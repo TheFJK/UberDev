@@ -90,6 +90,66 @@ echo
 echo "== Apply-loop fixer named (code-fixer NEW per #73) =="
 assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
   'code-fixer' "code-fixer named in Agent Descriptions (apply-loop fixer)"
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1.*findings_sha256.*commit_range_sha256' \
+  "Phase 1 fixer callsite declares both immutable source digests"
+assert_grep "$REVIEW_PR" 'PHASE1_FINDINGS_PATH="\$RESEARCH_DIR_ABS/post-impl-review-final\.md"' \
+  "Phase 1 fixer binds the canonical aggregate path from RESEARCH_DIR_ABS"
+PHASE1_FIX_REGION="$(awk '/^5\. \*\*Apply Phase 1 Fixes/{active=1} active; /^6\. \*\*Phase 2/{active=0}' "$REVIEW_PR")"
+if grep -qF 'digest --path "$PHASE1_FINDINGS_PATH"' <<<"$PHASE1_FIX_REGION" && \
+   grep -qF 'findings_path "$(review_json_string "$PHASE1_FINDINGS_PATH")"' <<<"$PHASE1_FIX_REGION" && \
+   ! grep -qF '$findings_path' <<<"$PHASE1_FIX_REGION"; then
+  echo "  PASS  Phase 1 canonical path owns digest and handoff under set -u"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Phase 1 digest/handoff still depends on an unbound or noncanonical path"
+  FAIL=$((FAIL + 1))
+fi
+PHASE1_FIXTURE="$(mktemp)"
+python3 -I -B - "$REVIEW_PR" >"$PHASE1_FIXTURE" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+blocks = re.findall(r"^[ \t]*```bash(?: [^\n]*)?\n(.*?)\n[ \t]*```$", text, re.MULTILINE | re.DOTALL)
+selected = [block for block in blocks if 'PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1' in block]
+if len(selected) != 1:
+    raise SystemExit(2)
+print(selected[0])
+PY
+if bash -c '
+  set -u
+  unset findings_path
+  RESEARCH_DIR_ABS=/repo/.uberdev/research/20260728-010203-abcdef0
+  CODE_FIXER_CONTRACT=/contract.py
+  COMMIT_RANGE_PATH="$RESEARCH_DIR_ABS/commit-range.txt"
+  PHASE1_DISPOSITION_PATH="$RESEARCH_DIR_ABS/phase1-disposition.json"
+  WORKTREE_ROOT=/repo
+  PR_NUMBER=73
+  RUN_ID=20260728-010203-abcdef0
+  REVIEW_ITERATION=1
+  REVIEW_PR_TIMEOUT=600
+  python3() { printf "%064d" 0; }
+  review_json_string() { printf "\"%s\"" "$1"; }
+  uberdev_child_inputs_build() { printf "{}"; }
+  uberdev_child_instance_id() { printf "%s" "$1"; }
+  review_child_single() { :; }
+  . "$1"
+  [ "$PHASE1_FINDINGS_PATH" = "$RESEARCH_DIR_ABS/post-impl-review-final.md" ]
+' _ "$PHASE1_FIXTURE"
+then
+  echo "  PASS  Phase 1 fixer callsite executes under set -u with findings_path unset"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  Phase 1 fixer callsite is not set-u safe without legacy findings_path"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$PHASE1_FIXTURE"
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*findings_sha256.*commit_range_sha256' \
+  "Phase 2 fixer callsite declares both immutable source digests"
+assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \
+  "fixer callsites carry no prompt-only phase/type claim"
+assert_grep "$REVIEW_PR" 'rev-list --count.*before.*after|rev-list --count.*FIXER' \
+  "fixer controller requires exactly one APPLIED commit"
 
 echo
 echo "== Capped-wave parallel invariant documented =="
@@ -314,8 +374,79 @@ assert_grep "$REVIEW_PR" \
 # R9.2 — anchor commit uses git commit --allow-empty (NOT --amend); regression guard for the
 # v0.18.0 trailer-on-simplify-commit bug where the trailer SHA pointed at the parent.
 assert_grep "$REVIEW_PR" \
-  'git commit --allow-empty' \
+  'git( -C "\$WORKTREE_ROOT")? commit --allow-empty' \
   "R9.2 — anchor commit literal git commit --allow-empty present"
+assert_grep "$REVIEW_PR" \
+  'review_validate_trust_anchor|git diff --quiet "\$PARENT_SHA".*HEAD' \
+  "R9.2b — anchor tree and parent are authenticated after hooks and before push"
+assert_grep "$REVIEW_PR" \
+  '\[ "\$PARENT_SHA" = "\$REVIEWED_HEAD_SHA" \]' \
+  "R9.2c — anchor parent is the exact reviewed head, not a fresh unchecked commit"
+assert_grep "$REVIEW_PR" \
+  'commit-message-digest|ANCHOR_MESSAGE_SHA256' \
+  "R9.2d — anchor subject, body, and trailer are authenticated after hooks"
+assert_grep "$REVIEW_PR" \
+  'rev-list --parents -n 1.*anchor_sha|rev-list.*--parents.*-n.*1.*anchor_sha' \
+  "R9.2e — anchor validator requires the complete one-parent commit shape"
+
+ANCHOR_GATE_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_validate_trust_anchor\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$ANCHOR_GATE_FIXTURE"
+ANCHOR_PARENT="$(printf 'a%.0s' {1..40})"
+ANCHOR_COMMIT="$(printf 'b%.0s' {1..40})"
+ANCHOR_MESSAGE_SHA256="$(printf 'd%.0s' {1..64})"
+if [ -s "$ANCHOR_GATE_FIXTURE" ] && \
+  ANCHOR_PARENT="$ANCHOR_PARENT" ANCHOR_COMMIT="$ANCHOR_COMMIT" \
+  ANCHOR_MESSAGE_SHA256="$ANCHOR_MESSAGE_SHA256" bash -c '
+    . "$1"
+    WORKTREE_ROOT=/repo
+    RESEARCH_DIR_ABS=/repo/.uberdev/research/run
+    CODE_FIXER_CONTRACT=/contract.py
+    python3() {
+      case " $* " in
+        *" commit-message-digest "*)
+          if [ "${MESSAGE_DIRTY:-0}" = 1 ]; then printf "e%.0s" {1..64}; else printf "%s" "$ANCHOR_MESSAGE_SHA256"; fi
+          ;;
+        *)
+          [ "${RESIDUE_DIRTY:-0}" != 1 ] || return 74
+          printf "{\"status\":\"clean\"}\n"
+          ;;
+      esac
+    }
+    git() {
+      [ "$1" = -C ] && [ "$2" = /repo ] || return 90
+      if [ "$3" = rev-parse ] && [ "$4" = HEAD ]; then
+        if [ "${WRONG_HEAD:-0}" = 1 ]; then printf "c%.0s" {1..40}; else printf "%s" "$ANCHOR_COMMIT"; fi
+        printf "\n"
+      elif [ "$3" = rev-list ] && [ "$4" = --parents ] && [ "$5" = -n ] && [ "$6" = 1 ] && [ "$7" = "$ANCHOR_COMMIT" ]; then
+        printf "%s " "$ANCHOR_COMMIT"
+        if [ "${WRONG_PARENT:-0}" = 1 ]; then printf "c%.0s" {1..40}; else printf "%s" "$ANCHOR_PARENT"; fi
+        if [ "${EXTRA_PARENT:-0}" = 1 ]; then printf " %s" "$(printf e%.0s {1..40})"; fi
+        printf "\n"
+      elif [ "$3" = diff ] && [ "$4" = --quiet ]; then
+        [ "${TREE_DIRTY:-0}" != 1 ]
+      else
+        return 91
+      fi
+    }
+    review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" || exit 11
+    TREE_DIRTY=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 12
+    WRONG_PARENT=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 13
+    RESIDUE_DIRTY=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 14
+    review_validate_trust_anchor "$(printf c%.0s {1..40})" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 15
+    MESSAGE_DIRTY=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 16
+    WRONG_HEAD=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 17
+    EXTRA_PARENT=1 review_validate_trust_anchor "$ANCHOR_PARENT" "$ANCHOR_PARENT" "$ANCHOR_COMMIT" "$ANCHOR_MESSAGE_SHA256" && exit 18
+    exit 0
+  ' _ "$ANCHOR_GATE_FIXTURE"
+then
+  echo "  PASS  R9.2f — executable anchor gate rejects reviewed-head, HEAD, wrong/extra parents, tree, message, and residue mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R9.2f — executable anchor gate is absent or fail-open"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$ANCHOR_GATE_FIXTURE"
 
 # R9.3 — explicit prose that --amend is NEVER used in trust-signal emission so push never
 # requires --force-with-lease. Pin the regression-guard prose so a future implementer can't
@@ -346,13 +477,14 @@ assert_grep "$REVIEW_PR" \
   'anchor commit fails|anchor commit.*fails' \
   "R9.7 — artifact-emission failure prose covers anchor commit failure"
 
-# R9.8 (#78) — ANCHOR_SHA captured AFTER `git push origin HEAD` so the audit JSON `"sha"`
-# field can reference the anchor commit's own SHA (== post-emission headRefOid). The
-# pre-#78 recipe only named PARENT_SHA, leaving the producer agent to infer which SHA
-# went into the JSON; the inferred value drifted, breaking /merge sub-condition (d).
+# R9.8 — the audit identity remains the immutable, post-hook-validated anchor;
+# never recapture moving HEAD after publication.
 assert_grep "$REVIEW_PR" \
-  'ANCHOR_SHA="\$\(git rev-parse HEAD\)"' \
-  "R9.8 — ANCHOR_SHA captured after the push (post-emission headRefOid for the audit JSON)"
+  'ANCHOR_SHA="\$LOCAL_ANCHOR_SHA"' \
+  "R9.8 — ANCHOR_SHA remains the immutable validated anchor after publication"
+assert_no_grep "$REVIEW_PR" \
+  '^[[:space:]]*ANCHOR_SHA="\$\(git( -C "\$WORKTREE_ROOT")? rev-parse HEAD\)"' \
+  "R9.8b — moving HEAD is never recaptured as post-validation authority"
 
 # R9.9 (#78) — audit JSON `"sha"` field references ${ANCHOR_SHA} explicitly, not the
 # pre-#78 ambiguous `<full-40-char-head-sha>` placeholder.
@@ -372,29 +504,120 @@ assert_grep "$REVIEW_PR" \
   'NOT[[:space:]]*\$\{PARENT_SHA\}|NOT.*PARENT_SHA|sha.*ANCHOR_SHA.*from artifact 1' \
   "R9.11 — disambiguation prose: JSON sha is ANCHOR_SHA, not PARENT_SHA"
 
-# R9.12 (#79 follow-on) — push-failure guard: the recipe MUST guard `git push origin HEAD`
-# with an explicit exit-code check before capturing ANCHOR_SHA. Without the guard, a push
-# failure (network, auth, hook rejection) would leave ANCHOR_SHA pointing at a local-only
-# HEAD; the audit JSON would then carry a SHA absent from the remote, and `/merge` would
-# fail downstream with `trust_trail_agent_invalid_input` (subreason
-# `trailer_sha_not_in_local_clone`). The spec at the artifact-emission-failure prose below
-# already mandates exit 2 on push failure — this assertion pins the guard's *recipe* form
-# so a future edit can't silently regress to a bare `git push origin HEAD` and re-create
-# the silent-failure mode. Two-of-two alternatives so a reviewer can choose `if !` or
-# `|| exit 2` style without false-failing.
+# R9.12 — publication pushes the validated object identity to the explicit PR
+# branch and authenticates the remote ref plus live/local PR head afterwards.
 assert_grep "$REVIEW_PR" \
-  'if ! git push origin HEAD|git push origin HEAD \|\| .*exit 2' \
-  "R9.12 — git push origin HEAD guarded with exit-code check before ANCHOR_SHA capture"
+  'review_publish_same_repo_pr_head' \
+  "R9.12 — anchor publication is delegated to the immutable same-repo push gate"
+assert_grep "$REVIEW_PR" \
+  '"\$publish_sha:refs/heads/\$live_branch"' \
+  "R9.12b — push refspec uses immutable anchor SHA and explicit validated PR branch"
+assert_grep "$REVIEW_PR" \
+  'ls-remote.*refs/heads/\$live_branch|review_assert_selected_pr_head.*anchor_sha' \
+  "R9.12c — remote branch and live/local PR head are authenticated after push"
+assert_grep "$REVIEW_PR" \
+  'isCrossRepository.*headRepository|headRepository.*isCrossRepository' \
+  "R9.12d — same-repository head identity is authenticated before publication"
+assert_grep "$REVIEW_PR" \
+  'validate-residue.*evidence_dir|validate-residue.*evidence-dir' \
+  "R9.12e — repository residue is revalidated after publication equality"
 
-# R9.13 (#79 follow-on) — negative regression guard: the bare `git push origin HEAD` line
-# (no guard, no `||`, no preceding `if !`) MUST NOT appear in the trust-signal-emission
-# recipe. Anchored on the literal "git push origin HEAD" followed by end-of-line — i.e.,
-# the exact pre-#79 unguarded form. With the guard in place, the literal `git push origin
-# HEAD` only appears as the predicate inside `if ! git push origin HEAD; then`, so it's
-# never EOL-bare. This pin defends against the F1 silent-failure class returning.
-assert_no_grep "$REVIEW_PR" \
-  '^[[:space:]]*git push origin HEAD[[:space:]]*$' \
-  "R9.13 — bare 'git push origin HEAD' (unguarded, EOL-anchored) is not present"
+# R9.13 — execute the production push gate with adversarial local movement
+# immediately after anchor validation and during the push hook window.
+ANCHOR_PUSH_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$ANCHOR_PUSH_FIXTURE"
+ANCHOR_PUSH_LOG="$(mktemp)"
+ANCHOR_GH_STATE="$(mktemp)"
+if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
+  ANCHOR_PUSH_LOG="$ANCHOR_PUSH_LOG" ANCHOR_GH_STATE="$ANCHOR_GH_STATE" \
+  ANCHOR_REVIEWED="$ANCHOR_PARENT" ANCHOR_COMMIT="$ANCHOR_COMMIT" bash -c '
+    . "$1"
+    reset_fixture() {
+      printf "0\n" >"$ANCHOR_GH_STATE"
+      : >"$ANCHOR_PUSH_LOG"
+      unset LOCAL_MOVED
+    }
+    gh() {
+      [ "$1" = pr ] && [ "$2" = view ] || return 90
+      call_count="$(cat "$ANCHOR_GH_STATE")" || return 90
+      call_count=$((call_count + 1))
+      printf "%s\n" "$call_count" >"$ANCHOR_GH_STATE"
+      if [ "$call_count" -eq 1 ]; then live_oid="$ANCHOR_REVIEWED"; else live_oid="$ANCHOR_COMMIT"; fi
+      if [ "${STALE_REMOTE:-0}" = 1 ] && [ "$call_count" -eq 1 ]; then live_oid="$(printf c%.0s {1..40})"; fi
+      if [ "${LIVE_MISMATCH:-0}" = 1 ] && [ "$call_count" -gt 1 ]; then live_oid="$(printf c%.0s {1..40})"; fi
+      live_branch=feature/anchor
+      [ "${BAD_BRANCH:-0}" != 1 ] || live_branch="bad branch"
+      cross=false
+      [ "${CROSS_REPO:-0}" != 1 ] || cross=true
+      head_repo=owner/repo
+      [ "${WRONG_HEAD_REPO:-0}" != 1 ] || head_repo=attacker/fork
+      printf "%s\t%s\t%s\t%s\n" "$live_oid" "$live_branch" "$cross" "$head_repo"
+    }
+    python3() {
+      [ "${RESIDUE_DURING_PUSH:-0}" != 1 ] || return 74
+      printf "{\"status\":\"clean\"}\n"
+    }
+    git() {
+      [ "$1" = -C ] && [ "$2" = /repo ] || return 91
+      case "$3" in
+        rev-parse)
+          if [ "${MUTATED_BEFORE_PUSH:-0}" = 1 ] || [ "${LOCAL_MOVED:-0}" = 1 ]; then printf "c%.0s" {1..40}; else printf "%s" "$ANCHOR_COMMIT"; fi
+          printf "\n"
+          ;;
+        check-ref-format)
+          [ "$4" = --branch ] && [ "$5" = feature/anchor ]
+          ;;
+        push)
+          [ "$4" = origin ] && [ "$5" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || return 92
+          printf "%s\n" "$5" >>"$ANCHOR_PUSH_LOG"
+          [ "${MUTATE_DURING_PUSH:-0}" != 1 ] || LOCAL_MOVED=1
+          ;;
+        ls-remote)
+          if [ "${REMOTE_MISMATCH:-0}" = 1 ]; then printf "c%.0s" {1..40}; else printf "%s" "$ANCHOR_COMMIT"; fi
+          printf "\trefs/heads/feature/anchor\n"
+          ;;
+        *) return 93 ;;
+      esac
+    }
+    reset_fixture
+    review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence || exit 11
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 12
+    reset_fixture
+    MUTATED_BEFORE_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 13
+    [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 14
+    reset_fixture
+    MUTATE_DURING_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 15
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 16
+    reset_fixture
+    STALE_REMOTE=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 17
+    [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 18
+    reset_fixture
+    BAD_BRANCH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 19
+    [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 20
+    reset_fixture
+    CROSS_REPO=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 21
+    [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 22
+    reset_fixture
+    WRONG_HEAD_REPO=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 23
+    [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 24
+    reset_fixture
+    REMOTE_MISMATCH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 25
+    reset_fixture
+    LIVE_MISMATCH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 26
+    reset_fixture
+    RESIDUE_DURING_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 27
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 28
+    exit 0
+  ' _ "$ANCHOR_PUSH_FIXTURE"
+then
+  echo "  PASS  R9.13 — immutable publication rejects HEAD races, forks, repo/ref drift, and post-push residue"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R9.13 — validated anchor can be replaced by moving HEAD during publication"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$ANCHOR_PUSH_FIXTURE" "$ANCHOR_PUSH_LOG" "$ANCHOR_GH_STATE"
 
 # R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
 # `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
@@ -491,9 +714,10 @@ fi
 # R12.3 — Phase 1 edge carries the fix contract through its manifest inputs
 assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1' \
   "R12.3 — Phase 1 code-fixer uses the phase1 manifest edge"
-# R12.4 — Phase 2 commit_type_prefix is refactor: (locked by R8.6)
-assert_grep "$REVIEW_PR" 'commit_type_prefix=refactor:|commit_type_prefix: refactor:' \
-  "R12.4 — Phase 2 code-fixer dispatch carries commit_type_prefix=refactor: (R8.6 invariant)"
+# R12.4 — Phase 2 derives refactor authority from the routed edge + policy
+# phase; no prompt-carried commit type is accepted.
+assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*simplify_fix|simplify_fix.*review_pr\.fix\.phase2' \
+  "R12.4 — Phase 2 derives refactor authority from edge + manifest phase"
 # R12.5 — phase identity is encoded in the stable edge, not prompt text
 assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1' \
   "R12.5 — Phase 1 code-fixer dispatch carries phase identity in edge_id"
@@ -766,7 +990,7 @@ fi
 
 echo
 echo "== R24 (#302): Step 6a post-fixer push — Phase 3 probes the POST-fix remote SHA =="
-# RFC 0012 §3.1 do-first: ONE guarded `git push origin HEAD` after the LAST fixer
+# RFC 0012 §3.1 do-first: ONE immutable-SHA publication after the LAST fixer
 # (Step 6b's Phase-2 fixer, or Step 5's Phase-1 fixer under --no-simplify), so the
 # 6c.1 PROBE validates the post-fix remote SHA. Without it, GREEN can describe
 # code CI never ran on. The guard mirrors the trust-trail anchor push (R9.12).
@@ -777,12 +1001,19 @@ else
   echo "  PASS  R24.1 — Step 6a 'Post-fixer push' heading present (#302)"
   PASS=$((PASS + 1))
   STEP6A_REGION=$(awk '/^6a\. \*\*Post-fixer push/{f=1} f; /^6b\. \*\*Phase 2\.5/{f=0}' "$REVIEW_PR")
-  if grep -qF 'if ! git push origin HEAD; then' <<<"$STEP6A_REGION"; then
-    echo "  PASS  R24.2 — Step 6a push is exit-code guarded (if ! git push origin HEAD — R9.12 shape)"
+  if grep -qF 'review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA"' <<<"$STEP6A_REGION"; then
+    echo "  PASS  R24.2 — Step 6a publishes the exact validated fixer SHA through the same-repo gate"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  R24.2 — Step 6a push must use the guarded 'if ! git push origin HEAD; then' form (#302)"
+    echo "  FAIL  R24.2 — Step 6a must publish POST_FIXER_HEAD_SHA through the immutable same-repo gate"
     FAIL=$((FAIL + 1))
+  fi
+  if grep -qF 'git push origin HEAD' <<<"$STEP6A_REGION"; then
+    echo "  FAIL  R24.2b — Step 6a retains unsafe symbolic-HEAD publication"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  R24.2b — Step 6a never publishes moving symbolic HEAD"
+    PASS=$((PASS + 1))
   fi
   if grep -qE '^[[:space:]]*exit 2' <<<"$STEP6A_REGION"; then
     echo "  PASS  R24.3 — Step 6a push failure exits 2 (blocked-equivalent per artifact-emission prose)"
@@ -1007,8 +1238,19 @@ FIXER_HEAD_OUTPUT="$(
   FIXER_HEAD_LOG="$FIXER_HEAD_LOG" bash -c '
     . "$1"
     WORKTREE_ROOT=/repo
+    RESEARCH_DIR_ABS=/repo/.uberdev/research/run
+    CODE_FIXER_CONTRACT=/contract.py
+    python3(){
+      if [ "${4:-}" = validate-residue ]; then
+        [ "${RESIDUE_DIRTY:-0}" != 1 ] || return 74
+        printf "{\"status\":\"clean\"}\n"
+      else
+        command python3 "$@"
+      fi
+    }
     git(){
       [ "$3" = merge-base ] && [ "$4" = --is-ancestor ] && return 0
+      [ "$3" = rev-list ] && [ "$4" = --count ] && printf "1\\n" && return 0
       return 2
     }
     VALIDATED_FIXER_HEAD_SHA="$2"
@@ -1021,19 +1263,104 @@ FIXER_CHAIN_OK=1
 [ "$FIXER_HEAD_OUTPUT" = "$PHASE2_FIX_HEAD" ] || FIXER_CHAIN_OK=0
 if VALIDATED_FIXER_HEAD_SHA="$PHASE2_FIX_HEAD" WORKTREE_ROOT=/repo bash -c '
   . "$1"
+  RESEARCH_DIR_ABS=/repo/.uberdev/research/run
+  CODE_FIXER_CONTRACT=/contract.py
+  python3(){ printf "{\"status\":\"clean\"}\n"; }
   git(){ return 0; }
   review_track_validated_fixer_head REFUSED "$2" "$3" "$3"
 ' _ "$FIXER_HEAD_FIXTURE" "$PHASE2_FIX_HEAD" "$UNEXPECTED_HEAD" >/dev/null 2>&1; then
   FIXER_CHAIN_OK=0
 fi
+if VALIDATED_FIXER_HEAD_SHA="$PHASE2_FIX_HEAD" WORKTREE_ROOT=/repo \
+  RESEARCH_DIR_ABS=/repo/.uberdev/research/run CODE_FIXER_CONTRACT=/contract.py \
+  RESIDUE_DIRTY=1 bash -c '
+    . "$1"
+    python3(){ [ "${RESIDUE_DIRTY:-0}" != 1 ] || return 74; printf "{\"status\":\"clean\"}\n"; }
+    git(){ return 0; }
+    review_track_validated_fixer_head REFUSED "$2" "$2" ""
+  ' _ "$FIXER_HEAD_FIXTURE" "$PHASE2_FIX_HEAD" >/dev/null 2>&1; then
+  FIXER_CHAIN_OK=0
+fi
+grep -qF 'validate-residue' "$FIXER_HEAD_FIXTURE" || FIXER_CHAIN_OK=0
+
+FIXER_PROMOTE_FIXTURE="$(mktemp)"
+awk '/^[[:space:]]*review_promote_validated_fixer_outcome\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
+  "$REVIEW_PR" >"$FIXER_PROMOTE_FIXTURE"
+FIXER_PROMOTE_LOG="$(mktemp)"
+VALID_OUTCOME="$(printf '{"applied_content_sha256":"%s","commit":{},"declared_tip":"%s","disposition_sha256":"%s","receipt_sha256":"%s","result_sha256":"%s","status":"APPLIED","status_sha256":"%s"}' \
+  "$(printf 'a%.0s' {1..64})" "$PHASE1_FIX_HEAD" "$(printf 'b%.0s' {1..64})" \
+  "$(printf 'c%.0s' {1..64})" "$(printf 'd%.0s' {1..64})" "$(printf 'e%.0s' {1..64})")"
+if ! FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
+  . "$1"
+  review_track_validated_fixer_head(){ printf "%s|%s|%s|%s\n" "$@" >>"$FIXER_PROMOTE_LOG"; }
+  review_promote_validated_fixer_outcome "$2" "$3" "$4"
+' _ "$FIXER_PROMOTE_FIXTURE" "$VALID_OUTCOME" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD"; then
+  FIXER_CHAIN_OK=0
+fi
+[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD" ] \
+  || FIXER_CHAIN_OK=0
+MALFORMED_OUTCOME="${VALID_OUTCOME%?},\"extra\":true}"
+if FIXER_PROMOTE_LOG="$FIXER_PROMOTE_LOG" bash -c '
+  . "$1"
+  review_track_validated_fixer_head(){ printf "unexpected\n" >>"$FIXER_PROMOTE_LOG"; }
+  review_promote_validated_fixer_outcome "$2" "$3" "$4"
+' _ "$FIXER_PROMOTE_FIXTURE" "$MALFORMED_OUTCOME" "$PRE_FIX_HEAD" "$PHASE1_FIX_HEAD" >/dev/null 2>&1; then
+  FIXER_CHAIN_OK=0
+fi
+[ "$(cat "$FIXER_PROMOTE_LOG")" = "APPLIED|$PRE_FIX_HEAD|$PHASE1_FIX_HEAD|$PHASE1_FIX_HEAD" ] \
+  || FIXER_CHAIN_OK=0
+
+FIXER_FAILURE_GUARD_FIXTURE="$(mktemp)"
+awk '/# BEGIN review-failed-return-guard-v1/{active=1;next} /# END review-failed-return-guard-v1/{exit} active{print}' \
+  "$REVIEW_PR" >"$FIXER_FAILURE_GUARD_FIXTURE"
+FIXER_FAILURE_REPO="$(mktemp -d)"
+git -C "$FIXER_FAILURE_REPO" init -q
+git -C "$FIXER_FAILURE_REPO" config user.email fixture@example.invalid
+git -C "$FIXER_FAILURE_REPO" config user.name Fixture
+printf '%s\n' baseline >"$FIXER_FAILURE_REPO/tracked.txt"
+git -C "$FIXER_FAILURE_REPO" add -- tracked.txt
+git -C "$FIXER_FAILURE_REPO" commit -qm 'test: fixer failure guard baseline'
+FIXER_FAILURE_BEFORE="$(git -C "$FIXER_FAILURE_REPO" rev-parse HEAD)"
+FIXER_FAILURE_EVIDENCE="$FIXER_FAILURE_REPO/.uberdev/research/guard"
+mkdir -p "$FIXER_FAILURE_EVIDENCE"
+set +e
+WORKTREE_ROOT="$FIXER_FAILURE_REPO" RESEARCH_DIR_ABS="$FIXER_FAILURE_EVIDENCE" \
+  CODE_FIXER_CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" \
+  bash -c '. "$1"; review_guard_failed_fixer_return "$2" 74' \
+  _ "$FIXER_FAILURE_GUARD_FIXTURE" "$FIXER_FAILURE_BEFORE" >/dev/null 2>&1
+FIXER_FAILURE_CLEAN_RC=$?
+[ "$FIXER_FAILURE_CLEAN_RC" -eq 74 ] || FIXER_CHAIN_OK=0
+git -C "$FIXER_FAILURE_REPO" commit --allow-empty -qm 'fix: simulate published helper commit'
+set +e
+WORKTREE_ROOT="$FIXER_FAILURE_REPO" RESEARCH_DIR_ABS="$FIXER_FAILURE_EVIDENCE" \
+  CODE_FIXER_CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" \
+  FIXER_FAILURE_DOWNSTREAM="$FIXER_FAILURE_REPO/downstream-ran" \
+  bash -c '. "$1"; review_guard_failed_fixer_return "$2" 74; rc=$?; [ "$rc" -eq 0 ] && : >"$FIXER_FAILURE_DOWNSTREAM"; exit "$rc"' \
+  _ "$FIXER_FAILURE_GUARD_FIXTURE" "$FIXER_FAILURE_BEFORE" >/dev/null 2>&1
+FIXER_FAILURE_MUTATED_RC=$?
+[ "$FIXER_FAILURE_MUTATED_RC" -eq 79 ] || FIXER_CHAIN_OK=0
+[ ! -e "$FIXER_FAILURE_REPO/downstream-ran" ] || FIXER_CHAIN_OK=0
+grep -qF 'validate-failed-return' "$FIXER_FAILURE_GUARD_FIXTURE" || FIXER_CHAIN_OK=0
+grep -qF 'MUTATED_BLOCKED' "$FIXER_FAILURE_GUARD_FIXTURE" || FIXER_CHAIN_OK=0
+rm -rf "$FIXER_FAILURE_REPO"
+grep -qF 'review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER"' "$REVIEW_PR" \
+  || FIXER_CHAIN_OK=0
+grep -qF 'review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER"' "$REVIEW_PR" \
+  || FIXER_CHAIN_OK=0
 
 PROMOTION_REGION="$(awk '/^[[:space:]]*6a\. \*\*Post-fixer push/{active=1} active{print} /^[[:space:]]*6b\. \*\*Phase 2\.5/{exit}' "$REVIEW_PR")"
-grep -qF 'review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \' <<<"$PROMOTION_REGION" \
+grep -qF 'if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
-grep -qF '"$VALIDATED_FIXER_HEAD_SHA" "$WORKTREE_ROOT"' <<<"$PROMOTION_REGION" \
+grep -qF 'review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
-grep -qF 'REVIEWED_HEAD_SHA="$VALIDATED_FIXER_HEAD_SHA"' <<<"$PROMOTION_REGION" \
+grep -qF 'REVIEWED_HEAD_SHA="$POST_FIXER_HEAD_SHA"' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
+ANCHOR_RESIDUE_LINE="$(grep -n 'validate-residue.*RESEARCH_DIR_ABS' "$REVIEW_PR" | tail -1 | cut -d: -f1)"
+ANCHOR_COMMIT_LINE="$(grep -n 'PARENT_SHA=.*git.*rev-parse HEAD' "$REVIEW_PR" | head -1 | cut -d: -f1)"
+if [ -z "$ANCHOR_RESIDUE_LINE" ] || [ -z "$ANCHOR_COMMIT_LINE" ] || \
+   [ "$ANCHOR_RESIDUE_LINE" -ge "$ANCHOR_COMMIT_LINE" ]; then
+  FIXER_CHAIN_OK=0
+fi
 if [ "$FIXER_CHAIN_OK" -eq 1 ]; then
   echo "  PASS  R30 — only validated, published fixer ancestry advances the final trust target"
   PASS=$((PASS + 1))
@@ -1041,7 +1368,23 @@ else
   echo "  FAIL  R30 — fixed-head trust lifecycle is stale or fail-open"
   FAIL=$((FAIL + 1))
 fi
-rm -f "$FIXER_HEAD_FIXTURE" "$FIXER_HEAD_LOG"
+rm -f "$FIXER_HEAD_FIXTURE" "$FIXER_HEAD_LOG" "$FIXER_PROMOTE_FIXTURE" "$FIXER_PROMOTE_LOG" "$FIXER_FAILURE_GUARD_FIXTURE"
+
+echo
+echo "== R31: Phase 2 refreshes the authenticated range after Phase 1 =="
+PHASE2_REGION="$(awk '/^[[:space:]]*6\. \*\*Phase 2/{active=1} active{print} /^[[:space:]]*6a\. \*\*Post-fixer push/{exit}' "$REVIEW_PR")"
+PHASE2_REFRESH_LINE="$(grep -nF 'review_refresh_phase1_scope "$BASE_SHA"' <<<"$PHASE2_REGION" | head -1 | cut -d: -f1)"
+PHASE2_LENS_LINE="$(grep -nF 'review_child_record "$EDGE_ID"' <<<"$PHASE2_REGION" | head -1 | cut -d: -f1)"
+PHASE2_DIGEST_LINE="$(grep -nF 'FIXER_COMMIT_RANGE_SHA256=' <<<"$PHASE2_REGION" | head -1 | cut -d: -f1)"
+if [ -n "$PHASE2_REFRESH_LINE" ] && [ -n "$PHASE2_LENS_LINE" ] && \
+   [ -n "$PHASE2_DIGEST_LINE" ] && [ "$PHASE2_REFRESH_LINE" -lt "$PHASE2_LENS_LINE" ] && \
+   [ "$PHASE2_REFRESH_LINE" -lt "$PHASE2_DIGEST_LINE" ]; then
+  echo "  PASS  R31 — Phase 2 rebuilds diff/range artifacts from the post-Phase-1 HEAD"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R31 — Phase 2 can reuse a stale pre-fix commit range"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Summary =="

@@ -10,7 +10,20 @@ python3 -I -B "$CHECKER" check --root "$ROOT" --tree "$TREE" --fixture "$CONTRAC
 python3 -I -B "$CHECKER" emit --root "$ROOT" --tree "$TREE" --fixture "$CONTRACT" >"$TMP/emitted.json"
 python3 -I -B - "$CONTRACT" "$TMP/emitted.json" <<'PY'
 import json,sys
-assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))
+expected=json.load(open(sys.argv[1])); actual=json.load(open(sys.argv[2]))
+assert expected == actual
+rows={row['edge_id']:row for row in expected['contracts']}
+fixer_fields={
+ 'authority_path':'path','authority_sha256':'string',
+ 'commit_range_path':'path','commit_range_sha256':'string',
+ 'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+ 'pr_number':'integer','working_dir':'directory',
+}
+for edge in ('review_pr.fix.phase1','review_pr.fix.phase2'):
+    row=rows[edge]
+    assert row['required_input_types']==fixer_fields, edge
+    assert row['required_inputs']==sorted(fixer_fields), edge
+    assert row['optional_inputs']==[] and row['optional_input_types']=={}, edge
 PY
 
 # The static checker owns only declared/typed contract closure. Executability is
@@ -46,7 +59,7 @@ def rejected_tree(mutate, needle):
 brain_rel="plugins/uberdev/skills/brainstorm/SKILL.md"
 brain=(root/brain_rel).read_text()
 deleted=re.sub(r'^\s*"brainstorm\.research\.codebase"[^\n]*\n?', '', brain, count=1, flags=re.M)
-rejected({brain_rel:deleted},"expected 40")
+rejected({brain_rel:deleted},"expected 41")
 
 invalid_workflow=brain.replace(
     '"allowed_workflows":["solve","turbo"]',
@@ -63,6 +76,10 @@ rejected({brain_rel:risk_mismatch},"risk scope/argument mismatch")
 def drift_question_type(value):
     value["edges"]["brainstorm.research.codebase"]["required_inputs"]["question"]="boolean"
 rejected_tree(drift_question_type,"manifest input type mismatch: brainstorm.research.codebase")
+
+def drift_fixer_digest_type(value):
+    value["edges"]["review_pr.fix.phase2"]["required_inputs"]["findings_sha256"]="path"
+rejected_tree(drift_fixer_digest_type,"manifest input type mismatch: review_pr.fix.phase2")
 
 orch_rel="plugins/uberdev/skills/orchestrator/SKILL.md"
 orch=(root/orch_rel).read_text()

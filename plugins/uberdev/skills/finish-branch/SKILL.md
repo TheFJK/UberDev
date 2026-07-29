@@ -212,15 +212,84 @@ if [ -n "$REVIEW_FILES" ]; then
     while IFS= read -r f; do
       [ -f "$f" ] || continue
       echo "### $(basename "$f")"
-      # Strip external-untrusted-input envelope tag lines before pasting into
-      # the PR body: aggregate files carry the tags as file bytes once the
-      # #302 writer-side change lands (harmless no-op on files without them).
-      # Only PURE tag lines are dropped — finding text that merely mentions
-      # the tag inline survives. GitHub renders raw tags as noise; every LLM
-      # consumer re-wraps PR bodies at its own read site, so no validator is
-      # weakened by stripping here.
-      sed -E -e '/^[[:space:]]*<external-untrusted-input[^>]*>[[:space:]]*$/d' \
-             -e '/^[[:space:]]*<\/external-untrusted-input>[[:space:]]*$/d' "$f"
+      case "$(basename "$f")" in
+        post-impl-review-*.md)
+          # Phase 1 aggregates are machine-authority documents. Validate the
+          # exact v2 bytes and render a bounded human summary; never paste raw
+          # compact JSON into the PR body.
+          if ! python3 -I -B - "$f" <<PY
+import json,pathlib,posixpath,re,sys
+
+contributor_ids=[
+ "review_pr.review.correctness",
+ "review_pr.review.silent_failures",
+ "review_pr.review.types",
+ "review_pr.review.comments",
+ "review_pr.review.tests",
+ "review_pr.review.general",
+]
+payload=pathlib.Path(sys.argv[1]).read_bytes()
+opening=b'<external-untrusted-input source="post-impl-review-aggregate">\n'
+closing=b'\n</external-untrusted-input>\n'
+if not payload.startswith(opening) or not payload.endswith(closing): raise SystemExit(2)
+body=payload[len(opening):-len(closing)]
+try: document=json.loads(body)
+except (UnicodeError,json.JSONDecodeError): raise SystemExit(2)
+canonical=json.dumps(document,sort_keys=True,separators=(',',':'),ensure_ascii=True)
+canonical=canonical.replace('</external-untrusted-input>',chr(92)+'u003c/external-untrusted-input>')
+if body.decode('utf-8')!=canonical: raise SystemExit(2)
+contributors=document.get('contributors')
+if (list(document)!=['contributors','findings','phase','schema_version']
+    or type(contributors) is not list or len(contributors)!=len(contributor_ids)
+    or document.get('phase')!='phase1' or document.get('schema_version')!=2
+    or type(document.get('findings')) is not list): raise SystemExit(2)
+for index, contributor in enumerate(contributors):
+ if (type(contributor) is not dict
+     or list(contributor)!=['confidence','id','verdict']
+     or contributor.get('id')!=contributor_ids[index]
+     or contributor.get('confidence') not in {'low','medium','high'}
+     or contributor.get('verdict') not in {'APPROVE','REVISIONS_REQUIRED','REJECT'}):
+  raise SystemExit(2)
+for finding in document['findings']:
+ if (type(finding) is not dict
+     or list(finding)!=['detail','scope','severity','source_edges','summary']
+     or finding.get('severity') not in {'blocker','suggestion'}
+     or not isinstance(finding.get('summary'),str) or not finding['summary']
+     or not isinstance(finding.get('detail'),str) or not finding['detail']
+     or type(finding.get('source_edges')) is not list
+     or not finding['source_edges']): raise SystemExit(2)
+ expected_edges=[edge for edge in contributor_ids if edge in finding['source_edges']]
+ if finding['source_edges']!=expected_edges or len(expected_edges)!=len(set(expected_edges)):
+  raise SystemExit(2)
+ scope=finding.get('scope')
+ if (type(scope) is not dict or list(scope)!=['line','operation','path']
+     or scope.get('operation')!='modify_existing'
+     or type(scope.get('line')) is not int or isinstance(scope.get('line'),bool)
+     or scope['line']<1 or not isinstance(scope.get('path'),str)): raise SystemExit(2)
+ path=scope['path']; parts=path.split('/')
+ if (not path or path.startswith('/') or chr(92) in path or re.match(r'^[A-Za-z]:',path)
+     or any(part in {'','.','..'} for part in parts) or parts[0]=='.git'
+     or posixpath.normpath(path)!=path): raise SystemExit(2)
+if not document['findings']:
+ print('No findings.')
+else:
+ for finding in document['findings']:
+  scope=finding['scope']
+  tick=chr(96)
+  print(f"- **{finding['severity']}** {tick}{scope['path']}:{scope['line']}{tick} — {finding['summary']}")
+PY
+          then
+            echo "ERROR: invalid canonical Phase 1 review aggregate: $f" >&2
+            return 1 2>/dev/null || exit 1
+          fi
+          ;;
+        *)
+          # Legacy analyzer reports remain human prose. Strip only pure
+          # envelope tag lines; inline mentions survive.
+          sed -E -e '/^[[:space:]]*<external-untrusted-input[^>]*>[[:space:]]*$/d' \
+                 -e '/^[[:space:]]*<\/external-untrusted-input>[[:space:]]*$/d' "$f"
+          ;;
+      esac
       echo
     done <<< "$REVIEW_FILES"
   } >> "$PR_BODY_FILE"

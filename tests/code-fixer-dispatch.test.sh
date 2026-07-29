@@ -11,10 +11,11 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CODE_FIXER="$REPO_ROOT/plugins/uberdev/agents/code-fixer.md"
+CONTRACT_HELPER="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
-for f in "$CODE_FIXER" "$REVIEW_PR" "$SIMPLIFY"; do
+for f in "$CODE_FIXER" "$CONTRACT_HELPER" "$REVIEW_PR" "$SIMPLIFY"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -62,16 +63,16 @@ assert_grep "$CODE_FIXER" '/uberdev:review-pr Phase 1.*Phase 2|Phase 1.*Phase 2.
 echo
 echo "== code-fixer.md ## Inputs section names all required inputs =="
 assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`findings_path`' "Inputs names findings_path"
-assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`findings_aggregate`' "Inputs names findings_aggregate"
-assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`commit_range`' "Inputs names commit_range"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`findings_sha256`' "Inputs names findings_sha256"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`commit_range_path`' "Inputs names commit_range_path"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`commit_range_sha256`' "Inputs names commit_range_sha256"
 assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`working_dir`' "Inputs names working_dir"
 assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`pr_number`' "Inputs names pr_number"
-assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`phase`' "Inputs names phase"
-assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`commit_type_prefix`' "Inputs names commit_type_prefix"
-# findings_aggregate is wrapped in trust envelope (load-bearing)
-assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' \
-  'wrapped in `<external-untrusted-input source="post-impl-review-aggregate">' \
-  "Inputs documents trust-envelope wrapping for findings_aggregate"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`disposition_path`' "Inputs names disposition_path"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`authority_path`' "Inputs names controller authority_path"
+assert_in_section "$CODE_FIXER" '^## Inputs' '^## Tools authorised' '`authority_sha256`' "Inputs names controller authority_sha256"
+assert_no_grep "$CODE_FIXER" '`findings_aggregate`|`commit_type_prefix`' \
+  "Inputs remove raw aggregate and prompt-only commit-type claims"
 
 echo
 echo "== code-fixer.md ## Tools authorised — allowlist + denylist =="
@@ -84,8 +85,11 @@ assert_in_section "$CODE_FIXER" '^## Tools authorised' '^## Process' \
   '\bBash\b' "Tools allowlist contains Bash (limited)"
 # Bash sub-allowlist
 assert_in_section "$CODE_FIXER" '^## Tools authorised' '^## Process' \
-  'git add|git commit|git diff|git log|git rev-parse' \
-  "Bash limited to git add/commit/diff/log/rev-parse + realpath"
+  'exact receipt parsing.*git diff.*git log' \
+  "Bash is limited to the contract helper and read-only git inspection"
+assert_in_section "$CODE_FIXER" '^## Tools authorised' '^## Process' \
+  'No route runs `git add` or direct `git commit`' \
+  "Bash denies child-owned staging and direct commits"
 # Bash denylist (regression guards — these MUST NOT be in the allowlist prose)
 assert_in_section "$CODE_FIXER" '^## Tools authorised' '^## Process' \
   'no .git reset.|no .git push.|no .git checkout.|no .git rebase.' \
@@ -100,40 +104,58 @@ assert_in_section "$CODE_FIXER" '^## Tools authorised' '^## Process' \
   "Denylist names Task (no re-entrant fanout)"
 
 echo
-echo "== code-fixer.md ## Process — six-step sequence with security defenses =="
-# Step 1: Validate inputs (trust envelope + worktree check)
+echo "== code-fixer.md ## Process — authenticated sequence with security defenses =="
+# Step 1: consume authority created by the controller before dispatch.
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  'Validate inputs.*git -C.*rev-parse --is-inside-work-tree' \
-  "Process Step 1: validates working_dir is inside a git worktree"
+  'consume-authority' \
+  "Process consumes controller-created routed authority before edits"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  'trust envelope|external-untrusted-input source="post-impl-review-aggregate"' \
-  "Process Step 1: checks trust envelope on findings_aggregate"
-# Step 3b: Realpath-prefix-check
+  'create or replace authority inside the child' \
+  "Process forbids child-side authority creation"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  '[Rr]ealpath-prefix-check|realpath -m .working_dir|path-traversal-blocked' \
-  "Process Step 3b: realpath-prefix-check against working_dir"
-# Step 4: Heredoc commit (single-quoted EOF — second-order injection defense)
+  'findings_sha256.*commit_range_sha256|commit_range_sha256.*findings_sha256' \
+  "Process Step 1: binds both immutable source digests"
+# Component containment is owned by the executable helper, not a string prefix.
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'os\.path\.commonpath|component containment|path-traversal-blocked' \
+  "Process uses component-aware containment"
+# Commit message remains single-quoted against second-order expansion.
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
   "<<'EOF'" \
-  "Process Step 4: heredoc commit uses single-quoted EOF (no shell expansion)"
+  "Commit message uses single-quoted EOF (no shell expansion)"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  'NEVER .git add -A.|NEVER .git add -a.|NEVER `git add -A`' \
-  "Process Step 4: never use git add -A/-a"
-# Step 5: Single Phase 2 commit (R8.6 invariant)
+  'never stage anything and never invoke' \
+  "Review terminal boundary forbids direct staging and commit"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  'Phase 2 specifically: ONE .refactor:. commit only|R8\.6.s separate-commit invariant' \
-  "Process Step 5: Phase 2 emits ONE refactor: commit (R8.6 invariant)"
-# Step 6: No git operations beyond add+commit
+  'private index.*hooks.*fixed commit message' \
+  "Review commit helper owns private index and HEAD CAS"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  'Do NOT push, fetch, reset, or rebase|never push|do not push' \
-  "Process Step 6: NO git push/fetch/reset/rebase"
+  'publish-disposition' \
+  "Disposition is published before the terminal helper"
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'route-specific terminal boundary' \
+  "Terminal commit is delegated to the route-specific authenticated helper"
+# Both phases have exactly one commit on APPLIED.
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'exactly ONE commit|ONE .*commit.*either phase|one-commit authority' \
+  "APPLIED emits exactly one commit in either phase"
+# No state-changing git operations are child-owned.
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'Do NOT push, fetch, reset, checkout, or rebase|never push|do not push' \
+  "Process denies git push/fetch/reset/rebase"
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'no .*evidence.*after.*commit|After.*commit.*no.*evidence' \
+  "No fallible evidence publication occurs after commit"
 
 echo
 echo "== code-fixer.md ## Refusal triggers + ## Return contract =="
 # Refusal triggers
 assert_in_section "$CODE_FIXER" '^## Refusal triggers' '^## Return contract' \
-  'refused-malformed-envelope|refused-not-a-worktree|refused-empty-aggregate' \
-  "Refusal triggers names malformed-envelope / not-a-worktree / empty-aggregate"
+  'authority.*envelope.*canonical-schema.*disposition.*snapshot' \
+  "Refusal triggers cover authority, envelope, schema, disposition, and snapshot failures"
+assert_in_section "$CODE_FIXER" '^## Refusal triggers' '^## Return contract' \
+  'exact `findings:\[\]` is valid|findings:\[\].*valid' \
+  "Refusal triggers explicitly accept an exact empty aggregate"
 # Return contract YAML shape
 assert_in_section "$CODE_FIXER" '^## Return contract' '^## Output Rules' \
   '^status: APPLIED \| NO_FIXES_NEEDED \| REFUSED' \
@@ -162,14 +184,9 @@ echo "== Dispatch sites: review-pr.md Phase 1 (Step 5) + Phase 2 (Step 6b) =="
 # Each dispatch site uses subagent_type: uberdev:code-fixer
 assert_subagent_type "$REVIEW_PR" 'code-fixer' \
   "review-pr.md dispatches uberdev:code-fixer (subagent_type)"
-# Phase 1 dispatch: phase=phase1
-assert_grep "$REVIEW_PR" 'phase=phase1' \
-  "review-pr.md Phase 1 dispatch carries phase=phase1"
-# Phase 2 dispatch: phase=phase2 + commit_type_prefix=refactor:
-assert_grep "$REVIEW_PR" 'phase=phase2' \
-  "review-pr.md Phase 2 dispatch carries phase=phase2"
-assert_grep "$REVIEW_PR" 'commit_type_prefix=refactor:' \
-  "review-pr.md Phase 2 dispatch carries commit_type_prefix=refactor:"
+# Phase/type authority comes only from the routed edge + manifest phase.
+assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \
+  "review-pr.md carries no prompt-only phase/type claim"
 # Count: ≥ 2 distinct subagent_type: uberdev:code-fixer references
 REVIEW_DISPATCH_COUNT=$(grep -cE 'subagent_type: uberdev:code-fixer' "$REVIEW_PR" || true)
 if [[ "$REVIEW_DISPATCH_COUNT" -ge 2 ]]; then
@@ -184,35 +201,25 @@ echo
 echo "== Dispatch site: simplify.md Phase 3 =="
 assert_subagent_type "$SIMPLIFY" 'code-fixer' \
   "simplify.md Phase 3 dispatches uberdev:code-fixer (subagent_type)"
-assert_grep "$SIMPLIFY" 'phase=phase2' \
-  "simplify.md Phase 3 dispatch carries phase=phase2 (per #73 design)"
-assert_grep "$SIMPLIFY" 'commit_type_prefix=refactor:' \
-  "simplify.md Phase 3 dispatch carries commit_type_prefix=refactor:"
+assert_no_grep "$SIMPLIFY" 'phase=phase[12] commit_type_prefix=' \
+  "simplify.md carries no prompt-only phase/type claim"
 
 echo
-echo "== Executable disposition-before-commit gate =="
-GATE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*code_fixer_require_valid_disposition\(\) \{/{active=1} active{sub(/^[[:space:]]+/,""); print} active && /^[[:space:]]*\}/{exit}' \
-  "$CODE_FIXER" >"$GATE_FIXTURE"
-GATE_LOG="$(mktemp)"
-GATE_LOG="$GATE_LOG" bash -c '
-  . "$1"
-  git() { printf "git:%s\n" "$*" >>"$GATE_LOG"; }
-  push_or_trust() { printf "trust\n" >>"$GATE_LOG"; }
-  if code_fixer_require_valid_disposition failed; then
-    git commit -m forbidden
-    push_or_trust
-  fi
-' _ "$GATE_FIXTURE"
-GATE_RC=$?
-if [ "$GATE_RC" -eq 0 ] && [ -s "$GATE_FIXTURE" ] && [ ! -s "$GATE_LOG" ]; then
-  echo "  PASS  disposition publication failure prevents commit, push, and trust markers"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  disposition publication failure crossed the commit boundary"
-  FAIL=$((FAIL + 1))
-fi
-rm -f "$GATE_FIXTURE" "$GATE_LOG"
+echo "== Controller-owned review commit boundary =="
+assert_no_grep "$CODE_FIXER" 'code_fixer_commit_once|validation_receipt=.*validate-staged|post_commit_receipt=.*validate-commit' \
+  "obsolete child-owned commit gate is absent"
+assert_grep "$CODE_FIXER" 'commit-review --authority-path.*--authority-sha256.*--disposition-path.*--disposition-sha256.*--applied-content-path.*--applied-content-sha256.*--working-dir' \
+  "review terminal call authenticates authority, disposition, content plan, and worktree"
+assert_grep "$CODE_FIXER" 'fixed routed message is `fix: address authenticated fixer' \
+  "review helper derives the phase1 fix subject"
+assert_grep "$CODE_FIXER" 'phase1 or `refactor: address authenticated fixer findings`' \
+  "review helper derives the phase2 refactor subject"
+assert_grep "$CONTRACT_HELPER" '^def commit_review\(' \
+  "executable helper owns the review commit transaction"
+assert_grep "$CONTRACT_HELPER" '"commit-review"' \
+  "helper CLI exposes the authenticated review commit boundary"
+assert_grep "$REVIEW_PR" 'git -C .*rev-list --count.*before.*after|rev-list --count.*FIXER' \
+  "controller proves APPLIED is exactly one commit"
 
 echo
 echo "== Summary =="

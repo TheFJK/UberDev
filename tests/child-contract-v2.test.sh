@@ -39,6 +39,41 @@ for edge in ('review_pr.simplify.reuse','review_pr.simplify.quality','review_pr.
     assert 'focus' not in row['required_inputs'], edge
     assert row['optional_inputs'].get('focus')=='optional_string', edge
     assert 'additional_focus' not in row['optional_inputs'], edge
+fixer_inputs={
+ 'findings_path':'path',
+ 'findings_sha256':'string',
+ 'commit_range_path':'path',
+ 'commit_range_sha256':'string',
+ 'working_dir':'directory',
+ 'pr_number':'integer',
+ 'disposition_path':'path',
+ 'authority_path':'path',
+ 'authority_sha256':'string',
+}
+for edge,policy_phase in (
+ ('review_pr.fix.phase1','review_fix'),
+ ('review_pr.fix.phase2','simplify_fix'),
+):
+    row=providers[edge]
+    assert row['required_inputs']==fixer_inputs, edge
+    assert row['optional_inputs']=={}, edge
+    assert row['phase']==policy_phase, edge
+standalone_fixer_inputs={
+ 'findings_path':'path',
+ 'findings_sha256':'string',
+ 'standalone_snapshot_path':'path',
+ 'standalone_snapshot_sha256':'string',
+ 'working_dir':'directory',
+ 'pr_number':'integer',
+ 'disposition_path':'path',
+ 'authority_path':'path',
+ 'authority_sha256':'string',
+}
+standalone=providers['simplify.fix.phase2']
+assert standalone['required_inputs']==standalone_fixer_inputs
+assert standalone['optional_inputs']=={}
+assert standalone['phase']=='simplify_fix'
+assert standalone['allowed_workflows']==['simplify']
 review_edges={edge for edge in providers if edge.startswith('review_pr.review.')}
 assert len(review_edges)==6
 assert tree.get('output_contracts')=={'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md'}
@@ -47,7 +82,7 @@ for edge in review_edges:
     assert row['required_inputs']['changed_paths']=='repo_path_array', edge
     assert row.get('output_contract')=='phase1-reviewer-v1', edge
 caller_edges={
- 'review_pr.fix.phase1','review_pr.fix.phase2','review_pr.ci.fix_code',
+ 'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2','review_pr.ci.fix_code',
  'review_pr.ci.rebase','review_pr.ci.resolve_conflict'
 }
 assert {edge for edge,row in providers.items() if row.get('workspace_mode')=='caller'}==caller_edges
@@ -57,10 +92,8 @@ PY
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"
 grep -q '^uberdev_unwind_child()' "$LIB"
-cmp "$TREE" "$ROOT/codex/uberdev-codex/policy/solve-run-tree-v1.json"
-cmp "$LIB" "$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
-cmp "$ROOT/plugins/uberdev/lib/child-inputs.py" \
-  "$ROOT/codex/uberdev-codex/lib/child-inputs.py"
+# Generated Codex mirrors are verified by the dedicated generation/drift suite.
+# This source contract test intentionally remains runnable before regeneration.
 cmp "$CONTRACT" "$CONTRACT_MIRROR"
 
 python3 -I -B - \

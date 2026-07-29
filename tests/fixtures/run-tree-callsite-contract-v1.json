@@ -706,16 +706,24 @@
       "edge_id": "review_pr.fix.phase1",
       "source": "plugins/uberdev/commands/review-pr.md",
       "required_inputs": [
+        "authority_path",
+        "authority_sha256",
         "commit_range_path",
+        "commit_range_sha256",
         "disposition_path",
         "findings_path",
+        "findings_sha256",
         "pr_number",
         "working_dir"
       ],
       "required_input_types": {
+        "authority_path": "path",
+        "authority_sha256": "string",
         "commit_range_path": "path",
+        "commit_range_sha256": "string",
         "disposition_path": "path",
         "findings_path": "path",
+        "findings_sha256": "string",
         "pr_number": "integer",
         "working_dir": "directory"
       },
@@ -733,16 +741,24 @@
       "edge_id": "review_pr.fix.phase2",
       "source": "plugins/uberdev/commands/review-pr.md",
       "required_inputs": [
+        "authority_path",
+        "authority_sha256",
         "commit_range_path",
+        "commit_range_sha256",
         "disposition_path",
         "findings_path",
+        "findings_sha256",
         "pr_number",
         "working_dir"
       ],
       "required_input_types": {
+        "authority_path": "path",
+        "authority_sha256": "string",
         "commit_range_path": "path",
+        "commit_range_sha256": "string",
         "disposition_path": "path",
         "findings_path": "path",
+        "findings_sha256": "string",
         "pr_number": "integer",
         "working_dir": "directory"
       },
@@ -750,7 +766,6 @@
       "optional_input_types": {},
       "allowed_workflows": [
         "review-pr",
-        "simplify",
         "solve",
         "turbo"
       ],
@@ -1128,6 +1143,39 @@
       ],
       "risk_scope": "subtask",
       "risk_argument": "subtask"
+    },
+    {
+      "edge_id": "simplify.fix.phase2",
+      "source": "plugins/uberdev/commands/simplify.md",
+      "required_inputs": [
+        "authority_path",
+        "authority_sha256",
+        "disposition_path",
+        "findings_path",
+        "findings_sha256",
+        "pr_number",
+        "standalone_snapshot_path",
+        "standalone_snapshot_sha256",
+        "working_dir"
+      ],
+      "required_input_types": {
+        "authority_path": "path",
+        "authority_sha256": "string",
+        "disposition_path": "path",
+        "findings_path": "path",
+        "findings_sha256": "string",
+        "pr_number": "integer",
+        "standalone_snapshot_path": "path",
+        "standalone_snapshot_sha256": "string",
+        "working_dir": "directory"
+      },
+      "optional_inputs": [],
+      "optional_input_types": {},
+      "allowed_workflows": [
+        "simplify"
+      ],
+      "risk_scope": "run",
+      "risk_argument": null
     }
   ],
   "pending_edges": []

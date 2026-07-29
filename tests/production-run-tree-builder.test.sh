@@ -34,6 +34,7 @@ def governed_source(edge):
  if edge.startswith('sdd.'): return 'plugins/uberdev/skills/subagent-driven-dev/SKILL.md'
  if edge.startswith('review_pr.review.'): return 'plugins/uberdev/skills/post-impl-review/SKILL.md'
  if edge.startswith('review_pr.'): return 'plugins/uberdev/commands/review-pr.md'
+ if edge.startswith('simplify.'): return 'plugins/uberdev/commands/simplify.md'
  raise AssertionError(edge)
 
 def context(workflow,issue):
@@ -89,6 +90,16 @@ for contract in contracts:
   run,carrier=context(workflow,issue)
   workspace_mode=row.get('workspace_mode','isolated')
   inputs={key:value(fixture_types[key],repository if workspace_mode=='caller' and key=='working_dir' else run,key,index) for key in required+optional}
+  if edge in {'review_pr.fix.phase1','review_pr.fix.phase2'}:
+   inputs['pr_number']=issue
+   inputs['findings_sha256']=hashlib.sha256(pathlib.Path(inputs['findings_path']).read_bytes()).hexdigest()
+   inputs['commit_range_sha256']=hashlib.sha256(pathlib.Path(inputs['commit_range_path']).read_bytes()).hexdigest()
+   inputs['authority_sha256']=hashlib.sha256(pathlib.Path(inputs['authority_path']).read_bytes()).hexdigest()
+  if edge=='simplify.fix.phase2':
+   inputs['pr_number']=0
+   inputs['findings_sha256']=hashlib.sha256(pathlib.Path(inputs['findings_path']).read_bytes()).hexdigest()
+   inputs['standalone_snapshot_sha256']=hashlib.sha256(pathlib.Path(inputs['standalone_snapshot_path']).read_bytes()).hexdigest()
+   inputs['authority_sha256']=hashlib.sha256(pathlib.Path(inputs['authority_path']).read_bytes()).hexdigest()
   if edge=='review_pr.ci.classify':
    content=f'<external-untrusted-input source="github-actions-log-pr-{issue}-run-1">\nfailed assertion\n</external-untrusted-input>\n'
    inputs.update(
@@ -108,7 +119,7 @@ PY
 
 CONTRACT_COUNT="$(python3 -I -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
 EXPECTED_COUNT="$(python3 -I -B -c 'import json,sys; print(sum(len(row["allowed_workflows"]) for row in json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
-[ "$CONTRACT_COUNT" -eq 40 ]
+[ "$CONTRACT_COUNT" -eq 41 ]
 [ "$EXPECTED_COUNT" -eq 102 ]
 
 RUNTIME="$TMP/runtime"

@@ -14,8 +14,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SIMPLIFY="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 CODE_SIMPLIFIER="$REPO_ROOT/plugins/uberdev/agents/code-simplifier.md"
 CODE_FIXER="$REPO_ROOT/plugins/uberdev/agents/code-fixer.md"
+CODE_FIXER_CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 
-for f in "$SIMPLIFY" "$CODE_SIMPLIFIER" "$CODE_FIXER"; do
+for f in "$SIMPLIFY" "$CODE_SIMPLIFIER" "$CODE_FIXER" "$CODE_FIXER_CONTRACT"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -82,16 +83,36 @@ assert_grep "$SIMPLIFY" 'three agents|three lenses|three .Task. tool_use blocks|
 echo
 echo "== Phase 3: dispatch code-fixer subagent (#73 Q3) =="
 
-# P3.1-P3.3 — stable phase2 edge owns the code-fixer route and refactor contract
-assert_grep "$SIMPLIFY" 'uberdev_dispatch_child review_pr\.fix\.phase2' \
+# P3.1-P3.3 — standalone phase2 edge owns the fixer route and refactor contract
+assert_grep "$SIMPLIFY" 'simplify_fixer_child_bound simplify\.fix\.phase2' \
   "P3.1 — Phase 3 routes code-fixer through child-dispatch"
-assert_grep "$SIMPLIFY" 'review_pr\.fix\.phase2' \
+assert_grep "$SIMPLIFY" 'simplify\.fix\.phase2' \
   "P3.2 — Phase 3 code-fixer carries phase identity in edge_id"
+assert_grep "$SIMPLIFY" 'findings_sha256' \
+  "P3.2a — Phase 3 code-fixer carries the aggregate digest"
+assert_grep "$SIMPLIFY" 'standalone_snapshot_sha256' \
+  "P3.2b — Phase 3 code-fixer carries the standalone baseline digest"
+assert_no_grep "$SIMPLIFY" 'phase=phase[12] commit_type_prefix=' \
+  "P3.2c — Phase/type are derived from routed authority, not prompt prose"
 assert_grep "$SIMPLIFY" 'ONE `refactor:` commit|single `refactor:`' \
   "P3.3 — Phase 3 code-fixer retains the refactor contract"
 # P3.4 — refactor: as the conventional commit type (separate-commit invariant)
 assert_grep "$SIMPLIFY" 'separate `refactor:` conventional commit|ONE `refactor:` commit|single `refactor:`' \
   "P3.4 — Phase 3 commits as a separate refactor: conventional commit"
+assert_grep "$SIMPLIFY" 'pr_number:.*0|PR_NUMBER.*0' \
+  "P3.4a — standalone simplify keeps integer subject zero"
+assert_grep "$SIMPLIFY" 'SIMPLIFY_FIXER_HEAD_BEFORE=.*git -C "\$WORKTREE_ROOT" rev-parse HEAD' \
+  "P3.4b — standalone simplify captures HEAD immediately before fixer dispatch"
+assert_grep "$SIMPLIFY" 'SIMPLIFY_FIXER_HEAD_AFTER=.*git -C "\$WORKTREE_ROOT" rev-parse HEAD' \
+  "P3.4c — standalone simplify captures HEAD immediately after fixer return"
+assert_grep "$SIMPLIFY" 'validate-standalone-outcome' \
+  "P3.4d — standalone simplify validates the bound result and baseline algebra"
+assert_grep "$SIMPLIFY" 'capture-standalone-terminal' \
+  "P3.4e — controller freezes exact terminal status/result/disposition bytes"
+assert_grep "$SIMPLIFY" 'NO_FIXES_NEEDED.*zero-history|zero-history.*NO_FIXES_NEEDED|zero-history' \
+  "P3.4f — no-fix/refusal routes require a zero history delta"
+assert_grep "$SIMPLIFY" 'Non-APPLIED staged, unstaged, and untracked state is preserved exactly' \
+  "P3.4g — standalone result preserves unrelated dirty baseline state"
 # P3.5 — iron rule preserved
 assert_grep "$SIMPLIFY" '[Pp]reserve behavior|[Bb]ehavior preservation|iron rule' \
   "P3.5 — iron rule (preserve behavior) prose preserved"
@@ -103,6 +124,15 @@ assert_no_grep "$SIMPLIFY" 'Aggregate their findings and fix each issue directly
   "P3.7 — old in-context apply-loop prose removed (now dispatches code-fixer)"
 
 echo
+echo "== P3.8-P3.11: executable standalone controller integration =="
+if bash "$REPO_ROOT/tests/simplify-standalone-flow.test.sh"; then
+  echo "  PASS  controller preserves dirt, commits APPLIED bytes once, handles exact zero, ignores ledger rebind, and refuses terminal replacement"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  executable standalone controller integration"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== F1: code-simplifier no-quoting rule preserved (test moved from review-pr.test.sh #73) =="
 
 # F1 — code-simplifier dropped out of tests/review-pr.test.sh's AGENT_FILES array
@@ -168,13 +198,13 @@ assert_grep "$SIMPLIFY" 'git rev-parse --show-toplevel' \
 assert_grep "$SIMPLIFY" 'WORKTREE_ROOT|AGG_PATH' \
   "G4 — /simplify Phase 3 builds aggregate path from worktree root variable"
 
-# G5 — dedup policy across lenses specified
-assert_grep "$SIMPLIFY" '[Dd]edup policy' \
-  "G5 — /simplify Phase 3 documents dedup policy heading"
-assert_grep "$SIMPLIFY" 'file:line' \
-  "G5 — /simplify Phase 3 dedup keyed on file:line"
-assert_grep "$SIMPLIFY" 'Reuse\+Quality|merged findings|merge into ONE finding' \
-  "G5 — /simplify Phase 3 dedup merges overlapping findings (lens-prefixed)"
+# G5 — structured dedup policy across lenses specified
+assert_grep "$SIMPLIFY" '\*\*Canonical aggregate\.\*\*' \
+  "G5 — /simplify Phase 3 documents the canonical aggregate"
+assert_grep "$SIMPLIFY" 'structured `\(path,line\)`' \
+  "G5 — /simplify Phase 3 dedup keys on structured scope"
+assert_grep "$SIMPLIFY" 'Merge same-location findings in roster order' \
+  "G5 — /simplify Phase 3 merges overlapping lens findings"
 
 # G6 — per-lens output format pinned in agent return contract
 assert_grep "$CODE_SIMPLIFIER" '^## Return contract' \
@@ -207,14 +237,15 @@ assert_in_section "$CODE_SIMPLIFIER" '^## Return contract' '^## Output Rules' 's
 assert_no_grep "$CODE_SIMPLIFIER" 'severity: critical \| important \| suggestion' \
   "R1 — agent return contract no longer uses non-canonical critical|important enum"
 
-# R2 — code-fixer.md parser explicitly acknowledges the optional lens field carried
-# by simplify aggregates. The Process Step 2 extraction list must include `lens`
-# so the parser doesn't silently drop the field that the simplify aggregator
-# uses to indicate which lens(es) flagged a finding (single or merged form).
+# R2 — code-fixer.md accepts only canonical Phase-2 schema-v2 records, so an
+# unrelated bullet or partial pseudo-finding cannot become edit authority.
 CODE_FIXER="$REPO_ROOT/plugins/uberdev/agents/code-fixer.md"
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
-  '\{severity, location.*lens|severity, location.*lens.*summary, detail|lens\?' \
-  "R2 — code-fixer parser Step 2 extraction list includes optional lens field"
+  'source_edges' \
+  "R2 — code-fixer binds canonical source_edges"
+assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
+  'Any other encoding, prose, key' \
+  "R2 — code-fixer rejects non-canonical pseudo-findings"
 
 # R3 — cross-file consistency: each lens name in command file paired with the same name in agent file
 # Catches the rename-one-without-the-other class of drift.
@@ -346,6 +377,27 @@ assert_grep "$CODE_FIXER" 'closed two-member source set' \
 assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
   'any other source attribute is malformed' \
   "E4.3 — code-fixer Step 1 still refuses non-member sources (input-malformed)"
+
+echo
+echo "== E4.4-E4.8: authenticated standalone persistence result gate =="
+assert_grep "$SIMPLIFY" 'count-deferred-blockers' \
+  "E4.4 — Phase 3.5 authenticates the deferred blocker count"
+assert_grep "$SIMPLIFY" 'validate-persistence-result' \
+  "E4.5 — Phase 3.5 authenticates and validates the child result"
+assert_grep "$SIMPLIFY" 'if simplify_defer_child_bound review_pr\.defer\.findings' \
+  "E4.6 — findings persistence uses the receipt-bound dispatch path"
+assert_grep "$SIMPLIFY" 'bind-persistence-launch-receipt' \
+  "E4.6a — persistence receipt binds source digests, count, and policy"
+assert_grep "$SIMPLIFY" 'capture-persistence-terminal' \
+  "E4.6b — persistence terminal bytes are captured immediately after wait"
+assert_no_grep "$SIMPLIFY" 'validate-persistence-result[[:space:]\\]*\\\n?[[:space:]]*--result-path' \
+  "E4.6c — persistence validation never trusts an unbound result pathname"
+assert_grep "$SIMPLIFY" 'if \[ "\$DEFERRED_BLOCKER_COUNT" -gt 0 \].*' \
+  "E4.7 — deferred blockers require a concern-free persistence result"
+assert_grep "$SIMPLIFY" 'DEFER_PERSISTENCE_HALTED.*return 1|return 1.*DEFER_PERSISTENCE_HALTED' \
+  "E4.8 — a persisted blocker halts and surfaces the standalone run"
+assert_no_grep "$SIMPLIFY" 'Never fails the parent `/uberdev:simplify` run' \
+  "E4.9 — stale fail-open persistence prose is removed"
 
 echo
 echo "== E5: standalone deferred-findings handoff is Phase-2-only =="

@@ -149,18 +149,34 @@ simplify_fixer_result="$(
     RUN_ID=20260716-000005-abcdef0 PR_NUMBER=0 ARGUMENTS='' \
     bash -c '
       mkdir -p "$3"; cd "$2"; . "$1"
-      printf "<external-untrusted-input source=\"simplify-aggregate\">\n</external-untrusted-input>\n" >"$AGG_PATH"
-      printf "HEAD^..HEAD\n" >"$COMMIT_RANGE_PATH"
+      printf "%s" '\''{"contributors":[{"confidence":"n/a","id":"review_pr.simplify.reuse","verdict":"COMPLETE"},{"confidence":"n/a","id":"review_pr.simplify.quality","verdict":"COMPLETE"},{"confidence":"n/a","id":"review_pr.simplify.efficiency","verdict":"COMPLETE"}],"findings":[],"phase":"phase2","schema_version":2}'\'' \
+        | python3 -I -B "$CODE_FIXER_CONTRACT" encode-aggregate --phase phase2 >"$AGG_PATH"
+      snapshot_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" snapshot-standalone \
+        --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS" \
+        --diff-path "$DIFF_ARTIFACT_PATH" --snapshot-path "$STANDALONE_SNAPSHOT_PATH")"
+      snapshot_sha256="$(python3 -I -B -c '\''import json,sys; print(json.loads(sys.argv[1])["snapshot_sha256"],end="")'\'' "$snapshot_receipt")"
+      findings_sha256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$AGG_PATH" --minimum 1 --maximum 16777216)"
       : >"$PHASE2_DISPOSITION_PATH"
+      authority_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-standalone-authority \
+        --edge-id simplify.fix.phase2 --policy-phase simplify_fix \
+        --findings-path "$AGG_PATH" --findings-sha256 "$findings_sha256" \
+        --snapshot-path "$STANDALONE_SNAPSHOT_PATH" --snapshot-sha256 "$snapshot_sha256" \
+        --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE2_DISPOSITION_PATH")"
+      authority_path="$(python3 -I -B -c '\''import json,sys; print(json.loads(sys.argv[1])["authority_path"],end="")'\'' "$authority_receipt")"
+      authority_sha256="$(python3 -I -B -c '\''import json,sys; print(json.loads(sys.argv[1])["authority_sha256"],end="")'\'' "$authority_receipt")"
       json_string() { python3 -I -B -c '\''import json,sys; print(json.dumps(sys.argv[1]),end="")'\'' "$1"; }
-      inputs="$(uberdev_child_inputs_build review_pr.fix.phase2 \
+      inputs="$(uberdev_child_inputs_build simplify.fix.phase2 \
         findings_path "$(json_string "$AGG_PATH")" \
-        commit_range_path "$(json_string "$COMMIT_RANGE_PATH")" \
+        findings_sha256 "$(json_string "$findings_sha256")" \
+        standalone_snapshot_path "$(json_string "$STANDALONE_SNAPSHOT_PATH")" \
+        standalone_snapshot_sha256 "$(json_string "$snapshot_sha256")" \
         working_dir "$(json_string "$WORKTREE_ROOT")" \
         pr_number 0 \
-        disposition_path "$(json_string "$PHASE2_DISPOSITION_PATH")")"
-      uberdev_create_child_handoff review_pr.fix.phase2 simplify-fixer-iter1-attempt01 "$inputs" null >/dev/null
-      prepared="$(_uberdev_child_prepare review_pr.fix.phase2 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
+        disposition_path "$(json_string "$PHASE2_DISPOSITION_PATH")" \
+        authority_path "$(json_string "$authority_path")" \
+        authority_sha256 "$(json_string "$authority_sha256")")"
+      uberdev_create_child_handoff simplify.fix.phase2 simplify-fixer-iter1-attempt01 "$inputs" null >/dev/null
+      prepared="$(_uberdev_child_prepare simplify.fix.phase2 "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
       python3 -I -B -c '\''import json,sys; v=json.loads(sys.argv[1]); print(v["request"]["backend"]+":"+v["request"]["workspace_mode"]+":"+v["request"]["workspace_dir"],end="")'\'' "$prepared"
     ' _ "$TMP/simplify-setup.sh" "$TMP/repo" "$TMP/runtime-simplify"
 )"

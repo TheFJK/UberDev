@@ -17,11 +17,11 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "review_pr.fix.phase1":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.fix.phase1":{"inputs":["findings_path","findings_sha256","commit_range_path","commit_range_sha256","working_dir","pr_number","disposition_path","authority_path","authority_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.simplify.reuse":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.simplify.quality":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.simplify.efficiency":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "review_pr.fix.phase2":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.fix.phase2":{"inputs":["findings_path","findings_sha256","commit_range_path","commit_range_sha256","working_dir","pr_number","disposition_path","authority_path","authority_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.classify":{"inputs":["pr_number","run_id","head_sha","log_content","log_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.ci.fix_code":{"inputs":["failure_class","signal_anchor","run_id","head_sha","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
@@ -40,6 +40,7 @@ All provider calls in this command use the runtime-owned carrier and handoff bui
 set -u
 UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
+CODE_FIXER_CONTRACT="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
 RISK_JSON="${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
@@ -106,8 +107,8 @@ PY
     handoff="${launch_handoffs[$index]}"
     handoff_sha256="${launch_handoff_sha256s[$index]}"
     result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
-    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status")"; then
-      :
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+      receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
@@ -264,6 +265,73 @@ review_child_single() {
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
   review_child_wait_all "$prefix.launched" "$timeout_s"
 }
+# BEGIN review-fixer-child-bound-v2
+# BEGIN review-failed-return-guard-v1
+review_guard_failed_fixer_return() {
+  [ "$#" -eq 2 ] || return 2
+  local head_before="$1" original_rc="$2" guard_receipt
+  case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
+  guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
+    --working-dir "$WORKTREE_ROOT" \
+    --evidence-dir "$RESEARCH_DIR_ABS" \
+    --head-before "$head_before")" || {
+    echo "error: MUTATED_BLOCKED — fixer failure left unvalidated repository mutation" >&2
+    return 79
+  }
+  [ "$guard_receipt" = '{"status":"clean"}' ] || {
+    echo "error: MUTATED_BLOCKED — fixer failure residue receipt is malformed" >&2
+    return 79
+  }
+  return "$original_rc"
+}
+# END review-failed-return-guard-v1
+review_fixer_child_bound() {
+  [ "$#" -eq 10 ] || return 2
+  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local authority_path="$7" authority_sha256="$8" disposition_path="$9" applied_content_path="${10}"
+  local receipt wait_rc
+  uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
+  REVIEW_FIXER_RESULT_PATH="$UBERDEV_CHILD_RESULT"
+  REVIEW_FIXER_STATUS_PATH="$UBERDEV_CHILD_STATUS"
+  uberdev_dispatch_child_capture "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$REVIEW_FIXER_RESULT_PATH" "$REVIEW_FIXER_STATUS_PATH" || return $?
+  receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
+  REVIEW_FIXER_LAUNCH_BINDING="$(printf '%s' "$receipt" | python3 -I -B "$CODE_FIXER_CONTRACT" bind-fixer-launch-receipt \
+    --edge-id "$edge" --instance-id "$instance" \
+    --result-path "$REVIEW_FIXER_RESULT_PATH" \
+    --status-path "$REVIEW_FIXER_STATUS_PATH" \
+    --working-dir "$WORKTREE_ROOT" \
+    --authority-path "$authority_path" \
+    --authority-sha256 "$authority_sha256")" || {
+    wait_rc=$?
+    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+    return "$wait_rc"
+  }
+  # Diagnostics only; authorization retains the exact in-memory binding above.
+  python3 -I -B - "$edge" "$instance" "$REVIEW_FIXER_LAUNCH_BINDING" "$prefix.launched" <<'PY' || {
+import json,sys
+edge,instance,binding,path=sys.argv[1:]
+value=json.loads(binding)
+with open(path,"w",encoding="utf-8") as stream:
+    json.dump({"edge":edge,"instance":instance,"receipt_sha256":value["receipt_sha256"]},stream,sort_keys=True,separators=(",",":"))
+    stream.write("\n")
+PY
+    wait_rc=$?
+    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+    return "$wait_rc"
+  }
+  if uberdev_wait_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s"; then
+    REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
+      --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+      --disposition-path "$disposition_path" \
+      --applied-content-path "$applied_content_path")" || return 74
+    return 0
+  fi
+  wait_rc=$?
+  uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+  return "$wait_rc"
+}
+# END review-fixer-child-bound-v2
 ```
 <!-- END review-child-builder-v1 -->
 
@@ -340,6 +408,40 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      live_head="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
      local_head="$(git -C "$worktree_root" rev-parse HEAD 2>/dev/null)" || return 2
      [ "$live_head" = "$expected_head" ] && [ "$local_head" = "$expected_head" ]
+   }
+
+   review_publish_same_repo_pr_head() {
+     [ "$#" -eq 7 ] || return 2
+     local repo_slug="$1" pr_number="$2" expected_remote_head_sha="$3" publish_sha="$4"
+     local worktree_root="$5" contract_helper="$6" evidence_dir="$7"
+     local live_identity live_head live_branch live_cross_repository live_head_repo extra
+     local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
+     [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
+     [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
+     [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+     [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
+     [[ "$live_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     [ "$live_head" = "$expected_remote_head_sha" ] || return 79
+     [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
+     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$publish_sha" ] || return 79
+     git -C "$worktree_root" push origin "$publish_sha:refs/heads/$live_branch" || return 79
+     remote_identity="$(git -C "$worktree_root" ls-remote --exit-code --heads origin "refs/heads/$live_branch")" || return 79
+     [[ "$remote_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
+     [ "$remote_head" = "$publish_sha" ] && [ "$remote_ref" = "refs/heads/$live_branch" ] && [ -z "$remote_extra" ] || return 79
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
+     [[ "$live_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     [ "$live_head" = "$publish_sha" ] || return 79
+     [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$publish_sha" ] || return 79
+     residue_receipt="$(python3 -I -B "$contract_helper" validate-residue --working-dir "$worktree_root" --evidence-dir "$evidence_dir")" || return 79
+     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
    }
    REVIEW_REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
    REVIEW_PR_METADATA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
@@ -543,21 +645,72 @@ PY
    ```
    **The artifact already carries the `<external-untrusted-input source="post-impl-review-aggregate">…</external-untrusted-input>` envelope as its own LEADING/TRAILING file bytes** (written by `uberdev:post-impl-review` Step 4 — #302 / RFC 0012 §3.1 do-first). Pass the artifact PATH (`findings_path`) or its already-enveloped bytes VERBATIM into the apply-loop prompt — **do NOT re-wrap** (a read-time second wrap nests envelopes while leaving the on-disk file bare, which is exactly what made `findings-to-issues.md` Step 1's first-128-bytes validation refuse every Phase 2.5 dispatch `input-malformed`). The file-bytes envelope is the single envelope of record, per the orchestrator trust-boundary convention (`plugins/uberdev/skills/orchestrator/SKILL.md` "Trust boundary" section). Threat model unchanged: second-order injection where issue-author text → diff hunk → reviewer agent's report → aggregate findings file → fixer prompt. The envelope is required, not advisory — it is simply written once, by the writer.
 
-   Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The structured input contract restores `phase=phase1` and `commit_type_prefix=fix:` as data:
+   Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The edge and manifest phase are the only phase/type authority; the payload carries only immutable artifact authority:
 
    ```bash
+   PHASE1_FINDINGS_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+   PHASE1_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE1_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter${REVIEW_ITERATION}.json"
+   PHASE1_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase1 --policy-phase review_fix \
+     --findings-path "$PHASE1_FINDINGS_PATH" --findings-sha256 "$PHASE1_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE1_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase1" or value["commit_type"]!="fix" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
    PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1 \
-     findings_path "$(review_json_string "$findings_path")" \
+     findings_path "$(review_json_string "$PHASE1_FINDINGS_PATH")" \
+     findings_sha256 "$(review_json_string "$PHASE1_FINDINGS_SHA256")" \
      commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     commit_range_sha256 "$(review_json_string "$FIXER_COMMIT_RANGE_SHA256")" \
      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
      pr_number "$PR_NUMBER" \
-     disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")")"
-   # phase=phase1 commit_type_prefix=fix:
+     disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
+     authority_path "$(review_json_string "$PHASE1_AUTHORITY_PATH")" \
+     authority_sha256 "$(review_json_string "$PHASE1_AUTHORITY_SHA256")")"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   REVIEW_FIXER_TERMINAL=
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
-   review_child_single review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
+   if review_fixer_child_bound review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" "$PHASE1_DISPOSITION_PATH" "$PHASE1_APPLIED_CONTENT_PATH"; then :; else
+     REVIEW_FIXER_RC=$?
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
+     return $?
+   fi
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   PHASE1_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE1_AUTHORITY_PATH" --authority-sha256 "$PHASE1_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
-   The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
+   The agent applies edits and creates exactly one routed `fix:` conventional commit when any Phase 1 finding is APPLIED, returning that SHA in its YAML. This **review-phase commit** stays distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
    Capture `FIXER_HEAD_BEFORE` immediately before dispatch,
    `FIXER_HEAD_AFTER` immediately after return, and the final declared
@@ -565,7 +718,9 @@ PY
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local status="$1" before="$2" after="$3" declared_tip="${4:-}"
+     local status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
+     [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
      [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
      case "$status" in
@@ -573,6 +728,8 @@ PY
          [ "$before" != "$after" ] || return 77
          [ "$declared_tip" = "$after" ] || return 77
          git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$before" "$after" || return 78
+         commit_count="$(git -C "$WORKTREE_ROOT" rev-list --count "$before..$after")" || return 78
+         [ "$commit_count" = 1 ] || return 77
          VALIDATED_FIXER_HEAD_SHA="$after"
          ;;
        NO_FIXES_NEEDED|REFUSED)
@@ -581,12 +738,38 @@ PY
        *) return 2 ;;
      esac
    }
+   review_promote_validated_fixer_outcome() {
+     [ "$#" -eq 3 ] || return 2
+     local outcome="$1" before="$2" after="$3" parsed status declared_tip extra
+     parsed="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1])
+expected={"status","declared_tip","receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
+if not isinstance(value,dict) or set(value)!=expected: raise SystemExit(74)
+status=value["status"]; tip=value["declared_tip"]
+if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,str): raise SystemExit(74)
+if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in ("receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
+if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
+print(status+"\t"+tip,end="")' "$outcome")" || return 74
+     IFS=$'\t' read -r status declared_tip extra <<<"$parsed"
+     [ -z "${extra:-}" ] || return 74
+     review_track_validated_fixer_head "$status" "$before" "$after" "$declared_tip"
+   }
+   ```
+
+   Promote the exact authenticated Phase 1 outcome immediately:
+
+   ```bash
+   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
    entry, including mandatory CI-fix re-entry. Call
    `review_track_validated_fixer_head` after each Phase 1 and Phase 2 fixer
-   return. Any status/head/declaration/ancestry mismatch is
+   return. Run the residue check even when result parsing fails; malformed
+   result plus residual state is still `MUTATED_BLOCKED`, never an ordinary
+   parser refusal. Any status/head/declaration/ancestry/residue mismatch is
    `MUTATED_BLOCKED`: stop before publication and re-enter Phase 1 only after
    the unexpected history is resolved. A CI fixer never advances this variable
    directly; its successful push must take the mandatory Phase 1 re-entry path,
@@ -617,6 +800,10 @@ PY
    **The post-Phase-1 diff is attacker-controllable** and MUST be persisted at `DIFF_ARTIFACT_PATH` with literal leading `<external-untrusted-input source="pr-diff">` and trailing `</external-untrusted-input>` bytes. Concrete dispatch uses three immutable instances and issues the whole wave before waiting:
 
    ```bash
+   # Phase 1 may have advanced HEAD. Rebuild both the enveloped diff and the
+   # commit-range artifact from that exact post-fix snapshot before any Phase 2
+   # lens or fixer receives authority.
+   review_refresh_phase1_scope "$BASE_SHA" || return 2
    # routed-provider-edge: review_pr.simplify.reuse
    # routed-provider-edge: review_pr.simplify.quality
    # routed-provider-edge: review_pr.simplify.efficiency
@@ -652,18 +839,73 @@ PY
 
    Each lens preserves the iron rule from `/uberdev:simplify`: **behavior preservation is non-negotiable.**
 
-   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer` agent with `phase: phase2` and `commit_type_prefix: refactor:`:
+   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer`; `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
 
    ```bash
+   PHASE2_FINDINGS_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
+   PHASE2_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE2_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter${REVIEW_ITERATION}.json"
+   PHASE2_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase2 --policy-phase simplify_fix \
+     --findings-path "$PHASE2_FINDINGS_PATH" --findings-sha256 "$PHASE2_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE2_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase2" or value["commit_type"]!="refactor" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
    PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2 \
-     findings_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
+     findings_path "$(review_json_string "$PHASE2_FINDINGS_PATH")" \
+     findings_sha256 "$(review_json_string "$PHASE2_FINDINGS_SHA256")" \
      commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     commit_range_sha256 "$(review_json_string "$FIXER_COMMIT_RANGE_SHA256")" \
      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
      pr_number "$PR_NUMBER" \
-     disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")")"
-   # subagent_type: uberdev:code-fixer; phase=phase2 commit_type_prefix=refactor:
+     disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
+     authority_path "$(review_json_string "$PHASE2_AUTHORITY_PATH")" \
+     authority_sha256 "$(review_json_string "$PHASE2_AUTHORITY_SHA256")")"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   REVIEW_FIXER_TERMINAL=
+   # subagent_type: uberdev:code-fixer
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
-   review_child_single review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
+   if review_fixer_child_bound review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" "$PHASE2_DISPOSITION_PATH" "$PHASE2_APPLIED_CONTENT_PATH"; then :; else
+     REVIEW_FIXER_RC=$?
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
+     return $?
+   fi
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    `PHASE2_HANDOFF` passes the already-enveloped `simplify-final.md` path; its
@@ -673,7 +915,7 @@ PY
 
    Capture the Phase 2 `FIXER_HEAD_BEFORE`, `FIXER_HEAD_AFTER`, and declared
    `commits[0].sha`, then pass them through
-   `review_track_validated_fixer_head`. Phase 2 uses the same fail-closed
+   `review_promote_validated_fixer_outcome`. Phase 2 uses the same fail-closed
    mutation and ancestry rules as Phase 1; a refusal is non-mutating or blocked.
 
    If `code-fixer` returns `status: REFUSED` for Phase 2, log the rationale, continue to trust-signal evaluation (the Phase 2 row in the aggregation table reads `Auto-applied: ∅` and "Phase 2 fixer refused: <reason>" surfaces in Advisory findings). Phase 2 status is `blocked` if and only if the lens fanout itself failed (timeout / parse error / aggregator crash); a fixer refusal does NOT make Phase 2 `blocked` — the lenses' findings are advisory.
@@ -698,25 +940,23 @@ PY
    # a silently-failed push here would let Phase 3 probe a stale remote SHA and
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
    # per the artifact-emission-failure prose (trust-signal contract broken).
-   POST_FIXER_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
+   POST_FIXER_HEAD_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
    if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
      echo "error: HEAD changed outside the validated review fixers; refusing publication" >&2
      exit 2
    fi
-   if ! git push origin HEAD; then
-     echo "error: post-fixer push failed (git push origin HEAD exited non-zero) — Phase 3 would probe a stale remote SHA. Re-run /review-pr after resolving." >&2
+   if ! review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"; then
+     echo "error: immutable post-fixer publication, same-repository authority, equality, or residue proof failed — Phase 3 would probe an unauthenticated SHA. Re-run /review-pr after resolving." >&2
      exit 2
    fi
-   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \
-     "$VALIDATED_FIXER_HEAD_SHA" "$WORKTREE_ROOT" || {
-       echo "error: post-fixer publication did not produce exact remote/local head equality" >&2
-       exit 2
-     }
-   REVIEWED_HEAD_SHA="$VALIDATED_FIXER_HEAD_SHA"
+   REVIEWED_HEAD_SHA="$POST_FIXER_HEAD_SHA"
    ```
 
-   Only after the guarded push and exact live/local equality assertion does the
-   controller promote `REVIEWED_HEAD_SHA` to the validated fixer tip. When
+   The shared publication gate rejects fork PRs and authenticates the PR head
+   repository, branch, pre-push remote head, immutable pushed object, remote
+   ref, post-push live PR head, local HEAD, and clean repository residue. Only
+   after every proof succeeds does the controller promote `REVIEWED_HEAD_SHA`
+   to the validated fixer tip. When
    neither fixer produced a commit, the candidate remains the entry snapshot
    and the push is an `Everything up-to-date` no-op (exit 0). On Phase 1
    re-entry iterations (6c.5) this full tracking/publication sequence re-runs
@@ -2024,30 +2264,80 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    ```
 
    ```bash
-   PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short; goes into the trailer payload
-   git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
+   review_validate_trust_anchor() {
+     [ "$#" -eq 4 ] || return 2
+     local reviewed_head_sha="$1" parent_sha="$2" anchor_sha="$3" expected_message_sha256="$4"
+     local observed_head observed_parents observed_message_sha256 residue_receipt
+     [[ "$reviewed_head_sha" =~ ^[0-9a-f]{40}$ && "$parent_sha" =~ ^[0-9a-f]{40}$ && "$anchor_sha" =~ ^[0-9a-f]{40}$ && "$expected_message_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
+     [ "$parent_sha" = "$reviewed_head_sha" ] || return 79
+     observed_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$anchor_sha" ] || return 79
+     observed_parents="$(git -C "$WORKTREE_ROOT" rev-list --parents -n 1 "$anchor_sha")" || return 79
+     [ "$observed_parents" = "$anchor_sha $parent_sha" ] || return 79
+     git -C "$WORKTREE_ROOT" diff --quiet "$parent_sha" "$anchor_sha" -- || return 79
+     observed_message_sha256="$(python3 -I -B "$CODE_FIXER_CONTRACT" commit-message-digest --working-dir "$WORKTREE_ROOT" --commit-sha "$anchor_sha")" || return 79
+     [ "$observed_message_sha256" = "$expected_message_sha256" ] || return 79
+     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || return 79
+     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
+   }
 
-   Reviewed-by: uberdev/review-pr@${PARENT_SHA}${TRAILER_SUFFIX}"
-   if ! git push origin HEAD; then
+   TRUST_RESIDUE_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || {
+     echo "error: MUTATED_BLOCKED — residual repository state suppresses trust emission" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   }
+   [ "$TRUST_RESIDUE_RECEIPT" = '{"status":"clean"}' ] || {
+     echo "error: MUTATED_BLOCKED — malformed residue receipt suppresses trust emission" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   }
+   PARENT_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
+   if ! [ "$PARENT_SHA" = "$REVIEWED_HEAD_SHA" ]; then
+     echo "error: MUTATED_BLOCKED — trust-trail parent is not the reviewed head" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   fi
+   ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX")" || exit 2
+   ANCHOR_MESSAGE_SHA256="$(python3 -I -B -c 'import hashlib,sys
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_MESSAGE")" || exit 2
+   [[ "$ANCHOR_MESSAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+   if ! git -C "$WORKTREE_ROOT" commit --allow-empty --cleanup=verbatim -m "$ANCHOR_MESSAGE"; then
+     echo "error: trust-trail anchor commit failed; suppressing trust emission" >&2
+     OUTCOME=halted
+     exit 2
+   fi
+   LOCAL_ANCHOR_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
+   if ! review_validate_trust_anchor "$REVIEWED_HEAD_SHA" "$PARENT_SHA" "$LOCAL_ANCHOR_SHA" "$ANCHOR_MESSAGE_SHA256"; then
+     echo "error: MUTATED_BLOCKED — trust-trail anchor head/parent/tree/message/residue validation failed" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   fi
+   if ! review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$LOCAL_ANCHOR_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"; then
      # Push failed (network, auth, rate limit, hook rejection, non-fast-forward, …).
-     # Without this guard, ANCHOR_SHA below would capture a local-only HEAD; the audit
-     # JSON would then be written with a SHA that does not exist on the remote, and
+     # The immutable anchor SHA is pushed to the explicit, validated PR branch;
+     # symbolic HEAD is never publication authority. The gate then requires the
+     # remote ref, live PR head, and local HEAD to equal that exact SHA. Without
+     # this guard, the audit JSON could name a SHA absent from the remote, and
      # `/merge` Phase 1.4 would later fail with a cryptic `trust_trail_agent_invalid_input`
      # (subreason `trailer_sha_not_in_local_clone`). Per artifact-emission-failure prose
      # below, exit 2 — treat as `blocked`-equivalent so the trust-signal contract is
      # never silently broken. Re-run /review-pr after resolving the push failure.
-     echo "error: trust-trail anchor push failed (git push origin HEAD exited non-zero). Re-run /review-pr after resolving." >&2
+     echo "error: immutable trust-trail anchor publication or equality proof failed. Re-run /review-pr after resolving." >&2
      exit 2
    fi
-   ANCHOR_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — captured AFTER the push (push-success guarded above); equals post-emission `headRefOid` (i.e., the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload). Used in artifact 3's audit JSON `"sha"` field.
+   ANCHOR_SHA="$LOCAL_ANCHOR_SHA"   # full 40-char validated anchor identity, proven equal to the post-emission remote ref + live/local PR head. This is the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload, and is used in artifact 3's audit JSON `"sha"` field.
    ```
 
    Why an empty anchor commit (and not a per-simplify-commit trailer or `git commit --amend`):
-   - **Empty diff by construction** (`--allow-empty`). `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
+   - **Empty diff proven after hooks** (`--allow-empty` plus `review_validate_trust_anchor`). `--allow-empty` alone does not force emptiness when a hook or concurrent writer stages bytes, so the controller verifies the exact parent and an empty tree diff before push. `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
    - **Always a fresh new commit on top.** `git commit --amend` is **NEVER** used, so push **never** requires `--force-with-lease`. Works identically whether Phase 1 / Phase 2 already pushed mid-run or batched their pushes.
    - **Self-pinning trailer.** The trailer references the anchor's parent — the actual end-of-run HEAD before the anchor — so the SHA is captured *deterministically* at the only moment it can be written without chicken-and-egg. No reliance on amend-recompute or sibling-equivalence heuristics on the agent side.
 
-   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
+   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. `review_validate_trust_anchor` authenticates the SHA-256 of the complete post-hook subject/body bytes against `ANCHOR_MESSAGE_SHA256`, including exact equality of the `Reviewed-by` payload to `PARENT_SHA`, before proceeding to artifact 2.
 
 2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
@@ -2281,8 +2571,8 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 
 **uberdev:code-fixer** (`subagent_type: uberdev:code-fixer`):
 - Reads the post-impl-review aggregate or simplify aggregate — each file carries its own envelope as leading/trailing file bytes (`<external-untrusted-input source="post-impl-review-aggregate">` for Phase 1, `source="simplify-aggregate"` for Phase 2); the dispatch passes the path or the enveloped bytes verbatim, never re-wrapped
-- Applies minimal-scope edits + creates `fix:`/`refactor:` conventional commits
-- Phase 1 commit type: `fix:` (default) or `refactor:` if all findings are non-behavioral
+- Applies minimal-scope edits and creates at most one routed conventional commit
+- Phase 1 commit type: `fix:` (derived only from `review_pr.fix.phase1` + `review_fix`)
 - Phase 2 commit type: `refactor:` (R8.6 invariant — no override; one commit per run)
 - Returns commit SHAs and per-finding disposition table; advisory findings surface in the final aggregation table
 

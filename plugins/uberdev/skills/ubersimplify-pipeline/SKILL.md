@@ -19,7 +19,7 @@ reads, the PyYAML probe — then emits the canonical args and mandates the call.
 ## Reuses
 
 - `lib/chunk.py` — scope enumeration + balanced area-packing (`--areas N`; shared with /uberscan, NOT a uberscan-pipeline copy).
-- `skills/ubersimplify-pipeline/aggregate.py` — lens-merge dedup (`fixer` mode → `post-impl-review-aggregate` envelope) + leftover-issues collection (`issues` mode → `ubersimplify-aggregate` envelope).
+- `skills/ubersimplify-pipeline/aggregate.py` — lens-merge dedup (`fixer` mode → canonical compact Phase 2 schema v2 in a `simplify-aggregate` envelope) + leftover-issues collection (`issues` mode → legacy `ubersimplify-aggregate` envelope).
 - `agents/code-simplifier.md` — the 3 lenses (Reuse / Quality / Efficiency), audit-only per area.
 - `agents/code-fixer.md` — preserve-behavior apply as one `refactor:` commit per area (R8.6 single-commit invariant; phase2 = refactor: only).
 - `agents/findings-to-issues.md` — durable GitHub issue persistence; it OWNS the gh rate-limit floor (CB6) — see `agents/findings-to-issues.md Step 2` (no pre-dispatch copy lives here).
@@ -27,7 +27,10 @@ reads, the PyYAML probe — then emits the canonical args and mandates the call.
 ## Schema C-LENS — per-area lens findings file (`chunk-NNN-lens.yaml`)
 
 The per-area `code-simplifier` writes this; `aggregate.py fixer` dedups across
-lenses by `file:line`. (Byte-stable contract.)
+lenses by `file:line`, maps the three lens names to the exact
+`review_pr.simplify.{reuse,quality,efficiency}` contributors/source edges, and
+emits schema v2. `findings: []` is a valid clean-area result. (Byte-stable
+contract.)
 
 ```yaml
 schema_version: 1
@@ -148,7 +151,7 @@ Code): do the preflight fence above, then run the directive recipe by hand:
 
 1. **Pack** — `python3 "$CLAUDE_PLUGIN_ROOT/lib/chunk.py" --scope "$SCOPE" --areas "$NUM_AREAS" --run-id "$RUN_ID" > "$RUN_DIR/manifest.json"` (chunk.py writes the manifest JSON to stdout — there is no `--out` flag).
 2. **Areas** — for each `manifest.chunks[].id`, dispatch ONE `Task(subagent_type: uberdev:code-simplifier)` (waves of `CONCURRENCY`, IN ONE MESSAGE) running ALL lenses in `$LENSES` over the area; each writes `$RUN_DIR/chunk-NNN-lens.yaml` (Schema C-LENS).
-3. **Aggregate** — per area, `python3 "$CLAUDE_PLUGIN_ROOT/skills/ubersimplify-pipeline/aggregate.py" fixer --lens-file "$RUN_DIR/chunk-NNN-lens.yaml" --out "$RUN_DIR/chunk-NNN-fixer.md"`.
-4. **Apply** (skip iff `--audit-only`) — `git checkout -b ubersimplify/$RUN_ID`, then dispatch `Task(subagent_type: uberdev:code-fixer)` ONE AT A TIME (never parallel — concurrent commits race the git index), phase2, one `refactor:` commit per area; write each disposition to `$RUN_DIR/chunk-NNN-fixer-disposition.yaml`.
+3. **Aggregate** — per area, `python3 "$CLAUDE_PLUGIN_ROOT/skills/ubersimplify-pipeline/aggregate.py" fixer --lens-file "$RUN_DIR/chunk-NNN-lens.yaml" --out "$RUN_DIR/chunk-NNN-fixer.md"`. The output is the exact compact sorted JSON schema v2 body under `source="simplify-aggregate"`; Markdown tables and YAML fixer bodies are invalid.
+4. **Apply** (skip iff `--audit-only`) — `git checkout -b ubersimplify/$RUN_ID`, then dispatch `Task(subagent_type: uberdev:code-fixer)` ONE AT A TIME (never parallel — concurrent commits race the git index), phase2, one `refactor:` commit per area; write each disposition to `$RUN_DIR/chunk-NNN-fixer-disposition.json`. A valid empty v2 aggregate returns `NO_FIXES_NEEDED`; a missing/malformed aggregate is fail-closed and never reaches apply.
 5. **PR** (skip iff `--audit-only` or 0 commits) — write the PR body to a FILE (never inline — 2nd-order injection guard; NO Claude/co-author trailer), `git push -u origin "$BRANCH_NAME"`, then `gh pr create --body-file …`.
 6. **File leftovers** (unless `--no-issues`) — `python3 "$CLAUDE_PLUGIN_ROOT/skills/ubersimplify-pipeline/aggregate.py" issues --chunks-dir "$RUN_DIR" --out "$RUN_DIR/f2i-aggregate.md"` (add `--audit-only` when set), then `Task(subagent_type: uberdev:findings-to-issues)` over it using the explicit `variant=legacy.ubersimplify` contract (envelope `source=ubersimplify-aggregate`), `finding_label=ubersimplify-finding`, `finding_marker_slug=ubersimplify`, `max_new=$MAX_NEW`, `pr_number=$PR_NUMBER`. The agent owns the CB6 gh rate-limit floor + MAX_NEW/dedupe/halt.

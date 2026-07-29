@@ -145,7 +145,7 @@ write(
     "review-head-assert.sh",
     function_definition(review, "review_assert_selected_pr_head"),
 )
-write("review-scope.sh", containing(review, 'review_refresh_phase1_scope "$BASE_SHA"'))
+write("review-scope.sh", containing(review, "review_refresh_phase1_scope() {"))
 
 review_instance_lines = [
     line for line in review.splitlines()
@@ -311,6 +311,138 @@ export FOCUS=$'focus "quoted" \\glob*?[x]\t'
 . "$TMP/review-setup.sh"
 . "$TMP/review-builder.sh"
 REVIEW_WORKSPACE_JSON="$UBERDEV_COMMAND_WORKSPACE_JSON"
+eval "$(declare -f review_fixer_child_bound | sed '1s/^review_fixer_child_bound/review_fixer_child_bound_production/')"
+
+# This test closes the production child-input/build/handoff/dispatch graph, not
+# the code-fixer repository transaction. The source worktree is intentionally
+# dirty while this suite runs, so give the extracted controller callsites a
+# deterministic contract fixture that publishes real authority bytes/digests.
+# The production contract implementation has its own state-machine test suite.
+CODE_FIXER_CONTRACT_FIXTURE="$TMP/code-fixer-contract-fixture.py"
+cat >"$CODE_FIXER_CONTRACT_FIXTURE" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def options(values):
+    if len(values) % 2:
+        raise SystemExit(2)
+    parsed = {}
+    for index in range(0, len(values), 2):
+        key, value = values[index : index + 2]
+        if not key.startswith("--") or key in parsed:
+            raise SystemExit(2)
+        parsed[key] = value
+    return parsed
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+command = sys.argv[1]
+arguments = options(sys.argv[2:])
+if command == "digest":
+    payload = Path(arguments["--path"]).read_bytes()
+    if not int(arguments["--minimum"]) <= len(payload) <= int(arguments["--maximum"]):
+        raise SystemExit(74)
+    print(hashlib.sha256(payload).hexdigest(), end="")
+elif command == "prepare-authority":
+    edge = arguments["--edge-id"]
+    phase = "phase1" if edge.endswith("phase1") else "phase2"
+    commit_type = "fix" if phase == "phase1" else "refactor"
+    path = Path(arguments["--authority-output-path"])
+    value = {
+        "schema_version": 1,
+        "edge_id": edge,
+        "phase": phase,
+        "commit_type": commit_type,
+        "findings_sha256": arguments["--findings-sha256"],
+        "commit_range_sha256": arguments["--commit-range-sha256"],
+    }
+    path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+    print(json.dumps({
+        "authority_path": str(path),
+        "authority_sha256": digest(path),
+        "phase": phase,
+        "commit_type": commit_type,
+        "target_paths": [],
+    }, sort_keys=True, separators=(",", ":")), end="")
+elif command == "bind-fixer-launch-receipt":
+    receipt = sys.stdin.buffer.read()
+    if os.environ.get("REVIEW_FIXTURE_FORCE_BIND_FAILURE") == "1":
+        state_dir = Path(os.environ["REVIEW_BIND_FAILURE_STATE_DIR"])
+        status_path = str(Path(arguments["--status-path"]).resolve())
+        matches = []
+        for lease in state_dir.rglob("*.lease"):
+            values = {}
+            for line in lease.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator:
+                    values[key] = value
+            if values.get("status_path") == status_path:
+                matches.append((lease, values))
+        if len(matches) != 1:
+            raise SystemExit(74)
+        lease, values = matches[0]
+        observation = Path(os.environ["REVIEW_BIND_FAILURE_OBSERVATION"])
+        observation.write_text(json.dumps({
+            "controller_pid": int(os.environ["REVIEW_BIND_FAILURE_CONTROLLER_PID"]),
+            "owner_pid": int(values["owner_pid"]),
+            "provider_pid": int(values["backend_handle"]),
+            "receipt_sha256": hashlib.sha256(receipt).hexdigest(),
+            "run_id": values["run_id"],
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.chmod(observation, 0o600)
+        raise SystemExit(73)
+    print(json.dumps({
+        "receipt_sha256": hashlib.sha256(receipt).hexdigest(),
+        "result_path": arguments["--result-path"],
+        "status_path": arguments["--status-path"],
+    }, sort_keys=True, separators=(",", ":")), end="")
+elif command == "capture-review-terminal":
+    binding = json.loads(arguments["--launch-binding-json"])
+    disposition = Path(arguments["--disposition-path"])
+    applied = Path(arguments["--applied-content-path"])
+    for path in (disposition, applied):
+        path.write_text("{}\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    print(json.dumps({
+        "status_sha256": digest(binding["status_path"]),
+        "result_sha256": digest(binding["result_path"]),
+        "disposition_sha256": digest(disposition),
+        "applied_content_path": str(applied),
+        "applied_content_sha256": digest(applied),
+    }, sort_keys=True, separators=(",", ":")), end="")
+elif command == "validate-review-outcome":
+    print('{"status":"NO_FIXES_NEEDED"}', end="")
+else:
+    raise SystemExit(2)
+PY
+chmod 600 "$CODE_FIXER_CONTRACT_FIXTURE"
+CODE_FIXER_CONTRACT="$CODE_FIXER_CONTRACT_FIXTURE"
+
+# Keep this closure test on the established record/fanout/wait seam. The bound
+# fixer wrapper's receipt/status/terminal authorization is exercised by the
+# dedicated code-fixer contract tests; using it here would make a payload test
+# own process cancellation and repository-transaction semantics as well.
+review_fixer_child_bound() {
+  [ "$#" -eq 10 ] || return 2
+  review_child_single "$1" "$2" "$3" "$4" "$5" "$6" || return $?
+  REVIEW_FIXER_LAUNCH_BINDING='{}'
+  REVIEW_FIXER_TERMINAL='{"applied_content_sha256":"0000000000000000000000000000000000000000000000000000000000000000","disposition_sha256":"0000000000000000000000000000000000000000000000000000000000000000","result_sha256":"0000000000000000000000000000000000000000000000000000000000000000","status_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}'
+}
+
+review_promote_validated_fixer_outcome() {
+  [ "$#" -eq 3 ]
+}
 
 # Keep every production layer through child-dispatch. Only the immediate final
 # provider seam is replaced, and it refuses to run before its correlated
@@ -344,6 +476,13 @@ _uberdev_agent_dispatch_backend() {
   }
   instance="$(basename "$(dirname "$status")")"
   edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' "$HANDOFFS/$instance.json")"
+  if [ "${REVIEW_FIXTURE_FORCE_BIND_FAILURE:-0}" = 1 ]; then
+    python3 -I -B -c 'import os,time; os.setsid(); time.sleep(60)' >/dev/null 2>&1 &
+    DISPATCH_ID="$!"
+    printf '%s\n' "$DISPATCH_ID" >"$REVIEW_BIND_FAILURE_PROVIDER_PID"
+    chmod 600 "$REVIEW_BIND_FAILURE_PROVIDER_PID"
+    return 0
+  fi
   python3 -I -B - "$RECEIPTS" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" <<'PY'
 import json
 import sys
@@ -562,6 +701,9 @@ for fixture in \
   printf 'private hostile review fixture: %s\n' "${fixture##*/}" >"$fixture"
   chmod 600 "$fixture"
 done
+POST_FINAL_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$POST_FINAL")"
+SIMPLIFY_FINAL_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$SIMPLIFY_FINAL")"
+COMMIT_RANGE_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$COMMIT_RANGE_FIXTURE")"
 printf '%s\n' 'original & <failed assertion>' >"$CI_LOG_SOURCE_PATH"
 chmod 600 "$CI_LOG_SOURCE_PATH"
 CI_LOG_CONTENT=$'<external-untrusted-input source="github-actions-log-pr-73-run-9001">\noriginal &amp; &lt;failed assertion>\n</external-untrusted-input>\n'
@@ -669,7 +811,7 @@ WORKING_DIR_ABS="$MUTATION_WORKTREE"
 COMMIT_RANGE_PATH="$COMMIT_RANGE_FIXTURE"
 PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_FIXTURE"
 PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_FIXTURE"
-findings_path="$POST_FINAL"
+unset findings_path
 DIFF_ARTIFACT_PATH="$DIFF_PATH"
 FOCUS_PRESENT="$FOCUS"
 
@@ -684,6 +826,13 @@ review_wait_jobs() {
     [ "$first_rc" -ne 0 ] || first_rc="$rc"
   done
   [ "$first_rc" -eq 0 ] || return "$first_rc"
+}
+
+# Scope refresh itself is exercised against a real repository above. The
+# child-input closure waves consume those already-materialized artifacts, so
+# keep their extracted Phase 2 callsite focused on build/dispatch evidence.
+review_refresh_phase1_scope() {
+  return 0
 }
 
 wave=()
@@ -701,6 +850,108 @@ wave=()
 (. "$TMP/review-defer.sh") & wave+=("$!")
 (. "$TMP/review-classify.sh") & wave+=("$!")
 review_wait_jobs "${wave[@]}"
+PHASE1_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter7.json"
+PHASE2_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter7.json"
+PHASE1_AUTHORITY_SHA256_FIXTURE="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$PHASE1_AUTHORITY_FIXTURE")"
+PHASE2_AUTHORITY_SHA256_FIXTURE="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$PHASE2_AUTHORITY_FIXTURE")"
+PHASE1_FINDINGS_SHA256_FIXTURE="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["findings_sha256"],end="")' "$PHASE1_AUTHORITY_FIXTURE")"
+PHASE1_COMMIT_RANGE_SHA256_FIXTURE="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit_range_sha256"],end="")' "$PHASE1_AUTHORITY_FIXTURE")"
+
+# The production bound fixer wrapper must dispatch from its durable controller
+# shell. Force the first post-launch receipt-binding step to fail, then prove
+# that the controller owns the lease, survives long enough to unwind the real
+# provider process group, publishes one terminal event, and releases capacity.
+BIND_FAILURE_INSTANCE="$(uberdev_child_instance_id "review-pr-${RUN_ID}-bind-failure-attempt01")"
+BIND_FAILURE_FINDINGS="$RESEARCH_DIR_ABS/bind-failure-findings.md"
+BIND_FAILURE_RANGE="$RESEARCH_DIR_ABS/bind-failure-commit-range.txt"
+BIND_FAILURE_DISPOSITION="$RESEARCH_DIR_ABS/bind-failure-disposition.json"
+BIND_FAILURE_AUTHORITY="$RESEARCH_DIR_ABS/bind-failure-authority.json"
+cp "$POST_FINAL" "$BIND_FAILURE_FINDINGS"
+cp "$COMMIT_RANGE_FIXTURE" "$BIND_FAILURE_RANGE"
+: >"$BIND_FAILURE_DISPOSITION"
+chmod 600 "$BIND_FAILURE_FINDINGS" "$BIND_FAILURE_RANGE" "$BIND_FAILURE_DISPOSITION"
+BIND_FAILURE_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$BIND_FAILURE_FINDINGS" --minimum 1 --maximum 16777216)"
+BIND_FAILURE_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$BIND_FAILURE_RANGE" --minimum 1 --maximum 256)"
+BIND_FAILURE_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+  --edge-id review_pr.fix.phase1 --policy-phase review_fix \
+  --findings-path "$BIND_FAILURE_FINDINGS" --findings-sha256 "$BIND_FAILURE_FINDINGS_SHA256" \
+  --commit-range-path "$BIND_FAILURE_RANGE" --commit-range-sha256 "$BIND_FAILURE_RANGE_SHA256" \
+  --working-dir "$WORKTREE_ROOT" --disposition-path "$BIND_FAILURE_DISPOSITION" \
+  --authority-output-path "$BIND_FAILURE_AUTHORITY")"
+BIND_FAILURE_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["authority_sha256"],end="")' "$BIND_FAILURE_AUTHORITY_RECEIPT")"
+BIND_FAILURE_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1 \
+  findings_path "$(review_json_string "$BIND_FAILURE_FINDINGS")" \
+  findings_sha256 "$(review_json_string "$BIND_FAILURE_FINDINGS_SHA256")" \
+  commit_range_path "$(review_json_string "$BIND_FAILURE_RANGE")" \
+  commit_range_sha256 "$(review_json_string "$BIND_FAILURE_RANGE_SHA256")" \
+  working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+  pr_number "$PR_NUMBER" \
+  disposition_path "$(review_json_string "$BIND_FAILURE_DISPOSITION")" \
+  authority_path "$(review_json_string "$BIND_FAILURE_AUTHORITY")" \
+  authority_sha256 "$(review_json_string "$BIND_FAILURE_AUTHORITY_SHA256")")"
+BIND_FAILURE_OBSERVATION="$TMP/bind-failure-observation.json"
+BIND_FAILURE_PROVIDER_PID="$TMP/bind-failure-provider.pid"
+BIND_FAILURE_SURVIVED="$TMP/bind-failure-controller-survived"
+BIND_FAILURE_EXITED="$TMP/bind-failure-controller-exited"
+(
+  trap 'printf "%s\n" "$BASHPID" >"$BIND_FAILURE_EXITED"' EXIT
+  export REVIEW_FIXTURE_FORCE_BIND_FAILURE=1
+  export REVIEW_BIND_FAILURE_STATE_DIR="$STATE_DIR"
+  export REVIEW_BIND_FAILURE_OBSERVATION="$BIND_FAILURE_OBSERVATION"
+  export REVIEW_BIND_FAILURE_PROVIDER_PID="$BIND_FAILURE_PROVIDER_PID"
+  export REVIEW_BIND_FAILURE_CONTROLLER_PID="$BASHPID"
+  set +e
+  review_fixer_child_bound_production review_pr.fix.phase1 "$BIND_FAILURE_INSTANCE" \
+    "$BIND_FAILURE_INPUTS" null "$RESEARCH_DIR_ABS/bind-failure" 2 \
+    "$BIND_FAILURE_AUTHORITY" "$BIND_FAILURE_AUTHORITY_SHA256" \
+    "$BIND_FAILURE_DISPOSITION" "$RESEARCH_DIR_ABS/bind-failure-applied.json"
+  bind_failure_rc=$?
+  set -e
+  [ "$bind_failure_rc" -eq 73 ]
+  printf '%s\n' "$BASHPID" >"$BIND_FAILURE_SURVIVED"
+)
+[ -s "$BIND_FAILURE_SURVIVED" ] && [ -s "$BIND_FAILURE_EXITED" ]
+cmp "$BIND_FAILURE_SURVIVED" "$BIND_FAILURE_EXITED"
+python3 -I -B - "$BIND_FAILURE_OBSERVATION" "$BIND_FAILURE_PROVIDER_PID" \
+  "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR/semaphore-v1" \
+  "$BIND_FAILURE_INSTANCE" "$BIND_FAILURE_SURVIVED" <<'PY'
+import errno,json,os,sys,time
+observation_path,provider_path,lifecycle_path,semaphore_root,instance,controller_path=sys.argv[1:]
+observation=json.load(open(observation_path,encoding='utf-8'))
+provider_pid=int(open(provider_path,encoding='utf-8').read().strip())
+controller_pid=int(open(controller_path,encoding='utf-8').read().strip())
+assert observation['owner_pid']==controller_pid,observation
+assert observation['controller_pid']==controller_pid,observation
+assert observation['provider_pid']==provider_pid,observation
+assert observation['run_id']==instance,observation
+for _ in range(50):
+    try:
+        os.killpg(provider_pid,0)
+    except ProcessLookupError:
+        break
+    except OSError as error:
+        if error.errno==errno.ESRCH:
+            break
+        raise
+    time.sleep(0.1)
+else:
+    raise AssertionError(f'provider process group {provider_pid} survived controller unwind')
+rows=[json.loads(line) for line in open(lifecycle_path,encoding='utf-8') if line.strip()]
+child=[row for row in rows if row.get('run_id')==instance]
+terminal=[row for row in child if row.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
+assert len(terminal)==1,(child,terminal)
+residual=[]
+for directory,_,names in os.walk(semaphore_root):
+    for name in names:
+        if not name.endswith('.lease'):
+            continue
+        path=os.path.join(directory,name)
+        if f'run_id={instance}\n' in open(path,encoding='utf-8').read():
+            residual.append(path)
+assert residual==[],residual
+PY
+! find "$HANDOFFS" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit | grep -q .
+
 if find "$RESEARCH_DIR_ABS" -maxdepth 1 -name 'ci-log-run-*.raw' -print -quit | grep -q .; then
   echo 'review-child-inputs: controller created a mutable raw CI log staging file' >&2
   exit 1
@@ -790,6 +1041,7 @@ expect(post_source, "review_pr.review.types", f"post-review-{run_id}-r3-iter7-at
 
 review_cases = (
     ("review_pr.fix.phase1", f"review-pr-{run_id}-fix-phase1-iter7-attempt01"),
+    ("review_pr.fix.phase1", f"review-pr-{run_id}-bind-failure-attempt01"),
     ("review_pr.simplify.reuse", f"review-pr-{run_id}-simplify-reuse-iter7-attempt01"),
     ("review_pr.simplify.quality", f"review-pr-{run_id}-simplify-quality-iter7-attempt01"),
     ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter7-attempt01"),
@@ -808,7 +1060,7 @@ for edge, instance in review_cases:
     expect(review_source, edge, instance)
 
 expected_pairs = set(expected.values())
-if len(expected_pairs) != 17 or len(expected) != 21:
+if len(expected_pairs) != 17 or len(expected) != 22:
     raise SystemExit("invalid receipt expectation fixture")
 
 handoff_root = Path(handoff_dir)
@@ -963,6 +1215,7 @@ def validate_provider(candidate_rows):
     expected_calls = Counter(
         (source, edge, instance)
         for instance, (source, edge) in expected.items()
+        if instance != f"review-pr-{run_id}-bind-failure-attempt01"
     )
     assert actual == expected_calls, (
         f"provider seam mismatch: expected={expected_calls!r} actual={actual!r}"
@@ -998,14 +1251,24 @@ def validate_lifecycle(candidate_rows, residual_leases):
         )
         assert row.get("phase") == handoff_value["phase"], f"lifecycle phase mismatch: {row!r}"
         assert row.get("role") == handoff_value["role"], f"lifecycle role mismatch: {row!r}"
-        assert row.get("risk_signals") == handoff_value["risk_signals"], (
-            f"lifecycle risk mismatch: {row!r}"
-        )
+        if not (
+            instance == f"review-pr-{run_id}-bind-failure-attempt01"
+            and row.get("event") in {"failed", "timed_out", "cancelled", "abandoned"}
+        ):
+            assert row.get("risk_signals") == handoff_value["risk_signals"], (
+                f"lifecycle risk mismatch: {row!r}"
+            )
         events[instance].append(row.get("event"))
     for instance, sequence in events.items():
-        assert sequence == ["route_decided", "agent_started", "completed"], (
-            f"incomplete lifecycle for {instance}: {sequence!r}"
-        )
+        if instance == f"review-pr-{run_id}-bind-failure-attempt01":
+            assert len(sequence) == 3 and sequence[:2] == ["route_decided", "agent_started"] \
+                and sequence[2] in {"failed", "timed_out", "cancelled", "abandoned"}, (
+                    f"incomplete bind-failure lifecycle for {instance}: {sequence!r}"
+                )
+        else:
+            assert sequence == ["route_decided", "agent_started", "completed"], (
+                f"incomplete lifecycle for {instance}: {sequence!r}"
+            )
     assert len(candidate_rows) == len(expected) * 3, (
         f"unknown lifecycle count: expected={len(expected) * 3} actual={len(candidate_rows)}"
     )
@@ -1023,7 +1286,10 @@ PY
 
 export HANDOFFS CHANGED_PATHS_JSON EMPHASIS_JSON DIFF_PATH CRITERIA_FIXTURE FORMAT_EXAMPLE
 export HOSTILE_DIR POST_FINAL SIMPLIFY_FINAL COMMIT_RANGE_FIXTURE
+export POST_FINAL_SHA256 SIMPLIFY_FINAL_SHA256 COMMIT_RANGE_SHA256
 export PHASE1_DISPOSITION_FIXTURE PHASE2_DISPOSITION_FIXTURE
+export PHASE1_AUTHORITY_FIXTURE PHASE2_AUTHORITY_FIXTURE
+export PHASE1_AUTHORITY_SHA256_FIXTURE PHASE2_AUTHORITY_SHA256_FIXTURE
 export CLASSIFICATION_PATH CI_LOG_CONTENT CI_LOG_SHA256 CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
 export failure_class signal_anchor
 export CI_RUN_ID FOCUS CI_CLASSIFICATION_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
@@ -1081,10 +1347,14 @@ exact(
 
 phase1 = {
     "findings_path": env["POST_FINAL"],
+    "findings_sha256": env["POST_FINAL_SHA256"],
     "commit_range_path": env["COMMIT_RANGE_FIXTURE"],
+    "commit_range_sha256": env["COMMIT_RANGE_SHA256"],
     "working_dir": env["MUTATION_WORKTREE"],
     "pr_number": 73,
     "disposition_path": env["PHASE1_DISPOSITION_FIXTURE"],
+    "authority_path": env["PHASE1_AUTHORITY_FIXTURE"],
+    "authority_sha256": env["PHASE1_AUTHORITY_SHA256_FIXTURE"],
 }
 exact(f"review-pr-{run_id}-fix-phase1-iter7-attempt01", phase1)
 
@@ -1109,7 +1379,10 @@ exact(
     f"review-pr-{run_id}-fix-phase2-iter7-attempt01",
     phase1 | {
         "findings_path": env["SIMPLIFY_FINAL"],
+        "findings_sha256": env["SIMPLIFY_FINAL_SHA256"],
         "disposition_path": env["PHASE2_DISPOSITION_FIXTURE"],
+        "authority_path": env["PHASE2_AUTHORITY_FIXTURE"],
+        "authority_sha256": env["PHASE2_AUTHORITY_SHA256_FIXTURE"],
     },
 )
 exact(
@@ -1394,4 +1667,4 @@ SH
   [ "$EARLY_PROBE_FAILURES" -eq 0 ] || exit 1
 fi
 
-printf 'review-child-inputs: PASS (17 unique source/edge pairs; 21 complete chains, dual simplify focus, lifecycle closed)\n'
+printf 'review-child-inputs: PASS (17 unique source/edge pairs; 22 complete chains, dual simplify focus, lifecycle closed)\n'

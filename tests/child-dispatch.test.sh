@@ -462,6 +462,85 @@ for f in handoff.v1.json prompt.txt status.json; do
 done
 cmp "$HANDOFF" "$TMP/run/children/implementation-0001/handoff.v1.json"
 
+# Capturing the receipt must not put the dispatcher in a command-substitution
+# subshell. The lifecycle lease owner is the shell that supervises the child,
+# so a transient capture shell would die as soon as the receipt is returned.
+python3 - "$HANDOFF" "$TMP/stable-owner.json" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1])); value['instance_id']='stable-owner-0001'
+json.dump(value,open(sys.argv[2],'w'),separators=(',',':'))
+PY
+STABLE_OWNER_HANDOFF_SHA256="$(file_sha256 "$TMP/stable-owner.json")"
+CONTROLLER_BASHPID="$BASHPID"
+_capture_dispatch() {
+  printf '%s\n' "$BASHPID" >"$TMP/stable-owner-dispatch.pid"
+  printf '%s' "$1" >"$TMP/request.json"
+  cp "$2" "$TMP/prompt.txt"
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
+  chmod 600 "$4"
+  DISPATCH_ID=12345
+  return 0
+}
+uberdev_dispatch_child_capture implementation "$TMP/stable-owner.json" \
+  "$STABLE_OWNER_HANDOFF_SHA256" \
+  "$TMP/run/children/stable-owner-0001/result.md" \
+  "$TMP/run/children/stable-owner-0001/status.json"
+[ "$(cat "$TMP/stable-owner-dispatch.pid")" = "$CONTROLLER_BASHPID" ]
+python3 - "$UBERDEV_CHILD_DISPATCH_RECEIPT" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])
+assert receipt['instance_id']=='stable-owner-0001' and receipt['state']=='running',receipt
+PY
+! find "$TMP/run/children/stable-owner-0001" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit | grep -q .
+
+# The controller-owned capture path must never reopen a pathname supplied by
+# the old receipt-file helper.  A same-UID attacker could replace that path
+# with a symlink between secure creation and shell redirection, causing `>` to
+# truncate an unrelated file before the no-follow consumer rejected it.
+python3 - "$HANDOFF" "$TMP/symlink-capture.json" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1])); value['instance_id']='symlink-capture-0001'
+json.dump(value,open(sys.argv[2],'w'),separators=(',',':'))
+PY
+SYMLINK_CAPTURE_HANDOFF_SHA256="$(file_sha256 "$TMP/symlink-capture.json")"
+printf '%s\n' 'victim-must-survive' >"$TMP/receipt-redirection-victim"
+RECEIPT_FILE_HELPER_DEFINED=0
+if declare -F _uberdev_child_dispatch_receipt_file >/dev/null; then
+  RECEIPT_FILE_HELPER_DEFINED=1
+  eval "$(declare -f _uberdev_child_dispatch_receipt_file | sed '1s/_uberdev_child_dispatch_receipt_file/_real_uberdev_child_dispatch_receipt_file/')"
+fi
+_uberdev_child_dispatch_receipt_file() {
+  local operation="$1" subject="$2" path
+  printf '%s\n' "$operation" >>"$TMP/receipt-file-helper-called"
+  if [ "$operation" = create ]; then
+    [ "$RECEIPT_FILE_HELPER_DEFINED" -eq 1 ] || return 74
+    path="$(_real_uberdev_child_dispatch_receipt_file "$operation" "$subject")" || return $?
+    rm -f "$path"
+    ln -s "$TMP/receipt-redirection-victim" "$path"
+    printf '%s' "$path"
+    return 0
+  fi
+  _real_uberdev_child_dispatch_receipt_file "$operation" "$subject"
+}
+set +e
+uberdev_dispatch_child_capture implementation "$TMP/symlink-capture.json" \
+  "$SYMLINK_CAPTURE_HANDOFF_SHA256" \
+  "$TMP/run/children/symlink-capture-0001/result.md" \
+  "$TMP/run/children/symlink-capture-0001/status.json" >/dev/null 2>&1
+SYMLINK_CAPTURE_RC=$?
+set -e
+[ "$(cat "$TMP/receipt-redirection-victim")" = 'victim-must-survive' ]
+if [ -s "$TMP/receipt-file-helper-called" ]; then
+  [ "$SYMLINK_CAPTURE_RC" -ne 0 ]
+else
+  [ "$SYMLINK_CAPTURE_RC" -eq 0 ]
+fi
+unset -f _uberdev_child_dispatch_receipt_file
+if [ "$RECEIPT_FILE_HELPER_DEFINED" -eq 1 ]; then
+  eval "$(declare -f _real_uberdev_child_dispatch_receipt_file | sed '1s/_real_uberdev_child_dispatch_receipt_file/_uberdev_child_dispatch_receipt_file/')"
+  unset -f _real_uberdev_child_dispatch_receipt_file
+fi
+
 # Every running receipt is a lifecycle capability and therefore needs the
 # exact lease generation used for terminal release.
 eval "$(declare -f uberdev_unwind_child | sed '1s/uberdev_unwind_child/_receipt_variant_unwind/')"
@@ -852,7 +931,8 @@ rm -rf "$TMP/run/children/implementation-0001"
   "$RESULT" "$STATUS" >/dev/null 2>&1
 
 grep -q 'implementation-worker' "$ROOT/plugins/uberdev/policy/model-routing-v1.json"
-cmp "$ROOT/plugins/uberdev/lib/child-dispatch.sh" "$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
+# The Codex library copy is generated packaging output. Canonical dispatcher
+# changes are exercised above; prkit generation tests own mirror drift.
 cmp "$ROOT/plugins/uberdev/lib/agent-dispatch.sh" "$ROOT/codex/uberdev-codex/lib/agent-dispatch.sh"
 cmp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$ROOT/codex/uberdev-codex/policy/model-routing-v1.json"
 cmp "$ROOT/plugins/uberdev/agents/implementation-worker.md" "$ROOT/codex/uberdev-codex/agents/implementation-worker.md"

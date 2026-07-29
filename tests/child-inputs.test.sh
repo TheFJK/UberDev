@@ -209,6 +209,80 @@ assert_fails_cleanly 'classifier authority rejects a coherent log record over th
   'child inputs exceed immutable handoff budget' \
   uberdev_child_inputs_validate review_pr.ci.classify "$CI_OVERSIZE_AUTHORITY"
 
+FIXER_DIGEST=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+FIXER_AUTHORITY="$(uberdev_child_inputs_build review_pr.fix.phase1 \
+  findings_path '"/tmp/findings.md"' \
+  findings_sha256 "\"$FIXER_DIGEST\"" \
+  commit_range_path '"/tmp/commit-range.txt"' \
+  commit_range_sha256 "\"$FIXER_DIGEST\"" \
+  working_dir '"/tmp/work"' \
+  pr_number 73 \
+  disposition_path '"/tmp/phase1-disposition.json"' \
+  authority_path '"/tmp/code-fixer-authority-phase1.json"' \
+  authority_sha256 "\"$FIXER_DIGEST\"")"
+assert_eq 'fixer authority carries the exact nine typed fields' "$FIXER_AUTHORITY" \
+  "{\"authority_path\":\"/tmp/code-fixer-authority-phase1.json\",\"authority_sha256\":\"$FIXER_DIGEST\",\"commit_range_path\":\"/tmp/commit-range.txt\",\"commit_range_sha256\":\"$FIXER_DIGEST\",\"disposition_path\":\"/tmp/phase1-disposition.json\",\"findings_path\":\"/tmp/findings.md\",\"findings_sha256\":\"$FIXER_DIGEST\",\"pr_number\":73,\"working_dir\":\"/tmp/work\"}"
+FIXER_UPPERCASE="$(python3 -I -B - "$FIXER_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['findings_sha256']=value['findings_sha256'].upper()
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+assert_fails_cleanly 'fixer authority rejects a non-lowercase findings digest' \
+  'code fixer authority digest mismatch' \
+  uberdev_child_inputs_validate review_pr.fix.phase1 "$FIXER_UPPERCASE"
+FIXER_SHORT="$(python3 -I -B - "$FIXER_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['commit_range_sha256']='0'*63
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+assert_fails_cleanly 'fixer authority rejects an incorrectly sized range digest' \
+  'code fixer authority digest mismatch' \
+  uberdev_child_inputs_validate review_pr.fix.phase1 "$FIXER_SHORT"
+FIXER_AUTHORITY_UPPERCASE="$(python3 -I -B - "$FIXER_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['authority_sha256']=value['authority_sha256'].upper()
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+assert_fails_cleanly 'fixer authority rejects a non-lowercase authority digest' \
+  'code fixer authority digest mismatch' \
+  uberdev_child_inputs_validate review_pr.fix.phase1 "$FIXER_AUTHORITY_UPPERCASE"
+FIXER_STANDALONE="$(python3 -I -B - "$FIXER_AUTHORITY" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['pr_number']=0
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+assert_fails_cleanly 'phase1 fixer rejects standalone subject zero' \
+  'code fixer authority subject mismatch' \
+  uberdev_child_inputs_validate review_pr.fix.phase1 "$FIXER_STANDALONE"
+uberdev_child_inputs_validate review_pr.fix.phase2 "$FIXER_STANDALONE" >/dev/null
+pass 'phase2 fixer accepts standalone simplify subject zero'
+STANDALONE_FIXER="$(uberdev_child_inputs_build simplify.fix.phase2 \
+  findings_path '"/tmp/simplify-final.md"' \
+  findings_sha256 "\"$FIXER_DIGEST\"" \
+  standalone_snapshot_path '"/tmp/standalone-snapshot.json"' \
+  standalone_snapshot_sha256 "\"$FIXER_DIGEST\"" \
+  working_dir '"/tmp/work"' \
+  pr_number '0' \
+  disposition_path '"/tmp/phase2-disposition.json"' \
+  authority_path '"/tmp/code-fixer-authority-phase2.json"' \
+  authority_sha256 "\"$FIXER_DIGEST\"")"
+assert_eq 'standalone fixer carries exact nine-field snapshot authority' "$STANDALONE_FIXER" \
+  "{\"authority_path\":\"/tmp/code-fixer-authority-phase2.json\",\"authority_sha256\":\"$FIXER_DIGEST\",\"disposition_path\":\"/tmp/phase2-disposition.json\",\"findings_path\":\"/tmp/simplify-final.md\",\"findings_sha256\":\"$FIXER_DIGEST\",\"pr_number\":0,\"standalone_snapshot_path\":\"/tmp/standalone-snapshot.json\",\"standalone_snapshot_sha256\":\"$FIXER_DIGEST\",\"working_dir\":\"/tmp/work\"}"
+uberdev_child_inputs_validate simplify.fix.phase2 "$STANDALONE_FIXER" >/dev/null
+STANDALONE_NONZERO="$(python3 -I -B - "$STANDALONE_FIXER" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1]); value['pr_number']=9
+print(json.dumps(value,separators=(',',':')),end='')
+PY
+)"
+assert_fails_cleanly 'standalone fixer rejects nonzero PR subject' \
+  'code fixer authority subject mismatch' \
+  uberdev_child_inputs_validate simplify.fix.phase2 "$STANDALONE_NONZERO"
+
 export UBERDEV_CHILD_MANIFEST_PATH="$FIXTURE"
 [ -f "$canonical_manifest" ] || fail 'canonical manifest exists' "$canonical_manifest missing"
 pass 'canonical manifest exists'

@@ -798,8 +798,9 @@ PY
   [[ "$WINDOWS_DIGEST" =~ ^[0-9a-f]{64}$ ]]
   cmp "$WINDOWS_REVIEW_RESULT" "$WINDOWS_VALIDATED"
 
-  WINDOWS_FIX_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" --arg d "$WINDOWS_REPO_ID" \
-    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:91,disposition_path:$p}')"
+  WINDOWS_FIX_SHA256="$(file_sha256 "$WINDOWS_REPO_ID/README.md")"
+  WINDOWS_FIX_INPUT="$(jq -cn --arg p "$WINDOWS_REPO_ID/README.md" --arg d "$WINDOWS_REPO_ID" --arg sha "$WINDOWS_FIX_SHA256" \
+    '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:91,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')"
   windows_handoff_stage fix-handoff-create \
     uberdev_create_child_handoff review_pr.fix.phase1 \
     windows-fixer-iter1-attempt01 "$WINDOWS_FIX_INPUT" null >/dev/null
@@ -1383,6 +1384,7 @@ PY
 )
 
 path="$TEST_REPO/README.md"; changed_path="README.md"; deleted_path="src/deleted-in-pr.ts"; dir="$TEST_REPO"
+path_sha256="$(file_sha256 "$path")"
 declare -a edges inputs risks
 for lens in correctness silent_failures types comments tests; do
   edges+=("review_pr.review.$lens")
@@ -1394,7 +1396,7 @@ inputs+=("$(jq -cn --arg changed "$changed_path" --arg deleted "$deleted_path" -
 risks+=('[]')
 for edge in review_pr.fix.phase1 review_pr.fix.phase2; do
   edges+=("$edge")
-  inputs+=("$(jq -cn --arg p "$path" --arg d "$dir" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')")
+  inputs+=("$(jq -cn --arg p "$path" --arg d "$dir" --arg sha "$path_sha256" '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:1,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')")
   risks+=(null)
 done
 for lens in reuse quality efficiency; do
@@ -1650,18 +1652,44 @@ PY
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different
 # working_dir is rejected before dispatch.
-caller_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
+caller_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --arg sha "$path_sha256" '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:1,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')"
 uberdev_create_child_handoff review_pr.fix.phase1 review-caller-mode-iter1-attempt01 "$caller_input" null >/dev/null
 caller_prepared="$(_uberdev_child_prepare review_pr.fix.phase1 "$UBERDEV_CHILD_HANDOFF" \
   "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
 jq -e --arg repo "$TEST_REPO" '.request.workspace_mode=="caller" and .request.workspace_dir==$repo' <<<"$caller_prepared" >/dev/null
+
+# Fixer source digests are checked both when the handoff is created and again
+# when it is consumed, so mutable path contents cannot silently cross either
+# side of the routed boundary.
+fixer_digest_source="$TEST_REPO/fixer-digest-source.txt"
+printf '%s\n' 'immutable fixer evidence' >"$fixer_digest_source"
+fixer_digest_sha="$(file_sha256 "$fixer_digest_source")"
+fixer_digest_input="$(jq -cn --arg p "$fixer_digest_source" --arg d "$TEST_REPO" --arg sha "$fixer_digest_sha" \
+  '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:1,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')"
+fixer_bad_digest_input="$(jq -cn --argjson value "$fixer_digest_input" '$value | .findings_sha256=("0"*64)')"
+if uberdev_create_child_handoff review_pr.fix.phase1 review-fixer-bad-digest-iter1-attempt01 "$fixer_bad_digest_input" null >/dev/null 2>&1; then
+  echo 'fixer handoff accepted a mismatched findings digest' >&2
+  exit 1
+fi
+uberdev_create_child_handoff review_pr.fix.phase1 review-fixer-source-mutation-iter1-attempt01 "$fixer_digest_input" null >/dev/null
+fixer_mutation_handoff="$UBERDEV_CHILD_HANDOFF"
+fixer_mutation_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
+fixer_mutation_result="$UBERDEV_CHILD_RESULT"
+fixer_mutation_status="$UBERDEV_CHILD_STATUS"
+printf '%s\n' 'mutated after handoff creation' >>"$fixer_digest_source"
+if _uberdev_child_prepare review_pr.fix.phase1 "$fixer_mutation_handoff" \
+  "$fixer_mutation_sha256" "$fixer_mutation_result" "$fixer_mutation_status" dispatch >/dev/null 2>&1; then
+  echo 'fixer handoff accepted source bytes mutated after digest capture' >&2
+  exit 1
+fi
+
 reviewer_input="$(jq -cn --arg p "$path" '{changed_paths:["README.md"],diff_path:$p,criteria_path:$p,emphasis:[]}')"
 uberdev_create_child_handoff review_pr.review.types review-isolated-mode-iter1-attempt01 "$reviewer_input" '[]' >/dev/null
 reviewer_prepared="$(_uberdev_child_prepare review_pr.review.types "$UBERDEV_CHILD_HANDOFF" \
   "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" dispatch)"
 jq -e '.request.workspace_mode=="isolated" and (.request|has("workspace_dir")|not)' <<<"$reviewer_prepared" >/dev/null
 OTHER_REPO="$TMP/other-repo"; mkdir -p "$OTHER_REPO"
-mismatch_input="$(jq -cn --arg p "$path" --arg d "$OTHER_REPO" '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:1,disposition_path:$p}')"
+mismatch_input="$(jq -cn --arg p "$path" --arg d "$OTHER_REPO" --arg sha "$path_sha256" '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:1,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')"
 if uberdev_create_child_handoff review_pr.fix.phase1 review-mismatch-mode-iter1-attempt01 "$mismatch_input" null >/dev/null 2>&1; then
   echo 'caller workspace mismatch accepted' >&2
   exit 1
@@ -1707,8 +1735,8 @@ exercise_parent_review_carrier() {
     '.carrier.workflow==$workflow and .carrier.issue_num==$issue and .edge_id=="review_pr.review.correctness"' "$reviewer_handoff" >/dev/null
   jq -e '.request.workspace_mode=="isolated"' <<<"$reviewer_prepared" >/dev/null
 
-  fixer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --argjson pr "$issue" \
-    '{findings_path:$p,commit_range_path:$p,working_dir:$d,pr_number:$pr,disposition_path:$p}')"
+  fixer_input="$(jq -cn --arg p "$path" --arg d "$TEST_REPO" --arg sha "$path_sha256" --argjson pr "$issue" \
+    '{findings_path:$p,findings_sha256:$sha,commit_range_path:$p,commit_range_sha256:$sha,working_dir:$d,pr_number:$pr,disposition_path:$p,authority_path:$p,authority_sha256:$sha}')"
   uberdev_create_child_handoff review_pr.fix.phase1 "$workflow-fixer-iter1-attempt01" "$fixer_input" null >/dev/null
   fixer_handoff="$UBERDEV_CHILD_HANDOFF"; fixer_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
   fixer_result="$UBERDEV_CHILD_RESULT"; fixer_status="$UBERDEV_CHILD_STATUS"
@@ -2330,12 +2358,12 @@ with open(path,"w",encoding="utf-8") as stream:
         stream.write(json.dumps(row,sort_keys=True,separators=(",",":"))+"\n")
 PY
 }
-uberdev_dispatch_child() {
+uberdev_dispatch_child_capture() {
   printf 'dispatch %s %s\n' "$1" "$#" >>"$log"
   [ "$#" -eq 5 ] || return 4
   [ "$(mock_file_sha256 "$2")" = "$3" ] || return 5
   [ "$1" != second.edge ] || return 9
-  printf 'receipt'
+  UBERDEV_CHILD_DISPATCH_RECEIPT=receipt
 }
 uberdev_unwind_child() { printf 'unwind %s %s %s\n' "$1" "$2" "$3" >>"$log"; [ "$3" -gt 0 ]; }
 uberdev_wait_child() { return 0; }
@@ -2398,12 +2426,12 @@ uberdev_preflight_child_batch() {
     [ "$(mock_file_sha256 "$path")" = "$expected" ] || return 3
   done
 }
-uberdev_dispatch_child() {
+uberdev_dispatch_child_capture() {
   [ "$#" -eq 5 ] || return 4
   [ "$(mock_file_sha256 "$2")" = "$3" ] || return 5
   printf '%s\n' "$1" >>"$dispatches"
   if [ "$(wc -l <"$dispatches" | tr -d ' ')" -eq 2 ]; then : >"$marker"; fi
-  printf 'receipt-%s' "$1"
+  UBERDEV_CHILD_DISPATCH_RECEIPT="receipt-$1"
 }
 uberdev_unwind_child() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$log"
@@ -2622,7 +2650,7 @@ for doc in "$REVIEW" "$SIMPLIFY" "$POST"; do
   grep -Fq 'preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
   grep -Fq 'uberdev_preflight_child_batch "${preflight_refs[@]}"' "$doc"
   grep -Fq 'launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
-  grep -Fq 'uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status"' "$doc"
+  grep -Fq 'uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"' "$doc"
 done
 grep -Fq "'handoff_sha256':handoff_sha256" "$REVIEW"
 grep -Fq "'handoff_sha256':handoff_sha256" "$SIMPLIFY"

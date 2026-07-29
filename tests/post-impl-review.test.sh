@@ -9,6 +9,8 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
+PHASE1_ORACLE="$REPO_ROOT/tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
+PHASE1_EMPTY_ORACLE="$REPO_ROOT/tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 # #304 / RFC 0012 §3.4: the tier-prompt heredocs (AUTO_MODE branches) live in
@@ -84,7 +86,7 @@ assert_grep "$POST_IMPL" 'handoff_sha256:\$handoff_sha256' \
   "descriptor audit rows retain each creation-time handoff digest"
 assert_grep "$POST_IMPL" 'uberdev_preflight_child_batch "\$\{preflight_refs\[@\]\}"' \
   "preflight receives controller-held handoff/digest pairs"
-assert_grep "$POST_IMPL" 'uberdev_dispatch_child "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$status"' \
+assert_grep "$POST_IMPL" 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$status"' \
   "dispatch receives the controller-held creation-time digest"
 assert_grep "$POST_IMPL" '"\$_UBERDEV_DISPATCH_BACKEND_ENUM" "\$UBERDEV_CARRIER_BACKEND"' \
   "evidence validation receives the closed backend policy and carrier-selected backend"
@@ -377,6 +379,182 @@ assert_no_grep "$POST_IMPL" 'reader MUST wrap the read content' \
   "W1.5 — old read-time-wrap reader mandate removed (anti-regression; #302)"
 
 echo
+echo "== Canonical aggregate schema v2 =="
+assert_grep "$POST_IMPL" 'post_review_write_aggregate_v2' \
+  "V2.1 — Phase 1 uses a deterministic schema-v2 aggregate writer"
+assert_grep "$POST_IMPL" '"contributors".*"findings".*"phase".*"schema_version"|contributors.*findings.*phase.*schema_version' \
+  "V2.2 — writer pins the exact compact top-level keys"
+assert_grep "$POST_IMPL" 'detail.*scope.*severity.*source_edges.*summary' \
+  "V2.3 — writer pins the exact finding keys including structured scope"
+assert_grep "$POST_IMPL" 'modify_existing' \
+  "V2.4 — every Phase 1 scope is constrained to modify_existing"
+assert_grep "$POST_IMPL" 'findings.*\[\].*valid|zero findings.*valid|empty findings.*valid' \
+  "V2.5 — an exact empty findings array is a valid completed review"
+assert_no_grep "$POST_IMPL" '\| Agent \| Verdict \| Top finding \|' \
+  "V2.6 — lossy three-column aggregate format is removed"
+if python3 -I -B - "$PHASE1_ORACLE" "$PHASE1_EMPTY_ORACLE" <<'PY'
+import json, pathlib, sys
+
+contributor_ids = [
+    "review_pr.review.correctness",
+    "review_pr.review.silent_failures",
+    "review_pr.review.types",
+    "review_pr.review.comments",
+    "review_pr.review.tests",
+    "review_pr.review.general",
+]
+opening = b'<external-untrusted-input source="post-impl-review-aggregate">\n'
+closing = b'\n</external-untrusted-input>\n'
+for index, name in enumerate(sys.argv[1:]):
+    payload = pathlib.Path(name).read_bytes()
+    assert payload.startswith(opening) and payload.endswith(closing)
+    body = payload[len(opening):-len(closing)]
+    value = json.loads(body)
+    assert body.decode() == json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    assert list(value) == ["contributors", "findings", "phase", "schema_version"]
+    assert value["schema_version"] == 2 and value["phase"] == "phase1"
+    contributors = value["contributors"]
+    assert [row["id"] for row in contributors] == contributor_ids
+    for row in contributors:
+        assert list(row) == ["confidence", "id", "verdict"]
+        assert row["confidence"] in {"low", "medium", "high"}
+        assert row["verdict"] in {"APPROVE", "REVISIONS_REQUIRED", "REJECT"}
+    for finding in value["findings"]:
+        assert list(finding) == ["detail", "scope", "severity", "source_edges", "summary"]
+        assert list(finding["scope"]) == ["line", "operation", "path"]
+        assert finding["scope"]["operation"] == "modify_existing"
+        assert finding["source_edges"] and all(edge in contributor_ids for edge in finding["source_edges"])
+    if index == 1:
+        assert value["findings"] == []
+PY
+then
+  echo "  PASS  V2.7 — non-empty and empty byte oracles are exact compact sorted Phase 1 JSON"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.7 — Phase 1 byte oracles are not exact compact sorted schema v2"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== Canonical aggregate writer runtime =="
+POST_REVIEW_V2_TMP="$(mktemp -d)"
+POST_REVIEW_V2_FUNCTION="$POST_REVIEW_V2_TMP/writer.sh"
+awk '
+  /^post_review_write_aggregate_v2\(\) \{/ { active=1 }
+  active { print }
+  active && /^}$/ { exit }
+' "$POST_IMPL" >"$POST_REVIEW_V2_FUNCTION"
+python3 -I -B - "$POST_REVIEW_V2_TMP/nonempty-input.json" "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/structural-input.json" "$POST_REVIEW_V2_TMP/structural-document.json" "$POST_REVIEW_V2_TMP/duplicate-input.json" "$POST_REVIEW_V2_TMP/duplicate-document.json" <<'PY'
+import hashlib,json,pathlib,sys
+
+edges=[
+ "review_pr.review.correctness",
+ "review_pr.review.silent_failures",
+ "review_pr.review.types",
+ "review_pr.review.comments",
+ "review_pr.review.tests",
+ "review_pr.review.general",
+]
+findings=[
+ [
+  ("blocker","src/auth.ts:42","Missing null check on req.user before .id access","The request user may be absent before identity access."),
+  ("blocker","src/auth.ts:88","Inline magic number should use a constant","The inline value should use the existing shared constant."),
+ ],
+ [("suggestion","src/log.ts:17","Consider structured logger","A structured logger would improve diagnostics.")],
+ [("blocker","src/api.ts:130","Handler return has an unconstrained type","The handler return leaks an unconstrained type.")],
+ [("suggestion","src/util.ts:5","Outdated comment","The comment no longer matches the implementation.")],
+ [],
+ [],
+]
+
+def content(rows):
+ verdict="REVISIONS_REQUIRED" if any(row[0]=="blocker" for row in rows) else "APPROVE"
+ lines=["```yaml",f"verdict: {verdict}"]
+ if rows:
+  lines.append("findings:")
+  for severity,location,summary,detail in rows:
+   lines.extend((f"  - severity: {severity}",f"    location: {location}",f"    summary: {summary}",f"    detail: {detail}"))
+ else:
+  lines.append("findings: []")
+ lines.extend(("confidence: high","```"))
+ return "\n".join(lines)
+
+def captured(rows_by_edge):
+ rows=[]
+ for index,(edge,rows_for_edge) in enumerate(zip(edges,rows_by_edge),1):
+  body=content(rows_for_edge)
+  rows.append({"content":body,"edge":edge,"index":index,"instance":f"fixture-{index}","sha256":hashlib.sha256(body.encode()).hexdigest()})
+ return {"ledger_sha256":"a"*64,"rows":rows,"schema_version":1}
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps(captured(findings),sort_keys=True,separators=(",",":")))
+pathlib.Path(sys.argv[2]).write_text(json.dumps(captured([[] for _ in edges]),sort_keys=True,separators=(",",":")))
+structural=[[('suggestion','src/generic.ts:9','Preserve T<U> & café','Keep λ < > & bytes canonical')],[],[],[],[],[]]
+pathlib.Path(sys.argv[3]).write_text(json.dumps(captured(structural),sort_keys=True,separators=(",",":")))
+pathlib.Path(sys.argv[4]).write_text(json.dumps({
+ "contributors":[{"confidence":"high","id":edge,"verdict":"APPROVE"} for edge in edges],
+ "findings":[{
+  "detail":"Keep λ < > & bytes canonical",
+  "scope":{"line":9,"operation":"modify_existing","path":"src/generic.ts"},
+  "severity":"suggestion",
+  "source_edges":[edges[0]],
+  "summary":"Preserve T<U> & café",
+ }],
+ "phase":"phase1",
+ "schema_version":2,
+},sort_keys=True,separators=(",",":"),ensure_ascii=False))
+duplicates=[
+ [('blocker','src/shared.ts:23','Null guard is missing','The handler dereferences a nullable session.')],
+ [('suggestion','src/shared.ts:23','Reuse the session assertion','The shared assertion already narrows this session.')],
+ [],[],[],[],
+]
+pathlib.Path(sys.argv[5]).write_text(json.dumps(captured(duplicates),sort_keys=True,separators=(",",":")))
+pathlib.Path(sys.argv[6]).write_text(json.dumps({
+ "contributors":[
+  {"confidence":"high","id":edges[0],"verdict":"REVISIONS_REQUIRED"},
+  {"confidence":"high","id":edges[1],"verdict":"APPROVE"},
+  *[{"confidence":"high","id":edge,"verdict":"APPROVE"} for edge in edges[2:]],
+ ],
+ "findings":[{
+  "detail":f"{edges[0]}: The handler dereferences a nullable session. | {edges[1]}: The shared assertion already narrows this session.",
+  "scope":{"line":23,"operation":"modify_existing","path":"src/shared.ts"},
+  "severity":"blocker",
+  "source_edges":edges[:2],
+  "summary":f"{edges[0]}: Null guard is missing | {edges[1]}: Reuse the session assertion",
+ }],
+ "phase":"phase1",
+ "schema_version":2,
+},sort_keys=True,separators=(",",":"),ensure_ascii=False))
+PY
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" || exit 1
+  python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
+    <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
+  python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
+    <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$PHASE1_ORACLE" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$PHASE1_EMPTY_ORACLE" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
+  python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY'
+import json,pathlib,sys
+value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+value["rows"].pop()
+pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")))
+PY
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" 2>/dev/null
+  [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ]
+); then
+  echo "  PASS  V2.8 — writer emits exact oracles, merges duplicate scopes in roster order, and refuses an incomplete roster"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$POST_REVIEW_V2_TMP"
+
+echo
 echo "== Model posture: lightweight-lens Haiku pins retired (RFC 0012 §5) =="
 # The tier input no longer drives model selection — all 6 reviewer agents inherit.
 assert_no_grep "$POST_IMPL" 'lightweight lenses pin Haiku' \
@@ -463,9 +641,9 @@ if (
     [ "$#" -eq 4 ] && [ "$2" = "$UBERDEV_CHILD_HANDOFF_SHA256" ] \
       && [ "$4" = "$UBERDEV_CHILD_HANDOFF_SHA256" ]
   }
-  uberdev_dispatch_child() {
+  uberdev_dispatch_child_capture() {
     [ "$#" -eq 5 ] && [ "$3" = "$UBERDEV_CHILD_HANDOFF_SHA256" ] || return 96
-    [ "$1" = review.one ] && { printf '%s\n' receipt-one; return 0; }
+    [ "$1" = review.one ] && { UBERDEV_CHILD_DISPATCH_RECEIPT=receipt-one; return 0; }
     return 17
   }
   uberdev_unwind_child() { return 23; }
@@ -511,7 +689,7 @@ if (
     UBERDEV_CHILD_STATUS=s
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
-  uberdev_dispatch_child() { : >"$dispatched"; }
+  uberdev_dispatch_child_capture() { : >"$dispatched"; }
   ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
   [ ! -e "$dispatched" ]
 ); then
@@ -547,7 +725,7 @@ if (
     rm -f "$root/descriptors"; mkdir "$root/descriptors"
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
-  uberdev_dispatch_child() { : >"$dispatched"; }
+  uberdev_dispatch_child_capture() { : >"$dispatched"; }
   ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
   [ ! -e "$dispatched" ]
 ); then

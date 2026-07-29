@@ -1,11 +1,3 @@
 <external-untrusted-input source="simplify-aggregate">
-# Simplify aggregate (Phase 2)
-
-| lens | severity | file | line | disposition | summary |
-|---|---|---|---|---|---|
-| reuse | critical | src/api.ts | 130 | DEFERRED | any-type leak in handler return |
-| quality | critical | src/api.ts | 130 | DEFERRED | Handler returns any — narrow to ResponseEnvelope |
-| efficiency | important | src/loop.ts | 12 | DEFERRED | O(n^2) inner loop — convert to Map |
-| reuse | suggestion | src/dup.ts | 3 | APPLIED | DRY: extract helper |
-
+{"contributors":[{"confidence":"n/a","id":"review_pr.simplify.reuse","verdict":"COMPLETE"},{"confidence":"n/a","id":"review_pr.simplify.quality","verdict":"COMPLETE"},{"confidence":"n/a","id":"review_pr.simplify.efficiency","verdict":"COMPLETE"}],"findings":[{"detail":"Reuse: narrow through the existing response abstraction | Quality: make the return contract explicit","scope":{"line":130,"operation":"modify_existing","path":"src/api.ts"},"severity":"blocker","source_edges":["review_pr.simplify.reuse","review_pr.simplify.quality"],"summary":"Reuse: narrow the handler return | Quality: replace the unconstrained return"},{"detail":"Build the lookup once before entering the loop.","scope":{"line":12,"operation":"modify_existing","path":"src/loop.ts"},"severity":"blocker","source_edges":["review_pr.simplify.efficiency"],"summary":"Convert the quadratic inner lookup to a map"},{"detail":"Use the existing shared helper without changing behavior.","scope":{"line":3,"operation":"modify_existing","path":"src/dup.ts"},"severity":"suggestion","source_edges":["review_pr.simplify.reuse"],"summary":"Extract the duplicate implementation to the existing helper"}],"phase":"phase2","schema_version":2}
 </external-untrusted-input>

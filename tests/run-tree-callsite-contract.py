@@ -17,6 +17,7 @@ SOURCE_FILES = (
     "plugins/uberdev/skills/subagent-driven-dev/SKILL.md",
     "plugins/uberdev/skills/post-impl-review/SKILL.md",
     "plugins/uberdev/commands/review-pr.md",
+    "plugins/uberdev/commands/simplify.md",
 )
 CONTRACT_BLOCK = re.compile(
     r"<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\s*(.*?)\s*```\s*"
@@ -122,8 +123,8 @@ def collect_sources(root: Path, overrides: dict[str, str] | None = None) -> list
             if edge in merged:
                 fail(f"duplicate source edge: {edge}")
             merged[edge] = row
-    if declared_count != 40 or len(merged) != 40:
-        fail(f"source contract count: expected 40, got {declared_count} declared/{len(merged)} unique")
+    if declared_count != 41 or len(merged) != 41:
+        fail(f"source contract count: expected 41, got {declared_count} declared/{len(merged)} unique")
     return [merged[edge] for edge in sorted(merged)]
 
 
@@ -139,7 +140,7 @@ def _typed_fixture(rows: list[dict[str, Any]], fixture_path: Path) -> list[dict[
     if not isinstance(fixture, dict) or fixture.get("schema_version") != 1 or fixture.get("pending_edges") != []:
         fail("invalid fixture envelope")
     contracts = fixture.get("contracts")
-    if not isinstance(contracts, list) or len(contracts) != 40:
+    if not isinstance(contracts, list) or len(contracts) != 41:
         fail("invalid fixture contracts")
     source_rows: list[dict[str, Any]] = []
     for item in contracts:
