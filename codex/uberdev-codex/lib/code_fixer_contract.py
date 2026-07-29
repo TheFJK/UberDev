@@ -113,6 +113,17 @@ class _ArtifactRollback:
     predecessor: bytes | None
 
 
+@dataclass(frozen=True)
+class _IndexObservationLock:
+    index_path: str
+    lock_path: str
+    index_payload: bytes
+    index_mode: int
+    lock_identity: tuple[int, int]
+    descriptor: int | None
+    handle: int | None
+
+
 class ContractFailure(Exception):
     """A closed refusal whose token is safe to expose."""
 
@@ -442,10 +453,12 @@ def _absolute_input(path: str, reason: str) -> str:
     return os.path.realpath(path)
 
 
-def _git(repository: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+def _run_observational_git(
+    repository: str, *arguments: str
+) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
-            ["git", "-C", repository, *arguments],
+            ["git", "--no-optional-locks", "-C", repository, *arguments],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -453,6 +466,10 @@ def _git(repository: str, *arguments: str) -> subprocess.CompletedProcess[bytes]
         )
     except OSError:
         fail("git_unavailable")
+
+
+def _git(repository: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    return _run_observational_git(repository, *arguments)
 
 
 def _git_io(
@@ -475,6 +492,340 @@ def _git_io(
         )
     except OSError:
         fail("git_unavailable")
+
+
+def _index_observation_unchanged(binding: _IndexObservationLock) -> bool:
+    try:
+        payload, identity = _capture_regular(
+            binding.index_path,
+            len(binding.index_payload),
+            len(binding.index_payload),
+        )
+    except ContractFailure:
+        return False
+    return (
+        payload == binding.index_payload
+        and stat.S_IMODE(identity.mode) == binding.index_mode
+    )
+
+
+def _cleanup_posix_index_lock(
+    lock_path: str,
+    descriptor: int,
+    lock_identity: tuple[int, int] | None,
+    *,
+    require_mode: bool = True,
+) -> bool:
+    cleanup_succeeded = True
+    try:
+        held = os.fstat(descriptor)
+        visible = os.lstat(lock_path)
+        expected_identity = lock_identity or (held.st_dev, held.st_ino)
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(visible.st_mode)
+            or held.st_nlink != 1
+            or visible.st_nlink != 1
+            or held.st_size != 0
+            or visible.st_size != 0
+            or (
+                require_mode
+                and (
+                    stat.S_IMODE(held.st_mode) != 0o600
+                    or stat.S_IMODE(visible.st_mode) != 0o600
+                )
+            )
+            or (held.st_dev, held.st_ino) != expected_identity
+            or (visible.st_dev, visible.st_ino) != expected_identity
+        ):
+            cleanup_succeeded = False
+        else:
+            os.unlink(lock_path)
+            if os.path.lexists(lock_path):
+                cleanup_succeeded = False
+    except BaseException:
+        cleanup_succeeded = False
+    try:
+        os.close(descriptor)
+    except BaseException:
+        cleanup_succeeded = False
+    return cleanup_succeeded
+
+
+def _windows_index_lock_state(handle: int, reason: str) -> tuple[int, int]:
+    if os.name != "nt":
+        fail(reason)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileStandardInformation(ctypes.Structure):
+            _fields_ = [
+                ("allocation_size", ctypes.c_longlong),
+                ("end_of_file", ctypes.c_longlong),
+                ("number_of_links", wintypes.DWORD),
+                ("delete_pending", ctypes.c_ubyte),
+                ("directory", ctypes.c_ubyte),
+            ]
+
+        class FileId128(ctypes.Structure):
+            _fields_ = [("identifier", ctypes.c_ubyte * 16)]
+
+        class FileIdInformation(ctypes.Structure):
+            _fields_ = [
+                ("volume_serial_number", ctypes.c_ulonglong),
+                ("file_id", FileId128),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        get_information.restype = wintypes.BOOL
+        standard = FileStandardInformation()
+        identity = FileIdInformation()
+        for information_class, information in (
+            (1, standard),  # FileStandardInfo
+            (18, identity),  # FileIdInfo
+        ):
+            if not get_information(
+                wintypes.HANDLE(handle),
+                information_class,
+                ctypes.byref(information),
+                ctypes.sizeof(information),
+            ):
+                fail(reason)
+        file_id = int.from_bytes(bytes(identity.file_id.identifier), "little")
+        volume = int(identity.volume_serial_number)
+    except ContractFailure:
+        raise
+    except (AttributeError, OSError, TypeError, ValueError):
+        fail(reason)
+    if (
+        standard.directory
+        or standard.delete_pending
+        or standard.number_of_links != 1
+        or standard.end_of_file != 0
+        or volume == 0
+        or file_id == 0
+    ):
+        fail(reason)
+    return volume, file_id
+
+
+def _windows_create_index_lock(lock_path: str) -> int:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            lock_path,
+            0x80000000
+            | 0x40000000
+            | 0x00010000
+            | 0x00000080
+            | 0x00000100,  # GENERIC_READ | WRITE | DELETE | attribute access
+            0,  # Exclusive sharing blocks open, rename, replacement, and delete.
+            None,
+            1,  # CREATE_NEW
+            0x00000080 | 0x00200000,  # NORMAL | OPEN_REPARSE_POINT
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+    except (AttributeError, OSError, TypeError, ValueError):
+        fail("index_observation_lock_unavailable")
+    if handle in (None, invalid_handle):
+        fail("index_observation_lock_unavailable")
+    return int(handle)
+
+
+def _windows_dispose_index_lock(handle: int) -> bool:
+    disposition_succeeded = False
+    close_succeeded = False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileDispositionInformation(ctypes.Structure):
+            _fields_ = [("delete_file", ctypes.c_ubyte)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        set_information = kernel32.SetFileInformationByHandle
+        set_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        set_information.restype = wintypes.BOOL
+        disposition = FileDispositionInformation(True)
+        disposition_succeeded = bool(
+            set_information(
+                wintypes.HANDLE(handle),
+                4,  # FileDispositionInfo
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            )
+        )
+    except BaseException:
+        disposition_succeeded = False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        close_succeeded = bool(close_handle(wintypes.HANDLE(handle)))
+    except BaseException:
+        close_succeeded = False
+    return disposition_succeeded and close_succeeded
+
+
+def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
+    index_path = _git_index_path(repository)
+    lock_path = index_path + ".lock"
+    if os.name == "nt":
+        handle = _windows_create_index_lock(lock_path)
+        try:
+            lock_identity = _windows_index_lock_state(
+                handle, "index_observation_lock_unavailable"
+            )
+            index_payload, index_identity = _capture_regular(
+                index_path, 1, INDEX_LIMIT
+            )
+        except BaseException:
+            if not _windows_dispose_index_lock(handle):
+                fail("index_observation_lock_recovery_failed")
+            raise
+        return _IndexObservationLock(
+            index_path=index_path,
+            lock_path=lock_path,
+            index_payload=index_payload,
+            index_mode=stat.S_IMODE(index_identity.mode),
+            lock_identity=lock_identity,
+            descriptor=None,
+            handle=handle,
+        )
+
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = -1
+    lock_identity: tuple[int, int] | None = None
+    mode_normalized = False
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        mode_normalized = True
+        held = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or held.st_nlink != 1
+            or held.st_size != 0
+            or stat.S_IMODE(held.st_mode) != 0o600
+        ):
+            fail("index_observation_lock_unavailable")
+        lock_identity = (held.st_dev, held.st_ino)
+        index_payload, index_identity = _capture_regular(index_path, 1, INDEX_LIMIT)
+        return _IndexObservationLock(
+            index_path=index_path,
+            lock_path=lock_path,
+            index_payload=index_payload,
+            index_mode=stat.S_IMODE(index_identity.mode),
+            lock_identity=lock_identity,
+            descriptor=descriptor,
+            handle=None,
+        )
+    except OSError:
+        if descriptor < 0:
+            fail("index_observation_lock_unavailable")
+        if not _cleanup_posix_index_lock(
+            lock_path,
+            descriptor,
+            lock_identity,
+            require_mode=mode_normalized,
+        ):
+            fail("index_observation_lock_recovery_failed")
+        fail("index_observation_lock_unavailable")
+    except BaseException:
+        if descriptor >= 0 and not _cleanup_posix_index_lock(
+            lock_path,
+            descriptor,
+            lock_identity,
+            require_mode=mode_normalized,
+        ):
+            fail("index_observation_lock_recovery_failed")
+        raise
+
+
+def _release_index_observation_lock(binding: _IndexObservationLock) -> None:
+    unchanged = False
+    identity_matches = binding.handle is None
+    primary_error: BaseException | None = None
+    primary_traceback = None
+    try:
+        unchanged = _index_observation_unchanged(binding)
+        if binding.handle is not None:
+            identity_matches = (
+                _windows_index_lock_state(
+                    binding.handle, "index_observation_lock_recovery_failed"
+                )
+                == binding.lock_identity
+            )
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
+
+    if binding.handle is not None:
+        cleanup_succeeded = _windows_dispose_index_lock(binding.handle)
+    elif binding.descriptor is not None:
+        cleanup_succeeded = _cleanup_posix_index_lock(
+            binding.lock_path, binding.descriptor, binding.lock_identity
+        )
+    else:
+        cleanup_succeeded = False
+
+    if not cleanup_succeeded:
+        fail("index_observation_lock_recovery_failed")
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    if not unchanged or not identity_matches:
+        fail("index_observation_lock_recovery_failed")
+
+
+def _observe_worktree_with_index_lock(
+    repository: str, commands: tuple[tuple[str, ...], ...]
+) -> tuple[subprocess.CompletedProcess[bytes], ...]:
+    binding = _acquire_index_observation_lock(repository)
+    try:
+        return tuple(
+            _run_observational_git(repository, *command) for command in commands
+        )
+    finally:
+        _release_index_observation_lock(binding)
 
 
 def _require_repository(repository: str) -> None:
@@ -580,8 +931,7 @@ def _changed_paths(working_dir: str, head_sha: str) -> tuple[str, ...]:
         ("diff", "--name-status", "-z", "--no-renames", head_sha, "--"),
     )
     paths: set[str] = set()
-    for command in commands:
-        result = _git(working_dir, *command)
+    for result in _observe_worktree_with_index_lock(working_dir, commands):
         if result.returncode != 0:
             fail("git_state_unreadable")
         paths.update(_parse_name_status(result.stdout, "tracked_path_invalid"))
@@ -1059,30 +1409,34 @@ def capture_standalone_snapshot(
         fail("snapshot_path_invalid")
     _require_repository(canonical_working)
     first = _capture_repo_state(canonical_working, canonical_evidence)
-    first_diff = _git(
+    (first_diff,) = _observe_worktree_with_index_lock(
         canonical_working,
-        "diff",
-        "HEAD",
-        "--no-renames",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        "--full-index",
-        "--",
+        ((
+            "diff",
+            "HEAD",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            "--",
+        ),),
     )
     if first_diff.returncode != 0:
         fail("diff_capture_failed")
     middle = _capture_repo_state(canonical_working, canonical_evidence)
-    second_diff = _git(
+    (second_diff,) = _observe_worktree_with_index_lock(
         canonical_working,
-        "diff",
-        "HEAD",
-        "--no-renames",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--binary",
-        "--full-index",
-        "--",
+        ((
+            "diff",
+            "HEAD",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            "--",
+        ),),
     )
     if second_diff.returncode != 0:
         fail("diff_capture_failed")
@@ -1441,7 +1795,9 @@ def _reserved_evidence_residue(path: str) -> bool:
 
 
 def _require_worktree_residue_closed(working_dir: str, evidence_dir: str) -> None:
-    unstaged = _git(working_dir, "diff", "--quiet", "--exit-code", "--")
+    (unstaged,) = _observe_worktree_with_index_lock(
+        working_dir, (("diff", "--quiet", "--exit-code", "--"),)
+    )
     if unstaged.returncode == 1:
         fail("worktree_unstaged")
     if unstaged.returncode != 0:

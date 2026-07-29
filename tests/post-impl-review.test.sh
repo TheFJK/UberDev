@@ -8,9 +8,10 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TEST_FILE="$REPO_ROOT/tests/post-impl-review.test.sh"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
-PHASE1_ORACLE="$REPO_ROOT/tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
-PHASE1_EMPTY_ORACLE="$REPO_ROOT/tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
+PHASE1_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
+PHASE1_EMPTY_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
 SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 # #304 / RFC 0012 §3.4: the tier-prompt heredocs (AUTO_MODE branches) live in
@@ -392,8 +393,18 @@ assert_grep "$POST_IMPL" 'findings.*\[\].*valid|zero findings.*valid|empty findi
   "V2.5 — an exact empty findings array is a valid completed review"
 assert_no_grep "$POST_IMPL" '\| Agent \| Verdict \| Top finding \|' \
   "V2.6 — lossy three-column aggregate format is removed"
-if python3 -I -B - "$PHASE1_ORACLE" "$PHASE1_EMPTY_ORACLE" <<'PY'
-import json, pathlib, sys
+V2_ORACLE_ASSERTION_REGION="$(awk '
+  /^if python3 -I -B - .*PHASE1_ORACLE/ { active=1 }
+  active { print }
+  active && /^then$/ { exit }
+' "$TEST_FILE")"
+if grep -qE 'git.*cat-file.*blob' <<<"$V2_ORACLE_ASSERTION_REGION"; then
+  echo "  PASS  V2.6a — byte oracle validation reads canonical Git blob bytes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.6a — byte oracle validation must read canonical Git blob bytes, not checkout-normalized bytes"; FAIL=$((FAIL + 1))
+fi
+if python3 -I -B - "$REPO_ROOT" "$PHASE1_ORACLE_RELPATH" "$PHASE1_EMPTY_ORACLE_RELPATH" <<'PY'
+import json, subprocess, sys
 
 contributor_ids = [
     "review_pr.review.correctness",
@@ -405,8 +416,13 @@ contributor_ids = [
 ]
 opening = b'<external-untrusted-input source="post-impl-review-aggregate">\n'
 closing = b'\n</external-untrusted-input>\n'
-for index, name in enumerate(sys.argv[1:]):
-    payload = pathlib.Path(name).read_bytes()
+repo_root = sys.argv[1]
+for index, name in enumerate(sys.argv[2:]):
+    payload = subprocess.run(
+        ["git", "-C", repo_root, "cat-file", "blob", f"HEAD:{name}"],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
     assert payload.startswith(opening) and payload.endswith(closing)
     body = payload[len(opening):-len(closing)]
     value = json.loads(body)
@@ -481,14 +497,17 @@ def captured(rows_by_edge):
  rows=[]
  for index,(edge,rows_for_edge) in enumerate(zip(edges,rows_by_edge),1):
   body=content(rows_for_edge)
-  rows.append({"content":body,"edge":edge,"index":index,"instance":f"fixture-{index}","sha256":hashlib.sha256(body.encode()).hexdigest()})
+  rows.append({"content":body,"edge":edge,"index":index,"instance":f"fixture-{index}","sha256":hashlib.sha256(body.encode("utf-8")).hexdigest()})
  return {"ledger_sha256":"a"*64,"rows":rows,"schema_version":1}
 
-pathlib.Path(sys.argv[1]).write_text(json.dumps(captured(findings),sort_keys=True,separators=(",",":")))
-pathlib.Path(sys.argv[2]).write_text(json.dumps(captured([[] for _ in edges]),sort_keys=True,separators=(",",":")))
+def write_utf8(path,payload):
+ pathlib.Path(path).write_text(payload,encoding="utf-8",newline="\n")
+
+write_utf8(sys.argv[1],json.dumps(captured(findings),sort_keys=True,separators=(",",":")))
+write_utf8(sys.argv[2],json.dumps(captured([[] for _ in edges]),sort_keys=True,separators=(",",":")))
 structural=[[('suggestion','src/generic.ts:9','Preserve T<U> & café','Keep λ < > & bytes canonical')],[],[],[],[],[]]
-pathlib.Path(sys.argv[3]).write_text(json.dumps(captured(structural),sort_keys=True,separators=(",",":")))
-pathlib.Path(sys.argv[4]).write_text(json.dumps({
+write_utf8(sys.argv[3],json.dumps(captured(structural),sort_keys=True,separators=(",",":")))
+write_utf8(sys.argv[4],json.dumps({
  "contributors":[{"confidence":"high","id":edge,"verdict":"APPROVE"} for edge in edges],
  "findings":[{
   "detail":"Keep λ < > & bytes canonical",
@@ -505,8 +524,8 @@ duplicates=[
  [('suggestion','src/shared.ts:23','Reuse the session assertion','The shared assertion already narrows this session.')],
  [],[],[],[],
 ]
-pathlib.Path(sys.argv[5]).write_text(json.dumps(captured(duplicates),sort_keys=True,separators=(",",":")))
-pathlib.Path(sys.argv[6]).write_text(json.dumps({
+write_utf8(sys.argv[5],json.dumps(captured(duplicates),sort_keys=True,separators=(",",":")))
+write_utf8(sys.argv[6],json.dumps({
  "contributors":[
   {"confidence":"high","id":edges[0],"verdict":"REVISIONS_REQUIRED"},
   {"confidence":"high","id":edges[1],"verdict":"APPROVE"},
@@ -523,6 +542,71 @@ pathlib.Path(sys.argv[6]).write_text(json.dumps({
  "schema_version":2,
 },sort_keys=True,separators=(",",":"),ensure_ascii=False))
 PY
+V2_FIXTURE_WRITER_REGION="$(awk '
+  /^python3 -I -B - .*nonempty-input\.json/ { active=1 }
+  active { print }
+  active && /^PY$/ { exit }
+' "$TEST_FILE")"
+if grep -qE 'write_text\(.*encoding=.utf-8.' <<<"$V2_FIXTURE_WRITER_REGION"; then
+  echo "  PASS  V2.7a — Unicode fixture writer pins UTF-8 explicitly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.7a — Unicode fixture writer must pin UTF-8 instead of inheriting the locale codec"; FAIL=$((FAIL + 1))
+fi
+V2_RUNTIME_WRITER_REGION="$(awk '
+  /^post_review_write_aggregate_v2\(\) \{/ { active=1 }
+  active { print }
+  active && /^}$/ { exit }
+' "$POST_IMPL")"
+if grep -qE '/dev/fd|/proc' <<<"$V2_RUNTIME_WRITER_REGION"; then
+  echo "  FAIL  V2.7b — aggregate writer must not depend on POSIX pseudo-files"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  V2.7b — aggregate writer has no /dev/fd or /proc dependency"; PASS=$((PASS + 1))
+fi
+if grep -qE 'sys\.stdin\.buffer\.read\(\)\.decode\(.utf-8.\)' <<<"$V2_RUNTIME_WRITER_REGION"; then
+  echo "  PASS  V2.7c — aggregate writer decodes untrusted stdin as UTF-8 explicitly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.7c — aggregate writer must decode untrusted stdin as UTF-8 explicitly"; FAIL=$((FAIL + 1))
+fi
+if grep -qE 'python3 -I -B -c' <<<"$V2_RUNTIME_WRITER_REGION"; then
+  echo "  PASS  V2.7d — aggregate writer uses a fixed Python -c program with JSON on stdin"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.7d — aggregate writer must use a fixed Python -c program while keeping JSON on stdin"; FAIL=$((FAIL + 1))
+fi
+TRANSPORT_SENTINEL='{"transport":"stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
+TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/transport.capture"
+TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/transport-output.md"
+TRANSPORT_WRITER_SHA256='c11f011225451c3e1492d153fbfbaeac196569ace86b3f162ea384390dedcebe'
+REAL_PYTHON3="$(command -v python3)"
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  python3() {
+    local observed= arg actual_writer_sha
+    [ "$#" -eq 6 ] || return 91
+    [ "$1" = '-I' ] && [ "$2" = '-B' ] && [ "$3" = '-c' ] || return 92
+    actual_writer_sha="$(printf '%s' "$4" | "$REAL_PYTHON3" -I -B -c \
+      'import hashlib,sys; body=sys.stdin.buffer.read().replace(b"\r\n",b"\n"); print(hashlib.sha256(body).hexdigest(),end="")')" || return 93
+    [ "$actual_writer_sha" = "$TRANSPORT_WRITER_SHA256" ] || return 94
+    [ "$5" = "$TRANSPORT_OUTPUT" ] && [ "$6" = "$UBERDEV_REVIEW_PLUGIN_ROOT" ] || return 95
+    for arg in "$@"; do
+      [[ "$arg" != *"$TRANSPORT_SENTINEL"* ]] || return 96
+    done
+    "$REAL_PYTHON3" -I -B -c \
+      'import os,sys; raise SystemExit(any(sys.argv[1] in value for value in os.environ.values()))' \
+      "$TRANSPORT_SENTINEL" || return 97
+    IFS= read -r -d '' observed || true
+    [ "$observed" = "$TRANSPORT_SENTINEL" ] || return 98
+    printf 'verified\n' >"$TRANSPORT_CAPTURE"
+  }
+  post_review_write_aggregate_v2 "$TRANSPORT_SENTINEL" "$TRANSPORT_OUTPUT"
+  [ "$(<"$TRANSPORT_CAPTURE")" = 'verified' ]
+  [ ! -e "$TRANSPORT_OUTPUT" ]
+); then
+  echo "  PASS  V2.7e — digest-pinned in-memory code is argv while attacker-controlled aggregate bytes travel only on stdin"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.7e — aggregate writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only"; FAIL=$((FAIL + 1))
+fi
 if (
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
@@ -531,19 +615,21 @@ if (
   post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" || exit 1
   post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" || exit 1
   post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" || exit 1
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
   python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
     <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
   python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
     <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$PHASE1_ORACLE" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$PHASE1_EMPTY_ORACLE" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
   python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY'
 import json,pathlib,sys
-value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 value["rows"].pop()
-pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")))
+pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")),encoding="utf-8",newline="\n")
 PY
   ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" 2>/dev/null
   [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ]

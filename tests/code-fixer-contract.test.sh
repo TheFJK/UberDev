@@ -1319,6 +1319,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
+    git(repo, "config", "diff.autoRefreshIndex", "true")
     names = (
         "applied-staged", "applied-unstaged", "applied-both",
         "keep-staged", "keep-unstaged", "keep-both",
@@ -1345,6 +1346,12 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     keep_cached = git(repo, "diff", "--cached", "--binary", "--", *keep_paths).stdout
     keep_worktree = git(repo, "diff", "--binary", "--", *keep_paths).stdout
     keep_bytes = {name: (repo / name).read_bytes() for name in keep_paths}
+    split_index_result = git(repo, "update-index", "--split-index", check=False)
+    split_index_supported = split_index_result.returncode == 0
+    if not split_index_supported:
+        assert b"split-index" in split_index_result.stderr
+        assert b"unknown option" in split_index_result.stderr
+    git_dir = repo / ".git"
     evidence = repo / ".uberdev/research/20260728-010206-abcdef0"
     evidence.mkdir(parents=True)
     diff_path = evidence / "pr-diff.md"
@@ -1359,6 +1366,146 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     )
     assert snapshot_receipt["head_sha"] == parent
     assert snapshot_receipt["target_eligible_paths"] == sorted(names)
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    raw_index_path = pathlib.Path(snapshot["index_path"])
+    shared_indexes_before_observation = {
+        path.name: path.read_bytes() for path in git_dir.glob("sharedindex.*")
+    }
+    if split_index_supported:
+        assert shared_indexes_before_observation
+    keep_staged_path = repo / "keep-staged"
+    keep_staged_stat = keep_staged_path.stat()
+    os.utime(
+        keep_staged_path,
+        ns=(keep_staged_stat.st_atime_ns, keep_staged_stat.st_mtime_ns + 2_000_000_000),
+    )
+    assert keep_staged_path.read_bytes() == git(repo, "show", ":keep-staged").stdout
+    raw_index_baseline = raw_index_path.read_bytes()
+    observed_after_mtime_touch = module._capture_repo_state(str(repo), str(evidence))
+    logical_state_keys = (
+        "head_sha", "head_tree_sha", "index_tree_sha", "target_eligible_paths",
+        "tracked", "untracked",
+    )
+    assert {
+        key: observed_after_mtime_touch[key] for key in logical_state_keys
+    } == {
+        key: snapshot[key] for key in logical_state_keys
+    }
+    assert raw_index_path.read_bytes() == raw_index_baseline
+    assert {
+        path.name: path.read_bytes() for path in git_dir.glob("sharedindex.*")
+    } == shared_indexes_before_observation
+    index_lock_path = pathlib.Path(f"{raw_index_path}.lock")
+    assert not index_lock_path.exists()
+    previous_umask = os.umask(0o777)
+    try:
+        (observed_with_restrictive_umask,) = module._observe_worktree_with_index_lock(
+            str(repo),
+            (("diff", "--name-status", "-z", "--no-renames", "--"),),
+        )
+    finally:
+        os.umask(previous_umask)
+    assert observed_with_restrictive_umask.returncode == 0
+    assert not index_lock_path.exists()
+    assert raw_index_path.read_bytes() == raw_index_baseline
+    original_capture_regular = module._capture_regular
+
+    def interrupt_acquisition_capture(path, minimum, maximum):
+        if index_lock_path.exists():
+            raise KeyboardInterrupt("injected acquisition interrupt")
+        return original_capture_regular(path, minimum, maximum)
+
+    module._capture_regular = interrupt_acquisition_capture
+    try:
+        try:
+            module._capture_repo_state(str(repo), str(evidence))
+        except KeyboardInterrupt as error:
+            assert str(error) == "injected acquisition interrupt"
+        else:
+            raise AssertionError("acquisition KeyboardInterrupt was swallowed")
+    finally:
+        module._capture_regular = original_capture_regular
+    assert not index_lock_path.exists(), (
+        f"acquisition KeyboardInterrupt left stale lock: {index_lock_path}"
+    )
+    assert raw_index_path.read_bytes() == raw_index_baseline
+
+    release_capture_calls = {"count": 0}
+
+    def interrupt_release_capture(path, minimum, maximum):
+        if index_lock_path.exists():
+            release_capture_calls["count"] += 1
+            if release_capture_calls["count"] == 2:
+                raise SystemExit("injected release interrupt")
+        return original_capture_regular(path, minimum, maximum)
+
+    module._capture_regular = interrupt_release_capture
+    try:
+        try:
+            module._capture_repo_state(str(repo), str(evidence))
+        except SystemExit as error:
+            assert str(error) == "injected release interrupt"
+        else:
+            raise AssertionError("release SystemExit was swallowed")
+    finally:
+        module._capture_regular = original_capture_regular
+    assert release_capture_calls["count"] == 2
+    assert not index_lock_path.exists(), (
+        f"release SystemExit left stale lock: {index_lock_path}"
+    )
+    assert raw_index_path.read_bytes() == raw_index_baseline
+
+    original_run_observational_git = module._run_observational_git
+
+    def fail_observation_diff(repository, *arguments):
+        if not arguments or arguments[0] != "diff":
+            return original_run_observational_git(repository, *arguments)
+        return subprocess.CompletedProcess(
+            ["git", *arguments], 2, stdout=b"", stderr=b"injected"
+        )
+
+    module._run_observational_git = fail_observation_diff
+    try:
+        expect_contract_reason(
+            lambda: module._capture_repo_state(str(repo), str(evidence)),
+            "git_state_unreadable",
+        )
+    finally:
+        module._run_observational_git = original_run_observational_git
+    assert not index_lock_path.exists()
+    assert raw_index_path.read_bytes() == raw_index_baseline
+
+    foreign_index_lock = b"foreign-index-lock\n"
+    index_lock_path.write_bytes(foreign_index_lock)
+    expect_contract_reason(
+        lambda: module._capture_repo_state(str(repo), str(evidence)),
+        "index_observation_lock_unavailable",
+    )
+    assert index_lock_path.read_bytes() == foreign_index_lock
+    assert raw_index_path.read_bytes() == raw_index_baseline
+    index_lock_path.unlink()
+
+    replacement_index_lock = b"replacement-index-lock\n"
+    def replace_observation_lock(repository, *arguments):
+        if not arguments or arguments[0] != "diff":
+            return original_run_observational_git(repository, *arguments)
+        assert index_lock_path.read_bytes() == b""
+        index_lock_path.unlink()
+        index_lock_path.write_bytes(replacement_index_lock)
+        return original_run_observational_git(repository, *arguments)
+
+    module._run_observational_git = replace_observation_lock
+    try:
+        expect_contract_reason(
+            lambda: module._capture_repo_state(str(repo), str(evidence)),
+            "index_observation_lock_recovery_failed",
+        )
+    finally:
+        module._run_observational_git = original_run_observational_git
+    assert index_lock_path.read_bytes() == replacement_index_lock
+    assert raw_index_path.read_bytes() == raw_index_baseline
+    index_lock_path.unlink()
+    assert not index_lock_path.exists()
     findings = evidence / "simplify-final.md"
     findings.write_bytes(aggregate("phase2", [
         (("review_pr.simplify.reuse",), "suggestion", "applied-staged", "1", "refine A", "detail A"),
@@ -1389,27 +1536,55 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         for finding in authority["finding_keys"]
     ]
     applied_content_path = evidence / "standalone-applied-content.json"
+    head_keep_staged_oid = git(
+        repo, "rev-parse", "HEAD:keep-staged"
+    ).stdout.decode().strip()
+    git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "100644",
+        head_keep_staged_oid,
+        "keep-staged",
+    )
+    git(repo, "write-tree")
+    assert raw_index_path.read_bytes() != raw_index_baseline
+    assert raw_index_path.stat().st_size == len(raw_index_baseline)
+    expect_contract_reason(lambda: module.publish_disposition(
+        authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+        disposition_path=str(disposition),
+        candidate=json.dumps(candidate(authority, rows)).encode(),
+    ), "standalone_index_mismatch")
+    assert disposition.read_bytes() == b""
+    assert not applied_content_path.exists()
+    raw_index_path.write_bytes(raw_index_baseline)
+    assert raw_index_path.read_bytes() == raw_index_baseline
     original_secure_publish = module.secure_publish_captured
     publication_calls = {"count": 0}
 
     def fail_applied_content(path, payload):
         publication_calls["count"] += 1
         if publication_calls["count"] == 2:
+            module.secure_publish_captured = original_secure_publish
             module.fail("injected_applied_content_publication_failure")
         return original_secure_publish(path, payload)
 
     module.secure_publish_captured = fail_applied_content
     try:
-        expect_contract_failure(lambda: module.publish_disposition(
+        expect_contract_reason(lambda: module.publish_disposition(
             authority_path=str(authority_path),
             authority_sha256=authority_receipt["authority_sha256"],
             disposition_path=str(disposition),
             candidate=json.dumps(candidate(authority, rows)).encode(),
-        ))
+        ), "injected_applied_content_publication_failure")
     finally:
         module.secure_publish_captured = original_secure_publish
+    assert publication_calls["count"] == 2
     assert disposition.read_bytes() == b""
     assert not applied_content_path.exists()
+    assert raw_index_path.read_bytes() == raw_index_baseline
 
     replacement = b"foreign-disposition-replacement\n"
     publication_calls["count"] = 0
@@ -1419,6 +1594,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         if publication_calls["count"] == 2:
             disposition.unlink()
             disposition.write_bytes(replacement)
+            module.secure_publish_captured = original_secure_publish
             module.fail("injected_applied_content_publication_failure")
         return original_secure_publish(path, payload)
 
@@ -1432,8 +1608,10 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         ), "disposition_transaction_recovery_failed")
     finally:
         module.secure_publish_captured = original_secure_publish
+    assert publication_calls["count"] == 2
     assert disposition.read_bytes() == replacement
     assert not applied_content_path.exists()
+    assert raw_index_path.read_bytes() == raw_index_baseline
     disposition.unlink()
     disposition.write_bytes(b"")
     published = module.publish_disposition(
@@ -1458,7 +1636,6 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     ))
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == parent
     (repo / "applied-staged").write_text("A2\n", encoding="utf-8")
-    raw_index_path = repo / ".git/index"
     raw_index_before = raw_index_path.read_bytes()
     hook_dir = evidence / "hooks"
     hook_dir.mkdir()

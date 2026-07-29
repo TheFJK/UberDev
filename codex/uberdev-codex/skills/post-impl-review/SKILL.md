@@ -803,9 +803,8 @@ post_review_require_complete_wave() {
 # Phase 1 document. The captured JSON arrives on stdin so the bounded reviewer
 # payloads never cross the platform argv/env-size boundary.
 post_review_write_aggregate_v2() {
-  local aggregation_input="$1" aggregate_path="$2"
-  printf '%s' "$aggregation_input" | python3 -I -B /dev/fd/3 \
-    "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT" 3<<'PY'
+  local aggregation_input="$1" aggregate_path="$2" writer_code=
+  IFS= read -r -d '' writer_code <<'PY' || :
 import hashlib,importlib.util,json,os,posixpath,re,stat,sys,tempfile
 
 aggregate_path,plugin_root=sys.argv[1:]
@@ -913,7 +912,7 @@ try:
  contract=importlib.util.module_from_spec(spec); sys.modules[spec.name]=contract
  spec.loader.exec_module(contract)
  contributor_ids=list(contract.PHASE_CONTRIBUTORS['phase1'])
- captured=json.loads(sys.stdin.read(),object_pairs_hook=closed_object)
+ captured=json.loads(sys.stdin.buffer.read().decode('utf-8'),object_pairs_hook=closed_object)
  if (type(captured) is not dict
      or set(captured)!={'ledger_sha256','rows','schema_version'}
      or captured.get('schema_version')!=1
@@ -995,6 +994,8 @@ finally:
   try: os.unlink(temporary_path)
   except OSError: pass
 PY
+  printf '%s' "$aggregation_input" | python3 -I -B -c "$writer_code" \
+    "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT"
 }
 if post_review_require_complete_wave; then
   :
