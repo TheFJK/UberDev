@@ -63,8 +63,11 @@ run_case() (
   printf 'keep-both-W0\n' >"$repo/keep-both.txt"
   printf 'untracked-U0\n' >"$repo/untracked.txt"
 
-  git -C "$repo" diff --cached --binary -- keep-staged.txt keep-both.txt >"$case_dir/keep.cached"
-  git -C "$repo" diff --binary -- keep-unstaged.txt keep-both.txt >"$case_dir/keep.worktree"
+  local preserved_path
+  for preserved_path in apply.txt keep-staged.txt keep-unstaged.txt keep-both.txt; do
+    git -C "$repo" ls-files --stage -- "$preserved_path" >"$case_dir/$preserved_path.index"
+    cp "$repo/$preserved_path" "$case_dir/$preserved_path.worktree"
+  done
 
   WORKTREE_ROOT="$(cd "$repo" && pwd -P)"
   RESEARCH_DIR_ABS="$(cd "$evidence" && pwd -P)"
@@ -233,8 +236,16 @@ PY
     [ "$SIMPLIFY_FIXER_STATUS" = APPLIED ]
     [ "$SIMPLIFY_FIXER_DECLARED_TIP" = "$(git -C "$repo" rev-parse HEAD)" ]
   fi
-  cmp "$case_dir/keep.cached" <(git -C "$repo" diff --cached --binary -- keep-staged.txt keep-both.txt)
-  cmp "$case_dir/keep.worktree" <(git -C "$repo" diff --binary -- keep-unstaged.txt keep-both.txt)
+  local preserved_paths="keep-staged.txt keep-unstaged.txt keep-both.txt"
+  [ "$mode" != zero ] || preserved_paths="apply.txt $preserved_paths"
+  for preserved_path in $preserved_paths; do
+    cmp "$case_dir/$preserved_path.index" <(git -C "$repo" ls-files --stage -- "$preserved_path")
+    cmp "$case_dir/$preserved_path.worktree" "$repo/$preserved_path"
+  done
+  if [ "$mode" != zero ]; then
+    [ "$(git -C "$repo" show :apply.txt)" = apply-FINAL ]
+    [ "$(<"$repo/apply.txt")" = apply-FINAL ]
+  fi
   [ "$(<"$repo/untracked.txt")" = untracked-U0 ]
 )
 

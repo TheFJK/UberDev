@@ -12,6 +12,9 @@ import inspect
 import json
 import os
 import pathlib
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,6 +29,21 @@ assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+
+codex_helper = root / "codex/uberdev-codex/lib/code_fixer_contract.py"
+assert helper_path.read_bytes() == codex_helper.read_bytes(), (
+    "generated Codex helper drifted from the authoritative plugin source"
+)
+
+workflow = (root / ".github/workflows/test.yml").read_text(encoding="utf-8")
+windows_job_match = re.search(
+    r"(?ms)^  shape-checks-windows:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
+)
+assert windows_job_match is not None
+windows_job = windows_job_match.group(0)
+assert "    runs-on: windows-latest\n" in windows_job
+assert "python -I -B tests/code-fixer-contract-windows.test.py" in windows_job
+assert "continue-on-error: true" not in windows_job
 
 assert dataclasses.is_dataclass(module.FindingKey)
 assert dataclasses.is_dataclass(module.RouteAuthority)
@@ -253,6 +271,21 @@ def git_object_files(repository):
     )
 
 
+def regular_snapshot(path):
+    entry = os.lstat(path)
+    assert stat.S_ISREG(entry.st_mode)
+    return (
+        path.read_bytes(),
+        entry.st_dev,
+        entry.st_ino,
+        entry.st_size,
+        stat.S_IMODE(entry.st_mode),
+        entry.st_mtime_ns,
+        entry.st_ctime_ns,
+        entry.st_nlink,
+    )
+
+
 def digest(path):
     value = run([
         "digest", "--path", str(path), "--minimum", "1", "--maximum", "1048576"
@@ -402,6 +435,125 @@ def expect_contract_reason(callback, reason):
         assert str(error) == reason, (str(error), reason)
         return
     raise AssertionError(f"expected closed contract refusal: {reason}")
+
+
+hostile_git_environment = {
+    "git_object_directory": "/hostile/objects",
+    "Git_Alternate_Object_Directories": "/hostile/alternates",
+    "gIt_InDeX_fIlE": "/hostile/index",
+}
+for key, value in hostile_git_environment.items():
+    os.environ[key] = value
+try:
+    scrubbed_environment = module._scrubbed_git_environment()
+finally:
+    for key in hostile_git_environment:
+        os.environ.pop(key, None)
+assert {
+    key for key in scrubbed_environment if key.upper().startswith("GIT_")
+} == {
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_NO_LAZY_FETCH",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OPTIONAL_LOCKS",
+}
+assert scrubbed_environment["GIT_NO_LAZY_FETCH"] == "1"
+assert scrubbed_environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+assert scrubbed_environment["GIT_OPTIONAL_LOCKS"] == "0"
+
+expect_contract_reason(
+    lambda: module._git_io(
+        str(root),
+        "rev-parse",
+        "--git-dir",
+        extra_env={"GIT_OBJECT_DIRECTORY": "/hostile/objects"},
+    ),
+    "git_environment_invalid",
+)
+expect_contract_reason(
+    lambda: module._git_io(
+        str(root),
+        "rev-parse",
+        "--git-dir",
+        extra_env={"GIT_EDITOR": "hostile-editor"},
+    ),
+    "git_environment_invalid",
+)
+
+
+def ewah_payload(bit_size, words, current_rlw=0):
+    return (
+        bit_size.to_bytes(4, "big")
+        + len(words).to_bytes(4, "big")
+        + b"".join(word.to_bytes(8, "big") for word in words)
+        + current_rlw.to_bytes(4, "big")
+    )
+
+
+expect_contract_reason(
+    lambda: module._decode_ewah_bitmap(
+        ewah_payload(1, [1 | (0xFFFFFFFF << 1)]), 0, 1
+    ),
+    "index_tree_unreadable",
+)
+expect_contract_reason(
+    lambda: module._decode_ewah_bitmap(ewah_payload(1, [1 | (1 << 1)]), 0, 1),
+    "index_tree_unreadable",
+)
+expect_contract_reason(
+    lambda: module._decode_ewah_bitmap(
+        ewah_payload(1, [1 << 33, 1 << 63]), 0, 1
+    ),
+    "index_tree_unreadable",
+)
+assert module._decode_ewah_bitmap(
+    ewah_payload(64, [1 | (1 << 1)]), 0, 64
+) == (set(range(64)), 20)
+
+
+class InterruptingStdout:
+    def __init__(self):
+        self.closed = False
+
+    def read(self, _maximum):
+        raise KeyboardInterrupt("injected bounded-read interrupt")
+
+    def close(self):
+        self.closed = True
+
+
+class ProvisionalProcess:
+    def __init__(self):
+        self.stdout = InterruptingStdout()
+        self.killed = False
+        self.waited = False
+
+    def poll(self):
+        return -9 if self.killed else None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        self.waited = True
+        return -9
+
+
+provisional_process = ProvisionalProcess()
+try:
+    module._read_bounded_process_stdout(
+        provisional_process, 16, "temporary_index_failed"
+    )
+except KeyboardInterrupt as error:
+    assert str(error) == "injected bounded-read interrupt"
+else:
+    raise AssertionError("bounded-read KeyboardInterrupt was swallowed")
+assert provisional_process.stdout.closed
+assert provisional_process.killed
+assert provisional_process.waited
 
 
 def persistence_result(status, *, halted=False, blocker_count=0,
@@ -1313,6 +1465,785 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-rename-") as temporary:
     assert rename_disposition.read_bytes() == b""
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == head
 
+with tempfile.TemporaryDirectory(prefix="code-fixer-index-tree-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "foo.bar").write_bytes(b"regular\n")
+    (repo / "foo").mkdir()
+    (repo / "foo/child").write_bytes(b"nested\n")
+    (repo / "foo0").write_bytes(b"prefix ordering\n")
+    executable = repo / "executable"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    symlink_supported = os.name != "nt"
+    if symlink_supported:
+        os.symlink("foo.bar", repo / "symlink")
+    raw_name = b"raw-\xff"
+    raw_path = os.path.join(os.fsencode(repo), raw_name)
+    raw_path_supported = True
+    try:
+        raw_descriptor = os.open(
+            raw_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+    except (OSError, TypeError):
+        raw_path_supported = False
+    else:
+        try:
+            os.write(raw_descriptor, b"raw path\n")
+        finally:
+            os.close(raw_descriptor)
+    git(repo, "add", "-A")
+    gitlink_oid = "1" * 40
+    git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000",
+        gitlink_oid,
+        "gitlink",
+    )
+    git(repo, "commit", "-qm", "test: index tree shapes")
+    raw_index_path = pathlib.Path(module._git_index_path(str(repo)))
+    git_dir = raw_index_path.parent
+    alternate = git_dir / "expected-tree-index"
+    shutil.copyfile(raw_index_path, alternate)
+    expected_environment = os.environ.copy()
+    expected_environment["GIT_INDEX_FILE"] = str(alternate)
+    expected_tree = subprocess.run(
+        ["git", "-C", str(repo), "write-tree"],
+        env=expected_environment,
+        capture_output=True,
+        check=True,
+    ).stdout.decode("ascii").strip()
+    alternate.unlink()
+    raw_blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=b"raw tree path\n",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    raw_tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree", "-z"],
+        input=b"100644 blob " + raw_blob + b"\t" + raw_name + b"\x00",
+        capture_output=True,
+        check=True,
+    ).stdout.decode("ascii").strip()
+    assert module._tree_sha_from_stage_rows(
+        str(repo),
+        b"100644 " + raw_blob + b" 0\t" + raw_name + b"\x00",
+    ) == raw_tree
+    index_before = regular_snapshot(raw_index_path)
+    objects_before = git_object_files(repo)
+    assert module._index_tree_sha(str(repo)) == expected_tree
+    assert regular_snapshot(raw_index_path) == index_before
+    assert git_object_files(repo) == objects_before
+    assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+    listed = git(repo, "ls-files", "--stage", "-z").stdout
+    assert b"100755 " in listed
+    assert b"160000 " + gitlink_oid.encode("ascii") + b" 0\tgitlink\x00" in listed
+    if raw_path_supported:
+        assert b"\t" + raw_name + b"\x00" in listed
+    if symlink_supported:
+        assert b"120000 " in listed
+
+    deep_index = git_dir / "deep-index"
+    deep_environment = os.environ.copy()
+    deep_environment["GIT_INDEX_FILE"] = str(deep_index)
+    subprocess.run(
+        ["git", "-C", str(repo), "read-tree", "--empty"],
+        env=deep_environment,
+        capture_output=True,
+        check=True,
+    )
+    deep_path = ("a/" * 1000) + "z"
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "update-index", "--info-only", "--add",
+            "--cacheinfo", "100644", raw_blob.decode("ascii"), deep_path,
+        ],
+        env=deep_environment,
+        capture_output=True,
+        check=True,
+    )
+    expected_deep_tree = subprocess.run(
+        ["git", "-C", str(repo), "write-tree"],
+        env=deep_environment,
+        capture_output=True,
+        check=True,
+    ).stdout.decode("ascii").strip()
+    assert module._index_tree_sha(
+        str(repo), extra_env={"GIT_INDEX_FILE": str(deep_index)}
+    ) == expected_deep_tree
+    deep_index.unlink()
+
+    replacement = git_dir / "same-byte-index-replacement"
+    replacement.write_bytes(raw_index_path.read_bytes())
+    original_parse_raw_index = module._parse_raw_index
+    canonical_rebound = {"done": False}
+
+    def rebind_canonical_index(payload, *, split_overlay):
+        result = original_parse_raw_index(payload, split_overlay=split_overlay)
+        if not canonical_rebound["done"]:
+            os.replace(replacement, raw_index_path)
+            canonical_rebound["done"] = True
+        return result
+
+    module._parse_raw_index = rebind_canonical_index
+    try:
+        expect_contract_reason(
+            lambda: module._index_tree_sha(str(repo)),
+            "index_observation_lock_recovery_failed",
+        )
+    finally:
+        module._parse_raw_index = original_parse_raw_index
+    assert canonical_rebound["done"]
+    assert raw_index_path.read_bytes() == index_before[0]
+    assert regular_snapshot(raw_index_path) != index_before
+    assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+
+    attacker_index_path = git_dir / "attacker-selected-index"
+    attacker_environment = os.environ.copy()
+    attacker_environment["GIT_INDEX_FILE"] = str(attacker_index_path)
+    subprocess.run(
+        ["git", "-C", str(repo), "read-tree", "HEAD"],
+        env=attacker_environment,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "update-index", "--info-only", "--add",
+            "--cacheinfo", "160000", "3" * 40, "attacker-selected",
+        ],
+        env=attacker_environment,
+        capture_output=True,
+        check=True,
+    )
+    attacker_index_payload = attacker_index_path.read_bytes()
+    attacker_index_path.unlink()
+    publication_index = git_dir / "publication-candidate"
+    publication_payload = module._build_tree_index_candidate(
+        str(repo), git(repo, "rev-parse", "HEAD").stdout.decode("ascii").strip(), {}
+    )
+    publication_index.write_bytes(publication_payload)
+    observed_publication, publication_identity = module._capture_regular(
+        str(publication_index), len(publication_payload), len(publication_payload)
+    )
+    assert observed_publication == publication_payload
+    original_run_candidate_write_tree = module._run_candidate_write_tree
+    post_mutation_rebound = {"done": False}
+
+    def rebind_after_mutating_git(working_dir, index_path):
+        result = original_run_candidate_write_tree(working_dir, index_path)
+        if not post_mutation_rebound["done"]:
+            replacement_index = pathlib.Path(index_path).with_suffix(".replacement")
+            replacement_index.write_bytes(attacker_index_payload)
+            os.replace(replacement_index, index_path)
+            post_mutation_rebound["done"] = True
+        return result
+
+    module._run_candidate_write_tree = rebind_after_mutating_git
+    try:
+        expect_contract_reason(
+            lambda: module._publish_index_tree_sha(
+                str(repo),
+                str(publication_index),
+                publication_payload,
+                publication_identity,
+            ),
+            "index_tree_unreadable",
+        )
+    finally:
+        module._run_candidate_write_tree = original_run_candidate_write_tree
+    assert post_mutation_rebound["done"]
+    assert not publication_index.exists()
+    quarantines = tuple(git_dir.glob(".code-fixer-index-quarantine-*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == attacker_index_payload
+    quarantines[0].unlink()
+
+    precapture_index = git_dir / "pre-capture-candidate"
+    precapture_index.write_bytes(publication_payload)
+    observed_precapture, precapture_identity = module._capture_regular(
+        str(precapture_index), len(publication_payload), len(publication_payload)
+    )
+    assert observed_precapture == publication_payload
+    precapture_replacement = git_dir / "pre-capture-replacement"
+    precapture_replacement.write_bytes(attacker_index_payload)
+    os.replace(precapture_replacement, precapture_index)
+    expect_contract_reason(
+        lambda: module._publish_index_tree_sha(
+            str(repo),
+            str(precapture_index),
+            publication_payload,
+            precapture_identity,
+        ),
+        "index_tree_unreadable",
+    )
+    assert not precapture_index.exists()
+    quarantines = tuple(git_dir.glob(".code-fixer-index-quarantine-*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == attacker_index_payload
+    quarantines[0].unlink()
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-index-refusal-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "base").write_bytes(b"base\n")
+    git(repo, "add", "--", "base")
+    git(repo, "commit", "-qm", "test: refusal base")
+    raw_index_path = pathlib.Path(module._git_index_path(str(repo)))
+    git_dir = raw_index_path.parent
+    baseline = regular_snapshot(raw_index_path)
+
+    (repo / "intent-to-add").write_bytes(b"")
+    git(repo, "add", "-N", "--", "intent-to-add")
+    ita_index = regular_snapshot(raw_index_path)
+    expect_contract_reason(
+        lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+    )
+    assert regular_snapshot(raw_index_path) == ita_index
+    git(repo, "reset", "--mixed", "-q", "HEAD")
+    (repo / "intent-to-add").unlink()
+    baseline = regular_snapshot(raw_index_path)
+
+    git(repo, "update-index", "--assume-unchanged", "--", "base")
+    assume_unchanged = regular_snapshot(raw_index_path)
+    expect_contract_reason(
+        lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+    )
+    expect_contract_reason(
+        lambda: module._build_index_candidate(
+            str(repo), assume_unchanged[0], assume_unchanged[4], {}
+        ),
+        "index_tree_unreadable",
+    )
+    assert regular_snapshot(raw_index_path) == assume_unchanged
+    git(repo, "update-index", "--no-assume-unchanged", "--", "base")
+
+    git(repo, "update-index", "--skip-worktree", "--", "base")
+    skip_worktree = regular_snapshot(raw_index_path)
+    expect_contract_reason(
+        lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+    )
+    expect_contract_reason(
+        lambda: module._build_index_candidate(
+            str(repo), skip_worktree[0], skip_worktree[4], {}
+        ),
+        "index_tree_unreadable",
+    )
+    assert regular_snapshot(raw_index_path) == skip_worktree
+    git(repo, "update-index", "--no-skip-worktree", "--", "base")
+    baseline = regular_snapshot(raw_index_path)
+
+    null_index = bytearray(raw_index_path.read_bytes())
+    assert null_index[:4] == b"DIRC"
+    null_index[52:72] = b"\x00" * 20
+    null_index[-20:] = hashlib.sha1(null_index[:-20]).digest()
+    expect_contract_reason(
+        lambda: module._validate_normalized_index(bytes(null_index)),
+        "index_tree_unreadable",
+    )
+
+    blobs = []
+    for payload in (b"ancestor\n", b"ours\n", b"theirs\n"):
+        blobs.append(
+            subprocess.run(
+                ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+                input=payload,
+                capture_output=True,
+                check=True,
+            ).stdout.decode("ascii").strip()
+        )
+    unmerged_index = git_dir / "unmerged-index"
+    unmerged_environment = os.environ.copy()
+    unmerged_environment["GIT_INDEX_FILE"] = str(unmerged_index)
+    index_info = b"".join(
+        f"100644 {oid} {stage}\tconflict\n".encode("ascii")
+        for stage, oid in enumerate(blobs, start=1)
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "update-index", "--index-info"],
+        input=index_info,
+        env=unmerged_environment,
+        capture_output=True,
+        check=True,
+    )
+    expect_contract_reason(
+        lambda: module._index_tree_sha(
+            str(repo), extra_env={"GIT_INDEX_FILE": str(unmerged_index)}
+        ),
+        "index_tree_unreadable",
+    )
+    unmerged_index.unlink()
+
+    missing_index = git_dir / "missing-blob-index"
+    missing_environment = os.environ.copy()
+    missing_environment["GIT_INDEX_FILE"] = str(missing_index)
+    subprocess.run(
+        ["git", "-C", str(repo), "read-tree", "HEAD"],
+        env=missing_environment,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "update-index", "--info-only", "--add",
+            "--cacheinfo", "100644", "2" * 40, "missing-blob",
+        ],
+        env=missing_environment,
+        capture_output=True,
+        check=True,
+    )
+    expect_contract_reason(
+        lambda: module._index_tree_sha(
+            str(repo), extra_env={"GIT_INDEX_FILE": str(missing_index)}
+        ),
+        "index_tree_unreadable",
+    )
+    missing_index.unlink()
+    assert regular_snapshot(raw_index_path) == baseline
+    assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-reuc-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    conflict = repo / "conflict"
+    conflict.write_bytes(b"base\n")
+    git(repo, "add", "--", conflict.name)
+    git(repo, "commit", "-qm", "test: resolve-undo base")
+    main_branch = git(repo, "branch", "--show-current").stdout.decode().strip()
+    git(repo, "branch", "resolve-undo-side")
+    conflict.write_bytes(b"main\n")
+    git(repo, "commit", "-qam", "test: resolve-undo main")
+    git(repo, "checkout", "-q", "resolve-undo-side")
+    conflict.write_bytes(b"side\n")
+    git(repo, "commit", "-qam", "test: resolve-undo side")
+    git(repo, "checkout", "-q", main_branch)
+    merge = git(repo, "merge", "resolve-undo-side", check=False)
+    assert merge.returncode != 0
+    assert git(repo, "ls-files", "--unmerged").stdout
+    conflict.write_bytes(b"resolved\n")
+    git(repo, "add", "--", conflict.name)
+    assert git(repo, "ls-files", "--resolve-undo").stdout
+    reuc_index_path = pathlib.Path(module._git_index_path(str(repo)))
+    reuc_index = regular_snapshot(reuc_index_path)
+    assert b"REUC" in reuc_index[0]
+    expect_contract_reason(
+        lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+    )
+    expect_contract_reason(
+        lambda: module._build_index_candidate(
+            str(repo),
+            reuc_index[0],
+            reuc_index[4],
+            {},
+        ),
+        "index_tree_unreadable",
+    )
+    assert regular_snapshot(reuc_index_path) == reuc_index
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-split-linked-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "tracked").write_bytes(b"tracked\n")
+    git(repo, "add", "--", "tracked")
+    git(repo, "commit", "-qm", "test: split and linked base")
+    expected_tree = git(repo, "rev-parse", "HEAD^{tree}").stdout.decode().strip()
+    raw_index_path = pathlib.Path(module._git_index_path(str(repo)))
+    git_dir = raw_index_path.parent
+    git(repo, "config", "splitIndex.maxPercentChange", "0")
+    git(repo, "config", "splitIndex.sharedIndexExpire", "never")
+    split_result = git(repo, "update-index", "--split-index", check=False)
+    if split_result.returncode == 0:
+        split_payload = raw_index_path.read_bytes()
+        shared_reference = module._index_shared_reference(split_payload)
+        assert shared_reference is not None
+        shared_name = shared_reference
+        canonical_shared = git_dir / shared_name
+        shared_before = regular_snapshot(canonical_shared)
+        alternate_parent = pathlib.Path(temporary) / "alternate split index"
+        alternate_parent.mkdir()
+        alternate_index = alternate_parent / "index"
+        alternate_shared = alternate_parent / shared_name
+        shutil.copyfile(raw_index_path, alternate_index)
+        shutil.copyfile(canonical_shared, alternate_shared)
+        hidden_shared = git_dir / f"{shared_name}.hidden"
+        os.replace(canonical_shared, hidden_shared)
+        try:
+            assert module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(alternate_index)}
+            ) == expected_tree
+        finally:
+            os.replace(hidden_shared, canonical_shared)
+        assert regular_snapshot(canonical_shared)[0] == shared_before[0]
+        shared_replacement = alternate_parent / f"{shared_name}.replacement"
+        shared_replacement.write_bytes(alternate_shared.read_bytes())
+        original_capture_regular = module._capture_regular
+        shared_rebound = {"done": False}
+
+        def rebind_alternate_shared(path, minimum, maximum):
+            captured = original_capture_regular(path, minimum, maximum)
+            if pathlib.Path(path) == alternate_shared and not shared_rebound["done"]:
+                os.replace(shared_replacement, alternate_shared)
+                shared_rebound["done"] = True
+            return captured
+
+        module._capture_regular = rebind_alternate_shared
+        try:
+            expect_contract_reason(
+                lambda: module._index_tree_sha(
+                    str(repo), extra_env={"GIT_INDEX_FILE": str(alternate_index)}
+                ),
+                "index_tree_unreadable",
+            )
+        finally:
+            module._capture_regular = original_capture_regular
+        assert shared_rebound["done"]
+        assert alternate_shared.read_bytes() == shared_before[0]
+        assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+        alternate_index.unlink()
+        alternate_shared.unlink()
+    else:
+        assert b"split-index" in split_result.stderr
+
+    git(repo, "branch", "linked-fixture")
+    linked = pathlib.Path(temporary) / "linked worktree"
+    git(repo, "worktree", "add", "-q", str(linked), "linked-fixture")
+    linked_index = pathlib.Path(module._git_index_path(str(linked)))
+    linked_before = regular_snapshot(linked_index)
+    assert module._index_tree_sha(str(linked)) == expected_tree
+    assert regular_snapshot(linked_index) == linked_before
+    assert not tuple(linked_index.parent.glob(".code-fixer-private-git-*"))
+
+exercised_split_versions = set()
+for index_version in (2, 3, 4):
+    with tempfile.TemporaryDirectory(
+        prefix=f"code-fixer-split-v{index_version}-"
+    ) as temporary:
+        repo = pathlib.Path(temporary) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        git(repo, "config", "user.email", "fixture@example.invalid")
+        git(repo, "config", "user.name", "Fixture")
+        for name in ("a", "b", "c", "d"):
+            (repo / name).write_bytes(f"{name}-base\n".encode("ascii"))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", f"test: split v{index_version} base")
+        git(repo, "config", "splitIndex.maxPercentChange", "100")
+        git(repo, "config", "splitIndex.sharedIndexExpire", "never")
+        git(repo, "update-index", "--index-version", str(index_version))
+        split_result = git(repo, "update-index", "--split-index", check=False)
+        assert split_result.returncode == 0, split_result.stderr
+        (repo / "a").write_bytes(b"a-replaced\n")
+        (repo / "c").unlink()
+        (repo / "e").write_bytes(b"e-added\n")
+        git(repo, "add", "-A")
+        split_index_path = pathlib.Path(module._git_index_path(str(repo)))
+        split_payload, split_identity = module._capture_regular(
+            str(split_index_path), 1, module.INDEX_LIMIT
+        )
+        shared_name = module._index_shared_reference(split_payload)
+        assert shared_name is not None
+        shared_path = split_index_path.parent / shared_name
+        shared_payload = shared_path.read_bytes()
+        if index_version == 3 and int.from_bytes(split_payload[4:8], "big") == 2:
+            assert int.from_bytes(shared_payload[4:8], "big") == 2
+            shared_content = bytearray(shared_payload[:-20])
+            shared_content[4:8] = (3).to_bytes(4, "big")
+            shared_digest = hashlib.sha1(shared_content).digest()
+            shared_payload = bytes(shared_content) + shared_digest
+            shared_path = split_index_path.parent / (
+                "sharedindex." + shared_digest.hex()
+            )
+            shared_path.write_bytes(shared_payload)
+            split_content = bytearray(split_payload[:-20])
+            extension_offset, _content_limit, _sparse = module._index_entry_layout(
+                split_payload
+            )
+            assert split_content[extension_offset : extension_offset + 4] == b"link"
+            split_content[4:8] = (3).to_bytes(4, "big")
+            split_content[extension_offset + 8 : extension_offset + 28] = shared_digest
+            split_payload = bytes(split_content) + hashlib.sha1(split_content).digest()
+            split_index_path.write_bytes(split_payload)
+            split_payload, split_identity = module._capture_regular(
+                str(split_index_path), len(split_payload), len(split_payload)
+            )
+        assert int.from_bytes(split_payload[4:8], "big") == index_version
+        assert int.from_bytes(shared_payload[4:8], "big") == index_version
+        shared_entries, _shared_extensions = module._parse_raw_index(
+            shared_payload, split_overlay=False
+        )
+        overlay_entries, overlay_extensions = module._parse_raw_index(
+            split_payload, split_overlay=True
+        )
+        link = overlay_extensions[b"link"]
+        deleted, link_offset = module._decode_ewah_bitmap(
+            link, 20, len(shared_entries)
+        )
+        replaced, link_offset = module._decode_ewah_bitmap(
+            link, link_offset, len(shared_entries)
+        )
+        assert link_offset == len(link)
+        assert deleted and replaced
+        assert len(overlay_entries) > len(replaced)
+        split_before = regular_snapshot(split_index_path)
+        shared_before = regular_snapshot(shared_path)
+        pure_rows = module._captured_index_stage_rows(
+            str(repo), str(split_index_path), split_payload, split_identity
+        )
+        assert regular_snapshot(split_index_path) == split_before
+        assert regular_snapshot(shared_path) == shared_before
+        git_rows = git(repo, "ls-files", "--stage", "-z").stdout
+        assert pure_rows == git_rows
+        assert b"\ta\x00" in pure_rows
+        assert b"\tc\x00" not in pure_rows
+        assert b"\te\x00" in pure_rows
+        exercised_split_versions.add(index_version)
+assert exercised_split_versions == {2, 3, 4}
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-git-environment-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "original").write_bytes(b"original\n")
+    git(repo, "add", "--", "original")
+    git(repo, "commit", "-qm", "test: canonical environment base")
+    original_commit = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    original_tree = git(repo, "rev-parse", "HEAD^{tree}").stdout.decode().strip()
+    canonical_rows = module._read_tree_stage_rows(str(repo), original_commit)
+    canonical_commit_payload = git(repo, "cat-file", "commit", original_commit).stdout
+
+    (repo / "original").unlink()
+    (repo / "replacement").write_bytes(b"replacement\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "test: hostile replacement commit")
+    replacement_commit = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    git(repo, "reset", "--hard", "-q", original_commit)
+    git(repo, "replace", original_commit, replacement_commit)
+    assert b"replacement" in git(repo, "ls-tree", "-r", "-z", original_commit).stdout
+    assert module._read_tree_stage_rows(str(repo), original_commit) == canonical_rows
+    assert module._git(
+        str(repo), "cat-file", "commit", original_commit
+    ).stdout == canonical_commit_payload
+
+    alternate_objects = pathlib.Path(temporary) / "alternate-objects"
+    (alternate_objects / "info").mkdir(parents=True)
+    (alternate_objects / "pack").mkdir()
+    alternate_environment = os.environ.copy()
+    alternate_environment["GIT_OBJECT_DIRECTORY"] = str(alternate_objects)
+    alternate_only_oid = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=b"alternate-only-object\n",
+        env=alternate_environment,
+        capture_output=True,
+        check=True,
+    ).stdout.decode().strip()
+    assert (alternate_objects / alternate_only_oid[:2] / alternate_only_oid[2:]).is_file()
+    assert module._git(
+        str(repo), "cat-file", "-e", alternate_only_oid
+    ).returncode != 0
+
+    hostile_repository = pathlib.Path(temporary) / "hostile.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-q", str(hostile_repository)], check=True
+    )
+    hostile_index = pathlib.Path(temporary) / "hostile-index"
+    shutil.copyfile(module._git_index_path(str(repo)), hostile_index)
+    hostile_global = pathlib.Path(temporary) / "hostile-global-config"
+    hostile_global.write_text("[hostile]\n\tmarker = true\n", encoding="utf-8")
+    hostile_values = {
+        "GIT_OBJECT_DIRECTORY": str(alternate_objects),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(alternate_objects),
+        "GIT_INDEX_FILE": str(hostile_index),
+        "GIT_CONFIG_GLOBAL": str(hostile_global),
+        "GIT_DIR": str(hostile_repository),
+        "GIT_WORK_TREE": str(pathlib.Path(temporary) / "hostile-worktree"),
+        "GIT_COMMON_DIR": str(hostile_repository),
+        "GIT_NO_REPLACE_OBJECTS": "0",
+        "GIT_REPLACE_REF_BASE": "refs/replace",
+    }
+    missing_environment_value = object()
+    previous_values = {
+        key: os.environ.get(key, missing_environment_value) for key in hostile_values
+    }
+    os.environ.update(hostile_values)
+    try:
+        canonical_payload = b"canonical-object-store\n"
+        canonical_object = module._git_io(
+            str(repo), "hash-object", "-w", "--stdin", payload=canonical_payload
+        )
+        assert canonical_object.returncode == 0
+        canonical_oid = canonical_object.stdout.decode().strip()
+        canonical_object_path = repo / ".git/objects" / canonical_oid[:2] / canonical_oid[2:]
+        assert canonical_object_path.is_file()
+        assert not (
+            alternate_objects / canonical_oid[:2] / canonical_oid[2:]
+        ).exists()
+        assert module._git(str(repo), "write-tree").stdout == (
+            original_tree.encode("ascii") + b"\n"
+        )
+        assert module._git(
+            str(repo), "config", "--global", "--get", "hostile.marker"
+        ).returncode != 0
+        ref_update = module._git_io(
+            str(repo),
+            "update-ref",
+            "refs/heads/environment-proof",
+            original_commit,
+            "0" * 40,
+        )
+        assert ref_update.returncode == 0
+    finally:
+        for key, previous in previous_values.items():
+            if previous is missing_environment_value:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+    assert git(
+        repo, "rev-parse", "refs/heads/environment-proof"
+    ).stdout.decode().strip() == original_commit
+    assert git(
+        hostile_repository,
+        "show-ref",
+        "--verify",
+        "refs/heads/environment-proof",
+        check=False,
+    ).returncode != 0
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-partial-clone-") as temporary:
+    source = pathlib.Path(temporary) / "source"
+    source.mkdir()
+    git(source, "init", "-q")
+    git(source, "config", "user.email", "fixture@example.invalid")
+    git(source, "config", "user.name", "Fixture")
+    (source / "promised-a").write_bytes(b"promised-a\n")
+    (source / "promised-b").write_bytes(b"promised-b\n")
+    git(source, "add", "-A")
+    git(source, "commit", "-qm", "test: promised blobs")
+    remote = pathlib.Path(temporary) / "remote.git"
+    subprocess.run(
+        ["git", "clone", "--bare", "-q", str(source), str(remote)], check=True
+    )
+    git(remote, "config", "uploadpack.allowFilter", "true")
+    partial = pathlib.Path(temporary) / "partial"
+    clone = subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "-q",
+            "--filter=blob:none",
+            "--no-checkout",
+            remote.as_uri(),
+            str(partial),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert clone.returncode == 0, clone.stderr
+    assert git(
+        partial, "config", "--get", "remote.origin.promisor"
+    ).stdout == b"true\n"
+    no_fetch_environment = os.environ.copy()
+    no_fetch_environment["GIT_NO_LAZY_FETCH"] = "1"
+    subprocess.run(
+        ["git", "-C", str(partial), "read-tree", "HEAD"],
+        env=no_fetch_environment,
+        capture_output=True,
+        check=True,
+    )
+    missing_before = subprocess.run(
+        ["git", "-C", str(partial), "rev-list", "--objects", "--missing=print", "HEAD"],
+        env=no_fetch_environment,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert b"?" in missing_before
+    partial_index_path = pathlib.Path(module._git_index_path(str(partial)))
+    partial_index = regular_snapshot(partial_index_path)
+    partial_objects = git_object_files(partial)
+    expect_contract_reason(
+        lambda: module._index_tree_sha(str(partial)), "index_tree_unreadable"
+    )
+    missing_after = subprocess.run(
+        ["git", "-C", str(partial), "rev-list", "--objects", "--missing=print", "HEAD"],
+        env=no_fetch_environment,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert missing_after == missing_before
+    assert regular_snapshot(partial_index_path) == partial_index
+    assert git_object_files(partial) == partial_objects
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-sparse-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "included").mkdir()
+    (repo / "included/file").write_bytes(b"included\n")
+    (repo / "excluded").mkdir()
+    (repo / "excluded/file").write_bytes(b"excluded\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "test: sparse base")
+    sparse_result = git(repo, "sparse-checkout", "init", "--cone", "--sparse-index", check=False)
+    if sparse_result.returncode == 0:
+        git(repo, "sparse-checkout", "set", "included")
+        sparse_index = pathlib.Path(module._git_index_path(str(repo)))
+        sparse_before = regular_snapshot(sparse_index)
+        sparse_rows = git(repo, "ls-files", "--sparse", "--stage", "-z").stdout
+        assert b"040000 " in sparse_rows
+        expect_contract_reason(
+            lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+        )
+        assert regular_snapshot(sparse_index) == sparse_before
+        assert not tuple(sparse_index.parent.glob(".code-fixer-private-git-*"))
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-sha256-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    sha256_init = subprocess.run(
+        ["git", "init", "-q", "--object-format=sha256", str(repo)],
+        capture_output=True,
+        check=False,
+    )
+    if sha256_init.returncode == 0:
+        git(repo, "config", "user.email", "fixture@example.invalid")
+        git(repo, "config", "user.name", "Fixture")
+        (repo / "tracked").write_bytes(b"sha256\n")
+        git(repo, "add", "--", "tracked")
+        git(repo, "commit", "-qm", "test: sha256 refusal")
+        sha256_index = pathlib.Path(
+            git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index")
+            .stdout.decode()
+            .strip()
+        )
+        sha256_before = regular_snapshot(sha256_index)
+        expect_contract_reason(
+            lambda: module._index_tree_sha(str(repo)), "index_tree_unreadable"
+        )
+        assert regular_snapshot(sha256_index) == sha256_before
+        assert not tuple(sha256_index.parent.glob(".code-fixer-private-git-*"))
+
 with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
@@ -1346,12 +2277,13 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     keep_cached = git(repo, "diff", "--cached", "--binary", "--", *keep_paths).stdout
     keep_worktree = git(repo, "diff", "--binary", "--", *keep_paths).stdout
     keep_bytes = {name: (repo / name).read_bytes() for name in keep_paths}
+    git(repo, "config", "splitIndex.maxPercentChange", "0")
+    git(repo, "config", "splitIndex.sharedIndexExpire", "never")
     split_index_result = git(repo, "update-index", "--split-index", check=False)
     split_index_supported = split_index_result.returncode == 0
     if not split_index_supported:
         assert b"split-index" in split_index_result.stderr
         assert b"unknown option" in split_index_result.stderr
-    git_dir = repo / ".git"
     evidence = repo / ".uberdev/research/20260728-010206-abcdef0"
     evidence.mkdir(parents=True)
     diff_path = evidence / "pr-diff.md"
@@ -1368,8 +2300,9 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     assert snapshot_receipt["target_eligible_paths"] == sorted(names)
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     raw_index_path = pathlib.Path(snapshot["index_path"])
+    git_dir = raw_index_path.parent
     shared_indexes_before_observation = {
-        path.name: path.read_bytes() for path in git_dir.glob("sharedindex.*")
+        path.name: regular_snapshot(path) for path in git_dir.glob("sharedindex.*")
     }
     if split_index_supported:
         assert shared_indexes_before_observation
@@ -1394,7 +2327,172 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     assert raw_index_path.read_bytes() == raw_index_baseline
     assert {
         path.name: path.read_bytes() for path in git_dir.glob("sharedindex.*")
-    } == shared_indexes_before_observation
+    } == {
+        name: shared[0]
+        for name, shared in shared_indexes_before_observation.items()
+    }
+    keep_staged_index_oid = git(
+        repo, "rev-parse", ":keep-staged"
+    ).stdout.decode().strip()
+    git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "100644",
+        keep_staged_index_oid,
+        "keep-staged",
+    )
+    invalid_cache_index = raw_index_path.read_bytes()
+    invalid_cache_shared_indexes = {
+        path.name: regular_snapshot(path) for path in git_dir.glob("sharedindex.*")
+    }
+    assert invalid_cache_index != raw_index_baseline
+    git(repo, "config", "splitIndex.sharedIndexExpire", "now")
+    assert module._index_tree_sha(str(repo)) == snapshot["index_tree_sha"]
+    assert {
+        path.name: regular_snapshot(path) for path in git_dir.glob("sharedindex.*")
+    } == invalid_cache_shared_indexes
+    git(repo, "config", "splitIndex.sharedIndexExpire", "never")
+    observed_with_invalid_cache_tree = module._capture_repo_state(
+        str(repo), str(evidence)
+    )
+    assert {
+        key: observed_with_invalid_cache_tree[key] for key in logical_state_keys
+    } == {
+        key: snapshot[key] for key in logical_state_keys
+    }
+    assert raw_index_path.read_bytes() == invalid_cache_index
+    assert {
+        path.name: path.read_bytes() for path in git_dir.glob("sharedindex.*")
+    } == {
+        name: shared[0] for name, shared in invalid_cache_shared_indexes.items()
+    }
+    assert not tuple(git_dir.glob(".code-fixer-index-tree-*"))
+    assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+
+    previous_ambient_index = os.environ.get("GIT_INDEX_FILE")
+    os.environ["GIT_INDEX_FILE"] = str(raw_index_path)
+    try:
+        expect_contract_reason(
+            lambda: module._index_tree_sha(str(repo)),
+            "index_tree_environment_invalid",
+        )
+    finally:
+        if previous_ambient_index is None:
+            os.environ.pop("GIT_INDEX_FILE", None)
+        else:
+            os.environ["GIT_INDEX_FILE"] = previous_ambient_index
+
+    original_git_io = module._git_io
+    direct_write_calls = []
+
+    def record_direct_write(repository, *arguments, **kwargs):
+        direct_write_calls.append((repository, arguments, kwargs))
+        return subprocess.CompletedProcess(
+            ["git", *arguments], 0, stdout=(b"0" * 40) + b"\n", stderr=b""
+        )
+
+    module._git_io = record_direct_write
+    try:
+        resolved_real_index = module._git_index_path(str(repo))
+        assert os.path.normcase(os.path.realpath(resolved_real_index)) == os.path.normcase(
+            os.path.realpath(raw_index_path)
+        ), (resolved_real_index, str(raw_index_path))
+        expect_contract_reason(
+            lambda: module._index_tree_sha(str(repo), extra_env={}),
+            "index_tree_environment_invalid",
+        )
+        expect_contract_reason(
+            lambda: module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(raw_index_path)}
+            ),
+            "index_tree_environment_invalid",
+        )
+    finally:
+        module._git_io = original_git_io
+    assert direct_write_calls == []
+
+    for removed_private_api in (
+        "_PrivateGitDirectory",
+        "_create_private_git_directory",
+        "_cleanup_private_git_directory",
+        "_run_private_git",
+        "_private_index_tree",
+    ):
+        assert not hasattr(module, removed_private_api)
+    assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
+
+    fsmonitor_marker = git_dir / "fsmonitor-executed"
+    fsmonitor_hook = git_dir / "fsmonitor-hook"
+    fsmonitor_hook.write_text(
+        f"#!/bin/sh\nprintf invoked >\"{fsmonitor_marker}\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    fsmonitor_hook.chmod(0o755)
+    git(repo, "config", "core.fsmonitor", str(fsmonitor_hook))
+    git(repo, "update-index", "--fsmonitor")
+    fsmonitor_marker.unlink(missing_ok=True)
+    fsmonitor_index = regular_snapshot(raw_index_path)
+    assert module._index_tree_sha(str(repo)) == snapshot["index_tree_sha"]
+    assert not fsmonitor_marker.exists()
+    assert regular_snapshot(raw_index_path) == fsmonitor_index
+    git(repo, "config", "--unset", "core.fsmonitor")
+    git(repo, "update-index", "--no-fsmonitor")
+
+    alternate_index = git_dir / "alternate-index-hardlink"
+    os.link(raw_index_path, alternate_index)
+    try:
+        expect_contract_reason(
+            lambda: module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(alternate_index)}
+            ),
+            "index_tree_environment_invalid",
+        )
+    finally:
+        alternate_index.unlink()
+
+    alias_index = git_dir / "alternate-index-alias"
+    alias_index.symlink_to(raw_index_path.name)
+    try:
+        expect_contract_reason(
+            lambda: module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(alias_index)}
+            ),
+            "index_tree_environment_invalid",
+        )
+    finally:
+        alias_index.unlink()
+
+    rebound_index = git_dir / "alternate-index-rebound"
+    rebound_index.write_bytes(raw_index_path.read_bytes())
+    rebound_replacement = git_dir / "alternate-index-replacement"
+    rebound_replacement.write_bytes(raw_index_path.read_bytes())
+    original_capture_regular = module._capture_regular
+    rebound_injected = {"done": False}
+
+    def replace_alternate_after_capture(path, minimum, maximum):
+        captured = original_capture_regular(path, minimum, maximum)
+        if pathlib.Path(path) == rebound_index and not rebound_injected["done"]:
+            rebound_index.unlink()
+            os.replace(rebound_replacement, rebound_index)
+            rebound_injected["done"] = True
+        return captured
+
+    module._capture_regular = replace_alternate_after_capture
+    try:
+        expect_contract_reason(
+            lambda: module._index_tree_sha(
+                str(repo), extra_env={"GIT_INDEX_FILE": str(rebound_index)}
+            ),
+            "index_tree_environment_invalid",
+        )
+    finally:
+        module._capture_regular = original_capture_regular
+        rebound_index.unlink(missing_ok=True)
+        rebound_replacement.unlink(missing_ok=True)
+    assert rebound_injected["done"]
+    raw_index_path.write_bytes(raw_index_baseline)
     index_lock_path = pathlib.Path(f"{raw_index_path}.lock")
     assert not index_lock_path.exists()
     previous_umask = os.umask(0o777)
@@ -1506,6 +2604,81 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     assert raw_index_path.read_bytes() == raw_index_baseline
     index_lock_path.unlink()
     assert not index_lock_path.exists()
+
+    original_atomic_rename_noreplace = module.atomic_rename_noreplace
+    between_quarantine_payload = b"between-quarantine-and-verification\n"
+    preserved_owned_lock = git_dir / "preserved-owned-observation-lock"
+    quarantine_replaced = {"done": False}
+
+    def replace_quarantine_before_verification(source, destination, **kwargs):
+        result = original_atomic_rename_noreplace(source, destination, **kwargs)
+        if (
+            not quarantine_replaced["done"]
+            and os.path.abspath(os.fspath(source)) == os.path.abspath(index_lock_path)
+            and ".code-fixer-index-lock-retired-" in os.path.basename(destination)
+        ):
+            os.replace(destination, preserved_owned_lock)
+            pathlib.Path(destination).write_bytes(between_quarantine_payload)
+            quarantine_replaced["done"] = True
+        return result
+
+    module.atomic_rename_noreplace = replace_quarantine_before_verification
+    try:
+        expect_contract_reason(
+            lambda: module._capture_repo_state(str(repo), str(evidence)),
+            "index_observation_lock_recovery_failed",
+        )
+    finally:
+        module.atomic_rename_noreplace = original_atomic_rename_noreplace
+    assert quarantine_replaced["done"]
+    assert preserved_owned_lock.read_bytes() == b""
+    assert index_lock_path.read_bytes() == between_quarantine_payload
+    preserved_owned_lock.unlink()
+    index_lock_path.unlink()
+
+    after_verification_payload = b"after-quarantine-verification\n"
+    after_verification_source = git_dir / "after-verification-source"
+    observed_quarantine = {"path": None, "replaced": False}
+    original_close = module.os.close
+
+    def capture_quarantine(source, destination, **kwargs):
+        result = original_atomic_rename_noreplace(source, destination, **kwargs)
+        if (
+            os.path.abspath(os.fspath(source)) == os.path.abspath(index_lock_path)
+            and ".code-fixer-index-lock-retired-" in os.path.basename(destination)
+            and observed_quarantine["path"] is None
+        ):
+            observed_quarantine["path"] = pathlib.Path(destination)
+        return result
+
+    def replace_quarantine_after_verification(descriptor):
+        quarantine = observed_quarantine["path"]
+        if quarantine is not None and not observed_quarantine["replaced"]:
+            try:
+                held = os.fstat(descriptor)
+                visible = os.lstat(quarantine)
+            except OSError:
+                pass
+            else:
+                if (held.st_dev, held.st_ino) == (visible.st_dev, visible.st_ino):
+                    original_close(descriptor)
+                    after_verification_source.write_bytes(after_verification_payload)
+                    os.replace(after_verification_source, quarantine)
+                    observed_quarantine["replaced"] = True
+                    return
+        original_close(descriptor)
+
+    module.atomic_rename_noreplace = capture_quarantine
+    module.os.close = replace_quarantine_after_verification
+    try:
+        module._capture_repo_state(str(repo), str(evidence))
+    finally:
+        module.os.close = original_close
+        module.atomic_rename_noreplace = original_atomic_rename_noreplace
+    assert observed_quarantine["replaced"]
+    assert observed_quarantine["path"].read_bytes() == after_verification_payload
+    assert not index_lock_path.exists()
+
     findings = evidence / "simplify-final.md"
     findings.write_bytes(aggregate("phase2", [
         (("review_pr.simplify.reuse",), "suggestion", "applied-staged", "1", "refine A", "detail A"),
@@ -1536,19 +2709,13 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         for finding in authority["finding_keys"]
     ]
     applied_content_path = evidence / "standalone-applied-content.json"
-    head_keep_staged_oid = git(
-        repo, "rev-parse", "HEAD:keep-staged"
-    ).stdout.decode().strip()
-    git(
-        repo,
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        "100644",
-        head_keep_staged_oid,
-        "keep-staged",
-    )
-    git(repo, "write-tree")
+    mismatched_index = bytearray(raw_index_baseline)
+    mismatch_width = 20
+    mismatched_index[12] ^= 1
+    mismatched_index[-mismatch_width:] = hashlib.sha1(
+        mismatched_index[:-mismatch_width]
+    ).digest()
+    raw_index_path.write_bytes(mismatched_index)
     assert raw_index_path.read_bytes() != raw_index_baseline
     assert raw_index_path.stat().st_size == len(raw_index_baseline)
     expect_contract_reason(lambda: module.publish_disposition(

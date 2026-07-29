@@ -10,6 +10,7 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -42,6 +43,20 @@ except ModuleNotFoundError:
     secure_capture_published = _run_manifest.secure_capture_published
     secure_capture_regular = _run_manifest.secure_capture_regular
     secure_publish_captured = _run_manifest.secure_publish_captured
+
+try:
+    from atomic_move import atomic_rename_noreplace
+except ModuleNotFoundError:
+    _atomic_move_path = os.path.join(os.path.dirname(__file__), "atomic_move.py")
+    _atomic_move_spec = importlib.util.spec_from_file_location(
+        "_code_fixer_atomic_move", _atomic_move_path
+    )
+    if _atomic_move_spec is None or _atomic_move_spec.loader is None:
+        raise
+    _atomic_move = importlib.util.module_from_spec(_atomic_move_spec)
+    sys.modules[_atomic_move_spec.name] = _atomic_move
+    _atomic_move_spec.loader.exec_module(_atomic_move)
+    atomic_rename_noreplace = _atomic_move.atomic_rename_noreplace
 
 Phase = Literal["phase1", "phase2"]
 CommitType = Literal["fix", "refactor"]
@@ -117,8 +132,9 @@ class _ArtifactRollback:
 class _IndexObservationLock:
     index_path: str
     lock_path: str
+    parent_identity: tuple[int, int]
     index_payload: bytes
-    index_mode: int
+    index_identity: ArtifactIdentity
     lock_identity: tuple[int, int]
     descriptor: int | None
     handle: int | None
@@ -458,10 +474,19 @@ def _run_observational_git(
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
-            ["git", "--no-optional-locks", "-C", repository, *arguments],
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                repository,
+                "-c",
+                "core.fsmonitor=false",
+                *arguments,
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
             check=False,
         )
     except OSError:
@@ -478,12 +503,36 @@ def _git_io(
     payload: bytes | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    environment = os.environ.copy()
-    if extra_env:
+    environment = _scrubbed_git_environment()
+    if extra_env is not None:
+        if not isinstance(extra_env, dict) or not set(extra_env).issubset(
+            {"GIT_INDEX_FILE", "GIT_EDITOR"}
+        ):
+            fail("git_environment_invalid")
+        index_path = extra_env.get("GIT_INDEX_FILE")
+        if index_path is not None and (
+            not isinstance(index_path, str)
+            or not index_path
+            or not os.path.isabs(index_path)
+            or "\x00" in index_path
+            or any(ord(character) < 32 or ord(character) == 127 for character in index_path)
+        ):
+            fail("git_environment_invalid")
+        editor = extra_env.get("GIT_EDITOR")
+        if editor is not None and editor != ":":
+            fail("git_environment_invalid")
         environment.update(extra_env)
     try:
         return subprocess.run(
-            ["git", "-C", repository, *arguments],
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                repository,
+                "-c",
+                "core.fsmonitor=false",
+                *arguments,
+            ],
             input=payload,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -505,7 +554,7 @@ def _index_observation_unchanged(binding: _IndexObservationLock) -> bool:
         return False
     return (
         payload == binding.index_payload
-        and stat.S_IMODE(identity.mode) == binding.index_mode
+        and identity == binding.index_identity
     )
 
 
@@ -513,42 +562,119 @@ def _cleanup_posix_index_lock(
     lock_path: str,
     descriptor: int,
     lock_identity: tuple[int, int] | None,
+    parent_identity: tuple[int, int],
     *,
     require_mode: bool = True,
 ) -> bool:
-    cleanup_succeeded = True
+    cleanup_succeeded = False
+    parent_descriptor = -1
+    quarantine_descriptor = -1
+    quarantine_path = ""
     try:
         held = os.fstat(descriptor)
-        visible = os.lstat(lock_path)
         expected_identity = lock_identity or (held.st_dev, held.st_ino)
         if (
             not stat.S_ISREG(held.st_mode)
-            or not stat.S_ISREG(visible.st_mode)
             or held.st_nlink != 1
-            or visible.st_nlink != 1
             or held.st_size != 0
-            or visible.st_size != 0
             or (
                 require_mode
-                and (
-                    stat.S_IMODE(held.st_mode) != 0o600
-                    or stat.S_IMODE(visible.st_mode) != 0o600
-                )
+                and stat.S_IMODE(held.st_mode) != 0o600
             )
             or (held.st_dev, held.st_ino) != expected_identity
-            or (visible.st_dev, visible.st_ino) != expected_identity
         ):
-            cleanup_succeeded = False
+            return False
+        parent_path = os.path.dirname(lock_path)
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+        if directory_flag is None or nofollow_flag is None:
+            return False
+        parent_descriptor = os.open(
+            parent_path,
+            os.O_RDONLY
+            | directory_flag
+            | nofollow_flag
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened_parent = os.fstat(parent_descriptor)
+        visible_parent = os.lstat(parent_path)
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or not stat.S_ISDIR(visible_parent.st_mode)
+            or (opened_parent.st_dev, opened_parent.st_ino) != parent_identity
+            or (visible_parent.st_dev, visible_parent.st_ino) != parent_identity
+        ):
+            return False
+        for _ in range(128):
+            candidate = os.path.join(
+                parent_path,
+                ".code-fixer-index-lock-retired-" + secrets.token_hex(16),
+            )
+            try:
+                atomic_rename_noreplace(lock_path, candidate)
+            except FileExistsError:
+                continue
+            except OSError:
+                return False
+            quarantine_path = candidate
+            break
+        if not quarantine_path:
+            return False
+        os.fsync(parent_descriptor)
+        quarantined = os.lstat(quarantine_path)
+        quarantine_descriptor = os.open(
+            quarantine_path,
+            os.O_RDONLY | nofollow_flag | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened_quarantine = os.fstat(quarantine_descriptor)
+        current_parent = os.lstat(parent_path)
+        owned = (
+            stat.S_ISREG(quarantined.st_mode)
+            and stat.S_ISREG(opened_quarantine.st_mode)
+            and quarantined.st_nlink == 1
+            and opened_quarantine.st_nlink == 1
+            and quarantined.st_size == 0
+            and opened_quarantine.st_size == 0
+            and (
+                not require_mode
+                or (
+                    stat.S_IMODE(quarantined.st_mode) == 0o600
+                    and stat.S_IMODE(opened_quarantine.st_mode) == 0o600
+                )
+            )
+            and (quarantined.st_dev, quarantined.st_ino) == expected_identity
+            and (opened_quarantine.st_dev, opened_quarantine.st_ino)
+            == expected_identity
+            and stat.S_ISDIR(current_parent.st_mode)
+            and (current_parent.st_dev, current_parent.st_ino) == parent_identity
+        )
+        os.close(quarantine_descriptor)
+        quarantine_descriptor = -1
+        if owned:
+            # Portable POSIX has no unlink-if-inode primitive.  Retain the
+            # verified zero-byte generation under its unpredictable private
+            # name so a post-verification same-UID replacement cannot be
+            # deleted by this process.
+            cleanup_succeeded = True
         else:
-            os.unlink(lock_path)
-            if os.path.lexists(lock_path):
+            try:
+                atomic_rename_noreplace(quarantine_path, lock_path)
+            except OSError:
+                pass
+            try:
+                os.fsync(parent_descriptor)
+            except OSError:
+                pass
+    except BaseException:
+        cleanup_succeeded = False
+    finally:
+        for provisional in (quarantine_descriptor, parent_descriptor, descriptor):
+            if provisional < 0:
+                continue
+            try:
+                os.close(provisional)
+            except BaseException:
                 cleanup_succeeded = False
-    except BaseException:
-        cleanup_succeeded = False
-    try:
-        os.close(descriptor)
-    except BaseException:
-        cleanup_succeeded = False
     return cleanup_succeeded
 
 
@@ -702,6 +828,9 @@ def _windows_dispose_index_lock(handle: int) -> bool:
 def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
     index_path = _git_index_path(repository)
     lock_path = index_path + ".lock"
+    parent_identity = _directory_identity(
+        os.path.dirname(index_path), "index_observation_lock_unavailable"
+    )[:2]
     if os.name == "nt":
         handle = _windows_create_index_lock(lock_path)
         try:
@@ -718,8 +847,9 @@ def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
         return _IndexObservationLock(
             index_path=index_path,
             lock_path=lock_path,
+            parent_identity=parent_identity,
             index_payload=index_payload,
-            index_mode=stat.S_IMODE(index_identity.mode),
+            index_identity=index_identity,
             lock_identity=lock_identity,
             descriptor=None,
             handle=handle,
@@ -753,8 +883,9 @@ def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
         return _IndexObservationLock(
             index_path=index_path,
             lock_path=lock_path,
+            parent_identity=parent_identity,
             index_payload=index_payload,
-            index_mode=stat.S_IMODE(index_identity.mode),
+            index_identity=index_identity,
             lock_identity=lock_identity,
             descriptor=descriptor,
             handle=None,
@@ -766,6 +897,7 @@ def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
             lock_path,
             descriptor,
             lock_identity,
+            parent_identity,
             require_mode=mode_normalized,
         ):
             fail("index_observation_lock_recovery_failed")
@@ -775,6 +907,7 @@ def _acquire_index_observation_lock(repository: str) -> _IndexObservationLock:
             lock_path,
             descriptor,
             lock_identity,
+            parent_identity,
             require_mode=mode_normalized,
         ):
             fail("index_observation_lock_recovery_failed")
@@ -803,7 +936,10 @@ def _release_index_observation_lock(binding: _IndexObservationLock) -> None:
         cleanup_succeeded = _windows_dispose_index_lock(binding.handle)
     elif binding.descriptor is not None:
         cleanup_succeeded = _cleanup_posix_index_lock(
-            binding.lock_path, binding.descriptor, binding.lock_identity
+            binding.lock_path,
+            binding.descriptor,
+            binding.lock_identity,
+            binding.parent_identity,
         )
     else:
         cleanup_succeeded = False
@@ -3169,19 +3305,1312 @@ def _staged_modified_paths(working_dir: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _validate_sha1_index(payload: bytes) -> None:
+    if len(payload) <= 20 or hashlib.sha1(payload[:-20]).digest() != payload[-20:]:
+        fail("index_tree_unreadable")
+
+
+def _index_entry_layout(payload: bytes) -> tuple[int, int, bool]:
+    _validate_sha1_index(payload)
+    content_limit = len(payload) - 20
+    if content_limit < 12 or payload[:4] != b"DIRC":
+        fail("index_tree_unreadable")
+    version = int.from_bytes(payload[4:8], "big")
+    entry_count = int.from_bytes(payload[8:12], "big")
+    if version not in {2, 3, 4}:
+        fail("index_tree_unreadable")
+    offset = 12
+    sparse = False
+    for _ in range(entry_count):
+        entry_start = offset
+        fixed_end = offset + 62
+        if fixed_end > content_limit:
+            fail("index_tree_unreadable")
+        sparse = sparse or int.from_bytes(
+            payload[entry_start + 24 : entry_start + 28], "big"
+        ) == 0o040000
+        flags = int.from_bytes(payload[fixed_end - 2 : fixed_end], "big")
+        if flags & 0x8000:
+            fail("index_tree_unreadable")
+        offset = fixed_end
+        if version >= 3 and flags & 0x4000:
+            if offset + 2 > content_limit:
+                fail("index_tree_unreadable")
+            if int.from_bytes(payload[offset : offset + 2], "big") & 0x6000:
+                fail("index_tree_unreadable")
+            offset += 2
+        if version in {2, 3}:
+            terminator = payload.find(b"\x00", offset, content_limit)
+            if terminator < 0:
+                fail("index_tree_unreadable")
+            consumed = terminator + 1 - entry_start
+            offset = entry_start + ((consumed + 7) // 8) * 8
+            if offset > content_limit:
+                fail("index_tree_unreadable")
+        else:
+            while True:
+                if offset >= content_limit:
+                    fail("index_tree_unreadable")
+                marker = payload[offset]
+                offset += 1
+                if marker & 0x80 == 0:
+                    break
+            terminator = payload.find(b"\x00", offset, content_limit)
+            if terminator < 0:
+                fail("index_tree_unreadable")
+            offset = terminator + 1
+    return offset, content_limit, sparse
+
+
+def _decode_index_v4_offset(
+    payload: bytes, offset: int, content_limit: int
+) -> tuple[int, int]:
+    if offset >= content_limit:
+        fail("index_tree_unreadable")
+    marker = payload[offset]
+    offset += 1
+    value = marker & 0x7F
+    while marker & 0x80:
+        if offset >= content_limit:
+            fail("index_tree_unreadable")
+        value += 1
+        marker = payload[offset]
+        offset += 1
+        value = (value << 7) + (marker & 0x7F)
+        if value > INDEX_LIMIT:
+            fail("index_tree_unreadable")
+    return value, offset
+
+
+def _parse_raw_index(
+    payload: bytes, *, split_overlay: bool
+) -> tuple[list[tuple[bytes, bytes, bytes, bytes]], dict[bytes, bytes]]:
+    _validate_sha1_index(payload)
+    content_limit = len(payload) - 20
+    if content_limit < 12 or payload[:4] != b"DIRC":
+        fail("index_tree_unreadable")
+    version = int.from_bytes(payload[4:8], "big")
+    entry_count = int.from_bytes(payload[8:12], "big")
+    if version not in {2, 3, 4}:
+        fail("index_tree_unreadable")
+    offset = 12
+    previous_path = b""
+    entries: list[tuple[bytes, bytes, bytes, bytes]] = []
+    for _ in range(entry_count):
+        entry_start = offset
+        fixed_end = offset + 62
+        if fixed_end > content_limit:
+            fail("index_tree_unreadable")
+        mode_value = int.from_bytes(payload[offset + 24 : offset + 28], "big")
+        oid = payload[offset + 40 : offset + 60]
+        flags = int.from_bytes(payload[offset + 60 : fixed_end], "big")
+        if mode_value not in {0o100644, 0o100755, 0o120000, 0o160000}:
+            fail("index_tree_unreadable")
+        if not any(oid) or flags & 0x8000:
+            fail("index_tree_unreadable")
+        stage = (flags >> 12) & 3
+        offset = fixed_end
+        if flags & 0x4000:
+            if version < 3 or offset + 2 > content_limit:
+                fail("index_tree_unreadable")
+            extended = int.from_bytes(payload[offset : offset + 2], "big")
+            if extended != 0:
+                fail("index_tree_unreadable")
+            offset += 2
+        if version in {2, 3}:
+            terminator = payload.find(b"\x00", offset, content_limit)
+            if terminator < 0:
+                fail("index_tree_unreadable")
+            path = payload[offset:terminator]
+            consumed = terminator + 1 - entry_start
+            offset = entry_start + ((consumed + 7) // 8) * 8
+            if offset > content_limit or any(payload[terminator + 1 : offset]):
+                fail("index_tree_unreadable")
+        else:
+            remove, offset = _decode_index_v4_offset(payload, offset, content_limit)
+            if remove > len(previous_path):
+                fail("index_tree_unreadable")
+            terminator = payload.find(b"\x00", offset, content_limit)
+            if terminator < 0:
+                fail("index_tree_unreadable")
+            path = previous_path[: len(previous_path) - remove] + payload[offset:terminator]
+            offset = terminator + 1
+        encoded_length = flags & 0x0FFF
+        if (
+            (not path and not split_overlay)
+            or (path and (path.startswith(b"/") or path.endswith(b"/")))
+            or (path and encoded_length < 0x0FFF and encoded_length != len(path))
+            or (path and encoded_length == 0x0FFF and len(path) < 0x0FFF)
+            or any(
+                component in {b"", b".", b"..", b".git"}
+                for component in path.split(b"/")
+                if path
+            )
+        ):
+            fail("index_tree_unreadable")
+        mode = f"{mode_value:06o}".encode("ascii")
+        entries.append((mode, oid.hex().encode("ascii"), str(stage).encode("ascii"), path))
+        previous_path = path
+    extensions: dict[bytes, bytes] = {}
+    while offset < content_limit:
+        if offset + 8 > content_limit:
+            fail("index_tree_unreadable")
+        signature = payload[offset : offset + 4]
+        size = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+        offset += 8
+        end = offset + size
+        if end > content_limit or signature in extensions:
+            fail("index_tree_unreadable")
+        if signature in {b"sdir", b"REUC"} or (
+            signature[:1].islower() and signature != b"link"
+        ):
+            fail("index_tree_unreadable")
+        extensions[signature] = payload[offset:end]
+        offset = end
+    if offset != content_limit:
+        fail("index_tree_unreadable")
+    if not split_overlay:
+        previous_key: tuple[bytes, bytes] | None = None
+        for _mode, _oid_hex, stage, path in entries:
+            key = path, stage
+            if previous_key is not None and key <= previous_key:
+                fail("index_tree_unreadable")
+            previous_key = key
+    return entries, extensions
+
+
+def _decode_ewah_bitmap(
+    payload: bytes, offset: int, maximum_bits: int
+) -> tuple[set[int], int]:
+    if offset + 8 > len(payload):
+        fail("index_tree_unreadable")
+    bit_size = int.from_bytes(payload[offset : offset + 4], "big")
+    word_count = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+    expected_words = (bit_size + 63) // 64
+    offset += 8
+    words_end = offset + word_count * 8
+    if bit_size > maximum_bits or words_end + 4 > len(payload):
+        fail("index_tree_unreadable")
+    words = [
+        int.from_bytes(payload[position : position + 8], "big")
+        for position in range(offset, words_end, 8)
+    ]
+    current_rlw = int.from_bytes(payload[words_end : words_end + 4], "big")
+    if word_count == 0 or current_rlw >= word_count:
+        fail("index_tree_unreadable")
+    header_positions: set[int] = set()
+    result: set[int] = set()
+    word_index = 0
+    uncompressed_word = 0
+    while word_index < word_count:
+        header_positions.add(word_index)
+        header = words[word_index]
+        word_index += 1
+        repeated_bit = header & 1
+        repeated_words = (header >> 1) & 0xFFFFFFFF
+        literal_words = header >> 33
+        remaining_words = expected_words - uncompressed_word
+        if (
+            remaining_words < 0
+            or repeated_words > remaining_words
+            or literal_words > remaining_words - repeated_words
+            or word_index + literal_words > word_count
+        ):
+            fail("index_tree_unreadable")
+        if repeated_bit:
+            repeated_end = uncompressed_word + repeated_words
+            if bit_size % 64 and repeated_end == expected_words:
+                fail("index_tree_unreadable")
+            result.update(range(uncompressed_word * 64, repeated_end * 64))
+        uncompressed_word += repeated_words
+        for literal_index in range(literal_words):
+            literal = words[word_index + literal_index]
+            base = uncompressed_word * 64
+            while literal:
+                low = literal & -literal
+                bit = low.bit_length() - 1
+                position = base + bit
+                if position >= bit_size:
+                    fail("index_tree_unreadable")
+                result.add(position)
+                literal ^= low
+            uncompressed_word += 1
+        word_index += literal_words
+    if (
+        current_rlw not in header_positions
+        or current_rlw != max(header_positions)
+        or uncompressed_word != expected_words
+    ):
+        fail("index_tree_unreadable")
+    return result, words_end + 4
+
+
+def _stage_rows_from_entries(
+    entries: list[tuple[bytes, bytes, bytes, bytes]]
+) -> bytes:
+    rows = bytearray()
+    previous: tuple[bytes, bytes] | None = None
+    for mode, oid_hex, stage, path in entries:
+        key = path, stage
+        if previous is not None and key <= previous:
+            fail("index_tree_unreadable")
+        previous = key
+        rows.extend(mode + b" " + oid_hex + b" " + stage + b"\t" + path + b"\x00")
+        if len(rows) > INDEX_LIMIT:
+            fail("index_tree_unreadable")
+    for _row in _iter_stage_rows(bytes(rows)):
+        pass
+    return bytes(rows)
+
+
+def _raw_index_stage_rows(index_payload: bytes) -> bytes:
+    entries, extensions = _parse_raw_index(index_payload, split_overlay=False)
+    if b"link" in extensions:
+        fail("index_tree_unreadable")
+    return _stage_rows_from_entries(entries)
+
+
+def _split_index_stage_rows(index_payload: bytes, shared_payload: bytes) -> bytes:
+    shared_entries, shared_extensions = _parse_raw_index(
+        shared_payload, split_overlay=False
+    )
+    if b"link" in shared_extensions:
+        fail("index_tree_unreadable")
+    overlay_entries, overlay_extensions = _parse_raw_index(
+        index_payload, split_overlay=True
+    )
+    link = overlay_extensions.get(b"link")
+    if link is None or len(link) < 20 or link[:20] != shared_payload[-20:]:
+        fail("index_tree_unreadable")
+    delete_positions, offset = _decode_ewah_bitmap(
+        link, 20, len(shared_entries)
+    )
+    replace_positions, offset = _decode_ewah_bitmap(
+        link, offset, len(shared_entries)
+    )
+    if (
+        offset != len(link)
+        or delete_positions & replace_positions
+        or len(overlay_entries) < len(replace_positions)
+    ):
+        fail("index_tree_unreadable")
+    replacements: dict[int, tuple[bytes, bytes, bytes, bytes]] = {}
+    for overlay_index, shared_index in enumerate(sorted(replace_positions)):
+        mode, oid_hex, stage, path = overlay_entries[overlay_index]
+        if path:
+            fail("index_tree_unreadable")
+        path = shared_entries[shared_index][3]
+        replacements[shared_index] = (mode, oid_hex, stage, path)
+    combined: list[tuple[bytes, bytes, bytes, bytes]] = []
+    for shared_index, entry in enumerate(shared_entries):
+        selected = replacements.get(shared_index, entry)
+        if shared_index not in delete_positions:
+            combined.append(selected)
+    for entry in overlay_entries[len(replace_positions) :]:
+        if not entry[3]:
+            fail("index_tree_unreadable")
+        combined.append(entry)
+    additions = overlay_entries[len(replace_positions) :]
+    if any(
+        (additions[index - 1][3], additions[index - 1][2])
+        >= (additions[index][3], additions[index][2])
+        for index in range(1, len(additions))
+    ):
+        fail("index_tree_unreadable")
+    combined.sort(key=lambda row: (row[3], row[2]))
+    return _stage_rows_from_entries(combined)
+
+
+def _index_shared_reference(payload: bytes) -> str | None:
+    offset, content_limit, _sparse = _index_entry_layout(payload)
+
+    link_oid: bytes | None = None
+    while offset < content_limit:
+        if offset + 8 > content_limit:
+            fail("index_tree_unreadable")
+        signature = payload[offset : offset + 4]
+        extension_size = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+        offset += 8
+        extension_end = offset + extension_size
+        if extension_end > content_limit:
+            fail("index_tree_unreadable")
+        if signature == b"link":
+            if link_oid is not None or extension_size < 20:
+                fail("index_tree_unreadable")
+            link_oid = payload[offset : offset + 20]
+        offset = extension_end
+    if offset != content_limit:
+        fail("index_tree_unreadable")
+    if link_oid is None or not any(link_oid):
+        return None
+    return "sharedindex." + link_oid.hex()
+
+
+def _capture_shared_index(
+    index_path: str, index_payload: bytes
+) -> tuple[str, bytes, ArtifactIdentity] | None:
+    reference = _index_shared_reference(index_payload)
+    if reference is None:
+        return None
+    name = reference
+    path = os.path.join(os.path.dirname(index_path), name)
+    try:
+        payload, identity = _capture_regular(path, 32, INDEX_LIMIT)
+    except ContractFailure:
+        fail("index_tree_unreadable")
+    expected_oid = bytes.fromhex(name.removeprefix("sharedindex."))
+    if (
+        len(payload) <= 20
+        or hashlib.sha1(payload[:-20]).digest() != payload[-20:]
+        or payload[-20:] != expected_oid
+    ):
+        fail("index_tree_unreadable")
+    return path, payload, identity
+
+
+def _directory_identity(path: str, reason: str) -> tuple[int, int, int]:
+    try:
+        before = os.lstat(path)
+        attributes = getattr(before, "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or bool(attributes & reparse)
+        ):
+            fail(reason)
+        if os.name == "nt":
+            current = os.lstat(path)
+            if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                fail(reason)
+            return before.st_dev, before.st_ino, stat.S_IMODE(before.st_mode)
+        directory = getattr(os, "O_DIRECTORY", None)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if directory is None or nofollow is None:
+            fail(reason)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            current = os.lstat(path)
+        finally:
+            os.close(descriptor)
+    except ContractFailure:
+        raise
+    except OSError:
+        fail(reason)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (before.st_dev, before.st_ino)
+        != (opened.st_dev, opened.st_ino)
+        or (opened.st_dev, opened.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        fail(reason)
+    return opened.st_dev, opened.st_ino, stat.S_IMODE(opened.st_mode)
+
+
+def _scrubbed_git_environment() -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+    )
+    return environment
+
+
+
+
+def _require_sha1_repository(working_dir: str) -> None:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                working_dir,
+                "rev-parse",
+                "--show-object-format",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
+            check=False,
+        )
+    except OSError:
+        fail("git_unavailable")
+    if result.returncode != 0 or result.stdout != b"sha1\n":
+        fail("index_tree_unreadable")
+
+
+def _repository_object_directory(
+    working_dir: str,
+) -> tuple[str, tuple[int, int, int]]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                working_dir,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
+            check=False,
+        )
+    except OSError:
+        fail("git_unavailable")
+    if result.returncode != 0 or not result.stdout.endswith(b"\n"):
+        fail("index_tree_unreadable")
+    raw = result.stdout[:-1]
+    if b"\x00" in raw or b"\n" in raw or b"\r" in raw:
+        fail("index_tree_unreadable")
+    try:
+        common = os.path.realpath(raw.decode("utf-8"))
+    except UnicodeError:
+        fail("index_tree_unreadable")
+    objects = os.path.join(common, "objects")
+    return objects, _directory_identity(objects, "index_tree_unreadable")
+
+
+def _validate_normalized_index(payload: bytes) -> None:
+    _validate_sha1_index(payload)
+    content_limit = len(payload) - 20
+    if content_limit < 12 or payload[:4] != b"DIRC":
+        fail("index_tree_unreadable")
+    version = int.from_bytes(payload[4:8], "big")
+    entry_count = int.from_bytes(payload[8:12], "big")
+    if version not in {2, 3}:
+        fail("index_tree_unreadable")
+    offset = 12
+    for _ in range(entry_count):
+        entry_start = offset
+        fixed_end = offset + 62
+        if fixed_end > content_limit:
+            fail("index_tree_unreadable")
+        oid = payload[offset + 40 : offset + 60]
+        flags = int.from_bytes(payload[fixed_end - 2 : fixed_end], "big")
+        if not any(oid) or flags & 0xB000:
+            fail("index_tree_unreadable")
+        offset = fixed_end
+        if flags & 0x4000:
+            if version != 3 or offset + 2 > content_limit:
+                fail("index_tree_unreadable")
+            extended = int.from_bytes(payload[offset : offset + 2], "big")
+            if extended or extended & ~0x6000:
+                fail("index_tree_unreadable")
+            offset += 2
+        terminator = payload.find(b"\x00", offset, content_limit)
+        if terminator < 0:
+            fail("index_tree_unreadable")
+        path = payload[offset:terminator]
+        encoded_length = flags & 0x0FFF
+        if (
+            not path
+            or path.startswith(b"/")
+            or path.endswith(b"/")
+            or (encoded_length < 0x0FFF and encoded_length != len(path))
+            or (encoded_length == 0x0FFF and len(path) < 0x0FFF)
+            or any(component in {b"", b".", b".."} for component in path.split(b"/"))
+        ):
+            fail("index_tree_unreadable")
+        consumed = terminator + 1 - entry_start
+        offset = entry_start + ((consumed + 7) // 8) * 8
+        if offset > content_limit or any(payload[terminator + 1 : offset]):
+            fail("index_tree_unreadable")
+    while offset < content_limit:
+        if offset + 8 > content_limit:
+            fail("index_tree_unreadable")
+        signature = payload[offset : offset + 4]
+        extension_size = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+        offset += 8
+        extension_end = offset + extension_size
+        if extension_end > content_limit or signature == b"link":
+            fail("index_tree_unreadable")
+        offset = extension_end
+    if offset != content_limit:
+        fail("index_tree_unreadable")
+
+
+def _iter_stage_rows(payload: bytes):
+    if len(payload) > INDEX_LIMIT or (payload and not payload.endswith(b"\x00")):
+        fail("index_tree_unreadable")
+    offset = 0
+    previous_path: bytes | None = None
+    while offset < len(payload):
+        terminator = payload.find(b"\x00", offset)
+        if terminator < 0:
+            fail("index_tree_unreadable")
+        row = payload[offset:terminator]
+        offset = terminator + 1
+        metadata, separator, path = row.partition(b"\t")
+        fields = metadata.split(b" ")
+        if not separator or len(fields) != 3:
+            fail("index_tree_unreadable")
+        mode, oid_hex, stage = fields
+        if (
+            mode not in {b"100644", b"100755", b"120000", b"160000"}
+            or stage != b"0"
+            or len(oid_hex) != 40
+            or re.fullmatch(rb"[0-9a-f]{40}", oid_hex) is None
+            or oid_hex == b"0" * 40
+            or not path
+            or path.startswith(b"/")
+            or path.endswith(b"/")
+        ):
+            fail("index_tree_unreadable")
+        components = path.split(b"/")
+        if any(component in {b"", b".", b".."} for component in components):
+            fail("index_tree_unreadable")
+        if previous_path is not None and (
+            path <= previous_path or path.startswith(previous_path + b"/")
+        ):
+            fail("index_tree_unreadable")
+        previous_path = path
+        yield mode, oid_hex, path, components
+
+
+def _start_index_object_verifier(working_dir: str) -> subprocess.Popen[bytes]:
+    try:
+        return subprocess.Popen(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                working_dir,
+                "cat-file",
+                "--batch-check=%(objectname) %(objecttype)",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
+        )
+    except OSError:
+        fail("git_unavailable")
+
+
+def _verify_index_blob(process: subprocess.Popen[bytes], oid_hex: bytes) -> None:
+    if process.stdin is None or process.stdout is None:
+        fail("index_tree_unreadable")
+    try:
+        process.stdin.write(oid_hex + b"\n")
+        process.stdin.flush()
+        response = process.stdout.readline(96)
+    except OSError:
+        fail("index_tree_unreadable")
+    if response != oid_hex + b" blob\n":
+        fail("index_tree_unreadable")
+
+
+def _close_index_object_verifier(process: subprocess.Popen[bytes]) -> None:
+    succeeded = True
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.stdout is not None:
+            remainder = process.stdout.read(1)
+            succeeded = remainder == b""
+            process.stdout.close()
+        succeeded = process.wait() == 0 and succeeded
+    except OSError:
+        succeeded = False
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    if not succeeded:
+        fail("index_tree_unreadable")
+
+
+def _abort_index_object_verifier(process: subprocess.Popen[bytes]) -> None:
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+    except OSError:
+        pass
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait()
+    except OSError:
+        pass
+    for stream in (process.stdout,):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+
+
+def _tree_object_id(body: bytearray) -> bytes:
+    header = f"tree {len(body)}\0".encode("ascii")
+    digest = hashlib.sha1()
+    digest.update(header)
+    digest.update(body)
+    return digest.digest()
+
+
+def _append_tree_entry(
+    frame: dict[str, Any], name: bytes, mode: bytes, oid: bytes, *, directory: bool
+) -> None:
+    key = name + (b"/" if directory else b"\x00")
+    previous = frame["last_key"]
+    if previous is not None and key <= previous:
+        fail("index_tree_unreadable")
+    frame["last_key"] = key
+    frame["body"].extend(mode + b" " + name + b"\x00" + oid)
+
+
+def _tree_sha_from_stage_rows(working_dir: str, payload: bytes) -> str:
+    frames: list[dict[str, Any]] = [
+        {"name": None, "body": bytearray(), "last_key": None}
+    ]
+    verifier: subprocess.Popen[bytes] | None = None
+    try:
+        for mode, oid_hex, _path, components in _iter_stage_rows(payload):
+            directories = components[:-1]
+            common = 0
+            while (
+                common < len(directories)
+                and common + 1 < len(frames)
+                and frames[common + 1]["name"] == directories[common]
+            ):
+                common += 1
+            while len(frames) - 1 > common:
+                child = frames.pop()
+                _append_tree_entry(
+                    frames[-1],
+                    child["name"],
+                    b"40000",
+                    _tree_object_id(child["body"]),
+                    directory=True,
+                )
+            for name in directories[common:]:
+                frames.append({"name": name, "body": bytearray(), "last_key": None})
+            if mode != b"160000":
+                if verifier is None:
+                    verifier = _start_index_object_verifier(working_dir)
+                _verify_index_blob(verifier, oid_hex)
+            _append_tree_entry(
+                frames[-1],
+                components[-1],
+                mode,
+                bytes.fromhex(oid_hex.decode("ascii")),
+                directory=False,
+            )
+        while len(frames) > 1:
+            child = frames.pop()
+            _append_tree_entry(
+                frames[-1],
+                child["name"],
+                b"40000",
+                _tree_object_id(child["body"]),
+                directory=True,
+            )
+        if verifier is not None:
+            _close_index_object_verifier(verifier)
+            verifier = None
+        return _tree_object_id(frames[0]["body"]).hex()
+    finally:
+        if verifier is not None:
+            _abort_index_object_verifier(verifier)
+
+
+def _hold_captured_regular(path: str, expected: ArtifactIdentity) -> int:
+    descriptor = -1
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            create_file.restype = wintypes.HANDLE
+            handle = create_file(
+                path,
+                0x80000000 | 0x00000080,  # GENERIC_READ | FILE_READ_ATTRIBUTES
+                0x00000001,  # FILE_SHARE_READ: deny writes, replacement, and delete.
+                None,
+                3,  # OPEN_EXISTING
+                0x00000080 | 0x00200000,  # NORMAL | OPEN_REPARSE_POINT
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            if handle in (None, invalid_handle):
+                fail("index_tree_unreadable")
+            try:
+                descriptor = msvcrt.open_osfhandle(
+                    int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                )
+            except BaseException:
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
+                raise
+        else:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_BINARY", 0),
+            )
+        observed = os.fstat(descriptor)
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        fail("index_tree_unreadable")
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_nlink != 1
+        or (observed.st_dev, observed.st_ino, observed.st_size)
+        != (expected.device, expected.inode, expected.size)
+        or getattr(
+            observed, "st_mtime_ns", int(observed.st_mtime * 1_000_000_000)
+        )
+        != expected.mtime_ns
+        or stat.S_IMODE(observed.st_mode) != stat.S_IMODE(expected.mode)
+    ):
+        os.close(descriptor)
+        fail("index_tree_unreadable")
+    return descriptor
+
+
+
+
+def _read_bounded_process_stdout(
+    process: subprocess.Popen[bytes], maximum: int, reason: str
+) -> tuple[bytes, int]:
+    if process.stdout is None:
+        fail(reason)
+    try:
+        payload = process.stdout.read(maximum + 1)
+        process.stdout.close()
+        if len(payload) > maximum and process.poll() is None:
+            process.kill()
+        returncode = process.wait()
+    except BaseException as error:
+        try:
+            process.stdout.close()
+        except BaseException:
+            pass
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        except BaseException:
+            pass
+        if isinstance(error, OSError):
+            fail(reason)
+        raise error.with_traceback(error.__traceback__)
+    if len(payload) > maximum:
+        fail(reason)
+    return payload, returncode
+
+
+
+
+def _captured_index_stage_rows(
+    working_dir: str,
+    index_path: str,
+    index_payload: bytes,
+    index_identity: ArtifactIdentity,
+) -> bytes:
+    _require_sha1_repository(working_dir)
+    shared = _capture_shared_index(index_path, index_payload)
+    if _index_entry_layout(index_payload)[2] or (
+        shared is not None and _index_entry_layout(shared[1])[2]
+    ):
+        fail("index_tree_unreadable")
+    source_descriptors = [_hold_captured_regular(index_path, index_identity)]
+    if shared is not None:
+        source_descriptors.append(_hold_captured_regular(shared[0], shared[2]))
+    primary_error: BaseException | None = None
+    primary_traceback = None
+    rows = b""
+    try:
+        rows = (
+            _raw_index_stage_rows(index_payload)
+            if shared is None
+            else _split_index_stage_rows(index_payload, shared[1])
+        )
+        observed_payload, observed_identity = _capture_regular(
+            index_path, len(index_payload), len(index_payload)
+        )
+        if observed_payload != index_payload or observed_identity != index_identity:
+            fail("index_tree_unreadable")
+        if shared is not None:
+            shared_path, shared_payload, shared_identity = shared
+            observed_shared, observed_shared_identity = _capture_regular(
+                shared_path, len(shared_payload), len(shared_payload)
+            )
+            if (
+                observed_shared != shared_payload
+                or observed_shared_identity != shared_identity
+            ):
+                fail("index_tree_unreadable")
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
+    finally:
+        close_failed = False
+        for descriptor in source_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                close_failed = True
+        if close_failed:
+            primary_error = ContractFailure("index_tree_unreadable")
+            primary_traceback = primary_error.__traceback__
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    return rows
+
+
+def _captured_index_tree_sha(
+    working_dir: str,
+    index_path: str,
+    index_payload: bytes,
+    index_identity: ArtifactIdentity,
+) -> str:
+    return _tree_sha_from_stage_rows(
+        working_dir,
+        _captured_index_stage_rows(
+            working_dir, index_path, index_payload, index_identity
+        ),
+    )
+
+
+def _serialize_index_v2(rows) -> bytes:
+    payload = bytearray(b"DIRC" + (2).to_bytes(4, "big") + b"\x00" * 4)
+    count = 0
+    previous_path: bytes | None = None
+    for mode, oid_hex, path in rows:
+        if (
+            mode not in {b"100644", b"100755", b"120000", b"160000"}
+            or len(oid_hex) != 40
+            or re.fullmatch(rb"[0-9a-f]{40}", oid_hex) is None
+            or oid_hex == b"0" * 40
+            or not path
+            or path.startswith(b"/")
+            or path.endswith(b"/")
+            or any(component in {b"", b".", b".."} for component in path.split(b"/"))
+            or (previous_path is not None and path <= previous_path)
+        ):
+            fail("index_entry_invalid")
+        previous_path = path
+        count += 1
+        if count > 0xFFFFFFFF:
+            fail("index_entry_invalid")
+        entry_start = len(payload)
+        payload.extend(b"\x00" * 24)
+        payload.extend(int(mode, 8).to_bytes(4, "big"))
+        payload.extend(b"\x00" * 12)
+        payload.extend(bytes.fromhex(oid_hex.decode("ascii")))
+        payload.extend(min(len(path), 0x0FFF).to_bytes(2, "big"))
+        payload.extend(path)
+        payload.append(0)
+        payload.extend(b"\x00" * ((8 - ((len(payload) - entry_start) % 8)) % 8))
+        if len(payload) + 20 > INDEX_LIMIT:
+            fail("index_entry_invalid")
+    payload[8:12] = count.to_bytes(4, "big")
+    payload.extend(hashlib.sha1(payload).digest())
+    normalized = bytes(payload)
+    _validate_normalized_index(normalized)
+    return normalized
+
+
+def _replacement_stage_rows(
+    entries: dict[str, dict[str, str]],
+) -> list[tuple[bytes, bytes, bytes]]:
+    replacements: list[tuple[bytes, bytes, bytes]] = []
+    for path, entry in entries.items():
+        if (
+            not isinstance(path, str)
+            or not _valid_tree_entry(
+                {"mode": entry.get("mode"), "oid": entry.get("oid")},
+                index=False,
+            )
+        ):
+            fail("index_entry_invalid")
+        _safe_repo_path(path)
+        try:
+            encoded_path = path.encode("utf-8")
+        except UnicodeError:
+            fail("index_entry_invalid")
+        replacements.append(
+            (entry["mode"].encode("ascii"), entry["oid"].encode("ascii"), encoded_path)
+        )
+    replacements.sort(key=lambda row: row[2])
+    if any(
+        replacements[index - 1][2] == replacements[index][2]
+        for index in range(1, len(replacements))
+    ):
+        fail("index_entry_invalid")
+    return replacements
+
+
+def _merge_stage_rows(
+    baseline_rows: bytes, entries: dict[str, dict[str, str]]
+):
+    replacements = _replacement_stage_rows(entries)
+    replacement_index = 0
+    for mode, oid_hex, path, _components in _iter_stage_rows(baseline_rows):
+        while (
+            replacement_index < len(replacements)
+            and replacements[replacement_index][2] < path
+        ):
+            yield replacements[replacement_index]
+            replacement_index += 1
+        if (
+            replacement_index < len(replacements)
+            and replacements[replacement_index][2] == path
+        ):
+            yield replacements[replacement_index]
+            replacement_index += 1
+        else:
+            yield mode, oid_hex, path
+    while replacement_index < len(replacements):
+        yield replacements[replacement_index]
+        replacement_index += 1
+
+
+def _index_candidate_from_stage_rows(
+    baseline_rows: bytes, entries: dict[str, dict[str, str]]
+) -> bytes:
+    return _serialize_index_v2(_merge_stage_rows(baseline_rows, entries))
+
+
+def _read_tree_stage_rows(working_dir: str, treeish: str) -> bytes:
+    if re.fullmatch(r"[0-9a-f]{40}", treeish) is None:
+        fail("temporary_index_failed")
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                working_dir,
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                treeish,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
+        )
+    except OSError:
+        fail("git_unavailable")
+    raw, returncode = _read_bounded_process_stdout(
+        process, INDEX_LIMIT, "temporary_index_failed"
+    )
+    if returncode != 0 or (raw and not raw.endswith(b"\x00")):
+        fail("temporary_index_failed")
+    rows = bytearray()
+    offset = 0
+    while offset < len(raw):
+        terminator = raw.find(b"\x00", offset)
+        if terminator < 0:
+            fail("temporary_index_failed")
+        metadata, separator, path = raw[offset:terminator].partition(b"\t")
+        fields = metadata.split(b" ")
+        if not separator or len(fields) != 3:
+            fail("temporary_index_failed")
+        mode, object_type, oid_hex = fields
+        if (mode == b"160000" and object_type != b"commit") or (
+            mode != b"160000" and object_type != b"blob"
+        ):
+            fail("temporary_index_failed")
+        rows.extend(mode + b" " + oid_hex + b" 0\t" + path + b"\x00")
+        if len(rows) > INDEX_LIMIT:
+            fail("temporary_index_failed")
+        offset = terminator + 1
+    for _row in _iter_stage_rows(bytes(rows)):
+        pass
+    return bytes(rows)
+
+
+def _build_tree_index_candidate(
+    working_dir: str, treeish: str, entries: dict[str, dict[str, str]]
+) -> bytes:
+    return _index_candidate_from_stage_rows(
+        _read_tree_stage_rows(working_dir, treeish), entries
+    )
+
+
+def _run_candidate_write_tree(
+    working_dir: str, index_path: str
+) -> subprocess.CompletedProcess[bytes]:
+    environment = _scrubbed_git_environment()
+    environment["GIT_INDEX_FILE"] = index_path
+    try:
+        process = subprocess.Popen(
+            [
+                "git",
+                "-C",
+                working_dir,
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.splitIndex=false",
+                "write-tree",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
+    except OSError:
+        fail("git_unavailable")
+    stdout, returncode = _read_bounded_process_stdout(
+        process, 128, "index_tree_unreadable"
+    )
+    return subprocess.CompletedProcess(process.args, returncode, stdout, b"")
+
+
+def _quarantine_changed_candidate(index_path: str) -> None:
+    if not os.path.lexists(index_path):
+        return
+    parent = os.path.dirname(index_path)
+    for _ in range(128):
+        quarantine = os.path.join(
+            parent, ".code-fixer-index-quarantine-" + secrets.token_hex(16)
+        )
+        try:
+            atomic_rename_noreplace(index_path, quarantine)
+            return
+        except FileExistsError:
+            continue
+        except OSError:
+            fail("temporary_cleanup_failed")
+    fail("temporary_cleanup_failed")
+
+
+def _publish_captured_index_tree(
+    working_dir: str,
+    index_path: str,
+    expected_payload: bytes,
+    expected_identity: ArtifactIdentity,
+) -> str:
+    observation = _acquire_index_observation_lock(working_dir)
+    primary_error: BaseException | None = None
+    primary_traceback = None
+    tree_sha = ""
+    try:
+        if (
+            not os.path.isabs(index_path)
+            or os.path.normcase(os.path.realpath(index_path))
+            == os.path.normcase(os.path.realpath(observation.index_path))
+        ):
+            fail("index_tree_environment_invalid")
+        try:
+            candidate, candidate_identity = _capture_regular(
+                index_path, len(expected_payload), len(expected_payload)
+            )
+        except ContractFailure:
+            _quarantine_changed_candidate(index_path)
+            fail("index_tree_unreadable")
+        if candidate != expected_payload or candidate_identity != expected_identity:
+            _quarantine_changed_candidate(index_path)
+            fail("index_tree_unreadable")
+        if (candidate_identity.device, candidate_identity.inode) == (
+            observation.index_identity.device,
+            observation.index_identity.inode,
+        ):
+            fail("index_tree_environment_invalid")
+        _validate_normalized_index(candidate)
+        expected_tree = _captured_index_tree_sha(
+            working_dir, index_path, candidate, candidate_identity
+        )
+        objects, objects_identity = _repository_object_directory(working_dir)
+        result = _run_candidate_write_tree(working_dir, index_path)
+        expected_stdout = expected_tree.encode("ascii") + b"\n"
+        if result.returncode != 0 or result.stdout != expected_stdout:
+            try:
+                current, current_identity = _capture_regular(index_path, 1, INDEX_LIMIT)
+            except ContractFailure:
+                current = b""
+                current_identity = None
+            if current_identity != candidate_identity or current != candidate:
+                _quarantine_changed_candidate(index_path)
+            fail("index_tree_unreadable")
+        try:
+            post_candidate, post_identity = _capture_regular(index_path, 1, INDEX_LIMIT)
+            _validate_normalized_index(post_candidate)
+            post_tree = _captured_index_tree_sha(
+                working_dir, index_path, post_candidate, post_identity
+            )
+        except ContractFailure:
+            _quarantine_changed_candidate(index_path)
+            raise
+        if post_tree != expected_tree:
+            _quarantine_changed_candidate(index_path)
+            fail("index_tree_unreadable")
+        if _directory_identity(objects, "index_tree_unreadable") != objects_identity:
+            fail("index_tree_unreadable")
+        tree_sha = expected_tree
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
+    finally:
+        try:
+            _release_index_observation_lock(observation)
+        except BaseException as release_error:
+            primary_error = release_error
+            primary_traceback = release_error.__traceback__
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    if not tree_sha:
+        fail("index_tree_unreadable")
+    return tree_sha
+
+
+
+
+def _alternate_index_tree_sha(working_dir: str, index_path: str) -> str:
+    try:
+        observation = _acquire_index_observation_lock(working_dir)
+    except ContractFailure:
+        fail("index_tree_environment_invalid")
+    real_index = observation.index_path
+    primary_error: BaseException | None = None
+    primary_traceback = None
+    tree_sha = ""
+    try:
+        if os.path.normcase(os.path.realpath(index_path)) == os.path.normcase(
+            os.path.realpath(real_index)
+        ):
+            fail("index_tree_environment_invalid")
+        try:
+            alternate_payload, alternate_identity = _capture_regular(
+                index_path, 1, INDEX_LIMIT
+            )
+        except ContractFailure:
+            fail("index_tree_environment_invalid")
+        if (alternate_identity.device, alternate_identity.inode) == (
+            observation.index_identity.device,
+            observation.index_identity.inode,
+        ):
+            fail("index_tree_environment_invalid")
+        try:
+            current_payload, current_identity = _capture_regular(
+                index_path, len(alternate_payload), len(alternate_payload)
+            )
+        except ContractFailure:
+            fail("index_tree_environment_invalid")
+        if current_payload != alternate_payload or current_identity != alternate_identity:
+            fail("index_tree_environment_invalid")
+        tree_sha = _captured_index_tree_sha(
+            working_dir, index_path, alternate_payload, alternate_identity
+        )
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
+    finally:
+        try:
+            _release_index_observation_lock(observation)
+        except BaseException as release_error:
+            primary_error = release_error
+            primary_traceback = release_error.__traceback__
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    if not tree_sha:
+        fail("index_tree_unreadable")
+    return tree_sha
+
+
+def _publish_index_tree_sha(
+    working_dir: str,
+    index_path: str,
+    expected_payload: bytes,
+    expected_identity: ArtifactIdentity,
+) -> str:
+    if "GIT_INDEX_FILE" in os.environ:
+        fail("index_tree_environment_invalid")
+    if not isinstance(expected_payload, bytes) or not expected_payload:
+        fail("index_tree_unreadable")
+    return _publish_captured_index_tree(
+        working_dir, index_path, expected_payload, expected_identity
+    )
+
+
 def _index_tree_sha(
     working_dir: str, *, extra_env: dict[str, str] | None = None
 ) -> str:
-    result = _git_io(working_dir, "write-tree", extra_env=extra_env)
-    if result.returncode != 0:
-        fail("index_tree_unreadable")
-    try:
-        tree_sha = result.stdout.decode("ascii").strip()
-    except UnicodeError:
-        fail("index_tree_unreadable")
-    if re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None:
-        fail("index_tree_unreadable")
-    return tree_sha
+    if "GIT_INDEX_FILE" in os.environ:
+        fail("index_tree_environment_invalid")
+    if extra_env is None:
+        observation = _acquire_index_observation_lock(working_dir)
+        primary_error: BaseException | None = None
+        primary_traceback = None
+        tree_sha = ""
+        try:
+            tree_sha = _captured_index_tree_sha(
+                working_dir,
+                observation.index_path,
+                observation.index_payload,
+                observation.index_identity,
+            )
+        except BaseException as error:
+            primary_error = error
+            primary_traceback = error.__traceback__
+        finally:
+            try:
+                _release_index_observation_lock(observation)
+            except BaseException as release_error:
+                primary_error = release_error
+                primary_traceback = release_error.__traceback__
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_traceback)
+        if not tree_sha:
+            fail("index_tree_unreadable")
+        return tree_sha
+    if not isinstance(extra_env, dict) or not set(extra_env).issubset(
+        {"GIT_INDEX_FILE", "GIT_EDITOR"}
+    ):
+        fail("index_tree_environment_invalid")
+    index_value = extra_env.get("GIT_INDEX_FILE")
+    if (
+        not isinstance(index_value, str)
+        or not index_value
+        or not os.path.isabs(index_value)
+        or "\x00" in index_value
+        or any(ord(character) < 32 or ord(character) == 127 for character in index_value)
+    ):
+        fail("index_tree_environment_invalid")
+    return _alternate_index_tree_sha(working_dir, index_value)
 
 
 def _commit_message_sha256(working_dir: str, commit_sha: str) -> str:
@@ -3257,31 +4686,6 @@ REVIEW_COMMIT_MESSAGES = {
 }
 
 
-def _update_index_entry(
-    working_dir: str,
-    path: str,
-    entry: dict[str, Any],
-    *,
-    extra_env: dict[str, str] | None = None,
-) -> None:
-    if not _valid_tree_entry(
-        {"mode": entry.get("mode"), "oid": entry.get("oid")}, index=False
-    ):
-        fail("index_entry_invalid")
-    result = _git_io(
-        working_dir,
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        entry["mode"],
-        entry["oid"],
-        path,
-        extra_env=extra_env,
-    )
-    if result.returncode != 0:
-        fail("index_update_failed")
-
-
 def _write_descriptor(descriptor: int, payload: bytes) -> None:
     offset = 0
     try:
@@ -3322,7 +4726,26 @@ def _cleanup_temporary_paths(*paths: str) -> None:
 
 
 def _git_index_path(working_dir: str) -> str:
-    result = _git(working_dir, "rev-parse", "--git-path", "index")
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                working_dir,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_scrubbed_git_environment(),
+            check=False,
+        )
+    except OSError:
+        fail("git_unavailable")
     if result.returncode != 0:
         fail("index_path_unreadable")
     try:
@@ -3348,36 +4771,42 @@ def _git_index_path(working_dir: str) -> str:
 
 def _build_index_candidate(
     working_dir: str,
-    evidence_dir: str,
     baseline: bytes,
     baseline_mode: int,
     entries: dict[str, dict[str, str]],
 ) -> bytes:
-    descriptor = -1
-    candidate = ""
+    observation = _acquire_index_observation_lock(working_dir)
+    primary_error: BaseException | None = None
+    primary_traceback = None
+    candidate = b""
     try:
-        descriptor, candidate = tempfile.mkstemp(
-            prefix=".standalone-real-index-", dir=evidence_dir
+        if (
+            observation.index_payload != baseline
+            or stat.S_IMODE(observation.index_identity.mode)
+            != stat.S_IMODE(baseline_mode)
+        ):
+            fail("index_baseline_mismatch")
+        rows = _captured_index_stage_rows(
+            working_dir,
+            observation.index_path,
+            observation.index_payload,
+            observation.index_identity,
         )
-        if os.name != "nt":
-            os.fchmod(descriptor, stat.S_IMODE(baseline_mode))
-        _write_descriptor(descriptor, baseline)
-        _close_temporary_descriptor(descriptor)
-        descriptor = -1
-        environment = {"GIT_INDEX_FILE": candidate}
-        for path in sorted(entries):
-            _update_index_entry(
-                working_dir, path, entries[path], extra_env=environment
-            )
-        payload, _identity = _capture_regular(candidate, 1, INDEX_LIMIT)
-        return payload
+        candidate = _index_candidate_from_stage_rows(rows, entries)
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
     finally:
-        if descriptor >= 0:
-            _close_temporary_descriptor(descriptor)
-        _cleanup_temporary_paths(
-            candidate,
-            candidate + ".lock" if candidate else "",
-        )
+        try:
+            _release_index_observation_lock(observation)
+        except BaseException as release_error:
+            primary_error = release_error
+            primary_traceback = release_error.__traceback__
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    if not candidate:
+        fail("index_update_failed")
+    return candidate
 
 
 def _install_index_candidate(
@@ -3776,19 +5205,6 @@ def _reconcile_standalone_transaction(
     fail("standalone_recovery_ambiguous")
 
 
-def _restore_standalone_index(
-    working_dir: str, snapshot: dict[str, Any], paths: tuple[str, ...]
-) -> None:
-    rows = {row["path"]: row for row in snapshot["tracked"]}
-    for path in paths:
-        entry = rows[path]["index"]
-        if entry is None:
-            fail("index_restore_failed")
-        _update_index_entry(working_dir, path, entry)
-    if _index_tree_sha(working_dir) != snapshot["index_tree_sha"]:
-        fail("index_restore_failed")
-
-
 def _committed_modified_paths(
     working_dir: str, parent_sha: str, commit_sha: str
 ) -> tuple[str, ...]:
@@ -3963,6 +5379,7 @@ def commit_standalone(
     ):
         fail("index_baseline_mismatch")
     temporary_index = ""
+    temporary_descriptor = -1
     message_path = ""
     message_descriptor = -1
     candidate_index = b""
@@ -3972,32 +5389,28 @@ def commit_standalone(
     try:
         for row in content_plan["applied"]:
             _materialize_authenticated_blob(canonical_working, row)
-        descriptor, temporary_index = tempfile.mkstemp(
+        temporary_descriptor, temporary_index = tempfile.mkstemp(
             prefix=".standalone-index-", dir=snapshot["evidence_dir"]
         )
-        _close_temporary_descriptor(descriptor)
-        _cleanup_temporary_paths(temporary_index)
-        temp_env = {"GIT_INDEX_FILE": temporary_index}
-        read_tree = _git_io(
-            canonical_working, "read-tree", parent_sha, extra_env=temp_env
+        temporary_payload = _build_tree_index_candidate(
+            canonical_working, parent_sha, final_entries
         )
-        if read_tree.returncode != 0:
-            fail("temporary_index_failed")
-        for path in applied_paths:
-            _update_index_entry(
-                canonical_working, path, final_entries[path], extra_env=temp_env
-            )
-        expected_tree = _git_io(
-            canonical_working, "write-tree", extra_env=temp_env
+        if os.name != "nt":
+            os.fchmod(temporary_descriptor, 0o600)
+        _write_descriptor(temporary_descriptor, temporary_payload)
+        _close_temporary_descriptor(temporary_descriptor)
+        temporary_descriptor = -1
+        observed_temporary, temporary_identity = _capture_regular(
+            temporary_index, len(temporary_payload), len(temporary_payload)
         )
-        if expected_tree.returncode != 0:
+        if observed_temporary != temporary_payload:
             fail("temporary_index_failed")
-        try:
-            expected_tree_sha = expected_tree.stdout.decode("ascii").strip()
-        except UnicodeError:
-            fail("temporary_index_failed")
-        if re.fullmatch(r"[0-9a-f]{40}", expected_tree_sha) is None:
-            fail("temporary_index_failed")
+        expected_tree_sha = _publish_index_tree_sha(
+            canonical_working,
+            temporary_index,
+            temporary_payload,
+            temporary_identity,
+        )
 
         message_descriptor, message_path = tempfile.mkstemp(
             prefix=".standalone-message-", dir=snapshot["evidence_dir"]
@@ -4070,7 +5483,6 @@ def commit_standalone(
         )
         candidate_index = _build_index_candidate(
             canonical_working,
-            snapshot["evidence_dir"],
             baseline_index,
             baseline_identity.mode,
             final_entries,
@@ -4162,6 +5574,8 @@ def commit_standalone(
                 fail("standalone_recovery_failed")
         raise
     finally:
+        if temporary_descriptor >= 0:
+            _close_temporary_descriptor(temporary_descriptor)
         if message_descriptor >= 0:
             _close_temporary_descriptor(message_descriptor)
         _cleanup_temporary_paths(*(
@@ -4496,6 +5910,7 @@ def commit_review(
     }
     evidence_dir = os.path.dirname(authority["findings_path"])
     temporary_index = ""
+    temporary_descriptor = -1
     message_path = ""
     message_descriptor = -1
     candidate_index = b""
@@ -4506,25 +5921,28 @@ def commit_review(
     try:
         for row in content_plan["applied"]:
             _materialize_authenticated_blob(canonical_working, row)
-        descriptor, temporary_index = tempfile.mkstemp(
+        temporary_descriptor, temporary_index = tempfile.mkstemp(
             prefix=".standalone-index-", dir=evidence_dir
         )
-        _close_temporary_descriptor(descriptor)
-        _cleanup_temporary_paths(temporary_index)
-        hook_environment = {"GIT_INDEX_FILE": temporary_index, "GIT_EDITOR": ":"}
-        if _git_io(
-            canonical_working,
-            "read-tree",
-            authority["parent_sha"],
-            extra_env=hook_environment,
-        ).returncode != 0:
+        temporary_payload = _build_tree_index_candidate(
+            canonical_working, authority["parent_sha"], final_entries
+        )
+        if os.name != "nt":
+            os.fchmod(temporary_descriptor, 0o600)
+        _write_descriptor(temporary_descriptor, temporary_payload)
+        _close_temporary_descriptor(temporary_descriptor)
+        temporary_descriptor = -1
+        observed_temporary, temporary_identity = _capture_regular(
+            temporary_index, len(temporary_payload), len(temporary_payload)
+        )
+        if observed_temporary != temporary_payload:
             fail("temporary_index_failed")
-        for path in applied_paths:
-            _update_index_entry(
-                canonical_working, path, final_entries[path], extra_env=hook_environment
-            )
-        expected_tree_sha = _index_tree_sha(
-            canonical_working, extra_env=hook_environment
+        hook_environment = {"GIT_INDEX_FILE": temporary_index, "GIT_EDITOR": ":"}
+        expected_tree_sha = _publish_index_tree_sha(
+            canonical_working,
+            temporary_index,
+            temporary_payload,
+            temporary_identity,
         )
         message_descriptor, message_path = tempfile.mkstemp(
             prefix=".standalone-message-", dir=evidence_dir
@@ -4593,7 +6011,6 @@ def commit_review(
         )
         candidate_index = _build_index_candidate(
             canonical_working,
-            evidence_dir,
             baseline_index,
             baseline_identity.mode,
             final_entries,
@@ -4674,6 +6091,8 @@ def commit_review(
             _cleanup_transaction_files(backup_path, journal_path)
         raise
     finally:
+        if temporary_descriptor >= 0:
+            _close_temporary_descriptor(temporary_descriptor)
         if message_descriptor >= 0:
             _close_temporary_descriptor(message_descriptor)
         _cleanup_temporary_paths(
