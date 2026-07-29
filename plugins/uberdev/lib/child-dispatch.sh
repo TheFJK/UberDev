@@ -1690,6 +1690,7 @@ except Exception: raise SystemExit(1)
 PY
             return 0
           fi
+          [ "$state" = timed_out ] && return 124
           return 1
           ;;
       esac

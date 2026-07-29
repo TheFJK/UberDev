@@ -31,6 +31,29 @@ printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"comp
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
 uberdev_unwind_child "$STATUS" "$RESULT" 2
 
+# A fully verified terminal timeout has the same public return code whether this
+# waiter won the timeout CAS or observed the durable terminal state afterward.
+printf '{"backend":"codex","state":"timed_out","exit_code":124,"pid":"321"}\n' >"$STATUS"
+terminal_manifest timed_out
+set +e
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+TERMINAL_TIMEOUT_RC=$?
+set -e
+[ "$TERMINAL_TIMEOUT_RC" -eq 124 ]
+
+# Other fully verified non-success terminals retain the generic failure code;
+# callers must not mistake them for a scheduler timeout.
+for TERMINAL_FAILURE_STATE in failed cancelled; do
+  printf '{"backend":"codex","state":"%s","exit_code":1,"pid":"321"}\n' \
+    "$TERMINAL_FAILURE_STATE" >"$STATUS"
+  terminal_manifest "$TERMINAL_FAILURE_STATE"
+  set +e
+  uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+  TERMINAL_FAILURE_RC=$?
+  set -e
+  [ "$TERMINAL_FAILURE_RC" -eq 1 ]
+done
+
 # A terminal manifest event is not sufficient success evidence while the exact
 # lifecycle lease remains present. Wait until watcher finalization releases it.
 TERMINAL_GENERATION=11111111111111111111111111111111
