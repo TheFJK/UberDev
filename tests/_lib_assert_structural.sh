@@ -81,7 +81,7 @@ assert_subagent_type() {
 
 assert_in_section() {
   local file="$1" section_start="$2" section_end="$3" pattern="$4" desc="$5"
-  if awk "/$section_start/,/$section_end/" "$file" | grep -qE -e "$pattern"; then
+  if awk "/$section_start/,/$section_end/" "$file" | grep -E -e "$pattern" >/dev/null; then
     echo "  PASS  $desc"; PASS=$((PASS + 1))
   else
     echo "  FAIL  $desc"; echo "        file: $file  section: $section_start..$section_end  pattern: $pattern"
