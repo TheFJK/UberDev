@@ -157,78 +157,80 @@ done
 
 fixture_receipt_guard_audit() {
   local source_path="$1" fixture_receipt_guard_scan fixture_receipt_guard_rc
-  local fixture_receipt_guard_count fixture_receipt_guard_rest
-  local fixture_receipt_guard_lines fixture_receipt_guard_errors
   if fixture_receipt_guard_scan="$(native_python -I -B - "$source_path" 2>&1 <<'PY'
 import pathlib
+import re
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text().splitlines()
+wrapper = "_uberdev_dispatch_worktree_" + "receipt_helper"
+real_wrapper = wrapper + "_real"
 python_launch = "_uberdev_dispatch_" + "python -I -B"
-receipt_helper = "$_UBERDEV_DISPATCH_LIB_DIR/" + "worktree_receipts.py"
-launches = []
-unguarded = []
-for lineno, line in enumerate(source, 1):
-    stripped = line.lstrip()
-    if not stripped or stripped.startswith("#"):
-        continue
-    if python_launch in line and receipt_helper in line:
-        launches.append(lineno)
-        prefix = line.split(python_launch, 1)[0].rstrip()
-        if not prefix.endswith("MSYS_NO_PATHCONV=1"):
-            unguarded.append(lineno)
-print(
-    f"{len(launches)}|{' '.join(map(str, launches))}|{' '.join(map(str, unguarded))}",
-    end="",
+receipt_script = "$_UBERDEV_DISPATCH_LIB_DIR/" + "worktree_receipts.py"
+direct_launches = []
+saved_aliases = []
+delegations = []
+delegate_pattern = re.compile(
+    re.escape(real_wrapper) + r'\s+(?:"\$@"|create(?:\s|\\|$))'
 )
+for lineno, line in enumerate(source, 1):
+    code = line.split("#", 1)[0]
+    if not code.strip():
+        continue
+    if python_launch in code and receipt_script in code:
+        direct_launches.append(lineno)
+    if "declare -f " + wrapper in code and real_wrapper in code:
+        saved_aliases.append(lineno)
+    if delegate_pattern.search(code):
+        delegations.append(lineno)
+
+errors = []
+if direct_launches:
+    errors.append(
+        f"expected 0 direct native-helper launches, found {len(direct_launches)} "
+        f"(lines: {' '.join(map(str, direct_launches))})"
+    )
+if len(saved_aliases) != 8:
+    errors.append(
+        f"expected 8 saved production-helper aliases, found {len(saved_aliases)} "
+        f"(lines: {' '.join(map(str, saved_aliases))})"
+    )
+if len(delegations) != 11:
+    errors.append(
+        f"expected 11 production-helper delegations, found {len(delegations)} "
+        f"(lines: {' '.join(map(str, delegations))})"
+    )
+if errors:
+    print("; ".join(errors), end="")
+    raise SystemExit(42)
 PY
   )"; then
-    :
+    if [ -n "$fixture_receipt_guard_scan" ]; then
+      printf 'unexpected scanner output: %s' "$fixture_receipt_guard_scan"
+      return 2
+    fi
+    return 0
   else
     fixture_receipt_guard_rc=$?
+    if [ "$fixture_receipt_guard_rc" -eq 42 ]; then
+      printf '%s' "$fixture_receipt_guard_scan"
+      return 1
+    fi
     printf 'scanner rc=%s: %s' "$fixture_receipt_guard_rc" \
       "$(printf '%s' "$fixture_receipt_guard_scan" | tr '\n' ' ')"
     return 2
   fi
-  fixture_receipt_guard_count="${fixture_receipt_guard_scan%%|*}"
-  fixture_receipt_guard_rest="${fixture_receipt_guard_scan#*|}"
-  if [ "$fixture_receipt_guard_rest" = "$fixture_receipt_guard_scan" ]; then
-    printf 'malformed scanner output: %s' "$fixture_receipt_guard_scan"
-    return 2
-  fi
-  fixture_receipt_guard_lines="${fixture_receipt_guard_rest%%|*}"
-  fixture_receipt_guard_errors="${fixture_receipt_guard_rest#*|}"
-  if [ "$fixture_receipt_guard_errors" = "$fixture_receipt_guard_rest" ]; then
-    printf 'malformed scanner output: %s' "$fixture_receipt_guard_scan"
-    return 2
-  fi
-  case "$fixture_receipt_guard_count" in
-    ''|*[!0-9]*)
-      printf 'malformed scanner count: %s' "$fixture_receipt_guard_count"
-      return 2
-      ;;
-  esac
-  if [ "$fixture_receipt_guard_count" -ne 11 ]; then
-    printf 'expected 11 override launches, found %s (lines: %s)' \
-      "$fixture_receipt_guard_count" "$fixture_receipt_guard_lines"
-    return 2
-  fi
-  if [ -z "$fixture_receipt_guard_errors" ]; then
-    return 0
-  fi
-  printf '%s' "$fixture_receipt_guard_errors"
-  return 1
 }
 
 fixture_receipt_guard_errors="$(fixture_receipt_guard_audit "$0")"
 fixture_receipt_guard_rc=$?
 case "$fixture_receipt_guard_rc" in
   0)
-    pass_msg "test fixture receipt-helper override launches preserve native authority argv"
+    pass_msg "test fixture receipt-helper overrides delegate every real launch through production"
     ;;
   1)
-    fail_msg "test fixture receipt-helper override launches preserve native authority argv" \
-      "unguarded lines: $(printf '%s' "$fixture_receipt_guard_errors" | tr '\n' ' ')"
+    fail_msg "test fixture receipt-helper overrides delegate every real launch through production" \
+      "$fixture_receipt_guard_errors"
     ;;
   *)
     fail_msg "test fixture receipt-helper override audit executes successfully" \
@@ -252,11 +254,11 @@ esac
 fixture_receipt_guard_failure="$(fixture_receipt_guard_audit "$WORKTREE_RECEIPTS")"
 fixture_receipt_guard_failure_rc=$?
 case "$fixture_receipt_guard_failure_rc:$fixture_receipt_guard_failure" in
-  2:expected\ 11\ override\ launches,\ found\ 0*)
-    pass_msg "test fixture receipt-helper audit rejects a vacuous zero-launch source"
+  1:*expected\ 8\ saved\ production-helper\ aliases,\ found\ 0*expected\ 11\ production-helper\ delegations,\ found\ 0*)
+    pass_msg "test fixture receipt-helper audit rejects a vacuous zero-delegation source"
     ;;
   *)
-    fail_msg "test fixture receipt-helper audit rejects a vacuous zero-launch source" \
+    fail_msg "test fixture receipt-helper audit rejects a vacuous zero-delegation source" \
       "rc=$fixture_receipt_guard_failure_rc result=$fixture_receipt_guard_failure"
     ;;
 esac
@@ -812,12 +814,13 @@ TRANSACTION_ORDER_LOG="$transaction_order_log" bash -c '
   eval "$(declare -f _uberdev_semaphore_mutex_acquire | sed "1s/_uberdev_semaphore_mutex_acquire/_uberdev_semaphore_mutex_acquire_real/")"
   eval "$(declare -f _uberdev_semaphore_mutex_release | sed "1s/_uberdev_semaphore_mutex_release/_uberdev_semaphore_mutex_release_real/")"
   eval "$(declare -f _uberdev_dispatch_codex_worktree_absent_locked | sed "1s/_uberdev_dispatch_codex_worktree_absent_locked/_uberdev_dispatch_codex_worktree_absent_locked_real/")"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   _uberdev_semaphore_mutex_acquire() { printf "acquire\n" >>"$TRANSACTION_ORDER_LOG"; _uberdev_semaphore_mutex_acquire_real "$@"; }
   _uberdev_semaphore_mutex_release() { printf "release\n" >>"$TRANSACTION_ORDER_LOG"; _uberdev_semaphore_mutex_release_real "$@"; }
   _uberdev_dispatch_codex_worktree_absent_locked() { printf "absence\n" >>"$TRANSACTION_ORDER_LOG"; _uberdev_dispatch_codex_worktree_absent_locked_real "$@"; }
   _uberdev_dispatch_worktree_receipt_helper() {
     [ "$1" != create ] || printf "create\n" >>"$TRANSACTION_ORDER_LOG"
-    MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+    _uberdev_dispatch_worktree_receipt_helper_real "$@"
   }
   git() {
     if [ "$1" = worktree ] && [ "$2" = add ]; then
@@ -866,13 +869,14 @@ TRANSACTION_PARTIAL_LOG="$transaction_partial_log" bash -c '
   eval "$(declare -f _uberdev_semaphore_mutex_release | sed "1s/_uberdev_semaphore_mutex_release/_uberdev_semaphore_mutex_release_real/")"
   eval "$(declare -f _uberdev_dispatch_codex_worktree_absent_locked | sed "1s/_uberdev_dispatch_codex_worktree_absent_locked/_uberdev_dispatch_codex_worktree_absent_locked_real/")"
   eval "$(declare -f _uberdev_dispatch_cleanup_codex_worktree_locked | sed "1s/_uberdev_dispatch_cleanup_codex_worktree_locked/_uberdev_dispatch_cleanup_codex_worktree_locked_real/")"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   _uberdev_semaphore_mutex_acquire() { printf "acquire\n" >>"$TRANSACTION_PARTIAL_LOG"; _uberdev_semaphore_mutex_acquire_real "$@"; }
   _uberdev_semaphore_mutex_release() { printf "release\n" >>"$TRANSACTION_PARTIAL_LOG"; _uberdev_semaphore_mutex_release_real "$@"; }
   _uberdev_dispatch_codex_worktree_absent_locked() { printf "absence\n" >>"$TRANSACTION_PARTIAL_LOG"; _uberdev_dispatch_codex_worktree_absent_locked_real "$@"; }
   _uberdev_dispatch_cleanup_codex_worktree_locked() { printf "cleanup\n" >>"$TRANSACTION_PARTIAL_LOG"; _uberdev_dispatch_cleanup_codex_worktree_locked_real "$@"; }
   _uberdev_dispatch_worktree_receipt_helper() {
     case "$1" in create|retire) printf "%s\n" "$1" >>"$TRANSACTION_PARTIAL_LOG" ;; esac
-    MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+    _uberdev_dispatch_worktree_receipt_helper_real "$@"
   }
   git() {
     if [ "$1" = worktree ] && [ "$2" = add ]; then
@@ -920,9 +924,10 @@ transaction_head_start="$(git -C "$CLEANUP_TMP/repo" rev-parse HEAD)"
 set +e
 MUTABLE_HEAD_REPO="$CLEANUP_TMP/repo" bash -c '
   . "$1"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   _uberdev_dispatch_worktree_receipt_helper() {
     local output rc
-    if output="$(MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@")"; then rc=0; else rc=$?; fi
+    if output="$(_uberdev_dispatch_worktree_receipt_helper_real "$@")"; then rc=0; else rc=$?; fi
     if [ "$1" = create ] && [ "$rc" -eq 0 ]; then
       printf "advanced\n" >"$MUTABLE_HEAD_REPO/transaction-head.txt"
       command git -C "$MUTABLE_HEAD_REPO" add transaction-head.txt
@@ -971,9 +976,10 @@ git -C "$CLEANUP_TMP/repo" worktree add -q "$transaction_preexisting_relative" \
 set +e
 TRANSACTION_PREEXISTING_HELPER_LOG="$transaction_preexisting_helper_log" bash -c '
   . "$1"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   _uberdev_dispatch_worktree_receipt_helper() {
     printf "%s\n" "$1" >>"$TRANSACTION_PREEXISTING_HELPER_LOG"
-    MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+    _uberdev_dispatch_worktree_receipt_helper_real "$@"
   }
   _uberdev_dispatch_create_codex_worktree "$2" "$3" "$4" "$5" "$6" >/dev/null
 ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$transaction_preexisting_relative" \
@@ -1004,15 +1010,16 @@ set +e
 TRANSACTION_UNCONFIRMED_ATTEMPTS="$transaction_unconfirmed_attempts" \
   TRANSACTION_UNCONFIRMED_OLD_TOKEN="$transaction_unconfirmed_old_token_file" bash -c '
     . "$1"
+    eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
     _uberdev_dispatch_worktree_receipt_helper() {
       local output rc count
       if [ "$1" != create ]; then
-        MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+        _uberdev_dispatch_worktree_receipt_helper_real "$@"
         return $?
       fi
       printf "attempt\n" >>"$TRANSACTION_UNCONFIRMED_ATTEMPTS"
       count="$(wc -l <"$TRANSACTION_UNCONFIRMED_ATTEMPTS" | tr -d " ")"
-      if output="$(MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@")"; then rc=0; else rc=$?; fi
+      if output="$(_uberdev_dispatch_worktree_receipt_helper_real "$@")"; then rc=0; else rc=$?; fi
       if [ "$count" -eq 1 ] && [ "$rc" -eq 0 ]; then
         old_token="$(_uberdev_dispatch_python -I -B -c \
           "import json,sys; print(json.loads(sys.argv[1])[\"token\"],end=\"\")" "$output")" || return 3
@@ -1189,6 +1196,7 @@ cleanup_with_mutator_log() {
   set +e
   CLEANUP_HELPER_MODE="$mode" CLEANUP_MUTATOR_LOG="$log" bash -c '
     . "$1"
+    eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
     git() {
       case "$*" in *"worktree remove"*|*"branch -D"*) printf "mutator:%s\n" "$*" >>"$CLEANUP_MUTATOR_LOG" ;; esac
       command git "$@"
@@ -1201,7 +1209,7 @@ cleanup_with_mutator_log() {
           rc3) return 3 ;;
         esac
       fi
-      MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+      _uberdev_dispatch_worktree_receipt_helper_real "$@"
     }
     _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
   ' _ "$DISPATCH_LIB" "$@"
@@ -1410,6 +1418,7 @@ ordering_log="$CLEANUP_TMP/runtime/retirement-order.log"
 : >"$ordering_log"
 if ORDERING_LOG="$ordering_log" bash -c '
   . "$1"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   git() {
     case "$*" in *"worktree remove"*) printf "remove\n" >>"$ORDERING_LOG" ;; *"branch -D"*) printf "branch\n" >>"$ORDERING_LOG" ;; esac
     command git "$@"
@@ -1421,7 +1430,7 @@ if ORDERING_LOG="$ordering_log" bash -c '
   _uberdev_dispatch_worktree_receipt_helper() {
     [ "$1" != inspect ] || printf "inspect\n" >>"$ORDERING_LOG"
     [ "$1" != retire ] || printf "retire\n" >>"$ORDERING_LOG"
-    MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+    _uberdev_dispatch_worktree_receipt_helper_real "$@"
   }
   _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
 ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CONTRACT_RELATIVE" "$CONTRACT_BRANCH" \
@@ -1436,9 +1445,10 @@ make_contract_fixture foreign-public
 foreign_token_file="$CLEANUP_TMP/runtime/foreign-public.token.json"
 if FOREIGN_TOKEN_FILE="$foreign_token_file" bash -c '
   . "$1"
+  eval "$(declare -f _uberdev_dispatch_worktree_receipt_helper | sed "1s/_uberdev_dispatch_worktree_receipt_helper/_uberdev_dispatch_worktree_receipt_helper_real/")"
   _uberdev_dispatch_worktree_receipt_helper() {
     if [ "$1" = retire ]; then
-      retired="$(MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@")" || return $?
+      retired="$(_uberdev_dispatch_worktree_receipt_helper_real "$@")" || return $?
       [ "$retired" = "{\"state\":\"retired\"}" ] || return 3
       shift
       repo=""; relative=""; branch=""; receipt=""; start=""
@@ -1449,13 +1459,13 @@ if FOREIGN_TOKEN_FILE="$foreign_token_file" bash -c '
           --start-head) start="$2"; shift 2 ;; --token) shift 2 ;; *) return 3 ;;
         esac
       done
-      MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" create \
+      _uberdev_dispatch_worktree_receipt_helper_real create \
         --repo "$repo" --relative "$relative" --branch "$branch" \
         --receipt "$receipt" --start-head "$start" >"$FOREIGN_TOKEN_FILE" || return $?
       printf "{\"state\":\"retired\"}\n"
       return 0
     fi
-    MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" "$@"
+    _uberdev_dispatch_worktree_receipt_helper_real "$@"
   }
   _uberdev_dispatch_cleanup_codex_worktree "$2" "$3" "$4" "$5" "$6" completed
 ' _ "$DISPATCH_LIB" "$CLEANUP_TMP/repo" "$CONTRACT_RELATIVE" "$CONTRACT_BRANCH" \
