@@ -15,6 +15,188 @@ awk '/# BEGIN simplify-standalone-controller-v2/{active=1;next} /# END simplify-
 bash -n "$BUILDER"
 bash -n "$CONTROLLER"
 
+python3 -I -B - "$CONTRACT" "$0" "$TEST_ROOT" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import ntpath
+import os
+import pathlib
+import sys
+
+contract_path, fixture_path, test_root = sys.argv[1:]
+fixture_source = pathlib.Path(fixture_path).read_text(encoding="utf-8")
+status_output = os.path.join(test_root, "modeled-windows-status.json")
+
+
+def load_contract(path):
+    spec = importlib.util.spec_from_file_location("simplify_code_fixer_contract", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load code fixer contract")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def fixture_python_body(marker_parts):
+    marker = "".join(marker_parts)
+    marker_at = fixture_source.index(marker)
+    body_at = fixture_source.rfind("<<'PY'\n", 0, marker_at)
+    if body_at < 0:
+        raise AssertionError(f"fixture producer missing for {marker}")
+    body_at += len("<<'PY'\n")
+    body_end = fixture_source.index("\nPY\n", marker_at)
+    return fixture_source[body_at:body_end]
+
+
+def execute_fixture_python(source, arguments):
+    saved_argv = sys.argv
+    output = io.StringIO()
+    try:
+        sys.argv = ["fixture-producer", *arguments]
+        with contextlib.redirect_stdout(output):
+            exec(compile(source, "<fixture-producer>", "exec"), {})
+    finally:
+        sys.argv = saved_argv
+    return output.getvalue()
+
+
+class WindowsPathModel:
+    sep = "\\"
+    altsep = "/"
+    junction_source = "C:\\Program Files\\Git\\tmp\\prkit-simplify"
+    junction_target = "D:\\fixture-junction-target\\prkit-simplify"
+
+    @staticmethod
+    def isabs(value):
+        drive, tail = ntpath.splitdrive(value)
+        return bool(drive and tail.startswith(("\\", "/")))
+
+    @staticmethod
+    def abspath(value):
+        drive, tail = ntpath.splitdrive(ntpath.normpath(value))
+        if not drive or not tail.startswith("\\"):
+            raise AssertionError(f"modeled path is not drive-absolute: {value!r}")
+        return drive.upper() + tail
+
+    @staticmethod
+    def realpath(value):
+        absolute = WindowsPathModel.abspath(value)
+        source = WindowsPathModel.junction_source
+        if absolute == source or absolute.startswith(source + "\\"):
+            return WindowsPathModel.junction_target + absolute[len(source):]
+        return absolute
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+contract = load_contract(contract_path)
+receipt_source = fixture_python_body(
+    ("edge,instance,result,", "status=sys.argv[1:]")
+)
+status_source = fixture_python_body(
+    ("path,handle,worktree,", "result=sys.argv[1:]")
+)
+raw_worktree = "C:/Program Files/Git/tmp/prkit-simplify/repo"
+raw_result = (
+    "C:/Program Files/Git/tmp/prkit-simplify/repo/.uberdev/research/"
+    "20260728-010208-abcdef0/fixer-result.md"
+)
+raw_status = (
+    "C:/Program Files/Git/tmp/prkit-simplify/repo/.uberdev/research/"
+    "20260728-010208-abcdef0/fixer-status.json"
+)
+canonical_worktree = WindowsPathModel.realpath(
+    WindowsPathModel.abspath(raw_worktree)
+)
+canonical_result = WindowsPathModel.realpath(WindowsPathModel.abspath(raw_result))
+canonical_status = WindowsPathModel.realpath(WindowsPathModel.abspath(raw_status))
+assert WindowsPathModel.abspath(raw_worktree) != canonical_worktree
+assert WindowsPathModel.abspath(raw_result) != canonical_result
+assert WindowsPathModel.abspath(raw_status) != canonical_status
+edge_id = "simplify.fix.phase2"
+instance_id = "fixture-instance"
+raw_receipt = {
+    "schema_version": 1,
+    "edge_id": edge_id,
+    "instance_id": instance_id,
+    "backend": "codex",
+    "handle": "12345",
+    "state": "completed",
+    "result_file": raw_result,
+    "status_file": raw_status,
+}
+
+saved_path = contract.os.path
+saved_capture = contract._capture_regular
+try:
+    contract.os.path = WindowsPathModel
+    contract._capture_regular = lambda *_arguments: (b"{}", ())
+    try:
+        contract.bind_launch_receipt(
+            receipt=canonical_json(raw_receipt),
+            edge_id=edge_id,
+            instance_id=instance_id,
+            result_path=canonical_result,
+            status_path=canonical_status,
+            working_dir=canonical_worktree,
+        )
+    except contract.ContractFailure as error:
+        if str(error) != "launch_receipt_path_mismatch":
+            raise
+    else:
+        raise AssertionError("raw alternate Windows receipt spelling reached authority")
+
+    execute_fixture_python(
+        status_source, [status_output, "12345", raw_worktree, raw_result]
+    )
+    with open(status_output, encoding="utf-8") as stream:
+        produced_status = json.load(stream)
+    produced_receipt = json.loads(
+        execute_fixture_python(
+            receipt_source, [edge_id, instance_id, raw_result, raw_status]
+        )
+    )
+    actual_paths = {
+        "receipt.result_file": produced_receipt["result_file"],
+        "receipt.status_file": produced_receipt["status_file"],
+        "status.worktree": produced_status["worktree"],
+        "status.result": produced_status["result"],
+    }
+    expected_paths = {
+        "receipt.result_file": canonical_result,
+        "receipt.status_file": canonical_status,
+        "status.worktree": canonical_worktree,
+        "status.result": canonical_result,
+    }
+    if actual_paths != expected_paths:
+        raise AssertionError(
+            "fixture producer kept alternate Windows spelling: "
+            + json.dumps(actual_paths, sort_keys=True)
+        )
+
+    status_payload = canonical_json(produced_status)
+    contract._capture_regular = lambda *_arguments: (status_payload, ())
+    binding = contract.bind_launch_receipt(
+        receipt=canonical_json(produced_receipt),
+        edge_id=edge_id,
+        instance_id=instance_id,
+        result_path=canonical_result,
+        status_path=canonical_status,
+        working_dir=canonical_worktree,
+    )
+    assert binding["result_path"] == canonical_result
+    assert binding["status_path"] == canonical_status
+    assert binding["worktree"] == canonical_worktree
+finally:
+    contract.os.path = saved_path
+    contract._capture_regular = saved_capture
+PY
+
 write_aggregate() {
   local path="$1" target="${2:-}"
   python3 -I -B - "$target" <<'PY' | python3 -I -B "$CONTRACT" encode-aggregate --phase phase2 >"$path"
@@ -158,8 +340,10 @@ PY
     local status_handle=12345
     [ "$replacement" != foreign_handle ] || status_handle=54321
     python3 -I -B - "$UBERDEV_CHILD_STATUS" "$status_handle" "$WORKTREE_ROOT" "$UBERDEV_CHILD_RESULT" <<'PY'
-import json,sys
+import json,os,sys
 path,handle,worktree,result=sys.argv[1:]
+worktree=os.path.realpath(os.path.abspath(worktree))
+result=os.path.realpath(os.path.abspath(result))
 value={
     "backend":"codex",
     "branch":"",
@@ -178,8 +362,10 @@ PY
   uberdev_dispatch_child_capture() {
     fixture_child
     UBERDEV_CHILD_DISPATCH_RECEIPT="$(python3 -I -B - "$1" "$FIXTURE_INSTANCE" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" <<'PY'
-import json,sys
+import json,os,sys
 edge,instance,result,status=sys.argv[1:]
+result=os.path.realpath(os.path.abspath(result))
+status=os.path.realpath(os.path.abspath(status))
 print(json.dumps({"schema_version":1,"edge_id":edge,"instance_id":instance,"backend":"codex","handle":"12345","state":"completed","result_file":result,"status_file":status},sort_keys=True,separators=(",",":")),end="")
 PY
 )"
