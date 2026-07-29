@@ -24,10 +24,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "M1 every manifest path exists in plugins/uberdev/" \
   || no "M1 $missing manifest path(s) do not exist"
 
-# M2 — count of real (non-comment, non-blank) entries is 36
+# M2 — count of real (non-comment, non-blank) entries is 37
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 36 ] && ok "M2 manifest lists exactly 36 files" \
-  || no "M2 manifest lists $count files (expected 36)"
+[ "$count" -eq 37 ] && ok "M2 manifest lists exactly 37 files" \
+  || no "M2 manifest lists $count files (expected 37)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \
@@ -61,6 +61,14 @@ done
 grep -qxF lib/atomic_move.py "$MANIFEST" \
   && grep -qxF lib/worktree_receipts.py "$MANIFEST" \
   && ok "M6 both receipt-retirement helpers are packaged"
+
+# M7 — the code-fixer authority contract is a required standalone runtime
+# dependency, not an implicit dependency on the full UberDev checkout.
+if grep -qxF lib/code_fixer_contract.py "$MANIFEST"; then
+  ok "M7 code-fixer authority contract is packaged"
+else
+  no "M7 missing code-fixer authority contract"
+fi
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

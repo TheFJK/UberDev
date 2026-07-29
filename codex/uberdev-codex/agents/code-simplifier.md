@@ -139,9 +139,18 @@ Emit findings as a structured block. Each finding is one record with these field
   detail: <prose rationale + suggested direction, your own words>
 ```
 
-`severity` matches the canonical `post-impl-review-aggregate` envelope (see `plugins/uberdev/skills/post-impl-review/SKILL.md` line 128 and `plugins/uberdev/agents/pr-test-analyzer.md` line 57): `blocker` = must-fix before merge, `suggestion` = nice-to-have. This is the same enum every other producer in the pipeline uses, so `code-fixer`'s parser does not need a normalisation map.
+`severity` uses the canonical two-member aggregate enum: `blocker` = must-fix
+before merge, `suggestion` = nice-to-have. The `lens` field is mandatory so the
+trusted aggregator can dedup by `file:line` and map it to the exact Phase 2
+source edge (`review_pr.simplify.reuse`, `.quality`, or `.efficiency`).
 
-This shape is the contract `code-fixer` parses (see `plugins/uberdev/agents/code-fixer.md` Step 2). The `lens` field is mandatory so the aggregator can dedup by `file:line` across lenses (see `/uberdev:simplify` Phase 3 dedup policy). If you have zero findings, return an empty list — do not invent findings to fill the report.
+This YAML is an upstream contributor result, not code-fixer input. The
+aggregator converts it to the one canonical compact sorted JSON schema v2:
+`location` becomes `scope: {operation: modify_existing, path, line}`, the lens
+becomes `source_edges`, and summary/detail remain context-only prose. Markdown
+tables and direct YAML fallbacks are not emitted to code-fixer. If you have zero
+findings, return an empty list — `findings: []` is valid and you must not invent
+findings to fill the report.
 
 ## Output Rules — secret-leak prevention
 

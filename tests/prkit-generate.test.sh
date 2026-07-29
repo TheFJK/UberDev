@@ -491,10 +491,10 @@ fi
 # G2 — verify gate independently passes on the produced tree
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
-# G3 — EXACTLY 36 source files landed under plugins/prkit (manifest count-lock;
+# G3 — EXACTLY 37 source files landed under plugins/prkit (manifest count-lock;
 # -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 36 ] && ok "G3 exactly 36 copied files present" || no "G3 copied $n files (expected 36)"
+[ "$n" -eq 37 ] && ok "G3 exactly 37 copied files present" || no "G3 copied $n files (expected 37)"
 
 # G4 — scaffold files exist with interpolated version and a native Codex
 # marketplace whose selector matches the generated README.
@@ -689,11 +689,15 @@ def swap_roles(tree):
  left=tree['edges']['review_pr.review.correctness']; right=tree['edges']['review_pr.review.comments']
  left['role'],right['role']=right['role'],left['role']
 def swap_workflows(tree):
- left=tree['edges']['review_pr.fix.phase1']; right=tree['edges']['review_pr.fix.phase2']
+ left=tree['edges']['review_pr.fix.phase2']; right=tree['edges']['simplify.fix.phase2']
  left['allowed_workflows'],right['allowed_workflows']=right['allowed_workflows'],left['allowed_workflows']
 def attach_contract(tree):
  tree['edges']['review_pr.fix.phase1']['output_contract']='phase1-reviewer-v1'
-for mutation in (swap_roles,swap_workflows,attach_contract): reject_mutation(mutation)
+def add_unexpected_simplify_edge(tree):
+ tree['edges']['simplify.unexpected']=dict(tree['edges']['simplify.fix.phase2'])
+def drift_fixer_posture(tree):
+ tree['edges']['simplify.fix.phase2']['workspace_mode']='disposable'
+for mutation in (swap_roles,swap_workflows,attach_contract,add_unexpected_simplify_edge,drift_fixer_posture): reject_mutation(mutation)
 root,policy,agents=fixture(); before=policy.read_bytes(); env=os.environ.copy()
 env['PRKIT_GENERATOR_TEST_MODE']='1'; env['PRKIT_TEST_POLICY_PUBLISH_FAIL']='1'
 result=subprocess.run([sys.executable,'-I','-B','-',str(policy),str(agents),'','.md'],input=snippet,text=True,capture_output=True,env=env)
@@ -704,13 +708,15 @@ PY
 then ok "G6ab policy projection enforces canonical edge semantics and atomic failure cleanup"
 else no "G6ab policy projection accepted relationship drift or leaked partial publication"; fi
 
-# G6b — both standalone runtimes ship one byte-identical, review-only policy
+# G6b — both standalone runtimes ship one byte-identical, closed PR-phase policy
 # projection and the manifest-declared reviewer contract, while native Codex
 # role TOMLs remain edge-agnostic.
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
    && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
+   && [ -f "$T1/plugins/prkit/lib/code_fixer_contract.py" ] \
+   && [ -f "$T1/codex/prkit-codex/lib/code_fixer_contract.py" ] \
    && python3 -I -B - "$T1" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
@@ -752,7 +758,7 @@ provider_edges={
  'review_pr.simplify.quality','review_pr.simplify.efficiency',
  'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
- 'review_pr.ci.resolve_conflict',
+ 'review_pr.ci.resolve_conflict','simplify.fix.phase2',
 }
 assert set(edges)==structural_edges|provider_edges
 assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)
@@ -767,22 +773,57 @@ for edge_id in (
  'review_pr.review.correctness','review_pr.review.silent_failures',
  'review_pr.review.types','review_pr.review.comments','review_pr.review.tests',
  'review_pr.review.general','review_pr.fix.phase1','review_pr.ci.classify',
+ 'review_pr.fix.phase2',
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
  'review_pr.ci.resolve_conflict',
 ):
  assert edges[edge_id]['allowed_workflows']==['review-pr','solve','turbo'], edge_id
 for edge_id in (
  'review_pr.simplify.reuse','review_pr.simplify.quality',
- 'review_pr.simplify.efficiency','review_pr.fix.phase2','review_pr.defer.findings',
+ 'review_pr.simplify.efficiency','review_pr.defer.findings',
 ):
  assert edges[edge_id]['allowed_workflows']==['review-pr','simplify','solve','turbo'], edge_id
+assert edges['simplify.fix.phase2']['allowed_workflows']==['simplify']
+review_inputs={
+ 'authority_path':'path','authority_sha256':'string',
+ 'commit_range_path':'path','commit_range_sha256':'string',
+ 'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+ 'pr_number':'integer','working_dir':'directory',
+}
+standalone_inputs={
+ 'authority_path':'path','authority_sha256':'string',
+ 'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+ 'pr_number':'integer','standalone_snapshot_path':'path',
+ 'standalone_snapshot_sha256':'string','working_dir':'directory',
+}
+assert edges['review_pr.fix.phase2']['required_inputs']==review_inputs
+assert edges['simplify.fix.phase2']['required_inputs']==standalone_inputs
+assert edges['review_pr.fix.phase2']['optional_inputs']=={}
+assert edges['simplify.fix.phase2']['optional_inputs']=={}
+assert (
+ edges['review_pr.fix.phase2']['phase'],
+ edges['review_pr.fix.phase2']['workspace_mode'],
+ edges['review_pr.fix.phase2']['risk_scope'],
+ edges['review_pr.fix.phase2']['required'],
+ edges['review_pr.fix.phase2']['cardinality'],
+)==('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration')
+assert (
+ edges['simplify.fix.phase2']['phase'],
+ edges['simplify.fix.phase2']['workspace_mode'],
+ edges['simplify.fix.phase2']['risk_scope'],
+ edges['simplify.fix.phase2']['required'],
+ edges['simplify.fix.phase2']['cardinality'],
+)==('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration')
+assert (root/'plugins/prkit/lib/code_fixer_contract.py').read_bytes()==(
+ root/'codex/prkit-codex/lib/code_fixer_contract.py'
+).read_bytes()
 referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
 assert set(tree.get('output_contracts',{}))==referenced
 contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
 roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
 assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
 PY
-then ok "G6b review-only policy is identical, closed, and contract-scoped across runtimes"
+then ok "G6b PR-phase policy and authority helper are identical and closed across runtimes"
 else no "G6b standalone policy projection or reviewer contract scope is incorrect"; fi
 
 # G6bc — standalone /simplify uses PR_NUMBER=0. Execute the origin-derivation

@@ -6,7 +6,7 @@
 # rewritten by rewrite.sh (blanket uberdev->prkit + slug + neutralize).
 # The Codex manifest (.codex-plugin/plugin.json), README, and AGENTS.md primer are
 # NOT listed here — they are authored from templates with prkit-correct counts.
-# Count-locked at 55 by tests/prkit-codex-manifest.test.sh.
+# Count-locked at 56 by tests/prkit-codex-manifest.test.sh.
 
 # --- command-skills (3) — Codex equivalents of commands/{review-pr,simplify,merge}.md ---
 codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md
@@ -34,7 +34,7 @@ codex/uberdev-codex/agents/merge-strategy-decider.md
 codex/uberdev-codex/agents/conflict-resolver.md
 codex/uberdev-codex/agents/findings-to-issues.md
 
-# --- lib (13 — shared dispatch/config/receipt chain) ---
+# --- lib (14 — shared dispatch/config/authority/receipt chain) ---
 codex/uberdev-codex/lib/child-dispatch.sh
 codex/uberdev-codex/lib/agent-dispatch.sh
 codex/uberdev-codex/lib/dispatch.sh
@@ -43,6 +43,7 @@ codex/uberdev-codex/lib/model_routing.py
 codex/uberdev-codex/lib/run_manifest.py
 codex/uberdev-codex/lib/atomic_move.py
 codex/uberdev-codex/lib/worktree_receipts.py
+codex/uberdev-codex/lib/code_fixer_contract.py
 codex/uberdev-codex/lib/live-semaphore.sh
 codex/uberdev-codex/lib/child-receipts.py
 codex/uberdev-codex/lib/child-inputs.py

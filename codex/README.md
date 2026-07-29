@@ -219,17 +219,19 @@ final message lands in the `-o` result file for post-run inspection.
 
 ## Regenerating the Codex artifacts
 
-If you change the source skills/agents/commands, regenerate the Codex output:
+If you change canonical skills, agents, commands, runtime libraries, shared
+contracts, or child policy, regenerate the Codex output:
 
 ```bash
-# Skills → codex/uberdev-codex/skills/ (path-fixed copies)
+# Skills + package shared contracts → codex/uberdev-codex/{skills,shared}/
+# (path-fixed copies; shared combines skills/_shared and plugins/uberdev/shared)
 bash codex/tools/port-skill.sh plugins/uberdev/skills codex/uberdev-codex/skills
-
-# Agents → codex/agents/*.toml (Claude .md → Codex .toml)
-python3 codex/tools/convert-agents.py plugins/uberdev/agents codex/agents
 
 # Runtime Markdown prompts → codex/uberdev-codex/agents/ (Codex-path-safe copies)
 bash codex/tools/port-agent-prompts.sh plugins/uberdev/agents codex/uberdev-codex/agents
+
+# Agents → codex/agents/*.toml (Claude .md → Codex .toml)
+python3 codex/tools/convert-agents.py plugins/uberdev/agents codex/agents
 
 # Commands → codex/uberdev-codex/skills/uberdev-cmd-*/ (13 command-skills)
 python3 codex/tools/convert-commands.py plugins/uberdev/commands codex/uberdev-codex/skills
@@ -237,9 +239,12 @@ python3 codex/tools/convert-commands.py plugins/uberdev/commands codex/uberdev-c
 # Runtime shell libraries → codex/uberdev-codex/lib/
 rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.bak' --exclude '*.bak2' --exclude '*.fix' --exclude '.DS_Store' \
   plugins/uberdev/lib/ codex/uberdev-codex/lib/
+
+# Canonical child-policy registry → Codex runtime policy projection source
+cp plugins/uberdev/policy/solve-run-tree-v1.json codex/uberdev-codex/policy/solve-run-tree-v1.json
 ```
 
-All five are idempotent. Keep `codex/uberdev-codex/.codex-plugin/plugin.json`'s
+All six steps are idempotent. Keep `codex/uberdev-codex/.codex-plugin/plugin.json`'s
 `version` in sync with `plugins/uberdev/.claude-plugin/plugin.json`.
 
 ## License

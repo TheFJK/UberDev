@@ -30,9 +30,10 @@ import secrets
 import stat
 import sys
 import time
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, NamedTuple
+from typing import Any, NamedTuple
 
 try:
     import fcntl as _fcntl
@@ -972,7 +973,7 @@ def _windows_parent_pid(pid: int) -> int:
 @contextmanager
 def _windows_live_process(
     pid: int,
-) -> Iterable[tuple[int, Callable[[], None]]]:
+) -> Iterator[tuple[int, Callable[[], None]]]:
     """Hold a validated live process handle while its identity is consumed."""
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -1748,7 +1749,7 @@ def _unlock_manifest_descriptor(descriptor: int) -> None:
 
 
 @contextmanager
-def _locked_manifest(path: str) -> Iterable[int]:
+def _locked_manifest(path: str) -> Iterator[int]:
     """Hold an advisory inode lock while lifecycle state is checked and changed."""
 
     descriptor = _secure_open_regular(path, os.O_RDWR | os.O_CREAT, 0o600)

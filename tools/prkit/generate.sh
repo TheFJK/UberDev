@@ -322,8 +322,8 @@ render_managed(){
   render "$tmpl" "$out" "$rel"
 }
 
-# Project the canonical UberDev run tree down to the review-only closure shipped
-# by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
+# Project the canonical UberDev run tree down to the closed PR-phase surface
+# shipped by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
 # otherwise-accepted NaN/Infinity constants are rejected, and the exact
 # deterministic bytes are reparsed before the atomic replace.
 project_review_policy(){
@@ -361,15 +361,40 @@ edge_semantics = {
     'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
-    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'simplify', 'solve', 'turbo'), None),
+    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.defer_refusal': ('provider', 'findings-to-issues', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.resolve_conflict': ('provider', 'conflict-resolver', ('review-pr', 'solve', 'turbo'), None),
+    'simplify.fix.phase2': ('provider', 'code-fixer', ('simplify',), None),
 }
 expected_edges = set(edge_semantics)
+review_fixer_inputs = {
+    'authority_path': 'path', 'authority_sha256': 'string',
+    'commit_range_path': 'path', 'commit_range_sha256': 'string',
+    'disposition_path': 'path', 'findings_path': 'path',
+    'findings_sha256': 'string', 'pr_number': 'integer',
+    'working_dir': 'directory',
+}
+standalone_fixer_inputs = {
+    'authority_path': 'path', 'authority_sha256': 'string',
+    'disposition_path': 'path', 'findings_path': 'path',
+    'findings_sha256': 'string', 'pr_number': 'integer',
+    'standalone_snapshot_path': 'path',
+    'standalone_snapshot_sha256': 'string', 'working_dir': 'directory',
+}
+fixer_input_semantics = {
+    'review_pr.fix.phase1': review_fixer_inputs,
+    'review_pr.fix.phase2': review_fixer_inputs,
+    'simplify.fix.phase2': standalone_fixer_inputs,
+}
+fixer_route_posture = {
+    'review_pr.fix.phase1': ('review_fix', 'caller', 'run', False, 'one_per_review_iteration'),
+    'review_pr.fix.phase2': ('simplify_fix', 'caller', 'run', False, 'zero_or_one_per_review_iteration'),
+    'simplify.fix.phase2': ('simplify_fix', 'caller', 'run', False, 'zero_or_one_per_review_iteration'),
+}
 
 def reject_pairs(pairs):
     result = {}
@@ -418,11 +443,12 @@ if shipped_roles != expected_roles:
 
 selected_edge_ids = {
     edge_id for edge_id in source_edges
-    if isinstance(edge_id, str) and edge_id.startswith('review_pr.')
+    if isinstance(edge_id, str)
+    and edge_id.startswith(('review_pr.', 'simplify.'))
 }
 if selected_edge_ids != expected_edges:
     raise SystemExit(
-        'policy review edge grammar mismatch: '
+        'policy PR-phase edge grammar mismatch: '
         f'missing={sorted(expected_edges - selected_edge_ids)} '
         f'unexpected={sorted(selected_edge_ids - expected_edges)}'
     )
@@ -453,6 +479,19 @@ for edge_id in sorted(expected_edges):
     actual_contract = edge.get('output_contract')
     if actual_contract != expected_contract or (expected_contract is None and 'output_contract' in edge):
         raise SystemExit(f'policy edge output contract mismatch: {edge_id}')
+    expected_inputs = fixer_input_semantics.get(edge_id)
+    if expected_inputs is not None and edge.get('required_inputs') != expected_inputs:
+        raise SystemExit(f'policy fixer input contract mismatch: {edge_id}')
+    if expected_inputs is not None and edge.get('optional_inputs') != {}:
+        raise SystemExit(f'policy fixer optional-input contract mismatch: {edge_id}')
+    expected_posture = fixer_route_posture.get(edge_id)
+    if expected_posture is not None:
+        actual_posture = (
+            edge.get('phase'), edge.get('workspace_mode'), edge.get('risk_scope'),
+            edge.get('required'), edge.get('cardinality'),
+        )
+        if actual_posture != expected_posture or type(edge.get('required')) is not bool:
+            raise SystemExit(f'policy fixer route posture mismatch: {edge_id}')
     edges[edge_id] = edge
 
 contract_ids = {

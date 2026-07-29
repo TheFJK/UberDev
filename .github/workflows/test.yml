@@ -101,6 +101,7 @@ jobs:
           bash tests/prkit-generate.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
+          bash tests/code-fixer-contract.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/review-child-handoff.test.sh && \
           bash tests/findings-to-issues.test.sh && \
@@ -162,6 +163,7 @@ jobs:
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/simplify.test.sh && \
+          bash tests/simplify-standalone-flow.test.sh && \
           bash tests/uberscan.test.sh && \
           bash tests/uberscan-report.test.sh && \
           bash tests/uberscan-chunk.test.sh && \
@@ -256,10 +258,12 @@ jobs:
         # block below in lockstep; a new Unix-only fixture needs an entry
         # here AND its `bash tests/...` line in the ubuntu job above.
         #   - cluster-pipeline.test.sh
+        #   - code-fixer-contract.test.sh
         #   - finish-branch-zsh.test.sh
         #   - goal-pipeline-zsh.test.sh
         #   - goal-state-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh
+        #   - simplify-standalone-flow.test.sh
         #   - testers-pipeline.test.sh
         #   - testers-agent-contract.test.sh
         #   - testers-rate-limit-audit.test.sh

@@ -618,18 +618,66 @@ fi
 # ownership receipt, or retained capacity lease.
 FIX_FINDINGS="$RESEARCH_DIR_ABS/e2e-findings.md"
 FIX_RANGE="$RESEARCH_DIR_ABS/e2e-commit-range.txt"
-FIX_DISPOSITION="$RESEARCH_DIR_ABS/e2e-disposition.json"
-printf '<external-untrusted-input source="post-impl-review-aggregate">\n</external-untrusted-input>\n' >"$FIX_FINDINGS"
-printf 'HEAD^..HEAD\n' >"$FIX_RANGE"
-printf '{}\n' >"$FIX_DISPOSITION"
+FIX_DISPOSITION="$RESEARCH_DIR_ABS/phase1-disposition.json"
+python3 -I -B - <<'PY' \
+  | python3 -I -B "$CODE_FIXER_CONTRACT" encode-aggregate --phase phase1 \
+  >"$FIX_FINDINGS"
+import json
+
+contributors = []
+for edge in (
+    "review_pr.review.correctness",
+    "review_pr.review.silent_failures",
+    "review_pr.review.types",
+    "review_pr.review.comments",
+    "review_pr.review.tests",
+    "review_pr.review.general",
+):
+    contributors.append({
+        "confidence": "high",
+        "id": edge,
+        "verdict": "REVISIONS_REQUIRED" if edge == "review_pr.review.correctness" else "APPROVE",
+    })
+print(json.dumps({
+    "contributors": contributors,
+    "findings": [{
+        "detail": "Exercise the caller-owned fixer boundary.",
+        "scope": {"line": 1, "operation": "modify_existing", "path": "README.md"},
+        "severity": "blocker",
+        "source_edges": ["review_pr.review.correctness"],
+        "summary": "Apply the bounded caller repair",
+    }],
+    "phase": "phase1",
+    "schema_version": 2,
+}, sort_keys=True, separators=(",", ":")))
+PY
+FIX_RANGE_BASE="$(git rev-parse HEAD^)"
+FIX_RANGE_HEAD="$(git rev-parse HEAD)"
+printf '%s..%s\n' "$FIX_RANGE_BASE" "$FIX_RANGE_HEAD" >"$FIX_RANGE"
+: >"$FIX_DISPOSITION"
+FIX_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest \
+  --path "$FIX_FINDINGS" --minimum 1 --maximum 16777216)"
+FIX_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest \
+  --path "$FIX_RANGE" --minimum 1 --maximum 256)"
+FIX_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+  --edge-id review_pr.fix.phase1 --policy-phase review_fix \
+  --findings-path "$FIX_FINDINGS" --findings-sha256 "$FIX_FINDINGS_SHA256" \
+  --commit-range-path "$FIX_RANGE" --commit-range-sha256 "$FIX_RANGE_SHA256" \
+  --working-dir "$repo" --disposition-path "$FIX_DISPOSITION")"
+FIX_AUTHORITY_PATH="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["authority_path"],end="")' "$FIX_AUTHORITY_RECEIPT")"
+FIX_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["authority_sha256"],end="")' "$FIX_AUTHORITY_RECEIPT")"
 repair_instance="review-pr-e2e-${case_name}-caller-fix-iter1-attempt01"
 before_repair="$(git rev-parse HEAD)"
 repair_inputs="$(uberdev_child_inputs_build review_pr.fix.phase1 \
   findings_path "$(review_json_string "$FIX_FINDINGS")" \
+  findings_sha256 "$(review_json_string "$FIX_FINDINGS_SHA256")" \
   commit_range_path "$(review_json_string "$FIX_RANGE")" \
+  commit_range_sha256 "$(review_json_string "$FIX_RANGE_SHA256")" \
   working_dir "$(review_json_string "$repo")" \
   pr_number "$PR_NUMBER" \
-  disposition_path "$(review_json_string "$FIX_DISPOSITION")")"
+  disposition_path "$(review_json_string "$FIX_DISPOSITION")" \
+  authority_path "$(review_json_string "$FIX_AUTHORITY_PATH")" \
+  authority_sha256 "$(review_json_string "$FIX_AUTHORITY_SHA256")")"
 uberdev_create_child_handoff review_pr.fix.phase1 "$repair_instance" "$repair_inputs" null >/dev/null
 repair_result="$UBERDEV_CHILD_RESULT"
 repair_status="$UBERDEV_CHILD_STATUS"
@@ -918,6 +966,9 @@ make_repo() {
   printf 'fixture\n' >"$repo/README.md"
   git -C "$repo" add README.md
   git -C "$repo" commit -qm init
+  printf 'reviewed change\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm 'test: add reviewed change'
 }
 
 run_case() {

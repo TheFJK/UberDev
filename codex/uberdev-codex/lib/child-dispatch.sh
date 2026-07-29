@@ -197,9 +197,9 @@ uberdev_command_workspace_prepare() {
   UBERDEV_CARRIER_BACKEND="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["root_decision"]["backend"],end="")' "$validated_context")" || return 2
   parent_descriptor="${UBERDEV_COMMAND_WORKSPACE_JSON:-}"
   [ "$caller" != post-impl-review ] || [ -n "$parent_descriptor" ] || { _uberdev_child_error 'post-impl-review requires parent workspace'; return 2; }
-  presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
+  presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","STANDALONE_SNAPSHOT_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
     "${WORKTREE_ROOT:-}" "${RESEARCH_DIR_ABS:-}" "${DIFF_ARTIFACT_PATH:-}" "${CRITERIA_PATH:-}" \
-    "${COMMIT_RANGE_PATH:-}" "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}")" || return 2
+    "${COMMIT_RANGE_PATH:-}" "${STANDALONE_SNAPSHOT_PATH:-}" "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}")" || return 2
   helper="$_UBERDEV_CHILD_LIB_DIR/command-workspace.py"
   [ -f "$helper" ] || { _uberdev_child_error 'command workspace helper missing'; return 2; }
   output="$(python3 -I -B "$helper" --caller "$caller" --carrier-json "$UBERDEV_RUN_CARRIER_JSON" --run-id "$run_id" --requested-root "$requested_root" --parent-workspace-json "$parent_descriptor" --presets-json "$presets")" || return $?
@@ -210,11 +210,12 @@ uberdev_command_workspace_prepare() {
   DIFF_ARTIFACT_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("diff",""),end="")' "$output")" || return 2
   CRITERIA_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("criteria",""),end="")' "$output")" || return 2
   COMMIT_RANGE_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("commit_range",""),end="")' "$output")" || return 2
+  STANDALONE_SNAPSHOT_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("standalone_snapshot",""),end="")' "$output")" || return 2
   PHASE1_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase1_disposition",""),end="")' "$output")" || return 2
   PHASE2_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase2_disposition",""),end="")' "$output")" || return 2
   AGG_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("aggregate",""),end="")' "$output")" || return 2
   export UBERDEV_COMMAND_WORKSPACE_JSON UBERDEV_CARRIER_BACKEND WORKTREE_ROOT UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
-  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
   printf '%s' "$output"
 }
 
@@ -401,6 +402,21 @@ def classifier_authority():
  except UnicodeEncodeError: fail('classifier_authority_mismatch')
  if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
 classifier_authority()
+def fixer_authority():
+ if edge not in {'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}: return
+ expected_phase={'review_pr.fix.phase1':'review_fix','review_pr.fix.phase2':'simplify_fix','simplify.fix.phase2':'simplify_fix'}[edge]
+ pr_number=inputs.get('pr_number'); findings_digest=inputs.get('findings_sha256'); secondary_digest=inputs.get('standalone_snapshot_sha256' if edge=='simplify.fix.phase2' else 'commit_range_sha256'); authority_digest=inputs.get('authority_sha256')
+ if (row.get('phase')!=expected_phase or type(pr_number) is not int or pr_number!=issue
+     or (edge=='review_pr.fix.phase1' and pr_number<=0)
+     or (edge=='simplify.fix.phase2' and pr_number!=0)
+     or not isinstance(findings_digest,str) or re.fullmatch(r'[0-9a-f]{64}',findings_digest) is None
+     or not isinstance(secondary_digest,str) or re.fullmatch(r'[0-9a-f]{64}',secondary_digest) is None
+     or not isinstance(authority_digest,str) or re.fullmatch(r'[0-9a-f]{64}',authority_digest) is None): fail('code_fixer_authority_mismatch')
+ if hashlib.sha256(read_regular_once(inputs['findings_path'],16777216,'unsafe_path')).hexdigest()!=findings_digest: fail('code_fixer_findings_digest_mismatch')
+ secondary_path=inputs['standalone_snapshot_path' if edge=='simplify.fix.phase2' else 'commit_range_path']
+ if hashlib.sha256(read_regular_once(secondary_path,16777216,'unsafe_path')).hexdigest()!=secondary_digest: fail('code_fixer_range_digest_mismatch')
+ if hashlib.sha256(read_regular_once(inputs['authority_path'],1048576,'unsafe_path')).hexdigest()!=authority_digest: fail('code_fixer_authority_digest_mismatch')
+fixer_authority()
 if workspace_mode=='caller':
  working_dir=inputs.get('working_dir'); repository_id=meta.get('repository_id')
  if (not isinstance(working_dir,str) or not isinstance(repository_id,str)
@@ -723,6 +739,21 @@ def classifier_authority():
     except UnicodeEncodeError: fail('classifier_authority_mismatch')
     if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
 classifier_authority()
+def fixer_authority():
+    if edge not in {'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}: return
+    expected_phase={'review_pr.fix.phase1':'review_fix','review_pr.fix.phase2':'simplify_fix','simplify.fix.phase2':'simplify_fix'}[edge]
+    pr_number=inputs.get('pr_number'); findings_digest=inputs.get('findings_sha256'); secondary_digest=inputs.get('standalone_snapshot_sha256' if edge=='simplify.fix.phase2' else 'commit_range_sha256'); authority_digest=inputs.get('authority_sha256')
+    if (row.get('phase')!=expected_phase or type(pr_number) is not int or pr_number!=carrier['issue_num']
+        or (edge=='review_pr.fix.phase1' and pr_number<=0)
+        or (edge=='simplify.fix.phase2' and pr_number!=0)
+        or not isinstance(findings_digest,str) or re.fullmatch(r'[0-9a-f]{64}',findings_digest) is None
+        or not isinstance(secondary_digest,str) or re.fullmatch(r'[0-9a-f]{64}',secondary_digest) is None
+        or not isinstance(authority_digest,str) or re.fullmatch(r'[0-9a-f]{64}',authority_digest) is None): fail('code_fixer_authority_mismatch')
+    if hashlib.sha256(read_regular_once(inputs['findings_path'],16777216,'unsafe_path')).hexdigest()!=findings_digest: fail('code_fixer_findings_digest_mismatch')
+    secondary_path=inputs['standalone_snapshot_path' if edge=='simplify.fix.phase2' else 'commit_range_path']
+    if hashlib.sha256(read_regular_once(secondary_path,16777216,'unsafe_path')).hexdigest()!=secondary_digest: fail('code_fixer_range_digest_mismatch')
+    if hashlib.sha256(read_regular_once(inputs['authority_path'],1048576,'unsafe_path')).hexdigest()!=authority_digest: fail('code_fixer_authority_digest_mismatch')
+fixer_authority()
 workspace_dir=''
 if workspace_mode=='caller':
     working_dir=inputs.get('working_dir')
@@ -968,6 +999,7 @@ _uberdev_child_fail_after_launch() {
 
 uberdev_dispatch_child() {
   local edge="${1:-}" handoff="${2:-}" expected_sha256="${3:-}" result="${4:-}" status_file="${5:-}" prepared request prompt rc receipt provider_handle
+  UBERDEV_CHILD_DISPATCH_RECEIPT=
   [ "$#" -eq 5 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE'; return 2; }
   prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$expected_sha256" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
@@ -1023,14 +1055,34 @@ PY
     _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt construction'
     return $?
   fi
+  UBERDEV_CHILD_DISPATCH_RECEIPT="$receipt"
   if printf '%s' "$receipt"; then
     return 0
   else
     rc=$?
+    UBERDEV_CHILD_DISPATCH_RECEIPT=
     _uberdev_child_error 'failed to publish child dispatch receipt'
     _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt publication'
     return $?
   fi
+}
+
+# Capture the canonical receipt without executing the dispatcher in command
+# substitution. `uberdev_agent_dispatch` binds its capacity lease to the
+# calling controller process, so dispatching from a short-lived capture
+# subshell would publish an owner identity that disappears as soon as the
+# receipt is returned. The dispatcher assigns the canonical receipt directly
+# to a controller-owned variable; no pathname is reopened for shell output.
+uberdev_dispatch_child_capture() {
+  local edge="${1:-}" handoff="${2:-}" expected_sha256="${3:-}" result="${4:-}" status_file="${5:-}"
+  UBERDEV_CHILD_DISPATCH_RECEIPT=
+  [ "$#" -eq 5 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE'; return 2; }
+  uberdev_dispatch_child "$edge" "$handoff" "$expected_sha256" "$result" "$status_file" >/dev/null || return $?
+  [ -n "$UBERDEV_CHILD_DISPATCH_RECEIPT" ] || {
+    _uberdev_child_error 'dispatcher returned without a canonical child receipt'
+    uberdev_unwind_child "$status_file" "$result" 600 || return 74
+    return 74
+  }
 }
 
 _uberdev_child_wait_projection() {
@@ -1452,7 +1504,7 @@ PY
 }
 
 _uberdev_child_terminal_lease_proof() {
-  local status_path status_real child run_dir instance state lease_paths lease record lease_run lease_status
+  local status_path status_real child run_dir instance state lease_paths lease record lease_run lease_status lease_read_attempt
   status_path="$1"
   status_real="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]),end="")' "$status_path")" || return 1
   child="$(dirname "$status_real")"; run_dir="$(dirname "$(dirname "$child")")"; instance="$(basename "$child")"
@@ -1488,8 +1540,24 @@ PY
   [ -z "$lease_paths" ] && return 0
   while IFS= read -r lease; do
     [ -n "$lease" ] || continue
-    if ! _uberdev_semaphore_validate_lease_path "$lease" >/dev/null 2>&1 \
-        || ! record="$(_uberdev_agent_lease_record "$lease" 2>/dev/null)"; then
+    record=''; lease_read_attempt=0
+    while [ "$lease_read_attempt" -lt 3 ]; do
+      lease_read_attempt=$((lease_read_attempt + 1))
+      if _uberdev_semaphore_validate_lease_path "$lease" >/dev/null 2>&1 \
+          && record="$(_uberdev_agent_lease_record "$lease" 2>/dev/null)"; then
+        break
+      fi
+      record=''
+      # Watchers remove and atomically replace leases under the scope mutex.
+      # A path that vanished after the directory snapshot is completed cleanup,
+      # while a persistent unreadable path remains a fail-closed error.
+      [ -e "$lease" ] || [ -L "$lease" ] || break
+      [ "$lease_read_attempt" -ge 3 ] || sleep 0.05
+    done
+    if [ -z "$record" ] && { [ ! -e "$lease" ] && [ ! -L "$lease" ]; }; then
+      continue
+    fi
+    if [ -z "$record" ]; then
       _uberdev_child_error "invalid lifecycle lease: $lease"
       return 1
     fi

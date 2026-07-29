@@ -4,13 +4,22 @@
 Two modes:
   fixer  — dedup ONE chunk's lens findings by file:line (merging across lenses,
            mirroring commands/simplify.md Phase 3) and emit the per-chunk
-           code-fixer input, wrapped in the post-impl-review-aggregate envelope.
+           code-fixer input as canonical Phase 2 aggregate schema v2.
   issues — collect fileable (blocker) findings across all chunks that code-fixer
            did NOT apply, and emit the findings-to-issues input, wrapped in the
            ubersimplify-aggregate envelope. --audit-only treats every fileable
            finding as deferred (no apply phase ran).
 """
-import argparse, glob, os, re, sys, yaml
+import argparse
+import glob
+import hashlib
+import json
+import os
+import posixpath
+import re
+import sys
+
+import yaml
 
 # Shared report primitives (issue #183): cell() neutralizes the
 # </external-untrusted-input> close-tag with a ZWSP so attacker-influenceable
@@ -23,11 +32,22 @@ import argparse, glob, os, re, sys, yaml
 # breakout this issue fixes — reuse the hardened shared primitive (no custom copy).
 # skills/ubersimplify-pipeline/aggregate.py -> ../../lib/report_primitives.py
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "lib"))
-from report_primitives import cell, envelope  # noqa: E402
+from report_primitives import (  # noqa: E402
+    PHASE2_CONTRIBUTORS,
+    canonical_json,
+    cell,
+    envelope,
+    json_envelope,
+)
 
 SEV_RANK = {"blocker": 2, "suggestion": 1}
 LENS_ORDER = {"Reuse": 0, "Quality": 1, "Efficiency": 2}
 FILEABLE = {"blocker"}  # only blocker-tier lens findings are filed as issues
+LENS_EDGE = {
+    "Reuse": "review_pr.simplify.reuse",
+    "Quality": "review_pr.simplify.quality",
+    "Efficiency": "review_pr.simplify.efficiency",
+}
 
 
 def _norm(s):
@@ -89,34 +109,152 @@ def dedupe_by_location(rows):
     return merged
 
 
+def _scope(location):
+    try:
+        path, raw_line = location.rsplit(":", 1)
+        line = int(raw_line)
+    except (AttributeError, ValueError):
+        raise ValueError("invalid finding location") from None
+    parts = path.split("/")
+    if (
+        not path
+        or line < 1
+        or path.startswith("/")
+        or "\\" in path
+        or re.match(r"^[A-Za-z]:", path)
+        or any(part in {"", ".", ".."} for part in parts)
+        or parts[0] == ".git"
+        or posixpath.normpath(path) != path
+    ):
+        raise ValueError("invalid finding location")
+    return {"line": line, "operation": "modify_existing", "path": path}
+
+
+def _source_edges(lens):
+    try:
+        edges = [LENS_EDGE[item] for item in lens.split("+")]
+    except (AttributeError, KeyError):
+        raise ValueError("invalid finding lens") from None
+    expected = [edge for edge in PHASE2_CONTRIBUTORS if edge in edges]
+    if not edges or edges != expected or len(edges) != len(set(edges)):
+        raise ValueError("invalid finding lens")
+    return edges
+
+
+def _phase2_document(rows):
+    findings = []
+    for finding in rows:
+        severity = finding.get("severity")
+        summary = _norm(finding.get("summary"))
+        detail = _norm(finding.get("detail"))
+        if severity not in SEV_RANK or not summary or not detail:
+            raise ValueError("invalid finding record")
+        findings.append(
+            {
+                "detail": detail,
+                "scope": _scope(finding.get("location")),
+                "severity": severity,
+                "source_edges": _source_edges(finding.get("lens")),
+                "summary": summary,
+            }
+        )
+    return {
+        "contributors": list(PHASE2_CONTRIBUTORS),
+        "findings": findings,
+        "phase": "phase2",
+        "schema_version": 2,
+    }
+
+
 def emit_fixer(lens_file, out):
     merged = dedupe_by_location(load_lens_findings(lens_file))
-    # Build the YAML-list body, then wrap via the shared envelope(). Every field
-    # passes through cell() so an injected </external-untrusted-input> in the
-    # (attacker-influenceable) summary/detail prose cannot terminate the
-    # post-impl-review-aggregate envelope early and inject into code-fixer.
-    body = ""
-    for f in merged:
-        body += f"- location: {cell(f['location'])}\n"
-        body += f"  severity: {cell(f['severity'])}\n"
-        body += f"  lens: {cell(f['lens'])}\n"
-        body += f"  summary: {cell(f['summary'])}\n"
-        body += f"  detail: {cell(f['detail'])}\n"
-    with open(out, "w") as fh:
-        envelope(fh, "post-impl-review-aggregate", body)
+    document = _phase2_document(merged)
+    with open(out, "w", encoding="utf-8") as fh:
+        json_envelope(fh, "simplify-aggregate", document)
     return len(merged)
 
 
 def _applied_locations(chunks_dir):
     applied = set()
-    for p in sorted(glob.glob(os.path.join(chunks_dir, "chunk-*-fixer-disposition.yaml"))):
+    for p in sorted(glob.glob(os.path.join(chunks_dir, "chunk-*-fixer-disposition.json"))):
+        aggregate_path = p.removesuffix("-disposition.json") + ".md"
         try:
-            with open(p) as fh:
-                doc = yaml.safe_load(fh) or {}
-        except (OSError, yaml.YAMLError) as e:
+            aggregate_payload = open(aggregate_path, "rb").read()
+            opening = b'<external-untrusted-input source="simplify-aggregate">\n'
+            closing = b"\n</external-untrusted-input>\n"
+            if not aggregate_payload.startswith(opening) or not aggregate_payload.endswith(closing):
+                raise ValueError("invalid aggregate envelope")
+            aggregate_body = aggregate_payload[len(opening) : -len(closing)]
+            aggregate = json.loads(aggregate_body)
+            if aggregate_body.decode("utf-8") != canonical_json(aggregate):
+                raise ValueError("non-canonical aggregate")
+            if (
+                set(aggregate) != {"contributors", "findings", "phase", "schema_version"}
+                or aggregate.get("schema_version") != 2
+                or aggregate.get("phase") != "phase2"
+                or aggregate.get("contributors") != list(PHASE2_CONTRIBUTORS)
+                or not isinstance(aggregate.get("findings"), list)
+            ):
+                raise ValueError("invalid aggregate schema")
+            raw_disposition = open(p, "rb").read()
+            doc = json.loads(raw_disposition)
+            expected_disposition = (
+                json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                + "\n"
+            ).encode("utf-8")
+            if raw_disposition != expected_disposition:
+                raise ValueError("non-canonical disposition")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as e:
             print(f"error: failed to load disposition {p}: {e}", file=sys.stderr)
             sys.exit(2)
-        for d in doc.get("findings_disposition") or []:
+        if (
+            set(doc) != {"aggregate_sha256", "findings_disposition", "phase", "schema_version"}
+            or doc.get("schema_version") != 1
+            or doc.get("phase") != "phase2"
+            or doc.get("aggregate_sha256") != hashlib.sha256(aggregate_payload).hexdigest()
+            or not isinstance(doc.get("findings_disposition"), list)
+            or len(doc["findings_disposition"]) != len(aggregate["findings"])
+        ):
+            print(f"error: failed to load disposition {p}: schema mismatch", file=sys.stderr)
+            sys.exit(2)
+        for index, (d, finding) in enumerate(
+            zip(doc["findings_disposition"], aggregate["findings"], strict=True), 1
+        ):
+            scope = finding.get("scope")
+            expected_location = (
+                f"{scope.get('path')}:{scope.get('line')}" if isinstance(scope, dict) else ""
+            )
+            expected_summary = hashlib.sha256(
+                str(finding.get("summary", "")).encode("utf-8")
+            ).hexdigest()
+            if (
+                not isinstance(d, dict)
+                or set(d)
+                != {
+                    "behavior_tag",
+                    "disposition",
+                    "finding_index",
+                    "location",
+                    "reason",
+                    "summary_sha256",
+                }
+                or d.get("finding_index") != index
+                or d.get("location") != expected_location
+                or d.get("summary_sha256") != expected_summary
+                or d.get("disposition") not in {"APPLIED", "SKIPPED", "REFUSED"}
+                or not isinstance(d.get("reason"), str)
+                or not d["reason"]
+                or (
+                    d["disposition"] == "APPLIED"
+                    and d.get("behavior_tag") != "preserve"
+                )
+                or (
+                    d["disposition"] != "APPLIED"
+                    and d.get("behavior_tag") != "n/a"
+                )
+            ):
+                print(f"error: failed to load disposition {p}: row mismatch", file=sys.stderr)
+                sys.exit(2)
             if d.get("disposition") == "APPLIED":
                 applied.add(d.get("location", ""))
     return applied

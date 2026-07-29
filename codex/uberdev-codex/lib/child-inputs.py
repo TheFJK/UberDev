@@ -186,6 +186,34 @@ def validate_ci_classifier_authority(edge_id: str, inputs: dict[str, Any]) -> No
         fail("classifier authority digest mismatch")
 
 
+def validate_code_fixer_authority(edge_id: str, inputs: dict[str, Any]) -> None:
+    if edge_id not in {
+        "review_pr.fix.phase1",
+        "review_pr.fix.phase2",
+        "simplify.fix.phase2",
+    }:
+        return
+    digest_keys = (
+        ("findings_sha256", "standalone_snapshot_sha256", "authority_sha256")
+        if edge_id == "simplify.fix.phase2"
+        else ("findings_sha256", "commit_range_sha256", "authority_sha256")
+    )
+    if any(
+        not isinstance(inputs.get(key), str)
+        or re.fullmatch(r"[0-9a-f]{64}", inputs[key]) is None
+        for key in digest_keys
+    ):
+        fail("code fixer authority digest mismatch")
+    pr_number = inputs.get("pr_number")
+    if (
+        type(pr_number) is not int
+        or pr_number < 0
+        or (edge_id == "review_pr.fix.phase1" and pr_number == 0)
+        or (edge_id == "simplify.fix.phase2" and pr_number != 0)
+    ):
+        fail("code fixer authority subject mismatch")
+
+
 def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict[str, Any]:
     required, optional, _ = edge_schema(manifest, edge_id)
     if not isinstance(inputs, dict):
@@ -201,6 +229,7 @@ def validate_inputs(manifest: dict[str, Any], edge_id: str, inputs: Any) -> dict
     for key, value in inputs.items():
         validate_value(key, value, schema[key])
     validate_ci_classifier_authority(edge_id, inputs)
+    validate_code_fixer_authority(edge_id, inputs)
     if len(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")) > input_byte_limit(manifest):
         fail("child inputs exceed immutable handoff budget")
     return inputs

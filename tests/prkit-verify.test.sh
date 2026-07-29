@@ -83,6 +83,9 @@ expect_fail "V8o nested generated-tree symlink fails"         'printf "outside\n
 expect_fail "V8p nested generated-tree special file fails"    'mkfifo "$d/codex/nested-pipe"'
 expect_fail "V9 removed all agents (non-vacuity/ref-int) fails" 'rm -rf "$d/plugins/prkit/agents"'
 expect_fail "V10 removed Claude reviewer contract fails" 'rm -f "$d/plugins/prkit/shared/phase1-reviewer-output-v1.md"'
+expect_fail "V10b removed Claude authority helper fails" 'rm -f "$d/plugins/prkit/lib/code_fixer_contract.py"'
+expect_fail "V10c removed Codex authority helper fails" 'rm -f "$d/codex/prkit-codex/lib/code_fixer_contract.py"'
+expect_fail "V10d cross-runtime authority helper byte divergence fails" 'printf "\n# syntax-valid divergence\n" >> "$d/codex/prkit-codex/lib/code_fixer_contract.py"'
 expect_fail "V11 removed Codex solve run tree fails" 'rm -f "$d/codex/prkit-codex/policy/solve-run-tree-v1.json"'
 expect_fail "V12 native reviewer injected edge schema fails" 'python3 - "$d/codex/agents/prkit-code-reviewer.toml" "$d/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" <<'PY'
 from pathlib import Path
@@ -142,13 +145,25 @@ expect_fail "V23 paired runtime workflow swap fails" 'python3 - "$d/plugins/prki
 import json,sys
 from pathlib import Path
 for name in sys.argv[1:]:
- p=Path(name); tree=json.loads(p.read_text()); left=tree["edges"]["review_pr.fix.phase1"]; right=tree["edges"]["review_pr.fix.phase2"]; left["allowed_workflows"],right["allowed_workflows"]=right["allowed_workflows"],left["allowed_workflows"]; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+ p=Path(name); tree=json.loads(p.read_text()); left=tree["edges"]["review_pr.fix.phase2"]; right=tree["edges"]["simplify.fix.phase2"]; left["allowed_workflows"],right["allowed_workflows"]=right["allowed_workflows"],left["allowed_workflows"]; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
 expect_fail "V24 paired runtime unexpected edge contract fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
 import json,sys
 from pathlib import Path
 for name in sys.argv[1:]:
  p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["review_pr.fix.phase1"]["output_contract"]="phase1-reviewer-v1"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+PY'
+expect_fail "V24b paired runtime fixer optional-input drift fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+for name in sys.argv[1:]:
+ p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["simplify.fix.phase2"]["optional_inputs"]={"unexpected":"string"}; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+PY'
+expect_fail "V24c paired runtime fixer route-posture drift fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+for name in sys.argv[1:]:
+ p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["simplify.fix.phase2"]["phase"]="review_fix"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
 
 # V25 — a placeholder scan error is unavailable evidence, never proof that the
@@ -158,7 +173,7 @@ dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
 cat > "$dp/bin/grep" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *A-Za-z_*) exit 2 ;;
+  *A-Z0-9_*) exit 2 ;;
 esac
 exec "$PRKIT_REAL_GREP" "$@"
 SH

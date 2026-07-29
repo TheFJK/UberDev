@@ -1,6 +1,6 @@
 # tools/prkit/manifest.txt — prkit PR-phase copy set (RFC 0014 §5.3).
 # Paths are relative to plugins/uberdev/. Blank lines and #-comments ignored.
-# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 36).
+# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 37).
 
 # --- commands (3) ---
 commands/review-pr.md
@@ -28,7 +28,7 @@ skills/post-impl-review/SKILL.md
 skills/merge-pipeline/SKILL.md
 skills/merge-pipeline/lib/discover.sh
 
-# --- lib (13 — shared dispatch/config/receipt chain) ---
+# --- lib (14 — shared dispatch/config/authority/receipt chain) ---
 lib/child-dispatch.sh
 lib/agent-dispatch.sh
 lib/dispatch.sh
@@ -37,6 +37,7 @@ lib/model_routing.py
 lib/run_manifest.py
 lib/atomic_move.py
 lib/worktree_receipts.py
+lib/code_fixer_contract.py
 lib/live-semaphore.sh
 lib/child-receipts.py
 lib/child-inputs.py

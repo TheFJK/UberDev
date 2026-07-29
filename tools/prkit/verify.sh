@@ -39,6 +39,7 @@ CLAUDE_REQUIRED=(
   "skills/merge-pipeline/SKILL.md"
   "policy/model-routing-v1.json"
   "policy/solve-run-tree-v1.json"
+  "lib/code_fixer_contract.py"
   "shared/phase1-reviewer-output-v1.md"
   ".claude-plugin/plugin.json"
 )
@@ -50,6 +51,7 @@ CODEX_REQUIRED=(
   "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md"
   "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md"
   "codex/prkit-codex/policy/solve-run-tree-v1.json"
+  "codex/prkit-codex/lib/code_fixer_contract.py"
   "codex/prkit-codex/shared/phase1-reviewer-output-v1.md"
   "codex/install-codex.sh"
   "codex/README.md"
@@ -201,7 +203,7 @@ for bad in post-impl-review merge-pipeline; do
 done
 ok "shape: codex required-file presence + prkit-prefixed skills checked"
 
-# --- 7b. Standalone review-policy integrity: strict JSON, review-only closure,
+# --- 7b. Standalone PR-policy integrity: strict JSON, closed PR-phase closure,
 # shipped provider roles/workflows/contracts, deterministic serialization, and
 # byte equality across Claude/Codex. Native Codex roles stay edge-local. ---
 if python3 -I -B - "$ROOT" <<'PY'
@@ -228,15 +230,38 @@ edge_semantics={
     'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
-    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
     'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
     'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
     'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr','solve','turbo'),None),
     'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr','solve','turbo'),None),
+    'simplify.fix.phase2':('provider','code-fixer',('simplify',),None),
 }
 expected_edges=set(edge_semantics)
+review_fixer_inputs={
+    'authority_path':'path','authority_sha256':'string',
+    'commit_range_path':'path','commit_range_sha256':'string',
+    'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+    'pr_number':'integer','working_dir':'directory',
+}
+standalone_fixer_inputs={
+    'authority_path':'path','authority_sha256':'string',
+    'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+    'pr_number':'integer','standalone_snapshot_path':'path',
+    'standalone_snapshot_sha256':'string','working_dir':'directory',
+}
+fixer_input_semantics={
+    'review_pr.fix.phase1':review_fixer_inputs,
+    'review_pr.fix.phase2':review_fixer_inputs,
+    'simplify.fix.phase2':standalone_fixer_inputs,
+}
+fixer_route_posture={
+    'review_pr.fix.phase1':('review_fix','caller','run',False,'one_per_review_iteration'),
+    'review_pr.fix.phase2':('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration'),
+    'simplify.fix.phase2':('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration'),
+}
 
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
 codex_roles={
@@ -289,6 +314,18 @@ def validate(plugin):
         assert (tuple(workflows) if isinstance(workflows,list) else workflows)==expected_workflows, edge_id
         assert edge.get('output_contract')==expected_contract, edge_id
         assert expected_contract is not None or 'output_contract' not in edge, edge_id
+        expected_inputs=fixer_input_semantics.get(edge_id)
+        if expected_inputs is not None:
+            assert edge.get('required_inputs')==expected_inputs, edge_id
+            assert edge.get('optional_inputs')=={}, edge_id
+        expected_posture=fixer_route_posture.get(edge_id)
+        if expected_posture is not None:
+            actual_posture=(
+                edge.get('phase'),edge.get('workspace_mode'),edge.get('risk_scope'),
+                edge.get('required'),edge.get('cardinality'),
+            )
+            assert actual_posture==expected_posture, edge_id
+            assert type(edge.get('required')) is bool, edge_id
         if expected_kind=='provider':
             assert expected_role in shipped_roles and expected_workflows, edge_id
             assert all(workflow in allowed_workflows for workflow in expected_workflows), edge_id
@@ -324,8 +361,15 @@ if codex_plugin.is_dir():
             data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
             assert codex_contract not in data['developer_instructions'], role
 PY
-then ok "review-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
-else fail "review-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
+then ok "PR-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
+else fail "PR-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
+
+if cmp -s "$ROOT/plugins/prkit/lib/code_fixer_contract.py" \
+          "$ROOT/codex/prkit-codex/lib/code_fixer_contract.py"; then
+  ok "authority-helper: Claude/Codex runtime bytes match"
+else
+  fail "authority-helper: Claude/Codex runtime bytes diverged"
+fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
 for req in "${SCAFFOLD_REQUIRED[@]}"; do
@@ -395,8 +439,11 @@ PY
 then ok "scaffold: root files present; both marketplaces valid; native selector canonical"
 else fail "scaffold: native Codex marketplace schema, availability, source, or README selector drift"; fi
 
-# --- 9. No unrendered template placeholders leaked into generated output ---
-PLH=$(grep -rlE '\{\{[A-Za-z_]+\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)
+# --- 9. No unrendered generator placeholders leaked into generated output ---
+# Generator placeholders are uppercase identifiers (for example {{VERSION}}).
+# Lowercase doubled braces are valid runtime data, including Git's ^{tree}
+# spelling inside Python f-strings (`^{{tree}}`).
+PLH=$(grep -rlE '\{\{[A-Z][A-Z0-9_]*\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)
 placeholder_status=$?
 case "$placeholder_status" in
   0)

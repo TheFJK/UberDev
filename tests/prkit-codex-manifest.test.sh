@@ -23,10 +23,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "C1 every codex-manifest path exists at repo root" \
   || no "C1 $missing codex-manifest path(s) do not exist"
 
-# C2 — count of real entries is 55
+# C2 — count of real entries is 56
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 55 ] && ok "C2 codex manifest lists exactly 55 files" \
-  || no "C2 codex manifest lists $count files (expected 55)"
+[ "$count" -eq 56 ] && ok "C2 codex manifest lists exactly 56 files" \
+  || no "C2 codex manifest lists $count files (expected 56)"
 
 # C3 — excluded files are NOT listed
 for bad in codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md \
@@ -64,6 +64,13 @@ done
 grep -qxF codex/uberdev-codex/lib/atomic_move.py "$MANIFEST" \
   && grep -qxF codex/uberdev-codex/lib/worktree_receipts.py "$MANIFEST" \
   && ok "C6 both Codex receipt-retirement helpers are packaged"
+
+# C7 — the native Codex runtime carries the same generated authority helper.
+if grep -qxF codex/uberdev-codex/lib/code_fixer_contract.py "$MANIFEST"; then
+  ok "C7 Codex code-fixer authority contract is packaged"
+else
+  no "C7 missing Codex code-fixer authority contract"
+fi
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
