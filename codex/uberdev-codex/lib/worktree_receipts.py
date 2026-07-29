@@ -287,6 +287,21 @@ def _raw_descriptor_state(entry: os.stat_result) -> tuple[int, int, int, int, in
     )
 
 
+def _windows_rename_stable_identity(
+    identity: tuple[int, int, int, int, int, int],
+) -> tuple[int, int, int, int, int]:
+    return identity[:4] + identity[5:]
+
+
+def _windows_rename_carriers_match(before: _Carrier, after: _Carrier) -> bool:
+    return (
+        before.raw == after.raw
+        and before.digest == after.digest
+        and _windows_rename_stable_identity(before.identity)
+        == _windows_rename_stable_identity(after.identity)
+    )
+
+
 def _canonical_bytes(value: dict[str, Any]) -> bytes:
     return (
         json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
@@ -1291,10 +1306,7 @@ def _create_windows(
             captured = _open_windows_carrier(public, parent_identity)
             if captured is not None:
                 _require_exact(captured, raw)
-                if (
-                    captured.identity == staged.identity
-                    and captured.digest == staged.digest
-                ):
+                if _windows_rename_carriers_match(staged, captured):
                     published = True
                     raise PublishedTransientReceiptError(token) from exc
                 _terminal()
@@ -1307,7 +1319,7 @@ def _create_windows(
         if captured is None:
             _terminal()
         _require_exact(captured, raw)
-        if captured.identity != staged.identity or captured.digest != staged.digest:
+        if not _windows_rename_carriers_match(staged, captured):
             _terminal()
         _validate_windows_carrier_path(public, parent_identity, captured)
     except PublishedTransientReceiptError:
@@ -1484,7 +1496,7 @@ def _retire_windows(
     if moved is None:
         _terminal()
     _require_exact(moved, expected_raw)
-    if moved.identity != source.identity or moved.digest != source.digest:
+    if not _windows_rename_carriers_match(source, moved):
         _terminal()
     new_public = _open_windows_carrier(public, parent_identity)
     if new_public is not None and not _foreign_public_valid(

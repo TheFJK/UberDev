@@ -387,6 +387,51 @@ linux_after = SimpleNamespace(**rename_stable_base, st_ctime_ns=6)
 assert receipts._identity(linux_before, False) == receipts._identity(linux_after, False)
 assert receipts._identity(linux_before, True) != receipts._identity(linux_after, True)
 
+# NTFS filename tunneling may change only the creation-time component when an
+# exact carrier crosses an atomic rename boundary. That field is not stable
+# across the move; every other identity component and the exact raw/digest
+# evidence remain mandatory.
+modeled_raw = b"modeled Windows rename carrier\n"
+modeled_digest = hashlib.sha256(modeled_raw).hexdigest()
+modeled_before_identity = (1, 2, len(modeled_raw), 4, 5, stat.S_IFREG | 0o600)
+modeled_after_identity = (1, 2, len(modeled_raw), 4, 6, stat.S_IFREG | 0o600)
+modeled_before = receipts._Carrier(
+    modeled_raw,
+    modeled_digest,
+    modeled_before_identity,
+    (*modeled_before_identity[:4], 5, modeled_before_identity[5]),
+    None,
+)
+modeled_after = receipts._Carrier(
+    modeled_raw,
+    modeled_digest,
+    modeled_after_identity,
+    (*modeled_after_identity[:4], 6, modeled_after_identity[5]),
+    None,
+)
+windows_rename_carriers_match = getattr(
+    receipts, "_windows_rename_carriers_match", lambda _before, _after: False
+)
+assert windows_rename_carriers_match(modeled_before, modeled_after)
+for identity_index in (0, 1, 2, 3, 5):
+    changed_identity = list(modeled_after_identity)
+    changed_identity[identity_index] ^= (
+        stat.S_IWUSR if identity_index == 5 else 1
+    )
+    changed = modeled_after._replace(identity=tuple(changed_identity))
+    assert not windows_rename_carriers_match(modeled_before, changed)
+changed_raw = b"different Windows rename carrier\n"
+assert not windows_rename_carriers_match(
+    modeled_before,
+    modeled_after._replace(
+        raw=changed_raw,
+        digest=hashlib.sha256(changed_raw).hexdigest(),
+    ),
+)
+assert not windows_rename_carriers_match(
+    modeled_before, modeled_after._replace(digest="0" * 64)
+)
+
 # Route modeled Windows st_nlink values through the real secure-capture call
 # site as well as the predicate. This prevents a stray direct `!= 1` check
 # from rejecting legitimate Windows descriptors.
@@ -436,6 +481,45 @@ tombstone = pathlib.Path(receipts._tombstone_path(str(public), token))
 assert not public.exists() and tombstone.read_bytes() == receipts._canonical_bytes(expected)
 assert success(run("inspect", *common, "--token", token), "retired") == {"state": "retired"}
 assert success(run("retire", *common, "--token", token), "retired") == {"state": "retired"}
+
+# Native NTFS regression: immediately reuse the public basename for a distinct
+# generation after A retires, then prime and vacate B's tombstone basename
+# before retiring B. Filename tunneling may preserve the vacated names'
+# creation times, but both exact generations must retain independent authority.
+if os.name == "nt":
+    (
+        tunnel_repo,
+        _,
+        tunnel_public,
+        tunnel_head,
+        tunnel_relative,
+        tunnel_branch,
+        tunnel_common,
+    ) = fixture("windows-filename-tunneling")
+    tunnel_a_token = success(run("create", *tunnel_common), "active")["token"]
+    tunnel_a_raw = tunnel_public.read_bytes()
+    tunnel_a_tomb = pathlib.Path(
+        receipts._tombstone_path(str(tunnel_public), tunnel_a_token)
+    )
+    success(run("retire", *tunnel_common, "--token", tunnel_a_token), "retired")
+    assert tunnel_a_tomb.read_bytes() == tunnel_a_raw
+
+    tunnel_b_token = success(run("create", *tunnel_common), "active")["token"]
+    assert tunnel_b_token != tunnel_a_token
+    tunnel_b_raw = tunnel_public.read_bytes()
+    tunnel_b_tomb = pathlib.Path(
+        receipts._tombstone_path(str(tunnel_public), tunnel_b_token)
+    )
+    tunnel_b_prime = tunnel_b_tomb.with_name(tunnel_b_tomb.name + ".primed")
+    tunnel_b_prime_raw = b"vacated tombstone basename\n"
+    tunnel_b_tomb.write_bytes(tunnel_b_prime_raw)
+    tunnel_b_tomb.rename(tunnel_b_prime)
+
+    success(run("retire", *tunnel_common, "--token", tunnel_b_token), "retired")
+    assert not tunnel_public.exists()
+    assert tunnel_a_tomb.read_bytes() == tunnel_a_raw
+    assert tunnel_b_tomb.read_bytes() == tunnel_b_raw
+    assert tunnel_b_prime.read_bytes() == tunnel_b_prime_raw
 
 # A missing sibling dependency must stay on each helper's fixed failure
 # protocol; it may never emit a traceback containing local paths.
