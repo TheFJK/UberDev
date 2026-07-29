@@ -5,6 +5,497 @@
 
 set -euo pipefail
 
+six_child_update_readiness_deadline() {
+  local startup_progress=0 numeric
+
+  case "${fully_dispatched-}" in 0|1) ;; *) return 74 ;; esac
+  for numeric in \
+      "${ready_count-}" "${backend_bound_lease_count-}" "${max_ready_count-}" \
+      "${max_backend_bound_lease_count-}" "${barrier_now-}" "${startup_timeout-}" \
+      "${barrier_timeout-}" "${barrier_deadline-}"; do
+    case "$numeric" in
+      0) ;;
+      [1-9]*) case "$numeric" in *[!0-9]*) return 74 ;; esac ;;
+      *) return 74 ;;
+    esac
+    [ "${#numeric}" -le 18 ] || return 74
+  done
+  [ "$startup_timeout" -gt 0 ] && [ "$barrier_timeout" -gt 0 ] || return 74
+  [ "$ready_count" -le 6 ] && [ "$backend_bound_lease_count" -le 6 ] \
+    && [ "$max_ready_count" -le 6 ] && [ "$max_backend_bound_lease_count" -le 6 ] \
+    || return 74
+
+  # A progress sample does not retroactively rescue an already-expired phase.
+  if [ "$barrier_now" -ge "$barrier_deadline" ]; then
+    return 124
+  fi
+
+  if [ "$fully_dispatched" -eq 0 ]; then
+    if [ "$ready_count" -gt "$max_ready_count" ]; then
+      max_ready_count="$ready_count"
+      startup_progress=1
+    fi
+    if [ "$backend_bound_lease_count" -gt "$max_backend_bound_lease_count" ]; then
+      max_backend_bound_lease_count="$backend_bound_lease_count"
+      startup_progress=1
+    fi
+    if [ "$startup_progress" -eq 1 ]; then
+      barrier_deadline=$((barrier_now + startup_timeout))
+    fi
+    if [ "$backend_bound_lease_count" -eq 6 ]; then
+      barrier_deadline=$((barrier_now + barrier_timeout))
+      fully_dispatched=1
+    fi
+  fi
+
+  return 0
+}
+
+six_child_count_readiness_leases() {
+  local lease_root="${1-}" lease='' lease_probe='' scan_rc
+  local root_probe='' lease_scope='' scope_probe=''
+
+  raw_lease_count=0
+  backend_bound_lease_count=0
+  lease_scan_detail=''
+  if [ -z "$lease_root" ]; then
+    lease_scan_detail='lease-discovery-failed rc=74 root=missing'
+    return 74
+  fi
+  if root_probe="$(find "$lease_root" -prune -type d -print 2>&1)"; then
+    if [ "$root_probe" != "$lease_root" ]; then
+      lease_scan_detail="lease-discovery-failed rc=74 root=$lease_root error=not-a-directory"
+      return 74
+    fi
+  else
+    scan_rc=$?
+    root_probe="$(printf '%s' "$root_probe" | tr '\r\n' '  ')"
+    lease_scan_detail="lease-discovery-failed rc=$scan_rc root=$lease_root error=$root_probe"
+    return 74
+  fi
+
+  for lease_scope in "$lease_root"/.agent-state-*/semaphore-v1/*.scope; do
+    if [ ! -e "$lease_scope" ] && [ ! -L "$lease_scope" ]; then
+      case "$lease_scope" in *'*'*) continue ;; esac
+      lease_scan_detail="lease-discovery-failed rc=74 scope=$lease_scope error=disappeared"
+      return 74
+    fi
+    if [ ! -d "$lease_scope" ] || [ -L "$lease_scope" ]; then
+      lease_scan_detail="lease-discovery-failed rc=74 scope=$lease_scope error=invalid-scope"
+      return 74
+    fi
+    if scope_probe="$(LC_ALL=C ls -f "$lease_scope" 2>&1 >/dev/null)"; then
+      :
+    else
+      scan_rc=$?
+      scope_probe="$(printf '%s' "$scope_probe" | tr '\r\n' '  ')"
+      lease_scan_detail="lease-discovery-failed rc=$scan_rc scope=$lease_scope error=scope-enumeration-failed:$scope_probe"
+      return 74
+    fi
+
+    for lease in "$lease_scope"/*.lease; do
+      if [ ! -e "$lease" ] && [ ! -L "$lease" ]; then
+        if [ "$lease" = "$lease_scope/*.lease" ]; then
+          continue
+        fi
+        lease_scan_detail="lease-candidate-disappeared lease=$lease"
+        return 74
+      fi
+      if [ -L "$lease" ]; then
+        lease_scan_detail="lease-candidate-invalid kind=symlink lease=$lease"
+        return 74
+      fi
+      if [ ! -f "$lease" ]; then
+        lease_scan_detail="lease-candidate-invalid kind=non-regular lease=$lease"
+        return 74
+      fi
+      raw_lease_count=$((raw_lease_count + 1))
+      if [ "$raw_lease_count" -gt 6 ]; then
+        lease_scan_detail="raw-lease-count-exceeded count=$raw_lease_count"
+        return 74
+      fi
+      if lease_probe="$(grep -q '^backend_identity=.' "$lease" 2>&1)"; then
+        backend_bound_lease_count=$((backend_bound_lease_count + 1))
+        if [ "$backend_bound_lease_count" -gt 6 ]; then
+          lease_scan_detail="bound-lease-count-exceeded count=$backend_bound_lease_count"
+          return 74
+        fi
+      else
+        scan_rc=$?
+        case "$scan_rc" in
+          1) ;;
+          *)
+            lease_probe="$(printf '%s' "$lease_probe" | tr '\r\n' '  ')"
+            lease_scan_detail="lease-read-failed rc=$scan_rc lease=$lease error=$lease_probe"
+            return 74
+            ;;
+        esac
+      fi
+    done
+  done
+  return 0
+}
+
+six_child_resolve_readiness_preflight() {
+  readiness_preflight_rc=0
+  readiness_preflight_reason=continue
+  readiness_preflight_detail=''
+
+  case "${terminal-}" in
+    1)
+      readiness_preflight_rc=70
+      readiness_preflight_reason=terminal-before-readiness
+      return 0
+      ;;
+    0) ;;
+    *)
+      readiness_preflight_rc=74
+      readiness_preflight_reason=coordinator-error
+      readiness_preflight_detail=invalid-terminal-state
+      return 0
+      ;;
+  esac
+
+  case "${lease_scan_rc-}" in
+    0) ;;
+    [1-9]*)
+      case "$lease_scan_rc" in
+        *[!0-9]*)
+          readiness_preflight_rc=74
+          readiness_preflight_reason=coordinator-error
+          readiness_preflight_detail=invalid-lease-scan-state
+          return 0
+          ;;
+      esac
+      readiness_preflight_rc="$lease_scan_rc"
+      readiness_preflight_reason=coordinator-error
+      readiness_preflight_detail="${lease_scan_detail-}"
+      ;;
+    *)
+      readiness_preflight_rc=74
+      readiness_preflight_reason=coordinator-error
+      readiness_preflight_detail=invalid-lease-scan-state
+      ;;
+  esac
+  return 0
+}
+
+run_readiness_progress_deadline_regression() {
+  if ! declare -F six_child_update_readiness_deadline >/dev/null; then
+    echo "missing six-child readiness progress deadline helper" >&2
+    return 1
+  fi
+  if ! declare -F six_child_resolve_readiness_preflight >/dev/null; then
+    echo "missing six-child readiness preflight decision helper" >&2
+    return 1
+  fi
+
+  startup_timeout=60
+  barrier_timeout=10
+  barrier_deadline=60
+  fully_dispatched=0
+  max_ready_count=0
+  max_backend_bound_lease_count=0
+
+  # Total startup takes 190 logical seconds, but each ready/bound-lease advance
+  # arrives less than 60 seconds after the previous one. No step may time out.
+  while read -r barrier_now ready_count backend_bound_lease_count; do
+    if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+    if [ "$step_rc" -ne 0 ]; then
+      printf 'progress deadline expired: now=%s ready=%s bound_leases=%s rc=%s\n' \
+        "$barrier_now" "$ready_count" "$backend_bound_lease_count" "$step_rc" >&2
+      return 1
+    fi
+  done <<'EOF'
+20 1 0
+40 1 1
+60 2 1
+80 2 2
+100 3 2
+120 3 3
+140 4 4
+160 5 5
+EOF
+  [ "$barrier_deadline" -eq 220 ]
+
+  # Regressing observations must not move the monotonic maxima or deadline.
+  barrier_now=170
+  ready_count=4
+  backend_bound_lease_count=4
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 0 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "5:5:220" ]
+
+  # The sixth bound lease switches to the existing barrier timeout phase.
+  barrier_now=190
+  ready_count=5
+  backend_bound_lease_count=6
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 0 ]
+  [ "$fully_dispatched:$barrier_deadline" = "1:200" ]
+
+  # Ready progress observed after all six leases are bound belongs to the
+  # fixed barrier phase. It must not refresh that phase's original deadline.
+  barrier_deadline=200
+  fully_dispatched=1
+  max_ready_count=4
+  max_backend_bound_lease_count=6
+  barrier_now=195
+  ready_count=5
+  backend_bound_lease_count=6
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 0 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "4:6:200" ]
+  barrier_now=200
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 124 ]
+  [ "$barrier_deadline" -eq 200 ]
+
+  # Once fully dispatched, ready=5/bound-leases=6 still times out on the
+  # barrier deadline; repeated not-ready observations must not extend it.
+  barrier_now=201
+  ready_count=5
+  backend_bound_lease_count=6
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 124 ]
+
+  # Before full dispatch, a genuine 61-second no-progress stall remains rc124.
+  barrier_deadline=60
+  fully_dispatched=0
+  max_ready_count=0
+  max_backend_bound_lease_count=0
+  barrier_now=20
+  ready_count=1
+  backend_bound_lease_count=1
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc:$barrier_deadline" = "0:80" ]
+  barrier_now=81
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 124 ]
+
+  # Progress first observed at or after the prior deadline is already late and
+  # must not mutate either monotonic maximum or extend the expired deadline.
+  barrier_deadline=60
+  fully_dispatched=0
+  max_ready_count=0
+  max_backend_bound_lease_count=0
+  barrier_now=60
+  ready_count=1
+  backend_bound_lease_count=0
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 124 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "0:0:60" ]
+
+  barrier_now=61
+  ready_count=0
+  backend_bound_lease_count=1
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 124 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "0:0:60" ]
+
+  # This isolated wave owns exactly six children. Counts above that invariant
+  # are coordinator errors, never progress and never startup timeouts.
+  barrier_deadline=100
+  barrier_now=10
+  ready_count=7
+  backend_bound_lease_count=0
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 74 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "0:0:100" ]
+
+  ready_count=0
+  backend_bound_lease_count=7
+  if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+  [ "$step_rc" -eq 74 ]
+  [ "$max_ready_count:$max_backend_bound_lease_count:$barrier_deadline" = "0:0:100" ]
+
+  # Every arithmetic/global input is validated before the helper mutates state.
+  for malformed_value in not-a-number 999999999999999999999999; do
+    for malformed_field in \
+        fully_dispatched ready_count backend_bound_lease_count max_ready_count \
+        max_backend_bound_lease_count barrier_now startup_timeout barrier_timeout \
+        barrier_deadline; do
+      fully_dispatched=0
+      ready_count=0
+      backend_bound_lease_count=0
+      max_ready_count=0
+      max_backend_bound_lease_count=0
+      barrier_now=10
+      startup_timeout=60
+      barrier_timeout=10
+      barrier_deadline=100
+      printf -v "$malformed_field" '%s' "$malformed_value"
+      if six_child_update_readiness_deadline; then step_rc=0; else step_rc=$?; fi
+      [ "$step_rc" -eq 74 ] || {
+        printf 'malformed deadline input was not rejected: field=%s value=%s rc=%s\n' \
+          "$malformed_field" "$malformed_value" "$step_rc" >&2
+        return 1
+      }
+    done
+  done
+
+  (
+    lease_fixture="$(mktemp -d)"
+    cleanup_lease_fixture() {
+      if [ -n "${lease_scope-}" ] && [ -d "$lease_scope" ]; then
+        chmod 700 "$lease_scope" 2>/dev/null || :
+      fi
+      rm -rf "$lease_fixture"
+    }
+    trap cleanup_lease_fixture EXIT
+    if ! declare -F six_child_count_readiness_leases >/dev/null; then
+      echo "missing six-child readiness lease scan helper" >&2
+      exit 1
+    fi
+
+    if six_child_count_readiness_leases "$lease_fixture/missing"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$scan_rc" -eq 74 ]
+    case "$lease_scan_detail" in lease-discovery-failed*) ;; *) exit 1 ;; esac
+
+    lease_scope="$lease_fixture/.agent-state-test/semaphore-v1/test.scope"
+    mkdir -p "$lease_scope"
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$scan_rc:$raw_lease_count:$backend_bound_lease_count" = "0:0:0" ]
+
+    # An unreadable scope must not collapse to the same literal glob as a
+    # genuinely empty scope. Root can bypass mode 000, so force the probe's
+    # command failure only under uid 0 while retaining the real mode fixture.
+    printf 'backend_identity=synthetic\n' >"$lease_scope/unreadable.lease"
+    chmod 000 "$lease_scope"
+    root_probe_override=0
+    if [ "$(id -u)" -eq 0 ]; then
+      ls() { printf 'synthetic unreadable scope\n' >&2; return 13; }
+      root_probe_override=1
+    fi
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$root_probe_override" -eq 0 ] || unset -f ls
+    chmod 700 "$lease_scope"
+    if [ "$scan_rc" -ne 74 ]; then
+      printf 'unreadable lease scope was not rejected: rc=%s raw=%s bound=%s detail=%s\n' \
+        "$scan_rc" "$raw_lease_count" "$backend_bound_lease_count" \
+        "$lease_scan_detail" >&2
+      exit 1
+    fi
+    case "$lease_scan_detail" in
+      lease-discovery-failed\ rc=[1-9]*\ scope=*\ error=scope-enumeration-failed*) ;;
+      *) printf 'unreadable lease scope lacked probe detail: %s\n' \
+           "$lease_scan_detail" >&2; exit 1 ;;
+    esac
+    rm -f "$lease_scope/unreadable.lease"
+
+    printf 'backend_identity=\n' >"$lease_scope/one.lease"
+    mkdir "$lease_scope/volatile-mutex-state"
+    chmod 000 "$lease_scope/volatile-mutex-state"
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    chmod 700 "$lease_scope/volatile-mutex-state"
+    [ "$scan_rc:$raw_lease_count:$backend_bound_lease_count" = "0:1:0" ]
+
+    # Direct-child enumeration must reject deceptive lease-shaped entries
+    # instead of silently filtering them out as BSD find -type f would.
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope"
+    printf 'backend_identity=target\n' >"$lease_fixture/symlink-target"
+    ln -s "$lease_fixture/symlink-target" "$lease_scope/symlink.lease"
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$scan_rc" -eq 74 ]
+    case "$lease_scan_detail" in
+      lease-candidate-invalid\ kind=symlink*) ;;
+      *) printf 'symlink lease was not rejected: rc=%s detail=%s\n' \
+           "$scan_rc" "$lease_scan_detail" >&2; exit 1 ;;
+    esac
+
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope/directory.lease"
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$scan_rc" -eq 74 ]
+    case "$lease_scan_detail" in
+      lease-candidate-invalid\ kind=non-regular*) ;;
+      *) printf 'directory lease was not rejected: rc=%s detail=%s\n' \
+           "$scan_rc" "$lease_scan_detail" >&2; exit 1 ;;
+    esac
+
+    # A candidate removed after the shell expands the direct-child glob is an
+    # operational scan failure, not an unmatched glob and not an unbound lease.
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope"
+    printf 'backend_identity=\n' >"$lease_scope/a.lease"
+    printf 'backend_identity=synthetic\n' >"$lease_scope/b.lease"
+    grep() {
+      case "${!#}" in
+        */a.lease) rm -f "$lease_scope/b.lease"; return 1 ;;
+        *) command grep "$@" ;;
+      esac
+    }
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    unset -f grep
+    [ "$scan_rc" -eq 74 ]
+    case "$lease_scan_detail" in
+      lease-candidate-disappeared*) ;;
+      *) printf 'disappearing lease was not classified: rc=%s detail=%s\n' \
+           "$scan_rc" "$lease_scan_detail" >&2; exit 1 ;;
+    esac
+    disappearing_scan_detail="$lease_scan_detail"
+
+    # In one coordinator sample, terminal evidence and the disappearing-lease
+    # scan failure coexist. Durable terminal evidence must deterministically
+    # win the decision before the scan error is mapped to coordinator failure.
+    terminal=1
+    lease_scan_rc="$scan_rc"
+    six_child_resolve_readiness_preflight
+    [ "$readiness_preflight_rc:$readiness_preflight_reason" = \
+      "70:terminal-before-readiness" ]
+    [ -z "$readiness_preflight_detail" ]
+
+    terminal=0
+    six_child_resolve_readiness_preflight
+    [ "$readiness_preflight_rc:$readiness_preflight_reason" = \
+      "74:coordinator-error" ]
+    [ "$readiness_preflight_detail" = "$disappearing_scan_detail" ]
+
+    # The scanner may probe the root, but it must never traverse a scope (and
+    # therefore cannot enter volatile mutex quarantine descendants).
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope/.mutex.quarantine.synthetic"
+    printf 'backend_identity=\n' >"$lease_scope/one.lease"
+    find() {
+      if [ "${1-}" = "$lease_scope" ]; then
+        printf 'per-scope find traversal is forbidden\n' >&2
+        return 99
+      fi
+      command find "$@"
+    }
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    unset -f find
+    [ "$scan_rc:$raw_lease_count:$backend_bound_lease_count" = "0:1:0" ]
+
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope"
+    for i in 1 2 3 4 5 6 7; do
+      printf 'backend_identity=\n' >"$lease_scope/$i.lease"
+    done
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    [ "$scan_rc" -eq 74 ]
+    [ "$raw_lease_count" -eq 7 ]
+    case "$lease_scan_detail" in raw-lease-count-exceeded*) ;; *) exit 1 ;; esac
+
+    rm -rf "$lease_scope"
+    mkdir -p "$lease_scope"
+    printf 'backend_identity=synthetic\n' >"$lease_scope/read-error.lease"
+    grep() { printf 'synthetic lease read failure\n' >&2; return 2; }
+    if six_child_count_readiness_leases "$lease_fixture"; then scan_rc=0; else scan_rc=$?; fi
+    unset -f grep
+    [ "$scan_rc" -eq 74 ]
+    case "$lease_scan_detail" in lease-read-failed*) ;; *) exit 1 ;; esac
+  )
+
+  echo "review-pr Codex six-child progress deadline regression passed"
+}
+
+if [ "${SIX_CHILD_CASE:-all}" = progress-deadline ]; then
+  run_readiness_progress_deadline_regression
+  exit
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REAL_GIT="$(command -v git)"
 RUNTIME_ROOT="${SIX_CHILD_RUNTIME_ROOT:-$ROOT/codex/uberdev-codex}"
@@ -19,6 +510,9 @@ POST_SKILL="$RUNTIME_ROOT/skills/$POST_SKILL_DIR/SKILL.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
+declare -f six_child_update_readiness_deadline >"$TMP/readiness-deadline.sh"
+declare -f six_child_count_readiness_leases >>"$TMP/readiness-deadline.sh"
+declare -f six_child_resolve_readiness_preflight >>"$TMP/readiness-deadline.sh"
 
 awk -v marker="$RUNTIME_NAMESPACE-executable setup=review-pr" '
   index($0,marker){active=1; next}
@@ -393,8 +887,10 @@ fail_instance="${6-}"
 timeout_instance="${7-}"
 skip_ready_instance="${8-}"
 pre_ready_fail_instance="${9-}"
+readiness_deadline_helper="${10}"
 cd "$repo"
 . "$setup"
+. "$readiness_deadline_helper"
 
 # These are immutable command-owned artifacts consumed by all six reviewer
 # handoffs. changed_paths deliberately remains repository-relative, including
@@ -418,23 +914,25 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
   barrier_deadline=$((barrier_started + startup_timeout))
   lease_visibility_deadline=$((barrier_started + lease_visibility_delay))
   fully_dispatched=0
-  barrier_rc=0; barrier_reason=ready; ready_count=0; lease_count=0
+  max_ready_count=0
+  max_backend_bound_lease_count=0
+  barrier_rc=0; barrier_reason=ready; ready_count=0
+  raw_lease_count=0; backend_bound_lease_count=0; lease_scan_rc=0
+  lease_scan_detail=''; barrier_detail=''
   while :; do
     ready_count="$(find "$CODEX_STUB_READY_DIR" -type f | wc -l | tr -d ' ')"
-    lease_count=0
-    while IFS= read -r lease; do
-      if grep -q '^backend_identity=.' "$lease" 2>/dev/null; then
-        lease_count=$((lease_count + 1))
-      fi
-    done < <(find "$UBERDEV_CARRIER_RUN_DIR" -path '*/semaphore-v1/*.scope/*.lease' -type f 2>/dev/null)
+    if six_child_count_readiness_leases "$UBERDEV_CARRIER_RUN_DIR"; then
+      lease_scan_rc=0
+    else
+      lease_scan_rc=$?
+    fi
     barrier_now="$(date +%s)"
     # Deterministic case-4 regression fixture: model one backend identity whose
     # lease visibility reaches the coordinator late on a loaded macOS runner.
     if [ "$lease_visibility_delay" -gt 0 ] && [ "$barrier_now" -lt "$lease_visibility_deadline" ] \
-        && [ "$lease_count" -eq 6 ]; then
-      lease_count=5
+        && [ "$backend_bound_lease_count" -eq 6 ]; then
+      backend_bound_lease_count=5
     fi
-    if [ "$ready_count" -eq 6 ] && [ "$lease_count" -eq 6 ]; then break; fi
     terminal=0
     while IFS= read -r status; do
       case "$status" in *.watcher-error.json) terminal=1; break ;; esac
@@ -448,17 +946,40 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
         grep -Eq '"event":"(failed|timed_out|cancelled|abandoned)".*"run_id":"post-review-' "$lifecycle"; then
       terminal=1
     fi
-    if [ "$terminal" -eq 1 ]; then barrier_rc=70; barrier_reason=terminal-before-readiness; break; fi
-    if [ "$lease_count" -eq 6 ] && [ "$fully_dispatched" -eq 0 ]; then
-      barrier_deadline=$((barrier_now + barrier_timeout)); fully_dispatched=1
+    # Production persists terminal evidence before releasing the exact lease.
+    # Therefore a lease that disappears during this scan is expected only when
+    # the terminal probes corroborate it; every uncorroborated scan error is a
+    # coordinator failure rather than an unbound lease.
+    six_child_resolve_readiness_preflight
+    if [ "$readiness_preflight_rc" -ne 0 ]; then
+      barrier_rc="$readiness_preflight_rc"
+      barrier_reason="$readiness_preflight_reason"
+      barrier_detail="$readiness_preflight_detail"
+      break
     fi
-    if [ "$barrier_now" -ge "$barrier_deadline" ]; then
+    if six_child_update_readiness_deadline; then
+      :
+    else
+      barrier_rc=$?
+      [ "$barrier_rc" -eq 124 ] || {
+        barrier_reason=coordinator-error
+        barrier_detail=invalid-deadline-state
+        break
+      }
       barrier_rc=124; barrier_reason=readiness-timeout; break
     fi
+    if [ "$ready_count" -eq 6 ] && [ "$backend_bound_lease_count" -eq 6 ]; then break; fi
     sleep .05
   done
-  printf 'rc=%s reason=%s ready=%s leases=%s\n' \
-    "$barrier_rc" "$barrier_reason" "$ready_count" "$lease_count" >"$CODEX_STUB_BARRIER_REPORT"
+  launch_count=0
+  if [ -f "$CODEX_STUB_LOG" ]; then
+    launch_count="$(wc -l <"$CODEX_STUB_LOG" | tr -d ' ')"
+  fi
+  printf 'rc=%s reason=%s ready=%s leases=%s raw_leases=%s bound_leases=%s launches=%s max_ready=%s max_bound_leases=%s detail=%s\n' \
+    "$barrier_rc" "$barrier_reason" "$ready_count" "$backend_bound_lease_count" \
+    "$raw_lease_count" "$backend_bound_lease_count" "$launch_count" \
+    "$max_ready_count" "$max_backend_bound_lease_count" "${barrier_detail:-none}" \
+    >"$CODEX_STUB_BARRIER_REPORT"
   exit "$barrier_rc"
 ) & readiness_coordinator=$!
 
@@ -1018,7 +1539,7 @@ run_case() {
     PR_NUMBER=335 ARGUMENTS='' SOLVE_TIMEOUT=120 UBERDEV_AGENT_CAPACITY=6 PRKIT_AGENT_CAPACITY=6 \
     bash "$RUN_CASE_SCRIPT" "$name" "$repo" "$TMP/setup.sh" \
       "$TMP/post-setup.sh" "$TMP/post-boundary.sh" "$fail_instance" "$timeout_instance" \
-      "$skip_ready_instance" "$pre_ready_fail_instance"
+      "$skip_ready_instance" "$pre_ready_fail_instance" "$TMP/readiness-deadline.sh"
   printf 'case-complete name=%s\n' "$name"
 }
 
@@ -1029,6 +1550,7 @@ case "${SIX_CHILD_CASE:-all}" in
   4) run_case 4 '' '' post-review-20260716-000004-abcdef0-r2-iter1-attempt01 ;;
   5) run_case 5 '' '' '' post-review-20260716-000005-abcdef0-r5-iter1-attempt01 ;;
   all)
+    run_readiness_progress_deadline_regression
     run_case 1
     run_case 2 post-review-20260716-000002-abcdef0-r3-iter1-attempt01
     run_case 3 '' post-review-20260716-000003-abcdef0-r4-iter1-attempt01
