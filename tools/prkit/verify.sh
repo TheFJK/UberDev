@@ -27,6 +27,45 @@ ROOT_PARENT="$(cd "$ROOT_PARENT" && pwd -P)" \
   || { echo "verify: cannot resolve target parent: $ROOT_PARENT"; exit 2; }
 ROOT="$ROOT_PARENT/$ROOT_NAME"
 
+# One cleanup owner covers every verifier-created temporary on normal exit and
+# HUP/INT/TERM. There were no pre-existing traps in this script to chain; keep
+# this as the single trap installation point so later checks cannot clobber it.
+VERIFY_TEMP_PATHS=()
+cleanup_verify_temp_paths(){
+  local i path cleanup_failed=0
+  for ((i=0; i<${#VERIFY_TEMP_PATHS[@]}; i++)); do
+    path="${VERIFY_TEMP_PATHS[$i]}"
+    [ -n "$path" ] || continue
+    case "$path" in
+      /)
+        echo "verify: refusing unsafe temporary cleanup target: $path" >&2
+        cleanup_failed=1
+        ;;
+      *)
+        if rm -rf -- "$path"; then
+          VERIFY_TEMP_PATHS[$i]=""
+        else
+          echo "verify: temporary cleanup failed: $path" >&2
+          cleanup_failed=1
+        fi
+        ;;
+    esac
+  done
+  return "$cleanup_failed"
+}
+cleanup_verify_on_exit(){
+  local original_status=$?
+  trap - EXIT HUP INT TERM
+  if ! cleanup_verify_temp_paths; then
+    [ "$original_status" -ne 0 ] || original_status=1
+  fi
+  exit "$original_status"
+}
+trap cleanup_verify_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 check_managed_path(){
   python3 -I -B "$PATH_GUARD" "$ROOT" "$1" "$2"
 }
@@ -145,15 +184,17 @@ fi
 # Backstops the neutralizer's de-namespace: a NEW UberDev skill it didn't strip
 # would surface here as a dangling prkit:<name> and fail generation. ---
 SHIPPED="$(mktemp)"
+VERIFY_TEMP_PATHS+=("$SHIPPED")
 { ls "$P/commands" 2>/dev/null | sed 's/\.md$//'
   ls "$P/agents" 2>/dev/null | sed 's/\.md$//'
   for d in "$P/skills"/*/; do [ -d "$d" ] && basename "$d"; done
 } | sort -u > "$SHIPPED"
 OOS_BAD=$(grep -rhoE 'prkit:[a-z][a-z0-9-]+' "$P" 2>/dev/null | sed 's/prkit://' | sort -u | while read -r n; do
-  case "$n" in ''|active|*-finding) continue;; esac
+  [ -n "$n" ] || continue
+  [ "$n" != "active" ] || continue
+  [ "${n%-finding}" = "$n" ] || continue
   grep -qxF "$n" "$SHIPPED" || echo "$n"
 done)
-rm -f "$SHIPPED"
 if [ -n "$OOS_BAD" ]; then fail "out-of-set: dangling prkit:<name> (not shipped, not a label):"; printf '%s\n' "$OOS_BAD" | sed 's/^/         prkit:/'
 else ok "out-of-set: every prkit:<name> resolves to a shipped item or label"; fi
 
@@ -376,6 +417,222 @@ for req in "${SCAFFOLD_REQUIRED[@]}"; do
   { check_managed_path "$req" required-file && [ -s "$ROOT/$req" ]; } \
     || fail "scaffold: missing/empty/non-regular/link/reparse $req"
 done
+
+# The standalone workflows persist local trust/research/audit state below
+# .prkit/. First require the complete active rule set emitted by the sealed
+# scaffold (comments/blanks are inert; CRLF is Git-valid), so additive broad
+# rules cannot hide behind a later canonical match.
+EXPECTED_GITIGNORE_RULES=(
+  ".DS_Store"
+  "__pycache__/"
+  "*.pyc"
+  ".claude/"
+  ".worktrees/"
+  ".prkit/"
+)
+ACTUAL_GITIGNORE_RULES=()
+while IFS= read -r ignore_line || [ -n "$ignore_line" ]; do
+  ignore_line="${ignore_line%$'\r'}"
+  ignore_nonblank="${ignore_line// /}"
+  [ -n "$ignore_nonblank" ] || continue
+  case "$ignore_line" in
+    \#*) continue ;;
+  esac
+  ACTUAL_GITIGNORE_RULES+=("$ignore_line")
+done < "$ROOT/.gitignore"
+gitignore_rules_canonical=1
+if [ "${#ACTUAL_GITIGNORE_RULES[@]}" -ne "${#EXPECTED_GITIGNORE_RULES[@]}" ]; then
+  gitignore_rules_canonical=0
+else
+  for ((ignore_i=0; ignore_i<${#EXPECTED_GITIGNORE_RULES[@]}; ignore_i++)); do
+    [ "${ACTUAL_GITIGNORE_RULES[$ignore_i]}" = "${EXPECTED_GITIGNORE_RULES[$ignore_i]}" ] \
+      || gitignore_rules_canonical=0
+  done
+fi
+
+# Then prove the canonical rule is semantically effective while the root
+# generation lock remains visible. Separate empty Git metadata supports non-Git
+# targets and prevents system/global config, init templates, and excludes from
+# becoming verifier evidence.
+run_isolated_probe_git(){
+  (
+    local isolated_config="$1" config_prefix config_var config_suffix
+    shift
+
+    # Git's command-scope transports outrank system/global config. Remove both
+    # forms in this child only; validated compgen names avoid evaluating caller
+    # bytes, and COUNT=0 keeps any non-shell indexed environment entries inert.
+    unset GIT_CONFIG_PARAMETERS
+    for config_prefix in GIT_CONFIG_KEY_ GIT_CONFIG_VALUE_; do
+      while IFS= read -r config_var; do
+        config_suffix="${config_var#"$config_prefix"}"
+        case "$config_suffix" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        unset "$config_var"
+      done < <(compgen -A variable "$config_prefix")
+    done
+
+    GIT_CONFIG_COUNT=0 \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$isolated_config" \
+      git "$@"
+  )
+}
+
+IGNORE_PROBE_PARENT=""
+IGNORE_PROBE_GIT=""
+IGNORE_PROBE_TEMPLATE=""
+IGNORE_PROBE_CONFIG=""
+IGNORE_PROBE_INPUT=""
+IGNORE_PROBE_OUTPUT=""
+ignore_artifact_status=2
+ignore_lock_status=2
+ignore_artifact_record_valid=0
+ignore_infrastructure_error=0
+
+IGNORE_PROBE_PARENT="$(mktemp -d 2>/dev/null)"
+ignore_mktemp_status=$?
+if [ "$ignore_mktemp_status" -ne 0 ] || [ -z "$IGNORE_PROBE_PARENT" ]; then
+  fail "artifact-ignore: infrastructure error: mktemp failed (rc=$ignore_mktemp_status)"
+  ignore_infrastructure_error=1
+else
+  VERIFY_TEMP_PATHS+=("$IGNORE_PROBE_PARENT")
+  IGNORE_PROBE_GIT="$IGNORE_PROBE_PARENT/repo"
+  IGNORE_PROBE_TEMPLATE="$IGNORE_PROBE_PARENT/empty-template"
+  IGNORE_PROBE_CONFIG="$IGNORE_PROBE_PARENT/empty.gitconfig"
+  IGNORE_PROBE_INPUT="$IGNORE_PROBE_PARENT/check-ignore.input"
+  IGNORE_PROBE_OUTPUT="$IGNORE_PROBE_PARENT/check-ignore.output"
+  mkdir "$IGNORE_PROBE_GIT" "$IGNORE_PROBE_TEMPLATE" 2>/dev/null
+  ignore_mkdir_status=$?
+  if [ "$ignore_mkdir_status" -ne 0 ]; then
+    fail "artifact-ignore: infrastructure error: probe mkdir failed (rc=$ignore_mkdir_status)"
+    ignore_infrastructure_error=1
+  else
+    : > "$IGNORE_PROBE_CONFIG"
+    ignore_config_status=$?
+    if [ "$ignore_config_status" -ne 0 ]; then
+      fail "artifact-ignore: infrastructure error: empty Git config creation failed (rc=$ignore_config_status)"
+      ignore_infrastructure_error=1
+    else
+      printf '%s\0' '.prkit/audit.jsonl' > "$IGNORE_PROBE_INPUT"
+      ignore_input_status=$?
+      if [ "$ignore_input_status" -ne 0 ]; then
+        fail "artifact-ignore: infrastructure error: probe input creation failed (rc=$ignore_input_status)"
+        ignore_infrastructure_error=1
+      fi
+    fi
+    if [ "$ignore_infrastructure_error" -eq 0 ]; then
+      run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+        -C "$IGNORE_PROBE_GIT" init -q \
+        --template="$IGNORE_PROBE_TEMPLATE" >/dev/null 2>&1
+      ignore_init_status=$?
+      if [ "$ignore_init_status" -ne 0 ]; then
+        fail "artifact-ignore: infrastructure error: git init failed (rc=$ignore_init_status)"
+        ignore_infrastructure_error=1
+      fi
+    fi
+  fi
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ]; then
+  run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+    --git-dir="$IGNORE_PROBE_GIT/.git" --work-tree="$ROOT" \
+    -c core.excludesFile=/dev/null \
+    check-ignore -v -z --no-index --stdin \
+    < "$IGNORE_PROBE_INPUT" > "$IGNORE_PROBE_OUTPUT" 2>/dev/null
+  ignore_artifact_status=$?
+  run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+    --git-dir="$IGNORE_PROBE_GIT/.git" --work-tree="$ROOT" \
+    -c core.excludesFile=/dev/null \
+    check-ignore -q --no-index -- .prkit-generate.lock >/dev/null 2>&1
+  ignore_lock_status=$?
+  case "$ignore_artifact_status" in
+    0|1) ;;
+    *)
+      fail "artifact-ignore: infrastructure error: git check-ignore for .prkit/audit.jsonl failed (rc=$ignore_artifact_status)"
+      ignore_infrastructure_error=1
+      ;;
+  esac
+  case "$ignore_lock_status" in
+    0|1) ;;
+    *)
+      fail "artifact-ignore: infrastructure error: git check-ignore for .prkit-generate.lock failed (rc=$ignore_lock_status)"
+      ignore_infrastructure_error=1
+      ;;
+  esac
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ] \
+   && [ "$ignore_artifact_status" -eq 0 ] \
+   && python3 -I -B - "$IGNORE_PROBE_OUTPUT" "$ROOT/.gitignore" <<'PY'
+import ntpath
+import os
+from pathlib import Path
+import platform
+import re
+import sys
+
+record = Path(sys.argv[1]).read_bytes().split(b"\0")
+if len(record) != 5 or record[-1] != b"":
+    raise SystemExit(1)
+
+source_raw, line_raw, pattern_raw, path_raw, _ = record
+source = source_raw.decode("utf-8", "surrogateescape")
+expected = sys.argv[2]
+
+if not line_raw.isdigit() or int(line_raw) < 1:
+    raise SystemExit(1)
+if pattern_raw != b".prkit/" or path_raw != b".prkit/audit.jsonl":
+    raise SystemExit(1)
+
+
+def windows_key(value):
+    normalized = value.replace("\\", "/")
+    msys_drive = re.match(r"^/([A-Za-z])(/.*)$", normalized)
+    if msys_drive:
+        normalized = f"{msys_drive.group(1)}:{msys_drive.group(2)}"
+    if re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("//"):
+        return ntpath.normcase(ntpath.normpath(normalized))
+    return None
+
+
+source_is_target = source == ".gitignore"
+if not source_is_target:
+    runtime_system = platform.system().casefold()
+    windows_runtime = os.name == "nt" or runtime_system.startswith(
+        ("windows", "msys", "mingw", "cygwin")
+    )
+    if windows_runtime:
+        source_windows = windows_key(source)
+        expected_windows = windows_key(expected)
+        if source_windows is not None or expected_windows is not None:
+            source_is_target = (
+                source_windows is not None
+                and expected_windows is not None
+                and source_windows == expected_windows
+            )
+        elif os.path.isabs(source):
+            source_is_target = os.path.realpath(source) == os.path.realpath(expected)
+    elif os.path.isabs(source):
+        source_is_target = os.path.realpath(source) == os.path.realpath(expected)
+
+raise SystemExit(0 if source_is_target else 1)
+PY
+then
+  ignore_artifact_record_valid=1
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ] \
+   && [ "$gitignore_rules_canonical" -eq 1 ] \
+   && [ "$ignore_artifact_status" -eq 0 ] \
+   && [ "$ignore_lock_status" -eq 1 ] \
+   && [ "$ignore_artifact_record_valid" -eq 1 ]; then
+  ok "artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock"
+elif [ "$ignore_infrastructure_error" -eq 0 ]; then
+  fail "artifact-ignore: .gitignore must contain an effective .prkit/ rule and leave .prkit-generate.lock unignored"
+fi
+
 jq empty "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || fail "scaffold: marketplace.json is not valid JSON"
 jq empty "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null || fail "scaffold: native Codex marketplace.json is not valid JSON"
 if python3 -I -B - "$ROOT/.agents/plugins/marketplace.json" "$ROOT/codex/README.md" <<'PY'
@@ -453,6 +710,10 @@ case "$placeholder_status" in
   1) ok "placeholders: no unrendered {{...}} in output" ;;
   *) fail "placeholders: scan errored (grep rc=$placeholder_status) — cannot certify clean" ;;
 esac
+
+if ! cleanup_verify_temp_paths; then
+  fail "cleanup: verifier temporary removal failed"
+fi
 
 echo "  Result: $([ "$rc" -eq 0 ] && echo PASS || echo FAIL)"
 exit "$rc"

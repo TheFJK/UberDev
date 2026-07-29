@@ -24,15 +24,55 @@ _B9="$(mktemp -d)"; _B10="$(mktemp -d)"; _B11="$(mktemp -d)"; _B12="$(mktemp -d)
 _B13="$(mktemp -d)"; _B14="$(mktemp -d)"; _B15="$(mktemp -d)"; _B16="$(mktemp -d)"
 T1="$_B1/prkit tgt"; T2="$_B2/out"
 mkdir -p "$T1" "$T2"; trap 'rm -rf "$_B1" "$_B2" "$_B3" "$_B4" "$_B5" "$_B6" "$_B7" "$_B8" "$_B9" "$_B10" "$_B11" "$_B12" "$_B13" "$_B14" "$_B15" "$_B16"' EXIT
-git -C "$T1" init -q; git -C "$T2" init -q
+G1_INIT_TEMPLATE="$_B1/init-template"
+G1_EMPTY_TEMPLATE="$_B1/empty-template"
+G1_GLOBAL_CONFIG="$_B1/global.gitconfig"
+G1_EMPTY_CONFIG="$_B1/empty.gitconfig"
+G1_COMMAND_EXCLUDES="$_B1/command-excludes"
+mkdir -p "$G1_INIT_TEMPLATE/info" "$G1_EMPTY_TEMPLATE"
+printf '.prkit-generate.lock\n' > "$G1_INIT_TEMPLATE/info/exclude"
+printf '.prkit*\n' > "$G1_COMMAND_EXCLUDES"
+git config --file "$G1_GLOBAL_CONFIG" init.templateDir "$G1_INIT_TEMPLATE"
+: > "$G1_EMPTY_CONFIG"
+G1_CONFIG_PARAMETERS="'core.excludesFile'='$G1_COMMAND_EXCLUDES' 'init.templateDir'='$G1_INIT_TEMPLATE'"
+GIT_CONFIG_GLOBAL="$G1_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0="$G1_COMMAND_EXCLUDES" \
+  GIT_CONFIG_KEY_1=init.templateDir GIT_CONFIG_VALUE_1="$G1_INIT_TEMPLATE" \
+  GIT_CONFIG_PARAMETERS="$G1_CONFIG_PARAMETERS" \
+  git -C "$T1" init -q --template="$G1_EMPTY_TEMPLATE"
+GIT_CONFIG_GLOBAL="$G1_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0="$G1_COMMAND_EXCLUDES" \
+  GIT_CONFIG_KEY_1=init.templateDir GIT_CONFIG_VALUE_1="$G1_INIT_TEMPLATE" \
+  GIT_CONFIG_PARAMETERS="$G1_CONFIG_PARAMETERS" \
+  git -C "$T2" init -q --template="$G1_EMPTY_TEMPLATE"
 
 # G1 — generate into a clean target succeeds and self-verifies
 G1_OUTPUT=""
-if G1_OUTPUT="$(bash "$GEN" --target "$T1" --version 0.1.0 2>&1)" \
+if G1_OUTPUT="$(
+     GIT_CONFIG_COUNT=2 \
+     GIT_CONFIG_KEY_0=core.excludesFile \
+     GIT_CONFIG_VALUE_0="$G1_COMMAND_EXCLUDES" \
+     GIT_CONFIG_KEY_1=init.templateDir \
+     GIT_CONFIG_VALUE_1="$G1_INIT_TEMPLATE" \
+     GIT_CONFIG_KEY_7=core.excludesFile \
+     GIT_CONFIG_VALUE_7="$G1_COMMAND_EXCLUDES" \
+     GIT_CONFIG_PARAMETERS="$G1_CONFIG_PARAMETERS" \
+       bash "$GEN" --target "$T1" --version 0.1.0 2>&1
+   )" \
    && [ ! -e "$T1/.prkit-generate.lock" ]; then
-  ok "G1 generate exits 0 (verify passed, lock cleaned)"
+  ok "G1 generate exits 0 under hostile command-scope Git config (verify passed, lock cleaned)"
 else
-  no "G1 generate failed or leaked its lock"
+  no "G1 generate inherited hostile command-scope Git config, failed, or leaked its lock"
+fi
+if GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$G1_EMPTY_CONFIG" \
+     git -C "$T1" check-ignore -q --no-index -- .prkit/audit.jsonl \
+   && ! GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$G1_EMPTY_CONFIG" \
+     git -C "$T1" check-ignore -q --no-index -- .prkit-generate.lock; then
+  ok "G1a generated ignore contract covers .prkit artifacts but not the generation lock"
+else
+  no "G1a generated ignore contract is missing, overbroad, or ineffective"
 fi
 
 # G1b — linked worktrees represent .git as a FILE. Dirty tracked and untracked
