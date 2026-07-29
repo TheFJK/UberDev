@@ -617,9 +617,9 @@ if (
   post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" || exit 1
   git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
   git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
-  python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
+  PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
     <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
-  python3 -I -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
+  PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
     <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
@@ -637,6 +637,97 @@ PY
   echo "  PASS  V2.8 — writer emits exact oracles, merges duplicate scopes in roster order, and refuses an incomplete roster"; PASS=$((PASS + 1))
 else
   echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract"; FAIL=$((FAIL + 1))
+fi
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" <<'PY'
+import hashlib,importlib.util,os,pathlib,subprocess,sys
+
+helper=pathlib.Path(sys.argv[1]).resolve()
+command=[
+ sys.executable,"-I","-B",str(helper),"digest","--path",str(helper),
+ "--minimum","1","--maximum","10000000",
+]
+process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+assert process.stdout is not None and process.stderr is not None
+process.stdout.close()
+closed_pipe_stderr=process.stderr.read()
+closed_pipe_rc=process.wait()
+assert closed_pipe_rc==74,closed_pipe_rc
+assert closed_pipe_stderr==b"contract_failure\n",closed_pipe_stderr
+
+spec=importlib.util.spec_from_file_location("post_review_stdout_contract",helper)
+assert spec is not None and spec.loader is not None
+module=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=module
+spec.loader.exec_module(module)
+
+class DescriptorStream:
+ def __init__(self,descriptor): self.descriptor=descriptor
+ def fileno(self): return self.descriptor
+
+class MissingDescriptorStream:
+ pass
+
+def invoke(stdout,stderr,write=None):
+ original_stdout,original_stderr,original_argv=sys.stdout,sys.stderr,sys.argv
+ original_write=module.os.write
+ try:
+  sys.stdout,sys.stderr=stdout,stderr
+  sys.argv=command[3:]
+  if write is not None: module.os.write=write
+  return module.main()
+ finally:
+  module.os.write=original_write
+  sys.stdout,sys.stderr,sys.argv=original_stdout,original_stderr,original_argv
+
+stdout_read,stdout_write=os.pipe()
+stderr_read,stderr_write=os.pipe()
+captured_stdout=bytearray()
+captured_stderr=bytearray()
+def short_write(descriptor,payload):
+ chunk=bytes(payload[:5])
+ if descriptor==stdout_write: captured_stdout.extend(chunk)
+ elif descriptor==stderr_write: captured_stderr.extend(chunk)
+ else: raise AssertionError(descriptor)
+ return len(chunk)
+try:
+ assert invoke(
+     DescriptorStream(stdout_write),DescriptorStream(stderr_write),short_write
+ )==0
+finally:
+ for descriptor in (stdout_read,stdout_write,stderr_read,stderr_write): os.close(descriptor)
+assert captured_stdout==hashlib.sha256(helper.read_bytes()).hexdigest().encode("ascii")
+assert captured_stderr==b""
+
+stderr_read,stderr_write=os.pipe()
+captured_stderr=bytearray()
+def capture_diagnostic(descriptor,payload):
+ assert descriptor==stderr_write
+ chunk=bytes(payload[:3]); captured_stderr.extend(chunk); return len(chunk)
+try:
+ assert invoke(
+     MissingDescriptorStream(),DescriptorStream(stderr_write),capture_diagnostic
+ )==74
+finally:
+ os.close(stderr_read); os.close(stderr_write)
+assert captured_stderr==b"contract_failure\n"
+
+stderr_read,stderr_write=os.pipe()
+dead_read,dead_write=os.pipe()
+os.close(dead_read); os.close(dead_write)
+try:
+ assert invoke(DescriptorStream(dead_write),DescriptorStream(stderr_write))==74
+finally:
+ os.close(stderr_write)
+closed_descriptor_stderr=os.read(stderr_read,1024)
+os.close(stderr_read)
+assert closed_descriptor_stderr==b"contract_failure\n"
+
+assert invoke(MissingDescriptorStream(),MissingDescriptorStream())==74
+PY
+then
+  echo "  PASS  V2.9 — raw CLI output handles closed pipes, short writes, and missing/closed descriptors with deterministic rc 74"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.9 — raw CLI output or diagnostic boundary is not deterministic"; FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_V2_TMP"
 

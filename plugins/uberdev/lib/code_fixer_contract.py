@@ -5832,6 +5832,52 @@ def _compact(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _write_raw_stream(stream: Any, payload: bytes) -> bool:
+    previous_mode: int | None = None
+    succeeded = False
+    try:
+        descriptor = stream.fileno()
+        if (
+            not isinstance(descriptor, int)
+            or isinstance(descriptor, bool)
+            or descriptor < 0
+        ):
+            raise ValueError("invalid stream descriptor")
+        if os.name == "nt":
+            import msvcrt
+
+            previous_mode = msvcrt.setmode(descriptor, os.O_BINARY)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if (
+                not isinstance(written, int)
+                or isinstance(written, bool)
+                or written <= 0
+                or written > len(remaining)
+            ):
+                raise OSError("incomplete stream write")
+            remaining = remaining[written:]
+        succeeded = True
+    except (AttributeError, OSError, TypeError, ValueError):
+        succeeded = False
+    finally:
+        if previous_mode is not None:
+            try:
+                msvcrt.setmode(descriptor, previous_mode)
+            except (AttributeError, OSError, TypeError, ValueError):
+                succeeded = False
+    return succeeded
+
+
+def _write_cli_diagnostic(reason: str) -> None:
+    try:
+        payload = (reason + "\n").encode("ascii")
+    except (AttributeError, UnicodeError):
+        payload = b"contract_failure\n"
+    _write_raw_stream(sys.stderr, payload)
+
+
 def main() -> int:
     try:
         arguments = _parser().parse_args()
@@ -6114,12 +6160,19 @@ def main() -> int:
                 )
             )
     except ContractFailure as error:
-        print(str(error), file=sys.stderr)
+        _write_cli_diagnostic(str(error))
         return 74
     except Exception:
-        print("contract_failure", file=sys.stderr)
+        _write_cli_diagnostic("contract_failure")
         return 74
-    print(output, end="")
+    try:
+        payload = output.encode("utf-8")
+    except (AttributeError, UnicodeError):
+        _write_cli_diagnostic("contract_failure")
+        return 74
+    if not _write_raw_stream(sys.stdout, payload):
+        _write_cli_diagnostic("contract_failure")
+        return 74
     return 0
 
 
