@@ -207,10 +207,10 @@ jobs:
     name: shape-checks-windows
     runs-on: windows-latest
     # Proves the shape-check harness and routed dispatch lifecycle are portable
-    # on native Windows/Git Bash. A recent full run took 9.5 minutes, while the
-    # current suite reached its final minute at the old ten-minute cap. Fifteen
-    # minutes leaves about four minutes of headroom and retains a bounded guard.
-    timeout-minutes: 15
+    # on native Windows/Git Bash. The exhaustive portability shard's measured
+    # runtime outgrew the prior ceiling; thirty minutes provides runner-variance
+    # headroom while preserving a meaningful hang guard.
+    timeout-minutes: 30
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.

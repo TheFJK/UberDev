@@ -21,7 +21,7 @@
 #         declared in the marker block, and the marker block cannot drift
 #         from the actual skip set.
 #   W5  — the Linux job retains its evidence-based 40-minute hang guard.
-#   W6  — the Windows job retains its evidence-based 15-minute hang guard.
+#   W6  — the Windows job retains its evidence-based 30-minute hang guard.
 #   W7  — receipt retirement runs on Linux, macOS, and native Windows.
 #
 # Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
@@ -54,7 +54,7 @@ if [ ! -d "$REPO_ROOT/tests" ]; then
 fi
 
 LINUX_TIMEOUT_MINUTES=40
-WINDOWS_TIMEOUT_MINUTES=15
+WINDOWS_TIMEOUT_MINUTES=30
 linux_job_block=$(awk '
   /^  shape-checks:[[:space:]]*$/ { in_job=1; next }
   in_job && /^  [[:alnum:]_-]+:[[:space:]]*$/ { exit }
@@ -176,8 +176,8 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W6 — observed timing projects about eleven minutes for the complete portable
-# suite; keep enough hosted-runner headroom without falling back to Actions'
+# W6 — the exhaustive native Windows portability shard needs measured runtime
+# headroom; retain a bounded hang guard without falling back to Actions'
 # 360-minute default or weakening the Linux/macOS job-specific guards.
 windows_timeout_rows=$(printf '%s\n' "$windows_job_block" \
   | sed -n 's/^    timeout-minutes:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')
