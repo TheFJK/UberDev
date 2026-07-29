@@ -10,6 +10,11 @@
 set -u
 set -o pipefail
 
+MSYS_NO_PATHCONV_INITIAL_SET="${MSYS_NO_PATHCONV+x}"
+MSYS_NO_PATHCONV_INITIAL_VALUE="${MSYS_NO_PATHCONV-}"
+MSYS_ARG_CONV_EXCL_INITIAL_SET="${MSYS2_ARG_CONV_EXCL+x}"
+MSYS_ARG_CONV_EXCL_INITIAL_VALUE="${MSYS2_ARG_CONV_EXCL-}"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SIMPLIFY="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 CODE_SIMPLIFIER="$REPO_ROOT/plugins/uberdev/agents/code-simplifier.md"
@@ -23,12 +28,8 @@ for f in "$SIMPLIFY" "$CODE_SIMPLIFIER" "$CODE_FIXER" "$CODE_FIXER_CONTRACT"; do
   fi
 done
 
-# Keep slash-prefixed jq filter literals unchanged at the Git-for-Windows
-# native-process boundary. These controls are inert on POSIX hosts.
 # Exact-line lookup decoys: export MSYS_NO_PATHCONV=1
 # Exact-line lookup decoys: export MSYS2_ARG_CONV_EXCL='*'
-export MSYS_NO_PATHCONV=1
-export MSYS2_ARG_CONV_EXCL='*'
 
 PASS=0
 FAIL=0
@@ -125,7 +126,24 @@ assert_no_grep "$SIMPLIFY" 'Aggregate their findings and fix each issue directly
 
 echo
 echo "== P3.8-P3.11: executable standalone controller integration =="
-if bash "$REPO_ROOT/tests/simplify-standalone-flow.test.sh"; then
+# Model the Git Bash parent-to-child boundary on every host. The nested fixture
+# creates POSIX mktemp paths that native Windows tools must be allowed to
+# convert. First prove E5 did not change the entry environment, then clear any
+# caller-owned controls for the full nested integration.
+if MSYSTEM=MSYS bash -c '
+  if [ "${MSYS_NO_PATHCONV+x}" != "$1" ] \
+    || [ "${MSYS_NO_PATHCONV-}" != "$2" ] \
+    || [ "${MSYS2_ARG_CONV_EXCL+x}" != "$3" ] \
+    || [ "${MSYS2_ARG_CONV_EXCL-}" != "$4" ]; then
+    echo "E5 MSYS path-conversion suppression leaked into standalone child" >&2
+    exit 97
+  fi
+  unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+  exec bash "$5"
+' _ \
+  "$MSYS_NO_PATHCONV_INITIAL_SET" "$MSYS_NO_PATHCONV_INITIAL_VALUE" \
+  "$MSYS_ARG_CONV_EXCL_INITIAL_SET" "$MSYS_ARG_CONV_EXCL_INITIAL_VALUE" \
+  "$REPO_ROOT/tests/simplify-standalone-flow.test.sh"; then
   echo "  PASS  controller preserves dirt, commits APPLIED bytes once, handles exact zero, ignores ledger rebind, and refuses terminal replacement"
   PASS=$((PASS + 1))
 else
@@ -401,15 +419,13 @@ assert_no_grep "$SIMPLIFY" 'Never fails the parent `/uberdev:simplify` run' \
 
 echo
 echo "== E5: standalone deferred-findings handoff is Phase-2-only =="
-MSYS_NO_PATHCONV_COUNT="$(grep -Fxc 'export MSYS_NO_PATHCONV=1' "$0" || true)"
-MSYS_ARG_EXCL_COUNT="$(grep -Fxc "export MSYS2_ARG_CONV_EXCL='*'" "$0" || true)"
-MSYS_NO_PATHCONV_LINE="$(grep -Fnx 'export MSYS_NO_PATHCONV=1' "$0" \
+MSYS_NO_PATHCONV_COUNT="$(grep -Ec '^[[:space:]]*export MSYS_NO_PATHCONV=1[[:space:]]*$' "$0" || true)"
+MSYS_ARG_EXCL_COUNT="$(grep -Ec "^[[:space:]]*export MSYS2_ARG_CONV_EXCL='\\*'[[:space:]]*$" "$0" || true)"
+MSYS_NO_PATHCONV_LINE="$(grep -En '^[[:space:]]*export MSYS_NO_PATHCONV=1[[:space:]]*$' "$0" \
   | head -n1 | cut -d: -f1)"
-MSYS_ARG_EXCL_LINE="$(grep -Fnx "export MSYS2_ARG_CONV_EXCL='*'" "$0" \
+MSYS_ARG_EXCL_LINE="$(grep -En "^[[:space:]]*export MSYS2_ARG_CONV_EXCL='\\*'[[:space:]]*$" "$0" \
   | head -n1 | cut -d: -f1)"
-MSYS_NO_PATHCONV_SOURCE="$(sed -n "${MSYS_NO_PATHCONV_LINE}p" "$0")"
-MSYS_ARG_EXCL_SOURCE="$(sed -n "${MSYS_ARG_EXCL_LINE}p" "$0")"
-DEFER_EVAL_LINE="$(awk '$0 == "eval \"$DEFER_LINE\"" { print NR; exit }' "$0")"
+DEFER_EVAL_LINE="$(awk '$0 ~ /^[[:space:]]*eval "\$DEFER_LINE"[[:space:]]*$/ { print NR; exit }' "$0")"
 DEFER_JQ_LINE="$(awk \
   '/^[[:space:]]*&& printf/ && index($0,"DEFER_INPUTS") && index($0,"| jq -e") {
     print NR
@@ -420,26 +436,46 @@ AGG_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/simplify-final.md"
 PHASE2_DISPOSITION_PATH="/repo/.uberdev/research/20260726-010203-abcdef0/phase2-disposition.json"
 WORKING_DIR_ABS="/repo"
 PR_NUMBER=0
-eval "$DEFER_LINE"
-if [ "$MSYS_NO_PATHCONV_COUNT" -eq 1 ] \
-  && [ "$MSYS_ARG_EXCL_COUNT" -eq 1 ] \
-  && [ "$MSYS_NO_PATHCONV_SOURCE" = 'export MSYS_NO_PATHCONV=1' ] \
-  && [ "$MSYS_ARG_EXCL_SOURCE" = "export MSYS2_ARG_CONV_EXCL='*'" ] \
-  && [ -n "$DEFER_EVAL_LINE" ] \
-  && [ -n "$DEFER_JQ_LINE" ] \
-  && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_EVAL_LINE" ] \
-  && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_JQ_LINE" ] \
-  && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_EVAL_LINE" ] \
-  && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_JQ_LINE" ] \
-  && printf '%s' "$DEFER_INPUTS" | jq -e \
-  '.phase1_path=="" and .phase1_disposition_path=="" and
-   (.phase2_path|endswith("/simplify-final.md"))' >/dev/null 2>&1 \
-   && printf '%s' "$DEFER_INPUTS" | jq -e \
-  '.phase2_disposition_path|endswith("/phase2-disposition.json")' >/dev/null 2>&1; then
+if (
+  # Keep slash-prefixed jq filter literals unchanged only inside this fixture
+  # at the Git-for-Windows native-process boundary.
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL='*'
+
+  eval "$DEFER_LINE"
+  [ "$MSYS_NO_PATHCONV_COUNT" -eq 1 ] \
+    && [ "$MSYS_ARG_EXCL_COUNT" -eq 1 ] \
+    && [ -n "$DEFER_EVAL_LINE" ] \
+    && [ -n "$DEFER_JQ_LINE" ] \
+    && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_EVAL_LINE" ] \
+    && [ "$MSYS_NO_PATHCONV_LINE" -lt "$DEFER_JQ_LINE" ] \
+    && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_EVAL_LINE" ] \
+    && [ "$MSYS_ARG_EXCL_LINE" -lt "$DEFER_JQ_LINE" ] \
+    && printf '%s' "$DEFER_INPUTS" | jq -e \
+    '.phase1_path=="" and .phase1_disposition_path=="" and
+     (.phase2_path|endswith("/simplify-final.md"))' >/dev/null 2>&1 \
+    && printf '%s' "$DEFER_INPUTS" | jq -e \
+    '.phase2_disposition_path|endswith("/phase2-disposition.json")' >/dev/null 2>&1
+); then
   echo "  PASS  E5 — standalone /simplify carries only Phase 2 aggregate/disposition evidence"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  E5 — standalone /simplify duplicated or mislabeled Phase 2 evidence"
+  FAIL=$((FAIL + 1))
+fi
+
+if MSYSTEM=MSYS bash -c '
+  [ "${MSYS_NO_PATHCONV+x}" = "$1" ] \
+    && [ "${MSYS_NO_PATHCONV-}" = "$2" ] \
+    && [ "${MSYS2_ARG_CONV_EXCL+x}" = "$3" ] \
+    && [ "${MSYS2_ARG_CONV_EXCL-}" = "$4" ]
+' _ \
+  "$MSYS_NO_PATHCONV_INITIAL_SET" "$MSYS_NO_PATHCONV_INITIAL_VALUE" \
+  "$MSYS_ARG_CONV_EXCL_INITIAL_SET" "$MSYS_ARG_CONV_EXCL_INITIAL_VALUE"; then
+  echo "  PASS  E5.1 — MSYS path-conversion suppression stays inside the E5 fixture"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E5.1 — MSYS path-conversion suppression escaped the E5 fixture"
   FAIL=$((FAIL + 1))
 fi
 
