@@ -186,6 +186,7 @@ jobs:
           bash tests/workflow-args.test.sh && \
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
+          bash tests/solve-fleet-workflow.test.sh && \
           bash tests/codex-port.test.sh
 
   supervision-smoke-macos:
@@ -370,4 +371,5 @@ jobs:
           bash tests/workflow-scripts.test.sh && \
           bash tests/workflow-args.test.sh && \
           bash tests/testers-workflow.test.sh && \
-          bash tests/scan-fleet-workflow.test.sh
+          bash tests/scan-fleet-workflow.test.sh && \
+          bash tests/solve-fleet-workflow.test.sh
