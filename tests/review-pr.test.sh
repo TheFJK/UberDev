@@ -1645,6 +1645,17 @@ run_r34_case() {
       mkdir -p "$repo/.uberdev/runs"
       printf 'external\n' >"$R33_TMP/r34-$name.external"
       ln -s "$R33_TMP/r34-$name.external" "$repo/.uberdev/runs/.gitignore"
+      # Precondition, same convention as tests/aliases.test.sh S5b: on Git Bash
+      # (windows-latest CI) without admin / Developer Mode, `ln -s` does not
+      # create a POSIX symlink — it copies the target instead. The case then
+      # degrades into the `incompatible` shape (a regular file), the publisher
+      # is never asked to refuse a symlink, and the refusal assertion cannot be
+      # satisfied. SKIP rather than FAIL: the platform cannot express the input
+      # this case exists to exercise.
+      if [ ! -L "$repo/.uberdev/runs/.gitignore" ]; then
+        echo "  SKIP  R34.$R34_CASE_NUMBER ($name): ln -s did not produce a symlink on this platform (Git Bash without admin/Developer Mode?)"
+        return 0
+      fi
       ;;
     directory)
       mkdir -p "$repo/.uberdev/runs/.gitignore"
@@ -1731,6 +1742,7 @@ fi
 echo
 echo "== R35: lexical run-root ancestors reject links/swaps without external mutation =="
 R35_OK=1
+R35_SKIP=0
 for component in uberdev runs; do
   repo="$R33_TMP/r35-$component"
   outside="$R33_TMP/r35-$component-outside"
@@ -1743,9 +1755,20 @@ for component in uberdev runs; do
   git -C "$repo" commit -qm init
   if [ "$component" = uberdev ]; then
     ln -s "$outside" "$repo/.uberdev"
+    R35_LINK="$repo/.uberdev"
   else
     mkdir "$repo/.uberdev"
     ln -s "$outside" "$repo/.uberdev/runs"
+    R35_LINK="$repo/.uberdev/runs"
+  fi
+  # Precondition, same convention as tests/aliases.test.sh S5b: where `ln -s`
+  # cannot create a real symlink (Git Bash without admin / Developer Mode) it
+  # copies instead, so the run root becomes an ordinary directory. Setup then
+  # correctly SUCCEEDS — there is no linked ancestor to reject — and this case
+  # would score that correct behaviour as a failure. SKIP instead.
+  if [ ! -L "$R35_LINK" ]; then
+    R35_SKIP=1
+    break
   fi
   if UBERDEV_RUN_CARRIER_JSON=fixture WORKTREE_ROOT="$repo" \
      PR_NUMBER=73 RISK_JSON='[]' RUN_ID="20260729-150000-abcdef01" \
@@ -1755,7 +1778,9 @@ for component in uberdev runs; do
   fi
   [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] || R35_OK=0
 done
-if [ "$R35_OK" -eq 1 ]; then
+if [ "$R35_SKIP" -eq 1 ]; then
+  echo "  SKIP  R35: ln -s did not produce a symlink on this platform (Git Bash without admin/Developer Mode?)"
+elif [ "$R35_OK" -eq 1 ]; then
   echo "  PASS  R35 — .uberdev/runs lexical-link rejection returns nonzero with zero external mutation"
   PASS=$((PASS + 1))
 else
