@@ -348,10 +348,11 @@ assert_no_grep "$REVIEW_PR" \
   'read content MUST be wrapped' \
   "R8.3c — old read-time-wrap mandate removed (anti-regression; #302)"
 
-# R8.4 — Phase 1 generates its own RUN_ID (decoupled from any subagent-driven-dev RUN_ID)
+# R8.4 — Phase 1 generates one reservation prefix and lets the atomic mkdir
+# choose the final discriminator (decoupled from any earlier workflow RUN_ID).
 assert_grep "$REVIEW_PR" \
-  'RUN_ID="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git rev-parse --short HEAD\)"' \
-  "R8.4 — Phase 1 mints its own RUN_ID per the canonical /review-pr Run-ID format"
+  'REVIEW_RUN_ID_REQUEST="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git -C "\$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD\)"' \
+  "R8.4 — setup mints one canonical /review-pr Run-ID reservation prefix"
 
 # R8.5 — missing reviewer evidence is supervisory failure, never an empty review
 assert_grep "$REVIEW_PR" \
@@ -1385,6 +1386,384 @@ else
   echo "  FAIL  R31 — Phase 2 can reuse a stale pre-fix commit range"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== R32: run directory reservation and verdict publication are atomic/no-clobber =="
+assert_grep "$REVIEW_PR" \
+  'review_reserve_run_directory\(\)|reserve_review_run_directory\(\)' \
+  "R32.1 — executable helper owns atomic run-directory reservation"
+assert_grep "$REVIEW_PR" \
+  'os\.mkdir\(candidate|os\.mkdir\(os\.path\.join\(runs_root, candidate\)' \
+  "R32.2 — reservation uses plain mkdir as the atomic primitive (never mkdir -p)"
+assert_no_grep "$REVIEW_PR" \
+  'mkdir -p "\$MARKER_DIR"' \
+  "R32.3 — collision-prone mkdir -p marker reservation is retired"
+assert_grep "$REVIEW_PR" \
+  'RUN_ID_WAS_EXPLICIT|EXPLICIT_RUN_ID|caller-supplied.*collision.*exit 2|explicit.*RUN_ID.*collision.*fail' \
+  "R32.4 — explicit caller RUN_ID collision fails closed"
+assert_grep "$REVIEW_PR" \
+  'token_hex|[Hh]ex discriminator|RUN_ID_RESERVATION_MAX_ATTEMPTS|bounded.*attempt' \
+  "R32.5 — internally minted IDs use bounded cryptographic hex-discriminator retries"
+assert_grep "$REVIEW_PR" \
+  'secure_publish_exact_no_clobber' \
+  "R32.6 — verdict publication delegates the shared no-clobber publisher"
+assert_grep "$REVIEW_PR" \
+  'O_EXCL|noclobber|set -C|mv.*no-clobber|link\(' \
+  "R32.7 — verdict publication uses an exclusive/no-clobber primitive"
+assert_no_grep "$REVIEW_PR" \
+  '> "\$MARKER_DIR/review-pr-verdict\.json"|> "\$RUN_DIR/review-pr-verdict\.json"' \
+  "R32.8 — verdict JSON is never pathname-truncated in place"
+# R32.8b — `git check-ignore -q` exits 1 for a NOT-ignored path, which is the
+# expected first-run state the 0|1|* triage exists to handle. Left bare, the
+# probe aborts the whole setup fence under `set -e` before `REVIEW_IGNORE_RC`
+# is ever assigned, so the ignore policy is never installed and every reviewer
+# child dies before dispatch. Every probe must therefore pre-seed the rc and
+# capture failure through `||`.
+IGNORE_PROBE_COUNT="$(grep -cE 'check-ignore -q -- "\.uberdev/runs/\.review-probe"' "$REVIEW_PR" || true)"
+GUARDED_PROBE_COUNT="$(grep -cE 'check-ignore -q -- "\.uberdev/runs/\.review-probe" \|\| REVIEW_IGNORE_RC=\$\?' "$REVIEW_PR" || true)"
+if [ "$IGNORE_PROBE_COUNT" -gt 0 ] && [ "$IGNORE_PROBE_COUNT" -eq "$GUARDED_PROBE_COUNT" ]; then
+  echo "  PASS  R32.8b — every check-ignore probe captures its rc through || (set -e safe)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R32.8b — $((IGNORE_PROBE_COUNT - GUARDED_PROBE_COUNT)) of $IGNORE_PROBE_COUNT check-ignore probes run bare; set -e aborts before the 0|1|* triage"
+  FAIL=$((FAIL + 1))
+fi
+assert_no_grep "$REVIEW_PR" \
+  'check-ignore -q -- "\.uberdev/runs/\.review-probe"$' \
+  "R32.8c — no unguarded trailing check-ignore probe remains"
+
+RUN_MINT_COUNT="$(grep -cE '^  REVIEW_RUN_ID_REQUEST=.*date \+%Y%m%d-%H%M%S.*git -C .*rev-parse --short HEAD' "$REVIEW_PR" || true)"
+if [ "$RUN_MINT_COUNT" -eq 1 ]; then
+  echo "  PASS  R32.9 — RUN_ID is minted at exactly one executable source"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R32.9 — expected exactly one RUN_ID mint, found $RUN_MINT_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+
+R32_TMP="$(mktemp -d)"
+awk '
+  /^RUN_ID_WAS_EXPLICIT=0$/ { active=1 }
+  active && /^# Standalone carrier preparation owns/ { exit }
+  active && /^REVIEW_RUN_REPO_ROOT=/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$R32_TMP/helpers.sh"
+if (
+  set -u
+  RUN_ID=
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  . "$R32_TMP/helpers.sh"
+  mkdir "$R32_TMP/repository"
+  git -C "$R32_TMP/repository" init -q
+  git -C "$R32_TMP/repository" config user.email test@example.com
+  git -C "$R32_TMP/repository" config user.name Test
+  printf 'fixture\n' >"$R32_TMP/repository/README.md"
+  git -C "$R32_TMP/repository" add README.md
+  git -C "$R32_TMP/repository" commit -qm init
+  root_record="$(review_prepare_run_root "$R32_TMP/repository")"
+  runs_root="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$root_record")"
+  runs_identity="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$root_record")"
+  review_publish_local_ignore "$runs_root" "$runs_identity"
+  explicit_id=20260729-120000-abcdef01
+  first_output="$(review_reserve_run_directory "$runs_root" "$runs_identity" "$explicit_id" 1 73)"
+  first_receipt="${first_output%%$'\n'*}"
+  first_remainder="${first_output#*$'\n'}"
+  first_run_id="${first_remainder%%$'\n'*}"
+  first_dir="${first_remainder#*$'\n'}"
+  [ "$first_run_id" = "$explicit_id" ]
+  [ -n "$first_receipt" ]
+  [ -z "$(git -C "$R32_TMP/repository" status --porcelain --untracked-files=all)" ]
+  if review_reserve_run_directory "$runs_root" "$runs_identity" "$explicit_id" 1 73 2>/dev/null; then
+    exit 1
+  fi
+  [ -f "$first_dir/locked" ] && [ -f "$first_dir/pr-context.json" ]
+  auto_output="$(review_reserve_run_directory "$runs_root" "$runs_identity" 20260729-120001-abcdef0 0 73)"
+  auto_remainder="${auto_output#*$'\n'}"
+  auto_run_id="${auto_remainder%%$'\n'*}"
+  [[ "$auto_run_id" =~ ^20260729-120001-abcdef0[a-f0-9]{8}$ ]]
+); then
+  echo "  PASS  R32.10 — explicit collisions fail closed and internal IDs retry with a bounded discriminator"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R32.10 — reservation collision/discriminator behavioral contract failed"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$R32_TMP"
+
+echo
+echo "== R33: review reservation receipt survives setup and finalizes in a fresh shell =="
+assert_grep "$REVIEW_PR" \
+  'REVIEW_RUN_RESERVATION_RECEIPT' \
+  "R33.1 — setup exports one opaque reservation receipt"
+assert_grep "$REVIEW_PR" \
+  'secure_publish_exact_no_clobber' \
+  "R33.2 — final publication delegates the public exact-name publisher"
+assert_grep "$REVIEW_PR" \
+  'BEGIN review-verdict-final-fence-v1' \
+  "R33.3 — verdict publication is a self-contained fresh-shell fence"
+
+R33_TMP="$(mktemp -d)"
+awk '
+  /^RUN_ID_WAS_EXPLICIT=0$/ { active=1 }
+  active && /^uberdev_command_workspace_prepare / { exit }
+  active { print }
+' "$REVIEW_PR" >"$R33_TMP/setup-reservation.sh"
+awk '
+  /# BEGIN review-verdict-final-fence-v1/ { active=1; next }
+  /# END review-verdict-final-fence-v1/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$R33_TMP/final-verdict.sh"
+
+R33_REPO="$R33_TMP/repository"
+mkdir "$R33_REPO"
+git -C "$R33_REPO" init -q
+git -C "$R33_REPO" config user.email test@example.com
+git -C "$R33_REPO" config user.name Test
+printf 'fixture\n' >"$R33_REPO/README.md"
+git -C "$R33_REPO" add README.md
+git -C "$R33_REPO" commit -qm init
+R33_CALLER_TRAP="$R33_TMP/caller-trap"
+R33_STATE="$R33_TMP/setup-state"
+R33_SETUP_RC=0
+if [ -s "$R33_TMP/setup-reservation.sh" ]; then
+  UBERDEV_RUN_CARRIER_JSON=fixture WORKTREE_ROOT="$R33_REPO" \
+    PR_NUMBER=73 RISK_JSON='[]' RUN_ID=20260729-130000-abcdef01 \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    R33_CALLER_TRAP="$R33_CALLER_TRAP" R33_STATE="$R33_STATE" \
+    bash -c '
+      set -u
+      trap '\''printf caller >"$R33_CALLER_TRAP"'\'' EXIT
+      caller_trap_before="$(trap -p EXIT)"
+      . "$1"
+      [ "$(trap -p EXIT)" = "$caller_trap_before" ] || exit 81
+      printf "%s\n%s\n" "$REVIEW_RUN_RESERVATION_RECEIPT" "$MARKER_DIR" >"$R33_STATE"
+    ' _ "$R33_TMP/setup-reservation.sh" || R33_SETUP_RC=$?
+else
+  R33_SETUP_RC=99
+fi
+if [ "$R33_SETUP_RC" -eq 0 ] && [ -s "$R33_STATE" ] && \
+   [ "$(cat "$R33_CALLER_TRAP" 2>/dev/null)" = caller ]; then
+  R33_RECEIPT="$(sed -n '1p' "$R33_STATE")"
+  R33_MARKER_DIR="$(sed -n '2p' "$R33_STATE")"
+  if [ -n "$R33_RECEIPT" ] && [ -d "$R33_MARKER_DIR" ] && \
+     [ -f "$R33_MARKER_DIR/locked" ] && [ -f "$R33_MARKER_DIR/pr-context.json" ]; then
+    echo "  PASS  R33.4 — shell A exits with receipt, reservation, markers, and caller EXIT trap intact"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R33.4 — shell A lost its receipt, reservation, or markers"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  R33.4 — shell A setup/EXIT-trap contract failed (rc=$R33_SETUP_RC)"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ "${R33_SETUP_RC:-99}" -eq 0 ] && [ -s "$R33_TMP/final-verdict.sh" ]; then
+  R33_FIRST_PAYLOAD='{"pr":73,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+  if REVIEW_RUN_RESERVATION_RECEIPT="$R33_RECEIPT" \
+     AUDIT_JSON_PAYLOAD="$R33_FIRST_PAYLOAD" \
+     UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+     bash "$R33_TMP/final-verdict.sh"; then
+    R33_FIRST_DIGEST="$(python3 -I -B -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$R33_MARKER_DIR/review-pr-verdict.json")"
+    if [ -d "$R33_MARKER_DIR" ] && [ ! -e "$R33_MARKER_DIR/locked" ] && \
+       [ ! -e "$R33_MARKER_DIR/pr-context.json" ]; then
+      echo "  PASS  R33.5 — shell B rehydrates the receipt, publishes, then removes only markers"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  R33.5 — final publication did not preserve directory/remove markers in order"
+      FAIL=$((FAIL + 1))
+    fi
+    if REVIEW_RUN_RESERVATION_RECEIPT="$R33_RECEIPT" \
+       AUDIT_JSON_PAYLOAD='{"pr":99}' \
+       UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+       bash "$R33_TMP/final-verdict.sh" >/dev/null 2>&1; then
+      R33_SECOND_RC=0
+    else
+      R33_SECOND_RC=$?
+    fi
+    R33_SECOND_DIGEST="$(python3 -I -B -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$R33_MARKER_DIR/review-pr-verdict.json")"
+    if [ "$R33_SECOND_RC" -eq 2 ] && [ "$R33_FIRST_DIGEST" = "$R33_SECOND_DIGEST" ]; then
+      echo "  PASS  R33.6 — second shell-B publication refuses and preserves first bytes"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  R33.6 — second publication did not fail closed/preserve first bytes"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo "  FAIL  R33.5 — fresh-shell final fence failed"
+    echo "  FAIL  R33.6 — second-publication contract could not run"
+    FAIL=$((FAIL + 2))
+  fi
+else
+  echo "  FAIL  R33.5 — self-contained final fence is missing"
+  echo "  FAIL  R33.6 — second-publication contract could not run"
+  FAIL=$((FAIL + 2))
+fi
+
+assert_grep "$REVIEW_PR" \
+  'review_abandon_run_reservation.*REVIEW_RUN_RESERVATION_RECEIPT|review_abandon_run_reservation.*reservation_receipt' \
+  "R33.7 — every explicit setup-failure arm abandons through the identity receipt"
+assert_no_grep "$R33_TMP/setup-reservation.sh" \
+  'trap[[:space:]].*EXIT' \
+  "R33.8 — review setup installs no review-owned EXIT trap"
+
+echo
+echo "== R34: review ignore policy is tri-state, exact, and no-clobber =="
+assert_grep "$REVIEW_PR" \
+  'check-ignore.*; then|check-ignore.*$' \
+  "R34.1 — setup executes the effective Git ignore probe"
+assert_grep "$REVIEW_PR" \
+  'case[[:space:]].*IGNORE.*RC|case[[:space:]].*ignore.*rc|0\).*ignored|1\).*install' \
+  "R34.2 — ignore probe distinguishes rc 0, rc 1, and infrastructure errors"
+
+R34_CASES_OK=1
+R34_CASE_NUMBER=0
+run_r34_case() {
+  local name="$1" policy="$2" expect_rc="$3" expect_marker="$4"
+  local repo="$R33_TMP/r34-$name" state="$R33_TMP/r34-$name.state"
+  R34_CASE_NUMBER=$((R34_CASE_NUMBER + 1))
+  mkdir "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  printf 'fixture\n' >"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm init
+  case "$policy" in
+    global)
+      printf '.uberdev/\n' >>"$repo/.git/info/exclude"
+      ;;
+    compatible)
+      mkdir -p "$repo/.uberdev/runs"
+      printf '*\n' >"$repo/.uberdev/runs/.gitignore"
+      ;;
+    incompatible)
+      mkdir -p "$repo/.uberdev/runs"
+      printf 'preserve-me\n' >"$repo/.uberdev/runs/.gitignore"
+      ;;
+    symlink)
+      mkdir -p "$repo/.uberdev/runs"
+      printf 'external\n' >"$R33_TMP/r34-$name.external"
+      ln -s "$R33_TMP/r34-$name.external" "$repo/.uberdev/runs/.gitignore"
+      ;;
+    directory)
+      mkdir -p "$repo/.uberdev/runs/.gitignore"
+      ;;
+  esac
+  set +e
+  UBERDEV_RUN_CARRIER_JSON=fixture WORKTREE_ROOT="$repo" \
+    PR_NUMBER=73 RISK_JSON='[]' RUN_ID="20260729-14000${R34_CASE_NUMBER}-abcdef01" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    R34_POLICY="$policy" R34_STATE="$state" \
+    bash -c '
+      set -u
+      if [ "$R34_POLICY" = infra ] || [ "$R34_POLICY" = race ]; then
+        git() {
+          if [ "${3:-}" = check-ignore ]; then
+            if [ "$R34_POLICY" = race ]; then
+              mkdir -p "$2/.uberdev/runs"
+              printf "racing-bytes\n" >"$2/.uberdev/runs/.gitignore"
+              return 1
+            fi
+            return 2
+          fi
+          command git "$@"
+        }
+      fi
+      . "$1"
+      setup_rc=$?
+      [ "$setup_rc" -eq 0 ] || exit "$setup_rc"
+      printf "%s\n" "$MARKER_DIR" >"$R34_STATE"
+    ' _ "$R33_TMP/setup-reservation.sh"
+  local rc=$?
+  set +e
+  [ "$rc" -eq "$expect_rc" ] || R34_CASES_OK=0
+  local marker=""
+  [ -s "$state" ] && marker="$(cat "$state")"
+  if [ "$expect_marker" = yes ]; then
+    [ -n "$marker" ] && [ -f "$marker/locked" ] || R34_CASES_OK=0
+  else
+    find "$repo/.uberdev/runs" -mindepth 1 -maxdepth 1 -type d \
+      ! -name '.gitignore' -print -quit 2>/dev/null | grep -q . && R34_CASES_OK=0
+  fi
+  case "$policy" in
+    global)
+      [ ! -e "$repo/.uberdev/runs/.gitignore" ] || R34_CASES_OK=0
+      ;;
+    compatible)
+      [ "$(cat "$repo/.uberdev/runs/.gitignore")" = '*' ] || R34_CASES_OK=0
+      ;;
+    incompatible)
+      [ "$(cat "$repo/.uberdev/runs/.gitignore")" = preserve-me ] || R34_CASES_OK=0
+      ;;
+    symlink)
+      [ -L "$repo/.uberdev/runs/.gitignore" ] && \
+        [ "$(cat "$R33_TMP/r34-$name.external")" = external ] || R34_CASES_OK=0
+      ;;
+    directory)
+      [ -d "$repo/.uberdev/runs/.gitignore" ] || R34_CASES_OK=0
+      ;;
+    race)
+      [ "$(cat "$repo/.uberdev/runs/.gitignore")" = racing-bytes ] || R34_CASES_OK=0
+      ;;
+  esac
+}
+
+if [ -s "$R33_TMP/setup-reservation.sh" ]; then
+  run_r34_case global global 0 yes
+  run_r34_case compatible compatible 0 yes
+  run_r34_case incompatible incompatible 2 no
+  run_r34_case symlink symlink 2 no
+  run_r34_case directory directory 2 no
+  run_r34_case infra infra 2 no
+  run_r34_case race race 2 no
+else
+  R34_CASES_OK=0
+fi
+if [ "$R34_CASES_OK" -eq 1 ]; then
+  echo "  PASS  R34.3 — global/compatible/incompatible/symlink/directory/infra/race cases preserve policy and markers"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R34.3 — ignore tri-state/no-clobber behavioral matrix failed"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== R35: lexical run-root ancestors reject links/swaps without external mutation =="
+R35_OK=1
+for component in uberdev runs; do
+  repo="$R33_TMP/r35-$component"
+  outside="$R33_TMP/r35-$component-outside"
+  mkdir "$repo" "$outside"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  printf 'fixture\n' >"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm init
+  if [ "$component" = uberdev ]; then
+    ln -s "$outside" "$repo/.uberdev"
+  else
+    mkdir "$repo/.uberdev"
+    ln -s "$outside" "$repo/.uberdev/runs"
+  fi
+  if UBERDEV_RUN_CARRIER_JSON=fixture WORKTREE_ROOT="$repo" \
+     PR_NUMBER=73 RISK_JSON='[]' RUN_ID="20260729-150000-abcdef01" \
+     UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+     bash "$R33_TMP/setup-reservation.sh" >/dev/null 2>&1; then
+    R35_OK=0
+  fi
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] || R35_OK=0
+done
+if [ "$R35_OK" -eq 1 ]; then
+  echo "  PASS  R35 — .uberdev/runs lexical-link rejection returns nonzero with zero external mutation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R35 — linked run-root ancestor was followed or externally mutated"
+  FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$R33_TMP"
 
 echo
 echo "== Summary =="

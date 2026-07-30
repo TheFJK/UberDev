@@ -59,7 +59,7 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `TRUST_ANCHOR_ENUM` | `reviewDecision_approved`, `uberdev_review_trail`, `bypass_with_waiver` (deprecated; never emitted post-v0.17.0) | Phase 1.4 (audit-log `gate_pass.data.trust_anchor`) |
 | `GATE_FAIL_REASON_ENUM` | **trust-resolution reasons** (PATH_1 / PATH_2): `review_decision_not_approved`, `trust_trail_missing`, `trust_trail_stale_sha`, `trust_trail_label_missing`, `trust_trail_trailer_missing`, `trust_trail_json_missing`, `trust_trail_agent_invalid_input`, `trust_trail_json_sha_mismatch`. **Pre-condition gate reasons** (Step 1.4 pre-flight, evaluated before trust resolution): `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`. **Infrastructure failure reasons** (Step 1.4 lib-call failure): `pr_view_unreachable` — emitted when the pr-view projection lib call exits non-zero; the PR is skipped, the queue continues, and a discovery-gh-failed audit event is emitted alongside. Total 13 members — the eight trust-resolution reasons are subject to M37's enum-row count assertion; the four pre-condition reasons are emitted by Step 1.4 pre-flight gates that fire regardless of trust path; the one infrastructure failure reason is emitted when the lib call itself fails. | Phase 1.4 (audit-log `gate_fail.data.reason`) |
 | `GATE_FAIL_REASON_TRUST_TRAIL_JSON_SHA_MISMATCH` | `trust_trail_json_sha_mismatch` (8th member of `GATE_FAIL_REASON_ENUM`) | Phase 1.4 PATH_2 sub-condition (d) caller mapping for **shape-malformed** cases ONLY post-#78 (run-id regex fail, JSON parse fail, missing-or-non-40-hex `"sha"` field); the strict `"sha" == headRefOid` equality check that historically also emitted this reason is RETIRED post-#78 in favour of (c)'s cumulative-diff heuristic. Enum row is preserved for audit-log compatibility (deprecation pattern). Audit-log `gate_fail.data.reason` |
-| `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` | `input_malformed` (immediate gate_fail; no retry), `trailer_sha_not_in_local_clone` (one bounded `git fetch --prune` + re-dispatch with `data.retry_attempt=1`; second INVALID is terminal), `phase2_5_blocker_deferred` (RFC 0002 §3.6 — Phase 2.5 halted with blocker findings filed; no retry; user resolves issues OR re-runs `/merge` with `--accept-blocker-deferred`), `phase2_5_override_unacknowledged` (RFC 0002 §3.6 — operator selected emit-GREEN-on-blocker-deferred during `/review-pr`; no retry; user re-runs `/merge` with `--i-know-what-im-doing` to land) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.subreason` when `data.choice="INVALID"` |
+| `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM` | `input_malformed` (immediate gate_fail; no retry), `trailer_sha_not_in_local_clone` (one bounded `git fetch --prune` + re-dispatch with `data.retry_attempt=1`; second INVALID is terminal), `structural_probe_failed` (unexpected non-zero structural command exit; immediate gate_fail, no retry), `phase2_5_blocker_deferred` (RFC 0002 §3.6 — Phase 2.5 halted with blocker findings filed; no retry; user resolves issues OR re-runs `/merge` with `--accept-blocker-deferred`), `phase2_5_override_unacknowledged` (RFC 0002 §3.6 — operator selected emit-GREEN-on-blocker-deferred during `/review-pr`; no retry; user re-runs `/merge` with `--i-know-what-im-doing` to land) | Phase 1.4 PATH_2 sub-condition (c); audit-log `trust_trail_agent_decision.data.subreason` when `data.choice="INVALID"` |
 | `ACCEPT_BLOCKER_DEFERRED_FLAG` | `--accept-blocker-deferred` (CLI flag; opt-in override of the Phase 2.5 blocker-halt INVALID gate per RFC 0002 §3.6). No env-var equivalent — opt-in is per-invocation, never sticky. | Phase 1 (arg parse), Phase 1.4 PATH_2 (c) dispatch input |
 | `ACCEPT_CRITICAL_DEFERRED_FLAG` | `--accept-critical-deferred` (CLI flag; opt-in override of the Phase 2.5 critical-deferred STALE gate per RFC 0002 §3.6). No env-var equivalent. | Phase 1 (arg parse), Phase 1.4 PATH_2 (c) dispatch input |
 | `I_KNOW_WHAT_IM_DOING_FLAG` | `--i-know-what-im-doing` (CLI flag; required to land a PR whose `/review-pr` run selected the emit-GREEN-on-blocker-deferred override per RFC 0002 §3.5). Intentionally verbose to discourage muscle-memory use. No env-var equivalent. | Phase 1 (arg parse), Phase 1.4 PATH_2 (c) dispatch input |
@@ -96,7 +96,7 @@ D15. Field-level extensions: gate_pass.data.trust_anchor ∈ TRUST_ANCHOR_ENUM; 
 
 **+2 auto-review members (#89):** `auto_review_dispatched` (`data.pr: int`, `data.reason_triggering: string ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`) — fires before the synchronous `Skill("uberdev:review-pr")` call; always paired with `auto_review_returned` (`data.pr: int`, `data.outcome: string ∈ {green, blocked, refused_non_green}`, `data.duration_ms: int`) — fires after `Skill()` returns or times out. Cap: 1 dispatch per `(pr_number, run_id)` per `/merge` run (`AUTO_REVIEW_DISPATCH_CAP`).
 
-Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure` (`data.jq_error: string` ≤200 chars; `data.audit_path: string`). Fires when the audit JSON is malformed (detected via `jq empty` non-zero exit — version-agnostic across jq 1.6/1.7/1.8). Fail-open: PHASE2_5_PRESENT stays false, run continues — the event is auditable but not a halt.
+Plus 2 phase2_5-observability members (#116): `audit_json_phase2_5_parse_failure` (`data.jq_error: string` ≤200 chars; `data.audit_path: string`). Fires when the audit JSON is malformed (detected via `jq empty` non-zero exit — version-agnostic across jq 1.6/1.7/1.8). The caller sets `PHASE2_5_AUDIT_STATE=malformed`; the evaluator returns `INVALID / input_malformed` for that PR, while the queue continues — the event is auditable but not a run-wide halt.
 
 And `halt_tool_unavailable` (`data.tool: string`) — fires from `commands/review-pr.md` Step 6b.1 when `ToolSearch` fails to load the named tool (e.g. `AskUserQuestion`); `/review-pr` aborts (exit 1) rather than silently auto-pick a Phase 2.5 halt-choice.
 
@@ -444,12 +444,13 @@ a. `"uberdev-approved" ∈ labels` (see `UBERDEV_APPROVED_LABEL` constant) — e
 b. The most-recent commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`.
 c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. Dispatch in a single-message `Task("trust-trail-evaluator")` with inputs `pr_number=<N>`, `head_ref_oid=<live gh pr view --json headRefOid>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
 
-   **Phase 2.5 inputs (RFC 0002 §3.6, added v0.26.0).** Before dispatch, parse the Phase 2.5 block from the same `.uberdev/runs/<run-id>/review-pr-verdict.json` audit file inspected by sub-condition (d). First **discover the path** by mirroring sub-condition (d)'s glob enumeration (single source of truth — the prose below); then parse:
+   **Phase 2.5 inputs (RFC 0002 §3.6, added v0.26.0).** Before dispatch, discover exactly one typed artifact identity and parse its Phase 2.5 block. Sub-condition (d) reuses that selection; it never performs a second discovery pass.
 
    ```bash
-   # Step (c.0) — discover $AUDIT_JSON_PATH (mirrors sub-condition (d) prose below).
+   # Step (c.0) — capture one closed $AUDIT_VERDICT_RECEIPT. Sub-condition
+   # (d) consumes only controller-resident fields from this receipt.
    # Delegated to `discover_review_verdict_json` in lib/discover.sh (#303) — a
-   # find-based helper covering the canonical root layout AND every
+   # find -H helper covering the canonical root layout AND every
    # worktree-local mirror declared by `solve-pipeline/SKILL.md` and the
    # generic `using-git-worktrees/SKILL.md` (the four documented layouts; the
    # lib function header is the canonical enumeration). The previous inline
@@ -463,70 +464,148 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
    # from the main checkout but the PR was produced by a worktree-based
    # /solve|/turbo|subagent-driven-dev|executing-plans|brainstorm-Phase-4,
    # the audit JSON lives inside the worktree's gitignored `.uberdev/` —
-   # invisible to a root-only search. The helper filters by .pr == PR number,
-   # validates <run-id> against RUN_ID_REGEX before the candidate participates
-   # in selection (D4/F8 path-traversal hardening; the basename-of-dirname
-   # projection works on ALL four layouts because the prefix segments are
-   # never concatenated from untrusted input), and picks the lex-greatest
-   # <run-id> on multi-match.
+   # invisible to a root-only search. The helper follows a symlink only when
+   # it is one of the four command-line roots (including a root targeting an
+   # external directory), binds validated relative suffixes beneath that
+   # captured physical root, and never follows descendant symlinks. Root
+   # identity is checked before and after enumeration/capture.
+   #
+   # Candidate bytes are captured once with run_manifest.secure_capture_regular.
+   # The helper validates RUN_ID_REGEX, integer `.pr`, top-level lowercase
+   # 40-hex `.sha`, and the entire Phase 2.5 tuple from those same bytes. It
+   # ranks only the YYYYMMDD-HHMMSS timestamp prefix. Expected-PR artifacts
+   # tied at the selected timestamp must have identical captured bytes. Known
+   # other-PR artifacts are ignored; an older unknown is harmless, a newer or
+   # equal unknown is indeterminate, and without a target any unknown is
+   # indeterminate. The winner is published with secure_publish_captured and
+   # immediately digest-recaptured before one closed receipt is returned.
+   # Typed return contract: FOUND=0, exhaustive ABSENT=1, INDETERMINATE=2.
    if [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/merge-pipeline/lib/discover.sh" ]; then
      . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/merge-pipeline/lib/discover.sh"
    else
      echo "error: lib/discover.sh not found at ${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/merge-pipeline/lib/" >&2
      exit 1
    fi
-   AUDIT_JSON_PATH="$(discover_review_verdict_json "$PR_NUMBER")"
-   # AUDIT_JSON_PATH is now the most-recent verdict JSON for this PR, or empty
-   # if none exists (fresh clone / pre-v0.26.0 / corroborator unavailable).
 
-   PHASE2_5_PRESENT=false; PHASE2_5_HALTED=false; PHASE2_5_BLOCKER_COUNT=0; PHASE2_5_CRITICAL_COUNT=0; PHASE2_5_OVERRIDE_REASON=null
-   if [ -n "$AUDIT_JSON_PATH" ] && [ -r "$AUDIT_JSON_PATH" ]; then
-     # jq 1.8.x returns rc=5 for parse errors and rc=4 for absent results with
-     # `-e`, while earlier versions used rc=2 / rc=1 — use a two-step
-     # parse-then-extract so the audit emission does not depend on jq version.
-     JQ_STDERR=$(jq empty "$AUDIT_JSON_PATH" 2>&1 >/dev/null)
-     JQ_RC=$?
-     if [ "$JQ_RC" -ne 0 ]; then
-       # Malformed JSON. Emit new audit event; stay fail-open
-       # (PHASE2_5_PRESENT=false → caller falls through to legacy-audit
-       # STALE branch in trust-trail-evaluator Step 1.5).
-       JQ_STDERR_TRUNC=$(printf '%s' "$JQ_STDERR" | head -c 200)
-       audit audit_json_phase2_5_parse_failure \
-         data.jq_error="$JQ_STDERR_TRUNC" \
-         data.audit_path="$AUDIT_JSON_PATH"
-       PHASE2_5_PRESENT=false
+   # Composed audit identity: absent (exhaustive no-match), legacy (captured
+   # bytes predate phase2_5), current (captured valid phase2_5 block), malformed
+   # (closed receipt extraction failure), or indeterminate (discovery/capture
+   # could not prove identity/absence). Absent skips only Phase 2.5 telemetry;
+   # structural proof still runs. Malformed and indeterminate fail closed as
+   # INVALID/input_malformed.
+   PHASE2_5_AUDIT_STATE=absent; PHASE2_5_HALTED=false; PHASE2_5_BLOCKER_COUNT=0; PHASE2_5_CRITICAL_COUNT=0; PHASE2_5_OVERRIDE_REASON=null
+   AUDIT_VERDICT_RECEIPT=""; AUDIT_ARTIFACT_SHA=""; AUDIT_CAPTURE_CLEANED=false; DISCOVERY_RC=2
+   DISCOVERY_STATE=indeterminate; DISCOVERY_STDERR=""
+   # A temporary-allocation failure is indeterminate. It can never collapse
+   # into the exhaustive-absence branch.
+   if DISCOVERY_STDERR="$(mktemp)"; then
+     if AUDIT_VERDICT_RECEIPT="$(discover_review_verdict_json "$PR_NUMBER" 2>"$DISCOVERY_STDERR")"; then
+       DISCOVERY_RC=0
      else
-       # JSON parses. Now check phase2_5 presence on well-formed input.
-       if jq -e '.phases.phase2_5 // empty' "$AUDIT_JSON_PATH" >/dev/null 2>&1; then
-         PHASE2_5_PRESENT=true
-         # Single jq call emits all four fields tab-separated; defaults preserved
-         # per-field (// "false", // 0, // "null") so missing fields fall back
-         # identically to the prior 4× sequential probes.
-         read -r PHASE2_5_HALTED PHASE2_5_BLOCKER_COUNT PHASE2_5_CRITICAL_COUNT PHASE2_5_OVERRIDE_REASON <<< "$(jq -r '[.phases.phase2_5.halted // "false", .phases.phase2_5.by_severity.blocker // 0, .phases.phase2_5.by_severity.critical // 0, .phases.phase2_5.override_reason // "null"] | @tsv' "$AUDIT_JSON_PATH")"
+       DISCOVERY_RC=$?
+     fi
+     DISCOVERY_STATE="$(review_verdict_discovery_state "$DISCOVERY_RC")"
+   else
+     DISCOVERY_RC=2
+     DISCOVERY_STATE=indeterminate
+     printf 'warning: audit discovery temporary allocation failed for PR #%s; treating as indeterminate\n' \
+       "$PR_NUMBER" >&2
+   fi
+
+   case "$DISCOVERY_STATE" in
+     found)
+       CLOSED_RECEIPT=""
+       if CLOSED_RECEIPT="$(recapture_review_verdict_snapshot "$AUDIT_VERDICT_RECEIPT" 2>>"$DISCOVERY_STDERR")" \
+          && [ "$CLOSED_RECEIPT" = "$AUDIT_VERDICT_RECEIPT" ]; then
+         # Extract receipt authority + SHA + Phase2.5 in one complete TSV. The
+         # source artifact pathname is absent by construction.
+         if RECEIPT_FIELDS="$(jq -er '
+           [
+             .snapshot_path,
+             .snapshot_sha256,
+             (.snapshot_identity | tojson),
+             .artifact_sha,
+             .audit_state,
+             (.phase2_5_halted | tostring),
+             (.phase2_5_blocker_count | tostring),
+             (.phase2_5_critical_count | tostring),
+             (.phase2_5_override_reason // "null")
+           ] | @tsv
+         ' <<<"$CLOSED_RECEIPT" 2>>"$DISCOVERY_STDERR")"; then
+           AUDIT_SNAPSHOT_PATH=""; AUDIT_SNAPSHOT_SHA256=""; AUDIT_SNAPSHOT_IDENTITY=""
+           PARSED_ARTIFACT_SHA=""; PARSED_AUDIT_STATE=""; PARSED_HALTED=""
+           PARSED_BLOCKERS=""; PARSED_CRITICALS=""; PARSED_OVERRIDE=""
+           IFS="$(printf '\t')" read -r \
+             AUDIT_SNAPSHOT_PATH AUDIT_SNAPSHOT_SHA256 AUDIT_SNAPSHOT_IDENTITY \
+             PARSED_ARTIFACT_SHA PARSED_AUDIT_STATE PARSED_HALTED \
+             PARSED_BLOCKERS PARSED_CRITICALS PARSED_OVERRIDE <<< "$RECEIPT_FIELDS"
+           if cleanup_review_verdict_snapshot "$AUDIT_VERDICT_RECEIPT" 2>>"$DISCOVERY_STDERR"; then
+             AUDIT_CAPTURE_CLEANED=true
+             # Authority is now closed controller state. Assign only after the
+             # complete extraction AND stable-carrier cleanup both succeed.
+             AUDIT_ARTIFACT_SHA="$PARSED_ARTIFACT_SHA"
+             PHASE2_5_AUDIT_STATE="$PARSED_AUDIT_STATE"
+             PHASE2_5_HALTED="$PARSED_HALTED"
+             PHASE2_5_BLOCKER_COUNT="$PARSED_BLOCKERS"
+             PHASE2_5_CRITICAL_COUNT="$PARSED_CRITICALS"
+             PHASE2_5_OVERRIDE_REASON="$PARSED_OVERRIDE"
+           else
+             PHASE2_5_AUDIT_STATE=indeterminate
+           fi
+         else
+           PHASE2_5_AUDIT_STATE=malformed
+         fi
        else
-         # phase2_5 block absent — legacy / pre-v0.26.0 audit. No new audit
-         # event (current behaviour preserved).
-         PHASE2_5_PRESENT=false
+         PHASE2_5_AUDIT_STATE=indeterminate
        fi
+       ;;
+     absent)
+       PHASE2_5_AUDIT_STATE=absent
+       ;;
+     indeterminate|*)
+       PHASE2_5_AUDIT_STATE=indeterminate
+       ;;
+   esac
+
+   # Found receipts own one private carrier. Clean it even when receipt
+   # extraction failed; a cleanup identity/digest mismatch is indeterminate.
+   if [ "$DISCOVERY_STATE" = "found" ] && [ "$AUDIT_CAPTURE_CLEANED" != "true" ]; then
+     if cleanup_review_verdict_snapshot "$AUDIT_VERDICT_RECEIPT" 2>>"$DISCOVERY_STDERR"; then
+       AUDIT_CAPTURE_CLEANED=true
+     else
+       PHASE2_5_AUDIT_STATE=indeterminate
      fi
    fi
+
+   if [ "$PHASE2_5_AUDIT_STATE" = "malformed" ]; then
+     DISCOVERY_STDERR_TRUNC=$(head -c 200 "$DISCOVERY_STDERR" 2>/dev/null)
+     audit audit_json_phase2_5_parse_failure \
+       data.jq_error="${DISCOVERY_STDERR_TRUNC:-closed receipt extraction failed}" \
+       data.audit_path="<stable-capture>"
+   elif [ "$PHASE2_5_AUDIT_STATE" = "indeterminate" ]; then
+     DISCOVERY_STDERR_TRUNC=$(head -c 200 "$DISCOVERY_STDERR" 2>/dev/null)
+     printf 'warning: audit discovery indeterminate for PR #%s: %s\n' \
+       "$PR_NUMBER" "$DISCOVERY_STDERR_TRUNC" >&2
+   fi
+   [ -z "$DISCOVERY_STDERR" ] || rm -f "$DISCOVERY_STDERR"
    ```
 
-   Pass these alongside the existing inputs in the dispatch prompt as: `phase2_5_present=<bool>`, `phase2_5_halted=<bool>`, `phase2_5_blocker_count=<int>`, `phase2_5_critical_count=<int>`, `phase2_5_override_reason=<string|null>`, `accept_blocker_deferred_flag=<true|false>` (from `ACCEPT_BLOCKER_DEFERRED_FLAG` parse), `accept_critical_deferred_flag=<true|false>` (from `ACCEPT_CRITICAL_DEFERRED_FLAG` parse), `i_know_what_im_doing_flag=<true|false>` (from `I_KNOW_WHAT_IM_DOING_FLAG` parse). The agent evaluates the Phase 2.5 gate in its Step 1.5 before the structural primitives (see `agents/trust-trail-evaluator.md` Process §1.5). The agent inspects ancestor + diff-empty + log-empty primitives and returns a verdict ∈ `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`) plus rationale plus `signals_inspected` list. The caller maps verdicts to events as follows (canonical reference; the agent file's return-contract prose mirrors this word-for-word):
+   Pass these alongside the existing inputs in the dispatch prompt as: `audit_state=<absent|legacy|current|malformed|indeterminate>` (from `PHASE2_5_AUDIT_STATE`), `phase2_5_halted=<bool>`, `phase2_5_blocker_count=<int>`, `phase2_5_critical_count=<int>`, `phase2_5_override_reason=<string|null>`, `accept_blocker_deferred_flag=<true|false>` (from `ACCEPT_BLOCKER_DEFERRED_FLAG` parse), `accept_critical_deferred_flag=<true|false>` (from `ACCEPT_CRITICAL_DEFERRED_FLAG` parse), `i_know_what_im_doing_flag=<true|false>` (from `I_KNOW_WHAT_IM_DOING_FLAG` parse). For `audit_state=absent`, the agent skips only the Phase 2.5 telemetry gate and still runs the immutable SHA/ancestor/diff/log structural proof; only a structural `PASS` reaches sub-condition (d), which emits the existing absent-JSON advisory and `gate_pass`. `legacy` remains `STALE`; `current` evaluates the existing Phase 2.5 gates; `malformed`, `indeterminate`, and any unknown state defensively handled by the agent map to `INVALID / input_malformed`. The agent evaluates this state contract in its Step 1.5 before the structural primitives (see `agents/trust-trail-evaluator.md` Process §1.5). The agent inspects ancestor + diff-empty + log-empty primitives and returns a verdict ∈ `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`) plus rationale plus `signals_inspected` list. The caller maps verdicts to events as follows (canonical reference; the agent file's return-contract prose mirrors this word-for-word):
 
       - `PASS` → emit `trust_trail_agent_decision` with `data.choice="PASS"`, `data.retry_attempt=0`, then `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
       - `STALE` → emit `trust_trail_agent_decision` with `data.choice="STALE"`, `data.retry_attempt=0`, then `gate_fail` with `data.reason="trust_trail_stale_sha"` (existing enum value preserved per M37). Diagnostic: agent's rationale, no `--bypass-protections` reference.
-      - `INVALID / input_malformed` (e.g., trailer regex parse failure, label query failure, malformed JSON in audit corroborator) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="input_malformed"`, `data.retry_attempt=0`, then `gate_fail` immediately with `data.reason="trust_trail_agent_invalid_input"` (NEW `GATE_FAIL_REASON_ENUM` member; see Constants `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT`). No retry. Diagnostic: agent's rationale.
+      - `INVALID / input_malformed` (e.g., trailer regex parse failure, label query failure, or `audit_state=malformed` / `indeterminate` / unknown) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="input_malformed"`, `data.retry_attempt=0`, then `gate_fail` immediately with `data.reason="trust_trail_agent_invalid_input"` (NEW `GATE_FAIL_REASON_ENUM` member; see Constants `GATE_FAIL_REASON_TRUST_TRAIL_AGENT_INVALID_INPUT`). No retry. Diagnostic: agent's rationale.
+      - `INVALID / structural_probe_failed` (an unexpected `git merge-base`, `git diff`, or `git log` exit) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="structural_probe_failed"`, `data.retry_attempt=0`, then `gate_fail` immediately with `data.reason="trust_trail_agent_invalid_input"`. No retry. Diagnostic: surface the failed primitive and exit code; never infer a trust verdict from partial stdout.
       - `INVALID / trailer_sha_not_in_local_clone` (the exit-128 case from `git merge-base --is-ancestor` when the trailer SHA is not in the local clone — common after a fresh clone or when an old `/review-pr` trailer points at a commit that's been GC'd locally) → emit `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason="trailer_sha_not_in_local_clone"`, `data.retry_attempt=0`. Caller runs ONE bounded `git fetch --prune origin <branch>` then re-dispatches the trust-trail-evaluator agent in a single-message `Task()`. **Fetch-failure handling:** if the `git fetch` itself exits non-zero (network error, auth failure, branch deleted from origin, rate limit), the caller emits one stderr line `warning: git fetch origin <branch> failed (exit <N>); the trust-trail re-dispatch will run against the existing local clone and may return INVALID — verify network and git credentials, then re-run /merge`, records an `error` audit event with `data.reason="git_fetch_failed"` `data.branch=<branch>` `data.exit_code=<N>`, and proceeds to re-dispatch unchanged (the autopilot contract continues; the queue does not halt). Emit `trust_trail_agent_decision` with `data.retry_attempt=1` for the second invocation. If the second dispatch returns any verdict other than `PASS`, `gate_fail` with the appropriate reason: a second `INVALID` (any subreason) maps to `data.reason="trust_trail_agent_invalid_input"`; `STALE` / `FORCE_PUSHED` map to `data.reason="trust_trail_stale_sha"` per the rows above. The retry is bounded at 1 — never recursive — mirroring Phase 3.3v's max-1-retry policy.
       - `FORCE_PUSHED` → emit `trust_trail_agent_decision` with `data.choice="FORCE_PUSHED"`, `data.retry_attempt=0`, then `gate_fail` with `data.reason="trust_trail_stale_sha"`. Diagnostic: agent's rationale.
 
       Any verdict from (c) other than `PASS` short-circuits sub-condition (d): the caller emits `gate_fail` immediately and does NOT evaluate (d). (d) is only checked when (c) returned `PASS`.
 
-d. ∃ a file matching `.uberdev/runs/<run-id>/review-pr-verdict.json` **whose top-level `.pr` integer field equals the current PR number `<N>`** is **corroborating-only** — the JSON is local-only debug telemetry per D1 and `.uberdev/` is gitignored, so its absence on a fresh clone is by design (the trailer + (c) agent verdict are the load-bearing trust artifacts). The check is presence + shape; strict `"sha" == headRefOid` is RETIRED post-#78 — sub-condition (c) already does tamper detection via the trust-trail-evaluator's cumulative-diff heuristic, and (d) gating harder than (c) contradicted the fast-forward-fixup tolerance documented immediately below at "Honest fast-forward fixup commits..." (see issue #78). Two evaluation paths:
-   - **JSON present (filtered by `.pr == <N>`).** Glob the canonical `.uberdev/runs/*/review-pr-verdict.json` AND every worktree-local mirror path declared by the worktree-creating skills: `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`/solve` / `/turbo` convention — `solve-pipeline/SKILL.md`), `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` preferred hidden convention), and `worktrees/*/.uberdev/runs/*/review-pr-verdict.json` (`using-git-worktrees` alternate visible convention). The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is NOT globbed (out of scope — requires runtime `$HOME` resolution; the writer-side path-anchoring follow-up tracks this). The `.uberdev/` directory is gitignored and per-worktree, so when `/merge` runs from the main checkout but the PR was produced by a worktree-based `/solve` / `/turbo` / `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 run, the audit JSON lives inside that worktree — see `discover_review_verdict_json` in `lib/discover.sh` for the canonical find-based enumeration (Step (c.0) calls it; #303 replaced the inline `compgen` chain). Parse each match, retain only those whose top-level `.pr` integer field equals `<N>`; if multiple match, take the one with the lex-greatest `<run-id>` (most recent — `<run-id>` format `YYYYMMDD-HHMMSS-<short-sha>` lex-sorts identically to chronological order; the tie-break is path-layout-agnostic). Validate that `<run-id>` against `RUN_ID_REGEX` (D4, F8 path-traversal hardening) BEFORE any path concatenation; the `basename "$(dirname "$f")"` projection works identically on all four layouts because the prefix segments are never concatenated from untrusted input. On run-id regex fail, JSON parse fail, or missing/non-40-hex `"sha"` field: emit `gate_fail` with `data.reason="trust_trail_json_sha_mismatch"` (the reason name is preserved post-#78 for audit-log compatibility but its scope is narrowed to **shape-malformed only** — the SHA equality check is no longer performed). On shape OK: proceed to `gate_pass`. **No equality check against `headRefOid`** — the JSON's role is corroborator-only; (c) owns tamper detection.
-   - **JSON absent for this PR.** None of the four glob layouts (`.uberdev/runs/`, `.claude/worktrees/*/.uberdev/runs/`, `.worktrees/*/.uberdev/runs/`, `worktrees/*/.uberdev/runs/`) has any `review-pr-verdict.json` with top-level `.pr == <N>` (any of those directories may contain JSONs for other PRs in the same repo — those are ignored, NOT compared against this PR's `headRefOid`). Emit one `error` audit event with `data.reason="trust_trail_json_absent"` `data.pr=<N>`, append a one-line advisory to the run summary (`audit JSON absent for PR <N> (fresh clone — corroborator unavailable; trailer + agent verdict are load-bearing)`), and emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. The queue continues; no halt.
+d. The artifact **whose top-level `.pr` integer field equals the current PR number `<N>`** is **corroborating-only** — the JSON is local-only debug telemetry per D1 and `.uberdev/` is gitignored, so its absence on a fresh clone is by design (the trailer + (c) agent verdict are the load-bearing trust artifacts). This sub-condition MUST reuse only the closed controller state produced in Step (c.0): `DISCOVERY_STATE`, `PHASE2_5_AUDIT_STATE`, and cached `AUDIT_ARTIFACT_SHA`. It must not reopen the selected source pathname, reopen the snapshot carrier, rediscover, re-rank, or parse artifact JSON again. The canonical helper's search surface remains `.uberdev/runs/*/review-pr-verdict.json`, `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json`, `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json`, and `worktrees/*/.uberdev/runs/*/review-pr-verdict.json`. It validates `RUN_ID_REGEX` before identity reads, accepts only integer `.pr`, and ranks by the timestamp prefix only. Expected-PR artifacts tied at the selected timestamp are accepted only when their securely captured bytes are identical. Valid artifacts for other PRs are ignored. Older unknown identity is harmless; newer/equal unknown identity is indeterminate. The check here is presence + cached shape; strict `"sha" == headRefOid` is RETIRED post-#78 — sub-condition (c) already does tamper detection via the trust-trail-evaluator's cumulative-diff heuristic, and (d) gating harder than (c) contradicted the fast-forward-fixup tolerance documented immediately below at "Honest fast-forward fixup commits..." (see issue #78). Two evaluation paths:
+   - **JSON present (typed discovery FOUND=0).** Step (c.0) already validated the expected PR, top-level lowercase 40-hex SHA, Phase 2.5 fields, snapshot digest, and snapshot identity from one byte capture, then cleaned the private carrier. Use cached `AUDIT_ARTIFACT_SHA`; do not execute `jq`, the legacy path-taking parser, or any file read in this sub-condition. A missing/non-40-hex cached value is an impossible closed-receipt invariant break and emits `gate_fail` with `data.reason="trust_trail_json_sha_mismatch"` (the reason name is preserved post-#78 for audit-log compatibility but its scope is narrowed to **shape-malformed only**). On shape OK: proceed to `gate_pass`. **No equality check against `headRefOid`** — the JSON's role is corroborator-only; (c) owns tamper detection.
+   - **JSON absent for this PR (typed discovery ABSENT=1).** The single exhaustive Step (c.0) scan found no valid target artifact across the four helper-owned layouts; artifacts with valid integer identities for other PRs do not change this result. Emit one `error` audit event with `data.reason="trust_trail_json_absent"` `data.pr=<N>`, append a one-line advisory to the run summary (`audit JSON absent for PR <N> (fresh clone — corroborator unavailable; trailer + agent verdict are load-bearing)`), and emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. The queue continues; no halt. `malformed` and `indeterminate` never reach (d), because the evaluator has already returned `INVALID / input_malformed`.
 
-   **Old `data.reason="trust_trail_json_missing"` is RETIRED** post-#52 — the value remains declared in `GATE_FAIL_REASON_ENUM` for historical audit-log compatibility but is NEVER emitted (deprecation pattern; mirrors `admin_bypass`/`waiver_recorded`). **The strict `"sha" == headRefOid` equality check is RETIRED** post-#78 — `data.reason="trust_trail_json_sha_mismatch"` is still emitted for shape failures (run-id regex / JSON parse / missing-or-malformed `sha` field) but no longer for SHA-equality mismatches; tamper detection is fully delegated to sub-condition (c) via the trust-trail-evaluator agent's cumulative-diff heuristic. This eliminates the (c)/(d) contradiction where empty-diff fast-forward fixups (or sibling-equivalent `git commit --amend`) PASSed (c) but FAILed (d), gating valid trust trails.
+   **Old `data.reason="trust_trail_json_missing"` is RETIRED** post-#52 — the value remains declared in `GATE_FAIL_REASON_ENUM` for historical audit-log compatibility but is NEVER emitted (deprecation pattern; mirrors `admin_bypass`/`waiver_recorded`). **The strict `"sha" == headRefOid` equality check is RETIRED** post-#78 — `data.reason="trust_trail_json_sha_mismatch"` is still emitted for an impossible missing-or-malformed cached `AUDIT_ARTIFACT_SHA` (a shape failure only) but no longer for SHA-equality mismatches. Invalid run-id candidates are ignored before identity reads; JSON/identity/root/capture failures become `indeterminate` or `malformed` in (c.0) and never reach (d). Tamper detection is fully delegated to sub-condition (c) via the trust-trail-evaluator agent's cumulative-diff heuristic. This eliminates both the mutable-path TOCTOU and the (c)/(d) contradiction where empty-diff fast-forward fixups (or sibling-equivalent `git commit --amend`) PASSed (c) but FAILed (d), gating valid trust trails.
 
 On all four sub-conditions met: emit `gate_pass` with `data.trust_anchor="uberdev_review_trail"`. Proceed.
 
@@ -921,6 +1000,7 @@ done
 | dependency cycle (Phase 2.1) | break edges, fall back to createdAt order; emit cycle path to stderr | continues |
 | local pull non-FF (Phase 4.2) | auto-rebase local onto origin; on rebase conflict, abort rebase and surface in summary | continues |
 | `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
+| `trust_trail_agent_decision` returns `INVALID / structural_probe_failed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; report the failed primitive and exit code; no retry; PR excluded from merge set | continues |
 | `trust_trail_agent_decision` returns `INVALID / trailer_sha_not_in_local_clone` (Phase 1.4 PATH_2 (c)) | One bounded `git fetch --prune origin <branch>` + re-dispatch (max retry=1); persistent INVALID → `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `pr_view_projection` lib call failure (Step 1.4 — gh-or-jq exit non-zero, e.g., network / auth / rate-limit) | emit `discovery_gh_failed` (step="1.4") + `gate_fail` with `data.reason="pr_view_unreachable"`; PR excluded from merge set | continues |
 | Auto-review returned `blocked` (Phase 1.4.5; `outcome="blocked"`) | `/review-pr` returned exit 1 (REVISIONS_REQUIRED / REJECT / Phase 3 stop-condition escaped past `--turbo`). Emit `auto_review_returned` with `outcome: blocked`; exclude PR; run-summary line: `"PR #${PR}: auto-review returned blocked; see .uberdev/runs/<run-id>/review-pr-verdict.json"`; queue continues | continues |
@@ -1061,14 +1141,14 @@ The same release snippet runs at every documented post-acquisition early exit (S
 - **Auto-creating a merge commit or `reset --hard`** when `git pull --ff-only` fails. Use `git rebase` for auto-recovery; on rebase conflict, abort the rebase (preserving local head) and surface the divergence in the summary. Never overwrite local state.
 - **Adding an author allow-list back as a gate.** PR-author identity is intentionally NOT a Phase 1.4 gate condition in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (PATH_1, team / branch-protection path) OR a green `/review-pr` trail bound to current HEAD SHA (PATH_2, solo-dev / no-protection path) — author identity is not a gate in either path. `bot_authors_allow_list` is deprecated and parsed only for backward compat — it has no behavioural effect.
 - **Adding the trust trail without re-running /review-pr against the current head SHA.** Manually copying a stale `Reviewed-by:` trailer onto a new commit is a regression — Phase 1.4 PATH_2 (c) dispatches `trust-trail-evaluator`, which inspects ancestor + diff-empty + log-empty primitives. Trivial fast-forward fixups added after `/review-pr` evaluate to `PASS` without re-run; non-empty cumulative diffs evaluate to `STALE` and gate_fail with `data.reason="trust_trail_stale_sha"`; force-pushes evaluate to `FORCE_PUSHED`. Never hand-edit the trailer; the agent owns the decision.
-- **Treating sub-condition (d) as a tamper detector, or globbing all JSONs without filtering by `.pr`.** The JSON is local debug telemetry per D1 — `.uberdev/` is gitignored, so its absence on a fresh clone is by design. Sub-condition (d) is corroborating-only post-#78: JSON present (after filtering all four glob layouts — see the worktree-mirror bullet below — to those with `.pr == <N>`) → presence + shape check (`gate_fail` with `trust_trail_json_sha_mismatch` on shape-malformed only — narrow scope post-#78); JSON absent for this PR → advisory `error` audit event with `data.reason="trust_trail_json_absent"` + `gate_pass` (queue continues). Tamper detection is fully owned by sub-condition (c) — the trust-trail-evaluator agent's cumulative-diff heuristic. The retired `trust_trail_json_missing` reason is never emitted post-#52; the strict `"sha" == headRefOid` equality check is retired post-#78. Globbing JSONs without filtering by `.pr` (the pre-#78 bug) caused gate_fail when prior /review-pr runs from earlier states or other PRs left stale JSONs in `.uberdev/runs/`, even when the current-PR JSON had a valid SHA.
-- **Searching only `.uberdev/runs/*/review-pr-verdict.json` for sub-condition (c.0) / (d) and missing the worktree-mirror paths.** `/review-pr` writes its audit JSON relative to its CWD; when `/merge` runs from the main checkout but the PR was produced by ANY worktree-based flow (`/solve` and `/turbo` per `solve-pipeline/SKILL.md`, OR `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 per the generic `using-git-worktrees/SKILL.md`), the audit JSON lives inside that worktree's gitignored `.uberdev/runs/` — invisible to a root-only search. The `discover_review_verdict_json` helper in `lib/discover.sh` (the single discovery mechanism — Step (c.0) calls it; the pre-#303 inline `compgen -G` chain was a bashism that silently misfired under the zsh Bash tool) and sub-condition (d) prose MUST both enumerate the FULL worktree-mirror set alongside the canonical path:
+- **Treating sub-condition (d) as a tamper detector, or rediscovering its JSON independently of (c.0).** The JSON is local debug telemetry per D1 — `.uberdev/` is gitignored, so its exhaustive absence on a fresh clone is by design. Sub-condition (d) is corroborating-only post-#78 and MUST reuse only the closed controller state cached from the identity-safe receipt in (c.0): `DISCOVERY_STATE`, `PHASE2_5_AUDIT_STATE`, and `AUDIT_ARTIFACT_SHA`. It must not reopen either the mutable source path or the private snapshot carrier. FOUND → cached `sha` shape check; ABSENT → advisory `error` audit event with `data.reason="trust_trail_json_absent"` + `gate_pass`; INDETERMINATE never reaches (d), because (c) returns `INVALID / input_malformed`. A second glob/ranking pass or later pathname read could select different bytes and reopen a TOCTOU/identity-confusion class. Tamper detection is fully owned by sub-condition (c) — the trust-trail-evaluator agent's cumulative-diff heuristic. The retired `trust_trail_json_missing` reason is never emitted post-#52; the strict `"sha" == headRefOid` equality check is retired post-#78.
+- **Searching only `.uberdev/runs/*/review-pr-verdict.json` in Step (c.0) and missing the worktree-mirror paths.** `/review-pr` writes its audit JSON relative to its CWD; when `/merge` runs from the main checkout but the PR was produced by ANY worktree-based flow (`/solve` and `/turbo` per `solve-pipeline/SKILL.md`, OR `subagent-driven-dev` / `executing-plans` / brainstorm-Phase-4 per the generic `using-git-worktrees/SKILL.md`), the audit JSON lives inside that worktree's gitignored `.uberdev/runs/` — invisible to a root-only search. The `discover_review_verdict_json` helper in `lib/discover.sh` is the single discovery mechanism (Step (c.0) calls it once; (d) reuses the result), and its documentation MUST enumerate the FULL worktree-mirror set alongside the canonical path:
   - `.uberdev/runs/*/review-pr-verdict.json` — canonical / main-checkout location.
   - `.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `/solve` / `/turbo` convention (the `.claude/worktrees/solve-issue-N/` shape declared in `solve-pipeline/SKILL.md`).
   - `.worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `using-git-worktrees` preferred hidden convention.
   - `worktrees/*/.uberdev/runs/*/review-pr-verdict.json` — `using-git-worktrees` alternate visible convention.
 
-  The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT globbed — it lives outside the project root and would require runtime `$HOME` resolution; that case is deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on the main-checkout root via `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The pre-fix bug short-circuited `trust-trail-evaluator` to `STALE` via `phase2_5_present=false` in its Step 1.5 (legacy-audit branch) and gated otherwise-valid trust trails on every worktree-produced PR. The RUN_ID_REGEX basename-of-dirname projection (D4/F8 path-traversal hardening) works identically on all four path layouts because the prefix segments are never concatenated from untrusted input — no security regression. Future worktree conventions added to `using-git-worktrees/SKILL.md` MUST be paired with a layout addition AND a matching `M63.worktree-glob.*` test assertion (4-surface fan-out: the `discover_review_verdict_json` find enumeration in `lib/discover.sh` + sub-condition (d) prose + this bullet + tests/merge.test.sh).
+  The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT searched — it lives outside the project root and would require runtime `$HOME` resolution; that case is deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on the main-checkout root via `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The composed identity contract distinguishes exhaustive no-match (`audit_state=absent`, structural proof still required), present pre-v0.26.0 (`legacy`, `STALE`), valid current, selected malformed, and incomplete/identity-unknown discovery (`indeterminate`, INVALID). Missing a worktree mirror can never be called exhaustive absence. RUN_ID_REGEX is validated before candidate identity reads; malformed identity at a newer/equal run-id suppresses an older target as indeterminate, while invalid run-ids are ignored. Future worktree conventions added to `using-git-worktrees/SKILL.md` MUST be paired with a helper layout addition and matching discovery tests.
 - **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
 - **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
 - **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the counter is set BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval.
@@ -1106,7 +1186,7 @@ Every phase writes one JSON line per event to `AUDIT_LOG_DIR_PATTERN` + `AUDIT_L
 
 `event` MUST be one of `AUDIT_EVENT_ENUM` (declared in `## Constants`). Surface the audit log path in the final user-facing summary so the user can grep for `gate_fail`, `error`, etc.
 
-**Field-level note for the new agent-decision events:** `data.choice` for `trust_trail_agent_decision` ranges over `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`); `data.choice` for `merge_strategy_agent_decision` ranges over `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` (`squash` / `rebase` / `merge` — never `drop`). For `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason ∈ {input_malformed, trailer_sha_not_in_local_clone}` and `data.retry_attempt ∈ {0, 1}` are recorded. For `merge_strategy_fanout_wave_started`, `data.wave_index` is 1-based and `data.wave_size` is the count of agents dispatched in that wave.
+**Field-level note for the new agent-decision events:** `data.choice` for `trust_trail_agent_decision` ranges over `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`); `data.choice` for `merge_strategy_agent_decision` ranges over `MERGE_STRATEGY_DECIDER_VERDICT_ENUM` (`squash` / `rebase` / `merge` — never `drop`). For `trust_trail_agent_decision` with `data.choice="INVALID"`, `data.subreason ∈ {input_malformed, trailer_sha_not_in_local_clone, structural_probe_failed, phase2_5_blocker_deferred, phase2_5_override_unacknowledged}` and `data.retry_attempt ∈ {0, 1}` are recorded. Only `trailer_sha_not_in_local_clone` at attempt 0 is retryable; `structural_probe_failed` and every other subreason are terminal. For `merge_strategy_fanout_wave_started`, `data.wave_index` is 1-based and `data.wave_size` is the count of agents dispatched in that wave.
 
 ### Run-summary block (final user-facing output)
 
@@ -1129,7 +1209,7 @@ Per-PR detail block (one per PR in the run):
     strategy: <merge|rebase|squash|drop>
     rationale: <one-line, citing dominant signal from merge-strategy-decider — wip-marker, single-commit, conventional-ratio, divergence, label-hint, repo-convention, or agent-refusal-fallback>
     trust trail verdict: <PASS | STALE | INVALID | FORCE_PUSHED>   (only if PATH_2 fired)
-                          (subreason=<input_malformed | trailer_sha_not_in_local_clone>; retry_attempt=<0 | 1>)
+                          (subreason=<input_malformed | trailer_sha_not_in_local_clone | structural_probe_failed | phase2_5_blocker_deferred | phase2_5_override_unacknowledged>; retry_attempt=<0 | 1>)
                           (only if verdict is INVALID)
     outcome: <Merged|Skipped|Parked|Aborted>
     park reason: <PARK_REASON_ENUM value>          (only if outcome is Parked)

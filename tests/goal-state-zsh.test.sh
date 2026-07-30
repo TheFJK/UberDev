@@ -519,6 +519,31 @@ else
   fail "Z12c: SKILL.md GOAL_ID generator must be the prefix-free \$(date +%s)-\$(mktemp …) form (#299 finding 3)"
 fi
 
+echo
+echo "== Z13: sourced-file resolver loads discover.sh from an unrelated cwd =="
+Z13_TMP="$(mktemp -d)"
+if [ "$RUN_SHELL" = zsh ]; then
+  Z13_SHELL="$(command -v zsh)"
+else
+  Z13_SHELL="$(command -v bash)"
+fi
+Z13_OUT="$(
+  cd "$Z13_TMP" || exit 2
+  "$Z13_SHELL" -c '
+    set -u
+    unset _UBERDEV_GOAL_STATE_LOADED _UBERDEV_MERGE_DISCOVER_LOADED
+    . "$1"
+    command -v discover_review_verdict_json
+  ' _ "$GOAL_LIB" 2>&1
+)"
+Z13_RC=$?
+if [ "$Z13_RC" -eq 0 ] && printf '%s' "$Z13_OUT" | grep -q 'discover_review_verdict_json'; then
+  pass "Z13: $RUN_SHELL resolves goal-state.sh via BASH_SOURCE/%x outside the repository cwd"
+else
+  fail "Z13: $RUN_SHELL failed to load sibling discover.sh from unrelated cwd (rc=$Z13_RC out=[$Z13_OUT])"
+fi
+rm -rf "$Z13_TMP"
+
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true
 

@@ -2836,5 +2836,408 @@ else
   fail "artifact publication isolates retries and never pathname-deletes replacements" "$SECURE_CAPTURE_RESULT"
 fi
 
+EXACT_PUBLICATION_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import hashlib
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+from unittest import mock
+
+
+def load_module(module_path, index):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_exact_publication_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def parent_identity(path):
+    entry = os.lstat(path)
+    return entry.st_dev, entry.st_ino
+
+
+def expect_failure(module, operation, label, failures):
+    try:
+        operation()
+    except (module.ManifestRejected, module.ManifestRuntimeError):
+        return
+    except BaseException as error:
+        failures.append(
+            f"{label}: escaped as {type(error).__name__}: {error}"
+        )
+        return
+    failures.append(f"{label}: unexpectedly succeeded")
+
+
+failures = []
+for index, module_path in enumerate(sys.argv[1:3]):
+    module = load_module(module_path, index)
+    publish = getattr(module, "secure_publish_exact_no_clobber", None)
+    if publish is None:
+        failures.append(f"{index}: public exact-name publisher is missing")
+        continue
+
+    root = pathlib.Path(sys.argv[3]) / f"exact-publication-{index}"
+    root.mkdir()
+    payload = b'{"schema_version":1,"value":"trusted"}\n'
+    expected_digest = hashlib.sha256(payload).hexdigest()
+
+    # POSIX success binds the exact requested pathname, payload, digest, and
+    # parent identity. A second publication must preserve the first bytes.
+    parent = root / "posix"
+    parent.mkdir()
+    target = parent / "review-pr-verdict.json"
+    result = publish(str(target), payload, parent_identity(parent))
+    assert result[0] == os.path.abspath(target), result
+    assert result[2] == expected_digest, result
+    assert target.read_bytes() == payload
+    captured, captured_identity = module.secure_capture_published(
+        str(target), expected_digest, len(payload), len(payload)
+    )
+    assert captured == payload and captured_identity == result[1]
+    expect_failure(
+        module,
+        lambda: publish(str(target), b"replacement\n", parent_identity(parent)),
+        f"{index}: second exact-name publication",
+        failures,
+    )
+    if target.read_bytes() != payload:
+        failures.append(f"{index}: second publication changed first bytes")
+
+    # Partial writes are completed; a zero write is a hard failure that leaves
+    # an untrusted crash residue. Retrying that exact name must refuse rather
+    # than truncate, replace, or unlink the residue.
+    partial_parent = root / "partial"
+    partial_parent.mkdir()
+    partial_target = partial_parent / "artifact"
+    real_write = module.os.write
+
+    def partial_write(descriptor, value):
+        return real_write(descriptor, value[: max(1, min(2, len(value)))])
+
+    with mock.patch.object(module.os, "write", partial_write):
+        publish(
+            str(partial_target),
+            b"partial writes must complete\n",
+            parent_identity(partial_parent),
+        )
+    if partial_target.read_bytes() != b"partial writes must complete\n":
+        failures.append(f"{index}: partial-write loop changed payload")
+
+    zero_parent = root / "zero"
+    zero_parent.mkdir()
+    zero_target = zero_parent / "artifact"
+    unlink_calls = []
+    with mock.patch.object(module.os, "write", return_value=0), mock.patch.object(
+        module.os, "unlink", side_effect=lambda *args, **kwargs: unlink_calls.append(
+            (args, kwargs)
+        )
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(zero_target), b"zero write\n", parent_identity(zero_parent)
+            ),
+            f"{index}: zero write",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: zero-write failure attempted unlink")
+    if not zero_target.exists():
+        failures.append(f"{index}: zero-write crash residue was removed")
+    expect_failure(
+        module,
+        lambda: publish(
+            str(zero_target), b"retry\n", parent_identity(zero_parent)
+        ),
+        f"{index}: crash-residue retry",
+        failures,
+    )
+    if zero_target.read_bytes() != b"":
+        failures.append(f"{index}: crash-residue retry changed partial bytes")
+
+    # Sync and readback failures remain fail-closed and never roll back through
+    # a mutable pathname. Both file-fsync and parent-fsync are exercised.
+    for scenario, fail_fsync_call in (
+        ("file-fsync", 1),
+        ("parent-fsync", 2),
+    ):
+        sync_parent = root / scenario
+        sync_parent.mkdir()
+        sync_target = sync_parent / "artifact"
+        real_fsync = module.os.fsync
+        fsync_calls = [0]
+
+        def selective_fsync(descriptor):
+            fsync_calls[0] += 1
+            if fsync_calls[0] == fail_fsync_call:
+                raise OSError(f"deterministic {scenario} failure")
+            return real_fsync(descriptor)
+
+        unlink_calls = []
+        with mock.patch.object(module.os, "fsync", selective_fsync), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(sync_target),
+                    b"durable bytes\n",
+                    parent_identity(sync_parent),
+                ),
+                f"{index}: {scenario}",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: {scenario} attempted unlink")
+        if not sync_target.exists():
+            failures.append(f"{index}: {scenario} removed crash residue")
+
+    read_parent = root / "readback"
+    read_parent.mkdir()
+    read_target = read_parent / "artifact"
+    real_read = module.os.read
+    read_calls = [0]
+
+    def failed_readback(descriptor, size):
+        read_calls[0] += 1
+        if read_calls[0] == 1:
+            return b""
+        return real_read(descriptor, size)
+
+    unlink_calls = []
+    with mock.patch.object(module.os, "read", failed_readback), mock.patch.object(
+        module.os,
+        "unlink",
+        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(read_target),
+                b"readback bytes\n",
+                parent_identity(read_parent),
+            ),
+            f"{index}: readback failure",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: readback failure attempted unlink")
+    if not read_target.exists():
+        failures.append(f"{index}: readback failure removed crash residue")
+
+    # Existing files, symlinks, and directories are immutable obstacles.
+    existing_parent = root / "existing"
+    existing_parent.mkdir()
+    existing_file = existing_parent / "file"
+    existing_file.write_bytes(b"first\n")
+    external = root / "external"
+    external.write_bytes(b"outside\n")
+    existing_link = existing_parent / "link"
+    existing_link.symlink_to(external)
+    existing_dir = existing_parent / "directory"
+    existing_dir.mkdir()
+    for obstacle in (existing_file, existing_link, existing_dir):
+        expect_failure(
+            module,
+            lambda obstacle=obstacle: publish(
+                str(obstacle), b"forbidden\n", parent_identity(existing_parent)
+            ),
+            f"{index}: existing {obstacle.name}",
+            failures,
+        )
+    if existing_file.read_bytes() != b"first\n":
+        failures.append(f"{index}: existing file was changed")
+    if not existing_link.is_symlink() or external.read_bytes() != b"outside\n":
+        failures.append(f"{index}: existing symlink or target was changed")
+    if not existing_dir.is_dir():
+        failures.append(f"{index}: existing directory was changed")
+
+    # Invalid identity, a symlinked parent, and modeled native-Windows reparse
+    # rejection all fail before target mutation.
+    identity_parent = root / "identity"
+    identity_parent.mkdir()
+    identity_target = identity_parent / "artifact"
+    wrong_identity = (parent_identity(identity_parent)[0], parent_identity(identity_parent)[1] + 1)
+    expect_failure(
+        module,
+        lambda: publish(str(identity_target), b"identity\n", wrong_identity),
+        f"{index}: wrong parent identity",
+        failures,
+    )
+    if identity_target.exists():
+        failures.append(f"{index}: wrong parent identity created a target")
+
+    symlink_parent_target = root / "symlink-parent-target"
+    symlink_parent_target.mkdir()
+    symlink_parent = root / "symlink-parent"
+    symlink_parent.symlink_to(symlink_parent_target, target_is_directory=True)
+    expect_failure(
+        module,
+        lambda: publish(
+            str(symlink_parent / "artifact"),
+            b"outside mutation\n",
+            parent_identity(symlink_parent_target),
+        ),
+        f"{index}: symlinked parent",
+        failures,
+    )
+    if any(symlink_parent_target.iterdir()):
+        failures.append(f"{index}: symlinked parent mutated external directory")
+
+    windows_parent = root / "windows"
+    windows_parent.mkdir()
+    windows_target = windows_parent / "artifact"
+    with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
+        module, "_uses_native_windows_filesystem", return_value=True
+    ):
+        windows_result = publish(
+            str(windows_target),
+            b"windows exact bytes\n",
+            parent_identity(windows_parent),
+        )
+    if windows_result[0] != os.path.abspath(windows_target) or windows_target.read_bytes() != b"windows exact bytes\n":
+        failures.append(f"{index}: modeled native-Windows exact publication failed")
+
+    reparse_parent = root / "windows-reparse"
+    reparse_parent.mkdir()
+    reparse_target = reparse_parent / "artifact"
+
+    class ReparseStatView:
+        def __init__(self, entry, reparse_tag):
+            self._entry = entry
+            self.st_reparse_tag = reparse_tag
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+    real_lstat = module.os.lstat
+
+    def modeled_reparse_lstat(path):
+        entry = real_lstat(path)
+        if os.path.abspath(os.fspath(path)) == os.path.abspath(reparse_parent):
+            return ReparseStatView(entry, 0xA000000C)
+        return entry
+
+    with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
+        module, "_uses_native_windows_filesystem", return_value=True
+    ), mock.patch.object(
+        module.os, "lstat", modeled_reparse_lstat
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(reparse_target),
+                b"reparse\n",
+                parent_identity(reparse_parent),
+            ),
+            f"{index}: native-Windows reparse parent",
+            failures,
+        )
+    if reparse_target.exists():
+        failures.append(f"{index}: reparse rejection created a target")
+
+    # A pathname replacement between two path snapshots must be rejected, and
+    # the replacement must survive because uncertain identity never authorizes
+    # unlink. The same rule applies when the parent pathname drifts while its
+    # original descriptor/handle remains open.
+    race_parent = root / "race"
+    race_parent.mkdir()
+    race_target = race_parent / "artifact"
+    race_replacement = root / "race-replacement"
+    race_replacement.write_bytes(b"replacement survives\n")
+    real_stat = module.os.stat
+    target_path_snapshots = [0]
+
+    def replace_after_first_target_snapshot(path, *args, **kwargs):
+        entry = real_stat(path, *args, **kwargs)
+        if (
+            path == race_target.name
+            and kwargs.get("dir_fd") is not None
+            and not kwargs.get("follow_symlinks", True)
+        ):
+            target_path_snapshots[0] += 1
+            if target_path_snapshots[0] == 1:
+                os.replace(race_replacement, race_target)
+        return entry
+
+    unlink_calls = []
+    with mock.patch.object(module.os, "stat", replace_after_first_target_snapshot), mock.patch.object(
+        module.os,
+        "unlink",
+        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(race_target),
+                b"trusted race bytes\n",
+                parent_identity(race_parent),
+            ),
+            f"{index}: path/fd identity race",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: path/fd race attempted unlink")
+    if race_target.read_bytes() != b"replacement survives\n":
+        failures.append(f"{index}: racing replacement did not survive")
+
+    drift_parent = root / "parent-drift"
+    drift_parent.mkdir()
+    drift_target = drift_parent / "artifact"
+    moved_parent = root / "parent-drift-original"
+    real_write = module.os.write
+    drifted = [False]
+
+    def drift_parent_after_write(descriptor, value):
+        written = real_write(descriptor, value)
+        if not drifted[0]:
+            drifted[0] = True
+            os.rename(drift_parent, moved_parent)
+            drift_parent.mkdir()
+        return written
+
+    unlink_calls = []
+    with mock.patch.object(module.os, "write", drift_parent_after_write), mock.patch.object(
+        module.os,
+        "unlink",
+        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(drift_target),
+                b"parent drift bytes\n",
+                parent_identity(drift_parent),
+            ),
+            f"{index}: parent path drift",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: parent drift attempted unlink")
+    if any(drift_parent.iterdir()):
+        failures.append(f"{index}: parent drift mutated replacement directory")
+    if not (moved_parent / "artifact").exists():
+        failures.append(f"{index}: parent drift removed isolated crash residue")
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok", end="")
+PY
+)"
+if [ "$EXACT_PUBLICATION_RESULT" = ok ]; then
+  pass "exact-name publisher is durable, no-clobber, identity-bound, dual-platform, and never path-rolls back"
+else
+  fail "exact-name publisher contract" "$EXACT_PUBLICATION_RESULT"
+fi
+
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

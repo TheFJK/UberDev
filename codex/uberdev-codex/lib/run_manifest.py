@@ -1719,6 +1719,263 @@ def secure_publish_captured(
     return candidate, published_identity, digest
 
 
+def _parse_parent_directory_identity(value: Any) -> tuple[int, int]:
+    if (
+        not isinstance(value, (tuple, list))
+        or len(value) != 2
+        or any(
+            isinstance(component, bool)
+            or not isinstance(component, int)
+            or component < 0
+            for component in value
+        )
+    ):
+        raise ManifestRejected("artifact_parent_identity_invalid")
+    return value[0], value[1]
+
+
+def _directory_identity_matches(
+    entry: os.stat_result, expected: tuple[int, int]
+) -> bool:
+    return (entry.st_dev, entry.st_ino) == expected
+
+
+def _validate_publication_parent(
+    entry: os.stat_result, expected: tuple[int, int]
+) -> None:
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        stat.S_ISLNK(entry.st_mode)
+        or not stat.S_ISDIR(entry.st_mode)
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise ManifestRejected("artifact_parent_not_owned_directory")
+    if not _directory_identity_matches(entry, expected):
+        raise ManifestRejected("artifact_parent_identity_mismatch")
+
+
+def _reject_windows_reparse_ancestors(path: str) -> None:
+    """Reject every existing native-Windows ancestor carrying a reparse tag."""
+
+    if not _uses_native_windows_filesystem():
+        return
+    absolute = os.path.abspath(path)
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.path.sep if drive else os.path.sep
+    for component in tail.split(os.path.sep):
+        if component in ("", "."):
+            continue
+        if component == "..":
+            raise ManifestRejected("manifest_parent_path_traversal_rejected")
+        current = os.path.join(current, component)
+        try:
+            entry = os.lstat(current)
+        except OSError as exc:
+            raise ManifestRuntimeError("artifact_parent_inspect_failed") from exc
+        if getattr(entry, "st_reparse_tag", 0):
+            raise ManifestRejected("artifact_parent_reparse_rejected")
+
+
+def secure_publish_exact_no_clobber(
+    path: str,
+    payload: bytes,
+    expected_parent_identity: tuple[int, int],
+) -> tuple[str, ArtifactIdentity, str]:
+    """Durably publish bytes at one exact, previously absent pathname.
+
+    A failed attempt is deliberately never unlinked. Once creation succeeds,
+    no portable primitive can prove that a later pathname still identifies the
+    opened file at the instant of deletion. Any partial carrier therefore
+    remains an untrusted crash residue and makes an exact-name retry fail.
+    """
+
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ManifestRejected("artifact_path_invalid")
+    if not isinstance(payload, bytes):
+        raise ManifestRejected("artifact_payload_invalid")
+    expected_parent = _parse_parent_directory_identity(
+        expected_parent_identity
+    )
+    absolute = os.path.abspath(path)
+    parent = os.path.dirname(absolute)
+    name = os.path.basename(absolute)
+    if not name or name in {".", ".."}:
+        raise ManifestRejected("artifact_path_invalid")
+    digest = hashlib.sha256(payload).hexdigest()
+
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    published_identity: ArtifactIdentity | None = None
+    failure: BaseException | None = None
+    native_windows = _uses_native_windows_filesystem()
+    try:
+        _reject_symlinked_ancestors(parent)
+        _reject_windows_reparse_ancestors(parent)
+        parent_path_before = os.lstat(parent)
+        _validate_publication_parent(parent_path_before, expected_parent)
+
+        if native_windows:
+            try:
+                descriptor = _secure_open_regular(
+                    absolute,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except ManifestRuntimeError as exc:
+                if isinstance(exc.__cause__, FileExistsError):
+                    raise ManifestRejected("artifact_target_exists") from exc
+                raise
+        else:
+            parent_descriptor = _open_directory_fd(parent)
+            opened_parent = os.fstat(parent_descriptor)
+            _validate_publication_parent(opened_parent, expected_parent)
+            if not _directory_identity_matches(
+                parent_path_before, (opened_parent.st_dev, opened_parent.st_ino)
+            ):
+                raise ManifestRejected("artifact_parent_identity_changed")
+            target_flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                descriptor = os.open(
+                    name,
+                    target_flags,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+            except FileExistsError as exc:
+                raise ManifestRejected("artifact_target_exists") from exc
+            except OSError as exc:
+                raise ManifestRuntimeError("artifact_snapshot_open_failed") from exc
+
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise ManifestRuntimeError("artifact_snapshot_short_write")
+            offset += written
+        os.fsync(descriptor)
+
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not _artifact_descriptor_link_count_valid(opened)
+            or opened.st_size != len(payload)
+        ):
+            raise ManifestRejected("artifact_snapshot_invalid")
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = len(payload)
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                raise ManifestRejected("artifact_snapshot_short_read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        captured = b"".join(chunks)
+        if hashlib.sha256(captured).hexdigest() != digest:
+            raise ManifestRejected("artifact_snapshot_digest_mismatch")
+
+        if not native_windows:
+            os.fchmod(descriptor, 0o400)
+        finalized = os.fstat(descriptor)
+        published_identity = _artifact_identity(finalized)
+
+        if native_windows:
+            current_before = os.lstat(absolute)
+        else:
+            current_before = os.stat(
+                name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        if _artifact_identity(current_before) != published_identity:
+            raise ManifestRejected("artifact_snapshot_identity_changed")
+
+        uid_fn = getattr(os, "geteuid", None)
+        uid = uid_fn() if uid_fn is not None else None
+        if (
+            not stat.S_ISREG(finalized.st_mode)
+            or not stat.S_ISREG(current_before.st_mode)
+            or not _artifact_descriptor_link_count_valid(finalized)
+            or current_before.st_nlink != 1
+            or finalized.st_size != len(payload)
+            or current_before.st_size != len(payload)
+            or (uid is not None and finalized.st_uid != uid)
+            or (uid is not None and current_before.st_uid != uid)
+            or (
+                not native_windows
+                and (
+                    stat.S_IMODE(finalized.st_mode) != 0o400
+                    or stat.S_IMODE(current_before.st_mode) != 0o400
+                )
+            )
+        ):
+            raise ManifestRejected("artifact_snapshot_invalid")
+
+        if parent_descriptor is not None:
+            os.fsync(parent_descriptor)
+
+        parent_path_after = os.lstat(parent)
+        _validate_publication_parent(parent_path_after, expected_parent)
+        if parent_descriptor is not None:
+            parent_after = os.fstat(parent_descriptor)
+            _validate_publication_parent(parent_after, expected_parent)
+
+        if native_windows:
+            current_after = os.lstat(absolute)
+        else:
+            current_after = os.stat(
+                name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        if (
+            _artifact_identity(current_after) != published_identity
+            or current_after.st_nlink != 1
+        ):
+            raise ManifestRejected("artifact_snapshot_identity_changed")
+    except (ManifestRejected, ManifestRuntimeError) as exc:
+        failure = exc
+    except OSError as exc:
+        failure = ManifestRuntimeError("artifact_snapshot_failed")
+        failure.__cause__ = exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if failure is None:
+                    failure = ManifestRuntimeError(
+                        "artifact_snapshot_close_failed"
+                    )
+                    failure.__cause__ = exc
+                else:
+                    _record_cleanup_diagnostic(
+                        failure, "artifact_snapshot_close_failed"
+                    )
+        if parent_descriptor is not None:
+            try:
+                os.close(parent_descriptor)
+            except OSError as exc:
+                if failure is None:
+                    failure = ManifestRuntimeError(
+                        "artifact_parent_close_failed"
+                    )
+                    failure.__cause__ = exc
+                else:
+                    _record_cleanup_diagnostic(
+                        failure, "artifact_parent_close_failed"
+                    )
+
+    if failure is not None:
+        raise failure
+    if published_identity is None:
+        raise ManifestRuntimeError("artifact_snapshot_failed")
+    return absolute, published_identity, digest
+
+
 def _lock_manifest_descriptor(descriptor: int) -> None:
     if _fcntl is not None:
         _fcntl.flock(descriptor, _fcntl.LOCK_EX)

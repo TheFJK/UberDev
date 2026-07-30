@@ -67,12 +67,589 @@ UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/u
 CODE_FIXER_CONTRACT="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
 RISK_JSON="${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}"
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
-uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+RUN_ID_WAS_EXPLICIT=0
+if [ "${RUN_ID+x}" = x ] && [ -n "${RUN_ID:-}" ]; then
+  RUN_ID_WAS_EXPLICIT=1
+fi
+RUN_ID_RESERVATION_MAX_ATTEMPTS=16
+REVIEW_RUN_MANIFEST="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py"
+review_prepare_run_root() {
+  local repository_root="$1"
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B - "$repository_root" "$REVIEW_RUN_MANIFEST" <<'PY'
+import importlib.util
+import json
+import os
+import stat
+import sys
+
+repository_root, module_path = sys.argv[1:]
+repository_root = os.path.abspath(repository_root)
+spec = importlib.util.spec_from_file_location("uberdev_review_run_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def owned_directory(entry):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    return (
+        stat.S_ISDIR(entry.st_mode)
+        and not stat.S_ISLNK(entry.st_mode)
+        and not getattr(entry, "st_reparse_tag", 0)
+        and (uid is None or entry.st_uid == uid)
+    )
+
+def require_directory(entry, expected=None):
+    if not owned_directory(entry):
+        raise module.ManifestRejected("review_run_root_not_owned_directory")
+    if expected is not None and (entry.st_dev, entry.st_ino) != expected:
+        raise module.ManifestRejected("review_run_root_identity_changed")
+
+try:
+    module._reject_symlinked_ancestors(repository_root)
+    module._reject_windows_reparse_ancestors(repository_root)
+    repository_before = os.lstat(repository_root)
+    require_directory(repository_before)
+    repository_identity = (repository_before.st_dev, repository_before.st_ino)
+    components = (".uberdev", "runs")
+    if module._uses_native_windows_filesystem():
+        parent_path = repository_root
+        parent_identity = repository_identity
+        for component in components:
+            module._reject_symlinked_ancestors(parent_path)
+            module._reject_windows_reparse_ancestors(parent_path)
+            parent_before = os.lstat(parent_path)
+            require_directory(parent_before, parent_identity)
+            child_path = os.path.join(parent_path, component)
+            try:
+                os.mkdir(child_path, 0o700)
+            except FileExistsError:
+                pass
+            child = os.lstat(child_path)
+            require_directory(child)
+            parent_after = os.lstat(parent_path)
+            require_directory(parent_after, parent_identity)
+            parent_path = child_path
+            parent_identity = (child.st_dev, child.st_ino)
+        runs_root = parent_path
+        runs_identity = parent_identity
+    else:
+        descriptor = module._open_directory_fd(repository_root)
+        try:
+            opened_repository = os.fstat(descriptor)
+            require_directory(opened_repository, repository_identity)
+            parent_path = repository_root
+            for component in components:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except FileExistsError:
+                    pass
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                child_descriptor = os.open(component, flags, dir_fd=descriptor)
+                child_opened = os.fstat(child_descriptor)
+                child_path = os.path.join(parent_path, component)
+                child_current = os.lstat(child_path)
+                require_directory(child_opened)
+                require_directory(
+                    child_current, (child_opened.st_dev, child_opened.st_ino)
+                )
+                os.close(descriptor)
+                descriptor = child_descriptor
+                parent_path = child_path
+            repository_after = os.lstat(repository_root)
+            require_directory(repository_after, repository_identity)
+            runs_opened = os.fstat(descriptor)
+            require_directory(runs_opened)
+            runs_root = parent_path
+            runs_identity = (runs_opened.st_dev, runs_opened.st_ino)
+        finally:
+            os.close(descriptor)
+    print(
+        json.dumps(
+            {"identity": list(runs_identity), "path": runs_root},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        end="",
+    )
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not prepare private review run root: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+review_publish_local_ignore() {
+  local runs_root="$1" runs_identity_json="$2"
+  [ "$#" -eq 2 ] || return 2
+  python3 -I -B - "$runs_root" "$runs_identity_json" "$REVIEW_RUN_MANIFEST" <<'PY'
+import importlib.util
+import json
+import os
+import sys
+
+runs_root, identity_json, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_ignore_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+try:
+    identity = json.loads(identity_json)
+    module.secure_publish_exact_no_clobber(
+        os.path.join(runs_root, ".gitignore"), b"*\n", identity
+    )
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not install private review ignore policy: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+review_reserve_run_directory() {
+  local runs_root="$1" runs_identity_json="$2" requested_run_id="$3"
+  local explicit_run_id="$4" pr_number="$5"
+  [ "$#" -eq 5 ] || return 2
+  python3 -I -B - "$runs_root" "$runs_identity_json" "$requested_run_id" \
+    "$explicit_run_id" "$pr_number" "$RUN_ID_RESERVATION_MAX_ATTEMPTS" \
+    "$REVIEW_RUN_MANIFEST" <<'PY'
+import base64
+import datetime as dt
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+
+(
+    runs_root,
+    runs_identity_json,
+    requested_run_id,
+    explicit_text,
+    pr_text,
+    attempts_text,
+    module_path,
+) = sys.argv[1:]
+runs_root = os.path.abspath(runs_root)
+spec = importlib.util.spec_from_file_location("uberdev_review_reserve_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+")
+created = False
+run_descriptor = None
+runs_descriptor = None
+published = []
+
+def require_identity(value):
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+    ):
+        raise module.ManifestRejected("review_directory_identity_invalid")
+    return tuple(value)
+
+def require_owned_directory(entry, expected):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != expected
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_directory_identity_changed")
+
+def rollback_successful_markers(run_dir, run_identity):
+    for name, identity in reversed(published):
+        try:
+            current = os.lstat(os.path.join(run_dir, name))
+            if module._artifact_identity(current) != identity:
+                continue
+            if module._uses_native_windows_filesystem():
+                os.unlink(os.path.join(run_dir, name))
+            elif run_descriptor is not None:
+                relative = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if module._artifact_identity(relative) == identity:
+                    os.unlink(name, dir_fd=run_descriptor)
+        except OSError:
+            pass
+    try:
+        if module._uses_native_windows_filesystem():
+            if not os.listdir(run_dir):
+                current = os.lstat(run_dir)
+                require_owned_directory(current, run_identity)
+                os.rmdir(run_dir)
+        elif (
+            run_descriptor is not None
+            and runs_descriptor is not None
+            and not os.listdir(run_descriptor)
+        ):
+            current = os.stat(
+                os.path.basename(run_dir),
+                dir_fd=runs_descriptor,
+                follow_symlinks=False,
+            )
+            require_owned_directory(current, run_identity)
+            os.rmdir(os.path.basename(run_dir), dir_fd=runs_descriptor)
+            os.fsync(runs_descriptor)
+    except (OSError, module.ManifestRejected):
+        pass
+
+try:
+    explicit = int(explicit_text)
+    attempts = int(attempts_text)
+    if explicit not in (0, 1) or attempts < 1 or attempts > 128:
+        raise module.ManifestRejected("review_reservation_policy_invalid")
+    if re.fullmatch(r"[1-9][0-9]*", pr_text) is None:
+        raise module.ManifestRejected("review_pr_number_invalid")
+    pr_number = int(pr_text)
+    runs_identity = require_identity(json.loads(runs_identity_json))
+    module._reject_symlinked_ancestors(runs_root)
+    module._reject_windows_reparse_ancestors(runs_root)
+    runs_path = os.lstat(runs_root)
+    require_owned_directory(runs_path, runs_identity)
+    if not module._uses_native_windows_filesystem():
+        runs_descriptor = module._open_directory_fd(runs_root)
+        require_owned_directory(os.fstat(runs_descriptor), runs_identity)
+
+    candidate = None
+    for attempt in range(attempts):
+        if explicit:
+            candidate = requested_run_id
+        else:
+            candidate = requested_run_id + secrets.token_hex(4)
+        if RUN_ID.fullmatch(candidate) is None:
+            raise module.ManifestRejected(
+                f"BUG: run-id {candidate} does not match "
+                "^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue"
+            )
+        try:
+            if module._uses_native_windows_filesystem():
+                os.mkdir(os.path.join(runs_root, candidate), 0o700)
+            else:
+                os.mkdir(candidate, 0o700, dir_fd=runs_descriptor)
+                os.fsync(runs_descriptor)
+            created = True
+            break
+        except FileExistsError:
+            if explicit:
+                raise module.ManifestRejected(
+                    "caller-supplied RUN_ID collision; refusing reuse"
+                )
+            if attempt + 1 == attempts:
+                raise module.ManifestRejected(
+                    "exhausted bounded review run-id reservation attempts"
+                )
+    if not created or candidate is None:
+        raise module.ManifestRuntimeError("review_run_reservation_failed")
+
+    run_dir = os.path.join(runs_root, candidate)
+    run_path = os.lstat(run_dir)
+    run_identity = (run_path.st_dev, run_path.st_ino)
+    require_owned_directory(run_path, run_identity)
+    if not module._uses_native_windows_filesystem():
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        run_descriptor = os.open(candidate, flags, dir_fd=runs_descriptor)
+        require_owned_directory(os.fstat(run_descriptor), run_identity)
+
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+    context = (
+        json.dumps(
+            {"issue": 0, "pr": pr_number, "started_at": started_at},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    marker_records = {}
+    for name, payload in (("locked", b""), ("pr-context.json", context)):
+        _path, identity, digest = module.secure_publish_exact_no_clobber(
+            os.path.join(run_dir, name), payload, run_identity
+        )
+        published.append((name, identity))
+        marker_records[name] = {
+            "identity": list(identity),
+            "sha256": digest,
+            "size": len(payload),
+        }
+    receipt = {
+        "markers": marker_records,
+        "run_dir": run_dir,
+        "run_dir_identity": list(run_identity),
+        "run_id": candidate,
+        "runs_root": runs_root,
+        "runs_root_identity": list(runs_identity),
+        "schema": "review-run-reservation-v1",
+    }
+    raw = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    print(f"v1:{token}\n{candidate}\n{run_dir}", end="")
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    if created and "run_dir" in locals() and "run_identity" in locals():
+        rollback_successful_markers(run_dir, run_identity)
+    print(f"error: could not reserve private review run: {error}", file=sys.stderr)
+    raise SystemExit(2)
+finally:
+    if run_descriptor is not None:
+        os.close(run_descriptor)
+    if runs_descriptor is not None:
+        os.close(runs_descriptor)
+PY
+}
+review_abandon_run_reservation() {
+  local reservation_receipt="$1"
+  [ "$#" -eq 1 ] && [ -n "$reservation_receipt" ] || return 2
+  python3 -I -B - "$reservation_receipt" "$REVIEW_RUN_MANIFEST" <<'PY'
+import base64
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+
+receipt_text, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_abandon_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def decode_receipt(value):
+    if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    token = value[3:]
+    raw = base64.b64decode(
+        token + "=" * (-len(token) % 4), altchars=b"-_", validate=True
+    )
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "markers", "run_dir", "run_dir_identity", "run_id", "runs_root",
+        "runs_root_identity", "schema",
+    }:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    if (
+        receipt["schema"] != "review-run-reservation-v1"
+        or json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() != raw
+        or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for key in ("runs_root_identity", "run_dir_identity"):
+        identity = receipt[key]
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in identity)
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    runs_root = os.path.abspath(receipt["runs_root"])
+    run_dir = os.path.abspath(receipt["run_dir"])
+    if (
+        runs_root != receipt["runs_root"]
+        or run_dir != receipt["run_dir"]
+        or run_dir != os.path.join(runs_root, receipt["run_id"])
+        or os.path.basename(runs_root) != "runs"
+        or os.path.basename(os.path.dirname(runs_root)) != ".uberdev"
+        or set(receipt["markers"]) != {"locked", "pr-context.json"}
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for marker in receipt["markers"].values():
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"identity", "sha256", "size"}
+            or not isinstance(marker["identity"], list)
+            or len(marker["identity"]) != 6
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in marker["identity"])
+            or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"] or "") is None
+            or isinstance(marker["size"], bool)
+            or not isinstance(marker["size"], int)
+            or marker["size"] < 0
+            or marker["identity"][2] != marker["size"]
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    return receipt
+
+def require_directory(entry, identity):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != tuple(identity)
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_reservation_directory_changed")
+
+try:
+    receipt = decode_receipt(receipt_text)
+    runs_root = receipt["runs_root"]
+    run_dir = receipt["run_dir"]
+    module._reject_symlinked_ancestors(run_dir)
+    module._reject_windows_reparse_ancestors(run_dir)
+    require_directory(os.lstat(runs_root), receipt["runs_root_identity"])
+    require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    for name, marker in receipt["markers"].items():
+        _payload, identity = module.secure_capture_published(
+            os.path.join(run_dir, name),
+            marker["sha256"],
+            marker["size"],
+            marker["size"],
+        )
+        if list(identity) != marker["identity"]:
+            raise module.ManifestRejected("review_reservation_marker_changed")
+
+    if module._uses_native_windows_filesystem():
+        if set(os.listdir(run_dir)) != set(receipt["markers"]):
+            raise module.ManifestRejected("review_reservation_directory_not_empty")
+        for name, marker in receipt["markers"].items():
+            current = os.lstat(os.path.join(run_dir, name))
+            if list(module._artifact_identity(current)) != marker["identity"]:
+                raise module.ManifestRejected("review_reservation_marker_changed")
+            os.unlink(os.path.join(run_dir, name))
+        require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+        os.rmdir(run_dir)
+    else:
+        runs_descriptor = module._open_directory_fd(runs_root)
+        run_descriptor = None
+        try:
+            require_directory(os.fstat(runs_descriptor), receipt["runs_root_identity"])
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            run_descriptor = os.open(
+                receipt["run_id"], flags, dir_fd=runs_descriptor
+            )
+            require_directory(os.fstat(run_descriptor), receipt["run_dir_identity"])
+            if set(os.listdir(run_descriptor)) != set(receipt["markers"]):
+                raise module.ManifestRejected("review_reservation_directory_not_empty")
+            for name, marker in receipt["markers"].items():
+                current = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if list(module._artifact_identity(current)) != marker["identity"]:
+                    raise module.ManifestRejected("review_reservation_marker_changed")
+                os.unlink(name, dir_fd=run_descriptor)
+            os.fsync(run_descriptor)
+            require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+            os.rmdir(receipt["run_id"], dir_fd=runs_descriptor)
+            os.fsync(runs_descriptor)
+        finally:
+            if run_descriptor is not None:
+                os.close(run_descriptor)
+            os.close(runs_descriptor)
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not abandon private review reservation: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+# Standalone carrier preparation owns the clean-worktree gate. Run it before
+# the checkout-local reservation so our own `.uberdev/runs/<RUN_ID>` evidence
+# cannot appear as pre-existing untracked input in repositories that do not
+# yet ignore `.uberdev/`. The workspace allocator below sees this inherited
+# carrier and therefore does not repeat the preparation.
+if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
+  uberdev_prepare_run_carrier review-pr "$PR_NUMBER" medium "$RISK_JSON" >/dev/null || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
+REVIEW_RUN_REPO_ROOT="$(git -C "${WORKTREE_ROOT:-.}" rev-parse --show-toplevel)" || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
-uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
+if [ "$RUN_ID_WAS_EXPLICIT" -eq 1 ]; then
+  REVIEW_RUN_ID_REQUEST="$RUN_ID"
+else
+  REVIEW_RUN_ID_REQUEST="$(date +%Y%m%d-%H%M%S)-$(git -C "$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD)" || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
+REVIEW_RUN_ROOT_RECORD="$(review_prepare_run_root "$REVIEW_RUN_REPO_ROOT")" || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$REVIEW_RUN_ROOT_RECORD")" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUNS_ROOT_IDENTITY_JSON="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$REVIEW_RUN_ROOT_RECORD")" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+# `check-ignore -q` exits 1 for a NOT-ignored path — the expected first-run
+# state this case arm handles, not an error. The probe must therefore be
+# guarded: bare, it aborts the fence under `set -e` before `$?` is ever read,
+# so the 0|1|* triage below becomes unreachable.
+REVIEW_IGNORE_RC=0
+git -C "$REVIEW_RUN_REPO_ROOT" check-ignore -q -- ".uberdev/runs/.review-probe" || REVIEW_IGNORE_RC=$?
+case "$REVIEW_IGNORE_RC" in
+  0)
+    # The repository's effective ignore stack already covers private evidence.
+    ;;
+  1)
+    review_publish_local_ignore "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" || {
+      rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+    }
+    REVIEW_IGNORE_RC=0
+    git -C "$REVIEW_RUN_REPO_ROOT" check-ignore -q -- ".uberdev/runs/.review-probe" || REVIEW_IGNORE_RC=$?
+    if [ "$REVIEW_IGNORE_RC" -ne 0 ]; then
+      echo "error: installed review ignore policy is not effective" >&2
+      return 2 2>/dev/null || exit 2
+    fi
+    ;;
+  *)
+    echo "error: could not inspect the effective review ignore policy" >&2
+    return 2 2>/dev/null || exit 2
+    ;;
+esac
+REVIEW_RESERVATION_OUTPUT="$(
+  review_reserve_run_directory \
+    "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" \
+    "$REVIEW_RUN_ID_REQUEST" "$RUN_ID_WAS_EXPLICIT" "$PR_NUMBER"
+)" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUN_RESERVATION_RECEIPT="${REVIEW_RESERVATION_OUTPUT%%$'\n'*}"
+REVIEW_RESERVATION_REMAINDER="${REVIEW_RESERVATION_OUTPUT#*$'\n'}"
+RUN_ID="${REVIEW_RESERVATION_REMAINDER%%$'\n'*}"
+MARKER_DIR="${REVIEW_RESERVATION_REMAINDER#*$'\n'}"
+if [ -z "$REVIEW_RUN_RESERVATION_RECEIPT" ] || [ -z "$RUN_ID" ] || [ -z "$MARKER_DIR" ]; then
+  echo "error: review run reservation returned an incomplete receipt" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" 2>/dev/null || true
+  return 2 2>/dev/null || exit 2
+fi
+export RUN_ID MARKER_DIR REVIEW_RUN_RESERVATION_RECEIPT
+uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+  rc=$?
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || rc=2
+  return "$rc" 2>/dev/null || exit "$rc"
+}
+if [ "$(cd "$WORKTREE_ROOT" && pwd -P)" != "$(cd "$REVIEW_RUN_REPO_ROOT" && pwd -P)" ]; then
+  echo "error: reserved review run root does not match the validated workspace" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+fi
+uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
+  rc=$?
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || rc=2
+  return "$rc" 2>/dev/null || exit "$rc"
 }
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
@@ -487,37 +1064,27 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
 4. **Phase 1 — Dispatch `Skill(uberdev:post-impl-review)`**
 
-   Generate a fresh `RUN_ID` for this `/review-pr` invocation:
-   ```bash
-   RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
-   ```
-   Validate against the regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` (see "Run-ID format" subsection below); on validation failure, exit 2 and surface the bug. Note: this `RUN_ID` is **decoupled** from any earlier `subagent-driven-dev` `RUN_ID` — `/review-pr` mints its own.
+   The executable setup has already reserved this invocation's `RUN_ID` with
+   one plain `mkdir` before any reviewer dispatch. An explicitly supplied
+   `RUN_ID` is accepted only when that exact directory can be created; a
+   collision exits 2. A standalone invocation mints one timestamp/HEAD prefix
+   and retries a bounded number of cryptographic hex discriminators. In both
+   cases the resulting ID is validated against
+   `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` before path use.
 
    **Locked-marker write (issue #220, AC ❶):** Before invoking the post-impl-review skill, write a sibling `.uberdev/runs/<RUN_ID>/locked` zero-byte marker + `pr-context.json` so a concurrent `/uberdev:goal` Phase 2b knows this PR's `/review-pr` is in-flight (avoids re-dispatching ours while the leaf solver's own is still running):
 
-   ```bash
-   # B3 (post-impl-review): the marker-write + EXIT-trap MUST live in ONE bash
-   # fence. When split across fences each fence is its own subshell — MARKER_DIR
-   # never propagates to the trap-install fence, the trap expands to literal
-   # empty paths (`rm -f "/locked" "/pr-context.json"; rmdir ""`), and it fires
-   # at the END of the trap-installer fence rather than at /review-pr exit. The
-   # latent bug meant the marker was never cleaned up; B1's worktree-glob mirror
-   # would then surface stale markers indefinitely.
-   PR_NUM="$PR_NUMBER"
-   ISSUE_NUM="$(gh pr view --json body -q .body 2>/dev/null | grep -oE 'Closes #[0-9]+' | head -n1 | grep -oE '[0-9]+')"
-   if [ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null; then
-     MARKER_DIR="$(git rev-parse --show-toplevel)/.uberdev/runs/$RUN_ID"
-     mkdir -p "$MARKER_DIR"
-     : > "$MARKER_DIR/locked"  # creates .uberdev/runs/$RUN_ID/locked zero-byte sentinel
-     jq -n --argjson pr "$PR_NUM" --arg issue "${ISSUE_NUM:-0}" --arg ts "$(date -u +%FT%TZ)" \
-       '{pr: $pr, issue: ($issue|tonumber? // 0), started_at: $ts}' > "$MARKER_DIR/pr-context.json"
-     # Trap-slot audit: no pre-existing EXIT trap found (issue #220 §3.2).
-     # Install in the SAME fence so MARKER_DIR is in scope when the trap expands.
-     trap 'rm -f "$MARKER_DIR/locked" "$MARKER_DIR/pr-context.json" 2>/dev/null; rmdir "$MARKER_DIR" 2>/dev/null || true' EXIT
-   fi
-   ```
+   The marker write also ran in that same executable setup fence. Setup exports
+   one opaque, identity-bound `REVIEW_RUN_RESERVATION_RECEIPT`; it does not
+   install or replace an `EXIT` trap. The receipt survives the setup shell and
+   is the only authority accepted by the self-contained final publication
+   fence. Explicit setup failures abandon the reservation through that receipt.
+   Normal or signal exits leave the markers for `/goal` to observe; even on
+   SIGKILL the reader's grace-window check bounds staleness. Final publication
+   removes only the two receipt-bound markers, and only after the exact verdict
+   pathname has been published durably.
 
-   The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The trap fires on every exit path (success, failure, signal) so an orphaned marker is bounded by the natural EXIT signal — and even on SIGKILL the `/goal` reader's grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without operator intervention. See RFC 0005 §9 D220b for the cross-component design rationale.
+   The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The marker remains truthful across shell boundaries until the receipt-authorized final fence publishes the verdict and retires it. If the producer exits before finalization, `/goal`'s grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without an operator or an `EXIT`-trap race. See RFC 0005 §9 D220b for the cross-component design rationale.
 
    Compute Phase 1 inputs from the PR:
    - `changed_paths` — normalized, non-empty POSIX repository-relative paths from the same fixed local `git diff <merge-base>..<head> --name-only` snapshot used for the Phase 1 diff artifact and commit range. The GitHub server-side path list is not authoritative on entry or re-entry. Preserve deleted or otherwise missing entries as path strings; absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected by the `repo_path_array` handoff contract before provider launch.
@@ -2464,6 +3031,176 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
 }
 ```
 
+Assemble that exact object in `AUDIT_JSON_PAYLOAD`, then publish it through the
+fresh-shell receipt fence:
+
+```bash
+# BEGIN review-verdict-final-fence-v1
+if ! python3 -I -B - \
+  "$REVIEW_RUN_RESERVATION_RECEIPT" \
+  "$AUDIT_JSON_PAYLOAD" \
+  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY'
+import base64
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+
+receipt_text, payload_text, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_final_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def decode_receipt(value):
+    if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    token = value[3:]
+    raw = base64.b64decode(
+        token + "=" * (-len(token) % 4), altchars=b"-_", validate=True
+    )
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "markers", "run_dir", "run_dir_identity", "run_id", "runs_root",
+        "runs_root_identity", "schema",
+    }:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    if (
+        receipt["schema"] != "review-run-reservation-v1"
+        or json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() != raw
+        or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for key in ("runs_root_identity", "run_dir_identity"):
+        identity = receipt[key]
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in identity)
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    runs_root = os.path.abspath(receipt["runs_root"])
+    run_dir = os.path.abspath(receipt["run_dir"])
+    if (
+        runs_root != receipt["runs_root"]
+        or run_dir != receipt["run_dir"]
+        or run_dir != os.path.join(runs_root, receipt["run_id"])
+        or os.path.basename(runs_root) != "runs"
+        or os.path.basename(os.path.dirname(runs_root)) != ".uberdev"
+        or set(receipt["markers"]) != {"locked", "pr-context.json"}
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for marker in receipt["markers"].values():
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"identity", "sha256", "size"}
+            or not isinstance(marker["identity"], list)
+            or len(marker["identity"]) != 6
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in marker["identity"])
+            or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"] or "") is None
+            or isinstance(marker["size"], bool)
+            or not isinstance(marker["size"], int)
+            or marker["size"] < 0
+            or marker["identity"][2] != marker["size"]
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    return receipt
+
+def require_directory(entry, identity):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != tuple(identity)
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_reservation_directory_changed")
+
+def validate_marker(run_dir, name, marker):
+    _payload, identity = module.secure_capture_published(
+        os.path.join(run_dir, name),
+        marker["sha256"],
+        marker["size"],
+        marker["size"],
+    )
+    if list(identity) != marker["identity"]:
+        raise module.ManifestRejected("review_reservation_marker_changed")
+
+try:
+    receipt = decode_receipt(receipt_text)
+    payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise module.ManifestRejected("review_verdict_payload_invalid")
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    runs_root = receipt["runs_root"]
+    run_dir = receipt["run_dir"]
+    module._reject_symlinked_ancestors(run_dir)
+    module._reject_windows_reparse_ancestors(run_dir)
+    require_directory(os.lstat(runs_root), receipt["runs_root_identity"])
+    require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    for name, marker in receipt["markers"].items():
+        validate_marker(run_dir, name, marker)
+
+    module.secure_publish_exact_no_clobber(
+        os.path.join(run_dir, "review-pr-verdict.json"),
+        encoded,
+        receipt["run_dir_identity"],
+    )
+
+    # Publication is now durable and exact-name/no-clobber. Revalidate both
+    # marker identities before retiring only those receipt-bound names.
+    for name, marker in receipt["markers"].items():
+        validate_marker(run_dir, name, marker)
+    if module._uses_native_windows_filesystem():
+        for name, marker in receipt["markers"].items():
+            current = os.lstat(os.path.join(run_dir, name))
+            if list(module._artifact_identity(current)) != marker["identity"]:
+                raise module.ManifestRejected("review_reservation_marker_changed")
+            os.unlink(os.path.join(run_dir, name))
+        require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    else:
+        run_descriptor = module._open_directory_fd(run_dir)
+        try:
+            require_directory(os.fstat(run_descriptor), receipt["run_dir_identity"])
+            for name, marker in receipt["markers"].items():
+                current = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if list(module._artifact_identity(current)) != marker["identity"]:
+                    raise module.ManifestRejected("review_reservation_marker_changed")
+                os.unlink(name, dir_fd=run_descriptor)
+            os.fsync(run_descriptor)
+            require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+        finally:
+            os.close(run_descriptor)
+except (OSError, TypeError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not publish review verdict: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+then
+  echo "error: review verdict publication failed; refusing to replace or reuse an existing artifact" >&2
+  exit 2
+fi
+unset AUDIT_JSON_PAYLOAD
+# END review-verdict-final-fence-v1
+```
+
+The fence rehydrates and validates the setup receipt in a fresh shell, captures
+both marker bytes against their recorded digests and identities, canonicalizes
+the JSON, and calls the shared `secure_publish_exact_no_clobber` primitive for
+the fixed `review-pr-verdict.json` basename. The publisher never truncates,
+replaces, or unlinks that pathname, including after a partial-write or sync
+failure. Only after successful publication does the fence revalidate and remove
+`locked` and `pr-context.json`; the reserved run directory and verdict remain.
+A collision, directory retarget, short write, identity change, or sync failure
+exits 2.
+
 **`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
 
 **`trust_trail_state` field (RFC 0002 §3.4)** — top-level GREEN/YELLOW/RED discriminator, redundant with the `phases.*` blocks but exposed at the JSON root for faster downstream gating (`/merge` can branch on a single string instead of recomputing the predicate from each phase block).
@@ -2476,13 +3213,14 @@ On any artifact-emission failure (anchor commit fails — pre-commit hook reject
 
 ### Run-ID format
 
-`<run-id>` MUST be derived as:
+For a standalone invocation, `<run-id>` is derived once in executable setup
+from a UTC-second timestamp, the selected worktree's short HEAD, and an
+8-character cryptographic hex discriminator. The final discriminator is chosen
+by the atomic directory reservation, with at most
+`RUN_ID_RESERVATION_MAX_ATTEMPTS` attempts. An explicitly supplied ID is never
+reminted or reused: an existing directory is a collision and exits 2.
 
-```bash
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
-```
-
-This mirrors the convention in `skills/merge-pipeline/SKILL.md:209` (Phase 3.3ii scratch worktree path). Before any path concatenation, validate `<run-id>` against the regex:
+Before any path concatenation, validate `<run-id>` against the regex:
 
 ```
 ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$

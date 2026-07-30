@@ -52,6 +52,10 @@
 #   M71 — SKILL.md Step 1.7 cross-references bare-mode zero-eligible (clean exit 0); preserves "Not an error, not a halt" prose.
 #   M72 — commands/merge.md frontmatter argument-hint omits --yes|-y; Usage bullet 1 documents context-aware bare-mode dual path.
 #   M73 — SKILL.md Phase 1.4 prose preserves "for each" / "per discovered PR" fanout language; Step 2.2 preserves "ONE assistant turn" single-message invariant.
+#   M92 — Phase 1.4 derives and dispatches the composed five-state audit identity
+#         without conflating absent telemetry with a legacy audit.
+#   M93 — Phase 1.4 consumes typed discovery/parser results safely, reuses the
+#         selected artifact, and documents structural-probe failures.
 
 set -u
 set -o pipefail
@@ -1280,10 +1284,10 @@ else
   fail "M63.shape-malformed-narrow — sub-condition (d) must narrow trust_trail_json_sha_mismatch to shape-malformed cases only post-#78"
 fi
 
-if echo "$PATH2_D_BODY" | grep -qE 'lex-greatest|most recent.*run-id|most-recent.*run-id'; then
-  pass "M63.most-recent-tiebreak — sub-condition (d) prose specifies tie-break to most-recent run-id when multiple JSONs match the PR (issue #78)"
+if echo "$PATH2_D_BODY" | grep -qE 'timestamp prefix only|YYYYMMDD-HHMMSS.*timestamp|selected timestamp.*identical'; then
+  pass "M63.most-recent-tiebreak — sub-condition (d) ranks by timestamp prefix and requires identical bytes for selected-time ties"
 else
-  fail "M63.most-recent-tiebreak — sub-condition (d) must specify a deterministic tie-break (most-recent run-id) when multiple matching JSONs exist (issue #78)"
+  fail "M63.most-recent-tiebreak — sub-condition (d) must rank by timestamp prefix and fail closed on divergent selected-time ties"
 fi
 
 # M63.inequality-phrasing-absent — negative regression guard that asserts the OLD
@@ -1338,36 +1342,46 @@ WORKTREE_GLOBS=(
   'worktrees/*/.uberdev/runs/*/review-pr-verdict.json'
 )
 
-# (a) the find-based helper in lib/discover.sh owns the enumeration (#303).
+# (a) the closed Python receipt-builder in lib/discover.sh owns the
+# enumeration (#303 plus secure-capture hardening).
 DISCOVER_LIB_FILE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
-HELPER_BLOCK=$(awk '/^discover_review_verdict_json\(\)/,/^\}/' "$DISCOVER_LIB_FILE" 2>/dev/null)
+HELPER_BLOCK=$(awk '/ROOT_LAYOUTS = \(/,/^\\)/' "$DISCOVER_LIB_FILE" 2>/dev/null)
 if [ -z "$HELPER_BLOCK" ]; then
-  fail "M63.worktree-glob.c0 — discover_review_verdict_json() not found in lib/discover.sh (#303 find-based helper missing)"
+  fail "M63.worktree-glob.c0 — ROOT_LAYOUTS contract not found in lib/discover.sh"
 else
-  for glob in "${WORKTREE_GLOBS[@]}"; do
-    if echo "$HELPER_BLOCK" | grep -qF -- "-path '$glob'"; then
-      pass "M63.worktree-glob.c0.find[$glob] — discover_review_verdict_json find enumeration includes $glob"
+  for root in '.uberdev/runs' '.claude/worktrees' '.worktrees' 'worktrees'; do
+    if echo "$HELPER_BLOCK" | grep -qF "\"$root\""; then
+      pass "M63.worktree-glob.c0.find[$root] — secure selector root table includes $root"
     else
-      fail "M63.worktree-glob.c0.find[$glob] — discover_review_verdict_json MUST search $glob (a removal silently skips that layout's verdict JSONs)"
+      fail "M63.worktree-glob.c0.find[$root] — secure selector MUST search $root"
     fi
   done
-  # (a.count) — exactly one find invocation per documented layout. A drift in
-  # either direction (dropped layout, or an undocumented fifth) fails loud.
-  FIND_COUNT=$(echo "$HELPER_BLOCK" | grep -cE '^[[:space:]]*find ' || true)
-  if [ "${FIND_COUNT:-0}" = "4" ]; then
-    pass "M63.worktree-glob.c0.find-count — helper runs exactly 4 find invocations (one per documented layout)"
+  ROOT_COUNT=$(echo "$HELPER_BLOCK" | grep -cE \
+    '"(\.uberdev/runs|\.claude/worktrees|\.worktrees|worktrees)"' || true)
+  # The layout tuple carries the depth/path pins alongside the root name, and
+  # `find_command` is a multi-line list literal — so match the loop header with
+  # a trailing-field wildcard and the argv elements one line at a time rather
+  # than as one collapsed source line. Requiring exactly ONE loop header is the
+  # load-bearing half: it keeps all four roots on a single find -H pass instead
+  # of drifting back into per-layout scans.
+  FIND_LOOP_COUNT=$(grep -cE 'for root_name, expected_shape[^:]* in ROOT_LAYOUTS:' \
+    "$DISCOVER_LIB_FILE" || true)
+  if [ "${ROOT_COUNT:-0}" = "4" ] \
+     && [ "${FIND_LOOP_COUNT:-0}" = "1" ] \
+     && grep -qE '^[[:space:]]*"find",[[:space:]]*$' "$DISCOVER_LIB_FILE" \
+     && grep -qE '^[[:space:]]*"-H",[[:space:]]*$' "$DISCOVER_LIB_FILE" \
+     && grep -qE '^[[:space:]]*root_name,[[:space:]]*$' "$DISCOVER_LIB_FILE"; then
+    pass "M63.worktree-glob.c0.find-count — exactly four roots feed one find -H loop"
   else
-    fail "M63.worktree-glob.c0.find-count — helper MUST run exactly 4 find invocations, got ${FIND_COUNT:-0} (layout set drifted from the documented four)"
+    fail "M63.worktree-glob.c0.find-count — four-root find -H loop contract drifted (roots=${ROOT_COUNT:-0} loops=${FIND_LOOP_COUNT:-0})"
   fi
 fi
 
 # (a.callsite) — Step (c.0) in SKILL.md delegates to the helper and carries
 # no inline compgen chain (bashism: silently misfires under the zsh Bash
 # tool — the #294 _uberdev_goal_glob_worktree class).
-# Anchor on the load-bearing identifier `discover \$AUDIT_JSON_PATH` rather
-# than the en-dash punctuation, so a future ASCII-normalisation pass (em-dash
-# → `--`) on SKILL.md cannot silently empty STEP_C0_BLOCK.
-STEP_C0_BLOCK=$(awk '/Step \(c\.0\).*discover \$AUDIT_JSON_PATH/,/AUDIT_JSON_PATH is now the most-recent verdict JSON/' "$SKILL_FILE")
+# Anchor on the closed receipt identifier and composed-identity dispatch prose.
+STEP_C0_BLOCK=$(awk '/Step \(c\.0\).*AUDIT_VERDICT_RECEIPT/,/Pass these alongside the existing inputs/' "$SKILL_FILE")
 if echo "$STEP_C0_BLOCK" | grep -qE 'discover_review_verdict_json "\$PR_NUMBER"'; then
   pass "M63.worktree-glob.c0.callsite — Step (c.0) delegates to discover_review_verdict_json \"\$PR_NUMBER\""
 else
@@ -1395,7 +1409,7 @@ done
 # prose refactor cannot accidentally delete the bullet that calls out the
 # worktree-mirror requirement. Mirrors the M86.7 convention which locks the
 # #95 Common Mistakes bullet.
-CM_BULLET=$(awk '/^- \*\*Searching only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` for sub-condition \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
+CM_BULLET=$(awk '/^- \*\*Searching only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` in Step \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
 if echo "$CM_BULLET" | grep -qF '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
   pass "M63.worktree-glob.cm — Common Mistakes bullet enumerates .worktrees/ and worktrees/ glob layouts (defends against documentation regression)"
 else
@@ -2149,6 +2163,182 @@ for M91_AGENT in trust-trail-evaluator merge-strategy-decider conflict-resolver;
 done
 assert_grep "$CMD_FILE" 'Do NOT improvise any Task dispatch beyond' \
   "M91.4 — improvised Task dispatches beyond the three sites remain forbidden"
+
+echo
+echo "== M92: Phase 1.4 composes explicit absent | legacy | current | malformed | indeterminate audit identity =="
+PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
+STEP_C0_STATE_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/PHASE2_5_AUDIT_STATE=/,/Pass these alongside the existing inputs/')
+
+for M92_STATE in absent legacy current malformed indeterminate; do
+  if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE "PHASE2_5_AUDIT_STATE=${M92_STATE}|audit_state.*${M92_STATE}"; then
+    pass "M92.state.$M92_STATE — caller derives explicit $M92_STATE audit state"
+  else
+    fail "M92.state.$M92_STATE — caller MUST derive explicit $M92_STATE audit state"
+  fi
+done
+
+if printf '%s\n' "$PHASE_14_BODY" | grep -qE 'audit_state=<absent\|legacy\|current\|malformed\|indeterminate>'; then
+  pass "M92.dispatch — caller dispatches explicit five-state audit_state"
+else
+  fail "M92.dispatch — trust-trail-evaluator dispatch MUST include the exact five-state audit_state enum"
+fi
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'absent.*skip.*Phase 2\.5.*structural|absent.*structural proof' \
+  && printf '%s\n' "$PHASE_14_BODY" | grep -qE 'JSON absent.*advisory|JSON absent for this PR'; then
+  pass "M92.absent-compose — absent skips only Phase 2.5 and remains subject to structural proof plus JSON advisory handling"
+else
+  fail "M92.absent-compose — absent MUST continue structural proof and then use sub-condition (d)'s advisory JSON handling"
+fi
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'malformed.*INVALID|malformed.*input_malformed|malformed.*input-malformed' \
+  && ! printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'malformed.*fail-open|fail-open.*malformed'; then
+  pass "M92.malformed-closed — malformed audit identity maps to INVALID / input_malformed"
+else
+  fail "M92.malformed-closed — malformed audit identity MUST map to INVALID / input_malformed, not fail-open"
+fi
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'indeterminate.*INVALID|indeterminate.*input_malformed|indeterminate.*input-malformed' \
+  && ! printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'indeterminate.*fail-open|fail-open.*indeterminate'; then
+  pass "M92.indeterminate-closed — indeterminate discovery maps to INVALID / input_malformed"
+else
+  fail "M92.indeterminate-closed — indeterminate discovery MUST map to INVALID / input_malformed, not absent/fail-open"
+fi
+
+echo
+echo "== M93: typed discovery/parser capture, single artifact identity, structural-probe mapping =="
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'if AUDIT_VERDICT_RECEIPT=.*discover_review_verdict_json "\$PR_NUMBER"' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'DISCOVERY_RC=\$\?'; then
+  pass "M93.discovery-capture — discovery runs in a guarded conditional and captures its non-zero status safely"
+else
+  fail "M93.discovery-capture — discovery MUST be guarded by if (safe under errexit) and preserve its typed return code"
+fi
+
+for M93_MAPPING in \
+  'found (receipt|recapture|parse)' \
+  'absent PHASE2_5_AUDIT_STATE=absent' \
+  'indeterminate PHASE2_5_AUDIT_STATE=indeterminate'; do
+  M93_STATE="${M93_MAPPING%% *}"
+  M93_ASSIGN="${M93_MAPPING#* }"
+  if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qiE "^[[:space:]]*${M93_STATE}(\\||\\))" \
+    && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qiE "$M93_ASSIGN"; then
+    pass "M93.discovery-map.$M93_MAPPING — typed discovery result is mapped explicitly"
+  else
+    fail "M93.discovery-map.$M93_MAPPING — caller MUST map discovery rc 0=found, 1=absent, 2=indeterminate"
+  fi
+done
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'recapture_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'if RECEIPT_FIELDS=.*jq -er'; then
+  pass "M93.parser-guard — closed snapshot recapture and receipt extraction are guarded"
+else
+  fail "M93.parser-guard — caller MUST guard snapshot recapture and receipt extraction"
+fi
+
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'read -r[[:space:]\\]*' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'PARSED_ARTIFACT_SHA.*PARSED_AUDIT_STATE' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'PHASE2_5_AUDIT_STATE=.*PARSED'; then
+  pass "M93.parser-atomic — caller reads one complete closed-receipt tuple before assignment"
+else
+  fail "M93.parser-atomic — caller MUST atomically read receipt identity/SHA/Phase2.5 before assignment"
+fi
+
+DISCOVERY_CALL_COUNT=$(printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -Ec 'discover_review_verdict_json "\$PR_NUMBER"' || true)
+if [ "$DISCOVERY_CALL_COUNT" -eq 1 ]; then
+  pass "M93.discovery-once — Phase 1.4 selects the audit artifact exactly once"
+else
+  fail "M93.discovery-once — Phase 1.4 MUST call discover_review_verdict_json exactly once, got $DISCOVERY_CALL_COUNT"
+fi
+
+STEP_D_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/^d\. /,/^[[:space:]]*\*\*Old /')
+if printf '%s\n' "$STEP_D_BLOCK" | grep -qE 'AUDIT_ARTIFACT_SHA|cached `?AUDIT_ARTIFACT_SHA' \
+  && ! printf '%s\n' "$STEP_D_BLOCK" | grep -qE 'Glob the canonical|Parse each match|AUDIT_JSON_PATH'; then
+  pass "M93.discovery-reuse — sub-condition (d) reuses closed controller state and does not rediscover"
+else
+  fail "M93.discovery-reuse — sub-condition (d) MUST use cached receipt SHA, not a mutable artifact path"
+fi
+
+INVALID_ENUM_ROW=$(grep -E '^\| `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM`' "$SKILL_FILE" || true)
+if printf '%s\n' "$INVALID_ENUM_ROW" | grep -q 'structural_probe_failed' \
+  && printf '%s\n' "$INVALID_ENUM_ROW" | grep -qE 'no retry|immediate gate_fail'; then
+  pass "M93.structural-enum — structural_probe_failed is a no-retry INVALID subreason"
+else
+  fail "M93.structural-enum — INVALID subreason enum MUST include structural_probe_failed with no retry"
+fi
+
+CALLER_MAPPING_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/The caller maps verdicts to events as follows/,/Any verdict from \(c\)/')
+if printf '%s\n' "$CALLER_MAPPING_BLOCK" | grep -qE 'INVALID / structural_probe_failed' \
+  && printf '%s\n' "$CALLER_MAPPING_BLOCK" | grep -qE 'structural_probe_failed.*No retry|structural_probe_failed.*no retry'; then
+  pass "M93.structural-caller — caller mapping fail-closes structural probe errors without retry"
+else
+  fail "M93.structural-caller — caller mapping MUST handle INVALID / structural_probe_failed as terminal no-retry"
+fi
+
+FAILURE_SUMMARY_BLOCK=$(awk '/^### Step 3\.5 — Failure-mode summary/,/^### Step 4/' "$SKILL_FILE")
+if printf '%s\n' "$FAILURE_SUMMARY_BLOCK" | grep -q 'structural_probe_failed'; then
+  pass "M93.structural-failure-table — failure-mode table documents structural probe failure"
+else
+  fail "M93.structural-failure-table — failure-mode table MUST document structural_probe_failed"
+fi
+
+FIELD_NOTE_BLOCK=$(awk '/^\*\*Field-level note for the new agent-decision events:/,/^$/' "$SKILL_FILE")
+if printf '%s\n' "$FIELD_NOTE_BLOCK" | grep -q 'structural_probe_failed'; then
+  pass "M93.structural-field-note — audit field note declares structural_probe_failed"
+else
+  fail "M93.structural-field-note — audit field note MUST declare structural_probe_failed"
+fi
+
+RUN_SUMMARY_BLOCK=$(awk '/run-summary|Run summary/{capture=1} capture{print}' "$SKILL_FILE")
+if printf '%s\n' "$RUN_SUMMARY_BLOCK" | grep -q 'structural_probe_failed'; then
+  pass "M93.structural-summary — user-facing summary contract includes structural probe failure"
+else
+  fail "M93.structural-summary — run summary MUST surface structural_probe_failed"
+fi
+
+echo
+echo "== M94: Phase 1.4 consumes one closed capture receipt and never reopens source authority =="
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'if AUDIT_VERDICT_RECEIPT=.*discover_review_verdict_json "\$PR_NUMBER"' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'DISCOVERY_STATE=.*review_verdict_discovery_state "\$DISCOVERY_RC"'; then
+  pass "M94.closed-discovery — guarded selector result is classified by the canonical rc-state helper"
+else
+  fail "M94.closed-discovery — caller MUST guard the selector and structurally use review_verdict_discovery_state"
+fi
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'AUDIT_VERDICT_RECEIPT' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_path' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_sha256' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_identity' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'AUDIT_ARTIFACT_SHA=.*(artifact_sha|PARSED_ARTIFACT_SHA)'; then
+  pass "M94.receipt-fields — caller atomically extracts capture receipt and cached artifact SHA"
+else
+  fail "M94.receipt-fields — caller MUST extract snapshot path/digest/identity plus cached artifact SHA from one receipt"
+fi
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'recapture_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'cleanup_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"'; then
+  pass "M94.capture-lifecycle — stable carrier is recaptured and explicitly cleaned"
+else
+  fail "M94.capture-lifecycle — caller MUST digest/identity-recapture then clean the stable carrier"
+fi
+if ! printf '%s\n' "$STEP_D_BLOCK" | grep -qE \
+  '\$\(.*jq|parse_review_verdict_phase2_5[[:space:]]+"|AUDIT_JSON_PATH|snapshot_path' \
+  && printf '%s\n' "$STEP_D_BLOCK" | grep -qE \
+  'AUDIT_ARTIFACT_SHA|cached.*artifact_sha|receipt.*artifact_sha'; then
+  pass "M94.d-closed-state — subcondition (d) uses cached SHA and never rereads any pathname"
+else
+  fail "M94.d-closed-state — subcondition (d) MUST use cached receipt SHA with zero source/snapshot pathname reads"
+fi
+if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'if .*mktemp|mktemp.*\|\|.*indeterminate|mktemp.*return.*2' \
+  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  'mktemp.*indeterminate|temporary.*indeterminate'; then
+  pass "M94.mktemp-closed — caller documents guarded temporary-allocation failure as indeterminate"
+else
+  fail "M94.mktemp-closed — caller MUST not let mktemp failure collapse into absent telemetry"
+fi
 
 echo
 echo "== Summary =="

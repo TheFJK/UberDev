@@ -1924,23 +1924,21 @@ _bt36_out="$(uberdev_goal_locate_review_pr_audit 9999)" || _bt36_rc=$?
 assert_eq "$_bt36_out" "" "BT36.locate-no-pr-empty"
 assert_rc "$_bt36_rc" "0" "BT36.locate-no-pr-rc-zero"
 
-# BT37 — happy: gh resolves issue 37 -> PR=500, .uberdev/runs/<run>/review-pr-verdict.json
-# carries matching .pr, run_id matches RUN_ID_REGEX. Function returns
-# the relative canonical path. The verdict.json uses `"pr": "500"`
-# (string form) because locate_review_pr_audit_by_pr reads .pr via `jq -r`
-# (NOT `jq --argjson`) and then string-compares against $pr, so either
-# `{"pr": "500"}` or `{"pr": 500}` works identically here. BT43's
-# read_merge_result counterpart MUST use integer form (see BT43) — the
-# asymmetry is intentional and reflects each fn's filter.
+# BT37 — happy: gh resolves issue 37 -> PR=500 and canonical discovery returns
+# stable controller-state JSON after cleaning its private snapshot.
+_goal_receipt_field() {
+  printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null
+}
+_bt_verdict_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _bt37_dir="$_b12_tmpdir/bt37-cwd"
 mkdir -p "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111"
 MOCK_PR_LIST_JSON='[{"number":500,"closingIssuesReferences":[{"number":37}],"headRefName":"feat/37-x"}]'
 cat > "$_bt37_dir/.uberdev/runs/20260521-120000-aaaa1111/review-pr-verdict.json" <<'EOF'
-{"pr": "500"}
+{"pr":500,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 EOF
 _bt37_out="$(cd "$_bt37_dir" && uberdev_goal_locate_review_pr_audit 37)"
-assert_eq "$_bt37_out" \
-  ".uberdev/runs/20260521-120000-aaaa1111/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt37_out" '.run_timestamp')" \
+  "20260521-120000" \
   "BT37.locate-happy-path"
 
 # BT38 — multi-run edge case: two runs both match .pr=600; `sort -r |
@@ -1958,12 +1956,12 @@ mkdir -p "$_bt38_dir/.uberdev/runs/20260521-100000-bbbb2222" \
          "$_bt38_dir/.uberdev/runs/20260521-200000-aaaa1111"
 MOCK_PR_LIST_JSON='[{"number":600,"closingIssuesReferences":[{"number":38}],"headRefName":"feat/38-x"}]'
 for _d in 20260521-100000-bbbb2222 20260521-200000-aaaa1111; do
-  printf '%s\n' '{"pr": "600"}' \
+  printf '%s\n' '{"pr":600,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
     > "$_bt38_dir/.uberdev/runs/$_d/review-pr-verdict.json"
 done
 _bt38_out="$(cd "$_bt38_dir" && uberdev_goal_locate_review_pr_audit 38)"
-assert_eq "$_bt38_out" \
-  ".uberdev/runs/20260521-200000-aaaa1111/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt38_out" '.run_timestamp')" \
+  "20260521-200000" \
   "BT38.locate-multi-run-newest-wins"
 
 # BT39 — PR mismatch: verdict.json's .pr is 999 but gh resolves issue 39 to
@@ -2126,16 +2124,16 @@ mkdir -p "$_bt50_scratch"
   mkdir -p .uberdev/runs/20260101-100000-aaaaaaaa
   mkdir -p .uberdev/runs/20260102-120000-bbbbbbbb
   mkdir -p .uberdev/runs/20260103-110000-cccccccc
-  printf '{"pr":700}\n' > .uberdev/runs/20260101-100000-aaaaaaaa/review-pr-verdict.json
-  printf '{"pr":700}\n' > .uberdev/runs/20260102-120000-bbbbbbbb/review-pr-verdict.json
-  printf '{"pr":701}\n' > .uberdev/runs/20260103-110000-cccccccc/review-pr-verdict.json
+  printf '{"pr":700,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > .uberdev/runs/20260101-100000-aaaaaaaa/review-pr-verdict.json
+  printf '{"pr":700,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > .uberdev/runs/20260102-120000-bbbbbbbb/review-pr-verdict.json
+  printf '{"pr":701,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > .uberdev/runs/20260103-110000-cccccccc/review-pr-verdict.json
 )
 _bt50_pr700="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 700)"
 _bt50_pr701="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 701)"
 _bt50_pr999="$(cd "$_bt50_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 999)"
-assert_eq "$_bt50_pr700" ".uberdev/runs/20260102-120000-bbbbbbbb/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt50_pr700" '.run_timestamp')" "20260102-120000" \
   "BT50.newest-audit-for-pr700"
-assert_eq "$_bt50_pr701" ".uberdev/runs/20260103-110000-cccccccc/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt50_pr701" '.run_timestamp')" "20260103-110000" \
   "BT50.single-audit-for-pr701"
 assert_eq "$_bt50_pr999" "" "BT50.no-audit-for-pr999"
 # Non-numeric PR rejected.
@@ -2177,7 +2175,7 @@ UBERDEV_GOAL_ID=test-bt52 uberdev_goal_pr_state_transition test-bt52 800 pushed-
   cd "$_bt52_scratch" || exit 1
   mkdir -p .uberdev/runs/20260201-100000-aaaaaaaa
   cat > .uberdev/runs/20260201-100000-aaaaaaaa/review-pr-verdict.json <<'EOF'
-{"pr":800,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
 EOF
 )
 _bt52_initial="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
@@ -2189,13 +2187,13 @@ assert_eq "$(uberdev_goal_get_pr_state test-bt52 800)" "yellow-held" "BT52.initi
   cd "$_bt52_scratch" || exit 1
   mkdir -p .uberdev/runs/20260202-110000-bbbbbbbb
   cat > .uberdev/runs/20260202-110000-bbbbbbbb/review-pr-verdict.json <<'EOF'
-{"pr":800,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
 EOF
 )
 # Step 3: poll detects new audit, signal green, transitions to green.
 _bt52_latest="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
-assert_eq "$_bt52_latest" \
-  ".uberdev/runs/20260202-110000-bbbbbbbb/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt52_latest" '.run_timestamp')" \
+  "20260202-110000" \
   "BT52.poll-finds-new-audit"
 _bt52_last_seen="$(uberdev_goal_get_last_held_audit test-bt52 800)"
 if [ "$_bt52_latest" != "$_bt52_last_seen" ]; then
@@ -2205,7 +2203,10 @@ else
   FAIL=$((FAIL + 1))
   printf '  FAIL  %s\n' "BT52.new-audit-differs-from-last-seen" >&2
 fi
+_bt52_saved_body="$MOCK_PR_BODY"
+MOCK_PR_BODY="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _bt52_signal="$(cd "$_bt52_scratch" && uberdev_goal_read_trust_signal "$_bt52_latest")"
+MOCK_PR_BODY="$_bt52_saved_body"
 assert_eq "$_bt52_signal" "green" "BT52.new-audit-green-signal"
 _bt52_current_state="$(uberdev_goal_get_pr_state test-bt52 800)"
 UBERDEV_GOAL_ID=test-bt52 uberdev_goal_pr_state_transition test-bt52 800 "$_bt52_current_state" green >/dev/null 2>&1
@@ -2264,12 +2265,12 @@ mkdir -p "$_bt56_scratch"
 (
   cd "$_bt56_scratch" || exit 1
   mkdir -p .uberdev/runs/20260301-100000-deadbeef
-  printf '{"pr":1234}\n' > .uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json
+  printf '{"pr":1234,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > .uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json
 )
 # gh resolves issue 555 -> PR 1234 (closingIssuesReferences), then _by_pr globs.
 MOCK_PR_LIST_JSON='[{"number":1234,"closingIssuesReferences":[{"number":555}],"headRefName":"feat/555-x"}]'
 _bt56_audit="$(cd "$_bt56_scratch" && uberdev_goal_locate_review_pr_audit 555)"
-assert_eq "$_bt56_audit" ".uberdev/runs/20260301-100000-deadbeef/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt56_audit" '.run_timestamp')" "20260301-100000" \
   "BT56.issue-keyed-locator-still-works"
 MOCK_PR_LIST_JSON='[]'
 rm -rf "$_bt56_scratch" 2>/dev/null || true
@@ -2297,7 +2298,7 @@ UBERDEV_GOAL_ID=test-bt57 uberdev_goal_pr_state_transition test-bt57 802 pushed-
   cd "$_bt57_scratch" || exit 1
   mkdir -p .uberdev/runs/20260203-120000-cccccccc
   cat > .uberdev/runs/20260203-120000-cccccccc/review-pr-verdict.json <<'EOF'
-{"pr":802,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+{"pr":802,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
 EOF
 )
 _bt57_baseline="$(cd "$_bt57_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
@@ -2312,12 +2313,12 @@ assert_eq "$(uberdev_goal_get_last_held_audit test-bt57 802)" "$_bt57_baseline" 
   cd "$_bt57_scratch" || exit 1
   mkdir -p .uberdev/runs/20260204-130000-dddddddd
   cat > .uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json <<'EOF'
-{"pr":802,"phases":{}}
+{"pr":802,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{}}
 EOF
 )
 _bt57_new_audit="$(cd "$_bt57_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 802)"
-assert_eq "$_bt57_new_audit" \
-  ".uberdev/runs/20260204-130000-dddddddd/review-pr-verdict.json" \
+assert_eq "$(_goal_receipt_field "$_bt57_new_audit" '.run_timestamp')" \
+  "20260204-130000" \
   "BT57.new-audit-locatable"
 _bt57_signal="$(cd "$_bt57_scratch" && uberdev_goal_read_trust_signal "$_bt57_new_audit" 2>/dev/null)"
 assert_eq "$_bt57_signal" "stale" "BT57.undecidable-audit-emits-stale"
@@ -2359,7 +2360,7 @@ UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 pushed-
   cd "$_bt58_scratch" || exit 1
   mkdir -p .uberdev/runs/20260205-140000-eeeeeeee
   cat > .uberdev/runs/20260205-140000-eeeeeeee/review-pr-verdict.json <<'EOF'
-{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
 EOF
 )
 _bt58_baseline="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
@@ -2375,11 +2376,14 @@ _bt58_transitions_before=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_b
   cd "$_bt58_scratch" || exit 1
   mkdir -p .uberdev/runs/20260206-150000-ffffffff
   cat > .uberdev/runs/20260206-150000-ffffffff/review-pr-verdict.json <<'EOF'
-{"pr":803,"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
+{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
 EOF
 )
 _bt58_new_audit="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
+_bt58_saved_body="$MOCK_PR_BODY"
+MOCK_PR_BODY="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _bt58_signal="$(cd "$_bt58_scratch" && uberdev_goal_read_trust_signal "$_bt58_new_audit")"
+MOCK_PR_BODY="$_bt58_saved_body"
 assert_eq "$_bt58_signal" "yellow" "BT58.new-audit-still-yellow"
 
 # Simulate the step 2e logic: signal is yellow, held_current is yellow-held,
@@ -3449,6 +3453,63 @@ else
   FAIL=$((FAIL+1)); echo "  FAIL  BT86.term-handler-contract (got: [$bt86_out])" >&2
 fi
 rm -rf "$bt86_dir"
+
+echo
+echo "== G48: goal verdict lookup delegates canonical selector and cleans its stable capture =="
+_g48_locator_block="$(awk '
+  /^uberdev_goal_locate_review_pr_audit_by_pr\(\)/ { capture=1 }
+  capture { print }
+  capture && /^}/ { exit }
+' "$GOAL_LIB")"
+if printf '%s\n' "$_g48_locator_block" | grep -q \
+  'discover_review_verdict_json' \
+  && printf '%s\n' "$_g48_locator_block" | grep -q \
+  'review_verdict_discovery_state'; then
+  PASS=$((PASS+1)); echo "  PASS  G48.canonical-selector-and-state-helper"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G48.canonical-selector-and-state-helper (goal must not fork selector/rc semantics)" >&2
+fi
+if printf '%s\n' "$_g48_locator_block" | grep -q \
+  'cleanup_review_verdict_snapshot'; then
+  PASS=$((PASS+1)); echo "  PASS  G48.stable-capture-cleaned"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G48.stable-capture-cleaned (goal must clean the selector carrier on every found path)" >&2
+fi
+if ! printf '%s\n' "$_g48_locator_block" | grep -qE \
+  '_uberdev_goal_glob_worktree|find[[:space:]]|sort -r|jq[[:space:]]+-r'; then
+  PASS=$((PASS+1)); echo "  PASS  G48.no-forked-discovery"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G48.no-forked-discovery (duplicated glob/sort/jq selector remains)" >&2
+fi
+if printf '%s\n' "$_g48_locator_block" | grep -qE \
+  'indeterminate.*missing|DISCOVERY_STATE.*indeterminate|2\\|\\*.*return 0'; then
+  PASS=$((PASS+1)); echo "  PASS  G48.indeterminate-reuses-existing-missing-rereview-path"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G48.indeterminate-reuses-existing-missing-rereview-path" >&2
+fi
+
+echo
+echo "== G49: selector indeterminate emits no controller state and never recaptures =="
+G49_TMP="$(mktemp -d)"
+G49_OUT="$(
+  G49_CALLS="$G49_TMP/calls" bash -c '
+    . "$1"
+    discover_review_verdict_json() { return 2; }
+    review_verdict_discovery_state() {
+      [ "$1" -eq 2 ] && printf "indeterminate\n" || return 1
+    }
+    recapture_review_verdict_snapshot() { printf "recapture\n" >>"$G49_CALLS"; }
+    cleanup_review_verdict_snapshot() { printf "cleanup\n" >>"$G49_CALLS"; }
+    uberdev_goal_locate_review_pr_audit_by_pr 73
+    printf "rc=%s\n" "$?"
+  ' _ "$GOAL_LIB"
+)"
+if [ "$G49_OUT" = "rc=0" ] && [ ! -e "$G49_TMP/calls" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G49 — rc2 reuses missing/re-review with no receipt recapture or controller state"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G49 — rc2 touched a receipt or published controller state (out=[$G49_OUT] calls=[$(cat "$G49_TMP/calls" 2>/dev/null)])" >&2
+fi
+rm -rf "$G49_TMP"
 
 echo
 echo "== Summary =="
