@@ -167,21 +167,58 @@ main loop. That is a separate landing with its own acceptance criteria.
 
 ---
 
-## 6. Risks
+## 6. Risks and accepted behaviour losses
 
-- **R-1 — no survive-the-parent.** If the session ends, the fleet ends. The
-  detached backends remain available for the deliberate fire-and-forget case,
-  and `--backend=claude-bg` is exactly that escape hatch until v1.0.0.
+Every loss below is **printed, never silent** — in this section, in
+`skills/solve-fleet/SKILL.md`, and where it matters at runtime.
+
+- **R-1 — no survive-the-parent.** If the session ends — closed, `/clear`,
+  compact — every in-flight solver dies with it. The detached backends remain
+  available for the deliberate fire-and-forget case, and `--backend=claude-bg`
+  is exactly that escape hatch until v1.0.0.
+- **R-1b — per-child model, effort and permission tier are inexpressible.**
+  The detached backends passed `--model`, `--effort` and the
+  `--dangerously-skip-permissions --permission-mode bypassPermissions` pair as
+  explicit child argv. The Workflow API has no per-agent effort or permission
+  option, so fleet solvers **inherit the session's model, effort and permission
+  tier**. Two consequences worth stating outright: `/turbo --auto`'s bypass is
+  no longer scoped to the children — it is whatever the session already has;
+  and a session running below `max` effort produces lower-effort solvers than
+  the same command would have on a detached backend. Users who need the pinned
+  tier should use `--backend=claude-bg` or raise the session's own settings.
+- **R-1c — no in-flight cancellation through `lib/dispatch.sh`.**
+  `_uberdev_dispatch_cancel_backend` proves a detached child is gone
+  (TERM→poll→KILL→poll, or `claude stop` plus a terminal probe). There is no
+  equivalent for a fleet agent: cancellation belongs to the Workflow runtime
+  (`TaskStop` / skipping an agent), not to this library. The `workflow` arm is
+  absent from the cancel switch by construction, exactly as it is from the
+  dispatch switch.
+- **R-1d — no status records, lifecycle manifest, or capacity lease.** The
+  detached path publishes a canonical status JSON per issue, an
+  `agent-lifecycle.jsonl` event stream with exactly one terminal event, and a
+  capacity lease bound to the owner process identity. The fleet publishes none
+  of those: its observability channel is the `/workflows` progress tree plus
+  the `WORKFLOW_RESULT` line and the structured return. That is *more* legible
+  interactively and *less* legible to a machine consumer — which is precisely
+  why `/goal`, the only machine consumer, is staged (§5) rather than migrated
+  blind.
 - **R-2 — medium-tier fidelity.** The script's design chain is a faithful but
   not identical translation of `/uberdev:orchestrator` (no SDD wave
   decomposition, one bounded review round instead of the always-on
   writer/reviewer pairs). RFC 0012 Phase 6 remains the path to full parity;
   until then `--backend=claude-bg` reaches the original pipeline.
-- **R-3 — a stranded claim.** If the fleet stops early (CB1/CB2, or the session
-  ends), unsolved issues keep their `uberdev:active` label. The script logs
-  this explicitly on every early-exit path; there is no automatic release,
-  because releasing a claim we did not verify is worse than a visible stale
-  label.
+- **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
+  stops early (CB1/CB2, or the session ends), unsolved issues keep their
+  `uberdev:active` label. There is also a window the detached path did not
+  have: the launcher writes claims and then *exits*, and the run only begins
+  when the model relays the args envelope into the `Workflow` call. A run that
+  is never relayed — the model errors, the user interrupts — leaves every claim
+  in the batch held with nothing running. The script logs the stranded set on
+  every early-exit path, but there is no automatic release: releasing a claim
+  we did not verify is worse than a visible stale label. **A
+  `--reap-stale-claims` sweep on the launcher is the correct fix and is owed
+  as a follow-up**; until it lands, `gh issue edit N --remove-label
+  uberdev:active` is the manual recovery.
 - **R-4 — no Workflow tool.** Codex, Gemini, Copilot and pre-Workflow Claude
   Code have no `Workflow` tool. Every surface carries a **No-Workflow
   fallback** naming the explicit backend to re-run with, and `auto` still

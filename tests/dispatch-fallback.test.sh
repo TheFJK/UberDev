@@ -75,7 +75,12 @@ echo "== Functional: auto never selects a detached backend on any OS =="
 for OS_CLASS in macos linux wsl2 windows-native; do
   AUTO_BACKEND="$(/bin/bash -c '
     . "$1"
-    _uberdev_dispatch_os_class() { printf "%s" "$2"; }
+    # Capture the class BEFORE defining the override: inside a function body
+    # $2 is the FUNCTION\047s second argument, not the shell\047s, so reading
+    # it there would silently print empty and the per-OS assertion would pass
+    # vacuously on every platform.
+    _forced_os_class="$2"
+    _uberdev_dispatch_os_class() { printf "%s" "$_forced_os_class"; }
     _uberdev_dispatch_wezterm_available() { return 0; }
     _uberdev_dispatch_codex_available() { return 1; }
     unset CODEX_HOME UBERDEV_RESOLVED_BACKEND

@@ -47,6 +47,16 @@ read-only and write their artifacts to absolute paths under the run dir — an
 isolated researcher would write into its own throwaway worktree and the artifact
 would vanish (the artifact path-leak class this project has hit before).
 
+## What you give up (RFC 0015 §6 — say these out loud, never silently)
+
+| Loss | Detail | Escape hatch |
+|---|---|---|
+| Survive-the-parent | closing the session, `/clear` or a compact kills every in-flight solver | `--backend=claude-bg` |
+| Per-child model / effort / permission tier | the Workflow API has no per-agent effort or permission option, so solvers inherit the **session's** model, effort and tier. `/turbo --auto`'s bypass is no longer scoped to children. | raise the session's own settings, or `--backend=claude-bg` |
+| In-flight cancellation via `lib/dispatch.sh` | cancellation belongs to the Workflow runtime (`TaskStop` / skip), not to this library | `/workflows`, `TaskStop` |
+| Status records / lifecycle manifest / capacity lease | the fleet's observability is the progress tree + the structured return, not machine-readable per-issue JSON | `--backend=claude-bg` for machine consumers |
+| Claim safety on a never-relayed run | claims are written by the launcher *before* the model relays the args, so an un-relayed run holds claims with nothing running | `gh issue edit N --remove-label uberdev:active` (a `--reap-stale-claims` sweep is owed) |
+
 ## What did NOT move
 
 Everything up to and including the claim protocol still runs in
