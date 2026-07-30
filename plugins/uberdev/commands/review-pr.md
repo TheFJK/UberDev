@@ -556,7 +556,7 @@ REVIEW_RUN_REPO_ROOT="$(git -C "${WORKTREE_ROOT:-.}" rev-parse --show-toplevel)"
 if [ "$RUN_ID_WAS_EXPLICIT" -eq 1 ]; then
   REVIEW_RUN_ID_REQUEST="$RUN_ID"
 else
-  REVIEW_RUN_ID_REQUEST="$(date +%Y%m%d-%H%M%S)-$(git -C "$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD)" || {
+  REVIEW_RUN_ID_REQUEST="$(date -u +%Y%m%d-%H%M%S)-$(git -C "$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD)" || {
     rc=$?; return "$rc" 2>/dev/null || exit "$rc"
   }
 fi

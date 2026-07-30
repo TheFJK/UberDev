@@ -320,7 +320,16 @@ if spec is None or spec.loader is None:
     raise SystemExit(2)
 runtime = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = runtime
-spec.loader.exec_module(runtime)
+try:
+    spec.loader.exec_module(runtime)
+except Exception:
+    # Loading the secure artifact runtime is NOT proof that no verdict exists.
+    # Left unguarded this raises before the funnel below is installed, and an
+    # unhandled exception exits 1 -- which the shell maps to exhaustive ABSENT,
+    # i.e. "no verdict for this PR", which /merge treats as gate_pass. A missing
+    # or version-skewed run_manifest.py must fail closed as INDETERMINATE.
+    print("indeterminate: secure artifact runtime failed to load", file=sys.stderr)
+    raise SystemExit(2)
 
 RUN_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[a-f0-9]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -416,11 +425,11 @@ def parse_payload(payload):
 def parse_phase2_5(value):
     phases = value.get("phases")
     if phases is None:
-        return ("legacy", False, 0, 0, None)
+        return ("legacy", False, 0, 0, None, False)
     if not isinstance(phases, dict):
         raise VerdictError("phases must be an object or null")
     if "phase2_5" not in phases:
-        return ("legacy", False, 0, 0, None)
+        return ("legacy", False, 0, 0, None, False)
     phase = phases["phase2_5"]
     if not isinstance(phase, dict):
         raise VerdictError("phase2_5 must be an object")
@@ -451,7 +460,18 @@ def parse_phase2_5(value):
     override = phase.get("override_reason")
     if override is not None and override != OVERRIDE:
         raise VerdictError("phase2_5.override_reason has an invalid value")
-    return ("current", halted, counts[0], counts[1], override)
+
+    # Carried so /goal can gate its Phase 3 truncation on the same authority
+    # /review-pr recorded. Same strict discipline as `halted`: absent/null is
+    # False, any non-boolean is a contract violation, never a silent default.
+    overflow = phase.get("halted_due_to_overflow")
+    if overflow is None:
+        overflow = False
+    elif not isinstance(overflow, bool):
+        raise VerdictError(
+            "phase2_5.halted_due_to_overflow must be boolean or null"
+        )
+    return ("current", halted, counts[0], counts[1], override, overflow)
 
 
 def validate_target(value):
@@ -632,7 +652,7 @@ def discover(expected_pr, capture_dir):
             "expected-PR artifacts tied at the selected timestamp diverge"
         )
     artifact_sha = selected[0][2]
-    state, halted, blocker, critical, override = selected[0][3]
+    state, halted, blocker, critical, override, overflow = selected[0][3]
 
     snapshot_path, snapshot_identity, snapshot_digest = (
         runtime.secure_publish_captured(
@@ -658,6 +678,7 @@ def discover(expected_pr, capture_dir):
         "phase2_5_blocker_count": blocker,
         "phase2_5_critical_count": critical,
         "phase2_5_override_reason": override,
+        "phase2_5_halted_due_to_overflow": overflow,
     }
 
 
@@ -702,6 +723,13 @@ except SystemExit:
     raise
 except (VerdictError, runtime.ManifestRejected, runtime.ManifestRuntimeError, OSError) as exc:
     fail(str(exc))
+except Exception as exc:
+    # Catch-all so no unhandled exception can reach the interpreter and exit 1.
+    # Exit 1 is reserved for the two deliberate `raise SystemExit(1)` sites that
+    # mean "scan completed, no candidate for this PR". Anything else -- an
+    # AttributeError from version skew, a ValueError from a malformed layout
+    # tuple, a RecursionError -- is an undetermined result, not proven absence.
+    fail(f"unexpected selector failure: {type(exc).__name__}")
 PY
 }
 
@@ -725,7 +753,10 @@ PY
 # — a bashism that silently misfires under the zsh Bash tool (#294
 # _uberdev_goal_glob_worktree class; issue #303 / RFC 0012 §3.2 item 2).
 # `find` is an external binary with identical semantics under bash 3.2, zsh,
-# and CI bash. Missing roots are normal (2>/dev/null per find).
+# and CI bash. A root that does not exist is skipped at the pre-scan lstat
+# (FileNotFoundError -> continue). find errors are NOT suppressed: any scan
+# failure, root-identity drift, or capture failure is INDETERMINATE, never
+# absence — do not reintroduce a 2>/dev/null here.
 # Hardening (D4/F8): the <run-id> path segment is validated against
 # RUN_ID_REGEX (^[0-9]{8}-[0-9]{6}-[a-f0-9]+$) via grep -E before the
 # candidate participates in selection (no [[ =~ ]] — BASH_REMATCH is a

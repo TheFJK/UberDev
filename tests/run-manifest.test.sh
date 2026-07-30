@@ -2963,11 +2963,19 @@ for index, module_path in enumerate(sys.argv[1:3]):
         failures.append(f"{index}: crash-residue retry changed partial bytes")
 
     # Sync and readback failures remain fail-closed and never roll back through
-    # a mutable pathname. Both file-fsync and parent-fsync are exercised.
-    for scenario, fail_fsync_call in (
-        ("file-fsync", 1),
-        ("parent-fsync", 2),
-    ):
+    # a mutable pathname. file-fsync is exercised on every platform; parent-fsync
+    # only where a parent descriptor exists.
+    #
+    # secure_publish_exact_no_clobber opens a parent-directory descriptor ONLY on
+    # its POSIX branch, so native Windows performs exactly one fsync. A
+    # ("parent-fsync", 2) trigger therefore never fires there, the publish
+    # correctly succeeds, and expect_failure reports it as "unexpectedly
+    # succeeded" — a test-harness artifact, not a publisher defect.
+    native_windows = module._uses_native_windows_filesystem()
+    fsync_scenarios = [("file-fsync", 1)]
+    if not native_windows:
+        fsync_scenarios.append(("parent-fsync", 2))
+    for scenario, fail_fsync_call in fsync_scenarios:
         sync_parent = root / scenario
         sync_parent.mkdir()
         sync_target = sync_parent / "artifact"
@@ -3149,84 +3157,96 @@ for index, module_path in enumerate(sys.argv[1:3]):
     # the replacement must survive because uncertain identity never authorizes
     # unlink. The same rule applies when the parent pathname drifts while its
     # original descriptor/handle remains open.
-    race_parent = root / "race"
-    race_parent.mkdir()
-    race_target = race_parent / "artifact"
-    race_replacement = root / "race-replacement"
-    race_replacement.write_bytes(b"replacement survives\n")
-    real_stat = module.os.stat
-    target_path_snapshots = [0]
+    # Both scenarios below inject through POSIX-only mechanics and are skipped on
+    # native Windows:
+    #   * the identity race keys on `dir_fd`, which only the POSIX branch passes
+    #     to os.stat — the Windows branch re-validates via os.lstat(absolute), so
+    #     the replacement would never be injected and the publish would succeed;
+    #   * the parent drift renames a directory while a descriptor for a file
+    #     inside it is still open, which Windows refuses (ERROR_ACCESS_DENIED),
+    #     so the publish would fail for the wrong reason and leave the follow-up
+    #     residue assertions unsatisfiable.
+    # The no-rollback property they prove is asserted for Windows by the
+    # existing target-exists and reparse-parent cases above.
+    if not native_windows:
+        race_parent = root / "race"
+        race_parent.mkdir()
+        race_target = race_parent / "artifact"
+        race_replacement = root / "race-replacement"
+        race_replacement.write_bytes(b"replacement survives\n")
+        real_stat = module.os.stat
+        target_path_snapshots = [0]
 
-    def replace_after_first_target_snapshot(path, *args, **kwargs):
-        entry = real_stat(path, *args, **kwargs)
-        if (
-            path == race_target.name
-            and kwargs.get("dir_fd") is not None
-            and not kwargs.get("follow_symlinks", True)
+        def replace_after_first_target_snapshot(path, *args, **kwargs):
+            entry = real_stat(path, *args, **kwargs)
+            if (
+                path == race_target.name
+                and kwargs.get("dir_fd") is not None
+                and not kwargs.get("follow_symlinks", True)
+            ):
+                target_path_snapshots[0] += 1
+                if target_path_snapshots[0] == 1:
+                    os.replace(race_replacement, race_target)
+            return entry
+
+        unlink_calls = []
+        with mock.patch.object(module.os, "stat", replace_after_first_target_snapshot), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
         ):
-            target_path_snapshots[0] += 1
-            if target_path_snapshots[0] == 1:
-                os.replace(race_replacement, race_target)
-        return entry
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(race_target),
+                    b"trusted race bytes\n",
+                    parent_identity(race_parent),
+                ),
+                f"{index}: path/fd identity race",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: path/fd race attempted unlink")
+        if race_target.read_bytes() != b"replacement survives\n":
+            failures.append(f"{index}: racing replacement did not survive")
 
-    unlink_calls = []
-    with mock.patch.object(module.os, "stat", replace_after_first_target_snapshot), mock.patch.object(
-        module.os,
-        "unlink",
-        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
-    ):
-        expect_failure(
-            module,
-            lambda: publish(
-                str(race_target),
-                b"trusted race bytes\n",
-                parent_identity(race_parent),
-            ),
-            f"{index}: path/fd identity race",
-            failures,
-        )
-    if unlink_calls:
-        failures.append(f"{index}: path/fd race attempted unlink")
-    if race_target.read_bytes() != b"replacement survives\n":
-        failures.append(f"{index}: racing replacement did not survive")
+        drift_parent = root / "parent-drift"
+        drift_parent.mkdir()
+        drift_target = drift_parent / "artifact"
+        moved_parent = root / "parent-drift-original"
+        real_write = module.os.write
+        drifted = [False]
 
-    drift_parent = root / "parent-drift"
-    drift_parent.mkdir()
-    drift_target = drift_parent / "artifact"
-    moved_parent = root / "parent-drift-original"
-    real_write = module.os.write
-    drifted = [False]
+        def drift_parent_after_write(descriptor, value):
+            written = real_write(descriptor, value)
+            if not drifted[0]:
+                drifted[0] = True
+                os.rename(drift_parent, moved_parent)
+                drift_parent.mkdir()
+            return written
 
-    def drift_parent_after_write(descriptor, value):
-        written = real_write(descriptor, value)
-        if not drifted[0]:
-            drifted[0] = True
-            os.rename(drift_parent, moved_parent)
-            drift_parent.mkdir()
-        return written
-
-    unlink_calls = []
-    with mock.patch.object(module.os, "write", drift_parent_after_write), mock.patch.object(
-        module.os,
-        "unlink",
-        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
-    ):
-        expect_failure(
-            module,
-            lambda: publish(
-                str(drift_target),
-                b"parent drift bytes\n",
-                parent_identity(drift_parent),
-            ),
-            f"{index}: parent path drift",
-            failures,
-        )
-    if unlink_calls:
-        failures.append(f"{index}: parent drift attempted unlink")
-    if any(drift_parent.iterdir()):
-        failures.append(f"{index}: parent drift mutated replacement directory")
-    if not (moved_parent / "artifact").exists():
-        failures.append(f"{index}: parent drift removed isolated crash residue")
+        unlink_calls = []
+        with mock.patch.object(module.os, "write", drift_parent_after_write), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(drift_target),
+                    b"parent drift bytes\n",
+                    parent_identity(drift_parent),
+                ),
+                f"{index}: parent path drift",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: parent drift attempted unlink")
+        if any(drift_parent.iterdir()):
+            failures.append(f"{index}: parent drift mutated replacement directory")
+        if not (moved_parent / "artifact").exists():
+            failures.append(f"{index}: parent drift removed isolated crash residue")
 
 if failures:
     raise AssertionError("; ".join(failures))

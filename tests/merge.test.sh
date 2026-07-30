@@ -2275,21 +2275,33 @@ else
 fi
 
 FAILURE_SUMMARY_BLOCK=$(awk '/^### Step 3\.5 — Failure-mode summary/,/^### Step 4/' "$SKILL_FILE")
-if printf '%s\n' "$FAILURE_SUMMARY_BLOCK" | grep -q 'structural_probe_failed'; then
+# These three extractions are matched with a herestring, never `printf | grep -q`.
+# `grep -q` exits the instant it matches; if the extracted block is larger than the
+# 64 KiB pipe buffer, `printf` has not finished writing and takes EPIPE, which CI's
+# `-o pipefail` turns into a FAILED pipeline even though the pattern matched. That
+# is platform-sensitive (the block fits the buffer on macOS and does not on Linux),
+# so a piped form here reds CI on ubuntu while passing locally.
+if grep -q 'structural_probe_failed' <<<"$FAILURE_SUMMARY_BLOCK"; then
   pass "M93.structural-failure-table — failure-mode table documents structural probe failure"
 else
   fail "M93.structural-failure-table — failure-mode table MUST document structural_probe_failed"
 fi
 
 FIELD_NOTE_BLOCK=$(awk '/^\*\*Field-level note for the new agent-decision events:/,/^$/' "$SKILL_FILE")
-if printf '%s\n' "$FIELD_NOTE_BLOCK" | grep -q 'structural_probe_failed'; then
+if grep -q 'structural_probe_failed' <<<"$FIELD_NOTE_BLOCK"; then
   pass "M93.structural-field-note — audit field note declares structural_probe_failed"
 else
   fail "M93.structural-field-note — audit field note MUST declare structural_probe_failed"
 fi
 
-RUN_SUMMARY_BLOCK=$(awk '/run-summary|Run summary/{capture=1} capture{print}' "$SKILL_FILE")
-if printf '%s\n' "$RUN_SUMMARY_BLOCK" | grep -q 'structural_probe_failed'; then
+# Anchor on the real `### Run-summary block` heading and stop at the next `### `.
+# The previous pattern (`/run-summary|Run summary/`) first matched prose ~1000 lines
+# above the section and then captured to EOF, so it asserted nothing about the run
+# summary specifically AND produced the oversized block described above.
+RUN_SUMMARY_BLOCK=$(awk '/^### Run-summary block/{capture=1; next} capture && /^### /{exit} capture{print}' "$SKILL_FILE")
+if [ -z "$RUN_SUMMARY_BLOCK" ]; then
+  fail "M93.structural-summary — run-summary section not found (heading renamed? extraction window is empty)"
+elif grep -q 'structural_probe_failed' <<<"$RUN_SUMMARY_BLOCK"; then
   pass "M93.structural-summary — user-facing summary contract includes structural probe failure"
 else
   fail "M93.structural-summary — run summary MUST surface structural_probe_failed"

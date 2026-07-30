@@ -773,8 +773,18 @@ uberdev_goal_read_trust_signal() {
     head_oid="$(gh pr view "$verdict_pr" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
     head_rc=$?
     if [ "$head_rc" -ne 0 ] || [ -z "$head_oid" ]; then
-      printf 'goal-state: gh pr view %s headRefOid unreadable (rc=%s); skipping SHA-binding for this read\n' \
+      # An unreadable HEAD means the verdict CANNOT be bound to the live commit,
+      # so its colour is unproven — not good. Falling through to the colour
+      # decision here would let a rate-limited or offline `gh` turn a verdict
+      # earned on an older SHA into a green light for whatever has been pushed
+      # since, and /goal auto-merges on green. Report stale: it never authorises
+      # a merge, and the existing consumers already handle it by re-reviewing.
+      # Re-review churn on a transient gh outage is the correct trade against
+      # merging unreviewed commits.
+      printf 'goal-state: gh pr view %s headRefOid unreadable (rc=%s); cannot bind verdict to HEAD, reporting stale\n' \
         "$verdict_pr" "$head_rc" >&2
+      printf 'stale\n'
+      return 0
     elif [ "$head_oid" != "$verdict_sha" ]; then
       printf 'goal-state: trust verdict for PR %s is bound to %s but HEAD is %s; treating as stale (re-review needed)\n' \
         "$verdict_pr" "$verdict_sha" "$head_oid" >&2
@@ -924,8 +934,11 @@ uberdev_goal_locate_review_pr_audit() {
   # to the PR-keyed locator. The old solve-bg stdout `pushed PR #N` marker has
   # ZERO producers and `claude --bg` stdout is a detached banner on CLI 2.1.150,
   # so the only reliable issue->PR link is `closingIssuesReferences` / `feat/N-`
-  # head. The `.pr == $pr` filter + lex-greatest-run_id tiebreak lives in one
-  # place (see uberdev_goal_locate_review_pr_audit_by_pr).
+  # head. Candidate filtering and ranking live in ONE place — the canonical
+  # selector in merge-pipeline/lib/discover.sh, reached via
+  # uberdev_goal_locate_review_pr_audit_by_pr. Ranking is by the 15-byte
+  # YYYYMMDD-HHMMSS prefix, requiring byte-identical artifacts on a tie
+  # (RFC 0005 B12); the previous lex-greatest-run_id tiebreak is retired.
   local pr
   pr="$(uberdev_goal_find_pr_for_issue "$issue")"
   [ -n "$pr" ] || return 0
@@ -982,7 +995,8 @@ uberdev_goal_locate_review_pr_audit_by_pr() {
         audit_state: .audit_state,
         phase2_5_halted: .phase2_5_halted,
         phase2_5_blocker_count: .phase2_5_blocker_count,
-        phase2_5_critical_count: .phase2_5_critical_count
+        phase2_5_critical_count: .phase2_5_critical_count,
+        phase2_5_halted_due_to_overflow: .phase2_5_halted_due_to_overflow
       }
     ' <<<"$recaptured" 2>/dev/null)" || stable=""
   fi

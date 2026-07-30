@@ -351,7 +351,7 @@ assert_no_grep "$REVIEW_PR" \
 # R8.4 — Phase 1 generates one reservation prefix and lets the atomic mkdir
 # choose the final discriminator (decoupled from any earlier workflow RUN_ID).
 assert_grep "$REVIEW_PR" \
-  'REVIEW_RUN_ID_REQUEST="\$\(date \+%Y%m%d-%H%M%S\)-\$\(git -C "\$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD\)"' \
+  'REVIEW_RUN_ID_REQUEST="\$\(date -u \+%Y%m%d-%H%M%S\)-\$\(git -C "\$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD\)"' \
   "R8.4 — setup mints one canonical /review-pr Run-ID reservation prefix"
 
 # R8.5 — missing reviewer evidence is supervisory failure, never an empty review
@@ -1432,7 +1432,7 @@ assert_no_grep "$REVIEW_PR" \
   'check-ignore -q -- "\.uberdev/runs/\.review-probe"$' \
   "R32.8c — no unguarded trailing check-ignore probe remains"
 
-RUN_MINT_COUNT="$(grep -cE '^  REVIEW_RUN_ID_REQUEST=.*date \+%Y%m%d-%H%M%S.*git -C .*rev-parse --short HEAD' "$REVIEW_PR" || true)"
+RUN_MINT_COUNT="$(grep -cE '^  REVIEW_RUN_ID_REQUEST=.*date -u \+%Y%m%d-%H%M%S.*git -C .*rev-parse --short HEAD' "$REVIEW_PR" || true)"
 if [ "$RUN_MINT_COUNT" -eq 1 ]; then
   echo "  PASS  R32.9 — RUN_ID is minted at exactly one executable source"
   PASS=$((PASS + 1))
