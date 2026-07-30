@@ -1876,41 +1876,63 @@ for path in sys.argv[1:]:
 }
 if (
   set -u
+  # `set -e` is deliberately NOT relied on here: bash suppresses errexit for the
+  # whole command in an `if` condition, and that suppression is inherited by this
+  # subshell even if it re-enables it itself (`if ( set -e; false; echo hi )`
+  # still prints `hi`). Without an explicit exit per assertion the subshell's
+  # status would be decided solely by its LAST command, making every safety
+  # assertion below non-binding — a reaper that unlinks a LIVE run's markers
+  # would ship green. `r36_require` restores the binding, and names the failure.
+  r36_require() {
+    "$@" && return 0
+    echo "        R36.4 assertion failed: $*" >&2
+    exit 1
+  }
   RUN_ID=
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   . "$R36_TMP/helpers.sh"
-  mkdir "$R36_TMP/repository"
-  git -C "$R36_TMP/repository" init -q
-  git -C "$R36_TMP/repository" config user.email test@example.com
-  git -C "$R36_TMP/repository" config user.name Test
-  printf 'fixture\n' >"$R36_TMP/repository/README.md"
-  git -C "$R36_TMP/repository" add README.md
-  git -C "$R36_TMP/repository" commit -qm init
-  root_record="$(review_prepare_run_root "$R36_TMP/repository")"
-  R36_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$root_record")"
-  runs_identity="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$root_record")"
-  review_publish_local_ignore "$R36_RUNS_ROOT" "$runs_identity"
-  R36_SEED 20260101-000000-aaaaaaaa stale
-  R36_SEED 20260101-000001-bbbbbbbb fresh
-  R36_SEED 20260101-000002-cccccccc stale review-pr-verdict.json
-  R36_SEED 20260101-000003-dddddddd stale surprise.txt
-  reaped="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)"
-  [ "$reaped" = 1 ]
+  r36_require mkdir "$R36_TMP/repository"
+  r36_require git -C "$R36_TMP/repository" init -q
+  r36_require git -C "$R36_TMP/repository" config user.email test@example.com
+  r36_require git -C "$R36_TMP/repository" config user.name Test
+  r36_require printf 'fixture\n' >"$R36_TMP/repository/README.md"
+  r36_require git -C "$R36_TMP/repository" add README.md
+  r36_require git -C "$R36_TMP/repository" commit -qm init
+  root_record="$(review_prepare_run_root "$R36_TMP/repository")" || exit 1
+  R36_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$root_record")" || exit 1
+  runs_identity="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$root_record")" || exit 1
+  r36_require review_publish_local_ignore "$R36_RUNS_ROOT" "$runs_identity"
+  r36_require R36_SEED 20260101-000000-aaaaaaaa stale
+  r36_require R36_SEED 20260101-000001-bbbbbbbb fresh
+  r36_require R36_SEED 20260101-000002-cccccccc stale review-pr-verdict.json
+  r36_require R36_SEED 20260101-000003-dddddddd stale surprise.txt
+  reaped="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>"$R36_TMP/reap.err")" || exit 1
+  r36_require [ "$reaped" = 1 ]
+  # Observability: the documented contract is a `notice:` line for what it
+  # reaped AND for every directory that still looks live but was left alone.
+  # An operator debugging a /goal stall reads these; silence there is the same
+  # failure mode as the stall itself.
+  r36_require grep -q "retired abandoned reservation markers in .*20260101-000000-aaaaaaaa" "$R36_TMP/reap.err"
+  r36_require grep -q "20260101-000001-bbbbbbbb/locked is .*s old, under the 60s reap policy" "$R36_TMP/reap.err"
+  r36_require grep -q "20260101-000003-dddddddd holds unrecognized entries" "$R36_TMP/reap.err"
   # (a) abandoned: markers gone, directory preserved as evidence
-  [ -d "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa" ]
-  [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/locked" ]
-  [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/pr-context.json" ]
+  r36_require [ -d "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa" ]
+  r36_require [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/locked" ]
+  r36_require [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/pr-context.json" ]
   # (b) fresh run: a live /review-pr must never be reaped out from under itself
-  [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/locked" ]
-  [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/pr-context.json" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/locked" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/pr-context.json" ]
   # (c) published run: a verdict means the final fence owns the markers
-  [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/locked" ]
-  [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/review-pr-verdict.json" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/locked" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/pr-context.json" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/review-pr-verdict.json" ]
   # (d) unrecognized content: never guess, never delete
-  [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/locked" ]
-  [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/surprise.txt" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/locked" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/pr-context.json" ]
+  r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/surprise.txt" ]
   # The reaper is idempotent and reports 0 on a second pass.
-  [ "$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)" = 0 ]
+  second_pass="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)" || exit 1
+  r36_require [ "$second_pass" = 0 ]
 ); then
   echo "  PASS  R36.4 — reaps only abandoned, verdict-less, recognized reservations (idempotent)"
   PASS=$((PASS + 1))
@@ -1930,12 +1952,14 @@ awk '
 ' "$REVIEW_PR" >"$R37_TMP/triple-guard.sh"
 run_r37_case() {
   local name="$1" payload="$2" want_rc="$3" want_run_id="$4"
+  local runs_root="${5:-/repo/.uberdev/runs}"
   local out rc=0
   out="$(
-    R37_PAYLOAD="$payload" R37_GUARD="$R37_TMP/triple-guard.sh" bash -c '
+    R37_PAYLOAD="$payload" R37_GUARD="$R37_TMP/triple-guard.sh" \
+    R37_RUNS_ROOT="$runs_root" bash -c '
       set -u
       review_abandon_run_reservation(){ :; }
-      REVIEW_RUNS_ROOT=/repo/.uberdev/runs
+      REVIEW_RUNS_ROOT="$R37_RUNS_ROOT"
       REVIEW_RESERVATION_OUTPUT="$R37_PAYLOAD"
       # The guard refuses with `return 2 2>/dev/null || exit 2`, and a `return`
       # from a sourced file only ends the source — propagate it explicitly so a
@@ -1974,6 +1998,22 @@ not-a-run-id
     "v1:abcDEF
 20260729-120000-abcdef01
 /tmp/elsewhere/20260729-120000-abcdef01" 2 ""
+  # R37.6/R37.7 — the shape-checks-windows regression this guard first shipped
+  # with. `MARKER_DIR` is minted by Python (`os.path.abspath` + `os.path.join`),
+  # so on native Windows it is `C:\...\<RUN_ID>` while the shell builds the
+  # expected value with `/`. A POSIX-only absoluteness test plus a raw string
+  # equality rejected the HAPPY path and abandoned the just-reserved directory.
+  # Only the Windows CI job exercises this — assert it explicitly on every OS.
+  run_r37_case "R37.6 — a native-Windows drive-letter triple is accepted" \
+    'v1:abcDEF
+20260729-120000-abcdef01
+C:\repo\.uberdev\runs\20260729-120000-abcdef01' 0 "20260729-120000-abcdef01" \
+    'C:\repo\.uberdev\runs'
+  run_r37_case "R37.7 — a Windows MARKER_DIR outside the validated runs root is refused" \
+    'v1:abcDEF
+20260729-120000-abcdef01
+C:\elsewhere\20260729-120000-abcdef01' 2 "" \
+    'C:\repo\.uberdev\runs'
 else
   echo "  FAIL  R37.0 — could not slice review-reservation-triple-guard-v1 (markers renamed?)"
   FAIL=$((FAIL + 1))

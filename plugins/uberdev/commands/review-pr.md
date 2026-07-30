@@ -584,6 +584,12 @@ def marker_stat(run_dir, run_descriptor, name):
     return os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
 
 def reap_run_directory(run_dir, run_descriptor, entries):
+    # The two routine paths below stay SILENT on purpose: a runs root
+    # accumulates one directory per completed review, and every one of those
+    # either holds a verdict or has already had its markers retired by the final
+    # fence. Announcing them would emit a line per historical run and bury the
+    # ones an operator actually needs. Every path that leaves a LIVE-looking
+    # reservation in place is announced.
     if VERDICT in entries:
         return False
     if "locked" not in entries:
@@ -597,6 +603,14 @@ def reap_run_directory(run_dir, run_descriptor, entries):
         note(f"{run_dir}/locked is not a plain single-linked owned file; leaving it untouched")
         return False
     if (now - locked.st_mtime) <= reap_secs:
+        # This is the ONE skip an operator chasing a `/uberdev:goal` stall needs
+        # named: the directory still looks like an in-flight run, so the reaper
+        # deliberately kept its hands off and the PR stays "in review" until the
+        # marker ages past the policy.
+        note(
+            f"{run_dir}/locked is {int(now - locked.st_mtime)}s old, "
+            f"under the {reap_secs}s reap policy; leaving it untouched"
+        )
         return False
     removed = 0
     for name in MARKERS:
@@ -924,14 +938,27 @@ MARKER_DIR="${REVIEW_RESERVATION_REMAINDER#*$'\n'}"
 # RUN_ID == MARKER_DIR and a pure non-emptiness guard passes — exporting the
 # base64 receipt blob AS the RUN_ID and using it as a marker pathname. Validate
 # each component's SHAPE, not just its length.
+#
+# Both pathnames are compared SEPARATOR-NORMALISED, because the two sides are
+# produced by different worlds. `MARKER_DIR` comes from Python
+# (`os.path.join(os.path.abspath(runs_root), run_id)`), which on native Windows
+# emits `C:\...\.uberdev\runs\<RUN_ID>` — drive letter, backslashes — while this
+# shell builds `$REVIEW_RUNS_ROOT/$RUN_ID` with a forward slash. A `/*`-only
+# absoluteness test plus a raw string equality therefore rejected every
+# legitimate Windows reservation: the guard fired on the HAPPY path and
+# abandoned the directory it had just reserved. Normalising `\` to `/` on both
+# sides keeps the assertion exact on POSIX and correct on Windows.
 REVIEW_RESERVATION_VALID=1
+REVIEW_MARKER_DIR_NORMALIZED="${MARKER_DIR//\\//}"
+REVIEW_MARKER_DIR_EXPECTED="${REVIEW_RUNS_ROOT//\\//}/$RUN_ID"
 [[ "$REVIEW_RUN_RESERVATION_RECEIPT" =~ ^v1:[A-Za-z0-9_-]+$ ]] || REVIEW_RESERVATION_VALID=0
 [[ "$RUN_ID" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || REVIEW_RESERVATION_VALID=0
-case "$MARKER_DIR" in
-  /*) ;;
+case "$REVIEW_MARKER_DIR_NORMALIZED" in
+  /*) ;;               # POSIX absolute (and UNC `\\server\share`, once normalised)
+  [A-Za-z]:/*) ;;      # native Windows absolute (`C:\...`)
   *) REVIEW_RESERVATION_VALID=0 ;;
 esac
-[ "$MARKER_DIR" = "$REVIEW_RUNS_ROOT/$RUN_ID" ] || REVIEW_RESERVATION_VALID=0
+[ "$REVIEW_MARKER_DIR_NORMALIZED" = "$REVIEW_MARKER_DIR_EXPECTED" ] || REVIEW_RESERVATION_VALID=0
 if [ "$REVIEW_RESERVATION_VALID" -ne 1 ]; then
   echo "error: review run reservation returned an incomplete or malformed receipt triple" >&2
   review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" 2>/dev/null || true
@@ -1403,9 +1430,18 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    is a plain single-linked file owned by this user, and that marker's mtime is
    older than `REVIEW_RESERVATION_REAP_SECS` (default `7200` = 2 x the
    `REVIEW_GRACE_SECS` window `/goal` itself uses). It never removes a
-   directory, never touches a verdict, never installs an `EXIT` trap, and prints
-   a `notice:` line for every directory it skips or reaps — a reaper that fails
-   quietly reproduces the very stall it exists to prevent.
+   directory, never touches a verdict, and never installs an `EXIT` trap.
+
+   It prints a `notice:` line for every directory it reaps, and for every
+   directory that still looks like a live reservation but was left alone anyway
+   — `locked` younger than the reap policy, `locked` not a plain single-linked
+   owned file, unrecognized entries present, or an `OSError` on the unlink or
+   fsync. Those are the lines an operator chasing a `/goal` stall needs, and a
+   reaper that failed quietly would reproduce the very stall it exists to
+   prevent. The two routine skips are deliberately silent: a directory holding a
+   `review-pr-verdict.json`, and a directory with no `locked` marker, are the
+   normal end state of every completed review, so announcing them would emit one
+   line per historical run and bury the actionable ones.
 
    The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The marker remains truthful across shell boundaries until the receipt-authorized final fence publishes the verdict and retires it. If the producer exits before finalization, `/goal`'s grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without an operator or an `EXIT`-trap race. See RFC 0005 §9 D220b for the cross-component design rationale.
 
@@ -2231,46 +2267,87 @@ PY
 
     ### 6c.2 MONITOR — bounded `gh pr checks --watch` passes
 
-    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants). The literal `300` is `CI_MONITOR_PASS_SEC`, declared HERE — a `/review-pr`-owned monitor constant, exactly like the `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` settle literals in 6c.1 above.
+    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants). `CI_MONITOR_PASS_SEC` (`240`), `CI_MONITOR_FENCE_SEC` (`480`), `CI_MONITOR_MIN_PASS_SEC` (`30`) and `CI_MONITOR_PASSES_MAX` (`48`) are declared HERE — `/review-pr`-owned monitor constants, exactly like the `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` settle literals in 6c.1 above.
 
-    **Why the watch is split into passes (#302).** Every `bash` block in this command is executed as ONE harness call, and that harness caps a single call at `600000` ms. A single `timeout 1200 gh pr checks --watch` therefore never reaches its own `timeout`: on a genuinely slow CI the *harness* kills the call at ≤ 600 s and reports a code that is neither gh's `0` nor its documented `8`. Mapping "non-zero, non-8" straight to red then dispatched `ci-failure-classifier` and `ci-code-fixer` against CI that had not failed — a fabricated red on every long run. The fix is to keep each watch pass strictly inside the harness ceiling and accumulate the passes against the 20-minute budget, so "the budget ran out" stays a distinct, first-class outcome instead of being laundered into "a check failed".
+    **Why the watch is split into passes AND across fences (#302).** Every `bash` block in this command is executed as ONE harness call, and that harness caps a single call at `600000` ms. A single `timeout 1200 gh pr checks --watch` therefore never reaches its own `timeout`: on a genuinely slow CI the *harness* kills the call at ≤ 600 s and reports a code that is neither gh's `0` nor its documented `8`. Mapping "non-zero, non-8" straight to red then dispatched `ci-failure-classifier` and `ci-code-fixer` against CI that had not failed — a fabricated red on every long run.
+
+    Bounding each `timeout` is only half of that fix. A loop that *accumulates* 1200 s of passes still spends them inside one harness call, so on the very CI this targets — anything slower than ~600 s — the harness still kills the fence, and because `CI_MONITOR_VERDICT` and the elapsed counter are fence-scoped shell state the kill destroys them too. The `pending → OUTCOME=halted` arm would then be unreachable in exactly the scenario it exists for. So the budget is enforced in two nested layers:
+
+    - **Per fence:** `CI_MONITOR_FENCE_SEC` = 480 s (two 240 s passes), plus at most one `CI_MONITOR_MIN_PASS_SEC` floor sleep — a hard ceiling of ~510 s, comfortably inside the 600 s harness cap. No harness kill, ever.
+    - **Across fences:** the 1200 s total travels as an absolute `CI_MONITOR_DEADLINE_SEC` and a running `CI_MONITOR_PASSES_USED`, both printed on the `resume` path and rebound by the orchestrator on re-entry. That is the same cross-fence carry `RUN_ID` uses, and it is immune to the fence-scoped-state class because nothing survives *inside* the shell.
+
+    Three fences (480 + 480 + 240) therefore spend the full 20 minutes as at most five watch passes, and "the budget ran out" stays a distinct, first-class outcome instead of being laundered into "a check failed" or lost to a harness kill.
 
     ```bash
     # BEGIN ci-monitor-bounded-loop-v1
-    CI_MONITOR_PASS_SEC=300          # /review-pr-owned; must stay < the 600s harness call ceiling
-    CI_MONITOR_ELAPSED_SEC=0
-    CI_MONITOR_PASSES_USED=0
-    CI_MONITOR_VERDICT=pending       # pending | green | red
+    CI_MONITOR_PASS_SEC=240          # one watch pass
+    CI_MONITOR_FENCE_SEC=480         # this FENCE's share of the budget (2 passes)
+    CI_MONITOR_MIN_PASS_SEC=30       # = CI_WATCH_INTERVAL_SEC; minimum-progress floor
+    CI_MONITOR_PASSES_MAX=48         # clock-independent backstop (1200/30 = 40 real passes)
+    CI_MONITOR_STARTED_SEC="$(date +%s)"
+    # Cross-fence carry. The 20-minute budget outlives any single harness call,
+    # so it is an absolute DEADLINE plus a pass count that this fence RECEIVES
+    # and RE-EMITS — never a fence-local accumulator that a harness kill would
+    # silently destroy along with the verdict it was supposed to produce.
+    CI_MONITOR_DEADLINE_SEC="${CI_MONITOR_DEADLINE_SEC:-$(( CI_MONITOR_STARTED_SEC + 1200 ))}"
+    CI_MONITOR_PASSES_USED="${CI_MONITOR_PASSES_USED:-0}"
+    CI_MONITOR_FENCE_DEADLINE_SEC=$(( CI_MONITOR_STARTED_SEC + CI_MONITOR_FENCE_SEC ))
+    if [ "$CI_MONITOR_FENCE_DEADLINE_SEC" -gt "$CI_MONITOR_DEADLINE_SEC" ]; then
+      CI_MONITOR_FENCE_DEADLINE_SEC="$CI_MONITOR_DEADLINE_SEC"
+    fi
+    CI_MONITOR_VERDICT=pending       # pending | green | red | resume
     CI_MONITOR_RC=8
-    while [ "$CI_MONITOR_ELAPSED_SEC" -lt 1200 ]; do
-      CI_MONITOR_PASS_STARTED_SEC="$(date +%s)"
+    while : ; do
+      CI_MONITOR_NOW_SEC="$(date +%s)"
+      # Total budget spent, or the backstop tripped → terminal, halted.
+      if [ "$CI_MONITOR_NOW_SEC" -ge "$CI_MONITOR_DEADLINE_SEC" ] || \
+         [ "$CI_MONITOR_PASSES_USED" -ge "$CI_MONITOR_PASSES_MAX" ]; then
+        CI_MONITOR_VERDICT=pending
+        break
+      fi
+      # This fence's share is spent but the budget is not → hand back, don't halt.
+      if [ "$CI_MONITOR_NOW_SEC" -ge "$CI_MONITOR_FENCE_DEADLINE_SEC" ]; then
+        CI_MONITOR_VERDICT=resume
+        break
+      fi
+      CI_MONITOR_WINDOW_SEC=$(( CI_MONITOR_FENCE_DEADLINE_SEC - CI_MONITOR_NOW_SEC ))
+      if [ "$CI_MONITOR_WINDOW_SEC" -gt "$CI_MONITOR_PASS_SEC" ]; then
+        CI_MONITOR_WINDOW_SEC="$CI_MONITOR_PASS_SEC"
+      fi
       CI_MONITOR_RC=0
-      timeout "$CI_MONITOR_PASS_SEC" gh pr checks "$PR_NUMBER" --watch --interval 30 || CI_MONITOR_RC=$?
-      CI_MONITOR_PASS_ELAPSED_SEC=$(( $(date +%s) - CI_MONITOR_PASS_STARTED_SEC ))
-      CI_MONITOR_ELAPSED_SEC=$(( CI_MONITOR_ELAPSED_SEC + CI_MONITOR_PASS_ELAPSED_SEC ))
+      timeout "$CI_MONITOR_WINDOW_SEC" gh pr checks "$PR_NUMBER" --watch --interval 30 || CI_MONITOR_RC=$?
       CI_MONITOR_PASSES_USED=$(( CI_MONITOR_PASSES_USED + 1 ))
+      CI_MONITOR_PASS_ELAPSED_SEC=$(( $(date +%s) - CI_MONITOR_NOW_SEC ))
       if [ "$CI_MONITOR_RC" -eq 0 ]; then
         CI_MONITOR_VERDICT=green
         break
       fi
-      # 8 is gh's documented "Checks pending" code — always another pass.
-      # Written as a full `if` rather than `[ … ] && continue`: the short-circuit
+      # 8 is gh's documented "Checks pending" code. 124 is `timeout`'s own kill
+      # code, and a pass that burned its FULL window is indistinguishable from
+      # that truncation (a harness kill reports its own code, not 124). All three
+      # mean "still running when we stopped watching" — pending, NEVER red. Only
+      # a non-zero, non-8 code that came back EARLY is gh reporting a check that
+      # actually failed.
+      # Written as a full `if` rather than `[ … ] && break`: the short-circuit
       # form leaves the statement at rc 1 whenever the test is false, which
       # aborts the whole fence under `set -e`.
-      if [ "$CI_MONITOR_RC" -eq 8 ]; then
-        continue
+      if [ "$CI_MONITOR_RC" -ne 8 ] && [ "$CI_MONITOR_RC" -ne 124 ] && \
+         [ "$CI_MONITOR_PASS_ELAPSED_SEC" -lt "$CI_MONITOR_WINDOW_SEC" ]; then
+        CI_MONITOR_VERDICT=red
+        break
       fi
-      # 124 is `timeout`'s own kill code, and a pass that burned its FULL window
-      # is indistinguishable from that truncation (a harness kill reports its own
-      # code, not 124). Both mean "still running when we stopped watching" — they
-      # are pending, NEVER red. Only a non-zero, non-8 code that came back EARLY
-      # is gh reporting a check that actually failed.
-      if [ "$CI_MONITOR_RC" -eq 124 ] || [ "$CI_MONITOR_PASS_ELAPSED_SEC" -ge "$CI_MONITOR_PASS_SEC" ]; then
-        continue
+      # Minimum-progress floor. A pass that returns in ~0s (gh handing back 8
+      # immediately, a watch that finds nothing to watch) otherwise re-enters
+      # with zero accumulated wall clock and no sleep — an unbounded hot loop
+      # against the GitHub API. Sleeping the remainder makes every pass advance
+      # the budget by at least CI_WATCH_INTERVAL_SEC.
+      if [ "$CI_MONITOR_PASS_ELAPSED_SEC" -lt "$CI_MONITOR_MIN_PASS_SEC" ]; then
+        sleep $(( CI_MONITOR_MIN_PASS_SEC - CI_MONITOR_PASS_ELAPSED_SEC ))
       fi
-      CI_MONITOR_VERDICT=red
-      break
     done
+    # Elapsed is derived from the shared deadline, so it stays a TOTAL across
+    # every fence rather than restarting at 0 on each re-entry.
+    CI_MONITOR_ELAPSED_SEC=$(( 1200 - ( CI_MONITOR_DEADLINE_SEC - $(date +%s) ) ))
     case "$CI_MONITOR_VERDICT" in
       green)
         OUTCOME=green
@@ -2278,6 +2355,12 @@ PY
         ;;
       red)
         audit ci_monitor_red passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC rc=$CI_MONITOR_RC
+        ;;
+      resume)
+        # Deliberately NOT an audit event and NOT an OUTCOME: nothing terminal
+        # happened. Recording a phase outcome here would report a CI verdict the
+        # monitor never reached. The carry below is the whole handoff.
+        echo "notice: CI monitor fence budget spent, total budget remains — re-run this fence with CI_MONITOR_DEADLINE_SEC=$CI_MONITOR_DEADLINE_SEC CI_MONITOR_PASSES_USED=$CI_MONITOR_PASSES_USED" >&2
         ;;
       *)
         OUTCOME=halted
@@ -2287,15 +2370,23 @@ PY
     # END ci-monitor-bounded-loop-v1
     ```
 
-    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** total (`1200` = `CI_MONITOR_TIMEOUT_SEC`), spent as at most four `CI_MONITOR_PASS_SEC`-bounded passes. The watch terminates on its own once every check leaves the `pending` bucket. Terminal mapping:
+    **When `CI_MONITOR_VERDICT=resume`, the fence is NOT done.** Re-run this
+    exact `bash` block as a NEW harness call, with `CI_MONITOR_DEADLINE_SEC` and
+    `CI_MONITOR_PASSES_USED` bound to the two values the `notice:` line printed.
+    Repeat until the block returns `green`, `red`, or `pending`. Do not fall
+    through to CLASSIFY, do not set `OUTCOME`, and do not anchor a trust trail
+    on a `resume` — it carries no verdict.
+
+    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** total (`1200` = `CI_MONITOR_TIMEOUT_SEC`), spent as at most five `CI_MONITOR_PASS_SEC`-bounded passes across at most three `CI_MONITOR_FENCE_SEC`-bounded fences. The watch terminates on its own once every check leaves the `pending` bucket. Verdict mapping:
 
     | `CI_MONITOR_VERDICT` | how it is reached | OUTCOME | Audit event |
     |---|---|---|---|
     | `green` | any pass exits `0` — all checks green | `green` | `ci_monitor_green` |
-    | `red` | a pass exits non-zero, non-8 **and returned before consuming its full `CI_MONITOR_PASS_SEC` window** | (proceed to CLASSIFY) | `ci_monitor_red` |
-    | `pending` | the 1200 s budget was exhausted while every pass reported `8`, `124`, or a full-window truncation | `halted` | `ci_monitor_timeout` (`data.subreason=monitor_timeout`) |
+    | `red` | a pass exits non-zero, non-8 **and returned before consuming its full `CI_MONITOR_WINDOW_SEC` window** | (proceed to CLASSIFY) | `ci_monitor_red` |
+    | `resume` | this fence's `CI_MONITOR_FENCE_SEC` share is spent and the 1200 s total is not | **none — not terminal** | none (`notice:` carry line only) |
+    | `pending` | the 1200 s total was exhausted (or `CI_MONITOR_PASSES_MAX` tripped) while every pass reported `8`, `124`, or a full-window truncation | `halted` | `ci_monitor_timeout` (`data.subreason=monitor_timeout`) |
 
-    `halted` is the canonical `CI_OUTCOME_ENUM` member, not a `halted_timeout` synthetic. `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
+    `resume` is the only non-terminal verdict; it emits no audit event precisely because no phase outcome has occurred yet. `halted` is the canonical `CI_OUTCOME_ENUM` member, not a `halted_timeout` synthetic. `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard), and `CI_MONITOR_MIN_PASS_SEC` re-uses that same 30 s as the loop's minimum-progress floor so a pass that returns instantly cannot spin the loop against the API. `CI_MONITOR_PASSES_MAX` is the clock-independent backstop underneath it: even if `date` never advanced, the loop cannot exceed 48 watch invocations.
 
     On a `red` MONITOR verdict, refresh the check projection before
     CLASSIFY. A pending-only initial probe can become red while `--watch` is
