@@ -1,0 +1,4 @@
+UBERDEV_DESIGN_BARRIER_INSTANCES=("${UBERDEV_DESIGN_PREPARED_INSTANCES[@]}")
+for instance in "${UBERDEV_DESIGN_BARRIER_INSTANCES[@]}"; do
+  uberdev_design_wait "$instance" 300
+done
