@@ -474,6 +474,50 @@ else
   check jNoLeak true         "B44 the rejected path never reaches the solver prompt"
 fi
 
+echo "== S: /goal interim demotion (RFC 0015 §5) =="
+# /goal still drives uberdev_dispatch_one itself, which cannot serve the
+# workflow backend. Without an explicit demotion every /goal dispatch would
+# hit the loud refusal above and the convergence loop would fail on cycle 1.
+GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
+grep -q 'uberdev_dispatch_demote_workflow_to_detached /goal' "$GOAL_SKILL" \
+  && pass "S16 goal-pipeline Phase 0 demotes a workflow resolution before dispatching" \
+  || fail "S16 goal-pipeline would dispatch with backend=workflow and fail every issue"
+grep -q 'uberdev_dispatch_demote_workflow_to_detached()' "$DISPATCH" \
+  && pass "S17 the demotion helper exists in lib/dispatch.sh" \
+  || fail "S17 no demotion helper"
+
+DEMOTED="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf linux; }
+  UBERDEV_RESOLVED_BACKEND=workflow
+  uberdev_dispatch_demote_workflow_to_detached /goal 2>/dev/null || exit
+  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH")"
+[ "$DEMOTED" = claude-bg ] \
+  && pass "S18 a workflow resolution demotes to a detached backend for /goal" \
+  || fail "S18 demotion produced '$DEMOTED', expected claude-bg on linux"
+
+DEMOTE_NOISE="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf linux; }
+  UBERDEV_RESOLVED_BACKEND=workflow
+  uberdev_dispatch_demote_workflow_to_detached /goal
+' _ "$DISPATCH" 2>&1 >/dev/null)"
+printf '%s' "$DEMOTE_NOISE" | grep -Fq 'RFC 0015 §5' \
+  && pass "S19 the demotion is announced on stderr, never silent" \
+  || fail "S19 the demotion is silent: $DEMOTE_NOISE"
+
+NOOP="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf linux; }
+  UBERDEV_RESOLVED_BACKEND=codex
+  uberdev_dispatch_demote_workflow_to_detached /goal 2>/dev/null || exit
+  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH")"
+[ "$NOOP" = codex ] \
+  && pass "S20 demotion is a no-op for any non-workflow backend" \
+  || fail "S20 demotion clobbered a non-workflow backend: got '$NOOP'"
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"
