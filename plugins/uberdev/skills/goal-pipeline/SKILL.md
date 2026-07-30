@@ -1,6 +1,6 @@
 ---
 name: goal-pipeline
-description: "Autonomous convergence pipeline for /uberdev:goal. Drives cycle algorithm (RFC 0005 §3.3) and PR/issue state machines. Inherits backend dispatch from solve-pipeline."
+description: "Autonomous convergence pipeline for /uberdev:goal. Drives cycle algorithm (RFC 0005 §3.3) and PR/issue state machines. Inherits backend dispatch from solve-pipeline; still dispatches detached children, so a Workflow-native resolution is demoted per RFC 0015 §5 until Phase 1 migrates."
 ---
 
 # Goal Pipeline (autonomous convergence body for /uberdev:goal)
@@ -276,6 +276,13 @@ Notes on the enums:
    export UBERDEV_DISPATCH_BACKEND_REQUESTED
    uberdev_dispatch_preflight
    # UBERDEV_RESOLVED_BACKEND is now exported (D15: resolved once, frozen for the run).
+   # INTERIM (RFC 0015 §5): /goal still drives uberdev_dispatch_one itself, and
+   # that entry point cannot serve the Workflow-native backend by construction
+   # (the fleet is spawned by the calling session's Workflow tool, not by
+   # lib/dispatch.sh). Demote a `workflow` resolution to the detached backend
+   # the pre-RFC-0015 auto matrix would have picked, LOUDLY. Delete this call
+   # when Phase 1 emits an args envelope instead of dispatching directly.
+   uberdev_dispatch_demote_workflow_to_detached /goal || exit 1
    # /goal dispatches /uberdev:orchestrator per issue; mirror /turbo's unattended dispatch env so the orchestrator child inherits the same flags /turbo would have set.
    export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO=1 in the bg env)
    # /goal opts every dispatched bg agent into bypassPermissions so the cmux
