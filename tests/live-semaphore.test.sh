@@ -90,16 +90,23 @@ fi
 # value whenever ANY single line matches — while the variable still carries every
 # line. LEASE_PATH is caller-supplied, so a scope or filename component that
 # embeds a newline in front of a well-formed component used to clear both
-# anchored patterns and be accepted verbatim. Both fixtures below materialise the
-# poisoned directory on disk so the pre-fix library returns 0 (accepted), not a
-# coincidental 2 from some later existence check — the assertions therefore lock
-# the guard, not the geometry.
+# anchored patterns and be accepted verbatim. Every fixture below materialises
+# the poisoned directory on disk so the pre-fix library returns 0 (accepted), not
+# a coincidental 2 from some later existence check — the assertions therefore
+# lock the guard, not the geometry.
+#
+# The TRAILING-newline pair is the case a per-component check cannot see at all:
+# the guard has to run on the RAW argument because `$(dirname …)`/`$(basename …)`
+# run through command substitution, which strips trailing newlines — a component
+# literally named `<64hex>.scope\n` reduces to a well-formed `<64hex>.scope` in
+# every derived variable while the raw path still traverses the newline-suffixed
+# sibling.
 poison_hex_scope="$(printf 'a%.0s' {1..64}).scope"
 poison_hex_lease="$(printf 'b%.0s' {1..64}).lease"
 poison_scope_dir="$TMP/poison-scope/semaphore-v1/evil"$'\n'"$poison_hex_scope"
 mkdir -p "$poison_scope_dir"
 capture _uberdev_semaphore_validate_lease_path "$poison_scope_dir/$poison_hex_lease"
-if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'scope component must be single-line text' <<<"$CAPTURE_OUT"; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
   pass "multi-line lease scope component is rejected before the anchored match"
 else
   fail "multi-line lease scope component is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -107,10 +114,83 @@ fi
 poison_lease_dir="$TMP/poison-lease/semaphore-v1/$poison_hex_scope"
 mkdir -p "$poison_lease_dir"
 capture _uberdev_semaphore_validate_lease_path "$poison_lease_dir/evil"$'\n'"$poison_hex_lease"
-if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'filename must be single-line text' <<<"$CAPTURE_OUT"; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
   pass "multi-line lease filename is rejected before the anchored match"
 else
   fail "multi-line lease filename is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Trailing newline on the SCOPE component: `$scope` resolves to the legitimate
+# stripped directory (so `[ ! -L "$scope" ]` sees a real dir and passes) while
+# the raw path traverses the sibling SYMLINK named `<64hex>.scope\n`. Rejection
+# is asserted together with the escape target staying empty, so the lock is
+# about containment, not just about an exit code.
+escape_root="$TMP/poison-trailing/escape"
+trailing_version="$TMP/poison-trailing/semaphore-v1"
+mkdir -p "$escape_root" "$trailing_version/$poison_hex_scope"
+ln -s "$escape_root" "$trailing_version/$poison_hex_scope"$'\n'
+trailing_scope_lease="$trailing_version/$poison_hex_scope"$'\n'"/$poison_hex_lease"
+capture _uberdev_semaphore_validate_lease_path "$trailing_scope_lease"
+if [ "$CAPTURE_RC" -eq 2 ] \
+    && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT" \
+    && [ ! -e "$escape_root/$poison_hex_lease" ]; then
+  pass "trailing-newline scope component cannot escape the validated scope via a sibling symlink"
+else
+  fail "trailing-newline scope component cannot escape the validated scope via a sibling symlink" \
+    "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Trailing newline on the FILENAME: `$(basename …)` strips it, so every derived
+# check saw a well-formed `<64hex>.lease` while the published path was a
+# different file.
+capture _uberdev_semaphore_validate_lease_path "$trailing_version/$poison_hex_scope/$poison_hex_lease"$'\n'
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "trailing-newline lease filename is rejected"
+else
+  fail "trailing-newline lease filename is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Counterpart: a well-formed single-line path must still clear the new guard, so
+# the assertions above cannot be passing because everything is now rejected.
+mkdir -p "$trailing_version/$poison_hex_scope"
+capture _uberdev_semaphore_validate_lease_path "$trailing_version/$poison_hex_scope/$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 0 ]; then
+  pass "well-formed single-line lease path still validates"
+else
+  fail "well-formed single-line lease path still validates" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# No library function may declare a local named after a zsh-TIED parameter.
+# zsh ties `path` to `PATH`, `fpath` to `FPATH`, and so on, so `local path`
+# empties the command search path for that entire function body and every
+# external it calls stops resolving. That is not theoretical here: it silently
+# broke `uname -s` inside _uberdev_semaphore_reject_symlinked_ancestors, which
+# left the Darwin carve-out disabled and rejected every $TMPDIR-rooted state
+# path on macOS as a symlinked ancestor. The /goal fences run under /bin/zsh;
+# bash has no such tie, so no assertion in this bash suite can observe it.
+zsh_tied_hits=''
+for tied in path cdpath fpath manpath mailpath module_path psvar prompt status \
+            argv options signals watch histchars fignore; do
+  if grep -qE "^[[:space:]]*(local|typeset)([[:space:]]+[^[:space:]]+)*[[:space:]]+$tied([[:space:]=]|\$)" "$LIB"; then
+    zsh_tied_hits="$zsh_tied_hits $tied"
+  fi
+done
+if [ -z "$zsh_tied_hits" ]; then
+  pass "no local shadows a zsh-tied parameter (PATH-clobber class)"
+else
+  fail "no local shadows a zsh-tied parameter (PATH-clobber class)" "tied locals:$zsh_tied_hits"
+fi
+# Behavioural counterpart, run under the real fence shell when one is available:
+# a $TMPDIR-rooted ancestor walk must succeed identically under zsh and bash.
+zsh_bin="$(command -v zsh 2>/dev/null || true)"
+if [ -n "$zsh_bin" ]; then
+  zsh_probe="$("$zsh_bin" -c '
+    source "$1" >/dev/null 2>&1 || { echo "source=failed"; exit 0; }
+    _uberdev_semaphore_reject_symlinked_ancestors "$2" >/dev/null 2>&1
+    echo "rc=$?"' _ "$LIB" "$TMP/state")"
+  if [ "$zsh_probe" = 'rc=0' ]; then
+    pass "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh"
+  else
+    fail "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh" "$zsh_probe"
+  fi
+else
+  fail "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh" "zsh not found on PATH"
 fi
 absolute_failures=''
 for candidate in '/tmp/state' 'C:/state' 'C:\state' 'C:/' 'C:\'; do

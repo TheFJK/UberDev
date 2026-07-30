@@ -36,23 +36,29 @@ _uberdev_semaphore_is_absolute_path() {
 }
 
 _uberdev_semaphore_reject_symlinked_ancestors() {
-  local path remaining current component os_name
-  path="$1"
-  case "$path" in
+  # The walked path is `target`, NOT `path`: this library is sourced under zsh
+  # (the /goal and finish-branch fences run under /bin/zsh), and there `path` is
+  # tied to `PATH` — `local path` empties the command search path for the whole
+  # function body. That silently broke `uname -s` below, which left `os_name`
+  # empty, which disabled the Darwin /var + /tmp carve-out, which rejected every
+  # $TMPDIR-rooted state path on macOS as a symlinked ancestor.
+  local target remaining current component os_name
+  target="$1"
+  case "$target" in
     [A-Za-z]:/*|[A-Za-z]:\\*)
       if command -v cygpath >/dev/null 2>&1; then
-        path="$(cygpath -u "$path")" || return 2
+        target="$(cygpath -u "$target")" || return 2
       else
         _uberdev_semaphore_error 'cygpath is required for a native-Windows state path'
         return 2
       fi
       ;;
   esac
-  case "$path" in
+  case "$target" in
     /*) ;;
     *) return 2 ;;
   esac
-  remaining="${path#/}"
+  remaining="${target#/}"
   current=''
   os_name="$(uname -s 2>/dev/null || true)"
   while [ -n "$remaining" ]; do
@@ -750,31 +756,37 @@ _uberdev_semaphore_validate_lease_path() {
   _uberdev_semaphore_is_absolute_path "$lease" || {
     _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2
   }
-  scope="$(dirname "$lease")"
-  scope_base="$(basename "$scope")"
-  version_base="$(basename "$(dirname "$scope")")"
-  lease_base="$(basename "$lease")"
   # `grep -Eq` decides PER LINE, so a `^…$`-anchored pattern accepts a
   # MULTI-LINE value as long as any one of its lines matches — while the
   # variable keeps every line. LEASE_PATH is caller-supplied, so a path whose
   # scope or filename component embeds a newline before a well-formed component
-  # (…/evil\n<64hex>.scope/…) would clear both patterns here and then be used
-  # verbatim as the mutex/lease path. Assert single-line text FIRST; only then
-  # is the anchored match a statement about the whole value.
-  _uberdev_semaphore_safe_text "$scope_base" || {
-    _uberdev_semaphore_error 'LEASE_PATH scope component must be single-line text'
+  # (…/evil\n<64hex>.scope/…) would clear both anchored patterns below and then
+  # be used verbatim as the mutex/lease path.
+  #
+  # The check has to run on the RAW argument, never on the `$(dirname …)` /
+  # `$(basename …)` derivatives: command substitution strips TRAILING newlines,
+  # so a component literally named `<64hex>.scope\n` reduces to a well-formed
+  # `<64hex>.scope` in every derived variable while the raw path still traverses
+  # the newline-suffixed sibling. That is how such a component defeated the
+  # `[ ! -L "$scope" ]` guard below — `$scope` resolved to the legitimate
+  # directory while the lease materialised inside a symlink named
+  # `<64hex>.scope\n`, outside the validated scope. One assertion on the whole
+  # value subsumes every per-component variant, embedded and trailing alike;
+  # only then is an anchored match a statement about the whole path.
+  _uberdev_semaphore_safe_text "$lease" || {
+    _uberdev_semaphore_error 'LEASE_PATH must be single-line text'
     return 2
   }
+  scope="$(dirname "$lease")"
+  scope_base="$(basename "$scope")"
+  version_base="$(basename "$(dirname "$scope")")"
+  lease_base="$(basename "$lease")"
   printf '%s\n' "$scope_base" | grep -Eq '^[0-9a-f]{64}\.scope$' || {
     _uberdev_semaphore_error 'LEASE_PATH is outside a semaphore scope'
     return 2
   }
   [ "$version_base" = 'semaphore-v1' ] || {
     _uberdev_semaphore_error 'LEASE_PATH has the wrong state version'
-    return 2
-  }
-  _uberdev_semaphore_safe_text "$lease_base" || {
-    _uberdev_semaphore_error 'LEASE_PATH filename must be single-line text'
     return 2
   }
   printf '%s\n' "$lease_base" | grep -Eq '^[0-9a-f]{64}\.lease$' || {
