@@ -2837,8 +2837,8 @@ rm -rf "$PACKAGE_TMP"
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
-  'auto\|claude-bg\|wezterm\|background\|codex' \
-  "backend enum includes codex"
+  'auto\|workflow\|claude-bg\|wezterm\|background\|codex' \
+  "backend enum includes codex (and the RFC 0015 workflow default)"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_codex_available\(\)' \
   "codex availability probe is defined"

@@ -4,6 +4,29 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.0] — 2026-07-30
+
+### Added
+
+- Workflow-native dispatch for `/solve` and `/turbo` (RFC 0015): a new `workflow` backend runs one worktree-isolated solver agent per issue inside the calling session's Workflow runtime, via `skills/solve-fleet/workflow.js`. Progress is visible with `/workflows` and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`) instead of leaving outcome discovery to a separate agent surface.
+- Script-orchestrated design phases for medium/large tier: a parallel research fan-out (codebase, constraints, test-coverage) feeding a spec writer, a bounded single-round spec review, and a plan writer, because a Workflow agent is a leaf and cannot fan out for itself.
+- Live circuit breakers on the fleet: a projected-agent ceiling that aborts before any dispatch, a token-budget guard between waves, a manifest/claim cross-check that refuses to touch an unclaimed issue, and per-issue fault isolation so one failing issue cannot take the batch down.
+
+### Changed
+
+- `auto` now resolves to `workflow` on every Claude host and every OS class; a Codex session or Codex-only host still resolves to `codex`. The per-OS detached-supervisor matrix (macOS → WezTerm/claude-bg, WSL2/Linux → claude-bg, native Windows → WezTerm) is retired from automatic selection.
+- Native Windows no longer hard-errors without WezTerm: the Workflow runtime owns agent lifetimes, so there is no process tree to supervise.
+- The fanout cap is a real live concurrency ceiling on the `workflow` backend (waves are barriers), where on the detached backends it only ever chunked the dispatch burst.
+
+### Deprecated
+
+- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. Removal target v1.0.0. `wezterm`, `background` and `codex` remain fully supported explicit choices, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+
+### Tests
+
+- Added `tests/solve-fleet-workflow.test.sh`: the shell seam (backend enum, `auto` resolution across all four OS classes, the deprecation notice, the no-provider-arm refusal, launcher Step 5w ordering and args emission), shape greps over the fleet script and its skill, and T3 behavioral fixtures covering tier routing, wave barriers, both circuit breakers, null-agent handling, the manifest cross-check, out-of-run-dir path rejection, and model policy.
+- Re-anchored `tests/dispatch-fallback.test.sh` on the new auto contract (auto never selects a detached backend; native Windows resolves rather than refusing; an explicit deprecated backend still resolves, loudly) and updated the enum and Codex-skill-count locks.
+
 ## [0.40.3] — 2026-07-28
 
 ### Fixed

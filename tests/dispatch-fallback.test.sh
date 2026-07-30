@@ -36,25 +36,34 @@ assert_grep_not() {
   fi
 }
 
-echo "== Positive: per-OS auto-resolution preference order =="
+echo "== Positive: auto resolution is Workflow-native (RFC 0015) =="
+# The per-OS auto matrix (macos->wezterm/claude-bg, wsl2/linux->claude-bg,
+# windows-native->wezterm-or-hard-error) existed ONLY to choose a detached
+# process supervisor. The Workflow runtime needs no supervisor, so `auto` now
+# resolves to `workflow` everywhere except inside Codex. These assertions lock
+# the new contract; the OS-class detector and the supervision gate are still
+# exercised, because the EXPLICIT detached backends still depend on them.
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_os_class' \
-  "preflight calls the OS-class detector"
+  "preflight still calls the OS-class detector (explicit detached backends need it)"
 assert_grep "$DISPATCH_LIB" \
-  'macos\)' \
-  "resolver has a macos branch"
-assert_grep "$DISPATCH_LIB" \
-  'if[[:space:]]+\[[[:space:]]+"\$os_class"[[:space:]]+=[[:space:]]+windows-native[[:space:]]+\][[:space:]]*;[[:space:]]*then' \
-  "resolver has an explicit windows-native equality branch"
+  'resolved="workflow"; reason="auto-workflow"' \
+  "auto resolves to the Workflow-native backend"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_numeric_supervision_supported' \
-  "resolver shares the native-Windows numeric supervision capability gate"
+  "resolver still shares the native-Windows numeric supervision capability gate"
 assert_grep_not "$DISPATCH_LIB" \
   'resolved="background"; reason="auto-windows-fallback"' \
-  "native Windows auto-resolution never falls back to an unsupervisable numeric backend"
-assert_grep "$DISPATCH_LIB" \
-  'wsl2\)' \
-  "resolver has a wsl2 branch"
+  "auto never falls back to an unsupervisable numeric backend"
+assert_grep_not "$DISPATCH_LIB" \
+  'reason="auto-macos-wezterm"' \
+  "the retired macos->wezterm auto arm is gone"
+assert_grep_not "$DISPATCH_LIB" \
+  'reason="auto-wsl2"' \
+  "the retired wsl2->claude-bg auto arm is gone"
+assert_grep_not "$DISPATCH_LIB" \
+  'reason="auto-linux"' \
+  "the retired linux->claude-bg auto arm is gone"
 assert_grep "$DISPATCH_LIB" \
   'UBERDEV_RESOLVED_BACKEND' \
   "preflight exports UBERDEV_RESOLVED_BACKEND"
@@ -62,38 +71,80 @@ assert_grep "$DISPATCH_LIB" \
   'dispatch_backend_resolved' \
   "preflight emits the dispatch_backend_resolved audit event"
 
-echo "== Functional: native Windows auto uses only supervised backends =="
+echo "== Functional: auto never selects a detached backend on any OS =="
+for OS_CLASS in macos linux wsl2 windows-native; do
+  AUTO_BACKEND="$(/bin/bash -c '
+    . "$1"
+    _uberdev_dispatch_os_class() { printf "%s" "$2"; }
+    _uberdev_dispatch_wezterm_available() { return 0; }
+    _uberdev_dispatch_codex_available() { return 1; }
+    unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
+    UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+    uberdev_dispatch_preflight solve >/dev/null 2>&1 || exit
+    printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+  ' _ "$DISPATCH_LIB" "$OS_CLASS")"
+  if [ "$AUTO_BACKEND" = workflow ]; then
+    echo "  PASS  auto on $OS_CLASS resolves to workflow (WezTerm available and still not chosen)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  auto on $OS_CLASS resolved to '$AUTO_BACKEND', expected workflow"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo "== Functional: native Windows no longer hard-errors without WezTerm =="
+# This was a hard refusal before RFC 0015 — the Workflow runtime needs no
+# process tree, so native Windows is now a first-class host.
 if WINDOWS_AUTO_BACKEND="$(/bin/bash -c '
   . "$1"
   _uberdev_dispatch_os_class() { printf windows-native; }
-  _uberdev_dispatch_wezterm_available() { return 0; }
-  _uberdev_dispatch_codex_available() { return 0; }
-  CODEX_HOME=/tmp/codex UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
-  uberdev_dispatch_preflight solve >/dev/null || exit
-  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
-' _ "$DISPATCH_LIB")" && [ "$WINDOWS_AUTO_BACKEND" = wezterm ]; then
-  echo "  PASS  native Windows auto prefers supervised WezTerm over a Codex environment"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  native Windows auto did not resolve available WezTerm: $WINDOWS_AUTO_BACKEND"
-  FAIL=$((FAIL + 1))
-fi
-if WINDOWS_AUTO_ERROR="$(/bin/bash -c '
-  . "$1"
-  _uberdev_dispatch_os_class() { printf windows-native; }
   _uberdev_dispatch_wezterm_available() { return 1; }
-  _uberdev_dispatch_codex_available() { return 0; }
-  claude() { return 0; }
+  _uberdev_dispatch_codex_available() { return 1; }
   unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
   UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
-  ! uberdev_dispatch_preflight solve
-  [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
-' _ "$DISPATCH_LIB" 2>&1)" \
-    && printf '%s\n' "$WINDOWS_AUTO_ERROR" | grep -Fq 'native Windows requires WezTerm'; then
-  echo "  PASS  native Windows auto fails loudly when no supervised backend exists"
+  uberdev_dispatch_preflight solve >/dev/null 2>&1 || exit
+  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH_LIB")" && [ "$WINDOWS_AUTO_BACKEND" = workflow ]; then
+  echo "  PASS  native Windows auto resolves to workflow with no WezTerm installed"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  native Windows auto did not fail closed without WezTerm: $WINDOWS_AUTO_ERROR"
+  echo "  FAIL  native Windows auto did not resolve to workflow: $WINDOWS_AUTO_BACKEND"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "== Functional: a Codex environment still wins auto =="
+if CODEX_AUTO_BACKEND="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf linux; }
+  _uberdev_dispatch_wezterm_available() { return 1; }
+  _uberdev_dispatch_codex_available() { return 0; }
+  CODEX_HOME=/tmp/codex UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  unset UBERDEV_RESOLVED_BACKEND
+  uberdev_dispatch_preflight solve >/dev/null 2>&1 || exit
+  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH_LIB")" && [ "$CODEX_AUTO_BACKEND" = codex ]; then
+  echo "  PASS  auto inside a Codex session still resolves to codex (no Workflow tool there)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  auto inside Codex resolved to '$CODEX_AUTO_BACKEND', expected codex"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "== Functional: an explicit deprecated backend still works, loudly =="
+if BG_NOTICE="$(/bin/bash -c '
+  . "$1"
+  _uberdev_dispatch_os_class() { printf linux; }
+  unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg
+  uberdev_dispatch_preflight solve >/dev/null
+  printf "|%s" "$UBERDEV_RESOLVED_BACKEND"
+' _ "$DISPATCH_LIB" 2>&1)" \
+    && printf '%s' "$BG_NOTICE" | grep -Fq '|claude-bg' \
+    && printf '%s' "$BG_NOTICE" | grep -Fq 'is deprecated (RFC 0015)'; then
+  echo "  PASS  --backend=claude-bg still resolves, with a one-line deprecation notice"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  explicit claude-bg did not resolve with a deprecation notice: $BG_NOTICE"
   FAIL=$((FAIL + 1))
 fi
 

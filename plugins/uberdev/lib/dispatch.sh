@@ -874,9 +874,35 @@ _uberdev_dispatch_create_codex_worktree() {
 }
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
+# `workflow` is the DEFAULT (RFC 0015): the per-issue solver fleet runs inside
+# the main session's Workflow runtime (skills/solve-fleet/workflow.js), so this
+# library never spawns anything for it — the launcher emits the args envelope
+# and the command file mandates the Workflow call.
 # `codex` is the OpenAI Codex CLI backend (RFC 0012 §3.4 codex-port): execs
 # `codex exec` headless + nohup-detached, PID-tracked like `background`.
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+# `claude-bg` is DEPRECATED (RFC 0015; removal target v1.0.0) — detached
+# `claude --bg` sessions parked in the separate `claude agents` surface.
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
+
+# Detached-provider backends scheduled for retirement. Selecting one emits a
+# one-line stderr deprecation notice (once per process — the sentinel below).
+# `auto` NEVER resolves to a deprecated backend; only an explicit request does.
+_UBERDEV_DISPATCH_DEPRECATED_BACKENDS='claude-bg'
+_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=0
+
+# _uberdev_dispatch_deprecation_notice BACKEND
+# Verbatim, constant-template stderr notice (mirrors the v0.22.0 --terminal=
+# retirement shape in lib/solve-launcher.sh). Emitted once per process.
+_uberdev_dispatch_deprecation_notice() {
+  case " $_UBERDEV_DISPATCH_DEPRECATED_BACKENDS " in
+    *" ${1:-} "*) ;;
+    *) return 0 ;;
+  esac
+  [ "$_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED" = "1" ] && return 0
+  _UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=1
+  echo "warning: --backend=$1 is deprecated (RFC 0015); /solve, /turbo and /goal now dispatch their per-issue solvers through the Workflow runtime (--backend=workflow, the auto default) instead of detached sessions in the separate 'claude agents' surface. The backend still works and will be removed in v1.0.0." >&2
+  return 0
+}
 
 # _uberdev_dispatch_os_class -> prints one of: macos | windows-native | wsl2 | linux
 # WSL2 is detected via /proc/version containing "microsoft" (case-insensitive);
@@ -907,6 +933,12 @@ _uberdev_dispatch_numeric_supervision_supported() {
   case "${1:-}" in
     codex|background) [ "$(_uberdev_dispatch_os_class)" != windows-native ] ;;
     claude-bg|wezterm) return 0 ;;
+    # `workflow` spawns no OS process at all: the Workflow runtime owns every
+    # agent's lifetime, cancellation and result capture in-session. There is
+    # no process tree for this library to supervise, so the native-Windows
+    # gate does not apply — this is the backend that makes native Windows
+    # work without WezTerm (RFC 0015 §4).
+    workflow) return 0 ;;
     *) return 2 ;;
   esac
 }
@@ -962,7 +994,7 @@ _uberdev_dispatch_codex_available() {
 }
 
 # uberdev_dispatch_preflight [WORKFLOW]
-# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|claude-bg|wezterm|background|codex)
+# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|claude-bg|wezterm|background|codex)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
 # explicit backend is unusable on this host. Auto selection is workflow-aware
@@ -974,9 +1006,18 @@ uberdev_dispatch_preflight() {
   local workflow="${1:-}" os_class reason resolved
   os_class="$(_uberdev_dispatch_os_class)"
   case "$requested" in
+    workflow)
+      # The Workflow runtime lives in the calling session, not on PATH, so
+      # there is nothing for this shell to probe: no binary, no mux, no
+      # timeout(1). The caller (solve-launcher Step 5b' / goal Phase 0) emits
+      # the args envelope and the command file mandates the Workflow call;
+      # availability of the tool itself is the model's No-Workflow fallback
+      # decision, documented in commands/solve.md.
+      resolved="workflow"; reason="explicit" ;;
     claude-bg|background)
       # claude-bg / background depend only on git + claude + shell — usable
       # on every OS class. No capability gate.
+      _uberdev_dispatch_deprecation_notice "$requested"
       resolved="$requested"; reason="explicit" ;;
     codex)
       # codex backend needs the `codex` CLI on PATH. No OS constraint (codex
@@ -1003,15 +1044,14 @@ uberdev_dispatch_preflight() {
       fi
       resolved="wezterm"; reason="explicit" ;;
     auto)
-      if [ "$os_class" = windows-native ]; then
-        if _uberdev_dispatch_wezterm_available; then
-          resolved="wezterm"; reason="auto-windows-wezterm"
-        else
-          echo "error: native Windows requires WezTerm for verifiable child supervision" >&2
-          echo "       install/start WezTerm, or run from WSL2 or another POSIX host" >&2
-          return 1
-        fi
-      elif [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
+      # RFC 0015: `auto` resolves to `workflow` on every Claude host and every
+      # OS class. The historical per-OS matrix below it (macos->wezterm/claude-bg,
+      # wsl2/linux->claude-bg, windows-native->wezterm-or-hard-error) existed
+      # only to pick a *detached process* supervisor; the Workflow runtime needs
+      # no supervisor, which is why native Windows no longer hard-errors here.
+      # The Codex arms stay AHEAD of it: inside a Codex session there is no
+      # Claude Workflow tool to mandate, so `codex` remains the correct default.
+      if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
         if _uberdev_dispatch_codex_available; then
           resolved="codex"; reason="auto-${workflow}-result-artifact"
         else
@@ -1034,15 +1074,7 @@ uberdev_dispatch_preflight() {
       elif ! command -v claude >/dev/null 2>&1 && _uberdev_dispatch_codex_available; then
         resolved="codex"; reason="auto-no-claude"
       else
-      case "$os_class" in
-        macos)
-          if _uberdev_dispatch_wezterm_available; then resolved="wezterm"; reason="auto-macos-wezterm"
-          else resolved="claude-bg"; reason="auto-macos-fallback"; fi ;;
-        wsl2)
-          resolved="claude-bg"; reason="auto-wsl2" ;;
-        *)
-          resolved="claude-bg"; reason="auto-linux" ;;
-      esac
+        resolved="workflow"; reason="auto-workflow"
       fi ;;
     *)
       echo "error: dispatch backend '$requested' not in {$_UBERDEV_DISPATCH_BACKEND_ENUM}" >&2
@@ -1177,7 +1209,13 @@ uberdev_dispatch_resolve_env() {
   # Codex does not wrap `codex exec` in timeout(1): the wrapper PID + status
   # JSON are the liveness contract. Do not require GNU coreutils on Codex-only
   # hosts just to resolve Claude-backed dispatch settings.
-  if [ "$_dispatch_env_backend" = "codex" ]; then
+  #
+  # `workflow` launches no OS process either: the Workflow runtime owns each
+  # agent's lifetime and cancellation, so there is nothing to wrap and no
+  # reason to demand GNU coreutils on the host (RFC 0015 §4). SOLVE_TIMEOUT
+  # above is still resolved — it is relayed into the args envelope as the
+  # per-issue advisory budget the fleet script reports on.
+  if [ "$_dispatch_env_backend" = "codex" ] || [ "$_dispatch_env_backend" = "workflow" ]; then
     TIMEOUT_BIN=""
     return 0
   fi
@@ -1226,7 +1264,7 @@ uberdev_dispatch_preflight_backend() {
         echo "error: $workflow cannot use claude-bg because it does not export a supervised result artifact" >&2
         return 1
         ;;
-      wezterm|background)
+      wezterm|background|workflow)
         echo "error: $workflow requires a backend with result-artifact and caller-workspace repair support: $backend" >&2
         return 1
         ;;
@@ -1234,6 +1272,12 @@ uberdev_dispatch_preflight_backend() {
   fi
   case "$backend" in
     codex)
+      return 0
+      ;;
+    workflow)
+      # Nothing to preflight: no provider binary, no permission tier to probe
+      # (the Workflow runtime inherits the session's), no timeout(1). The
+      # solve-fleet script's own preflight validated the on-disk workflow.js.
       return 0
       ;;
     claude-bg)
@@ -1276,6 +1320,16 @@ _uberdev_agent_dispatch_backend() {
     wezterm)     _uberdev_dispatch_wezterm "$issue_num" "$tier" "$prompt_file" ;;
     background)  _uberdev_dispatch_background "$issue_num" "$tier" "$prompt_file" ;;
     codex)       _uberdev_dispatch_codex "$issue_num" "$tier" "$prompt_file" ;;
+    # `workflow` has no provider arm BY CONSTRUCTION: the fleet is spawned by
+    # the calling session's Workflow tool, not by this library. Reaching here
+    # means a caller resolved `workflow` and then took the detached-dispatch
+    # path anyway — a wiring bug, so fail loud rather than silently falling
+    # through to a default provider (RFC 0015 §4).
+    workflow)
+      DISPATCH_RC=1; DISPATCH_ID=""
+      DISPATCH_LOG="backend 'workflow' is dispatched by the session's Workflow tool (skills/solve-fleet/workflow.js), not by lib/dispatch.sh; the caller must emit the args envelope instead of calling uberdev_dispatch_one"
+      echo "error: $DISPATCH_LOG" >&2
+      return 1 ;;
     *) DISPATCH_RC=1; DISPATCH_ID=""; DISPATCH_LOG="unsupported backend: $backend"; return 1 ;;
   esac
 }
