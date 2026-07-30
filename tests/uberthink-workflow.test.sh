@@ -274,9 +274,19 @@ function personasRet() {
   };
 }
 
+// report.py writes BOTH an `id` and a `composite_path` on every shortlist row,
+// and they are DIFFERENT strings: the id is comp-island-<K>-<NNN> while the file
+// is comp-<NNN>-<synth-lens>.yaml. The relay hands both back, index-aligned, so
+// Wave 5 never has to reconstruct a path (which would point at nothing).
+function shortlistFor(k) {
+  return { rc: 0, stderrTail: "", outPath: RD + "/island-" + k + "/shortlist.yaml",
+    shortlist: ["comp-island-" + k + "-001", "comp-island-" + k + "-002"],
+    compositePaths: [RD + "/island-" + k + "/composites/comp-001-weave.yaml",
+      RD + "/island-" + k + "/composites/comp-002-crossover.yaml"],
+    count: 2 };
+}
+
 function baseReturns(extra) {
-  const shortlist = { rc: 0, stderrTail: "", outPath: RD + "/island-1/shortlist.yaml",
-    shortlist: ["comp-001-weave", "comp-002-crossover"], count: 2 };
   const r = {
     "personas": personasRet(),
     "scope-gate": { verdict: "PROCEED", rationale: "legitimate defensive research",
@@ -295,15 +305,15 @@ function baseReturns(extra) {
         { id: "gap-ff", persona: "provocateur", donor: "", prompt: "q6" }] },
     "uberdev:uberthink-synthesizer": { islandIndex: 1, lens: "weave", compositeCount: 2,
       outDir: RD + "/island-1/composites" },
-    "shortlist-1-r0": shortlist,
-    "shortlist-2-r0": Object.assign({}, shortlist, { outPath: RD + "/island-2/shortlist.yaml" }),
-    "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-001-weave",
+    "shortlist-1-r0": shortlistFor(1),
+    "shortlist-2-r0": shortlistFor(2),
+    "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-island-1-001",
       lens: "steelman", outPath: RD + "/island-1/falsify/x.yaml", fatalKills: 1, fixableKills: 0,
       repairHints: [] },
     "cross-pollinate": { islandIndex: 1, lens: "crossover", compositeCount: 3,
       outDir: RD + "/composites" },
     "floor-survivors": { rc: 0, stderrTail: "", outPath: RD + "/floor-survivors.yaml",
-      shortlist: ["comp-001-weave", "comp-002-crossover"], count: 2 },
+      shortlist: ["comp-island-1-001", "comp-island-2-001"], count: 2 },
     "arbiter": { rankedPath: RD + "/ranked.yaml", rankedCount: 3, culledCount: 1 },
     "dossier": { rc: 0, stderrTail: "", outPath: RD + "/report.md" },
     "aggregate": { rc: 0, stderrTail: "", outPath: RD + "/f2i-aggregate.md" },
@@ -404,6 +414,36 @@ function ledgerFor(res, label) {
     return c.prompt.indexOf("MUST read " + RD + "/frame/constraints.md FIRST") >= 0;
   });
 
+  // F.6/F.7 — the composite_path a falsifier is briefed with must be the
+  // AUTHORITATIVE path report.py wrote into the shortlist row, and the dossier
+  // name must be derived from that FILE STEM. The composite id
+  // (comp-island-K-NNN) is not the file stem (comp-NNN-<synth-lens>), so a path
+  // rebuilt from the id points at a file that does not exist, and an id-named
+  // dossier is never matched by the report.py
+  // `<basename(composite_path) minus .yaml>-*.yaml` glob — every physics/redteam
+  // feasibility sub-score would be silently dropped from the Wave-7 floor cut.
+  function briefedPath(c) {
+    const m = /composite_path:  (\S+)/.exec(c.prompt);
+    return m ? m[1] : "";
+  }
+  out.fPathIsAuthoritative = fals.length > 0 && fals.every(function (c) {
+    const island = String(c.label).split("-")[1];
+    return /^\/r\/\.uberdev\/think\/RID\/island-[12]\/composites\/comp-00[12]-(weave|crossover)\.yaml$/
+      .test(briefedPath(c))
+      && briefedPath(c).indexOf(RD + "/island-" + island + "/composites/") === 0;
+  });
+  out.fNoIdDerivedPath = fals.length > 0
+    && !fals.some(function (c) { return c.prompt.indexOf("/composites/comp-island-") >= 0; });
+  out.fOutIsStemDerived = fals.length > 0 && fals.every(function (c) {
+    const p = briefedPath(c);
+    const lens = String(c.label).split("-")[3];     // falsify-<k>-<NNN>-<lens>-r<round>
+    if (!p || !lens) return false;
+    const base = p.slice(p.lastIndexOf("/") + 1);
+    const stem = base.slice(0, base.length - ".yaml".length);
+    return c.prompt.indexOf("/falsify/" + stem + "-" + lens + ".yaml") >= 0
+      && c.prompt.indexOf("/falsify/comp-island-") < 0;
+  });
+
   // Persona SSOT relay must carry the multi-line prompt through UNFLATTENED.
   const scoutCall = recA.agentCalls.find(function (c) {
     return (c.label || "").indexOf("gen-1-distributed-systems") === 0;
@@ -475,7 +515,7 @@ function ledgerFor(res, label) {
 
   // ===== Run V — genetic loop-back + CB-LOOP cap. =====
   const recV = await run(buildArgs({ loopBackCap: 2 }), { agentReturns: baseReturns({
-    "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-001-weave", lens: "premortem",
+    "uberdev:uberthink-falsifier": { islandIndex: 1, compositeId: "comp-island-1-001", lens: "premortem",
       outPath: RD + "/island-1/falsify/x.yaml", fatalKills: 0, fixableKills: 2,
       repairHints: ["widen the entropy budget", "drop the fixed handshake"] },
     "shortlist-1-r1": Object.assign({}, baseReturns()["shortlist-1-r0"]),
@@ -508,17 +548,85 @@ function ledgerFor(res, label) {
   out.yTooling = !!(resY && resY.halts.some(function (x) { return x.indexOf("TOOLING:personas") === 0; }));
   out.yNoScopeGate = !recY.agentCalls.some(function (c) { return c.label === "scope-gate"; });
 
+  // ===== Run P — a shortlist row with NO composite_path is DROPPED, never
+  // dispatched at a fabricated path. =====
+  const noPaths = { rc: 0, stderrTail: "", outPath: RD + "/island-1/shortlist.yaml",
+    shortlist: ["comp-island-1-001", "comp-island-1-002"], count: 2 };
+  const recP = await run(buildArgs(), { agentReturns: baseReturns({
+    "shortlist-1-r0": noPaths,
+    "shortlist-2-r0": Object.assign({}, noPaths, { outPath: RD + "/island-2/shortlist.yaml" }) }) });
+  const resP = resultOf(recP);
+  out.pNoFalsify = !recP.agentCalls.some(function (c) { return (c.label || "").indexOf("falsify-") === 0; });
+  out.pTooling = !!(resP && resP.halts.some(function (x) {
+    return x.indexOf("TOOLING:shortlist-island-") === 0; }));
+  out.pNoConverge = !!(resP && resP.halts.indexOf("CB-CONVERGE") < 0);
+  out.pShortlisted = resP ? resP.totalShortlisted : null;
+
+  // ===== Run Y2 — the personas relay exits 0 with an unusable PAYLOAD. =====
+  // personas.yaml is a mapping of keyed maps, so the relay has to transform it
+  // into the requested arrays. rc alone never proves it did.
+  const recY2 = await run(buildArgs(), { agentReturns: baseReturns({ "personas": { rc: 0 } }) });
+  const resY2 = resultOf(recY2);
+  out.y2Tooling = !!(resY2 && resY2.halts.some(function (x) {
+    return x.indexOf("TOOLING:personas payload unusable") === 0; }));
+  out.y2NoScopeGate = !recY2.agentCalls.some(function (c) { return c.label === "scope-gate"; });
+  out.y2Observable = !!resY2;
+  out.y2Audit = !!(resY2 && resY2.auditEvents.some(function (e) {
+    return e.event === "personas_payload_unusable"; }));
+
   // ===== Run Z — resume skips the completed waves. =====
   const recZ = await run(buildArgs({ resumeFromRunId: "RID" }), { agentReturns: baseReturns({
     "resume-scan": { runDirExists: true, verdict: "PROCEED",
       frameLensesPresent: ["frame", "teardown", "prior-art", "constraints"],
       islandsWithCandidates: [1, 2], islandsWithShortlist: [], globalCompositeCount: 0,
-      rankedExists: false } }) });
+      rankedExists: false, donors: DONORS } }) });
   const resZ = resultOf(recZ);
   out.zResumed = resZ ? resZ.resumed : null;
   out.zSkippedGate = !!(resZ && resZ.resumeSkipped.indexOf("scope-gate") >= 0);
   out.zNoGenerators = !recZ.agentCalls.some(function (c) { return (c.label || "").indexOf("gen-") === 0; });
   out.zNoScopeGate = !recZ.agentCalls.some(function (c) { return c.label === "scope-gate"; });
+
+  // ===== Run Z2 — resume with NO island skipped: the donor fanout must survive.
+  // Run Z above skips divergence on BOTH islands, which masks a resume that
+  // silently dropped the donor catalog (no generators fire either way). Here the
+  // Field Scout fleet MUST be rehydrated from scope-verdict.yaml. =====
+  const recZ2 = await run(buildArgs({ resumeFromRunId: "RID" }), { agentReturns: baseReturns({
+    "resume-scan": { runDirExists: true, verdict: "PROCEED",
+      frameLensesPresent: ["frame", "teardown", "prior-art", "constraints"],
+      islandsWithCandidates: [], islandsWithShortlist: [], globalCompositeCount: 0,
+      rankedExists: false, donors: DONORS } }) });
+  const resZ2 = resultOf(recZ2);
+  out.z2Donors = resZ2 ? resZ2.donorCount : null;
+  out.z2SkippedGate = !!(resZ2 && resZ2.resumeSkipped.indexOf("scope-gate") >= 0);
+  out.z2Generators = recZ2.agentCalls.filter(function (c) {
+    return (c.label || "").indexOf("gen-") === 0; }).length;
+  out.z2Scouts = recZ2.agentCalls.filter(function (c) {
+    return (c.label || "").indexOf("gen-1-distributed-systems") === 0; }).length;
+
+  // ===== Z3 — a resumed PROCEED whose donors cannot be rehydrated re-runs the
+  // scope gate instead of proceeding with an empty Field Scout fleet. =====
+  const recZ3 = await run(buildArgs({ resumeFromRunId: "RID" }), { agentReturns: baseReturns({
+    "resume-scan": { runDirExists: true, verdict: "PROCEED",
+      frameLensesPresent: ["frame", "teardown", "prior-art", "constraints"],
+      islandsWithCandidates: [], islandsWithShortlist: [], globalCompositeCount: 0,
+      rankedExists: false, donors: [] } }) });
+  const resZ3 = resultOf(recZ3);
+  out.z3ScopeGateReRun = recZ3.agentCalls.some(function (c) { return c.label === "scope-gate"; });
+  out.z3NotSkipped = !!(resZ3 && resZ3.resumeSkipped.indexOf("scope-gate") < 0);
+  out.z3Donors = resZ3 ? resZ3.donorCount : null;
+  out.z3Audit = !!(resZ3 && resZ3.auditEvents.some(function (e) {
+    return e.event === "resume_donors_unrecoverable"; }));
+
+  // ===== Run D — a decorated donor value is REJECTED with a log, not silently
+  // swallowed (only the all-dropped case used to be observable). =====
+  const recD = await run(buildArgs(), { agentReturns: baseReturns({
+    "scope-gate": { verdict: "PROCEED", rationale: "ok",
+      framePath: RD + "/frame/frame.md", scopeVerdictPath: RD + "/frame/scope-verdict.yaml",
+      donors: ["biology", "rotating-exotic (linguistics/music)", "economics-markets"] } }) });
+  const resD = resultOf(recD);
+  out.dDonors = resD ? resD.donorCount : null;
+  out.dRejectedAudit = !!(resD && resD.auditEvents.some(function (e) {
+    return e.event === "donor_slugs_rejected" && (e.rejected || []).length === 1; }));
 
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
@@ -570,6 +678,9 @@ else
   check fAllFrameArtifacts true "F.3 every falsifier prompt names all four frame artifacts by absolute path"
   check fAllGoalAndWorkingDir true "F.4 every falsifier prompt carries working_dir, composite_path and the goal envelope"
   check fPhysicsReadsFence true "F.5 the physics lens is told to read constraints.md FIRST (its feasibility fence)"
+  check fPathIsAuthoritative true "F.6 composite_path is the path report.py wrote for THAT row, on THAT island"
+  check fNoIdDerivedPath true "F.6a no falsifier is briefed with a path rebuilt from the composite id"
+  check fOutIsStemDerived true "F.7 the falsify dossier is named <composite file stem>-<lens>.yaml (what report.py globs)"
   # Run B — the ceiling trips on the ACCUMULATED total
   check bObservable true "B.1 a ceiling abort still returns an observable result (DR-8)"
   check bHalts '"CB-ISLAND"' "B.2 the accumulated total (39+6=45 > 44) TRIPS CB-ISLAND"
@@ -611,11 +722,34 @@ else
   # Run Y — SSOT relay failure aborts safely
   check yTooling true "Y.1 a failed personas SSOT relay is a TOOLING halt"
   check yNoScopeGate true "Y.2 nothing is dispatched when no prompt can be composed"
+  # Run P — an unusable composite_path is dropped, not fabricated
+  check pNoFalsify true "P.1 a shortlist row with no composite_path dispatches NO falsifier"
+  check pTooling true "P.2 the unusable rows are recorded as a TOOLING failure of the cut"
+  check pNoConverge true "P.3 that TOOLING halt suppresses CB-CONVERGE (it is not a verdict)"
+  check pShortlisted 0 "P.4 no unusable row is counted as shortlisted"
+  # Run Y2 — the personas payload is validated, not just its rc
+  check y2Observable true "Y2.1 an unusable personas payload still returns an observable result"
+  check y2Tooling true "Y2.2 rc 0 with a wrong-shaped payload is a TOOLING halt"
+  check y2NoScopeGate true "Y2.3 nothing is dispatched when no prompt can be composed from it"
+  check y2Audit true "Y2.4 the unusable payload is recorded as personas_payload_unusable"
   # Run Z — resume
   check zResumed true "Z.1 --resume rehydrates from the on-disk artifact scan"
   check zSkippedGate true "Z.2 an already-PROCEEDed scope gate is skipped on resume"
   check zNoScopeGate true "Z.3 the scope gate is not re-dispatched on resume"
   check zNoGenerators true "Z.4 islands whose candidates already exist are not re-diverged"
+  # Run Z2 — resume must NOT destroy the donor fanout
+  check z2Donors 12 "Z2.1 a resumed run rehydrates the donor catalog from scope-verdict.yaml"
+  check z2SkippedGate true "Z2.2 the gate is still skipped once the donors are rehydrated"
+  check z2Generators 32 "Z2.3 a resumed run still dispatches 12 donors + 4 operators per island"
+  check z2Scouts 1 "Z2.4 the Field Scout fleet survives the resume (not just the fixed operators)"
+  # Z3 — an un-rehydratable donor list re-runs the gate rather than degrading
+  check z3ScopeGateReRun true "Z3.1 a resumed PROCEED with no donors on disk re-dispatches the scope gate"
+  check z3NotSkipped true "Z3.2 the gate is NOT recorded as skipped in that case"
+  check z3Donors 12 "Z3.3 the re-run gate repopulates the donor catalog"
+  check z3Audit true "Z3.4 the degradation is audited as resume_donors_unrecoverable"
+  # Run D — a decorated donor value is rejected loudly
+  check dDonors 2 "D.1 a donor value that is not a bare slug is rejected"
+  check dRejectedAudit true "D.2 the rejection is audited even though other slugs survived"
 fi
 
 echo

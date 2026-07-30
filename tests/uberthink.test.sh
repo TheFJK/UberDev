@@ -19,6 +19,7 @@ SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 F2I="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
 AGENTS_DIR="$REPO_ROOT/plugins/uberdev/agents"
 REPORT_TEST="$REPO_ROOT/tests/uberthink-report.test.sh"
+REPORT_PY="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/report.py"
 # RFC 0012 §3.7 moved the orchestration out of SKILL.md into workflow.js. Asserts
 # that used to anchor on directive-emitter bash now anchor HERE; the behavioral
 # coverage lives in tests/uberthink-workflow.test.sh.
@@ -44,6 +45,11 @@ echo "== U2: READ-ONLY invariant (no Edit/MultiEdit in allowed-tools) =="
 # Mirrors uberscan U2 — /uberthink is read-only by spec; presence of Edit/MultiEdit
 # would mean an agent could write application source.
 ck "allowed-tools omits Edit/MultiEdit" "[ \$(grep '^allowed-tools:' '$CMD' | grep -cE '\"Edit\"|MultiEdit') -eq 0 ]"
+# RFC 0012 §3.7: SKILL.md MANDATES Workflow({scriptPath: .../uberthink-pipeline/workflow.js}).
+# A command whose allowed-tools omits Workflow cannot invoke the tool its own
+# pipeline requires. Same assert uberscan.test.sh + ubersimplify.test.sh carry.
+ck "allowed-tools carries Workflow (the migration's dispatch tool)" \
+  "grep '^allowed-tools:' '$CMD' | grep -q '\"Workflow\"'"
 
 echo "== U3: personas.yaml parses + has required top-level + donor_catalog tier keys =="
 PY_KEYS=$(python3 - <<PYEOF
@@ -103,10 +109,28 @@ ck "SKILL.md mandates the uberthink Workflow script" \
 ck "SKILL.md carries the mandatory '## No-Workflow fallback' section" \
   "grep -qF '## No-Workflow fallback' '$SKILL'"
 
-echo "== U6: SKILL.md has all 6 CB ids =="
-for cb in CB-LOOP CB-WAVE CB-FLOOD CB-CLOCK CB-CONVERGE CB-ISLAND; do
-  ck "SKILL.md mentions $cb" "grep -q '$cb' '$SKILL'"
+echo "== U6: SKILL.md documents every LIVE circuit breaker as a breaker-table row =="
+# The old form looped over CB-LOOP/CB-WAVE/CB-FLOOD/CB-CLOCK/CB-CONVERGE/CB-ISLAND
+# and grepped the WHOLE file — so "CB-WAVE … are **retired**" satisfied the assert
+# "SKILL.md mentions CB-WAVE": prose asserting the OPPOSITE of what was claimed.
+# Anchor the live breakers on the breaker TABLE instead, and assert the two dead
+# wall-clock breakers appear ONLY as retirement prose. CB-BUDGET (the genuinely
+# new one, RFC 0012 DR-7) is now covered too.
+CB_TABLE="$(awk '/^\| ID \| Guard \| Trip condition \| Action \|/{active=1} active{print} active && /^$/{exit}' "$SKILL")"
+ck_msg "the circuit-breaker table exists in SKILL.md" "[ -n \"\$CB_TABLE\" ]" \
+  "no '| ID | Guard | Trip condition | Action |' table header found in $SKILL"
+for cb in CB-ISLAND CB-BUDGET CB-FLOOD CB-LOOP CB-CONVERGE; do
+  ck_msg "breaker table carries a LIVE row for $cb" \
+    "grep -qF '**$cb**' <<<\"\$CB_TABLE\"" \
+    "$cb is not a row in the breaker table (a mention elsewhere in the file does not count)"
 done
+for cb in CB-WAVE CB-CLOCK; do
+  ck_msg "$cb is retired — named in the file but NOT a live breaker row" \
+    "grep -qF '$cb' '$SKILL' && ! grep -qF '**$cb**' <<<\"\$CB_TABLE\"" \
+    "$cb must survive only as retirement prose (DR-7: the wall-clock globals are forbidden)"
+done
+ck "SKILL.md states both wall-clock breakers are retired on one line" \
+  "grep -qE 'CB-WAVE.*CB-CLOCK.*retired' '$SKILL'"
 
 echo "== U7: SKILL.md handles island, gap-gate, loop-back(3), --handoff =="
 ck "SKILL.md references islands ('island-' token)" "grep -q 'island-' '$SKILL'"
@@ -190,9 +214,16 @@ echo "== U12: standalone findings dispatch uses the closed caller contract =="
 # `printf | grep` — a pipe into `grep -q` can EPIPE-race under pipefail on Linux CI.
 UBERTHINK_F2I_REGION="$(awk 'index($0,"function f2iPrompt("){active=1} active{print} active && $0=="}"{exit}' "$WORKFLOW")"
 ck "uberthink f2i builder was found in workflow.js" "[ -n \"\$UBERTHINK_F2I_REGION\" ]"
-ck "uberthink dispatch sends aggregate_path" \
-  "grep -q 'aggregate_path=' <<<\"\$UBERTHINK_F2I_REGION\" \
-    && grep -q 'f2i-aggregate.md' '$WORKFLOW'"
+# Bind the KEY to its VALUE *inside the builder*. The weaker form checked
+# `aggregate_path=` in the region and then grepped `f2i-aggregate.md` against the
+# WHOLE workflow.js — where aggregatePrompt() also contains it — so the region
+# could lose the value entirely and the assert would still pass.
+ck "uberthink dispatch binds aggregate_path to the caller-supplied path" \
+  "grep -qF 'aggregate_path=\" + aggregatePathAbs' <<<\"\$UBERTHINK_F2I_REGION\""
+UBERTHINK_AGG_REGION="$(awk 'index($0,"function aggregatePrompt("){active=1} active{print} active && $0=="}"{exit}' "$WORKFLOW")"
+ck "uberthink aggregate builder was found in workflow.js" "[ -n \"\$UBERTHINK_AGG_REGION\" ]"
+ck "the aggregate relay writes f2i-aggregate.md under the run dir" \
+  "grep -qF 'runDirAbs + \"/f2i-aggregate.md\"' <<<\"\$UBERTHINK_AGG_REGION\""
 ck "uberthink dispatch sends numeric pr_number=0" \
   "grep -q 'pr_number=0' <<<\"\$UBERTHINK_F2I_REGION\""
 ck "uberthink dispatch sends fixed label, marker, and max_new" \
@@ -203,6 +234,67 @@ ck "uberthink dispatch selects variant=legacy.uberthink" \
   "grep -q 'variant=legacy.uberthink' <<<\"\$UBERTHINK_F2I_REGION\""
 ck "uberthink dispatch omits agent-derived and legacy path fields" \
   "! grep -qE '(run_id|repo_slug|pr_commit_sha|source_ref|phase1_aggregate_path)=' <<<\"\$UBERTHINK_F2I_REGION\""
+
+echo "== U14: flag parse, donor catalog, Wave-5 path derivation, relay payload =="
+# --resume is documented with a SPACE in the argument-hint, the flag table and
+# RFC 0009. Parsing only `--resume=VALUE` sent the run id into GOAL and launched a
+# full fresh (~30x a normal chat) ideation run on the literal id string.
+ck "SKILL.md parses --resume=VALUE" "grep -qF -- '--resume=*)' '$SKILL'"
+ck "SKILL.md parses the documented '--resume VALUE' space form" \
+  "grep -qE -- '--resume\\)[[:space:]]+WANT=resume' '$SKILL'"
+ck "SKILL.md parses the space form of --islands and --max-new too" \
+  "grep -qE -- '--islands\\)[[:space:]]+WANT=islands' '$SKILL' \
+    && grep -qE -- '--max-new\\)[[:space:]]+WANT=max-new' '$SKILL'"
+ck "SKILL.md refuses a value-taking flag that has no value" \
+  "grep -q 'requires a value' '$SKILL'"
+ck "commands/uberthink.md preflight accepts BOTH --resume spellings" \
+  "grep -qF -- '--resume(=|\$)' '$CMD'"
+
+# Every donor_catalog entry is returned VERBATIM by the schema lens and then run
+# through the pipeline's ^[a-z0-9][a-z0-9-]{1,48}$ slug validator. A decorated
+# entry is dropped with no log, silently weakening the mandatory >=2 tier-5
+# wildcard rule.
+DONOR_BAD=$(python3 - <<PYEOF
+import re, yaml
+try:
+    d = yaml.safe_load(open("$PERSONAS")) or {}
+except Exception as e:
+    print(f"PARSE_ERROR:{e}"); raise SystemExit(0)
+rx = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}\$")
+bad = [str(s) for tier in (d.get("donor_catalog") or {}).values() for s in (tier or [])
+       if not rx.match(str(s))]
+print(" | ".join(bad))
+PYEOF
+)
+ck_msg "every donor_catalog slug survives the pipeline's isSlug() validator" \
+  "[ -z '$DONOR_BAD' ]" \
+  "these catalog entries are silently dropped before any Field Scout is dispatched: $DONOR_BAD"
+
+# Wave 5 must attack the composite_path report.py wrote into the shortlist row.
+# The composite id (comp-island-K-NNN) is NOT the composite file stem
+# (comp-NNN-<synth-lens>), so a path rebuilt from the id points at nothing.
+ck "the Wave-4 relay returns the authoritative composite_path per shortlist row" \
+  "grep -qF 'compositePaths' '$WORKFLOW'"
+ck "workflow.js never rebuilds a composite path from the shortlist id" \
+  "! grep -qF '/composites/\" + cid' '$WORKFLOW'"
+ck "the falsify artifact name is derived from the composite FILE stem" \
+  "grep -qF 'baseStem(compositePath)' '$WORKFLOW'"
+# report.py globs the falsify dossiers off the composite basename — the two
+# conventions must stay in lockstep.
+ck "report.py globs falsify dossiers off basename(composite_path)" \
+  "grep -qF 'base.replace(\".yaml\", \"-*.yaml\")' '$REPORT_PY'"
+
+# rc 0 from the personas SSOT relay only says "the file parsed" — it says nothing
+# about the payload SHAPE, and every wave prompt is composed from that payload.
+ck "workflow.js validates the personas relay PAYLOAD, not just its rc" \
+  "grep -qF 'function missingPersonas' '$WORKFLOW' \
+    && grep -qF 'personas payload unusable' '$WORKFLOW'"
+# A resumed run must not lose the donor catalog (the Field Scout fleet is the
+# cross-domain import /uberthink exists for).
+ck "a resumed run rehydrates the donor catalog before skipping the scope gate" \
+  "grep -qF 'resumedDonors.donors.length > 0' '$WORKFLOW'"
+ck "scope-verdict.yaml is contracted to record the donor slugs" \
+  "grep -qF 'donors:' '$AGENTS_DIR/uberthink-frame.md'"
 
 echo "== U13: report.py tests pass (source tests/uberthink-report.test.sh) =="
 # T1 owns report.py and its own unit tests in tests/uberthink-report.test.sh.

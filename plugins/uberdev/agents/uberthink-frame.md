@@ -78,9 +78,14 @@ You perform ONE lens per dispatch. Read the injected `lens` and execute the matc
    ```yaml
    verdict: PROCEED   # or REFUSE
    rationale: <short — one or two sentences>
+   donors:            # the SAME slugs you return in `donors` below, one per line
+     - distributed-systems
+     - biology
    ```
 
    On `REFUSE` the pipeline halts before any fanout and writes a refusal report; on `PROCEED` the pipeline continues to Wave 1.
+
+   `donors:` is **not optional on PROCEED**. It is the only machine-readable record of the donor catalog in the run tree, and a `--resume RUN_ID` run rehydrates the Field Scout fleet from it. Omit it and the resumed run either re-runs the whole scope gate or (worse, before this was fixed) proceeds with zero Field Scouts — cross-domain donor import is the premise of the entire pipeline. Write bare slugs, never a decorated string.
 
 ### Lens `teardown` (Reductionist)
 

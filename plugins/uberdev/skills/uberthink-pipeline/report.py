@@ -222,12 +222,26 @@ def load_composite_designs(comp_dir: str) -> tuple[list[dict], list[str]]:
     """Load `comp-*.yaml` composites from `comp_dir` into scoreable designs.
 
     Returns `(designs, malformed)`. Raises `ArtifactError` when `comp_dir` does
-    not exist, or when files exist but NONE of them yielded a design (a
-    wholly-unreadable input set is a crash, not an empty frontier).
+    not exist, when it holds NO composite artifact at all, or when files exist
+    but NONE of them yielded a design (a wholly-unreadable input set is a crash,
+    not an empty frontier).
+
+    The zero-file case is a crash *because the pipeline preflight `mkdir -p`s
+    `island-K/composites` eagerly*: the directory's existence carries no
+    information, so "the dir is there but empty" means the Wave-3 combine wave
+    wrote nothing — an upstream failure, never a verdict about the goal. Letting
+    it return `([], [])` at rc 0 produced an empty shortlist, which the caller
+    read as non-convergence and rendered as "the goal as framed admitted no
+    feasible novel approach". That is defect 2 wearing a different hat.
     """
     if not os.path.isdir(comp_dir):
         raise ArtifactError(f"composites directory missing: {comp_dir}")
     paths = sorted(glob.glob(os.path.join(comp_dir, "comp-*.yaml")))
+    if not paths:
+        raise ArtifactError(
+            f"no composite artifacts (comp-*.yaml) under {comp_dir} — the combine wave wrote "
+            "nothing to cut; the directory exists only because the preflight created it"
+        )
     designs: list[dict] = []
     malformed: list[str] = []
     for path in paths:
@@ -300,7 +314,11 @@ def collect_wave7_designs(run_dir: str) -> tuple[list[dict], list[str]]:
     island finalists that never entered cross-pollination.
 
     Raises `ArtifactError` when neither source exists at all (nothing reached
-    Wave 7 because an upstream wave never wrote its artifacts).
+    Wave 7 because an upstream wave never wrote its artifacts), and equally when
+    the sources DO exist but none of them yielded a scoreable design — same
+    crash-vs-empty discriminator `load_composite_designs` applies one wave
+    earlier. Zero rankable designs is never "nothing cleared the floor"; the
+    floor cut has not been run on anything.
     """
     designs: list[dict] = []
     malformed: list[str] = []
@@ -351,6 +369,12 @@ def collect_wave7_designs(run_dir: str) -> tuple[list[dict], list[str]]:
                 malformed.append(f"{path}: bad shortlist axes ({e})")
                 continue
             designs.append(dict(axes, id=str(d.get("id") or ""), composite_path=cp))
+    if not designs:
+        raise ArtifactError(
+            f"{len(global_paths)} Wave-6 composite file(s) and {len(shortlist_paths)} island "
+            f"shortlist(s) under {run_dir} but none yielded a rankable design: "
+            f"{'; '.join(malformed) or 'no composites[]/shortlist[] entries'}"
+        )
     return designs, malformed
 
 

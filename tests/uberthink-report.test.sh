@@ -199,14 +199,23 @@ check "shortlist: the missing-input failure names the directory on stderr" \
   "grep -q 'composites directory missing' \"$TMP/missing.err\""
 check "shortlist: a crashed cut writes NO shortlist artifact" "[ ! -e \"$CUT/island-2/shortlist.yaml\" ]"
 
-# EMPTY-BUT-HONEST: the directory exists and holds no composites.
+# ZERO-ARTIFACT: the directory EXISTS and holds no composite file. That is NOT an
+# honestly-empty frontier — the pipeline preflight `mkdir -p`s island-K/composites
+# eagerly, so the directory's existence carries no information at all. An empty
+# input set means the Wave-3 combine wave wrote nothing (every synthesizer
+# returned null / crashed), and reporting it at rc 0 produced an empty shortlist
+# that the caller read as non-convergence and rendered as "the goal as framed
+# admitted no feasible novel approach" — defect 2 in a different hat.
 mkdir -p "$CUT/island-2/composites"
 python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist --island 2 \
   > "$TMP/empty.out" 2>"$TMP/empty.err"
 EMPTY_RC=$?
-check "shortlist: an EMPTY (but present) composites dir exits 0" "[ $EMPTY_RC -eq 0 ]"
-check "shortlist: the honest-empty case still writes a shortlist artifact" \
-  "[ -s \"$CUT/island-2/shortlist.yaml\" ]"
+check "shortlist: a composites dir with ZERO comp-*.yaml exits 3 (crash, not an empty frontier)" \
+  "[ $EMPTY_RC -eq 3 ]"
+check "shortlist: the zero-artifact failure names the empty input on stderr" \
+  "grep -q 'no composite artifacts' \"$TMP/empty.err\""
+check "shortlist: the zero-artifact case writes NO shortlist artifact" \
+  "[ ! -e \"$CUT/island-2/shortlist.yaml\" ]"
 
 # A composites dir holding only unparseable files is a crash, not an empty frontier.
 mkdir -p "$CUT/island-3/composites"
@@ -259,6 +268,18 @@ BARREN_RC=$?
 check "floor-survivors: a run with no rankable artifact at all exits 3" "[ $BARREN_RC -eq 3 ]"
 check "floor-survivors: a crashed cut writes NO floor-survivors artifact" \
   "[ ! -e \"$TMP/barren/floor-survivors.yaml\" ]"
+
+# CRASH: the sources EXIST but none of them yields a rankable design. Same
+# crash-vs-empty discriminator one wave later — "0/0 cleared the floor" is not a
+# negative result about the goal, it means the floor cut ran on nothing.
+mkdir -p "$TMP/hollow/island-1"
+printf 'shortlist: []\n' > "$TMP/hollow/island-1/shortlist.yaml"
+python3 "$PIPELINE_DIR/report.py" --run-dir "$TMP/hollow" --emit floor-survivors \
+  > "$TMP/hollow.out" 2>"$TMP/hollow.err"
+HOLLOW_RC=$?
+check "floor-survivors: sources present but ZERO rankable designs exits 3" "[ $HOLLOW_RC -eq 3 ]"
+check "floor-survivors: the hollow-input failure writes NO artifact" \
+  "[ ! -e \"$TMP/hollow/floor-survivors.yaml\" ]"
 
 # --emit shortlist without --island is a usage error, not a silent no-op.
 python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist >/dev/null 2>&1

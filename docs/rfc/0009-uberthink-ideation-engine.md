@@ -105,7 +105,7 @@ The single most important behavior separating `/uberthink` from a one-shot brain
 
 **Island bookkeeping.** Loop counters are keyed by island index in `run-state.txt` (`island-1.loop_count`, `island-2.loop_count`). A global counter would let one runaway island starve the others (spec §11). Per-island shortlist files (`island-K/shortlist.yaml`) keep the populations isolated through Wave 5.
 
-**Falsifier output contract.** Each falsifier lens, applied to one composite, emits `island-K/falsify/comp-NNN-<lens>.yaml` containing: (1) the attack dossier (steelman → attack steps → outcome), (2) per-feasibility-sub-criterion scores 0–10 (hard_constraint, survives_adversary, buildability, premortem_resilience, deployment_reality), (3) each kill-cause tagged `fatal: true | false`, and (4) for fixable kills, a one-paragraph fix-suggestion injected into the loop-back's Wave-3 input. The synthesizer is therefore not blindly retrying — it has a specific repair target each time.
+**Falsifier output contract.** Each falsifier lens, applied to one composite, emits `island-K/falsify/<composite file stem>-<lens>.yaml` — the stem of the `composite_path` the Wave-4 shortlist row carries, e.g. `composites/comp-007-weave.yaml` → `falsify/comp-007-weave-physics.yaml`. The name is derived from the FILE, never from the composite id (`comp-island-K-NNN`): the Wave-7 floor cut merges `feasibility_sub_scores` by globbing `<basename(composite_path) minus .yaml>-*.yaml`, so an id-named dossier is silently never read. The file contains: (1) the attack dossier (steelman → attack steps → outcome), (2) per-feasibility-sub-criterion scores 0–10 (hard_constraint, survives_adversary, buildability, premortem_resilience, deployment_reality), (3) each kill-cause tagged `fatal: true | false`, and (4) for fixable kills, a one-paragraph fix-suggestion injected into the loop-back's Wave-3 input. The synthesizer is therefore not blindly retrying — it has a specific repair target each time.
 
 **Genetic loop vs naïve filtering.** Co-Scientist showed empirically that an Evolve step that *modifies* candidates outperforms a Generate + Rank step that merely filters them, because the iterative critic-driven repair surfaces designs the original generation could not produce. `/uberthink` extends that with island isolation so the repairs happen in parallel under independent priors. The combination produces denser, more thoroughly-attacked output than a one-shot brainstorm or even a single-island Co-Scientist cycle.
 
@@ -159,7 +159,7 @@ Five tiers gives the Cartographer a clean two-axis selection (tier index × cata
 
 The safety posture is **a single lightweight Wave-0 gate, not a heavy approval checkpoint**, consistent with the project's no-hard-gates principle and the global `CLAUDE.md` security rules.
 
-1. **Wave-0 scope gate.** The `uberthink-frame` schema lens emits `scope-verdict.yaml` with `verdict: PROCEED | REFUSE` plus rationale. `REFUSE` is reserved for goals whose **primary purpose** is unambiguous harm with no legitimate framing (ransomware-for-extortion, mass-targeting, DoS-as-a-service). The vast majority of dual-use research goals — anti-censorship, defensive security research, CTF, red-team exercises, academic exploration — **PROCEED**. On `REFUSE` the pipeline halts before any fanout and writes a short refusal report to `report.md`.
+1. **Wave-0 scope gate.** The `uberthink-frame` schema lens emits `scope-verdict.yaml` with `verdict: PROCEED | REFUSE`, the rationale, and (on `PROCEED`) the `donors:` slug list the run is built on. `REFUSE` is reserved for goals whose **primary purpose** is unambiguous harm with no legitimate framing (ransomware-for-extortion, mass-targeting, DoS-as-a-service). The vast majority of dual-use research goals — anti-censorship, defensive security research, CTF, red-team exercises, academic exploration — **PROCEED**. On `REFUSE` the pipeline halts before any fanout and writes a short refusal report to `report.md`.
 2. **The Adversary falsifier as safety lens.** The `redteam` lens in Wave 5 doubles as a safety analyzer: each composite's feasibility dossier includes a misuse-potential note (who could weaponize this, against whom, at what cost). This is part of the normal feasibility scoring — the Adversary is the same role whether the goal is offensive or defensive.
 
 The gate is intentionally permissive on framing. Security research, censorship-circumvention research, and adversarial testing all require thinking like an attacker; refusing to ideate on attack vectors would refuse the legitimate research case along with the harmful one. The project's global rule — "never implement an insecure pattern" — applies at *implementation* time (`/dev`, `/solve`, `/turbo`). `/uberthink` is an ideation engine; it produces a dossier, not code.
@@ -325,8 +325,11 @@ that disagreement was unsound:
   on the fourth wave.
 - **Crash ≠ empty.** Both deterministic cuts are now first-class `report.py` CLI
   modes (`--emit shortlist`, `--emit floor-survivors`) that raise `ArtifactError`
-  → exit 3 on a missing/unreadable input and exit 0 with an empty result when the
-  frontier is honestly empty. A non-zero rc becomes a `TOOLING:` halt;
+  → exit 3 on a missing, unreadable **or empty** input set and exit 0 with an
+  empty result only when the cut genuinely ran and nothing cleared it. A
+  composites directory holding zero `comp-*.yaml` counts as missing input, not as
+  an empty frontier: the preflight `mkdir -p`s it eagerly, so its existence
+  proves nothing about whether the combine wave produced anything. A non-zero rc becomes a `TOOLING:` halt;
   `convergenceIsHonest()` gates the single site that can raise CB-CONVERGE, and
   the rank phase is skipped outright so no dossier can be assembled from
   artifacts that were never written.
@@ -342,8 +345,12 @@ that disagreement was unsound:
   scalars. The old TSV sidecar flattened every prompt through
   `.replace(chr(10), " ")`, capping each lens at one line; the Workflow relay
   carries them as JSON strings with newlines intact.
-- **`--resume RUN_ID`** rehydrates an existing run tree from a disk artifact scan
-  and skips the waves that already produced artifacts.
+- **`--resume RUN_ID`** (either spelling — `--resume RUN_ID` or
+  `--resume=RUN_ID`) rehydrates an existing run tree from a disk artifact scan
+  and skips the waves that already produced artifacts. The donor catalog is read
+  back from `scope-verdict.yaml`'s `donors:` list, which is why the schema lens
+  records it there: a resumed run that cannot rehydrate the donors re-dispatches
+  the scope gate rather than proceeding with an empty Field Scout fleet.
 
 ### Deliberately preserved
 

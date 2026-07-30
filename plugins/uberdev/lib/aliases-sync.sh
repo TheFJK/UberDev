@@ -35,7 +35,7 @@ testers|testers|["Bash", "Read", "Write", "Task", "Workflow"]
 ubergoal|goal|["Bash", "Read", "Task"]
 uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write"]
 ubersimplify|ubersimplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Workflow", "Write"]
-uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write", "WebSearch", "WebFetch"]
+uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write", "WebSearch", "WebFetch"]
 ubercluster|cluster|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]
 '
 

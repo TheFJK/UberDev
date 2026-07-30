@@ -58,7 +58,14 @@ donor_catalog:                      # Cartographer picks ~10-12 of these per pro
   tier2_gamedev:  [engine-architecture-ecs, netcode-rollback, procedural-generation, real-time-rendering, game-physics, game-ai-pathfinding, anti-cheat-integrity, systems-economy-design]
   tier3_it_sys:   [cloud-distributed-infra, virtualization-containers, observability-ebpf, caching-hierarchies, queueing-backpressure, fault-tolerance-bulkheads, edge-cdn, identity-authz]
   tier4_math:     [graph-theory, information-theory, optimization, probability-statistics, number-theory-algebra, category-type-theory, control-theory, combinatorics]
-  tier5_wildcard: [biology, economics-markets, physics, "rotating-exotic (linguistics/music/epidemiology/logistics)"]
+  # EVERY catalog entry must be a bare lowercase kebab-case slug: the schema lens
+  # returns these VERBATIM and the pipeline validates each against
+  # ^[a-z0-9][a-z0-9-]{1,48}$ before it reaches a prompt or a file name. A
+  # decorated entry (a parenthetical, a tier prefix) is dropped on arrival, which
+  # silently weakened the mandatory >=2 tier-5 wildcard rule.
+  # rotating-exotic rotates over linguistics / music-acoustics / epidemiology /
+  # logistics — the Cartographer picks the rotation, the slug stays constant.
+  tier5_wildcard: [biology, economics-markets, physics, rotating-exotic]
 
 generator_personas:
   field_scout:

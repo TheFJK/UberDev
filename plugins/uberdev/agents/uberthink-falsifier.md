@@ -59,7 +59,7 @@ The `steelman` and `premortem` lenses do not call `WebSearch`/`WebFetch`; emit `
 
 Every path you `Write` to MUST be an absolute path under the `summary_dir` the pipeline injected. Concretely:
 
-- Write your artifact to `<summary_dir>/comp-<NNN>-<lens>.yaml`, where `<NNN>` is the zero-padded composite number extracted from the `composite_path` basename (e.g. `composites/comp-007.yaml` → `comp-007-physics.yaml`). If the basename pattern is ambiguous, fall back to `<composite_id-from-the-file>-<lens>.yaml`.
+- Write your artifact to the exact absolute path the pipeline names in your brief. That path is always `<summary_dir>/<basename of composite_path minus `.yaml`>-<lens>.yaml` — e.g. `composites/comp-007-weave.yaml` → `falsify/comp-007-weave-physics.yaml`. **Derive the name from the composite FILE, never from the composite id**: the id (`comp-island-2-007`) and the file stem (`comp-007-weave`) are different strings, and the Wave-7 deterministic floor cut merges your `feasibility_sub_scores` by globbing `<basename(composite_path) minus .yaml>-*.yaml`. An id-named dossier is never read, so every sub-score in it is silently discarded.
 
 Do NOT write to `falsify/...` or `./falsify/...` — the cwd at dispatch time is the project root, not the worktree or the run dir, and a relative path will leak the artifact outside the run dir (the cross-worktree artifact-leak bug). Always prefix with the absolute `summary_dir` the pipeline injected.
 
@@ -111,9 +111,9 @@ Test the composite against the **hard-constraint fence** from `<frame_dir>/const
 4. Enumerate **kill-causes** as physics-law violations. Mark each `fatal: true|false`. **Fatal** = the composite violates a LAW (Shannon-Hartley, Kerckhoffs's principle as misapplied, the speed of light, an unforgeability assumption that doesn't hold for the chosen primitive). **Fixable** = the composite is right at the bound but a Wave-3 mutation could relax it (e.g. "trade latency for capacity by streaming differently"); populate `repair_hint`.
 5. **Feasibility sub-scores — physics MUST populate ALL 5.** This is the lens of record for the floor; the other lenses contribute optionally, but physics is required to fill every slot 0–10:
    - `hard_constraint`: physics's own primary score. 0 if the composite violates any numeric LAW from constraints.md; 10 if it sits comfortably inside every bound with headroom.
-   - `survives_adversary`: **punt to redteam's score if redteam also ran this composite** (the pipeline guarantees both run when both lenses are dispatched). Look for `<summary_dir>/comp-<NNN>-redteam.yaml` and copy its `survives_adversary` value. If redteam has not yet emitted (race or single-lens run), estimate based on the composite's stated threat model and your reading of `frame/constraints.md`'s threat-model boundary section.
+   - `survives_adversary`: **punt to redteam's score if redteam also ran this composite** (the pipeline guarantees both run when both lenses are dispatched). Look for `<summary_dir>/<the same file stem you were told to write>-redteam.yaml` (i.e. swap your own lens suffix for `redteam`) and copy its `survives_adversary` value. If redteam has not yet emitted (race or single-lens run), estimate based on the composite's stated threat model and your reading of `frame/constraints.md`'s threat-model boundary section.
    - `buildability`: estimate based on how many novel primitives the composite invents vs reuses, and how exotic the donor-domain imports are.
-   - `premortem_resilience`: **punt to premortem's score if premortem also ran this composite.** Look for `<summary_dir>/comp-<NNN>-premortem.yaml` and copy its `premortem_resilience` value. If premortem has not yet emitted, estimate based on the composite's operator-error surface and graceful-degradation story.
+   - `premortem_resilience`: **punt to premortem's score if premortem also ran this composite.** Look for `<summary_dir>/<the same file stem you were told to write>-premortem.yaml` (swap your lens suffix for `premortem`) and copy its `premortem_resilience` value. If premortem has not yet emitted, estimate based on the composite's operator-error surface and graceful-degradation story.
    - `deployment_reality`: estimate based on what infrastructure the composite assumes already exists and what compatibility surface it must preserve.
 6. **No misuse flags.** Physics is the LAW lens, not the safety lens; leave `misuse_flags: []` (redteam owns safety).
 
@@ -123,7 +123,7 @@ The "punt to peer lens" rule above is a **soft** dependency: the orchestrating s
 
 ## Output artifact shape (the YAML you write to disk)
 
-Write `<summary_dir>/comp-<NNN>-<lens>.yaml` with **exactly this schema** (the deterministic aggregator depends on the keys; do not rename or omit them):
+Write the artifact at the absolute path from your brief — `<summary_dir>/<basename of composite_path minus `.yaml`>-<lens>.yaml` — with **exactly this schema** (the deterministic aggregator depends on the keys; do not rename or omit them):
 
 ```yaml
 composite_id: comp-<NNN>                   # match the composite's own id; if upstream emitted "island-2-comp-007" preserve verbatim

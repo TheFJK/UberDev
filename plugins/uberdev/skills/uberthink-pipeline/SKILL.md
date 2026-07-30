@@ -65,14 +65,14 @@ changed is that after `PROCEED`, the three remaining Wave-0 lenses fire in the
 $RUN_DIR/                                       # .uberdev/think/<RUN_ID>/  (absolute)
   frame/
     frame.md                                    # schema lens (Cartographer) — locked
-    scope-verdict.yaml                          # verdict: PROCEED | REFUSE
+    scope-verdict.yaml                          # verdict: PROCEED | REFUSE + donors: (resume rehydrates from it)
     teardown.md  prior-art.md  constraints.md
   island-1/
     candidates/cand-*.yaml                      # Wave-1 + Wave-2 generator outputs
     gaps.yaml                                   # Wave-2 moderator output
     composites/comp-*.yaml                      # Wave-3 + post-loop-back synthesizer outputs
     shortlist.yaml                              # Wave-4 deterministic Pareto cut (report.py)
-    falsify/<composite-id>-{steelman,premortem,redteam,physics}.yaml
+    falsify/<composite-file-stem>-{steelman,premortem,redteam,physics}.yaml   # stem, NOT the id
   island-2/  ...                                # same shape, per K
   composites/global-*.yaml                      # Wave-6 cross-pollinated composites
   floor-survivors.yaml                          # Wave-7 deterministic floor cut (report.py)
@@ -101,19 +101,42 @@ REPO_ROOT_ABS="$(git rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$REPO_ROOT_ABS" ] || { echo "error: /uberthink must run inside a git repository" >&2; exit 2; }
 
 # Parse flags; GOAL accumulates the non-flag tokens (the user's free-text goal).
-ISLANDS=""; HANDOFF=0; NO_ISSUES=0; MAX_NEW=""; RESUME_ID=""; GOAL=""
+# Value-taking flags accept BOTH spellings — `--resume=RUN_ID` and the
+# `--resume RUN_ID` form the command's argument-hint and flag table document.
+# Parsing only the `=` form silently routed the value into GOAL, so
+# `/uberthink --resume 20260730-abcd` minted a brand-new run and launched a full
+# ~30x-a-normal-chat ideation pass on the string "20260730-abcd". WANT parks the
+# pending flag name so the NEXT token is consumed as its value.
+ISLANDS=""; HANDOFF=0; NO_ISSUES=0; MAX_NEW=""; RESUME_ID=""; GOAL=""; WANT=""
 for arg in $ARGUMENTS; do
+  if [ -n "$WANT" ]; then
+    case "$arg" in
+      --*) echo "error: --$WANT requires a value (got the flag '$arg')" >&2; exit 2 ;;
+    esac
+    case "$WANT" in
+      islands) ISLANDS="$arg" ;;
+      max-new) MAX_NEW="$arg" ;;
+      resume)  RESUME_ID="$arg" ;;
+    esac
+    WANT=""
+    continue
+  fi
   case "$arg" in
     --islands=*)   ISLANDS="${arg#--islands=}" ;;
-    --islands)     : ;;                              # bare flag = keep the default
+    --islands)     WANT=islands ;;
     --handoff)     HANDOFF=1 ;;
     --no-issues)   NO_ISSUES=1 ;;
     --max-new=*)   MAX_NEW="${arg#--max-new=}" ;;
+    --max-new)     WANT=max-new ;;
     --resume=*)    RESUME_ID="${arg#--resume=}" ;;
+    --resume)      WANT=resume ;;
     --*)           echo "warning: unknown flag $arg" >&2 ;;
     *)             GOAL="${GOAL:+$GOAL }$arg" ;;
   esac
 done
+if [ -n "$WANT" ]; then
+  echo "error: --$WANT requires a value (--$WANT <value> or --$WANT=<value>)" >&2; exit 2
+fi
 
 # --resume rehydrates an existing run tree instead of minting a new one. Validate
 # the id to a closed character class BEFORE it becomes a path component.
@@ -289,7 +312,11 @@ inject each `prompt` verbatim (agents must not re-read it).
    `uberdev:uberthink-falsifier` Task. Every dispatch MUST carry `frame_dir=$RUN_DIR/frame`
    plus `composite_path`, `summary_dir`, `island_index`, `working_dir` and the goal
    envelope — the `physics` lens reads `$RUN_DIR/frame/constraints.md` as its
-   feasibility fence. Fixable kills (`fatal: false`) with a `repair_hint` re-enter
+   feasibility fence. Take `composite_path` from the shortlist row's own
+   `composite_path` field; **never rebuild it from the composite id** (the id is
+   `comp-island-K-NNN`, the file is `comp-NNN-<synth-lens>.yaml`). Each dossier is
+   named `<basename of composite_path minus .yaml>-<lens>.yaml`, which is exactly
+   what the Wave-7 floor cut globs for. Fixable kills (`fatal: false`) with a `repair_hint` re-enter
    step 4 as design constraints, capped at 3 loop-backs per island (CB-LOOP).
 7. **Cross-pollinate.** With `--islands 1`, copy `island-1/composites/comp-*.yaml`
    to `$RUN_DIR/composites/global-*.yaml`. Otherwise ONE global
