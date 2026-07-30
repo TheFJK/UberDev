@@ -378,13 +378,15 @@ try:
     }
     raw = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
     token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    # Write bytes, not text: `end=""` suppresses only the TRAILING newline, while
-    # the two embedded separators are still translated to \r\n under native-Windows
-    # text mode. The shell splits this triple on $'\n', so a translated separator
-    # leaves a trailing CR on the receipt and on RUN_ID -- which then fails the
-    # receipt regex and is exported into marker paths.
-    sys.stdout.buffer.write(f"v1:{token}\n{candidate}\n{run_dir}".encode())
-    sys.stdout.buffer.flush()
+    # `end=""` suppresses only the TRAILING newline; the two embedded separators
+    # are still translated to \r\n under native-Windows text mode. The shell splits
+    # this triple on $'\n', so a translated separator leaves a trailing CR on the
+    # receipt and on RUN_ID -- failing the receipt regex and leaking into marker
+    # paths. Disable newline translation on the text layer rather than dropping to
+    # sys.stdout.buffer: writing bytes while other code in this interpreter uses
+    # print() mixes two buffering layers and can reorder output.
+    sys.stdout.reconfigure(newline="")
+    print(f"v1:{token}\n{candidate}\n{run_dir}", end="")
 except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
     if created and "run_dir" in locals() and "run_identity" in locals():
         rollback_successful_markers(run_dir, run_identity)
