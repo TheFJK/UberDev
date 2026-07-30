@@ -394,7 +394,7 @@ Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberde
 <details>
 <summary><strong>Will <code>/solve</code> work outside macOS?</strong></summary>
 
-Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. On the default `workflow` backend there is no OS-specific supervision at all (the Workflow runtime owns every agent), which is why native Windows no longer requires WezTerm. For the explicit detached backends, process-identity reconciliation is supported on Linux, macOS, and native Windows; other kernels fail closed instead of using a degraded PID fingerprint, and `claude --bg` sessions are monitored with `claude agents`. Requires Claude Code >= 2.1.139.
+Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. On the default `workflow` backend there is no OS-specific supervision at all (the Workflow runtime owns every agent), which is why native Windows no longer requires WezTerm. Process-identity reconciliation is supported on Linux, macOS, and native Windows for the explicit detached backends; other kernels fail closed instead of using a degraded PID fingerprint, and `claude --bg` sessions are monitored with `claude agents`. Requires Claude Code >= 2.1.139.
 
 </details>
 

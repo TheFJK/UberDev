@@ -2861,12 +2861,14 @@ CODEX_MISSING_OUT="$(mktemp)"
 if CODEX_HOME=/tmp/codex-home PATH=/usr/bin:/bin UBERDEV_DISPATCH_BACKEND_REQUESTED=auto bash -c \
   '. "$1"; uberdev_dispatch_preflight' _ "$DISPATCH_LIB" >"$CODEX_MISSING_OUT" 2>&1; then
   fail_msg "auto preflight fails loudly when CODEX_HOME is set but codex is absent" "preflight returned success"
-elif [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ] \
-    && grep -q "native Windows requires WezTerm" "$CODEX_MISSING_OUT"; then
-  pass_msg "auto preflight fails on the native-Windows supervision capability gate"
-elif [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 1 ] \
-    && grep -q "CODEX_HOME" "$CODEX_MISSING_OUT" \
+elif grep -q "CODEX_HOME" "$CODEX_MISSING_OUT" \
     && grep -q "codex" "$CODEX_MISSING_OUT"; then
+  # RFC 0015 collapsed the platform split here. Before it, native Windows
+  # short-circuited on the "native Windows requires WezTerm" supervision gate
+  # BEFORE the CODEX_HOME arm was ever reached, so this assertion needed a
+  # per-platform branch. `auto` no longer has a windows-native arm at all —
+  # every host now reaches the CODEX_HOME arm and reports the same, more
+  # accurate, cause.
   pass_msg "auto preflight fails loudly when CODEX_HOME is set but codex is absent"
 else
   fail_msg "auto preflight failure matches the host supervision capability" "$(cat "$CODEX_MISSING_OUT")"
