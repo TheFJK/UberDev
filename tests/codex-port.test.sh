@@ -405,6 +405,11 @@ if [ -r "$TMP/shared/document-reviewer-template.md" ] \
 else
   fail "ported skills do not resolve shared templates from package-level shared directory"
 fi
+if [ -r "$TMP/shared/phase1-reviewer-output-v1.md" ]; then
+  pass "skill port preserves canonical package-level runtime contracts"
+else
+  fail "skill port dropped canonical package-level runtime contracts"
+fi
 if grep -q '.codex/uberdev.local.md' "$TMP/skills/using-uberdev/SKILL.md" \
    && grep -q '\$uberdev-cmd-\*' "$TMP/skills/using-uberdev/SKILL.md" \
    && ! grep -q 'SessionStart hook also auto-installs the short-form aliases' "$TMP/skills/using-uberdev/SKILL.md"; then

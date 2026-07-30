@@ -24,10 +24,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "M1 every manifest path exists in plugins/uberdev/" \
   || no "M1 $missing manifest path(s) do not exist"
 
-# M2 — count of real (non-comment, non-blank) entries is 34
+# M2 — count of real (non-comment, non-blank) entries is 37
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 34 ] && ok "M2 manifest lists exactly 34 files" \
-  || no "M2 manifest lists $count files (expected 34)"
+[ "$count" -eq 37 ] && ok "M2 manifest lists exactly 37 files" \
+  || no "M2 manifest lists $count files (expected 37)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \
@@ -52,6 +52,23 @@ done
 grep -qxF policy/solve-run-tree-v1.json "$MANIFEST" \
   && grep -qxF shared/phase1-reviewer-output-v1.md "$MANIFEST" \
   && ok "M5 canonical policy projection source + reviewer output contract present"
+
+# M6 — receipt retirement's shared atomic-move and worktree helper modules are
+# packaged with the standalone Claude runtime.
+for req in lib/atomic_move.py lib/worktree_receipts.py; do
+  grep -qxF "$req" "$MANIFEST" || no "M6 missing receipt-retirement helper: $req"
+done
+grep -qxF lib/atomic_move.py "$MANIFEST" \
+  && grep -qxF lib/worktree_receipts.py "$MANIFEST" \
+  && ok "M6 both receipt-retirement helpers are packaged"
+
+# M7 — the code-fixer authority contract is a required standalone runtime
+# dependency, not an implicit dependency on the full UberDev checkout.
+if grep -qxF lib/code_fixer_contract.py "$MANIFEST"; then
+  ok "M7 code-fixer authority contract is packaged"
+else
+  no "M7 missing code-fixer authority contract"
+fi
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -31,6 +31,29 @@ printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"comp
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
 uberdev_unwind_child "$STATUS" "$RESULT" 2
 
+# A fully verified terminal timeout has the same public return code whether this
+# waiter won the timeout CAS or observed the durable terminal state afterward.
+printf '{"backend":"codex","state":"timed_out","exit_code":124,"pid":"321"}\n' >"$STATUS"
+terminal_manifest timed_out
+set +e
+uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+TERMINAL_TIMEOUT_RC=$?
+set -e
+[ "$TERMINAL_TIMEOUT_RC" -eq 124 ]
+
+# Other fully verified non-success terminals retain the generic failure code;
+# callers must not mistake them for a scheduler timeout.
+for TERMINAL_FAILURE_STATE in failed cancelled; do
+  printf '{"backend":"codex","state":"%s","exit_code":1,"pid":"321"}\n' \
+    "$TERMINAL_FAILURE_STATE" >"$STATUS"
+  terminal_manifest "$TERMINAL_FAILURE_STATE"
+  set +e
+  uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+  TERMINAL_FAILURE_RC=$?
+  set -e
+  [ "$TERMINAL_FAILURE_RC" -eq 1 ]
+done
+
 # A terminal manifest event is not sufficient success evidence while the exact
 # lifecycle lease remains present. Wait until watcher finalization releases it.
 TERMINAL_GENERATION=11111111111111111111111111111111
@@ -71,6 +94,22 @@ set -e
 printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq "invalid lifecycle lease: $MALFORMED_LEASE_REAL"
 ! printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq 'generation=bad'
 rm -f "$MALFORMED_LEASE"; rmdir "$MALFORMED_SCOPE"
+
+# Another child's watcher may remove or atomically replace its lease after the
+# terminal proof snapshots the shared lease directory. A vanished unrelated
+# lease is successful concurrent cleanup, not malformed retained capacity.
+VANISHED_SCOPE="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'c%.0s' {1..64}).scope"
+VANISHED_LEASE="$VANISHED_SCOPE/$(printf 'd%.0s' {1..64}).lease"
+mkdir -p "$VANISHED_SCOPE"
+printf 'concurrent lease placeholder\n' >"$VANISHED_LEASE"
+eval "$(declare -f _uberdev_semaphore_validate_lease_path | sed '1s/^_uberdev_semaphore_validate_lease_path/_child_wait_real_validate_lease_path/')"
+_uberdev_semaphore_validate_lease_path() {
+  rm -f "$1"
+  return 1
+}
+_uberdev_child_terminal_lease_proof "$STATUS"
+eval "$(declare -f _child_wait_real_validate_lease_path | sed '1s/^_child_wait_real_validate_lease_path/_uberdev_semaphore_validate_lease_path/')"
+rmdir "$VANISHED_SCOPE"
 
 : >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1

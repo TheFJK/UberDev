@@ -81,6 +81,23 @@ fi
 grep -q 'NEVER parallel' "$WORKFLOW" \
   && pass "G-5 the apply fixer loop is documented sequential (git-index race guard)" \
   || fail "G-5 no sequential-apply guard documented"
+grep -q 'source=\\"simplify-aggregate\\"' "$WORKFLOW" \
+  && pass "G-5a ubersimplify fixer receives the Phase 2 simplify-aggregate envelope" \
+  || fail "G-5a fixer prompt still uses a non-Phase-2 aggregate source"
+grep -q 'fixer-disposition\.json' "$WORKFLOW" \
+  && pass "G-5b ubersimplify fixer disposition artifact is JSON" \
+  || fail "G-5b fixer disposition path is not JSON"
+grep -q 'schema_version.*2\|schema v2' "$WORKFLOW" \
+  && pass "G-5c fixer prompt pins canonical aggregate schema v2" \
+  || fail "G-5c fixer prompt does not pin schema v2"
+grep -qE 'lens file.*missing.*non-zero|does not exist.*non-zero|missing.*fail CLOSED' "$WORKFLOW" \
+  && pass "G-5d a missing lens input cannot masquerade as a valid empty v2 aggregate" \
+  || fail "G-5d missing lens input still has a fail-open zero-result path"
+if grep -q 'rc=0 with mergedCount=0' "$WORKFLOW"; then
+  fail "G-5e missing fixer input must not return rc=0 without publishing the v2 artifact"
+else
+  pass "G-5e no missing-input rc=0 aggregate shortcut remains"
+fi
 
 missing_prompts=""
 for src in "$REPO_ROOT/plugins/uberdev/agents"/*.md; do
@@ -159,8 +176,8 @@ function simplifyReturns() {
     "fixer-agg-001": { outPath: RD+"/chunk-001-fixer.md", mergedCount: 2, rc: 0 },
     "fixer-agg-002": { outPath: RD+"/chunk-002-fixer.md", mergedCount: 1, rc: 0 },
     "apply-setup": { branch: "ubersimplify/RID", rc: 0 },
-    "fixer-001": { areaId: "1", status: "APPLIED", commitSha: "aaa111", dispositionPath: RD+"/chunk-001-fixer-disposition.yaml" },
-    "fixer-002": { areaId: "2", status: "APPLIED", commitSha: "bbb222", dispositionPath: RD+"/chunk-002-fixer-disposition.yaml" },
+    "fixer-001": { areaId: "1", status: "APPLIED", commitSha: "aaa111", dispositionPath: RD+"/chunk-001-fixer-disposition.json" },
+    "fixer-002": { areaId: "2", status: "APPLIED", commitSha: "bbb222", dispositionPath: RD+"/chunk-002-fixer-disposition.json" },
     "open-pr": { prNumber: 303, prUrl: "https://example/pull/303", branch: "ubersimplify/RID", commitCount: 2, rc: 0 },
     "simplify-issues-agg": { aggregatePath: RD+"/f2i-aggregate.md", rc: 0 },
     "findings-to-issues": { issuesCreated: [304], skipped: 0 },
@@ -311,18 +328,19 @@ function modelsHaiku(record, pred) {
   out.jObservable = !!resJ;
   out.jNullAudit = !!(resJ && resJ.auditEvents.some(function (ev) { return ev.event === "findings_to_issues_null"; }));
 
-  // Run K — simplify fixer-agg returns null: aggregate phase counts the null; apply still runs.
+  // Run K — simplify fixer-agg returns null: missing authority blocks apply.
   const kReturns = Object.assign({}, simplifyReturns()); kReturns["fixer-agg-001"] = null;
   const recK = await run(buildArgs("simplify"), { agentReturns: kReturns });
   const resK = resultOf(recK);
   out.kObservable = !!resK;
   out.kAggNullCounted = !!(resK && resK.nullsByPhase && resK.nullsByPhase.aggregate >= 1);
-  out.kApplyStillRan = (h.countAgentsByPhase(recK).apply || 0) >= 3;
+  out.kApplySkipped = (h.countAgentsByPhase(recK).apply || 0) === 0;
+  out.kMissingAggregateAudit = !!(resK && resK.auditEvents.some(function (ev) { return ev.event === "fixer_aggregate_incomplete"; }));
 
   // Run L — simplify 0-applied (all NO_FIXES_NEEDED): the empty temp branch is cleaned up.
   const lReturns = Object.assign({}, simplifyReturns(),
-    { "fixer-001": { areaId: "1", status: "NO_FIXES_NEEDED", commitSha: "", dispositionPath: RD_SIMP + "/d1.yaml" },
-      "fixer-002": { areaId: "2", status: "NO_FIXES_NEEDED", commitSha: "", dispositionPath: RD_SIMP + "/d2.yaml" } });
+    { "fixer-001": { areaId: "1", status: "NO_FIXES_NEEDED", commitSha: "", dispositionPath: RD_SIMP + "/d1.json" },
+      "fixer-002": { areaId: "2", status: "NO_FIXES_NEEDED", commitSha: "", dispositionPath: RD_SIMP + "/d2.json" } });
   const recL = await run(buildArgs("simplify"), { agentReturns: lReturns });
   const resL = resultOf(recL);
   out.lApplied = resL ? resL.appliedAreas : null;
@@ -422,7 +440,8 @@ else
   # Run K — fixer-agg null
   check kObservable true "K.1 a null fixer-agg still yields an observable result"
   check kAggNullCounted true "K.2 a null fixer-agg is counted in nullsByPhase.aggregate (not silently dropped)"
-  check kApplyStillRan true "K.3 a null fixer-agg does not block the apply phase"
+  check kApplySkipped true "K.3 a null fixer-agg blocks the apply phase"
+  check kMissingAggregateAudit true "K.4 missing fixer authority is recorded explicitly"
   # Run L — 0-applied empty-branch cleanup
   check lApplied 0 "L.1 all-NO_FIXES_NEEDED yields 0 applied areas"
   check lNoFixesNeeded 2 "L.2 NO_FIXES_NEEDED areas are counted (not silently dropped, review #0)"

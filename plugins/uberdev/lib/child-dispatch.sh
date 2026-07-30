@@ -197,9 +197,9 @@ uberdev_command_workspace_prepare() {
   UBERDEV_CARRIER_BACKEND="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["root_decision"]["backend"],end="")' "$validated_context")" || return 2
   parent_descriptor="${UBERDEV_COMMAND_WORKSPACE_JSON:-}"
   [ "$caller" != post-impl-review ] || [ -n "$parent_descriptor" ] || { _uberdev_child_error 'post-impl-review requires parent workspace'; return 2; }
-  presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
+  presets="$(python3 -I -B -c 'import json,sys; keys=("WORKTREE_ROOT","RESEARCH_DIR_ABS","DIFF_ARTIFACT_PATH","CRITERIA_PATH","COMMIT_RANGE_PATH","STANDALONE_SNAPSHOT_PATH","PHASE1_DISPOSITION_PATH","PHASE2_DISPOSITION_PATH","AGG_PATH"); print(json.dumps(dict(zip(keys,sys.argv[1:])),sort_keys=True,separators=(",",":")),end="")' \
     "${WORKTREE_ROOT:-}" "${RESEARCH_DIR_ABS:-}" "${DIFF_ARTIFACT_PATH:-}" "${CRITERIA_PATH:-}" \
-    "${COMMIT_RANGE_PATH:-}" "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}")" || return 2
+    "${COMMIT_RANGE_PATH:-}" "${STANDALONE_SNAPSHOT_PATH:-}" "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}")" || return 2
   helper="$_UBERDEV_CHILD_LIB_DIR/command-workspace.py"
   [ -f "$helper" ] || { _uberdev_child_error 'command workspace helper missing'; return 2; }
   output="$(python3 -I -B "$helper" --caller "$caller" --carrier-json "$UBERDEV_RUN_CARRIER_JSON" --run-id "$run_id" --requested-root "$requested_root" --parent-workspace-json "$parent_descriptor" --presets-json "$presets")" || return $?
@@ -210,11 +210,12 @@ uberdev_command_workspace_prepare() {
   DIFF_ARTIFACT_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("diff",""),end="")' "$output")" || return 2
   CRITERIA_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("criteria",""),end="")' "$output")" || return 2
   COMMIT_RANGE_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("commit_range",""),end="")' "$output")" || return 2
+  STANDALONE_SNAPSHOT_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("standalone_snapshot",""),end="")' "$output")" || return 2
   PHASE1_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase1_disposition",""),end="")' "$output")" || return 2
   PHASE2_DISPOSITION_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("phase2_disposition",""),end="")' "$output")" || return 2
   AGG_PATH="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"].get("aggregate",""),end="")' "$output")" || return 2
   export UBERDEV_COMMAND_WORKSPACE_JSON UBERDEV_CARRIER_BACKEND WORKTREE_ROOT UBERDEV_CARRIER_RUN_DIR RESEARCH_DIR_ABS
-  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
   printf '%s' "$output"
 }
 
@@ -287,6 +288,10 @@ try:
  carrier=json.loads(carrier_raw); inputs=json.loads(inputs_raw); risks=json.loads(risks_raw)
  manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_builder_input'))
 except Exception: fail('invalid_builder_input')
+input_limits=manifest.get('input_limits')
+max_input_bytes=input_limits.get('max_serialized_bytes') if isinstance(input_limits,dict) else None
+if type(max_input_bytes) is not int or not 0<max_input_bytes<65536: fail('invalid_builder_input')
+if not isinstance(inputs,dict) or len(json.dumps(inputs,sort_keys=True,separators=(',',':')).encode())>max_input_bytes: fail('invalid_builder_input')
 if not EDGE.fullmatch(edge) or not IDENT.fullmatch(instance): fail('invalid_identity')
 if set(carrier)!={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'} or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
 if carrier.get('workflow') not in {'solve','turbo','review-pr','simplify'}: fail('invalid_carrier')
@@ -354,6 +359,11 @@ def scalar(value,kind):
  if kind in {'string','optional_string'}:
   if not isinstance(value,str) or (kind=='string' and not value) or len(value)>8192 or any(c in value for c in '\r\n\0'): fail('input_type_mismatch')
   return
+ if kind=='bounded_text':
+  if not isinstance(value,str) or not value or '\x00' in value: fail('input_type_mismatch')
+  try: value.encode('utf-8')
+  except UnicodeEncodeError: fail('input_type_mismatch')
+  return
  if kind=='string_array':
   if not isinstance(value,list) or len(value)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in value): fail('input_type_mismatch')
   return
@@ -375,6 +385,38 @@ def scalar(value,kind):
   elif not stat.S_ISREG(pe.st_mode) or pe.st_nlink!=1 or pe.st_size>16777216: fail('input_type_mismatch')
 types={**required,**optional}
 for key,value in inputs.items(): scalar(value,types[key])
+def classifier_authority():
+ if edge!='review_pr.ci.classify': return
+ pr_number=inputs.get('pr_number'); run_id=inputs.get('run_id')
+ head_sha=inputs.get('head_sha'); content=inputs.get('log_content'); digest=inputs.get('log_sha256')
+ if (type(pr_number) is not int or pr_number<=0 or pr_number!=issue or not isinstance(run_id,str)
+     or re.fullmatch(r'[1-9][0-9]*',run_id) is None or not isinstance(head_sha,str)
+     or re.fullmatch(r'[0-9a-f]{40}',head_sha) is None or not isinstance(digest,str)
+     or re.fullmatch(r'[0-9a-f]{64}',digest) is None or not isinstance(content,str)): fail('classifier_authority_mismatch')
+ opening=f'<external-untrusted-input source="github-actions-log-pr-{pr_number}-run-{run_id}">\n'
+ closing='\n</external-untrusted-input>\n'
+ if not content.startswith(opening) or not content.endswith(closing): fail('classifier_authority_mismatch')
+ body=content[len(opening):-len(closing)]
+ if not body or '<' in body or '\x00' in body: fail('classifier_authority_mismatch')
+ try: captured=content.encode('utf-8')
+ except UnicodeEncodeError: fail('classifier_authority_mismatch')
+ if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
+classifier_authority()
+def fixer_authority():
+ if edge not in {'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}: return
+ expected_phase={'review_pr.fix.phase1':'review_fix','review_pr.fix.phase2':'simplify_fix','simplify.fix.phase2':'simplify_fix'}[edge]
+ pr_number=inputs.get('pr_number'); findings_digest=inputs.get('findings_sha256'); secondary_digest=inputs.get('standalone_snapshot_sha256' if edge=='simplify.fix.phase2' else 'commit_range_sha256'); authority_digest=inputs.get('authority_sha256')
+ if (row.get('phase')!=expected_phase or type(pr_number) is not int or pr_number!=issue
+     or (edge=='review_pr.fix.phase1' and pr_number<=0)
+     or (edge=='simplify.fix.phase2' and pr_number!=0)
+     or not isinstance(findings_digest,str) or re.fullmatch(r'[0-9a-f]{64}',findings_digest) is None
+     or not isinstance(secondary_digest,str) or re.fullmatch(r'[0-9a-f]{64}',secondary_digest) is None
+     or not isinstance(authority_digest,str) or re.fullmatch(r'[0-9a-f]{64}',authority_digest) is None): fail('code_fixer_authority_mismatch')
+ if hashlib.sha256(read_regular_once(inputs['findings_path'],16777216,'unsafe_path')).hexdigest()!=findings_digest: fail('code_fixer_findings_digest_mismatch')
+ secondary_path=inputs['standalone_snapshot_path' if edge=='simplify.fix.phase2' else 'commit_range_path']
+ if hashlib.sha256(read_regular_once(secondary_path,16777216,'unsafe_path')).hexdigest()!=secondary_digest: fail('code_fixer_range_digest_mismatch')
+ if hashlib.sha256(read_regular_once(inputs['authority_path'],1048576,'unsafe_path')).hexdigest()!=authority_digest: fail('code_fixer_authority_digest_mismatch')
+fixer_authority()
 if workspace_mode=='caller':
  working_dir=inputs.get('working_dir'); repository_id=meta.get('repository_id')
  if (not isinstance(working_dir,str) or not isinstance(repository_id,str)
@@ -406,6 +448,7 @@ handoff_name=instance+'.json'
 handoff=os.path.join(handoff_dir,handoff_name)
 value={'schema_version':1,'carrier':carrier,'edge_id':edge,'instance_id':instance,'parent_run_id':carrier['run_id'],'role':row['role'],'phase':row['phase'],'risk_scope':row['risk_scope'],'risk_signals':risks,'inputs':inputs}
 raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
+handoff_sha256=hashlib.sha256(raw).hexdigest()
 opened=None
 def publication_reason(error):
  if isinstance(error,FileExistsError): return 'instance_exists'
@@ -451,13 +494,14 @@ try: os.chdir(previous_dir)
 except BaseException as error:
  report_publication_failure(publication_reason(error),not rollback_handoff())
 child=os.path.join(run_dir,'children',instance)
-print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
+print(json.dumps({'edge_id':edge,'instance_id':instance,'required':row['required'],'handoff_file':handoff,'handoff_sha256':handoff_sha256,'result_file':os.path.join(child,'result.md'),'status_file':os.path.join(child,'status.json')},sort_keys=True,separators=(',',':')),end='')
 PY
 )" || return $?
   UBERDEV_CHILD_HANDOFF="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_file"],end="")' "$output")" || return 2
+  UBERDEV_CHILD_HANDOFF_SHA256="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff_sha256"],end="")' "$output")" || return 2
   UBERDEV_CHILD_RESULT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result_file"],end="")' "$output")" || return 2
   UBERDEV_CHILD_STATUS="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status_file"],end="")' "$output")" || return 2
-  export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
+  export UBERDEV_CHILD_HANDOFF UBERDEV_CHILD_HANDOFF_SHA256 UBERDEV_CHILD_RESULT UBERDEV_CHILD_STATUS
   _uberdev_child_receipt_emit_handoff handoff "$edge" "$UBERDEV_CHILD_HANDOFF" || return $?
   printf '%s' "$output"
 }
@@ -466,11 +510,15 @@ PY
 # directory, and emit the descendant routing request. All mutable files are
 # opened relative to verified directory descriptors by the helper.
 _uberdev_child_prepare() {
-  local edge="$1" handoff="$2" result="$3" status_file="$4" mode="${5:-dispatch}" manifest_path
+  [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || {
+    _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE [MODE]'
+    return 2
+  }
+  local edge="$1" handoff="$2" expected_sha256="$3" result="$4" status_file="$5" mode="${6:-dispatch}" manifest_path
   manifest_path="$(_uberdev_child_manifest_path)" || return 2
-  python3 -I -B - "$edge" "$handoff" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
+  python3 -I -B - "$edge" "$handoff" "$expected_sha256" "$result" "$status_file" "$_UBERDEV_CHILD_ROOT" "$manifest_path" "$mode" <<'PY'
 import hashlib,html,json,os,posixpath,re,secrets,stat,sys
-edge,handoff_arg,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
+edge,handoff_arg,expected_sha256,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
@@ -539,7 +587,7 @@ def read_regular_once(path,max_bytes,code,exact_mode=None,nonempty=False):
     finally: os.close(descriptor)
     if len(raw)>max_bytes or (nonempty and not raw): fail(code)
     return raw
-if not EDGE.fullmatch(edge): fail('invalid_edge_id')
+if re.fullmatch(r'[0-9a-f]{64}',expected_sha256) is None: fail('invalid_handoff_digest')
 handoff=os.path.abspath(handoff_arg)
 try:
     manifest=json.loads(read_regular_once(manifest_path,1048576,'invalid_run_tree_manifest'))
@@ -549,6 +597,7 @@ max_input_bytes=input_limits.get('max_serialized_bytes') if isinstance(input_lim
 if type(max_input_bytes) is not int or not 0<max_input_bytes<65536: fail('invalid_run_tree_manifest')
 try:
     raw=read_regular_once(handoff,65536,'invalid_handoff')
+    if hashlib.sha256(raw).hexdigest()!=expected_sha256: fail('handoff_digest_mismatch')
     value=json.loads(raw)
 except Exception: fail('invalid_handoff')
 required={'schema_version','carrier','edge_id','instance_id','parent_run_id','role','phase','risk_scope','risk_signals','inputs'}
@@ -556,7 +605,10 @@ if not isinstance(value,dict) or set(value)!=required or value.get('schema_versi
 carrier=value.get('carrier')
 carrier_keys={'schema_version','run_id','workflow','issue_num','context_file','context_sha256'}
 if not isinstance(carrier,dict) or set(carrier)!=carrier_keys or carrier.get('schema_version')!=1: fail('invalid_carrier_schema')
-if value.get('edge_id')!=edge: fail('edge_mismatch')
+handoff_edge=value.get('edge_id')
+if mode=='preflight' and edge=='': edge=handoff_edge
+if not isinstance(edge,str) or not EDGE.fullmatch(edge): fail('invalid_edge_id')
+if handoff_edge!=edge: fail('edge_mismatch')
 for field in ('run_id','instance_id','parent_run_id'):
     if not isinstance(value.get(field) if field!='run_id' else carrier.get(field),str): fail('invalid_identity')
 if not IDENT.fullmatch(carrier['run_id']) or not IDENT.fullmatch(value['instance_id']) or not IDENT.fullmatch(value['parent_run_id']): fail('invalid_identity')
@@ -644,6 +696,11 @@ def validate_typed(item,kind):
     if kind in {'string','optional_string'}:
         if not isinstance(item,str) or (kind=='string' and not item) or len(item)>8192 or '\x00' in item or '\r' in item or '\n' in item: fail('input_type_mismatch')
         return
+    if kind=='bounded_text':
+        if not isinstance(item,str) or not item or '\x00' in item: fail('input_type_mismatch')
+        try: item.encode('utf-8')
+        except UnicodeEncodeError: fail('input_type_mismatch')
+        return
     if kind=='string_array':
         if not isinstance(item,list) or len(item)>128 or any(not isinstance(x,str) or not x or len(x)>8192 or any(c in x for c in '\r\n\0') for x in item): fail('input_type_mismatch')
         return
@@ -665,6 +722,38 @@ def validate_typed(item,kind):
         elif not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1 or entry.st_size>16777216: fail('input_type_mismatch')
 input_types={**required_inputs,**optional_inputs}
 for key,item in inputs.items(): validate_typed(item,input_types[key])
+def classifier_authority():
+    if edge!='review_pr.ci.classify': return
+    pr_number=inputs.get('pr_number'); run_id=inputs.get('run_id')
+    head_sha=inputs.get('head_sha'); content=inputs.get('log_content'); digest=inputs.get('log_sha256')
+    if (type(pr_number) is not int or pr_number<=0 or pr_number!=carrier['issue_num'] or not isinstance(run_id,str)
+        or re.fullmatch(r'[1-9][0-9]*',run_id) is None or not isinstance(head_sha,str)
+        or re.fullmatch(r'[0-9a-f]{40}',head_sha) is None or not isinstance(digest,str)
+        or re.fullmatch(r'[0-9a-f]{64}',digest) is None or not isinstance(content,str)): fail('classifier_authority_mismatch')
+    opening=f'<external-untrusted-input source="github-actions-log-pr-{pr_number}-run-{run_id}">\n'
+    closing='\n</external-untrusted-input>\n'
+    if not content.startswith(opening) or not content.endswith(closing): fail('classifier_authority_mismatch')
+    body=content[len(opening):-len(closing)]
+    if not body or '<' in body or '\x00' in body: fail('classifier_authority_mismatch')
+    try: captured=content.encode('utf-8')
+    except UnicodeEncodeError: fail('classifier_authority_mismatch')
+    if hashlib.sha256(captured).hexdigest()!=digest: fail('classifier_authority_digest_mismatch')
+classifier_authority()
+def fixer_authority():
+    if edge not in {'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}: return
+    expected_phase={'review_pr.fix.phase1':'review_fix','review_pr.fix.phase2':'simplify_fix','simplify.fix.phase2':'simplify_fix'}[edge]
+    pr_number=inputs.get('pr_number'); findings_digest=inputs.get('findings_sha256'); secondary_digest=inputs.get('standalone_snapshot_sha256' if edge=='simplify.fix.phase2' else 'commit_range_sha256'); authority_digest=inputs.get('authority_sha256')
+    if (row.get('phase')!=expected_phase or type(pr_number) is not int or pr_number!=carrier['issue_num']
+        or (edge=='review_pr.fix.phase1' and pr_number<=0)
+        or (edge=='simplify.fix.phase2' and pr_number!=0)
+        or not isinstance(findings_digest,str) or re.fullmatch(r'[0-9a-f]{64}',findings_digest) is None
+        or not isinstance(secondary_digest,str) or re.fullmatch(r'[0-9a-f]{64}',secondary_digest) is None
+        or not isinstance(authority_digest,str) or re.fullmatch(r'[0-9a-f]{64}',authority_digest) is None): fail('code_fixer_authority_mismatch')
+    if hashlib.sha256(read_regular_once(inputs['findings_path'],16777216,'unsafe_path')).hexdigest()!=findings_digest: fail('code_fixer_findings_digest_mismatch')
+    secondary_path=inputs['standalone_snapshot_path' if edge=='simplify.fix.phase2' else 'commit_range_path']
+    if hashlib.sha256(read_regular_once(secondary_path,16777216,'unsafe_path')).hexdigest()!=secondary_digest: fail('code_fixer_range_digest_mismatch')
+    if hashlib.sha256(read_regular_once(inputs['authority_path'],1048576,'unsafe_path')).hexdigest()!=authority_digest: fail('code_fixer_authority_digest_mismatch')
+fixer_authority()
 workspace_dir=''
 if workspace_mode=='caller':
     working_dir=inputs.get('working_dir')
@@ -676,11 +765,11 @@ role_raw=read_regular_once(role_path,262144,'unsafe_path')
 children_name='children'; instance=value['instance_id']
 child_dir=os.path.join(run_real,children_name,instance)
 expected_result=os.path.join(child_dir,'result.md'); expected_status=os.path.join(child_dir,'status.json')
-if os.path.realpath(result_arg)!=expected_result or os.path.realpath(status_arg)!=expected_status: fail('caller_path_mismatch')
 if mode=='preflight':
     print(json.dumps({'backend':context['metadata']['backend'],'edge_id':edge,'instance_id':instance},sort_keys=True,separators=(',',':')))
     raise SystemExit(0)
 if mode!='dispatch': fail('invalid_prepare_mode')
+if os.path.realpath(result_arg)!=expected_result or os.path.realpath(status_arg)!=expected_status: fail('caller_path_mismatch')
 created_child=False; childrenfd=None; childfd=None
 if descriptor_relative:
     runfd=os.open(run_real,os.O_RDONLY|os.O_DIRECTORY|getattr(os,'O_NOFOLLOW',0))
@@ -876,30 +965,19 @@ except (OSError,ValueError,subprocess.SubprocessError): raise SystemExit(2)
 
 # Validate an entire immutable handoff batch and the selected provider's
 # cancellation capability before the caller launches the first child.
-# Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE [...]
+# Usage: uberdev_preflight_child_batch HANDOFF_JSON_FILE EXPECTED_SHA256 [...]
 uberdev_preflight_child_batch() {
-  [ "$#" -gt 0 ] || { _uberdev_child_error 'expected at least one HANDOFF_JSON_FILE'; return 2; }
-  local handoff info edge instance run_dir result status prepared backend seen='|'
-  for handoff in "$@"; do
-    info="$(python3 -I -B - "$handoff" <<'PY'
-import json,ntpath,os,re,sys
-try:
- v=json.load(open(sys.argv[1])); carrier=v['carrier']
- path=carrier['context_file']
- if not path or any(ord(char)<32 or ord(char)==127 for char in path): raise ValueError()
- path_module=ntpath if os.name=='nt' or re.match(r'^[A-Za-z]:[\\/]',path) or path.startswith(('\\\\','//')) else os.path
- if not path_module.isabs(path) or any(part in {'.','..'} for part in re.split(r'[\\/]',path)): raise ValueError()
- state_dir=path_module.dirname(path); run_dir=path_module.dirname(state_dir)
- if not state_dir or not run_dir or run_dir==state_dir: raise ValueError()
- print(json.dumps({'edge':v['edge_id'],'instance':v['instance_id'],'run_dir':run_dir},sort_keys=True,separators=(',',':')),end='')
-except Exception: raise SystemExit(2)
-PY
-)" || return 2
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"],end="")' "$info")" || return 2
-    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"],end="")' "$info")" || return 2
-    run_dir="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["run_dir"],end="")' "$info")" || return 2
-    result="$run_dir/children/$instance/result.md"; status="$run_dir/children/$instance/status.json"
-    prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status" preflight)" || return $?
+  [ "$#" -gt 0 ] && [ $(( $# % 2 )) -eq 0 ] || {
+    _uberdev_child_error 'expected HANDOFF_JSON_FILE EXPECTED_SHA256 pairs'
+    return 2
+  }
+  local handoff expected_sha256 instance prepared backend seen='|'
+  while [ "$#" -gt 0 ]; do
+    handoff="$1"; expected_sha256="$2"; shift 2
+    # Empty routing/path arguments select side-effect-free discovery: the full
+    # validator derives the edge only after authenticating the handoff bytes.
+    prepared="$(_uberdev_child_prepare '' "$handoff" "$expected_sha256" '' '' preflight)" || return $?
+    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance_id"],end="")' "$prepared")" || return 2
     case "$seen" in *"|$instance|"*) _uberdev_child_error 'duplicate batch instance'; return 2 ;; esac
     seen="${seen}${instance}|"
     backend="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["backend"],end="")' "$prepared")" || return 2
@@ -920,9 +998,10 @@ _uberdev_child_fail_after_launch() {
 }
 
 uberdev_dispatch_child() {
-  local edge="${1:-}" handoff="${2:-}" result="${3:-}" status_file="${4:-}" prepared request prompt rc receipt provider_handle
-  [ "$#" -eq 4 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE RESULT_FILE STATUS_FILE'; return 2; }
-  prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$result" "$status_file")" || return $?
+  local edge="${1:-}" handoff="${2:-}" expected_sha256="${3:-}" result="${4:-}" status_file="${5:-}" prepared request prompt rc receipt provider_handle
+  UBERDEV_CHILD_DISPATCH_RECEIPT=
+  [ "$#" -eq 5 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE'; return 2; }
+  prepared="$(_uberdev_child_prepare "$edge" "$handoff" "$expected_sha256" "$result" "$status_file")" || return $?
   request="$(python3 -I -B -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["request"],sort_keys=True,separators=(",",":")),end="")' "$prepared")" || return 2
   prompt="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"],end="")' "$prepared")" || return 2
   _uberdev_child_receipt_emit_handoff dispatch "$edge" "${prompt%/*}/handoff.v1.json" || return $?
@@ -976,14 +1055,34 @@ PY
     _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt construction'
     return $?
   fi
+  UBERDEV_CHILD_DISPATCH_RECEIPT="$receipt"
   if printf '%s' "$receipt"; then
     return 0
   else
     rc=$?
+    UBERDEV_CHILD_DISPATCH_RECEIPT=
     _uberdev_child_error 'failed to publish child dispatch receipt'
     _uberdev_child_fail_after_launch "$rc" "$status_file" "$result" 'receipt publication'
     return $?
   fi
+}
+
+# Capture the canonical receipt without executing the dispatcher in command
+# substitution. `uberdev_agent_dispatch` binds its capacity lease to the
+# calling controller process, so dispatching from a short-lived capture
+# subshell would publish an owner identity that disappears as soon as the
+# receipt is returned. The dispatcher assigns the canonical receipt directly
+# to a controller-owned variable; no pathname is reopened for shell output.
+uberdev_dispatch_child_capture() {
+  local edge="${1:-}" handoff="${2:-}" expected_sha256="${3:-}" result="${4:-}" status_file="${5:-}"
+  UBERDEV_CHILD_DISPATCH_RECEIPT=
+  [ "$#" -eq 5 ] || { _uberdev_child_error 'expected EDGE_ID HANDOFF_JSON_FILE EXPECTED_SHA256 RESULT_FILE STATUS_FILE'; return 2; }
+  uberdev_dispatch_child "$edge" "$handoff" "$expected_sha256" "$result" "$status_file" >/dev/null || return $?
+  [ -n "$UBERDEV_CHILD_DISPATCH_RECEIPT" ] || {
+    _uberdev_child_error 'dispatcher returned without a canonical child receipt'
+    uberdev_unwind_child "$status_file" "$result" 600 || return 74
+    return 74
+  }
 }
 
 _uberdev_child_wait_projection() {
@@ -1099,8 +1198,19 @@ def linked(entry):
  return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&reparse_point)
 def owned(entry):
  return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
-def stable(entry):
+native_windows=os.name=='nt' or sys.platform=='win32'
+def raw_descriptor_state(entry):
  return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
+def artifact_identity(entry):
+ raw=raw_descriptor_state(entry)
+ if not native_windows: return raw
+ birthtime_ns=getattr(entry,'st_birthtime_ns',None)
+ if birthtime_ns is None:
+  birthtime=getattr(entry,'st_birthtime',None)
+  birthtime_ns=int(birthtime*1_000_000_000) if birthtime is not None else raw[-1]
+ return (*raw[:4],int(birthtime_ns))
+def descriptor_link_count_valid(entry):
+ return entry.st_nlink==1 or (entry.st_nlink==0 and native_windows)
 def parse_scalar(raw):
  if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
  def validated(value):
@@ -1146,9 +1256,12 @@ try:
  finally:
   if descriptor is not None: os.close(descriptor)
  if (len(raw_bytes)>1048576 or any(linked(item) or not stat.S_ISREG(item.st_mode)
-      or not owned(item) or item.st_nlink!=1 for item in (opened,final,current))
-     or stable(opened)!=stable(entry) or stable(final)!=stable(opened)
-     or stable(current)!=stable(final)): raise ValueError()
+      or not owned(item) for item in (opened,final,current))
+     or not descriptor_link_count_valid(opened) or not descriptor_link_count_valid(final)
+     or current.st_nlink!=1
+     or artifact_identity(opened)!=artifact_identity(entry)
+     or raw_descriptor_state(final)!=raw_descriptor_state(opened)
+     or artifact_identity(current)!=artifact_identity(final)): raise ValueError()
  raw=raw_bytes.decode('utf-8')
  match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
  if not match: raise ValueError()
@@ -1215,7 +1328,8 @@ try:
     0o600,
    )
    opened=os.fstat(descriptor); current=os.lstat(validated_path)
-   if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
+   if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode)
+       or not descriptor_link_count_valid(opened) or current.st_nlink!=1
        or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise OSError(5,'publication identity')
    published_identity=(opened.st_dev,opened.st_ino)
    view=memoryview(raw_bytes)
@@ -1231,7 +1345,7 @@ try:
    final_opened=os.fstat(descriptor); final_current=os.lstat(validated_path)
    if ((final_opened.st_dev,final_opened.st_ino)!=(final_current.st_dev,final_current.st_ino)
        or final_opened.st_size!=len(raw_bytes) or final_current.st_size!=len(raw_bytes)
-       or final_opened.st_nlink!=1 or final_current.st_nlink!=1
+       or not descriptor_link_count_valid(final_opened) or final_current.st_nlink!=1
        or (os.name!='nt' and (stat.S_IMODE(final_opened.st_mode)!=0o400 or stat.S_IMODE(final_current.st_mode)!=0o400))):
     raise OSError(5,'publication verification')
    os.close(descriptor); descriptor=None
@@ -1253,6 +1367,8 @@ try:
    read_current=os.lstat(validated_path)
    if ((read_opened.st_dev,read_opened.st_ino)!=(read_final.st_dev,read_final.st_ino)
        or (read_final.st_dev,read_final.st_ino)!=(read_current.st_dev,read_current.st_ino)
+       or not descriptor_link_count_valid(read_opened) or not descriptor_link_count_valid(read_final)
+       or read_current.st_nlink!=1
        or len(readback)>1048576 or readback!=raw_bytes):
     raise OSError(5,'publication readback')
   except BaseException:
@@ -1388,7 +1504,7 @@ PY
 }
 
 _uberdev_child_terminal_lease_proof() {
-  local status_path status_real child run_dir instance state lease_paths lease record lease_run lease_status
+  local status_path status_real child run_dir instance state lease_paths lease record lease_run lease_status lease_read_attempt
   status_path="$1"
   status_real="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]),end="")' "$status_path")" || return 1
   child="$(dirname "$status_real")"; run_dir="$(dirname "$(dirname "$child")")"; instance="$(basename "$child")"
@@ -1424,8 +1540,24 @@ PY
   [ -z "$lease_paths" ] && return 0
   while IFS= read -r lease; do
     [ -n "$lease" ] || continue
-    if ! _uberdev_semaphore_validate_lease_path "$lease" >/dev/null 2>&1 \
-        || ! record="$(_uberdev_agent_lease_record "$lease" 2>/dev/null)"; then
+    record=''; lease_read_attempt=0
+    while [ "$lease_read_attempt" -lt 3 ]; do
+      lease_read_attempt=$((lease_read_attempt + 1))
+      if _uberdev_semaphore_validate_lease_path "$lease" >/dev/null 2>&1 \
+          && record="$(_uberdev_agent_lease_record "$lease" 2>/dev/null)"; then
+        break
+      fi
+      record=''
+      # Watchers remove and atomically replace leases under the scope mutex.
+      # A path that vanished after the directory snapshot is completed cleanup,
+      # while a persistent unreadable path remains a fail-closed error.
+      [ -e "$lease" ] || [ -L "$lease" ] || break
+      [ "$lease_read_attempt" -ge 3 ] || sleep 0.05
+    done
+    if [ -z "$record" ] && { [ ! -e "$lease" ] && [ ! -L "$lease" ]; }; then
+      continue
+    fi
+    if [ -z "$record" ]; then
       _uberdev_child_error "invalid lifecycle lease: $lease"
       return 1
     fi
@@ -1558,6 +1690,7 @@ except Exception: raise SystemExit(1)
 PY
             return 0
           fi
+          [ "$state" = timed_out ] && return 124
           return 1
           ;;
       esac

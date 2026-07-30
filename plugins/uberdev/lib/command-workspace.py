@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 PRIVATE_DIR = 0o700
 PRIVATE_FILE = 0o600
@@ -25,8 +25,8 @@ CALLERS = {
             "diff": ("pr-diff.md", b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n'),
             "criteria": ("review-criteria.md", b""),
             "commit_range": ("commit-range.txt", b""),
-            "phase1_disposition": ("phase1-disposition.json", b"{}\n"),
-            "phase2_disposition": ("phase2-disposition.json", b"{}\n"),
+            "phase1_disposition": ("phase1-disposition.json", b""),
+            "phase2_disposition": ("phase2-disposition.json", b""),
         },
     },
     "simplify": {
@@ -34,9 +34,9 @@ CALLERS = {
         "artifacts": {
             "diff": ("pr-diff.md", b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n'),
             "aggregate": ("simplify-final.md", b""),
-            "commit_range": ("commit-range.txt", b""),
-            "phase1_disposition": ("phase1-disposition.json", b"{}\n"),
-            "phase2_disposition": ("phase2-disposition.json", b"{}\n"),
+            "standalone_snapshot": ("standalone-snapshot.json", b""),
+            "phase1_disposition": ("phase1-disposition.json", b""),
+            "phase2_disposition": ("phase2-disposition.json", b""),
         },
     },
     "post-impl-review": {
@@ -157,7 +157,7 @@ def owned_by_current_user(entry: os.stat_result) -> bool:
     return uid is not None and entry.st_uid == uid
 
 
-def fail(reason: str) -> None:
+def fail(reason: str) -> NoReturn:
     raise Failure(reason)
 
 
@@ -1363,6 +1363,7 @@ def main() -> int:
         "diff": "DIFF_ARTIFACT_PATH", "criteria": "CRITERIA_PATH", "commit_range": "COMMIT_RANGE_PATH",
         "phase1_disposition": "PHASE1_DISPOSITION_PATH", "phase2_disposition": "PHASE2_DISPOSITION_PATH",
         "aggregate": "AGG_PATH",
+        "standalone_snapshot": "STANDALONE_SNAPSHOT_PATH",
     }
     for key, (name, _initial) in artifacts.items():
         expected_globals[name_to_global[key]] = os.path.join(expected_workspace, name)

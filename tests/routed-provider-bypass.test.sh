@@ -232,7 +232,7 @@ printf '%s\n' "$ROOT" CLAUDE CODEX
 uberdev_child_inputs_build review_pr.review.tests key '"value"'
 uberdev_child_inputs_validate review_pr.review.tests '{}'
 uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks"
-uberdev_dispatch_child "$edge" "$handoff" "$result" "$status"
+uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status"
 printf '%s\n' claudette codexes spawn_agent2 uberdev_agent_dispatcher
 printf '%s\n' uberdev_dispatch_one2
 printf '%s\n' Tasker Agentic

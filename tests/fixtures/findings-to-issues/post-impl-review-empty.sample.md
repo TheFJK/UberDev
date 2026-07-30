@@ -1,0 +1,3 @@
+<external-untrusted-input source="post-impl-review-aggregate">
+{"contributors":[{"confidence":"high","id":"review_pr.review.correctness","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.silent_failures","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.types","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.comments","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.tests","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.general","verdict":"APPROVE"}],"findings":[],"phase":"phase1","schema_version":2}
+</external-untrusted-input>

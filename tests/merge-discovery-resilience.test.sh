@@ -21,6 +21,8 @@
 #   discover_bare_fast_path   (Step 1.0.5)
 #   discover_multi            (Step 1.2.5)
 #   pr_view_projection        (Step 1.4)
+#   discover_review_verdict_json (typed audit-artifact discovery)
+#   parse_review_verdict_phase2_5 (atomic phase2_5 validation + extraction)
 #   emit_gate_fail            (gate-fail audit-emit helper)
 #
 # This test file has two layers:
@@ -613,10 +615,17 @@ echo "== A12: discover_review_verdict_json — find-based audit-JSON discovery s
 # this file locks the function shape + runtime behavior.
 assert_grep "$LIB" '^discover_review_verdict_json\(\)[[:space:]]*\{' \
   "A12a: function discover_review_verdict_json defined"
+assert_grep "$LIB" '0.*found|FOUND=0|return 0.*found' \
+  "A12a.1: discovery contract declares FOUND=0"
+assert_grep "$LIB" '1.*absent|ABSENT=1|return 1.*absent' \
+  "A12a.2: discovery contract declares exhaustive ABSENT=1"
+assert_grep "$LIB" '2.*indeterminate|INDETERMINATE=2|return 2.*indeterminate' \
+  "A12a.3: discovery contract declares INDETERMINATE=2"
 assert_no_grep "$LIB" '^[[:space:]]*(if[[:space:]]+)?compgen[[:space:]]|\|\|[[:space:]]*compgen[[:space:]]' \
   "A12b: no compgen invocation in lib/discover.sh (bashism — #294 class; comments may mention it)"
-assert_grep "$LIB" 'grep -qE .\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
-  "A12c: run-id segment validated via grep -E against RUN_ID_REGEX (no [[ =~ ]] / BASH_REMATCH bashism)"
+assert_grep "$LIB" \
+  'RUN_ID_RE = re\.compile\(r"\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$"\)|grep -qE .\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
+  "A12c: run-id segment is validated against RUN_ID_REGEX without [[ =~ ]] / BASH_REMATCH"
 # A12d — `[ a \> b ]` is a bash test-builtin extension: zsh's `[` rejects
 # `\>` with "condition expected: >", silently degrading the run-id tie-break
 # to first-found. Caught live during #303 implementation; the fix is
@@ -637,24 +646,28 @@ echo "== B8: discover_review_verdict_json functional — four layouts, .pr filte
 # The helper searches relative paths from CWD, so we cd into the sandbox
 # (mirrors the B7 sandbox convention).
 B8_SANDBOX="$(mktemp -d)"
+B8_SHA_OLD="1111111111111111111111111111111111111111"
+B8_SHA_NEW="2222222222222222222222222222222222222222"
+B8_SHA_99="9999999999999999999999999999999999999999"
+B8_SHA_77="7777777777777777777777777777777777777777"
 mkdir -p "$B8_SANDBOX/.uberdev/runs/20260101-000000-aaaa111"
-printf '{"pr":42,"sha":"deadbeef"}\n' \
+printf '{"pr":42,"sha":"%s"}\n' "$B8_SHA_OLD" \
   > "$B8_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
 mkdir -p "$B8_SANDBOX/.claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222"
-printf '{"pr":42,"sha":"deadbeef"}\n' \
+printf '{"pr":42,"sha":"%s"}\n' "$B8_SHA_NEW" \
   > "$B8_SANDBOX/.claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json"
 mkdir -p "$B8_SANDBOX/.worktrees/wt1/.uberdev/runs/20260103-000000-cccc333"
-printf '{"pr":99,"sha":"deadbeef"}\n' \
+printf '{"pr":99,"sha":"%s"}\n' "$B8_SHA_99" \
   > "$B8_SANDBOX/.worktrees/wt1/.uberdev/runs/20260103-000000-cccc333/review-pr-verdict.json"
 mkdir -p "$B8_SANDBOX/worktrees/wt2/.uberdev/runs/20251231-000000-dddd444"
-printf '{"pr":77,"sha":"deadbeef"}\n' \
+printf '{"pr":77,"sha":"%s"}\n' "$B8_SHA_77" \
   > "$B8_SANDBOX/worktrees/wt2/.uberdev/runs/20251231-000000-dddd444/review-pr-verdict.json"
 # Path-traversal / regex-rejection fixture: a verdict for PR 42 under a
 # run-id that fails RUN_ID_REGEX. "zz-invalid-run-id" sorts lex-GREATER than
 # any timestamp run-id, so if the regex validation were dropped this entry
 # would win the PR-42 tie-break — B8a doubles as the regex-rejection guard.
 mkdir -p "$B8_SANDBOX/worktrees/wt3/.uberdev/runs/zz-invalid-run-id"
-printf '{"pr":42,"sha":"deadbeef"}\n' \
+printf '{"pr":42,"sha":"%s"}\n' "$B8_SHA_OLD" \
   > "$B8_SANDBOX/worktrees/wt3/.uberdev/runs/zz-invalid-run-id/review-pr-verdict.json"
 
 _b8_call() {
@@ -663,25 +676,34 @@ _b8_call() {
 }
 
 B8_OUT="$(_b8_call 42)"
-assert_eq "$B8_OUT" \
-  ".claude/worktrees/solve-issue-7/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json" \
-  "B8a: PR 42 → lex-greatest VALID run-id wins across layouts (invalid run-id rejected despite sorting greater)"
+B8_RC=$?
+assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
+  "$B8_SHA_NEW" \
+  "B8a: PR 42 → newest valid timestamp wins across layouts (invalid run-id rejected)"
+assert_eq "$B8_RC" "0" "B8a.rc: PR 42 match → FOUND=0"
+( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
 B8_OUT="$(_b8_call 99)"
-assert_eq "$B8_OUT" \
-  ".worktrees/wt1/.uberdev/runs/20260103-000000-cccc333/review-pr-verdict.json" \
+B8_RC=$?
+assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
+  "$B8_SHA_99" \
   "B8b: PR 99 → .worktrees/ hidden-convention layout found"
+assert_eq "$B8_RC" "0" "B8b.rc: PR 99 match → FOUND=0"
+( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
 B8_OUT="$(_b8_call 77)"
-assert_eq "$B8_OUT" \
-  "worktrees/wt2/.uberdev/runs/20251231-000000-dddd444/review-pr-verdict.json" \
+B8_RC=$?
+assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
+  "$B8_SHA_77" \
   "B8c: PR 77 → worktrees/ visible-convention layout found"
+assert_eq "$B8_RC" "0" "B8c.rc: PR 77 match → FOUND=0"
+( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
 B8_OUT="$(_b8_call 123)"
 B8_RC=$?
 assert_eq "$B8_OUT" "" "B8d: unmatched PR → empty stdout (corroborator absent)"
-assert_eq "$B8_RC" "0" "B8e: unmatched PR → exit 0 (absence is not an error; sub-condition (d) handles it)"
+assert_eq "$B8_RC" "1" "B8e: unmatched PR → exit 1 (exhaustive ABSENT contract)"
 B8_OUT="$(_b8_call 'x; rm -rf /')"
 B8_RC=$?
 assert_eq "$B8_OUT" "" "B8f: non-integer PR argument → empty stdout (input gate)"
-assert_eq "$B8_RC" "0" "B8g: non-integer PR argument → exit 0 (no match by contract)"
+assert_eq "$B8_RC" "2" "B8g: non-integer PR argument → exit 2 (invalid input is INDETERMINATE, never ABSENT)"
 rm -rf "$B8_SANDBOX"
 
 echo
@@ -695,17 +717,21 @@ echo "== B9: discover_review_verdict_json zsh parity (#303 — the helper exists
 # error surfaces there).
 if command -v zsh >/dev/null 2>&1; then
   B9_SANDBOX="$(mktemp -d)"
+  B9_SHA_OLD="3333333333333333333333333333333333333333"
+  B9_SHA_NEW="4444444444444444444444444444444444444444"
   mkdir -p "$B9_SANDBOX/.uberdev/runs/20260101-000000-aaaa111"
-  printf '{"pr":42}\n' \
+  printf '{"pr":42,"sha":"%s"}\n' "$B9_SHA_OLD" \
     > "$B9_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
   mkdir -p "$B9_SANDBOX/.claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999"
-  printf '{"pr":42}\n' \
+  printf '{"pr":42,"sha":"%s"}\n' "$B9_SHA_NEW" \
     > "$B9_SANDBOX/.claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999/review-pr-verdict.json"
   B9_ERR="$(mktemp)"
   B9_OUT="$(zsh -c "cd '$B9_SANDBOX' && . '$LIB' && discover_review_verdict_json 42" 2>"$B9_ERR")"
-  assert_eq "$B9_OUT" \
-    ".claude/worktrees/w/.uberdev/runs/20260105-000000-ffff999/review-pr-verdict.json" \
-    "B9a: zsh run picks the lex-greatest run-id (tie-break parity with bash)"
+  B9_RC=$?
+  assert_eq "$(printf '%s' "$B9_OUT" | jq -r '.artifact_sha // empty')" \
+    "$B9_SHA_NEW" \
+    "B9a: zsh run picks the newest timestamp (receipt parity with bash)"
+  assert_eq "$B9_RC" "0" "B9a.rc: zsh match → FOUND=0"
   if [ -s "$B9_ERR" ]; then
     echo "  FAIL  B9b: zsh run emitted stderr (bashism leak?): $(head -c 200 "$B9_ERR")"
     FAIL=$((FAIL + 1))
@@ -713,11 +739,930 @@ if command -v zsh >/dev/null 2>&1; then
     echo "  PASS  B9b: zsh run emitted no stderr (no 'condition expected' class errors)"
     PASS=$((PASS + 1))
   fi
+  ( . "$LIB"; cleanup_review_verdict_snapshot "$B9_OUT" ) >/dev/null 2>&1 || true
   rm -f "$B9_ERR"
   rm -rf "$B9_SANDBOX"
 else
   echo "  SKIP  B9: zsh not available on this runner (informational — macOS and CI ubuntu both ship zsh)"
 fi
+
+echo
+echo "== B10: verdict discovery identity safety + recency ordering =="
+B10_SANDBOX="$(mktemp -d)"
+B10_ERR="$(mktemp)"
+B10_SHA_42="5555555555555555555555555555555555555555"
+B10_VALID_42="{\"pr\":42,\"sha\":\"$B10_SHA_42\"}"
+
+_b10_clear() {
+  rm -rf \
+    "$B10_SANDBOX/.uberdev" \
+    "$B10_SANDBOX/.claude" \
+    "$B10_SANDBOX/.worktrees" \
+    "$B10_SANDBOX/worktrees"
+  : > "$B10_ERR"
+}
+
+_b10_write() {
+  local relative_path="$1"
+  local json="$2"
+  mkdir -p "$(dirname "$B10_SANDBOX/$relative_path")"
+  printf '%s\n' "$json" > "$B10_SANDBOX/$relative_path"
+}
+
+_b10_call() {
+  local pr_number="$1"
+  ( cd "$B10_SANDBOX" && . "$LIB" && discover_review_verdict_json "$pr_number" ) 2>"$B10_ERR"
+}
+
+_b10_receipt_sha() {
+  printf '%s' "$1" | jq -r '.artifact_sha // empty' 2>/dev/null
+}
+
+_b10_cleanup_receipt() {
+  [ -n "$1" ] || return 0
+  ( . "$LIB"; cleanup_review_verdict_snapshot "$1" ) >/dev/null 2>&1 || true
+}
+
+# An empty, fully scanned search surface is exhaustive absence.
+_b10_clear
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10zero.1: empty exhaustive scan emits no path"
+assert_eq "$B10_RC" "1" "B10zero.2: empty exhaustive scan → ABSENT=1"
+
+# A valid-run-id candidate whose identity cannot be parsed is not evidence of
+# exhaustive absence.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10a.1: malformed identity candidate emits no path"
+assert_eq "$B10_RC" "2" "B10a.2: malformed identity candidate → INDETERMINATE=2, never ABSENT"
+if grep -qiE 'indeterminate|identity.*unknown|malformed' "$B10_ERR"; then
+  echo "  PASS  B10a.3: malformed identity emits a stderr reason"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  B10a.3: malformed identity MUST emit an indeterminate stderr reason"
+  FAIL=$((FAIL + 1))
+fi
+
+# Unreadable identity is the same unknown-identity class.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":42}'
+chmod 000 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+chmod 600 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
+assert_eq "$B10_OUT" "" "B10b.1: unreadable identity candidate emits no path"
+assert_eq "$B10_RC" "2" "B10b.2: unreadable identity candidate → INDETERMINATE=2, never ABSENT"
+
+# A string lookalike is not the integer PR identity.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":"42"}'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10bstr.1: string PR lookalike emits no path"
+assert_eq "$B10_RC" "2" "B10bstr.2: string PR lookalike → INDETERMINATE=2"
+
+# Symlinked artifacts are not trusted as local run-owned identity evidence.
+_b10_clear
+printf '%s\n' '{"pr":42}' > "$B10_SANDBOX/outside-verdict.json"
+mkdir -p "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaa111"
+ln -s "$B10_SANDBOX/outside-verdict.json" \
+  "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json"
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10blink.1: symlinked identity candidate emits no path"
+assert_eq "$B10_RC" "2" "B10blink.2: symlinked identity candidate → INDETERMINATE=2"
+rm -f "$B10_SANDBOX/outside-verdict.json"
+
+# Fully readable candidates for other PRs prove exhaustive absence.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":99}'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10c.1: valid other-PR-only scan emits no path"
+assert_eq "$B10_RC" "1" "B10c.2: valid other-PR-only scan remains exhaustive ABSENT=1"
+
+# An older identity-unknown candidate cannot override a newer valid target.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":'
+_b10_write \
+  ".worktrees/wt/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json" \
+  "$B10_VALID_42"
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$(_b10_receipt_sha "$B10_OUT")" \
+  "$B10_SHA_42" \
+  "B10d.1: newer valid target outranks older identity-unknown candidate"
+assert_eq "$B10_RC" "0" "B10d.2: newer valid target → FOUND=0"
+_b10_cleanup_receipt "$B10_OUT"
+
+# A newer identity-unknown candidate may be the target's superseding artifact,
+# so the older valid target is not safe to select.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  "$B10_VALID_42"
+_b10_write \
+  ".worktrees/wt/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json" \
+  '{"pr":'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10e.1: newer identity-unknown candidate suppresses older target path"
+assert_eq "$B10_RC" "2" "B10e.2: newer identity-unknown candidate → INDETERMINATE=2"
+
+# Equal run-id across layouts is equally unsafe when one identity is unknown.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  "$B10_VALID_42"
+_b10_write \
+  ".worktrees/wt/.uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  '{"pr":'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10f.1: equal-run-id identity ambiguity emits no target path"
+assert_eq "$B10_RC" "2" "B10f.2: equal-run-id identity ambiguity → INDETERMINATE=2"
+
+# A newer known-other-PR artifact cannot hide an older valid target.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/20260101-000000-aaaa111/review-pr-verdict.json" \
+  "$B10_VALID_42"
+_b10_write \
+  ".worktrees/wt/.uberdev/runs/20260102-000000-bbbb222/review-pr-verdict.json" \
+  '{"pr":99}'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$(_b10_receipt_sha "$B10_OUT")" \
+  "$B10_SHA_42" \
+  "B10fother.1: newer known-other-PR candidate does not suppress target"
+assert_eq "$B10_RC" "0" "B10fother.2: older target with newer known-other → FOUND=0"
+_b10_cleanup_receipt "$B10_OUT"
+
+# Invalid run-id candidates never participate in identity or recency ranking.
+_b10_clear
+_b10_write \
+  ".uberdev/runs/not-a-run-id/review-pr-verdict.json" \
+  '{"pr":'
+B10_OUT="$(_b10_call 42)"
+B10_RC=$?
+assert_eq "$B10_OUT" "" "B10g.1: invalid-run-id candidate is ignored"
+assert_eq "$B10_RC" "1" "B10g.2: invalid-run-id-only scan is exhaustive ABSENT=1"
+
+# Any incomplete root scan is indeterminate, even when no candidate bytes were
+# returned. Shadow find with a deterministic failure to exercise this seam.
+_b10_clear
+# The scan is in-process since issue #346, so an unreadable directory replaces
+# the old shadowed-`find` stub as the deterministic failure injection.
+mkdir -p "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa"
+chmod 000 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+if ls "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" >/dev/null 2>&1; then
+  # Windows/Git Bash chmod is a no-op, and root ignores the mode bits.
+  echo "  SKIP  B10h: cannot make a directory unreadable on this platform/user"
+  chmod 755 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+else
+  B10_OUT="$(
+    cd "$B10_SANDBOX" &&
+    . "$LIB" &&
+    discover_review_verdict_json 42
+  )" 2>"$B10_ERR"
+  B10_RC=$?
+  chmod 755 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+  assert_eq "$B10_OUT" "" "B10h.1: failed root scan emits no path"
+  assert_eq "$B10_RC" "2" "B10h.2: failed root scan → INDETERMINATE=2"
+fi
+
+rm -f "$B10_ERR"
+rm -rf "$B10_SANDBOX"
+
+echo
+echo "== A13/B11: phase2_5 parser validates raw types and publishes atomically =="
+assert_grep "$LIB" '^parse_review_verdict_phase2_5\(\)[[:space:]]*\{' \
+  "A13: function parse_review_verdict_phase2_5 defined"
+
+B11_SANDBOX="$(mktemp -d)"
+B11_ERR="$(mktemp)"
+B11_JSON="$B11_SANDBOX/review-pr-verdict.json"
+
+_b11_call() {
+  ( cd "$B11_SANDBOX" && . "$LIB" && parse_review_verdict_phase2_5 "$B11_JSON" ) 2>"$B11_ERR"
+}
+
+printf '%s\n' '{"phases":{"phase2_5":{}}}' > "$B11_JSON"
+B11_OUT="$(_b11_call)"
+B11_RC=$?
+assert_eq "$B11_OUT" $'current\tfalse\t0\t0\tnull' \
+  "B11a.1: empty phase2_5 object is current-clean with caller defaults"
+assert_eq "$B11_RC" "0" "B11a.2: empty phase2_5 object parses successfully"
+
+printf '%s\n' \
+  '{"phases":{"phase2_5":{"halted":null,"by_severity":{"blocker":null,"critical":null},"override_reason":null}}}' \
+  > "$B11_JSON"
+B11_OUT="$(_b11_call)"
+B11_RC=$?
+assert_eq "$B11_OUT" $'current\tfalse\t0\t0\tnull' \
+  "B11b.1: explicit null optional fields preserve current-clean defaults"
+assert_eq "$B11_RC" "0" "B11b.2: explicit null optional fields parse successfully"
+
+printf '%s\n' '{"phases":{}}' > "$B11_JSON"
+B11_OUT="$(_b11_call)"
+B11_RC=$?
+assert_eq "$B11_OUT" $'legacy\tfalse\t0\t0\tnull' \
+  "B11c.1: missing phase2_5 block is a present legacy audit"
+assert_eq "$B11_RC" "0" "B11c.2: legacy audit parses successfully"
+
+printf '%s\n' '{"phases":{"phase2_5":{"by_severity":{"blocker":false}}}}' > "$B11_JSON"
+B11_OUT="$(_b11_call)"
+B11_RC=$?
+assert_eq "$B11_OUT" "" "B11d.1: explicit blocker:false never publishes a tuple"
+assert_eq "$B11_RC" "2" "B11d.2: explicit blocker:false is malformed"
+
+printf '%s\n' '{"phases":{"phase2_5":{"by_severity":{"critical":false}}}}' > "$B11_JSON"
+B11_OUT="$(_b11_call)"
+B11_RC=$?
+assert_eq "$B11_OUT" "" "B11e.1: explicit critical:false never publishes a tuple"
+assert_eq "$B11_RC" "2" "B11e.2: explicit critical:false is malformed"
+
+# A zero-exit jq that fails to return the complete five-field tuple models an
+# extraction seam failure. The parser must validate output before publishing
+# current state.
+B11_FAKE_BIN="$B11_SANDBOX/fake-bin"
+mkdir -p "$B11_FAKE_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "current\tfalse\t0\n"' \
+  'exit 0' \
+  > "$B11_FAKE_BIN/jq"
+chmod +x "$B11_FAKE_BIN/jq"
+B11_OUT="$(
+  cd "$B11_SANDBOX" &&
+  PATH="$B11_FAKE_BIN:$PATH" &&
+  export PATH &&
+  . "$LIB" &&
+  parse_review_verdict_phase2_5 "$B11_JSON"
+)" 2>"$B11_ERR"
+B11_RC=$?
+assert_eq "$B11_OUT" "" "B11f.1: incomplete extraction never publishes current state"
+assert_eq "$B11_RC" "2" "B11f.2: incomplete extraction is malformed"
+
+rm -f "$B11_ERR"
+rm -rf "$B11_SANDBOX"
+
+echo
+echo "== A14/B12: closed verdict receipt + secure snapshot contract =="
+assert_grep "$LIB" '^review_verdict_discovery_state\(\)[[:space:]]*\{' \
+  "A14a: executable discovery rc-to-state helper is defined"
+# The scan is a bounded in-process walk, not `find` (issue #346: native-Windows
+# Python resolves a bare "find" to System32\find.exe). These pin the same three
+# invariants the find argv used to carry.
+assert_grep "$LIB" '^def scan_root_layout\(root_name, exact_depth, exact_path\):' \
+  "A14b: command-line roots are traversed by the bounded in-process walk"
+assert_grep "$LIB" 'follow_symlinks=False' \
+  "A14c: descendant symlinks are never followed during descent"
+assert_no_grep "$LIB" 'follow_symlinks=True' \
+  "A14c.0: no descent path opts back into following symlinks"
+assert_grep "$LIB" 'if depth == exact_depth:' \
+  "A14c.1: the walk emits only at the pinned exact depth"
+assert_grep "$LIB" 'fnmatch\.fnmatchcase\(posix, exact_path\)' \
+  "A14c.1b: candidates must match the exact slash-path glob before being emitted"
+assert_grep "$LIB" '\.uberdev/runs/\*/review-pr-verdict\.json' \
+  "A14c.2: canonical run root declares exact depth 2"
+assert_grep "$LIB" '\.worktrees/\*/\.uberdev/runs/\*/review-pr-verdict\.json' \
+  "A14c.3: worktree roots declare exact depth 5"
+assert_grep "$LIB" 'secure_capture_regular' \
+  "A14d: candidate authority uses run_manifest.secure_capture_regular"
+assert_grep "$LIB" 'secure_publish_captured' \
+  "A14e: selected bytes use run_manifest.secure_publish_captured"
+assert_grep "$LIB" 'secure_capture_published' \
+  "A14f: published carrier is digest-recaptured before receipt emission"
+assert_grep "$LIB" '^recapture_review_verdict_snapshot\(\)[[:space:]]*\{' \
+  "A14g: snapshot drift validator is defined"
+assert_grep "$LIB" '^cleanup_review_verdict_snapshot\(\)[[:space:]]*\{' \
+  "A14h: caller-owned stable snapshot cleanup helper is defined"
+
+for B12_PAIR in '0 found' '1 absent' '2 indeterminate' '71 indeterminate'; do
+  set -- $B12_PAIR
+  B12_STATE="$(
+    . "$LIB"
+    review_verdict_discovery_state "$1"
+  )" 2>/dev/null
+  B12_STATE_RC=$?
+  assert_eq "$B12_STATE" "$2" "B12.rc.$1: discovery rc $1 maps to $2"
+  assert_eq "$B12_STATE_RC" "0" "B12.rc.$1.status: state helper itself succeeds"
+done
+
+B12_SANDBOX="$(mktemp -d)"
+B12_ERR="$(mktemp)"
+B12_SHA_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+B12_SHA_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+_b12_clear() {
+  rm -rf \
+    "$B12_SANDBOX/.uberdev" \
+    "$B12_SANDBOX/.claude" \
+    "$B12_SANDBOX/.worktrees" \
+    "$B12_SANDBOX/worktrees" \
+    "$B12_SANDBOX/_linked_worktrees" \
+    "$B12_SANDBOX/_outside"
+  : > "$B12_ERR"
+}
+
+_b12_payload() {
+  local pr="$1" sha="$2" blocker="${3:-0}" critical="${4:-0}"
+  printf '{"pr":%s,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":%s,"critical":%s},"override_reason":null}}}\n' \
+    "$pr" "$sha" "$blocker" "$critical"
+}
+
+_b12_write() {
+  local relative_path="$1" payload="$2"
+  mkdir -p "$(dirname "$B12_SANDBOX/$relative_path")"
+  printf '%s' "$payload" > "$B12_SANDBOX/$relative_path"
+}
+
+_b12_capture() {
+  local pr="$1"
+  (
+    cd "$B12_SANDBOX" || exit 2
+    . "$LIB"
+    discover_review_verdict_json "$pr"
+  ) 2>"$B12_ERR"
+}
+
+_b12_assert_receipt() {
+  local receipt="$1" expected_sha="$2" desc="$3"
+  if printf '%s' "$receipt" | jq -e \
+    --arg sha "$expected_sha" '
+      .schema_version == 1
+      and (.snapshot_path | type == "string" and length > 0)
+      and (.snapshot_sha256 | test("^[0-9a-f]{64}$"))
+      and (.snapshot_identity | type == "array" and length == 6)
+      and .artifact_sha == $sha
+      and .audit_state == "current"
+      and .phase2_5_halted == false
+      and .phase2_5_blocker_count == 0
+      and .phase2_5_critical_count == 0
+      and .phase2_5_override_reason == null
+    ' >/dev/null 2>&1; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"
+    echo "        receipt: $receipt"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# Optional roots that do not exist are exhaustively absent.
+_b12_clear
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.root.absent.out: absent optional roots emit no receipt"
+assert_eq "$B12_RC" "1" "B12.root.absent.rc: absent optional roots → ABSENT=1"
+
+# An allowed root hidden behind an inaccessible ancestor is not proven absent.
+# The root probe must distinguish ENOENT from inspection errors so merge cannot
+# bypass a verdict by taking the audit-absent path.
+_b12_clear
+mkdir -p "$B12_SANDBOX/.claude"
+chmod 000 "$B12_SANDBOX/.claude"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+chmod 700 "$B12_SANDBOX/.claude"
+assert_eq "$B12_OUT" "" "B12.root.inaccessible.out: inaccessible ancestor emits no receipt"
+assert_eq "$B12_RC" "2" "B12.root.inaccessible.rc: inaccessible ancestor → INDETERMINATE=2"
+assert_grep "$B12_ERR" 'root inspect failed: \.claude/worktrees' \
+  "B12.root.inaccessible.err: inaccessible ancestor reports the failed root probe"
+
+# Each allowed root invokes find with the exact option ordering and depth/path
+# contract. This also proves shallow/deep entries never become candidates.
+_b12_clear
+mkdir -p \
+  "$B12_SANDBOX/.uberdev/runs" \
+  "$B12_SANDBOX/.claude/worktrees" \
+  "$B12_SANDBOX/.worktrees" \
+  "$B12_SANDBOX/worktrees"
+# Behavioural replacement for the old fake-`find` argv log (issue #346 removed
+# the subprocess). Asserting argv proved only that the right flags were passed;
+# these prove the property the flags existed for -- an artifact one level too
+# shallow or too deep is invisible, and only the pinned depth is emitted.
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.walk.out: bounded empty scans emit no receipt"
+assert_eq "$B12_RC" "1" "B12.walk.rc: bounded empty scans prove absence"
+
+B12_SHA40="$(printf 'a%.0s' $(seq 40))"
+# Too shallow: directly under the root, i.e. depth 1 where the layout pins 2.
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" >"$B12_SANDBOX/.uberdev/runs/review-pr-verdict.json"
+# Too deep: one extra directory level below the pinned depth.
+mkdir -p "$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/nested"
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" \
+  >"$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/nested/review-pr-verdict.json"
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_RC" "1" "B12.walk.depth: artifacts above and below the pinned depth are invisible"
+# Now place one at the exact pinned depth; it must become discoverable.
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" \
+  >"$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/review-pr-verdict.json"
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.walk.depth-exact: an artifact at the pinned depth is discovered"
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_A")"
+_b12_write ".uberdev/runs/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_B")"
+_b12_write ".uberdev/runs/20270101-010101-a1/extra/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_B")"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.find.depth2.rc: canonical shallow/deep decoys are ignored"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.find.depth2.receipt: only exact canonical depth 2 is selected"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+_b12_clear
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_A")"
+_b12_write ".worktrees/.uberdev/runs/20270101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_B")"
+_b12_write ".worktrees/a/b/.uberdev/runs/20270101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_B")"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.find.depth5.rc: worktree shallow/deep decoys are ignored"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.find.depth5.receipt: only exact worktree depth 5 is selected"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+# A symlink is supported only as the find -H command-line root. Its captured
+# physical target may be external, but that root identity must stay stable.
+_b12_clear
+mkdir -p "$B12_SANDBOX/_linked_worktrees/w/.uberdev/runs/20260101-010101-a1"
+_b12_payload 42 "$B12_SHA_A" \
+  > "$B12_SANDBOX/_linked_worktrees/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+ln -s "_linked_worktrees" "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.root.symlink.rc: in-repository command-line root symlink is supported"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.root.symlink.receipt: symlink-root capture returns one closed receipt"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+# Dangling roots are not equivalent to absent optional roots. A valid external
+# target is supported because find -H binds the command-line root itself.
+_b12_clear
+ln -s "missing-target" "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.root.dangling.out: dangling root emits no receipt"
+assert_eq "$B12_RC" "2" "B12.root.dangling.rc: dangling root → INDETERMINATE=2"
+_b12_clear
+B12_EXTERNAL_ROOT="$(mktemp -d)"
+mkdir -p "$B12_EXTERNAL_ROOT/w/.uberdev/runs/20260101-010101-a1"
+_b12_payload 42 "$B12_SHA_A" \
+  > "$B12_EXTERNAL_ROOT/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+ln -s "$B12_EXTERNAL_ROOT" "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.root.external.rc: external command-line root target is supported"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.root.external.receipt: external-root bytes remain bound to the captured root"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+rm -rf "$B12_EXTERNAL_ROOT"
+
+# Retargeting an allowed command-line symlink while find is running invalidates
+# the scan even when find itself exits zero and returns no candidate.
+_b12_clear
+B12_RETARGET_A="$(mktemp -d)"
+B12_RETARGET_B="$(mktemp -d)"
+ln -s "$B12_RETARGET_A" "$B12_SANDBOX/.worktrees"
+# This case used the external `find` as a mid-scan timing hook to retarget the
+# root symlink. Issue #346 removed the subprocess, so no shell-reachable hook
+# exists inside the walk. Pin the checks the hook used to prove instead: the
+# root identity is snapshotted before the scan, re-verified immediately after,
+# and re-verified again across all roots once every capture completes.
+assert_grep "$LIB" 'lexical_before = raw_identity\(root_lexical_entry\)' \
+  "B12.root.retarget.snapshot: root identity is snapshotted before the scan"
+assert_grep "$LIB" 'raise VerdictError\(f"root identity drifted: \{root_name\}"\)' \
+  "B12.root.retarget.rc: root identity drift is INDETERMINATE, never absence"
+assert_grep "$LIB" '^def verify_bound_roots\(bound_roots\):' \
+  "B12.root.retarget.reverify: every bound root is re-verified after capture"
+rm -rf "$B12_RETARGET_A" "$B12_RETARGET_B"
+
+# A find result whose relative suffix attempts lexical traversal is
+# indeterminate, even when the command itself exits successfully.
+_b12_clear
+mkdir -p "$B12_SANDBOX/.worktrees"
+# This case injected a traversal-shaped path through the external `find`.
+# Since issue #346 the walk composes candidate paths itself from scandir names,
+# so a traversal suffix is unreachable by construction rather than merely
+# rejected. validate_suffix remains as defence in depth; what is tested here is
+# the property that makes traversal impossible -- descent never follows a link.
+B12_ESCAPE_TARGET="$(mktemp -d)"
+mkdir -p "$B12_ESCAPE_TARGET/.uberdev/runs/20260101-010101-a1"
+printf '{"pr":42,"sha":"%s"}\n' "$(printf 'a%.0s' $(seq 40))" \
+  >"$B12_ESCAPE_TARGET/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+ln -s "$B12_ESCAPE_TARGET" "$B12_SANDBOX/.worktrees/escape" 2>/dev/null || true
+if [ ! -L "$B12_SANDBOX/.worktrees/escape" ]; then
+  echo "  SKIP  B12.root.traversal: ln -s did not produce a symlink on this platform"
+else
+  B12_OUT="$(
+    cd "$B12_SANDBOX" &&
+    . "$LIB" &&
+    discover_review_verdict_json 42
+  )" 2>"$B12_ERR"
+  B12_RC=$?
+  assert_eq "$B12_OUT" "" "B12.root.traversal.out: a linked descendant emits no receipt"
+  assert_eq "$B12_RC" "1" "B12.root.traversal.rc: descent never follows a link out of the root"
+fi
+assert_grep "$LIB" 'find result escaped or violated the root layout' \
+  "B12.root.traversal.guard: the lexical-escape guard is retained as defence in depth"
+rm -rf "$B12_ESCAPE_TARGET"
+
+# A descendant worktree symlink is not followed by find -H.
+_b12_clear
+mkdir -p "$B12_SANDBOX/_linked_worktrees/w/.uberdev/runs/20260101-010101-a1"
+_b12_payload 42 "$B12_SHA_A" \
+  > "$B12_SANDBOX/_linked_worktrees/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+mkdir -p "$B12_SANDBOX/.worktrees"
+ln -s "$B12_SANDBOX/_linked_worktrees/w" "$B12_SANDBOX/.worktrees/w"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.descendant-symlink.out: descendant symlink is not traversed"
+assert_eq "$B12_RC" "1" "B12.descendant-symlink.rc: untraversed descendant proves absence"
+
+# A guarded mktemp failure is infrastructure indeterminacy, never absence.
+_b12_clear
+B12_FAKE_BIN="$B12_SANDBOX/fake-mktemp-bin"
+mkdir -p "$B12_FAKE_BIN"
+printf '%s\n' '#!/bin/sh' 'exit 71' > "$B12_FAKE_BIN/mktemp"
+chmod +x "$B12_FAKE_BIN/mktemp"
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  PATH="$B12_FAKE_BIN:$PATH" &&
+  export PATH &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.mktemp.out: mktemp failure emits no receipt"
+assert_eq "$B12_RC" "2" "B12.mktemp.rc: mktemp failure → INDETERMINATE=2"
+
+# Rank by the 15-byte timestamp prefix only. At the selected timestamp every
+# expected-PR artifact must carry byte-identical payloads.
+_b12_clear
+B12_PAYLOAD_A="$(_b12_payload 42 "$B12_SHA_A")"
+B12_PAYLOAD_B="$(_b12_payload 42 "$B12_SHA_B")"
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010101-b2/review-pr-verdict.json" "$B12_PAYLOAD_B"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.tie.divergent.out: same-timestamp divergent target artifacts emit no receipt"
+assert_eq "$B12_RC" "2" "B12.tie.divergent.rc: same-timestamp divergent target artifacts → INDETERMINATE=2"
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.tie.identical.rc: cross-layout exact-run-id identical bytes are accepted"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.tie.identical.receipt: identical tie publishes one receipt"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-ffff/review-pr-verdict.json" "$B12_PAYLOAD_A"
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010102-0000/review-pr-verdict.json" "$B12_PAYLOAD_B"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.rank.seconds.rc: distinct-second ordering remains chronological"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_B" \
+  "B12.rank.seconds.receipt: later timestamp wins regardless of suffix ordering"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+# Known other-PR artifacts never affect ranking. Unknown identity is harmless
+# only when older than the selected target; newer/equal unknown is fail-closed,
+# and with no target any unknown makes absence unprovable.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010100-a1/review-pr-verdict.json" '{"pr":'
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010101-b2/review-pr-verdict.json" "$B12_PAYLOAD_A"
+_b12_write "worktrees/z/.uberdev/runs/20260101-010102-c3/review-pr-verdict.json" "$(_b12_payload 99 "$B12_SHA_B")"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.unknown.older.rc: older unknown + newer other-PR do not suppress target"
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B12.unknown.older.receipt: target survives harmless candidates"
+(
+  . "$LIB"
+  cleanup_review_verdict_snapshot "$B12_OUT"
+) >/dev/null 2>&1 || true
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
+_b12_write ".worktrees/w/.uberdev/runs/20260101-010102-b2/review-pr-verdict.json" '{"pr":'
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.unknown.newer.out: newer unknown suppresses older target receipt"
+assert_eq "$B12_RC" "2" "B12.unknown.newer.rc: newer unknown → INDETERMINATE=2"
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" '{"pr":'
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B12.unknown.only.out: unknown-only scan emits no receipt"
+assert_eq "$B12_RC" "2" "B12.unknown.only.rc: no target + any unknown → INDETERMINATE=2"
+
+echo
+echo "== B13: selected verdict parser compatibility and strict-type matrix =="
+_b13_valid() {
+  local label="$1" payload="$2" expected_state="$3" expected_halted="$4"
+  local expected_blocker="$5" expected_critical="$6" expected_override="$7"
+  local receipt rc
+  _b12_clear
+  _b12_write \
+    ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+    "$payload"
+  receipt="$(_b12_capture 42)"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$receipt" | jq -e \
+    --arg state "$expected_state" \
+    --argjson halted "$expected_halted" \
+    --argjson blocker "$expected_blocker" \
+    --argjson critical "$expected_critical" \
+    --arg override "$expected_override" '
+      .audit_state == $state
+      and .phase2_5_halted == $halted
+      and .phase2_5_blocker_count == $blocker
+      and .phase2_5_critical_count == $critical
+      and (
+        ($override == "null" and .phase2_5_override_reason == null)
+        or ($override != "null" and .phase2_5_override_reason == $override)
+      )
+    ' >/dev/null 2>&1; then
+    echo "  PASS  B13.valid.$label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  B13.valid.$label"
+    echo "        rc: $rc"
+    echo "        receipt: $receipt"
+    FAIL=$((FAIL + 1))
+  fi
+  if [ "$rc" -eq 0 ]; then
+    (
+      . "$LIB"
+      cleanup_review_verdict_snapshot "$receipt"
+    ) >/dev/null 2>&1 || true
+  fi
+}
+
+_b13_invalid() {
+  local label="$1" payload="$2" receipt rc
+  _b12_clear
+  _b12_write \
+    ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+    "$payload"
+  receipt="$(_b12_capture 42)"
+  rc=$?
+  if [ "$rc" -eq 2 ] && [ -z "$receipt" ]; then
+    echo "  PASS  B13.invalid.$label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  B13.invalid.$label"
+    echo "        expected: rc=2 and no receipt"
+    echo "        actual rc: $rc"
+    echo "        receipt: $receipt"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+_b13_valid "phases-missing" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\"}" \
+  legacy false 0 0 null
+_b13_valid "phases-null" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":null}" \
+  legacy false 0 0 null
+_b13_valid "phase2_5-missing" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{}}" \
+  legacy false 0 0 null
+_b13_valid "phase2_5-empty" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{}}}" \
+  current false 0 0 null
+_b13_valid "nullable-defaults" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":null,\"by_severity\":null,\"override_reason\":null}}}" \
+  current false 0 0 null
+_b13_valid "typed-values" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":true,\"by_severity\":{\"blocker\":2,\"critical\":3},\"override_reason\":\"user-selected-emit-green-on-blocker-deferred\"}}}" \
+  current true 2 3 user-selected-emit-green-on-blocker-deferred
+
+_b13_invalid "top-level-array" '[]'
+_b13_invalid "duplicate-pr" \
+  "{\"pr\":42,\"pr\":42,\"sha\":\"$B12_SHA_A\"}"
+_b13_invalid "pr-bool" \
+  "{\"pr\":true,\"sha\":\"$B12_SHA_A\"}"
+_b13_invalid "pr-string" \
+  "{\"pr\":\"42\",\"sha\":\"$B12_SHA_A\"}"
+_b13_invalid "pr-fraction" \
+  "{\"pr\":42.0,\"sha\":\"$B12_SHA_A\"}"
+_b13_invalid "pr-nonpositive" \
+  "{\"pr\":0,\"sha\":\"$B12_SHA_A\"}"
+_b13_invalid "sha-missing" '{"pr":42}'
+_b13_invalid "sha-uppercase" \
+  '{"pr":42,"sha":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'
+_b13_invalid "sha-short" '{"pr":42,"sha":"aaaa"}'
+_b13_invalid "sha-nonstring" '{"pr":42,"sha":42}'
+_b13_invalid "phases-bool" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":false}"
+_b13_invalid "phases-string" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":\"legacy\"}"
+_b13_invalid "phases-array" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":[]}"
+_b13_invalid "phase2_5-null" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":null}}"
+_b13_invalid "phase2_5-string" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":\"current\"}}"
+_b13_invalid "phase2_5-array" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":[]}}"
+_b13_invalid "halted-number" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":0}}}"
+_b13_invalid "halted-string" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":\"false\"}}}"
+_b13_invalid "severity-bool" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":false}}}"
+_b13_invalid "severity-array" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":[]}}}"
+_b13_invalid "blocker-bool" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"blocker\":false}}}}"
+_b13_invalid "blocker-string" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"blocker\":\"1\"}}}}"
+_b13_invalid "blocker-negative" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"blocker\":-1}}}}"
+_b13_invalid "blocker-fraction" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"blocker\":1.5}}}}"
+_b13_invalid "critical-bool" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"critical\":false}}}}"
+_b13_invalid "critical-negative" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"critical\":-1}}}}"
+_b13_invalid "critical-fraction" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"critical\":1.5}}}}"
+_b13_invalid "override-bool" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"override_reason\":false}}}"
+_b13_invalid "override-unknown" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"override_reason\":\"operator-said-so\"}}}"
+_b13_invalid "duplicate-nested-key" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":false,\"halted\":true}}}"
+_b13_invalid "non-finite-number" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"by_severity\":{\"blocker\":NaN}}}}"
+
+# A published snapshot is accepted only while path, digest, identity, and
+# regular-file shape all remain bound to the closed receipt.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
+B12_RECEIPT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.snapshot.setup: secure snapshot receipt created"
+if printf '%s' "$B12_RECEIPT" | jq -e \
+  '.snapshot_path | type == "string" and startswith("/")' >/dev/null 2>&1; then
+  (
+    . "$LIB"
+    recapture_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "0" "B12.snapshot.stable: unchanged snapshot digest-recaptures"
+  B12_SNAPSHOT_PATH="$(printf '%s' "$B12_RECEIPT" | jq -r '.snapshot_path')"
+  B12_SNAPSHOT_COPY="$B12_SANDBOX/snapshot-copy"
+  cp "$B12_SNAPSHOT_PATH" "$B12_SNAPSHOT_COPY"
+  chmod 600 "$B12_SNAPSHOT_PATH"
+  printf '\n' >> "$B12_SNAPSHOT_PATH"
+  (
+    . "$LIB"
+    recapture_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "2" "B12.snapshot.digest-drift: mutated snapshot → INDETERMINATE=2"
+  rm -f "$B12_SNAPSHOT_PATH"
+  cp "$B12_SNAPSHOT_COPY" "$B12_SNAPSHOT_PATH"
+  chmod 400 "$B12_SNAPSHOT_PATH"
+  (
+    . "$LIB"
+    recapture_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "2" "B12.snapshot.replacement: byte-identical replacement identity → INDETERMINATE=2"
+  rm -f "$B12_SNAPSHOT_PATH"
+  ln -s "$B12_SNAPSHOT_COPY" "$B12_SNAPSHOT_PATH"
+  (
+    . "$LIB"
+    recapture_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "2" "B12.snapshot.symlink: symlink carrier → INDETERMINATE=2"
+  rm -f "$B12_SNAPSHOT_PATH"
+  mkdir "$B12_SNAPSHOT_PATH"
+  (
+    . "$LIB"
+    recapture_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "2" "B12.snapshot.nonregular: directory carrier → INDETERMINATE=2"
+  rm -rf "$B12_SNAPSHOT_PATH"
+  rm -f "$B12_SNAPSHOT_COPY"
+  (
+    . "$LIB"
+    cleanup_review_verdict_snapshot "$B12_RECEIPT"
+  ) >/dev/null 2>&1 || true
+else
+  for B12_DRIFT_CASE in stable digest-drift replacement symlink nonregular; do
+    echo "  FAIL  B12.snapshot.$B12_DRIFT_CASE: closed receipt prerequisite missing"
+    FAIL=$((FAIL + 1))
+  done
+fi
+
+rm -f "$B12_ERR"
+rm -rf "$B12_SANDBOX"
+
+echo
+echo "== B15: an unloadable secure runtime is INDETERMINATE, never proven absence =="
+# Regression for the fail-open funnel: the selector maps interpreter rc 1 to
+# "exhaustive ABSENT", but 1 is also CPython's code for any unhandled exception.
+# With the module load unguarded, a missing/partial run_manifest.py exited 1 and
+# /merge read ABSENT as gate_pass -- landing a PR whose verdict it never read.
+B15_ROOT="$(mktemp -d)"
+mkdir -p "$B15_ROOT/skills/merge-pipeline/lib" "$B15_ROOT/lib" "$B15_ROOT/work"
+cp "$LIB" "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+# NOTE: $B15_ROOT/lib/run_manifest.py is deliberately absent.
+(
+  cd "$B15_ROOT/work" && git init -q .
+  . "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+  discover_review_verdict_json 340
+) >/dev/null 2>&1
+assert_eq "$?" "2" "B15.runtime-missing: unloadable artifact runtime → INDETERMINATE=2 (never ABSENT=1)"
+(
+  cd "$B15_ROOT/work" && . "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+  review_verdict_discovery_state 2
+) >"$B15_ROOT/state" 2>/dev/null
+assert_eq "$(cat "$B15_ROOT/state")" "indeterminate" "B15.state: rc 2 maps to indeterminate"
+rm -rf "$B15_ROOT"
+
+echo
+echo "== B16: the selector receipt carries phase2_5_halted_due_to_overflow =="
+# Regression for the dead /goal blocker-overflow gate: the field was absent from
+# the receipt entirely, so overflow_detected could never reach 1 and the Phase 3
+# truncation was unreachable code.
+B16_ROOT="$(mktemp -d)"
+mkdir -p "$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01"
+B16_SHA="$(printf 'a%.0s' $(seq 40))"
+printf '{"pr":340,"sha":"%s","phases":{"phase2_5":{"halted":false,"halted_due_to_overflow":true,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+B16_RECEIPT="$( cd "$B16_ROOT" && git init -q . 2>/dev/null; cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 340 2>/dev/null )"
+B16_RC=$?
+assert_eq "$B16_RC" "0" "B16.found: verdict carrying halted_due_to_overflow is discoverable"
+assert_eq "$(printf '%s' "$B16_RECEIPT" | jq -r '.phase2_5_halted_due_to_overflow')" "true" \
+  "B16.overflow-true: receipt carries phase2_5_halted_due_to_overflow=true"
+# A verdict without the field must default to false, not null/absent.
+printf '{"pr":341,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+B16_RECEIPT2="$( cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 341 2>/dev/null )"
+assert_eq "$(printf '%s' "$B16_RECEIPT2" | jq -r '.phase2_5_halted_due_to_overflow')" "false" \
+  "B16.overflow-default: absent halted_due_to_overflow defaults to false"
+rm -rf "$B16_ROOT"
 
 echo
 echo "== Summary =="

@@ -8,7 +8,8 @@
 #
 #   RUNTIME (S15): exercises the Phase-3 6c.1 PROBE bucket-classification
 #     contract for real. It prepends tests/_fixtures/fake-gh to PATH, sets
-#     FAKE_GH_MODE per scenario, runs `gh pr checks ... --json name,state,bucket`
+#     FAKE_GH_MODE per scenario, runs
+#     `gh pr checks ... --json name,state,bucket,link,event,workflow`
 #     exactly as review-pr.md specifies, then applies the *prose's own* jq
 #     verdict expression (extracted live from review-pr.md, so the test can
 #     never drift from the documented logic) and asserts the resulting verdict.
@@ -27,8 +28,9 @@ CLASSIFIER="$REPO_ROOT/plugins/uberdev/agents/ci-failure-classifier.md"
 CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
+RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 
-for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL"; do
+for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -213,6 +215,40 @@ assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-class
   "S10.10b — classifier validation does not read an artifact no child writes"
 assert_grep "$REVIEW_PR" 'os\.write\(fd,payload\)' \
   "S10.10c — refusal aggregate serializes a concrete envelope and finding row"
+assert_no_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_path|log_path.*review_pr\.ci\.classify' \
+  "S10.10d — classifier handoff carries no mutable log pathname"
+assert_no_grep "$REVIEW_PR" 'CI_LOG_TRUNCATE_LINES|ci-log-run-|capture_path|capture_receipt|created_identity' \
+  "S10.10d1 — classifier authority uses no named raw staging or producer receipt"
+assert_grep "$REVIEW_PR" 'gh run view "\$CI_RUN_ID".*--log-failed' \
+  "S10.10d2 — classifier authority streams only failed-job logs into its transformer"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_content|log_content.*CI_LOG_AUTHORITY_JSON' \
+  "S10.10e — classifier handoff carries the captured log bytes inline"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*log_sha256|log_sha256.*CI_LOG_AUTHORITY_JSON' \
+  "S10.10f — classifier handoff binds the exact captured log digest"
+assert_grep "$REVIEW_PR" 'review_pr\.ci\.classify.*head_sha|head_sha.*CI_CLASSIFICATION_HEAD_SHA' \
+  "S10.10g — classifier handoff binds the validated PR head"
+assert_grep "$CLASSIFIER" 'log_sha256.*SHA-256|SHA-256.*log_sha256' \
+  "S10.10h — classifier contract names the exact content digest"
+if python3 -I -B - "$RUN_TREE" <<'PY'
+import json,sys
+required=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.classify"]["required_inputs"]
+expected={
+    "pr_number":"integer",
+    "run_id":"string",
+    "head_sha":"string",
+    "log_content":"bounded_text",
+    "log_sha256":"string",
+}
+if required!=expected or "log_path" in required:
+    raise SystemExit("classifier authority is not closed over identity and bytes")
+PY
+then
+  echo "  PASS  S10.10i — policy closes classifier authority over PR/run/head and bounded bytes"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10.10i — policy closes classifier authority over PR/run/head and bounded bytes"
+  FAIL=$((FAIL + 1))
+fi
 
 CLASSIFY_LIFECYCLE_FIXTURE="$(mktemp)"
 CLASSIFY_LIFECYCLE_LOG="$(mktemp)"
@@ -231,10 +267,12 @@ dispatch_fixer
 SH
 set +e
 CLASSIFY_LIFECYCLE_LOG="$CLASSIFY_LIFECYCLE_LOG" \
-PR_NUMBER=1 CI_RUN_ID=123 CI_LOG_ARTIFACT_PATH=/tmp/log RUN_ID=fixture \
+PR_NUMBER=1 CI_RUN_ID=123 RUN_ID=fixture \
+CI_LOG_AUTHORITY_JSON='{"pr_number":1,"run_id":"123","head_sha":"0123456789abcdef0123456789abcdef01234567","log_content":"wrapped","log_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' \
 CI_FIX_LOOP_ITER=2 RESEARCH_DIR_ABS=/tmp/research REVIEW_PR_TIMEOUT=9 \
 bash -c '
   review_json_string() { printf "\"%s\"" "$1"; }
+  review_json_member() { python3 -I -B -c '"'"'import json,sys; print(json.dumps(json.loads(sys.argv[1])[sys.argv[2]]),end="")'"'"' "$1" "$2"; }
   uberdev_child_inputs_build() { printf "{}"; }
   uberdev_child_instance_id() { printf "%s" "$1"; }
   review_child_single() { printf "child\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
@@ -431,6 +469,11 @@ fi
 
 RESULT_PATH_HELPER="$(mktemp)"
 RESULT_PATH_TMP="$(mktemp -d)"
+RESULT_PATH_TMP="$(cd "$RESULT_PATH_TMP" && pwd -P)"
+export UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+export UBERDEV_CARRIER_RUN_DIR="$RESULT_PATH_TMP/run"
+export _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+export UBERDEV_CARRIER_BACKEND=codex
 awk '
   /^review_child_result_path\(\) \{/ { capture=1 }
   capture { print }
@@ -440,13 +483,102 @@ mkdir -p "$RESULT_PATH_TMP/run/children/classifier"
 RESULT_PATH="$RESULT_PATH_TMP/run/children/classifier/result.md"
 RESULT_STATUS="$RESULT_PATH_TMP/run/children/classifier/status.json"
 RESULT_LEDGER="$RESULT_PATH_TMP/classifier.launched"
-printf 'classifier result\n' > "$RESULT_PATH"
-printf '{"state":"completed","exit_code":0}\n' > "$RESULT_STATUS"
+write_classifier_case CLASSIFIED code_bug '"README.md:42"' '"repository test failure"'
+cp "$CLASSIFY_CASE" "$RESULT_PATH"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n' > "$RESULT_STATUS"
 printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
-RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
-RESULT_PATH_EXPECTED="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]),end="")' "$RESULT_PATH")"
 RESULT_PATH_INVALID=0
-[ "$RESULT_PATH_RESOLVED" = "$RESULT_PATH_EXPECTED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+write_result_carrier_fixture() {
+  local backend="$1"
+  python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" "$backend" <<'PY'
+import json,pathlib,sys
+ledger,result,status,backend=sys.argv[1:]
+receipt={
+ "schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"classifier",
+ "backend":backend,"handle":"4242","state":"running",
+ "result_file":result,"status_file":status,
+}
+row={
+ "edge":"review_pr.ci.classify","instance":"classifier",
+ "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+ "result":result,"status":status,
+}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+pathlib.Path(status).write_text(json.dumps({
+ "backend":backend,"state":"completed","exit_code":0,"pid":"4242",
+},separators=(",",":"))+"\n")
+PY
+}
+write_result_carrier_fixture codex
+RESULT_PATH_RESOLVED="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER")"
+[ "$RESULT_PATH_RESOLVED" != "$RESULT_PATH" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ -f "$RESULT_PATH_RESOLVED" ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+cmp "$RESULT_PATH" "$RESULT_PATH_RESOLVED" >/dev/null || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+SNAPSHOT_CLASSIFICATION="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT")"
+[ "$SNAPSHOT_CLASSIFICATION" = $'CLASSIFIED\tcode_bug\tREADME.md:42\t-' ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+
+RESULT_REASON="$(env _UBERDEV_DISPATCH_BACKEND_ENUM='auto|codex|codex' \
+  UBERDEV_CARRIER_BACKEND=codex \
+  bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+    _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_carrier_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+RESULT_REASON="$(env \
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex' \
+  UBERDEV_CARRIER_BACKEND=auto \
+  bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+    _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_carrier_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+write_result_carrier_fixture background
+RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
+  _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
+  && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+[ "$RESULT_REASON" = classification_receipt_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+write_result_carrier_fixture codex
+
+chmod 600 "$RESULT_PATH_RESOLVED"
+write_classifier_case AMBIGUOUS null null '"replacement after discovery"'
+cp "$CLASSIFY_CASE" "$RESULT_PATH_RESOLVED"
+if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"foreign-instance",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"classifier",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
+FOREIGN_RESULT="$RESULT_PATH_TMP/foreign/children/classifier/result.md"
+FOREIGN_STATUS="$RESULT_PATH_TMP/foreign/children/classifier/status.json"
+mkdir -p "$(dirname "$FOREIGN_RESULT")"
+cp "$RESULT_PATH" "$FOREIGN_RESULT"
+cp "$RESULT_STATUS" "$FOREIGN_STATUS"
+python3 -I -B - "$RESULT_LEDGER" "$FOREIGN_RESULT" "$FOREIGN_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"classifier",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"classifier",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
+if bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify >/dev/null' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER"; then
+  RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
+fi
 printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' \
   "$RESULT_PATH" "$RESULT_STATUS" "$RESULT_PATH" "$RESULT_STATUS" > "$RESULT_LEDGER"
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
@@ -462,8 +594,18 @@ RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.cla
 [ "$RESULT_REASON" = classification_ledger_malformed ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 mkdir -p "$RESULT_PATH_TMP/run/children/missing"
 MISSING_STATUS="$RESULT_PATH_TMP/run/children/missing/status.json"
-printf '{"state":"completed","exit_code":0}\n' > "$MISSING_STATUS"
-printf '{"edge":"review_pr.ci.classify","result":"%s","status":"%s"}\n' "$RESULT_PATH_TMP/run/children/missing/result.md" "$MISSING_STATUS" > "$RESULT_LEDGER"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"4242"}\n' > "$MISSING_STATUS"
+python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH_TMP/run/children/missing/result.md" "$MISSING_STATUS" <<'PY'
+import json,pathlib,sys
+ledger,result,status=sys.argv[1:]
+receipt={"schema_version":1,"edge_id":"review_pr.ci.classify","instance_id":"missing",
+         "backend":"codex","handle":"4242","state":"running",
+         "result_file":result,"status_file":status}
+row={"edge":"review_pr.ci.classify","instance":"missing",
+     "receipt":json.dumps(receipt,sort_keys=True,separators=(",",":")),
+     "result":result,"status":status}
+pathlib.Path(ledger).write_text(json.dumps(row,separators=(",",":"))+"\n")
+PY
 RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_artifact_missing ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
@@ -505,6 +647,46 @@ assert_grep "$CODE_FIXER_CI" 'fix\(ci\):.*chore\(deps\):|chore\(deps\):.*fix\(ci
   "S11.4 — both commit-type prefixes (fix(ci):, chore(deps):) documented"
 assert_no_grep "$CODE_FIXER_CI" 'git push' \
   "S11.5 — agent never pushes (caller handles)"
+assert_no_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*classification_path|classification_path.*CI_CLASSIFICATION_PATH' \
+  "S11.6 — fixer handoff never carries the mutable classifier pathname"
+assert_no_grep "$CODE_FIXER_CI" 'no classifier pathname crosses this boundary' \
+  "S11.6a — fixer contract does not deny its validated classifier-derived signal anchor"
+assert_grep "$CODE_FIXER_CI" '[Nn]o classifier (result|log) artifact pathname crosses this boundary' \
+  "S11.6b — fixer contract excludes classifier result/log artifact pathnames specifically"
+assert_grep "$CODE_FIXER_CI" 'signal_anchor.*intentionally crosses.*validated scalar' \
+  "S11.6c — fixer contract names signal_anchor as the intentional validated scalar handoff"
+assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*failure_class|failure_class.*review_json_string' \
+  "S11.7 — fixer handoff carries the controller-validated failure class"
+assert_grep "$REVIEW_PR" 'CI_FIX_INPUTS=.*signal_anchor|signal_anchor.*review_json_string' \
+  "S11.8 — fixer handoff carries the controller-validated signal anchor"
+assert_grep "$REVIEW_PR" 'CI_CLASSIFICATION_HEAD_SHA=.*review_capture_ci_classification_head' \
+  "S11.9 — controller binds classifier authority before dispatch"
+assert_grep "$REVIEW_PR" 'head_sha.*CI_CLASSIFICATION_HEAD_SHA' \
+  "S11.10 — fixer handoff carries the original classification-bound head"
+assert_no_grep "$REVIEW_PR" 'CI_HEAD_SHA="\$\(git rev-parse HEAD\)"' \
+  "S11.11 — ROUTE never substitutes a freshly recaptured local head"
+python3 -I -B - "$RUN_TREE" <<'PY'
+import json,sys
+edge=json.load(open(sys.argv[1],encoding="utf-8"))["edges"]["review_pr.ci.fix_code"]
+required=edge["required_inputs"]
+expected={
+    "failure_class":"string",
+    "signal_anchor":"string",
+    "run_id":"string",
+    "head_sha":"string",
+    "working_dir":"directory",
+    "pr_number":"integer",
+}
+if required!=expected or "classification_path" in required or "log_path" in required:
+    raise SystemExit("ci fixer policy does not bind the validated scalar contract")
+PY
+if [ "$?" -eq 0 ]; then
+  echo "  PASS  S11.12 — policy binds only validated classifier scalars and exact run/head metadata"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S11.12 — policy binds only validated classifier scalars and exact run/head metadata"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S12: ci-rebase-handler agent shape =="
@@ -618,11 +800,11 @@ else
 fi
 
 echo
-echo "== S15: field-contract structural guard — probe reads name,state,bucket (NOT status,conclusion) =="
+echo "== S15: field-contract structural guard — probe reads state + immutable run metadata =="
 # Lock the gh >= 2.83.1 field contract in the prose so a future edit can't
 # silently regress the probe back to the removed status,conclusion fields.
-assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket' \
-  "S15.1 — PROBE call reads --json name,state,bucket"
+assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket,link,event,workflow' \
+  "S15.1 — PROBE call reads state plus immutable run-selection metadata"
 assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --watch --interval 30$' \
   "S15.2 — MONITOR --watch call takes NO --json (gh forbids --watch with --json)"
 # S15.2b — gh 2.83.1 rejects `--watch` together with `--json`
@@ -675,13 +857,13 @@ if [ ! -x "$FAKE_GH_DIR/gh" ]; then
 fi
 
 # Run the PROBE exactly as Phase 3 6c.1 specifies: fake gh on PATH, FAKE_GH_MODE
-# set, `gh pr checks <n> --json name,state,bucket`. Echo the raw probe JSON on
+# set, `gh pr checks <n> --json name,state,bucket,link,event,workflow`. Echo the raw probe JSON on
 # stdout so callers capture it in their own scope (a global set inside the $(...)
 # command-substitution subshell would NOT propagate back to the caller).
 _run_probe() {
   local mode="$1"
   PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_MODE="$mode" \
-    gh pr checks 999 --json name,state,bucket 2>/dev/null
+    gh pr checks 999 --json name,state,bucket,link,event,workflow 2>/dev/null
 }
 
 assert_verdict() {
@@ -711,13 +893,13 @@ assert_verdict ci-checks-red     red     "S15-RT.3 — any bucket fail → red (
 assert_verdict ci-checks-mixed   red     "S15-RT.4 — fail+pending mix → red (red outranks pending)"
 
 # S15-RT.5 — gh >= 2.83.1 field contract: the probe JSON the stub emits MUST
-# carry name/state/bucket on every entry and NEVER the removed status/conclusion
-# fields. This is the regression that the issue's "verified live" diagnosis pins.
+# carry state plus immutable run-selection metadata on every entry and NEVER the
+# removed status/conclusion fields.
 GREEN_PROBE="$(_run_probe ci-checks-green)"
-if printf '%s' "$GREEN_PROBE" | jq -e 'type=="array" and length>0 and all(.[]; has("name") and has("state") and has("bucket"))' >/dev/null 2>&1; then
-  echo "  PASS  S15-RT.5a — stub probe entries carry name/state/bucket"; PASS=$((PASS + 1))
+if printf '%s' "$GREEN_PROBE" | jq -e 'type=="array" and length>0 and all(.[]; has("name") and has("state") and has("bucket") and has("link") and has("event") and has("workflow"))' >/dev/null 2>&1; then
+  echo "  PASS  S15-RT.5a — stub probe entries carry state plus immutable run metadata"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  S15-RT.5a — stub probe entries missing name/state/bucket: $GREEN_PROBE"; FAIL=$((FAIL + 1))
+  echo "  FAIL  S15-RT.5a — stub probe entries missing run-selection metadata: $GREEN_PROBE"; FAIL=$((FAIL + 1))
 fi
 if printf '%s' "$GREEN_PROBE" | jq -e 'all(.[]; (has("status")|not) and (has("conclusion")|not))' >/dev/null 2>&1; then
   echo "  PASS  S15-RT.5b — stub probe entries carry NO removed status/conclusion fields"; PASS=$((PASS + 1))
@@ -866,6 +1048,346 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$CLASSIFIER_STATUS_FIXTURE" "$CLASSIFIER_STATUS_LOG"
+
+echo
+echo "== S18: selected Actions run is derived, event-bound, and refreshed =="
+assert_no_grep "$REVIEW_PR" 'CI_RUN_ID="\$\{CI_RUN_ID:-0\}"' \
+  "S18.1 — setup never treats sentinel run id 0 as authority"
+assert_grep "$REVIEW_PR" 'review_select_failed_ci_run' \
+  "S18.2 — failed Actions run is selected from check metadata"
+assert_grep "$REVIEW_PR" 'review_clear_ci_run_selection' \
+  "S18.3 — run selection has an explicit clear operation"
+assert_grep "$REVIEW_PR" 'actions/runs/\$CI_RUN_ID|actions/runs/\$\{CI_RUN_ID\}' \
+  "S18.4 — controller reads immutable Actions run metadata"
+assert_grep "$REVIEW_PR" 'pull_requests.*PR_NUMBER|PR_NUMBER.*pull_requests' \
+  "S18.5 — pull_request authority is bound through PR association"
+S18_CLEAR_CALLS="$(grep -c 'review_clear_ci_run_selection' "$REVIEW_PR" || true)"
+if [ "$S18_CLEAR_CALLS" -ge 3 ]; then
+  echo "  PASS  S18.6 — run selection is cleared at definition, probe, and head-changing re-entry"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S18.6 — run selection clear is not wired at both probe and re-entry (count=$S18_CLEAR_CALLS)"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S18-RUNTIME: synthetic merge SHA, unset id, unrelated run, and reselection fixtures =="
+CI_AUTHORITY_FIXTURE="$(mktemp)"
+for function_name in review_clear_ci_run_selection review_select_failed_ci_run review_capture_ci_classification_head; do
+  awk -v wanted="$function_name" '
+    $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+    active { print }
+    active && /^    \}$/ { exit }
+  ' "$REVIEW_PR" >>"$CI_AUTHORITY_FIXTURE"
+done
+
+if ! grep -q '^    review_clear_ci_run_selection() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^    review_select_failed_ci_run() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^    review_capture_ci_classification_head() {' "$CI_AUTHORITY_FIXTURE"; then
+  echo "  FAIL  S18-RT.0 — could not extract all CI authority helpers from review-pr.md"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S18-RT.0 — extracted CI authority helpers from review-pr.md"
+  PASS=$((PASS + 1))
+
+  # Default/unset CI_RUN_ID is non-authoritative: the failed check's exact
+  # Actions URL supplies the positive run id and event.
+  SELECTION_PROBE="$(_run_probe ci-checks-red)"
+  unset CI_RUN_ID
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+    bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
+  )
+  if [ "$CI_RUN_ID" = 991 ] && [ "$CI_RUN_EVENT" = pull_request ] \
+      && [ "$CI_RUN_CHECK_LINK" = "https://github.com/owner/repo/actions/runs/991/job/1012" ]; then
+    echo "  PASS  S18-RT.1 — unset run id is derived from the selected failed check"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.1 — unset run id was not derived exactly (id=$CI_RUN_ID event=$CI_RUN_EVENT link=$CI_RUN_CHECK_LINK)"; FAIL=$((FAIL + 1))
+  fi
+  CI_RUN_ID=0
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+    bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
+  )
+  if [ "$CI_RUN_ID" = 991 ]; then
+    echo "  PASS  S18-RT.2 — sentinel run id 0 is replaced by check metadata"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.2 — sentinel run id survived selection (id=$CI_RUN_ID)"; FAIL=$((FAIL + 1))
+  fi
+
+  # A failed check URL from another repository is never accepted as the current
+  # PR's Actions authority.
+  UNRELATED_PROBE='[{"name":"test","state":"FAILURE","bucket":"fail","event":"pull_request","link":"https://github.com/other/repo/actions/runs/777/job/1","workflow":"Tests"}]'
+  if bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$UNRELATED_PROBE" >/dev/null 2>&1; then
+    echo "  FAIL  S18-RT.3 — unrelated repository run was selected"; FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  S18-RT.3 — unrelated repository run fails closed"; PASS=$((PASS + 1))
+  fi
+
+  run_capture_fixture() {
+    local run_event="$1" run_json="$2" expected_head="${3:-}"
+    local local_head="${4:-0123456789012345678901234567890123456789}"
+    local live_head="${5:-$local_head}"
+    CI_CAPTURE_RUN_EVENT="$run_event" CI_CAPTURE_RUN_JSON="$run_json" \
+      CI_CAPTURE_EXPECTED_HEAD="$expected_head" CI_CAPTURE_LOCAL_HEAD="$local_head" \
+      CI_CAPTURE_LIVE_HEAD="$live_head" \
+      bash -c '
+        . "$1"
+        PR_NUMBER=73
+        REVIEW_REPO_SLUG=owner/repo
+        WORKTREE_ROOT=/worktree
+        CI_RUN_ID=991
+        CI_RUN_EVENT="$CI_CAPTURE_RUN_EVENT"
+        LOCAL_HEAD="$CI_CAPTURE_LOCAL_HEAD"
+        LIVE_HEAD="$CI_CAPTURE_LIVE_HEAD"
+        LIVE_BRANCH=feature/current
+        git() {
+          [ "$1" = -C ] && [ "$2" = "$WORKTREE_ROOT" ] \
+            && [ "$3" = rev-parse ] && [ "$4" = HEAD ] || return 2
+          printf "%s\n" "$LOCAL_HEAD"
+        }
+        gh() {
+          if [ "$1" = pr ] && [ "$2" = view ]; then
+            printf "%s\t%s\n" "$LIVE_HEAD" "$LIVE_BRANCH"
+            return 0
+          fi
+          if [ "$1" = api ] && [ "$2" = "repos/$REVIEW_REPO_SLUG/actions/runs/$CI_RUN_ID" ]; then
+            printf "%s\n" "$CI_CAPTURE_RUN_JSON"
+            return 0
+          fi
+          return 2
+        }
+        review_capture_ci_classification_head "$CI_CAPTURE_EXPECTED_HEAD"
+      ' _ "$CI_AUTHORITY_FIXTURE"
+  }
+
+  SYNTHETIC_MERGE_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":73,"head":{"sha":"0123456789012345678901234567890123456789","ref":"feature/current"}}]}'
+  SYNTHETIC_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON")"
+  if [ "$SYNTHETIC_RESULT" = 0123456789012345678901234567890123456789 ]; then
+    echo "  PASS  S18-RT.4 — authoritative pull_request accepts synthetic merge headSha via PR association"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.4 — synthetic merge headSha was rejected ($SYNTHETIC_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  UNRELATED_RUN_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/other","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":74,"head":{"sha":"0123456789012345678901234567890123456789","ref":"feature/other"}}]}'
+  set +e
+  UNRELATED_RESULT="$(run_capture_fixture pull_request "$UNRELATED_RUN_JSON")"
+  UNRELATED_RC=$?
+  set -e
+  if [ "$UNRELATED_RC" -ne 0 ] && [ "$UNRELATED_RESULT" = classification_run_pr_mismatch ]; then
+    echo "  PASS  S18-RT.5 — unrelated pull_request run fails closed"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.5 — unrelated pull_request run crossed the authority gate (rc=$UNRELATED_RC result=$UNRELATED_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  PUSH_STALE_JSON='{"id":991,"event":"push","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[]}'
+  set +e
+  PUSH_STALE_RESULT="$(run_capture_fixture push "$PUSH_STALE_JSON")"
+  PUSH_STALE_RC=$?
+  set -e
+  if [ "$PUSH_STALE_RC" -ne 0 ] && [ "$PUSH_STALE_RESULT" = classification_run_head_mismatch ]; then
+    echo "  PASS  S18-RT.6 — stale push run still requires direct branch-SHA equality"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.6 — stale push run crossed the direct equality gate (rc=$PUSH_STALE_RC result=$PUSH_STALE_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  ORIGINAL_HEAD=0123456789012345678901234567890123456789
+  MOVED_HEAD=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+  LOCAL_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$MOVED_HEAD" "$ORIGINAL_HEAD")" || true
+  LIVE_MOVE_RESULT="$(run_capture_fixture pull_request "$SYNTHETIC_MERGE_JSON" "$ORIGINAL_HEAD" "$ORIGINAL_HEAD" "$MOVED_HEAD")" || true
+  MOVED_ASSOCIATION_JSON='{"id":991,"event":"pull_request","head_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","head_branch":"feature/current","repository":{"full_name":"owner/repo"},"pull_requests":[{"number":73,"head":{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd","ref":"feature/current"}}]}'
+  ASSOCIATION_MOVE_RESULT="$(run_capture_fixture pull_request "$MOVED_ASSOCIATION_JSON" "$ORIGINAL_HEAD")" || true
+  if [ "$LOCAL_MOVE_RESULT" = classification_local_head_moved ] \
+      && [ "$LIVE_MOVE_RESULT" = classification_live_head_moved ] \
+      && [ "$ASSOCIATION_MOVE_RESULT" = classification_run_pr_moved ]; then
+    echo "  PASS  S18-RT.7 — route-time local, live, and PR-association moves remain fail-closed"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.7 — route-time authority move escaped (local=$LOCAL_MOVE_RESULT live=$LIVE_MOVE_RESULT association=$ASSOCIATION_MOVE_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  # A head-changing push clears the old tuple, and the next probe selects the
+  # new run rather than recycling the prior id.
+  RESELECT_PROBE='[{"name":"test","state":"FAILURE","bucket":"fail","event":"pull_request","link":"https://github.com/owner/repo/actions/runs/992/job/1022","workflow":"Tests"}]'
+  RESELECT_RESULT="$(
+    bash -c '
+      . "$1"
+      CI_RUN_ID=991
+      CI_RUN_EVENT=pull_request
+      CI_RUN_CHECK_LINK=https://github.com/owner/repo/actions/runs/991/job/1012
+      review_clear_ci_run_selection
+      [ -z "$CI_RUN_ID$CI_RUN_EVENT$CI_RUN_CHECK_LINK" ] || exit 3
+      review_select_failed_ci_run "$2" owner/repo
+    ' _ "$CI_AUTHORITY_FIXTURE" "$RESELECT_PROBE"
+  )"
+  if [ "$RESELECT_RESULT" = $'992\tpull_request\thttps://github.com/owner/repo/actions/runs/992/job/1022' ]; then
+    echo "  PASS  S18-RT.8 — post-push re-entry clears and reselects the new run"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S18-RT.8 — post-push selection reused stale authority ($RESELECT_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+fi
+rm -f "$CI_AUTHORITY_FIXTURE"
+
+echo
+echo "== S19-RUNTIME: post-MONITOR refresh failure cannot downgrade observed red =="
+POST_MONITOR_REFRESH_FIXTURE="$(mktemp)"
+awk '
+  /^    On a non-zero, non-8 MONITOR exit,/ { section=1 }
+  section && /^    ```bash$/ { code=1; next }
+  code && /^    ```$/ { exit }
+  code {
+    sub(/^    /, "")
+    print
+  }
+' "$REVIEW_PR" >"$POST_MONITOR_REFRESH_FIXTURE"
+POST_MONITOR_REFRESH_LOG="$(mktemp)"
+set +e
+POST_MONITOR_REFRESH_OUTPUT="$(
+  POST_MONITOR_REFRESH_LOG="$POST_MONITOR_REFRESH_LOG" bash -c '
+    audit(){ printf "%s\n" "$*" >>"$POST_MONITOR_REFRESH_LOG"; }
+    gh(){
+      printf "post-monitor metadata refresh unavailable\n" >&2
+      return 1
+    }
+    PR_NUMBER=73
+    OUTCOME=red
+    trap '\''printf "outcome=%s\n" "$OUTCOME" >>"$POST_MONITOR_REFRESH_LOG"'\'' EXIT
+    . "$1"
+    printf "continued\n" >>"$POST_MONITOR_REFRESH_LOG"
+  ' _ "$POST_MONITOR_REFRESH_FIXTURE"
+)"
+POST_MONITOR_REFRESH_RC=$?
+set -e
+if grep -q '^unset PROBE_RC$' "$POST_MONITOR_REFRESH_FIXTURE" \
+    && [ "$POST_MONITOR_REFRESH_RC" -ne 0 ] \
+    && grep -qxF 'ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed' \
+      "$POST_MONITOR_REFRESH_LOG" \
+    && grep -qxF 'outcome=halted' "$POST_MONITOR_REFRESH_LOG" \
+    && ! grep -q 'ci_probe_unreachable' "$POST_MONITOR_REFRESH_LOG" \
+    && ! grep -qxF 'continued' "$POST_MONITOR_REFRESH_LOG"; then
+  echo "  PASS  S19-RT — post-MONITOR refresh failure preserves red as terminal halted"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S19-RT — post-MONITOR refresh failure downgraded observed red"
+  echo "        rc: $POST_MONITOR_REFRESH_RC"
+  echo "        output: $POST_MONITOR_REFRESH_OUTPUT"
+  echo "        log: $(tr '\n' ' ' <"$POST_MONITOR_REFRESH_LOG")"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$POST_MONITOR_REFRESH_FIXTURE" "$POST_MONITOR_REFRESH_LOG"
+
+echo
+echo "== S20-RUNTIME: direct bounded classifier-log stream =="
+CI_LOG_STREAM_FIXTURE="$(mktemp)"
+awk -v wanted="review_capture_ci_log_authority" '
+  $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+  active && /^    if CI_LOG_AUTHORITY_JSON=/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$CI_LOG_STREAM_FIXTURE"
+
+run_ci_log_stream_fixture() {
+  local mode="$1"
+  CI_LOG_STREAM_MODE="$mode" bash -c '
+    . "$1"
+    REVIEW_REPO_SLUG=owner/repo
+    PR_NUMBER=73
+    CI_RUN_ID=991
+    CI_CLASSIFICATION_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+    gh() {
+      [ "$#" -eq 6 ] \
+        && [ "$1" = run ] \
+        && [ "$2" = view ] \
+        && [ "$3" = "$CI_RUN_ID" ] \
+        && [ "$4" = --repo ] \
+        && [ "$5" = "$REVIEW_REPO_SLUG" ] \
+        && [ "$6" = --log-failed ] || return 97
+      case "$CI_LOG_STREAM_MODE" in
+        valid) printf "original & <failed assertion>\n" ;;
+        gh-error) printf "partial failed log\n"; return 1 ;;
+        invalid-utf8) printf "\377" ;;
+        oversize) python3 -I -B -c '\''import sys; sys.stdout.write("x"*49153)'\'' ;;
+        *) return 98 ;;
+      esac
+    }
+    review_capture_ci_log_authority
+  ' _ "$CI_LOG_STREAM_FIXTURE"
+}
+
+if ! grep -Eq 'capture_path|capture_receipt|created_identity|secure_capture_regular|os\.(open|lstat)' \
+      "$CI_LOG_STREAM_FIXTURE" \
+    && grep -q -- '--log-failed' "$CI_LOG_STREAM_FIXTURE" \
+    && grep -q 'set -o pipefail' "$CI_LOG_STREAM_FIXTURE"; then
+  echo "  PASS  S20-RT.1 — one pipefail-protected transformer has no named producer identity to mutate"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.1 — classifier capture still exposes a named mutable producer boundary"
+  FAIL=$((FAIL + 1))
+fi
+
+if ! grep -Eq 'os\.unlink|unlink\(' "$CI_LOG_STREAM_FIXTURE"; then
+  echo "  PASS  S20-RT.2 — classifier capture has no pathname unlink replacement race"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.2 — classifier capture still deletes through a mutable pathname"
+  FAIL=$((FAIL + 1))
+fi
+
+set +e
+CI_LOG_VALID_RESULT="$(run_ci_log_stream_fixture valid)"
+CI_LOG_VALID_RC=$?
+set -e
+if [ "$CI_LOG_VALID_RC" -eq 0 ] && python3 -I -B - "$CI_LOG_VALID_RESULT" <<'PY'
+import hashlib,json,sys
+value=json.loads(sys.argv[1])
+expected='<external-untrusted-input source="github-actions-log-pr-73-run-991">\noriginal &amp; &lt;failed assertion>\n</external-untrusted-input>\n'
+assert value=={
+    'head_sha':'0123456789abcdef0123456789abcdef01234567',
+    'log_content':expected,
+    'log_sha256':hashlib.sha256(expected.encode()).hexdigest(),
+    'pr_number':73,
+    'run_id':'991',
+}
+assert len(json.dumps(value,sort_keys=True,separators=(',',':')).encode())<=49152
+PY
+then
+  echo "  PASS  S20-RT.3 — transformer emits exact canonical identity, envelope bytes, and digest"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.3 — valid failed-log stream did not produce canonical authority JSON"
+  echo "        rc: $CI_LOG_VALID_RC"
+  FAIL=$((FAIL + 1))
+fi
+
+set +e
+CI_LOG_GH_ERROR_RESULT="$(run_ci_log_stream_fixture gh-error)"
+CI_LOG_GH_ERROR_RC=$?
+CI_LOG_UTF8_RESULT="$(run_ci_log_stream_fixture invalid-utf8)"
+CI_LOG_UTF8_RC=$?
+CI_LOG_OVERSIZE_RESULT="$(run_ci_log_stream_fixture oversize)"
+CI_LOG_OVERSIZE_RC=$?
+set -e
+if [ "$CI_LOG_GH_ERROR_RC" -ne 0 ]; then
+  echo "  PASS  S20-RT.4 — upstream gh failure fails the pipe closed"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.4 — upstream gh failure produced accepted authority"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$CI_LOG_UTF8_RC" -ne 0 ] \
+    && [ "$CI_LOG_UTF8_RESULT" = classification_log_capture_invalid ]; then
+  echo "  PASS  S20-RT.5 — invalid UTF-8 stream fails closed"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.5 — invalid UTF-8 stream escaped the transformer"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$CI_LOG_OVERSIZE_RC" -ne 0 ] \
+    && [ "$CI_LOG_OVERSIZE_RESULT" = classification_log_input_oversize ]; then
+  echo "  PASS  S20-RT.6 — oversized stream fails before authority publication"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S20-RT.6 — oversized stream escaped the immutable input ceiling"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$CI_LOG_STREAM_FIXTURE"
 
 echo
 echo "== Summary =="

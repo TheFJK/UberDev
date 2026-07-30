@@ -267,11 +267,508 @@ pr_view_projection() {
   return 0
 }
 
+# Resolve this sourced library's plugin root without assuming Bash. zsh exposes
+# the current sourced pathname through its prompt-expansion `%x`; Bash exposes
+# BASH_SOURCE. The eval keeps zsh-only syntax out of Bash's parser.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  eval '_UBERDEV_MERGE_DISCOVER_SOURCE=${(%):-%x}'
+else
+  _UBERDEV_MERGE_DISCOVER_SOURCE="${BASH_SOURCE[0]}"
+fi
+_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT="$(
+  cd "$(dirname "$_UBERDEV_MERGE_DISCOVER_SOURCE")/../../.." 2>/dev/null &&
+    pwd -P
+)"
+
+# review_verdict_discovery_state RC
+# Convert the selector's exhaustive result code into the only three caller
+# states. Any unrecognised/non-numeric infrastructure status is indeterminate.
+review_verdict_discovery_state() {
+  case "${1:-}" in
+    0) printf 'found\n' ;;
+    1) printf 'absent\n' ;;
+    *) printf 'indeterminate\n' ;;
+  esac
+  return 0
+}
+
+# _uberdev_review_verdict_python COMMAND [...]
+# One closed Python boundary owns root binding, secure byte capture, duplicate-
+# key-safe JSON parsing, timestamp ranking, snapshot publication, and carrier
+# recapture. It imports the existing run_manifest primitives directly; no new
+# runtime interface is introduced.
+_uberdev_review_verdict_python() {
+  local command="$1"
+  shift
+  python3 -I -B - "$command" "$_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT" "$@" <<'PY'
+import fnmatch
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+
+command, plugin_root, *args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location(
+    "uberdev_merge_review_verdict",
+    os.path.join(plugin_root, "lib", "run_manifest.py"),
+)
+if spec is None or spec.loader is None:
+    print("indeterminate: secure artifact runtime unavailable", file=sys.stderr)
+    raise SystemExit(2)
+runtime = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runtime
+try:
+    spec.loader.exec_module(runtime)
+except Exception:
+    # Loading the secure artifact runtime is NOT proof that no verdict exists.
+    # Left unguarded this raises before the funnel below is installed, and an
+    # unhandled exception exits 1 -- which the shell maps to exhaustive ABSENT,
+    # i.e. "no verdict for this PR", which /merge treats as gate_pass. A missing
+    # or version-skewed run_manifest.py must fail closed as INDETERMINATE.
+    print("indeterminate: secure artifact runtime failed to load", file=sys.stderr)
+    raise SystemExit(2)
+
+RUN_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[a-f0-9]+$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+MAXIMUM_SIZE = 1024 * 1024
+OVERRIDE = "user-selected-emit-green-on-blocker-deferred"
+ROOT_LAYOUTS = (
+    (
+        ".uberdev/runs",
+        ("run_id", "review-pr-verdict.json"),
+        2,
+        ".uberdev/runs/*/review-pr-verdict.json",
+    ),
+    (
+        ".claude/worktrees",
+        ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
+        5,
+        ".claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
+    ),
+    (
+        ".worktrees",
+        ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
+        5,
+        ".worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
+    ),
+    (
+        "worktrees",
+        ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
+        5,
+        "worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
+    ),
+)
+
+
+class VerdictError(Exception):
+    pass
+
+
+def fail(reason):
+    print(f"indeterminate: {reason}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def raw_identity(entry):
+    return (
+        entry.st_dev,
+        entry.st_ino,
+        entry.st_size,
+        getattr(entry, "st_mtime_ns", int(entry.st_mtime * 1_000_000_000)),
+        getattr(entry, "st_ctime_ns", int(entry.st_ctime * 1_000_000_000)),
+        entry.st_mode,
+    )
+
+
+def followed_identity(path):
+    entry = os.stat(path)
+    return raw_identity(entry)
+
+
+def lexical_identity(path):
+    entry = os.lstat(path)
+    return raw_identity(entry)
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise VerdictError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def parse_payload(payload):
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                VerdictError(f"non-finite number: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, VerdictError) as exc:
+        raise VerdictError("malformed JSON") from exc
+    if not isinstance(value, dict):
+        raise VerdictError("top-level JSON must be an object")
+    pr = value.get("pr")
+    if isinstance(pr, bool) or not isinstance(pr, int) or pr < 1:
+        raise VerdictError("top-level pr must be a positive integer")
+    return value, pr
+
+
+def parse_phase2_5(value):
+    phases = value.get("phases")
+    if phases is None:
+        return ("legacy", False, 0, 0, None, False)
+    if not isinstance(phases, dict):
+        raise VerdictError("phases must be an object or null")
+    if "phase2_5" not in phases:
+        return ("legacy", False, 0, 0, None, False)
+    phase = phases["phase2_5"]
+    if not isinstance(phase, dict):
+        raise VerdictError("phase2_5 must be an object")
+
+    halted = phase.get("halted")
+    if halted is None:
+        halted = False
+    elif not isinstance(halted, bool):
+        raise VerdictError("phase2_5.halted must be boolean or null")
+
+    severity = phase.get("by_severity")
+    if severity is None:
+        severity = {}
+    elif not isinstance(severity, dict):
+        raise VerdictError("phase2_5.by_severity must be an object or null")
+
+    counts = []
+    for key in ("blocker", "critical"):
+        count = severity.get(key)
+        if count is None:
+            count = 0
+        elif isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise VerdictError(
+                f"phase2_5.by_severity.{key} must be a non-negative integer or null"
+            )
+        counts.append(count)
+
+    override = phase.get("override_reason")
+    if override is not None and override != OVERRIDE:
+        raise VerdictError("phase2_5.override_reason has an invalid value")
+
+    # Carried so /goal can gate its Phase 3 truncation on the same authority
+    # /review-pr recorded. Same strict discipline as `halted`: absent/null is
+    # False, any non-boolean is a contract violation, never a silent default.
+    overflow = phase.get("halted_due_to_overflow")
+    if overflow is None:
+        overflow = False
+    elif not isinstance(overflow, bool):
+        raise VerdictError(
+            "phase2_5.halted_due_to_overflow must be boolean or null"
+        )
+    return ("current", halted, counts[0], counts[1], override, overflow)
+
+
+def validate_target(value):
+    artifact_sha = value.get("sha")
+    if not isinstance(artifact_sha, str) or SHA_RE.fullmatch(artifact_sha) is None:
+        raise VerdictError("top-level sha must be 40 lowercase hexadecimal characters")
+    return artifact_sha, parse_phase2_5(value)
+
+
+def receipt_identity(value):
+    identity = value.get("snapshot_identity")
+    if (
+        not isinstance(identity, list)
+        or len(identity) != 6
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in identity)
+    ):
+        raise VerdictError("snapshot identity malformed")
+    return runtime.ArtifactIdentity(*identity)
+
+
+def parse_receipt(raw):
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise VerdictError("snapshot receipt malformed") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise VerdictError("snapshot receipt schema mismatch")
+    path = value.get("snapshot_path")
+    digest = value.get("snapshot_sha256")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise VerdictError("snapshot path malformed")
+    if not isinstance(digest, str) or DIGEST_RE.fullmatch(digest) is None:
+        raise VerdictError("snapshot digest malformed")
+    return value, path, digest, receipt_identity(value)
+
+
+def validate_suffix(root_name, candidate, expected_shape):
+    relative = os.path.relpath(candidate, root_name)
+    parts = tuple(relative.split(os.sep))
+    if (
+        relative == os.pardir
+        or relative.startswith(os.pardir + os.sep)
+        or any(part in ("", ".", os.pardir) for part in parts)
+        or len(parts) != len(expected_shape)
+    ):
+        raise VerdictError("find result escaped or violated the root layout")
+    for actual, expected in zip(parts, expected_shape):
+        if expected not in {"run_id", "worktree"} and actual != expected:
+            raise VerdictError("find result violated the root layout")
+    run_id = parts[expected_shape.index("run_id")]
+    return parts, run_id
+
+
+def scan_root_layout(root_name, exact_depth, exact_path):
+    """Enumerate ROOT at exactly `exact_depth`, keeping entries matching `exact_path`.
+
+    Replaces `find -H ROOT -mindepth N -maxdepth N -path GLOB -print0`. The
+    external binary is not usable here: this module runs under whatever
+    interpreter the host provides, and on native Windows `subprocess` resolves
+    a bare "find" against the system PATH, where C:\\Windows\\System32\\find.exe -- an
+    unrelated text-search tool -- precedes Git Bash's POSIX find. That made every
+    scan fail with "FIND: Parameter format not correct", so /goal and /merge
+    discovery returned INDETERMINATE for every lookup on Windows.
+
+    Semantics preserved exactly:
+      * `-H`  -- the command-line root is the ONLY followed link; descent uses
+                 follow_symlinks=False, matching find's default no-follow.
+      * `-mindepth N -maxdepth N` -- only entries at exactly depth N are emitted,
+                 and nothing below depth N is traversed.
+      * `-path GLOB` -- fnmatchcase against the printed path, where `*` spans `/`
+                 exactly as in find; the path is composed with `/` so the glob is
+                 separator-independent on Windows.
+      * any file type is emitted at the pinned depth (find does not filter by
+                 type here); regularity is enforced later during secure capture.
+
+    Results are sorted, which is stricter than find's directory order.
+    A scan failure is fail-closed: OSError becomes VerdictError, so an
+    unreadable subtree is INDETERMINATE and never mistaken for absence.
+    """
+    matches = []
+    pending = [(root_name, root_name.replace(os.sep, "/"), 0)]
+    while pending:
+        native, posix, depth = pending.pop()
+        if depth == exact_depth:
+            if fnmatch.fnmatchcase(posix, exact_path):
+                matches.append(native)
+            continue
+        try:
+            with os.scandir(native) as entries:
+                children = list(entries)
+        except OSError as exc:
+            raise VerdictError(f"root scan failed: {root_name}") from exc
+        for entry in children:
+            child_native = os.path.join(native, entry.name)
+            child_posix = posix + "/" + entry.name
+            if depth + 1 == exact_depth:
+                pending.append((child_native, child_posix, depth + 1))
+                continue
+            try:
+                descend = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                raise VerdictError(f"root scan failed: {root_name}") from exc
+            if descend:
+                pending.append((child_native, child_posix, depth + 1))
+    matches.sort()
+    return matches
+
+
+def scan_roots():
+    candidates = []
+    bound_roots = []
+    for root_name, expected_shape, exact_depth, exact_path in ROOT_LAYOUTS:
+        try:
+            root_lexical_entry = os.lstat(root_name)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise VerdictError(f"root inspect failed: {root_name}") from exc
+        try:
+            lexical_before = raw_identity(root_lexical_entry)
+            followed_before = followed_identity(root_name)
+        except OSError as exc:
+            raise VerdictError(f"root inspect failed: {root_name}") from exc
+        try:
+            root_entry = os.stat(root_name)
+        except OSError as exc:
+            raise VerdictError(f"root target unavailable: {root_name}") from exc
+        if not stat.S_ISDIR(root_entry.st_mode):
+            raise VerdictError(f"root is not a directory: {root_name}")
+        physical_root = os.path.realpath(root_name)
+        scan_results = scan_root_layout(root_name, exact_depth, exact_path)
+        try:
+            if (
+                lexical_identity(root_name) != lexical_before
+                or followed_identity(root_name) != followed_before
+                or os.path.realpath(root_name) != physical_root
+            ):
+                raise VerdictError(f"root identity drifted: {root_name}")
+        except OSError as exc:
+            raise VerdictError(f"root identity drifted: {root_name}") from exc
+        bound_roots.append(
+            (root_name, physical_root, lexical_before, followed_before)
+        )
+        for candidate in scan_results:
+            parts, run_id = validate_suffix(root_name, candidate, expected_shape)
+            if RUN_ID_RE.fullmatch(run_id) is None:
+                continue
+            physical_candidate = os.path.join(physical_root, *parts)
+            candidates.append((run_id, physical_candidate))
+    return candidates, bound_roots
+
+
+def verify_bound_roots(bound_roots):
+    for root_name, physical_root, lexical_before, followed_before in bound_roots:
+        try:
+            if (
+                lexical_identity(root_name) != lexical_before
+                or followed_identity(root_name) != followed_before
+                or os.path.realpath(root_name) != physical_root
+            ):
+                raise VerdictError(f"root identity drifted: {root_name}")
+        except OSError as exc:
+            raise VerdictError(f"root identity drifted: {root_name}") from exc
+
+
+def discover(expected_pr, capture_dir):
+    candidates, bound_roots = scan_roots()
+    if not candidates:
+        raise SystemExit(1)
+    targets = []
+    unknown_timestamps = []
+    for run_id, path in candidates:
+        timestamp = run_id[:15]
+        try:
+            payload, _identity = runtime.secure_capture_regular(
+                path, 2, MAXIMUM_SIZE
+            )
+            value, candidate_pr = parse_payload(payload)
+        except Exception:
+            unknown_timestamps.append(timestamp)
+            continue
+        if candidate_pr != expected_pr:
+            continue
+        try:
+            artifact_sha, phase = validate_target(value)
+        except VerdictError:
+            unknown_timestamps.append(timestamp)
+            continue
+        targets.append((timestamp, payload, artifact_sha, phase))
+    verify_bound_roots(bound_roots)
+    if not targets:
+        if unknown_timestamps:
+            raise VerdictError("candidate identity or selected shape is unknown")
+        raise SystemExit(1)
+
+    selected_timestamp = max(target[0] for target in targets)
+    if any(timestamp >= selected_timestamp for timestamp in unknown_timestamps):
+        raise VerdictError(
+            "identity unknown at or after the selected target timestamp"
+        )
+    selected = [target for target in targets if target[0] == selected_timestamp]
+    selected_payload = selected[0][1]
+    if any(target[1] != selected_payload for target in selected[1:]):
+        raise VerdictError(
+            "expected-PR artifacts tied at the selected timestamp diverge"
+        )
+    artifact_sha = selected[0][2]
+    state, halted, blocker, critical, override, overflow = selected[0][3]
+
+    snapshot_path, snapshot_identity, snapshot_digest = (
+        runtime.secure_publish_captured(
+            os.path.join(capture_dir, "review-pr-verdict.json"),
+            selected_payload,
+        )
+    )
+    recaptured, recaptured_identity = runtime.secure_capture_published(
+        snapshot_path, snapshot_digest, 2, MAXIMUM_SIZE
+    )
+    if recaptured != selected_payload or recaptured_identity != snapshot_identity:
+        raise VerdictError("published snapshot failed its immediate receipt check")
+    return {
+        "schema_version": 1,
+        "run_timestamp": selected_timestamp,
+        "snapshot_path": snapshot_path,
+        "snapshot_sha256": snapshot_digest,
+        "snapshot_identity": list(snapshot_identity),
+        "pr": expected_pr,
+        "artifact_sha": artifact_sha,
+        "audit_state": state,
+        "phase2_5_halted": halted,
+        "phase2_5_blocker_count": blocker,
+        "phase2_5_critical_count": critical,
+        "phase2_5_override_reason": override,
+        "phase2_5_halted_due_to_overflow": overflow,
+    }
+
+
+try:
+    if command == "discover":
+        if len(args) != 2 or re.fullmatch(r"[1-9][0-9]*", args[0]) is None:
+            fail("PR number must be a positive integer")
+        expected_pr = int(args[0])
+        capture_dir = os.path.abspath(args[1])
+        receipt = discover(expected_pr, capture_dir)
+        # end="" so native-Windows text mode cannot append \r\n: $() strips the
+        # trailing \n but leaves the \r, and both consumers compare the receipt
+        # byte-for-byte against its recapture.
+        print(json.dumps(receipt, sort_keys=True, separators=(",", ":")), end="")
+    elif command == "recapture":
+        if len(args) != 1:
+            fail("snapshot receipt argument missing")
+        _receipt, path, digest, expected_identity = parse_receipt(args[0])
+        _payload, observed_identity = runtime.secure_capture_published(
+            path, digest, 2, MAXIMUM_SIZE
+        )
+        if observed_identity != expected_identity:
+            raise VerdictError("snapshot identity drifted")
+        print(args[0])
+    elif command == "cleanup":
+        if len(args) != 1:
+            fail("snapshot receipt argument missing")
+        _receipt, path, digest, expected_identity = parse_receipt(args[0])
+        parent = os.path.dirname(path)
+        if not os.path.basename(parent).startswith("uberdev-review-verdict."):
+            raise VerdictError("snapshot cleanup directory is not controller-owned")
+        _payload, observed_identity = runtime.secure_capture_published(
+            path, digest, 2, MAXIMUM_SIZE
+        )
+        if observed_identity != expected_identity:
+            raise VerdictError("snapshot identity drifted before cleanup")
+        current = os.lstat(path)
+        if runtime._artifact_identity(current) != expected_identity:
+            raise VerdictError("snapshot path drifted before cleanup")
+        os.unlink(path)
+        os.rmdir(parent)
+    else:
+        fail("unknown secure verdict command")
+except SystemExit:
+    raise
+except (VerdictError, runtime.ManifestRejected, runtime.ManifestRuntimeError, OSError) as exc:
+    fail(str(exc))
+except Exception as exc:
+    # Catch-all so no unhandled exception can reach the interpreter and exit 1.
+    # Exit 1 is reserved for the two deliberate `raise SystemExit(1)` sites that
+    # mean "scan completed, no candidate for this PR". Anything else -- an
+    # AttributeError from version skew, a ValueError from a malformed layout
+    # tuple, a RecursionError -- is an undetermined result, not proven absence.
+    fail(f"unexpected selector failure: {type(exc).__name__}")
+PY
+}
+
 # discover_review_verdict_json PR_NUMBER
-# Stdout: path to the most-recent review-pr-verdict.json whose top-level
-#         `.pr` integer equals PR_NUMBER, or empty when none matches.
-# Exit:   0 always (empty stdout = corroborator absent; the caller's
-#         sub-condition (d) advisory path handles absence).
+# Stdout: one closed JSON receipt containing the securely published carrier
+#         path/digest/identity plus the expected PR, validated 40-hex artifact
+#         SHA, and fully typed Phase 2.5 tuple. No source pathname is exposed.
+# Exit:   FOUND=0, exhaustive ABSENT=1, INDETERMINATE=2 (invalid input,
+#         incomplete scan, root drift, ambiguous timestamp, or unknown bytes).
 # Search surface — the four documented layouts (single source of truth for
 # the glob set; sub-condition (d) prose + the Common Mistakes bullet mirror
 # this enumeration; tests/merge.test.sh M63.worktree-glob.* locks all
@@ -286,59 +783,140 @@ pr_view_projection() {
 # — a bashism that silently misfires under the zsh Bash tool (#294
 # _uberdev_goal_glob_worktree class; issue #303 / RFC 0012 §3.2 item 2).
 # `find` is an external binary with identical semantics under bash 3.2, zsh,
-# and CI bash. Missing roots are normal (2>/dev/null per find).
+# and CI bash. A root that does not exist is skipped at the pre-scan lstat
+# (FileNotFoundError -> continue). find errors are NOT suppressed: any scan
+# failure, root-identity drift, or capture failure is INDETERMINATE, never
+# absence — do not reintroduce a 2>/dev/null here.
 # Hardening (D4/F8): the <run-id> path segment is validated against
 # RUN_ID_REGEX (^[0-9]{8}-[0-9]{6}-[a-f0-9]+$) via grep -E before the
 # candidate participates in selection (no [[ =~ ]] — BASH_REMATCH is a
 # bashism); the prefix segments are never concatenated from untrusted input.
-# Tie-break: lex-greatest <run-id> wins (run-id format lex-sorts
-# chronologically); on identical run-ids across layouts the first layout in
-# the order above wins (deterministic).
+# Identity-safe tie-break: only the YYYYMMDD-HHMMSS timestamp prefix ranks.
+# At the selected timestamp, every expected-PR artifact must have identical
+# captured bytes. A newer/equal unknown suppresses a target; without a target,
+# any unknown makes absence unprovable. Known other-PR artifacts are ignored.
 discover_review_verdict_json() {
   local pr_number="$1"
-  case "$pr_number" in
-    ''|*[!0-9]*) return 0 ;;  # non-integer PR number: no match by contract
-  esac
-  local found
-  found="$(
-    {
-      find .uberdev/runs -mindepth 2 -maxdepth 2 \
-        -path '.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
-      find .claude/worktrees -mindepth 5 -maxdepth 5 \
-        -path '.claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
-      find .worktrees -mindepth 5 -maxdepth 5 \
-        -path '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
-      find worktrees -mindepth 5 -maxdepth 5 \
-        -path 'worktrees/*/.uberdev/runs/*/review-pr-verdict.json' 2>/dev/null
-    } || true
-  )"
-  [ -n "$found" ] || return 0
-  local f pr_field run_id best_run_id="" best_path=""
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    [ -r "$f" ] || continue
-    pr_field="$(jq -r '.pr // empty' "$f" 2>/dev/null)" || continue
-    [ "$pr_field" = "$pr_number" ] || continue
-    run_id="$(basename "$(dirname "$f")")"
-    printf '%s' "$run_id" | grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' || continue
-    # Lexicographic compare via `expr` (C collation forced): `[ a \> b ]` is
-    # a bash test-builtin extension — zsh's `[` rejects `\>` with "condition
-    # expected: >", silently degrading the tie-break to first-found under
-    # the zsh Bash tool (the exact #294 bashism class this helper exists to
-    # fix). `expr` exits 0 when the comparison is true, 1 when false; equal
-    # run-ids across layouts keep the FIRST layout in the search order
-    # (documented tie-break above). Operands are regex-validated digit-lead
-    # strings, so expr cannot mistake them for options or pure integers.
-    if [ -z "$best_run_id" ] || LC_ALL=C expr "$run_id" \> "$best_run_id" >/dev/null; then
-      best_run_id="$run_id"
-      best_path="$f"
-    fi
-  done <<EOF
-$found
-EOF
-  if [ -n "$best_path" ]; then
-    printf '%s\n' "$best_path"
+  if ! printf '%s' "$pr_number" | grep -qE '^[1-9][0-9]*$'; then
+    printf 'indeterminate: PR number must be a positive integer\n' >&2
+    return 2
   fi
+  local capture_dir receipt rc
+  if ! capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/uberdev-review-verdict.XXXXXX")"; then
+    printf 'indeterminate: unable to allocate stable verdict capture directory\n' >&2
+    return 2
+  fi
+  if receipt="$(_uberdev_review_verdict_python discover "$pr_number" "$capture_dir")"; then
+    printf '%s\n' "$receipt"
+    return 0
+  else
+    rc=$?
+  fi
+  rmdir "$capture_dir" 2>/dev/null || true
+  case "$rc" in
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# recapture_review_verdict_snapshot RECEIPT_JSON
+# Re-bind the published carrier to both its digest and six-field identity.
+# Any replacement (including byte-identical), mutation, symlink, non-regular
+# node, ownership change, or malformed receipt is INDETERMINATE=2.
+recapture_review_verdict_snapshot() {
+  _uberdev_review_verdict_python recapture "$1" || return 2
+}
+
+# cleanup_review_verdict_snapshot RECEIPT_JSON
+# Remove only an unchanged carrier inside its private mktemp-owned directory.
+cleanup_review_verdict_snapshot() {
+  _uberdev_review_verdict_python cleanup "$1" || return 2
+}
+
+# parse_review_verdict_phase2_5 AUDIT_JSON_PATH
+# Stdout: exactly five tab-separated fields:
+#   <legacy|current> <halted> <blocker_count> <critical_count> <override_reason>
+# Exit:   0 = complete typed tuple, 2 = malformed/unreadable/extraction failure.
+# Missing/null optional fields in a current block receive the compatibility
+# defaults false, 0, 0, null. Raw fields are type-checked before defaults, so
+# explicit false is never accepted as a numeric count by jq's `//` operator.
+parse_review_verdict_phase2_5() {
+  local audit_json_path="$1"
+  if [ ! -f "$audit_json_path" ] || [ -L "$audit_json_path" ] || [ ! -r "$audit_json_path" ]; then
+    printf 'malformed: audit artifact is not a readable regular file\n' >&2
+    return 2
+  fi
+
+  local jq_err tuple
+  jq_err="$(mktemp)"
+  if tuple="$(jq -er '
+    def integer_count:
+      type == "number" and . >= 0 and floor == .;
+    if type != "object"
+       or ((.phases != null) and ((.phases | type) != "object"))
+    then error("root/phases shape")
+    elif ((.phases | type) != "object") or ((.phases | has("phase2_5")) | not)
+    then ["legacy", "false", "0", "0", "null"] | @tsv
+    else
+      .phases.phase2_5 as $p |
+      if (($p | type) != "object")
+         or (($p | has("halted")) and ($p.halted != null) and (($p.halted | type) != "boolean"))
+         or (($p | has("by_severity")) and ($p.by_severity != null) and (($p.by_severity | type) != "object"))
+         or (($p.by_severity | type) == "object"
+             and ($p.by_severity | has("blocker"))
+             and ($p.by_severity.blocker != null)
+             and (($p.by_severity.blocker | integer_count) | not))
+         or (($p.by_severity | type) == "object"
+             and ($p.by_severity | has("critical"))
+             and ($p.by_severity.critical != null)
+             and (($p.by_severity.critical | integer_count) | not))
+         or (($p | has("override_reason"))
+             and ($p.override_reason != null)
+             and ($p.override_reason != "user-selected-emit-green-on-blocker-deferred"))
+      then error("phase2_5 field shape")
+      else [
+        "current",
+        (($p.halted // false) | tostring),
+        (($p.by_severity.blocker // 0) | tostring),
+        (($p.by_severity.critical // 0) | tostring),
+        ($p.override_reason // "null")
+      ] | @tsv
+      end
+    end
+  ' "$audit_json_path" 2>"$jq_err")"; then
+    :
+  else
+    local jq_exit=$?
+    printf 'malformed: phase2_5 parse/extraction failed (jq exit %s): %s\n' \
+      "$jq_exit" "$(head -c 200 "$jq_err" 2>/dev/null)" >&2
+    rm -f "$jq_err"
+    return 2
+  fi
+  rm -f "$jq_err"
+
+  # Do not publish a state until the entire tuple passes an independent shell
+  # shape check. This catches truncated/partial stdout even when jq exits 0.
+  if ! printf '%s\n' "$tuple" | LC_ALL=C awk -F '\t' '
+    NR != 1 || NF != 5 { bad = 1; next }
+    $1 == "legacy" {
+      if ($2 != "false" || $3 != "0" || $4 != "0" || $5 != "null") bad = 1
+      next
+    }
+    $1 == "current" {
+      if ($2 !~ /^(true|false)$/) bad = 1
+      if ($3 !~ /^(0|[1-9][0-9]*)$/) bad = 1
+      if ($4 !~ /^(0|[1-9][0-9]*)$/) bad = 1
+      if ($5 != "null" && $5 != "user-selected-emit-green-on-blocker-deferred") bad = 1
+      next
+    }
+    { bad = 1 }
+    END { if (NR != 1 || bad) exit 1 }
+  '; then
+    printf 'malformed: phase2_5 parser returned an incomplete or invalid tuple\n' >&2
+    return 2
+  fi
+
+  printf '%s\n' "$tuple"
   return 0
 }
 

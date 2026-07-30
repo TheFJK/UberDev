@@ -868,10 +868,14 @@
       ],
       "required_inputs": {
         "findings_path": "path",
+        "findings_sha256": "string",
         "commit_range_path": "path",
+        "commit_range_sha256": "string",
         "working_dir": "directory",
         "pr_number": "integer",
-        "disposition_path": "path"
+        "disposition_path": "path",
+        "authority_path": "path",
+        "authority_sha256": "string"
       },
       "optional_inputs": {}
     },
@@ -952,16 +956,44 @@
       "risk_scope": "run",
       "allowed_workflows": [
         "review-pr",
-        "simplify",
         "solve",
         "turbo"
       ],
       "required_inputs": {
         "findings_path": "path",
+        "findings_sha256": "string",
         "commit_range_path": "path",
+        "commit_range_sha256": "string",
         "working_dir": "directory",
         "pr_number": "integer",
-        "disposition_path": "path"
+        "disposition_path": "path",
+        "authority_path": "path",
+        "authority_sha256": "string"
+      },
+      "optional_inputs": {}
+    },
+    "simplify.fix.phase2": {
+      "kind": "provider",
+      "workspace_mode": "caller",
+      "source": "plugins/uberdev/commands/simplify.md",
+      "role": "code-fixer",
+      "phase": "simplify_fix",
+      "cardinality": "zero_or_one_per_review_iteration",
+      "required": false,
+      "risk_scope": "run",
+      "allowed_workflows": [
+        "simplify"
+      ],
+      "required_inputs": {
+        "findings_path": "path",
+        "findings_sha256": "string",
+        "standalone_snapshot_path": "path",
+        "standalone_snapshot_sha256": "string",
+        "working_dir": "directory",
+        "pr_number": "integer",
+        "disposition_path": "path",
+        "authority_path": "path",
+        "authority_sha256": "string"
       },
       "optional_inputs": {}
     },
@@ -1005,7 +1037,9 @@
       "required_inputs": {
         "pr_number": "integer",
         "run_id": "string",
-        "log_path": "path"
+        "head_sha": "string",
+        "log_content": "bounded_text",
+        "log_sha256": "string"
       },
       "optional_inputs": {}
     },
@@ -1024,8 +1058,10 @@
         "turbo"
       ],
       "required_inputs": {
-        "classification_path": "path",
-        "log_path": "path",
+        "failure_class": "string",
+        "signal_anchor": "string",
+        "run_id": "string",
+        "head_sha": "string",
         "working_dir": "directory",
         "pr_number": "integer"
       },

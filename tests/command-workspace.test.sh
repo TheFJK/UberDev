@@ -7,6 +7,27 @@ HELPER="$ROOT/plugins/uberdev/lib/command-workspace.py"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+python3 -I -B - "$HELPER" <<'PY'
+import importlib.util
+import sys
+import typing
+
+module_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("command_workspace_type_contract", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert getattr(module, "NoReturn", None) is typing.NoReturn, (
+    f"NoReturn import is {getattr(module, 'NoReturn', None)!r}"
+)
+fail_hints = typing.get_type_hints(module.fail)
+assert fail_hints["return"] is typing.NoReturn, (
+    f"fail return is {fail_hints['return']!r}"
+)
+PY
+
 . "$LIB"
 
 file_mode() {
@@ -913,7 +934,7 @@ fi
 RUN_ID=20260710-010203-abcdef0
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
 export UBERDEV_RUN_CARRIER_JSON
-unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 
 # Inherited solve review creates the exact runtime-owned workspace and artifacts.
 uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" '' >/dev/null
@@ -930,6 +951,8 @@ for path in "$DIFF_ARTIFACT_PATH" "$CRITERIA_PATH" "$COMMIT_RANGE_PATH" "$PHASE1
   [ "$(file_mode "$path")" = 600 ]
   [ "$(file_link_count "$path")" = 1 ]
 done
+[ ! -s "$PHASE1_DISPOSITION_PATH" ]
+[ ! -s "$PHASE2_DISPOSITION_PATH" ]
 grep -q '^<external-untrusted-input source="pr-diff">$' "$DIFF_ARTIFACT_PATH"
 jq -e '.caller=="review-pr" and .carrier_workflow=="solve" and .repository_root==$repo and .research_dir==$research and (.artifacts|keys)==["commit_range","criteria","diff","phase1_disposition","phase2_disposition"]' \
   --arg repo "$REPO" --arg research "$EXPECTED" <<<"$UBERDEV_COMMAND_WORKSPACE_JSON" >/dev/null
@@ -952,7 +975,7 @@ DIFF_ARTIFACT_PATH="$EXPECTED/pr-diff.md"
 # Review rejects an inherited simplify carrier before allocating its workspace.
 BAD_RUN_ID=20260710-010204-abcdef0
 UBERDEV_RUN_CARRIER_JSON="$SIMPLIFY_CARRIER"
-unset UBERDEV_COMMAND_WORKSPACE_JSON RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 if uberdev_command_workspace_prepare review-pr 77 medium '[]' "$BAD_RUN_ID" "$REPO" >/dev/null 2>&1; then
   echo 'review accepted simplify carrier' >&2; exit 1
 fi
@@ -960,21 +983,21 @@ fi
 
 # Review preserves inherited turbo lineage; simplify rejects solve/turbo carriers.
 UBERDEV_RUN_CARRIER_JSON="$TURBO_CARRIER"
-unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 TURBO_RUN=20260710-010204-abcdeff
 uberdev_command_workspace_prepare review-pr 78 medium '[]' "$TURBO_RUN" '' >/dev/null
 [ "$(jq -r .carrier_workflow <<<"$UBERDEV_COMMAND_WORKSPACE_JSON")" = turbo ]
 uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$TURBO_RUN" "$REPO" >/dev/null
 [ "$(jq -r .carrier_workflow <<<"$UBERDEV_COMMAND_WORKSPACE_JSON")" = turbo ]
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
-unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 if uberdev_command_workspace_prepare simplify 0 medium '[]' 20260710-010204-acdeeff '' >/dev/null 2>&1; then
   echo 'simplify accepted inherited solve carrier' >&2; exit 1
 fi
 
 # Carrier mint failure is terminal and happens before any workspace write.
 uberdev_prepare_run_carrier() { return 17; }
-unset UBERDEV_RUN_CARRIER_JSON UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_RUN_CARRIER_JSON UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 MINT_FAIL_RUN=20260710-010204-acdeefa
 rc=0
 uberdev_command_workspace_prepare review-pr 79 medium '[]' "$MINT_FAIL_RUN" '' >/dev/null 2>&1 || rc=$?
@@ -989,16 +1012,23 @@ uberdev_prepare_run_carrier() {
   UBERDEV_RUN_CARRIER_JSON="$STANDALONE_CARRIER"
   export UBERDEV_RUN_CARRIER_JSON
 }
-unset UBERDEV_RUN_CARRIER_JSON UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_RUN_CARRIER_JSON UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 SIMPLIFY_RUN=20260710-010205-abcdef0
 uberdev_command_workspace_prepare simplify 0 medium '[]' "$SIMPLIFY_RUN" '' >/dev/null
 [ "$mint_calls" -eq 1 ]
 [ "$AGG_PATH" = "$REPO/.uberdev/research/$SIMPLIFY_RUN/simplify-final.md" ]
 [ "$(file_mode "$AGG_PATH")" = 600 ]
+[ "$STANDALONE_SNAPSHOT_PATH" = "$REPO/.uberdev/research/$SIMPLIFY_RUN/standalone-snapshot.json" ]
+[ "$(file_mode "$STANDALONE_SNAPSHOT_PATH")" = 600 ]
+[ ! -s "$STANDALONE_SNAPSHOT_PATH" ]
+[ ! -s "$PHASE1_DISPOSITION_PATH" ]
+[ ! -s "$PHASE2_DISPOSITION_PATH" ]
+jq -e '(.artifacts|keys)==["aggregate","diff","phase1_disposition","phase2_disposition","standalone_snapshot"]' \
+  <<<"$UBERDEV_COMMAND_WORKSPACE_JSON" >/dev/null
 
 # Post-review requires the inherited descriptor, attaches exactly, and preserves bytes.
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
-unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 POST_RUN=20260710-010206-abcdef0
 uberdev_command_workspace_prepare review-pr 77 medium '[]' "$POST_RUN" '' >/dev/null
 printf 'parent-diff\n' >"$DIFF_ARTIFACT_PATH"; chmod 600 "$DIFF_ARTIFACT_PATH"
@@ -1033,7 +1063,7 @@ SYMLINK_RUN=20260710-010207-abcdef0
 OUTSIDE_DIR="$TMP/outside-dir"; mkdir -p "$OUTSIDE_DIR"
 ln -s "$OUTSIDE_DIR" "$REPO/.uberdev/research/$SYMLINK_RUN"
 UBERDEV_RUN_CARRIER_JSON="$SOLVE_CARRIER"
-unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
 if uberdev_command_workspace_prepare review-pr 80 medium '[]' "$SYMLINK_RUN" '' >/dev/null 2>&1; then
   echo 'workspace followed a symlink run directory' >&2; exit 1
 fi

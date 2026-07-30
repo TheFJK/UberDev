@@ -10,7 +10,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 SRC="$REPO_ROOT/plugins/uberdev"
 MANIFEST="$HERE/manifest.txt"
+CODEX_SOURCE="$REPO_ROOT/codex"
+MANIFEST_CODEX="$HERE/manifest-codex.txt"
 TEMPLATES="$HERE/templates"
+PATH_GUARD="$HERE/managed-path-guard.py"
 . "$HERE/rewrite.sh"
 
 TARGET=""; VERSION="0.1.0"; FORCE=0
@@ -23,31 +26,237 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TARGET" ] || { echo "generate: --target <dir> required" >&2; exit 2; }
-# Guard mkdir/cd: an unchecked failure here would collapse TARGET to "" and make
-# the later rm -rf "$P" / scaffold writes hit the filesystem root.
-mkdir -p "$TARGET" || { echo "generate: cannot create target dir: $TARGET" >&2; exit 1; }
-TARGET="$(cd "$TARGET" && pwd)" || { echo "generate: cannot resolve target dir: $TARGET" >&2; exit 1; }
-[ -n "$TARGET" ] || { echo "generate: target resolved to empty path — refusing to write to filesystem root" >&2; exit 1; }
+
+# Test-only path overrides exercise the real mandatory-input checks without
+# renaming shared SSOT files while parallel tests or agents may be reading them.
+if [ "${PRKIT_GENERATOR_TEST_MODE:-}" = "1" ]; then
+  [ -n "${PRKIT_TEST_CODEX_MANIFEST_PATH:-}" ] \
+    && MANIFEST_CODEX="$PRKIT_TEST_CODEX_MANIFEST_PATH"
+  [ -n "${PRKIT_TEST_CODEX_SOURCE_PATH:-}" ] \
+    && CODEX_SOURCE="$PRKIT_TEST_CODEX_SOURCE_PATH"
+fi
+
+# Mandatory SSOT inputs are checked before target creation/resolution. The
+# generated verifier requires the native Codex tree and marketplace
+# unconditionally, so a Claude-only partial generation is never valid.
+[ -d "$SRC" ] && [ -r "$SRC" ] \
+  || { echo "generate: SSOT missing/unreadable: $SRC" >&2; exit 1; }
+[ -r "$MANIFEST" ] \
+  || { echo "generate: manifest missing/unreadable: $MANIFEST" >&2; exit 1; }
+[ -d "$CODEX_SOURCE" ] && [ -r "$CODEX_SOURCE" ] \
+  || { echo "generate: Codex SSOT missing/unreadable: $CODEX_SOURCE" >&2; exit 1; }
+[ -r "$MANIFEST_CODEX" ] \
+  || { echo "generate: Codex manifest missing/unreadable: $MANIFEST_CODEX" >&2; exit 1; }
+[ -r "$PATH_GUARD" ] \
+  || { echo "generate: managed path guard missing/unreadable: $PATH_GUARD" >&2; exit 1; }
+
+# Canonicalize only the parent so the target's final entry remains visible to
+# lstat. A target-root symlink or Windows junction is rejected, not silently
+# resolved. Once the real root passes the shared guard, pwd -P only normalizes
+# an entry already proven to be a real directory.
+TARGET_PARENT_INPUT="$(dirname "$TARGET")"
+TARGET_NAME="$(basename "$TARGET")"
+mkdir -p "$TARGET_PARENT_INPUT" \
+  || { echo "generate: cannot create target parent: $TARGET_PARENT_INPUT" >&2; exit 1; }
+TARGET_PARENT="$(cd "$TARGET_PARENT_INPUT" && pwd -P)" \
+  || { echo "generate: cannot resolve target parent: $TARGET_PARENT_INPUT" >&2; exit 1; }
+TARGET="$TARGET_PARENT/$TARGET_NAME"
+if [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ]; then
+  mkdir "$TARGET" || { echo "generate: cannot create target dir: $TARGET" >&2; exit 1; }
+fi
+if ! python3 -I -B "$PATH_GUARD" "$TARGET" ".prkit-root-probe" tree; then
+  echo "generate: target root must be a real, non-reparse directory: $TARGET" >&2
+  exit 1
+fi
+TARGET="$(cd "$TARGET" && pwd -P)" \
+  || { echo "generate: cannot resolve validated target dir: $TARGET" >&2; exit 1; }
+[ "$TARGET" != "/" ] \
+  || { echo "generate: refusing to use the filesystem root as target" >&2; exit 1; }
 
 # Deterministic DATE input (no wall-clock in output beyond the version's date):
 # use PRKIT_RELEASE_DATE if provided, else a fixed placeholder the release ritual
 # overrides. The determinism test pins this.
 DATE="${PRKIT_RELEASE_DATE:-2026-07-12}"
 
-# --- 1. Preflight ---
-[ -d "$SRC" ] || { echo "generate: SSOT missing: $SRC" >&2; exit 1; }
-[ -r "$MANIFEST" ] || { echo "generate: manifest missing: $MANIFEST" >&2; exit 1; }
-if [ -d "$TARGET/.git" ] && [ "$FORCE" -eq 0 ]; then
-  if [ -n "$(git -C "$TARGET" status --porcelain 2>/dev/null)" ]; then
-    echo "generate: target working tree is dirty (use --force to override)" >&2; exit 1
+# --- 1. Target preflight ---
+P="$TARGET/plugins/prkit"
+MANAGED_PATHS=(
+  "plugins/prkit"
+  "codex"
+  "README.md"
+  "LICENSE"
+  "NOTICE"
+  "CHANGELOG.md"
+  ".gitignore"
+  ".github/workflows/ci.yml"
+  ".claude-plugin/marketplace.json"
+  ".agents/plugins/marketplace.json"
+)
+TARGET_GIT_GUARDED=0
+GENERATION_LOCK="$TARGET/.prkit-generate.lock"
+GENERATION_LOCK_HELD=0
+
+fail_generation(){
+  echo "generate: $1" >&2
+  exit 1
+}
+
+# The shared helper uses component-wise os.lstat and rejects both symbolic links
+# and Windows junction/reparse points. It returns nonzero rather than exiting
+# this shell, which lets render() clean an unpublished destination-local temp.
+check_managed_destination(){
+  python3 -I -B "$PATH_GUARD" "$TARGET" "$1" "$2"
+}
+
+require_managed_destination(){
+  local rel="$1" kind="$2"
+  check_managed_destination "$rel" "$kind" \
+    || fail_generation "unsafe managed destination: $rel"
+}
+
+atomic_replace(){
+  python3 -I -B - "$1" "$2" <<'PY'
+import os
+import sys
+
+try:
+    os.replace(sys.argv[1], sys.argv[2])
+except OSError as exc:
+    raise SystemExit(f"atomic replace failed: {exc}")
+PY
+}
+
+# Copy into a destination-local temporary, recheck containment immediately
+# before publication, atomically replace the canonical leaf, then require the
+# published file to exist. A late leaf symlink is replaced as a directory entry;
+# it is never opened as the copy destination.
+copy_managed_file(){
+  local src="$1" dst="$2" rel="$3" out_dir tmp
+  require_managed_destination "$rel" file
+  out_dir="$(dirname "$dst")" \
+    || fail_generation "cannot resolve copy destination directory: $rel"
+  mkdir -p "$out_dir" \
+    || fail_generation "cannot create copy destination directory: $rel"
+  require_managed_destination "$rel" file
+  if ! tmp="$(mktemp "$out_dir/.prkit-copy.XXXXXX")"; then
+    fail_generation "cannot create destination-local copy temporary: $rel"
+  fi
+  if ! cp -p "$src" "$tmp"; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove failed copy temporary: $tmp" >&2
+    fail_generation "copy failed (manifest source missing?): $rel"
+  fi
+  if ! check_managed_destination "$rel" file; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove unpublished copy temporary: $tmp" >&2
+    fail_generation "copy destination changed before publication: $rel"
+  fi
+  if [ "${PRKIT_GENERATOR_TEST_MODE:-}" = "1" ] \
+     && [ "${PRKIT_TEST_COPY_PUBLISH_FAIL:-}" = "$rel" ]; then
+    rm -f "$tmp" || fail_generation "injected copy failure also could not clean temporary: $tmp"
+    fail_generation "injected copy publication failure: $rel"
+  fi
+  if ! atomic_replace "$tmp" "$dst"; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove unpublished copy temporary: $tmp" >&2
+    fail_generation "cannot publish copied output: $rel"
+  fi
+  require_managed_destination "$rel" required-file
+}
+
+probe_target_status(){
+  if [ "${PRKIT_GENERATOR_TEST_MODE:-}" = "1" ] \
+     && [ "${PRKIT_TEST_GIT_STATUS_FAIL:-}" = "1" ]; then
+    return 1
+  fi
+  git -C "$TARGET" status --porcelain --untracked-files=all "$@" 2>/dev/null
+}
+
+# Git status deliberately omits ignored files. Inventory ignored, untracked
+# content separately for every path this generator recursively replaces or
+# overwrites. Path-scoped rechecks run immediately before each destructive or
+# overwrite boundary. The exclusive target lock below serializes cooperative
+# generator processes for the complete mutation + verification lifecycle.
+guard_managed_paths(){
+  [ "$TARGET_GIT_GUARDED" -eq 1 ] || return 0
+  local dirty ignored
+  if ! dirty="$(probe_target_status -- "$@")"; then
+    fail_generation "cannot inspect target working tree status — refusing to modify it"
+  fi
+  if [ -n "$dirty" ]; then
+    fail_generation "managed target path became dirty (use --force to override)"
+  fi
+  if ! ignored="$(git -C "$TARGET" ls-files --others --ignored --exclude-standard -- "$@" 2>/dev/null)"; then
+    fail_generation "cannot inventory ignored content under managed target paths"
+  fi
+  if [ -n "$ignored" ]; then
+    fail_generation "ignored content exists under a managed target path (use --force to override)"
+  fi
+}
+
+lock_error="target generation lock exists: $GENERATION_LOCK (another generator may be running; remove it only after confirming it is stale)"
+if [ -e "$GENERATION_LOCK" ] || [ -L "$GENERATION_LOCK" ]; then
+  fail_generation "$lock_error"
+fi
+
+if { [ -e "$TARGET/.git" ] || [ -L "$TARGET/.git" ]; } && [ "$FORCE" -eq 0 ]; then
+  TARGET_GIT_GUARDED=1
+  target_status=""
+  if ! target_status="$(probe_target_status)"; then
+    fail_generation "cannot inspect target working tree status — refusing to modify it"
+  fi
+  if [ -n "$target_status" ]; then
+    fail_generation "target working tree is dirty (use --force to override)"
+  fi
+  guard_managed_paths "${MANAGED_PATHS[@]}"
+elif [ "$FORCE" -eq 0 ]; then
+  first_entry=""
+  if ! first_entry="$(find "$TARGET" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+    fail_generation "cannot inspect non-Git target contents — refusing to modify it"
+  fi
+  if [ -n "$first_entry" ]; then
+    fail_generation "non-Git target is not empty (initialize Git or use --force to replace managed paths)"
   fi
 fi
 
-P="$TARGET/plugins/prkit"
+# Shape/containment checks are independent of Git cleanliness and are never
+# bypassed by --force. Check the whole managed surface before the first write,
+# then recheck individual paths immediately before each mutation boundary.
+require_managed_destination "plugins/prkit" tree
+require_managed_destination "codex" tree
+for managed_file in \
+  "README.md" "LICENSE" "NOTICE" "CHANGELOG.md" ".gitignore" \
+  ".github/workflows/ci.yml" ".claude-plugin/marketplace.json" \
+  ".agents/plugins/marketplace.json"; do
+  require_managed_destination "$managed_file" file
+done
+
+# mkdir is the cross-platform atomic lock acquisition primitive. Cleanup uses
+# rmdir (never recursive deletion), so a replaced/nonempty lock fails safely.
+if ! mkdir "$GENERATION_LOCK"; then
+  fail_generation "$lock_error"
+fi
+GENERATION_LOCK_HELD=1
+cleanup_generation_lock(){
+  local status=$?
+  trap - EXIT
+  if [ "$GENERATION_LOCK_HELD" -eq 1 ]; then
+    if ! rmdir "$GENERATION_LOCK"; then
+      echo "generate: cannot remove generation lock safely: $GENERATION_LOCK" >&2
+      [ "$status" -ne 0 ] || status=1
+    fi
+    GENERATION_LOCK_HELD=0
+  fi
+  exit "$status"
+}
+trap cleanup_generation_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- 2. Clean previously generated plugin tree (leave the rest of the repo) ---
-rm -rf "$P"
-mkdir -p "$P"
+guard_managed_paths "plugins/prkit"
+require_managed_destination "plugins/prkit" optional-sealed-tree
+rm -rf "$P" || fail_generation "cannot remove generated plugin tree: $P"
+mkdir -p "$P" || fail_generation "cannot create generated plugin tree: $P"
+require_managed_destination "plugins/prkit" required-tree
 
 # --- 3. Copy per manifest. A failed cp (e.g. a manifest source went missing in
 # the SSOT) MUST abort — otherwise a broken tree ships and the "copied N" summary
@@ -58,8 +267,8 @@ while IFS= read -r rel; do
   case "$rel" in ''|\#*) continue;; esac
   expected=$((expected+1))
   dst="$P/$rel"
-  mkdir -p "$(dirname "$dst")"
-  cp "$SRC/$rel" "$dst" || { echo "generate: copy failed (manifest source missing?): $rel" >&2; exit 1; }
+  plugin_rel="plugins/prkit/$rel"
+  copy_managed_file "$SRC/$rel" "$dst" "$plugin_rel"
   copied=$((copied+1))
 done < "$MANIFEST"
 [ "$copied" -eq "$expected" ] || { echo "generate: copied $copied of $expected manifest files" >&2; exit 1; }
@@ -69,16 +278,52 @@ done < "$MANIFEST"
 # zero-byte scaffold (a bare `> out` redirect truncates out before sed runs, and
 # the root-level scaffolds are outside verify's plugins/prkit + codex scan roots).
 render(){
-  local tmpl="$1" out="$2" tmp
-  [ -r "$tmpl" ] || { echo "generate: template missing: $tmpl" >&2; exit 1; }
-  tmp="$(mktemp)"
-  { sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{DATE}}/$DATE/g" "$tmpl" > "$tmp" && [ -s "$tmp" ]; } \
-    || { echo "generate: render produced empty/failed output: $tmpl" >&2; rm -f "$tmp"; exit 1; }
-  mv "$tmp" "$out"
+  local tmpl="$1" out="$2" rel="$3" out_dir tmp injected_publish injected_dir
+  [ -r "$tmpl" ] || fail_generation "template missing: $tmpl"
+  require_managed_destination "$rel" file
+  out_dir="$(dirname "$out")" || fail_generation "cannot resolve render destination directory: $out"
+  mkdir -p "$out_dir" || fail_generation "cannot create render destination directory: $out_dir"
+  require_managed_destination "$rel" file
+  [ -d "$out_dir" ] || fail_generation "render destination is not a directory: $out_dir"
+  if ! tmp="$(mktemp "$out_dir/.prkit-render.XXXXXX")"; then
+    fail_generation "cannot create destination-local render temporary: $out_dir"
+  fi
+  if ! sed -e "s/{{VERSION}}/$VERSION/g" -e "s/{{DATE}}/$DATE/g" "$tmpl" > "$tmp" \
+     || [ ! -s "$tmp" ]; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove failed render temporary: $tmp" >&2
+    fail_generation "render produced empty/failed output: $tmpl"
+  fi
+  if [ "${PRKIT_GENERATOR_TEST_MODE:-}" = "1" ] \
+     && [ -n "${PRKIT_TEST_RENDER_PUBLISH_FAIL:-}" ]; then
+    injected_publish="$PRKIT_TEST_RENDER_PUBLISH_FAIL"
+    injected_dir="$(dirname "$injected_publish")"
+    if [ -d "$injected_dir" ]; then
+      injected_publish="$(cd "$injected_dir" && pwd -P)/$(basename "$injected_publish")"
+    fi
+    if [ "$injected_publish" = "$out" ]; then
+      rm -f "$tmp" || fail_generation "injected publication failure also could not clean temporary: $tmp"
+      fail_generation "injected render publication failure: $out"
+    fi
+  fi
+  if ! check_managed_destination "$rel" file; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove unpublished render temporary: $tmp" >&2
+    fail_generation "render destination changed before publication: $rel"
+  fi
+  if ! atomic_replace "$tmp" "$out"; then
+    rm -f "$tmp" || echo "generate: warning: cannot remove unpublished render temporary: $tmp" >&2
+    fail_generation "cannot publish rendered output: $out"
+  fi
+  require_managed_destination "$rel" required-file
 }
 
-# Project the canonical UberDev run tree down to the review-only closure shipped
-# by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
+render_managed(){
+  local tmpl="$1" out="$2" rel="$3"
+  guard_managed_paths "$rel"
+  render "$tmpl" "$out" "$rel"
+}
+
+# Project the canonical UberDev run tree down to the closed PR-phase surface
+# shipped by standalone prkit. Parse and publish fail closed: duplicate keys and Python's
 # otherwise-accepted NaN/Infinity constants are rejected, and the exact
 # deterministic bytes are reparsed before the atomic replace.
 project_review_policy(){
@@ -116,15 +361,40 @@ edge_semantics = {
     'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
-    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'simplify', 'solve', 'turbo'), None),
+    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.defer_refusal': ('provider', 'findings-to-issues', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.resolve_conflict': ('provider', 'conflict-resolver', ('review-pr', 'solve', 'turbo'), None),
+    'simplify.fix.phase2': ('provider', 'code-fixer', ('simplify',), None),
 }
 expected_edges = set(edge_semantics)
+review_fixer_inputs = {
+    'authority_path': 'path', 'authority_sha256': 'string',
+    'commit_range_path': 'path', 'commit_range_sha256': 'string',
+    'disposition_path': 'path', 'findings_path': 'path',
+    'findings_sha256': 'string', 'pr_number': 'integer',
+    'working_dir': 'directory',
+}
+standalone_fixer_inputs = {
+    'authority_path': 'path', 'authority_sha256': 'string',
+    'disposition_path': 'path', 'findings_path': 'path',
+    'findings_sha256': 'string', 'pr_number': 'integer',
+    'standalone_snapshot_path': 'path',
+    'standalone_snapshot_sha256': 'string', 'working_dir': 'directory',
+}
+fixer_input_semantics = {
+    'review_pr.fix.phase1': review_fixer_inputs,
+    'review_pr.fix.phase2': review_fixer_inputs,
+    'simplify.fix.phase2': standalone_fixer_inputs,
+}
+fixer_route_posture = {
+    'review_pr.fix.phase1': ('review_fix', 'caller', 'run', False, 'one_per_review_iteration'),
+    'review_pr.fix.phase2': ('simplify_fix', 'caller', 'run', False, 'zero_or_one_per_review_iteration'),
+    'simplify.fix.phase2': ('simplify_fix', 'caller', 'run', False, 'zero_or_one_per_review_iteration'),
+}
 
 def reject_pairs(pairs):
     result = {}
@@ -173,11 +443,12 @@ if shipped_roles != expected_roles:
 
 selected_edge_ids = {
     edge_id for edge_id in source_edges
-    if isinstance(edge_id, str) and edge_id.startswith('review_pr.')
+    if isinstance(edge_id, str)
+    and edge_id.startswith(('review_pr.', 'simplify.'))
 }
 if selected_edge_ids != expected_edges:
     raise SystemExit(
-        'policy review edge grammar mismatch: '
+        'policy PR-phase edge grammar mismatch: '
         f'missing={sorted(expected_edges - selected_edge_ids)} '
         f'unexpected={sorted(selected_edge_ids - expected_edges)}'
     )
@@ -208,6 +479,19 @@ for edge_id in sorted(expected_edges):
     actual_contract = edge.get('output_contract')
     if actual_contract != expected_contract or (expected_contract is None and 'output_contract' in edge):
         raise SystemExit(f'policy edge output contract mismatch: {edge_id}')
+    expected_inputs = fixer_input_semantics.get(edge_id)
+    if expected_inputs is not None and edge.get('required_inputs') != expected_inputs:
+        raise SystemExit(f'policy fixer input contract mismatch: {edge_id}')
+    if expected_inputs is not None and edge.get('optional_inputs') != {}:
+        raise SystemExit(f'policy fixer optional-input contract mismatch: {edge_id}')
+    expected_posture = fixer_route_posture.get(edge_id)
+    if expected_posture is not None:
+        actual_posture = (
+            edge.get('phase'), edge.get('workspace_mode'), edge.get('risk_scope'),
+            edge.get('required'), edge.get('cardinality'),
+        )
+        if actual_posture != expected_posture or type(edge.get('required')) is not bool:
+            raise SystemExit(f'policy fixer route posture mismatch: {edge_id}')
     edges[edge_id] = edge
 
 contract_ids = {
@@ -270,8 +554,10 @@ PY
 # --- 4. Project the copied canonical policy, then rewrite every copied file.
 # JSON policy files contain no uberdev token, so perl is a byte-preserving
 # no-op on them; every copied file is text. ---
+require_managed_destination "plugins/prkit/policy/solve-run-tree-v1.json" required-file
 project_review_policy "$P/policy/solve-run-tree-v1.json" "$P/agents" "" ".md" \
   || { echo "generate: Claude policy projection failed" >&2; exit 1; }
+require_managed_destination "plugins/prkit/policy/solve-run-tree-v1.json" required-file
 rw_rc=0
 while IFS= read -r -d '' f; do
   prkit_neutralize "$f" || { echo "generate: neutralize failed: $f" >&2; rw_rc=1; }
@@ -279,23 +565,22 @@ while IFS= read -r -d '' f; do
 done < <(find "$P" -type f -print0)
 [ "$rw_rc" -eq 0 ] || { echo "generate: rewrite pass had failures" >&2; exit 1; }
 
-mkdir -p "$P/.claude-plugin" "$TARGET/.claude-plugin" "$TARGET/.github/workflows"
-render "$TEMPLATES/plugin.json.tmpl"       "$P/.claude-plugin/plugin.json"
-render "$TEMPLATES/marketplace.json.tmpl"  "$TARGET/.claude-plugin/marketplace.json"
-render "$TEMPLATES/README.md.tmpl"         "$TARGET/README.md"
-render "$TEMPLATES/LICENSE.tmpl"           "$TARGET/LICENSE"
-render "$TEMPLATES/NOTICE.tmpl"            "$TARGET/NOTICE"
-render "$TEMPLATES/CHANGELOG.md.tmpl"      "$TARGET/CHANGELOG.md"
-render "$TEMPLATES/gitignore.tmpl"        "$TARGET/.gitignore"
-render "$TEMPLATES/ci.yml.tmpl"           "$TARGET/.github/workflows/ci.yml"
+render "$TEMPLATES/plugin.json.tmpl"       "$P/.claude-plugin/plugin.json" "plugins/prkit/.claude-plugin/plugin.json"
+render_managed "$TEMPLATES/marketplace.json.tmpl" "$TARGET/.claude-plugin/marketplace.json" ".claude-plugin/marketplace.json"
+render_managed "$TEMPLATES/README.md.tmpl"        "$TARGET/README.md"                       "README.md"
+render_managed "$TEMPLATES/LICENSE.tmpl"          "$TARGET/LICENSE"                         "LICENSE"
+render_managed "$TEMPLATES/NOTICE.tmpl"           "$TARGET/NOTICE"                          "NOTICE"
+render_managed "$TEMPLATES/CHANGELOG.md.tmpl"      "$TARGET/CHANGELOG.md"                    "CHANGELOG.md"
+render_managed "$TEMPLATES/gitignore.tmpl"        "$TARGET/.gitignore"                      ".gitignore"
+render_managed "$TEMPLATES/ci.yml.tmpl"           "$TARGET/.github/workflows/ci.yml"         ".github/workflows/ci.yml"
 
-# --- 5b. Codex port (present only when the codex/ SSOT + its manifest exist) ---
-MANIFEST_CODEX="$HERE/manifest-codex.txt"
+# --- 5b. Codex port (mandatory inputs were validated before target mutation) ---
 cx_copied=0; cx_scaffolded=0
-if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
   # The prkit repo's entire codex/ tree is generated — clean it for an idempotent
   # regenerate (no stale files if the manifest shrinks).
-  rm -rf "$TARGET/codex"
+  guard_managed_paths "codex"
+  require_managed_destination "codex" optional-sealed-tree
+  rm -rf "$TARGET/codex" || fail_generation "cannot remove generated Codex tree"
   # Copy each codex source to a dest path with uberdev->prkit applied
   # (codex/uberdev-codex -> codex/prkit-codex, uberdev-cmd- -> prkit-cmd-,
   #  codex/agents/uberdev-<a>.toml -> codex/agents/prkit-<a>.toml).
@@ -312,14 +597,16 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
               -e 's#/skills/post-impl-review/#/skills/prkit-post-impl-review/#' \
               -e 's#/skills/merge-pipeline/#/skills/prkit-merge-pipeline/#')"
     dst="$TARGET/$drel"
-    mkdir -p "$(dirname "$dst")"
-    cp "$REPO_ROOT/$rel" "$dst" || { echo "generate: codex copy failed (source missing?): $rel" >&2; exit 1; }
+    copy_managed_file "$REPO_ROOT/$rel" "$dst" "$drel"
     cx_copied=$((cx_copied+1))
   done < "$MANIFEST_CODEX"
   [ "$cx_copied" -eq "$cx_expected" ] || { echo "generate: codex copied $cx_copied of $cx_expected files" >&2; exit 1; }
+  require_managed_destination "codex" required-tree
+  require_managed_destination "codex/prkit-codex/policy/solve-run-tree-v1.json" required-file
   project_review_policy "$TARGET/codex/prkit-codex/policy/solve-run-tree-v1.json" \
     "$TARGET/codex/agents" "prkit-" ".toml" \
     || { echo "generate: Codex policy projection failed" >&2; exit 1; }
+  require_managed_destination "codex/prkit-codex/policy/solve-run-tree-v1.json" required-file
   # Rewrite content of every copied codex file (neutralize out-of-set, then blanket).
   while IFS= read -r -d '' f; do
     prkit_neutralize "$f" || { echo "generate: codex neutralize failed: $f" >&2; rw_rc=1; }
@@ -342,6 +629,7 @@ if [ -r "$MANIFEST_CODEX" ] && [ -d "$REPO_ROOT/codex" ]; then
   # a deliberately smaller manifest (5 skills / 14 agents); rewrite those
   # user-facing counts here so generated installation guidance cannot claim a
   # fleet that prkit does not ship.
+  require_managed_destination "codex/install-codex.sh" required-file
   python3 -I -B - "$TARGET" <<'PY' || {
 import os,pathlib,stat,sys,tempfile
 root=pathlib.Path(sys.argv[1])
@@ -380,24 +668,38 @@ PY
     echo "generate: codex installer count rewrite failed" >&2
     exit 1
   }
+  require_managed_destination "codex/install-codex.sh" required-file
   # Scaffold codex-specific files from prkit-correct templates (authored, not
   # rewritten — so they don't inherit UberDev's stale counts). AFTER the rewrite
   # loop so they stay pristine.
-  mkdir -p "$TARGET/codex/prkit-codex/.codex-plugin"
-  render "$TEMPLATES/codex-plugin.json.tmpl" "$TARGET/codex/prkit-codex/.codex-plugin/plugin.json"
-  render "$TEMPLATES/codex-README.md.tmpl"   "$TARGET/codex/README.md"
-  render "$TEMPLATES/codex-AGENTS.md.tmpl"    "$TARGET/codex/AGENTS.md"
-  cx_scaffolded=3
+  render "$TEMPLATES/codex-plugin.json.tmpl" "$TARGET/codex/prkit-codex/.codex-plugin/plugin.json" \
+    "codex/prkit-codex/.codex-plugin/plugin.json"
+  render "$TEMPLATES/codex-README.md.tmpl" "$TARGET/codex/README.md" "codex/README.md"
+  render "$TEMPLATES/codex-AGENTS.md.tmpl" "$TARGET/codex/AGENTS.md" "codex/AGENTS.md"
+  render_managed "$TEMPLATES/codex-marketplace.json.tmpl" \
+    "$TARGET/.agents/plugins/marketplace.json" ".agents/plugins/marketplace.json"
+  cx_scaffolded=4
   # Restore exec bits on the entry scripts (cp preserves mode, but be explicit).
-  [ -f "$TARGET/codex/install-codex.sh" ] && chmod +x "$TARGET/codex/install-codex.sh"
-  [ -f "$TARGET/codex/prkit-codex/hooks/session-start" ] && chmod +x "$TARGET/codex/prkit-codex/hooks/session-start"
-fi
+  require_managed_destination "codex/install-codex.sh" required-file
+  chmod +x "$TARGET/codex/install-codex.sh" \
+    || fail_generation "cannot mark Codex installer executable"
+  require_managed_destination "codex/install-codex.sh" required-file
+  [ -x "$TARGET/codex/install-codex.sh" ] \
+    || fail_generation "Codex installer executable postcondition failed"
+  require_managed_destination "codex/prkit-codex/hooks/session-start" required-file
+  chmod +x "$TARGET/codex/prkit-codex/hooks/session-start" \
+    || fail_generation "cannot mark Codex session-start hook executable"
+  require_managed_destination "codex/prkit-codex/hooks/session-start" required-file
+  [ -x "$TARGET/codex/prkit-codex/hooks/session-start" ] \
+    || fail_generation "Codex session-start executable postcondition failed"
 
 # --- 6. Verify (fail the whole run on any violation; covers both trees) ---
 if ! bash "$HERE/verify.sh" "$TARGET"; then
   echo "generate: VERIFY FAILED — output left in $TARGET for inspection" >&2
   exit 1
 fi
+require_managed_destination "plugins/prkit" sealed-tree
+require_managed_destination "codex" sealed-tree
 
 # --- 7. Summary ---
 echo "generate: OK — copied $copied claude + $cx_copied codex files, scaffolded $((8 + cx_scaffolded)), verified."

@@ -16,12 +16,132 @@ no(){ echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 echo "## prkit verify gate (RFC 0014 §5.6)"
 [ -r "$VERIFY" ] || { echo "  ABORT — verify.sh missing"; exit 99; }
 
-BASEP="$(mktemp -d)"; BASE="$BASEP/clean"; mkdir -p "$BASE"; git -C "$BASE" init -q
+BASEP="$(mktemp -d)"; BASE="$BASEP/clean"; BASE_EMPTY_TEMPLATE="$BASEP/empty-template"
+BASE_EMPTY_CONFIG="$BASEP/empty.gitconfig"
+mkdir -p "$BASE" "$BASE_EMPTY_TEMPLATE"
+: > "$BASE_EMPTY_CONFIG"
+git -C "$BASE" init -q --template="$BASE_EMPTY_TEMPLATE"
 trap 'rm -rf "$BASEP"' EXIT
 bash "$GEN" --target "$BASE" --version 0.1.0 >/dev/null 2>&1 || { echo "  ABORT — baseline generation failed"; exit 99; }
 
-# V1 — the clean generated tree passes
-if bash "$VERIFY" "$BASE" >/dev/null 2>&1; then ok "V1 clean generated tree passes"; else no "V1 clean generated tree rejected"; fi
+# V1 — the clean generated tree passes and reports the managed ignore contract
+V1_OUTPUT=""
+if V1_OUTPUT="$(bash "$VERIFY" "$BASE" 2>&1)" \
+   && printf '%s\n' "$V1_OUTPUT" | grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'; then
+  ok "V1 clean generated tree passes with the managed artifact-ignore contract"
+else
+  no "V1 clean generated tree rejected or artifact-ignore diagnostic missing"
+fi
+
+# V1b — verifier scratch metadata must not inherit user init templates. The
+# injected template ignores the root generation lock; target .gitignore must
+# remain the effective source for the managed artifact rule.
+V1B_INIT_TEMPLATE="$BASEP/init-template"
+V1B_GLOBAL_CONFIG="$BASEP/global.gitconfig"
+mkdir -p "$V1B_INIT_TEMPLATE/info"
+printf '.prkit-generate.lock\n' > "$V1B_INIT_TEMPLATE/info/exclude"
+git config --file "$V1B_GLOBAL_CONFIG" init.templateDir "$V1B_INIT_TEMPLATE"
+V1B_OUTPUT=""
+V1B_ARTIFACT_SOURCE="$(
+  GIT_CONFIG_GLOBAL="$V1B_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$BASE" -c core.excludesFile=/dev/null \
+      check-ignore -v --no-index -- .prkit/audit.jsonl 2>/dev/null
+)"
+if V1B_OUTPUT="$(
+     GIT_CONFIG_GLOBAL="$V1B_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
+       bash "$VERIFY" "$BASE" 2>&1
+   )" \
+   && printf '%s\n' "$V1B_OUTPUT" | grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+   && case "$V1B_ARTIFACT_SOURCE" in
+        .gitignore:*:.prkit/$'\t'.prkit/audit.jsonl) true ;;
+        *) false ;;
+      esac
+then
+  ok "V1b verifier ignores hostile init template and uses target .gitignore"
+else
+  no "V1b verifier inherited hostile init template or lost target .gitignore source"
+fi
+
+# V1c — a user-global excludes file is not verifier evidence. Even if it ignores
+# both probe paths, only the generated target's .gitignore may decide the contract.
+V1C_GLOBAL_EXCLUDES="$BASEP/global-excludes"
+V1C_GLOBAL_CONFIG="$BASEP/global-excludes.gitconfig"
+printf '.prkit*\n' > "$V1C_GLOBAL_EXCLUDES"
+git config --file "$V1C_GLOBAL_CONFIG" core.excludesFile "$V1C_GLOBAL_EXCLUDES"
+V1C_OUTPUT=""
+if V1C_OUTPUT="$(
+     GIT_CONFIG_GLOBAL="$V1C_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
+       bash "$VERIFY" "$BASE" 2>&1
+   )" \
+   && printf '%s\n' "$V1C_OUTPUT" | grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'
+then
+  ok "V1c verifier ignores hostile global excludes"
+else
+  no "V1c verifier inherited hostile global excludes"
+fi
+
+# V1d — command-scope Git configuration outranks system/global files. Both
+# transport forms are hostile here, including stale indexed variables beyond
+# GIT_CONFIG_COUNT; verifier-owned Git calls must neutralize all of them.
+V1D_COMMAND_EXCLUDES="$BASEP/command-excludes"
+V1D_COMMAND_TEMPLATE="$BASEP/command-template"
+mkdir -p "$V1D_COMMAND_TEMPLATE/info"
+printf '.prkit*\n' > "$V1D_COMMAND_EXCLUDES"
+printf '.prkit-generate.lock\n' > "$V1D_COMMAND_TEMPLATE/info/exclude"
+V1D_CONFIG_PARAMETERS="'core.excludesFile'='$V1D_COMMAND_EXCLUDES' 'init.templateDir'='$V1D_COMMAND_TEMPLATE'"
+V1D_OUTPUT=""
+if V1D_OUTPUT="$(
+     GIT_CONFIG_COUNT=2 \
+     GIT_CONFIG_KEY_0=core.excludesFile \
+     GIT_CONFIG_VALUE_0="$V1D_COMMAND_EXCLUDES" \
+     GIT_CONFIG_KEY_1=init.templateDir \
+     GIT_CONFIG_VALUE_1="$V1D_COMMAND_TEMPLATE" \
+     GIT_CONFIG_KEY_7=core.excludesFile \
+     GIT_CONFIG_VALUE_7="$V1D_COMMAND_EXCLUDES" \
+     GIT_CONFIG_PARAMETERS="$V1D_CONFIG_PARAMETERS" \
+       bash "$VERIFY" "$BASE" 2>&1
+   )" \
+   && printf '%s\n' "$V1D_OUTPUT" | grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'
+then
+  ok "V1d verifier ignores hostile command-scope Git configuration"
+else
+  no "V1d verifier inherited hostile command-scope Git configuration"
+fi
+
+# V1e — verify.sh supports a generated tree that has not been git init'd yet.
+V1E_NONGIT="$BASEP/non-git"
+cp -R "$BASE" "$V1E_NONGIT"
+rm -rf "$V1E_NONGIT/.git"
+if bash "$VERIFY" "$V1E_NONGIT" >/dev/null 2>&1; then
+  ok "V1e clean non-Git generated tree passes"
+else
+  no "V1e clean non-Git generated tree rejected"
+fi
+
+# V1f — Git treats CRLF rules as valid. Comments and blank lines are inert and
+# remain allowed around the canonical generated rules.
+V1F_CRLF="$BASEP/crlf"
+cp -R "$BASE" "$V1F_CRLF"
+python3 - "$V1F_CRLF/.gitignore" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+raw=p.read_bytes()
+p.write_bytes(
+    b"# generated rules\r\n"
+    b"   \r\n"
+    + raw.replace(b"\n",b"\r\n")
+)
+PY
+if bash "$VERIFY" "$V1F_CRLF" >/dev/null 2>&1; then
+  ok "V1f CRLF gitignore with comments and whitespace-only blanks passes"
+else
+  no "V1f CRLF gitignore with comments or whitespace-only blanks rejected"
+fi
 
 # expect_fail <desc> <mutate-cmd> : copy baseline, apply mutation on $d, assert verify FAILS
 expect_fail(){
@@ -29,6 +149,22 @@ expect_fail(){
   dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"
   eval "$mutate"
   if bash "$VERIFY" "$d" >/dev/null 2>&1; then no "$desc (verify wrongly PASSED)"; else ok "$desc"; fi
+  rm -rf "$dp"
+}
+
+# expect_fail_diag <desc> <mutate-cmd> <diagnostic> : as above, but also require
+# the verifier to identify the exact failed contract instead of failing elsewhere.
+expect_fail_diag(){
+  local desc="$1" mutate="$2" diagnostic="$3" dp d output
+  dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"
+  eval "$mutate"
+  if output="$(bash "$VERIFY" "$d" 2>&1)"; then
+    no "$desc (verify wrongly PASSED)"
+  elif ! printf '%s\n' "$output" | grep -qF "$diagnostic"; then
+    no "$desc (expected diagnostic missing)"
+  else
+    ok "$desc"
+  fi
   rm -rf "$dp"
 }
 
@@ -42,8 +178,95 @@ expect_fail "V5 residual prkit:goal fails"                  'printf "chain to /p
 expect_fail "V6 dangling out-of-set prkit:brainstorm fails" 'printf "see prkit:brainstorm for ideation\n" >> "$d/plugins/prkit/commands/review-pr.md"'
 expect_fail "V7 unrendered {{VERSION}} placeholder fails"   'printf "version {{VERSION}} here\n" >> "$d/README.md"'
 expect_fail "V8 empty marketplace.json fails"               ': > "$d/.claude-plugin/marketplace.json"'
+expect_fail "V8b missing native Codex marketplace fails"     'rm -f "$d/.agents/plugins/marketplace.json"'
+expect_fail "V8c empty native Codex marketplace fails"       'mkdir -p "$d/.agents/plugins"; : > "$d/.agents/plugins/marketplace.json"'
+expect_fail "V8d wrong native marketplace name fails"        'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["name"]="wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8e wrong native plugin name fails"             'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["name"]="wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8f wrong native plugin source fails"           'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["source"]["path"]="./wrong"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8g wrong native plugin availability fails"     'python3 - "$d/.agents/plugins/marketplace.json" <<'"'"'PY'"'"'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); tree=json.loads(p.read_text()); tree["plugins"][0]["policy"]["installation"]="UNAVAILABLE"; p.write_text(json.dumps(tree))
+PY'
+expect_fail "V8h changed README marketplace selector fails"   'python3 - "$d/codex/README.md" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace("codex plugin add prkit-codex@prkit","codex plugin add prkit-codex@wrong"))
+PY'
+expect_fail "V8i duplicated README marketplace selector fails" 'printf "\ncodex plugin add prkit-codex@prkit\n" >> "$d/codex/README.md"'
+expect_fail "V8j suffixed README marketplace selector fails"  'python3 - "$d/codex/README.md" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace("codex plugin add prkit-codex@prkit","codex plugin add prkit-codex@prkit-evil"))
+PY'
+expect_fail "V8k root scaffold directory fails"               'rm -f "$d/README.md"; mkdir "$d/README.md"; printf "sentinel\n" > "$d/README.md/sentinel.txt"'
+expect_fail "V8l root scaffold symlink fails"                 'rm -f "$d/NOTICE"; ln -s "$d/LICENSE" "$d/NOTICE"'
+expect_fail "V8m root scaffold ancestor symlink fails"        'mkdir -p "$dp/outside-agents/plugins"; cp "$d/.agents/plugins/marketplace.json" "$dp/outside-agents/plugins/marketplace.json"; rm -rf "$d/.agents"; ln -s "$dp/outside-agents" "$d/.agents"'
+expect_fail "V8n generated-tree ancestor symlink fails"       'mv "$d/plugins" "$dp/outside-plugins"; ln -s "$dp/outside-plugins" "$d/plugins"'
+expect_fail "V8o nested generated-tree symlink fails"         'printf "outside\n" > "$dp/outside-file"; ln -s "$dp/outside-file" "$d/codex/nested-link"'
+expect_fail "V8p nested generated-tree special file fails"    'mkfifo "$d/codex/nested-pipe"'
+ARTIFACT_IGNORE_DIAGNOSTIC='artifact-ignore: .gitignore must contain an effective .prkit/ rule and leave .prkit-generate.lock unignored'
+expect_fail_diag "V8q altered .prkit/** rule fails" 'python3 - "$d/.gitignore" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace(".prkit/\n", ".prkit/**\n"))
+PY' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+expect_fail_diag "V8r broad .prkit* rule cannot hide generation lock" 'python3 - "$d/.gitignore" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace(".prkit/\n", ".prkit*\n"))
+PY' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+expect_fail_diag "V8s additive overbroad rules cannot bypass canonical rule" 'python3 - "$d/.gitignore" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace(".prkit/\n", ".prkit*\n!.prkit-generate.lock\n.prkit/\n"))
+PY' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+expect_fail_diag "V8t missing canonical .prkit/ rule fails" 'python3 - "$d/.gitignore" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace(".prkit/\n", ""))
+PY' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+expect_fail_diag "V8u duplicate canonical .prkit/ rule fails" 'printf ".prkit/\n" >> "$d/.gitignore"' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+expect_fail_diag "V8v leading-space pseudo-comment remains an active rule" 'printf " #not-a-comment\n" >> "$d/.gitignore"' "$ARTIFACT_IGNORE_DIAGNOSTIC"
+
+# Git ignores an ASCII-space-only line, but a tab remains a literal pattern
+# byte. Prove the fixture through Git itself before requiring verifier rejection.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"
+V8W_TAB_PATTERN=$'\t \t'
+printf '%s\n' "$V8W_TAB_PATTERN" >> "$d/.gitignore"
+if (
+     unset GIT_CONFIG_PARAMETERS
+     GIT_CONFIG_COUNT=0 \
+     GIT_CONFIG_NOSYSTEM=1 \
+     GIT_CONFIG_GLOBAL="$BASE_EMPTY_CONFIG" \
+       git -C "$d" -c core.excludesFile=/dev/null \
+         check-ignore -q --no-index -- "$V8W_TAB_PATTERN"
+   ) \
+   && ! V8W_OUTPUT="$(bash "$VERIFY" "$d" 2>&1)" \
+   && printf '%s\n' "$V8W_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+  ok "V8w Git-active tab rule is rejected"
+else
+  no "V8w tab rule semantics or verifier rejection regressed"
+fi
+rm -rf "$dp"
+
 expect_fail "V9 removed all agents (non-vacuity/ref-int) fails" 'rm -rf "$d/plugins/prkit/agents"'
 expect_fail "V10 removed Claude reviewer contract fails" 'rm -f "$d/plugins/prkit/shared/phase1-reviewer-output-v1.md"'
+expect_fail "V10b removed Claude authority helper fails" 'rm -f "$d/plugins/prkit/lib/code_fixer_contract.py"'
+expect_fail "V10c removed Codex authority helper fails" 'rm -f "$d/codex/prkit-codex/lib/code_fixer_contract.py"'
+expect_fail "V10d cross-runtime authority helper byte divergence fails" 'printf "\n# syntax-valid divergence\n" >> "$d/codex/prkit-codex/lib/code_fixer_contract.py"'
 expect_fail "V11 removed Codex solve run tree fails" 'rm -f "$d/codex/prkit-codex/policy/solve-run-tree-v1.json"'
 expect_fail "V12 native reviewer injected edge schema fails" 'python3 - "$d/codex/agents/prkit-code-reviewer.toml" "$d/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" <<'PY'
 from pathlib import Path
@@ -103,7 +326,7 @@ expect_fail "V23 paired runtime workflow swap fails" 'python3 - "$d/plugins/prki
 import json,sys
 from pathlib import Path
 for name in sys.argv[1:]:
- p=Path(name); tree=json.loads(p.read_text()); left=tree["edges"]["review_pr.fix.phase1"]; right=tree["edges"]["review_pr.fix.phase2"]; left["allowed_workflows"],right["allowed_workflows"]=right["allowed_workflows"],left["allowed_workflows"]; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+ p=Path(name); tree=json.loads(p.read_text()); left=tree["edges"]["review_pr.fix.phase2"]; right=tree["edges"]["simplify.fix.phase2"]; left["allowed_workflows"],right["allowed_workflows"]=right["allowed_workflows"],left["allowed_workflows"]; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
 expect_fail "V24 paired runtime unexpected edge contract fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
 import json,sys
@@ -111,6 +334,213 @@ from pathlib import Path
 for name in sys.argv[1:]:
  p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["review_pr.fix.phase1"]["output_contract"]="phase1-reviewer-v1"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
 PY'
+expect_fail "V24b paired runtime fixer optional-input drift fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+for name in sys.argv[1:]:
+ p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["simplify.fix.phase2"]["optional_inputs"]={"unexpected":"string"}; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+PY'
+expect_fail "V24c paired runtime fixer route-posture drift fails" 'python3 - "$d/plugins/prkit/policy/solve-run-tree-v1.json" "$d/codex/prkit-codex/policy/solve-run-tree-v1.json" <<'PY'
+import json,sys
+from pathlib import Path
+for name in sys.argv[1:]:
+ p=Path(name); tree=json.loads(p.read_text()); tree["edges"]["simplify.fix.phase2"]["phase"]="review_fix"; p.write_text(json.dumps(tree,sort_keys=True,indent=2)+"\n")
+PY'
+
+# V25 — a placeholder scan error is unavailable evidence, never proof that the
+# generated output is clean. The wrapper passes every earlier grep through and
+# fails only the final placeholder-pattern invocation.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/grep" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *A-Z0-9_*) exit 2 ;;
+esac
+exec "$PRKIT_REAL_GREP" "$@"
+SH
+chmod +x "$dp/bin/grep"
+real_grep="$(command -v grep)"
+V25_OUTPUT=""
+if V25_OUTPUT="$(PATH="$dp/bin:$PATH" PRKIT_REAL_GREP="$real_grep" \
+     bash "$VERIFY" "$d" 2>&1)"; then
+  no "V25 placeholder scan error fails closed (verify wrongly PASSED)"
+elif ! printf '%s\n' "$V25_OUTPUT" | grep -qF 'placeholders: scan errored'; then
+  no "V25 placeholder scan error fails closed (expected diagnostic missing)"
+else
+  ok "V25 placeholder scan error fails closed"
+fi
+rm -rf "$dp"
+
+# V26 — Git execution errors are infrastructure failures, not evidence that the
+# generated target's managed rule is invalid. Preserve the exact failing rc.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" check-ignore "*) exit 73 ;;
+esac
+exec "$PRKIT_REAL_GIT" "$@"
+SH
+chmod +x "$dp/bin/git"
+real_git="$(command -v git)"
+V26_OUTPUT=""
+if V26_OUTPUT="$(PATH="$dp/bin:$PATH" PRKIT_REAL_GIT="$real_git" \
+     bash "$VERIFY" "$d" 2>&1)"; then
+  no "V26 Git check-ignore error fails closed (verify wrongly PASSED)"
+elif ! printf '%s\n' "$V26_OUTPUT" | grep -qF \
+  'artifact-ignore: infrastructure error: git check-ignore for .prkit/audit.jsonl failed (rc=73)'; then
+  no "V26 Git check-ignore error fails closed (exact infrastructure diagnostic missing)"
+elif printf '%s\n' "$V26_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+  no "V26 Git check-ignore error was misclassified as invalid target rule"
+else
+  ok "V26 Git check-ignore error preserves rc and infrastructure classification"
+fi
+rm -rf "$dp"
+
+# V27 — a forged verbose match from an outside .gitignore must never satisfy the
+# managed-source proof. The wrapper supports both the legacy text form (to prove
+# the regression goes RED) and the NUL-delimited stdin form required by the fix.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" check-ignore -v "*)
+    case " $* " in
+      *" -z "*)
+        printf '%s\0%s\0%s\0%s\0' \
+          "$PRKIT_WRONG_SOURCE" 6 '.prkit/' '.prkit/audit.jsonl'
+        ;;
+      *)
+        printf '%s:%s:%s\t%s\n' \
+          "$PRKIT_WRONG_SOURCE" 6 '.prkit/' '.prkit/audit.jsonl'
+        ;;
+    esac
+    exit 0
+    ;;
+  *" check-ignore "*) exit 1 ;;
+esac
+exec "$PRKIT_REAL_GIT" "$@"
+SH
+chmod +x "$dp/bin/git"
+real_git="$(command -v git)"
+V27_OUTPUT=""
+if V27_OUTPUT="$(
+     PATH="$dp/bin:$PATH" \
+     PRKIT_REAL_GIT="$real_git" \
+     PRKIT_WRONG_SOURCE="$dp/outside/.gitignore" \
+       bash "$VERIFY" "$d" 2>&1
+   )"; then
+  no "V27 forged outside .gitignore source fails (verify wrongly PASSED)"
+elif ! printf '%s\n' "$V27_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+  no "V27 forged outside .gitignore source fails (expected diagnostic missing)"
+else
+  ok "V27 forged outside .gitignore source cannot satisfy managed-source proof"
+fi
+rm -rf "$dp"
+
+# V28 — POSIX source identity is case-sensitive even when forged paths resemble
+# MSYS drive spelling. Caller-controlled OS/MSYSTEM variables cannot opt in to
+# Windows normalization. The python wrapper changes only the modeled expected
+# argument so this can be tested without creating root-level /a and /A fixtures.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" check-ignore -v "*)
+    printf '%s\0%s\0%s\0%s\0' \
+      "$PRKIT_FORGED_SOURCE" 6 '.prkit/' '.prkit/audit.jsonl'
+    exit 0
+    ;;
+  *" check-ignore "*) exit 1 ;;
+esac
+exec "$PRKIT_REAL_GIT" "$@"
+SH
+cat > "$dp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-I" ] && [ "${2:-}" = "-B" ] && [ "${3:-}" = "-" ]; then
+  case "${4:-}" in
+    */check-ignore.output)
+      exec "$PRKIT_REAL_PYTHON" -I -B - "$4" "$PRKIT_MODELED_EXPECTED"
+      ;;
+  esac
+fi
+exec "$PRKIT_REAL_PYTHON" "$@"
+SH
+chmod +x "$dp/bin/git" "$dp/bin/python3"
+real_git="$(command -v git)"
+real_python="$(command -v python3)"
+V28_OUTPUT=""
+if V28_OUTPUT="$(
+     PATH="$dp/bin:$PATH" \
+     PRKIT_REAL_GIT="$real_git" \
+     PRKIT_REAL_PYTHON="$real_python" \
+     PRKIT_FORGED_SOURCE="/A/project/.gitignore" \
+     PRKIT_MODELED_EXPECTED="/a/project/.gitignore" \
+     OS=Windows_NT \
+     MSYSTEM=MINGW64 \
+       bash "$VERIFY" "$d" 2>&1
+   )"; then
+  no "V28 POSIX wrong-case source fails (verify wrongly PASSED)"
+elif ! printf '%s\n' "$V28_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+  no "V28 POSIX wrong-case source fails (expected diagnostic missing)"
+else
+  ok "V28 POSIX source identity stays case-sensitive despite caller environment"
+fi
+rm -rf "$dp"
+
+# V29 — retain the modeled MSYS/Windows equivalence intentionally: only a
+# runtime platform probe, simulated inside the parser process, enables it.
+dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"; mkdir "$dp/bin"
+cat > "$dp/bin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" check-ignore -v "*)
+    printf '%s\0%s\0%s\0%s\0' \
+      "$PRKIT_FORGED_SOURCE" 6 '.prkit/' '.prkit/audit.jsonl'
+    exit 0
+    ;;
+  *" check-ignore "*) exit 1 ;;
+esac
+exec "$PRKIT_REAL_GIT" "$@"
+SH
+cat > "$dp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-I" ] && [ "${2:-}" = "-B" ] && [ "${3:-}" = "-" ]; then
+  case "${4:-}" in
+    */check-ignore.output)
+      {
+        printf '%s\n' \
+          'import platform as _prkit_platform' \
+          '_prkit_platform.system = lambda: "MSYS_NT-10.0"'
+        cat
+      } > "$PRKIT_MODELED_SCRIPT"
+      exec "$PRKIT_REAL_PYTHON" -I -B "$PRKIT_MODELED_SCRIPT" \
+        "$4" "$PRKIT_MODELED_EXPECTED"
+      ;;
+  esac
+fi
+exec "$PRKIT_REAL_PYTHON" "$@"
+SH
+chmod +x "$dp/bin/git" "$dp/bin/python3"
+real_git="$(command -v git)"
+real_python="$(command -v python3)"
+V29_OUTPUT=""
+if V29_OUTPUT="$(
+     PATH="$dp/bin:$PATH" \
+     PRKIT_REAL_GIT="$real_git" \
+     PRKIT_REAL_PYTHON="$real_python" \
+     PRKIT_FORGED_SOURCE="/C/project/.gitignore" \
+     PRKIT_MODELED_EXPECTED='c:\project\.gitignore' \
+     PRKIT_MODELED_SCRIPT="$dp/modeled-parser.py" \
+       bash "$VERIFY" "$d" 2>&1
+   )" \
+   && printf '%s\n' "$V29_OUTPUT" | grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'; then
+  ok "V29 modeled MSYS runtime accepts equivalent drive spelling"
+else
+  no "V29 modeled MSYS runtime rejected equivalent drive spelling"
+fi
+rm -rf "$dp"
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

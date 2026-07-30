@@ -171,15 +171,26 @@ BLOCKS_LINE_REGEX='^Blocks: #([0-9]+)$'
 # SECURITY: do NOT change to ':=' — see Q2 advisory above
 FINDING_FINGERPRINT_REGEX='<!-- uberdev:review-pr-finding fingerprint=([a-f0-9]{16}) -->'
 
-# Source discover.sh opportunistically for its stderr-isolation helpers;
-# tolerated absent (the goal-state.sh functions below do not hard-require
-# any discover.sh symbol).
-# #270: default ${BASH_SOURCE[0]:-} — under zsh (which runs the goal-pipeline
-# SKILL.md bash fences that source this lib) BASH_SOURCE is unset when a caller
-# has `set -u`/NO_UNSET active, and the bare reference would abort the source
-# with `BASH_SOURCE[0]: parameter not set`. The `:-` default keeps the source
-# robust regardless of the caller's nounset state in BOTH shells.
-_UBERDEV_GOAL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+# Source the canonical merge verdict selector. Most goal-state helpers do not
+# need it, so a packaging omission is tolerated at source time; the verdict
+# locator itself maps that omission to the existing missing/re-review path.
+# Resolve the sourced file itself, never the caller's cwd: bash publishes
+# BASH_SOURCE while zsh publishes the equivalent source identity through %x.
+_uberdev_goal_source_path() {
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    printf '%s' "${BASH_SOURCE[0]}"
+  elif [ -n "${ZSH_VERSION:-}" ]; then
+    printf '%s' "${(%):-%x}"
+  else
+    return 1
+  fi
+}
+_UBERDEV_GOAL_FILE="$(_uberdev_goal_source_path)" || return 1
+case "$_UBERDEV_GOAL_FILE" in
+  */*) _UBERDEV_GOAL_LIB_DIR="${_UBERDEV_GOAL_FILE%/*}" ;;
+  *) _UBERDEV_GOAL_LIB_DIR='.' ;;
+esac
+_UBERDEV_GOAL_LIB_DIR="$(cd "$_UBERDEV_GOAL_LIB_DIR" 2>/dev/null && pwd -P)" || return 1
 if [ -z "${_UBERDEV_MERGE_DISCOVER_LOADED:-}" ] && \
    [ -f "$_UBERDEV_GOAL_LIB_DIR/../skills/merge-pipeline/lib/discover.sh" ]; then
   # shellcheck source=/dev/null
@@ -719,6 +730,79 @@ uberdev_goal_issue_state_transition() {
 # fixtures that never set a PR).
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
+  # Canonical locator output is closed controller state, not a pathname. Its
+  # private carrier was already digest/identity-recaptured and cleaned.
+  if [ "${audit_path#\{}" != "$audit_path" ]; then
+    local closed_fields verdict_pr verdict_sha closed_state
+    local blocker critical halted
+    if ! closed_fields="$(jq -er '
+      if type != "object"
+         or .schema_version != 1
+         or .kind != "uberdev-goal-review-verdict"
+         or ((.pr | type) != "number")
+         or (.pr < 1)
+         or ((.pr | floor) != .pr)
+         or ((.sha | type) != "string")
+         or ((.sha | test("^[0-9a-f]{40}$")) | not)
+         or (.audit_state != "legacy" and .audit_state != "current")
+         or ((.phase2_5_halted | type) != "boolean")
+         or ((.phase2_5_blocker_count | type) != "number")
+         or (.phase2_5_blocker_count < 0)
+         or ((.phase2_5_blocker_count | floor) != .phase2_5_blocker_count)
+         or ((.phase2_5_critical_count | type) != "number")
+         or (.phase2_5_critical_count < 0)
+         or ((.phase2_5_critical_count | floor) != .phase2_5_critical_count)
+      then error("closed goal verdict shape")
+      else [
+        (.pr | tostring),
+        .sha,
+        .audit_state,
+        (.phase2_5_halted | tostring),
+        (.phase2_5_blocker_count | tostring),
+        (.phase2_5_critical_count | tostring)
+      ] | @tsv
+      end
+    ' <<<"$audit_path" 2>/dev/null)"; then
+      printf 'missing\n'
+      return 0
+    fi
+    IFS="$(printf '\t')" read -r \
+      verdict_pr verdict_sha closed_state halted blocker critical <<<"$closed_fields"
+
+    local head_oid head_rc
+    head_oid="$(gh pr view "$verdict_pr" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
+    head_rc=$?
+    if [ "$head_rc" -ne 0 ] || [ -z "$head_oid" ]; then
+      # An unreadable HEAD means the verdict CANNOT be bound to the live commit,
+      # so its colour is unproven — not good. Falling through to the colour
+      # decision here would let a rate-limited or offline `gh` turn a verdict
+      # earned on an older SHA into a green light for whatever has been pushed
+      # since, and /goal auto-merges on green. Report stale: it never authorises
+      # a merge, and the existing consumers already handle it by re-reviewing.
+      # Re-review churn on a transient gh outage is the correct trade against
+      # merging unreviewed commits.
+      printf 'goal-state: gh pr view %s headRefOid unreadable (rc=%s); cannot bind verdict to HEAD, reporting stale\n' \
+        "$verdict_pr" "$head_rc" >&2
+      printf 'stale\n'
+      return 0
+    elif [ "$head_oid" != "$verdict_sha" ]; then
+      printf 'goal-state: trust verdict for PR %s is bound to %s but HEAD is %s; treating as stale (re-review needed)\n' \
+        "$verdict_pr" "$verdict_sha" "$head_oid" >&2
+      printf 'stale\n'
+      return 0
+    fi
+
+    [ "$closed_state" = "current" ] || { printf 'stale\n'; return 0; }
+    if [ "$halted" = "true" ] || [ "$blocker" -gt 0 ]; then
+      printf 'red\n'
+    elif [ "$critical" -gt 0 ]; then
+      printf 'yellow\n'
+    else
+      printf 'green\n'
+    fi
+    return 0
+  fi
+
   [ -f "$audit_path" ] || { printf 'missing\n'; return 0; }
   # #290.1 — bind the verdict to the live PR HEAD before trusting its colour.
   # Both reads come from the same verdict file (no extra disk I/O beyond two
@@ -837,21 +921,12 @@ uberdev_goal_should_automerge() {
 
 # uberdev_goal_locate_review_pr_audit ISSUE_NUM
 # Locate newest .uberdev/runs/<run-id>/review-pr-verdict.json (canonical) or
-# worktree-mirror equivalent for the issue's PR. Mirrors merge-pipeline/SKILL.md
-# Phase 1.4 PATH_2 sub-condition (c.0): four glob patterns total — the
-# canonical `.uberdev/runs/*` path plus three additional worktree-mirror
-# layouts (/solve and /turbo write `.claude/worktrees/*/.uberdev/` per
-# solve-pipeline/SKILL.md; using-git-worktrees emits hidden `.worktrees/*`
-# and visible `worktrees/*` layouts). Filters by top-level `.pr == $pr_num`,
-# validates each `<run-id>` against RUN_ID_REGEX before any path concatenation
-# (D4/F8 path-traversal hardening — basename-of-dirname projection is path-
-# layout-agnostic because prefix segments are never concatenated from untrusted
-# input), and picks the lex-greatest `<run-id>` (chronologically newest;
-# `YYYYMMDD-HHMMSS-<short-sha>` lex-sorts identically). Returns empty string
-# when no match. The legacy `.claude/audit/review-pr-<PR>-<run>.json` path is
-# never written by /review-pr — reading it (the pre-B1 behavior) silently
-# returned "missing" forever, blocking the goal-pipeline from ever picking up
-# the trust signal.
+# worktree-mirror equivalent for the issue's PR. Selection, root binding,
+# timestamp ordering, ambiguity handling, and stable byte capture are delegated
+# to merge-pipeline/lib/discover.sh. On success the private carrier is
+# digest/identity-recaptured, reduced to stable controller state, and cleaned
+# before this function returns. Absent or indeterminate both return empty so
+# the existing caller classifies the signal as missing and re-runs /review-pr.
 uberdev_goal_locate_review_pr_audit() {
   local issue="$1"
   _uberdev_goal_validate_int "$issue" || return 1
@@ -859,8 +934,11 @@ uberdev_goal_locate_review_pr_audit() {
   # to the PR-keyed locator. The old solve-bg stdout `pushed PR #N` marker has
   # ZERO producers and `claude --bg` stdout is a detached banner on CLI 2.1.150,
   # so the only reliable issue->PR link is `closingIssuesReferences` / `feat/N-`
-  # head. The `.pr == $pr` filter + lex-greatest-run_id tiebreak lives in one
-  # place (see uberdev_goal_locate_review_pr_audit_by_pr).
+  # head. Candidate filtering and ranking live in ONE place — the canonical
+  # selector in merge-pipeline/lib/discover.sh, reached via
+  # uberdev_goal_locate_review_pr_audit_by_pr. Ranking is by the 15-byte
+  # YYYYMMDD-HHMMSS prefix, requiring byte-identical artifacts on a tie
+  # (RFC 0005 B12); the previous lex-greatest-run_id tiebreak is retired.
   local pr
   pr="$(uberdev_goal_find_pr_for_issue "$issue")"
   [ -n "$pr" ] || return 0
@@ -871,30 +949,65 @@ uberdev_goal_locate_review_pr_audit() {
 # uberdev_goal_locate_review_pr_audit_by_pr PR_NUM
 # PR-keyed companion to uberdev_goal_locate_review_pr_audit. Used by the
 # held-PR re-review poll loop (Phase 2 step 2e) which already has the PR
-# number in hand and bypasses the issue→PR resolution. Same glob set, same
-# filter (`.pr == $pr`), same lex-greatest run_id tiebreak (newest wins
-# because YYYYMMDD-HHMMSS-<sha> sorts identically to chronological order).
-# Returns the relative path to the audit JSON or empty when no match.
+# number in hand and bypasses issue→PR resolution. Returns a stable minified
+# controller-state JSON value (not a mutable pathname) or empty when the
+# canonical selector reports absent/indeterminate.
 uberdev_goal_locate_review_pr_audit_by_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  local candidate_file run_id pr_field
-  # R2 SSOT (issue #220 simplify pass): glob set read from
-  # _UBERDEV_GOAL_WORKTREE_PREFIXES. #270/#290.2 cross-shell: route the
-  # prefix-glob through _uberdev_goal_glob_worktree — the bare `${prefix}` glob
-  # silently matched no worktree mirror under the zsh Bash tool (a variable-
-  # derived `*` is not glob-expanded by zsh), so worktree-mirror verdict
-  # discovery never fired there. Empty prefix = main checkout; three worktree
-  # prefixes mirror the using-git-worktrees skill's documented layouts.
-  while IFS= read -r candidate_file; do
-    [ -r "$candidate_file" ] || continue
-    pr_field="$(jq -r '.pr // empty' "$candidate_file" 2>/dev/null)" || continue
-    [ "$pr_field" = "$pr" ] || continue
-    run_id="$(basename "$(dirname "$candidate_file")")"
-    [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || continue
-    printf '%s\t%s\n' "$run_id" "$candidate_file"
-  done < <(_uberdev_goal_glob_worktree ".uberdev/runs/*/review-pr-verdict.json") \
-    | sort -r | head -n 1 | cut -f2
+  if ! command -v discover_review_verdict_json >/dev/null 2>&1 \
+     || ! command -v review_verdict_discovery_state >/dev/null 2>&1 \
+     || ! command -v recapture_review_verdict_snapshot >/dev/null 2>&1 \
+     || ! command -v cleanup_review_verdict_snapshot >/dev/null 2>&1; then
+    printf 'goal-state: canonical verdict selector unavailable; treating audit as missing\n' >&2
+    return 0
+  fi
+
+  local receipt="" discovery_rc=2 discovery_state=indeterminate
+  if receipt="$(discover_review_verdict_json "$pr")"; then
+    discovery_rc=0
+  else
+    discovery_rc=$?
+  fi
+  discovery_state="$(review_verdict_discovery_state "$discovery_rc")"
+  case "$discovery_state" in
+    absent|indeterminate)
+      # Reuse the existing missing/re-review state-machine path.
+      return 0
+      ;;
+    found)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  local recaptured="" stable=""
+  if recaptured="$(recapture_review_verdict_snapshot "$receipt")" \
+     && [ "$recaptured" = "$receipt" ]; then
+    stable="$(jq -cer '
+      {
+        schema_version: 1,
+        kind: "uberdev-goal-review-verdict",
+        run_timestamp: .run_timestamp,
+        pr: .pr,
+        sha: .artifact_sha,
+        audit_state: .audit_state,
+        phase2_5_halted: .phase2_5_halted,
+        phase2_5_blocker_count: .phase2_5_blocker_count,
+        phase2_5_critical_count: .phase2_5_critical_count,
+        phase2_5_halted_due_to_overflow: .phase2_5_halted_due_to_overflow
+      }
+    ' <<<"$recaptured" 2>/dev/null)" || stable=""
+  fi
+
+  # The canonical selector's stable carrier is private and caller-owned.
+  # Failure to prove/clean its exact digest+identity reuses missing/re-review.
+  if ! cleanup_review_verdict_snapshot "$receipt" >/dev/null 2>&1; then
+    return 0
+  fi
+  [ -n "$stable" ] || return 0
+  printf '%s\n' "$stable"
 }
 
 # uberdev_goal_get_pr_state GOAL_ID PR

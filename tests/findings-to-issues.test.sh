@@ -635,6 +635,27 @@ assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by sev
 assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
   'never re-read|already validated in-memory bytes' \
   'S18.5 — validated aggregate/disposition bytes are not re-read mutably'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'schema_version.*2|schema v2' \
+  'S18.6 — review Phase 1/2 aggregates use schema v2'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'contributors.*findings.*phase.*schema_version' \
+  'S18.7 — v2 top-level key set is exact'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'detail.*scope.*severity.*source_edges.*summary' \
+  'S18.8 — v2 finding key set is exact'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'scope\.path.*sole|only.*scope\.path|authority.*scope\.path' \
+  'S18.9 — issue location authority comes only from structured scope.path'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'summary.*detail.*context-only|context-only.*summary.*detail' \
+  'S18.10 — summary/detail are context-only and never path authority'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'findings.*\[\].*DONE|zero findings.*DONE|empty findings.*DONE' \
+  'S18.11 — valid v2 empty findings returns DONE'
+assert_in_section "$AGENT_MD" '^3\. \*\*Parse aggregates' '^4\. \*\*Route by severity' \
+  'no GitHub writes|zero GitHub writes|before.*rate-limit.*label' \
+  'S18.12 — valid v2 empty findings short-circuits before GitHub writes'
 
 echo
 echo "### Suite 19: legacy fleet callers select explicit variants"

@@ -8,22 +8,66 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
       # NOTE: `find ... -exec cmd \;` returns 0 even when cmd fails, so an explicit
-      # `|| exit 1` is required for these to actually gate. codex/ is optional
-      # (only present when the Codex port is generated), hence the guarded root.
+      # `|| exit 1` is required for these to actually gate. Both generated runtime
+      # roots and their marketplace descriptors are mandatory release surfaces.
+      - name: Required generated surfaces
+        run: |
+          test -d plugins/prkit && test -d codex || exit 1
+          test -s .claude-plugin/marketplace.json || exit 1
+          test -s .agents/plugins/marketplace.json || exit 1
+          claude_manifest="$(mktemp)" || exit 1
+          codex_manifest="$(mktemp)" || exit 1
+          trap 'rm -f "$claude_manifest" "$codex_manifest"' EXIT
+          find plugins/prkit -type f -print0 > "$claude_manifest" || exit 1
+          find codex -type f -print0 > "$codex_manifest" || exit 1
+          test -s "$claude_manifest" && test -s "$codex_manifest" || exit 1
       - name: Syntax — shell
-        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.sh'); do bash -n "$f" || exit 1; done
+        run: |
+          manifest="$(mktemp)" || exit 1
+          trap 'rm -f "$manifest"' EXIT
+          find plugins/prkit codex -type f -name '*.sh' -print0 > "$manifest" || exit 1
+          test -s "$manifest" || exit 1
+          while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done < "$manifest"
       - name: Syntax — python
-        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.py'); do python3 -c 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read(), sys.argv[1])' "$f" || exit 1; done
+        run: |
+          manifest="$(mktemp)" || exit 1
+          trap 'rm -f "$manifest"' EXIT
+          find plugins/prkit codex -type f -name '*.py' -print0 > "$manifest" || exit 1
+          test -s "$manifest" || exit 1
+          while IFS= read -r -d '' f; do
+            python3 -c 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read(), sys.argv[1])' "$f" || exit 1
+          done < "$manifest"
       - name: Syntax — json
-        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.json'); do jq empty "$f" || exit 1; done
+        run: |
+          manifest="$(mktemp)" || exit 1
+          trap 'rm -f "$manifest"' EXIT
+          find plugins/prkit codex -type f -name '*.json' -print0 > "$manifest" || exit 1
+          test -s "$manifest" || exit 1
+          printf '%s\0' .claude-plugin/marketplace.json .agents/plugins/marketplace.json >> "$manifest" || exit 1
+          while IFS= read -r -d '' f; do jq empty "$f" || exit 1; done < "$manifest"
       - name: Syntax — toml
-        run: for f in $(find plugins/prkit $([ -d codex ] && echo codex) -name '*.toml'); do python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$f" || exit 1; done
+        run: |
+          manifest="$(mktemp)" || exit 1
+          trap 'rm -f "$manifest"' EXIT
+          find plugins/prkit codex -type f -name '*.toml' -print0 > "$manifest" || exit 1
+          test -s "$manifest" || exit 1
+          while IFS= read -r -d '' f; do
+            python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$f" || exit 1
+          done < "$manifest"
       - name: Namespace guard — no uberdev token survives (root NOTICE/LICENSE are out of scope)
         run: |
-          hits=$(grep -rilE 'uberdev' plugins/prkit $([ -d codex ] && echo codex) || true)
-          if [ -n "$hits" ]; then echo "surviving uberdev token:"; echo "$hits"; exit 1; fi
-          echo "clean"
+          if hits=$(grep -rilE 'uberdev' plugins/prkit codex); then
+            echo "surviving uberdev token:"
+            echo "$hits"
+            exit 1
+          else
+            grep_status=$?
+            case "$grep_status" in
+              1) echo "clean" ;;
+              *) echo "namespace scan failed (grep rc=$grep_status)" >&2; exit "$grep_status" ;;
+            esac
+          fi

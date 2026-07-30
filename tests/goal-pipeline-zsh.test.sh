@@ -473,7 +473,11 @@ WT_ROOT="$WORK/wt-root"
 WT_STATE="$WT_ROOT/state"
 WT_VERDICT_DIR="$WT_ROOT/.claude/worktrees/wt-A/.uberdev/runs/20260529-140000-cafe01"
 mkdir -p "$WT_STATE" "$WT_VERDICT_DIR" || { echo "FATAL: mkdir -p worktree-mirror sandbox ($WT_VERDICT_DIR) failed" >&2; exit 3; }
-printf '%s\n' '{"pr":200,"sha":"cafe01","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' \
+# The canonical selector treats malformed PR/SHA identity as INDETERMINATE
+# rather than absence (RFC 0005 B13), so `sha` must be a full 40-hex object
+# name — an abbreviated one makes the candidate identity-unknown and the loop
+# never reaches green. Mirrors the fixture shape in tests/goal.test.sh.
+printf '%s\n' '{"pr":200,"sha":"cafe010000000000000000000000000000000000","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' \
   > "$WT_VERDICT_DIR/review-pr-verdict.json"
 
 W_GID="pipewatch01"
@@ -487,7 +491,7 @@ DRV_W="$WORK/drv_watch.zsh"
   echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
   # gh stub: headRefOid (read by read_trust_signal's #290.1 SHA-binding) matches
   # the seeded verdict sha, so the verdict binds and the colour is honoured.
-  echo 'gh() { case "$1 $2" in "pr view") printf "cafe01\n" ;; *) return 0 ;; esac }'
+  echo 'gh() { case "$1 $2" in "pr view") printf "cafe010000000000000000000000000000000000\n" ;; *) return 0 ;; esac }'
   echo "uberdev_goal_state_init '$W_GID' >/dev/null 2>&1"
   echo "uberdev_goal_pr_state_transition '$W_GID' 200 dispatched pushed-reviewing >/dev/null 2>&1"
   # Scalars the loop body references on its NON-green arms (harmless on the green

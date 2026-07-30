@@ -38,6 +38,86 @@ if [ ! -f "$MANIFEST" ]; then
   printf '  FAIL  run_manifest.py is missing: %s\n' "$MANIFEST"
   exit 1
 fi
+
+TYPE_HINT_CONTRACT="$(python3 -I -B - "$MANIFEST" 2>&1 <<'PY'
+import ast
+import importlib.util
+import pathlib
+import sys
+import typing
+from collections.abc import Callable, Iterable, Iterator
+
+module_path = sys.argv[1]
+tree = ast.parse(pathlib.Path(module_path).read_text(encoding="utf-8"))
+expected_source_members = {
+    "collections.abc": {
+        ("Callable", None),
+        ("Iterable", None),
+        ("Iterator", None),
+    },
+    "typing": {("Any", None), ("NamedTuple", None)},
+}
+actual_source_members = {source: set() for source in expected_source_members}
+tracked_membership = {
+    name: set()
+    for members in expected_source_members.values()
+    for name, _alias in members
+}
+for node in ast.walk(tree):
+    if not isinstance(node, ast.ImportFrom):
+        continue
+    source = "." * node.level + (node.module or "")
+    for imported in node.names:
+        member = (imported.name, imported.asname)
+        if source in actual_source_members:
+            actual_source_members[source].add(member)
+        if imported.name in tracked_membership:
+            tracked_membership[imported.name].add((source, imported.asname))
+
+expected_membership = {
+    name: {(source, alias)}
+    for source, members in expected_source_members.items()
+    for name, alias in members
+}
+assert actual_source_members == expected_source_members, (
+    f"type import source members are {actual_source_members!r}"
+)
+assert tracked_membership == expected_membership, (
+    f"type import membership is {tracked_membership!r}"
+)
+
+spec = importlib.util.spec_from_file_location("run_manifest_type_contract", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+assert module.Callable is Callable, module.Callable
+assert module.Iterable is Iterable, module.Iterable
+assert module.Iterator is Iterator, module.Iterator
+
+windows_hints = typing.get_type_hints(module._windows_live_process.__wrapped__)
+windows_expected = Iterator[tuple[int, Callable[[], None]]]
+assert windows_hints["return"] == windows_expected, (
+    f"_windows_live_process return is {windows_hints['return']!r}"
+)
+
+locked_hints = typing.get_type_hints(module._locked_manifest.__wrapped__)
+locked_expected = Iterator[int]
+assert locked_hints["return"] == locked_expected, (
+    f"_locked_manifest return is {locked_hints['return']!r}"
+)
+
+print("ok", end="")
+PY
+)"
+if [ "$TYPE_HINT_CONTRACT" = ok ]; then
+  pass "canonical context managers expose exact collections.abc Iterator contracts"
+else
+  fail "canonical context-manager type contract" "$TYPE_HINT_CONTRACT"
+fi
+
+if [ "${1:-}" != "--artifact-publication-only" ]; then
 SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 
 LINUX_IDENTITY_CLASSIFICATION="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
@@ -1851,6 +1931,1332 @@ if [ "$deleted_reconcile_rc" -eq 0 ] \
   pass "deleted opaque-backend status is unavailable evidence, not a recovery wedge"
 else
   fail "deleted opaque-backend status is unavailable evidence, not a recovery wedge" "reconcile=$deleted_reconcile_rc/$deleted_reconcile_out verify=$CAPTURE_RC/$CAPTURE_OUT"
+fi
+fi
+
+WINDOWS_ARTIFACT_IDENTITY_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+from unittest import mock
+
+
+EXECUTE_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+BIRTHTIME_NS = 1_700_000_000_123_456_789
+PATH_CTIME_NS = 1_700_000_000_223_456_789
+FD_CTIME_NS = 1_700_000_000_323_456_789
+POSIX_PATH_CTIME_NS = 1_700_000_000_423_456_789
+POSIX_FD_CTIME_NS = 1_700_000_000_523_456_789
+POSIX_IDENTITY_CTIME_NS = 1_700_000_000_623_456_789
+
+
+class StatView:
+    def __init__(self, entry, **overrides):
+        self._entry = entry
+        self._overrides = overrides
+
+    def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._entry, name)
+
+
+def windows_path_view(entry):
+    return StatView(
+        entry,
+        st_birthtime_ns=BIRTHTIME_NS,
+        st_birthtime=BIRTHTIME_NS / 1_000_000_000,
+        st_ctime_ns=PATH_CTIME_NS,
+        st_ctime=PATH_CTIME_NS / 1_000_000_000,
+        st_mode=entry.st_mode | EXECUTE_BITS,
+    )
+
+
+def windows_fd_view(
+    entry, *, ctime_ns=FD_CTIME_NS, mode=None, link_count=None
+):
+    return StatView(
+        entry,
+        st_birthtime_ns=BIRTHTIME_NS,
+        st_birthtime=BIRTHTIME_NS / 1_000_000_000,
+        st_ctime_ns=ctime_ns,
+        st_ctime=ctime_ns / 1_000_000_000,
+        st_mode=entry.st_mode if mode is None else mode,
+        st_nlink=entry.st_nlink if link_count is None else link_count,
+    )
+
+
+failures = []
+for index, module_path in enumerate(sys.argv[1:3]):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_windows_artifact_identity_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    root = pathlib.Path(sys.argv[3]) / f"windows-artifact-identity-{index}"
+    root.mkdir()
+    artifact = root / "artifact"
+    artifact.write_bytes(b"verified bytes\n")
+    real_open = module.os.open
+    real_lstat = module.os.lstat
+    real_fstat = module.os.fstat
+
+    base = real_lstat(artifact)
+    path_state = windows_path_view(base)
+    fd_state = windows_fd_view(base)
+
+    def posix_identity_view(entry):
+        return StatView(
+            entry,
+            st_dev=base.st_dev,
+            st_ino=base.st_ino,
+            st_size=base.st_size,
+            st_mtime_ns=base.st_mtime_ns,
+            st_mtime=base.st_mtime,
+            st_ctime_ns=POSIX_IDENTITY_CTIME_NS,
+            st_ctime=POSIX_IDENTITY_CTIME_NS / 1_000_000_000,
+            st_mode=base.st_mode,
+        )
+
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
+        posix_identity = module._artifact_identity(path_state)
+        raw_descriptor_state = module._artifact_raw_fd_state(path_state)
+        expected_posix_identity = (
+            path_state.st_dev,
+            path_state.st_ino,
+            path_state.st_size,
+            path_state.st_mtime_ns,
+            path_state.st_ctime_ns,
+            path_state.st_mode,
+        )
+        if posix_identity != expected_posix_identity:
+            failures.append(f"{index}: non-Windows public identity changed")
+        if (
+            type(posix_identity) is not getattr(module, "ArtifactIdentity", None)
+            or not isinstance(posix_identity, tuple)
+        ):
+            failures.append(f"{index}: public identity lacks its immutable tuple type")
+        if (
+            type(raw_descriptor_state)
+            is not getattr(module, "RawArtifactDescriptorState", None)
+            or not isinstance(raw_descriptor_state, tuple)
+        ):
+            failures.append(
+                f"{index}: raw descriptor state lacks its immutable tuple type"
+            )
+        if type(posix_identity) is type(raw_descriptor_state):
+            failures.append(f"{index}: public and raw descriptor states share one type")
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=True):
+        if module._artifact_identity(path_state) != module._artifact_identity(fd_state):
+            failures.append(
+                f"{index}: native Windows path/fd birthtime and execute-bit views diverged"
+            )
+        accepted_link_counts = {
+            link_count
+            for link_count in (0, 1, 2)
+            if module._artifact_descriptor_link_count_valid(
+                StatView(base, st_nlink=link_count)
+            )
+        }
+        if accepted_link_counts != {0, 1}:
+            failures.append(
+                f"{index}: native Windows artifact descriptor accepted "
+                f"st_nlink={sorted(accepted_link_counts)!r}, expected [0, 1]"
+            )
+    with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
+        accepted_link_counts = {
+            link_count
+            for link_count in (0, 1, 2)
+            if module._artifact_descriptor_link_count_valid(
+                StatView(base, st_nlink=link_count)
+            )
+        }
+        if accepted_link_counts != {1}:
+            failures.append(
+                f"{index}: POSIX artifact descriptor accepted "
+                f"st_nlink={sorted(accepted_link_counts)!r}, expected [1]"
+            )
+
+    def direct_open(path, flags, mode=0o600):
+        return real_open(
+            path,
+            flags
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0),
+            mode,
+        )
+
+    def modeled_capture(native_windows, descriptor_link_counts, path_link_counts):
+        descriptor_snapshot = [0]
+        path_snapshot = [0]
+        injected_path_identities = []
+        injected_descriptor_identities = []
+
+        def modeled_lstat(path):
+            entry = real_lstat(path)
+            if native_windows:
+                entry = windows_path_view(entry)
+            else:
+                entry = StatView(
+                    entry,
+                    st_ctime_ns=POSIX_PATH_CTIME_NS,
+                    st_ctime=POSIX_PATH_CTIME_NS / 1_000_000_000,
+                )
+                injected_path_identities.append(
+                    module._artifact_raw_fd_state(entry)
+                )
+                entry = posix_identity_view(entry)
+            snapshot = path_snapshot[0]
+            path_snapshot[0] += 1
+            return StatView(entry, st_nlink=path_link_counts[snapshot])
+
+        def modeled_fstat(descriptor):
+            entry = real_fstat(descriptor)
+            snapshot = descriptor_snapshot[0]
+            descriptor_snapshot[0] += 1
+            link_count = descriptor_link_counts[snapshot]
+            if native_windows:
+                return windows_fd_view(
+                    entry, link_count=link_count
+                )
+            entry = StatView(
+                entry,
+                st_ctime_ns=POSIX_FD_CTIME_NS,
+                st_ctime=POSIX_FD_CTIME_NS / 1_000_000_000,
+            )
+            injected_descriptor_identities.append(
+                module._artifact_raw_fd_state(entry)
+            )
+            entry = posix_identity_view(entry)
+            return StatView(entry, st_nlink=link_count)
+
+        error = None
+        try:
+            with mock.patch.object(
+                module,
+                "_uses_native_windows_filesystem",
+                return_value=native_windows,
+            ), mock.patch.object(
+                module, "_secure_open_regular", direct_open
+            ), mock.patch.object(
+                module.os, "lstat", modeled_lstat
+            ), mock.patch.object(
+                module.os, "fstat", modeled_fstat
+            ):
+                payload, _ = module.secure_capture_regular(
+                    str(artifact), 1, 1024
+                )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as caught:
+            error = caught
+        else:
+            if payload != b"verified bytes\n":
+                error = AssertionError("modeled capture changed bytes")
+        if not native_windows:
+            assert injected_path_identities
+            assert injected_descriptor_identities
+            assert (
+                injected_path_identities[0]
+                != injected_descriptor_identities[0]
+            )
+        return error, descriptor_snapshot[0], path_snapshot[0]
+
+    capture_error, descriptor_calls, path_calls = modeled_capture(
+        True, (0, 0), (1, 1, 1)
+    )
+    if capture_error is not None or (descriptor_calls, path_calls) != (2, 3):
+        failures.append(
+            f"{index}: native Windows descriptor st_nlink=0 capture failed "
+            f"with calls={descriptor_calls}/{path_calls} "
+            f"({type(capture_error).__name__}: {capture_error})"
+        )
+    for native_windows, descriptor_link_counts, label in (
+        (False, (0, 1), "POSIX descriptor st_nlink=0"),
+        (True, (2, 1), "native Windows descriptor st_nlink=2"),
+    ):
+        capture_error, descriptor_calls, path_calls = modeled_capture(
+            native_windows, descriptor_link_counts, (1, 1, 1)
+        )
+        if not (
+            isinstance(capture_error, module.ManifestRejected)
+            and str(capture_error) == "artifact_not_owned_regular"
+            and (descriptor_calls, path_calls) == (1, 2)
+        ):
+            failures.append(
+                f"{index}: {label} was not rejected "
+                f"at the initial snapshot with calls="
+                f"{descriptor_calls}/{path_calls} "
+                f"({type(capture_error).__name__}: {capture_error})"
+            )
+    capture_error, descriptor_calls, path_calls = modeled_capture(
+        True, (1, 2), (1, 1, 1)
+    )
+    if not (
+        isinstance(capture_error, module.ManifestRejected)
+        and str(capture_error) == "artifact_not_owned_regular"
+        and (descriptor_calls, path_calls) == (2, 3)
+    ):
+        failures.append(
+            f"{index}: native Windows descriptor st_nlink=1->2 transition "
+            f"was not rejected at after_open with calls="
+            f"{descriptor_calls}/{path_calls} "
+            f"({type(capture_error).__name__}: {capture_error})"
+        )
+    for snapshot, snapshot_name in enumerate(("before", "current", "after_path")):
+        for path_link_count in (0, 2):
+            path_link_counts = [1, 1, 1]
+            path_link_counts[snapshot] = path_link_count
+            capture_error, descriptor_calls, path_calls = modeled_capture(
+                True, (1, 1), tuple(path_link_counts)
+            )
+            expected_calls = (1, 2) if snapshot < 2 else (2, 3)
+            if not (
+                isinstance(capture_error, module.ManifestRejected)
+                and str(capture_error) == "artifact_not_owned_regular"
+                and (descriptor_calls, path_calls) == expected_calls
+            ):
+                failures.append(
+                    f"{index}: native Windows {snapshot_name} pathname "
+                    f"st_nlink={path_link_count} was not rejected "
+                    f"with calls={descriptor_calls}/{path_calls} "
+                    f"({type(capture_error).__name__}: {capture_error})"
+                )
+
+    def path_lstat(path):
+        return windows_path_view(real_lstat(path))
+
+    def descriptor_fstat(descriptor):
+        return windows_fd_view(real_fstat(descriptor))
+
+    with mock.patch.object(module.os, "name", "nt"), \
+         mock.patch.object(module, "_secure_open_regular", direct_open), \
+         mock.patch.object(module.os, "lstat", path_lstat), \
+         mock.patch.object(module.os, "fstat", descriptor_fstat):
+        try:
+            payload, capture_identity = module.secure_capture_regular(
+                str(artifact), 1, 1024
+            )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as error:
+            failures.append(
+                f"{index}: stable native Windows capture failed "
+                f"({type(error).__name__}: {error})"
+            )
+        else:
+            if payload != b"verified bytes\n":
+                failures.append(f"{index}: stable native Windows capture changed bytes")
+            if getattr(capture_identity, "identity_time_ns", None) != BIRTHTIME_NS:
+                failures.append(f"{index}: native Windows identity omitted birthtime")
+            if getattr(capture_identity, "mode", 0) & EXECUTE_BITS:
+                failures.append(f"{index}: native Windows identity retained execute bits")
+
+    def mutation_lstat(path):
+        entry = real_lstat(path)
+        return windows_fd_view(entry)
+
+    for mutation_field in ("ctime", "mode"):
+        mutation = root / f"same-handle-{mutation_field}-mutation"
+        mutation.write_bytes(b"same bytes\n")
+        fstat_calls = [0]
+
+        def mutation_fstat(
+            descriptor, *, field=mutation_field, calls=fstat_calls
+        ):
+            entry = real_fstat(descriptor)
+            calls[0] += 1
+            if calls[0] == 1:
+                return windows_fd_view(entry)
+            if field == "ctime":
+                return windows_fd_view(entry, ctime_ns=FD_CTIME_NS + 1)
+            return windows_fd_view(entry, mode=entry.st_mode | EXECUTE_BITS)
+
+        with mock.patch.object(module.os, "name", "nt"), \
+             mock.patch.object(module, "_secure_open_regular", direct_open), \
+             mock.patch.object(module.os, "lstat", mutation_lstat), \
+             mock.patch.object(module.os, "fstat", mutation_fstat):
+            try:
+                module.secure_capture_regular(str(mutation), 1, 1024)
+            except module.ManifestRejected as error:
+                if str(error) != "artifact_replaced_during_capture":
+                    failures.append(
+                        f"{index}: same-handle {mutation_field} mutation used "
+                        f"unexpected verdict {error}"
+                    )
+            else:
+                failures.append(
+                    f"{index}: same-handle raw {mutation_field} mutation was accepted"
+                )
+
+    publication_target = root / "publication"
+    attempt_counter = [0]
+    publication_descriptor_open = [False]
+    publication_descriptor_link_counts = []
+    publication_descriptor_states = []
+    publication_candidate = [None]
+    publication_path_link_counts = []
+
+    def direct_publication_open(requested_path, digest):
+        attempt_counter[0] += 1
+        candidate = f"{requested_path}.windows-fixture-{attempt_counter[0]}-{digest}"
+        descriptor = real_open(
+            candidate,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0),
+            0o600,
+        )
+        publication_candidate[0] = candidate
+        publication_descriptor_open[0] = True
+        return candidate, descriptor
+
+    def modeled_publication(
+        descriptor_link_counts, scenario, path_link_count=1
+    ):
+        descriptor_snapshot = [0]
+        path_snapshot = [0]
+        modeled_candidate = [None]
+
+        def modeled_publication_open(requested_path, digest):
+            candidate = f"{requested_path}.{scenario}-{digest}"
+            descriptor = real_open(
+                candidate,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0),
+                0o600,
+            )
+            modeled_candidate[0] = candidate
+            return candidate, descriptor
+
+        def modeled_publication_fstat(descriptor):
+            entry = real_fstat(descriptor)
+            snapshot = descriptor_snapshot[0]
+            descriptor_snapshot[0] += 1
+            return windows_fd_view(
+                entry, link_count=descriptor_link_counts[snapshot]
+            )
+
+        def modeled_publication_lstat(path):
+            path_snapshot[0] += 1
+            return StatView(
+                windows_path_view(real_lstat(path)),
+                st_nlink=path_link_count,
+            )
+
+        error = None
+        try:
+            with mock.patch.object(
+                module.os, "name", "nt"
+            ), mock.patch.object(
+                module,
+                "_uses_native_windows_filesystem",
+                return_value=True,
+            ), mock.patch.object(
+                module,
+                "_open_publication_attempt",
+                modeled_publication_open,
+            ), mock.patch.object(
+                module.os, "lstat", modeled_publication_lstat
+            ), mock.patch.object(
+                module.os, "fstat", modeled_publication_fstat
+            ):
+                module.secure_publish_captured(
+                    str(root / f"publication-{scenario}"),
+                    b"modeled publication\n",
+                )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as caught:
+            error = caught
+        finally:
+            if (
+                modeled_candidate[0] is not None
+                and pathlib.Path(modeled_candidate[0]).exists()
+            ):
+                pathlib.Path(modeled_candidate[0]).unlink()
+        return error, descriptor_snapshot[0], path_snapshot[0]
+
+    for descriptor_link_counts, expected_calls, scenario in (
+        ((2, 1), (1, 0), "opened-link-two"),
+        ((1, 2), (2, 1), "finalized-link-two"),
+    ):
+        publication_error, descriptor_calls, path_calls = modeled_publication(
+            descriptor_link_counts, scenario
+        )
+        if not (
+            isinstance(publication_error, module.ManifestRejected)
+            and str(publication_error) == "artifact_snapshot_invalid"
+            and (descriptor_calls, path_calls) == expected_calls
+        ):
+            failures.append(
+                f"{index}: publication {scenario} was not rejected at its "
+                f"descriptor helper site with calls="
+                f"{descriptor_calls}/{path_calls} "
+                f"({type(publication_error).__name__}: {publication_error})"
+            )
+
+    for path_link_count in (0, 2):
+        publication_error, descriptor_calls, path_calls = modeled_publication(
+            (1, 1),
+            f"path-link-{path_link_count}",
+            path_link_count=path_link_count,
+        )
+        if not (
+            isinstance(publication_error, module.ManifestRejected)
+            and str(publication_error) == "artifact_snapshot_invalid"
+            and (descriptor_calls, path_calls) == (2, 1)
+        ):
+            failures.append(
+                f"{index}: publication final pathname "
+                f"st_nlink={path_link_count} was not rejected with valid "
+                f"descriptor snapshots and calls={descriptor_calls}/"
+                f"{path_calls} "
+                f"({type(publication_error).__name__}: {publication_error})"
+            )
+
+    def publication_descriptor_fstat(descriptor):
+        entry = real_fstat(descriptor)
+        if publication_descriptor_open[0]:
+            # CPython's native-Windows descriptor view can report zero links
+            # until this newly-created carrier handle closes. Its live
+            # pathname view and every reopened descriptor still report one.
+            entry = windows_fd_view(entry, link_count=0)
+            publication_descriptor_link_counts.append(entry.st_nlink)
+            publication_descriptor_states.append(
+                (
+                    stat.S_ISREG(entry.st_mode),
+                    entry.st_mode,
+                    entry.st_size,
+                    entry.st_nlink,
+                )
+            )
+            return entry
+        return windows_fd_view(entry)
+
+    def publication_path_lstat(path):
+        entry = windows_path_view(real_lstat(path))
+        if (
+            publication_descriptor_open[0]
+            and str(path) == publication_candidate[0]
+        ):
+            publication_path_link_counts.append(entry.st_nlink)
+        return entry
+
+    with mock.patch.object(module.os, "name", "nt"), \
+         mock.patch.object(module, "_secure_open_regular", direct_open), \
+         mock.patch.object(module, "_open_publication_attempt", direct_publication_open), \
+         mock.patch.object(module.os, "lstat", publication_path_lstat), \
+         mock.patch.object(module.os, "fstat", publication_descriptor_fstat):
+        try:
+            published_path, published_identity, digest = (
+                module.secure_publish_captured(
+                    str(publication_target), b"published bytes\n"
+                )
+            )
+            publication_descriptor_open[0] = False
+            recaptured, recaptured_identity = module.secure_capture_published(
+                published_path, digest, 1, 1024
+            )
+        except (module.ManifestRejected, module.ManifestRuntimeError) as error:
+            failures.append(
+                f"{index}: native Windows publish/recapture failed "
+                f"with open-carrier states="
+                f"{publication_descriptor_states!r} and live-path "
+                f"st_nlink={publication_path_link_counts!r} "
+                f"({type(error).__name__}: {error})"
+            )
+        else:
+            if publication_descriptor_link_counts != [0, 0]:
+                failures.append(
+                    f"{index}: fixture did not exercise two open-carrier "
+                    f"st_nlink=0 snapshots: {publication_descriptor_link_counts!r}"
+                )
+            if publication_path_link_counts != [1]:
+                failures.append(
+                    f"{index}: fixture did not retain one live-path "
+                    f"st_nlink=1 snapshot: {publication_path_link_counts!r}"
+                )
+            if recaptured != b"published bytes\n":
+                failures.append(f"{index}: native Windows recapture changed bytes")
+            if published_identity != recaptured_identity:
+                failures.append(
+                    f"{index}: native Windows publication identity was not stable"
+                )
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok", end="")
+PY
+)"
+if [ "$WINDOWS_ARTIFACT_IDENTITY_RESULT" = ok ]; then
+  pass "native Windows artifact identity normalizes path/fd semantics without hiding handle mutations"
+else
+  fail "native Windows artifact identity normalization" "$WINDOWS_ARTIFACT_IDENTITY_RESULT"
+fi
+
+SECURE_CAPTURE_CLOSE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import pathlib
+import sys
+from unittest import mock
+
+failures=[]
+for index,module_path in enumerate(sys.argv[1:3]):
+    spec=importlib.util.spec_from_file_location(f"run_manifest_capture_close_{index}",module_path)
+    module=importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    root=pathlib.Path(sys.argv[3])/f"capture-close-{index}"; root.mkdir()
+    artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
+    original_open=module._secure_open_regular
+    real_close=module.os.close
+
+    primary_descriptor=[None]
+    def capture_primary_descriptor(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        primary_descriptor[0]=descriptor
+        return descriptor
+    def fail_primary_close(descriptor):
+        if descriptor==primary_descriptor[0]:
+            raise OSError("deterministic capture close failure")
+        return real_close(descriptor)
+    primary_failure=module.ManifestRuntimeError("primary_capture_failure")
+    caught_primary=None
+    try:
+        try:
+            with mock.patch.object(module,"_secure_open_regular",capture_primary_descriptor), \
+                 mock.patch.object(module.os,"read",side_effect=primary_failure), \
+                 mock.patch.object(module.os,"close",fail_primary_close):
+                module.secure_capture_regular(str(artifact),1,1024)
+        except BaseException as error:
+            caught_primary=error
+    finally:
+        if primary_descriptor[0] is not None:
+            real_close(primary_descriptor[0])
+    if caught_primary is not primary_failure:
+        failures.append(f"{index}: capture close failure masked the primary failure")
+    if caught_primary is None or module._cleanup_diagnostic(caught_primary) != {
+        "code": "artifact_capture_close_failed"
+    }:
+        failures.append(f"{index}: capture close cleanup diagnostic was discarded")
+
+    close_only_descriptor=[None]
+    def capture_close_only_descriptor(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        close_only_descriptor[0]=descriptor
+        return descriptor
+    def fail_close_only(descriptor):
+        if descriptor==close_only_descriptor[0]:
+            raise OSError("deterministic capture close-only failure")
+        return real_close(descriptor)
+    close_only_failure=None
+    try:
+        try:
+            with mock.patch.object(module,"_secure_open_regular",capture_close_only_descriptor), \
+                 mock.patch.object(module.os,"close",fail_close_only):
+                module.secure_capture_regular(str(artifact),1,1024)
+        except BaseException as error:
+            close_only_failure=error
+    finally:
+        if close_only_descriptor[0] is not None:
+            real_close(close_only_descriptor[0])
+    if (
+        not isinstance(close_only_failure,module.ManifestRuntimeError)
+        or str(close_only_failure)!="artifact_capture_close_failed"
+    ):
+        failures.append(
+            f"{index}: capture close-only failure escaped as "
+            f"{type(close_only_failure).__name__}: {close_only_failure}"
+        )
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok",end="")
+PY
+)"
+if [ "$SECURE_CAPTURE_CLOSE_RESULT" = ok ]; then
+  pass "artifact capture preserves primary failures and normalizes close-only failures in both mirrors"
+else
+  fail "artifact capture close failures" "$SECURE_CAPTURE_CLOSE_RESULT"
+fi
+
+SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import hashlib
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+from unittest import mock
+
+for index,module_path in enumerate(sys.argv[1:3]):
+    spec=importlib.util.spec_from_file_location(f"run_manifest_capture_{index}",module_path)
+    module=importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    root=pathlib.Path(sys.argv[3])/f"capture-{index}"; root.mkdir()
+    artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
+    payload,identity=module.secure_capture_regular(str(artifact),1,1024)
+    assert payload==b"verified bytes\n" and len(identity)==6
+    replacement=root/"replacement"; replacement.write_bytes(b"replacement\n")
+    original_open=module._secure_open_regular
+    replacement_completed=[False]
+    def replace_after_open(path,flags,mode=0o600):
+        descriptor=original_open(path,flags,mode)
+        try:
+            os.replace(replacement,path)
+        except PermissionError:
+            if os.name=="nt":
+                os.close(descriptor)
+                os.replace(replacement,path)
+                replacement_completed[0]=True
+                return original_open(path,flags,mode)
+            os.close(descriptor)
+            raise
+        replacement_completed[0]=True
+        return descriptor
+    with mock.patch.object(module,"_secure_open_regular",replace_after_open):
+        try:
+            captured_payload,_=module.secure_capture_regular(str(artifact),1,1024)
+        except module.ManifestRejected as error:
+            assert replacement_completed[0]
+            assert str(error)=="artifact_replaced_during_capture"
+        else:
+            assert not replacement_completed[0]
+            assert captured_payload==b"verified bytes\n"
+
+    failures=[]
+    unlink_target=root/"pre-unlink"
+    unlink_replacement=root/"pre-unlink-replacement"
+    unlink_replacement.write_bytes(b"pre-unlink replacement\n")
+    real_write=module.os.write
+    write_calls=[0]
+    def fail_after_short_write(descriptor,payload):
+        write_calls[0]+=1
+        if write_calls[0]==1:
+            return real_write(descriptor,payload[:1])
+        raise OSError("deterministic short-write failure")
+    real_unlink=module.os.unlink
+    unlink_calls=[]
+    def swap_immediately_before_unlink(path):
+        unlink_calls.append(path)
+        os.replace(unlink_replacement,path)
+        return real_unlink(path)
+    with mock.patch.object(module.os,"write",fail_after_short_write), \
+         mock.patch.object(module.os,"unlink",swap_immediately_before_unlink):
+        try:
+            module.secure_publish_captured(str(unlink_target),b"failed publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            raise AssertionError("short write accepted")
+    if unlink_calls:
+        failures.append("rollback attempted pathname unlink after validation")
+    if not unlink_replacement.exists():
+        failures.append("pre-unlink replacement was removed")
+
+    cleanup_dir=root/"pre-rmdir"
+    cleanup_dir.mkdir()
+    cleanup_identity=module._artifact_identity(os.lstat(cleanup_dir))
+    rmdir_replacement=root/"pre-rmdir-replacement"
+    rmdir_replacement.mkdir()
+    moved_original=root/"pre-rmdir-original"
+    real_rmdir=module.os.rmdir
+    rmdir_calls=[]
+    def swap_immediately_before_rmdir(path):
+        rmdir_calls.append(path)
+        os.rename(path,moved_original)
+        os.replace(rmdir_replacement,path)
+        return real_rmdir(path)
+    with mock.patch.object(module.os,"rmdir",swap_immediately_before_rmdir):
+        module.secure_remove_published_directory(str(cleanup_dir),cleanup_identity)
+    if rmdir_calls:
+        failures.append("rollback attempted pathname rmdir after validation")
+    if not rmdir_replacement.exists():
+        failures.append("pre-rmdir replacement was removed")
+
+    identity_target=root/"identity-target"
+    identity_replacement=root/"identity-replacement"
+    identity_replacement.write_bytes(b"replacement must survive\n")
+    trusted_payload=b"trusted publication\n"
+    trusted_digest=hashlib.sha256(trusted_payload).hexdigest()
+    real_lstat=module.os.lstat
+    swapped_paths=[]
+    swap_blocked=[False]
+    def replace_after_final_path_snapshot(path):
+        entry=real_lstat(path)
+        candidate=pathlib.Path(path)
+        if (candidate==identity_target or candidate.name.startswith(identity_target.name+".attempt-")) \
+                and entry.st_size==len(trusted_payload) and not swapped_paths:
+            try:
+                os.replace(identity_replacement,candidate)
+                swapped_paths.append(str(candidate))
+            except PermissionError:
+                if os.name!="nt":
+                    raise
+                swap_blocked[0]=True
+        return entry
+    try:
+        with mock.patch.object(module.os,"lstat",replace_after_final_path_snapshot):
+            publication=module.secure_publish_captured(str(identity_target),trusted_payload)
+        published_path=publication[0] if len(publication)==3 and isinstance(publication[0],str) else str(identity_target)
+        capture_published=getattr(module,"secure_capture_published",None)
+        if capture_published is None:
+            failures.append("digest-bound trusted reopen is unavailable")
+        elif swapped_paths:
+            try:
+                capture_published(published_path,trusted_digest,1,1024)
+            except module.ManifestRejected:
+                pass
+            else:
+                failures.append("post-snapshot replacement was reported trusted")
+        else:
+            captured,_=capture_published(published_path,trusted_digest,1,1024)
+            if not swap_blocked[0] or captured!=trusted_payload:
+                failures.append("post-snapshot replacement was neither blocked nor rejected")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        published_path=swapped_paths[0] if swapped_paths else str(identity_target)
+    if swapped_paths:
+        if not pathlib.Path(published_path).exists() \
+                or pathlib.Path(published_path).read_bytes()!=b"replacement must survive\n":
+            failures.append("post-snapshot replacement was not preserved")
+    elif not identity_replacement.exists():
+        failures.append("blocked post-snapshot replacement was not preserved")
+
+    reserved_target=root/"reserved-target"
+    reserved_target.write_bytes(b"unrelated replacement\n")
+    try:
+        reserved_publication=module.secure_publish_captured(
+            str(reserved_target),b"independent trusted bytes\n"
+        )
+        reserved_path=reserved_publication[0] if len(reserved_publication)==3 else str(reserved_target)
+        if pathlib.Path(reserved_path)==reserved_target:
+            failures.append("publication reused the caller's deterministic pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError):
+        failures.append("unrelated deterministic pathname wedged a safe retry")
+    if reserved_target.read_bytes()!=b"unrelated replacement\n":
+        failures.append("unrelated deterministic replacement was modified")
+
+    close_target=root/"primary-plus-close-failure"
+    original_publication_open=module._open_publication_attempt
+    publication_descriptor=[None]
+    real_close=module.os.close
+    def capture_publication_descriptor(requested_path,digest):
+        candidate,descriptor=original_publication_open(requested_path,digest)
+        publication_descriptor[0]=descriptor
+        return candidate,descriptor
+    def fail_publication_close(descriptor):
+        if descriptor==publication_descriptor[0]:
+            raise OSError("deterministic publication close failure")
+        return real_close(descriptor)
+    primary_failure=module.ManifestRuntimeError("primary_publication_failure")
+    caught_failure=None
+    cleanup_diagnostic=None
+    try:
+        try:
+            with mock.patch.object(module,"_open_publication_attempt",capture_publication_descriptor), \
+                 mock.patch.object(module.os,"write",side_effect=primary_failure), \
+                 mock.patch.object(module.os,"close",fail_publication_close):
+                module.secure_publish_captured(str(close_target),b"failed publication\n")
+        except module.ManifestRuntimeError as error:
+            caught_failure=error
+            cleanup_diagnostic=module._cleanup_diagnostic(error)
+    finally:
+        if publication_descriptor[0] is not None:
+            real_close(publication_descriptor[0])
+    if caught_failure is not primary_failure:
+        failures.append("publication close failure masked the primary failure")
+    if cleanup_diagnostic!={"code":"artifact_snapshot_close_failed"}:
+        failures.append("publication close failure diagnostic was discarded")
+
+    short_target=root/"short-write"
+    real_unlink=module.os.unlink
+    def windows_read_only_unlink_failure(path):
+        raise PermissionError("simulated native Windows read-only cleanup failure")
+    write_calls[0]=0
+    with mock.patch.object(module.os,"write",fail_after_short_write), \
+         mock.patch.object(module.os,"unlink",windows_read_only_unlink_failure):
+        try:
+            module.secure_publish_captured(str(short_target),b"complete publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            failures.append("short write accepted")
+    short_retry_path=""
+    try:
+        short_retry=module.secure_publish_captured(str(short_target),b"complete publication\n")
+        short_retry_path=short_retry[0] if len(short_retry)==3 else str(short_target)
+        if pathlib.Path(short_retry_path)==short_target:
+            failures.append("short-write retry reused the failed pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError) as error:
+        failures.append(
+            f"short-write retry remained wedged ({type(error).__name__}: {error})"
+        )
+
+    fsync_target=root/"fsync-failure"
+    with mock.patch.object(module.os,"fsync",side_effect=OSError("deterministic fsync failure")), \
+         mock.patch.object(module.os,"unlink",windows_read_only_unlink_failure):
+        try:
+            module.secure_publish_captured(str(fsync_target),b"durable publication\n")
+        except module.ManifestRuntimeError:
+            pass
+        else:
+            failures.append("fsync failure accepted")
+    fsync_retry_path=""
+    try:
+        fsync_retry=module.secure_publish_captured(str(fsync_target),b"durable publication\n")
+        fsync_retry_path=fsync_retry[0] if len(fsync_retry)==3 else str(fsync_target)
+        if pathlib.Path(fsync_retry_path)==fsync_target:
+            failures.append("fsync retry reused the failed pathname")
+    except (module.ManifestRejected,module.ManifestRuntimeError) as error:
+        failures.append(
+            f"fsync retry remained wedged ({type(error).__name__}: {error})"
+        )
+
+    for failed in list(root.glob("short-write.attempt-*"))+list(root.glob("fsync-failure.attempt-*")):
+        successful_retries={pathlib.Path(path) for path in (short_retry_path,fsync_retry_path) if path}
+        if failed not in successful_retries \
+                and not (failed.stat().st_mode & stat.S_IWUSR):
+            failures.append("failed attempt was made read-only before publication")
+    if failures:
+        raise AssertionError("; ".join(failures))
+
+print("ok",end="")
+PY
+)"
+if [ "$SECURE_CAPTURE_RESULT" = ok ]; then
+  pass "artifact publication isolates retries and never pathname-deletes replacements"
+else
+  fail "artifact publication isolates retries and never pathname-deletes replacements" "$SECURE_CAPTURE_RESULT"
+fi
+
+EXACT_PUBLICATION_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import hashlib
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+from unittest import mock
+
+
+def load_module(module_path, index):
+    spec = importlib.util.spec_from_file_location(
+        f"run_manifest_exact_publication_{index}", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def parent_identity(path):
+    entry = os.lstat(path)
+    return entry.st_dev, entry.st_ino
+
+
+def expect_failure(module, operation, label, failures):
+    try:
+        operation()
+    except (module.ManifestRejected, module.ManifestRuntimeError):
+        return
+    except BaseException as error:
+        failures.append(
+            f"{label}: escaped as {type(error).__name__}: {error}"
+        )
+        return
+    failures.append(f"{label}: unexpectedly succeeded")
+
+
+failures = []
+for index, module_path in enumerate(sys.argv[1:3]):
+    module = load_module(module_path, index)
+    publish = getattr(module, "secure_publish_exact_no_clobber", None)
+    if publish is None:
+        failures.append(f"{index}: public exact-name publisher is missing")
+        continue
+
+    root = pathlib.Path(sys.argv[3]) / f"exact-publication-{index}"
+    root.mkdir()
+    payload = b'{"schema_version":1,"value":"trusted"}\n'
+    expected_digest = hashlib.sha256(payload).hexdigest()
+
+    # POSIX success binds the exact requested pathname, payload, digest, and
+    # parent identity. A second publication must preserve the first bytes.
+    parent = root / "posix"
+    parent.mkdir()
+    target = parent / "review-pr-verdict.json"
+    result = publish(str(target), payload, parent_identity(parent))
+    assert result[0] == os.path.abspath(target), result
+    assert result[2] == expected_digest, result
+    assert target.read_bytes() == payload
+    captured, captured_identity = module.secure_capture_published(
+        str(target), expected_digest, len(payload), len(payload)
+    )
+    assert captured == payload and captured_identity == result[1]
+    expect_failure(
+        module,
+        lambda: publish(str(target), b"replacement\n", parent_identity(parent)),
+        f"{index}: second exact-name publication",
+        failures,
+    )
+    if target.read_bytes() != payload:
+        failures.append(f"{index}: second publication changed first bytes")
+
+    # Partial writes are completed; a zero write is a hard failure that leaves
+    # an untrusted crash residue. Retrying that exact name must refuse rather
+    # than truncate, replace, or unlink the residue.
+    partial_parent = root / "partial"
+    partial_parent.mkdir()
+    partial_target = partial_parent / "artifact"
+    real_write = module.os.write
+
+    def partial_write(descriptor, value):
+        return real_write(descriptor, value[: max(1, min(2, len(value)))])
+
+    with mock.patch.object(module.os, "write", partial_write):
+        publish(
+            str(partial_target),
+            b"partial writes must complete\n",
+            parent_identity(partial_parent),
+        )
+    if partial_target.read_bytes() != b"partial writes must complete\n":
+        failures.append(f"{index}: partial-write loop changed payload")
+
+    zero_parent = root / "zero"
+    zero_parent.mkdir()
+    zero_target = zero_parent / "artifact"
+    unlink_calls = []
+    with mock.patch.object(module.os, "write", return_value=0), mock.patch.object(
+        module.os, "unlink", side_effect=lambda *args, **kwargs: unlink_calls.append(
+            (args, kwargs)
+        )
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(zero_target), b"zero write\n", parent_identity(zero_parent)
+            ),
+            f"{index}: zero write",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: zero-write failure attempted unlink")
+    if not zero_target.exists():
+        failures.append(f"{index}: zero-write crash residue was removed")
+    expect_failure(
+        module,
+        lambda: publish(
+            str(zero_target), b"retry\n", parent_identity(zero_parent)
+        ),
+        f"{index}: crash-residue retry",
+        failures,
+    )
+    if zero_target.read_bytes() != b"":
+        failures.append(f"{index}: crash-residue retry changed partial bytes")
+
+    # Sync and readback failures remain fail-closed and never roll back through
+    # a mutable pathname. file-fsync is exercised on every platform; parent-fsync
+    # only where a parent descriptor exists.
+    #
+    # secure_publish_exact_no_clobber opens a parent-directory descriptor ONLY on
+    # its POSIX branch, so native Windows performs exactly one fsync. A
+    # ("parent-fsync", 2) trigger therefore never fires there, the publish
+    # correctly succeeds, and expect_failure reports it as "unexpectedly
+    # succeeded" — a test-harness artifact, not a publisher defect.
+    native_windows = module._uses_native_windows_filesystem()
+    fsync_scenarios = [("file-fsync", 1)]
+    if not native_windows:
+        fsync_scenarios.append(("parent-fsync", 2))
+    for scenario, fail_fsync_call in fsync_scenarios:
+        sync_parent = root / scenario
+        sync_parent.mkdir()
+        sync_target = sync_parent / "artifact"
+        real_fsync = module.os.fsync
+        fsync_calls = [0]
+
+        def selective_fsync(descriptor):
+            fsync_calls[0] += 1
+            if fsync_calls[0] == fail_fsync_call:
+                raise OSError(f"deterministic {scenario} failure")
+            return real_fsync(descriptor)
+
+        unlink_calls = []
+        with mock.patch.object(module.os, "fsync", selective_fsync), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(sync_target),
+                    b"durable bytes\n",
+                    parent_identity(sync_parent),
+                ),
+                f"{index}: {scenario}",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: {scenario} attempted unlink")
+        if not sync_target.exists():
+            failures.append(f"{index}: {scenario} removed crash residue")
+
+    read_parent = root / "readback"
+    read_parent.mkdir()
+    read_target = read_parent / "artifact"
+    real_read = module.os.read
+    read_calls = [0]
+
+    def failed_readback(descriptor, size):
+        read_calls[0] += 1
+        if read_calls[0] == 1:
+            return b""
+        return real_read(descriptor, size)
+
+    unlink_calls = []
+    with mock.patch.object(module.os, "read", failed_readback), mock.patch.object(
+        module.os,
+        "unlink",
+        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(read_target),
+                b"readback bytes\n",
+                parent_identity(read_parent),
+            ),
+            f"{index}: readback failure",
+            failures,
+        )
+    if unlink_calls:
+        failures.append(f"{index}: readback failure attempted unlink")
+    if not read_target.exists():
+        failures.append(f"{index}: readback failure removed crash residue")
+
+    # Existing files, symlinks, and directories are immutable obstacles.
+    existing_parent = root / "existing"
+    existing_parent.mkdir()
+    existing_file = existing_parent / "file"
+    existing_file.write_bytes(b"first\n")
+    external = root / "external"
+    external.write_bytes(b"outside\n")
+    existing_link = existing_parent / "link"
+    existing_link.symlink_to(external)
+    existing_dir = existing_parent / "directory"
+    existing_dir.mkdir()
+    for obstacle in (existing_file, existing_link, existing_dir):
+        expect_failure(
+            module,
+            lambda obstacle=obstacle: publish(
+                str(obstacle), b"forbidden\n", parent_identity(existing_parent)
+            ),
+            f"{index}: existing {obstacle.name}",
+            failures,
+        )
+    if existing_file.read_bytes() != b"first\n":
+        failures.append(f"{index}: existing file was changed")
+    if not existing_link.is_symlink() or external.read_bytes() != b"outside\n":
+        failures.append(f"{index}: existing symlink or target was changed")
+    if not existing_dir.is_dir():
+        failures.append(f"{index}: existing directory was changed")
+
+    # Invalid identity, a symlinked parent, and modeled native-Windows reparse
+    # rejection all fail before target mutation.
+    identity_parent = root / "identity"
+    identity_parent.mkdir()
+    identity_target = identity_parent / "artifact"
+    wrong_identity = (parent_identity(identity_parent)[0], parent_identity(identity_parent)[1] + 1)
+    expect_failure(
+        module,
+        lambda: publish(str(identity_target), b"identity\n", wrong_identity),
+        f"{index}: wrong parent identity",
+        failures,
+    )
+    if identity_target.exists():
+        failures.append(f"{index}: wrong parent identity created a target")
+
+    symlink_parent_target = root / "symlink-parent-target"
+    symlink_parent_target.mkdir()
+    symlink_parent = root / "symlink-parent"
+    symlink_parent.symlink_to(symlink_parent_target, target_is_directory=True)
+    expect_failure(
+        module,
+        lambda: publish(
+            str(symlink_parent / "artifact"),
+            b"outside mutation\n",
+            parent_identity(symlink_parent_target),
+        ),
+        f"{index}: symlinked parent",
+        failures,
+    )
+    if any(symlink_parent_target.iterdir()):
+        failures.append(f"{index}: symlinked parent mutated external directory")
+
+    windows_parent = root / "windows"
+    windows_parent.mkdir()
+    windows_target = windows_parent / "artifact"
+    with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
+        module, "_uses_native_windows_filesystem", return_value=True
+    ):
+        windows_result = publish(
+            str(windows_target),
+            b"windows exact bytes\n",
+            parent_identity(windows_parent),
+        )
+    if windows_result[0] != os.path.abspath(windows_target) or windows_target.read_bytes() != b"windows exact bytes\n":
+        failures.append(f"{index}: modeled native-Windows exact publication failed")
+
+    reparse_parent = root / "windows-reparse"
+    reparse_parent.mkdir()
+    reparse_target = reparse_parent / "artifact"
+
+    class ReparseStatView:
+        def __init__(self, entry, reparse_tag):
+            self._entry = entry
+            self.st_reparse_tag = reparse_tag
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+    real_lstat = module.os.lstat
+
+    def modeled_reparse_lstat(path):
+        entry = real_lstat(path)
+        if os.path.abspath(os.fspath(path)) == os.path.abspath(reparse_parent):
+            return ReparseStatView(entry, 0xA000000C)
+        return entry
+
+    with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
+        module, "_uses_native_windows_filesystem", return_value=True
+    ), mock.patch.object(
+        module.os, "lstat", modeled_reparse_lstat
+    ):
+        expect_failure(
+            module,
+            lambda: publish(
+                str(reparse_target),
+                b"reparse\n",
+                parent_identity(reparse_parent),
+            ),
+            f"{index}: native-Windows reparse parent",
+            failures,
+        )
+    if reparse_target.exists():
+        failures.append(f"{index}: reparse rejection created a target")
+
+    # A pathname replacement between two path snapshots must be rejected, and
+    # the replacement must survive because uncertain identity never authorizes
+    # unlink. The same rule applies when the parent pathname drifts while its
+    # original descriptor/handle remains open.
+    # Both scenarios below inject through POSIX-only mechanics and are skipped on
+    # native Windows:
+    #   * the identity race keys on `dir_fd`, which only the POSIX branch passes
+    #     to os.stat — the Windows branch re-validates via os.lstat(absolute), so
+    #     the replacement would never be injected and the publish would succeed;
+    #   * the parent drift renames a directory while a descriptor for a file
+    #     inside it is still open, which Windows refuses (ERROR_ACCESS_DENIED),
+    #     so the publish would fail for the wrong reason and leave the follow-up
+    #     residue assertions unsatisfiable.
+    # The no-rollback property they prove is asserted for Windows by the
+    # existing target-exists and reparse-parent cases above.
+    if not native_windows:
+        race_parent = root / "race"
+        race_parent.mkdir()
+        race_target = race_parent / "artifact"
+        race_replacement = root / "race-replacement"
+        race_replacement.write_bytes(b"replacement survives\n")
+        real_stat = module.os.stat
+        target_path_snapshots = [0]
+
+        def replace_after_first_target_snapshot(path, *args, **kwargs):
+            entry = real_stat(path, *args, **kwargs)
+            if (
+                path == race_target.name
+                and kwargs.get("dir_fd") is not None
+                and not kwargs.get("follow_symlinks", True)
+            ):
+                target_path_snapshots[0] += 1
+                if target_path_snapshots[0] == 1:
+                    os.replace(race_replacement, race_target)
+            return entry
+
+        unlink_calls = []
+        with mock.patch.object(module.os, "stat", replace_after_first_target_snapshot), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(race_target),
+                    b"trusted race bytes\n",
+                    parent_identity(race_parent),
+                ),
+                f"{index}: path/fd identity race",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: path/fd race attempted unlink")
+        if race_target.read_bytes() != b"replacement survives\n":
+            failures.append(f"{index}: racing replacement did not survive")
+
+        drift_parent = root / "parent-drift"
+        drift_parent.mkdir()
+        drift_target = drift_parent / "artifact"
+        moved_parent = root / "parent-drift-original"
+        real_write = module.os.write
+        drifted = [False]
+
+        def drift_parent_after_write(descriptor, value):
+            written = real_write(descriptor, value)
+            if not drifted[0]:
+                drifted[0] = True
+                os.rename(drift_parent, moved_parent)
+                drift_parent.mkdir()
+            return written
+
+        unlink_calls = []
+        with mock.patch.object(module.os, "write", drift_parent_after_write), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(drift_target),
+                    b"parent drift bytes\n",
+                    parent_identity(drift_parent),
+                ),
+                f"{index}: parent path drift",
+                failures,
+            )
+        if unlink_calls:
+            failures.append(f"{index}: parent drift attempted unlink")
+        if any(drift_parent.iterdir()):
+            failures.append(f"{index}: parent drift mutated replacement directory")
+        if not (moved_parent / "artifact").exists():
+            failures.append(f"{index}: parent drift removed isolated crash residue")
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok", end="")
+PY
+)"
+if [ "$EXACT_PUBLICATION_RESULT" = ok ]; then
+  pass "exact-name publisher is durable, no-clobber, identity-bound, dual-platform, and never path-rolls back"
+else
+  fail "exact-name publisher contract" "$EXACT_PUBLICATION_RESULT"
 fi
 
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"

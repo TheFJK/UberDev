@@ -26,17 +26,24 @@ dispatch_log="$2"
 
 uberdev_create_child_handoff() {
   UBERDEV_CHILD_HANDOFF="/tmp/handoff|$2"
+  UBERDEV_CHILD_HANDOFF_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest(),end="")' "$UBERDEV_CHILD_HANDOFF")"
   UBERDEV_CHILD_STATUS="/tmp/status|$2"
   UBERDEV_CHILD_RESULT="/tmp/result|$2"
 }
-uberdev_preflight_child_batch() { [ "$#" -gt 0 ]; }
-uberdev_dispatch_child() { printf '%s\n' "$1:$2:$3:$4" >>"$dispatch_log"; }
+uberdev_preflight_child_batch() { [ "$#" -gt 0 ] && [ $(( $# % 2 )) -eq 0 ]; }
+uberdev_dispatch_child() {
+  [ "$#" -eq 5 ] && [[ "$3" =~ ^[0-9a-f]{64}$ ]]
+  printf '%s\n' "$1:$2:$3:$4:$5" >>"$dispatch_log"
+}
 uberdev_wait_child() { printf 'done\n' >"$2"; return 0; }
 uberdev_unwind_child() { return 99; }
 
 sdd_begin_batch
 sdd_dispatch_prepared edge.one batch1-a '{}' '[]'
 sdd_dispatch_prepared edge.one batch1-b '{}' '[]'
+[ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 2 ]
+[[ "${SDD_PREPARED_HANDOFF_SHA256S[0]}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${SDD_PREPARED_HANDOFF_SHA256S[1]}" =~ ^[0-9a-f]{64}$ ]]
 sdd_launch_prepared_batch
 sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT"
 
@@ -50,6 +57,7 @@ sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT"
 [ "$(grep -c 'batch1-b' "$dispatch_log")" -eq 1 ]
 [ "$(grep -c 'batch2-a' "$dispatch_log")" -eq 1 ]
 [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq 0 ]
+[ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_INSTANCES[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_STATUSES[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_RESULTS[@]}" -eq 0 ]
@@ -65,11 +73,12 @@ wait_log="$2"; unwind_log="$3"
 
 uberdev_create_child_handoff() {
   UBERDEV_CHILD_HANDOFF="/tmp/handoff|$2"
+  UBERDEV_CHILD_HANDOFF_SHA256="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest(),end="")' "$UBERDEV_CHILD_HANDOFF")"
   UBERDEV_CHILD_STATUS="/tmp/status|$2"
   UBERDEV_CHILD_RESULT="/tmp/result|$2"
 }
-uberdev_preflight_child_batch() { return 0; }
-uberdev_dispatch_child() { return 0; }
+uberdev_preflight_child_batch() { [ "$#" -gt 0 ] && [ $(( $# % 2 )) -eq 0 ]; }
+uberdev_dispatch_child() { [ "$#" -eq 5 ] && [[ "$3" =~ ^[0-9a-f]{64}$ ]]; }
 uberdev_wait_child() {
   printf '%s\n' "$1" >>"$wait_log"
   case "$1" in
@@ -87,6 +96,7 @@ sdd_begin_batch
 sdd_dispatch_prepared edge.one first-ok '{}' '[]'
 sdd_dispatch_prepared edge.one wait-fails '{}' '[]'
 sdd_dispatch_prepared edge.one sibling-running '{}' '[]'
+[ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 3 ]
 sdd_launch_prepared_batch
 rc=0
 sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT" || rc=$?
@@ -97,6 +107,7 @@ sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT" || rc=$?
 grep -Fq $'/tmp/status|wait-fails\t/tmp/result|wait-fails\t23' "$unwind_log"
 grep -Fq $'/tmp/status|sibling-running\t/tmp/result|sibling-running\t23' "$unwind_log"
 [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq 0 ]
+[ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_INSTANCES[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_STATUSES[@]}" -eq 0 ]
 [ "${#SDD_RECEIPT_RESULTS[@]}" -eq 0 ]

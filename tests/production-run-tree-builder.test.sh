@@ -34,6 +34,7 @@ def governed_source(edge):
  if edge.startswith('sdd.'): return 'plugins/uberdev/skills/subagent-driven-dev/SKILL.md'
  if edge.startswith('review_pr.review.'): return 'plugins/uberdev/skills/post-impl-review/SKILL.md'
  if edge.startswith('review_pr.'): return 'plugins/uberdev/commands/review-pr.md'
+ if edge.startswith('simplify.'): return 'plugins/uberdev/commands/simplify.md'
  raise AssertionError(edge)
 
 def context(workflow,issue):
@@ -50,6 +51,7 @@ def value(kind,run,key,index):
  if kind=='integer': return 1
  if kind=='boolean': return True
  if kind=='string': return f'value-{key}'
+ if kind=='bounded_text': return f'value-{key}'
  if kind=='optional_string': return ''
  if kind=='directory': return str(run)
  if kind in {'path','optional_path'}:
@@ -88,6 +90,25 @@ for contract in contracts:
   run,carrier=context(workflow,issue)
   workspace_mode=row.get('workspace_mode','isolated')
   inputs={key:value(fixture_types[key],repository if workspace_mode=='caller' and key=='working_dir' else run,key,index) for key in required+optional}
+  if edge in {'review_pr.fix.phase1','review_pr.fix.phase2'}:
+   inputs['pr_number']=issue
+   inputs['findings_sha256']=hashlib.sha256(pathlib.Path(inputs['findings_path']).read_bytes()).hexdigest()
+   inputs['commit_range_sha256']=hashlib.sha256(pathlib.Path(inputs['commit_range_path']).read_bytes()).hexdigest()
+   inputs['authority_sha256']=hashlib.sha256(pathlib.Path(inputs['authority_path']).read_bytes()).hexdigest()
+  if edge=='simplify.fix.phase2':
+   inputs['pr_number']=0
+   inputs['findings_sha256']=hashlib.sha256(pathlib.Path(inputs['findings_path']).read_bytes()).hexdigest()
+   inputs['standalone_snapshot_sha256']=hashlib.sha256(pathlib.Path(inputs['standalone_snapshot_path']).read_bytes()).hexdigest()
+   inputs['authority_sha256']=hashlib.sha256(pathlib.Path(inputs['authority_path']).read_bytes()).hexdigest()
+  if edge=='review_pr.ci.classify':
+   content=f'<external-untrusted-input source="github-actions-log-pr-{issue}-run-1">\nfailed assertion\n</external-untrusted-input>\n'
+   inputs.update(
+    pr_number=issue,
+    run_id='1',
+    head_sha='0123456789abcdef0123456789abcdef01234567',
+    log_content=content,
+    log_sha256=hashlib.sha256(content.encode()).hexdigest(),
+   )
   argv_path=root/'argv'/f'{index:03d}.tsv'; argv_path.parent.mkdir(exist_ok=True)
   argv_path.write_text(''.join(f'{key}\t{json.dumps(inputs[key],separators=(",",":"))}\n' for key in required+optional))
   risks=None if risk_scope=='run' else []
@@ -98,7 +119,7 @@ PY
 
 CONTRACT_COUNT="$(python3 -I -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
 EXPECTED_COUNT="$(python3 -I -B -c 'import json,sys; print(sum(len(row["allowed_workflows"]) for row in json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
-[ "$CONTRACT_COUNT" -eq 40 ]
+[ "$CONTRACT_COUNT" -eq 41 ]
 [ "$EXPECTED_COUNT" -eq 102 ]
 
 RUNTIME="$TMP/runtime"
@@ -174,7 +195,7 @@ while IFS="$(printf '\t')" read -r EDGE SOURCE INSTANCE CARRIER RISKS ARGV_FILE;
   export UBERDEV_RUN_CARRIER_JSON
   uberdev_create_child_handoff "$EDGE" "$INSTANCE" "$VALIDATED" "$RISKS" >/dev/null
   [ -f "$UBERDEV_CHILD_HANDOFF" ]
-  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF"
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256"
   [ ! -e "$UBERDEV_CHILD_STATUS" ]
   COUNT=$((COUNT + 1))
 done <"$TMP/cases.tsv"

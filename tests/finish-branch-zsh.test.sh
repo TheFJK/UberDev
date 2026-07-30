@@ -121,13 +121,14 @@ if ! slice_fence 'echo "## Reviewer findings summary"' 'done' > "$COMPOSER"; the
   exit 1
 fi
 
-# Seed the run dir with two aggregate files carrying the #302 envelope tag lines
-# as FILE BYTES (the exact shape the post-impl-review writer emits post-#302).
+# Seed the run dir with the canonical compact JSON v2 aggregate plus one legacy
+# analyzer report. The composer must render the v2 document for humans instead
+# of pasting its raw JSON bytes into the PR body.
 SEED_DIR="$WORK/seed"
 mkdir -p "$SEED_DIR"
 {
-  printf '%s\n' '<external-untrusted-input source="pr-diff">'
-  printf '%s\n' 'FINDING-PIR: silent failure in handler'
+  printf '%s\n' '<external-untrusted-input source="post-impl-review-aggregate">'
+  printf '%s\n' '{"contributors":[{"confidence":"high","id":"review_pr.review.correctness","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.silent_failures","verdict":"REVISIONS_REQUIRED"},{"confidence":"high","id":"review_pr.review.types","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.comments","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.tests","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.general","verdict":"APPROVE"}],"findings":[{"detail":"The failure path loses its error.","scope":{"line":7,"operation":"modify_existing","path":"src/handler.ts"},"severity":"blocker","source_edges":["review_pr.review.silent_failures"],"summary":"Silent failure in handler"}],"phase":"phase1","schema_version":2}'
   printf '%s\n' '</external-untrusted-input>'
 } > "$SEED_DIR/post-impl-review-final.md"
 {
@@ -167,12 +168,18 @@ else
 fi
 
 # F2 — the finding text from BOTH files survives into the rendered body.
-if printf '%s\n' "$RENDERED" | grep -qF 'FINDING-PIR: silent failure in handler' \
+if printf '%s\n' "$RENDERED" | grep -qF '**blocker** `src/handler.ts:7` — Silent failure in handler' \
    && printf '%s\n' "$RENDERED" | grep -qF 'FINDING-PTA: missing coverage on the new branch'; then
-  pass "F2: finding text from both aggregate files is pasted into the section under zsh"
+  pass "F2: schema-v2 findings are human-rendered and legacy analyzer text survives under zsh"
 else
-  fail "F2: finding text MISSING from the rendered section under zsh (body did not run for one/both files)"
+  fail "F2: v2 human summary or legacy analyzer text is missing under zsh"
   printf '        rendered=[%s]\n' "$(printf '%s' "$RENDERED" | tr '\n' '|')"
+fi
+
+if printf '%s\n' "$RENDERED" | grep -qF '"schema_version":2'; then
+  fail "F2b: raw compact schema-v2 JSON leaked into the PR body"
+else
+  pass "F2b: raw compact schema-v2 JSON is not pasted into the PR body"
 fi
 
 # F3 — the envelope tag lines are STRIPPED (the headline behavior of the #302

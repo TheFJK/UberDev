@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
-MIRROR="$ROOT/codex/uberdev-codex/policy/solve-run-tree-v1.json"
 POLICY="$ROOT/plugins/uberdev/policy/model-routing-v1.json"
 
 python3 -I -B - "$TREE" "$POLICY" <<'PY'
@@ -31,7 +30,7 @@ for edge_id,edge in edges.items():
         assert isinstance(required_inputs,dict) and isinstance(optional_inputs,dict), edge_id
         assert not set(required_inputs)&set(optional_inputs), edge_id
         assert set(required_inputs.values())|set(optional_inputs.values()) <= {
-            'string','optional_string','integer','boolean','path','optional_path',
+            'string','bounded_text','optional_string','integer','boolean','path','optional_path',
             'directory','path_array','optional_path_array','repo_path_array','string_array'
         }, edge_id
         allowed=edge.get('allowed_workflows')
@@ -45,7 +44,7 @@ required={
  'review_pr.review.types','review_pr.review.comments','review_pr.review.tests',
  'review_pr.review.general','review_pr.fix.phase1','review_pr.simplify.reuse',
  'review_pr.simplify.quality','review_pr.simplify.efficiency',
- 'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
+ 'review_pr.fix.phase2','simplify.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
  'review_pr.ci.resolve_conflict'
 }
@@ -75,8 +74,28 @@ for edge_id in review_edges:
     assert edges[edge_id]['retry']=={'format':1}, edge_id
     assert edges[edge_id]['required_inputs']['changed_paths']=='repo_path_array', edge_id
     assert edges[edge_id]['output_contract']=='phase1-reviewer-v1', edge_id
+fixer_inputs={
+ 'authority_path':'path','authority_sha256':'string',
+ 'findings_path':'path','findings_sha256':'string',
+ 'commit_range_path':'path','commit_range_sha256':'string',
+ 'working_dir':'directory','pr_number':'integer','disposition_path':'path'
+}
+assert edges['review_pr.fix.phase1']['phase']=='review_fix'
+assert edges['review_pr.fix.phase2']['phase']=='simplify_fix'
+for edge_id in ('review_pr.fix.phase1','review_pr.fix.phase2'):
+    assert edges[edge_id]['required_inputs']==fixer_inputs, edge_id
+    assert edges[edge_id]['optional_inputs']=={}, edge_id
+assert edges['simplify.fix.phase2']['required_inputs']=={
+ 'authority_path':'path','authority_sha256':'string',
+ 'findings_path':'path','findings_sha256':'string',
+ 'standalone_snapshot_path':'path','standalone_snapshot_sha256':'string',
+ 'working_dir':'directory','pr_number':'integer','disposition_path':'path'
+}
+assert edges['simplify.fix.phase2']['optional_inputs']=={}
+assert edges['simplify.fix.phase2']['phase']=='simplify_fix'
+assert edges['simplify.fix.phase2']['allowed_workflows']==['simplify']
 caller_edges={
- 'review_pr.fix.phase1','review_pr.fix.phase2','review_pr.ci.fix_code',
+ 'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2','review_pr.ci.fix_code',
  'review_pr.ci.rebase','review_pr.ci.resolve_conflict'
 }
 assert {edge_id for edge_id,row in edges.items() if row.get('workspace_mode')=='caller'}==caller_edges
@@ -88,7 +107,8 @@ assert policy['roles']['spec-compliance-reviewer']=={
 }
 PY
 
-cmp "$TREE" "$MIRROR"
+# The Codex policy copy is generated packaging output. Canonical policy changes
+# are verified here; dedicated generation/manifest tests own mirror drift.
 cmp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$ROOT/codex/uberdev-codex/policy/model-routing-v1.json"
 cmp "$ROOT/plugins/uberdev/lib/solve-launcher.sh" "$ROOT/codex/uberdev-codex/lib/solve-launcher.sh"
 grep -q 'finish_branch.review_pr' "$ROOT/codex/uberdev-codex/skills/finish-branch/SKILL.md"

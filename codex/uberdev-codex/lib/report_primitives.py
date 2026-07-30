@@ -10,6 +10,7 @@ envelope emitter, and a rank-parameterized sort helper.
 Deliberately NOT here (pipeline-local): SEV_RANK maps, norm()/fingerprint()/
 dedupe(), load_findings()/read_global(), per-pipeline main()/column schemas.
 """
+import json
 import re
 from typing import Callable, Sequence, TextIO
 
@@ -43,6 +44,20 @@ ACCEPTED_SOURCES = frozenset({
     "uberthink-aggregate",
 })
 
+PHASE1_CONTRIBUTORS = (
+    "review_pr.review.correctness",
+    "review_pr.review.silent_failures",
+    "review_pr.review.types",
+    "review_pr.review.comments",
+    "review_pr.review.tests",
+    "review_pr.review.general",
+)
+PHASE2_CONTRIBUTORS = (
+    "review_pr.simplify.reuse",
+    "review_pr.simplify.quality",
+    "review_pr.simplify.efficiency",
+)
+
 
 def cell(s: object) -> str:
     """Escape a value for a markdown table cell, shared by both report.py files.
@@ -73,8 +88,8 @@ def envelope(fh: TextIO, source: str, body: str) -> None:
     `source` MUST be a value in the findings-to-issues closed allow-list when
     the output is consumed by that agent; this is now asserted at emit time
     against ACCEPTED_SOURCES (issue #198) so an un-accepted source raises here
-    instead of silently filing zero issues downstream. `body` is the
-    already-rendered table (each cell already passed through cell()).
+    instead of silently filing zero issues downstream. `body` is an already-
+    rendered payload; callers own its schema and escaping.
     """
     if source not in ACCEPTED_SOURCES:
         raise ValueError(
@@ -87,6 +102,27 @@ def envelope(fh: TextIO, source: str, body: str) -> None:
     if body and not body.endswith("\n"):
         fh.write("\n")
     fh.write("</external-untrusted-input>\n")
+
+
+def canonical_json(value: object) -> str:
+    """Return the aggregate contract's exact compact, sorted JSON bytes as text.
+
+    JSON does not normally escape ``<``. Escape the envelope close marker's
+    opening angle bracket as ``\u003c`` so reviewer-derived prose cannot create a
+    second structural trailer. Decoding the JSON restores the original prose.
+    """
+    rendered = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return rendered.replace(_ENVELOPE_CLOSE, "\\u003c/external-untrusted-input>")
+
+
+def json_envelope(fh: TextIO, source: str, value: object) -> None:
+    """Write one canonical compact JSON value in a spotlighting envelope."""
+    envelope(fh, source, canonical_json(value))
 
 
 def sort_by_rank(

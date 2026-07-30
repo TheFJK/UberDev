@@ -647,6 +647,18 @@ PY
       printf 'synchronous result\n' > "$5"
       printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
+    *fast-terminal-context.md)
+      printf 'trusted fast terminal result\n' > "$5"
+      DISPATCH_STATUS_CONTEXT=1
+      DISPATCH_STATUS_LOG="$FAST_CONTEXT_LOG"
+      DISPATCH_STATUS_RESULT="$5"
+      DISPATCH_STATUS_WORKTREE="$FAST_CONTEXT_WORKTREE"
+      DISPATCH_STATUS_BRANCH="$FAST_CONTEXT_BRANCH"
+      DISPATCH_STATUS_WORKSPACE_MODE=isolated
+      printf '{"backend":"codex","state":"failed","exit_code":74,"pid":"opaque:test-handle","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
+        "$TMP/run/forged-fast-terminal.log" "$TMP/run/forged-fast-terminal.md" \
+        "$TMP/run/forged-fast-terminal-worktree" > "$6"
+      ;;
     *no-status.md)
       :
       ;;
@@ -1358,6 +1370,38 @@ if grep -R -q 'run_id=agent-dispatch-sync' "$STATE_DIR/semaphore-v1" 2>/dev/null
   exit 1
 fi
 
+# A fast provider can publish its terminal state before generic finalization.
+# The terminal event/exit tuple stays immutable, while the trusted provider
+# boundary tuple must atomically replace forged context from the mutable file.
+FAST_CONTEXT_LOG="$TMP/run/trusted-fast-terminal.log"
+FAST_CONTEXT_WORKTREE="$TMP/run/trusted-fast-terminal-worktree"
+FAST_CONTEXT_BRANCH="worktree-trusted-fast-terminal"
+printf 'trusted fast terminal log\n' > "$FAST_CONTEXT_LOG"
+FAST_CONTEXT_REQUEST="$(variant_request agent-dispatch-fast-terminal-context inherit)"
+uberdev_agent_dispatch "$FAST_CONTEXT_REQUEST" "$TMP/run/prompt.txt" \
+  "$TMP/run/fast-terminal-context.md" "$TMP/run/fast-terminal-context.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" \
+  agent-dispatch-fast-terminal-context failed 80 0.1 "$TMP/run/fast-terminal-context.json"
+python3 -I -B - "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/fast-terminal-context.json" \
+  "$FAST_CONTEXT_LOG" "$TMP/run/fast-terminal-context.md" "$FAST_CONTEXT_WORKTREE" \
+  "$FAST_CONTEXT_BRANCH" <<'PY'
+import json,pathlib,sys
+events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual=[event['event'] for event in events if event.get('run_id')=='agent-dispatch-fast-terminal-context']
+assert actual==['route_decided','agent_started','failed'],actual
+status=json.loads(pathlib.Path(sys.argv[2]).read_text())
+expected={
+    'log':sys.argv[3],
+    'result':str(pathlib.Path(sys.argv[4]).resolve()),
+    'worktree':sys.argv[5],
+    'branch':sys.argv[6],
+    'workspace_mode':'isolated',
+}
+assert status.get('state')=='failed' and status.get('exit_code')==74,status
+assert {key:status.get(key) for key in expected}==expected,status
+assert not any('forged' in str(value) for value in status.values()),status
+PY
+
 # A provider may publish terminal status before the adapter binds its handle.
 # Force a sibling acquisition to reconcile during that exact window: the
 # unexpired pre-handle generation must survive, bind, and finalize exactly once.
@@ -1921,22 +1965,47 @@ cross_backend_case wezterm
 DEAD_RUN="$TMP/dead-without-terminal"
 mkdir -p "$DEAD_RUN"
 printf 'dead provider prompt\n' > "$DEAD_RUN/prompt.txt"
+DEAD_LOG="$DEAD_RUN/trusted-provider.log"
+DEAD_RESULT="$DEAD_RUN/trusted-result.md"
+DEAD_WORKTREE="$DEAD_RUN/trusted-worktree"
+DEAD_BRANCH="worktree-trusted-dead-provider"
+printf 'trusted provider log\n' > "$DEAD_LOG"
 DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
 _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(1)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  DISPATCH_STATUS_CONTEXT=1
+  DISPATCH_STATUS_LOG="$DEAD_LOG"
+  DISPATCH_STATUS_RESULT="$DEAD_RESULT"
+  DISPATCH_STATUS_WORKTREE="$DEAD_WORKTREE"
+  DISPATCH_STATUS_BRANCH="$DEAD_BRANCH"
+  DISPATCH_STATUS_WORKSPACE_MODE=isolated
+  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
+    "$DISPATCH_ID" "$DEAD_RUN/forged.log" "$DEAD_RUN/forged-result.md" "$DEAD_RUN/forged-worktree" > "$6"
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$DEAD_REQUEST" "$DEAD_RUN/prompt.txt" "$DEAD_RUN/result.md" "$DEAD_RUN/status.json"
 wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$DEAD_RUN/status.json" || { echo "dead provider retained running status" >&2; exit 1; }
-python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
+python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/status.json" \
+  "$DEAD_LOG" "$DEAD_RESULT" "$DEAD_WORKTREE" "$DEAD_BRANCH" <<'PY'
 import json,pathlib,sys
 rows=[json.loads(x) for x in pathlib.Path(sys.argv[1]).read_text().splitlines()]
 terminal=[x for x in rows if x.get('run_id')=='adapter-dead-without-terminal' and x.get('event')=='failed']
 assert len(terminal)==1 and terminal[0].get('error_class')=='provider_execution_failed',terminal
+status=json.loads(pathlib.Path(sys.argv[2]).read_text())
+expected={
+    'log':sys.argv[3],
+    'result':sys.argv[4],
+    'worktree':sys.argv[5],
+    'branch':sys.argv[6],
+    'workspace_mode':'isolated',
+}
+assert status.get('state')=='failed' and status.get('exit_code')==1,status
+assert {key:status.get(key) for key in expected}==expected,status
+assert all(pathlib.Path(status[key]).is_absolute() for key in ('log','result','worktree')),status
+assert not any('forged' in str(value) for value in status.values()),status
 PY
 ! grep -R -q 'run_id=adapter-dead-without-terminal' "$DEAD_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 
@@ -2462,5 +2531,171 @@ assert actual == ["route_decided", "agent_started", "completed"], ("adapter-reco
 assert all(event["event"] != "abandoned" for event in events if event["run_id"] == "adapter-reconcile-wins")
 PY
 [ ! -e "$RACE_LEASE" ] || { echo "reconcile-winning watcher retained its exact lease" >&2; exit 1; }
+
+# The terminal probe and context attestation are separate secure snapshots. If
+# a mutable provider status changes from canonical numeric PID 1 to JSON true
+# or 1.0 between them, attestation must reject the type alias: no trusted
+# context publication, terminal append, or exact-lease release is permitted.
+ATTEST_ALIAS_ROOT="$TMP/attest-handle-aliases"
+mkdir -p "$ATTEST_ALIAS_ROOT"
+eval "$(declare -f _uberdev_agent_status_terminal_event | sed '1s/_uberdev_agent_status_terminal_event/_real_attest_alias_terminal_event/')"
+_uberdev_agent_status_terminal_event() {
+  local status_path="$1" event rc=0 alias_kind='' marker
+  event="$(_real_attest_alias_terminal_event "$@")" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  case "$status_path" in
+    */bool/status.json) alias_kind=bool ;;
+    */float/status.json) alias_kind=float ;;
+  esac
+  marker="$status_path.alias-injected"
+  if [ -n "$alias_kind" ] && [ ! -e "$marker" ]; then
+    python3 -I -B - "$status_path" "$alias_kind" <<'PY'
+import json,os,pathlib,sys,tempfile
+path=pathlib.Path(sys.argv[1])
+payload=json.loads(path.read_text(encoding='utf-8'))
+payload['pid']=True if sys.argv[2]=='bool' else 1.0
+descriptor,temporary=tempfile.mkstemp(prefix='.attest-alias.',dir=path.parent)
+try:
+    os.fchmod(descriptor,0o600)
+    with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+        descriptor=None
+        json.dump(payload,stream,sort_keys=True,separators=(',',':'))
+        stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary,path)
+finally:
+    if descriptor is not None: os.close(descriptor)
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+PY
+    : > "$marker"
+  fi
+  printf '%s' "$event"
+}
+
+_uberdev_agent_dispatch_backend() {
+  [ "$#" -eq 7 ]
+  local result_path="$5" status_path="$6" case_root
+  case_root="$(dirname "$status_path")"
+  DISPATCH_RC=0
+  DISPATCH_ID=1
+  DISPATCH_LOG=''
+  DISPATCH_STATUS_CONTEXT=1
+  DISPATCH_STATUS_LOG="$case_root/trusted.log"
+  DISPATCH_STATUS_RESULT="$result_path"
+  DISPATCH_STATUS_WORKTREE="$case_root/trusted-worktree"
+  DISPATCH_STATUS_BRANCH="trusted-$(basename "$case_root")"
+  DISPATCH_STATUS_WORKSPACE_MODE=isolated
+  printf 'trusted provider log\n' > "$DISPATCH_STATUS_LOG"
+  printf 'trusted provider result\n' > "$result_path"
+  mkdir -p "$DISPATCH_STATUS_WORKTREE"
+  python3 -I -B - "$status_path" "$case_root" <<'PY'
+import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])
+payload={
+    'backend':'codex', 'state':'failed', 'exit_code':74, 'pid':1,
+    'log':str(root/'forged.log'), 'result':str(root/'forged-result.md'),
+    'worktree':str(root/'forged-worktree'), 'branch':'forged-branch',
+    'workspace_mode':'caller',
+}
+with path.open('w',encoding='utf-8') as stream:
+    json.dump(payload,stream,sort_keys=True,separators=(',',':'))
+    stream.write('\n')
+os.chmod(path,0o600)
+PY
+  return 0
+}
+
+attest_alias_request() {
+  python3 -I -B - "$1" "$2" <<'PY'
+import json,sys
+run,kind=sys.argv[1:]
+print(json.dumps({
+    'schema_version':1, 'run_dir':run, 'run_id':'adapter-attest-'+kind,
+    'repository_id':'adapter-attest-'+kind+'-repository', 'backend':'codex',
+    'workflow':'solve', 'phase':'lead', 'role':'lead', 'task_tier':'small',
+    'risk_signals':[], 'routing_mode':'inherit', 'issue_or_pr':98,
+    'issue_num':98, 'capacity':1, 'timeout_s':20,
+},sort_keys=True,separators=(',',':')),end='')
+PY
+}
+
+assert_attest_alias_rejected() {
+  local kind="$1" run="$ATTEST_ALIAS_ROOT/$1" request state manifest rc
+  mkdir -p "$run"
+  printf 'attest alias prompt\n' > "$run/prompt.txt"
+  request="$(attest_alias_request "$run" "$kind")"
+  state="$run/.agent-state-$(id -u)"
+  manifest="$state/agent-lifecycle.jsonl"
+  set +e
+  uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json" \
+    >"$run/dispatch.out" 2>"$run/dispatch.err"
+  rc=$?
+  set -e
+  [ -e "$run/status.json.alias-injected" ] || {
+    echo "$kind PID alias race was not injected after terminal validation" >&2
+    exit 1
+  }
+  [ "$rc" -eq 2 ] || {
+    echo "$kind PID alias attestation returned $rc after injection instead of failing closed" >&2
+    exit 1
+  }
+  python3 -I -B - "$manifest" "$run/status.json" "$kind" <<'PY'
+import json,pathlib,sys
+events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+run_id='adapter-attest-'+sys.argv[3]
+actual=[event['event'] for event in events if event.get('run_id')==run_id]
+assert actual==['route_decided','agent_started'],(run_id,actual)
+status=json.loads(pathlib.Path(sys.argv[2]).read_text())
+pid=status.get('pid')
+if sys.argv[3]=='bool': assert type(pid) is bool and pid is True,status
+else: assert type(pid) is float and pid==1.0,status
+assert status.get('state')=='failed' and status.get('exit_code')==74,status
+assert status.get('branch')=='forged-branch' and status.get('workspace_mode')=='caller',status
+assert all('forged' in status.get(key,'') for key in ('log','result','worktree')),status
+assert not any('trusted-' in str(value) for value in status.values()),status
+PY
+  grep -R -F -x -q -- "run_id=adapter-attest-$kind" "$state/semaphore-v1" 2>/dev/null || {
+    echo "$kind PID alias attestation released its exact lease" >&2
+    exit 1
+  }
+}
+
+assert_attest_alias_rejected bool
+assert_attest_alias_rejected float
+
+# A genuine positive JSON integer remains equivalent to the numeric provider
+# handle and therefore publishes the trusted context and finalizes normally.
+NUMERIC_ATTEST_RUN="$ATTEST_ALIAS_ROOT/numeric"
+mkdir -p "$NUMERIC_ATTEST_RUN"
+printf 'numeric attest prompt\n' > "$NUMERIC_ATTEST_RUN/prompt.txt"
+NUMERIC_ATTEST_REQUEST="$(attest_alias_request "$NUMERIC_ATTEST_RUN" numeric)"
+uberdev_agent_dispatch "$NUMERIC_ATTEST_REQUEST" "$NUMERIC_ATTEST_RUN/prompt.txt" \
+  "$NUMERIC_ATTEST_RUN/result.md" "$NUMERIC_ATTEST_RUN/status.json" >/dev/null
+NUMERIC_ATTEST_STATE="$NUMERIC_ATTEST_RUN/.agent-state-$(id -u)"
+wait_for_terminal_and_release "$NUMERIC_ATTEST_STATE/agent-lifecycle.jsonl" \
+  "$NUMERIC_ATTEST_STATE" adapter-attest-numeric failed 80 0.1 "$NUMERIC_ATTEST_RUN/status.json"
+python3 -I -B - "$NUMERIC_ATTEST_STATE/agent-lifecycle.jsonl" "$NUMERIC_ATTEST_RUN/status.json" \
+  "$NUMERIC_ATTEST_RUN/trusted.log" "$NUMERIC_ATTEST_RUN/result.md" \
+  "$NUMERIC_ATTEST_RUN/trusted-worktree" <<'PY'
+import json,pathlib,sys
+events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+actual=[event['event'] for event in events if event.get('run_id')=='adapter-attest-numeric']
+assert actual==['route_decided','agent_started','failed'],actual
+status=json.loads(pathlib.Path(sys.argv[2]).read_text())
+assert type(status.get('pid')) is int and status['pid']==1,status
+expected={
+    'log':str(pathlib.Path(sys.argv[3]).resolve()),
+    'result':str(pathlib.Path(sys.argv[4]).resolve()),
+    'worktree':str(pathlib.Path(sys.argv[5]).resolve()),
+    'branch':'trusted-numeric', 'workspace_mode':'isolated',
+}
+assert {key:status.get(key) for key in expected}==expected,status
+assert not any('forged' in str(value) for value in status.values()),status
+PY
+if grep -R -F -x -q -- 'run_id=adapter-attest-numeric' \
+    "$NUMERIC_ATTEST_STATE/semaphore-v1" 2>/dev/null; then
+  echo "legitimate numeric PID attestation retained its lease" >&2
+  exit 1
+fi
 
 echo "agent-dispatch: PASS"

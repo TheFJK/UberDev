@@ -17,14 +17,14 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 <!-- BEGIN child-callsite-contracts-v1 -->
 ```json
 {
-  "review_pr.fix.phase1":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.fix.phase1":{"inputs":["findings_path","findings_sha256","commit_range_path","commit_range_sha256","working_dir","pr_number","disposition_path","authority_path","authority_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.simplify.reuse":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.simplify.quality":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.simplify.efficiency":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "review_pr.fix.phase2":{"inputs":["findings_path","commit_range_path","working_dir","pr_number","disposition_path"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.fix.phase2":{"inputs":["findings_path","findings_sha256","commit_range_path","commit_range_sha256","working_dir","pr_number","disposition_path","authority_path","authority_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
-  "review_pr.ci.classify":{"inputs":["pr_number","run_id","log_path"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
-  "review_pr.ci.fix_code":{"inputs":["classification_path","log_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.ci.classify":{"inputs":["pr_number","run_id","head_sha","log_content","log_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
+  "review_pr.ci.fix_code":{"inputs":["failure_class","signal_anchor","run_id","head_sha","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.rebase":{"inputs":["working_dir","pr_number","head_sha","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.defer_refusal":{"inputs":["phase1_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.resolve_conflict":{"inputs":["file_path","working_dir","pr_branch","integration_branch","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null}
@@ -40,19 +40,610 @@ All provider calls in this command use the runtime-owned carrier and handoff bui
 set -u
 UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh"
+CODE_FIXER_CONTRACT="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number)}"
 RISK_JSON="${UBERDEV_AGENT_RISK_SIGNALS_JSON:-[]}"
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)}"
-uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+RUN_ID_WAS_EXPLICIT=0
+if [ "${RUN_ID+x}" = x ] && [ -n "${RUN_ID:-}" ]; then
+  RUN_ID_WAS_EXPLICIT=1
+fi
+RUN_ID_RESERVATION_MAX_ATTEMPTS=16
+REVIEW_RUN_MANIFEST="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py"
+review_prepare_run_root() {
+  local repository_root="$1"
+  [ "$#" -eq 1 ] || return 2
+  python3 -I -B - "$repository_root" "$REVIEW_RUN_MANIFEST" <<'PY'
+import importlib.util
+import json
+import os
+import stat
+import sys
+
+repository_root, module_path = sys.argv[1:]
+repository_root = os.path.abspath(repository_root)
+spec = importlib.util.spec_from_file_location("uberdev_review_run_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def owned_directory(entry):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    return (
+        stat.S_ISDIR(entry.st_mode)
+        and not stat.S_ISLNK(entry.st_mode)
+        and not getattr(entry, "st_reparse_tag", 0)
+        and (uid is None or entry.st_uid == uid)
+    )
+
+def require_directory(entry, expected=None):
+    if not owned_directory(entry):
+        raise module.ManifestRejected("review_run_root_not_owned_directory")
+    if expected is not None and (entry.st_dev, entry.st_ino) != expected:
+        raise module.ManifestRejected("review_run_root_identity_changed")
+
+try:
+    module._reject_symlinked_ancestors(repository_root)
+    module._reject_windows_reparse_ancestors(repository_root)
+    repository_before = os.lstat(repository_root)
+    require_directory(repository_before)
+    repository_identity = (repository_before.st_dev, repository_before.st_ino)
+    components = (".uberdev", "runs")
+    if module._uses_native_windows_filesystem():
+        parent_path = repository_root
+        parent_identity = repository_identity
+        for component in components:
+            module._reject_symlinked_ancestors(parent_path)
+            module._reject_windows_reparse_ancestors(parent_path)
+            parent_before = os.lstat(parent_path)
+            require_directory(parent_before, parent_identity)
+            child_path = os.path.join(parent_path, component)
+            try:
+                os.mkdir(child_path, 0o700)
+            except FileExistsError:
+                pass
+            child = os.lstat(child_path)
+            require_directory(child)
+            parent_after = os.lstat(parent_path)
+            require_directory(parent_after, parent_identity)
+            parent_path = child_path
+            parent_identity = (child.st_dev, child.st_ino)
+        runs_root = parent_path
+        runs_identity = parent_identity
+    else:
+        descriptor = module._open_directory_fd(repository_root)
+        try:
+            opened_repository = os.fstat(descriptor)
+            require_directory(opened_repository, repository_identity)
+            parent_path = repository_root
+            for component in components:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except FileExistsError:
+                    pass
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                child_descriptor = os.open(component, flags, dir_fd=descriptor)
+                child_opened = os.fstat(child_descriptor)
+                child_path = os.path.join(parent_path, component)
+                child_current = os.lstat(child_path)
+                require_directory(child_opened)
+                require_directory(
+                    child_current, (child_opened.st_dev, child_opened.st_ino)
+                )
+                os.close(descriptor)
+                descriptor = child_descriptor
+                parent_path = child_path
+            repository_after = os.lstat(repository_root)
+            require_directory(repository_after, repository_identity)
+            runs_opened = os.fstat(descriptor)
+            require_directory(runs_opened)
+            runs_root = parent_path
+            runs_identity = (runs_opened.st_dev, runs_opened.st_ino)
+        finally:
+            os.close(descriptor)
+    print(
+        json.dumps(
+            {"identity": list(runs_identity), "path": runs_root},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        end="",
+    )
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not prepare private review run root: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+review_publish_local_ignore() {
+  local runs_root="$1" runs_identity_json="$2"
+  [ "$#" -eq 2 ] || return 2
+  python3 -I -B - "$runs_root" "$runs_identity_json" "$REVIEW_RUN_MANIFEST" <<'PY'
+import importlib.util
+import json
+import os
+import sys
+
+runs_root, identity_json, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_ignore_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+try:
+    identity = json.loads(identity_json)
+    module.secure_publish_exact_no_clobber(
+        os.path.join(runs_root, ".gitignore"), b"*\n", identity
+    )
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not install private review ignore policy: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+review_reserve_run_directory() {
+  local runs_root="$1" runs_identity_json="$2" requested_run_id="$3"
+  local explicit_run_id="$4" pr_number="$5"
+  [ "$#" -eq 5 ] || return 2
+  python3 -I -B - "$runs_root" "$runs_identity_json" "$requested_run_id" \
+    "$explicit_run_id" "$pr_number" "$RUN_ID_RESERVATION_MAX_ATTEMPTS" \
+    "$REVIEW_RUN_MANIFEST" <<'PY'
+import base64
+import datetime as dt
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+
+(
+    runs_root,
+    runs_identity_json,
+    requested_run_id,
+    explicit_text,
+    pr_text,
+    attempts_text,
+    module_path,
+) = sys.argv[1:]
+runs_root = os.path.abspath(runs_root)
+spec = importlib.util.spec_from_file_location("uberdev_review_reserve_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+")
+created = False
+run_descriptor = None
+runs_descriptor = None
+published = []
+
+def require_identity(value):
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+    ):
+        raise module.ManifestRejected("review_directory_identity_invalid")
+    return tuple(value)
+
+def require_owned_directory(entry, expected):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != expected
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_directory_identity_changed")
+
+def rollback_successful_markers(run_dir, run_identity):
+    for name, identity in reversed(published):
+        try:
+            current = os.lstat(os.path.join(run_dir, name))
+            if module._artifact_identity(current) != identity:
+                continue
+            if module._uses_native_windows_filesystem():
+                os.unlink(os.path.join(run_dir, name))
+            elif run_descriptor is not None:
+                relative = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if module._artifact_identity(relative) == identity:
+                    os.unlink(name, dir_fd=run_descriptor)
+        except OSError:
+            pass
+    try:
+        if module._uses_native_windows_filesystem():
+            if not os.listdir(run_dir):
+                current = os.lstat(run_dir)
+                require_owned_directory(current, run_identity)
+                os.rmdir(run_dir)
+        elif (
+            run_descriptor is not None
+            and runs_descriptor is not None
+            and not os.listdir(run_descriptor)
+        ):
+            current = os.stat(
+                os.path.basename(run_dir),
+                dir_fd=runs_descriptor,
+                follow_symlinks=False,
+            )
+            require_owned_directory(current, run_identity)
+            os.rmdir(os.path.basename(run_dir), dir_fd=runs_descriptor)
+            os.fsync(runs_descriptor)
+    except (OSError, module.ManifestRejected):
+        pass
+
+try:
+    explicit = int(explicit_text)
+    attempts = int(attempts_text)
+    if explicit not in (0, 1) or attempts < 1 or attempts > 128:
+        raise module.ManifestRejected("review_reservation_policy_invalid")
+    if re.fullmatch(r"[1-9][0-9]*", pr_text) is None:
+        raise module.ManifestRejected("review_pr_number_invalid")
+    pr_number = int(pr_text)
+    runs_identity = require_identity(json.loads(runs_identity_json))
+    module._reject_symlinked_ancestors(runs_root)
+    module._reject_windows_reparse_ancestors(runs_root)
+    runs_path = os.lstat(runs_root)
+    require_owned_directory(runs_path, runs_identity)
+    if not module._uses_native_windows_filesystem():
+        runs_descriptor = module._open_directory_fd(runs_root)
+        require_owned_directory(os.fstat(runs_descriptor), runs_identity)
+
+    candidate = None
+    for attempt in range(attempts):
+        if explicit:
+            candidate = requested_run_id
+        else:
+            candidate = requested_run_id + secrets.token_hex(4)
+        if RUN_ID.fullmatch(candidate) is None:
+            raise module.ManifestRejected(
+                f"BUG: run-id {candidate} does not match "
+                "^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue"
+            )
+        try:
+            if module._uses_native_windows_filesystem():
+                os.mkdir(os.path.join(runs_root, candidate), 0o700)
+            else:
+                os.mkdir(candidate, 0o700, dir_fd=runs_descriptor)
+                os.fsync(runs_descriptor)
+            created = True
+            break
+        except FileExistsError:
+            if explicit:
+                raise module.ManifestRejected(
+                    "caller-supplied RUN_ID collision; refusing reuse"
+                )
+            if attempt + 1 == attempts:
+                raise module.ManifestRejected(
+                    "exhausted bounded review run-id reservation attempts"
+                )
+    if not created or candidate is None:
+        raise module.ManifestRuntimeError("review_run_reservation_failed")
+
+    run_dir = os.path.join(runs_root, candidate)
+    run_path = os.lstat(run_dir)
+    run_identity = (run_path.st_dev, run_path.st_ino)
+    require_owned_directory(run_path, run_identity)
+    if not module._uses_native_windows_filesystem():
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        run_descriptor = os.open(candidate, flags, dir_fd=runs_descriptor)
+        require_owned_directory(os.fstat(run_descriptor), run_identity)
+
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+    context = (
+        json.dumps(
+            {"issue": 0, "pr": pr_number, "started_at": started_at},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    marker_records = {}
+    for name, payload in (("locked", b""), ("pr-context.json", context)):
+        _path, identity, digest = module.secure_publish_exact_no_clobber(
+            os.path.join(run_dir, name), payload, run_identity
+        )
+        published.append((name, identity))
+        marker_records[name] = {
+            "identity": list(identity),
+            "sha256": digest,
+            "size": len(payload),
+        }
+    receipt = {
+        "markers": marker_records,
+        "run_dir": run_dir,
+        "run_dir_identity": list(run_identity),
+        "run_id": candidate,
+        "runs_root": runs_root,
+        "runs_root_identity": list(runs_identity),
+        "schema": "review-run-reservation-v1",
+    }
+    raw = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    # `end=""` suppresses only the TRAILING newline; the two embedded separators
+    # are still translated to \r\n under native-Windows text mode. The shell splits
+    # this triple on $'\n', so a translated separator leaves a trailing CR on the
+    # receipt and on RUN_ID -- failing the receipt regex and leaking into marker
+    # paths. Disable newline translation on the text layer rather than dropping to
+    # sys.stdout.buffer: writing bytes while other code in this interpreter uses
+    # print() mixes two buffering layers and can reorder output.
+    sys.stdout.reconfigure(newline="")
+    print(f"v1:{token}\n{candidate}\n{run_dir}", end="")
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    if created and "run_dir" in locals() and "run_identity" in locals():
+        rollback_successful_markers(run_dir, run_identity)
+    print(f"error: could not reserve private review run: {error}", file=sys.stderr)
+    raise SystemExit(2)
+finally:
+    if run_descriptor is not None:
+        os.close(run_descriptor)
+    if runs_descriptor is not None:
+        os.close(runs_descriptor)
+PY
+}
+review_abandon_run_reservation() {
+  local reservation_receipt="$1"
+  [ "$#" -eq 1 ] && [ -n "$reservation_receipt" ] || return 2
+  python3 -I -B - "$reservation_receipt" "$REVIEW_RUN_MANIFEST" <<'PY'
+import base64
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+
+receipt_text, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_abandon_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def decode_receipt(value):
+    if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    token = value[3:]
+    raw = base64.b64decode(
+        token + "=" * (-len(token) % 4), altchars=b"-_", validate=True
+    )
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "markers", "run_dir", "run_dir_identity", "run_id", "runs_root",
+        "runs_root_identity", "schema",
+    }:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    if (
+        receipt["schema"] != "review-run-reservation-v1"
+        or json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() != raw
+        or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for key in ("runs_root_identity", "run_dir_identity"):
+        identity = receipt[key]
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in identity)
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    runs_root = os.path.abspath(receipt["runs_root"])
+    run_dir = os.path.abspath(receipt["run_dir"])
+    if (
+        runs_root != receipt["runs_root"]
+        or run_dir != receipt["run_dir"]
+        or run_dir != os.path.join(runs_root, receipt["run_id"])
+        or os.path.basename(runs_root) != "runs"
+        or os.path.basename(os.path.dirname(runs_root)) != ".uberdev"
+        or set(receipt["markers"]) != {"locked", "pr-context.json"}
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for marker in receipt["markers"].values():
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"identity", "sha256", "size"}
+            or not isinstance(marker["identity"], list)
+            or len(marker["identity"]) != 6
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in marker["identity"])
+            or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"] or "") is None
+            or isinstance(marker["size"], bool)
+            or not isinstance(marker["size"], int)
+            or marker["size"] < 0
+            or marker["identity"][2] != marker["size"]
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    return receipt
+
+def require_directory(entry, identity):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != tuple(identity)
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_reservation_directory_changed")
+
+try:
+    receipt = decode_receipt(receipt_text)
+    runs_root = receipt["runs_root"]
+    run_dir = receipt["run_dir"]
+    module._reject_symlinked_ancestors(run_dir)
+    module._reject_windows_reparse_ancestors(run_dir)
+    require_directory(os.lstat(runs_root), receipt["runs_root_identity"])
+    require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    for name, marker in receipt["markers"].items():
+        _payload, identity = module.secure_capture_published(
+            os.path.join(run_dir, name),
+            marker["sha256"],
+            marker["size"],
+            marker["size"],
+        )
+        if list(identity) != marker["identity"]:
+            raise module.ManifestRejected("review_reservation_marker_changed")
+
+    if module._uses_native_windows_filesystem():
+        if set(os.listdir(run_dir)) != set(receipt["markers"]):
+            raise module.ManifestRejected("review_reservation_directory_not_empty")
+        for name, marker in receipt["markers"].items():
+            current = os.lstat(os.path.join(run_dir, name))
+            if list(module._artifact_identity(current)) != marker["identity"]:
+                raise module.ManifestRejected("review_reservation_marker_changed")
+            os.unlink(os.path.join(run_dir, name))
+        require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+        os.rmdir(run_dir)
+    else:
+        runs_descriptor = module._open_directory_fd(runs_root)
+        run_descriptor = None
+        try:
+            require_directory(os.fstat(runs_descriptor), receipt["runs_root_identity"])
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            run_descriptor = os.open(
+                receipt["run_id"], flags, dir_fd=runs_descriptor
+            )
+            require_directory(os.fstat(run_descriptor), receipt["run_dir_identity"])
+            if set(os.listdir(run_descriptor)) != set(receipt["markers"]):
+                raise module.ManifestRejected("review_reservation_directory_not_empty")
+            for name, marker in receipt["markers"].items():
+                current = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if list(module._artifact_identity(current)) != marker["identity"]:
+                    raise module.ManifestRejected("review_reservation_marker_changed")
+                os.unlink(name, dir_fd=run_descriptor)
+            os.fsync(run_descriptor)
+            require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+            os.rmdir(receipt["run_id"], dir_fd=runs_descriptor)
+            os.fsync(runs_descriptor)
+        finally:
+            if run_descriptor is not None:
+                os.close(run_descriptor)
+            os.close(runs_descriptor)
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not abandon private review reservation: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+# Standalone carrier preparation owns the clean-worktree gate. Run it before
+# the checkout-local reservation so our own `.uberdev/runs/<RUN_ID>` evidence
+# cannot appear as pre-existing untracked input in repositories that do not
+# yet ignore `.uberdev/`. The workspace allocator below sees this inherited
+# carrier and therefore does not repeat the preparation.
+if [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
+  uberdev_prepare_run_carrier review-pr "$PR_NUMBER" medium "$RISK_JSON" >/dev/null || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
+REVIEW_RUN_REPO_ROOT="$(git -C "${WORKTREE_ROOT:-.}" rev-parse --show-toplevel)" || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
-uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
+if [ "$RUN_ID_WAS_EXPLICIT" -eq 1 ]; then
+  REVIEW_RUN_ID_REQUEST="$RUN_ID"
+else
+  REVIEW_RUN_ID_REQUEST="$(date -u +%Y%m%d-%H%M%S)-$(git -C "$REVIEW_RUN_REPO_ROOT" rev-parse --short HEAD)" || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
+fi
+REVIEW_RUN_ROOT_RECORD="$(review_prepare_run_root "$REVIEW_RUN_REPO_ROOT")" || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$REVIEW_RUN_ROOT_RECORD")" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUNS_ROOT_IDENTITY_JSON="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$REVIEW_RUN_ROOT_RECORD")" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+# `check-ignore -q` exits 1 for a NOT-ignored path — the expected first-run
+# state this case arm handles, not an error. The probe must therefore be
+# guarded: bare, it aborts the fence under `set -e` before `$?` is ever read,
+# so the 0|1|* triage below becomes unreachable.
+REVIEW_IGNORE_RC=0
+git -C "$REVIEW_RUN_REPO_ROOT" check-ignore -q -- ".uberdev/runs/.review-probe" || REVIEW_IGNORE_RC=$?
+case "$REVIEW_IGNORE_RC" in
+  0)
+    # The repository's effective ignore stack already covers private evidence.
+    ;;
+  1)
+    review_publish_local_ignore "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" || {
+      rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+    }
+    REVIEW_IGNORE_RC=0
+    git -C "$REVIEW_RUN_REPO_ROOT" check-ignore -q -- ".uberdev/runs/.review-probe" || REVIEW_IGNORE_RC=$?
+    if [ "$REVIEW_IGNORE_RC" -ne 0 ]; then
+      echo "error: installed review ignore policy is not effective" >&2
+      return 2 2>/dev/null || exit 2
+    fi
+    ;;
+  *)
+    echo "error: could not inspect the effective review ignore policy" >&2
+    return 2 2>/dev/null || exit 2
+    ;;
+esac
+REVIEW_RESERVATION_OUTPUT="$(
+  review_reserve_run_directory \
+    "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" \
+    "$REVIEW_RUN_ID_REQUEST" "$RUN_ID_WAS_EXPLICIT" "$PR_NUMBER"
+)" || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
+REVIEW_RUN_RESERVATION_RECEIPT="${REVIEW_RESERVATION_OUTPUT%%$'\n'*}"
+REVIEW_RESERVATION_REMAINDER="${REVIEW_RESERVATION_OUTPUT#*$'\n'}"
+RUN_ID="${REVIEW_RESERVATION_REMAINDER%%$'\n'*}"
+MARKER_DIR="${REVIEW_RESERVATION_REMAINDER#*$'\n'}"
+if [ -z "$REVIEW_RUN_RESERVATION_RECEIPT" ] || [ -z "$RUN_ID" ] || [ -z "$MARKER_DIR" ]; then
+  echo "error: review run reservation returned an incomplete receipt" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" 2>/dev/null || true
+  return 2 2>/dev/null || exit 2
+fi
+export RUN_ID MARKER_DIR REVIEW_RUN_RESERVATION_RECEIPT
+uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
+  rc=$?
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || rc=2
+  return "$rc" 2>/dev/null || exit "$rc"
+}
+if [ "$(cd "$WORKTREE_ROOT" && pwd -P)" != "$(cd "$REVIEW_RUN_REPO_ROOT" && pwd -P)" ]; then
+  echo "error: reserved review run root does not match the validated workspace" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+fi
+uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
+  rc=$?
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || rc=2
+  return "$rc" 2>/dev/null || exit "$rc"
 }
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
-CI_RUN_ID="${CI_RUN_ID:-0}"
+# Phase 3 derives run authority from the selected failed check's immutable
+# metadata. Setup has no sentinel default; 6c.1 clears any inherited tuple
+# before every probe so caller state can never become classification authority.
+CI_RUN_ID="${CI_RUN_ID:-}"
+CI_RUN_EVENT="${CI_RUN_EVENT:-}"
+CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
 review_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
@@ -73,8 +664,10 @@ with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'i
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff result status receipt dispatch_rc ledger_rc cleanup_rc
-  local handoffs=()
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local preflight_refs=()
+  local launch_edges=() launch_instances=() launch_handoffs=()
+  local launch_handoff_sha256s=() launch_results=() launch_statuses=()
   : >"$descriptors"; : >"$launched"
   while IFS= read -r row; do
     edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
@@ -82,21 +675,25 @@ review_child_fanout() {
     inputs="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["inputs"],separators=(",",":")))' "$row")"
     risks="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["risks"],separators=(",",":")))' "$row")"
     uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    python3 -I -B - "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
+    python3 -I -B - "$edge" "$instance" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
 import json,sys
-edge,handoff,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'handoff':handoff,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,instance,handoff,handoff_sha256,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'handoff':handoff,'handoff_sha256':handoff_sha256,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
-    handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_edges+=("$edge"); launch_instances+=("$instance")
+    launch_handoffs+=("$UBERDEV_CHILD_HANDOFF")
+    launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
+    launch_results+=("$UBERDEV_CHILD_RESULT"); launch_statuses+=("$UBERDEV_CHILD_STATUS")
   done <"$records"
-  uberdev_preflight_child_batch "${handoffs[@]}" || return $?
-  while IFS= read -r row; do
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
-    handoff="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["handoff"])' "$row")"
-    result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if receipt="$(uberdev_dispatch_child "$edge" "$handoff" "$result" "$status")"; then
-      :
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || return $?
+  for ((index=0; index<${#launch_handoffs[@]}; index++)); do
+    edge="${launch_edges[$index]}"; instance="${launch_instances[$index]}"
+    handoff="${launch_handoffs[$index]}"
+    handoff_sha256="${launch_handoff_sha256s[$index]}"
+    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+      receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
@@ -107,10 +704,10 @@ PY
       [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
       return "$dispatch_rc"
     fi
-    if python3 -I -B - "$edge" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$status" "$launched" <<'PY'
 import json,sys
-edge,receipt,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
+edge,instance,receipt,result,status,path=sys.argv[1:]
+with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
 PY
     then
       :
@@ -125,7 +722,7 @@ PY
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
     fi
-  done <"$descriptors"
+  done
 }
 review_child_wait_all() {
   local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
@@ -148,26 +745,30 @@ review_child_wait_all() {
 }
 review_child_result_path() {
   local launched="$1" edge="$2"
-  python3 -I -B - "$launched" "$edge" <<'PY'
-import json,os,stat,sys
-ledger,edge=sys.argv[1:]
+  python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" \
+    "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
+import hashlib,importlib.util,json,os,stat,sys
+ledger,edge,plugin_root,carrier_run_dir,backend_policy,expected_backend=sys.argv[1:]
 def fail(reason):
     print(reason,end='')
     raise SystemExit(2)
+policy_backends=backend_policy.split('|')
+if (not policy_backends or any(not item for item in policy_backends)
+        or len(policy_backends)!=len(set(policy_backends)) or 'auto' not in policy_backends):
+    fail('classification_carrier_mismatch')
+allowed_backends=set(policy_backends); allowed_backends.remove('auto')
+if expected_backend not in allowed_backends:
+    fail('classification_carrier_mismatch')
+spec=importlib.util.spec_from_file_location('uberdev_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+if spec is None or spec.loader is None: fail('classification_ledger_unreadable')
+artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+try: spec.loader.exec_module(artifacts)
+except Exception: fail('classification_ledger_unreadable')
+if not os.path.lexists(ledger): fail('classification_ledger_missing')
 try:
-    ledger_entry=os.lstat(ledger)
-except FileNotFoundError:
-    fail('classification_ledger_missing')
-except OSError:
-    fail('classification_ledger_unreadable')
-uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-if (stat.S_ISLNK(ledger_entry.st_mode) or not stat.S_ISREG(ledger_entry.st_mode)
-        or ledger_entry.st_nlink!=1 or (uid is not None and ledger_entry.st_uid!=uid)
-        or ledger_entry.st_size<1 or ledger_entry.st_size>1048576):
-    fail('classification_ledger_unsafe')
-try:
-    rows=[json.loads(line) for line in open(ledger,encoding='utf-8') if line.strip()]
-except (OSError,UnicodeError,json.JSONDecodeError):
+    ledger_bytes,_=artifacts.secure_capture_regular(ledger,1,1048576)
+    rows=[json.loads(line) for line in ledger_bytes.decode('utf-8').splitlines() if line.strip()]
+except Exception:
     fail('classification_ledger_malformed')
 if any(not isinstance(row,dict) for row in rows):
     fail('classification_ledger_malformed')
@@ -176,40 +777,70 @@ if not matches:
     fail('classification_ledger_edge_missing')
 if len(matches)>1:
     fail('classification_ledger_duplicate')
-path=matches[0].get('result')
-status=matches[0].get('status')
-if (not isinstance(path,str) or not os.path.isabs(path)
+row=matches[0]
+if set(row)!={'edge','instance','receipt','result','status'}:
+    fail('classification_ledger_malformed')
+path=row.get('result'); status=row.get('status'); instance=row.get('instance')
+expected_child=os.path.join(os.path.realpath(carrier_run_dir),'children',instance) if isinstance(instance,str) else ''
+if (not os.path.isabs(carrier_run_dir) or os.path.realpath(carrier_run_dir)!=carrier_run_dir
+        or not isinstance(path,str) or not os.path.isabs(path)
         or os.path.basename(path)!='result.md'
-        or os.path.basename(os.path.dirname(os.path.dirname(path)))!='children'):
+        or not isinstance(instance,str) or os.path.basename(os.path.dirname(path))!=instance
+        or os.path.dirname(path)!=expected_child):
     fail('classification_result_path_invalid')
 if (not isinstance(status,str) or not os.path.isabs(status)
         or os.path.basename(status)!='status.json'
         or os.path.dirname(status)!=os.path.dirname(path)):
     fail('classification_status_path_invalid')
 try:
-    status_entry=os.lstat(status)
-    if (stat.S_ISLNK(status_entry.st_mode) or not stat.S_ISREG(status_entry.st_mode)
-            or status_entry.st_nlink!=1 or (uid is not None and status_entry.st_uid!=uid)
-            or status_entry.st_size<1 or status_entry.st_size>65536):
-        fail('classification_status_unsafe')
-    status_value=json.loads(open(status,encoding='utf-8').read())
-except (OSError,UnicodeError,json.JSONDecodeError):
+    receipt=json.loads(row['receipt'])
+except (TypeError,json.JSONDecodeError):
+    fail('classification_receipt_malformed')
+receipt_keys={'schema_version','edge_id','instance_id','backend','handle','state','result_file','status_file'}
+if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
+        or receipt.get('edge_id')!=edge or receipt.get('instance_id')!=instance
+        or receipt.get('result_file')!=path or receipt.get('status_file')!=status
+        or receipt.get('backend')!=expected_backend
+        or not isinstance(receipt.get('handle'),str) or not receipt['handle']
+        or receipt.get('state') not in {'running','completed'}):
+    fail('classification_receipt_mismatch')
+try:
+    status_bytes,_=artifacts.secure_capture_regular(status,1,65536)
+    status_value=json.loads(status_bytes.decode('utf-8'))
+except Exception:
     fail('classification_status_unreadable')
 if (not isinstance(status_value,dict) or status_value.get('state')!='completed'
-        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0):
+        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0
+        or status_value.get('backend')!=receipt['backend']):
     fail('classification_child_not_completed_zero')
+status_handle=status_value.get('pid')
+if (status_handle is None or receipt['handle'] not in {str(status_handle),'pane:'+str(status_handle)}):
+    fail('classification_receipt_mismatch')
+if not os.path.lexists(path): fail('classification_artifact_missing')
 try:
-    entry=os.lstat(path)
-except FileNotFoundError:
-    fail('classification_artifact_missing')
-except OSError:
-    fail('classification_artifact_unreadable')
-if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode) or entry.st_nlink!=1
-        or (uid is not None and entry.st_uid!=uid)):
+    payload,_=artifacts.secure_capture_regular(path,1,16777216)
+except artifacts.ManifestRejected:
     fail('classification_artifact_unsafe')
-if entry.st_size<1 or entry.st_size>16777216:
-    fail('classification_artifact_size_invalid')
-print(os.path.realpath(path),end='')
+except Exception:
+    fail('classification_artifact_unreadable')
+digest=hashlib.sha256(payload).hexdigest()
+instance_digest=hashlib.sha256(instance.encode()).hexdigest()[:16]
+snapshot=os.path.join(os.path.dirname(os.path.abspath(ledger)),f'ci-classification-{instance_digest}-{digest}.trusted.md')
+try:
+    parent=os.lstat(os.path.dirname(snapshot))
+    uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
+    if (stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode)
+            or (uid is not None and parent.st_uid!=uid)):
+        fail('classification_snapshot_failed')
+    published,_,published_digest=artifacts.secure_publish_captured(snapshot,payload)
+    captured,_=artifacts.secure_capture_published(published,published_digest,1,16777216)
+    if captured!=payload or published_digest!=digest:
+        fail('classification_snapshot_failed')
+except SystemExit:
+    raise
+except Exception:
+    fail('classification_snapshot_failed')
+print(published,end='')
 PY
 }
 review_child_single() {
@@ -219,6 +850,73 @@ review_child_single() {
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
   review_child_wait_all "$prefix.launched" "$timeout_s"
 }
+# BEGIN review-fixer-child-bound-v2
+# BEGIN review-failed-return-guard-v1
+review_guard_failed_fixer_return() {
+  [ "$#" -eq 2 ] || return 2
+  local head_before="$1" original_rc="$2" guard_receipt
+  case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
+  guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
+    --working-dir "$WORKTREE_ROOT" \
+    --evidence-dir "$RESEARCH_DIR_ABS" \
+    --head-before "$head_before")" || {
+    echo "error: MUTATED_BLOCKED — fixer failure left unvalidated repository mutation" >&2
+    return 79
+  }
+  [ "$guard_receipt" = '{"status":"clean"}' ] || {
+    echo "error: MUTATED_BLOCKED — fixer failure residue receipt is malformed" >&2
+    return 79
+  }
+  return "$original_rc"
+}
+# END review-failed-return-guard-v1
+review_fixer_child_bound() {
+  [ "$#" -eq 10 ] || return 2
+  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local authority_path="$7" authority_sha256="$8" disposition_path="$9" applied_content_path="${10}"
+  local receipt wait_rc
+  uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
+  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
+  REVIEW_FIXER_RESULT_PATH="$UBERDEV_CHILD_RESULT"
+  REVIEW_FIXER_STATUS_PATH="$UBERDEV_CHILD_STATUS"
+  uberdev_dispatch_child_capture "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$REVIEW_FIXER_RESULT_PATH" "$REVIEW_FIXER_STATUS_PATH" || return $?
+  receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
+  REVIEW_FIXER_LAUNCH_BINDING="$(printf '%s' "$receipt" | python3 -I -B "$CODE_FIXER_CONTRACT" bind-fixer-launch-receipt \
+    --edge-id "$edge" --instance-id "$instance" \
+    --result-path "$REVIEW_FIXER_RESULT_PATH" \
+    --status-path "$REVIEW_FIXER_STATUS_PATH" \
+    --working-dir "$WORKTREE_ROOT" \
+    --authority-path "$authority_path" \
+    --authority-sha256 "$authority_sha256")" || {
+    wait_rc=$?
+    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+    return "$wait_rc"
+  }
+  # Diagnostics only; authorization retains the exact in-memory binding above.
+  python3 -I -B - "$edge" "$instance" "$REVIEW_FIXER_LAUNCH_BINDING" "$prefix.launched" <<'PY' || {
+import json,sys
+edge,instance,binding,path=sys.argv[1:]
+value=json.loads(binding)
+with open(path,"w",encoding="utf-8") as stream:
+    json.dump({"edge":edge,"instance":instance,"receipt_sha256":value["receipt_sha256"]},stream,sort_keys=True,separators=(",",":"))
+    stream.write("\n")
+PY
+    wait_rc=$?
+    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+    return "$wait_rc"
+  }
+  if uberdev_wait_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s"; then
+    REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
+      --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+      --disposition-path "$disposition_path" \
+      --applied-content-path "$applied_content_path")" || return 74
+    return 0
+  fi
+  wait_rc=$?
+  uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
+  return "$wait_rc"
+}
+# END review-fixer-child-bound-v2
 ```
 <!-- END review-child-builder-v1 -->
 
@@ -296,6 +994,40 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      local_head="$(git -C "$worktree_root" rev-parse HEAD 2>/dev/null)" || return 2
      [ "$live_head" = "$expected_head" ] && [ "$local_head" = "$expected_head" ]
    }
+
+   review_publish_same_repo_pr_head() {
+     [ "$#" -eq 7 ] || return 2
+     local repo_slug="$1" pr_number="$2" expected_remote_head_sha="$3" publish_sha="$4"
+     local worktree_root="$5" contract_helper="$6" evidence_dir="$7"
+     local live_identity live_head live_branch live_cross_repository live_head_repo extra
+     local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
+     [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
+     [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
+     [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+     [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
+     [[ "$live_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     [ "$live_head" = "$expected_remote_head_sha" ] || return 79
+     [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
+     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$publish_sha" ] || return 79
+     git -C "$worktree_root" push origin "$publish_sha:refs/heads/$live_branch" || return 79
+     remote_identity="$(git -C "$worktree_root" ls-remote --exit-code --heads origin "refs/heads/$live_branch")" || return 79
+     [[ "$remote_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
+     [ "$remote_head" = "$publish_sha" ] && [ "$remote_ref" = "refs/heads/$live_branch" ] && [ -z "$remote_extra" ] || return 79
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
+     [[ "$live_identity" != *$'\n'* ]] || return 79
+     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     [ "$live_head" = "$publish_sha" ] || return 79
+     [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$publish_sha" ] || return 79
+     residue_receipt="$(python3 -I -B "$contract_helper" validate-residue --working-dir "$worktree_root" --evidence-dir "$evidence_dir")" || return 79
+     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
+   }
    REVIEW_REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
    REVIEW_PR_METADATA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
      --json number,baseRefOid,baseRefName,headRefOid)"
@@ -316,37 +1048,27 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
 4. **Phase 1 — Dispatch `Skill(uberdev:post-impl-review)`**
 
-   Generate a fresh `RUN_ID` for this `/review-pr` invocation:
-   ```bash
-   RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
-   ```
-   Validate against the regex `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` (see "Run-ID format" subsection below); on validation failure, exit 2 and surface the bug. Note: this `RUN_ID` is **decoupled** from any earlier `subagent-driven-dev` `RUN_ID` — `/review-pr` mints its own.
+   The executable setup has already reserved this invocation's `RUN_ID` with
+   one plain `mkdir` before any reviewer dispatch. An explicitly supplied
+   `RUN_ID` is accepted only when that exact directory can be created; a
+   collision exits 2. A standalone invocation mints one timestamp/HEAD prefix
+   and retries a bounded number of cryptographic hex discriminators. In both
+   cases the resulting ID is validated against
+   `^[0-9]{8}-[0-9]{6}-[a-f0-9]+$` before path use.
 
    **Locked-marker write (issue #220, AC ❶):** Before invoking the post-impl-review skill, write a sibling `.uberdev/runs/<RUN_ID>/locked` zero-byte marker + `pr-context.json` so a concurrent `/uberdev:goal` Phase 2b knows this PR's `/review-pr` is in-flight (avoids re-dispatching ours while the leaf solver's own is still running):
 
-   ```bash
-   # B3 (post-impl-review): the marker-write + EXIT-trap MUST live in ONE bash
-   # fence. When split across fences each fence is its own subshell — MARKER_DIR
-   # never propagates to the trap-install fence, the trap expands to literal
-   # empty paths (`rm -f "/locked" "/pr-context.json"; rmdir ""`), and it fires
-   # at the END of the trap-installer fence rather than at /review-pr exit. The
-   # latent bug meant the marker was never cleaned up; B1's worktree-glob mirror
-   # would then surface stale markers indefinitely.
-   PR_NUM="$PR_NUMBER"
-   ISSUE_NUM="$(gh pr view --json body -q .body 2>/dev/null | grep -oE 'Closes #[0-9]+' | head -n1 | grep -oE '[0-9]+')"
-   if [ -n "$PR_NUM" ] && [ "$PR_NUM" -gt 0 ] 2>/dev/null; then
-     MARKER_DIR="$(git rev-parse --show-toplevel)/.uberdev/runs/$RUN_ID"
-     mkdir -p "$MARKER_DIR"
-     : > "$MARKER_DIR/locked"  # creates .uberdev/runs/$RUN_ID/locked zero-byte sentinel
-     jq -n --argjson pr "$PR_NUM" --arg issue "${ISSUE_NUM:-0}" --arg ts "$(date -u +%FT%TZ)" \
-       '{pr: $pr, issue: ($issue|tonumber? // 0), started_at: $ts}' > "$MARKER_DIR/pr-context.json"
-     # Trap-slot audit: no pre-existing EXIT trap found (issue #220 §3.2).
-     # Install in the SAME fence so MARKER_DIR is in scope when the trap expands.
-     trap 'rm -f "$MARKER_DIR/locked" "$MARKER_DIR/pr-context.json" 2>/dev/null; rmdir "$MARKER_DIR" 2>/dev/null || true' EXIT
-   fi
-   ```
+   The marker write also ran in that same executable setup fence. Setup exports
+   one opaque, identity-bound `REVIEW_RUN_RESERVATION_RECEIPT`; it does not
+   install or replace an `EXIT` trap. The receipt survives the setup shell and
+   is the only authority accepted by the self-contained final publication
+   fence. Explicit setup failures abandon the reservation through that receipt.
+   Normal or signal exits leave the markers for `/goal` to observe; even on
+   SIGKILL the reader's grace-window check bounds staleness. Final publication
+   removes only the two receipt-bound markers, and only after the exact verdict
+   pathname has been published durably.
 
-   The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The trap fires on every exit path (success, failure, signal) so an orphaned marker is bounded by the natural EXIT signal — and even on SIGKILL the `/goal` reader's grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without operator intervention. See RFC 0005 §9 D220b for the cross-component design rationale.
+   The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The marker remains truthful across shell boundaries until the receipt-authorized final fence publishes the verdict and retires it. If the producer exits before finalization, `/goal`'s grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without an operator or an `EXIT`-trap race. See RFC 0005 §9 D220b for the cross-component design rationale.
 
    Compute Phase 1 inputs from the PR:
    - `changed_paths` — normalized, non-empty POSIX repository-relative paths from the same fixed local `git diff <merge-base>..<head> --name-only` snapshot used for the Phase 1 diff artifact and commit range. The GitHub server-side path list is not authoritative on entry or re-entry. Preserve deleted or otherwise missing entries as path strings; absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected by the `repo_path_array` handoff contract before provider launch.
@@ -498,21 +1220,72 @@ PY
    ```
    **The artifact already carries the `<external-untrusted-input source="post-impl-review-aggregate">…</external-untrusted-input>` envelope as its own LEADING/TRAILING file bytes** (written by `uberdev:post-impl-review` Step 4 — #302 / RFC 0012 §3.1 do-first). Pass the artifact PATH (`findings_path`) or its already-enveloped bytes VERBATIM into the apply-loop prompt — **do NOT re-wrap** (a read-time second wrap nests envelopes while leaving the on-disk file bare, which is exactly what made `findings-to-issues.md` Step 1's first-128-bytes validation refuse every Phase 2.5 dispatch `input-malformed`). The file-bytes envelope is the single envelope of record, per the orchestrator trust-boundary convention (`plugins/uberdev/skills/orchestrator/SKILL.md` "Trust boundary" section). Threat model unchanged: second-order injection where issue-author text → diff hunk → reviewer agent's report → aggregate findings file → fixer prompt. The envelope is required, not advisory — it is simply written once, by the writer.
 
-   Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The structured input contract restores `phase=phase1` and `commit_type_prefix=fix:` as data:
+   Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The edge and manifest phase are the only phase/type authority; the payload carries only immutable artifact authority:
 
    ```bash
+   PHASE1_FINDINGS_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+   PHASE1_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE1_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter${REVIEW_ITERATION}.json"
+   PHASE1_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase1 --policy-phase review_fix \
+     --findings-path "$PHASE1_FINDINGS_PATH" --findings-sha256 "$PHASE1_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE1_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase1" or value["commit_type"]!="fix" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
    PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1 \
-     findings_path "$(review_json_string "$findings_path")" \
+     findings_path "$(review_json_string "$PHASE1_FINDINGS_PATH")" \
+     findings_sha256 "$(review_json_string "$PHASE1_FINDINGS_SHA256")" \
      commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     commit_range_sha256 "$(review_json_string "$FIXER_COMMIT_RANGE_SHA256")" \
      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
      pr_number "$PR_NUMBER" \
-     disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")")"
-   # phase=phase1 commit_type_prefix=fix:
+     disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
+     authority_path "$(review_json_string "$PHASE1_AUTHORITY_PATH")" \
+     authority_sha256 "$(review_json_string "$PHASE1_AUTHORITY_SHA256")")"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   REVIEW_FIXER_TERMINAL=
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase1
-   review_child_single review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT"
+   if review_fixer_child_bound review_pr.fix.phase1 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase1-iter${REVIEW_ITERATION}-attempt01")" "$PHASE1_INPUTS" null "$RESEARCH_DIR_ABS/phase1-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" "$PHASE1_DISPOSITION_PATH" "$PHASE1_APPLIED_CONTENT_PATH"; then :; else
+     REVIEW_FIXER_RC=$?
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
+     return $?
+   fi
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   PHASE1_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE1_AUTHORITY_PATH" --authority-sha256 "$PHASE1_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
-   The agent applies edits + creates `fix:` / `refactor:` conventional commits autonomously, returning commit SHAs in its YAML. These are the **review-phase commits**, kept distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
+   The agent applies edits and creates exactly one routed `fix:` conventional commit when any Phase 1 finding is APPLIED, returning that SHA in its YAML. This **review-phase commit** stays distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
    Capture `FIXER_HEAD_BEFORE` immediately before dispatch,
    `FIXER_HEAD_AFTER` immediately after return, and the final declared
@@ -520,7 +1293,9 @@ PY
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local status="$1" before="$2" after="$3" declared_tip="${4:-}"
+     local status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
+     [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
      [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
      case "$status" in
@@ -528,6 +1303,8 @@ PY
          [ "$before" != "$after" ] || return 77
          [ "$declared_tip" = "$after" ] || return 77
          git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$before" "$after" || return 78
+         commit_count="$(git -C "$WORKTREE_ROOT" rev-list --count "$before..$after")" || return 78
+         [ "$commit_count" = 1 ] || return 77
          VALIDATED_FIXER_HEAD_SHA="$after"
          ;;
        NO_FIXES_NEEDED|REFUSED)
@@ -536,12 +1313,38 @@ PY
        *) return 2 ;;
      esac
    }
+   review_promote_validated_fixer_outcome() {
+     [ "$#" -eq 3 ] || return 2
+     local outcome="$1" before="$2" after="$3" parsed status declared_tip extra
+     parsed="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1])
+expected={"status","declared_tip","receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
+if not isinstance(value,dict) or set(value)!=expected: raise SystemExit(74)
+status=value["status"]; tip=value["declared_tip"]
+if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,str): raise SystemExit(74)
+if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in ("receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
+if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
+print(status+"\t"+tip,end="")' "$outcome")" || return 74
+     IFS=$'\t' read -r status declared_tip extra <<<"$parsed"
+     [ -z "${extra:-}" ] || return 74
+     review_track_validated_fixer_head "$status" "$before" "$after" "$declared_tip"
+   }
+   ```
+
+   Promote the exact authenticated Phase 1 outcome immediately:
+
+   ```bash
+   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
    entry, including mandatory CI-fix re-entry. Call
    `review_track_validated_fixer_head` after each Phase 1 and Phase 2 fixer
-   return. Any status/head/declaration/ancestry mismatch is
+   return. Run the residue check even when result parsing fails; malformed
+   result plus residual state is still `MUTATED_BLOCKED`, never an ordinary
+   parser refusal. Any status/head/declaration/ancestry/residue mismatch is
    `MUTATED_BLOCKED`: stop before publication and re-enter Phase 1 only after
    the unexpected history is resolved. A CI fixer never advances this variable
    directly; its successful push must take the mandatory Phase 1 re-entry path,
@@ -572,6 +1375,10 @@ PY
    **The post-Phase-1 diff is attacker-controllable** and MUST be persisted at `DIFF_ARTIFACT_PATH` with literal leading `<external-untrusted-input source="pr-diff">` and trailing `</external-untrusted-input>` bytes. Concrete dispatch uses three immutable instances and issues the whole wave before waiting:
 
    ```bash
+   # Phase 1 may have advanced HEAD. Rebuild both the enveloped diff and the
+   # commit-range artifact from that exact post-fix snapshot before any Phase 2
+   # lens or fixer receives authority.
+   review_refresh_phase1_scope "$BASE_SHA" || return 2
    # routed-provider-edge: review_pr.simplify.reuse
    # routed-provider-edge: review_pr.simplify.quality
    # routed-provider-edge: review_pr.simplify.efficiency
@@ -607,18 +1414,73 @@ PY
 
    Each lens preserves the iron rule from `/uberdev:simplify`: **behavior preservation is non-negotiable.**
 
-   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer` agent with `phase: phase2` and `commit_type_prefix: refactor:`:
+   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer`; `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
 
    ```bash
+   PHASE2_FINDINGS_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
+   PHASE2_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE2_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter${REVIEW_ITERATION}.json"
+   PHASE2_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase2 --policy-phase simplify_fix \
+     --findings-path "$PHASE2_FINDINGS_PATH" --findings-sha256 "$PHASE2_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE2_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase2" or value["commit_type"]!="refactor" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
    PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2 \
-     findings_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
+     findings_path "$(review_json_string "$PHASE2_FINDINGS_PATH")" \
+     findings_sha256 "$(review_json_string "$PHASE2_FINDINGS_SHA256")" \
      commit_range_path "$(review_json_string "$COMMIT_RANGE_PATH")" \
+     commit_range_sha256 "$(review_json_string "$FIXER_COMMIT_RANGE_SHA256")" \
      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
      pr_number "$PR_NUMBER" \
-     disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")")"
-   # subagent_type: uberdev:code-fixer; phase=phase2 commit_type_prefix=refactor:
+     disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
+     authority_path "$(review_json_string "$PHASE2_AUTHORITY_PATH")" \
+     authority_sha256 "$(review_json_string "$PHASE2_AUTHORITY_SHA256")")"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   REVIEW_FIXER_TERMINAL=
+   # subagent_type: uberdev:code-fixer
    # builder dispatch: uberdev_dispatch_child review_pr.fix.phase2
-   review_child_single review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT"
+   if review_fixer_child_bound review_pr.fix.phase2 "$(uberdev_child_instance_id "review-pr-${RUN_ID}-fix-phase2-iter${REVIEW_ITERATION}-attempt01")" "$PHASE2_INPUTS" null "$RESEARCH_DIR_ABS/phase2-fixer" "$REVIEW_PR_TIMEOUT" "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" "$PHASE2_DISPOSITION_PATH" "$PHASE2_APPLIED_CONTENT_PATH"; then :; else
+     REVIEW_FIXER_RC=$?
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"
+     return $?
+   fi
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   [ -n "${REVIEW_FIXER_TERMINAL:-}" ] || {
+     review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" 74; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    `PHASE2_HANDOFF` passes the already-enveloped `simplify-final.md` path; its
@@ -628,7 +1490,7 @@ PY
 
    Capture the Phase 2 `FIXER_HEAD_BEFORE`, `FIXER_HEAD_AFTER`, and declared
    `commits[0].sha`, then pass them through
-   `review_track_validated_fixer_head`. Phase 2 uses the same fail-closed
+   `review_promote_validated_fixer_outcome`. Phase 2 uses the same fail-closed
    mutation and ancestry rules as Phase 1; a refusal is non-mutating or blocked.
 
    If `code-fixer` returns `status: REFUSED` for Phase 2, log the rationale, continue to trust-signal evaluation (the Phase 2 row in the aggregation table reads `Auto-applied: ∅` and "Phase 2 fixer refused: <reason>" surfaces in Advisory findings). Phase 2 status is `blocked` if and only if the lens fanout itself failed (timeout / parse error / aggregator crash); a fixer refusal does NOT make Phase 2 `blocked` — the lenses' findings are advisory.
@@ -653,25 +1515,23 @@ PY
    # a silently-failed push here would let Phase 3 probe a stale remote SHA and
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
    # per the artifact-emission-failure prose (trust-signal contract broken).
-   POST_FIXER_HEAD_SHA="$(git rev-parse HEAD)" || exit 2
+   POST_FIXER_HEAD_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
    if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
      echo "error: HEAD changed outside the validated review fixers; refusing publication" >&2
      exit 2
    fi
-   if ! git push origin HEAD; then
-     echo "error: post-fixer push failed (git push origin HEAD exited non-zero) — Phase 3 would probe a stale remote SHA. Re-run /review-pr after resolving." >&2
+   if ! review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"; then
+     echo "error: immutable post-fixer publication, same-repository authority, equality, or residue proof failed — Phase 3 would probe an unauthenticated SHA. Re-run /review-pr after resolving." >&2
      exit 2
    fi
-   review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" \
-     "$VALIDATED_FIXER_HEAD_SHA" "$WORKTREE_ROOT" || {
-       echo "error: post-fixer publication did not produce exact remote/local head equality" >&2
-       exit 2
-     }
-   REVIEWED_HEAD_SHA="$VALIDATED_FIXER_HEAD_SHA"
+   REVIEWED_HEAD_SHA="$POST_FIXER_HEAD_SHA"
    ```
 
-   Only after the guarded push and exact live/local equality assertion does the
-   controller promote `REVIEWED_HEAD_SHA` to the validated fixer tip. When
+   The shared publication gate rejects fork PRs and authenticates the PR head
+   repository, branch, pre-push remote head, immutable pushed object, remote
+   ref, post-push live PR head, local HEAD, and clean repository residue. Only
+   after every proof succeeds does the controller promote `REVIEWED_HEAD_SHA`
+   to the validated fixer tip. When
    neither fixer produced a commit, the candidate remains the entry snapshot
    and the push is an `Everything up-to-date` no-op (exit 0). On Phase 1
    re-entry iterations (6c.5) this full tracking/publication sequence re-runs
@@ -829,6 +1689,82 @@ PY
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
+    Run authority is iteration-local. The caller never supplies `CI_RUN_ID`;
+    each red probe selects it from the failed check row's immutable `link` and
+    `event` fields. The selector applies the same drop-only-cancel grouping as
+    `PROBE_VERDICT`, accepts only positive GitHub Actions run IDs for the current
+    repository, prefers the PR-associated `pull_request` run over a same-head
+    `push` sibling, and fails closed on an unknown event, external check, or
+    cross-repository link.
+
+    ```bash
+    review_clear_ci_run_selection() {
+      CI_RUN_ID=
+      CI_RUN_EVENT=
+      CI_RUN_CHECK_LINK=
+      unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
+    }
+    review_select_failed_ci_run() {
+      local probe_json="${1:-}" repo_slug="${2:-}"
+      python3 -I -B - "$repo_slug" 3<<<"$probe_json" <<'PY'
+import json,os,re,sys
+from urllib.parse import urlsplit
+
+repo_slug=sys.argv[1]
+try:
+    rows=json.load(os.fdopen(3))
+except (json.JSONDecodeError,UnicodeDecodeError):
+    raise SystemExit(2)
+if not isinstance(rows,list) or not rows or not re.fullmatch(r'[^/\s]+/[^/\s]+',repo_slug):
+    raise SystemExit(2)
+known_buckets={'pass','skipping','pending','fail','cancel'}
+groups={}
+for row in rows:
+    if not isinstance(row,dict):
+        raise SystemExit(2)
+    name=row.get('name')
+    bucket=row.get('bucket')
+    if not isinstance(name,str) or not name or not isinstance(bucket,str) or bucket not in known_buckets:
+        raise SystemExit(2)
+    groups.setdefault(name,[]).append(row)
+kept=[]
+for group in groups.values():
+    kept.extend(
+        [row for row in group if row['bucket']!='cancel']
+        if any(row['bucket']!='cancel' for row in group)
+        else group
+    )
+failed=[row for row in kept if row['bucket'] in {'fail','cancel'}]
+if not failed:
+    raise SystemExit(2)
+candidates=[]
+link_pattern=re.compile(r'^/([^/]+)/([^/]+)/actions/runs/([1-9][0-9]*)(?:/job/[1-9][0-9]*)?/?$')
+for row in failed:
+    event=row.get('event')
+    link=row.get('link')
+    workflow=row.get('workflow')
+    if event not in {'pull_request','push'} or not isinstance(link,str) or not link:
+        raise SystemExit(2)
+    if not isinstance(workflow,str) or any(ord(char)<32 or ord(char)==127 for char in event+link+workflow):
+        raise SystemExit(2)
+    parsed=urlsplit(link)
+    match=link_pattern.fullmatch(parsed.path)
+    if parsed.scheme!='https' or parsed.netloc.lower()!='github.com' or match is None:
+        raise SystemExit(2)
+    linked_slug=f'{match.group(1)}/{match.group(2)}'
+    if linked_slug.lower()!=repo_slug.lower():
+        raise SystemExit(2)
+    run_id=match.group(3)
+    candidates.append((0 if event=='pull_request' else 1,workflow,row['name'],int(run_id),event,link))
+if not candidates:
+    raise SystemExit(2)
+_,_,_,run_id,event,link=min(candidates)
+print(f'{run_id}\t{event}\t{link}')
+PY
+    }
+    review_clear_ci_run_selection
+    ```
+
     **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
     ```bash
@@ -854,7 +1790,7 @@ PY
 
     **Probe call:**
 
-    **Field contract (gh ≥ 2.83.1):** `gh pr checks --json` exposes `name`, `state`, and `bucket` — there is **no** `status` and **no** `conclusion` field (those were removed upstream; reading them errors `unknown JSON field`). `bucket` is gh's own canonical categorization of `state` and is the field this probe keys off:
+    **Field contract (gh ≥ 2.83.1):** `gh pr checks --json` exposes `name`, `state`, `bucket`, `link`, `event`, and `workflow` — there is **no** `status` and **no** `conclusion` field (those were removed upstream; reading them errors `unknown JSON field`). `bucket` is gh's own canonical categorization of `state`; `link` and `event` are the immutable controller inputs used to identify the exact Actions run when classification is required:
 
     | `bucket` | `state` values folded into it (gh `aggregateChecks`) | meaning here |
     |---|---|---|
@@ -865,7 +1801,7 @@ PY
     | `cancel` | `CANCELLED` | red |
 
     ```bash
-    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket 2>&1)" || PROBE_RC=$?
+    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
     # Validate PROBE_JSON is parseable JSON BEFORE the terminal-mapping
     # branches below try to interpret it. On gh failure (non-zero exit),
     # PROBE_JSON contains stderr text; jq parsing would silently produce
@@ -962,27 +1898,297 @@ PY
     timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30
     ```
 
-    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
 
     `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
 
+    On a non-zero, non-8 MONITOR exit, refresh the check projection before
+    CLASSIFY. A pending-only initial probe can become red while `--watch` is
+    running; retaining the pre-watch JSON would leave no failed row from which
+    to derive the authoritative run. The refreshed projection uses the exact
+    6c.1 field set and replaces (never appends to) `PROBE_JSON`:
+
+    ```bash
+    unset PROBE_RC
+    PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
+    if [ "${PROBE_RC:-0}" -ne 0 ] && ! jq empty <<<"$PROBE_JSON" 2>/dev/null; then
+      # MONITOR has already established red CI. That evidence is monotonic:
+      # a later metadata outage cannot reuse the initial-probe unreachable
+      # carve-out or omit Phase 3. Preserve status=ran with a halted outcome.
+      OUTCOME=halted
+      audit ci_phase_outcome outcome=halted subreason=post_monitor_refresh_failed
+      exit 1
+    fi
+    ```
+
     ### 6c.3 CLASSIFY — routed ci-failure-classifier
 
-    Read the failed check's log via `gh run view <run-id> --log`. The log content MUST be wrapped in:
+    First derive the exact failed Actions run from the refreshed check
+    projection. `CI_RUN_ID` is never accepted from setup/environment state:
+
+    ```bash
+    if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+        review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
+      ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]] \
+        && [ -n "$CI_RUN_CHECK_LINK" ]; then
+      :
+    else
+      review_clear_ci_run_selection
+      audit ci_phase_outcome outcome=halted subreason=classification_run_selection_invalid
+      OUTCOME=halted
+      exit 1
+    fi
+    ```
+
+    Then bind the classifier to one immutable PR-head identity before reading
+    the selected run's log or dispatching the child. The local worktree HEAD and
+    live PR head must always identify the same full SHA. Run identity is
+    **event-aware**:
+
+    - `push`: the selected run's repository, branch, event, and `head_sha` must
+      directly equal the live PR-head identity.
+    - `pull_request`: GitHub may report a synthetic merge `head_sha`; do not
+      compare it directly to the branch SHA. Instead, require the run's
+      `pull_requests` metadata to contain `PR_NUMBER` with the exact live
+      `head.sha` and `head.ref`, plus matching repository/event/branch fields.
+
+    An unknown event, stale association, different PR/repository, or moved
+    local/live head fails closed. `review_capture_ci_classification_head` emits
+    only the branch-head SHA on success or one stable bounded failure class on
+    failure; it never relays `git`/`gh` diagnostics.
+
+    ```bash
+    review_capture_ci_classification_head() {
+      local expected_head="${1:-}" local_head live_identity live_head live_branch
+      local target_head run_json run_failure
+      local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
+        printf 'classification_local_head_query_failed'
+        return 1
+      }
+      live_identity="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
+        --json headRefOid,headRefName \
+        --jq '"\(.headRefOid)\t\(.headRefName)"' 2>/dev/null)" || {
+        printf 'classification_live_head_query_failed'
+        return 1
+      }
+      IFS=$'\t' read -r live_head live_branch <<<"$live_identity"
+      if [[ ! "$local_head" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'classification_local_head_malformed'
+        return 1
+      fi
+      if [[ ! "$live_head" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'classification_live_head_malformed'
+        return 1
+      fi
+      if [ -z "$live_branch" ]; then
+        printf 'classification_live_branch_malformed'
+        return 1
+      fi
+      if [[ ! "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'classification_run_id_malformed'
+        return 1
+      fi
+      if [[ ! "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]]; then
+        printf 'classification_run_event_malformed'
+        return 1
+      fi
+      if [ -n "$expected_head" ]; then
+        if [[ ! "$expected_head" =~ ^[0-9a-f]{40}$ ]]; then
+          printf 'classification_expected_head_malformed'
+          return 1
+        fi
+        if [ "$local_head" != "$expected_head" ]; then
+          printf 'classification_local_head_moved'
+          return 1
+        fi
+        if [ "$live_head" != "$expected_head" ]; then
+          printf 'classification_live_head_moved'
+          return 1
+        fi
+        target_head="$expected_head"
+      else
+        if [ "$live_head" != "$local_head" ]; then
+          printf 'classification_live_head_mismatch'
+          return 1
+        fi
+        target_head="$local_head"
+      fi
+      run_json="$(gh api "repos/$REVIEW_REPO_SLUG/actions/runs/$CI_RUN_ID" 2>/dev/null)" || {
+        printf 'classification_run_metadata_query_failed'
+        return 1
+      }
+      if run_failure="$(
+        python3 -I -B - "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$CI_RUN_ID" \
+          "$CI_RUN_EVENT" "$target_head" "$live_branch" \
+          "$([ -n "$expected_head" ] && printf moved || printf mismatch)" \
+          3<<<"$run_json" 2>/dev/null <<'PY'
+import json,os,re,sys
+repo_slug,pr_number,run_id,selected_event,target_head,live_branch,phase=sys.argv[1:]
+def fail(reason):
+    print(reason,end='')
+    raise SystemExit(2)
+try:
+    value=json.load(os.fdopen(3))
+except (json.JSONDecodeError,UnicodeDecodeError,OSError):
+    fail('classification_run_metadata_malformed')
+if not isinstance(value,dict):
+    fail('classification_run_metadata_malformed')
+if value.get('id')!=int(run_id):
+    fail('classification_run_id_mismatch')
+repository=value.get('repository')
+if not isinstance(repository,dict) or str(repository.get('full_name','')).lower()!=repo_slug.lower():
+    fail('classification_run_repository_mismatch')
+if value.get('event')!=selected_event:
+    fail('classification_run_event_mismatch')
+run_head=value.get('head_sha')
+run_branch=value.get('head_branch')
+if not isinstance(run_head,str) or re.fullmatch(r'[0-9a-f]{40}',run_head) is None:
+    fail('classification_run_head_malformed')
+suffix='moved' if phase=='moved' else 'mismatch'
+if selected_event=='push':
+    if run_branch!=live_branch or run_head!=target_head:
+        fail(f'classification_run_head_{suffix}')
+elif selected_event=='pull_request':
+    # pull_requests must contain PR_NUMBER at the exact live branch-head.
+    associations=value.get('pull_requests')
+    if not isinstance(associations,list):
+        fail('classification_run_metadata_malformed')
+    matched=False
+    for association in associations:
+        if not isinstance(association,dict) or association.get('number')!=int(pr_number):
+            continue
+        head=association.get('head')
+        if isinstance(head,dict) and head.get('sha')==target_head and head.get('ref')==live_branch:
+            matched=True
+            break
+    if run_branch!=live_branch or not matched:
+        fail(f'classification_run_pr_{suffix}')
+else:
+    fail('classification_run_event_mismatch')
+PY
+      )"; then
+        :
+      else
+        printf '%s' "${run_failure:-classification_run_metadata_malformed}"
+        return 1
+      fi
+      printf '%s' "$local_head"
+    }
+    if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
+      :
+    else
+      CI_CLASSIFICATION_HEAD_FAILURE="$CI_CLASSIFICATION_HEAD_SHA"
+      audit ci_phase_outcome outcome=halted subreason="$CI_CLASSIFICATION_HEAD_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
+    ```
+
+    Read only failed-job logs via
+    `gh run view <run-id> --repo <owner/repo> --log-failed`. Pipe that stream
+    directly into one bounded transformer: there is no raw staging pathname,
+    producer receipt, reopen, or cleanup unlink. The transformer reads at most
+    49,153 bytes, validates strict UTF-8 and the selected PR/run/head identity,
+    escapes `<` and `&`, then emits the canonical inline input JSON. The exact
+    `log_content` MUST be wrapped in:
 
     ```
     <external-untrusted-input source="github-actions-log-pr-<N>-run-<id>">
-    …log content (truncated to last 500 lines per check — `CI_LOG_TRUNCATE_LINES`)…
+    …bounded failed-job log content…
     </external-untrusted-input>
     ```
 
-    Dispatch the classifier:
+    The immutable classifier authority is the exact tuple
+    (`pr_number`, `run_id`, `head_sha`, `log_content`, `log_sha256`).
+    `log_sha256` covers the exact UTF-8 bytes the child receives. The builder,
+    handoff publisher, and handoff consumer each independently require the
+    envelope's PR/run identity and digest to match, and each enforces the
+    49,152-byte serialized input ceiling.
+
+    Capture and dispatch the classifier:
 
     ```bash
+    review_json_member() {
+      [ "$#" -eq 2 ] || return 2
+      python3 -I -B -c '
+import json,sys
+value=json.loads(sys.argv[1])
+if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
+print(json.dumps(value[sys.argv[2]],separators=(",",":")),end="")
+' "$1" "$2"
+    }
+    review_capture_ci_log_authority() {
+      (
+        set -o pipefail
+        gh run view "$CI_RUN_ID" --repo "$REVIEW_REPO_SLUG" --log-failed 2>/dev/null \
+          | python3 -I -B -c '
+import hashlib,json,re,sys
+pr_number,run_id,head_sha=sys.argv[1:]
+def fail(reason,code=2):
+    print(reason,end="")
+    raise SystemExit(code)
+if (re.fullmatch(r"[1-9][0-9]*",pr_number) is None
+        or re.fullmatch(r"[1-9][0-9]*",run_id) is None
+        or re.fullmatch(r"[0-9a-f]{40}",head_sha) is None):
+    fail("classification_log_identity_mismatch")
+chunks=[]
+total=0
+while total<=49152:
+    chunk=sys.stdin.buffer.read(min(8192,49153-total))
+    if not chunk:
+        break
+    chunks.append(chunk)
+    total+=len(chunk)
+    if total>49152:
+        fail("classification_log_input_oversize",3)
+raw=b"".join(chunks)
+if not raw:
+    fail("classification_log_capture_invalid")
+try:
+    body=raw.decode("utf-8")
+except UnicodeDecodeError:
+    fail("classification_log_capture_invalid")
+if not body or "\x00" in body:
+    fail("classification_log_capture_invalid")
+body=body.replace("&","&amp;").replace("<","&lt;")
+source=json.dumps(f"github-actions-log-pr-{pr_number}-run-{run_id}")
+content="<external-untrusted-input source="+source+">\n"+body
+if not content.endswith("\n"):
+    content+="\n"
+content+="</external-untrusted-input>\n"
+inputs={
+    "pr_number":int(pr_number),
+    "run_id":run_id,
+    "head_sha":head_sha,
+    "log_content":content,
+    "log_sha256":hashlib.sha256(content.encode("utf-8")).hexdigest(),
+}
+serialized=json.dumps(inputs,sort_keys=True,separators=(",",":"))
+if len(serialized.encode("utf-8"))>49152:
+    fail("classification_log_input_oversize",3)
+print(serialized,end="")
+' "$PR_NUMBER" "$CI_RUN_ID" "$CI_CLASSIFICATION_HEAD_SHA"
+      )
+    }
+    if CI_LOG_AUTHORITY_JSON="$(review_capture_ci_log_authority)"; then
+      :
+    else
+      CI_LOG_AUTHORITY_FAILURE="${CI_LOG_AUTHORITY_JSON:-classification_log_capture_failed}"
+      case "$CI_LOG_AUTHORITY_FAILURE" in
+        classification_log_capture_failed|classification_log_identity_mismatch|classification_log_capture_invalid|classification_log_input_oversize) ;;
+        *) CI_LOG_AUTHORITY_FAILURE=classification_log_capture_failed ;;
+      esac
+      audit ci_classify_returned subreason="$CI_LOG_AUTHORITY_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
     CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify \
-      pr_number "$PR_NUMBER" \
-      run_id "$(review_json_string "$CI_RUN_ID")" \
-      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")")"
+      pr_number "$(review_json_member "$CI_LOG_AUTHORITY_JSON" pr_number)" \
+      run_id "$(review_json_member "$CI_LOG_AUTHORITY_JSON" run_id)" \
+      head_sha "$(review_json_member "$CI_LOG_AUTHORITY_JSON" head_sha)" \
+      log_content "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_content)" \
+      log_sha256 "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_sha256)")"
     if review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"; then
       :
     else
@@ -993,7 +2199,7 @@ PY
     fi
     CI_CLASSIFICATION_PATH="$(review_child_result_path "$RESEARCH_DIR_ABS/ci-classify.launched" review_pr.ci.classify)" || {
       case "$CI_CLASSIFICATION_PATH" in
-        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_status_path_invalid|classification_status_unsafe|classification_status_unreadable|classification_child_not_completed_zero|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid) ;;
+        classification_ledger_missing|classification_ledger_unreadable|classification_ledger_unsafe|classification_ledger_malformed|classification_ledger_edge_missing|classification_ledger_duplicate|classification_result_path_invalid|classification_status_path_invalid|classification_status_unsafe|classification_status_unreadable|classification_child_not_completed_zero|classification_receipt_malformed|classification_receipt_mismatch|classification_carrier_mismatch|classification_artifact_missing|classification_artifact_unreadable|classification_artifact_unsafe|classification_artifact_size_invalid|classification_snapshot_failed) ;;
         *) CI_CLASSIFICATION_PATH=classification_result_discovery_failed ;;
       esac
       audit ci_classify_returned subreason="$CI_CLASSIFICATION_PATH"
@@ -1010,11 +2216,29 @@ PY
 
     ```bash
     review_validate_ci_classification() {
-      python3 -I -B - "$1" "$2" <<'PY'
-import json,pathlib,re,sys
-path,root=sys.argv[1:]
-raw=pathlib.Path(path).read_text(encoding='utf-8')
-if len(raw.encode())>65536: raise SystemExit(2)
+      local helper_root="${3:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$2/plugins/uberdev}}"
+      python3 -I -B - "$1" "$2" "$helper_root" <<'PY'
+import hashlib,importlib.util,json,os,pathlib,re,sys
+path,root,helper_root=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('uberdev_classifier_artifacts',os.path.join(helper_root,'lib','run_manifest.py'))
+if spec is None or spec.loader is None: raise SystemExit(2)
+artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
+trusted_name=re.fullmatch(
+    r'ci-classification-[0-9a-f]{16}-([0-9a-f]{64})\.trusted\.md'
+    r'\.attempt-[0-9a-f]{32}-([0-9a-f]{64})',
+    os.path.basename(path),
+)
+try:
+    spec.loader.exec_module(artifacts)
+    if '.trusted.md.attempt-' in os.path.basename(path):
+        if trusted_name is None or trusted_name.group(1)!=trusted_name.group(2):
+            raise ValueError()
+        raw_bytes,_=artifacts.secure_capture_published(path,trusted_name.group(2),1,65536)
+    else:
+        raw_bytes,_=artifacts.secure_capture_regular(path,1,65536)
+    raw=raw_bytes.decode('utf-8')
+except Exception:
+    raise SystemExit(2)
 document=re.search(r'(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z',raw,re.DOTALL)
 if document is None: raise SystemExit(2)
 fields={}
@@ -1100,22 +2324,36 @@ PY
       exit 1
     }
     review_apply_ci_classification_status "$classification_status" "$classifier_rationale" || exit 1
+    # The pathname has completed its controller-only validation role. ROUTE
+    # carries only the closed scalars captured above and cannot reopen a later
+    # replacement of the classifier snapshot.
+    CI_CLASSIFICATION_PATH=
+    if CI_ROUTE_HEAD_SHA="$(review_capture_ci_classification_head \
+        "$CI_CLASSIFICATION_HEAD_SHA")"; then
+      unset CI_ROUTE_HEAD_SHA
+    else
+      CI_CLASSIFICATION_HEAD_FAILURE="$CI_ROUTE_HEAD_SHA"
+      audit ci_phase_outcome outcome=halted subreason="$CI_CLASSIFICATION_HEAD_FAILURE"
+      OUTCOME=halted
+      exit 1
+    fi
     ```
 
     ### 6c.4 ROUTE — failure_class → downstream agent
 
     ```bash
     CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code \
-      classification_path "$(review_json_string "$CI_CLASSIFICATION_PATH")" \
-      log_path "$(review_json_string "$CI_LOG_ARTIFACT_PATH")" \
+      failure_class "$(review_json_string "$failure_class")" \
+      signal_anchor "$(review_json_string "$signal_anchor")" \
+      run_id "$(review_json_string "$CI_RUN_ID")" \
+      head_sha "$(review_json_string "$CI_CLASSIFICATION_HEAD_SHA")" \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER")"
-    CI_HEAD_SHA="$(git rev-parse HEAD)"
     CI_BASE_SHA="$(git merge-base HEAD "origin/${base_branch}")"
     CI_REBASE_INPUTS="$(uberdev_child_inputs_build review_pr.ci.rebase \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER" \
-      head_sha "$(review_json_string "$CI_HEAD_SHA")" \
+      head_sha "$(review_json_string "$CI_CLASSIFICATION_HEAD_SHA")" \
       base_sha "$(review_json_string "$CI_BASE_SHA")")"
     case $failure_class in
       code_bug | env_drift)        review_child_single review_pr.ci.fix_code "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-fix-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_FIX_INPUTS" null "$RESEARCH_DIR_ABS/ci-fix" "$REVIEW_PR_TIMEOUT" ;;
@@ -1374,6 +2612,14 @@ PY
 
     Implementation: rather than a re-entrant skill call, the orchestrator decrements the loop counter and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
 
+    Before that re-entry, discard the complete selected-run tuple. This call is
+    mandatory after every head-changing fixer/rebase/conflict-resolution push;
+    the next 6c.1 probe must derive a new run ID from that new head's checks:
+
+    ```bash
+    review_clear_ci_run_selection
+    ```
+
     Audit `ci_fix_pushed` (with `data.commit_sha` full 40-hex) when fixer push lands. On Phase 1 re-entry returning APPROVE → loop to 6c.1 (counts toward `CI_FIX_LOOP_CAP`). On Phase 1 re-entry rejecting → exit 1 with `OUTCOME=halted` (carry differentiation in audit `data.subreason=post_fix_review_rejected`).
 
     ### 6c.6 HALT — turbo-aware (billing_quota / platform_outage)
@@ -1593,30 +2839,80 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    ```
 
    ```bash
-   PARENT_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — NOT --short; goes into the trailer payload
-   git commit --allow-empty -m "chore(review-pr): trust trail anchor for #<PR>
+   review_validate_trust_anchor() {
+     [ "$#" -eq 4 ] || return 2
+     local reviewed_head_sha="$1" parent_sha="$2" anchor_sha="$3" expected_message_sha256="$4"
+     local observed_head observed_parents observed_message_sha256 residue_receipt
+     [[ "$reviewed_head_sha" =~ ^[0-9a-f]{40}$ && "$parent_sha" =~ ^[0-9a-f]{40}$ && "$anchor_sha" =~ ^[0-9a-f]{40}$ && "$expected_message_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
+     [ "$parent_sha" = "$reviewed_head_sha" ] || return 79
+     observed_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 79
+     [ "$observed_head" = "$anchor_sha" ] || return 79
+     observed_parents="$(git -C "$WORKTREE_ROOT" rev-list --parents -n 1 "$anchor_sha")" || return 79
+     [ "$observed_parents" = "$anchor_sha $parent_sha" ] || return 79
+     git -C "$WORKTREE_ROOT" diff --quiet "$parent_sha" "$anchor_sha" -- || return 79
+     observed_message_sha256="$(python3 -I -B "$CODE_FIXER_CONTRACT" commit-message-digest --working-dir "$WORKTREE_ROOT" --commit-sha "$anchor_sha")" || return 79
+     [ "$observed_message_sha256" = "$expected_message_sha256" ] || return 79
+     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || return 79
+     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
+   }
 
-   Reviewed-by: uberdev/review-pr@${PARENT_SHA}${TRAILER_SUFFIX}"
-   if ! git push origin HEAD; then
+   TRUST_RESIDUE_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || {
+     echo "error: MUTATED_BLOCKED — residual repository state suppresses trust emission" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   }
+   [ "$TRUST_RESIDUE_RECEIPT" = '{"status":"clean"}' ] || {
+     echo "error: MUTATED_BLOCKED — malformed residue receipt suppresses trust emission" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   }
+   PARENT_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
+   if ! [ "$PARENT_SHA" = "$REVIEWED_HEAD_SHA" ]; then
+     echo "error: MUTATED_BLOCKED — trust-trail parent is not the reviewed head" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   fi
+   ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX")" || exit 2
+   ANCHOR_MESSAGE_SHA256="$(python3 -I -B -c 'import hashlib,sys
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_MESSAGE")" || exit 2
+   [[ "$ANCHOR_MESSAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+   if ! git -C "$WORKTREE_ROOT" commit --allow-empty --cleanup=verbatim -m "$ANCHOR_MESSAGE"; then
+     echo "error: trust-trail anchor commit failed; suppressing trust emission" >&2
+     OUTCOME=halted
+     exit 2
+   fi
+   LOCAL_ANCHOR_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
+   if ! review_validate_trust_anchor "$REVIEWED_HEAD_SHA" "$PARENT_SHA" "$LOCAL_ANCHOR_SHA" "$ANCHOR_MESSAGE_SHA256"; then
+     echo "error: MUTATED_BLOCKED — trust-trail anchor head/parent/tree/message/residue validation failed" >&2
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   fi
+   if ! review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$LOCAL_ANCHOR_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"; then
      # Push failed (network, auth, rate limit, hook rejection, non-fast-forward, …).
-     # Without this guard, ANCHOR_SHA below would capture a local-only HEAD; the audit
-     # JSON would then be written with a SHA that does not exist on the remote, and
+     # The immutable anchor SHA is pushed to the explicit, validated PR branch;
+     # symbolic HEAD is never publication authority. The gate then requires the
+     # remote ref, live PR head, and local HEAD to equal that exact SHA. Without
+     # this guard, the audit JSON could name a SHA absent from the remote, and
      # `/merge` Phase 1.4 would later fail with a cryptic `trust_trail_agent_invalid_input`
      # (subreason `trailer_sha_not_in_local_clone`). Per artifact-emission-failure prose
      # below, exit 2 — treat as `blocked`-equivalent so the trust-signal contract is
      # never silently broken. Re-run /review-pr after resolving the push failure.
-     echo "error: trust-trail anchor push failed (git push origin HEAD exited non-zero). Re-run /review-pr after resolving." >&2
+     echo "error: immutable trust-trail anchor publication or equality proof failed. Re-run /review-pr after resolving." >&2
      exit 2
    fi
-   ANCHOR_SHA="$(git rev-parse HEAD)"   # full 40-char SHA — captured AFTER the push (push-success guarded above); equals post-emission `headRefOid` (i.e., the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload). Used in artifact 3's audit JSON `"sha"` field.
+   ANCHOR_SHA="$LOCAL_ANCHOR_SHA"   # full 40-char validated anchor identity, proven equal to the post-emission remote ref + live/local PR head. This is the anchor commit's own SHA, NOT the trailer's PARENT_SHA payload, and is used in artifact 3's audit JSON `"sha"` field.
    ```
 
    Why an empty anchor commit (and not a per-simplify-commit trailer or `git commit --amend`):
-   - **Empty diff by construction** (`--allow-empty`). `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
+   - **Empty diff proven after hooks** (`--allow-empty` plus `review_validate_trust_anchor`). `--allow-empty` alone does not force emptiness when a hook or concurrent writer stages bytes, so the controller verifies the exact parent and an empty tree diff before push. `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
    - **Always a fresh new commit on top.** `git commit --amend` is **NEVER** used, so push **never** requires `--force-with-lease`. Works identically whether Phase 1 / Phase 2 already pushed mid-run or batched their pushes.
    - **Self-pinning trailer.** The trailer references the anchor's parent — the actual end-of-run HEAD before the anchor — so the SHA is captured *deterministically* at the only moment it can be written without chicken-and-egg. No reliance on amend-recompute or sibling-equivalence heuristics on the agent side.
 
-   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. Verify with `git log -1 --format=%B | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}$'` before proceeding to artifact 2.
+   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. `review_validate_trust_anchor` authenticates the SHA-256 of the complete post-hook subject/body bytes against `ANCHOR_MESSAGE_SHA256`, including exact equality of the `Reviewed-by` payload to `PARENT_SHA`, before proceeding to artifact 2.
 
 2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
@@ -1719,6 +3015,176 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
 }
 ```
 
+Assemble that exact object in `AUDIT_JSON_PAYLOAD`, then publish it through the
+fresh-shell receipt fence:
+
+```bash
+# BEGIN review-verdict-final-fence-v1
+if ! python3 -I -B - \
+  "$REVIEW_RUN_RESERVATION_RECEIPT" \
+  "$AUDIT_JSON_PAYLOAD" \
+  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY'
+import base64
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+
+receipt_text, payload_text, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_review_final_manifest", module_path)
+module = importlib.util.module_from_spec(spec)
+if spec.loader is None:
+    raise SystemExit(2)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+def decode_receipt(value):
+    if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    token = value[3:]
+    raw = base64.b64decode(
+        token + "=" * (-len(token) % 4), altchars=b"-_", validate=True
+    )
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "markers", "run_dir", "run_dir_identity", "run_id", "runs_root",
+        "runs_root_identity", "schema",
+    }:
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    if (
+        receipt["schema"] != "review-run-reservation-v1"
+        or json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() != raw
+        or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for key in ("runs_root_identity", "run_dir_identity"):
+        identity = receipt[key]
+        if (
+            not isinstance(identity, list)
+            or len(identity) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in identity)
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    runs_root = os.path.abspath(receipt["runs_root"])
+    run_dir = os.path.abspath(receipt["run_dir"])
+    if (
+        runs_root != receipt["runs_root"]
+        or run_dir != receipt["run_dir"]
+        or run_dir != os.path.join(runs_root, receipt["run_id"])
+        or os.path.basename(runs_root) != "runs"
+        or os.path.basename(os.path.dirname(runs_root)) != ".uberdev"
+        or set(receipt["markers"]) != {"locked", "pr-context.json"}
+    ):
+        raise module.ManifestRejected("review_reservation_receipt_invalid")
+    for marker in receipt["markers"].values():
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"identity", "sha256", "size"}
+            or not isinstance(marker["identity"], list)
+            or len(marker["identity"]) != 6
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in marker["identity"])
+            or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"] or "") is None
+            or isinstance(marker["size"], bool)
+            or not isinstance(marker["size"], int)
+            or marker["size"] < 0
+            or marker["identity"][2] != marker["size"]
+        ):
+            raise module.ManifestRejected("review_reservation_receipt_invalid")
+    return receipt
+
+def require_directory(entry, identity):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != tuple(identity)
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_reservation_directory_changed")
+
+def validate_marker(run_dir, name, marker):
+    _payload, identity = module.secure_capture_published(
+        os.path.join(run_dir, name),
+        marker["sha256"],
+        marker["size"],
+        marker["size"],
+    )
+    if list(identity) != marker["identity"]:
+        raise module.ManifestRejected("review_reservation_marker_changed")
+
+try:
+    receipt = decode_receipt(receipt_text)
+    payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise module.ManifestRejected("review_verdict_payload_invalid")
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    runs_root = receipt["runs_root"]
+    run_dir = receipt["run_dir"]
+    module._reject_symlinked_ancestors(run_dir)
+    module._reject_windows_reparse_ancestors(run_dir)
+    require_directory(os.lstat(runs_root), receipt["runs_root_identity"])
+    require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    for name, marker in receipt["markers"].items():
+        validate_marker(run_dir, name, marker)
+
+    module.secure_publish_exact_no_clobber(
+        os.path.join(run_dir, "review-pr-verdict.json"),
+        encoded,
+        receipt["run_dir_identity"],
+    )
+
+    # Publication is now durable and exact-name/no-clobber. Revalidate both
+    # marker identities before retiring only those receipt-bound names.
+    for name, marker in receipt["markers"].items():
+        validate_marker(run_dir, name, marker)
+    if module._uses_native_windows_filesystem():
+        for name, marker in receipt["markers"].items():
+            current = os.lstat(os.path.join(run_dir, name))
+            if list(module._artifact_identity(current)) != marker["identity"]:
+                raise module.ManifestRejected("review_reservation_marker_changed")
+            os.unlink(os.path.join(run_dir, name))
+        require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+    else:
+        run_descriptor = module._open_directory_fd(run_dir)
+        try:
+            require_directory(os.fstat(run_descriptor), receipt["run_dir_identity"])
+            for name, marker in receipt["markers"].items():
+                current = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+                if list(module._artifact_identity(current)) != marker["identity"]:
+                    raise module.ManifestRejected("review_reservation_marker_changed")
+                os.unlink(name, dir_fd=run_descriptor)
+            os.fsync(run_descriptor)
+            require_directory(os.lstat(run_dir), receipt["run_dir_identity"])
+        finally:
+            os.close(run_descriptor)
+except (OSError, TypeError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not publish review verdict: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+then
+  echo "error: review verdict publication failed; refusing to replace or reuse an existing artifact" >&2
+  exit 2
+fi
+unset AUDIT_JSON_PAYLOAD
+# END review-verdict-final-fence-v1
+```
+
+The fence rehydrates and validates the setup receipt in a fresh shell, captures
+both marker bytes against their recorded digests and identities, canonicalizes
+the JSON, and calls the shared `secure_publish_exact_no_clobber` primitive for
+the fixed `review-pr-verdict.json` basename. The publisher never truncates,
+replaces, or unlinks that pathname, including after a partial-write or sync
+failure. Only after successful publication does the fence revalidate and remove
+`locked` and `pr-context.json`; the reserved run directory and verdict remain.
+A collision, directory retarget, short write, identity change, or sync failure
+exits 2.
+
 **`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
 
 **`trust_trail_state` field (RFC 0002 §3.4)** — top-level GREEN/YELLOW/RED discriminator, redundant with the `phases.*` blocks but exposed at the JSON root for faster downstream gating (`/merge` can branch on a single string instead of recomputing the predicate from each phase block).
@@ -1731,13 +3197,14 @@ On any artifact-emission failure (anchor commit fails — pre-commit hook reject
 
 ### Run-ID format
 
-`<run-id>` MUST be derived as:
+For a standalone invocation, `<run-id>` is derived once in executable setup
+from a UTC-second timestamp, the selected worktree's short HEAD, and an
+8-character cryptographic hex discriminator. The final discriminator is chosen
+by the atomic directory reservation, with at most
+`RUN_ID_RESERVATION_MAX_ATTEMPTS` attempts. An explicitly supplied ID is never
+reminted or reused: an existing directory is a collision and exits 2.
 
-```bash
-RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
-```
-
-This mirrors the convention in `skills/merge-pipeline/SKILL.md:209` (Phase 3.3ii scratch worktree path). Before any path concatenation, validate `<run-id>` against the regex:
+Before any path concatenation, validate `<run-id>` against the regex:
 
 ```
 ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$
@@ -1850,8 +3317,8 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 
 **uberdev:code-fixer** (`subagent_type: uberdev:code-fixer`):
 - Reads the post-impl-review aggregate or simplify aggregate — each file carries its own envelope as leading/trailing file bytes (`<external-untrusted-input source="post-impl-review-aggregate">` for Phase 1, `source="simplify-aggregate"` for Phase 2); the dispatch passes the path or the enveloped bytes verbatim, never re-wrapped
-- Applies minimal-scope edits + creates `fix:`/`refactor:` conventional commits
-- Phase 1 commit type: `fix:` (default) or `refactor:` if all findings are non-behavioral
+- Applies minimal-scope edits and creates at most one routed conventional commit
+- Phase 1 commit type: `fix:` (derived only from `review_pr.fix.phase1` + `review_fix`)
 - Phase 2 commit type: `refactor:` (R8.6 invariant — no override; one commit per run)
 - Returns commit SHAs and per-finding disposition table; advisory findings surface in the final aggregation table
 

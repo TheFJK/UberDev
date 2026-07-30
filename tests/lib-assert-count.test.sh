@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for issue #275 — the shared SSOT assert_count helper in
-# tests/_lib_assert_structural.sh must NOT pass an absence assertion
+# Tests for the shared structural assertion helpers in
+# tests/_lib_assert_structural.sh. Issue #275: assert_count must NOT pass an absence assertion
 # (expected count 0) vacuously when its target file is missing or unreadable.
 #
 # Root cause: the old body was
@@ -68,8 +68,21 @@ run_assert_count() {
   )
 }
 
+# run_assert_in_section <file> <start> <end> <pattern>
+# Same counter-preserving probe for assert_in_section.
+run_assert_in_section() {
+  (
+    PASS=0; FAIL=0
+    local tmp; tmp="$(mktemp)"
+    assert_in_section "$1" "$2" "$3" "$4" "lib-assert-in-section probe" >"$tmp" 2>&1
+    printf '%s %s :: %s\n' "$PASS" "$FAIL" "$(cat "$tmp")"
+    rm -f "$tmp"
+  )
+}
+
 FIXTURE="$(mktemp)"
-trap 'rm -f "$FIXTURE"' EXIT
+LARGE_FIXTURE="$(mktemp)"
+trap 'rm -f "$FIXTURE" "$LARGE_FIXTURE"' EXIT
 cat >"$FIXTURE" <<'EOF'
 START
 match-line one
@@ -123,6 +136,30 @@ else
     "[ \"\$P\" = 0 ] && [ \"\$F\" = 1 ]" \
     "VACUOUS-PASS BUG: unreadable file with expected==0 should bump FAIL, got [$RES]"
 fi
+
+echo "== AC5: assert_in_section drains a large early-match section under pipefail =="
+# A quiet grep may stop after the early match and close its read end while awk
+# still has this deliberately large section to emit. Under a caller's
+# `pipefail`, GNU awk/mawk then reports SIGPIPE (141) and turns a real match into
+# a false failure. The matcher must consume the complete section instead.
+{
+  printf '%s\n' 'outside' '## SECTION START' 'EARLY_MATCH'
+  awk 'BEGIN { for (i = 0; i < 250000; i++) printf "late-content-%06d-abcdefghijklmnopqrstuvwxyz0123456789\n", i }'
+  printf '%s\n' '## SECTION END' 'outside-again'
+} >"$LARGE_FIXTURE"
+
+RES="$(run_assert_in_section "$LARGE_FIXTURE" '^## SECTION START$' '^## SECTION END$' '^EARLY_MATCH$')"
+P="${RES%% *}"; rest="${RES#* }"; F="${rest%% *}"
+expect "early match in a large section remains a PASS under pipefail" \
+  "[ \"\$P\" = 1 ] && [ \"\$F\" = 0 ]" \
+  "SIGPIPE BUG: expected inner PASS=1 FAIL=0, got [$RES]"
+
+# Shape-lock the portability contract even on a platform where SIGPIPE happens
+# not to reproduce for a particular fixture size.
+ASSERT_IN_SECTION_BODY="$(sed -n '/^assert_in_section()/,/^}/p' "$HELPER")"
+expect "assert_in_section uses a draining grep consumer" \
+  "! grep -E 'grep[[:space:]]+(-[[:alnum:]]*q[[:alnum:]]*|--quiet)([[:space:]]|$)' >/dev/null <<<\"\$ASSERT_IN_SECTION_BODY\"" \
+  "assert_in_section must not use quiet grep on an awk pipeline"
 
 echo
 echo "==================================================================="

@@ -5,6 +5,41 @@ AGG="$REPO_ROOT/plugins/uberdev/skills/ubersimplify-pipeline/aggregate.py"
 PASS=0; FAIL=0
 check() { if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
 
+check_v2() {
+  local label="$1" path="$2" expected_count="$3"
+  if python3 -I -B - "$path" "$expected_count" <<'PY'
+import json, pathlib, sys
+
+path, expected_count = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+payload = path.read_bytes()
+opening = b'<external-untrusted-input source="simplify-aggregate">\n'
+closing = b'\n</external-untrusted-input>\n'
+assert payload.startswith(opening) and payload.endswith(closing)
+body = payload[len(opening):-len(closing)]
+value = json.loads(body)
+canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+canonical = canonical.replace("</external-untrusted-input>", "\\u003c/external-untrusted-input>")
+assert body.decode() == canonical
+assert list(value) == ["contributors", "findings", "phase", "schema_version"]
+assert value["schema_version"] == 2 and value["phase"] == "phase2"
+assert value["contributors"] == [
+    "review_pr.simplify.reuse",
+    "review_pr.simplify.quality",
+    "review_pr.simplify.efficiency",
+]
+assert len(value["findings"]) == expected_count
+for finding in value["findings"]:
+    assert list(finding) == ["detail", "scope", "severity", "source_edges", "summary"]
+    assert list(finding["scope"]) == ["line", "operation", "path"]
+    assert finding["scope"]["operation"] == "modify_existing"
+PY
+  then
+    echo "  PASS  $label"; PASS=$((PASS+1))
+  else
+    echo "  FAIL  $label"; FAIL=$((FAIL+1))
+  fi
+}
+
 if ! python3 -c "import yaml" 2>/dev/null; then echo "SKIP: PyYAML not installed"; exit 0; fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -34,11 +69,25 @@ YAML
 
 echo "== fixer aggregate (per-chunk, code-fixer envelope) =="
 python3 "$AGG" fixer --lens-file "$TMP/chunk-001-lens.yaml" --out "$TMP/chunk-001-fixer.md"
-check "wrapped in post-impl-review-aggregate envelope" "head -1 '$TMP/chunk-001-fixer.md' | grep -q 'source=\"post-impl-review-aggregate\"'"
-check "merges same file:line across lenses into one row" "[ \$(grep -c '^- location: src/a.ts:10' '$TMP/chunk-001-fixer.md') -eq 1 ]"
-check "merged lens label is Reuse+Quality" "grep -q '^  lens: Reuse+Quality' '$TMP/chunk-001-fixer.md'"
-check "merged severity is max (blocker)" "grep -A1 '^- location: src/a.ts:10' '$TMP/chunk-001-fixer.md' | grep -q 'severity: blocker'"
-check "merged summary keeps both lens parts" "grep -q 'Reuse: duplicates existing helper' '$TMP/chunk-001-fixer.md' && grep -q 'Quality: nested ternary' '$TMP/chunk-001-fixer.md'"
+check_v2 "fixer aggregate is exact compact Phase 2 schema v2" "$TMP/chunk-001-fixer.md" 2
+check "merges same file:line across lenses into one finding" "python3 -I -B - '$TMP/chunk-001-fixer.md' <<'PY'
+import json,pathlib
+p=pathlib.Path('$TMP/chunk-001-fixer.md').read_text(); body=p.split('>\\n',1)[1].rsplit('\\n</',1)[0]; v=json.loads(body)
+f=next(row for row in v['findings'] if row['scope']['line']==10)
+assert f['scope']=={'line':10,'operation':'modify_existing','path':'src/a.ts'}
+assert f['severity']=='blocker'
+assert f['source_edges']==['review_pr.simplify.reuse','review_pr.simplify.quality']
+assert 'Reuse: duplicates existing helper' in f['summary'] and 'Quality: nested ternary' in f['summary']
+PY"
+
+cat > "$TMP/chunk-002-lens.yaml" <<'YAML'
+schema_version: 1
+chunk_id: 2
+files: [src/clean.ts]
+findings: []
+YAML
+python3 "$AGG" fixer --lens-file "$TMP/chunk-002-lens.yaml" --out "$TMP/chunk-002-fixer.md"
+check_v2 "zero findings emits a valid exact Phase 2 document" "$TMP/chunk-002-fixer.md" 0
 
 echo "== issues aggregate --audit-only (ubersimplify envelope, blocker-only) =="
 python3 "$AGG" issues --chunks-dir "$TMP" --out "$TMP/f2i.md" --audit-only
@@ -48,15 +97,22 @@ check "excludes suggestion-only location" "! grep -q 'src/a.ts:55' '$TMP/f2i.md'
 check "rows marked DEFERRED" "grep -q '| DEFERRED |' '$TMP/f2i.md'"
 
 echo "== issues aggregate respects code-fixer dispositions (leftover only) =="
-cat > "$TMP/chunk-001-fixer-disposition.yaml" <<'YAML'
-status: APPLIED
-phase: phase2
-findings_disposition:
-  - location: src/a.ts:10
-    disposition: APPLIED
-    behavior_tag: preserve
-    reason: applied
-YAML
+python3 -I -B - "$TMP/chunk-001-fixer.md" "$TMP/chunk-001-fixer-disposition.json" <<'PY'
+import hashlib,json,pathlib,sys
+aggregate=pathlib.Path(sys.argv[1]); output=pathlib.Path(sys.argv[2])
+payload=aggregate.read_bytes(); body=payload.split(b">\n",1)[1].rsplit(b"\n</",1)[0]; value=json.loads(body)
+finding=value["findings"][0]
+row={
+  "behavior_tag":"preserve",
+  "disposition":"APPLIED",
+  "finding_index":1,
+  "location":f'{finding["scope"]["path"]}:{finding["scope"]["line"]}',
+  "reason":"applied",
+  "summary_sha256":hashlib.sha256(finding["summary"].encode()).hexdigest(),
+}
+doc={"aggregate_sha256":hashlib.sha256(payload).hexdigest(),"findings_disposition":[row,{"behavior_tag":"n/a","disposition":"SKIPPED","finding_index":2,"location":"src/a.ts:55","reason":"not applied","summary_sha256":hashlib.sha256(value["findings"][1]["summary"].encode()).hexdigest()}],"phase":"phase2","schema_version":1}
+output.write_text(json.dumps(doc,sort_keys=True,separators=(",",":"))+"\n")
+PY
 python3 "$AGG" issues --chunks-dir "$TMP" --out "$TMP/f2i2.md"
 check "APPLIED location is NOT filed" "! grep -q 'src/a.ts:10' '$TMP/f2i2.md'"
 
@@ -93,12 +149,12 @@ check "D7 issues: exactly ONE verbatim close marker (the structural trailer)" "[
 check "D7 issues: the single close marker is the LAST non-empty line" "[ \"\$(grep -vE '^[[:space:]]*\$' '$D7TMP/agg.md' | tail -1)\" = '</external-untrusted-input>' ]"
 check "D7 issues: injected close-tag is ZWSP-neutralized (shared cell())" "LC_ALL=C grep -qF -- \"$ZWSP_CLOSE\" '$D7TMP/agg.md'"
 
-# --- fixer path (post-impl-review-aggregate envelope -> code-fixer) ---
+# --- fixer path (simplify-aggregate schema v2 envelope -> code-fixer) ---
 python3 "$AGG" fixer --lens-file "$D7TMP/chunk-001-lens.yaml" --out "$D7TMP/fixer.md"
-check "D7 fixer: opening marker within first 128 bytes" "head -c 128 '$D7TMP/fixer.md' | grep -q 'source=\"post-impl-review-aggregate\"'"
+check "D7 fixer: opening marker within first 128 bytes" "head -c 128 '$D7TMP/fixer.md' | grep -q 'source=\"simplify-aggregate\"'"
 check "D7 fixer: exactly ONE verbatim close marker (the structural trailer)" "[ \$(grep -cF '</external-untrusted-input>' '$D7TMP/fixer.md') -eq 1 ]"
 check "D7 fixer: the single close marker is the LAST non-empty line" "[ \"\$(grep -vE '^[[:space:]]*\$' '$D7TMP/fixer.md' | tail -1)\" = '</external-untrusted-input>' ]"
-check "D7 fixer: injected close-tag is ZWSP-neutralized (shared cell())" "LC_ALL=C grep -qF -- \"$ZWSP_CLOSE\" '$D7TMP/fixer.md'"
+check "D7 fixer: injected close-tag is JSON escaped" "grep -qF -- '\\u003c/external-untrusted-input>' '$D7TMP/fixer.md'"
 rm -rf "$D7TMP"
 
 echo "Results: $PASS passed, $FAIL failed"

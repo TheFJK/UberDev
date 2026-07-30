@@ -34,13 +34,14 @@ jobs:
   shape-checks:
     name: shape-checks
     runs-on: ubuntu-latest
-    # Routed lifecycle, semaphore-race, and provider-contract fixtures now make
-    # the complete Linux suite legitimately exceed ten minutes on hosted runners.
-    # Twenty-five minutes preserves the hang guard while leaving room for the real runtime checks
-    # wired below (ci-wiring.test.sh keeps that list complete).
+    # Routed lifecycle, semaphore-race, and provider-contract fixtures made the
+    # complete Linux suite exhaust its 30-minute budget even though the final
+    # suite reported 91/0 only 89 ms before cancellation. Forty minutes retains
+    # a bounded hang guard with ten minutes of runner-variance/recovery headroom.
+    # ci-wiring.test.sh locks that exact budget so it cannot silently regress.
     # Caps the default 360-min budget so a hung test from a fork PR can't burn
     # the public-repo Actions allowance. Bump if the suite legitimately grows.
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install zsh
@@ -100,6 +101,7 @@ jobs:
           bash tests/prkit-generate.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
+          bash tests/code-fixer-contract.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/review-child-handoff.test.sh && \
           bash tests/findings-to-issues.test.sh && \
@@ -130,6 +132,7 @@ jobs:
           bash tests/agent-dispatch.test.sh && \
           bash tests/child-dispatch.test.sh && \
           bash tests/child-dispatch-receipts.test.sh && \
+          bash tests/worktree-receipts.test.sh && \
           bash tests/child-inputs.test.sh && \
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
@@ -160,6 +163,7 @@ jobs:
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/simplify.test.sh && \
+          bash tests/simplify-standalone-flow.test.sh && \
           bash tests/uberscan.test.sh && \
           bash tests/uberscan-report.test.sh && \
           bash tests/uberscan-chunk.test.sh && \
@@ -196,16 +200,17 @@ jobs:
         run: |
           bash tests/review-pr-codex-entry.test.sh && \
           bash tests/agent-dispatch.test.sh && \
-          bash tests/review-pr-codex-six-child.test.sh
+          bash tests/review-pr-codex-six-child.test.sh && \
+          bash tests/worktree-receipts.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
     runs-on: windows-latest
     # Proves the shape-check harness and routed dispatch lifecycle are portable
-    # on native Windows/Git Bash. A recent full run took 9.5 minutes, while the
-    # current suite reached its final minute at the old ten-minute cap. Fifteen
-    # minutes leaves about four minutes of headroom and retains a bounded guard.
-    timeout-minutes: 15
+    # on native Windows/Git Bash. The exhaustive portability shard's measured
+    # runtime outgrew the prior ceiling; thirty minutes provides runner-variance
+    # headroom while preserving a meaningful hang guard.
+    timeout-minutes: 30
     defaults:
       run:
         # Force every `run:` step into Git Bash, not PowerShell or cmd.
@@ -253,10 +258,12 @@ jobs:
         # block below in lockstep; a new Unix-only fixture needs an entry
         # here AND its `bash tests/...` line in the ubuntu job above.
         #   - cluster-pipeline.test.sh
+        #   - code-fixer-contract.test.sh
         #   - finish-branch-zsh.test.sh
         #   - goal-pipeline-zsh.test.sh
         #   - goal-state-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh
+        #   - simplify-standalone-flow.test.sh
         #   - testers-pipeline.test.sh
         #   - testers-agent-contract.test.sh
         #   - testers-rate-limit-audit.test.sh
@@ -270,7 +277,6 @@ jobs:
         #   - model-routing.test.sh
         #   - model-routing-config.test.sh
         #   - plan-writer-routing.test.sh
-        #   - run-manifest.test.sh
         #   - live-semaphore.test.sh
         #   - agent-dispatch.test.sh
         #   - child-dispatch.test.sh
@@ -304,11 +310,12 @@ jobs:
 #                                         uberthink; also calls rsync which isn't
 #                                         on windows-latest's Git Bash)
 # === END ci-wiring windows-skip-list ===
-        # review-child-handoff uses a bounded native-Windows mode for carrier
-        # serialization, parent derivation, and lexical tamper rejection; its
-        # full Unix race fixture remains in shape-checks above.
+        # review-child-handoff and run-manifest use bounded native-Windows
+        # modes for carrier/path serialization and captured publication retry;
+        # their full Unix race fixtures remain in shape-checks above.
         run: |
           bash tests/ci-wiring.test.sh && \
+          bash tests/run-manifest.test.sh --artifact-publication-only && \
           bash tests/turbo-flow.test.sh && \
           bash tests/issue-causal-fanout.test.sh && \
           bash tests/post-impl-review.test.sh && \
@@ -321,6 +328,7 @@ jobs:
           bash tests/prkit-codex-manifest.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
+          python -I -B tests/code-fixer-contract-windows.test.py && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
@@ -344,6 +352,7 @@ jobs:
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-codex.test.sh && \
           bash tests/child-dispatch-receipts.test.sh && \
+          bash tests/worktree-receipts.test.sh && \
           bash tests/review-child-handoff.test.sh --windows-path-only && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \

@@ -921,11 +921,20 @@ while true; do
       red)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
         uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
-        # B6/M14 — blocker-overflow handler (D13). Explicit branch on
-        # gh_jq_or_jq rc so a corrupted audit defaults to "no overflow" rather
-        # than silently skipping; sets overflow_detected (gates the Phase 3
-        # first-10 truncation) and accumulates the per-cycle count.
-        if halted_overflow="$(gh_jq_or_jq "$audit_json" '.phases.phase2_5.halted_due_to_overflow // false')"; then
+        # B6/M14 — blocker-overflow handler (D13). Explicit branch on the jq rc
+        # so a corrupted audit defaults to "no overflow" rather than silently
+        # skipping; sets overflow_detected (gates the Phase 3 first-10
+        # truncation) and accumulates the per-cycle count.
+        #
+        # `$audit_json` is the canonical selector's CLOSED CONTROLLER STATE (a
+        # minified JSON value), not a pathname — `uberdev_goal_locate_review_pr_audit_by_pr`
+        # stopped returning paths when the shared verdict selector landed. It must
+        # therefore be parsed as a value: `gh_jq_or_jq` opens with `[ -f "$file" ]`,
+        # so feeding it JSON made this branch fail on EVERY red PR, permanently
+        # pinning overflow_detected at 0 and making the Phase 3 truncation dead
+        # code. The field is read at its projected top-level name, not the
+        # `.phases.phase2_5.*` shape of the raw on-disk verdict.
+        if halted_overflow="$(jq -er '.phase2_5_halted_due_to_overflow // false' <<<"$audit_json" 2>/dev/null)"; then
           if [ "$halted_overflow" = "true" ]; then
             overflow_detected=1
             overflow_count=$(( ${overflow_count:-0} + 1 ))

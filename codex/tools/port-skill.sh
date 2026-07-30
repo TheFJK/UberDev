@@ -56,9 +56,29 @@ rsync -a --delete \
 
 PKG_ROOT="$(dirname "$DST")"
 SHARED_DST="$PKG_ROOT/shared"
-if [ -d "$DST/_shared" ]; then
-  rm -rf "$SHARED_DST"
-  mv "$DST/_shared" "$SHARED_DST"
+RUNTIME_SHARED_SRC="$(dirname "$SRC")/shared"
+
+# Package-level shared artifacts have two canonical sources: skill-local
+# `_shared/` templates and runtime contracts under the plugin's `shared/`.
+# Rebuild the destination from both on every run so rsync --delete on skills
+# cannot silently retire a runtime contract.
+rm -rf "$SHARED_DST"
+if [ -d "$DST/_shared" ] || [ -d "$RUNTIME_SHARED_SRC" ]; then
+  mkdir -p "$SHARED_DST"
+  if [ -d "$DST/_shared" ]; then
+    rsync -a "$DST/_shared"/ "$SHARED_DST"/
+    rm -rf "$DST/_shared"
+  fi
+  if [ -d "$RUNTIME_SHARED_SRC" ]; then
+    rsync -a \
+      --exclude '__pycache__/' \
+      --exclude '*.pyc' \
+      --exclude '*.bak' \
+      --exclude '*.bak2' \
+      --exclude '*.fix' \
+      --exclude '.DS_Store' \
+      "$RUNTIME_SHARED_SRC"/ "$SHARED_DST"/
+  fi
 fi
 
 # Apply path substitutions to every regular file under $DST.

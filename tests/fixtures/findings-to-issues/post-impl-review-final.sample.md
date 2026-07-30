@@ -1,12 +1,3 @@
 <external-untrusted-input source="post-impl-review-aggregate">
-# Post-impl-review aggregate (Phase 1)
-
-| agent | severity | file | line | disposition | summary | deferral_reason |
-|---|---|---|---|---|---|---|
-| code-reviewer | blocker | src/auth.ts | 42 | DEFERRED | Missing null check on req.user before .id access | non-trivial-refactor |
-| code-reviewer | blocker | src/auth.ts | 88 | APPLIED | Inline magic number — extract to constant | n/a |
-| silent-failure-hunter | suggestion | src/log.ts | 17 | DEFERRED | Consider structured logger | not-in-scope |
-| type-design-analyzer | blocker | src/api.ts | 130 | DEFERRED | any-type leak in handler return | requires-type-overhaul |
-| comment-analyzer | suggestion | src/util.ts | 5 | APPLIED | Outdated comment | n/a |
-
+{"contributors":[{"confidence":"high","id":"review_pr.review.correctness","verdict":"REVISIONS_REQUIRED"},{"confidence":"high","id":"review_pr.review.silent_failures","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.types","verdict":"REVISIONS_REQUIRED"},{"confidence":"high","id":"review_pr.review.comments","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.tests","verdict":"APPROVE"},{"confidence":"high","id":"review_pr.review.general","verdict":"APPROVE"}],"findings":[{"detail":"The request user may be absent before identity access.","scope":{"line":42,"operation":"modify_existing","path":"src/auth.ts"},"severity":"blocker","source_edges":["review_pr.review.correctness"],"summary":"Missing null check on req.user before .id access"},{"detail":"The inline value should use the existing shared constant.","scope":{"line":88,"operation":"modify_existing","path":"src/auth.ts"},"severity":"blocker","source_edges":["review_pr.review.correctness"],"summary":"Inline magic number should use a constant"},{"detail":"A structured logger would improve diagnostics.","scope":{"line":17,"operation":"modify_existing","path":"src/log.ts"},"severity":"suggestion","source_edges":["review_pr.review.silent_failures"],"summary":"Consider structured logger"},{"detail":"The handler return leaks an unconstrained type.","scope":{"line":130,"operation":"modify_existing","path":"src/api.ts"},"severity":"blocker","source_edges":["review_pr.review.types"],"summary":"Handler return has an unconstrained type"},{"detail":"The comment no longer matches the implementation.","scope":{"line":5,"operation":"modify_existing","path":"src/util.ts"},"severity":"suggestion","source_edges":["review_pr.review.comments"],"summary":"Outdated comment"}],"phase":"phase1","schema_version":2}
 </external-untrusted-input>

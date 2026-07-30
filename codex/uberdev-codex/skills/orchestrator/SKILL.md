@@ -204,6 +204,7 @@ UBERDEV_DESIGN_PLUGIN_ROOT="${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/u
 UBERDEV_DESIGN_PREPARED_EDGES=()
 UBERDEV_DESIGN_PREPARED_INSTANCES=()
 UBERDEV_DESIGN_PREPARED_HANDOFFS=()
+UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S=()
 UBERDEV_DESIGN_PREPARED_RESULTS=()
 UBERDEV_DESIGN_PREPARED_STATUSES=()
 UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
@@ -222,7 +223,8 @@ uberdev_design_json_string() {
 
 uberdev_design_reset_batch() {
   UBERDEV_DESIGN_PREPARED_EDGES=(); UBERDEV_DESIGN_PREPARED_INSTANCES=()
-  UBERDEV_DESIGN_PREPARED_HANDOFFS=(); UBERDEV_DESIGN_PREPARED_RESULTS=()
+  UBERDEV_DESIGN_PREPARED_HANDOFFS=(); UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S=()
+  UBERDEV_DESIGN_PREPARED_RESULTS=()
   UBERDEV_DESIGN_PREPARED_STATUSES=(); UBERDEV_DESIGN_DISPATCH_RECEIPTS=()
   UBERDEV_DESIGN_RECEIPT_STATUSES=(); UBERDEV_DESIGN_RECEIPT_RESULTS=()
   UBERDEV_DESIGN_WAITED_INSTANCES=()
@@ -263,7 +265,7 @@ uberdev_design_drain_after_wait_failure() {
 
 uberdev_design_dispatch() {
   local edge="${@:1:1}" instance="${@:2:1}" role="${@:3:1}" phase="${@:4:1}" risk_scope="${@:5:1}" risks_json="${@:6:1}" inputs_json="${@:7:1}"
-  local handoff result status create_rc cleanup_rc
+  local handoff handoff_sha256 result status create_rc cleanup_rc
   : "$role" "$phase" "$risk_scope" # edge manifest is the authority for these fields
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
     :
@@ -274,28 +276,36 @@ uberdev_design_dispatch() {
     return "$create_rc"
   fi
   handoff="$UBERDEV_CHILD_HANDOFF"
+  handoff_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
   result="$UBERDEV_CHILD_RESULT"
   status="$UBERDEV_CHILD_STATUS"
   UBERDEV_DESIGN_PREPARED_EDGES+=("$edge")
   UBERDEV_DESIGN_PREPARED_INSTANCES+=("$instance")
   UBERDEV_DESIGN_PREPARED_HANDOFFS+=("$handoff")
+  UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   UBERDEV_DESIGN_PREPARED_RESULTS+=("$result")
   UBERDEV_DESIGN_PREPARED_STATUSES+=("$status")
 }
 
 uberdev_design_launch_batch() {
-  local index edge instance handoff result status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result status dispatch_rc cleanup_rc
+  local preflight_refs=()
   [ "${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
-  uberdev_preflight_child_batch "${UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}" || {
+  [ "${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}" -eq "${#UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
+  for ((index=0; index<${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}; index++)); do
+    preflight_refs+=("${UBERDEV_DESIGN_PREPARED_HANDOFFS[$index]}" "${UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S[$index]}")
+  done
+  uberdev_preflight_child_batch "${preflight_refs[@]}" || {
     dispatch_rc=$?; uberdev_design_reset_batch; return "$dispatch_rc"
   }
   for ((index=0; index<${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}; index++)); do
     edge="${UBERDEV_DESIGN_PREPARED_EDGES[$index]}"
     instance="${UBERDEV_DESIGN_PREPARED_INSTANCES[$index]}"
     handoff="${UBERDEV_DESIGN_PREPARED_HANDOFFS[$index]}"
+    handoff_sha256="${UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S[$index]}"
     result="${UBERDEV_DESIGN_PREPARED_RESULTS[$index]}"
     status="${UBERDEV_DESIGN_PREPARED_STATUSES[$index]}"
-    if uberdev_dispatch_child "$edge" "$handoff" "$result" "$status" >/dev/null; then
+    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status" >/dev/null; then
       UBERDEV_DESIGN_DISPATCH_RECEIPTS+=("$instance")
       UBERDEV_DESIGN_RECEIPT_STATUSES+=("$status")
       UBERDEV_DESIGN_RECEIPT_RESULTS+=("$result")

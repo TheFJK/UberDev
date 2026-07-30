@@ -478,12 +478,14 @@ PY
 }
 
 assert_fails_cleanly 'failed prepare emits no dispatch receipt' 'caller_path_mismatch' \
-  uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$TMP/outside/result.md" "$UBERDEV_CHILD_STATUS"
+  uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+    "$TMP/outside/result.md" "$UBERDEV_CHILD_STATUS"
 [ "$(wc -l <"$CHAIN_FILE" | tr -d ' ')" -eq 2 ] || fail 'failed prepare receipt' 'dispatch emitted before prepare succeeded'
 [ "$PROVIDER_CALLED" -eq 0 ] || fail 'failed prepare provider seam' 'provider was called'
 pass 'prepare failure stops before dispatch receipt and provider seam'
 
-uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >/dev/null
+uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+  "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >/dev/null
 [ "$PROVIDER_CALLED" -eq 1 ] || fail 'provider seam ordering' 'provider was not called'
 python3 -I -B - "$CHAIN_FILE" "$SOURCE_PATH" "$INSTANCE_ID" "$INPUTS_JSON" <<'PY'
 import hashlib,json,pathlib,sys
@@ -555,7 +557,8 @@ pass 'duplicate identical validated build snapshots are allowed'
 INSTANCE_ID='receipt-worker-transformed'
 uberdev_create_child_handoff sdd.task.implement "$INSTANCE_ID" "$VALIDATED_TRANSFORMED" '[]' >/dev/null
 PROVIDER_CALLED=0
-uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >/dev/null
+uberdev_dispatch_child sdd.task.implement "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" \
+  "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" >/dev/null
 [ "$PROVIDER_CALLED" -eq 1 ] || fail 'transformed provider seam' 'provider was not called'
 python3 -I -B - "$CHAIN_FILE" "$PRE_CANONICAL_INPUTS" "$VALIDATED_TRANSFORMED" "$INSTANCE_ID" <<'PY'
 import hashlib,json,pathlib,sys

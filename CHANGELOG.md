@@ -4,6 +4,39 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.3] — 2026-07-28
+
+### Fixed
+
+- Canonicalized review receipts and bound published evidence to validated artifact descriptors and digests.
+- Made publication attempts replacement-safe and uniquely identified, with retry behavior safe on native Windows.
+- Made Phase 1 aggregation executable without carrying artifact paths across trust boundaries.
+- Restricted Phase 3 CI-fixer dispatch to validated scalar inputs bound to the captured PR head.
+- Bound final review consumers to immutable local, live, and run-carrier SHAs before lifecycle advancement.
+- Bound CI run selection to authoritative pull-request checks and reselected after every head-changing repair.
+- Streamed bounded failed-job logs directly into an immutable PR/run/head/digest authority record without mutable staging paths.
+- Preserved primary artifact-capture failures and structured cleanup diagnostics when descriptor closure also fails.
+- Retired worktree receipts durably with shared atomic, no-overwrite moves so an existing terminal receipt can never be replaced.
+- Bound `/review-pr` verdict discovery across the root checkout and three worktree layouts to stable command-line-root identities, one-time secure candidate captures, timestamp-prefix ranking, byte-identical selected ties, and a private digest/identity-recaptured snapshot receipt consumed without later pathname reopens.
+- Made unknown verdict identity fail closed according to recency while ignoring known other-PR artifacts, and made strict duplicate-key-safe parsing distinguish exhaustive absence, legacy telemetry, current telemetry, and indeterminate discovery.
+- Reused the canonical verdict selector in `/goal`, replacing its duplicate glob/sort/path-read implementation with normalized closed controller state.
+- Enforced blocker- and critical-deferred acceptance independently in the trust evaluator, including halted Phase 2.5 results.
+- Atomically reserved `/review-pr` run directories with collision-safe generated IDs, carried reservation/marker authority across fresh shells in a closed identity-and-digest receipt, preserved caller-owned `EXIT` traps, and published verdict JSON through the shared exact-name writer without truncating, replacing, or rolling back prior evidence.
+- Installed a private ignore policy over `.uberdev/runs/` through the same no-clobber publisher when the repository's effective ignore stack does not already cover it, so review evidence never surfaces as untracked working-tree noise; the probe that detects an already-covered stack no longer aborts setup on its expected not-ignored exit status.
+- Kept an already-observed red CI result terminal when the post-monitor metadata refresh is unavailable.
+- Bound every routed child handoff to a controller-retained whole-file digest before preflight parsing or dispatch.
+- Preserved receipt-authority argv byte-for-byte across Git Bash native-Python launches so raw short-name, case, symlink, and junction aliases remain rejectable, and normalized native descriptor artifact identities, including descriptor link-count portability, without weakening same-handle mutation or replacement detection.
+- Added native Codex marketplace metadata and its canonical install selector to generated prkit output, and made the Codex source, manifest, and marketplace contract mandatory generation inputs.
+- Made standalone generation fail closed on dirty, ignored, uninspectable, or non-empty non-Git targets; `--force` remains the explicit managed-path replacement override and never bypasses containment or the generation lock.
+- Rejected symbolic-link, reparse-point, special, and Windows-reserved managed paths before replacement and during final verification; sealed generated trees before recursive deletion.
+- Published copied and rendered files atomically from destination-local temporaries, propagated publication failures instead of accepting stale output, verified executable-mode postconditions, and pinned the generated CI checkout action by immutable SHA.
+- Raised the Linux shape-check timeout to 40 minutes after a green 91/0 suite exhausted the 30-minute ceiling, preserving a bounded hang guard with measured hosted-runner headroom.
+
+### Tests
+
+- Added regression coverage for receipt and publication identity, immutable SHA binding, path-free aggregation, authoritative CI-run selection and reselection, direct-stream classifier limits and encoding failures, coherent handoff mutation, fail-closed post-monitor refresh, capture cleanup diagnostics, CI-fixer dispatch, verdict-root retargeting, external root symlinks, strict JSON compatibility/type matrices, timestamp ties, unknown-candidate recency, snapshot drift, atomic run collisions, no-clobber verdict publication, native-Windows retries and stat semantics, prkit Codex marketplace validation, dirty/ignored target preservation, non-Git force semantics, symbolic-link/reparse and special-path containment, Windows reserved names, cooperative locking, immutable CI action pins, atomic publication failures, and the Linux CI timeout budget.
+- Exercised durable worktree-receipt retirement natively on Linux, macOS, and Windows.
+
 ## [0.40.2] — 2026-07-26
 
 ### Fixed

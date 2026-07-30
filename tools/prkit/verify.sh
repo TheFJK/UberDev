@@ -2,7 +2,7 @@
 # tools/prkit/verify.sh — prkit generation verify gate (RFC 0014 §5.6 + Codex addendum).
 #   verify.sh <target-repo-root>
 # Exit 0 iff the generated tree is correct. Prints each check. Covers the Claude
-# plugin (plugins/prkit, always) and the Codex port (codex/, when generated).
+# plugin (plugins/prkit) and the mandatory native Codex port (codex/).
 #
 # Design invariant (issue #334 review): NO check may pass VACUOUSLY. An empty scan,
 # an errored grep (rc>=2), or a zero-file find is treated as a FAIL, never silently
@@ -11,13 +11,126 @@
 set -u
 set -o pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd -P)"
+PATH_GUARD="$HERE/managed-path-guard.py"
 ROOT="${1:-}"
-[ -n "$ROOT" ] && [ -d "$ROOT/plugins/prkit" ] || { echo "verify: no plugins/prkit under '$ROOT'"; exit 2; }
+[ -n "$ROOT" ] || { echo "verify: target repo root required"; exit 2; }
+[ -r "$PATH_GUARD" ] \
+  || { echo "verify: managed path guard missing/unreadable: $PATH_GUARD"; exit 2; }
+
+# Canonicalize the parent while preserving the root's final directory entry.
+# The shared lstat guard can therefore reject a symlink/reparse-point root,
+# rather than resolving it away before validation.
+ROOT_PARENT="$(dirname "$ROOT")"
+ROOT_NAME="$(basename "$ROOT")"
+ROOT_PARENT="$(cd "$ROOT_PARENT" && pwd -P)" \
+  || { echo "verify: cannot resolve target parent: $ROOT_PARENT"; exit 2; }
+ROOT="$ROOT_PARENT/$ROOT_NAME"
+
+# One cleanup owner covers every verifier-created temporary on normal exit and
+# HUP/INT/TERM. There were no pre-existing traps in this script to chain; keep
+# this as the single trap installation point so later checks cannot clobber it.
+VERIFY_TEMP_PATHS=()
+cleanup_verify_temp_paths(){
+  local i path cleanup_failed=0
+  for ((i=0; i<${#VERIFY_TEMP_PATHS[@]}; i++)); do
+    path="${VERIFY_TEMP_PATHS[$i]}"
+    [ -n "$path" ] || continue
+    case "$path" in
+      /)
+        echo "verify: refusing unsafe temporary cleanup target: $path" >&2
+        cleanup_failed=1
+        ;;
+      *)
+        if rm -rf -- "$path"; then
+          VERIFY_TEMP_PATHS[$i]=""
+        else
+          echo "verify: temporary cleanup failed: $path" >&2
+          cleanup_failed=1
+        fi
+        ;;
+    esac
+  done
+  return "$cleanup_failed"
+}
+cleanup_verify_on_exit(){
+  local original_status=$?
+  trap - EXIT HUP INT TERM
+  if ! cleanup_verify_temp_paths; then
+    [ "$original_status" -ne 0 ] || original_status=1
+  fi
+  exit "$original_status"
+}
+trap cleanup_verify_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+check_managed_path(){
+  python3 -I -B "$PATH_GUARD" "$ROOT" "$1" "$2"
+}
+
+CLAUDE_REQUIRED=(
+  "commands/review-pr.md"
+  "commands/simplify.md"
+  "commands/merge.md"
+  "skills/post-impl-review/SKILL.md"
+  "skills/merge-pipeline/SKILL.md"
+  "policy/model-routing-v1.json"
+  "policy/solve-run-tree-v1.json"
+  "lib/code_fixer_contract.py"
+  "shared/phase1-reviewer-output-v1.md"
+  ".claude-plugin/plugin.json"
+)
+CODEX_REQUIRED=(
+  "codex/prkit-codex/.codex-plugin/plugin.json"
+  "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md"
+  "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md"
+  "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md"
+  "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md"
+  "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md"
+  "codex/prkit-codex/policy/solve-run-tree-v1.json"
+  "codex/prkit-codex/lib/code_fixer_contract.py"
+  "codex/prkit-codex/shared/phase1-reviewer-output-v1.md"
+  "codex/install-codex.sh"
+  "codex/README.md"
+  "codex/AGENTS.md"
+)
+SCAFFOLD_REQUIRED=(
+  "README.md"
+  "LICENSE"
+  "NOTICE"
+  "CHANGELOG.md"
+  ".gitignore"
+  ".github/workflows/ci.yml"
+  ".claude-plugin/marketplace.json"
+  ".agents/plugins/marketplace.json"
+)
+
+# Containment is established before the first recursive find/grep. Root trees
+# and known files must exist; a final sealed-tree walk rejects every nested
+# link, Windows reparse point, socket/FIFO/device, or other special entry.
+for tree in "plugins/prkit" "codex"; do
+  check_managed_path "$tree" required-tree \
+    || { echo "verify: unsafe/missing generated tree: $tree"; exit 2; }
+done
+for req in "${CLAUDE_REQUIRED[@]}"; do
+  check_managed_path "plugins/prkit/$req" required-file \
+    || { echo "verify: unsafe/missing Claude file: $req"; exit 2; }
+done
+for req in "${CODEX_REQUIRED[@]}" "${SCAFFOLD_REQUIRED[@]}"; do
+  check_managed_path "$req" required-file \
+    || { echo "verify: unsafe/missing generated file: $req"; exit 2; }
+done
+for tree in "plugins/prkit" "codex"; do
+  check_managed_path "$tree" sealed-tree \
+    || { echo "verify: generated tree is not sealed: $tree"; exit 2; }
+done
+
 P="$ROOT/plugins/prkit"
-# Scan roots: the Claude plugin (always) + the Codex port (if generated). Array
+# Scan roots: the Claude plugin + the mandatory Codex port. Array
 # form keeps this space-safe for target paths like "/Volumes/FJK SSD/...".
-SCAN=("$P")
-[ -d "$ROOT/codex" ] && SCAN+=("$ROOT/codex")
+SCAN=("$P" "$ROOT/codex")
 rc=0
 fail(){ echo "  FAIL  $1"; rc=1; }
 ok(){ echo "  OK    $1"; }
@@ -71,15 +184,17 @@ fi
 # Backstops the neutralizer's de-namespace: a NEW UberDev skill it didn't strip
 # would surface here as a dangling prkit:<name> and fail generation. ---
 SHIPPED="$(mktemp)"
+VERIFY_TEMP_PATHS+=("$SHIPPED")
 { ls "$P/commands" 2>/dev/null | sed 's/\.md$//'
   ls "$P/agents" 2>/dev/null | sed 's/\.md$//'
   for d in "$P/skills"/*/; do [ -d "$d" ] && basename "$d"; done
 } | sort -u > "$SHIPPED"
 OOS_BAD=$(grep -rhoE 'prkit:[a-z][a-z0-9-]+' "$P" 2>/dev/null | sed 's/prkit://' | sort -u | while read -r n; do
-  case "$n" in ''|active|*-finding) continue;; esac
+  [ -n "$n" ] || continue
+  [ "$n" != "active" ] || continue
+  [ "${n%-finding}" = "$n" ] || continue
   grep -qxF "$n" "$SHIPPED" || echo "$n"
 done)
-rm -f "$SHIPPED"
 if [ -n "$OOS_BAD" ]; then fail "out-of-set: dangling prkit:<name> (not shipped, not a label):"; printf '%s\n' "$OOS_BAD" | sed 's/^/         prkit:/'
 else ok "out-of-set: every prkit:<name> resolves to a shipped item or label"; fi
 
@@ -113,34 +228,23 @@ if [ -d "$ROOT/codex" ]; then
 fi
 
 # --- 7. Required tree shape ---
-for req in "commands/review-pr.md" "commands/simplify.md" "commands/merge.md" \
-           "skills/post-impl-review/SKILL.md" "skills/merge-pipeline/SKILL.md" \
-           "policy/model-routing-v1.json" "policy/solve-run-tree-v1.json" \
-           "shared/phase1-reviewer-output-v1.md" ".claude-plugin/plugin.json"; do
-  [ -e "$P/$req" ] || fail "shape: missing $req"
+for req in "${CLAUDE_REQUIRED[@]}"; do
+  check_managed_path "plugins/prkit/$req" required-file \
+    || fail "shape: missing/non-regular/link/reparse $req"
 done
 ok "shape: claude required-file presence checked"
-if [ -d "$ROOT/codex" ]; then
-  for req in "codex/prkit-codex/.codex-plugin/plugin.json" \
-             "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md" \
-             "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md" \
-             "codex/prkit-codex/policy/solve-run-tree-v1.json" \
-             "codex/prkit-codex/shared/phase1-reviewer-output-v1.md" \
-             "codex/install-codex.sh" "codex/README.md" "codex/AGENTS.md"; do
-    [ -e "$ROOT/$req" ] || fail "shape: missing $req"
-  done
-  # Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
-  # (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
-  for bad in post-impl-review merge-pipeline; do
-    [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
-  done
-  ok "shape: codex required-file presence + prkit-prefixed skills checked"
-fi
+for req in "${CODEX_REQUIRED[@]}"; do
+  check_managed_path "$req" required-file \
+    || fail "shape: missing/non-regular/link/reparse $req"
+done
+# Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
+# (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
+for bad in post-impl-review merge-pipeline; do
+  [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
+done
+ok "shape: codex required-file presence + prkit-prefixed skills checked"
 
-# --- 7b. Standalone review-policy integrity: strict JSON, review-only closure,
+# --- 7b. Standalone PR-policy integrity: strict JSON, closed PR-phase closure,
 # shipped provider roles/workflows/contracts, deterministic serialization, and
 # byte equality across Claude/Codex. Native Codex roles stay edge-local. ---
 if python3 -I -B - "$ROOT" <<'PY'
@@ -167,15 +271,38 @@ edge_semantics={
     'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
-    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
     'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
     'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
     'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr','solve','turbo'),None),
     'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr','solve','turbo'),None),
+    'simplify.fix.phase2':('provider','code-fixer',('simplify',),None),
 }
 expected_edges=set(edge_semantics)
+review_fixer_inputs={
+    'authority_path':'path','authority_sha256':'string',
+    'commit_range_path':'path','commit_range_sha256':'string',
+    'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+    'pr_number':'integer','working_dir':'directory',
+}
+standalone_fixer_inputs={
+    'authority_path':'path','authority_sha256':'string',
+    'disposition_path':'path','findings_path':'path','findings_sha256':'string',
+    'pr_number':'integer','standalone_snapshot_path':'path',
+    'standalone_snapshot_sha256':'string','working_dir':'directory',
+}
+fixer_input_semantics={
+    'review_pr.fix.phase1':review_fixer_inputs,
+    'review_pr.fix.phase2':review_fixer_inputs,
+    'simplify.fix.phase2':standalone_fixer_inputs,
+}
+fixer_route_posture={
+    'review_pr.fix.phase1':('review_fix','caller','run',False,'one_per_review_iteration'),
+    'review_pr.fix.phase2':('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration'),
+    'simplify.fix.phase2':('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration'),
+}
 
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
 codex_roles={
@@ -228,6 +355,18 @@ def validate(plugin):
         assert (tuple(workflows) if isinstance(workflows,list) else workflows)==expected_workflows, edge_id
         assert edge.get('output_contract')==expected_contract, edge_id
         assert expected_contract is not None or 'output_contract' not in edge, edge_id
+        expected_inputs=fixer_input_semantics.get(edge_id)
+        if expected_inputs is not None:
+            assert edge.get('required_inputs')==expected_inputs, edge_id
+            assert edge.get('optional_inputs')=={}, edge_id
+        expected_posture=fixer_route_posture.get(edge_id)
+        if expected_posture is not None:
+            actual_posture=(
+                edge.get('phase'),edge.get('workspace_mode'),edge.get('risk_scope'),
+                edge.get('required'),edge.get('cardinality'),
+            )
+            assert actual_posture==expected_posture, edge_id
+            assert type(edge.get('required')) is bool, edge_id
         if expected_kind=='provider':
             assert expected_role in shipped_roles and expected_workflows, edge_id
             assert all(workflow in allowed_workflows for workflow in expected_workflows), edge_id
@@ -263,20 +402,318 @@ if codex_plugin.is_dir():
             data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
             assert codex_contract not in data['developer_instructions'], role
 PY
-then ok "review-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
-else fail "review-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
+then ok "PR-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
+else fail "PR-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
+
+if cmp -s "$ROOT/plugins/prkit/lib/code_fixer_contract.py" \
+          "$ROOT/codex/prkit-codex/lib/code_fixer_contract.py"; then
+  ok "authority-helper: Claude/Codex runtime bytes match"
+else
+  fail "authority-helper: Claude/Codex runtime bytes diverged"
+fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
-for req in README.md LICENSE NOTICE CHANGELOG.md .gitignore \
-           .github/workflows/ci.yml .claude-plugin/marketplace.json; do
-  [ -s "$ROOT/$req" ] || fail "scaffold: missing/empty $req"
+for req in "${SCAFFOLD_REQUIRED[@]}"; do
+  { check_managed_path "$req" required-file && [ -s "$ROOT/$req" ]; } \
+    || fail "scaffold: missing/empty/non-regular/link/reparse $req"
 done
-jq empty "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || fail "scaffold: marketplace.json is not valid JSON"
-ok "scaffold: root files present, non-empty, marketplace.json valid"
 
-# --- 9. No unrendered template placeholders leaked into generated output ---
-PLH=$(grep -rlE '\{\{[A-Za-z_]+\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || true)
-[ -z "$PLH" ] && ok "placeholders: no unrendered {{...}} in output" || { fail "placeholders: unrendered {{...}} in:"; echo "$PLH" | sed 's/^/         /'; }
+# The standalone workflows persist local trust/research/audit state below
+# .prkit/. First require the complete active rule set emitted by the sealed
+# scaffold (comments/blanks are inert; CRLF is Git-valid), so additive broad
+# rules cannot hide behind a later canonical match.
+EXPECTED_GITIGNORE_RULES=(
+  ".DS_Store"
+  "__pycache__/"
+  "*.pyc"
+  ".claude/"
+  ".worktrees/"
+  ".prkit/"
+)
+ACTUAL_GITIGNORE_RULES=()
+while IFS= read -r ignore_line || [ -n "$ignore_line" ]; do
+  ignore_line="${ignore_line%$'\r'}"
+  ignore_nonblank="${ignore_line// /}"
+  [ -n "$ignore_nonblank" ] || continue
+  case "$ignore_line" in
+    \#*) continue ;;
+  esac
+  ACTUAL_GITIGNORE_RULES+=("$ignore_line")
+done < "$ROOT/.gitignore"
+gitignore_rules_canonical=1
+if [ "${#ACTUAL_GITIGNORE_RULES[@]}" -ne "${#EXPECTED_GITIGNORE_RULES[@]}" ]; then
+  gitignore_rules_canonical=0
+else
+  for ((ignore_i=0; ignore_i<${#EXPECTED_GITIGNORE_RULES[@]}; ignore_i++)); do
+    [ "${ACTUAL_GITIGNORE_RULES[$ignore_i]}" = "${EXPECTED_GITIGNORE_RULES[$ignore_i]}" ] \
+      || gitignore_rules_canonical=0
+  done
+fi
+
+# Then prove the canonical rule is semantically effective while the root
+# generation lock remains visible. Separate empty Git metadata supports non-Git
+# targets and prevents system/global config, init templates, and excludes from
+# becoming verifier evidence.
+run_isolated_probe_git(){
+  (
+    local isolated_config="$1" config_prefix config_var config_suffix
+    shift
+
+    # Git's command-scope transports outrank system/global config. Remove both
+    # forms in this child only; validated compgen names avoid evaluating caller
+    # bytes, and COUNT=0 keeps any non-shell indexed environment entries inert.
+    unset GIT_CONFIG_PARAMETERS
+    for config_prefix in GIT_CONFIG_KEY_ GIT_CONFIG_VALUE_; do
+      while IFS= read -r config_var; do
+        config_suffix="${config_var#"$config_prefix"}"
+        case "$config_suffix" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        unset "$config_var"
+      done < <(compgen -A variable "$config_prefix")
+    done
+
+    GIT_CONFIG_COUNT=0 \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$isolated_config" \
+      git "$@"
+  )
+}
+
+IGNORE_PROBE_PARENT=""
+IGNORE_PROBE_GIT=""
+IGNORE_PROBE_TEMPLATE=""
+IGNORE_PROBE_CONFIG=""
+IGNORE_PROBE_INPUT=""
+IGNORE_PROBE_OUTPUT=""
+ignore_artifact_status=2
+ignore_lock_status=2
+ignore_artifact_record_valid=0
+ignore_infrastructure_error=0
+
+IGNORE_PROBE_PARENT="$(mktemp -d 2>/dev/null)"
+ignore_mktemp_status=$?
+if [ "$ignore_mktemp_status" -ne 0 ] || [ -z "$IGNORE_PROBE_PARENT" ]; then
+  fail "artifact-ignore: infrastructure error: mktemp failed (rc=$ignore_mktemp_status)"
+  ignore_infrastructure_error=1
+else
+  VERIFY_TEMP_PATHS+=("$IGNORE_PROBE_PARENT")
+  IGNORE_PROBE_GIT="$IGNORE_PROBE_PARENT/repo"
+  IGNORE_PROBE_TEMPLATE="$IGNORE_PROBE_PARENT/empty-template"
+  IGNORE_PROBE_CONFIG="$IGNORE_PROBE_PARENT/empty.gitconfig"
+  IGNORE_PROBE_INPUT="$IGNORE_PROBE_PARENT/check-ignore.input"
+  IGNORE_PROBE_OUTPUT="$IGNORE_PROBE_PARENT/check-ignore.output"
+  mkdir "$IGNORE_PROBE_GIT" "$IGNORE_PROBE_TEMPLATE" 2>/dev/null
+  ignore_mkdir_status=$?
+  if [ "$ignore_mkdir_status" -ne 0 ]; then
+    fail "artifact-ignore: infrastructure error: probe mkdir failed (rc=$ignore_mkdir_status)"
+    ignore_infrastructure_error=1
+  else
+    : > "$IGNORE_PROBE_CONFIG"
+    ignore_config_status=$?
+    if [ "$ignore_config_status" -ne 0 ]; then
+      fail "artifact-ignore: infrastructure error: empty Git config creation failed (rc=$ignore_config_status)"
+      ignore_infrastructure_error=1
+    else
+      printf '%s\0' '.prkit/audit.jsonl' > "$IGNORE_PROBE_INPUT"
+      ignore_input_status=$?
+      if [ "$ignore_input_status" -ne 0 ]; then
+        fail "artifact-ignore: infrastructure error: probe input creation failed (rc=$ignore_input_status)"
+        ignore_infrastructure_error=1
+      fi
+    fi
+    if [ "$ignore_infrastructure_error" -eq 0 ]; then
+      run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+        -C "$IGNORE_PROBE_GIT" init -q \
+        --template="$IGNORE_PROBE_TEMPLATE" >/dev/null 2>&1
+      ignore_init_status=$?
+      if [ "$ignore_init_status" -ne 0 ]; then
+        fail "artifact-ignore: infrastructure error: git init failed (rc=$ignore_init_status)"
+        ignore_infrastructure_error=1
+      fi
+    fi
+  fi
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ]; then
+  run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+    --git-dir="$IGNORE_PROBE_GIT/.git" --work-tree="$ROOT" \
+    -c core.excludesFile=/dev/null \
+    check-ignore -v -z --no-index --stdin \
+    < "$IGNORE_PROBE_INPUT" > "$IGNORE_PROBE_OUTPUT" 2>/dev/null
+  ignore_artifact_status=$?
+  run_isolated_probe_git "$IGNORE_PROBE_CONFIG" \
+    --git-dir="$IGNORE_PROBE_GIT/.git" --work-tree="$ROOT" \
+    -c core.excludesFile=/dev/null \
+    check-ignore -q --no-index -- .prkit-generate.lock >/dev/null 2>&1
+  ignore_lock_status=$?
+  case "$ignore_artifact_status" in
+    0|1) ;;
+    *)
+      fail "artifact-ignore: infrastructure error: git check-ignore for .prkit/audit.jsonl failed (rc=$ignore_artifact_status)"
+      ignore_infrastructure_error=1
+      ;;
+  esac
+  case "$ignore_lock_status" in
+    0|1) ;;
+    *)
+      fail "artifact-ignore: infrastructure error: git check-ignore for .prkit-generate.lock failed (rc=$ignore_lock_status)"
+      ignore_infrastructure_error=1
+      ;;
+  esac
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ] \
+   && [ "$ignore_artifact_status" -eq 0 ] \
+   && python3 -I -B - "$IGNORE_PROBE_OUTPUT" "$ROOT/.gitignore" <<'PY'
+import ntpath
+import os
+from pathlib import Path
+import platform
+import re
+import sys
+
+record = Path(sys.argv[1]).read_bytes().split(b"\0")
+if len(record) != 5 or record[-1] != b"":
+    raise SystemExit(1)
+
+source_raw, line_raw, pattern_raw, path_raw, _ = record
+source = source_raw.decode("utf-8", "surrogateescape")
+expected = sys.argv[2]
+
+if not line_raw.isdigit() or int(line_raw) < 1:
+    raise SystemExit(1)
+if pattern_raw != b".prkit/" or path_raw != b".prkit/audit.jsonl":
+    raise SystemExit(1)
+
+
+def windows_key(value):
+    normalized = value.replace("\\", "/")
+    msys_drive = re.match(r"^/([A-Za-z])(/.*)$", normalized)
+    if msys_drive:
+        normalized = f"{msys_drive.group(1)}:{msys_drive.group(2)}"
+    if re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("//"):
+        return ntpath.normcase(ntpath.normpath(normalized))
+    return None
+
+
+source_is_target = source == ".gitignore"
+if not source_is_target:
+    runtime_system = platform.system().casefold()
+    windows_runtime = os.name == "nt" or runtime_system.startswith(
+        ("windows", "msys", "mingw", "cygwin")
+    )
+    if windows_runtime:
+        source_windows = windows_key(source)
+        expected_windows = windows_key(expected)
+        if source_windows is not None or expected_windows is not None:
+            source_is_target = (
+                source_windows is not None
+                and expected_windows is not None
+                and source_windows == expected_windows
+            )
+        elif os.path.isabs(source):
+            source_is_target = os.path.realpath(source) == os.path.realpath(expected)
+    elif os.path.isabs(source):
+        source_is_target = os.path.realpath(source) == os.path.realpath(expected)
+
+raise SystemExit(0 if source_is_target else 1)
+PY
+then
+  ignore_artifact_record_valid=1
+fi
+
+if [ "$ignore_infrastructure_error" -eq 0 ] \
+   && [ "$gitignore_rules_canonical" -eq 1 ] \
+   && [ "$ignore_artifact_status" -eq 0 ] \
+   && [ "$ignore_lock_status" -eq 1 ] \
+   && [ "$ignore_artifact_record_valid" -eq 1 ]; then
+  ok "artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock"
+elif [ "$ignore_infrastructure_error" -eq 0 ]; then
+  fail "artifact-ignore: .gitignore must contain an effective .prkit/ rule and leave .prkit-generate.lock unignored"
+fi
+
+jq empty "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || fail "scaffold: marketplace.json is not valid JSON"
+jq empty "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null || fail "scaffold: native Codex marketplace.json is not valid JSON"
+if python3 -I -B - "$ROOT/.agents/plugins/marketplace.json" "$ROOT/codex/README.md" <<'PY'
+import json
+import pathlib
+import sys
+
+marketplace_path = pathlib.Path(sys.argv[1])
+readme_path = pathlib.Path(sys.argv[2])
+
+def reject_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON key: {key}')
+        result[key] = value
+    return result
+
+try:
+    marketplace = json.loads(
+        marketplace_path.read_text(encoding='utf-8'),
+        object_pairs_hook=reject_pairs,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f'non-finite JSON constant: {value}')
+        ),
+    )
+    readme = readme_path.read_text(encoding='utf-8')
+except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f'native Codex marketplace parse failed: {exc}')
+
+expected = {
+    'name': 'prkit',
+    'interface': {'displayName': 'prkit'},
+    'plugins': [{
+        'name': 'prkit-codex',
+        'source': {
+            'source': 'local',
+            'path': './codex/prkit-codex',
+        },
+        'policy': {
+            'installation': 'AVAILABLE',
+            'authentication': 'ON_INSTALL',
+        },
+        'category': 'workflow',
+    }],
+}
+if marketplace != expected:
+    raise SystemExit('native Codex marketplace shape or values differ from the canonical contract')
+selector = f"{marketplace['plugins'][0]['name']}@{marketplace['name']}"
+if selector != 'prkit-codex@prkit':
+    raise SystemExit(f'native Codex marketplace selector mismatch: {selector}')
+expected_command = f'codex plugin add {selector}'
+plugin_add_commands = [
+    line.strip()
+    for line in readme.splitlines()
+    if line.strip().startswith('codex plugin add ')
+]
+if plugin_add_commands != [expected_command]:
+    raise SystemExit('codex README must contain exactly one canonical marketplace selector')
+PY
+then ok "scaffold: root files present; both marketplaces valid; native selector canonical"
+else fail "scaffold: native Codex marketplace schema, availability, source, or README selector drift"; fi
+
+# --- 9. No unrendered generator placeholders leaked into generated output ---
+# Generator placeholders are uppercase identifiers (for example {{VERSION}}).
+# Lowercase doubled braces are valid runtime data, including Git's ^{tree}
+# spelling inside Python f-strings (`^{{tree}}`).
+PLH=$(grep -rlE '\{\{[A-Z][A-Z0-9_]*\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)
+placeholder_status=$?
+case "$placeholder_status" in
+  0)
+    fail "placeholders: unrendered {{...}} in:"
+    echo "$PLH" | sed 's/^/         /'
+    ;;
+  1) ok "placeholders: no unrendered {{...}} in output" ;;
+  *) fail "placeholders: scan errored (grep rc=$placeholder_status) — cannot certify clean" ;;
+esac
+
+if ! cleanup_verify_temp_paths; then
+  fail "cleanup: verifier temporary removal failed"
+fi
 
 echo "  Result: $([ "$rc" -eq 0 ] && echo PASS || echo FAIL)"
 exit "$rc"
