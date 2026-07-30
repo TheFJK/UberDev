@@ -273,7 +273,7 @@ echo "== M16: SKILL.md Phase 1.3 falls back to literal main without prompting OR
 # persist), no `[Y/n]`. Without this negative guard, a well-meaning future
 # edit could re-introduce ask-and-persist and silently re-add a prompt.
 PHASE_1_3_BLOCK=$(awk '/^### Step 1\.3/,/^### Step 1\.4/' "$SKILL_FILE")
-if echo "$PHASE_1_3_BLOCK" | grep -qE 'mktemp|\bmv\b|\[Y/n\]|persist the answer'; then
+if grep -qE 'mktemp|\bmv\b|\[Y/n\]|persist the answer' <<<"$PHASE_1_3_BLOCK"; then
   fail "M16 — Phase 1.3 MUST NOT ask-and-persist; it falls back to INTEGRATION_BRANCH_FALLBACK with no disk write"
   echo "         (the prior atomic-rename pattern was removed alongside the prompt)"
 else
@@ -283,7 +283,7 @@ fi
 # M16b — Phase 1.3 verifies the fallback branch exists on origin before proceeding.
 # Without this, repos whose default branch is not `main` would hit a confusing
 # `gh pr merge --base main` 404 several phases downstream.
-if echo "$PHASE_1_3_BLOCK" | grep -qE 'git ls-remote.*--heads.*origin|fallback-branch-missing'; then
+if grep -qE 'git ls-remote.*--heads.*origin|fallback-branch-missing' <<<"$PHASE_1_3_BLOCK"; then
   pass "M16b — Phase 1.3 verifies fallback branch exists on origin before proceeding"
 else
   fail "M16b — Phase 1.3 MUST verify the fallback branch exists on origin (\`git ls-remote --heads origin\`) and emit \`fallback-branch-missing\` on miss"
@@ -315,26 +315,26 @@ assert_grep "$SKILL_FILE" 'no behavioural effect' \
 echo
 echo "== M18: SKILL.md Phase 2.4 is unconditional autopilot (no ON/OFF branches, no [y/N] prompt) =="
 PHASE_2_4=$(awk '/^### Step 2\.4/,/^## Phase 3/' "$SKILL_FILE")
-if echo "$PHASE_2_4" | grep -qE 'If auto-confirm is ON|If auto-confirm is OFF'; then
+if grep -qE 'If auto-confirm is ON|If auto-confirm is OFF' <<<"$PHASE_2_4"; then
   fail "M18.1 — Phase 2.4 must NOT contain 'If auto-confirm is ON/OFF' branches (autopilot is unconditional)"
 else
   pass "M18.1 — Phase 2.4 has NO ON/OFF branches (autopilot is unconditional)"
 fi
-if echo "$PHASE_2_4" | grep -qE 'autopilot|Autopilot'; then
+if grep -qE 'autopilot|Autopilot' <<<"$PHASE_2_4"; then
   pass "M18.2 — Phase 2.4 carries autopilot prose"
 else
   fail "M18.2 — Phase 2.4 MUST mention autopilot"
 fi
 # A positive prompt would have either [y/N] near it, OR `Apply this plan?` without
 # a preceding "NO" / "no" within the same line. Scan for that pattern.
-if echo "$PHASE_2_4" | grep -qE '\[y/N\].*Apply this plan\?|Apply this plan\?.*\[y/N\]'; then
+if grep -qE '\[y/N\].*Apply this plan\?|Apply this plan\?.*\[y/N\]' <<<"$PHASE_2_4"; then
   fail "M18.3 — Phase 2.4 must NOT contain a positive 'Apply this plan?' [y/N] prompt (autopilot is unconditional)"
-elif echo "$PHASE_2_4" | grep -E 'Apply this plan\?' | grep -qvE '\bNO\b|\bno\b'; then
+elif grep -qvE '\bNO\b|\bno\b' <<<"$(grep -E 'Apply this plan\?' <<<"$PHASE_2_4")"; then
   fail "M18.3 — Phase 2.4 has 'Apply this plan?' without a NO/no qualifier (likely a positive prompt)"
 else
   pass "M18.3 — Phase 2.4 has no positive 'Apply this plan?' prompt"
 fi
-if echo "$PHASE_2_4" | grep -qE 'autopilot-default'; then
+if grep -qE 'autopilot-default' <<<"$PHASE_2_4"; then
   pass "M18.4 — Phase 2.4 emits 'autopilot-default' as data.reason for order_confirmed"
 else
   fail "M18.4 — Phase 2.4 MUST emit data.reason='autopilot-default' for order_confirmed"
@@ -343,22 +343,22 @@ fi
 echo
 echo "== M19: SKILL.md Phase 4.5 carries the autopilot affirmative-decision invariant =="
 PHASE_4_5=$(awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE")
-if echo "$PHASE_4_5" | grep -qE 'never rebases without an explicit affirmative decision'; then
+if grep -qE 'never rebases without an explicit affirmative decision' <<<"$PHASE_4_5"; then
   pass "M19.1 — Phase 4.5 carries Q2 invariant 'never rebases without an explicit affirmative decision'"
 else
   fail "M19.1 — Phase 4.5 MUST contain verbatim 'never rebases without an explicit affirmative decision'"
 fi
-if echo "$PHASE_4_5" | grep -qE "agent's typed decision-record is the affirmative form|typed decision-record is the affirmative form"; then
+if grep -qE "agent's typed decision-record is the affirmative form|typed decision-record is the affirmative form" <<<"$PHASE_4_5"; then
   pass "M19.2 — Phase 4.5 names the typed decision-record as the affirmative form"
 else
   fail "M19.2 — Phase 4.5 MUST state 'the agent's typed decision-record is the affirmative form for autopilot mode'"
 fi
-if echo "$PHASE_4_5" | grep -qE 'If auto-confirm is ON|If auto-confirm is OFF'; then
+if grep -qE 'If auto-confirm is ON|If auto-confirm is OFF' <<<"$PHASE_4_5"; then
   fail "M19.3 — Phase 4.5 must NOT branch on auto-confirm (autopilot is unconditional)"
 else
   pass "M19.3 — Phase 4.5 has no auto-confirm ON/OFF branching (autopilot is unconditional)"
 fi
-if echo "$PHASE_4_5" | grep -qE 'Force-push to PR head refs remains absolutely forbidden|Never `--force`|never --force|Force-push to PR head refs remains forbidden absolutely'; then
+if grep -qE 'Force-push to PR head refs remains absolutely forbidden|Never `--force`|never --force|Force-push to PR head refs remains forbidden absolutely' <<<"$PHASE_4_5"; then
   pass "M19.4 — Phase 4.5 preserves the no-force-push invariant"
 else
   fail "M19.4 — Phase 4.5 MUST preserve the 'no force-push to PR head refs' invariant"
@@ -415,12 +415,12 @@ fi
 echo
 echo "== M22: SKILL.md STRATEGY_ENUM declares drop (and does NOT declare the removed defer) =="
 STRATEGY_ROW=$(grep -E '^\| `STRATEGY_ENUM` \|' "$SKILL_FILE" || true)
-if echo "$STRATEGY_ROW" | grep -qE '`drop`'; then
+if grep -qE '`drop`' <<<"$STRATEGY_ROW"; then
   pass "M22.drop — STRATEGY_ENUM lists \`drop\`"
 else
   fail "M22.drop — STRATEGY_ENUM row in Constants must list \`drop\`"
 fi
-if echo "$STRATEGY_ROW" | grep -qE '`defer`'; then
+if grep -qE '`defer`' <<<"$STRATEGY_ROW"; then
   fail "M22.no-defer — STRATEGY_ENUM MUST NOT list \`defer\` (the defer strategy was removed when author-identity gating was deleted)"
 else
   pass "M22.no-defer — STRATEGY_ENUM correctly omits the removed \`defer\` strategy"
@@ -432,14 +432,14 @@ echo "== M23: SKILL.md AUDIT_EVENT_ENUM declares all autopilot events =="
 # (mirrors the M22 STRATEGY_ROW pattern — one extraction, six in-memory checks).
 AUDIT_EVENT_ROW=$(grep -E '^\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" || true)
 for ev in pr_parked stale_branch_rebase_decision deprecated_flag_used agent_strategy_switch test_fail_agent_decision; do
-  if echo "$AUDIT_EVENT_ROW" | grep -qE "\`$ev\`"; then
+  if grep -qE "\`$ev\`" <<<"$AUDIT_EVENT_ROW"; then
     pass "M23.$ev — AUDIT_EVENT_ENUM declares \`$ev\`"
   else
     fail "M23.$ev — AUDIT_EVENT_ENUM missing \`$ev\`"
   fi
 done
 # Negative assertion: pr_deferred was removed alongside the defer strategy.
-if echo "$AUDIT_EVENT_ROW" | grep -qE '`pr_deferred`'; then
+if grep -qE '`pr_deferred`' <<<"$AUDIT_EVENT_ROW"; then
   fail "M23.no-pr_deferred — AUDIT_EVENT_ENUM MUST NOT list \`pr_deferred\` (removed alongside the defer strategy)"
 else
   pass "M23.no-pr_deferred — AUDIT_EVENT_ENUM correctly omits the removed \`pr_deferred\` event"
@@ -456,7 +456,7 @@ assert_grep "$SKILL_FILE" '`test-fail-exhausted`' \
 assert_grep "$SKILL_FILE" '`push-non-ff`' \
   "M24.PARK.push-non-ff — PARK_REASON_ENUM lists \`push-non-ff\` (Phase 3.3vi parks instead of halting)"
 PARK_ROW=$(grep -E '^\| `PARK_REASON_ENUM` \|' "$SKILL_FILE" || true)
-if echo "$PARK_ROW" | grep -qE '`external-author-not-allow-listed`'; then
+if grep -qE '`external-author-not-allow-listed`' <<<"$PARK_ROW"; then
   fail "M24.PARK.no-ext-author — PARK_REASON_ENUM MUST NOT list \`external-author-not-allow-listed\` (author-identity gate removed)"
 else
   pass "M24.PARK.no-ext-author — PARK_REASON_ENUM correctly omits the removed \`external-author-not-allow-listed\` reason"
@@ -466,23 +466,23 @@ echo
 echo "== M25: SKILL.md Phase 3.3v test-fail response covers re-resolve / strategy-switch / park =="
 PHASE_3_3V=$(awk '/^v\. \*\*Pre-push test gate/,/^vi\. \*\*Push the resolution/' "$SKILL_FILE")
 for branch in 'RE-RESOLVE' 'STRATEGY-SWITCH' 'PARK'; do
-  if echo "$PHASE_3_3V" | grep -qE "$branch"; then
+  if grep -qE "$branch" <<<"$PHASE_3_3V"; then
     pass "M25.$branch — Phase 3.3v documents $branch branch"
   else
     fail "M25.$branch — Phase 3.3v MUST document $branch branch (agent-decided test-fail response)"
   fi
 done
-if echo "$PHASE_3_3V" | grep -qE 'Max 1 retry|max.{0,5}1.{0,5}retry'; then
+if grep -qE 'Max 1 retry|max.{0,5}1.{0,5}retry' <<<"$PHASE_3_3V"; then
   pass "M25.bound-retry — Phase 3.3v bounds re-resolve to max 1 retry"
 else
   fail "M25.bound-retry — Phase 3.3v MUST cap re-resolve at max 1 retry per PR per run"
 fi
-if echo "$PHASE_3_3V" | grep -qE 'Max 1 switch|max.{0,5}1.{0,5}switch'; then
+if grep -qE 'Max 1 switch|max.{0,5}1.{0,5}switch' <<<"$PHASE_3_3V"; then
   pass "M25.bound-switch — Phase 3.3v bounds strategy-switch to max 1 per PR per run"
 else
   fail "M25.bound-switch — Phase 3.3v MUST cap strategy-switch at max 1 per PR per run"
 fi
-if echo "$PHASE_3_3V" | grep -qE 'max 3 test runs per PR per run|Worst-case test runs per PR per run:[[:space:]]*3|3 test runs per PR per run'; then
+if grep -qE 'max 3 test runs per PR per run|Worst-case test runs per PR per run:[[:space:]]*3|3 test runs per PR per run' <<<"$PHASE_3_3V"; then
   pass "M25.worst-case — Phase 3.3v states max 3 test runs per PR per run"
 else
   fail "M25.worst-case — Phase 3.3v MUST state max 3 test runs per PR per run (initial + re-resolve-retry + strategy-switch-retry)"
@@ -491,25 +491,25 @@ fi
 echo
 echo "== M26: SKILL.md Phase 4.5 documents agent-decided rebase with safety preconditions =="
 PHASE_4_5=$(awk '/^### Step 4\.5/,/^### Step 4\.6/' "$SKILL_FILE")
-if echo "$PHASE_4_5" | grep -qE 'never rebases without an explicit affirmative decision'; then
+if grep -qE 'never rebases without an explicit affirmative decision' <<<"$PHASE_4_5"; then
   pass "M26.invariant — Phase 4.5 carries the Q2 'never rebases without affirmative decision' invariant"
 else
   fail "M26.invariant — Phase 4.5 MUST include verbatim 'never rebases without an explicit affirmative decision'"
 fi
-if echo "$PHASE_4_5" | grep -qE "agent's typed decision-record is the affirmative form|structured decision-record"; then
+if grep -qE "agent's typed decision-record is the affirmative form|structured decision-record" <<<"$PHASE_4_5"; then
   pass "M26.affirmation — Phase 4.5 names the typed decision-record as the affirmative form"
 else
   fail "M26.affirmation — Phase 4.5 MUST state the typed decision-record is the affirmative form for autopilot mode"
 fi
 for cond in 'merge-tree --write-tree' 'PR head ref' 'force-push'; do
-  if echo "$PHASE_4_5" | grep -qE "$cond"; then
+  if grep -qE "$cond" <<<"$PHASE_4_5"; then
     pass "M26.precond[$cond] — Phase 4.5 references safety precondition: $cond"
   else
     fail "M26.precond[$cond] — Phase 4.5 MUST reference $cond as part of safety preconditions"
   fi
 done
 for choice in 'rebased-ff-clean' 'skipped-conflicts' 'skipped-pr-head-ref' 'rebase-aborted'; do
-  if echo "$PHASE_4_5" | grep -qE "\`$choice\`"; then
+  if grep -qE "\`$choice\`" <<<"$PHASE_4_5"; then
     pass "M26.choice[$choice] — Phase 4.5 emits STALE_REBASE_DECISION_ENUM value \`$choice\`"
   else
     fail "M26.choice[$choice] — Phase 4.5 MUST document STALE_REBASE_DECISION_ENUM value \`$choice\`"
@@ -519,19 +519,19 @@ done
 echo
 echo "== M27: SKILL.md run-summary block describes Parked outcome =="
 SUMMARY_BLOCK=$(awk '/^### Run-summary block/,/^## /' "$SKILL_FILE")
-if echo "$SUMMARY_BLOCK" | grep -qE '^[[:space:]]*Parked:'; then
+if grep -qE '^[[:space:]]*Parked:' <<<"$SUMMARY_BLOCK"; then
   pass "M27.Parked — run-summary block names Parked outcome at top level"
 else
   fail "M27.Parked — run-summary block MUST list Parked: <count> at top level (alongside Merged/Skipped/Aborted)"
 fi
 # Negative: Deferred was removed alongside the defer strategy.
-if echo "$SUMMARY_BLOCK" | grep -qE '^[[:space:]]*Deferred:'; then
+if grep -qE '^[[:space:]]*Deferred:' <<<"$SUMMARY_BLOCK"; then
   fail "M27.no-Deferred — run-summary block MUST NOT list Deferred: (removed alongside defer strategy)"
 else
   pass "M27.no-Deferred — run-summary block correctly omits the removed Deferred outcome"
 fi
 for field in 'strategy:' 'rationale:' 'outcome:' 'park reason:'; do
-  if echo "$SUMMARY_BLOCK" | grep -qiE "$field"; then
+  if grep -qiE "$field" <<<"$SUMMARY_BLOCK"; then
     pass "M27.field[$field] — run-summary detail block names \"$field\" field"
   else
     fail "M27.field[$field] — run-summary detail block MUST include \"$field\" field"
@@ -544,13 +544,13 @@ echo "== M28: SKILL.md pre-flight banner advertises no-prompts-no-halts autopilo
 # legitimately mentions bot_authors_allow_list to call out its deprecated
 # status, and that prose should not trip this assertion.
 STEP_1_0=$(awk '/^### Step 1\.0/,/^### Step 1\.1/' "$SKILL_FILE")
-if echo "$STEP_1_0" | grep -qE 'no prompts.*no halts|no halts.*no prompts'; then
+if grep -qE 'no prompts.*no halts|no halts.*no prompts' <<<"$STEP_1_0"; then
   pass "M28.preflight — pre-flight banner advertises the no-prompts-no-halts autopilot contract"
 else
   fail "M28.preflight — Step 1.0 banner MUST surface the no-prompts-no-halts autopilot contract verbatim"
 fi
 # Negative: legacy bot_authors_allow_list banner was removed from Step 1.0.
-if echo "$STEP_1_0" | grep -qiE 'allow-listed authors|bot_authors_allow_list'; then
+if grep -qiE 'allow-listed authors|bot_authors_allow_list' <<<"$STEP_1_0"; then
   fail "M28.no-allow-list — Step 1.0 banner MUST NOT print bot_authors_allow_list (the trust-boundary gate was removed)"
 else
   pass "M28.no-allow-list — Step 1.0 banner correctly omits the removed bot_authors_allow_list listing"
@@ -559,12 +559,12 @@ fi
 echo
 echo "== M29: SKILL.md Phase 1.4 explicitly removes the PR-author allow-list as a gate condition =="
 PHASE_1_4=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
-if echo "$PHASE_1_4" | grep -qiE 'Author identity is NOT a gate condition'; then
+if grep -qiE 'Author identity is NOT a gate condition' <<<"$PHASE_1_4"; then
   pass "M29.no-author-gate — Phase 1.4 explicitly states author identity is NOT a gate"
 else
   fail "M29.no-author-gate — Phase 1.4 MUST explicitly state \"Author identity is NOT a gate condition\""
 fi
-if echo "$PHASE_1_4" | grep -qiE 'PR author is repo collaborator|author\.login.*bot_authors_allow_list'; then
+if grep -qiE 'PR author is repo collaborator|author\.login.*bot_authors_allow_list' <<<"$PHASE_1_4"; then
   fail "M29.no-old-condition — Phase 1.4 MUST NOT contain the old author-collaborator gate clause"
 else
   pass "M29.no-old-condition — Phase 1.4 correctly omits the removed author-collaborator gate clause"
@@ -573,12 +573,12 @@ fi
 echo
 echo "== M30: SKILL.md Phase 1.3 falls back to literal main (no integration-branch prompt) =="
 PHASE_1_3=$(awk '/^### Step 1\.3/,/^### Step 1\.4/' "$SKILL_FILE")
-if echo "$PHASE_1_3" | grep -qE 'INTEGRATION_BRANCH_FALLBACK'; then
+if grep -qE 'INTEGRATION_BRANCH_FALLBACK' <<<"$PHASE_1_3"; then
   pass "M30.fallback — Phase 1.3 references INTEGRATION_BRANCH_FALLBACK"
 else
   fail "M30.fallback — Phase 1.3 MUST reference INTEGRATION_BRANCH_FALLBACK (literal main)"
 fi
-if echo "$PHASE_1_3" | grep -qiE 'Never prompt'; then
+if grep -qiE 'Never prompt' <<<"$PHASE_1_3"; then
   pass "M30.never-prompt — Phase 1.3 explicitly forbids prompting"
 else
   fail "M30.never-prompt — Phase 1.3 MUST explicitly state \"Never prompt the user\""
@@ -587,12 +587,12 @@ fi
 echo
 echo "== M31: SKILL.md Phase 4.2 auto-rebases on ff-only fail (no halt) =="
 PHASE_4_2=$(awk '/^### Step 4\.2/,/^### Step 4\.3/' "$SKILL_FILE")
-if echo "$PHASE_4_2" | grep -qE 'auto-rebase|git rebase origin/'; then
+if grep -qE 'auto-rebase|git rebase origin/' <<<"$PHASE_4_2"; then
   pass "M31.auto-rebase — Phase 4.2 auto-rebases on ff-only fail"
 else
   fail "M31.auto-rebase — Phase 4.2 MUST auto-rebase local onto origin on ff-only fail"
 fi
-if echo "$PHASE_4_2" | grep -qiE 'MUST NOT halt|never halt|does NOT halt'; then
+if grep -qiE 'MUST NOT halt|never halt|does NOT halt' <<<"$PHASE_4_2"; then
   pass "M31.no-halt — Phase 4.2 explicitly forbids halting on local divergence"
 else
   fail "M31.no-halt — Phase 4.2 MUST explicitly state the run does NOT halt on local divergence"
@@ -601,12 +601,12 @@ fi
 echo
 echo "== M32: SKILL.md Phase 3.3vi parks PR on push-non-FF (no halt) =="
 PHASE_3_3VI=$(awk '/^vi\. \*\*Push the resolution/,/^vii\. /' "$SKILL_FILE")
-if echo "$PHASE_3_3VI" | grep -qE 'park THIS PR|park.*drop.*push-non-ff|push-non-ff'; then
+if grep -qE 'park THIS PR|park.*drop.*push-non-ff|push-non-ff' <<<"$PHASE_3_3VI"; then
   pass "M32.park — Phase 3.3vi parks PR on push-non-FF"
 else
   fail "M32.park — Phase 3.3vi MUST park PR via drop on push-non-FF (instead of halting)"
 fi
-if echo "$PHASE_3_3VI" | grep -qE 'continue with the next PR|queue does NOT halt|queue continues'; then
+if grep -qE 'continue with the next PR|queue does NOT halt|queue continues' <<<"$PHASE_3_3VI"; then
   pass "M32.continue — Phase 3.3vi states queue continues after park"
 else
   fail "M32.continue — Phase 3.3vi MUST state the queue continues after parking the PR"
@@ -615,20 +615,20 @@ fi
 echo
 echo "== M33: SKILL.md Phase 2.1 auto-breaks dependency cycles (no halt) =="
 PHASE_2_1=$(awk '/^### Step 2\.1/,/^### Step 2\.2/' "$SKILL_FILE")
-if echo "$PHASE_2_1" | grep -qE 'createdAt|drop the cycle|fall through'; then
+if grep -qE 'createdAt|drop the cycle|fall through' <<<"$PHASE_2_1"; then
   pass "M33.auto-break — Phase 2.1 auto-breaks cycles via createdAt fallback"
 else
   fail "M33.auto-break — Phase 2.1 MUST auto-break cycles (drop edges + fall through to createdAt order)"
 fi
 # Single positive check + explicit regression check against the OLD "never auto-break" rule.
-if echo "$PHASE_2_1" | grep -qE 'Never halt|never halts'; then
+if grep -qE 'Never halt|never halts' <<<"$PHASE_2_1"; then
   pass "M33.no-halt — Phase 2.1 explicitly forbids halting on cycle"
 else
   fail "M33.no-halt — Phase 2.1 MUST contain 'Never halt' / 'never halts' (the cycle-auto-break contract)"
 fi
 # Negative regression guard: the OLD rule "Never auto-break" must be gone — it's
 # now reversed (auto-break IS the new contract).
-if echo "$PHASE_2_1" | grep -qE 'Never auto-break|never auto-break\b'; then
+if grep -qE 'Never auto-break|never auto-break\b' <<<"$PHASE_2_1"; then
   fail "M33.no-old-rule — Phase 2.1 MUST NOT carry the old 'Never auto-break' prose (auto-break IS the new contract)"
 else
   pass "M33.no-old-rule — Phase 2.1 correctly omits the reversed 'Never auto-break' rule"
@@ -848,7 +848,7 @@ else
   assert_grep "$MSD_FILE" 'strategy: squash \| rebase \| merge'     "M48.9 — strategy enum in return-contract YAML"
   # Negative: drop must NOT appear as a verdict in the return-contract YAML
   YAML_BLOCK=$(awk '/^```yaml$/,/^```$/' "$MSD_FILE")
-  if echo "$YAML_BLOCK" | grep -qE '^strategy:.*drop'; then
+  if grep -qE '^strategy:.*drop' <<<"$YAML_BLOCK"; then
     echo "  FAIL  M48.no-drop — return-contract YAML must NOT name 'drop' as a verdict"
     FAIL=$((FAIL + 1))
   else
@@ -885,21 +885,21 @@ fi
 echo
 echo "== M50: SKILL.md Phase 2.2 dispatches merge-strategy-decider via Task() =="
 PHASE_22_BODY=$(awk '/^### Step 2.2/,/^### Step 2.3/' "$SKILL_FILE")
-if echo "$PHASE_22_BODY" | grep -qE 'merge-strategy-decider'; then
+if grep -qE 'merge-strategy-decider' <<<"$PHASE_22_BODY"; then
   echo "  PASS  M50.1 — Phase 2.2 names merge-strategy-decider agent"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M50.1 — Phase 2.2 must name merge-strategy-decider agent"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_22_BODY" | grep -qE 'Task\('; then
+if grep -qE 'Task\(' <<<"$PHASE_22_BODY"; then
   echo "  PASS  M50.2 — Phase 2.2 mentions Task() dispatch"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M50.2 — Phase 2.2 must mention Task() dispatch for merge-strategy-decider"
   FAIL=$((FAIL + 1))
 fi
-if echo "$PHASE_22_BODY" | grep -qE 'Per-invocation flag always wins'; then
+if grep -qE 'Per-invocation flag always wins' <<<"$PHASE_22_BODY"; then
   echo "  FAIL  M50.no-cli-wins — Phase 2.2 must NOT contain 'Per-invocation flag always wins' clause"
   FAIL=$((FAIL + 1))
 else
@@ -922,7 +922,7 @@ echo
 echo "== M52: SKILL.md AUDIT_EVENT_ENUM contains new agent-decision events; STRATEGY_REASON_ENUM contains agent_decided =="
 AUDIT_ROW=$(grep -E '\| `AUDIT_EVENT_ENUM` \|' "$SKILL_FILE" || true)
 for EV in trust_trail_agent_decision merge_strategy_agent_decision merge_strategy_fanout_wave_started; do
-  if echo "$AUDIT_ROW" | grep -qE "$EV"; then
+  if grep -qE "$EV" <<<"$AUDIT_ROW"; then
     echo "  PASS  M52.$EV — AUDIT_EVENT_ENUM declares $EV"
     PASS=$((PASS + 1))
   else
@@ -944,7 +944,7 @@ CMD_DEP_BODY=$(awk '/^## Deprecated Flags/,EOF' "$CMD_FILE")
 for FL in '--squash' '--rebase' '--merge' '--bypass-protections'; do
   # Use `grep -e <pattern>` so flag-style patterns starting with `--` are
   # not parsed as grep options (BSD grep on macOS is strict about this).
-  if echo "$CMD_DEP_BODY" | grep -qE -e "$FL"; then
+  if grep -qE -e "$FL" <<<"$CMD_DEP_BODY"; then
     echo "  PASS  M53.$FL — Deprecated Flags section names $FL"
     PASS=$((PASS + 1))
   else
@@ -952,14 +952,14 @@ for FL in '--squash' '--rebase' '--merge' '--bypass-protections'; do
     FAIL=$((FAIL + 1))
   fi
 done
-if echo "$CMD_DEP_BODY" | grep -qE 'warning: --squash / --rebase / --merge are deprecated'; then
+if grep -qE 'warning: --squash / --rebase / --merge are deprecated' <<<"$CMD_DEP_BODY"; then
   echo "  PASS  M53.notice-strategy — verbatim STRATEGY_FLAGS_DEPRECATED_NOTE present"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  M53.notice-strategy — verbatim STRATEGY_FLAGS_DEPRECATED_NOTE missing"
   FAIL=$((FAIL + 1))
 fi
-if echo "$CMD_DEP_BODY" | grep -qE 'warning: --bypass-protections is deprecated'; then
+if grep -qE 'warning: --bypass-protections is deprecated' <<<"$CMD_DEP_BODY"; then
   echo "  PASS  M53.notice-bypass — verbatim BYPASS_PROTECTIONS_DEPRECATED_NOTE present"
   PASS=$((PASS + 1))
 else
@@ -1023,7 +1023,7 @@ echo
 echo "== M59: SKILL.md Phase 2.2 documents MAX_PARALLEL_AGENTS chunking + merge_strategy_fanout_wave_started =="
 PHASE_22_BODY=$(awk '/^### Step 2.2/,/^### Step 2.3/' "$SKILL_FILE")
 for KW in 'MAX_PARALLEL_AGENTS' 'merge_strategy_fanout_wave_started' 'wave_index' 'wave_size'; do
-  if echo "$PHASE_22_BODY" | grep -qE "$KW"; then
+  if grep -qE "$KW" <<<"$PHASE_22_BODY"; then
     echo "  PASS  M59.$KW — Phase 2.2 mentions $KW"
     PASS=$((PASS + 1))
   else
@@ -1102,13 +1102,13 @@ if [ -z "$PHASE_1_1_BLOCK" ]; then
   fail "M62 — could not slice Step 1.1 block; heading layout changed"
 else
   # M62.1 — mkdir is the atomic acquisition primitive (sole mechanism).
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'if mkdir "\$LOCK_DIR"'; then
+  if grep -qE 'if mkdir "\$LOCK_DIR"' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.1 — Step 1.1 acquires via the mkdir-atomic 'if mkdir \"\$LOCK_DIR\"' pattern (sole mechanism post-#303)"
   else
     fail "M62.1 — Step 1.1 must acquire via the mkdir-atomic 'if mkdir \"\$LOCK_DIR\"' pattern (#303 — no flock branch)"
   fi
   # M62.2 — the lock DIRECTORY literal.
-  if echo "$PHASE_1_1_BLOCK" | grep -qF '.git/uberdev-merge.lock.d'; then
+  if grep -qF '.git/uberdev-merge.lock.d' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.2 — Step 1.1 declares the .git/uberdev-merge.lock.d lock directory"
   else
     fail "M62.2 — Step 1.1 must declare the .git/uberdev-merge.lock.d lock directory (#303)"
@@ -1116,7 +1116,7 @@ else
   # M62.3 — the void-lock retirement rationale is load-bearing prose: it is
   # what stops a future simplification from re-introducing flock / PID
   # stamps / traps (each re-opens the void-lock class).
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'flock\(1\), PID stamps, and traps are all retired'; then
+  if grep -qE 'flock\(1\), PID stamps, and traps are all retired' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.3 — Step 1.1 documents the flock/PID/trap retirement rationale (#303 void-lock class)"
   else
     fail "M62.3 — Step 1.1 must document why flock(1)/PID stamps/traps are retired (#303 — per-fence shells make every process-lifetime-bound mechanism void)"
@@ -1124,8 +1124,8 @@ else
   # M62.4 — Step 4.6 releases explicitly with holder verification (run_id
   # match before removal — never delete a lock another run reclaimed).
   PHASE_4_6_BLOCK=$(awk '/^### Step 4\.6/,/^## Quick Reference/' "$SKILL_FILE")
-  if echo "$PHASE_4_6_BLOCK" | grep -qE 'rm -rf "\$LOCK_DIR"' \
-     && echo "$PHASE_4_6_BLOCK" | grep -qE '\.run_id'; then
+  if grep -qE 'rm -rf "\$LOCK_DIR"' <<<"$PHASE_4_6_BLOCK" \
+     && grep -qE '\.run_id' <<<"$PHASE_4_6_BLOCK"; then
     pass "M62.4 — Step 4.6 releases via holder-verified rm -rf (run_id match before removal; #303)"
   else
     fail "M62.4 — Step 4.6 must release explicitly with a holder-verified rm -rf of the lock dir (#303 — there is no trap)"
@@ -1133,7 +1133,7 @@ else
   # M62.5 — Step 1.1 must distinguish mkdir filesystem errors from contention so users see the
   # right diagnostic. Without this, ENOSPC / EACCES / EROFS get mis-reported as "another /merge
   # run in progress" — the same silent-failure family as the original issue #51 mis-classification.
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'filesystem error|ENOSPC|EACCES|EROFS|non-EEXIST'; then
+  if grep -qE 'filesystem error|ENOSPC|EACCES|EROFS|non-EEXIST' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.5 — Step 1.1 distinguishes mkdir filesystem errors from lock contention"
   else
     fail "M62.5 — Step 1.1 must distinguish mkdir filesystem errors (ENOSPC / EACCES / EROFS) from lock contention so the diagnostic does not mis-fire"
@@ -1144,14 +1144,14 @@ else
   # class the redesign retires. The pattern targets literal trap-installation
   # syntax (trap followed by a quoted command), not the retirement prose
   # that merely mentions the word.
-  if echo "$PHASE_1_1_BLOCK" | grep -qE "trap +['\"]" \
-     || echo "$PHASE_4_6_BLOCK" | grep -qE "trap +['\"]"; then
+  if grep -qE "trap +['\"]" <<<"$PHASE_1_1_BLOCK" \
+     || grep -qE "trap +['\"]" <<<"$PHASE_4_6_BLOCK"; then
     fail "M62.6 — Steps 1.1/4.6 must NOT prescribe trap-based cleanup (#303 — a fence-scoped trap fires at fence exit, releasing the lock at the start of the run)"
   else
     pass "M62.6 — no trap-installation syntax in Steps 1.1/4.6 (no-trap contract; #303)"
   fi
   # M62.7 — the lock record shape, including the workflowRunId reservation.
-  if echo "$PHASE_1_1_BLOCK" | grep -qF '{"run_id":"%s","started_at":"%s","workflowRunId":null}'; then
+  if grep -qF '{"run_id":"%s","started_at":"%s","workflowRunId":null}' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.7a — Step 1.1 stamps record.json as {run_id, started_at, workflowRunId:null}"
   else
     fail "M62.7a — Step 1.1 must stamp record.json with the {run_id, started_at, workflowRunId:null} shape (#303/#310)"
@@ -1159,7 +1159,7 @@ else
   assert_grep "$SKILL_FILE" 'workflowRunId.*RESERVED for #310' \
     "M62.7b — Constants row reserves workflowRunId for #310's status reader"
   # M62.8 — staleness threshold formula + the 900 s hard floor.
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'max\(`?command_timeouts\.merge`?, `?LOCK_STALE_FLOOR_SEC`?\)'; then
+  if grep -qE 'max\(`?command_timeouts\.merge`?, `?LOCK_STALE_FLOOR_SEC`?\)' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.8a — staleness threshold = max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC) heartbeat age"
   else
     fail "M62.8a — Step 1.1 must define staleness as heartbeat age > max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC) (#303)"
@@ -1169,7 +1169,7 @@ else
   # M62.9 — staleness must NEVER key on started_at age (a live long run —
   # the 1.4.5 auto-review intercept alone can exceed CI_MONITOR_TIMEOUT_SEC —
   # would be mis-stolen; that trades the void lock for a steal-during-live-run lock).
-  if echo "$PHASE_1_1_BLOCK" | grep -qE 'NEVER classify by `?started_at`? age'; then
+  if grep -qE 'NEVER classify by `?started_at`? age' <<<"$PHASE_1_1_BLOCK"; then
     pass "M62.9 — Step 1.1 forbids started_at-age staleness (heartbeat age only; #303)"
   else
     fail "M62.9 — Step 1.1 must forbid classifying staleness by started_at age (#303 — live long runs would be mis-stolen)"
@@ -1180,7 +1180,7 @@ else
   if [ -z "$HEARTBEAT_BLOCK" ]; then
     fail "M62.10 — Lock heartbeat protocol section missing (#303)"
   else
-    if echo "$HEARTBEAT_BLOCK" | grep -qE 'date \+%s > "\$LOCK_DIR/heartbeat"'; then
+    if grep -qE 'date \+%s > "\$LOCK_DIR/heartbeat"' <<<"$HEARTBEAT_BLOCK"; then
       pass "M62.10a — canonical heartbeat touch snippet present (epoch-seconds overwrite)"
     else
       fail "M62.10a — heartbeat protocol must carry the canonical 'date +%s > \"\$LOCK_DIR/heartbeat\"' touch snippet (#303)"
@@ -1201,7 +1201,7 @@ else
     # exact steal-during-live-run class #303 closes); Step 4.6 likewise refuses
     # release, blocking the next run. (RFC 0012 §3.2 item 1 cross-fence
     # provisioning.)
-    if echo "$PHASE_1_1_BLOCK" | grep -qE 'echo "merge lock acquired \(run_id \$RUN_ID\)"'; then
+    if grep -qE 'echo "merge lock acquired \(run_id \$RUN_ID\)"' <<<"$PHASE_1_1_BLOCK"; then
       pass "M62.10c — Step 1.1 acquire fence echoes the effective RUN_ID on success (cross-fence provisioning source; #303 / RFC 0012 §3.2)"
     else
       fail "M62.10c — Step 1.1 acquire fence must echo 'merge lock acquired (run_id \$RUN_ID)' on success so the orchestrator can re-establish RUN_ID in later touch/release fences (#303 — RUN_ID is fence-scoped; a silent acquire leaves every touch fence with RUN_ID unset and the heartbeat frozen at acquisition)"
@@ -1214,9 +1214,9 @@ else
     # RUN_ID=<value> from the Step 1.1 acquire echo, and (3) forbid re-deriving
     # run_id from record.json (which vacates the holder check). Same fence-scoped
     # run-state class as goal-pipeline's cross-shell traps (#178).
-    if echo "$HEARTBEAT_BLOCK" | grep -qiE '`?RUN_ID`? does not survive fences' \
-       && echo "$HEARTBEAT_BLOCK" | grep -qE 'prepend the literal `?RUN_ID=' \
-       && echo "$HEARTBEAT_BLOCK" | grep -qiE 'MUST NOT re-derive `?run_id`? from `?record\.json`?'; then
+    if grep -qiE '`?RUN_ID`? does not survive fences' <<<"$HEARTBEAT_BLOCK" \
+       && grep -qE 'prepend the literal `?RUN_ID=' <<<"$HEARTBEAT_BLOCK" \
+       && grep -qiE 'MUST NOT re-derive `?run_id`? from `?record\.json`?' <<<"$HEARTBEAT_BLOCK"; then
       pass "M62.10d — heartbeat protocol mandates RUN_ID re-establishment per fence (prepend RUN_ID=<value>; forbid re-derive from record.json; #303 / RFC 0012 §3.2)"
     else
       fail "M62.10d — 'Lock heartbeat protocol' must mandate per-fence RUN_ID provisioning: state RUN_ID does not survive fences, require prepending the literal 'RUN_ID=<value>' from Step 1.1, and forbid re-deriving run_id from record.json (#303 — 'run it verbatim' silently depends on undocumented orchestrator behavior otherwise; verbatim fence with RUN_ID unset warn-skips every heartbeat)"
@@ -1231,7 +1231,7 @@ else
   else
     fail "M62.11a — Steps 1.2/1.3/1.7 must each cite the explicit lock release (rm -rf .git/uberdev-merge.lock.d), found ${RELEASE_SITE_COUNT:-0} (#303)"
   fi
-  if echo "$HEARTBEAT_BLOCK" | grep -qE 'Release sites \(explicit'; then
+  if grep -qE 'Release sites \(explicit' <<<"$HEARTBEAT_BLOCK"; then
     pass "M62.11b — release-sites paragraph present (explicit — there is no trap)"
   else
     fail "M62.11b — heartbeat protocol must carry the explicit release-sites paragraph (#303)"
@@ -1266,25 +1266,25 @@ assert_grep "$SKILL_FILE" 'short-circuit.*sub-condition.*d|d.*only.*checked.*c.*
 # Phase 1.4 PATH_2 (d) body so they don't accidentally match other prose.
 PATH2_D_BODY=$(echo "$PHASE_14_BODY" | awk '/^d\. /,/^On all four sub-conditions met:/')
 
-if echo "$PATH2_D_BODY" | grep -qE 'top-level `?\.pr`? integer field equals'; then
+if grep -qE 'top-level `?\.pr`? integer field equals' <<<"$PATH2_D_BODY"; then
   pass "M63.pr-filter — sub-condition (d) prose explicitly requires filtering JSONs by top-level .pr field"
 else
   fail "M63.pr-filter — sub-condition (d) prose must require filtering .uberdev/runs/*/review-pr-verdict.json by top-level .pr == <N> (issue #78)"
 fi
 
-if echo "$PATH2_D_BODY" | grep -qE 'strict.*"sha"[[:space:]]*==[[:space:]]*headRefOid.*RETIRED|equality check is RETIRED|equality check is no longer performed|RETIRED.*post-#78'; then
+if grep -qE 'strict.*"sha"[[:space:]]*==[[:space:]]*headRefOid.*RETIRED|equality check is RETIRED|equality check is no longer performed|RETIRED.*post-#78' <<<"$PATH2_D_BODY"; then
   pass "M63.strict-equality-retired — sub-condition (d) prose explicitly retires strict \"sha\" == headRefOid equality check (issue #78)"
 else
   fail "M63.strict-equality-retired — sub-condition (d) prose must explicitly retire the strict \"sha\" == headRefOid check (issue #78)"
 fi
 
-if echo "$PATH2_D_BODY" | grep -qE 'shape-malformed only|narrowed to.*shape-malformed|shape failures.*only'; then
+if grep -qE 'shape-malformed only|narrowed to.*shape-malformed|shape failures.*only' <<<"$PATH2_D_BODY"; then
   pass "M63.shape-malformed-narrow — sub-condition (d) narrows trust_trail_json_sha_mismatch emission to shape-malformed cases only (issue #78)"
 else
   fail "M63.shape-malformed-narrow — sub-condition (d) must narrow trust_trail_json_sha_mismatch to shape-malformed cases only post-#78"
 fi
 
-if echo "$PATH2_D_BODY" | grep -qE 'timestamp prefix only|YYYYMMDD-HHMMSS.*timestamp|selected timestamp.*identical'; then
+if grep -qE 'timestamp prefix only|YYYYMMDD-HHMMSS.*timestamp|selected timestamp.*identical' <<<"$PATH2_D_BODY"; then
   pass "M63.most-recent-tiebreak — sub-condition (d) ranks by timestamp prefix and requires identical bytes for selected-time ties"
 else
   fail "M63.most-recent-tiebreak — sub-condition (d) must rank by timestamp prefix and fail closed on divergent selected-time ties"
@@ -1300,7 +1300,7 @@ fi
 # asserts the retirement *prose* is PRESENT). Mirrors the `assert_no_grep` convention
 # but operates on $PATH2_D_BODY (a variable, not a file) so it stays consistent with
 # the surrounding M63 inline-grep style.
-if echo "$PATH2_D_BODY" | grep -qE '"sha"[[:space:]]*!=[[:space:]]*headRefOid|"sha"[[:space:]]*≠[[:space:]]*headRefOid|sha[[:space:]]+(does[[:space:]]+not|!=)[[:space:]]+(equal|match)[[:space:]]+headRefOid'; then
+if grep -qE '"sha"[[:space:]]*!=[[:space:]]*headRefOid|"sha"[[:space:]]*≠[[:space:]]*headRefOid|sha[[:space:]]+(does[[:space:]]+not|!=)[[:space:]]+(equal|match)[[:space:]]+headRefOid' <<<"$PATH2_D_BODY"; then
   fail "M63.inequality-phrasing-absent — strict-inequality phrasing (\"sha\" != headRefOid / \"sha\" ≠ headRefOid) must NOT return to sub-condition (d) post-#78 — see M63.strict-equality-retired"
 else
   pass "M63.inequality-phrasing-absent — sub-condition (d) does not carry the retired strict-inequality phrasing (issue #78 regression guard)"
@@ -1345,12 +1345,18 @@ WORKTREE_GLOBS=(
 # (a) the closed Python receipt-builder in lib/discover.sh owns the
 # enumeration (#303 plus secure-capture hardening).
 DISCOVER_LIB_FILE="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
-HELPER_BLOCK=$(awk '/ROOT_LAYOUTS = \(/,/^\\)/' "$DISCOVER_LIB_FILE" 2>/dev/null)
+# Range end is `/^\)/` — a literal `)` at column 0, i.e. the closing paren of the
+# ROOT_LAYOUTS tuple. It used to read `/^\\)/`, which inside these single quotes
+# reaches awk as `^\\)` = "a literal BACKSLASH at line start, then `)`". That
+# never matches, so the range silently ran to EOF and HELPER_BLOCK was "the rest
+# of the file" — every root-name literal anywhere below ROOT_LAYOUTS inflated
+# ROOT_COUNT and the four-root assertion was measuring the wrong text.
+HELPER_BLOCK=$(awk '/ROOT_LAYOUTS = \(/,/^\)/' "$DISCOVER_LIB_FILE" 2>/dev/null)
 if [ -z "$HELPER_BLOCK" ]; then
   fail "M63.worktree-glob.c0 — ROOT_LAYOUTS contract not found in lib/discover.sh"
 else
   for root in '.uberdev/runs' '.claude/worktrees' '.worktrees' 'worktrees'; do
-    if echo "$HELPER_BLOCK" | grep -qF "\"$root\""; then
+    if grep -qF "\"$root\"" <<<"$HELPER_BLOCK"; then
       pass "M63.worktree-glob.c0.find[$root] — secure selector root table includes $root"
     else
       fail "M63.worktree-glob.c0.find[$root] — secure selector MUST search $root"
@@ -1387,12 +1393,12 @@ fi
 # tool — the #294 _uberdev_goal_glob_worktree class).
 # Anchor on the closed receipt identifier and composed-identity dispatch prose.
 STEP_C0_BLOCK=$(awk '/Step \(c\.0\).*AUDIT_VERDICT_RECEIPT/,/Pass these alongside the existing inputs/' "$SKILL_FILE")
-if echo "$STEP_C0_BLOCK" | grep -qE 'discover_review_verdict_json "\$PR_NUMBER"'; then
+if grep -qE 'discover_review_verdict_json "\$PR_NUMBER"' <<<"$STEP_C0_BLOCK"; then
   pass "M63.worktree-glob.c0.callsite — Step (c.0) delegates to discover_review_verdict_json \"\$PR_NUMBER\""
 else
   fail "M63.worktree-glob.c0.callsite — Step (c.0) MUST call discover_review_verdict_json \"\$PR_NUMBER\" (lib/discover.sh owns the enumeration post-#303)"
 fi
-if echo "$STEP_C0_BLOCK" | grep -qE '^[[:space:]]*if compgen|\|\|[[:space:]]*compgen'; then
+if grep -qE '^[[:space:]]*if compgen|\|\|[[:space:]]*compgen' <<<"$STEP_C0_BLOCK"; then
   fail "M63.worktree-glob.c0.no-compgen — Step (c.0) MUST NOT re-inline a compgen chain (bashism — silently misfires under the zsh Bash tool; #303/#294)"
 else
   pass "M63.worktree-glob.c0.no-compgen — Step (c.0) carries no inline compgen invocation (zsh-safe; #303)"
@@ -1403,7 +1409,7 @@ fi
 # bash code (prose-bash drift is the regression class this guards against).
 # Iterates the SAME WORKTREE_GLOBS array as (a) above — single source of truth.
 for glob in "${WORKTREE_GLOBS[@]}"; do
-  if echo "$PATH2_D_BODY" | grep -qF "$glob"; then
+  if grep -qF "$glob" <<<"$PATH2_D_BODY"; then
     pass "M63.worktree-glob.d[$glob] — sub-condition (d) prose names glob $glob (prose mirrors Step (c.0)'s bash enumeration)"
   else
     fail "M63.worktree-glob.d[$glob] — sub-condition (d) prose MUST name glob $glob (prose-bash drift between (c.0) and (d) is the regression class this guards against)"
@@ -1415,7 +1421,7 @@ done
 # worktree-mirror requirement. Mirrors the M86.7 convention which locks the
 # #95 Common Mistakes bullet.
 CM_BULLET=$(awk '/^- \*\*Searching only `\.uberdev\/runs\/\*\/review-pr-verdict\.json` in Step \(c\.0\)/{flag=1} flag{print; if(/^- /){count++; if(count>1)exit}}' "$SKILL_FILE")
-if echo "$CM_BULLET" | grep -qF '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json'; then
+if grep -qF '.worktrees/*/.uberdev/runs/*/review-pr-verdict.json' <<<"$CM_BULLET"; then
   pass "M63.worktree-glob.cm — Common Mistakes bullet enumerates .worktrees/ and worktrees/ glob layouts (defends against documentation regression)"
 else
   fail "M63.worktree-glob.cm — Common Mistakes bullet MUST enumerate the worktree-mirror glob set including .worktrees/ and worktrees/ — without it, future maintainers reading the bullet for guidance receive an incomplete picture"
@@ -1437,7 +1443,7 @@ SANITIZE_BODY=$(awk '/sanitize_agent_text\(\) \{/,/^[[:space:]]*\}[[:space:]]*$/
 # (literal -F) so a future "Conflict Files:" or "VERDICT:" mistake fails loudly
 # instead of silently matching the lowercase contract.
 for field in 'conflict files:' 'verdict:' 'justification:' 'risks:'; do
-  if echo "$CONFLICT_BLOCK" | grep -qF "$field"; then
+  if grep -qF "$field" <<<"$CONFLICT_BLOCK"; then
     pass "M64.field[$field] — conflict-files sub-block names \"$field\" (lowercase, within sub-block)"
   else
     fail "M64.field[$field] — conflict-files sub-block MUST include \"$field\" lowercase, within the sub-block (not just elsewhere in SKILL.md)"
@@ -1448,7 +1454,7 @@ done
 # tags must appear inside the conflict-files sub-block (not in an unrelated
 # example or comment elsewhere in the run-summary section).
 for tag in '\[refused\]' '\[ambiguous\]'; do
-  if echo "$CONFLICT_BLOCK" | grep -qE "$tag"; then
+  if grep -qE "$tag" <<<"$CONFLICT_BLOCK"; then
     pass "M64.tag[$tag] — verdict casing matches PARK_REASON_ENUM (lowercase, bracketed) within sub-block"
   else
     fail "M64.tag[$tag] — verdict tag $tag MUST appear inside the conflict-files sub-block (lowercase bracketed form per PARK_REASON_ENUM)"
@@ -1457,7 +1463,7 @@ done
 
 # Phase 3.3iv prose must explicitly name the source fields (4 tokens).
 for prose_token in 'resolution_summary' 'risks' 'sanitize_agent_text' 'fmt -w 80'; do
-  if echo "$PHASE_33IV" | grep -qF "$prose_token"; then
+  if grep -qF "$prose_token" <<<"$PHASE_33IV"; then
     pass "M64.prose[$prose_token] — Phase 3.3iv mentions \"$prose_token\""
   else
     fail "M64.prose[$prose_token] — Phase 3.3iv MUST mention \"$prose_token\" so consumer wiring is unambiguous"
@@ -1468,7 +1474,7 @@ done
 # conflict-files sub-block template, not merely somewhere in SKILL.md. This
 # catches the regression where the gate is removed from the template but the
 # phrase survives in surrounding prose.
-if echo "$CONFLICT_BLOCK" | grep -qF 'only if outcome is Parked AND park reason'; then
+if grep -qF 'only if outcome is Parked AND park reason' <<<"$CONFLICT_BLOCK"; then
   pass "M64.conditional — conflict-files sub-block render-condition documented inline with the sub-block (gates RESOLVED path unchanged)"
 else
   fail "M64.conditional — conflict-files sub-block MUST inline the render-condition clause; gate removal from template would leave RESOLVED path unprotected"
@@ -1478,7 +1484,7 @@ fi
 # AND must appear within the awk-bounded sanitize_agent_text() function — so
 # the assertion fails if the helper definition is removed but the byte range
 # survives in a comment or example elsewhere.
-if echo "$SANITIZE_BODY" | grep -qF "tr -d '\\000-\\010\\013-\\037\\177\\200-\\237'"; then
+if grep -qF "tr -d '\\000-\\010\\013-\\037\\177\\200-\\237'" <<<"$SANITIZE_BODY"; then
   pass "M64.sanitize-impl — sanitize_agent_text body documents the C0/C1+DEL strip range (within helper definition)"
 else
   fail "M64.sanitize-impl — sanitize_agent_text body MUST contain literal C0/C1+DEL strip range inside the helper definition"
@@ -1491,19 +1497,19 @@ echo "== M64: SKILL.md Inputs 'No args' bullet documents bare-discover dual path
 # the next argument-parsing entry). M33's awk-range pattern.
 BARE_MODE_BULLET=$(awk '/^- \*\*No args\*\*/,/^- \*\*`<PR/' "$SKILL_FILE")
 
-if echo "$BARE_MODE_BULLET" | grep -qE 'single-PR mode|context-aware'; then
+if grep -qE 'single-PR mode|context-aware' <<<"$BARE_MODE_BULLET"; then
   pass "M64.fast-path-described — Inputs 'No args' bullet describes the single-PR fast path (context-aware wording)"
 else
   fail "M64.fast-path-described — Inputs 'No args' bullet MUST describe the single-PR fast path (single-PR mode / context-aware) per spec Components § SKILL.md item 2"
 fi
 
-if echo "$BARE_MODE_BULLET" | grep -qE 'fall through.*--all|same discovery pipeline as `--all`|multi-discover'; then
+if grep -qE 'fall through.*--all|same discovery pipeline as `--all`|multi-discover' <<<"$BARE_MODE_BULLET"; then
   pass "M64.multi-discover-described — Inputs 'No args' bullet describes the multi-discover fall-through to the --all pipeline"
 else
   fail "M64.multi-discover-described — Inputs 'No args' bullet MUST describe the multi-discover fall-through (fall through / same discovery pipeline as --all / multi-discover)"
 fi
 
-if echo "$BARE_MODE_BULLET" | grep -qE 'errors if none|error out.*finish-branch'; then
+if grep -qE 'errors if none|error out.*finish-branch' <<<"$BARE_MODE_BULLET"; then
   fail "M64.no-old-error — Inputs 'No args' bullet MUST NOT carry the old 'errors if none' / 'error out…finish-branch' prose (bare-discover replaces it)"
 else
   pass "M64.no-old-error — Inputs 'No args' bullet correctly omits the old finish-branch error wording"
@@ -1521,17 +1527,17 @@ else
 fi
 # Value-cell content checks — must reference --base, --state open, draft:false.
 DISCOVERY_FILTER_ROW=$(grep -E '^\| `DISCOVERY_FILTER` \|' "$SKILL_FILE" || true)
-if echo "$DISCOVERY_FILTER_ROW" | grep -qE 'gh pr list --base'; then
+if grep -qE 'gh pr list --base' <<<"$DISCOVERY_FILTER_ROW"; then
   pass "M65.base-flag — DISCOVERY_FILTER value cites 'gh pr list --base'"
 else
   fail "M65.base-flag — DISCOVERY_FILTER value MUST cite 'gh pr list --base' (canonical query; spec Q4)"
 fi
-if echo "$DISCOVERY_FILTER_ROW" | grep -qE -- '--state open'; then
+if grep -qE -- '--state open' <<<"$DISCOVERY_FILTER_ROW"; then
   pass "M65.state-open — DISCOVERY_FILTER value cites '--state open'"
 else
   fail "M65.state-open — DISCOVERY_FILTER value MUST cite '--state open' (canonical query; spec Q4)"
 fi
-if echo "$DISCOVERY_FILTER_ROW" | grep -qE 'draft:false'; then
+if grep -qE 'draft:false' <<<"$DISCOVERY_FILTER_ROW"; then
   pass "M65.draft-filter — DISCOVERY_FILTER value cites 'draft:false'"
 else
   fail "M65.draft-filter — DISCOVERY_FILTER value MUST cite 'draft:false' (canonical query; spec Q4)"
@@ -1546,17 +1552,17 @@ else
   fail "M66.unique — BARE_MODE_FAST_PATH_QUERY MUST be declared exactly once in Constants table (got $BARE_FAST_PATH_ROWS rows; spec Components § SKILL.md item 1)"
 fi
 BARE_FAST_PATH_ROW=$(grep -E '^\| `BARE_MODE_FAST_PATH_QUERY` \|' "$SKILL_FILE" || true)
-if echo "$BARE_FAST_PATH_ROW" | grep -qE 'gh pr list --head'; then
+if grep -qE 'gh pr list --head' <<<"$BARE_FAST_PATH_ROW"; then
   pass "M66.head-flag — BARE_MODE_FAST_PATH_QUERY value cites 'gh pr list --head'"
 else
   fail "M66.head-flag — BARE_MODE_FAST_PATH_QUERY value MUST cite 'gh pr list --head' (current-branch detection; spec Architecture § Branch (a))"
 fi
-if echo "$BARE_FAST_PATH_ROW" | grep -qE -- '--state open'; then
+if grep -qE -- '--state open' <<<"$BARE_FAST_PATH_ROW"; then
   pass "M66.state-open — BARE_MODE_FAST_PATH_QUERY value cites '--state open'"
 else
   fail "M66.state-open — BARE_MODE_FAST_PATH_QUERY value MUST cite '--state open'"
 fi
-if echo "$BARE_FAST_PATH_ROW" | grep -qE 'draft:false'; then
+if grep -qE 'draft:false' <<<"$BARE_FAST_PATH_ROW"; then
   pass "M66.draft-filter — BARE_MODE_FAST_PATH_QUERY value cites 'draft:false'"
 else
   fail "M66.draft-filter — BARE_MODE_FAST_PATH_QUERY value MUST cite 'draft:false'"
@@ -1573,12 +1579,12 @@ fi
 # Mirror M65/M66: scope sub-checks to the row literal so future Step 2.2 prose
 # additions that quote the format string don't accidentally satisfy these.
 PREFLIGHT_FORMAT_ROW=$(grep -E '^\| `PREFLIGHT_SUMMARY_FORMAT` \|' "$SKILL_FILE" || true)
-if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE 'merging %d PR%s in order: %s'; then
+if grep -qE 'merging %d PR%s in order: %s' <<<"$PREFLIGHT_FORMAT_ROW"; then
   pass "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT contains the literal 'merging %d PR%s in order: %s'"
 else
   fail "M67.format-literal — PREFLIGHT_SUMMARY_FORMAT MUST contain literal 'merging %d PR%s in order: %s' (spec Q5)"
 fi
-if echo "$PREFLIGHT_FORMAT_ROW" | grep -qE '80-char|80 char'; then
+if grep -qE '80-char|80 char' <<<"$PREFLIGHT_FORMAT_ROW"; then
   pass "M67.wrap-convention — Constants prose mentions 80-char line-wrap convention"
 else
   fail "M67.wrap-convention — Constants prose MUST mention the 80-char line-wrap convention for long PR-number lists (spec Q5)"
@@ -1593,23 +1599,23 @@ if [ -n "$STEP_105_BLOCK" ]; then
 else
   fail "M68.exists — Step 1.0.5 (mode-detect) section MUST exist between Step 1.0 and Step 1.1 (spec Components § SKILL.md item 3)"
 fi
-if echo "$STEP_105_BLOCK" | grep -qE 'BARE_MODE_FAST_PATH_QUERY'; then
+if grep -qE 'BARE_MODE_FAST_PATH_QUERY' <<<"$STEP_105_BLOCK"; then
   pass "M68.fast-path-query-cited — Step 1.0.5 cites BARE_MODE_FAST_PATH_QUERY"
 else
   fail "M68.fast-path-query-cited — Step 1.0.5 MUST cite BARE_MODE_FAST_PATH_QUERY (the constant for the detection query)"
 fi
-if echo "$STEP_105_BLOCK" | grep -qE 'three-way|1.*0.*>1|fast-path.*multi-discover.*ambiguous'; then
+if grep -qE 'three-way|1.*0.*>1|fast-path.*multi-discover.*ambiguous' <<<"$STEP_105_BLOCK"; then
   pass "M68.three-way-branch — Step 1.0.5 documents the three-way branch (1 / 0 / >1)"
 else
   fail "M68.three-way-branch — Step 1.0.5 MUST document the three-way branch on candidate count (1 / 0 / >1; spec Components § SKILL.md item 3)"
 fi
-if echo "$STEP_105_BLOCK" | grep -qE 'NOT consume.*integration_branch|does not consume.*integration_branch|deferred to Step 1\.2\.5'; then
+if grep -qE 'NOT consume.*integration_branch|does not consume.*integration_branch|deferred to Step 1\.2\.5' <<<"$STEP_105_BLOCK"; then
   pass "M68.no-integration-branch-dep — Step 1.0.5 explicitly states it does NOT consume \$integration_branch"
 else
   fail "M68.no-integration-branch-dep — Step 1.0.5 MUST explicitly state it does NOT consume \$integration_branch (sequencing invariant; spec Architecture § Sequencing)"
 fi
 # Negative regression — Step 1.0.5 must NOT mention DISCOVERY_FILTER (which lives in Step 1.2.5).
-if echo "$STEP_105_BLOCK" | grep -qE 'DISCOVERY_FILTER'; then
+if grep -qE 'DISCOVERY_FILTER' <<<"$STEP_105_BLOCK"; then
   fail "M68.no-discovery-filter — Step 1.0.5 MUST NOT mention DISCOVERY_FILTER (split-detection invariant; DISCOVERY_FILTER lives in Step 1.2.5)"
 else
   pass "M68.no-discovery-filter — Step 1.0.5 correctly omits DISCOVERY_FILTER (lives in Step 1.2.5)"
@@ -1623,23 +1629,23 @@ if [ -n "$STEP_125_BLOCK" ]; then
 else
   fail "M69.exists — Step 1.2.5 (multi-discover dispatch) section MUST exist between Step 1.2 and Step 1.3 (spec Components § SKILL.md item 4)"
 fi
-if echo "$STEP_125_BLOCK" | grep -qE 'DISCOVERY_FILTER|discover_multi'; then
+if grep -qE 'DISCOVERY_FILTER|discover_multi' <<<"$STEP_125_BLOCK"; then
   pass "M69.discovery-filter-cited — Step 1.2.5 cites DISCOVERY_FILTER or discover_multi (R2 canonical alias)"
 else
   fail "M69.discovery-filter-cited — Step 1.2.5 MUST cite DISCOVERY_FILTER or discover_multi (spec Components § SKILL.md item 4; R2 v0.19.3 introduces lib-function alias)"
 fi
-if echo "$STEP_125_BLOCK" | grep -qE '\$integration_branch|integration_branch'; then
+if grep -qE '\$integration_branch|integration_branch' <<<"$STEP_125_BLOCK"; then
   pass "M69.integration-branch-cited — Step 1.2.5 cites \$integration_branch"
 else
   fail "M69.integration-branch-cited — Step 1.2.5 MUST cite \$integration_branch (consumed by DISCOVERY_FILTER post-Step-1.2)"
 fi
-if echo "$STEP_125_BLOCK" | grep -qE 'multi-discover|--all'; then
+if grep -qE 'multi-discover|--all' <<<"$STEP_125_BLOCK"; then
   pass "M69.triggers-cited — Step 1.2.5 mentions both bare-mode and --all as triggers"
 else
   fail "M69.triggers-cited — Step 1.2.5 MUST mention both bare-mode (multi-discover) and --all as triggers (spec Components § SKILL.md item 4)"
 fi
 # Negative regression — Step 1.2.5 must NOT mention BARE_MODE_FAST_PATH_QUERY (which lives in Step 1.0.5).
-if echo "$STEP_125_BLOCK" | grep -qE 'BARE_MODE_FAST_PATH_QUERY'; then
+if grep -qE 'BARE_MODE_FAST_PATH_QUERY' <<<"$STEP_125_BLOCK"; then
   fail "M69.no-fast-path-query — Step 1.2.5 MUST NOT mention BARE_MODE_FAST_PATH_QUERY (split-detection invariant; lives in Step 1.0.5)"
 else
   pass "M69.no-fast-path-query — Step 1.2.5 correctly omits BARE_MODE_FAST_PATH_QUERY (lives in Step 1.0.5)"
@@ -1648,23 +1654,23 @@ fi
 echo
 echo "== M70: SKILL.md Step 2.2 entry emits PREFLIGHT_SUMMARY_FORMAT pre-flight in multi-discover mode only =="
 STEP_22_BLOCK=$(awk '/^### Step 2\.2/,/^### Step 2\.3/' "$SKILL_FILE")
-if echo "$STEP_22_BLOCK" | grep -qE 'PREFLIGHT_SUMMARY_FORMAT'; then
+if grep -qE 'PREFLIGHT_SUMMARY_FORMAT' <<<"$STEP_22_BLOCK"; then
   pass "M70.format-cited — Step 2.2 entry cites PREFLIGHT_SUMMARY_FORMAT"
 else
   fail "M70.format-cited — Step 2.2 entry MUST cite PREFLIGHT_SUMMARY_FORMAT (spec Components § SKILL.md item 7)"
 fi
-if echo "$STEP_22_BLOCK" | grep -qE 'multi-discover.*mode|mode.*multi-discover|in multi-discover mode'; then
+if grep -qE 'multi-discover.*mode|mode.*multi-discover|in multi-discover mode' <<<"$STEP_22_BLOCK"; then
   pass "M70.mode-gated — Step 2.2 entry pre-flight line is emitted in multi-discover mode only"
 else
   fail "M70.mode-gated — Step 2.2 entry pre-flight line MUST be mode-gated (multi-discover mode only; not single-PR fast path; spec Q2)"
 fi
-if echo "$STEP_22_BLOCK" | grep -qE 'full ordered set|full.*ordered'; then
+if grep -qE 'full ordered set|full.*ordered' <<<"$STEP_22_BLOCK"; then
   pass "M70.full-set — Step 2.2 entry pre-flight enumerates the full ordered set (not per-wave)"
 else
   fail "M70.full-set — Step 2.2 entry pre-flight MUST enumerate the full ordered set, not a per-wave subset (spec Q5)"
 fi
 # Negative regression — pre-flight is informational, NOT a [y/N] prompt or abortable.
-if echo "$STEP_22_BLOCK" | grep -qE 'pre-flight.*\[y/N\]|y/N.*pre-flight|prompt.*pre-flight|pre-flight.*prompt|pre-flight.*abort'; then
+if grep -qE 'pre-flight.*\[y/N\]|y/N.*pre-flight|prompt.*pre-flight|pre-flight.*prompt|pre-flight.*abort' <<<"$STEP_22_BLOCK"; then
   fail "M70.no-prompt — Step 2.2 entry pre-flight line MUST NOT be described as a [y/N] prompt or abortable (autopilot contract; spec Q2)"
 else
   pass "M70.no-prompt — Step 2.2 entry pre-flight correctly avoids [y/N] / abort wording"
@@ -1673,18 +1679,18 @@ fi
 echo
 echo "== M71: SKILL.md Step 1.7 cross-references bare-mode zero-eligible (clean exit 0) =="
 STEP_17_BLOCK=$(awk '/^### Step 1\.7/,/^## Phase 2/' "$SKILL_FILE")
-if echo "$STEP_17_BLOCK" | grep -qE 'Not an error, not a halt|nothing to merge'; then
+if grep -qE 'Not an error, not a halt|nothing to merge' <<<"$STEP_17_BLOCK"; then
   pass "M71.contract-preserved — Step 1.7 preserves 'Not an error, not a halt' / 'nothing to merge' baseline prose"
 else
   fail "M71.contract-preserved — Step 1.7 MUST preserve baseline prose ('Not an error, not a halt' / 'nothing to merge') — bare-mode is a documentation-only addition"
 fi
-if echo "$STEP_17_BLOCK" | grep -qE 'bare-mode|bare-discover|bare-mode discovery|empty eligible set'; then
+if grep -qE 'bare-mode|bare-discover|bare-mode discovery|empty eligible set' <<<"$STEP_17_BLOCK"; then
   pass "M71.bare-mode-xref — Step 1.7 cross-references bare-mode zero-eligible behaviour"
 else
   fail "M71.bare-mode-xref — Step 1.7 MUST add a cross-reference to bare-mode zero-eligible (spec Components § SKILL.md item 6 / Q3)"
 fi
 # Negative regression — must NOT introduce a non-zero exit code on the same logical state.
-if echo "$STEP_17_BLOCK" | grep -qE 'exit 1|non-zero.*exit|exit code.*1'; then
+if grep -qE 'exit 1|non-zero.*exit|exit code.*1' <<<"$STEP_17_BLOCK"; then
   fail "M71.no-nonzero-exit — Step 1.7 MUST NOT introduce a non-zero exit on zero-eligible (Q3 amends issue AC #6 to clean exit 0)"
 else
   pass "M71.no-nonzero-exit — Step 1.7 correctly preserves exit 0 (no non-zero exit reference; spec Q3)"
@@ -1722,18 +1728,18 @@ fi
 echo
 echo "== M73: SKILL.md Phase 1.4 'per discovered PR' fanout + Step 2.2 single-message invariant preserved =="
 PHASE_14_BLOCK=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
-if echo "$PHASE_14_BLOCK" | grep -qE 'for each|per discovered PR|per-PR|every PR'; then
+if grep -qE 'for each|per discovered PR|per-PR|every PR' <<<"$PHASE_14_BLOCK"; then
   pass "M73.per-pr-fanout — Phase 1.4 prose preserves per-PR fanout language (one gate dispatch per discovered PR)"
 else
   fail "M73.per-pr-fanout — Phase 1.4 MUST preserve 'for each' / 'per discovered PR' / 'per-PR' fanout language (AC#2: bare-discover does not relax dispatch shape)"
 fi
-if echo "$STEP_22_BLOCK" | grep -qE 'ONE assistant turn|single-message Task|single-message invariant'; then
+if grep -qE 'ONE assistant turn|single-message Task|single-message invariant' <<<"$STEP_22_BLOCK"; then
   pass "M73.single-message-preserved — Step 2.2 fanout preserves the single-message Task() invariant"
 else
   fail "M73.single-message-preserved — Step 2.2 MUST preserve 'ONE assistant turn' / 'single-message Task()' invariant (AC#2/AC#4: bare-discover changes candidate set but not dispatch shape)"
 fi
 # Negative regression — Phase 1.4 must NOT hard-code single-PR-only language.
-if echo "$PHASE_14_BLOCK" | grep -qE 'only one PR can|single PR only|exactly one PR per gate|hard-coded.*single'; then
+if grep -qE 'only one PR can|single PR only|exactly one PR per gate|hard-coded.*single' <<<"$PHASE_14_BLOCK"; then
   fail "M73.no-single-pr-hardcode — Phase 1.4 MUST NOT enumerate a fixed PR count or hard-code single-PR-only language (bare-discover supplies a multi-PR candidate set)"
 else
   pass "M73.no-single-pr-hardcode — Phase 1.4 correctly avoids single-PR-only hard-coding"
@@ -1763,7 +1769,7 @@ echo "== M76: AUDIT_EVENT_ENUM prose names the data.outcome enum for auto_review
 # that subsection (heading → next heading) so the prose-token greps below resolve.
 ENUM_ROW=$(awk '/^### .AUDIT_EVENT_ENUM. .*event semantics/{f=1; next} f && /^#{2,3} /{exit} f' "$SKILL_FILE")
 for token in 'green' 'blocked' 'refused_non_green' 'reason_triggering' 'duration_ms'; do
-  if echo "$ENUM_ROW" | grep -qE "$token"; then
+  if grep -qE "$token" <<<"$ENUM_ROW"; then
     pass "M76.$token — AUDIT_EVENT_ENUM prose names $token"
   else
     fail "M76.$token — AUDIT_EVENT_ENUM prose MUST name $token (spec '## Data flow & return contracts')"
@@ -1782,8 +1788,8 @@ echo
 echo "== M78: Constants table declares AUTO_REVIEW_ON_MERGE_KEY (#89) =="
 KEY_ROW=$(grep -E '^\| `AUTO_REVIEW_ON_MERGE_KEY`' "$SKILL_FILE" | head -1)
 if [ -n "$KEY_ROW" ]; then
-  if echo "$KEY_ROW" | grep -q 'auto_review_on_merge' && \
-     echo "$KEY_ROW" | grep -q 'UBERDEV_AUTO_REVIEW_ON_MERGE'; then
+  if grep -q 'auto_review_on_merge' <<<"$KEY_ROW" && \
+     grep -q 'UBERDEV_AUTO_REVIEW_ON_MERGE' <<<"$KEY_ROW"; then
     pass "M78 — AUTO_REVIEW_ON_MERGE_KEY row cites config-key name + env-var (spec D7 reuses uberdev_read_enum)"
   else
     fail "M78 — AUTO_REVIEW_ON_MERGE_KEY row MUST cite both 'auto_review_on_merge' (config key) and 'UBERDEV_AUTO_REVIEW_ON_MERGE' (env override)"
@@ -1801,7 +1807,7 @@ else
 fi
 STEP_145_BLOCK=$(awk '/^### Step 1\.4\.5/,/^### Step 1\.5/' "$SKILL_FILE")
 for token in 'AUTO_REVIEW_ON_MERGE' 'AUTO_REVIEW_DISPATCHED' 'AUTO_REVIEW_DISPATCH_CAP'; do
-  if echo "$STEP_145_BLOCK" | grep -q "$token"; then
+  if grep -q "$token" <<<"$STEP_145_BLOCK"; then
     pass "M79.$token — Step 1.4.5 references $token"
   else
     fail "M79.$token — Step 1.4.5 MUST reference $token (spec '## Architecture' counter lifecycle + trigger guard)"
@@ -1811,25 +1817,33 @@ done
 echo
 echo "== M80: Step 1.4.5 dispatches Skill(uberdev:review-pr) with --turbo (#89) =="
 STEP_145_BLOCK=$(awk '/^### Step 1\.4\.5/,/^### Step 1\.5/' "$SKILL_FILE")
-if echo "$STEP_145_BLOCK" | grep -qE 'Skill\("uberdev:review-pr".*--turbo'; then
+if grep -qE 'Skill\("uberdev:review-pr".*--turbo' <<<"$STEP_145_BLOCK"; then
   pass "M80.dispatch — Step 1.4.5 invokes Skill(uberdev:review-pr) with --turbo flag (spec D1: --turbo unconditional)"
 else
   fail "M80.dispatch — Step 1.4.5 MUST invoke Skill(uberdev:review-pr) with --turbo flag (spec D1)"
 fi
-L_COUNTER=$(grep -n 'AUTO_REVIEW_DISPATCHED\["\${PR}:\${RUN_ID}"\]=1' "$SKILL_FILE" | head -1 | cut -d: -f1)
+# The cap is an atomic on-disk marker claim, not a shell array write (#303):
+# every fence re-declared `declare -A AUTO_REVIEW_DISPATCHED=()` empty, so the
+# array-based cap silently never held. Anchor on the mkdir claim instead.
+L_COUNTER=$(grep -n 'mkdir "\$AUTO_REVIEW_MARKER_DIR/\${PR}\.\${RUN_ID}"' "$SKILL_FILE" | head -1 | cut -d: -f1)
 # Match the actual dispatch call (with `args:` keyword), not the `Skill("uberdev:review-pr")` mentions
 # in the AUDIT_EVENT_ENUM prose, R7 dispatch-failure paragraph, or Common Mistakes bullet.
 L_DISPATCH=$(grep -n 'Skill("uberdev:review-pr", args:' "$SKILL_FILE" | head -1 | cut -d: -f1)
 if [ -n "$L_COUNTER" ] && [ -n "$L_DISPATCH" ] && [ "$L_COUNTER" -lt "$L_DISPATCH" ]; then
-  pass "M80.cap-ordering — counter write precedes Skill() dispatch in source order (R6 invariant)"
+  pass "M80.cap-ordering — marker claim precedes Skill() dispatch in source order (R6 invariant)"
 else
-  fail "M80.cap-ordering — AUTO_REVIEW_DISPATCHED write MUST precede Skill(uberdev:review-pr) dispatch in source order (R6 / spec)"
+  fail "M80.cap-ordering — AUTO_REVIEW_MARKER_DIR mkdir claim MUST precede Skill(uberdev:review-pr) dispatch in source order (R6 / spec)"
 fi
+# Anchored at line start so the retirement RATIONALE (which necessarily names the
+# retired construct in prose) does not trip the guard — only an actual code line
+# re-introducing it does.
+assert_no_grep "$SKILL_FILE" '^[[:space:]]*declare -A AUTO_REVIEW_DISPATCHED' \
+  "M80.no-fence-scoped-cap — the auto-review cap MUST NOT be a shell associative array (fence-scoped state is re-initialised every fence, so the cap never held; #303)"
 
 echo
 echo "== M81: Common Mistakes bullet enumerates the excluded gate-fail reasons (#89) =="
 CM_BLOCK=$(awk '/^## Common Mistakes/,/^## Red Flags/' "$SKILL_FILE")
-if echo "$CM_BLOCK" | grep -qE "Don't trigger auto-review on .review_decision_not_approved. alone"; then
+if grep -qE "Don't trigger auto-review on .review_decision_not_approved. alone" <<<"$CM_BLOCK"; then
   pass "M81.bullet-present — Common Mistakes bullet present"
 else
   fail "M81.bullet-present — Common Mistakes MUST include 'Don't trigger auto-review on review_decision_not_approved alone' bullet (spec C2.6 / D11)"
@@ -1837,7 +1851,7 @@ fi
 for reason in review_decision_not_approved trust_trail_stale_sha trust_trail_agent_invalid_input \
               trust_trail_json_sha_mismatch pr_state_not_open is_draft ci_red merge_state_blocked \
               pr_view_unreachable; do
-  if echo "$CM_BLOCK" | grep -qF "$reason"; then
+  if grep -qF "$reason" <<<"$CM_BLOCK"; then
     pass "M81.excluded-$reason — bullet names $reason"
   else
     fail "M81.excluded-$reason — Common Mistakes bullet MUST name excluded reason $reason (spec D11 + Q6)"
@@ -1847,12 +1861,12 @@ done
 echo
 echo "== M82: Step 3.4 failure-mode table has auto-review blocked + refused_non_green rows (#89) =="
 STEP_34_BLOCK=$(awk '/^### Step 3\.4/,/^## Phase 4/' "$SKILL_FILE")
-if echo "$STEP_34_BLOCK" | grep -q 'Auto-review returned `blocked`'; then
+if grep -q 'Auto-review returned `blocked`' <<<"$STEP_34_BLOCK"; then
   pass "M82.blocked-row — Step 3.4 table has 'Auto-review returned blocked' row"
 else
   fail "M82.blocked-row — Step 3.4 table MUST include 'Auto-review returned blocked' failure-mode row (spec C2.5)"
 fi
-if echo "$STEP_34_BLOCK" | grep -q 'Auto-review returned `refused_non_green`'; then
+if grep -q 'Auto-review returned `refused_non_green`' <<<"$STEP_34_BLOCK"; then
   pass "M82.refused-row — Step 3.4 table has 'Auto-review returned refused_non_green' row"
 else
   fail "M82.refused-row — Step 3.4 table MUST include 'Auto-review returned refused_non_green' failure-mode row (spec C2.5)"
@@ -1861,7 +1875,7 @@ fi
 echo
 echo "== M83: editor's note adds 6th bullet about #89 auto-review carve-out =="
 EDITORS_NOTE=$(awk '/^> \*\*Note for editors:\*\*/,/^[^>]/' "$SKILL_FILE")
-if echo "$EDITORS_NOTE" | grep -qE '^> 6\..*auto_review_on_merge'; then
+if grep -qE '^> 6\..*auto_review_on_merge' <<<"$EDITORS_NOTE"; then
   pass "M83.6th-bullet — editor's note has 6th bullet referencing auto_review_on_merge (spec C2.4 / Q5)"
 else
   fail "M83.6th-bullet — editor's note MUST add a 6th bullet describing the #89 auto-review carve-out (spec C2.4 / Q5 mitigates R5 mirror-site drift)"
@@ -1885,7 +1899,7 @@ fi
 INPUTS_BLOCK=$(awk '/auto_review_on_merge: true\|false/,/^##|^---/' "$CMD_FILE")
 for reason in trust_trail_stale_sha trust_trail_agent_invalid_input trust_trail_json_sha_mismatch \
               review_decision_not_approved; do
-  if echo "$INPUTS_BLOCK" | grep -qF "$reason"; then
+  if grep -qF "$reason" <<<"$INPUTS_BLOCK"; then
     pass "M85.excluded-$reason — Inputs section names excluded reason $reason"
   else
     fail "M85.excluded-$reason — Inputs section MUST name excluded reason $reason (spec C3.2)"
@@ -1909,14 +1923,14 @@ PROBE_START=$(grep -n 'NEW (#95): label-present probe' "$SKILL_FILE" | head -1 |
 PROBE_END=$(awk -v s="$PROBE_START" 'NR > s && /^fi$/ { print NR; exit }' "$SKILL_FILE")
 if [[ -n "$PROBE_START" && -n "$PROBE_END" ]]; then
   PROBE_BLOCK=$(sed -n "${PROBE_START},${PROBE_END}p" "$SKILL_FILE")
-  if echo "$PROBE_BLOCK" | grep -qE 'reason="trust_trail_label_missing"'; then
+  if grep -qE 'reason="trust_trail_label_missing"' <<<"$PROBE_BLOCK"; then
     pass "M86.3 — probe assigns reason=trust_trail_label_missing on label match (spec D1; no new AUDIT_EVENT_ENUM member)"
   else
     fail "M86.3 — probe MUST assign reason=\"trust_trail_label_missing\" on label match (spec D1)"
   fi
 
   # M86.4 — AUTO_REVIEW_ON_MERGE gate wraps the probe block
-  if echo "$PROBE_BLOCK" | grep -qE 'AUTO_REVIEW_ON_MERGE.*==.*"true"'; then
+  if grep -qE 'AUTO_REVIEW_ON_MERGE.*==.*"true"' <<<"$PROBE_BLOCK"; then
     pass "M86.4 — probe gated by AUTO_REVIEW_ON_MERGE=true (spec C3; default-off bit-identity contract preserved)"
   else
     fail "M86.4 — probe MUST be gated by AUTO_REVIEW_ON_MERGE == \"true\" (spec C3)"
@@ -1939,17 +1953,25 @@ else
   fail "M86.5 — AUDIT_EVENT_ENUM row MUST contain ONLY auto_review_dispatched and auto_review_returned (got: $GOT)"
 fi
 
-# M86.6 — cap-ordering preserved: AUTO_REVIEW_DISPATCHED counter write still precedes
-# the Skill(uberdev:review-pr) dispatch in source order. The bash code dispatch is the
-# `Skill("uberdev:review-pr",` line inside the dispatch sequence (lines ~410), not the
-# AUDIT_EVENT_ENUM prose row.  We anchor on the bash code by requiring "args:" on the
-# same line.
-L_COUNTER=$(grep -n 'AUTO_REVIEW_DISPATCHED\["\${PR}:\${RUN_ID}"\]=1' "$SKILL_FILE" | head -1 | cut -d: -f1)
+# M86.6 — cap-ordering preserved: the AUTO_REVIEW_MARKER_DIR marker claim still
+# precedes the Skill(uberdev:review-pr) dispatch in source order. The bash code
+# dispatch is the `Skill("uberdev:review-pr",` line inside the dispatch sequence,
+# not the AUDIT_EVENT_ENUM prose row. We anchor on the bash code by requiring
+# "args:" on the same line.
+L_COUNTER=$(grep -n 'mkdir "\$AUTO_REVIEW_MARKER_DIR/\${PR}\.\${RUN_ID}"' "$SKILL_FILE" | head -1 | cut -d: -f1)
 L_DISPATCH=$(grep -n -E 'Skill\("uberdev:review-pr",[[:space:]]*args:' "$SKILL_FILE" | head -1 | cut -d: -f1)
 if [[ -n "$L_COUNTER" && -n "$L_DISPATCH" && "$L_COUNTER" -lt "$L_DISPATCH" ]]; then
-  pass "M86.6 — AUTO_REVIEW_DISPATCHED counter write precedes Skill() dispatch (#89 cap-ordering preserved after #95 probe insertion; L_COUNTER=$L_COUNTER < L_DISPATCH=$L_DISPATCH)"
+  pass "M86.6 — marker claim precedes Skill() dispatch (#89 cap-ordering preserved after #95 probe insertion; L_COUNTER=$L_COUNTER < L_DISPATCH=$L_DISPATCH)"
 else
-  fail "M86.6 — AUTO_REVIEW_DISPATCHED counter MUST precede Skill() dispatch (L_COUNTER=$L_COUNTER L_DISPATCH=$L_DISPATCH)"
+  fail "M86.6 — AUTO_REVIEW_MARKER_DIR marker claim MUST precede Skill() dispatch (L_COUNTER=$L_COUNTER L_DISPATCH=$L_DISPATCH)"
+fi
+# M86.6b — the claim must be an ATOMIC test-and-set. A `[ -e ... ]` probe followed
+# by a separate create re-opens the check-then-act window the array had.
+if grep -qE 'if ! mkdir "\$AUTO_REVIEW_MARKER_DIR/\$\{PR\}\.\$\{RUN_ID\}" 2>/dev/null' "$SKILL_FILE" \
+   || grep -qE 'elif ! mkdir "\$AUTO_REVIEW_MARKER_DIR/\$\{PR\}\.\$\{RUN_ID\}" 2>/dev/null' "$SKILL_FILE"; then
+  pass "M86.6b — cap claim is a single atomic mkdir (no check-then-act window)"
+else
+  fail "M86.6b — cap claim MUST be a single atomic \`mkdir\` whose failure means 'already claimed' (#303)"
 fi
 
 # M86.7 — Common Mistakes section documents the #95 probe (defends against future
@@ -1958,7 +1980,7 @@ CM_START=$(grep -n '^## Common Mistakes' "$SKILL_FILE" | head -1 | cut -d: -f1)
 CM_END=$(awk -v s="$CM_START" 'NR > s && /^## / { print NR; exit }' "$SKILL_FILE")
 if [[ -n "$CM_START" && -n "$CM_END" ]]; then
   CM_BLOCK=$(sed -n "${CM_START},${CM_END}p" "$SKILL_FILE")
-  if echo "$CM_BLOCK" | grep -q '#95'; then
+  if grep -q '#95' <<<"$CM_BLOCK"; then
     pass "M86.7 — Common Mistakes section documents the #95 probe (defends against review_pr_pending_label_present regression)"
   else
     fail "M86.7 — Common Mistakes section MUST mention #95 (spec C3 / T4 Edit B)"
@@ -2137,7 +2159,7 @@ if [ "${ORIGIN_PROBE_COUNT:-0}" = "2" ]; then
 else
   fail "M90.4 — Phase 3 must probe 'git merge-tree --write-tree origin/<integration_branch> <headRefOid>' at exactly 2 sites (Step 3.1 + strategy-switch), got ${ORIGIN_PROBE_COUNT:-0}"
 fi
-if echo "$PHASE_3_BLOCK" | grep -qE 'merge-tree --write-tree <integration_branch>'; then
+if grep -qE 'merge-tree --write-tree <integration_branch>' <<<"$PHASE_3_BLOCK"; then
   fail "M90.5 — Phase 3 must NOT probe the bare local <integration_branch> (the local-ref probe is the actual stale-tip bug; #303)"
 else
   pass "M90.5 — no Phase 3 probe against the bare local integration ref remains"
@@ -2175,35 +2197,35 @@ PHASE_14_BODY=$(awk '/^### Step 1\.4/,/^### Step 1\.5/' "$SKILL_FILE")
 STEP_C0_STATE_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/PHASE2_5_AUDIT_STATE=/,/Pass these alongside the existing inputs/')
 
 for M92_STATE in absent legacy current malformed indeterminate; do
-  if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE "PHASE2_5_AUDIT_STATE=${M92_STATE}|audit_state.*${M92_STATE}"; then
+  if grep -qE "PHASE2_5_AUDIT_STATE=${M92_STATE}|audit_state.*${M92_STATE}" <<<"$STEP_C0_STATE_BLOCK"; then
     pass "M92.state.$M92_STATE — caller derives explicit $M92_STATE audit state"
   else
     fail "M92.state.$M92_STATE — caller MUST derive explicit $M92_STATE audit state"
   fi
 done
 
-if printf '%s\n' "$PHASE_14_BODY" | grep -qE 'audit_state=<absent\|legacy\|current\|malformed\|indeterminate>'; then
+if grep -qE 'audit_state=<absent\|legacy\|current\|malformed\|indeterminate>' <<<"$PHASE_14_BODY"; then
   pass "M92.dispatch — caller dispatches explicit five-state audit_state"
 else
   fail "M92.dispatch — trust-trail-evaluator dispatch MUST include the exact five-state audit_state enum"
 fi
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'absent.*skip.*Phase 2\.5.*structural|absent.*structural proof' \
-  && printf '%s\n' "$PHASE_14_BODY" | grep -qE 'JSON absent.*advisory|JSON absent for this PR'; then
+if grep -qE 'absent.*skip.*Phase 2\.5.*structural|absent.*structural proof' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE 'JSON absent.*advisory|JSON absent for this PR' <<<"$PHASE_14_BODY"; then
   pass "M92.absent-compose — absent skips only Phase 2.5 and remains subject to structural proof plus JSON advisory handling"
 else
   fail "M92.absent-compose — absent MUST continue structural proof and then use sub-condition (d)'s advisory JSON handling"
 fi
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'malformed.*INVALID|malformed.*input_malformed|malformed.*input-malformed' \
-  && ! printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'malformed.*fail-open|fail-open.*malformed'; then
+if grep -qE 'malformed.*INVALID|malformed.*input_malformed|malformed.*input-malformed' <<<"$STEP_C0_STATE_BLOCK" \
+  && ! grep -qE 'malformed.*fail-open|fail-open.*malformed' <<<"$STEP_C0_STATE_BLOCK"; then
   pass "M92.malformed-closed — malformed audit identity maps to INVALID / input_malformed"
 else
   fail "M92.malformed-closed — malformed audit identity MUST map to INVALID / input_malformed, not fail-open"
 fi
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'indeterminate.*INVALID|indeterminate.*input_malformed|indeterminate.*input-malformed' \
-  && ! printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'indeterminate.*fail-open|fail-open.*indeterminate'; then
+if grep -qE 'indeterminate.*INVALID|indeterminate.*input_malformed|indeterminate.*input-malformed' <<<"$STEP_C0_STATE_BLOCK" \
+  && ! grep -qE 'indeterminate.*fail-open|fail-open.*indeterminate' <<<"$STEP_C0_STATE_BLOCK"; then
   pass "M92.indeterminate-closed — indeterminate discovery maps to INVALID / input_malformed"
 else
   fail "M92.indeterminate-closed — indeterminate discovery MUST map to INVALID / input_malformed, not absent/fail-open"
@@ -2212,8 +2234,8 @@ fi
 echo
 echo "== M93: typed discovery/parser capture, single artifact identity, structural-probe mapping =="
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'if AUDIT_VERDICT_RECEIPT=.*discover_review_verdict_json "\$PR_NUMBER"' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'DISCOVERY_RC=\$\?'; then
+if grep -qE 'if AUDIT_VERDICT_RECEIPT=.*discover_review_verdict_json "\$PR_NUMBER"' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE 'DISCOVERY_RC=\$\?' <<<"$STEP_C0_STATE_BLOCK"; then
   pass "M93.discovery-capture — discovery runs in a guarded conditional and captures its non-zero status safely"
 else
   fail "M93.discovery-capture — discovery MUST be guarded by if (safe under errexit) and preserve its typed return code"
@@ -2225,24 +2247,24 @@ for M93_MAPPING in \
   'indeterminate PHASE2_5_AUDIT_STATE=indeterminate'; do
   M93_STATE="${M93_MAPPING%% *}"
   M93_ASSIGN="${M93_MAPPING#* }"
-  if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qiE "^[[:space:]]*${M93_STATE}(\\||\\))" \
-    && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qiE "$M93_ASSIGN"; then
+  if grep -qiE "^[[:space:]]*${M93_STATE}(\\||\\))" <<<"$STEP_C0_STATE_BLOCK" \
+    && grep -qiE "$M93_ASSIGN" <<<"$STEP_C0_STATE_BLOCK"; then
     pass "M93.discovery-map.$M93_MAPPING — typed discovery result is mapped explicitly"
   else
     fail "M93.discovery-map.$M93_MAPPING — caller MUST map discovery rc 0=found, 1=absent, 2=indeterminate"
   fi
 done
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'recapture_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'if RECEIPT_FIELDS=.*jq -er'; then
+if grep -qE 'recapture_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE 'if RECEIPT_FIELDS=.*jq -er' <<<"$STEP_C0_STATE_BLOCK"; then
   pass "M93.parser-guard — closed snapshot recapture and receipt extraction are guarded"
 else
   fail "M93.parser-guard — caller MUST guard snapshot recapture and receipt extraction"
 fi
 
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'read -r[[:space:]\\]*' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'PARSED_ARTIFACT_SHA.*PARSED_AUDIT_STATE' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE 'PHASE2_5_AUDIT_STATE=.*PARSED'; then
+if grep -qE 'read -r[[:space:]\\]*' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE 'PARSED_ARTIFACT_SHA.*PARSED_AUDIT_STATE' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE 'PHASE2_5_AUDIT_STATE=.*PARSED' <<<"$STEP_C0_STATE_BLOCK"; then
   pass "M93.parser-atomic — caller reads one complete closed-receipt tuple before assignment"
 else
   fail "M93.parser-atomic — caller MUST atomically read receipt identity/SHA/Phase2.5 before assignment"
@@ -2256,24 +2278,24 @@ else
 fi
 
 STEP_D_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/^d\. /,/^[[:space:]]*\*\*Old /')
-if printf '%s\n' "$STEP_D_BLOCK" | grep -qE 'AUDIT_ARTIFACT_SHA|cached `?AUDIT_ARTIFACT_SHA' \
-  && ! printf '%s\n' "$STEP_D_BLOCK" | grep -qE 'Glob the canonical|Parse each match|AUDIT_JSON_PATH'; then
+if grep -qE 'AUDIT_ARTIFACT_SHA|cached `?AUDIT_ARTIFACT_SHA' <<<"$STEP_D_BLOCK" \
+  && ! grep -qE 'Glob the canonical|Parse each match|AUDIT_JSON_PATH' <<<"$STEP_D_BLOCK"; then
   pass "M93.discovery-reuse — sub-condition (d) reuses closed controller state and does not rediscover"
 else
   fail "M93.discovery-reuse — sub-condition (d) MUST use cached receipt SHA, not a mutable artifact path"
 fi
 
 INVALID_ENUM_ROW=$(grep -E '^\| `TRUST_TRAIL_VERDICT_INVALID_SUBREASON_ENUM`' "$SKILL_FILE" || true)
-if printf '%s\n' "$INVALID_ENUM_ROW" | grep -q 'structural_probe_failed' \
-  && printf '%s\n' "$INVALID_ENUM_ROW" | grep -qE 'no retry|immediate gate_fail'; then
+if grep -q 'structural_probe_failed' <<<"$INVALID_ENUM_ROW" \
+  && grep -qE 'no retry|immediate gate_fail' <<<"$INVALID_ENUM_ROW"; then
   pass "M93.structural-enum — structural_probe_failed is a no-retry INVALID subreason"
 else
   fail "M93.structural-enum — INVALID subreason enum MUST include structural_probe_failed with no retry"
 fi
 
 CALLER_MAPPING_BLOCK=$(printf '%s\n' "$PHASE_14_BODY" | awk '/The caller maps verdicts to events as follows/,/Any verdict from \(c\)/')
-if printf '%s\n' "$CALLER_MAPPING_BLOCK" | grep -qE 'INVALID / structural_probe_failed' \
-  && printf '%s\n' "$CALLER_MAPPING_BLOCK" | grep -qE 'structural_probe_failed.*No retry|structural_probe_failed.*no retry'; then
+if grep -qE 'INVALID / structural_probe_failed' <<<"$CALLER_MAPPING_BLOCK" \
+  && grep -qE 'structural_probe_failed.*No retry|structural_probe_failed.*no retry' <<<"$CALLER_MAPPING_BLOCK"; then
   pass "M93.structural-caller — caller mapping fail-closes structural probe errors without retry"
 else
   fail "M93.structural-caller — caller mapping MUST handle INVALID / structural_probe_failed as terminal no-retry"
@@ -2314,48 +2336,163 @@ fi
 
 echo
 echo "== M94: Phase 1.4 consumes one closed capture receipt and never reopens source authority =="
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+if grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'if AUDIT_VERDICT_RECEIPT=.*discover_review_verdict_json "\$PR_NUMBER"' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  && grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'DISCOVERY_STATE=.*review_verdict_discovery_state "\$DISCOVERY_RC"'; then
   pass "M94.closed-discovery — guarded selector result is classified by the canonical rc-state helper"
 else
   fail "M94.closed-discovery — caller MUST guard the selector and structurally use review_verdict_discovery_state"
 fi
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'AUDIT_VERDICT_RECEIPT' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_path' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_sha256' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -q 'snapshot_identity' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+if grep -q 'AUDIT_VERDICT_RECEIPT' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -q 'snapshot_path' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -q 'snapshot_sha256' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -q 'snapshot_identity' <<<"$STEP_C0_STATE_BLOCK" \
+  && grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'AUDIT_ARTIFACT_SHA=.*(artifact_sha|PARSED_ARTIFACT_SHA)'; then
   pass "M94.receipt-fields — caller atomically extracts capture receipt and cached artifact SHA"
 else
   fail "M94.receipt-fields — caller MUST extract snapshot path/digest/identity plus cached artifact SHA from one receipt"
 fi
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+if grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'recapture_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  && grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'cleanup_review_verdict_snapshot "\$AUDIT_VERDICT_RECEIPT"'; then
   pass "M94.capture-lifecycle — stable carrier is recaptured and explicitly cleaned"
 else
   fail "M94.capture-lifecycle — caller MUST digest/identity-recapture then clean the stable carrier"
 fi
-if ! printf '%s\n' "$STEP_D_BLOCK" | grep -qE \
+if ! grep -qE <<<"$STEP_D_BLOCK" \
   '\$\(.*jq|parse_review_verdict_phase2_5[[:space:]]+"|AUDIT_JSON_PATH|snapshot_path' \
-  && printf '%s\n' "$STEP_D_BLOCK" | grep -qE \
+  && grep -qE <<<"$STEP_D_BLOCK" \
   'AUDIT_ARTIFACT_SHA|cached.*artifact_sha|receipt.*artifact_sha'; then
   pass "M94.d-closed-state — subcondition (d) uses cached SHA and never rereads any pathname"
 else
   fail "M94.d-closed-state — subcondition (d) MUST use cached receipt SHA with zero source/snapshot pathname reads"
 fi
-if printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+if grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'if .*mktemp|mktemp.*\|\|.*indeterminate|mktemp.*return.*2' \
-  && printf '%s\n' "$STEP_C0_STATE_BLOCK" | grep -qE \
+  && grep -qE <<<"$STEP_C0_STATE_BLOCK" \
   'mktemp.*indeterminate|temporary.*indeterminate'; then
   pass "M94.mktemp-closed — caller documents guarded temporary-allocation failure as indeterminate"
 else
   fail "M94.mktemp-closed — caller MUST not let mktemp failure collapse into absent telemetry"
 fi
+
+echo
+echo "== M95: the Phase 1.4 trust-gate fence is EXTRACTED and EXECUTED (#347) =="
+# Every previous assertion about this fence was a grep: it proved the words were
+# present, never that the discovery -> recapture -> cleanup state machine
+# actually resolves DISCOVERY_STATE / PHASE2_5_AUDIT_STATE correctly. The fence
+# is delimited by `# BEGIN|END merge-trust-gate-fence-v1` precisely so this test
+# can lift it out of the Markdown and run it against on-disk fixtures.
+M95_FENCE="$(mktemp)"
+awk '/^[[:space:]]*# BEGIN merge-trust-gate-fence-v1$/,/^[[:space:]]*# END merge-trust-gate-fence-v1$/' \
+  "$SKILL_FILE" | sed 's/^   //' > "$M95_FENCE"
+if [ -s "$M95_FENCE" ] \
+   && grep -q '^# BEGIN merge-trust-gate-fence-v1$' "$M95_FENCE" \
+   && grep -q '^# END merge-trust-gate-fence-v1$' "$M95_FENCE"; then
+  pass "M95.extract — the trust-gate fence is delimited and extractable"
+else
+  fail "M95.extract — SKILL.md MUST delimit the Phase 1.4 trust-gate bash with # BEGIN/# END merge-trust-gate-fence-v1"
+fi
+
+if ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP  M95.exec — python3 and jq are both required to execute the fence"
+elif [ ! -s "$M95_FENCE" ]; then
+  echo "  SKIP  M95.exec — no fence body was extracted"
+else
+  M95_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  M95_RUNNER="$(mktemp)"
+  cat > "$M95_RUNNER" <<'M95_RUNNER_EOF'
+set -u
+# The fence may only assume CLAUDE_PLUGIN_ROOT, PR_NUMBER, and an `audit`
+# emitter. Anything else it reaches for is a contract break and `set -u` says so.
+# `${VAR-<unset>}` without the colon: an EMPTY AUDIT_ARTIFACT_SHA is a real,
+# expected state (absent/indeterminate), and `:-` would report it as unset.
+audit() { printf 'AUDIT %s\n' "$*" >&2; }
+. "$UBERDEV_FENCE_BODY"
+printf 'DISCOVERY_STATE=%s\n' "${DISCOVERY_STATE-<unset>}"
+printf 'PHASE2_5_AUDIT_STATE=%s\n' "${PHASE2_5_AUDIT_STATE-<unset>}"
+printf 'AUDIT_ARTIFACT_SHA=%s\n' "${AUDIT_ARTIFACT_SHA-<unset>}"
+printf 'AUDIT_CAPTURE_CLEANED=%s\n' "${AUDIT_CAPTURE_CLEANED-<unset>}"
+printf 'PHASE2_5_BLOCKER_COUNT=%s\n' "${PHASE2_5_BLOCKER_COUNT-<unset>}"
+M95_RUNNER_EOF
+
+  M95_SANDBOX="$(mktemp -d)"
+  M95_TMP="$(mktemp -d)"
+  M95_SHA="cccccccccccccccccccccccccccccccccccccccc"
+
+  m95_run() {
+    rm -rf "$M95_TMP"
+    mkdir -p "$M95_TMP"
+    (
+      cd "$M95_SANDBOX" || exit 2
+      CLAUDE_PLUGIN_ROOT="$M95_PLUGIN_ROOT"
+      PR_NUMBER="$1"
+      UBERDEV_FENCE_BODY="$M95_FENCE"
+      TMPDIR="$M95_TMP"
+      export CLAUDE_PLUGIN_ROOT PR_NUMBER UBERDEV_FENCE_BODY TMPDIR
+      bash "$M95_RUNNER"
+    ) 2>/dev/null
+  }
+
+  m95_field() {
+    grep -E "^$2=" <<<"$1" | head -1 | cut -d= -f2-
+  }
+
+  m95_assert_case() {
+    local label="$1" pr="$2" want_discovery="$3" want_state="$4" want_sha="$5" out residue
+    out="$(m95_run "$pr")"
+    if [ -z "$out" ]; then
+      fail "M95.$label — the fence produced no state (it did not execute cleanly)"
+      return
+    fi
+    if [ "$(m95_field "$out" DISCOVERY_STATE)" = "$want_discovery" ]; then
+      pass "M95.$label.discovery — DISCOVERY_STATE=$want_discovery"
+    else
+      fail "M95.$label.discovery — expected DISCOVERY_STATE=$want_discovery, got $(m95_field "$out" DISCOVERY_STATE)"
+    fi
+    if [ "$(m95_field "$out" PHASE2_5_AUDIT_STATE)" = "$want_state" ]; then
+      pass "M95.$label.audit-state — PHASE2_5_AUDIT_STATE=$want_state"
+    else
+      fail "M95.$label.audit-state — expected PHASE2_5_AUDIT_STATE=$want_state, got $(m95_field "$out" PHASE2_5_AUDIT_STATE)"
+    fi
+    if [ "$(m95_field "$out" AUDIT_ARTIFACT_SHA)" = "$want_sha" ]; then
+      pass "M95.$label.sha — AUDIT_ARTIFACT_SHA is the expected value"
+    else
+      fail "M95.$label.sha — expected AUDIT_ARTIFACT_SHA=$want_sha, got $(m95_field "$out" AUDIT_ARTIFACT_SHA)"
+    fi
+    residue="$(ls -A "$M95_TMP" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$residue" = "0" ]; then
+      pass "M95.$label.no-leak — the fence left no private capture directory behind"
+    else
+      fail "M95.$label.no-leak — the fence leaked $residue entr(y|ies) under TMPDIR"
+    fi
+  }
+
+  # 1. A valid current verdict resolves to found/current with the cached SHA and
+  #    a cleaned carrier.
+  rm -rf "${M95_SANDBOX:?}/.uberdev"
+  mkdir -p "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1"
+  printf '{"pr":42,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0},"override_reason":null}}}\n' \
+    "$M95_SHA" > "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+  m95_assert_case "current" 42 found current "$M95_SHA"
+
+  # 2. An exhaustively empty search surface is absent telemetry, not a failure.
+  rm -rf "${M95_SANDBOX:?}/.uberdev"
+  m95_assert_case "absent" 42 absent absent ""
+
+  # 3. Unparseable candidate bytes are INDETERMINATE, never absence — this is
+  #    the distinction that decides whether /merge gate_passes.
+  mkdir -p "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1"
+  printf '{"pr":' > "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+  m95_assert_case "indeterminate" 42 indeterminate indeterminate ""
+
+  rm -rf "$M95_SANDBOX" "$M95_TMP"
+  rm -f "$M95_RUNNER"
+fi
+rm -f "$M95_FENCE"
 
 echo
 echo "== Summary =="

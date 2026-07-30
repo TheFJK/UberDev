@@ -179,11 +179,11 @@ if [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/c
 else
   AUTO_REVIEW_ON_MERGE=false
 fi
-# Run-scoped per-PR dispatch counter (lifetime = merge-pipeline subshell only; no cross-run state).
-declare -A AUTO_REVIEW_DISPATCHED=()
 ```
 
-**Precedence (inherited from `uberdev_read_enum` generic semantics):** `UBERDEV_AUTO_REVIEW_ON_MERGE` env > `auto_review_on_merge:` in `.codex/uberdev.local.md` > default `false`. Invalid values (anything outside `true|false`) trigger the standard D7 warning format, emit a `uberdev_config_invalid` audit event via existing helper machinery, and fall back to default `false` non-fatally — no new event needed for invalid config. The `AUTO_REVIEW_DISPATCHED` associative array is declared empty at hoist time and indexed by the composite key `${PR}:${RUN_ID}` at intercept time (see Step 1.4.5).
+**Precedence (inherited from `uberdev_read_enum` generic semantics):** `UBERDEV_AUTO_REVIEW_ON_MERGE` env > `auto_review_on_merge:` in `.codex/uberdev.local.md` > default `false`. Invalid values (anything outside `true|false`) trigger the standard D7 warning format, emit a `uberdev_config_invalid` audit event via existing helper machinery, and fall back to default `false` non-fatally — no new event needed for invalid config.
+
+**The auto-review dispatch cap is an on-disk marker, never a shell variable (#303).** A `declare -A AUTO_REVIEW_DISPATCHED=()` hoisted here used to carry the cap. It could not work: this skill's bash executes as short-lived per-fence shells, so every later fence re-declared the array EMPTY and the "counter is unset" guard read true on every pass — `AUTO_REVIEW_DISPATCH_CAP = 1` was never enforced and `/review-pr` could be re-dispatched without bound while holding the merge lock. The cap now lives at `AUTO_REVIEW_MARKER_DIR = "$LOCK_DIR/auto-review-dispatched"`, one directory per `${PR}.${RUN_ID}` composite key, claimed with an atomic `mkdir` BEFORE dispatch (see Step 1.4.5). Its lifetime is exactly the merge lock's: Step 4.6's `rm -rf "$LOCK_DIR"` retires it, and Step 1.1's stale-lock reclaim `rm -rf`s it too, so no cross-run state can survive. Do NOT re-introduce a shell variable, array, or exported env var for this — every one of them is fence-scoped and silently void.
 
 ### Step 1.0.5 — Bare-mode detection (mode-only, no dispatch)
 
@@ -253,7 +253,29 @@ else
 fi
 STALE_THRESHOLD="$MERGE_TIMEOUT"
 if [ "$STALE_THRESHOLD" -lt 900 ]; then STALE_THRESHOLD=900; fi   # LOCK_STALE_FLOOR_SEC
-if [ -z "${RUN_ID:-}" ]; then RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"; fi
+# RUN_ID is minted here, or inherited from an enclosing /goal|/review-pr fence.
+# An inherited value is UNTRUSTED INPUT: it is interpolated unescaped into
+# record.json below, so a value carrying `"` or a newline writes a record whose
+# `.run_id` no longer round-trips. Every later holder check (`jq -r '.run_id'` ==
+# "$RUN_ID") then mismatches and warn-SKIPS — including the Step 4.6 release —
+# leaving the merge lock held until the staleness threshold expires. Validate
+# against RUN_ID_REGEX (declared in `## Constants`) and re-mint on mismatch;
+# never try to escape or repair the inherited value.
+# `grep -q PAT <<<"$V"`, never `printf | grep -q`: a pipe into a -q grep can
+# EPIPE-race under `set -o pipefail` on Linux CI.
+if ! grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"${RUN_ID:-}"; then
+  if [ -n "${RUN_ID:-}" ]; then
+    echo "warning: inherited RUN_ID does not match RUN_ID_REGEX — re-minting" >&2
+  fi
+  RUN_ID="$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
+fi
+# A re-minted value must satisfy the same contract; a git short-SHA that is not
+# lowercase hex (or an empty rev-parse in a fresh repo) is a filesystem-error
+# class failure, not something to paper over.
+if ! grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"$RUN_ID"; then
+  echo "error: cannot mint a RUN_ID matching RUN_ID_REGEX (git rev-parse --short HEAD failed?)" >&2
+  exit 1
+fi
 
 merge_lock_stamp() {
   # Lock dir exists and is ours: write record.json + first heartbeat.
@@ -393,7 +415,14 @@ This is the only Phase-1 path where /merge declines to run for a config reason. 
 
 At the top of each per-PR gate iteration, run the canonical lock-heartbeat touch snippet (see "Lock heartbeat protocol", touch site 1).
 
-For each PR in the candidate set (per-PR fanout — the gate is dispatched once per discovered PR; bare-discover does not relax this dispatch shape), project the JSON via the canonical `pr_view_projection` lib function:
+**Two-pass shape (#303) — the trust-trail evaluators are ONE batched Task wave, not one wave per PR.** The gate is still evaluated per PR, but the single expensive step (the `trust-trail-evaluator` agent in PATH_2 sub-condition (c)) is hoisted out of the loop:
+
+- **Pass 1 (per PR, no agents).** Project the PR, run every pre-condition, PATH_1, and PATH_2 sub-conditions (a) and (b), and run Step (c.0) discovery. Every PR that fails here is resolved immediately (`gate_pass` on PATH_1; `gate_fail` with its specific reason otherwise) and drops out. PRs that reach sub-condition (c) are collected into a pending-evaluation list carrying their per-PR agent inputs. **No `Task()` is dispatched during Pass 1.**
+- **Batched dispatch.** Emit ALL collected `Task("trust-trail-evaluator")` calls **in ONE assistant message** — one agent per pending PR, dispatched together, capped at `MAX_PARALLEL_AGENTS`; chunk into successive single-message waves when the pending list exceeds the cap. This is the same single-message fanout invariant Step 2.2 uses for `merge-strategy-decider`. The old shape dispatched one wave per PR inside the loop, so N candidate PRs serialised into N round-trips while holding the merge lock — the exact seam the lock's staleness threshold is most exposed to. Run the canonical lock-heartbeat touch immediately BEFORE and immediately AFTER each wave.
+- **Pass 2 (per PR, no agents).** Consume each returned verdict, apply the verdict→event mapping below, evaluate sub-condition (d) for the PRs whose verdict was `PASS`, and emit `gate_pass` / `gate_fail`.
+- **Retry wave.** The bounded `INVALID / trailer_sha_not_in_local_clone` retry is itself batched: run each affected PR's ONE `git fetch --prune origin <branch>`, then re-dispatch **all** retrying PRs in ONE further single-message wave (`data.retry_attempt=1`). The retry is still bounded at 1 per PR and is never recursive.
+
+For each PR in the candidate set (per-PR fanout — the gate is evaluated once per discovered PR; bare-discover does not relax this evaluation shape), project the JSON via the canonical `pr_view_projection` lib function:
 
 ```bash
 if [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/merge-pipeline/lib/discover.sh" ]; then
@@ -442,11 +471,24 @@ ALL of the following must hold:
 
 a. `"uberdev-approved" ∈ labels` (see `UBERDEV_APPROVED_LABEL` constant) — else gate_fail with `data.reason="trust_trail_label_missing"`.
 b. The most-recent commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`.
-c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. Dispatch in a single-message `Task("trust-trail-evaluator")` with inputs `pr_number=<N>`, `head_ref_oid=<live gh pr view --json headRefOid>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
+c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. The PR joins the pending-evaluation list; every pending PR's `Task("trust-trail-evaluator")` is dispatched together in ONE assistant message (see "Two-pass shape" above) with inputs `pr_number=<N>`, `head_ref_oid=<.headRefOid from the cached PR_JSON projection>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, `status_check_rollup=<.statusCheckRollup from the cached PR_JSON projection, compact JSON>`, `commit_shas=<[.commits[].oid] from the cached PR_JSON projection, compact JSON array>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
+
+   **Corroborators come from the caller's cached projection, never from a fresh fetch inside the agent (#303).** `pr_view_projection` already requested `headRefOid`, `statusCheckRollup`, and `commits` for this PR in the fence above, so the agent re-running `gh pr view <N> --json statusCheckRollup` and `gh api repos/:owner/:repo/pulls/<N>/commits` bought two extra API round-trips per PR — and worse, sampled GitHub state at a LATER instant than the `headRefOid` the structural probes are bound to, so the agent could corroborate a head the verdict was not computed against. Extract all three from `$PR_JSON` and pass them in the dispatch prompt. The agent MUST treat them as its only PR-state corroborators and MUST NOT re-fetch. When the green-path re-eval of Step 1.4.5 refreshes `PR_JSON`, the refreshed values are what a re-dispatch carries.
 
    **Phase 2.5 inputs (RFC 0002 §3.6, added v0.26.0).** Before dispatch, discover exactly one typed artifact identity and parse its Phase 2.5 block. Sub-condition (d) reuses that selection; it never performs a second discovery pass.
 
+   The fence below is delimited by `# BEGIN merge-trust-gate-fence-v1` /
+   `# END merge-trust-gate-fence-v1`. Those markers are a CONTRACT, not a
+   comment: `tests/merge.test.sh` extracts everything between them, strips the
+   list indentation, and EXECUTES it in a fresh `bash -c` against on-disk
+   verdict fixtures. Grepping this block only ever proved that the words were
+   present; executing it proves the discovery/recapture/cleanup state machine
+   actually resolves `PHASE2_5_AUDIT_STATE` correctly. Keep the block
+   self-contained (it may assume only `PLUGIN_ROOT`, `PR_NUMBER`, and an
+   `audit` emitter), and bump the marker version if the contract changes.
+
    ```bash
+   # BEGIN merge-trust-gate-fence-v1
    # Step (c.0) — capture one closed $AUDIT_VERDICT_RECEIPT. Sub-condition
    # (d) consumes only controller-resident fields from this receipt.
    # Delegated to `discover_review_verdict_json` in lib/discover.sh (#303) — a
@@ -588,6 +630,7 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
        "$PR_NUMBER" "$DISCOVERY_STDERR_TRUNC" >&2
    fi
    [ -z "$DISCOVERY_STDERR" ] || rm -f "$DISCOVERY_STDERR"
+   # END merge-trust-gate-fence-v1
    ```
 
    Pass these alongside the existing inputs in the dispatch prompt as: `audit_state=<absent|legacy|current|malformed|indeterminate>` (from `PHASE2_5_AUDIT_STATE`), `phase2_5_halted=<bool>`, `phase2_5_blocker_count=<int>`, `phase2_5_critical_count=<int>`, `phase2_5_override_reason=<string|null>`, `accept_blocker_deferred_flag=<true|false>` (from `ACCEPT_BLOCKER_DEFERRED_FLAG` parse), `accept_critical_deferred_flag=<true|false>` (from `ACCEPT_CRITICAL_DEFERRED_FLAG` parse), `i_know_what_im_doing_flag=<true|false>` (from `I_KNOW_WHAT_IM_DOING_FLAG` parse). For `audit_state=absent`, the agent skips only the Phase 2.5 telemetry gate and still runs the immutable SHA/ancestor/diff/log structural proof; only a structural `PASS` reaches sub-condition (d), which emits the existing absent-JSON advisory and `gate_pass`. `legacy` remains `STALE`; `current` evaluates the existing Phase 2.5 gates; `malformed`, `indeterminate`, and any unknown state defensively handled by the agent map to `INVALID / input_malformed`. The agent evaluates this state contract in its Step 1.5 before the structural primitives (see `agents/trust-trail-evaluator.md` Process §1.5). The agent inspects ancestor + diff-empty + log-empty primitives and returns a verdict ∈ `TRUST_TRAIL_VERDICT_ENUM` (`PASS` / `STALE` / `INVALID` / `FORCE_PUSHED`) plus rationale plus `signals_inspected` list. The caller maps verdicts to events as follows (canonical reference; the agent file's return-contract prose mirrors this word-for-word):
@@ -615,7 +658,7 @@ Honest fast-forward fixup commits added between `/review-pr` and `/merge` (e.g.,
 
 ### Step 1.4.5 — Auto-review intercept (#89)
 
-**Default-off bit-identity contract.** When `AUTO_REVIEW_ON_MERGE` is `false` (the default), this step is a structural no-op: control falls through to the existing `gate_fail` emission described under the "Otherwise:" paragraph above. Zero new audit events fire. Zero new wall-clock is consumed. The `AUTO_REVIEW_DISPATCHED` associative array is declared but never written. This is the load-bearing safety contract (constraints.md §Summary #1).
+**Default-off bit-identity contract.** When `AUTO_REVIEW_ON_MERGE` is `false` (the default), this step is a structural no-op: control falls through to the existing `gate_fail` emission described under the "Otherwise:" paragraph above. Zero new audit events fire. Zero new wall-clock is consumed. `AUTO_REVIEW_MARKER_DIR` is never created. This is the load-bearing safety contract (constraints.md §Summary #1).
 
 **Label-presence probe (#95).** Before evaluating the trigger guard, a positive-signal probe checks for the `review-pr:pending` label on the PR (set by `finish-branch/SKILL.md` immediately before its `Skill("uberdev:review-pr")` dispatch — see `REVIEW_PR_PENDING_LABEL` in the Constants table). When the label is present, the probe short-circuits trust-trail reason resolution by assigning `reason="trust_trail_label_missing"` directly. This reuses the existing `GATE_FAIL_REASON_ENUM` member (per D1 of `docs/uberdev/specs/2026-05-13-finish-branch-review-pr-pending-backstop-design.md`) and introduces NO new `AUDIT_EVENT_ENUM` value — the existing `auto_review_dispatched.data.reason_triggering` enum at line 30 is preserved. The probe is itself gated by `AUTO_REVIEW_ON_MERGE` so the default-off bit-identity contract above remains intact (the block is a structural no-op when the user has not opted in).
 
@@ -638,19 +681,30 @@ if [[ "$AUTO_REVIEW_ON_MERGE" == "true" ]]; then
 fi
 ```
 
-The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and `AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` counter (asserted in the dispatch sequence below) continue to enforce per-run de-dup downstream — re-entry via the new probe cannot bypass the cap because the counter is checked as the third trigger guard condition (the third condition in the Trigger guard section immediately below).
+The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and the on-disk `AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}` marker (claimed in the dispatch sequence below) continue to enforce per-run de-dup downstream — re-entry via the new probe cannot bypass the cap because the marker claim IS the third trigger guard condition (the third condition in the Trigger guard section immediately below).
 
 **Trigger guard (positive whitelist; D10).** The intercept fires if and only if ALL THREE conditions hold:
 
 1. `AUTO_REVIEW_ON_MERGE == true` (config-opt-in)
 2. The candidate `data.reason` produced by Step 1.4 PATH_2 evaluation is in the trigger set: `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}`. All other `GATE_FAIL_REASON_ENUM` members — `review_decision_not_approved`, `trust_trail_stale_sha`, `trust_trail_agent_invalid_input`, `trust_trail_json_sha_mismatch`, `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked`, `pr_view_unreachable` — explicitly DO NOT trigger (see `## Common Mistakes` for the exhaustive rationale).
-3. The counter for this PR + run composite key is unset: `[[ -z "${AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]:-}" ]]`. This enforces the absolute cap `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`.
+3. The atomic marker claim for this PR + run composite key SUCCEEDS: `mkdir "$AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}"` exits 0. `mkdir` is POSIX-atomic for exclusive creation, so the guard and the cap-consumption are ONE operation with no check-then-act window. This enforces the absolute cap `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`. A pre-existing marker (EEXIST) means the cap is already consumed → the intercept does not fire.
 
-**Dispatch sequence (cap-ordering invariant).** When all three conditions hold, execute in this exact order:
+**Dispatch sequence (cap-ordering invariant).** When all three conditions hold, execute in this exact order. This fence is a fresh per-fence shell: re-establish `LOCK_DIR` (a literal) and prepend the `RUN_ID=<value>` literal carried from the Step 1.1 acquire echo, exactly as the touch/release fences do.
 
 ```bash
-# 1. Mark counter BEFORE dispatch — prevents re-entry under any path
-AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]=1
+# 1. Claim the cap BEFORE dispatch — an atomic on-disk test-and-set that no
+#    fence boundary can erase (the retired `declare -A AUTO_REVIEW_DISPATCHED`
+#    was re-declared empty in every fence, so the cap never held; #303).
+LOCK_DIR=".git/uberdev-merge.lock.d"
+AUTO_REVIEW_MARKER_DIR="$LOCK_DIR/auto-review-dispatched"
+if ! mkdir -p "$AUTO_REVIEW_MARKER_DIR" 2>/dev/null; then
+  echo "warning: cannot create $AUTO_REVIEW_MARKER_DIR — auto-review intercept skipped for PR $PR (cap cannot be enforced)" >&2
+  # Fall through to the else-branch below: no dispatch without an enforceable cap.
+elif ! mkdir "$AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}" 2>/dev/null; then
+  # Cap already consumed for this (pr, run) — or the lock dir vanished under us.
+  # Either way: no dispatch. Fall through to the else-branch below.
+  :
+else
 
 # 2. Emit pre-dispatch audit event
 printf '{"event":"auto_review_dispatched","run_id":"%s","ts":"%s","data":{"pr":%d,"reason_triggering":"%s"}}\n' \
@@ -692,12 +746,16 @@ esac
 # 7. Emit post-dispatch audit event
 printf '{"event":"auto_review_returned","run_id":"%s","ts":"%s","data":{"pr":%d,"outcome":"%s","duration_ms":%d}}\n' \
   "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$outcome" "$duration_ms" >> ".uberdev/audit.jsonl"
+
+fi   # closes the marker-claim guard opened at step 1
 ```
+
+**The marker is never removed inside the run.** Not on green, not on `blocked`, not on `refused_non_green`, not on dispatch failure. Removing it would restore the unbounded-re-dispatch class the fence-scoped array had. It is retired only when the lock directory is (Step 4.6 release, or a later run's stale-lock reclaim).
 
 **Green-path re-eval (D3, D12).** When `outcome == "green"`:
 
 1. **Refresh inputs.** Re-run `pr_view_projection` for `${PR}` only (full `gh pr view ${PR} --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,latestReviews,createdAt,author --jq '.'`). The returned projection REPLACES the cached `PR_JSON` for this PR in the per-PR loop iteration. Fields specifically refreshed: `headRefOid` (anchor commit advances by 1 after green `/review-pr`), `commits` (count and SHAs), `labels` (the `uberdev-approved` label appears post-emission), `latestReviews` (refreshed defensively — `/review-pr` does NOT call `gh pr review --approve`, so PATH_1 still cannot reach via auto-dispatch per security.md §2). `commit_count` and `divergence_commits` are derived from refreshed `commits`. This refresh closes the TOCTOU window flagged in R1 / security.md §4.
-2. **Re-evaluate Phase 1.4 for `${PR}` only (D12).** Single re-pass — no recursion. PATH_1 is checked again (defensive against any `/review-pr` side-effect on `reviewDecision`). PATH_2 sub-conditions (a)–(d) are re-checked against the refreshed projection. **Counter check prevents re-entry:** the very first guard condition of Step 1.4.5 (`AUTO_REVIEW_DISPATCHED["${PR}:${RUN_ID}"]` is unset) is now FALSE on re-entry, so the intercept skips and any new trigger reason falls through to the original manual-handoff diagnostic. Absolute cap honored.
+2. **Re-evaluate Phase 1.4 for `${PR}` only (D12).** Single re-pass — no recursion. PATH_1 is checked again (defensive against any `/review-pr` side-effect on `reviewDecision`). PATH_2 sub-conditions (a)–(d) are re-checked against the refreshed projection. **Marker check prevents re-entry:** the third guard condition of Step 1.4.5 (`mkdir "$AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}"`) now fails with EEXIST on re-entry, so the intercept skips and any new trigger reason falls through to the original manual-handoff diagnostic. Absolute cap honored — and unlike the retired shell array, the marker survives the fence boundary that the re-eval necessarily crosses.
 3. **On `gate_pass` after re-eval:** the PR proceeds into Phase 2 with refreshed inputs (Phase 2.2 strategy-decider consumes the refreshed `commit_count` and `divergence_commits`).
 4. **On `gate_fail` after re-eval:** the PR is excluded from the merge set with the NEW `data.reason` (e.g., a teammate push during the auto-review window may produce `trust_trail_stale_sha`); the queue continues.
 
@@ -709,11 +767,11 @@ PR #${PR}: auto-review returned ${outcome} (duration ${duration_ms}ms); see .ube
 
 The queue continues with the next PR. No halt path is introduced — the autopilot contract from `## Common Mistakes` ("Halting the run") is preserved.
 
-**Else-branch (intercept does NOT fire).** When ANY of the three trigger conditions fails — `AUTO_REVIEW_ON_MERGE == false`, OR `reason` not in the trigger set, OR the counter is already set — control falls through to the existing "Otherwise:" paragraph above: `gate_fail` emits with the original diagnostic message (`/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`), the PR is excluded, the queue continues. Bit-identical to pre-#89 behavior.
+**Else-branch (intercept does NOT fire).** When ANY of the three trigger conditions fails — `AUTO_REVIEW_ON_MERGE == false`, OR `reason` not in the trigger set, OR the marker claim did not succeed (cap already consumed, or the marker directory could not be created) — control falls through to the existing "Otherwise:" paragraph above: `gate_fail` emits with the original diagnostic message (`/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`), the PR is excluded, the queue continues. Bit-identical to pre-#89 behavior.
 
 **Dispatch failure handling (R7).** If `Skill("uberdev:review-pr", ...)` itself fails to dispatch (plugin disabled per the `enabledPlugins` bug pattern, missing command, etc.), the failure is caught at the call site; `auto_review_returned` is emitted with `outcome: refused_non_green` and the duration measured to the point of dispatch failure; the PR is excluded; the queue continues. Healthy installs are unaffected.
 
-**Stale-SHA verification primitive (D3, agent-delegated post-v0.17.0).** The PATH_2 (c) check is delegated to `trust-trail-evaluator`. The agent inspects three structural primitives — `git merge-base --is-ancestor <trailer-sha> <live-headRefOid>`, `git diff --shortstat <trailer-sha> <live-headRefOid>`, and `git log <trailer-sha>..<live-headRefOid> --oneline` — to distinguish `PASS` (honest fast-forward fixup with empty cumulative diff OR sibling commits via `commit --amend` with identical trees), `STALE` (ancestor relationship with non-empty diff between trailer and current head), `INVALID` (input-malformed or trailer SHA not in local clone), and `FORCE_PUSHED` (non-ancestor AND tree contents differ — real history rewriting). The ancestor relationship and the tree-diff are checked independently: non-ancestor with empty tree diff is a sibling-equivalent rewrite (PASS), not a force-push. The agent's `head_ref_oid` input is the live `gh pr view <N> --json headRefOid` value (never a local ref like `HEAD` or `origin/<branch>`); M38's live-headRefOid mandate is preserved as the agent's input contract. The single dispatch primitive covers all rewrite types with one return-contract YAML and one set of caller-side mappings.
+**Stale-SHA verification primitive (D3, agent-delegated post-v0.17.0).** The PATH_2 (c) check is delegated to `trust-trail-evaluator`. The agent inspects three structural primitives — `git merge-base --is-ancestor <trailer-sha> <live-headRefOid>`, `git diff --shortstat <trailer-sha> <live-headRefOid>`, and `git log <trailer-sha>..<live-headRefOid> --oneline` — to distinguish `PASS` (honest fast-forward fixup with empty cumulative diff OR sibling commits via `commit --amend` with identical trees), `STALE` (ancestor relationship with non-empty diff between trailer and current head), `INVALID` (input-malformed or trailer SHA not in local clone), and `FORCE_PUSHED` (non-ancestor AND tree contents differ — real history rewriting). The ancestor relationship and the tree-diff are checked independently: non-ancestor with empty tree diff is a sibling-equivalent rewrite (PASS), not a force-push. The agent's `head_ref_oid` input is the live `headRefOid` carried in the caller's cached `pr_view_projection` (never a local ref like `HEAD` or `origin/<branch>`); M38's live-headRefOid mandate is preserved as the agent's input contract, and #303 additionally binds the Step 5 corroborators (`status_check_rollup`, `commit_shas`) to that SAME projection instant instead of letting the agent re-fetch them later. The single dispatch primitive covers all rewrite types with one return-contract YAML and one set of caller-side mappings.
 
 **Author identity is NOT a gate condition** in any path. Phase 1.4 trust resolution accepts EITHER `reviewDecision == "APPROVED"` (team / branch-protection path; PATH_1) OR a green `/review-pr` trail bound to current HEAD SHA (solo-dev / no-protection path; PATH_2) — author identity is not a gate in either path. The `bot_authors_allow_list` config key is deprecated; see `commands/merge.md` `## Deprecated Flags` and `using-uberdev/SKILL.md`.
 
@@ -1084,9 +1142,34 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 1. **Probe rebaseability** via `git merge-tree --write-tree <integration_branch> <stale_branch>` — clean exit = rebase would be conflict-free. **FF detection:** run `git merge-base --is-ancestor <integration_branch> <stale_branch>` after the merge-tree clean check; ancestor relationship → FF-able (decision tree rule 1); non-ancestor + clean merge-tree → non-conflicting (decision tree rule 2).
 2. **Safety preconditions** (ALL must hold to rebase):
    (a) the branch is NOT a PR head ref currently in the autopilot's merge set — cross-checked via `gh pr list --head <branch> --json number,state` (state ∈ {OPEN, MERGED}).
-   (b) the branch has a remote-tracking ref that does NOT have force-push protection (probed via `gh api repos/:owner/:repo/branches/<branch>/protection` — 200 with `allow_force_pushes.enabled=false` means protected). Local-only branches without a remote-tracking ref do NOT satisfy this precondition; they SKIP via the `skipped-non-tracking` rule below — local-only branches may represent in-progress unpushed work and are not safe to rebase blindly.
+   (b) the branch has a remote-tracking ref that does NOT have force-push protection. Local-only branches without a remote-tracking ref do NOT satisfy this precondition; they SKIP via the `skipped-non-tracking` rule below — local-only branches may represent in-progress unpushed work and are not safe to rebase blindly.
 
-   **Failure handling on API probes:** if `gh pr list --head <branch>` fails (network, auth, rate limit, JSON parse error), treat the branch as potentially a PR head ref (safe default) and emit `data.choice="skipped-pr-head-ref"` with `data.rationale="gh-pr-list-api-unreachable"`. If `gh api .../protection` fails, treat as protected and emit `data.choice="skipped-non-tracking"` with `data.rationale="protection-api-unreachable"`. Never rebase when safety status cannot be determined.
+   **Protection probe — read the HTTP status, not the exit code (#303).** `gh api repos/:owner/:repo/branches/<branch>/protection` exits non-zero for BOTH "this branch has no protection rule" (HTTP 404, the common and perfectly safe case) and "we could not find out" (401/403/5xx/network). Mapping every non-zero exit to `skipped-non-tracking` therefore skipped every unprotected branch — the entire population Step 4.5 exists to rebase — and reported it with the misleading rationale `protection-api-unreachable`. Probe with `-i` so the status line is on stdout and classify on it:
+
+   ```bash
+   # `gh api -i` emits the response headers, so a 404 is readable as data.
+   # `|| true` is safe ONLY because the status line is the classifier — the
+   # exit code is deliberately not consulted.
+   PROTECTION_RESPONSE="$(gh api -i "repos/:owner/:repo/branches/${b}/protection" 2>/dev/null || true)"
+   PROTECTION_STATUS_LINE="$(head -n 1 <<<"$PROTECTION_RESPONSE")"
+   # "HTTP/2.0 404 Not Found" -> "404". Parameter expansion, not awk: the Skill
+   # renderer substitutes $ARGUMENTS positionals into bare `$N` field refs even
+   # inside single-quoted awk bodies (#222), which would silently corrupt the
+   # status parse.
+   PROTECTION_STATUS="${PROTECTION_STATUS_LINE#* }"
+   PROTECTION_STATUS="${PROTECTION_STATUS%% *}"
+   case "$PROTECTION_STATUS" in
+     404) protection_state=unprotected ;;   # no rule → precondition (b) satisfied
+     200) protection_state=protected ;;     # a rule exists → inspect allow_force_pushes
+     *)   protection_state=unknown ;;       # 401/403/5xx/empty/network → fail closed
+   esac
+   ```
+
+   - `unprotected` (404) → precondition (b) is SATISFIED. Continue to the decision tree.
+   - `protected` (200) → parse the body: `allow_force_pushes.enabled == true` satisfies (b); anything else (including a missing key) does not, and the branch SKIPs with `data.choice="skipped-non-tracking"` and `data.rationale="force-push-protected"`.
+   - `unknown` → treat as protected; SKIP with `data.choice="skipped-non-tracking"` and `data.rationale="protection-api-unreachable"`. This rationale now means what it says.
+
+   **Failure handling on the PR-head probe:** if `gh pr list --head <branch>` fails (network, auth, rate limit, JSON parse error), treat the branch as potentially a PR head ref (safe default) and emit `data.choice="skipped-pr-head-ref"` with `data.rationale="gh-pr-list-api-unreachable"`. Never rebase when safety status cannot be determined.
 3. **Decide** (decision tree, first match wins; emit `data.choice` ∈ `STALE_REBASE_DECISION_ENUM`):
    - FF-able + safety met → `git rebase <integration_branch>`; emit choice `rebased-ff-clean`.
    - Non-conflicting probe + safety met → `git rebase <integration_branch>`; emit choice `rebased-non-conflicting`.
@@ -1151,7 +1234,7 @@ The same release snippet runs at every documented post-acquisition early exit (S
   The `~/.config/uberdev/worktrees/<project>/<branch>/.uberdev/runs/*` global-fallback layout (also declared in `using-git-worktrees/SKILL.md`) is intentionally NOT searched — it lives outside the project root and would require runtime `$HOME` resolution; that case is deferred to the writer-side path-anchoring follow-up (anchor `/review-pr`'s artifact writer on the main-checkout root via `git rev-parse --show-toplevel`, mirroring the convention in `orchestrator/SKILL.md`). The composed identity contract distinguishes exhaustive no-match (`audit_state=absent`, structural proof still required), present pre-v0.26.0 (`legacy`, `STALE`), valid current, selected malformed, and incomplete/identity-unknown discovery (`indeterminate`, INVALID). Missing a worktree mirror can never be called exhaustive absence. RUN_ID_REGEX is validated before candidate identity reads; malformed identity at a newer/equal run-id suppresses an older target as indeterminate, while invalid run-ids are ignored. Future worktree conventions added to `using-git-worktrees/SKILL.md` MUST be paired with a helper layout addition and matching discovery tests.
 - **Treating `--bypass-protections` as a live admin-bypass anchor.** It is deprecated as a no-op post-v0.17.0 — the trust-trail-evaluator agent subsumes its job; there is no PATH_3 admin-bypass anchor and no CI-red waiver. The flag is parsed without error indefinitely (Terraform / npm CLI deprecation precedent), emits `BYPASS_PROTECTIONS_DEPRECATED_NOTE` once per run on first encounter, and records a `deprecated_flag_used` audit event. `admin_bypass` and `waiver_recorded` events are declared in `AUDIT_EVENT_ENUM` for backward-compat with audit-log consumers but are NEVER emitted post-v0.17.0.
 - **Inlining strategy heuristics in Phase 2.2 instead of dispatching `merge-strategy-decider`.** The agent owns the decision; the skill normalises inputs (commit_count, conventional_commit_ratio, divergence_commits, wip_marker_present, label_hint, repo_convention) and surfaces the verdict to the audit log via `merge_strategy_agent_decision` and `strategy_chosen` (`data.reason="agent_decided"`). There is NO "Per-invocation flag always wins" clause — `--squash` / `--rebase` / `--merge` are no-ops post-v0.17.0.
-- **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the counter is set BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval.
+- **Don't trigger auto-review on `review_decision_not_approved` alone, on `trust_trail_stale_sha`, or on any other non-whitelisted gate-fail reason.** The Phase 1.4.5 auto-review intercept fires ONLY on the positive whitelist `reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}` (D10). The non-trigger `GATE_FAIL_REASON_ENUM` members are excluded as a defensive completeness measure (D11): `review_decision_not_approved` (auto-bypassing branch protection is a security regression — security.md §2), `trust_trail_stale_sha` (deferred to v2 — requires a pricier full re-anchor), `trust_trail_agent_invalid_input` (input-malformed agent input is a manual-investigation signal), `trust_trail_json_sha_mismatch` (indicates a corrupted run-local path post-#78 — manual investigation per Q6), `pr_state_not_open`, `is_draft`, `ci_red`, `merge_state_blocked` (pre-condition gates evaluated before trust resolution — not auto-recoverable), `pr_view_unreachable` (infrastructure failure — not auto-recoverable). The cap is `AUTO_REVIEW_DISPATCH_CAP = 1` per `(pr_number, run_id)`; the `AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}` marker is claimed with an atomic `mkdir` BEFORE the synchronous `Skill("uberdev:review-pr")` dispatch (Step 1.4.5 cap-ordering invariant) so re-entry cannot bypass the cap even on green re-eval. **Never carry this cap in a shell variable or associative array** — fence-scoped state is re-initialised on every fence, which is exactly how the cap silently stopped existing (#303).
 - **Extending the trigger set for #95.** The label-presence probe added in #95 (gated by `AUTO_REVIEW_ON_MERGE`) short-circuits reason resolution by setting `reason="trust_trail_label_missing"` directly. This reuses the existing whitelist member and does NOT extend the trigger set — `GATE_FAIL_REASON_ENUM` is unchanged, `AUDIT_EVENT_ENUM` is unchanged (Q5 / D1). Do not "fix" this by introducing a new `review_pr_pending_label_present` reason or audit event.
 
 ## Red Flags

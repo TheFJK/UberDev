@@ -33,7 +33,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any
 
 try:
     import fcntl as _fcntl
@@ -1322,9 +1322,20 @@ def _open_directory_fd(path: str) -> int:
 
 
 def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
-    """Open a regular file relative to a no-follow parent directory handle."""
+    """Open a regular file relative to a no-follow parent directory handle.
+
+    ``O_NONBLOCK`` is added to every open. It is a no-op for the regular files
+    this function exists to open, but without it POSIX ``open()`` on a FIFO with
+    ``O_RDONLY`` BLOCKS until some other process opens the write end -- forever,
+    in practice. The regularity check below can only reject a node it has already
+    managed to open, so a FIFO planted at any artifact path (a verdict candidate,
+    a manifest, a lease) wedged the calling command indefinitely -- for /merge,
+    while holding the merge lock. Opening non-blocking makes the node type
+    observable so the existing ``manifest_not_regular_file`` rejection can fire.
+    """
 
     absolute = os.path.abspath(path)
+    flags |= getattr(os, "O_NONBLOCK", 0)
     if _uses_native_windows_filesystem():
         # Native Windows has no dir_fd/O_NOFOLLOW support.  Reject reparse-point
         # ancestors before opening, then bind the opened handle to the lstat
@@ -1368,7 +1379,48 @@ def _secure_open_regular(path: str, flags: int, mode: int = 0o600) -> int:
     return descriptor
 
 
-class ArtifactIdentity(NamedTuple):
+def _validate_artifact_components(
+    kind: str, components: Iterable[tuple[str, Any, bool]]
+) -> None:
+    """Reject any stat component that cannot describe a real filesystem node.
+
+    ``components`` yields ``(name, value, non_negative)`` triples.  ``bool`` is a
+    subclass of ``int`` and must never satisfy an integer field, so it is
+    rejected explicitly.  ``non_negative`` is False for the two timestamp fields
+    (a pre-epoch mtime/birthtime is legitimately negative) and for ``device``
+    (``st_dev`` is a signed value on several platforms); it is True for inode,
+    size, and mode, which have no negative domain.
+    """
+
+    for name, value, non_negative in components:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ManifestRejected(f"{kind}_component_not_integer: {name}")
+        if non_negative and value < 0:
+            raise ManifestRejected(f"{kind}_component_negative: {name}")
+
+
+@dataclass(frozen=True)
+class ArtifactIdentity:
+    """The six stat components that bind one captured artifact.
+
+    Deliberately NOT a ``NamedTuple``: the raw descriptor state below carries the
+    same six integers in the same order, so tuple structural equality made the
+    two types -- and any bare six-element tuple decoded from receipt JSON --
+    compare equal.  A frozen dataclass compares only against its own class, and
+    ``__post_init__`` rejects a value that cannot describe a filesystem node, so
+    an untrusted receipt can no longer construct a nonsense identity that later
+    "matches" a real one.
+
+    NOT ``slots=True``, deliberately.  That keyword needs Python 3.10, and this
+    module must import under the OLDEST interpreter any caller can reach: the
+    child-dispatch background wrapper pins ``PATH=/usr/bin:/bin``, which on macOS
+    resolves ``python3`` to the 3.9 system build.  ``slots=True`` there is a
+    ``TypeError`` at import, which surfaces several layers away as
+    ``owner_process_identity_unavailable`` -- a diagnostic that points nowhere
+    near the cause.  ``frozen=True`` alone already supplies immutability, the
+    class-scoped ``__eq__``, and ``__hash__``, which is the entire fix.
+    """
+
     device: int
     inode: int
     size: int
@@ -1376,14 +1428,108 @@ class ArtifactIdentity(NamedTuple):
     identity_time_ns: int
     mode: int
 
+    def __post_init__(self) -> None:
+        _validate_artifact_components(
+            "artifact_identity",
+            (
+                ("device", self.device, False),
+                ("inode", self.inode, True),
+                ("size", self.size, True),
+                ("mtime_ns", self.mtime_ns, False),
+                ("identity_time_ns", self.identity_time_ns, False),
+                ("mode", self.mode, True),
+            ),
+        )
 
-class RawArtifactDescriptorState(NamedTuple):
+    # ---- read-only sequence view over the contractual receipt-array order ----
+    #
+    # The on-disk receipt shape is a six-element JSON array, so the component
+    # ORDER is part of the persisted contract, not an implementation detail.
+    # These three methods expose exactly that order and nothing more, so the
+    # existing positional consumers keep working across the NamedTuple ->
+    # dataclass change: ``list(module._artifact_identity(...))`` in
+    # ``commands/review-pr.md`` and ``stat.S_IMODE(identity[5])`` in
+    # ``skills/post-impl-review/SKILL.md``.
+    #
+    # Crucially, a sequence VIEW is not tuple IDENTITY: ``isinstance(x, tuple)``
+    # is False, ``x == (a, b, c, d, e, f)`` is False, and
+    # ``ArtifactIdentity(...) == RawArtifactDescriptorState(...)`` is False.
+    # Those three structural equalities are the bug #343 closes; positional
+    # reads never depended on them.
+    #
+    # New code should prefer named attributes (``identity.mode``) or
+    # ``artifact_identity_receipt_components`` -- ``identity[5]`` says nothing
+    # about which component it means.
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(artifact_identity_receipt_components(self))
+
+    def __len__(self) -> int:
+        return len(ARTIFACT_IDENTITY_RECEIPT_FIELDS)
+
+    def __getitem__(self, index: int) -> int:
+        return artifact_identity_receipt_components(self)[index]
+
+
+@dataclass(frozen=True)
+class RawArtifactDescriptorState:
+    """The raw descriptor view, before the platform identity normalisation."""
+
     device: int
     inode: int
     size: int
     mtime_ns: int
     ctime_ns: int
     mode: int
+
+    def __post_init__(self) -> None:
+        _validate_artifact_components(
+            "artifact_raw_descriptor_state",
+            (
+                ("device", self.device, False),
+                ("inode", self.inode, True),
+                ("size", self.size, True),
+                ("mtime_ns", self.mtime_ns, False),
+                ("ctime_ns", self.ctime_ns, False),
+                ("mode", self.mode, True),
+            ),
+        )
+
+
+ARTIFACT_IDENTITY_RECEIPT_FIELDS = (
+    "device",
+    "inode",
+    "size",
+    "mtime_ns",
+    "identity_time_ns",
+    "mode",
+)
+
+
+def artifact_identity_receipt_components(identity: ArtifactIdentity) -> list[int]:
+    """Serialise one identity into its contractual six-element receipt array."""
+
+    if not isinstance(identity, ArtifactIdentity):
+        raise ManifestRejected("artifact_identity_not_bound")
+    return [getattr(identity, name) for name in ARTIFACT_IDENTITY_RECEIPT_FIELDS]
+
+
+def artifact_identity_from_receipt(value: Any) -> ArtifactIdentity:
+    """Rebuild one identity from an untrusted six-element receipt array.
+
+    The receipt is JSON, so every component arrives as an arbitrary decoded
+    value.  Shape is checked here and the component domain is checked by
+    ``ArtifactIdentity.__post_init__``; nothing else may construct an identity
+    from receipt bytes.
+    """
+
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(
+        value, (list, tuple)
+    ):
+        raise ManifestRejected("artifact_identity_receipt_invalid")
+    if len(value) != len(ARTIFACT_IDENTITY_RECEIPT_FIELDS):
+        raise ManifestRejected("artifact_identity_receipt_invalid")
+    return ArtifactIdentity(*value)
 
 
 def _artifact_raw_fd_state(entry: os.stat_result) -> RawArtifactDescriptorState:
@@ -1668,7 +1814,13 @@ def secure_publish_captured(
         # from descriptor capture plus the digest receipt, not a pathname
         # attribute.  Crucially, failed attempts were created writable too, so
         # Windows retries can never be wedged by a read-only partial target.
-        if os.name != "nt":
+        # The predicate must be `_uses_native_windows_filesystem()`, matching
+        # `secure_publish_exact_no_clobber`: the owner-depth model tests patch
+        # `os.name`, and a bare `os.name != "nt"` check then calls `os.fchmod`
+        # on a Windows model where the attribute does not exist -- an
+        # AttributeError that escapes both the ManifestRejected and OSError
+        # handlers below.
+        if not _uses_native_windows_filesystem():
             os.fchmod(descriptor, 0o400)
         finalized = os.fstat(descriptor)
         current = os.lstat(candidate)
@@ -1687,7 +1839,7 @@ def secure_publish_captured(
             or (uid is not None and finalized.st_uid != uid)
             or (uid is not None and current.st_uid != uid)
             or (
-                os.name != "nt"
+                not _uses_native_windows_filesystem()
                 and (
                     stat.S_IMODE(finalized.st_mode) != 0o400
                     or stat.S_IMODE(current.st_mode) != 0o400
@@ -1717,6 +1869,112 @@ def secure_publish_captured(
     if candidate is None or published_identity is None:
         raise ManifestRuntimeError("artifact_snapshot_failed")
     return candidate, published_identity, digest
+
+
+def _validate_private_capture_entry(entry: os.stat_result, uid: int | None) -> None:
+    """Refuse to delete anything that is not one owned, single-link regular file."""
+
+    if (
+        stat.S_ISLNK(entry.st_mode)
+        or not stat.S_ISREG(entry.st_mode)
+        or entry.st_nlink != 1
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise ManifestRejected("artifact_capture_dir_entry_unexpected")
+
+
+def secure_remove_private_capture_dir(path: str, prefix: str) -> None:
+    """Remove one controller-owned private capture directory and its carriers.
+
+    ``secure_publish_captured`` deliberately never unlinks a publication attempt
+    -- no portable primitive proves that a pathname still names the opened file
+    at the instant of deletion -- so once publication has run, the private
+    mktemp-owned capture directory always holds at least one mode-0400 carrier.
+    A bare ``rmdir`` therefore always fails with ENOTEMPTY, and every non-clean
+    discovery exit leaked a full copy of the selected verdict into the temp
+    directory.  The creating interpreter owns the removal because it is the only
+    party that knows the attempt name it chose.
+
+    The deletion is narrow by construction: the directory basename must carry
+    ``prefix``, the directory must be a real euid-owned directory bound by
+    identity to the handle the walk descends through, and every entry must be an
+    euid-owned single-link regular file.  Anything else refuses instead of
+    widening the blast radius.  A missing directory is success, not an error --
+    the shell-side kill-before-Python fallback may have removed it already.
+    """
+
+    if not isinstance(prefix, str) or not prefix:
+        raise ManifestRejected("artifact_capture_dir_prefix_invalid")
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ManifestRejected("artifact_capture_dir_path_invalid")
+    absolute = os.path.abspath(path)
+    if not os.path.basename(absolute).startswith(prefix):
+        raise ManifestRejected("artifact_capture_dir_not_controller_owned")
+    try:
+        current = os.lstat(absolute)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_capture_dir_inspect_failed") from exc
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (uid is not None and current.st_uid != uid)
+    ):
+        raise ManifestRejected("artifact_capture_dir_not_owned_directory")
+    expected = (current.st_dev, current.st_ino)
+
+    try:
+        if _uses_native_windows_filesystem():
+            # Native Windows has no dir_fd walk.  Reject reparse-point ancestors
+            # first, then bind each entry by lstat before unlinking it.
+            _reject_windows_reparse_ancestors(absolute)
+            for name in sorted(os.listdir(absolute)):
+                entry_path = os.path.join(absolute, name)
+                try:
+                    entry = os.lstat(entry_path)
+                except FileNotFoundError:
+                    continue
+                _validate_private_capture_entry(entry, uid)
+                try:
+                    os.unlink(entry_path)
+                except FileNotFoundError:
+                    continue
+        else:
+            descriptor = _open_directory_fd(absolute)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != expected:
+                    raise ManifestRejected("artifact_capture_dir_replaced")
+                for name in sorted(os.listdir(descriptor)):
+                    try:
+                        entry = os.stat(
+                            name, dir_fd=descriptor, follow_symlinks=False
+                        )
+                    except FileNotFoundError:
+                        continue
+                    _validate_private_capture_entry(entry, uid)
+                    try:
+                        os.unlink(name, dir_fd=descriptor)
+                    except FileNotFoundError:
+                        continue
+            finally:
+                os.close(descriptor)
+        try:
+            final = os.lstat(absolute)
+        except FileNotFoundError:
+            return
+        if (final.st_dev, final.st_ino) != expected:
+            raise ManifestRejected("artifact_capture_dir_replaced")
+        os.rmdir(absolute)
+    except FileNotFoundError:
+        return
+    except (ManifestRejected, ManifestRuntimeError):
+        raise
+    except OSError as exc:
+        raise ManifestRuntimeError("artifact_capture_dir_remove_failed") from exc
 
 
 def _parse_parent_directory_identity(value: Any) -> tuple[int, int]:
@@ -1756,7 +2014,21 @@ def _validate_publication_parent(
 
 
 def _reject_windows_reparse_ancestors(path: str) -> None:
-    """Reject every existing native-Windows ancestor carrying a reparse tag."""
+    """Reject any native-Windows path component that carries a reparse tag.
+
+    Two details the previous one-line summary got wrong, both load-bearing:
+
+    * The walk is NOT limited to *existing* components.  A component that
+      cannot be lstat'd raises ``artifact_parent_inspect_failed`` rather than
+      being skipped, because an unreadable ancestor is unproven, not absent.
+      (``_reject_symlinked_ancestors`` deliberately makes the opposite choice
+      -- it breaks at the first non-existent component -- so the two walks must
+      not be assumed interchangeable.)
+    * The walk is NOT limited to *ancestors*: the final loop iteration inspects
+      ``path`` itself.  Callers pass the publication parent directory, so the
+      leaf inspected here is the directory whose reparse status is being
+      asserted, not merely everything above it.
+    """
 
     if not _uses_native_windows_filesystem():
         return
