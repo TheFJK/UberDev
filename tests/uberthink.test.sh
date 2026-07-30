@@ -19,6 +19,10 @@ SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 F2I="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
 AGENTS_DIR="$REPO_ROOT/plugins/uberdev/agents"
 REPORT_TEST="$REPO_ROOT/tests/uberthink-report.test.sh"
+# RFC 0012 §3.7 moved the orchestration out of SKILL.md into workflow.js. Asserts
+# that used to anchor on directive-emitter bash now anchor HERE; the behavioral
+# coverage lives in tests/uberthink-workflow.test.sh.
+WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/workflow.js"
 
 PASS=0; FAIL=0
 ck() { if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
@@ -85,14 +89,19 @@ for a in "${AGENTS[@]}"; do
   ck "agent model matches all-inherit policy: uberthink-$a == $want" "grep -qE '^model: $want\$' '$f'"
 done
 
-echo "== U5: SKILL.md single-message invariant =="
-# Match the wording the orchestrator pipeline actually uses ("SINGLE assistant message")
-# — this is the load-bearing token that gets repeated at every wave dispatch and
-# the one a refactor would most likely accidentally weaken.
+echo "== U5: Workflow seam + the fallback's single-message invariant =="
+# The single-message fanout invariant survives the migration inside the
+# '## No-Workflow fallback' recipe — it is the load-bearing token a refactor
+# would most likely weaken, and it still governs every hand-driven wave.
 ck "SKILL.md contains 'SINGLE assistant message' invariant" "grep -q 'SINGLE assistant message' '$SKILL'"
-# Sanity: the directive-emitter framing line should be present too — the bash
-# blocks return in ms and the orchestrating session fires the Task() fanout.
-ck "SKILL.md describes directive-emitter pattern" "grep -qE 'each bash block emits directives' '$SKILL'"
+# Post-migration framing: SKILL.md is a thin preflight + args seam that mandates
+# the on-disk Workflow script (RFC 0012 §3.7). The directive-emitter bash it
+# replaced lived here; the orchestration now lives in workflow.js.
+ck "workflow.js exists on disk (the orchestration moved out of SKILL.md)" "[ -r '$WORKFLOW' ]"
+ck "SKILL.md mandates the uberthink Workflow script" \
+  "grep -qF 'Workflow({scriptPath: \"\$CLAUDE_PLUGIN_ROOT/skills/uberthink-pipeline/workflow.js\"}' '$SKILL'"
+ck "SKILL.md carries the mandatory '## No-Workflow fallback' section" \
+  "grep -qF '## No-Workflow fallback' '$SKILL'"
 
 echo "== U6: SKILL.md has all 6 CB ids =="
 for cb in CB-LOOP CB-WAVE CB-FLOOD CB-CLOCK CB-CONVERGE CB-ISLAND; do
@@ -118,13 +127,20 @@ echo "== U8: no bashisms in SKILL.md (type -t / BASH_REMATCH) =="
 ck "SKILL.md contains no 'type -t' bashism" "! grep -nE 'type -t' '$SKILL'"
 ck "SKILL.md contains no 'BASH_REMATCH' bashism" "! grep -nE 'BASH_REMATCH' '$SKILL'"
 
-echo "== U9: scope-gate REFUSE halt present =="
-# The schema lens's scope-gate writes CIRCUIT_BREAKER_HALT=SCOPE_REFUSE to
-# run-state.txt and exits before any fanout (spec §5 safety lens).
-ck "SKILL.md sets CIRCUIT_BREAKER_HALT=SCOPE_REFUSE on REFUSE" \
-  "grep -q 'CIRCUIT_BREAKER_HALT=SCOPE_REFUSE' '$SKILL'"
-ck "SKILL.md describes scope-gate halting before fanout" \
-  "grep -qE 'scope-gate REFUSE|halted before any fanout' '$SKILL'"
+echo "== U9: scope-gate REFUSE halt present (verdict-first safety lens) =="
+# The schema lens runs ALONE; its REFUSE verdict records a SCOPE_REFUSE halt and
+# stops the run before any fanout (spec §5). The halt id used to be an
+# append-only run-state.txt line; it is now a return-value halt raised by
+# workflow.js, so assert it on BOTH the contract (SKILL.md) and the code.
+ck "SKILL.md documents the SCOPE_REFUSE halt" "grep -q 'SCOPE_REFUSE' '$SKILL'"
+ck "workflow.js raises SCOPE_REFUSE on a REFUSE verdict" \
+  "grep -qF 'addHalt(\"SCOPE_REFUSE\")' '$WORKFLOW'"
+ck "SKILL.md describes the scope gate halting before fanout" \
+  "grep -qE 'Halt before ANY fanout|before any sibling agent is dispatched|stop before any other dispatch' '$SKILL'"
+# Verdict-first is the whole point: the gate must be a solo awaited dispatch, not
+# a member of a parallel burst.
+ck "workflow.js dispatches the scope gate solo (no pre-verdict parallel wave)" \
+  "grep -qE '^[[:space:]]+const scopeRet = await agent\(scopePrompt' '$WORKFLOW'"
 
 echo "== U10: allowed-tools drift guard (commands/uberthink.md <-> lib/aliases-sync.sh) =="
 # This is the same drift guard pattern uberscan.test.sh + ubersimplify.test.sh use:
@@ -169,17 +185,24 @@ ck_msg "findings-to-issues.md Step-1 closed set includes uberthink-aggregate" \
   "uberthink-aggregate not in the Step-1 closed-set allow-list of $F2I"
 
 echo "== U12: standalone findings dispatch uses the closed caller contract =="
-UBERTHINK_F2I_REGION="$(awk 'index($0,"# DISPATCH POINT — findings-to-issues"){active=1} active{print} active && index($0,"elif [ \"$NO_ISSUES\""){exit}' "$SKILL")"
+# The dispatch moved from a SKILL.md "DISPATCH POINT" comment block into
+# workflow.js's f2iPrompt(); re-anchored on that builder. Herestrings instead of
+# `printf | grep` — a pipe into `grep -q` can EPIPE-race under pipefail on Linux CI.
+UBERTHINK_F2I_REGION="$(awk 'index($0,"function f2iPrompt("){active=1} active{print} active && $0=="}"{exit}' "$WORKFLOW")"
+ck "uberthink f2i builder was found in workflow.js" "[ -n \"\$UBERTHINK_F2I_REGION\" ]"
 ck "uberthink dispatch sends aggregate_path" \
-  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'aggregate_path=.*f2i-aggregate.md'"
+  "grep -q 'aggregate_path=' <<<\"\$UBERTHINK_F2I_REGION\" \
+    && grep -q 'f2i-aggregate.md' '$WORKFLOW'"
 ck "uberthink dispatch sends numeric pr_number=0" \
-  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'pr_number=0'"
+  "grep -q 'pr_number=0' <<<\"\$UBERTHINK_F2I_REGION\""
 ck "uberthink dispatch sends fixed label, marker, and max_new" \
-  "printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'finding_label=uberthink-idea' \
-    && printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'finding_marker_slug=uberthink' \
-    && printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -q 'max_new='"
+  "grep -q 'finding_label=uberthink-idea' <<<\"\$UBERTHINK_F2I_REGION\" \
+    && grep -q 'finding_marker_slug=uberthink' <<<\"\$UBERTHINK_F2I_REGION\" \
+    && grep -q 'max_new=' <<<\"\$UBERTHINK_F2I_REGION\""
+ck "uberthink dispatch selects variant=legacy.uberthink" \
+  "grep -q 'variant=legacy.uberthink' <<<\"\$UBERTHINK_F2I_REGION\""
 ck "uberthink dispatch omits agent-derived and legacy path fields" \
-  "! printf '%s' \"\$UBERTHINK_F2I_REGION\" | grep -qE '(run_id|repo_slug|pr_commit_sha|source_ref|phase1_aggregate_path)='"
+  "! grep -qE '(run_id|repo_slug|pr_commit_sha|source_ref|phase1_aggregate_path)=' <<<\"\$UBERTHINK_F2I_REGION\""
 
 echo "== U13: report.py tests pass (source tests/uberthink-report.test.sh) =="
 # T1 owns report.py and its own unit tests in tests/uberthink-report.test.sh.
@@ -196,7 +219,7 @@ if [ -r "$REPORT_TEST" ]; then
     "[ $REPORT_RC -eq 0 ]" \
     "report.py test exited $REPORT_RC; last lines: $(printf '%s\n' \"\$REPORT_OUT\" | tail -5)"
   ck_msg "report.py output contains 'ALL REPORT TESTS PASS' marker" \
-    "printf '%s' \"\$REPORT_OUT\" | grep -q 'ALL REPORT TESTS PASS'" \
+    "grep -q 'ALL REPORT TESTS PASS' <<<\"\$REPORT_OUT\"" \
     "marker missing from report.py test stdout (scoring-contract python heredoc did not reach print)"
 else
   ck_msg "tests/uberthink-report.test.sh present" "false" \

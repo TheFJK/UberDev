@@ -7,14 +7,29 @@ Pure scoring core: no LLM calls, no network. The Arbiter agent writes
 Pattern mirrors `skills/uberscan-pipeline/report.py`: shared `cell()` /
 `envelope()` from `lib/report_primitives.py` (anchored on this file's
 location so the import resolves regardless of cwd), one CLI entry with
-`--emit {dossier,aggregate}` switching the artifact written to stdout.
+`--emit {dossier,aggregate,shortlist,floor-survivors}` switching the artifact
+written to stdout (or to `--out`).
+
+The two deterministic CUTS — the Wave-4 per-island Pareto shortlist and the
+Wave-7 feasibility-floor survivor list — live HERE, as first-class CLI modes
+with real exit codes. They used to be ad-hoc `python3 - <<'PY'` heredocs
+inside the pipeline SKILL.md, each running under `2>/dev/null || true`: an
+ImportError wrote no shortlist, the pipeline then counted zero falsifier
+dispatches and tripped its non-convergence breaker, and a ~90-minute run
+reported "the goal as framed admitted no feasible novel approach" — a tooling
+crash rendered as a substantive verdict. A missing/unreadable input now raises
+`ArtifactError` and exits non-zero so the caller can tell a CRASH from an
+honestly-empty result.
 
 Contract pinned by `tests/uberthink-report.test.sh` (spec §3): the names
 `axis_score / feasibility_floor_fails / ambition_score / pareto_frontier /
-moonshot_frontier / rank` and their signatures are stable.
+moonshot_frontier / rank` and their signatures are stable, as are
+`load_composite_designs / compute_shortlist / collect_wave7_designs /
+compute_floor_survivors` and the `ArtifactError` exit-code mapping.
 """
 from __future__ import annotations
 import argparse
+import glob
 import os
 import sys
 from typing import Iterable, Sequence
@@ -161,6 +176,193 @@ def rank(designs: Iterable[dict]) -> list[dict]:
         d["on_frontier"] = id(d) in front_ids
         d["moonshot"] = id(d) in moon_ids
     return sorted(survivors, key=lambda d: d["ambition"], reverse=True)
+
+
+# ---- Deterministic cuts: Wave-4 shortlist + Wave-7 floor survivors --------
+
+SHORTLIST_TOP_DEFAULT = 7
+PRELIM_AXES = ("novelty", "feasibility", "combination", "impact")
+
+
+class ArtifactError(Exception):
+    """An input artifact is missing, or every candidate input was unreadable.
+
+    Raised INSTEAD of returning an empty result. "No composite cleared the
+    frontier" and "the composites directory does not exist" are different
+    outcomes with different remedies, and only the first one may ever reach the
+    dossier as a substantive verdict. The CLI maps this to exit code 3.
+    """
+
+
+def _load_yaml_mapping(path: str) -> dict:
+    with open(path) as fh:
+        doc = yaml.safe_load(fh)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise yaml.YAMLError("top level is not a mapping")
+    return doc
+
+
+def _prelim_axes(subs) -> dict:
+    """Coerce a `prelim_subscores` mapping into the 4 float axes.
+
+    A non-mapping or a non-numeric score raises (ValueError/TypeError) so the
+    caller records the record as malformed rather than silently scoring it 0 —
+    a silent 0 on `feasibility` is indistinguishable from a real crackpot cut.
+    """
+    if subs is None:
+        subs = {}
+    if not isinstance(subs, dict):
+        raise TypeError("prelim_subscores is not a mapping")
+    return {axis: float(subs.get(axis, 0) or 0) for axis in PRELIM_AXES}
+
+
+def load_composite_designs(comp_dir: str) -> tuple[list[dict], list[str]]:
+    """Load `comp-*.yaml` composites from `comp_dir` into scoreable designs.
+
+    Returns `(designs, malformed)`. Raises `ArtifactError` when `comp_dir` does
+    not exist, or when files exist but NONE of them yielded a design (a
+    wholly-unreadable input set is a crash, not an empty frontier).
+    """
+    if not os.path.isdir(comp_dir):
+        raise ArtifactError(f"composites directory missing: {comp_dir}")
+    paths = sorted(glob.glob(os.path.join(comp_dir, "comp-*.yaml")))
+    designs: list[dict] = []
+    malformed: list[str] = []
+    for path in paths:
+        try:
+            doc = _load_yaml_mapping(path)
+        except (OSError, yaml.YAMLError) as e:
+            malformed.append(f"{path}: {e}")
+            continue
+        for c in doc.get("composites") or []:
+            if not isinstance(c, dict):
+                malformed.append(f"{path}: a composites[] entry is not a mapping")
+                continue
+            try:
+                axes = _prelim_axes(c.get("prelim_subscores"))
+            except (TypeError, ValueError) as e:
+                malformed.append(f"{path}: bad prelim_subscores ({e})")
+                continue
+            design = {
+                "id": str(c.get("id") or os.path.basename(path)),
+                "title": str(c.get("title") or ""),
+                "composite_path": path,
+            }
+            design.update(axes)
+            designs.append(design)
+    if paths and not designs:
+        raise ArtifactError(
+            f"{len(paths)} composite file(s) under {comp_dir} but none yielded a scoreable "
+            f"design: {'; '.join(malformed) or 'no composites[] entries'}"
+        )
+    return designs, malformed
+
+
+def compute_shortlist(designs: Iterable[dict], top: int = SHORTLIST_TOP_DEFAULT) -> list[dict]:
+    """Wave-4 cut: 4-axis Pareto frontier, then top-N by AmbitionScore."""
+    front = pareto_frontier(list(designs))
+    for d in front:
+        d["ambition"] = ambition_score(d["novelty"], d["feasibility"], d["combination"], d["impact"])
+    return sorted(front, key=lambda d: d["ambition"], reverse=True)[: max(0, int(top))]
+
+
+def falsify_feasibility_subs(composite_path: str) -> dict:
+    """Merge `feasibility_sub_scores` from every falsify dossier for a composite.
+
+    Layout (spec §2.4): a composite at `<island>/composites/comp-NNN-<lens>.yaml`
+    is attacked by `<island>/falsify/comp-NNN-<lens>-<falsify-lens>.yaml`. First
+    non-null value per sub-criterion wins (the `physics` lens owns
+    `hard_constraint`, `redteam` owns `survives_adversary`).
+    """
+    if not composite_path:
+        return {}
+    base = os.path.basename(composite_path)
+    fal_dir = os.path.join(os.path.dirname(os.path.dirname(composite_path)), "falsify")
+    merged: dict = {}
+    for fal_path in sorted(glob.glob(os.path.join(fal_dir, base.replace(".yaml", "-*.yaml")))):
+        try:
+            fdoc = _load_yaml_mapping(fal_path)
+        except (OSError, yaml.YAMLError):
+            continue
+        subs = fdoc.get("feasibility_sub_scores") or {}
+        if not isinstance(subs, dict):
+            continue
+        for k, v in subs.items():
+            if v is not None and merged.get(k) is None:
+                merged[k] = v
+    return merged
+
+
+def collect_wave7_designs(run_dir: str) -> tuple[list[dict], list[str]]:
+    """Every composite still in play at Wave 7: global cross-pollinated ones plus
+    island finalists that never entered cross-pollination.
+
+    Raises `ArtifactError` when neither source exists at all (nothing reached
+    Wave 7 because an upstream wave never wrote its artifacts).
+    """
+    designs: list[dict] = []
+    malformed: list[str] = []
+    seen_paths: set[str] = set()
+
+    global_paths = sorted(glob.glob(os.path.join(run_dir, "composites", "*.yaml")))
+    shortlist_paths = sorted(glob.glob(os.path.join(run_dir, "island-*", "shortlist.yaml")))
+    if not global_paths and not shortlist_paths:
+        raise ArtifactError(
+            f"no Wave-6 composites and no island shortlists under {run_dir} — "
+            "no upstream wave produced a rankable artifact"
+        )
+
+    for path in global_paths:
+        try:
+            doc = _load_yaml_mapping(path)
+        except (OSError, yaml.YAMLError) as e:
+            malformed.append(f"{path}: {e}")
+            continue
+        for c in doc.get("composites") or []:
+            if not isinstance(c, dict):
+                malformed.append(f"{path}: a composites[] entry is not a mapping")
+                continue
+            try:
+                axes = _prelim_axes(c.get("prelim_subscores"))
+            except (TypeError, ValueError) as e:
+                malformed.append(f"{path}: bad prelim_subscores ({e})")
+                continue
+            designs.append(dict(axes, id=str(c.get("id") or ""), composite_path=path))
+        seen_paths.add(path)
+
+    for path in shortlist_paths:
+        try:
+            doc = _load_yaml_mapping(path)
+        except (OSError, yaml.YAMLError) as e:
+            malformed.append(f"{path}: {e}")
+            continue
+        for d in doc.get("shortlist") or []:
+            if not isinstance(d, dict):
+                malformed.append(f"{path}: a shortlist[] entry is not a mapping")
+                continue
+            cp = str(d.get("composite_path") or "")
+            if cp and (cp in seen_paths or any(x["composite_path"] == cp for x in designs)):
+                continue
+            try:
+                axes = _prelim_axes({axis: d.get(axis, 0) for axis in PRELIM_AXES})
+            except (TypeError, ValueError) as e:
+                malformed.append(f"{path}: bad shortlist axes ({e})")
+                continue
+            designs.append(dict(axes, id=str(d.get("id") or ""), composite_path=cp))
+    return designs, malformed
+
+
+def compute_floor_survivors(designs: Iterable[dict]) -> list[str]:
+    """Wave-7 pre-cut: ids whose Feasibility clears the spec §3 crackpot floor."""
+    survivors: list[str] = []
+    for d in designs:
+        feas = float(d.get("feasibility", 0) or 0)
+        if feasibility_floor_fails(feas, falsify_feasibility_subs(d.get("composite_path", ""))):
+            continue
+        survivors.append(d.get("id", ""))
+    return survivors
 
 
 # ---- Dossier render (spec §6) --------------------------------------------
@@ -460,19 +662,117 @@ def _load_ranked_yaml(run_dir: str) -> dict:
     return doc
 
 
+def _write_yaml_doc(doc: dict, out_path: str) -> None:
+    """Write a YAML artifact to `out_path` (parent dirs are the caller's job).
+
+    OSError propagates: a shortlist that could not be persisted must fail the
+    process, never leave the caller believing an empty frontier was written.
+    """
+    with open(out_path, "w") as fh:
+        yaml.safe_dump(doc, fh, sort_keys=False)
+
+
+def _emit_shortlist(args) -> int:
+    """Wave-4 per-island deterministic Pareto cut -> island-K/shortlist.yaml."""
+    if args.island is None or args.island < 1:
+        print("error: --emit shortlist requires --island <K> (1-based)", file=sys.stderr)
+        return 2
+    island_dir = os.path.join(args.run_dir, f"island-{args.island}")
+    comp_dir = args.composites_dir or os.path.join(island_dir, "composites")
+    out_path = args.out or os.path.join(island_dir, "shortlist.yaml")
+
+    designs, malformed = load_composite_designs(comp_dir)
+    for m in malformed:
+        print(f"warning: skipped malformed composite record — {m}", file=sys.stderr)
+    shortlist = compute_shortlist(designs, args.top)
+    _write_yaml_doc(
+        {
+            "island_index": args.island,
+            "designs_considered": len(designs),
+            "skipped_malformed": len(malformed),
+            "shortlist": [
+                {
+                    "id": d["id"],
+                    "title": d.get("title", ""),
+                    "novelty": d["novelty"],
+                    "feasibility": d["feasibility"],
+                    "combination": d["combination"],
+                    "impact": d["impact"],
+                    "ambition": d.get("ambition", 0),
+                    "composite_path": d["composite_path"],
+                }
+                for d in shortlist
+            ],
+        },
+        out_path,
+    )
+    print(
+        f"shortlist: island={args.island} considered={len(designs)} "
+        f"selected={len(shortlist)} malformed={len(malformed)} out={out_path}"
+    )
+    return 0
+
+
+def _emit_floor_survivors(args) -> int:
+    """Wave-7 deterministic feasibility-floor pre-cut -> floor-survivors.yaml."""
+    out_path = args.out or os.path.join(args.run_dir, "floor-survivors.yaml")
+    designs, malformed = collect_wave7_designs(args.run_dir)
+    for m in malformed:
+        print(f"warning: skipped malformed Wave-7 record — {m}", file=sys.stderr)
+    survivors = compute_floor_survivors(designs)
+    _write_yaml_doc(
+        {
+            "designs_considered": len(designs),
+            "skipped_malformed": len(malformed),
+            "floor_survivors": survivors,
+        },
+        out_path,
+    )
+    print(
+        f"floor-survivors: {len(survivors)}/{len(designs)} cleared the floor "
+        f"malformed={len(malformed)} out={out_path}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True,
-                    help="Run directory holding ranked.yaml (spec §2.4).")
-    ap.add_argument("--emit", choices=["dossier", "aggregate"], required=True,
-                    help="dossier = report.md per spec §6; aggregate = findings-to-issues envelope.")
+                    help="Run directory holding ranked.yaml / island-*/ (spec §2.4).")
+    ap.add_argument("--emit", choices=["dossier", "aggregate", "shortlist", "floor-survivors"],
+                    required=True,
+                    help="dossier = report.md per spec §6; aggregate = findings-to-issues "
+                         "envelope; shortlist = Wave-4 per-island Pareto cut; "
+                         "floor-survivors = Wave-7 feasibility-floor pre-cut.")
     ap.add_argument("--max-new", type=int, default=3,
                     help="Max rows in the aggregate (top N by AmbitionScore). Default 3.")
+    ap.add_argument("--island", type=int, default=None,
+                    help="1-based island index (required by --emit shortlist).")
+    ap.add_argument("--composites-dir", default="",
+                    help="Override the composites dir scanned by --emit shortlist.")
+    ap.add_argument("--top", type=int, default=SHORTLIST_TOP_DEFAULT,
+                    help=f"Max designs kept by --emit shortlist. Default {SHORTLIST_TOP_DEFAULT}.")
+    ap.add_argument("--out", default="",
+                    help="Write the artifact to this path instead of the mode default "
+                         "(shortlist/floor-survivors only; dossier/aggregate always use stdout).")
     args = ap.parse_args(argv)
 
     if not os.path.isdir(args.run_dir):
         print(f"error: --run-dir is not a directory: {args.run_dir}", file=sys.stderr)
         return 2
+
+    # The deterministic cuts run BEFORE ranked.yaml exists — they must not be
+    # gated on it. Exit 3 marks "input artifact missing/unreadable", which the
+    # caller reports as a TOOLING halt, never as a non-convergence verdict.
+    if args.emit in ("shortlist", "floor-survivors"):
+        try:
+            return _emit_shortlist(args) if args.emit == "shortlist" else _emit_floor_survivors(args)
+        except ArtifactError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 3
+        except OSError as e:
+            print(f"error: cannot write the {args.emit} artifact: {e}", file=sys.stderr)
+            return 3
 
     doc = _load_ranked_yaml(args.run_dir)
     raw_ranked = doc.get("ranked") or []

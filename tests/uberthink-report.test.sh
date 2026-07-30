@@ -144,5 +144,126 @@ check "CLI: aggregate has closing envelope tag" \
 check "CLI: aggregate respects --max-new cap" \
   "[ \$(awk '/^\\|/ && !/^\\| *-+/{n++} END{print n}' \"$TMP/agg.md\") -le 4 ]"
 
+# === Deterministic cuts: --emit shortlist / --emit floor-survivors ==========
+# These two used to be inline `python3 - <<'PY'` heredocs inside the pipeline
+# SKILL.md, each running with stderr discarded and the exit status swallowed. A
+# module-load failure therefore wrote no shortlist, the falsifier count fell to
+# 0, CB-CONVERGE fired, and a ~90-minute run reported "the goal as framed
+# admitted no feasible novel approach" — a tooling crash rendered as the verdict.
+#
+# The contract asserted here is the CRASH vs EMPTY discriminator:
+#   exit 0 + empty result  = the frontier was honestly empty
+#   exit 3                 = an input artifact was missing/unreadable
+# They must never collapse into each other.
+CUT="$TMP/cut"
+mkdir -p "$CUT/island-1/composites" "$CUT/island-1/falsify" "$CUT/island-2" "$CUT/composites"
+
+# Island 1: B dominates A on all four axes; C is incomparable to B.
+cat > "$CUT/island-1/composites/comp-001-weave.yaml" <<'YAML'
+composites:
+  - id: A
+    title: dominated design
+    prelim_subscores: {novelty: 5, feasibility: 5, combination: 5, impact: 5}
+  - id: B
+    title: dominating design
+    prelim_subscores: {novelty: 6, feasibility: 6, combination: 6, impact: 6}
+YAML
+cat > "$CUT/island-1/composites/comp-002-crossover.yaml" <<'YAML'
+composites:
+  - id: C
+    title: audacious but fragile
+    prelim_subscores: {novelty: 9, feasibility: 2, combination: 4, impact: 9}
+YAML
+
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist --island 1 \
+  > "$TMP/shortlist.out" 2>"$TMP/shortlist.err"
+SHORTLIST_RC=$?
+check "shortlist: exits 0 on a healthy island" "[ $SHORTLIST_RC -eq 0 ]"
+check "shortlist: writes island-1/shortlist.yaml" "[ -s \"$CUT/island-1/shortlist.yaml\" ]"
+check "shortlist: keeps the Pareto frontier (B and C)" \
+  "grep -q 'id: B' \"$CUT/island-1/shortlist.yaml\" && grep -q 'id: C' \"$CUT/island-1/shortlist.yaml\""
+check "shortlist: drops the dominated design (A)" \
+  "! grep -qE '^ *-? *id: A$' \"$CUT/island-1/shortlist.yaml\""
+check "shortlist: rows carry composite_path back to the source artifact" \
+  "grep -q 'composite_path:' \"$CUT/island-1/shortlist.yaml\""
+check "shortlist: --top caps the selection" \
+  "python3 \"$PIPELINE_DIR/report.py\" --run-dir \"$CUT\" --emit shortlist --island 1 --top 1 \
+     --out \"$TMP/top1.yaml\" >/dev/null 2>&1 && [ \$(grep -cE '^ *-? *id: ' \"$TMP/top1.yaml\") -eq 1 ]"
+
+# CRASH: island 2 has no composites/ directory at all.
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist --island 2 \
+  > "$TMP/missing.out" 2>"$TMP/missing.err"
+MISSING_RC=$?
+check "shortlist: a MISSING composites dir exits 3 (crash, not an empty frontier)" "[ $MISSING_RC -eq 3 ]"
+check "shortlist: the missing-input failure names the directory on stderr" \
+  "grep -q 'composites directory missing' \"$TMP/missing.err\""
+check "shortlist: a crashed cut writes NO shortlist artifact" "[ ! -e \"$CUT/island-2/shortlist.yaml\" ]"
+
+# EMPTY-BUT-HONEST: the directory exists and holds no composites.
+mkdir -p "$CUT/island-2/composites"
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist --island 2 \
+  > "$TMP/empty.out" 2>"$TMP/empty.err"
+EMPTY_RC=$?
+check "shortlist: an EMPTY (but present) composites dir exits 0" "[ $EMPTY_RC -eq 0 ]"
+check "shortlist: the honest-empty case still writes a shortlist artifact" \
+  "[ -s \"$CUT/island-2/shortlist.yaml\" ]"
+
+# A composites dir holding only unparseable files is a crash, not an empty frontier.
+mkdir -p "$CUT/island-3/composites"
+printf 'composites: [\n  - id: unterminated\n' > "$CUT/island-3/composites/comp-001-weave.yaml"
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist --island 3 \
+  > "$TMP/bad.out" 2>"$TMP/bad.err"
+BAD_RC=$?
+check "shortlist: composites that ALL fail to parse exit 3 (not a silent empty cut)" "[ $BAD_RC -eq 3 ]"
+
+# --emit floor-survivors: the physics falsifier's hard_constraint=0 must cut a
+# design whose feasibility axis alone would have cleared the floor.
+cat > "$CUT/composites/global-001-crossover.yaml" <<'YAML'
+composites:
+  - id: SURVIVOR
+    prelim_subscores: {novelty: 7, feasibility: 7, combination: 7, impact: 7}
+  - id: LOWFEAS
+    prelim_subscores: {novelty: 9, feasibility: 2, combination: 8, impact: 9}
+YAML
+cat > "$CUT/island-1/composites/comp-003-mutate.yaml" <<'YAML'
+composites:
+  - id: ZEROSUB
+    prelim_subscores: {novelty: 8, feasibility: 8, combination: 8, impact: 8}
+YAML
+cat > "$CUT/island-1/falsify/comp-003-mutate-physics.yaml" <<'YAML'
+composite_id: ZEROSUB
+feasibility_sub_scores:
+  hard_constraint: 0
+  survives_adversary: 7
+  buildability: 7
+  premortem_resilience: 7
+  deployment_reality: 7
+YAML
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit floor-survivors \
+  > "$TMP/floor.out" 2>"$TMP/floor.err"
+FLOOR_RC=$?
+check "floor-survivors: exits 0" "[ $FLOOR_RC -eq 0 ]"
+check "floor-survivors: writes floor-survivors.yaml" "[ -s \"$CUT/floor-survivors.yaml\" ]"
+check "floor-survivors: keeps a design that clears the floor" \
+  "grep -q 'SURVIVOR' \"$CUT/floor-survivors.yaml\""
+check "floor-survivors: cuts a design whose feasibility axis is below 4" \
+  "! grep -q 'LOWFEAS' \"$CUT/floor-survivors.yaml\""
+check "floor-survivors: cuts a design whose physics hard_constraint sub-score is 0" \
+  "! grep -q 'ZEROSUB' \"$CUT/floor-survivors.yaml\""
+
+# CRASH: a run dir with neither global composites nor island shortlists.
+mkdir -p "$TMP/barren"
+python3 "$PIPELINE_DIR/report.py" --run-dir "$TMP/barren" --emit floor-survivors \
+  > "$TMP/barren.out" 2>"$TMP/barren.err"
+BARREN_RC=$?
+check "floor-survivors: a run with no rankable artifact at all exits 3" "[ $BARREN_RC -eq 3 ]"
+check "floor-survivors: a crashed cut writes NO floor-survivors artifact" \
+  "[ ! -e \"$TMP/barren/floor-survivors.yaml\" ]"
+
+# --emit shortlist without --island is a usage error, not a silent no-op.
+python3 "$PIPELINE_DIR/report.py" --run-dir "$CUT" --emit shortlist >/dev/null 2>&1
+NOISLAND_RC=$?
+check "shortlist: omitting --island is a usage error (exit 2)" "[ $NOISLAND_RC -eq 2 ]"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

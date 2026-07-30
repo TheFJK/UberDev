@@ -37,6 +37,8 @@ Ship `/uberthink` as a new top-level command in the `uber*` family — read-only
 
 The orchestration shape is the proven `/uberscan` / `/testers` template: pipeline `SKILL.md` bash is a **directive-emitter** that returns in milliseconds, writing dispatch directives and `DISPATCH:` sentinels. The orchestrating session fires each wave's `Task()` calls — across all islands — in a single assistant message. State lives in files (`run-state.txt`, per-island `shortlist.yaml`, per-wave dirs); the orchestrator reads only universal handles (status + `artifact_path` + `artifact_sha` + ≤200-word `summary` + `risks` + `next_phase_recommendation`), never raw artifact bodies.
 
+> **SUPERSEDED (RFC 0012 §3.7, Phase 3).** The directive-emitter substrate described in this paragraph has been replaced by an on-disk Workflow script — see §11 below. Everything else in this RFC (the island topology, the genetic loop, the 4-axis scoring, the moonshot lane, the donor catalog, the safety posture) is unchanged and still authoritative.
+
 ## 3. Topology (island model)
 
 Anthropic's multi-agent research system established that an orchestrator-worker topology with parallel Sonnet workers under an Opus lead beats single-agent on breadth by ~90% at ~15× tokens. DeepMind's AI Co-Scientist established that for *invention* (not search), a Generate → Reflect → Rank[Elo] → Evolve cycle outperforms a single deep pass. `/uberthink` composes both, then wraps the composition in the **GA island model** for population diversity.
@@ -278,16 +280,102 @@ Spec §11 enumerates implementation risks; the highlights:
 - **Auto-`--handoff` heuristic.** Detect "design …" or "invent …" prompts and suggest `--handoff` when the user has not specified. Not in v1 to keep the read-only invariant unambiguous (every `--handoff` is currently user-initiated).
 - **Empty-`detail` auto-reject.** Mirror the `/uberscan` deferred enhancement: high-severity falsifier kill-causes with empty rationale could be auto-rejected as low-confidence. v1 surfaces them rather than silently dropping (same reasoning as `/uberscan`).
 
+## 11. Amendment — Workflow migration (RFC 0012 §3.7, Phase 3)
+
+The directive-emitter substrate in §2 has been replaced by an on-disk Workflow
+script, `skills/uberthink-pipeline/workflow.js`. The pipeline `SKILL.md` is now a
+thin preflight + args seam plus a retained `## No-Workflow fallback` recipe for
+runtimes without the `Workflow` tool. **No wave semantics changed**: the island
+topology (§3), the genetic loop (§4), the 4-axis scoring and moonshot lane (§5),
+the donor catalog (§6) and the safety posture (§7) are carried over verbatim.
+
+### Why it moved — three defects, one root cause
+
+`run-state.txt` was *designed* as a key/value store (§3's "state lives in files")
+and *implemented* as an append-only log. The write path and the read path
+disagreed about which occurrence was authoritative, and everything downstream of
+that disagreement was unsound:
+
+1. **The fleet ceiling was inert.** All eight counter bumps used a first-match
+   regex against the dispatched-agents key — forever the seeded `0` — while every
+   reader took the last appended line. Simulated waves of 3+32+2+6 left the file
+   as `0,3,32,2,6`: the reader saw `6`, the true total was `43`, and `MAX_AGENTS`
+   (`200 × K`) was unreachable. **CB-ISLAND could not halt a runaway genetic
+   loop.** The only test coverage was a grep that the literal string `CB-ISLAND`
+   appeared in the SKILL — nothing exercised accumulation.
+2. **Masked crashes were delivered as substance.** The Wave-4 Pareto cut and the
+   Wave-7 floor-survivor cut ran as inline heredocs with stderr discarded and the
+   exit status swallowed. A module-load failure wrote no shortlist, the falsifier
+   count fell to 0, CB-CONVERGE fired, and after a ~90-minute run the deliver
+   phase printed *"the goal as framed admitted no feasible novel approach"* —
+   tooling breakage rendered as a substantive verdict.
+3. **The Wave-5 file-set brief was missing.** Dispatch rows carried
+   `island_index`/`lens`/`composite_id`/`composite_path`/`summary_dir`;
+   `grep -n frame_dir` over the pipeline returned **zero** hits, while
+   `agents/uberthink-falsifier.md` declares `frame_dir` mandatory and the
+   `physics` lens must read `constraints.md` as its feasibility fence.
+
+### What replaced them
+
+- **One counter, one place.** `dispatched` is a JS variable spanning the run;
+  every fanout passes through `guard(n, label)` which throws `CB-ISLAND` or
+  `CB-BUDGET` *before* dispatching a wave it cannot afford. A `dispatchLedger`
+  makes accumulation observable, and `tests/uberthink-workflow.test.sh` pins the
+  worked example: waves of 3+32+2+6 must reach 43, and a ceiling of 44 must trip
+  on the fourth wave.
+- **Crash ≠ empty.** Both deterministic cuts are now first-class `report.py` CLI
+  modes (`--emit shortlist`, `--emit floor-survivors`) that raise `ArtifactError`
+  → exit 3 on a missing/unreadable input and exit 0 with an empty result when the
+  frontier is honestly empty. A non-zero rc becomes a `TOOLING:` halt;
+  `convergenceIsHonest()` gates the single site that can raise CB-CONVERGE, and
+  the rank phase is skipped outright so no dossier can be assembled from
+  artifacts that were never written.
+- **The file set is script-derived.** `falsifyPrompt()` composes `frame_dir`, all
+  four frame artifacts, `composite_path`, `summary_dir`, `working_dir`,
+  `island_index` and the enveloped goal from constants — the omission is
+  structurally impossible, and the fixture asserts it on *every* Wave-5 prompt.
+- **Donors are returned, not scraped.** The `schema` lens returns its selected
+  donor slugs via `StructuredOutput` instead of the pipeline regex-scraping them
+  out of `frame.md` prose; each slug is validated to a closed character class
+  before it reaches a prompt.
+- **The lens diet is over.** `personas.yaml` prompts are multi-line block
+  scalars. The old TSV sidecar flattened every prompt through
+  `.replace(chr(10), " ")`, capping each lens at one line; the Workflow relay
+  carries them as JSON strings with newlines intact.
+- **`--resume RUN_ID`** rehydrates an existing run tree from a disk artifact scan
+  and skips the waves that already produced artifacts.
+
+### Deliberately preserved
+
+- **The scope gate stays VERDICT-FIRST.** The `schema` lens is dispatched alone
+  and its `PROCEED|REFUSE` verdict is read before any sibling agent exists. There
+  is no pre-verdict parallel Wave 0 — that refusal path is shipped safety (§7),
+  not an optimisation target. The stale artifact was the claim in
+  `agents/uberthink-frame.md` that the pipeline "fans out all four in parallel";
+  post-verdict, the three remaining lenses now fire in the same burst as Wave 1.
+- **No `lib/uberthink-state.sh`.** RFC 0012 explicitly rejects re-implementing
+  the run ledger in shell; the fix was to stop having a second representation of
+  the counter at all.
+
+### Retired breakers
+
+`CB-WAVE` (>1800 s/wave) and `CB-CLOCK` (>5400 s total) are removed. They were
+already dead in the directive-emitter era — the bash fence that "timed" a wave
+returned in milliseconds, before that wave's `Task()` fanout had started — and
+the Workflow runtime forbids wall-clock globals outright (RFC 0012 DR-7). The
+runtime `budget` lifetime cap plus the now-live CB-ISLAND / CB-FLOOD / CB-LOOP
+cover the real failure modes.
+
 ## Appendix: Shipping checklist
 
 Per project `CLAUDE.md`, all of the following must land in the same PR or in the immediately-preceding `chore(release): v0.34.0` commit:
 
 1. `plugins/uberdev/commands/uberthink.md` — thin entrypoint (flags + cost warning + `Skill(uberdev:uberthink-pipeline)` handoff).
-2. `plugins/uberdev/skills/uberthink-pipeline/SKILL.md` — 7-wave island-aware directive-emitter, `model: opus`.
+2. `plugins/uberdev/skills/uberthink-pipeline/SKILL.md` — 7-wave island-aware directive-emitter, `model: opus`. *(Superseded by §11: now a thin preflight + args seam over `skills/uberthink-pipeline/workflow.js`, `model: inherit`, with a retained `## No-Workflow fallback`.)*
 3. `plugins/uberdev/skills/uberthink-pipeline/personas.yaml` — 5-tier catalog + persona library (SSOT).
 4. `plugins/uberdev/skills/uberthink-pipeline/report.py` — deterministic 4-axis scoring + dual Pareto + dossier render + f2i aggregate.
 5. Six new agents: `uberthink-frame.md`, `uberthink-generator.md`, `uberthink-moderator.md`, `uberthink-synthesizer.md`, `uberthink-falsifier.md`, `uberthink-arbiter.md` (model assignments per spec §2.5).
 6. `plugins/uberdev/agents/findings-to-issues.md` — add `uberthink-aggregate` to the accepted-source set.
-7. Tests: `tests/uberthink.test.sh` + `tests/uberthink-report.test.sh` (both CI-listed in `.github/workflows/test.yml`).
+7. Tests: `tests/uberthink.test.sh` + `tests/uberthink-report.test.sh` (both CI-listed in `.github/workflows/test.yml`). *(§11 adds `tests/uberthink-workflow.test.sh` — shape greps plus the T3 behavioral fixtures that lock the three defects; CI-listed on both the ubuntu and windows jobs since it needs only grep + node.)*
 8. Alias surfaces (5): `lib/aliases-sync.sh`, `commands/install-aliases.md`, `commands/uninstall-aliases.md`, `README.md`, `tests/aliases.test.sh`.
 9. Version bump to `0.34.0` in all 7 locations (plugin.json, marketplace.json, README badge, CHANGELOG, git tag, GH release, and the two test-locks in `tests/goal.test.sh` G20 + `tests/solve-claim.test.sh`).

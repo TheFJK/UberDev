@@ -189,3 +189,11 @@ Status values:
 - **No misuse_flags outside redteam.** The four other sub-criteria own their sub-scores; misuse_flags is the redteam-only safety surface. Other lenses MUST emit `misuse_flags: []`.
 - **Absolute paths only.** Any artifact written to a relative path is lost (cross-worktree leak). Always prefix with the injected `summary_dir`.
 - **One composite, one lens.** If you find yourself attacking two composites or running two lenses in one dispatch, stop — re-read the dispatch prompt. The orchestrator fanned out one dispatch per (composite × lens) pair.
+
+## Structured return (Workflow runtime)
+
+Under `skills/uberthink-pipeline/workflow.js` the orchestration reads a `StructuredOutput` return: `islandIndex`, `compositeId`, `lens`, `outPath`, `fatalKills` (count of `fatal: true` causes), `fixableKills` (count of `fatal: false` causes) and `repairHints` — at most 4 one-line hints drawn from the fixable causes' `repair_hint` fields.
+
+`repairHints` is the genetic loop's fuel: the pipeline feeds them back into the next Wave-3 crossover round as required design constraints (capped at 3 loop-backs per island by CB-LOOP). A fixable kill with no usable hint wastes a loop-back, so give every `fatal: false` cause a concrete, actionable `repair_hint`.
+
+**`frame_dir` is always supplied.** Earlier revisions of the pipeline dispatched Wave 5 with only `island_index`/`lens`/`composite_id`/`composite_path`/`summary_dir`, which left the `physics` lens with no feasibility fence of record. The Workflow builder now composes `frame_dir` plus all four frame artifact paths, `working_dir` and the goal envelope from script-derived constants, so the omission cannot recur. If a dispatch ever reaches you WITHOUT `frame_dir`, say so in `summary` and return `status: partial` rather than guessing the constraints.
