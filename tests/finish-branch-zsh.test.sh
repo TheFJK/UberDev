@@ -237,6 +237,52 @@ else
   fail "F5b: expected the composer to feed \$REVIEW_FILES into a 'while read' loop via '<<< \"\$REVIEW_FILES\"'"
 fi
 
+# --------------------------------------------------------------------------
+# F6 — the pre-push secret-scan LIBRARY must behave identically under the real
+# fence shell. zsh ties the parameter `path` to `PATH`, so a `local path` inside
+# any library function empties the command search path for that entire function
+# body and every external it calls silently stops resolving — turning a clean
+# scan into a fail-CLOSED scanner error. bash has no such tie, so the bash
+# suites cannot see it; and the affected code is on the gitleaks branch, which
+# never executes on a runner without gitleaks. This probe therefore puts a
+# gitleaks STUB on PATH so the primary layer runs on every platform.
+#
+# Mutation guard: rename any library local back to `path` (e.g. in
+# _uberdev_secret_scan_default_config) => F6 RED on all three assertions.
+# --------------------------------------------------------------------------
+echo
+echo "== F6: lib/secret-scan.sh behaves identically under zsh =="
+F6_BIN="$WORK/f6bin"
+mkdir -p "$F6_BIN"
+cat > "$F6_BIN/gitleaks" <<'STUB'
+#!/bin/sh
+# Reports CLEAN, so the verdict is decided by the regex fallback: the point of
+# this probe is that the surrounding library machinery still RUNS under zsh.
+cat >/dev/null
+exit 0
+STUB
+chmod +x "$F6_BIN/gitleaks"
+F6_OUT="$(PATH="$F6_BIN:$PATH" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" "$ZSH_BIN" -c '
+  set -u
+  source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || { echo "source=failed"; exit 0; }
+  # Assembled at runtime so these source bytes never carry the token
+  # contiguously (finish-branch scans its own diff).
+  key="AKIA""IOSFODNN7EXAMPLE"
+  printf "%s\n" "a clean line of code" | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "clean=$?"
+  printf "%s\n" "$key" | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "leak=$?"
+  printf "%s # %s\n" "$key" "$UBERDEV_SECRET_SCAN_ALLOW_MARKER" \
+    | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "marked=$?"
+' 2>&1)"
+F6_FAILURES=''
+grep -q '^clean=0$'  <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES clean-input-not-clean"
+grep -q '^leak=1$'   <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES leak-not-detected-as-match"
+grep -q '^marked=0$' <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES allow-marker-not-honoured"
+if [ -z "$F6_FAILURES" ]; then
+  pass "F6: secret-scan clean/leak/allowlisted verdicts are identical under zsh"
+else
+  fail "F6: secret-scan misbehaves under zsh:$F6_FAILURES (got: $(tr '\n' ' ' <<<"$F6_OUT"))"
+fi
+
 echo
 echo "== Summary =="
 echo "  launcher: $LAUNCH_SHELL  (composer ran under: $ZSH_BIN)"

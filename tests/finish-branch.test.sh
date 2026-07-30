@@ -180,6 +180,54 @@ else
   echo "  FAIL  F10 PR-title scan contract broken:$F10_FAILURES"; FAIL=$((FAIL+1))
 fi
 
+# F11: the abort message must respect the library's TRI-STATE return code.
+# rc 1 is a detected secret; rc>=2 means the scanner could not run at all
+# (crashed gitleaks, unreadable ruleset, broken fallback grep). Reporting the
+# latter as "secret found" and offering the allowlist marker talks the operator
+# into stripping the line from the regex fallback too — removing the second
+# layer while the first stays broken, which is the exact fail-OPEN the tri-state
+# handling exists to prevent (#189 principle, applied at the caller).
+#
+# The function is EXTRACTED from SKILL.md and executed, so this asserts the
+# shipped behaviour rather than the presence of a string.
+F11_FN="$(sed -n '/^abort_if_secret() {$/,/^}$/p' "$SKILL")"
+F11_FAILURES=''
+if [[ -z "$F11_FN" ]]; then
+  F11_FAILURES="$F11_FAILURES abort_if_secret-not-extractable"
+else
+  F11_DRIVER="$(mktemp)" && F11_T1="$(mktemp)" && F11_T2="$(mktemp)" || {
+    echo "FATAL: mktemp failed" >&2; exit 2
+  }
+  {
+    printf '%s\n' 'UBERDEV_SECRET_SCAN_ALLOW_MARKER="gitleaks:allow"'
+    printf '%s\n' 'TITLE_FILE="$1"; PR_BODY_FILE="$2"'
+    printf '%s\n' "$F11_FN"
+    printf '%s\n' 'abort_if_secret "unit-under-test" "raw scanner diagnostic" "$3"'
+    printf '%s\n' 'exit 0'
+  } > "$F11_DRIVER"
+  F11_MATCH="$(bash "$F11_DRIVER" "$F11_T1" "$F11_T2" 1 2>&1)"; F11_MATCH_RC=$?
+  F11_CRASH="$(bash "$F11_DRIVER" "$F11_T1" "$F11_T2" 2 2>&1)"; F11_CRASH_RC=$?
+  F11_CLEAN="$(bash "$F11_DRIVER" "$F11_T1" "$F11_T2" 0 2>&1)"; F11_CLEAN_RC=$?
+  rm -f "$F11_DRIVER" "$F11_T1" "$F11_T2"
+  # rc 0 -> no abort at all.
+  [[ "$F11_CLEAN_RC" -eq 0 && -z "$F11_CLEAN" ]] || F11_FAILURES="$F11_FAILURES clean-rc-aborts"
+  # rc 1 -> a real match: name the escape hatch, do not cry scanner failure.
+  [[ "$F11_MATCH_RC" -ne 0 ]] || F11_FAILURES="$F11_FAILURES match-does-not-abort"
+  grep -qF 'secret found' <<<"$F11_MATCH" || F11_FAILURES="$F11_FAILURES match-not-named"
+  grep -qF 'gitleaks:allow' <<<"$F11_MATCH" || F11_FAILURES="$F11_FAILURES match-omits-marker"
+  grep -qF 'BROKEN SCANNER' <<<"$F11_MATCH" && F11_FAILURES="$F11_FAILURES match-claims-broken-scanner"
+  # rc>=2 -> broken scanner: opposite advice, and never "secret found".
+  [[ "$F11_CRASH_RC" -ne 0 ]] || F11_FAILURES="$F11_FAILURES crash-does-not-abort"
+  grep -qF 'BROKEN SCANNER' <<<"$F11_CRASH" || F11_FAILURES="$F11_FAILURES crash-not-named"
+  grep -qF 'secret found' <<<"$F11_CRASH" && F11_FAILURES="$F11_FAILURES crash-claims-secret-found"
+  grep -qF 'False positive' <<<"$F11_CRASH" && F11_FAILURES="$F11_FAILURES crash-offers-allowlist"
+fi
+if [[ -z "$F11_FAILURES" ]]; then
+  echo "  PASS  F11 abort_if_secret separates a detected secret from a broken scanner"; PASS=$((PASS+1))
+else
+  echo "  FAIL  F11 abort_if_secret tri-state advice broken:$F11_FAILURES"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

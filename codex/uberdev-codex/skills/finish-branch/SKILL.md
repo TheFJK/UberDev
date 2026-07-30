@@ -343,11 +343,22 @@ abort_if_secret() {
   local scan_diag="$2"
   local scan_rc="$3"
   [[ "$scan_rc" -eq 0 ]] && return 0
-  echo "ERROR: secret found in $label (rc=$scan_rc): $scan_diag" >&2
-  # Name the escape hatch by expanding the marker variable owned by the library
-  # rather than re-typing the literal — lib/secret-scan.sh holds the single
-  # definition, so the two can never drift apart.
-  echo "False positive? Exempt the individual line with the ${UBERDEV_SECRET_SCAN_ALLOW_MARKER} marker, or add an allowlist rule to the repo .gitleaks.toml." >&2
+  # The library rc is TRI-STATE and the two non-zero cases need opposite
+  # advice: rc 1 is a detected secret (offer the escape hatch); rc>=2 means the
+  # scanner itself could not run (crashed gitleaks, unreadable ruleset, broken
+  # fallback grep). Reporting the latter as "secret found" and offering the
+  # allowlist marker would talk the operator into stripping a line from the
+  # regex fallback too, removing the second layer while the first stays broken.
+  if [[ "$scan_rc" -ge 2 ]]; then
+    echo "ERROR: secret scan could not complete for $label (rc=$scan_rc): $scan_diag" >&2
+    echo "This is a BROKEN SCANNER, not a detected secret — do NOT allowlist anything. Fix the scanner or its config and rerun." >&2
+  else
+    echo "ERROR: secret found in $label (rc=$scan_rc): $scan_diag" >&2
+    # Name the escape hatch by expanding the marker variable owned by the library
+    # rather than re-typing the literal — lib/secret-scan.sh holds the single
+    # definition, so the two can never drift apart.
+    echo "False positive? Exempt the individual line with the ${UBERDEV_SECRET_SCAN_ALLOW_MARKER} marker, or add an allowlist rule to the repo .gitleaks.toml." >&2
+  fi
   echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
   exit 1
