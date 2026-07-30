@@ -63,7 +63,11 @@ assert_grep "$POST_IMPL" 'type-design-analyzer' "type-design-analyzer named"
 assert_grep "$POST_IMPL" 'comment-analyzer' "comment-analyzer named"
 # Anti-regression: code-simplifier MUST NOT be in the Step 2 dispatch table region
 # (it moved to Phase 2 of /uberdev:review-pr as the named lens dispatcher per #73).
-if awk '/^### Step 2:/,/^### Step 3:/' "$POST_IMPL" | grep -qE '\| .code-simplifier. \|'; then
+# Herestring, not a pipe: `grep -q` exits on its first match, which SIGPIPEs awk
+# and — under this file's `set -o pipefail` — turns a successful match into a
+# non-zero pipeline status on Linux CI.
+STEP2_TABLE_REGION="$(awk '/^### Step 2:/,/^### Step 3:/' "$POST_IMPL")"
+if grep -qE '\| .code-simplifier. \|' <<<"$STEP2_TABLE_REGION"; then
   echo "  FAIL  code-simplifier MUST NOT appear in Step 2 dispatch table (moved to Phase 2 lens per #73)"
   FAIL=$((FAIL + 1))
 else
@@ -108,6 +112,53 @@ assert_grep "$POST_IMPL" 'uberdev_read_int_in_range fanout_concurrency\.post_imp
   "fanout cap default in uberdev_read_int_in_range bumped to 6 (was 5)"
 assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP=6' \
   "fanout cap fallback assignment is 6 (was 5)"
+
+echo
+echo "== fanout_cap Skill input overrides config/env/default (#302) =="
+assert_grep "$POST_IMPL" '^- .fanout_cap. — optional integer' \
+  "Inputs section declares the optional fanout_cap input"
+assert_grep "$POST_IMPL" 'FANOUT_CAP_INPUT="\$\{FANOUT_CAP_INPUT:-\}"' \
+  "fanout_cap is materialised inside the same executable fence that uses the cap"
+assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP="\$\(post_review_resolve_cap "\$POST_IMPL_REVIEW_CAP"\)"' \
+  "cap resolution routes the config answer through post_review_resolve_cap"
+# Behavioral: slice post_review_resolve_cap out of the SKILL and exercise it.
+# `sequential` was a silent no-op because the caller's `export` died with its
+# fence; the replacement must be an input that actually changes the cap, and it
+# must REFUSE junk rather than fall back to the default.
+CAP_FIXTURE="$(mktemp)"
+awk '
+  /^post_review_resolve_cap\(\) \{/ { active=1 }
+  active { print }
+  active && /^\}$/ { exit }
+' "$POST_IMPL" >"$CAP_FIXTURE"
+if [ -s "$CAP_FIXTURE" ]; then
+  echo "  PASS  post_review_resolve_cap sliced out of the SKILL"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  could not slice post_review_resolve_cap out of the SKILL"; FAIL=$((FAIL + 1))
+fi
+run_cap_case() {
+  local name="$1" input="$2" config="$3" want_rc="$4" want_out="$5"
+  local out rc=0
+  out="$(FANOUT_CAP_INPUT="$input" CAP_FIXTURE="$CAP_FIXTURE" bash -c '
+    set -u
+    . "$CAP_FIXTURE"
+    post_review_resolve_cap "$1"
+  ' _ "$config" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq "$want_rc" ] && [ "$out" = "$want_out" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name (rc=$rc want=$want_rc out='$out' want='$want_out')"; FAIL=$((FAIL + 1))
+  fi
+}
+if [ -s "$CAP_FIXTURE" ]; then
+  run_cap_case "cap: absent input keeps the config/env/default answer" "" 6 0 6
+  run_cap_case "cap: fanout_cap=1 (the sequential override) wins over config 6" 1 6 0 1
+  run_cap_case "cap: fanout_cap=50 upper bound accepted" 50 6 0 50
+  run_cap_case "cap: fanout_cap=0 refuses (no silent default fallback)" 0 6 2 ""
+  run_cap_case "cap: fanout_cap=51 refuses (above range)" 51 6 2 ""
+  run_cap_case "cap: non-integer fanout_cap refuses" "1x" 6 2 ""
+fi
+rm -f "$CAP_FIXTURE"
 
 echo
 echo "== canonical reviewer YAML boundary =="

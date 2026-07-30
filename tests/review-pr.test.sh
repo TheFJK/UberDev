@@ -72,23 +72,23 @@ echo
 # Agent Descriptions section so a bare prose mention elsewhere doesn't
 # false-positive.
 echo "== Phase 1 reviewer agents named in /uberdev:review-pr =="
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'code-reviewer' "code-reviewer named in Agent Descriptions"
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'pr-test-analyzer' "pr-test-analyzer named in Agent Descriptions (6th reviewer per #73)"
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'comment-analyzer' "comment-analyzer named in Agent Descriptions"
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'silent-failure-hunter' "silent-failure-hunter named in Agent Descriptions"
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'type-design-analyzer' "type-design-analyzer named in Agent Descriptions"
 echo
 echo "== Phase 2 lens dispatcher named (code-simplifier moved per #73) =="
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'code-simplifier' "code-simplifier named in Agent Descriptions (Phase 2 lens)"
 echo
 echo "== Apply-loop fixer named (code-fixer NEW per #73) =="
-assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Tips' \
+assert_in_section "$REVIEW_PR" '^## Agent Descriptions' '^## Notes' \
   'code-fixer' "code-fixer named in Agent Descriptions (apply-loop fixer)"
 assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase1.*findings_sha256.*commit_range_sha256' \
   "Phase 1 fixer callsite declares both immutable source digests"
@@ -666,16 +666,25 @@ assert_grep "$REVIEW_PR" \
   "R9.16b (#170) — per-tier TRUST_LABEL_COLOR set in the TRUST_LABEL case (GREEN=0E8A16)"
 
 echo
-echo "== R10 (#73): Sequential argument honored — env-var export + stderr notice =="
+echo "== R10 (#73/#302): Sequential argument honored — fanout_cap Skill input + stderr notice =="
 
 # R10.1 — sequential token detection in Step 1 / Argument Parsing block
 assert_grep "$REVIEW_PR" '\bsequential\b.*ASPECT_LIST|ASPECT_LIST.*\bsequential\b|Detect .sequential. token|SEQUENTIAL=1' \
   "R10.1 — Step 1 detects the bare 'sequential' token and sets SEQUENTIAL"
-# R10.2 — env-var export (the load-bearing behavioral effect)
-assert_grep "$REVIEW_PR" 'export UBERDEV_FANOUT_POST_IMPL_REVIEW=1' \
-  "R10.2 — sequential exports UBERDEV_FANOUT_POST_IMPL_REVIEW=1"
+# R10.2 — the load-bearing behavioral effect. It must be a Skill INPUT, not an
+# `export`: each bash block in review-pr.md is a fresh shell, so an export in
+# Step 1 is already gone when post-impl-review's own executable fence resolves
+# its cap — which made the whole `sequential` token a silent no-op (#302).
+assert_grep "$REVIEW_PR" 'POST_IMPL_FANOUT_CAP=1' \
+  "R10.2 — sequential binds POST_IMPL_FANOUT_CAP=1"
+assert_grep "$REVIEW_PR" 'fanout_cap=\$POST_IMPL_FANOUT_CAP' \
+  "R10.2b — POST_IMPL_FANOUT_CAP is forwarded as the fanout_cap Skill input"
+# Anchored to an executable line (leading whitespace only) so the prose that
+# EXPLAINS why the export was removed does not itself trip the guard.
+assert_no_grep "$REVIEW_PR" '^[[:space:]]*export UBERDEV_FANOUT_POST_IMPL_REVIEW=' \
+  "R10.2c — the fence-scoped export of UBERDEV_FANOUT_POST_IMPL_REVIEW is retired (#302)"
 # R10.3 — stderr notice (the user-visible half — sequential-must-be-visible invariant)
-assert_grep "$REVIEW_PR" 'notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1' \
+assert_grep "$REVIEW_PR" 'notice: running post-impl-review sequentially via fanout_cap=1' \
   "R10.3 — sequential emits stderr notice on user terminal"
 # R10.4 — old warn-and-continue prose removed (anti-regression)
 assert_no_grep "$REVIEW_PR" 'Phase 1 still runs in parallel because the skill.s single-message contract is invariant' \
@@ -760,8 +769,28 @@ echo
 echo "== R17: exit-code contract reuses 1 for Phase 3 halts (#76) =="
 assert_grep "$REVIEW_PR" 'Phase 3 outcome.*halted|halted.*loop_cap_exhausted' \
   "R17.1 — exit-1 row mentions Phase 3 halted/loop_cap_exhausted outcomes"
-assert_no_grep "$REVIEW_PR" '\| `3` \|' \
-  "R17.2 — no new exit code 3 row introduced (Q2 decision: reuse 1)"
+# R17.2 — the Q2 decision is that *Phase 3* introduces no new exit code, not
+# that the command may never grow one. #348 adds exit 3 for
+# `verdict_published_marker_retire_failed`: the verdict WAS published but its
+# reservation markers could not be retired. Collapsing that into exit 2 told
+# callers "no verdict exists, re-run me" about a run whose verdict does exist —
+# and the exact-name publisher then refuses the re-run, wedging the PR. So the
+# row must exist, must name that class, and must say nothing about Phase 3.
+EXIT3_ROWS="$(grep -cE '^\| `3` \|' "$REVIEW_PR" || true)"
+EXIT3_ROW="$(grep -E '^\| `3` \|' "$REVIEW_PR" || true)"
+if [ "$EXIT3_ROWS" -eq 1 ] \
+   && grep -qF 'verdict_published_marker_retire_failed' <<<"$EXIT3_ROW" \
+   && ! grep -qE 'Phase 3|loop_cap_exhausted' <<<"$EXIT3_ROW"; then
+  echo "  PASS  R17.2 — the only exit-3 row is verdict_published_marker_retire_failed, not a Phase 3 outcome"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R17.2 — exit-3 row missing, duplicated, or attributed to Phase 3 (Q2: Phase 3 reuses 1)"
+  echo "        rows: $EXIT3_ROWS"
+  echo "        row:  $EXIT3_ROW"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" 'Phase 3 reuses exit `1`' \
+  "R17.3 — prose still states Phase 3 reuses exit 1 (Q2 decision intact)"
 
 echo
 echo "== R18: --turbo prose narrows scope to Phase 1 or Phase 2 only (#76) =="
@@ -1407,8 +1436,12 @@ assert_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   'secure_publish_exact_no_clobber' \
   "R32.6 — verdict publication delegates the shared no-clobber publisher"
+# The old alternation included a bare `link\(`, which matches every
+# `os.unlink(` line in this file — so a plain truncating write would have
+# satisfied "uses an exclusive/no-clobber primitive" (#347). Require the actual
+# primitives instead.
 assert_grep "$REVIEW_PR" \
-  'O_EXCL|noclobber|set -C|mv.*no-clobber|link\(' \
+  'secure_publish_exact_no_clobber|O_EXCL' \
   "R32.7 — verdict publication uses an exclusive/no-clobber primitive"
 assert_no_grep "$REVIEW_PR" \
   '> "\$MARKER_DIR/review-pr-verdict\.json"|> "\$RUN_DIR/review-pr-verdict\.json"' \
@@ -1603,14 +1636,20 @@ fi
 assert_grep "$REVIEW_PR" \
   'review_abandon_run_reservation.*REVIEW_RUN_RESERVATION_RECEIPT|review_abandon_run_reservation.*reservation_receipt' \
   "R33.7 — every explicit setup-failure arm abandons through the identity receipt"
-assert_no_grep "$R33_TMP/setup-reservation.sh" \
+# assert_no_grep_nonempty, not assert_no_grep: the slice is generated by awk and
+# is empty whenever its anchors move, at which point a plain absence assertion
+# would pass while inspecting nothing (#347).
+assert_no_grep_nonempty "$R33_TMP/setup-reservation.sh" \
   'trap[[:space:]].*EXIT' \
   "R33.8 — review setup installs no review-owned EXIT trap"
 
 echo
 echo "== R34: review ignore policy is tri-state, exact, and no-clobber =="
+# `check-ignore.*$` matched ANY line mentioning check-ignore, prose included, so
+# deleting the probe entirely would still have passed (#347). Anchor on the exact
+# invocation the tri-state triage below depends on.
 assert_grep "$REVIEW_PR" \
-  'check-ignore.*; then|check-ignore.*$' \
+  '^[[:space:]]*git -C "\$REVIEW_RUN_REPO_ROOT" check-ignore -q -- "\.uberdev/runs/\.review-probe"' \
   "R34.1 — setup executes the effective Git ignore probe"
 assert_grep "$REVIEW_PR" \
   'case[[:space:]].*IGNORE.*RC|case[[:space:]].*ignore.*rc|0\).*ignored|1\).*install' \
@@ -1694,8 +1733,13 @@ run_r34_case() {
   if [ "$expect_marker" = yes ]; then
     [ -n "$marker" ] && [ -f "$marker/locked" ] || R34_CASES_OK=0
   else
-    find "$repo/.uberdev/runs" -mindepth 1 -maxdepth 1 -type d \
-      ! -name '.gitignore' -print -quit 2>/dev/null | grep -q . && R34_CASES_OK=0
+    # Herestring, not a pipe: `grep -q` can exit before `find` finishes writing,
+    # and under this file's `set -o pipefail` the resulting SIGPIPE turns a
+    # correct "found nothing" into a spurious pipeline status on Linux CI.
+    local R34_STRAY
+    R34_STRAY="$(find "$repo/.uberdev/runs" -mindepth 1 -maxdepth 1 -type d \
+      ! -name '.gitignore' -print -quit 2>/dev/null)"
+    [ -z "$R34_STRAY" ] || R34_CASES_OK=0
   fi
   case "$policy" in
     global)
@@ -1787,6 +1831,337 @@ else
   echo "  FAIL  R35 — linked run-root ancestor was followed or externally mutated"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== R36 (#344): abandoned reservation markers have a reaper, not just a grace window =="
+assert_grep "$REVIEW_PR" \
+  'review_reap_stale_run_reservations\(\) \{' \
+  "R36.1 — setup defines review_reap_stale_run_reservations"
+assert_grep "$REVIEW_PR" \
+  'REVIEW_RESERVATION_REAP_SECS="\$\{REVIEW_RESERVATION_REAP_SECS:-7200\}"' \
+  "R36.2 — reap threshold defaults to 7200 (2x REVIEW_GRACE_SECS)"
+# Ordering matters: reaping AFTER reserving would see this run's own fresh
+# `locked` marker; reaping before it keeps the pass strictly about predecessors.
+R36_REAP_LINE="$(grep -n '^review_reap_stale_run_reservations \\$' "$REVIEW_PR" | head -n 1 | cut -d: -f1)"
+R36_RESERVE_LINE="$(grep -n '^REVIEW_RESERVATION_OUTPUT="\$($' "$REVIEW_PR" | head -n 1 | cut -d: -f1)"
+if [ -n "$R36_REAP_LINE" ] && [ -n "$R36_RESERVE_LINE" ] && [ "$R36_REAP_LINE" -lt "$R36_RESERVE_LINE" ]; then
+  echo "  PASS  R36.3 — the reaper runs immediately BEFORE this run reserves its own directory"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R36.3 — reaper call is missing or does not precede review_reserve_run_directory"
+  echo "        reap line: ${R36_REAP_LINE:-none}  reserve line: ${R36_RESERVE_LINE:-none}"
+  FAIL=$((FAIL + 1))
+fi
+
+R36_TMP="$(mktemp -d)"
+awk '
+  /^RUN_ID_WAS_EXPLICIT=0$/ { active=1 }
+  active && /^# Standalone carrier preparation owns/ { exit }
+  active && /^REVIEW_RUN_REPO_ROOT=/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$R36_TMP/helpers.sh"
+R36_SEED() {  # <run-id> <age-mode: stale|fresh> [extra-file...]
+  local id="$1" age="$2"; shift 2
+  local dir="$R36_RUNS_ROOT/$id"
+  mkdir "$dir"
+  : >"$dir/locked"
+  printf '{"issue":0,"pr":73}\n' >"$dir/pr-context.json"
+  local extra
+  for extra in "$@"; do printf 'x\n' >"$dir/$extra"; done
+  if [ "$age" = stale ]; then
+    python3 -I -B -c 'import os,sys
+for path in sys.argv[1:]:
+    os.utime(path, (0, 0))' "$dir/locked" "$dir/pr-context.json"
+  fi
+}
+if (
+  set -u
+  RUN_ID=
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  . "$R36_TMP/helpers.sh"
+  mkdir "$R36_TMP/repository"
+  git -C "$R36_TMP/repository" init -q
+  git -C "$R36_TMP/repository" config user.email test@example.com
+  git -C "$R36_TMP/repository" config user.name Test
+  printf 'fixture\n' >"$R36_TMP/repository/README.md"
+  git -C "$R36_TMP/repository" add README.md
+  git -C "$R36_TMP/repository" commit -qm init
+  root_record="$(review_prepare_run_root "$R36_TMP/repository")"
+  R36_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$root_record")"
+  runs_identity="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$root_record")"
+  review_publish_local_ignore "$R36_RUNS_ROOT" "$runs_identity"
+  R36_SEED 20260101-000000-aaaaaaaa stale
+  R36_SEED 20260101-000001-bbbbbbbb fresh
+  R36_SEED 20260101-000002-cccccccc stale review-pr-verdict.json
+  R36_SEED 20260101-000003-dddddddd stale surprise.txt
+  reaped="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)"
+  [ "$reaped" = 1 ]
+  # (a) abandoned: markers gone, directory preserved as evidence
+  [ -d "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa" ]
+  [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/locked" ]
+  [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/pr-context.json" ]
+  # (b) fresh run: a live /review-pr must never be reaped out from under itself
+  [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/locked" ]
+  [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/pr-context.json" ]
+  # (c) published run: a verdict means the final fence owns the markers
+  [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/locked" ]
+  [ -f "$R36_RUNS_ROOT/20260101-000002-cccccccc/review-pr-verdict.json" ]
+  # (d) unrecognized content: never guess, never delete
+  [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/locked" ]
+  [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/surprise.txt" ]
+  # The reaper is idempotent and reports 0 on a second pass.
+  [ "$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)" = 0 ]
+); then
+  echo "  PASS  R36.4 — reaps only abandoned, verdict-less, recognized reservations (idempotent)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R36.4 — reaper selection contract failed"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$R36_TMP"
+
+echo
+echo "== R37 (#348): the reservation triple is validated by SHAPE, not just non-emptiness =="
+R37_TMP="$(mktemp -d)"
+awk '
+  /# BEGIN review-reservation-triple-guard-v1/ { active=1; next }
+  /# END review-reservation-triple-guard-v1/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$R37_TMP/triple-guard.sh"
+run_r37_case() {
+  local name="$1" payload="$2" want_rc="$3" want_run_id="$4"
+  local out rc=0
+  out="$(
+    R37_PAYLOAD="$payload" R37_GUARD="$R37_TMP/triple-guard.sh" bash -c '
+      set -u
+      review_abandon_run_reservation(){ :; }
+      REVIEW_RUNS_ROOT=/repo/.uberdev/runs
+      REVIEW_RESERVATION_OUTPUT="$R37_PAYLOAD"
+      # The guard refuses with `return 2 2>/dev/null || exit 2`, and a `return`
+      # from a sourced file only ends the source — propagate it explicitly so a
+      # refusal cannot be scored as an acceptance.
+      . "$R37_GUARD" || exit $?
+      printf "%s\n" "$RUN_ID"
+    ' 2>/dev/null
+  )" || rc=$?
+  if [ "$rc" -eq "$want_rc" ] && [ "$out" = "$want_run_id" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name (rc=$rc want=$want_rc run_id='$out' want='$want_run_id')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+if [ -s "$R37_TMP/triple-guard.sh" ]; then
+  echo "  PASS  R37.0 — sliced the reservation triple guard out of review-pr.md"
+  PASS=$((PASS + 1))
+  run_r37_case "R37.1 — a well-formed triple is accepted" \
+    "v1:abcDEF-_123
+20260729-120000-abcdef01
+/repo/.uberdev/runs/20260729-120000-abcdef01" 0 "20260729-120000-abcdef01"
+  # THE #348 defect: no newline anywhere makes RECEIPT == RUN_ID == MARKER_DIR,
+  # so a non-emptiness guard passes and a base64 blob is exported as RUN_ID.
+  run_r37_case "R37.2 — a newline-less receipt blob is refused, not exported as RUN_ID" \
+    "v1:eyJydW5faWQiOiAiMjAyNjA3MjktMTIwMDAwLWFiY2RlZjAxIn0" 2 ""
+  run_r37_case "R37.3 — a malformed RUN_ID is refused" \
+    "v1:abcDEF
+not-a-run-id
+/repo/.uberdev/runs/not-a-run-id" 2 ""
+  run_r37_case "R37.4 — a relative MARKER_DIR is refused" \
+    "v1:abcDEF
+20260729-120000-abcdef01
+.uberdev/runs/20260729-120000-abcdef01" 2 ""
+  run_r37_case "R37.5 — a MARKER_DIR outside the validated runs root is refused" \
+    "v1:abcDEF
+20260729-120000-abcdef01
+/tmp/elsewhere/20260729-120000-abcdef01" 2 ""
+else
+  echo "  FAIL  R37.0 — could not slice review-reservation-triple-guard-v1 (markers renamed?)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$R37_TMP"
+
+echo
+echo "== R38 (#348): marker retire failure is its own class, never a publication failure =="
+# Structural ordering: every unlink of a reservation marker must live AFTER the
+# publication handler, so a cleanup fault cannot be reported as "could not
+# publish review verdict" (which makes callers re-review an already-published
+# verdict and hit the exact-name refusal).
+R38_TMP="$(mktemp -d)"
+awk '
+  /# BEGIN review-verdict-final-fence-v1/ { active=1; next }
+  /# END review-verdict-final-fence-v1/ { exit }
+  active { print }
+' "$REVIEW_PR" >"$R38_TMP/final-fence.sh"
+R38_PUBLISH_HANDLER="$(grep -n 'could not publish review verdict' "$R38_TMP/final-fence.sh" | head -n 1 | cut -d: -f1)"
+R38_FIRST_UNLINK="$(grep -n 'os\.unlink(' "$R38_TMP/final-fence.sh" | head -n 1 | cut -d: -f1)"
+R38_RETIRE_HANDLER="$(grep -n 'verdict_published_marker_retire_failed' "$R38_TMP/final-fence.sh" | head -n 1 | cut -d: -f1)"
+R38_EXIT3="$(grep -n 'raise SystemExit(3)' "$R38_TMP/final-fence.sh" | head -n 1 | cut -d: -f1)"
+if [ -n "$R38_PUBLISH_HANDLER" ] && [ -n "$R38_FIRST_UNLINK" ] && \
+   [ -n "$R38_RETIRE_HANDLER" ] && [ -n "$R38_EXIT3" ] && \
+   [ "$R38_PUBLISH_HANDLER" -lt "$R38_FIRST_UNLINK" ] && \
+   [ "$R38_FIRST_UNLINK" -lt "$R38_RETIRE_HANDLER" ] && \
+   [ "$R38_RETIRE_HANDLER" -lt "$R38_EXIT3" ]; then
+  echo "  PASS  R38.1 — marker retire sits after the publication handler under its own exit-3 handler"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R38.1 — marker retire still shares the publication failure handler"
+  echo "        publish=$R38_PUBLISH_HANDLER unlink=$R38_FIRST_UNLINK retire=$R38_RETIRE_HANDLER exit3=$R38_EXIT3"
+  FAIL=$((FAIL + 1))
+fi
+# Behavioral: the shell arm must forward 3 as 3 and everything else as 2.
+mkdir "$R38_TMP/shim"
+run_r38_rc_case() {
+  local name="$1" stub_rc="$2" want_rc="$3"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit %s\n' "$stub_rc" >"$R38_TMP/shim/python3"
+  chmod +x "$R38_TMP/shim/python3"
+  local rc=0
+  PATH="$R38_TMP/shim:$PATH" REVIEW_RUN_RESERVATION_RECEIPT=v1:stub \
+    AUDIT_JSON_PAYLOAD='{}' UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash "$R38_TMP/final-fence.sh" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq "$want_rc" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name (rc=$rc want=$want_rc)"; FAIL=$((FAIL + 1))
+  fi
+}
+if [ -s "$R38_TMP/final-fence.sh" ]; then
+  run_r38_rc_case "R38.2 — publication failure (rc 2) stays exit 2" 2 2
+  run_r38_rc_case "R38.3 — marker retire failure (rc 3) surfaces as exit 3, not 2" 3 3
+  run_r38_rc_case "R38.4 — an unexpected interpreter rc still fails closed as exit 2" 9 2
+  run_r38_rc_case "R38.5 — success leaves the fence at exit 0" 0 0
+else
+  echo "  FAIL  R38.2 — could not slice review-verdict-final-fence-v1"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$R38_TMP"
+
+echo
+echo "== R39 (#348): reservation rollback owns everything it created, and says so =="
+R39_TMP="$(mktemp -d)"
+awk '
+  /^review_reserve_run_directory\(\) \{/ { active=1 }
+  active { print }
+  active && /^\}$/ { exit }
+' "$REVIEW_PR" >"$R39_TMP/reserve.sh"
+if [ -s "$R39_TMP/reserve.sh" ]; then
+  echo "  PASS  R39.0 — sliced review_reserve_run_directory out of review-pr.md"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R39.0 — could not slice review_reserve_run_directory"
+  FAIL=$((FAIL + 1))
+fi
+# The directory exists the moment mkdir returns; the fsync only makes the parent
+# entry durable. Recording ownership after the fsync meant an fsync OSError left
+# created=False, so the failure handler skipped rollback and orphaned the
+# directory — which permanently poisons an explicit RUN_ID via "refusing reuse".
+R39_MKDIR_BLOCK="$(grep -A3 -F 'os.mkdir(candidate, 0o700, dir_fd=runs_descriptor)' "$R39_TMP/reserve.sh" || true)"
+if grep -qF 'created = True' <<<"$R39_MKDIR_BLOCK" && \
+   grep -qF 'created_candidate = candidate' <<<"$R39_MKDIR_BLOCK" && \
+   [ "$(grep -n 'created = True' <<<"$R39_MKDIR_BLOCK" | head -n 1 | cut -d: -f1)" -lt \
+     "$(grep -n 'os.fsync(runs_descriptor)' <<<"$R39_MKDIR_BLOCK" | head -n 1 | cut -d: -f1)" ]; then
+  echo "  PASS  R39.1 — ownership is recorded between mkdir and the parent fsync"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R39.1 — an fsync failure can still leave created=False and orphan the directory"
+  FAIL=$((FAIL + 1))
+fi
+# Rollback must be reachable from a failure that happens BEFORE run_dir is bound.
+assert_grep "$REVIEW_PR" 'if created and created_candidate is not None:' \
+  "R39.2 — the failure handler keys rollback off the mkdir-time candidate, not later locals()"
+assert_no_grep "$REVIEW_PR" 'if created and "run_dir" in locals\(\)' \
+  "R39.3 — the locals()-probing rollback guard is retired"
+# The publisher never unlinks a failed attempt, so an attempt that is registered
+# only on success is residue rollback can neither remove nor report.
+R39_ATTEMPT_LINE="$(grep -n 'attempted.append(name)' "$R39_TMP/reserve.sh" | head -n 1 | cut -d: -f1)"
+R39_PUBLISH_LINE="$(grep -n 'module.secure_publish_exact_no_clobber(' "$R39_TMP/reserve.sh" | head -n 1 | cut -d: -f1)"
+if [ -n "$R39_ATTEMPT_LINE" ] && [ -n "$R39_PUBLISH_LINE" ] && \
+   [ "$R39_ATTEMPT_LINE" -lt "$R39_PUBLISH_LINE" ]; then
+  echo "  PASS  R39.4 — the marker name is registered BEFORE the publisher is invoked"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R39.4 — publication attempts are recorded only after the publisher returns"
+  FAIL=$((FAIL + 1))
+fi
+# No blanket `except …: pass` may remain in the reservation helper: it made an
+# un-reclaimable reservation indistinguishable from a clean one.
+R39_SWALLOWED="$(awk '
+  /^[[:space:]]*except[^#]*:[[:space:]]*$/ { pending=NR; next }
+  pending && /^[[:space:]]*pass[[:space:]]*$/ { print pending; pending=0; next }
+  { pending=0 }
+' "$R39_TMP/reserve.sh")"
+if [ -z "$R39_SWALLOWED" ]; then
+  echo "  PASS  R39.5 — no blanket except/pass swallows a rollback failure"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R39.5 — blanket except/pass at line(s): $(tr '\n' ' ' <<<"$R39_SWALLOWED")"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" 'def report_rollback_failure\(what, error\):' \
+  "R39.6 — rollback failures are reported through one named stderr reporter"
+rm -rf "$R39_TMP"
+
+echo
+echo "== R40: helper-module loading and operator-actionable wedges =="
+# Every embedded python helper must reject an unloadable module BEFORE
+# module_from_spec (which raises AttributeError on a None spec) and must import
+# it inside a try — otherwise a broken lib/run_manifest.py escapes as an
+# uncaught traceback and the caller only sees an opaque rc (#348).
+R40_SPEC_SITES="$(grep -c 'spec_from_file_location' "$REVIEW_PR" || true)"
+R40_GUARDED="$(grep -c 'if spec is None or spec.loader is None' "$REVIEW_PR" || true)"
+if [ "$R40_SPEC_SITES" -gt 0 ] && [ "$R40_SPEC_SITES" -eq "$R40_GUARDED" ]; then
+  echo "  PASS  R40.1 — all $R40_SPEC_SITES module loaders guard 'spec is None or spec.loader is None'"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R40.1 — $((R40_SPEC_SITES - R40_GUARDED)) of $R40_SPEC_SITES module loaders lack the spec-is-None guard"
+  FAIL=$((FAIL + 1))
+fi
+# Ordering, checked line-by-line: a multi-line grep pattern would never match
+# and would PASS vacuously (the exact failure mode #347 is about). Each
+# module_from_spec() must be preceded by the guard for its own spec_from_file_location().
+R40_ORDER_VIOLATIONS="$(awk '
+  /spec_from_file_location/ { guarded=0 }
+  /if spec is None or spec\.loader is None/ { guarded=1 }
+  /module_from_spec\(spec\)/ && !guarded { print NR }
+' "$REVIEW_PR")"
+if [ -z "$R40_ORDER_VIOLATIONS" ]; then
+  echo "  PASS  R40.2 — no loader calls module_from_spec before checking the spec"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R40.2 — module_from_spec precedes its spec guard at line(s): $(tr '\n' ' ' <<<"$R40_ORDER_VIOLATIONS")"
+  FAIL=$((FAIL + 1))
+fi
+R40_BARE_EXEC="$(awk '
+  /^[[:space:]]*spec\.loader\.exec_module\(/ && prev !~ /^[[:space:]]*try:[[:space:]]*$/ { print NR }
+  { prev=$0 }
+' "$REVIEW_PR")"
+if [ -z "$R40_BARE_EXEC" ]; then
+  echo "  PASS  R40.3 — every exec_module call is the first statement of a try block"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R40.3 — unguarded exec_module at line(s): $(tr '\n' ' ' <<<"$R40_BARE_EXEC")"
+  FAIL=$((FAIL + 1))
+fi
+# The .uberdev/runs/.gitignore wedge used to print only "{error}" — no pathname,
+# no way out — for a residue file the no-clobber publisher will never replace.
+assert_grep "$REVIEW_PR" \
+  'could not install private review ignore policy at \{ignore_path\}' \
+  "R40.4 — the ignore-policy wedge names the exact absolute pathname"
+assert_grep "$REVIEW_PR" \
+  'hint: inspect \{ignore_path\}' \
+  "R40.5 — the ignore-policy wedge carries a recovery hint"
+assert_grep "$REVIEW_PR" \
+  'never clobbers or truncates it' \
+  "R40.6 — the hint preserves the no-clobber contract instead of suggesting an overwrite"
+# The pre-PR tail sections contradicted the post-push contract this command is
+# built on (PR_NUMBER is resolved from a live PR before anything else runs).
+assert_no_grep "$REVIEW_PR" '^## Tips:' \
+  "R40.7 — the stale '## Tips' tail section is retired"
+assert_no_grep "$REVIEW_PR" '^## Workflow Integration:' \
+  "R40.8 — the stale '## Workflow Integration' pre-PR flow section is retired"
+assert_no_grep "$REVIEW_PR" 'Before creating PR, not after' \
+  "R40.9 — the 'run before creating PR' advice is gone"
+assert_grep "$REVIEW_PR" '\*\*post-push\*\* command' \
+  "R40.10 — the Notes section states the post-push contract explicitly"
 
 rm -rf "$R33_TMP"
 
