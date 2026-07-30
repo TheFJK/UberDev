@@ -689,7 +689,10 @@ try:
         expected_pr = int(args[0])
         capture_dir = os.path.abspath(args[1])
         receipt = discover(expected_pr, capture_dir)
-        print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+        # end="" so native-Windows text mode cannot append \r\n: $() strips the
+        # trailing \n but leaves the \r, and both consumers compare the receipt
+        # byte-for-byte against its recapture.
+        print(json.dumps(receipt, sort_keys=True, separators=(",", ":")), end="")
     elif command == "recapture":
         if len(args) != 1:
             fail("snapshot receipt argument missing")
