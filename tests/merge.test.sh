@@ -1364,16 +1364,21 @@ else
   # than as one collapsed source line. Requiring exactly ONE loop header is the
   # load-bearing half: it keeps all four roots on a single find -H pass instead
   # of drifting back into per-layout scans.
-  FIND_LOOP_COUNT=$(grep -cE 'for root_name, expected_shape[^:]* in ROOT_LAYOUTS:' \
+  SCAN_LOOP_COUNT=$(grep -cE 'for root_name, expected_shape[^:]* in ROOT_LAYOUTS:' \
     "$DISCOVER_LIB_FILE" || true)
+  # The enumeration is a bounded in-process walk, not `find` (issue #346: native
+  # Windows resolves a bare "find" to System32\find.exe, which broke every scan).
+  # Requiring exactly ONE loop over ROOT_LAYOUTS remains the load-bearing half:
+  # it keeps all four roots on a single pass instead of drifting back into
+  # per-layout scans.
   if [ "${ROOT_COUNT:-0}" = "4" ] \
-     && [ "${FIND_LOOP_COUNT:-0}" = "1" ] \
-     && grep -qE '^[[:space:]]*"find",[[:space:]]*$' "$DISCOVER_LIB_FILE" \
-     && grep -qE '^[[:space:]]*"-H",[[:space:]]*$' "$DISCOVER_LIB_FILE" \
-     && grep -qE '^[[:space:]]*root_name,[[:space:]]*$' "$DISCOVER_LIB_FILE"; then
-    pass "M63.worktree-glob.c0.find-count — exactly four roots feed one find -H loop"
+     && [ "${SCAN_LOOP_COUNT:-0}" = "1" ] \
+     && grep -qE '^def scan_root_layout\(root_name, exact_depth, exact_path\):' "$DISCOVER_LIB_FILE" \
+     && grep -qE '^[[:space:]]*scan_results = scan_root_layout\(root_name, exact_depth, exact_path\)$' "$DISCOVER_LIB_FILE" \
+     && grep -qE 'follow_symlinks=False' "$DISCOVER_LIB_FILE"; then
+    pass "M63.worktree-glob.c0.find-count — exactly four roots feed one bounded no-follow walk"
   else
-    fail "M63.worktree-glob.c0.find-count — four-root find -H loop contract drifted (roots=${ROOT_COUNT:-0} loops=${FIND_LOOP_COUNT:-0})"
+    fail "M63.worktree-glob.c0.find-count — four-root single-walk contract drifted (roots=${ROOT_COUNT:-0} loops=${SCAN_LOOP_COUNT:-0})"
   fi
 fi
 

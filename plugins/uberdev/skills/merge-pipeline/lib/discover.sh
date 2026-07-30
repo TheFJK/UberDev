@@ -301,13 +301,13 @@ _uberdev_review_verdict_python() {
   local command="$1"
   shift
   python3 -I -B - "$command" "$_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT" "$@" <<'PY'
+import fnmatch
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import stat
-import subprocess
 import sys
 
 command, plugin_root, *args = sys.argv[1:]
@@ -525,6 +525,61 @@ def validate_suffix(root_name, candidate, expected_shape):
     return parts, run_id
 
 
+def scan_root_layout(root_name, exact_depth, exact_path):
+    """Enumerate ROOT at exactly `exact_depth`, keeping entries matching `exact_path`.
+
+    Replaces `find -H ROOT -mindepth N -maxdepth N -path GLOB -print0`. The
+    external binary is not usable here: this module runs under whatever
+    interpreter the host provides, and on native Windows `subprocess` resolves
+    a bare "find" against the system PATH, where C:\\Windows\\System32\\find.exe -- an
+    unrelated text-search tool -- precedes Git Bash's POSIX find. That made every
+    scan fail with "FIND: Parameter format not correct", so /goal and /merge
+    discovery returned INDETERMINATE for every lookup on Windows.
+
+    Semantics preserved exactly:
+      * `-H`  -- the command-line root is the ONLY followed link; descent uses
+                 follow_symlinks=False, matching find's default no-follow.
+      * `-mindepth N -maxdepth N` -- only entries at exactly depth N are emitted,
+                 and nothing below depth N is traversed.
+      * `-path GLOB` -- fnmatchcase against the printed path, where `*` spans `/`
+                 exactly as in find; the path is composed with `/` so the glob is
+                 separator-independent on Windows.
+      * any file type is emitted at the pinned depth (find does not filter by
+                 type here); regularity is enforced later during secure capture.
+
+    Results are sorted, which is stricter than find's directory order.
+    A scan failure is fail-closed: OSError becomes VerdictError, so an
+    unreadable subtree is INDETERMINATE and never mistaken for absence.
+    """
+    matches = []
+    pending = [(root_name, root_name.replace(os.sep, "/"), 0)]
+    while pending:
+        native, posix, depth = pending.pop()
+        if depth == exact_depth:
+            if fnmatch.fnmatchcase(posix, exact_path):
+                matches.append(native)
+            continue
+        try:
+            with os.scandir(native) as entries:
+                children = list(entries)
+        except OSError as exc:
+            raise VerdictError(f"root scan failed: {root_name}") from exc
+        for entry in children:
+            child_native = os.path.join(native, entry.name)
+            child_posix = posix + "/" + entry.name
+            if depth + 1 == exact_depth:
+                pending.append((child_native, child_posix, depth + 1))
+                continue
+            try:
+                descend = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                raise VerdictError(f"root scan failed: {root_name}") from exc
+            if descend:
+                pending.append((child_native, child_posix, depth + 1))
+    matches.sort()
+    return matches
+
+
 def scan_roots():
     candidates = []
     bound_roots = []
@@ -547,32 +602,7 @@ def scan_roots():
         if not stat.S_ISDIR(root_entry.st_mode):
             raise VerdictError(f"root is not a directory: {root_name}")
         physical_root = os.path.realpath(root_name)
-        try:
-            # `find -H ROOT` follows only this command-line root. Descendant
-            # symlinks retain find's default no-follow semantics.
-            find_command = [
-                "find",
-                "-H",
-                root_name,
-                "-mindepth",
-                str(exact_depth),
-                "-maxdepth",
-                str(exact_depth),
-                "-path",
-                exact_path,
-                "-print0",
-            ]
-            result = subprocess.run(
-                find_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except OSError as exc:
-            raise VerdictError(f"root scan failed: {root_name}") from exc
-        if result.returncode != 0:
-            detail = result.stderr[:200].decode("utf-8", "replace")
-            raise VerdictError(f"root scan failed: {root_name}: {detail}")
+        scan_results = scan_root_layout(root_name, exact_depth, exact_path)
         try:
             if (
                 lexical_identity(root_name) != lexical_before
@@ -585,10 +615,7 @@ def scan_roots():
         bound_roots.append(
             (root_name, physical_root, lexical_before, followed_before)
         )
-        for encoded in result.stdout.split(b"\0"):
-            if not encoded:
-                continue
-            candidate = os.fsdecode(encoded)
+        for candidate in scan_results:
             parts, run_id = validate_suffix(root_name, candidate, expected_shape)
             if RUN_ID_RE.fullmatch(run_id) is None:
                 continue

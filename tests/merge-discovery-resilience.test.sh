@@ -924,21 +924,25 @@ assert_eq "$B10_RC" "1" "B10g.2: invalid-run-id-only scan is exhaustive ABSENT=1
 # Any incomplete root scan is indeterminate, even when no candidate bytes were
 # returned. Shadow find with a deterministic failure to exercise this seam.
 _b10_clear
-B10_FAKE_BIN="$B10_SANDBOX/fake-find-bin"
-mkdir -p "$B10_FAKE_BIN"
-mkdir -p "$B10_SANDBOX/.uberdev/runs"
-printf '%s\n' '#!/bin/sh' 'exit 2' > "$B10_FAKE_BIN/find"
-chmod +x "$B10_FAKE_BIN/find"
-B10_OUT="$(
-  cd "$B10_SANDBOX" &&
-  PATH="$B10_FAKE_BIN:$PATH" &&
-  export PATH &&
-  . "$LIB" &&
-  discover_review_verdict_json 42
-)" 2>"$B10_ERR"
-B10_RC=$?
-assert_eq "$B10_OUT" "" "B10h.1: failed root scan emits no path"
-assert_eq "$B10_RC" "2" "B10h.2: failed root scan → INDETERMINATE=2"
+# The scan is in-process since issue #346, so an unreadable directory replaces
+# the old shadowed-`find` stub as the deterministic failure injection.
+mkdir -p "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa"
+chmod 000 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+if ls "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" >/dev/null 2>&1; then
+  # Windows/Git Bash chmod is a no-op, and root ignores the mode bits.
+  echo "  SKIP  B10h: cannot make a directory unreadable on this platform/user"
+  chmod 755 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+else
+  B10_OUT="$(
+    cd "$B10_SANDBOX" &&
+    . "$LIB" &&
+    discover_review_verdict_json 42
+  )" 2>"$B10_ERR"
+  B10_RC=$?
+  chmod 755 "$B10_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa" 2>/dev/null || true
+  assert_eq "$B10_OUT" "" "B10h.1: failed root scan emits no path"
+  assert_eq "$B10_RC" "2" "B10h.2: failed root scan → INDETERMINATE=2"
+fi
 
 rm -f "$B10_ERR"
 rm -rf "$B10_SANDBOX"
@@ -1020,12 +1024,19 @@ echo
 echo "== A14/B12: closed verdict receipt + secure snapshot contract =="
 assert_grep "$LIB" '^review_verdict_discovery_state\(\)[[:space:]]*\{' \
   "A14a: executable discovery rc-to-state helper is defined"
-assert_grep "$LIB" 'find[[:space:]]+-H[[:space:]]' \
-  "A14b: command-line roots are traversed with find -H"
-assert_no_grep "$LIB" 'find[[:space:]]+-L[[:space:]]' \
-  "A14c: descendant symlinks are never followed with find -L"
-assert_grep "$LIB" '"-mindepth",' \
-  "A14c.1: find bounds depth and exact slash-path before emitting candidates"
+# The scan is a bounded in-process walk, not `find` (issue #346: native-Windows
+# Python resolves a bare "find" to System32\find.exe). These pin the same three
+# invariants the find argv used to carry.
+assert_grep "$LIB" '^def scan_root_layout\(root_name, exact_depth, exact_path\):' \
+  "A14b: command-line roots are traversed by the bounded in-process walk"
+assert_grep "$LIB" 'follow_symlinks=False' \
+  "A14c: descendant symlinks are never followed during descent"
+assert_no_grep "$LIB" 'follow_symlinks=True' \
+  "A14c.0: no descent path opts back into following symlinks"
+assert_grep "$LIB" 'if depth == exact_depth:' \
+  "A14c.1: the walk emits only at the pinned exact depth"
+assert_grep "$LIB" 'fnmatch\.fnmatchcase\(posix, exact_path\)' \
+  "A14c.1b: candidates must match the exact slash-path glob before being emitted"
 assert_grep "$LIB" '\.uberdev/runs/\*/review-pr-verdict\.json' \
   "A14c.2: canonical run root declares exact depth 2"
 assert_grep "$LIB" '\.worktrees/\*/\.uberdev/runs/\*/review-pr-verdict\.json' \
@@ -1142,39 +1153,43 @@ mkdir -p \
   "$B12_SANDBOX/.claude/worktrees" \
   "$B12_SANDBOX/.worktrees" \
   "$B12_SANDBOX/worktrees"
-B12_FIND_BIN="$B12_SANDBOX/fake-depth-bin"
-B12_FIND_LOG="$B12_SANDBOX/find-argv.log"
-mkdir -p "$B12_FIND_BIN"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'printf "%s\n" "$*" >>"$B12_FIND_LOG"' \
-  'exit 0' \
-  >"$B12_FIND_BIN/find"
-chmod +x "$B12_FIND_BIN/find"
+# Behavioural replacement for the old fake-`find` argv log (issue #346 removed
+# the subprocess). Asserting argv proved only that the right flags were passed;
+# these prove the property the flags existed for -- an artifact one level too
+# shallow or too deep is invisible, and only the pinned depth is emitted.
 B12_OUT="$(
   cd "$B12_SANDBOX" &&
-  PATH="$B12_FIND_BIN:$PATH" &&
-  export PATH B12_FIND_LOG &&
   . "$LIB" &&
   discover_review_verdict_json 42
 )" 2>"$B12_ERR"
 B12_RC=$?
-assert_eq "$B12_OUT" "" "B12.find.argv.out: bounded empty scans emit no receipt"
-assert_eq "$B12_RC" "1" "B12.find.argv.rc: bounded empty scans prove absence"
-for B12_EXPECTED_FIND in \
-  '-H .uberdev/runs -mindepth 2 -maxdepth 2 -path .uberdev/runs/*/review-pr-verdict.json -print0' \
-  '-H .claude/worktrees -mindepth 5 -maxdepth 5 -path .claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json -print0' \
-  '-H .worktrees -mindepth 5 -maxdepth 5 -path .worktrees/*/.uberdev/runs/*/review-pr-verdict.json -print0' \
-  '-H worktrees -mindepth 5 -maxdepth 5 -path worktrees/*/.uberdev/runs/*/review-pr-verdict.json -print0'
-do
-  if grep -Fqx -- "$B12_EXPECTED_FIND" "$B12_FIND_LOG"; then
-    echo "  PASS  B12.find.argv: $B12_EXPECTED_FIND"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL  B12.find.argv: missing exact argv [$B12_EXPECTED_FIND]"
-    FAIL=$((FAIL + 1))
-  fi
-done
+assert_eq "$B12_OUT" "" "B12.walk.out: bounded empty scans emit no receipt"
+assert_eq "$B12_RC" "1" "B12.walk.rc: bounded empty scans prove absence"
+
+B12_SHA40="$(printf 'a%.0s' $(seq 40))"
+# Too shallow: directly under the root, i.e. depth 1 where the layout pins 2.
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" >"$B12_SANDBOX/.uberdev/runs/review-pr-verdict.json"
+# Too deep: one extra directory level below the pinned depth.
+mkdir -p "$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/nested"
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" \
+  >"$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/nested/review-pr-verdict.json"
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_RC" "1" "B12.walk.depth: artifacts above and below the pinned depth are invisible"
+# Now place one at the exact pinned depth; it must become discoverable.
+printf '{"pr":42,"sha":"%s"}\n' "$B12_SHA40" \
+  >"$B12_SANDBOX/.uberdev/runs/20260101-000000-aaaaaaaa/review-pr-verdict.json"
+B12_OUT="$(
+  cd "$B12_SANDBOX" &&
+  . "$LIB" &&
+  discover_review_verdict_json 42
+)" 2>"$B12_ERR"
+B12_RC=$?
+assert_eq "$B12_RC" "0" "B12.walk.depth-exact: an artifact at the pinned depth is discovered"
 
 _b12_clear
 _b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
@@ -1258,50 +1273,48 @@ _b12_clear
 B12_RETARGET_A="$(mktemp -d)"
 B12_RETARGET_B="$(mktemp -d)"
 ln -s "$B12_RETARGET_A" "$B12_SANDBOX/.worktrees"
-B12_RETARGET_BIN="$B12_SANDBOX/fake-retarget-bin"
-mkdir -p "$B12_RETARGET_BIN"
-printf '%s\n' \
-  '#!/bin/sh' \
-  '/bin/rm -f .worktrees' \
-  '/bin/ln -s "$B12_RETARGET_DEST" .worktrees' \
-  'exit 0' \
-  > "$B12_RETARGET_BIN/find"
-chmod +x "$B12_RETARGET_BIN/find"
-B12_OUT="$(
-  cd "$B12_SANDBOX" &&
-  PATH="$B12_RETARGET_BIN:$PATH" &&
-  B12_RETARGET_DEST="$B12_RETARGET_B" &&
-  export PATH B12_RETARGET_DEST &&
-  . "$LIB" &&
-  discover_review_verdict_json 42
-)" 2>"$B12_ERR"
-B12_RC=$?
-assert_eq "$B12_OUT" "" "B12.root.retarget.out: retargeted root emits no receipt"
-assert_eq "$B12_RC" "2" "B12.root.retarget.rc: root identity drift → INDETERMINATE=2"
+# This case used the external `find` as a mid-scan timing hook to retarget the
+# root symlink. Issue #346 removed the subprocess, so no shell-reachable hook
+# exists inside the walk. Pin the checks the hook used to prove instead: the
+# root identity is snapshotted before the scan, re-verified immediately after,
+# and re-verified again across all roots once every capture completes.
+assert_grep "$LIB" 'lexical_before = raw_identity\(root_lexical_entry\)' \
+  "B12.root.retarget.snapshot: root identity is snapshotted before the scan"
+assert_grep "$LIB" 'raise VerdictError\(f"root identity drifted: \{root_name\}"\)' \
+  "B12.root.retarget.rc: root identity drift is INDETERMINATE, never absence"
+assert_grep "$LIB" '^def verify_bound_roots\(bound_roots\):' \
+  "B12.root.retarget.reverify: every bound root is re-verified after capture"
 rm -rf "$B12_RETARGET_A" "$B12_RETARGET_B"
 
 # A find result whose relative suffix attempts lexical traversal is
 # indeterminate, even when the command itself exits successfully.
 _b12_clear
 mkdir -p "$B12_SANDBOX/.worktrees"
-B12_TRAVERSAL_BIN="$B12_SANDBOX/fake-traversal-bin"
-mkdir -p "$B12_TRAVERSAL_BIN"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'printf ".worktrees/../escape/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json\\0"' \
-  'exit 0' \
-  > "$B12_TRAVERSAL_BIN/find"
-chmod +x "$B12_TRAVERSAL_BIN/find"
-B12_OUT="$(
-  cd "$B12_SANDBOX" &&
-  PATH="$B12_TRAVERSAL_BIN:$PATH" &&
-  export PATH &&
-  . "$LIB" &&
-  discover_review_verdict_json 42
-)" 2>"$B12_ERR"
-B12_RC=$?
-assert_eq "$B12_OUT" "" "B12.root.traversal.out: traversal-shaped find result emits no receipt"
-assert_eq "$B12_RC" "2" "B12.root.traversal.rc: traversal-shaped find result → INDETERMINATE=2"
+# This case injected a traversal-shaped path through the external `find`.
+# Since issue #346 the walk composes candidate paths itself from scandir names,
+# so a traversal suffix is unreachable by construction rather than merely
+# rejected. validate_suffix remains as defence in depth; what is tested here is
+# the property that makes traversal impossible -- descent never follows a link.
+B12_ESCAPE_TARGET="$(mktemp -d)"
+mkdir -p "$B12_ESCAPE_TARGET/.uberdev/runs/20260101-010101-a1"
+printf '{"pr":42,"sha":"%s"}\n' "$(printf 'a%.0s' $(seq 40))" \
+  >"$B12_ESCAPE_TARGET/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+ln -s "$B12_ESCAPE_TARGET" "$B12_SANDBOX/.worktrees/escape" 2>/dev/null || true
+if [ ! -L "$B12_SANDBOX/.worktrees/escape" ]; then
+  echo "  SKIP  B12.root.traversal: ln -s did not produce a symlink on this platform"
+else
+  B12_OUT="$(
+    cd "$B12_SANDBOX" &&
+    . "$LIB" &&
+    discover_review_verdict_json 42
+  )" 2>"$B12_ERR"
+  B12_RC=$?
+  assert_eq "$B12_OUT" "" "B12.root.traversal.out: a linked descendant emits no receipt"
+  assert_eq "$B12_RC" "1" "B12.root.traversal.rc: descent never follows a link out of the root"
+fi
+assert_grep "$LIB" 'find result escaped or violated the root layout' \
+  "B12.root.traversal.guard: the lexical-escape guard is retained as defence in depth"
+rm -rf "$B12_ESCAPE_TARGET"
 
 # A descendant worktree symlink is not followed by find -H.
 _b12_clear
