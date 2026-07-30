@@ -88,6 +88,129 @@ else
   rc=$?; echo "  FAIL  S3 scanner error must surface a distinct diagnostic and fail-CLOSED (sub-rc=$rc)"; FAIL=$((FAIL+1))
 fi
 
+# ---------------------------------------------------------------------------
+# S4-S7 — repo gitleaks config + line-level allowlist (#303).
+#
+# `gitleaks stdin` used to run with neither `--config` nor an inherited
+# `GITLEAKS_CONFIG`, so a repo `.gitleaks.toml` allowlist was silently ignored
+# and a false positive had NO escape hatch: the regex fallback fired regardless
+# and the push aborted with no way to proceed short of editing the library.
+#
+# S4/S6 pin the two layers to ONE exemption token. The gitleaks stub below
+# always exits 0 (i.e. "gitleaks says clean"), so those assertions are decided
+# purely by the regex fallback and hold identically on a host with gitleaks
+# installed and on CI where it is not — no conditional skips, no flake.
+# ---------------------------------------------------------------------------
+STUB_DIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 2; }
+STUB_REPO="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 2; }
+trap 'rm -rf "$STUB_DIR" "$STUB_REPO"' EXIT INT TERM
+
+cat > "$STUB_DIR/gitleaks" <<'STUB'
+#!/usr/bin/env bash
+# Records its argv, drains stdin, and reports CLEAN. Draining first keeps the
+# producing `printf` from taking an EPIPE.
+cat >/dev/null
+if [ -n "${GITLEAKS_ARGV_FILE:-}" ]; then
+  printf '%s\n' "$*" > "$GITLEAKS_ARGV_FILE"
+fi
+exit 0
+STUB
+chmod +x "$STUB_DIR/gitleaks"
+
+# The canonical AWS example key is assembled at runtime so this fixture never
+# carries the flaggable token contiguously (same rule as S2).
+EXAMPLE_KEY_HEAD='AKIA'
+EXAMPLE_KEY_TAIL='IOSFODNN7EXAMPLE'
+
+# S4 — line-level allowlist: a marked line is exempt, the identical unmarked
+# line still aborts. Both directions are asserted so the exemption cannot be
+# "passing" because the scanner stopped detecting anything at all.
+if ( PATH="$STUB_DIR:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+     EXAMPLE_KEY="$EXAMPLE_KEY_HEAD$EXAMPLE_KEY_TAIL" bash -c '
+      set -u
+      source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+      [ -n "${UBERDEV_SECRET_SCAN_ALLOW_MARKER:-}" ] || exit 1
+      marked="aws_key = \"$EXAMPLE_KEY\" # $UBERDEV_SECRET_SCAN_ALLOW_MARKER"
+      SCAN_DIAG=$(printf "%s\n" "$marked" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
+      [ "$SCAN_RC" -eq 0 ] || exit 2
+      plain="aws_key = \"$EXAMPLE_KEY\""
+      SCAN_DIAG=$(printf "%s\n" "$plain" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
+      [ "$SCAN_RC" -eq 1 ] || exit 3
+      # A marked line must not launder its NEIGHBOURS: an unmarked secret in the
+      # same payload still aborts.
+      SCAN_DIAG=$(printf "%s\n%s\n" "$marked" "$plain" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
+      [ "$SCAN_RC" -eq 1 ] || exit 4
+    ' ); then
+  echo "  PASS  S4 line-level allowlist exempts only the marked line"; PASS=$((PASS+1))
+else
+  rc=$?; echo "  FAIL  S4 line-level allowlist contract broken (sub-rc=$rc)"; FAIL=$((FAIL+1))
+fi
+
+# S5 — the repo `.gitleaks.toml` reaches gitleaks as `--config`. Without this
+# the repo's own allowlist was silently ignored.
+git -C "$STUB_REPO" init -q 2>/dev/null || { echo "FATAL: git init failed" >&2; exit 2; }
+printf '%s\n' 'title = "fixture"' > "$STUB_REPO/.gitleaks.toml"
+if ( cd "$STUB_REPO" && PATH="$STUB_DIR:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+     GITLEAKS_ARGV_FILE="$STUB_DIR/argv-repo" bash -c '
+      set -u
+      unset GITLEAKS_CONFIG
+      source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+      printf "%s\n" "clean line" | uberdev_run_secret_scan_stdin >/dev/null 2>&1 || exit 1
+      [ -f "$GITLEAKS_ARGV_FILE" ] || exit 2
+      argv=$(cat "$GITLEAKS_ARGV_FILE")
+      grep -q -- "--config " <<<"$argv" || exit 3
+      grep -q -- "/.gitleaks.toml" <<<"$argv" || exit 4
+    ' ); then
+  echo "  PASS  S5 repo .gitleaks.toml is passed to gitleaks as --config"; PASS=$((PASS+1))
+else
+  rc=$?; echo "  FAIL  S5 repo .gitleaks.toml is not honoured (sub-rc=$rc)"; FAIL=$((FAIL+1))
+fi
+
+# S6 — $GITLEAKS_CONFIG is the operator override and outranks the repo file;
+# with neither present no --config is invented (gitleaks keeps its defaults).
+if ( cd "$STUB_REPO" && PATH="$STUB_DIR:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" bash -c '
+      set -u
+      export GITLEAKS_CONFIG="$PWD/override.toml"
+      export GITLEAKS_ARGV_FILE="$PWD/argv-override"
+      source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+      printf "%s\n" "clean line" | uberdev_run_secret_scan_stdin >/dev/null 2>&1 || exit 1
+      grep -qF -- "--config $GITLEAKS_CONFIG" "$GITLEAKS_ARGV_FILE" || exit 2
+    ' ) \
+   && ( mkdir -p "$STUB_DIR/norepo" && cd "$STUB_DIR/norepo" \
+     && PATH="$STUB_DIR:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+        GITLEAKS_ARGV_FILE="$STUB_DIR/argv-none" \
+        GIT_CEILING_DIRECTORIES="$STUB_DIR" bash -c '
+      set -u
+      unset GITLEAKS_CONFIG
+      source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+      printf "%s\n" "clean line" | uberdev_run_secret_scan_stdin >/dev/null 2>&1 || exit 1
+      [ -f "$GITLEAKS_ARGV_FILE" ] || exit 2
+      grep -q -- "--config" "$GITLEAKS_ARGV_FILE" && exit 3
+      exit 0
+    ' ); then
+  echo "  PASS  S6 GITLEAKS_CONFIG outranks the repo file; no config -> no --config"; PASS=$((PASS+1))
+else
+  rc=$?; echo "  FAIL  S6 gitleaks config precedence broken (sub-rc=$rc)"; FAIL=$((FAIL+1))
+fi
+
+# S7 — every abort names the escape hatch. A fail-CLOSED scanner with an
+# undiscoverable exemption is an unrecoverable stop for the caller.
+if ( PATH="$STUB_DIR:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+     EXAMPLE_KEY="$EXAMPLE_KEY_HEAD$EXAMPLE_KEY_TAIL" bash -c '
+      set -u
+      source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || exit 99
+      SCAN_DIAG=$(printf "%s\n" "$EXAMPLE_KEY" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
+      [ "$SCAN_RC" -eq 1 ] || exit 1
+      case "$SCAN_DIAG" in *"$UBERDEV_SECRET_SCAN_ALLOW_MARKER"*) : ;; *) exit 2;; esac
+      case "$SCAN_DIAG" in *".gitleaks.toml"*) : ;; *) exit 3;; esac
+      # The hint must not masquerade as a scanner failure (S3 distinguishes them).
+      case "$SCAN_DIAG" in *"scanner failure"*) exit 4;; esac
+    ' ); then
+  echo "  PASS  S7 match diagnostic names the line marker and .gitleaks.toml"; PASS=$((PASS+1))
+else
+  rc=$?; echo "  FAIL  S7 abort diagnostic does not name the escape hatch (sub-rc=$rc)"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

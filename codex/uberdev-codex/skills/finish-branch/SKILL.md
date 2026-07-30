@@ -124,9 +124,15 @@ Both sections are read-only dumps; finish-branch does not block on confidence th
 # cross-process contract is the per-worktree sidecar written by orchestrator
 # Phase 0 — never a RUN_ID export. An in-process RUN_ID (same-agent chain) is
 # honoured first when it names a real run dir.
-# RUN_ID_FORMAT mirrors the orchestrator Phase 0 mint:
-# date +%Y%m%d-%H%M%S, then a hyphen, then short-SHA or the literal nohead.
-RUN_ID_FORMAT='^[0-9]{8}-[0-9]{6}-[0-9a-z]{4,40}$'
+# RUN_ID_FORMAT is the repo-wide run-id contract, NOT a finish-branch dialect.
+# Source of truth: RUN_ID_REGEX in skills/merge-pipeline/SKILL.md Constants
+# (^[0-9]{8}-[0-9]{6}-[a-f0-9]+$), enforced identically by lib/command-workspace.py,
+# commands/review-pr.md, commands/simplify.md, agents/findings-to-issues.md and
+# skills/merge-pipeline/lib/discover.sh. It matches the orchestrator Phase 0 mint:
+# date +%Y%m%d-%H%M%S, a hyphen, then the short SHA (or the 0000000 hex sentinel).
+# Do NOT widen this locally — a run-id that only finish-branch accepts resolves
+# here and is rejected as invalid_run_id by every other consumer (#345).
+RUN_ID_FORMAT='^[0-9]{8}-[0-9]{6}-[a-f0-9]+$'
 RESEARCH_ROOT="$(git rev-parse --show-toplevel)/.uberdev/research"
 ACTIVE_RUN_ID=""
 if [ -n "${RUN_ID:-}" ] && [[ "${RUN_ID}" =~ $RUN_ID_FORMAT ]] && [ -d "$RESEARCH_ROOT/${RUN_ID}" ]; then
@@ -316,12 +322,15 @@ PR_TITLE_EOF
 IFS= read -r PR_TITLE_VAR < "$TITLE_FILE" || { echo "ERROR: failed to read title file" >&2; rm -f "$TITLE_FILE" "$PR_BODY_FILE"; exit 1; }
 
 # Pre-push secret scan: layered defense (gitleaks primary + regex fallback)
-# over BOTH the to-be-pushed commit range AND the composed PR-body file. Either
-# hit aborts the push BEFORE any text reaches GitHub. Worktree is preserved for
-# investigation. The library signals leaks via non-zero exit code (matched
-# content streams to stderr for diagnostic capture). Callers MUST check the
-# exit code, NOT the captured stdout, because the library writes nothing to
-# stdout on either path.
+# over ALL THREE texts this step ships outward — the to-be-pushed commit range,
+# the composed PR-body file, AND the composed PR title. Any hit aborts the push
+# BEFORE any text reaches GitHub. The title is not optional coverage: `gh pr
+# create --title` publishes it exactly like `--body-file` publishes the body, so
+# an unscanned title was the same leak under a different field name (#303).
+# Worktree is preserved for investigation. The library signals leaks via non-zero
+# exit code (matched content streams to stderr for diagnostic capture). Callers
+# MUST check the exit code, NOT the captured stdout, because the library writes
+# nothing to stdout on either path.
 # Layered secret scan (gitleaks + regex fallback): sourced from shared library.
 # Source-time idempotency guard prevents double-load if any caller already sourced.
 source "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/secret-scan.sh"
@@ -335,6 +344,10 @@ abort_if_secret() {
   local scan_rc="$3"
   [[ "$scan_rc" -eq 0 ]] && return 0
   echo "ERROR: secret found in $label (rc=$scan_rc): $scan_diag" >&2
+  # Name the escape hatch by expanding the marker variable owned by the library
+  # rather than re-typing the literal — lib/secret-scan.sh holds the single
+  # definition, so the two can never drift apart.
+  echo "False positive? Exempt the individual line with the ${UBERDEV_SECRET_SCAN_ALLOW_MARKER} marker, or add an allowlist rule to the repo .gitleaks.toml." >&2
   echo "Push aborted. Worktree preserved. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
   exit 1
@@ -368,7 +381,15 @@ abort_if_secret "to-be-pushed diff" "$SCAN_DIAG" "$SCAN_RC"
 SCAN_DIAG=$(uberdev_run_secret_scan_stdin < "$PR_BODY_FILE" 2>&1 >/dev/null); SCAN_RC=$?
 abort_if_secret "composed PR body" "$SCAN_DIAG" "$SCAN_RC"
 
-# Both scans clean → push and create PR. Each step is exit-code-checked so a
+# Scan target 3: composed PR title. Scanned from $PR_TITLE_VAR (the exact bytes
+# handed to `gh pr create --title` below), not from $TITLE_FILE, so the scan and
+# the publish read the identical value — the read-back at the heredoc above
+# keeps only the first line, and scanning the file would cover text the title
+# never carries while missing nothing the title does.
+SCAN_DIAG=$(printf '%s\n' "$PR_TITLE_VAR" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
+abort_if_secret "composed PR title" "$SCAN_DIAG" "$SCAN_RC"
+
+# All three scans clean → push and create PR. Each step is exit-code-checked so a
 # failure surfaces explicitly (rather than silently proceeding to the next step).
 if ! git push -u origin <feature-branch>; then
   echo "ERROR: git push failed. Branch state preserved. Worktree retained. Investigate and rerun." >&2

@@ -754,12 +754,27 @@ _uberdev_semaphore_validate_lease_path() {
   scope_base="$(basename "$scope")"
   version_base="$(basename "$(dirname "$scope")")"
   lease_base="$(basename "$lease")"
+  # `grep -Eq` decides PER LINE, so a `^…$`-anchored pattern accepts a
+  # MULTI-LINE value as long as any one of its lines matches — while the
+  # variable keeps every line. LEASE_PATH is caller-supplied, so a path whose
+  # scope or filename component embeds a newline before a well-formed component
+  # (…/evil\n<64hex>.scope/…) would clear both patterns here and then be used
+  # verbatim as the mutex/lease path. Assert single-line text FIRST; only then
+  # is the anchored match a statement about the whole value.
+  _uberdev_semaphore_safe_text "$scope_base" || {
+    _uberdev_semaphore_error 'LEASE_PATH scope component must be single-line text'
+    return 2
+  }
   printf '%s\n' "$scope_base" | grep -Eq '^[0-9a-f]{64}\.scope$' || {
     _uberdev_semaphore_error 'LEASE_PATH is outside a semaphore scope'
     return 2
   }
   [ "$version_base" = 'semaphore-v1' ] || {
     _uberdev_semaphore_error 'LEASE_PATH has the wrong state version'
+    return 2
+  }
+  _uberdev_semaphore_safe_text "$lease_base" || {
+    _uberdev_semaphore_error 'LEASE_PATH filename must be single-line text'
     return 2
   }
   printf '%s\n' "$lease_base" | grep -Eq '^[0-9a-f]{64}\.lease$' || {
@@ -1320,6 +1335,20 @@ uberdev_semaphore_set_handle() {
     return 2
   }
   if [ -n "$backend_identity" ]; then
+    # Single-line assertion BEFORE the anchored match: `grep -Eq` is per-line,
+    # so `<pid>|<pgid>|<sid>|<sha256>\n<anything>` would satisfy the pattern on
+    # its first line while `${backend_identity%%|*}` still equals the pid. The
+    # value is written verbatim as `backend_identity=%s` into the lease record
+    # by _uberdev_semaphore_publish_lease, so an embedded newline forges an
+    # extra key=value line — poisoning every subsequent lease read (and, via
+    # _uberdev_semaphore_reconcile_locked's fail-closed "malformed lease" abort,
+    # bricking the whole scope). Unlike the lease-file readers, this value never
+    # passes through the newline-free `IFS= read -r` loop, so nothing else
+    # establishes the invariant.
+    _uberdev_semaphore_safe_text "$backend_identity" || {
+      _uberdev_semaphore_error 'BACKEND_IDENTITY must be single-line text'
+      return 2
+    }
     printf '%s\n' "$backend_identity" \
       | grep -Eq '^[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}$' || return 2
     [ "$handle_kind" != status-only ] && [ "$handle_kind" != opaque ] || return 2

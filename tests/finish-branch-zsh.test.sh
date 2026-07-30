@@ -158,9 +158,9 @@ fi
 # F1 — the section is NOT silently skipped: the heading + BOTH per-file
 # `### <basename>` sub-headers render. This is the assertion the zsh word-split
 # bug defeated (the body never ran, so nothing past the heading appeared).
-if printf '%s\n' "$RENDERED" | grep -qF '## Reviewer findings summary' \
-   && printf '%s\n' "$RENDERED" | grep -qF '### post-impl-review-final.md' \
-   && printf '%s\n' "$RENDERED" | grep -qF '### pr-test-analyzer.md'; then
+if grep -qF '## Reviewer findings summary' <<<"$RENDERED" \
+   && grep -qF '### post-impl-review-final.md' <<<"$RENDERED" \
+   && grep -qF '### pr-test-analyzer.md' <<<"$RENDERED"; then
   pass "F1: composer renders the section + both ### file headers under zsh (the read-loop word-splits the list)"
 else
   fail "F1: composer section/file-headers MISSING under zsh — the loop skipped the body (for-loop word-split regression?)"
@@ -168,15 +168,15 @@ else
 fi
 
 # F2 — the finding text from BOTH files survives into the rendered body.
-if printf '%s\n' "$RENDERED" | grep -qF '**blocker** `src/handler.ts:7` — Silent failure in handler' \
-   && printf '%s\n' "$RENDERED" | grep -qF 'FINDING-PTA: missing coverage on the new branch'; then
+if grep -qF '**blocker** `src/handler.ts:7` — Silent failure in handler' <<<"$RENDERED" \
+   && grep -qF 'FINDING-PTA: missing coverage on the new branch' <<<"$RENDERED"; then
   pass "F2: schema-v2 findings are human-rendered and legacy analyzer text survives under zsh"
 else
   fail "F2: v2 human summary or legacy analyzer text is missing under zsh"
   printf '        rendered=[%s]\n' "$(printf '%s' "$RENDERED" | tr '\n' '|')"
 fi
 
-if printf '%s\n' "$RENDERED" | grep -qF '"schema_version":2'; then
+if grep -qF '"schema_version":2' <<<"$RENDERED"; then
   fail "F2b: raw compact schema-v2 JSON leaked into the PR body"
 else
   pass "F2b: raw compact schema-v2 JSON is not pasted into the PR body"
@@ -185,7 +185,7 @@ fi
 # F3 — the envelope tag lines are STRIPPED (the headline behavior of the #302
 # pairing). Pure `<external-untrusted-input …>` / `</external-untrusted-input>`
 # lines must NOT survive into the PR body.
-if printf '%s\n' "$RENDERED" | grep -qE '<external-untrusted-input'; then
+if grep -qE '<external-untrusted-input' <<<"$RENDERED"; then
   fail "F3: envelope OPEN/CLOSE tag lines leaked into the rendered section (the sed strip did not run)"
   printf '        rendered=[%s]\n' "$(printf '%s' "$RENDERED" | tr '\n' '|')"
 else
@@ -213,7 +213,7 @@ OLD_RENDERED="$("$ZSH_BIN" -f -c '
     echo
   done
 ' 2>/dev/null)"
-if printf '%s\n' "$OLD_RENDERED" | grep -qF '### post-impl-review-final.md'; then
+if grep -qF '### post-impl-review-final.md' <<<"$OLD_RENDERED"; then
   fail "F4: the OLD for-loop shape rendered a file header under zsh — zsh word-split behavior changed; F1/F2 may be vacuous"
 else
   pass "F4: OLD for-loop shape skips the body under zsh (confirms F1/F2 assert the real fix, not shell luck)"

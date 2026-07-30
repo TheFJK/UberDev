@@ -81,10 +81,36 @@ fi
 windows_scope="$(printf 'a%.0s' {1..64}).scope"
 windows_lease="$(printf 'b%.0s' {1..64}).lease"
 capture _uberdev_semaphore_validate_lease_path "C:\\state/semaphore-v1/$windows_scope/$windows_lease"
-if [ "$CAPTURE_RC" -eq 2 ] && ! printf '%s' "$CAPTURE_OUT" | grep -q 'LEASE_PATH must be absolute'; then
+if [ "$CAPTURE_RC" -eq 2 ] && ! grep -q 'LEASE_PATH must be absolute' <<<"$CAPTURE_OUT"; then
   pass "native Windows lease paths advance past the absolute-path guard"
 else
   fail "native Windows lease paths advance past the absolute-path guard" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# `grep -Eq` decides PER LINE, so a `^…$`-anchored pattern accepts a MULTI-LINE
+# value whenever ANY single line matches — while the variable still carries every
+# line. LEASE_PATH is caller-supplied, so a scope or filename component that
+# embeds a newline in front of a well-formed component used to clear both
+# anchored patterns and be accepted verbatim. Both fixtures below materialise the
+# poisoned directory on disk so the pre-fix library returns 0 (accepted), not a
+# coincidental 2 from some later existence check — the assertions therefore lock
+# the guard, not the geometry.
+poison_hex_scope="$(printf 'a%.0s' {1..64}).scope"
+poison_hex_lease="$(printf 'b%.0s' {1..64}).lease"
+poison_scope_dir="$TMP/poison-scope/semaphore-v1/evil"$'\n'"$poison_hex_scope"
+mkdir -p "$poison_scope_dir"
+capture _uberdev_semaphore_validate_lease_path "$poison_scope_dir/$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'scope component must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "multi-line lease scope component is rejected before the anchored match"
+else
+  fail "multi-line lease scope component is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+poison_lease_dir="$TMP/poison-lease/semaphore-v1/$poison_hex_scope"
+mkdir -p "$poison_lease_dir"
+capture _uberdev_semaphore_validate_lease_path "$poison_lease_dir/evil"$'\n'"$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'filename must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "multi-line lease filename is rejected before the anchored match"
+else
+  fail "multi-line lease filename is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 absolute_failures=''
 for candidate in '/tmp/state' 'C:/state' 'C:\state' 'C:/' 'C:\'; do
@@ -140,7 +166,7 @@ capture /bin/bash -c '
   printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_runtime_state_failed ]
 ' _ "$LIB" "$TMP/reason-probe"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_runtime_state_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_runtime_state_failed' <<<"$CAPTURE_OUT"; then
   pass "acquisition exports a bounded runtime-state failure reason"
 else
   fail "acquisition exports a bounded runtime-state failure reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -212,7 +238,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_publish_failed ] \
     && ! find "$2" -name '\''*.lease'\'' -type f -print 2>/dev/null | grep -q .
 ' _ "$LIB" "$TMP/publish-then-fail"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_publish_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_publish_failed' <<<"$CAPTURE_OUT"; then
   pass "post-publication writer failure rolls back the acquired generation"
 else
   fail "post-publication writer failure rolls back the acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -235,7 +261,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_rollback_failed ] \
     && [[ "$replacement" =~ ^/.+\.lease$'\''\t'\''[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]
 ' _ "$LIB" "$TMP/publish-rollback-failure"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_rollback_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_rollback_failed' <<<"$CAPTURE_OUT"; then
   pass "failed post-publication rollback returns the retained lease capability"
 else
   fail "failed post-publication rollback returns the retained lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -259,8 +285,8 @@ for release_stage in count allocation owner; do
       && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_mutex_release_failed ]
   ' _ "$LIB" "$TMP/release-failure-$release_stage" "$release_stage"
   if [ "$CAPTURE_RC" -eq 0 ] \
-      && printf '%s' "$CAPTURE_OUT" | grep -q 'cannot release acquisition mutex' \
-      && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_mutex_release_failed'; then
+      && grep -q 'cannot release acquisition mutex' <<<"$CAPTURE_OUT" \
+      && grep -q 'reason=lease_acquire_mutex_release_failed' <<<"$CAPTURE_OUT"; then
     pass "$release_stage failure preserves the mutex-release diagnostic and reason"
   else
     fail "$release_stage failure preserves the mutex-release diagnostic and reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -295,7 +321,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ -f "$lease" ] && [ -n "$replacement" ] \
     && [ "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}" = lease_handle_rollback_failed ]
 ' _ "$LIB" "$TMP/set-handle-rollback-capability" "$FIXTURES/running-status.json"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_handle_rollback_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_handle_rollback_failed' <<<"$CAPTURE_OUT"; then
   pass "failed handle rollback preserves the replacement lease capability"
 else
   fail "failed handle rollback preserves the replacement lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -399,7 +425,7 @@ fi
 semaphore_identity="$(_uberdev_semaphore_process_identity "$$")"
 manifest_identity="$(python3 -I -B "$MANIFEST" process-identity --pid "$$")"
 if [ "$semaphore_identity" = "$manifest_identity" ] \
-    && printf '%s' "$semaphore_identity" | grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$"; then
+    && grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$" <<<"$semaphore_identity"; then
   pass "semaphore and manifest share one kernel process identity"
 else
   fail "shared kernel process identity" "semaphore=$semaphore_identity manifest=$manifest_identity"
@@ -521,6 +547,23 @@ if [ "$CAPTURE_RC" -eq 2 ] && ! grep -q '^timeout_s=1$' "$lease_handle"; then
   pass "status path newline injection cannot rewrite lease fields"
 else
   fail "status path newline injection cannot rewrite lease fields" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# BACKEND_IDENTITY is the sibling injection vector: it is caller-supplied, is
+# written verbatim as `backend_identity=%s` by _uberdev_semaphore_publish_lease,
+# and — unlike every lease FIELD — never passes through the newline-free
+# `IFS= read -r` loop that establishes single-line-ness for the readers. Its
+# `grep -Eq` validation matches per line, so a well-formed first line used to
+# smuggle arbitrary extra `key=value` records into the published lease, which
+# then trips _uberdev_semaphore_reconcile_locked's fail-closed "malformed lease"
+# abort and bricks the whole scope.
+poison_backend_identity="$(_uberdev_semaphore_process_identity "$$")"$'\nowner_pid=999999'
+capture uberdev_semaphore_set_handle "$lease_handle" "$$" "$status_path" '' '' "$poison_backend_identity"
+if [ "$CAPTURE_RC" -eq 2 ] \
+   && ! grep -q '^owner_pid=999999$' "$lease_handle" \
+   && _uberdev_semaphore_read_lease "$lease_handle"; then
+  pass "backend identity newline injection cannot forge lease records"
+else
+  fail "backend identity newline injection cannot forge lease records" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 capture uberdev_semaphore_acquire "$HANDLE_STATE" repo codex 1 run-handle 5
 if [ "$CAPTURE_RC" -ne 0 ]; then
@@ -1110,7 +1153,7 @@ _uberdev_semaphore_process_identity() {
 }
 capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
 if [ "$CAPTURE_RC" -eq 2 ] && [ -f "$lease_identity_path" ] \
-    && printf '%s' "$CAPTURE_OUT" | grep -q 'process identity probe unavailable'; then
+    && grep -q 'process identity probe unavailable' <<<"$CAPTURE_OUT"; then
   pass "unavailable backend identity probe retains lifecycle capacity with an error"
 else
   fail "unavailable backend identity probe retains lifecycle capacity with an error" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
