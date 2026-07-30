@@ -1606,6 +1606,52 @@ rm -f "$B12_ERR"
 rm -rf "$B12_SANDBOX"
 
 echo
+echo "== B15: an unloadable secure runtime is INDETERMINATE, never proven absence =="
+# Regression for the fail-open funnel: the selector maps interpreter rc 1 to
+# "exhaustive ABSENT", but 1 is also CPython's code for any unhandled exception.
+# With the module load unguarded, a missing/partial run_manifest.py exited 1 and
+# /merge read ABSENT as gate_pass -- landing a PR whose verdict it never read.
+B15_ROOT="$(mktemp -d)"
+mkdir -p "$B15_ROOT/skills/merge-pipeline/lib" "$B15_ROOT/lib" "$B15_ROOT/work"
+cp "$LIB" "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+# NOTE: $B15_ROOT/lib/run_manifest.py is deliberately absent.
+(
+  cd "$B15_ROOT/work" && git init -q .
+  . "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+  discover_review_verdict_json 340
+) >/dev/null 2>&1
+assert_eq "$?" "2" "B15.runtime-missing: unloadable artifact runtime → INDETERMINATE=2 (never ABSENT=1)"
+(
+  cd "$B15_ROOT/work" && . "$B15_ROOT/skills/merge-pipeline/lib/discover.sh"
+  review_verdict_discovery_state 2
+) >"$B15_ROOT/state" 2>/dev/null
+assert_eq "$(cat "$B15_ROOT/state")" "indeterminate" "B15.state: rc 2 maps to indeterminate"
+rm -rf "$B15_ROOT"
+
+echo
+echo "== B16: the selector receipt carries phase2_5_halted_due_to_overflow =="
+# Regression for the dead /goal blocker-overflow gate: the field was absent from
+# the receipt entirely, so overflow_detected could never reach 1 and the Phase 3
+# truncation was unreachable code.
+B16_ROOT="$(mktemp -d)"
+mkdir -p "$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01"
+B16_SHA="$(printf 'a%.0s' $(seq 40))"
+printf '{"pr":340,"sha":"%s","phases":{"phase2_5":{"halted":false,"halted_due_to_overflow":true,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+B16_RECEIPT="$( cd "$B16_ROOT" && git init -q . 2>/dev/null; cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 340 2>/dev/null )"
+B16_RC=$?
+assert_eq "$B16_RC" "0" "B16.found: verdict carrying halted_due_to_overflow is discoverable"
+assert_eq "$(printf '%s' "$B16_RECEIPT" | jq -r '.phase2_5_halted_due_to_overflow')" "true" \
+  "B16.overflow-true: receipt carries phase2_5_halted_due_to_overflow=true"
+# A verdict without the field must default to false, not null/absent.
+printf '{"pr":341,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+B16_RECEIPT2="$( cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 341 2>/dev/null )"
+assert_eq "$(printf '%s' "$B16_RECEIPT2" | jq -r '.phase2_5_halted_due_to_overflow')" "false" \
+  "B16.overflow-default: absent halted_due_to_overflow defaults to false"
+rm -rf "$B16_ROOT"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

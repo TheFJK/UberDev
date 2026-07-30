@@ -3512,6 +3512,42 @@ fi
 rm -rf "$G49_TMP"
 
 echo
+echo "== BT61: an unreadable PR head can never yield a merge-authorising colour =="
+# Regression: the closed-receipt branch warned and FELL THROUGH to the colour
+# decision when `gh pr view ... headRefOid` failed or returned empty, so a
+# rate-limited or offline gh could report green for a verdict bound to a
+# superseded SHA -- and /goal auto-merges on green. It must report stale.
+BT61_TMP="$(mktemp -d)"
+mkdir -p "$BT61_TMP/.uberdev/runs/20260305-090000-abcdef01"
+cat > "$BT61_TMP/.uberdev/runs/20260305-090000-abcdef01/review-pr-verdict.json" <<'EOF'
+{"pr":900,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+EOF
+BT61_RECEIPT="$(cd "$BT61_TMP" && uberdev_goal_locate_review_pr_audit_by_pr 900 2>/dev/null)"
+if [ -z "$BT61_RECEIPT" ]; then
+  printf '  FAIL  %s\n' "BT61.setup — could not build a closed receipt"
+  FAIL=$((FAIL + 1))
+else
+  # Control: with a matching head the same receipt is green, so the assertions
+  # below prove the gh-failure branch specifically, not a broken fixture.
+  BT61_OK="$(
+    gh() { case "$1 $2" in "pr view") printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;; *) return 0 ;; esac; }
+    uberdev_goal_read_trust_signal "$BT61_RECEIPT" 2>/dev/null
+  )"
+  assert_eq "$BT61_OK" "green" "BT61.control — matching head still reports green"
+  BT61_RC1="$(
+    gh() { case "$1 $2" in "pr view") return 1 ;; *) return 0 ;; esac; }
+    uberdev_goal_read_trust_signal "$BT61_RECEIPT" 2>/dev/null
+  )"
+  assert_eq "$BT61_RC1" "stale" "BT61.gh-nonzero — gh failure reports stale, never green"
+  BT61_EMPTY="$(
+    gh() { case "$1 $2" in "pr view") printf '' ;; *) return 0 ;; esac; }
+    uberdev_goal_read_trust_signal "$BT61_RECEIPT" 2>/dev/null
+  )"
+  assert_eq "$BT61_EMPTY" "stale" "BT61.gh-empty — empty headRefOid reports stale, never green"
+fi
+rm -rf "$BT61_TMP"
+
+echo
 echo "== Summary =="
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 
