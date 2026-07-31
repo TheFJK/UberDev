@@ -4,6 +4,17 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.6] — 2026-07-30
+
+### Fixed
+
+- RFC prose named symbols that resolve nowhere. Two identifiers cited as live fan-out sites were retired by the scan-fleet and testers-pipeline Workflow migrations, and one `workflow.js` was labelled "as shipped" while no such file exists on disk. All now cite the shipped replacements, verified against the real call sites.
+- Documentation that hand-enumerated the CI jobs was guarded in only one of the two files that do it, and the job-count assertion could not match the phrasing the docs actually used.
+
+### Tests
+
+- Replaced hand-maintained doc lists with **derived** guards: every identifier-shaped backticked token in RFC 0012 §1 must resolve in the tree, and every `skills/*/workflow.js` path the RFC names must exist if the line calls it shipped — so a new dead reference reds without anyone extending a list. Assertions now match word-bounded, so renaming a symbol no longer counts as resolved, and the trust-table guard slices data rows rather than grepping prose that names the emitter deliberately.
+
 ## [0.41.5] — 2026-07-30
 
 ### Added
