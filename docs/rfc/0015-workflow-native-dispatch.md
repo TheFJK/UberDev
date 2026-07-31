@@ -327,6 +327,43 @@ Every loss below is **printed, never silent** — in this section, in
 
 ---
 
+## 6b. The args-shape contract (added v0.42.2 — read before writing a workflow.js)
+
+**The runtime hands `args` to a `scriptPath` workflow as a JSON STRING, not a parsed object.**
+Probed live 2026-07-31 with a no-agent workflow that reported `typeof args`:
+
+```
+argsType:           "string"
+shippedGuardResult: "NOT-OBJECT — guard yields {} and the pipeline no-ops"
+parsesAsJson:       true
+```
+
+Every script shipped through v0.42.1 opened with
+`const A = (args && typeof args === "object") ? args : {};`. Under a string that guard falls
+through to `{}`, so **every migrated pipeline — `/ubergoal`, the `/solve`+`/turbo` fleet,
+`/uberscan`, `/ubersimplify`, `/testers`, `/uberthink` — returned success having dispatched
+nothing.** A `/ubergoal` run finished in 5 ms with zero agents and an empty journal.
+
+Three things made this survive nine releases:
+
+1. **The failure mode is a silent no-op, not a throw.** The script completes, returns a
+   well-formed result, and exits 0. Nothing looks wrong.
+2. **The test harness modelled the runtime incorrectly.** `tests/_workflow_harness.js` passed
+   `args` as a parsed object, so the suite was green while production was dead. A test oracle
+   that models the runtime wrongly is worse than no oracle — it certifies the bug.
+3. **Running both shapes is not sufficient on its own.** Verified: reverting a script to the
+   object-only guard and re-running the harness under a string envelope still PASSED, because a
+   no-op raises no error. Only requiring *proof of consumption* catches it.
+
+The contract is therefore enforced three ways:
+
+- every `workflow.js` carries the byte-identical `// === SHARED:args-envelope v1 ===` block,
+  which accepts a string or an object and treats unparseable input as absent;
+- `validate` runs every script under **both** shapes;
+- `GENERIC_ARGS.run_id` is a sentinel that must appear in the script's observable output
+  (logs, agent prompts, nested `workflow()` calls), proving the envelope was read. Mutation-
+  verified against all five scripts: restoring the object-only guard reds each one.
+
 ## 7. Rejected alternatives
 
 - **Delete `claude-bg` outright.** Rejected: it is ~170 lines of mature,
