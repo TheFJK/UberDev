@@ -613,7 +613,13 @@ try:
  if (stat.S_ISLNK(carrier_entry.st_mode) or not stat.S_ISDIR(carrier_entry.st_mode)
      or (uid is not None and carrier_entry.st_uid!=uid)): fail('unsafe-artifact')
  children_root=os.path.join(carrier_run,'children')
- ledger_payload=capture(artifacts,ledger,1,1048576,'malformed-ledger')[0]
+ # A ledger the wave never wrote, a well-formed ledger that is short of the
+ # roster, and a ledger whose bytes are damaged demand three different
+ # investigations, so they carry three different classes. An empty ledger is
+ # therefore captured (floor 0) and classed by the roster check below rather
+ # than rejected as corruption.
+ if not os.path.lexists(ledger): fail('ledger-absent')
+ ledger_payload=capture(artifacts,ledger,0,1048576,'malformed-ledger')[0]
  rows=json_lines(ledger_payload)
  launched=[]; launch_payloads=[]
  for source in (initial_ledger,repair_ledger):
@@ -621,6 +627,7 @@ try:
    source_payload=capture(artifacts,source,0,1048576,'malformed-ledger')[0]
    launch_payloads.append(source_payload); launched.extend(json_lines(source_payload))
  allowed_pairs={(edge,index) for index,edge in enumerate(allowed,1)}
+ if len(rows)<expected: fail('incomplete-roster')
  if (len(rows)!=expected or len({row.get('edge') for row in rows})!=expected
      or len({row.get('index') for row in rows})!=expected
      or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
@@ -1073,9 +1080,17 @@ opens a ledger, snapshot, child-owned `validated-result.md`, or provider-owned
 captured bytes. Failed attempts remain isolated under their unique attempt
 identity; retries create a fresh identity and never unlink or remove a
 pathname after a separate identity check. Evidence failures emit only the stable class
-`malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
-`duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
-path or reviewer content).
+`ledger-absent`, `incomplete-roster`, `malformed-ledger`, `roster-mismatch`,
+`unsafe-artifact`, `duplicate-artifact`, or `digest-mismatch` plus the bounded
+edge/index (never a path or reviewer content). The first three are deliberately
+distinct because they demand different investigations: `ledger-absent` means the
+validated ledger was never written at all, `incomplete-roster` means it is
+well-formed but carries fewer rows than the reviewer roster — a supervision
+shortfall, i.e. a reviewer child that failed, timed out, or was unwound — and
+`malformed-ledger` is reserved for damaged bytes or a violated row schema.
+Reporting a short-but-intact ledger as `malformed-ledger` made a lifecycle
+shortfall indistinguishable from ledger corruption and trained readers to
+re-run instead of investigate (#365).
 
 Pass the 6 captured `POST_REVIEW_AGGREGATION_INPUT.rows` to
 `post_review_write_aggregate_v2`. The deterministic writer re-validates the
