@@ -731,10 +731,44 @@ if command -v zsh >/dev/null 2>&1; then
     "S14.8 zsh resolves the reservation age instead of degrading to age-unknown"
   assert_in "$XS_ZSH" 'in flight for PR #401 — wait for it' \
     "S14.9 zsh hints 'wait', never '/uberdev:review-pr 401', for a FRESH reservation"
-  assert_in "$XS_ZSH" '#310 (pushed-reviewing|solving) \(age [0-9]+s\)' \
+  assert_in "$XS_ZSH" '#310 solving \(age [0-9]+s\)' \
     "S14.10 zsh resolves the goal TSV ages through awk (awk is external too)"
+
+  # The inversion has two directions and both are harmful: live-read-as-stale
+  # tells the operator to steal a lock, stale-read-as-live tells them to wait on
+  # a run that already died. The first render above pins the live branch; age
+  # the same markers and re-run both shells to pin the stale/abandoned branch.
+  touch -t 202001010000 "$LOCK_DIR/heartbeat"
+  touch -t 202001010000 "$RUNS/20260730-120000-aaaaaaa/locked"
+  RENDER_SHELL="bash"
+  render xshell-aged-bash
+  XS_AGED_BASH="$RENDER_OUT"
+  RENDER_SHELL="zsh"
+  render xshell-aged-zsh
+  XS_AGED_ZSH="$RENDER_OUT"
+  RENDER_SHELL="bash"
+
+  normalise_ages "$XS_AGED_BASH" "$XS_AGED_BASH.norm"
+  normalise_ages "$XS_AGED_ZSH" "$XS_AGED_ZSH.norm"
+  if diff -u "$XS_AGED_BASH.norm" "$XS_AGED_ZSH.norm" > "$TMPROOT/xshell-aged.diff" 2>&1; then
+    pass "S14.11 the aged-marker census is byte-identical under bash and zsh"
+  else
+    fail "S14.11 the aged-marker census is byte-identical under bash and zsh"
+    sed -n '1,60p' "$TMPROOT/xshell-aged.diff" | sed 's/^/        /'
+  fi
+  # A NUMERIC heartbeat age proves the stale verdict came from the comparison,
+  # not from the "heartbeat missing or unreadable" fallback a broken `stat`
+  # would take — the two render the same word but mean opposite things.
+  assert_in "$XS_AGED_ZSH" 'STALE \(heartbeat [0-9]+s >= 900s\)' \
+    "S14.12 zsh reaches the stale verdict by COMPARING the age, not by failing to read it"
+  assert_in "$XS_AGED_ZSH" 're-enter: /uberdev:merge' \
+    "S14.13 zsh hands a genuinely stale lock back to its owning command"
+  assert_in "$XS_AGED_ZSH" '20260730-120000-aaaaaaa  pr=401  age=[0-9]+s  ABANDONED' \
+    "S14.14 zsh classifies a marker past the reap window ABANDONED with a numeric age"
+  assert_not_in "$XS_AGED_ZSH" 'in flight for PR #401 — wait for it' \
+    "S14.15 zsh does not report an abandoned reservation as still in flight"
 else
-  for n in 0 1 2 3 4 5 6 7 8 9 10; do
+  for n in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     pass "S14.$n skipped — zsh not installed on this host"
   done
 fi
