@@ -66,7 +66,7 @@ CI is light by design (this plugin is markdown + shell scripts, not a build pipe
 
 ## Local testing
 
-`plugins/uberdev/docs/testing.md` documents the `tests/*.test.sh` shape-check harness and the two-job CI matrix — read it before adding or changing a test, and run the affected tests after non-trivial changes to `/solve`, `/issue`, or any skill that the spawned agents invoke.
+`plugins/uberdev/docs/testing.md` documents the `tests/*.test.sh` shape-check harness and the CI job layout — read it before adding or changing a test, and run the affected tests after non-trivial changes to `/solve`, `/issue`, or any skill that the spawned agents invoke.
 
 For pure markdown / docs edits, install the plugin locally and confirm the affected command or skill loads without warning (`/plugin` → Installed → `uberdev` shows no errors).
 
@@ -78,7 +78,7 @@ For pure markdown / docs edits, install the plugin locally and confirm the affec
 bash tests/<name>.test.sh
 ```
 
-…or run the whole suite the way CI does (the `*-zsh.test.sh` fixtures — `solve-pipeline-zsh`, `goal-state-zsh`, `goal-pipeline-zsh` — run under `zsh`; everything else under `bash`. `tests/ci-wiring.test.sh` asserts every file on disk is wired into both CI jobs):
+…or run the whole suite the way CI does (every `tests/*-zsh.test.sh` fixture runs under `zsh`; everything else under `bash`. `tests/ci-wiring.test.sh` asserts every file on disk is wired into both shape-check jobs — do not hand-enumerate the zsh fixtures here, the glob is the contract):
 
 ```bash
 for t in tests/*.test.sh; do
@@ -90,7 +90,7 @@ for t in tests/*.test.sh; do
 done
 ```
 
-These run in CI on every push and PR via the two-job matrix in `.github/workflows/test.yml` (`shape-checks` on `ubuntu-latest` runs the full suite; `shape-checks-windows` on `windows-latest` / Git Bash runs it minus the Unix-only runtime fixtures). Most checks are structural greps against prompt and lib files, but the suite **does** include runtime behavioral fixtures (`solve-pipeline-zsh.test.sh`, `goal.test.sh` BT84/BT85, `config-override.test.sh`) and the release-ratchet version-lock tests (`goal.test.sh` G20, `solve-claim.test.sh`) that turn CI red on a missed version bump — so don't skip the full run before a release.
+These run in CI on every push to `main` and every PR via the jobs declared in `.github/workflows/test.yml` — `shape-checks` (`ubuntu-latest`) runs the full suite, `shape-checks-windows` (`windows-latest` / Git Bash) runs it minus the Unix-only runtime fixtures, and `supervision-smoke-macos` (`macos-latest`) runs a short focused dispatch-supervision list. A job may execute its list as one sequential step or fan it out across cost-balanced shards; wiring is per JOB, not per shard, so a test wired into any shard of `shape-checks` counts as wired. `plugins/uberdev/docs/testing.md` carries the full layout and is the surface `tests/docs-accuracy.test.sh` pins against `test.yml`. Most checks are structural greps against prompt and lib files, but the suite **does** include runtime behavioral fixtures (`solve-pipeline-zsh.test.sh`, `goal.test.sh` BT84/BT85, `config-override.test.sh`) and the release-ratchet version-lock tests (`goal.test.sh` G20, `solve-claim.test.sh`) that turn CI red on a missed version bump — so don't skip the full run before a release.
 
 ---
 
