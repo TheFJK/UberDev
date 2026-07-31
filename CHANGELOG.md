@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.2] — 2026-07-31
+
+### Fixed
+
+- **Every Workflow-native pipeline silently did nothing.** The runtime hands `args` to a `scriptPath` workflow as a JSON **string**, but all five shipped `workflow.js` scripts opened with `const A = (args && typeof args === "object") ? args : {}` — so the envelope fell through to `{}` and `/ubergoal`, the `/solve`+`/turbo` solver fleet, `/uberscan`, `/ubersimplify`, `/testers` and `/uberthink` all returned **success having dispatched nothing**. A `/ubergoal` run finished in 5 ms with zero agents and an empty journal. Every script now carries a shared normaliser that accepts a string or an object and treats unparseable input as absent.
+
+### Tests
+
+- `tests/_workflow_harness.js` was the reason this survived nine releases: it passed `args` as a parsed **object**, so the suite stayed green while production was dead. It now runs every script under **both** shapes.
+- Running both shapes is not sufficient on its own, and that was verified rather than assumed: reverting a script to the object-only guard still **passed** the both-shapes run, because a silent no-op raises no error. So `validate` also requires proof of consumption — `GENERIC_ARGS.run_id` is a sentinel that must appear in the script's observable output. Mutation-verified against all five scripts: restoring the old guard reds each one.
+- Added `T2/T3.c1b`, a control fixture that guards with `typeof args === "object"` and must be **rejected**, so the exact shipped bug cannot return.
+
+### Documentation
+
+- RFC 0015 gains §6b, the args-shape contract: what the runtime actually passes, why a silent no-op outlived nine releases, and the three enforcement points.
+
 ## [0.42.1] — 2026-07-31
 
 ### Fixed

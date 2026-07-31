@@ -47,7 +47,28 @@ export const meta = { "name": "scan-fleet", "description": "Shared whole-codebas
 // (run_id, plugin_root, repo_root, cwd) + locked v/now_*/pipeline sit top-level;
 // everything the preflight emits lands under .config. Normalize both into one
 // view (the testers-pipeline/workflow.js:42-51 idiom).
-const A = (args && typeof args === "object") ? args : {};
+// === SHARED:args-envelope v1 ===
+// The runtime hands `args` to a scriptPath workflow as a JSON **string**, not a
+// parsed object (probed live 2026-07-31: `typeof args === "string"`). Every
+// script here previously guarded with `typeof args === "object"`, so `args`
+// fell through to `{}` and the whole pipeline SILENTLY no-opped — returning
+// success, zero agents, empty result. That is the worst failure mode there is,
+// and it affected every migrated pipeline at once.
+//
+// Accept BOTH shapes: a future runtime (or the test harness) may hand over a
+// real object, and a script must not care which. A string that does not parse
+// is treated as absent rather than thrown on, so the script still reaches its
+// own explicit "nothing to do" guard and reports it, instead of dying in the
+// prologue where there is no structured result yet.
+function _uberdevNormalizeArgs(raw) {
+  var v = raw;
+  if (typeof v === "string") {
+    try { v = JSON.parse(v); } catch (e) { return {}; }
+  }
+  return (v && typeof v === "object") ? v : {};
+}
+// === END SHARED ===
+const A = _uberdevNormalizeArgs(args);
 const CFG = (A.config && typeof A.config === "object") ? A.config : {};
 
 const mode = (CFG.mode === "simplify") ? "simplify" : "scan";   // default-closed to read-only scan

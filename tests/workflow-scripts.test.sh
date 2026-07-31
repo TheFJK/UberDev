@@ -260,13 +260,41 @@ GOOD_FLOW="$TMPDIR_FIXTURES/good-flow.js"
   echo 'export const meta = { "name": "cli-control", "description": "harness CLI control fixture", "phases": ["Solo"] };'
   echo '/* META-END */'
   echo 'phase("Solo");'
+  # The fixture must CONSUME its args, because that is now part of the contract
+  # it is controlling for: the runtime passes `args` as a JSON string, and the
+  # harness requires proof the envelope was read (a script that drops it
+  # silently no-ops rather than failing). Normalising both shapes here is the
+  # same two lines every shipped workflow.js carries.
+  echo 'const _a = (typeof args === "string") ? JSON.parse(args) : (args || {});'
   echo 'const r = await agent("control prompt", { label: "ctl" });'
-  echo 'log("done:" + JSON.stringify(r));'
+  echo 'log("run:" + (_a.run_id || "") + " done:" + JSON.stringify(r));'
 } > "$GOOD_FLOW"
 if node "$HARNESS" validate "$GOOD_FLOW" >/dev/null 2>&1; then
   pass "T2/T3.c1 harness validate exits 0 on a conforming script"
 else
   fail "T2/T3.c1 harness validate rejected a conforming control fixture"
+fi
+
+# T2/T3.c1b — the args-consumption oracle must RED on a script that guards with
+# `typeof args === "object"`. That guard is what shipped in every workflow.js
+# through v0.42.1: the runtime passes args as a JSON STRING, so the guard fell
+# through to {} and every migrated pipeline returned success having dispatched
+# nothing. Running both arg shapes does NOT catch it on its own (a silent no-op
+# raises no error) — only requiring proof of consumption does.
+ARGS_DROPPER="$TMPDIR_FIXTURES/args-dropper.js"
+{
+  echo '/* META-BEGIN */'
+  echo 'export const meta = { "name": "args-dropper", "description": "object-only args guard", "phases": ["Solo"] };'
+  echo '/* META-END */'
+  echo 'const A = (args && typeof args === "object") ? args : {};'
+  echo 'phase("Solo");'
+  echo 'await agent("control prompt", { label: "ctl" });'
+  echo 'log("run:" + (A.run_id || ""));'
+} > "$ARGS_DROPPER"
+if node "$HARNESS" validate "$ARGS_DROPPER" >/dev/null 2>&1; then
+  fail "T2/T3.c1b args-consumption oracle MISSED an object-only args guard (the v0.42.1 silent-no-op bug would ship again)"
+else
+  pass "T2/T3.c1b args-consumption oracle reds on an object-only args guard"
 fi
 
 BAD_META="$TMPDIR_FIXTURES/bad-meta.js"

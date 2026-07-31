@@ -960,9 +960,22 @@ async function selfTest() {
 // Minimal args envelope for generic `validate` runs (per-pipeline T3 fixtures
 // with real canned returns land WITH each migrated-pipeline PR per RFC 0012
 // §9; the carrier ships the generic dry-run + the self-tests above).
+//
+// ARGS SHAPE — this harness got this WRONG and it cost the whole migration.
+// It handed `args` to every script as a parsed OBJECT, so the suite stayed
+// green while the real runtime handed over a JSON **STRING** and every shipped
+// pipeline silently no-opped (probed live 2026-07-31). A test oracle that
+// models the runtime incorrectly is worse than no oracle: it certifies the bug.
+// `validate` now runs each script under BOTH shapes and requires both to pass,
+// so a script that handles only one is a red test.
+// Sentinel run_id — the consumption oracle in `validate` requires this exact
+// string to appear in a script's observable output, proving it parsed the
+// envelope instead of silently falling through to an empty default.
+const ARGS_SENTINEL = 'workflow-harness-args-sentinel-7f3a';
+
 const GENERIC_ARGS = {
   v: 1,
-  run_id: 'workflow-harness-dry-run',
+  run_id: ARGS_SENTINEL,
   now_epoch: 0,
   now_iso: '1970-01-01T00:00:00Z',
   plugin_root: '/workflow-harness/plugin_root',
@@ -993,13 +1006,47 @@ async function main() {
     let failures = 0;
     for (const file of rest) {
       const source = readFileOrExit(file);
-      const { errors } = await runScript(source, { args: GENERIC_ARGS }, path.basename(file), DEFAULT_RUN_TIMEOUT_MS);
-      if (errors.length === 0) {
-        console.log(`  PASS  validate ${file}`);
+      // Both shapes, every script, every run. `string` is what the live runtime
+      // actually passes; `object` is what a future runtime (and every existing
+      // per-pipeline fixture) may pass. A script must be indifferent.
+      const shapes = [
+        ['string', JSON.stringify(GENERIC_ARGS)],
+        ['object', GENERIC_ARGS],
+      ];
+      const shapeErrors = [];
+      for (const [shapeName, argsValue] of shapes) {
+        const { errors, record } = await runScript(
+          source, { args: argsValue }, `${path.basename(file)} [args:${shapeName}]`, DEFAULT_RUN_TIMEOUT_MS);
+        for (const e of errors) shapeErrors.push(`[args:${shapeName}] ${e}`);
+        // CONSUMPTION ORACLE — the load-bearing half. Running both shapes is
+        // NOT enough on its own: the real failure is a SILENT NO-OP, not a
+        // throw, so a script that drops its args still "passes" a
+        // dry-run-completes check. (Verified: reverting a script to the
+        // object-only guard passed the both-shapes run cleanly.)
+        //
+        // So require PROOF the envelope was actually read: GENERIC_ARGS carries
+        // a sentinel run_id, and every workflow script surfaces its runId in a
+        // log line and/or its WORKFLOW_RESULT. If args never parsed, runId is
+        // "" and the sentinel cannot appear anywhere in the observable output.
+        const observable = JSON.stringify({
+          logs: record.logs,
+          agentCalls: record.agentCalls.map((c) => ({ label: c.label, prompt: c.prompt })),
+          workflowCalls: record.workflowCalls,
+        });
+        if (observable.indexOf(ARGS_SENTINEL) < 0) {
+          shapeErrors.push(
+            `[args:${shapeName}] script never surfaced the args sentinel (${ARGS_SENTINEL}) in any log, `
+            + `agent prompt or nested workflow call — the envelope was not consumed. The runtime passes `
+            + `args as a JSON STRING; a \`typeof args === "object"\` guard drops it and the pipeline `
+            + `silently no-ops.`);
+        }
+      }
+      if (shapeErrors.length === 0) {
+        console.log(`  PASS  validate ${file} (args as string AND object)`);
       } else {
         failures += 1;
         console.log(`  FAIL  validate ${file}`);
-        for (const e of errors) console.log(`        ${e}`);
+        for (const e of shapeErrors) console.log(`        ${e}`);
       }
     }
     process.exit(failures === 0 ? 0 : 1);
