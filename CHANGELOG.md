@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.1] — 2026-07-31
+
+### Fixed
+
+- **`/goal` could not dispatch at all.** `lib/solve_triage.py`'s `--backend=` whitelist was never updated when RFC 0015 added `workflow` to `_UBERDEV_DISPATCH_BACKEND_ENUM`, so an explicit `--backend=workflow` failed `routing_cli_invalid`. That gate is the *first* thing `lib/solve-launcher.sh` runs (`:87`), and `/goal`'s Workflow driver passes exactly that flag — so every `/goal` cycle aborted at dispatch. The default `auto` path was unaffected (`auto` is whitelisted and resolves to `workflow` later, inside `lib/dispatch.sh`), which is why this shipped unnoticed.
+
+### Tests
+
+- `tests/solve-routing.test.sh` now pins `--backend=workflow` in both token orders **and** iterates `_UBERDEV_DISPATCH_BACKEND_ENUM` from `lib/dispatch.sh`, asserting every backend it offers survives `parse-cli`. The two lists can no longer drift silently — which is the actual defect class, not the one missing name.
+
 ## [0.42.0] — 2026-07-31
 
 ### Changed

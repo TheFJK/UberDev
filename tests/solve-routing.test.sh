@@ -25,6 +25,42 @@ OUT="$(parse 9 3 9 --routing-mode=adaptive --service-tier=fast)"
 expect_ok "$OUT" 'v["issues"]==[9,3] and v["routing_mode"]=="adaptive" and v["service_tier"]=="fast"'
 OUT="$(parse --backend=codex 9)"
 expect_ok "$OUT" 'v["issues"]==[9] and v["backend"]=="codex"'
+
+# RFC 0015 regression guard. `workflow` is the backend `auto` resolves to on every
+# Claude host, and /goal's driver passes it EXPLICITLY. This whitelist is the first
+# gate lib/solve-launcher.sh runs (:87), so omitting the name here failed every
+# /goal cycle at dispatch while the default `auto` path kept working — which is why
+# it shipped unnoticed. The two asserts below pin the accept, and the loop pins the
+# whitelist against lib/dispatch.sh's enum so the two can never drift again.
+OUT="$(parse --backend=workflow 9)"
+expect_ok "$OUT" 'v["issues"]==[9] and v["backend"]=="workflow"'
+OUT="$(parse 9 --backend=workflow)"
+expect_ok "$OUT" 'v["issues"]==[9] and v["backend"]=="workflow"'
+
+DISPATCH_ENUM_LINE="$(grep -m1 "^_UBERDEV_DISPATCH_BACKEND_ENUM=" "$ROOT/plugins/uberdev/lib/dispatch.sh")"
+DISPATCH_ENUM="${DISPATCH_ENUM_LINE#*=\'}"; DISPATCH_ENUM="${DISPATCH_ENUM%\'}"
+if [ -z "$DISPATCH_ENUM" ]; then
+  echo "  FAIL  could not read _UBERDEV_DISPATCH_BACKEND_ENUM from lib/dispatch.sh"
+  FAIL=$((FAIL + 1))
+else
+  ENUM_OK=1
+  OLD_IFS="$IFS"; IFS='|'
+  for _backend in $DISPATCH_ENUM; do
+    IFS="$OLD_IFS"
+    if ! parse "--backend=$_backend" 9 >/dev/null 2>&1; then
+      echo "  FAIL  dispatch.sh offers --backend=$_backend but solve_triage.py parse-cli rejects it"
+      ENUM_OK=0
+    fi
+    IFS='|'
+  done
+  IFS="$OLD_IFS"
+  if [ "$ENUM_OK" = "1" ]; then
+    echo "  PASS  every backend in _UBERDEV_DISPATCH_BACKEND_ENUM survives parse-cli"
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+fi
 OUT="$(parse 1 --route=sol-ultra --fast)"
 expect_ok "$OUT" 'v["route"]=="sol-ultra" and v["service_tier"]=="fast"'
 OUT="$(parse 1 --fast --service-tier=fast)"
