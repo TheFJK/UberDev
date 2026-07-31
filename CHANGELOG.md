@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.4] — 2026-07-31
+
+### Fixed
+
+- `codex/uberdev-codex/skills/merge-pipeline/lib/discover.sh` shipped with **zero** test coverage — no test sourced it, executed it, or byte-compared it, so replacing the entire 1,070-line file with `# gutted` was green across the whole suite. Any drift in the Codex mirror shipped silently, including a broken `../../..` runtime-root hop that makes `_uberdev_review_verdict_python` fail closed and leaves every Codex-backend `/merge` and `/ubergoal` permanently INDETERMINATE with no signal.
+
+### Tests
+
+- Three asserts added to `tests/dispatch-codex.test.sh` — the only candidate wired into **both** CI jobs (`merge-discovery-resilience` and `codex-port` are on the Windows skip-list, and a new `tests/*.test.sh` would drag in the `ci-wiring` W1/W2/W4 lockstep for no extra signal):
+  - **byte-lock**, joining the existing mirror `cmp` loop, deliberately with no `[ -r ]` short-circuit so that *deleting* the mirror stays red rather than passing vacuously;
+  - **transform-envelope guard**, so that if `discover.sh` ever gains a porter-rewritten token the legitimate divergence reports its real cause instead of becoming a mystery red;
+  - **behavioural runtime-root assert**, which sources the shipped Codex copy from `/` and checks the `../../..` hop lands on the Codex plugin root — `cmp` is depth-blind and cannot see this.
+- Non-vacuity is proven by a 9-case mutation matrix run against the real extracted bytes. The load-bearing row is **V4b**: both copies move to the wrong depth together, so the byte-lock stays green and only the behavioural assert reds — signal `cmp` structurally cannot carry.
+
+_Solved end-to-end by the Workflow-native `/ubergoal` fleet (RFC 0015): claim → nested solve-fleet → research fan-out → spec → review → plan → solver → PR, with no detached session anywhere._
+
 ## [0.42.3] — 2026-07-31
 
 ### Fixed
