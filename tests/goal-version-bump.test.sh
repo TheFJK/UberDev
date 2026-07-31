@@ -288,7 +288,16 @@ origin_branch_commits() {  # <root> <branch>
   git -C "$1/origin.git" rev-list --count "refs/heads/$2" 2>/dev/null || printf 'ERR'
 }
 origin_file() {            # <root> <branch> <path>
-  git -C "$1/origin.git" show "refs/heads/$2:$3" 2>/dev/null
+  # MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL — same idiom as lib/dispatch.sh, and
+  # load-bearing here. Git for Windows rewrites an argument containing `:` when
+  # the segment after the colon looks like a POSIX path, and a LEADING DOT is
+  # exactly the marker its path-LIST heuristic keys on. So on windows-latest
+  # `git show <rev>:.claude-plugin/marketplace.json` resolved to nothing and the
+  # surface assertion read as "the bump did not happen" — while every other
+  # version-surface path starts with a letter and was untouched. That one-surface
+  # asymmetry is the whole tell. No-op off Windows.
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    git -C "$1/origin.git" show "refs/heads/$2:$3" 2>/dev/null
 }
 origin_subject() {         # <root> <branch>
   git -C "$1/origin.git" log -1 --format=%s "refs/heads/$2" 2>/dev/null
@@ -310,6 +319,19 @@ after="$(origin_branch_commits "$S2" fix/101-thing)"
 assert_eq "$((after - before))" "1" "V2.commits: EXACTLY ONE commit was pushed (no double bump, no stray commits)"
 assert_eq "$(origin_subject "$S2" fix/101-thing)" "chore(release): v1.2.4" \
   "V2.subject: the pushed commit is a conventional chore(release) for the resolved version"
+# Prove the READ works before asserting on what it returned. An unreadable blob
+# and an unbumped surface both make the greps below count 0, and they demand
+# opposite fixes — the Windows argv-mangling class (see origin_file) presented
+# as "marketplace.json was never bumped" for exactly that reason.
+for v2_surface in plugins/uberdev/.claude-plugin/plugin.json .claude-plugin/marketplace.json \
+                  codex/uberdev-codex/.codex-plugin/plugin.json README.md CHANGELOG.md \
+                  tests/goal.test.sh tests/solve-claim.test.sh; do
+  if [ -n "$(origin_file "$S2" fix/101-thing "$v2_surface")" ]; then
+    pass "V2.readable: $v2_surface reads back from the pushed branch"
+  else
+    fail "V2.readable: origin_file returned NOTHING for $v2_surface — the blob READ is broken (argv mangling / bad ref), not the bump"
+  fi
+done
 # All seven CI-locked surfaces must carry the new version on the PR branch.
 assert_eq "$(origin_file "$S2" fix/101-thing plugins/uberdev/.claude-plugin/plugin.json | grep -c '"version": "1\.2\.4"')" "1" \
   "V2.surface1: plugin.json (canonical SSOT)"
