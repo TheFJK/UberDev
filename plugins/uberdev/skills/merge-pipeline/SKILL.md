@@ -263,7 +263,13 @@ if [ "$STALE_THRESHOLD" -lt 900 ]; then STALE_THRESHOLD=900; fi   # LOCK_STALE_F
 # never try to escape or repair the inherited value.
 # `grep -q PAT <<<"$V"`, never `printf | grep -q`: a pipe into a -q grep can
 # EPIPE-race under `set -o pipefail` on Linux CI.
-if ! grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"${RUN_ID:-}"; then
+# ONE binding of the `RUN_ID_REGEX` Constants row, used by both checks below.
+# Re-inlining the literal per check is the exact "one fact restated N ways with
+# nothing proving they agree" shape `## Common Mistakes` forbids: a drifted
+# copy would accept an inherited RUN_ID here and reject the re-minted one
+# there (or vice versa), and nothing would fail.
+RUN_ID_REGEX='^[0-9]{8}-[0-9]{6}-[a-f0-9]+$'
+if ! grep -qE "$RUN_ID_REGEX" <<<"${RUN_ID:-}"; then
   if [ -n "${RUN_ID:-}" ]; then
     echo "warning: inherited RUN_ID does not match RUN_ID_REGEX — re-minting" >&2
   fi
@@ -272,7 +278,7 @@ fi
 # A re-minted value must satisfy the same contract; a git short-SHA that is not
 # lowercase hex (or an empty rev-parse in a fresh repo) is a filesystem-error
 # class failure, not something to paper over.
-if ! grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"$RUN_ID"; then
+if ! grep -qE "$RUN_ID_REGEX" <<<"$RUN_ID"; then
   echo "error: cannot mint a RUN_ID matching RUN_ID_REGEX (git rev-parse --short HEAD failed?)" >&2
   exit 1
 fi
@@ -697,7 +703,20 @@ The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and the on-disk `AUTO_REVIEW_MARKER_
 #    was re-declared empty in every fence, so the cap never held; #303).
 LOCK_DIR=".git/uberdev-merge.lock.d"
 AUTO_REVIEW_MARKER_DIR="$LOCK_DIR/auto-review-dispatched"
-if ! mkdir -p "$AUTO_REVIEW_MARKER_DIR" 2>/dev/null; then
+# NEVER `mkdir -p` the marker dir: -p would silently re-create $LOCK_DIR itself
+# when a concurrent run's stale-reclaim removed it under us, resurrecting a
+# record-less lock directory. Step 4.6's holder-verified release then finds no
+# record.json, warns, and refuses to remove it — so the lock survives until the
+# NEXT run's staleness threshold expires — and this run would dispatch while
+# not actually holding the lock, breaking both "no dispatch without an
+# enforceable cap" and "the marker's lifetime is exactly the merge lock's".
+# The lock dir must already exist (we acquired it in Step 1.1); assert, do not
+# create. `mkdir` without -p is the marker dir's create, and an EEXIST from a
+# previous PR in the same run is success, not failure.
+if [ ! -d "$LOCK_DIR" ]; then
+  echo "warning: merge lock dir $LOCK_DIR is gone (stale-reclaimed by another run?) — auto-review intercept skipped for PR $PR (cap cannot be enforced without the lock)" >&2
+  # Fall through to the else-branch below: no dispatch without an enforceable cap.
+elif ! mkdir "$AUTO_REVIEW_MARKER_DIR" 2>/dev/null && [ ! -d "$AUTO_REVIEW_MARKER_DIR" ]; then
   echo "warning: cannot create $AUTO_REVIEW_MARKER_DIR — auto-review intercept skipped for PR $PR (cap cannot be enforced)" >&2
   # Fall through to the else-branch below: no dispatch without an enforceable cap.
 elif ! mkdir "$AUTO_REVIEW_MARKER_DIR/${PR}.${RUN_ID}" 2>/dev/null; then
@@ -767,7 +786,7 @@ PR #${PR}: auto-review returned ${outcome} (duration ${duration_ms}ms); see .ube
 
 The queue continues with the next PR. No halt path is introduced — the autopilot contract from `## Common Mistakes` ("Halting the run") is preserved.
 
-**Else-branch (intercept does NOT fire).** When ANY of the three trigger conditions fails — `AUTO_REVIEW_ON_MERGE == false`, OR `reason` not in the trigger set, OR the marker claim did not succeed (cap already consumed, or the marker directory could not be created) — control falls through to the existing "Otherwise:" paragraph above: `gate_fail` emits with the original diagnostic message (`/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`), the PR is excluded, the queue continues. Bit-identical to pre-#89 behavior.
+**Else-branch (intercept does NOT fire).** When ANY of the three trigger conditions fails — `AUTO_REVIEW_ON_MERGE == false`, OR `reason` not in the trigger set, OR the marker claim did not succeed (cap already consumed, the lock directory is gone, or the marker directory could not be created) — control falls through to the existing "Otherwise:" paragraph above: `gate_fail` emits with the original diagnostic message (`/review-pr hasn't run on commit <sha> — run /review-pr first to establish a trust trail; the next /merge invocation will pick this PR up automatically.`), the PR is excluded, the queue continues. Bit-identical to pre-#89 behavior.
 
 **Dispatch failure handling (R7).** If `Skill("uberdev:review-pr", ...)` itself fails to dispatch (plugin disabled per the `enabledPlugins` bug pattern, missing command, etc.), the failure is caught at the call site; `auto_review_returned` is emitted with `outcome: refused_non_green` and the duration measured to the point of dispatch failure; the PR is excluded; the queue continues. Healthy installs are unaffected.
 
@@ -1144,30 +1163,88 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
    (a) the branch is NOT a PR head ref currently in the autopilot's merge set — cross-checked via `gh pr list --head <branch> --json number,state` (state ∈ {OPEN, MERGED}).
    (b) the branch has a remote-tracking ref that does NOT have force-push protection. Local-only branches without a remote-tracking ref do NOT satisfy this precondition; they SKIP via the `skipped-non-tracking` rule below — local-only branches may represent in-progress unpushed work and are not safe to rebase blindly.
 
-   **Protection probe — read the HTTP status, not the exit code (#303).** `gh api repos/:owner/:repo/branches/<branch>/protection` exits non-zero for BOTH "this branch has no protection rule" (HTTP 404, the common and perfectly safe case) and "we could not find out" (401/403/5xx/network). Mapping every non-zero exit to `skipped-non-tracking` therefore skipped every unprotected branch — the entire population Step 4.5 exists to rebase — and reported it with the misleading rationale `protection-api-unreachable`. Probe with `-i` so the status line is on stdout and classify on it:
+   **Precondition (b) is TWO probes in a fixed order: a LOCAL tracking probe, then — for its survivors only — the remote protection probe (#303).** The order is load-bearing, not an optimisation. `gh api repos/:owner/:repo/branches/<branch>/protection` answers **HTTP 404 for BOTH** "this branch exists on the remote and simply has no protection rule" **and** "there is no such branch on the remote at all" — this repo answers 404 for `main` (protected-by-nothing) and for a name that has never existed, byte-identically. Classifying 404 as `unprotected` without first proving the branch has a remote-tracking ref would therefore read every local-only branch as `unprotected` and rebase it — precisely the in-progress-unpushed-work class (b) exists to protect, and the arm the `skipped-non-tracking` decision-tree rule is fed by. The local probe is free (no network) and answers a question the API cannot answer at all.
+
+   The block below is delimited by `# BEGIN merge-stale-rebase-precondition-b-v1` / `# END merge-stale-rebase-precondition-b-v1`. Those markers are a CONTRACT, not a comment: `tests/merge.test.sh` extracts everything between them, strips the list indentation, and EXECUTES it against stubbed `git` / `gh` binaries — including a stub that records whether `gh` was invoked at all, which is what proves the local-only branch never reaches the network probe. Keep the block self-contained (it may assume only `b` and the two stubs on `PATH`), and bump the marker version if the contract changes.
 
    ```bash
-   # `gh api -i` emits the response headers, so a 404 is readable as data.
-   # `|| true` is safe ONLY because the status line is the classifier — the
-   # exit code is deliberately not consulted.
-   PROTECTION_RESPONSE="$(gh api -i "repos/:owner/:repo/branches/${b}/protection" 2>/dev/null || true)"
-   PROTECTION_STATUS_LINE="$(head -n 1 <<<"$PROTECTION_RESPONSE")"
-   # "HTTP/2.0 404 Not Found" -> "404". Parameter expansion, not awk: the Skill
-   # renderer substitutes $ARGUMENTS positionals into bare `$N` field refs even
-   # inside single-quoted awk bodies (#222), which would silently corrupt the
-   # status parse.
-   PROTECTION_STATUS="${PROTECTION_STATUS_LINE#* }"
-   PROTECTION_STATUS="${PROTECTION_STATUS%% *}"
-   case "$PROTECTION_STATUS" in
-     404) protection_state=unprotected ;;   # no rule → precondition (b) satisfied
-     200) protection_state=protected ;;     # a rule exists → inspect allow_force_pushes
-     *)   protection_state=unknown ;;       # 401/403/5xx/empty/network → fail closed
-   esac
+   # BEGIN merge-stale-rebase-precondition-b-v1
+   # Probe 1 (LOCAL, no network) — does this branch have a remote-tracking ref?
+   # `git rev-parse --verify --quiet <b>@{upstream}` is empty + rc!=0 for BOTH
+   # "no upstream configured" and "upstream configured but the remote-tracking
+   # ref is gone (pruned)". Both are non-tracking for (b)'s purposes.
+   BRANCH_REMOTE="$(git config --get "branch.${b}.remote" 2>/dev/null || true)"
+   UPSTREAM_REF="$(git rev-parse --verify --quiet --symbolic-full-name "${b}@{upstream}" 2>/dev/null || true)"
+   REMOTE_BRANCH=""
+   PROTECTION_BODY=""
+   if [ -z "$BRANCH_REMOTE" ] || [ -z "$UPSTREAM_REF" ]; then
+     # Local-only. Probe 2 is NOT reached: a 404 from it would be indistinguishable
+     # from "unprotected" and would fail OPEN into a blind rebase.
+     tracking_state=none
+     protection_state=not-probed
+     precondition_b=unsatisfied
+     skip_rationale=no-remote-tracking-ref
+   else
+     tracking_state=tracking
+     # refs/remotes/origin/feat/x -> feat/x. The REMOTE branch name is what the
+     # protection API keys on; it is not always the local branch name.
+     REMOTE_BRANCH="${UPSTREAM_REF#refs/remotes/${BRANCH_REMOTE}/}"
+     # Probe 2 (REMOTE) — read the HTTP status, not the exit code. `gh api` exits
+     # non-zero for BOTH "no protection rule" (404, the common and perfectly safe
+     # case) and "we could not find out" (401/403/5xx/network); mapping every
+     # non-zero exit to skipped-non-tracking skipped every unprotected branch —
+     # the entire population Step 4.5 exists to rebase — under the misleading
+     # rationale `protection-api-unreachable`. `gh api -i` puts the status line on
+     # stdout, so 404 becomes readable as data. `|| true` is safe ONLY because the
+     # status line is the classifier — the exit code is deliberately not consulted.
+     PROTECTION_RESPONSE="$(gh api -i "repos/:owner/:repo/branches/${REMOTE_BRANCH}/protection" 2>/dev/null || true)"
+     PROTECTION_STATUS_LINE="$(head -n 1 <<<"$PROTECTION_RESPONSE")"
+     # "HTTP/2.0 404 Not Found" -> "404". Parameter expansion, not awk: the Skill
+     # renderer substitutes $ARGUMENTS positionals into bare `$N` field refs even
+     # inside single-quoted awk bodies (#222), which would silently corrupt the
+     # status parse.
+     PROTECTION_STATUS="${PROTECTION_STATUS_LINE#* }"
+     PROTECTION_STATUS="${PROTECTION_STATUS%% *}"
+     case "$PROTECTION_STATUS" in
+       404) protection_state=unprotected ;;   # no rule → precondition (b) satisfied
+       200) protection_state=protected ;;     # a rule exists → inspect allow_force_pushes
+       *)   protection_state=unknown ;;       # 401/403/5xx/empty/network → fail closed
+     esac
+     # `-i` output is status line + headers + blank separator + body, so the
+     # variable is NOT valid JSON. Strip the header block before any jq: delete
+     # through the first blank line (CR-only lines count — `[[:space:]]` covers
+     # the CRLF terminator). Feeding $PROTECTION_RESPONSE straight to jq dies on
+     # the "HTTP/2.0 200 OK" first line, and a jq that dies is indistinguishable
+     # from a jq that said false unless the failure is mapped explicitly.
+     PROTECTION_BODY="$(sed -e '1,/^[[:space:]]*$/d' <<<"$PROTECTION_RESPONSE")"
+     case "$protection_state" in
+       unprotected)
+         precondition_b=satisfied
+         skip_rationale=""
+         ;;
+       protected)
+         # A jq parse failure is `unsatisfied`, never `satisfied`: fail closed.
+         if jq -e '.allow_force_pushes.enabled == true' <<<"$PROTECTION_BODY" >/dev/null 2>&1; then
+           precondition_b=satisfied
+           skip_rationale=""
+         else
+           precondition_b=unsatisfied
+           skip_rationale=force-push-protected
+         fi
+         ;;
+       *)
+         precondition_b=unsatisfied
+         skip_rationale=protection-api-unreachable
+         ;;
+     esac
+   fi
+   # END merge-stale-rebase-precondition-b-v1
    ```
 
-   - `unprotected` (404) → precondition (b) is SATISFIED. Continue to the decision tree.
-   - `protected` (200) → parse the body: `allow_force_pushes.enabled == true` satisfies (b); anything else (including a missing key) does not, and the branch SKIPs with `data.choice="skipped-non-tracking"` and `data.rationale="force-push-protected"`.
-   - `unknown` → treat as protected; SKIP with `data.choice="skipped-non-tracking"` and `data.rationale="protection-api-unreachable"`. This rationale now means what it says.
+   - `tracking_state=none` → (b) NOT satisfied. SKIP with `data.choice="skipped-non-tracking"` and `data.rationale="no-remote-tracking-ref"`. **No network probe runs for this branch.**
+   - `protection_state=unprotected` (404, tracking-proved) → (b) is SATISFIED. Continue to the decision tree.
+   - `protection_state=protected` (200) → `allow_force_pushes.enabled == true` satisfies (b); anything else — a missing key, `false`, or a jq parse failure — does not, and the branch SKIPs with `data.choice="skipped-non-tracking"` and `data.rationale="force-push-protected"`.
+   - `protection_state=unknown` → treat as protected; SKIP with `data.choice="skipped-non-tracking"` and `data.rationale="protection-api-unreachable"`. This rationale now means what it says.
 
    **Failure handling on the PR-head probe:** if `gh pr list --head <branch>` fails (network, auth, rate limit, JSON parse error), treat the branch as potentially a PR head ref (safe default) and emit `data.choice="skipped-pr-head-ref"` with `data.rationale="gh-pr-list-api-unreachable"`. Never rebase when safety status cannot be determined.
 3. **Decide** (decision tree, first match wins; emit `data.choice` ∈ `STALE_REBASE_DECISION_ENUM`):
@@ -1175,7 +1252,7 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
    - Non-conflicting probe + safety met → `git rebase <integration_branch>`; emit choice `rebased-non-conflicting`.
    - Conflicts in probe → SKIP; emit choice `skipped-conflicts` with `data.rationale` citing the conflicting file paths.
    - PR head ref in scope → SKIP; emit choice `skipped-pr-head-ref`.
-   - No tracking branch → SKIP; emit choice `skipped-non-tracking`.
+   - No tracking branch (probe 1 returned `tracking_state=none`) → SKIP; emit choice `skipped-non-tracking` with `data.rationale="no-remote-tracking-ref"`. This arm is fed by the LOCAL probe above — never by a 404 from the protection API, which cannot distinguish "no rule" from "no branch".
    - `git rebase` fails mid-way → `git rebase --abort` to restore the original head; emit choice `rebase-aborted`; continue with the next branch.
 
 **Force-push to PR head refs remains absolutely forbidden.** Any branch with force-push protection that requires rewinding falls into `skipped-pr-head-ref` or `skipped-non-tracking`.

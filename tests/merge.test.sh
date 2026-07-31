@@ -327,9 +327,16 @@ else
 fi
 # A positive prompt would have either [y/N] near it, OR `Apply this plan?` without
 # a preceding "NO" / "no" within the same line. Scan for that pattern.
+# The capture MUST be materialised and emptiness-tested separately: a herestring
+# always appends a trailing newline, so `grep -qv PAT <<<""` sees ONE empty line,
+# selects it, and exits 0 — i.e. "Phase 2.4 never mentions the prompt at all"
+# (unambiguously correct) would report as a FAIL. A pipe from an empty producer
+# exits 1 instead, which is why the `echo|grep` -> herestring sweep changed this
+# assertion's meaning. `[ -n ]` restores it without reintroducing the pipe.
+APPLY_PROMPT_LINES=$(grep -E 'Apply this plan\?' <<<"$PHASE_2_4" || true)
 if grep -qE '\[y/N\].*Apply this plan\?|Apply this plan\?.*\[y/N\]' <<<"$PHASE_2_4"; then
   fail "M18.3 — Phase 2.4 must NOT contain a positive 'Apply this plan?' [y/N] prompt (autopilot is unconditional)"
-elif grep -qvE '\bNO\b|\bno\b' <<<"$(grep -E 'Apply this plan\?' <<<"$PHASE_2_4")"; then
+elif [ -n "$APPLY_PROMPT_LINES" ] && grep -qvE '\bNO\b|\bno\b' <<<"$APPLY_PROMPT_LINES"; then
   fail "M18.3 — Phase 2.4 has 'Apply this plan?' without a NO/no qualifier (likely a positive prompt)"
 else
   pass "M18.3 — Phase 2.4 has no positive 'Apply this plan?' prompt"
@@ -738,6 +745,23 @@ echo "== M39: SKILL.md RUN_ID_REGEX constant present (AC11) =="
 assert_grep "$SKILL_FILE" '\| `RUN_ID_REGEX` \|' "M39 — RUN_ID_REGEX constant declared in Constants table"
 assert_grep "$SKILL_FILE" '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' \
   "M39.regex — RUN_ID_REGEX value is the spec-mandated regex literal"
+# `## Common Mistakes` forbids re-inlining a Constants value ("always reference;
+# never re-inline"). The Phase-1.1 fence validates BOTH the inherited and the
+# re-minted RUN_ID; two inlined copies could drift so that one check accepts what
+# the other rejects, and nothing would fail. Exactly two occurrences are legal:
+# the Constants row itself, and ONE shell binding the fence reuses.
+M39_LITERALS="$(grep -cE '\^\[0-9\]\{8\}-\[0-9\]\{6\}-\[a-f0-9\]\+\$' "$SKILL_FILE" | tr -d ' ')"
+if [ "$M39_LITERALS" = "2" ]; then
+  pass "M39.ssot — the RUN_ID regex literal appears exactly twice (Constants row + one shell binding)"
+else
+  fail "M39.ssot — the RUN_ID regex literal MUST appear exactly twice (Constants row + one shell binding); found $M39_LITERALS — re-inlining it per check is the drift shape '## Common Mistakes' forbids"
+fi
+assert_grep "$SKILL_FILE" "^RUN_ID_REGEX='\\^\\[0-9\\]\\{8\\}-\\[0-9\\]\\{6\\}-\\[a-f0-9\\]\\+\\\$'\$" \
+  "M39.binding — the fence binds RUN_ID_REGEX once as a shell constant"
+assert_grep "$SKILL_FILE" 'grep -qE "\$RUN_ID_REGEX" <<<"\${RUN_ID:-}"' \
+  "M39.inherited — the inherited-RUN_ID check references the binding"
+assert_grep "$SKILL_FILE" 'grep -qE "\$RUN_ID_REGEX" <<<"\$RUN_ID"' \
+  "M39.reminted — the re-minted-RUN_ID check references the same binding"
 
 echo
 echo "== M40: SKILL.md UBERDEV_APPROVED_LABEL constant present (AC1) =="
@@ -1806,13 +1830,30 @@ else
   fail "M79.heading — SKILL.md MUST declare ### Step 1.4.5 sub-section heading (spec C2.3)"
 fi
 STEP_145_BLOCK=$(awk '/^### Step 1\.4\.5/,/^### Step 1\.5/' "$SKILL_FILE")
-for token in 'AUTO_REVIEW_ON_MERGE' 'AUTO_REVIEW_DISPATCHED' 'AUTO_REVIEW_DISPATCH_CAP'; do
+# The cap is an on-disk marker claim, not a shell array (#303). `AUTO_REVIEW_DISPATCHED`
+# is RETIRED: it was `declare -A`'d fresh in every Bash fence, so the cap never held.
+# Anchoring on that name would pin archaeology — the retirement comment alone satisfies
+# a bare token grep — so anchor on the live constructs instead.
+for token in 'AUTO_REVIEW_ON_MERGE' 'AUTO_REVIEW_MARKER_DIR' 'AUTO_REVIEW_DISPATCH_CAP'; do
   if grep -q "$token" <<<"$STEP_145_BLOCK"; then
     pass "M79.$token — Step 1.4.5 references $token"
   else
-    fail "M79.$token — Step 1.4.5 MUST reference $token (spec '## Architecture' counter lifecycle + trigger guard)"
+    fail "M79.$token — Step 1.4.5 MUST reference $token (spec '## Architecture' cap lifecycle + trigger guard)"
   fi
 done
+# Retirement is pinned by BEHAVIOUR, not by absence of the word. This extends
+# M80.no-fence-scoped-cap (which pins only the line-anchored `declare -A` form) to
+# `typeset -A` / `local -A`, element writes, and bare assignment: the scan looks at
+# EXECUTABLE bash only — fenced code with comments stripped — and rejects any live
+# declare / assignment / index of the fence-scoped associative array. Prose and
+# retirement comments that name it stay legal, which is exactly why a bare token
+# grep (the old M79.AUTO_REVIEW_DISPATCHED row) proved nothing.
+M79_BASH="$(awk '/^[[:space:]]*```bash$/{inb=1;next} /^[[:space:]]*```$/{inb=0;next} inb' "$SKILL_FILE" | sed 's/#.*$//')"
+if grep -qE '(declare|typeset|local)[[:space:]]+-A[[:space:]]+AUTO_REVIEW_DISPATCHED|AUTO_REVIEW_DISPATCHED\[|AUTO_REVIEW_DISPATCHED=' <<<"$M79_BASH"; then
+  fail "M79.no-array-cap — SKILL.md MUST NOT declare or index the retired fence-scoped AUTO_REVIEW_DISPATCHED array (#303: every fence re-declared it empty, so the cap never held; the on-disk marker claim is the cap)"
+else
+  pass "M79.no-array-cap — retired AUTO_REVIEW_DISPATCHED array is never declared or indexed"
+fi
 
 echo
 echo "== M80: Step 1.4.5 dispatches Skill(uberdev:review-pr) with --turbo (#89) =="
@@ -2493,6 +2534,222 @@ M95_RUNNER_EOF
   rm -f "$M95_RUNNER"
 fi
 rm -f "$M95_FENCE"
+
+echo
+echo "== M96: Step 1.4 pins the caller half of the batched-wave + cached-corroborator contract (#303) =="
+# TT17a/b/c pin the AGENT half. The agent's own `gh` authorisation was withdrawn
+# and its refusal contract calls a missing Step-5 corroborator "advisory" — so if
+# the CALLER ever stops passing them, corroboration silently disappears and
+# nothing fails. These assertions are the caller-side counterpart.
+STEP_14_BLOCK=$(awk '/^### Step 1\.4 —/,/^### Step 1\.4\.5/' "$SKILL_FILE")
+if [ -n "$STEP_14_BLOCK" ]; then
+  pass "M96.extract — Step 1.4 block is extractable"
+else
+  fail "M96.extract — SKILL.md MUST declare a '### Step 1.4 —' section ahead of Step 1.4.5"
+fi
+# The dispatch inputs are named, and named as coming from the CACHED projection —
+# not from a fresh fetch, which would sample GitHub at a later instant than the
+# headRefOid the structural probes are bound to.
+for m96_input in 'status_check_rollup' 'commit_shas'; do
+  if grep -qE "\`?${m96_input}=<[^>]*cached PR_JSON projection" <<<"$STEP_14_BLOCK"; then
+    pass "M96.$m96_input — Step 1.4 passes $m96_input sourced from the cached PR_JSON projection"
+  else
+    fail "M96.$m96_input — Step 1.4 MUST pass $m96_input=<… from the cached PR_JSON projection> in the trust-trail-evaluator dispatch inputs (#303 C: the agent may not re-fetch)"
+  fi
+done
+if grep -qE 'MUST treat them as its only PR-state corroborators and MUST NOT re-fetch' <<<"$STEP_14_BLOCK"; then
+  pass "M96.no-refetch — Step 1.4 forbids the agent re-fetching its corroborators"
+else
+  fail "M96.no-refetch — Step 1.4 MUST forbid the agent re-fetching status_check_rollup / commit_shas (#303 C)"
+fi
+if grep -q 'pr_view_projection' <<<"$STEP_14_BLOCK"; then
+  pass "M96.projection — Step 1.4 sources the projection through pr_view_projection"
+else
+  fail "M96.projection — Step 1.4 MUST project the PR via the canonical pr_view_projection lib function"
+fi
+# Two-pass batched wave (#303 B): the expensive agent step is hoisted out of the
+# per-PR loop into ONE single-message wave capped at MAX_PARALLEL_AGENTS.
+if grep -qE 'in ONE assistant message' <<<"$STEP_14_BLOCK"; then
+  pass "M96.one-message — Step 1.4 mandates a single-assistant-message evaluator wave"
+else
+  fail "M96.one-message — Step 1.4 MUST dispatch every pending trust-trail-evaluator in ONE assistant message (#303 B)"
+fi
+if grep -q 'MAX_PARALLEL_AGENTS' <<<"$STEP_14_BLOCK"; then
+  pass "M96.cap — Step 1.4 caps the batched wave at MAX_PARALLEL_AGENTS"
+else
+  fail "M96.cap — Step 1.4 MUST cap the batched evaluator wave at MAX_PARALLEL_AGENTS and chunk beyond it (#303 B)"
+fi
+if grep -qE 'No `Task\(\)` is dispatched during Pass 1' <<<"$STEP_14_BLOCK"; then
+  pass "M96.pass1-no-agents — Step 1.4 Pass 1 dispatches no agents"
+else
+  fail "M96.pass1-no-agents — Step 1.4 MUST state that Pass 1 dispatches no Task() (#303 B two-pass shape)"
+fi
+if grep -qE 'pending-evaluation list' <<<"$STEP_14_BLOCK"; then
+  pass "M96.pending-list — Step 1.4 collects sub-condition (c) PRs into a pending-evaluation list"
+else
+  fail "M96.pending-list — Step 1.4 MUST collect sub-condition (c) PRs into a pending-evaluation list before the batched wave (#303 B)"
+fi
+if grep -qE 're-dispatch \*\*all\*\* retrying PRs in ONE further single-message wave' <<<"$STEP_14_BLOCK"; then
+  pass "M96.retry-wave — Step 1.4 batches the bounded INVALID retry into one further wave"
+else
+  fail "M96.retry-wave — Step 1.4 MUST batch the bounded trailer_sha_not_in_local_clone retry into ONE further single-message wave (#303 B)"
+fi
+
+echo
+echo "== M97: the Step 4.5 precondition-(b) fence is EXTRACTED and EXECUTED (#303 D) =="
+# The protection probe had zero coverage, and `gh api .../protection` answers 404
+# for BOTH "no protection rule" and "no such branch on the remote" — so a
+# status-only classifier reads every LOCAL-ONLY branch as `unprotected` and
+# rebases in-progress unpushed work. Grepping the prose cannot catch that; the
+# fence is executed against stubs, and the `gh` stub records every invocation so
+# "the local-only branch never reached the network" is a proved fact.
+M97_FENCE="$(mktemp)"
+awk '/^[[:space:]]*# BEGIN merge-stale-rebase-precondition-b-v1$/,/^[[:space:]]*# END merge-stale-rebase-precondition-b-v1$/' \
+  "$SKILL_FILE" | sed 's/^   //' > "$M97_FENCE"
+if [ -s "$M97_FENCE" ] \
+   && grep -q '^# BEGIN merge-stale-rebase-precondition-b-v1$' "$M97_FENCE" \
+   && grep -q '^# END merge-stale-rebase-precondition-b-v1$' "$M97_FENCE"; then
+  pass "M97.extract — the precondition-(b) fence is delimited and extractable"
+else
+  fail "M97.extract — SKILL.md MUST delimit the Step 4.5 precondition-(b) bash with # BEGIN/# END merge-stale-rebase-precondition-b-v1"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP  M97.exec — jq is required to execute the fence"
+elif [ ! -s "$M97_FENCE" ]; then
+  echo "  SKIP  M97.exec — no fence body was extracted"
+else
+  M97_STATE="$(mktemp -d)"
+  # `git` / `gh` are stubbed as shell FUNCTIONS, not as executables on PATH:
+  # merge.test.sh runs on the windows-latest job too, where a runtime-chmod'd
+  # extensionless script on PATH is exactly the Git Bash surface #196 pulled
+  # merge-discovery-resilience.test.sh out of the Windows list over. A function
+  # takes precedence over PATH lookup in every POSIX shell and needs no exec bit.
+  # `gh` records EVERY invocation (argv included), so "this branch never reached
+  # the network" is a proved fact rather than an inference.
+  m97_run() {
+    printf '%s' "$1" > "$M97_STATE/branch_remote"
+    printf '%s' "$2" > "$M97_STATE/upstream_ref"
+    printf '%s' "$3" > "$M97_STATE/gh_rc"
+    printf '%s' "$4" > "$M97_STATE/gh_response"
+    rm -f "$M97_STATE/gh_calls"
+    (
+      git() {
+        case "$1 $2" in
+          "config --get") cat "$M97_STATE/branch_remote" 2>/dev/null; [ -s "$M97_STATE/branch_remote" ] ;;
+          "rev-parse --verify") cat "$M97_STATE/upstream_ref" 2>/dev/null; [ -s "$M97_STATE/upstream_ref" ] ;;
+          *) return 127 ;;
+        esac
+      }
+      gh() {
+        printf '%s\n' "$*" >> "$M97_STATE/gh_calls"
+        cat "$M97_STATE/gh_response" 2>/dev/null
+        return "$(cat "$M97_STATE/gh_rc" 2>/dev/null || echo 0)"
+      }
+      b="feat/local"
+      set -u
+      . "$M97_FENCE"
+      printf 'tracking_state=%s\n' "${tracking_state-<unset>}"
+      printf 'protection_state=%s\n' "${protection_state-<unset>}"
+      printf 'precondition_b=%s\n' "${precondition_b-<unset>}"
+      printf 'skip_rationale=%s\n' "${skip_rationale-<unset>}"
+      printf 'remote_branch=%s\n' "${REMOTE_BRANCH-<unset>}"
+      printf 'body_is_json=%s\n' \
+        "$(jq -e . <<<"${PROTECTION_BODY-}" >/dev/null 2>&1 && echo yes || echo no)"
+    ) 2>/dev/null
+  }
+  m97_field() { grep -E "^$2=" <<<"$1" | head -1 | cut -d= -f2-; }
+  m97_expect() {
+    local out="$1" key="$2" want="$3" label="$4" got
+    got="$(m97_field "$out" "$key")"
+    if [ "$got" = "$want" ]; then
+      pass "M97.$label — $key=$want"
+    else
+      fail "M97.$label — expected $key=$want, got '$got'"
+    fi
+  }
+
+  M97_200_BODY='HTTP/2.0 200 OK
+content-type: application/json
+
+{"allow_force_pushes":{"enabled":true},"required_status_checks":null}'
+  M97_200_LOCKED='HTTP/2.0 200 OK
+content-type: application/json
+
+{"allow_force_pushes":{"enabled":false}}'
+  M97_200_NOKEY='HTTP/2.0 200 OK
+content-type: application/json
+
+{"required_status_checks":null}'
+  M97_404='HTTP/2.0 404 Not Found
+content-type: application/json
+
+{"message":"Branch not protected"}'
+  M97_403='HTTP/2.0 403 Forbidden
+content-type: application/json
+
+{"message":"Resource not accessible by integration"}'
+
+  # 1. LOCAL-ONLY branch: (b) unsatisfied, and `gh` is never invoked at all.
+  #    This is the #303 D fail-open: a 404 would otherwise read as `unprotected`.
+  M97_OUT="$(m97_run "" "" 0 "$M97_404")"
+  m97_expect "$M97_OUT" tracking_state none        local-only.tracking
+  m97_expect "$M97_OUT" precondition_b unsatisfied local-only.precondition
+  m97_expect "$M97_OUT" skip_rationale no-remote-tracking-ref local-only.rationale
+  if [ ! -e "$M97_STATE/gh_calls" ]; then
+    pass "M97.local-only.no-network — the protection API was never called for a local-only branch"
+  else
+    fail "M97.local-only.no-network — a local-only branch reached the protection API ($(tr '\n' ';' < "$M97_STATE/gh_calls")); a 404 there is indistinguishable from 'unprotected' and fails OPEN"
+  fi
+
+  # 2. Pruned upstream ref (config present, remote-tracking ref gone) is also
+  #    non-tracking — rev-parse is empty, which is the whole point of probing it.
+  M97_OUT="$(m97_run "origin" "" 0 "$M97_404")"
+  m97_expect "$M97_OUT" tracking_state none        pruned.tracking
+  m97_expect "$M97_OUT" skip_rationale no-remote-tracking-ref pruned.rationale
+
+  # 3. Tracking + 404: the common, safe case — (b) SATISFIED, and the REMOTE
+  #    branch name (not the local one) is what the API was keyed on.
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/remote-name" 1 "$M97_404")"
+  m97_expect "$M97_OUT" tracking_state tracking       tracked-404.tracking
+  m97_expect "$M97_OUT" protection_state unprotected  tracked-404.state
+  m97_expect "$M97_OUT" precondition_b satisfied      tracked-404.precondition
+  m97_expect "$M97_OUT" remote_branch "feat/remote-name" tracked-404.remote-name
+  if grep -q 'branches/feat/remote-name/protection' "$M97_STATE/gh_calls" 2>/dev/null; then
+    pass "M97.tracked-404.api-key — the probe keyed on the upstream's remote branch name"
+  else
+    fail "M97.tracked-404.api-key — the probe MUST key on the upstream ref's remote branch name, got: $(tr '\n' ';' < "$M97_STATE/gh_calls" 2>/dev/null)"
+  fi
+
+  # 4. Protected + allow_force_pushes → satisfied, and the body actually parsed
+  #    (the `-i` header block must be stripped or jq dies on "HTTP/2.0 200 OK").
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/local" 0 "$M97_200_BODY")"
+  m97_expect "$M97_OUT" protection_state protected protected-open.state
+  m97_expect "$M97_OUT" body_is_json yes            protected-open.body-stripped
+  m97_expect "$M97_OUT" precondition_b satisfied    protected-open.precondition
+
+  # 5. Protected + force-push disallowed, and 6. protected + key absent →
+  #    unsatisfied/force-push-protected. A missing key is NOT permission.
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/local" 0 "$M97_200_LOCKED")"
+  m97_expect "$M97_OUT" precondition_b unsatisfied          protected-locked.precondition
+  m97_expect "$M97_OUT" skip_rationale force-push-protected protected-locked.rationale
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/local" 0 "$M97_200_NOKEY")"
+  m97_expect "$M97_OUT" precondition_b unsatisfied          protected-nokey.precondition
+  m97_expect "$M97_OUT" skip_rationale force-push-protected protected-nokey.rationale
+
+  # 7. 403 and 8. empty response → unknown → fail closed under the rationale that
+  #    now means what it says.
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/local" 1 "$M97_403")"
+  m97_expect "$M97_OUT" protection_state unknown                forbidden.state
+  m97_expect "$M97_OUT" precondition_b unsatisfied              forbidden.precondition
+  m97_expect "$M97_OUT" skip_rationale protection-api-unreachable forbidden.rationale
+  M97_OUT="$(m97_run "origin" "refs/remotes/origin/feat/local" 1 "")"
+  m97_expect "$M97_OUT" protection_state unknown                offline.state
+  m97_expect "$M97_OUT" skip_rationale protection-api-unreachable offline.rationale
+
+  rm -rf "$M97_STATE"
+fi
+rm -f "$M97_FENCE"
 
 echo
 echo "== Summary =="
