@@ -739,17 +739,6 @@ while true; do
   # state machine, the next pass has real work waiting for it — go straight
   # there. (The counter below stops this from becoming a hot loop.)
   made_transition=0
-  # #301 speedup finding 1 — ONE `gh pr list` for the whole pass instead of one
-  # per active issue. The response is issue-independent, so the per-issue calls
-  # were N identical round-trips every 60s against exactly the API budget this
-  # loop is most sensitive to (Phase 0 step 10 pre-flights the rate limit for
-  # this reason). Fetching once also makes the pass internally CONSISTENT: every
-  # issue is resolved against the same snapshot, instead of issue 1 seeing a
-  # GitHub state that issue 6 no longer sees. An empty snapshot means the fetch
-  # failed — uberdev_goal_pr_list_snapshot has already ticked the consecutive-
-  # failure counter, so the `_gh_failure_count` guard below defers the no-PR
-  # classification exactly as it did for a per-issue failure.
-  pr_snapshot="$(uberdev_goal_pr_list_snapshot)"
 
   # 2a. Detect each solver's pushed PR via GitHub (issue #180 — CLI-version-
   # independent). The pre-2.1.150 stdout-marker probe (`backgrounded ·` +
@@ -771,11 +760,46 @@ while true; do
     return 0
   }
 
+  # #301 speedup finding 1 — ONE `gh pr list` per pass instead of one per active
+  # issue. The response is issue-independent, so the per-issue calls were N
+  # identical round-trips every 60s against exactly the API budget this loop is
+  # most sensitive to (Phase 0 step 10 pre-flights the rate limit for this
+  # reason). Fetching once also makes the pass internally CONSISTENT: every issue
+  # is resolved against the same snapshot, instead of issue 1 seeing a GitHub
+  # state that issue 6 no longer sees.
+  #
+  # The fetch is LAZY — taken inside the loop, on the first issue that actually
+  # needs resolving — and that placement is load-bearing, not a style choice.
+  # Hoisting it above the loop makes it UNCONDITIONAL, and an unconditional
+  # healthy `gh pr list` calls _uberdev_goal_reset_gh_failure every pass. Once
+  # every solver has pushed (the reviewing/merging steady state, and the longest
+  # phase of a run) the `continue` below skips every issue, so this pass issues
+  # NO gh call at all — exactly as the pre-#301 per-issue finder did — and the
+  # #290.3 consecutive-failure counter is free to accumulate the 2c/2d
+  # `gh pr view` failures that are the only gh traffic left. Reset it here every
+  # pass and a sustained `gh pr view` outage is pinned at 1 forever: the
+  # gh_api_failed breaker can never fire and /goal rides the 4h stuck_loop
+  # instead of halting loudly in ~5 min. Lazy also keeps the steady-state API
+  # cost at zero rather than one 200-PR page per pass (up to 6/min under the
+  # made_transition fast path).
+  pr_snapshot=""
+  _pr_snapshot_taken=0
+
   for issue in "${active_issues[@]}"; do
     istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
-    # #301 — resolve against the per-pass snapshot taken above; identical
-    # ranking (both routes share _uberdev_goal_pr_for_issue_jq), zero network.
+    # First issue of the pass that needs a PR number pays for the snapshot; the
+    # rest resolve against it in-process. An empty snapshot means the fetch
+    # failed — uberdev_goal_pr_list_snapshot has already ticked the consecutive-
+    # failure counter, so the `_gh_failure_count` guard below defers the no-PR
+    # classification exactly as it did for a per-issue failure (and we do NOT
+    # re-fetch for the remaining issues: one failed page per pass, not N).
+    if [ "$_pr_snapshot_taken" = "0" ]; then
+      pr_snapshot="$(uberdev_goal_pr_list_snapshot)"
+      _pr_snapshot_taken=1
+    fi
+    # #301 — resolve against the per-pass snapshot; identical ranking (both
+    # routes share _uberdev_goal_pr_for_issue_jq), zero extra network.
     pr_num="$(uberdev_goal_find_pr_for_issue_from_json "$issue" "$pr_snapshot")"
     _gh_failure_count="$(uberdev_goal_gh_failure_count "$GOAL_ID" 2>/dev/null || printf '0')"
     _uberdev_goal_validate_int "$_gh_failure_count" || _gh_failure_count=0
@@ -1529,9 +1553,10 @@ while true; do
   #
   # The consecutive bound is the load-bearing half. An unbounded "transition =>
   # no sleep" rule is a hot loop the moment two PRs keep handing each other
-  # work, and every pass costs a `gh pr list` snapshot plus a `gh pr view` per
-  # merging PR — i.e. exactly the rate-limit exhaustion Phase 0 step 10 warns
-  # about, converted from a warning into a self-inflicted 403 storm. After
+  # work, and every pass costs a `gh pr view` per merging PR (plus the ONE
+  # lazily-taken `gh pr list` page, and only while some issue still has no PR)
+  # — i.e. exactly the rate-limit exhaustion Phase 0 step 10 warns about,
+  # converted from a warning into a self-inflicted 403 storm. After
   # _UBERDEV_GOAL_MAX_FAST_PASSES back-to-back fast passes we sleep regardless
   # and reset, which keeps the burst bounded while still collapsing the common
   # 2-3 pass hand-off chains to a single poll interval.

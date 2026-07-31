@@ -32,8 +32,10 @@
 #     --dry-run  print what WOULD be released and exit 0 without mutating
 #                GitHub or removing any sidecar.
 #   exit 0  every non-terminal claim released (or nothing to do / dry-run)
-#   exit 1  at least one release failed — the run-state is DELIBERATELY left in
-#           place so a re-run can retry; the stranded issues are named on stderr
+#   exit 1  at least one release failed, OR the issue-state ledger could not be
+#           read/parsed (an unread ledger is NEVER reported as "nothing to
+#           release") — the run-state is DELIBERATELY left in place so a re-run
+#           can retry; the stranded issues are named on stderr
 #   exit 2  usage error, or no resolvable goal run
 #
 # No audit rows are emitted. GOAL_AUDIT_EVENT_ENUM is a CLOSED set (RFC 0005
@@ -119,7 +121,18 @@ fi
 #
 # awk reads the LAST row per issue: the ledger is append-only, so an issue that
 # went solving -> failed must be judged on `failed`, not on `solving`.
-PENDING="$(awk -F'\t' '
+#
+# The awk rc is CHECKED, and an unreadable/unparseable ledger is fail-LOUD.
+# `PENDING=""` from a crashed awk is byte-identical to `PENDING=""` from "every
+# issue is terminal", and this script has no `pipefail`, so an unchecked
+# pipeline would report `released=0 … run-state cleaned`, exit 0, release
+# NOTHING and then DELETE the run-state + the fixed-path pointer — destroying
+# the only channel a retry could resolve the run through, and stranding every
+# `uberdev:active` claim permanently. That is the exact failure this script
+# exists to prevent, so it takes the same exit-1/keep-run-state contract as a
+# refused release.
+_ledger_rc=0
+PENDING_ROWS="$(awk -F'\t' '
   { last[$1] = $2 }
   END {
     for (issue in last) {
@@ -127,7 +140,19 @@ PENDING="$(awk -F'\t' '
       if (s != "resolved" && s != "resolved-by-no-action" && s != "failed") print issue "\t" s
     }
   }
-' "$ISSUE_TSV" | sort -n)"
+' "$ISSUE_TSV")" || _ledger_rc=$?
+if [ "$_ledger_rc" -ne 0 ]; then
+  printf 'goal-abort: FAILED to read the issue-state ledger %s (awk rc=%s) — refusing to report "nothing to release" on an unread ledger; run-state KEPT so this can be retried\n' \
+    "$ISSUE_TSV" "$_ledger_rc" >&2
+  exit 1
+fi
+_sort_rc=0
+PENDING="$(sort -n <<<"$PENDING_ROWS")" || _sort_rc=$?
+if [ "$_sort_rc" -ne 0 ]; then
+  printf 'goal-abort: FAILED to order the pending-claim rows (sort rc=%s) — same fail-loud contract as an unreadable ledger; run-state KEPT so this can be retried\n' \
+    "$_sort_rc" >&2
+  exit 1
+fi
 
 RELEASED=0
 FAILED=0
