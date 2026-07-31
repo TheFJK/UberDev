@@ -535,9 +535,21 @@ async function runCycle() {
       auditEvents.push({ event: "fleet_args_refused", cycle: cycle, reason: fleetArgs,
         claimed: rec.claimed.slice(),
         launcherRc: (typeof claim.launcherRc === "number" ? claim.launcherRc : -1), ts: nowIso });
+      // Where the claims end up differs by reason, and saying it wrong would
+      // send an operator looking for a leak that is not there. `no_envelope`
+      // means the launcher itself failed, so the relay's STEP 3 already took
+      // the --mark-failed branch and released them. Every other reason means
+      // the launcher SUCCEEDED and STEP 3 marked them `solving` — those are
+      // reclaimed by the watch pass below, which runs with
+      // UBERDEV_GOAL_SOLVERS_SETTLED=1 and so classifies a no-PR issue as
+      // failed (releasing its claim) on the first tick instead of waiting out
+      // the 150-minute detached-solver timeout.
       log("cycle " + cycle + ": the launcher produced no usable solve-fleet args envelope (" + fleetArgs
-        + ") — NOT dispatching a fleet this cycle. The claimed issues were marked failed and released by "
-        + "the relay's STEP 3.");
+        + ") — NOT dispatching a fleet this cycle. "
+        + (fleetArgs === "no_envelope"
+            ? "The claimed issues were marked failed and released by the relay's STEP 3."
+            : "The claimed issues are marked `solving` with no solver behind them; the watch pass below "
+              + "runs with the settled-fleet marker, so it fails them and releases their claims this cycle."));
     } else {
       // THE one nested call. One per cycle, for the whole cycle. See the header:
       // a nested call per issue would spend the single nesting level on the
