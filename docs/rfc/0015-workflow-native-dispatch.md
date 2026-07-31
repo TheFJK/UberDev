@@ -248,6 +248,62 @@ issue with no PR and no live agent is terminal *now*. The driver therefore passe
 instead of spending the entire watch-tick budget re-proving a settled fact. The
 marker is opt-in, so a hand-run `lib/goal-watch.sh` keeps the timeout semantics.
 
+### 5.6 The solver-side bump ban left nobody holding the bump (issue #364)
+
+`skills/solve-fleet/workflow.js` tells every solver: *do not bump the project
+version, do not touch CHANGELOG.md, the manifests, the README badge, or the
+version-lock tests.* That instruction is correct and stays. N solvers branching
+off one base all resolve the **same** next version; the two diffs are byte-
+identical, so git auto-merges them without a conflict and the second landing
+silently eats the first bump (`project_uberdev_merge_version_collision`).
+
+What §5 shipped without was anyone downstream who added the bump back.
+`_uberdev_goal_rebase_collision_chain` *renumbers* a bump that already exists —
+it has never created one — so a `/goal` run landed PRs that touched **zero**
+version surfaces. That is a silent failure by construction: the two CI
+version-lock tests assert the surfaces AGREE WITH EACH OTHER, never that the
+version ADVANCED. An unbumped landing leaves every surface consistently at the
+old value, CI stays green, and the marketplace never serves the update — exactly
+the outcome the mandatory-bump rule exists to prevent. PR #363, produced by a
+real `/ubergoal` run, would have been auto-merged that way.
+
+The bump belongs to the **landing** step, and only there. `lib/goal-watch.sh`
+step 2c acts on exactly one green PR per pass (strict lowest-first) and holds
+the `MERGING` sentinel until that PR lands (#289.2) — the one strictly-serialized
+point in the run. At that moment `origin/<base>` already carries the previous
+landing's bump, which is what makes sequential numbering correct here and
+colliding anywhere earlier. So `_uberdev_goal_ensure_version_bump <pr>`
+(`lib/goal-state.sh`) runs immediately **before**
+`_uberdev_goal_dispatch_merge <pr>`, and the ordering is the entire contract:
+
+- **Next version from the BASE, never the PR branch.** A PR that branched before
+  two releases landed sits *below* its base; a `head != base` test would read
+  that as "already bumped". The predicate is strictly-greater.
+- **Kind from the PR's conventional-commit type** — `feat:` → minor, a `!`
+  marker or a `BREAKING CHANGE:` footer → major, everything else → patch.
+- **`lib/bump-version.sh` owns the seven-surface edit.** It already refuses on
+  drift (exit 3) and re-verifies every surface after writing (exit 4); this path
+  leans on it rather than re-implementing the surface list. The work happens in a
+  throwaway **detached worktree** at the PR head — never the `/goal` session's
+  own checkout, whose index must stay pristine
+  (`project_uberdev_turbo_main_index_pollution`).
+- **FAIL CLOSED.** Any failure returns non-zero, `/merge` is not dispatched, the
+  PR stays `green` for a later pass, and a `goal_merge_deferred` row carrying
+  `reason=version_bump_failed` plus the exact `stage` lands in the audit stream.
+  Merging unbumped IS the bug, so merging is never the fallback. A fork
+  (cross-repository) head is refused for the same reason: `origin` is not its
+  remote, and pushing there would create a stray branch on the base repo instead
+  of updating the PR.
+- **Never `--force`.** A rejected non-fast-forward push means the branch moved
+  under us; the correct response is to fail closed and re-derive next pass.
+- Repos with no `plugins/uberdev/.claude-plugin/plugin.json` carry no version
+  ratchet, so the step is **skipped** (audited, never silent) instead of blocking
+  `/goal` on every other repository.
+
+The new audit event is `goal_version_bumped` with
+`action ∈ {bumped, already_bumped, skipped}`; the failure path deliberately
+reuses `goal_merge_deferred`, because the merge really was deferred.
+
 ### 5.4 Trust verdicts are never LLM-reported
 
 Every relay in the driver is mechanical: run a script, report its exit status

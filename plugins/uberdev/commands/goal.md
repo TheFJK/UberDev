@@ -48,6 +48,21 @@ green — detected via the `uberdev-approved` trust-trail label — or it stays 
 A wall-clock cap (default 4h, see `--barrier-timeout=N`) escalates a stuck barrier to
 `stuck_loop` halt.
 
+**Mandatory version bump before landing (issue #364).** The fleet solvers are forbidden
+from bumping the project version — N solvers off one base all resolve the same next
+version and the duplicate change auto-merges without a conflict. `/goal` therefore adds
+the bump itself, at the one strictly-serialized point in the run: immediately before it
+dispatches `/merge` for the lowest green PR. The next version comes from the **base
+branch's** manifest plus the PR's conventional-commit type (`feat:` → minor, `!` /
+`BREAKING CHANGE:` → major, everything else → patch); `lib/bump-version.sh` moves all
+seven CI-locked surfaces in a throwaway worktree, the CHANGELOG stub is replaced with an
+entry derived from the PR, and the result is pushed as `chore(release): vX.Y.Z` (never
+`--force`). If the bump cannot be guaranteed the step **fails closed**: `/merge` is not
+dispatched, the PR stays `green` for a later pass, and a `goal_merge_deferred` audit row
+with `reason=version_bump_failed` names the stage that stopped it. A PR that already
+carries a strictly-greater version is left alone (the collision chain renumbers it), and
+a repo that carries no version surfaces is skipped rather than blocked.
+
 ## Scoped relaxations (RFC 0005 §2.3)
 
 - `feedback_merge_independent.md`: `/merge` auto-chain is allowed **inside `/goal` only** (enforced by `UBERDEV_GOAL_ID` env-var provenance check — outside `/goal` the existing manual-invocation rule still binds).
