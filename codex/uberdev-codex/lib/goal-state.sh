@@ -168,12 +168,24 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 # After this many CONSECUTIVE failures (any success resets the counter), the
 # breaker fires gh_api_failed. Default 5 ≈ 5 min at the 60s poll cadence.
 : "${_UBERDEV_GOAL_MAX_GH_FAILURES:=5}"
-# #348 finding 1 — bound on how many consecutive passes a PR may spend with the
-# verdict discovery reporting `indeterminate` or `tamper` before /goal stops
+# #348 finding 1 — bound on how many TIMES a PR may be observed with the verdict
+# discovery reporting `indeterminate` or `tamper` before /goal stops
 # re-dispatching /review-pr against it. Neither cause is fixable by re-reviewing
 # (a duplicate-timestamp tie stays a tie; a replaced carrier stays replaced), so
 # without a bound the PR spins to the 4h stuck_loop. Default 3 mirrors the
 # review-pr dispatch cap.
+#
+# The tally is CUMULATIVE per (PR, kind) for the life of the run — an
+# append-only TSV (uberdev_goal_record_verdict_anomaly) that is never reset —
+# and that is deliberate, not an oversight. A "consecutive" counter would have
+# to reset on every interleaved non-anomalous observation, and the interleaving
+# outcome here is `stale`/`missing` (a verdict that still has not landed), not
+# proof the channel healed: a PR alternating indeterminate → stale →
+# indeterminate would then never reach the bound and would ride the 4h
+# stuck_loop, which is precisely what this cap exists to prevent. Cumulative is
+# the only shape that guarantees termination, so the bound reads "N unusable
+# verdict observations for this PR", as the operator-facing message and the
+# `observations` audit field both say.
 : "${_UBERDEV_GOAL_MAX_VERDICT_ANOMALIES:=3}"
 # #301 speedup finding 2 — cap on CONSECUTIVE Phase-2 passes that skip the poll
 # sleep because the previous pass applied a state transition. Bounds the burst
