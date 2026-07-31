@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.5] — 2026-07-31
+
+### Fixed
+
+- **`/ubergoal` auto-merged PRs with no version bump** (#364). RFC 0015 correctly forbids fleet solvers from bumping — parallel solvers all reaching for the same `vN+1` is a collision class this repo has hit before — but nothing downstream then added it, and `_uberdev_goal_rebase_collision_chain` only *renumbers* a bump that already exists. It failed silently: the version-lock tests assert the surfaces are *consistent*, not that they *advanced*, so an unbumped merge left everything consistently at the old version and CI stayed green while the marketplace never served the update. The goal merge lane now bumps immediately before landing — the one place that is already strictly serialized, so consecutive versions fall out naturally.
+
+### Added
+
+- `skills/merge-pipeline/lib/release-anchor.sh` and `/merge` PATH_2 sub-condition (a.5). Placing the bump at the landing lane puts a `chore(release):` commit above the review trailer, and PATH_2 reads the trailer from the most-recent commit — so without this the trust gate would fail and the loop would never converge, trading a silent wrong-merge for a silent never-merge. The helper resolves a trust head that tolerates a top commit **only** when it is provably inert with respect to reviewed code: exactly one parent, a non-chained depth of one, an exact `chore(release): vX.Y.Z` subject, a non-empty diff confined to the seven version surfaces, a manifest version strictly advancing to the subject's version, an insertion-only CHANGELOG section, and — for every other surface — removed and added line **sequences** that are byte-identical once SemVer tokens are normalised. Two of the seven surfaces are executable test files, which is exactly why a path allow-list is not sufficient and the comparison is order-sensitive. Any unproven condition, any helper error and any non-zero exit resolve the trust head back to the PR head, i.e. the pre-#364 behaviour.
+- The bump defers one watch pass after pushing, and a withholding-only CI-settle probe gates the dispatch, so the restarted checks cannot make `/merge` fail on a pending rollup.
+
+### Tests
+
+- `tests/goal-version-bump.test.sh` (115 assertions), wired into both CI jobs: no-op on an already-bumped PR, seven surfaces advancing on an unbumped one, `feat:`/`fix:`/breaking resolution now read from the PR's **commits** rather than its title alone, **consecutive** versions for two PRs landing in one cycle, fail-closed when the bump fails, and an ordering assert that runs the real watch-lane region rather than a copy.
+- Two self-found fail-open holes closed: an unreadable release-diff size defaulted to *under* the bound, and the merge-dispatch chain branched on a literal `rc 1` so an unknown status could reach `/merge`.
+
 ## [0.42.4] — 2026-07-31
 
 ### Fixed
