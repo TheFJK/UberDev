@@ -1,5 +1,5 @@
 /* META-BEGIN */
-export const meta = { "name": "goal-pipeline", "description": "Workflow-native convergence driver for /uberdev:goal (RFC 0015 §5). Owns the cycle loop in JS variables that span the whole run — queue, cycle counter, candidate set and fingerprints — and drives each cycle through four relay-run shell phases: lib/goal-phase1.sh claims the issues, ONE nested workflow() call into skills/solve-fleet/workflow.js solves the whole cycle, lib/goal-watch.sh polls the merge lane under its documented 0/42/1 exit contract, and lib/goal-phase3.sh collects the next queue. Replaces the per-issue detached claude-bg dispatch that used to live in the goal-pipeline SKILL.md fences.", "phases": ["dispatch", "watch", "collect", "finalize"], "whenToUse": "Invoked verbatim by skills/goal-pipeline/SKILL.md after lib/goal-phase0.sh emits the args envelope between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END." };
+export const meta = { "name": "goal-pipeline", "description": "Workflow-native convergence driver for /uberdev:goal (RFC 0015 §5). Owns the cycle loop in JS variables that span the whole run — queue, cycle counter, per-cycle records and fingerprints — and drives each cycle through four relay-run shell phases: lib/goal-phase1.sh claims the issues, ONE nested workflow() call into skills/solve-fleet/workflow.js solves the whole cycle, lib/goal-watch.sh polls the merge lane under its documented 0/42/1 exit contract, and lib/goal-phase3.sh collects the next queue. Replaces the per-issue detached claude-bg dispatch that used to live in the goal-pipeline SKILL.md fences.", "phases": ["dispatch", "watch", "collect", "finalize"], "whenToUse": "Invoked verbatim by skills/goal-pipeline/SKILL.md after lib/goal-phase0.sh emits the args envelope between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END." };
 /* META-END */
 
 // skills/goal-pipeline/workflow.js — RFC 0015 §5 (the /goal half of the
@@ -15,9 +15,10 @@ export const meta = { "name": "goal-pipeline", "description": "Workflow-native c
 // counter that reset every pass). Patching them individually kept working until
 // the next variable died.
 //
-// Here the queue, the cycle counter, the candidate set and the per-cycle
-// fingerprints are ORDINARY JS VARIABLES that live for the whole run. The class
-// is gone by construction, not by another guard.
+// Here the queue, the cycle counter, the per-cycle records (each carrying that
+// cycle's candidate count) and the fingerprint history are ORDINARY JS
+// VARIABLES that live for the whole run. The class is gone by construction, not
+// by another guard.
 //
 // THE ONE NESTING LEVEL, AND WHERE IT IS SPENT.
 // workflow() nesting is one level deep. It is spent on ONE call per cycle into
@@ -90,11 +91,41 @@ const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 250);
 // is one lib/goal-watch.sh invocation, which itself honours the
 // watchPasses/watchBudgetS bound lib/goal-phase0.sh resolved.
 const maxWatchTicks = clampInt(CFG.maxWatchTicks, 1, 500, 40);
+// lib/goal-phase0.sh resolves this (0 = the legacy unbounded watch loop). It is
+// what sizes the Bash-tool timeout the watch relay is told to ask for: ONE
+// lib/goal-watch.sh invocation runs for up to watchBudgetS before it exits 42.
+const watchBudgetS = clampInt(CFG.watchBudgetS, 0, 86400, 0);
+// The Bash tool's default timeout is 120 s, and lib/goal-phase0.sh defaults the
+// watch budget to 480 s under the Claude-Code runtime — so the DEFAULT relay
+// call outlives the DEFAULT tool timeout by 6x, and a timed-out call delivers
+// no exit status at all (the 0/42/1 contract cannot survive it). The relay is
+// therefore told the exact timeout to pass. +120 s of headroom covers one
+// worst-case serial gh walk past the budget; 600000 ms is the tool's own cap.
+const watchTimeoutMs = clampInt(
+  ((watchBudgetS > 0 ? watchBudgetS : 480) + 120) * 1000, 120000, 600000, 600000);
 
 const issuesFromArgs = String(CFG.issues || "")
   .split(",").map(function (s) { return s.trim(); }).filter(function (s) {
     return /^[0-9]+$/.test(s);
   });
+
+// The bash >= 4 EXECUTION CONTRACT for the relay-run phase scripts (issue
+// #294). lib/goal-phase0.sh's resolver re-execs ITSELF under a bash >= 4, which
+// fixes phase 0 and nothing else: Phases 1/2/3 are separate processes launched
+// from the relay prompts below. PATH `bash` is 3.2 on stock macOS, where
+// lib/goal-watch.sh dies on `active_issues[@]: unbound variable` — a non-0/42
+// status the driver would report as haltReason="watch_script_error" on cycle 1.
+// So phase 0 publishes its resolved interpreter as config.bashBin and every
+// relay command below runs under it. Only an absolute path of shell-safe
+// characters is accepted; anything else degrades to PATH `bash` rather than
+// letting an unvalidated string reach a command line.
+const bashBinRaw = String(CFG.bashBin || "");
+const bashBin = /^\/[A-Za-z0-9._/+-]+$/.test(bashBinRaw) ? bashBinRaw : "bash";
+
+// One command word for a phase script, under the resolved interpreter.
+function bashCmd(scriptPath) {
+  return '"' + bashBin + '" "' + scriptPath + '"';
+}
 
 const solveFleetJs = pluginRootAbs + "/skills/solve-fleet/workflow.js";
 const phase1Sh = pluginRootAbs + "/lib/goal-phase1.sh";
@@ -131,7 +162,10 @@ function envPrefix() {
     + 'UBERDEV_PLUGIN_ROOT="' + pluginRootAbs + '" '
     + 'UBERDEV_TMPDIR="' + tmpDirAbs + '" '
     + 'UBERDEV_GOAL_ID="' + goalId + '" '
-    + 'UBERDEV_RESOLVED_BACKEND="' + backend + '" ';
+    + 'UBERDEV_RESOLVED_BACKEND="' + backend + '" '
+    // Forwarded so anything the phase scripts shell out to inherits the same
+    // interpreter contract they are themselves launched under.
+    + 'UBERDEV_GOAL_BASH="' + bashBin + '" ';
 }
 
 // ---- schemas (DR-4: structured returns, enums closed, counts integers) ----
@@ -147,6 +181,7 @@ const S = {
       launcherRc: { type: "integer" },
       fleetArgsJson: { type: "string", description: "verbatim JSON between WORKFLOW_ARGS_BEGIN/END, or empty" },
       armed: { type: "string", description: "comma-joined issue numbers the launcher accepted" },
+      markRc: { type: "integer", description: "exit status of the STEP 3 --mark-solving/--mark-failed reconciliation pass" },
       note: { type: "string", description: "one line, <=300 chars" },
     },
   },
@@ -154,7 +189,8 @@ const S = {
     type: "object", additionalProperties: false,
     required: ["rc"],
     properties: {
-      rc: { type: "integer", description: "0 drained, 42 re-invoke, 1 halt, other = script error" },
+      rc: { type: "integer", description: "0 drained, 42 re-invoke, 1 halt, other = script error, -1 = no status (timed out)" },
+      timedOut: { type: "boolean", description: "true ONLY when the Bash call itself timed out before the script reported a status" },
       note: { type: "string", description: "the last diagnostic line the script printed, <=300 chars" },
     },
   },
@@ -199,15 +235,16 @@ function claimPrompt(cycleNo) {
   return "You are a mechanical relay for one /uberdev:goal cycle. Run the commands below EXACTLY as written, "
     + "in order, via Bash. Do not interpret, summarise or repair their output, and do not run anything else.\n\n"
     + "STEP 1 — claim the cycle's issues:\n\n"
-    + "  " + envPrefix() + 'bash "' + phase1Sh + '" --goal-id=' + goalId + "\n\n"
+    + "  " + envPrefix() + bashCmd(phase1Sh) + " --goal-id=" + goalId + "\n\n"
     + "It prints ONE JSON line: {\"phase\":\"claim\",\"goal_id\":...,\"cycle\":N,\"dispatch\":\"<csv>\","
     + "\"rollover\":\"<csv>\",\"skipped\":\"<csv>\",\"claimed\":N,\"rc\":0}. Record its exit status as rc and "
     + "copy dispatch/rollover/skipped VERBATIM.\n\n"
     + "If rc is non-zero, or `dispatch` is empty, STOP HERE: return rc, dispatch, rollover, skipped, "
-    + "launcherRc 0, fleetArgsJson \"\", armed \"\".\n\n"
+    + "launcherRc 0, fleetArgsJson \"\", armed \"\", markRc 0.\n\n"
     + "STEP 2 — arm the solver fleet for exactly the claimed set (substitute <ISSUES> with the SPACE-separated "
     + "issue numbers from `dispatch`):\n\n"
-    + "  " + envPrefix() + 'AUTO_MODE=1 bash "' + launcherSh + '" --auto-mode=1 --turbo -- <ISSUES> --backend=workflow --force\n\n'
+    + "  " + envPrefix() + "AUTO_MODE=1 " + bashCmd(launcherSh)
+    + " --auto-mode=1 --turbo -- <ISSUES> --backend=workflow --force\n\n"
     + "`--backend=workflow` makes the launcher write its manifest and print an args envelope INSTEAD of "
     + "dispatching anything itself. `--force` is required and is not a shortcut: STEP 1 already took the "
     + "`uberdev:active` claim for these issues on this run's behalf, so the launcher's own claim pass would "
@@ -217,13 +254,15 @@ function claimPrompt(cycleNo) {
     + "no key reordering, nothing added or removed. If the markers are absent, set fleetArgsJson to \"\".\n\n"
     + "STEP 3 — reconcile the issue state with what actually happened:\n\n"
     + "  if the launcher succeeded (launcherRc 0 AND fleetArgsJson non-empty):\n"
-    + "    " + envPrefix() + 'bash "' + phase1Sh + '" --goal-id=' + goalId + " --mark-solving=<CSV>\n"
+    + "    " + envPrefix() + bashCmd(phase1Sh) + " --goal-id=" + goalId + " --mark-solving=<CSV>\n"
     + "  otherwise:\n"
-    + "    " + envPrefix() + 'bash "' + phase1Sh + '" --goal-id=' + goalId + " --mark-failed=<CSV>\n\n"
+    + "    " + envPrefix() + bashCmd(phase1Sh) + " --goal-id=" + goalId + " --mark-failed=<CSV>\n\n"
     + "where <CSV> is the comma-separated `dispatch` list. Set armed to that same list on the success path "
-    + "and to \"\" otherwise.\n\n"
-    + "Return via StructuredOutput: rc, dispatch, rollover, skipped, launcherRc, fleetArgsJson, armed, and "
-    + "note (one line naming what failed, if anything). This is cycle " + cycleNo + " of at most "
+    + "and to \"\" otherwise. Record the exit status of whichever STEP 3 command you ran as markRc "
+    + "(0 if STEP 1 stopped you before reaching STEP 3) — a non-zero markRc means a state transition did "
+    + "NOT land, which the driver must see; do not repair it and do not re-run the command.\n\n"
+    + "Return via StructuredOutput: rc, dispatch, rollover, skipped, launcherRc, fleetArgsJson, armed, markRc, "
+    + "and note (one line naming what failed, if anything). This is cycle " + cycleNo + " of at most "
     + maxCycles + ".";
 }
 
@@ -233,8 +272,11 @@ function watchPrompt(cycleNo, tickNo) {
   // cycle has already returned. It tells lib/goal-watch.sh to classify a
   // no-PR issue as terminal immediately instead of sitting on the 150-minute
   // detached-solver liveness timeout, which cannot say anything new here.
-  return "You are a mechanical relay. Run EXACTLY this command via Bash and report its numeric exit status:\n\n"
-    + "  " + envPrefix() + 'UBERDEV_GOAL_SOLVERS_SETTLED=1 bash "' + watchSh + '" --goal-id=' + goalId + "\n\n"
+  return "You are a mechanical relay. Run EXACTLY this command via Bash and report its numeric exit status. "
+    + "Pass timeout: " + watchTimeoutMs + " to the Bash tool — this call is EXPECTED to run for up to "
+    + (watchBudgetS > 0 ? watchBudgetS : 480) + " seconds, which is far longer than the tool's default "
+    + "timeout, and a timed-out call returns no exit status at all:\n\n"
+    + "  " + envPrefix() + "UBERDEV_GOAL_SOLVERS_SETTLED=1 " + bashCmd(watchSh) + " --goal-id=" + goalId + "\n\n"
     + "This is the /uberdev:goal watch pass (cycle " + cycleNo + ", tick " + tickNo + " of at most "
     + maxWatchTicks + "). It polls GitHub, drives the PR state machine and the merge barrier, and exits "
     + "with ONE of three documented codes:\n"
@@ -242,15 +284,20 @@ function watchPrompt(cycleNo, tickNo) {
     + "  42 — still working; the pass/budget bound was reached and it should be re-invoked\n"
     + "  1  — a circuit breaker fired, or a run-state flush failed\n\n"
     + "Report the status EXACTLY as the shell reported it. Do NOT interpret it, do NOT decide whether the "
-    + "goal is done, do NOT re-run the command, and do NOT run any other command. If the script cannot be "
-    + "executed at all, report the shell's own exit status.\n\n"
-    + "Return via StructuredOutput: rc (the integer exit status) and note (the LAST line the script wrote to "
-    + "stderr, verbatim, truncated to 300 characters).";
+    + "goal is done, do NOT re-run the command, and do NOT run any other command. If the script ran and the "
+    + "shell reported a status outside 0/42/1, report THAT status verbatim and leave timedOut false.\n\n"
+    + "TIMEOUT CONTRACT: if the Bash call itself is killed by the tool's timeout — i.e. you receive a timeout "
+    + "notice instead of an exit status — set timedOut true and rc -1. Do NOT invent a status, do NOT retry, "
+    + "and do NOT report 0. The script installs a TERM handler that persists run-state before it dies, so the "
+    + "driver re-ticks a timed-out pass; a fabricated 0 would tell it the cycle drained.\n\n"
+    + "Return via StructuredOutput: rc (the integer exit status, or -1 when timedOut), timedOut (false unless "
+    + "the tool timed the call out) and note (the LAST line the script wrote to stderr, verbatim, truncated "
+    + "to 300 characters).";
 }
 
 function collectPrompt(cycleNo) {
   return "You are a mechanical relay. Run EXACTLY this command via Bash and report what it printed:\n\n"
-    + "  " + envPrefix() + 'bash "' + phase3Sh + '" --goal-id=' + goalId + "\n\n"
+    + "  " + envPrefix() + bashCmd(phase3Sh) + " --goal-id=" + goalId + "\n\n"
     + "This is the /uberdev:goal collect pass for cycle " + cycleNo + ". It enumerates the cycle's new "
     + "BLOCKER/CRITICAL `review-pr-finding` issues, runs the fingerprint-repeat detector, applies the "
     + "overflow truncation, and evaluates the terminal gates. It prints ONE JSON line "
@@ -271,7 +318,7 @@ function verdictPrompt(cycleNo) {
   // verdict PATH to uberdev_goal_read_trust_signal and reports that helper's
   // stdout; the enum in S.verdicts is the helper's own closed return set.
   return "You are a mechanical relay. Run EXACTLY this via Bash and report the lines it prints:\n\n"
-    + "  " + envPrefix() + 'bash -c \'. "' + stateSh + '"; '
+    + "  " + envPrefix() + '"' + bashBin + '" -c \'. "' + stateSh + '"; '
     + 'while IFS="\t" read -r pr rest; do case "$pr" in ""|*[!0-9]*) continue ;; esac; '
     + 'printf "%s\\t%s\\n" "$pr" "$(uberdev_goal_read_trust_signal "$(uberdev_goal_locate_review_pr_audit_by_pr "$pr")")"; '
     + 'done < "' + tmpDirAbs + "/goal-" + goalId + '-pr-states.tsv" | sort -u\'\n\n'
@@ -290,7 +337,6 @@ function verdictPrompt(cycleNo) {
 // false-converge or a stranded queue.
 let cycle = 1;
 let queue = issuesFromArgs.slice();       // the rollover queue, carried across cycles
-let candidates = [];                       // this cycle's new finding issues (count)
 const fingerprintHistory = {};             // fingerprint -> first cycle seen
 const cycleRecords = [];
 const auditEvents = [];
@@ -363,20 +409,36 @@ function projectedAgentsForCycle(issueCount) {
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
 // agent-derived structure this script consumes, so it is validated before it
-// reaches workflow(): it must parse, it must be an object, and it must declare
-// itself as the solve-fleet pipeline. Anything else is refused and audited —
-// never "repaired", and never spliced into a prompt.
-function parseFleetArgs(raw) {
-  if (typeof raw !== "string" || raw.length === 0) return null;
+// reaches workflow(): it must parse, it must be an object, it must declare
+// itself as the solve-fleet pipeline, and — the load-bearing check — its issue
+// set must be EXACTLY the set lib/goal-phase1.sh claimed this cycle.
+//
+// WHY THE SET CHECK IS NOT OPTIONAL. The relay arms the launcher with
+// `--force`, which by its own documentation bypasses the launcher's
+// `uberdev:active` collision guard, because STEP 1 already took that claim on
+// this run's behalf. That is only safe while the armed set and the claimed set
+// are the same set — and the armed set is produced by an agent copying a CSV by
+// hand. solve-fleet's own intake cross-check compares the envelope against the
+// manifest the SAME launcher call wrote, so it cannot catch a mis-copied list
+// either. This is the only place both sides exist: the claim script's stdout,
+// and the envelope. A mismatch means solvers would be armed on an issue nobody
+// claimed (or a claimed issue would be silently dropped), so it is refused.
+//
+// Returns the parsed envelope, or a STRING reason for the refusal.
+function parseFleetArgs(raw, claimedList) {
+  if (typeof raw !== "string" || raw.length === 0) return "no_envelope";
   let parsed = null;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    return null;
+    return "unparseable";
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  if (parsed.pipeline !== "solve-fleet") return null;
-  if (!parsed.config || typeof parsed.config !== "object") return null;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "not_an_object";
+  if (parsed.pipeline !== "solve-fleet") return "wrong_pipeline";
+  if (!parsed.config || typeof parsed.config !== "object") return "no_config";
+  const envelopeIssues = csvToList(parsed.config.issues).slice().sort().join(",");
+  const claimedIssues = digitsOnly(claimedList).slice().sort().join(",");
+  if (envelopeIssues !== claimedIssues) return "issue_set_mismatch";
   return parsed;
 }
 
@@ -440,14 +502,42 @@ async function runCycle() {
     return false;
   }
 
+  // STEP 3's reconciliation rc, checked BEFORE the fleet is spawned. A non-zero
+  // markRc means a `dispatched -> solving` transition did not land, so the
+  // issue's TSV row is stuck at `dispatched` — and lib/goal-watch.sh's
+  // `solving -> pr-pushed` arc can then never apply for it. any_active would
+  // stay 1 for the rest of the cycle and the run would burn every watch tick to
+  // a `watch_tick_ceiling` halt that names the wrong cause. Halt here instead,
+  // with the real reason, before spending a fleet on issues the state machine
+  // has already lost track of. The claims and the on-disk state survive:
+  // `/uberdev:goal --resume` (or lib/goal-abort.sh) is the recovery.
+  const markRc = (typeof claim.markRc === "number") ? claim.markRc : 0;
+  if (markRc !== 0) {
+    halted = true;
+    haltReason = "mark_reconcile_failed";
+    rec.markRc = markRc;
+    auditEvents.push({ event: "mark_reconcile_failed", cycle: cycle, markRc: markRc,
+      claimed: rec.claimed.slice(), ts: nowIso });
+    log("cycle " + cycle + ": the post-arm reconciliation pass (lib/goal-phase1.sh --mark-solving/"
+      + "--mark-failed) exited " + markRc + " — at least one issue state transition did not land, so the "
+      + "watch pass could never drive those issues to a terminal state. Halting before arming the fleet.");
+    rec.decision = "halt";
+    rec.reason = haltReason;
+    cycleRecords.push(rec);
+    return false;
+  }
+
   if (rec.claimed.length > 0) {
-    const fleetArgs = parseFleetArgs(claim.fleetArgsJson);
-    if (fleetArgs === null) {
+    const fleetArgs = parseFleetArgs(claim.fleetArgsJson, rec.claimed);
+    if (typeof fleetArgs === "string") {
       rec.fleet = "args-refused";
-      auditEvents.push({ event: "fleet_args_refused", cycle: cycle,
+      rec.fleetRefusal = fleetArgs;
+      auditEvents.push({ event: "fleet_args_refused", cycle: cycle, reason: fleetArgs,
+        claimed: rec.claimed.slice(),
         launcherRc: (typeof claim.launcherRc === "number" ? claim.launcherRc : -1), ts: nowIso });
-      log("cycle " + cycle + ": the launcher produced no usable solve-fleet args envelope — NOT dispatching "
-        + "a fleet this cycle. The claimed issues were marked failed and released by the relay's STEP 3.");
+      log("cycle " + cycle + ": the launcher produced no usable solve-fleet args envelope (" + fleetArgs
+        + ") — NOT dispatching a fleet this cycle. The claimed issues were marked failed and released by "
+        + "the relay's STEP 3.");
     } else {
       // THE one nested call. One per cycle, for the whole cycle. See the header:
       // a nested call per issue would spend the single nesting level on the
@@ -507,6 +597,20 @@ async function runCycle() {
       continue;
     }
     rec.watchRc = w.rc;
+    // A tool-level timeout is NOT a script verdict — there is no exit status to
+    // route. lib/goal-watch.sh's TERM handler persists run-state and takes the
+    // same "still-active, re-invoke" interpretation (#301), so re-ticking is the
+    // correct response and the tick bound below is what keeps it finite.
+    // Treating it as a script error would halt the whole goal on a slow poll.
+    if (w.timedOut === true) {
+      rec.watchTimeouts = (rec.watchTimeouts || 0) + 1;
+      auditEvents.push({ event: "watch_relay_timeout", cycle: cycle, tick: tick,
+        timeoutMs: watchTimeoutMs, ts: nowIso });
+      log("cycle " + cycle + " tick " + tick + ": the watch relay's Bash call timed out after "
+        + watchTimeoutMs + "ms without reporting an exit status — re-ticking (the script's TERM handler "
+        + "persists run-state on the way down).");
+      continue;
+    }
     if (w.rc === 0) { drained = true; break; }
     if (w.rc === 42) { continue; }
     // Anything else is a halt: 1 is a circuit breaker or a fail-loud run-state
@@ -567,7 +671,6 @@ async function runCycle() {
   rec.decision = col.decision;
   rec.reason = String(col.reason || "");
   rec.candidates = clampInt(col.candidates, 0, 100000, 0);
-  candidates = rec.candidates;
 
   // Fingerprint bookkeeping lives HERE, in a JS object spanning the run. The
   // shell detector in lib/goal-phase3.sh is still the authority that HALTS; this

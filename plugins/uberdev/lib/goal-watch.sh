@@ -77,6 +77,19 @@ uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-de
 # non-deprecated, file-polled transport that is exactly the right shape for a
 # short-lived command a poller supervises — for these two dispatches only, and
 # says so out loud. Override with UBERDEV_GOAL_CHILD_BACKEND.
+#
+# THE PIN IS PROCESS-GLOBAL, SO THE SOLVER BACKEND IS SAVED FIRST.
+# `uberdev_dispatch_preflight` EXPORTs UBERDEV_RESOLVED_BACKEND for the whole
+# process, and that variable is ALSO what the backend-aware solver-liveness
+# probe (`uberdev_goal_agent_busy_for_issue`, lib/goal-state.sh) branches on.
+# Left unsaved, the pin silently re-routes that probe down the `background`
+# PID-file arm for solvers that are Workflow agents and never write a PID file
+# — so a live fleet reads as dead, or a recycled PID reads as a live solver and
+# holds the cycle open to its tick ceiling. UBERDEV_GOAL_SOLVER_BACKEND keeps
+# the run-level answer, and `_uberdev_goal_watch_solver_busy` below is the only
+# way this script asks the solver-liveness question.
+UBERDEV_GOAL_SOLVER_BACKEND="${UBERDEV_GOAL_SOLVER_BACKEND:-${UBERDEV_RESOLVED_BACKEND:-}}"
+export UBERDEV_GOAL_SOLVER_BACKEND
 if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "workflow" ]; then
   UBERDEV_DISPATCH_BACKEND_REQUESTED="${UBERDEV_GOAL_CHILD_BACKEND:-background}"
   export UBERDEV_DISPATCH_BACKEND_REQUESTED
@@ -84,6 +97,20 @@ if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "workflow" ]; then
   uberdev_dispatch_preflight || exit 1
   uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1
 fi
+
+# Solver liveness under the SOLVER's transport. Save/restore rather than an
+# assignment-prefixed call: a prefixed assignment on a FUNCTION invocation
+# persists after the call in POSIX mode, so the "temporary" override would leak
+# the solver backend into the /merge + /review-pr dispatches — the exact
+# mirror-image of the bug this closes.
+_uberdev_goal_watch_solver_busy() {
+  local _saved="${UBERDEV_RESOLVED_BACKEND:-}" _rc
+  UBERDEV_RESOLVED_BACKEND="${UBERDEV_GOAL_SOLVER_BACKEND:-$_saved}"
+  uberdev_goal_agent_busy_for_issue "$1"
+  _rc=$?
+  UBERDEV_RESOLVED_BACKEND="$_saved"
+  return "$_rc"
+}
 
 # watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
@@ -260,15 +287,20 @@ while true; do
       any_active=1
       continue
     fi
-    # No PR yet — is the solver still alive, or did it die?
-    if uberdev_goal_agent_busy_for_issue "$issue"; then
+    # No PR yet — is the solver still alive, or did it die? Probed through the
+    # SOLVER's transport (see _uberdev_goal_watch_solver_busy above), never the
+    # child transport this loop pinned for its own /merge + /review-pr children.
+    if _uberdev_goal_watch_solver_busy "$issue"; then
       any_active=1
     else
       _codex_state=""
       _codex_exit=""
       _codex_log=""
       _codex_result=""
-      if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
+      # Same reasoning as the liveness probe: the Codex status sidecar belongs
+      # to the SOLVER, so this branch keys on the solver backend, not on the
+      # child transport pinned above.
+      if [ "${UBERDEV_GOAL_SOLVER_BACKEND:-${UBERDEV_RESOLVED_BACKEND:-}}" = "codex" ]; then
         if _codex_status="$(uberdev_goal_codex_status_for_issue "$issue")"; then
           _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
           _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"

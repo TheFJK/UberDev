@@ -510,11 +510,19 @@ live_calls_in_sh() {  # $1=root  $2=symbol -> prints "file:line:text" per live h
   done < <(find "$root" -type f -name '*.sh' 2>/dev/null | sort)
 }
 
-DEMOTE_CALLERS="$(live_calls_in_sh "$REPO_ROOT/plugins/uberdev" 'uberdev_dispatch_demote_workflow_to_detached')"
+# Both shipped runtimes, not just the Claude one: codex/uberdev-codex/lib is a
+# byte-identical mirror, so a resurrected call there is just as live — and
+# scanning only plugins/uberdev would leave that half to codex-port.test.sh's
+# byte-comparison, which reports "mirror drift", not "the demotion is back".
+DEMOTE_CALLERS=""
+for _demote_root in "$REPO_ROOT/plugins/uberdev" "$REPO_ROOT/codex/uberdev-codex"; do
+  [ -d "$_demote_root" ] || continue
+  DEMOTE_CALLERS="$DEMOTE_CALLERS$(live_calls_in_sh "$_demote_root" 'uberdev_dispatch_demote_workflow_to_detached')"
+done
 if [ -n "$DEMOTE_CALLERS" ]; then
   fail "S17 a live call site for the retired demotion helper survives: $DEMOTE_CALLERS"
 else
-  pass "S17 no live call site for the retired demotion helper anywhere under plugins/uberdev"
+  pass "S17 no live call site for the retired demotion helper under plugins/uberdev or codex/uberdev-codex"
 fi
 
 grep -q 'Workflow({scriptPath: "\$CLAUDE_PLUGIN_ROOT/skills/goal-pipeline/workflow.js"}' "$GOAL_SKILL" \

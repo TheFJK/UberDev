@@ -43,7 +43,8 @@ UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:
 
 # >>> region: bash4-resolver
 # Execution-contract resolver (issue #294). Three outcomes:
-#   (a) already running under bash >= 4  -> proceed (CI / explicit `bash` run).
+#   (a) already running under bash >= 4  -> publish THIS interpreter and
+#       proceed (CI / explicit `bash` run).
 #   (b) NOT bash >= 4, but a bash >= 4 binary is discoverable -> resolve it,
 #       publish it as UBERDEV_GOAL_BASH, and re-exec THIS script under it so the
 #       glob/array semantics are correct from here on. The re-exec is the
@@ -62,7 +63,16 @@ UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:
 # version is verified >= 4 via `--version` (a `bash` on PATH could itself be
 # 3.2 on stock macOS), so we never publish a too-old interpreter.
 if [ -n "${BASH_VERSINFO:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
-  : # (a) already bash >= 4 — nothing to do.
+  # (a) already bash >= 4. Publishing the interpreter is NOT redundant here:
+  # the re-exec below only fixes THIS process, while Phases 1/2/3 are launched
+  # as SEPARATE processes by skills/goal-pipeline/workflow.js. Without a
+  # published path the driver falls back to PATH `bash`, which is 3.2 on stock
+  # macOS — and lib/goal-watch.sh's unmatched-glob verdict locator needs >= 4.
+  # $BASH is the absolute path of the running interpreter; an inherited value
+  # (the re-exec arm exports it before exec'ing) always wins so the two arms
+  # agree on one answer.
+  UBERDEV_GOAL_BASH="${UBERDEV_GOAL_BASH:-${BASH:-}}"
+  export UBERDEV_GOAL_BASH
 else
   UBERDEV_GOAL_BASH=""
   for _cand in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
@@ -117,6 +127,7 @@ barrier_timeout_cli=""
 review_grace_cli=""
 watch_passes_cli=""
 watch_budget_cli=""
+max_watch_ticks_cli=""
 only_mine=0
 dry_run=0
 resume=0
@@ -129,6 +140,7 @@ for tok in $ARGUMENTS; do
     --review-grace-secs=*)  review_grace_cli="${tok#--review-grace-secs=}" ;;
     --watch-passes=*)       watch_passes_cli="${tok#--watch-passes=}" ;;
     --watch-budget=*)       watch_budget_cli="${tok#--watch-budget=}" ;;
+    --max-watch-ticks=*)    max_watch_ticks_cli="${tok#--max-watch-ticks=}" ;;
     --only-mine)            only_mine=1 ;;
     --dry-run)              dry_run=1 ;;
     --resume)               resume=1 ;;
@@ -158,7 +170,7 @@ fi
 # <<< region: validate
 
 if [ "${#queue[@]}" -eq 0 ] && [ "$resume" = "0" ]; then
-  echo "usage: /uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--watch-passes=N] [--watch-budget=SECS] [--only-mine] [--dry-run] [--resume] [--backend=<name>]" >&2
+  echo "usage: /uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--watch-passes=N] [--watch-budget=SECS] [--max-watch-ticks=N] [--only-mine] [--dry-run] [--resume] [--backend=<name>]" >&2
   exit 2
 fi
 
@@ -191,6 +203,15 @@ WATCH_PASSES="$(UBERDEV_GOAL_WATCH_PASSES="${watch_passes_cli:-${UBERDEV_GOAL_WA
   uberdev_read_int_in_range goal.watch_passes UBERDEV_GOAL_WATCH_PASSES 0 100000 0)"
 WATCH_BUDGET="$(UBERDEV_GOAL_WATCH_BUDGET="${watch_budget_cli:-${UBERDEV_GOAL_WATCH_BUDGET:-}}" \
   uberdev_read_int_in_range goal.watch_budget UBERDEV_GOAL_WATCH_BUDGET 0 86400 0)"
+
+# MAX_WATCH_TICKS is the driver-side CB3 bound: how many lib/goal-watch.sh
+# invocations skills/goal-pipeline/workflow.js will relay in ONE cycle before it
+# halts deterministically. It is resolved HERE (rather than left to the driver's
+# hardcoded clamp default) so an operator can actually tune it — the same
+# CLI-flag → UBERDEV_GOAL_* env → goal.* config key → default chain every other
+# goal tunable uses. Range matches the driver's clampInt(…, 1, 500, 40).
+MAX_WATCH_TICKS="$(UBERDEV_GOAL_MAX_WATCH_TICKS="${max_watch_ticks_cli:-${UBERDEV_GOAL_MAX_WATCH_TICKS:-}}" \
+  uberdev_read_int_in_range goal.max_watch_ticks UBERDEV_GOAL_MAX_WATCH_TICKS 1 500 40)"
 if [ "${GOAL_SINGLE_TICK:-0}" = "1" ] && [ "${WATCH_PASSES:-0}" -eq 0 ] && [ "${WATCH_BUDGET:-0}" -eq 0 ]; then
   WATCH_PASSES=1
 fi
@@ -314,6 +335,7 @@ if [ "$dry_run" = "1" ]; then
   printf '  BARRIER_TIMEOUT_S=%s\n' "$BARRIER_TIMEOUT_S"
   printf '  WATCH_PASSES=%s WATCH_BUDGET=%s (0=unbounded watch loop)\n' \
     "${WATCH_PASSES:-0}" "${WATCH_BUDGET:-0}"
+  printf '  MAX_WATCH_TICKS=%s (driver-side CB3 bound)\n' "$MAX_WATCH_TICKS"
   printf '  backend=%s\n' "$UBERDEV_RESOLVED_BACKEND"
   printf '  issues=%s\n' "${queue[*]}"
   printf '  would emit goal_dispatched\n'
@@ -379,6 +401,23 @@ GOAL_QUEUE_CSV=""
 if [ "${#queue[@]}" -gt 0 ]; then
   GOAL_QUEUE_CSV="$(printf '%s,' "${queue[@]}")"; GOAL_QUEUE_CSV="${GOAL_QUEUE_CSV%,}"
 fi
+# The bash >= 4 EXECUTION CONTRACT, carried to the phases that actually need it.
+# Phases 1/2/3 run as fresh processes launched by
+# skills/goal-pipeline/workflow.js's relays; nothing of this process's
+# environment reaches them, so the resolver's re-exec above protects Phase 0
+# ONLY. Ship the resolved interpreter in the envelope and the driver launches
+# `"$bashBin" lib/goal-*.sh` instead of PATH `bash` (3.2 on stock macOS, where
+# lib/goal-watch.sh dies on `active_issues[@]: unbound variable`). Absolute
+# executable path or nothing — the driver falls back to `bash` on an empty or
+# malformed value rather than trusting a relative word.
+GOAL_BASH_BIN="${UBERDEV_GOAL_BASH:-}"
+case "$GOAL_BASH_BIN" in
+  /*) [ -x "$GOAL_BASH_BIN" ] || GOAL_BASH_BIN="" ;;
+  *)  GOAL_BASH_BIN="" ;;
+esac
+if [ -z "$GOAL_BASH_BIN" ]; then
+  echo "goal: WARN could not publish a bash >= 4 path for the relay-run phase scripts; they will run under PATH \`bash\` (lib/goal-watch.sh requires >= 4)" >&2
+fi
 uberdev_emit_workflow_args goal \
   repo_root="$GOAL_REPO_ROOT_ABS" \
   pluginRootAbs="$GOAL_PLUGIN_ROOT" \
@@ -392,6 +431,8 @@ uberdev_emit_workflow_args goal \
   reviewGraceSecs="$REVIEW_GRACE_SECS" \
   watchPasses="${WATCH_PASSES:-0}" \
   watchBudgetS="${WATCH_BUDGET:-0}" \
+  maxWatchTicks="$MAX_WATCH_TICKS" \
+  bashBin="$GOAL_BASH_BIN" \
   onlyMine="$([ "$only_mine" = "1" ] && echo true || echo false)" \
   resumed="$([ "$resume" = "1" ] && echo true || echo false)" \
   backend="$UBERDEV_RESOLVED_BACKEND" \

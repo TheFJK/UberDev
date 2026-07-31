@@ -97,14 +97,18 @@ The driver returns a structured result and logs it as one `WORKFLOW_RESULT` line
 
 After the driver returns, print the operator's narrative from the on-disk audit trail — the same `print_summary` contract the fence era had, read from state rather than reconstructed from the model's memory of the run:
 
+**`UBERDEV_GOAL_ID` is NOT in scope here, and gating on it would make this fence dead code.** `lib/goal-phase0.sh` exports it inside its OWN process, several Bash calls ago; this shell inherits nothing from it. `uberdev_goal_read_run_state` is what recovers the id — it bootstraps `GOAL_ID` from the fixed-path `goal-active-id.txt` pointer (`lib/goal-state.sh`, issue #171) — so it is called **unconditionally**, exactly as `lib/goal-phase1.sh`, `lib/goal-watch.sh` and `lib/goal-phase3.sh` call it, and **its** exit status is the gate.
+
 ```bash
+[ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/dispatch.sh" ] && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/dispatch.sh"
 [ -r "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh" ] && . "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-state.sh"
-GOAL_ID="${UBERDEV_GOAL_ID:-}"
-if [ -n "$GOAL_ID" ]; then
-  uberdev_goal_read_run_state || true
+if uberdev_goal_read_run_state; then
   print_summary "${cycle:-1}"
-  printf '  audit: %s\n' "${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-$GOAL_ID.jsonl"
-  tail -n 5 "${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-$GOAL_ID.jsonl" 2>/dev/null || true
+  GOAL_AUDIT_LOG="${UBERDEV_TMPDIR:-${TMPDIR:-/tmp}}/goal-${UBERDEV_GOAL_ID:-${GOAL_ID:-}}.jsonl"
+  printf '  audit: %s\n' "$GOAL_AUDIT_LOG"
+  tail -n 5 "$GOAL_AUDIT_LOG" 2>/dev/null || true
+else
+  echo "goal: no run-state to summarise (no goal-active-id.txt pointer under \${UBERDEV_TMPDIR:-\${TMPDIR:-/tmp}}) — the driver's WORKFLOW_RESULT line above is the record of this run." >&2
 fi
 ```
 
@@ -116,31 +120,40 @@ Codex, Gemini, Copilot and pre-Workflow Claude Code have no `Workflow` tool. The
 
 What remains is the manual sequence. Every phase script is a normal executable with a documented exit contract, so the loop can be driven by hand (or by any harness) without the driver:
 
+Every phase script runs under **bash ≥ 4** (`lib/goal-watch.sh`'s verdict locator iterates unmatched globs, which zsh and bash 3.2 do not survive). Phase 0 resolves one and exports it as `UBERDEV_GOAL_BASH`; drive the rest with that, never with PATH `bash` — stock macOS ships 3.2.
+
 ```bash
 export PLUGIN_ROOT=<plugin root>
 
 # Preflight ONCE. Name a detached backend explicitly — without a Workflow tool
-# there is nothing for `auto`'s `workflow` resolution to run on.
+# there is nothing for `auto`'s `workflow` resolution to run on. Phase 0 prints
+# the resolved interpreter as the envelope's config.bashBin (and exports
+# UBERDEV_GOAL_BASH); GBASH below is that interpreter.
 bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase0.sh" 123 124 --backend=claude-bg
+GBASH="${UBERDEV_GOAL_BASH:-$(command -v bash)}"
 
 # Then, per cycle:
 #  1. claim. Prints one JSON line: {"dispatch":"<csv>","rollover":"<csv>",...}
-bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase1.sh"
+"$GBASH" "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase1.sh"
 #  2. solve the claimed set. `--force` is required, not optional: step 1 already
 #     took the `uberdev:active` claim for these issues, so the launcher's own
-#     claim pass would otherwise refuse them as a collision with us.
-bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/solve-launcher.sh" --auto-mode=1 --turbo -- \
+#     claim pass would otherwise refuse them as a collision with us. Arm it with
+#     EXACTLY the `dispatch` list — `--force` means an issue you add by hand
+#     here is solved without ever having been claimed.
+"$GBASH" "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/solve-launcher.sh" --auto-mode=1 --turbo -- \
   <claimed issues> --backend=claude-bg --force
 #  3. reconcile: --mark-solving=<csv> on success, --mark-failed=<csv> otherwise.
-bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase1.sh" --mark-solving=<csv>
+#     A non-zero exit here means a state transition did NOT land — stop and fix
+#     it; step 4 can never drive an issue whose row is stuck at `dispatched`.
+"$GBASH" "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase1.sh" --mark-solving=<csv>
 #  4. watch until it stops asking to be re-invoked (0 drained / 42 again / 1 halt).
 while :; do
-  bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-watch.sh"; rc=$?
+  "$GBASH" "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-watch.sh"; rc=$?
   [ "$rc" = "42" ] || break
 done
 [ "$rc" = "0" ] || exit "$rc"
 #  5. collect (0 converged -> stop / 42 loop back to step 1 / 1 halt).
-bash "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase3.sh"
+"$GBASH" "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/lib/goal-phase3.sh"
 ```
 
 `--backend=claude-bg` in that sequence is the deliberate escape hatch: it is the one path that still uses a detached transport, it prints its deprecation notice, and its removal target is v1.0.0. `auto` never selects it.

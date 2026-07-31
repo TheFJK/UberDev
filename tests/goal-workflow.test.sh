@@ -139,13 +139,27 @@ if grep -q 'UBERDEV_GOAL_CHILD_BACKEND' "$WATCH"; then
 else
   fail "G6d lib/goal-watch.sh has no child transport — with backend=workflow every /merge and /review-pr dispatch would hit the loud refusal in lib/dispatch.sh"
 fi
-# ...and it must not be the retired whole-run demotion in disguise: the pin is
-# scoped to this script's own dispatches, so the run-level backend the driver
-# was given stays `workflow`.
-if grep -q 'the solvers stay Workflow-native' "$WATCH"; then
-  pass "G6e the child-transport pin states that the solvers are unaffected (scoped, not a whole-run demotion)"
+# ...and it must not be the retired whole-run demotion in disguise. A comment
+# saying so proves nothing: uberdev_dispatch_preflight EXPORTS
+# UBERDEV_RESOLVED_BACKEND process-globally, and uberdev_goal_agent_busy_for_issue
+# branches on that SAME variable — so an unscoped pin silently re-routes the
+# SOLVER liveness probe onto the PID-file arm for Workflow agents that never
+# write a PID file. What makes the pin genuinely scoped is that the run-level
+# backend is SAVED before it and the liveness probe reads the saved value.
+# (tests/goal.test.sh G51 runs the wrapper and asserts both halves behaviorally.)
+if grep -q 'UBERDEV_GOAL_SOLVER_BACKEND="\${UBERDEV_GOAL_SOLVER_BACKEND:-\${UBERDEV_RESOLVED_BACKEND:-}}"' "$WATCH" \
+   && grep -q '_uberdev_goal_watch_solver_busy "\$issue"' "$WATCH"; then
+  pass "G6e the child-transport pin is scoped: the run-level solver backend is saved and the liveness probe reads it"
 else
-  fail "G6e the child-transport pin does not state its scope — a reader cannot tell it from the retired demotion"
+  fail "G6e the child-transport pin is process-global — it re-routes the solver liveness probe (save UBERDEV_GOAL_SOLVER_BACKEND and probe via _uberdev_goal_watch_solver_busy)"
+fi
+# The saved value must be captured BEFORE the pin, or it captures the pin itself.
+G6E_SAVE="$(grep -n 'UBERDEV_GOAL_SOLVER_BACKEND="\${UBERDEV_GOAL_SOLVER_BACKEND:-' "$WATCH" | head -1 | cut -d: -f1)"
+G6E_PIN="$(grep -n 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\${UBERDEV_GOAL_CHILD_BACKEND:-' "$WATCH" | head -1 | cut -d: -f1)"
+if [ -n "$G6E_SAVE" ] && [ -n "$G6E_PIN" ] && [ "$G6E_SAVE" -lt "$G6E_PIN" ]; then
+  pass "G6e2 the solver backend is captured before the child transport overwrites it"
+else
+  fail "G6e2 solver-backend capture (line ${G6E_SAVE:-none}) must precede the child-transport pin (line ${G6E_PIN:-none})"
 fi
 # G6f — the settled-fleet short-circuit: the 150m detached-solver timeout is
 # meaningless once the awaited fleet call has returned.
@@ -221,14 +235,22 @@ function buildArgs(cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "goal", config: cfg };
 }
 
-function fleetEnvelope() {
+function fleetEnvelope(issues) {
   return JSON.stringify({ v: 1, run_id: "RID", now_epoch: 1767225600,
     now_iso: "2026-01-01T00:00:00Z", plugin_root: "/p", repo_root: "/r", cwd: "/r",
-    pipeline: "solve-fleet", config: { runId: "RID", issues: "11,12", concurrency: 6 } });
+    pipeline: "solve-fleet",
+    config: { runId: "RID", issues: (issues === undefined ? "11,12" : issues), concurrency: 6 } });
 }
+// A healthy claim relay returns an envelope whose issue set IS the claimed set —
+// that is the invariant `--force` arming depends on, so the default fixture
+// derives the envelope from `dispatch` and a test that wants a mismatch has to
+// pass fleetArgsJson explicitly.
 function claim(o) {
-  return Object.assign({ rc: 0, dispatch: "11,12", rollover: "", skipped: "",
-    launcherRc: 0, fleetArgsJson: fleetEnvelope(), armed: "11,12", note: "" }, o || {});
+  const base = { rc: 0, dispatch: "11,12", rollover: "", skipped: "",
+    launcherRc: 0, armed: "11,12", markRc: 0, note: "" };
+  const merged = Object.assign(base, o || {});
+  if (!("fleetArgsJson" in merged)) merged.fleetArgsJson = fleetEnvelope(merged.dispatch);
+  return merged;
 }
 function collect(o) {
   return Object.assign({ rc: 0, decision: "converged", candidates: 0, queued: 0,
@@ -460,6 +482,117 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.nWatchNoInterpret = !!(watchCall && watchCall.prompt.indexOf("Do NOT interpret it") >= 0);
   out.nWatchSettled = !!(watchCall && watchCall.prompt.indexOf("UBERDEV_GOAL_SOLVERS_SETTLED=1") >= 0);
 
+  // Run O — the envelope issue set must be the set the claim pass CLAIMED.
+  // The launcher is armed with --force, which bypasses its own uberdev:active
+  // collision guard, so an envelope naming any other issue would solve an
+  // unclaimed one. Same shape as a healthy run except for the substituted list.
+  const recO = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim({ dispatch: "11,12", armed: "11,12",
+      fleetArgsJson: fleetEnvelope("11,12,99") }),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resO = resultOf(recO);
+  out.oNested = recO.workflowCalls.length;
+  out.oFleet = resO ? resO.cycles[0].fleet : null;
+  out.oReason = !!(resO && resO.auditEvents.some(function (e) {
+    return e.event === "fleet_args_refused" && e.reason === "issue_set_mismatch";
+  }));
+  // ...and a DROPPED issue is a mismatch too, not just an extra one.
+  const recO2 = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim({ dispatch: "11,12", armed: "11,12", fleetArgsJson: fleetEnvelope("11") }),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  out.o2Nested = recO2.workflowCalls.length;
+  // Control: the same run with a MATCHING set (order permuted) still dispatches,
+  // so the guard is a set comparison and not an accidental always-refuse.
+  const recO3 = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim({ dispatch: "11,12", armed: "11,12", fleetArgsJson: fleetEnvelope("12,11") }),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  out.o3Nested = recO3.workflowCalls.length;
+
+  // Run P — a failed STEP 3 reconciliation halts BEFORE the fleet is armed.
+  // A stuck `dispatched` row can never take the goal-watch `solving -> pr-pushed`
+  // arc, so the cycle would otherwise burn every tick to a misattributed
+  // watch_tick_ceiling.
+  const recP = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim({ markRc: 1 }),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resP = resultOf(recP);
+  out.pHalted = resP ? resP.halted : null;
+  out.pReason = resP ? resP.haltReason : null;
+  out.pNoNested = recP.workflowCalls.length === 0;
+  out.pNoWatch = !labels(recP).some(function (l) { return /^goal-watch/.test(l || ""); });
+  out.pAudit = !!(resP && resP.auditEvents.some(function (e) { return e.event === "mark_reconcile_failed"; }));
+
+  // Run Q — a Bash-tool TIMEOUT on the watch relay is not a script verdict.
+  // It carries no exit status, so it must re-tick (the goal-watch.sh TERM handler
+  // persisted run-state) instead of halting the goal as a script error.
+  const recQ = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: -1, timedOut: true, note: "tool timeout" },
+    "goal-watch:c1:t2": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resQ = resultOf(recQ);
+  out.qConverged = resQ ? resQ.converged : null;
+  out.qHalted = resQ ? resQ.halted : null;
+  out.qTicks = resQ ? resQ.cycles[0].watchTicks : null;
+  out.qAudit = !!(resQ && resQ.auditEvents.some(function (e) { return e.event === "watch_relay_timeout"; }));
+  // Negative control: WITHOUT the timedOut flag the same rc IS a script error.
+  const recQ2 = await run(buildArgs(), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: -1, note: "some other failure" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resQ2 = resultOf(recQ2);
+  out.q2Reason = resQ2 ? resQ2.haltReason : null;
+  const watchQ = recQ.agentCalls.find(function (c) { return c.label === "goal-watch:c1:t1"; });
+  out.qPromptTimeout = !!(watchQ && watchQ.prompt.indexOf("timeout: 600000") >= 0);
+  out.qPromptContract = !!(watchQ && watchQ.prompt.indexOf("TIMEOUT CONTRACT") >= 0);
+
+  // Run R — the bash>=4 execution contract reaches the RELAY-RUN phase scripts.
+  // The phase-0 re-exec only fixes the phase-0 process itself; these are separate
+  // processes, and PATH `bash` is 3.2 on stock macOS.
+  const recR = await run(buildArgs({ bashBin: "/opt/homebrew/bin/bash", watchBudgetS: 300 }), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect(),
+    } });
+  const claimR = recR.agentCalls.find(function (c) { return c.label === "goal-claim:c1"; });
+  const watchR = recR.agentCalls.find(function (c) { return c.label === "goal-watch:c1:t1"; });
+  const collectR = recR.agentCalls.find(function (c) { return c.label === "goal-collect:c1"; });
+  out.rClaimBash = !!(claimR && claimR.prompt.indexOf("\"/opt/homebrew/bin/bash\" \"/p/lib/goal-phase1.sh\"") >= 0);
+  out.rLauncherBash = !!(claimR && claimR.prompt.indexOf("\"/opt/homebrew/bin/bash\" \"/p/lib/solve-launcher.sh\"") >= 0);
+  out.rWatchBash = !!(watchR && watchR.prompt.indexOf("\"/opt/homebrew/bin/bash\" \"/p/lib/goal-watch.sh\"") >= 0);
+  out.rCollectBash = !!(collectR && collectR.prompt.indexOf("\"/opt/homebrew/bin/bash\" \"/p/lib/goal-phase3.sh\"") >= 0);
+  out.rNoBarePathBash = !!(watchR && watchR.prompt.indexOf("bash \"/p/lib/goal-watch.sh\"") < 0);
+  // watchBudgetS=300 -> (300+120)*1000
+  out.rWatchTimeout = !!(watchR && watchR.prompt.indexOf("timeout: 420000") >= 0);
+  // A malformed/absent bashBin degrades to PATH `bash`, never to an unvalidated word.
+  const recR2 = await run(buildArgs({ bashBin: "rm -rf /; bash" }), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const claimR2 = recR2.agentCalls.find(function (c) { return c.label === "goal-claim:c1"; });
+  out.r2Sanitised = !!(claimR2 && claimR2.prompt.indexOf("rm -rf") < 0
+    && claimR2.prompt.indexOf("\"bash\" \"/p/lib/goal-phase1.sh\"") >= 0);
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -557,6 +690,34 @@ else
   check nMarkFailed true                  "B61 the relay reconciles dispatched->failed on an arming failure"
   check nWatchNoInterpret true            "B62 the watch relay is told to report the exit status, never interpret it"
   check nWatchSettled true                "B63 the watch relay carries the settled-fleet marker (the awaited fleet call makes the 150m solver timeout meaningless)"
+
+  check oNested 0                         "B64 an envelope naming an UNCLAIMED issue is refused — --force would have solved it without a claim"
+  check oFleet '"args-refused"'           "B65 the issue-set mismatch is recorded on the cycle"
+  check oReason true                      "B66 the refusal is audited with reason=issue_set_mismatch"
+  check o2Nested 0                        "B67 an envelope that DROPS a claimed issue is a mismatch too"
+  check o3Nested 1                        "B68 a set-equal envelope in a different order still dispatches (set comparison, not string equality)"
+
+  check pHalted true                      "B69 a non-zero STEP 3 reconciliation rc halts the run"
+  check pReason '"mark_reconcile_failed"' "B70 the halt names the reconciliation, not a downstream tick ceiling"
+  check pNoNested true                    "B71 no fleet is armed for issues whose state rows did not land"
+  check pNoWatch true                     "B72 the watch pass does not run on an unreconciled cycle"
+  check pAudit true                       "B73 mark_reconcile_failed is audited, not silent"
+
+  check qConverged true                   "B74 a timed-out watch relay re-ticks and the cycle still converges"
+  check qHalted false                     "B75 a Bash-tool timeout is not a circuit breaker"
+  check qTicks 2                          "B76 the timed-out tick is counted against the tick bound"
+  check qAudit true                       "B77 watch_relay_timeout is audited"
+  check q2Reason '"watch_script_error"'   "B78 the SAME rc without timedOut is still a script error (the flag is what routes it)"
+  check qPromptTimeout true               "B79 the watch relay is told the explicit Bash-tool timeout to pass"
+  check qPromptContract true               "B80 the watch relay carries an explicit timeout contract"
+
+  check rClaimBash true                   "B81 the claim relay runs lib/goal-phase1.sh under the resolved bash>=4"
+  check rLauncherBash true                "B82 the launcher runs under the resolved bash>=4"
+  check rWatchBash true                   "B83 the watch relay runs lib/goal-watch.sh under the resolved bash>=4 (PATH bash is 3.2 on stock macOS)"
+  check rCollectBash true                 "B84 the collect relay runs lib/goal-phase3.sh under the resolved bash>=4"
+  check rNoBarePathBash true              "B85 no relay falls back to a bare PATH \`bash\` when an interpreter was published"
+  check rWatchTimeout true                "B86 the relay timeout is sized from the resolved watch budget"
+  check r2Sanitised true                  "B87 a malformed bashBin degrades to PATH \`bash\`, never reaching the command line"
 fi
 
 echo ""

@@ -323,7 +323,7 @@ export UBERDEV_TMPDIR="$g17_dir/state"; mkdir -p "\$UBERDEV_TMPDIR"
 . "$GOAL_LIB"
 uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch.log"; return 0; }
 uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit.log"; return 0; }
-MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400
+MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400; MAX_WATCH_TICKS=40
 UBERDEV_RESOLVED_BACKEND=claude-bg
 GOAL_ID="goal-g17dryrun01"
 ARGUMENTS="101 202 --dry-run"
@@ -359,7 +359,7 @@ export UBERDEV_TMPDIR="$g17_dir/state2"; mkdir -p "\$UBERDEV_TMPDIR"
 . "$GOAL_LIB"
 uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch2.log"; return 0; }
 uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit2.log"; return 0; }
-MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400
+MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400; MAX_WATCH_TICKS=40
 UBERDEV_RESOLVED_BACKEND=claude-bg
 GOAL_ID="goal-g17real01"
 ARGUMENTS="101 202"
@@ -570,8 +570,8 @@ assert_grep "$GOAL_P1" 'dispatched solving' "G24b.dispatched-to-solving-post-arm
 # Arming-failure path transitions dispatched->failed (no solver, no PR; explicit cleanup).
 assert_grep "$GOAL_P1" 'dispatched failed' "G24b.dispatched-to-failed-on-arm-failure"
 # ...and the driver must actually drive both arms, or the states above are dead.
-assert_grep "$GOAL_WF" -- '--mark-solving'  "G24b.driver-marks-solving"
-assert_grep "$GOAL_WF" -- '--mark-failed'   "G24b.driver-marks-failed"
+assert_grep "$GOAL_WF" '--mark-solving'  "G24b.driver-marks-solving"
+assert_grep "$GOAL_WF" '--mark-failed'   "G24b.driver-marks-failed"
 
 echo
 echo "== G25: Phase 1 dispatch loop honours MAX_PARALLEL cap (#211 AC2) =="
@@ -673,7 +673,7 @@ echo "== G34: goal.review_grace_secs config plumbing (issue #220, AC ❶) =="
 assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS=3600'                                "G34.default-3600"
 assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400' "G34.range-helper"
 assert_grep "$GOAL_P0" 'review_grace_cli'                                                            "G34.cli-arg-var"
-assert_grep "$GOAL_P0" -- '--review-grace-secs=\*)'                                                  "G34.cli-arg-case-arm"
+assert_grep "$GOAL_P0" '--review-grace-secs=\*)'                                                  "G34.cli-arg-case-arm"
 assert_no_grep "$GOAL_P0" '_UBERDEV_GOAL_REVIEW_GRACE\b'                                             "G34.old-symbol-removed"
 
 echo
@@ -3125,8 +3125,8 @@ echo "== BT83: the cycle-arming chain, end to end (issue #248 -> RFC 0015 §5) =
 # the same two-sided coverage BT83 + G38 gave.
 assert_grep "$GOAL_WF" 'lib/goal-phase1.sh|phase1Sh'          "BT83.a-arming-chain-names-the-claim-pass"
 assert_grep "$GOAL_WF" 'lib/solve-launcher.sh|launcherSh'     "BT83.b-arming-chain-names-the-launcher"
-assert_grep "$GOAL_WF" -- '--backend=workflow'                "BT83.c-launcher-armed-on-the-workflow-backend"
-assert_grep "$GOAL_WF" -- '--force'                           "BT83.d-launcher-armed-with-force (our own claim would otherwise collide)"
+assert_grep "$GOAL_WF" '--backend=workflow'                "BT83.c-launcher-armed-on-the-workflow-backend"
+assert_grep "$GOAL_WF" '--force'                           "BT83.d-launcher-armed-with-force (our own claim would otherwise collide)"
 # The envelope must be relayed VERBATIM (DR-2). An LLM-composed envelope is the
 # failure mode this instruction exists to prevent.
 assert_grep "$GOAL_WF" 'VERBATIM'                             "BT83.e-envelope-relayed-verbatim"
@@ -3563,6 +3563,178 @@ else
   assert_eq "$BT61_EMPTY" "stale" "BT61.gh-empty — empty headRefOid reports stale, never green"
 fi
 rm -rf "$BT61_TMP"
+
+echo
+echo "== G50: the post-Workflow summary fence rehydrates UNCONDITIONALLY (RFC 0015 §5) =="
+# The fence used to read `GOAL_ID="${UBERDEV_GOAL_ID:-}"` and gate its whole body
+# on that being non-empty. UBERDEV_GOAL_ID is exported inside `bash
+# lib/goal-phase0.sh` — a CHILD of a DIFFERENT, earlier Bash call — so in this
+# fence it is ALWAYS empty and the body was dead code: the operator summary never
+# printed. Every other consumer (goal-phase1.sh, goal-watch.sh, goal-phase3.sh)
+# calls uberdev_goal_read_run_state unconditionally and lets IT bootstrap the id
+# from the fixed-path goal-active-id.txt pointer.
+#
+# A grep cannot tell the two shapes apart — only running the fence with
+# UBERDEV_GOAL_ID genuinely unset can. So: extract the fence verbatim, seed real
+# run-state, and run it in a fresh bash with the env var cleared.
+_g50_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g50-%s' "$$")"
+_g50_fence="$_g50_dir/summary.fence.sh"
+# The first ```bash block after the "## Post-Workflow summary" heading.
+awk '
+  /^## Post-Workflow summary$/ { seen=1; next }
+  seen && /^```bash$/          { cap=1; next }
+  cap && /^```$/               { exit }
+  cap                          { print }
+' "$GOAL_SKILL" > "$_g50_fence"
+if [ -s "$_g50_fence" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.extract: located the post-Workflow summary fence in the goal-pipeline SKILL.md"
+
+  _g50_id="1700000042-g50fence"
+  # Seed a real run: state files + the goal-active-id.txt pointer the fence must
+  # bootstrap from. Done in its OWN shell, exactly as lib/goal-phase0.sh does.
+  UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  "${BASH:-bash}" -c '
+    set -u
+    . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+    . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
+    GOAL_ID="'"$_g50_id"'"
+    export UBERDEV_GOAL_ID="$GOAL_ID"
+    uberdev_goal_state_init "$GOAL_ID" || exit 9
+    cycle=3; watch_start="$(date +%s)"; MAX_CYCLES=5; MAX_PARALLEL=3
+    queue=(); active_issues=()
+    uberdev_goal_write_run_state || exit 9
+  ' >/dev/null 2>&1 \
+    && _g50_seeded=1 || _g50_seeded=0
+  assert_eq "$_g50_seeded" "1" "G50.seed: run-state + goal-active-id.txt pointer written"
+
+  # THE ASSERTION: fresh shell, UBERDEV_GOAL_ID explicitly unset (the production
+  # condition), only UBERDEV_TMPDIR + CLAUDE_PLUGIN_ROOT in the environment.
+  # `unset` (a builtin) rather than `env -u`: the same clear-the-variable effect
+  # on every shell the CI matrix runs, Git-Bash-on-windows included.
+  _g50_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+      "${BASH:-bash}" -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$0"' "$_g50_fence" 2>&1)"
+  if printf '%s' "$_g50_out" | grep -q "^goal $_g50_id: cycles=3/5 "; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.prints-summary: the fence rehydrates from the pointer and prints the operator summary with UBERDEV_GOAL_ID unset"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.prints-summary: fence printed no summary (dead-code gate on UBERDEV_GOAL_ID?) — got: [$_g50_out]" >&2
+  fi
+  if printf '%s' "$_g50_out" | grep -q "audit: .*goal-$_g50_id\.jsonl"; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.prints-audit-path: the fence names the audit log for the rehydrated id (not an empty goal-.jsonl)"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.prints-audit-path: audit path missing/unkeyed — got: [$_g50_out]" >&2
+  fi
+  # Non-vacuity control: point the SAME fence at a tmpdir with no pointer. It
+  # must say so on stderr and print NO summary — proving G50.prints-summary is
+  # discriminating and not a grep that would pass on any output.
+  _g50_empty="$_g50_dir/empty"; mkdir -p "$_g50_empty"
+  _g50_neg="$(UBERDEV_TMPDIR="$_g50_empty" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+      "${BASH:-bash}" -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$0"' "$_g50_fence" 2>&1)"
+  if printf '%s' "$_g50_neg" | grep -q 'no run-state to summarise' \
+     && ! printf '%s' "$_g50_neg" | grep -q 'cycles='; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.control: with no active-id pointer the fence says so and prints no summary (assert is discriminating)"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.control: pointer-less run should refuse loudly and print nothing — got: [$_g50_neg]" >&2
+  fi
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.extract: could NOT extract the post-Workflow summary fence (heading renamed?)" >&2
+fi
+rm -rf "$_g50_dir"
+
+echo
+echo "== G51: the child-transport pin does not re-route the SOLVER liveness probe =="
+# uberdev_dispatch_preflight EXPORTS UBERDEV_RESOLVED_BACKEND process-globally,
+# and uberdev_goal_agent_busy_for_issue branches on that same variable. So the
+# `background` pin lib/goal-watch.sh takes for its OWN /merge + /review-pr
+# children silently re-routed the SOLVER liveness probe onto the PID-file arm —
+# for solvers that are Workflow agents and never write a PID file. A comment
+# saying "the solvers stay Workflow-native" cannot detect that; running the
+# wrapper can.
+_g51_fn="$(awk '
+  /^_uberdev_goal_watch_solver_busy\(\) \{/ { cap=1 }
+  cap                                       { print }
+  cap && /^\}$/                             { exit }
+' "$GOAL_WATCH")"
+if [ -n "$_g51_fn" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.extract: located _uberdev_goal_watch_solver_busy in lib/goal-watch.sh"
+  _g51_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g51-%s' "$$")"
+  {
+    echo 'set -u'
+    echo 'uberdev_goal_agent_busy_for_issue() { printf "PROBED=%s\n" "${UBERDEV_RESOLVED_BACKEND:-}"; return 1; }'
+    printf '%s\n' "$_g51_fn"
+    echo '_uberdev_goal_watch_solver_busy 123; printf "RC=%s\n" "$?"'
+    echo 'printf "AFTER=%s\n" "${UBERDEV_RESOLVED_BACKEND:-}"'
+  } > "$_g51_dir/probe.sh"
+  _g51_out="$(UBERDEV_RESOLVED_BACKEND=background UBERDEV_GOAL_SOLVER_BACKEND=workflow \
+    "${BASH:-bash}" "$_g51_dir/probe.sh" 2>&1)"
+  if printf '%s' "$_g51_out" | grep -q '^PROBED=workflow$'; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.probes-solver-backend: liveness is asked under the SOLVER backend, not the pinned child transport"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.probes-solver-backend: probe saw the child transport — got: [$_g51_out]" >&2
+  fi
+  if printf '%s' "$_g51_out" | grep -q '^AFTER=background$'; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.restores-child-backend: the child transport is restored after the probe (the /merge + /review-pr dispatches keep it)"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.restores-child-backend: the override leaked past the probe — got: [$_g51_out]" >&2
+  fi
+  # The no-PR solver arm must go through the wrapper. A bare
+  # `uberdev_goal_agent_busy_for_issue "$issue"` there is the bug returning.
+  if grep -qE '^[[:space:]]*if[[:space:]]+uberdev_goal_agent_busy_for_issue[[:space:]]+"\$issue"' "$GOAL_WATCH"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.no-bare-solver-probe: the solver arm calls uberdev_goal_agent_busy_for_issue directly again — the pin re-routes it" >&2
+  else
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.no-bare-solver-probe: the solver arm probes only via _uberdev_goal_watch_solver_busy"
+  fi
+  rm -rf "$_g51_dir"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.extract: _uberdev_goal_watch_solver_busy missing — the pin re-routes the solver liveness probe" >&2
+fi
+# The solver backend must be captured BEFORE the pin overwrites it.
+_g51_save_line="$(grep -n 'UBERDEV_GOAL_SOLVER_BACKEND="\${UBERDEV_GOAL_SOLVER_BACKEND:-\${UBERDEV_RESOLVED_BACKEND:-}}"' "$GOAL_WATCH" | head -1 | cut -d: -f1)"
+_g51_pin_line="$(grep -n 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\${UBERDEV_GOAL_CHILD_BACKEND:-background}"' "$GOAL_WATCH" | head -1 | cut -d: -f1)"
+if [ -n "$_g51_save_line" ] && [ -n "$_g51_pin_line" ] && [ "$_g51_save_line" -lt "$_g51_pin_line" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.saved-before-pin: the run-level solver backend is captured before the child-transport pin runs"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.saved-before-pin: solver backend captured at line [$_g51_save_line], pin at [$_g51_pin_line] — capture must come first" >&2
+fi
+
+echo
+echo "== G52: the bash>=4 execution contract reaches the RELAY-RUN phase scripts (#294) =="
+# lib/goal-phase0.sh's re-exec fixes phase 0 and nothing else: Phases 1/2/3 are
+# separate processes the driver's relays launch. PATH `bash` is 3.2 on stock
+# macOS, where lib/goal-watch.sh dies on `active_issues[@]: unbound variable` —
+# a non-0/42 status the driver reports as watch_script_error on cycle 1.
+assert_grep "$GOAL_P0" 'UBERDEV_GOAL_BASH="\$\{UBERDEV_GOAL_BASH:-\$\{BASH:-\}\}"' "G52.phase0-publishes-in-the-already-bash4-arm"
+assert_grep "$GOAL_P0" 'bashBin="\$GOAL_BASH_BIN"'                                  "G52.phase0-emits-bashBin-in-the-envelope"
+assert_grep "$GOAL_WF" 'CFG.bashBin'                                                "G52.driver-reads-bashBin"
+assert_grep "$GOAL_WF" 'function bashCmd'                                           "G52.driver-builds-every-relay-command-under-it"
+# ...and no relay may still hardcode a bare `bash "<path>"` command word.
+# grep -F: the needle is the JS source fragment `'bash "' +`, which is all
+# metacharacter and would be a silently-never-matching ERE.
+if grep -F "'bash \"' +" "$GOAL_WF" >/dev/null 2>&1; then
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G52.no-bare-bash-relay: a relay still launches a phase script with PATH bash" >&2
+else
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G52.no-bare-bash-relay: no relay hardcodes PATH bash for a phase script"
+fi
+# The published path must survive Phase 0's own arm (a) — the CI/bash>=4 case.
+_g52_out="$("${BASH:-bash}" -c '
+  set -u
+  BASH_VERSINFO_PROBE=1
+  '"$(awk "/^# >>> region: bash4-resolver/{c=1;next} /^# <<< region: bash4-resolver/{exit} c{print}" "$GOAL_P0")"'
+  printf "PUBLISHED=%s\n" "${UBERDEV_GOAL_BASH:-unset}"
+' 2>&1)"
+# A drive-letter prefix is accepted for Git-Bash-on-windows; the asserted
+# property is "absolute path to a bash", not a POSIX-only spelling.
+if printf '%s' "$_g52_out" | grep -qE '^PUBLISHED=([A-Za-z]:)?/.*bash'; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G52.arm-a-publishes: running the resolver under bash>=4 publishes an absolute interpreter path"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G52.arm-a-publishes: arm (a) left UBERDEV_GOAL_BASH unset — Phases 1/2/3 would fall back to PATH bash — got: [$_g52_out]" >&2
+fi
+
+echo
+echo "== G53: --max-watch-ticks is an operator-tunable knob, not a hardcoded driver default =="
+assert_grep "$GOAL_P0" '--max-watch-ticks='                                      "G53.phase0-parses-the-flag"
+assert_grep "$GOAL_P0" 'goal\.max_watch_ticks UBERDEV_GOAL_MAX_WATCH_TICKS 1 500 40' "G53.phase0-resolves-via-the-standard-precedence-chain"
+assert_grep "$GOAL_P0" 'maxWatchTicks="\$MAX_WATCH_TICKS"'                           "G53.phase0-emits-it-in-the-envelope"
+assert_grep "$GOAL_CMD" '--max-watch-ticks=N'                                     "G53.cmd-documents-the-flag"
 
 echo
 echo "== Summary =="
