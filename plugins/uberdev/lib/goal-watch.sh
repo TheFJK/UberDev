@@ -688,6 +688,7 @@ while true; do
     # renumbered to vN+2 by its own /merge — become eligible. The in-pass
     # `break` + the cross-pass MERGING interlock together guarantee at most one
     # manifest-touching merge is ever in flight.
+    # >>> region: merge-dispatch-gate
     pr="$(_uberdev_goal_batch_green_prs_ordered "$GOAL_ID" | head -n 1)"
     if [ -n "$pr" ]; then
       if uberdev_goal_pr_is_merged "$pr"; then
@@ -708,7 +709,61 @@ while true; do
         uberdev_goal_audit goal_merge_deferred \
           "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"review_in_flight\",\"in_flight_count\":1}"
       elif uberdev_goal_should_automerge "$GOAL_ID" "$pr"; then
-        if _uberdev_goal_dispatch_merge "$pr"; then
+        # #364 — GUARANTEE THE VERSION BUMP BEFORE THE MERGE IS DISPATCHED.
+        # The ORDER is the entire contract: the fleet solvers are forbidden from
+        # bumping (N parallel solvers off one base all resolve the same next
+        # version and the duplicate change auto-merges without a conflict), so
+        # if nothing adds the bump HERE the PR lands with every version surface
+        # still at the old value — CI stays green, the marketplace never serves
+        # the update, and the failure is completely silent. This is also the
+        # only strictly-serialized point in the run (one green PR per pass +
+        # the MERGING interlock), so `origin/<base>` already carries the
+        # previous landing's bump and sequential numbering is correct here and
+        # nowhere earlier.
+        #
+        # FAIL CLOSED: a bump that could not be guaranteed leaves the PR in
+        # `green` for a later pass and emits a goal_merge_deferred audit row.
+        # Merging unbumped IS the bug, so merging is never the fallback.
+        #
+        # THREE-WAY exit status, not a boolean (#364 review):
+        #   2 — bump PUSHED this pass -> the push restarted the PR's checks;
+        #       dispatching now is a DETERMINISTIC /merge gate_fail on
+        #       reason=ci_red (Step 1.4 reads any pending rollup entry as red,
+        #       and its settle probe is bounded at 3x10s against a CI critical
+        #       path of minutes). Three such passes exhaust
+        #       _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS, should_automerge starts
+        #       returning 1, no arm is taken, and the PR sits in `green` until
+        #       the 4h stuck_loop breaker — a hard stall of the whole run.
+        #       Defer instead; the next pass sees already_bumped (rc 0).
+        #   0 — already bumped / no ratchet -> fall through to the CI gate.
+        #   anything else — fail closed. The `-ne 0` arm is deliberately the
+        #       catch-all rather than a literal `-eq 1`: an exit status this
+        #       lane does not recognise must NEVER reach the merge dispatch,
+        #       so a future status added to the helper cannot silently become
+        #       "merge it" here.
+        _uberdev_goal_ensure_version_bump "$pr"
+        version_bump_rc=$?
+        if [ "$version_bump_rc" -eq 2 ]; then
+          printf 'goal-pipeline: PR %s bumped and pushed this pass — deferring /merge until the restarted checks settle\n' \
+            "$pr" >&2
+          any_active=1
+          uberdev_goal_audit goal_merge_deferred \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"ci_restarted_by_version_bump\"}"
+        elif [ "$version_bump_rc" -ne 0 ]; then
+          printf 'goal-pipeline: PR %s NOT dispatched to /merge — its version bump could not be guaranteed (rc=%s; see the version_bump_failed audit row); staying green for a later pass\n' \
+            "$pr" "$version_bump_rc" >&2
+          any_active=1
+        # CI-settle gate. Withholding only — it can never authorise a merge (a
+        # gh failure or an unconfigured-checks repo returns rc 1 and falls
+        # through to /merge, which owns the hard CI gate). The 4h stuck_loop
+        # wall clock remains the backstop for a check that never completes.
+        elif _uberdev_goal_pr_checks_pending "$pr"; then
+          printf 'goal-pipeline: PR %s has checks still running — deferring /merge rather than burning a merge attempt on a pending rollup\n' \
+            "$pr" >&2
+          any_active=1
+          uberdev_goal_audit goal_merge_deferred \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"ci_pending\"}"
+        elif _uberdev_goal_dispatch_merge "$pr"; then
           uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
           # Flip to the MERGING sentinel BEFORE the collision-chain so the very
           # next batch_all_terminal read (this PR no longer GREEN/terminal)
@@ -731,6 +786,7 @@ while true; do
       # lowest-first serialization, #289.2). The rest wait behind the MERGING
       # interlock until this one reaches MERGED in step 2d.
     fi
+    # <<< region: merge-dispatch-gate
   else
     # Barrier NOT clear yet — at least one PR is PENDING or the unblock-wait
     # has unresolved blockers.

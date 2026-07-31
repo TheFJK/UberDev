@@ -707,7 +707,7 @@ uberdev_goal_state_init() {
 uberdev_goal_audit() {
   local event="$1" payload="$2"
   case "$event" in
-    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr) ;;
+    goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
@@ -2842,6 +2842,457 @@ _uberdev_goal_batch_green_prs_ordered() {
   while IFS=$'\t' read -r pr _issue _ts state; do
     [ "$state" = "GREEN" ] && printf '%s\n' "$pr"
   done < "$tsv" | sort -n
+}
+
+# ---------------------------------------------------------------------------
+# Mandatory version bump before landing (issue #364)
+# ---------------------------------------------------------------------------
+# THE HOLE THIS CLOSES. `skills/solve-fleet/workflow.js` tells every fleet
+# solver, correctly, NOT to bump the project version: N solvers branching off
+# the same main all resolve the SAME next version, git auto-merges the identical
+# change without a conflict, and the second landing silently eats the first
+# bump (project memory: project_uberdev_merge_version_collision). But nothing
+# downstream ever ADDED the bump back. `_uberdev_goal_rebase_collision_chain`
+# below RENUMBERS a bump that already exists; it never creates one. So a /goal
+# run landed PRs that touched zero version surfaces, and it failed SILENTLY:
+# the two CI version-lock tests assert the surfaces AGREE with each other, not
+# that the version ADVANCED, so an unbumped landing leaves every surface
+# consistently at the old version, CI stays green, and the marketplace never
+# serves the update.
+#
+# WHY THE BUMP BELONGS HERE. `lib/goal-watch.sh` step 2c acts on exactly ONE
+# green PR per pass (strict lowest-first) and holds the MERGING sentinel until
+# that PR lands (#289.2). That is the only strictly-serialized point in the
+# run, so at the moment we bump, `origin/<base>` already carries the previous
+# landing's bump — which is what makes sequential numbering correct instead of
+# colliding. Bumping any earlier (in the solver, in the review lane) reopens the
+# collision.
+#
+# FAIL CLOSED. Every helper below returns non-zero rather than guessing, and
+# the watch lane must NOT dispatch /merge for a PR whose bump could not be
+# guaranteed. Merging unbumped IS the bug; merging is never the fallback.
+#
+# THE TWO DOWNSTREAM CONSEQUENCES OF PUSHING HERE, and where each is answered.
+#   1. The release commit lands ON TOP of the `Reviewed-by:` anchor commit
+#      `/review-pr` wrote, so /merge Phase 1.4 PATH_2 would read the trailer off
+#      the wrong commit (gate_fail trust_trail_trailer_missing) and, even with
+#      the trailer, would see a non-empty cumulative diff (verdict STALE ->
+#      trust_trail_stale_sha, which is explicitly excluded from the Step-1.4.5
+#      auto-review recovery). ANSWERED IN /merge, not here: PATH_2 sub-condition
+#      (a.5) resolves the trust head through
+#      `skills/merge-pipeline/lib/release-anchor.sh`, which tolerates the top
+#      commit ONLY when it is provably inert with respect to reviewed code. The
+#      bump therefore stays at the serialized lane — the only place consecutive
+#      versions fall out naturally — instead of being moved before the review,
+#      which would reopen the collision class this whole section exists to close.
+#   2. The push RESTARTS the PR's checks. /merge Step 1.4 reads any pending
+#      rollup entry as gate_fail reason=ci_red. ANSWERED HERE: a successful bump
+#      returns rc 2 ("pushed just now — defer"), and the watch lane additionally
+#      gates every dispatch on `_uberdev_goal_pr_checks_pending`.
+
+# The canonical version SSOT (`bump-version.sh` surface 1). Its presence is
+# also the probe for "does this repo have a version ratchet at all" — /goal is a
+# general-purpose command and the mandatory-bump rule belongs to repos that
+# actually carry the surfaces `bump-version.sh` knows how to move.
+_UBERDEV_GOAL_VERSION_MANIFEST='plugins/uberdev/.claude-plugin/plugin.json'
+# The exact stub body `bump-version.sh::bv_insert_changelog_stub` writes. Kept
+# as a constant so a drift in that script fails LOUD here (the fill helper
+# returns non-zero when the marker is absent) instead of shipping a CHANGELOG
+# section whose body is still "release notes pending".
+_UBERDEV_GOAL_CHANGELOG_STUB_MARK='_Release notes pending'
+
+# _uberdev_goal_manifest_version   (reads the manifest JSON on stdin)
+# Echo the first `"version": "X.Y.Z"` value. Same extraction bump-version.sh
+# uses for its own current-version read, so the two can never disagree about
+# which literal is canonical.
+_uberdev_goal_manifest_version() {
+  sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' | sed -n '1p'
+}
+
+# _uberdev_goal_validate_ref REF
+# A branch name arrives from `gh` and goes straight into `git` argv. Refuse a
+# leading `-` (git would parse it as an option), whitespace, and anything
+# outside git's own ref-name character set — the same defence-in-depth
+# `_uberdev_goal_validate_int` gives the PR numbers.
+_uberdev_goal_validate_ref() {
+  local ref="$1"
+  case "$ref" in
+    ''|-*) return 1 ;;
+    *[!A-Za-z0-9._/-]*) return 1 ;;
+    *'..'*) return 1 ;;
+  esac
+  return 0
+}
+
+# _uberdev_goal_semver_parts VERSION
+# Echo `MAJOR MINOR PATCH` for a strict X.Y.Z; rc 1 for anything else. Pure
+# parameter expansion — no subshell, no `read`, no `[[ ]]`, so bash 3.2, bash 5
+# and zsh all parse and evaluate it identically.
+_uberdev_goal_semver_parts() {
+  local v="$1" maj min pat rest
+  case "$v" in
+    ''|*[!0-9.]*) return 1 ;;
+  esac
+  maj="${v%%.*}"; rest="${v#*.}"
+  [ "$rest" != "$v" ] || return 1          # no first dot
+  min="${rest%%.*}"; pat="${rest#*.}"
+  [ "$pat" != "$rest" ] || return 1        # no second dot
+  case "$pat" in *.*) return 1 ;; esac     # X.Y.Z.W is not SemVer
+  [ -n "$maj" ] && [ -n "$min" ] && [ -n "$pat" ] || return 1
+  printf '%s %s %s' "$maj" "$min" "$pat"
+}
+
+# _uberdev_goal_semver_gt A B — rc 0 iff A is strictly newer than B.
+# Load-bearing: a PR branched before two releases landed has a version LOWER
+# than its base, and a plain `!=` would read that as "already bumped" and let it
+# land unbumped — the very bug this machinery closes.
+_uberdev_goal_semver_gt() {
+  local pa pb a1 a2 a3 b1 b2 b3
+  pa="$(_uberdev_goal_semver_parts "$1")" || return 1
+  pb="$(_uberdev_goal_semver_parts "$2")" || return 1
+  a1="${pa%% *}"; pa="${pa#* }"; a2="${pa%% *}"; a3="${pa#* }"
+  b1="${pb%% *}"; pb="${pb#* }"; b2="${pb%% *}"; b3="${pb#* }"
+  # `10#` forces base-10 so a zero-padded component can never be read as octal.
+  [ "$(( 10#$a1 ))" -gt "$(( 10#$b1 ))" ] && return 0
+  [ "$(( 10#$a1 ))" -lt "$(( 10#$b1 ))" ] && return 1
+  [ "$(( 10#$a2 ))" -gt "$(( 10#$b2 ))" ] && return 0
+  [ "$(( 10#$a2 ))" -lt "$(( 10#$b2 ))" ] && return 1
+  [ "$(( 10#$a3 ))" -gt "$(( 10#$b3 ))" ] && return 0
+  return 1
+}
+
+# _uberdev_goal_next_version CURRENT KIND   (KIND: major|minor|patch)
+_uberdev_goal_next_version() {
+  local parts="" maj min pat kind="$2"
+  parts="$(_uberdev_goal_semver_parts "$1")" || return 1
+  maj="${parts%% *}"; parts="${parts#* }"; min="${parts%% *}"; pat="${parts#* }"
+  case "$kind" in
+    major) printf '%s.0.0'    "$(( 10#$maj + 1 ))" ;;
+    minor) printf '%s.%s.0'   "$(( 10#$maj ))" "$(( 10#$min + 1 ))" ;;
+    patch) printf '%s.%s.%s'  "$(( 10#$maj ))" "$(( 10#$min ))" "$(( 10#$pat + 1 ))" ;;
+    *) return 1 ;;
+  esac
+}
+
+# _uberdev_goal_fetch_pr_commits PR
+# The PR's commit messages in ONE gh round-trip, as tagged lines so the two
+# zones stay separable in a flat blob: `S|<subject>` per commit, `B|<line>` for
+# every line of every commit body. Split with `sed -n 's/^S|//p'` — `|` is
+# literal in a BRE, and unlike a tab it survives BSD sed (macOS) as well as GNU.
+_uberdev_goal_fetch_pr_commits() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  gh pr view "$pr" --json commits --jq '
+    .commits[]
+    | ("S|" + (.messageHeadline // "")),
+      ((.messageBody // "") | split("\n")[] | "B|" + .)' 2>/dev/null
+}
+
+# _uberdev_goal_bump_kind TITLE BODY [COMMIT_SUBJECTS] [COMMIT_BODIES]
+#   -> major|minor|patch
+# SemVer from the PR's conventional-commit type, per CLAUDE.md's release rule:
+# `feat:` -> minor, everything else (`fix:`/`test:`/`docs:`/`refactor:`/`chore:`)
+# -> patch, a `!` marker or a `BREAKING CHANGE:` footer -> major.
+#
+# The COMMITS are part of the predicate, not decoration. In a /goal run the PR
+# title is written by the solver agent, not by a release engineer: a PR titled
+# `fix(x): …` that carries a `feat:` commit is a FEATURE, and deriving the step
+# from the title alone silently under-releases it as a patch. Title/body still
+# participate — a maintainer-authored `BREAKING CHANGE:` footer in the PR body
+# is authoritative even when no single commit declares it. Highest wins:
+# major > minor > patch.
+#
+# Herestrings (never `echo … | grep -q`) — a pipe into `grep -q` can EPIPE-race
+# under pipefail on Linux CI.
+_uberdev_goal_bump_kind() {
+  local title="$1" body="$2" subjects="${3:-}" bodies="${4:-}"
+  if grep -Eq '^[A-Za-z]+(\([^)]*\))?!:' <<<"$title" \
+     || grep -Eq '^[A-Za-z]+(\([^)]*\))?!:' <<<"$subjects" \
+     || grep -Eq '^[[:space:]]*BREAKING[ -]CHANGE[[:space:]]*:' <<<"$body" \
+     || grep -Eq '^[[:space:]]*BREAKING[ -]CHANGE[[:space:]]*:' <<<"$bodies"; then
+    printf 'major'
+    return 0
+  fi
+  if grep -Eq '^feat(\([^)]*\))?:' <<<"$title" \
+     || grep -Eq '^feat(\([^)]*\))?:' <<<"$subjects"; then
+    printf 'minor'
+    return 0
+  fi
+  printf 'patch'
+}
+
+# _uberdev_goal_pr_checks_pending PR
+# rc 0 — at least one statusCheckRollup entry is queued / in-progress / pending.
+#        The caller MUST NOT dispatch /merge: Step 1.4 of merge-pipeline
+#        classifies a non-empty rollup carrying ANY pending entry as
+#        gate_fail reason=ci_red, and its null-rollup settle probe is bounded at
+#        3 x 10s while this repo's CI critical path is minutes — so dispatching
+#        into a pending rollup is a DETERMINISTIC gate-fail that burns one of
+#        the three per-PR merge attempts for nothing (#364).
+# rc 1 — no pending entry, OR the probe was unusable (gh failure, malformed
+#        count, no checks configured). Fail SOFT on purpose: /merge Step 1.4
+#        owns the hard CI gate and re-probes with its own settle logic, so a
+#        transient gh blip must never wedge the landing lane. This helper only
+#        ever WITHHOLDS a dispatch; it can never authorise one.
+_uberdev_goal_pr_checks_pending() {
+  local pr="$1" pending
+  _uberdev_goal_validate_int "$pr" || return 1
+  pending="$(gh pr view "$pr" --json statusCheckRollup --jq '
+    [ .statusCheckRollup[]?
+      | ((.status // .state // "") | ascii_upcase)
+      | select(. == "QUEUED" or . == "IN_PROGRESS" or . == "PENDING"
+               or . == "WAITING" or . == "REQUESTED" or . == "EXPECTED") ]
+    | length' 2>/dev/null)" || pending=""
+  case "$pending" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pending" -gt 0 ]
+}
+
+# _uberdev_goal_sanitize_release_text TEXT
+# A PR title/body is UNTRUSTED input that is about to be written into
+# CHANGELOG.md and passed through `awk -v`. Strip control characters (the field
+# is single-line by contract), backslashes (awk -v runs escape processing on its
+# value) and any leading markdown structure markers (a title beginning `## [9.9.9]`
+# would otherwise forge a CHANGELOG section header and break the next release's
+# drift pre-check). Length-capped for hygiene.
+_uberdev_goal_sanitize_release_text() {
+  printf '%s' "$1" \
+    | tr -d '[:cntrl:]' \
+    | sed -e 's/\\//g' \
+          -e 's/^[[:space:]]*[#>*_-]*[[:space:]]*//' \
+          -e 's/[[:space:]]*$//' \
+    | cut -c1-160
+}
+
+# _uberdev_goal_release_entry PR TITLE BODY
+# The CHANGELOG bullet that replaces bump-version.sh's stub — derived from the
+# PR (its title, and the issue references its body carries), never free-form.
+_uberdev_goal_release_entry() {
+  local pr="$1" title="$2" body="$3" clean refs
+  clean="$(_uberdev_goal_sanitize_release_text "$title")"
+  [ -n "$clean" ] || clean="PR #$pr"
+  refs="$(grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' <<<"$body" \
+          | grep -Eo '[0-9]+' | sort -n -u | sed 's/^/#/' | paste -sd, - | sed 's/,/, /g')"
+  if [ -n "$refs" ]; then
+    printf -- '- %s (#%s; closes %s)' "$clean" "$pr" "$refs"
+  else
+    printf -- '- %s (#%s)' "$clean" "$pr"
+  fi
+}
+
+# _uberdev_goal_fill_changelog_stub CHANGELOG_FILE ENTRY_LINE
+# Replace the pending-release stub line bump-version.sh inserted with ENTRY_LINE.
+# rc 1 when the stub marker is absent — a release section whose body still reads
+# "release notes pending" is not a release, so this fails CLOSED rather than
+# committing the placeholder.
+_uberdev_goal_fill_changelog_stub() {
+  local file="$1" entry="$2" tmp
+  [ -f "$file" ] || return 1
+  tmp="$file.goal-bump.$$"
+  if ! awk -v entry="$entry" -v mark="$_UBERDEV_GOAL_CHANGELOG_STUB_MARK" '
+        !filled && index($0, mark) { print entry; filled = 1; next }
+        { print }
+        END { if (!filled) exit 3 }
+      ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp" > "$file" && rm -f "$tmp"
+}
+
+# _uberdev_goal_version_bump_deferred PR STAGE
+# One place that records "the bump did not happen, and here is exactly where it
+# stopped". Reuses the existing closed audit enum: `goal_merge_deferred` already
+# means "the merge dispatch was withheld this pass, with a reason". STAGE is a
+# fixed vocabulary, never interpolated free text, so the JSON payload can never
+# be malformed by a hostile PR title. Always rc 1 — callers `return` it directly.
+_uberdev_goal_version_bump_deferred() {
+  local pr="$1" stage="$2"
+  uberdev_goal_audit goal_merge_deferred \
+    "$(printf '{"goal_id":"%s","pr":%s,"reason":"version_bump_failed","stage":"%s"}' \
+        "${UBERDEV_GOAL_ID:-unknown}" "$pr" "$stage")" >/dev/null 2>&1 || true
+  printf 'goal-state: version bump for PR %s FAILED at stage=%s — NOT dispatching /merge (landing unbumped is invisible to the marketplace); the PR stays green for a later pass\n' \
+    "$pr" "$stage" >&2
+  return 1
+}
+
+# _uberdev_goal_apply_version_bump WT NEXT PR HEAD_REF TITLE BODY
+# The write half, isolated so the caller owns worktree lifecycle on every exit
+# path (a shell function cannot use `trap` without clobbering the caller's).
+# Runs inside a DETACHED throwaway worktree at the PR head — never the /goal
+# session's own checkout, whose index must stay pristine (project memory:
+# project_uberdev_turbo_main_index_pollution).
+_uberdev_goal_apply_version_bump() {
+  local wt="$1" next="$2" pr="$3" head_ref="$4" title="$5" body="$6"
+  local bump_sh="$_UBERDEV_GOAL_LIB_DIR/bump-version.sh" out entry
+  # bump-version.sh owns the seven-surface edit, refuses on pre-existing drift
+  # (exit 3) and re-verifies every surface after writing (exit 4). Lean on it;
+  # never re-implement the surface list here.
+  if ! out="$(bash "$bump_sh" "$next" --repo-root "$wt" 2>&1)"; then
+    printf 'goal-state: bump-version.sh %s refused for PR %s:\n%s\n' "$next" "$pr" "$out" >&2
+    _uberdev_goal_version_bump_deferred "$pr" "bump_script"
+    return 1
+  fi
+  entry="$(_uberdev_goal_release_entry "$pr" "$title" "$body")"
+  if ! _uberdev_goal_fill_changelog_stub "$wt/CHANGELOG.md" "$entry"; then
+    _uberdev_goal_version_bump_deferred "$pr" "changelog"
+    return 1
+  fi
+  # `-a` (tracked files only): every surface bump-version.sh touches is tracked,
+  # so an untracked stray can never be swept into the release commit.
+  if ! out="$(git -C "$wt" commit -a -m "chore(release): v$next" \
+        -m "$(printf 'Added by /goal before landing PR #%s. The fleet solvers are forbidden from bumping the version, because N solvers off the same base all resolve the same next version and the duplicate change auto-merges without a conflict. The serialized landing lane is the one point where the next version is unambiguous.' "$pr")" 2>&1)"; then
+    printf 'goal-state: git commit failed for PR %s: %s\n' "$pr" "$out" >&2
+    _uberdev_goal_version_bump_deferred "$pr" "commit"
+    return 1
+  fi
+  # NEVER --force. A rejected non-fast-forward means the PR branch moved under
+  # us; the correct response is to fail closed and re-derive next pass, not to
+  # overwrite someone else's commit.
+  if ! out="$(git -C "$wt" push origin "HEAD:refs/heads/$head_ref" 2>&1)"; then
+    printf 'goal-state: push of the release commit for PR %s failed: %s\n' "$pr" "$out" >&2
+    _uberdev_goal_version_bump_deferred "$pr" "push"
+    return 1
+  fi
+  return 0
+}
+
+# _uberdev_goal_ensure_version_bump PR
+# Guarantee that PR carries a version bump before /goal lands it.
+#   rc 0 — the PR ALREADY carried a bump, or the repo has no version ratchet to
+#          enforce. Nothing was pushed, so the PR's checks are undisturbed and
+#          the caller may proceed to its CI gate.
+#   rc 2 — this call created the bump and PUSHED it. The push RESTARTED the
+#          PR's checks, so the caller MUST defer the /merge dispatch by at
+#          least one pass (#364): merge-pipeline Step 1.4 reads any pending
+#          rollup entry as gate_fail reason=ci_red, which would burn one of the
+#          three merge attempts and, three passes later, strand the PR in
+#          `green` until the 4h stuck_loop breaker. The next pass takes the
+#          already_bumped arm (rc 0) and gates on the settled rollup instead.
+#   rc 1 — could not guarantee a bump. The caller MUST NOT dispatch /merge.
+_uberdev_goal_ensure_version_bump() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local goal_id="${UBERDEV_GOAL_ID:-unknown}"
+
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || repo_root=""
+  if [ -z "$repo_root" ]; then
+    _uberdev_goal_version_bump_deferred "$pr" "repo_root_unresolved"
+    return 1
+  fi
+
+  # No ratchet in this repo -> nothing to enforce. Probed on the working tree
+  # (cheap, offline, and a PR cannot remove the file from the base checkout).
+  if [ ! -f "$repo_root/$_UBERDEV_GOAL_VERSION_MANIFEST" ]; then
+    uberdev_goal_audit goal_version_bumped \
+      "$(printf '{"goal_id":"%s","pr":%s,"action":"skipped","reason":"no_version_ratchet"}' "$goal_id" "$pr")" \
+      >/dev/null 2>&1 || true
+    printf 'goal-state: %s is absent — this repo carries no version ratchet, so PR %s needs no bump\n' \
+      "$_UBERDEV_GOAL_VERSION_MANIFEST" "$pr" >&2
+    return 0
+  fi
+
+  local bump_sh="$_UBERDEV_GOAL_LIB_DIR/bump-version.sh"
+  if [ -z "$_UBERDEV_GOAL_LIB_DIR" ] || [ ! -f "$bump_sh" ]; then
+    _uberdev_goal_version_bump_deferred "$pr" "bump_script_missing"
+    return 1
+  fi
+
+  # PR metadata in ONE gh round-trip, through gh's own --jq so this helper adds
+  # no local jq dependency (the same reason the rest of this file reaches for
+  # `gh … --jq` on API output and plain `jq` only on local files).
+  local meta head_ref base_ref cross title
+  meta="$(gh pr view "$pr" --json headRefName,baseRefName,isCrossRepository,title \
+            --jq '[.headRefName, .baseRefName, (.isCrossRepository | tostring), .title] | @tsv' 2>/dev/null)"
+  IFS=$'\t' read -r head_ref base_ref cross title <<<"$meta"
+  if ! _uberdev_goal_validate_ref "${head_ref:-}" || ! _uberdev_goal_validate_ref "${base_ref:-}"; then
+    _uberdev_goal_version_bump_deferred "$pr" "gh_metadata"
+    return 1
+  fi
+  if [ "${cross:-}" = "true" ]; then
+    # A fork head is not pushable through `origin`; pushing `head_ref` there
+    # would silently CREATE that branch on the base repo instead of updating the
+    # PR. Refuse loudly — the operator bumps the fork by hand, and the
+    # already-bumped check below then clears the PR on a later pass.
+    _uberdev_goal_version_bump_deferred "$pr" "cross_repository"
+    return 1
+  fi
+
+  # Base + head tips via FETCH_HEAD rather than refs/remotes/*: correct
+  # regardless of how narrow the clone's fetch refspec is.
+  local base_sha head_sha
+  if ! git fetch origin "$base_ref" >/dev/null 2>&1; then
+    _uberdev_goal_version_bump_deferred "$pr" "fetch_base"
+    return 1
+  fi
+  base_sha="$(git rev-parse FETCH_HEAD 2>/dev/null)" || base_sha=""
+  if ! git fetch origin "$head_ref" >/dev/null 2>&1; then
+    _uberdev_goal_version_bump_deferred "$pr" "fetch_head"
+    return 1
+  fi
+  head_sha="$(git rev-parse FETCH_HEAD 2>/dev/null)" || head_sha=""
+  if [ -z "$base_sha" ] || [ -z "$head_sha" ]; then
+    _uberdev_goal_version_bump_deferred "$pr" "fetch_head"
+    return 1
+  fi
+
+  local base_ver head_ver
+  base_ver="$(git show "$base_sha:$_UBERDEV_GOAL_VERSION_MANIFEST" 2>/dev/null | _uberdev_goal_manifest_version)"
+  if ! _uberdev_goal_semver_parts "$base_ver" >/dev/null 2>&1; then
+    _uberdev_goal_version_bump_deferred "$pr" "base_version_unreadable"
+    return 1
+  fi
+  head_ver="$(git show "$head_sha:$_UBERDEV_GOAL_VERSION_MANIFEST" 2>/dev/null | _uberdev_goal_manifest_version)"
+  # STRICTLY GREATER, not merely different: a PR branched before two releases
+  # landed sits BELOW its base and still needs a bump.
+  if _uberdev_goal_semver_gt "$head_ver" "$base_ver"; then
+    uberdev_goal_audit goal_version_bumped \
+      "$(printf '{"goal_id":"%s","pr":%s,"action":"already_bumped","from":"%s","to":"%s"}' \
+          "$goal_id" "$pr" "$base_ver" "$head_ver")" >/dev/null 2>&1 || true
+    printf 'goal-state: PR %s already carries a version bump (%s -> %s); leaving renumbering to the collision chain\n' \
+      "$pr" "$base_ver" "$head_ver" >&2
+    return 0
+  fi
+
+  local body kind next tagged c_subjects c_bodies
+  body="$(_uberdev_goal_fetch_pr_body "$pr")"
+  # The SemVer step is derived from the PR's COMMITS as well as its title/body:
+  # a /goal PR title is authored by the solver agent, so a `fix(...)` title over
+  # a `feat:` commit would otherwise ship a feature as a patch release.
+  tagged="$(_uberdev_goal_fetch_pr_commits "$pr")"
+  c_subjects="$(printf '%s\n' "$tagged" | sed -n 's/^S|//p')"
+  c_bodies="$(printf '%s\n' "$tagged"   | sed -n 's/^B|//p')"
+  kind="$(_uberdev_goal_bump_kind "$title" "$body" "$c_subjects" "$c_bodies")"
+  if ! next="$(_uberdev_goal_next_version "$base_ver" "$kind")"; then
+    _uberdev_goal_version_bump_deferred "$pr" "version_resolution"
+    return 1
+  fi
+
+  local wt_parent wt rc
+  if ! wt_parent="$(mktemp -d 2>/dev/null)"; then
+    _uberdev_goal_version_bump_deferred "$pr" "mktemp"
+    return 1
+  fi
+  wt="$wt_parent/pr-$pr"
+  if ! git worktree add --detach "$wt" "$head_sha" >/dev/null 2>&1; then
+    rm -rf "$wt_parent"
+    _uberdev_goal_version_bump_deferred "$pr" "worktree_add"
+    return 1
+  fi
+  _uberdev_goal_apply_version_bump "$wt" "$next" "$pr" "$head_ref" "$title" "$body"
+  rc=$?
+  git worktree remove --force "$wt" >/dev/null 2>&1 || true
+  rm -rf "$wt_parent"
+  git worktree prune >/dev/null 2>&1 || true
+  [ "$rc" -eq 0 ] || return 1   # the deferral audit row is emitted by the callee
+
+  uberdev_goal_audit goal_version_bumped \
+    "$(printf '{"goal_id":"%s","pr":%s,"action":"bumped","from":"%s","to":"%s","kind":"%s"}' \
+        "$goal_id" "$pr" "$base_ver" "$next" "$kind")" >/dev/null 2>&1 || true
+  printf 'goal-state: PR %s bumped %s -> %s (%s) and pushed as `chore(release): v%s`; deferring /merge one pass so the restarted checks can settle\n' \
+    "$pr" "$base_ver" "$next" "$kind" "$next" >&2
+  # rc 2, NOT 0 — the push restarted CI. See the contract above.
+  return 2
 }
 
 # _uberdev_goal_rebase_collision_chain GOAL_ID JUST_MERGED_PR
