@@ -1217,6 +1217,82 @@ else
   fail "W5b: expected passes=7 sleeps=7 when made_transition=0 (got rc=$W5B_RC, out=[$W5B_OUT]) — an always-on skip would hammer gh"
 fi
 
+# ==========================================================================
+# PS — the post-Workflow summary fence, under the shell it actually runs in.
+#
+# This is the ONE executable block still living in skills/goal-pipeline/SKILL.md
+# after the RFC 0015 §5 extraction, so it is the one block that still runs under
+# the Claude-Code Bash tool's /bin/zsh rather than under a resolved bash>=4.
+# It shipped gated on `[ -n "${UBERDEV_GOAL_ID:-}" ]` — an env var that
+# lib/goal-phase0.sh exports inside its OWN child process, several Bash calls
+# earlier — so the gate was never true and the operator summary was never
+# printed. The fix is the standard unconditional rehydrate:
+# uberdev_goal_read_run_state bootstraps GOAL_ID from the fixed-path
+# goal-active-id.txt pointer.
+#
+# Mutation guard: re-introduce the `GOAL_ID="${UBERDEV_GOAL_ID:-}"` +
+# `[ -n "$GOAL_ID" ]` gate => PSa RED (fence prints nothing).
+# ==========================================================================
+echo
+echo "== PS: the post-Workflow summary fence under zsh =="
+
+PS_FENCE="$WORK/summary.fence.sh"
+awk '
+  /^## Post-Workflow summary$/ { seen=1; next }
+  seen && /^```bash$/          { cap=1; next }
+  cap && /^```$/               { exit }
+  cap                          { print }
+' "$GOAL_SKILL" > "$PS_FENCE"
+if [ -s "$PS_FENCE" ]; then
+  pass "PS.extract: located the post-Workflow summary fence in skills/goal-pipeline/SKILL.md"
+
+  PS_TMP="$WORK/ps-state"; mkdir -p "$PS_TMP"
+  PS_ID="1700000077-pszshfence"
+  # Seed a real run the way lib/goal-phase0.sh does — in its OWN process, so the
+  # fence below inherits nothing but $UBERDEV_TMPDIR (exactly production).
+  PS_SEED_RC=0
+  UBERDEV_TMPDIR="$PS_TMP" "$ZSH_BIN" -f -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    GOAL_ID="'"$PS_ID"'"
+    export UBERDEV_GOAL_ID="$GOAL_ID"
+    uberdev_goal_state_init "$GOAL_ID" || exit 9
+    cycle=4; watch_start="$(date +%s)"; MAX_CYCLES=5; MAX_PARALLEL=3
+    queue=(); active_issues=()
+    uberdev_goal_write_run_state || exit 9
+  ' >/dev/null 2>&1 || PS_SEED_RC=$?
+  if [ "$PS_SEED_RC" -eq 0 ]; then
+    pass "PS.seed: run-state + goal-active-id.txt pointer written under zsh"
+  else
+    fail "PS.seed: could not seed run-state under zsh (rc=$PS_SEED_RC)"
+  fi
+
+  # THE ASSERTION: the fence, under zsh, with UBERDEV_GOAL_ID genuinely unset.
+  PS_OUT="$(UBERDEV_TMPDIR="$PS_TMP" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+    "$ZSH_BIN" -f -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$1"' zsh "$PS_FENCE" 2>&1)"
+  if grep -q "^goal $PS_ID: cycles=4/5 " <<<"$PS_OUT"; then
+    pass "PSa: the fence rehydrates from goal-active-id.txt and prints the operator summary with UBERDEV_GOAL_ID unset (the production condition)"
+  else
+    fail "PSa: fence printed no summary under zsh — a UBERDEV_GOAL_ID gate makes it dead code (got: [$PS_OUT])"
+  fi
+  if grep -q "audit: .*goal-$PS_ID\.jsonl" <<<"$PS_OUT"; then
+    pass "PSb: the fence names the audit log for the rehydrated id"
+  else
+    fail "PSb: audit path missing or unkeyed (got: [$PS_OUT])"
+  fi
+  # Non-vacuity control: no pointer => refuse loudly, print no summary.
+  PS_EMPTY="$WORK/ps-empty"; mkdir -p "$PS_EMPTY"
+  PS_NEG="$(UBERDEV_TMPDIR="$PS_EMPTY" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+    "$ZSH_BIN" -f -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$1"' zsh "$PS_FENCE" 2>&1)"
+  if grep -q 'no run-state to summarise' <<<"$PS_NEG" && ! grep -q 'cycles=' <<<"$PS_NEG"; then
+    pass "PSc: with no active-id pointer the fence refuses loudly and prints no summary (PSa is discriminating)"
+  else
+    fail "PSc: pointer-less run should refuse loudly and print nothing (got: [$PS_NEG])"
+  fi
+else
+  fail "PS.extract: could NOT extract the post-Workflow summary fence (heading renamed?)"
+fi
+
 echo
 echo "== Summary =="
 echo "  harness shell: $LAUNCH_SHELL"
