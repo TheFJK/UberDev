@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.2] — 2026-07-30
+
+### Fixed
+
+- `/review-pr` Phase 3 dispatched the CI failure classifier and code fixer against CI that never failed. The monitor ran `timeout 1200 gh pr checks --watch` in ONE Bash fence, but the Bash tool caps at 600 s — so the harness killed the fence and returned a code that was neither `gh`'s success nor its documented "checks pending", which the next line mapped to "at least one check failed". Replaced with a bounded-pass loop that distinguishes a pass consuming its full budget (still pending) from one that returned early (genuinely red).
+- The `sequential` fanout mode was a no-op: `/review-pr` exported its flag in one bash fence and `post-impl-review` read it in a later, separate fence, and Bash tool calls share no shell state. The cap is now passed as a Skill input.
+- Abandoned `/review-pr` run reservations had no owner. The `EXIT` trap was replaced by a receipt redeemed only by the final publish fence, all four abandon sites sat inside the setup fence, and no reaper existed — so any mid-run abandonment stalled `/goal` for the full grace period. Added a reaper that runs immediately before reservation, on both the native-Windows and POSIX arms.
+- A cleanup failure after publication masqueraded as a publication failure, so callers re-reviewed an already-published verdict. Marker retirement now has its own error path and exit code.
+- Hardened five Python helpers that lacked a `spec is None` guard and ran `exec_module` outside their `try`; a `created = True` set after `os.fsync` that skipped rollback on an fsync error and orphaned the run directory; two blanket `except: pass` blocks; and a no-newline receipt that made the run id, receipt and marker directory compare equal so a base64 blob could be exported as the run id.
+- Native Windows lost its reservation receipt and markers across a fresh shell, and the ignore tri-state/no-clobber matrix did not hold there.
+
+### Tests
+
+- Replaced a vacuous reaper oracle. Its assertions ran in an `if` condition, where bash suppresses `errexit` for the whole command — and that suppression is inherited by a subshell even when the subshell re-enables it, so `set -e` would not have fixed it either. Every assertion now routes through a helper that exits and names the failure, and both reviewer mutations were re-run to prove the oracle reds.
+- Replaced a structural assertion that alternated on `link(`, which matched pre-existing `os.unlink(` lines so a plain truncating write would have passed, and added a non-empty guard before every awk-slice negative assertion (one was vacuous because its slice could be empty).
+
 ## [0.41.1] — 2026-07-30
 
 ### Changed
