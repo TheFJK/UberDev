@@ -22,6 +22,12 @@
 #     specific section so a prose match elsewhere in the file does not
 #     false-positive.
 #
+#   assert_no_grep_nonempty <file> <pattern> <desc>
+#     Negative-presence assertion for a file the caller BUILT (an awk/sed slice
+#     of a source document). Refuses to pass when <file> is missing or empty —
+#     an empty slice matches nothing, so a plain `assert_no_grep` on it passes
+#     vacuously and keeps passing after the anchors it slices on are renamed.
+#
 #   assert_version_bump <repo_root> <version>
 #     Asserts <version> is propagated to all five manifest surfaces
 #     (plugin.json, marketplace.json, Codex plugin.json, README badge,
@@ -86,6 +92,26 @@ assert_in_section() {
   else
     echo "  FAIL  $desc"; echo "        file: $file  section: $section_start..$section_end  pattern: $pattern"
     FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_no_grep_nonempty() {
+  local file="$1" pattern="$2" desc="$3"
+  # A slice file that the caller generated with awk/sed is empty whenever the
+  # anchors it slices on were renamed. `grep -q` on an empty file never matches,
+  # so an absence assertion over it PASSES while inspecting nothing at all
+  # (#347). Refuse that outcome before evaluating the pattern.
+  if [[ ! -s "$file" ]]; then
+    echo "  FAIL  $desc (slice missing or empty — refusing vacuous PASS)"
+    echo "        file: $file  pattern (must NOT appear): $pattern"
+    FAIL=$((FAIL + 1)); return
+  fi
+  if grep -qE -e "$pattern" "$file"; then
+    echo "  FAIL  $desc"
+    echo "        file: $file  pattern (must NOT appear): $pattern"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
   fi
 }
 

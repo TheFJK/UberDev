@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.40.3-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.41.2-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -37,7 +37,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 
 | Command | What it does |
 |---|---|
-| **`/solve <issue#>`** | Spawns an autonomous Claude agent as a `claude --bg` background session (visible in `claude agents`). Tier-aware: trivial issues skip brainstorm; large ones get the full orchestrator → spec → plan → wave-dispatch → review pipeline. |
+| **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium/large get a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
 | **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
@@ -155,10 +155,23 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 /solve 123 --small                    # force small tier
 /solve 123 --full                     # force medium/large
 /solve 123 --auto                     # enable --dangerously-skip-permissions (bypass all permission gates)
-claude agents                          # monitor active /solve and /turbo background sessions
+/workflows                             # monitor active /solve and /turbo solver fleets
 ```
 
-**What runs as the background session** — model and effort are pinned so behavior is reproducible across runs:
+**What actually runs** (RFC 0015) — the launcher validates, triages and claims every issue, then hands the batch to `skills/solve-fleet/workflow.js`. That script runs **one solver agent per issue in its own git worktree**, in `parallel()` waves of `fanout_concurrency.solve_bg` (default 6):
+
+```
+/solve 5 6 7
+  └── lib/solve-launcher.sh   validate -> triage -> claim -> emit args   (one Bash call, seconds)
+  └── Workflow(skills/solve-fleet/workflow.js)
+        ├── #5  medium  research x3 -> spec -> review -> plan -> solve (worktree) -> PR
+        ├── #6  trivial                                    solve (worktree) -> PR
+        └── #7  small                                      solve (worktree) -> PR
+```
+
+Monitor with **`/workflows`** — the progress tree lives in the session you started, and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`). There is no separate agent surface to poll.
+
+**Detached transports** are still available for fire-and-forget runs: `--backend=claude-bg` (deprecated, removal target v1.0.0), `--backend=wezterm`, `--backend=background`, `--backend=codex`. Those spawn a real session per issue:
 
 ```bash
 claude --bg \
@@ -167,7 +180,7 @@ claude --bg \
   --model 'claude-opus-4-8[1m]'
 ```
 
-Monitor with `claude agents` (the Agent View peek panel handles `AskUserQuestion` prompts inline — type the response and press Enter). Session names display natively from the `--worktree solve-issue-N` flag; no OSC tab-rename or `cmux workspace-action` is needed.
+and are monitored with `claude agents` (the Agent View peek panel handles `AskUserQuestion` prompts inline). `auto` never selects them.
 
 **Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
 
@@ -381,7 +394,7 @@ Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberde
 <details>
 <summary><strong>Will <code>/solve</code> work outside macOS?</strong></summary>
 
-Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. Process-identity reconciliation is supported on Linux, macOS, and native Windows; other kernels fail closed instead of using a degraded PID fingerprint. Monitor `claude --bg` sessions with `claude agents`. Requires Claude Code >= 2.1.139.
+Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. On the default `workflow` backend there is no OS-specific supervision at all (the Workflow runtime owns every agent), which is why native Windows no longer requires WezTerm. Process-identity reconciliation is supported on Linux, macOS, and native Windows for the explicit detached backends; other kernels fail closed instead of using a degraded PID fingerprint, and `claude --bg` sessions are monitored with `claude agents`. Requires Claude Code >= 2.1.139.
 
 </details>
 

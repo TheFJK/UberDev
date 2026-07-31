@@ -4,6 +4,67 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.2] — 2026-07-30
+
+### Fixed
+
+- `/review-pr` Phase 3 dispatched the CI failure classifier and code fixer against CI that never failed. The monitor ran `timeout 1200 gh pr checks --watch` in ONE Bash fence, but the Bash tool caps at 600 s — so the harness killed the fence and returned a code that was neither `gh`'s success nor its documented "checks pending", which the next line mapped to "at least one check failed". Replaced with a bounded-pass loop that distinguishes a pass consuming its full budget (still pending) from one that returned early (genuinely red).
+- The `sequential` fanout mode was a no-op: `/review-pr` exported its flag in one bash fence and `post-impl-review` read it in a later, separate fence, and Bash tool calls share no shell state. The cap is now passed as a Skill input.
+- Abandoned `/review-pr` run reservations had no owner. The `EXIT` trap was replaced by a receipt redeemed only by the final publish fence, all four abandon sites sat inside the setup fence, and no reaper existed — so any mid-run abandonment stalled `/goal` for the full grace period. Added a reaper that runs immediately before reservation, on both the native-Windows and POSIX arms.
+- A cleanup failure after publication masqueraded as a publication failure, so callers re-reviewed an already-published verdict. Marker retirement now has its own error path and exit code.
+- Hardened five Python helpers that lacked a `spec is None` guard and ran `exec_module` outside their `try`; a `created = True` set after `os.fsync` that skipped rollback on an fsync error and orphaned the run directory; two blanket `except: pass` blocks; and a no-newline receipt that made the run id, receipt and marker directory compare equal so a base64 blob could be exported as the run id.
+- Native Windows lost its reservation receipt and markers across a fresh shell, and the ignore tri-state/no-clobber matrix did not hold there.
+
+### Tests
+
+- Replaced a vacuous reaper oracle. Its assertions ran in an `if` condition, where bash suppresses `errexit` for the whole command — and that suppression is inherited by a subshell even when the subshell re-enables it, so `set -e` would not have fixed it either. Every assertion now routes through a helper that exits and names the failure, and both reviewer mutations were re-run to prove the oracle reds.
+- Replaced a structural assertion that alternated on `link(`, which matched pre-existing `os.unlink(` lines so a plain truncating write would have passed, and added a non-empty guard before every awk-slice negative assertion (one was vacuous because its slice could be empty).
+
+## [0.41.1] — 2026-07-30
+
+### Changed
+
+- Migrated `/uberthink` off the directive-emitter onto `skills/uberthink-pipeline/workflow.js`, leaving a thin preflight + args seam. The run ledger was designed as a key/value store but implemented as an append-only log, and the write and read paths disagreed about which occurrence of a key was authoritative; orchestration state now lives in JavaScript variables for the whole run, so the disagreement cannot exist.
+
+### Fixed
+
+- The fleet ceiling is live again. Every counter bump matched the FIRST occurrence of `AGENTS_DISPATCHED` — forever the Phase-0 seed of `0` — while every reader took the LAST, so waves of 3+32+2+6 reported 6 against a true total of 43 and `CB-ISLAND` could never halt a runaway genetic loop.
+- Tooling crashes are no longer delivered as substance. The Wave-4 and Wave-7 cuts ran under `2>/dev/null || true`, so a module-load failure wrote no shortlist, the falsifier count fell to zero, `CB-CONVERGE` fired, and a ~90-minute run reported "the goal as framed admitted no feasible novel approach". A non-zero report run is now a `TOOLING` halt that can never route to a convergence verdict.
+- Wave 5 dispatched against a fabricated composite path: it rebuilt the path from the shortlist *id* (`comp-island-K-NNN`) when the file is named by lens (`comp-NNN-<lens>.yaml`), so it pointed at a file that never exists. It now carries `report.py`'s authoritative `composite_path`, drops unusable rows with a halt rather than inventing one, and names falsifier dossiers by file stem so feasibility sub-scores actually reach the Wave-7 floor cut.
+- `/uberthink` could not invoke the tool it now mandates: `allowed-tools` omitted `Workflow`. Added, with the byte-matched alias SSOT row and the assertion the sibling migrations already carry.
+- `--resume` silently discarded the entire donor catalogue — cross-domain donor import is the premise of the command — because donors were assigned only on the non-resume branch. Donors now rehydrate from the scope verdict, or the scope gate re-runs.
+- A personas relay returning the wrong shape at `rc 0` shipped empty persona blocks into every wave prompt and reported a clean success. The payload is validated before any dispatch, not just the return code.
+- `--resume RUN_ID`, `--islands N` and `--max-new N` were documented with a space but only parsed with `=`; the space form fell through and launched a full ideation run on the run id as its goal. Both spellings now parse, and a value-taking flag with no value is a hard error.
+- An existing-but-empty composites directory returned an empty design list at `rc 0`, which the preflight's eager `mkdir -p` made reachable; zero artifacts is now a missing input, not an honest frontier.
+
+### Tests
+
+- Added `tests/uberthink-workflow.test.sh` with a real accumulation fixture (3+32+2+6 must reach 43 and trip the ceiling), a report-runner `rc != 0` case asserting a `TOOLING` halt rather than a convergence verdict, resume-with-donors coverage, and persona-payload validation.
+- Strengthened two assertions that passed for the wrong reason: the circuit-breaker check was satisfied by the sentence retiring a breaker, and the aggregate-path check matched a literal from an unrelated region. Every new assertion was mutation-proven.
+
+## [0.41.0] — 2026-07-30
+
+### Added
+
+- Workflow-native dispatch for `/solve` and `/turbo` (RFC 0015): a new `workflow` backend runs one worktree-isolated solver agent per issue inside the calling session's Workflow runtime, via `skills/solve-fleet/workflow.js`. Progress is visible with `/workflows` and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`) instead of leaving outcome discovery to a separate agent surface.
+- Script-orchestrated design phases for medium/large tier: a parallel research fan-out (codebase, constraints, test-coverage) feeding a spec writer, a bounded single-round spec review, and a plan writer, because a Workflow agent is a leaf and cannot fan out for itself.
+- Live circuit breakers on the fleet: a projected-agent ceiling that aborts before any dispatch, a token-budget guard between waves, a manifest/claim cross-check that refuses to touch an unclaimed issue, and per-issue fault isolation so one failing issue cannot take the batch down.
+
+### Changed
+
+- `auto` now resolves to `workflow` on every Claude host and every OS class; a Codex session or Codex-only host still resolves to `codex`. The per-OS detached-supervisor matrix (macOS → WezTerm/claude-bg, WSL2/Linux → claude-bg, native Windows → WezTerm) is retired from automatic selection.
+- Native Windows no longer hard-errors without WezTerm: the Workflow runtime owns agent lifetimes, so there is no process tree to supervise.
+- The fanout cap is a real live concurrency ceiling on the `workflow` backend (waves are barriers), where on the detached backends it only ever chunked the dispatch burst.
+
+### Deprecated
+
+- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. Removal target v1.0.0. `wezterm`, `background` and `codex` remain fully supported explicit choices, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+
+### Tests
+
+- Added `tests/solve-fleet-workflow.test.sh`: the shell seam (backend enum, `auto` resolution across all four OS classes, the deprecation notice, the no-provider-arm refusal, launcher Step 5w ordering and args emission), shape greps over the fleet script and its skill, and T3 behavioral fixtures covering tier routing, wave barriers, both circuit breakers, null-agent handling, the manifest cross-check, out-of-run-dir path rejection, and model policy.
+- Re-anchored `tests/dispatch-fallback.test.sh` on the new auto contract (auto never selects a detached backend; native Windows resolves rather than refusing; an explicit deprecated backend still resolves, loudly) and updated the enum and Codex-skill-count locks.
+
 ## [0.40.3] — 2026-07-28
 
 ### Fixed

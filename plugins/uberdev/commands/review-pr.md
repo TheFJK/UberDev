@@ -48,6 +48,14 @@ if [ "${RUN_ID+x}" = x ] && [ -n "${RUN_ID:-}" ]; then
   RUN_ID_WAS_EXPLICIT=1
 fi
 RUN_ID_RESERVATION_MAX_ATTEMPTS=16
+# Age after which an unpublished reservation's `locked` marker is treated as
+# abandoned and reaped. Default 7200 = 2 x REVIEW_GRACE_SECS (goal-state.sh's
+# `_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS=3600`): the reaper must never race the
+# reader, so it only removes markers that are already well past the window
+# `/uberdev:goal` itself uses to call a marker stale. No live `/review-pr` run
+# reaches this age — the per-child timeout defaults to 600s, MONITOR is capped at
+# 1200s, and the CI-fix loop is capped at 3 iterations.
+REVIEW_RESERVATION_REAP_SECS="${REVIEW_RESERVATION_REAP_SECS:-7200}"
 REVIEW_RUN_MANIFEST="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py"
 review_prepare_run_root() {
   local repository_root="$1"
@@ -62,11 +70,20 @@ import sys
 repository_root, module_path = sys.argv[1:]
 repository_root = os.path.abspath(repository_root)
 spec = importlib.util.spec_from_file_location("uberdev_review_run_manifest", module_path)
-module = importlib.util.module_from_spec(spec)
-if spec.loader is None:
+# `spec` itself is None when the pathname is unloadable; `module_from_spec(None)`
+# then raises AttributeError BEFORE the loader guard below could ever run, and an
+# import-time failure inside exec_module escapes as an uncaught traceback. Both
+# leave the caller with an opaque rc instead of one stable diagnostic.
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
     raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
 
 def owned_directory(entry):
     uid_fn = getattr(os, "geteuid", None)
@@ -172,18 +189,37 @@ import sys
 
 runs_root, identity_json, module_path = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("uberdev_review_ignore_manifest", module_path)
-module = importlib.util.module_from_spec(spec)
-if spec.loader is None:
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
     raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
+ignore_path = os.path.join(os.path.abspath(runs_root), ".gitignore")
 try:
     identity = json.loads(identity_json)
-    module.secure_publish_exact_no_clobber(
-        os.path.join(runs_root, ".gitignore"), b"*\n", identity
-    )
+    module.secure_publish_exact_no_clobber(ignore_path, b"*\n", identity)
 except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
-    print(f"error: could not install private review ignore policy: {error}", file=sys.stderr)
+    # The publisher is exact-name/no-clobber by contract: it never truncates or
+    # unlinks an existing pathname, so a crash residue (typically a 0-byte
+    # carrier from an interrupted earlier run) wedges every later run here. The
+    # bare `{error}` this used to print ("artifact_target_exists") named neither
+    # the file nor the way out, so the operator had nothing to act on.
+    print(
+        f"error: could not install private review ignore policy at {ignore_path}: {error}",
+        file=sys.stderr,
+    )
+    print(
+        f"hint: inspect {ignore_path}. This publisher never clobbers or truncates it. "
+        "If it is crash residue from an interrupted run, remove that one file and "
+        "re-run /uberdev:review-pr; adding '.uberdev/' to the repository's ignore "
+        "stack also removes the need for this publication entirely.",
+        file=sys.stderr,
+    )
     raise SystemExit(2)
 PY
 }
@@ -216,15 +252,28 @@ import sys
 ) = sys.argv[1:]
 runs_root = os.path.abspath(runs_root)
 spec = importlib.util.spec_from_file_location("uberdev_review_reserve_manifest", module_path)
-module = importlib.util.module_from_spec(spec)
-if spec.loader is None:
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
     raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
 RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+")
 created = False
+created_candidate = None
 run_descriptor = None
 runs_descriptor = None
+# `attempted` is appended BEFORE the publisher is invoked, `published` only
+# after it returns. The publisher deliberately never unlinks a failed attempt
+# (see secure_publish_exact_no_clobber), so a name that is attempted-but-not-
+# published may still exist on disk as untrusted crash residue whose identity we
+# were never able to record. Rollback can safely unlink only the `published`
+# names; the difference is reported, never silently dropped.
+attempted = []
 published = []
 
 def require_identity(value):
@@ -248,41 +297,74 @@ def require_owned_directory(entry, expected):
     ):
         raise module.ManifestRejected("review_directory_identity_changed")
 
-def rollback_successful_markers(run_dir, run_identity):
-    for name, identity in reversed(published):
+def report_rollback_failure(what, error):
+    # Rollback runs on an error path, so it stays best-effort — but every step
+    # that fails is NAMED on stderr. The two `except: pass` blocks this replaces
+    # made an un-reclaimable reservation indistinguishable from a clean one, and
+    # the leftover directory then permanently poisons the explicit-RUN_ID
+    # "refusing reuse" path with no trace of why.
+    print(f"warning: review reservation rollback could not {what}: {error}", file=sys.stderr)
+
+def rollback_reservation(name):
+    run_dir = os.path.join(runs_root, name)
+    try:
+        current = os.lstat(run_dir)
+        run_identity = (current.st_dev, current.st_ino)
+        require_owned_directory(current, run_identity)
+    except (OSError, module.ManifestRejected) as error:
+        report_rollback_failure(f"re-stat the reserved directory {run_dir}", error)
+        return
+    for marker_name, identity in reversed(published):
         try:
-            current = os.lstat(os.path.join(run_dir, name))
-            if module._artifact_identity(current) != identity:
+            marker = os.lstat(os.path.join(run_dir, marker_name))
+            if module._artifact_identity(marker) != identity:
+                report_rollback_failure(
+                    f"retire {marker_name}", "identity changed since publication"
+                )
                 continue
             if module._uses_native_windows_filesystem():
-                os.unlink(os.path.join(run_dir, name))
+                os.unlink(os.path.join(run_dir, marker_name))
             elif run_descriptor is not None:
-                relative = os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
-                if module._artifact_identity(relative) == identity:
-                    os.unlink(name, dir_fd=run_descriptor)
-        except OSError:
-            pass
+                relative = os.stat(marker_name, dir_fd=run_descriptor, follow_symlinks=False)
+                if module._artifact_identity(relative) != identity:
+                    report_rollback_failure(
+                        f"retire {marker_name}", "identity changed since publication"
+                    )
+                    continue
+                os.unlink(marker_name, dir_fd=run_descriptor)
+            else:
+                report_rollback_failure(f"retire {marker_name}", "no run directory descriptor")
+                continue
+        except OSError as error:
+            report_rollback_failure(f"retire {marker_name}", error)
+    for marker_name in attempted:
+        if any(marker_name == published_name for published_name, _ in published):
+            continue
+        # secure_publish_exact_no_clobber never unlinks a failed attempt, and we
+        # hold no identity for it, so removing it by name could destroy a file we
+        # did not create. Surface it instead of pretending the slot is clean.
+        if os.path.lexists(os.path.join(run_dir, marker_name)):
+            report_rollback_failure(
+                f"retire {marker_name}",
+                "unconfirmed publication left crash residue; inspect and remove it manually",
+            )
     try:
         if module._uses_native_windows_filesystem():
             if not os.listdir(run_dir):
                 current = os.lstat(run_dir)
                 require_owned_directory(current, run_identity)
                 os.rmdir(run_dir)
-        elif (
-            run_descriptor is not None
-            and runs_descriptor is not None
-            and not os.listdir(run_descriptor)
-        ):
-            current = os.stat(
-                os.path.basename(run_dir),
-                dir_fd=runs_descriptor,
-                follow_symlinks=False,
-            )
+        elif runs_descriptor is not None:
+            if run_descriptor is not None and os.listdir(run_descriptor):
+                return
+            if run_descriptor is None and os.listdir(run_dir):
+                return
+            current = os.stat(name, dir_fd=runs_descriptor, follow_symlinks=False)
             require_owned_directory(current, run_identity)
-            os.rmdir(os.path.basename(run_dir), dir_fd=runs_descriptor)
+            os.rmdir(name, dir_fd=runs_descriptor)
             os.fsync(runs_descriptor)
-    except (OSError, module.ManifestRejected):
-        pass
+    except (OSError, module.ManifestRejected) as error:
+        report_rollback_failure(f"remove the reserved directory {run_dir}", error)
 
 try:
     explicit = int(explicit_text)
@@ -313,12 +395,22 @@ try:
                 "^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue"
             )
         try:
+            # `created` must flip the instant mkdir returns, BEFORE the parent
+            # fsync. The directory already exists at that point; the fsync only
+            # makes the parent entry durable. Recording ownership afterwards
+            # meant an fsync OSError left created=False, so the failure handler
+            # skipped rollback entirely and orphaned the directory — and with an
+            # explicit RUN_ID that orphan permanently poisons the run id through
+            # the "caller-supplied RUN_ID collision; refusing reuse" arm.
             if module._uses_native_windows_filesystem():
                 os.mkdir(os.path.join(runs_root, candidate), 0o700)
+                created = True
+                created_candidate = candidate
             else:
                 os.mkdir(candidate, 0o700, dir_fd=runs_descriptor)
+                created = True
+                created_candidate = candidate
                 os.fsync(runs_descriptor)
-            created = True
             break
         except FileExistsError:
             if explicit:
@@ -358,6 +450,11 @@ try:
     ).encode()
     marker_records = {}
     for name, payload in (("locked", b""), ("pr-context.json", context)):
+        # Register the attempt BEFORE the call: a publisher that fails after
+        # creating the carrier leaves residue this reservation is responsible
+        # for reporting. Registering only on success made that residue invisible
+        # to rollback, which then silently failed to reclaim the directory.
+        attempted.append(name)
         _path, identity, digest = module.secure_publish_exact_no_clobber(
             os.path.join(run_dir, name), payload, run_identity
         )
@@ -388,8 +485,11 @@ try:
     sys.stdout.reconfigure(newline="")
     print(f"v1:{token}\n{candidate}\n{run_dir}", end="")
 except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
-    if created and "run_dir" in locals() and "run_identity" in locals():
-        rollback_successful_markers(run_dir, run_identity)
+    # Keyed off the candidate recorded at mkdir time, not off locals() that are
+    # only bound several statements later — a failure between mkdir and the
+    # run_dir/run_identity assignments used to skip rollback altogether.
+    if created and created_candidate is not None:
+        rollback_reservation(created_candidate)
     print(f"error: could not reserve private review run: {error}", file=sys.stderr)
     raise SystemExit(2)
 finally:
@@ -397,6 +497,211 @@ finally:
         os.close(run_descriptor)
     if runs_descriptor is not None:
         os.close(runs_descriptor)
+PY
+}
+# Owner of last resort for abandoned reservation markers (#344). The EXIT trap
+# that used to retire them was replaced by a receipt that ONLY the final
+# publication fence can redeem, and every `review_abandon_run_reservation` call
+# site sits inside the setup fence — so any abandonment after setup (SIGKILL, a
+# crashed reviewer wave, a harness timeout, an operator ^C) leaves `locked` +
+# `pr-context.json` behind with nobody to remove them, and `/uberdev:goal`
+# Phase 2b then treats the PR as in-flight for a full REVIEW_GRACE_SECS. This
+# reaper gives them an owner: it runs once per `/review-pr`, immediately before
+# this run reserves its own directory. It NEVER installs an EXIT trap (the
+# receipt design forbids one) and never removes a directory or a verdict — only
+# the two receipt-shaped markers of a run that is demonstrably abandoned.
+review_reap_stale_run_reservations() {
+  local runs_root="$1" runs_identity_json="$2" reap_secs="$3"
+  [ "$#" -eq 3 ] || return 2
+  python3 -I -B - "$runs_root" "$runs_identity_json" "$reap_secs" "$REVIEW_RUN_MANIFEST" <<'PY'
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+import time
+
+runs_root, runs_identity_json, reap_text, module_path = sys.argv[1:]
+runs_root = os.path.abspath(runs_root)
+spec = importlib.util.spec_from_file_location("uberdev_review_reap_manifest", module_path)
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
+    raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
+
+RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+")
+MARKERS = ("locked", "pr-context.json")
+VERDICT = "review-pr-verdict.json"
+KNOWN = set(MARKERS) | {VERDICT}
+
+def require_identity(value):
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+    ):
+        raise module.ManifestRejected("review_directory_identity_invalid")
+    return tuple(value)
+
+def require_owned_directory(entry, expected):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or stat.S_ISLNK(entry.st_mode)
+        or getattr(entry, "st_reparse_tag", 0)
+        or (entry.st_dev, entry.st_ino) != expected
+        or (uid is not None and entry.st_uid != uid)
+    ):
+        raise module.ManifestRejected("review_directory_identity_changed")
+
+def owned_plain_file(entry):
+    uid_fn = getattr(os, "geteuid", None)
+    uid = uid_fn() if uid_fn is not None else None
+    return (
+        stat.S_ISREG(entry.st_mode)
+        and not stat.S_ISLNK(entry.st_mode)
+        and not getattr(entry, "st_reparse_tag", 0)
+        and entry.st_nlink == 1
+        and (uid is None or entry.st_uid == uid)
+    )
+
+def note(message):
+    # Never silent: a reaper that cannot do its job must say so, or #344 comes
+    # back as an unexplained /goal stall.
+    print(f"notice: review reservation reaper: {message}", file=sys.stderr)
+
+def marker_stat(run_dir, run_descriptor, name):
+    if run_descriptor is None:
+        return os.lstat(os.path.join(run_dir, name))
+    return os.stat(name, dir_fd=run_descriptor, follow_symlinks=False)
+
+def reap_run_directory(run_dir, run_descriptor, entries):
+    # The two routine paths below stay SILENT on purpose: a runs root
+    # accumulates one directory per completed review, and every one of those
+    # either holds a verdict or has already had its markers retired by the final
+    # fence. Announcing them would emit a line per historical run and bury the
+    # ones an operator actually needs. Every path that leaves a LIVE-looking
+    # reservation in place is announced.
+    if VERDICT in entries:
+        return False
+    if "locked" not in entries:
+        return False
+    unexpected = entries - KNOWN
+    if unexpected:
+        note(f"{run_dir} holds unrecognized entries {sorted(unexpected)}; leaving it untouched")
+        return False
+    locked = marker_stat(run_dir, run_descriptor, "locked")
+    if not owned_plain_file(locked):
+        note(f"{run_dir}/locked is not a plain single-linked owned file; leaving it untouched")
+        return False
+    if (now - locked.st_mtime) <= reap_secs:
+        # This is the ONE skip an operator chasing a `/uberdev:goal` stall needs
+        # named: the directory still looks like an in-flight run, so the reaper
+        # deliberately kept its hands off and the PR stays "in review" until the
+        # marker ages past the policy.
+        note(
+            f"{run_dir}/locked is {int(now - locked.st_mtime)}s old, "
+            f"under the {reap_secs}s reap policy; leaving it untouched"
+        )
+        return False
+    removed = 0
+    for name in MARKERS:
+        if name not in entries:
+            continue
+        try:
+            current = marker_stat(run_dir, run_descriptor, name)
+            if not owned_plain_file(current):
+                note(f"{run_dir}/{name} is not a plain single-linked owned file; leaving it untouched")
+                continue
+            if run_descriptor is None:
+                os.unlink(os.path.join(run_dir, name))
+            else:
+                os.unlink(name, dir_fd=run_descriptor)
+            removed += 1
+        except OSError as error:
+            note(f"could not retire {run_dir}/{name}: {error}")
+    if removed and run_descriptor is not None:
+        try:
+            os.fsync(run_descriptor)
+        except OSError as error:
+            note(f"could not fsync {run_dir} after retiring markers: {error}")
+    return removed > 0
+
+try:
+    if re.fullmatch(r"[0-9]+", reap_text) is None:
+        raise module.ManifestRejected("review_reservation_reap_policy_invalid")
+    reap_secs = int(reap_text)
+    if reap_secs < 60 or reap_secs > 604800:
+        raise module.ManifestRejected("review_reservation_reap_policy_invalid")
+    runs_identity = require_identity(json.loads(runs_identity_json))
+    module._reject_symlinked_ancestors(runs_root)
+    module._reject_windows_reparse_ancestors(runs_root)
+    require_owned_directory(os.lstat(runs_root), runs_identity)
+except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not inspect the private review run root: {error}", file=sys.stderr)
+    raise SystemExit(2)
+
+now = time.time()
+reaped = 0
+native = module._uses_native_windows_filesystem()
+runs_descriptor = None
+try:
+    if native:
+        names = os.listdir(runs_root)
+    else:
+        runs_descriptor = module._open_directory_fd(runs_root)
+        require_owned_directory(os.fstat(runs_descriptor), runs_identity)
+        names = os.listdir(runs_descriptor)
+    for name in sorted(names):
+        if RUN_ID.fullmatch(name) is None:
+            continue
+        run_dir = os.path.join(runs_root, name)
+        run_descriptor = None
+        try:
+            if native:
+                current = os.lstat(run_dir)
+                identity = (current.st_dev, current.st_ino)
+                require_owned_directory(current, identity)
+                entries = set(os.listdir(run_dir))
+            else:
+                current = os.stat(name, dir_fd=runs_descriptor, follow_symlinks=False)
+                identity = (current.st_dev, current.st_ino)
+                require_owned_directory(current, identity)
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                run_descriptor = os.open(name, flags, dir_fd=runs_descriptor)
+                # Identity re-stat: the descriptor we will unlink through and the
+                # name we resolved must still be the same directory object.
+                require_owned_directory(os.fstat(run_descriptor), identity)
+                entries = set(os.listdir(run_descriptor))
+            if reap_run_directory(run_dir, run_descriptor, entries):
+                reaped += 1
+                note(f"retired abandoned reservation markers in {run_dir}")
+        except (OSError, module.ManifestRejected) as error:
+            note(f"skipped {run_dir}: {error}")
+        finally:
+            if run_descriptor is not None:
+                os.close(run_descriptor)
+    if reaped and runs_descriptor is not None:
+        try:
+            os.fsync(runs_descriptor)
+        except OSError as error:
+            note(f"could not fsync {runs_root} after reaping: {error}")
+finally:
+    if runs_descriptor is not None:
+        os.close(runs_descriptor)
+print(reaped, end="")
 PY
 }
 review_abandon_run_reservation() {
@@ -414,11 +719,16 @@ import sys
 
 receipt_text, module_path = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("uberdev_review_abandon_manifest", module_path)
-module = importlib.util.module_from_spec(spec)
-if spec.loader is None:
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
     raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
 
 def decode_receipt(value):
     if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
@@ -603,6 +913,14 @@ case "$REVIEW_IGNORE_RC" in
     return 2 2>/dev/null || exit 2
     ;;
 esac
+# Retire any abandoned predecessor's markers BEFORE reserving our own directory
+# (#344). Ordering matters: the reaper must not see this run's own fresh
+# `locked` marker, and a stalled `/uberdev:goal` should be unblocked by the very
+# next `/review-pr` rather than waiting out REVIEW_GRACE_SECS.
+review_reap_stale_run_reservations \
+  "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" "$REVIEW_RESERVATION_REAP_SECS" >/dev/null || {
+  rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+}
 REVIEW_RESERVATION_OUTPUT="$(
   review_reserve_run_directory \
     "$REVIEW_RUNS_ROOT" "$REVIEW_RUNS_ROOT_IDENTITY_JSON" \
@@ -610,15 +928,43 @@ REVIEW_RESERVATION_OUTPUT="$(
 )" || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
+# BEGIN review-reservation-triple-guard-v1
 REVIEW_RUN_RESERVATION_RECEIPT="${REVIEW_RESERVATION_OUTPUT%%$'\n'*}"
 REVIEW_RESERVATION_REMAINDER="${REVIEW_RESERVATION_OUTPUT#*$'\n'}"
 RUN_ID="${REVIEW_RESERVATION_REMAINDER%%$'\n'*}"
 MARKER_DIR="${REVIEW_RESERVATION_REMAINDER#*$'\n'}"
-if [ -z "$REVIEW_RUN_RESERVATION_RECEIPT" ] || [ -z "$RUN_ID" ] || [ -z "$MARKER_DIR" ]; then
-  echo "error: review run reservation returned an incomplete receipt" >&2
+# The three-way split degenerates when the helper emits NO newline at all:
+# `${v%%$'\n'*}` and `${v#*$'\n'}` both return the whole string, so RECEIPT ==
+# RUN_ID == MARKER_DIR and a pure non-emptiness guard passes — exporting the
+# base64 receipt blob AS the RUN_ID and using it as a marker pathname. Validate
+# each component's SHAPE, not just its length.
+#
+# Both pathnames are compared SEPARATOR-NORMALISED, because the two sides are
+# produced by different worlds. `MARKER_DIR` comes from Python
+# (`os.path.join(os.path.abspath(runs_root), run_id)`), which on native Windows
+# emits `C:\...\.uberdev\runs\<RUN_ID>` — drive letter, backslashes — while this
+# shell builds `$REVIEW_RUNS_ROOT/$RUN_ID` with a forward slash. A `/*`-only
+# absoluteness test plus a raw string equality therefore rejected every
+# legitimate Windows reservation: the guard fired on the HAPPY path and
+# abandoned the directory it had just reserved. Normalising `\` to `/` on both
+# sides keeps the assertion exact on POSIX and correct on Windows.
+REVIEW_RESERVATION_VALID=1
+REVIEW_MARKER_DIR_NORMALIZED="${MARKER_DIR//\\//}"
+REVIEW_MARKER_DIR_EXPECTED="${REVIEW_RUNS_ROOT//\\//}/$RUN_ID"
+[[ "$REVIEW_RUN_RESERVATION_RECEIPT" =~ ^v1:[A-Za-z0-9_-]+$ ]] || REVIEW_RESERVATION_VALID=0
+[[ "$RUN_ID" =~ ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ ]] || REVIEW_RESERVATION_VALID=0
+case "$REVIEW_MARKER_DIR_NORMALIZED" in
+  /*) ;;               # POSIX absolute (and UNC `\\server\share`, once normalised)
+  [A-Za-z]:/*) ;;      # native Windows absolute (`C:\...`)
+  *) REVIEW_RESERVATION_VALID=0 ;;
+esac
+[ "$REVIEW_MARKER_DIR_NORMALIZED" = "$REVIEW_MARKER_DIR_EXPECTED" ] || REVIEW_RESERVATION_VALID=0
+if [ "$REVIEW_RESERVATION_VALID" -ne 1 ]; then
+  echo "error: review run reservation returned an incomplete or malformed receipt triple" >&2
   review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" 2>/dev/null || true
   return 2 2>/dev/null || exit 2
 fi
+# END review-reservation-triple-guard-v1
 export RUN_ID MARKER_DIR REVIEW_RUN_RESERVATION_RECEIPT
 uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
   rc=$?
@@ -947,19 +1293,19 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - Default: Run all applicable reviews + Phase 2 simplify pass
    - **Capture aspect tokens.** Tokenise the remaining arguments (after the `--no-simplify` and `--turbo` flags are stripped) into `ASPECT_LIST` (an array). Example: `/uberdev:review-pr tests errors` → `ASPECT_LIST=("tests" "errors")`. Empty arguments → `ASPECT_LIST=()`. The `all` token is treated as "no emphasis" (i.e., default behavior — every reviewer's brief receives no emphasis section).
    - **Detect `sequential` token.** If `$ARGUMENTS` contains the bare token `sequential` (anywhere; case-sensitive), strip it from `ASPECT_LIST` and set `SEQUENTIAL=1`. Otherwise `SEQUENTIAL=0`.
-   - **If `SEQUENTIAL=1`,** emit the user-visible stderr notice and export the env var BEFORE the Step 4 `Skill()` invocation (kept here so the env var inherits into the skill's process):
+   - **If `SEQUENTIAL=1`,** emit the user-visible stderr notice and bind the cap that Step 4 forwards as the `fanout_cap` **Skill input**:
      ```bash
-     echo "notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1" >&2
-     export UBERDEV_FANOUT_POST_IMPL_REVIEW=1
+     echo "notice: running post-impl-review sequentially via fanout_cap=1" >&2
+     POST_IMPL_FANOUT_CAP=1
      ```
-     The skill's Step 2 fanout cap reads `UBERDEV_FANOUT_POST_IMPL_REVIEW` via `uberdev_read_int_in_range`, so a value of `1` yields `ceil(6/1) = 6` sequential one-child waves. The dispatch-before-wait invariant is preserved within each wave.
+     **Why an input and not an `export` (#302).** Every `bash` block in this command is a FRESH shell — no `export`, trap, PID, or array survives to the next block. The previous `export UBERDEV_FANOUT_POST_IMPL_REVIEW=1` here was therefore already gone by the time `post-impl-review`'s own executable fence resolved its cap, which made the whole `sequential` token a silent no-op: the user got the stderr notice and the default 6-wide fanout anyway. The cap must travel as a declared Skill input, which the skill resolves inside the same fence that uses it. The skill's Step 2 cap resolution prefers a caller-supplied `fanout_cap` over the `uberdev_read_int_in_range` config/env/default answer, so `1` yields `ceil(6/1) = 6` sequential one-child waves. The dispatch-before-wait invariant is preserved within each wave.
 
    ### Argument Parsing Summary
 
    | Variable | Source | Default | Effect |
    |---|---|---|---|
    | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
-   | `SEQUENTIAL` | `sequential` token | `0` | `1` exports `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` (stderr notice emitted) |
+   | `SEQUENTIAL` | `sequential` token | `0` | `1` binds `POST_IMPL_FANOUT_CAP=1`, forwarded to `Skill(uberdev:post-impl-review)` as the `fanout_cap` input (stderr notice emitted) |
    | `CI_FIX_PHASE` | `--no-ci-fix` token | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). |
    | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
@@ -1067,6 +1413,35 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    SIGKILL the reader's grace-window check bounds staleness. Final publication
    removes only the two receipt-bound markers, and only after the exact verdict
    pathname has been published durably.
+
+   **Reservation reaper (#344).** Retirement therefore has exactly two owners:
+   the receipt-authorized final publication fence, and — for runs that never
+   reach it — `review_reap_stale_run_reservations`, which every `/review-pr`
+   invocation runs immediately before reserving its own directory. Without it no
+   component owns an abandoned marker at all: all four
+   `review_abandon_run_reservation` call sites live inside the setup fence, so a
+   SIGKILL, harness timeout, crashed reviewer wave, or operator `^C` after setup
+   strands `locked` + `pr-context.json` and stalls `/uberdev:goal` Phase 2b for a
+   full `REVIEW_GRACE_SECS`. The reaper walks the runs root under the same
+   identity-checked directory descriptor the reservation uses, and unlinks
+   `locked` + `pr-context.json` from a run directory only when ALL of the
+   following hold: the directory name matches the run-ID format, it holds no
+   `review-pr-verdict.json`, it holds no unrecognized entry, its `locked` marker
+   is a plain single-linked file owned by this user, and that marker's mtime is
+   older than `REVIEW_RESERVATION_REAP_SECS` (default `7200` = 2 x the
+   `REVIEW_GRACE_SECS` window `/goal` itself uses). It never removes a
+   directory, never touches a verdict, and never installs an `EXIT` trap.
+
+   It prints a `notice:` line for every directory it reaps, and for every
+   directory that still looks like a live reservation but was left alone anyway
+   — `locked` younger than the reap policy, `locked` not a plain single-linked
+   owned file, unrecognized entries present, or an `OSError` on the unlink or
+   fsync. Those are the lines an operator chasing a `/goal` stall needs, and a
+   reaper that failed quietly would reproduce the very stall it exists to
+   prevent. The two routine skips are deliberately silent: a directory holding a
+   `review-pr-verdict.json`, and a directory with no `locked` marker, are the
+   normal end state of every completed review, so announcing them would emit one
+   line per historical run and bury the actionable ones.
 
    The locked marker is read by `/uberdev:goal` Phase 2b via `_uberdev_goal_locked_marker_for_pr_fresh "$pr_num" "$REVIEW_GRACE_SECS"` (lib/goal-state.sh). The contract is additive — `/review-pr` runs identically whether `/goal` is the caller or a human is. The marker remains truthful across shell boundaries until the receipt-authorized final fence publishes the verdict and retires it. If the producer exits before finalization, `/goal`'s grace-window check (REVIEW_GRACE_SECS, default 3600s) bounds staleness without an operator or an `EXIT`-trap race. See RFC 0005 §9 D220b for the cross-component design rationale.
 
@@ -1206,11 +1581,11 @@ PY
    Invoke the post-impl-review skill through the context-only run-tree edge
    `review_pr.post_impl_review` (skill handoff, never a provider dispatch):
 
-   > Invoke `uberdev:post-impl-review` via the `Skill` tool with `changed_paths`, `commit_range`, `tier`, `RUN_ID`, and `aspect_emphasis=$ASPECT_LIST` (so the skill writes to the same `RUN_ID`-keyed directory `/review-pr` will read, and the brief includes the emphasis section when aspects were requested).
+   > Invoke `uberdev:post-impl-review` via the `Skill` tool with `changed_paths`, `commit_range`, `tier`, `RUN_ID`, `aspect_emphasis=$ASPECT_LIST`, and — only when `SEQUENTIAL=1` — `fanout_cap=$POST_IMPL_FANOUT_CAP` (so the skill writes to the same `RUN_ID`-keyed directory `/review-pr` will read, the brief includes the emphasis section when aspects were requested, and the sequential override reaches the cap resolution that actually uses it).
 
    The skill runs its 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
 
-   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via UBERDEV_FANOUT_POST_IMPL_REVIEW=1`) and `UBERDEV_FANOUT_POST_IMPL_REVIEW=1` has been exported. The skill's Step 2 fanout cap inherits the env var and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves per its existing fanout-cap logic. No skill change is needed; only `/review-pr` parses the `sequential` flag and exports. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. After the `Skill()` call returns, the env var falls out of scope at end of Step 4 (or `unset UBERDEV_FANOUT_POST_IMPL_REVIEW` if a later Skill() invocation in the same run might depend on the default).
+   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
 
 5. **Apply Phase 1 Fixes — dispatch `code-fixer` subagent**
 
@@ -1890,19 +2265,130 @@ PY
 
     The `gh pr checks` output MUST be parsed as JSON, never line-grepped.
 
-    ### 6c.2 MONITOR — gh pr checks --watch
+    ### 6c.2 MONITOR — bounded `gh pr checks --watch` passes
 
-    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
+    The literals `1200` and `30` below are `CI_MONITOR_TIMEOUT_SEC` and `CI_WATCH_INTERVAL_SEC` respectively (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants). `CI_MONITOR_PASS_SEC` (`240`), `CI_MONITOR_FENCE_SEC` (`480`), `CI_MONITOR_MIN_PASS_SEC` (`30`) and `CI_MONITOR_PASSES_MAX` (`48`) are declared HERE — `/review-pr`-owned monitor constants, exactly like the `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` settle literals in 6c.1 above.
+
+    **Why the watch is split into passes AND across fences (#302).** Every `bash` block in this command is executed as ONE harness call, and that harness caps a single call at `600000` ms. A single `timeout 1200 gh pr checks --watch` therefore never reaches its own `timeout`: on a genuinely slow CI the *harness* kills the call at ≤ 600 s and reports a code that is neither gh's `0` nor its documented `8`. Mapping "non-zero, non-8" straight to red then dispatched `ci-failure-classifier` and `ci-code-fixer` against CI that had not failed — a fabricated red on every long run.
+
+    Bounding each `timeout` is only half of that fix. A loop that *accumulates* 1200 s of passes still spends them inside one harness call, so on the very CI this targets — anything slower than ~600 s — the harness still kills the fence, and because `CI_MONITOR_VERDICT` and the elapsed counter are fence-scoped shell state the kill destroys them too. The `pending → OUTCOME=halted` arm would then be unreachable in exactly the scenario it exists for. So the budget is enforced in two nested layers:
+
+    - **Per fence:** `CI_MONITOR_FENCE_SEC` = 480 s (two 240 s passes), plus at most one `CI_MONITOR_MIN_PASS_SEC` floor sleep — a hard ceiling of ~510 s, comfortably inside the 600 s harness cap. No harness kill, ever.
+    - **Across fences:** the 1200 s total travels as an absolute `CI_MONITOR_DEADLINE_SEC` and a running `CI_MONITOR_PASSES_USED`, both printed on the `resume` path and rebound by the orchestrator on re-entry. That is the same cross-fence carry `RUN_ID` uses, and it is immune to the fence-scoped-state class because nothing survives *inside* the shell.
+
+    Three fences (480 + 480 + 240) therefore spend the full 20 minutes as at most five watch passes, and "the budget ran out" stays a distinct, first-class outcome instead of being laundered into "a check failed" or lost to a harness kill.
 
     ```bash
-    timeout 1200 gh pr checks "$PR_NUMBER" --watch --interval 30
+    # BEGIN ci-monitor-bounded-loop-v1
+    CI_MONITOR_PASS_SEC=240          # one watch pass
+    CI_MONITOR_FENCE_SEC=480         # this FENCE's share of the budget (2 passes)
+    CI_MONITOR_MIN_PASS_SEC=30       # = CI_WATCH_INTERVAL_SEC; minimum-progress floor
+    CI_MONITOR_PASSES_MAX=48         # clock-independent backstop (1200/30 = 40 real passes)
+    CI_MONITOR_STARTED_SEC="$(date +%s)"
+    # Cross-fence carry. The 20-minute budget outlives any single harness call,
+    # so it is an absolute DEADLINE plus a pass count that this fence RECEIVES
+    # and RE-EMITS — never a fence-local accumulator that a harness kill would
+    # silently destroy along with the verdict it was supposed to produce.
+    CI_MONITOR_DEADLINE_SEC="${CI_MONITOR_DEADLINE_SEC:-$(( CI_MONITOR_STARTED_SEC + 1200 ))}"
+    CI_MONITOR_PASSES_USED="${CI_MONITOR_PASSES_USED:-0}"
+    CI_MONITOR_FENCE_DEADLINE_SEC=$(( CI_MONITOR_STARTED_SEC + CI_MONITOR_FENCE_SEC ))
+    if [ "$CI_MONITOR_FENCE_DEADLINE_SEC" -gt "$CI_MONITOR_DEADLINE_SEC" ]; then
+      CI_MONITOR_FENCE_DEADLINE_SEC="$CI_MONITOR_DEADLINE_SEC"
+    fi
+    CI_MONITOR_VERDICT=pending       # pending | green | red | resume
+    CI_MONITOR_RC=8
+    while : ; do
+      CI_MONITOR_NOW_SEC="$(date +%s)"
+      # Total budget spent, or the backstop tripped → terminal, halted.
+      if [ "$CI_MONITOR_NOW_SEC" -ge "$CI_MONITOR_DEADLINE_SEC" ] || \
+         [ "$CI_MONITOR_PASSES_USED" -ge "$CI_MONITOR_PASSES_MAX" ]; then
+        CI_MONITOR_VERDICT=pending
+        break
+      fi
+      # This fence's share is spent but the budget is not → hand back, don't halt.
+      if [ "$CI_MONITOR_NOW_SEC" -ge "$CI_MONITOR_FENCE_DEADLINE_SEC" ]; then
+        CI_MONITOR_VERDICT=resume
+        break
+      fi
+      CI_MONITOR_WINDOW_SEC=$(( CI_MONITOR_FENCE_DEADLINE_SEC - CI_MONITOR_NOW_SEC ))
+      if [ "$CI_MONITOR_WINDOW_SEC" -gt "$CI_MONITOR_PASS_SEC" ]; then
+        CI_MONITOR_WINDOW_SEC="$CI_MONITOR_PASS_SEC"
+      fi
+      CI_MONITOR_RC=0
+      timeout "$CI_MONITOR_WINDOW_SEC" gh pr checks "$PR_NUMBER" --watch --interval 30 || CI_MONITOR_RC=$?
+      CI_MONITOR_PASSES_USED=$(( CI_MONITOR_PASSES_USED + 1 ))
+      CI_MONITOR_PASS_ELAPSED_SEC=$(( $(date +%s) - CI_MONITOR_NOW_SEC ))
+      if [ "$CI_MONITOR_RC" -eq 0 ]; then
+        CI_MONITOR_VERDICT=green
+        break
+      fi
+      # 8 is gh's documented "Checks pending" code. 124 is `timeout`'s own kill
+      # code, and a pass that burned its FULL window is indistinguishable from
+      # that truncation (a harness kill reports its own code, not 124). All three
+      # mean "still running when we stopped watching" — pending, NEVER red. Only
+      # a non-zero, non-8 code that came back EARLY is gh reporting a check that
+      # actually failed.
+      # Written as a full `if` rather than `[ … ] && break`: the short-circuit
+      # form leaves the statement at rc 1 whenever the test is false, which
+      # aborts the whole fence under `set -e`.
+      if [ "$CI_MONITOR_RC" -ne 8 ] && [ "$CI_MONITOR_RC" -ne 124 ] && \
+         [ "$CI_MONITOR_PASS_ELAPSED_SEC" -lt "$CI_MONITOR_WINDOW_SEC" ]; then
+        CI_MONITOR_VERDICT=red
+        break
+      fi
+      # Minimum-progress floor. A pass that returns in ~0s (gh handing back 8
+      # immediately, a watch that finds nothing to watch) otherwise re-enters
+      # with zero accumulated wall clock and no sleep — an unbounded hot loop
+      # against the GitHub API. Sleeping the remainder makes every pass advance
+      # the budget by at least CI_WATCH_INTERVAL_SEC.
+      if [ "$CI_MONITOR_PASS_ELAPSED_SEC" -lt "$CI_MONITOR_MIN_PASS_SEC" ]; then
+        sleep $(( CI_MONITOR_MIN_PASS_SEC - CI_MONITOR_PASS_ELAPSED_SEC ))
+      fi
+    done
+    # Elapsed is derived from the shared deadline, so it stays a TOTAL across
+    # every fence rather than restarting at 0 on each re-entry.
+    CI_MONITOR_ELAPSED_SEC=$(( 1200 - ( CI_MONITOR_DEADLINE_SEC - $(date +%s) ) ))
+    case "$CI_MONITOR_VERDICT" in
+      green)
+        OUTCOME=green
+        audit ci_monitor_green passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC
+        ;;
+      red)
+        audit ci_monitor_red passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC rc=$CI_MONITOR_RC
+        ;;
+      resume)
+        # Deliberately NOT an audit event and NOT an OUTCOME: nothing terminal
+        # happened. Recording a phase outcome here would report a CI verdict the
+        # monitor never reached. The carry below is the whole handoff.
+        echo "notice: CI monitor fence budget spent, total budget remains — re-run this fence with CI_MONITOR_DEADLINE_SEC=$CI_MONITOR_DEADLINE_SEC CI_MONITOR_PASSES_USED=$CI_MONITOR_PASSES_USED" >&2
+        ;;
+      *)
+        OUTCOME=halted
+        audit ci_monitor_timeout subreason=monitor_timeout passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC
+        ;;
+    esac
+    # END ci-monitor-bounded-loop-v1
     ```
 
-    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** (`timeout 1200` = `CI_MONITOR_TIMEOUT_SEC`). The watch terminates on its own once every check leaves the `pending` bucket. On exit code 0 → all green → `OUTCOME=green` → audit `ci_monitor_green`. Exit 8 (still pending after watch terminates — `gh pr checks` exit code 8 = "Checks pending", per `gh pr checks --help`) → `ci_monitor_timeout` audit; halt loop iteration with `OUTCOME=halted` (carry differentiation in audit `data.subreason=monitor_timeout`; `halted` is the canonical CI_OUTCOME_ENUM member, not a `halted_timeout` synthetic). Non-zero non-8 → at least one check failed → audit `ci_monitor_red`; proceed to CLASSIFY.
+    **When `CI_MONITOR_VERDICT=resume`, the fence is NOT done.** Re-run this
+    exact `bash` block as a NEW harness call, with `CI_MONITOR_DEADLINE_SEC` and
+    `CI_MONITOR_PASSES_USED` bound to the two values the `notice:` line printed.
+    Repeat until the block returns `green`, `red`, or `pending`. Do not fall
+    through to CLASSIFY, do not set `OUTCOME`, and do not anchor a trust trail
+    on a `resume` — it carries no verdict.
 
-    `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard).
+    **`--watch` takes NO `--json`:** gh refuses `--watch` together with `--json` (`cannot use --watch with --json flag`, verified live on gh 2.83.1) — that is why the field list is absent here even though 6c.1 PROBE reads `--json name,state,bucket,link,event,workflow`. MONITOR keys off the **exit code** (gh's documented `gh pr checks` contract), not parsed JSON, so it needs no field projection. Wall-clock cap: **20 minutes** total (`1200` = `CI_MONITOR_TIMEOUT_SEC`), spent as at most five `CI_MONITOR_PASS_SEC`-bounded passes across at most three `CI_MONITOR_FENCE_SEC`-bounded fences. The watch terminates on its own once every check leaves the `pending` bucket. Verdict mapping:
 
-    On a non-zero, non-8 MONITOR exit, refresh the check projection before
+    | `CI_MONITOR_VERDICT` | how it is reached | OUTCOME | Audit event |
+    |---|---|---|---|
+    | `green` | any pass exits `0` — all checks green | `green` | `ci_monitor_green` |
+    | `red` | a pass exits non-zero, non-8 **and returned before consuming its full `CI_MONITOR_WINDOW_SEC` window** | (proceed to CLASSIFY) | `ci_monitor_red` |
+    | `resume` | this fence's `CI_MONITOR_FENCE_SEC` share is spent and the 1200 s total is not | **none — not terminal** | none (`notice:` carry line only) |
+    | `pending` | the 1200 s total was exhausted (or `CI_MONITOR_PASSES_MAX` tripped) while every pass reported `8`, `124`, or a full-window truncation | `halted` | `ci_monitor_timeout` (`data.subreason=monitor_timeout`) |
+
+    `resume` is the only non-terminal verdict; it emits no audit event precisely because no phase outcome has occurred yet. `halted` is the canonical `CI_OUTCOME_ENUM` member, not a `halted_timeout` synthetic. `--fail-fast` is **NOT** used (the classifier needs the complete failure picture). The 30-second `--interval` floor (`CI_WATCH_INTERVAL_SEC`) is intentional (rate-limit guard), and `CI_MONITOR_MIN_PASS_SEC` re-uses that same 30 s as the loop's minimum-progress floor so a pass that returns instantly cannot spin the loop against the API. `CI_MONITOR_PASSES_MAX` is the clock-independent backstop underneath it: even if `date` never advanced, the loop cannot exceed 48 watch invocations.
+
+    On a `red` MONITOR verdict, refresh the check projection before
     CLASSIFY. A pending-only initial probe can become red while `--watch` is
     running; retaining the pre-watch JSON would leave no failed row from which
     to derive the authoritative run. The refreshed projection uses the exact
@@ -2610,7 +3096,7 @@ PY
 
     After a fixer pushes a remediation commit, the new HEAD MUST re-enter the **per-push trust-trail flow** — i.e., Phase 1 (post-impl-review fanout) and Phase 2 (simplify fanout) re-run on the post-fix diff before Phase 3 re-probes. The trust-trail anchor commit is always the **absolute last** step. This guarantees the trailer's referenced SHA covers reviewed code only.
 
-    Implementation: rather than a re-entrant skill call, the orchestrator decrements the loop counter and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
+    Implementation: rather than a re-entrant skill call, the orchestrator increments the loop counter (`CI_FIX_LOOP_ITER`, per 6c.7 LOOP GUARD — the same direction the two other statements of this rule use) and re-enters at Step 4 (Phase 1 dispatch). Step 1 argument parsing has already run, so `RUN_ID` is preserved. The `phases.phase1` and `phases.phase2` fields in audit JSON are **rewritten** on each iteration (not appended to) — only `phases.phase3.iterations` and `phases.phase3.fix_pushes` accumulate.
 
     Before that re-entry, discard the complete selected-run tuple. This call is
     mandatory after every head-changing fixer/rebase/conflict-resolution push;
@@ -2651,7 +3137,7 @@ PY
 
     ### 6c.7 LOOP GUARD
 
-    Counter `CI_FIX_LOOP_ITER` starts at `0` at Phase 3 entry. Each fix-and-push increments. Cap = `CI_FIX_LOOP_CAP` (declared in `merge-pipeline/SKILL.md` Constants — value `3`).
+    Counter `CI_FIX_LOOP_ITER` starts at `1` at Phase 3 entry — the executable setup binds `CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"`, and every child instance ID reads that same 1-based value (`…-iter${CI_FIX_LOOP_ITER:-1}-attempt01`), so the first iteration IS iteration 1. Each fix-and-push increments. Cap = `CI_FIX_LOOP_CAP` (declared in `merge-pipeline/SKILL.md` Constants — value `3`), i.e. at most 3 iterations per run.
 
     - Iteration < 3, terminal outcome → emit `ci_phase_outcome` audit (with `data.outcome ∈ CI_OUTCOME_ENUM`), return to Step 7.
     - Iteration == 3, still red → audit `ci_loop_cap_reached`; `OUTCOME=loop_cap_exhausted`; exit 1; no anchor commit.
@@ -3020,10 +3506,11 @@ fresh-shell receipt fence:
 
 ```bash
 # BEGIN review-verdict-final-fence-v1
-if ! python3 -I -B - \
+REVIEW_FINAL_FENCE_RC=0
+python3 -I -B - \
   "$REVIEW_RUN_RESERVATION_RECEIPT" \
   "$AUDIT_JSON_PAYLOAD" \
-  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY'
+  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY' || REVIEW_FINAL_FENCE_RC=$?
 import base64
 import importlib.util
 import json
@@ -3034,11 +3521,16 @@ import sys
 
 receipt_text, payload_text, module_path = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("uberdev_review_final_manifest", module_path)
-module = importlib.util.module_from_spec(spec)
-if spec.loader is None:
+if spec is None or spec.loader is None:
+    print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
     raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
-spec.loader.exec_module(module)
+try:
+    spec.loader.exec_module(module)
+except Exception as error:
+    print(f"error: review run manifest failed to import: {error}", file=sys.stderr)
+    raise SystemExit(2)
 
 def decode_receipt(value):
     if not value.startswith("v1:") or re.fullmatch(r"v1:[A-Za-z0-9_-]+", value) is None:
@@ -3138,9 +3630,18 @@ try:
         encoded,
         receipt["run_dir_identity"],
     )
+except (OSError, TypeError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
+    print(f"error: could not publish review verdict: {error}", file=sys.stderr)
+    raise SystemExit(2)
 
-    # Publication is now durable and exact-name/no-clobber. Revalidate both
-    # marker identities before retiring only those receipt-bound names.
+# Publication is durable and exact-name/no-clobber from here on. Retiring the
+# two reservation markers is CLEANUP, and it gets its OWN failure class: sharing
+# the publication handler above made a cleanup fault print "could not publish
+# review verdict" and exit 2, so callers concluded the verdict was never written
+# and re-ran the review — against a run directory whose verdict artifact already
+# exists, which the exact-name publisher then refuses, wedging the PR. Revalidate
+# both marker identities before retiring only those receipt-bound names.
+try:
     for name, marker in receipt["markers"].items():
         validate_marker(run_dir, name, marker)
     if module._uses_native_windows_filesystem():
@@ -3164,13 +3665,24 @@ try:
         finally:
             os.close(run_descriptor)
 except (OSError, TypeError, ValueError, module.ManifestRejected, module.ManifestRuntimeError) as error:
-    print(f"error: could not publish review verdict: {error}", file=sys.stderr)
-    raise SystemExit(2)
+    print(
+        f"error: verdict_published_marker_retire_failed: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
 PY
-then
-  echo "error: review verdict publication failed; refusing to replace or reuse an existing artifact" >&2
-  exit 2
-fi
+case "$REVIEW_FINAL_FENCE_RC" in
+  0) ;;
+  3)
+    echo "error: the review verdict WAS published, but its reservation markers could not be retired (verdict_published_marker_retire_failed)" >&2
+    echo "note: do NOT re-run /uberdev:review-pr for this run — the verdict artifact already exists and the exact-name publisher will refuse to replace it. /uberdev:goal treats the stale markers as in-flight until its grace window expires or the next run's reservation reaper clears them." >&2
+    exit 3
+    ;;
+  *)
+    echo "error: review verdict publication failed; refusing to replace or reuse an existing artifact" >&2
+    exit 2
+    ;;
+esac
 unset AUDIT_JSON_PAYLOAD
 # END review-verdict-final-fence-v1
 ```
@@ -3183,7 +3695,12 @@ replaces, or unlinks that pathname, including after a partial-write or sync
 failure. Only after successful publication does the fence revalidate and remove
 `locked` and `pr-context.json`; the reserved run directory and verdict remain.
 A collision, directory retarget, short write, identity change, or sync failure
-exits 2.
+**during publication** exits 2 (nothing was written — re-running is safe). A
+failure **during the post-publication marker retire** exits 3
+(`verdict_published_marker_retire_failed`) — the verdict is already on disk, so
+re-running would hit the no-clobber refusal; the stale markers are reclaimed by
+`/uberdev:goal`'s grace window or by the next run's
+`review_reap_stale_run_reservations` pass.
 
 **`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
 
@@ -3219,6 +3736,7 @@ See `skills/merge-pipeline/SKILL.md` Constants `RUN_ID_REGEX`. If the regex matc
 | `0` | GREEN OR YELLOW OR OVERRIDE_GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} AND Phase 3 outcome ∈ {`green`, `green_after_fix`, `skipped_no_checks`} AND (Phase 2.5 halted == false OR Phase 2.5 halt was overridden) |
 | `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** OR **Phase 2.5 halted == true AND PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip}** (RFC 0002 §3.4 — `override` takes the OVERRIDE_GREEN path and exits 0) |
 | `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) OR Phase 2.5 status == `blocked` (agent return YAML parse failure) OR Step 6a post-fixer push failure (blocked-equivalent — Phase 3 would probe a stale remote SHA) |
+| `3` | `verdict_published_marker_retire_failed` — the verdict artifact WAS published durably, but the two reservation markers could not be retired afterwards. Distinct from `2` on purpose: `2` means "no verdict exists, re-run me", `3` means "the verdict exists, do NOT re-run me" (the exact-name publisher would refuse). Callers treat the run's verdict as authoritative and let `/uberdev:goal`'s grace window or the next run's reservation reaper clear the markers. |
 
 Exit code `2` is a **behavioral break** from the previous always-exit-0 contract. Callers that scripted `/review-pr` against the old "always exits successfully" prose must either ignore the exit code (preserve old behavior) or branch on it (use new behavior). The new contract surfaces silent reviewer-crash failures that the trust signal exists to eliminate. Documented in CHANGELOG.
 
@@ -3340,43 +3858,21 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Worktree-scoped lock prevents parallel-run lease races
 - Returns `CONFLICT` for caller to fan out `conflict-resolver` agents (single message)
 
-## Tips:
-
-- **Run early**: Before creating PR, not after
-- **Focus on changes**: Agents analyze git diff by default
-- **Address critical first**: Fix high-priority issues before lower priority
-- **Re-run after fixes**: Verify issues are resolved
-- **Use specific reviews**: Target specific aspects when you know the concern
-
-## Workflow Integration:
-
-**Before committing:**
-```
-1. Write code
-2. Run: /uberdev:review-pr code errors
-3. Fix any critical issues
-4. Commit
-```
-
-**Before creating PR:**
-```
-1. Stage all changes
-2. Run: /uberdev:review-pr all
-3. Address all critical and important issues
-4. Run specific reviews again to verify
-5. Create PR
-```
-
-**After PR feedback:**
-```
-1. Make requested changes
-2. Run targeted reviews based on feedback
-3. Verify issues are resolved
-4. Push updates
-```
-
 ## Notes:
 
+`/uberdev:review-pr` is a **post-push** command. The executable setup resolves
+`PR_NUMBER` from the live PR (`gh pr view --json number`), Phase 1 reviews the
+`<merge-base>..<reviewed-head-sha>` range of that PR, Phase 2.5 files deferred
+findings against it, Phase 3 probes its CI checks, and Step 7 anchors the trust
+trailer on a commit pushed to its branch. There is no pre-PR mode: the two tail
+sections that used to tell the reader to "run early, before creating PR" and
+walked through `Before committing` / `Before creating PR` flows predated the PR
+contract and contradicted every one of those steps (#302). Use
+`/uberdev:solve`, `/uberdev:turbo`, or `/uberdev:simplify` for pre-push work;
+`finish-branch` chains into this command once the PR exists.
+
+- Aspect tokens (`code`, `errors`, `tests`, …) narrow *emphasis*, never the
+  fanout — all 6 Phase 1 reviewers always run
 - Agents run autonomously and return detailed reports
 - Each agent focuses on its specialty for deep analysis
 - Results are actionable with specific file:line references
