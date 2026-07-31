@@ -570,8 +570,10 @@ assert_grep "$GOAL_P1" 'dispatched solving' "G24b.dispatched-to-solving-post-arm
 # Arming-failure path transitions dispatched->failed (no solver, no PR; explicit cleanup).
 assert_grep "$GOAL_P1" 'dispatched failed' "G24b.dispatched-to-failed-on-arm-failure"
 # ...and the driver must actually drive both arms, or the states above are dead.
-assert_grep "$GOAL_WF" '--mark-solving'  "G24b.driver-marks-solving"
-assert_grep "$GOAL_WF" '--mark-failed'   "G24b.driver-marks-failed"
+# Anchored on the COMMAND (`--mark-solving=<CSV>`), not the bare flag name — the
+# STEP 3 prose names both flags, so a bare-token grep survives their deletion.
+assert_grep "$GOAL_WF" '--mark-solving=<CSV>'  "G24b.driver-marks-solving"
+assert_grep "$GOAL_WF" '--mark-failed=<CSV>'   "G24b.driver-marks-failed"
 
 echo
 echo "== G25: Phase 1 dispatch loop honours MAX_PARALLEL cap (#211 AC2) =="
@@ -3125,8 +3127,14 @@ echo "== BT83: the cycle-arming chain, end to end (issue #248 -> RFC 0015 §5) =
 # the same two-sided coverage BT83 + G38 gave.
 assert_grep "$GOAL_WF" 'lib/goal-phase1.sh|phase1Sh'          "BT83.a-arming-chain-names-the-claim-pass"
 assert_grep "$GOAL_WF" 'lib/solve-launcher.sh|launcherSh'     "BT83.b-arming-chain-names-the-launcher"
-assert_grep "$GOAL_WF" '--backend=workflow'                "BT83.c-launcher-armed-on-the-workflow-backend"
-assert_grep "$GOAL_WF" '--force'                           "BT83.d-launcher-armed-with-force (our own claim would otherwise collide)"
+# These two anchor on the ARMED COMMAND, not on the loose flag token: the
+# prompt's own prose explains `--backend=workflow` and `--force` at length, so a
+# bare token grep passes even after the flag is deleted from the command line
+# (verified by mutation). The full fragment is what actually arms the launcher.
+assert_grep "$GOAL_WF" '--turbo -- <ISSUES> --backend=workflow --force' \
+  "BT83.c-launcher-command-armed-on-the-workflow-backend-with-force (our own claim would otherwise collide)"
+# ...and the two flags must not drift apart into separate call sites.
+assert_grep "$GOAL_WF" 'backend=workflow --force' "BT83.d-force-immediately-follows-the-backend-pin"
 # The envelope must be relayed VERBATIM (DR-2). An LLM-composed envelope is the
 # failure mode this instruction exists to prevent.
 assert_grep "$GOAL_WF" 'VERBATIM'                             "BT83.e-envelope-relayed-verbatim"

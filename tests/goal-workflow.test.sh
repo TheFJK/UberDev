@@ -473,11 +473,14 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const cp = claimCall ? claimCall.prompt : "";
   out.nPhase1 = cp.indexOf("/p/lib/goal-phase1.sh") >= 0;
   out.nLauncher = cp.indexOf("/p/lib/solve-launcher.sh") >= 0;
-  out.nBackend = cp.indexOf("--backend=workflow") >= 0;
-  out.nForce = cp.indexOf("--force") >= 0;
+  // The ARMED COMMAND, not the loose flag token: the prompt explains both flags
+  // in prose at length, so a bare-token check passes even after the flag is
+  // deleted from the command line (verified by mutation).
+  out.nBackend = cp.indexOf("--turbo -- <ISSUES> --backend=workflow --force") >= 0;
+  out.nForce = cp.indexOf("backend=workflow --force") >= 0;
   out.nVerbatim = cp.indexOf("VERBATIM") >= 0;
-  out.nMarkSolving = cp.indexOf("--mark-solving") >= 0;
-  out.nMarkFailed = cp.indexOf("--mark-failed") >= 0;
+  out.nMarkSolving = cp.indexOf("--mark-solving=<CSV>") >= 0;
+  out.nMarkFailed = cp.indexOf("--mark-failed=<CSV>") >= 0;
   const watchCall = recA.agentCalls.find(function (c) { return c.label === "goal-watch:c1:t1"; });
   out.nWatchNoInterpret = !!(watchCall && watchCall.prompt.indexOf("Do NOT interpret it") >= 0);
   out.nWatchSettled = !!(watchCall && watchCall.prompt.indexOf("UBERDEV_GOAL_SOLVERS_SETTLED=1") >= 0);
@@ -683,8 +686,8 @@ else
 
   check nPhase1 true                      "B55 the claim prompt names lib/goal-phase1.sh"
   check nLauncher true                    "B56 the claim prompt names lib/solve-launcher.sh"
-  check nBackend true                     "B57 the launcher is armed with --backend=workflow"
-  check nForce true                       "B58 the launcher is armed with --force (our own claim would collide)"
+  check nBackend true                     "B57 the launcher COMMAND is armed with --backend=workflow (not just prose about it)"
+  check nForce true                       "B58 --force sits on that same command, right after the backend pin (our own claim would collide)"
   check nVerbatim true                    "B59 the envelope must be copied VERBATIM"
   check nMarkSolving true                 "B60 the relay reconciles dispatched->solving on success"
   check nMarkFailed true                  "B61 the relay reconciles dispatched->failed on an arming failure"
