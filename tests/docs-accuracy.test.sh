@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guard against the documentation-drift class fixed in issue #273:
 #   1. plugins/uberdev/docs/testing.md must describe the REAL harness
-#      (tests/*.test.sh shape-checks + test.yml two-job matrix; marketplace key
+#      (tests/*.test.sh shape-checks + the test.yml CI job layout; marketplace key
 #      uberdev@uberdev) — not verbatim upstream Superpowers (tests/claude-code/,
 #      test-helpers.sh, analyze-token-usage.py, run-skill-tests.sh,
 #      superpowers@superpowers-dev, "run FROM the superpowers directory").
@@ -14,6 +14,15 @@
 #      line + the CHANGELOG: target v0.30.0, not v0.29.0.
 #   5. The alias-RFC cross-refs in hooks/session-start + lib/aliases-sync.sh must
 #      point at RFC 0011, and no stale 0004-alias-install path ref may survive.
+#   6. (#349) RFC prose must not anchor on `file:line` literals, and every
+#      symbol it DOES cite must still resolve in the shipped tree. The prior
+#      edition of RFC 0012's §3.3 contract table anchored on line numbers and
+#      rotted silently inside one release — its "audit-JSON write" anchor came
+#      to point at sequential fanout-cap prose, its locked-marker anchor at a
+#      Python heredoc, and its trust-reader anchor at the audit EMITTER rather
+#      than the reader. Section T9 below makes both halves enforceable: no
+#      `*.md:N` / `*.sh:N` literal inside §1 or the contract table, and every
+#      named symbol grep-resolves in plugins/uberdev/.
 #
 # These are structural greps over the shipped docs/shell files — they exercise
 # the source bytes, not a running session. Every assertion below FAILS on the
@@ -36,6 +45,12 @@ TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
 # references/configuration.md.
 USING_SKILL="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/SKILL.md"
 CONFIG_REF="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configuration.md"
+# #349 anchor-rot surfaces: the two RFCs whose prose is consumed as a live
+# contract checklist (RFC 0012 §3.3 is the /goal + /review-pr + /merge
+# acceptance table; RFC 0005 §9.5 defines the behaviours it locks).
+WORKFLOW_RFC="$RFC_DIR/0012-ultracode-workflow-orchestration.md"
+GOAL_RFC="$RFC_DIR/0005-uberdev-goal.md"
+PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
 HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
 HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
 PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
@@ -45,7 +60,7 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
-         "$PRE_COMPACT"; do
+         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -92,8 +107,84 @@ fi
 assert_grep "$TESTING_MD" 'tests/\*\.test\.sh'              "T1.7 testing.md names the real tests/*.test.sh shape-checks"
 assert_grep "$TESTING_MD" '\.github/workflows/test\.yml'    "T1.8 testing.md points at .github/workflows/test.yml"
 assert_grep "$TESTING_MD" 'uberdev@uberdev'                 "T1.9 testing.md uses the real uberdev@uberdev marketplace key"
-assert_grep "$TESTING_MD" 'shape-checks-windows|two-job|windows-latest' "T1.10 testing.md documents the two-job CI matrix"
 assert_grep "$TESTING_MD" 'solve-pipeline-zsh\.test\.sh'    "T1.11 testing.md names the zsh-runtime fixture"
+
+echo
+echo "== T1b: CI-layout prose is DERIVED from test.yml, not a hand-written count =="
+# Root cause of the 'two-job matrix' rot: the docs hardcoded a job COUNT while
+# test.yml grew a third job (supervision-smoke-macos). Derive the job ids from
+# the workflow and require the docs to name each one, so the next job addition
+# reds here instead of silently making the prose a lie. Scan starts at the
+# top-level `jobs:` key so `on: push:` / `concurrency:` children never match.
+CI_JOB_IDS="$(awk '
+  /^jobs:[[:space:]]*$/          { in_jobs = 1; next }
+  in_jobs && /^[^[:space:]#]/    { in_jobs = 0 }
+  in_jobs && /^  [a-z0-9][a-z0-9_-]*:[[:space:]]*$/ {
+    gsub(/[[:space:]:]/, ""); print
+  }
+' "$TEST_YML")"
+CI_JOB_COUNT="$(printf '%s\n' "$CI_JOB_IDS" | grep -c '[a-z]' || true)"
+if [ "${CI_JOB_COUNT:-0}" -ge 2 ] 2>/dev/null; then
+  echo "  PASS  T1b.1 test.yml job ids parsed (${CI_JOB_COUNT}: $(printf '%s ' $CI_JOB_IDS))"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T1b.1 could not parse >=2 job ids from $TEST_YML"; FAIL=$((FAIL + 1))
+fi
+# BOTH prose surfaces hand-enumerate the job list, so both are checked: the
+# CONTRIBUTING.md paragraph names all jobs inline and rots on the next job
+# addition exactly like testing.md's table did.
+for job_doc in "$TESTING_MD" "$CONTRIBUTING_MD"; do
+  MISSING_JOB_DOC=""
+  while IFS= read -r job_id; do
+    [ -n "$job_id" ] || continue
+    grep -qF -e "$job_id" "$job_doc" || MISSING_JOB_DOC="${MISSING_JOB_DOC} ${job_id}"
+  done <<EOF_CI_JOBS
+$CI_JOB_IDS
+EOF_CI_JOBS
+  if [ -z "$MISSING_JOB_DOC" ]; then
+    echo "  PASS  T1b.2 $(basename "$job_doc") names every test.yml job"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T1b.2 $(basename "$job_doc") does not name test.yml job(s):${MISSING_JOB_DOC}"
+    echo "        file: $job_doc"; FAIL=$((FAIL + 1))
+  fi
+done
+# No hardcoded job-count claim may re-grow in either doc (the drift shape that
+# produced 'two-job matrix'). Sharding a job changes the number of CI RUNS
+# without changing the number of jobs, so a count in prose is wrong twice over.
+# The count token need NOT be adjacent to 'job': 'two shape-check jobs' is the
+# same rot as 'two-job matrix', so allow up to three intervening words.
+JOB_COUNT_RE='(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)([ -][a-z]+){0,3}[ -]jobs?([^a-z]|$)'
+for count_doc in "$TESTING_MD" "$CONTRIBUTING_MD"; do
+  if grep -qiE "$JOB_COUNT_RE" "$count_doc"; then
+    echo "  FAIL  T1b.3 $(basename "$count_doc") carries a hardcoded CI job-count claim (drift-prone)"
+    grep -inE "$JOB_COUNT_RE" "$count_doc" | cut -c1-120 | sed 's/^/        /'
+    echo "        file: $count_doc"; FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  T1b.3 $(basename "$count_doc") carries no hardcoded CI job-count claim"; PASS=$((PASS + 1))
+  fi
+done
+# Sharding is an execution detail; the docs must say wiring is per JOB so a
+# reader never concludes a test needs re-wiring when a shard axis appears.
+assert_grep "$TESTING_MD" 'shard' "T1b.4 testing.md explains the per-job (not per-shard) wiring contract"
+# Stale-enumeration guard: any *-zsh fixture NAMED in the docs must be one
+# test.yml actually invokes with zsh. Catches a renamed/removed fixture that
+# the prose keeps advertising (the 'one fixture' / three-name-list class).
+ZSH_WIRED="$(grep -oE 'zsh tests/[A-Za-z0-9_-]+-zsh\.test\.sh' "$TEST_YML" | sed 's|^zsh tests/||' | sort -u)"
+STALE_ZSH_DOC=""
+for zsh_doc in "$TESTING_MD" "$CONTRIBUTING_MD"; do
+  while IFS= read -r cited; do
+    [ -n "$cited" ] || continue
+    grep -qF -e "$cited" <<EOF_ZSH_WIRED || STALE_ZSH_DOC="${STALE_ZSH_DOC} $(basename "$zsh_doc"):${cited}"
+$ZSH_WIRED
+EOF_ZSH_WIRED
+  done <<EOF_ZSH_CITED
+$(grep -oE '[A-Za-z0-9_-]+-zsh\.test\.sh' "$zsh_doc" | sort -u)
+EOF_ZSH_CITED
+done
+if [ -z "$STALE_ZSH_DOC" ]; then
+  echo "  PASS  T1b.5 every *-zsh fixture named in the docs is one test.yml runs under zsh"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T1b.5 docs cite zsh fixture(s) test.yml does not run under zsh:${STALE_ZSH_DOC}"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== CONTRIBUTING.md: no dead link, no false claim, test.yml is SSOT =="
@@ -286,6 +377,259 @@ assert_grep "$PRE_COMPACT" 'Contract status \(live-verified' \
   "T8.5 pre-compact documents the verified auto-memory.md contract status"
 assert_grep "$PRE_COMPACT" 'DOCUMENTED user/tooling-facing contract' \
   "T8.6 pre-compact states the keep-as-documented-contract decision"
+
+echo
+echo "== T9: RFC anchors are SYMBOLS that resolve, not file:line literals (#349) =="
+# Why this section exists: RFC 0012 §3.3's contract table is the acceptance
+# checklist a /goal, /review-pr or /merge change is graded against. Its prior
+# edition bound every row to a `file:line` literal, and nothing ever resolved
+# one — so when the anchored code moved (in the same commits that edited the
+# anchored rows), the pointers rotted with no test noticing. Two enforceable
+# halves replace that: NO line literals inside the load-bearing prose, and
+# every cited symbol must still grep-resolve in the shipped tree.
+
+# --- §1 and the §3.3 contract table, sliced by heading ---------------------
+RFC12_S1="$(awk '/^## 1\. Context/{f=1; next} f && /^## 2\./{exit} f' "$WORKFLOW_RFC")"
+RFC12_TABLE="$(awk '/^\*\*Joint-migration contract table\.\*\*/{f=1} f && /^### /{exit} f' "$WORKFLOW_RFC")"
+# Non-vacuity: a renamed heading must fail loudly, never silently pass zero
+# assertions over an empty slice.
+for slice_name in S1 TABLE; do
+  case "$slice_name" in
+    S1)    slice_body="$RFC12_S1"    slice_desc="§1 Context" ;;
+    TABLE) slice_body="$RFC12_TABLE" slice_desc="§3.3 contract table" ;;
+  esac
+  slice_lines="$(printf '%s\n' "$slice_body" | grep -c . || true)"
+  if [ "${slice_lines:-0}" -ge 10 ] 2>/dev/null; then
+    echo "  PASS  T9.0 RFC 0012 ${slice_desc} slice extracted (${slice_lines} lines)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.0 RFC 0012 ${slice_desc} slice is empty/too small — heading renamed?"
+    echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+  fi
+done
+
+# ANCHOR-FREE: neither `lib/foo.sh:123` nor the `RP:954` / `GS:633-713` /
+# `MP:698` / `SKILL:1341` shorthand the old table used may survive.
+ANCHOR_RE='\.(md|sh|py|js|json|yaml|yml):[0-9]+|(^|[^A-Za-z])(RP|GS|MP|SKILL):[0-9]+'
+for slice_name in S1 TABLE; do
+  case "$slice_name" in
+    S1)    slice_body="$RFC12_S1"    slice_desc="§1 Context" ;;
+    TABLE) slice_body="$RFC12_TABLE" slice_desc="§3.3 contract table" ;;
+  esac
+  if grep -qE -e "$ANCHOR_RE" <<<"$slice_body"; then
+    echo "  FAIL  T9.1 RFC 0012 ${slice_desc} still carries file:line anchors:"
+    grep -oE -e "$ANCHOR_RE" <<<"$slice_body" | sort -u | sed 's/^/        /'
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  T9.1 RFC 0012 ${slice_desc} is anchor-free (symbols only)"; PASS=$((PASS + 1))
+  fi
+done
+assert_grep "$WORKFLOW_RFC" 'Reference convention \(normative for this RFC\)' \
+  "T9.2 RFC 0012 states the symbol-over-line-number reference convention"
+
+# --- The contract table names the symbols, and they still exist ------------
+# Each pair is "symbol|human description". A rename in the shipped tree reds
+# here, which is the entire point: the reference must be resolvable.
+CONTRACT_SYMBOLS='review_reserve_run_directory|review-pr run-directory reservation
+uberdev_goal_read_trust_signal|goal trust-signal READER (not the audit emitter)
+_uberdev_goal_locked_marker_for_pr_fresh|goal locked-marker freshness probe
+_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS|review grace window constant
+discover_review_verdict_json|canonical verdict selector
+uberdev_goal_locate_review_pr_audit_by_pr|PR-keyed verdict locator
+uberdev_goal_read_merge_result|merge-result reader
+uberdev_goal_review_pr_in_flight|review-pr in-flight probe
+uberdev_dispatch_one|dispatch entry point'
+while IFS='|' read -r sym desc; do
+  [ -n "$sym" ] || continue
+  if grep -qF -e "$sym" <<<"$RFC12_TABLE"; then
+    echo "  PASS  T9.3 contract table cites \`$sym\` ($desc)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.3 contract table no longer cites \`$sym\` ($desc)"
+    echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+  fi
+  if grep -rqF -e "$sym" "$PLUGIN_DIR"; then
+    echo "  PASS  T9.4 \`$sym\` resolves in plugins/uberdev/"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.4 \`$sym\` does NOT resolve in plugins/uberdev/ — the RFC cites a dead symbol"
+    echo "        renamed? update RFC 0012 §3.3 in the SAME change"; FAIL=$((FAIL + 1))
+  fi
+done <<EOF_CONTRACT_SYMBOLS
+$CONTRACT_SYMBOLS
+EOF_CONTRACT_SYMBOLS
+
+# --- §1 is the OTHER symbol-only surface: guard its references too ----------
+# The reference convention scopes symbol-only to §1 AND the contract table, so
+# §1 needs the same resolvability half. Without it §1 shipped two references
+# (`CHUNK_ARRAY=($CHUNK_IDS)`, `_wave_count`) that resolved in NO file — code
+# retired by the migration, cited as though it were live.
+#
+# T9.3b is a small CURATED presence list: the named `Step`/section headings the
+# derived scan below cannot see (they are not identifier-shaped) plus the three
+# correction anchors this change installed, so a silent revert to prose reds.
+SECTION1_SYMBOLS='### Executable setup|the review-pr fence that reserves the run directory
+Acquire the single-instance lock|the merge-pipeline single-instance lock step
+review_reserve_run_directory|the shipped locked-marker writer
+areaPrompt|the scan-fleet area fan-out that replaced the zsh-split wave loop
+personaPrompt|the testers round loop that replaced the corrupted count helper'
+while IFS='|' read -r sym desc; do
+  [ -n "$sym" ] || continue
+  if grep -qwF -e "$sym" <<<"$RFC12_S1"; then
+    echo "  PASS  T9.3b §1 cites \`$sym\` ($desc)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.3b §1 no longer cites \`$sym\` ($desc)"
+    echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+  fi
+  if grep -rqwF -e "$sym" "$PLUGIN_DIR"; then
+    echo "  PASS  T9.4b \`$sym\` resolves in plugins/uberdev/"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.4b \`$sym\` does NOT resolve in plugins/uberdev/ — §1 cites a dead symbol"
+    echo "        retired by a migration? cite the SHIPPED replacement, not the corpse"
+    FAIL=$((FAIL + 1))
+  fi
+done <<EOF_SECTION1_SYMBOLS
+$SECTION1_SYMBOLS
+EOF_SECTION1_SYMBOLS
+# T9.4c is DERIVED, so a NEW dead reference reds without anyone remembering to
+# extend a list: every identifier-shaped backticked token in §1 must resolve.
+# `(memory: `key`)` spans are stripped first — those name Claude-memory files,
+# not repo symbols, and the prose labels them as such. That exclusion is read
+# off the prose marker, not hand-maintained per key.
+S1_TOKENS="$(printf '%s\n' "$RFC12_S1" \
+  | sed 's/memory: `[^`]*`//g' \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]{5,}`' | tr -d '`' | sort -u)"
+S1_TOKEN_COUNT="$(printf '%s\n' "$S1_TOKENS" | grep -c '[A-Za-z]' || true)"
+if [ "${S1_TOKEN_COUNT:-0}" -ge 5 ] 2>/dev/null; then
+  echo "  PASS  T9.4c §1 yielded ${S1_TOKEN_COUNT} identifier references to resolve"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.4c §1 yielded only ${S1_TOKEN_COUNT} identifier references — slice/format broke"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
+S1_DEAD_TOKENS=""
+while IFS= read -r s1_tok; do
+  [ -n "$s1_tok" ] || continue
+  grep -rqwF -e "$s1_tok" "$PLUGIN_DIR" || S1_DEAD_TOKENS="${S1_DEAD_TOKENS} ${s1_tok}"
+done <<EOF_S1_TOKENS
+$S1_TOKENS
+EOF_S1_TOKENS
+if [ -z "$S1_DEAD_TOKENS" ]; then
+  echo "  PASS  T9.4c every identifier §1 cites resolves in plugins/uberdev/"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.4c §1 cites identifier(s) that resolve nowhere in plugins/uberdev/:${S1_DEAD_TOKENS}"
+  echo "        retired by a migration? cite the SHIPPED replacement, not the corpse"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
+
+# The rotted claim of record: the trust-fields row must point at the READER.
+# `uberdev_goal_audit` is the audit EMITTER the old line anchor landed on.
+# Scoped to the table's DATA ROWS so the §3.3 anchoring-rule paragraph — which
+# names the emitter deliberately, as the historical example — cannot mask a
+# real re-rot, and matched on a symbol boundary so the backticked form the
+# RFC's own convention produces (`uberdev_goal_audit` followed by a backtick,
+# not a space) is caught too.
+RFC12_TABLE_ROWS="$(grep '^|' <<<"$RFC12_TABLE" || true)"
+RFC12_TRUST_ROW="$(awk -F'|' '$2 ~ /Trust fields/' <<<"$RFC12_TABLE_ROWS")"
+EMITTER_RE='uberdev_goal_audit([^_[:alnum:]]|$)'
+if [ -z "$RFC12_TRUST_ROW" ]; then
+  echo "  FAIL  T9.5 no 'Trust fields' row found in the §3.3 contract table — renamed?"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+elif grep -qE -e "$EMITTER_RE" <<<"$RFC12_TABLE_ROWS"; then
+  echo "  FAIL  T9.5 a contract-table row cites the audit emitter where the trust READER belongs"
+  grep -nE -e "$EMITTER_RE" <<<"$RFC12_TABLE_ROWS" | cut -c1-120 | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -e 'uberdev_goal_read_trust_signal' <<<"$RFC12_TRUST_ROW"; then
+  echo "  FAIL  T9.5 the 'Trust fields' row no longer names uberdev_goal_read_trust_signal"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T9.5 the Trust-fields row names the reader and no table row names the emitter"
+  PASS=$((PASS + 1))
+fi
+
+# --- Per-corrected-claim greps (#349) --------------------------------------
+# Marker retirement: only successful publication retires markers, so the
+# Phase-3 seam must NOT carry an unconditional `rm marker` step beside it.
+assert_absent_fixed "$WORKFLOW_RFC" "rm marker" \
+  "T9.6 RFC 0012 drops the unconditional 'rm marker' that contradicted the publication rule"
+assert_grep "$WORKFLOW_RFC" 'only successful verdict publication retires' \
+  "T9.7 RFC 0012 states the publication-gated marker-retirement rule"
+# Verdict-selection semantics match discover.sh: an OLDER unknown is ignored.
+assert_grep "$WORKFLOW_RFC" 'at or after.*selected timestamp is indeterminate' \
+  "T9.8 RFC 0012 qualifies indeterminacy as positional (at-or-after the selected timestamp)"
+
+# claude-bg retirement (RFC 0015) annotations — annotate, never delete.
+assert_grep "$WORKFLOW_RFC" 'SUPERSEDED IN PART — RFC 0015' \
+  "T9.9 RFC 0012 annotates the claude-bg-dependent verdicts as superseded by RFC 0015"
+assert_grep "$WORKFLOW_RFC" 'hybrid — shell preflight \+ solve-fleet workflow' \
+  "T9.10 §3.0 verdict row for the /solve+/turbo launcher reads hybrid, not keep-shell"
+assert_grep "$WORKFLOW_RFC" 'skills/goal-pipeline/workflow\.js' \
+  "T9.11 §3.3 names the goal driver script"
+# T9.11b — shipped-ness is DERIVED from disk, never asserted in prose. Naming a
+# design target is fine; labelling it "shipped" while no such file exists is the
+# unverifiable-claim class #349 exists to kill. Every `skills/<name>/workflow.js`
+# the RFC names is resolved against the tree; a path that is absent may not
+# appear on a line that calls it shipped.
+RFC12_JS_PATHS="$(grep -oE 'skills/[a-z0-9_-]+/workflow\.js' "$WORKFLOW_RFC" | sort -u)"
+RFC12_JS_COUNT="$(printf '%s\n' "$RFC12_JS_PATHS" | grep -c 'workflow\.js' || true)"
+if [ "${RFC12_JS_COUNT:-0}" -ge 1 ] 2>/dev/null; then
+  echo "  PASS  T9.11b RFC 0012 names ${RFC12_JS_COUNT} workflow.js driver path(s) to resolve"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.11b no skills/*/workflow.js path parsed from $WORKFLOW_RFC — renamed?"
+  FAIL=$((FAIL + 1))
+fi
+JS_SHIPPED_LIE=""
+while IFS= read -r js_path; do
+  [ -n "$js_path" ] || continue
+  [ -e "$PLUGIN_DIR/$js_path" ] && continue
+  # No pipe into `grep -q`: its early exit SIGPIPEs the producer and pipefail
+  # would then mask the match. Capture first, match against the capture.
+  JS_CITING_LINES="$(grep -F -e "$js_path" "$WORKFLOW_RFC" || true)"
+  if grep -qi -e 'shipped' <<<"$JS_CITING_LINES"; then
+    JS_SHIPPED_LIE="${JS_SHIPPED_LIE} ${js_path}"
+  fi
+done <<EOF_RFC12_JS
+$RFC12_JS_PATHS
+EOF_RFC12_JS
+if [ -z "$JS_SHIPPED_LIE" ]; then
+  echo "  PASS  T9.11c every workflow.js RFC 0012 calls shipped exists in plugins/uberdev/"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.11c RFC 0012 claims shipped-ness for absent driver script(s):${JS_SHIPPED_LIE}"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$WORKFLOW_RFC" 'EXACTLY ONE nested workflow' \
+  "T9.12 §3.3 pins one nested workflow() call per cycle"
+assert_grep "$WORKFLOW_RFC" 'spends the single .workflow\(\). nesting level' \
+  "T9.13 §3.3 records that /goal spends the single nesting level"
+assert_grep "$WORKFLOW_RFC" '§3\.3 spends that level instead' \
+  "T9.14 §3.6 retracts the sdd-waves nesting reservation it no longer holds"
+
+# --- RFC 0005 corrected claims, cross-checked against the implementation ---
+assert_grep "$GOAL_RFC" 'review_reserve_run_directory' \
+  "T9.15 RFC 0005 D220b cites the reservation helper by symbol"
+assert_grep "$GOAL_RFC" 'not.*\*\*Step 4\*\*|\*\*not\*\* "Step 4"' \
+  "T9.16 RFC 0005 D220b retracts the wrong 'Step 4' pointer"
+assert_grep "$GOAL_RFC" 'timestamp >= selected_timestamp' \
+  "T9.17 RFC 0005 B13 states the positional indeterminacy predicate verbatim"
+assert_grep "$GOAL_RFC" 'never absence\*\* — that half is unconditional' \
+  "T9.18 RFC 0005 B13 scopes 'never absence' as the unconditional half"
+assert_grep "$GOAL_RFC" 'POSIX; native Windows substitutes reparse-ancestor rejection' \
+  "T9.19 RFC 0005 B14 annotates the non-POSIX O_NOFOLLOW substitute"
+# Both RFC 0005 claims must match the code they describe, or the annotation is
+# just a better-written lie.
+DISCOVER_SH="$PLUGIN_DIR/skills/merge-pipeline/lib/discover.sh"
+RUN_MANIFEST_PY="$PLUGIN_DIR/lib/run_manifest.py"
+if [ -r "$DISCOVER_SH" ] && grep -qF -e 'timestamp >= selected_timestamp' "$DISCOVER_SH"; then
+  echo "  PASS  T9.20 B13's predicate matches the canonical selector's code"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.20 B13 claims 'timestamp >= selected_timestamp' but discover.sh no longer does"
+  echo "        file: $DISCOVER_SH"; FAIL=$((FAIL + 1))
+fi
+if [ -r "$RUN_MANIFEST_PY" ] && grep -qF -e '_reject_windows_reparse_ancestors' "$RUN_MANIFEST_PY"; then
+  echo "  PASS  T9.21 B14's Windows substitute matches the runtime's reparse-ancestor rejection"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.21 B14 claims reparse-ancestor rejection but run_manifest.py no longer implements it"
+  echo "        file: $RUN_MANIFEST_PY"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Summary =="

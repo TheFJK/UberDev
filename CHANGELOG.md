@@ -4,6 +4,31 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.6] — 2026-07-30
+
+### Fixed
+
+- RFC prose named symbols that resolve nowhere. Two identifiers cited as live fan-out sites were retired by the scan-fleet and testers-pipeline Workflow migrations, and one `workflow.js` was labelled "as shipped" while no such file exists on disk. All now cite the shipped replacements, verified against the real call sites.
+- Documentation that hand-enumerated the CI jobs was guarded in only one of the two files that do it, and the job-count assertion could not match the phrasing the docs actually used.
+
+### Tests
+
+- Replaced hand-maintained doc lists with **derived** guards: every identifier-shaped backticked token in RFC 0012 §1 must resolve in the tree, and every `skills/*/workflow.js` path the RFC names must exist if the line calls it shipped — so a new dead reference reds without anyone extending a list. Assertions now match word-bounded, so renaming a symbol no longer counts as resolved, and the trust-table guard slices data rows rather than grepping prose that names the emitter deliberately.
+
+## [0.41.5] — 2026-07-30
+
+### Added
+
+- `/uberdev:status` — a read-only aggregator across the five run-state stores (solve claims, goal state, review reservations, the merge lock, and Workflow fleet runs). It reads and reports; it never mutates, never releases a claim and never breaks a lock.
+
+### Fixed
+
+- Under zsh, `local path=…` binds the **special `path` array tied to `$PATH`**, so `stat` resolved to command-not-found inside the mtime helper and `/status` inverted both of its safety-critical verdicts — reporting a live merge lock as stale and an in-flight review as finished, which would invite an operator to steal the lock and re-dispatch. Five locals renamed; the rule is recorded in the file's cross-shell notes.
+
+### Tests
+
+- The zsh coverage that would have caught this discarded its output and so could not fail on an output regression. Replaced with a bash-vs-zsh **rendered-byte diff** over both live and aged fixtures, normalising only elapsed times so a threshold divergence still reds, plus negative tests proving the shared-root ownership gate actually refuses a foreign-owned file. Every new assertion was mutation-proved.
+
 ## [0.41.4] — 2026-07-30
 
 ### Fixed
