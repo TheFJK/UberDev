@@ -4,6 +4,28 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.1] — 2026-07-30
+
+### Changed
+
+- Migrated `/uberthink` off the directive-emitter onto `skills/uberthink-pipeline/workflow.js`, leaving a thin preflight + args seam. The run ledger was designed as a key/value store but implemented as an append-only log, and the write and read paths disagreed about which occurrence of a key was authoritative; orchestration state now lives in JavaScript variables for the whole run, so the disagreement cannot exist.
+
+### Fixed
+
+- The fleet ceiling is live again. Every counter bump matched the FIRST occurrence of `AGENTS_DISPATCHED` — forever the Phase-0 seed of `0` — while every reader took the LAST, so waves of 3+32+2+6 reported 6 against a true total of 43 and `CB-ISLAND` could never halt a runaway genetic loop.
+- Tooling crashes are no longer delivered as substance. The Wave-4 and Wave-7 cuts ran under `2>/dev/null || true`, so a module-load failure wrote no shortlist, the falsifier count fell to zero, `CB-CONVERGE` fired, and a ~90-minute run reported "the goal as framed admitted no feasible novel approach". A non-zero report run is now a `TOOLING` halt that can never route to a convergence verdict.
+- Wave 5 dispatched against a fabricated composite path: it rebuilt the path from the shortlist *id* (`comp-island-K-NNN`) when the file is named by lens (`comp-NNN-<lens>.yaml`), so it pointed at a file that never exists. It now carries `report.py`'s authoritative `composite_path`, drops unusable rows with a halt rather than inventing one, and names falsifier dossiers by file stem so feasibility sub-scores actually reach the Wave-7 floor cut.
+- `/uberthink` could not invoke the tool it now mandates: `allowed-tools` omitted `Workflow`. Added, with the byte-matched alias SSOT row and the assertion the sibling migrations already carry.
+- `--resume` silently discarded the entire donor catalogue — cross-domain donor import is the premise of the command — because donors were assigned only on the non-resume branch. Donors now rehydrate from the scope verdict, or the scope gate re-runs.
+- A personas relay returning the wrong shape at `rc 0` shipped empty persona blocks into every wave prompt and reported a clean success. The payload is validated before any dispatch, not just the return code.
+- `--resume RUN_ID`, `--islands N` and `--max-new N` were documented with a space but only parsed with `=`; the space form fell through and launched a full ideation run on the run id as its goal. Both spellings now parse, and a value-taking flag with no value is a hard error.
+- An existing-but-empty composites directory returned an empty design list at `rc 0`, which the preflight's eager `mkdir -p` made reachable; zero artifacts is now a missing input, not an honest frontier.
+
+### Tests
+
+- Added `tests/uberthink-workflow.test.sh` with a real accumulation fixture (3+32+2+6 must reach 43 and trip the ceiling), a report-runner `rc != 0` case asserting a `TOOLING` halt rather than a convergence verdict, resume-with-donors coverage, and persona-payload validation.
+- Strengthened two assertions that passed for the wrong reason: the circuit-breaker check was satisfied by the sentence retiring a breaker, and the aggregate-path check matched a literal from an unrelated region. Every new assertion was mutation-proven.
+
 ## [0.41.0] — 2026-07-30
 
 ### Added
