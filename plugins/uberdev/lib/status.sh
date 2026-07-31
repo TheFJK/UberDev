@@ -73,6 +73,15 @@
 #     a -q grep can EPIPE-race under `set -o pipefail` on Linux CI).
 #   - `stat -c` is probed BEFORE `stat -f`: on GNU coreutils `-f` means
 #     --file-system and exits 0 with unrelated output.
+#   - NEVER name a local `path` (nor cdpath/fpath/manpath/mailpath/module_path/
+#     psvar/watch/status/argv/options/commands). zsh TIES the `path` array to
+#     `$PATH`, so `local path="$1"` replaces the command search path for the
+#     whole call frame: `stat`, `date`, `find` and `awk` all become
+#     command-not-found, every external probe silently returns rc=1, and the
+#     safety-critical verdicts INVERT (a live /merge lock renders STALE, and
+#     /status then tells the operator to steal it). Locals that hold a
+#     filesystem path are named `target`/`file`/`dir`/`root`. Asserted
+#     structurally by tests/status.test.sh S1.17 and behaviourally by S14.
 #
 # Sourced by:
 #   - commands/status.md (the only production caller)
@@ -251,15 +260,17 @@ _uberdev_status_have_python() {
 
 _uberdev_status_now_secs() { date +%s; }
 
-# Epoch mtime of PATH, or rc=1. `stat -c` FIRST: on GNU coreutils `stat -f`
+# Epoch mtime of TARGET, or rc=1. `stat -c` FIRST: on GNU coreutils `stat -f`
 # means --file-system and exits 0 with unrelated output, so a BSD-first probe
-# yields silent garbage on Linux CI.
+# yields silent garbage on Linux CI. The local is `target`, never `path` — see
+# the zsh tied-array note in CROSS-SHELL NOTES; naming it `path` here empties
+# $PATH for this frame and makes `stat` itself unfindable.
 _uberdev_status_mtime() {
-  local path="$1" value=''
-  [ -e "$path" ] || return 1
-  value="$(stat -c %Y "$path" 2>/dev/null)" || value=''
+  local target="$1" value=''
+  [ -e "$target" ] || return 1
+  value="$(stat -c %Y "$target" 2>/dev/null)" || value=''
   if ! _uberdev_status_is_int "$value"; then
-    value="$(stat -f %m "$path" 2>/dev/null)" || value=''
+    value="$(stat -f %m "$target" 2>/dev/null)" || value=''
   fi
   _uberdev_status_is_int "$value" || return 1
   printf '%s\n' "$value"
@@ -375,11 +386,11 @@ _uberdev_status_merge_stale_secs() {
 # empty). Verdicts: ok | ok-shared | absent | not-directory | owner-mismatch |
 #                   unreadable | unresolvable
 _uberdev_status_probe_root() {
-  local path="$1" role="$2" resolved=''
-  if [ -z "$path" ]; then printf 'absent \n'; return 0; fi
-  if [ ! -e "$path" ]; then printf 'absent \n'; return 0; fi
-  if [ ! -d "$path" ]; then printf 'not-directory \n'; return 0; fi
-  resolved="$(_uberdev_status_resolve_dir "$path")" || { printf 'unresolvable \n'; return 0; }
+  local target="$1" role="$2" resolved=''
+  if [ -z "$target" ]; then printf 'absent \n'; return 0; fi
+  if [ ! -e "$target" ]; then printf 'absent \n'; return 0; fi
+  if [ ! -d "$target" ]; then printf 'not-directory \n'; return 0; fi
+  resolved="$(_uberdev_status_resolve_dir "$target")" || { printf 'unresolvable \n'; return 0; }
   if [ ! -r "$resolved" ] || [ ! -x "$resolved" ]; then
     printf 'unreadable %s\n' "$resolved"; return 0
   fi
@@ -393,14 +404,14 @@ _uberdev_status_probe_root() {
 # each walk the deduped root list. Entries are `ROLE PATH` — the role travels
 # with the root so every section knows which per-file rule to enforce.
 _uberdev_status_consider_root() {
-  local label="$1" path="$2" role="$3" probe verdict resolved suffix effective
-  probe="$(_uberdev_status_probe_root "$path" "$role")"
+  local label="$1" target="$2" role="$3" probe verdict resolved suffix effective
+  probe="$(_uberdev_status_probe_root "$target" "$role")"
   verdict="${probe%% *}"
   resolved="${probe#* }"
   suffix=''
-  if [ -n "$resolved" ] && [ "$resolved" != "$path" ]; then suffix=" -> $resolved"; fi
+  if [ -n "$resolved" ] && [ "$resolved" != "$target" ]; then suffix=" -> $resolved"; fi
   _UBERDEV_STATUS_ROOT_REPORT="$_UBERDEV_STATUS_ROOT_REPORT$(
-    printf '%-22s %-14s %s%s' "$label" "$verdict" "${path:-<unset>}" "$suffix")
+    printf '%-22s %-14s %s%s' "$label" "$verdict" "${target:-<unset>}" "$suffix")
 "
   case "$verdict" in
     ok) effective='private' ;;
@@ -438,22 +449,22 @@ _uberdev_status_discover_roots() {
 # non-symlink regular file owned by the effective uid; under a `private` root
 # the 0700 owner-checked directory already established that boundary.
 _uberdev_status_readable_file() {
-  local role="$1" path="$2"
-  [ -L "$path" ] && return 1
-  [ -f "$path" ] || return 1
-  [ -r "$path" ] || return 1
+  local role="$1" target="$2"
+  [ -L "$target" ] && return 1
+  [ -f "$target" ] || return 1
+  [ -r "$target" ] || return 1
   [ "$role" = shared ] || return 0
-  [ -O "$path" ] || return 1
+  [ -O "$target" ] || return 1
   return 0
 }
 
 _uberdev_status_readable_dir() {
-  local role="$1" path="$2"
-  [ -L "$path" ] && return 1
-  [ -d "$path" ] || return 1
-  [ -r "$path" ] && [ -x "$path" ] || return 1
+  local role="$1" target="$2"
+  [ -L "$target" ] && return 1
+  [ -d "$target" ] || return 1
+  [ -r "$target" ] && [ -x "$target" ] || return 1
   [ "$role" = shared ] || return 0
-  [ -O "$path" ] || return 1
+  [ -O "$target" ] || return 1
   return 0
 }
 

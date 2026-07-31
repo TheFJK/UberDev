@@ -166,6 +166,10 @@ RENDER_GH_MODE="ok"
 RENDER_GH_JSON="[]"
 RENDER_OUT=""
 RENDER_RC=0
+# The interpreter the census is driven through. Every section below pins bash;
+# S14 re-drives one fixture through zsh and diffs the bytes, because zsh is the
+# shell the Bash tool actually uses on macOS.
+RENDER_SHELL="bash"
 
 render() {   # OUT_BASENAME -> sets RENDER_OUT, RENDER_RC
   RENDER_OUT="$OUT_DIR/$1"
@@ -180,7 +184,7 @@ render() {   # OUT_BASENAME -> sets RENDER_OUT, RENDER_RC
       GH_STUB_MODE="$RENDER_GH_MODE" \
       GH_STUB_JSON="$RENDER_GH_JSON" \
       PATH="$STUB_BIN:$PATH" \
-      bash -c 'set -u; . "$1" && uberdev_status_render' _ "$STATUS_LIB"
+      "$RENDER_SHELL" -c 'set -u; . "$1" && uberdev_status_render' _ "$STATUS_LIB"
   ) > "$RENDER_OUT" 2> "$RENDER_OUT.err"
   RENDER_RC=$?
 }
@@ -271,15 +275,29 @@ assert_not_in "$CODE_ONLY" '(echo|printf) .*\| *grep -q' \
   "S1.15 no 'echo \$V | grep -q' EPIPE race under pipefail"
 
 # The renderer must also load cleanly under zsh — the Bash tool's macOS shell.
+# NOTE: uberdev_status_render is documented to ALWAYS return 0, so this assert
+# can only catch a LOAD failure. Wrong-VALUE regressions under zsh are caught by
+# S14, which diffs the rendered bytes bash-vs-zsh.
 if command -v zsh >/dev/null 2>&1; then
   if zsh -c "set -u; . '$STATUS_LIB' && uberdev_status_render >/dev/null 2>&1"; then
-    pass "S1.16 lib/status.sh sources and renders under zsh"
+    pass "S1.16 lib/status.sh sources and renders under zsh (load smoke only)"
   else
-    fail "S1.16 lib/status.sh sources and renders under zsh"
+    fail "S1.16 lib/status.sh sources and renders under zsh (load smoke only)"
   fi
 else
   pass "S1.16 skipped — zsh not installed on this host"
 fi
+
+# zsh TIES the `path` array to $PATH (and cdpath/fpath/manpath/mailpath/
+# module_path/psvar likewise, plus `status`/`argv` which are reserved). A
+# `local path="$1"` therefore REPLACES the command search path for that whole
+# call frame: `stat`, `date`, `find` and `awk` become command-not-found, every
+# external probe silently returns rc=1, and the safety-critical verdicts INVERT
+# (a live /merge lock renders STALE and /status hands the operator a hint to
+# steal it). Structural twin of the behavioural S14 diff.
+assert_not_in "$CODE_ONLY" \
+  '(^|[^_[:alnum:]])(path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv)=' \
+  "S1.17 no local shadows a zsh tied/special parameter (zsh's \`path\` IS \$PATH)"
 
 # ===========================================================================
 echo "== S2: codex mirror parity =="
@@ -592,6 +610,133 @@ if ln -s "$TMPROOT/owned-file" "$TMPROOT/link-file" 2>/dev/null && [ -L "$TMPROO
   fi
 else
   pass "S13.7 skipped — this filesystem does not create real symlinks"
+fi
+
+# The load-bearing half of the shared-root design: a shared root is accepted
+# (S13.5) precisely BECAUSE the per-FILE euid check refuses foreign content
+# underneath it. Without a negative assert, deleting `[ -O "$target" ]` would
+# leave the suite green while /status printed another user's /tmp artefacts.
+# /etc/hosts is a foreign-owned, world-readable, non-symlink regular file on
+# both ubuntu-latest and macOS — the two halves are asserted as a PAIR so the
+# refusal is provably the OWNERSHIP check and not -f/-r failing.
+if [ "$UID_NOW" != "0" ] && [ -f /etc/hosts ] && [ ! -L /etc/hosts ] \
+   && [ -r /etc/hosts ] && [ ! -O /etc/hosts ]; then
+  if _uberdev_status_readable_file shared /etc/hosts; then
+    fail "S13.8 a foreign-owned regular file is REFUSED under a shared root"
+  else
+    pass "S13.8 a foreign-owned regular file is REFUSED under a shared root"
+  fi
+  if _uberdev_status_readable_file private /etc/hosts; then
+    pass "S13.9 the same file is accepted under a private root (the gate is role-scoped)"
+  else
+    fail "S13.9 the same file is accepted under a private root (the gate is role-scoped)"
+  fi
+else
+  pass "S13.8 skipped — running as root, or /etc/hosts is not a foreign-owned regular file"
+  pass "S13.9 skipped — running as root, or /etc/hosts is not a foreign-owned regular file"
+fi
+
+# The directory twin of the same gate (goal sidecar roots are walked with it).
+if [ "$UID_NOW" != "0" ] && [ -d /usr ] && [ ! -L /usr ] && [ ! -O /usr ]; then
+  if _uberdev_status_readable_dir shared /usr; then
+    fail "S13.10 a foreign-owned directory is REFUSED by the shared-root dir gate"
+  else
+    pass "S13.10 a foreign-owned directory is REFUSED by the shared-root dir gate"
+  fi
+else
+  pass "S13.10 skipped — running as root, or /usr is not a foreign-owned directory"
+fi
+
+# ===========================================================================
+echo "== S14: cross-shell — the RENDERED census is byte-identical under zsh =="
+# ===========================================================================
+# S1.16 can only catch a load failure: uberdev_status_render always returns 0 by
+# design ("a status reader that aborts on the first unreadable store is useless"),
+# so an exit-code assert is unfalsifiable for wrong-VALUE regressions. Every
+# other section pins `bash -c`, yet /uberdev:status runs through the Bash tool,
+# which is /bin/zsh on macOS. This section drives the SAME fixture through both
+# interpreters and diffs the output, with the two safety-critical verdicts
+# (HELD-LIVE merge lock, FRESH review reservation) asserted against the ZSH
+# render specifically — those are the rows whose inversion tells an operator to
+# steal a lock that a live run still owns.
+if command -v zsh >/dev/null 2>&1; then
+  reset_roots
+  rm -rf "$WORK_REPO/.uberdev" "$LOCK_DIR"
+  write_goal_fixture "$HARDENED" crossshell 3
+  write_lifecycle_fixture "$HARDENED/.agent-state-$UID_NOW"
+  printf '{"issue":310,"tier":"medium","backend":"codex","state":"running","pid":4242}\n' \
+    > "$HARDENED/solve-codex-status-310.json"
+  mkdir -p "$RUNS/20260730-120000-aaaaaaa" "$LOCK_DIR"
+  : > "$RUNS/20260730-120000-aaaaaaa/locked"
+  printf '{"issue":0,"pr":401,"started_at":"2026-07-30T12:00:00Z"}\n' \
+    > "$RUNS/20260730-120000-aaaaaaa/pr-context.json"
+  printf '{"run_id":"20260730-091500-a1b2c3d","started_at":"2026-07-30T09:15:00Z","workflowRunId":null}\n' \
+    > "$LOCK_DIR/record.json"
+  date +%s > "$LOCK_DIR/heartbeat"
+
+  # The unit-level smoking gun first: _uberdev_status_mtime is the single
+  # external-command probe every age/verdict is derived from.
+  touch -t 202001010000 "$TMPROOT/mtime-probe"
+  MTIME_BASH="$(bash -c 'set -u; . "$1" && _uberdev_status_mtime "$2"' _ "$STATUS_LIB" "$TMPROOT/mtime-probe" 2>/dev/null)"
+  MTIME_ZSH="$(zsh -c 'set -u; . "$1" && _uberdev_status_mtime "$2"' _ "$STATUS_LIB" "$TMPROOT/mtime-probe" 2>/dev/null)"
+  case "$MTIME_BASH" in
+    ''|*[!0-9]*) fail "S14.0 _uberdev_status_mtime returns an epoch int under bash (got '$MTIME_BASH')" ;;
+    *) pass "S14.0 _uberdev_status_mtime returns an epoch int under bash" ;;
+  esac
+  assert_eq "$MTIME_ZSH" "$MTIME_BASH" \
+    "S14.1 _uberdev_status_mtime returns the SAME epoch int under zsh (zsh 'path' is \$PATH)"
+
+  RENDER_SHELL="bash"
+  render xshell-bash
+  XS_BASH="$RENDER_OUT"
+  XS_BASH_RC="$RENDER_RC"
+  RENDER_SHELL="zsh"
+  render xshell-zsh
+  XS_ZSH="$RENDER_OUT"
+  XS_ZSH_RC="$RENDER_RC"
+  RENDER_SHELL="bash"
+
+  assert_eq "$XS_ZSH_RC" "$XS_BASH_RC" "S14.2 both shells exit with the same status"
+
+  # Only the elapsed-time values are normalised — the two renders are seconds
+  # apart. Thresholds ("grace 3600s", "stale threshold 900s") are deliberately
+  # NOT normalised, so a config-resolution divergence still reds. An `age=?s`
+  # (the age-unknown signature of the zsh $PATH clobber) does not match the
+  # numeric normaliser and therefore survives into the diff.
+  normalise_ages() {   # IN OUT
+    sed -E 's/(age[ =])[0-9]+s/\1<N>s/g; s/heartbeat [0-9]+s/heartbeat <N>s/g; s/^generated_at:.*/generated_at: <TS>/' \
+      "$1" > "$2"
+  }
+  normalise_ages "$XS_BASH" "$XS_BASH.norm"
+  normalise_ages "$XS_ZSH" "$XS_ZSH.norm"
+  if diff -u "$XS_BASH.norm" "$XS_ZSH.norm" > "$TMPROOT/xshell.diff" 2>&1; then
+    pass "S14.3 the rendered census is byte-identical under bash and zsh"
+  else
+    fail "S14.3 the rendered census is byte-identical under bash and zsh"
+    sed -n '1,60p' "$TMPROOT/xshell.diff" | sed 's/^/        /'
+  fi
+
+  # Asserted against the ZSH render specifically: these are the rows that invert
+  # when an external probe silently fails, and inverting them tells the operator
+  # to re-dispatch an in-flight review or steal a live merge lock.
+  assert_in "$XS_ZSH" 'run_id=20260730-091500-a1b2c3d  started=2026-07-30T09:15:00Z  HELD-LIVE \(heartbeat [0-9]+s ago\)' \
+    "S14.4 zsh classifies a live merge lock HELD-LIVE with a numeric heartbeat age"
+  assert_not_in "$XS_ZSH" 'STALE \(heartbeat missing or unreadable' \
+    "S14.5 zsh never reports a present, readable heartbeat as missing"
+  assert_in "$XS_ZSH" 'another /merge run owns this lock — wait; do NOT remove the directory' \
+    "S14.6 zsh hints 'wait', never the stale-lock reclaim hint, for a live lock"
+  assert_in "$XS_ZSH" '20260730-120000-aaaaaaa  pr=401  age=[0-9]+s  FRESH' \
+    "S14.7 zsh classifies a just-written /review-pr reservation FRESH with a numeric age"
+  assert_not_in "$XS_ZSH" 'age=\?s  age-unknown' \
+    "S14.8 zsh resolves the reservation age instead of degrading to age-unknown"
+  assert_in "$XS_ZSH" 'in flight for PR #401 — wait for it' \
+    "S14.9 zsh hints 'wait', never '/uberdev:review-pr 401', for a FRESH reservation"
+  assert_in "$XS_ZSH" '#310 (pushed-reviewing|solving) \(age [0-9]+s\)' \
+    "S14.10 zsh resolves the goal TSV ages through awk (awk is external too)"
+else
+  for n in 0 1 2 3 4 5 6 7 8 9 10; do
+    pass "S14.$n skipped — zsh not installed on this host"
+  done
 fi
 
 echo
