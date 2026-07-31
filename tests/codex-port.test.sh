@@ -2,7 +2,7 @@
 # Shape + functional checks for the Codex port deliverables under codex/.
 # Verifies: the agent converter round-trips (md→toml, valid TOML, correct
 # field mapping incl. RFC 0013 role-default model/effort/sandbox profiles); the
-# command converter produces 13 skills + skips the 2 Claude-only ones; generated
+# command converter produces 14 skills + skips the 2 Claude-only ones; generated
 # artifacts are Codex-path-safe; the installer is idempotent + installs the
 # Codex-ported skill tree; uninstall works; the plugin manifest +
 # marketplace.json are valid JSON with the right shape. RFC 0012 §3.4 codex-port.
@@ -277,14 +277,14 @@ else
   fi
 fi
 
-echo "== Command converter: 13 skills + 2 skipped =="
+echo "== Command converter: 14 skills + 2 skipped =="
 assert_cmd 0 "convert-commands runs clean" \
   python3 "$CONVERT_COMMANDS" "$REPO_ROOT/plugins/uberdev/commands" "$TMP/cmd-skills"
 mkdir -p "$TMP/empty-commands-src"
 assert_cmd 2 "convert-commands fails when source contains zero commands" \
   python3 "$CONVERT_COMMANDS" "$TMP/empty-commands-src" "$TMP/empty-commands-out"
 N_CMD="$(find "$TMP/cmd-skills" -maxdepth 1 -name 'uberdev-cmd-*' -type d 2>/dev/null | wc -l | tr -d ' ')"
-[ "$N_CMD" -eq 13 ] && pass "13 uberdev-cmd-* skills produced" || fail "expected 13 cmd skills, got $N_CMD"
+[ "$N_CMD" -eq 14 ] && pass "14 uberdev-cmd-* skills produced" || fail "expected 14 cmd skills, got $N_CMD"
 # install-aliases / uninstall-aliases NOT present (skipped)
 [ ! -d "$TMP/cmd-skills/uberdev-cmd-install-aliases" ] && [ ! -d "$TMP/cmd-skills/uberdev-cmd-uninstall-aliases" ] \
   && pass "Claude-only alias commands skipped (not converted)" \
@@ -509,8 +509,8 @@ NB="$(grep -c 'BEGIN uberdev-codex-primer' "$TH/.codex/AGENTS.md" 2>/dev/null ||
 [ "$NB" -eq 1 ] && pass "exactly 1 primer block after 2 installs (idempotent)" \
   || fail "found $NB primer blocks (expected 1)"
 NS="$(find "$TH/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
-[ "$NS" -eq 40 ] && pass "installer copied 40 Codex-ported skills incl. command-skills" \
-  || fail "installer copied $NS skills (expected 40)"
+[ "$NS" -eq 41 ] && pass "installer copied 41 Codex-ported skills incl. command-skills" \
+  || fail "installer copied $NS skills (expected 41)"
 [ -f "$TH/.agents/skills/uberdev-cmd-solve/SKILL.md" ] \
   && pass "standalone installer includes command-skills" \
   || fail "standalone installer missing uberdev-cmd-solve"
@@ -557,8 +557,8 @@ assert_cmd 0 "installer adopts full legacy unmarked UberDev skill set" \
   env HOME="$TH_LEGACY" CODEX_HOME="$TH_LEGACY/.codex" bash "$INSTALLER"
 NS="$(find "$TH_LEGACY/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
 NM="$(find "$TH_LEGACY/.agents/skills" -maxdepth 2 -name '.uberdev-codex-managed' 2>/dev/null | wc -l | tr -d '[:space:]')"
-if [ "$NS" -eq 40 ] \
-  && [ "$NM" -eq 40 ] \
+if [ "$NS" -eq 41 ] \
+  && [ "$NM" -eq 41 ] \
   && [ -x "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/solve-launcher.sh" ] \
   && [ -r "$TH_LEGACY/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && grep -Rql '\.codex/uberdev.local.md' "$TH_LEGACY/.agents/skills/uberdev-cmd-solve/SKILL.md"; then
@@ -654,7 +654,7 @@ assert_cmd 0 "standalone copied installer bootstraps missing repo sources from a
 NS="$(find "$TH3/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
 NA="$(find "$TH3/.codex/agents" -maxdepth 1 -name 'uberdev-*.toml' 2>/dev/null | wc -l | tr -d '[:space:]')"
 NB="$(grep -c 'BEGIN uberdev-codex-primer' "$TH3/.codex/AGENTS.md" 2>/dev/null || echo 0)"
-[ "$NS" -eq 40 ] && [ "$NA" -eq 44 ] && [ "$NB" -eq 1 ] \
+[ "$NS" -eq 41 ] && [ "$NA" -eq 44 ] && [ "$NB" -eq 1 ] \
   && [ -r "$TH3/.codex/plugins/uberdev-codex/lib/command-workspace.py" ] \
   && pass "bootstrapped standalone install carries skills, agents, and primer" \
   || fail "bootstrapped install incomplete: skills=$NS agents=$NA primer=$NB"
@@ -684,7 +684,7 @@ assert_cmd 0 "install converts symlinked ~/.agents/skills into a Codex-owned dir
   env HOME="$TH5" CODEX_HOME="$TH5/.codex" bash "$INSTALLER"
 NS="$(find "$TH5/.agents/skills" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')"
 if [ ! -L "$TH5/.agents/skills" ] \
-  && [ "$NS" -eq 40 ] \
+  && [ "$NS" -eq 41 ] \
   && [ ! -e "$CLAUDE_SKILLS/uberdev-cmd-solve" ] \
   && [ -f "$CLAUDE_SKILLS/legacy-skill/SKILL.md" ] \
   && find "$TH5/.agents" -maxdepth 1 -name 'skills.symlink-*.bak' -type l | grep -q .; then

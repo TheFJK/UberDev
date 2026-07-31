@@ -4,6 +4,20 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.5] — 2026-07-30
+
+### Added
+
+- `/uberdev:status` — a read-only aggregator across the five run-state stores (solve claims, goal state, review reservations, the merge lock, and Workflow fleet runs). It reads and reports; it never mutates, never releases a claim and never breaks a lock.
+
+### Fixed
+
+- Under zsh, `local path=…` binds the **special `path` array tied to `$PATH`**, so `stat` resolved to command-not-found inside the mtime helper and `/status` inverted both of its safety-critical verdicts — reporting a live merge lock as stale and an in-flight review as finished, which would invite an operator to steal the lock and re-dispatch. Five locals renamed; the rule is recorded in the file's cross-shell notes.
+
+### Tests
+
+- The zsh coverage that would have caught this discarded its output and so could not fail on an output regression. Replaced with a bash-vs-zsh **rendered-byte diff** over both live and aged fixtures, normalising only elapsed times so a threshold divergence still reds, plus negative tests proving the shared-root ownership gate actually refuses a foreign-owned file. Every new assertion was mutation-proved.
+
 ## [0.41.4] — 2026-07-30
 
 ### Fixed

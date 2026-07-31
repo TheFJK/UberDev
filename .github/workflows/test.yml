@@ -99,6 +99,7 @@ jobs:
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
           bash tests/prkit-generate.test.sh && \
+          bash tests/status.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-contract.test.sh && \
@@ -311,6 +312,12 @@ jobs:
 #                                         issue on Git Bash, same as uberscan/
 #                                         uberthink; also calls rsync which isn't
 #                                         on windows-latest's Git Bash)
+#   - status.test.sh                      (#310 fixtures drive python3 over
+#                                         mktemp -d paths, POSIX ownership
+#                                         predicates and `touch -t` mtime
+#                                         forgery; lib/status.sh itself stays
+#                                         portable — only the harness is
+#                                         Unix-bound)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
