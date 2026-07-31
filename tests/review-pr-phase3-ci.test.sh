@@ -78,10 +78,184 @@ echo
 echo "== S2: pending → green via MONITOR (no fixer dispatched) =="
 assert_grep "$REVIEW_PR" 'gh pr checks.*--watch.*--interval 30' \
   "S2.1 — MONITOR uses --watch --interval 30"
-assert_grep "$REVIEW_PR" 'timeout 1200|20[- ]minute.*wall.cap' \
-  "S2.2 — MONITOR has 20-minute wall cap (timeout 1200)"
+assert_grep "$REVIEW_PR" \
+  'CI_MONITOR_DEADLINE_SEC="\$\{CI_MONITOR_DEADLINE_SEC:-\$\(\( CI_MONITOR_STARTED_SEC \+ 1200 \)\)\}"' \
+  "S2.2 — the 1200s (20-minute) budget is an absolute deadline, defaulted once"
+# S2.2b/S2.2c — #302: the watch MUST NOT be one 1200s call. The Bash harness
+# caps a single call at 600000 ms, so `timeout 1200 gh pr checks --watch` is
+# killed by the harness (not by `timeout`) with a code that is neither 0 nor
+# gh's documented 8 — which the old "non-zero non-8 ⇒ red" mapping turned into
+# a fabricated CLASSIFY dispatch on CI that never failed.
+assert_no_grep "$REVIEW_PR" \
+  '^[[:space:]]*timeout 1200 gh pr checks' \
+  "S2.2b — the single unbounded 1200s watch call is retired"
+assert_grep "$REVIEW_PR" \
+  'CI_MONITOR_PASS_SEC=[0-9]+' \
+  "S2.2c — each watch pass is bounded by the /review-pr-owned CI_MONITOR_PASS_SEC"
+assert_grep "$REVIEW_PR" \
+  'timeout "\$CI_MONITOR_WINDOW_SEC" gh pr checks "\$PR_NUMBER" --watch --interval 30' \
+  "S2.2d — each pass runs the watch under the fence-clamped CI_MONITOR_WINDOW_SEC"
+# S2.2e (#302, second half) — bounding each `timeout` is NOT enough: a loop that
+# accumulates 1200s of passes still spends them inside ONE harness call, so the
+# harness still kills the fence on exactly the slow CI the fix targets, taking
+# the fence-scoped verdict with it. The per-FENCE budget (plus one worst-case
+# minimum-progress sleep) must therefore fit strictly under the 600s ceiling,
+# and the total must travel across fences as a carried deadline. Assert the
+# arithmetic, not just the presence of the names.
+CI_MONITOR_PASS_CONST="$(grep -oE '^ *CI_MONITOR_PASS_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
+CI_MONITOR_FENCE_CONST="$(grep -oE '^ *CI_MONITOR_FENCE_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
+CI_MONITOR_MIN_CONST="$(grep -oE '^ *CI_MONITOR_MIN_PASS_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
+if [ -n "$CI_MONITOR_PASS_CONST" ] && [ -n "$CI_MONITOR_FENCE_CONST" ] && \
+   [ -n "$CI_MONITOR_MIN_CONST" ] && \
+   [ "$((CI_MONITOR_FENCE_CONST + CI_MONITOR_MIN_CONST))" -lt 600 ] && \
+   [ "$CI_MONITOR_PASS_CONST" -le "$CI_MONITOR_FENCE_CONST" ]; then
+  echo "  PASS  S2.2e — per-fence budget (${CI_MONITOR_FENCE_CONST}s + ${CI_MONITOR_MIN_CONST}s floor) stays under the 600s harness call ceiling"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S2.2e — per-fence MONITOR budget can exceed the 600s harness call ceiling"
+  echo "        pass=${CI_MONITOR_PASS_CONST:-none} fence=${CI_MONITOR_FENCE_CONST:-none} min=${CI_MONITOR_MIN_CONST:-none}"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" \
+  'CI_MONITOR_PASSES_USED="\$\{CI_MONITOR_PASSES_USED:-0\}"' \
+  "S2.2f — the pass count is carried across fences, not reset per harness call"
+assert_grep "$REVIEW_PR" \
+  're-run this fence with CI_MONITOR_DEADLINE_SEC=\$CI_MONITOR_DEADLINE_SEC CI_MONITOR_PASSES_USED=\$CI_MONITOR_PASSES_USED' \
+  "S2.2g — the resume path prints the cross-fence carry the orchestrator must rebind"
 assert_grep "$REVIEW_PR" 'in_progress|pending' \
   "S2.3 — pending state surfaces from PROBE for MONITOR transition"
+
+echo
+echo "== S2-RUNTIME: bounded MONITOR passes never launder a truncated watch into red (#302) =="
+# Slice the MONITOR loop out of review-pr.md itself and drive it with a scripted
+# per-pass plan ("<elapsed>:<rc> ..."), a fake clock, and a `timeout` stub, so the
+# contract under test is the documented one — not a re-implementation — and the
+# suite never sleeps or touches the network.
+CI_MONITOR_FIXTURE="$(mktemp)"
+awk '
+  /# BEGIN ci-monitor-bounded-loop-v1/ { active=1; next }
+  /# END ci-monitor-bounded-loop-v1/ { exit }
+  active { sub(/^    /, ""); print }
+' "$REVIEW_PR" >"$CI_MONITOR_FIXTURE"
+if [ -s "$CI_MONITOR_FIXTURE" ]; then
+  echo "  PASS  S2-RT.0 — sliced the ci-monitor-bounded-loop-v1 region out of review-pr.md"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S2-RT.0 — could not slice ci-monitor-bounded-loop-v1 out of review-pr.md (markers renamed?)"
+  FAIL=$((FAIL + 1))
+fi
+
+run_ci_monitor_case() {
+  local name="$1" plan="$2" want="$3" want_audit="$4"
+  # Optional cross-fence carry — exactly what the orchestrator rebinds when the
+  # previous fence returned `resume`.
+  local carry_deadline="${5:-}" carry_passes="${6:-}"
+  local log got audit_line
+  log="$(mktemp)"
+  got="$(
+    CI_MONITOR_PLAN="$plan" CI_MONITOR_LOG="$log" \
+    CI_MONITOR_CARRY_DEADLINE="$carry_deadline" CI_MONITOR_CARRY_PASSES="$carry_passes" \
+    bash -c '
+      # `set -e`, not just `set -u`: the command fences run under it, so a
+      # short-circuit like `[ x ] && continue` (rc 1 when the test is false)
+      # would abort the whole MONITOR fence in production. Lock that here.
+      set -eu
+      audit(){ printf "%s\n" "$*" >>"$CI_MONITOR_LOG"; }
+      OUTCOME=unset
+      PR_NUMBER=73
+      FAKE_NOW=0
+      # `date +%s` is the loop'"'"'s only clock — drive it from the plan.
+      date(){ printf "%s\n" "$FAKE_NOW"; }
+      # The minimum-progress floor must ADVANCE the budget, not just idle: stub
+      # `sleep` onto the same fake clock so a zero-elapsed pass still costs wall
+      # time here exactly as it does in production.
+      sleep(){ FAKE_NOW=$((FAKE_NOW + $1)); }
+      # shellcheck disable=SC2206
+      PLAN_ITEMS=($CI_MONITOR_PLAN)
+      PLAN_INDEX=0
+      timeout(){
+        local item="${PLAN_ITEMS[$PLAN_INDEX]:-}"
+        [ -n "$item" ] || { printf "monitor plan exhausted\n" >&2; exit 90; }
+        PLAN_INDEX=$((PLAN_INDEX + 1))
+        FAKE_NOW=$((FAKE_NOW + ${item%%:*}))
+        return "${item##*:}"
+      }
+      [ -z "$CI_MONITOR_CARRY_DEADLINE" ] || CI_MONITOR_DEADLINE_SEC="$CI_MONITOR_CARRY_DEADLINE"
+      [ -z "$CI_MONITOR_CARRY_PASSES" ] || CI_MONITOR_PASSES_USED="$CI_MONITOR_CARRY_PASSES"
+      . "$1"
+      printf "%s %s %s %s\n" "$CI_MONITOR_VERDICT" "$OUTCOME" \
+        "$CI_MONITOR_PASSES_USED" "$CI_MONITOR_ELAPSED_SEC"
+    ' _ "$CI_MONITOR_FIXTURE" 2>/dev/null
+  )"
+  audit_line="$(head -n 1 "$log" 2>/dev/null)"
+  if [ "$got" = "$want" ] && [ "$audit_line" = "$want_audit" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name"
+    echo "        plan:          $plan"
+    echo "        want state:    $want   (verdict outcome passes elapsed)"
+    echo "        got  state:    $got"
+    echo "        want audit:    $want_audit"
+    echo "        got  audit:    $audit_line"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$log"
+}
+
+if [ -s "$CI_MONITOR_FIXTURE" ]; then
+  # THE #302 regression: pass 1 burns its FULL window and comes back with a code
+  # that is neither 0 nor 8 (a harness kill reports its own code, not 124). That
+  # is a truncated watch, not a failed check — it must NOT reach CLASSIFY.
+  run_ci_monitor_case \
+    "S2-RT.1 — full-window non-8 truncation is pending, next pass sees the green" \
+    "240:137 45:0" "green green 2 285" "ci_monitor_green passes=2 elapsed_sec=285"
+  run_ci_monitor_case \
+    "S2-RT.2 — timeout's own 124 is pending, never red" \
+    "240:124 60:0" "green green 2 300" "ci_monitor_green passes=2 elapsed_sec=300"
+  run_ci_monitor_case \
+    "S2-RT.3 — gh's documented 8 (checks pending) continues to the next pass" \
+    "240:8 20:0" "green green 2 260" "ci_monitor_green passes=2 elapsed_sec=260"
+  # Only an EARLY non-zero non-8 is gh reporting a genuinely failed check.
+  run_ci_monitor_case \
+    "S2-RT.4 — early non-zero non-8 is red and proceeds to CLASSIFY" \
+    "12:1" "red unset 1 12" "ci_monitor_red passes=1 elapsed_sec=12 rc=1"
+  # S2-RT.5 (#302, second half) — the fence spends its OWN 480s share and hands
+  # back. It must NOT halt (1200s of budget remain) and must NOT emit a terminal
+  # audit event: nothing terminal happened. This is the state the old
+  # single-fence loop could never express — it just kept watching until the
+  # harness killed the call and took the verdict with it.
+  run_ci_monitor_case \
+    "S2-RT.5 — a spent fence budget resumes (no halt, no terminal audit)" \
+    "240:8 240:8" "resume unset 2 480" ""
+  # Only when the carried TOTAL deadline is reached does it become halted —
+  # budget exhaustion stays its own outcome, never a fabricated red.
+  run_ci_monitor_case \
+    "S2-RT.6 — a resumed fence that exhausts the carried 1200s budget halts" \
+    "240:8" "pending halted 5 1200" \
+    "ci_monitor_timeout subreason=monitor_timeout passes=5 elapsed_sec=1200" \
+    240 4
+  run_ci_monitor_case \
+    "S2-RT.7 — an immediately green first pass short-circuits the loop" \
+    "40:0" "green green 1 40" "ci_monitor_green passes=1 elapsed_sec=40"
+  # S2-RT.8 — the hot-loop guard. Every pass returns in 0s with gh's rc 8; with
+  # no minimum-progress floor the loop would never advance its clock and would
+  # hammer the API forever. The floor makes each pass cost CI_MONITOR_MIN_PASS_SEC,
+  # so exactly 16 passes fill the 480s fence share and the plan is consumed
+  # exactly. Remove the floor and the plan runs dry (rc 90) instead.
+  run_ci_monitor_case \
+    "S2-RT.8 — zero-elapsed passes cannot hot-loop: the min-progress floor advances the budget" \
+    "0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8 0:8" \
+    "resume unset 16 480" ""
+  # S2-RT.9 — the clock-independent backstop: even with the whole budget left,
+  # a carried pass count at CI_MONITOR_PASSES_MAX terminates immediately rather
+  # than invoking the watch again.
+  run_ci_monitor_case \
+    "S2-RT.9 — CI_MONITOR_PASSES_MAX is a hard cap, enforced before any watch" \
+    "" "pending halted 48 0" \
+    "ci_monitor_timeout subreason=monitor_timeout passes=48 elapsed_sec=0" \
+    1200 48
+fi
+rm -f "$CI_MONITOR_FIXTURE"
 
 echo
 echo "== S3: pending → red → ci-code-fixer → green (full happy path) =="
@@ -117,6 +291,20 @@ assert_grep "$REVIEW_PR" 'MUST NOT introduce any additional retry path|no extra 
   "S5.3 — anti-pattern guard against additional retry paths restated"
 assert_grep "$REVIEW_PR" 'distinct.*commit SHA|HEAD SHA changed|distinct fix-and-push' \
   "S5.4 — counter increments only on distinct commit SHA change"
+# S5.5/S5.6 (#302) — the loop-counter prose used to contradict itself and the
+# executable setup: one block said the orchestrator "decrements" the counter
+# while two others said increments, and 6c.7 claimed it "starts at 0" while
+# setup binds `${CI_FIX_LOOP_ITER:-1}`. A reader implementing from either wrong
+# statement gets an off-by-one iteration budget or a counter that runs backwards
+# into negative instance IDs.
+assert_no_grep "$REVIEW_PR" 'decrements the loop counter' \
+  "S5.5 — no prose claims the CI-fix loop counter is decremented"
+assert_no_grep "$REVIEW_PR" 'CI_FIX_LOOP_ITER` starts at `0`' \
+  "S5.6 — 6c.7 no longer claims CI_FIX_LOOP_ITER starts at 0"
+assert_grep "$REVIEW_PR" 'CI_FIX_LOOP_ITER="\$\{CI_FIX_LOOP_ITER:-1\}"' \
+  "S5.7 — executable setup binds the 1-based CI_FIX_LOOP_ITER default"
+assert_grep "$REVIEW_PR" 'CI_FIX_LOOP_ITER` starts at `1`' \
+  "S5.8 — 6c.7 prose matches the executable 1-based default"
 
 echo
 echo "== S6: --no-ci-fix probe-only — no fixer/rebase/halt dispatch =="
@@ -805,7 +993,10 @@ echo "== S15: field-contract structural guard — probe reads state + immutable 
 # silently regress the probe back to the removed status,conclusion fields.
 assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --json name,state,bucket,link,event,workflow' \
   "S15.1 — PROBE call reads state plus immutable run-selection metadata"
-assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --watch --interval 30$' \
+# The only text allowed AFTER `--interval 30` on the invocation line is the
+# bounded-pass rc capture — a `--json` projection (or any other flag) must not
+# creep in, because gh rejects `--watch` together with `--json`.
+assert_grep "$REVIEW_PR" 'gh pr checks "\$PR_NUMBER" --watch --interval 30( \|\| CI_MONITOR_RC=\$\?)?$' \
   "S15.2 — MONITOR --watch call takes NO --json (gh forbids --watch with --json)"
 # S15.2b — gh 2.83.1 rejects `--watch` together with `--json`
 # ("cannot use --watch with --json flag", verified live). Scope this guard to
@@ -1230,7 +1421,7 @@ echo
 echo "== S19-RUNTIME: post-MONITOR refresh failure cannot downgrade observed red =="
 POST_MONITOR_REFRESH_FIXTURE="$(mktemp)"
 awk '
-  /^    On a non-zero, non-8 MONITOR exit,/ { section=1 }
+  /^    On a `red` MONITOR verdict, refresh the check projection before$/ { section=1 }
   section && /^    ```bash$/ { code=1; next }
   code && /^    ```$/ { exit }
   code {
