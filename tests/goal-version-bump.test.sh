@@ -288,16 +288,25 @@ origin_branch_commits() {  # <root> <branch>
   git -C "$1/origin.git" rev-list --count "refs/heads/$2" 2>/dev/null || printf 'ERR'
 }
 origin_file() {            # <root> <branch> <path>
-  # MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL — same idiom as lib/dispatch.sh, and
-  # load-bearing here. Git for Windows rewrites an argument containing `:` when
-  # the segment after the colon looks like a POSIX path, and a LEADING DOT is
-  # exactly the marker its path-LIST heuristic keys on. So on windows-latest
-  # `git show <rev>:.claude-plugin/marketplace.json` resolved to nothing and the
-  # surface assertion read as "the bump did not happen" — while every other
-  # version-surface path starts with a letter and was untouched. That one-surface
-  # asymmetry is the whole tell. No-op off Windows.
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-    git -C "$1/origin.git" show "refs/heads/$2:$3" 2>/dev/null
+  # Resolve the blob by OID — deliberately NOT `git show <rev>:<path>`.
+  #
+  # Git for Windows rewrites an argument containing `:` when the segment after
+  # the colon looks like a POSIX path, and a LEADING DOT is exactly the marker
+  # its path-LIST heuristic keys on. On windows-latest that made
+  # `git show <rev>:.claude-plugin/marketplace.json` resolve to nothing, and the
+  # surface assertion read as "marketplace.json was never bumped". Exactly one of
+  # the seven surfaces failed, because it is the only path that starts with a
+  # dot — that asymmetry is the tell.
+  #
+  # Suppressing the conversion is NOT the fix: `MSYS_NO_PATHCONV=1` /
+  # `MSYS2_ARG_CONV_EXCL='*'` also stop `-C <dir>` being translated, so all seven
+  # reads fail instead of one (observed). `ls-tree` + `cat-file` put no colon in
+  # argv at all, on any platform.
+  local sha
+  sha="$(git -C "$1/origin.git" ls-tree -r "refs/heads/$2" 2>/dev/null \
+           | awk -F'\t' -v p="$3" '$2 == p { split($1, f, " "); print f[3]; exit }')"
+  [ -n "$sha" ] || return 1
+  git -C "$1/origin.git" cat-file blob "$sha" 2>/dev/null
 }
 origin_subject() {         # <root> <branch>
   git -C "$1/origin.git" log -1 --format=%s "refs/heads/$2" 2>/dev/null
