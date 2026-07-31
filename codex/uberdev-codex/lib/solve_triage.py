@@ -348,7 +348,12 @@ def parse_cli(tokens: list[str]) -> dict[str, Any]:
             assign("service_tier", value)
         elif token.startswith("--backend="):
             value = token.split("=", 1)[1]
-            if value not in {"auto", "claude-bg", "wezterm", "background", "codex"}: fail("routing_cli_invalid")
+            # Keep in lockstep with _UBERDEV_DISPATCH_BACKEND_ENUM in lib/dispatch.sh.
+            # `workflow` (RFC 0015, the default `auto` resolves to) was added there and
+            # NOT here, so an explicit --backend=workflow died at this gate — which is
+            # the very first thing lib/solve-launcher.sh runs, and the exact flag
+            # /goal's driver passes, so every /goal cycle failed at dispatch.
+            if value not in {"auto", "workflow", "claude-bg", "wezterm", "background", "codex"}: fail("routing_cli_invalid")
             assign("backend", value)
         elif token.startswith("--terminal="):
             assign("terminal", token.split("=", 1)[1])
