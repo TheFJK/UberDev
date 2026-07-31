@@ -25,8 +25,8 @@
 # Must be byte-identical to each canonical's allowed-tools frontmatter
 # (enforced by tests/aliases.test.sh:A6).
 ALIASES='issue|issue|["Bash", "Glob", "Grep", "Read", "Task"]
-solve|solve|["Bash", "Read", "Task"]
-turbo|turbo|["Bash", "Read", "Task"]
+solve|solve|["Bash", "Read", "Task", "Workflow"]
+turbo|turbo|["Bash", "Read", "Task", "Workflow"]
 simplify|simplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]
 review-pr|review-pr|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
@@ -35,7 +35,7 @@ testers|testers|["Bash", "Read", "Write", "Task", "Workflow"]
 ubergoal|goal|["Bash", "Read", "Task"]
 uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write"]
 ubersimplify|ubersimplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Workflow", "Write"]
-uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write", "WebSearch", "WebFetch"]
+uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write", "WebSearch", "WebFetch"]
 ubercluster|cluster|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Write"]
 '
 

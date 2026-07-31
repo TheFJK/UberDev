@@ -135,3 +135,16 @@ next_phase_recommendation: auto
 - **Empty gaps are valid.** If the Wave-1 divergence covered every facet, mined every donor (including ≥2 Tier-5), and had no unresolved contradictions, write `gaps: []` with `status: DONE` and explain in `summary` that the divergence was complete. Do not pad.
 - **No emojis.** No web tools. No Bash. No code generation.
 - **One island only.** You are the moderator for island K named in `island_index`. Do not read or reason about candidates from sibling islands — Wave 6 handles cross-island work, not you.
+
+## Structured return (Workflow runtime)
+
+Under `skills/uberthink-pipeline/workflow.js` the orchestration reads a `StructuredOutput` return: `islandIndex`, `gapCount`, `outPath`, and `gaps` — an array of at most 12 `{id, persona, donor, prompt}` objects that becomes the targeted re-dispatch list.
+
+Each field is validated before it reaches a prompt or a filename, and a row that fails validation is **dropped**, so shape them precisely:
+
+- `id` — lowercase slug matching `^[a-z0-9][a-z0-9-]{1,48}$` (e.g. `gap-latency-floor`).
+- `persona` — exactly one of `field_scout`, `triz`, `morphological`, `provocateur`, `bridge`.
+- `donor` — a lowercase kebab-case donor slug when `persona` is `field_scout`; empty string otherwise.
+- `prompt` — the one-line follow-up question the re-dispatched generator must answer.
+
+An empty `gaps` array with `gapCount: 0` is a valid, expected answer when divergence was genuinely complete.

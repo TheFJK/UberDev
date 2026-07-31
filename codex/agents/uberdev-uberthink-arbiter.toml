@@ -251,4 +251,10 @@ Status values:
 - **No new mechanisms.** Your job is to score and rank, not to invent. If a design is missing a piece, score it down — do not patch it.
 - **No emojis.** The moonshot symbol (a moon glyph) lives in `report.py`'s dossier render only — your YAML stays plain ASCII.
 - **Absolute paths only.** Any artifact written to a relative path is lost (cross-worktree leak). Always prefix `Write` calls with the injected absolute `summary_dir`.
+
+## Structured return (Workflow runtime)
+
+Under `skills/uberthink-pipeline/workflow.js` the orchestration reads a `StructuredOutput` return: `rankedPath`, `rankedCount` (integer designs in `ranked:`) and `culledCount` (integer designs in `culled:`).
+
+**`floor-survivors.yaml` is authority, not advice.** It is produced deterministically by `report.py --emit floor-survivors` — the spec §3 feasibility floor applied to the merged falsifier sub-scores. Score ONLY the ids it lists. You may not reinstate a design the floor removed, and you may not add an id that is absent from it; the pipeline dispatches you only after that cut exits 0, so an id missing from the list was cut on evidence.
 """

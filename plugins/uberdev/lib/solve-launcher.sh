@@ -262,14 +262,14 @@ else
   fi
   if command -v uberdev_read_enum >/dev/null 2>&1; then
     DISPATCH_BACKEND="$(uberdev_read_enum dispatch_backend UBERDEV_DISPATCH_BACKEND \
-      'auto|claude-bg|wezterm|background|codex' 'auto')"
+      'auto|workflow|claude-bg|wezterm|background|codex' 'auto')"
   else
     DISPATCH_BACKEND=auto
   fi
 fi
 case "$DISPATCH_BACKEND" in
-  auto|claude-bg|wezterm|background|codex) ;;
-  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,claude-bg,wezterm,background,codex}" >&2; exit 1 ;;
+  auto|workflow|claude-bg|wezterm|background|codex) ;;
+  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,workflow,claude-bg,wezterm,background,codex}" >&2; exit 1 ;;
 esac
 export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
@@ -1030,6 +1030,107 @@ fi
 esac
 _pidx=$((_pidx + 1))
 done
+
+# Step 5w — Workflow-native fanout (RFC 0015; the `workflow` backend, which is
+# what `auto` resolves to on every Claude host). There is NOTHING to dispatch
+# from this process: the per-issue solver fleet runs inside the calling
+# session's Workflow runtime, so the launcher's job ends at "write the
+# manifest, emit the args envelope". commands/solve.md + commands/turbo.md
+# mandate the Workflow call on the JSON between the markers (DR-2: relayed
+# verbatim, never LLM-composed).
+#
+# Everything before this point is unchanged and still authoritative: the
+# validate-all-first pass, the triage decisions, the prepared root request /
+# context files, and the Step 4.5 claim protocol have all already run. Only
+# the transport differs.
+if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
+  # The prompt + context files must outlive this process — the fleet agents
+  # read them after the launcher has exited.
+  UBERDEV_KEEP_TMPDIR=1
+
+  SOLVE_FLEET_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+  SOLVE_FLEET_WORKFLOW_JS="$SOLVE_FLEET_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
+  if [ ! -f "$SOLVE_FLEET_WORKFLOW_JS" ]; then
+    echo "error: $SOLVE_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin, or re-run with an explicit --backend=<name> to use a detached transport" >&2
+    exit 2
+  fi
+  # uberdev_emit_workflow_args lives in config-read.sh. It is sourced earlier on
+  # most paths (the enum readers), but only conditionally — source it here so
+  # the emission cannot depend on which flag branches happened to run.
+  if ! command -v uberdev_emit_workflow_args >/dev/null 2>&1; then
+    if [ -r "$SOLVE_FLEET_PLUGIN_ROOT/lib/config-read.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$SOLVE_FLEET_PLUGIN_ROOT/lib/config-read.sh"
+    fi
+  fi
+  if ! command -v uberdev_emit_workflow_args >/dev/null 2>&1; then
+    echo "error: uberdev_emit_workflow_args unavailable (lib/config-read.sh not loadable from $SOLVE_FLEET_PLUGIN_ROOT); cannot emit the solve-fleet args envelope" >&2
+    exit 2
+  fi
+  if ! REPO_ROOT_ABS="$(git rev-parse --show-toplevel 2>/dev/null)" || [ -z "$REPO_ROOT_ABS" ]; then
+    echo "error: unable to resolve the repository root for the solve-fleet args envelope" >&2
+    exit 2
+  fi
+
+  # Per-issue manifest (the scan-fleet manifestPathAbs convention): one JSON
+  # file the fleet's `intake` relay reads, instead of stuffing per-issue
+  # records into envelope scalars. Titles are NOT embedded anywhere in a
+  # prompt — the fleet agents re-read them from `gh` inside their own
+  # untrusted-input handling.
+  SOLVE_FLEET_MANIFEST="$UBERDEV_TMPDIR/solve-fleet-manifest.json"
+  {
+    _mfirst=1
+    printf '{"schema_version":1,"auto_mode":%s,"issues":[' \
+      "$([[ "$AUTO_MODE" == "1" ]] && echo true || echo false)"
+    _midx=0
+    for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
+      [ "$_mfirst" = "1" ] || printf ','
+      _mfirst=0
+      python3 -I -c '
+import json,sys
+issue,tier,prompt_file,root_request=sys.argv[1:5]
+rec={"issue":int(issue),"tier":tier,"prompt_file":prompt_file}
+try:
+    r=json.loads(root_request) if root_request else {}
+except ValueError:
+    r={}
+for key in ("context_file","context_sha256","run_id"):
+    if r.get(key):
+        rec[key]=r[key]
+print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
+' "$ISSUE_NUM" "${TIERS[$_midx]}" "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" "${ROOT_REQUESTS[$_midx]:-}" \
+        || { echo "error: failed to build the solve-fleet manifest record for #$ISSUE_NUM" >&2; exit 2; }
+      _midx=$((_midx + 1))
+    done
+    printf ']}\n'
+  } > "$SOLVE_FLEET_MANIFEST" || { echo "error: failed to write $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
+  chmod 600 "$SOLVE_FLEET_MANIFEST" 2>/dev/null || true
+
+  _uberdev_audit_emit solve_workflow_fleet_prepared \
+    "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"concurrency\":$MAX_PARALLEL_BG_AGENTS}"
+
+  SOLVE_FLEET_ISSUES="$(printf '%s,' "${ISSUE_NUMS[@]}")"; SOLVE_FLEET_ISSUES="${SOLVE_FLEET_ISSUES%,}"
+  uberdev_emit_workflow_args solve-fleet \
+    repo_root="$REPO_ROOT_ABS" \
+    pluginRootAbs="${UBERDEV_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}" \
+    repoRootAbs="$REPO_ROOT_ABS" \
+    manifestPathAbs="$SOLVE_FLEET_MANIFEST" \
+    runDirAbs="$UBERDEV_TMPDIR" \
+    issues="$SOLVE_FLEET_ISSUES" \
+    issueCount="${#ISSUE_NUMS[@]}" \
+    concurrency="$MAX_PARALLEL_BG_AGENTS" \
+    autoMode="$([[ "$AUTO_MODE" == "1" ]] && echo true || echo false)" \
+    repoSlug="$REPO_SLUG" \
+    branchPrefix="worktree-solve-issue-" \
+    solveTimeoutS="${SOLVE_TIMEOUT:-3600}" \
+    maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-250}"
+
+  echo "repo: $REPO_SLUG" >&2
+  echo "prepared ${#ISSUE_NUMS[@]} issue(s) for the Workflow-native solver fleet (backend=workflow)" >&2
+  echo "Relay the JSON between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END verbatim into Workflow({scriptPath: \"$SOLVE_FLEET_WORKFLOW_JS\"}, <args>)." >&2
+  echo "Progress is visible with /workflows — no separate agent surface to poll." >&2
+  exit 0
+fi
 
 # Step 5b' — dispatch via the backend resolved by uberdev_dispatch_preflight.
 # SAFE prompt passthrough only (--prompt-file / stdin / positional argv via
