@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Tests for issue #16 — top-level aliases for the thirteen most-used uberdev
 # commands (/issue, /solve, /turbo, /simplify, /review-pr, /merge, /dev,
-# /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink).
+# /testers, /ubergoal, /uberscan, /ubersimplify, /uberthink, /ubercluster).
+# The count and the list are both derived from the ALIASES table in
+# lib/aliases-sync.sh (the SSOT) — if you add row 14 there, this comment,
+# section A1's expectation and the five alias surfaces move together.
 #
 # Plugin commands are addressed as `/uberdev:<command>` because Claude Code's
 # plugin manifest enforces the `<plugin-name>:` prefix on every plugin

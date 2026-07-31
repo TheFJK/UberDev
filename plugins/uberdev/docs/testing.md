@@ -5,7 +5,7 @@ UberDev's product is **markdown prompt files, shell libraries, a little Python, 
 ## The harness at a glance
 
 - **Where:** every test lives in `tests/` and is named `<name>.test.sh`.
-- **Runner:** there is no separate runner binary — each file is self-contained and run directly with `bash tests/<name>.test.sh` (one fixture, `solve-pipeline-zsh.test.sh`, runs under `zsh` — see below).
+- **Runner:** there is no separate runner binary — each file is self-contained and run directly with `bash tests/<name>.test.sh`. The `tests/*-zsh.test.sh` fixtures run under `zsh` instead — see below.
 - **What CI runs:** `.github/workflows/test.yml` is the **single source of truth** for the active test set. Do not maintain a second hand-curated list anywhere — read `test.yml`.
 - **Shared assertion library:** `tests/_lib_assert_structural.sh` provides the section-scoped `assert_in_section` / structural helpers that many tests `source`.
 - **Workflow-script harness:** `tests/_workflow_harness.js` is a node-run helper (not a test file itself) that `tests/workflow-scripts.test.sh` drives for the T1–T4 workflow-script tiers below.
@@ -16,14 +16,13 @@ The canonical list of tests is whatever `.github/workflows/test.yml` runs. To ru
 
 ```bash
 # Run every tests/*.test.sh on disk (mirrors what CI gates on; needs zsh for
-# the one zsh-runtime fixture — see below).
+# the zsh-runtime fixtures — see below).
 for t in tests/*.test.sh; do
   echo "== $t =="
-  if [ "$t" = "tests/solve-pipeline-zsh.test.sh" ]; then
-    zsh "$t" || exit 1          # zsh-runtime fixture
-  else
-    bash "$t" || exit 1
-  fi
+  case "$t" in
+    tests/*-zsh.test.sh) zsh "$t" || exit 1 ;;   # zsh-runtime fixtures
+    *) bash "$t" || exit 1 ;;
+  esac
 done
 ```
 
@@ -37,13 +36,13 @@ The shape-checks read the files in your checkout directly, so they need no plugi
 
 Each test prints a `PASS` / `FAIL` line per assertion and a `== Summary ==` block, and **exits non-zero if any assertion failed** — so `&&`-chaining them (as `test.yml` does) stops at the first red file.
 
-### The zsh-runtime fixture
+### The zsh-runtime fixtures
 
-`tests/solve-pipeline-zsh.test.sh` is run with **`zsh`**, not `bash`. SKILL.md `bash` fences execute under Claude Code's Bash tool, which is `/bin/zsh` at runtime, so this fixture locks behaviour that only manifests under zsh's word-splitting and array semantics (e.g. the v0.22.2 regression where a scalar `EFFORT_FLAG="--effort max"` broke under `SH_WORD_SPLIT=off`). `ubuntu-latest` does not ship `zsh` by default, so the CI job installs it before running the suite. Run it locally with `zsh tests/solve-pipeline-zsh.test.sh`.
+Every `tests/*-zsh.test.sh` fixture is run with **`zsh`**, not `bash` — `tests/solve-pipeline-zsh.test.sh` is the original. SKILL.md `bash` fences execute under Claude Code's Bash tool, which is `/bin/zsh` at runtime, so these fixtures lock behaviour that only manifests under zsh's word-splitting and array semantics (e.g. the v0.22.2 regression where a scalar `EFFORT_FLAG="--effort max"` broke under `SH_WORD_SPLIT=off`). The naming convention is load-bearing, not decorative: `tests/docs-accuracy.test.sh` asserts that every fixture `test.yml` invokes with `zsh` matches the `*-zsh.test.sh` glob, so the one-line local loop above stays truthful as fixtures are added. `ubuntu-latest` does not ship `zsh` by default, so the CI job installs it before running the suite. Run one locally with `zsh tests/solve-pipeline-zsh.test.sh`.
 
 ### The workflow-script tier (T1–T4)
 
-RFC 0012 migrates the heavy pipelines onto on-disk Workflow orchestration scripts (`plugins/uberdev/skills/<name>/workflow.js`, children under `skills/<name>/workflows/`). Those scripts get their own four-tier check, driven by `tests/workflow-scripts.test.sh` (a normal `.test.sh`, wired into **both** CI jobs — node is preinstalled on the ubuntu and windows images) with `tests/_workflow_harness.js` as its engine:
+RFC 0012 migrates the heavy pipelines onto on-disk Workflow orchestration scripts (`plugins/uberdev/skills/<name>/workflow.js`, children under `skills/<name>/workflows/`). Those scripts get their own four-tier check, driven by `tests/workflow-scripts.test.sh` (a normal `.test.sh`, wired into **both shape-check jobs** — node is preinstalled on the ubuntu and windows images) with `tests/_workflow_harness.js` as its engine:
 
 | Tier | What it locks | Where |
 | --- | --- | --- |
@@ -65,18 +64,21 @@ These are **structural / contract** checks, not end-to-end behavioural tests of 
 
 They deliberately do **not** launch real `claude` sessions, parse session transcripts, or measure token usage. UberDev ships no headless-integration runner and no token-analysis script — the suite is the `tests/*.test.sh` shape-checks (plus the helper files they drive: `tests/_lib_assert_structural.sh`, `tests/_workflow_harness.js`) and nothing else.
 
-## The two-job CI matrix
+## The CI job layout
 
-`.github/workflows/test.yml` runs on every push and pull request, with **two jobs**:
+`.github/workflows/test.yml` runs on every push to `main` and every pull request. It declares these jobs — the file is the SSOT, and `tests/docs-accuracy.test.sh` asserts that each job declared there is named here, so this list cannot silently fall behind:
 
 | Job | Runner | Shell | Scope |
 | --- | --- | --- | --- |
-| `shape-checks` | `ubuntu-latest` | `bash` (+ `zsh` installed for the one zsh fixture) | The **full** suite — every `tests/*.test.sh`. |
+| `shape-checks` | `ubuntu-latest` | `bash` (+ `zsh` installed for the `*-zsh.test.sh` fixtures) | The **full** suite — every `tests/*.test.sh`. |
 | `shape-checks-windows` | `windows-latest` | Git Bash (`shell: bash`) | The full suite **minus** the Unix-only runtime fixtures Git Bash can't run reliably. |
+| `supervision-smoke-macos` | `macos-latest` | `bash` (+ GNU `coreutils` for `timeout`) | A focused dispatch-supervision subset — the only job that exercises a real BSD/macOS userland. |
 
-The Windows job exists to prove the shape-check harness is Git-Bash-portable (RFC 0004 §3.8). The Unix-only fixtures it skips (zsh, and the `python3 -c` + `mktemp -d` path-translation cases) are enumerated in the canonical **`ci-wiring windows-skip-list`** marker block inside `test.yml`. `tests/ci-wiring.test.sh` enforces that `(ubuntu − windows)` equals exactly that list — so the two jobs cannot drift.
+The `shape-checks` and `shape-checks-windows` jobs are a **matched pair**: `tests/ci-wiring.test.sh` enforces that `(ubuntu − windows)` equals exactly the canonical **`ci-wiring windows-skip-list`** marker block inside `test.yml`, so they cannot drift. The Windows job exists to prove the shape-check harness is Git-Bash-portable (RFC 0004 §3.8); the fixtures it skips are the zsh ones plus the `python3 -c` + `mktemp -d` path-translation cases. The macOS job is **not** part of that pair — it runs a short hand-picked list, so wiring a test there does not wire it into the suite.
 
-> **When you add or remove a test file:** wire it into **both** jobs in `test.yml` by hand (and add it to the Windows skip-list block if it is a Unix-only runtime fixture). `ci-wiring.test.sh` runs first in both jobs and fails fast on any wiring drift.
+A job may execute its list as a single sequential `run:` step or fan it out across cost-balanced shards (`strategy.matrix.shard`). **That is an execution detail with no bearing on wiring:** the contract is the union of every `run:` block belonging to a job, so a test wired into any shard of `shape-checks` counts as wired into `shape-checks`. Do not infer the number of CI *runs* from the number of jobs above.
+
+> **When you add or remove a test file:** wire it into **both shape-check jobs** in `test.yml` by hand (and add it to the Windows skip-list block instead if it is a Unix-only runtime fixture). `ci-wiring.test.sh` runs first in both jobs and fails fast on any wiring drift.
 
 ## Writing a new test
 
@@ -118,11 +120,11 @@ Conventions worth honouring:
 1. **Fail loud on missing inputs.** Guard required files with an `exit 2` FATAL — a count-based test that finds zero assertions because the file moved must not report PASS.
 2. **Anchor on the real token.** If you assert on a literal string the source ships, and you later rename that token, update the test in the same change. Relax start-anchored patterns (`^foo`) to tolerate leading whitespace (`^[[:space:]]*foo`) when the matched line may be indented.
 3. **Mind the runtime shell.** SKILL.md `bash` fences run under **zsh** in production. If you are locking a runtime behaviour of a fence, prefer a `zsh`-run fixture (and add it to the zsh path in `test.yml`), because bashisms (`BASH_REMATCH`, `${!var}` indirection, `compgen`, `type -t`) misfire under zsh.
-4. **Wire it into CI.** Add the new file to **both** jobs in `.github/workflows/test.yml`; `ci-wiring.test.sh` will otherwise fail.
+4. **Wire it into CI.** Add the new file to **both shape-check jobs** in `.github/workflows/test.yml` (or to the ubuntu job plus the windows skip-list block, if it is Unix-only); `ci-wiring.test.sh` will otherwise fail.
 
 ## See also
 
-- `.github/workflows/test.yml` — the authoritative test set and the two-job matrix.
+- `.github/workflows/test.yml` — the authoritative test set and the CI job layout.
 - `tests/ci-wiring.test.sh` — the wiring invariant that keeps the workflow and the on-disk test set in sync.
 - `tests/_lib_assert_structural.sh` — shared section-scoped assertion helpers.
 - `tests/_workflow_harness.js` — the T1–T4 workflow-script harness (self-tests: `node tests/_workflow_harness.js self-test`).
