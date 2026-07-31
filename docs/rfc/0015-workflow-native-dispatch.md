@@ -300,9 +300,82 @@ colliding anywhere earlier. So `_uberdev_goal_ensure_version_bump <pr>`
   ratchet, so the step is **skipped** (audited, never silent) instead of blocking
   `/goal` on every other repository.
 
+- **Kind from the PR's COMMITS as well as its title.** A `/goal` PR title is
+  written by the solver agent, not a release engineer, so a `fix(...)` title
+  over a `feat:` commit would ship a feature as a patch. `gh pr view --json
+  commits` returns the messages in one round-trip; commit subjects feed the
+  `feat:`/`!` probes and commit bodies feed the `BREAKING CHANGE:` probe
+  alongside the PR body. Highest wins.
+
 The new audit event is `goal_version_bumped` with
 `action ∈ {bumped, already_bumped, skipped}`; the failure path deliberately
 reuses `goal_merge_deferred`, because the merge really was deferred.
+
+#### 5.6.1 Landing a bump on an already-reviewed head
+
+The bump lands *after* `/review-pr` anchored its trust trail. That is inherent
+to putting the bump at the serialized lane, and it is the right trade: the
+alternative — bump before the review — buys a correct trailer for free and
+reopens the collision class the solver-side ban exists to close, because nothing
+before step 2c is serialized. Serializing the bump on its own would be most of
+the merge-lane machinery rebuilt. So the lane pays, in two places.
+
+**(a) The trust trail, paid in `/merge`.** `/merge` Phase 1.4 PATH_2 (b) reads
+the `Reviewed-by: uberdev/review-pr@<sha>` trailer off the most-recent commit,
+and (c) delegates the trailer SHA to `trust-trail-evaluator`, which returns
+`STALE` on a non-empty cumulative diff. A release commit on top therefore fails
+(b) with `trust_trail_trailer_missing` and would fail (c) with
+`trust_trail_stale_sha` — the latter explicitly excluded from the Step-1.4.5
+auto-review recovery — while PATH_1 is unreachable because `/review-pr` never
+calls `gh pr review --approve`. PATH_2 gains sub-condition **(a.5)**: resolve a
+`TRUST_HEAD` via `skills/merge-pipeline/lib/release-anchor.sh` and evaluate (b)
+and (c) against it. The helper returns `tolerated` — trust head = the release
+commit's parent — only under a structural proof that the commit changed no
+reviewed code:
+
+1. exactly one parent (never a merge),
+2. subject exactly `chore(release): vX.Y.Z`, anchored at both ends,
+3. the parent is not itself a release commit (tolerance depth is exactly 1, so
+   code cannot hide two release subjects deep),
+4. a non-empty diff confined to the seven version surfaces,
+5. the canonical manifest version strictly advances, to the subject's version,
+6. outside `CHANGELOG.md`, the removed and added line **sequences** are
+   byte-identical once SemVer tokens (including the backslash-escaped forms the
+   version-lock tests carry inside regexes) are normalised away,
+7. `CHANGELOG.md` is bounded, insertion-only, release-section shaped.
+
+Conditions 6 and 7 are why the predicate is not "subject + path allow-list":
+two of the seven surfaces (`tests/goal.test.sh`, `tests/solve-claim.test.sh`)
+are executable test files, so a path allow-list alone would be a channel for
+smuggling arbitrary test edits past the trust gate. The comparison is
+order-sensitive for the same reason — a multiset comparison would tolerate
+*reordering* lines of an executable file while every individual line stayed
+byte-identical. Any unproven condition, any helper error, any non-zero exit
+resolves `TRUST_HEAD` back to `headRefOid`, i.e. the pre-#364 gate. The
+`trust-trail-evaluator` agent is not modified and still demands an empty
+cumulative diff; `TRUST_ANCHOR_ENUM` and `GATE_FAIL_REASON_ENUM` are unchanged
+(a tolerated anchor is recorded as a D15 field-level extension,
+`gate_pass.data.release_anchor`).
+
+**(b) The restarted checks, paid in `/goal`.** The push re-triggers the PR's
+workflows, and `/merge` Step 1.4 classifies a non-empty rollup carrying any
+pending entry as `gate_fail reason=ci_red`; its null-rollup settle probe is
+bounded at `CI_ROLLUP_SETTLE_RETRIES` × `CI_ROLLUP_SETTLE_INTERVAL_SEC` = 30 s
+against a CI critical path of minutes. Dispatching straight after the push is
+therefore a deterministic gate-fail that burns one of the three
+`_UBERDEV_GOAL_MAX_MERGE_ATTEMPTS`; after three, `uberdev_goal_should_automerge`
+returns 1, the `elif` chain takes no arm, the PR sits in `green` forever,
+`uberdev_goal_batch_all_terminal` never clears, and the run dies on the 4h
+`stuck_loop` breaker. `_uberdev_goal_ensure_version_bump` therefore reports a
+**three-way** status — `0` already bumped / no ratchet, `1` could not guarantee,
+`2` pushed just now — and step 2c defers on `2` and, independently, on
+`_uberdev_goal_pr_checks_pending <pr>`. Neither deferral burns a merge attempt
+(the counter lives inside `_uberdev_goal_dispatch_merge`), both emit
+`goal_merge_deferred` (`reason=ci_restarted_by_version_bump` / `ci_pending`),
+and the CI-settle gate is withholding-only: a `gh` failure or an
+unconfigured-checks repo returns rc 1 and falls through to `/merge`, which owns
+the hard CI gate. The 4h `stuck_loop` wall clock remains the backstop for a
+check that never completes.
 
 ### 5.4 Trust verdicts are never LLM-reported
 

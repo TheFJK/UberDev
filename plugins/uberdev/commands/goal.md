@@ -63,6 +63,17 @@ with `reason=version_bump_failed` names the stage that stopped it. A PR that alr
 carries a strictly-greater version is left alone (the collision chain renumbers it), and
 a repo that carries no version surfaces is skipped rather than blocked.
 
+Pushing that commit onto an already-reviewed head is paid for on both sides. `/merge`
+Phase 1.4 PATH_2 resolves its trust head through
+`skills/merge-pipeline/lib/release-anchor.sh` first, so a `chore(release):` commit that is
+**provably inert** — single parent, exact subject, version-surfaces-only diff whose lines
+are byte-identical once SemVer tokens are normalised away — does not invalidate the
+`/review-pr` trail beneath it; anything unproven still gates exactly as before. And
+because the push restarts the PR's checks, `/goal` defers the `/merge` dispatch for a pass
+(`goal_merge_deferred reason=ci_restarted_by_version_bump`) and keeps deferring while any
+check is still running (`reason=ci_pending`) rather than burning merge attempts on a
+pending rollup.
+
 ## Scoped relaxations (RFC 0005 §2.3)
 
 - `feedback_merge_independent.md`: `/merge` auto-chain is allowed **inside `/goal` only** (enforced by `UBERDEV_GOAL_ID` env-var provenance check — outside `/goal` the existing manual-invocation rule still binds).

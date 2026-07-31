@@ -2871,6 +2871,24 @@ _uberdev_goal_batch_green_prs_ordered() {
 # FAIL CLOSED. Every helper below returns non-zero rather than guessing, and
 # the watch lane must NOT dispatch /merge for a PR whose bump could not be
 # guaranteed. Merging unbumped IS the bug; merging is never the fallback.
+#
+# THE TWO DOWNSTREAM CONSEQUENCES OF PUSHING HERE, and where each is answered.
+#   1. The release commit lands ON TOP of the `Reviewed-by:` anchor commit
+#      `/review-pr` wrote, so /merge Phase 1.4 PATH_2 would read the trailer off
+#      the wrong commit (gate_fail trust_trail_trailer_missing) and, even with
+#      the trailer, would see a non-empty cumulative diff (verdict STALE ->
+#      trust_trail_stale_sha, which is explicitly excluded from the Step-1.4.5
+#      auto-review recovery). ANSWERED IN /merge, not here: PATH_2 sub-condition
+#      (a.5) resolves the trust head through
+#      `skills/merge-pipeline/lib/release-anchor.sh`, which tolerates the top
+#      commit ONLY when it is provably inert with respect to reviewed code. The
+#      bump therefore stays at the serialized lane — the only place consecutive
+#      versions fall out naturally — instead of being moved before the review,
+#      which would reopen the collision class this whole section exists to close.
+#   2. The push RESTARTS the PR's checks. /merge Step 1.4 reads any pending
+#      rollup entry as gate_fail reason=ci_red. ANSWERED HERE: a successful bump
+#      returns rc 2 ("pushed just now — defer"), and the watch lane additionally
+#      gates every dispatch on `_uberdev_goal_pr_checks_pending`.
 
 # The canonical version SSOT (`bump-version.sh` surface 1). Its presence is
 # also the probe for "does this repo have a version ratchet at all" — /goal is a
@@ -2956,24 +2974,77 @@ _uberdev_goal_next_version() {
   esac
 }
 
-# _uberdev_goal_bump_kind TITLE BODY -> major|minor|patch
+# _uberdev_goal_fetch_pr_commits PR
+# The PR's commit messages in ONE gh round-trip, as tagged lines so the two
+# zones stay separable in a flat blob: `S|<subject>` per commit, `B|<line>` for
+# every line of every commit body. Split with `sed -n 's/^S|//p'` — `|` is
+# literal in a BRE, and unlike a tab it survives BSD sed (macOS) as well as GNU.
+_uberdev_goal_fetch_pr_commits() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  gh pr view "$pr" --json commits --jq '
+    .commits[]
+    | ("S|" + (.messageHeadline // "")),
+      ((.messageBody // "") | split("\n")[] | "B|" + .)' 2>/dev/null
+}
+
+# _uberdev_goal_bump_kind TITLE BODY [COMMIT_SUBJECTS] [COMMIT_BODIES]
+#   -> major|minor|patch
 # SemVer from the PR's conventional-commit type, per CLAUDE.md's release rule:
 # `feat:` -> minor, everything else (`fix:`/`test:`/`docs:`/`refactor:`/`chore:`)
-# -> patch, a `!` marker or a `BREAKING CHANGE:` footer -> major. Herestrings
-# (never `echo … | grep -q`) — a pipe into `grep -q` can EPIPE-race under
-# pipefail on Linux CI.
+# -> patch, a `!` marker or a `BREAKING CHANGE:` footer -> major.
+#
+# The COMMITS are part of the predicate, not decoration. In a /goal run the PR
+# title is written by the solver agent, not by a release engineer: a PR titled
+# `fix(x): …` that carries a `feat:` commit is a FEATURE, and deriving the step
+# from the title alone silently under-releases it as a patch. Title/body still
+# participate — a maintainer-authored `BREAKING CHANGE:` footer in the PR body
+# is authoritative even when no single commit declares it. Highest wins:
+# major > minor > patch.
+#
+# Herestrings (never `echo … | grep -q`) — a pipe into `grep -q` can EPIPE-race
+# under pipefail on Linux CI.
 _uberdev_goal_bump_kind() {
-  local title="$1" body="$2"
+  local title="$1" body="$2" subjects="${3:-}" bodies="${4:-}"
   if grep -Eq '^[A-Za-z]+(\([^)]*\))?!:' <<<"$title" \
-     || grep -Eq '^[[:space:]]*BREAKING[ -]CHANGE[[:space:]]*:' <<<"$body"; then
+     || grep -Eq '^[A-Za-z]+(\([^)]*\))?!:' <<<"$subjects" \
+     || grep -Eq '^[[:space:]]*BREAKING[ -]CHANGE[[:space:]]*:' <<<"$body" \
+     || grep -Eq '^[[:space:]]*BREAKING[ -]CHANGE[[:space:]]*:' <<<"$bodies"; then
     printf 'major'
     return 0
   fi
-  if grep -Eq '^feat(\([^)]*\))?:' <<<"$title"; then
+  if grep -Eq '^feat(\([^)]*\))?:' <<<"$title" \
+     || grep -Eq '^feat(\([^)]*\))?:' <<<"$subjects"; then
     printf 'minor'
     return 0
   fi
   printf 'patch'
+}
+
+# _uberdev_goal_pr_checks_pending PR
+# rc 0 — at least one statusCheckRollup entry is queued / in-progress / pending.
+#        The caller MUST NOT dispatch /merge: Step 1.4 of merge-pipeline
+#        classifies a non-empty rollup carrying ANY pending entry as
+#        gate_fail reason=ci_red, and its null-rollup settle probe is bounded at
+#        3 x 10s while this repo's CI critical path is minutes — so dispatching
+#        into a pending rollup is a DETERMINISTIC gate-fail that burns one of
+#        the three per-PR merge attempts for nothing (#364).
+# rc 1 — no pending entry, OR the probe was unusable (gh failure, malformed
+#        count, no checks configured). Fail SOFT on purpose: /merge Step 1.4
+#        owns the hard CI gate and re-probes with its own settle logic, so a
+#        transient gh blip must never wedge the landing lane. This helper only
+#        ever WITHHOLDS a dispatch; it can never authorise one.
+_uberdev_goal_pr_checks_pending() {
+  local pr="$1" pending
+  _uberdev_goal_validate_int "$pr" || return 1
+  pending="$(gh pr view "$pr" --json statusCheckRollup --jq '
+    [ .statusCheckRollup[]?
+      | ((.status // .state // "") | ascii_upcase)
+      | select(. == "QUEUED" or . == "IN_PROGRESS" or . == "PENDING"
+               or . == "WAITING" or . == "REQUESTED" or . == "EXPECTED") ]
+    | length' 2>/dev/null)" || pending=""
+  case "$pending" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pending" -gt 0 ]
 }
 
 # _uberdev_goal_sanitize_release_text TEXT
@@ -3087,8 +3158,16 @@ _uberdev_goal_apply_version_bump() {
 
 # _uberdev_goal_ensure_version_bump PR
 # Guarantee that PR carries a version bump before /goal lands it.
-#   rc 0 — the PR already bumped, this call bumped it, or the repo has no
-#          version ratchet to enforce.
+#   rc 0 — the PR ALREADY carried a bump, or the repo has no version ratchet to
+#          enforce. Nothing was pushed, so the PR's checks are undisturbed and
+#          the caller may proceed to its CI gate.
+#   rc 2 — this call created the bump and PUSHED it. The push RESTARTED the
+#          PR's checks, so the caller MUST defer the /merge dispatch by at
+#          least one pass (#364): merge-pipeline Step 1.4 reads any pending
+#          rollup entry as gate_fail reason=ci_red, which would burn one of the
+#          three merge attempts and, three passes later, strand the PR in
+#          `green` until the 4h stuck_loop breaker. The next pass takes the
+#          already_bumped arm (rc 0) and gates on the settled rollup instead.
 #   rc 1 — could not guarantee a bump. The caller MUST NOT dispatch /merge.
 _uberdev_goal_ensure_version_bump() {
   local pr="$1"
@@ -3175,9 +3254,15 @@ _uberdev_goal_ensure_version_bump() {
     return 0
   fi
 
-  local body kind next
+  local body kind next tagged c_subjects c_bodies
   body="$(_uberdev_goal_fetch_pr_body "$pr")"
-  kind="$(_uberdev_goal_bump_kind "$title" "$body")"
+  # The SemVer step is derived from the PR's COMMITS as well as its title/body:
+  # a /goal PR title is authored by the solver agent, so a `fix(...)` title over
+  # a `feat:` commit would otherwise ship a feature as a patch release.
+  tagged="$(_uberdev_goal_fetch_pr_commits "$pr")"
+  c_subjects="$(printf '%s\n' "$tagged" | sed -n 's/^S|//p')"
+  c_bodies="$(printf '%s\n' "$tagged"   | sed -n 's/^B|//p')"
+  kind="$(_uberdev_goal_bump_kind "$title" "$body" "$c_subjects" "$c_bodies")"
   if ! next="$(_uberdev_goal_next_version "$base_ver" "$kind")"; then
     _uberdev_goal_version_bump_deferred "$pr" "version_resolution"
     return 1
@@ -3204,9 +3289,10 @@ _uberdev_goal_ensure_version_bump() {
   uberdev_goal_audit goal_version_bumped \
     "$(printf '{"goal_id":"%s","pr":%s,"action":"bumped","from":"%s","to":"%s","kind":"%s"}' \
         "$goal_id" "$pr" "$base_ver" "$next" "$kind")" >/dev/null 2>&1 || true
-  printf 'goal-state: PR %s bumped %s -> %s (%s) and pushed as `chore(release): v%s`\n' \
+  printf 'goal-state: PR %s bumped %s -> %s (%s) and pushed as `chore(release): v%s`; deferring /merge one pass so the restarted checks can settle\n' \
     "$pr" "$base_ver" "$next" "$kind" "$next" >&2
-  return 0
+  # rc 2, NOT 0 — the push restarted CI. See the contract above.
+  return 2
 }
 
 # _uberdev_goal_rebase_collision_chain GOAL_ID JUST_MERGED_PR

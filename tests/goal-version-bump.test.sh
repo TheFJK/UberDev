@@ -23,9 +23,15 @@
 #   V6 — a repo with no version ratchet is skipped (rc 0), nothing pushed
 #   V7 — a cross-repository (fork) PR fails closed rather than pushing to origin
 #   V8 — BEHAVIOURAL over the REAL watch-lane region: ensure-fails => /merge is
-#        NOT dispatched and the PR stays green; ensure-ok => dispatch happens,
-#        and ensure ALWAYS runs first
-#   V9 — structural: the ordering + a single, guarded merge-dispatch site
+#        NOT dispatched and the PR stays green; ensure pushed-this-pass (rc 2)
+#        and checks-still-running both defer instead of burning a merge attempt;
+#        ensure-ok + settled CI => dispatch happens, and both gates run first
+#   V9 — structural: the ordering, the three-way exit status, a single guarded
+#        merge-dispatch site, and the /merge-side trust-head resolution the push
+#        depends on
+#   V10 — _uberdev_goal_pr_checks_pending withholds on pending, falls through on
+#        an unusable probe (it can never AUTHORISE a merge)
+#   V11 — the SemVer step follows the PR's COMMITS, not just its title
 #
 # Portable: bash + git + coreutils + sed/awk/grep only (no python3, no zsh, no
 # jq), so it runs on BOTH CI jobs (ubuntu-latest and windows-latest Git Bash).
@@ -115,6 +121,27 @@ assert_eq "$(v1 '_uberdev_goal_bump_kind "feat(goal)!: x" ""')" "major" "V1.kind
 assert_eq "$(v1 '_uberdev_goal_bump_kind "fix: x" "body
 
 BREAKING CHANGE: gone"')" "major" "V1.kind: a BREAKING CHANGE footer -> major"
+# The COMMITS are part of the predicate. A /goal PR title is written by the
+# solver agent, not a release engineer: title-only derivation silently ships a
+# feature as a patch release.
+assert_eq "$(v1 '_uberdev_goal_bump_kind "fix(goal): x" "body" "fix(a): one
+feat(b): two" ""')" "minor" \
+  "V1.kind: a feat: COMMIT under a fix: title -> minor (not a silent under-release)"
+assert_eq "$(v1 '_uberdev_goal_bump_kind "fix(goal): x" "body" "fix(a): one
+refactor(b)!: two" ""')" "major" \
+  "V1.kind: a ! marker on a COMMIT subject -> major"
+assert_eq "$(v1 '_uberdev_goal_bump_kind "fix(goal): x" "body" "fix(a): one" "text
+
+BREAKING CHANGE: gone"')" "major" \
+  "V1.kind: a BREAKING CHANGE footer in a COMMIT body -> major"
+assert_eq "$(v1 '_uberdev_goal_bump_kind "fix(goal): x" "body" "fix(a): one
+chore(b): two" ""')" "patch" \
+  "V1.kind: ordinary commits under a fix: title stay a patch"
+# A commit BODY line that merely mentions a type must not be read as a subject —
+# only the tagged subject stream feeds the feat:/! probes.
+assert_eq "$(v1 '_uberdev_goal_bump_kind "fix(goal): x" "body" "fix(a): one" "we considered
+feat: something else here"')" "patch" \
+  "V1.kind: prose inside a commit BODY does not promote the release"
 
 # Untrusted title: a leading markdown header would forge a CHANGELOG section and
 # break the NEXT release's drift pre-check; a backslash would be re-escaped by
@@ -207,6 +234,8 @@ for a in "$@"; do
 done
 printf '%s\n' "$*" >> "$GH_FIX/calls.txt"
 case "$*" in
+  *"--json statusCheckRollup"*)  cat "$GH_FIX/pr-$pr.checks" 2>/dev/null || printf '0\n'; exit 0 ;;
+  *"--json commits"*)            cat "$GH_FIX/pr-$pr.commits" 2>/dev/null; exit 0 ;;
   *"--json body"*)               cat "$GH_FIX/pr-$pr.body" 2>/dev/null; exit 0 ;;
   *headRefName*)                 cat "$GH_FIX/pr-$pr.meta" 2>/dev/null; exit 0 ;;
 esac
@@ -227,7 +256,20 @@ add_pr() {
   git -C "$root/work" checkout -q "$base"
   printf '%s\t%s\t%s\t%s\n' "$branch" "$base" "$cross" "$title" > "$root/ghfix/pr-$pr.meta"
   printf '%s\n' "$body" > "$root/ghfix/pr-$pr.body"
+  # Default commit projection: the single commit this fixture actually made.
+  # `S|` tags a commit SUBJECT, `B|` one line of a commit BODY — the same shape
+  # `_uberdev_goal_fetch_pr_commits` asks gh for.
+  printf 'S|%s\nB|\n' "$title" > "$root/ghfix/pr-$pr.commits"
 }
+
+# set_pr_commits <root> <pr> <tagged-lines> — override the commit projection so
+# a PR's TITLE and its COMMITS can disagree (the #364-review case).
+set_pr_commits() { printf '%s\n' "$3" > "$1/ghfix/pr-$2.commits"; }
+
+# set_pr_checks <root> <pr> <pending-count> — the statusCheckRollup projection
+# `_uberdev_goal_pr_checks_pending` reads (gh runs the --jq server-side, so the
+# shim returns the already-reduced count). Absent file => 0 via the shim default.
+set_pr_checks() { printf '%s\n' "$3" > "$1/ghfix/pr-$2.checks"; }
 
 # run_ensure <root> <pr> — run the REAL helper with cwd = the work clone.
 # Captures stderr into $root/state/ensure-<pr>.err and returns its rc.
@@ -263,7 +305,7 @@ add_pr "$S2" 101 "fix/101-thing" main "fix(goal): stop unbumped merges" "body
 Closes #364"
 before="$(origin_branch_commits "$S2" fix/101-thing)"
 run_ensure "$S2" 101; rc=$?
-assert_eq "$rc" "0" "V2.rc: the helper reports success"
+assert_eq "$rc" "2" "V2.rc: a bump that was PUSHED reports rc 2 (defer /merge one pass — the push restarted CI)"
 after="$(origin_branch_commits "$S2" fix/101-thing)"
 assert_eq "$((after - before))" "1" "V2.commits: EXACTLY ONE commit was pushed (no double bump, no stray commits)"
 assert_eq "$(origin_subject "$S2" fix/101-thing)" "chore(release): v1.2.4" \
@@ -315,7 +357,7 @@ git -C "$S3/work" push -q origin feat/102-thing
 git -C "$S3/work" checkout -q main
 before="$(origin_branch_commits "$S3" feat/102-thing)"
 run_ensure "$S3" 102; rc=$?
-assert_eq "$rc" "0" "V3.rc: an already-bumped PR is accepted"
+assert_eq "$rc" "0" "V3.rc: an already-bumped PR is accepted with rc 0 — nothing was pushed, so CI is undisturbed"
 assert_eq "$(origin_branch_commits "$S3" feat/102-thing)" "$before" \
   "V3.no-op: no second commit was pushed (no double bump)"
 assert_eq "$(origin_file "$S3" feat/102-thing plugins/uberdev/.claude-plugin/plugin.json | grep -c '"version": "1\.3\.0"')" "1" \
@@ -331,13 +373,13 @@ S4="$(new_sandbox v4 1.2.3)"
 add_pr "$S4" 201 "fix/201-a" main "fix(a): first"  "body"
 add_pr "$S4" 202 "fix/202-b" main "fix(b): second" "body"
 run_ensure "$S4" 201; rc1=$?
-assert_eq "$rc1" "0" "V4.first: the lowest PR bumps"
+assert_eq "$rc1" "2" "V4.first: the lowest PR bumps (rc 2 — pushed this pass)"
 assert_eq "$(origin_subject "$S4" fix/201-a)" "chore(release): v1.2.4" "V4.first: PR 201 -> v1.2.4"
 # The serialized lane lands PR 201 before it ever looks at PR 202. Simulate the
 # landing, then bump the second PR — it MUST see the new base.
 git -C "$S4/origin.git" update-ref refs/heads/main "$(git -C "$S4/origin.git" rev-parse refs/heads/fix/201-a)"
 run_ensure "$S4" 202; rc2=$?
-assert_eq "$rc2" "0" "V4.second: the next PR bumps"
+assert_eq "$rc2" "2" "V4.second: the next PR bumps (rc 2 — pushed this pass)"
 assert_eq "$(origin_subject "$S4" fix/202-b)" "chore(release): v1.2.5" \
   "V4.second: PR 202 -> v1.2.5 — CONSECUTIVE, not a second v1.2.4 (the collision class)"
 assert_eq "$(origin_file "$S4" fix/202-b plugins/uberdev/.claude-plugin/plugin.json | grep -c '"version": "1\.2\.5"')" "1" \
@@ -436,11 +478,13 @@ else
   fail "V8.extract: the sliced region does not parse standalone"
 fi
 
-# run_gate <ensure-rc> — drive the real region with recording stubs.
+# run_gate <ensure-rc> [checks-pending-rc] — drive the real region with recording
+# stubs. CHECKS_RC defaults to 1 ("nothing pending"), the only state in which
+# /merge may run.
 run_gate() {
-  local ensure_rc="$1" log="$WORK/gate-$1.log"
+  local ensure_rc="$1" checks_rc="${2:-1}" log="$WORK/gate-$1-${2:-1}.log"
   : > "$log"
-  GATE_LOG="$log" ENSURE_RC="$ensure_rc" bash -c '
+  GATE_LOG="$log" ENSURE_RC="$ensure_rc" CHECKS_RC="$checks_rc" bash -c '
     set -u
     GOAL_ID="g1"; pr=""; any_active=0
     _uberdev_goal_batch_green_prs_ordered() { printf "%s\n" 100; }
@@ -448,11 +492,12 @@ run_gate() {
     uberdev_goal_review_pr_in_flight()      { return 1; }
     uberdev_goal_should_automerge()         { return 0; }
     _uberdev_goal_ensure_version_bump()     { printf "ensure:%s\n"   "$1" >> "$GATE_LOG"; return "$ENSURE_RC"; }
+    _uberdev_goal_pr_checks_pending()       { printf "checks:%s\n"   "$1" >> "$GATE_LOG"; return "$CHECKS_RC"; }
     _uberdev_goal_dispatch_merge()          { printf "dispatch:%s\n" "$1" >> "$GATE_LOG"; return 0; }
     uberdev_goal_pr_state_transition()      { printf "transition:%s:%s->%s\n" "$2" "$3" "$4" >> "$GATE_LOG"; }
     _uberdev_goal_set_batch_terminal_state(){ printf "batch:%s:%s\n" "$2" "$3" >> "$GATE_LOG"; }
     _uberdev_goal_rebase_collision_chain()  { printf "chain:%s\n" "$2" >> "$GATE_LOG"; }
-    uberdev_goal_audit()                    { printf "audit:%s\n" "$1" >> "$GATE_LOG"; }
+    uberdev_goal_audit()                    { printf "audit:%s:%s\n" "$1" "${2:-}" >> "$GATE_LOG"; }
     . "$1"
   ' _ "$GATE" >/dev/null 2>&1
   cat "$log"
@@ -462,6 +507,10 @@ GATE_OK="$(run_gate 0)"
 case "$GATE_OK" in
   "ensure:100"*"dispatch:100"*) pass "V8.order: the version bump runs BEFORE /merge is dispatched" ;;
   *) fail "V8.order: expected ensure:100 then dispatch:100 (got: [$GATE_OK])" ;;
+esac
+case "$GATE_OK" in
+  *"checks:100"*"dispatch:100"*) pass "V8.order: the CI-settle probe runs BEFORE /merge is dispatched" ;;
+  *) fail "V8.order: expected checks:100 then dispatch:100 (got: [$GATE_OK])" ;;
 esac
 case "$GATE_OK" in
   *"transition:100:green->merging"*) pass "V8.happy: a bumped PR still transitions green -> merging" ;;
@@ -490,26 +539,82 @@ case "$GATE_FAIL" in
   *) pass "V8.closed: the batch row is left GREEN (the barrier stays open for a retry)" ;;
 esac
 
+# rc 2 = "the bump was pushed JUST NOW". The push restarted the PR's checks, so
+# dispatching /merge in the same pass is a deterministic gate_fail on
+# reason=ci_red that burns one of the three merge attempts — three of those and
+# should_automerge stops firing and the run stalls to the 4h stuck_loop.
+GATE_PUSHED="$(run_gate 2)"
+case "$GATE_PUSHED" in
+  *dispatch:*) fail "V8.settle: /merge was dispatched in the SAME pass as the bump push (got: [$GATE_PUSHED])" ;;
+  *) pass "V8.settle: rc 2 (bump pushed this pass) does NOT dispatch /merge — the restarted checks get a pass to settle" ;;
+esac
+case "$GATE_PUSHED" in
+  *"->merging"*) fail "V8.settle: the PR left green on the push pass (got: [$GATE_PUSHED])" ;;
+  *) pass "V8.settle: the PR stays green so the NEXT pass re-enters on the already_bumped arm" ;;
+esac
+case "$GATE_PUSHED" in
+  *"audit:goal_merge_deferred"*ci_restarted_by_version_bump*)
+    pass "V8.settle: the deferral is audited with reason=ci_restarted_by_version_bump" ;;
+  *) fail "V8.settle: no goal_merge_deferred/ci_restarted_by_version_bump audit row (got: [$GATE_PUSHED])" ;;
+esac
+
+# Already bumped (rc 0) but the rollup still carries a pending entry: /merge must
+# still be withheld, for the same reason — Step 1.4 reads pending as ci_red.
+GATE_PENDING="$(run_gate 0 0)"
+case "$GATE_PENDING" in
+  *dispatch:*) fail "V8.pending: /merge was dispatched while checks were still running (got: [$GATE_PENDING])" ;;
+  *) pass "V8.pending: /merge is withheld while any check is queued/in-progress" ;;
+esac
+case "$GATE_PENDING" in
+  *"audit:goal_merge_deferred"*ci_pending*) pass "V8.pending: the deferral is audited with reason=ci_pending" ;;
+  *) fail "V8.pending: no goal_merge_deferred/ci_pending audit row (got: [$GATE_PENDING])" ;;
+esac
+case "$GATE_PENDING" in
+  *"batch:100:MERGING"*) fail "V8.pending: the MERGING sentinel was set without a merge (got: [$GATE_PENDING])" ;;
+  *) pass "V8.pending: the batch row is left GREEN" ;;
+esac
+# The CI gate must never even be consulted when the bump itself failed — fail
+# closed beats fail-closed-by-accident.
+case "$GATE_FAIL" in
+  *checks:*) fail "V8.closed: the CI probe ran after a failed bump (the arms are not mutually exclusive)" ;;
+  *) pass "V8.closed: a failed bump short-circuits before the CI probe" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # V9 — structural: ordering, and exactly one guarded dispatch site.
 # ---------------------------------------------------------------------------
 echo
 echo "== V9: structural — ensure-before-dispatch, one guarded dispatch site =="
 ensure_ln="$(grep -n '_uberdev_goal_ensure_version_bump "\$pr"' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
+checks_ln="$(grep -n '_uberdev_goal_pr_checks_pending "\$pr"' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
 disp_ln="$(grep -n '_uberdev_goal_dispatch_merge "\$pr"' "$GOAL_WATCH" | head -n 1 | cut -d: -f1)"
 if [ -n "$ensure_ln" ] && [ -n "$disp_ln" ] && [ "$ensure_ln" -lt "$disp_ln" ]; then
   pass "V9.order: _uberdev_goal_ensure_version_bump precedes _uberdev_goal_dispatch_merge in the watch lane"
 else
   fail "V9.order: expected ensure (line ${ensure_ln:-none}) before dispatch (line ${disp_ln:-none})"
 fi
+if [ -n "$checks_ln" ] && [ -n "$disp_ln" ] && [ "$checks_ln" -lt "$disp_ln" ]; then
+  pass "V9.order: _uberdev_goal_pr_checks_pending precedes _uberdev_goal_dispatch_merge in the watch lane"
+else
+  fail "V9.order: expected the CI probe (line ${checks_ln:-none}) before dispatch (line ${disp_ln:-none})"
+fi
 assert_eq "$(grep -c '_uberdev_goal_dispatch_merge "\$pr"' "$GOAL_WATCH")" "1" \
   "V9.single: exactly ONE /merge dispatch site exists, so the gate cannot be bypassed"
-# The dispatch must sit on the `elif` arm of the ensure test — an unguarded
+# The bump's exit status is captured and branched THREE ways — collapsing it back
+# to a boolean would either merge into a pending rollup (rc 2 read as success) or
+# stall the lane forever (rc 2 read as failure).
+assert_grep "$GOAL_WATCH" '^[[:space:]]*version_bump_rc=\$\?' \
+  "V9.guard: the bump's exit status is captured, not collapsed by an if/!"
+assert_grep "$GOAL_WATCH" '^[[:space:]]*if \[ "\$version_bump_rc" -eq 1 \]; then' \
+  "V9.guard: rc 1 fails closed"
+assert_grep "$GOAL_WATCH" '^[[:space:]]*elif \[ "\$version_bump_rc" -eq 2 \]; then' \
+  "V9.guard: rc 2 (pushed this pass) has its own arm"
+# The dispatch must sit on an `elif` arm downstream of BOTH gates — an unguarded
 # `if _uberdev_goal_dispatch_merge` would re-open the hole.
-assert_grep "$GOAL_WATCH" '^[[:space:]]*if ! _uberdev_goal_ensure_version_bump "\$pr"; then' \
-  "V9.guard: the dispatch is gated on the bump's exit status"
+assert_grep "$GOAL_WATCH" '^[[:space:]]*elif _uberdev_goal_pr_checks_pending "\$pr"; then' \
+  "V9.guard: the CI-settle probe is an arm of the same chain"
 assert_grep "$GOAL_WATCH" '^[[:space:]]*elif _uberdev_goal_dispatch_merge "\$pr"; then' \
-  "V9.guard: /merge runs only on the arm reachable when the bump succeeded"
+  "V9.guard: /merge runs only on the arm reachable when the bump succeeded AND CI settled"
 # The solver prompt must KEEP forbidding solver-side bumps — the fix is to add
 # the bump at the serialized landing point, not to hand it back to the fleet.
 SOLVE_FLEET="$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
@@ -519,6 +624,55 @@ if [ -r "$SOLVE_FLEET" ]; then
 else
   fail "V9.invariant: $SOLVE_FLEET is missing"
 fi
+# The other half of the contract lives in /merge: pushing a release commit onto a
+# reviewed head is only survivable because PATH_2 resolves a trust head first.
+# Without this the bump lands and the PR can NEVER be merged.
+MERGE_SKILL="$CLAUDE_PLUGIN_ROOT/skills/merge-pipeline/SKILL.md"
+RELEASE_ANCHOR_LIB="$CLAUDE_PLUGIN_ROOT/skills/merge-pipeline/lib/release-anchor.sh"
+if [ -r "$MERGE_SKILL" ] && [ -x "$RELEASE_ANCHOR_LIB" ] || [ -r "$RELEASE_ANCHOR_LIB" ]; then
+  assert_grep "$MERGE_SKILL" 'release-anchor\.sh' \
+    "V9.invariant: /merge PATH_2 resolves its trust head through release-anchor.sh"
+else
+  fail "V9.invariant: $RELEASE_ANCHOR_LIB is missing — /goal's bump would make every PR unmergeable"
+fi
+
+# ---------------------------------------------------------------------------
+# V10 — the CI-settle probe itself.
+# ---------------------------------------------------------------------------
+echo
+echo "== V10: _uberdev_goal_pr_checks_pending — withholding only, never authorising =="
+S10="$(new_sandbox v10 1.2.3)"
+add_pr "$S10" 601 "fix/601-ci" main "fix(x): ci" "body"
+run_checks() {   # <root> <pr>
+  ( cd "$1/work" && PATH="$1/bin:$PATH" GH_FIX="$1/ghfix" \
+      bash -c '. "$GOAL_LIB"; _uberdev_goal_pr_checks_pending "$1"' _ "$2" >/dev/null 2>&1 )
+}
+set_pr_checks "$S10" 601 2
+run_checks "$S10" 601; assert_eq "$?" "0" "V10.pending: a rollup with running checks reports pending (rc 0 — withhold)"
+set_pr_checks "$S10" 601 0
+run_checks "$S10" 601; assert_eq "$?" "1" "V10.settled: an all-settled rollup reports not-pending (rc 1 — proceed)"
+# A gh failure / malformed count must NOT wedge the landing lane: /merge Step 1.4
+# owns the hard CI gate and re-probes with its own settle logic.
+set_pr_checks "$S10" 601 "boom"
+run_checks "$S10" 601; assert_eq "$?" "1" "V10.soft: an unusable probe result falls through (rc 1) instead of stalling the lane"
+run_checks "$S10" "not-a-number"; assert_eq "$?" "1" "V10.validate: a non-numeric PR is refused without touching gh"
+
+# ---------------------------------------------------------------------------
+# V11 — the SemVer step follows the PR's COMMITS, not just its title.
+# ---------------------------------------------------------------------------
+echo
+echo "== V11: a feat: commit under a fix: title is released as a MINOR, end to end =="
+S11="$(new_sandbox v11 1.2.3)"
+add_pr "$S11" 701 "fix/701-mislabelled" main "fix(goal): tidy up" "body"
+set_pr_commits "$S11" 701 'S|fix(goal): tidy up
+B|
+S|feat(goal): a whole new subcommand
+B|'
+run_ensure "$S11" 701; rc=$?
+assert_eq "$rc" "2" "V11.rc: the PR is bumped and pushed"
+assert_eq "$(origin_subject "$S11" fix/701-mislabelled)" "chore(release): v1.3.0" \
+  "V11.kind: the feat: COMMIT drove a MINOR bump (1.2.3 -> 1.3.0), not the title's patch"
+assert_grep "$(audit_log "$S11")" '"kind":"minor"' "V11.audit: the audited kind is minor"
 
 echo
 echo "== Summary =="

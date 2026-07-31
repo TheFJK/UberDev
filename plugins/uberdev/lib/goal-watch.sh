@@ -724,10 +724,41 @@ while true; do
         # FAIL CLOSED: a bump that could not be guaranteed leaves the PR in
         # `green` for a later pass and emits a goal_merge_deferred audit row.
         # Merging unbumped IS the bug, so merging is never the fallback.
-        if ! _uberdev_goal_ensure_version_bump "$pr"; then
+        #
+        # THREE-WAY exit status, not a boolean (#364 review):
+        #   1 — bump not guaranteed  -> fail closed, PR stays green.
+        #   2 — bump PUSHED this pass -> the push restarted the PR's checks;
+        #       dispatching now is a DETERMINISTIC /merge gate_fail on
+        #       reason=ci_red (Step 1.4 reads any pending rollup entry as red,
+        #       and its settle probe is bounded at 3x10s against a CI critical
+        #       path of minutes). Three such passes exhaust
+        #       _UBERDEV_GOAL_MAX_MERGE_ATTEMPTS, should_automerge starts
+        #       returning 1, no arm is taken, and the PR sits in `green` until
+        #       the 4h stuck_loop breaker — a hard stall of the whole run.
+        #       Defer instead; the next pass sees already_bumped (rc 0).
+        #   0 — already bumped / no ratchet -> fall through to the CI gate.
+        _uberdev_goal_ensure_version_bump "$pr"
+        version_bump_rc=$?
+        if [ "$version_bump_rc" -eq 1 ]; then
           printf 'goal-pipeline: PR %s NOT dispatched to /merge — its version bump could not be guaranteed (see the version_bump_failed audit row); staying green for a later pass\n' \
             "$pr" >&2
           any_active=1
+        elif [ "$version_bump_rc" -eq 2 ]; then
+          printf 'goal-pipeline: PR %s bumped and pushed this pass — deferring /merge until the restarted checks settle\n' \
+            "$pr" >&2
+          any_active=1
+          uberdev_goal_audit goal_merge_deferred \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"ci_restarted_by_version_bump\"}"
+        # CI-settle gate. Withholding only — it can never authorise a merge (a
+        # gh failure or an unconfigured-checks repo returns rc 1 and falls
+        # through to /merge, which owns the hard CI gate). The 4h stuck_loop
+        # wall clock remains the backstop for a check that never completes.
+        elif _uberdev_goal_pr_checks_pending "$pr"; then
+          printf 'goal-pipeline: PR %s has checks still running — deferring /merge rather than burning a merge attempt on a pending rollup\n' \
+            "$pr" >&2
+          any_active=1
+          uberdev_goal_audit goal_merge_deferred \
+            "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr,\"reason\":\"ci_pending\"}"
         elif _uberdev_goal_dispatch_merge "$pr"; then
           uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" green merging
           # Flip to the MERGING sentinel BEFORE the collision-chain so the very
