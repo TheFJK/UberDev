@@ -4,6 +4,19 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.3] — 2026-07-31
+
+### Fixed
+
+- **Every open issue in this repository was undispatchable.** `component_tokens()` derived a component by stripping only the *last* extension, so `foo.test.sh` produced the token `foo.test` — and the routing-context schema in `lib/agent-dispatch.sh` validates every component against `[a-z0-9][a-z0-9_-]{0,127}`, which forbids the dot. `uberdev_agent_context_create` therefore failed with `route_context_create_failed`, and `/solve`, `/turbo` and `/ubergoal` all **refused the issue outright** — no PR, no retry, no dispatch. Any issue body naming a `*.test.sh`, `*.test.py`, `*.d.ts` or `*.tar.gz` was affected; all eight open issues name a `*.test.sh`.
+- Splitting on the *first* dot also fixes a quieter miscount: `foo.sh` and `foo.test.sh` are one component, not two, so the multi-component tier heuristic no longer double-counts a module and its own test file.
+- Leading punctuation is trimmed (`_workflow_harness.js` → `workflow_harness`), and a name that cannot yield a conforming token is dropped rather than emitted — losing one coarse component from a heuristic count is strictly better than refusing to work the issue.
+
+### Tests
+
+- Added `tests/component-token-schema.py`, run from `tests/solve-triage.test.sh`: conformance for the exact shapes that broke, a property check that **every** emitted token satisfies the schema, the `foo.sh`/`foo.test.sh` collapse, and a **drift guard** asserting the regex literal in `solve_triage.py` is byte-identical to the one the context schema enforces.
+- Both halves are mutation-verified: restoring `rsplit(".", 1)` reds the conformance cases, and editing either regex alone reds the drift guard. Two independent copies of one contract is how this shipped — and how the `--backend` enum bug shipped before it.
+
 ## [0.42.2] — 2026-07-31
 
 ### Fixed
