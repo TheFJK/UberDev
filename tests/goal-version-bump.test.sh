@@ -573,6 +573,18 @@ case "$GATE_PENDING" in
   *"batch:100:MERGING"*) fail "V8.pending: the MERGING sentinel was set without a merge (got: [$GATE_PENDING])" ;;
   *) pass "V8.pending: the batch row is left GREEN" ;;
 esac
+# An exit status this lane does not recognise must fail CLOSED too — a future
+# status added to the helper cannot be allowed to silently mean "merge it".
+GATE_UNKNOWN="$(run_gate 7)"
+case "$GATE_UNKNOWN" in
+  *dispatch:*) fail "V8.unknown: an UNRECOGNISED bump status reached the /merge dispatch (got: [$GATE_UNKNOWN])" ;;
+  *) pass "V8.unknown: an unrecognised bump status fails closed — no /merge dispatch" ;;
+esac
+case "$GATE_UNKNOWN" in
+  *"->merging"*) fail "V8.unknown: the PR left green on an unrecognised status (got: [$GATE_UNKNOWN])" ;;
+  *) pass "V8.unknown: the PR stays green on an unrecognised status" ;;
+esac
+
 # The CI gate must never even be consulted when the bump itself failed — fail
 # closed beats fail-closed-by-accident.
 case "$GATE_FAIL" in
@@ -605,10 +617,14 @@ assert_eq "$(grep -c '_uberdev_goal_dispatch_merge "\$pr"' "$GOAL_WATCH")" "1" \
 # stall the lane forever (rc 2 read as failure).
 assert_grep "$GOAL_WATCH" '^[[:space:]]*version_bump_rc=\$\?' \
   "V9.guard: the bump's exit status is captured, not collapsed by an if/!"
-assert_grep "$GOAL_WATCH" '^[[:space:]]*if \[ "\$version_bump_rc" -eq 1 \]; then' \
-  "V9.guard: rc 1 fails closed"
-assert_grep "$GOAL_WATCH" '^[[:space:]]*elif \[ "\$version_bump_rc" -eq 2 \]; then' \
+assert_grep "$GOAL_WATCH" '^[[:space:]]*if \[ "\$version_bump_rc" -eq 2 \]; then' \
   "V9.guard: rc 2 (pushed this pass) has its own arm"
+# `-ne 0`, never a literal `-eq 1`: an exit status this lane does not recognise
+# must fail CLOSED, not fall through to the merge dispatch.
+assert_grep "$GOAL_WATCH" '^[[:space:]]*elif \[ "\$version_bump_rc" -ne 0 \]; then' \
+  "V9.guard: every non-zero status other than 2 fails closed (catch-all, not just rc 1)"
+assert_no_grep "$GOAL_WATCH" '\[ "\$version_bump_rc" -eq 1 \]' \
+  "V9.guard: the fail-closed arm is NOT narrowed to a literal rc 1"
 # The dispatch must sit on an `elif` arm downstream of BOTH gates — an unguarded
 # `if _uberdev_goal_dispatch_merge` would re-open the hole.
 assert_grep "$GOAL_WATCH" '^[[:space:]]*elif _uberdev_goal_pr_checks_pending "\$pr"; then' \
