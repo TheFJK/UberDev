@@ -292,6 +292,18 @@ review_verdict_discovery_state() {
   return 0
 }
 
+# SINGLE binding of the private capture-directory basename prefix. Three parties
+# need this one fact — the shell that mints the directory (`mktemp -d`), the
+# shell that removes an interpreter-never-started leftover (a basename guard so
+# `rm -rf` can only ever touch a directory this file minted), and the Python side
+# that refuses to publish into or clean up anything outside such a directory.
+# It used to be restated three ways with nothing proving they agreed; a drifted
+# copy would silently disarm one of the two guards while both still "looked"
+# correct. It is transported to Python through the environment (below) rather
+# than re-typed there. `python3 -I` implies `-E`, which ignores only PYTHON*
+# variables, so a non-PYTHON name crosses the boundary intact.
+UBERDEV_VERDICT_CAPTURE_PREFIX="uberdev-review-verdict."
+
 # _uberdev_review_verdict_python COMMAND [...]
 # One closed Python boundary owns root binding, secure byte capture, duplicate-
 # key-safe JSON parsing, timestamp ranking, snapshot publication, and carrier
@@ -300,6 +312,7 @@ review_verdict_discovery_state() {
 _uberdev_review_verdict_python() {
   local command="$1"
   shift
+  UBERDEV_VERDICT_CAPTURE_PREFIX="$UBERDEV_VERDICT_CAPTURE_PREFIX" \
   python3 -I -B - "$command" "$_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT" "$@" <<'PY'
 import fnmatch
 import hashlib
@@ -336,7 +349,18 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MAXIMUM_SIZE = 1024 * 1024
 OVERRIDE = "user-selected-emit-green-on-blocker-deferred"
-CAPTURE_DIR_PREFIX = "uberdev-review-verdict."
+# Transported from the shell (see UBERDEV_VERDICT_CAPTURE_PREFIX above), never
+# re-typed: the shell mints the directory, this side guards publication and
+# removal against it, and a drifted second copy would disarm one guard silently.
+# An absent or empty value is INDETERMINATE — never a permissive default, which
+# would make the `startswith` guards below match every path.
+CAPTURE_DIR_PREFIX = os.environ.get("UBERDEV_VERDICT_CAPTURE_PREFIX", "")
+if not CAPTURE_DIR_PREFIX:
+    print(
+        "indeterminate: private capture-directory prefix was not provided by the caller",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 # Segments that stand for "any single directory name" in an expected_shape.
 WILDCARD_SEGMENTS = frozenset({"run_id", "worktree"})
 # One entry per searched root: (root_name, expected_shape). expected_shape names
@@ -726,6 +750,19 @@ def scan_roots():
             candidates.append((run_id, physical_candidate))
     # Fail-closed, once, naming every failing root. Reached only after every
     # root has been given its chance, so the diagnosis is complete.
+    #
+    # Accumulation improves the DIAGNOSTIC, deliberately not the OUTCOME. A
+    # "use whatever the readable roots produced" partial-success model is a
+    # fail-open here and cannot be adopted: selection ranks candidates by
+    # timestamp, and `discover` already treats an unknown artifact that is
+    # newer than (or tied with) the winner as INDETERMINATE precisely because
+    # such an artifact could outrank it. An unreadable root is the same
+    # epistemic state with less information — it may hold a newer verdict for
+    # this PR, so a verdict picked from the readable roots cannot be shown to
+    # be the current one. Honouring it would let one chmod-000 stale worktree
+    # silently downgrade /merge onto a superseded (possibly BLOCKER-carrying)
+    # verdict. Missing roots are NOT failures — FileNotFoundError `continue`s
+    # above — so the common single-root repo never reaches this branch.
     if failures:
         raise VerdictError(describe_scan_failures(failures))
     return candidates, bound_roots
@@ -946,8 +983,15 @@ discover_review_verdict_json() {
     printf 'indeterminate: PR number must be a positive integer\n' >&2
     return 2
   fi
+  # The prefix is the sole authority for BOTH the mktemp template and the
+  # basename guard on the `rm -rf` below. An empty binding would widen that
+  # guard's `case` pattern to `*` — assert instead of degrading silently.
+  if [ -z "${UBERDEV_VERDICT_CAPTURE_PREFIX:-}" ]; then
+    printf 'indeterminate: capture-directory prefix binding is missing (lib/discover.sh sourced incompletely?)\n' >&2
+    return 2
+  fi
   local capture_dir receipt rc
-  if ! capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/uberdev-review-verdict.XXXXXX")"; then
+  if ! capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/${UBERDEV_VERDICT_CAPTURE_PREFIX}XXXXXX")"; then
     printf 'indeterminate: unable to allocate stable verdict capture directory\n' >&2
     return 2
   fi
@@ -966,7 +1010,7 @@ discover_review_verdict_json() {
   # signalled, or never started, leaves an empty directory behind. The basename
   # prefix guard keeps the removal bound to a directory this function minted.
   case "${capture_dir##*/}" in
-    uberdev-review-verdict.*)
+    "$UBERDEV_VERDICT_CAPTURE_PREFIX"*)
       rm -rf -- "$capture_dir" 2>/dev/null || true
       ;;
   esac

@@ -1794,6 +1794,35 @@ fi
 chmod -R u+rwX "$B12_SANDBOX/.worktrees" 2>/dev/null || true
 _b12_clear
 
+# Accumulation is a DIAGNOSTIC improvement, deliberately not an outcome change:
+# a perfectly good verdict under the canonical root does NOT rescue a run whose
+# sibling root could not be read. That is not under-delivery, it is the only
+# sound model — selection ranks by timestamp and `discover` already calls a
+# newer/tied UNKNOWN artifact indeterminate, so an unreadable root (the same
+# epistemic state with less information) could be hiding a newer verdict for
+# this very PR. Honouring the readable roots would let one chmod-000 stale
+# worktree silently land a superseded verdict. Pinned so a future "partial
+# success" refactor has to argue with a red test.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_A")"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B21.canonical-alone: the canonical root alone resolves to a FOUND receipt"
+assert_eq "$B12_RC" "0" "B21.canonical-alone.rc: canonical-only discovery is FOUND=0"
+: > "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "2" \
+  "B21.canonical-plus-broken.rc: a broken sibling root makes an otherwise-good canonical verdict INDETERMINATE=2 (fail-closed, not partial success)"
+assert_eq "$B12_OUT" "" \
+  "B21.canonical-plus-broken.out: no receipt is emitted from the readable roots"
+assert_grep "$B12_ERR" 'root is not a directory: \.worktrees' \
+  "B21.canonical-plus-broken.err: the unreadable root is still named"
+rm -f "$B12_SANDBOX/.worktrees"
+_b12_clear
+
 echo
 echo "== B22: the private capture directory never leaks (#344) =="
 # secure_publish_captured deliberately never unlinks its attempt file, so the
@@ -1809,6 +1838,31 @@ assert_grep "$LIB" 'warning: leaked private verdict capture directory' \
   "B22.breadcrumb: a residual directory is named on stderr, not swallowed"
 assert_grep "$LIB" '^            discard_private_capture_dir\(capture_dir\)$' \
   "B22.python-owns: the creating interpreter removes the directory on every failure path"
+
+# The prefix is BOTH the mktemp template and the basename guard that bounds the
+# failure-path `rm -rf` — restating it per consumer (mktemp template, shell case
+# guard, Python CAPTURE_DIR_PREFIX) let a drifted copy disarm one guard while
+# every site still read as correct. One binding, transported; the literal must
+# appear exactly once in the whole library.
+B22_PREFIX_LITERALS="$(grep -c 'uberdev-review-verdict\.' "$LIB" | tr -d ' ')"
+assert_eq "$B22_PREFIX_LITERALS" "1" \
+  "B22.prefix-ssot: the capture-dir prefix literal appears exactly once in lib/discover.sh"
+assert_grep "$LIB" '^UBERDEV_VERDICT_CAPTURE_PREFIX="uberdev-review-verdict\."$' \
+  "B22.prefix-binding: the single binding is a shell constant"
+assert_grep "$LIB" 'CAPTURE_DIR_PREFIX = os\.environ\.get\("UBERDEV_VERDICT_CAPTURE_PREFIX", ""\)' \
+  "B22.prefix-transported: the Python side reads the binding instead of re-typing it"
+# An empty transport is INDETERMINATE on both sides, never a permissive default:
+# the Python `startswith` guards would match every path and the shell `case`
+# pattern would collapse to `*`.
+(
+  cd "$B12_SANDBOX" || exit 2
+  . "$LIB"
+  UBERDEV_VERDICT_CAPTURE_PREFIX=""
+  discover_review_verdict_json 42
+) >/dev/null 2>"$B12_ERR"
+assert_eq "$?" "2" "B22.prefix-empty.rc: an empty prefix binding is INDETERMINATE=2"
+assert_grep "$B12_ERR" 'capture-directory prefix binding is missing' \
+  "B22.prefix-empty.err: the missing binding is named, not silently defaulted"
 
 # Point TMPDIR at a private directory so the leak assertion is exact and cannot
 # be perturbed by anything else on the runner.
