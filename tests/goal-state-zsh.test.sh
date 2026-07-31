@@ -665,19 +665,28 @@ Z16_OUT="$(
   # A stale PID stash from an EARLIER detached run: the pre-fix reaper would read
   # it and signal whatever process now owns that pid.
   printf '{"pid":1,"issue":42}\n' > "$Z16_TMP/solve-bg-status-42.json"
-  claude() { printf 'CLAUDE-AGENTS-PROBED\n' >&2; return 1; }
+  # The `busy=no` / `infl=no` legs alone are NOT discriminating: the pre-RFC-0015
+  # default arm reaches `claude agents --json`, and a stub that merely `return 1`s
+  # answers "not busy / not in flight" too — so both legs pass with the workflow
+  # arms deleted. The load-bearing assertion is therefore that the claude-agents
+  # probe is NEVER REACHED. Record each invocation to a FILE (a >&2 breadcrumb
+  # from inside `$(…)` is not visible to the assertion, and the call sites
+  # redirect stderr to /dev/null anyway), then assert the file stays empty.
+  claude() { printf 'CLAUDE-AGENTS-PROBED %s\n' "$*" >> "$Z16_TMP/claude-probe.log"; return 1; }
   busy=no;  uberdev_goal_agent_busy_for_issue 42 2>/dev/null && busy=yes
   infl=no;  uberdev_goal_review_pr_in_flight 900 2>/dev/null && infl=yes
   _uberdev_goal_reap_zombies >/dev/null 2>&1
   skipped=no
   grep -q 'runtime_owned_lifecycle' "$Z16_TMP/goal-goaltestz16.jsonl" 2>/dev/null && skipped=yes
-  printf 'busy=%s infl=%s reap_skipped=%s\n' "$busy" "$infl" "$skipped"
+  probed=no
+  [ -s "$Z16_TMP/claude-probe.log" ] && probed=yes
+  printf 'busy=%s infl=%s reap_skipped=%s claude_probed=%s\n' "$busy" "$infl" "$skipped" "$probed"
 )"
 case "$Z16_OUT" in
-  *"busy=no infl=no reap_skipped=yes"*)
-    pass "Z16a: backend=workflow gets explicit liveness + reaper arms under $RUN_SHELL (no claude-agents probe, no PID reap)" ;;
+  *"busy=no infl=no reap_skipped=yes claude_probed=no"*)
+    pass "Z16a: backend=workflow gets explicit liveness + reaper arms under $RUN_SHELL (the claude-agents probe is never reached, no PID reap)" ;;
   *)
-    fail "Z16a: backend=workflow still falls into a default arm under $RUN_SHELL (got: [$Z16_OUT]; expect busy=no infl=no reap_skipped=yes)" ;;
+    fail "Z16a: backend=workflow still falls into a default arm under $RUN_SHELL (got: [$Z16_OUT]; expect busy=no infl=no reap_skipped=yes claude_probed=no)" ;;
 esac
 rm -rf "$Z16_TMP" 2>/dev/null || true
 

@@ -238,10 +238,25 @@ SNAP='[{"number":100,"closingIssuesReferences":[{"number":42}],"headRefName":"fe
       {"number":900,"closingIssuesReferences":[],"headRefName":"feat/42-late"},
       {"number":200,"closingIssuesReferences":[],"headRefName":"feat/77-only-head"},
       {"number":210,"closingIssuesReferences":[{"number":88}],"headRefName":"feat/88-b"}]'
+# `gh` is SHADOWED (not merely absent) for the whole probe: a shim that records
+# its argv and exits 97 sits at the FRONT of PATH. `bash -c` inherits PATH, so
+# "we didn't put gh there" would be no guarantee at all — the real gh stays
+# resolvable and a regression back to the live finder would make a genuine
+# network call and quietly pass. With the shim, any such call is both loud (rc
+# 97) and RECORDED, which is what the zero-invocation assertion below reads.
+SNAP_BIN="$(mktemp -d 2>/dev/null || printf '/tmp/goal-snap-%s' "$$")"
+mkdir -p "$SNAP_BIN"
+SNAP_GH_CALLS="$SNAP_BIN/gh-calls.txt"
+cat > "$SNAP_BIN/gh" <<'SNAPGH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SNAP_GH_CALLS"
+printf 'gh: this probe must never reach the network\n' >&2
+exit 97
+SNAPGH
+chmod +x "$SNAP_BIN/gh"
 _snap_run() {
-  # No gh on PATH inside the probe: any accidental network call would fail loudly
-  # rather than quietly succeed and hide a regression back to the live finder.
   UBERDEV_TMPDIR="${TMPDIR:-/tmp}" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" SNAP="$SNAP" \
+    SNAP_GH_CALLS="$SNAP_GH_CALLS" PATH="$SNAP_BIN:$PATH" \
     bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; '"$1"
 }
 got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 42 "$SNAP"')"
@@ -268,6 +283,11 @@ if grep -qF '_uberdev_goal_pr_for_issue_jq' "$GOAL_LIB"; then
 else
   assert_eq "helper" "MISSING" "#301 both the live finder and the snapshot finder call the shared ranking helper"
 fi
+# Zero network: the shim at the front of PATH was never invoked by ANY of the
+# probes above. A regression back to `gh pr list` per resolution trips this.
+assert_eq "$([ -e "$SNAP_GH_CALLS" ] && printf yes || printf no)" "no" \
+  "#301 from_json: resolves with ZERO gh invocations (the PATH shim recorded nothing)"
+rm -rf "$SNAP_BIN"
 
 echo "== goal-abort.sh: releases only NON-terminal claims, then reaps run-state =="
 ABORT_SH="$CLAUDE_PLUGIN_ROOT/lib/goal-abort.sh"
@@ -355,6 +375,44 @@ GHSTUB
   fi
   assert_eq "$([ -e "$ab_dir/goal-$AB_GOAL_ID-runstate" ] && printf yes || printf no)" "yes" \
     "goal-abort: keeps run-state after a failed release so the sweep can be retried"
+
+  # UNREADABLE / UNPARSEABLE LEDGER: an empty pending-claim scan because awk
+  # CRASHED is byte-identical to an empty scan because every issue is terminal.
+  # The script has no `pipefail`, so an unchecked scan reported
+  # `released=0 … run-state cleaned`, exited 0, released NOTHING and then DELETED
+  # both the run-state sidecar and the fixed-path active-id pointer — destroying
+  # the only channel a retry could resolve this run through and stranding every
+  # `uberdev:active` claim permanently. That is the exact failure this script
+  # exists to prevent, so it must take the fail-loud keep-run-state contract.
+  #
+  # An `awk` shim that exits non-zero reproduces it deterministically on every
+  # platform; a chmod-000 ledger does not (no-op as root, ignored on Windows).
+  cat > "$ab_bin/awk" <<'AWKSTUB'
+#!/usr/bin/env bash
+printf 'awk: simulated ledger read failure\n' >&2
+exit 2
+AWKSTUB
+  chmod +x "$ab_bin/awk"
+  printf '77\tsolving\t150\n' > "$ab_dir/goal-$AB_GOAL_ID-issue-states.tsv"
+  printf '%s\n' "$AB_GOAL_ID" > "$ab_dir/goal-active-id.txt"
+  printf 'GOAL_ID=%s\ncycle=1\n' "$AB_GOAL_ID" > "$ab_dir/goal-$AB_GOAL_ID-runstate"
+  ab_led_out="$(GH_CALLS="$ab_dir/calls-ledger.txt" PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" \
+    bash "$ABORT_SH" "$AB_GOAL_ID" 2>&1)"
+  ab_led_rc=$?
+  rm -f "$ab_bin/awk"
+  assert_eq "$ab_led_rc" "1" \
+    "goal-abort: an unreadable issue-state ledger is rc 1 — never a silent 'nothing to release' success"
+  if grep -qF 'FAILED to read the issue-state ledger' <<<"$ab_led_out"; then
+    PASS=$((PASS + 1)); printf '  PASS  goal-abort: names the unread ledger on stderr instead of reporting released=0\n'
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: expected an unread-ledger diagnostic (got: [%s])\n' "$ab_led_out" >&2
+  fi
+  assert_eq "$([ -e "$ab_dir/goal-$AB_GOAL_ID-runstate" ] && printf yes || printf no)" "yes" \
+    "goal-abort: KEEPS the run-state when the ledger could not be read (a retry still has something to resolve)"
+  assert_eq "$([ -e "$ab_dir/goal-active-id.txt" ] && printf yes || printf no)" "yes" \
+    "goal-abort: KEEPS the fixed-path active-id pointer — the only channel a retry can find the run through"
+  assert_eq "$([ -e "$ab_dir/calls-ledger.txt" ] && printf yes || printf no)" "no" \
+    "goal-abort: attempts no gh mutation at all when the ledger is unread"
 
   # A path-traversal GOAL_ID must be refused before it indexes any file path.
   PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" bash "$ABORT_SH" '../pwned' >/dev/null 2>&1

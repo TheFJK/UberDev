@@ -591,10 +591,17 @@ if [ "$W1B_RC" -eq 0 ] \
 else
   fail "W1b: indeterminate bound wrong (rc=$W1B_RC out=[$W1B_OUT] err=[$W1B_ERR]) — #348"
 fi
-if grep -q 'REVIEW-DISPATCHED' <<<"$W1B_OUT$W1B_ERR"; then
-  fail "W1b.no-rereview: step-2b dispatched a /review-pr for an INDETERMINATE verdict — re-reviewing cannot resolve a ranking tie (#348)"
+# The assertion is on the CASCADE ENTRY, not just on the dispatch. `REVIEW-
+# DISPATCHED` alone is a tautology: without the #348 split the benign cascade
+# still short-circuits at its grace arm (now - seen_ts ≈ 0 < REVIEW_GRACE_SECS),
+# so no review is dispatched on ANY of the three passes and the assertion passes
+# with the fix reverted. The FIRST cascade probe — the fresh-marker check — is
+# what actually discriminates: the #348 arm `continue`s before it, the pre-fix
+# code walks straight into it. Trip on either marker.
+if grep -qE 'REVIEW-DISPATCHED|MARKER-PROBED' <<<"$W1B_OUT$W1B_ERR"; then
+  fail "W1b.no-rereview: step-2b entered the benign stale|missing cascade for an INDETERMINATE verdict (marker probe and/or /review-pr dispatch reached) — the indeterminate arm must short-circuit before it; re-reviewing cannot resolve a ranking tie (#348)"
 else
-  pass "W1b.no-rereview: no /review-pr dispatched for an indeterminate verdict (#348)"
+  pass "W1b.no-rereview: the indeterminate arm short-circuits BEFORE the benign cascade — neither the marker probe nor a /review-pr dispatch is reached (#348)"
 fi
 if grep -q 'verdict_indeterminate' "$W1B_AUDIT" 2>/dev/null \
    && ! grep -q 'dispatch_cap_exhausted' "$W1B_AUDIT" 2>/dev/null; then
@@ -920,7 +927,11 @@ DRV_W3="$WORK/drv_w3.zsh"
   echo 'any_active=0'
   echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=3600'
   echo 'uberdev_goal_get_issue_state() { printf "solving"; }'
-  echo 'uberdev_goal_find_pr_for_issue() { :; }'
+  # Step 2a resolves PRs from the per-pass snapshot (#301), not the retired
+  # per-issue live finder. Stub BOTH halves to "no PR yet" — that is the
+  # precondition for the no-PR solver-status branch this test exercises.
+  echo 'uberdev_goal_pr_list_snapshot() { :; }'
+  echo 'uberdev_goal_find_pr_for_issue_from_json() { :; }'
   echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
   echo 'uberdev_goal_agent_busy_for_issue() { return 1; }'
   echo 'uberdev_goal_issue_ts_in_state() { printf "%s" "$now"; }'
@@ -945,6 +956,196 @@ if [ "$W3_RC" -eq 1 ] \
   pass "W3: malformed Codex status file fails closed with diagnostic, release breadcrumb, failed transition, and solver_failed audit"
 else
   fail "W3: malformed Codex status should fail closed with release breadcrumb (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
+fi
+
+# ==========================================================================
+# W4 — step-2a per-pass PR snapshot: N resolutions, ONE fetch, and ZERO fetches
+# when no issue needs one (#301 speedup finding 1).
+#
+# Two properties, and the SECOND is the load-bearing one:
+#
+#   (1) When k>0 active issues still need a PR number, the whole pass takes
+#       exactly ONE `gh pr list` page and every issue is resolved against THAT
+#       page (the pre-#301 code took k identical pages, and the k answers could
+#       disagree mid-pass).
+#   (2) When every active issue is already pr-pushed/terminal, the pass takes
+#       ZERO pages. This is not a micro-optimisation: `uberdev_goal_pr_list_snapshot`
+#       calls `_uberdev_goal_reset_gh_failure` on every healthy fetch, so a
+#       snapshot taken UNCONDITIONALLY at the top of the pass resets the #290.3
+#       consecutive-failure counter every 60s. In the reviewing/merging steady
+#       state — where the only remaining gh traffic is 2c/2d `gh pr view` — that
+#       pins the counter at 1 forever and the gh_api_failed breaker can NEVER
+#       fire; /goal then rides the 4h stuck_loop instead of halting in ~5 min.
+#
+# Mutation guards (revert in your worktree, re-run -> the named assertion RED):
+#   - Hoist `pr_snapshot="$(uberdev_goal_pr_list_snapshot)"` back above the
+#     `for issue` loop (unconditional) => W4b RED (snap_calls=1, not 0).
+#   - Go back to the per-issue live finder (uberdev_goal_find_pr_for_issue)
+#     => W4a RED (snap_calls=0 and the LIVE-FINDER tripwire fires).
+#   - Re-fetch per issue inside the loop => W4a RED (snap_calls=3, not 1).
+# ==========================================================================
+echo
+echo "== W4: step-2a resolves N issues from ONE PR-list page — and none at all when nobody needs one (#301) =="
+
+W4_SNAP='[{"number":501,"closingIssuesReferences":[{"number":41}],"headRefName":"feat/41-a"},
+          {"number":502,"closingIssuesReferences":[{"number":42}],"headRefName":"feat/42-a"},
+          {"number":503,"closingIssuesReferences":[{"number":43}],"headRefName":"feat/43-a"}]'
+
+# $1=outfile $2=tag $3=issue state reported for all three active issues
+write_w4_driver() {
+  # Two statements, not one: zsh's `local` declares every name in the command
+  # BEFORE assigning, so a `state_dir="…$tag"` in the same `local` reads an
+  # unset $tag and aborts under set -u.
+  local out="$1" tag="$2" istate="$3"
+  local state_dir="$WORK/w4-state-$tag"
+  mkdir -p "$state_dir" || { echo "FATAL: mkdir -p $state_dir failed" >&2; exit 3; }
+  {
+    echo 'set -u'
+    echo "export UBERDEV_TMPDIR='$state_dir'"
+    echo "export GOAL_ID='pipew4$tag'"
+    echo "export UBERDEV_GOAL_ID='pipew4$tag'"
+    echo 'export UBERDEV_RESOLVED_BACKEND=workflow'
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+    echo "uberdev_goal_state_init 'pipew4$tag' >/dev/null 2>&1"
+    echo 'active_issues=(41 42 43)'
+    echo 'now="$(date +%s)"'
+    echo 'cycle=1'
+    echo 'any_active=0'
+    echo 'made_transition=0'
+    echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=3600'
+    echo "W4_SNAP='$W4_SNAP'"
+    echo "uberdev_goal_get_issue_state() { printf '%s' '$istate'; }"
+    # The fetch happens inside a command substitution (a SUBSHELL), so the call
+    # tally has to live on disk — an in-memory counter would be lost every time.
+    echo 'uberdev_goal_pr_list_snapshot() { printf "x" >> "$UBERDEV_TMPDIR/snap-calls"; printf "%s" "$W4_SNAP"; }'
+    # Tripwire: the retired per-issue live finder must never be reached again.
+    echo 'uberdev_goal_find_pr_for_issue() { printf "LIVE-FINDER-CALLED\n" >> "$UBERDEV_TMPDIR/w4-log"; printf "999"; }'
+    echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
+    echo 'uberdev_goal_batch_has_pr() { return 1; }'
+    echo 'uberdev_goal_register_batch_pr() { printf "resolved issue=%s pr=%s\n" "$3" "$2" >> "$UBERDEV_TMPDIR/w4-log"; return 0; }'
+    echo 'uberdev_goal_issue_state_transition() { return 0; }'
+    echo 'uberdev_goal_pr_state_transition() { return 0; }'
+    echo 'uberdev_goal_pr_is_merged() { return 1; }'
+    echo 'uberdev_goal_agent_busy_for_issue() { return 0; }'
+    # Any real gh reach-through is a bug: record it so it cannot pass silently.
+    echo 'gh() { printf "GH-CALLED %s\n" "$*" >> "$UBERDEV_TMPDIR/w4-log"; return 0; }'
+    echo "source '$W3_STEP2A'"
+    echo '_snap="$(cat "$UBERDEV_TMPDIR/snap-calls" 2>/dev/null)"'
+    echo 'printf "snap_calls=%s any_active=%s\n" "${#_snap}" "$any_active"'
+  } > "$out"
+}
+
+# --- W4a: three issues in `solving` all need a PR number -> ONE page, three
+# resolutions off that page, live finder never touched.
+DRV_W4A="$WORK/drv_w4a.zsh"; write_w4_driver "$DRV_W4A" a solving
+W4A_OUT="$("$ZSH_BIN" -f "$DRV_W4A" 2>"$WORK/w4a.err")"; W4A_RC=$?
+W4A_LOG="$(cat "$WORK/w4-state-a/w4-log" 2>/dev/null)"
+if [ "$W4A_RC" -eq 0 ] \
+   && grep -q 'snap_calls=1' <<<"$W4A_OUT" \
+   && grep -q 'resolved issue=41 pr=501' <<<"$W4A_LOG" \
+   && grep -q 'resolved issue=42 pr=502' <<<"$W4A_LOG" \
+   && grep -q 'resolved issue=43 pr=503' <<<"$W4A_LOG"; then
+  pass "W4a: three active issues resolve to their own PRs off exactly ONE gh pr list page (was one page per issue) — #301"
+else
+  fail "W4a: expected snap_calls=1 + all three issues resolved from that page (rc=$W4A_RC, out=[$W4A_OUT], log=[$W4A_LOG], err=[$(cat "$WORK/w4a.err" 2>/dev/null)])"
+fi
+if grep -qE 'LIVE-FINDER-CALLED|GH-CALLED' <<<"$W4A_LOG"; then
+  fail "W4a.nolive: step-2a reached the retired per-issue live finder / a raw gh call instead of the per-pass snapshot (log=[$W4A_LOG]) — #301"
+else
+  pass "W4a.nolive: step-2a never touches the per-issue live finder or a raw gh call — the snapshot is the only PR-resolution route (#301)"
+fi
+
+# --- W4b: every active issue is already pr-pushed -> the loop `continue`s past
+# all of them and the pass must take ZERO pages, so the #290.3 counter is free
+# to accumulate the 2c/2d gh failures that are the only gh traffic left.
+DRV_W4B="$WORK/drv_w4b.zsh"; write_w4_driver "$DRV_W4B" b pr-pushed
+W4B_OUT="$("$ZSH_BIN" -f "$DRV_W4B" 2>"$WORK/w4b.err")"; W4B_RC=$?
+W4B_LOG="$(cat "$WORK/w4-state-b/w4-log" 2>/dev/null)"
+if [ "$W4B_RC" -eq 0 ] \
+   && grep -q 'snap_calls=0' <<<"$W4B_OUT" \
+   && [ -z "$W4B_LOG" ]; then
+  pass "W4b: a pass in which every active issue is already pr-pushed issues ZERO gh pr list pages — so a healthy 'pr list' can never reset the #290.3 counter out from under a sustained 'pr view' outage (#301/#290.3)"
+else
+  fail "W4b: expected snap_calls=0 and no gh traffic for an all-pr-pushed pass (rc=$W4B_RC, out=[$W4B_OUT], log=[$W4B_LOG], err=[$(cat "$WORK/w4b.err" 2>/dev/null)]) — an UNCONDITIONAL snapshot defeats the gh_api_failed breaker"
+fi
+
+# ==========================================================================
+# W5 — the made_transition fast path skips the poll sleep, and the consecutive
+# bound stops it degenerating into a hot loop (#301 speedup finding 2).
+#
+# Steps run 2a…2f in a fixed order, so a transition applied in a later step is
+# not consumed until the next pass; sleeping 60s first is dead latency. But an
+# UNBOUNDED "transition => no sleep" rule is a gh-hammering hot loop the moment
+# two PRs keep handing each other work. Both halves are behaviour, and both were
+# untested — the gate lives in the watch fence, which no unit test executes.
+#
+# Reuses W2's Slice A (bound setup) + Slice B (2f drain + bound gate + trailing
+# sleep) verbatim; only the loop-driving scalars are ours.
+#
+# Mutation guards (revert in your worktree, re-run -> the named assertion RED):
+#   - Delete the `made_transition=1 && _fast_passes < MAX` continue gate
+#     => W5a RED (7 sleeps instead of 1).
+#   - Drop the `-lt "${_UBERDEV_GOAL_MAX_FAST_PASSES:-5}"` bound (unbounded fast
+#     path) => W5a RED (0 sleeps — the hot loop).
+#   - Make the gate fire regardless of made_transition => W5b RED (0 sleeps).
+# ==========================================================================
+echo
+echo "== W5: made_transition fast path — bounded burst, then a real sleep (#301) =="
+
+# $1=outfile $2=tag $3=made_transition value per pass $4=passes to run
+write_w5_driver() {
+  local out="$1" tag="$2" mt="$3" passes="$4"
+  {
+    echo 'set -u'
+    echo "export UBERDEV_TMPDIR='$WORK/w5-state-$tag'"
+    echo "export GOAL_ID='pipew5$tag'"
+    echo "export UBERDEV_GOAL_ID='pipew5$tag'"
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
+    echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+    echo "uberdev_goal_state_init 'pipew5$tag' >/dev/null 2>&1"
+    echo '_uberdev_goal_reap_zombies() { :; }'
+    echo 'uberdev_goal_write_run_state() { return 0; }'
+    # Counting sleep stub: same shell as the loop, so a plain counter is fine
+    # (unlike W4's snapshot, this call is not inside a command substitution).
+    echo 'W5_SLEEPS=0'
+    echo 'sleep() { W5_SLEEPS=$(( W5_SLEEPS + 1 )); printf "SLEPT pass=%s\n" "$_iter"; }'
+    echo 'WATCH_PASSES=0'   # unbounded watch: isolate the fast-path gate from
+    echo 'WATCH_BUDGET=0'   # the #299 bounded-tick exits (W2 owns those).
+    cat "$W2_SETUP"
+    echo 'fi'
+    echo '_iter=0'
+    echo 'while true; do'
+    echo '  _iter=$(( _iter + 1 ))'
+    echo "  [ \"\$_iter\" -gt $passes ] && break"
+    echo '  any_active=1'                 # never drains: 2f must fall through
+    echo "  made_transition=$mt"
+    cat "$W2_GATE"
+    echo 'done'
+    echo 'printf "passes=%s sleeps=%s fast_passes=%s\n" "$(( _iter - 1 ))" "$W5_SLEEPS" "${_fast_passes:-0}"'
+  } > "$out"
+}
+
+# --- W5a: a transition on EVERY pass. Passes 1-5 skip the sleep, pass 6 hits
+# the MAX_FAST_PASSES bound and sleeps (resetting the burst), pass 7 is fast
+# again => exactly ONE sleep in seven passes.
+DRV_W5A="$WORK/drv_w5a.zsh"; write_w5_driver "$DRV_W5A" a 1 7
+W5A_OUT="$("$ZSH_BIN" -f "$DRV_W5A" 2>&1)"; W5A_RC=$?
+if [ "$W5A_RC" -eq 0 ] \
+   && grep -q 'passes=7 sleeps=1' <<<"$W5A_OUT" \
+   && grep -q 'SLEPT pass=6' <<<"$W5A_OUT"; then
+  pass "W5a: with a transition every pass, the first ${_UBERDEV_GOAL_MAX_FAST_PASSES:-5} passes skip the 60s sleep and the 6th sleeps anyway — fast path bounded, never a hot loop (#301)"
+else
+  fail "W5a: expected passes=7 sleeps=1 with the sleep landing on pass 6 (got rc=$W5A_RC, out=[$W5A_OUT]) — missing fast path (7 sleeps) or missing bound (0 sleeps)?"
+fi
+
+# --- W5b: no transition => the gate must NOT fire; every pass sleeps.
+DRV_W5B="$WORK/drv_w5b.zsh"; write_w5_driver "$DRV_W5B" b 0 7
+W5B_OUT="$("$ZSH_BIN" -f "$DRV_W5B" 2>&1)"; W5B_RC=$?
+if [ "$W5B_RC" -eq 0 ] && grep -q 'passes=7 sleeps=7' <<<"$W5B_OUT"; then
+  pass "W5b: a pass that moved NOTHING still sleeps the full poll interval — the fast path is gated on made_transition, not always-on (#301)"
+else
+  fail "W5b: expected passes=7 sleeps=7 when made_transition=0 (got rc=$W5B_RC, out=[$W5B_OUT]) — an always-on skip would hammer gh"
 fi
 
 echo
