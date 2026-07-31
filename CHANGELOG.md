@@ -4,6 +4,24 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.4] — 2026-07-30
+
+### Fixed
+
+- `/merge` verdict discovery could report a verdict as **proven absent** — which reads as a passing gate — when its root-layout table simply disagreed with itself. The table restated one segment count three ways with nothing checking they agreed; it now carries one shape per root and derives the rest, asserted against a documented pin table and routed through the failure path so a mismatch can never exit with the code reserved for proven absence.
+- A `/merge` scan aborted every root layout on the first `OSError`, so an unreadable directory could hide a good verdict under the canonical root. Errors now accumulate per root, every root is scanned, and the run fails once, naming root and errno.
+- Artifact identities compared equal to a different type and to any bare 6-tuple, and the public constructor accepted unvalidated receipt JSON. Both are now frozen dataclasses with construction-time domain validation; the receipt wire format is unchanged.
+- A mode-0400 verdict copy leaked per non-clean exit: the capture directory was removed with a swallowing `rmdir` that could never succeed, because the publisher had deliberately left a file inside it. Removal is now identity-guarded and a failure names the leaked absolute path instead of hiding it.
+- The `/merge` auto-review cap was void — it lived in an associative array inside a bash fence, and fences share no shell state, so the array always read empty and re-dispatch was unbounded **while holding the merge lock**. The cap is now an atomic directory marker claimed before dispatch.
+- The branch-protection probe mapped every non-zero exit to "skip". It now classifies on the HTTP status, and — after review found the first fix introduced a *new* fail-open — runs a local upstream-ref check first, so a `404` can no longer read a local-only branch as unprotected.
+- An inherited `RUN_ID` was interpolated into the lock record unvalidated; a quote or newline broke the record and the holder check then warn-skipped, leaving the merge lock held.
+- A FIFO at any artifact path hung the caller forever: `open()` for reading blocks until a writer appears, and the regularity check can only reject a node it has already opened — so `/merge` wedged while holding the lock. Opens are now non-blocking.
+
+### Tests
+
+- The Phase 1.4 trust gate is now extracted and **executed** against fixtures rather than only grepped, and an assertion that pinned the retired associative-array construct — passing off its own retirement comment — was re-anchored and mutation-proved.
+- Added fixtures for a FIFO and a directory at the verdict path, the size boundary, divergent duplicate JSON keys, a root that is a regular file, and errno accumulation; converted 131 `echo | grep -q` sites to herestrings (the EPIPE-race class), fixing one that inverted an empty-input assertion in the process.
+
 ## [0.41.3] — 2026-07-30
 
 ### Fixed

@@ -55,7 +55,11 @@ expected_source_members = {
         ("Iterable", None),
         ("Iterator", None),
     },
-    "typing": {("Any", None), ("NamedTuple", None)},
+    # `NamedTuple` is deliberately absent since #343: ArtifactIdentity and
+    # RawArtifactDescriptorState are frozen slotted dataclasses now, because two
+    # 6-int NamedTuples compare structurally equal to each other AND to any bare
+    # 6-tuple decoded from receipt JSON.
+    "typing": {("Any", None)},
 }
 actual_source_members = {source: set() for source in expected_source_members}
 tracked_membership = {
@@ -772,14 +776,14 @@ else
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/duplicate-terminal.jsonl" --strict
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'line 4: duplicate_terminal'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'line 4: duplicate_terminal' <<<"$CAPTURE_OUT"; then
   pass "duplicate terminal event is rejected"
 else
   fail "duplicate terminal event is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/invalid-transition.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'line 1: agent_started_before_route_decided'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'line 1: agent_started_before_route_decided' <<<"$CAPTURE_OUT"; then
   pass "start before route decision is rejected"
 else
   fail "start before route decision is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -792,21 +796,21 @@ else
   fail "non-strict verification permits a live started run" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/missing-terminal.jsonl" --strict
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'run run-open: missing_terminal'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'run run-open: missing_terminal' <<<"$CAPTURE_OUT"; then
   pass "strict verification rejects a missing terminal"
 else
   fail "strict verification rejects a missing terminal" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/forbidden.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'forbidden_field: prompt_body'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'forbidden_field: prompt_body' <<<"$CAPTURE_OUT"; then
   pass "verification detects forbidden payload fields"
 else
   fail "verification detects forbidden payload fields" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/schema-float.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_schema_version'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'invalid_schema_version' <<<"$CAPTURE_OUT"; then
   pass "schema version must be a supported integer, not a JSON float"
 else
   fail "schema version must be the integer 1, not a JSON float" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -815,14 +819,14 @@ fi
 INVALID_STARTED_SCHEMA="$TMP/invalid-started-schema.jsonl"
 printf '%s\n' '{"schema_version":"2","event":"agent_started","timestamp":"2026-07-10T00:00:00Z","run_id":"run-invalid-started-schema","backend":"codex","owner_pid":1}' >"$INVALID_STARTED_SCHEMA"
 capture python3 "$MANIFEST" verify --manifest "$INVALID_STARTED_SCHEMA"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_schema_version'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'invalid_schema_version' <<<"$CAPTURE_OUT"; then
   pass "invalid agent_started schema is rejected without a validator crash"
 else
   fail "invalid agent_started schema is rejected without a validator crash" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/backend-mismatch.jsonl" --strict
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'line 2: backend_mismatch'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'line 2: backend_mismatch' <<<"$CAPTURE_OUT"; then
   pass "backend identity cannot drift within one lifecycle"
 else
   fail "backend identity cannot drift within one lifecycle" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -839,7 +843,7 @@ do
   fixture="${invalid_case%%:*}"
   expected="${invalid_case#*:}"
   capture python3 "$MANIFEST" verify --manifest "$FIXTURES/$fixture"
-  if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -Fq "$expected"; then
+  if [ "$CAPTURE_RC" -eq 1 ] && grep -Fq "$expected" <<<"$CAPTURE_OUT"; then
     pass "$fixture is rejected by closed manifest metadata rules"
   else
     fail "$fixture is rejected by closed manifest metadata rules" "rc=$CAPTURE_RC expected=$expected out=$CAPTURE_OUT"
@@ -847,7 +851,7 @@ do
 done
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/null-owner.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_owner_pid'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'invalid_owner_pid' <<<"$CAPTURE_OUT"; then
   pass "agent_started requires a positive owner PID, not null"
 else
   fail "agent_started requires a positive owner PID, not null" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -856,7 +860,7 @@ fi
 MISSING_OWNER_IDENTITY="$TMP/missing-owner-identity/events.jsonl"
 append_event "$MISSING_OWNER_IDENTITY" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-missing-owner-identity","backend":"codex"}' >/dev/null
 capture append_event "$MISSING_OWNER_IDENTITY" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"run_id\":\"run-missing-owner-identity\",\"backend\":\"codex\",\"owner_pid\":$$}"
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_owner_process_identity'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'invalid_owner_process_identity' <<<"$CAPTURE_OUT"; then
   pass "current agent_started records require owner process identity"
 else
   fail "current agent_started records require owner process identity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -890,7 +894,7 @@ fi
 
 V1_APPEND_BYPASS="$TMP/v1-append-bypass/events.jsonl"
 capture append_event "$V1_APPEND_BYPASS" '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-v1-bypass","backend":"codex"}'
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'append_requires_current_schema'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'append_requires_current_schema' <<<"$CAPTURE_OUT"; then
   pass "append boundary rejects newly claimed legacy v1 records"
 else
   fail "append boundary rejects newly claimed legacy v1 records" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -899,7 +903,7 @@ fi
 IDENTITY_PID_MISMATCH="$TMP/identity-pid-mismatch/events.jsonl"
 append_event "$IDENTITY_PID_MISMATCH" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:00:00Z","run_id":"run-identity-pid-mismatch","backend":"codex"}' >/dev/null
 capture append_event "$IDENTITY_PID_MISMATCH" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:00:01Z\",\"run_id\":\"run-identity-pid-mismatch\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$(( $$ + 1 ))|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_owner_process_identity'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'invalid_owner_process_identity' <<<"$CAPTURE_OUT"; then
   pass "owner process identity is bound to owner_pid"
 else
   fail "owner process identity is bound to owner_pid" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -951,14 +955,14 @@ else
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/policy-mismatch.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'decision_effective_route_mismatch'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'decision_effective_route_mismatch' <<<"$CAPTURE_OUT"; then
   pass "adaptive decision and effective route metadata must agree"
 else
   fail "adaptive decision and effective route metadata must agree" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 capture python3 "$MANIFEST" verify --manifest "$FIXTURES/sensitive-allowed-field.jsonl"
-if [ "$CAPTURE_RC" -eq 1 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'sensitive_value: issue_or_pr'; then
+if [ "$CAPTURE_RC" -eq 1 ] && grep -q 'sensitive_value: issue_or_pr' <<<"$CAPTURE_OUT"; then
   pass "sensitive content cannot smuggle through an allowed metadata key"
 else
   fail "sensitive content cannot smuggle through an allowed metadata key" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -994,14 +998,14 @@ fi
 before_lines="$(wc -l < "$APPEND_PATH" | tr -d ' ')"
 capture append_event "$APPEND_PATH" '{"schema_version":2,"event":"failed","timestamp":"2026-07-10T00:01:03Z","run_id":"run-append","agent_id":"agent-append","backend":"codex","terminal_status":"failed"}'
 after_lines="$(wc -l < "$APPEND_PATH" | tr -d ' ')"
-if [ "$CAPTURE_RC" -eq 2 ] && [ "$before_lines" -eq "$after_lines" ] && printf '%s' "$CAPTURE_OUT" | grep -q 'duplicate_terminal'; then
+if [ "$CAPTURE_RC" -eq 2 ] && [ "$before_lines" -eq "$after_lines" ] && grep -q 'duplicate_terminal' <<<"$CAPTURE_OUT"; then
   pass "append rejects a second terminal without mutating the file"
 else
   fail "append rejects a second terminal without mutating the file" "rc=$CAPTURE_RC lines=$before_lines/$after_lines out=$CAPTURE_OUT"
 fi
 
 capture append_event "$TMP/no-route/events.jsonl" '{"schema_version":2,"event":"agent_started","timestamp":"2026-07-10T00:02:00Z","run_id":"run-no-route","backend":"codex","owner_pid":1,"owner_process_identity":"1|1|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'agent_started_before_route_decided'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'agent_started_before_route_decided' <<<"$CAPTURE_OUT"; then
   pass "append validates lifecycle transitions"
 else
   fail "append validates lifecycle transitions" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -1021,7 +1025,7 @@ if [ "$FAIL" -eq "$forbidden_fail_before" ]; then
 fi
 
 capture append_event "$TMP/unknown/events.jsonl" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:04:00Z","run_id":"run-unknown","backend":"codex","message":"payload in disguise"}'
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'unknown_field: message'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'unknown_field: message' <<<"$CAPTURE_OUT"; then
   pass "unknown non-metadata fields are rejected"
 else
   fail "unknown non-metadata fields are rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -1056,7 +1060,7 @@ else
 fi
 
 capture append_event "$TMP/non-string-risk/events.jsonl" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:04:01Z","run_id":"run-non-string-risk","backend":"codex","risk_signals":[{}]}'
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_risk_signals'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'invalid_risk_signals' <<<"$CAPTURE_OUT"; then
   pass "non-string risk metadata is rejected without a validator crash"
 else
   fail "non-string risk metadata is rejected without a validator crash" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -1068,7 +1072,7 @@ mkdir -p "$(dirname "$OPAQUE_PAYLOAD_STATUS")"
 printf '{"state":"running"}\n' > "$OPAQUE_PAYLOAD_STATUS"
 append_event "$OPAQUE_PAYLOAD_PATH" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:04:02Z","run_id":"run-smuggling-handle","backend":"codex"}' >/dev/null
 capture append_event "$OPAQUE_PAYLOAD_PATH" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-smuggling-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":\"function steal(){return document.cookie}\",\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_backend_handle'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'invalid_backend_handle' <<<"$CAPTURE_OUT"; then
   pass "opaque backend handles are identifiers rather than payload channels"
 else
   fail "opaque backend handles are identifiers rather than payload channels" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -1077,7 +1081,7 @@ fi
 INVALID_PID_HANDLE_PATH="$TMP/invalid-pid-handle/events.jsonl"
 append_event "$INVALID_PID_HANDLE_PATH" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:04:02Z","run_id":"run-invalid-pid-handle","backend":"codex"}' >/dev/null
 capture append_event "$INVALID_PID_HANDLE_PATH" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:04:03Z\",\"run_id\":\"run-invalid-pid-handle\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":0,\"status_path\":\"$OPAQUE_PAYLOAD_STATUS\"}"
-if [ "$CAPTURE_RC" -eq 2 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'invalid_backend_handle'; then
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'invalid_backend_handle' <<<"$CAPTURE_OUT"; then
   pass "numeric backend handles must be positive process IDs"
 else
   fail "numeric backend handles must be positive process IDs" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -1107,9 +1111,9 @@ for reserved_pid_handle in 'pid:' 'pid:0' 'pid:-1' 'pid:provider'; do
   reconcile_reserved_out="$CAPTURE_OUT"
   reserved_lines_after="$(wc -l < "$reserved_verify_path" | tr -d ' ')"
 
-  if [ "$append_reserved_rc" -ne 2 ] || ! printf '%s' "$append_reserved_out" | grep -q invalid_backend_handle \
-     || [ "$verify_reserved_rc" -ne 1 ] || ! printf '%s' "$verify_reserved_out" | grep -q invalid_backend_handle \
-     || [ "$reconcile_reserved_rc" -ne 2 ] || ! printf '%s' "$reconcile_reserved_out" | grep -q invalid_backend_handle \
+  if [ "$append_reserved_rc" -ne 2 ] || ! grep -q invalid_backend_handle  <<<"$append_reserved_out" \
+     || [ "$verify_reserved_rc" -ne 1 ] || ! grep -q invalid_backend_handle  <<<"$verify_reserved_out" \
+     || [ "$reconcile_reserved_rc" -ne 2 ] || ! grep -q invalid_backend_handle  <<<"$reconcile_reserved_out" \
      || [ "$reserved_lines_before" -ne "$reserved_lines_after" ]; then
     reserved_pid_failures="$reserved_pid_failures $reserved_pid_handle(append:$append_reserved_rc,verify:$verify_reserved_rc,reconcile:$reconcile_reserved_rc,lines:$reserved_lines_before/$reserved_lines_after)"
   fi
@@ -1594,8 +1598,8 @@ completed_reconcile_out="$CAPTURE_OUT"
 completed_terminal="$(tail -n 1 "$TRUE_COMPLETED_MANIFEST")"
 if [ "$completed_reconcile_rc" -eq 0 ] \
    && [ "$completed_reconcile_out" = '{"abandoned":0,"open":0,"status":"ok"}' ] \
-   && printf '%s' "$completed_terminal" | grep -q '"event":"completed"' \
-   && ! printf '%s' "$completed_terminal" | grep -q 'ignored'; then
+   && grep -q '"event":"completed"'  <<<"$completed_terminal" \
+   && ! grep -q 'ignored' <<<"$completed_terminal"; then
   pass "reconcile consumes canonical completed status without copying arbitrary fields"
 else
   fail "reconcile consumes canonical completed status without copying arbitrary fields" "rc=$completed_reconcile_rc out=$completed_reconcile_out terminal=$completed_terminal"
@@ -1613,8 +1617,8 @@ failed_reconcile_out="$CAPTURE_OUT"
 failed_terminal="$(tail -n 1 "$TRUE_FAILED_MANIFEST")"
 if [ "$failed_reconcile_rc" -eq 0 ] \
    && [ "$failed_reconcile_out" = '{"abandoned":0,"open":0,"status":"ok"}' ] \
-   && printf '%s' "$failed_terminal" | grep -q '"event":"failed"' \
-   && printf '%s' "$failed_terminal" | grep -q '"error_class":"provider_failed"'; then
+   && grep -q '"event":"failed"'  <<<"$failed_terminal" \
+   && grep -q '"error_class":"provider_failed"' <<<"$failed_terminal"; then
   pass "reconcile consumes canonical failed status with validated nonzero exit"
 else
   fail "reconcile consumes canonical failed status with validated nonzero exit" "rc=$failed_reconcile_rc out=$failed_reconcile_out terminal=$failed_terminal"
@@ -1824,8 +1828,8 @@ capture python3 "$MANIFEST" reconcile --manifest "$UNKNOWN_TRUTH_MANIFEST"
 unknown_terminal="$(tail -n 1 "$UNKNOWN_TRUTH_MANIFEST")"
 if [ "$malformed_rc" -eq 0 ] \
    && [ "$malformed_lines_after" -eq $((malformed_lines_before + 1)) ] \
-   && printf '%s' "$malformed_terminal" | grep -q '"event":"abandoned"' \
-   && ! printf '%s' "$unknown_terminal" | grep -Eq '"event":"(completed|failed|timed_out|cancelled)"'; then
+   && grep -q '"event":"abandoned"'  <<<"$malformed_terminal" \
+   && ! grep -Eq '"event":"(completed|failed|timed_out|cancelled)"' <<<"$unknown_terminal"; then
   pass "malformed and unknown status are unavailable and never provider terminal truth"
 else
   fail "malformed and unknown status are unavailable and never provider terminal truth" "malformed_rc=$malformed_rc lines=$malformed_lines_before/$malformed_lines_after malformed=$malformed_terminal unknown=$unknown_terminal"
@@ -1842,7 +1846,7 @@ future_true_rc="$CAPTURE_RC"
 capture python3 "$MANIFEST" verify --manifest "$FUTURE_TRUE_MANIFEST" --strict
 future_true_terminal="$(tail -n 1 "$FUTURE_TRUE_MANIFEST")"
 if [ "$future_true_rc" -eq 0 ] && [ "$CAPTURE_RC" -eq 0 ] \
-   && printf '%s' "$future_true_terminal" | grep -q '"event":"completed"'; then
+   && grep -q '"event":"completed"' <<<"$future_true_terminal"; then
   pass "reconciled provider terminal timestamp is never before agent start"
 else
   fail "reconciled provider terminal timestamp is never before agent start" "reconcile_rc=$future_true_rc verify=$CAPTURE_RC/$CAPTURE_OUT terminal=$future_true_terminal"
@@ -2025,31 +2029,82 @@ for index, module_path in enumerate(sys.argv[1:3]):
     with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=False):
         posix_identity = module._artifact_identity(path_state)
         raw_descriptor_state = module._artifact_raw_fd_state(path_state)
-        expected_posix_identity = (
+        expected_components = [
             path_state.st_dev,
             path_state.st_ino,
             path_state.st_size,
             path_state.st_mtime_ns,
             path_state.st_ctime_ns,
             path_state.st_mode,
+        ]
+        expected_posix_identity = module.artifact_identity_from_receipt(
+            expected_components
         )
         if posix_identity != expected_posix_identity:
             failures.append(f"{index}: non-Windows public identity changed")
         if (
-            type(posix_identity) is not getattr(module, "ArtifactIdentity", None)
-            or not isinstance(posix_identity, tuple)
+            module.artifact_identity_receipt_components(posix_identity)
+            != expected_components
         ):
-            failures.append(f"{index}: public identity lacks its immutable tuple type")
-        if (
-            type(raw_descriptor_state)
-            is not getattr(module, "RawArtifactDescriptorState", None)
-            or not isinstance(raw_descriptor_state, tuple)
-        ):
+            failures.append(f"{index}: receipt component order changed")
+        # #343: the two identity types are frozen dataclasses, deliberately NOT
+        # tuples. As 6-int NamedTuples they compared equal to each other and to
+        # any bare 6-tuple, so a malformed receipt array could pose as a verified
+        # identity.
+        if type(posix_identity) is not getattr(
+            module, "ArtifactIdentity", None
+        ) or isinstance(posix_identity, tuple):
             failures.append(
-                f"{index}: raw descriptor state lacks its immutable tuple type"
+                f"{index}: public identity must be its own non-tuple frozen type"
+            )
+        if type(raw_descriptor_state) is not getattr(
+            module, "RawArtifactDescriptorState", None
+        ) or isinstance(raw_descriptor_state, tuple):
+            failures.append(
+                f"{index}: raw descriptor state must be its own non-tuple frozen type"
             )
         if type(posix_identity) is type(raw_descriptor_state):
             failures.append(f"{index}: public and raw descriptor states share one type")
+        if posix_identity == raw_descriptor_state:
+            failures.append(
+                f"{index}: public identity compares equal to the raw descriptor state"
+            )
+        if posix_identity == tuple(expected_components):
+            failures.append(
+                f"{index}: public identity compares equal to a bare 6-tuple"
+            )
+        if posix_identity == expected_components:
+            failures.append(f"{index}: public identity compares equal to a bare list")
+        try:
+            object.__setattr__  # noqa: B018 - readability of the intent below
+            posix_identity.size = 0
+        except Exception:
+            pass
+        else:
+            failures.append(f"{index}: public identity is mutable")
+        for malformed in (
+            expected_components[:5],
+            expected_components + [0],
+            "abcdef",
+            [True] + expected_components[1:],
+            [expected_components[0], -1] + expected_components[2:],
+            expected_components[:2] + [-1] + expected_components[3:],
+            expected_components[:5] + [-1],
+            expected_components[:5] + ["0"],
+        ):
+            try:
+                module.artifact_identity_from_receipt(malformed)
+            except module.ManifestRejected:
+                continue
+            failures.append(f"{index}: receipt parser accepted {malformed!r}")
+        # Pre-epoch mtime/birthtime and a signed st_dev are legitimate and MUST
+        # NOT be rejected — over-tight validation would fail-closed on real files.
+        try:
+            module.artifact_identity_from_receipt([-7, 1, 0, -1, -2, 0o100644])
+        except module.ManifestRejected:
+            failures.append(
+                f"{index}: receipt parser rejected a legitimate negative dev/time"
+            )
     with mock.patch.object(module, "_uses_native_windows_filesystem", return_value=True):
         if module._artifact_identity(path_state) != module._artifact_identity(fd_state):
             failures.append(
@@ -2603,7 +2658,18 @@ for index,module_path in enumerate(sys.argv[1:3]):
     root=pathlib.Path(sys.argv[3])/f"capture-{index}"; root.mkdir()
     artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
     payload,identity=module.secure_capture_regular(str(artifact),1,1024)
-    assert payload==b"verified bytes\n" and len(identity)==6
+    # Identities are frozen dataclasses, not tuples (#343) — serialise through the
+    # published receipt helper rather than assuming a tuple len().
+    assert payload==b"verified bytes\n"
+    assert len(module.artifact_identity_receipt_components(identity))==6
+    assert type(identity) is module.ArtifactIdentity and not isinstance(identity,tuple)
+    # A bare 6-tuple with identical components must NEVER compare equal: that
+    # structural equality is exactly what let unvalidated receipt JSON pose as a
+    # verified identity.
+    assert identity!=tuple(module.artifact_identity_receipt_components(identity))
+    assert identity!=module.RawArtifactDescriptorState(
+        *module.artifact_identity_receipt_components(identity)
+    )
     replacement=root/"replacement"; replacement.write_bytes(b"replacement\n")
     original_open=module._secure_open_regular
     replacement_completed=[False]
@@ -2862,10 +2928,21 @@ def parent_identity(path):
     return entry.st_dev, entry.st_ino
 
 
-def expect_failure(module, operation, label, failures):
+def expect_failure(module, operation, label, failures, expected_reason=None):
+    """Assert the operation fails closed, optionally on ONE specific reason.
+
+    `expected_reason` matters wherever a mock could short-circuit the code path
+    the test claims to exercise: a readback stub returning b"" trips the
+    short-read guard and never reaches the digest comparison the test is named
+    after, and both spellings look identical without pinning the reason.
+    """
     try:
         operation()
-    except (module.ManifestRejected, module.ManifestRuntimeError):
+    except (module.ManifestRejected, module.ManifestRuntimeError) as error:
+        if expected_reason is not None and expected_reason not in str(error):
+            failures.append(
+                f"{label}: failed with {error!s}, expected {expected_reason}"
+            )
         return
     except BaseException as error:
         failures.append(
@@ -3009,38 +3086,55 @@ for index, module_path in enumerate(sys.argv[1:3]):
         if not sync_target.exists():
             failures.append(f"{index}: {scenario} removed crash residue")
 
-    read_parent = root / "readback"
-    read_parent.mkdir()
-    read_target = read_parent / "artifact"
-    real_read = module.os.read
-    read_calls = [0]
-
-    def failed_readback(descriptor, size):
-        read_calls[0] += 1
-        if read_calls[0] == 1:
-            return b""
-        return real_read(descriptor, size)
-
-    unlink_calls = []
-    with mock.patch.object(module.os, "read", failed_readback), mock.patch.object(
-        module.os,
-        "unlink",
-        side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+    # Two distinct readback failures. Returning b"" only ever reaches the
+    # short-read guard, so the digest comparison -- the check that actually
+    # proves the bytes on disk are the bytes we published -- was never executed
+    # by this suite. Case 2 returns WRONG bytes of the RIGHT length so the read
+    # loop completes and the digest compare is the thing that fails.
+    for readback_case, readback_reason in (
+        ("short", "artifact_snapshot_short_read"),
+        ("corrupt", "artifact_snapshot_digest_mismatch"),
     ):
-        expect_failure(
-            module,
-            lambda: publish(
-                str(read_target),
-                b"readback bytes\n",
-                parent_identity(read_parent),
-            ),
-            f"{index}: readback failure",
-            failures,
-        )
-    if unlink_calls:
-        failures.append(f"{index}: readback failure attempted unlink")
-    if not read_target.exists():
-        failures.append(f"{index}: readback failure removed crash residue")
+        read_parent = root / f"readback-{readback_case}"
+        read_parent.mkdir()
+        read_target = read_parent / "artifact"
+        readback_payload = b"readback bytes\n"
+        real_read = module.os.read
+        read_calls = [0]
+
+        def failed_readback(descriptor, size, _case=readback_case):
+            read_calls[0] += 1
+            if read_calls[0] == 1:
+                return b"" if _case == "short" else b"\xa5" * size
+            return real_read(descriptor, size)
+
+        unlink_calls = []
+        with mock.patch.object(
+            module.os, "read", failed_readback
+        ), mock.patch.object(
+            module.os,
+            "unlink",
+            side_effect=lambda *args, **kwargs: unlink_calls.append((args, kwargs)),
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(read_target),
+                    readback_payload,
+                    parent_identity(read_parent),
+                ),
+                f"{index}: {readback_case} readback failure",
+                failures,
+                expected_reason=readback_reason,
+            )
+        if unlink_calls:
+            failures.append(
+                f"{index}: {readback_case} readback failure attempted unlink"
+            )
+        if not read_target.exists():
+            failures.append(
+                f"{index}: {readback_case} readback failure removed crash residue"
+            )
 
     # Existing files, symlinks, and directories are immutable obstacles.
     existing_parent = root / "existing"
@@ -3115,10 +3209,6 @@ for index, module_path in enumerate(sys.argv[1:3]):
     if windows_result[0] != os.path.abspath(windows_target) or windows_target.read_bytes() != b"windows exact bytes\n":
         failures.append(f"{index}: modeled native-Windows exact publication failed")
 
-    reparse_parent = root / "windows-reparse"
-    reparse_parent.mkdir()
-    reparse_target = reparse_parent / "artifact"
-
     class ReparseStatView:
         def __init__(self, entry, reparse_tag):
             self._entry = entry
@@ -3129,29 +3219,45 @@ for index, module_path in enumerate(sys.argv[1:3]):
 
     real_lstat = module.os.lstat
 
-    def modeled_reparse_lstat(path):
-        entry = real_lstat(path)
-        if os.path.abspath(os.fspath(path)) == os.path.abspath(reparse_parent):
-            return ReparseStatView(entry, 0xA000000C)
-        return entry
+    # Two placements. Tagging only the FINAL component exercises just the last
+    # loop iteration -- an implementation that inspected nothing but the leaf
+    # would have passed. The "grandparent" case tags a NON-final ancestor, so it
+    # can only be caught by the walk actually stepping through every component
+    # above the publication parent.
+    for reparse_case in ("leaf", "grandparent"):
+        reparse_grandparent = root / f"windows-reparse-{reparse_case}"
+        reparse_grandparent.mkdir()
+        reparse_parent = reparse_grandparent / "nested"
+        reparse_parent.mkdir()
+        reparse_target = reparse_parent / "artifact"
+        tagged = reparse_parent if reparse_case == "leaf" else reparse_grandparent
 
-    with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
-        module, "_uses_native_windows_filesystem", return_value=True
-    ), mock.patch.object(
-        module.os, "lstat", modeled_reparse_lstat
-    ):
-        expect_failure(
-            module,
-            lambda: publish(
-                str(reparse_target),
-                b"reparse\n",
-                parent_identity(reparse_parent),
-            ),
-            f"{index}: native-Windows reparse parent",
-            failures,
-        )
-    if reparse_target.exists():
-        failures.append(f"{index}: reparse rejection created a target")
+        def modeled_reparse_lstat(path, _tagged=tagged):
+            entry = real_lstat(path)
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(_tagged):
+                return ReparseStatView(entry, 0xA000000C)
+            return entry
+
+        with mock.patch.object(module.os, "name", "nt"), mock.patch.object(
+            module, "_uses_native_windows_filesystem", return_value=True
+        ), mock.patch.object(
+            module.os, "lstat", modeled_reparse_lstat
+        ):
+            expect_failure(
+                module,
+                lambda: publish(
+                    str(reparse_target),
+                    b"reparse\n",
+                    parent_identity(reparse_parent),
+                ),
+                f"{index}: native-Windows reparse {reparse_case}",
+                failures,
+                expected_reason="artifact_parent_reparse_rejected",
+            )
+        if reparse_target.exists():
+            failures.append(
+                f"{index}: reparse {reparse_case} rejection created a target"
+            )
 
     # A pathname replacement between two path snapshots must be rejected, and
     # the replacement must survive because uncertain identity never authorizes
@@ -3257,6 +3363,197 @@ if [ "$EXACT_PUBLICATION_RESULT" = ok ]; then
   pass "exact-name publisher is durable, no-clobber, identity-bound, dual-platform, and never path-rolls back"
 else
   fail "exact-name publisher contract" "$EXACT_PUBLICATION_RESULT"
+fi
+
+PRIVATE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+import importlib.util
+import os
+import pathlib
+import signal
+import stat
+import sys
+
+PREFIX = "uberdev-review-verdict."
+failures = []
+
+
+def expect_rejected(module, operation, label):
+    try:
+        operation()
+    except module.ManifestRejected:
+        return
+    except BaseException as error:
+        failures.append(f"{label}: escaped as {type(error).__name__}: {error}")
+        return
+    failures.append(f"{label}: unexpectedly succeeded")
+
+
+for index, module_path in enumerate(sys.argv[1:3]):
+    spec = importlib.util.spec_from_file_location(f"run_manifest_private_{index}", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    remove = getattr(module, "secure_remove_private_capture_dir", None)
+    if remove is None:
+        failures.append(f"{index}: secure_remove_private_capture_dir is missing")
+        continue
+
+    root = pathlib.Path(sys.argv[3]) / f"private-capture-{index}"
+    root.mkdir()
+
+    # The load-bearing case: secure_publish_captured NEVER unlinks its attempt
+    # file, so the capture directory is non-empty and a bare rmdir always failed.
+    populated = root / (PREFIX + "populated")
+    populated.mkdir(mode=0o700)
+    carrier, identity, digest = module.secure_publish_captured(
+        str(populated / "review-pr-verdict.json"), b'{"pr":1}'
+    )
+    if not os.path.exists(carrier):
+        failures.append(f"{index}: publication did not create a carrier")
+
+    # Positional read-only sequence view over the contractual receipt order.
+    # Two consumers OUTSIDE run_manifest.py depend on it and would break
+    # silently at runtime, not at import: `list(module._artifact_identity(...))`
+    # in commands/review-pr.md (reservation-marker compare) and
+    # `stat.S_IMODE(identity[5])` in skills/post-impl-review/SKILL.md (evidence
+    # mode check). Both are exercised only by slow integration suites, so pin
+    # the contract here.
+    components = module.artifact_identity_receipt_components(identity)
+    if list(identity) != components:
+        failures.append(f"{index}: list(identity) is not the receipt component order")
+    if len(identity) != 6:
+        failures.append(f"{index}: len(identity) is not 6")
+    if identity[5] != identity.mode:
+        failures.append(f"{index}: identity[5] is not the mode component")
+    if identity[1] != identity.inode or identity[0] != identity.device:
+        failures.append(f"{index}: positional order drifted from the receipt order")
+    # A sequence VIEW must not restore tuple IDENTITY — that structural
+    # equality is precisely the defect (#343).
+    if isinstance(identity, tuple) or identity == tuple(components):
+        failures.append(f"{index}: identity still compares equal to a bare tuple")
+    if identity == module.RawArtifactDescriptorState(*components):
+        failures.append(f"{index}: identity compares equal to the raw descriptor state")
+    if len({identity, module.artifact_identity_from_receipt(components)}) != 1:
+        failures.append(f"{index}: identity is not hashable/equal to its own re-parse")
+    remove(str(populated), PREFIX)
+    if populated.exists():
+        failures.append(f"{index}: a populated capture directory survived removal")
+
+    # Idempotent: the shell-side kill-before-Python fallback may have won.
+    remove(str(populated), PREFIX)
+
+    # Prefix guard: a directory this module did not mint is never removed.
+    foreign = root / "not-a-capture-dir"
+    foreign.mkdir()
+    expect_rejected(
+        module, lambda: remove(str(foreign), PREFIX), f"{index}: foreign prefix"
+    )
+    if not foreign.exists():
+        failures.append(f"{index}: prefix guard deleted a foreign directory")
+
+    # Unexpected entry types are refused rather than recursively deleted.
+    nested = root / (PREFIX + "nested")
+    nested.mkdir(mode=0o700)
+    (nested / "subdir").mkdir()
+    expect_rejected(
+        module, lambda: remove(str(nested), PREFIX), f"{index}: nested directory entry"
+    )
+    if not (nested / "subdir").exists():
+        failures.append(f"{index}: refusal still deleted the nested entry")
+
+    # A non-directory carrying the prefix is refused too.
+    not_dir = root / (PREFIX + "regular")
+    not_dir.write_bytes(b"not a directory\n")
+    expect_rejected(
+        module, lambda: remove(str(not_dir), PREFIX), f"{index}: non-directory"
+    )
+    if not not_dir.exists():
+        failures.append(f"{index}: refusal deleted a non-directory")
+
+    # An empty prefix would make the guard vacuous.
+    empty_prefix_dir = root / (PREFIX + "vacuous")
+    empty_prefix_dir.mkdir(mode=0o700)
+    expect_rejected(
+        module, lambda: remove(str(empty_prefix_dir), ""), f"{index}: empty prefix"
+    )
+    if not empty_prefix_dir.exists():
+        failures.append(f"{index}: empty prefix still deleted the directory")
+
+    # A FIFO at an artifact path must be REJECTED, not blocked on. POSIX open()
+    # with O_RDONLY blocks until a writer appears, so without O_NONBLOCK the
+    # calling command hangs forever holding whatever lock it holds.
+    if hasattr(os, "mkfifo"):
+        fifo_dir = root / "fifo"
+        fifo_dir.mkdir()
+        fifo_path = fifo_dir / "artifact"
+        os.mkfifo(fifo_path)
+        if not stat.S_ISFIFO(os.lstat(fifo_path).st_mode):
+            failures.append(f"{index}: fixture is not a FIFO")
+
+        def on_alarm(signum, frame):
+            raise TimeoutError("open on a FIFO blocked")
+
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(5)
+        try:
+            expect_rejected(
+                module,
+                lambda: module.secure_capture_regular(str(fifo_path), 1, 1024),
+                f"{index}: FIFO capture",
+            )
+        except TimeoutError as error:
+            failures.append(f"{index}: FIFO capture blocked: {error}")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+if failures:
+    raise AssertionError("; ".join(failures))
+print("ok", end="")
+PY
+)"
+if [ "$PRIVATE_CAPTURE_RESULT" = ok ]; then
+  pass "private capture directories are removed under a prefix guard and FIFOs never block a capture"
+else
+  fail "private capture directory contract" "$PRIVATE_CAPTURE_RESULT"
+fi
+
+# run_manifest.py must import under EVERY python3 a caller can reach, not just
+# the newest one on $PATH. The child-dispatch background wrapper pins
+# PATH=/usr/bin:/bin, so on macOS the module is loaded by the 3.9 system build.
+# A 3.10+-only construct (e.g. `@dataclass(slots=True)`) is a TypeError at
+# import there, and it surfaces several layers away as
+# `owner_process_identity_unavailable` — a diagnostic that points nowhere near
+# the cause. Import each distinct interpreter we can find, both mirrors.
+IMPORT_FLOOR_FAIL=""
+IMPORT_FLOOR_SEEN=""
+for INTERP in /usr/bin/python3 /bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+  [ -n "$INTERP" ] && [ -x "$INTERP" ] || continue
+  INTERP_REAL="$("$INTERP" -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+  [ -n "$INTERP_REAL" ] || continue
+  case " $IMPORT_FLOOR_SEEN " in *" $INTERP_REAL "*) continue ;; esac
+  IMPORT_FLOOR_SEEN="$IMPORT_FLOOR_SEEN $INTERP_REAL"
+  for MODULE in "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py"; do
+    if ! IMPORT_OUT="$("$INTERP" -I -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("run_manifest_import_floor", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.ArtifactIdentity(1, 2, 3, -4, -5, 6)
+print("ok", end="")
+' "$MODULE" 2>&1)"; then
+      IMPORT_FLOOR_FAIL="$IMPORT_FLOOR_FAIL
+        $INTERP_REAL ($("$INTERP" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)) -> $MODULE: $IMPORT_OUT"
+    fi
+  done
+done
+if [ -z "$IMPORT_FLOOR_FAIL" ]; then
+  pass "run_manifest.py imports under every reachable python3 (interpreters:$IMPORT_FLOOR_SEEN)"
+else
+  fail "run_manifest.py import floor" "$IMPORT_FLOOR_FAIL"
 fi
 
 printf '\nrun-manifest: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"

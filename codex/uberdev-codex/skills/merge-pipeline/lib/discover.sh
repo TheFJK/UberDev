@@ -292,6 +292,18 @@ review_verdict_discovery_state() {
   return 0
 }
 
+# SINGLE binding of the private capture-directory basename prefix. Three parties
+# need this one fact — the shell that mints the directory (`mktemp -d`), the
+# shell that removes an interpreter-never-started leftover (a basename guard so
+# `rm -rf` can only ever touch a directory this file minted), and the Python side
+# that refuses to publish into or clean up anything outside such a directory.
+# It used to be restated three ways with nothing proving they agreed; a drifted
+# copy would silently disarm one of the two guards while both still "looked"
+# correct. It is transported to Python through the environment (below) rather
+# than re-typed there. `python3 -I` implies `-E`, which ignores only PYTHON*
+# variables, so a non-PYTHON name crosses the boundary intact.
+UBERDEV_VERDICT_CAPTURE_PREFIX="uberdev-review-verdict."
+
 # _uberdev_review_verdict_python COMMAND [...]
 # One closed Python boundary owns root binding, secure byte capture, duplicate-
 # key-safe JSON parsing, timestamp ranking, snapshot publication, and carrier
@@ -300,6 +312,7 @@ review_verdict_discovery_state() {
 _uberdev_review_verdict_python() {
   local command="$1"
   shift
+  UBERDEV_VERDICT_CAPTURE_PREFIX="$UBERDEV_VERDICT_CAPTURE_PREFIX" \
   python3 -I -B - "$command" "$_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT" "$@" <<'PY'
 import fnmatch
 import hashlib
@@ -336,30 +349,41 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MAXIMUM_SIZE = 1024 * 1024
 OVERRIDE = "user-selected-emit-green-on-blocker-deferred"
+# Transported from the shell (see UBERDEV_VERDICT_CAPTURE_PREFIX above), never
+# re-typed: the shell mints the directory, this side guards publication and
+# removal against it, and a drifted second copy would disarm one guard silently.
+# An absent or empty value is INDETERMINATE — never a permissive default, which
+# would make the `startswith` guards below match every path.
+CAPTURE_DIR_PREFIX = os.environ.get("UBERDEV_VERDICT_CAPTURE_PREFIX", "")
+if not CAPTURE_DIR_PREFIX:
+    print(
+        "indeterminate: private capture-directory prefix was not provided by the caller",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+# Segments that stand for "any single directory name" in an expected_shape.
+WILDCARD_SEGMENTS = frozenset({"run_id", "worktree"})
+# One entry per searched root: (root_name, expected_shape). expected_shape names
+# every path segment beneath the root; the depth pin and the fnmatch glob are
+# DERIVED from it (see derive_root_layout_pins below). They used to be stored
+# here as two extra tuple fields, which restated one segment count three ways
+# with nothing proving the three agreed. A disagreement silently produced zero
+# candidates, and zero candidates funnels through `raise SystemExit(1)` --
+# exhaustive ABSENT, which /merge treats as gate_pass. Derivation makes the
+# three views incapable of disagreeing.
 ROOT_LAYOUTS = (
-    (
-        ".uberdev/runs",
-        ("run_id", "review-pr-verdict.json"),
-        2,
-        ".uberdev/runs/*/review-pr-verdict.json",
-    ),
+    (".uberdev/runs", ("run_id", "review-pr-verdict.json")),
     (
         ".claude/worktrees",
         ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
-        5,
-        ".claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
     ),
     (
         ".worktrees",
         ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
-        5,
-        ".worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
     ),
     (
         "worktrees",
         ("worktree", ".uberdev", "runs", "run_id", "review-pr-verdict.json"),
-        5,
-        "worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
     ),
 )
 
@@ -371,6 +395,61 @@ class VerdictError(Exception):
 def fail(reason):
     print(f"indeterminate: {reason}", file=sys.stderr)
     raise SystemExit(2)
+
+
+# The documented depth/glob contract, mirrored by the four globs enumerated in
+# `discover_review_verdict_json`'s header, sub-condition (d) prose, and
+# tests/merge.test.sh M63.worktree-glob.*. It is an ASSERTION TARGET, never an
+# input: derive_root_layout_pins computes the pins from ROOT_LAYOUTS and refuses
+# to run if the computed table and this one disagree.
+EXPECTED_ROOT_LAYOUT_PINS = {
+    ".uberdev/runs": (2, ".uberdev/runs/*/review-pr-verdict.json"),
+    ".claude/worktrees": (
+        5,
+        ".claude/worktrees/*/.uberdev/runs/*/review-pr-verdict.json",
+    ),
+    ".worktrees": (5, ".worktrees/*/.uberdev/runs/*/review-pr-verdict.json"),
+    "worktrees": (5, "worktrees/*/.uberdev/runs/*/review-pr-verdict.json"),
+}
+
+
+def derive_root_layout_pins():
+    """Derive `{root_name: (exact_depth, exact_path)}` from ROOT_LAYOUTS.
+
+    Every failure here routes through `fail()` -> SystemExit(2) -> INDETERMINATE.
+    A bare module-scope `assert` would exit 1, and exit 1 is reserved for the two
+    deliberate `raise SystemExit(1)` sites that mean "scan completed, no
+    candidate" -- i.e. proven absence, i.e. /merge gate_pass. A layout-contract
+    break must never be able to spell itself as proven absence.
+    """
+
+    derived = {}
+    # The loop variables are deliberately NOT named root_name/expected_shape:
+    # tests/merge.test.sh M63 requires EXACTLY ONE loop header binding those two
+    # names over ROOT_LAYOUTS, which is how it proves all four roots still feed
+    # one bounded walk inside scan_roots.
+    for layout_root, layout_shape in ROOT_LAYOUTS:
+        if layout_root in derived:
+            fail(f"duplicate root layout: {layout_root}")
+        if not layout_shape:
+            fail(f"root layout has an empty shape: {layout_root}")
+        if "run_id" not in layout_shape:
+            fail(f"root layout has no run_id segment: {layout_root}")
+        derived[layout_root] = (
+            len(layout_shape),
+            layout_root
+            + "/"
+            + "/".join(
+                "*" if segment in WILDCARD_SEGMENTS else segment
+                for segment in layout_shape
+            ),
+        )
+    if derived != EXPECTED_ROOT_LAYOUT_PINS:
+        fail("derived root layout pins disagree with the documented contract")
+    return derived
+
+
+ROOT_LAYOUT_PINS = derive_root_layout_pins()
 
 
 def raw_identity(entry):
@@ -482,14 +561,23 @@ def validate_target(value):
 
 
 def receipt_identity(value):
+    """Rebind the receipt's six-element identity array to a typed identity.
+
+    The array arrives from receipt JSON, so every element is untrusted. The
+    domain checks (integer, not bool, non-negative inode/size/mode) live in
+    `ArtifactIdentity.__post_init__`; `artifact_identity_from_receipt` is the
+    only sanctioned way to cross that boundary, so a malformed array can no
+    longer be laundered into an identity that later compares equal to a real
+    one.
+    """
+
     identity = value.get("snapshot_identity")
-    if (
-        not isinstance(identity, list)
-        or len(identity) != 6
-        or any(isinstance(item, bool) or not isinstance(item, int) for item in identity)
-    ):
+    if not isinstance(identity, list):
         raise VerdictError("snapshot identity malformed")
-    return runtime.ArtifactIdentity(*identity)
+    try:
+        return runtime.artifact_identity_from_receipt(identity)
+    except runtime.ManifestRejected as exc:
+        raise VerdictError("snapshot identity malformed") from exc
 
 
 def parse_receipt(raw):
@@ -548,10 +636,18 @@ def scan_root_layout(root_name, exact_depth, exact_path):
                  type here); regularity is enforced later during secure capture.
 
     Results are sorted, which is stricter than find's directory order.
-    A scan failure is fail-closed: OSError becomes VerdictError, so an
-    unreadable subtree is INDETERMINATE and never mistaken for absence.
+
+    Returns `(matches, errors)`. An OSError anywhere in the subtree is recorded
+    as one `(reason, subject, errno)` triple and the walk CONTINUES: aborting on
+    the first error meant a single unreadable stale worktree under `.worktrees`
+    stopped the whole enumeration, so a perfectly good verdict under the
+    canonical `.uberdev/runs` root was never even looked at. Accumulating keeps
+    the diagnosis complete while staying fail-closed -- `scan_roots` raises once
+    when the accumulator is non-empty, so a partial scan is still INDETERMINATE
+    and never mistaken for absence.
     """
     matches = []
+    errors = []
     pending = [(root_name, root_name.replace(os.sep, "/"), 0)]
     while pending:
         native, posix, depth = pending.pop()
@@ -563,7 +659,8 @@ def scan_root_layout(root_name, exact_depth, exact_path):
             with os.scandir(native) as entries:
                 children = list(entries)
         except OSError as exc:
-            raise VerdictError(f"root scan failed: {root_name}") from exc
+            errors.append(("root scan failed", root_name, exc.errno))
+            continue
         for entry in children:
             child_native = os.path.join(native, entry.name)
             child_posix = posix + "/" + entry.name
@@ -573,54 +670,101 @@ def scan_root_layout(root_name, exact_depth, exact_path):
             try:
                 descend = entry.is_dir(follow_symlinks=False)
             except OSError as exc:
-                raise VerdictError(f"root scan failed: {root_name}") from exc
+                errors.append(("root scan failed", root_name, exc.errno))
+                continue
             if descend:
                 pending.append((child_native, child_posix, depth + 1))
     matches.sort()
-    return matches
+    return matches, errors
+
+
+def describe_scan_failures(failures):
+    """Render every accumulated failure as `<reason>: <root> (errno N)`.
+
+    Each root that failed is named exactly once per reason so the operator sees
+    the full picture from one INDETERMINATE line, not just whichever root the
+    old first-error abort happened to reach first.
+    """
+
+    rendered = []
+    for reason, subject, error_number in failures:
+        text = f"{reason}: {subject}"
+        if error_number is not None:
+            text += f" (errno {error_number})"
+        if text not in rendered:
+            rendered.append(text)
+    return "; ".join(rendered)
 
 
 def scan_roots():
     candidates = []
     bound_roots = []
-    for root_name, expected_shape, exact_depth, exact_path in ROOT_LAYOUTS:
+    failures = []
+    for root_name, expected_shape in ROOT_LAYOUTS:
+        exact_depth, exact_path = ROOT_LAYOUT_PINS[root_name]
         try:
             root_lexical_entry = os.lstat(root_name)
         except FileNotFoundError:
             continue
         except OSError as exc:
-            raise VerdictError(f"root inspect failed: {root_name}") from exc
+            failures.append(("root inspect failed", root_name, exc.errno))
+            continue
         try:
             lexical_before = raw_identity(root_lexical_entry)
             followed_before = followed_identity(root_name)
         except OSError as exc:
-            raise VerdictError(f"root inspect failed: {root_name}") from exc
+            failures.append(("root inspect failed", root_name, exc.errno))
+            continue
         try:
             root_entry = os.stat(root_name)
         except OSError as exc:
-            raise VerdictError(f"root target unavailable: {root_name}") from exc
+            failures.append(("root target unavailable", root_name, exc.errno))
+            continue
         if not stat.S_ISDIR(root_entry.st_mode):
-            raise VerdictError(f"root is not a directory: {root_name}")
+            failures.append(("root is not a directory", root_name, None))
+            continue
         physical_root = os.path.realpath(root_name)
         scan_results = scan_root_layout(root_name, exact_depth, exact_path)
+        scan_matches, scan_errors = scan_results
+        failures.extend(scan_errors)
         try:
-            if (
+            drifted = (
                 lexical_identity(root_name) != lexical_before
                 or followed_identity(root_name) != followed_before
                 or os.path.realpath(root_name) != physical_root
-            ):
-                raise VerdictError(f"root identity drifted: {root_name}")
+            )
         except OSError as exc:
-            raise VerdictError(f"root identity drifted: {root_name}") from exc
+            failures.append(("root identity drifted", root_name, exc.errno))
+            continue
+        if drifted:
+            failures.append(("root identity drifted", root_name, None))
+            continue
         bound_roots.append(
             (root_name, physical_root, lexical_before, followed_before)
         )
-        for candidate in scan_results:
+        for candidate in scan_matches:
             parts, run_id = validate_suffix(root_name, candidate, expected_shape)
             if RUN_ID_RE.fullmatch(run_id) is None:
                 continue
             physical_candidate = os.path.join(physical_root, *parts)
             candidates.append((run_id, physical_candidate))
+    # Fail-closed, once, naming every failing root. Reached only after every
+    # root has been given its chance, so the diagnosis is complete.
+    #
+    # Accumulation improves the DIAGNOSTIC, deliberately not the OUTCOME. A
+    # "use whatever the readable roots produced" partial-success model is a
+    # fail-open here and cannot be adopted: selection ranks candidates by
+    # timestamp, and `discover` already treats an unknown artifact that is
+    # newer than (or tied with) the winner as INDETERMINATE precisely because
+    # such an artifact could outrank it. An unreadable root is the same
+    # epistemic state with less information — it may hold a newer verdict for
+    # this PR, so a verdict picked from the readable roots cannot be shown to
+    # be the current one. Honouring it would let one chmod-000 stale worktree
+    # silently downgrade /merge onto a superseded (possibly BLOCKER-carrying)
+    # verdict. Missing roots are NOT failures — FileNotFoundError `continue`s
+    # above — so the common single-root repo never reaches this branch.
+    if failures:
+        raise VerdictError(describe_scan_failures(failures))
     return candidates, bound_roots
 
 
@@ -697,7 +841,9 @@ def discover(expected_pr, capture_dir):
         "run_timestamp": selected_timestamp,
         "snapshot_path": snapshot_path,
         "snapshot_sha256": snapshot_digest,
-        "snapshot_identity": list(snapshot_identity),
+        "snapshot_identity": runtime.artifact_identity_receipt_components(
+            snapshot_identity
+        ),
         "pr": expected_pr,
         "artifact_sha": artifact_sha,
         "audit_state": state,
@@ -709,13 +855,42 @@ def discover(expected_pr, capture_dir):
     }
 
 
+def discard_private_capture_dir(capture_dir):
+    """Remove the private capture directory on every non-clean discover exit.
+
+    `secure_publish_captured` deliberately never unlinks its attempt file, so
+    once publication has run the mktemp directory is NOT empty and the shell's
+    `rmdir` always failed -- silently, because it was `2>/dev/null || true`.
+    Every non-clean exit therefore leaked a complete copy of the selected
+    verdict under $TMPDIR. Only the interpreter that published knows the attempt
+    name it chose, so the removal belongs here; the shell keeps a
+    prefix-guarded fallback for the kill-before-Python case.
+
+    Cleanup failure must never mask the original failure, so a rejection here
+    only adds one stderr breadcrumb naming the leaked absolute path.
+    """
+
+    try:
+        runtime.secure_remove_private_capture_dir(capture_dir, CAPTURE_DIR_PREFIX)
+    except BaseException as exc:  # noqa: BLE001 - diagnostic only, never fatal
+        print(
+            f"warning: leaked private verdict capture directory {capture_dir}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
 try:
     if command == "discover":
         if len(args) != 2 or re.fullmatch(r"[1-9][0-9]*", args[0]) is None:
             fail("PR number must be a positive integer")
         expected_pr = int(args[0])
         capture_dir = os.path.abspath(args[1])
-        receipt = discover(expected_pr, capture_dir)
+        try:
+            receipt = discover(expected_pr, capture_dir)
+        except BaseException:
+            discard_private_capture_dir(capture_dir)
+            raise
         # end="" so native-Windows text mode cannot append \r\n: $() strips the
         # trailing \n but leaves the \r, and both consumers compare the receipt
         # byte-for-byte against its recapture.
@@ -735,7 +910,7 @@ try:
             fail("snapshot receipt argument missing")
         _receipt, path, digest, expected_identity = parse_receipt(args[0])
         parent = os.path.dirname(path)
-        if not os.path.basename(parent).startswith("uberdev-review-verdict."):
+        if not os.path.basename(parent).startswith(CAPTURE_DIR_PREFIX):
             raise VerdictError("snapshot cleanup directory is not controller-owned")
         _payload, observed_identity = runtime.secure_capture_published(
             path, digest, 2, MAXIMUM_SIZE
@@ -797,12 +972,26 @@ PY
 # any unknown makes absence unprovable. Known other-PR artifacts are ignored.
 discover_review_verdict_json() {
   local pr_number="$1"
-  if ! printf '%s' "$pr_number" | grep -qE '^[1-9][0-9]*$'; then
+  # Herestring, not `printf | grep -q`: `grep -q` exits the moment it matches,
+  # so the producer can take SIGPIPE (141). This library is SOURCED into the
+  # caller's shell, so if that caller has `set -o pipefail` the pipeline status
+  # becomes 141 and the guard rejects a perfectly VALID PR number as malformed
+  # input — INDETERMINATE=2, which parks the PR. The window is small (this
+  # payload is a handful of bytes) and load-dependent, which is exactly what
+  # makes it undiagnosable from the symptom; the herestring removes the pipe.
+  if ! grep -qE '^[1-9][0-9]*$' <<<"$pr_number"; then
     printf 'indeterminate: PR number must be a positive integer\n' >&2
     return 2
   fi
+  # The prefix is the sole authority for BOTH the mktemp template and the
+  # basename guard on the `rm -rf` below. An empty binding would widen that
+  # guard's `case` pattern to `*` — assert instead of degrading silently.
+  if [ -z "${UBERDEV_VERDICT_CAPTURE_PREFIX:-}" ]; then
+    printf 'indeterminate: capture-directory prefix binding is missing (lib/discover.sh sourced incompletely?)\n' >&2
+    return 2
+  fi
   local capture_dir receipt rc
-  if ! capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/uberdev-review-verdict.XXXXXX")"; then
+  if ! capture_dir="$(mktemp -d "${TMPDIR:-/tmp}/${UBERDEV_VERDICT_CAPTURE_PREFIX}XXXXXX")"; then
     printf 'indeterminate: unable to allocate stable verdict capture directory\n' >&2
     return 2
   fi
@@ -812,7 +1001,23 @@ discover_review_verdict_json() {
   else
     rc=$?
   fi
-  rmdir "$capture_dir" 2>/dev/null || true
+  # Failure path. The Python side already removed the private capture directory
+  # (it is the only party that knows the attempt filename secure_publish_captured
+  # chose, and that attempt file is deliberately never unlinked — which is why
+  # the old `rmdir ... 2>/dev/null || true` ALWAYS failed and silently leaked a
+  # full mode-0400 copy of the selected verdict into $TMPDIR on every non-clean
+  # exit). This block only covers kill-before-Python: an interpreter that was
+  # signalled, or never started, leaves an empty directory behind. The basename
+  # prefix guard keeps the removal bound to a directory this function minted.
+  case "${capture_dir##*/}" in
+    "$UBERDEV_VERDICT_CAPTURE_PREFIX"*)
+      rm -rf -- "$capture_dir" 2>/dev/null || true
+      ;;
+  esac
+  if [ -e "$capture_dir" ]; then
+    printf 'warning: leaked private verdict capture directory: %s\n' \
+      "$capture_dir" >&2
+  fi
   case "$rc" in
     1) return 1 ;;
     *) return 2 ;;
@@ -831,93 +1036,6 @@ recapture_review_verdict_snapshot() {
 # Remove only an unchanged carrier inside its private mktemp-owned directory.
 cleanup_review_verdict_snapshot() {
   _uberdev_review_verdict_python cleanup "$1" || return 2
-}
-
-# parse_review_verdict_phase2_5 AUDIT_JSON_PATH
-# Stdout: exactly five tab-separated fields:
-#   <legacy|current> <halted> <blocker_count> <critical_count> <override_reason>
-# Exit:   0 = complete typed tuple, 2 = malformed/unreadable/extraction failure.
-# Missing/null optional fields in a current block receive the compatibility
-# defaults false, 0, 0, null. Raw fields are type-checked before defaults, so
-# explicit false is never accepted as a numeric count by jq's `//` operator.
-parse_review_verdict_phase2_5() {
-  local audit_json_path="$1"
-  if [ ! -f "$audit_json_path" ] || [ -L "$audit_json_path" ] || [ ! -r "$audit_json_path" ]; then
-    printf 'malformed: audit artifact is not a readable regular file\n' >&2
-    return 2
-  fi
-
-  local jq_err tuple
-  jq_err="$(mktemp)"
-  if tuple="$(jq -er '
-    def integer_count:
-      type == "number" and . >= 0 and floor == .;
-    if type != "object"
-       or ((.phases != null) and ((.phases | type) != "object"))
-    then error("root/phases shape")
-    elif ((.phases | type) != "object") or ((.phases | has("phase2_5")) | not)
-    then ["legacy", "false", "0", "0", "null"] | @tsv
-    else
-      .phases.phase2_5 as $p |
-      if (($p | type) != "object")
-         or (($p | has("halted")) and ($p.halted != null) and (($p.halted | type) != "boolean"))
-         or (($p | has("by_severity")) and ($p.by_severity != null) and (($p.by_severity | type) != "object"))
-         or (($p.by_severity | type) == "object"
-             and ($p.by_severity | has("blocker"))
-             and ($p.by_severity.blocker != null)
-             and (($p.by_severity.blocker | integer_count) | not))
-         or (($p.by_severity | type) == "object"
-             and ($p.by_severity | has("critical"))
-             and ($p.by_severity.critical != null)
-             and (($p.by_severity.critical | integer_count) | not))
-         or (($p | has("override_reason"))
-             and ($p.override_reason != null)
-             and ($p.override_reason != "user-selected-emit-green-on-blocker-deferred"))
-      then error("phase2_5 field shape")
-      else [
-        "current",
-        (($p.halted // false) | tostring),
-        (($p.by_severity.blocker // 0) | tostring),
-        (($p.by_severity.critical // 0) | tostring),
-        ($p.override_reason // "null")
-      ] | @tsv
-      end
-    end
-  ' "$audit_json_path" 2>"$jq_err")"; then
-    :
-  else
-    local jq_exit=$?
-    printf 'malformed: phase2_5 parse/extraction failed (jq exit %s): %s\n' \
-      "$jq_exit" "$(head -c 200 "$jq_err" 2>/dev/null)" >&2
-    rm -f "$jq_err"
-    return 2
-  fi
-  rm -f "$jq_err"
-
-  # Do not publish a state until the entire tuple passes an independent shell
-  # shape check. This catches truncated/partial stdout even when jq exits 0.
-  if ! printf '%s\n' "$tuple" | LC_ALL=C awk -F '\t' '
-    NR != 1 || NF != 5 { bad = 1; next }
-    $1 == "legacy" {
-      if ($2 != "false" || $3 != "0" || $4 != "0" || $5 != "null") bad = 1
-      next
-    }
-    $1 == "current" {
-      if ($2 !~ /^(true|false)$/) bad = 1
-      if ($3 !~ /^(0|[1-9][0-9]*)$/) bad = 1
-      if ($4 !~ /^(0|[1-9][0-9]*)$/) bad = 1
-      if ($5 != "null" && $5 != "user-selected-emit-green-on-blocker-deferred") bad = 1
-      next
-    }
-    { bad = 1 }
-    END { if (NR != 1 || bad) exit 1 }
-  '; then
-    printf 'malformed: phase2_5 parser returned an incomplete or invalid tuple\n' >&2
-    return 2
-  fi
-
-  printf '%s\n' "$tuple"
-  return 0
 }
 
 # emit_gate_fail PR_NUMBER REASON

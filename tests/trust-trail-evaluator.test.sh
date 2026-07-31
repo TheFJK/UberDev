@@ -22,6 +22,49 @@ done
 PASS=0; FAIL=0
 source "$THIS_DIR/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
 
+# assert_all_in_section <file> <section_start> <section_end> <desc> <pattern>...
+#
+# Section-scoped, MULTI-token, non-empty-guarded (#347). Two weaknesses of the
+# single-pattern `assert_in_section` this replaces at the load-bearing sites:
+#   * one incidental token anywhere in the range satisfied an assertion whose
+#     description promises a whole contract (e.g. "declares absent | legacy |
+#     current | malformed | indeterminate" passed on any ONE of the five), and
+#   * an anchor typo yielding an EMPTY range is indistinguishable from a
+#     genuinely missing clause — it just fails, so nobody notices the assertion
+#     stopped inspecting anything real. Here an empty range is its own loud
+#     failure, distinct from "pattern absent".
+# `grep -qE PAT <<<"$V"` throughout, never `printf | grep -q`: a pipe into a -q
+# grep can EPIPE-race under `set -o pipefail` on Linux CI.
+# String accumulator, not an array — bash 3.2 errors on an empty array
+# expansion under `set -u`.
+assert_all_in_section() {
+  local file="$1" section_start="$2" section_end="$3" desc="$4"
+  shift 4
+  local section missing="" pattern
+  if [ ! -r "$file" ]; then
+    echo "  FAIL  $desc (file missing/unreadable: $file)"
+    FAIL=$((FAIL + 1)); return
+  fi
+  section="$(awk "/$section_start/,/$section_end/" "$file")"
+  if [ -z "$section" ]; then
+    echo "  FAIL  $desc (section $section_start..$section_end is EMPTY — refusing a vacuous verdict)"
+    FAIL=$((FAIL + 1)); return
+  fi
+  for pattern in "$@"; do
+    if ! grep -qE -e "$pattern" <<<"$section"; then
+      missing="$missing
+        missing: $pattern"
+    fi
+  done
+  if [ -z "$missing" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"
+    echo "        file: $file  section: $section_start..$section_end$missing"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "## trust-trail-evaluator structural coverage (RFC 0002 §3.6 Phase 2.5 gate)"
 
 # TT1 — agent mentions the Phase 2.5 gate by name in Step 1.5
@@ -29,10 +72,16 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
   'Phase 2\.5 gate|RFC 0002 §3\.6|phase2_5 inputs' \
   'TT1 — agent documents Phase 2.5 gate in Process section (RFC 0002 §3.6)'
 
-# TT2 — caller-composed audit identity is explicit and five-state.
-assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
-  'audit_state.*absent.*legacy.*current.*malformed.*indeterminate|audit_state.*absent.*legacy.*current.*indeterminate.*malformed' \
-  'TT2 — audit_state input declares absent | legacy | current | malformed | indeterminate'
+# TT2 — caller-composed audit identity is explicit and five-state. Every one of
+# the five states must be named, not just whichever one happens to appear first.
+assert_all_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'TT2 — audit_state input declares ALL of absent | legacy | current | malformed | indeterminate' \
+  '`audit_state`' \
+  '"absent"' \
+  '"legacy"' \
+  '"current"' \
+  '"malformed"' \
+  '"indeterminate"'
 
 # TT2a — absent telemetry is not legacy: skip only Phase 2.5 and continue
 # through the immutable structural proof.
@@ -51,10 +100,18 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
   'RFC 0002 v0\.26\.0|RFC 0002.*v0\.26\.0' \
   'TT2c — STALE rationale cites "RFC 0002 v0.26.0" (constraints [hard])'
 
-# TT3 — current audits retain the Phase 2.5 halted + by_severity inputs.
-assert_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
-  'phase2_5_halted|phase2_5_blocker_count|phase2_5_critical_count' \
-  'TT3 — Phase 2.5 inputs (halted, blocker_count, critical_count) are declared'
+# TT3 — current audits retain the Phase 2.5 halted + by_severity inputs. All
+# three, plus the override reason and all three acceptance flags: a single-token
+# alternation here passed while two of the six were missing.
+assert_all_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'TT3 — every Phase 2.5 input is declared (halted, both counts, override, three flags)' \
+  '`phase2_5_halted`' \
+  '`phase2_5_blocker_count`' \
+  '`phase2_5_critical_count`' \
+  '`phase2_5_override_reason`' \
+  '`accept_blocker_deferred_flag`' \
+  '`accept_critical_deferred_flag`' \
+  '`i_know_what_im_doing_flag`'
 assert_in_section "$AGENT_MD" '^## Process' '^## Refusal triggers' \
   'Current audit.*audit_state.*current|audit_state.*current.*Phase 2\.5' \
   'TT3b — current audit state evaluates the existing Phase 2.5 gates'
@@ -97,7 +154,7 @@ ABSENT_BRANCH=$(printf '%s\n' "$PHASE_1_5_BLOCK" | awk '
   in_absent
 ')
 if [[ -n "$ABSENT_BRANCH" ]] \
-  && ! printf '%s\n' "$ABSENT_BRANCH" | grep -qE 'return.*verdict|verdict: (PASS|STALE|INVALID|FORCE_PUSHED)'; then
+  && ! grep -qE 'return.*verdict|verdict: (PASS|STALE|INVALID|FORCE_PUSHED)' <<<"$ABSENT_BRANCH"; then
   echo "  PASS  TT6b — absent audit branch has no pre-structural terminal verdict"
   PASS=$((PASS + 1))
 else
@@ -178,36 +235,77 @@ do
     "TT14 — successful structural row preserved: $TT14_PATTERN"
 done
 
-# TT15 — caller/audit mapping can distinguish structural probe failure.
-assert_in_section "$AGENT_MD" '^## Return contract' 'EOF' \
+# TT15 — the return contract enumerates every verdict AND every INVALID
+# subreason. The old single-token check passed on the word
+# `structural_probe_failed` appearing once anywhere below the heading, which
+# said nothing about the other four subreasons or the four verdicts.
+# ('EOF' matches no line in this file, so the range runs to end-of-file — the
+# non-empty guard makes that explicit rather than silently vacuous.)
+assert_all_in_section "$AGENT_MD" '^## Return contract' 'EOF' \
+  'TT15 — return contract enumerates all four verdicts and all five INVALID subreasons' \
+  'verdict: PASS \| STALE \| INVALID \| FORCE_PUSHED' \
+  'input_malformed' \
+  'trailer_sha_not_in_local_clone' \
   'structural_probe_failed' \
-  'TT15 — INVALID subreason contract includes structural_probe_failed'
+  'phase2_5_blocker_deferred' \
+  'phase2_5_override_unacknowledged'
 
 # TT16 — blocker and critical are independent acceptance domains. `halted=true`
 # may be caused by blocker/overflow state, but it must never suppress a
 # simultaneously serialized critical count. The combined matrix therefore
 # requires both flags when both counts are positive.
 CURRENT_AUDIT_BLOCK=$(awk '/\*\*Current audit/,/\*\*Malformed, indeterminate/' "$AGENT_MD")
-if printf '%s\n' "$CURRENT_AUDIT_BLOCK" | grep -qE \
-  'phase2_5_critical_count > 0.*accept_critical_deferred_flag == "false"' \
-  && ! printf '%s\n' "$CURRENT_AUDIT_BLOCK" | grep -qE \
-  'Critical-deferred gate.*phase2_5_halted == "false"|phase2_5_critical_count > 0.*phase2_5_halted == "false"'; then
+if [[ -z "$CURRENT_AUDIT_BLOCK" ]]; then
+  # Without this guard both branches below would report a plain FAIL, which
+  # reads as "the contract regressed" when the truth is "the anchors no longer
+  # match anything and these two assertions stopped inspecting the file".
+  echo "  FAIL  TT16 — the **Current audit** block is EMPTY (section anchors drifted; refusing a vacuous verdict)"
+  FAIL=$((FAIL + 2))
+else
+if grep -qE 'phase2_5_critical_count > 0.*accept_critical_deferred_flag == "false"' <<<"$CURRENT_AUDIT_BLOCK" \
+  && ! grep -qE 'Critical-deferred gate.*phase2_5_halted == "false"|phase2_5_critical_count > 0.*phase2_5_halted == "false"' <<<"$CURRENT_AUDIT_BLOCK"; then
   echo "  PASS  TT16a — critical acceptance gate is independent of halted"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  TT16a — critical_count>0 MUST require accept_critical_deferred even when halted=true"
   FAIL=$((FAIL + 1))
 fi
-if printf '%s\n' "$CURRENT_AUDIT_BLOCK" | grep -qE \
-  'blocker.*critical.*both.*accept_blocker_deferred_flag.*accept_critical_deferred_flag|both counts.*both acceptance flags|combined.*both.*accept_' \
-  && printf '%s\n' "$CURRENT_AUDIT_BLOCK" | grep -qE \
-  'halted.*true.*critical|critical.*halted.*true'; then
+if grep -qE 'blocker.*critical.*both.*accept_blocker_deferred_flag.*accept_critical_deferred_flag|both counts.*both acceptance flags|combined.*both.*accept_' <<<"$CURRENT_AUDIT_BLOCK" \
+  && grep -qE 'halted.*true.*critical|critical.*halted.*true' <<<"$CURRENT_AUDIT_BLOCK"; then
   echo "  PASS  TT16b — combined halted/blocker/critical matrix requires both independent acknowledgments"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  TT16b — current-audit paragraph MUST state the combined both-counts/both-flags matrix"
   FAIL=$((FAIL + 1))
 fi
+fi
+
+# TT17 — PR-state corroborators are dispatch INPUTS, never a fresh fetch (#303).
+# Re-fetching cost two API round-trips per PR and, worse, sampled GitHub at a
+# LATER instant than the head_ref_oid the structural probes are bound to.
+assert_all_in_section "$AGENT_MD" '^## Inputs' '^## Tools authorised' \
+  'TT17a — corroborator inputs are declared and bound to the caller projection' \
+  '`status_check_rollup`' \
+  '`commit_shas`' \
+  'pr_view_projection' \
+  'MUST NOT re-fetch'
+assert_all_in_section "$AGENT_MD" '^## Tools authorised' '^## Process' \
+  'TT17b — the agent has no gh tool authorisation left' \
+  'git merge-base' \
+  'No `gh`'
+# Negative contract: the retired probe commands must not reappear anywhere.
+for TT17_FORBIDDEN in \
+  'gh pr view <N> --json statusCheckRollup' \
+  'gh api repos/:owner/:repo/pulls/<N>/commits'
+do
+  if grep -qF -e "$TT17_FORBIDDEN" "$AGENT_MD"; then
+    echo "  FAIL  TT17c — agent MUST NOT re-fetch corroborators: found '$TT17_FORBIDDEN'"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  TT17c — agent does not re-fetch: '$TT17_FORBIDDEN' absent"
+    PASS=$((PASS + 1))
+  fi
+done
 
 echo
 echo "## Summary"

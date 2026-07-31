@@ -22,8 +22,13 @@
 #   discover_multi            (Step 1.2.5)
 #   pr_view_projection        (Step 1.4)
 #   discover_review_verdict_json (typed audit-artifact discovery)
-#   parse_review_verdict_phase2_5 (atomic phase2_5 validation + extraction)
 #   emit_gate_fail            (gate-fail audit-emit helper)
+#
+# `parse_review_verdict_phase2_5` was RETIRED in #347: the closed-receipt path
+# (discover -> recapture -> cleanup) has parsed and validated the phase2_5 tuple
+# from the SAME captured bytes since the secure-capture rework, so the standalone
+# jq parser had zero production callers. Its A13/B11 coverage went with it —
+# testing a function nothing calls only proves the tests still run.
 #
 # This test file has two layers:
 #   Layer A — file-content greps that lock the implementation shape so a
@@ -186,6 +191,43 @@ _run_lib_call() {
   _LB_STDERR="$(cat "$err")"
   _LB_EXIT="$rc"
   rm -f "$out" "$err"
+}
+
+# Strict cleanup assertion (#347). Every cleanup call site used to end in
+# `>/dev/null 2>&1 || true`, which threw away BOTH the exit code and the stderr.
+# A cleanup that silently stopped removing the private carrier would then have
+# kept all 15 sites green while leaking one mode-0400 copy of the selected
+# verdict per call. Assert the rc AND that the carrier and its private mktemp
+# directory are actually gone.
+assert_cleanup_removed() {
+  local receipt="$1" desc="$2" snapshot_path parent rc err
+  if [ -z "$receipt" ]; then
+    echo "  FAIL  $desc — no receipt to clean up"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  snapshot_path="$(jq -r '.snapshot_path // empty' <<<"$receipt" 2>/dev/null)"
+  err="$(mktemp)"
+  ( . "$LIB"; cleanup_review_verdict_snapshot "$receipt" ) >/dev/null 2>"$err"
+  rc=$?
+  parent="$(dirname "$snapshot_path")"
+  if [ "$rc" -ne 0 ]; then
+    echo "  FAIL  $desc — cleanup exited $rc: $(head -c 200 "$err" 2>/dev/null)"
+    FAIL=$((FAIL + 1))
+  elif [ -z "$snapshot_path" ]; then
+    echo "  FAIL  $desc — receipt carried no snapshot_path"
+    FAIL=$((FAIL + 1))
+  elif [ -e "$snapshot_path" ]; then
+    echo "  FAIL  $desc — carrier still present: $snapshot_path"
+    FAIL=$((FAIL + 1))
+  elif [ -e "$parent" ]; then
+    echo "  FAIL  $desc — private capture directory still present: $parent"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  fi
+  rm -f "$err"
 }
 
 # --- Layer A — Source-discipline assertions --------------------------------
@@ -632,7 +674,7 @@ assert_grep "$LIB" \
 # LC_ALL=C expr. Comment lines are stripped before the check (the rationale
 # comments legitimately mention the forbidden shape); LIB_NORMALISED is set
 # at A3.
-if printf '%s\n' "$LIB_NORMALISED" | grep -qE '\[ [^][]*\\>'; then
+if grep -qE '\[ [^][]*\\>' <<<"$LIB_NORMALISED"; then
   echo "  FAIL  A12d: '[ ... \\> ... ]' test-bracket string comparison present (zsh rejects it — use LC_ALL=C expr)"
   FAIL=$((FAIL + 1))
 else
@@ -681,21 +723,21 @@ assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
   "$B8_SHA_NEW" \
   "B8a: PR 42 → newest valid timestamp wins across layouts (invalid run-id rejected)"
 assert_eq "$B8_RC" "0" "B8a.rc: PR 42 match → FOUND=0"
-( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B8_OUT" "B8a.cleanup: private carrier and capture directory removed"
 B8_OUT="$(_b8_call 99)"
 B8_RC=$?
 assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
   "$B8_SHA_99" \
   "B8b: PR 99 → .worktrees/ hidden-convention layout found"
 assert_eq "$B8_RC" "0" "B8b.rc: PR 99 match → FOUND=0"
-( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B8_OUT" "B8b.cleanup: private carrier and capture directory removed"
 B8_OUT="$(_b8_call 77)"
 B8_RC=$?
 assert_eq "$(printf '%s' "$B8_OUT" | jq -r '.artifact_sha // empty')" \
   "$B8_SHA_77" \
   "B8c: PR 77 → worktrees/ visible-convention layout found"
 assert_eq "$B8_RC" "0" "B8c.rc: PR 77 match → FOUND=0"
-( . "$LIB"; cleanup_review_verdict_snapshot "$B8_OUT" ) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B8_OUT" "B8c.cleanup: private carrier and capture directory removed"
 B8_OUT="$(_b8_call 123)"
 B8_RC=$?
 assert_eq "$B8_OUT" "" "B8d: unmatched PR → empty stdout (corroborator absent)"
@@ -739,7 +781,7 @@ if command -v zsh >/dev/null 2>&1; then
     echo "  PASS  B9b: zsh run emitted no stderr (no 'condition expected' class errors)"
     PASS=$((PASS + 1))
   fi
-  ( . "$LIB"; cleanup_review_verdict_snapshot "$B9_OUT" ) >/dev/null 2>&1 || true
+  assert_cleanup_removed "$B9_OUT" "B9c.cleanup: zsh-produced receipt cleans up completely"
   rm -f "$B9_ERR"
   rm -rf "$B9_SANDBOX"
 else
@@ -779,8 +821,7 @@ _b10_receipt_sha() {
 }
 
 _b10_cleanup_receipt() {
-  [ -n "$1" ] || return 0
-  ( . "$LIB"; cleanup_review_verdict_snapshot "$1" ) >/dev/null 2>&1 || true
+  assert_cleanup_removed "$1" "${2:-B10.cleanup}: private carrier and capture directory removed"
 }
 
 # An empty, fully scanned search surface is exhaustive absence.
@@ -866,7 +907,7 @@ assert_eq "$(_b10_receipt_sha "$B10_OUT")" \
   "$B10_SHA_42" \
   "B10d.1: newer valid target outranks older identity-unknown candidate"
 assert_eq "$B10_RC" "0" "B10d.2: newer valid target → FOUND=0"
-_b10_cleanup_receipt "$B10_OUT"
+_b10_cleanup_receipt "$B10_OUT" "B10d.3"
 
 # A newer identity-unknown candidate may be the target's superseding artifact,
 # so the older valid target is not safe to select.
@@ -909,7 +950,7 @@ assert_eq "$(_b10_receipt_sha "$B10_OUT")" \
   "$B10_SHA_42" \
   "B10fother.1: newer known-other-PR candidate does not suppress target"
 assert_eq "$B10_RC" "0" "B10fother.2: older target with newer known-other → FOUND=0"
-_b10_cleanup_receipt "$B10_OUT"
+_b10_cleanup_receipt "$B10_OUT" "B10fother.3"
 
 # Invalid run-id candidates never participate in identity or recency ranking.
 _b10_clear
@@ -946,79 +987,6 @@ fi
 
 rm -f "$B10_ERR"
 rm -rf "$B10_SANDBOX"
-
-echo
-echo "== A13/B11: phase2_5 parser validates raw types and publishes atomically =="
-assert_grep "$LIB" '^parse_review_verdict_phase2_5\(\)[[:space:]]*\{' \
-  "A13: function parse_review_verdict_phase2_5 defined"
-
-B11_SANDBOX="$(mktemp -d)"
-B11_ERR="$(mktemp)"
-B11_JSON="$B11_SANDBOX/review-pr-verdict.json"
-
-_b11_call() {
-  ( cd "$B11_SANDBOX" && . "$LIB" && parse_review_verdict_phase2_5 "$B11_JSON" ) 2>"$B11_ERR"
-}
-
-printf '%s\n' '{"phases":{"phase2_5":{}}}' > "$B11_JSON"
-B11_OUT="$(_b11_call)"
-B11_RC=$?
-assert_eq "$B11_OUT" $'current\tfalse\t0\t0\tnull' \
-  "B11a.1: empty phase2_5 object is current-clean with caller defaults"
-assert_eq "$B11_RC" "0" "B11a.2: empty phase2_5 object parses successfully"
-
-printf '%s\n' \
-  '{"phases":{"phase2_5":{"halted":null,"by_severity":{"blocker":null,"critical":null},"override_reason":null}}}' \
-  > "$B11_JSON"
-B11_OUT="$(_b11_call)"
-B11_RC=$?
-assert_eq "$B11_OUT" $'current\tfalse\t0\t0\tnull' \
-  "B11b.1: explicit null optional fields preserve current-clean defaults"
-assert_eq "$B11_RC" "0" "B11b.2: explicit null optional fields parse successfully"
-
-printf '%s\n' '{"phases":{}}' > "$B11_JSON"
-B11_OUT="$(_b11_call)"
-B11_RC=$?
-assert_eq "$B11_OUT" $'legacy\tfalse\t0\t0\tnull' \
-  "B11c.1: missing phase2_5 block is a present legacy audit"
-assert_eq "$B11_RC" "0" "B11c.2: legacy audit parses successfully"
-
-printf '%s\n' '{"phases":{"phase2_5":{"by_severity":{"blocker":false}}}}' > "$B11_JSON"
-B11_OUT="$(_b11_call)"
-B11_RC=$?
-assert_eq "$B11_OUT" "" "B11d.1: explicit blocker:false never publishes a tuple"
-assert_eq "$B11_RC" "2" "B11d.2: explicit blocker:false is malformed"
-
-printf '%s\n' '{"phases":{"phase2_5":{"by_severity":{"critical":false}}}}' > "$B11_JSON"
-B11_OUT="$(_b11_call)"
-B11_RC=$?
-assert_eq "$B11_OUT" "" "B11e.1: explicit critical:false never publishes a tuple"
-assert_eq "$B11_RC" "2" "B11e.2: explicit critical:false is malformed"
-
-# A zero-exit jq that fails to return the complete five-field tuple models an
-# extraction seam failure. The parser must validate output before publishing
-# current state.
-B11_FAKE_BIN="$B11_SANDBOX/fake-bin"
-mkdir -p "$B11_FAKE_BIN"
-printf '%s\n' \
-  '#!/bin/sh' \
-  'printf "current\tfalse\t0\n"' \
-  'exit 0' \
-  > "$B11_FAKE_BIN/jq"
-chmod +x "$B11_FAKE_BIN/jq"
-B11_OUT="$(
-  cd "$B11_SANDBOX" &&
-  PATH="$B11_FAKE_BIN:$PATH" &&
-  export PATH &&
-  . "$LIB" &&
-  parse_review_verdict_phase2_5 "$B11_JSON"
-)" 2>"$B11_ERR"
-B11_RC=$?
-assert_eq "$B11_OUT" "" "B11f.1: incomplete extraction never publishes current state"
-assert_eq "$B11_RC" "2" "B11f.2: incomplete extraction is malformed"
-
-rm -f "$B11_ERR"
-rm -rf "$B11_SANDBOX"
 
 echo
 echo "== A14/B12: closed verdict receipt + secure snapshot contract =="
@@ -1203,10 +1171,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.find.depth2.rc: canonical shallow/deep decoys are ignored"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.find.depth2.receipt: only exact canonical depth 2 is selected"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.find.depth2.cleanup: private carrier and capture directory removed"
 
 _b12_clear
 _b12_write ".worktrees/w/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
@@ -1220,10 +1185,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.find.depth5.rc: worktree shallow/deep decoys are ignored"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.find.depth5.receipt: only exact worktree depth 5 is selected"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.find.depth5.cleanup: private carrier and capture directory removed"
 
 # A symlink is supported only as the find -H command-line root. Its captured
 # physical target may be external, but that root identity must stay stable.
@@ -1237,10 +1199,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.root.symlink.rc: in-repository command-line root symlink is supported"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.root.symlink.receipt: symlink-root capture returns one closed receipt"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.root.symlink.cleanup: private carrier and capture directory removed"
 
 # Dangling roots are not equivalent to absent optional roots. A valid external
 # target is supported because find -H binds the command-line root itself.
@@ -1261,10 +1220,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.root.external.rc: external command-line root target is supported"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.root.external.receipt: external-root bytes remain bound to the captured root"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.root.external.cleanup: private carrier and capture directory removed"
 rm -rf "$B12_EXTERNAL_ROOT"
 
 # Retargeting an allowed command-line symlink while find is running invalidates
@@ -1365,10 +1321,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.tie.identical.rc: cross-layout exact-run-id identical bytes are accepted"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.tie.identical.receipt: identical tie publishes one receipt"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.tie.identical.cleanup: private carrier and capture directory removed"
 
 _b12_clear
 _b12_write ".uberdev/runs/20260101-010101-ffff/review-pr-verdict.json" "$B12_PAYLOAD_A"
@@ -1378,10 +1331,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.rank.seconds.rc: distinct-second ordering remains chronological"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_B" \
   "B12.rank.seconds.receipt: later timestamp wins regardless of suffix ordering"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.rank.seconds.cleanup: private carrier and capture directory removed"
 
 # Known other-PR artifacts never affect ranking. Unknown identity is harmless
 # only when older than the selected target; newer/equal unknown is fail-closed,
@@ -1395,10 +1345,7 @@ B12_RC=$?
 assert_eq "$B12_RC" "0" "B12.unknown.older.rc: older unknown + newer other-PR do not suppress target"
 _b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
   "B12.unknown.older.receipt: target survives harmless candidates"
-(
-  . "$LIB"
-  cleanup_review_verdict_snapshot "$B12_OUT"
-) >/dev/null 2>&1 || true
+assert_cleanup_removed "$B12_OUT" "B12.unknown.older.cleanup: private carrier and capture directory removed"
 
 _b12_clear
 _b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$B12_PAYLOAD_A"
@@ -1451,10 +1398,7 @@ _b13_valid() {
     FAIL=$((FAIL + 1))
   fi
   if [ "$rc" -eq 0 ]; then
-    (
-      . "$LIB"
-      cleanup_review_verdict_snapshot "$receipt"
-    ) >/dev/null 2>&1 || true
+    assert_cleanup_removed "$receipt" "B13.valid.$label.cleanup: private carrier and capture directory removed"
   fi
 }
 
@@ -1604,10 +1548,18 @@ if printf '%s' "$B12_RECEIPT" | jq -e \
   assert_eq "$?" "2" "B12.snapshot.nonregular: directory carrier → INDETERMINATE=2"
   rm -rf "$B12_SNAPSHOT_PATH"
   rm -f "$B12_SNAPSHOT_COPY"
+  # The carrier was deliberately destroyed above, so cleanup cannot prove the
+  # identity it is asked to remove. It MUST fail closed (2), never report a
+  # successful removal of something it never re-bound.
   (
     . "$LIB"
     cleanup_review_verdict_snapshot "$B12_RECEIPT"
-  ) >/dev/null 2>&1 || true
+  ) >/dev/null 2>"$B12_ERR"
+  assert_eq "$?" "2" "B12.snapshot.cleanup-destroyed: cleanup of a destroyed carrier is INDETERMINATE=2"
+  B12_ORPHAN_DIR="$(dirname "$B12_SNAPSHOT_PATH")"
+  case "${B12_ORPHAN_DIR##*/}" in
+    uberdev-review-verdict.*) rm -rf "$B12_ORPHAN_DIR" ;;
+  esac
 else
   for B12_DRIFT_CASE in stable digest-drift replacement symlink nonregular; do
     echo "  FAIL  B12.snapshot.$B12_DRIFT_CASE: closed receipt prerequisite missing"
@@ -1663,6 +1615,318 @@ B16_RECEIPT2="$( cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 341 
 assert_eq "$(printf '%s' "$B16_RECEIPT2" | jq -r '.phase2_5_halted_due_to_overflow')" "false" \
   "B16.overflow-default: absent halted_due_to_overflow defaults to false"
 rm -rf "$B16_ROOT"
+
+echo
+echo "== B17: derived root-layout pins (#342) =="
+# ROOT_LAYOUTS used to restate one segment count THREE ways — expected_shape,
+# exact_depth, exact_path — with nothing proving the three agreed. A silent
+# disagreement produced zero candidates, and zero candidates funnels through
+# `raise SystemExit(1)` = exhaustive ABSENT = /merge gate_pass. The pins are now
+# derived from expected_shape and asserted against a documented table.
+assert_grep "$LIB" '^ROOT_LAYOUTS = \($' \
+  "B17.table: ROOT_LAYOUTS is still the single root enumeration"
+assert_grep "$LIB" '^EXPECTED_ROOT_LAYOUT_PINS = \{$' \
+  "B17.expected: a documented pin table exists to assert the derivation against"
+assert_grep "$LIB" '^ROOT_LAYOUT_PINS = derive_root_layout_pins\(\)$' \
+  "B17.derive: the live pins are derived, never hand-written"
+assert_no_grep "$LIB" '^[[:space:]]*assert .*ROOT_LAYOUT' \
+  "B17.no-bare-assert: a bare module-scope assert would exit 1 = proven ABSENT (the funnel reserves 1)"
+# The derivation must fail through fail() -> SystemExit(2), never through an
+# uncaught error that the shell maps to exhaustive absence.
+B17_ROOT="$(mktemp -d)"
+mkdir -p "$B17_ROOT/lib" "$B17_ROOT/skills/merge-pipeline/lib" "$B17_ROOT/work"
+cp "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" "$B17_ROOT/lib/run_manifest.py"
+sed 's|^EXPECTED_ROOT_LAYOUT_PINS = {$|EXPECTED_ROOT_LAYOUT_PINS = {\
+    "drifted/root": (99, "drifted/root/*"),|' \
+  "$LIB" > "$B17_ROOT/skills/merge-pipeline/lib/discover.sh"
+if grep -q 'drifted/root' "$B17_ROOT/skills/merge-pipeline/lib/discover.sh"; then
+  (
+    cd "$B17_ROOT/work" &&
+    . "$B17_ROOT/skills/merge-pipeline/lib/discover.sh" &&
+    discover_review_verdict_json 42
+  ) >/dev/null 2>"$B17_ROOT/err"
+  assert_eq "$?" "2" "B17.drift-rc: a pin-contract disagreement is INDETERMINATE=2, never ABSENT=1"
+  assert_grep "$B17_ROOT/err" 'indeterminate: derived root layout pins disagree' \
+    "B17.drift-msg: the disagreement names itself on stderr"
+else
+  echo "  FAIL  B17.drift-rc: could not build the pin-drift fixture"
+  echo "  FAIL  B17.drift-msg: could not build the pin-drift fixture"
+  FAIL=$((FAIL + 2))
+fi
+rm -rf "$B17_ROOT"
+
+echo
+echo "== B18: hostile nodes at the verdict path (#347) =="
+# A FIFO or a directory at the pinned candidate path must never be captured as
+# an artifact, and must never be reported as proven absence either: the walk
+# emits any node type at the pinned depth by design, and regularity is enforced
+# during secure capture.
+_b12_clear
+mkdir -p "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1"
+if mkfifo "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json" 2>/dev/null; then
+  B12_OUT="$(_b12_capture 42)"
+  B12_RC=$?
+  assert_eq "$B12_OUT" "" "B18.fifo.out: a FIFO candidate emits no receipt"
+  assert_eq "$B12_RC" "2" "B18.fifo.rc: an uncapturable candidate is INDETERMINATE=2, never ABSENT=1"
+  rm -f "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+else
+  echo "  SKIP  B18.fifo: mkfifo unavailable on this platform"
+fi
+
+_b12_clear
+mkdir -p "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B18.dir.out: a directory at the candidate path emits no receipt"
+assert_eq "$B12_RC" "2" "B18.dir.rc: a directory candidate is INDETERMINATE=2, never ABSENT=1"
+_b12_clear
+
+echo
+echo "== B19: MAXIMUM_SIZE boundary is exactly 1 MiB inclusive (#347) =="
+assert_grep "$LIB" '^MAXIMUM_SIZE = 1024 \* 1024$' \
+  "B19.constant: MAXIMUM_SIZE is 1 MiB"
+_b19_sized_payload() {
+  # Emit valid verdict JSON padded to exactly $1 bytes. python3 is already a hard
+  # dependency of the selector, and `head -c /dev/zero | tr` is not portable
+  # enough to trust for an exact-byte boundary fixture.
+  local target="$1" head_json tail_json filler_len
+  head_json="{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"pad\":\""
+  tail_json='"}'
+  filler_len=$(( target - ${#head_json} - ${#tail_json} ))
+  [ "$filler_len" -ge 0 ] || return 1
+  printf '%s' "$head_json"
+  python3 -c 'import sys; sys.stdout.write("x" * int(sys.argv[1]))' "$filler_len"
+  printf '%s' "$tail_json"
+}
+_b19_boundary_case() {
+  local size="$1" expect_rc="$2" label="$3" actual_size
+  _b12_clear
+  mkdir -p "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1"
+  _b19_sized_payload "$size" \
+    > "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+  actual_size="$(wc -c < "$B12_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json" | tr -d ' ')"
+  assert_eq "$actual_size" "$size" "B19.$label.fixture: payload is exactly $size bytes"
+  B12_OUT="$(_b12_capture 42)"
+  B12_RC=$?
+  assert_eq "$B12_RC" "$expect_rc" \
+    "B19.$label.rc: a $size-byte candidate returns rc $expect_rc"
+  if [ "$expect_rc" = "0" ]; then
+    assert_cleanup_removed "$B12_OUT" "B19.$label.cleanup: boundary-sized carrier is removed"
+  else
+    assert_eq "$B12_OUT" "" "B19.$label.out: an oversized candidate emits no receipt"
+  fi
+}
+_b19_boundary_case 1048576 0 accepted
+_b19_boundary_case 1048577 2 rejected
+_b12_clear
+
+echo
+echo "== B20: divergent duplicate JSON keys are rejected (#347) =="
+# `{"pr":42,"pr":99}` is accepted by a naive json.loads (last key wins) and would
+# let one artifact claim two PR identities. object_pairs_hook must reject it.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "{\"pr\":42,\"pr\":99,\"sha\":\"$B12_SHA_A\"}"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B20.divergent.out: a divergent duplicate key emits no receipt"
+assert_eq "$B12_RC" "2" "B20.divergent.rc: a divergent duplicate key is INDETERMINATE=2"
+# ... and the same shape with identical values is still rejected — the guard is
+# structural (duplicate key), not value-comparing.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "{\"pr\":42,\"pr\":42,\"sha\":\"$B12_SHA_A\"}"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "2" "B20.identical.rc: even an identical duplicate key is rejected structurally"
+_b12_clear
+
+echo
+echo "== B21: one broken root never hides another root's failure (#348) =="
+# scan_root_layout used to abort the whole enumeration on the first OSError, so a
+# stale worktree with a mode-000 subdirectory under .worktrees stopped every
+# other root from even being scanned. Errors now accumulate, the scan continues,
+# and ONE fail-closed error names every failing root plus its errno.
+assert_grep "$LIB" '^def describe_scan_failures\(failures\):$' \
+  "B21.renderer: a single accumulated-failure renderer exists"
+assert_grep "$LIB" '^[[:space:]]*scan_matches, scan_errors = scan_results$' \
+  "B21.accumulate: scan_root_layout returns matches AND accumulated errors"
+
+_b12_clear
+: > "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_OUT" "" "B21.regular-root.out: a root that is a regular file emits no receipt"
+assert_eq "$B12_RC" "2" "B21.regular-root.rc: a root that is a regular file is INDETERMINATE=2"
+assert_grep "$B12_ERR" 'root is not a directory: \.worktrees' \
+  "B21.regular-root.err: the failing root is named"
+rm -f "$B12_SANDBOX/.worktrees"
+
+# Two independently broken roots must BOTH be named — proof the scan did not
+# abort at the first one.
+_b12_clear
+: > "$B12_SANDBOX/.worktrees"
+: > "$B12_SANDBOX/worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "2" "B21.two-roots.rc: two broken roots stay fail-closed"
+assert_grep "$B12_ERR" 'root is not a directory: \.worktrees' \
+  "B21.two-roots.err-hidden: the hidden-convention root is named"
+assert_grep "$B12_ERR" 'root is not a directory: worktrees' \
+  "B21.two-roots.err-visible: the visible-convention root is ALSO named (no first-error abort)"
+rm -f "$B12_SANDBOX/.worktrees" "$B12_SANDBOX/worktrees"
+
+# An unreadable subtree under one root reports that root with its errno.
+_b12_clear
+mkdir -p "$B12_SANDBOX/.worktrees/w/.uberdev/runs/20260101-010101-a1"
+chmod 000 "$B12_SANDBOX/.worktrees/w/.uberdev/runs" 2>/dev/null || true
+if ls "$B12_SANDBOX/.worktrees/w/.uberdev/runs" >/dev/null 2>&1; then
+  chmod 755 "$B12_SANDBOX/.worktrees/w/.uberdev/runs" 2>/dev/null || true
+  echo "  SKIP  B21.errno: cannot make a directory unreadable on this platform/user"
+else
+  B12_OUT="$(_b12_capture 42)"
+  B12_RC=$?
+  chmod 755 "$B12_SANDBOX/.worktrees/w/.uberdev/runs" 2>/dev/null || true
+  assert_eq "$B12_RC" "2" "B21.errno.rc: an unreadable subtree stays fail-closed"
+  assert_grep "$B12_ERR" 'root scan failed: \.worktrees \(errno [0-9]' \
+    "B21.errno.err: the failure names the root AND its errno"
+fi
+chmod -R u+rwX "$B12_SANDBOX/.worktrees" 2>/dev/null || true
+_b12_clear
+
+# Accumulation is a DIAGNOSTIC improvement, deliberately not an outcome change:
+# a perfectly good verdict under the canonical root does NOT rescue a run whose
+# sibling root could not be read. That is not under-delivery, it is the only
+# sound model — selection ranks by timestamp and `discover` already calls a
+# newer/tied UNKNOWN artifact indeterminate, so an unreadable root (the same
+# epistemic state with less information) could be hiding a newer verdict for
+# this very PR. Honouring the readable roots would let one chmod-000 stale
+# worktree silently land a superseded verdict. Pinned so a future "partial
+# success" refactor has to argue with a red test.
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" \
+  "$(_b12_payload 42 "$B12_SHA_A")"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+_b12_assert_receipt "$B12_OUT" "$B12_SHA_A" \
+  "B21.canonical-alone: the canonical root alone resolves to a FOUND receipt"
+assert_eq "$B12_RC" "0" "B21.canonical-alone.rc: canonical-only discovery is FOUND=0"
+: > "$B12_SANDBOX/.worktrees"
+B12_OUT="$(_b12_capture 42)"
+B12_RC=$?
+assert_eq "$B12_RC" "2" \
+  "B21.canonical-plus-broken.rc: a broken sibling root makes an otherwise-good canonical verdict INDETERMINATE=2 (fail-closed, not partial success)"
+assert_eq "$B12_OUT" "" \
+  "B21.canonical-plus-broken.out: no receipt is emitted from the readable roots"
+assert_grep "$B12_ERR" 'root is not a directory: \.worktrees' \
+  "B21.canonical-plus-broken.err: the unreadable root is still named"
+rm -f "$B12_SANDBOX/.worktrees"
+_b12_clear
+
+echo
+echo "== B22: the private capture directory never leaks (#344) =="
+# secure_publish_captured deliberately never unlinks its attempt file, so the
+# capture directory is NOT empty once publication ran. The old shell-side
+# `rmdir "$capture_dir" 2>/dev/null || true` therefore ALWAYS failed, silently,
+# leaking a mode-0400 copy of the selected verdict on every non-clean exit.
+assert_grep "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
+  '^def secure_remove_private_capture_dir\(path: str, prefix: str\) -> None:$' \
+  "B22.helper: run_manifest exposes the prefix-guarded capture-dir remover"
+assert_no_grep "$LIB" 'rmdir "\$capture_dir"' \
+  "B22.no-swallow: the swallowing rmdir is gone"
+assert_grep "$LIB" 'warning: leaked private verdict capture directory' \
+  "B22.breadcrumb: a residual directory is named on stderr, not swallowed"
+assert_grep "$LIB" '^            discard_private_capture_dir\(capture_dir\)$' \
+  "B22.python-owns: the creating interpreter removes the directory on every failure path"
+
+# The prefix is BOTH the mktemp template and the basename guard that bounds the
+# failure-path `rm -rf` — restating it per consumer (mktemp template, shell case
+# guard, Python CAPTURE_DIR_PREFIX) let a drifted copy disarm one guard while
+# every site still read as correct. One binding, transported; the literal must
+# appear exactly once in the whole library.
+B22_PREFIX_LITERALS="$(grep -c 'uberdev-review-verdict\.' "$LIB" | tr -d ' ')"
+assert_eq "$B22_PREFIX_LITERALS" "1" \
+  "B22.prefix-ssot: the capture-dir prefix literal appears exactly once in lib/discover.sh"
+assert_grep "$LIB" '^UBERDEV_VERDICT_CAPTURE_PREFIX="uberdev-review-verdict\."$' \
+  "B22.prefix-binding: the single binding is a shell constant"
+assert_grep "$LIB" 'CAPTURE_DIR_PREFIX = os\.environ\.get\("UBERDEV_VERDICT_CAPTURE_PREFIX", ""\)' \
+  "B22.prefix-transported: the Python side reads the binding instead of re-typing it"
+# An empty transport is INDETERMINATE on both sides, never a permissive default:
+# the Python `startswith` guards would match every path and the shell `case`
+# pattern would collapse to `*`.
+(
+  cd "$B12_SANDBOX" || exit 2
+  . "$LIB"
+  UBERDEV_VERDICT_CAPTURE_PREFIX=""
+  discover_review_verdict_json 42
+) >/dev/null 2>"$B12_ERR"
+assert_eq "$?" "2" "B22.prefix-empty.rc: an empty prefix binding is INDETERMINATE=2"
+assert_grep "$B12_ERR" 'capture-directory prefix binding is missing' \
+  "B22.prefix-empty.err: the missing binding is named, not silently defaulted"
+
+# Point TMPDIR at a private directory so the leak assertion is exact and cannot
+# be perturbed by anything else on the runner.
+B22_TMP="$(mktemp -d)"
+_b22_leak_check() {
+  local label="$1" pr="$2" expected_rc="$3" out rc residue
+  rm -rf "$B22_TMP"
+  mkdir -p "$B22_TMP"
+  out="$(
+    cd "$B12_SANDBOX" || exit 2
+    TMPDIR="$B22_TMP"
+    export TMPDIR
+    . "$LIB"
+    discover_review_verdict_json "$pr"
+  )" 2>"$B12_ERR"
+  rc=$?
+  assert_eq "$rc" "$expected_rc" "B22.$label.rc: exit code is $expected_rc"
+  if [ "$rc" -eq 0 ]; then
+    assert_cleanup_removed "$out" "B22.$label.cleanup: successful discovery cleans up"
+  fi
+  residue="$(ls -A "$B22_TMP" 2>/dev/null | wc -l | tr -d ' ')"
+  assert_eq "$residue" "0" "B22.$label.no-leak: private TMPDIR is empty afterwards"
+}
+
+_b12_clear
+_b22_leak_check "absent" 42 1
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" '{"pr":'
+_b22_leak_check "malformed" 42 2
+
+_b12_clear
+: > "$B12_SANDBOX/.worktrees"
+_b22_leak_check "broken-root" 42 2
+rm -f "$B12_SANDBOX/.worktrees"
+
+_b12_clear
+_b12_write ".uberdev/runs/20260101-010101-a1/review-pr-verdict.json" "$(_b12_payload 42 "$B12_SHA_A")"
+_b22_leak_check "found" 42 0
+
+# The load-bearing case the old `rmdir` could never handle: a capture directory
+# that is NOT empty when discovery fails. Seed a stale attempt file (exactly what
+# secure_publish_captured leaves behind and never unlinks) and prove the creating
+# interpreter still removes the whole directory.
+_b12_clear
+B22_SEEDED="$(mktemp -d "$B22_TMP/uberdev-review-verdict.XXXXXX")"
+printf 'stale carrier bytes\n' > "$B22_SEEDED/review-pr-verdict.json.attempt-deadbeef-cafe"
+chmod 0400 "$B22_SEEDED/review-pr-verdict.json.attempt-deadbeef-cafe"
+(
+  cd "$B12_SANDBOX" || exit 2
+  . "$LIB"
+  _uberdev_review_verdict_python discover 42 "$B22_SEEDED"
+) >/dev/null 2>"$B12_ERR"
+assert_eq "$?" "1" "B22.nonempty.rc: a seeded non-empty capture dir still reports ABSENT=1"
+if [ -e "$B22_SEEDED" ]; then
+  echo "  FAIL  B22.nonempty.removed: a NON-EMPTY capture directory leaked: $B22_SEEDED"
+  FAIL=$((FAIL + 1))
+  rm -rf "$B22_SEEDED"
+else
+  echo "  PASS  B22.nonempty.removed: a non-empty capture directory is removed by its creating interpreter"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$B22_TMP"
+_b12_clear
 
 echo
 echo "== Summary =="
