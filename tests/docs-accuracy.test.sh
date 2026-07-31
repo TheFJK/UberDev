@@ -129,25 +129,34 @@ if [ "${CI_JOB_COUNT:-0}" -ge 2 ] 2>/dev/null; then
 else
   echo "  FAIL  T1b.1 could not parse >=2 job ids from $TEST_YML"; FAIL=$((FAIL + 1))
 fi
-MISSING_JOB_DOC=""
-while IFS= read -r job_id; do
-  [ -n "$job_id" ] || continue
-  grep -qF -e "$job_id" "$TESTING_MD" || MISSING_JOB_DOC="${MISSING_JOB_DOC} ${job_id}"
-done <<EOF_CI_JOBS
+# BOTH prose surfaces hand-enumerate the job list, so both are checked: the
+# CONTRIBUTING.md paragraph names all jobs inline and rots on the next job
+# addition exactly like testing.md's table did.
+for job_doc in "$TESTING_MD" "$CONTRIBUTING_MD"; do
+  MISSING_JOB_DOC=""
+  while IFS= read -r job_id; do
+    [ -n "$job_id" ] || continue
+    grep -qF -e "$job_id" "$job_doc" || MISSING_JOB_DOC="${MISSING_JOB_DOC} ${job_id}"
+  done <<EOF_CI_JOBS
 $CI_JOB_IDS
 EOF_CI_JOBS
-if [ -z "$MISSING_JOB_DOC" ]; then
-  echo "  PASS  T1b.2 testing.md names every test.yml job"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  T1b.2 testing.md does not name test.yml job(s):${MISSING_JOB_DOC}"
-  echo "        file: $TESTING_MD"; FAIL=$((FAIL + 1))
-fi
+  if [ -z "$MISSING_JOB_DOC" ]; then
+    echo "  PASS  T1b.2 $(basename "$job_doc") names every test.yml job"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T1b.2 $(basename "$job_doc") does not name test.yml job(s):${MISSING_JOB_DOC}"
+    echo "        file: $job_doc"; FAIL=$((FAIL + 1))
+  fi
+done
 # No hardcoded job-count claim may re-grow in either doc (the drift shape that
 # produced 'two-job matrix'). Sharding a job changes the number of CI RUNS
 # without changing the number of jobs, so a count in prose is wrong twice over.
+# The count token need NOT be adjacent to 'job': 'two shape-check jobs' is the
+# same rot as 'two-job matrix', so allow up to three intervening words.
+JOB_COUNT_RE='(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)([ -][a-z]+){0,3}[ -]jobs?([^a-z]|$)'
 for count_doc in "$TESTING_MD" "$CONTRIBUTING_MD"; do
-  if grep -qiE '(two|three|four|five|[0-9]+)[- ]job' "$count_doc"; then
+  if grep -qiE "$JOB_COUNT_RE" "$count_doc"; then
     echo "  FAIL  T1b.3 $(basename "$count_doc") carries a hardcoded CI job-count claim (drift-prone)"
+    grep -inE "$JOB_COUNT_RE" "$count_doc" | cut -c1-120 | sed 's/^/        /'
     echo "        file: $count_doc"; FAIL=$((FAIL + 1))
   else
     echo "  PASS  T1b.3 $(basename "$count_doc") carries no hardcoded CI job-count claim"; PASS=$((PASS + 1))
@@ -446,13 +455,93 @@ while IFS='|' read -r sym desc; do
 done <<EOF_CONTRACT_SYMBOLS
 $CONTRACT_SYMBOLS
 EOF_CONTRACT_SYMBOLS
+
+# --- §1 is the OTHER symbol-only surface: guard its references too ----------
+# The reference convention scopes symbol-only to §1 AND the contract table, so
+# §1 needs the same resolvability half. Without it §1 shipped two references
+# (`CHUNK_ARRAY=($CHUNK_IDS)`, `_wave_count`) that resolved in NO file — code
+# retired by the migration, cited as though it were live.
+#
+# T9.3b is a small CURATED presence list: the named `Step`/section headings the
+# derived scan below cannot see (they are not identifier-shaped) plus the three
+# correction anchors this change installed, so a silent revert to prose reds.
+SECTION1_SYMBOLS='### Executable setup|the review-pr fence that reserves the run directory
+Acquire the single-instance lock|the merge-pipeline single-instance lock step
+review_reserve_run_directory|the shipped locked-marker writer
+areaPrompt|the scan-fleet area fan-out that replaced the zsh-split wave loop
+personaPrompt|the testers round loop that replaced the corrupted count helper'
+while IFS='|' read -r sym desc; do
+  [ -n "$sym" ] || continue
+  if grep -qwF -e "$sym" <<<"$RFC12_S1"; then
+    echo "  PASS  T9.3b §1 cites \`$sym\` ($desc)"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.3b §1 no longer cites \`$sym\` ($desc)"
+    echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+  fi
+  if grep -rqwF -e "$sym" "$PLUGIN_DIR"; then
+    echo "  PASS  T9.4b \`$sym\` resolves in plugins/uberdev/"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T9.4b \`$sym\` does NOT resolve in plugins/uberdev/ — §1 cites a dead symbol"
+    echo "        retired by a migration? cite the SHIPPED replacement, not the corpse"
+    FAIL=$((FAIL + 1))
+  fi
+done <<EOF_SECTION1_SYMBOLS
+$SECTION1_SYMBOLS
+EOF_SECTION1_SYMBOLS
+# T9.4c is DERIVED, so a NEW dead reference reds without anyone remembering to
+# extend a list: every identifier-shaped backticked token in §1 must resolve.
+# `(memory: `key`)` spans are stripped first — those name Claude-memory files,
+# not repo symbols, and the prose labels them as such. That exclusion is read
+# off the prose marker, not hand-maintained per key.
+S1_TOKENS="$(printf '%s\n' "$RFC12_S1" \
+  | sed 's/memory: `[^`]*`//g' \
+  | grep -oE '`[A-Za-z_][A-Za-z0-9_]{5,}`' | tr -d '`' | sort -u)"
+S1_TOKEN_COUNT="$(printf '%s\n' "$S1_TOKENS" | grep -c '[A-Za-z]' || true)"
+if [ "${S1_TOKEN_COUNT:-0}" -ge 5 ] 2>/dev/null; then
+  echo "  PASS  T9.4c §1 yielded ${S1_TOKEN_COUNT} identifier references to resolve"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.4c §1 yielded only ${S1_TOKEN_COUNT} identifier references — slice/format broke"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
+S1_DEAD_TOKENS=""
+while IFS= read -r s1_tok; do
+  [ -n "$s1_tok" ] || continue
+  grep -rqwF -e "$s1_tok" "$PLUGIN_DIR" || S1_DEAD_TOKENS="${S1_DEAD_TOKENS} ${s1_tok}"
+done <<EOF_S1_TOKENS
+$S1_TOKENS
+EOF_S1_TOKENS
+if [ -z "$S1_DEAD_TOKENS" ]; then
+  echo "  PASS  T9.4c every identifier §1 cites resolves in plugins/uberdev/"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.4c §1 cites identifier(s) that resolve nowhere in plugins/uberdev/:${S1_DEAD_TOKENS}"
+  echo "        retired by a migration? cite the SHIPPED replacement, not the corpse"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
+
 # The rotted claim of record: the trust-fields row must point at the READER.
 # `uberdev_goal_audit` is the audit EMITTER the old line anchor landed on.
-if grep -qF -e 'uberdev_goal_audit ' <<<"$RFC12_TABLE"; then
-  echo "  FAIL  T9.5 contract table cites the audit emitter where the trust READER belongs"
+# Scoped to the table's DATA ROWS so the §3.3 anchoring-rule paragraph — which
+# names the emitter deliberately, as the historical example — cannot mask a
+# real re-rot, and matched on a symbol boundary so the backticked form the
+# RFC's own convention produces (`uberdev_goal_audit` followed by a backtick,
+# not a space) is caught too.
+RFC12_TABLE_ROWS="$(grep '^|' <<<"$RFC12_TABLE" || true)"
+RFC12_TRUST_ROW="$(awk -F'|' '$2 ~ /Trust fields/' <<<"$RFC12_TABLE_ROWS")"
+EMITTER_RE='uberdev_goal_audit([^_[:alnum:]]|$)'
+if [ -z "$RFC12_TRUST_ROW" ]; then
+  echo "  FAIL  T9.5 no 'Trust fields' row found in the §3.3 contract table — renamed?"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+elif grep -qE -e "$EMITTER_RE" <<<"$RFC12_TABLE_ROWS"; then
+  echo "  FAIL  T9.5 a contract-table row cites the audit emitter where the trust READER belongs"
+  grep -nE -e "$EMITTER_RE" <<<"$RFC12_TABLE_ROWS" | cut -c1-120 | sed 's/^/        /'
   FAIL=$((FAIL + 1))
+elif ! grep -qF -e 'uberdev_goal_read_trust_signal' <<<"$RFC12_TRUST_ROW"; then
+  echo "  FAIL  T9.5 the 'Trust fields' row no longer names uberdev_goal_read_trust_signal"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
 else
-  echo "  PASS  T9.5 contract table does not mistake the audit emitter for the trust reader"; PASS=$((PASS + 1))
+  echo "  PASS  T9.5 the Trust-fields row names the reader and no table row names the emitter"
+  PASS=$((PASS + 1))
 fi
 
 # --- Per-corrected-claim greps (#349) --------------------------------------
@@ -472,7 +561,41 @@ assert_grep "$WORKFLOW_RFC" 'SUPERSEDED IN PART — RFC 0015' \
 assert_grep "$WORKFLOW_RFC" 'hybrid — shell preflight \+ solve-fleet workflow' \
   "T9.10 §3.0 verdict row for the /solve+/turbo launcher reads hybrid, not keep-shell"
 assert_grep "$WORKFLOW_RFC" 'skills/goal-pipeline/workflow\.js' \
-  "T9.11 §3.3 names the shipped goal driver script"
+  "T9.11 §3.3 names the goal driver script"
+# T9.11b — shipped-ness is DERIVED from disk, never asserted in prose. Naming a
+# design target is fine; labelling it "shipped" while no such file exists is the
+# unverifiable-claim class #349 exists to kill. Every `skills/<name>/workflow.js`
+# the RFC names is resolved against the tree; a path that is absent may not
+# appear on a line that calls it shipped.
+RFC12_JS_PATHS="$(grep -oE 'skills/[a-z0-9_-]+/workflow\.js' "$WORKFLOW_RFC" | sort -u)"
+RFC12_JS_COUNT="$(printf '%s\n' "$RFC12_JS_PATHS" | grep -c 'workflow\.js' || true)"
+if [ "${RFC12_JS_COUNT:-0}" -ge 1 ] 2>/dev/null; then
+  echo "  PASS  T9.11b RFC 0012 names ${RFC12_JS_COUNT} workflow.js driver path(s) to resolve"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.11b no skills/*/workflow.js path parsed from $WORKFLOW_RFC — renamed?"
+  FAIL=$((FAIL + 1))
+fi
+JS_SHIPPED_LIE=""
+while IFS= read -r js_path; do
+  [ -n "$js_path" ] || continue
+  [ -e "$PLUGIN_DIR/$js_path" ] && continue
+  # No pipe into `grep -q`: its early exit SIGPIPEs the producer and pipefail
+  # would then mask the match. Capture first, match against the capture.
+  JS_CITING_LINES="$(grep -F -e "$js_path" "$WORKFLOW_RFC" || true)"
+  if grep -qi -e 'shipped' <<<"$JS_CITING_LINES"; then
+    JS_SHIPPED_LIE="${JS_SHIPPED_LIE} ${js_path}"
+  fi
+done <<EOF_RFC12_JS
+$RFC12_JS_PATHS
+EOF_RFC12_JS
+if [ -z "$JS_SHIPPED_LIE" ]; then
+  echo "  PASS  T9.11c every workflow.js RFC 0012 calls shipped exists in plugins/uberdev/"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T9.11c RFC 0012 claims shipped-ness for absent driver script(s):${JS_SHIPPED_LIE}"
+  echo "        file: $WORKFLOW_RFC"; FAIL=$((FAIL + 1))
+fi
 assert_grep "$WORKFLOW_RFC" 'EXACTLY ONE nested workflow' \
   "T9.12 §3.3 pins one nested workflow() call per cycle"
 assert_grep "$WORKFLOW_RFC" 'spends the single .workflow\(\). nesting level' \
