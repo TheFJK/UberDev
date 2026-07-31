@@ -2794,13 +2794,83 @@ if [ -r "$CODEX_CONFIG_LIB" ]; then
 else
   fail_msg "packaged Codex config-read.sh missing"
 fi
-for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh policy/model-routing-v1.json; do
+# #341: skills/merge-pipeline/lib/discover.sh joins this byte-lock. A bare `cmp`
+# is the correct assertion for it because codex/tools/port-skill.sh applies zero
+# transform to this file today -- the M2 guard below is what keeps that premise
+# honest. Deliberately no `[ -r ]` readability short-circuit: `cmp -s` exits 2 on
+# a missing file, so deleting a mirror must stay red rather than pass vacuously.
+for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh \
+                policy/model-routing-v1.json skills/merge-pipeline/lib/discover.sh; do
   if cmp -s "$REPO_ROOT/plugins/uberdev/$relative" "$PLUGIN_ROOT/$relative"; then
     pass_msg "packaged Codex $relative is byte-identical to canonical runtime"
   else
     fail_msg "packaged Codex $relative drifted from canonical runtime"
   fi
 done
+
+# #341: the byte-lock above is the correct assertion only while
+# codex/tools/port-skill.sh (14 sed rules, plus the trailing-whitespace strip in
+# its Python pass) has nothing to rewrite in this file. If discover.sh ever gains
+# one of these tokens the packaged mirror will LEGITIMATELY differ and the cmp
+# turns into a mystery red -- name the real cause instead of leaving a bare
+# "drifted". Every token is single-quoted on purpose: PLUGIN_ROOT is a live
+# variable in this file, so a double-quoted pattern would expand and never match.
+# grep -F keeps BRE/ERE brace escaping out of the comparison (GNU vs BSD grep).
+# The trailing-whitespace probe strips CR first: nothing pins line endings (no
+# .gitattributes), and under a CRLF checkout `[[:blank:]]$` would match the CR
+# instead of the space and go blind on the Windows job alone. No-op without CR.
+CANONICAL_DISCOVER_LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
+if grep -Fq \
+     -e 'CLAUDE_PLUGIN_ROOT' \
+     -e '${PLUGIN_ROOT}/' \
+     -e '$PLUGIN_ROOT/' \
+     -e '${HOME}/.claude/plugins' \
+     -e '${HOME}/.cursor/plugins' \
+     -e '../_shared/' \
+     -e '.claude/uberdev.local.md' \
+     -e '~/.claude' \
+     "$CANONICAL_DISCOVER_LIB" ||
+   tr -d '\r' < "$CANONICAL_DISCOVER_LIB" | grep -q '[[:blank:]]$'; then
+  fail_msg "canonical merge-pipeline/lib/discover.sh left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
+           "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
+else
+  pass_msg "canonical merge-pipeline/lib/discover.sh is inside the port-skill no-transform envelope (byte-lock stays valid)"
+fi
+
+# #341: cmp is depth-blind -- it passes even if BOTH copies move to a wrong
+# nesting depth. discover.sh resolves its own plugin root by hopping ../../..
+# from its sourced path; _uberdev_review_verdict_python then importlib-loads
+# <root>/lib/run_manifest.py and fails CLOSED to INDETERMINATE (SystemExit 2)
+# when that load fails, which would make every Codex-backend /merge and /goal
+# permanently INDETERMINATE with no test signal. merge-discovery-resilience.test.sh
+# builds this fixture shape but pins its LIB to the plugins/uberdev copy, so the
+# Codex layout is never the subject. Source in a subshell (discover.sh sets a
+# re-source guard and defines ~40 functions), `cd /` first so the resolution is
+# proven source-path-relative rather than cwd-relative, and normalise both sides
+# through `cd ... && pwd -P` because REPO_ROOT above uses a plain `pwd`.
+# This block sits inside one of the file's `set -e` regions, so both probes must
+# absorb their own non-zero exit into the empty string -- a bare `VAR="$(...)"`
+# assignment adopts the substitution's status and would abort the whole run
+# before fail_msg ever prints (observed: a gutted mirror truncated the run at
+# this line instead of reporting). The emptiness is not swallowed; it is exactly
+# what the assertion below reports as `resolved=<empty>`.
+CODEX_DISCOVER_LIB="$PLUGIN_ROOT/skills/merge-pipeline/lib/discover.sh"
+DISCOVER_ROOT="$(
+  LIB_PATH="$CODEX_DISCOVER_LIB" bash -c '
+    cd / || exit 1
+    . "$LIB_PATH" >/dev/null 2>&1 || exit 1
+    cd "${_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT:-/nonexistent}" 2>/dev/null || exit 1
+    pwd -P
+  '
+)" || DISCOVER_ROOT=''
+EXPECTED_DISCOVER_ROOT="$(cd "$PLUGIN_ROOT" 2>/dev/null && pwd -P)" || EXPECTED_DISCOVER_ROOT=''
+if [ -n "$DISCOVER_ROOT" ] && [ "$DISCOVER_ROOT" = "$EXPECTED_DISCOVER_ROOT" ] &&
+   [ -r "$DISCOVER_ROOT/lib/run_manifest.py" ]; then
+  pass_msg "packaged Codex discover.sh resolves its own runtime root to the Codex plugin root with run_manifest.py importable"
+else
+  fail_msg "packaged Codex discover.sh runtime-root hop is broken (verdict reader would fail closed to INDETERMINATE)" \
+           "resolved=${DISCOVER_ROOT:-<empty>} expected=$EXPECTED_DISCOVER_ROOT"
+fi
 
 PACKAGE_TMP="$(mktemp -d)"
 cp -R "$PLUGIN_ROOT" "$PACKAGE_TMP/uberdev-codex"
