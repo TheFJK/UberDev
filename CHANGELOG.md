@@ -4,6 +4,16 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.3] — 2026-07-30
+
+### Fixed
+
+- Converged four incompatible run-id contracts. `finish-branch` declared a widened format specifically to admit the `nohead` sentinel that `orchestrator` mints from `git rev-parse --short HEAD || echo nohead`; that id passed `finish-branch` and failed every canonical `[a-f0-9]` site, so `command-workspace.py` rejected it as invalid while `finish-branch` happily resolved the same run. The sentinel is now hex and both surfaces use the canonical regex, with tests locking the literals that previously had none.
+- `finish-branch` enumerated exactly two secret-scan targets — the push diff and the composed PR body — and never the PR **title**, which it reads and ships to GitHub. The title now goes through the scanner.
+- `secret-scan.sh` invoked `gitleaks` with no config, so a repository `.gitleaks.toml` allowlist was silently ignored and there was no escape hatch. The repo config is now honoured, with a line-level allowlist named in the abort message.
+- `live-semaphore.sh` validated values with a pipeline that matches **per line** while the caller kept the whole string, so a newline-bearing value could pass validation at three poisonable sites. Each now goes through the file's existing safe-text primitive first.
+- Hoisted ~32 duplicate 40-hex SHA patterns in `code_fixer_contract.py` to one compiled constant.
+
 ## [0.41.2] — 2026-07-30
 
 ### Fixed
