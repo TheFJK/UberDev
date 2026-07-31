@@ -36,23 +36,29 @@ _uberdev_semaphore_is_absolute_path() {
 }
 
 _uberdev_semaphore_reject_symlinked_ancestors() {
-  local path remaining current component os_name
-  path="$1"
-  case "$path" in
+  # The walked path is `target`, NOT `path`: this library is sourced under zsh
+  # (the /goal and finish-branch fences run under /bin/zsh), and there `path` is
+  # tied to `PATH` — `local path` empties the command search path for the whole
+  # function body. That silently broke `uname -s` below, which left `os_name`
+  # empty, which disabled the Darwin /var + /tmp carve-out, which rejected every
+  # $TMPDIR-rooted state path on macOS as a symlinked ancestor.
+  local target remaining current component os_name
+  target="$1"
+  case "$target" in
     [A-Za-z]:/*|[A-Za-z]:\\*)
       if command -v cygpath >/dev/null 2>&1; then
-        path="$(cygpath -u "$path")" || return 2
+        target="$(cygpath -u "$target")" || return 2
       else
         _uberdev_semaphore_error 'cygpath is required for a native-Windows state path'
         return 2
       fi
       ;;
   esac
-  case "$path" in
+  case "$target" in
     /*) ;;
     *) return 2 ;;
   esac
-  remaining="${path#/}"
+  remaining="${target#/}"
   current=''
   os_name="$(uname -s 2>/dev/null || true)"
   while [ -n "$remaining" ]; do
@@ -750,6 +756,27 @@ _uberdev_semaphore_validate_lease_path() {
   _uberdev_semaphore_is_absolute_path "$lease" || {
     _uberdev_semaphore_error 'LEASE_PATH must be absolute'; return 2
   }
+  # `grep -Eq` decides PER LINE, so a `^…$`-anchored pattern accepts a
+  # MULTI-LINE value as long as any one of its lines matches — while the
+  # variable keeps every line. LEASE_PATH is caller-supplied, so a path whose
+  # scope or filename component embeds a newline before a well-formed component
+  # (…/evil\n<64hex>.scope/…) would clear both anchored patterns below and then
+  # be used verbatim as the mutex/lease path.
+  #
+  # The check has to run on the RAW argument, never on the `$(dirname …)` /
+  # `$(basename …)` derivatives: command substitution strips TRAILING newlines,
+  # so a component literally named `<64hex>.scope\n` reduces to a well-formed
+  # `<64hex>.scope` in every derived variable while the raw path still traverses
+  # the newline-suffixed sibling. That is how such a component defeated the
+  # `[ ! -L "$scope" ]` guard below — `$scope` resolved to the legitimate
+  # directory while the lease materialised inside a symlink named
+  # `<64hex>.scope\n`, outside the validated scope. One assertion on the whole
+  # value subsumes every per-component variant, embedded and trailing alike;
+  # only then is an anchored match a statement about the whole path.
+  _uberdev_semaphore_safe_text "$lease" || {
+    _uberdev_semaphore_error 'LEASE_PATH must be single-line text'
+    return 2
+  }
   scope="$(dirname "$lease")"
   scope_base="$(basename "$scope")"
   version_base="$(basename "$(dirname "$scope")")"
@@ -1320,6 +1347,20 @@ uberdev_semaphore_set_handle() {
     return 2
   }
   if [ -n "$backend_identity" ]; then
+    # Single-line assertion BEFORE the anchored match: `grep -Eq` is per-line,
+    # so `<pid>|<pgid>|<sid>|<sha256>\n<anything>` would satisfy the pattern on
+    # its first line while `${backend_identity%%|*}` still equals the pid. The
+    # value is written verbatim as `backend_identity=%s` into the lease record
+    # by _uberdev_semaphore_publish_lease, so an embedded newline forges an
+    # extra key=value line — poisoning every subsequent lease read (and, via
+    # _uberdev_semaphore_reconcile_locked's fail-closed "malformed lease" abort,
+    # bricking the whole scope). Unlike the lease-file readers, this value never
+    # passes through the newline-free `IFS= read -r` loop, so nothing else
+    # establishes the invariant.
+    _uberdev_semaphore_safe_text "$backend_identity" || {
+      _uberdev_semaphore_error 'BACKEND_IDENTITY must be single-line text'
+      return 2
+    }
     printf '%s\n' "$backend_identity" \
       | grep -Eq '^[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}$' || return 2
     [ "$handle_kind" != status-only ] && [ "$handle_kind" != opaque ] || return 2

@@ -18,7 +18,7 @@ This skill was ported from a Claude Code slash command (`/uberthink`). On Codex:
   follow the skill's `## No-Workflow fallback` section instead.
 - **`MultiEdit`** → apply edits with your native file-edit tool.
 
-Original argument hint: `<goal text> [--islands N] [--handoff] [--no-issues] [--max-new N]`
+Original argument hint: `<goal text> [--islands N] [--handoff] [--no-issues] [--max-new N] [--resume RUN_ID]`
 
 ---
 
@@ -50,20 +50,31 @@ above is the enforced read-only invariant. (Design: `docs/rfc/0009-uberthink-ide
 | `--handoff` | After filing the issue, auto-invoke `Skill(uberdev:brainstorm)` seeded with the #1 dossier section so a real design pass starts immediately. |
 | `--no-issues` | Skip the `findings-to-issues` filing step (dossier-only run). |
 | `--max-new N` | Cap on how many top ideas get filed as GitHub issues (default 3). |
+| `--resume RUN_ID` | Rehydrate an existing `.uberdev/think/<RUN_ID>` tree instead of minting a new run. The pipeline scans the run dir and skips the waves whose artifacts are already on disk (scope gate, frame lenses, per-island divergence, per-island shortlists, `ranked.yaml`). The goal is read back from the run tree when you do not restate it. |
 
 ## Implementation
 
 Invoke the `uberdev:uberthink-pipeline` skill with `$ARGUMENTS` in scope. The skill owns
-all phases (frame + scope gate, per-island Waves 1–5 with genetic loop-back, cross-pollinate,
-rank + deliver, dossier render, issue filing, optional `--handoff`). This command
-performs only preflight validation, then hands off:
+the preflight (goal/flag parse, run-tree mint, config reads) and then hands the whole
+orchestration to `skills/uberthink-pipeline/workflow.js` — frame + scope gate, per-island
+Waves 1–5 with the genetic loop-back, cross-pollination, rank + deliver, dossier render,
+issue filing and the optional `--handoff` seed (RFC 0012 §3.7). This command performs only
+preflight validation, then hands off:
 
 ```bash
 # Preflight
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: /uberthink must run inside a git repository" >&2; exit 2
 fi
-if ! printf '%s' "$ARGUMENTS" | grep -qE '[^[:space:]-]'; then
+# A resume run may legitimately carry only flags — the goal is read back from the
+# run tree. Everything else needs at least one non-flag token. Both `--resume=ID`
+# and the documented `--resume ID` spelling count as a resume (the latter also
+# leaves a non-flag token, so it never reaches the grep).
+HAS_GOAL=0
+for tok in $ARGUMENTS; do
+  case "$tok" in --*) ;; *) HAS_GOAL=1 ;; esac
+done
+if [ "$HAS_GOAL" -eq 0 ] && ! grep -qE -- '--resume(=|$)' <<<"$ARGUMENTS"; then
   echo "error: /uberthink requires a goal text argument (got empty / flags-only)" >&2; exit 2
 fi
 ```

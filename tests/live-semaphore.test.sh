@@ -81,10 +81,116 @@ fi
 windows_scope="$(printf 'a%.0s' {1..64}).scope"
 windows_lease="$(printf 'b%.0s' {1..64}).lease"
 capture _uberdev_semaphore_validate_lease_path "C:\\state/semaphore-v1/$windows_scope/$windows_lease"
-if [ "$CAPTURE_RC" -eq 2 ] && ! printf '%s' "$CAPTURE_OUT" | grep -q 'LEASE_PATH must be absolute'; then
+if [ "$CAPTURE_RC" -eq 2 ] && ! grep -q 'LEASE_PATH must be absolute' <<<"$CAPTURE_OUT"; then
   pass "native Windows lease paths advance past the absolute-path guard"
 else
   fail "native Windows lease paths advance past the absolute-path guard" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# `grep -Eq` decides PER LINE, so a `^…$`-anchored pattern accepts a MULTI-LINE
+# value whenever ANY single line matches — while the variable still carries every
+# line. LEASE_PATH is caller-supplied, so a scope or filename component that
+# embeds a newline in front of a well-formed component used to clear both
+# anchored patterns and be accepted verbatim. Every fixture below materialises
+# the poisoned directory on disk so the pre-fix library returns 0 (accepted), not
+# a coincidental 2 from some later existence check — the assertions therefore
+# lock the guard, not the geometry.
+#
+# The TRAILING-newline pair is the case a per-component check cannot see at all:
+# the guard has to run on the RAW argument because `$(dirname …)`/`$(basename …)`
+# run through command substitution, which strips trailing newlines — a component
+# literally named `<64hex>.scope\n` reduces to a well-formed `<64hex>.scope` in
+# every derived variable while the raw path still traverses the newline-suffixed
+# sibling.
+poison_hex_scope="$(printf 'a%.0s' {1..64}).scope"
+poison_hex_lease="$(printf 'b%.0s' {1..64}).lease"
+poison_scope_dir="$TMP/poison-scope/semaphore-v1/evil"$'\n'"$poison_hex_scope"
+mkdir -p "$poison_scope_dir"
+capture _uberdev_semaphore_validate_lease_path "$poison_scope_dir/$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "multi-line lease scope component is rejected before the anchored match"
+else
+  fail "multi-line lease scope component is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+poison_lease_dir="$TMP/poison-lease/semaphore-v1/$poison_hex_scope"
+mkdir -p "$poison_lease_dir"
+capture _uberdev_semaphore_validate_lease_path "$poison_lease_dir/evil"$'\n'"$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "multi-line lease filename is rejected before the anchored match"
+else
+  fail "multi-line lease filename is rejected before the anchored match" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Trailing newline on the SCOPE component: `$scope` resolves to the legitimate
+# stripped directory (so `[ ! -L "$scope" ]` sees a real dir and passes) while
+# the raw path traverses the sibling SYMLINK named `<64hex>.scope\n`. Rejection
+# is asserted together with the escape target staying empty, so the lock is
+# about containment, not just about an exit code.
+escape_root="$TMP/poison-trailing/escape"
+trailing_version="$TMP/poison-trailing/semaphore-v1"
+mkdir -p "$escape_root" "$trailing_version/$poison_hex_scope"
+ln -s "$escape_root" "$trailing_version/$poison_hex_scope"$'\n'
+trailing_scope_lease="$trailing_version/$poison_hex_scope"$'\n'"/$poison_hex_lease"
+capture _uberdev_semaphore_validate_lease_path "$trailing_scope_lease"
+if [ "$CAPTURE_RC" -eq 2 ] \
+    && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT" \
+    && [ ! -e "$escape_root/$poison_hex_lease" ]; then
+  pass "trailing-newline scope component cannot escape the validated scope via a sibling symlink"
+else
+  fail "trailing-newline scope component cannot escape the validated scope via a sibling symlink" \
+    "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Trailing newline on the FILENAME: `$(basename …)` strips it, so every derived
+# check saw a well-formed `<64hex>.lease` while the published path was a
+# different file.
+capture _uberdev_semaphore_validate_lease_path "$trailing_version/$poison_hex_scope/$poison_hex_lease"$'\n'
+if [ "$CAPTURE_RC" -eq 2 ] && grep -q 'LEASE_PATH must be single-line text' <<<"$CAPTURE_OUT"; then
+  pass "trailing-newline lease filename is rejected"
+else
+  fail "trailing-newline lease filename is rejected" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# Counterpart: a well-formed single-line path must still clear the new guard, so
+# the assertions above cannot be passing because everything is now rejected.
+mkdir -p "$trailing_version/$poison_hex_scope"
+capture _uberdev_semaphore_validate_lease_path "$trailing_version/$poison_hex_scope/$poison_hex_lease"
+if [ "$CAPTURE_RC" -eq 0 ]; then
+  pass "well-formed single-line lease path still validates"
+else
+  fail "well-formed single-line lease path still validates" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# No library function may declare a local named after a zsh-TIED parameter.
+# zsh ties `path` to `PATH`, `fpath` to `FPATH`, and so on, so `local path`
+# empties the command search path for that entire function body and every
+# external it calls stops resolving. That is not theoretical here: it silently
+# broke `uname -s` inside _uberdev_semaphore_reject_symlinked_ancestors, which
+# left the Darwin carve-out disabled and rejected every $TMPDIR-rooted state
+# path on macOS as a symlinked ancestor. The /goal fences run under /bin/zsh;
+# bash has no such tie, so no assertion in this bash suite can observe it.
+zsh_tied_hits=''
+for tied in path cdpath fpath manpath mailpath module_path psvar prompt status \
+            argv options signals watch histchars fignore; do
+  if grep -qE "^[[:space:]]*(local|typeset)([[:space:]]+[^[:space:]]+)*[[:space:]]+$tied([[:space:]=]|\$)" "$LIB"; then
+    zsh_tied_hits="$zsh_tied_hits $tied"
+  fi
+done
+if [ -z "$zsh_tied_hits" ]; then
+  pass "no local shadows a zsh-tied parameter (PATH-clobber class)"
+else
+  fail "no local shadows a zsh-tied parameter (PATH-clobber class)" "tied locals:$zsh_tied_hits"
+fi
+# Behavioural counterpart, run under the real fence shell when one is available:
+# a $TMPDIR-rooted ancestor walk must succeed identically under zsh and bash.
+zsh_bin="$(command -v zsh 2>/dev/null || true)"
+if [ -n "$zsh_bin" ]; then
+  zsh_probe="$("$zsh_bin" -c '
+    source "$1" >/dev/null 2>&1 || { echo "source=failed"; exit 0; }
+    _uberdev_semaphore_reject_symlinked_ancestors "$2" >/dev/null 2>&1
+    echo "rc=$?"' _ "$LIB" "$TMP/state")"
+  if [ "$zsh_probe" = 'rc=0' ]; then
+    pass "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh"
+  else
+    fail "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh" "$zsh_probe"
+  fi
+else
+  fail "symlinked-ancestor walk accepts a \$TMPDIR-rooted state path under zsh" "zsh not found on PATH"
 fi
 absolute_failures=''
 for candidate in '/tmp/state' 'C:/state' 'C:\state' 'C:/' 'C:\'; do
@@ -140,7 +246,7 @@ capture /bin/bash -c '
   printf "rc=%s reason=%s\n" "$rc" "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}"
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_runtime_state_failed ]
 ' _ "$LIB" "$TMP/reason-probe"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_runtime_state_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_runtime_state_failed' <<<"$CAPTURE_OUT"; then
   pass "acquisition exports a bounded runtime-state failure reason"
 else
   fail "acquisition exports a bounded runtime-state failure reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -212,7 +318,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_publish_failed ] \
     && ! find "$2" -name '\''*.lease'\'' -type f -print 2>/dev/null | grep -q .
 ' _ "$LIB" "$TMP/publish-then-fail"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_publish_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_publish_failed' <<<"$CAPTURE_OUT"; then
   pass "post-publication writer failure rolls back the acquired generation"
 else
   fail "post-publication writer failure rolls back the acquired generation" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -235,7 +341,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_rollback_failed ] \
     && [[ "$replacement" =~ ^/.+\.lease$'\''\t'\''[0-9]+:[0-9]+:[0-9a-f]{32}$ ]]
 ' _ "$LIB" "$TMP/publish-rollback-failure"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_rollback_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_acquire_rollback_failed' <<<"$CAPTURE_OUT"; then
   pass "failed post-publication rollback returns the retained lease capability"
 else
   fail "failed post-publication rollback returns the retained lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -259,8 +365,8 @@ for release_stage in count allocation owner; do
       && [ "${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-}" = lease_acquire_mutex_release_failed ]
   ' _ "$LIB" "$TMP/release-failure-$release_stage" "$release_stage"
   if [ "$CAPTURE_RC" -eq 0 ] \
-      && printf '%s' "$CAPTURE_OUT" | grep -q 'cannot release acquisition mutex' \
-      && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_acquire_mutex_release_failed'; then
+      && grep -q 'cannot release acquisition mutex' <<<"$CAPTURE_OUT" \
+      && grep -q 'reason=lease_acquire_mutex_release_failed' <<<"$CAPTURE_OUT"; then
     pass "$release_stage failure preserves the mutex-release diagnostic and reason"
   else
     fail "$release_stage failure preserves the mutex-release diagnostic and reason" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -295,7 +401,7 @@ capture /bin/bash -c '
   [ "$rc" -eq 2 ] && [ -f "$lease" ] && [ -n "$replacement" ] \
     && [ "${_UBERDEV_SEMAPHORE_SET_HANDLE_FAILURE_REASON:-}" = lease_handle_rollback_failed ]
 ' _ "$LIB" "$TMP/set-handle-rollback-capability" "$FIXTURES/running-status.json"
-if [ "$CAPTURE_RC" -eq 0 ] && printf '%s' "$CAPTURE_OUT" | grep -q 'reason=lease_handle_rollback_failed'; then
+if [ "$CAPTURE_RC" -eq 0 ] && grep -q 'reason=lease_handle_rollback_failed' <<<"$CAPTURE_OUT"; then
   pass "failed handle rollback preserves the replacement lease capability"
 else
   fail "failed handle rollback preserves the replacement lease capability" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
@@ -399,7 +505,7 @@ fi
 semaphore_identity="$(_uberdev_semaphore_process_identity "$$")"
 manifest_identity="$(python3 -I -B "$MANIFEST" process-identity --pid "$$")"
 if [ "$semaphore_identity" = "$manifest_identity" ] \
-    && printf '%s' "$semaphore_identity" | grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$"; then
+    && grep -Eq "^$$\\|[0-9]+\\|[0-9]+\\|[0-9a-f]{64}$" <<<"$semaphore_identity"; then
   pass "semaphore and manifest share one kernel process identity"
 else
   fail "shared kernel process identity" "semaphore=$semaphore_identity manifest=$manifest_identity"
@@ -521,6 +627,23 @@ if [ "$CAPTURE_RC" -eq 2 ] && ! grep -q '^timeout_s=1$' "$lease_handle"; then
   pass "status path newline injection cannot rewrite lease fields"
 else
   fail "status path newline injection cannot rewrite lease fields" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+fi
+# BACKEND_IDENTITY is the sibling injection vector: it is caller-supplied, is
+# written verbatim as `backend_identity=%s` by _uberdev_semaphore_publish_lease,
+# and — unlike every lease FIELD — never passes through the newline-free
+# `IFS= read -r` loop that establishes single-line-ness for the readers. Its
+# `grep -Eq` validation matches per line, so a well-formed first line used to
+# smuggle arbitrary extra `key=value` records into the published lease, which
+# then trips _uberdev_semaphore_reconcile_locked's fail-closed "malformed lease"
+# abort and bricks the whole scope.
+poison_backend_identity="$(_uberdev_semaphore_process_identity "$$")"$'\nowner_pid=999999'
+capture uberdev_semaphore_set_handle "$lease_handle" "$$" "$status_path" '' '' "$poison_backend_identity"
+if [ "$CAPTURE_RC" -eq 2 ] \
+   && ! grep -q '^owner_pid=999999$' "$lease_handle" \
+   && _uberdev_semaphore_read_lease "$lease_handle"; then
+  pass "backend identity newline injection cannot forge lease records"
+else
+  fail "backend identity newline injection cannot forge lease records" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 capture uberdev_semaphore_acquire "$HANDLE_STATE" repo codex 1 run-handle 5
 if [ "$CAPTURE_RC" -ne 0 ]; then
@@ -1110,7 +1233,7 @@ _uberdev_semaphore_process_identity() {
 }
 capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
 if [ "$CAPTURE_RC" -eq 2 ] && [ -f "$lease_identity_path" ] \
-    && printf '%s' "$CAPTURE_OUT" | grep -q 'process identity probe unavailable'; then
+    && grep -q 'process identity probe unavailable' <<<"$CAPTURE_OUT"; then
   pass "unavailable backend identity probe retains lifecycle capacity with an error"
 else
   fail "unavailable backend identity probe retains lifecycle capacity with an error" "rc=$CAPTURE_RC out=$CAPTURE_OUT"

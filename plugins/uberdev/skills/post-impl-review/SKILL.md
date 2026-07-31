@@ -38,6 +38,7 @@ If a reviewer agent surfaces a finding that "we should re-plan", record it as a 
 - `commit_range` — immutable git rev range for diff context, `<merge-base>..<reviewed-head-sha>`; never use moving `HEAD` after the reviewed head has been captured.
 - `tier` — one of `trivial` / `small` / `medium` / `large`. Accepted for caller compatibility but **dead for model selection** (RFC 0012 §5): all 6 reviewer agents carry `model: inherit` in their frontmatter (the former lightweight-lens Haiku pins are retired — blocker verdicts feed an auto-fixer, so every judgment lens inherits the session model).
 - `aspect_emphasis` — optional list of aspect-token strings (e.g. `["tests", "errors"]`) forwarded from `/uberdev:review-pr` Step 1's `ASPECT_LIST`. Default: empty list. When non-empty, Step 1 below appends a `## Emphasis` subsection to the shared brief listing each token. The emphasis section is identical across all 6 reviewers — emphasis is uniform, never per-reviewer.
+- `fanout_cap` — optional integer in `[1, 50]` forwarded by `/uberdev:review-pr` Step 1 when the caller passed the `sequential` token (`fanout_cap=1`). Default: absent. When supplied it OVERRIDES `POST_IMPL_REVIEW_CAP` for this invocation only, ranking above the `fanout_concurrency.post_impl_review` config key, the `UBERDEV_FANOUT_POST_IMPL_REVIEW` env var, and the built-in default of 6. The value is materialised as `FANOUT_CAP_INPUT` **inside** the executable setup fence below — the caller cannot `export` it, because each caller `bash` block is a fresh shell whose exports are gone before this fence runs (#302). An out-of-range or non-integer value is a hard refusal, never a silent fallback to the default.
 
 ## Process
 
@@ -121,6 +122,29 @@ REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
 EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
+# Caller-supplied `fanout_cap` Skill input (empty = not supplied). Bound HERE,
+# in the same fence that resolves and uses POST_IMPL_REVIEW_CAP — a caller
+# `export` in an earlier bash block never reaches this shell (#302).
+FANOUT_CAP_INPUT="${FANOUT_CAP_INPUT:-}"
+post_review_resolve_cap() {
+  # <config_cap> — echoes the effective cap; refuses an out-of-band input.
+  local config_cap="$1"
+  if [ -z "$FANOUT_CAP_INPUT" ]; then
+    printf '%s' "$config_cap"
+    return 0
+  fi
+  case "$FANOUT_CAP_INPUT" in
+    ''|*[!0-9]*)
+      echo "error: fanout_cap input must be an integer in [1,50], got '$FANOUT_CAP_INPUT'" >&2
+      return 2
+      ;;
+  esac
+  if [ "$FANOUT_CAP_INPUT" -lt 1 ] || [ "$FANOUT_CAP_INPUT" -gt 50 ]; then
+    echo "error: fanout_cap input out of range [1,50], got '$FANOUT_CAP_INPUT'" >&2
+    return 2
+  fi
+  printf '%s' "$FANOUT_CAP_INPUT"
+}
 post_review_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
 }
@@ -440,6 +464,10 @@ else
   else
     POST_IMPL_REVIEW_CAP=6
   fi
+  # A caller-supplied `fanout_cap` Skill input outranks config/env/default.
+  POST_IMPL_REVIEW_CAP="$(post_review_resolve_cap "$POST_IMPL_REVIEW_CAP")" || {
+    rc=$?; return "$rc" 2>/dev/null || exit "$rc"
+  }
   if post_review_run_capped "$REVIEW_RECORDS" "$REVIEW_EXPECTED_COUNT" "$POST_IMPL_REVIEW_CAP" \
       "$REVIEW_DESCRIPTORS" "$REVIEW_LAUNCHED" "$REVIEW_FAILED" "$REVIEW_PR_TIMEOUT" "$RESEARCH_DIR_ABS/post-review"; then
     :
@@ -474,12 +502,18 @@ All six receive the same brief path and return their own reviewer YAML. All six 
 
 **Per-repo fanout cap.** Immediately before dispatching the 6 reviewer
 agents, the executable setup sources `${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh`
-and resolves `POST_IMPL_REVIEW_CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)`.
+and resolves `POST_IMPL_REVIEW_CAP=$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)`,
+then lets `post_review_resolve_cap` override that answer with the caller's
+`fanout_cap` Skill input when one was supplied.
 When `CAP < 6`, split the 6 routed calls into `ceil(6 / CAP)` sequential
 waves — each wave still obeys the dispatch-all-before-wait
 invariant. When `CAP >= 6` (default), dispatch all 6 in one wave
 (today's behaviour, unchanged). Default 6, range [1, 50],
-precedence env > config > default.
+precedence `fanout_cap` input > env > config > default. The input is the ONLY
+precedence tier that works across a caller boundary: `/uberdev:review-pr`'s
+`sequential` token used to `export UBERDEV_FANOUT_POST_IMPL_REVIEW=1` from one
+of its own `bash` blocks, which is a different shell from this fence, so the
+override never arrived and the token was a silent no-op (#302).
 
 Each return MUST match the manifest-declared shared output contract in this YAML shape:
 

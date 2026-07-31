@@ -35,15 +35,30 @@ prior-fence `unset` protects nothing).
   costs 2–8 s per issue — the 120 s default timeout can expire mid-claim and
   strand a half-claimed batch (the rollback path runs before any abort, but
   only while the process is alive).
-- The wave cap (`fanout_concurrency.solve_bg`, default 6) is
-  **dispatch-burst chunking**, not a live concurrency ceiling: every backend
-  returns immediately after spawn, so all dispatched agents run concurrently.
+- The wave cap (`fanout_concurrency.solve_bg`, default 6) means different
+  things per transport, and the difference is load-bearing:
+  - on the **detached** backends it is **dispatch-burst chunking**, not a live
+    concurrency ceiling — every backend returns immediately after spawn, so all
+    dispatched agents run concurrently regardless of the cap;
+  - on the **`workflow`** backend it is a **real live ceiling**: the fleet runs
+    issues in `parallel()` waves of that size and each wave is a barrier, so at
+    most `concurrency` solvers exist at once (further bounded by the runtime's
+    own `min(16, cores-2)` cap).
+- On the `workflow` backend the launcher call is short and cheap regardless of
+  batch size — it stops after the claim protocol and emits args. The long-running
+  work happens in the Workflow, which reports through `/workflows`.
 
 `$ARGUMENTS` may contain **one or more issue numbers** (e.g. `42` or `5 6 7`).
 The launcher validates every issue up front (Phase A, validate-all-first),
 echoes one `triage:` signal line per issue, claims each issue (Step 4.5), and
-dispatches one autonomous agent per issue (Phase B) via the platform-aware
-backend in `lib/dispatch.sh` (`claude-bg` / `wezterm` / `background` / `codex`).
+then hands the batch to the resolved transport. On the default `workflow`
+backend (RFC 0015) it stops at **Step 5w**: it writes
+`$UBERDEV_TMPDIR/solve-fleet-manifest.json`, emits the args envelope, and the
+command file mandates one `Workflow` call into
+`skills/solve-fleet/workflow.js`, which runs one worktree-isolated solver agent
+per issue. On a detached backend (`claude-bg` / `wezterm` / `background` /
+`codex`) it instead dispatches one autonomous session per issue (Phase B) via
+`lib/dispatch.sh`.
 The `codex` backend is also available under Codex or via `--backend=codex`;
 it runs detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`.
 Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
@@ -52,8 +67,9 @@ Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
 `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are
 namespaced by issue number, so concurrent spawns are collision-free. Override flags
 (`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service
-flags, `--backend=<name>`) apply batch-wide. Monitor via `claude agents` (claude-bg),
-visible panes (wezterm), or PID/log/result files (background/codex).
+flags, `--backend=<name>`) apply batch-wide. Monitor via `/workflows` (workflow — the
+default), `claude agents` (claude-bg), visible panes (wezterm), or
+PID/log/result files (background/codex).
 
 ## Constants
 
@@ -64,13 +80,13 @@ is the documentation surface.
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | see the column-0 binding in `lib/solve-launcher.sh` (verbatim note also quoted under `## Deprecated Flags` in both command files) | Phase A stderr emission on first `--terminal=` / `$SOLVE_TERMINAL` encounter. |
 | `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (`claude --bg` needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
-| `DISPATCH_BACKEND_ENUM` | `auto \| claude-bg \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight. |
+| `DISPATCH_BACKEND_ENUM` | `auto \| workflow \| claude-bg \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight, which resolves `workflow` on every Claude host (RFC 0015). `claude-bg` is deprecated — removal target v1.0.0. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | `MAX_PARALLEL_BG_AGENTS` default (dispatch-burst chunk size). |
 | `GH_PARALLEL_CAP` | `8` | Chunk size for the parallel gh stages (validation reads, claim writes) — GitHub secondary-rate-limit courtesy. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | /turbo is unattended — quality > cost. |
 | `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max \| ultra` | Public parser; `ultra` is rejected unless backend resolution selects Codex. Claude legacy effort remains the first five values. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Source tag in the `effort_resolved` audit event. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers (launcher + `lib/dispatch.sh`). `dispatch_setup_failed` carries `phase` (+ `subphase` ∈ {`marker_absent`, `pipeline_error`} on `id_extract`); `claim_collision` carries `phase:"post_write_verification"` when the post-write re-read lost to a racing dispatcher. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `solve_workflow_fleet_prepared`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers (launcher + `lib/dispatch.sh`). `dispatch_setup_failed` carries `phase` (+ `subphase` ∈ {`marker_absent`, `pipeline_error`} on `id_extract`); `claim_collision` carries `phase:"post_write_verification"` when the post-write re-read lost to a racing dispatcher. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied on dispatch; cleared by `/merge` post-merge or the dispatch-failure rollback. NEVER set or removed by hand (color `D93F0B`; description ≤100 chars — GitHub 422s longer). |
 | `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint on every claim audit comment — the only safe parser surface. Collision checks match the **version-stripped prefix** so rolling v1/v2 upgrades stay mutually visible (#123 B7); adding optional body fields is backward-compatible (missing fields parse as `"?"`), removing/renaming fields MUST bump the marker version. |
 

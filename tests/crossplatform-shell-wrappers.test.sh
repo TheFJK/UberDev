@@ -955,6 +955,10 @@ PY
     ! _uberdev_dispatch_numeric_supervision_supported background
     _uberdev_dispatch_numeric_supervision_supported claude-bg
     _uberdev_dispatch_numeric_supervision_supported wezterm
+    # RFC 0015: `workflow` spawns no OS process, so the numeric-supervision gate
+    # does not apply to it — this is what makes native Windows a first-class
+    # host without WezTerm.
+    _uberdev_dispatch_numeric_supervision_supported workflow
     _uberdev_dispatch_codex_available() { return 0; }
     for rejected_backend in codex background; do
       unset UBERDEV_RESOLVED_BACKEND
@@ -963,13 +967,19 @@ PY
       ! uberdev_dispatch_preflight solve >/dev/null 2>&1
       [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
     done
+    # RFC 0015 changed this arm: `auto` on native Windows used to HARD-ERROR
+    # when WezTerm was unavailable, because every candidate backend needed a
+    # supervisable process tree. It now resolves to `workflow`, which has no
+    # process tree at all. This block is native-Windows-only — there is no
+    # macOS CI job and Linux never enters it — so it is the sole guard against
+    # the auto matrix regressing on Windows.
     unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
     UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
     export UBERDEV_DISPATCH_BACKEND_REQUESTED
     _uberdev_dispatch_wezterm_available() { return 1; }
     claude() { return 0; }
-    ! uberdev_dispatch_preflight solve >/dev/null 2>&1
-    [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
+    uberdev_dispatch_preflight solve >/dev/null 2>&1
+    [ "${UBERDEV_RESOLVED_BACKEND:-}" = workflow ]
     windows_stage=lease-release-wrong-identity
     release_identity="$(_uberdev_agent_lease_identity "$lease")"
     release_native_identity="${release_identity%:*}"

@@ -147,4 +147,10 @@ next_phase_recommendation: auto
 - **Field Scout discipline.** When you are `field_scout`, you import FROM `donor_domain`. You do not generate cross-domain candidates from other donors — that's the Bridge's job. Stay in your lane; the fleet covers the catalog by parallel dispatch.
 - **Bridge discipline.** When you are `bridge`, you do NOT duplicate Field Scout outputs. Your mandate is forced-distance analogy + translation. Near-adjacent analogies (e.g. "compilers → DSLs" for a networking problem) are Field Scout territory; refuse them.
 - **No emojis in the artifact.** The dossier render at Wave 7 controls presentation; keep your output plain.
+
+## Structured return (Workflow runtime)
+
+Under `skills/uberthink-pipeline/workflow.js` the orchestration reads a `StructuredOutput` return: `islandIndex` (the integer K from your dispatch), `persona` (your persona name), `candidateCount` (the integer number of mechanisms you wrote) and `outPath`. Keep emitting the YAML handle above as well — it is what the No-Workflow fallback orchestrator reads.
+
+**Wave-1 frame availability.** In the Workflow path, Wave 1 fires in the SAME burst as the three remaining Wave-0 lenses, so at wave 1 only `frame.md` is guaranteed to exist. `teardown.md`, `prior-art.md` and `constraints.md` are being written concurrently: read whichever already exist, never block on them, and never invent their contents. Your dispatch prompt says which are guaranteed. Wave-2 (gap-targeted) dispatches always have all four.
 """

@@ -74,3 +74,16 @@ CLAUDE.md
 
 # Local implementation worktrees (write-plan / subagent-driven-dev)
 .worktrees/
+
+# Test scratch directories. Five suites mktemp INTO tests/_fixtures/ and clean
+# up on EXIT, but a killed or crashed run leaves the tree behind — and some of
+# those fixtures deliberately contain hostile path components (quotes,
+# backslashes, tabs) that native Windows CANNOT CHECK OUT. A single `git add -A`
+# over that residue therefore produces a commit that reds the Windows job at
+# the checkout step, before a single test runs. Ignore the residue so no
+# working tree can commit it by accident.
+tests/_fixtures/child-dispatch-receipts.*
+tests/_fixtures/child-inputs.*
+tests/_fixtures/orchestrator-child-inputs.*
+tests/_fixtures/review-child-inputs.*
+tests/_fixtures/worktree-receipts.*

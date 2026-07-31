@@ -158,9 +158,9 @@ fi
 # F1 — the section is NOT silently skipped: the heading + BOTH per-file
 # `### <basename>` sub-headers render. This is the assertion the zsh word-split
 # bug defeated (the body never ran, so nothing past the heading appeared).
-if printf '%s\n' "$RENDERED" | grep -qF '## Reviewer findings summary' \
-   && printf '%s\n' "$RENDERED" | grep -qF '### post-impl-review-final.md' \
-   && printf '%s\n' "$RENDERED" | grep -qF '### pr-test-analyzer.md'; then
+if grep -qF '## Reviewer findings summary' <<<"$RENDERED" \
+   && grep -qF '### post-impl-review-final.md' <<<"$RENDERED" \
+   && grep -qF '### pr-test-analyzer.md' <<<"$RENDERED"; then
   pass "F1: composer renders the section + both ### file headers under zsh (the read-loop word-splits the list)"
 else
   fail "F1: composer section/file-headers MISSING under zsh — the loop skipped the body (for-loop word-split regression?)"
@@ -168,15 +168,15 @@ else
 fi
 
 # F2 — the finding text from BOTH files survives into the rendered body.
-if printf '%s\n' "$RENDERED" | grep -qF '**blocker** `src/handler.ts:7` — Silent failure in handler' \
-   && printf '%s\n' "$RENDERED" | grep -qF 'FINDING-PTA: missing coverage on the new branch'; then
+if grep -qF '**blocker** `src/handler.ts:7` — Silent failure in handler' <<<"$RENDERED" \
+   && grep -qF 'FINDING-PTA: missing coverage on the new branch' <<<"$RENDERED"; then
   pass "F2: schema-v2 findings are human-rendered and legacy analyzer text survives under zsh"
 else
   fail "F2: v2 human summary or legacy analyzer text is missing under zsh"
   printf '        rendered=[%s]\n' "$(printf '%s' "$RENDERED" | tr '\n' '|')"
 fi
 
-if printf '%s\n' "$RENDERED" | grep -qF '"schema_version":2'; then
+if grep -qF '"schema_version":2' <<<"$RENDERED"; then
   fail "F2b: raw compact schema-v2 JSON leaked into the PR body"
 else
   pass "F2b: raw compact schema-v2 JSON is not pasted into the PR body"
@@ -185,7 +185,7 @@ fi
 # F3 — the envelope tag lines are STRIPPED (the headline behavior of the #302
 # pairing). Pure `<external-untrusted-input …>` / `</external-untrusted-input>`
 # lines must NOT survive into the PR body.
-if printf '%s\n' "$RENDERED" | grep -qE '<external-untrusted-input'; then
+if grep -qE '<external-untrusted-input' <<<"$RENDERED"; then
   fail "F3: envelope OPEN/CLOSE tag lines leaked into the rendered section (the sed strip did not run)"
   printf '        rendered=[%s]\n' "$(printf '%s' "$RENDERED" | tr '\n' '|')"
 else
@@ -213,7 +213,7 @@ OLD_RENDERED="$("$ZSH_BIN" -f -c '
     echo
   done
 ' 2>/dev/null)"
-if printf '%s\n' "$OLD_RENDERED" | grep -qF '### post-impl-review-final.md'; then
+if grep -qF '### post-impl-review-final.md' <<<"$OLD_RENDERED"; then
   fail "F4: the OLD for-loop shape rendered a file header under zsh — zsh word-split behavior changed; F1/F2 may be vacuous"
 else
   pass "F4: OLD for-loop shape skips the body under zsh (confirms F1/F2 assert the real fix, not shell luck)"
@@ -235,6 +235,52 @@ if grep -qE 'done[[:space:]]*<<<[[:space:]]*"\$REVIEW_FILES"' "$FINISH_BRANCH"; 
   pass "F5b: the composer consumes REVIEW_FILES via a read-loop here-string (word-split-independent)"
 else
   fail "F5b: expected the composer to feed \$REVIEW_FILES into a 'while read' loop via '<<< \"\$REVIEW_FILES\"'"
+fi
+
+# --------------------------------------------------------------------------
+# F6 — the pre-push secret-scan LIBRARY must behave identically under the real
+# fence shell. zsh ties the parameter `path` to `PATH`, so a `local path` inside
+# any library function empties the command search path for that entire function
+# body and every external it calls silently stops resolving — turning a clean
+# scan into a fail-CLOSED scanner error. bash has no such tie, so the bash
+# suites cannot see it; and the affected code is on the gitleaks branch, which
+# never executes on a runner without gitleaks. This probe therefore puts a
+# gitleaks STUB on PATH so the primary layer runs on every platform.
+#
+# Mutation guard: rename any library local back to `path` (e.g. in
+# _uberdev_secret_scan_default_config) => F6 RED on all three assertions.
+# --------------------------------------------------------------------------
+echo
+echo "== F6: lib/secret-scan.sh behaves identically under zsh =="
+F6_BIN="$WORK/f6bin"
+mkdir -p "$F6_BIN"
+cat > "$F6_BIN/gitleaks" <<'STUB'
+#!/bin/sh
+# Reports CLEAN, so the verdict is decided by the regex fallback: the point of
+# this probe is that the surrounding library machinery still RUNS under zsh.
+cat >/dev/null
+exit 0
+STUB
+chmod +x "$F6_BIN/gitleaks"
+F6_OUT="$(PATH="$F6_BIN:$PATH" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" "$ZSH_BIN" -c '
+  set -u
+  source "$CLAUDE_PLUGIN_ROOT/lib/secret-scan.sh" >/dev/null 2>&1 || { echo "source=failed"; exit 0; }
+  # Assembled at runtime so these source bytes never carry the token
+  # contiguously (finish-branch scans its own diff).
+  key="AKIA""IOSFODNN7EXAMPLE"
+  printf "%s\n" "a clean line of code" | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "clean=$?"
+  printf "%s\n" "$key" | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "leak=$?"
+  printf "%s # %s\n" "$key" "$UBERDEV_SECRET_SCAN_ALLOW_MARKER" \
+    | uberdev_run_secret_scan_stdin >/dev/null 2>&1; echo "marked=$?"
+' 2>&1)"
+F6_FAILURES=''
+grep -q '^clean=0$'  <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES clean-input-not-clean"
+grep -q '^leak=1$'   <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES leak-not-detected-as-match"
+grep -q '^marked=0$' <<<"$F6_OUT" || F6_FAILURES="$F6_FAILURES allow-marker-not-honoured"
+if [ -z "$F6_FAILURES" ]; then
+  pass "F6: secret-scan clean/leak/allowlisted verdicts are identical under zsh"
+else
+  fail "F6: secret-scan misbehaves under zsh:$F6_FAILURES (got: $(tr '\n' ' ' <<<"$F6_OUT"))"
 fi
 
 echo

@@ -61,6 +61,12 @@ except ModuleNotFoundError:
 Phase = Literal["phase1", "phase2"]
 CommitType = Literal["fix", "refactor"]
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# Git object-id shape (40 lowercase hex). One compiled definition for the whole
+# module: this validator guards every commit/tree/blob oid crossing the contract
+# boundary, and an inline `re.fullmatch(r"[0-9a-f]{40}", …)` re-typed at each of
+# those call sites is a literal that can silently drift at one of them.
+SHA1 = re.compile(r"[0-9a-f]{40}")
+SHA1_BYTES = re.compile(rb"[0-9a-f]{40}")
 PROCESS_IDENTITY = re.compile(r"[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}")
 LEASE_GENERATION = re.compile(r"[0-9a-f]{32}")
 COMMIT_RANGE = re.compile(rb"[0-9a-f]{40}\.\.[0-9a-f]{40}\n?")
@@ -1031,8 +1037,8 @@ def _head_identity(working_dir: str) -> tuple[str, str]:
     except UnicodeError:
         fail("git_state_unreadable")
     if (
-        re.fullmatch(r"[0-9a-f]{40}", head_sha) is None
-        or re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None
+        SHA1.fullmatch(head_sha) is None
+        or SHA1.fullmatch(tree_sha) is None
     ):
         fail("git_state_unreadable")
     return head_sha, tree_sha
@@ -1099,7 +1105,7 @@ def _tree_entry(working_dir: str, treeish: str, path: str) -> dict[str, str] | N
         or mode not in {"100644", "100755", "120000", "160000"}
         or kind not in {"blob", "commit"}
         or (mode == "160000") != (kind == "commit")
-        or re.fullmatch(r"[0-9a-f]{40}", oid) is None
+        or SHA1.fullmatch(oid) is None
     ):
         fail("tree_entry_invalid")
     return {"mode": mode, "oid": oid}
@@ -1128,7 +1134,7 @@ def _index_entry(working_dir: str, path: str) -> dict[str, Any] | None:
     if (
         decoded_path != path
         or mode not in {"100644", "100755", "120000", "160000"}
-        or re.fullmatch(r"[0-9a-f]{40}", oid) is None
+        or SHA1.fullmatch(oid) is None
         or oid == "0" * 40
         or stage_text != "0"
     ):
@@ -1171,7 +1177,7 @@ def _hash_git_blob(working_dir: str, path: str, payload: bytes) -> str:
         oid = result.stdout.decode("ascii").strip()
     except UnicodeError:
         fail("worktree_hash_failed")
-    if re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+    if SHA1.fullmatch(oid) is None:
         fail("worktree_hash_failed")
     return oid
 
@@ -1241,7 +1247,7 @@ def _worktree_entry(working_dir: str, path: str) -> dict[str, Any]:
             oid = result.stdout.decode("ascii").strip()
         except UnicodeError:
             fail("worktree_hash_failed")
-        if re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+        if SHA1.fullmatch(oid) is None:
             fail("worktree_hash_failed")
     else:
         fail("worktree_type_unsupported")
@@ -1669,7 +1675,7 @@ def _valid_tree_entry(value: Any, *, index: bool) -> bool:
     if (
         value.get("mode") not in {"100644", "100755", "120000", "160000"}
         or not isinstance(value.get("oid"), str)
-        or re.fullmatch(r"[0-9a-f]{40}", value["oid"]) is None
+        or SHA1.fullmatch(value["oid"]) is None
         or value["oid"] == "0" * 40
     ):
         return False
@@ -1695,7 +1701,7 @@ def _valid_worktree_entry(value: Any) -> bool:
     return (
         valid_mode
         and isinstance(value.get("git_oid"), str)
-        and re.fullmatch(r"[0-9a-f]{40}", value["git_oid"]) is not None
+        and SHA1.fullmatch(value["git_oid"]) is not None
         and isinstance(value.get("sha256"), str)
         and SHA256.fullmatch(value["sha256"]) is not None
         and type(value.get("size")) is int
@@ -1726,11 +1732,11 @@ def _load_snapshot(path: str, digest: str) -> dict[str, Any]:
             fail("snapshot_schema_invalid")
     if (
         not isinstance(value.get("head_sha"), str)
-        or re.fullmatch(r"[0-9a-f]{40}", value["head_sha"]) is None
+        or SHA1.fullmatch(value["head_sha"]) is None
         or not isinstance(value.get("head_tree_sha"), str)
-        or re.fullmatch(r"[0-9a-f]{40}", value["head_tree_sha"]) is None
+        or SHA1.fullmatch(value["head_tree_sha"]) is None
         or not isinstance(value.get("index_tree_sha"), str)
-        or re.fullmatch(r"[0-9a-f]{40}", value["index_tree_sha"]) is None
+        or SHA1.fullmatch(value["index_tree_sha"]) is None
         or not isinstance(value.get("index_sha256"), str)
         or SHA256.fullmatch(value["index_sha256"]) is None
         or type(value.get("index_size")) is not int
@@ -2006,7 +2012,7 @@ def validate_failed_return(
         or not os.path.isdir(canonical_evidence)
         or canonical_evidence == canonical_working
         or not beneath(canonical_working, canonical_evidence)
-        or re.fullmatch(r"[0-9a-f]{40}", head_before or "") is None
+        or SHA1.fullmatch(head_before or "") is None
     ):
         fail("failed_return_guard_invalid")
     _require_repository(canonical_working)
@@ -2065,7 +2071,7 @@ def _require_targets_in_reviewed_range(
             expected_head = current.stdout.decode("ascii").strip()
         except UnicodeError:
             fail("git_state_unreadable")
-    if re.fullmatch(r"[0-9a-f]{40}", expected_head) is None or head != expected_head:
+    if SHA1.fullmatch(expected_head) is None or head != expected_head:
         fail("commit_range_head_mismatch")
     ancestor = _git(working_dir, "merge-base", "--is-ancestor", base, head)
     if ancestor.returncode == 1:
@@ -2388,10 +2394,10 @@ def _load_authority(path: str, digest: str) -> dict[str, Any]:
             fail("authority_schema_invalid")
     if not standalone:
         if (
-            re.fullmatch(r"[0-9a-f]{40}", value.get("parent_sha", "")) is None
-            or re.fullmatch(r"[0-9a-f]{40}", value.get("parent_tree_sha", ""))
+            SHA1.fullmatch(value.get("parent_sha", "")) is None
+            or SHA1.fullmatch(value.get("parent_tree_sha", ""))
             is None
-            or re.fullmatch(r"[0-9a-f]{40}", value.get("index_tree_sha", ""))
+            or SHA1.fullmatch(value.get("index_tree_sha", ""))
             is None
             or not isinstance(value.get("index_path"), str)
             or _absolute_input(value["index_path"], "authority_schema_invalid")
@@ -2674,7 +2680,7 @@ def _load_applied_content_plan(
             or row.get("path") != expected_path
             or row.get("git_mode") not in {"100644", "100755"}
             or not isinstance(row.get("git_oid"), str)
-            or re.fullmatch(r"[0-9a-f]{40}", row["git_oid"]) is None
+            or SHA1.fullmatch(row["git_oid"]) is None
             or not isinstance(row.get("sha256"), str)
             or SHA256.fullmatch(row["sha256"]) is None
             or type(row.get("size")) is not int
@@ -3871,7 +3877,7 @@ def _iter_stage_rows(payload: bytes):
             mode not in {b"100644", b"100755", b"120000", b"160000"}
             or stage != b"0"
             or len(oid_hex) != 40
-            or re.fullmatch(rb"[0-9a-f]{40}", oid_hex) is None
+            or SHA1_BYTES.fullmatch(oid_hex) is None
             or oid_hex == b"0" * 40
             or not path
             or path.startswith(b"/")
@@ -4217,7 +4223,7 @@ def _serialize_index_v2(rows) -> bytes:
         if (
             mode not in {b"100644", b"100755", b"120000", b"160000"}
             or len(oid_hex) != 40
-            or re.fullmatch(rb"[0-9a-f]{40}", oid_hex) is None
+            or SHA1_BYTES.fullmatch(oid_hex) is None
             or oid_hex == b"0" * 40
             or not path
             or path.startswith(b"/")
@@ -4310,7 +4316,7 @@ def _index_candidate_from_stage_rows(
 
 
 def _read_tree_stage_rows(working_dir: str, treeish: str) -> bytes:
-    if re.fullmatch(r"[0-9a-f]{40}", treeish) is None:
+    if SHA1.fullmatch(treeish) is None:
         fail("temporary_index_failed")
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -4614,7 +4620,7 @@ def _index_tree_sha(
 
 
 def _commit_message_sha256(working_dir: str, commit_sha: str) -> str:
-    if re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None:
+    if SHA1.fullmatch(commit_sha) is None:
         fail("commit_identity_invalid")
     result = _git(working_dir, "cat-file", "commit", commit_sha)
     if result.returncode != 0:
@@ -5157,7 +5163,7 @@ def _reconcile_standalone_transaction(
         )
         or any(
             not isinstance(journal.get(key), str)
-            or re.fullmatch(r"[0-9a-f]{40}", journal[key]) is None
+            or SHA1.fullmatch(journal[key]) is None
             for key in ("parent_sha", "commit_sha", "tree_sha")
         )
     ):
@@ -5471,7 +5477,7 @@ def commit_standalone(
             commit_sha = commit.stdout.decode("ascii").strip()
         except UnicodeError:
             fail("commit_object_failed")
-        if re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None:
+        if SHA1.fullmatch(commit_sha) is None:
             fail("commit_object_failed")
         _validate_standalone_commit_object(
             authority,
@@ -5787,7 +5793,7 @@ def _reconcile_review_transaction(
         )
         or any(
             not isinstance(journal.get(key), str)
-            or re.fullmatch(r"[0-9a-f]{40}", journal[key]) is None
+            or SHA1.fullmatch(journal[key]) is None
             for key in ("parent_sha", "commit_sha", "tree_sha")
         )
     ):
@@ -5999,7 +6005,7 @@ def commit_review(
             commit_sha = commit.stdout.decode("ascii").strip()
         except UnicodeError:
             fail("commit_object_failed")
-        if re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None:
+        if SHA1.fullmatch(commit_sha) is None:
             fail("commit_object_failed")
         _validate_review_commit_object(
             authority,
@@ -6115,7 +6121,7 @@ def validate_commit(
     expected_message_sha256: str,
 ) -> dict[str, Any]:
     for value in (parent_sha, commit_sha, staged_tree_sha):
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        if not isinstance(value, str) or SHA1.fullmatch(value) is None:
             fail("commit_identity_invalid")
     if not isinstance(expected_message_sha256, str) or SHA256.fullmatch(
         expected_message_sha256
@@ -6886,8 +6892,8 @@ def validate_standalone_outcome(
     if parsed_result["status"] != derived_status:
         fail("fixer_result_status_mismatch")
     if (
-        re.fullmatch(r"[0-9a-f]{40}", head_before or "") is None
-        or re.fullmatch(r"[0-9a-f]{40}", head_after or "") is None
+        SHA1.fullmatch(head_before or "") is None
+        or SHA1.fullmatch(head_after or "") is None
         or head_before != snapshot["head_sha"]
     ):
         fail("commit_identity_invalid")
@@ -6998,8 +7004,8 @@ def validate_review_outcome(
     if parsed_result["status"] != derived_status:
         fail("fixer_result_status_mismatch")
     if (
-        re.fullmatch(r"[0-9a-f]{40}", head_before or "") is None
-        or re.fullmatch(r"[0-9a-f]{40}", head_after or "") is None
+        SHA1.fullmatch(head_before or "") is None
+        or SHA1.fullmatch(head_after or "") is None
         or head_before != authority["parent_sha"]
     ):
         fail("commit_identity_invalid")
