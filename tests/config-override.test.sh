@@ -524,15 +524,21 @@ echo "== I8: goal-pipeline reads goal.max_parallel + goal.barrier_timeout_s via 
 # The verbatim call shape is the test surface: an editor cannot widen the
 # range or drop the default without tripping these greps.
 GOAL_SKILL_PATH="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
+# RFC 0015 §5 — the /goal preflight (and with it every config-read call
+# shape) moved out of the SKILL.md fences into lib/goal-phase0.sh. The
+# Constants block stayed in SKILL.md, so the DEFAULT-constant asserts still
+# target the skill while the CALL-SHAPE asserts follow the code.
+GOAL_PHASE0_PATH="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
+[ -r "$GOAL_PHASE0_PATH" ] || { printf 'FATAL: required file missing or unreadable: %s\n' "$GOAL_PHASE0_PATH" >&2; exit 2; }
 
-assert_grep_in "$GOAL_SKILL_PATH" \
+assert_grep_in "$GOAL_PHASE0_PATH" \
   'uberdev_read_int_in_range goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
   "I8.max-parallel-call-shape"
 assert_grep_in "$GOAL_SKILL_PATH" \
   '_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3' \
   "I8.max-parallel-default-constant"
 
-assert_grep_in "$GOAL_SKILL_PATH" \
+assert_grep_in "$GOAL_PHASE0_PATH" \
   'uberdev_read_int_in_range goal\.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400' \
   "I8.barrier-timeout-call-shape"
 assert_grep_in "$GOAL_SKILL_PATH" \
@@ -542,10 +548,10 @@ assert_grep_in "$GOAL_SKILL_PATH" \
 # Env-precedence pattern: the verbatim UBERDEV_GOAL_*=${*_cli:-${UBERDEV_GOAL_*:-}} guard
 # is the same shape Phase 0 uses for goal.max_cycles (line ~98) — a regression that
 # silently drops the CLI flag in favor of the env var would break /goal --max-parallel=N.
-assert_grep_in "$GOAL_SKILL_PATH" \
+assert_grep_in "$GOAL_PHASE0_PATH" \
   'UBERDEV_GOAL_MAX_PARALLEL="\$\{max_parallel_cli:-\$\{UBERDEV_GOAL_MAX_PARALLEL:-\}\}"' \
   "I8.max-parallel-cli-env-precedence"
-assert_grep_in "$GOAL_SKILL_PATH" \
+assert_grep_in "$GOAL_PHASE0_PATH" \
   'UBERDEV_GOAL_BARRIER_TIMEOUT_S="\$\{barrier_timeout_cli:-\$\{UBERDEV_GOAL_BARRIER_TIMEOUT_S:-\}\}"' \
   "I8.barrier-timeout-cli-env-precedence"
 

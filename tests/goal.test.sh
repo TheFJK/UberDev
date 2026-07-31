@@ -44,8 +44,20 @@ GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
 GOAL_LIB="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
+# RFC 0015 §5 — the executable body of /goal moved OUT of the SKILL.md bash
+# fences into four shebang'd scripts plus a Workflow driver. Assertions about
+# BEHAVIOUR now target the file that owns that behaviour; SKILL.md keeps only
+# the documentation SSOT (the Constants block, byte-identical) plus the
+# preflight / Workflow-mandate / No-Workflow-fallback seam. Nothing was
+# dropped -- every gate below names its new home.
+GOAL_P0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"      # preflight
+GOAL_P1="$REPO_ROOT/plugins/uberdev/lib/goal-phase1.sh"      # claim (never dispatch)
+GOAL_WATCH="$REPO_ROOT/plugins/uberdev/lib/goal-watch.sh"    # watch + merge lane
+GOAL_P3="$REPO_ROOT/plugins/uberdev/lib/goal-phase3.sh"      # collect next queue
+GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"   # cycle driver
+
 # Pre-flight: refuse to run if any asserted-against file is missing.
-for f in "$GOAL_CMD" "$GOAL_SKILL" "$GOAL_LIB"; do
+for f in "$GOAL_CMD" "$GOAL_SKILL" "$GOAL_LIB" "$GOAL_P0" "$GOAL_P1" "$GOAL_WATCH" "$GOAL_P3" "$GOAL_WF"; do
   if [ ! -r "$f" ]; then
     printf 'FATAL: required file missing or unreadable: %s\n' "$f" >&2
     exit 2
@@ -98,33 +110,28 @@ assert_eq() {
   fi
 }
 
-# extract_fence ANCHOR FILE — print the body of the ```bash fence containing
-# ANCHOR (handles the 3-space-indented Phase-0 fences). Content-anchored so it
-# survives line drift. Exit 3 (caller fails loud) when the anchor is not found.
-# Lets G17 RUN the real dry-run fences instead of grepping the markdown.
+# extract_region NAME FILE — print the body between `# >>> region: NAME` and
+# `# <<< region: NAME` in a plain shell script. This REPLACES the old
+# extract_fence (which sliced ```bash blocks out of SKILL.md) now that the
+# executable body lives in lib/goal-*.sh: those files carry explicit region
+# markers precisely so a fixture can run ONE block standalone. Exit 3 (caller
+# fails loud) when the region is not found, so a renamed region reds here
+# instead of silently extracting nothing.
 _GOAL_EXTRACT_AWK="$(mktemp)"
 cat > "$_GOAL_EXTRACT_AWK" <<'AWK'
-BEGIN { infence=0; curbash=0; found=0; buf="" }
+BEGIN { inregion=0; found=0 }
 {
   line=$0
-  if (line ~ /^[[:space:]]*```/) {
-    if (infence==0) {
-      stripped=line; sub(/^[[:space:]]*```/, "", stripped)
-      curbash = (stripped ~ /^bash[[:space:]]*$/) ? 1 : 0
-      infence=1; buf=""; hasanchor=0; next
-    } else {
-      if (curbash==1 && hasanchor==1) { printf "%s", buf; found=1; exit }
-      infence=0; curbash=0; next
-    }
+  if (inregion==0) {
+    if (line ~ ("^[[:space:]]*# >>> region: " NAME "[[:space:]]*$")) { inregion=1; found=1; next }
+    next
   }
-  if (infence==1 && curbash==1) {
-    buf = buf line "\n"
-    if (index(line, ANCHOR) > 0) hasanchor=1
-  }
+  if (line ~ ("^[[:space:]]*# <<< region: " NAME "[[:space:]]*$")) { exit }
+  print line
 }
 END { if (found==0) exit 3 }
 AWK
-extract_fence() { awk -v ANCHOR="$1" -f "$_GOAL_EXTRACT_AWK" "$2"; }
+extract_region() { awk -v NAME="$1" -f "$_GOAL_EXTRACT_AWK" "$2"; }
 trap 'rm -f "$_GOAL_EXTRACT_AWK"' EXIT
 
 echo "== G1: frontmatter (skill + command) =="
@@ -156,19 +163,19 @@ echo "== G4: trust-signal handling =="
 # SKILL's case-block has signal on line 200 and `green)` on line 203 (well-
 # formed bash); collapse to two single-line assertions: the helper name and
 # the green case-arm.
-assert_grep "$GOAL_SKILL" 'uberdev_goal_read_trust_signal'  "G4a.trust-signal-read"
-assert_grep "$GOAL_SKILL" '^[[:space:]]*green\)[[:space:]]*$|green\)[[:space:]]*$' "G4a.green-case-arm"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_read_trust_signal'  "G4a.trust-signal-read"
+assert_grep "$GOAL_WATCH" '^[[:space:]]*green\)[[:space:]]*$|green\)[[:space:]]*$' "G4a.green-case-arm"
 # G4a (cont) — GREEN dispatches /merge. The SKILL uses bare `/merge` prose AND
 # the helper `_uberdev_goal_dispatch_merge`; either proves the contract.
-assert_grep "$GOAL_SKILL" '/merge|_uberdev_goal_dispatch_merge' "G4a.green-dispatches-merge"
+assert_grep "$GOAL_WATCH" '/merge|_uberdev_goal_dispatch_merge' "G4a.green-dispatches-merge"
 # G4b — YELLOW held on CRITICAL.
-assert_grep "$GOAL_SKILL" 'yellow-held'                     "G4b.yellow-held"
+assert_grep "$GOAL_WATCH" 'yellow-held'                     "G4b.yellow-held"
 assert_grep "$GOAL_SKILL" 'critical|CRITICAL'               "G4b.yellow-critical-trigger"
 # G4c — RED held on BLOCKER (or halted_due_to_overflow).
-assert_grep "$GOAL_SKILL" 'red-held'                        "G4c.red-held"
+assert_grep "$GOAL_WATCH" 'red-held'                        "G4c.red-held"
 assert_grep "$GOAL_SKILL" 'blocker|BLOCKER'                 "G4c.red-blocker-trigger"
 # G4d — stale handling: phase2_5 absent => re-dispatch /review-pr (not assumed GREEN).
-assert_grep "$GOAL_SKILL" 'phase2_5|stale'                  "G4d.stale-handling"
+assert_grep "$GOAL_WATCH" 'phase2_5|stale'                  "G4d.stale-handling"
 
 echo
 echo "== G5: blocker-unblock chain =="
@@ -179,33 +186,37 @@ assert_grep "$GOAL_SKILL" 'goal_unblock_triggered'          "G5.unblock-audit-ev
 
 echo
 echo "== G6: circuit breaker max_cycles =="
-assert_grep "$GOAL_SKILL" 'MAX_CYCLES|max_cycles'                  "G6.max-cycles-constant"
-assert_grep "$GOAL_SKILL" 'cycle.*>.*MAX_CYCLES|cycle >= MAX'      "G6.max-cycles-check"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*max_cycles'       "G6.max-cycles-breaker-emit"
+assert_grep "$GOAL_P3" 'MAX_CYCLES|max_cycles'                  "G6.max-cycles-constant"
+assert_grep "$GOAL_P3"    '"\$cycle" -ge "\$MAX_CYCLES"'          "G6.max-cycles-check"
+assert_grep "$GOAL_P3"    'reason.*max_cycles'                     "G6.max-cycles-breaker-emit"
+# The ceiling is enforced TWICE on purpose (#288 #2): the claim pass re-checks
+# it from rehydrated run-state, so a mis-sequenced re-entry that lands back on
+# the claim phase with an over-incremented cycle cannot run unbounded.
+assert_grep "$GOAL_P1"    'reason.*max_cycles'                     "G6.max-cycles-phase1-backstop-emit"
 
 echo
 echo "== G7: circuit breaker nonconvergence =="
-assert_grep "$GOAL_SKILL" 'fingerprint'                                  "G7.fingerprint-name"
-assert_grep "$GOAL_SKILL" 'check_fingerprint_repeat|fingerprint.*repeat' "G7.fingerprint-repeat-check"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*nonconvergence'         "G7.nonconvergence-breaker-emit"
+assert_grep "$GOAL_P3"    'fingerprint'                                  "G7.fingerprint-name"
+assert_grep "$GOAL_P3"    'check_fingerprint_repeat|fingerprint.*repeat' "G7.fingerprint-repeat-check"
+assert_grep "$GOAL_P3"    'reason.*nonconvergence'                       "G7.nonconvergence-breaker-emit"
 
 echo
 echo "== G8: circuit breaker stuck_loop =="
-assert_grep "$GOAL_SKILL" '4 hour|4h|14400'                              "G8.stuck-loop-constant"
-assert_grep "$GOAL_SKILL" 'watch_start|stuck_loop'                       "G8.stuck-loop-check"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*stuck_loop'             "G8.stuck-loop-breaker-emit"
+assert_grep "$GOAL_WATCH" '4 hour|4h|14400'                              "G8.stuck-loop-constant"
+assert_grep "$GOAL_WATCH" 'watch_start|stuck_loop'                       "G8.stuck-loop-check"
+assert_grep "$GOAL_WATCH" 'reason.*stuck_loop'                           "G8.stuck-loop-breaker-emit"
 
 echo
 echo "== G9: circuit breaker merge_failed =="
-assert_grep "$GOAL_SKILL" 'merge_result|merge.*conflict|hook_failed'     "G9.merge-result-classification"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*merge_failed'           "G9.merge-failed-breaker-emit"
-assert_grep "$GOAL_SKILL" 'exit 1'                                       "G9.halt-on-merge-failure"
+assert_grep "$GOAL_WATCH" 'merge_result|merge.*conflict|hook_failed'     "G9.merge-result-classification"
+assert_grep "$GOAL_WATCH" 'reason.*merge_failed'                         "G9.merge-failed-breaker-emit"
+assert_grep "$GOAL_WATCH" '^[[:space:]]*exit 1[[:space:]]*$'             "G9.halt-on-merge-failure"
 
 echo
 echo "== G10: convergence happy-path =="
-assert_grep "$GOAL_SKILL" 'goal_converged'                "G10.converged-event"
-assert_grep "$GOAL_SKILL" 'queue.*empty|new_candidates'   "G10.empty-queue-predicate"
-assert_grep "$GOAL_SKILL" 'exit 0'                        "G10.zero-exit"
+assert_grep "$GOAL_P3"    'goal_converged'                "G10.converged-event"
+assert_grep "$GOAL_P3"    'queue.*empty|new_candidates'   "G10.empty-queue-predicate"
+assert_grep "$GOAL_P3"    '^[[:space:]]*exit 0[[:space:]]*$' "G10.zero-exit"
 
 echo
 echo "== G11: all 12 audit events present =="
@@ -230,37 +241,56 @@ assert_grep "$REPO_ROOT/README.md"                                     '/ubergoa
 assert_grep "$REPO_ROOT/tests/aliases.test.sh"                         'goal'        "G12.aliases-test"
 
 echo
-echo "== G13: claim_collision soft-fail =="
-assert_grep "$GOAL_SKILL" 'claim_collision'                          "G13.claim-collision"
-assert_grep "$GOAL_SKILL" 'skip.*issue|continue.*cycle|soft.fail'    "G13.soft-fail-behaviour"
-assert_grep "$GOAL_SKILL" 'do NOT halt|never silent|never halt'      "G13.no-halt-prose"
+echo "== G13: claim collision soft-fail =="
+# RFC 0015 §5 — /goal no longer calls uberdev_dispatch_one, so the old probe
+# that read solve-launcher's `claim_collision` audit row out of the DISPATCH
+# FAILURE branch has no dispatch rc left to interpret; that probe is genuinely
+# gone with the dispatch call. The BEHAVIOUR it protected — another process
+# holds the claim, so skip the issue for THIS cycle and never halt the goal —
+# survives intact in the claim pass's own SETNX rc-2 arm, which is what these
+# assertions now target.
+assert_grep "$GOAL_P1" 'collision \(held by another process\)'      "G13.claim-collision"
+assert_grep "$GOAL_P1" 'skipped this cycle'                          "G13.soft-fail-behaviour"
+assert_grep "$GOAL_P1" 'soft-skip'                                   "G13.no-halt-prose"
+# The rc-2 arm must `continue`, never exit — it is the one arm of the claim
+# switch that does not halt the run.
+assert_grep "$GOAL_P1" '_claim_rc" = "2"'                            "G13.collision-rc2-arm"
+# And the driver must explain WHY the fleet launcher is armed with --force:
+# the claim it would collide with is OUR OWN, taken one step earlier. Without
+# that rationale a future edit drops --force and every cycle self-collides.
+assert_grep "$GOAL_WF" 'would\s+.otherwise refuse them as a collision with us|otherwise refuse them as a collision with us' \
+                                                                     "G13.launcher-force-rationale"
 
 echo
 echo "== G14: blocker overflow handler =="
-assert_grep "$GOAL_SKILL" 'halted_due_to_overflow'                              "G14.overflow-flag"
-assert_grep "$GOAL_SKILL" 'first.*10|truncate.*10|first 10|new_candidates.*:0:10'   "G14.first-10-only"
-assert_grep "$GOAL_SKILL" 'does NOT halt the entire goal|do NOT halt entire goal'   "G14.no-halt-prose"
+# Detection lives in the watch loop (the red trust-signal arm has $audit_json
+# and $pr_num in scope); the truncation + the no-halt contract live in collect.
+assert_grep "$GOAL_WATCH" 'halted_due_to_overflow'                              "G14.overflow-flag"
+assert_grep "$GOAL_P3" 'first.*10|truncate.*10|first 10|new_candidates.*:0:10'   "G14.first-10-only"
+assert_grep "$GOAL_P3" 'does NOT halt the entire goal|do NOT halt entire goal'   "G14.no-halt-prose"
 
 echo
 echo "== G15: backend inheritance =="
-assert_grep "$GOAL_SKILL" 'UBERDEV_RESOLVED_BACKEND'                        "G15.resolved-backend-env"
-# Issue #248 — Phase 1 no longer passes --backend= as an arg flag; backend
-# now forwards purely via the UBERDEV_RESOLVED_BACKEND env-var that Phase 0
-# exports (claude --bg inherits the parent shell's env table by default).
-# Anchor on the Phase 1 comment that documents the env-var path.
-assert_grep "$GOAL_SKILL" 'Backend forwards via UBERDEV_RESOLVED_BACKEND' \
+assert_grep "$GOAL_P0" 'UBERDEV_RESOLVED_BACKEND'                           "G15.resolved-backend-env"
+# The backend is resolved ONCE in the preflight and frozen for the run (D15);
+# every later phase re-derives its dispatch ENV from that frozen value rather
+# than re-resolving. Anchor the rule where it is documented and both places it
+# is consumed, so a per-cycle re-resolution cannot creep back in.
+assert_grep "$GOAL_SKILL" 'Backend inheritance \(D15\)'                     "G15.backend-inheritance-doc"
+assert_grep "$GOAL_P0" '^[[:space:]]*uberdev_dispatch_preflight[[:space:]]*$' "G15.backend-resolved-once"
+assert_grep "$GOAL_WATCH" 'uberdev_dispatch_resolve_env "\$\{UBERDEV_RESOLVED_BACKEND:-\}"' \
                                                                             "G15.backend-forwarding"
 
 echo
 echo "== G16: provenance (Q5 / T5) =="
-assert_grep "$GOAL_SKILL" 'UBERDEV_GOAL_ID'                              "G16.goal-id-env"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_should_automerge'                "G16.automerge-predicate"
-assert_grep "$GOAL_SKILL" 'automerge_attempt|merge.*attempt|MERGE_ATTEMPTS'  "G16.attempt-counter"
+assert_grep "$GOAL_P1" 'UBERDEV_GOAL_ID'                                 "G16.goal-id-env"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_should_automerge'                "G16.automerge-predicate"
+assert_grep "$GOAL_WATCH" 'automerge_attempt|merge.*attempt|MERGE_ATTEMPTS'  "G16.attempt-counter"
 
 echo
 echo "== G17: --dry-run semantics (BEHAVIOURAL — #293) =="
-assert_grep "$GOAL_SKILL" '--dry-run|dry_run'                            "G17.dry-run-flag"
-assert_grep "$GOAL_SKILL" 'exit 0'                                       "G17.dry-run-exit"
+assert_grep "$GOAL_P0" '--dry-run|dry_run'                               "G17.dry-run-flag"
+assert_grep "$GOAL_P0" '^[[:space:]]*exit 0[[:space:]]*$'                "G17.dry-run-exit"
 # #293 — the old G17 was a single-line negative grep
 # (`dry_run=1.*uberdev_dispatch_one`) that CANNOT catch a real dispatch leak:
 # the guard is an early `exit 0` hundreds of lines away from any dispatch call,
@@ -280,10 +310,10 @@ g17_emit="$g17_dir/emit.sh"
 # both are bash>=4, so the dry-run fences (which use bash arrays) run under the
 # launching interpreter. $BASH is the absolute path to the running bash.
 g17_bash="${BASH:-bash}"
-if extract_fence 'for tok in $ARGUMENTS' "$GOAL_SKILL" > "$g17_argparse" && [ -s "$g17_argparse" ] \
-   && extract_fence 'dry-run preview (no agent spawn' "$GOAL_SKILL" > "$g17_dryrun" && [ -s "$g17_dryrun" ] \
-   && extract_fence 'issues_json=' "$GOAL_SKILL" > "$g17_emit" && [ -s "$g17_emit" ]; then
-  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G17.extract: arg-parse + dry-run gate + goal_dispatched emit fences located in SKILL.md"
+if extract_region argparse "$GOAL_P0" > "$g17_argparse" && [ -s "$g17_argparse" ] \
+   && extract_region dry-run "$GOAL_P0" > "$g17_dryrun" && [ -s "$g17_dryrun" ] \
+   && extract_region dispatched-emit "$GOAL_P0" > "$g17_emit" && [ -s "$g17_emit" ]; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "G17.extract: arg-parse + dry-run gate + goal_dispatched emit regions located in lib/goal-phase0.sh"
 
   # Build the dry-run driver. Mocks record into files; we pre-seed the resolved
   # Phase-0 scalars the dry-run gate prints, then run the three fences in order.
@@ -346,12 +376,12 @@ DRV
   fi
 else
   FAIL=$((FAIL + 1))
-  printf '  FAIL  %s\n' "G17.extract: could NOT extract the Phase-0 dry-run fences from SKILL.md (anchors moved?)" >&2
+  printf '  FAIL  %s\n' "G17.extract: could NOT extract the Phase-0 dry-run regions from lib/goal-phase0.sh (region markers renamed?)" >&2
 fi
-# Structural backstop (kept from the original G17): no literal dispatch call on
-# a `dry_run=1` line. Cheap and complementary to the behavioural run above.
-assert_no_grep "$GOAL_SKILL" 'dry_run=1.*uberdev_dispatch_one|uberdev_dispatch_one.*dry_run=1' \
-                                                                         "G17.dry-run-no-dispatch"
+# Structural backstop (kept from the original G17): the preflight must contain
+# no dispatch call at all. Post-RFC-0015 that is a stronger statement than the
+# old same-line grep — nothing in Phase 0 spawns anything.
+assert_no_grep "$GOAL_P0" 'uberdev_dispatch_one'                          "G17.dry-run-no-dispatch"
 rm -rf "$g17_dir"
 
 echo
@@ -426,9 +456,9 @@ echo "== G20: version bump locked (0.41.7) =="
 assert_version_bump "$REPO_ROOT" "0.41.7"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
-assert_grep "$GOAL_SKILL" 'uberdev_dispatch_resolve_env'  "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
-assert_grep "$GOAL_SKILL" 'export AUTO_MODE=1'            "G20b.phase0-sets-AUTO_MODE (#175 turbo-parity)"
-assert_grep "$GOAL_SKILL" 'export SKIP_PERMISSIONS=1'     "G20c.phase0-sets-SKIP_PERMISSIONS (#241 cmux/hook bypass)"
+assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
+assert_grep "$GOAL_P0" 'export AUTO_MODE=1'               "G20b.phase0-sets-AUTO_MODE (#175 turbo-parity)"
+assert_grep "$GOAL_P0" 'export SKIP_PERMISSIONS=1'        "G20c.phase0-sets-SKIP_PERMISSIONS (#241 cmux/hook bypass)"
 
 echo
 echo "== G23: CLI-version-independent gh+file detection (issue #180) =="
@@ -436,8 +466,8 @@ echo "== G23: CLI-version-independent gh+file detection (issue #180) =="
 # NOT the captured claude --bg stdout (which on CLI 2.1.150 is a detached
 # banner only). These gates lock the fix in place against regression.
 # Positive: the gh signals are wired into the skill + lib.
-assert_grep "$GOAL_SKILL" 'uberdev_goal_find_pr_for_issue'  "G23.find-pr-in-skill"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_pr_is_merged'       "G23.pr-is-merged-in-skill"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_find_pr_for_issue'  "G23.find-pr-in-watch"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_pr_is_merged'       "G23.pr-is-merged-in-watch"
 assert_grep "$GOAL_LIB"   '^uberdev_goal_find_pr_for_issue\(\)'    "G23.lib-find-pr"
 assert_grep "$GOAL_LIB"   '^uberdev_goal_pr_state_gh\(\)'          "G23.lib-pr-state-gh"
 assert_grep "$GOAL_LIB"   '^uberdev_goal_pr_is_merged\(\)'         "G23.lib-pr-is-merged"
@@ -445,14 +475,14 @@ assert_grep "$GOAL_LIB"   '^uberdev_goal_agent_busy_for_issue\(\)' "G23.lib-agen
 assert_grep "$GOAL_LIB"   'closingIssuesReferences'               "G23.lib-uses-closing-refs"
 # Phase 0 bash>=4 preflight guard (defect #8 — macOS /bin/bash is 3.2, and the
 # Bash-tool default zsh chokes on the unmatched-glob verdict locator).
-assert_grep "$GOAL_SKILL" 'BASH_VERSINFO'                  "G23.phase0-bash4-guard"
+assert_grep "$GOAL_P0" 'BASH_VERSINFO'                  "G23.phase0-bash4-guard"
 # Anti-regression: the broken stdout-marker COMPLETION PROBES are gone from the
 # watch loop. These target the actual CODE constructs, not token mentions — the
 # explanatory prose legitimately NAMES the retired markers to document the fix.
-assert_no_grep "$GOAL_SKILL" "grep -q 'backgrounded"      "G23.no-backgrounded-completion-probe"
-assert_no_grep "$GOAL_SKILL" 'merge_log='                 "G23.no-merge-bg-stdout-read"
-assert_no_grep "$GOAL_SKILL" 'uberdev_goal_extract_pr_num_from_log' "G23.skill-no-extract-call"
-assert_no_grep "$GOAL_SKILL" 'mapfile -t'                 "G23.no-mapfile-bash4ism"
+assert_no_grep "$GOAL_WATCH" "grep -q 'backgrounded"      "G23.no-backgrounded-completion-probe"
+assert_no_grep "$GOAL_WATCH" 'merge_log='                 "G23.no-merge-bg-stdout-read"
+assert_no_grep "$GOAL_WATCH" 'uberdev_goal_extract_pr_num_from_log' "G23.watch-no-extract-call"
+assert_no_grep "$GOAL_P3" 'mapfile -t'                 "G23.no-mapfile-bash4ism"
 # Anti-regression: the false-premise log parser is removed from the lib, and
 # the `pushed PR #N` grep it relied on is gone.
 assert_no_grep "$GOAL_LIB" '^uberdev_goal_extract_pr_num_from_log' "G23.lib-no-extract-pr-num"
@@ -464,10 +494,10 @@ echo "== G21: held-PR re-review poll loop (issue #159) =="
 # bookkeeping helpers. The poll loop is what lets a held PR exit the held
 # state once /review-pr (re-)runs — without it the unblock rule's dispatch
 # is fire-and-forget and held PRs sit forever.
-assert_grep "$GOAL_SKILL" 'uberdev_goal_locate_review_pr_audit_by_pr'             "G21.locate-by-pr-in-skill"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_get_last_held_audit|last_held_audit'      "G21.last-held-audit-in-skill"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_record_held_audit|record_held_audit'      "G21.record-held-audit-in-skill"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_get_pr_state'                             "G21.get-pr-state-in-skill"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_locate_review_pr_audit_by_pr'             "G21.locate-by-pr-in-watch"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_get_last_held_audit|last_held_audit'      "G21.last-held-audit-in-watch"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_record_held_audit|record_held_audit'      "G21.record-held-audit-in-watch"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_get_pr_state'                             "G21.get-pr-state-in-watch"
 # Cross-held downgrade/upgrade arcs (yellow-held<->red-held) are valid in
 # the PR state machine so a re-review can re-classify the held PR.
 assert_grep "$GOAL_LIB" 'yellow-held->red-held'                                   "G21.yellow-to-red-transition"
@@ -481,30 +511,33 @@ echo
 echo "== G22: queue_empty_not_converged + held-as-terminal (issue #160) =="
 # Reason added to the enum AND the deterministic halt is emitted from Phase 3.
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*queue_empty_not_converged' "G22.reason-in-enum"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*queue_empty_not_converged'         "G22.halt-emit"
+assert_grep "$GOAL_P3" 'reason.*queue_empty_not_converged'                      "G22.halt-emit"
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*agent_stuck_on_dialog' "G22.reason-agent-stuck-in-enum"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*agent_stuck_on_dialog'           "G22.halt-emit-agent-stuck"
+assert_grep "$GOAL_WATCH" 'reason.*agent_stuck_on_dialog'                        "G22.halt-emit-agent-stuck"
 # Phase 3 terminal_prs MUST include held states so a goal with only held PRs
 # left can converge cleanly instead of spinning until stuck_loop.
-assert_grep "$GOAL_SKILL" 'list_prs_in_state.*yellow-held'                         "G22.terminal-includes-yellow-held"
-assert_grep "$GOAL_SKILL" 'list_prs_in_state.*red-held'                            "G22.terminal-includes-red-held"
+assert_grep "$GOAL_P3" 'list_prs_in_state.*yellow-held'                         "G22.terminal-includes-yellow-held"
+assert_grep "$GOAL_P3" 'list_prs_in_state.*red-held'                            "G22.terminal-includes-red-held"
 
 echo
 echo "== G24: --max-parallel cap config-read + dry-run surface (#211 AC1) =="
 # Phase 0 step 3 MUST read goal.max_parallel via uberdev_read_int_in_range
 # with the verbatim default + range from the spec (default 3, [1,10]).
-assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
+assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
                                                                          "G24.config-read-call-shape"
 # Default constant lives in the Constants block.
 assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_MAX_PARALLEL=3'         "G24.default-constant"
 # Dry-run preview surfaces MAX_PARALLEL.
-assert_grep "$GOAL_SKILL" 'MAX_PARALLEL'                                  "G24.dry-run-mentions-cap"
+assert_grep "$GOAL_P0" 'MAX_PARALLEL'                                  "G24.dry-run-mentions-cap"
 
 echo
-echo "== G24b: Phase 1 writes 'dispatched' PRE-spawn + extended skip-check (issue #236) =="
-# Issue #236: parent must transition input->dispatched BEFORE uberdev_dispatch_one
-# so a leaf crash between spawn and the post-spawn solving write cannot produce
-# a double-spawn on the next cycle. Skip-check must include `dispatched`.
+echo "== G24b: claim pass writes 'dispatched' PRE-arm + extended skip-check (issue #236) =="
+# Issue #236: the parent must transition input->dispatched BEFORE the solvers can
+# possibly start, so a crash in that window cannot produce a double-claim on the
+# next cycle. RFC 0015 §5 retargets the window rather than removing it: there is
+# no longer a spawn call here at all, so the window is now "claim taken, fleet
+# not yet armed" and the guard state is written before the claim pass prints the
+# dispatch list the driver arms the fleet with.
 # Enum constant must include `dispatched` (grep -F literal — `|` is grep alternation under -E).
 if grep -qF "GOAL_ISSUE_STATE_ENUM='input|dispatched|solving|pr-pushed|resolved|resolved-by-no-action|failed'" "$GOAL_SKILL"; then
   PASS=$((PASS+1)); echo "  PASS  G24b.enum-includes-dispatched-and-resolved-by-no-action"
@@ -512,73 +545,79 @@ else
   FAIL=$((FAIL+1)); echo "  FAIL  G24b.enum-includes-dispatched-and-resolved-by-no-action (literal enum string not found in SKILL.md)" >&2
 fi
 # Skip-check matches all three pre-resolved in-flight states (literal alternation in case-arm).
-if grep -qF 'dispatched|solving|pr-pushed) continue' "$GOAL_SKILL"; then
+if grep -qF 'dispatched|solving|pr-pushed) continue' "$GOAL_P1"; then
   PASS=$((PASS+1)); echo "  PASS  G24b.skip-check-extended-to-dispatched"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G24b.skip-check-extended-to-dispatched (literal case-arm not found)" >&2
 fi
-# Pre-spawn transition (input->dispatched) appears BEFORE uberdev_dispatch_one.
-# An awk one-shot keeps the line-order check unambiguous: the input->dispatched
-# transition must precede the uberdev_dispatch_one call inside Phase 1.
-_g24b_pre_spawn_line="$(grep -nF 'input dispatched' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-_g24b_dispatch_call_line="$(grep -nE 'uberdev_dispatch_one "\$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-if [ -n "$_g24b_pre_spawn_line" ] && [ -n "$_g24b_dispatch_call_line" ] \
-   && [ "$_g24b_pre_spawn_line" -lt "$_g24b_dispatch_call_line" ]; then
-  PASS=$((PASS+1)); echo "  PASS  G24b.input-to-dispatched-precedes-dispatch_one"
+# ORDER: the claim is taken, THEN input->dispatched is written, THEN the JSON
+# dispatch list is printed. Any other order re-opens a hole — writing the state
+# before the claim would mark an issue in-flight we may not own, and printing
+# the list before the state write would let the fleet start against an `input`
+# row that the next cycle's skip-check does not match.
+_g24b_claim_line="$(grep -nF '_uberdev_goal_claim_issue "$ISSUE_NUM"; _claim_rc=$?' "$GOAL_P1" | head -1 | cut -d: -f1)"
+_g24b_pre_arm_line="$(grep -nF 'input dispatched' "$GOAL_P1" | head -1 | cut -d: -f1)"
+_g24b_emit_line="$(grep -nF '{"phase":"claim"' "$GOAL_P1" | head -1 | cut -d: -f1)"
+if [ -n "$_g24b_claim_line" ] && [ -n "$_g24b_pre_arm_line" ] && [ -n "$_g24b_emit_line" ] \
+   && [ "$_g24b_claim_line" -lt "$_g24b_pre_arm_line" ] && [ "$_g24b_pre_arm_line" -lt "$_g24b_emit_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G24b.claim-then-dispatched-then-emit (claim=$_g24b_claim_line < state=$_g24b_pre_arm_line < emit=$_g24b_emit_line)"
 else
   FAIL=$((FAIL+1))
-  echo "  FAIL  G24b.input-to-dispatched-precedes-dispatch_one (pre-spawn line=$_g24b_pre_spawn_line, dispatch line=$_g24b_dispatch_call_line)" >&2
+  echo "  FAIL  G24b.claim-then-dispatched-then-emit (claim=$_g24b_claim_line state=$_g24b_pre_arm_line emit=$_g24b_emit_line)" >&2
 fi
-# Post-spawn solving transition: dispatched->solving on success path.
-assert_grep "$GOAL_SKILL" 'dispatched solving' "G24b.dispatched-to-solving-post-spawn"
-# Dispatch-failure path transitions dispatched->failed (no leaf, no PR; explicit cleanup).
-assert_grep "$GOAL_SKILL" 'dispatched failed' "G24b.dispatched-to-failed-on-dispatch-failure"
+# Post-arm solving transition: dispatched->solving once the fleet holds the manifest.
+assert_grep "$GOAL_P1" 'dispatched solving' "G24b.dispatched-to-solving-post-arm"
+# Arming-failure path transitions dispatched->failed (no solver, no PR; explicit cleanup).
+assert_grep "$GOAL_P1" 'dispatched failed' "G24b.dispatched-to-failed-on-arm-failure"
+# ...and the driver must actually drive both arms, or the states above are dead.
+assert_grep "$GOAL_WF" -- '--mark-solving'  "G24b.driver-marks-solving"
+assert_grep "$GOAL_WF" -- '--mark-failed'   "G24b.driver-marks-failed"
 
 echo
 echo "== G25: Phase 1 dispatch loop honours MAX_PARALLEL cap (#211 AC2) =="
 # The cap counter and rollover array MUST appear inside the Phase 1 dispatch.
-assert_grep "$GOAL_SKILL" 'dispatched_this_cycle'                         "G25.cap-counter-var"
-assert_grep "$GOAL_SKILL" 'remaining_queue'                               "G25.rollover-array-var"
-assert_grep "$GOAL_SKILL" '>= MAX_PARALLEL'                               "G25.cap-comparison"
+assert_grep "$GOAL_P1" 'dispatched_this_cycle'                         "G25.cap-counter-var"
+assert_grep "$GOAL_P1" 'remaining_queue'                               "G25.rollover-array-var"
+assert_grep "$GOAL_P1" '\-ge "\$MAX_PARALLEL"'                        "G25.cap-comparison"
 # The register-batch-pr call is the SSOT side-effect tying dispatch to the registry.
-assert_grep "$GOAL_SKILL" 'uberdev_goal_register_batch_pr'                "G25.register-batch-pr-call"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_register_batch_pr'                "G25.register-batch-pr-call"
 
 echo
 echo "== G26: Phase 2 step 2c uses batch-all-terminal + unblock-wait predicates (#211 AC3, AC5) =="
-assert_grep "$GOAL_SKILL" 'uberdev_goal_batch_all_terminal'               "G26.all-terminal-predicate"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_batch_unblock_wait_clear'         "G26.unblock-wait-predicate"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_batch_all_terminal'               "G26.all-terminal-predicate"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_batch_unblock_wait_clear'         "G26.unblock-wait-predicate"
 # Sequential green-PR iteration ordering helper.
-assert_grep "$GOAL_SKILL" '_uberdev_goal_batch_green_prs_ordered'         "G26.green-prs-ordered"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_batch_green_prs_ordered'         "G26.green-prs-ordered"
 # Collision-chain rebase helper.
-assert_grep "$GOAL_SKILL" '_uberdev_goal_rebase_collision_chain'          "G26.collision-chain"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_rebase_collision_chain'          "G26.collision-chain"
 
 echo
 echo "== G27: --max-parallel range [1,10] enforced via uberdev_read_int_in_range (#211 AC1 boundary) =="
 # The range arguments 1 10 appear verbatim in the config-read call (G24 covers shape;
 # G27 doubles-down by asserting the literal min/max so an editor can't silently widen).
-assert_grep "$GOAL_SKILL" 'goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
+assert_grep "$GOAL_P0" 'goal\.max_parallel UBERDEV_GOAL_MAX_PARALLEL 1 10' \
                                                                          "G27.literal-range-1-10"
 # And the symmetric flag-parse line for --max-parallel=N. assert_grep already
 # uses `grep -qE -e "$pattern"`, so the leading dashes in the pattern are safe
 # to pass directly without a `--` separator (which would otherwise be consumed
 # as the positional pattern arg).
-assert_grep "$GOAL_SKILL" '\-\-max-parallel=\*'                           "G27.flag-parse-pattern"
+assert_grep "$GOAL_P0" '\-\-max-parallel=\*'                           "G27.flag-parse-pattern"
 
 echo
 echo "== G28: Barrier wall-clock breaker maps to stuck_loop (#211 AC6) =="
 # Barrier-timeout config-read call shape (default 14400 = 4h; range [60, 86400]).
-assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal\.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400' \
+assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal\.barrier_timeout_s UBERDEV_GOAL_BARRIER_TIMEOUT_S 60 86400' \
                                                                          "G28.barrier-config-read-call-shape"
 assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_BARRIER_TIMEOUT_S=14400' "G28.barrier-default-constant"
 # Phase 2 step 2c iteration computes elapsed against barrier_start_ts and
 # escalates to the closed-enum reason stuck_loop — no new reason added.
-assert_grep "$GOAL_SKILL" 'BARRIER_TIMEOUT_S'                             "G28.barrier-var-referenced"
-assert_grep "$GOAL_SKILL" 'barrier_start_ts'                              "G28.barrier-start-ts-referenced"
+assert_grep "$GOAL_P0" 'BARRIER_TIMEOUT_S'                             "G28.barrier-var-referenced"
+assert_grep "$GOAL_P3" 'barrier_start_ts'                              "G28.barrier-start-ts-referenced"
 # The audit event reuses stuck_loop verbatim (closed enum).
 assert_grep "$GOAL_SKILL" 'reason.*stuck_loop|stuck_loop.*reason|"stuck_loop"' \
                                                                          "G28.reuses-stuck-loop-reason"
 # And GOAL_CIRCUIT_BREAKER_REASONS still does NOT contain merge_barrier_timeout.
-assert_no_grep "$GOAL_SKILL" 'merge_barrier_timeout'                      "G28.no-new-reason-merge-barrier-timeout"
+assert_no_grep "$GOAL_WATCH" 'merge_barrier_timeout'                      "G28.no-new-reason-merge-barrier-timeout"
 
 echo
 echo "== G29: Manifest-collision sequential merge (#211 AC4) =="
@@ -608,9 +647,9 @@ echo
 echo "== G31: Phase 2 step 2e updates batch registry on held → green transitions (#211 AC3/AC5 wiring) =="
 # Phase 2e MUST call _uberdev_goal_set_batch_terminal_state after recording a
 # held-PR's green transition — otherwise the barrier never sees the update.
-assert_grep "$GOAL_SKILL" '_uberdev_goal_set_batch_terminal_state'        "G31.set-terminal-state-call"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_set_batch_terminal_state'        "G31.set-terminal-state-call"
 # The rebase helper is called per just-merged PR in the green-set.
-assert_grep "$GOAL_SKILL" '_uberdev_goal_rebase_collision_chain'          "G31.rebase-chain-in-phase2c"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_rebase_collision_chain'          "G31.rebase-chain-in-phase2c"
 
 echo
 echo "== G32: uberdev_goal_review_pr_in_flight in-flight gate shape (issue #220, AC ❷) =="
@@ -620,26 +659,30 @@ assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                   
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
 assert_grep "$GOAL_LIB" 'background\|codex'                                         "G32.codex-background-status-file-branch"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-skill"
+assert_grep "$GOAL_WATCH" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-watch"
 
 echo
 echo "== G33: Phase 3 rollover preservation + rolled_over audit field (issue #220, AC ❹) =="
-assert_grep "$GOAL_SKILL" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G33.merge-not-overwrite"
-assert_grep "$GOAL_SKILL" '_rolled_over=\$\{#queue\[@\]\}'                         "G33.capture-before-merge"
-assert_grep "$GOAL_SKILL" '\\"rolled_over\\":\$_rolled_over'                       "G33.payload-field"
-assert_no_grep "$GOAL_SKILL" 'local _rolled_over'                                  "G33.no-local-keyword (script-scope)"
+assert_grep "$GOAL_P3" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G33.merge-not-overwrite"
+assert_grep "$GOAL_P3" '_rolled_over=\$\{#queue\[@\]\}'                         "G33.capture-before-merge"
+assert_grep "$GOAL_P3" '\\"rolled_over\\":\$_rolled_over'                       "G33.payload-field"
+assert_no_grep "$GOAL_P3" 'local _rolled_over'                                  "G33.no-local-keyword (script-scope)"
 
 echo
 echo "== G34: goal.review_grace_secs config plumbing (issue #220, AC ❶) =="
 assert_grep "$GOAL_SKILL" '_UBERDEV_GOAL_DEFAULT_REVIEW_GRACE_SECS=3600'                                "G34.default-3600"
-assert_grep "$GOAL_SKILL" 'uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400' "G34.range-helper"
-assert_grep "$GOAL_SKILL" 'review_grace_cli'                                                            "G34.cli-arg-var"
-assert_grep "$GOAL_SKILL" -- '--review-grace-secs=\*)'                                                  "G34.cli-arg-case-arm"
-assert_no_grep "$GOAL_SKILL" '_UBERDEV_GOAL_REVIEW_GRACE\b'                                             "G34.old-symbol-removed"
+assert_grep "$GOAL_P0" 'uberdev_read_int_in_range goal.review_grace_secs UBERDEV_GOAL_REVIEW_GRACE_SECS 60 86400' "G34.range-helper"
+assert_grep "$GOAL_P0" 'review_grace_cli'                                                            "G34.cli-arg-var"
+assert_grep "$GOAL_P0" -- '--review-grace-secs=\*)'                                                  "G34.cli-arg-case-arm"
+assert_no_grep "$GOAL_P0" '_UBERDEV_GOAL_REVIEW_GRACE\b'                                             "G34.old-symbol-removed"
 
 echo
 echo "== G35: _uberdev_goal_reap_zombies precedes every goal_circuit_breaker exit 1 (issue #220, AC reaper) =="
-reaper_count="$(grep -cF '_uberdev_goal_reap_zombies || true' "$GOAL_SKILL")"
+# The reaper call sites moved with the breakers: the claim ceiling backstop is
+# in the claim pass, the watch/merge breakers in the watch script, and the
+# convergence-side breakers in the collect script. Count across all three — the
+# guard is "every breaker reaps", not "they all live in one file".
+reaper_count="$(cat "$GOAL_P1" "$GOAL_WATCH" "$GOAL_P3" | grep -cF '_uberdev_goal_reap_zombies || true')"
 if [ "$reaper_count" -ge 9 ]; then
   PASS=$((PASS+1)); echo "  PASS  G35.reaper-call-sites (count=$reaper_count, ge 9)"
 else
@@ -654,14 +697,14 @@ assert_grep "$GOAL_LIB"   'kill -KILL'                                          
 
 echo
 echo "== G36: INT/TERM traps installed, existing EXIT trap unchanged (issue #220, AC reaper; #301 TERM/INT split) =="
-assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 130' INT"       "G36.int-trap"
+assert_grep "$GOAL_WATCH" "trap '_uberdev_goal_reap_zombies; exit 130' INT"       "G36.int-trap"
 # #301 (RFC 0012 §3.3 goal-R1 item 3) — TERM is the HARNESS-cap signal, not an
 # operator abort: it must route to the no-reap persist+exit-42 handler, never
 # the reaper (the pre-#301 trap '_uberdev_goal_reap_zombies; exit 143' TERM
 # meant the Bash tool's 600s cap killed every live solver ~10 minutes in).
-assert_grep "$GOAL_SKILL" "trap '_uberdev_goal_handle_harness_term' TERM"         "G36.term-trap"
-assert_no_grep "$GOAL_SKILL" "trap '_uberdev_goal_reap_zombies; exit 143' TERM"   "G36.term-trap-no-reap-regression"
-assert_grep "$GOAL_SKILL" "trap 'rm -f \"\\\$gh_err\" \"\\\$findings_err\"' EXIT" "G36.exit-trap-unchanged"
+assert_grep "$GOAL_WATCH" "trap '_uberdev_goal_handle_harness_term' TERM"         "G36.term-trap"
+assert_no_grep "$GOAL_WATCH" "trap '_uberdev_goal_reap_zombies; exit 143' TERM"   "G36.term-trap-no-reap-regression"
+assert_grep "$GOAL_WATCH" "trap 'rm -f \"\\\$gh_err\" \"\\\$findings_err\"' EXIT" "G36.exit-trap-unchanged"
 # Handler shape in the lib: defined + persists + audits goal_reaper_skipped
 # (reason=harness_term) + exits 42, and NEVER calls the reaper.
 assert_grep "$GOAL_LIB" '^_uberdev_goal_handle_harness_term\(\)'                  "G36.term-handler-defined"
@@ -683,21 +726,36 @@ assert_grep "$GOAL_LIB" 'PRIOR_LAST_ACTIVITY_'                                  
 assert_grep "$GOAL_LIB" 'FIRST_DIALOG_TS_'                                        "G37.sidecar-first-seen-key"
 assert_grep "$GOAL_LIB" '\-ge 60'                                                 "G37.60s-window"
 assert_grep "$GOAL_LIB" '^_uberdev_goal_any_attempt_stuck\(\)'                    "G37.wrapper-defined"
-assert_grep "$GOAL_SKILL" '_uberdev_goal_any_attempt_stuck'                       "G37.wrapper-called-from-skill"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_any_attempt_stuck'                       "G37.wrapper-called-from-watch"
 
 echo
-echo "== G38: Phase 1 dispatches /uberdev:orchestrator directly (issue #248) =="
-# Issue #248 — confirm Phase 1 dispatch prompt invokes /uberdev:orchestrator
-# (NOT /uberdev:turbo), preventing regression back to the double-bg-spawn
-# anti-pattern (goal → bg(turbo) → bg(orchestrator)). Mirrors the G24b
-# structural-grep convention from PR #239.
-# See BT83 below for the behavioural complement; if you change the printf
-# shape, update BT83's awk anchor too.
-assert_grep "$GOAL_SKILL" \
-  'printf.*Invoke the slash command /uberdev:orchestrator --turbo solve GH issue' \
-  "G38.goal-phase-1-orchestrator-dispatch"
-assert_no_grep "$GOAL_SKILL" \
-  'printf.*Invoke the slash command /uberdev:turbo' \
+echo "== G38: one nested solve-fleet call per cycle, never a per-issue spawn (issue #248 / RFC 0015 §5) =="
+# Issue #248's original guarantee was "ONE session per issue, not two": the old
+# Phase-1 prompt invoked /uberdev:orchestrator DIRECTLY instead of wrapping it in
+# a /turbo bg session (goal -> bg(turbo) -> bg(orchestrator)). RFC 0015 §5 keeps
+# the guarantee and removes the mechanism: there is no per-issue session at all
+# now. The driver makes EXACTLY ONE nested workflow() call per cycle into the
+# solve-fleet, which fans out internally.
+#
+# This is the same anti-double-spawn property, one level up, so the assertions
+# move with it rather than being dropped.
+assert_grep "$GOAL_WF" 'skills/solve-fleet/workflow.js'  "G38.driver-targets-the-fleet"
+_g38_nested="$(grep -cE '(^|[^A-Za-z0-9_])workflow\(\{' "$GOAL_WF" || true)"
+if [ "$_g38_nested" = "1" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G38.exactly-one-nested-workflow-call (count=$_g38_nested)"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G38.exactly-one-nested-workflow-call (count=$_g38_nested, want exactly 1 — a per-issue nested call spends the single nesting level on the wrong thing)" >&2
+fi
+# The fleet script itself must contain ZERO nested workflow() sites: a nested
+# call inside the child throws at runtime (one level only).
+_g38_child_nested="$(grep -cE '(^|[^A-Za-z0-9_])workflow\(' "$REPO_ROOT/plugins/uberdev/skills/solve-fleet/workflow.js" || true)"
+if [ "$_g38_child_nested" = "0" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G38.child-fleet-has-no-nested-workflow"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL  G38.child-fleet-has-no-nested-workflow (count=$_g38_child_nested — the nesting budget is already spent by the goal driver)" >&2
+fi
+# And the claim pass must not have grown a spawn back.
+assert_no_grep "$GOAL_P1" 'Invoke the slash command /uberdev:turbo' \
   "G38.goal-phase-1-no-turbo-wrapper-dispatch"
 
 echo
@@ -706,38 +764,38 @@ echo "== G39: Phase 2 step 2a probes gh issue state inside else-no-agent branch 
 # Both BT84/BT85 cover the helpers in isolation; G39 covers the SKILL.md probe
 # call-site, so a future refactor that removes the probe block entirely would
 # trip this grep guard (BT84/BT85 would still pass — they test the helpers).
-assert_grep "$GOAL_SKILL" 'gh issue view "\$issue" --json state --jq' \
+assert_grep "$GOAL_WATCH" 'gh issue view "\$issue" --json state --jq' \
   "G39.probe-line-present"
-assert_grep "$GOAL_SKILL" '\[ "\$issue_state" = "CLOSED" \]' \
+assert_grep "$GOAL_WATCH" '\[ "\$issue_state" = "CLOSED" \]' \
   "G39.uppercase-CLOSED-check"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_issue_state_transition "\$GOAL_ID" "\$issue" solving resolved-by-no-action' \
+assert_grep "$GOAL_WATCH" 'uberdev_goal_issue_state_transition "\$GOAL_ID" "\$issue" solving resolved-by-no-action' \
   "G39.transition-arc-call-site"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_audit goal_issue_closed_without_pr' \
+assert_grep "$GOAL_WATCH" 'uberdev_goal_audit goal_issue_closed_without_pr' \
   "G39.audit-event-emitted"
 # See BT84/BT85 below for the behavioural complement.
 
 echo "== G39b: Phase 2 surfaces terminal Codex agent failure immediately =="
 assert_grep "$GOAL_LIB" '^uberdev_goal_codex_status_for_issue\(\)' \
   "G39b.codex-status-helper-defined"
-assert_grep "$GOAL_SKILL" 'uberdev_goal_codex_status_for_issue "\$issue"' \
+assert_grep "$GOAL_WATCH" 'uberdev_goal_codex_status_for_issue "\$issue"' \
   "G39b.phase2-checks-codex-terminal-status"
 assert_grep "$GOAL_LIB" 'Codex returns in-flight' \
   "G39b.codex-review-pr-ambiguous-status-contract-documented"
-assert_grep "$GOAL_SKILL" 'codex agent for issue .* failed' \
+assert_grep "$GOAL_WATCH" 'codex agent for issue .* failed' \
   "G39b.codex-failed-surfaces-immediately"
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*solver_failed' \
   "G39b.solver-failed-reason-in-enum"
-assert_grep "$GOAL_SKILL" 'goal_circuit_breaker.*solver_failed' \
+assert_grep "$GOAL_WATCH" 'reason.*solver_failed' \
   "G39b.codex-terminal-failure-circuit-breaks"
-assert_grep "$GOAL_SKILL" '\$_codex_state.*completed' \
+assert_grep "$GOAL_WATCH" '\$_codex_state.*completed' \
   "G39b.codex-completed-without-pr-is-terminal"
 
 echo "== G39c: Phase 0 threads parsed --backend into dispatch preflight =="
-assert_grep "$GOAL_SKILL" 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\$\{backend_cli:-\$\{UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto\}\}"' \
+assert_grep "$GOAL_P0" 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\$\{backend_cli:-\$\{UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto\}\}"' \
   "G39c.backend-cli-export-assigned"
-assert_grep "$GOAL_SKILL" 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' \
+assert_grep "$GOAL_P0" 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' \
   "G39c.backend-cli-exported"
-assert_grep "$GOAL_SKILL" '^[[:space:]]*uberdev_dispatch_preflight[[:space:]]*$' \
+assert_grep "$GOAL_P0" '^[[:space:]]*uberdev_dispatch_preflight[[:space:]]*$' \
   "G39c.preflight-uses-env-request"
 
 echo
@@ -3052,75 +3110,33 @@ esac
 assert_eq "$_bt82_skipped_pre_fix" "0" "BT82.d-skip-check-NOT-match-empty-pre-fix-regression-guard"
 
 echo
-echo "== BT83: Phase 1 prompt construction emits /uberdev:orchestrator (issue #248 behavioural) =="
-# #250 post-impl-review blocker — G38's structural grep on the SKILL.md source
-# would also pass on the previously-buggy /turbo wrapper if a future refactor
-# swapped `printf` for a heredoc or variable-extracted form while keeping
-# the literal token, AND would FALSELY pass on a printf that constructed
-# the line for the wrong target. BT83 extracts the Phase-1 PROMPT_FILE
-# construction lines from SKILL.md (the `printf 'Invoke the slash command
-# /uberdev:orchestrator…' "$ISSUE_NUM" > "$PROMPT_FILE"` block), executes
-# them with a controlled $ISSUE_NUM into an isolated tmpdir, and asserts
-# the resulting file contents contain /uberdev:orchestrator and NOT
-# /uberdev:turbo. This is the behavioural complement to G38's source-shape
-# grep: only this test catches a regression where the literal token in the
-# source survives but the run-time output is wrong.
+echo "== BT83: the cycle-arming chain, end to end (issue #248 -> RFC 0015 §5) =="
+# BT83 used to eval the Phase-1 `printf 'Invoke the slash command
+# /uberdev:orchestrator …' > "$PROMPT_FILE"` block and assert the RUNTIME prompt
+# named the orchestrator and not /turbo. That per-issue prompt no longer exists:
+# the driver arms the whole cycle through lib/solve-launcher.sh instead, so there
+# is no printf to eval.
 #
-# Mechanism (BT82 idiom): no source-extract of Phase 1's outer loop (it is
-# markdown-embedded); instead grep the printf line by literal anchor
-# ("printf 'Invoke the slash command /uberdev:orchestrator"), pair it with
-# the immediately-following continuation line (the `"$ISSUE_NUM" >`
-# argument), and pass the two-line snippet through `eval` under a
-# controlled ISSUE_NUM + PROMPT_FILE.
-_bt83_prompt_file="$_b12_tmpdir/bt83-prompt-out.txt"
-ISSUE_NUM=999
-PROMPT_FILE="$_bt83_prompt_file"
-# Expected dispatch-prompt prefix. Keep in sync with G38 (the printf-anchor
-# grep above) and SKILL.md Phase 1's printf line; if you change any of the
-# three, change all three together.
-_bt83_expected_prefix='Invoke the slash command /uberdev:orchestrator --turbo solve GH issue'
-# Extract the two printf lines verbatim from SKILL.md. The first line
-# carries the format string + escape; the second carries the $ISSUE_NUM
-# substitution + redirect. awk reads from the `printf 'Invoke the slash
-# command /uberdev:orchestrator` anchor to the first `> "$PROMPT_FILE"`
-# (inclusive). The extracted snippet is then eval'd in this shell so the
-# real format string + redirect run against our controlled vars.
-#
-# Trust boundary: the snippet is read from a repo-controlled source file
-# (SKILL.md) bounded by the awk anchors — no external/untrusted input
-# reaches eval. The trust check lives at the extraction site, not at the
-# eval call.
-_bt83_snippet="$(awk '
-  /printf .Invoke the slash command \/uberdev:orchestrator/ { capture=1 }
-  capture { print }
-  capture && /> "\$PROMPT_FILE"/ { exit }
-' "$GOAL_SKILL")"
-# Sanity guard — if extraction yields nothing the printf line moved or the
-# anchor drifted; surface that as a discrete failure rather than letting
-# the eval silently no-op.
-if [ -z "$_bt83_snippet" ]; then
-  FAIL=$((FAIL+1))
-  echo "  FAIL  BT83.a-snippet-extracted-from-skill (extraction returned empty — printf anchor moved?)" >&2
-else
-  PASS=$((PASS+1))
-  echo "  PASS  BT83.a-snippet-extracted-from-skill"
-  # Execute the extracted snippet. Trust boundary documented at the awk
-  # extraction site above; the awk-anchored exit-on-`> "$PROMPT_FILE"` also
-  # bounds the snippet so it cannot pull in arbitrary bash below the printf.
-  eval "$_bt83_snippet"
-  # Assert the constructed prompt contains /uberdev:orchestrator and NOT
-  # /uberdev:turbo. Both directions are checked so a future regression
-  # (literal source token swap) flips one assertion clearly.
-  assert_grep_file "$_bt83_prompt_file" \
-    "${_bt83_expected_prefix} #999" \
-    "BT83.b-runtime-prompt-contains-orchestrator-token"
-  # Negative: the runtime prompt MUST NOT contain `/uberdev:turbo` (the
-  # double-bg-spawn anti-pattern).
-  assert_no_grep_file "$_bt83_prompt_file" \
-    '/uberdev:turbo' \
-    "BT83.c-runtime-prompt-omits-turbo-token"
-fi
-unset ISSUE_NUM PROMPT_FILE
+# The property BT83 protected — the arming chain is fully specified in the
+# source, not improvised by the model at run time — is asserted here on the
+# chain that replaced it. The RUNTIME complement (the actual relay prompt the
+# driver emits, captured under the Workflow harness stubs) lives in
+# tests/goal-workflow.test.sh; a grep here plus a live prompt capture there is
+# the same two-sided coverage BT83 + G38 gave.
+assert_grep "$GOAL_WF" 'lib/goal-phase1.sh|phase1Sh'          "BT83.a-arming-chain-names-the-claim-pass"
+assert_grep "$GOAL_WF" 'lib/solve-launcher.sh|launcherSh'     "BT83.b-arming-chain-names-the-launcher"
+assert_grep "$GOAL_WF" -- '--backend=workflow'                "BT83.c-launcher-armed-on-the-workflow-backend"
+assert_grep "$GOAL_WF" -- '--force'                           "BT83.d-launcher-armed-with-force (our own claim would otherwise collide)"
+# The envelope must be relayed VERBATIM (DR-2). An LLM-composed envelope is the
+# failure mode this instruction exists to prevent.
+assert_grep "$GOAL_WF" 'VERBATIM'                             "BT83.e-envelope-relayed-verbatim"
+# ...and the driver must REFUSE an envelope it cannot validate rather than
+# repairing it into the nested call.
+assert_grep "$GOAL_WF" 'parseFleetArgs'                       "BT83.f-envelope-validated-before-nesting"
+assert_grep "$GOAL_WF" 'pipeline !== "solve-fleet"'           "BT83.g-envelope-pipeline-identity-checked"
+# Negative: no /uberdev:turbo wrapper anywhere in the arming chain (the
+# double-session anti-pattern #248 closed).
+assert_no_grep "$GOAL_WF" '/uberdev:turbo'                    "BT83.h-no-turbo-wrapper-in-the-arming-chain"
 
 echo "== BT84: new 'solving->resolved-by-no-action' valid arc (issue #249) =="
 # Issue #249 — orchestrator can legitimately close an issue without producing
@@ -3250,30 +3266,25 @@ echo
 echo "== G41: Phase-0 bash>=4 execution-contract guard does NOT dead-end when bash>=4 exists (issue #294) =="
 # Structural: the guard resolves a bash binary + publishes UBERDEV_GOAL_BASH
 # instead of the old unconditional `exit 2` on unset BASH_VERSINFO.
-assert_grep "$GOAL_SKILL" 'UBERDEV_GOAL_BASH'                                   "G41.publishes-bash-path"
-assert_grep "$GOAL_SKILL" '/opt/homebrew/bin/bash /usr/local/bin/bash'         "G41.brew-path-candidates"
-assert_grep "$GOAL_SKILL" 'exec "\$UBERDEV_GOAL_BASH" "\$0" "\$@"'              "G41.reexec-under-discovered-bash"
+assert_grep "$GOAL_P0" 'UBERDEV_GOAL_BASH'                                   "G41.publishes-bash-path"
+assert_grep "$GOAL_P0" '/opt/homebrew/bin/bash /usr/local/bin/bash'         "G41.brew-path-candidates"
+assert_grep "$GOAL_P0" 'exec "\$UBERDEV_GOAL_BASH" "\$0" "\$@"'              "G41.reexec-under-discovered-bash"
 # Anti-regression: the guard must NOT exit 2 unconditionally on unset
 # BASH_VERSINFO. The old form was a single `if [ -z "${BASH_VERSINFO:-}" ] ...
 # exit 2`. The new form only exits 2 inside the `-z "$UBERDEV_GOAL_BASH"`
 # (no-bash-found) branch — so a guard text containing `-z "${BASH_VERSINFO`
 # directly gating `exit 2` would be the regression.
-assert_no_grep "$GOAL_SKILL" 'if \[ -z "\$\{BASH_VERSINFO:-\}" \] \|\| \[ "\$\{BASH_VERSINFO\[0\]:-0\}" -lt 4 \]; then' "G41.no-old-hard-exit-guard"
+assert_no_grep "$GOAL_P0" 'if \[ -z "\$\{BASH_VERSINFO:-\}" \] \|\| \[ "\$\{BASH_VERSINFO\[0\]:-0\}" -lt 4 \]; then' "G41.no-old-hard-exit-guard"
 # Re-exec must be shebang-gated so it never tries to exec the interpreter binary
 # ($0=/bin/zsh under an inline `zsh -c` body) — the rc=126 trap.
-assert_grep "$GOAL_SKILL" "head -c2 \"\\\$0\""                                  "G41.reexec-shebang-gated"
+assert_grep "$GOAL_P0" "head -c2 \"\\\$0\""                                  "G41.reexec-shebang-gated"
 # Behavioural: extract the FIRST Phase-0 bash fence (the guard) and run its
 # guard logic under zsh with bash>=4 present. It MUST NOT exit 2 (the #294 bug
 # was a spurious exit 2 on the very first fence under the zsh Bash tool). We run
 # the guard up to the point it would reach the rest of Phase-0, then echo a
 # sentinel; a clean run prints the sentinel and resolves UBERDEV_GOAL_BASH.
 if command -v zsh >/dev/null 2>&1 && { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }; then
-  _g41_guard="$(awk '
-    /^[[:space:]]*## Phase 0/      { inp0=1 }
-    inp0 && /^[[:space:]]*```bash[[:space:]]*$/ { inb=1; next }
-    inb && /^[[:space:]]*```[[:space:]]*$/      { exit }
-    inb { sub(/^   /,""); print }
-  ' "$GOAL_SKILL")"
+  _g41_guard="$(extract_region bash4-resolver "$GOAL_P0")"
   # Stop the extracted guard before the (undefined-in-isolation) Phase-0 body by
   # appending a sentinel echo; the guard arms either exit 2 (bug), exec away, or
   # fall through to here.
@@ -3297,18 +3308,18 @@ fi
 echo
 echo "== G42: false-convergence rollover guard + cycle backstop + per-cycle barrier reset (issue #288) =="
 # #288 #1 — BOTH Phase-3 terminal gates also require the rollover queue empty.
-assert_grep "$GOAL_SKILL" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$terminal_count" = "\$all_pr_count" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \]' "G42.converge-gate-queue-empty-guard"
-assert_grep "$GOAL_SKILL" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \] && \[ "\$terminal_count" != "\$all_pr_count" \]' "G42.queue-empty-not-converged-queue-guard"
+assert_grep "$GOAL_P3" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$terminal_count" = "\$all_pr_count" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \]' "G42.converge-gate-queue-empty-guard"
+assert_grep "$GOAL_P3" '\[ "\$\{#new_candidates\[@\]\}" = "0" \] && \[ "\$\{#queue\[@\]\}" -eq 0 \] && \[ "\$terminal_count" != "\$all_pr_count" \]' "G42.queue-empty-not-converged-queue-guard"
 # #288 #2 — Phase-1-top cycle ceiling backstop reads cycle from run-state.
-assert_grep "$GOAL_SKILL" '\[ "\$\{cycle:-1\}" -gt "\$\{MAX_CYCLES:-0\}" \]'   "G42.phase1-cycle-ceiling-backstop"
-assert_grep "$GOAL_SKILL" 'phase1_ceiling_backstop'                            "G42.phase1-backstop-audit-tag"
+assert_grep "$GOAL_P1" '\[ "\$\{cycle:-1\}" -gt "\$\{MAX_CYCLES:-0\}" \]'   "G42.phase1-cycle-ceiling-backstop"
+assert_grep "$GOAL_P1" 'phase1_ceiling_backstop'                            "G42.phase1-backstop-audit-tag"
 # #288 #3 — per-cycle barrier reset at the loop-back: barrier_start_ts=0 + TSV truncate.
-assert_grep "$GOAL_SKILL" 'barrier_start_ts=0'                                 "G42.barrier-reset-zero"
-assert_grep "$GOAL_SKILL" '_batch_prs_tsv=.*goal-\$GOAL_ID-batch-prs.tsv'      "G42.barrier-reset-tsv-path"
-assert_grep "$GOAL_SKILL" ': > "\$_batch_prs_tsv"'                             "G42.barrier-reset-tsv-truncate"
+assert_grep "$GOAL_P3" 'barrier_start_ts=0'                                 "G42.barrier-reset-zero"
+assert_grep "$GOAL_P3" '_batch_prs_tsv=.*goal-\$GOAL_ID-batch-prs.tsv'      "G42.barrier-reset-tsv-path"
+assert_grep "$GOAL_P3" ': > "\$_batch_prs_tsv"'                             "G42.barrier-reset-tsv-truncate"
 # Anti-regression: the #220 rollover-preservation merge must still be present
 # (NOT reverted to an overwrite) — the queue-empty guard relies on it.
-assert_grep "$GOAL_SKILL" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G42.rollover-merge-preserved"
+assert_grep "$GOAL_P3" 'queue=\("\$\{queue\[@\]\}" "\$\{new_candidates\[@\]\}"\)' "G42.rollover-merge-preserved"
 # Behavioural: the cap-overflow convergence-gate predicate must be FALSE while
 # the rollover queue is non-empty (so the goal does NOT falsely converge).
 # Mirror the exact gate boolean from the SKILL with a non-empty queue: 0 new
@@ -3330,29 +3341,35 @@ fi
 echo
 echo "== G43: cross-process uberdev:active claim acquire/release (issue #291 #1) + --only-mine identity doc (#291 #2) =="
 # #291 #1 — SETNX claim helper defined + acquired BEFORE dispatch, released on terminal.
-assert_grep "$GOAL_SKILL" '_uberdev_goal_claim_issue\(\)'                       "G43.claim-helper-defined"
-assert_grep "$GOAL_SKILL" '_uberdev_goal_release_claim\(\)'                     "G43.release-helper-defined"
-assert_grep "$GOAL_SKILL" "UBERDEV_ACTIVE_LABEL='uberdev:active'"               "G43.active-label-bound"
-# Claim acquired before uberdev_dispatch_one AND before the input->dispatched write.
-_g43_claim_line="$(grep -nF '_uberdev_goal_claim_issue "$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-_g43_dispatch_line="$(grep -nE 'uberdev_dispatch_one "\$ISSUE_NUM"' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-if [ -n "$_g43_claim_line" ] && [ -n "$_g43_dispatch_line" ] && [ "$_g43_claim_line" -lt "$_g43_dispatch_line" ]; then
-  PASS=$((PASS+1)); echo "  PASS  G43.claim-precedes-dispatch (claim=$_g43_claim_line dispatch=$_g43_dispatch_line)"
+assert_grep "$GOAL_P1" '_uberdev_goal_claim_issue\(\)'                       "G43.claim-helper-defined"
+assert_grep "$GOAL_P1" '_uberdev_goal_release_claim\(\)'                     "G43.release-helper-defined"
+assert_grep "$GOAL_P1" "UBERDEV_ACTIVE_LABEL='uberdev:active'"               "G43.active-label-bound"
+# The claim is the OUTERMOST guard: it must be acquired before the
+# input->dispatched write (which is itself before the fleet is armed — G24b
+# locks that half). Ordering inside the claim pass is what makes the label a
+# real cross-process lock rather than a label we set after the fact.
+_g43_claim_line="$(grep -nF '_uberdev_goal_claim_issue "$ISSUE_NUM"; _claim_rc=$?' "$GOAL_P1" | head -1 | cut -d: -f1)"
+_g43_state_line="$(grep -nF 'input dispatched' "$GOAL_P1" | head -1 | cut -d: -f1)"
+if [ -n "$_g43_claim_line" ] && [ -n "$_g43_state_line" ] && [ "$_g43_claim_line" -lt "$_g43_state_line" ]; then
+  PASS=$((PASS+1)); echo "  PASS  G43.claim-precedes-state-write (claim=$_g43_claim_line state=$_g43_state_line)"
 else
-  FAIL=$((FAIL+1)); echo "  FAIL  G43.claim-precedes-dispatch (claim=$_g43_claim_line dispatch=$_g43_dispatch_line)" >&2
+  FAIL=$((FAIL+1)); echo "  FAIL  G43.claim-precedes-state-write (claim=$_g43_claim_line state=$_g43_state_line)" >&2
 fi
 # Collision => soft-skip this cycle (continue), gh-fail => hard error.
-assert_grep "$GOAL_SKILL" '_claim_rc=\$\?'                                      "G43.claim-rc-captured"
-assert_grep "$GOAL_SKILL" 'uberdev:active claim held by another process'       "G43.collision-soft-skip-msg"
+assert_grep "$GOAL_P1" '_claim_rc=\$\?'                                      "G43.claim-rc-captured"
+assert_grep "$GOAL_P1" 'uberdev:active claim held by another process'       "G43.collision-soft-skip-msg"
 # Release on terminal non-merge transitions: Phase-1 dispatch-failure + Phase-2 failed/resolved-by-no-action.
-_g43_release_count="$(grep -cE '_uberdev_goal_release_claim "\$ISSUE_NUM"|gh issue edit "\$issue" --remove-label "uberdev:active"' "$GOAL_SKILL")"
+# Release sites now live in two files: the claim pass (state-write failure and
+# the arming-failure --mark-failed path) and the watch loop (solve timeout,
+# closed-without-PR, Codex terminal states).
+_g43_release_count="$(cat "$GOAL_P1" "$GOAL_WATCH" | grep -cE '_uberdev_goal_release_claim "\$ISSUE_NUM"|_uberdev_goal_release_claim "\$_issue"|gh issue edit "\$issue" --remove-label "uberdev:active"')"
 if [ "$_g43_release_count" -ge 3 ]; then
   PASS=$((PASS+1)); echo "  PASS  G43.claim-released-on-terminal (count=$_g43_release_count, ge 3)"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G43.claim-released-on-terminal (count=$_g43_release_count, want ge 3)" >&2
 fi
 # #291 #2 — the --only-mine identity requirement is documented (not a silent drop).
-assert_grep "$GOAL_SKILL" 'Identity requirement \(issue #291'                  "G43.only-mine-identity-doc-skill"
+assert_grep "$GOAL_P3" 'Identity requirement \(issue #291'                  "G43.only-mine-identity-doc-phase3"
 assert_grep "$GOAL_CMD"   'Requires a single .gh. identity \(issue #291\)'      "G43.only-mine-identity-doc-cmd"
 
 echo
@@ -3368,12 +3385,12 @@ assert_grep "$GOAL_LIB" '"\$\{sc\}\.queue" "\$\{sc\}\.active" "\$\{sc\}\.candida
 assert_grep "$GOAL_LIB" 'only_mine=%s'                                          "G44.lib-only-mine-in-scalar-flush"
 assert_grep "$GOAL_LIB" 'case "\$v" in 0\|1\) only_mine="\$v"'                   "G44.lib-only-mine-read-allowlist"
 # Phase-3 fence 1 flushes at fence END (the false-converge fix) — fail-loud.
-assert_grep "$GOAL_SKILL" 'failed to persist run-state after Phase-3 candidate collection' "G44.skill-fence1-flush-fail-loud"
+assert_grep "$GOAL_P3" 'failed to persist run-state after Phase-3 candidate collection' "G44.collect-flush-fail-loud"
 # Loop-back clears the consumed candidates BEFORE the flush (double-merge guard):
 # the clear must sit between the rollover merge and the loop-back write.
-_g44_merge_line="$(grep -nF 'queue=("${queue[@]}" "${new_candidates[@]}")' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-_g44_clear_line="$(grep -nF 'new_candidates=()' "$GOAL_SKILL" | awk -F: -v m="${_g44_merge_line:-0}" '$1 > m { print $1; exit }')"
-_g44_loopback_flush_line="$(grep -nF 'failed to persist run-state before loop-back' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g44_merge_line="$(grep -nF 'queue=("${queue[@]}" "${new_candidates[@]}")' "$GOAL_P3" | head -1 | cut -d: -f1)"
+_g44_clear_line="$(grep -nF 'new_candidates=()' "$GOAL_P3" | awk -F: -v m="${_g44_merge_line:-0}" '$1 > m { print $1; exit }')"
+_g44_loopback_flush_line="$(grep -nF 'failed to persist run-state before loop-back' "$GOAL_P3" | head -1 | cut -d: -f1)"
 if [ -n "${_g44_merge_line:-}" ] && [ -n "${_g44_clear_line:-}" ] && [ -n "${_g44_loopback_flush_line:-}" ] \
    && [ "$_g44_clear_line" -gt "$_g44_merge_line" ] && [ "$_g44_clear_line" -lt "$_g44_loopback_flush_line" ]; then
   PASS=$((PASS+1)); echo "  PASS  G44.loopback-clears-consumed-candidates (merge=$_g44_merge_line < clear=$_g44_clear_line < flush=$_g44_loopback_flush_line)"
@@ -3386,8 +3403,8 @@ echo "== G45: D13 first-10 truncation sequenced BEFORE the terminal/loop-back fe
 # Pre-#301 the truncation fence sat AFTER the loop-back fence — dead code (the
 # un-truncated set had already merged into queue and flushed). Lock the order:
 # truncation line < terminal-gate line < rollover-merge line.
-_g45_trunc_line="$(grep -nF 'new_candidates=("${new_candidates[@]:0:10}")' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
-_g45_term_line="$(grep -nF 'Terminal set for convergence' "$GOAL_SKILL" | head -1 | cut -d: -f1)"
+_g45_trunc_line="$(grep -nF 'new_candidates=("${new_candidates[@]:0:10}")' "$GOAL_P3" | head -1 | cut -d: -f1)"
+_g45_term_line="$(grep -nF 'Terminal set for convergence' "$GOAL_P3" | head -1 | cut -d: -f1)"
 if [ -n "${_g45_trunc_line:-}" ] && [ -n "${_g45_term_line:-}" ] && [ "$_g45_trunc_line" -lt "$_g45_term_line" ]; then
   PASS=$((PASS+1)); echo "  PASS  G45.truncation-precedes-terminal-fence (trunc=$_g45_trunc_line < terminal=$_g45_term_line)"
 else
@@ -3395,7 +3412,7 @@ else
 fi
 # The truncation fence re-flushes the TRUNCATED set so the fresh-shell terminal
 # fence rehydrates first-10, not the full set.
-assert_grep "$GOAL_SKILL" 'failed to persist run-state after overflow truncation' "G45.truncation-reflushes-sidecar"
+assert_grep "$GOAL_P3" 'failed to persist run-state after overflow truncation' "G45.truncation-reflushes-sidecar"
 
 echo
 echo "== G46: review-pr dispatch-cap exhaustion -> red-held with distinct audit note (#301, RFC 0012 §3.3 goal-R1 item 4) =="
@@ -3409,26 +3426,26 @@ else
 fi
 # SKILL 2b: rc captured, rc-5 arm transitions pushed-reviewing -> red-held and
 # emits the goal_review_pr_deferred note with reason=dispatch_cap_exhausted.
-assert_grep "$GOAL_SKILL" '_rpr_rc=\$\?'                                        "G46.skill-2b-rc-captured"
-assert_grep "$GOAL_SKILL" '\[ "\$_rpr_rc" -eq 5 \]'                              "G46.skill-2b-rc5-branch"
-assert_grep "$GOAL_SKILL" 'dispatch_cap_exhausted'                               "G46.skill-2b-distinct-audit-note"
-_g46_redheld_count="$(grep -cF 'uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held' "$GOAL_SKILL")"
+assert_grep "$GOAL_WATCH" '_rpr_rc=\$\?'                                        "G46.watch-2b-rc-captured"
+assert_grep "$GOAL_WATCH" '\[ "\$_rpr_rc" -eq 5 \]'                              "G46.watch-2b-rc5-branch"
+assert_grep "$GOAL_WATCH" 'dispatch_cap_exhausted'                               "G46.watch-2b-distinct-audit-note"
+_g46_redheld_count="$(grep -cF 'uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held' "$GOAL_WATCH")"
 if [ "$_g46_redheld_count" -ge 2 ]; then
-  PASS=$((PASS+1)); echo "  PASS  G46.skill-2b-red-held-transition (count=$_g46_redheld_count: red case + cap-exhaustion arm)"
+  PASS=$((PASS+1)); echo "  PASS  G46.watch-2b-red-held-transition (count=$_g46_redheld_count: red case + cap-exhaustion arm)"
 else
-  FAIL=$((FAIL+1)); echo "  FAIL  G46.skill-2b-red-held-transition (count=$_g46_redheld_count, want ge 2 — cap-exhaustion arm missing?)" >&2
+  FAIL=$((FAIL+1)); echo "  FAIL  G46.watch-2b-red-held-transition (count=$_g46_redheld_count, want ge 2 — cap-exhaustion arm missing?)" >&2
 fi
 
 echo
 echo "== G47: bounded-watch default 480s under the Claude-Code Bash tool (#301, RFC 0012 §3.3 goal-R1 item 3) =="
 assert_grep "$GOAL_LIB"   '_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:=480'              "G47.lib-default-constant-480"
-assert_grep "$GOAL_SKILL" 'CLAUDECODE'                                           "G47.skill-claudecode-feature-detect"
-assert_grep "$GOAL_SKILL" 'WATCH_BUDGET="\$\{_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:-480\}"' "G47.skill-default-applied"
+assert_grep "$GOAL_P0" 'CLAUDECODE'                                           "G47.phase0-claudecode-feature-detect"
+assert_grep "$GOAL_P0" 'WATCH_BUDGET="\$\{_UBERDEV_GOAL_DEFAULT_WATCH_BUDGET:-480\}"' "G47.phase0-default-applied"
 assert_grep "$GOAL_CMD"   'defaults to .480'                                     "G47.cmd-documents-480-default"
 assert_grep "$GOAL_CMD"   'harness_term'                                         "G47.cmd-documents-term-contract"
 # The default must NOT override an explicit zero: the gate requires empty
 # CLI/env inputs, not just resolved-0 values.
-assert_grep "$GOAL_SKILL" '\-z "\$\{watch_budget_cli:-\}"'                       "G47.skill-explicit-zero-opt-out"
+assert_grep "$GOAL_P0" '\-z "\$\{watch_budget_cli:-\}"'                       "G47.phase0-explicit-zero-opt-out"
 
 echo
 echo "== BT86: _uberdev_goal_handle_harness_term behavioural — persist + audit + exit 42, NO reap (#301) =="

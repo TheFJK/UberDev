@@ -680,14 +680,17 @@ echo "== B17: MERGING sentinel serializes merge dispatch (#289.2) =="
 ) || { FAIL=$((FAIL + 1)); echo "  FAIL  B17 block exited non-zero"; }
 
 # ---------------------------------------------------------------------------
-# B18 — #289.2 SKILL.md Phase-2c structural: the green-PR merge loop must take
-# the LOWEST green PR (head -n 1) and flip it to the MERGING sentinel, NOT loop
-# over all green PRs dispatching /merge in one async pass.
+# B18 — #289.2 step-2c structural: the green-PR merge loop must take the LOWEST
+# green PR (head -n 1) and flip it to the MERGING sentinel, NOT loop over all
+# green PRs dispatching /merge in one async pass.
+# RFC 0015 §5 moved that loop out of the SKILL.md fence into lib/goal-watch.sh;
+# the serialization property is unchanged, so the asserts follow the code.
 # ---------------------------------------------------------------------------
-echo "== B18: Phase 2c dispatches lowest green PR + MERGING sentinel (#289.2 structural) =="
-GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
-assert_grep "$GOAL_SKILL" '_uberdev_goal_batch_green_prs_ordered "\$GOAL_ID" \| head -n 1' "B18.lowest-green-head1"
-assert_grep "$GOAL_SKILL" '_uberdev_goal_set_batch_terminal_state "\$GOAL_ID" "\$pr" MERGING' "B18.flips-to-merging"
+echo "== B18: step 2c dispatches lowest green PR + MERGING sentinel (#289.2 structural) =="
+GOAL_WATCH="$REPO_ROOT/plugins/uberdev/lib/goal-watch.sh"
+[ -r "$GOAL_WATCH" ] || { printf 'FATAL: required file missing or unreadable: %s\n' "$GOAL_WATCH" >&2; exit 2; }
+assert_grep "$GOAL_WATCH" '_uberdev_goal_batch_green_prs_ordered "\$GOAL_ID" \| head -n 1' "B18.lowest-green-head1"
+assert_grep "$GOAL_WATCH" '_uberdev_goal_set_batch_terminal_state "\$GOAL_ID" "\$pr" MERGING' "B18.flips-to-merging"
 # The phantom-label gate must NOT appear as a live jq select in the lib.
 assert_no_grep "$GOAL_LIB"  'select\(\. == "review-pr:green"\)'                              "B18.no-phantom-green-gate-in-lib"
 

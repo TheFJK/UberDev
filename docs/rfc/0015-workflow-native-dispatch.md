@@ -5,9 +5,9 @@
 | **Status** | Accepted |
 | **Author** | TheFJK |
 | **Created** | 2026-07-30 |
-| **Tier** | Large (transport change across `/solve`, `/turbo`, and — staged — `/goal`) |
-| **Target ver** | `0.41.0` (this landing: `/solve` + `/turbo`); `/goal` follows in `0.41.x` |
-| **Targets** | new `skills/solve-fleet/{SKILL.md,workflow.js}`; `lib/dispatch.sh` (enum, `auto` arm, supervision gate, provider boundary, deprecation notice); `lib/solve-launcher.sh` (Step 5w); `commands/solve.md` + `commands/turbo.md`; `skills/solve-pipeline/SKILL.md`; `tests/solve-fleet-workflow.test.sh` (new) + `tests/dispatch-fallback.test.sh` + `tests/dispatch-codex.test.sh` + `tests/codex-port.test.sh`; `.github/workflows/test.yml` (both jobs); the `codex/uberdev-codex` mirror |
+| **Tier** | Large (transport change across `/solve`, `/turbo` and `/goal`) |
+| **Target ver** | `0.41.0` (`/solve` + `/turbo`); `/goal` landed in the following `0.41.x` (§5) |
+| **Targets** | new `skills/solve-fleet/{SKILL.md,workflow.js}`; `lib/dispatch.sh` (enum, `auto` arm, supervision gate, provider boundary, deprecation notice); `lib/solve-launcher.sh` (Step 5w); `commands/solve.md` + `commands/turbo.md`; `skills/solve-pipeline/SKILL.md`; `tests/solve-fleet-workflow.test.sh` (new) + `tests/dispatch-fallback.test.sh` + `tests/dispatch-codex.test.sh` + `tests/codex-port.test.sh`; `.github/workflows/test.yml` (both jobs); the `codex/uberdev-codex` mirror. **§5 landing:** new `skills/goal-pipeline/workflow.js` + `lib/goal-{phase0,phase1,watch,phase3}.sh`; `skills/goal-pipeline/SKILL.md` (shrunk to preflight + mandate + fallback); `commands/goal.md`; `lib/dispatch.sh` (demotion helper DELETED); `tests/goal-workflow.test.sh` (new) + `tests/goal.test.sh` + `tests/goal-pipeline-zsh.test.sh` re-anchored |
 | **Supersedes** | RFC 0004's **auto-resolution matrix** only. RFC 0004's per-backend transports, receipts and supervision contracts stay canonical for the explicit backends. |
 | **Amends** | RFC 0012 **Constraint 5** — see §2 |
 
@@ -66,7 +66,15 @@ that **`/solve` never needed one**:
   clocks in the script).
 
 Constraint 5 remains binding for anything that genuinely needs to outlive its
-session. `/goal`'s cross-session durability (§5) is where that bites.
+session — and the §5 landing settles what that means for `/goal`. `/goal`'s
+**children** turned out not to need it either: they are the same solvers
+`/solve` runs, and they now die with the session exactly as `/solve`'s do. What
+`/goal` genuinely needs to outlive a session is its **state**, not its
+processes, and that was always on disk in `lib/goal-state.sh`. So the constraint
+now binds one narrow thing: an operator who deliberately wants fire-and-forget
+must name a detached backend explicitly (`--backend=claude-bg`, until its v1.0.0
+removal). Nothing reaches a detached transport by default any more, on any
+command.
 
 ---
 
@@ -150,22 +158,103 @@ review command; that remains `/goal`'s decision.
 
 ---
 
-## 5. `/goal` — staged, not in this landing
+## 5. `/goal` — shipped
 
-`/goal` inherits the backend resolver, so its solvers move with `/solve`. Its
-**watch loop** does not, and must not be migrated naively:
+`/goal` is Workflow-native. This section described a staged hybrid before that
+landing; what follows is what actually shipped.
 
-- a Workflow cannot sleep, poll on a timer, or wait on CI;
-- resume is same-session only, so cross-session durability still needs
-  `lib/goal-state.sh` on disk;
-- `workflow()` nesting is one level deep, which the per-issue design chain
-  already spends if it is ever refactored into a child script.
+### 5.1 The fences were the bug
 
-The staged shape is a **hybrid**: the fan-out and verdict computation move into
-a workflow, while CI waiting, merge landing and cross-session state stay in the
-main loop. That is a separate landing with its own acceptance criteria.
+`/goal` was five ```bash fences in `skills/goal-pipeline/SKILL.md`. The
+Claude-Code Bash tool gives every fence its own shell, so the cycle counter, the
+rollover queue, the candidate array, the EXIT/INT/TERM traps and every
+accumulated counter died at each phase boundary. The false-converge (candidates
+rehydrated empty), the rollover wipe (queue overwritten instead of merged) and
+the dead circuit breakers (a counter that reset every pass) are one bug in three
+costumes, and each was patched individually until the next variable died. The
+Skill renderer's `$ARGUMENTS` positional substitution — which rewrote bare
+`$1`/`$2`/`$3` inside single-quoted `awk` one-liners — was the second structural
+hazard of that shape.
 
----
+So the executable body moved into four shebang'd, independently-testable scripts
+that `lib/*.sh` (never rendered) makes safe, and the loop that used to be an
+instruction to the model became a real loop in a real driver:
+
+| Phase | Script | Owns |
+|---|---|---|
+| 0 preflight | `lib/goal-phase0.sh` | arg parse, config reads, `GOAL_ID` mint, state init, `--resume` rehydration, the `uberdev_emit_workflow_args goal …` envelope |
+| 1 claim | `lib/goal-phase1.sh` | label provisioning, the `uberdev:active` cross-process claim, the `MAX_PARALLEL` rollover, `input -> dispatched`. **It does not dispatch.** |
+| 2 watch | `lib/goal-watch.sh` | the merge lane + every circuit breaker, under the documented `0`/`42`/`1` exit contract |
+| 3 collect | `lib/goal-phase3.sh` | candidates → fingerprint repeat → overflow truncation → terminal gates |
+| driver | `skills/goal-pipeline/workflow.js` | the cycle loop, the projected-agent gate, and the nested fleet call |
+
+### 5.2 The three §5 objections, resolved
+
+The staged plan listed three reasons `/goal` could not follow `/solve`. Each has
+a concrete answer:
+
+- *"A Workflow cannot sleep, poll on a timer, or wait on CI."* Correct, and it
+  does not. The polling lives in `lib/goal-watch.sh`, which is an ordinary shell
+  script with an ordinary `sleep`. The driver's watch stage is a **bounded
+  `for`** whose counter — never a clock — is the bound (DR-7), re-invoking the
+  script on its `42` ("still working") code until it returns `0` (drained) or
+  `1` (halt).
+- *"Resume is same-session only, so cross-session durability still needs
+  `lib/goal-state.sh` on disk."* It still does, unchanged. `--resume` reads the
+  fixed-path `goal-active-id.txt` pointer and rehydrates.
+- *"`workflow()` nesting is one level deep."* It is, and it is spent
+  deliberately: **exactly ONE nested call per cycle** into
+  `skills/solve-fleet/workflow.js` for the whole cycle. There is no
+  `solve-one.js` and there must not be one — the fleet already fans out per
+  issue internally, so a nested call *per issue* would spend the single level on
+  the wrong thing and the fleet's own agents could not run.
+
+### 5.3 The interim demotion is deleted
+
+`uberdev_dispatch_demote_workflow_to_detached` existed for exactly one caller:
+`/goal`'s Phase-1 loop, which drove `uberdev_dispatch_one` itself and so could
+not serve the `workflow` backend. It re-resolved a `workflow` selection back
+down to the retired per-OS matrix — which is to say it kept **`claude-bg`, a
+deprecated backend, reachable from `auto` on a default path**.
+
+With `/goal` no longer dispatching, the helper is **deleted, not left dormant**.
+A dormant demotion is precisely how retired policy drifts back into a default.
+Reaching a detached backend is now an explicit `--backend=<name>` choice on every
+surface, and `tests/solve-fleet-workflow.test.sh` S16-S20 assert the inverse of
+what they used to: the helper must not exist, nothing may call it,
+`lib/goal-phase1.sh` must contain no `uberdev_dispatch_one`, and the driver must
+make exactly one nested `workflow()` call.
+
+**One thing genuinely does still need a detached transport, and it is not the
+solvers.** `lib/goal-watch.sh` dispatches two children of its own — `/merge`
+(step 2c) and `/review-pr` (step 2b) — and it is a *shell polling loop*, not the
+driver, so it cannot call the Workflow tool. `lib/dispatch.sh` correctly refuses
+the `workflow` backend there. So the watch script resolves an explicit child
+transport (`background` by default, overridable via `UBERDEV_GOAL_CHILD_BACKEND`)
+and announces it. Three things distinguish that from the deleted shim: it is
+scoped to two dispatches instead of the whole run, it leaves the solvers
+Workflow-native, and it names a first-class non-deprecated backend rather than
+re-entering the retired per-OS matrix. Moving those two children into the driver
+as Workflow agents is the natural follow-up, and it is not this landing.
+
+### 5.5 The 150-minute solver timeout is now dead weight, and says so
+
+`_UBERDEV_GOAL_SOLVE_TIMEOUT` (150m) answered one question: *is the detached
+solver still working, or did it die?* That question only exists when the solver
+outlives its dispatcher. The nested fleet call is **awaited**, so by the time
+`lib/goal-watch.sh` runs, every solver in the cycle has already returned — an
+issue with no PR and no live agent is terminal *now*. The driver therefore passes
+`UBERDEV_GOAL_SOLVERS_SETTLED=1`, and the watch script classifies immediately
+instead of spending the entire watch-tick budget re-proving a settled fact. The
+marker is opt-in, so a hand-run `lib/goal-watch.sh` keeps the timeout semantics.
+
+### 5.4 Trust verdicts are never LLM-reported
+
+Every relay in the driver is mechanical: run a script, report its exit status
+verbatim. The one place a trust colour surfaces (the per-cycle summary) hands the
+verdict **path** to a relay running `uberdev_goal_read_trust_signal` and consumes
+that helper's stdout; the schema's enum is the helper's own closed return set.
+No agent is ever asked what colour a PR is.
 
 ## 6. Risks and accepted behaviour losses
 
@@ -173,9 +262,15 @@ Every loss below is **printed, never silent** — in this section, in
 `skills/solve-fleet/SKILL.md`, and where it matters at runtime.
 
 - **R-1 — no survive-the-parent.** If the session ends — closed, `/clear`,
-  compact — every in-flight solver dies with it. The detached backends remain
-  available for the deliberate fire-and-forget case, and `--backend=claude-bg`
-  is exactly that escape hatch until v1.0.0.
+  compact — every in-flight solver dies with it. This is true of `/goal` too
+  since §5: its children are the same fleet solvers, so a closed session leaves
+  a real run with live on-disk state and dead processes. The recovery is
+  explicit and shipped: `/uberdev:goal --resume` rehydrates the run from the
+  fixed-path `goal-active-id.txt` pointer and carries on, and
+  `plugins/uberdev/lib/goal-abort.sh` is the other half — it releases the
+  `uberdev:active` claims and reaps. The detached backends remain available for
+  the deliberate fire-and-forget case, and `--backend=claude-bg` is exactly that
+  escape hatch until v1.0.0.
 - **R-1b — per-child model, effort and permission tier are inexpressible.**
   The detached backends passed `--model`, `--effort` and the
   `--dangerously-skip-permissions --permission-mode bypassPermissions` pair as
@@ -186,6 +281,12 @@ Every loss below is **printed, never silent** — in this section, in
   and a session running below `max` effort produces lower-effort solvers than
   the same command would have on a detached backend. Users who need the pinned
   tier should use `--backend=claude-bg` or raise the session's own settings.
+  `/goal` inherits this as of §5, and it costs it more than it costs `/solve`:
+  `lib/goal-phase0.sh` still exports `SKIP_PERMISSIONS=1`, but that now only
+  reaches the children `lib/goal-watch.sh` still dispatches through
+  `lib/dispatch.sh` (`/merge`, `/review-pr`) — the *solvers* take the session's
+  tier. An unattended `/goal` therefore wants a session that is already at the
+  tier and effort the operator intends, or an explicit detached backend.
 - **R-1c — no in-flight cancellation through `lib/dispatch.sh`.**
   `_uberdev_dispatch_cancel_backend` proves a detached child is gone
   (TERM→poll→KILL→poll, or `claude stop` plus a terminal probe). There is no

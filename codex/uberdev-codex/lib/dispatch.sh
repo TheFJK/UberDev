@@ -1091,47 +1091,22 @@ uberdev_dispatch_preflight() {
   return 0
 }
 
-# uberdev_dispatch_demote_workflow_to_detached CONSUMER
-# INTERIM (RFC 0015 §5). Callers that still drive `uberdev_dispatch_one`
-# themselves — today that is ONLY /goal's Phase-1 loop — cannot use the
-# `workflow` backend: the fleet is spawned by the calling session's Workflow
-# tool, not by this library, so `uberdev_dispatch_one` refuses it by
-# construction. Rather than let /goal fail every dispatch, or silently paper
-# over it, this helper re-resolves a workflow selection down to the detached
-# backend the pre-RFC-0015 auto matrix would have chosen, and says so out loud.
+# RFC 0015 §5 — the workflow->detached DEMOTION HELPER IS GONE, DELIBERATELY.
 #
-# It is deliberately a SEPARATE, NAMED function rather than a branch inside
-# uberdev_dispatch_preflight: the per-OS matrix is retired policy, and keeping
-# its last consumer explicit is what stops it drifting back into the default
-# path. Delete this function when /goal's Phase 1 emits an args envelope
-# instead of calling uberdev_dispatch_one (RFC 0015 §5).
+# There used to be a `uberdev_dispatch_demote_workflow_to_detached` here. It
+# existed for exactly one caller: /goal's Phase-1 loop, which drove
+# uberdev_dispatch_one itself and therefore could not use the `workflow` backend
+# (the fleet is spawned by the calling session's Workflow tool, not by this
+# library). It re-resolved a `workflow` selection back down to the pre-RFC-0015
+# per-OS detached matrix — which meant `claude-bg`, a DEPRECATED backend, was
+# still reachable from `auto` on the default /goal path.
 #
-# No-op unless UBERDEV_RESOLVED_BACKEND is exactly `workflow`.
-uberdev_dispatch_demote_workflow_to_detached() {
-  local consumer="${1:-caller}" os_class demoted reason
-  [ "${UBERDEV_RESOLVED_BACKEND:-}" = "workflow" ] || return 0
-  os_class="$(_uberdev_dispatch_os_class)"
-  case "$os_class" in
-    macos)
-      if _uberdev_dispatch_wezterm_available; then demoted="wezterm"; reason="demote-macos-wezterm"
-      else demoted="claude-bg"; reason="demote-macos-fallback"; fi ;;
-    windows-native)
-      if _uberdev_dispatch_wezterm_available; then demoted="wezterm"; reason="demote-windows-wezterm"
-      else
-        echo "error: $consumer still drives detached dispatch and native Windows needs WezTerm to supervise it" >&2
-        echo "       install/start WezTerm, or run $consumer from WSL2 or another POSIX host" >&2
-        return 1
-      fi ;;
-    *)
-      demoted="claude-bg"; reason="demote-$os_class" ;;
-  esac
-  echo "note: $consumer dispatches its children directly and cannot use the Workflow-native backend yet (RFC 0015 §5); using --backend=$demoted for this run." >&2
-  _uberdev_dispatch_deprecation_notice "$demoted"
-  export UBERDEV_RESOLVED_BACKEND="$demoted"
-  _uberdev_dispatch_audit dispatch_backend_resolved \
-    "{\"requested\":\"workflow\",\"resolved\":\"$demoted\",\"os_class\":\"$os_class\",\"reason\":\"$reason\",\"consumer\":\"$consumer\"}"
-  return 0
-}
+# /goal no longer dispatches: lib/goal-phase1.sh claims only, and
+# skills/goal-pipeline/workflow.js makes ONE nested workflow() call per cycle
+# into skills/solve-fleet/workflow.js. With the last consumer gone the helper is
+# deleted rather than left dormant — a dormant demotion is exactly how the
+# retired per-OS matrix would drift back into a default path. Reaching a
+# detached backend is now an EXPLICIT `--backend=<name>` choice on every surface.
 
 # ---------------------------------------------------------------------------
 # uberdev_dispatch_resolve_env [BACKEND]
