@@ -148,8 +148,36 @@ def named_files(body: str) -> list[str]:
     return files
 
 
+# A component token is embedded in the routing-context metadata, which validates
+# every entry against this exact shape (lib/agent-dispatch.sh
+# _uberdev_agent_context_schema_validate). The two MUST agree: a token this
+# module emits but that validator rejects makes `uberdev_agent_context_create`
+# fail, which surfaces as `route_context_create_failed` and refuses the dispatch
+# outright — /solve, /turbo and /goal all decline the issue with no PR and no
+# retry. Keep this literal in lockstep with the schema; tests/solve-triage.test.sh
+# asserts the two regexes are identical.
+COMPONENT_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
+
+
 def component_tokens(files: list[str]) -> list[str]:
-    result = sorted({name.split("/", 1)[0] if "/" in name else name.rsplit(".", 1)[0] for name in files})
+    # `rsplit(".", 1)` stripped only the LAST extension, so `foo.test.sh` became
+    # the token `foo.test` — a dot, which the context schema forbids. Every
+    # issue body naming a `*.test.sh` (or `*.test.py`, `*.d.ts`, `*.tar.gz`)
+    # was therefore undispatchable. Split on the FIRST dot instead: it yields
+    # the real component (`foo`), and it correctly collapses `foo.sh` and
+    # `foo.test.sh` into ONE component rather than counting them as two.
+    tokens = set()
+    for name in files:
+        head = name.split("/", 1)[0] if "/" in name else name.split(".", 1)[0]
+        # Leading punctuation is not a legal first character (`_workflow_harness`,
+        # and any dot-segment `named_files` did not already strip).
+        head = head.lstrip("._-")
+        # Drop anything still non-conforming rather than emitting a token that
+        # would fail the schema: losing one coarse component from a heuristic
+        # count is strictly better than refusing to work the issue at all.
+        if head and COMPONENT_TOKEN_RE.fullmatch(head):
+            tokens.add(head)
+    result = sorted(tokens)
     if len(result) > MAX_COMPONENTS:
         fail("triage_limit_components")
     return result

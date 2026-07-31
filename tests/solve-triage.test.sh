@@ -130,4 +130,12 @@ grep -q 'triage_limit_issues' "$TMP/err"; PASS=$((PASS+1))
 if python3 -I "$TRIAGE" validate-issues 1 0 >"$TMP/out" 2>"$TMP/err"; then exit 1; fi
 grep -q 'triage_invalid_issue' "$TMP/err"; PASS=$((PASS+1))
 
+# --- component tokens must satisfy the routing-context schema (regression) ----
+# See tests/component-token-schema.py for the full rationale: a token carrying a
+# dot made uberdev_agent_context_create fail with route_context_create_failed,
+# and /solve, /turbo and /goal all refused the issue. Every open issue in this
+# repo names a *.test.sh, so the entire backlog was undispatchable.
+python3 -I "$ROOT/tests/component-token-schema.py" "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"
