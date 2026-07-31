@@ -7,7 +7,7 @@
 #   uberdev_goal_state_init                    GOAL_ID
 #   uberdev_goal_pr_state_transition           GOAL_ID PR FROM TO
 #   uberdev_goal_issue_state_transition        GOAL_ID ISSUE FROM TO
-#   uberdev_goal_read_trust_signal             AUDIT_JSON_PATH
+#   uberdev_goal_read_trust_signal             VERDICT_RECEIPT_OR_AUDIT_JSON_PATH
 #   uberdev_goal_check_fingerprint_repeat      GOAL_ID CYCLE FINGERPRINT
 #   uberdev_goal_should_automerge              GOAL_ID PR
 #   uberdev_goal_reset_merge_attempts          GOAL_ID PR            (issue #292.2)
@@ -25,7 +25,12 @@
 #   uberdev_goal_count_failed_issues           GOAL_ID
 #   uberdev_goal_record_held_audit             GOAL_ID PR AUDIT_PATH
 #   uberdev_goal_get_last_held_audit           GOAL_ID PR
+#   uberdev_goal_last_verdict_state            PR_NUM      (#348 discovery classification)
+#   uberdev_goal_record_verdict_anomaly        GOAL_ID PR KIND       (#348)
+#   uberdev_goal_count_verdict_anomalies       GOAL_ID PR KIND       (#348)
 #   uberdev_goal_find_pr_for_issue             ISSUE_NUM   (gh; issue #180/#290.4)
+#   uberdev_goal_pr_list_snapshot                          (gh; #301 per-pass snapshot)
+#   uberdev_goal_find_pr_for_issue_from_json   ISSUE_NUM SNAPSHOT_JSON   (#301)
 #   uberdev_goal_pr_state_gh                   PR_NUM      (gh; issue #180)
 #   uberdev_goal_pr_is_merged                  PR_NUM      (gh; issue #180)
 #   uberdev_goal_gh_failure_breaker_check      GOAL_ID [THRESHOLD]   (issue #290.3)
@@ -46,6 +51,11 @@
 # Internal:
 #   _uberdev_goal_ts_in_state              FILE KEY STATE [FIRST_WINS]
 #   _uberdev_goal_validate_int             N
+#   _uberdev_goal_is_object_name           SHA                (#345; lowercase 40-hex gate)
+#   _uberdev_goal_drain_stderr             LABEL ERRFILE      (#348; prefixed stderr relay)
+#   _uberdev_goal_pr_for_issue_jq          ISSUE_NUM          (#301; shared ranking program)
+#   _uberdev_goal_verdict_state_path       PR_NUM             (#348)
+#   _uberdev_goal_record_verdict_state     PR_NUM STATE       (#348)
 #   _uberdev_goal_validate_id              GOAL_ID
 #   _uberdev_goal_append                   FILE LINE
 #   _uberdev_goal_indirect_get             VARNAME            (issue #270; dual-shell indirect read, no eval)
@@ -158,6 +168,17 @@ _UBERDEV_GOAL_WORKTREE_PREFIXES=("" ".claude/worktrees/*/" ".worktrees/*/" "work
 # After this many CONSECUTIVE failures (any success resets the counter), the
 # breaker fires gh_api_failed. Default 5 ≈ 5 min at the 60s poll cadence.
 : "${_UBERDEV_GOAL_MAX_GH_FAILURES:=5}"
+# #348 finding 1 — bound on how many consecutive passes a PR may spend with the
+# verdict discovery reporting `indeterminate` or `tamper` before /goal stops
+# re-dispatching /review-pr against it. Neither cause is fixable by re-reviewing
+# (a duplicate-timestamp tie stays a tie; a replaced carrier stays replaced), so
+# without a bound the PR spins to the 4h stuck_loop. Default 3 mirrors the
+# review-pr dispatch cap.
+: "${_UBERDEV_GOAL_MAX_VERDICT_ANOMALIES:=3}"
+# #301 speedup finding 2 — cap on CONSECUTIVE Phase-2 passes that skip the poll
+# sleep because the previous pass applied a state transition. Bounds the burst
+# so the transition fast-path can never degenerate into a gh-hammering hot loop.
+: "${_UBERDEV_GOAL_MAX_FAST_PASSES:=5}"
 
 # Regex constants — PLAIN assignment, NOT := (Q2 security advisory: := would
 # let a hostile env override the regex shape and widen the ReDoS attack
@@ -186,12 +207,22 @@ _uberdev_goal_source_path() {
   fi
 }
 _UBERDEV_GOAL_FILE="$(_uberdev_goal_source_path)" || return 1
+# #349 item 10 — the comment above says "never the caller's cwd", and now the
+# code agrees. A source identity with NO `/` (a bare `goal-state.sh`, which the
+# shell resolved through PATH/CDPATH or a `cd`-then-source) carries no
+# directory information about the LIB, so the old `'.'` fallback resolved to
+# the CALLER'S cwd. That is not merely inaccurate prose: the very next block
+# sources `$_UBERDEV_GOAL_LIB_DIR/../skills/merge-pipeline/lib/discover.sh`, so
+# a caller running from a directory that happens to contain a planted
+# `../skills/merge-pipeline/lib/discover.sh` would have had it sourced into the
+# goal state machine. Leave the dir EMPTY instead and skip the optional source —
+# exactly the packaging-omission path the locator already tolerates.
+_UBERDEV_GOAL_LIB_DIR=""
 case "$_UBERDEV_GOAL_FILE" in
-  */*) _UBERDEV_GOAL_LIB_DIR="${_UBERDEV_GOAL_FILE%/*}" ;;
-  *) _UBERDEV_GOAL_LIB_DIR='.' ;;
+  */*) _UBERDEV_GOAL_LIB_DIR="$(cd "${_UBERDEV_GOAL_FILE%/*}" 2>/dev/null && pwd -P)" || return 1 ;;
+  *) : ;;   # no directory component -> unresolvable; never fall back to cwd
 esac
-_UBERDEV_GOAL_LIB_DIR="$(cd "$_UBERDEV_GOAL_LIB_DIR" 2>/dev/null && pwd -P)" || return 1
-if [ -z "${_UBERDEV_MERGE_DISCOVER_LOADED:-}" ] && \
+if [ -n "$_UBERDEV_GOAL_LIB_DIR" ] && [ -z "${_UBERDEV_MERGE_DISCOVER_LOADED:-}" ] && \
    [ -f "$_UBERDEV_GOAL_LIB_DIR/../skills/merge-pipeline/lib/discover.sh" ]; then
   # shellcheck source=/dev/null
   . "$_UBERDEV_GOAL_LIB_DIR/../skills/merge-pipeline/lib/discover.sh"
@@ -248,6 +279,43 @@ _uberdev_goal_validate_int() {
   local n="$1"
   case "$n" in
     ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# _uberdev_goal_drain_stderr LABEL ERRFILE   (#348 findings 2-3)
+# Emit whatever the previous step wrote into ERRFILE, one `goal-state: LABEL:`
+# prefixed line each, then TRUNCATE it so the next step starts from empty.
+# Multi-step flows that capture stderr to a file need exactly this: without the
+# truncate, step N+1's diagnostic is reported together with step N's; without
+# the emit, the diagnostic is the /dev/null the #348 findings are about.
+# No-op (rc 0) when ERRFILE is empty or unset, so every call site can be
+# unconditional and an mktemp failure degrades to "no breadcrumb", never to a
+# broken control flow.
+_uberdev_goal_drain_stderr() {
+  local label="$1" errfile="${2:-}"
+  [ -n "$errfile" ] && [ -s "$errfile" ] || return 0
+  sed "s|^|goal-state: ${label}: |" "$errfile" >&2
+  : > "$errfile" 2>/dev/null || true
+  return 0
+}
+
+# _uberdev_goal_is_object_name SHA   (#345 finding 2)
+# rc 0 iff SHA is a lowercase 40-hex git object name — the SAME shape the
+# closed-receipt jq gate enforces (`test("^[0-9a-f]{40}$")`), expressed once
+# here so the legacy pathname branch cannot drift away from it again.
+#
+# Deliberately NOT `[[ =~ ]]`: this lib is sourced by goal-pipeline SKILL.md
+# fences that the Claude-Code Bash tool executes under /bin/zsh, where
+# BASH_REMATCH is unset (zsh populates $match instead). A length probe plus a
+# single negated character-class glob is exact, POSIX, and shell-agnostic:
+# `*[!0-9a-f]*` matches iff ANY byte falls outside the class, so its negation
+# proves every byte is in-class, and the length test pins the count at 40.
+_uberdev_goal_is_object_name() {
+  local sha="$1"
+  [ "${#sha}" -eq 40 ] || return 1
+  case "$sha" in
+    *[!0-9a-f]*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -701,8 +769,29 @@ uberdev_goal_issue_state_transition() {
   _uberdev_goal_append "$tmpdir/goal-$goal_id-issue-states.tsv" "$row" || return 1
 }
 
-# uberdev_goal_read_trust_signal AUDIT_JSON_PATH
+# uberdev_goal_read_trust_signal VERDICT_RECEIPT_OR_AUDIT_JSON_PATH
 # D17 — GREEN/YELLOW/RED/STALE/MISSING from /review-pr Phase 2.5 audit.
+#
+# #349 item 9 — the argument is NOT (only) a pathname, and the two branches do
+# NOT share a tolerance contract. Both facts were wrong in the previous header,
+# which is the one place still denying the tightening the closed branch shipped:
+#
+#   CLOSED RECEIPT (the LIVE path). Anything starting with `{` is the closed
+#   controller state minted by uberdev_goal_locate_review_pr_audit_by_pr. It is
+#   validated STRICTLY and there is NO legacy tolerance: schema_version must be
+#   1, kind must be `uberdev-goal-review-verdict`, `.pr` must be a positive
+#   INTEGER, `.sha` must be lowercase 40-hex, `.audit_state` must be
+#   legacy|current, and the three phase2_5 counters must be
+#   boolean/non-negative-integer. Any deviation returns `missing`. A verdict
+#   that cannot be bound to the live HEAD returns `stale`, never a colour.
+#
+#   LEGACY PATHNAME (fixtures + pre-selector callers). A readable file path is
+#   parsed leniently: a missing `.pr`/`.sha` skips the HEAD binding entirely
+#   (backward compatibility for pre-anchor verdicts), and a gh outage falls
+#   through to the colour decision instead of reporting stale.
+#
+# Callers must therefore treat "path tolerance" as a property of the LEGACY
+# branch only.
 # B5 — explicit branch on gh_jq_or_jq exit code: jq-failure (rc!=0) means
 # the audit JSON is unreadable (malformed / not JSON); treat as `missing`
 # so the caller re-dispatches /review-pr (the only safe action — never
@@ -812,6 +901,25 @@ uberdev_goal_read_trust_signal() {
   local verdict_pr verdict_sha
   verdict_pr="$(jq -r '.pr // empty' "$audit_path" 2>/dev/null)"
   verdict_sha="$(jq -r '.sha // empty' "$audit_path" 2>/dev/null)"
+  # #345 finding 2 — this branch validated only `.pr`; `.sha` came off a bare
+  # `jq -r` with NO shape check, so a truncated/uppercase/garbage anchor was
+  # compared against a 40-char object name in silence and the PR was pinned
+  # `stale` forever with nothing on any stream saying why. Validate against the
+  # SAME lowercase-40-hex shape the closed-receipt branch enforces, using a
+  # `case` glob rather than `[[ =~ ]]` (this lib is sourced by SKILL.md fences
+  # that run under /bin/zsh, where BASH_REMATCH is unset — project memory
+  # project_uberdev_type_t_bashism_zsh).
+  #
+  # A malformed anchor is WARNED ABOUT AND STILL COMPARED, deliberately. The
+  # comparison of a non-40-hex string against a real object name can only ever
+  # produce `stale`, which is the fail-closed outcome. SKIPPING the binding
+  # instead would let the verdict's colour through unbound — strictly less safe
+  # than the status quo, and /goal auto-merges on green. So the fix here is to
+  # make the failure DIAGNOSABLE, not to relax it.
+  if [ -n "$verdict_sha" ] && ! _uberdev_goal_is_object_name "$verdict_sha"; then
+    printf 'goal-state: verdict %s carries a malformed .sha anchor (%s) — not a lowercase 40-hex object name; it can never equal a live HEAD, so this verdict will read stale until it is re-reviewed\n' \
+      "$audit_path" "$verdict_sha" >&2
+  fi
   if [ -n "$verdict_pr" ] && [ -n "$verdict_sha" ] \
      && _uberdev_goal_validate_int "$verdict_pr"; then
     local head_oid head_rc
@@ -946,12 +1054,119 @@ uberdev_goal_locate_review_pr_audit() {
   uberdev_goal_locate_review_pr_audit_by_pr "$pr"
 }
 
+# ---------------------------------------------------------------------------
+# Verdict-discovery classification channel (#348 findings 1-3).
+#
+# THE DEFECT. uberdev_goal_locate_review_pr_audit_by_pr funnelled SIX distinct
+# outcomes — selector library not sourced, proven absence, indeterminate,
+# recapture/tamper failure, projection failure, and cleanup failure — into ONE
+# observable: empty stdout with rc 0. /goal then classifies every one of them
+# as `missing` and re-dispatches /review-pr. That is fail-safe by accident of
+# destination, not by construction, and it costs three things:
+#   1. a PERSISTENT indeterminate cause never converges (the recovery action is
+#      "re-review", which cannot fix a duplicate-timestamp tie), and the run
+#      ends up red_held under the misleading label `dispatch_cap_exhausted`;
+#   2. TAMPER — the strongest security signal this machinery produces, meaning
+#      the private carrier was replaced/mutated/symlinked/re-owned — reads
+#      byte-for-byte identically to "no review has run yet";
+#   3. a PROVEN verdict is thrown away because a temp file could not be
+#      deleted, with the cleanup's stderr sent to /dev/null.
+#
+# WHY A SIDECAR AND NOT AN rc. Two hard constraints rule out the obvious fixes.
+# (a) The rc is already pinned: `absent`/`indeterminate` must stay rc 0 with no
+#     recapture (locked by tests/goal.test.sh G49), and rc 1 is reserved for a
+#     non-numeric PR (BT50). Overloading rc would break the selector contract
+#     /goal shares with /merge.
+# (b) Every caller invokes the locator inside a COMMAND SUBSTITUTION
+#     (`audit_json="$(uberdev_goal_locate_review_pr_audit_by_pr "$pr")"`), so a
+#     global variable set in here dies with the subshell — the same fence-scoped
+#     state class this project has been bitten by repeatedly.
+# The classification therefore travels on disk, keyed by GOAL_ID + PR, exactly
+# like the gh-failure counter and the held-audit registry.
+#
+# _uberdev_goal_verdict_state_path PR — path resolver. rc 1 + empty stdout when
+# there is no valid UBERDEV_GOAL_ID in scope (standalone/test callers), so the
+# recorder degrades to a no-op instead of writing outside a goal run.
+_uberdev_goal_verdict_state_path() {
+  local pr="$1"
+  _uberdev_goal_validate_int "$pr" || return 1
+  local goal_id="${UBERDEV_GOAL_ID:-}"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  printf '%s' "$tmpdir/goal-$goal_id-verdict-state-$pr.txt"
+}
+
+# _uberdev_goal_record_verdict_state PR STATE — best-effort single-line write.
+# Never disturbs the caller: a write failure leaves the reader at `unknown`,
+# which the consumer treats exactly as it treated every outcome before #348.
+_uberdev_goal_record_verdict_state() {
+  local pr="$1" state="$2"
+  local f; f="$(_uberdev_goal_verdict_state_path "$pr")" || return 0
+  printf '%s\n' "$state" > "$f" 2>/dev/null || return 0
+  return 0
+}
+
+# uberdev_goal_last_verdict_state PR — read back the classification recorded by
+# the most recent locator call for PR. Prints one of:
+#   found | absent | indeterminate | tamper | projection_failed |
+#   cleanup_failed | selector_unavailable | unknown
+# `unknown` covers "never recorded" and "recorded value outside the enum" — a
+# forged sidecar must degrade to the pre-#348 behaviour, never widen into a new
+# control-flow arm.
+uberdev_goal_last_verdict_state() {
+  local pr="$1"
+  local f; f="$(_uberdev_goal_verdict_state_path "$pr")" || { printf 'unknown\n'; return 0; }
+  [ -r "$f" ] || { printf 'unknown\n'; return 0; }
+  local v; v="$(head -n1 "$f" 2>/dev/null)"
+  case "$v" in
+    found|absent|indeterminate|tamper|projection_failed|cleanup_failed|selector_unavailable)
+      printf '%s\n' "$v" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# uberdev_goal_record_verdict_anomaly GOAL_ID PR KIND   (#348 finding 1)
+# Append-only tally of the non-recoverable verdict-discovery outcomes
+# (`indeterminate`, `tamper`) observed for a PR. Same TSV idiom as the held-audit
+# registry: append here, count with the reader below, so the tally survives the
+# fresh-shell fence boundary that kills every in-memory counter in this pipeline.
+uberdev_goal_record_verdict_anomaly() {
+  local goal_id="$1" pr="$2" kind="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  _uberdev_goal_validate_int "$pr" || return 1
+  case "$kind" in
+    indeterminate|tamper) : ;;
+    *) return 2 ;;   # closed set — an unknown kind must not create a new lane
+  esac
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local row; printf -v row '%s\t%s' "$pr" "$kind"
+  _uberdev_goal_append "$tmpdir/goal-$goal_id-verdict-anomalies.tsv" "$row"
+}
+
+# uberdev_goal_count_verdict_anomalies GOAL_ID PR KIND
+# Rows recorded for (PR, KIND). Prints 0 when the TSV does not exist yet, so the
+# caller's `-ge cap` comparison is always arithmetic-safe.
+uberdev_goal_count_verdict_anomalies() {
+  local goal_id="$1" pr="$2" kind="$3"
+  _uberdev_goal_validate_id "$goal_id" || return 1
+  _uberdev_goal_validate_int "$pr" || return 1
+  local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
+  local f="$tmpdir/goal-$goal_id-verdict-anomalies.tsv"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  awk -F'\t' -v p="$pr" -v k="$kind" '$1==p && $2==k {n++} END {print n+0}' "$f"
+}
+
 # uberdev_goal_locate_review_pr_audit_by_pr PR_NUM
 # PR-keyed companion to uberdev_goal_locate_review_pr_audit. Used by the
 # held-PR re-review poll loop (Phase 2 step 2e) which already has the PR
 # number in hand and bypasses issue→PR resolution. Returns a stable minified
 # controller-state JSON value (not a mutable pathname) or empty when the
 # canonical selector reports absent/indeterminate.
+#
+# rc contract (UNCHANGED, and load-bearing): rc 1 = the PR argument is not an
+# integer; rc 0 for every discovery outcome. What is NEW is that each outcome
+# also records its name via _uberdev_goal_record_verdict_state, and that a
+# verdict already PROVEN before an unrelated cleanup failure is still emitted.
 uberdev_goal_locate_review_pr_audit_by_pr() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
@@ -960,6 +1175,7 @@ uberdev_goal_locate_review_pr_audit_by_pr() {
      || ! command -v recapture_review_verdict_snapshot >/dev/null 2>&1 \
      || ! command -v cleanup_review_verdict_snapshot >/dev/null 2>&1; then
     printf 'goal-state: canonical verdict selector unavailable; treating audit as missing\n' >&2
+    _uberdev_goal_record_verdict_state "$pr" selector_unavailable
     return 0
   fi
 
@@ -972,20 +1188,38 @@ uberdev_goal_locate_review_pr_audit_by_pr() {
   discovery_state="$(review_verdict_discovery_state "$discovery_rc")"
   case "$discovery_state" in
     absent|indeterminate)
-      # Reuse the existing missing/re-review state-machine path.
+      # Reuse the existing missing/re-review state-machine path — but record
+      # WHICH of the two it was, because they demand different recoveries:
+      # `absent` converges once a review runs, `indeterminate` never will.
+      _uberdev_goal_record_verdict_state "$pr" "$discovery_state"
       return 0
       ;;
     found)
       ;;
     *)
+      _uberdev_goal_record_verdict_state "$pr" indeterminate
       return 0
       ;;
   esac
 
-  local recaptured="" stable=""
-  if recaptured="$(recapture_review_verdict_snapshot "$receipt")" \
-     && [ "$recaptured" = "$receipt" ]; then
-    stable="$(jq -cer '
+  # #348 finding 2 — the recapture is the tamper detector. Its failure is NOT
+  # "no review has run"; it means the private carrier this process just
+  # selected was replaced, mutated, symlinked or re-owned underneath us. Split
+  # that from the projection failure below and say so on stderr, loudly.
+  local recaptured="" stable="" verdict_state="" jq_err
+  jq_err="$(mktemp 2>/dev/null)" || jq_err=""
+  if ! recaptured="$(recapture_review_verdict_snapshot "$receipt" 2>>"${jq_err:-/dev/null}")" \
+     || [ "$recaptured" != "$receipt" ]; then
+    printf 'goal-state: TAMPER — the verdict carrier for PR %s did not survive digest/identity recapture; refusing to trust its colour\n' "$pr" >&2
+    _uberdev_goal_drain_stderr recapture "$jq_err"
+    verdict_state=tamper
+  else
+    _uberdev_goal_drain_stderr recapture "$jq_err"
+    # #348 finding 2 (second half) — the projection's stderr was discarded and
+    # its failure absorbed by `|| stable=""`. Keep it in a temp file and surface
+    # it: a projection failure on a RECAPTURED carrier means the verdict shape
+    # itself is wrong, which is a producer bug worth seeing.
+    if ! stable="$(jq -cer '
       {
         schema_version: 1,
         kind: "uberdev-goal-review-verdict",
@@ -998,14 +1232,38 @@ uberdev_goal_locate_review_pr_audit_by_pr() {
         phase2_5_critical_count: .phase2_5_critical_count,
         phase2_5_halted_due_to_overflow: .phase2_5_halted_due_to_overflow
       }
-    ' <<<"$recaptured" 2>/dev/null)" || stable=""
+    ' <<<"$recaptured" 2>>"${jq_err:-/dev/null}")"; then
+      stable=""
+      printf 'goal-state: verdict projection failed for PR %s — the recaptured carrier is not the expected verdict shape\n' "$pr" >&2
+      _uberdev_goal_drain_stderr projection "$jq_err"
+      verdict_state=projection_failed
+    else
+      _uberdev_goal_drain_stderr projection "$jq_err"
+      verdict_state=found
+    fi
   fi
 
-  # The canonical selector's stable carrier is private and caller-owned.
-  # Failure to prove/clean its exact digest+identity reuses missing/re-review.
-  if ! cleanup_review_verdict_snapshot "$receipt" >/dev/null 2>&1; then
-    return 0
+  # The canonical selector's stable carrier is private and caller-owned, so it
+  # must always be cleaned. #348 finding 3 — but a cleanup failure is NOT a
+  # discovery failure: the verdict above is already PROVEN (recaptured by exact
+  # digest+identity, then projected). Discarding it because `rmdir` raced threw
+  # away a valid GREEN with no diagnostic on any stream. Emit the proven verdict
+  # anyway, record `cleanup_failed` so the consumer can still see that a carrier
+  # leaked, and route the cleanup's stderr to the operator (mirroring
+  # merge-pipeline/SKILL.md, which surfaces the same cleanup's stderr).
+  if ! cleanup_review_verdict_snapshot "$receipt" >/dev/null 2>>"${jq_err:-/dev/null}"; then
+    printf 'goal-state: could not clean the verdict carrier for PR %s — a private copy of the selected verdict may survive in TMPDIR\n' "$pr" >&2
+    # Only DOWNGRADE a clean discovery. `tamper` and `projection_failed` are
+    # strictly more severe than a leaked temp file and must not be overwritten
+    # by it — the consumer branches on the worst thing that happened, not the
+    # last thing.
+    if [ "$verdict_state" = "found" ]; then
+      verdict_state=cleanup_failed
+    fi
   fi
+  _uberdev_goal_drain_stderr cleanup "$jq_err"
+  if [ -n "$jq_err" ]; then rm -f "$jq_err"; fi
+  _uberdev_goal_record_verdict_state "$pr" "$verdict_state"
   [ -n "$stable" ] || return 0
   printf '%s\n' "$stable"
 }
@@ -1245,10 +1503,7 @@ uberdev_goal_find_pr_for_issue() {
   local out rc
   out="$(gh pr list --state open --limit 200 \
     --json number,closingIssuesReferences,headRefName \
-    --jq ". as \$prs
-          | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${n})) | .number] | max) as \$byclose
-          | ([\$prs[] | select(.headRefName | test(\"^feat/${n}-\")) | .number] | max) as \$byhead
-          | (\$byclose // \$byhead // empty)" \
+    --jq "$(_uberdev_goal_pr_for_issue_jq "$n")" \
     2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -1257,6 +1512,75 @@ uberdev_goal_find_pr_for_issue() {
     return 0
   fi
   _uberdev_goal_reset_gh_failure                                   # #290.3 — gh healthy
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Per-pass PR snapshot (#301 speedup finding 1).
+#
+# THE DEFECT. Phase 2a called uberdev_goal_find_pr_for_issue once PER ISSUE,
+# and each call ran its OWN `gh pr list --state open --limit 200`. The response
+# is issue-independent — the SAME 200-PR page, re-fetched N times every 60s
+# poll, for the whole life of the goal. On a 6-issue cycle that is 6 identical
+# round-trips a minute against the API budget the watch loop is most sensitive
+# to, and it also means the N answers within one pass can disagree (a PR that
+# opens mid-pass is visible to issue 5 and not to issue 1), so the pass is not
+# even internally consistent.
+#
+# THE FIX. Fetch the page ONCE per pass into a snapshot, then resolve every
+# issue against that snapshot in-process. One round-trip per pass, and every
+# issue in the pass sees the same GitHub state.
+# ---------------------------------------------------------------------------
+
+# _uberdev_goal_pr_for_issue_jq ISSUE_NUM — the SSOT ranking program shared by
+# the live finder and the snapshot finder, so the two can never disagree about
+# which PR belongs to an issue. `any/2` (not `.closingIssuesReferences[]?.number
+# == N`) is deliberate: a bare stream yields EMPTY for a PR whose Closes-link was
+# dropped, while any/2 returns a concrete false, keeping `select` boolean.
+_uberdev_goal_pr_for_issue_jq() {
+  local n="$1"
+  printf '%s' ". as \$prs
+          | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${n})) | .number] | max) as \$byclose
+          | ([\$prs[] | select(.headRefName | test(\"^feat/${n}-\")) | .number] | max) as \$byhead
+          | (\$byclose // \$byhead // empty)"
+}
+
+# uberdev_goal_pr_list_snapshot
+# One `gh pr list` for the whole poll pass. Prints the raw JSON array on stdout.
+# Same fail-open contract as uberdev_goal_find_pr_for_issue: a gh failure prints
+# NOTHING, ticks the consecutive-failure counter (so the #290.3 breaker can
+# fire), and still returns 0 — callers must treat empty as "snapshot
+# unavailable, keep waiting", never as "no PRs exist".
+uberdev_goal_pr_list_snapshot() {
+  local out rc
+  out="$(gh pr list --state open --limit 200 \
+    --json number,closingIssuesReferences,headRefName 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf 'goal-state: gh pr list snapshot failed (rc=%s); PR resolution unavailable this pass (will re-poll)\n' "$rc" >&2
+    _uberdev_goal_record_gh_failure
+    return 0
+  fi
+  _uberdev_goal_reset_gh_failure
+  printf '%s' "$out"
+}
+
+# uberdev_goal_find_pr_for_issue_from_json ISSUE_NUM SNAPSHOT_JSON
+# Snapshot-resolving twin of uberdev_goal_find_pr_for_issue: identical ranking,
+# ZERO network calls. Empty stdout + rc 0 when the snapshot is empty (caller
+# already knows the fetch failed and has ticked the counter) or when no PR in
+# the snapshot matches. rc 1 only for a non-integer issue argument, matching the
+# live finder's R3 gh-argument-injection gate.
+uberdev_goal_find_pr_for_issue_from_json() {
+  local n="$1" snapshot="${2:-}"
+  _uberdev_goal_validate_int "$n" || return 1
+  [ -n "$snapshot" ] || return 0
+  local out
+  out="$(jq -r "$(_uberdev_goal_pr_for_issue_jq "$n")" <<<"$snapshot" 2>/dev/null)" || return 0
+  # jq prints the literal `null` for a `max` over an empty array that escaped
+  # the `// empty` guard on a malformed snapshot; never let that reach a caller
+  # that only checks for emptiness before feeding the value to `gh`.
+  [ "$out" = "null" ] && return 0
   printf '%s' "$out"
 }
 
@@ -1438,7 +1762,24 @@ uberdev_goal_agent_busy_for_issue() {
           return 1 ;;
       esac
       ;;
-    *)
+    workflow)
+      # RFC 0015 — a Workflow solver is an agent inside the calling session's
+      # Workflow runtime. It has NO `claude agents` session, NO worktree named
+      # `solve-issue-<n>` in the shape this probe matches, and NO PID stash. The
+      # pre-existing `*)` catch-all sent it to `claude agents --json`, which
+      # answers "not busy" for a perfectly healthy fleet — so Phase 2a's
+      # no-PR-yet arm fell straight through to the SOLVE_TIMEOUT path and would
+      # mark a live solver `failed`.
+      #
+      # rc 1 (not busy) is still the honest answer, because this shell genuinely
+      # cannot observe the fleet — but it is now a DELIBERATE answer with a
+      # breadcrumb, not an accident of a wrong probe. The authoritative progress
+      # signal for a Workflow run is the structured return the script hands
+      # back, plus `gh pr list`; liveness polling is not part of that contract.
+      printf 'goal-state: backend=workflow has no pollable per-issue liveness (the fleet is owned by the Workflow runtime); reporting not-busy for issue %s — PR existence via gh is the authoritative progress signal\n' "$n" >&2
+      return 1
+      ;;
+    claude-bg|wezterm|*)
       if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
         any(.[]?;
             (((.cwd // "") | rtrimstr("/")) | endswith("solve-issue-" + $n))
@@ -1516,6 +1857,19 @@ uberdev_goal_review_pr_in_flight() {
         "__mismatch__"|*)
           return 1 ;;
       esac
+      ;;
+    workflow)
+      # RFC 0015 — same leaf-constraint reasoning as agent_busy_for_issue: a
+      # Workflow-dispatched /review-pr is not a `claude agents` session, so the
+      # fall-through probe below cannot see it and would answer "not in flight",
+      # inviting a duplicate reviewer on top of a live one. Report NOT-in-flight
+      # (rc 1) rather than deferring forever: the caller's per-PR review-attempt
+      # cap (_UBERDEV_GOAL_MAX_REVIEW_PR_ATTEMPTS) is what bounds re-dispatch on
+      # this backend, and a permanent rc 0 here would instead spin the PR in
+      # pushed-reviewing until the 4h stuck_loop. Breadcrumb so the choice is
+      # visible in a post-mortem.
+      printf 'goal-state: backend=workflow has no pollable review-pr in-flight signal; reporting not-in-flight for PR %s — the per-PR review-attempt cap bounds re-dispatch\n' "$pr" >&2
+      return 1
       ;;
   esac
   if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
@@ -2752,7 +3106,17 @@ uberdev_goal_read_run_state() {
         printf -v "$k" '%s' "$v"
         export "$k" ;;
       UBERDEV_RESOLVED_BACKEND)
-        case "$v" in claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
+        # RFC 0015 added `workflow` to lib/dispatch.sh's
+        # _UBERDEV_DISPATCH_BACKEND_ENUM but NOT to this allowlist, which is the
+        # other half of the same change. The consequence was silent and nasty:
+        # an unlisted value is DROPPED here (no else arm), so a fresh-shell
+        # phase fence rehydrated an EMPTY UBERDEV_RESOLVED_BACKEND. Every
+        # backend-dispatch `case` in this file then fell into its default arm —
+        # the reaper's PID-based lane, and `claude agents --json` for liveness —
+        # so a Workflow run was probed and reaped as if it were a detached
+        # `background` session. Keep this list byte-aligned with the dispatch
+        # enum minus `auto` (auto is a REQUEST, never a resolution).
+        case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
     esac
   done < "$sc"
@@ -2850,6 +3214,19 @@ _uberdev_goal_reap_zombies() {
     claude-bg|wezterm)
       uberdev_goal_audit goal_reaper_skipped \
         "{\"goal_id\":\"$goal_id\",\"backend\":\"${UBERDEV_RESOLVED_BACKEND}\",\"reason\":\"no_pid_visibility\"}" || true
+      return 0
+      ;;
+    workflow)
+      # RFC 0015 — a Workflow fleet is not a process tree this shell owns. Its
+      # agents are children of the calling session's Workflow runtime, there is
+      # no per-issue PID stash to read, and cancellation belongs to that runtime
+      # (TaskStop / skip), not to a kill(2) from here. Falling through to the
+      # PID lane below would read whatever stale solve-bg-status-<issue>.json a
+      # PREVIOUS detached run left in TMPDIR and TERM/KILL an unrelated live
+      # process. Skip explicitly, with its own reason so the audit trail does
+      # not conflate it with the claude-bg no-PID case.
+      uberdev_goal_audit goal_reaper_skipped \
+        "{\"goal_id\":\"$goal_id\",\"backend\":\"workflow\",\"reason\":\"runtime_owned_lifecycle\"}" || true
       return 0
       ;;
     # background + codex: fall through to the PID-based reap below. Both

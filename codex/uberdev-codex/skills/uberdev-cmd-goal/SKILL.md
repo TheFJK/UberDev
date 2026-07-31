@@ -18,7 +18,7 @@ This skill was ported from a Claude Code slash command (`/goal`). On Codex:
   follow the skill's `## No-Workflow fallback` section instead.
 - **`MultiEdit`** → apply edits with your native file-edit tool.
 
-Original argument hint: `<issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--only-mine] [--dry-run] [--backend=<name>]`
+Original argument hint: `<issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--only-mine] [--dry-run] [--backend=<name>]`
 
 ---
 
@@ -28,7 +28,7 @@ Original argument hint: `<issue> [<issue> ...] [--max-cycles=N] [--max-parallel=
 
 Autonomous convergence orchestrator that drives one or more GitHub issues to merged-and-closed by dispatching `/uberdev:orchestrator --turbo` (solve + push PR) → auto `/review-pr` (trust-signal) → `/merge` ONLY when the trust trail is GREEN, recursing on `BLOCKER` / `CRITICAL` `review-pr-finding` issues filed by that review pass. `YELLOW` (CRITICAL findings) and `RED` (BLOCKER findings or `halted_due_to_overflow`) PRs are HELD — never merged automatically — and are re-reviewed only when every issue listed in their `Blocks:` PR-body line closes. The loop terminates on convergence (queue empty AND all open `/goal`-owned PRs are terminal) or on one of seven circuit breakers. The four loop-logic breakers are `max_cycles` (hard cycle ceiling, default 5), `nonconvergence` (queue-fingerprint repeat across cycles), `stuck_loop` (4-hour wall-clock cap), and `merge_failed` (any `/merge` invocation exits non-zero); three further surfaced-failure guards — `gh_api_failed`, `unknown_merge_result`, and `queue_empty_not_converged` — round out the `GOAL_CIRCUIT_BREAKER_REASONS` enum owned by the goal-pipeline skill. Per RFC 0005 §2.3 the loop applies three scoped relaxations to the global UberDev rules — see the call-out below.
 
-**Usage:** `/uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--only-mine] [--dry-run] [--backend=<name>]`
+**Usage:** `/uberdev:goal <issue> [<issue> ...] [--max-cycles=N] [--max-parallel=N] [--barrier-timeout=N] [--review-grace-secs=N] [--only-mine] [--dry-run] [--backend=<name>]`
 
 - `--max-cycles=N` — hard ceiling on cycle count (default `5`, range `1..20`; reads `goal.max_cycles` config / `UBERDEV_GOAL_MAX_CYCLES` env).
 - `--max-parallel=N` — cap the per-cycle `/uberdev:orchestrator` dispatch fan-out at N (default 3, range 1–10).
@@ -38,6 +38,14 @@ Autonomous convergence orchestrator that drives one or more GitHub issues to mer
 - `--barrier-timeout=N` — wall-clock cap (seconds) on the wait-for-all merge barrier in Phase 2 step 2c
   (default 14400 = 4h, range 60..86400). Timeout escalates to the existing `stuck_loop` circuit-breaker
   reason; no new breaker enum is added. Resolved via the same precedence as `--max-cycles`.
+- `--review-grace-secs=N` — how long (seconds) Phase 2b waits for the SOLVER'S OWN `/review-pr`
+  verdict to land before `/goal` dispatches a review of its own (default 3600 = 60m, range
+  60..86400; same precedence as `--max-cycles`: CLI flag > `UBERDEV_GOAL_REVIEW_GRACE_SECS` env >
+  `goal.review_grace_secs` config key > default). The leaf solver runs its own review ~20m after
+  pushing and goes idle in that window, so "agent idle ⇒ review done" is false — the grace is what
+  stops `/goal` firing redundant reviews and prematurely red-holding a PR whose GREEN verdict simply
+  has not landed yet. Lower it when your solvers do not self-review; raise it on a slow CI.
+  (Parsed since issue #220; documented here from #301 — it was reachable but invisible.)
 - `--only-mine` — only enqueue `review-pr-finding` issues authored by `$GH_USER`. **Requires a single `gh` identity (issue #291):** it filters on `.author.login`, so it assumes the detached bg `/review-pr` agent that files the findings runs under the same `gh` identity as the watcher. On a CI-token / multi-identity setup the bg-filed findings carry a different author and would be silently dropped (false convergence with open blockers) — OMIT `--only-mine` there. Opt-in, OFF by default.
 - `--dry-run` — print planned cycle 1 dispatch + watch-loop preview, exit 0. No `/uberdev:orchestrator`, no `/merge`, no `/review-pr` is invoked.
 - `--watch-passes=N` — run a bounded number of Phase-2 poll passes per fence invocation, then exit for re-invocation (0=unbounded default).

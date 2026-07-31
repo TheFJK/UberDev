@@ -662,10 +662,17 @@ uberdev_goal_read_run_state || { echo "goal: cannot rehydrate run-state in Phase
 uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-derive backend/env (idempotent, D8); not persisted
 # watch_start is set in Phase 0 (step 7) — goal-level wall-clock anchor.
 # The 4h stuck-loop check below measures total goal wall-clock, not per-cycle.
-# Q1 — bash supports ONE EXIT trap per shell; register the combined cleanup
-# for $gh_err + $findings_err here (Phase 3 mktemps $findings_err later).
-# Initialize $findings_err empty so `rm -f ""` is harmless if Phase 3 isn't
-# reached, and so a later `trap '…' EXIT` doesn't overwrite this one.
+# #301 — this EXIT trap covers THIS FENCE ONLY, and the reasoning that used to
+# be written here was wrong in a way worth recording. It said: "bash supports ONE
+# EXIT trap per shell, so register the combined cleanup for $gh_err AND
+# $findings_err here (Phase 3 mktemps $findings_err later)". The one-handler rule
+# is real, but it is a per-SHELL rule and every phase fence is a SEPARATE shell
+# (project memory project_uberdev_pipeline_directive_emitter). A trap registered
+# here therefore cannot possibly remove a file Phase 3 has not created yet — it
+# dies at this fence's boundary — so Phase 3 leaked one tempfile per cycle while
+# this line looked like it was cleaning up. `$findings_err` is initialised empty
+# below so this fence's `rm -f ""` is a harmless no-op; Phase 3 now registers its
+# OWN trap for the file it actually creates.
 gh_err="$(mktemp)"
 findings_err=""
 trap 'rm -f "$gh_err" "$findings_err"' EXIT
@@ -705,6 +712,10 @@ trap '_uberdev_goal_handle_harness_term' TERM
 _tick_start="$(date +%s)"
 _tick_passes=0
 _watch_bounded=0
+# #301 — consecutive sleep-skipping passes in THIS fence (see the fast-path gate
+# at the bottom of the loop). Per-fence like _tick_passes, not persisted: the
+# burst bound only needs to hold within one continuous run of passes.
+_fast_passes=0
 if [ "${WATCH_PASSES:-0}" -gt 0 ] || [ "${WATCH_BUDGET:-0}" -gt 0 ]; then
   _watch_bounded=1
 fi
@@ -720,6 +731,25 @@ while true; do
   fi
 
   any_active=0
+  # #301 speedup finding 2 — did THIS pass apply a state transition? The poll
+  # order is 2a…2f, so a PR that turns green in 2b is only picked up by 2c on
+  # the NEXT pass, and a PR that lands in 2d only unblocks held PRs on the next
+  # pass. With an unconditional 60s sleep between passes that is up to ~120s of
+  # pure poll latency per merged PR, spent doing nothing. When a pass moved the
+  # state machine, the next pass has real work waiting for it — go straight
+  # there. (The counter below stops this from becoming a hot loop.)
+  made_transition=0
+  # #301 speedup finding 1 — ONE `gh pr list` for the whole pass instead of one
+  # per active issue. The response is issue-independent, so the per-issue calls
+  # were N identical round-trips every 60s against exactly the API budget this
+  # loop is most sensitive to (Phase 0 step 10 pre-flights the rate limit for
+  # this reason). Fetching once also makes the pass internally CONSISTENT: every
+  # issue is resolved against the same snapshot, instead of issue 1 seeing a
+  # GitHub state that issue 6 no longer sees. An empty snapshot means the fetch
+  # failed — uberdev_goal_pr_list_snapshot has already ticked the consecutive-
+  # failure counter, so the `_gh_failure_count` guard below defers the no-PR
+  # classification exactly as it did for a per-issue failure.
+  pr_snapshot="$(uberdev_goal_pr_list_snapshot)"
 
   # 2a. Detect each solver's pushed PR via GitHub (issue #180 — CLI-version-
   # independent). The pre-2.1.150 stdout-marker probe (`backgrounded ·` +
@@ -744,7 +774,9 @@ while true; do
   for issue in "${active_issues[@]}"; do
     istate="$(uberdev_goal_get_issue_state "$GOAL_ID" "$issue" 2>/dev/null)"
     case "$istate" in pr-pushed|resolved|resolved-by-no-action|failed) continue ;; esac
-    pr_num="$(uberdev_goal_find_pr_for_issue "$issue")"
+    # #301 — resolve against the per-pass snapshot taken above; identical
+    # ranking (both routes share _uberdev_goal_pr_for_issue_jq), zero network.
+    pr_num="$(uberdev_goal_find_pr_for_issue_from_json "$issue" "$pr_snapshot")"
     _gh_failure_count="$(uberdev_goal_gh_failure_count "$GOAL_ID" 2>/dev/null || printf '0')"
     _uberdev_goal_validate_int "$_gh_failure_count" || _gh_failure_count=0
     if [ -z "$pr_num" ] && [ "$_gh_failure_count" -gt 0 ]; then
@@ -768,6 +800,7 @@ while true; do
       fi
       uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving pr-pushed
       uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" dispatched pushed-reviewing
+      made_transition=1   # #301 — 2b can read this PR's verdict on the next pass
       if uberdev_goal_pr_is_merged "$pr_num"; then
         # Resume / human-merged: the PR already landed. Pre-stage it through the
         # valid path so step 2d finalizes it to `merged` next pass — no wasteful
@@ -918,9 +951,13 @@ while true; do
     case "$signal" in
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
+        made_transition=1   # #301 — 2c sits ABOVE 2b in pass order; without this
+                            # the freshly-green PR waits a full 60s sleep before
+                            # the merge barrier even looks at it.
         ;;
       yellow)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing yellow-held
+        made_transition=1
         # Baseline audit for step 2e's poll loop — a NEWER audit means a
         # re-review fired, so the poll loop applies the next transition (#159).
         uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
@@ -928,6 +965,7 @@ while true; do
       red)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
         uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
+        made_transition=1
         # B6/M14 — blocker-overflow handler (D13). Explicit branch on the jq rc
         # so a corrupted audit defaults to "no overflow" rather than silently
         # skipping; sets overflow_detected (gates the Phase 3 first-10
@@ -953,6 +991,57 @@ while true; do
         fi
         ;;
       stale|missing)
+        # #348 finding 1+2 — SPLIT the non-recoverable discovery outcomes out of
+        # this arm BEFORE the benign cascade below. `stale|missing` is the
+        # "no verdict has landed YET" lane, and its whole recovery strategy is
+        # "wait, then re-review". Two outcomes reach it that re-reviewing can
+        # never fix, and until now were indistinguishable from a fresh PR:
+        #
+        #   indeterminate — the canonical selector found MULTIPLE candidate
+        #     verdicts it cannot rank (e.g. a duplicate-timestamp tie), or an
+        #     unreadable root made the scan non-exhaustive. Re-reviewing adds
+        #     ANOTHER candidate; the tie gets worse, never better.
+        #   tamper        — the private carrier this run selected did not survive
+        #     digest/identity recapture: it was replaced, mutated, symlinked or
+        #     re-owned. That is the strongest security signal this machinery
+        #     produces, and it read exactly like "no review has run yet".
+        #
+        # Both are bounded HERE by their own per-PR counter, and both land the PR
+        # in red-held with a reason that names the real cause. Pre-#348 the PR
+        # instead burned the review-pr dispatch cap and was red-held as
+        # `dispatch_cap_exhausted` — a label that sends the operator to look at
+        # /review-pr dispatch, which is not where the problem is.
+        _verdict_state="$(uberdev_goal_last_verdict_state "$pr_num")"
+        case "$_verdict_state" in
+          indeterminate|tamper)
+            uberdev_goal_record_verdict_anomaly "$GOAL_ID" "$pr_num" "$_verdict_state" \
+              || printf 'goal-pipeline: WARN could not record %s verdict anomaly for PR %s — the bound may not hold\n' "$_verdict_state" "$pr_num" >&2
+            _anomaly_count="$(uberdev_goal_count_verdict_anomalies "$GOAL_ID" "$pr_num" "$_verdict_state")"
+            _uberdev_goal_validate_int "$_anomaly_count" || _anomaly_count=0
+            if [ "$_anomaly_count" -ge "${_UBERDEV_GOAL_MAX_VERDICT_ANOMALIES:-3}" ]; then
+              if [ "$_verdict_state" = "tamper" ]; then
+                _held_reason="verdict_tamper_detected"
+              else
+                _held_reason="verdict_indeterminate"
+              fi
+              uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing red-held
+              uberdev_goal_record_held_audit "$GOAL_ID" "$pr_num" "$audit_json"
+              uberdev_goal_audit goal_review_pr_deferred \
+                "{\"goal_id\":\"$GOAL_ID\",\"pr\":$pr_num,\"reason\":\"$_held_reason\",\"action\":\"red_held\",\"observations\":$_anomaly_count,\"cap\":${_UBERDEV_GOAL_MAX_VERDICT_ANOMALIES:-3}}" || true
+              printf 'goal-pipeline: PR %s held (%s) — the verdict artifact is unusable after %s observations; re-reviewing cannot resolve this, inspect .uberdev/runs/ by hand\n' \
+                "$pr_num" "$_held_reason" "$_anomaly_count" >&2
+              # Pseudo-terminal for convergence; do NOT hold any_active for it.
+              continue
+            fi
+            # Under the bound: keep polling (a genuinely transient tie can clear
+            # when the losing candidate is cleaned up) but never fall into the
+            # benign cascade, which would spend the review-pr dispatch cap.
+            any_active=1
+            printf 'goal-pipeline: PR %s verdict discovery reported %s (%s/%s) — re-polling; NOT dispatching a re-review (it cannot fix this cause)\n' \
+              "$pr_num" "$_verdict_state" "$_anomaly_count" "${_UBERDEV_GOAL_MAX_VERDICT_ANOMALIES:-3}" >&2
+            continue
+            ;;
+        esac
         # No verdict yet. Cascade — marker → grace → in-flight → stuck → dispatch
         # (issue #220, Components 3.2-3.4). Order is load-bearing: each probe
         # short-circuits before the next, so the stuck-on-dialog circuit breaker
@@ -1206,6 +1295,8 @@ while true; do
     pr_state="$(uberdev_goal_pr_state_gh "$pr")"
     if [ "$pr_state" = "MERGED" ]; then
       uberdev_goal_pr_state_transition "$GOAL_ID" "$pr" merging merged
+      made_transition=1   # #301 — the merge just cleared the barrier for the
+                          # next-lowest green PR; do not idle 60s before 2c sees it.
       # B4 — uberdev_goal_list_prs_in_state takes ONE state ($2); call twice
       # and concatenate so BOTH held sets get the unblock check.
       for held_pr in $(uberdev_goal_list_prs_in_state "$GOAL_ID" yellow-held; \
@@ -1309,6 +1400,7 @@ while true; do
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$held_pr" "$held_current" green
         uberdev_goal_record_held_audit "$GOAL_ID" "$held_pr" "$new_audit"
+        made_transition=1
         # #292.2 — reset the per-PR merge-attempt counter on this held→green
         # recovery. The cap (uberdev_goal_should_automerge, default 3) is
         # otherwise per-PR-LIFETIME and never reset, so a PR blocked for ≥2
@@ -1429,6 +1521,26 @@ while true; do
     fi
   fi
 
+  # #301 speedup finding 2 — skip the poll sleep when THIS pass moved the state
+  # machine. The steps run 2a…2f in a fixed order, so a transition applied in a
+  # later step is not consumed until the next pass; sleeping 60s first adds up
+  # to ~120s of dead latency per merged PR for no benefit, because the work is
+  # already sitting there waiting.
+  #
+  # The consecutive bound is the load-bearing half. An unbounded "transition =>
+  # no sleep" rule is a hot loop the moment two PRs keep handing each other
+  # work, and every pass costs a `gh pr list` snapshot plus a `gh pr view` per
+  # merging PR — i.e. exactly the rate-limit exhaustion Phase 0 step 10 warns
+  # about, converted from a warning into a self-inflicted 403 storm. After
+  # _UBERDEV_GOAL_MAX_FAST_PASSES back-to-back fast passes we sleep regardless
+  # and reset, which keeps the burst bounded while still collapsing the common
+  # 2-3 pass hand-off chains to a single poll interval.
+  if [ "${made_transition:-0}" = "1" ] \
+     && [ "${_fast_passes:-0}" -lt "${_UBERDEV_GOAL_MAX_FAST_PASSES:-5}" ]; then
+    _fast_passes=$(( ${_fast_passes:-0} + 1 ))
+    continue
+  fi
+  _fast_passes=0
   sleep "$_UBERDEV_GOAL_POLL_SECS"
 done
 ```
@@ -1458,10 +1570,16 @@ goal_start_iso="$(date -u -r "$watch_start" +%FT%TZ 2>/dev/null \
 
 # In-process gh query — mirror discover.sh:152-183 mktemp/EXIT-trap stderr
 # isolation pattern (no shell-piped --template, never an external jq pipe).
-# The EXIT trap for $findings_err is registered up in Phase 2 alongside the
-# $gh_err cleanup (bash only honors ONE EXIT trap per shell; a second trap
-# here would silently overwrite the first and leak $gh_err).
+#
+# #301 — register the EXIT trap for $findings_err HERE, in the fence that
+# creates it. The old comment claimed Phase 2 already covered this file and that
+# a second trap "would overwrite the first and leak $gh_err"; both halves were
+# wrong, because this is a different SHELL from Phase 2, not a second trap in
+# the same one. Nothing of Phase 2's survives here to overwrite, and nothing of
+# Phase 2's was ever going to remove this file — so every cycle leaked one
+# tempfile until the OS cleared TMPDIR.
 findings_err="$(mktemp)"
+trap 'rm -f "$findings_err"' EXIT
 
 # Build the optional --only-mine filter via env-injected GH_USER (gh resolves
 # .author.login via env passthrough; --jq receives `env.GH_USER` literal).

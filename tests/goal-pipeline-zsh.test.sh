@@ -218,8 +218,8 @@ DRV_POS="$WORK/drv_pos.zsh"
 POS_OUT="$("$ZSH_BIN" -f "$DRV_POS" 2>&1)"
 POS_RC=$?
 if [ "$POS_RC" -eq 0 ] \
-   && printf '%s' "$POS_OUT" | grep -q "PROCEEDED rc=0" \
-   && printf '%s' "$POS_OUT" | grep -q "bash=$WORK/bash5"; then
+   && grep -q "PROCEEDED rc=0" <<<"$POS_OUT" \
+   && grep -q "bash=$WORK/bash5" <<<"$POS_OUT"; then
   pass "P0a: under zsh with a bash>=4 present, the resolver PROCEEDS (rc 0) and publishes UBERDEV_GOAL_BASH (no spurious exit 2 — the #294 fix)"
 else
   fail "P0a: resolver did NOT proceed/publish under zsh (got rc=$POS_RC, out=[$POS_OUT]) — #294 regression?"
@@ -237,12 +237,12 @@ DRV_NEG="$WORK/drv_neg.zsh"
 } > "$DRV_NEG"
 NEG_OUT="$("$ZSH_BIN" -f "$DRV_NEG" 2>&1)"
 NEG_RC=$?
-if [ "$NEG_RC" -eq 2 ] && ! printf '%s' "$NEG_OUT" | grep -q 'DID-NOT-EXIT'; then
+if [ "$NEG_RC" -eq 2 ] && ! grep -q 'DID-NOT-EXIT' <<<"$NEG_OUT"; then
   pass "P0b: under zsh with NO bash>=4 reachable, the resolver hard-exits 2 (the genuine-dead-end case)"
 else
   fail "P0b: resolver should exit 2 when no bash>=4 exists (got rc=$NEG_RC, out=[$NEG_OUT])"
 fi
-if printf '%s' "$NEG_OUT" | grep -q 'brew install bash'; then
+if grep -q 'brew install bash' <<<"$NEG_OUT"; then
   pass "P0c: the no-bash>=4 dead-end prints the brew-install remediation directive"
 else
   fail "P0c: the exit-2 dead-end must print the 'brew install bash' directive (got: [$NEG_OUT])"
@@ -264,7 +264,7 @@ if [ -n "$HBASH" ]; then
   { echo 'set -u'; echo "source '$RESOLVER_FENCE'"; echo 'echo "ARMA-OK rc=$?"'; } > "$DRV_A"
   ARMA_OUT="$("$HBASH" "$DRV_A" 2>&1)"
   ARMA_RC=$?
-  if [ "$ARMA_RC" -eq 0 ] && printf '%s' "$ARMA_OUT" | grep -q 'ARMA-OK rc=0'; then
+  if [ "$ARMA_RC" -eq 0 ] && grep -q 'ARMA-OK rc=0' <<<"$ARMA_OUT"; then
     pass "P0d: when already running bash>=4, the resolver short-circuits arm (a) — no exit 2 (got: [$ARMA_OUT])"
   else
     fail "P0d: resolver arm (a) (already bash>=4) should be a clean no-op (rc=$ARMA_RC, out=[$ARMA_OUT])"
@@ -298,9 +298,9 @@ if extract_fence 'for tok in $ARGUMENTS' > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_
     AP_OUT="$("$HBASH" "$DRV_AP" 2>&1)"
     AP_RC=$?
     if [ "$AP_RC" -eq 0 ] \
-       && printf '%s' "$AP_OUT" | grep -q 'queue=\[101 202 303\]' \
-       && printf '%s' "$AP_OUT" | grep -q 'mc=\[7\]' \
-       && printf '%s' "$AP_OUT" | grep -q 'om=\[1\] dr=\[1\] be=\[claude-bg\]'; then
+       && grep -q 'queue=\[101 202 303\]' <<<"$AP_OUT" \
+       && grep -q 'mc=\[7\]' <<<"$AP_OUT" \
+       && grep -q 'om=\[1\] dr=\[1\] be=\[claude-bg\]' <<<"$AP_OUT"; then
       pass "P0e: arg-parse fence under the resolved bash collects positional issues (101/202/303) + flags (got: $AP_OUT)"
     else
       fail "P0e: arg-parse fence mis-parsed under the resolved bash (rc=$AP_RC, out=[$AP_OUT])"
@@ -380,7 +380,7 @@ printf '100\tmerged\t10\n200\tyellow-held\t20\n' > "$WORK/state/goal-$G_Q-pr-sta
 DRV_Q="$WORK/drv_term_queue.zsh"; write_term_driver "$DRV_Q" "$G_Q" queue
 Q_OUT="$("$ZSH_BIN" -f "$DRV_Q" 2>&1)"
 Q_RC=$?
-if printf '%s' "$Q_OUT" | grep -q 'FELL-THROUGH rc=0' \
+if grep -q 'FELL-THROUGH rc=0' <<<"$Q_OUT" \
    && ! grep -q 'goal_converged' "$(audit_for "$G_Q")" 2>/dev/null \
    && grep -q 'goal_cycle_completed' "$(audit_for "$G_Q")" 2>/dev/null; then
   pass "P3a: with all PRs terminal BUT a non-empty rollover queue, the gate does NOT converge — it loops back (goal_cycle_completed). #288 #1"
@@ -398,7 +398,7 @@ C_RC=$?
 # The fence `exit 0`s on convergence, so the driver's FELL-THROUGH line is NOT
 # printed and the zsh rc is 0.
 if [ "$C_RC" -eq 0 ] \
-   && ! printf '%s' "$C_OUT" | grep -q 'FELL-THROUGH' \
+   && ! grep -q 'FELL-THROUGH' <<<"$C_OUT" \
    && grep -q 'goal_converged' "$(audit_for "$G_C")" 2>/dev/null; then
   pass "P3b: queue empty + all PRs terminal (merged + held) -> goal_converged, exit 0"
 else
@@ -511,8 +511,8 @@ W_OUT="$("$ZSH_BIN" -f "$DRV_W" 2>"$WORK/watch.err")"
 W_RC=$?
 W_ERR="$(cat "$WORK/watch.err" 2>/dev/null)"
 if [ "$W_RC" -eq 0 ] \
-   && printf '%s' "$W_OUT" | grep -q 'pre=\[pushed-reviewing\]' \
-   && printf '%s' "$W_OUT" | grep -q 'post=\[green\]'; then
+   && grep -q 'pre=\[pushed-reviewing\]' <<<"$W_OUT" \
+   && grep -q 'post=\[green\]' <<<"$W_OUT"; then
   pass "W: the step-2b loop runs under zsh; the verdict locator finds the WORKTREE-MIRROR verdict and transitions pushed-reviewing -> green (no fatal). #270/#290.2"
 else
   fail "W: step-2b loop did NOT reach green under zsh (rc=$W_RC, out=[$W_OUT], err=[$W_ERR]) — verdict-locator glob regression?"
@@ -520,10 +520,87 @@ fi
 # The unmatched worktree-prefix globs must NOT have fataled the loop under zsh
 # (the `no matches found` NOMATCH failure mode the lib's `nonomatch`/`${~pat}`
 # guard prevents). Assert no such fatal leaked to stderr.
-if printf '%s' "$W_ERR" | grep -qi 'no matches found'; then
+if grep -qi 'no matches found' <<<"$W_ERR"; then
   fail "W.nomatch: a zsh 'no matches found' fatal leaked from the verdict-locator glob (the #270/#290.2 nonomatch guard regressed)"
 else
   pass "W.nomatch: no zsh 'no matches found' fatal from the verdict-locator glob"
+fi
+
+# ==========================================================================
+# W1b — step-2b splits INDETERMINATE out of the stale|missing lane (#348).
+#
+# `stale|missing` is the "no verdict has landed YET" lane and its entire
+# recovery is "wait, then re-review". An INDETERMINATE discovery (the canonical
+# selector found candidates it cannot rank) reached that lane too, so /goal
+# re-reviewed — which adds another candidate and makes the tie worse — until the
+# review-pr dispatch cap ran out, at which point the PR was red-held under the
+# reason `dispatch_cap_exhausted`. That label points the operator at /review-pr
+# dispatch, which is not where the problem is.
+#
+# Executed through the SAME sliced fence as W, under zsh, three times (the cap):
+# the first two passes must NOT dispatch a review, and the third must red-hold
+# with reason=verdict_indeterminate.
+# ==========================================================================
+echo
+echo "== W1b: step-2b bounds INDETERMINATE separately from stale|missing (#348) =="
+W1B_ROOT="$WORK/w1b-root"
+W1B_STATE="$W1B_ROOT/state"
+mkdir -p "$W1B_STATE" || { echo "FATAL: mkdir -p $W1B_STATE failed" >&2; exit 3; }
+W1B_GID="pipeanom001"
+DRV_W1B="$WORK/drv_anomaly.zsh"
+{
+  echo 'set -u'
+  echo "cd '$W1B_ROOT' || exit 9"
+  echo "export UBERDEV_TMPDIR='$W1B_STATE'"
+  echo "export GOAL_ID='$W1B_GID'"
+  echo "export UBERDEV_GOAL_ID='$W1B_GID'"
+  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
+  # Selector reports INDETERMINATE (rc 2). No verdict is ever produced.
+  echo 'discover_review_verdict_json() { return 2; }'
+  echo 'review_verdict_discovery_state() { printf "indeterminate\n"; }'
+  echo 'recapture_review_verdict_snapshot() { printf "MUST-NOT-BE-CALLED\n"; }'
+  echo 'cleanup_review_verdict_snapshot() { return 0; }'
+  echo 'gh() { return 0; }'
+  # Tripwire: reaching the benign cascade would call one of these.
+  echo '_uberdev_goal_dispatch_review_pr() { printf "REVIEW-DISPATCHED\n"; return 0; }'
+  echo '_uberdev_goal_locked_marker_for_pr_fresh() { printf "MARKER-PROBED\n"; return 1; }'
+  echo "uberdev_goal_state_init '$W1B_GID' >/dev/null 2>&1"
+  echo "uberdev_goal_pr_state_transition '$W1B_GID' 300 dispatched pushed-reviewing >/dev/null 2>&1"
+  echo 'now="$(date +%s)"'
+  echo 'any_active=0'
+  echo 'REVIEW_GRACE_SECS=3600'
+  echo 'overflow_detected=0'
+  echo 'overflow_count=0'
+  echo 'made_transition=0'
+  # Three passes = the default _UBERDEV_GOAL_MAX_VERDICT_ANOMALIES.
+  echo 'for _pass in 1 2 3; do'
+  echo "  source '$STEP2B_SLICE'"
+  echo '  echo "pass=$_pass state=[$(uberdev_goal_get_pr_state '"$W1B_GID"' 300)]"'
+  echo 'done'
+} > "$DRV_W1B"
+
+W1B_OUT="$("$ZSH_BIN" -f "$DRV_W1B" 2>"$WORK/anomaly.err")"
+W1B_RC=$?
+W1B_ERR="$(cat "$WORK/anomaly.err" 2>/dev/null)"
+W1B_AUDIT="$W1B_STATE/goal-$W1B_GID.jsonl"
+if [ "$W1B_RC" -eq 0 ] \
+   && grep -q 'pass=1 state=\[pushed-reviewing\]' <<<"$W1B_OUT" \
+   && grep -q 'pass=2 state=\[pushed-reviewing\]' <<<"$W1B_OUT" \
+   && grep -q 'pass=3 state=\[red-held\]' <<<"$W1B_OUT"; then
+  pass "W1b: an indeterminate verdict holds the PR for 2 passes, then red-holds on the 3rd (bounded, never unbounded) — #348"
+else
+  fail "W1b: indeterminate bound wrong (rc=$W1B_RC out=[$W1B_OUT] err=[$W1B_ERR]) — #348"
+fi
+if grep -q 'REVIEW-DISPATCHED' <<<"$W1B_OUT$W1B_ERR"; then
+  fail "W1b.no-rereview: step-2b dispatched a /review-pr for an INDETERMINATE verdict — re-reviewing cannot resolve a ranking tie (#348)"
+else
+  pass "W1b.no-rereview: no /review-pr dispatched for an indeterminate verdict (#348)"
+fi
+if grep -q 'verdict_indeterminate' "$W1B_AUDIT" 2>/dev/null \
+   && ! grep -q 'dispatch_cap_exhausted' "$W1B_AUDIT" 2>/dev/null; then
+  pass "W1b.reason: the held audit row names verdict_indeterminate, not the misleading dispatch_cap_exhausted (#348)"
+else
+  fail "W1b.reason: expected reason=verdict_indeterminate in the audit (got: [$(tr -d '\n' < "$W1B_AUDIT" 2>/dev/null)]) — #348"
 fi
 
 # ==========================================================================
@@ -656,7 +733,7 @@ w2_sentinel_state() {  # $1=tag -> PRESENT|ABSENT
 # completes, _tick_passes(1) >= WATCH_PASSES(1) -> _bound_hit -> exit 42.
 DRV_W2A="$WORK/drv_w2a.zsh"; write_w2_driver "$DRV_W2A" a 1 0 1
 W2A_OUT="$("$ZSH_BIN" -f "$DRV_W2A" 2>&1)"; W2A_RC=$?
-if [ "$W2A_RC" -eq 42 ] && printf '%s' "$W2A_OUT" | grep -q 'bounded-tick exit 42'; then
+if [ "$W2A_RC" -eq 42 ] && grep -q 'bounded-tick exit 42' <<<"$W2A_OUT"; then
   pass "W2a: bounded (WATCH_PASSES=1) + work in flight -> the watch fence EXITS 42 and prints the 'bounded-tick exit 42' breadcrumb (#299 finding 2)"
 else
   fail "W2a: expected exit 42 + 'bounded-tick exit 42' breadcrumb (got rc=$W2A_RC, out=[$W2A_OUT]) — exit-code-arm regression?"
@@ -673,7 +750,7 @@ fi
 # persists + exits 0 BEFORE the pass/budget gate is reached.
 DRV_W2B="$WORK/drv_w2b.zsh"; write_w2_driver "$DRV_W2B" b 1 0 0
 W2B_OUT="$("$ZSH_BIN" -f "$DRV_W2B" 2>&1)"; W2B_RC=$?
-if [ "$W2B_RC" -eq 0 ] && printf '%s' "$W2B_OUT" | grep -q 'bounded-tick exit 0'; then
+if [ "$W2B_RC" -eq 0 ] && grep -q 'bounded-tick exit 0' <<<"$W2B_OUT"; then
   pass "W2b: bounded + DRAINED (no active agents, no merging PR) -> the watch fence EXITS 0 and prints the 'bounded-tick exit 0' breadcrumb (#299 finding 2)"
 else
   fail "W2b: expected exit 0 + 'bounded-tick exit 0' breadcrumb (got rc=$W2B_RC, out=[$W2B_OUT]) — exit-code-arm regression?"
@@ -691,9 +768,9 @@ fi
 DRV_W2D="$WORK/drv_w2d.zsh"; write_w2_driver "$DRV_W2D" d 0 0 0
 W2D_OUT="$("$ZSH_BIN" -f "$DRV_W2D" 2>&1)"; W2D_RC=$?
 if [ "$W2D_RC" -eq 0 ] \
-   && printf '%s' "$W2D_OUT" | grep -q 'W2-FELL-THROUGH' \
-   && ! printf '%s' "$W2D_OUT" | grep -q 'bounded-tick exit' \
-   && ! printf '%s' "$W2D_OUT" | grep -q 'W2-REACHED-SLEEP'; then
+   && grep -q 'W2-FELL-THROUGH' <<<"$W2D_OUT" \
+   && ! grep -q 'bounded-tick exit' <<<"$W2D_OUT" \
+   && ! grep -q 'W2-REACHED-SLEEP' <<<"$W2D_OUT"; then
   pass "W2d: unbounded (WATCH_PASSES=0 WATCH_BUDGET=0) + drained -> step 2f BREAKS into inline Phase 3 (no mid-fence exit 0/42, no sleep) (#299 finding 2)"
 else
   fail "W2d: unbounded drain should break (FELL-THROUGH, no 'bounded-tick exit', no sleep); got rc=$W2D_RC, out=[$W2D_OUT]"
@@ -705,7 +782,7 @@ fi
 # the pass-count arm exercised by W2a.
 DRV_W2BU="$WORK/drv_w2bu.zsh"; write_w2_driver "$DRV_W2BU" bu 0 1 1
 W2BU_OUT="$("$ZSH_BIN" -f "$DRV_W2BU" 2>&1)"; W2BU_RC=$?
-if [ "$W2BU_RC" -eq 42 ] && printf '%s' "$W2BU_OUT" | grep -q 'bounded-tick exit 42'; then
+if [ "$W2BU_RC" -eq 42 ] && grep -q 'bounded-tick exit 42' <<<"$W2BU_OUT"; then
   pass "W2.budget: bounded by WATCH_BUDGET (wall-clock arm, WATCH_PASSES=0) + work in flight -> exit 42 (the budget gate fires, not just the pass-count gate)"
 else
   fail "W2.budget: expected exit 42 from the budget arm (got rc=$W2BU_RC, out=[$W2BU_OUT]) — budget-gate regression?"
@@ -781,7 +858,7 @@ write_w2f_driver() {  # $1=out $2=tag $3=passes $4=budget $5=any_active
 # flush fails -> EXIT 1 (NOT 42), 'run-state flush FAILED' breadcrumb, NO reaper.
 DRV_W2FT="$WORK/drv_w2f_tick.zsh"; write_w2f_driver "$DRV_W2FT" tick 1 0 1
 W2FT_OUT="$("$ZSH_BIN" -f "$DRV_W2FT" 2>&1)"; W2FT_RC=$?
-if [ "$W2FT_RC" -eq 1 ] && printf '%s' "$W2FT_OUT" | grep -q 'run-state flush FAILED'; then
+if [ "$W2FT_RC" -eq 1 ] && grep -q 'run-state flush FAILED' <<<"$W2FT_OUT"; then
   pass "W2f.tick: bounded + work in flight + flush FAILS at the pass/budget bound -> the fence EXITS 1 (not 42) and prints the 'run-state flush FAILED' ERROR breadcrumb (#300 Fix B)"
 else
   fail "W2f.tick: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FT_RC, out=[$W2FT_OUT]) — a failed flush must NOT silently revert to unbounded via exit 42"
@@ -796,7 +873,7 @@ fi
 # step-2f drain boundary -> EXIT 1 (NOT 0), same breadcrumb. Cheap second arm.
 DRV_W2FD="$WORK/drv_w2f_drain.zsh"; write_w2f_driver "$DRV_W2FD" drain 1 0 0
 W2FD_OUT="$("$ZSH_BIN" -f "$DRV_W2FD" 2>&1)"; W2FD_RC=$?
-if [ "$W2FD_RC" -eq 1 ] && printf '%s' "$W2FD_OUT" | grep -q 'run-state flush FAILED'; then
+if [ "$W2FD_RC" -eq 1 ] && grep -q 'run-state flush FAILED' <<<"$W2FD_OUT"; then
   pass "W2f.drain: bounded + drained + flush FAILS at the drain boundary -> the fence EXITS 1 (not 0); never proceeds to Phase 3 on unpersisted state (#300 Fix B)"
 else
   fail "W2f.drain: expected exit 1 + 'run-state flush FAILED' (got rc=$W2FD_RC, out=[$W2FD_OUT]) — a failed drain flush must NOT proceed via exit 0"
@@ -859,9 +936,9 @@ DRV_W3="$WORK/drv_w3.zsh"
 W3_OUT="$("$ZSH_BIN" -f "$DRV_W3" 2>"$WORK/w3.err")"; W3_RC=$?
 W3_ERR="$(cat "$WORK/w3.err" 2>/dev/null)"
 if [ "$W3_RC" -eq 1 ] \
-   && printf '%s' "$W3_ERR" | grep -q 'invalid Codex status for issue 42' \
-   && printf '%s' "$W3_ERR" | grep -q 'release uberdev:active claim failed for issue 42' \
-   && printf '%s' "$W3_ERR" | grep -q 'edit denied' \
+   && grep -q 'invalid Codex status for issue 42' <<<"$W3_ERR" \
+   && grep -q 'release uberdev:active claim failed for issue 42' <<<"$W3_ERR" \
+   && grep -q 'edit denied' <<<"$W3_ERR" \
    && grep -q '"reason":"solver_failed"' "$W3_STATE/w3-audit" 2>/dev/null \
    && grep -q '"state":"invalid_status"' "$W3_STATE/w3-audit" 2>/dev/null \
    && grep -q '42:solving->failed' "$W3_STATE/w3-transition" 2>/dev/null; then

@@ -177,6 +177,7 @@ jobs:
           bash tests/goal-dispatch-helpers.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh && \
+          bash tests/goal-verdict-receipt.test.sh && \
           bash tests/goal-batch-barrier.test.sh && \
           bash tests/skill-renderer-awk-collision.test.sh && \
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
@@ -364,6 +365,7 @@ jobs:
           bash tests/goal-dispatch-helpers.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
           bash tests/goal.test.sh && \
+          bash tests/goal-verdict-receipt.test.sh && \
           bash tests/goal-batch-barrier.test.sh && \
           bash tests/skill-renderer-awk-collision.test.sh && \
           bash tests/dispatch-prompt-no-bare-slash.test.sh && \
