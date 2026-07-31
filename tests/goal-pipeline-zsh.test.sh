@@ -1238,6 +1238,9 @@ echo "== PS: the post-Workflow summary fence under zsh =="
 
 PS_FENCE="$WORK/summary.fence.sh"
 awk '
+  { sub(/\r$/, "") }   # CRLF-tolerant: a windows-latest checkout may carry \r,
+                       # which would defeat every $-anchored match below AND
+                       # make the extracted fence unrunnable.
   /^## Post-Workflow summary$/ { seen=1; next }
   seen && /^```bash$/          { cap=1; next }
   cap && /^```$/               { exit }

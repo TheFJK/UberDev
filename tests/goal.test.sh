@@ -3581,6 +3581,9 @@ _g50_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-g50-%s' "$$")"
 _g50_fence="$_g50_dir/summary.fence.sh"
 # The first ```bash block after the "## Post-Workflow summary" heading.
 awk '
+  { sub(/\r$/, "") }   # CRLF-tolerant: a windows-latest checkout may carry \r,
+                       # which would defeat every $-anchored match below AND
+                       # make the extracted fence unrunnable.
   /^## Post-Workflow summary$/ { seen=1; next }
   seen && /^```bash$/          { cap=1; next }
   cap && /^```$/               { exit }
