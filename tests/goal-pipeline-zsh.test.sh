@@ -59,8 +59,18 @@ export CLAUDE_PLUGIN_ROOT
 GOAL_SKILL="$CLAUDE_PLUGIN_ROOT/skills/goal-pipeline/SKILL.md"
 GOAL_LIB="$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
 DISPATCH_LIB="$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
+# RFC 0015 §5 — the orchestration body moved OUT of the SKILL.md bash fences
+# into these four scripts. That is a straight WIN for this fixture: it used to
+# slice markdown, and it now slices real shell files that a human can also run.
+# The zsh runs below are still the point — lib/goal-phase0.sh's resolver is
+# reached before any interpreter has been resolved, so it must survive zsh; and
+# the watch script's verdict-locator globs are the #270/#290.2 class.
+GOAL_P0="$CLAUDE_PLUGIN_ROOT/lib/goal-phase0.sh"
+GOAL_P1="$CLAUDE_PLUGIN_ROOT/lib/goal-phase1.sh"
+GOAL_WATCH="$CLAUDE_PLUGIN_ROOT/lib/goal-watch.sh"
+GOAL_P3="$CLAUDE_PLUGIN_ROOT/lib/goal-phase3.sh"
 
-for f in "$GOAL_SKILL" "$GOAL_LIB" "$DISPATCH_LIB"; do
+for f in "$GOAL_SKILL" "$GOAL_LIB" "$DISPATCH_LIB" "$GOAL_P0" "$GOAL_P1" "$GOAL_WATCH" "$GOAL_P3"; do
   if [ ! -r "$f" ]; then
     printf 'FATAL: required file missing or unreadable: %s\n' "$f" >&2
     exit 2
@@ -95,64 +105,48 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # --------------------------------------------------------------------------
-# Fence extractors. SKILL.md fences are Skill-RENDERED markdown; the bash
-# blocks (some 3-space-indented inside the Phase-0 numbered steps) execute
-# under /bin/zsh. These awk helpers pull a fence (or a precise slice of one)
-# by CONTENT ANCHOR — robust to line-number drift, which matters for the
-# mutation tests in #293's discipline section (reverting a fix shifts lines).
+# Region / slice extractors over the PHASE SCRIPTS (RFC 0015 §5). The fence
+# extractors these replaced had to understand ```bash blocks and their 3-space
+# markdown indentation; the phase scripts are plain shell, so the machinery
+# gets simpler and the extracted text is byte-identical to what actually runs.
 #
-# extract_fence ANCHOR  — print the body of the ```bash fence containing ANCHOR.
-# slice_fence S E       — print the lines from the (in-fence) line containing S
-#                         through the line containing E (inclusive); used to
-#                         pull one loop out of the 587-line Phase-2 watch fence.
-# Both exit 3 (-> caller fails the test) when the anchor is not found, so a
-# SKILL.md edit that removes/renames an anchored block fails LOUD here.
+# extract_region NAME FILE — print the body between `# >>> region: NAME` and
+#                            `# <<< region: NAME`. The phase scripts carry those
+#                            markers precisely so ONE block can run standalone.
+# slice_file S E FILE      — print the lines from the line containing S through
+#                            the line containing E (inclusive); used to pull one
+#                            loop out of the ~900-line watch script.
+# Both exit 3 (-> caller fails the test) when the anchor is not found, so an
+# edit that removes/renames an anchored block fails LOUD here.
 # --------------------------------------------------------------------------
 EXTRACT_AWK="$WORK/extract.awk"
 cat > "$EXTRACT_AWK" <<'AWK'
-BEGIN { infence=0; curbash=0; found=0; buf="" }
+BEGIN { inregion=0; found=0 }
 {
   line=$0
-  if (line ~ /^[[:space:]]*```/) {
-    if (infence==0) {
-      stripped=line; sub(/^[[:space:]]*```/, "", stripped)
-      curbash = (stripped ~ /^bash[[:space:]]*$/) ? 1 : 0
-      infence=1; buf=""; hasanchor=0; next
-    } else {
-      if (curbash==1 && hasanchor==1) { printf "%s", buf; found=1; exit }
-      infence=0; curbash=0; next
-    }
+  if (inregion==0) {
+    if (line ~ ("^[[:space:]]*# >>> region: " NAME "[[:space:]]*$")) { inregion=1; found=1; next }
+    next
   }
-  if (infence==1 && curbash==1) {
-    buf = buf line "\n"
-    if (index(line, ANCHOR) > 0) hasanchor=1
-  }
+  if (line ~ ("^[[:space:]]*# <<< region: " NAME "[[:space:]]*$")) { exit }
+  print line
 }
 END { if (found==0) exit 3 }
 AWK
 
 SLICE_AWK="$WORK/slice.awk"
 cat > "$SLICE_AWK" <<'AWK'
-BEGIN { infence=0; curbash=0; emitting=0; found=0 }
+BEGIN { emitting=0; found=0 }
 {
   line=$0
-  if (line ~ /^[[:space:]]*```/) {
-    if (infence==0) {
-      stripped=line; sub(/^[[:space:]]*```/, "", stripped)
-      curbash = (stripped ~ /^bash[[:space:]]*$/) ? 1 : 0
-      infence=1; next
-    } else { infence=0; curbash=0; next }
-  }
-  if (infence==1 && curbash==1) {
-    if (emitting==0 && index(line, SANCHOR) > 0) emitting=1
-    if (emitting==1) { print line; if (index(line, EANCHOR) > 0) { found=1; exit } }
-  }
+  if (emitting==0 && index(line, SANCHOR) > 0) emitting=1
+  if (emitting==1) { print line; if (index(line, EANCHOR) > 0) { found=1; exit } }
 }
 END { if (found==0) exit 3 }
 AWK
 
-extract_fence() { awk -v ANCHOR="$1" -f "$EXTRACT_AWK" "$GOAL_SKILL"; }
-slice_fence()   { awk -v SANCHOR="$1" -v EANCHOR="$2" -f "$SLICE_AWK" "$GOAL_SKILL"; }
+extract_region() { awk -v NAME="$1" -f "$EXTRACT_AWK" "$2"; }
+slice_file()     { awk -v SANCHOR="$1" -v EANCHOR="$2" -f "$SLICE_AWK" "$3"; }
 
 # ==========================================================================
 # P0 — Phase-0 arg-parse + bash>=4 execution-contract resolver (#294).
@@ -170,10 +164,10 @@ echo
 echo "== P0: Phase-0 bash>=4 resolver (#294) under zsh =="
 
 RESOLVER_FENCE="$WORK/resolver.fence.sh"
-if extract_fence 'Execution-contract resolver' > "$RESOLVER_FENCE" && [ -s "$RESOLVER_FENCE" ]; then
-  pass "P0.extract: located the #294 execution-contract resolver fence in SKILL.md"
+if extract_region bash4-resolver "$GOAL_P0" > "$RESOLVER_FENCE" && [ -s "$RESOLVER_FENCE" ]; then
+  pass "P0.extract: located the #294 execution-contract resolver region in lib/goal-phase0.sh"
 else
-  fail "P0.extract: could NOT extract the resolver fence (anchor 'Execution-contract resolver' moved/removed?)"
+  fail "P0.extract: could NOT extract the resolver region (region marker 'bash4-resolver' moved/removed?)"
 fi
 
 # Fake bash binaries: one reporting MAJOR 5 (usable) and one reporting MAJOR 3
@@ -202,7 +196,7 @@ make_resolver_variant() {  # $1=outfile  $2=first-cand  $3=second-cand
   # variant -> P0a/P0b would then probe the host's real bash and FALSE-PASS,
   # defeating the regression guard. Assert the test-controlled path landed.
   grep -q "$2" "$1" \
-    || { echo "FATAL: resolver candidate-list substitution did not apply (SKILL.md anchor '/opt/homebrew/bin/bash /usr/local/bin/bash' drifted?)" >&2; exit 3; }
+    || { echo "FATAL: resolver candidate-list substitution did not apply (lib/goal-phase0.sh anchor '/opt/homebrew/bin/bash /usr/local/bin/bash' drifted?)" >&2; exit 3; }
 }
 
 # --- P0a POSITIVE: a usable bash>=4 is present -> resolve + proceed (NOT exit 2).
@@ -285,8 +279,8 @@ fi
 # scalars — the parser the dry-run / dispatch paths depend on. (Running it under
 # raw zsh would only re-prove the word-split gap, not the parser's correctness.)
 ARGPARSE_FENCE="$WORK/argparse.fence.sh"
-if extract_fence 'for tok in $ARGUMENTS' > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FENCE" ]; then
-  pass "P0e.extract: located the Phase-0 arg-parse fence in SKILL.md"
+if extract_region argparse "$GOAL_P0" > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FENCE" ]; then
+  pass "P0e.extract: located the Phase-0 arg-parse region in lib/goal-phase0.sh"
   if [ -n "$HBASH" ]; then
     DRV_AP="$WORK/drv_argparse.sh"
     {
@@ -309,7 +303,7 @@ if extract_fence 'for tok in $ARGUMENTS' > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_
     fail "P0e: no resolved bash>=4 available to run the arg-parse fence (see P0d)"
   fi
 else
-  fail "P0e.extract: could not extract the Phase-0 arg-parse fence (anchor 'for tok in \$ARGUMENTS' moved?)"
+  fail "P0e.extract: could not extract the Phase-0 arg-parse region (region marker 'argparse' moved?)"
 fi
 
 # ==========================================================================
@@ -329,10 +323,11 @@ echo
 echo "== P3: Phase-3 terminal/convergence calc (#288) under zsh =="
 
 TERMINAL_FENCE="$WORK/terminal.fence.sh"
-if extract_fence 'Terminal set for convergence' > "$TERMINAL_FENCE" && [ -s "$TERMINAL_FENCE" ]; then
-  pass "P3.extract: located the Phase-3 terminal/convergence fence in SKILL.md"
+if extract_region terminal "$GOAL_P3" > "$TERMINAL_FENCE" && [ -s "$TERMINAL_FENCE" ] \
+   && grep -q 'Terminal set for convergence' "$TERMINAL_FENCE"; then
+  pass "P3.extract: located the Phase-3 terminal/convergence region in lib/goal-phase3.sh"
 else
-  fail "P3.extract: could NOT extract the terminal fence (anchor 'Terminal set for convergence' moved?)"
+  fail "P3.extract: could NOT extract the terminal region (region marker 'terminal' moved, or the convergence block left it?)"
 fi
 
 # Driver template emitter: $1=goal-id $2=case(conv|queue|stuck|failed).
@@ -456,11 +451,11 @@ echo
 echo "== W: watch-loop step-2b verdict read — verdict-locator glob under zsh (#270/#290.2) =="
 
 STEP2B_SLICE="$WORK/step2b.slice.sh"
-if slice_fence 'for pr_num in $(uberdev_goal_list_prs_in_state "$GOAL_ID" pushed-reviewing)' \
-               '2c. Barrier-gated merge dispatch' > "$STEP2B_SLICE" \
+if slice_file 'for pr_num in $(uberdev_goal_list_prs_in_state "$GOAL_ID" pushed-reviewing)' \
+              '2c. Barrier-gated merge dispatch' "$GOAL_WATCH" > "$STEP2B_SLICE" \
    && [ -s "$STEP2B_SLICE" ] && grep -q 'uberdev_goal_locate_review_pr_audit_by_pr' "$STEP2B_SLICE" \
    && grep -qE '^[[:space:]]*done' "$STEP2B_SLICE"; then
-  pass "W.extract: sliced the step-2b verdict-read loop (incl. the verdict locator call + a loop-closing 'done' — guards a head-only partial slice) from the watch fence"
+  pass "W.extract: sliced the step-2b verdict-read loop (incl. the verdict locator call + a loop-closing 'done' — guards a head-only partial slice) from the watch script"
 else
   fail "W.extract: could NOT slice the step-2b loop (loop head / step-2c marker moved?)"
 fi
@@ -674,19 +669,19 @@ echo "== W2: Phase-2 bounded-watch exit-code contract (42/0/break + reaper-skip)
 W2_SETUP="$WORK/w2_setup.frag.sh"
 # (B) the step-2f drain + pass/budget gate + trailing `sleep` — the real arms.
 W2_GATE="$WORK/w2_gate.frag.sh"
-if slice_fence '_tick_start="$(date' '_watch_bounded=1' > "$W2_SETUP" \
+if slice_file '_tick_start="$(date' '_watch_bounded=1' "$GOAL_WATCH" > "$W2_SETUP" \
    && [ -s "$W2_SETUP" ] && grep -q 'WATCH_PASSES' "$W2_SETUP" && grep -q 'WATCH_BUDGET' "$W2_SETUP"; then
-  pass "W2.extractA: sliced the per-fence bounded-watch SETUP block (_tick_start + _watch_bounded derivation) from the watch fence"
+  pass "W2.extractA: sliced the per-fence bounded-watch SETUP block (_tick_start + _watch_bounded derivation) from the watch script"
 else
   fail "W2.extractA: could NOT slice the bounded-watch setup block (anchor '_tick_start=' / '_watch_bounded=1' moved?)"
 fi
-if slice_fence '2f. Termination check' 'sleep "$_UBERDEV_GOAL_POLL_SECS"' > "$W2_GATE" \
+if slice_file '2f. Termination check' 'sleep "$_UBERDEV_GOAL_POLL_SECS"' "$GOAL_WATCH" > "$W2_GATE" \
    && [ -s "$W2_GATE" ] \
    && grep -q 'bounded-tick exit 42' "$W2_GATE" \
    && grep -q 'bounded-tick exit 0'  "$W2_GATE" \
    && grep -qE '^[[:space:]]*exit 42[[:space:]]*$' "$W2_GATE" \
    && grep -qE '^[[:space:]]*exit 0[[:space:]]*$'  "$W2_GATE"; then
-  pass "W2.extractB: sliced the step-2f drain check + pass/budget gate (both real 'exit 42' and 'exit 0' arms present — guards a head-only partial slice) from the watch fence"
+  pass "W2.extractB: sliced the step-2f drain check + pass/budget gate (both real 'exit 42' and 'exit 0' arms present — guards a head-only partial slice) from the watch script"
 else
   fail "W2.extractB: could NOT slice the step-2f/budget gate with BOTH exit arms (step-2f marker / sleep tail / an 'exit N' arm moved?)"
 fi
@@ -899,12 +894,12 @@ fi
 echo "== W3: Codex malformed solver status is surfaced, not swallowed (#329 review) =="
 
 W3_STEP2A="$WORK/w3_step2a.slice.sh"
-if slice_fence '_uberdev_goal_phase2_release_claim() {' '2b. Read the leaf /review-pr verdict' > "$W3_STEP2A" \
+if slice_file '_uberdev_goal_phase2_release_claim() {' '2b. Read the leaf /review-pr verdict' "$GOAL_WATCH" > "$W3_STEP2A" \
    && [ -s "$W3_STEP2A" ] \
    && grep -q 'uberdev_goal_codex_status_for_issue' "$W3_STEP2A" \
    && grep -q '_uberdev_goal_phase2_release_claim "$issue" "invalid_status"' "$W3_STEP2A" \
    && grep -qE '^[[:space:]]*done' "$W3_STEP2A"; then
-  pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch fence"
+  pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch script"
 else
   fail "W3.extract: could NOT slice the step-2a loop (loop head / step-2b marker moved?)"
 fi
@@ -956,6 +951,80 @@ if [ "$W3_RC" -eq 1 ] \
   pass "W3: malformed Codex status file fails closed with diagnostic, release breadcrumb, failed transition, and solver_failed audit"
 else
   fail "W3: malformed Codex status should fail closed with release breadcrumb (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
+fi
+
+# ==========================================================================
+# W3b — RFC 0015 §5: with the fleet already settled, a no-PR issue is terminal
+# NOW, not in 150 minutes.
+#
+# _UBERDEV_GOAL_SOLVE_TIMEOUT answers "is the DETACHED solver still working, or
+# did it die?" — a question that only exists when the solver outlives the
+# dispatcher. The Workflow-native fleet does not: the driver AWAITS its nested
+# workflow() call, so by the time the watch script runs, every solver in the
+# cycle has returned. Waiting out the 150-minute timeout there would burn the
+# entire watch-tick budget proving something already known.
+#
+# Mutation guard: drop the UBERDEV_GOAL_SOLVERS_SETTLED arm from step 2a and
+# W3b goes RED (any_active stays 1 and no failed transition is written), while
+# W3c stays GREEN — proving the arm is gated on the env var, so an operator
+# running lib/goal-watch.sh by hand keeps the timeout semantics.
+# ==========================================================================
+echo
+echo "== W3b: a settled fleet makes a no-PR issue terminal immediately (RFC 0015 §5) =="
+
+write_w3b_driver() {  # $1=outfile $2=state-dir $3=settled(0|1)
+  local out="$1" sdir="$2" settled="$3"
+  mkdir -p "$sdir" || { echo "FATAL: mkdir -p $sdir failed" >&2; exit 3; }
+  {
+    echo 'set -u'
+    echo "export UBERDEV_TMPDIR='$sdir'"
+    echo "export GOAL_ID='pipew3b'"
+    echo "export UBERDEV_GOAL_ID='pipew3b'"
+    echo "export UBERDEV_GOAL_SOLVERS_SETTLED=$settled"
+    echo 'export UBERDEV_RESOLVED_BACKEND=workflow'
+    echo '. "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"'
+    echo '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"'
+    echo 'active_issues=(77)'
+    echo 'now="$(date +%s)"'
+    echo 'cycle=1'
+    echo 'any_active=0'
+    echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=9000'
+    echo 'uberdev_goal_get_issue_state() { printf "solving"; }'
+    echo 'uberdev_goal_pr_list_snapshot() { :; }'
+    echo 'uberdev_goal_find_pr_for_issue_from_json() { :; }'
+    echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
+    echo 'uberdev_goal_agent_busy_for_issue() { return 1; }'
+    # The issue entered `solving` one second ago, so the 150m timeout has NOT
+    # lapsed: any terminal transition here can only come from the settled arm.
+    echo 'uberdev_goal_issue_ts_in_state() { printf "%s" "$(( now - 1 ))"; }'
+    echo 'uberdev_goal_issue_state_transition() { echo "$2:$3->$4" >> "$UBERDEV_TMPDIR/w3b-transition"; return 0; }'
+    echo 'uberdev_goal_audit() { printf "%s %s\n" "$1" "$2" >> "$UBERDEV_TMPDIR/w3b-audit"; }'
+    echo '_uberdev_goal_reap_zombies() { return 0; }'
+    echo 'print_summary() { :; }'
+    echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; *) return 0;; esac; }'
+    echo "source '$W3_STEP2A'"
+    echo 'echo "W3B-DONE any_active=$any_active"'
+  } > "$out"
+}
+
+W3B_SET="$WORK/w3b-settled"
+DRV_W3B="$WORK/drv_w3b.zsh"; write_w3b_driver "$DRV_W3B" "$W3B_SET" 1
+W3B_OUT="$("$ZSH_BIN" -f "$DRV_W3B" 2>&1)"
+if grep -q 'W3B-DONE any_active=0' <<<"$W3B_OUT" \
+   && grep -q '77:solving->failed' "$W3B_SET/w3b-transition" 2>/dev/null; then
+  pass "W3b: with UBERDEV_GOAL_SOLVERS_SETTLED=1 a no-PR issue transitions solving->failed on the FIRST pass and does not hold any_active"
+else
+  fail "W3b: settled fleet did not terminalise the no-PR issue (out=[$W3B_OUT], transition=[$(cat "$W3B_SET/w3b-transition" 2>/dev/null)])"
+fi
+
+W3C_SET="$WORK/w3c-unsettled"
+DRV_W3C="$WORK/drv_w3c.zsh"; write_w3b_driver "$DRV_W3C" "$W3C_SET" 0
+W3C_OUT="$("$ZSH_BIN" -f "$DRV_W3C" 2>&1)"
+if grep -q 'W3B-DONE any_active=1' <<<"$W3C_OUT" \
+   && [ ! -s "$W3C_SET/w3b-transition" ]; then
+  pass "W3c: WITHOUT the settled marker the same input keeps the issue active (the 150m detached-solver timeout still governs a hand-run watch)"
+else
+  fail "W3c: the settled arm is not gated on the env var (out=[$W3C_OUT], transition=[$(cat "$W3C_SET/w3b-transition" 2>/dev/null)])"
 fi
 
 # ==========================================================================
@@ -1146,6 +1215,85 @@ if [ "$W5B_RC" -eq 0 ] && grep -q 'passes=7 sleeps=7' <<<"$W5B_OUT"; then
   pass "W5b: a pass that moved NOTHING still sleeps the full poll interval — the fast path is gated on made_transition, not always-on (#301)"
 else
   fail "W5b: expected passes=7 sleeps=7 when made_transition=0 (got rc=$W5B_RC, out=[$W5B_OUT]) — an always-on skip would hammer gh"
+fi
+
+# ==========================================================================
+# PS — the post-Workflow summary fence, under the shell it actually runs in.
+#
+# This is the ONE executable block still living in skills/goal-pipeline/SKILL.md
+# after the RFC 0015 §5 extraction, so it is the one block that still runs under
+# the Claude-Code Bash tool's /bin/zsh rather than under a resolved bash>=4.
+# It shipped gated on `[ -n "${UBERDEV_GOAL_ID:-}" ]` — an env var that
+# lib/goal-phase0.sh exports inside its OWN child process, several Bash calls
+# earlier — so the gate was never true and the operator summary was never
+# printed. The fix is the standard unconditional rehydrate:
+# uberdev_goal_read_run_state bootstraps GOAL_ID from the fixed-path
+# goal-active-id.txt pointer.
+#
+# Mutation guard: re-introduce the `GOAL_ID="${UBERDEV_GOAL_ID:-}"` +
+# `[ -n "$GOAL_ID" ]` gate => PSa RED (fence prints nothing).
+# ==========================================================================
+echo
+echo "== PS: the post-Workflow summary fence under zsh =="
+
+PS_FENCE="$WORK/summary.fence.sh"
+awk '
+  { sub(/\r$/, "") }   # CRLF-tolerant: a windows-latest checkout may carry \r,
+                       # which would defeat every $-anchored match below AND
+                       # make the extracted fence unrunnable.
+  /^## Post-Workflow summary$/ { seen=1; next }
+  seen && /^```bash$/          { cap=1; next }
+  cap && /^```$/               { exit }
+  cap                          { print }
+' "$GOAL_SKILL" > "$PS_FENCE"
+if [ -s "$PS_FENCE" ]; then
+  pass "PS.extract: located the post-Workflow summary fence in skills/goal-pipeline/SKILL.md"
+
+  PS_TMP="$WORK/ps-state"; mkdir -p "$PS_TMP"
+  PS_ID="1700000077-pszshfence"
+  # Seed a real run the way lib/goal-phase0.sh does — in its OWN process, so the
+  # fence below inherits nothing but $UBERDEV_TMPDIR (exactly production).
+  PS_SEED_RC=0
+  UBERDEV_TMPDIR="$PS_TMP" "$ZSH_BIN" -f -c '
+    . "'"$DISPATCH_LIB"'"
+    . "'"$GOAL_LIB"'"
+    GOAL_ID="'"$PS_ID"'"
+    export UBERDEV_GOAL_ID="$GOAL_ID"
+    uberdev_goal_state_init "$GOAL_ID" || exit 9
+    cycle=4; watch_start="$(date +%s)"; MAX_CYCLES=5; MAX_PARALLEL=3
+    queue=(); active_issues=()
+    uberdev_goal_write_run_state || exit 9
+  ' >/dev/null 2>&1 || PS_SEED_RC=$?
+  if [ "$PS_SEED_RC" -eq 0 ]; then
+    pass "PS.seed: run-state + goal-active-id.txt pointer written under zsh"
+  else
+    fail "PS.seed: could not seed run-state under zsh (rc=$PS_SEED_RC)"
+  fi
+
+  # THE ASSERTION: the fence, under zsh, with UBERDEV_GOAL_ID genuinely unset.
+  PS_OUT="$(UBERDEV_TMPDIR="$PS_TMP" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+    "$ZSH_BIN" -f -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$1"' zsh "$PS_FENCE" 2>&1)"
+  if grep -q "^goal $PS_ID: cycles=4/5 " <<<"$PS_OUT"; then
+    pass "PSa: the fence rehydrates from goal-active-id.txt and prints the operator summary with UBERDEV_GOAL_ID unset (the production condition)"
+  else
+    fail "PSa: fence printed no summary under zsh — a UBERDEV_GOAL_ID gate makes it dead code (got: [$PS_OUT])"
+  fi
+  if grep -q "audit: .*goal-$PS_ID\.jsonl" <<<"$PS_OUT"; then
+    pass "PSb: the fence names the audit log for the rehydrated id"
+  else
+    fail "PSb: audit path missing or unkeyed (got: [$PS_OUT])"
+  fi
+  # Non-vacuity control: no pointer => refuse loudly, print no summary.
+  PS_EMPTY="$WORK/ps-empty"; mkdir -p "$PS_EMPTY"
+  PS_NEG="$(UBERDEV_TMPDIR="$PS_EMPTY" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
+    "$ZSH_BIN" -f -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$1"' zsh "$PS_FENCE" 2>&1)"
+  if grep -q 'no run-state to summarise' <<<"$PS_NEG" && ! grep -q 'cycles=' <<<"$PS_NEG"; then
+    pass "PSc: with no active-id pointer the fence refuses loudly and prints no summary (PSa is discriminating)"
+  else
+    fail "PSc: pointer-less run should refuse loudly and print nothing (got: [$PS_NEG])"
+  fi
+else
+  fail "PS.extract: could NOT extract the post-Workflow summary fence (heading renamed?)"
 fi
 
 echo

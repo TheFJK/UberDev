@@ -32,7 +32,7 @@ review-pr|review-pr|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write
 merge|merge|["Bash", "Glob", "Grep", "Read", "Task"]
 dev|dev|["Bash", "Read", "Edit", "Write", "Task"]
 testers|testers|["Bash", "Read", "Write", "Task", "Workflow"]
-ubergoal|goal|["Bash", "Read", "Task"]
+ubergoal|goal|["Bash", "Read", "Task", "Workflow"]
 uberscan|uberscan|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write"]
 ubersimplify|ubersimplify|["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Task", "Workflow", "Write"]
 uberthink|uberthink|["Bash(git*)", "Bash(gh*)", "Glob", "Grep", "Read", "Task", "Workflow", "Write", "WebSearch", "WebFetch"]

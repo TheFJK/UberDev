@@ -474,49 +474,81 @@ else
   check jNoLeak true         "B44 the rejected path never reaches the solver prompt"
 fi
 
-echo "== S: /goal interim demotion (RFC 0015 §5) =="
-# /goal still drives uberdev_dispatch_one itself, which cannot serve the
-# workflow backend. Without an explicit demotion every /goal dispatch would
-# hit the loud refusal above and the convergence loop would fail on cycle 1.
+echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="
+# S16-S20 used to pin the INTERIM `uberdev_dispatch_demote_workflow_to_detached`
+# shim: /goal drove uberdev_dispatch_one itself, could not serve the `workflow`
+# backend, and so demoted a workflow resolution back onto the retired per-OS
+# detached matrix. That shim was the last thing keeping the DEPRECATED claude-bg
+# backend reachable from `auto` on a default path.
+#
+# /goal is now Workflow-native (lib/goal-phase1.sh claims only;
+# skills/goal-pipeline/workflow.js makes ONE nested workflow() call per cycle
+# into skills/solve-fleet/workflow.js), so these assertions are INVERTED rather
+# than deleted: the helper must NOT exist, no surface may call it, and the
+# goal-pipeline must mandate the Workflow call instead.
 GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
-grep -q 'uberdev_dispatch_demote_workflow_to_detached /goal' "$GOAL_SKILL" \
-  && pass "S16 goal-pipeline Phase 0 demotes a workflow resolution before dispatching" \
-  || fail "S16 goal-pipeline would dispatch with backend=workflow and fail every issue"
+GOAL_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
+GOAL_PHASE1="$REPO_ROOT/plugins/uberdev/lib/goal-phase1.sh"
+for f in "$GOAL_SKILL" "$GOAL_WORKFLOW" "$GOAL_PHASE1"; do
+  [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
+done
+
 grep -q 'uberdev_dispatch_demote_workflow_to_detached()' "$DISPATCH" \
-  && pass "S17 the demotion helper exists in lib/dispatch.sh" \
-  || fail "S17 no demotion helper"
+  && fail "S16 the demotion helper still exists in lib/dispatch.sh — auto can still reach a deprecated detached backend" \
+  || pass "S16 the workflow->detached demotion helper is deleted from lib/dispatch.sh"
 
-DEMOTED="$(/bin/bash -c '
-  . "$1"
-  _uberdev_dispatch_os_class() { printf linux; }
-  UBERDEV_RESOLVED_BACKEND=workflow
-  uberdev_dispatch_demote_workflow_to_detached /goal 2>/dev/null || exit
-  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
-' _ "$DISPATCH")"
-[ "$DEMOTED" = claude-bg ] \
-  && pass "S18 a workflow resolution demotes to a detached backend for /goal" \
-  || fail "S18 demotion produced '$DEMOTED', expected claude-bg on linux"
+# A dormant helper is as bad as a live one, so assert nothing CALLS it either.
+# Only *.sh can hold a call site, and a `#`-comment naming the retired helper is
+# documentation, not a call — the point of that comment is to stop the per-OS
+# matrix drifting back, so the guard must not punish it.
+live_calls_in_sh() {  # $1=root  $2=symbol -> prints "file:line:text" per live hit
+  local root="$1" sym="$2" f hits
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    hits="$(grep -nE "(^|[^A-Za-z0-9_])$sym" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    [ -n "$hits" ] && printf '%s:%s\n' "$f" "$hits"
+  done < <(find "$root" -type f -name '*.sh' 2>/dev/null | sort)
+}
 
-DEMOTE_NOISE="$(/bin/bash -c '
-  . "$1"
-  _uberdev_dispatch_os_class() { printf linux; }
-  UBERDEV_RESOLVED_BACKEND=workflow
-  uberdev_dispatch_demote_workflow_to_detached /goal
-' _ "$DISPATCH" 2>&1 >/dev/null)"
-printf '%s' "$DEMOTE_NOISE" | grep -Fq 'RFC 0015 §5' \
-  && pass "S19 the demotion is announced on stderr, never silent" \
-  || fail "S19 the demotion is silent: $DEMOTE_NOISE"
+# Both shipped runtimes, not just the Claude one: codex/uberdev-codex/lib is a
+# byte-identical mirror, so a resurrected call there is just as live — and
+# scanning only plugins/uberdev would leave that half to codex-port.test.sh's
+# byte-comparison, which reports "mirror drift", not "the demotion is back".
+DEMOTE_CALLERS=""
+for _demote_root in "$REPO_ROOT/plugins/uberdev" "$REPO_ROOT/codex/uberdev-codex"; do
+  [ -d "$_demote_root" ] || continue
+  DEMOTE_CALLERS="$DEMOTE_CALLERS$(live_calls_in_sh "$_demote_root" 'uberdev_dispatch_demote_workflow_to_detached')"
+done
+if [ -n "$DEMOTE_CALLERS" ]; then
+  fail "S17 a live call site for the retired demotion helper survives: $DEMOTE_CALLERS"
+else
+  pass "S17 no live call site for the retired demotion helper under plugins/uberdev or codex/uberdev-codex"
+fi
 
-NOOP="$(/bin/bash -c '
-  . "$1"
-  _uberdev_dispatch_os_class() { printf linux; }
-  UBERDEV_RESOLVED_BACKEND=codex
-  uberdev_dispatch_demote_workflow_to_detached /goal 2>/dev/null || exit
-  printf "%s" "$UBERDEV_RESOLVED_BACKEND"
-' _ "$DISPATCH")"
-[ "$NOOP" = codex ] \
-  && pass "S20 demotion is a no-op for any non-workflow backend" \
-  || fail "S20 demotion clobbered a non-workflow backend: got '$NOOP'"
+grep -q 'Workflow({scriptPath: "\$CLAUDE_PLUGIN_ROOT/skills/goal-pipeline/workflow.js"}' "$GOAL_SKILL" \
+  && pass "S18 goal-pipeline mandates the Workflow call instead of dispatching detached children" \
+  || fail "S18 goal-pipeline has no Workflow mandate — /goal would have no driver at all"
+
+# The claim pass must NOT dispatch. If uberdev_dispatch_one reappears there the
+# demotion problem comes straight back with it. Comment lines are excluded for
+# the same reason as S17 — the file's header explains what it stopped doing.
+PHASE1_DISPATCH="$(grep -nE '(^|[^A-Za-z0-9_])uberdev_dispatch_one' "$GOAL_PHASE1" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+if [ -n "$PHASE1_DISPATCH" ]; then
+  fail "S19 lib/goal-phase1.sh calls uberdev_dispatch_one again — it is claim-only by contract: $PHASE1_DISPATCH"
+else
+  pass "S19 lib/goal-phase1.sh is claim-only (no live uberdev_dispatch_one call)"
+fi
+
+# EXACTLY ONE nested workflow() call site, and it must target the fleet script.
+# A per-issue nested call would spend the single nesting level on the wrong
+# thing and the fleet's own agents could not run.
+GOAL_NEST_COUNT="$(grep -cE '(^|[^A-Za-z0-9_])workflow\(\{' "$GOAL_WORKFLOW" || true)"
+if [ "$GOAL_NEST_COUNT" = "1" ] && grep -q 'skills/solve-fleet/workflow.js' "$GOAL_WORKFLOW"; then
+  pass "S20 the goal driver makes exactly one nested workflow() call, into skills/solve-fleet/workflow.js"
+else
+  fail "S20 expected exactly 1 nested workflow({ call into solve-fleet, found $GOAL_NEST_COUNT"
+fi
 
 echo ""
 echo "== Summary =="

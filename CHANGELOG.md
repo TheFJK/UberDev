@@ -4,6 +4,26 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0] — 2026-07-31
+
+### Changed
+
+- **`/goal` is now a Workflow driver, completing RFC 0015.** `skills/goal-pipeline/SKILL.md` shrinks from 1931 lines to ~155 (preflight, the on-disk script guard, the Workflow mandate, a summary fence and the fallback section); the phase bodies move to `lib/goal-phase0.sh`, `lib/goal-phase1.sh`, `lib/goal-watch.sh` and `lib/goal-phase3.sh`, which the Skill loader never renders — closing the `$ARGUMENTS` positional-substitution hazard that has corrupted awk column refs in this file before.
+- The cycle loop lives in `skills/goal-pipeline/workflow.js`, holding the queue, cycle counter and fingerprints in JavaScript variables spanning the whole run. That is what structurally retires the fence-death false-converge and rollover-wipe classes, rather than patching them again. Each cycle makes **exactly one** nested `workflow()` call into the solve-fleet; the fleet still fans out per issue internally.
+- **`claude-bg` is now off every default path.** `uberdev_dispatch_demote_workflow_to_detached` — the interim that kept `/goal` on a detached backend — is deleted along with its call site, and the tests that pinned it now assert it cannot come back, in the Codex mirror as well.
+
+### Fixed
+
+- Two blockers the migration itself exposed: the watch loop's own `/merge` and `/review-pr` children would have hit the workflow-backend refusal on **every poll**, so `/goal` could never have merged — they now resolve an explicit, scoped child transport; and the 150-minute detached-solver liveness budget became dead weight against an awaited fleet, so a no-PR issue would have held the watch budget for hours.
+- The fleet envelope is cross-checked against the issue set `/goal` actually claimed before any solver is armed, and refuses on mismatch. The launcher runs with `--force`, whose documented purpose is bypassing the claim guard, so without this check a mismatch could have worked an unclaimed issue.
+- The post-Workflow summary fence was dead code, gated on a variable that could never be set in that shell; the `bash >= 4` execution contract was documented but never propagated to the relay-run phase scripts; and the watch relay could exceed the Bash tool's default timeout, where the `0/42/1` exit contract cannot survive.
+
+### Tests
+
+- New `tests/goal-workflow.test.sh` (112 assertions): convergence, the watch drain and tick breakers, max-cycles, repeated-fingerprint non-convergence, a non-empty rollover blocking convergence, candidates surviving across cycles, a null child, a budget throw still reaching finalize, exactly one nested call per cycle, and no timers anywhere in the script.
+- `tests/goal.test.sh` re-anchored honestly (593 assertions): assertions about behaviour that **moved** now target the new file; the three cases where behaviour was genuinely **replaced** were rewritten to pin the replacement, with a comment saying so.
+- Fixed 7 tautological assertions: a stray `--` was consumed as the pattern argument, so they matched any file containing a double dash. Correcting that exposed a second layer — the bare flag tokens also appear in prompt prose — so they now anchor on the armed command line. Every new assertion is mutation-verified.
+
 ## [0.41.7] — 2026-07-30
 
 ### Fixed

@@ -189,6 +189,7 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/codex-port.test.sh
 
@@ -383,4 +384,5 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh

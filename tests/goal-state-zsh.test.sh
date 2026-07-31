@@ -132,6 +132,13 @@ fi
 # It must also be ABSENT as a function definition from the goal-pipeline SKILL.md
 # (the def was removed from the Phase-4 fence; only call sites remain).
 GOAL_SKILL="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/SKILL.md"
+# RFC 0015 §5 — the executable /goal body moved out of the SKILL.md fences
+# into these scripts. Structural asserts below follow the code to its new home.
+GOAL_P0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
+GOAL_WATCH="$REPO_ROOT/plugins/uberdev/lib/goal-watch.sh"
+for _f in "$GOAL_P0" "$GOAL_WATCH"; do
+  [ -r "$_f" ] || { printf 'FATAL: required file missing or unreadable: %s\n' "$_f" >&2; exit 2; }
+done
 if grep -qE '^print_summary\(\)' "$GOAL_SKILL"; then
   fail "Z3b: print_summary() is still DEFINED in goal-pipeline/SKILL.md — the hoist must remove the inline def (it cannot cross a fence)"
 else
@@ -495,18 +502,20 @@ case "$Z11_OUT" in
     fail "Z11a: bounded-watch bound did NOT round-trip run-state (got: [$Z11_OUT]; expect passes=3 budget=540 exported_passes=1)" ;;
 esac
 rm -rf "$Z11_TMP" 2>/dev/null || true
-# Structural: the Phase-2 watch loop in SKILL.md must carry the bounded-tick
-# contract (exit 42 still-active + exit 0 drained + the no-reaper-on-pause
-# guarantee). These are the load-bearing exit codes the harness drives on.
-if grep -q 'bounded-tick exit 42' "$GOAL_SKILL"; then
-  pass "Z11b: Phase-2 watch loop emits the documented 'still-active, re-invoke' exit 42 (#299 finding 2)"
+# Structural: the watch loop must carry the bounded-tick contract (exit 42
+# still-active + exit 0 drained + the no-reaper-on-pause guarantee). These are
+# the load-bearing exit codes the driver in skills/goal-pipeline/workflow.js
+# branches on. RFC 0015 §5 moved the loop out of the SKILL.md fence into
+# lib/goal-watch.sh; the contract is unchanged, so the asserts follow the code.
+if grep -q 'bounded-tick exit 42' "$GOAL_WATCH"; then
+  pass "Z11b: the watch loop emits the documented 'still-active, re-invoke' exit 42 (#299 finding 2)"
 else
-  fail "Z11b: Phase-2 watch loop must exit 42 on a bounded tick with work in flight (#299 finding 2)"
+  fail "Z11b: the watch loop must exit 42 on a bounded tick with work in flight (#299 finding 2)"
 fi
-if grep -q 'bounded-tick exit 0' "$GOAL_SKILL"; then
-  pass "Z11c: Phase-2 watch loop emits the documented 'drained -> Phase 3' exit 0 in bounded mode (#299 finding 2)"
+if grep -q 'bounded-tick exit 0' "$GOAL_WATCH"; then
+  pass "Z11c: the watch loop emits the documented 'drained -> collect' exit 0 in bounded mode (#299 finding 2)"
 else
-  fail "Z11c: Phase-2 watch loop must exit 0 on a bounded-mode drain (#299 finding 2)"
+  fail "Z11c: the watch loop must exit 0 on a bounded-mode drain (#299 finding 2)"
 fi
 
 echo
@@ -520,12 +529,12 @@ echo "== Z12: GOAL_ID generation yields a SINGLE goal- sidecar prefix (#299 find
 # shell, inits state, and asserts: (1) no `goal-goal-` file exists, (2) the
 # `goal-<id>-*` glob now MATCHES (foot-gun resolved), (3) the id passes
 # _uberdev_goal_validate_id, (4) the sidecar mis-pathing guard cannot trip.
-# Mutation guard: revert the SKILL.md generator to `GOAL_ID="goal-$(date …)…"`
+# Mutation guard: revert the lib/goal-phase0.sh generator to `GOAL_ID="goal-$(date …)…"`
 # => Z12 RED (a goal-goal- file appears + the structural assert below fails).
 Z12_TMP="$(mktemp -d)"
 Z12_OUT="$(
   export UBERDEV_TMPDIR="$Z12_TMP"
-  # Verbatim production generator (SKILL.md Phase-0 step 5, post-#299-finding-3).
+  # Verbatim production generator (lib/goal-phase0.sh, post-#299-finding-3).
   GOAL_ID="$(date +%s)-$(mktemp -u XXXXXXXX | tr -d '/' | head -c 8)"
   export GOAL_ID UBERDEV_GOAL_ID="$GOAL_ID"
   uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
@@ -544,16 +553,16 @@ case "$Z12_OUT" in
     fail "Z12a: GOAL_ID prefix wrong (#299 finding 3 — got: [$Z12_OUT]; expect doubled=0 single=1 vid=1 guard=safe)" ;;
 esac
 rm -rf "$Z12_TMP" 2>/dev/null || true
-# Structural: the SKILL.md generator must NOT emit a `goal-`-prefixed id.
-if grep -qE 'GOAL_ID="goal-\$\(date' "$GOAL_SKILL"; then
-  fail "Z12b: SKILL.md still generates a goal--prefixed GOAL_ID (produces goal-goal-… sidecars) — #299 finding 3 regression"
+# Structural: the preflight generator must NOT emit a `goal-`-prefixed id.
+if grep -qE 'GOAL_ID="goal-\$\(date' "$GOAL_P0"; then
+  fail "Z12b: lib/goal-phase0.sh still generates a goal--prefixed GOAL_ID (produces goal-goal-… sidecars) — #299 finding 3 regression"
 else
-  pass "Z12b: SKILL.md GOAL_ID generator no longer carries a leading goal- prefix (#299 finding 3)"
+  pass "Z12b: the GOAL_ID generator no longer carries a leading goal- prefix (#299 finding 3)"
 fi
-if grep -qE 'GOAL_ID="\$\(date \+%s\)-\$\(mktemp' "$GOAL_SKILL"; then
-  pass "Z12c: SKILL.md GOAL_ID generator uses the prefix-free \$(date)-\$(mktemp) form (#299 finding 3)"
+if grep -qE 'GOAL_ID="\$\(date \+%s\)-\$\(mktemp' "$GOAL_P0"; then
+  pass "Z12c: lib/goal-phase0.sh uses the prefix-free \$(date)-\$(mktemp) GOAL_ID form (#299 finding 3)"
 else
-  fail "Z12c: SKILL.md GOAL_ID generator must be the prefix-free \$(date +%s)-\$(mktemp …) form (#299 finding 3)"
+  fail "Z12c: lib/goal-phase0.sh must use the prefix-free \$(date +%s)-\$(mktemp …) GOAL_ID form (#299 finding 3)"
 fi
 
 echo
