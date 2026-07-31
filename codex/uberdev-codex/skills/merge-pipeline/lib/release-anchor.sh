@@ -218,7 +218,9 @@ main() {
   # into an unbounded diff walk.
   local total
   total="$(git diff --unified=0 "$parent" "$head" 2>/dev/null | wc -l | tr -d '[:space:]')"
-  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+  # An unreadable size is treated as OVER the bound, not under it: this is a
+  # trust gate, so an unusable measurement must never widen what it tolerates.
+  case "$total" in ''|*[!0-9]*) total=$(( RELEASE_ANCHOR_MAX_DIFF_LINES + 1 )) ;; esac
   if [ "$total" -gt "$RELEASE_ANCHOR_MAX_DIFF_LINES" ]; then
     release_anchor_emit "$head" none diff_too_large
     return 0
