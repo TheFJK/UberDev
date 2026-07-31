@@ -110,7 +110,7 @@ assert_rc() {
 
 assert_out() {
   local pattern="$1" desc="$2"
-  if printf '%s\n' "$OUT" | grep -qE -e "$pattern"; then
+  if grep -qE -e "$pattern" <<<"$OUT"; then
     echo "  PASS  $desc"
     PASS=$((PASS + 1))
   else

@@ -66,10 +66,10 @@ ck "coverage heredoc extracted (non-empty)" "[ -s '$P1B_TMP/cov.py' ]"
 ck "coverage python is syntactically valid" "python3 -c \"import ast; ast.parse(open('$P1B_TMP/cov.py').read())\""
 ( cd "$P1B_TMP" && git init -q && mkdir -p src tests && printf 'a\nb\n' > src/mod.py && printf 'x\n' > tests/test_mod.py && git add -A 2>/dev/null )
 COV_RUN="$(cd "$P1B_TMP" && python3 cov.py . 2>&1)"
-ck "coverage run emits the 'Source files:' summary" "printf '%s' \"\$COV_RUN\" | grep -q 'Source files:'"
-ck "coverage run never writes a Python traceback (fail-soft)" "! printf '%s' \"\$COV_RUN\" | grep -q 'Traceback (most recent call last)'"
+ck "coverage run emits the 'Source files:' summary" "grep -q 'Source files:' <<<\"\$COV_RUN\""
+ck "coverage run never writes a Python traceback (fail-soft)" "! grep -q 'Traceback (most recent call last)' <<<\"\$COV_RUN\""
 COV_NONGIT="$(cd "$(mktemp -d)" && python3 "$P1B_TMP/cov.py" . 2>&1)"; COV_NONGIT_RC=$?
-ck "coverage is fail-soft outside a git repo (exit 0, no traceback)" "[ $COV_NONGIT_RC -eq 0 ] && ! printf '%s' \"\$COV_NONGIT\" | grep -q 'Traceback'"
+ck "coverage is fail-soft outside a git repo (exit 0, no traceback)" "[ $COV_NONGIT_RC -eq 0 ] && ! grep -q 'Traceback' <<<\"\$COV_NONGIT\""
 # global-pass.sh itself is fail-soft + always exits 0 (advisory pass must never abort the audit).
 GP_TMP="$(mktemp -d)"; ( cd "$GP_TMP" && git init -q && printf 'x\n' > a.py && git add -A 2>/dev/null )
 ( cd "$GP_TMP" && bash "$GLOBAL_PASS" . "$GP_TMP" ); GP_RC=$?

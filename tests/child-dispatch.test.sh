@@ -114,7 +114,7 @@ preflight_must_reject() {
     echo "child-dispatch: $label preflight returned rc=$rc" >&2
     return 1
   }
-  printf '%s\n' "$output" | grep -Fq "$diagnostic" || {
+  grep -Fq "$diagnostic" <<<"$output" || {
     echo "child-dispatch: $label preflight missed diagnostic $diagnostic" >&2
     return 1
   }
@@ -304,7 +304,7 @@ CLAUDE_PREFLIGHT_ERROR="$(CLAUDE_CAP_MODE=no-stop PATH="$CLAUDE_CAP_BIN:$PATH" \
 CLAUDE_PREFLIGHT_RC=$?
 set -e
 [ "$CLAUDE_PREFLIGHT_RC" -eq 2 ]
-printf '%s\n' "$CLAUDE_PREFLIGHT_ERROR" | grep -Fq 'backend lacks lifecycle supervision: claude-bg'
+grep -Fq 'backend lacks lifecycle supervision: claude-bg' <<<"$CLAUDE_PREFLIGHT_ERROR"
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
 # Native Windows Codex has no verifiable process-tree cancellation primitive.
@@ -321,16 +321,16 @@ WINDOWS_REVIEW_ERROR="$(uberdev_dispatch_preflight_backend codex review-pr 2>&1)
 WINDOWS_REVIEW_RC=$?
 set -e
 [ "$WINDOWS_CODEX_RC" -eq 2 ]
-printf '%s\n' "$WINDOWS_CODEX_ERROR" | grep -Fq 'backend lacks lifecycle supervision: codex'
+grep -Fq 'backend lacks lifecycle supervision: codex' <<<"$WINDOWS_CODEX_ERROR"
 [ "$WINDOWS_REVIEW_RC" -eq 1 ]
-printf '%s\n' "$WINDOWS_REVIEW_ERROR" | grep -Fq 'cannot supervise native Windows Codex process trees'
+grep -Fq 'cannot supervise native Windows Codex process trees' <<<"$WINDOWS_REVIEW_ERROR"
 for WINDOWS_NUMERIC_BACKEND in codex background; do
   set +e
   WINDOWS_NUMERIC_ERROR="$(uberdev_dispatch_preflight_backend "$WINDOWS_NUMERIC_BACKEND" solve 2>&1)"
   WINDOWS_NUMERIC_RC=$?
   set -e
   [ "$WINDOWS_NUMERIC_RC" -eq 1 ]
-  printf '%s\n' "$WINDOWS_NUMERIC_ERROR" | grep -Fq 'cannot supervise native Windows'
+  grep -Fq 'cannot supervise native Windows' <<<"$WINDOWS_NUMERIC_ERROR"
 done
 _uberdev_dispatch_numeric_supervision_supported claude-bg
 _uberdev_dispatch_numeric_supervision_supported wezterm
@@ -375,7 +375,7 @@ PY
   STANDALONE_UNAVAILABLE_RC=$?
   set -e
   [ "$STANDALONE_UNAVAILABLE_RC" -eq 1 ]
-  printf '%s\n' "$STANDALONE_UNAVAILABLE_ERROR" | grep -Fq "simplify requires the 'codex' CLI"
+  grep -Fq "simplify requires the 'codex' CLI" <<<"$STANDALONE_UNAVAILABLE_ERROR"
   [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
   [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]
   [ -z "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]

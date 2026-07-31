@@ -118,7 +118,7 @@ expect "missing file + expected 0 → inner FAIL (no vacuous PASS)" \
   "[ \"\$P\" = 0 ] && [ \"\$F\" = 1 ]" \
   "VACUOUS-PASS BUG: missing file with expected==0 should bump FAIL, got [$RES]"
 expect "missing-file FAIL message names unreadable/missing file" \
-  "printf '%s' \"\$RES\" | grep -qiE 'unreadable|missing|not readable'" \
+  "grep -qiE 'unreadable|missing|not readable' <<<\"\$RES\"" \
   "FAIL diagnostic should identify the unreadable/missing file, got [$RES]"
 
 echo "== AC4: UNREADABLE file with expected==0 — must FAIL LOUD too =="

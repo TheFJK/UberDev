@@ -67,7 +67,7 @@ for f in "$TESTS_DIR"/*.test.sh; do
   # test fixtures (rare today, but the guard must be present on every
   # source line, not just one).
   while IFS=: read -r lineno line; do
-    if printf '%s' "$line" | grep -qF -- "$GUARD_FRAGMENT"; then
+    if grep -qF -- "$GUARD_FRAGMENT" <<<"$line"; then
       echo "  PASS  $(basename "$f"):$lineno carries the fail-loud guard"
       PASS=$((PASS + 1))
     else

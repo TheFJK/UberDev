@@ -177,7 +177,7 @@ echo "PASS P7: finding-ID collision keeps highest-severity record across waves"
 #   1. `--rps-cap` appears in --help text
 #   2. running without --rps-cap exits non-zero
 HELP_OUT="$(python3 "$AGG" --help 2>&1 || true)"
-echo "$HELP_OUT" | grep -q -- "--rps-cap" || { echo "P8: --rps-cap not in --help"; exit 1; }
+grep -q -- "--rps-cap" <<<"$HELP_OUT" || { echo "P8: --rps-cap not in --help"; exit 1; }
 # Run without --rps-cap; expect non-zero exit. `set -e` would abort on the
 # expected failure, so guard with `if`.
 if python3 "$AGG" --out "$SCRATCH/x.yaml" >/dev/null 2>&1; then

@@ -22,7 +22,7 @@ test_parse_non_numeric() {
       exit 2
     fi' 2>&1) && { fail "$FUNCNAME" "expected exit 2"; return; }
   [ "$?" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2, got $?"; return; }
-  echo "$out" | grep -q "must be a positive integer" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
+  grep -q "must be a positive integer" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
   pass "$FUNCNAME"
 }
 test_parse_non_numeric
@@ -35,7 +35,7 @@ test_parse_negative() {
       exit 2
     fi' 2>&1) && { fail "$FUNCNAME" "expected exit 2"; return; }
   [ "$?" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2, got $?"; return; }
-  echo "$out" | grep -q "must be a positive integer" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
+  grep -q "must be a positive integer" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
   pass "$FUNCNAME"
 }
 test_parse_negative
@@ -54,7 +54,7 @@ test_parse_zero() {
       exit 2
     fi' 2>&1) && { fail "$FUNCNAME" "expected exit 2"; return; }
   [ "$?" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2, got $?"; return; }
-  echo "$out" | grep -qE "must be a positive integer|in \[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks expected error"; return; }
+  grep -qE "must be a positive integer|in \[1, 1000\]" <<<"$out" || { fail "$FUNCNAME" "stderr lacks expected error"; return; }
   pass "$FUNCNAME"
 }
 test_parse_zero
@@ -71,7 +71,7 @@ test_parse_over_ceiling() {
       exit 2
     fi' 2>&1) && { fail "$FUNCNAME" "expected exit 2"; return; }
   [ "$?" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2, got $?"; return; }
-  echo "$out" | grep -q "in \[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks 'in [1, 1000]'"; return; }
+  grep -q "in \[1, 1000\]" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'in [1, 1000]'"; return; }
   pass "$FUNCNAME"
 }
 test_parse_over_ceiling
@@ -84,7 +84,7 @@ test_parse_leading_zero() {
       exit 2
     fi' 2>&1) && { fail "$FUNCNAME" "expected exit 2"; return; }
   [ "$?" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2, got $?"; return; }
-  echo "$out" | grep -q "must be a positive integer" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
+  grep -q "must be a positive integer" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'must be a positive integer'"; return; }
   pass "$FUNCNAME"
 }
 test_parse_leading_zero
@@ -177,7 +177,7 @@ test_url_flag_smuggling_neutralised() {
   out=$(uberdev_rate_limit_curl '-fOJ /etc/passwd' 2>&1) && { fail "$FUNCNAME" "expected non-zero exit"; return; }
   rc=$?
   [ "$rc" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2 from URL parse, got $rc"; return; }
-  echo "$out" | grep -q "cannot parse host" || { fail "$FUNCNAME" "stderr lacks 'cannot parse host'"; return; }
+  grep -q "cannot parse host" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'cannot parse host'"; return; }
   pass "$FUNCNAME"
 }
 test_url_flag_smuggling_neutralised
@@ -192,7 +192,7 @@ test_defensive_revalidation() {
   out=$(uberdev_rate_limit_curl 'http://example.test/' 2>&1) && { fail "$FUNCNAME" "expected non-zero exit"; return; }
   rc=$?
   [ "$rc" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2 from defensive re-validation, got $rc"; return; }
-  echo "$out" | grep -q "RPS_CAP malformed" || { fail "$FUNCNAME" "stderr lacks 'RPS_CAP malformed'"; return; }
+  grep -q "RPS_CAP malformed" <<<"$out" || { fail "$FUNCNAME" "stderr lacks 'RPS_CAP malformed'"; return; }
   pass "$FUNCNAME"
 }
 test_defensive_revalidation
@@ -372,7 +372,7 @@ EOF
   rc=$?
   export PATH="$OLD_PATH"
   [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "expected non-zero exit, got $rc"; return; }
-  echo "$out" | grep -qi "state" || { fail "$FUNCNAME" "stderr lacks a state-write error: $out"; return; }
+  grep -qi "state" <<<"$out" || { fail "$FUNCNAME" "stderr lacks a state-write error: $out"; return; }
   pass "$FUNCNAME"
 }
 test_state_write_failure_surfaces
@@ -402,7 +402,7 @@ EOF
   rc=$?
   export PATH="$OLD_PATH"
   [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "expected non-zero exit, got $rc"; return; }
-  echo "$out" | grep -qi "normalizer failed" || { fail "$FUNCNAME" "stderr lacks distinct tool-failure message (got: $out)"; return; }
+  grep -qi "normalizer failed" <<<"$out" || { fail "$FUNCNAME" "stderr lacks distinct tool-failure message (got: $out)"; return; }
   pass "$FUNCNAME"
 }
 test_normalizer_tool_failure_surfaces
@@ -445,7 +445,7 @@ test_bounded_mutex_retry_fails_loud_on_stale_lock() {
   rc=0; out=$(uberdev_rate_limit_curl "http://stale.test/x" 2>&1) || rc=$?
   unset UBERDEV_RATE_MUTEX_MAX_TRIES
   [ "$rc" -eq 2 ] || { fail "$FUNCNAME" "expected exit 2 on stale lock, got $rc"; return; }
-  echo "$out" | grep -q "could not acquire mutex" || { fail "$FUNCNAME" "stderr lacks the bounded-retry error: $out"; return; }
+  grep -q "could not acquire mutex" <<<"$out" || { fail "$FUNCNAME" "stderr lacks the bounded-retry error: $out"; return; }
   pass "$FUNCNAME"
 }
 test_bounded_mutex_retry_fails_loud_on_stale_lock
@@ -485,7 +485,7 @@ UBERDEV_RATE_MUTEX_MAX_TRIES=5 uberdev_rate_limit_curl "http://zwrap.test/c" >/d
 echo ZOK
 EOF
   out="$(RATE_STATE_DIR="$ZSTATE" RPS_CAP=1000 PATH="$SHIM:$PATH" REPO_ROOT="$REPO_ROOT" zsh "$ZFIXTURE" 2>&1)" || { fail "$FUNCNAME" "zsh fixture failed: $out"; return; }
-  echo "$out" | grep -q "ZOK" || { fail "$FUNCNAME" "zsh fixture did not reach ZOK: $out"; return; }
+  grep -q "ZOK" <<<"$out" || { fail "$FUNCNAME" "zsh fixture did not reach ZOK: $out"; return; }
   pass "$FUNCNAME"
 }
 test_wrapper_under_zsh

@@ -147,7 +147,7 @@ EOF
   [ "$out" = "6" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U2d: out-of-range high -> default" || fail "U2d: out-of-range high not defaulted"
-printf "%s" "$_LAST_STDERR" | grep -qE "fanout_concurrency.research = .999. is invalid \(out_of_range\)" \
+grep -qE "fanout_concurrency.research = .999. is invalid \(out_of_range\)" <<<"$_LAST_STDERR" \
   && pass "U2d: stderr carries out_of_range warning" \
   || fail "U2d: out_of_range stderr line missing"
 
@@ -176,7 +176,7 @@ EOF
   [ "$out" = "6" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U2f: non-integer abc -> default" || fail "U2f: non-integer not defaulted"
-printf "%s" "$_LAST_STDERR" | grep -qE "non_integer" \
+grep -qE "non_integer" <<<"$_LAST_STDERR" \
   && pass "U2f: stderr non_integer reason" \
   || fail "U2f: non_integer reason missing"
 
@@ -231,7 +231,7 @@ EOF
   [ "$out" = "trivial" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U3b: case-sensitive reject SMALL -> default trivial" || fail "U3b: SMALL not rejected"
-printf "%s" "$_LAST_STDERR" | grep -qE "invalid_enum" \
+grep -qE "invalid_enum" <<<"$_LAST_STDERR" \
   && pass "U3b: invalid_enum reason emitted" \
   || fail "U3b: invalid_enum reason missing"
 
@@ -258,7 +258,7 @@ EOF
   [ "$out" = "main" ] || exit 1
 '
 [ $? -eq 0 ] && pass "U4b: invalid branch name -> default main" || fail "U4b: invalid branch name accepted"
-printf "%s" "$_LAST_STDERR" | grep -qE "regex_mismatch" \
+grep -qE "regex_mismatch" <<<"$_LAST_STDERR" \
   && pass "U4b: regex_mismatch reason emitted" \
   || fail "U4b: regex_mismatch reason missing"
 
@@ -293,7 +293,7 @@ _isolate '
 _isolate '
   uberdev_clamp_tier medium large small >/dev/null
 '
-printf "%s" "$_LAST_STDERR" | grep -qE "floor_gt_ceiling" \
+grep -qE "floor_gt_ceiling" <<<"$_LAST_STDERR" \
   && pass "U6b: inversion emits floor_gt_ceiling reason" \
   || fail "U6b: inversion warning missing"
 
@@ -502,7 +502,7 @@ EOF
 '
 [ $? -eq 0 ] && pass "I7a: pre-existing config + no new keys -> silent defaults" \
   || fail "I7a: pre-existing config did not return silent defaults"
-printf "%s" "$_LAST_STDERR" | grep -qE "warning:" \
+grep -qE "warning:" <<<"$_LAST_STDERR" \
   && fail "I7b: stderr should be silent (no warnings) on pre-existing config" \
   || pass "I7b: stderr silent on pre-existing config"
 

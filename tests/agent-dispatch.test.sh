@@ -777,7 +777,7 @@ owner_provider_after=0
 [ ! -e "$OWNER_STATUS_FAULT_RUN/status.json" ]
 grep -q '"reason":"owner_process_identity_unavailable"' \
   "$OWNER_STATUS_FAULT_RUN/status.json.watcher-error.json"
-printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_status_publication_failed'
+grep -Fq 'owner_process_identity_status_publication_failed' <<<"$OWNER_FAILURE_ERROR"
 [ ! -d "$OWNER_STATUS_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
 )
 
@@ -804,7 +804,7 @@ owner_provider_after=0
 [ "$(cat "$OWNER_FAILURE_CALLS")" = diagnostic ]
 grep -q '"state":"failed"' "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json"
 [ ! -e "$OWNER_DIAGNOSTIC_FAULT_RUN/status.json.watcher-error.json" ]
-printf '%s\n' "$OWNER_FAILURE_ERROR" | grep -Fq 'owner_process_identity_diagnostic_persistence_failed'
+grep -Fq 'owner_process_identity_diagnostic_persistence_failed' <<<"$OWNER_FAILURE_ERROR"
 [ ! -d "$OWNER_DIAGNOSTIC_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
 )
 

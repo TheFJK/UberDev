@@ -423,7 +423,7 @@ PY
 [ "$_STATUS" -eq 0 ] && pass "R4h: complete canonical validator rejects semantic-invalid policies" || fail "R4h: semantic-invalid policy authorized map"
 warn_count=$(printf '%s\n' "$_LAST_STDERR" | grep -c "model_routing.roles = '<invalid-map>'" || true)
 [ "$warn_count" -eq 5 ] && pass "R4h: each semantic-invalid policy emits one redacted warning" || fail "R4h: semantic policy warning count=$warn_count"
-if printf '%s\n' "$_LAST_STDERR" | grep -qE 'warp|incomplete-route|duplicate-rank|duplicate-pair|malformed-role|bogus-effort'; then
+if grep -qE 'warp|incomplete-route|duplicate-rank|duplicate-pair|malformed-role|bogus-effort' <<<"$_LAST_STDERR"; then
   fail "R4h: semantic validator leaked hostile policy tokens"
 else
   pass "R4h: semantic validator diagnostics remain redacted"
@@ -528,7 +528,7 @@ _isolate '
   [ ! -e IMPORTLIB_SHADOW_EXECUTED ] || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R4i: isolated Python ignores hostile PWD stdlib shadows" || fail "R4i: hostile PWD Python module executed/broke parsing"
-if printf '%s\n' "$_LAST_STDERR" | grep -qE 'JSON_SHADOW|IMPORTLIB_SHADOW|Traceback'; then
+if grep -qE 'JSON_SHADOW|IMPORTLIB_SHADOW|Traceback' <<<"$_LAST_STDERR"; then
   fail "R4i: isolated Python leaked hostile token/traceback"
 else
   pass "R4i: isolated Python diagnostics remain silent/redacted"

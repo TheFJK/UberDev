@@ -2857,7 +2857,7 @@ M98SURF
     fail "M98.tolerate — expected tolerated + TRUST_HEAD=$M98_REVIEWED, got: [$M98_OUT]"
   fi
   assert_grep_str() {  # <text> <pattern> <desc>
-    if printf '%s\n' "$1" | grep -qE -e "$2"; then pass "$3"; else fail "$3 (got: [$1])"; fi
+    if grep -qE -e "$2" <<<"$1"; then pass "$3"; else fail "$3 (got: [$1])"; fi
   }
   assert_grep_str "$M98_OUT" '^RELEASE_ANCHOR_VERSION=1\.2\.4$' \
     "M98.tolerate — the tolerated anchor reports the version it advanced to"

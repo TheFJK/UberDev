@@ -234,7 +234,7 @@ if strip_shared_blocks "$FORBIDDEN_FIXTURE" | grep -qE 'new[[:space:]]+Date[[:sp
 else
   pass "T1.c5 SHARED-block contents are exempt from the static grep (T3 runtime shadows still apply)"
 fi
-if printf '%s\n' '1:// important: requires careful reading' | grep -qwE 'import|require'; then
+if grep -qwE 'import|require' <<<'1:// important: requires careful reading'; then
   fail "T1.c6 word-boundary control: 'important'/'requires' must not trip the import/require grep"
 else
   pass "T1.c6 import/require grep is word-bounded (no 'important'/'requires' false positives)"

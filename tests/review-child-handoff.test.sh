@@ -2246,7 +2246,7 @@ SUPPRESSION_RC=$?
 set -e
 [ "$SUPPRESSION_RC" -eq 71 ]
 [ -d "$AGG_PATH" ]
-printf '%s\n' "$SUPPRESSION_ERROR" | grep -Fq 'failed to suppress stale post-impl-review aggregate'
+grep -Fq 'failed to suppress stale post-impl-review aggregate' <<<"$SUPPRESSION_ERROR"
 
 # Review and simplify execute with inherited carriers. Post-review attaches to
 # the exact descriptor exported by its parent review setup.

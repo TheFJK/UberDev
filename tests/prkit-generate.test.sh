@@ -495,8 +495,8 @@ printf 'lock owner sentinel\n' > "$LOCK_TARGET/.prkit-generate.lock/owner"
 printf 'locked target sentinel\n' > "$LOCK_TARGET/sentinel.txt"
 lock_output=""
 if lock_output="$(bash "$GEN" --target "$LOCK_TARGET" --version 0.1.0 --force 2>&1)" \
-   || ! printf '%s\n' "$lock_output" | grep -qF "target generation lock exists:" \
-   || ! printf '%s\n' "$lock_output" | grep -qF "confirming it is stale" \
+   || ! grep -qF "target generation lock exists:" <<<"$lock_output" \
+   || ! grep -qF "confirming it is stale" <<<"$lock_output" \
    || [ "$(cat "$LOCK_TARGET/.prkit-generate.lock/owner" 2>/dev/null)" != "lock owner sentinel" ] \
    || [ "$(cat "$LOCK_TARGET/sentinel.txt" 2>/dev/null)" != "locked target sentinel" ] \
    || [ -e "$LOCK_TARGET/plugins" ]; then
@@ -569,7 +569,7 @@ assert commands == [f'codex plugin add {selector}']
 PY
 then ok "G4c native Codex marketplace backs README selector prkit-codex@prkit"
 else no "G4c native Codex marketplace missing, malformed, or disconnected from README selector"; fi
-if printf '%s\n' "$G1_OUTPUT" | grep -qF 'scaffolded 12, verified.' \
+if grep -qF 'scaffolded 12, verified.' <<<"$G1_OUTPUT" \
    && grep -qF '.agents/plugins/marketplace.json' "$T1/.github/workflows/ci.yml"; then
   ok "G4d native marketplace is counted and covered by generated JSON syntax CI"
 else

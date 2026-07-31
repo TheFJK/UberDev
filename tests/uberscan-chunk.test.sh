@@ -25,10 +25,10 @@ git add -A 2>/dev/null
 # ============================================================================
 OUT="$(python3 "$CHUNK" --scope . --areas 3)"
 check "emits valid JSON" "printf '%s' \"\$OUT\" | python3 -c 'import json,sys; json.load(sys.stdin)'"
-check "skips node_modules" "! printf '%s' \"\$OUT\" | grep -q node_modules"
-check "skips dist" "! printf '%s' \"\$OUT\" | grep -q 'dist/'"
-check "skips lockfile" "! printf '%s' \"\$OUT\" | grep -q package-lock.json"
-check "includes src files" "printf '%s' \"\$OUT\" | grep -q 'src/a.ts'"
+check "skips node_modules" "! grep -q node_modules <<<\"\$OUT\""
+check "skips dist" "! grep -q 'dist/' <<<\"\$OUT\""
+check "skips lockfile" "! grep -q package-lock.json <<<\"\$OUT\""
+check "includes src files" "grep -q 'src/a.ts' <<<\"\$OUT\""
 # Oversize handling (scan-R4): the >256KB file must be excluded from every area
 # AND surfaced BY NAME in skipped_oversize — a "whole-repo" audit's coverage gap
 # must be visible in the manifest, never a silent count.

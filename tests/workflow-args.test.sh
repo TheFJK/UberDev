@@ -163,12 +163,12 @@ if printf '%s' "$payload" | jq -e '
 else
   fail "W2.1 envelope keys/types drifted from the §4.3 v1 contract (got: $payload)"
 fi
-if printf '%s' "$payload" | jq -r '.run_id' | grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$'; then
+if grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"$(jq -r '.run_id' <<<"$payload")"; then
   pass "W2.2 minted run_id matches the established RUN_ID shape ^[0-9]{8}-[0-9]{6}-[a-f0-9]+\$"
 else
   fail "W2.2 minted run_id matches the established RUN_ID shape (got: $(printf '%s' "$payload" | jq -r '.run_id'))"
 fi
-if printf '%s' "$payload" | jq -r '.now_iso' | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+if grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$(jq -r '.now_iso' <<<"$payload")"; then
   pass "W2.3 now_iso is UTC ISO-8601 (YYYY-MM-DDTHH:MM:SSZ)"
 else
   fail "W2.3 now_iso is UTC ISO-8601 (got: $(printf '%s' "$payload" | jq -r '.now_iso'))"
@@ -223,7 +223,7 @@ else
 fi
 for locked in v now_epoch now_iso pipeline config; do
   _isolate "uberdev_emit_workflow_args goal $locked=x"
-  if [ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q "locked"; then
+  if [ "$_LAST_RC" -eq 2 ] && grep -q "locked" <<<"$_LAST_STDERR"; then
     pass "W4.2 locked key '$locked' is rejected rc=2"
   else
     fail "W4.2 locked key '$locked' is rejected rc=2 (rc=$_LAST_RC, stderr: $_LAST_STDERR)"
@@ -267,7 +267,7 @@ if printf '%s' "$payload" | jq -e '.config.fanout == 6' >/dev/null 2>&1 && [ "$w
 else
   fail "W5.3 read-helper warn-once + emitter silence (payload: $payload; warn_count=$warn_count)"
 fi
-if printf '%s\n' "$_LAST_STDERR" | grep -q 'uberdev_emit_workflow_args'; then
+if grep -q 'uberdev_emit_workflow_args' <<<"$_LAST_STDERR"; then
   fail "W5.4 emitter stays silent on stderr when inputs are valid (got: $_LAST_STDERR)"
 else
   pass "W5.4 emitter stays silent on stderr when inputs are valid"
@@ -305,7 +305,7 @@ if [ -n "$emit_body" ]; then
 else
   fail "W7.1 uberdev_emit_workflow_args function body found in lib/config-read.sh"
 fi
-if printf '%s\n' "$emit_body" | grep -qwE 'eval'; then
+if grep -qwE 'eval' <<<"$emit_body"; then
   fail "W7.2 emitter body must contain ZERO eval — caller-supplied KEY/VALUE may never be expanded as code"
 else
   pass "W7.2 emitter body contains zero eval (KEY/VALUE travel via jq --arg only)"
@@ -320,27 +320,27 @@ fi
 # ---------------------------------------------------------------------------
 echo "== W8: error paths =="
 _isolate 'uberdev_emit_workflow_args'
-[ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q 'missing PIPELINE' \
+[ "$_LAST_RC" -eq 2 ] && grep -q 'missing PIPELINE' <<<"$_LAST_STDERR" \
   && pass "W8.1 missing PIPELINE → rc=2 + diagnostic" \
   || fail "W8.1 missing PIPELINE → rc=2 + diagnostic (rc=$_LAST_RC, stderr: $_LAST_STDERR)"
 _isolate 'uberdev_emit_workflow_args "bad name"'
-[ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q 'invalid PIPELINE' \
+[ "$_LAST_RC" -eq 2 ] && grep -q 'invalid PIPELINE' <<<"$_LAST_STDERR" \
   && pass "W8.2 PIPELINE with disallowed chars → rc=2" \
   || fail "W8.2 PIPELINE with disallowed chars → rc=2 (rc=$_LAST_RC)"
 _isolate 'uberdev_emit_workflow_args scan notakeyvalue'
-[ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q 'not KEY=VALUE' \
+[ "$_LAST_RC" -eq 2 ] && grep -q 'not KEY=VALUE' <<<"$_LAST_STDERR" \
   && pass "W8.3 non-KEY=VALUE argument → rc=2" \
   || fail "W8.3 non-KEY=VALUE argument → rc=2 (rc=$_LAST_RC)"
 _isolate 'uberdev_emit_workflow_args scan "ba d=1"'
-[ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q 'invalid KEY' \
+[ "$_LAST_RC" -eq 2 ] && grep -q 'invalid KEY' <<<"$_LAST_STDERR" \
   && pass "W8.4 KEY with disallowed chars → rc=2" \
   || fail "W8.4 KEY with disallowed chars → rc=2 (rc=$_LAST_RC)"
 _isolate 'uberdev_emit_workflow_args scan =1'
-[ "$_LAST_RC" -eq 2 ] && printf '%s' "$_LAST_STDERR" | grep -q 'empty KEY' \
+[ "$_LAST_RC" -eq 2 ] && grep -q 'empty KEY' <<<"$_LAST_STDERR" \
   && pass "W8.5 empty KEY → rc=2" \
   || fail "W8.5 empty KEY → rc=2 (rc=$_LAST_RC)"
 _isolate 'uberdev_emit_workflow_args scan 2>/dev/null || echo "MARKER_ABSENT_RC=$?"'
-if printf '%s' "$_LAST_STDOUT" | grep -q 'WORKFLOW_ARGS_BEGIN'; then
+if grep -q 'WORKFLOW_ARGS_BEGIN' <<<"$_LAST_STDOUT"; then
   pass "W8.6 happy path still frames with markers after the error-path battery (no sticky state)"
 else
   fail "W8.6 happy path still frames with markers after the error-path battery"
