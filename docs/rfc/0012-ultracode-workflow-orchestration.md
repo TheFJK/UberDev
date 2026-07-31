@@ -25,13 +25,13 @@ Every heavy uberdev pipeline today is a **directive-emitter**: the `SKILL.md` ba
    - historically, `/review-pr`'s locked marker + EXIT trap lived milliseconds (the marker write that is now `review_reserve_run_directory` in the `### Executable setup` fence, #302); the directive fallback now carries marker authority across shells in an identity/digest receipt, while the `EXPECTED_OLD_SHA` force-push lease still splits across fences (its capture in the Step-6c CONFLICT arm vs. the later `--force-with-lease` push fence);
    - `/testers`' `POLITE_BREACH` fail-the-run contract can never fire (the testers-pipeline breach gate, #306).
 2. **zsh/bash divergence.** The Bash tool runs `/bin/zsh` on macOS:
-   - `ARR=($VAR)` scalar-split both scan wave loops into one garbage element (the uberscan and ubersimplify chunk-id wave loops, #305) — the fan-out that replaced them is `areaPrompt` in `skills/scan-fleet/workflow.js`, so the shell array is gone rather than patched;
+   - `ARR=($VAR)` scalar-split both scan wave loops into one garbage element (the uberscan and ubersimplify chunk-id wave loops, #305) — the replacement fans out one `areaPrompt` per area inside `skills/scan-fleet/workflow.js`, so the shell array is gone rather than patched;
    - `compgen -G` ×4 fails → `/merge` PATH_2 misclassifies every worktree-produced PR as STALE (the audit-JSON worktree-glob discovery inside merge-pipeline `Step 1.4`, #303);
    - `type -t`, `BASH_REMATCH`, `trap RETURN`, `declare -A` (solve-pipeline's associative claim map; macOS `/bin/bash` 3.2 hard-errors) misfire silently (memory: `project_uberdev_type_t_bashism_zsh`).
 3. **Skill-renderer `$ARGUMENTS` mangling.** Positional args substitute into the *whole* SKILL.md body:
    - bare `$1/$2/$3` in helpers corrupt under `/solve 5 6 7` — the claude-version gate renders `min="5"` and every claim release retargets issue 5 (solve-pipeline's `MIN_CLAUDE_VERSION` gate and its claim-release helpers, #304);
    - awk column refs died in goal-pipeline (memory: `project_uberdev_skill_renderer_dollar_arg_collision`);
-   - `/testers http://localhost:3000` corrupted the testers-pipeline round-count helper's `"$1" "$2"` — the round loop is now `personaPrompt` in `skills/testers-pipeline/workflow.js`, reached by `scriptPath`, the one invocation form the renderer never rewrites.
+   - `/testers http://localhost:3000` corrupted the testers-pipeline round-count helper's `"$1" "$2"` — the round fan-out now issues one `personaPrompt` per persona per round inside `skills/testers-pipeline/workflow.js`, reached by `scriptPath`, the one invocation form the renderer never rewrites.
 4. **Dead circuit breakers + prose-only control flow.** Timers/accumulators inside ms-returning fences never accumulate:
    - uberthink's fleet ceiling is inert — all 8 `AGENTS_DISPATCHED` bump heredocs regex-match the file's *first* line, the seed `=0` (CB-ISLAND; reproduced by simulation, #307);
    - CB-WAVE is dead-by-default; SDD's three fix loops are **unbounded** ("Re-test until green" in the implement / re-test / quality-review loops, #308);
