@@ -4,6 +4,26 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.7] — 2026-07-30
+
+### Fixed
+
+- `/goal`'s verdict channel collapsed six distinct outcomes into one empty result, so **indeterminate discovery and detected tamper both read as "never reviewed"**. Each outcome is now recorded on a run-scoped sidecar (found / absent / indeterminate / tamper / projection-failed / cleanup-failed / selector-unavailable); tamper announces itself loudly, and a proven verdict still publishes when only cleanup fails.
+- `/goal` bounded the new anomaly states with their own counter and red-holds with `verdict_indeterminate` / `verdict_tamper_detected` instead of the misleading `dispatch_cap_exhausted`.
+- The legacy verdict path read `.sha` with no shape check; it is now validated as a 40-hex object name with a zsh-safe test, and a malformed anchor warns loudly (it is still compared — skipping the binding would let an unbound colour through on a command that auto-merges on green).
+- Resolving a helper's source directory fell back to the caller's cwd, so a planted file in that cwd could be sourced. The fallback is removed.
+- `/goal` refetched the open-PR list per issue; each pass now takes one snapshot and resolves every issue from it, sharing one ranking program with the live finder. A pass that made progress skips the fixed 60-second sleep — bounded to five consecutive fast passes, because the unbounded form turns a rate-limit warning into a self-inflicted 403 storm.
+- **RFC 0015 follow-through:** `workflow` was missing from all four backend sites in `lib/goal-state.sh`. The run-state sidecar allowlist silently *dropped* the value, after which the pid resolver defaulted to a detached backend and a Workflow run could be probed with `claude agents --json` and mis-reaped.
+
+### Added
+
+- `lib/goal-abort.sh` — releases every non-terminal `uberdev:active` claim for a run. Required now that fleet children do not survive their session: a closed window would otherwise strand those labels indefinitely.
+
+### Tests
+
+- New `tests/goal-verdict-receipt.test.sh` (45 cases): the closed-receipt colour matrix through the real locator, `missing` for all sixteen shape-gate clauses, every discovery classification, and forged-sidecar degradation — verified non-vacuous against the pre-change library.
+- Sidecar round-trip under `env -i` with cleared environment (an environment-passing test would mask the re-export trap), a zsh mirror of the colour matrix, and lifted `abc123` fixtures to real 40-hex object names.
+
 ## [0.41.6] — 2026-07-30
 
 ### Fixed

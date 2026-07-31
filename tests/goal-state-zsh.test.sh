@@ -107,7 +107,7 @@ Z2_TMP="$(mktemp -d)"
 ) > "$Z2_TMP/out.txt" 2>&1
 Z2_LINE="$(cat "$Z2_TMP/out.txt")"
 # Stderr must be free of the two zsh-runtime failure signatures on BOTH samples.
-if printf '%s' "$Z2_LINE" | grep -qiE 'bad substitution|read-only variable'; then
+if grep -qiE 'bad substitution|read-only variable' <<<"$Z2_LINE"; then
   fail "Z2a: agent_stuck_on_dialog leaked a zsh-runtime error to stderr ($Z2_LINE)"
 else
   pass "Z2a: agent_stuck_on_dialog ran clean — no 'bad substitution' / 'read-only variable' ($RUN_SHELL)"
@@ -156,7 +156,7 @@ Z3_OUT="$(
   uberdev_goal_state_init "$GOAL_ID" >/dev/null 2>&1
   print_summary 3 2>&1
 )"
-if printf '%s' "$Z3_OUT" | grep -qE '^goal goal-z3abcd01: cycles=3/8 prs_merged=0 prs_held=0 issues_resolved=0 wall_secs=3600$'; then
+if grep -qE '^goal goal-z3abcd01: cycles=3/8 prs_merged=0 prs_held=0 issues_resolved=0 wall_secs=3600$' <<<"$Z3_OUT"; then
   pass "Z3d: print_summary emits the mandated operator summary line under $RUN_SHELL"
 else
   fail "Z3d: print_summary summary line malformed/missing (got: [$Z3_OUT])"
@@ -285,14 +285,23 @@ rm -rf "$Z6_TMP" 2>/dev/null || true
 
 echo
 echo "== Z7: read_trust_signal SHA-binding under the live shell (#290.1) =="
+# #345 finding 2 — the fixtures below carry REAL lowercase 40-hex object names.
+# They used to be `abc123`, which pinned this path loose: a 6-char string can
+# never equal a 40-char head, so the "mismatch" leg passed for the wrong reason
+# and the "match" leg only worked because the stub echoed the same 6 chars back.
+# With true object names the assertion exercises the shape the producer actually
+# writes, and the new `.sha` shape gate stays silent on them (asserted below).
+Z7_SHA='a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0'
+Z7_SHA_OTHER='0f1e2d3c4b5a6978869504132435465768798a0b'
 Z7_TMP="$(mktemp -d)"
 Z7_OUT="$(
   export UBERDEV_TMPDIR="$Z7_TMP"
   vf="$Z7_TMP/verdict.json"
-  printf '%s\n' '{"pr":42,"sha":"abc123","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' > "$vf"
-  gh() { case "$1 $2" in ("pr view") printf 'abc123';; esac; }
+  printf '{"pr":42,"sha":"%s","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}\n' \
+    "$Z7_SHA" > "$vf"
+  gh() { case "$1 $2" in ("pr view") printf '%s' "$Z7_SHA";; esac; }
   m="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
-  gh() { case "$1 $2" in ("pr view") printf 'def456';; esac; }
+  gh() { case "$1 $2" in ("pr view") printf '%s' "$Z7_SHA_OTHER";; esac; }
   s="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
   gh() { return 1; }
   f="$(uberdev_goal_read_trust_signal "$vf" 2>/dev/null)"
@@ -304,6 +313,34 @@ case "$Z7_OUT" in
   *)
     fail "Z7a: SHA-binding wrong (#290.1 — got: [$Z7_OUT]; expect match=green mismatch=stale failsafe=green)" ;;
 esac
+
+# #345 finding 2 — the shape gate itself, under the LIVE shell. It is written
+# with a length probe plus a `case` glob precisely because this file also runs
+# under zsh, where a `[[ =~ ]]` capture would silently misbehave.
+Z7B_TMP="$(mktemp -d)"
+Z7B_OUT="$(
+  export UBERDEV_TMPDIR="$Z7B_TMP"
+  bad="$Z7B_TMP/short.json"
+  good="$Z7B_TMP/good.json"
+  printf '{"pr":42,"sha":"abc123","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}\n' > "$bad"
+  printf '{"pr":42,"sha":"%s","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}\n' \
+    "$Z7_SHA" > "$good"
+  gh() { case "$1 $2" in ("pr view") printf '%s' "$Z7_SHA";; esac; }
+  bad_err="$(uberdev_goal_read_trust_signal "$bad" 2>&1 >/dev/null)"
+  bad_sig="$(uberdev_goal_read_trust_signal "$bad" 2>/dev/null)"
+  good_err="$(uberdev_goal_read_trust_signal "$good" 2>&1 >/dev/null)"
+  warned=no; quiet=no
+  grep -q 'malformed .sha anchor' <<<"$bad_err" && warned=yes
+  grep -q 'malformed .sha anchor' <<<"$good_err" || quiet=yes
+  printf 'warned=%s quiet=%s sig=%s\n' "$warned" "$quiet" "$bad_sig"
+)"
+case "$Z7B_OUT" in
+  *"warned=yes quiet=yes sig=stale"*)
+    pass "Z7b: malformed .sha is diagnosed and still fails closed to stale under $RUN_SHELL (#345)" ;;
+  *)
+    fail "Z7b: .sha shape gate wrong (#345 — got: [$Z7B_OUT]; expect warned=yes quiet=yes sig=stale)" ;;
+esac
+rm -rf "$Z7B_TMP" 2>/dev/null || true
 rm -rf "$Z7_TMP" 2>/dev/null || true
 
 echo
@@ -417,8 +454,8 @@ Z10_OUT="$(
     printf 'CLEAN\n'
   fi
 )"
-if printf '%s' "$Z10_OUT" | grep -q 'CLEAN' \
-   && ! printf '%s' "$Z10_OUT" | grep -qi 'no matches found'; then
+if grep -q 'CLEAN' <<<"$Z10_OUT" \
+   && ! grep -qi 'no matches found' <<<"$Z10_OUT"; then
   pass "Z10a: all glob-iterating enumerators return cleanly on zero matches under $RUN_SHELL — no 'no matches found' fatal (#299 finding 1)"
 else
   fail "Z10a: an enumerator FATALED on zero matches under $RUN_SHELL (got: [$Z10_OUT]) — verdict-locator glob regression (#299 finding 1)"
@@ -537,12 +574,121 @@ Z13_OUT="$(
   ' _ "$GOAL_LIB" 2>&1
 )"
 Z13_RC=$?
-if [ "$Z13_RC" -eq 0 ] && printf '%s' "$Z13_OUT" | grep -q 'discover_review_verdict_json'; then
+if [ "$Z13_RC" -eq 0 ] && grep -q 'discover_review_verdict_json' <<<"$Z13_OUT"; then
   pass "Z13: $RUN_SHELL resolves goal-state.sh via BASH_SOURCE/%x outside the repository cwd"
 else
   fail "Z13: $RUN_SHELL failed to load sibling discover.sh from unrelated cwd (rc=$Z13_RC out=[$Z13_OUT])"
 fi
 rm -rf "$Z13_TMP"
+
+echo
+echo "== Z14: closed-receipt colour matrix under the live shell (#347) =="
+# The zsh mirror of tests/goal-verdict-receipt.test.sh section A. The colour
+# decision is reached through a jq gate, a TSV `read` split on a literal tab and
+# an arithmetic comparison — all three have bitten this project across shells
+# (`local status` being read-only under zsh took out a whole circuit breaker in
+# #270). Locking the matrix in BOTH shells is what stops a colour decision from
+# silently differing between the CI runner and the Bash tool's /bin/zsh.
+Z14_SHA='a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0'
+Z14_SHA_OTHER='0f1e2d3c4b5a6978869504132435465768798a0b'
+Z14_TMP="$(mktemp -d)"
+Z14_OUT="$(
+  export UBERDEV_TMPDIR="$Z14_TMP"
+  cd "$Z14_TMP" || exit 2
+  mkdir -p .uberdev/runs/20260401-101112-deadbeef
+  mint() {
+    printf '{"pr":%s,"sha":"%s","phases":{"phase2_5":{"by_severity":{"blocker":%s,"critical":%s},"halted":%s}}}\n' \
+      "$1" "$Z14_SHA" "$2" "$3" "$4" > .uberdev/runs/20260401-101112-deadbeef/review-pr-verdict.json
+    uberdev_goal_locate_review_pr_audit_by_pr "$1" 2>/dev/null
+  }
+  r_green="$(mint 5101 0 0 false)"
+  r_yellow="$(mint 5102 0 2 false)"
+  r_red="$(mint 5103 1 0 false)"
+  gh() { case "$1 $2" in ("pr view") printf '%s\n' "$Z14_SHA";; esac; }
+  g="$(uberdev_goal_read_trust_signal "$r_green" 2>/dev/null)"
+  y="$(uberdev_goal_read_trust_signal "$r_yellow" 2>/dev/null)"
+  r="$(uberdev_goal_read_trust_signal "$r_red" 2>/dev/null)"
+  gh() { case "$1 $2" in ("pr view") printf '%s\n' "$Z14_SHA_OTHER";; esac; }
+  st="$(uberdev_goal_read_trust_signal "$r_green" 2>/dev/null)"
+  gh() { case "$1 $2" in ("pr view") printf '%s\n' "$Z14_SHA";; esac; }
+  # A receipt whose closed shape is violated must be `missing`, never a colour.
+  bad="$(printf '%s' "$r_green" | sed 's/"audit_state":"current"/"audit_state":"malformed"/')"
+  m="$(uberdev_goal_read_trust_signal "$bad" 2>/dev/null)"
+  legacy="$(printf '%s' "$r_green" | sed 's/"audit_state":"current"/"audit_state":"legacy"/')"
+  l="$(uberdev_goal_read_trust_signal "$legacy" 2>/dev/null)"
+  printf 'g=%s y=%s r=%s stale=%s missing=%s legacy=%s\n' "$g" "$y" "$r" "$st" "$m" "$l"
+)"
+case "$Z14_OUT" in
+  *"g=green y=yellow r=red stale=stale missing=missing legacy=stale"*)
+    pass "Z14a: receipt colour matrix (green/yellow/red + SHA-stale + shape-missing + legacy-stale) correct under $RUN_SHELL (#347)" ;;
+  *)
+    fail "Z14a: receipt colour matrix wrong under $RUN_SHELL (#347 — got: [$Z14_OUT]; expect g=green y=yellow r=red stale=stale missing=missing legacy=stale)" ;;
+esac
+rm -rf "$Z14_TMP" 2>/dev/null || true
+
+echo
+echo "== Z15: verdict-discovery classification survives the live shell (#348) =="
+# The classification travels on DISK because every caller invokes the locator
+# inside a command substitution — a subshell, whose globals die on the way out.
+# That is a cross-shell claim, so prove it in both shells.
+Z15_TMP="$(mktemp -d)"
+Z15_OUT="$(
+  export UBERDEV_TMPDIR="$Z15_TMP" UBERDEV_GOAL_ID="goaltestz15"
+  discover_review_verdict_json() { return 2; }
+  review_verdict_discovery_state() { printf 'indeterminate\n'; }
+  recapture_review_verdict_snapshot() { printf 'unexpected-recapture\n'; }
+  cleanup_review_verdict_snapshot() { return 0; }
+  out="$(uberdev_goal_locate_review_pr_audit_by_pr 515 2>/dev/null)"
+  printf 'state=%s empty=%s\n' \
+    "$(uberdev_goal_last_verdict_state 515)" \
+    "$([ -z "$out" ] && printf yes || printf no)"
+)"
+case "$Z15_OUT" in
+  *"state=indeterminate empty=yes"*)
+    pass "Z15a: indeterminate is recorded distinctly (not folded into absent/missing) under $RUN_SHELL (#348)" ;;
+  *)
+    fail "Z15a: verdict classification wrong under $RUN_SHELL (#348 — got: [$Z15_OUT]; expect state=indeterminate empty=yes)" ;;
+esac
+rm -rf "$Z15_TMP" 2>/dev/null || true
+
+echo
+echo "== Z16: the workflow backend is a first-class value in every backend case (#301/RFC 0015) =="
+# RFC 0015 added `workflow` to the dispatch enum. Every `case
+# "$UBERDEV_RESOLVED_BACKEND"` in this lib had to learn it in the same change:
+# an unlisted value falls into a default arm that probes `claude agents --json`
+# for liveness and PID-reaps for cleanup — both wrong, and both silent.
+Z16_TMP="$(mktemp -d)"
+Z16_OUT="$(
+  export UBERDEV_TMPDIR="$Z16_TMP" UBERDEV_GOAL_ID="goaltestz16" UBERDEV_RESOLVED_BACKEND=workflow
+  uberdev_goal_state_init "goaltestz16" >/dev/null 2>&1
+  printf '900\t42\t1700000000\tPENDING\n' > "$Z16_TMP/goal-goaltestz16-batch-prs.tsv"
+  # A stale PID stash from an EARLIER detached run: the pre-fix reaper would read
+  # it and signal whatever process now owns that pid.
+  printf '{"pid":1,"issue":42}\n' > "$Z16_TMP/solve-bg-status-42.json"
+  # The `busy=no` / `infl=no` legs alone are NOT discriminating: the pre-RFC-0015
+  # default arm reaches `claude agents --json`, and a stub that merely `return 1`s
+  # answers "not busy / not in flight" too — so both legs pass with the workflow
+  # arms deleted. The load-bearing assertion is therefore that the claude-agents
+  # probe is NEVER REACHED. Record each invocation to a FILE (a >&2 breadcrumb
+  # from inside `$(…)` is not visible to the assertion, and the call sites
+  # redirect stderr to /dev/null anyway), then assert the file stays empty.
+  claude() { printf 'CLAUDE-AGENTS-PROBED %s\n' "$*" >> "$Z16_TMP/claude-probe.log"; return 1; }
+  busy=no;  uberdev_goal_agent_busy_for_issue 42 2>/dev/null && busy=yes
+  infl=no;  uberdev_goal_review_pr_in_flight 900 2>/dev/null && infl=yes
+  _uberdev_goal_reap_zombies >/dev/null 2>&1
+  skipped=no
+  grep -q 'runtime_owned_lifecycle' "$Z16_TMP/goal-goaltestz16.jsonl" 2>/dev/null && skipped=yes
+  probed=no
+  [ -s "$Z16_TMP/claude-probe.log" ] && probed=yes
+  printf 'busy=%s infl=%s reap_skipped=%s claude_probed=%s\n' "$busy" "$infl" "$skipped" "$probed"
+)"
+case "$Z16_OUT" in
+  *"busy=no infl=no reap_skipped=yes claude_probed=no"*)
+    pass "Z16a: backend=workflow gets explicit liveness + reaper arms under $RUN_SHELL (the claude-agents probe is never reached, no PID reap)" ;;
+  *)
+    fail "Z16a: backend=workflow still falls into a default arm under $RUN_SHELL (got: [$Z16_OUT]; expect busy=no infl=no reap_skipped=yes claude_probed=no)" ;;
+esac
+rm -rf "$Z16_TMP" 2>/dev/null || true
 
 # Cleanup
 rm -rf "$Z2_TMP" "$Z3_TMP" "$Z4_TMP" 2>/dev/null || true

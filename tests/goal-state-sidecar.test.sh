@@ -496,6 +496,44 @@ s7_notag="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
 ')"
 assert_eq "$s7_notag" "rc0|0" "S7-neg: tag-less candidates file yields empty candidates (read still rc 0)"
 
+echo "== S8: UBERDEV_RESOLVED_BACKEND=workflow round-trips the sidecar (RFC 0015) =="
+# RFC 0015 added `workflow` to lib/dispatch.sh's _UBERDEV_DISPATCH_BACKEND_ENUM
+# but NOT to read_run_state's allowlist. An unlisted value has no else arm — it
+# is DROPPED — so a fresh-shell phase fence rehydrated an EMPTY backend and every
+# backend `case` in goal-state.sh fell into its default arm: `claude agents
+# --json` for liveness and the PID lane for the reaper. A Workflow run was
+# therefore probed and reaped as if it were a detached `background` session.
+#
+# `env -i` with ONLY UBERDEV_TMPDIR + PATH is load-bearing, not stylistic: an
+# env-passing test would smuggle UBERDEV_RESOLVED_BACKEND across the boundary and
+# pass even with the allowlist unchanged, masking exactly the trap under test
+# (the #178 re-export class — project memory
+# project_uberdev_goal_runstate_crossshell_traps).
+GOAL_ID="goal-test-wf0000001"; cycle=1; watch_start=1716400000
+overflow_count=0; overflow_detected=0; MAX_CYCLES=5
+UBERDEV_RESOLVED_BACKEND="workflow"
+queue=(); active_issues=()
+uberdev_goal_write_run_state || { FAIL=$((FAIL+1)); echo "  FAIL  S8.write" >&2; }
+s8_got="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null || exit 9
+  printf "%s" "${UBERDEV_RESOLVED_BACKEND:-DROPPED}"
+')"
+assert_eq "$s8_got" "workflow" "S8.workflow-backend-survives-a-cleared-env-fresh-shell"
+
+# NEGATIVE control: a value outside the allowlist must still be dropped, so the
+# widening is exactly one member and not a hole.
+sed -i.bak 's/^UBERDEV_RESOLVED_BACKEND=.*/UBERDEV_RESOLVED_BACKEND=not-a-backend/' \
+  "$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
+s8neg="$(env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" bash -c '
+  . "'"$DISPATCH_LIB"'"
+  . "'"$GOAL_LIB"'"
+  uberdev_goal_read_run_state >/dev/null || exit 9
+  printf "%s" "${UBERDEV_RESOLVED_BACKEND:-REFUSED}"
+')"
+assert_eq "$s8neg" "REFUSED" "S8-neg.a-value-outside-the-allowlist-is-still-dropped"
+
 echo
 printf 'goal-state-sidecar: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -207,6 +207,220 @@ assert_eq "$got" "2" "#234 count_resolved_issues: resolved + resolved-by-no-acti
 
 rm -rf "$hoist_dir"
 
+# ---------------------------------------------------------------------------
+# lib/goal-abort.sh — release the `uberdev:active` claims a dead /goal run left
+# behind (RFC 0015 §6 owed sweep).
+#
+# The claim is a real cross-process lock: every future /goal cycle AND every
+# manual /solve honours it. It is released on two paths only, and neither runs
+# when the RUN ITSELF disappears — which is the normal case now that the default
+# transport is Workflow-native and dies with the session. A stranded label makes
+# the issue permanently un-dispatchable and looks like "/solve silently skips my
+# issue", so the sweep has to be right about WHICH issues still hold a claim.
+#
+# `gh` is stubbed via a PATH shim (not a shell function): goal-abort.sh runs as a
+# separate PROCESS, so a function in this shell would never reach it.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# #301 speedup finding 1 — per-pass PR snapshot.
+#
+# Phase 2a resolved every active issue with its OWN `gh pr list --state open
+# --limit 200`, N identical round-trips per 60s pass. The snapshot pair replaces
+# them with one fetch plus N in-process resolutions. Two properties must hold or
+# the swap is a behaviour change, not a speedup: identical RANKING (closes-link
+# wins over the feat/N- head heuristic, highest number wins within each), and
+# identical FAIL-OPEN semantics (unresolvable => empty + rc 0, never an error the
+# watch loop would mistake for "solver died").
+# ---------------------------------------------------------------------------
+echo "== #301: uberdev_goal_find_pr_for_issue_from_json — same ranking, zero network =="
+SNAP='[{"number":100,"closingIssuesReferences":[{"number":42}],"headRefName":"feat/42-a"},
+      {"number":140,"closingIssuesReferences":[{"number":42}],"headRefName":"chore/x"},
+      {"number":900,"closingIssuesReferences":[],"headRefName":"feat/42-late"},
+      {"number":200,"closingIssuesReferences":[],"headRefName":"feat/77-only-head"},
+      {"number":210,"closingIssuesReferences":[{"number":88}],"headRefName":"feat/88-b"}]'
+# `gh` is SHADOWED (not merely absent) for the whole probe: a shim that records
+# its argv and exits 97 sits at the FRONT of PATH. `bash -c` inherits PATH, so
+# "we didn't put gh there" would be no guarantee at all — the real gh stays
+# resolvable and a regression back to the live finder would make a genuine
+# network call and quietly pass. With the shim, any such call is both loud (rc
+# 97) and RECORDED, which is what the zero-invocation assertion below reads.
+SNAP_BIN="$(mktemp -d 2>/dev/null || printf '/tmp/goal-snap-%s' "$$")"
+mkdir -p "$SNAP_BIN"
+SNAP_GH_CALLS="$SNAP_BIN/gh-calls.txt"
+cat > "$SNAP_BIN/gh" <<'SNAPGH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SNAP_GH_CALLS"
+printf 'gh: this probe must never reach the network\n' >&2
+exit 97
+SNAPGH
+chmod +x "$SNAP_BIN/gh"
+_snap_run() {
+  UBERDEV_TMPDIR="${TMPDIR:-/tmp}" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" SNAP="$SNAP" \
+    SNAP_GH_CALLS="$SNAP_GH_CALLS" PATH="$SNAP_BIN:$PATH" \
+    bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"; '"$1"
+}
+got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 42 "$SNAP"')"
+assert_eq "$got" "140" "#301 from_json: the closes-link match wins, highest number (140, NOT the 900 head-ref match)"
+got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 77 "$SNAP"')"
+assert_eq "$got" "200" "#301 from_json: falls back to the feat/N- head ref when no closes-link exists"
+got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 99 "$SNAP"')"
+assert_eq "$got" "" "#301 from_json: unknown issue resolves to empty (not the jq literal 'null')"
+got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 42 ""')"
+assert_eq "$got" "" "#301 from_json: an empty snapshot (failed fetch) resolves to empty, fail-open"
+_snap_run 'uberdev_goal_find_pr_for_issue_from_json 42 ""' >/dev/null 2>&1
+assert_eq "$?" "0" "#301 from_json: an empty snapshot is rc 0 — the caller must read it as 'keep waiting', not 'error'"
+_snap_run 'uberdev_goal_find_pr_for_issue_from_json abc "$SNAP"' >/dev/null 2>&1
+assert_eq "$?" "1" "#301 from_json: a non-integer issue is rejected rc 1 (the R3 gh-injection gate)"
+got="$(_snap_run 'uberdev_goal_find_pr_for_issue_from_json 42 "not json"')"
+assert_eq "$got" "" "#301 from_json: a malformed snapshot resolves to empty, never a jq error string"
+# SSOT: both resolvers must run the SAME ranking program, or the snapshot path
+# can silently disagree with the live path about which PR owns an issue.
+got="$(_snap_run '_uberdev_goal_pr_for_issue_jq 42 | grep -c "closingIssuesReferences"')"
+assert_eq "$got" "1" "#301 the shared ranking program is a single named helper (not duplicated inline)"
+if grep -qF '_uberdev_goal_pr_for_issue_jq' "$GOAL_LIB"; then
+  live_uses="$(grep -cF '_uberdev_goal_pr_for_issue_jq "$n"' "$GOAL_LIB")"
+  assert_eq "$live_uses" "2" "#301 both the live finder and the snapshot finder call the shared ranking helper"
+else
+  assert_eq "helper" "MISSING" "#301 both the live finder and the snapshot finder call the shared ranking helper"
+fi
+# Zero network: the shim at the front of PATH was never invoked by ANY of the
+# probes above. A regression back to `gh pr list` per resolution trips this.
+assert_eq "$([ -e "$SNAP_GH_CALLS" ] && printf yes || printf no)" "no" \
+  "#301 from_json: resolves with ZERO gh invocations (the PATH shim recorded nothing)"
+rm -rf "$SNAP_BIN"
+
+echo "== goal-abort.sh: releases only NON-terminal claims, then reaps run-state =="
+ABORT_SH="$CLAUDE_PLUGIN_ROOT/lib/goal-abort.sh"
+if [ ! -r "$ABORT_SH" ]; then
+  FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: %s missing\n' "$ABORT_SH" >&2
+else
+  ab_dir="$(mktemp -d 2>/dev/null || printf '/tmp/goal-abort-%s' "$$")"
+  ab_bin="$ab_dir/bin"; mkdir -p "$ab_bin"
+  cat > "$ab_bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+# Record every `gh issue edit` invocation; fail for issue 66 so the fail-loud
+# path is exercised alongside the happy one.
+printf '%s\n' "$*" >> "$GH_CALLS"
+for a in "$@"; do
+  if [ "$a" = "66" ]; then
+    printf 'HTTP 403: Resource not accessible\n' >&2
+    exit 1
+  fi
+done
+exit 0
+GHSTUB
+  chmod +x "$ab_bin/gh"
+
+  AB_GOAL_ID="goaltestabort"
+  # Ledger: 11 is still solving (claim held), 22 was dispatched but never
+  # progressed (claim held), 33 resolved via merge (released by the merge path),
+  # 44 failed (released at its terminal transition), 55 resolved-by-no-action
+  # (same). Only 11 and 22 may be touched.
+  printf '11\tdispatched\t100\n11\tsolving\t150\n22\tdispatched\t120\n33\tsolving\t130\n33\tresolved\t900\n44\tsolving\t140\n44\tfailed\t910\n55\tresolved-by-no-action\t920\n' \
+    > "$ab_dir/goal-$AB_GOAL_ID-issue-states.tsv"
+  printf '%s\n' "$AB_GOAL_ID" > "$ab_dir/goal-active-id.txt"
+  printf 'GOAL_ID=%s\ncycle=1\n' "$AB_GOAL_ID" > "$ab_dir/goal-$AB_GOAL_ID-runstate"
+
+  # DRY RUN first: must mutate nothing and keep the run-state.
+  ab_dry="$(GH_CALLS="$ab_dir/calls-dry.txt" PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" \
+    bash "$ABORT_SH" --dry-run 2>&1)"
+  assert_eq "$([ -e "$ab_dir/calls-dry.txt" ] && printf yes || printf no)" "no" \
+    "goal-abort dry-run: no gh mutation at all"
+  if grep -qF "would_release=2" <<<"$ab_dry"; then
+    PASS=$((PASS + 1)); printf '  PASS  goal-abort dry-run: reports exactly the 2 non-terminal claims\n'
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort dry-run: expected would_release=2 (got: [%s])\n' "$ab_dry" >&2
+  fi
+  assert_eq "$([ -e "$ab_dir/goal-$AB_GOAL_ID-runstate" ] && printf yes || printf no)" "yes" \
+    "goal-abort dry-run: run-state left intact"
+
+  # REAL run, resolving the goal from the fixed-path pointer (the only channel
+  # that survives a killed session — no GOAL_ID argument, no env var).
+  ab_out="$(GH_CALLS="$ab_dir/calls.txt" PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" \
+    bash "$ABORT_SH" 2>&1)"
+  ab_rc=$?
+  ab_calls="$(cat "$ab_dir/calls.txt" 2>/dev/null)"
+  assert_eq "$(grep -c 'issue edit' <<<"$ab_calls")" "2" \
+    "goal-abort: exactly 2 gh edits — terminal issues are NOT touched"
+  if grep -qE 'issue edit 11 .*--remove-label uberdev:active .*--remove-assignee' <<<"$ab_calls"; then
+    PASS=$((PASS + 1)); printf '  PASS  goal-abort: releases label AND assignee in one atomic gh call\n'
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: expected a combined remove-label+remove-assignee edit (got: [%s])\n' "$ab_calls" >&2
+  fi
+  for terminal in 33 44 55; do
+    if grep -qE "issue edit $terminal( |\$)" <<<"$ab_calls"; then
+      FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: touched terminal issue %s (its claim was already released)\n' "$terminal" >&2
+    else
+      PASS=$((PASS + 1)); printf '  PASS  goal-abort: leaves terminal issue %s alone\n' "$terminal"
+    fi
+  done
+  assert_eq "$ab_rc" "0" "goal-abort: rc 0 when every release succeeded"
+  assert_eq "$([ -e "$ab_dir/goal-active-id.txt" ] && printf yes || printf no)" "no" \
+    "goal-abort: reaps the fixed-path active-id pointer on success"
+
+  # FAIL-LOUD: a release that gh refuses must be rc 1 AND must keep the
+  # run-state, so a re-run can retry instead of losing the record of what is
+  # still claimed.
+  printf '66\tsolving\t150\n' > "$ab_dir/goal-$AB_GOAL_ID-issue-states.tsv"
+  printf '%s\n' "$AB_GOAL_ID" > "$ab_dir/goal-active-id.txt"
+  printf 'GOAL_ID=%s\ncycle=1\n' "$AB_GOAL_ID" > "$ab_dir/goal-$AB_GOAL_ID-runstate"
+  ab_fail_out="$(GH_CALLS="$ab_dir/calls-fail.txt" PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" \
+    bash "$ABORT_SH" "$AB_GOAL_ID" 2>&1)"
+  ab_fail_rc=$?
+  assert_eq "$ab_fail_rc" "1" "goal-abort: rc 1 when a release fails (never a silent success)"
+  if grep -qF "#66" <<<"$ab_fail_out"; then
+    PASS=$((PASS + 1)); printf '  PASS  goal-abort: names the still-claimed issue so it can be released by hand\n'
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: failure output must name the stranded issue (got: [%s])\n' "$ab_fail_out" >&2
+  fi
+  assert_eq "$([ -e "$ab_dir/goal-$AB_GOAL_ID-runstate" ] && printf yes || printf no)" "yes" \
+    "goal-abort: keeps run-state after a failed release so the sweep can be retried"
+
+  # UNREADABLE / UNPARSEABLE LEDGER: an empty pending-claim scan because awk
+  # CRASHED is byte-identical to an empty scan because every issue is terminal.
+  # The script has no `pipefail`, so an unchecked scan reported
+  # `released=0 … run-state cleaned`, exited 0, released NOTHING and then DELETED
+  # both the run-state sidecar and the fixed-path active-id pointer — destroying
+  # the only channel a retry could resolve this run through and stranding every
+  # `uberdev:active` claim permanently. That is the exact failure this script
+  # exists to prevent, so it must take the fail-loud keep-run-state contract.
+  #
+  # An `awk` shim that exits non-zero reproduces it deterministically on every
+  # platform; a chmod-000 ledger does not (no-op as root, ignored on Windows).
+  cat > "$ab_bin/awk" <<'AWKSTUB'
+#!/usr/bin/env bash
+printf 'awk: simulated ledger read failure\n' >&2
+exit 2
+AWKSTUB
+  chmod +x "$ab_bin/awk"
+  printf '77\tsolving\t150\n' > "$ab_dir/goal-$AB_GOAL_ID-issue-states.tsv"
+  printf '%s\n' "$AB_GOAL_ID" > "$ab_dir/goal-active-id.txt"
+  printf 'GOAL_ID=%s\ncycle=1\n' "$AB_GOAL_ID" > "$ab_dir/goal-$AB_GOAL_ID-runstate"
+  ab_led_out="$(GH_CALLS="$ab_dir/calls-ledger.txt" PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" \
+    bash "$ABORT_SH" "$AB_GOAL_ID" 2>&1)"
+  ab_led_rc=$?
+  rm -f "$ab_bin/awk"
+  assert_eq "$ab_led_rc" "1" \
+    "goal-abort: an unreadable issue-state ledger is rc 1 — never a silent 'nothing to release' success"
+  if grep -qF 'FAILED to read the issue-state ledger' <<<"$ab_led_out"; then
+    PASS=$((PASS + 1)); printf '  PASS  goal-abort: names the unread ledger on stderr instead of reporting released=0\n'
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  goal-abort: expected an unread-ledger diagnostic (got: [%s])\n' "$ab_led_out" >&2
+  fi
+  assert_eq "$([ -e "$ab_dir/goal-$AB_GOAL_ID-runstate" ] && printf yes || printf no)" "yes" \
+    "goal-abort: KEEPS the run-state when the ledger could not be read (a retry still has something to resolve)"
+  assert_eq "$([ -e "$ab_dir/goal-active-id.txt" ] && printf yes || printf no)" "yes" \
+    "goal-abort: KEEPS the fixed-path active-id pointer — the only channel a retry can find the run through"
+  assert_eq "$([ -e "$ab_dir/calls-ledger.txt" ] && printf yes || printf no)" "no" \
+    "goal-abort: attempts no gh mutation at all when the ledger is unread"
+
+  # A path-traversal GOAL_ID must be refused before it indexes any file path.
+  PATH="$ab_bin:$PATH" UBERDEV_TMPDIR="$ab_dir" bash "$ABORT_SH" '../pwned' >/dev/null 2>&1
+  assert_eq "$?" "2" "goal-abort: refuses a path-traversal GOAL_ID (rc 2)"
+
+  rm -rf "$ab_dir"
+fi
+
 # Summary
 echo
 echo "== Summary =="
