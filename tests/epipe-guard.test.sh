@@ -80,9 +80,13 @@
 #      an ERE alternation inside a quoted pattern (`assert_grep "$f" 'A|head'`),
 #      where a space would be literal pattern content. Every pipeline in this
 #      repo is written with the space; an unspaced one would slip through.
-#   5. Markdown `bash` fences inside `skills/**/SKILL.md`. They are executed,
-#      but their pipefail state is per-fence and set by the caller, so file-level
-#      exposure cannot be decided the way it can for a `.sh` file.
+#   5. Markdown `bash` fences inside `skills/**/SKILL.md`. They are executed, but
+#      their pipefail state is per-fence (Bash-tool calls share no shell state), so
+#      file-level exposure cannot be decided the way it can for a `.sh` file.
+#      Checked by hand rather than assumed: the repo's one instance,
+#      `merge-pipeline/SKILL.md:700`, sits in a fence that sets NEITHER pipefail
+#      nor -e, so its rc is grep's rc and it is not exposed. Re-check by hand if a
+#      fence ever gains `set -o pipefail`.
 #
 # SCAN SET. Every tracked `*.sh` file in the repo — tests, `plugins/uberdev/lib`,
 # the Codex mirror, `codex/tools`, `tools/prkit`, `install.sh` — that turns
