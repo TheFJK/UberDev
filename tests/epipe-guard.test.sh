@@ -146,6 +146,14 @@ function neutralised(s) {
   return (s ~ /[|][|][[:space:]]*(true|:)([[:space:]]|;|[)]|$)/)
 }
 function subdepth(s,   i, n, c, d) {
+  # Substitution depth at a match position: > 0 means the pipeline is producing
+  # a VALUE inside `$( ... )` rather than a truth value. Parens are counted
+  # after skipping backslash-escaped characters, so an ERE `\(` (a literal
+  # paren, not a group) does not skew the count, and a balanced ERE group
+  # `(a|b)` inside a quoted pattern nets out to zero. An UNBALANCED, unescaped
+  # paren in a quoted pattern would skew it — `(` alone is not a valid ERE, so
+  # the reachable case is a stray `)`, which can only lower the depth and
+  # therefore only ever flags MORE, never less.
   d = 0; n = length(s); i = 1
   while (i <= n) {
     c = substr(s, i, 1)
