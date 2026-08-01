@@ -4,6 +4,37 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.7] — 2026-07-31
+
+### Fixed
+
+- Closed the `pipefail` + early-exit-reader EPIPE race repo-wide (#313). Under `set -o pipefail` a reader that exits at its first match (`grep -q`, `grep -m`, `head`, `read`) leaves the writer taking EPIPE, and pipefail adopts the writer's non-zero status — false-failing an assertion whose pattern **matched**. Measured, not assumed: 20/20 false non-zero through a pipe versus 0/20 through a herestring, for each reader in the set.
+- One site was **inverting** its meaning rather than merely flaking: `grep -q "Traceback" && fail …` under `set -e`. An EPIPE after the match short-circuited the `&&`, so a genuinely leaked Python traceback was reported **PASS**.
+
+### Added
+
+- `tests/epipe-guard.test.sh`, built around the risk rather than the syntax that happened to be converted: logical-line joining (so a pipeline split across physical lines cannot hide), an **unconstrained** writer side, a measured early-exit reader set, and a scan over every tracked `*.sh` via `git ls-files` — 100 `pipefail`-setting files, not just `tests/`. That widened scope caught two production instances (`lib/bump-version.sh`, `codex/install-codex.sh`).
+- The oracle is 26 independent cases — 15 must-flag shapes and 11 must-not-flag boundary cases — so it can fail per shape instead of certifying the detector as a whole. Removing a reader from the set reds exactly four named cases and nothing else.
+- A vacuous-green path **inside the guard** was found and closed while building it: a non-zero `awk` exit produced empty output, which read as "clean". A detector error is now a named failure per file.
+
+The same guard run against the previous `main` flags **218** sites; against this tree, **0**.
+
+## [0.42.6] — 2026-07-31
+
+### Fixed
+
+- **Two more live instances of the v0.42.3 defect, both of which abort an entire `/solve`, `/turbo` or `/ubergoal` batch.** `triage_decision.files` and `triage_decision.components` are validated by the routing-context schema, but their producers scrape free-form issue prose and never checked the shape they had to satisfy. Reproduced: a markdown code span `` `-foo.sh` `` emits a leading dash; a pasted stack-trace path exceeds the 255-char cap; a non-ASCII filename survives `casefold()`; a 141-character module word exceeds the 128-char component cap; `İstanbul` casefolds to a two-codepoint `i̇stanbul`. Each makes `uberdev_agent_context_create` fail with `route_context_create_failed` and refuses the **whole batch** — "no claims written; no agents dispatched" — so innocent sibling issues die as collateral with an error naming neither the field nor the token.
+- The `components` field has **two** producers unioned, and v0.42.3 filtered only one of them. `named_modules()` fed the same validated field unfiltered, so the field looked guarded while still diverging. The filter now sits at the **union**, giving the field exactly one choke point however many producers ever feed it.
+
+### Tests
+
+- The v0.42.3 guard property-checked a single producer and was therefore structurally blind to the second — it certified a field that was still broken. The check now runs at `classify()`, the only vantage point that sees every path into both fields, over hostile bodies covering all five reproductions above.
+- The drift guard now scrapes the validator literal **per field name** for `files` as well as `components`, so a rename makes it fail rather than silently pass.
+- Added a non-vacuity assertion: an ordinary body must still yield files and components. A filter that dropped everything would have satisfied every other assertion while destroying triage.
+- Mutation-verified four ways, including removing the second producer entirely — the over-narrow failure the new assertion exists to catch.
+
+_Found by a repo-wide sweep for the "one contract, two independent copies, nothing comparing them" class, after four instances of it shipped through green CI in a single day._
+
 ## [0.42.5] — 2026-07-31
 
 ### Fixed

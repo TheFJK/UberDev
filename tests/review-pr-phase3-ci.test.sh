@@ -102,9 +102,9 @@ assert_grep "$REVIEW_PR" \
 # minimum-progress sleep) must therefore fit strictly under the 600s ceiling,
 # and the total must travel across fences as a carried deadline. Assert the
 # arithmetic, not just the presence of the names.
-CI_MONITOR_PASS_CONST="$(grep -oE '^ *CI_MONITOR_PASS_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
-CI_MONITOR_FENCE_CONST="$(grep -oE '^ *CI_MONITOR_FENCE_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
-CI_MONITOR_MIN_CONST="$(grep -oE '^ *CI_MONITOR_MIN_PASS_SEC=[0-9]+' "$REVIEW_PR" | head -n 1 | cut -d= -f2)"
+CI_MONITOR_PASS_CONST="$(head -n 1 <<<"$(grep -oE '^ *CI_MONITOR_PASS_SEC=[0-9]+' "$REVIEW_PR")" | cut -d= -f2)"
+CI_MONITOR_FENCE_CONST="$(head -n 1 <<<"$(grep -oE '^ *CI_MONITOR_FENCE_SEC=[0-9]+' "$REVIEW_PR")" | cut -d= -f2)"
+CI_MONITOR_MIN_CONST="$(head -n 1 <<<"$(grep -oE '^ *CI_MONITOR_MIN_PASS_SEC=[0-9]+' "$REVIEW_PR")" | cut -d= -f2)"
 if [ -n "$CI_MONITOR_PASS_CONST" ] && [ -n "$CI_MONITOR_FENCE_CONST" ] && \
    [ -n "$CI_MONITOR_MIN_CONST" ] && \
    [ "$((CI_MONITOR_FENCE_CONST + CI_MONITOR_MIN_CONST))" -lt 600 ] && \
@@ -971,7 +971,7 @@ assert_grep "$REVIEW_PR" \
 # "REFUSED is a deterministic decision, not flake; retrying consumes 3 iterations").
 # Negative: extract the REFUSED sub-block by line range and assert no retry-counter
 # increment in that sub-block.
-R_START=$(grep -n 'ci-code-fixer.*`status: REFUSED`' "$REVIEW_PR" | head -1 | cut -d: -f1)
+R_START=$(head -1 <<<"$(grep -n 'ci-code-fixer.*`status: REFUSED`' "$REVIEW_PR")" | cut -d: -f1)
 R_END=$(awk -v s="${R_START:-0}" 'NR > s && /ci-rebase-handler.*`status: REBASED|ci-rebase-handler.*`status: CONFLICT|^### 6c\.6/ { print NR; exit }' "$REVIEW_PR")
 if [[ -n "$R_START" && -n "$R_END" ]]; then
   RETRY_COUNT=$(sed -n "${R_START},${R_END}p" "$REVIEW_PR" | grep -cE 'CI_FIX_LOOP_CAP|loop-counter \+\+|retry_count\+\+|iteration\+\+')

@@ -439,8 +439,8 @@ done
 rm -rf "$NATIVE_AUTHORITY_TMP"
 
 for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
-  if extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror" \
-      | grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}'; then
+  if grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}' \
+      <<<"$(extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror")"; then
     pass_msg "Codex optional turbo env is safe under Bash 3.2 nounset ($(basename "$(dirname "$(dirname "$codex_dispatch_mirror")")"))"
   else
     fail_msg "Codex optional turbo env is safe under Bash 3.2 nounset" "$codex_dispatch_mirror"
@@ -651,9 +651,9 @@ RUNTIME_DISPATCH_ERROR="$(UBERDEV_TMPDIR="$RUNTIME_FILE" bash -c '
 RUNTIME_DISPATCH_RC=$?
 set -e
 if [ "$RUNTIME_FILE_RC" -ne 0 ] \
-    && printf '%s\n' "$RUNTIME_FILE_ERROR" | grep -Fq 'unsafe runtime root (not-directory)' \
+    && grep -Fq 'unsafe runtime root (not-directory)' <<<"$RUNTIME_FILE_ERROR" \
     && [ "$RUNTIME_DISPATCH_RC" -ne 0 ] \
-    && printf '%s\n' "$RUNTIME_DISPATCH_ERROR" | grep -Fq 'unsafe runtime root (not-directory)' \
+    && grep -Fq 'unsafe runtime root (not-directory)' <<<"$RUNTIME_DISPATCH_ERROR" \
     && grep -Fq $'dispatch_setup_failed\t' "$RUNTIME_AUDIT" \
     && grep -Fq '"phase":"runtime_root"' "$RUNTIME_AUDIT"; then
   pass_msg "runtime-root rejection is actionable and records dispatch setup failure"
@@ -1936,7 +1936,7 @@ for generic_provider_rc in 0 42; do
   [ "$generic_provider_rc" -ne 0 ] || expected_generic_rc=2
   [ "$GENERIC_MUTEX_RC" -eq "$expected_generic_rc" ] \
     || generic_mutex_errors="$generic_mutex_errors rc-$generic_provider_rc-$GENERIC_MUTEX_RC"
-  printf '%s\n' "$GENERIC_MUTEX_OUT" | grep -Fq "provider-output-$generic_provider_rc" \
+  grep -Fq "provider-output-$generic_provider_rc" <<<"$GENERIC_MUTEX_OUT" \
     || generic_mutex_errors="$generic_mutex_errors output-$generic_provider_rc"
   grep -Fxq 'uberdev git metadata mutex: release failed after transaction' \
     "$CLEANUP_TMP/runtime/generic-stderr-$generic_provider_rc.log" \
@@ -2261,14 +2261,14 @@ run_add_cleanup_round() {
               (
                 printf "%s\\n" "$BASHPID" >"$8"
                 locks="$1/.git/.uberdev-worktree-metadata-locks"
-                if find "$locks" -name .mutex -print 2>/dev/null | grep -q .; then
+                if [ -n "$(find "$locks" -name .mutex -print 2>/dev/null)" ]; then
                   printf "held\\n" >"$6"
                 else
                   printf "missing\\n" >"$6"
                 fi
                 printf "started\\n" >"$5"
                 tries=0
-                while find "$locks" -name .mutex -print 2>/dev/null | grep -q . \
+                while [ -n "$(find "$locks" -name .mutex -print 2>/dev/null)" ] \
                     && [ "$tries" -lt 1000 ]; do
                   tries=$((tries + 1)); sleep 0.01
                 done
@@ -2603,8 +2603,8 @@ if [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ]; then
         [ -z "${UBERDEV_RESOLVED_BACKEND+x}" ]
       ' _ "$DISPATCH_LIB" 2>&1
   )"; then
-    printf '%s\n' "$PID_CAPTURE_PREFLIGHT_OUT" | grep -Fq \
-      "lacks verifiable process-tree supervision on native Windows" \
+    grep -Fq "lacks verifiable process-tree supervision on native Windows" \
+      <<<"$PID_CAPTURE_PREFLIGHT_OUT" \
       || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS preflight-reason"
   else
     PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS preflight"
@@ -2618,7 +2618,8 @@ if [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ]; then
   [ ! -e "${PID_CAPTURE_STATE_GLOB[0]}" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS lifecycle"
   [ ! -d "$PID_CAPTURE_TMP/repo/.claude/worktrees" ] \
     || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS worktree"
-  git -C "$PID_CAPTURE_TMP/repo" show-ref | grep -Fq 'refs/heads/worktree-solve-issue-335-' \
+  grep -Fq 'refs/heads/worktree-solve-issue-335-' \
+    <<<"$(git -C "$PID_CAPTURE_TMP/repo" show-ref)" \
     && PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS branch"
   pid_capture_emergency_cleanup \
     || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS emergency-cleanup"
@@ -2686,9 +2687,9 @@ PID_CAPTURE_STATE_DIR="$(bash -c '. "$1"; _uberdev_agent_prepare_state_dir "$2"'
   _ "$DISPATCH_LIB" "$PID_CAPTURE_TMP/run")" \
   || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS state-dir"
 pid_capture_emergency_cleanup || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS emergency-cleanup"
-printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'rc=2' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS rc"
-printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq 'provider_live=0' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS provider-live"
-printf '%s\n' "$PID_CAPTURE_OUT" | grep -Fq '"state":"cancelled"' || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
+grep -Fq 'rc=2' <<<"$PID_CAPTURE_OUT" || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS rc"
+grep -Fq 'provider_live=0' <<<"$PID_CAPTURE_OUT" || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS provider-live"
+grep -Fq '"state":"cancelled"' <<<"$PID_CAPTURE_OUT" || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS terminal-status"
 [ ! -e "$PID_CAPTURE_TMP/repo/.claude/worktrees/solve-issue-335-$PID_CAPTURE_SLUG" ] || PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS worktree"
 git -C "$PID_CAPTURE_TMP/repo" show-ref --verify --quiet "refs/heads/worktree-solve-issue-335-$PID_CAPTURE_SLUG" \
   && PID_CAPTURE_ERRORS="$PID_CAPTURE_ERRORS branch"
@@ -2832,7 +2833,7 @@ for canonical_rel in discover.sh release-anchor.sh; do
        -e '.claude/uberdev.local.md' \
        -e '~/.claude' \
        "$CANONICAL_MERGE_LIB" ||
-     tr -d '\r' < "$CANONICAL_MERGE_LIB" | grep -q '[[:blank:]]$'; then
+     grep -q '[[:blank:]]$' <<<"$(tr -d '\r' < "$CANONICAL_MERGE_LIB")"; then
     fail_msg "canonical merge-pipeline/lib/$canonical_rel left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
              "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
   else
@@ -2961,7 +2962,7 @@ assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_git_worktree_add "\$REPOSITORY_ROOT"' \
   "codex backend serializes every isolated worktree add through the repository mutex"
 CODEX_DISPATCH_BODY="$(extract_function_body _uberdev_dispatch_codex "$DISPATCH_LIB")"
-if printf '%s\n' "$CODEX_DISPATCH_BODY" | grep -Fq 'MSYS_NO_PATHCONV=1 git worktree add'; then
+if grep -Fq 'MSYS_NO_PATHCONV=1 git worktree add' <<<"$CODEX_DISPATCH_BODY"; then
   fail_msg "codex backend has no direct non-child worktree-add bypass" \
     "_uberdev_dispatch_codex still invokes git worktree add directly"
 else
@@ -3027,14 +3028,14 @@ assert_grep "$DISPATCH_LIB" \
 
 echo "== Codex backend does NOT thread claude-specific flags =="
 CODEX_BODY="$(extract_function_body '_uberdev_dispatch_codex' "$DISPATCH_LIB")"
-if printf '%s\n' "$CODEX_BODY" | grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>'; then
+if grep -qE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>' <<<"$CODEX_BODY"; then
   fail_msg "codex backend body does not reference Claude-only flags or claude -p" \
     "$(printf '%s\n' "$CODEX_BODY" | grep -nE '\<(PERM_FLAG|EFFORT_FLAG|claude -p)\>')"
 else
   pass_msg "codex backend body does not reference Claude-only flags or claude -p"
 fi
-if printf '%s\n' "$CODEX_BODY" | grep -qF 'WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"' \
-   && ! printf '%s\n' "$CODEX_BODY" | grep -qF 'kill -0 "$DISPATCH_ID"'; then
+if grep -qF 'WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"' <<<"$CODEX_BODY" \
+   && ! grep -qF 'kill -0 "$DISPATCH_ID"' <<<"$CODEX_BODY"; then
   pass_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
 else
   fail_msg "codex backend status contract tracks the detached supervisor instead of parent-side liveness probing"
@@ -3351,15 +3352,15 @@ beh_pid="$(printf '%s\n' "$BEH_OUT" | sed -n 's/^pid=//p')"
 BEH_SLUG="$(UBERDEV_AGENT_INSTANCE_ID=review-code-a1 bash -c '. "$1"; _uberdev_dispatch_instance_slug' _ "$DISPATCH_LIB")"
 BEH_PYTHON_EXPECTED="$(cd "$BEH_TMP/bin" && pwd -P)/py"
 if [ -n "$beh_pid" ] \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq 'rc=0' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq "resolved=$BEH_PYTHON_EXPECTED" \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq 'running=' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"running"' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq "\"pid\":\"$beh_pid\"" \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq 'status=' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq '"state":"completed"' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq '"exit_code":0' \
-    && printf '%s\n' "$BEH_OUT" | grep -Fq 'result=codex final result' \
+    && grep -Fq 'rc=0' <<<"$BEH_OUT" \
+    && grep -Fq "resolved=$BEH_PYTHON_EXPECTED" <<<"$BEH_OUT" \
+    && grep -Fq 'running=' <<<"$BEH_OUT" \
+    && grep -Fq '"state":"running"' <<<"$BEH_OUT" \
+    && grep -Fq "\"pid\":\"$beh_pid\"" <<<"$BEH_OUT" \
+    && grep -Fq 'status=' <<<"$BEH_OUT" \
+    && grep -Fq '"state":"completed"' <<<"$BEH_OUT" \
+    && grep -Fq '"exit_code":0' <<<"$BEH_OUT" \
+    && grep -Fq 'result=codex final result' <<<"$BEH_OUT" \
     && ! grep -Fq 'exported-python-bridge' "$BEH_TMP/codex-capture.txt" \
     && [ ! -e "$BEH_TMP/repo/.claude/worktrees/solve-issue-42-$BEH_SLUG" ] \
     && [ ! -e "$BEH_TMP/tmp/solve-codex-status-42.json.worktree-owner.json" ]; then
@@ -3383,7 +3384,7 @@ else
   fail_msg "codex dispatch passes exact routed leaf argv and prompt on stdin" \
     "$(cat "$BEH_TMP/codex-capture.txt" 2>/dev/null)"
 fi
-if printf '%s\n' "$BEH_OUT" | grep -Eq '"pid":"[0-9]+"'; then
+if grep -Eq '"pid":"[0-9]+"' <<<"$BEH_OUT"; then
   pass_msg "codex dispatch status pid is numeric"
 else
   fail_msg "codex dispatch status pid is numeric" "$BEH_OUT"
@@ -3414,9 +3415,9 @@ EMPTY_OUT="$(
     printf "rc=%s\nstatus=%s\n" "$rc" "$(cat "$status_file" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$BEH_TMP/prompt.txt"
 )"
-if printf '%s\n' "$EMPTY_OUT" | grep -Fq 'rc=0' \
-    && printf '%s\n' "$EMPTY_OUT" | grep -Fq '"state":"failed"' \
-    && printf '%s\n' "$EMPTY_OUT" | grep -Fq '"exit_code":65' \
+if grep -Fq 'rc=0' <<<"$EMPTY_OUT" \
+    && grep -Fq '"state":"failed"' <<<"$EMPTY_OUT" \
+    && grep -Fq '"exit_code":65' <<<"$EMPTY_OUT" \
     && [ ! -s "$BEH_TMP/tmp/solve-codex-result-46.md" ] \
     && [ ! -e "$BEH_TMP/repo/.claude/worktrees/solve-issue-46-$EMPTY_SLUG" ] \
     && [ ! -e "$BEH_TMP/tmp/solve-codex-status-46.json.worktree-owner.json" ]; then
@@ -3608,10 +3609,10 @@ FAIL_OUT="$(
     printf "rc=%s\nstatus=%s\nresult=%s\n" "$rc" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$FAIL_TMP/prompt.txt"
 )"
-if printf '%s\n' "$FAIL_OUT" | grep -Fq 'rc=0' \
-   && printf '%s\n' "$FAIL_OUT" | grep -Fq '"state":"failed"' \
-   && printf '%s\n' "$FAIL_OUT" | grep -Fq '"exit_code":17' \
-   && printf '%s\n' "$FAIL_OUT" | grep -Fq 'result=codex refused'; then
+if grep -Fq 'rc=0' <<<"$FAIL_OUT" \
+   && grep -Fq '"state":"failed"' <<<"$FAIL_OUT" \
+   && grep -Fq '"exit_code":17' <<<"$FAIL_OUT" \
+   && grep -Fq 'result=codex refused' <<<"$FAIL_OUT"; then
   pass_msg "codex dispatch records failed child status without treating dispatch as failed"
 else
   fail_msg "codex dispatch records failed child status without treating dispatch as failed" "$FAIL_OUT"
@@ -3656,11 +3657,12 @@ time.sleep(30)'\'' "$pid_file" >/dev/null 2>&1 &
 )"
 RESOLVED_IDENTITY_PID="$(printf '%s\n' "$RESOLVED_IDENTITY_OUT" | sed -n '1p')"
 RESOLVED_IDENTITY_VALUE="$(printf '%s\n' "$RESOLVED_IDENTITY_OUT" | sed -n '2p')"
-if printf '%s\n' "$IMMEDIATE_ACCEPT_BODY" | grep -Fq 'process-identity' \
-   && printf '%s\n' "$DISPATCH_PROCESS_IDENTITY_BODY" | grep -Fq '_uberdev_dispatch_python' \
-   && printf '%s\n' "$WAIT_OWNED_BODY" | grep -Fq '_uberdev_dispatch_process_identity' \
+if grep -Fq 'process-identity' <<<"$IMMEDIATE_ACCEPT_BODY" \
+   && grep -Fq '_uberdev_dispatch_python' <<<"$DISPATCH_PROCESS_IDENTITY_BODY" \
+   && grep -Fq '_uberdev_dispatch_process_identity' <<<"$WAIT_OWNED_BODY" \
    && [[ "$RESOLVED_IDENTITY_VALUE" == "$RESOLVED_IDENTITY_PID|$RESOLVED_IDENTITY_PID|$RESOLVED_IDENTITY_PID|"* ]] \
-   && ! printf '%s\n%s\n' "$IMMEDIATE_ACCEPT_BODY" "$WAIT_OWNED_BODY" | grep -Fq 'os.kill'; then
+   && ! grep -Fq 'os.kill' \
+        <<<"$(printf '%s\n%s\n' "$IMMEDIATE_ACCEPT_BODY" "$WAIT_OWNED_BODY")"; then
   pass_msg "Windows dispatch liveness uses the non-signaling native identity probe"
 else
   fail_msg "Windows dispatch liveness uses the non-signaling native identity probe" \
@@ -3868,10 +3870,10 @@ RACE_OUT="$(
     printf "rc=%s\npid=%s\nstatus=%s\nresult=%s\n" "$rc" "$pid" "$(cat "$UBERDEV_TMPDIR/solve-codex-status-42.json" 2>/dev/null)" "$(cat "$UBERDEV_TMPDIR/solve-codex-result-42.md" 2>/dev/null)"
   ' _ "$DISPATCH_LIB" "$RACE_TMP/prompt.txt"
 )"
-if printf '%s\n' "$RACE_OUT" | grep -Fq 'rc=0' \
-   && printf '%s\n' "$RACE_OUT" | grep -Fq '"state":"failed"' \
-   && printf '%s\n' "$RACE_OUT" | grep -Fq '"exit_code":23' \
-   && printf '%s\n' "$RACE_OUT" | grep -Fq 'result=fast failed codex result'; then
+if grep -Fq 'rc=0' <<<"$RACE_OUT" \
+   && grep -Fq '"state":"failed"' <<<"$RACE_OUT" \
+   && grep -Fq '"exit_code":23' <<<"$RACE_OUT" \
+   && grep -Fq 'result=fast failed codex result' <<<"$RACE_OUT"; then
   pass_msg "codex dispatch never overwrites terminal child status with stale running status"
 else
   fail_msg "codex dispatch never overwrites terminal child status with stale running status" "$RACE_OUT"

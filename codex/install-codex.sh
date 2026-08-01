@@ -164,7 +164,7 @@ bootstrap_source_tree() {
   if [ -d "${BOOTSTRAP_PARENT}/repo/plugins/uberdev" ]; then
     extracted="${BOOTSTRAP_PARENT}/repo"
   else
-    extracted="$(find "${BOOTSTRAP_PARENT}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    extracted="$(head -n 1 <<<"$(find "${BOOTSTRAP_PARENT}" -mindepth 1 -maxdepth 1 -type d)")"
   fi
   if [ -z "${extracted}" ] || [ ! -d "${extracted}" ]; then
     err "downloaded UberDev archive did not contain a repo directory."

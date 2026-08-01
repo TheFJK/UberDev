@@ -950,9 +950,9 @@ for directory,_,names in os.walk(semaphore_root):
             residual.append(path)
 assert residual==[],residual
 PY
-! find "$HANDOFFS" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit | grep -q .
+[ -z "$(find "$HANDOFFS" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit)" ]
 
-if find "$RESEARCH_DIR_ABS" -maxdepth 1 -name 'ci-log-run-*.raw' -print -quit | grep -q .; then
+if [ -n "$(find "$RESEARCH_DIR_ABS" -maxdepth 1 -name 'ci-log-run-*.raw' -print -quit)" ]; then
   echo 'review-child-inputs: controller created a mutable raw CI log staging file' >&2
   exit 1
 fi

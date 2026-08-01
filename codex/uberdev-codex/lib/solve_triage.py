@@ -141,8 +141,27 @@ def validate_snapshot(value: dict[str, Any]) -> tuple[int, str, str, list[str]]:
     return number, title, body, sorted(set(names))
 
 
+# `triage_decision.files` is validated by the routing-context schema in
+# lib/agent-dispatch.sh with this exact shape. FILE_RE is deliberately permissive
+# (it scrapes free-form issue prose), so the two DISAGREE unless the emitter
+# filters: a markdown code span `-foo.sh` yields a leading `-`, a pasted
+# stack-trace path exceeds 255 chars, and a non-ASCII name survives casefold().
+# Any one of those makes uberdev_agent_context_create fail with
+# route_context_create_failed, which aborts the ENTIRE batch — every sibling
+# issue in the same /solve, /turbo or /ubergoal run dies with it. Same class as
+# the component-token bug, one field over.
+FILES_TOKEN_RE = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
+
+
 def named_files(body: str) -> list[str]:
-    files = sorted({match.group(0).strip("./").casefold() for match in FILE_RE.finditer(body)})
+    # Drop anything the schema would refuse rather than emit a token that
+    # refuses the dispatch: losing one filename from a triage heuristic is
+    # strictly better than declining to work the issue — and its siblings.
+    files = sorted({
+        token for token in (
+            match.group(0).strip("./").casefold() for match in FILE_RE.finditer(body)
+        ) if FILES_TOKEN_RE.fullmatch(token)
+    })
     if len(files) > MAX_FILES:
         fail("triage_limit_files")
     return files
@@ -217,7 +236,16 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     if expected_issue is not None and number != expected_issue:
         fail("triage_issue_mismatch")
     files = named_files(body)
-    components = sorted(set(component_tokens(files)) | set(named_modules("\n".join((title, body)))))
+    # `components` has TWO producers — component_tokens (already filtered) and
+    # named_modules (was NOT). Filtering at the UNION means exactly one choke
+    # point governs the field however many producers ever feed it; filtering
+    # inside each producer is what let the second one drift unnoticed while the
+    # field looked guarded.
+    components = sorted({
+        token for token in (
+            set(component_tokens(files)) | set(named_modules("\n".join((title, body))))
+        ) if COMPONENT_TOKEN_RE.fullmatch(token)
+    })
     if len(components) > MAX_COMPONENTS:
         fail("triage_limit_components")
     combined = "\n".join((title, body, " ".join(labels)))

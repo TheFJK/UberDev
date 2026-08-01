@@ -49,7 +49,7 @@ ck "allowed-tools omits Edit/MultiEdit" "[ \$(grep '^allowed-tools:' '$CMD' | gr
 # A command whose allowed-tools omits Workflow cannot invoke the tool its own
 # pipeline requires. Same assert uberscan.test.sh + ubersimplify.test.sh carry.
 ck "allowed-tools carries Workflow (the migration's dispatch tool)" \
-  "grep '^allowed-tools:' '$CMD' | grep -q '\"Workflow\"'"
+  "grep -q '\"Workflow\"' <<<\"\$(grep '^allowed-tools:' '$CMD')\""
 
 echo "== U3: personas.yaml parses + has required top-level + donor_catalog tier keys =="
 PY_KEYS=$(python3 - <<PYEOF

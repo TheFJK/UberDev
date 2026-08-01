@@ -103,7 +103,7 @@ fi
 hits=""
 while IFS= read -r -d '' skill_file; do
   flattened="$(tr '\n' ' ' < "$skill_file")"
-  if printf '%s' "$flattened" | grep -qE "$GUARD_REGEX"; then
+  if grep -qE "$GUARD_REGEX" <<<"$flattened"; then
     hits="$hits$skill_file"$'\n'
   fi
 done < <(find "$SKILLS_DIR" -name "SKILL.md" -print0)
@@ -133,7 +133,7 @@ cmd_hits=""
 if [ -d "$COMMANDS_DIR" ]; then
   while IFS= read -r -d '' cmd_file; do
     flattened="$(tr '\n' ' ' < "$cmd_file")"
-    if printf '%s' "$flattened" | grep -qE "$GUARD_REGEX"; then
+    if grep -qE "$GUARD_REGEX" <<<"$flattened"; then
       cmd_hits="$cmd_hits$cmd_file"$'\n'
     fi
   done < <(find "$COMMANDS_DIR" -name "*.md" -print0)
@@ -204,7 +204,7 @@ fi
 # MUST. If this regresses, R1 silently passes on multi-line vulnerable awks
 # (exactly the bug class found at orchestrator/SKILL.md:225).
 multi_flat="$(tr '\n' ' ' < "$fixture_multi")"
-if printf '%s' "$multi_flat" | grep -qE "$GUARD_REGEX"; then
+if grep -qE "$GUARD_REGEX" <<<"$multi_flat"; then
   echo "  PASS  R2.multiline the flattened scan flags a multi-line vulnerable awk shape"
   PASS=$((PASS+1))
 else
@@ -242,7 +242,7 @@ cat > "$fixture_cmd_bad" <<'EOF_CMD_BAD'
 mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
 EOF_CMD_BAD
 cmd_bad_flat="$(tr '\n' ' ' < "$fixture_cmd_bad")"
-if printf '%s' "$cmd_bad_flat" | grep -qE "$GUARD_REGEX"; then
+if grep -qE "$GUARD_REGEX" <<<"$cmd_bad_flat"; then
   echo "  PASS  R1b.bad the command-surface scan flags a vulnerable awk shape in a command file"
   PASS=$((PASS+1))
 else
@@ -255,7 +255,7 @@ cat > "$fixture_cmd_safe" <<'EOF_CMD_SAFE'
 mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
 EOF_CMD_SAFE
 cmd_safe_flat="$(tr '\n' ' ' < "$fixture_cmd_safe")"
-if printf '%s' "$cmd_safe_flat" | grep -qE "$GUARD_REGEX"; then
+if grep -qE "$GUARD_REGEX" <<<"$cmd_safe_flat"; then
   echo "  FAIL  R1b.safe the command-surface scan false-positives on the parameterised \`-v c2=2\` + \$c2 shape"
   echo "         R1b will red CI on the recommended command-file fix."
   FAIL=$((FAIL+1))

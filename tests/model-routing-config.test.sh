@@ -51,8 +51,8 @@ _isolate '
   [ "$UBERDEV_ROUTING_SHADOW" = false ] || exit 1
   [ "$UBERDEV_ROUTING_WORKFLOWS" = "{}" ] || exit 1
   [ "$UBERDEV_ROUTING_ROLES" = "{}" ] || exit 1
-  export -p | grep -q "UBERDEV_ROUTING_MODE=" || exit 1
-  export -p | grep -q "UBERDEV_ROUTING_ROLES=" || exit 1
+  grep -q "UBERDEV_ROUTING_MODE=" <<<"$(export -p)" || exit 1
+  grep -q "UBERDEV_ROUTING_ROLES=" <<<"$(export -p)" || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R1: v0.40 safe inherit defaults exported" || fail "R1: routing defaults/public exports"
 [ -z "$_LAST_STDERR" ] && pass "R1: absent routing config is warning-silent" || fail "R1: absent config warned: $_LAST_STDERR"
@@ -423,7 +423,7 @@ PY
 [ "$_STATUS" -eq 0 ] && pass "R4h: complete canonical validator rejects semantic-invalid policies" || fail "R4h: semantic-invalid policy authorized map"
 warn_count=$(printf '%s\n' "$_LAST_STDERR" | grep -c "model_routing.roles = '<invalid-map>'" || true)
 [ "$warn_count" -eq 5 ] && pass "R4h: each semantic-invalid policy emits one redacted warning" || fail "R4h: semantic policy warning count=$warn_count"
-if printf '%s\n' "$_LAST_STDERR" | grep -qE 'warp|incomplete-route|duplicate-rank|duplicate-pair|malformed-role|bogus-effort'; then
+if grep -qE 'warp|incomplete-route|duplicate-rank|duplicate-pair|malformed-role|bogus-effort' <<<"$_LAST_STDERR"; then
   fail "R4h: semantic validator leaked hostile policy tokens"
 else
   pass "R4h: semantic validator diagnostics remain redacted"
@@ -528,7 +528,7 @@ _isolate '
   [ ! -e IMPORTLIB_SHADOW_EXECUTED ] || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R4i: isolated Python ignores hostile PWD stdlib shadows" || fail "R4i: hostile PWD Python module executed/broke parsing"
-if printf '%s\n' "$_LAST_STDERR" | grep -qE 'JSON_SHADOW|IMPORTLIB_SHADOW|Traceback'; then
+if grep -qE 'JSON_SHADOW|IMPORTLIB_SHADOW|Traceback' <<<"$_LAST_STDERR"; then
   fail "R4i: isolated Python leaked hostile token/traceback"
 else
   pass "R4i: isolated Python diagnostics remain silent/redacted"

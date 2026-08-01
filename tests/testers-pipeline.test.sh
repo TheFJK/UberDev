@@ -177,7 +177,7 @@ echo "PASS P7: finding-ID collision keeps highest-severity record across waves"
 #   1. `--rps-cap` appears in --help text
 #   2. running without --rps-cap exits non-zero
 HELP_OUT="$(python3 "$AGG" --help 2>&1 || true)"
-echo "$HELP_OUT" | grep -q -- "--rps-cap" || { echo "P8: --rps-cap not in --help"; exit 1; }
+grep -q -- "--rps-cap" <<<"$HELP_OUT" || { echo "P8: --rps-cap not in --help"; exit 1; }
 # Run without --rps-cap; expect non-zero exit. `set -e` would abort on the
 # expected failure, so guard with `if`.
 if python3 "$AGG" --out "$SCRATCH/x.yaml" >/dev/null 2>&1; then
@@ -212,7 +212,7 @@ python3 "$AGG" --run-id smoke --wave 1 --scratch-dir "$P10/waves/scratch" \
 python3 plugins/uberdev/skills/testers-pipeline/report.py \
   --run-id smoke --waves-dir "$P10/waves" --invariants "$INV" \
   --emit-findings-to-issues-aggregate "$P10/agg.md"
-head -c 128 "$P10/agg.md" | grep -q '<external-untrusted-input source="testers-aggregate">' \
+grep -q '<external-untrusted-input source="testers-aggregate">' <<<"$(head -c 128 "$P10/agg.md")" \
   || { echo "P10: opening envelope marker not in first 128 bytes"; exit 1; }
 [ "$(grep -cF '</external-untrusted-input>' "$P10/agg.md")" = "1" ] \
   || { echo "P10: expected exactly one structural close marker"; exit 1; }

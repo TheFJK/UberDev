@@ -99,11 +99,10 @@ while (( $(date +%s) < deadline )); do
   # `claude agents --json` lists all live sessions; we filter by short-id
   # prefix and project the two fields that reflect slash-expansion outcome:
   # `name` (set from the opening message / expanded command) and `status`.
-  agent_row="$(claude agents --json 2>/dev/null \
+  agent_row="$(head -1 <<<"$(claude agents --json 2>/dev/null \
     | jq -r --arg sid "$SESSION_ID" \
         '.[] | select(.sessionId | startswith($sid)) | "name=\(.name) status=\(.status)"' \
-        2>/dev/null \
-    | head -1)"
+        2>/dev/null)")"
   if [[ -z "$agent_row" ]]; then
     sleep 1
     continue
