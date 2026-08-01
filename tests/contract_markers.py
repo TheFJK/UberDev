@@ -681,11 +681,10 @@ def main(argv: list[str]) -> int:
 
     for failure in failures:
         print(f"  FAIL  {failure}")
-    contracts_ok = len(CONTRACTS) - len({f.split("'")[1] for f in failures if f.startswith("contract '")})
     if failures:
         print(f"contract-markers: {len(sites)} sites across {len(CONTRACTS)} contracts, {len(failures)} failure(s)")
         return 1
-    print(f"  PASS  {len(sites)} sites across {contracts_ok} contracts agree (both trees walked)")
+    print(f"  PASS  {len(sites)} sites across {len(CONTRACTS)} contracts agree (both trees walked)")
     print(f"contract-markers: {len(sites)} sites across {len(CONTRACTS)} contracts, 0 failures")
     return 0
 

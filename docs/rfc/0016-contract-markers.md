@@ -186,12 +186,14 @@ comment saying it is drift, not intent, and it now reds on any one-sided edit.
 
 ## 4. What this does NOT do
 
-- **It is not a shape guard.** Half B of #370 (ranks 3–5's regex/schema
-  round-trips) is untouched, and textual diffing there would give false
-  confidence: a scraper regex and a `fullmatch` validator are not supposed to be
-  equal, and no literal comparison catches that one is unbounded while the other
-  caps at 256. That half needs real producer output round-tripped through the
-  real validator.
+- **It is not a shape guard.** Half B of #370 (ranks 3–5) is untouched, and
+  textual diffing there would give false confidence: a scraper regex and a
+  `fullmatch` validator are not supposed to be equal, and no literal comparison
+  catches that one is unbounded while the other caps at 256. That half needs real
+  producer output round-tripped through the real validator. Rank 4 appears in the
+  table above only because its *five literal copies* are textually comparable —
+  the guard it still needs is a round-trip of `solve_triage`'s `RISK_PATTERNS`
+  (the actual producer, deliberately unmarked here) through those validators.
 - **It does not fix behaviour.** Where marking exposed a live divergence, the
   divergence is *declared* and left to its own issue. The known one is rank 7:
   `queued` is a live lifecycle value to `agent-dispatch.sh`'s probe and not-live
