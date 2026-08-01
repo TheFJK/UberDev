@@ -343,7 +343,7 @@ DRV
     assert_eq "absent" "absent" "G17.behavioral.no-audit: --dry-run emitted NO goal_dispatched row (S9)"
   fi
   # The dry-run `exit 0` must short-circuit BEFORE the step-9 emit fence runs.
-  if printf '%s' "$g17_out" | grep -q 'REACHED-EMIT'; then
+  if grep -q 'REACHED-EMIT' <<<"$g17_out"; then
     assert_eq "reached-emit" "short-circuited" "G17.behavioral.short-circuit: dry-run exits before the goal_dispatched emit fence"
   else
     assert_eq "short-circuited" "short-circuited" "G17.behavioral.short-circuit: dry-run exits before the goal_dispatched emit fence"
@@ -452,8 +452,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.42.6) =="
-assert_version_bump "$REPO_ROOT" "0.42.6"
+echo "== G20: version bump locked (0.42.7) =="
+assert_version_bump "$REPO_ROOT" "0.42.7"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -712,10 +712,10 @@ assert_grep "$GOAL_WATCH" "trap 'rm -f \"\\\$gh_err\" \"\\\$findings_err\"' EXIT
 assert_grep "$GOAL_LIB" '^_uberdev_goal_handle_harness_term\(\)'                  "G36.term-handler-defined"
 assert_grep "$GOAL_LIB" 'harness_term'                                            "G36.term-handler-audit-reason"
 _g36_handler_body="$(sed -n '/^_uberdev_goal_handle_harness_term()/,/^}/p' "$GOAL_LIB")"
-if printf '%s' "$_g36_handler_body" | grep -q 'uberdev_goal_write_run_state' \
-   && printf '%s' "$_g36_handler_body" | grep -q 'goal_reaper_skipped' \
-   && printf '%s' "$_g36_handler_body" | grep -qE '^[[:space:]]*exit 42$' \
-   && ! printf '%s' "$_g36_handler_body" | grep -q '_uberdev_goal_reap_zombies'; then
+if grep -q 'uberdev_goal_write_run_state' <<<"$_g36_handler_body" \
+   && grep -q 'goal_reaper_skipped' <<<"$_g36_handler_body" \
+   && grep -qE '^[[:space:]]*exit 42$' <<<"$_g36_handler_body" \
+   && ! grep -q '_uberdev_goal_reap_zombies' <<<"$_g36_handler_body"; then
   PASS=$((PASS+1)); echo "  PASS  G36.term-handler-shape (persist + goal_reaper_skipped + exit 42, NO reap)"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G36.term-handler-shape (want persist + goal_reaper_skipped + exit 42 and NO reaper call; got: [$_g36_handler_body])" >&2
@@ -3298,13 +3298,13 @@ if command -v zsh >/dev/null 2>&1 && { [ -x /opt/homebrew/bin/bash ] || [ -x /us
   # fall through to here.
   _g41_script="$_g41_guard"$'\n''echo "__G41_REACHED__:UBERDEV_GOAL_BASH=${UBERDEV_GOAL_BASH:-unset}"'
   _g41_out="$(/bin/zsh -c "$_g41_script" 2>&1)"; _g41_rc=$?
-  if [ "$_g41_rc" != "2" ] && printf '%s' "$_g41_out" | grep -q '__G41_REACHED__'; then
+  if [ "$_g41_rc" != "2" ] && grep -q '__G41_REACHED__' <<<"$_g41_out"; then
     PASS=$((PASS+1)); echo "  PASS  G41.zsh-guard-no-spurious-exit2 (rc=$_g41_rc, reached body)"
   else
     FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-no-spurious-exit2 (rc=$_g41_rc, out: $_g41_out)" >&2
   fi
   # And it must have resolved a real bash>=4 path (not left it unset).
-  if printf '%s' "$_g41_out" | grep -qE '__G41_REACHED__:UBERDEV_GOAL_BASH=.*/bash'; then
+  if grep -qE '__G41_REACHED__:UBERDEV_GOAL_BASH=.*/bash' <<<"$_g41_out"; then
     PASS=$((PASS+1)); echo "  PASS  G41.zsh-guard-resolved-bash-path"
   else
     FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-resolved-bash-path (out: $_g41_out)" >&2
@@ -3427,7 +3427,7 @@ echo "== G46: review-pr dispatch-cap exhaustion -> red-held with distinct audit 
 # Lib: cap-reached returns the DISTINCT rc 5 (was rc 0 — indistinguishable from
 # a successful dispatch, so 2b spun any_active=1 to the 4h stuck_loop).
 _g46_cap_block="$(sed -n '/review-pr dispatch cap reached/,/fi/p' "$GOAL_LIB")"
-if printf '%s' "$_g46_cap_block" | grep -qE 'return 5'; then
+if grep -qE 'return 5' <<<"$_g46_cap_block"; then
   PASS=$((PASS+1)); echo "  PASS  G46.lib-cap-returns-distinct-rc5"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G46.lib-cap-returns-distinct-rc5 (cap arm: [$_g46_cap_block])" >&2
@@ -3469,10 +3469,10 @@ bt86_out="$(UBERDEV_TMPDIR="$bt86_dir" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/ub
     printf "rc=%s\n" "$?"
     cat "$UBERDEV_TMPDIR/bt86-calls" 2>/dev/null
   ')"
-if printf '%s' "$bt86_out" | grep -q '^rc=42$' \
-   && printf '%s' "$bt86_out" | grep -q '^persisted$' \
-   && printf '%s' "$bt86_out" | grep -q '^audit:goal_reaper_skipped:.*harness_term' \
-   && ! printf '%s' "$bt86_out" | grep -q '^reaped$'; then
+if grep -q '^rc=42$' <<<"$bt86_out" \
+   && grep -q '^persisted$' <<<"$bt86_out" \
+   && grep -q '^audit:goal_reaper_skipped:.*harness_term' <<<"$bt86_out" \
+   && ! grep -q '^reaped$' <<<"$bt86_out"; then
   PASS=$((PASS+1)); echo "  PASS  BT86.term-handler-contract (exit 42 + persist + goal_reaper_skipped/harness_term, reaper NOT called)"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  BT86.term-handler-contract (got: [$bt86_out])" >&2
@@ -3486,28 +3486,25 @@ _g48_locator_block="$(awk '
   capture { print }
   capture && /^}/ { exit }
 ' "$GOAL_LIB")"
-if printf '%s\n' "$_g48_locator_block" | grep -q \
-  'discover_review_verdict_json' \
-  && printf '%s\n' "$_g48_locator_block" | grep -q \
-  'review_verdict_discovery_state'; then
+if grep -q 'discover_review_verdict_json' <<<"$_g48_locator_block" \
+  && grep -q 'review_verdict_discovery_state' <<<"$_g48_locator_block"; then
   PASS=$((PASS+1)); echo "  PASS  G48.canonical-selector-and-state-helper"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G48.canonical-selector-and-state-helper (goal must not fork selector/rc semantics)" >&2
 fi
-if printf '%s\n' "$_g48_locator_block" | grep -q \
-  'cleanup_review_verdict_snapshot'; then
+if grep -q 'cleanup_review_verdict_snapshot' <<<"$_g48_locator_block"; then
   PASS=$((PASS+1)); echo "  PASS  G48.stable-capture-cleaned"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G48.stable-capture-cleaned (goal must clean the selector carrier on every found path)" >&2
 fi
-if ! printf '%s\n' "$_g48_locator_block" | grep -qE \
-  '_uberdev_goal_glob_worktree|find[[:space:]]|sort -r|jq[[:space:]]+-r'; then
+if ! grep -qE '_uberdev_goal_glob_worktree|find[[:space:]]|sort -r|jq[[:space:]]+-r' \
+  <<<"$_g48_locator_block"; then
   PASS=$((PASS+1)); echo "  PASS  G48.no-forked-discovery"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G48.no-forked-discovery (duplicated glob/sort/jq selector remains)" >&2
 fi
-if printf '%s\n' "$_g48_locator_block" | grep -qE \
-  'indeterminate.*missing|DISCOVERY_STATE.*indeterminate|2\\|\\*.*return 0'; then
+if grep -qE 'indeterminate.*missing|DISCOVERY_STATE.*indeterminate|2\\|\\*.*return 0' \
+  <<<"$_g48_locator_block"; then
   PASS=$((PASS+1)); echo "  PASS  G48.indeterminate-reuses-existing-missing-rereview-path"
 else
   FAIL=$((FAIL+1)); echo "  FAIL  G48.indeterminate-reuses-existing-missing-rereview-path" >&2
@@ -3624,12 +3621,12 @@ if [ -s "$_g50_fence" ]; then
   # on every shell the CI matrix runs, Git-Bash-on-windows included.
   _g50_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
       "${BASH:-bash}" -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$0"' "$_g50_fence" 2>&1)"
-  if printf '%s' "$_g50_out" | grep -q "^goal $_g50_id: cycles=3/5 "; then
+  if grep -q "^goal $_g50_id: cycles=3/5 " <<<"$_g50_out"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.prints-summary: the fence rehydrates from the pointer and prints the operator summary with UBERDEV_GOAL_ID unset"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.prints-summary: fence printed no summary (dead-code gate on UBERDEV_GOAL_ID?) — got: [$_g50_out]" >&2
   fi
-  if printf '%s' "$_g50_out" | grep -q "audit: .*goal-$_g50_id\.jsonl"; then
+  if grep -q "audit: .*goal-$_g50_id\.jsonl" <<<"$_g50_out"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.prints-audit-path: the fence names the audit log for the rehydrated id (not an empty goal-.jsonl)"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.prints-audit-path: audit path missing/unkeyed — got: [$_g50_out]" >&2
@@ -3640,8 +3637,8 @@ if [ -s "$_g50_fence" ]; then
   _g50_empty="$_g50_dir/empty"; mkdir -p "$_g50_empty"
   _g50_neg="$(UBERDEV_TMPDIR="$_g50_empty" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
       "${BASH:-bash}" -c 'unset UBERDEV_GOAL_ID GOAL_ID; . "$0"' "$_g50_fence" 2>&1)"
-  if printf '%s' "$_g50_neg" | grep -q 'no run-state to summarise' \
-     && ! printf '%s' "$_g50_neg" | grep -q 'cycles='; then
+  if grep -q 'no run-state to summarise' <<<"$_g50_neg" \
+     && ! grep -q 'cycles=' <<<"$_g50_neg"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "G50.control: with no active-id pointer the fence says so and prints no summary (assert is discriminating)"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G50.control: pointer-less run should refuse loudly and print nothing — got: [$_g50_neg]" >&2
@@ -3677,12 +3674,12 @@ if [ -n "$_g51_fn" ]; then
   } > "$_g51_dir/probe.sh"
   _g51_out="$(UBERDEV_RESOLVED_BACKEND=background UBERDEV_GOAL_SOLVER_BACKEND=workflow \
     "${BASH:-bash}" "$_g51_dir/probe.sh" 2>&1)"
-  if printf '%s' "$_g51_out" | grep -q '^PROBED=workflow$'; then
+  if grep -q '^PROBED=workflow$' <<<"$_g51_out"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.probes-solver-backend: liveness is asked under the SOLVER backend, not the pinned child transport"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.probes-solver-backend: probe saw the child transport — got: [$_g51_out]" >&2
   fi
-  if printf '%s' "$_g51_out" | grep -q '^AFTER=background$'; then
+  if grep -q '^AFTER=background$' <<<"$_g51_out"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "G51.restores-child-backend: the child transport is restored after the probe (the /merge + /review-pr dispatches keep it)"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G51.restores-child-backend: the override leaked past the probe — got: [$_g51_out]" >&2
@@ -3734,7 +3731,7 @@ _g52_out="$("${BASH:-bash}" -c '
 ' 2>&1)"
 # A drive-letter prefix is accepted for Git-Bash-on-windows; the asserted
 # property is "absolute path to a bash", not a POSIX-only spelling.
-if printf '%s' "$_g52_out" | grep -qE '^PUBLISHED=([A-Za-z]:)?/.*bash'; then
+if grep -qE '^PUBLISHED=([A-Za-z]:)?/.*bash' <<<"$_g52_out"; then
   PASS=$((PASS + 1)); printf '  PASS  %s\n' "G52.arm-a-publishes: running the resolver under bash>=4 publishes an absolute interpreter path"
 else
   FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "G52.arm-a-publishes: arm (a) left UBERDEV_GOAL_BASH unset — Phases 1/2/3 would fall back to PATH bash — got: [$_g52_out]" >&2

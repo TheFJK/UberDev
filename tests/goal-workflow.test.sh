@@ -72,7 +72,7 @@ fi
 # here means someone tried to move the poll loop into the script.
 if grep -nE 'setTimeout|setInterval|setImmediate|[^A-Za-z_]sleep[^A-Za-z_]|\bsleep\(' "$WORKFLOW" >/dev/null 2>&1; then
   fail "G2 the driver contains a timer/pause token — the watch loop belongs in lib/goal-watch.sh, and the driver's bound is a counter"
-  grep -nE 'setTimeout|setInterval|setImmediate|[^A-Za-z_]sleep[^A-Za-z_]|\bsleep\(' "$WORKFLOW" | head -5 | sed 's/^/        /'
+  grep -nE 'setTimeout|setInterval|setImmediate|[^A-Za-z_]sleep[^A-Za-z_]|\bsleep\(' "$WORKFLOW" | sed -n '1,5s/^/        /p'
 else
   pass "G2 no setTimeout/setInterval/sleep anywhere in the driver"
 fi
@@ -202,7 +202,7 @@ fi
 
 # N4 — there must be no per-issue child script. `solve-one.js` (or any sibling
 # under skills/goal-pipeline/) would be the shape this design explicitly rejects.
-if find "$REPO_ROOT/plugins/uberdev/skills" -type f -name 'solve-one*.js' 2>/dev/null | grep -q .; then
+if [ -n "$(find "$REPO_ROOT/plugins/uberdev/skills" -type f -name 'solve-one*.js' 2>/dev/null)" ]; then
   fail "N4 a solve-one child script exists — the fleet already fans out per issue; a per-issue child spends the nesting level"
 else
   pass "N4 no per-issue child script exists"
@@ -612,7 +612,7 @@ check() {
   fi
 }
 
-if printf '%s' "$FIXTURE_OUT" | grep -q FIXTURE_ERROR; then
+if grep -q FIXTURE_ERROR <<<"$FIXTURE_OUT"; then
   fail "B0 the behavioral fixture did not run: $FIXTURE_OUT"
 else
   pass "B0 the behavioral fixture ran"

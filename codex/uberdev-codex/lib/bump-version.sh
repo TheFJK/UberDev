@@ -86,7 +86,7 @@ USAGE
 
 err() { printf 'bump-version: %s\n' "$*" >&2; }
 
-is_semver() { printf '%s' "$1" | grep -Eq -e "$SEMVER_ERE"; }
+is_semver() { grep -Eq -e "$SEMVER_ERE" <<<"$1"; }
 
 # bv_edit_inplace <file> <sed -e args...>
 # Portable in-place edit: render through a tempfile next to the target, then

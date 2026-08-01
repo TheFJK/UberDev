@@ -1776,8 +1776,8 @@ done
 
 # Source/init precedes the builders, and all executable snippets are nounset-safe.
 for doc in "$REVIEW" "$SIMPLIFY"; do
-  setup_line="$(grep -n 'uberdev-executable setup=' "$doc" | head -1 | cut -d: -f1)"
-  builder_line="$(grep -n 'review_child_record()' "$doc" | head -1 | cut -d: -f1)"
+  setup_line="$(head -1 <<<"$(grep -n 'uberdev-executable setup=' "$doc")" | cut -d: -f1)"
+  builder_line="$(head -1 <<<"$(grep -n 'review_child_record()' "$doc")" | cut -d: -f1)"
   [ "$setup_line" -lt "$builder_line" ]
 done
 # Extract each production setup fence.
@@ -2246,7 +2246,7 @@ SUPPRESSION_RC=$?
 set -e
 [ "$SUPPRESSION_RC" -eq 71 ]
 [ -d "$AGG_PATH" ]
-printf '%s\n' "$SUPPRESSION_ERROR" | grep -Fq 'failed to suppress stale post-impl-review aggregate'
+grep -Fq 'failed to suppress stale post-impl-review aggregate' <<<"$SUPPRESSION_ERROR"
 
 # Review and simplify execute with inherited carriers. Post-review attaches to
 # the exact descriptor exported by its parent review setup.
@@ -2376,7 +2376,7 @@ review_child_record second.edge second-iter1-attempt01 '{}' '[]' "$records"
 if review_child_fanout "$records" "$run/descriptors" "$run/launched" 17; then exit 20; fi
 SH
 bash "$TMP/lifecycle.sh" "$TMP/builder.sh" "$TMP/lifecycle.log" "$TMP/lifecycle"
-[ "$(grep -n '^preflight ' "$TMP/lifecycle.log" | cut -d: -f1)" -lt "$(grep -n '^dispatch ' "$TMP/lifecycle.log" | head -1 | cut -d: -f1)" ]
+[ "$(grep -n '^preflight ' "$TMP/lifecycle.log" | cut -d: -f1)" -lt "$(head -1 <<<"$(grep -n '^dispatch ' "$TMP/lifecycle.log")" | cut -d: -f1)" ]
 [ "$(grep -c '^create ' "$TMP/lifecycle.log")" -eq 2 ]
 grep -q '^preflight 4$' "$TMP/lifecycle.log"
 grep -q '^dispatch first.edge 5$' "$TMP/lifecycle.log"

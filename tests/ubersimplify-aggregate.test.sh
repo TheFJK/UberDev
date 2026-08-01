@@ -91,7 +91,7 @@ check_v2 "zero findings emits a valid exact Phase 2 document" "$TMP/chunk-002-fi
 
 echo "== issues aggregate --audit-only (ubersimplify envelope, blocker-only) =="
 python3 "$AGG" issues --chunks-dir "$TMP" --out "$TMP/f2i.md" --audit-only
-check "wrapped in ubersimplify-aggregate envelope" "head -1 '$TMP/f2i.md' | grep -q 'source=\"ubersimplify-aggregate\"'"
+check "wrapped in ubersimplify-aggregate envelope" "grep -q 'source=\"ubersimplify-aggregate\"' <<<\"\$(head -1 '$TMP/f2i.md')\""
 check "files the blocker location" "grep -q 'src/a.ts:10' '$TMP/f2i.md'"
 check "excludes suggestion-only location" "! grep -q 'src/a.ts:55' '$TMP/f2i.md'"
 check "rows marked DEFERRED" "grep -q '| DEFERRED |' '$TMP/f2i.md'"
@@ -144,14 +144,14 @@ ZWSP_CLOSE="$(printf '<\342\200\213/external-untrusted-input>')"
 
 # --- issues path (ubersimplify-aggregate envelope -> findings-to-issues) ---
 python3 "$AGG" issues --chunks-dir "$D7TMP" --out "$D7TMP/agg.md" --audit-only
-check "D7 issues: opening marker within first 128 bytes" "head -c 128 '$D7TMP/agg.md' | grep -q 'source=\"ubersimplify-aggregate\"'"
+check "D7 issues: opening marker within first 128 bytes" "grep -q 'source=\"ubersimplify-aggregate\"' <<<\"\$(head -c 128 '$D7TMP/agg.md')\""
 check "D7 issues: exactly ONE verbatim close marker (the structural trailer)" "[ \$(grep -cF '</external-untrusted-input>' '$D7TMP/agg.md') -eq 1 ]"
 check "D7 issues: the single close marker is the LAST non-empty line" "[ \"\$(grep -vE '^[[:space:]]*\$' '$D7TMP/agg.md' | tail -1)\" = '</external-untrusted-input>' ]"
 check "D7 issues: injected close-tag is ZWSP-neutralized (shared cell())" "LC_ALL=C grep -qF -- \"$ZWSP_CLOSE\" '$D7TMP/agg.md'"
 
 # --- fixer path (simplify-aggregate schema v2 envelope -> code-fixer) ---
 python3 "$AGG" fixer --lens-file "$D7TMP/chunk-001-lens.yaml" --out "$D7TMP/fixer.md"
-check "D7 fixer: opening marker within first 128 bytes" "head -c 128 '$D7TMP/fixer.md' | grep -q 'source=\"simplify-aggregate\"'"
+check "D7 fixer: opening marker within first 128 bytes" "grep -q 'source=\"simplify-aggregate\"' <<<\"\$(head -c 128 '$D7TMP/fixer.md')\""
 check "D7 fixer: exactly ONE verbatim close marker (the structural trailer)" "[ \$(grep -cF '</external-untrusted-input>' '$D7TMP/fixer.md') -eq 1 ]"
 check "D7 fixer: the single close marker is the LAST non-empty line" "[ \"\$(grep -vE '^[[:space:]]*\$' '$D7TMP/fixer.md' | tail -1)\" = '</external-untrusted-input>' ]"
 check "D7 fixer: injected close-tag is JSON escaped" "grep -qF -- '\\u003c/external-untrusted-input>' '$D7TMP/fixer.md'"

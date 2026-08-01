@@ -360,7 +360,7 @@ git -C "$DIRECTORY_TARGET" commit -qm "test: directory output fixture"
 before_status="$(git -C "$DIRECTORY_TARGET" status --porcelain --untracked-files=all)"
 if bash "$GEN" --target "$DIRECTORY_TARGET" --version 0.1.0 >/dev/null 2>&1 \
    || [ "$(cat "$DIRECTORY_TARGET/README.md/sentinel.txt" 2>/dev/null)" != "directory output sentinel" ] \
-   || find "$DIRECTORY_TARGET/README.md" -maxdepth 1 -name '.prkit-render.*' -print -quit | grep -q . \
+   || [ -n "$(find "$DIRECTORY_TARGET/README.md" -maxdepth 1 -name '.prkit-render.*' -print -quit)" ] \
    || [ "$(git -C "$DIRECTORY_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
   no "G1p managed directory output was accepted, mutated, or received a temporary"
 else
@@ -461,7 +461,7 @@ if PRKIT_GENERATOR_TEST_MODE=1 \
   no "G1r injected copy publication failure was accepted"
 elif [ -e "$COPY_FAIL_TARGET/plugins/prkit/commands/review-pr.md" ]; then
   no "G1r failed copy publication left a canonical destination"
-elif find "$COPY_FAIL_TARGET" -name '.prkit-copy.*' -print -quit | grep -q .; then
+elif [ -n "$(find "$COPY_FAIL_TARGET" -name '.prkit-copy.*' -print -quit)" ]; then
   no "G1r failed copy publication leaked a destination temporary"
 elif [ -e "$COPY_FAIL_TARGET/.prkit-generate.lock" ]; then
   no "G1r failed copy publication leaked its generation lock"
@@ -495,8 +495,8 @@ printf 'lock owner sentinel\n' > "$LOCK_TARGET/.prkit-generate.lock/owner"
 printf 'locked target sentinel\n' > "$LOCK_TARGET/sentinel.txt"
 lock_output=""
 if lock_output="$(bash "$GEN" --target "$LOCK_TARGET" --version 0.1.0 --force 2>&1)" \
-   || ! printf '%s\n' "$lock_output" | grep -qF "target generation lock exists:" \
-   || ! printf '%s\n' "$lock_output" | grep -qF "confirming it is stale" \
+   || ! grep -qF "target generation lock exists:" <<<"$lock_output" \
+   || ! grep -qF "confirming it is stale" <<<"$lock_output" \
    || [ "$(cat "$LOCK_TARGET/.prkit-generate.lock/owner" 2>/dev/null)" != "lock owner sentinel" ] \
    || [ "$(cat "$LOCK_TARGET/sentinel.txt" 2>/dev/null)" != "locked target sentinel" ] \
    || [ -e "$LOCK_TARGET/plugins" ]; then
@@ -569,7 +569,7 @@ assert commands == [f'codex plugin add {selector}']
 PY
 then ok "G4c native Codex marketplace backs README selector prkit-codex@prkit"
 else no "G4c native Codex marketplace missing, malformed, or disconnected from README selector"; fi
-if printf '%s\n' "$G1_OUTPUT" | grep -qF 'scaffolded 12, verified.' \
+if grep -qF 'scaffolded 12, verified.' <<<"$G1_OUTPUT" \
    && grep -qF '.agents/plugins/marketplace.json' "$T1/.github/workflows/ci.yml"; then
   ok "G4d native marketplace is counted and covered by generated JSON syntax CI"
 else
@@ -636,7 +636,7 @@ if PRKIT_GENERATOR_TEST_MODE=1 PRKIT_TEST_RENDER_PUBLISH_FAIL="$PUBLISH_FILE" \
   no "G4e injected render publication failure was masked by stale valid output"
 elif ! cmp -s "$PUBLISH_FILE" "$_B6/expected-marketplace.json"; then
   no "G4e failed render publication changed the stale canonical output"
-elif find "$(dirname "$PUBLISH_FILE")" -maxdepth 1 -name '.prkit-render.*' -print -quit | grep -q .; then
+elif [ -n "$(find "$(dirname "$PUBLISH_FILE")" -maxdepth 1 -name '.prkit-render.*' -print -quit)" ]; then
   no "G4e failed render publication leaked a destination temporary"
 else
   ok "G4e render publication fails closed, preserves stale bytes, and cleans temporary"

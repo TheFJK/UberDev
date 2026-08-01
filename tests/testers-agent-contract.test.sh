@@ -144,7 +144,7 @@ SKILL_FILE="$SKILL_DIR/SKILL.md"
 # and expected — we only forbid a live call. The patterns below match an
 # invocation: dispatch_master followed by a quote or by a non-backtick word,
 # but NOT `dispatch_master` in inline-code backticks.
-if grep -nE 'dispatch_master[[:space:]]+("|\$|[A-Za-z./])' "$SKILL_FILE" | grep -vE '`dispatch_master`' | grep -q .; then
+if [ -n "$(grep -nE 'dispatch_master[[:space:]]+("|\$|[A-Za-z./])' "$SKILL_FILE" | grep -vE '`dispatch_master`')" ]; then
   fail "C8: an executable dispatch_master call site remains in SKILL.md — the never-worked master mode is removed at the RFC 0012 migration, not re-guarded (#306 / §3.10)"
 fi
 grep -qE 'master.dispatch.+(remove|removed)|master-dispatch mode is .*remove' "$SKILL_FILE" \
@@ -174,9 +174,9 @@ pass "C8b: Workflow path mandated, fallback present, politeBreach exit-1 contrac
 for a in "${PERSONA_AGENTS[@]}"; do
   F="$AGENT_DIR/$a.md"
   grep -q 'network_request:' "$F" || fail "C9 $a: missing network_request evidence block"
-  grep -A5 'network_request:' "$F" | grep -q 'url:' \
+  grep -q 'url:' <<<"$(grep -A5 'network_request:' "$F")" \
     || fail "C9 $a: network_request block lacks url: (rate-cap audit skips the row)"
-  grep -A5 'network_request:' "$F" | grep -q 'timestamp:' \
+  grep -q 'timestamp:' <<<"$(grep -A5 'network_request:' "$F")" \
     || fail "C9 $a: network_request block lacks timestamp: (rate-cap audit skips the row)"
 done
 pass "C9: all 6 persona network_request schema blocks carry url + timestamp"
@@ -192,7 +192,7 @@ pass "C9: all 6 persona network_request schema blocks carry url + timestamp"
 RLC="plugins/uberdev/lib/rl-curl"
 [ -f "$RLC" ] || fail "C10: $RLC missing"
 [ -x "$RLC" ] || fail "C10: $RLC is not executable (x-bit lost on checkout?)"
-head -1 "$RLC" | grep -q 'bash' || fail "C10: $RLC must run under a bash shebang"
+grep -q 'bash' <<<"$(head -1 "$RLC")" || fail "C10: $RLC must run under a bash shebang"
 grep -q 'rate-limit-curl.sh' "$RLC" || fail "C10: shim does not source the SSOT wrapper rate-limit-curl.sh"
 grep -q 'uberdev_rate_limit_curl' "$RLC" || fail "C10: shim does not call uberdev_rate_limit_curl"
 grep -q -- '--rate-state-dir=' "$RLC" || fail "C10: shim lacks --rate-state-dir= argv injection"

@@ -272,7 +272,7 @@ else
   fail "S1.14 'stat -c' is probed before 'stat -f' (GNU -f means --file-system)"
 fi
 assert_not_in "$CODE_ONLY" '(echo|printf) .*\| *grep -q' \
-  "S1.15 no 'echo \$V | grep -q' EPIPE race under pipefail"
+  "S1.15 no writer-into-'grep -q' EPIPE race under pipefail (use a herestring)"
 
 # The renderer must also load cleanly under zsh — the Bash tool's macOS shell.
 # NOTE: uberdev_status_render is documented to ALWAYS return 0, so this assert

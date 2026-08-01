@@ -22,7 +22,7 @@ ck "has allowed-tools" "grep -q '^allowed-tools:' '$CMD'"
 
 echo "== U2: READ-ONLY invariant (no Edit/MultiEdit in allowed-tools) =="
 ck "allowed-tools omits Edit/MultiEdit" "[ \$(grep '^allowed-tools:' '$CMD' | grep -cE '\"Edit\"|MultiEdit') -eq 0 ]"
-ck "allowed-tools carries Workflow (the migration's dispatch tool)" "grep '^allowed-tools:' '$CMD' | grep -q '\"Workflow\"'"
+ck "allowed-tools carries Workflow (the migration's dispatch tool)" "grep -q '\"Workflow\"' <<<\"\$(grep '^allowed-tools:' '$CMD')\""
 
 echo "== U3: pipeline skill =="
 ck "skill exists" "[ -r '$SKILL' ]"
@@ -51,7 +51,7 @@ ck "no per-phase #171 RUN_ID rehydrate stanza remains (single-process workflow n
 ck "no fence-scoped CIRCUIT_BREAKER_HALT run-state.txt persistence remains (CB lives in workflow.js)" "[ \$(grep -c 'CIRCUIT_BREAKER_HALT=' '$SKILL') -eq 0 ]"
 
 echo "== U6: global-pass.sh extracted (the inline Semgrep + coverage pass) =="
-ck "global-pass.sh exists + executable shebang" "[ -r '$GLOBAL_PASS' ] && head -1 '$GLOBAL_PASS' | grep -q 'bin/env bash'"
+ck "global-pass.sh exists + executable shebang" "[ -r '$GLOBAL_PASS' ] && grep -q 'bin/env bash' <<<\"\$(head -1 '$GLOBAL_PASS')\""
 ck "skill references global-pass.sh" "grep -q 'global-pass.sh' '$SKILL'"
 ck "global-pass runs Semgrep" "grep -qE 'semgrep scan --config' '$GLOBAL_PASS'"
 ck "global-pass writes the two artifacts report.py reads by name" "grep -q 'global-security.md' '$GLOBAL_PASS' && grep -q 'global-coverage.md' '$GLOBAL_PASS'"
@@ -66,10 +66,10 @@ ck "coverage heredoc extracted (non-empty)" "[ -s '$P1B_TMP/cov.py' ]"
 ck "coverage python is syntactically valid" "python3 -c \"import ast; ast.parse(open('$P1B_TMP/cov.py').read())\""
 ( cd "$P1B_TMP" && git init -q && mkdir -p src tests && printf 'a\nb\n' > src/mod.py && printf 'x\n' > tests/test_mod.py && git add -A 2>/dev/null )
 COV_RUN="$(cd "$P1B_TMP" && python3 cov.py . 2>&1)"
-ck "coverage run emits the 'Source files:' summary" "printf '%s' \"\$COV_RUN\" | grep -q 'Source files:'"
-ck "coverage run never writes a Python traceback (fail-soft)" "! printf '%s' \"\$COV_RUN\" | grep -q 'Traceback (most recent call last)'"
+ck "coverage run emits the 'Source files:' summary" "grep -q 'Source files:' <<<\"\$COV_RUN\""
+ck "coverage run never writes a Python traceback (fail-soft)" "! grep -q 'Traceback (most recent call last)' <<<\"\$COV_RUN\""
 COV_NONGIT="$(cd "$(mktemp -d)" && python3 "$P1B_TMP/cov.py" . 2>&1)"; COV_NONGIT_RC=$?
-ck "coverage is fail-soft outside a git repo (exit 0, no traceback)" "[ $COV_NONGIT_RC -eq 0 ] && ! printf '%s' \"\$COV_NONGIT\" | grep -q 'Traceback'"
+ck "coverage is fail-soft outside a git repo (exit 0, no traceback)" "[ $COV_NONGIT_RC -eq 0 ] && ! grep -q 'Traceback' <<<\"\$COV_NONGIT\""
 # global-pass.sh itself is fail-soft + always exits 0 (advisory pass must never abort the audit).
 GP_TMP="$(mktemp -d)"; ( cd "$GP_TMP" && git init -q && printf 'x\n' > a.py && git add -A 2>/dev/null )
 ( cd "$GP_TMP" && bash "$GLOBAL_PASS" . "$GP_TMP" ); GP_RC=$?

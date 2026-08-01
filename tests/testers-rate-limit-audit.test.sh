@@ -149,7 +149,7 @@ test_audit_rejects_cap_zero() {
   out=$(uberdev_rate_cap_audit "$WAVE" 0 "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=0"; return; }
   rc=$?
   [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=0 must be rejected, got rc $rc"; return; }
-  echo "$out" | grep -q "\[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
+  grep -q "\[1, 1000\]" <<<"$out" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
   pass "$FUNCNAME"
 }
 test_audit_rejects_cap_zero
@@ -162,7 +162,7 @@ test_audit_rejects_cap_negative() {
   out=$(uberdev_rate_cap_audit "$WAVE" -5 "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=-5"; return; }
   rc=$?
   [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=-5 must be rejected, got rc $rc"; return; }
-  echo "$out" | grep -q "\[1, 1000\]" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
+  grep -q "\[1, 1000\]" <<<"$out" || { fail "$FUNCNAME" "stderr lacks range message: $out"; return; }
   pass "$FUNCNAME"
 }
 test_audit_rejects_cap_negative
@@ -175,8 +175,11 @@ test_audit_rejects_cap_non_numeric() {
   out=$(uberdev_rate_cap_audit "$WAVE" abc "$OUT" 2>&1) && { fail "$FUNCNAME" "expected non-zero exit for cap=abc"; return; }
   rc=$?
   [ "$rc" -ne 0 ] || { fail "$FUNCNAME" "cap=abc must be rejected, got rc $rc"; return; }
-  echo "$out" | grep -qi "integer" || { fail "$FUNCNAME" "stderr lacks a clear integer error: $out"; return; }
-  echo "$out" | grep -q "Traceback" && { fail "$FUNCNAME" "raw Python traceback leaked: $out"; return; }
+  grep -qi "integer" <<<"$out" || { fail "$FUNCNAME" "stderr lacks a clear integer error: $out"; return; }
+  # Inverted polarity: a MATCH here means the defect is present. Keep it an
+  # explicit `if` so the failure branch can never be short-circuited away by a
+  # non-zero rc from the matcher itself (#313).
+  if grep -q "Traceback" <<<"$out"; then fail "$FUNCNAME" "raw Python traceback leaked: $out"; return; fi
   pass "$FUNCNAME"
 }
 test_audit_rejects_cap_non_numeric

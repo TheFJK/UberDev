@@ -4,6 +4,21 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.7] — 2026-07-31
+
+### Fixed
+
+- Closed the `pipefail` + early-exit-reader EPIPE race repo-wide (#313). Under `set -o pipefail` a reader that exits at its first match (`grep -q`, `grep -m`, `head`, `read`) leaves the writer taking EPIPE, and pipefail adopts the writer's non-zero status — false-failing an assertion whose pattern **matched**. Measured, not assumed: 20/20 false non-zero through a pipe versus 0/20 through a herestring, for each reader in the set.
+- One site was **inverting** its meaning rather than merely flaking: `grep -q "Traceback" && fail …` under `set -e`. An EPIPE after the match short-circuited the `&&`, so a genuinely leaked Python traceback was reported **PASS**.
+
+### Added
+
+- `tests/epipe-guard.test.sh`, built around the risk rather than the syntax that happened to be converted: logical-line joining (so a pipeline split across physical lines cannot hide), an **unconstrained** writer side, a measured early-exit reader set, and a scan over every tracked `*.sh` via `git ls-files` — 100 `pipefail`-setting files, not just `tests/`. That widened scope caught two production instances (`lib/bump-version.sh`, `codex/install-codex.sh`).
+- The oracle is 26 independent cases — 15 must-flag shapes and 11 must-not-flag boundary cases — so it can fail per shape instead of certifying the detector as a whole. Removing a reader from the set reds exactly four named cases and nothing else.
+- A vacuous-green path **inside the guard** was found and closed while building it: a non-zero `awk` exit produced empty output, which read as "clean". A detector error is now a named failure per file.
+
+The same guard run against the previous `main` flags **218** sites; against this tree, **0**.
+
 ## [0.42.6] — 2026-07-31
 
 ### Fixed

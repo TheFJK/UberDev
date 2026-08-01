@@ -121,7 +121,7 @@ grep -q 'schema_version: 1' "$SKILL" \
 
 # W-10: the never-worked master mode leaves NO live call site (re-anchors the
 # #306 contract under the migration — the mode is removed, not guarded).
-if grep -nE 'dispatch_master[[:space:]]+("|\$|[A-Za-z./])' "$SKILL" | grep -vE '`dispatch_master`' | grep -q .; then
+if [ -n "$(grep -nE 'dispatch_master[[:space:]]+("|\$|[A-Za-z./])' "$SKILL" | grep -vE '`dispatch_master`')" ]; then
   fail "W-10 an executable dispatch_master call site remains in SKILL.md (master mode must be REMOVED at the migration, #306)"
 else
   pass "W-10 no live dispatch_master call site in SKILL.md (master mode removed, #306)"
@@ -135,7 +135,7 @@ fi
 # `[ -f "$WORKFLOW_JS" ]` form where WORKFLOW_JS holds the workflow.js path; the
 # `-f` + workflow.js coupling on one line is what distinguishes the live test
 # from the §4.2 invocation/`scriptPath` references and the line-187 prose.
-if grep -nE '\[[[:space:]]+-f[[:space:]]+"\$WORKFLOW_JS"[[:space:]]+\]' "$SKILL" | grep -q . \
+if [ -n "$(grep -nE '\[[[:space:]]+-f[[:space:]]+"\$WORKFLOW_JS"[[:space:]]+\]' "$SKILL")" ] \
    && grep -qE '^[[:space:]]*WORKFLOW_JS=.*skills/testers-pipeline/workflow\.js' "$SKILL"; then
   pass "W-11 SKILL.md preflight executes the RFC §4.1 [ -f ...workflow.js ] existence guard (not just the prose claim)"
 else
@@ -274,7 +274,7 @@ check() {
   fi
 }
 
-if printf '%s' "$FIXTURE_OUT" | grep -q 'FIXTURE_ERROR'; then
+if grep -q 'FIXTURE_ERROR' <<<"$FIXTURE_OUT"; then
   fail "T3 fixture crashed: $FIXTURE_OUT"
 else
   check violations 0 "T3.1 no harness violations (no bad prompts / undeclared phases / forbidden globals)"

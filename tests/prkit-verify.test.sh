@@ -27,8 +27,9 @@ bash "$GEN" --target "$BASE" --version 0.1.0 >/dev/null 2>&1 || { echo "  ABORT 
 # V1 — the clean generated tree passes and reports the managed ignore contract
 V1_OUTPUT=""
 if V1_OUTPUT="$(bash "$VERIFY" "$BASE" 2>&1)" \
-   && printf '%s\n' "$V1_OUTPUT" | grep -qF \
-     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'; then
+   && grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+     <<<"$V1_OUTPUT"; then
   ok "V1 clean generated tree passes with the managed artifact-ignore contract"
 else
   no "V1 clean generated tree rejected or artifact-ignore diagnostic missing"
@@ -52,8 +53,9 @@ if V1B_OUTPUT="$(
      GIT_CONFIG_GLOBAL="$V1B_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
        bash "$VERIFY" "$BASE" 2>&1
    )" \
-   && printf '%s\n' "$V1B_OUTPUT" | grep -qF \
+   && grep -qF \
      'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+     <<<"$V1B_OUTPUT" \
    && case "$V1B_ARTIFACT_SOURCE" in
         .gitignore:*:.prkit/$'\t'.prkit/audit.jsonl) true ;;
         *) false ;;
@@ -75,8 +77,9 @@ if V1C_OUTPUT="$(
      GIT_CONFIG_GLOBAL="$V1C_GLOBAL_CONFIG" GIT_CONFIG_NOSYSTEM=1 \
        bash "$VERIFY" "$BASE" 2>&1
    )" \
-   && printf '%s\n' "$V1C_OUTPUT" | grep -qF \
-     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'
+   && grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+     <<<"$V1C_OUTPUT"
 then
   ok "V1c verifier ignores hostile global excludes"
 else
@@ -104,8 +107,9 @@ if V1D_OUTPUT="$(
      GIT_CONFIG_PARAMETERS="$V1D_CONFIG_PARAMETERS" \
        bash "$VERIFY" "$BASE" 2>&1
    )" \
-   && printf '%s\n' "$V1D_OUTPUT" | grep -qF \
-     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'
+   && grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+     <<<"$V1D_OUTPUT"
 then
   ok "V1d verifier ignores hostile command-scope Git configuration"
 else
@@ -160,7 +164,7 @@ expect_fail_diag(){
   eval "$mutate"
   if output="$(bash "$VERIFY" "$d" 2>&1)"; then
     no "$desc (verify wrongly PASSED)"
-  elif ! printf '%s\n' "$output" | grep -qF "$diagnostic"; then
+  elif ! grep -qF "$diagnostic" <<<"$output"; then
     no "$desc (expected diagnostic missing)"
   else
     ok "$desc"
@@ -255,7 +259,7 @@ if (
          check-ignore -q --no-index -- "$V8W_TAB_PATTERN"
    ) \
    && ! V8W_OUTPUT="$(bash "$VERIFY" "$d" 2>&1)" \
-   && printf '%s\n' "$V8W_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+   && grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC" <<<"$V8W_OUTPUT"; then
   ok "V8w Git-active tab rule is rejected"
 else
   no "V8w tab rule semantics or verifier rejection regressed"
@@ -364,7 +368,7 @@ V25_OUTPUT=""
 if V25_OUTPUT="$(PATH="$dp/bin:$PATH" PRKIT_REAL_GREP="$real_grep" \
      bash "$VERIFY" "$d" 2>&1)"; then
   no "V25 placeholder scan error fails closed (verify wrongly PASSED)"
-elif ! printf '%s\n' "$V25_OUTPUT" | grep -qF 'placeholders: scan errored'; then
+elif ! grep -qF 'placeholders: scan errored' <<<"$V25_OUTPUT"; then
   no "V25 placeholder scan error fails closed (expected diagnostic missing)"
 else
   ok "V25 placeholder scan error fails closed"
@@ -387,10 +391,11 @@ V26_OUTPUT=""
 if V26_OUTPUT="$(PATH="$dp/bin:$PATH" PRKIT_REAL_GIT="$real_git" \
      bash "$VERIFY" "$d" 2>&1)"; then
   no "V26 Git check-ignore error fails closed (verify wrongly PASSED)"
-elif ! printf '%s\n' "$V26_OUTPUT" | grep -qF \
-  'artifact-ignore: infrastructure error: git check-ignore for .prkit/audit.jsonl failed (rc=73)'; then
+elif ! grep -qF \
+  'artifact-ignore: infrastructure error: git check-ignore for .prkit/audit.jsonl failed (rc=73)' \
+  <<<"$V26_OUTPUT"; then
   no "V26 Git check-ignore error fails closed (exact infrastructure diagnostic missing)"
-elif printf '%s\n' "$V26_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+elif grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC" <<<"$V26_OUTPUT"; then
   no "V26 Git check-ignore error was misclassified as invalid target rule"
 else
   ok "V26 Git check-ignore error preserves rc and infrastructure classification"
@@ -431,7 +436,7 @@ if V27_OUTPUT="$(
        bash "$VERIFY" "$d" 2>&1
    )"; then
   no "V27 forged outside .gitignore source fails (verify wrongly PASSED)"
-elif ! printf '%s\n' "$V27_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+elif ! grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC" <<<"$V27_OUTPUT"; then
   no "V27 forged outside .gitignore source fails (expected diagnostic missing)"
 else
   ok "V27 forged outside .gitignore source cannot satisfy managed-source proof"
@@ -481,7 +486,7 @@ if V28_OUTPUT="$(
        bash "$VERIFY" "$d" 2>&1
    )"; then
   no "V28 POSIX wrong-case source fails (verify wrongly PASSED)"
-elif ! printf '%s\n' "$V28_OUTPUT" | grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC"; then
+elif ! grep -qF "$ARTIFACT_IGNORE_DIAGNOSTIC" <<<"$V28_OUTPUT"; then
   no "V28 POSIX wrong-case source fails (expected diagnostic missing)"
 else
   ok "V28 POSIX source identity stays case-sensitive despite caller environment"
@@ -534,8 +539,9 @@ if V29_OUTPUT="$(
      PRKIT_MODELED_SCRIPT="$dp/modeled-parser.py" \
        bash "$VERIFY" "$d" 2>&1
    )" \
-   && printf '%s\n' "$V29_OUTPUT" | grep -qF \
-     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock'; then
+   && grep -qF \
+     'artifact-ignore: managed .prkit/ rule ignores artifacts without ignoring generation lock' \
+     <<<"$V29_OUTPUT"; then
   ok "V29 modeled MSYS runtime accepts equivalent drive spelling"
 else
   no "V29 modeled MSYS runtime rejected equivalent drive spelling"

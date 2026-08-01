@@ -183,7 +183,7 @@ fi
 
 # Frontmatter audit: forbid `context: fork` (would isolate skill from caller's
 # shell scope; see spec Risk 2).
-if awk '/^---$/{f=!f; if(!f){exit}; next} f' "$SOLVE_PIPELINE" | grep -qE '^context:'; then
+if grep -qE '^context:' <<<"$(awk '/^---$/{f=!f; if(!f){exit}; next} f' "$SOLVE_PIPELINE")"; then
   echo "  FAIL  solve-pipeline/SKILL.md has a forbidden 'context:' frontmatter key (must render inline)"
   FAIL=$((FAIL + 1))
 else

@@ -96,7 +96,7 @@ assert_grep "$SUBAGENT_DRIVEN" \
 assert_grep "$SUBAGENT_DRIVEN" \
   'uberdev_unwind_child "\$status" "\$result" "\$SDD_CHILD_TIMEOUT"' \
   "SDD unwind is bounded by the configured positive timeout"
-if grep -A1 -F 'edge_id: sdd.finish_branch' "$SUBAGENT_DRIVEN" | grep -qF 'model_invocation: false'; then
+if grep -qF 'model_invocation: false' <<<"$(grep -A1 -F 'edge_id: sdd.finish_branch' "$SUBAGENT_DRIVEN")"; then
   echo "  PASS  SDD finish-branch transition has stable non-model lineage"
   PASS=$((PASS + 1))
 else

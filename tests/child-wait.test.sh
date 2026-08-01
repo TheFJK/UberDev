@@ -91,8 +91,8 @@ MALFORMED_LEASE_ERROR="$(_uberdev_child_terminal_lease_proof "$STATUS" 2>&1)"
 MALFORMED_LEASE_RC=$?
 set -e
 [ "$MALFORMED_LEASE_RC" -ne 0 ]
-printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq "invalid lifecycle lease: $MALFORMED_LEASE_REAL"
-! printf '%s\n' "$MALFORMED_LEASE_ERROR" | grep -Fq 'generation=bad'
+grep -Fq "invalid lifecycle lease: $MALFORMED_LEASE_REAL" <<<"$MALFORMED_LEASE_ERROR"
+! grep -Fq 'generation=bad' <<<"$MALFORMED_LEASE_ERROR"
 rm -f "$MALFORMED_LEASE"; rmdir "$MALFORMED_SCOPE"
 
 # Another child's watcher may remove or atomically replace its lease after the
@@ -146,9 +146,9 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=claude-bg; capacity=retained'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'action=resolve the retained Claude session or retry with Codex'
+grep -Fq 'provider supervision failed: provider_probe_failed' <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'backend=claude-bg; capacity=retained' <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'action=resolve the retained Claude session or retry with Codex' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # Owner identity capture is a launch-time supervisory failure with no reserved
@@ -162,9 +162,9 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
-  'provider supervision failed: owner_process_identity_unavailable'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'backend=codex; capacity=not-reserved'
+grep -Fq 'provider supervision failed: owner_process_identity_unavailable' \
+  <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'backend=codex; capacity=not-reserved' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # The same prelaunch record for claude-bg has no session and no capacity. Its
@@ -176,11 +176,11 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
-  'owner_process_identity_unavailable; backend=claude-bg; capacity=not-reserved'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
-  'action=fix the prelaunch supervisory failure and retry'
-! printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'resolve the retained Claude session'
+grep -Fq 'owner_process_identity_unavailable; backend=claude-bg; capacity=not-reserved' \
+  <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'action=fix the prelaunch supervisory failure and retry' \
+  <<<"$WATCHER_WAIT_ERROR"
+! grep -Fq 'resolve the retained Claude session' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # The detached numeric-process watcher emits a distinct durable record when
@@ -194,9 +194,9 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
-  'provider supervision failed: process_identity_probe_failed'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
+grep -Fq 'provider supervision failed: process_identity_probe_failed' \
+  <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'capacity=retained' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # Timeout-capability recovery failures use their own closed supervisory phase.
@@ -209,9 +209,9 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq \
-  'provider supervision failed: timeout_intent_identity_unavailable'
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
+grep -Fq 'provider supervision failed: timeout_intent_identity_unavailable' \
+  <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'capacity=retained' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # Timeout coordination is a short-lived waiter capability, not a same-handle
@@ -286,8 +286,8 @@ for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed;
   WATCHER_WAIT_RC=$?
   set -e
   [ "$WATCHER_WAIT_RC" -eq 70 ]
-  printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq "provider supervision failed: ${watcher_reason}"
-  printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'capacity=retained'
+  grep -Fq "provider supervision failed: ${watcher_reason}" <<<"$WATCHER_WAIT_ERROR"
+  grep -Fq 'capacity=retained' <<<"$WATCHER_WAIT_ERROR"
 done
 rm -f "$STATUS.watcher-error.json"
 
@@ -301,7 +301,7 @@ WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-printf '%s\n' "$WATCHER_WAIT_ERROR" | grep -Fq 'provider supervision failed: provider_probe_failed'
+grep -Fq 'provider supervision failed: provider_probe_failed' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$WATCHER_FALLBACK"
 
 for malformed_watcher_error in \
@@ -319,9 +319,9 @@ for malformed_watcher_error in \
   INVALID_WATCHER_RC=$?
   set -e
   if [ "$INVALID_WATCHER_RC" -ne 2 ] \
-      || ! printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'invalid-supervisory-record' \
-      || ! printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq "$STATUS.watcher-error.json" \
-      || printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'schema_version'; then
+      || ! grep -Fq 'invalid-supervisory-record' <<<"$INVALID_WATCHER_OUTPUT" \
+      || ! grep -Fq "$STATUS.watcher-error.json" <<<"$INVALID_WATCHER_OUTPUT" \
+      || grep -Fq 'schema_version' <<<"$INVALID_WATCHER_OUTPUT"; then
     echo "child wait did not surface a bounded invalid-supervisory-record diagnostic" >&2
     exit 1
   fi
@@ -335,8 +335,8 @@ INVALID_WATCHER_OUTPUT="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 INVALID_WATCHER_RC=$?
 set -e
 [ "$INVALID_WATCHER_RC" -eq 2 ]
-printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq 'invalid-supervisory-record'
-printf '%s\n' "$INVALID_WATCHER_OUTPUT" | grep -Fq "$WATCHER_FALLBACK"
+grep -Fq 'invalid-supervisory-record' <<<"$INVALID_WATCHER_OUTPUT"
+grep -Fq "$WATCHER_FALLBACK" <<<"$INVALID_WATCHER_OUTPUT"
 rm -f "$WATCHER_FALLBACK"
 
 # Reviewer results are validated at one deterministic boundary. In particular,
@@ -615,8 +615,9 @@ WAIT_RC=$?
 set -e
 [ "$WAIT_RC" -eq 2 ]
 [ "$WAIT_RC" -ne 124 ]
-printf '%s\n' "$UNSUPPORTED_CANCEL_ERROR" | grep -Fq \
-  'provider cancellation failed: backend=claude-bg handle=unsupported-session reason=provider_stop_failed capacity=retained'
+grep -Fq \
+  'provider cancellation failed: backend=claude-bg handle=unsupported-session reason=provider_stop_failed capacity=retained' \
+  <<<"$UNSUPPORTED_CANCEL_ERROR"
 [ "$(shasum -a 256 "$STATUS" | awk '{print $1}')" = "$STATUS_SHA" ]
 [ "$(shasum -a 256 "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA" ]
 [ -f "$LEASE" ] && [ "$(shasum -a 256 "$LEASE" | awk '{print $1}')" = "$LEASE_SHA" ]

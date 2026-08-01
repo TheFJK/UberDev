@@ -365,7 +365,7 @@ check() {
   fi
 }
 
-if printf '%s' "$FIXTURE_OUT" | grep -q 'FIXTURE_ERROR'; then
+if grep -q 'FIXTURE_ERROR' <<<"$FIXTURE_OUT"; then
   fail "T3 fixture crashed: $FIXTURE_OUT"
 else
   # Run A — scan
