@@ -62,11 +62,25 @@ shell / Python / jq, `//` for JavaScript, `<!-- ... -->` for Markdown.
 | Term | Meaning |
 |---|---|
 | `<name>` | kebab-case contract id (`dispatch-backend`, `trust-signal`). Must be present in the `CONTRACTS` registry. |
-| `@<anchor>` | Optional. The region starts at the first line at or after the marker containing the literal anchor text, instead of the line directly below. |
-| `/<regex>/` | Optional. Switches the site from *span mode* to *harvest mode*. |
+| `@<anchor>` | Optional. The region starts at the **unique** line at or after the marker containing the literal anchor text, instead of the line directly below. `@"..."` may contain spaces. Two matches is an error, not a first-match win. |
+| `!<mode>` | Optional. Selects a built-in extractor. Today: `!case-arm`. |
+| `/<regex>/` | Optional. Switches the site to *harvest mode*. Mutually exclusive with `!<mode>`. |
 | `<delta>` | Zero or more `-<member>` / `+<member>` terms declaring that this site is deliberately the contract minus / plus those members. |
 
+**The region defaults to ONE line.** That default is the wrong choice at any
+`case` or `elif` chain: the most likely real edit there is *adding an arm*, and a
+one-line region cannot see it. Close those regions with `/CONTRACT: <name>` at
+the `esac` / end of chain — the closing marker binds to the nearest preceding
+unclosed marker of the same name, bracket-style.
+
 ### 2.2 Extraction
+
+**Region text is stripped of comments first**, quote-aware, per language. Without
+that, a delimiter-separated decoy in a trailing comment
+(`# keep aligned with a|b|c|d`) wins the max-members span and hides a member
+*removal* from the real declaration beside it. Only a leader at line start or
+after whitespace counts, which is the real shell rule and leaves `$#`,
+`${x#y}` and `https://` intact.
 
 **Span mode** (default) enumerates candidate spans in the region — every quoted
 string, every `[...]` / `{...}` group, every bare pipe-alternation, and every
@@ -75,28 +89,70 @@ characters, and keeps the span that yields the most distinct members **and
 contains no rejected token**. A token is rejected when it does not fullmatch
 `[A-Za-z0-9][A-Za-z0-9_.-]*`, which is how spans carrying shell or regex syntax
 (`"$v"`, `type:`, `(audit-log`) disqualify themselves rather than poisoning the
-member set.
+member set. If a **second** span in the region also carries ≥ 2 members and a
+*different* set, the region declares two competing vocabularies and extraction is
+a hard failure — see §2.3 for why that rule exists.
 
-**Harvest mode** (`/regex/` present) unions the tokens of every regex match in
-the region. It exists for sites whose declaration is *scattered* rather than a
-single literal: `uberdev_semaphore_acquire` assigns its twelve failure reasons
-across ~20 statements, and `uberdev_goal_read_trust_signal` emits its five
-values from fifteen separate `printf` calls. **The regex must key on the shape
-of the emitting statement, never on the member names** — a regex that enumerates
-the members makes the site vacuous, because it can then only ever agree with
-itself.
+**`!case-arm` mode** harvests the arm heads of the region's outermost shell
+`case`, splitting alternations and tokenising **quoted** arms (`"hook-fail")` is
+legal shell, and a one-character edit must not hide an arm). It tracks
+`case`/`esac` *depth*, so a nested case's arms are excluded structurally — the
+`stale|missing)` arm of goal-watch's trust-signal switch sits *after* a nested
+verdict-state case, so the region cannot simply stop short of it, and an
+indentation anchor would break on any reindent.
 
-### 2.3 Why a heuristic extractor is acceptable
+**Harvest mode** (`/regex/`) unions the tokens of every regex match in the
+region; every capturing group that participated contributes, so one pattern can
+branch over several statement shapes. It exists for declarations that are
+*scattered* rather than a single literal: `uberdev_semaphore_acquire` assigns its
+twelve failure reasons across ~20 statements, and
+`uberdev_goal_read_trust_signal` emits its five values from fifteen separate
+`printf` calls.
 
-Span mode is a heuristic, and that is safe here for exactly one reason: **its
-failure mode is a failing test, never a passing one.** Pick the wrong span at a
-mirror and that mirror's set will not equal the canonical's, so CI reds. Pick
-the wrong span at the canonical and every mirror reds. There is no span choice
-that makes two genuinely different token sets compare equal.
+> **The regex must key on the shape of the emitting statement — not on the
+> member names, and not on a member-name PREFIX.** A prefix filter looks like it
+> keys on shape and does not: `/lease_acquire_[a-z_]+/` extracts a 12-member
+> *projection* of a 22-member and a 13-member set, and a projection of a superset
+> **silently agrees** with the set it projects, so ten members at one validator
+> and one at another were compared against nothing. The first edition of this RFC
+> stated the rule correctly and the first edition of the guard violated it at all
+> eight sites of `semaphore-lease-acquire-reason`. Where a site is a genuine
+> superset, take the **whole container span** and declare the extra members as
+> explicit `+member` deltas: a superset relationship declared at the site beats a
+> projection that agrees by construction.
+>
+> The same trap in a different costume is keying on *quoting style*.
+> `/printf '([a-z]+)\n'/` matched 15 of the producer's 22 `printf` statements, so
+> a sixth value emitted as `printf "amber\n"` or `echo amber` was invisible. Key
+> on the statement's **role** — an unredirected single-literal emission — and let
+> the quoting vary.
 
-Because that property is the whole justification, it is protected explicitly:
-every site must yield at least two members, and a marker whose region yields
-zero is a hard failure — never a skip.
+### 2.3 What the heuristic extractor actually guarantees
+
+**The first edition of this RFC claimed "there is no span choice that makes two
+genuinely different token sets compare equal." That claim is false and is
+withdrawn.** An adversarial sweep refuted it twice: a decoy token list in a
+trailing comment won the max-members span and hid a member removal, and a
+first-match `@anchor` bound to a decoy line inserted above a byte-locked
+declaration. Both are now closed (comment stripping; anchor uniqueness), but the
+*claim* was the real defect — it asserted a property the mechanism never had, and
+a false claim in a shipped RFC is worse than no RFC.
+
+Here is the property span mode actually has, stated so it can be checked:
+
+1. A region containing **exactly one** multi-member vocabulary extracts that
+   vocabulary, or fails loudly (zero members, or fewer than `MIN_MEMBERS`).
+2. A region containing **two different** multi-member vocabularies is a hard
+   failure — the extractor refuses to choose rather than silently preferring the
+   larger. Singleton spans (an individual quoted string inside a set literal,
+   `"string"` beside a JS enum array) are below `MIN_MEMBERS` and never compete,
+   and a singleton cannot win against a real vocabulary anyway.
+3. Given (1) and (2), a *mis-extraction that changes the member set* cannot be
+   silent: the mirror sites disagree and CI reds.
+
+What it does **not** guarantee is that the marker is attached to the declaration
+you meant — only that whatever it is attached to is extracted honestly and
+compared. §2.7 lists the residue that follows from that.
 
 ### 2.4 Why deltas are mandatory, not a convenience
 
@@ -122,6 +178,19 @@ Two escape hatches, both of which keep the site **compared** rather than skipped
   `skills/merge-pipeline/SKILL.md`'s `PARK_REASON_ENUM` lives in a Markdown
   table where an interleaved comment would split the table in two. The marker
   sits outside the fragile region and resolves forward to the declaration.
+  **The anchor must resolve uniquely.** A first-match scan is not an escape
+  hatch, it is a second attack surface: inserting a decoy line carrying the
+  canonical set *between* the marker and a byte-locked declaration re-points the
+  marker and lets the real declaration drift in silence. Two matches is an error;
+  a `@"..."` anchor may contain spaces so the shortest unique anchor is always
+  expressible (`PARK_REASON_ENUM` alone occurs eight times in
+  merge-pipeline/SKILL.md, so that site anchors on ``@"| `PARK_REASON_ENUM` |"``).
+- **jq comments.** Two of the three `agent-liveness-value` probes declare their
+  vocabulary inside a jq program embedded in a single-quoted shell string. jq
+  treats `#` as a comment to end of line, so those markers sit *on* the
+  declaration and need no anchor at all — the better answer whenever it is
+  available. (The prose in those comments carries no apostrophe: one would
+  terminate the surrounding shell string.)
 - **JSON has no comment syntax.** `policy/model-routing-v1.json`'s
   `risk_signals` is therefore declared in the test's own `JSON_SITES` table by
   path + key, and extracted exactly (`json.load` + key lookup) rather than
@@ -135,30 +204,78 @@ Two escape hatches, both of which keep the site **compared** rather than skipped
 of this shape can sit in CI, look right, and cover nothing. So the meta-test
 carries five ratchets:
 
-1. **`CONTRACTS` registry** — every contract name with its **exact** expected
-   site count. A deleted marker must red, not silently shrink the comparison
-   set. Adding a legitimate new mirror is a deliberate one-number edit, in the
-   same spirit as the repo's version-locks.
+1. **`CONTRACTS` registry pins PATHS, not a count** — for each contract, the
+   exact multiset of plugin-tree-relative files expected to declare it. A
+   count-only ratchet passes when a marker is *moved* off one file and
+   duplicated onto another: the count holds, per-tree parity holds, and the
+   abandoned declaration drifts free. The path multiset must match in **both**
+   trees, which folds mirror parity into the same comparison — a marker added to
+   one tree and forgotten in the other reds, and the message names the file and
+   the direction rather than printing two empty sets.
 2. **No contract may have fewer than two sites.** A one-site "contract" needs no
    comparator, so its presence in the registry means someone marked the wrong
    thing.
 3. **Both trees must be walked**, `plugins/uberdev/**` and
    `codex/uberdev-codex/**`, and each must yield files. A scan that silently
-   missed the Codex mirror would be this very bug one level up.
-4. **Mirror parity per contract** — the set of marked relative paths under
-   `plugins/uberdev/` must equal the set under `codex/uberdev-codex/`, so a
-   marker added to one tree and forgotten in the other reds.
-5. **`--selftest` and the in-CI mutation.** The extractor is a producer too, so
-   it has its own oracle: synthetic fixtures for every extraction mode plus the
-   negative cases (zero members, one member, stale delta, unparsable term,
-   unresolvable anchor). `tests/contract-markers.test.sh` C3 then copies the two
-   trees, adds a sixth terminal event at one site, and asserts the scan reds and
-   names both the contract and the moved member — so the anti-vacuity property
-   is asserted on **every** CI run, not just in the PR that introduced it.
+   missed the Codex mirror would be this very bug one level up. The walk is a
+   **denylist** of binary suffixes, not an allowlist of "text" ones: the first
+   edition allowlisted eleven extensions, which quietly excluded `.ts`, `.cmd`,
+   `.html` and every extension-less executable under `hooks/` and `lib/` while
+   looking exhaustive.
+4. **A commented-out declaration cannot keep its marker.** Comment stripping
+   runs before extraction, so commenting the declaration out empties the region
+   and the site fails with ZERO members instead of tokenising the dead text.
+5. **`--selftest` and two in-CI mutations.** The extractor is a producer too, so
+   it has its own oracle: 27 synthetic fixtures covering every extraction mode
+   plus eleven negative cases (zero members, one member, both stale-delta
+   directions, unparsable term, unknown mode, two modes, unresolvable anchor,
+   ambiguous anchor, ambiguous region, commented-out declaration).
+   `tests/contract-markers.test.sh` then copies both trees and mutates them for
+   real: **C3** adds a sixth terminal event at one site, **C4** adds a new `case`
+   arm — the edit shape a one-line region cannot see — and both must red and name
+   the contract and the moved member. The anti-vacuity property is therefore
+   asserted on **every** CI run, not just in the PR that introduced it.
+
+### 2.7 Known limits
+
+Stated because an unstated limit reads as a guarantee:
+
+- **A marker moved onto a same-set decoy in the same file is not detected.**
+  Delete the marker from the real declaration, add a second declaration carrying
+  the identical member set, and put the marker on that: every check passes, and
+  the real declaration is no longer compared. Closing it needs a per-site
+  *symbol* in the registry, which would make the registry a second copy of the
+  declarations — the exact shape this file exists to eliminate. The mitigation is
+  that the decoy is itself compared from then on, so the *next* edit to either
+  copy reds. This is a sabotage shape, not a drift shape.
+- **A computed emission is not statically extractable.** At the trust-signal
+  producer, `printf '%s\n' "$override"` emits a value no literal harvest can see.
+  The site catches every literal emission in any quoting style; a value routed
+  through a variable is outside the mechanism.
+- **A name-identity contract cannot be expressed.** #370 rank 7's larger half is
+  the field name (`state` for background-kind rows, `status` for interactive),
+  not the value set. That is a one-member contract, and `MIN_MEMBERS = 2` — the
+  invariant that makes span mode safe at all — structurally forbids it. It needs
+  a different mechanism, not a marker.
+- **Prose is not a declaration.** `commands/goal.md` still says "seven circuit
+  breakers" where the enum has nine. Sentences are not token sets and this
+  comparator does not read them.
 
 ---
 
 ## 3. What is registered today
+
+**How to read the site count.** "Sites" counts marker lines across both trees, so
+it is 2× the number of declarations in the shipped plugin tree. Half of it is the
+Codex mirror, and four of the twelve marked files
+(`lib/agent-dispatch.sh`, `lib/dispatch.sh`, `lib/status.sh`,
+`policy/model-routing-v1.json`) were **already** byte-locked to their plugin-tree
+twin before this convention existed — `tests/child-dispatch.test.sh`,
+`tests/solve-routing.test.sh` and `tests/status.test.sh` `cmp` them. For those
+files the Codex-side markers add no coupling that did not already exist. The
+honest figure is **40 declarations in `plugins/uberdev/`, of which the 13 Codex
+counterparts in already-`cmp`-locked files are bookkeeping rather than new
+coupling.**
 
 | Contract | #370 rank | Members | Sites (both trees) | Notes |
 |---|---|---|---|---|
