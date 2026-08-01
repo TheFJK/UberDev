@@ -199,11 +199,25 @@ function flush(   pos, abs, rest, d) {
 END { flush() }
 '
 
-# _epipe_hits FILE -> `startline<TAB>logical-line` for every offending site.
+# A detector that CANNOT RUN must not read as "nothing found" — that is the same
+# vacuous-green failure this file exists to prevent, one level up. If awk exits
+# non-zero (unsupported POSIX class in a dynamic regex on some awk, unreadable
+# file, ...) the helper emits this marker instead of an empty result, and E1
+# turns it into a FAIL naming the file.
+_EP_ERR_MARK='DETECTOR-ERROR: '
+
+# _epipe_hits FILE [REGEX_OVERRIDE]
+#   -> `startline<TAB>logical-line` for every offending site,
+#      or `0<TAB>DETECTOR-ERROR: ...` if the detector could not run.
+# REGEX_OVERRIDE exists so E2 can prove the error path is live.
 _epipe_hits() {
-  local _f="$1" _sete=0
+  local _f="$1" _re="${2:-$EPIPE_RE}" _sete=0 _out
   grep -qE -e "$ERREXIT_RE" "$_f" 2>/dev/null && _sete=1
-  awk -v RE="$EPIPE_RE" -v SETE="$_sete" "$_EP_AWK" "$_f"
+  if ! _out="$(awk -v RE="$_re" -v SETE="$_sete" "$_EP_AWK" "$_f" 2>/dev/null)"; then
+    printf '0\t%sawk exited non-zero while scanning this file\n' "$_EP_ERR_MARK"
+    return 0
+  fi
+  [ -z "$_out" ] || printf '%s\n' "$_out"
 }
 
 # _epipe_sh_files -> every tracked shell source in the repo, one per line.
@@ -238,9 +252,18 @@ while IFS= read -r rel; do
   [ -n "$HITS" ] || continue
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    echo "  FAIL  $rel:${hit%%$'\t'*} pipes into an early-exiting reader under pipefail"
-    echo "        line:   ${hit#*$'\t'}"
-    echo "        expect: reader PATTERN <<<\"\$(writer)\"   (herestring — no writer process, no EPIPE)"
+    body="${hit#*$'\t'}"
+    case "$body" in
+      "$_EP_ERR_MARK"*)
+        echo "  FAIL  $rel — the detector could not run, so this file was NOT checked"
+        echo "        cause:  ${body#"$_EP_ERR_MARK"}"
+        ;;
+      *)
+        echo "  FAIL  $rel:${hit%%$'\t'*} pipes into an early-exiting reader under pipefail"
+        echo "        line:   $body"
+        echo "        expect: reader PATTERN <<<\"\$(writer)\"   (herestring — no writer process, no EPIPE)"
+        ;;
+    esac
     FAIL=$((FAIL + 1))
   done <<<"$HITS"
 done <<<"$(_epipe_sh_files)"
@@ -342,6 +365,21 @@ _ep_case "E2.O8  rc explicitly neutralised under set -e" OK "$TMPD/o8.sh"
 _ep_case "E2.O9  '||' is not a pipe operator" OK "$TMPD/o9.sh"
 { printf 'set -o pipefail\n'; printf 'cat "$f" | %s -e PATTERN\n' "$_G"; } >"$TMPD/o10.sh"
 _ep_case "E2.O10 non-early grep flags (-e)" OK "$TMPD/o10.sh"
+
+# A detector that cannot RUN must not read as "nothing found". Force awk to fail
+# with an invalid regex over a known-CLEAN fixture: the result must be the error
+# marker (which E1 turns into a FAIL), not the empty output that means clean.
+_EP_X1="$(_epipe_hits "$TMPD/o1.sh" '[')"
+case "$_EP_X1" in
+  *"$_EP_ERR_MARK"*)
+    echo "  PASS  E2.X1 a detector that cannot run reports an error, not 'clean'"
+    PASS=$((PASS + 1))
+    ;;
+  *)
+    echo "  FAIL  E2.X1 a broken detector returned '$_EP_X1' — E1 would go vacuously green"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
 
 # The per-file pipefail gate lives in E1's loop rather than in _epipe_hits, so
 # assert it the way E1 does: an identical offending body in a file that never
