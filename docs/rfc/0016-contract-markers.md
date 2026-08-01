@@ -47,7 +47,7 @@ applies each site's declared delta, and asserts set equality.
 ### 2.1 Grammar
 
 ```
-CONTRACT: <name> [@<anchor>] [/<regex>/] [<delta> ...]
+CONTRACT: <name> [@<anchor>] [!<mode>] [/<regex>/] [<delta> ...]
 ```
 
 with an optional closing line that extends the region:
@@ -57,21 +57,33 @@ with an optional closing line that extends the region:
 ```
 
 The comment leader is per-language and is stripped before parsing: `#` for
-shell / Python / jq, `//` for JavaScript, `<!-- ... -->` for Markdown.
+shell / Python / jq, `//` and `/* … */` for JavaScript/TypeScript,
+`<!-- … -->` for Markdown. **A suffix with no registered comment syntax is a
+hard error**, never a silent pass-through.
 
 | Term | Meaning |
 |---|---|
 | `<name>` | kebab-case contract id (`dispatch-backend`, `trust-signal`). Must be present in the `CONTRACTS` registry. |
 | `@<anchor>` | Optional. The region starts at the **unique** line at or after the marker containing the literal anchor text, instead of the line directly below. `@"..."` may contain spaces. Two matches is an error, not a first-match win. |
-| `!<mode>` | Optional. Selects a built-in extractor. Today: `!case-arm`. |
+| `!<mode>` | Optional. Selects a built-in extractor: `!case-arm` (arm heads of the region's outermost shell `case`) or `!emit-literal` (every unredirected single-literal stdout write). |
 | `/<regex>/` | Optional. Switches the site to *harvest mode*. Mutually exclusive with `!<mode>`. |
 | `<delta>` | Zero or more `-<member>` / `+<member>` terms declaring that this site is deliberately the contract minus / plus those members. |
 
-**The region defaults to ONE line.** That default is the wrong choice at any
-`case` or `elif` chain: the most likely real edit there is *adding an arm*, and a
-one-line region cannot see it. Close those regions with `/CONTRACT: <name>` at
-the `esac` / end of chain — the closing marker binds to the nearest preceding
-unclosed marker of the same name, bracket-style.
+**The region defaults to ONE line, and that default is wrong at any `case` or
+`elif` chain**: the most likely real edit there is *adding an arm*, and a
+one-line region cannot see it. For an `elif` chain, close the region with
+`/CONTRACT: <name>` — the close binds to the nearest preceding unclosed marker
+of the same name, bracket-style. For a `case`, do **not** hand-place a close:
+`!case-arm` derives the region from `case`/`esac` depth. Two one-liner
+`case … esac` sites shipped with no close at all, so their region was one line
+and an appended arm was invisible; and reformatting such a one-liner onto four
+lines emptied the region and reddened CI. Both are the same defect — the author,
+not the parser, was deciding where the `case` ended.
+
+The region also **skips ordinary comment-only lines** between the marker and the
+declaration. Documenting a contract at its site is the single most likely
+follow-up edit a marker convention invites, and the first edition made that edit
+empty the region and red CI.
 
 ### 2.2 Extraction
 
@@ -202,7 +214,7 @@ Two escape hatches, both of which keep the site **compared** rather than skipped
 
 `tests/component-token-schema.py` is the register's own cautionary tale: a guard
 of this shape can sit in CI, look right, and cover nothing. So the meta-test
-carries five ratchets:
+carries six ratchets:
 
 1. **`CONTRACTS` registry pins PATHS, not a count** — for each contract, the
    exact multiset of plugin-tree-relative files expected to declare it. A
@@ -222,19 +234,36 @@ carries five ratchets:
    edition allowlisted eleven extensions, which quietly excluded `.ts`, `.cmd`,
    `.html` and every extension-less executable under `hooks/` and `lib/` while
    looking exhaustive.
-4. **A commented-out declaration cannot keep its marker.** Comment stripping
-   runs before extraction, so commenting the declaration out empties the region
-   and the site fails with ZERO members instead of tokenising the dead text.
-5. **`--selftest` and two in-CI mutations.** The extractor is a producer too, so
-   it has its own oracle: 27 synthetic fixtures covering every extraction mode
-   plus eleven negative cases (zero members, one member, both stale-delta
-   directions, unparsable term, unknown mode, two modes, unresolvable anchor,
-   ambiguous anchor, ambiguous region, commented-out declaration).
-   `tests/contract-markers.test.sh` then copies both trees and mutates them for
-   real: **C3** adds a sixth terminal event at one site, **C4** adds a new `case`
-   arm — the edit shape a one-line region cannot see — and both must red and name
-   the contract and the moved member. The anti-vacuity property is therefore
-   asserted on **every** CI run, not just in the PR that introduced it.
+4. **Commented-out text is never a member source.** Stripping runs before
+   extraction, so a commented-out declaration is not tokenised — the marker
+   binds to the next live line instead, and that line is not the declaration, so
+   the site fails on member count or on set inequality.
+
+   > The first edition of this ratchet claimed something stronger and false: *"a
+   > commented-out declaration cannot keep its marker."* It was false for
+   > JavaScript, where `strip_comments` knew only `//`: a `/* … */` comment-out
+   > kept its marker and the guard extracted the canonical vocabulary **out of
+   > dead code** — a silently wrong extraction, not a missed catch. Block
+   > comments are now handled for `.js/.mjs/.cjs/.ts` and `<!-- … -->` for
+   > Markdown, and — the load-bearing half — **a suffix with no registered
+   > comment syntax is a hard error**, so the next language to carry a marker
+   > cannot reintroduce the hole by omission.
+5. **An unmarked twin is refused.** Every contract's set is derived from its own
+   marked sites and then searched for, as whole tokens, on every unmarked line in
+   both trees. This is the only ratchet that can prove the marked set was ever
+   *complete*; the others only prove it never shrank. An intentional restatement
+   is exempted in `TWIN_ALLOWLIST` with a reason, and the exemption is itself
+   ratcheted — an entry matching nothing fails, so a restatement cannot silently
+   stop carrying the vocabulary it restates.
+6. **`--selftest` and four in-CI mutations.** The extractor is a producer too, so
+   it has its own oracle: 37 synthetic fixtures covering every extraction mode
+   plus sixteen negative cases. `tests/contract-markers.test.sh` then copies both
+   trees and mutates them for real: **C3** moves a member at one site, **C4**
+   adds a one-line `elif` arm, **C5** appends an arm to a one-liner `case`, and
+   **C6** plants an unmarked copy of a whole vocabulary. Each must red and name
+   the contract and the member. C4 and C5 exist as a pair on purpose: C4's site
+   is harvest mode, so on its own it never exercised `!case-arm` at all, and the
+   first edition drew a general conclusion from it that was false.
 
 ### 2.7 Known limits
 
@@ -250,8 +279,25 @@ Stated because an unstated limit reads as a guarantee:
   copy reds. This is a sabotage shape, not a drift shape.
 - **A computed emission is not statically extractable.** At the trust-signal
   producer, `printf '%s\n' "$override"` emits a value no literal harvest can see.
-  The site catches every literal emission in any quoting style; a value routed
-  through a variable is outside the mechanism.
+
+  > The first edition claimed the complement of this and was wrong: *"the site
+  > catches every literal emission in any quoting style."* It caught exactly one
+  > spelling. `printf '%s\n' amber` — a bare literal, unredirected, and this
+  > repo's own idiom elsewhere in the same file — was invisible, as were
+  > `printf "amber\n"` and `echo -n amber`. `!emit-literal` now keys on the
+  > statement's role (unredirected, argument list reduces to one member token)
+  > rather than on its punctuation, so all of those are seen. **The limit is
+  > only the variable case**, and it is a limit of static reading, not of the
+  > mode.
+- **Sensitivity is not uniform in edit size.** A span region is a physical line,
+  and `pick_span` ignores rival spans below `MIN_MEMBERS`, so widening a marked
+  set with a *single* extra member OUTSIDE its container
+  (`… in {…} or x == "reaped"`) can slip past where a two-member widening
+  hard-fails as ambiguous. Sites where that shape is plausible are keyed on role
+  instead of span — `agent-terminal-event`'s gate is, and the widening now reds —
+  but span-mode sites in general are not immune. The sign-flipped version (a
+  narrowing added as a separate guard statement *below* the region) is out of
+  reach of any span or harvest read.
 - **A name-identity contract cannot be expressed.** #370 rank 7's larger half is
   the field name (`state` for background-kind rows, `status` for interactive),
   not the value set. That is a one-member contract, and `MIN_MEMBERS = 2` — the
@@ -265,30 +311,35 @@ Stated because an unstated limit reads as a guarantee:
 
 ## 3. What is registered today
 
-**How to read the site count.** "Sites" counts marker lines across both trees, so
-it is 2× the number of declarations in the shipped plugin tree. Half of it is the
-Codex mirror, and four of the twelve marked files
-(`lib/agent-dispatch.sh`, `lib/dispatch.sh`, `lib/status.sh`,
-`policy/model-routing-v1.json`) were **already** byte-locked to their plugin-tree
-twin before this convention existed — `tests/child-dispatch.test.sh`,
-`tests/solve-routing.test.sh` and `tests/status.test.sh` `cmp` them. For those
-files the Codex-side markers add no coupling that did not already exist. The
-honest figure is **40 declarations in `plugins/uberdev/`, of which the 13 Codex
-counterparts in already-`cmp`-locked files are bookkeeping rather than new
-coupling.**
+**How to read the site count.** 98 "sites" is 49 declarations in
+`plugins/uberdev/` (48 markers plus one registry-declared JSON key) and the same
+49 in the Codex mirror. Half of the headline is therefore the mirror — and of the
+15 marked files per tree, **8 were already `cmp`-locked to their Codex twin
+before this convention existed** (`lib/agent-dispatch.sh`, `lib/dispatch.sh`,
+`lib/goal-state.sh`, `lib/live-semaphore.sh`, `lib/run_manifest.py`,
+`lib/solve-launcher.sh`, `lib/solve_triage.py`, `lib/status.sh`, plus
+`policy/model-routing-v1.json`; the locks live in `tests/dispatch-codex.test.sh`,
+`tests/child-dispatch.test.sh`, `tests/solve-routing.test.sh`,
+`tests/solve-run-tree.test.sh` and `tests/status.test.sh`). **30 of the 49
+Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 
-| Contract | #370 rank | Members | Sites (both trees) | Notes |
+> An earlier edition of this section said "13 Codex-side markers in 4
+> `cmp`-locked files". Both numbers were wrong — it counted only the locks it
+> happened to grep for, and missed the `tests/dispatch-codex.test.sh` loop
+> entirely. New Codex-side coupling was overstated.
+
+| Contract | #370 rank | Members | Declarations per tree | Notes |
 |---|---|---|---|---|
-| `dispatch-backend` | 6 | 6 | 4 | run-state allowlist carries `-auto` |
-| `agent-liveness-value` | 7 | 5 | 8 | three `goal-state.sh` probes carry `-queued` (declared divergence) |
-| `run-terminal-status` | 8 | 4 | 18 | one child-dispatch validator carries `+running` |
-| `goal-audit-event` | 9 | 13 | 4 | SKILL.md constants block via `@anchor` |
-| `park-reason` | 10 | 4 | 4 | Markdown table via `@anchor`; goal-state side via harvest |
-| `agent-terminal-event` | 11 | 5 | 14 | |
-| `semaphore-lease-acquire-reason` | 12 | 12 | 8 | all four sites harvest `lease_acquire_*` |
-| `trust-signal` | 13 | 5 | 8 | |
-| `risk-signal` | 4 | 11 | 8 | includes the JSON-declared policy site |
-| `goal-circuit-breaker-reason` | — | 9 | 4 | **not in the register** — found by applying this convention; the run-state allowlist carries `-solver_failed` |
+| `dispatch-backend` | 6 | 6 | 7 | run-state allowlist carries `-auto`; three launcher copies + the triage gate were the sites #360 shipped stale |
+| `agent-liveness-value` | 7 | 5 | 5 | three `goal-state.sh` probes carry `-queued` (declared divergence) |
+| `run-terminal-status` | 8 | 4 | 12 | `+running`, `+absent`, `+setup_failed` deltas where a site is a superset |
+| `goal-audit-event` | 9 | 13 | 2 | SKILL.md constants block via `@anchor` |
+| `park-reason` | 10 | 4 | 2 | Markdown table via `@anchor`; goal-state side via `!case-arm` |
+| `agent-terminal-event` | 11 | 5 | 7 | the writer gate is role-keyed so an `or … == "x"` widening is seen |
+| `semaphore-lease-acquire-reason` | 12 | 12 | 4 | producer keyed on its assignment target; two validators are declared supersets |
+| `trust-signal` | 13 | 5 | 4 | producer uses `!emit-literal` |
+| `risk-signal` | 4 | 11 | 4 | includes the JSON-declared policy site |
+| `goal-circuit-breaker-reason` | — | 9 | 2 | **not in the register** — found by applying this convention; the run-state allowlist carries `-solver_failed` |
 
 The last row is the point of the exercise: the mechanism found a tenth member of
 the family on its first application. `GOAL_CIRCUIT_BREAKER_REASONS` declares nine
@@ -328,10 +379,18 @@ comment saying it is drift, not intent, and it now reds on any one-sided edit.
 
 ## 5. Adding a contract
 
-1. Put `CONTRACT: <name>` above every declaration site, in **both** trees.
-2. Add `"<name>": <exact site count>` to `CONTRACTS` in
-   `tests/contract_markers.py`.
+1. Put `CONTRACT: <name>` above every declaration site, in **both** trees. On a
+   `case`, add `!case-arm` and let it find its own `esac` — do not hand-place a
+   close.
+2. Add `"<name>": [<exact plugin-tree-relative paths>]` to `CONTRACTS` in
+   `tests/contract_markers.py`, one entry per declaration.
 3. Run `python3 -I tests/contract_markers.py --dump` and read the extracted
    member set back. If a site extracted the wrong span, fix the marker (add an
-   `@anchor` or a `/regex/`) — do not widen the tokeniser.
-4. Mutation-prove it: change one member at one site, watch it red, revert.
+   `@anchor`, a `!mode` or a `/regex/`) — do not widen the tokeniser.
+4. **Let the twin scan find the copies you missed.** It will name every unmarked
+   line carrying the whole vocabulary. Mark each one; allow-list only a
+   restatement that is genuinely not a producer, and write down why.
+5. Mutation-prove it in BOTH directions: add a member at one site and remove one
+   at another, watch each red, revert. If the site is a `case` or an `elif`
+   chain, prove the *added arm* too — that is the edit a one-line region cannot
+   see, and it is what the first two editions of this guard missed.
