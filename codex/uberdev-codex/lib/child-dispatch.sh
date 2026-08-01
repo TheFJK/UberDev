@@ -1630,6 +1630,18 @@ _uberdev_child_timeout_intent_finish() {
   return 2
 }
 
+# rc 1 from uberdev_wait_child otherwise collapses two unrelated conditions:
+# the provider itself reached a non-success terminal, and the caller's own
+# wall-clock budget expired while an already-terminal provider was still
+# publishing its lifecycle record or releasing its capacity lease. Only the
+# second is a caller-budget defect, and it leaves the child's own status at
+# whatever terminal state the provider published — usually `completed` — so no
+# reader of status.json can tell the two apart after the fact. Name the
+# condition here, at the moment the decision is taken (#365).
+_uberdev_child_settle_budget_exhausted() {
+  _uberdev_child_error "child settle budget exhausted: instance=$1 state=$2 budget=${3}s reason=$4"
+}
+
 uberdev_wait_child() {
   local status_file="${1:-}" result="${2:-}" timeout="${3:-}" start now projection projection_kind state handle='' backend process_identity lease_generation snapshot child run_dir instance manifest terminal state_dir lease_info lease lease_identity cas rc watcher_error watcher_error_path
   [ "$#" -eq 3 ] || return 2
@@ -1670,13 +1682,19 @@ EOF_PROJECTION
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
           if [ "$terminal" != "$state" ]; then
             now="$(date +%s)"
-            [ $((now - start)) -lt "$timeout" ] || return 1
+            if [ $((now - start)) -ge "$timeout" ]; then
+              _uberdev_child_settle_budget_exhausted "$instance" "$state" "$timeout" lifecycle_record_pending
+              return 1
+            fi
             sleep 1
             continue
           fi
           if ! _uberdev_child_terminal_lease_proof "$status_file"; then
             now="$(date +%s)"
-            [ $((now - start)) -lt "$timeout" ] || return 1
+            if [ $((now - start)) -ge "$timeout" ]; then
+              _uberdev_child_settle_budget_exhausted "$instance" "$state" "$timeout" lease_release_pending
+              return 1
+            fi
             sleep 1
             continue
           fi

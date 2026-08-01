@@ -117,6 +117,48 @@ printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$
 printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 
+# rc 1 covers two conditions a caller must never confuse: the provider itself
+# reached a non-success terminal, and this caller's own wall-clock budget
+# expired while an already-terminal provider was still publishing its lifecycle
+# record or releasing its capacity lease. The second leaves the child's status
+# at whatever terminal state the provider published for itself, so nothing
+# downstream can recover the distinction after the fact — the wait must name it
+# when it takes the decision, and name which step was still pending (#365).
+printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"
+terminal_manifest failed
+set +e
+PROVIDER_FAILURE_DIAGNOSTIC="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1 >/dev/null)"
+PROVIDER_FAILURE_RC=$?
+set -e
+[ "$PROVIDER_FAILURE_RC" -eq 1 ]
+! grep -q 'child settle budget exhausted' <<<"$PROVIDER_FAILURE_DIAGNOSTIC"
+
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
+terminal_manifest failed
+set +e
+SETTLE_LIFECYCLE_DIAGNOSTIC="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1 >/dev/null)"
+SETTLE_LIFECYCLE_RC=$?
+set -e
+[ "$SETTLE_LIFECYCLE_RC" -eq 1 ]
+grep -Fq 'child settle budget exhausted: instance=worker-0001 state=completed budget=1s reason=lifecycle_record_pending' \
+  <<<"$SETTLE_LIFECYCLE_DIAGNOSTIC"
+
+mkdir -p "$TERMINAL_LEASE_DIR"
+printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
+  "$TERMINAL_GENERATION" >"$STATUS"
+terminal_manifest completed
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=321\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+  "$TERMINAL_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$TERMINAL_LEASE"
+chmod 600 "$TERMINAL_LEASE"
+set +e
+SETTLE_LEASE_DIAGNOSTIC="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1 >/dev/null)"
+SETTLE_LEASE_RC=$?
+set -e
+[ "$SETTLE_LEASE_RC" -eq 1 ]
+grep -Fq 'child settle budget exhausted: instance=worker-0001 state=completed budget=1s reason=lease_release_pending' \
+  <<<"$SETTLE_LEASE_DIAGNOSTIC"
+rm -f "$TERMINAL_LEASE"; rmdir "$TERMINAL_LEASE_DIR"
+
 # The status boundary has a closed backend enum and validates optional process
 # identity / lease-generation fields before timeout or cancellation logic.
 for malformed_status in \
