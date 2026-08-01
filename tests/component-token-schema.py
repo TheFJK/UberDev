@@ -48,27 +48,59 @@ def main() -> int:
     if st.component_tokens(["foo.sh", "foo.test.sh"]) != ["foo"]:
         failures.append("foo.sh + foo.test.sh must collapse to a single component")
 
-    # 3. Property check: EVERY emitted token conforms, not just the listed cases.
-    sample = ["a/b.test.sh", "dispatch-codex.test.sh", "_h.js", "n.d.ts",
-              "tests/x.test.py", ".hidden/y.sh", "z.min.js"]
-    shape = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
-    for tok in st.component_tokens(sample):
-        if not shape.fullmatch(tok):
-            failures.append(f"emitted token {tok!r} violates the context-schema shape")
+    # 3. Property check at the FIELD level, via classify(), not at one producer.
+    #    `components` has TWO producers unioned (component_tokens + named_modules)
+    #    and `files` has its own. Property-checking a single producer certified a
+    #    field that was still divergent: the earlier version of this test called
+    #    st.component_tokens() and was structurally blind to named_modules().
+    #    classify() is the only vantage point that sees every path into both fields.
+    comp_shape = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
+    files_shape = re.compile(r"[a-z0-9_.][a-z0-9_./-]{0,255}")
+    hostile_bodies = {
+        "markdown code span with a leading dash": "see `-foo.sh` for the repro",
+        "pasted stack-trace path over the length cap": "at " + ("a" * 300) + ".js:1",
+        "non-ASCII filename surviving casefold": "the file \u0130ndex.js is wrong",
+        "module word over the length cap": "the " + ("m" * 141) + " module is broken",
+        "Turkish dotted capital in a module word": "the \u0130stanbul module is broken",
+        "ordinary body": "tests/goal.test.sh and the run_manifest module",
+    }
+    for label, body in hostile_bodies.items():
+        snapshot = {"number": 1, "title": "t", "body": body, "labels": [], "state": "OPEN"}
+        decision = st.classify(snapshot, None, None, None)
+        for tok in decision.get("components", []):
+            if not comp_shape.fullmatch(tok):
+                failures.append(f"[{label}] component {tok!r} violates the context-schema shape")
+        for tok in decision.get("files", []):
+            if not files_shape.fullmatch(tok):
+                failures.append(f"[{label}] file {tok!r} violates the context-schema shape")
+    # The ordinary body must still yield signal — a filter that drops everything
+    # would satisfy every assertion above while destroying triage.
+    ordinary = st.classify({"number": 1, "title": "t",
+                            "body": "tests/goal.test.sh and the run_manifest module",
+                            "labels": [], "state": "OPEN"}, None, None, None)
+    if not ordinary.get("files") or not ordinary.get("components"):
+        failures.append("filtering emptied an ordinary body — the guard is over-broad, "
+                        f"files={ordinary.get('files')!r} components={ordinary.get('components')!r}")
 
     # 4. DRIFT GUARD. The literal this module enforces must be byte-identical to
     #    the one the context schema enforces. Two independent copies of a single
     #    contract is exactly how this shipped — and how the `--backend` enum bug
     #    shipped before it. Whichever side is edited alone, dispatch breaks with
     #    no test to catch it.
-    mine = st.COMPONENT_TOKEN_RE.pattern
     dispatch_src = open(dispatch_path, encoding="utf-8").read()
-    found = re.findall(r'fullmatch\(r"(\[a-z0-9\]\[a-z0-9_-\]\{0,127\})",x\)', dispatch_src)
-    if not found:
-        failures.append("could not locate the component regex in agent-dispatch.sh "
-                        "(the drift guard is vacuous — re-point it)")
-    elif any(f != mine for f in found):
-        failures.append(f"component regex drift: solve_triage={mine!r} agent-dispatch={found!r}")
+    # BOTH validated fields, not just components. Each literal is scraped from the
+    # validator by the field name it guards, so a rename cannot silently make the
+    # check vacuous — an unfound literal is a failure, never a pass.
+    for field, producer_re in (("components", st.COMPONENT_TOKEN_RE),
+                               ("files", st.FILES_TOKEN_RE)):
+        found = re.findall(r'fullmatch\(r"([^"]+)",x\) for x in ' + field, dispatch_src)
+        if not found:
+            failures.append(f"could not locate the {field} regex in agent-dispatch.sh "
+                            "(the drift guard is vacuous — re-point it)")
+            continue
+        if any(f != producer_re.pattern for f in found):
+            failures.append(f"{field} regex drift: solve_triage={producer_re.pattern!r} "
+                            f"agent-dispatch={found!r}")
 
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)

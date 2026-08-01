@@ -4,6 +4,22 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.6] — 2026-07-31
+
+### Fixed
+
+- **Two more live instances of the v0.42.3 defect, both of which abort an entire `/solve`, `/turbo` or `/ubergoal` batch.** `triage_decision.files` and `triage_decision.components` are validated by the routing-context schema, but their producers scrape free-form issue prose and never checked the shape they had to satisfy. Reproduced: a markdown code span `` `-foo.sh` `` emits a leading dash; a pasted stack-trace path exceeds the 255-char cap; a non-ASCII filename survives `casefold()`; a 141-character module word exceeds the 128-char component cap; `İstanbul` casefolds to a two-codepoint `i̇stanbul`. Each makes `uberdev_agent_context_create` fail with `route_context_create_failed` and refuses the **whole batch** — "no claims written; no agents dispatched" — so innocent sibling issues die as collateral with an error naming neither the field nor the token.
+- The `components` field has **two** producers unioned, and v0.42.3 filtered only one of them. `named_modules()` fed the same validated field unfiltered, so the field looked guarded while still diverging. The filter now sits at the **union**, giving the field exactly one choke point however many producers ever feed it.
+
+### Tests
+
+- The v0.42.3 guard property-checked a single producer and was therefore structurally blind to the second — it certified a field that was still broken. The check now runs at `classify()`, the only vantage point that sees every path into both fields, over hostile bodies covering all five reproductions above.
+- The drift guard now scrapes the validator literal **per field name** for `files` as well as `components`, so a rename makes it fail rather than silently pass.
+- Added a non-vacuity assertion: an ordinary body must still yield files and components. A filter that dropped everything would have satisfied every other assertion while destroying triage.
+- Mutation-verified four ways, including removing the second producer entirely — the over-narrow failure the new assertion exists to catch.
+
+_Found by a repo-wide sweep for the "one contract, two independent copies, nothing comparing them" class, after four instances of it shipped through green CI in a single day._
+
 ## [0.42.5] — 2026-07-31
 
 ### Fixed
