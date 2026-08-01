@@ -330,6 +330,16 @@ post_review_wait_all() {
       continue
     else
       wait_rc=$?
+      # A reviewer child whose supervised wait fails leaves no other trace: its
+      # row is simply absent from the validated ledger, and the only downstream
+      # symptom is `evidence incomplete; aggregate suppressed`. Record the
+      # supervisor's own decision — bounded edge/index/instance plus the wait
+      # return code — at the moment it is taken, so an evidence shortfall caused
+      # by this caller's wall-clock budget stays separable from a reviewer that
+      # genuinely produced nothing. Post-hoc child state cannot carry that
+      # distinction: a provider abandoned mid-settle keeps the terminal state it
+      # published for itself (#365).
+      echo "post_review_child_wait_failure edge=$edge index=$index instance=$instance rc=$wait_rc" >&2
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
     POST_REVIEW_INFRA_FAILURE=1
@@ -613,7 +623,13 @@ try:
  if (stat.S_ISLNK(carrier_entry.st_mode) or not stat.S_ISDIR(carrier_entry.st_mode)
      or (uid is not None and carrier_entry.st_uid!=uid)): fail('unsafe-artifact')
  children_root=os.path.join(carrier_run,'children')
- ledger_payload=capture(artifacts,ledger,1,1048576,'malformed-ledger')[0]
+ # A ledger the wave never wrote, a well-formed ledger that is short of the
+ # roster, and a ledger whose bytes are damaged demand three different
+ # investigations, so they carry three different classes. An empty ledger is
+ # therefore captured (floor 0) and classed by the roster check below rather
+ # than rejected as corruption.
+ if not os.path.lexists(ledger): fail('ledger-absent')
+ ledger_payload=capture(artifacts,ledger,0,1048576,'malformed-ledger')[0]
  rows=json_lines(ledger_payload)
  launched=[]; launch_payloads=[]
  for source in (initial_ledger,repair_ledger):
@@ -621,6 +637,7 @@ try:
    source_payload=capture(artifacts,source,0,1048576,'malformed-ledger')[0]
    launch_payloads.append(source_payload); launched.extend(json_lines(source_payload))
  allowed_pairs={(edge,index) for index,edge in enumerate(allowed,1)}
+ if len(rows)<expected: fail('incomplete-roster')
  if (len(rows)!=expected or len({row.get('edge') for row in rows})!=expected
      or len({row.get('index') for row in rows})!=expected
      or {(row.get('edge'),row.get('index')) for row in rows}!=allowed_pairs):
@@ -1073,9 +1090,30 @@ opens a ledger, snapshot, child-owned `validated-result.md`, or provider-owned
 captured bytes. Failed attempts remain isolated under their unique attempt
 identity; retries create a fresh identity and never unlink or remove a
 pathname after a separate identity check. Evidence failures emit only the stable class
-`malformed-ledger`, `roster-mismatch`, `unsafe-artifact`,
-`duplicate-artifact`, or `digest-mismatch` plus the bounded edge/index (never a
-path or reviewer content).
+`ledger-absent`, `incomplete-roster`, `malformed-ledger`, `roster-mismatch`,
+`unsafe-artifact`, `duplicate-artifact`, or `digest-mismatch` plus the bounded
+edge/index (never a path or reviewer content). The first three are deliberately
+distinct because they demand different investigations: `ledger-absent` means the
+validated ledger was never written at all, `incomplete-roster` means every line
+it does contain parsed as a JSON row but there are fewer of them than the
+reviewer roster, and `malformed-ledger` covers bytes that failed to parse or a
+row that violated the closed schema. Reporting a short ledger as
+`malformed-ledger` made the ordinary cause — a reviewer child that failed, timed
+out, or was unwound — indistinguishable from ledger corruption, and trained
+readers to re-run instead of investigate (#365).
+
+`incomplete-roster` is a statement about row count, not about intactness: a
+ledger truncated at a line boundary presents as short too, and the ledger's own
+bytes cannot separate the two. The corroborating evidence is the wait
+boundary's per-child record. `post_review_wait_all` emits
+`post_review_child_wait_failure edge=… index=… instance=… rc=…` for every
+reviewer it abandoned, and `uberdev_wait_child` emits `child settle budget
+exhausted: instance=… state=… budget=…s reason=…` when its own wall-clock
+budget — not the reviewer — is what ended the wait. One abandonment line per
+missing row means a supervision shortfall; a short ledger with no such line
+means rows were lost after they were written. Without those lines the two are
+indistinguishable after the fact, because a child abandoned mid-settle keeps
+the terminal state it published for itself.
 
 Pass the 6 captured `POST_REVIEW_AGGREGATION_INPUT.rows` to
 `post_review_write_aggregate_v2`. The deterministic writer re-validates the

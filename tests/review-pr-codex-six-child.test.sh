@@ -986,10 +986,28 @@ mkdir -p "$CODEX_STUB_READY_DIR" "$CODEX_STUB_RELEASE_DIR"
 CHANGED_PATHS_JSON='["README.md"]'
 EMPHASIS_JSON='[]'
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT_OVERRIDE:-10}"
+# The wave's per-child supervision decisions and the evidence gate's failure
+# class are both assertion targets below, so both phases write their stderr to
+# one file the shell fills synchronously: the initial wave (and therefore every
+# `post_review_child_wait_failure` line) runs inside post-setup, the evidence
+# gate inside the boundary.
+#
+# The file must not become a buffer that is only replayed once the phase
+# returns. If the boundary ever hangs until CI's wall-clock kill, a replay that
+# never runs loses exactly the diagnostics this fixture exists to surface, and
+# watcher children inherit this stderr and keep writing after the phase is
+# over. Stream the file into the job log for the whole case instead, so the
+# assertions read complete bytes while the reader still sees them live.
+POST_BOUNDARY_DIAGNOSTIC="$UBERDEV_TMPDIR/post-boundary-$case_name.stderr"
+: >"$POST_BOUNDARY_DIAGNOSTIC"
+tail -n +1 -f "$POST_BOUNDARY_DIAGNOSTIC" >&2 &
+post_boundary_stream=$!
+trap 'kill "$post_boundary_stream" 2>/dev/null || true' EXIT
 set +e
-. "$post_setup"
-post_setup_rc=$?
-if [ "$post_setup_rc" -eq 0 ]; then . "$post_boundary"; post_setup_rc=$?; fi
+{ . "$post_setup"; post_setup_rc=$?; } 2>>"$POST_BOUNDARY_DIAGNOSTIC"
+if [ "$post_setup_rc" -eq 0 ]; then
+  { . "$post_boundary"; post_setup_rc=$?; } 2>>"$POST_BOUNDARY_DIAGNOSTIC"
+fi
 set -e
 if wait "$readiness_coordinator"; then readiness_rc=0; else readiness_rc=$?; fi
 
@@ -1011,6 +1029,87 @@ dump_git_mutation_diagnostics() {
     cat "$mutex_owner" >&2
   done
 }
+
+# One `instance<TAB>state` row per provider child this wave published.
+child_terminal_states() {
+  local status_file instance state
+  for status_file in "$UBERDEV_CARRIER_RUN_DIR"/children/*/status.json; do
+    [ -f "$status_file" ] || continue
+    instance="$(basename "$(dirname "$status_file")")"
+    state="$(jq -r '.state // "unset"' "$status_file" 2>/dev/null || printf 'unreadable')"
+    printf '%s\t%s\n' "$instance" "$state"
+  done
+}
+
+dump_child_terminal_states() {
+  local instance state
+  while IFS=$'\t' read -r instance state; do
+    printf 'child terminal state: instance=%s state=%s\n' "$instance" "$state" >&2
+  done < <(child_terminal_states)
+}
+
+# At most one of these is ever set: the single reviewer child this case breaks
+# on purpose. Every other child must be supervised to completion.
+deliberate_instance="$fail_instance$timeout_instance$pre_ready_fail_instance"
+
+# The supervisor's own decision, recorded by the production wait boundary at the
+# moment it abandoned a reviewer child. This — not the child's state afterwards
+# — is the only race-free evidence that the harness's wall-clock budget, rather
+# than the reviewer, is what removed a row from the validated ledger.
+#
+# A child abandoned mid-settle keeps whatever terminal state it published for
+# itself, normally `completed`: the harness never got to write `timed_out`
+# because the provider had already finished and only its lifecycle record or
+# capacity lease was still landing. Gating on `state == timed_out` therefore
+# catches only the subset where the provider was still running when the budget
+# expired; the rest reach the operator as a bare `class=incomplete-roster`,
+# shaped exactly like a genuine missing-evidence defect (#365).
+abandoned_reviewer_children() {
+  grep -F 'post_review_child_wait_failure ' "$POST_BOUNDARY_DIAGNOSTIC" 2>/dev/null || true
+}
+
+assert_no_unbudgeted_child_abandonment() {
+  local line instance rc spurious=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    instance="${line##*instance=}"; instance="${instance%% *}"
+    rc="${line##*rc=}"; rc="${rc%% *}"
+    [ "$instance" != "$deliberate_instance" ] || continue
+    spurious=1
+    if [ "$rc" = 124 ] \
+        || grep -Fq "child settle budget exhausted: instance=$instance" "$POST_BOUNDARY_DIAGNOSTIC"; then
+      printf 'case=%s harness wait budget exhausted: instance=%s rc=%s budget=%ss; the provider was still settling when the fixture stopped waiting for it (fixture budget failure, NOT missing review evidence)\n' \
+        "$case_name" "$instance" "$rc" "$REVIEW_PR_TIMEOUT" >&2
+    else
+      printf 'case=%s reviewer child abandoned outside the deliberate fault for this case: instance=%s rc=%s (supervision failure, NOT missing review evidence)\n' \
+        "$case_name" "$instance" "$rc" >&2
+    fi
+  done < <(abandoned_reviewer_children)
+  [ "$spurious" -eq 0 ]
+}
+
+# Independent cross-check for a child that was never waited on at all, so it
+# leaves no supervision decision behind: only a deliberately hung provider may
+# end in `timed_out`.
+assert_no_unbudgeted_provider_timeout() {
+  local instance state spurious=0
+  while IFS=$'\t' read -r instance state; do
+    [ "$state" = timed_out ] || continue
+    [ "$instance" != "$timeout_instance" ] || continue
+    spurious=1
+    printf 'case=%s harness wait budget exhausted: instance=%s budget=%ss; the provider was still settling when the fixture killed it (fixture budget failure, NOT missing review evidence)\n' \
+      "$case_name" "$instance" "$REVIEW_PR_TIMEOUT" >&2
+  done < <(child_terminal_states)
+  [ "$spurious" -eq 0 ]
+}
+supervision_breach=0
+assert_no_unbudgeted_child_abandonment || supervision_breach=1
+assert_no_unbudgeted_provider_timeout || supervision_breach=1
+if [ "$supervision_breach" -ne 0 ]; then
+  dump_child_terminal_states
+  dump_git_mutation_diagnostics
+  exit 1
+fi
 
 readiness_report="$(cat "$CODEX_STUB_BARRIER_REPORT" 2>/dev/null || printf 'missing report')"
 unexpected_readiness() {
@@ -1034,13 +1133,27 @@ if [ -n "$fail_instance$timeout_instance$pre_ready_fail_instance" ]; then
   if [ "$post_setup_rc" -ne 70 ]; then
     printf 'case=%s unexpected post-setup rc=%s expected=70\n' \
       "$case_name" "$post_setup_rc" >&2
+    dump_child_terminal_states
     dump_git_mutation_diagnostics
+    exit 1
+  fi
+  # This wave genuinely loses exactly one reviewer's evidence. The gate must
+  # report that shortfall as an incomplete roster: classing a complete-but-short
+  # ledger as `malformed-ledger` made a supervision failure indistinguishable
+  # from ledger corruption (#365).
+  if ! grep -Fq 'post_review_evidence_failure class=incomplete-roster' \
+      "$POST_BOUNDARY_DIAGNOSTIC"; then
+    printf 'case=%s incomplete wave did not report class=incomplete-roster\n' \
+      "$case_name" >&2
+    cat "$POST_BOUNDARY_DIAGNOSTIC" >&2
+    dump_child_terminal_states
     exit 1
   fi
 else
   if [ "$post_setup_rc" -ne 0 ]; then
     printf 'case=%s unexpected post-setup rc=%s expected=0\n' \
       "$case_name" "$post_setup_rc" >&2
+    dump_child_terminal_states
     dump_git_mutation_diagnostics
     exit 1
   fi
@@ -1104,6 +1217,47 @@ PY
   [ "$wrong_backend_rc" -eq 2 ]
   grep -Fq 'post_review_evidence_failure class=roster-mismatch edge=review_pr.review.correctness index=1' \
     "$RESEARCH_DIR_ABS/wrong-backend.stderr"
+
+  # Evidence classes stay decision-grade only while they stay separable. A
+  # ledger that was never written, one that is merely short a reviewer, and one
+  # whose bytes are damaged each demand a different investigation; collapsing
+  # them into `malformed-ledger` is what taught readers to re-run a suppressed
+  # aggregate instead of read it (#365). Every probe must still fail closed.
+  evidence_class_must_be() {
+    local label="$1" ledger="$2" expected_class="$3" probe_rc
+    set +e
+    post_review_validated_evidence_complete "$ledger" "$REVIEW_EXPECTED_COUNT" \
+      "$REVIEW_LAUNCHED" "$REPAIR_PREFIX.launched" "$UBERDEV_CARRIER_RUN_DIR" \
+      >"$RESEARCH_DIR_ABS/$label.stdout" 2>"$RESEARCH_DIR_ABS/$label.stderr"
+    probe_rc=$?
+    set -e
+    if [ "$probe_rc" -ne 2 ]; then
+      printf 'evidence probe %s returned rc=%s expected=2 (fail-closed)\n' \
+        "$label" "$probe_rc" >&2
+      exit 1
+    fi
+    if ! grep -Fq "post_review_evidence_failure class=$expected_class" \
+        "$RESEARCH_DIR_ABS/$label.stderr"; then
+      printf 'evidence probe %s expected class=%s, got: %s\n' "$label" \
+        "$expected_class" "$(cat "$RESEARCH_DIR_ABS/$label.stderr")" >&2
+      exit 1
+    fi
+  }
+  sed '$d' "$RESEARCH_DIR_ABS/post-review.validated" \
+    >"$RESEARCH_DIR_ABS/short-roster.validated"
+  evidence_class_must_be short-roster "$RESEARCH_DIR_ABS/short-roster.validated" \
+    incomplete-roster
+  : >"$RESEARCH_DIR_ABS/empty-roster.validated"
+  evidence_class_must_be empty-roster "$RESEARCH_DIR_ABS/empty-roster.validated" \
+    incomplete-roster
+  evidence_class_must_be absent-ledger \
+    "$RESEARCH_DIR_ABS/never-written.validated" ledger-absent
+  {
+    sed '$d' "$RESEARCH_DIR_ABS/post-review.validated"
+    printf 'not-a-json-row\n'
+  } >"$RESEARCH_DIR_ABS/damaged.validated"
+  evidence_class_must_be damaged-ledger "$RESEARCH_DIR_ABS/damaged.validated" \
+    malformed-ledger
 fi
 
 if [ -n "$timeout_instance" ]; then
@@ -1478,6 +1632,38 @@ if [ "$RUNTIME_NAMESPACE" = prkit ]; then
 fi
 chmod +x "$RUN_CASE_SCRIPT"
 
+# Wall-clock hang guard, in seconds, for ONE reviewer child.
+#
+# The production wave dispatches all six providers before it waits on any of
+# them, so the first child's budget starts ticking the moment the sixth
+# dispatch returns and must still cover the entire post-release settle: this
+# fixture's readiness coordinator releasing the provider barrier, the released
+# provider exiting, its watcher publishing the terminal status.json plus
+# lifecycle record, and the capacity lease being released. That settle was
+# measured at ~9s for a six-provider wave on an idle Apple-silicon host and
+# 23-26s under 6x runner contention, so the previous hardcoded 10s left under
+# one second of local headroom and none at all on a loaded macOS runner: the
+# first child was killed as `timed_out`, the wave dropped to five validated
+# rows, and the evidence gate suppressed the aggregate (#365). This budget is a
+# hang guard, never a performance assertion — only a genuinely stuck provider
+# may consume it, which is why the deliberate-hang case pays it in full.
+#
+# Overridable so the budget-exhaustion diagnostics below stay exercisable
+# without a source edit: starving the budget (`SIX_CHILD_PROVIDER_SETTLE_BUDGET=1`)
+# must make the fixture fail with its own named budget class, never with a
+# generic missing-evidence report.
+SIX_CHILD_PROVIDER_SETTLE_BUDGET="${SIX_CHILD_PROVIDER_SETTLE_BUDGET:-60}"
+case "$SIX_CHILD_PROVIDER_SETTLE_BUDGET" in
+  ''|*[!0-9]*)
+    echo "invalid SIX_CHILD_PROVIDER_SETTLE_BUDGET=$SIX_CHILD_PROVIDER_SETTLE_BUDGET" >&2
+    exit 2
+    ;;
+esac
+[ "$SIX_CHILD_PROVIDER_SETTLE_BUDGET" -gt 0 ] || {
+  echo "invalid SIX_CHILD_PROVIDER_SETTLE_BUDGET=$SIX_CHILD_PROVIDER_SETTLE_BUDGET" >&2
+  exit 2
+}
+
 make_repo() {
   local repo="$1"
   mkdir -p "$repo"
@@ -1495,7 +1681,8 @@ make_repo() {
 run_case() {
   local name="$1" fail_instance="${2-}" timeout_instance="${3-}" skip_ready_instance="${4-}" pre_ready_fail_instance="${5-}"
   local repo runtime codex_log claude_log barrier_timeout=60 barrier_startup_timeout=60
-  local lease_visibility_delay=0 review_timeout=10 git_mutation_stress=0 expect_unprotected_probe=0
+  local lease_visibility_delay=0 review_timeout git_mutation_stress=0 expect_unprotected_probe=0
+  local coordinator_release_bound=0
   repo="$TMP/repo-$name"; runtime="$TMP/runtime-$name"
   codex_log="$TMP/codex-$name.log"; claude_log="$TMP/claude-$name.log"
   make_repo "$repo"
@@ -1503,13 +1690,15 @@ run_case() {
   ready_dir="$runtime/ready"; release_dir="$runtime/release"
   [ -z "$skip_ready_instance" ] || barrier_timeout=2
   if [ "$name" = 4 ]; then
-    barrier_startup_timeout=60
     lease_visibility_delay=30
-    # The child wait must outlive the coordinator's complete startup + release
-    # budget. Otherwise slow lease visibility makes the harness time out its own
-    # providers before the coordinator can release them (macOS CI #30404587111).
-    review_timeout=$((barrier_startup_timeout + barrier_timeout + 10))
+    # This case deliberately withholds one ready file, so the coordinator holds
+    # every provider hostage until its OWN startup + barrier budget expires.
+    # The child wait must outlive that release bound too; otherwise slow lease
+    # visibility makes the harness time out its own providers before the
+    # coordinator can release them (macOS CI #30404587111).
+    coordinator_release_bound=$((barrier_startup_timeout + barrier_timeout))
   fi
+  review_timeout=$((coordinator_release_bound + SIX_CHILD_PROVIDER_SETTLE_BUDGET))
   if [ "$name" = 3 ]; then
     git_mutation_stress=1
     expect_unprotected_probe=1
