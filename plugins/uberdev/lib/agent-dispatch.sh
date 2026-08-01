@@ -711,11 +711,12 @@ _uberdev_agent_status_terminal_event() {
   event="$(python3 -I "$_UBERDEV_AGENT_MANIFEST_TOOL" probe-terminal \
     --status-path "$status_path" --expected-backend "$backend" \
     --expected-handle "$handle" 2>/dev/null)" || return 1
+  # CONTRACT: run-terminal-status !case-arm
   case "$event" in
-    # CONTRACT: run-terminal-status
     completed|failed|timed_out|cancelled) printf '%s' "$event" ;;
     *) return 1 ;;
   esac
+  # /CONTRACT: run-terminal-status
 }
 
 _uberdev_agent_publish_status_record() {
@@ -1038,10 +1039,10 @@ reason = " ".join(str(matched[0].get(key) or "") for key in ("blockedReason", "r
 if state == "blocked":
     print("blocked:permission" if "permission" in reason else "blocked:provider", end="")
     raise SystemExit(0)
+# CONTRACT: agent-liveness-value /(?:in \{([^}\n]*)\}|== "([^"\n]*)"):\n[ \t]*print\("live"/
 lifecycle = state or status
 if lifecycle == "idle":
     print("blocked:permission", end="")
-# CONTRACT: agent-liveness-value
 elif lifecycle in {"busy", "running", "starting", "working", "queued"}:
     print("live", end="")
 elif lifecycle in {"failed", "error"}:
@@ -1054,6 +1055,7 @@ elif lifecycle in {"completed", "complete", "done", "finished"}:
     print("completed", end="")
 else:
     raise SystemExit(2)
+# /CONTRACT: agent-liveness-value
 ' "$handle" "$match_mode"
 }
 
@@ -1224,7 +1226,7 @@ elif terminal == "timeout_intent_recovery_failed": error="timeout_intent_recover
 elif terminal.startswith("blocked:"): error="provider_cancel_failed"
 elif terminal.startswith("launch:"): error="launch_finalize_failed"
 else: error="terminal_finalize_failed"
-# CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
+# CONTRACT: semaphore-lease-acquire-reason +provider_stop_failed +provider_session_resolution_failed +provider_cancel_probe_failed +provider_cancel_unconfirmed +timeout_intent_invalid +timeout_intent_identity_unavailable +timeout_intent_cleanup_failed +timeout_partial_result_cleanup_failed +owner_process_identity_unavailable +lease_handle_rollback_failed
 allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","owner_process_identity_unavailable","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
 payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
@@ -1363,9 +1365,13 @@ _uberdev_agent_start_watcher() {
       [ -z "$terminal_event" ] || break
       if [ "$backend" = claude-bg ]; then
         probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
+        # Role-keyed: the arms of this case are TWO vocabularies (the probe's
+        # own live/blocked words and the terminal-status set), so !case-arm
+        # would harvest both. Match only the arm that adopts $probe AS the
+        # terminal event.
+        # CONTRACT: run-terminal-status /^[ \t]*([A-Za-z0-9][A-Za-z0-9_.|-]*)\)[ \t]*terminal_event="\$probe"/
         case "$probe" in
           live) absent_count=0; indeterminate_count=0 ;;
-          # CONTRACT: run-terminal-status
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
           blocked:permission|blocked:provider)
             # A blocked Claude session is still provider-owned live state. Stop
@@ -1426,6 +1432,7 @@ _uberdev_agent_start_watcher() {
             fi
             ;;
         esac
+        # /CONTRACT: run-terminal-status
       else
         case "$handle" in
           ''|*[!0-9]*) ;;
@@ -1674,7 +1681,7 @@ _uberdev_agent_abort_after_launch() {
     _uberdev_dispatch_cleanup_dead_partial_result "$result_file" "$handle" || cleanup_rc=2
   fi
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
-  # CONTRACT: run-terminal-status
+  # CONTRACT: run-terminal-status !case-arm
   case "$terminal_event" in completed|failed|timed_out|cancelled) ;; *) terminal_event=failed ;; esac
   _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
     "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed \
@@ -1799,11 +1806,12 @@ uberdev_agent_dispatch() {
     rc=$?
     if [ "$rc" -eq 2 ]; then
       lease_failure_reason="${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-lease_acquire_identity_failed}"
+      # CONTRACT: semaphore-lease-acquire-reason !case-arm
       case "$lease_failure_reason" in
-        # CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
         lease_acquire_invalid_input|lease_acquire_runtime_state_failed|lease_acquire_mutex_failed|lease_acquire_reconcile_failed|lease_acquire_count_failed|lease_acquire_duplicate_check_failed|lease_acquire_allocate_failed|lease_acquire_owner_failed|lease_acquire_publish_failed|lease_acquire_identity_failed|lease_acquire_rollback_failed|lease_acquire_mutex_release_failed) ;;
         *) lease_failure_reason=lease_acquire_identity_failed ;;
       esac
+      # /CONTRACT: semaphore-lease-acquire-reason
       case "$lease_record" in
         *$'\t'*)
           lease="${lease_record%%$'\t'*}"

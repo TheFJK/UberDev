@@ -1138,7 +1138,7 @@ _uberdev_semaphore_remove_lease() {
     --generation "$generation" --identity "$identity" >/dev/null
 }
 
-# CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
+# CONTRACT: semaphore-lease-acquire-reason /_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON=([a-z_]+)/
 uberdev_semaphore_acquire() {
   local state_root repo_id backend cap run_id timeout_s identity_mode output_variable scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
   local generation path_identity exact_identity cleanup_rc record owner_identity owner_mode

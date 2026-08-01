@@ -1107,7 +1107,7 @@ def watcher_message(path):
  if error not in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts'); reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
- # CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
+ # CONTRACT: semaphore-lease-acquire-reason +lease_handle_rollback_failed
  lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_count_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
  timeout_reasons={'timeout_intent_invalid','timeout_intent_identity_unavailable','timeout_intent_cleanup_failed','timeout_partial_result_cleanup_failed'}
  owner_capture_reasons={'owner_process_identity_unavailable'}
@@ -1687,8 +1687,8 @@ EOF_PROJECTION
       *) return 2 ;;
     esac
     if [ "$projection_kind" = status ]; then
+      # CONTRACT: run-terminal-status !case-arm
       case "$state" in
-        # CONTRACT: run-terminal-status
         completed|failed|timed_out|cancelled)
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"
           if [ "$terminal" != "$state" ]; then
@@ -1723,6 +1723,7 @@ PY
           return 1
           ;;
       esac
+      # /CONTRACT: run-terminal-status
     fi
     now="$(date +%s)"
     if [ $((now - start)) -ge "$timeout" ]; then
