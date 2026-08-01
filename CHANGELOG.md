@@ -4,6 +4,18 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.8] — 2026-07-31
+
+### Fixed
+
+- The `supervision-smoke-macos` job flaked on `review-pr-codex-six-child` roughly a third of the time (#365), reporting `post-impl-review evidence incomplete; aggregate suppressed` — a message **indistinguishable from a genuine missing ledger**, which trained everyone to re-run rather than read.
+- The real mechanism was not the one first proposed: `child-dispatch.sh` returns rc 1 (not 124) when the settle budget expires while an **already-terminal** provider is still landing its lifecycle record or releasing its lease, so the status file keeps whatever the provider published for itself and the fixture cannot tell a starved budget from a real shortfall. Reproduced deterministically before changing anything.
+- The fix records the supervisor's decision instead of inferring it from downstream state: the settle boundary now names why it gave up (`lifecycle_record_pending` / `lease_release_pending`), and `post_review_wait_all` emits a per-child failure line on a path that was previously **100% silent**.
+- The `incomplete-roster` prose overstated what it could prove: a truncation aligned to a line boundary is byte-indistinguishable from a short roster. It is now documented as a row-count statement, with the corroborating evidence that separates a supervision shortfall from rows lost after write.
+- The settle budget is overridable (`${SIX_CHILD_PROVIDER_SETTLE_BUDGET:-60}`), matching the sibling tunables, so the starved-budget control is reproducible without editing the fixture.
+
+Verified on both race outcomes — rc 1 with `state=completed`, and rc 124 with `state=timed_out` — each now naming its class.
+
 ## [0.42.7] — 2026-07-31
 
 ### Fixed
