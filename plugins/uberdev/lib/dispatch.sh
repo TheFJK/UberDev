@@ -882,6 +882,7 @@ _uberdev_dispatch_create_codex_worktree() {
 # `codex exec` headless + nohup-detached, PID-tracked like `background`.
 # `claude-bg` is DEPRECATED (RFC 0015; removal target v1.0.0) — detached
 # `claude --bg` sessions parked in the separate `claude agents` surface.
+# CONTRACT: dispatch-backend
 _UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
 
 # Detached-provider backends scheduled for retirement. Selecting one emits a

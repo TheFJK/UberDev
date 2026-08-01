@@ -376,6 +376,7 @@ routing_allowed={"backend","workflow","phase","role","task_tier","risk_scope","r
 adapter_metadata={"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}
 decision_allowed={"schema_version","policy_version","backend","service_tier","sandbox","field_sources","adaptive_fallback","risk_signals","risk_scope","minimum_route","fallback_chain","ignored_sources","ignored_fields","logical_route","model","reasoning_effort","routing_mode","effective_policy","route_source","forced","reason_codes","adaptive_proposal"}
 provenance_keys={"mode","service_tier","risk_escalation","adaptive_fallback","shadow","workflows","roles"}; sources={"env","project-codex","project-claude","explicit-config-file","default"}
+# CONTRACT: risk-signal
 risks={"authentication","authorization","concurrency","cryptography","data-loss","destructive-operations","force-push","public-api-compatibility","release-infrastructure","schema-migration","security"}
 def validate(payload):
  if not isinstance(payload,dict) or set(payload)!={"schema_version","created_at","routing_request","root_decision","config_provenance","metadata"} or payload.get("schema_version")!=1: raise ValueError()
@@ -692,6 +693,7 @@ if event_name == "agent_started":
     record["timeout_s"] = int(request["timeout_s"])
     if handle: record["backend_handle"] = int(handle) if handle.isdigit() else handle
     if status_path: record["status_path"] = status_path
+# CONTRACT: agent-terminal-event
 if event_name in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
     record["terminal_status"] = event_name
     if event_name == "failed": record["error_class"] = error_class or "provider_launch_failed"
@@ -710,6 +712,7 @@ _uberdev_agent_status_terminal_event() {
     --status-path "$status_path" --expected-backend "$backend" \
     --expected-handle "$handle" 2>/dev/null)" || return 1
   case "$event" in
+    # CONTRACT: run-terminal-status
     completed|failed|timed_out|cancelled) printf '%s' "$event" ;;
     *) return 1 ;;
   esac
@@ -722,6 +725,7 @@ import errno,json,os,re,stat,sys,tempfile,time
 (path,mode,backend,state,exit_raw,pid,process_identity,lease_generation,
  issue,tier,provider_exit_raw,log,result,worktree,branch,workspace_mode,
  include_context)=sys.argv[1:]
+# CONTRACT: run-terminal-status
 terminal_states={'completed','failed','timed_out','cancelled'}
 status_context_keys=('log','result','worktree','branch','workspace_mode')
 allowed_status_keys={'issue','tier','backend','state','exit_code','pid','provider_exit_code',
@@ -1037,6 +1041,7 @@ if state == "blocked":
 lifecycle = state or status
 if lifecycle == "idle":
     print("blocked:permission", end="")
+# CONTRACT: agent-liveness-value
 elif lifecycle in {"busy", "running", "starting", "working", "queued"}:
     print("live", end="")
 elif lifecycle in {"failed", "error"}:
@@ -1139,6 +1144,7 @@ for line in pathlib.Path(manifest).read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
     if (event.get("run_id"), event.get("agent_id")) != identity:
         continue
+    # CONTRACT: agent-terminal-event
     if event.get("event") in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
         terminals.append(event.get("event"))
 if terminals != [expected]:
@@ -1218,6 +1224,7 @@ elif terminal == "timeout_intent_recovery_failed": error="timeout_intent_recover
 elif terminal.startswith("blocked:"): error="provider_cancel_failed"
 elif terminal.startswith("launch:"): error="launch_finalize_failed"
 else: error="terminal_finalize_failed"
+# CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
 allowed_reasons={"provider_stop_failed","provider_session_resolution_failed","provider_cancel_probe_failed","provider_cancel_unconfirmed","timeout_intent_invalid","timeout_intent_identity_unavailable","timeout_intent_cleanup_failed","timeout_partial_result_cleanup_failed","owner_process_identity_unavailable","lease_acquire_invalid_input","lease_acquire_runtime_state_failed","lease_acquire_mutex_failed","lease_acquire_reconcile_failed","lease_acquire_count_failed","lease_acquire_duplicate_check_failed","lease_acquire_allocate_failed","lease_acquire_owner_failed","lease_acquire_publish_failed","lease_acquire_identity_failed","lease_acquire_rollback_failed","lease_acquire_mutex_release_failed","lease_handle_rollback_failed"}
 payload={"schema_version":1,"error":error,"backend":backend,"handle":handle,"terminal":terminal,"attempts":int(attempts)}
 if reason: payload["reason"]=reason if reason in allowed_reasons else "supervisory_failure"
@@ -1358,6 +1365,7 @@ _uberdev_agent_start_watcher() {
         probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
         case "$probe" in
           live) absent_count=0; indeterminate_count=0 ;;
+          # CONTRACT: run-terminal-status
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
           blocked:permission|blocked:provider)
             # A blocked Claude session is still provider-owned live state. Stop
@@ -1666,6 +1674,7 @@ _uberdev_agent_abort_after_launch() {
     _uberdev_dispatch_cleanup_dead_partial_result "$result_file" "$handle" || cleanup_rc=2
   fi
   terminal_event="$(_uberdev_agent_status_terminal_event "$status_file" "$backend" "$handle" 2>/dev/null || true)"
+  # CONTRACT: run-terminal-status
   case "$terminal_event" in completed|failed|timed_out|cancelled) ;; *) terminal_event=failed ;; esac
   _uberdev_agent_finalize_terminal "$manifest" "$lease" "$lease_identity" "$status_file" \
     "$backend" "$handle" "$request_json" "$decision" "$terminal_event" dispatch_setup_failed \
@@ -1791,6 +1800,7 @@ uberdev_agent_dispatch() {
     if [ "$rc" -eq 2 ]; then
       lease_failure_reason="${_UBERDEV_SEMAPHORE_ACQUIRE_FAILURE_REASON:-lease_acquire_identity_failed}"
       case "$lease_failure_reason" in
+        # CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
         lease_acquire_invalid_input|lease_acquire_runtime_state_failed|lease_acquire_mutex_failed|lease_acquire_reconcile_failed|lease_acquire_count_failed|lease_acquire_duplicate_check_failed|lease_acquire_allocate_failed|lease_acquire_owner_failed|lease_acquire_publish_failed|lease_acquire_identity_failed|lease_acquire_rollback_failed|lease_acquire_mutex_release_failed) ;;
         *) lease_failure_reason=lease_acquire_identity_failed ;;
       esac

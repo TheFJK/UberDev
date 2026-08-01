@@ -17,6 +17,10 @@ Invoked from `commands/merge.md`. Do NOT call directly outside that path. Pairs 
 
 All magic strings/numbers used by this skill are declared here once. Later phases reference these names; values are NOT re-inlined.
 
+<!-- A marker line inside the table below would split the table in two, so the
+     #370 contract marker sits above it and resolves forward via @anchor.
+     See docs/rfc/0016-contract-markers.md. -->
+<!-- CONTRACT: park-reason @`PARK_REASON_ENUM` -->
 | Name | Value | Used by |
 |---|---|---|
 | `STRATEGY_ENUM` | `squash`, `rebase`, `merge`, `drop` | D11 (per-PR strategy), D-LABEL, Phase 3.3 (park) |

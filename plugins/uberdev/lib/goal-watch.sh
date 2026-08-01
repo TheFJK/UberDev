@@ -444,6 +444,12 @@ while true; do
   for pr_num in $(uberdev_goal_list_prs_in_state "$GOAL_ID" pushed-reviewing); do
     audit_json="$(uberdev_goal_locate_review_pr_audit_by_pr "$pr_num")"
     signal="$(uberdev_goal_read_trust_signal "$audit_json")"
+    # The harvest regex is anchored on SIX leading spaces on purpose: it must
+    # collect this case's own arms and NOT the nested `case "$_verdict_state"`
+    # arms ten spaces in. Reindenting this block makes the marker yield zero
+    # members, which is a hard failure in tests/contract-markers.test.sh — retune
+    # the anchor rather than deleting the marker.
+    # CONTRACT: trust-signal /^ {6}([a-z][a-z0-9|-]*)\)/
     case "$signal" in
       green)
         uberdev_goal_pr_state_transition "$GOAL_ID" "$pr_num" pushed-reviewing green
@@ -621,6 +627,7 @@ while true; do
         fi
         ;;
     esac
+    # /CONTRACT: trust-signal
   done
 
   # 2c. Barrier-gated merge dispatch (issue #211; barrier semantics #289).

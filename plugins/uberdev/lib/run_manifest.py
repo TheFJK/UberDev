@@ -53,9 +53,11 @@ except ImportError:  # pragma: no cover - unavailable on POSIX
 # accepts only the current version, so compatibility cannot create new v1 data.
 SCHEMA_VERSION = 2
 READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
+# CONTRACT: agent-terminal-event
 TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
+# /CONTRACT: agent-terminal-event
 LIFECYCLE_EVENTS = frozenset({"route_decided", "agent_started"}) | TERMINAL_EVENTS
 SUPPORTED_PROCESS_IDENTITY_PLATFORMS = ("linux", "darwin", "windows")
 _WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
@@ -2373,6 +2375,7 @@ def _terminal_truth_from_snapshot(
     if len(state_keys) != 1:
         return None
     terminal = str(snapshot[state_keys[0]]).strip().lower()
+    # CONTRACT: run-terminal-status
     if terminal not in {"completed", "failed", "timed_out", "cancelled"}:
         return None
     if snapshot.get("backend") != started.get("backend"):

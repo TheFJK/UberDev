@@ -34,6 +34,12 @@ All audit-event names, state-machine enums, regex shapes, and tunable thresholds
 
 > **Runtime SSOT:** the scalar constants below are mirrored into `plugins/uberdev/lib/goal-state.sh` (using `: "${VAR:=default}"`) so fresh-shell rehydration fences in Phases 1/2/3/4 — which source ONLY the lib, never re-execute this Phase 0 block — get canonical defaults. This SKILL.md block is the documentation SSOT and is preserved byte-identical for tests G24/G28/G34. See issue #245.
 
+<!-- The block below is held byte-identical by tests/goal.test.sh G24/G28/G34,
+     so the #370 contract markers sit outside the fence and resolve forward
+     via @anchor. See docs/rfc/0016-contract-markers.md. -->
+<!-- CONTRACT: goal-audit-event @GOAL_AUDIT_EVENT_ENUM= -->
+<!-- CONTRACT: goal-circuit-breaker-reason @GOAL_CIRCUIT_BREAKER_REASONS= -->
+<!-- CONTRACT: trust-signal @TRUST_SIGNAL_ENUM= -->
 ```
 GOAL_AUDIT_EVENT_ENUM='goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped'
 GOAL_CIRCUIT_BREAKER_REASONS='max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog|solver_failed'

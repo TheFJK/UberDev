@@ -240,6 +240,7 @@ const S = {
           required: ["pr", "signal"],
           properties: {
             pr: { type: "integer" },
+            // CONTRACT: trust-signal
             signal: { type: "string", enum: ["green", "yellow", "red", "stale", "missing"] },
           },
         },

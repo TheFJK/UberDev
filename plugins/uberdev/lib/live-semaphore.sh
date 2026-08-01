@@ -1138,6 +1138,7 @@ _uberdev_semaphore_remove_lease() {
     --generation "$generation" --identity "$identity" >/dev/null
 }
 
+# CONTRACT: semaphore-lease-acquire-reason /lease_acquire_[a-z_]+/
 uberdev_semaphore_acquire() {
   local state_root repo_id backend cap run_id timeout_s identity_mode output_variable scope lease active wait_tries wait_max mutex_rc duplicate_rc owner_pid
   local generation path_identity exact_identity cleanup_rc record owner_identity owner_mode
@@ -1323,6 +1324,7 @@ uberdev_semaphore_acquire() {
   _uberdev_semaphore_error 'capacity wait limit exceeded'
   return 75
 }
+# /CONTRACT: semaphore-lease-acquire-reason
 
 uberdev_semaphore_set_handle() {
   local lease backend_handle status_path identity_mode output_variable backend_identity scope mutex_rc publish_rc handle_kind

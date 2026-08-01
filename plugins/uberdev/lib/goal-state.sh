@@ -707,6 +707,7 @@ uberdev_goal_state_init() {
 uberdev_goal_audit() {
   local event="$1" payload="$2"
   case "$event" in
+    # CONTRACT: goal-audit-event
     goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
@@ -829,6 +830,7 @@ uberdev_goal_issue_state_transition() {
 # also skipped when the verdict has no `.sha` (legacy/pre-anchor JSON) or no
 # `.pr`, preserving backward compatibility (and the audit-path-only test
 # fixtures that never set a PR).
+# CONTRACT: trust-signal /printf '([a-z]+)\\n'/
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   # Canonical locator output is closed controller state, not a pathname. Its
@@ -1002,6 +1004,7 @@ uberdev_goal_read_trust_signal() {
   if [ "$critical" -gt 0 ]; then printf 'yellow\n'; return 0; fi
   printf 'green\n'
 }
+# /CONTRACT: trust-signal
 
 # uberdev_goal_check_fingerprint_repeat GOAL_ID CYCLE FINGERPRINT
 # Non-convergence detector: same fingerprint in cycle N-1 => repeat
@@ -1792,6 +1795,11 @@ uberdev_goal_agent_busy_for_issue() {
       return 1
       ;;
     claude-bg|wezterm|*)
+      # DECLARED DIVERGENCE, not intent (#370 rank 7): agent-dispatch.sh's
+      # lifecycle classifier treats `queued` as LIVE; this probe does not.
+      # Marked so a one-sided edit to either side reds; whether `queued`
+      # SHOULD be live is a behaviour question with its own issue.
+      # CONTRACT: agent-liveness-value -queued @test("^(busy
       if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
         any(.[]?;
             (((.cwd // "") | rtrimstr("/")) | endswith("solve-issue-" + $n))
@@ -1884,6 +1892,10 @@ uberdev_goal_review_pr_in_flight() {
       return 1
       ;;
   esac
+  # DECLARED DIVERGENCE, not intent (#370 rank 7): `queued` is LIVE to
+  # agent-dispatch.sh's classifier and not-live here. See the sibling note
+  # on uberdev_goal_agent_busy_for_issue.
+  # CONTRACT: agent-liveness-value -queued @test("^(busy
   if claude agents --json 2>/dev/null | jq -e --argjson pr "$pr" '
     [ .[]?
       | select(
@@ -1939,6 +1951,9 @@ uberdev_goal_agent_stuck_on_dialog() {
     .[]? | select(.pid? == $pid) | .status // ""' 2>/dev/null)"
   [ -n "$agent_status" ] || return 1
   case "$agent_status" in
+    # DECLARED DIVERGENCE, not intent (#370 rank 7): `queued` is LIVE to
+    # agent-dispatch.sh's classifier and not-live here.
+    # CONTRACT: agent-liveness-value -queued
     busy|running|starting|working) : ;;
     *) return 1 ;;
   esac
@@ -2148,11 +2163,13 @@ uberdev_goal_read_merge_result() {
     merge_executed)
       printf 'success\n' ;;
     pr_parked)
+      # CONTRACT: park-reason /^[ \t]*([a-z][a-z0-9|-]*)\)/
       case "$reason" in
         refused|ambiguous|push-non-ff) printf 'conflict\n' ;;
         test-fail-exhausted)           printf 'hook_failed\n' ;;
         *)                             printf 'missing\n' ;;
       esac ;;
+      # /CONTRACT: park-reason
     *)
       printf 'missing\n' ;;
   esac
@@ -3543,6 +3560,15 @@ uberdev_goal_read_run_state() {
         case "$v" in 0|1) only_mine="$v" ;; esac ;;
       CIRCUIT_BREAKER_HALT)
         case "$v" in
+          # DECLARED DIVERGENCE, not intent (found while wiring #370's Half A
+          # guard, NOT in its register): goal-pipeline/SKILL.md's
+          # GOAL_CIRCUIT_BREAKER_REASONS has NINE reasons; this rehydration
+          # allowlist has eight — `solver_failed` (goal-phase3.sh, goal-watch.sh)
+          # is missing. Latent today: only `agent_stuck_on_dialog` is ever
+          # assigned to CIRCUIT_BREAKER_HALT, so nothing is dropped yet. The
+          # arm has no else branch, so if that changes the value vanishes on the
+          # next fresh-shell fence exactly as it did for UBERDEV_RESOLVED_BACKEND.
+          # CONTRACT: goal-circuit-breaker-reason -solver_failed
           max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
             CIRCUIT_BREAKER_HALT="$v" ;;
         esac ;;
@@ -3579,6 +3605,7 @@ uberdev_goal_read_run_state() {
         # so a Workflow run was probed and reaped as if it were a detached
         # `background` session. Keep this list byte-aligned with the dispatch
         # enum minus `auto` (auto is a REQUEST, never a resolution).
+        # CONTRACT: dispatch-backend -auto
         case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
     esac
