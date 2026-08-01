@@ -491,7 +491,7 @@ import json,sys
 receipt=json.loads(sys.argv[1])
 assert receipt['instance_id']=='stable-owner-0001' and receipt['state']=='running',receipt
 PY
-! find "$TMP/run/children/stable-owner-0001" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit | grep -q .
+[ -z "$(find "$TMP/run/children/stable-owner-0001" -maxdepth 1 -name '.dispatch-receipt.*' -print -quit)" ]
 
 # The controller-owned capture path must never reopen a pathname supplied by
 # the old receipt-file helper.  A same-UID attacker could replace that path

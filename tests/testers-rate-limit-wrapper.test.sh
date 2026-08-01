@@ -218,7 +218,7 @@ EOF
   # Assert `--` appears in captured args before the URL
   grep -q '^--$' "$ARGFILE" || { fail "$FUNCNAME" "missing '--' separator in curl args: $(cat "$ARGFILE" | tr '\n' ' ')"; return; }
   # Assert URL is the LAST arg (right after `--`)
-  tail -1 "$ARGFILE" | grep -q '^http://example.test/probe$' || { fail "$FUNCNAME" "URL not last arg: $(tail -1 "$ARGFILE")"; return; }
+  grep -q '^http://example.test/probe$' <<<"$(tail -1 "$ARGFILE")" || { fail "$FUNCNAME" "URL not last arg: $(tail -1 "$ARGFILE")"; return; }
   pass "$FUNCNAME"
 }
 test_curl_dash_dash_separator

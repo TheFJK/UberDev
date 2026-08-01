@@ -256,7 +256,7 @@ assert_grep "$SKILL_FILE" 'chore\(merge\):' \
 # 'Co-Authored-By' hit, then grep that window for 'MUST NOT'. This catches
 # the marker whether it appears before OR after the Co-Authored-By literal,
 # which awk's forward-streaming approach misses.
-if grep -B5 -A5 'Co-Authored-By' "$SKILL_FILE" | grep -qE 'MUST NOT|must not'; then
+if grep -qE 'MUST NOT|must not' <<<"$(grep -B5 -A5 'Co-Authored-By' "$SKILL_FILE")"; then
   pass "M15.2 — 'MUST NOT' (or 'must not') near Co-Authored-By reference"
 else
   fail "M15.2 — no 'MUST NOT' guard near Co-Authored-By in SKILL.md"
@@ -1771,7 +1771,7 @@ fi
 
 echo
 echo "== M74: AUDIT_EVENT_ENUM declares auto_review_dispatched (#89) =="
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`auto_review_dispatched`'; then
+if grep -q '`auto_review_dispatched`' <<<"$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")"; then
   pass "M74 — AUDIT_EVENT_ENUM row contains auto_review_dispatched literal"
 else
   fail "M74 — AUDIT_EVENT_ENUM MUST declare auto_review_dispatched (spec C2.1; D8 cites PR #77 bracketing precedent)"
@@ -1779,7 +1779,7 @@ fi
 
 echo
 echo "== M75: AUDIT_EVENT_ENUM declares auto_review_returned (#89) =="
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q '`auto_review_returned`'; then
+if grep -q '`auto_review_returned`' <<<"$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")"; then
   pass "M75 — AUDIT_EVENT_ENUM row contains auto_review_returned literal"
 else
   fail "M75 — AUDIT_EVENT_ENUM MUST declare auto_review_returned (spec C2.1; bracketed pair with auto_review_dispatched)"
@@ -1802,7 +1802,8 @@ done
 
 echo
 echo "== M77: Constants table declares AUTO_REVIEW_DISPATCH_CAP = 1 (#89) =="
-if grep -E '^\| `AUTO_REVIEW_DISPATCH_CAP` \| `1`' "$SKILL_FILE" | head -1 | grep -q '`1`'; then
+M77_ROW="$(head -1 <<<"$(grep -E '^\| `AUTO_REVIEW_DISPATCH_CAP` \| `1`' "$SKILL_FILE")")"
+if grep -q '`1`' <<<"$M77_ROW"; then
   pass "M77 — AUTO_REVIEW_DISPATCH_CAP = 1 declared in Constants table (spec D4; no inline literal)"
 else
   fail "M77 — Constants table MUST declare AUTO_REVIEW_DISPATCH_CAP = 1 as a named constant (per CI_FIX_LOOP_CAP / RERUN_FLAKY_CAP pattern; constraints.md §Summary #4)"
@@ -1824,7 +1825,8 @@ fi
 
 echo
 echo "== M79: SKILL.md declares Step 1.4.5 auto-review intercept (#89) =="
-if grep -nE '^### Step 1\.4\.5' "$SKILL_FILE" | head -1 | grep -q '1\.4\.5'; then
+M79_HEADING="$(head -1 <<<"$(grep -nE '^### Step 1\.4\.5' "$SKILL_FILE")")"
+if grep -q '1\.4\.5' <<<"$M79_HEADING"; then
   pass "M79.heading — Step 1.4.5 sub-section heading present"
 else
   fail "M79.heading — SKILL.md MUST declare ### Step 1.4.5 sub-section heading (spec C2.3)"
@@ -1924,7 +1926,7 @@ fi
 
 echo
 echo "== M84: commands/merge.md Autopilot paragraph mentions auto_review_on_merge (#89) =="
-if awk '/\*\*Autopilot:\*\*/,/^## /' "$CMD_FILE" | grep -q 'auto_review_on_merge'; then
+if grep -q 'auto_review_on_merge' <<<"$(awk '/\*\*Autopilot:\*\*/,/^## /' "$CMD_FILE")"; then
   pass "M84 — commands/merge.md Autopilot paragraph cites auto_review_on_merge (spec C3.1)"
 else
   fail "M84 — commands/merge.md Autopilot paragraph MUST cite auto_review_on_merge as opt-in inner workflow (spec C3.1 / AC8)"
@@ -1932,7 +1934,8 @@ fi
 
 echo
 echo "== M85: commands/merge.md documents auto_review_on_merge with the excluded reasons (#89) =="
-if grep -nE 'auto_review_on_merge: true\|false' "$CMD_FILE" | head -1 | grep -q 'auto_review_on_merge'; then
+M85_ROW="$(head -1 <<<"$(grep -nE 'auto_review_on_merge: true\|false' "$CMD_FILE")")"
+if grep -q 'auto_review_on_merge' <<<"$M85_ROW"; then
   pass "M85.config-key — commands/merge.md documents auto_review_on_merge with true|false enum (spec C3.2)"
 else
   fail "M85.config-key — commands/merge.md MUST document auto_review_on_merge with true|false enum (spec C3.2)"
@@ -2052,7 +2055,7 @@ echo "== M87: Three /merge override flags declared in both commands/merge.md and
 
 # M87.1–M87.3 — argument-hint declarations in commands/merge.md frontmatter
 for FLAG in --accept-blocker-deferred --accept-critical-deferred --i-know-what-im-doing; do
-  if grep -E '^argument-hint:' "$CMD_FILE" | grep -q -- "$FLAG"; then
+  if grep -q -- "$FLAG" <<<"$(grep -E '^argument-hint:' "$CMD_FILE")"; then
     pass "M87.argv-$FLAG — commands/merge.md argument-hint declares $FLAG"
   else
     fail "M87.argv-$FLAG — commands/merge.md argument-hint MUST declare $FLAG"
@@ -2120,12 +2123,12 @@ if grep -qE '^### .AUDIT_EVENT_ENUM. .*event semantics' "$SKILL_FILE"; then
 else
   fail "M88.subsection — AUDIT_EVENT_ENUM event-semantics subsection MUST exist (#119)"
 fi
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q 'event semantics subsection'; then
+if grep -q 'event semantics subsection' <<<"$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")"; then
   pass "M88.pointer — AUDIT_EVENT_ENUM row points at the subsection"
 else
   fail "M88.pointer — AUDIT_EVENT_ENUM row MUST point at the event-semantics subsection (#119)"
 fi
-if grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE" | grep -q 'Field-level extensions'; then
+if grep -q 'Field-level extensions' <<<"$(grep -E '^\| `AUDIT_EVENT_ENUM`' "$SKILL_FILE")"; then
   fail "M88.extracted — 'Field-level extensions' prose MUST NOT be back on the AUDIT_EVENT_ENUM row (#119 regression)"
 else
   pass "M88.extracted — field-level prose no longer monolithic on the row"
@@ -2479,7 +2482,7 @@ M95_RUNNER_EOF
   }
 
   m95_field() {
-    grep -E "^$2=" <<<"$1" | head -1 | cut -d= -f2-
+    head -1 <<<"$(grep -E "^$2=" <<<"$1")" | cut -d= -f2-
   }
 
   m95_assert_case() {
@@ -2658,7 +2661,7 @@ else
         "$(jq -e . <<<"${PROTECTION_BODY-}" >/dev/null 2>&1 && echo yes || echo no)"
     ) 2>/dev/null
   }
-  m97_field() { grep -E "^$2=" <<<"$1" | head -1 | cut -d= -f2-; }
+  m97_field() { head -1 <<<"$(grep -E "^$2=" <<<"$1")" | cut -d= -f2-; }
   m97_expect() {
     local out="$1" key="$2" want="$3" label="$4" got
     got="$(m97_field "$out" "$key")"
@@ -2838,7 +2841,7 @@ M98SURF
   git -C "$M98_R" commit -q -m "feat: reviewed work"
   M98_REVIEWED="$(git -C "$M98_R" rev-parse HEAD)"
 
-  m98_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+  m98_field() { head -n 1 <<<"$(sed -n "s/^$2=//p" <<<"$1")"; }
   m98_run() { bash "$RA_LIB" "${1:-HEAD}" "$M98_R" 2>/dev/null; }
   m98_reset_release() {   # rebuild the release commit on top of the reviewed one
     git -C "$M98_R" reset -q --hard "$M98_REVIEWED"

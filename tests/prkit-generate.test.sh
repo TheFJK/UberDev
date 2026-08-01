@@ -360,7 +360,7 @@ git -C "$DIRECTORY_TARGET" commit -qm "test: directory output fixture"
 before_status="$(git -C "$DIRECTORY_TARGET" status --porcelain --untracked-files=all)"
 if bash "$GEN" --target "$DIRECTORY_TARGET" --version 0.1.0 >/dev/null 2>&1 \
    || [ "$(cat "$DIRECTORY_TARGET/README.md/sentinel.txt" 2>/dev/null)" != "directory output sentinel" ] \
-   || find "$DIRECTORY_TARGET/README.md" -maxdepth 1 -name '.prkit-render.*' -print -quit | grep -q . \
+   || [ -n "$(find "$DIRECTORY_TARGET/README.md" -maxdepth 1 -name '.prkit-render.*' -print -quit)" ] \
    || [ "$(git -C "$DIRECTORY_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
   no "G1p managed directory output was accepted, mutated, or received a temporary"
 else
@@ -461,7 +461,7 @@ if PRKIT_GENERATOR_TEST_MODE=1 \
   no "G1r injected copy publication failure was accepted"
 elif [ -e "$COPY_FAIL_TARGET/plugins/prkit/commands/review-pr.md" ]; then
   no "G1r failed copy publication left a canonical destination"
-elif find "$COPY_FAIL_TARGET" -name '.prkit-copy.*' -print -quit | grep -q .; then
+elif [ -n "$(find "$COPY_FAIL_TARGET" -name '.prkit-copy.*' -print -quit)" ]; then
   no "G1r failed copy publication leaked a destination temporary"
 elif [ -e "$COPY_FAIL_TARGET/.prkit-generate.lock" ]; then
   no "G1r failed copy publication leaked its generation lock"
@@ -636,7 +636,7 @@ if PRKIT_GENERATOR_TEST_MODE=1 PRKIT_TEST_RENDER_PUBLISH_FAIL="$PUBLISH_FILE" \
   no "G4e injected render publication failure was masked by stale valid output"
 elif ! cmp -s "$PUBLISH_FILE" "$_B6/expected-marketplace.json"; then
   no "G4e failed render publication changed the stale canonical output"
-elif find "$(dirname "$PUBLISH_FILE")" -maxdepth 1 -name '.prkit-render.*' -print -quit | grep -q .; then
+elif [ -n "$(find "$(dirname "$PUBLISH_FILE")" -maxdepth 1 -name '.prkit-render.*' -print -quit)" ]; then
   no "G4e failed render publication leaked a destination temporary"
 else
   ok "G4e render publication fails closed, preserves stale bytes, and cleans temporary"

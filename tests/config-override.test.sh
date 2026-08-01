@@ -309,8 +309,7 @@ fanout_concurrency:
 EOF
   uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6 >/dev/null
 '
-printf "%s" "$_LAST_STDERR" \
-  | grep -qE "^warning: fanout_concurrency.research = '999' is invalid \(out_of_range\); falling back to default 6$" \
+grep -qE "^warning: fanout_concurrency.research = '999' is invalid \(out_of_range\); falling back to default 6$" <<<"$_LAST_STDERR" \
   && pass "U7: warning format byte-matches D7 spec" \
   || fail "U7: warning format diverged from D7 spec"
 

@@ -51,8 +51,8 @@ _isolate '
   [ "$UBERDEV_ROUTING_SHADOW" = false ] || exit 1
   [ "$UBERDEV_ROUTING_WORKFLOWS" = "{}" ] || exit 1
   [ "$UBERDEV_ROUTING_ROLES" = "{}" ] || exit 1
-  export -p | grep -q "UBERDEV_ROUTING_MODE=" || exit 1
-  export -p | grep -q "UBERDEV_ROUTING_ROLES=" || exit 1
+  grep -q "UBERDEV_ROUTING_MODE=" <<<"$(export -p)" || exit 1
+  grep -q "UBERDEV_ROUTING_ROLES=" <<<"$(export -p)" || exit 1
 '
 [ "$_STATUS" -eq 0 ] && pass "R1: v0.40 safe inherit defaults exported" || fail "R1: routing defaults/public exports"
 [ -z "$_LAST_STDERR" ] && pass "R1: absent routing config is warning-silent" || fail "R1: absent config warned: $_LAST_STDERR"

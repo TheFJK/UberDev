@@ -168,7 +168,7 @@ check_forbidden_tokens() {
   hits="$(printf '%s\n' "$stripped" | grep -wE 'import|require' || true)"
   if [ -n "$hits" ]; then
     fail "T1 $base: forbidden token import/require (scripts are self-contained — copy-paste via SHARED blocks)"
-    printf '%s\n' "$hits" | head -5 | sed 's/^/        /'
+    sed -n '1,5s/^/        /p' <<<"$hits"
   else
     pass "T1 $base: no import/require"
   fi
@@ -176,7 +176,7 @@ check_forbidden_tokens() {
   hits="$(printf '%s\n' "$stripped" | grep -E '(^|[^[:alnum:]_$.])process\.|(^|[^[:alnum:]_$.])fs\.' || true)"
   if [ -n "$hits" ]; then
     fail "T1 $base: forbidden token process./fs. (the script cannot touch Node APIs or the filesystem — agents do)"
-    printf '%s\n' "$hits" | head -5 | sed 's/^/        /'
+    sed -n '1,5s/^/        /p' <<<"$hits"
   else
     pass "T1 $base: no process./fs."
   fi
@@ -184,7 +184,7 @@ check_forbidden_tokens() {
   hits="$(printf '%s\n' "$stripped" | grep -E '(^|[^[:alnum:]_$])Date\.now|(^|[^[:alnum:]_$])Math\.random|new[[:space:]]+Date[[:space:]]*\(' || true)"
   if [ -n "$hits" ]; then
     fail "T1 $base: forbidden token Date.now/Math.random/new Date( — timestamps arrive via args (DR-7)"
-    printf '%s\n' "$hits" | head -5 | sed 's/^/        /'
+    sed -n '1,5s/^/        /p' <<<"$hits"
   else
     pass "T1 $base: no Date.now/Math.random/new Date("
   fi
@@ -201,7 +201,7 @@ else
       pass "T1 $base: node --check --input-type=module < file"
     else
       fail "T1 $base: failed ESM lint (node --check --input-type=module)"
-      node --check --input-type=module < "$script" 2>&1 | head -5 | sed 's/^/        /'
+      node --check --input-type=module < "$script" 2>&1 | sed -n '1,5s/^/        /p'
     fi
 
     size="$(wc -c < "$script" | tr -d '[:space:]')"
@@ -224,12 +224,12 @@ FORBIDDEN_FIXTURE="$TMPDIR_FIXTURES/forbidden.js"
   echo 'const d = new Date(1700000000000).toISOString();'
   echo '// === END SHARED ==='
 } > "$FORBIDDEN_FIXTURE"
-if strip_shared_blocks "$FORBIDDEN_FIXTURE" | grep -qE '(^|[^[:alnum:]_$])Date\.now'; then
+if grep -qE '(^|[^[:alnum:]_$])Date\.now' <<<"$(strip_shared_blocks "$FORBIDDEN_FIXTURE")"; then
   pass "T1.c4 forbidden-token grep catches Date.now outside SHARED markers"
 else
   fail "T1.c4 forbidden-token grep MISSED Date.now outside SHARED markers"
 fi
-if strip_shared_blocks "$FORBIDDEN_FIXTURE" | grep -qE 'new[[:space:]]+Date[[:space:]]*\('; then
+if grep -qE 'new[[:space:]]+Date[[:space:]]*\(' <<<"$(strip_shared_blocks "$FORBIDDEN_FIXTURE")"; then
   fail "T1.c5 SHARED-block escape hatch broken: new Date( INSIDE markers leaked into the grep surface"
 else
   pass "T1.c5 SHARED-block contents are exempt from the static grep (T3 runtime shadows still apply)"
@@ -249,7 +249,7 @@ if node "$HARNESS" self-test >"$TMPDIR_FIXTURES/selftest.out" 2>&1; then
   pass "harness self-test green ($(grep -c '^  PASS' "$TMPDIR_FIXTURES/selftest.out" || echo '?') stub-semantic asserts)"
 else
   fail "harness self-test FAILED — stub drift or wrapper bug"
-  grep '^  FAIL' "$TMPDIR_FIXTURES/selftest.out" | head -10 | sed 's/^/      /'
+  grep '^  FAIL' "$TMPDIR_FIXTURES/selftest.out" | sed -n '1,10s/^/      /p'
 fi
 
 # Harness CLI contract controls (the per-script loop below relies on these
@@ -332,7 +332,7 @@ else
       pass "T2/T3 $base: meta valid + dry-run clean"
     else
       fail "T2/T3 $base: validate failed"
-      sed 's/^/        /' "$TMPDIR_FIXTURES/validate.out" | head -10
+      sed -n '1,10s/^/        /p' "$TMPDIR_FIXTURES/validate.out"
     fi
   done < "$SCRIPTS_FILE"
 fi
@@ -379,7 +379,7 @@ else
     pass "T4 cross-script SHARED blocks are byte-identical"
   else
     fail "T4 SHARED block drift across workflow scripts"
-    sed 's/^/        /' "$TMPDIR_FIXTURES/drift.out" | head -10
+    sed -n '1,10s/^/        /p' "$TMPDIR_FIXTURES/drift.out"
   fi
 fi
 
@@ -400,18 +400,16 @@ skill_workflow_existence_guard() {
   local md="$1" decoded var
   decoded="$(sed -E 's/`[^`]*`//g' "$md")"
   # Form (a): one decoded line with a `[ -f` test + workflow.js + a consequence.
-  if printf '%s\n' "$decoded" \
-       | grep -E '\[[[:space:]]+-f[[:space:]].*workflow\.js.*\][[:space:]]*(\|\||&&|;?[[:space:]]*then)' \
-       | grep -q .; then
+  if [ -n "$(grep -E '\[[[:space:]]+-f[[:space:]].*workflow\.js.*\][[:space:]]*(\|\||&&|;?[[:space:]]*then)' \
+       <<<"$decoded")" ]; then
     echo inline; return 0
   fi
   # Form (b): a `VAR=...workflow.js` assignment + a `[ -f "$VAR" ]` test with a
   # consequence referencing that same variable.
   while IFS= read -r var; do
     [ -n "$var" ] || continue
-    if printf '%s\n' "$decoded" \
-         | grep -E "\[[[:space:]]+-f[[:space:]]+\"\\\$$var\"[[:space:]]+\][[:space:]]*(\|\||&&|;?[[:space:]]*then)" \
-         | grep -q .; then
+    if [ -n "$(grep -E "\[[[:space:]]+-f[[:space:]]+\"\\\$$var\"[[:space:]]+\][[:space:]]*(\|\||&&|;?[[:space:]]*then)" \
+         <<<"$decoded")" ]; then
       echo variable; return 0
     fi
   done < <(printf '%s\n' "$decoded" | grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^=]*workflow\.js' | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/')

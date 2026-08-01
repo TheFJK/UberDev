@@ -138,7 +138,7 @@ check "CLI: top design appears in ranked section" "grep -q 'Stat-mech-shaped mul
 python3 "$PIPELINE_DIR/report.py" --run-dir "$TMP" --emit aggregate --max-new 3 > "$TMP/agg.md"
 check "CLI: aggregate written" "[ -s \"$TMP/agg.md\" ]"
 check "CLI: aggregate has uberthink-aggregate envelope (leading 128 bytes)" \
-  "head -c 128 \"$TMP/agg.md\" | grep -q 'source=\"uberthink-aggregate\"'"
+  "grep -q 'source=\"uberthink-aggregate\"' <<<\"\$(head -c 128 \"$TMP/agg.md\")\""
 check "CLI: aggregate has closing envelope tag" \
   "grep -qF '</external-untrusted-input>' \"$TMP/agg.md\""
 check "CLI: aggregate respects --max-new cap" \

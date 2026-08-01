@@ -22,7 +22,7 @@ ck "has allowed-tools" "grep -q '^allowed-tools:' '$CMD'"
 
 echo "== U2: READ-ONLY invariant (no Edit/MultiEdit in allowed-tools) =="
 ck "allowed-tools omits Edit/MultiEdit" "[ \$(grep '^allowed-tools:' '$CMD' | grep -cE '\"Edit\"|MultiEdit') -eq 0 ]"
-ck "allowed-tools carries Workflow (the migration's dispatch tool)" "grep '^allowed-tools:' '$CMD' | grep -q '\"Workflow\"'"
+ck "allowed-tools carries Workflow (the migration's dispatch tool)" "grep -q '\"Workflow\"' <<<\"\$(grep '^allowed-tools:' '$CMD')\""
 
 echo "== U3: pipeline skill =="
 ck "skill exists" "[ -r '$SKILL' ]"
@@ -51,7 +51,7 @@ ck "no per-phase #171 RUN_ID rehydrate stanza remains (single-process workflow n
 ck "no fence-scoped CIRCUIT_BREAKER_HALT run-state.txt persistence remains (CB lives in workflow.js)" "[ \$(grep -c 'CIRCUIT_BREAKER_HALT=' '$SKILL') -eq 0 ]"
 
 echo "== U6: global-pass.sh extracted (the inline Semgrep + coverage pass) =="
-ck "global-pass.sh exists + executable shebang" "[ -r '$GLOBAL_PASS' ] && head -1 '$GLOBAL_PASS' | grep -q 'bin/env bash'"
+ck "global-pass.sh exists + executable shebang" "[ -r '$GLOBAL_PASS' ] && grep -q 'bin/env bash' <<<\"\$(head -1 '$GLOBAL_PASS')\""
 ck "skill references global-pass.sh" "grep -q 'global-pass.sh' '$SKILL'"
 ck "global-pass runs Semgrep" "grep -qE 'semgrep scan --config' '$GLOBAL_PASS'"
 ck "global-pass writes the two artifacts report.py reads by name" "grep -q 'global-security.md' '$GLOBAL_PASS' && grep -q 'global-coverage.md' '$GLOBAL_PASS'"

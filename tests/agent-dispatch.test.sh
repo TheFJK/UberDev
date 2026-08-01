@@ -738,7 +738,7 @@ grep -q '"exit_code":70' "$OWNER_IDENTITY_RUN/status.json"
 grep -q '"reason":"owner_process_identity_unavailable"' "$OWNER_IDENTITY_RUN/status.json.watcher-error.json"
 ! grep -q '"event":"agent_started"' "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" 2>/dev/null
 [ ! -d "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" ] \
-  || ! find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f | grep -q .
+  || [ -z "$(find "$OWNER_IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f)" ]
 )
 
 # Owner-capture failure reporting uses two independent durable channels. Fault
@@ -1250,7 +1250,7 @@ fi
 GENERATION_REQUEST="$(variant_request agent-dispatch-generation-race inherit)"
 uberdev_agent_dispatch "$GENERATION_REQUEST" "$TMP/run/prompt.txt" \
   "$TMP/run/generation-race.md" "$TMP/run/generation-race.json"
-generation_lease="$(grep -R -l '^run_id=agent-dispatch-generation-race$' "$STATE_DIR/semaphore-v1" | head -1)"
+generation_lease="$(head -1 <<<"$(grep -R -l '^run_id=agent-dispatch-generation-race$' "$STATE_DIR/semaphore-v1")")"
 [ -n "$generation_lease" ] || { echo "generation-race lease missing" >&2; exit 1; }
 python3 -I - "$generation_lease" <<'PY'
 import os, pathlib, sys, tempfile
@@ -1298,7 +1298,7 @@ cmp -s "$TMP/backend.json" "$TMP/before-unsupported.json" || {
 
 # All caller paths are one disjoint set outside private lifecycle state.
 provider_before="$(cat "$TMP/provider-count")"
-lease_path="$(find "$STATE_DIR/semaphore-v1" -name '*.lease' -type f | head -1)"
+lease_path="$(head -1 <<<"$(find "$STATE_DIR/semaphore-v1" -name '*.lease' -type f)")"
 ln "$TMP/run/prompt.txt" "$TMP/run/prompt-hardlink.txt"
 for paths in \
   "$TMP/run/prompt.txt|$TMP/run/prompt.txt|$TMP/run/equal-status.json" \

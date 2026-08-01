@@ -439,8 +439,8 @@ done
 rm -rf "$NATIVE_AUTHORITY_TMP"
 
 for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
-  if extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror" \
-      | grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}'; then
+  if grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}' \
+      <<<"$(extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror")"; then
     pass_msg "Codex optional turbo env is safe under Bash 3.2 nounset ($(basename "$(dirname "$(dirname "$codex_dispatch_mirror")")"))"
   else
     fail_msg "Codex optional turbo env is safe under Bash 3.2 nounset" "$codex_dispatch_mirror"
@@ -2261,14 +2261,14 @@ run_add_cleanup_round() {
               (
                 printf "%s\\n" "$BASHPID" >"$8"
                 locks="$1/.git/.uberdev-worktree-metadata-locks"
-                if find "$locks" -name .mutex -print 2>/dev/null | grep -q .; then
+                if [ -n "$(find "$locks" -name .mutex -print 2>/dev/null)" ]; then
                   printf "held\\n" >"$6"
                 else
                   printf "missing\\n" >"$6"
                 fi
                 printf "started\\n" >"$5"
                 tries=0
-                while find "$locks" -name .mutex -print 2>/dev/null | grep -q . \
+                while [ -n "$(find "$locks" -name .mutex -print 2>/dev/null)" ] \
                     && [ "$tries" -lt 1000 ]; do
                   tries=$((tries + 1)); sleep 0.01
                 done
@@ -2618,7 +2618,8 @@ if [ "$PID_CAPTURE_NUMERIC_SUPPORTED" -eq 0 ]; then
   [ ! -e "${PID_CAPTURE_STATE_GLOB[0]}" ] || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS lifecycle"
   [ ! -d "$PID_CAPTURE_TMP/repo/.claude/worktrees" ] \
     || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS worktree"
-  git -C "$PID_CAPTURE_TMP/repo" show-ref | grep -Fq 'refs/heads/worktree-solve-issue-335-' \
+  grep -Fq 'refs/heads/worktree-solve-issue-335-' \
+    <<<"$(git -C "$PID_CAPTURE_TMP/repo" show-ref)" \
     && PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS branch"
   pid_capture_emergency_cleanup \
     || PID_CAPTURE_UNSUPPORTED_ERRORS="$PID_CAPTURE_UNSUPPORTED_ERRORS emergency-cleanup"
@@ -2832,7 +2833,7 @@ for canonical_rel in discover.sh release-anchor.sh; do
        -e '.claude/uberdev.local.md' \
        -e '~/.claude' \
        "$CANONICAL_MERGE_LIB" ||
-     tr -d '\r' < "$CANONICAL_MERGE_LIB" | grep -q '[[:blank:]]$'; then
+     grep -q '[[:blank:]]$' <<<"$(tr -d '\r' < "$CANONICAL_MERGE_LIB")"; then
     fail_msg "canonical merge-pipeline/lib/$canonical_rel left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
              "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
   else
