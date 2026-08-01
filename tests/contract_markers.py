@@ -149,10 +149,17 @@ from pathlib import Path
 # #370 rank in the comment.
 # --------------------------------------------------------------------------
 CONTRACTS: dict[str, list[str]] = {
-    # rank 6 — lib/dispatch.sh enum + the goal run-state allowlist (enum - auto)
+    # rank 6 — lib/dispatch.sh enum, the goal run-state allowlist (enum - auto),
+    # the launcher's three copies and the triage parser.  The launcher and
+    # triage copies are the ones #360 actually shipped stale.
     "dispatch-backend": [
         "lib/dispatch.sh",
         "lib/goal-state.sh",
+        "lib/solve-launcher.sh",
+        "lib/solve-launcher.sh",
+        "lib/solve-launcher.sh",
+        "lib/solve_triage.py",
+        "skills/solve-pipeline/SKILL.md",
     ],
     # rank 7 — `claude agents --json` row values that mean "this agent is alive"
     "agent-liveness-value": [
@@ -160,6 +167,7 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/goal-state.sh",
         "lib/goal-state.sh",
         "lib/goal-state.sh",
+        "lib/run_manifest.py",
     ],
     # rank 8 — terminal `state` a per-run status FILE may legally carry (4)
     "run-terminal-status": [
@@ -171,6 +179,9 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
+        "lib/code_fixer_contract.py",
+        "lib/dispatch.sh",
+        "lib/dispatch.sh",
         "lib/run_manifest.py",
     ],
     # rank 9 — the events uberdev_goal_audit accepts (13)
@@ -241,6 +252,49 @@ JSON_SITES: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# Lines that legitimately carry a contract's whole vocabulary WITHOUT being a
+# declaration of it — a restatement in prose, or a superset used for something
+# else.  Each entry is (relpath, distinctive substring, reason).  Entries are
+# ratcheted: one that matches nothing is stale and fails, so an exemption cannot
+# outlive the line it exempts.  Keep this list SHORT — the honest response to a
+# twin is almost always to mark it.
+_PROSE = (
+    "prose restatement, not a producer or a validator. Extracting a member set "
+    "from an English sentence via span heuristics is the exact fragility that "
+    "made a deleted pair of parentheses red CI; the sentence is documentation "
+    "ABOUT the contract, and the contract's real copies are all marked."
+)
+_PORTED_PROSE = (
+    "command prose, ported by codex/tools/convert-commands.py to a DIFFERENT "
+    "relative path in the Codex tree (commands/x.md -> skills/uberdev-cmd-x/"
+    "SKILL.md). A marker here could never satisfy the per-tree path-multiset "
+    "check, and the line is prose. " + _PROSE
+)
+TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
+    "dispatch-backend": [
+        ("plugins/uberdev/commands/goal.md", "pin a dispatch backend", _PORTED_PROSE),
+        ("plugins/uberdev/commands/solve.md", "selects how `/solve` runs each per-issue solver", _PORTED_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "selects how `/turbo` runs each per-issue solver", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-goal/SKILL.md", "pin a dispatch backend", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "selects how `/solve` runs each per-issue solver", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "selects how `/turbo` runs each per-issue solver", _PORTED_PROSE),
+        ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "one of: auto, workflow", _PROSE),
+        ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "precedence (RFC 0004 / RFC 0012)", _PROSE),
+        ("codex/uberdev-codex/skills/using-uberdev/references/configuration.md", "one of: auto, workflow", _PROSE),
+        ("codex/uberdev-codex/skills/using-uberdev/references/configuration.md", "precedence (RFC 0004 / RFC 0012)", _PROSE),
+    ],
+    "goal-circuit-breaker-reason": [
+        ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
+        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
+    ],
+    "park-reason": [
+        ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "uberdev_goal_read_merge_result` returns", _PROSE),
+        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "uberdev_goal_read_merge_result` returns", _PROSE),
+        ("plugins/uberdev/skills/merge-pipeline/SKILL.md", "Conditional render.", _PROSE),
+        ("codex/uberdev-codex/skills/merge-pipeline/SKILL.md", "Conditional render.", _PROSE),
+    ],
+}
+
 SCAN_ROOTS = ("plugins/uberdev", "codex/uberdev-codex")
 MIRROR_PAIR = ("plugins/uberdev", "codex/uberdev-codex")
 
@@ -278,7 +332,11 @@ NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 # `pick_span`), because a span containing shell/regex syntax is not a
 # vocabulary declaration.
 MEMBER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-SPLIT_RE = re.compile(r"[|,\s'\"`]+")
+# A backslash escape (`\n`, `\t`) separates tokens too: `printf 'missing\n'`
+# must yield `missing`, not the rejected fragment `missing\n`.  A lone backslash
+# before punctuation is a Markdown escape (`a \| b` inside a table cell) and is
+# likewise a separator, not part of a member.
+SPLIT_RE = re.compile(r"(?:\\[a-zA-Z]|\\(?![a-zA-Z])|[|,\s'\"`])+")
 
 # Delimited spans.  The delimiters are stripped before tokenising: they are not
 # separators, so leaving them on would make `{` and `}` rejected fragments and
@@ -311,8 +369,18 @@ COMMENT_LEADERS = {
     ".mjs": ("//",),
     ".cjs": ("//",),
     ".ts": ("//",),
+    ".md": (),
 }
-HTML_COMMENT_RE = re.compile(r"<!--.*?-->")
+# Block comments.  Omitting these made `/* … */` dead code readable to the
+# guard: a JS declaration commented out that way kept its marker and the
+# canonical set was extracted out of the corpse.
+BLOCK_COMMENT_RES = {
+    ".js": re.compile(r"/\*.*?\*/", re.S),
+    ".mjs": re.compile(r"/\*.*?\*/", re.S),
+    ".cjs": re.compile(r"/\*.*?\*/", re.S),
+    ".ts": re.compile(r"/\*.*?\*/", re.S),
+    ".md": re.compile(r"<!--.*?-->", re.S),
+}
 
 # A shell `case` arm head: `completed|failed)`, `"hook-fail")`, `paused)`.
 # Quoted arms are legal shell and must tokenise, or a one-character edit hides
@@ -325,20 +393,42 @@ CASE_SCAN_RE = re.compile(
     re.M,
 )
 
-BUILTIN_MODES = ("case-arm",)
+BUILTIN_MODES = ("case-arm", "emit-literal")
+
+# `!emit-literal`: a shell statement that writes ONE bare literal to stdout.
+# Keyed on the statement's role, not on its punctuation — `printf 'x\n'`,
+# `printf "x\n"`, `printf '%s\n' x`, `echo x` and `echo -n x` are the same act.
+EMITTER_RE = re.compile(r"\b(?:printf|echo)\b")
+# Statement separators outside quotes.  A signal emission is one statement; a
+# diagnostic is recognised by its stderr redirect, which may sit on a
+# backslash-continuation line, so continuations are joined before splitting.
+STMT_SPLIT_RE = re.compile(r"(?:;|\|\||&&|\{|\}|\bthen\b|\bdo\b)")
 
 
 def strip_comments(text: str, suffix: str) -> str:
     """Blank out comment tails, quote-aware, so a decoy cannot win a span.
 
-    Only the shapes that actually appear in the marked trees are handled: `#`
-    for shell/Python/jq, `//` for JavaScript, `<!-- ... -->` for Markdown.  A
-    leader only starts a comment at line start or after whitespace, which is the
-    real shell rule and keeps `$#`, `${x#y}` and `https://` intact.
+    Both line and BLOCK comments: `#` for shell/Python/jq, `//` plus `/* … */`
+    for JavaScript/TypeScript, `<!-- … -->` for Markdown.  A line leader only
+    starts a comment at line start or after whitespace, which is the real shell
+    rule and keeps `$#`, `${x#y}` and `https://` intact.
+
+    An unmapped suffix is a HARD ERROR, not a silent pass-through: a marker in a
+    language whose comments this function cannot see would let commented-out
+    dead code keep its marker and be extracted as live.
     """
-    if suffix == ".md":
-        return HTML_COMMENT_RE.sub("", text)
-    leaders = COMMENT_LEADERS.get(suffix)
+    if suffix not in COMMENT_LEADERS:
+        raise ContractError(
+            f"no comment syntax registered for {suffix or '(no suffix)'} files — a marker "
+            "cannot be extracted safely there, because a commented-out declaration would "
+            f"read as live. Add {suffix!r} to COMMENT_LEADERS (and BLOCK_COMMENT_RES if "
+            "the language has block comments)."
+        )
+    block = BLOCK_COMMENT_RES.get(suffix)
+    if block:
+        # Preserve line count so region line numbers stay meaningful.
+        text = block.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    leaders = COMMENT_LEADERS[suffix]
     if not leaders:
         return text
     out = []
@@ -404,28 +494,60 @@ def tokenize(text: str) -> tuple[list[str], list[str]]:
     return good, bad
 
 
-def candidate_spans(region: str):
-    """Yield (start_offset, span_text) for every candidate span in the region."""
+BACKTICKED_RE = re.compile(r"`([^`\n]*)`")
+
+
+def table_cell_tokens(cell: str) -> tuple[list[str], list[str]]:
+    """Tokenise a Markdown table cell: only BACKTICKED text can be a member.
+
+    The first edition counted bare words, so `Phase 3.3 (audit-log ...)` — six
+    English words — outbid the real four-member vocabulary next to it, and the
+    only thing keeping that from being a silently wrong extraction was a stray
+    pair of parentheses tripping the reject filter.  Deleting them reddened CI.
+    In a constants table the value cell is entirely backticked and the prose
+    cell is not, so requiring it makes the distinction structural instead of
+    incidental.
+    """
+    members: list[str] = []
+    rejects: list[str] = []
+    for chunk in BACKTICKED_RE.finditer(cell):
+        good, bad = tokenize(chunk.group(1))
+        members.extend(good)
+        rejects.extend(bad)
+    outside = BACKTICKED_RE.sub(" ", cell)
+    # Anything left outside backticks other than separators is prose.
+    for stray in re.split(r"[,\s]+", outside):
+        if stray:
+            rejects.append(stray)
+    return members, rejects
+
+
+def candidate_spans(region: str, suffix: str):
+    """Yield (start_offset, members, rejects, text) for every candidate span."""
     for pattern in DELIMITED_SPAN_RES:
         for match in pattern.finditer(region):
-            yield match.start() + 1, match.group(0)[1:-1]
+            text = match.group(0)[1:-1]
+            good, bad = tokenize(text)
+            yield match.start() + 1, good, bad, text
     for match in BARE_ALT_RE.finditer(region):
-        yield match.start(), match.group(0)
-    # Markdown table cells.  A table row's interesting cell is a comma-separated
-    # list of backticked members; its neighbours are a symbol name and prose,
-    # and prose reliably carries a rejected token (punctuation), which is what
-    # disqualifies it under the zero-reject rule.
+        good, bad = tokenize(match.group(0))
+        yield match.start(), good, bad, match.group(0)
+    if suffix != ".md":
+        return
     offset = 0
     for line in region.split("\n"):
         if TABLE_ROW_RE.match(line):
             cell_start = offset
-            for cell in line.split("|"):
-                yield cell_start, cell
+            # `\|` is an ESCAPED pipe inside a cell, not a cell boundary — the
+            # dispatch-backend constants row spells its alternation that way.
+            for cell in re.split(r"(?<!\\)\|", line):
+                good, bad = table_cell_tokens(cell)
+                yield cell_start, good, bad, cell
                 cell_start += len(cell) + 1
         offset += len(line) + 1
 
 
-def pick_span(region: str, where: str) -> tuple[list[str], str]:
+def pick_span(region: str, where: str, suffix: str) -> tuple[list[str], str]:
     """Span mode: the zero-reject span yielding the most distinct members.
 
     Deterministic: max member count, ties broken by earliest offset.
@@ -440,8 +562,7 @@ def pick_span(region: str, where: str) -> tuple[list[str], str]:
     below MIN_MEMBERS and never compete.
     """
     candidates = []
-    for start, text in candidate_spans(region):
-        good, bad = tokenize(text)
+    for start, good, bad, text in candidate_spans(region, suffix):
         if bad or not good:
             continue
         candidates.append((len(set(good)), -start, frozenset(good), text))
@@ -484,6 +605,67 @@ def harvest(region: str, pattern: str) -> tuple[list[str], str]:
         good, _bad = tokenize(text or "")
         members.update(good)
     return sorted(members), f"{hits} match(es) of /{pattern}/"
+
+
+def harvest_emitted_literals(region: str) -> tuple[list[str], str]:
+    """`!emit-literal` mode: every stdout emission of a single bare literal.
+
+    The producer of a signal enum does not declare it in one place — it emits it
+    from a dozen `printf`s.  A regex over the printf's QUOTING is not a role
+    key: the first edition matched `printf 'x\\n'` and missed `printf "x\\n"`,
+    `echo x` and `printf '%s\\n' x`, all of which this repo uses elsewhere.
+
+    The role is: writes to stdout (so anything redirected with `>&2` is a
+    diagnostic, not a signal) and its argument list reduces to EXACTLY ONE
+    member token (format specifiers `%s`, escapes `\\n` and flags `-n` all fail
+    MEMBER_RE and drop out; a multi-word diagnostic yields many and is skipped).
+    A value routed through a variable yields none and stays invisible — the one
+    limit, documented in RFC 0016 section 2.7.
+    """
+    members: set[str] = set()
+    hits = 0
+    # Join backslash-continuations so a redirect on the next physical line is
+    # still seen as part of its own statement.
+    joined = re.sub(r"\\\n\s*", " ", region)
+    for raw in joined.split("\n"):
+        for stmt in STMT_SPLIT_RE.split(raw):
+            match = EMITTER_RE.search(stmt)
+            if not match:
+                continue
+            if ">&2" in stmt or ">>" in stmt or re.search(r"(?<![0-9<>])>\s*\S", stmt):
+                continue
+            good, _bad = tokenize(stmt[match.end():])
+            if len(set(good)) == 1:
+                hits += 1
+                members.update(good)
+    return sorted(members), f"{hits} single-literal stdout emission(s)"
+
+
+def case_region_end(lines: list[str], start: int, suffix: str, where: str) -> int:
+    """Index of the line where the `case` opened at `start` returns to depth 0.
+
+    The region is derived from the SHELL, not from a hand-placed close marker.
+    Two one-liner `case … esac` sites shipped with no close at all, so their
+    region was a single line and an appended arm was invisible; and reformatting
+    such a one-liner onto four lines emptied the region and reddened CI. Both
+    are the same defect: the author, not the parser, was deciding where the
+    `case` ended.
+    """
+    depth = 0
+    saw_case = False
+    for i in range(start, len(lines)):
+        for match in CASE_SCAN_RE.finditer(strip_comments(lines[i], suffix)):
+            if match.group("case"):
+                depth += 1
+                saw_case = True
+            elif match.group("esac"):
+                depth -= 1
+        if saw_case and depth <= 0:
+            return i
+    raise ContractError(
+        f"{where}: !case-arm found no complete `case … esac` at or below the marker "
+        "(unbalanced, or the marker does not sit on a case statement)"
+    )
 
 
 def harvest_case_arms(region: str) -> tuple[list[str], str]:
@@ -635,31 +817,42 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
         [(i, "open", MARKER_RE.match(lines[i]).group("body")) for i, _b in opens]
         + [(i, "close", n) for i, n in closes]
     )
+    pairing_errors: list[str] = []
     for idx, kind, payload in events:
         if kind == "open":
             try:
                 nm = parse_body(payload, f"{rel}:{idx + 1}")[0]
-            except ContractError:
-                raise
+            except ContractError as exc:
+                pairing_errors.append(str(exc))
+                continue
             pending[nm] = idx
         else:
             opener = pending.pop(payload, None)
             if opener is None:
-                raise ContractError(
+                pairing_errors.append(
                     f"{rel}:{idx + 1}: `/CONTRACT: {payload}` closes a region that was never opened"
                 )
+                continue
             close_for[opener] = idx
 
     sites: list[Site] = []
+    errors: list[str] = list(pairing_errors)
+    covered: set[int] = set(marker_idx)
     for idx, body in opens:
-        where = f"{rel}:{idx + 1}"
+      where = f"{rel}:{idx + 1}"
+      try:
         name, anchor, pattern, mode, minus, plus = parse_body(body, where)
 
         if anchor is None:
-            # Skip any stacked marker lines: two contracts may share one
-            # declaration line (SKILL.md's constants block declares several).
+            # Skip stacked marker lines (two contracts may share one
+            # declaration) AND ordinary comment-only lines.  Documenting a
+            # contract at its declaration is the single most likely follow-up
+            # edit a marker convention invites; the first edition made that edit
+            # empty the region and red CI.
             start = idx + 1
-            while start in marker_idx:
+            while start < len(lines) and (
+                start in marker_idx or not strip_comments(lines[start], suffix).strip()
+            ):
                 start += 1
         else:
             # The anchor must resolve UNIQUELY.  A first-match scan binds to
@@ -683,9 +876,18 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
         if start >= len(lines):
             raise ContractError(f"{where}: marker has no region (end of file)")
 
-        end = start
-        if idx in close_for:
-            end = close_for[idx] - 1
+        if mode == "case-arm":
+            # Derived from the shell, not from a hand-placed close.
+            if idx in close_for:
+                raise ContractError(
+                    f"{where}: !case-arm derives its own region from `case … esac` depth; "
+                    "remove the redundant /CONTRACT: close so there is one source of truth"
+                )
+            end = case_region_end(lines, start, suffix, where)
+        else:
+            end = start
+            if idx in close_for:
+                end = close_for[idx] - 1
         if end < start:
             raise ContractError(f"{where}: /CONTRACT: {name} closes before its region opens")
 
@@ -696,8 +898,10 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
 
         if mode == "case-arm":
             members, evidence = harvest_case_arms(region)
+        elif mode == "emit-literal":
+            members, evidence = harvest_emitted_literals(region)
         elif pattern is None:
-            members, evidence = pick_span(region, where)
+            members, evidence = pick_span(region, where, suffix)
         else:
             members, evidence = harvest(region, pattern)
 
@@ -731,7 +935,14 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
         else:
             mode_name = "span"
         sites.append(Site(name, rel, start + 1, members, minus, plus, mode_name))
-    return sites
+        covered.update(range(start, end + 1))
+      except ContractError as exc:
+        # Accumulate rather than abort.  Returning on the first error made a
+        # FALSE POSITIVE hide concurrent real drift: the scan stopped before
+        # `report()` ever ran, so the operator saw only the FP, and could fix it
+        # and ship the drift.
+        errors.append(str(exc))
+    return sites, errors, covered
 
 
 def load_json_sites(root: Path, failures: list[str]) -> list[Site]:
@@ -796,6 +1007,78 @@ def walk(root: Path) -> list[tuple[str, str]]:
                 "and a scan that silently misses a tree is the same bug one level up."
             )
     return out
+
+
+def scan_unmarked_twins(
+    files: list[tuple[str, str]],
+    covered: dict[str, set[int]],
+    canonical: dict[str, frozenset],
+    failures: list[str],
+) -> None:
+    """Fail on any UNMARKED line that carries a contract's whole vocabulary.
+
+    This is the answer to the deepest hole the register itself warns about. The
+    `CONTRACTS` registry is hand-maintained, and the path ratchet only proves the
+    marked set never SHRINKS — never that it was ever COMPLETE.  Two live
+    consequences before this check existed: dropping a member from an unmarked
+    fifth copy of the liveness vocabulary passed green, and adding a seventh
+    dispatch backend to both MARKED sites while four unmarked siblings stayed
+    stale also passed green — #360 reproduced verbatim, the very bug this
+    convention exists to prevent, and updating exactly the files that carry
+    markers is precisely what a marker convention trains people to do.
+
+    The check derives each contract's set from its own marked sites, so it adds
+    no second copy of any declaration.  A line that carries every member as a
+    whole token, and is not inside a marked region, is either a copy that should
+    be marked or an intentional restatement that must be allow-listed with a
+    reason.  The allow-list is itself ratcheted: an entry that matches nothing
+    is stale and fails.
+    """
+    allow_hits: dict[tuple[str, str, str], int] = {
+        (contract, rel, needle): 0
+        for contract, entries in TWIN_ALLOWLIST.items()
+        for rel, needle, _why in entries
+    }
+    for contract, members in sorted(canonical.items()):
+        if len(members) < MIN_MEMBERS:
+            continue
+        token_res = [re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(m) + r"(?![A-Za-z0-9_.-])")
+                     for m in sorted(members)]
+        allowed = TWIN_ALLOWLIST.get(contract, ())
+        for rel, text in files:
+            suffix = "." + rel.rsplit(".", 1)[1] if "." in rel.rsplit("/", 1)[-1] else ""
+            if suffix not in COMMENT_LEADERS:
+                continue
+            marked = covered.get(rel, frozenset())
+            try:
+                stripped = strip_comments(text, suffix).split("\n")
+            except ContractError:
+                continue
+            for lineno, line in enumerate(stripped):
+                if lineno in marked:
+                    continue
+                if not all(rx.search(line) for rx in token_res):
+                    continue
+                hit = next(((r, n, w) for r, n, w in allowed if r == rel and n in line), None)
+                if hit is not None:
+                    allow_hits[(contract, hit[0], hit[1])] += 1
+                    continue
+                failures.append(
+                    f"contract {contract!r}: UNMARKED copy at {rel}:{lineno + 1} carries the whole "
+                    f"vocabulary {sorted(members)} but no marker compares it. "
+                    "Mark it, or add it to TWIN_ALLOWLIST with a reason. "
+                    "A registry that only proves the marked set never shrinks cannot prove it was "
+                    "ever complete — this is how #360 shipped."
+                )
+    for (contract, rel, needle), n in sorted(allow_hits.items()):
+        if n == 0:
+            failures.append(
+                f"contract {contract!r}: stale TWIN_ALLOWLIST entry {rel} / {needle!r} matches "
+                "no line carrying the whole vocabulary. Either the exempted line moved or was "
+                "reworded (update the needle), or the vocabulary GREW and this restatement was "
+                "not updated with it (update the prose). An allow-listed restatement is exempt "
+                "from being a marked declaration, not from being current."
+            )
 
 
 def report(sites: list[Site], failures: list[str], dump: bool) -> None:
@@ -943,19 +1226,19 @@ SELFTEST_CASES = [
     (
         "!case-arm sees a NEW arm that a one-line region cannot",
         ".sh",
-        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) : ;;\n  c) : ;;\n  *) return 1 ;;\nesac\n# /CONTRACT: t\n',
+        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) : ;;\n  c) : ;;\n  *) return 1 ;;\nesac\n',
         {"a", "b", "c"},
     ),
     (
         "!case-arm tokenises a QUOTED arm",
         ".sh",
-        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) : ;;\n  "c-d") : ;;\nesac\n# /CONTRACT: t\n',
+        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) : ;;\n  "c-d") : ;;\nesac\n',
         {"a", "b", "c-d"},
     ),
     (
         "!case-arm ignores a NESTED case's arms (depth, not indentation)",
         ".sh",
-        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b)\n    case "$f" in\n      nested1|nested2) : ;;\n    esac\n    ;;\n  c) : ;;\nesac\n# /CONTRACT: t\n',
+        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b)\n    case "$f" in\n      nested1|nested2) : ;;\n    esac\n    ;;\n  c) : ;;\nesac\n',
         {"a", "b", "c"},
     ),
     (
@@ -969,6 +1252,58 @@ SELFTEST_CASES = [
         ".sh",
         '# CONTRACT: t\nX="${row#*x}"; ENUM=\'a|b|c\'\n',
         {"a", "b", "c"},
+    ),
+    (
+        "!case-arm derives its own region from case/esac depth (one-liner)",
+        ".sh",
+        '# CONTRACT: t !case-arm\ncase "$e" in a|b) ;; c) ;; esac\n',
+        {"a", "b", "c"},
+    ),
+    (
+        "!case-arm auto-extends when the same one-liner is REFORMATTED",
+        ".sh",
+        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) ;;\n  c) ;;\nesac\n',
+        {"a", "b", "c"},
+    ),
+    (
+        "!emit-literal is quoting- and format-agnostic",
+        ".sh",
+        "# CONTRACT: t !emit-literal\n"
+        "printf 'aa\\n'\n"
+        'printf "bb\\n"\n'
+        "printf '%s\\n' cc\n"
+        "echo dd\n"
+        "echo -n ee\n"
+        "# /CONTRACT: t\n",
+        {"aa", "bb", "cc", "dd", "ee"},
+    ),
+    (
+        "!emit-literal skips stderr diagnostics and multi-word payloads",
+        ".sh",
+        "# CONTRACT: t !emit-literal\n"
+        "printf 'aa\\n'\n"
+        "printf 'some long diagnostic %s about things\\n' \"$x\" >&2\n"
+        "printf 'bb\\n'; return 0\n"
+        "# /CONTRACT: t\n",
+        {"aa", "bb"},
+    ),
+    (
+        "harvest keys on ROLE, not layout: same-line and tuple elif both count",
+        ".py",
+        '# CONTRACT: t /(?:in [\\[{(]([^\\]})\\n]*)[\\]})]|==\\s*[\'"]([^\'"\\n]*)[\'"])\\s*:\\s*print\\(\\s*[\'"]live[\'"]/\n'
+        'if x == "idle":\n    print("blocked", end="")\n'
+        'elif x in {"busy", "running"}:\n    print("live", end="")\n'
+        'elif x == "paused": print("live", end="")\n'
+        'elif x in ("suspended",):\n    print("live", end="")\n'
+        "# /CONTRACT: t\n",
+        {"busy", "running", "paused", "suspended"},
+    ),
+    (
+        "markdown: a prose cell cannot outbid the value cell (bare words are rejects)",
+        ".md",
+        "<!-- CONTRACT: t -->\n"
+        "| `E` | `refused`, `ambiguous`, `push-non-ff` | Phase 3.3 audit-log `data.reason` for `pr_parked` |\n",
+        {"refused", "ambiguous", "push-non-ff"},
     ),
 ]
 
@@ -1000,9 +1335,33 @@ SELFTEST_FAILURES = [
     ),
     (
         ".sh",
-        "commenting out the declaration but keeping the marker fails",
-        "# CONTRACT: t\n# ENUM='a|b|c'\n",
+        "commented-out declaration is never a member source (shell)",
+        "# CONTRACT: t\n# ENUM='a|b|c'\nOTHER='x'\n",
+        "only 1 member",
+    ),
+    (
+        ".js",
+        "commented-out declaration is never a member source (JS BLOCK comment)",
+        "// CONTRACT: t\n/* const E = [\"a\", \"b\", \"c\"]; */\nconst other = 1;\n",
         "ZERO members",
+    ),
+    (
+        ".yml",
+        "a marker in a language with no registered comment syntax is a hard error",
+        "# CONTRACT: t\nenum: a|b|c\n",
+        "no comment syntax registered",
+    ),
+    (
+        ".sh",
+        "!case-arm with a redundant explicit close is an error (one source of truth)",
+        '# CONTRACT: t !case-arm\ncase "$e" in\n  a|b) : ;;\nesac\n# /CONTRACT: t\n',
+        "remove the redundant",
+    ),
+    (
+        ".sh",
+        "!case-arm on a line that is not a case is a hard error",
+        "# CONTRACT: t !case-arm\nENUM='a|b|c'\n",
+        "found no complete `case",
     ),
 ]
 
@@ -1011,9 +1370,11 @@ def selftest() -> int:
     passed = failed = 0
     for label, suffix, text, expected in SELFTEST_CASES:
         try:
-            sites = extract_file("selftest" + suffix, text, suffix)
+            sites, errs, _cov = extract_file("selftest" + suffix, text, suffix)
+            if errs:
+                raise ContractError("; ".join(errs))
             got = sites[0].normalized
-        except ContractError as exc:
+        except (ContractError, IndexError) as exc:
             print(f"  FAIL  selftest: {label} raised {exc}")
             failed += 1
             continue
@@ -1025,17 +1386,19 @@ def selftest() -> int:
             failed += 1
     for suffix, label, text, fragment in SELFTEST_FAILURES:
         try:
-            extract_file("selftest" + suffix, text, suffix)
+            _s, errs, _c = extract_file("selftest" + suffix, text, suffix)
+            got = "; ".join(errs)
         except ContractError as exc:
-            if fragment in str(exc):
-                print(f"  PASS  selftest: {label}")
-                passed += 1
-            else:
-                print(f"  FAIL  selftest: {label} raised the wrong error: {exc}")
-                failed += 1
-            continue
-        print(f"  FAIL  selftest: {label} did NOT raise")
-        failed += 1
+            got = str(exc)
+        if not got:
+            print(f"  FAIL  selftest: {label} did NOT raise")
+            failed += 1
+        elif fragment in got:
+            print(f"  PASS  selftest: {label}")
+            passed += 1
+        else:
+            print(f"  FAIL  selftest: {label} raised the wrong error: {got}")
+            failed += 1
     print(f"contract-markers selftest: {passed} passed, {failed} failed")
     return 1 if failed else 0
 
@@ -1053,16 +1416,31 @@ def main(argv: list[str]) -> int:
     root = Path(args.repo_root) if args.repo_root else Path(__file__).resolve().parent.parent
     failures: list[str] = []
     sites: list[Site] = []
+    covered: dict[str, set[int]] = {}
     try:
-        for rel, text in walk(root):
-            sites.extend(extract_file(rel, text))
-        sites.extend(load_json_sites(root, failures))
+        files = walk(root)
     except ContractError as exc:
         print(f"  FAIL  {exc}")
         print("contract-markers: 0 passed, 1 failed")
         return 1
+    for rel, text in files:
+        found, errors, cov = extract_file(rel, text)
+        sites.extend(found)
+        failures.extend(errors)
+        covered[rel] = cov
+    sites.extend(load_json_sites(root, failures))
 
     report(sites, failures, args.dump)
+
+    # Derive each contract's canonical set from its own marked sites, then look
+    # for unmarked copies of it. Only contracts whose own sites agree contribute
+    # a canonical set — a drifted contract has no single answer to compare to.
+    canonical: dict[str, frozenset] = {}
+    for site in sites:
+        peers = [s for s in sites if s.contract == site.contract]
+        if len({s.normalized for s in peers}) == 1:
+            canonical[site.contract] = site.normalized
+    scan_unmarked_twins(files, covered, canonical, failures)
 
     for failure in failures:
         print(f"  FAIL  {failure}")

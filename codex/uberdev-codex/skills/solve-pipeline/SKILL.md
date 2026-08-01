@@ -76,6 +76,9 @@ PID/log/result files (background/codex).
 Bound shell-side in `lib/solve-launcher.sh` (the executable SSOT); this table
 is the documentation surface.
 
+<!-- A marker line inside the table would split it; the anchor resolves
+     forward to the one row that declares the backend enum. -->
+<!-- CONTRACT: dispatch-backend @"| `DISPATCH_BACKEND_ENUM` |" -->
 | Name | Value (verbatim) | Where used |
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | see the column-0 binding in `lib/solve-launcher.sh` (verbatim note also quoted under `## Deprecated Flags` in both command files) | Phase A stderr emission on first `--terminal=` / `$SOLVE_TERMINAL` encounter. |

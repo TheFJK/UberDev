@@ -409,6 +409,7 @@ def parse_cli(tokens: list[str]) -> dict[str, Any]:
             # NOT here, so an explicit --backend=workflow died at this gate — which is
             # the very first thing lib/solve-launcher.sh runs, and the exact flag
             # /goal's driver passes, so every /goal cycle failed at dispatch.
+            # CONTRACT: dispatch-backend
             if value not in {"auto", "workflow", "claude-bg", "wezterm", "background", "codex"}: fail("routing_cli_invalid")
             assign("backend", value)
         elif token.startswith("--terminal="):

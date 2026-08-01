@@ -626,7 +626,6 @@ while true; do
         fi
         ;;
     esac
-    # /CONTRACT: trust-signal
   done
 
   # 2c. Barrier-gated merge dispatch (issue #211; barrier semantics #289).

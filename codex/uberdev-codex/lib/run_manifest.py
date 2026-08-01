@@ -2350,6 +2350,7 @@ def _probe_status_snapshot(path: str) -> tuple[str, dict[str, Any] | None]:
     normalized = state.strip().lower()
     if normalized in TERMINAL_EVENTS:
         return "terminal", parsed
+    # CONTRACT: agent-liveness-value
     if normalized in {"running", "busy", "starting", "working", "queued"}:
         return "live", parsed
     return "unknown", parsed

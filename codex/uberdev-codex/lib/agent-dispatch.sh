@@ -693,7 +693,12 @@ if event_name == "agent_started":
     record["timeout_s"] = int(request["timeout_s"])
     if handle: record["backend_handle"] = int(handle) if handle.isdigit() else handle
     if status_path: record["status_path"] = status_path
-# CONTRACT: agent-terminal-event
+# Keyed on the ROLE: every membership or equality test against event_name on
+# this line, so widening the gate with `or event_name == "reaped"` is seen.
+# A plain span would have skipped that singleton as too small to compete.
+# NOTE: \x27 is a Python-regex single quote. A literal one here would close the
+# single-quoted shell string this python block lives in.
+# CONTRACT: agent-terminal-event /event_name (?:in [\[{(]([^\]})\n]*)[\]})]|==\s*["\x27]([^"\x27\n]*)["\x27])/
 if event_name in {"completed", "failed", "timed_out", "cancelled", "abandoned"}:
     record["terminal_status"] = event_name
     if event_name == "failed": record["error_class"] = error_class or "provider_launch_failed"
@@ -716,7 +721,6 @@ _uberdev_agent_status_terminal_event() {
     completed|failed|timed_out|cancelled) printf '%s' "$event" ;;
     *) return 1 ;;
   esac
-  # /CONTRACT: run-terminal-status
 }
 
 _uberdev_agent_publish_status_record() {
@@ -1039,7 +1043,14 @@ reason = " ".join(str(matched[0].get(key) or "") for key in ("blockedReason", "r
 if state == "blocked":
     print("blocked:permission" if "permission" in reason else "blocked:provider", end="")
     raise SystemExit(0)
-# CONTRACT: agent-liveness-value /(?:in \{([^}\n]*)\}|== "([^"\n]*)"):\n[ \t]*print\("live"/
+# Keyed on the ROLE of the arm — what it prints — not on its layout. The
+# first edition required a newline after the `:` and a set literal, so a
+# one-line `elif lifecycle == "paused": print("live")` (or a tuple) was
+# invisible, which is #370 rank 7 reproduced: live at the classifier and
+# not-live at all three goal-state probes.
+# NOTE: \x27 is a Python-regex single quote; a literal one would close the
+# single-quoted shell string this python block lives in.
+# CONTRACT: agent-liveness-value /(?:in [\[{(]([^\]})\n]*)[\]})]|==\s*["\x27]([^"\x27\n]*)["\x27])\s*:\s*print\(\s*["\x27]live["\x27]/
 lifecycle = state or status
 if lifecycle == "idle":
     print("blocked:permission", end="")
@@ -1365,11 +1376,13 @@ _uberdev_agent_start_watcher() {
       [ -z "$terminal_event" ] || break
       if [ "$backend" = claude-bg ]; then
         probe="$(_uberdev_agent_claude_probe "$handle" 2>/dev/null || true)"
-        # Role-keyed: the arms of this case are TWO vocabularies (the probe's
-        # own live/blocked words and the terminal-status set), so !case-arm
-        # would harvest both. Match only the arm that adopts $probe AS the
-        # terminal event.
-        # CONTRACT: run-terminal-status /^[ \t]*([A-Za-z0-9][A-Za-z0-9_.|-]*)\)[ \t]*terminal_event="\$probe"/
+        # The arms of this case are TWO vocabularies: the probe's own
+        # live/blocked words and the terminal-status set. Rather than key on
+        # the arm BODY (which a `terminal_event=paused` literal defeats),
+        # harvest every arm and declare the probe's own `live` as an explicit
+        # +delta. `blocked:permission|blocked:provider` carries a colon, so it
+        # is outside the arm grammar and contributes nothing.
+        # CONTRACT: run-terminal-status +live +absent !case-arm
         case "$probe" in
           live) absent_count=0; indeterminate_count=0 ;;
           completed|failed|timed_out|cancelled) terminal_event="$probe"; break ;;
@@ -1432,7 +1445,6 @@ _uberdev_agent_start_watcher() {
             fi
             ;;
         esac
-        # /CONTRACT: run-terminal-status
       else
         case "$handle" in
           ''|*[!0-9]*) ;;
@@ -1811,7 +1823,6 @@ uberdev_agent_dispatch() {
         lease_acquire_invalid_input|lease_acquire_runtime_state_failed|lease_acquire_mutex_failed|lease_acquire_reconcile_failed|lease_acquire_count_failed|lease_acquire_duplicate_check_failed|lease_acquire_allocate_failed|lease_acquire_owner_failed|lease_acquire_publish_failed|lease_acquire_identity_failed|lease_acquire_rollback_failed|lease_acquire_mutex_release_failed) ;;
         *) lease_failure_reason=lease_acquire_identity_failed ;;
       esac
-      # /CONTRACT: semaphore-lease-acquire-reason
       case "$lease_record" in
         *$'\t'*)
           lease="${lease_record%%$'\t'*}"

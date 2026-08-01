@@ -15,10 +15,17 @@
 #        it in-process on a throwaway copy of the tree, so the anti-vacuity
 #        property is asserted on every CI run rather than only in the PR that
 #        introduced it.
-#   C4 — a NEW `case`/`elif` arm must red. Regions default to ONE line, which
-#        makes "add an arm" — the most likely real edit to a switch — invisible
-#        unless the region is closed with `# /CONTRACT:` at its `esac`. C4 keeps
-#        that wiring honest on every run.
+#   C4 — a new `elif` arm written on ONE line must red. The first edition of
+#        this test asserted the general claim "a NEW case/elif arm must red" and
+#        proved only one spelling of it: its harvest regex required a literal
+#        newline after the `:`, so `elif lifecycle == "paused": print("live")`
+#        sailed through while C4 reported green. That is #370 rank 7 live —
+#        `paused` live at the classifier, not-live at all three probes. C4 now
+#        fires the spelling that defeated it.
+#   C5 — a new `case` arm appended to a ONE-LINER `case … esac` must red. This
+#        is the `!case-arm` mode, which C4 never exercised (C4's site is harvest
+#        mode). Two such one-liners shipped with no region close at all, so
+#        their region was a single line and an appended arm was invisible.
 #
 # Repo convention: `set -u` + `set -o pipefail` + manual PASS/FAIL counters
 # (NOT `set -e`; see tests/install.test.sh header for the rationale).
@@ -116,47 +123,78 @@ else
   fi
 fi
 
-echo "== C4: a NEW case arm must red — the edit a one-line region cannot see =="
-# The highest-value regression this guard has. `case`/`elif` regions default to
-# ONE line, which makes "add an arm" invisible; every such region is closed with
-# `# /CONTRACT:` at its `esac`. C4 keeps that wiring honest: adding a `paused`
-# lifecycle arm to the classifier reproduces #370 rank 7 exactly (live at the
-# classifier, not-live at all three goal-state probes), so it must never be green.
-MUT4="$TMP/mutant4"
-mkdir -p "$MUT4/plugins" "$MUT4/codex" "$MUT4/tests"
-cp -R "$REPO_ROOT/plugins/uberdev" "$MUT4/plugins/uberdev"
-cp -R "$REPO_ROOT/codex/uberdev-codex" "$MUT4/codex/uberdev-codex"
-cp "$GUARD" "$MUT4/tests/contract_markers.py"
-
-"$PY" -I -B - "$MUT4/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import sys, pathlib
+# assert_mutation_reds LABEL FILE PY_OLD PY_NEW GREP_A GREP_B
+# Copies both trees, applies one literal substitution, and requires the scan to
+# red AND to name both grep terms. Each case gets its own copy so one mutation
+# cannot mask another.
+assert_mutation_reds() {
+  local label="$1" target="$2" old="$3" new="$4" needle_a="$5" needle_b="$6"
+  local mut="$TMP/mutant-$label"
+  mkdir -p "$mut/plugins" "$mut/codex" "$mut/tests"
+  cp -R "$REPO_ROOT/plugins/uberdev" "$mut/plugins/uberdev"
+  cp -R "$REPO_ROOT/codex/uberdev-codex" "$mut/codex/uberdev-codex"
+  cp "$GUARD" "$mut/tests/contract_markers.py"
+  if ! OLD="$old" NEW="$new" "$PY" -I -B - "$mut/plugins/uberdev/$target" <<'PY'
+import os, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 t = p.read_text(encoding="utf-8")
-old = 'elif lifecycle in {"failed", "error"}:'
-new = 'elif lifecycle == "paused":\n    print("live", end="")\nelif lifecycle in {"failed", "error"}:'
+old, new = os.environ["OLD"], os.environ["NEW"]
 if old not in t:
-    raise SystemExit("C4 mutation anchor not found in lib/agent-dispatch.sh")
+    raise SystemExit("mutation anchor not found: " + old[:60])
 p.write_text(t.replace(old, new, 1), encoding="utf-8")
 PY
-MUT4_SEED_RC=$?
-
-if [ "$MUT4_SEED_RC" -ne 0 ]; then
-  echo "  FAIL  C4 could not seed the mutation (anchor moved — update this test)"
-  FAIL=$((FAIL + 1))
-elif "$PY" -I -B "$MUT4/tests/contract_markers.py" "$MUT4" > "$TMP/mutant4.out" 2>&1; then
-  echo "  FAIL  C4 a new case/elif arm is INVISIBLE — a region lost its /CONTRACT: close"
-  cat "$TMP/mutant4.out"
-  FAIL=$((FAIL + 1))
-else
-  if grep -q "agent-liveness-value" "$TMP/mutant4.out" && grep -q "paused" "$TMP/mutant4.out"; then
-    echo "  PASS  C4 a new arm reds and names the contract + the new member"
+  then
+    echo "  FAIL  $label could not seed the mutation (anchor moved — update this test)"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if "$PY" -I -B "$mut/tests/contract_markers.py" "$mut" > "$TMP/$label.out" 2>&1; then
+    echo "  FAIL  $label mutated tree still reports GREEN"
+    cat "$TMP/$label.out"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if grep -q "$needle_a" "$TMP/$label.out" && grep -q "$needle_b" "$TMP/$label.out"; then
+    echo "  PASS  $label reds and names the contract + the moved member"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  C4 reds but the message does not name the contract and the new member"
-    cat "$TMP/mutant4.out"
+    echo "  FAIL  $label reds but the message does not name $needle_a / $needle_b"
+    cat "$TMP/$label.out"
     FAIL=$((FAIL + 1))
   fi
-fi
+}
+
+echo "== C4: a new elif arm written on ONE line must red =="
+# The first edition asserted the general claim "a NEW case/elif arm must red"
+# and proved only one spelling: its harvest regex demanded a literal newline
+# after the `:`, so the one-line form below sailed through while C4 said green.
+# `paused` then means live at the classifier and not-live at all three
+# goal-state probes — #370 rank 7, live. C4 now fires that exact spelling.
+assert_mutation_reds C4 lib/agent-dispatch.sh \
+  'elif lifecycle in {"failed", "error"}:' \
+  'elif lifecycle == "paused": print("live", end="")
+elif lifecycle in {"failed", "error"}:' \
+  agent-liveness-value paused
+
+echo "== C5: a new arm on a ONE-LINER case must red (!case-arm mode) =="
+# C4 exercises harvest mode only. `!case-arm` derives its region from case/esac
+# depth precisely so a one-liner `case … esac` — which has nowhere to hang a
+# closing marker — still sees an appended arm. Two such sites shipped blind.
+assert_mutation_reds C5 lib/goal-state.sh \
+  'case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  'case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; podman) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  dispatch-backend podman
+
+echo "== C6: an UNMARKED copy of a whole vocabulary must red =="
+# The registry is hand-maintained: the path ratchet proves the marked set never
+# SHRINKS, never that it was ever COMPLETE. Adding a seventh dispatch backend to
+# both marked sites while the launcher's copies stayed stale is #360 verbatim,
+# and it passed green until the twin scan landed.
+assert_mutation_reds C6 lib/status.sh \
+  '_UBERDEV_STATUS_MAX_ROWS=25' \
+  "_UBERDEV_STATUS_SHADOW='completed failed timed_out cancelled abandoned'
+_UBERDEV_STATUS_MAX_ROWS=25" \
+  'UNMARKED copy' agent-terminal-event
 
 echo
 echo "contract-markers: $PASS passed, $FAIL failed"

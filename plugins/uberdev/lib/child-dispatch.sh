@@ -1015,7 +1015,10 @@ edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
  allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
- # CONTRACT: run-terminal-status
+ # Keyed on the assignment target: the sibling `states=` set on the same
+ # line is a different vocabulary, and a whole-line span region would make
+ # the site ambiguous the moment that sibling grew a second member.
+ # CONTRACT: run-terminal-status /terminal_states=\{([^}]*)\}/
  terminal_states={'completed','failed','timed_out','cancelled'}; states=terminal_states|{'running'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
@@ -1723,7 +1726,6 @@ PY
           return 1
           ;;
       esac
-      # /CONTRACT: run-terminal-status
     fi
     now="$(date +%s)"
     if [ $((now - start)) -ge "$timeout" ]; then

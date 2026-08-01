@@ -603,6 +603,9 @@ PY
 _uberdev_dispatch_cleanup_codex_worktree_locked() {
   local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6"
   local start_head target branch_exists=0 show_ref_rc branch_head local_status target_head native_target rc
+  # `setup_failed` is this cleanup path's own extra arm, not a manifest
+  # terminal status, so it is declared rather than smuggled in.
+  # CONTRACT: run-terminal-status +setup_failed !case-arm
   case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 3 ;; esac
   start_head="${token##*:}"
   _uberdev_dispatch_inspect_codex_worktree_receipt \
@@ -1377,6 +1380,10 @@ print(matches[0],end="")
       probe_rc=$?
     fi
     if [ "$probe_rc" -eq 0 ]; then
+      # `absent` is the CANCEL PROBE's own word, declared as a +delta. The
+      # `live|blocked:permission|blocked:provider` arm carries a colon, so the
+      # whole alternation is outside the arm grammar and contributes nothing.
+      # CONTRACT: run-terminal-status +absent !case-arm
       case "$probe" in
         completed|failed|timed_out|cancelled) return 0 ;;
         absent)

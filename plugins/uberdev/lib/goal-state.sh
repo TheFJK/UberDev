@@ -711,7 +711,6 @@ uberdev_goal_audit() {
     goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
   esac
-  # /CONTRACT: goal-audit-event
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   # #156 — validate the env-derived goal_id before pathing the jsonl. A forged
   # UBERDEV_GOAL_ID degrades to the safe `unknown` sink (with a breadcrumb)
@@ -831,7 +830,11 @@ uberdev_goal_issue_state_transition() {
 # also skipped when the verdict has no `.sha` (legacy/pre-anchor JSON) or no
 # `.pr`, preserving backward compatibility (and the audit-path-only test
 # fixtures that never set a PR).
-# CONTRACT: trust-signal /(?:printf|echo)[ \t]+(?:'([a-z][a-z_]*)(?:\\n)?'|"([a-z][a-z_]*)(?:\\n)?"|([a-z][a-z_]*))[ \t]*(?:;|$)/
+# The producer emits its signal from fifteen separate statements, in more
+# than one quoting style. !emit-literal keys on the ROLE (an unredirected
+# single-literal write to stdout), so `printf "x\\n"`, `printf '%s\\n' x`
+# and `echo x` are all seen; a regex over the quoting was not a role key.
+# CONTRACT: trust-signal !emit-literal
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   # Canonical locator output is closed controller state, not a pathname. Its
@@ -1964,7 +1967,6 @@ uberdev_goal_agent_stuck_on_dialog() {
     busy|running|starting|working) : ;;
     *) return 1 ;;
   esac
-  # /CONTRACT: agent-liveness-value
   tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   goal_id="${UBERDEV_GOAL_ID:-}"
   _uberdev_goal_validate_id "$goal_id" || return 1
@@ -2177,7 +2179,6 @@ uberdev_goal_read_merge_result() {
         test-fail-exhausted)           printf 'hook_failed\n' ;;
         *)                             printf 'missing\n' ;;
       esac ;;
-      # /CONTRACT: park-reason
     *)
       printf 'missing\n' ;;
   esac
@@ -3580,7 +3581,6 @@ uberdev_goal_read_run_state() {
           max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
             CIRCUIT_BREAKER_HALT="$v" ;;
         esac ;;
-        # /CONTRACT: goal-circuit-breaker-reason
       PRIOR_LAST_ACTIVITY_*|FIRST_DIALOG_TS_*)
         # R3 SSOT (issue #220 simplify pass): collapsed two near-identical
         # case arms into one — both keys are PID-suffixed int values with
