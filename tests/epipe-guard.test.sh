@@ -20,9 +20,18 @@
 # payload.
 #
 # Reproduced deterministically with `trap "" PIPE` + pipefail + a 200 KB payload
-# whose match is in the first chunk: 40/40 false FAILs for the piped form, 0/40
-# for `grep -q PATTERN <<<"$VAR"`. The herestring feeds the reader from a temp
-# file — there is no writer process, so there is no rc for pipefail to poison.
+# whose match is in the first chunk. EVERY reader in the set below was measured,
+# not assumed — 20 iterations each, piped form vs herestring form:
+#
+#     printf | grep -q    20/20 false-nonzero      grep -q  <<<   0/20
+#     printf | grep -m1   20/20 false-nonzero      grep -m1 <<<   0/20
+#     printf | head -1    20/20 false-nonzero      head -1  <<<   0/20
+#     printf | read       20/20 false-nonzero      read     <<<   0/20
+#
+# `head`, `read` and `grep -m` poison the rc exactly as reliably as `grep -q`,
+# which is why a detector that knew only `grep -q` was not a detector for this
+# class. The herestring feeds the reader from a temp file — there is no writer
+# process, so there is no rc for pipefail to poison.
 #
 # INVERTED POLARITY is the worse half: written as `<writer> | grep -q BAD && fail`,
 # an EPIPE after a MATCH makes the pipeline rc non-zero, the `&&` short-circuits,
