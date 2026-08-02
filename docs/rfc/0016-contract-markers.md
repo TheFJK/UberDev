@@ -302,8 +302,14 @@ Stated because an unstated limit reads as a guarantee:
   declarations — the exact shape this file exists to eliminate. The mitigation is
   that the decoy is itself compared from then on, so the *next* edit to either
   copy reds. This is a sabotage shape, not a drift shape.
-- **A computed emission is not statically extractable.** At the trust-signal
-  producer, `printf '%s\n' "$override"` emits a value no literal harvest can see.
+- **A computed emission is not statically extractable.** A signal emitted from a
+  variable rather than a literal — `printf '%s\n' "$some_var"` — is invisible to
+  any static read. No such emission exists at the trust-signal producer today:
+  every emission in `uberdev_goal_read_trust_signal` is a bare literal and all
+  of them are covered. This is the shape the mode cannot follow, not a site that
+  is currently unguarded. (An earlier edition cited a concrete
+  `"$override"` at that producer; no such code exists in either tree, and a
+  fabricated citation reads as licence to add one.)
 
   > The first edition claimed the complement of this and was wrong: *"the site
   > catches every literal emission in any quoting style."* It caught exactly one
@@ -347,16 +353,16 @@ Stated because an unstated limit reads as a guarantee:
 
 ## 3. What is registered today
 
-**How to read the site count.** 112 "sites" is 56 declarations in
-`plugins/uberdev/` (55 markers plus one registry-declared JSON key) and the same
-56 in the Codex mirror. Half of the headline is therefore the mirror — and of the
+**How to read the site count.** 110 "sites" is 55 declarations in
+`plugins/uberdev/` (54 markers plus one registry-declared JSON key) and the same
+55 in the Codex mirror. Half of the headline is therefore the mirror — and of the
 15 marked files per tree, **8 were already `cmp`-locked to their Codex twin
 before this convention existed** (`lib/agent-dispatch.sh`, `lib/dispatch.sh`,
 `lib/goal-state.sh`, `lib/live-semaphore.sh`, `lib/run_manifest.py`,
 `lib/solve-launcher.sh`, `lib/solve_triage.py`, `lib/status.sh`, plus
 `policy/model-routing-v1.json`; the locks live in `tests/dispatch-codex.test.sh`,
 `tests/child-dispatch.test.sh`, `tests/solve-routing.test.sh`,
-`tests/solve-run-tree.test.sh` and `tests/status.test.sh`). **35 of the 56
+`tests/solve-run-tree.test.sh` and `tests/status.test.sh`). **34 of the 55
 Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 
 > An earlier edition of this section said "13 Codex-side markers in 4
@@ -366,12 +372,20 @@ Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 
 | Contract | #370 rank | Members | Declarations per tree | Notes |
 |---|---|---|---|---|
-| `dispatch-backend` | 6 | 6 | 8 | run-state allowlist carries `-auto`; the supervision subset carries `-auto -workflow`; three launcher copies + the triage gate were the sites #360 shipped stale |
+| `dispatch-backend` | 6 | 6 | 8 | run-state allowlist carries `-auto`; the supervision subset carries `-auto -workflow`; `solve_triage.py`'s `parse_cli` gate is the copy #360 shipped stale |
 | `agent-liveness-value` | 7 | 5 | 5 | three `goal-state.sh` probes carry `-queued` (declared divergence) |
-| `run-terminal-status` | 8 | 4 | 16 | `+running`, `+absent`, `+live`, `+setup_failed`, `-completed` deltas where a site is a superset or subset |
+| `run-terminal-status` | 8 | 4 | 15 | `+running`, `+absent`, `+live`, `+setup_failed`, `-completed` deltas where a site is a superset or subset |
 | `goal-audit-event` | 9 | 13 | 2 | SKILL.md constants block via `@anchor` |
 | `park-reason` | 10 | 4 | 3 | Markdown table via `@anchor`; the failure-mode table via a `data.reason` role key; goal-state side via `!case-arm` |
 | `agent-terminal-event` | 11 | 5 | 8 | the writer gate is role-keyed so an `or … == "x"` widening is seen |
+
+> **On #360 specifically.** The stale copy that shipped it was
+> `solve_triage.py`'s `parse_cli` whitelist; `473b953` touches that file and no
+> other source file, and `473b953^:lib/solve-launcher.sh` already carried
+> `workflow` at all three of its copies. The launcher copies are marked here
+> because they were *uncompared*, not because they were wrong — which is the
+> distinction this whole convention exists to make, so getting it backwards in
+> the RFC's own summary table was worth correcting.
 | `semaphore-lease-acquire-reason` | 12 | 12 | 4 | producer keyed on its assignment target; two validators are declared supersets |
 | `trust-signal` | 13 | 5 | 4 | producer uses `!emit-literal` |
 | `risk-signal` | 4 | 11 | 4 | includes the JSON-declared policy site |

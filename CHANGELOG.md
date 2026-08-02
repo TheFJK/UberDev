@@ -20,15 +20,16 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   comparing them*. Until now the only signal that two literals were coupled was a prose comment,
   and a comment is not a producer. Source changes are comment-only — no runtime behaviour changes.
 
-### Fixed
+  **110 sites — 55 declarations per tree, mirrored.** Among them: `run_manifest.py`'s liveness set,
+  `solve-launcher.sh`'s three backend copies, `solve_triage.py`'s `parse_cli` whitelist (the copy
+  #360 shipped stale), `dispatch.sh`'s supervision-capable subset, `child-dispatch.sh`'s
+  status-file validator and merge-pipeline's failure-mode table — all now compared rather than
+  merely adjacent.
 
-- `run_manifest.py`'s liveness set, `solve-launcher.sh`'s three backend copies, `solve_triage.py`'s
-  `parse_cli` whitelist and six further declarations are now compared rather than merely adjacent.
-  The unmarked-copy scan surfaced eleven real copies during development; nine are now marked.
-- Corrected eight claims in RFC 0016 and the test suite that adversarial verification proved false,
-  including a withdrawn assertion that the copy scan could *prove* the marked set complete. It
-  cannot: its predicate selects copies that still agree, while drift is by definition disagreement.
-  The scan now matches at `N−1` members and its residual blind spots are documented as limits.
+  A companion scan reports unmarked lines carrying `N−1` of a contract's `N` members. It is a
+  **discovery aid, not a proof**: its predicate cannot establish completeness, and RFC 0016 §2.6
+  and §2.7 say so and list its blind spots. Registry completeness stays human-curated, ratcheted
+  by path multiset in the same spirit as this repo's version-locks.
 
 ## [0.42.8] — 2026-07-31
 
