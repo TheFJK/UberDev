@@ -231,6 +231,7 @@ import errno,hashlib,json,os,posixpath,re,stat,sys
 carrier_raw,edge,instance,inputs_raw,risks_raw,plugin_root,manifest_path=sys.argv[1:]
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
+# CONTRACT: risk-signal
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 HAS_EUID=callable(getattr(os,'geteuid',None))
 uid=os.geteuid() if HAS_EUID else None
@@ -520,6 +521,7 @@ _uberdev_child_prepare() {
 import hashlib,html,json,os,posixpath,re,secrets,stat,sys
 edge,handoff_arg,expected_sha256,result_arg,status_arg,plugin_root,manifest_path,mode=sys.argv[1:]
 FORBIDDEN={'command','commands','shell','model','route','effort','reasoning_effort','service','service_tier','sandbox','environment','env'}
+# CONTRACT: risk-signal
 RISKS={'authentication','authorization','concurrency','cryptography','data-loss','destructive-operations','force-push','public-api-compatibility','release-infrastructure','schema-migration','security'}
 IDENT=re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 EDGE=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}')
@@ -1013,6 +1015,10 @@ edge,request_raw,result,status,provider_handle=sys.argv[1:]
 try:
  s=json.load(open(status)); r=json.loads(request_raw)
  allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
+ # Keyed on the assignment target: the sibling `states=` set on the same
+ # line is a different vocabulary, and a whole-line span region would make
+ # the site ambiguous the moment that sibling grew a second member.
+ # CONTRACT: run-terminal-status /terminal_states\s*=\s*\{([^}]*)\}/
  terminal_states={'completed','failed','timed_out','cancelled'}; states=terminal_states|{'running'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
@@ -1104,6 +1110,7 @@ def watcher_message(path):
  if error not in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts'); reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
+ # CONTRACT: semaphore-lease-acquire-reason +lease_handle_rollback_failed
  lease_reasons={'lease_acquire_invalid_input','lease_acquire_runtime_state_failed','lease_acquire_mutex_failed','lease_acquire_reconcile_failed','lease_acquire_count_failed','lease_acquire_duplicate_check_failed','lease_acquire_allocate_failed','lease_acquire_owner_failed','lease_acquire_publish_failed','lease_acquire_identity_failed','lease_acquire_rollback_failed','lease_acquire_mutex_release_failed','lease_handle_rollback_failed'}
  timeout_reasons={'timeout_intent_invalid','timeout_intent_identity_unavailable','timeout_intent_cleanup_failed','timeout_partial_result_cleanup_failed'}
  owner_capture_reasons={'owner_process_identity_unavailable'}
@@ -1126,6 +1133,7 @@ def watcher_message(path):
   if terminal=='launch:owner_process_identity':
    if attempts!=1 or reason!='owner_process_identity_unavailable': raise ValueError()
   elif attempts!=3 or (reason and reason not in lease_reasons|{'supervisory_failure'}): raise ValueError()
+ # CONTRACT: agent-terminal-event
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}: raise ValueError()
  retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'} or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
  if backend=='claude-bg' and retained: action='resolve the retained Claude session or retry with Codex'
@@ -1147,6 +1155,8 @@ try:
  with open(status,'rb') as stream: raw=stream.read(65537)
  if len(raw)>65536: raise ValueError()
  value=json.loads(raw); allowed={'issue','tier','backend','state','exit_code','provider_exit_code','pid','log','result','worktree','branch','workspace_mode','process_identity','lease_generation'}
+ # Status-file states = the terminal set PLUS the in-flight `running`, hence +running.
+ # CONTRACT: run-terminal-status +running
  if not isinstance(value,dict) or set(value)-allowed or value.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  backend=value.get('backend')
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
@@ -1166,9 +1176,11 @@ try:
   else: raise ValueError()
  state=value['state']; code=value.get('exit_code'); handle=value.get('pid')
  if handle is not None and (not isinstance(handle,(str,int)) or isinstance(handle,bool) or any(ord(char)<32 or ord(char)==127 for char in str(handle))): raise ValueError()
+ # CONTRACT: run-terminal-status +running /state[ ]*(?:==|in)[ ]*(?:['\"]([a-z_]+)['\"]|\{([^}]*)\})/
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
  if state in {'failed','timed_out','cancelled'} and (type(code) is not int or code==0): raise ValueError()
+ # /CONTRACT: run-terminal-status
  emit('status',state,backend,str(handle) if handle is not None else '',process_identity or '',lease_generation or '',hashlib.sha256(raw).hexdigest())
 except Exception: raise SystemExit(2)
 PY
@@ -1497,6 +1509,7 @@ manifest,run_id=sys.argv[1:]
 try: rows=[json.loads(x) for x in pathlib.Path(manifest).read_text().splitlines() if x]
 except Exception: raise SystemExit(2)
 events=[r.get('event') for r in rows if r.get('run_id')==run_id]
+# CONTRACT: agent-terminal-event
 term=[x for x in events if x in {'completed','failed','timed_out','cancelled','abandoned'}]
 if len(term)!=1: raise SystemExit(1)
 print(term[0],end='')
@@ -1514,8 +1527,10 @@ import json,sys
 status,manifest,instance=sys.argv[1:]
 try:
  value=json.load(open(status)); terminal=value['state']
+ # CONTRACT: run-terminal-status
  if terminal not in {'completed','failed','timed_out','cancelled'}: raise ValueError()
  rows=[json.loads(line) for line in open(manifest) if line.strip()]
+ # CONTRACT: agent-terminal-event
  events=[row.get('event') for row in rows if row.get('run_id')==instance and row.get('event') in {'completed','failed','timed_out','cancelled','abandoned'}]
  if events!=[terminal]: raise ValueError()
 except Exception: raise SystemExit(1)
@@ -1677,6 +1692,7 @@ EOF_PROJECTION
       *) return 2 ;;
     esac
     if [ "$projection_kind" = status ]; then
+      # CONTRACT: run-terminal-status !case-arm
       case "$state" in
         completed|failed|timed_out|cancelled)
           terminal="$(_uberdev_child_manifest_terminal "$manifest" "$instance" 2>/dev/null || true)"

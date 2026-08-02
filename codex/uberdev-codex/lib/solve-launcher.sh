@@ -261,14 +261,20 @@ else
     . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
   fi
   if command -v uberdev_read_enum >/dev/null 2>&1; then
+    # CONTRACT: dispatch-backend
     DISPATCH_BACKEND="$(uberdev_read_enum dispatch_backend UBERDEV_DISPATCH_BACKEND \
       'auto|workflow|claude-bg|wezterm|background|codex' 'auto')"
+    # /CONTRACT: dispatch-backend
   else
     DISPATCH_BACKEND=auto
   fi
 fi
+# CONTRACT: dispatch-backend !case-arm
 case "$DISPATCH_BACKEND" in
   auto|workflow|claude-bg|wezterm|background|codex) ;;
+  # The operator-facing set is a THIRD copy in this file; #360 shipped
+  # because updating only the files that carry markers looks like enough.
+  # CONTRACT: dispatch-backend
   *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,workflow,claude-bg,wezterm,background,codex}" >&2; exit 1 ;;
 esac
 export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"

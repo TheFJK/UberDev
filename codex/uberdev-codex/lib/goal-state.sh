@@ -706,6 +706,7 @@ uberdev_goal_state_init() {
 # discover.sh:39-53).
 uberdev_goal_audit() {
   local event="$1" payload="$2"
+  # CONTRACT: goal-audit-event !case-arm
   case "$event" in
     goal_dispatched|goal_pr_transition|goal_unblock_triggered|goal_cycle_completed|goal_converged|goal_circuit_breaker|goal_merge_deferred|goal_review_pr_deferred|goal_review_grace|goal_reaper_kill|goal_reaper_skipped|goal_issue_closed_without_pr|goal_version_bumped) ;;
     *) printf 'goal-state: unknown event %s\n' "$event" >&2; return 1 ;;
@@ -829,6 +830,11 @@ uberdev_goal_issue_state_transition() {
 # also skipped when the verdict has no `.sha` (legacy/pre-anchor JSON) or no
 # `.pr`, preserving backward compatibility (and the audit-path-only test
 # fixtures that never set a PR).
+# The producer emits its signal from fifteen separate statements, in more
+# than one quoting style. !emit-literal keys on the ROLE (an unredirected
+# single-literal write to stdout), so `printf "x\\n"`, `printf '%s\\n' x`
+# and `echo x` are all seen; a regex over the quoting was not a role key.
+# CONTRACT: trust-signal !emit-literal
 uberdev_goal_read_trust_signal() {
   local audit_path="$1"
   # Canonical locator output is closed controller state, not a pathname. Its
@@ -1002,6 +1008,7 @@ uberdev_goal_read_trust_signal() {
   if [ "$critical" -gt 0 ]; then printf 'yellow\n'; return 0; fi
   printf 'green\n'
 }
+# /CONTRACT: trust-signal
 
 # uberdev_goal_check_fingerprint_repeat GOAL_ID CYCLE FINGERPRINT
 # Non-convergence detector: same fingerprint in cycle N-1 => repeat
@@ -1795,6 +1802,16 @@ uberdev_goal_agent_busy_for_issue() {
       if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
         any(.[]?;
             (((.cwd // "") | rtrimstr("/")) | endswith("solve-issue-" + $n))
+            # jq treats # as a comment to end of line, so the marker sits
+            # directly on the declaration instead of resolving forward — an
+            # @anchor here would be a substring scan over the rest of the file.
+            # NOTE: no apostrophes below — this whole jq program is a
+            # single-quoted shell string, and one would terminate it.
+            # DECLARED DIVERGENCE, not intent (#370 rank 7): the lifecycle
+            # classifier in agent-dispatch.sh treats `queued` as LIVE; this
+            # probe does not. Whether `queued` SHOULD be live is a behaviour
+            # question of its own.
+            # CONTRACT: agent-liveness-value -queued
             and ((.status // "") | test("^(busy|running|starting|working)$")))' \
         >/dev/null 2>&1; then
         return 0
@@ -1888,6 +1905,11 @@ uberdev_goal_review_pr_in_flight() {
     [ .[]?
       | select(
           ((.name // "") | test("/uberdev:review-pr " + ($pr|tostring) + "($|[^0-9])"))
+          # DECLARED DIVERGENCE, not intent (#370 rank 7): `queued` is LIVE to
+          # the classifier in agent-dispatch.sh and not-live here. See the
+          # sibling note on uberdev_goal_agent_busy_for_issue. This is a jq
+          # comment inside a single-quoted shell string — no apostrophes.
+          # CONTRACT: agent-liveness-value -queued
           and ((.status // "") | test("^(busy|running|starting|working)$"))
         )
     ] | length > 0' >/dev/null 2>&1; then
@@ -1938,6 +1960,9 @@ uberdev_goal_agent_stuck_on_dialog() {
   agent_status="$(claude agents --json 2>/dev/null | jq -r --argjson pid "$pid" '
     .[]? | select(.pid? == $pid) | .status // ""' 2>/dev/null)"
   [ -n "$agent_status" ] || return 1
+  # DECLARED DIVERGENCE, not intent (#370 rank 7): `queued` is LIVE to
+  # agent-dispatch.sh's classifier and not-live here.
+  # CONTRACT: agent-liveness-value -queued !case-arm
   case "$agent_status" in
     busy|running|starting|working) : ;;
     *) return 1 ;;
@@ -2148,6 +2173,7 @@ uberdev_goal_read_merge_result() {
     merge_executed)
       printf 'success\n' ;;
     pr_parked)
+      # CONTRACT: park-reason !case-arm
       case "$reason" in
         refused|ambiguous|push-non-ff) printf 'conflict\n' ;;
         test-fail-exhausted)           printf 'hook_failed\n' ;;
@@ -3542,7 +3568,16 @@ uberdev_goal_read_run_state() {
         # default-0 "no identity filter" arm, never widen into truthiness).
         case "$v" in 0|1) only_mine="$v" ;; esac ;;
       CIRCUIT_BREAKER_HALT)
+        # CONTRACT: goal-circuit-breaker-reason -solver_failed !case-arm
         case "$v" in
+          # DECLARED DIVERGENCE, not intent (found while wiring #370's Half A
+          # guard, NOT in its register): goal-pipeline/SKILL.md's
+          # GOAL_CIRCUIT_BREAKER_REASONS has NINE reasons; this rehydration
+          # allowlist has eight — `solver_failed` (goal-phase3.sh, goal-watch.sh)
+          # is missing. Latent today: only `agent_stuck_on_dialog` is ever
+          # assigned to CIRCUIT_BREAKER_HALT, so nothing is dropped yet. The
+          # arm has no else branch, so if that changes the value vanishes on the
+          # next fresh-shell fence exactly as it did for UBERDEV_RESOLVED_BACKEND.
           max_cycles|nonconvergence|stuck_loop|merge_failed|gh_api_failed|unknown_merge_result|queue_empty_not_converged|agent_stuck_on_dialog)
             CIRCUIT_BREAKER_HALT="$v" ;;
         esac ;;
@@ -3579,6 +3614,7 @@ uberdev_goal_read_run_state() {
         # so a Workflow run was probed and reaped as if it were a detached
         # `background` session. Keep this list byte-aligned with the dispatch
         # enum minus `auto` (auto is a REQUEST, never a resolution).
+        # CONTRACT: dispatch-backend -auto !case-arm
         case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
     esac

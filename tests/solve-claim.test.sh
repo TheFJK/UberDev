@@ -273,8 +273,8 @@ assert_grep "$SOLVE_CMD" \
   "small-team issue-claim protocol" \
   "solve.md mentions small-team claim protocol"
 
-echo "== Version bump 0.42.7 -> 0.42.8 propagated =="
-assert_version_bump "$REPO_ROOT" "0.42.8"
+echo "== Version bump 0.42.8 -> 0.42.9 propagated =="
+assert_version_bump "$REPO_ROOT" "0.42.9"
 
 echo "== #123 B1: closing-keyword regex left-anchor (rejects preclose/postfix/unresolve) =="
 # The closing-keyword regex in merge-pipeline Step 3.4 MUST require either start-of-input

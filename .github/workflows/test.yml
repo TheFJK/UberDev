@@ -193,6 +193,7 @@ jobs:
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
+          bash tests/contract-markers.test.sh && \
           bash tests/codex-port.test.sh
 
   supervision-smoke-macos:
@@ -389,4 +390,5 @@ jobs:
           bash tests/solve-fleet-workflow.test.sh && \
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
-          bash tests/epipe-guard.test.sh
+          bash tests/epipe-guard.test.sh && \
+          bash tests/contract-markers.test.sh

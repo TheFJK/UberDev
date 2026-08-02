@@ -4,6 +4,33 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.9] — 2026-08-01
+
+### Added
+
+- **`# CONTRACT:` markers + one meta-test** (`tests/contract-markers.test.sh`,
+  `tests/contract_markers.py`, RFC 0016) closing Half A of the contract-drift register (#370).
+  Ten closed vocabularies — dispatch backends, agent liveness values, terminal run states and
+  events, goal audit events, circuit-breaker reasons, park reasons, semaphore lease-acquire
+  reasons, trust signals, risk signals — are declared once per site with a marker and compared by
+  a single test across **both** the `plugins/uberdev/` and `codex/uberdev-codex/` trees, with
+  per-site `-member` / `+member` deltas for sites that are deliberately a subset or superset.
+
+  This is the class behind #360, #361 and #362: *one contract, N independent copies, and nothing
+  comparing them*. Until now the only signal that two literals were coupled was a prose comment,
+  and a comment is not a producer. Source changes are comment-only — no runtime behaviour changes.
+
+  **110 sites — 55 declarations per tree, mirrored.** Among them: `run_manifest.py`'s liveness set,
+  `solve-launcher.sh`'s three backend copies, `solve_triage.py`'s `parse_cli` whitelist (the copy
+  #360 shipped stale), `dispatch.sh`'s supervision-capable subset, `child-dispatch.sh`'s
+  status-file validator and merge-pipeline's failure-mode table — all now compared rather than
+  merely adjacent.
+
+  A companion scan reports unmarked lines carrying `N−1` of a contract's `N` members. It is a
+  **discovery aid, not a proof**: its predicate cannot establish completeness, and RFC 0016 §2.6
+  and §2.7 say so and list its blind spots. Registry completeness stays human-curated, ratcheted
+  by path multiset in the same spirit as this repo's version-locks.
+
 ## [0.42.8] — 2026-07-31
 
 ### Fixed

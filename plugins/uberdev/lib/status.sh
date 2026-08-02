@@ -149,6 +149,7 @@ _UBERDEV_STATUS_GOAL_POINTER_BASENAME='goal-active-id.txt'
 _UBERDEV_STATUS_AGENT_STATE_PREFIX='.agent-state-'
 _UBERDEV_STATUS_LIFECYCLE_BASENAME='agent-lifecycle.jsonl'
 # agent-dispatch.sh:_uberdev_agent_event_json terminal event set
+# CONTRACT: agent-terminal-event
 _UBERDEV_STATUS_TERMINAL_EVENTS='completed failed timed_out cancelled abandoned'
 # Render bounds. Every store is append-only and unbounded; a census that
 # scrolls off-screen is as useless as no census at all.

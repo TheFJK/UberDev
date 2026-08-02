@@ -53,9 +53,11 @@ except ImportError:  # pragma: no cover - unavailable on POSIX
 # accepts only the current version, so compatibility cannot create new v1 data.
 SCHEMA_VERSION = 2
 READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
+# CONTRACT: agent-terminal-event
 TERMINAL_EVENTS = frozenset(
     {"completed", "failed", "timed_out", "cancelled", "abandoned"}
 )
+# /CONTRACT: agent-terminal-event
 LIFECYCLE_EVENTS = frozenset({"route_decided", "agent_started"}) | TERMINAL_EVENTS
 SUPPORTED_PROCESS_IDENTITY_PLATFORMS = ("linux", "darwin", "windows")
 _WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
@@ -2348,6 +2350,7 @@ def _probe_status_snapshot(path: str) -> tuple[str, dict[str, Any] | None]:
     normalized = state.strip().lower()
     if normalized in TERMINAL_EVENTS:
         return "terminal", parsed
+    # CONTRACT: agent-liveness-value
     if normalized in {"running", "busy", "starting", "working", "queued"}:
         return "live", parsed
     return "unknown", parsed
@@ -2373,6 +2376,7 @@ def _terminal_truth_from_snapshot(
     if len(state_keys) != 1:
         return None
     terminal = str(snapshot[state_keys[0]]).strip().lower()
+    # CONTRACT: run-terminal-status
     if terminal not in {"completed", "failed", "timed_out", "cancelled"}:
         return None
     if snapshot.get("backend") != started.get("backend"):
@@ -2949,11 +2953,15 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                     "backend": state.started["backend"],
                     "terminal_status": terminal_truth,
                 }
+                # `completed` is absent by construction: a success has no
+                # error class. Declared rather than left to look like drift.
+                # CONTRACT: run-terminal-status -completed /^\s*"([a-z_]+)":/
                 error_classes = {
                     "failed": "provider_failed",
                     "timed_out": "provider_timed_out",
                     "cancelled": "provider_cancelled",
                 }
+                # /CONTRACT: run-terminal-status
                 if terminal_truth in error_classes:
                     terminal["error_class"] = error_classes[terminal_truth]
                 if agent_id:

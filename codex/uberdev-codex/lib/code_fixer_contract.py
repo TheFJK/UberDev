@@ -6293,6 +6293,7 @@ def bind_launch_receipt(
         or not isinstance(value.get("handle"), str)
         or not value["handle"]
         or value.get("state")
+        # CONTRACT: run-terminal-status +running
         not in {"running", "completed", "failed", "timed_out", "cancelled"}
     ):
         fail("launch_receipt_invalid")

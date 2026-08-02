@@ -17,6 +17,10 @@ Invoked from `commands/merge.md`. Do NOT call directly outside that path. Pairs 
 
 All magic strings/numbers used by this skill are declared here once. Later phases reference these names; values are NOT re-inlined.
 
+<!-- A marker line inside the table below would split the table in two, so the
+     #370 contract marker sits above it and resolves forward via @anchor.
+     See docs/rfc/0016-contract-markers.md. -->
+<!-- CONTRACT: park-reason @"| `PARK_REASON_ENUM` |" -->
 | Name | Value | Used by |
 |---|---|---|
 | `STRATEGY_ENUM` | `squash`, `rebase`, `merge`, `drop` | D11 (per-PR strategy), D-LABEL, Phase 3.3 (park) |
@@ -1086,6 +1090,9 @@ done
 
 ### Step 3.5 — Failure-mode summary
 
+<!-- Role-keyed: every row that parks a PR names its reason in the same
+     `data.reason="…"` shape, so the table is a declaration, not prose. -->
+<!-- CONTRACT: park-reason /data\.reason="([a-z-]+)"/ -->
 | Failure mode | Action | Queue state |
 |---|---|---|
 | `test_fail` after exhausting (a)/(b)/(c) in Step 3.3v | park via `drop` (`data.reason="test-fail-exhausted"`) | continues |
@@ -1101,6 +1108,7 @@ done
 | `pr_view_projection` lib call failure (Step 1.4 — gh-or-jq exit non-zero, e.g., network / auth / rate-limit) | emit `discovery_gh_failed` (step="1.4") + `gate_fail` with `data.reason="pr_view_unreachable"`; PR excluded from merge set | continues |
 | Auto-review returned `blocked` (Phase 1.4.5; `outcome="blocked"`) | `/review-pr` returned exit 1 (REVISIONS_REQUIRED / REJECT / Phase 3 stop-condition escaped past `--turbo`). Emit `auto_review_returned` with `outcome: blocked`; exclude PR; run-summary line: `"PR #${PR}: auto-review returned blocked; see .uberdev/runs/<run-id>/review-pr-verdict.json"`; queue continues | continues |
 | Auto-review returned `refused_non_green` (Phase 1.4.5; `outcome="refused_non_green"`) | `/review-pr` returned exit 2 (Phase 2 fanout crash / artifact-emission failure), OR /review-pr's own internal phase timeouts returning a non-zero exit, OR dispatch failure (plugin disabled). Emit `auto_review_returned` with `outcome: refused_non_green` and `duration_ms` = elapsed time at kill / dispatch failure; exclude PR; run-summary line; queue continues | continues |
+<!-- /CONTRACT: park-reason -->
 
 **No halt conditions remain.** Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
