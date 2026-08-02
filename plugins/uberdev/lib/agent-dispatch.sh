@@ -1203,7 +1203,6 @@ _uberdev_agent_finalize_terminal() {
     *) return 2 ;;
   esac
   # CONTRACT: agent-terminal-event !case-arm
-  # CONTRACT: agent-terminal-event !case-arm
   case "$terminal_event" in
     completed) terminal_rc=0 ;;
     failed|timed_out|cancelled|abandoned) terminal_rc=1 ;;

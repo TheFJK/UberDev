@@ -150,8 +150,10 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 CONTRACTS: dict[str, list[str]] = {
     # rank 6 — lib/dispatch.sh enum, the goal run-state allowlist (enum - auto),
-    # the launcher's three copies and the triage parser.  The launcher and
-    # triage copies are the ones #360 actually shipped stale.
+    # the supervision-capable subset, the launcher's three copies and the triage
+    # parser.  #360 shipped stale at the TRIAGE parser specifically; the launcher
+    # copies were already correct but uncompared, which is the distinction this
+    # convention exists to make.
     "dispatch-backend": [
         "lib/dispatch.sh",
         "lib/dispatch.sh",
@@ -201,7 +203,6 @@ CONTRACTS: dict[str, list[str]] = {
     ],
     # rank 11 — agent-lifecycle terminal EVENT set (5)
     "agent-terminal-event": [
-        "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
@@ -1188,6 +1189,20 @@ def scan_unmarked_twins(
         for contract, entries in TWIN_ALLOWLIST.items()
         for rel, needle, _why in entries
     }
+    # Strip each file's comments ONCE, not once per contract.  `strip_comments`
+    # is a per-character Python loop, so leaving it inside the per-contract loop
+    # made the scan cost O(contracts x repo_bytes) — 3590 strip passes over 359
+    # files where 359 would do, and 7.1s of a 13.1s scan.  That is not a
+    # micro-optimisation here: this test runs on the Windows shape-check job,
+    # which was landing 51 seconds inside its 30-minute hang guard, and the
+    # registry above is explicitly invited to grow.
+    prepared: list[tuple[str, str, list[str]]] = []
+    for rel, text in files:
+        base = rel.rsplit("/", 1)[-1]
+        suffix = "." + base.rsplit(".", 1)[1] if "." in base else ""
+        stripped = _safe_strip(text, suffix)
+        prepared.append((rel, stripped, stripped.split("\n")))
+
     for contract, members in sorted(canonical.items()):
         if len(members) < MIN_MEMBERS:
             continue
@@ -1202,14 +1217,17 @@ def scan_unmarked_twins(
         # parked inside a semaphore region is NOT exempt, which is the hole a
         # single flat coverage set left open.
         comparable = [d for d, dm in canonical.items() if members <= dm or dm <= members]
-        for rel, text in files:
-            base = rel.rsplit("/", 1)[-1]
-            suffix = "." + base.rsplit(".", 1)[1] if "." in base else ""
+        for rel, blob, lines in prepared:
+            # Cheap whole-file prefilter: a file that cannot reach k members in
+            # total cannot contain a window that does.  A plain substring test is
+            # orders of magnitude cheaper than the per-line regex sweep, and most
+            # files carry none of a given contract's vocabulary.
+            if sum(1 for m in members if m in blob) < k:
+                continue
             per_file = covered.get(rel, {})
             marked: set[int] = set(per_file.get("_all", ()))
             for d in comparable:
                 marked |= per_file.get(d, set())
-            lines = _safe_strip(text, suffix).split("\n")
             present = [{m for m, rx in res.items() if rx.search(ln)} for ln in lines]
             i = 0
             while i < len(lines):

@@ -1101,7 +1101,6 @@ done
 | conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="ambiguous"`) | continues |
 | conflict-resolver `REFUSED` | park via `drop` (`data.reason="refused"`) | continues |
 | dependency cycle (Phase 2.1) | break edges, fall back to createdAt order; emit cycle path to stderr | continues |
-<!-- /CONTRACT: park-reason -->
 | local pull non-FF (Phase 4.2) | auto-rebase local onto origin; on rebase conflict, abort rebase and surface in summary | continues |
 | `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `trust_trail_agent_decision` returns `INVALID / structural_probe_failed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; report the failed primitive and exit code; no retry; PR excluded from merge set | continues |
@@ -1109,6 +1108,7 @@ done
 | `pr_view_projection` lib call failure (Step 1.4 — gh-or-jq exit non-zero, e.g., network / auth / rate-limit) | emit `discovery_gh_failed` (step="1.4") + `gate_fail` with `data.reason="pr_view_unreachable"`; PR excluded from merge set | continues |
 | Auto-review returned `blocked` (Phase 1.4.5; `outcome="blocked"`) | `/review-pr` returned exit 1 (REVISIONS_REQUIRED / REJECT / Phase 3 stop-condition escaped past `--turbo`). Emit `auto_review_returned` with `outcome: blocked`; exclude PR; run-summary line: `"PR #${PR}: auto-review returned blocked; see .uberdev/runs/<run-id>/review-pr-verdict.json"`; queue continues | continues |
 | Auto-review returned `refused_non_green` (Phase 1.4.5; `outcome="refused_non_green"`) | `/review-pr` returned exit 2 (Phase 2 fanout crash / artifact-emission failure), OR /review-pr's own internal phase timeouts returning a non-zero exit, OR dispatch failure (plugin disabled). Emit `auto_review_returned` with `outcome: refused_non_green` and `duration_ms` = elapsed time at kill / dispatch failure; exclude PR; run-summary line; queue continues | continues |
+<!-- /CONTRACT: park-reason -->
 
 **No halt conditions remain.** Already-merged PRs stay merged. Every event hits `audit.jsonl`. Every parked PR appears in the run-summary block with its `PARK_REASON_ENUM` value and the structured handoff (where applicable).
 
