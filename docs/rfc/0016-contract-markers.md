@@ -233,7 +233,10 @@ carries six ratchets:
    **denylist** of binary suffixes, not an allowlist of "text" ones: the first
    edition allowlisted eleven extensions, which quietly excluded `.ts`, `.cmd`,
    `.html` and every extension-less executable under `hooks/` and `lib/` while
-   looking exhaustive.
+   looking exhaustive. The twin scan then reinstated exactly that allowlist one
+   function later and skipped 30 shipped files — including the JSON medium that
+   already holds a *declared* contract site. It now reads every readable file and
+   falls back to no comment-stripping rather than skipping.
 4. **Commented-out text is never a member source.** Stripping runs before
    extraction, so a commented-out declaration is not tokenised — the marker
    binds to the next live line instead, and that line is not the declaration, so
@@ -248,16 +251,38 @@ carries six ratchets:
    > Markdown, and — the load-bearing half — **a suffix with no registered
    > comment syntax is a hard error**, so the next language to carry a marker
    > cannot reintroduce the hole by omission.
-5. **An unmarked twin is refused.** Every contract's set is derived from its own
-   marked sites and then searched for, as whole tokens, on every unmarked line in
-   both trees. This is the only ratchet that can prove the marked set was ever
-   *complete*; the others only prove it never shrank. An intentional restatement
-   is exempted in `TWIN_ALLOWLIST` with a reason, and the exemption is itself
-   ratcheted — an entry matching nothing fails, so a restatement cannot silently
-   stop carrying the vocabulary it restates.
+5. **Unmarked twins are surfaced — as a discovery aid, not a proof.** Every
+   contract's set is derived from its own marked sites and searched for across
+   both trees; a line carrying **N−1 of N** members, and not inside a marked
+   region of a comparable contract, is reported.
+
+   > An earlier edition of this ratchet claimed this was *"the only ratchet that
+   > can prove the marked set was ever complete"*. **That claim is false and is
+   > withdrawn.** It cannot prove completeness, and its first predicate could not
+   > even approximate it: it asked for lines carrying the *whole current*
+   > vocabulary, but the copies that matter are the copies **out of agreement** —
+   > that is what drift is — and those two sets are disjoint by construction. It
+   > found only copies that were already in perfect agreement, and decayed to
+   > nothing exactly when it was needed. #360 replayed straight through it. The
+   > threshold is now N−1, which inverts the failure mode from silent-miss to
+   > noisy-and-curated — the only correct direction for a completeness aid — and
+   > **registry completeness remains a human-curated property**, hand-ratcheted
+   > in the same spirit as `CONTRACTS` and this repo's version-locks. A
+   > hand-maintained list wearing the costume of a proof is precisely the failure
+   > this scan was written to answer.
+
+   An intentional restatement is exempted in `TWIN_ALLOWLIST` with a written
+   reason. The exemption is ratcheted in both directions: an entry matching
+   nothing fails (the restatement stopped carrying the vocabulary, or the
+   vocabulary grew without it), **and** a restatement that still advertises a
+   member no marked declaration carries any more fails. That second half exists
+   because containment alone cannot see a SHRINK — every superset contains the
+   set — so the ratchet used to fire on grow and rename and never on removal.
 6. **`--selftest` and four in-CI mutations.** The extractor is a producer too, so
-   it has its own oracle: 37 synthetic fixtures covering every extraction mode
-   plus sixteen negative cases. `tests/contract-markers.test.sh` then copies both
+   it has its own oracle: 41 synthetic fixtures in total — 26 positive and 15
+   negative, every negative asserting a message fragment rather than an exit
+   code. (An earlier edition read "37 … plus sixteen negative", implying 53; 37
+   was the total and the split was wrong.) `tests/contract-markers.test.sh` then copies both
    trees and mutates them for real: **C3** moves a member at one site, **C4**
    adds a one-line `elif` arm, **C5** appends an arm to a one-liner `case`, and
    **C6** plants an unmarked copy of a whole vocabulary. Each must red and name
@@ -288,7 +313,9 @@ Stated because an unstated limit reads as a guarantee:
   > statement's role (unredirected, argument list reduces to one member token)
   > rather than on its punctuation, so all of those are seen. **The limit is
   > only the variable case**, and it is a limit of static reading, not of the
-  > mode.
+  > mode — and even that is narrower than "any literal emission": a redirect to
+  > stdout (`>&1`), a pipe (`| cat`) or a here-string (`cat <<<amber`) all read
+  > as something other than a plain emission and are not seen.
 - **Sensitivity is not uniform in edit size.** A span region is a physical line,
   and `pick_span` ignores rival spans below `MIN_MEMBERS`, so widening a marked
   set with a *single* extra member OUTSIDE its container
@@ -303,6 +330,15 @@ Stated because an unstated limit reads as a guarantee:
   not the value set. That is a one-member contract, and `MIN_MEMBERS = 2` — the
   invariant that makes span mode safe at all — structurally forbids it. It needs
   a different mechanism, not a marker.
+- **The twin scan is a discovery aid, not a completeness proof.** It reports a
+  line carrying N−1 of N members outside a marked region, which is a *heuristic
+  for finding copies*, not a guarantee that none remain. It cannot see a copy
+  written with fewer than N−1 of the members, one spread over more than
+  `TWIN_WINDOW` lines, or one that a `TWIN_ALLOWLIST` entry exempts. An
+  allow-listed line has four cheaper escapes than editing the allow-list — end
+  the list with a full stop, rewrap it, move it inside a marked region, or delete
+  the entry — and all four read as ordinary editing in review. Treat the list's
+  size as evidence of nothing.
 - **Prose is not a declaration.** `commands/goal.md` still says "seven circuit
   breakers" where the enum has nine. Sentences are not token sets and this
   comparator does not read them.
@@ -311,16 +347,16 @@ Stated because an unstated limit reads as a guarantee:
 
 ## 3. What is registered today
 
-**How to read the site count.** 98 "sites" is 49 declarations in
-`plugins/uberdev/` (48 markers plus one registry-declared JSON key) and the same
-49 in the Codex mirror. Half of the headline is therefore the mirror — and of the
+**How to read the site count.** 112 "sites" is 56 declarations in
+`plugins/uberdev/` (55 markers plus one registry-declared JSON key) and the same
+56 in the Codex mirror. Half of the headline is therefore the mirror — and of the
 15 marked files per tree, **8 were already `cmp`-locked to their Codex twin
 before this convention existed** (`lib/agent-dispatch.sh`, `lib/dispatch.sh`,
 `lib/goal-state.sh`, `lib/live-semaphore.sh`, `lib/run_manifest.py`,
 `lib/solve-launcher.sh`, `lib/solve_triage.py`, `lib/status.sh`, plus
 `policy/model-routing-v1.json`; the locks live in `tests/dispatch-codex.test.sh`,
 `tests/child-dispatch.test.sh`, `tests/solve-routing.test.sh`,
-`tests/solve-run-tree.test.sh` and `tests/status.test.sh`). **30 of the 49
+`tests/solve-run-tree.test.sh` and `tests/status.test.sh`). **35 of the 56
 Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 
 > An earlier edition of this section said "13 Codex-side markers in 4
@@ -330,12 +366,12 @@ Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 
 | Contract | #370 rank | Members | Declarations per tree | Notes |
 |---|---|---|---|---|
-| `dispatch-backend` | 6 | 6 | 7 | run-state allowlist carries `-auto`; three launcher copies + the triage gate were the sites #360 shipped stale |
+| `dispatch-backend` | 6 | 6 | 8 | run-state allowlist carries `-auto`; the supervision subset carries `-auto -workflow`; three launcher copies + the triage gate were the sites #360 shipped stale |
 | `agent-liveness-value` | 7 | 5 | 5 | three `goal-state.sh` probes carry `-queued` (declared divergence) |
-| `run-terminal-status` | 8 | 4 | 12 | `+running`, `+absent`, `+setup_failed` deltas where a site is a superset |
+| `run-terminal-status` | 8 | 4 | 16 | `+running`, `+absent`, `+live`, `+setup_failed`, `-completed` deltas where a site is a superset or subset |
 | `goal-audit-event` | 9 | 13 | 2 | SKILL.md constants block via `@anchor` |
-| `park-reason` | 10 | 4 | 2 | Markdown table via `@anchor`; goal-state side via `!case-arm` |
-| `agent-terminal-event` | 11 | 5 | 7 | the writer gate is role-keyed so an `or … == "x"` widening is seen |
+| `park-reason` | 10 | 4 | 3 | Markdown table via `@anchor`; the failure-mode table via a `data.reason` role key; goal-state side via `!case-arm` |
+| `agent-terminal-event` | 11 | 5 | 8 | the writer gate is role-keyed so an `or … == "x"` widening is seen |
 | `semaphore-lease-acquire-reason` | 12 | 12 | 4 | producer keyed on its assignment target; two validators are declared supersets |
 | `trust-signal` | 13 | 5 | 4 | producer uses `!emit-literal` |
 | `risk-signal` | 4 | 11 | 4 | includes the JSON-declared policy site |
