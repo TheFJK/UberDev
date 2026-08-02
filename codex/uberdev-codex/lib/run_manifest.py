@@ -2953,11 +2953,15 @@ def reconcile_manifest(path: str) -> dict[str, Any]:
                     "backend": state.started["backend"],
                     "terminal_status": terminal_truth,
                 }
+                # `completed` is absent by construction: a success has no
+                # error class. Declared rather than left to look like drift.
+                # CONTRACT: run-terminal-status -completed /^\s*"([a-z_]+)":/
                 error_classes = {
                     "failed": "provider_failed",
                     "timed_out": "provider_timed_out",
                     "cancelled": "provider_cancelled",
                 }
+                # /CONTRACT: run-terminal-status
                 if terminal_truth in error_classes:
                     terminal["error_class"] = error_classes[terminal_truth]
                 if agent_id:

@@ -1018,7 +1018,7 @@ try:
  # Keyed on the assignment target: the sibling `states=` set on the same
  # line is a different vocabulary, and a whole-line span region would make
  # the site ambiguous the moment that sibling grew a second member.
- # CONTRACT: run-terminal-status /terminal_states=\{([^}]*)\}/
+ # CONTRACT: run-terminal-status /terminal_states\s*=\s*\{([^}]*)\}/
  terminal_states={'completed','failed','timed_out','cancelled'}; states=terminal_states|{'running'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
@@ -1176,9 +1176,11 @@ try:
   else: raise ValueError()
  state=value['state']; code=value.get('exit_code'); handle=value.get('pid')
  if handle is not None and (not isinstance(handle,(str,int)) or isinstance(handle,bool) or any(ord(char)<32 or ord(char)==127 for char in str(handle))): raise ValueError()
+ # CONTRACT: run-terminal-status +running /state[ ]*(?:==|in)[ ]*(?:['\"]([a-z_]+)['\"]|\{([^}]*)\})/
  if state=='running' and code is not None: raise ValueError()
  if state=='completed' and (type(code) is not int or code!=0): raise ValueError()
  if state in {'failed','timed_out','cancelled'} and (type(code) is not int or code==0): raise ValueError()
+ # /CONTRACT: run-terminal-status
  emit('status',state,backend,str(handle) if handle is not None else '',process_identity or '',lease_generation or '',hashlib.sha256(raw).hexdigest())
 except Exception: raise SystemExit(2)
 PY

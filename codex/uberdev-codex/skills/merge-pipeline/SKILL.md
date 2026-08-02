@@ -1090,6 +1090,9 @@ done
 
 ### Step 3.5 — Failure-mode summary
 
+<!-- Role-keyed: every row that parks a PR names its reason in the same
+     `data.reason="…"` shape, so the table is a declaration, not prose. -->
+<!-- CONTRACT: park-reason /data\.reason="([a-z-]+)"/ -->
 | Failure mode | Action | Queue state |
 |---|---|---|
 | `test_fail` after exhausting (a)/(b)/(c) in Step 3.3v | park via `drop` (`data.reason="test-fail-exhausted"`) | continues |
@@ -1098,6 +1101,7 @@ done
 | conflict-resolver `AMBIGUOUS` | park via `drop` (`data.reason="ambiguous"`) | continues |
 | conflict-resolver `REFUSED` | park via `drop` (`data.reason="refused"`) | continues |
 | dependency cycle (Phase 2.1) | break edges, fall back to createdAt order; emit cycle path to stderr | continues |
+<!-- /CONTRACT: park-reason -->
 | local pull non-FF (Phase 4.2) | auto-rebase local onto origin; on rebase conflict, abort rebase and surface in summary | continues |
 | `trust_trail_agent_decision` returns `INVALID / input_malformed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; PR excluded from merge set | continues |
 | `trust_trail_agent_decision` returns `INVALID / structural_probe_failed` (Phase 1.4 PATH_2 (c)) | `gate_fail` with `data.reason="trust_trail_agent_invalid_input"`; report the failed primitive and exit code; no retry; PR excluded from merge set | continues |

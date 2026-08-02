@@ -1050,7 +1050,12 @@ if state == "blocked":
 # not-live at all three goal-state probes.
 # NOTE: \x27 is a Python-regex single quote; a literal one would close the
 # single-quoted shell string this python block lives in.
-# CONTRACT: agent-liveness-value /(?:in [\[{(]([^\]})\n]*)[\]})]|==\s*["\x27]([^"\x27\n]*)["\x27])\s*:\s*print\(\s*["\x27]live["\x27]/
+# The set body may span lines — lib/run_manifest.py writes multi-line set
+# literals at a marked site — so the class must NOT exclude a newline.
+# CONTRACT: agent-liveness-value /(?:in [\[{(]([^\]})]*)[\]})]|==\s*["\x27]([^"\x27\n]*)["\x27])\s*:\s*print\(\s*["\x27]live["\x27]/
+# The same block also PRODUCES the run-terminal-status vocabulary, one word
+# per arm; keyed on the print, with the probe-only `live` declared.
+# CONTRACT: run-terminal-status +live /print\(["\x27]([a-z_]+)["\x27]/
 lifecycle = state or status
 if lifecycle == "idle":
     print("blocked:permission", end="")
@@ -1067,6 +1072,7 @@ elif lifecycle in {"completed", "complete", "done", "finished"}:
 else:
     raise SystemExit(2)
 # /CONTRACT: agent-liveness-value
+# /CONTRACT: run-terminal-status
 ' "$handle" "$match_mode"
 }
 
@@ -1196,6 +1202,8 @@ _uberdev_agent_finalize_terminal() {
       ;;
     *) return 2 ;;
   esac
+  # CONTRACT: agent-terminal-event !case-arm
+  # CONTRACT: agent-terminal-event !case-arm
   case "$terminal_event" in
     completed) terminal_rc=0 ;;
     failed|timed_out|cancelled|abandoned) terminal_rc=1 ;;

@@ -154,6 +154,7 @@ CONTRACTS: dict[str, list[str]] = {
     # triage copies are the ones #360 actually shipped stale.
     "dispatch-backend": [
         "lib/dispatch.sh",
+        "lib/dispatch.sh",
         "lib/goal-state.sh",
         "lib/solve-launcher.sh",
         "lib/solve-launcher.sh",
@@ -175,6 +176,8 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
+        "lib/agent-dispatch.sh",
+        "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
@@ -182,6 +185,7 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/code_fixer_contract.py",
         "lib/dispatch.sh",
         "lib/dispatch.sh",
+        "lib/run_manifest.py",
         "lib/run_manifest.py",
     ],
     # rank 9 — the events uberdev_goal_audit accepts (13)
@@ -193,9 +197,12 @@ CONTRACTS: dict[str, list[str]] = {
     "park-reason": [
         "lib/goal-state.sh",
         "skills/merge-pipeline/SKILL.md",
+        "skills/merge-pipeline/SKILL.md",
     ],
     # rank 11 — agent-lifecycle terminal EVENT set (5)
     "agent-terminal-event": [
+        "lib/agent-dispatch.sh",
+        "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/child-dispatch.sh",
@@ -273,6 +280,18 @@ _PORTED_PROSE = (
 TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
     "dispatch-backend": [
         ("plugins/uberdev/commands/goal.md", "pin a dispatch backend", _PORTED_PROSE),
+        ("plugins/uberdev/commands/solve.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _PORTED_PROSE),
+        ("plugins/uberdev/commands/solve.md", "multiple issue numbers run in parallel.", _PORTED_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "auto-accepts brainstorm recommendations", _PORTED_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "with **brainstorm Q&", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "multiple issue numbers run in parallel.", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "auto-accepts brainstorm recommendations", _PORTED_PROSE),
+        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "with **brainstorm Q&", _PORTED_PROSE),
+        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "it instead dispatches one autonomous session per issue", _PROSE),
+        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "Monitor via `/workflows`", _PROSE),
+        ("codex/uberdev-codex/skills/solve-pipeline/SKILL.md", "it instead dispatches one autonomous session per issue", _PROSE),
+        ("codex/uberdev-codex/skills/solve-pipeline/SKILL.md", "Monitor via `/workflows`", _PROSE),
         ("plugins/uberdev/commands/solve.md", "selects how `/solve` runs each per-issue solver", _PORTED_PROSE),
         ("plugins/uberdev/commands/turbo.md", "selects how `/turbo` runs each per-issue solver", _PORTED_PROSE),
         ("codex/uberdev-codex/skills/uberdev-cmd-goal/SKILL.md", "pin a dispatch backend", _PORTED_PROSE),
@@ -286,6 +305,20 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
         ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
+    ],
+    "trust-signal": [
+        # Adjacent, UNRELATED enums in the same constants block share tokens
+        # (`green` is a PR state as well as a trust signal); the block itself is
+        # marked line-by-line via @anchor.
+        ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "GOAL_ISSUE_STATE_ENUM=", _PROSE),
+        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "GOAL_ISSUE_STATE_ENUM=", _PROSE),
+        ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "the 8 states the PR machine", _PROSE),
+        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "the 8 states the PR machine", _PROSE),
+        # An instruction to an LLM relay. Extracting a member set from an
+        # English sentence needs a regex over the member NAMES, which RFC 0016
+        # section 2.2 forbids as vacuous — so it is exempted, not marked.
+        ("plugins/uberdev/skills/goal-pipeline/workflow.js", "Each output line is", _PROSE),
+        ("codex/uberdev-codex/skills/goal-pipeline/workflow.js", "Each output line is", _PROSE),
     ],
     "park-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "uberdev_goal_read_merge_result` returns", _PROSE),
@@ -318,6 +351,8 @@ BINARY_SUFFIXES = {
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 # Guard against reading something pathological; nothing shipped is close.
 MAX_SCAN_BYTES = 4 * 1024 * 1024
+# How far a one-line span region may extend to balance its brackets.
+BRACKET_SPAN = 12
 
 # --------------------------------------------------------------------------
 # Marker grammar
@@ -347,6 +382,11 @@ DELIMITED_SPAN_RES = (
     re.compile(r"`[^`\n]*`"),
     re.compile(r"\[[^\[\]\n]*\]"),
     re.compile(r"\{[^{}\n]*\}"),
+    # Multi-line variants: a set literal rewrapped across lines is the same
+    # declaration, and refusing to read it made a behaviour-preserving reformat
+    # hard-fail in one direction while the collapse was tolerated in the other.
+    re.compile(r"\[[^\[\]]*\]"),
+    re.compile(r"\{[^{}]*\}"),
 )
 # A bare pipe-alternation: shell `case` heads and arms, and the inside of an
 # anchored jq/regex alternation such as `^(busy|running|starting|working)$`
@@ -394,6 +434,33 @@ CASE_SCAN_RE = re.compile(
 )
 
 BUILTIN_MODES = ("case-arm", "emit-literal")
+
+_QUOTED_RE = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
+
+
+def mask_strings(line: str) -> str:
+    """Blank out quoted-string INTERIORS, preserving quoted `case` arm heads.
+
+    `!case-arm` tracks `case`/`esac` depth, and had no string model at all: a
+    default arm reading `*) printf 'unhandled case: %s\\n' "$1" ;;` incremented
+    the depth from inside a message and the region never closed, so a rewording
+    hard-failed with "the marker does not sit on a case statement" — it did.
+    The same blindness silently mis-extracts when a `case`/`esac` word appears
+    mid-region.  A quoted string followed immediately by `)` or `|` is an arm
+    head (`"hook-fail")` is legal shell) and is left alone.
+    """
+    out = []
+    pos = 0
+    for m in _QUOTED_RE.finditer(line):
+        nxt = line[m.end():m.end() + 1]
+        out.append(line[pos:m.start()])
+        if nxt in (")", "|"):
+            out.append(m.group(0))
+        else:
+            out.append(m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1])
+        pos = m.end()
+    out.append(line[pos:])
+    return "".join(out)
 
 # `!emit-literal`: a shell statement that writes ONE bare literal to stdout.
 # Keyed on the statement's role, not on its punctuation — `printf 'x\n'`,
@@ -654,7 +721,7 @@ def case_region_end(lines: list[str], start: int, suffix: str, where: str) -> in
     depth = 0
     saw_case = False
     for i in range(start, len(lines)):
-        for match in CASE_SCAN_RE.finditer(strip_comments(lines[i], suffix)):
+        for match in CASE_SCAN_RE.finditer(mask_strings(strip_comments(lines[i], suffix))):
             if match.group("case"):
                 depth += 1
                 saw_case = True
@@ -682,7 +749,8 @@ def harvest_case_arms(region: str) -> tuple[list[str], str]:
     members: set[str] = set()
     depth = 0
     hits = 0
-    for match in CASE_SCAN_RE.finditer(region):
+    masked = "\n".join(mask_strings(ln) for ln in region.split("\n"))
+    for match in CASE_SCAN_RE.finditer(masked):
         if match.group("case"):
             depth += 1
         elif match.group("esac"):
@@ -837,9 +905,15 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
 
     sites: list[Site] = []
     errors: list[str] = list(pairing_errors)
-    covered: set[int] = set(marker_idx)
+    # Coverage is PER CONTRACT.  A single flat set exempted every line of a
+    # marked region from EVERY contract's twin scan — 1,568 lines across the two
+    # trees — so a copy of contract X sitting inside contract Y's region was
+    # invisible.  `_all` holds the marker lines themselves, which belong to no
+    # contract's vocabulary and are exempt from all of them.
+    covered: dict[str, set[int]] = {"_all": set(marker_idx)}
     for idx, body in opens:
       where = f"{rel}:{idx + 1}"
+      region_bounds: tuple[str, int, int] | None = None
       try:
         name, anchor, pattern, mode, minus, plus = parse_body(body, where)
 
@@ -884,13 +958,27 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
                     "remove the redundant /CONTRACT: close so there is one source of truth"
                 )
             end = case_region_end(lines, start, suffix, where)
+        elif idx in close_for:
+            end = close_for[idx] - 1
         else:
+            # A one-line region, EXTENDED while its brackets stay unbalanced.
+            # Rewrapping a set literal across lines is behaviour-preserving, and
+            # the guard used to answer it with "yielded ZERO members" while
+            # tolerating the collapse in the other direction — an asymmetry with
+            # no justification behind it.
             end = start
-            if idx in close_for:
-                end = close_for[idx] - 1
+            depth = 0
+            for probe in range(start, min(start + BRACKET_SPAN, len(lines))):
+                text_line = strip_comments(lines[probe], suffix)
+                depth += sum(text_line.count(c) for c in "([{")
+                depth -= sum(text_line.count(c) for c in ")]}")
+                end = probe
+                if depth <= 0:
+                    break
         if end < start:
             raise ContractError(f"{where}: /CONTRACT: {name} closes before its region opens")
 
+        region_bounds = (name, start, end)
         region = strip_comments(
             "\n".join(lines[i] for i in range(start, end + 1) if i not in marker_idx),
             suffix,
@@ -935,13 +1023,19 @@ def extract_file(rel: str, text: str, suffix: str | None = None) -> list[Site]:
         else:
             mode_name = "span"
         sites.append(Site(name, rel, start + 1, members, minus, plus, mode_name))
-        covered.update(range(start, end + 1))
       except ContractError as exc:
         # Accumulate rather than abort.  Returning on the first error made a
         # FALSE POSITIVE hide concurrent real drift: the scan stopped before
         # `report()` ever ran, so the operator saw only the FP, and could fix it
         # and ship the drift.
         errors.append(str(exc))
+      finally:
+        # Record coverage even when extraction FAILED.  On the success path
+        # only, any error at a marked site made the guard re-report that site's
+        # own declaration as an UNMARKED copy — with its marker two lines above.
+        if region_bounds is not None:
+            name_for_cover, lo, hi = region_bounds
+            covered.setdefault(name_for_cover, set()).update(range(lo, hi + 1))
     return sites, errors, covered
 
 
@@ -1009,30 +1103,85 @@ def walk(root: Path) -> list[tuple[str, str]]:
     return out
 
 
+TWIN_WINDOW = 4
+
+
+def twin_threshold(n: int) -> int:
+    """k = N-1. See scan_unmarked_twins for why N was the wrong threshold."""
+    return max(MIN_MEMBERS, n - 1)
+
+
+def _member_re(member: str) -> re.Pattern:
+    # Word boundary on ALPHANUMERICS AND `_` only.  Counting `.` and `-` as word
+    # characters meant any member abutting punctuation ("... or cancelled.")
+    # silently blocked that line from the whole contract's scan.
+    return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(member) + r"(?![A-Za-z0-9_])")
+
+
+def _safe_strip(text: str, suffix: str) -> str:
+    """strip_comments, but never refuses — the scan reads EVERY readable file.
+
+    The first edition re-imposed a suffix allowlist here, one function after the
+    walk had made a point of dropping one, which skipped 30 shipped files
+    including the JSON medium that already holds a declared contract site.
+    """
+    try:
+        return strip_comments(text, suffix)
+    except ContractError:
+        return text
+
+
+def _contiguous_run(line: str, members: frozenset) -> set[str] | None:
+    """The smallest delimiter-separated token run on `line` covering `members`.
+
+    Used only to answer one question about an allow-listed restatement: does it
+    list EXACTLY this vocabulary, or does it still advertise a member no marked
+    declaration carries any more?  Containment cannot answer that — every
+    superset contains the set — which is why the ratchet fired on grow and on
+    rename but never on SHRINK.  Returns None when the members are not written
+    as one run (scattered prose), where the question is unanswerable.
+    """
+    best = None
+    pattern = r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:[ \t]*[,|/][ \t]*`?[A-Za-z0-9][A-Za-z0-9_.-]*`?)+"
+    for run in re.finditer(pattern, line):
+        toks = {t for t in re.split(r"[^A-Za-z0-9_.-]+", run.group(0)) if t}
+        if members <= toks and (best is None or len(toks) < len(best)):
+            best = toks
+    return best
+
+
 def scan_unmarked_twins(
     files: list[tuple[str, str]],
-    covered: dict[str, set[int]],
+    covered: dict[str, dict[str, set[int]]],
     canonical: dict[str, frozenset],
     failures: list[str],
 ) -> None:
-    """Fail on any UNMARKED line that carries a contract's whole vocabulary.
+    """Report unmarked lines carrying MOST of a contract's vocabulary.
 
-    This is the answer to the deepest hole the register itself warns about. The
-    `CONTRACTS` registry is hand-maintained, and the path ratchet only proves the
-    marked set never SHRINKS — never that it was ever COMPLETE.  Two live
-    consequences before this check existed: dropping a member from an unmarked
-    fifth copy of the liveness vocabulary passed green, and adding a seventh
-    dispatch backend to both MARKED sites while four unmarked siblings stayed
-    stale also passed green — #360 reproduced verbatim, the very bug this
-    convention exists to prevent, and updating exactly the files that carry
-    markers is precisely what a marker convention trains people to do.
+    WHAT THIS IS, STATED HONESTLY.  A **discovery aid**, not a proof.  It cannot
+    establish that the marked set is complete, and an earlier edition of RFC 0016
+    claimed that it could.  That claim was false and is withdrawn: registry
+    completeness is a human-curated property, hand-ratcheted in the same spirit
+    as `CONTRACTS` and this repo's version-locks.  A hand-maintained list wearing
+    the costume of a proof is exactly the failure this scan was written to
+    answer, so the costume comes off.
 
-    The check derives each contract's set from its own marked sites, so it adds
-    no second copy of any declaration.  A line that carries every member as a
-    whole token, and is not inside a marked region, is either a copy that should
-    be marked or an intentional restatement that must be allow-listed with a
-    reason.  The allow-list is itself ratcheted: an entry that matches nothing
-    is stale and fails.
+    WHY k = N-1 AND NOT N.  The first edition asked for lines carrying the
+    *whole current* vocabulary.  But the copies that matter are the copies that
+    are OUT of agreement — that is what drift IS — and those two sets are
+    disjoint by construction.  The predicate could only find copies already in
+    perfect agreement, i.e. copies that were not yet a problem, so it decayed to
+    nothing exactly when it was needed.  #360 replayed straight through it: add a
+    sixth terminal event to all seven marked declarations and the unmarked eighth
+    goes invisible, because it is now one member short.  Asking for N-1 inverts
+    the failure mode from silent-miss to noisy-and-curated, the only correct
+    direction for a completeness aid.  `TWIN_ALLOWLIST` absorbs the noise, one
+    written reason per entry.
+
+    Scope, stated rather than implied: the window is a few consecutive lines (a
+    declaration split across lines is still one declaration); every readable file
+    is read; and a line is exempt only from the contracts whose own marked region
+    contains it, not from every contract's scan.
     """
     allow_hits: dict[tuple[str, str, str], int] = {
         (contract, rel, needle): 0
@@ -1042,42 +1191,82 @@ def scan_unmarked_twins(
     for contract, members in sorted(canonical.items()):
         if len(members) < MIN_MEMBERS:
             continue
-        token_res = [re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(m) + r"(?![A-Za-z0-9_.-])")
-                     for m in sorted(members)]
+        k = twin_threshold(len(members))
+        res = {m: _member_re(m) for m in members}
         allowed = TWIN_ALLOWLIST.get(contract, ())
+        # A line inside contract D's marked region is exempt from contract C's
+        # scan only when the two vocabularies are COMPARABLE (one contains the
+        # other).  The 4-member terminal-status set really does sit inside every
+        # 5-member terminal-event declaration and vice versa, and such a line is
+        # already compared — as the narrower contract.  A dispatch-backend copy
+        # parked inside a semaphore region is NOT exempt, which is the hole a
+        # single flat coverage set left open.
+        comparable = [d for d, dm in canonical.items() if members <= dm or dm <= members]
         for rel, text in files:
-            suffix = "." + rel.rsplit(".", 1)[1] if "." in rel.rsplit("/", 1)[-1] else ""
-            if suffix not in COMMENT_LEADERS:
-                continue
-            marked = covered.get(rel, frozenset())
-            try:
-                stripped = strip_comments(text, suffix).split("\n")
-            except ContractError:
-                continue
-            for lineno, line in enumerate(stripped):
-                if lineno in marked:
+            base = rel.rsplit("/", 1)[-1]
+            suffix = "." + base.rsplit(".", 1)[1] if "." in base else ""
+            per_file = covered.get(rel, {})
+            marked: set[int] = set(per_file.get("_all", ()))
+            for d in comparable:
+                marked |= per_file.get(d, set())
+            lines = _safe_strip(text, suffix).split("\n")
+            present = [{m for m, rx in res.items() if rx.search(ln)} for ln in lines]
+            i = 0
+            while i < len(lines):
+                if not present[i] or i in marked:
+                    i += 1
                     continue
-                if not all(rx.search(line) for rx in token_res):
+                # The UNMARKED lines must carry the k members between them. A
+                # window that reaches k only by borrowing from a marked
+                # declaration it happens to abut is a straddle artefact, not a
+                # copy — that shape produced most of this scan's first noise.
+                union: set[str] = set()
+                last = i
+                for j in range(i, min(i + TWIN_WINDOW, len(lines))):
+                    if j in marked:
+                        continue
+                    union |= present[j]
+                    last = j
+                    if len(union) >= k:
+                        break
+                if len(union) < k:
+                    i += 1
                     continue
-                hit = next(((r, n, w) for r, n, w in allowed if r == rel and n in line), None)
+                window = "\n".join(lines[i:last + 1])
+                hit = next(((r, n, w) for r, n, w in allowed if r == rel and n and n in window), None)
                 if hit is not None:
                     allow_hits[(contract, hit[0], hit[1])] += 1
+                    run = _contiguous_run(window.replace("\n", " "), frozenset(union))
+                    stale = sorted((run - members)) if run else []
+                    if stale:
+                        failures.append(
+                            f"contract {contract!r}: allow-listed restatement at {rel}:{i + 1} still "
+                            f"advertises {stale}, which no marked declaration carries any more. "
+                            "Containment alone cannot see this — every superset contains the set — "
+                            "which is why this ratchet fired on grow and on rename but never on shrink."
+                        )
+                    i = last + 1
                     continue
+                span = f"{rel}:{i + 1}" if last == i else f"{rel}:{i + 1}-{last + 1}"
                 failures.append(
-                    f"contract {contract!r}: UNMARKED copy at {rel}:{lineno + 1} carries the whole "
-                    f"vocabulary {sorted(members)} but no marker compares it. "
-                    "Mark it, or add it to TWIN_ALLOWLIST with a reason. "
-                    "A registry that only proves the marked set never shrinks cannot prove it was "
-                    "ever complete — this is how #360 shipped."
+                    f"contract {contract!r}: UNMARKED copy at {span} carries {len(union)} of "
+                    f"{len(members)} members ({sorted(union)}) but no marker compares it. "
+                    "Mark it if it is a declaration; allow-list it with a reason if it is a "
+                    "restatement. This is a discovery aid, not a proof of completeness."
                 )
+                i = last + 1
     for (contract, rel, needle), n in sorted(allow_hits.items()):
+        if contract not in canonical:
+            # The contract is DRIFTED, so no canonical set exists and nothing was
+            # matched against it.  Reporting every entry stale here buried one
+            # real drift under ten "go edit these documentation files" failures.
+            continue
         if n == 0:
             failures.append(
-                f"contract {contract!r}: stale TWIN_ALLOWLIST entry {rel} / {needle!r} matches "
-                "no line carrying the whole vocabulary. Either the exempted line moved or was "
-                "reworded (update the needle), or the vocabulary GREW and this restatement was "
-                "not updated with it (update the prose). An allow-listed restatement is exempt "
-                "from being a marked declaration, not from being current."
+                f"contract {contract!r}: stale TWIN_ALLOWLIST entry {rel} / {needle!r} matches no "
+                "line carrying the vocabulary. Either the exempted line moved or was reworded "
+                "(update the needle), or the vocabulary changed and this restatement was not "
+                "updated with it (update the prose)."
             )
 
 
@@ -1299,6 +1488,31 @@ SELFTEST_CASES = [
         {"busy", "running", "paused", "suspended"},
     ),
     (
+        "!case-arm has a string model: `case` inside a message is not a case",
+        ".sh",
+        "# CONTRACT: t !case-arm\ncase \"$e\" in\n  a|b) : ;;\n  c) : ;;\n"
+        "  *) printf 'unhandled case: %s\\n' \"$1\" >&2; return 1 ;;\nesac\n",
+        {"a", "b", "c"},
+    ),
+    (
+        "a one-line span region EXTENDS while its brackets are unbalanced",
+        ".py",
+        '# CONTRACT: t\nSTATES = {\n    "aa",\n    "bb",\n    "cc",\n}\n',
+        {"aa", "bb", "cc"},
+    ),
+    (
+        "PEP8 spacing around `=` does not empty a keyed region",
+        ".py",
+        "# CONTRACT: t /states\\s*=\\s*\\{([^}]*)\\}/\nstates = {'aa','bb','cc'}\n",
+        {"aa", "bb", "cc"},
+    ),
+    (
+        "a harvested set body may span lines (layout-agnostic)",
+        ".py",
+        '# CONTRACT: t /in [\\[{(]([^\\]})]*)[\\]})]/\nif x in {\n    "aa",\n    "bb",\n}:\n    pass\n# /CONTRACT: t\n',
+        {"aa", "bb"},
+    ),
+    (
         "markdown: a prose cell cannot outbid the value cell (bare words are rejects)",
         ".md",
         "<!-- CONTRACT: t -->\n"
@@ -1416,7 +1630,7 @@ def main(argv: list[str]) -> int:
     root = Path(args.repo_root) if args.repo_root else Path(__file__).resolve().parent.parent
     failures: list[str] = []
     sites: list[Site] = []
-    covered: dict[str, set[int]] = {}
+    covered: dict[str, dict[str, set[int]]] = {}
     try:
         files = walk(root)
     except ContractError as exc:

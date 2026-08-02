@@ -1268,6 +1268,9 @@ uberdev_dispatch_resolve_env() {
 # timeout variables; every Claude-backed transport shares the resolver above.
 uberdev_dispatch_preflight_backend() {
   local backend="${1:-}" workflow="${2:-}" backend_label
+  # The supervision-capable subset: every backend EXCEPT the two that are
+  # never a detached provider session. Declared, not silently narrower.
+  # CONTRACT: dispatch-backend -auto -workflow !case-arm
   case "$backend" in
     codex|claude-bg|background|wezterm)
       if ! _uberdev_dispatch_numeric_supervision_supported "$backend"; then

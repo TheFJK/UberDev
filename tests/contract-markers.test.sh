@@ -26,6 +26,10 @@
 #        is the `!case-arm` mode, which C4 never exercised (C4's site is harvest
 #        mode). Two such one-liners shipped with no region close at all, so
 #        their region was a single line and an appended arm was invisible.
+#   C6 — an UNMARKED copy of a whole vocabulary must red. The registry is
+#        hand-maintained: the path ratchet proves the marked set never SHRINKS,
+#        never that it was ever COMPLETE. This assertion was added with the twin
+#        scan and went undocumented in this header for one round.
 #
 # Repo convention: `set -u` + `set -o pipefail` + manual PASS/FAIL counters
 # (NOT `set -e`; see tests/install.test.sh header for the rationale).
