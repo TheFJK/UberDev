@@ -1,7 +1,7 @@
 ---
 description: "Review changed code for reuse, quality, and efficiency, then fix any issues found"
 argument-hint: "[additional-focus] [--no-defer-issues]"
-allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]
+allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 ---
 
 # Simplify: Code Review and Cleanup

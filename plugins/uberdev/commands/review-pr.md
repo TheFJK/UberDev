@@ -1,7 +1,7 @@
 ---
 description: "Comprehensive PR review using specialized agents"
 argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--no-defer-issues] [--turbo]"
-allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]
+allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 ---
 
 # Comprehensive PR Review
