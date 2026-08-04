@@ -155,6 +155,11 @@ CONTRACTS: dict[str, list[str]] = {
     # copies were already correct but uncompared, which is the distinction this
     # convention exists to make.
     "dispatch-backend": [
+        "lib/child-dispatch.sh",
+        "lib/child-dispatch.sh",
+        "lib/child-dispatch.sh",
+        "lib/code_fixer_contract.py",
+        "lib/code_fixer_contract.py",
         "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/goal-state.sh",

@@ -1022,6 +1022,7 @@ try:
  terminal_states={'completed','failed','timed_out','cancelled'}; states=terminal_states|{'running'}
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
+ # CONTRACT: dispatch-backend -auto -workflow
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  process_identity=s.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
@@ -1115,6 +1116,7 @@ def watcher_message(path):
  timeout_reasons={'timeout_intent_invalid','timeout_intent_identity_unavailable','timeout_intent_cleanup_failed','timeout_partial_result_cleanup_failed'}
  owner_capture_reasons={'owner_process_identity_unavailable'}
  if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|owner_capture_reasons|{'supervisory_failure'}: raise ValueError()
+ # CONTRACT: dispatch-backend -auto -workflow
  if backend not in {'codex','claude-bg','background','wezterm'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
@@ -1159,6 +1161,7 @@ try:
  # CONTRACT: run-terminal-status +running
  if not isinstance(value,dict) or set(value)-allowed or value.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  backend=value.get('backend')
+ # CONTRACT: dispatch-backend -auto -workflow
  if backend not in {'codex','claude-bg','background','wezterm'}: raise ValueError()
  process_identity=value.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
