@@ -41,6 +41,62 @@ two-command precedent.
 >
 > Until all five land, the directive-emitter flow is not merely the default —
 > it is the only path that exists.
+>
+> **Step 5 is blocked, and steps 1–4 must not ship without it.** Verified
+> 2026-08-04: the controller side cannot consume a `workflow`-backend child
+> today, so a stage wired now would dispatch a real fanout, spend real agent
+> budget, let the fixer commit onto the caller's checkout — and then fail its
+> proof. That is strictly worse than being unreachable, because the seam this
+> whole skill exists to defend is the proof *between* the stages. Three
+> independent gates, each of which must be retired first:
+>
+> - **The launch-binding chain has three links and P1 fixed only the last one.**
+>   Verified 2026-08-04 by reading all three:
+>
+>   1. **Producer — `bind_launch_receipt` (`lib/code_fixer_contract.py:6318-6330`).**
+>      It captures the launch *status file* and hard-requires a `pid`, a
+>      `process_identity` matching `PROCESS_IDENTITY`, and a `lease_generation`
+>      matching `LEASE_GENERATION`. A workflow child has none of the three, so
+>      **no binding can be produced at all.** This is the first gate, and it is
+>      the one to fix first.
+>   2. **Loader — `_load_launch_binding` (`:6360-6389`).** Demands
+>      `set(value) == LAUNCH_BINDING_KEYS`; that set carries no `run_nonce`
+>      (`:6225-6240`) and separately requires `process_identity` (`:6383`) and
+>      `lease_generation` (`:6385`). So even a hand-built workflow binding
+>      cannot be re-loaded.
+>   3. **Status validator — `_validate_bound_child_status`.** ✅ P1 landed this,
+>      along with the poller no-op (`lib/agent-dispatch.sh:1461-1473`).
+>
+>   The consequence is worth stating plainly: **the `"workflow"` entry P1 added
+>   to the backend allow-list at `:6375` is dead code.** The same boolean
+>   rejects the binding on `process_identity` before that member is ever
+>   consulted. P1's nonce validator is correct and tested, but nothing in
+>   production can reach it until links 1 and 2 exist.
+>
+>   The fix is additive and belongs inside `code_fixer_contract.py` so authority
+>   never leaves it: a `WORKFLOW_LAUNCH_BINDING_KEYS` set keyed on `run_nonce`,
+>   a `backend == "workflow"` branch in both the producer and the loader, and a
+>   bind verb that derives from the Workflow call rather than from a dispatch
+>   receipt (`bind-fixer-launch-receipt` derives from a receipt,
+>   `commands/review-pr.md:1228-1230`, and a `Workflow()` call issues none).
+>   `tests/code-fixer-contract.test.sh:3871-3878` already hand-builds such a
+>   dict as a literal — that is the shape to formalise.
+> - **The `review` stage's aggregate writers are unreachable and
+>   receipt-shaped.** `post_review_capture_aggregation_inputs` and
+>   `post_review_write_aggregate_v2` are shell functions defined only inside
+>   `skills/post-impl-review/SKILL.md` (`:736`, `:856`) — there is no on-disk
+>   executable — and the trusted-ledger builder they feed requires a provider
+>   artifact and an `0o400` result that a workflow child never writes. So
+>   `Skill(uberdev:post-impl-review)` cannot simply be swapped out at
+>   `commands/review-pr.md:1584`.
+> - **Neither command may call `Workflow` yet.** `commands/review-pr.md:4` and
+>   `commands/simplify.md:4` both read
+>   `allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]`.
+>   Adding `"Workflow"` also requires the byte-matched row in
+>   `lib/aliases-sync.sh` or `tests/aliases.test.sh` section A6 reds.
+>
+> The opt-in selector itself is unblocked and can land with the bind verb, but
+> a selector that gates nothing is not worth two flagship command files' churn.
 
 ---
 
