@@ -1460,6 +1460,17 @@ _uberdev_agent_start_watcher() {
         esac
       else
         case "$handle" in
+          # Deliberate no-op, not a fall-through (#381). A non-numeric handle on
+          # this lane is a workflow child: it is awaited in-process by the
+          # calling session, so there is no pid, no process group and no session
+          # to probe, and nothing here could observe its liveness. The await
+          # itself IS the supervision -- the runtime, not this poller, decides
+          # when the child is terminal. Its status is bound by run_nonce instead
+          # of process_identity (see _validate_bound_child_status).
+          #
+          # Do not "fix" this by synthesising a pid to probe: a fabricated
+          # identity makes every downstream equality look verified while
+          # proving nothing.
           ''|*[!0-9]*) ;;
           *)
             identity_probe_rc=0
