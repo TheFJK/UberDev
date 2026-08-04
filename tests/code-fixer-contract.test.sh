@@ -3964,5 +3964,104 @@ expect_contract_reason(
     "child_status_invalid",
 )
 
+# === P1/#381 part 2: the launch-binding chain must REACH the nonce validator ===
+#
+# The chain is producer -> loader -> validator. P1 landed only the validator, so
+# the whole nonce path was dead: bind_launch_receipt requires a pid,
+# process_identity and lease_generation from the launch STATUS file, and
+# _load_launch_binding requires set(value) == LAUNCH_BINDING_KEYS, a set with no
+# run_nonce. A workflow child has none of the three, so no binding could be
+# produced and none could be re-loaded.
+#
+# There is also no dispatch receipt to derive from -- a Workflow() call issues
+# none -- so the workflow producer takes the controller-minted nonce directly and
+# is callable BEFORE dispatch, which is when the controller actually mints it.
+WF_EDGE = "review_pr.fix.phase1"
+WF_INSTANCE = "review-pr-run-fix-phase1-iter1-attempt01"
+WF_RUN = str(publication_dir / "run")
+os.makedirs(os.path.join(WF_RUN, "children", "i1"), exist_ok=True)
+WF_RESULT = os.path.join(WF_RUN, "children", "i1", "result.md")
+WF_STATUS = os.path.join(WF_RUN, "children", "i1", "status.json")
+
+wf_binding = module.bind_workflow_launch(
+    edge_id=WF_EDGE,
+    instance_id=WF_INSTANCE,
+    run_nonce=WORKFLOW_NONCE,
+    result_path=WF_RESULT,
+    status_path=WF_STATUS,
+    working_dir=str(publication_dir),
+)
+
+# The producer must carry the nonce and must NOT invent the detached triple.
+assert wf_binding["backend"] == "workflow", wf_binding
+assert wf_binding["run_nonce"] == WORKFLOW_NONCE, wf_binding
+assert not ({"pid", "process_identity", "lease_generation"} & set(wf_binding)), wf_binding
+
+# The loader must accept exactly what the producer emits — this is the link that
+# was missing, and a round-trip is the only honest way to assert it.
+reloaded = module._load_launch_binding(module._canonical_json(wf_binding), WF_EDGE)
+assert reloaded == wf_binding, reloaded
+
+# ...and the reloaded binding must reach the validator P1 wrote.
+module._validate_bound_child_status(
+    reloaded,
+    json.dumps({
+        "backend": "workflow",
+        "state": "completed",
+        "exit_code": 0,
+        "run_nonce": WORKFLOW_NONCE,
+        "workspace_mode": reloaded["workspace_mode"],
+        "worktree": reloaded["worktree"],
+        "branch": reloaded["branch"],
+        # The binding CANONICALIZES every path (_absolute_input resolves
+        # symlinks, so /var becomes /private/var on macOS). The status must be
+        # compared against the canonical form, which is why this reads the
+        # binding rather than reusing the path that was passed in.
+        "result": reloaded["result_path"],
+    }).encode(),
+)
+
+# A nonce that is not 64 lowercase hex is not a binding token.
+for bad_nonce in ("", "g" * 64, "F" * 64, "f" * 63):
+    expect_contract_reason(
+        lambda n=bad_nonce: module.bind_workflow_launch(
+            edge_id=WF_EDGE, instance_id=WF_INSTANCE, run_nonce=n,
+            result_path=WF_RESULT, status_path=WF_STATUS,
+            working_dir=str(publication_dir),
+        ),
+        "launch_binding_invalid",
+    )
+
+# Cross-contamination in BOTH directions must be refused by the loader.
+smuggled_triple = dict(wf_binding)
+smuggled_triple["process_identity"] = "1|1|1|" + "0" * 64
+expect_contract_reason(
+    lambda: module._load_launch_binding(
+        module._canonical_json(smuggled_triple), WF_EDGE),
+    "launch_binding_invalid",
+)
+
+detached_with_nonce = {
+    "schema_version": 1, "receipt_sha256": "0" * 64, "edge_id": WF_EDGE,
+    "instance_id": WF_INSTANCE, "backend": "codex", "handle": "123",
+    "launch_status_sha256": "0" * 64,
+    "process_identity": "1|1|1|" + "0" * 64, "lease_generation": "0" * 32,
+    "result_path": WF_RESULT, "status_path": WF_STATUS,
+    "workspace_mode": "caller", "worktree": str(publication_dir), "branch": "",
+    "run_nonce": WORKFLOW_NONCE,
+}
+expect_contract_reason(
+    lambda: module._load_launch_binding(
+        module._canonical_json(detached_with_nonce), WF_EDGE),
+    "launch_binding_invalid",
+)
+
+# The edge id is still bound.
+expect_contract_reason(
+    lambda: module._load_launch_binding(
+        module._canonical_json(wf_binding), "review_pr.fix.phase2"),
+    "launch_binding_invalid",
+)
+
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

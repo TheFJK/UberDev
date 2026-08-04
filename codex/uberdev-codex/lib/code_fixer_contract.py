@@ -6238,6 +6238,31 @@ LAUNCH_BINDING_KEYS = {
     "worktree",
     "branch",
 }
+# A Workflow-native child is awaited in-process, so three of the detached
+# binding's members cannot exist and two more have nothing to describe:
+#
+#   process_identity / lease_generation / handle -- no pid, no process group,
+#       no lease, no provider handle. Synthesising any of them would make the
+#       binding look verified while proving nothing.
+#   receipt_sha256 / launch_status_sha256 -- a Workflow() call issues no
+#       dispatch receipt, and the status file does not exist yet at mint time.
+#
+# `run_nonce` replaces all five. The controller mints it before the Workflow
+# call and the child echoes it back, which is the same binding property the
+# detached triple provided: this status file belongs to THIS launch.
+WORKFLOW_LAUNCH_BINDING_KEYS = {
+    "schema_version",
+    "edge_id",
+    "instance_id",
+    "backend",
+    "run_nonce",
+    "result_path",
+    "status_path",
+    "workspace_mode",
+    "worktree",
+    "branch",
+}
+
 PERSISTENCE_BINDING_KEYS = LAUNCH_BINDING_KEYS | {
     "aggregate_path",
     "aggregate_sha256",
@@ -6357,13 +6382,94 @@ def bind_launch_receipt(
     }
 
 
+def bind_workflow_launch(
+    *,
+    edge_id: str,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+) -> dict[str, Any]:
+    """Mint the launch binding for a Workflow-native child.
+
+    Deliberately NOT a variant of bind_launch_receipt. That function derives its
+    binding from a dispatch receipt and a launch status file; a Workflow() call
+    issues no receipt, and at mint time the status file does not exist yet --
+    the controller mints the nonce BEFORE the call, which is the only moment the
+    binding can be created without the child having had a chance to influence
+    it. Deriving from a child-written artifact would let the child choose its
+    own binding.
+
+    The detached triple is not merely omitted here, it is unrepresentable: the
+    key set has no place to put it.
+    """
+    if not isinstance(run_nonce, str) or re.fullmatch(r"[0-9a-f]{64}", run_nonce) is None:
+        fail("launch_binding_invalid")
+    if edge_id not in {
+        "review_pr.fix.phase1",
+        "review_pr.fix.phase2",
+        "simplify.fix.phase2",
+    }:
+        fail("launch_binding_invalid")
+    if not isinstance(instance_id, str) or not instance_id:
+        fail("launch_binding_invalid")
+    canonical_result = _absolute_input(result_path, "launch_binding_invalid")
+    canonical_status = _absolute_input(status_path, "launch_binding_invalid")
+    canonical_working = _absolute_input(working_dir, "launch_binding_invalid")
+    return {
+        "schema_version": 1,
+        "edge_id": edge_id,
+        "instance_id": instance_id,
+        "backend": "workflow",
+        "run_nonce": run_nonce,
+        "result_path": canonical_result,
+        "status_path": canonical_status,
+        "workspace_mode": "caller",
+        "worktree": canonical_working,
+        "branch": "",
+    }
+
+
+def _load_workflow_launch_binding(
+    value: dict[str, Any], expected_edge_id: str, payload: bytes
+) -> dict[str, Any]:
+    if (
+        set(value) != WORKFLOW_LAUNCH_BINDING_KEYS
+        or _canonical_json(value) != payload
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or value.get("edge_id") != expected_edge_id
+        or not isinstance(value.get("instance_id"), str)
+        or not value["instance_id"]
+        or not isinstance(value.get("run_nonce"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["run_nonce"]) is None
+        or value.get("workspace_mode") != "caller"
+        or value.get("branch") != ""
+    ):
+        fail("launch_binding_invalid")
+    for key in ("result_path", "status_path", "worktree"):
+        item = value.get(key)
+        if not isinstance(item, str) or _absolute_input(
+            item, "launch_binding_invalid"
+        ) != item:
+            fail("launch_binding_invalid")
+    return value
+
+
 def _load_launch_binding(payload: bytes, expected_edge_id: str) -> dict[str, Any]:
     if not isinstance(payload, bytes) or not payload or len(payload) > 65_536:
         fail("launch_binding_invalid")
     value = _parse_json(payload, "launch_binding_invalid")
+    if not isinstance(value, dict):
+        fail("launch_binding_invalid")
+    # The two key sets are disjoint on the members that matter, so a binding
+    # cannot satisfy both. Dispatching on the declared backend keeps the
+    # exclusion explicit rather than letting a smuggled member decide.
+    if value.get("backend") == "workflow":
+        return _load_workflow_launch_binding(value, expected_edge_id, payload)
     if (
-        not isinstance(value, dict)
-        or set(value) != LAUNCH_BINDING_KEYS
+        set(value) != LAUNCH_BINDING_KEYS
         or _canonical_json(value) != payload
         or type(value.get("schema_version")) is not int
         or value["schema_version"] != 1
