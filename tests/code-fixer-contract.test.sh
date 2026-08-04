@@ -3854,5 +3854,115 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-atomic-publication-") as tem
         module._fsync_directory = original_fsync
     assert not persistent_transaction.exists()
 
+# === P1/#381: workflow-backend child status binds on a nonce, not a PID ===
+#
+# A Workflow-native child is awaited in-process. It has no pid, no process
+# group and no lease, so `process_identity` / `lease_generation` / `pid` cannot
+# be populated. The detached triple defends against a status file written by a
+# different or recycled process, or by a stale detached agent — neither of which
+# can occur for an awaited call. A single-use nonce the controller mints and the
+# relay agent echoes back carries the same binding.
+#
+# The load-bearing assertion is the NEGATIVE one: the triple must be ABSENT.
+# Accepting a fabricated pid would leave the binding looking correct while
+# proving nothing.
+WORKFLOW_NONCE = "f" * 64
+
+workflow_binding = {
+    "backend": "workflow",
+    "run_nonce": WORKFLOW_NONCE,
+    "workspace_mode": "caller",
+    "worktree": "/repo",
+    "branch": "feat/x",
+    "result_path": "/run/children/i1/result.md",
+}
+
+
+def workflow_status(**overrides):
+    document = {
+        "backend": "workflow",
+        "state": "completed",
+        "exit_code": 0,
+        "run_nonce": WORKFLOW_NONCE,
+        "workspace_mode": "caller",
+        "worktree": "/repo",
+        "branch": "feat/x",
+        "result": "/run/children/i1/result.md",
+    }
+    for key, value in overrides.items():
+        if value is _ABSENT:
+            document.pop(key, None)
+        else:
+            document[key] = value
+    return json.dumps(document).encode()
+
+
+_ABSENT = object()
+
+# Happy path: nonce matches, triple absent.
+module._validate_bound_child_status(workflow_binding, workflow_status())
+
+# A wrong nonce is a different run's status file.
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        workflow_binding, workflow_status(run_nonce="a" * 64)
+    ),
+    "child_status_invalid",
+)
+
+# A missing nonce leaves the status unbound entirely.
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        workflow_binding, workflow_status(run_nonce=_ABSENT)
+    ),
+    "child_status_invalid",
+)
+
+# Fabricated detached-supervision fields must be REFUSED, not tolerated.
+for fabricated in (
+    {"pid": 4242},
+    {"process_identity": "1|1|1|" + "0" * 64},
+    {"lease_generation": "0" * 32},
+):
+    expect_contract_reason(
+        lambda f=fabricated: module._validate_bound_child_status(
+            workflow_binding, workflow_status(**f)
+        ),
+        "child_status_invalid",
+    )
+
+# A non-terminal or failed child never binds.
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        workflow_binding, workflow_status(state="running")
+    ),
+    "child_status_invalid",
+)
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        workflow_binding, workflow_status(exit_code=1)
+    ),
+    "child_status_invalid",
+)
+
+# Workspace identity is still bound.
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        workflow_binding, workflow_status(worktree="/elsewhere")
+    ),
+    "child_status_invalid",
+)
+
+# And the reverse guard: a DETACHED backend must not smuggle a nonce in place
+# of the triple it is still required to carry.
+expect_contract_reason(
+    lambda: module._validate_bound_child_status(
+        {**workflow_binding, "backend": "codex", "handle": "9",
+         "process_identity": "9|9|9|" + "0" * 64, "lease_generation": "0" * 32},
+        workflow_status(backend="codex"),
+    ),
+    "child_status_invalid",
+)
+
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

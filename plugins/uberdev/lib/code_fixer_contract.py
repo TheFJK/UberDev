@@ -6265,6 +6265,11 @@ CHILD_STATUS_KEYS = {
     "workspace_mode",
     "process_identity",
     "lease_generation",
+    # Workflow-native children only. Mutually exclusive with the
+    # pid/process_identity/lease_generation triple — see
+    # _validate_bound_child_status, which enforces the exclusion in both
+    # directions rather than merely permitting the key here.
+    "run_nonce",
 }
 
 
@@ -6576,16 +6581,71 @@ def capture_persistence_terminal(*, launch_binding: bytes) -> dict[str, Any]:
     }
 
 
+DETACHED_SUPERVISION_KEYS = {"pid", "process_identity", "lease_generation"}
+
+
+def _validate_bound_workflow_child_status(
+    binding: dict[str, Any], status_document: dict[str, Any]
+) -> None:
+    """Bind a Workflow-native child's status on a nonce instead of a PID.
+
+    A Workflow child is awaited in-process: it owns no pid, no process group and
+    no lease, so the detached triple cannot be populated. What that triple
+    defends against -- a status file written by a different or recycled process,
+    or by a stale detached agent -- cannot occur for an awaited call, so a
+    single-use nonce the controller mints and the relay agent echoes back
+    carries the same binding.
+
+    The triple must be ABSENT, not null and not fabricated. A synthetic pid
+    would leave every downstream equality check looking correct while proving
+    nothing, which is strictly worse than having no check at all.
+    """
+    nonce = binding.get("run_nonce")
+    if (
+        set(status_document) - CHILD_STATUS_KEYS
+        or DETACHED_SUPERVISION_KEYS & set(status_document)
+        or not {
+            "backend",
+            "state",
+            "exit_code",
+            "run_nonce",
+            "workspace_mode",
+            "worktree",
+            "branch",
+        }.issubset(status_document)
+        or status_document.get("backend") != "workflow"
+        or status_document.get("state") != "completed"
+        or type(status_document.get("exit_code")) is not int
+        or status_document["exit_code"] != 0
+        or not isinstance(nonce, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", nonce)
+        or status_document.get("run_nonce") != nonce
+        or status_document.get("workspace_mode") != binding["workspace_mode"]
+        or status_document.get("worktree") != binding["worktree"]
+        or status_document.get("branch") != binding["branch"]
+        or (
+            "result" in status_document
+            and status_document["result"] != binding["result_path"]
+        )
+    ):
+        fail("child_status_invalid")
+
+
 def _validate_bound_child_status(
     binding: dict[str, Any], status_payload: bytes
 ) -> None:
     status_document = _parse_json(status_payload, "child_status_invalid")
-    status_handle = (
-        status_document.get("pid") if isinstance(status_document, dict) else None
-    )
+    if not isinstance(status_document, dict):
+        fail("child_status_invalid")
+    if binding.get("backend") == "workflow":
+        _validate_bound_workflow_child_status(binding, status_document)
+        return
+    status_handle = status_document.get("pid")
     if (
-        not isinstance(status_document, dict)
-        or set(status_document) - CHILD_STATUS_KEYS
+        set(status_document) - CHILD_STATUS_KEYS
+        # A detached backend still owes the supervision triple; it must not
+        # smuggle a workflow nonce in place of it.
+        or "run_nonce" in status_document
         or status_document.get("backend") != binding["backend"]
         or status_document.get("state") != "completed"
         or not {
