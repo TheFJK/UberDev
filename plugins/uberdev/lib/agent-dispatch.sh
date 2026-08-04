@@ -256,7 +256,13 @@ try:
         if workspace_dir is not None: raise ValueError("unexpected_workspace_dir")
     else:
         repository_id=request.get("repository_id"); backend=request.get("backend","codex")
-        if backend not in {"codex","claude-bg"}: raise ValueError("workspace_mode_unsupported")
+        # workflow admitted per #381: skills/scan-fleet/workflow.js already runs
+        # uberdev:code-fixer agents against the CALLER checkout with no worktree
+        # isolation (git forbids two worktrees on one branch), writing a
+        # digest-bound disposition artifact. Caller-workspace repair on this
+        # backend is shipped behaviour, not a new capability.
+        # NB: this block is a single-quoted shell string -- no apostrophes.
+        if backend not in {"codex","claude-bg","workflow"}: raise ValueError("workspace_mode_unsupported")
         if not isinstance(workspace_dir,str) or not os.path.isabs(workspace_dir) or not os.path.isdir(workspace_dir): raise ValueError("invalid_workspace_dir")
         entry=os.lstat(workspace_dir)
         reparse=getattr(entry,"st_file_attributes",0)&getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0)
