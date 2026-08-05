@@ -7,8 +7,10 @@
 #
 # Expanded scope (v0.22.0, #85): solve-pipeline must NOT contain any of the
 # retired terminal-dispatch forms — cmux IPC, iTerm/Terminal AppleScript,
-# nohup launcher invocation. The primary dispatch path is now `claude --bg`
-# (see tests/dispatch-claude-bg.test.sh for the positive assertions).
+# nohup launcher invocation. The primary dispatch path is now the Workflow-
+# native solver fleet (see tests/solve-fleet-workflow.test.sh for the positive
+# assertions); the `claude --bg` path that briefly held that role was itself
+# retired by RFC 0015 §7 as amended.
 
 set -u
 

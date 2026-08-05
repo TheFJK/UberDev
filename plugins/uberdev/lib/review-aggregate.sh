@@ -139,7 +139,7 @@ try:
   if len(matches)!=1: fail('roster-mismatch',row)
   launch=matches[0]; launched_result=launch.get('result'); launched_status=launch.get('status')
   # Two launch-row shapes, one per dispatcher. `receipt` is the detached
-  # transports (codex / claude-bg / wezterm / background), which issue a
+  # transports (codex / wezterm / background), which issue a
   # dispatch receipt and supervise by pid. `binding` is the session's Workflow
   # tool, which issues neither -- see capture_bound_child above.
   if set(launch)=={'edge','index','instance','receipt','result','status'}: row_shape='receipt'

@@ -1727,7 +1727,7 @@ uberdev_goal_gh_failure_breaker_check() {
 
 # uberdev_goal_agent_busy_for_issue ISSUE_NUM   (issue #180)
 # rc 0 iff the resolved backend still has an active solver for issue N:
-# claude-bg/wezterm poll `claude agents --json` for a live session in the
+# wezterm polls `claude agents --json` for a live session in the
 # solver worktree; background polls the recorded wrapper PID; codex first
 # treats terminal completed/failed status files as not busy, then falls back to
 # the wrapper PID. Phase 2a uses this to disambiguate "solver still working,
@@ -1742,8 +1742,8 @@ uberdev_goal_gh_failure_breaker_check() {
 uberdev_goal_agent_busy_for_issue() {
   local n="$1"
   _uberdev_goal_validate_int "$n" || return 1
-  # Backend-aware liveness (RFC 0012 §3.4 codex-port). claude-bg/wezterm
-  # dispatch named sessions queryable via `claude agents --json`; background
+  # Backend-aware liveness (RFC 0012 §3.4 codex-port). wezterm
+  # dispatches named sessions queryable via `claude agents --json`; background
   # dispatch tracks only a wrapper PID. Codex has a richer status JSON, so
   # terminal completed/failed states return "not busy" before PID probing; this
   # lets Phase 2a surface terminal Codex failures instead of skipping them just
@@ -1798,7 +1798,7 @@ uberdev_goal_agent_busy_for_issue() {
       printf 'goal-state: backend=workflow has no pollable per-issue liveness (the fleet is owned by the Workflow runtime); reporting not-busy for issue %s — PR existence via gh is the authoritative progress signal\n' "$n" >&2
       return 1
       ;;
-    claude-bg|wezterm|*)
+    wezterm|*)
       if claude agents --json 2>/dev/null | jq -e --arg n "$n" '
         any(.[]?;
             (((.cwd // "") | rtrimstr("/")) | endswith("solve-issue-" + $n))
@@ -1823,7 +1823,7 @@ uberdev_goal_agent_busy_for_issue() {
 
 # uberdev_goal_review_pr_in_flight PR_NUM   (issue #220, AC ❷)
 # rc 0 means a review-pr dispatch must be treated as in-flight. For
-# claude-bg/wezterm this means `claude agents --json` shows a live
+# wezterm this means `claude agents --json` shows a live
 # /uberdev:review-pr <pr> agent (status ∈ busy|running|starting|working). For
 # background it means the tracked wrapper PID is alive. Codex returns in-flight
 # for ambiguous running status files (malformed JSON or running state with an
@@ -1839,7 +1839,7 @@ uberdev_goal_agent_busy_for_issue() {
 uberdev_goal_review_pr_in_flight() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  # RFC 0012 §3.4 codex-port: claude-bg/wezterm have `claude agents --json`;
+  # RFC 0012 §3.4 codex-port: wezterm has `claude agents --json`;
   # background/codex have only the status JSON written by dispatch.sh. For the
   # PID-based backends, review-pr in-flight means the tracked wrapper process
   # for this PR is still alive.
@@ -3615,7 +3615,7 @@ uberdev_goal_read_run_state() {
         # `background` session. Keep this list byte-aligned with the dispatch
         # enum minus `auto` (auto is a REQUEST, never a resolution).
         # CONTRACT: dispatch-backend -auto !case-arm
-        case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
+        case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
     esac
   done < "$sc"
@@ -3699,7 +3699,7 @@ uberdev_goal_read_run_state() {
 # _uberdev_goal_reap_zombies   (issue #220, AC reaper)
 # Best-effort kill of every PID stashed in solve-bg-status-<ISSUE>.json for
 # every issue in this goal's batch-prs.tsv. Per-backend short-circuit:
-# claude-bg / wezterm cannot be reaped (no PID visibility — security.md);
+# wezterm cannot be reaped (no PID visibility — security.md);
 # background backend gets full TERM->sleep 2->KILL with owner-gate. Emits
 # goal_reaper_kill per kill + goal_reaper_skipped once per skip-backend.
 # Never aborts the caller: || true on every step.
@@ -3710,7 +3710,7 @@ _uberdev_goal_reap_zombies() {
   [ -f "$batch_tsv" ] || return 0
 
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
-    claude-bg|wezterm)
+    wezterm)
       uberdev_goal_audit goal_reaper_skipped \
         "{\"goal_id\":\"$goal_id\",\"backend\":\"${UBERDEV_RESOLVED_BACKEND}\",\"reason\":\"no_pid_visibility\"}" || true
       return 0
@@ -3723,7 +3723,7 @@ _uberdev_goal_reap_zombies() {
       # PID lane below would read whatever stale solve-bg-status-<issue>.json a
       # PREVIOUS detached run left in TMPDIR and TERM/KILL an unrelated live
       # process. Skip explicitly, with its own reason so the audit trail does
-      # not conflate it with the claude-bg no-PID case.
+      # not conflate it with the wezterm no-PID case.
       uberdev_goal_audit goal_reaper_skipped \
         "{\"goal_id\":\"$goal_id\",\"backend\":\"workflow\",\"reason\":\"runtime_owned_lifecycle\"}" || true
       return 0

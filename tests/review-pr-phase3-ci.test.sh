@@ -660,7 +660,7 @@ RESULT_PATH_TMP="$(mktemp -d)"
 RESULT_PATH_TMP="$(cd "$RESULT_PATH_TMP" && pwd -P)"
 export UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
 export UBERDEV_CARRIER_RUN_DIR="$RESULT_PATH_TMP/run"
-export _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+export _UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex'
 export UBERDEV_CARRIER_BACKEND=codex
 awk '
   /^review_child_result_path\(\) \{/ { capture=1 }
@@ -715,7 +715,7 @@ RESULT_REASON="$(env _UBERDEV_DISPATCH_BACKEND_ENUM='auto|codex|codex' \
   && RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 [ "$RESULT_REASON" = classification_carrier_mismatch ] || RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 RESULT_REASON="$(env \
-  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex' \
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex' \
   UBERDEV_CARRIER_BACKEND=auto \
   bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.classify' \
     _ "$RESULT_PATH_HELPER" "$RESULT_LEDGER" 2>/dev/null)" \

@@ -324,7 +324,7 @@ export UBERDEV_TMPDIR="$g17_dir/state"; mkdir -p "\$UBERDEV_TMPDIR"
 uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch.log"; return 0; }
 uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit.log"; return 0; }
 MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400; MAX_WATCH_TICKS=40
-UBERDEV_RESOLVED_BACKEND=claude-bg
+UBERDEV_RESOLVED_BACKEND=wezterm
 GOAL_ID="goal-g17dryrun01"
 ARGUMENTS="101 202 --dry-run"
 source "$g17_argparse"
@@ -360,7 +360,7 @@ export UBERDEV_TMPDIR="$g17_dir/state2"; mkdir -p "\$UBERDEV_TMPDIR"
 uberdev_dispatch_one() { printf 'DISPATCH %s\n' "\$*" >> "$g17_dir/dispatch2.log"; return 0; }
 uberdev_goal_audit()  { printf 'AUDIT %s\n'    "\$1" >> "$g17_dir/audit2.log"; return 0; }
 MAX_CYCLES=5; MAX_PARALLEL=3; BARRIER_TIMEOUT_S=14400; MAX_WATCH_TICKS=40
-UBERDEV_RESOLVED_BACKEND=claude-bg
+UBERDEV_RESOLVED_BACKEND=wezterm
 GOAL_ID="goal-g17real01"
 ARGUMENTS="101 202"
 source "$g17_argparse"

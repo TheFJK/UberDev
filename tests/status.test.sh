@@ -437,7 +437,7 @@ assert_in "$RENDER_OUT" 'solve-codex-312-1  pending \(routed, never started\)' \
 assert_in "$RENDER_OUT" 'summary: 1 live, 2 finished-or-unstarted' \
   "S8.6 the liveness census totals are correct"
 assert_not_in "$EXEC_ONLY" 'claude agents' \
-  "S8.7 liveness is never taken from the claude-bg agent surface"
+  "S8.7 liveness is never taken from the detached-session agent surface"
 
 # ===========================================================================
 echo "== S9: /review-pr reservations (FRESH / STALE / ABANDONED) =="

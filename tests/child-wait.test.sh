@@ -178,20 +178,10 @@ printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","proces
 terminal_manifest completed
 uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null
 
-# A detached watcher supervisory failure is actionable immediately. The
-# waiting caller receives the specific class instead of timing out generically.
-printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"abc12345"}\n' >"$STATUS"
-printf '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}\n' >"$STATUS.watcher-error.json"
-chmod 600 "$STATUS.watcher-error.json"
-set +e
-WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
-WATCHER_WAIT_RC=$?
-set -e
-[ "$WATCHER_WAIT_RC" -eq 70 ]
-grep -Fq 'provider supervision failed: provider_probe_failed' <<<"$WATCHER_WAIT_ERROR"
-grep -Fq 'backend=claude-bg; capacity=retained' <<<"$WATCHER_WAIT_ERROR"
-grep -Fq 'action=resolve the retained Claude session or retry with Codex' <<<"$WATCHER_WAIT_ERROR"
-rm -f "$STATUS.watcher-error.json"
+# The `provider_probe_failed` watcher-error fixture that used to open this
+# section is gone with its only producer: the detached `claude --bg`
+# supervision lane (RFC 0015 section 7 as amended). The surviving
+# supervisory-failure classes are exercised below.
 
 # Owner identity capture is a launch-time supervisory failure with no reserved
 # capacity. Exercise the exact producer helper and public waiter together so
@@ -207,22 +197,6 @@ set -e
 grep -Fq 'provider supervision failed: owner_process_identity_unavailable' \
   <<<"$WATCHER_WAIT_ERROR"
 grep -Fq 'backend=codex; capacity=not-reserved' <<<"$WATCHER_WAIT_ERROR"
-rm -f "$STATUS.watcher-error.json"
-
-# The same prelaunch record for claude-bg has no session and no capacity. Its
-# remediation must not tell the operator to resolve a retained Claude session.
-rm -f "$STATUS" "$STATUS.watcher-error.json"
-_uberdev_agent_fail_owner_capture "$STATUS" "$OWNER_CAPTURE_FALLBACK" claude-bg
-set +e
-WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
-WATCHER_WAIT_RC=$?
-set -e
-[ "$WATCHER_WAIT_RC" -eq 70 ]
-grep -Fq 'owner_process_identity_unavailable; backend=claude-bg; capacity=not-reserved' \
-  <<<"$WATCHER_WAIT_ERROR"
-grep -Fq 'action=fix the prelaunch supervisory failure and retry' \
-  <<<"$WATCHER_WAIT_ERROR"
-! grep -Fq 'resolve the retained Claude session' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # The detached numeric-process watcher emits a distinct durable record when
@@ -315,12 +289,11 @@ rm -f "$INTENT_PATH"
 
 # Producer-shaped cancellation and lease-acquisition failures carry a bounded
 # reason. The child reports that reason without rejecting the closed schema.
-for watcher_reason in provider_cancel_unconfirmed lease_acquire_rollback_failed; do
-  if [ "$watcher_reason" = provider_cancel_unconfirmed ]; then
-    watcher_payload="{\"schema_version\":1,\"error\":\"provider_cancel_failed\",\"backend\":\"claude-bg\",\"handle\":\"abc12345\",\"terminal\":\"blocked:permission\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
-  else
-    watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"codex\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
-  fi
+# `provider_cancel_unconfirmed` dropped out of this loop with the
+# `provider_cancel_failed` error kind, whose only writer was the retired
+# opaque-session supervision lane. The lease-acquire branch is unchanged.
+for watcher_reason in lease_acquire_rollback_failed; do
+  watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"codex\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
   printf '%s\n' "$watcher_payload" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e
@@ -336,24 +309,25 @@ rm -f "$STATUS.watcher-error.json"
 # If the child status directory becomes unwritable, the detached watcher uses
 # the independently monitored controller-state fallback for the same union.
 WATCHER_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
-printf '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}\n' >"$WATCHER_FALLBACK"
+printf '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"process_identity_probe_unavailable","attempts":3}\n' >"$WATCHER_FALLBACK"
 chmod 600 "$WATCHER_FALLBACK"
 set +e
 WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
 set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
-grep -Fq 'provider supervision failed: provider_probe_failed' <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'provider supervision failed: process_identity_probe_failed' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$WATCHER_FALLBACK"
 
 for malformed_watcher_error in \
-  '{"schema_version":1,"error":"provider_probe_failed","backend":"unknown","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}' \
-  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"","terminal":"provider_probe_failed","attempts":3}' \
-  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":0}' \
-  '{"schema_version":1,"error":"provider_probe_failed","backend":"claude-bg","handle":"abc12345","terminal":"failed","attempts":3}' \
-  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"unknown","handle":"321","terminal":"process_identity_probe_unavailable","attempts":3}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"","terminal":"process_identity_probe_unavailable","attempts":3}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"process_identity_probe_unavailable","attempts":0}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"failed","attempts":3}' \
   '{"schema_version":1,"error":"terminal_finalize_failed","backend":"codex","handle":"321","terminal":"failed","attempts":1,"reason":"owner_process_identity_unavailable"}' \
-  '{"schema_version":1,"error":"provider_cancel_failed","backend":"claude-bg","handle":"abc12345","terminal":"blocked:permission","attempts":3,"reason":"not-in-the-closed-enum"}'; do
+  '{"schema_version":1,"error":"timeout_intent_recovery_failed","backend":"codex","handle":"321","terminal":"timeout_intent_recovery_failed","attempts":1,"reason":"not-in-the-closed-enum"}' \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"codex","handle":"321","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_cancel_failed","backend":"codex","handle":"321","terminal":"blocked:permission","attempts":3}'; do
   printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e
@@ -622,47 +596,22 @@ wait "$LOCK_WRITER_PID"
 [ "$(cat "$LOCK_RESULT")" -eq 0 ]
 grep -q '"state":"completed"' "$ZERO_STATUS"
 
-# Opaque Claude sessions cancel through an explicit provider capability hook
-# and require an absent/terminal probe, never a fabricated local state.
-mkdir "$TMP/bin"; printf '[{"sessionId":"abc12345-full","state":"running"}]\n' >"$TMP/claude-state"
-cat >"$TMP/bin/claude" <<'SH'
-#!/usr/bin/env bash
-if [ "$1 $2 $3" = 'agents --all --json' ]; then cat "$CLAUDE_STATE"; exit 0; fi
-exit 2
-SH
-chmod +x "$TMP/bin/claude"
-_uberdev_dispatch_cancel_claude_bg() { printf '[]\n' >"$CLAUDE_STATE"; }
-CLAUDE_STATE="$TMP/claude-state" PATH="$TMP/bin:$PATH" _uberdev_dispatch_cancel_backend claude-bg abc12345 ''
-
-# An unavailable or failed Claude cancellation hook must make timeout handling
-# fail closed before mutating status, manifest, or the live lease.
-_uberdev_dispatch_cancel_claude_bg() {
-  _UBERDEV_DISPATCH_CANCEL_REASON=provider_stop_failed
-  return 2
-}
+# Two fixtures used to sit here: one proved an opaque Claude session cancels
+# through its provider capability hook, the other proved an unavailable hook
+# makes timeout handling fail closed before mutating status, manifest or the
+# live lease. Both drove the opaque-session cancel helper, deleted with
+# its backend (RFC 0015 section 7 as amended). The fail-closed contract they
+# shared is still covered for the surviving backends by the numeric
+# cancellation fixtures above -- there is no opaque-handle backend left.
+#
+# The lease scaffolding those fixtures built is still needed by the
+# completion-race fixtures below, so it is kept here, backend-neutral.
 GENERATION=abcdef0123456789abcdef0123456789
-printf '{"backend":"claude-bg","state":"running","exit_code":null,"pid":"unsupported-session","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
-printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf '9%.0s' {1..64}).scope"; mkdir -p "$LEASE_DIR"
 LEASE="$LEASE_DIR/${GENERATION}$(printf '8%.0s' {1..32}).lease"
-printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=unsupported-session\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
+printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=777\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
   "$GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$LEASE"
 chmod 600 "$LEASE"
-STATUS_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
-MANIFEST_SHA="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
-LEASE_SHA="$(shasum -a 256 "$LEASE" | awk '{print $1}')"
-set +e
-UNSUPPORTED_CANCEL_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1)"
-WAIT_RC=$?
-set -e
-[ "$WAIT_RC" -eq 2 ]
-[ "$WAIT_RC" -ne 124 ]
-grep -Fq \
-  'provider cancellation failed: backend=claude-bg handle=unsupported-session reason=provider_stop_failed capacity=retained' \
-  <<<"$UNSUPPORTED_CANCEL_ERROR"
-[ "$(shasum -a 256 "$STATUS" | awk '{print $1}')" = "$STATUS_SHA" ]
-[ "$(shasum -a 256 "$MANIFEST" | awk '{print $1}')" = "$MANIFEST_SHA" ]
-[ -f "$LEASE" ] && [ "$(shasum -a 256 "$LEASE" | awk '{print $1}')" = "$LEASE_SHA" ]
 
 # Provider completion may win after the running snapshot but before the timeout
 # path can find its lease. Re-probing the changed snapshot must observe the real

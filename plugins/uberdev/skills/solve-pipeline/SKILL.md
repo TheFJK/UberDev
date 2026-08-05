@@ -56,7 +56,7 @@ backend (RFC 0015) it stops at **Step 5w**: it writes
 `$UBERDEV_TMPDIR/solve-fleet-manifest.json`, emits the args envelope, and the
 command file mandates one `Workflow` call into
 `skills/solve-fleet/workflow.js`, which runs one worktree-isolated solver agent
-per issue. On a detached backend (`claude-bg` / `wezterm` / `background` /
+per issue. On a detached backend (`wezterm` / `background` /
 `codex`) it instead dispatches one autonomous session per issue (Phase B) via
 `lib/dispatch.sh`.
 The `codex` backend is also available under Codex or via `--backend=codex`;
@@ -68,8 +68,7 @@ Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
 namespaced by issue number, so concurrent spawns are collision-free. Override flags
 (`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service
 flags, `--backend=<name>`) apply batch-wide. Monitor via `/workflows` (workflow — the
-default), `claude agents` (claude-bg), visible panes (wezterm), or
-PID/log/result files (background/codex).
+default), visible panes (wezterm), or PID/log/result files (background/codex).
 
 ## Constants
 
@@ -82,8 +81,8 @@ is the documentation surface.
 | Name | Value (verbatim) | Where used |
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | see the column-0 binding in `lib/solve-launcher.sh` (verbatim note also quoted under `## Deprecated Flags` in both command files) | Phase A stderr emission on first `--terminal=` / `$SOLVE_TERMINAL` encounter. |
-| `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (`claude --bg` needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
-| `DISPATCH_BACKEND_ENUM` | `auto \| workflow \| claude-bg \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight, which resolves `workflow` on every Claude host (RFC 0015). `claude-bg` is deprecated — removal target v1.0.0. |
+| `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (plugin support needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
+| `DISPATCH_BACKEND_ENUM` | `auto \| workflow \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight, which resolves `workflow` on every Claude host (RFC 0015). The detached `claude --bg` backend was removed in RFC 0015 §7 as amended. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | `MAX_PARALLEL_BG_AGENTS` default (dispatch-burst chunk size). |
 | `GH_PARALLEL_CAP` | `8` | Chunk size for the parallel gh stages (validation reads, claim writes) — GitHub secondary-rate-limit courtesy. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | /turbo is unattended — quality > cost. |

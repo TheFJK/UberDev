@@ -285,7 +285,7 @@ if extract_region argparse "$GOAL_P0" > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FEN
     DRV_AP="$WORK/drv_argparse.sh"
     {
       echo 'set -u'
-      echo 'ARGUMENTS="101 --max-cycles=7 202 --only-mine --dry-run --backend=claude-bg 303"'
+      echo 'ARGUMENTS="101 --max-cycles=7 202 --only-mine --dry-run --backend=background 303"'
       echo "source '$ARGPARSE_FENCE'"
       echo 'echo "queue=[${queue[*]}] mc=[$max_cycles_cli] om=[$only_mine] dr=[$dry_run] be=[$backend_cli]"'
     } > "$DRV_AP"
@@ -294,7 +294,7 @@ if extract_region argparse "$GOAL_P0" > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FEN
     if [ "$AP_RC" -eq 0 ] \
        && grep -q 'queue=\[101 202 303\]' <<<"$AP_OUT" \
        && grep -q 'mc=\[7\]' <<<"$AP_OUT" \
-       && grep -q 'om=\[1\] dr=\[1\] be=\[claude-bg\]' <<<"$AP_OUT"; then
+       && grep -q 'om=\[1\] dr=\[1\] be=\[background\]' <<<"$AP_OUT"; then
       pass "P0e: arg-parse fence under the resolved bash collects positional issues (101/202/303) + flags (got: $AP_OUT)"
     else
       fail "P0e: arg-parse fence mis-parsed under the resolved bash (rc=$AP_RC, out=[$AP_OUT])"

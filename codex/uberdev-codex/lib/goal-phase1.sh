@@ -5,7 +5,7 @@
 # Pre-RFC-0015 this logic lived in a SKILL.md fence and ended with a
 # `uberdev_dispatch_one` call per issue: one DETACHED `claude --bg` session per
 # issue, running `/uberdev:orchestrator --turbo`. That is the last thing that
-# kept claude-bg on a default path. It is gone.
+# kept the detached default transport on a default path. Both are gone.
 #
 # This script now does the *claim* half only:
 #   - provision the `uberdev:active` label,

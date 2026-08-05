@@ -58,7 +58,7 @@ trap 'rm -rf "$_t_tmpdir"' EXIT
 echo "== scalar round-trip across fresh bash -c =="
 GOAL_ID="goal-test-12345678"; cycle=2; watch_start=1716400000
 overflow_count=1; overflow_detected=0; MAX_CYCLES=5
-UBERDEV_RESOLVED_BACKEND="claude-bg"
+UBERDEV_RESOLVED_BACKEND="wezterm"
 uberdev_goal_write_run_state
 assert_eq "$?" "0" "write returns 0"
 
@@ -69,7 +69,7 @@ read_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_
     uberdev_goal_read_run_state || exit 9
     printf "%s|%s|%s|%s|%s|%s" "$GOAL_ID" "$cycle" "$watch_start" "$overflow_count" "$MAX_CYCLES" "$UBERDEV_RESOLVED_BACKEND"
   ')"
-assert_eq "$read_out" "goal-test-12345678|2|1716400000|1|5|claude-bg" "fresh-shell read recovers all scalars"
+assert_eq "$read_out" "goal-test-12345678|2|1716400000|1|5|wezterm" "fresh-shell read recovers all scalars"
 
 echo "== reproduction-equivalence (no empty GOAL_ID, no command-not-found) =="
 repro="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
@@ -125,7 +125,7 @@ g195_ok="$(UBERDEV_TMPDIR="$g195_dir" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
     . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
     . "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh"
     cycle=1; watch_start=1; overflow_count=0; overflow_detected=0; MAX_CYCLES=5
-    UBERDEV_RESOLVED_BACKEND=claude-bg; queue=(); active_issues=()
+    UBERDEV_RESOLVED_BACKEND=wezterm; queue=(); active_issues=()
     uberdev_goal_write_run_state
     printf "%s" "$?"
   ')"
@@ -161,7 +161,7 @@ assert_eq "$empty_out" "0" "empty queue yields zero elements (no phantom)"
 echo "== validation rejects path-traversal GOAL_ID =="
 forge_id="goal-test-forge001"
 forged="$UBERDEV_TMPDIR/goal-$forge_id-runstate"
-printf 'GOAL_ID=../pwned\ncycle=1\nwatch_start=1\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=claude-bg\n' > "$forged"
+printf 'GOAL_ID=../pwned\ncycle=1\nwatch_start=1\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=wezterm\n' > "$forged"
 trav_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
   GOAL_ID="$forge_id" bash -c '
     . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
@@ -178,7 +178,7 @@ esac
 echo "== validation rejects non-int counter =="
 ni_id="goal-test-nonint01"
 ni="$UBERDEV_TMPDIR/goal-$ni_id-runstate"
-printf 'GOAL_ID=%s\ncycle=not-a-number\nwatch_start=1716400000\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=claude-bg\n' "$ni_id" > "$ni"
+printf 'GOAL_ID=%s\ncycle=not-a-number\nwatch_start=1716400000\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=wezterm\n' "$ni_id" > "$ni"
 ni_out="$(UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
   GOAL_ID="$ni_id" bash -c '
     . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
@@ -198,7 +198,7 @@ ns="$UBERDEV_TMPDIR/goal-$ns_id-runstate"
 marker="$UBERDEV_TMPDIR/PWNED"
 rm -f "$marker"
 # Deliberately malicious value; the validating reader must NOT eval/source it.
-printf 'GOAL_ID=x; touch %s/PWNED\ncycle=1\nwatch_start=1\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=claude-bg\n' "$UBERDEV_TMPDIR" > "$ns"
+printf 'GOAL_ID=x; touch %s/PWNED\ncycle=1\nwatch_start=1\noverflow_count=0\noverflow_detected=0\nMAX_CYCLES=5\nUBERDEV_RESOLVED_BACKEND=wezterm\n' "$UBERDEV_TMPDIR" > "$ns"
 UBERDEV_TMPDIR="$UBERDEV_TMPDIR" CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" \
   GOAL_ID="$ns_id" bash -c '
     . "$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh"
@@ -209,7 +209,7 @@ assert_absent "$marker" "metacharacter payload did not execute (no source/eval)"
 
 echo "== fixed-path active-id bootstrap: fresh shell with NO GOAL_ID recovers from pointer (#171 AC2) =="
 GOAL_ID="goal-test-boot00001"; cycle=3; watch_start=1716400000
-overflow_count=0; overflow_detected=0; MAX_CYCLES=7; UBERDEV_RESOLVED_BACKEND="claude-bg"
+overflow_count=0; overflow_detected=0; MAX_CYCLES=7; UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(501 601); active_issues=()
 uberdev_goal_write_run_state
 # Fresh shell: explicitly unset GOAL_ID + UBERDEV_GOAL_ID (mirrors a real
@@ -247,7 +247,7 @@ echo "== Phase0->1->2 hand-off: active_issues populated in Phase 1 survives to P
 # (another fresh shell) rehydrates and must see the Phase 1 mutation. Without the
 # Phase 1 flush, Phase 2 reads an empty active_issues and false-converges on cycle 1.
 GOAL_ID="goal-test-handoff01"; cycle=1; watch_start="$(date +%s)"
-overflow_count=0; overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
+overflow_count=0; overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(123); active_issues=()
 uberdev_goal_write_run_state                      # Phase 0 flush (active_issues still empty)
 # Phase 1 (fresh shell): rehydrate, simulate a dispatch populating active_issues, flush.
@@ -277,7 +277,7 @@ echo "== read_run_state re-exports UBERDEV_GOAL_ID + UBERDEV_TMPDIR for fresh-sh
 # audit to goal-unknown.jsonl, refuse a GREEN PR auto-merge, or resolve state
 # files under / or /tmp instead of the dir Phase 0 wrote.
 GOAL_ID="goal-test-export01"; cycle=1; watch_start=1; overflow_count=0
-overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
+overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(); active_issues=()
 uberdev_goal_write_run_state
 # Fresh shell: TMPDIR set (so the helper fallback locates the sidecar) but BOTH
@@ -299,7 +299,7 @@ assert_eq "$export_out" "OK|OK" "read_run_state exports UBERDEV_GOAL_ID + UBERDE
 
 echo "== cleanup removes all three sidecars + the active-id pointer =="
 GOAL_ID="goal-test-clean001"; cycle=1; watch_start=1; overflow_count=0
-overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="claude-bg"
+overflow_detected=0; MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(1 2); active_issues=(3)
 uberdev_goal_write_run_state
 sc="$UBERDEV_TMPDIR/goal-$GOAL_ID-runstate"
@@ -326,7 +326,7 @@ echo "== S-barrier-1: MAX_PARALLEL / BARRIER_TIMEOUT_S / barrier_start_ts surviv
 # active-id file; do NOT re-export GOAL_ID — that defeats the bootstrap test).
 GOAL_ID="goal-test-barrier01"; cycle=1; watch_start=1700000000
 overflow_count=0; overflow_detected=0; MAX_CYCLES=5
-UBERDEV_RESOLVED_BACKEND="claude-bg"
+UBERDEV_RESOLVED_BACKEND="wezterm"
 queue=(); active_issues=()
 MAX_PARALLEL=3
 BARRIER_TIMEOUT_S=14400
@@ -448,7 +448,7 @@ env -i UBERDEV_TMPDIR="$UBERDEV_TMPDIR" PATH="$PATH" GOAL_ID="goal-test-cand0001
   . "'"$DISPATCH_LIB"'"
   . "'"$GOAL_LIB"'"
   cycle=4; watch_start=1716400000; overflow_count=0; overflow_detected=0
-  MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND=claude-bg; only_mine=1
+  MAX_CYCLES=5; UBERDEV_RESOLVED_BACKEND=wezterm; only_mine=1
   queue=(); active_issues=(); new_candidates=()
   uberdev_goal_write_run_state
 ' || { FAIL=$((FAIL+1)); echo "  FAIL  S7.p0-seed errored" >&2; }

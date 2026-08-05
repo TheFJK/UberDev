@@ -72,9 +72,9 @@ uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # re-de
 # So a `workflow` run resolves a SEPARATE, EXPLICIT transport for those two
 # children. This is deliberately NOT the retired
 # `uberdev_dispatch_demote_workflow_to_detached` shim: that one re-resolved the
-# WHOLE RUN back onto the per-OS matrix (so `auto` reached the deprecated
-# `claude-bg` on the default path). This picks `background` — a first-class,
-# non-deprecated, file-polled transport that is exactly the right shape for a
+# WHOLE RUN back onto the per-OS matrix (so `auto` reached the since-removed
+# detached default on the default path). This picks `background` — a
+# first-class, file-polled transport that is exactly the right shape for a
 # short-lived command a poller supervises — for these two dispatches only, and
 # says so out loud. Override with UBERDEV_GOAL_CHILD_BACKEND.
 #

@@ -951,22 +951,6 @@ _uberdev_child_backend_cancellation_supported() {
     # answer here -- the capability is a property of the runtime holding the
     # await, not of anything this shell could interrogate.
     workflow) return 0 ;;
-    # Claude cancellation resolves the exact full session identifier from the
-    # provider inventory, invokes `claude stop`, and confirms terminal state.
-    # The adapter fails closed when exact cancellation cannot be proven.
-    claude-bg)
-      command -v _uberdev_agent_claude_probe >/dev/null 2>&1 \
-        && command -v _uberdev_agent_start_watcher >/dev/null 2>&1 \
-        && command -v claude >/dev/null 2>&1 \
-        && python3 -I -B -c '
-import json,subprocess
-try:
- inventory=subprocess.run(["claude","agents","--all","--json"],capture_output=True,text=True,timeout=10,check=True)
- if not isinstance(json.loads(inventory.stdout),list): raise ValueError()
- subprocess.run(["claude","stop","--help"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10,check=True)
-except (OSError,ValueError,subprocess.SubprocessError): raise SystemExit(2)
-'
-      ;;
     *) return 2 ;;
   esac
 }
@@ -1029,7 +1013,7 @@ try:
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','claude-bg','background','wezterm','workflow'}: raise ValueError()
+ if backend not in {'codex','background','wezterm','workflow'}: raise ValueError()
  process_identity=s.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=s.get('lease_generation')
@@ -1114,7 +1098,7 @@ def watcher_message(path):
  base_keys={'schema_version','error','backend','handle','terminal','attempts'}; keys=frozenset(value)
  if keys not in {frozenset(base_keys),frozenset(base_keys|{'reason'})} or value.get('schema_version')!=1: raise ValueError()
  error=value.get('error')
- if error not in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
+ if error not in {'process_identity_probe_failed','timeout_intent_recovery_failed','terminal_finalize_failed','launch_finalize_failed'}: raise ValueError()
  backend=value.get('backend'); handle=value.get('handle'); terminal=value.get('terminal'); attempts=value.get('attempts'); reason=value.get('reason','')
  cancel_reasons={'provider_stop_failed','provider_session_resolution_failed','provider_cancel_probe_failed','provider_cancel_unconfirmed'}
  # CONTRACT: semaphore-lease-acquire-reason +lease_handle_rollback_failed
@@ -1123,19 +1107,14 @@ def watcher_message(path):
  owner_capture_reasons={'owner_process_identity_unavailable'}
  if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|owner_capture_reasons|{'supervisory_failure'}: raise ValueError()
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','claude-bg','background','wezterm','workflow'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
+ if backend not in {'codex','background','wezterm','workflow'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
  if reason in owner_capture_reasons and not (error=='launch_finalize_failed' and not handle and terminal=='launch:owner_process_identity' and attempts==1): raise ValueError()
- if error=='provider_probe_failed':
-  if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal!='provider_probe_failed' or attempts!=3: raise ValueError()
- elif error=='process_identity_probe_failed':
+ if error=='process_identity_probe_failed':
   if backend not in {'codex','background'} or not handle.isdigit() or terminal!='process_identity_probe_unavailable' or attempts!=3: raise ValueError()
  elif error=='timeout_intent_recovery_failed':
   if backend not in {'codex','background'} or not handle.isdigit() or terminal!='timeout_intent_recovery_failed' or attempts!=1 or reason not in timeout_reasons: raise ValueError()
- elif error=='provider_cancel_failed':
-  if backend!='claude-bg' or not re.fullmatch(r'[0-9a-f]{8}',handle) or terminal not in {'blocked:permission','blocked:provider'} or attempts!=3: raise ValueError()
-  if reason and reason not in cancel_reasons|{'supervisory_failure'}: raise ValueError()
  elif error=='launch_finalize_failed':
   if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal): raise ValueError()
   if terminal=='launch:owner_process_identity':
@@ -1143,9 +1122,8 @@ def watcher_message(path):
   elif attempts!=3 or (reason and reason not in lease_reasons|{'supervisory_failure'}): raise ValueError()
  # CONTRACT: agent-terminal-event
  elif not handle or terminal not in {'completed','failed','timed_out','cancelled','abandoned'}: raise ValueError()
- retained=(error in {'provider_probe_failed','process_identity_probe_failed','timeout_intent_recovery_failed','provider_cancel_failed','terminal_finalize_failed'} or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
- if backend=='claude-bg' and retained: action='resolve the retained Claude session or retry with Codex'
- elif retained: action='resolve the retained lifecycle lease before retrying'
+ retained=(error in {'process_identity_probe_failed','timeout_intent_recovery_failed','terminal_finalize_failed'} or reason in {'lease_acquire_rollback_failed','lease_handle_rollback_failed'})
+ if retained: action='resolve the retained lifecycle lease before retrying'
  else: action='fix the prelaunch supervisory failure and retry'
  return f"{reason or error}; backend={backend}; capacity={'retained' if retained else 'not-reserved'}; action={action}"
 primary=status+'.watcher-error.json'; watcher=primary if os.path.lexists(primary) else fallback
@@ -1168,7 +1146,7 @@ try:
  if not isinstance(value,dict) or set(value)-allowed or value.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  backend=value.get('backend')
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','claude-bg','background','wezterm','workflow'}: raise ValueError()
+ if backend not in {'codex','background','wezterm','workflow'}: raise ValueError()
  process_identity=value.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=value.get('lease_generation')

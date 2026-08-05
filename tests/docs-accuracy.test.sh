@@ -555,9 +555,9 @@ assert_grep "$WORKFLOW_RFC" 'only successful verdict publication retires' \
 assert_grep "$WORKFLOW_RFC" 'at or after.*selected timestamp is indeterminate' \
   "T9.8 RFC 0012 qualifies indeterminacy as positional (at-or-after the selected timestamp)"
 
-# claude-bg retirement (RFC 0015) annotations — annotate, never delete.
+# Detached-session retirement (RFC 0015) annotations — annotate, never delete.
 assert_grep "$WORKFLOW_RFC" 'SUPERSEDED IN PART — RFC 0015' \
-  "T9.9 RFC 0012 annotates the claude-bg-dependent verdicts as superseded by RFC 0015"
+  "T9.9 RFC 0012 annotates the detached-dispatch-dependent verdicts as superseded by RFC 0015"
 assert_grep "$WORKFLOW_RFC" 'hybrid — shell preflight \+ solve-fleet workflow' \
   "T9.10 §3.0 verdict row for the /solve+/turbo launcher reads hybrid, not keep-shell"
 assert_grep "$WORKFLOW_RFC" 'skills/goal-pipeline/workflow\.js' \

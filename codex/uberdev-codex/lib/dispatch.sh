@@ -10,15 +10,15 @@
 #   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
-#   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm /
-#   _uberdev_dispatch_background / _uberdev_dispatch_codex
+#   _uberdev_dispatch_wezterm / _uberdev_dispatch_background /
+#   _uberdev_dispatch_codex
 #
 # Sourced by:
 #   - skills/solve-pipeline/SKILL.md Step 5b
 #   - skills/goal-pipeline/SKILL.md Phase 0
 #   - commands/review-pr.md executable setup and routed child adapter
-#   - tests/dispatch-claude-bg.test.sh, dispatch-fallback.test.sh,
-#     dispatch-background.test.sh, dispatch-wezterm.test.sh
+#   - tests/dispatch-fallback.test.sh, dispatch-background.test.sh,
+#     dispatch-wezterm.test.sh
 #
 # All variable expansions are double-quoted (mirrors lib/config-read.sh discipline).
 # Source-time idempotent: the guard below makes repeat `source` calls cheap.
@@ -65,21 +65,12 @@ _UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S=0.10
 _UBERDEV_CODEX_CREATE_MAX_ATTEMPTS=3
 _UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S=0.05
 _UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S=0.10
-_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S=60
-_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S=300
-_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS=8
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS=8
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_POLLS_PER_SECOND=4
-_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S=0.05
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S=0.10
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S=0.25
-_UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND=20
-_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS=1
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS=2
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS=5
-_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S=1
-_UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S=2
-_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS=3
+# The long-poll / ownerless-generation reclaim budget that used to live here
+# existed for ONE caller: the synchronous `claude --bg --worktree` bootstrap,
+# which could legitimately own the repository metadata mutex for its whole
+# provider timeout. That backend is gone (RFC 0015 §7), so every remaining
+# caller is an ordinary short Git transaction served by the semaphore's own
+# default acquisition policy.
 
 _uberdev_dispatch_resolve_python() {
   local candidate='' prefix='' candidate_dir candidate_base
@@ -227,153 +218,25 @@ PY
     "$common_dir" git-worktree-metadata
 }
 
-_uberdev_dispatch_claude_bootstrap_queue_slots() {
-  local slots expected
-  if [ -n "${POST_IMPL_REVIEW_CAP:-}" ]; then
-    slots="$POST_IMPL_REVIEW_CAP"
-    expected="${REVIEW_EXPECTED_COUNT:-}"
-  elif [ -n "${MAX_PARALLEL_BG_AGENTS:-}" ]; then
-    slots="$MAX_PARALLEL_BG_AGENTS"
-    expected="${TOTAL_ISSUES:-}"
-  else
-    slots=1
-    expected=''
-  fi
-  case "$slots" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
-  if [ -n "$expected" ]; then
-    case "$expected" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
-    [ "$expected" -ge "$slots" ] || slots="$expected"
-  fi
-  printf '%s\n' "$slots"
-}
-
-# Claude's synchronous `--bg --worktree` bootstrap may legitimately own the
-# repository mutex for its full provider timeout. Poll it at a low frequency
-# with backoff, one ownership-safe acquisition attempt per poll. The wait
-# budget is derived from the actual enforced fanout wave, so ordinary Git
-# add/cleanup callers retain the semaphore's short default policy.
+# Every remaining metadata transaction (worktree add, codex worktree create,
+# cleanup) is a short synchronous Git command, so the semaphore's own default
+# acquisition policy is the whole protocol. The long-poll + ownerless-generation
+# reclaim path this used to carry was reachable ONLY from the `claude-bootstrap`
+# phase, which no longer exists (RFC 0015 §7): it was there because a detached
+# `claude --bg --worktree` bootstrap could hold the mutex for its full provider
+# timeout, and nothing else ever asked for a wait budget that long.
 _uberdev_dispatch_git_metadata_mutex_acquire() {
-  local scope="$1" phase="$2" operation_timeout="${3:-}" queue_slots provider_wait_seconds
-  local scheduled_wait_seconds wall_wait_seconds
-  local wait_tick_limit grace_ticks max_polls polls=0 waited_ticks=0 delay delay_ticks acquire_rc
-  local wall_started wall_elapsed
-  local observed_state observed_identity ownerless_identity='' ownerless_first_tick=0 ownerless_confirmations=0
-  local stable_ticks reclaim_rc
-  if [ "$phase" != claude-bootstrap ] || [ -z "$operation_timeout" ]; then
-    _uberdev_semaphore_mutex_acquire "$scope"
-    return $?
-  fi
-  case "$operation_timeout" in
-    [1-9]|[1-9][0-9]|[12][0-9][0-9]|300) ;;
-    *) return 2 ;;
-  esac
-  queue_slots="$(_uberdev_dispatch_claude_bootstrap_queue_slots)" || return 2
-  provider_wait_seconds=$((operation_timeout * queue_slots))
-  scheduled_wait_seconds=$((provider_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S))
-  wall_wait_seconds=$((scheduled_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S))
-  wait_tick_limit=$((scheduled_wait_seconds * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
-  grace_ticks=$((_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
-  max_polls=$((wait_tick_limit \
-    + _UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS))
-  wall_started="$SECONDS"
-  while [ "$polls" -lt "$max_polls" ]; do
-    wall_elapsed=$((SECONDS - wall_started))
-    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    if UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1 \
-        UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1 \
-        _uberdev_semaphore_mutex_acquire "$scope"; then
-      return 0
-    else
-      acquire_rc=$?
-    fi
-    [ "$acquire_rc" -eq 75 ] || {
-      printf 'uberdev git metadata mutex: acquisition failed for %s (rc=%s)\n' \
-        "$phase" "$acquire_rc" >&2
-      return "$acquire_rc"
-    }
-    polls=$((polls + 1))
-    wall_elapsed=$((SECONDS - wall_started))
-    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    observed_state="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
-    observed_identity="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY:-}"
-    case "$observed_state" in
-      ownerless)
-        [ -n "$observed_identity" ] || return 2
-        if [ "$observed_identity" = "$ownerless_identity" ]; then
-          ownerless_confirmations=$((ownerless_confirmations + 1))
-        else
-          ownerless_identity="$observed_identity"
-          ownerless_first_tick="$waited_ticks"
-          ownerless_confirmations=1
-        fi
-        stable_ticks=$((waited_ticks - ownerless_first_tick))
-        if [ "$stable_ticks" -ge "$grace_ticks" ] \
-            && [ "$ownerless_confirmations" -ge "$_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS" ]; then
-          if _uberdev_semaphore_mutex_reclaim_ownerless_generation "$scope" "$ownerless_identity"; then
-            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-            continue
-          else
-            reclaim_rc=$?
-          fi
-          if [ "$reclaim_rc" -eq 1 ]; then
-            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-          else
-            printf 'uberdev git metadata mutex: ownerless reclaim failed for %s (rc=%s)\n' \
-              "$phase" "$reclaim_rc" >&2
-            return "$reclaim_rc"
-          fi
-        fi
-        ;;
-      published-live|published-dead|absent)
-        ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-        ;;
-      *)
-        printf 'uberdev git metadata mutex: unsafe probe state for %s (%s)\n' \
-          "$phase" "$observed_state" >&2
-        return 2
-        ;;
-    esac
-    if [ "$waited_ticks" -ge "$wait_tick_limit" ] || [ "$polls" -ge "$max_polls" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$scheduled_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    if [ "$polls" -le "$_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS" ]; then
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS"
-    elif [ "$polls" -le $((_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS)) ]; then
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS"
-    else
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS"
-    fi
-    sleep "$delay" || {
-      printf 'uberdev git metadata mutex: acquisition wait interrupted for %s\n' "$phase" >&2
-      return 2
-    }
-    waited_ticks=$((waited_ticks + delay_ticks))
-  done
-  return 75
+  _uberdev_semaphore_mutex_acquire "$1"
 }
 
 _uberdev_dispatch_with_git_metadata_mutex() {
   local repo_root="$1" phase="$2" scope rc release_rc
-  local operation_timeout="${_UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT:-}"
   shift 2
   [ "$#" -gt 0 ] || return 2
   case "$phase" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
   scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
   (
-    _uberdev_dispatch_git_metadata_mutex_acquire "$scope" "$phase" "$operation_timeout" || exit $?
+    _uberdev_dispatch_git_metadata_mutex_acquire "$scope" || exit $?
     trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
     "$@"
     rc=$?
@@ -399,33 +262,6 @@ _uberdev_dispatch_git_worktree_add() {
   local repo_root="$1"
   _uberdev_dispatch_with_git_metadata_mutex "$repo_root" worktree-add \
     _uberdev_dispatch_git_worktree_add_locked "$@"
-}
-
-_uberdev_dispatch_claude_bootstrap_timeout() {
-  local solve_timeout="$1" configured="${UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT:-$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S}"
-  _uberdev_dispatch_python -I -B - "$solve_timeout" "$configured" \
-    "$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S" <<'PY'
-import sys
-
-solve_raw, configured_raw, maximum = sys.argv[1:]
-
-def bounded_decimal(raw):
-    if not raw or not raw.isascii() or not raw.isdecimal():
-        raise SystemExit(2)
-    value = raw.lstrip("0")
-    if not value:
-        raise SystemExit(2)
-    if len(value) > len(maximum) or (len(value) == len(maximum) and value > maximum):
-        return maximum
-    return value
-
-solve = bounded_decimal(solve_raw)
-configured = bounded_decimal(configured_raw)
-if len(configured) < len(solve) or (len(configured) == len(solve) and configured < solve):
-    print(configured)
-else:
-    print(solve)
-PY
 }
 
 # Receipt authority is created before `git worktree add`, classified only while
@@ -888,30 +724,16 @@ _uberdev_dispatch_create_codex_worktree() {
 # and the command file mandates the Workflow call.
 # `codex` is the OpenAI Codex CLI backend (RFC 0012 §3.4 codex-port): execs
 # `codex exec` headless + nohup-detached, PID-tracked like `background`.
-# `claude-bg` is DEPRECATED (RFC 0015; removal target v1.0.0) — detached
-# `claude --bg` sessions parked in the separate `claude agents` surface.
+#
+# The detached `claude --bg` backend is GONE (RFC 0015 §7 as amended). It was
+# deprecated when `workflow` shipped for /solve, /turbo and /goal, and removed
+# once /review-pr and /simplify resolved `workflow` too — at which point nothing
+# on any default path could reach it and no workflow still required it. There is
+# deliberately no deprecation shim left behind: a dormant alias is how a retired
+# transport drifts back onto a default path. Naming it now fails the enum check
+# below, loudly, listing the accepted set.
 # CONTRACT: dispatch-backend
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
-
-# Detached-provider backends scheduled for retirement. Selecting one emits a
-# one-line stderr deprecation notice (once per process — the sentinel below).
-# `auto` NEVER resolves to a deprecated backend; only an explicit request does.
-_UBERDEV_DISPATCH_DEPRECATED_BACKENDS='claude-bg'
-_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=0
-
-# _uberdev_dispatch_deprecation_notice BACKEND
-# Verbatim, constant-template stderr notice (mirrors the v0.22.0 --terminal=
-# retirement shape in lib/solve-launcher.sh). Emitted once per process.
-_uberdev_dispatch_deprecation_notice() {
-  case " $_UBERDEV_DISPATCH_DEPRECATED_BACKENDS " in
-    *" ${1:-} "*) ;;
-    *) return 0 ;;
-  esac
-  [ "$_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED" = "1" ] && return 0
-  _UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=1
-  echo "warning: --backend=$1 is deprecated (RFC 0015); /solve, /turbo and /goal now dispatch their per-issue solvers through the Workflow runtime (--backend=workflow, the auto default) instead of detached sessions in the separate 'claude agents' surface. The backend still works and will be removed in v1.0.0." >&2
-  return 0
-}
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background|codex'
 
 # _uberdev_dispatch_os_class -> prints one of: macos | windows-native | wsl2 | linux
 # WSL2 is detected via /proc/version containing "microsoft" (case-insensitive);
@@ -941,7 +763,7 @@ _uberdev_dispatch_os_class() {
 _uberdev_dispatch_numeric_supervision_supported() {
   case "${1:-}" in
     codex|background) [ "$(_uberdev_dispatch_os_class)" != windows-native ] ;;
-    claude-bg|wezterm) return 0 ;;
+    wezterm) return 0 ;;
     # `workflow` spawns no OS process at all: the Workflow runtime owns every
     # agent's lifetime, cancellation and result capture in-session. There is
     # no process tree for this library to supervise, so the native-Windows
@@ -1036,7 +858,7 @@ _uberdev_dispatch_require_workflow_engine() {
 }
 
 # uberdev_dispatch_preflight [WORKFLOW]
-# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|claude-bg|wezterm|background|codex)
+# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|wezterm|background|codex)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
 # explicit backend is unusable on this host, and (since #381) when `auto` would
@@ -1057,10 +879,9 @@ uberdev_dispatch_preflight() {
       # mandate names is on disk — refuse here rather than at stage time.
       _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       resolved="workflow"; reason="explicit" ;;
-    claude-bg|background)
-      # claude-bg / background depend only on git + claude + shell — usable
-      # on every OS class. No capability gate.
-      _uberdev_dispatch_deprecation_notice "$requested"
+    background)
+      # background depends only on git + claude + shell — usable on every OS
+      # class. No capability gate.
       resolved="$requested"; reason="explicit" ;;
     codex)
       # codex backend needs the `codex` CLI on PATH. No OS constraint (codex
@@ -1088,10 +909,10 @@ uberdev_dispatch_preflight() {
       resolved="wezterm"; reason="explicit" ;;
     auto)
       # RFC 0015: `auto` resolves to `workflow` on every Claude host and every
-      # OS class. The historical per-OS matrix below it (macos->wezterm/claude-bg,
-      # wsl2/linux->claude-bg, windows-native->wezterm-or-hard-error) existed
-      # only to pick a *detached process* supervisor; the Workflow runtime needs
-      # no supervisor, which is why native Windows no longer hard-errors here.
+      # OS class. The historical per-OS matrix below it existed only to pick a
+      # *detached process* supervisor for the retired default transport; the
+      # Workflow runtime needs no supervisor, which is why native Windows no
+      # longer hard-errors here.
       #
       # #381: the review-pr/simplify SPECIAL CASE IS GONE. It required the codex
       # CLI because those two workflows need an atomic child result artifact and
@@ -1105,7 +926,7 @@ uberdev_dispatch_preflight() {
       #
       # If we're running inside Codex itself (CODEX_HOME set), or claude is
       # absent but codex is present, the codex backend is the natural default —
-      # dispatching a claude --bg session from inside Codex would be wrong.
+      # dispatching a Claude-backed session from inside Codex would be wrong.
       # Checked before the per-OS matrix below so it wins in auto mode.
       if [ -n "${CODEX_HOME:-}" ]; then
         if _uberdev_dispatch_codex_available; then
@@ -1148,7 +969,7 @@ uberdev_dispatch_preflight() {
 # uberdev_dispatch_one itself and therefore could not use the `workflow` backend
 # (the fleet is spawned by the calling session's Workflow tool, not by this
 # library). It re-resolved a `workflow` selection back down to the pre-RFC-0015
-# per-OS detached matrix — which meant `claude-bg`, a DEPRECATED backend, was
+# per-OS detached matrix — which meant the since-removed detached default was
 # still reachable from `auto` on the default /goal path.
 #
 # /goal no longer dispatches: lib/goal-phase1.sh claims only, and
@@ -1160,8 +981,11 @@ uberdev_dispatch_preflight() {
 
 # ---------------------------------------------------------------------------
 # uberdev_dispatch_resolve_env [BACKEND]
-# Resolves the six deterministic dispatch-env vars consumed by every backend:
-#   BG_PROMPT_MODE, MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
+# Resolves the five deterministic dispatch-env vars consumed by every backend:
+#   MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
+# There used to be a sixth — the prompt-delivery mode. Its only consumer was
+# the retired detached `claude --bg` provider arm's file/stdin/argv switch, so
+# it went with it (RFC 0015 §7 as amended).
 # SSOT for both solve-pipeline (replaces its inline Phase A block) and
 # goal-pipeline (Phase 0). Sourced, NEVER exec'd — PERM_FLAG/EFFORT_FLAG are
 # bash arrays that cannot survive an env(1)/fork+exec boundary, so they must be
@@ -1193,22 +1017,6 @@ uberdev_dispatch_preflight() {
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
   local _dispatch_env_backend="${1:-}"
-  # BG_PROMPT_MODE: hardcoded `argv`. Verified 2026-05-28 against claude-code
-  # 2.1.153 via tests/manual/probe-prompt-file-slash-expansion.sh — probe verdict
-  # was `INDETERMINATE`: --prompt-file is accepted as a flag (session backgrounds
-  # successfully), but the file body is not promoted to the session-name surface
-  # — the spawned session's name remained the short id rather than the opening
-  # prompt body, unlike argv-mode where name = the opening message verbatim. The
-  # session went idle within the probe's 30s window without the name field ever
-  # diverging. Slash-expansion firing is therefore unobservable from outside the
-  # session, but the name-surface divergence suggests the body is processed
-  # through a different parser path (or not at all) — either way, the natural-
-  # language wrapper at the 5 prompt-build callsites (issue #235 / PR #238)
-  # remains canonical. The `file`/`stdin` arms in _uberdev_dispatch_claude_bg
-  # remain pre-wired migration targets for a future CLI revision per RFC 0004
-  # §3.4. Closes #240 (won't-fix).
-  BG_PROMPT_MODE=argv
-
   # MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
   MODEL='claude-opus-4-8[1m]'
 
@@ -1318,7 +1126,7 @@ uberdev_dispatch_preflight_backend() {
   # never a detached provider session. Declared, not silently narrower.
   # CONTRACT: dispatch-backend -auto -workflow !case-arm
   case "$backend" in
-    codex|claude-bg|background|wezterm)
+    codex|background|wezterm)
       if ! _uberdev_dispatch_numeric_supervision_supported "$backend"; then
         backend_label="$backend"; [ "$backend" != codex ] || backend_label=Codex
         echo "error: $workflow cannot supervise native Windows $backend_label process trees" >&2
@@ -1353,10 +1161,6 @@ uberdev_dispatch_preflight_backend() {
       # (The engine gate is applied once, in the backend case below, so it
       # covers every workflow rather than only these two.)
       workflow) ;;
-      claude-bg)
-        echo "error: $workflow cannot use claude-bg because it does not export a supervised result artifact" >&2
-        return 1
-        ;;
       wezterm|background)
         echo "error: $workflow requires a backend with result-artifact and caller-workspace repair support: $backend" >&2
         return 1
@@ -1375,12 +1179,6 @@ uberdev_dispatch_preflight_backend() {
       # refuse a broken install identically instead of at different stages.
       _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       return 0
-      ;;
-    claude-bg)
-      uberdev_dispatch_resolve_env "$backend" || return $?
-      if [ -n "$workflow" ] && command -v _uberdev_agent_claude_permissions_preflight >/dev/null 2>&1; then
-        _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
-      fi
       ;;
     wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
     *)
@@ -1412,7 +1210,6 @@ _uberdev_agent_dispatch_backend() {
   export UBERDEV_AGENT_ROUTING_MODE UBERDEV_AGENT_EFFECTIVE_POLICY UBERDEV_AGENT_ROUTE_MODEL UBERDEV_AGENT_ROUTE_EFFORT
   export UBERDEV_AGENT_SERVICE_TIER UBERDEV_AGENT_SANDBOX UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE
   case "$backend" in
-    claude-bg)   _uberdev_dispatch_claude_bg "$issue_num" "$tier" "$prompt_file" ;;
     wezterm)     _uberdev_dispatch_wezterm "$issue_num" "$tier" "$prompt_file" ;;
     background)  _uberdev_dispatch_background "$issue_num" "$tier" "$prompt_file" ;;
     codex)       _uberdev_dispatch_codex "$issue_num" "$tier" "$prompt_file" ;;
@@ -1428,56 +1225,6 @@ _uberdev_agent_dispatch_backend() {
       return 1 ;;
     *) DISPATCH_RC=1; DISPATCH_ID=""; DISPATCH_LOG="unsupported backend: $backend"; return 1 ;;
   esac
-}
-
-_uberdev_dispatch_cancel_claude_bg() {
-  local handle="${1:-}" resolved probe probe_rc attempts=0 absent_count=0 saw_valid=0
-  _UBERDEV_DISPATCH_CANCEL_REASON=''
-  [ "${#handle}" -eq 8 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' \
-    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  resolved="$(claude agents --all --json 2>/dev/null | _uberdev_dispatch_python -I -B -c '
-import json,sys
-prefix=sys.argv[1]
-try: rows=json.load(sys.stdin)
-except Exception: raise SystemExit(2)
-matches=[row["sessionId"] for row in rows if isinstance(row,dict) and isinstance(row.get("sessionId"),str) and row["sessionId"].startswith(prefix)] if isinstance(rows,list) else []
-if len(matches)!=1: raise SystemExit(2)
-print(matches[0],end="")
-' "$handle")" || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  [ -n "$resolved" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  claude stop "$resolved" >/dev/null 2>&1 \
-    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_stop_failed; return 2; }
-  while [ "$attempts" -lt 20 ]; do
-    if probe="$(_uberdev_agent_claude_probe "$resolved" exact 2>/dev/null)"; then
-      probe_rc=0; saw_valid=1
-    else
-      probe_rc=$?
-    fi
-    if [ "$probe_rc" -eq 0 ]; then
-      # `absent` is the CANCEL PROBE's own word, declared as a +delta. The
-      # `live|blocked:permission|blocked:provider` arm carries a colon, so the
-      # whole alternation is outside the arm grammar and contributes nothing.
-      # CONTRACT: run-terminal-status +absent !case-arm
-      case "$probe" in
-        completed|failed|timed_out|cancelled) return 0 ;;
-        absent)
-          absent_count=$((absent_count + 1))
-          [ "$absent_count" -lt 3 ] || return 0
-          ;;
-        live|blocked:permission|blocked:provider) absent_count=0 ;;
-        *) saw_valid=0 ;;
-      esac
-    fi
-    sleep 0.05
-    attempts=$((attempts + 1))
-  done
-  if [ "$saw_valid" -eq 0 ]; then
-    _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_probe_failed
-    return 2
-  fi
-  _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
-  return 1
 }
 
 _uberdev_dispatch_group_live() {
@@ -1715,9 +1462,6 @@ EOF_IDENTITY
       _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
       return 1
       ;;
-    claude-bg)
-      _uberdev_dispatch_cancel_claude_bg "$handle"
-      ;;
     wezterm)
       pane="${handle#pane:}"; case "$pane" in ''|*[!0-9]*) return 2 ;; esac
       wezterm cli --domain-name uberdev kill-pane --pane-id "$pane" >/dev/null 2>&1 || return 2
@@ -1874,9 +1618,6 @@ uberdev_dispatch_prepare_root() {
   printf '%s' "$prepared"
 }
 
-# _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
-# Launch the Claude background provider under the current routed lifecycle and
-# capacity contract. Sets DISPATCH_RC and DISPATCH_ID for the caller.
 # --- TOCTOU symlink-swap / pre-creation guard for predictable tmp paths (#155) ---
 # Standard dispatch sets $UBERDEV_TMPDIR to a private EUID-owned directory.
 # Caller overrides and legacy direct invocation can still select shared roots,
@@ -2005,169 +1746,6 @@ _uberdev_dispatch_capture_supervisor_pid() {
   printf '%s' "$captured"
 }
 
-_uberdev_dispatch_claude_bg() {
-  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
-  DISPATCH_RC=0
-  DISPATCH_ID=""
-  local INSTANCE_SUFFIX='' INSTANCE_SLUG=''
-  if [ -n "${UBERDEV_AGENT_INSTANCE_ID:-}" ]; then
-    INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || return 3
-    INSTANCE_SUFFIX="-$INSTANCE_SLUG"
-  fi
-  local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM$INSTANCE_SUFFIX.log"
-  # TOCTOU hardening (#155): guard + 0600-create the predictable bg-stdout path
-  # before any case arm redirects to it (3 redirect sites below).
-  if ! _uberdev_dispatch_prepare_tmp_target "$BG_STDOUT_LOG" "$ISSUE_NUM" "claude-bg"; then
-    DISPATCH_RC=3
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    return 3
-  fi
-  # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
-  # mediates the inline-prefix because timeout(1) is argv[0]. Empty array
-  # under AUTO_MODE=0 -> no-op passthrough. See commands/turbo.md + commands/
-  # solve.md + RFC 0005 §2.3 (scoped-relaxation contract — propagation
-  # rules for unattended-mode signals).
-  # SKIP_PERMISSIONS=1 is /goal's autonomous-loop opt-in (#241); propagated
-  # to the bg child so its own uberdev_dispatch_resolve_env call sees the
-  # bypass tier. Gates on SKIP_PERMISSIONS directly, NOT on AUTO_MODE — the
-  # defensive `unset` in commands/turbo.md + commands/solve.md (RFC 0005 §2.3
-  # scoped-relaxation contract) is the pollution gate. `+=` (append)
-  # preserves any UBERDEV_TURBO=1 set above.
-  local BG_TURBO_ENV=()
-  [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-  [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
-  [[ "${AUTO_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( AUTO_PERMISSIONS=1 )
-  local BG_WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
-  local BG_EXECUTION_DIR BG_WORKTREE_ARGS=()
-  case "$BG_WORKSPACE_MODE" in
-    isolated)
-      BG_EXECUTION_DIR="$(pwd -P)" || return 3
-      BG_WORKTREE_ARGS=( --worktree "solve-issue-$ISSUE_NUM$INSTANCE_SUFFIX" )
-      ;;
-    caller)
-      BG_EXECUTION_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
-      [ -n "$BG_EXECUTION_DIR" ] && [ -d "$BG_EXECUTION_DIR" ] || return 3
-      BG_EXECUTION_DIR="$(cd "$BG_EXECUTION_DIR" 2>/dev/null && pwd -P)" || return 3
-      ;;
-    *) return 3 ;;
-  esac
-  local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}" BG_STDIN_FILE='' PROMPT_BODY BG_BOOTSTRAP_TIMEOUT
-  if ! BG_BOOTSTRAP_TIMEOUT="$(_uberdev_dispatch_claude_bootstrap_timeout "$SOLVE_TIMEOUT")"; then
-    DISPATCH_RC=3
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"bootstrap_timeout\",\"backend\":\"claude-bg\",\"rc\":3}"
-    return 3
-  fi
-  local cmd=( "$TIMEOUT_BIN" "$BG_BOOTSTRAP_TIMEOUT" env )
-  [ "${#BG_TURBO_ENV[@]}" -eq 0 ] || cmd+=( "${BG_TURBO_ENV[@]}" )
-  cmd+=( claude --bg )
-  case "$BG_PROMPT_MODE" in
-    file)
-      # Trusted path arg; file contents never reach the shell as argv.
-      cmd+=( --prompt-file "$PROMPT_FILE" )
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      ;;
-    stdin)
-      # File content streamed on FD 0; no argv quoting concern.
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      BG_STDIN_FILE="$PROMPT_FILE"
-      ;;
-    argv)
-      # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
-      # B5 fix (prompt-read), mirrored from the `background` backend: an
-      # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and
-      # dispatch `claude --bg … -- ""` (garbage agent), with the audit event
-      # happily reporting success. Guard the cat read and surface the failure
-      # as a dispatch_setup_failed audit + rc=1.
-      if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$BG_STDOUT_LOG")"; then
-        DISPATCH_RC=1
-        DISPATCH_LOG="$BG_STDOUT_LOG"
-        _uberdev_dispatch_audit dispatch_setup_failed \
-          "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"claude-bg\",\"rc\":1}"
-        return 1
-      fi
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      ;;
-    *)
-      # Defensive default arm (silent-failure-hunter finding B2) — rc=127
-      # instead of a silent no-op that would report DISPATCH_RC=0.
-      echo "error: BG_PROMPT_MODE='$BG_PROMPT_MODE' is not one of {file, stdin, argv}" > "$BG_STDOUT_LOG"
-      DISPATCH_RC=127
-      ;;
-  esac
-  if [ "$DISPATCH_RC" -eq 0 ]; then
-    [ "${#PERM_FLAG[@]}" -eq 0 ] || cmd+=( "${PERM_FLAG[@]}" )
-    [ "${#EFFORT_FLAG[@]}" -eq 0 ] || cmd+=( "${EFFORT_FLAG[@]}" )
-    [ "$BG_PROMPT_MODE" != argv ] || cmd+=( -- "$PROMPT_BODY" )
-    # Claude owns its --worktree semantics (hooks, base ref, session cleanup).
-    # Serialize only the synchronous bootstrap that creates and locks the
-    # worktree. The mutex is released before handle parsing and detached work.
-    (
-      cd "$BG_EXECUTION_DIR" || exit 3
-      if [ -n "$BG_STDIN_FILE" ]; then exec < "$BG_STDIN_FILE" || exit 1; fi
-      if [ "$BG_WORKSPACE_MODE" = isolated ]; then
-        _UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT="$BG_BOOTSTRAP_TIMEOUT" \
-          _uberdev_dispatch_with_git_metadata_mutex "$BG_EXECUTION_DIR" claude-bootstrap "${cmd[@]}"
-      else
-        "${cmd[@]}"
-      fi
-    ) > "$BG_STDOUT_LOG" 2>&1
-    DISPATCH_RC=$?
-  fi
-  if [[ "$DISPATCH_RC" -eq 0 ]]; then
-    # Combined #143 (ANSI-strip + line-anchor + hex-validate) + #154 (capture
-    # grep's OWN rc to tell a retryable pipeline error from non-retryable marker
-    # drift). ANSI-strip first — `claude --bg` may wrap the `backgrounded · <id>`
-    # marker in CSI color codes; the line-anchor `^...$` additionally rejects
-    # OSC/DCS-wrapped markers (defense-in-depth). The cleaned stream is piped to
-    # `grep -m1` so `$?` is grep's rc: grep is the LAST command in the
-    # `printf|grep` pipeline, so the subshell exits with grep's rc and `$()`
-    # propagates it as `$?`. (The subshell's PIPESTATUS is just not visible to
-    # the outer scope — a scoping fact, not destruction.)
-    # `${ID_RAW##* }` reproduces `awk '{print $NF}'`; the hex-validate sentinel
-    # rejects any partial/garbage token. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
-    local ID_CLEAN ID_RAW ID_GREP_RC ID_SUBPHASE
-    ID_CLEAN="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$BG_STDOUT_LOG")"
-    ID_RAW="$(printf '%s\n' "$ID_CLEAN" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
-    ID_GREP_RC=$?
-    DISPATCH_ID="${ID_RAW##* }"
-    DISPATCH_ID="${DISPATCH_ID//[^0-9a-f]/}"
-    [[ "${#DISPATCH_ID}" -eq 8 ]] || DISPATCH_ID=""  # sentinel: empty == validation failed (B3 guard below)
-    # B3 fix (preserved): `claude --bg` exited 0 but the marker was absent or
-    # the extraction pipeline errored. Recording bg_session_id="" as a
-    # "successful dispatch" would let /solve drop the claim-label while the user
-    # has no way to `claude agents`-monitor or recover. Surface rc=2 with a
-    # subphase discriminator so incident responders can tell drift
-    # (marker_absent) from infra (pipeline_error).
-    if [[ "$ID_GREP_RC" -ge 2 || -z "$DISPATCH_ID" ]]; then
-      # subphase from a TWO-ELEMENT LITERAL SET only (D7 injection guard):
-      # never derived from $ID_RAW or $BG_STDOUT_LOG content, which is
-      # untrusted and would forge/break the unescaped audit JSONL.
-      ID_SUBPHASE="marker_absent"
-      [[ "$ID_GREP_RC" -ge 2 ]] && ID_SUBPHASE="pipeline_error"
-      DISPATCH_RC=2
-      DISPATCH_LOG="$BG_STDOUT_LOG"
-      # Defense-in-depth (wezterm B4): stamp empty so the success arm can
-      # never fire on a partial token from a failed extraction.
-      DISPATCH_ID=""
-      _uberdev_dispatch_audit dispatch_setup_failed \
-        "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"subphase\":\"$ID_SUBPHASE\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
-      return 2
-    fi
-    _uberdev_dispatch_audit agent_dispatched \
-      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"$DISPATCH_ID\",\"mode\":\"$BG_PROMPT_MODE\"}"
-  else
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"claude-bg\",\"rc\":$DISPATCH_RC}"
-  fi
-  return "$DISPATCH_RC"
-}
-
 # _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE
 # Dependency-free fallback: explicit `git worktree add` + detached headless
 # `claude -p`. Sets DISPATCH_RC and DISPATCH_ID (the detached pid).
@@ -2226,7 +1804,8 @@ _uberdev_dispatch_background() {
       "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"background\",\"rc\":1}"
     return 1
   fi
-  # BG_TURBO_ENV: same propagation contract as the claude-bg arm — see lines ~359-369 for the rationale (UBERDEV_TURBO + SKIP_PERMISSIONS, RFC 0005 §2.3 scoped-relaxation contract).
+  # BG_TURBO_ENV: UBERDEV_TURBO + SKIP_PERMISSIONS propagation across the env(1)
+  # boundary, per RFC 0005 §2.3 (scoped-relaxation contract).
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
@@ -2827,7 +2406,7 @@ LUA
 # Spawns each agent as a foreground headless `claude -p` in a visible WezTerm
 # pane. Sets DISPATCH_RC and DISPATCH_ID (the spawned pane id).
 #
-# Intentional asymmetry vs. claude-bg / background backends: this backend does
+# Intentional asymmetry vs. the background backend: this backend does
 # NOT env(1)-wrap the spawn with BG_TURBO_ENV (no UBERDEV_TURBO / SKIP_PERMISSIONS
 # propagation). Per design Q4 (see `docs/uberdev/specs/...-goal-skip-permissions-propagation-design.md` §Q4 / Non-goals), wezterm is the attended-mode backend — visible panes,
 # operator can approve permission prompts manually — so the cmux PermissionRequest
@@ -2866,7 +2445,7 @@ _uberdev_dispatch_wezterm() {
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
   # TOCTOU hardening (#155): guard + 0600-create the predictable log path
   # before the worktree-add redirect below — the wezterm backend writes the
-  # SAME world-writable path the claude-bg / background backends harden, so it
+  # SAME world-writable path the background backend hardens, so it
   # must fail-CLOSED on a symlink/foreign-owned target too.
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "wezterm"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3

@@ -92,7 +92,7 @@ for wf in review-pr simplify; do
 done
 
 # S3 — nothing was weakened for the backends that never met the bar.
-for be in claude-bg wezterm background; do
+for be in wezterm background; do
   rc="$(backend_probe "$be" review-pr)"
   [ "$rc" != 0 ] \
     && pass "S3 $be is still refused for review-pr" \

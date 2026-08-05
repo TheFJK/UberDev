@@ -37,7 +37,7 @@ assert_grep_not() {
 }
 
 echo "== Positive: auto resolution is Workflow-native (RFC 0015) =="
-# The per-OS auto matrix (macos->wezterm/claude-bg, wsl2/linux->claude-bg,
+# The per-OS auto matrix (macos->wezterm/detached, wsl2/linux->detached,
 # windows-native->wezterm-or-hard-error) existed ONLY to choose a detached
 # process supervisor. The Workflow runtime needs no supervisor, so `auto` now
 # resolves to `workflow` everywhere except inside Codex. These assertions lock
@@ -60,10 +60,10 @@ assert_grep_not "$DISPATCH_LIB" \
   "the retired macos->wezterm auto arm is gone"
 assert_grep_not "$DISPATCH_LIB" \
   'reason="auto-wsl2"' \
-  "the retired wsl2->claude-bg auto arm is gone"
+  "the retired wsl2 detached auto arm is gone"
 assert_grep_not "$DISPATCH_LIB" \
   'reason="auto-linux"' \
-  "the retired linux->claude-bg auto arm is gone"
+  "the retired linux detached auto arm is gone"
 assert_grep "$DISPATCH_LIB" \
   'UBERDEV_RESOLVED_BACKEND' \
   "preflight exports UBERDEV_RESOLVED_BACKEND"
@@ -135,21 +135,28 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-echo "== Functional: an explicit deprecated backend still works, loudly =="
-if BG_NOTICE="$(/bin/bash -c '
+# This block used to prove the OPPOSITE: that the deprecated detached backend
+# still resolved, loudly. It is INVERTED, not deleted (RFC 0015 section 7 as
+# amended) -- naming the retired backend must now be a hard enum error, and the
+# error must list the accepted set so the operator is not left guessing.
+echo "== Functional: the retired detached backend is refused by the enum, loudly =="
+# preflight's own rc is captured INSIDE the subshell: the trailing printf would
+# otherwise mask it and the assertion would read a refusal as a success.
+BG_REFUSAL="$(/bin/bash -c '
   . "$1"
   _uberdev_dispatch_os_class() { printf linux; }
   unset CODEX_HOME UBERDEV_RESOLVED_BACKEND
   UBERDEV_DISPATCH_BACKEND_REQUESTED=claude-bg
   uberdev_dispatch_preflight solve >/dev/null
-  printf "|%s" "$UBERDEV_RESOLVED_BACKEND"
-' _ "$DISPATCH_LIB" 2>&1)" \
-    && printf '%s' "$BG_NOTICE" | grep -Fq '|claude-bg' \
-    && printf '%s' "$BG_NOTICE" | grep -Fq 'is deprecated (RFC 0015)'; then
-  echo "  PASS  --backend=claude-bg still resolves, with a one-line deprecation notice"
+  printf "|rc=%s|resolved=%s" "$?" "${UBERDEV_RESOLVED_BACKEND-}"
+' _ "$DISPATCH_LIB" 2>&1)"
+if grep -Fq "|rc=1|resolved=" <<<"$BG_REFUSAL" \
+    && grep -Fq "not in {auto|workflow|wezterm|background|codex}" <<<"$BG_REFUSAL" \
+    && ! grep -Fq "resolved=claude-bg" <<<"$BG_REFUSAL"; then
+  echo "  PASS  the retired detached backend is refused by the enum, naming the accepted set"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  explicit claude-bg did not resolve with a deprecation notice: $BG_NOTICE"
+  echo "  FAIL  the retired detached backend still resolves: $BG_REFUSAL"
   FAIL=$((FAIL + 1))
 fi
 

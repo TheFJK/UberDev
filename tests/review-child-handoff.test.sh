@@ -827,7 +827,7 @@ PY
   # awk carve-out of a markdown fence is gone. Sourcing the shipped file is
   # what /review-pr, the skill and this test all do, which is the point.
   . "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
-  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex'
   UBERDEV_CARRIER_BACKEND=codex
   WINDOWS_IDENTITY_PLUGIN_ROOT="$TMP/windows-identity-plugin"
   write_evidence_identity_helper "$WINDOWS_IDENTITY_PLUGIN_ROOT"
@@ -1869,7 +1869,7 @@ if grep -Fq 'post_review_validated_evidence_complete() {' "$POST"; then
 fi
 grep -Fq '. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh"' "$POST"
 UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex'
 UBERDEV_CARRIER_BACKEND=codex
 REVIEW_EDGES=("${ROSTER_EDGES[@]}")
 EVIDENCE_ROOT="$TMP/evidence"
@@ -1982,7 +1982,7 @@ evidence_carrier_config_must_fail() {
 evidence_carrier_config_must_fail invalid-backend-policy \
   'auto|codex|codex' codex
 evidence_carrier_config_must_fail invalid-expected-backend \
-  'auto|claude-bg|wezterm|background|codex' auto
+  'auto|wezterm|background|codex' auto
 
 WRONG_BACKEND_LAUNCHED="$EVIDENCE_ROOT/wrong-backend-initial"
 WRONG_BACKEND_STATUS="$EVIDENCE_ROOT/children/review-1-attempt01/status.json"
@@ -2740,7 +2740,7 @@ PY
 done
 
 UBERDEV_CARRIER_BACKEND=workflow
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background|codex'
 WF_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
   "$WF_EVIDENCE_ROOT/validated" 6 "$WF_EVIDENCE_ROOT/initial" \
   "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT")"

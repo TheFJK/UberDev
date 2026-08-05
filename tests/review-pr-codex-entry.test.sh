@@ -100,13 +100,17 @@ assert run_dir==sys.argv[2],(run_dir,sys.argv[2])
 assert value == {"requested": "codex", "backend": "codex", "model": "", "timeout": "", "permissions": "", "effort": ""}, value
 PY
 
-# claude-bg cannot publish the required result.md artifact for governed review
-# children, so explicit selection now fails during workflow preflight.
-if run_setup "$TMP/runtime-override" claude-bg >"$TMP/claude-override.out" 2>"$TMP/claude-override.err"; then
-  echo "standalone review accepted claude-bg without a result artifact" >&2
+# wezterm cannot publish the required result.md artifact for governed review
+# children, so explicit selection fails during workflow preflight. (This used to
+# name the detached `claude --bg` backend, which had its own bespoke refusal
+# message; that backend is gone, so the assertion moved to a backend that is
+# still selectable and still below the bar.)
+if run_setup "$TMP/runtime-override" wezterm >"$TMP/wezterm-override.out" 2>"$TMP/wezterm-override.err"; then
+  echo "standalone review accepted wezterm without a result artifact" >&2
   exit 1
 fi
-grep -q 'does not export a supervised result artifact' "$TMP/claude-override.err"
+grep -q 'requires a backend with result-artifact and caller-workspace repair support' \
+  "$TMP/wezterm-override.err"
 
 # Canonical standalone review is provider-neutral, but auto resolution is
 # workflow-aware before carrier creation. A usable macOS WezTerm or an ambient
@@ -115,7 +119,7 @@ grep -q 'does not export a supervised result artifact' "$TMP/claude-override.err
 # #381 step 3: that backend is now `workflow`, not `codex`. Both `codex` and
 # `claude` are on this fixture's PATH and CODEX_HOME is unset (env -i), so the
 # resolver's own ladder is what decides — and it must land on the transport the
-# command files actually wire, never on wezterm/claude-bg/background, none of
+# command files actually wire, never on wezterm/background, neither of
 # which can publish a governed child's result artifact.
 source_auto_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
@@ -137,7 +141,7 @@ stale_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
     UBERDEV_TMPDIR="$TMP/runtime-stale" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
-    UBERDEV_RESOLVED_BACKEND=claude-bg \
+    UBERDEV_RESOLVED_BACKEND=wezterm \
     RUN_ID=20260716-000004-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
     bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; print(json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"])[\"backend\"])"' \
       _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-stale"

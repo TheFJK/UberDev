@@ -188,7 +188,7 @@ Override explicitly:
 ```bash
 # In a solve/turbo invocation:
 --backend=codex        # force the codex backend
---backend=claude-bg    # force claude --bg (needs claude CLI)
+--backend=background   # force detached headless `claude -p` (needs claude CLI)
 ```
 
 The spawned session runs `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`

@@ -359,7 +359,7 @@ assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh" \
   "I1d: solve-pipeline enum allows all four tier names"
 
 echo
-echo "== I2: solve-pipeline claude --bg dispatch timeout-wrap (v0.22.0) =="
+echo "== I2: dispatch timeout-wrap resolution (v0.22.0) =="
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'uberdev_read_int_in_range command_timeouts.solve[[:space:]]+UBERDEV_SOLVE_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+3600' \
   "I2a: launcher reads command_timeouts.solve with bounds [60,86400] default 3600"
@@ -369,22 +369,16 @@ assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'command -v gtimeout' \
   "I2c: launcher probes gtimeout fallback (Homebrew coreutils installs the macOS binary as gtimeout, not timeout)"
-CLAUDE_BG_BODY="$(awk '
-  /^_uberdev_dispatch_claude_bg\(\) \{$/ { in_function = 1 }
-  in_function { print }
-  in_function && /^}$/ { exit }
-' "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh")"
-if printf '%s\n' "$CLAUDE_BG_BODY" | awk '
-  /^[[:space:]]*local cmd=\( "\$TIMEOUT_BIN" "\$BG_BOOTSTRAP_TIMEOUT" env \)[[:space:]]*$/ {
-    if (getline <= 0 || $0 !~ /^[[:space:]]*\[ "\$\{#BG_TURBO_ENV\[@\]\}" -eq 0 \] \|\| cmd\+=\( "\$\{BG_TURBO_ENV\[@\]\}" \)[[:space:]]*$/) next
-    if (getline <= 0 || $0 !~ /^[[:space:]]*cmd\+=\( claude --bg \)[[:space:]]*$/) next
-    found = 1
-  }
-  END { exit(found ? 0 : 1) }
-'; then
-  pass "I2d: _uberdev_dispatch_claude_bg builds timeout/env base, length-gated BG_TURBO_ENV append, then claude --bg in exact order"
+# I2d used to pin the argv construction order inside the detached
+# `_uberdev_dispatch_claude_bg` provider arm (timeout/env base -> length-gated
+# BG_TURBO_ENV append -> `claude --bg`). That arm was deleted with its backend
+# (RFC 0015 section 7 as amended), so the assertion is INVERTED into a
+# tombstone instead of being retargeted at a different backend: the ordering it
+# protected no longer exists to regress, but the surface coming back would.
+if grep -q '_uberdev_dispatch_claude_bg' "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"; then
+  fail "I2d: the retired detached provider arm is back in lib/dispatch.sh"
 else
-  fail "I2d: _uberdev_dispatch_claude_bg MUST build timeout/env base, length-gated BG_TURBO_ENV append, then claude --bg in exact order"
+  pass "I2d: the retired detached provider arm stays deleted (its argv-order guard retired with it)"
 fi
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'brew install coreutils' \
@@ -392,9 +386,14 @@ assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
 assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
   'if \[\[ -n "\$TIMEOUT_BIN" \]\]; then' \
   "I2f: launcher guards wrap branch with -n TIMEOUT_BIN check (prevents silent regression on guard inversion/removal)"
-assert_grep_in "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" \
-  'case "\$BG_PROMPT_MODE" in' \
-  "I2g: bg dispatch uses three-arm BG_PROMPT_MODE case-switch (file / stdin / argv)"
+# I2g retired with the same arm: BG_PROMPT_MODE's only consumer was that
+# case-switch, so the variable went too. Assert it stays gone rather than
+# asserting a switch that no backend reads.
+if grep -q 'BG_PROMPT_MODE' "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"; then
+  fail "I2g: BG_PROMPT_MODE is back in lib/dispatch.sh with no consumer to read it"
+else
+  pass "I2g: BG_PROMPT_MODE retired with the provider arm that was its only consumer"
+fi
 
 echo
 echo "== I3: orchestrator research fanout cap (Task 3) =="

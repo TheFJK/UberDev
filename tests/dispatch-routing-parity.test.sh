@@ -63,7 +63,6 @@ PY
 # The public solve dispatch must pass through the adapter, and the adapter's
 # provider boundary must retain non-Codex arms without Codex-only argv.
 grep -q 'uberdev_agent_dispatch' "$DISPATCH"
-grep -q '_uberdev_dispatch_claude_bg' "$DISPATCH"
 grep -q '_uberdev_dispatch_background' "$DISPATCH"
 grep -q '_uberdev_dispatch_wezterm' "$DISPATCH"
 grep -q 'UBERDEV_DISPATCH_ROUTING_MODE' "$DISPATCH"

@@ -242,7 +242,7 @@ export WATCH_PASSES WATCH_BUDGET
 # spawned by skills/solve-fleet/workflow.js from inside the calling session,
 # NOT by lib/dispatch.sh. The interim
 # `uberdev_dispatch_demote_workflow_to_detached` call that used to sit here is
-# GONE; there is no demotion, and claude-bg is no longer on any default path.
+# GONE; there is no demotion, and no detached transport is on any default path.
 [ -r "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh"
 UBERDEV_DISPATCH_BACKEND_REQUESTED="${backend_cli:-${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}}"
 export UBERDEV_DISPATCH_BACKEND_REQUESTED
@@ -257,7 +257,7 @@ export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO
 # /turbo + /solve defensively unset this var. EFFORT_LEVEL stays unset ->
 # helper applies :-max.
 export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in
-uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG once
 # <<< region: backend
 
 # >>> region: goal-id

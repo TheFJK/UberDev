@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/solve-fleet-workflow.test.sh — RFC 0015 (the claude-bg retirement):
+# tests/solve-fleet-workflow.test.sh — RFC 0015 (the detached-session retirement):
 # the Workflow-native /solve + /turbo transport.
 #
 # Covers three surfaces that must move together, because a half-migrated
@@ -50,13 +50,13 @@ echo "## solve-fleet-workflow (RFC 0015) — shell seam + shape greps + T3 behav
 # ---------------------------------------------------------------------------
 echo "== S: lib/dispatch.sh backend enum + auto resolution =="
 
-grep -q "^_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'$" "$DISPATCH" \
+grep -q "^_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background|codex'$" "$DISPATCH" \
   && pass "S1 enum includes workflow, ordered right after auto" \
   || fail "S1 backend enum does not declare workflow in the canonical position"
 
 # S2 — `auto` must resolve to workflow, and must NEVER resolve to a deprecated
 # detached backend. This is the whole point of the RFC: the old per-OS matrix
-# (macos->wezterm/claude-bg, wsl2/linux->claude-bg) is GONE from the auto arm.
+# (macos->wezterm/detached, wsl2/linux->detached) is GONE from the auto arm.
 if grep -q 'resolved="workflow"; reason="auto-workflow"' "$DISPATCH"; then
   pass "S2a auto resolves to workflow"
 else
@@ -78,16 +78,31 @@ grep -q 'workflow) return 0 ;;' "$DISPATCH" \
   && pass "S3b workflow is exempt from the numeric-supervision gate" \
   || fail "S3b workflow is not exempt from _uberdev_dispatch_numeric_supervision_supported"
 
-# S4 — claude-bg is deprecated but still functional (no silent removal).
-grep -q "^_UBERDEV_DISPATCH_DEPRECATED_BACKENDS='claude-bg'$" "$DISPATCH" \
-  && pass "S4a claude-bg is on the deprecated list" \
-  || fail "S4a claude-bg is not marked deprecated"
+# S4 — TOMBSTONE. This block used to assert the OPPOSITE: that the detached
+# `claude --bg` backend was deprecated-but-present, and S4c called its removal
+# "a breaking change, not a deprecation". That guard did its job — it held the
+# line until the deprecation had actually paid out. RFC 0015 §7 (as amended)
+# records the payout: `workflow` shipped across /solve, /turbo, /goal and — as
+# of #381 — /review-pr and /simplify, which were the only two workflows that
+# structurally required a supervised detached transport. With nothing selecting
+# it and nothing requiring it, the backend is DELETED, so the assertions are
+# INVERTED rather than deleted (the retired-surface pattern in
+# tests/ghostty-dispatch-no-instance-leak.test.sh): the surface must stay gone.
+#
+# Deliberately NO deprecation shim survives — a dormant alias is exactly how a
+# retired transport drifts back onto a default path.
+grep -q '_UBERDEV_DISPATCH_DEPRECATED_BACKENDS=' "$DISPATCH" \
+  && fail "S4a the deprecated-backends list is back — the retired transport has a re-entry point" \
+  || pass "S4a no deprecated-backends list survives the deletion"
 grep -q '_uberdev_dispatch_deprecation_notice()' "$DISPATCH" \
-  && pass "S4b a deprecation-notice emitter exists" \
-  || fail "S4b no deprecation-notice emitter"
+  && fail "S4b a deprecation-notice emitter survives with nothing left to deprecate" \
+  || pass "S4b the deprecation-notice emitter is gone with its only subject"
 grep -q '_uberdev_dispatch_claude_bg()' "$DISPATCH" \
-  && pass "S4c the claude-bg provider arm still exists (deprecated, not deleted)" \
-  || fail "S4c the claude-bg provider arm was removed — that is a breaking change, not a deprecation"
+  && fail "S4c the retired detached provider arm is back in lib/dispatch.sh" \
+  || pass "S4c the retired detached provider arm stays deleted"
+grep -Fq 'claude-bg' "$DISPATCH" \
+  && fail "S4d lib/dispatch.sh still names the retired backend somewhere" \
+  || pass "S4d lib/dispatch.sh carries no reference to the retired backend"
 
 # S5 — workflow has NO provider arm, and reaching one fails loud.
 if grep -qE '^\s+workflow\)\s*$' "$DISPATCH" && grep -q "is dispatched by the session's Workflow tool" "$DISPATCH"; then
@@ -127,9 +142,9 @@ grep -q 'UBERDEV_KEEP_TMPDIR=1' "$LAUNCHER" \
   || fail "S10 the launcher does not keep its tmpdir for the fleet"
 
 # S11 — the parser accepts the new backend name.
-grep -q 'auto|workflow|claude-bg|wezterm|background|codex) ;;' "$LAUNCHER" \
-  && pass "S11 --backend=workflow parses" \
-  || fail "S11 the --backend parser does not accept workflow"
+grep -q 'auto|workflow|wezterm|background|codex) ;;' "$LAUNCHER" \
+  && pass "S11 --backend=workflow parses, and the retired backend does not" \
+  || fail "S11 the --backend parser does not accept exactly {auto,workflow,wezterm,background,codex}"
 
 echo "== S: command files mandate the Workflow call =="
 for f in "$SOLVE_CMD" "$TURBO_CMD"; do
@@ -223,8 +238,9 @@ grep -q 'skills/solve-fleet/workflow.js' "$SKILL" \
   && pass "G8 SKILL.md names its workflow script" || fail "G8 SKILL.md does not name workflow.js"
 grep -q '## No-Workflow fallback' "$SKILL" \
   && pass "G9 SKILL.md carries the No-Workflow fallback section" || fail "G9 no fallback section"
-grep -q 'removal target' "$SKILL" \
-  && pass "G10 SKILL.md states the claude-bg removal target" || fail "G10 no removal target stated"
+grep -q 'RFC 0015' "$SKILL" && ! grep -Fq 'claude-bg' "$SKILL" \
+  && pass "G10 SKILL.md cites RFC 0015 and no longer offers the retired backend" \
+  || fail "G10 SKILL.md still names the retired backend (or lost its RFC 0015 citation)"
 
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
@@ -478,7 +494,7 @@ echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE 
 # S16-S20 used to pin the INTERIM `uberdev_dispatch_demote_workflow_to_detached`
 # shim: /goal drove uberdev_dispatch_one itself, could not serve the `workflow`
 # backend, and so demoted a workflow resolution back onto the retired per-OS
-# detached matrix. That shim was the last thing keeping the DEPRECATED claude-bg
+# detached matrix. That shim was the last thing keeping the since-deleted detached
 # backend reachable from `auto` on a default path.
 #
 # /goal is now Workflow-native (lib/goal-phase1.sh claims only;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runtime fixture for the v0.22.1 --effort=<level> threading in
 # solve-pipeline/SKILL.md. Complements the shape-check assertions in
-# tests/dispatch-claude-bg.test.sh by EXECUTING the Phase A parser against
+# the retired tests/dispatch-claude-bg.test.sh by EXECUTING the Phase A parser against
 # several `$ARGUMENTS` shapes and asserting the resolved EFFORT_LEVEL /
 # EFFORT_FLAG / captured-argv values.
 #

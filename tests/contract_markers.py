@@ -169,18 +169,23 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/solve_triage.py",
         "skills/solve-pipeline/SKILL.md",
     ],
-    # rank 7 — `claude agents --json` row values that mean "this agent is alive"
+    # rank 7 — `claude agents --json` row values that mean "this agent is alive".
+    # The lib/agent-dispatch.sh copy was the lifecycle CLASSIFIER inside the
+    # detached-session liveness probe; it went with that backend (RFC 0015 §7 as
+    # amended). The three goal-state probes and the run_manifest reader remain,
+    # and the `-queued` divergence they declare is now declared against
+    # run_manifest.py rather than against the deleted classifier.
     "agent-liveness-value": [
-        "lib/agent-dispatch.sh",
         "lib/goal-state.sh",
         "lib/goal-state.sh",
         "lib/goal-state.sh",
         "lib/run_manifest.py",
     ],
-    # rank 8 — terminal `state` a per-run status FILE may legally carry (4)
+    # rank 8 — terminal `state` a per-run status FILE may legally carry (4).
+    # Three copies retired with the detached-session backend: the probe that
+    # PRODUCED the vocabulary one word per arm, its supervision-lane case, and
+    # the opaque-handle cancel probe in lib/dispatch.sh.
     "run-terminal-status": [
-        "lib/agent-dispatch.sh",
-        "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
@@ -190,7 +195,6 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/code_fixer_contract.py",
-        "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/run_manifest.py",
         "lib/run_manifest.py",

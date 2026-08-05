@@ -21,10 +21,6 @@ dead=source.split('\nDEAD_RUN="$TMP/dead-without-terminal"',1)[1].split('\n# Kil
 assert 'wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed' in dead
 orphan=source.split('\nORPHAN_RUN="$TMP/wrapper-death-with-live-provider"',1)[1].split('\n# The same orphan-group proof',1)[0]
 assert 'wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed' in orphan
-watcher=source.split('\nclaude_watcher_case() {',1)[1].split('claude_watcher_case initial-absent',1)[0]
-ambiguous=watcher.rsplit('    ambiguous)',1)[1].split('    probe-error)',1)[0]
-assert 'command sleep 0.6' not in ambiguous
-assert '[ -s "$run/status.json.watcher-error.json" ] && break' in ambiguous
 for helper in (
     '_uberdev_agent_capture_owner_process_record', '_real_owner_process_record',
     '_uberdev_agent_persist_watcher_error', '_real_prelaunch_persist_error',
@@ -808,53 +804,18 @@ grep -Fq 'owner_process_identity_diagnostic_persistence_failed' <<<"$OWNER_FAILU
 [ ! -d "$OWNER_DIAGNOSTIC_FAULT_RUN/.agent-state-$(id -u)/semaphore-v1" ]
 )
 
-# Detached review fanout cannot rely on an interactive Claude permission
-# prompt. The adapter must reject manual mode before capacity or provider state
-# is created, while an explicit unattended opt-in remains accepted.
-if SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 \
-    _uberdev_agent_claude_permissions_preflight review-pr >/dev/null 2>&1; then
-  echo "agent-dispatch: Claude review permission preflight accepted manual mode" >&2
-  exit 1
-fi
-SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=1 \
-  _uberdev_agent_claude_permissions_preflight review-pr
-SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 \
-  _uberdev_agent_claude_permissions_preflight solve
-
-# Exercise the public boundary, not only the helper: manual review mode must
-# fail before provider invocation, lifecycle publication, status, or capacity.
-PREFLIGHT_RUN="$TMP/preflight-review"
-mkdir -p "$PREFLIGHT_RUN"
-printf 'review preflight prompt\n' > "$PREFLIGHT_RUN/prompt.txt"
-PREFLIGHT_REQUEST="$(python3 -I -B - "$REQUEST" "$PREFLIGHT_RUN" <<'PY'
-import json,sys
-request=json.loads(sys.argv[1]); request.update({
-    'run_dir':sys.argv[2], 'run_id':'agent-dispatch-review-preflight',
-    'backend':'claude-bg', 'workflow':'review-pr', 'phase':'review',
-})
-print(json.dumps(request,sort_keys=True,separators=(',',':')))
-PY
-)"
-provider_before=0
-[ ! -r "$TMP/provider-count" ] || read -r provider_before < "$TMP/provider-count"
-if SKIP_PERMISSIONS=0 AUTO_PERMISSIONS=0 uberdev_agent_dispatch "$PREFLIGHT_REQUEST" \
-    "$PREFLIGHT_RUN/prompt.txt" "$PREFLIGHT_RUN/result.md" "$PREFLIGHT_RUN/status.json" >/dev/null 2>&1; then
-  echo "agent-dispatch public review preflight accepted manual Claude mode" >&2
-  exit 1
-fi
-provider_after=0
-[ ! -r "$TMP/provider-count" ] || read -r provider_after < "$TMP/provider-count"
-[ "$provider_after" -eq "$provider_before" ] || { echo "review preflight reached provider" >&2; exit 1; }
-[ ! -e "$PREFLIGHT_RUN/.agent-state-$(id -u)" ] \
-  && [ ! -e "$PREFLIGHT_RUN/status.json" ] \
-  && [ ! -e "$PREFLIGHT_RUN/result.md" ] || {
-    echo "review preflight published lifecycle state before refusing" >&2; exit 1;
-  }
-
+# The last two retired with the detached `claude --bg` backend (RFC 0015
+# section 7 as amended): the liveness classifier that read `claude agents
+# --json`, and the unattended-permissions gate that existed because a detached
+# review child could not answer an interactive permission prompt. Their
+# positive fixtures are deleted, so this tombstone is the only thing standing
+# between a revert and a silent resurrection.
 for dead_helper in \
   _uberdev_agent_default_catalog \
   _uberdev_agent_catalog \
-  _uberdev_agent_non_codex_decision
+  _uberdev_agent_non_codex_decision \
+  _uberdev_agent_claude_probe \
+  _uberdev_agent_claude_permissions_preflight
 do
   if declare -F "$dead_helper" >/dev/null; then
     echo "agent-dispatch: dead helper remains defined: $dead_helper" >&2
@@ -1133,13 +1094,13 @@ if kind == "inherit": request["routing_mode"] = "inherit"
 elif kind == "ultra": request["explicit_route"] = "sol-ultra"
 elif kind == "shadow": request["shadow"] = True
 elif kind == "claude":
-    request["backend"] = "claude-bg"
+    request["backend"] = "background"
     request["routing_mode"] = "inherit"
 elif kind == "claude-forced":
-    request["backend"] = "claude-bg"
+    request["backend"] = "background"
     request["explicit_route"] = "sol-ultra"
 elif kind == "claude-fast":
-    request["backend"] = "claude-bg"
+    request["backend"] = "background"
     request["routing_mode"] = "inherit"
     request["explicit_service_tier"] = "fast"
 print(json.dumps(request, sort_keys=True, separators=(",", ":")))
@@ -1218,7 +1179,7 @@ wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" ag
 python3 - "$TMP/backend.json" <<'PY'
 import json, pathlib, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert capture["backend"] == "claude-bg"
+assert capture["backend"] == "background"
 decision = capture["decision"]
 assert decision["effective_policy"] == "inherit"
 assert decision["model"] is None and decision["reasoning_effort"] is None
@@ -1616,43 +1577,6 @@ exit 2
 SH
 chmod +x "$CROSS_BIN/claude"
 
-# The short Claude handle must resolve to exactly one full session. A shared
-# prefix is ambiguous and must remain unknown instead of selecting row order.
-printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' \
-  > "$TMP/ambiguous-claude-agents.json"
-if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
-    _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
-  echo "Claude watcher accepted an ambiguous session prefix" >&2
-  exit 1
-fi
-printf '[{"sessionId":"abc12345-one","state":"future-state"}]\n' \
-  > "$TMP/unknown-claude-status.json"
-if CROSS_CLAUDE_STATE="$TMP/unknown-claude-status.json" PATH="$CROSS_BIN:$PATH" \
-    _uberdev_agent_claude_probe abc12345 >/dev/null 2>&1; then
-  echo "Claude watcher treated an unknown status as completed" >&2
-  exit 1
-fi
-printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' \
-  > "$TMP/blocked-claude-status.json"
-BLOCKED_PROBE="$(CROSS_CLAUDE_STATE="$TMP/blocked-claude-status.json" PATH="$CROSS_BIN:$PATH" \
-  _uberdev_agent_claude_probe abc12345)"
-[ "$BLOCKED_PROBE" = 'blocked:permission' ] || {
-  echo "Claude watcher did not classify idle/blocked permission state: $BLOCKED_PROBE" >&2
-  exit 1
-}
-printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$TMP/idle-claude-status.json"
-IDLE_PROBE="$(CROSS_CLAUDE_STATE="$TMP/idle-claude-status.json" PATH="$CROSS_BIN:$PATH" \
-  _uberdev_agent_claude_probe abc12345)"
-[ "$IDLE_PROBE" = 'blocked:permission' ] || {
-  echo "Claude watcher did not classify idle as an actionable permission block: $IDLE_PROBE" >&2
-  exit 1
-}
-if CROSS_CLAUDE_STATE="$TMP/ambiguous-claude-agents.json" PATH="$CROSS_BIN:$PATH" \
-    _uberdev_dispatch_cancel_claude_bg abc12345 >/dev/null 2>&1; then
-  echo 'Claude cancellation accepted a non-unique session prefix' >&2
-  exit 1
-fi
-
 cross_backend_case() {
   backend="$1"
   run="$TMP/cross-$backend"
@@ -1660,9 +1584,6 @@ cross_backend_case() {
   printf 'cross-process prompt\n' > "$run/prompt.txt"
   request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"cross-"+sys.argv[2],"repository_id":"cross-repository","backend":sys.argv[2],"workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":88,"issue_num":88,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$backend")"
   state="$run/.agent-state-$(id -u)"
-  if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json"
-  fi
   (
     CROSS_BACKEND="$backend" CROSS_RUN="$run" CROSS_CLAUDE_STATE="$run/claude-agents.json" \
       PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
@@ -1678,19 +1599,15 @@ cross_backend_case() {
   fi
   python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile \
     --manifest "$state/agent-lifecycle.jsonl" >/dev/null
-  if [ "$backend" = claude-bg ]; then
-    printf '[{"sessionId":"abc12345-full","state":"completed"}]\n' > "$run/claude-agents.json"
+  tmp_status="$run/status.json.tmp"
+  if [ "$backend" = wezterm ]; then
+    printf '{"backend":"wezterm","state":"completed","exit_code":0}\n' > "$tmp_status"
   else
-    tmp_status="$run/status.json.tmp"
-    if [ "$backend" = wezterm ]; then
-      printf '{"backend":"wezterm","state":"completed","exit_code":0}\n' > "$tmp_status"
-    else
-      printf '{"backend":"%s","state":"completed","exit_code":0}\n' \
-        "$backend" > "$tmp_status"
-    fi
-    chmod 600 "$tmp_status"
-    mv "$tmp_status" "$run/status.json"
+    printf '{"backend":"%s","state":"completed","exit_code":0}\n' \
+      "$backend" > "$tmp_status"
   fi
+  chmod 600 "$tmp_status"
+  mv "$tmp_status" "$run/status.json"
   for _ in 1 2 3 4 5 6; do
     grep -q '"state":"completed"' "$run/status.json" 2>/dev/null \
       && ! grep -R -q "run_id=cross-$backend" "$state/semaphore-v1" 2>/dev/null \
@@ -1713,15 +1630,6 @@ _uberdev_agent_dispatch_backend() {
   backend="$1"; status_path="$6"
   DISPATCH_LOG=""
   case "$backend" in
-    claude-bg)
-      DISPATCH_ID=abc12345
-      if [ "${CROSS_CLAUDE_DROP_AFTER_LIVE:-0}" = 1 ]; then
-        nohup bash -c 'sleep 0.5; printf "[]\\n" > "$1"' _ "$CROSS_CLAUDE_STATE" >/dev/null 2>&1 &
-      elif [ -n "${CROSS_CLAUDE_TERMINAL_AFTER_LIVE:-}" ]; then
-        nohup bash -c 'sleep 0.5; printf "[{\"sessionId\":\"abc12345-full\",\"state\":\"%s\"}]\\n" "$2" > "$1"' \
-          _ "$CROSS_CLAUDE_STATE" "$CROSS_CLAUDE_TERMINAL_AFTER_LIVE" >/dev/null 2>&1 &
-      fi
-      ;;
     wezterm)
       DISPATCH_ID=777
       printf '{"backend":"wezterm","state":"running","exit_code":null,"pid":"pane"}\n' > "$status_path"
@@ -1738,226 +1646,8 @@ _uberdev_agent_dispatch_backend() {
   return 0
 }
 
-claude_watcher_case() {
-  mode="$1"
-  run="$TMP/claude-watch-$mode"
-  mkdir -p "$run"
-  printf 'claude watcher prompt\n' > "$run/prompt.txt"
-  state="$run/.agent-state-$(id -u)"
-  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-watch-"+sys.argv[2],"repository_id":"claude-watch-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":89,"issue_num":89,"capacity":1,"timeout_s":1},separators=(",",":")))' "$run" "$mode")"
-  case "$mode" in
-    initial-absent) printf '[]\n' > "$run/claude-agents.json" ;;
-    live-then-absent|explicit-completed) printf '[{"sessionId":"abc12345-full","state":"running"}]\n' > "$run/claude-agents.json" ;;
-    blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json" ;;
-    provider-blocked) printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Provider queue is paused"}]\n' > "$run/claude-agents.json" ;;
-    idle) printf '[{"sessionId":"abc12345-full","state":"idle"}]\n' > "$run/claude-agents.json" ;;
-    ambiguous) printf '[{"sessionId":"abc12345-one","state":"running"},{"sessionId":"abc12345-two","state":"completed"}]\n' > "$run/claude-agents.json" ;;
-    probe-error) printf '{not-json\n' > "$run/claude-agents.json" ;;
-  esac
-  (
-    sleep() { command sleep 0.1; }
-    drop=0
-    [ "$mode" != live-then-absent ] || drop=1
-    explicit=''
-    [ "$mode" != explicit-completed ] || explicit=completed
-    CROSS_CLAUDE_DROP_AFTER_LIVE="$drop" CROSS_CLAUDE_TERMINAL_AFTER_LIVE="$explicit" \
-      CROSS_CLAUDE_STATE="$run/claude-agents.json" \
-      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
-        "$run/prompt.txt" "$run/result.md" "$run/status.json"
-  )
-  case "$mode" in
-    initial-absent|live-then-absent|explicit-completed|blocked|provider-blocked|idle)
-      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        grep -Eq '"state":"(completed|failed)"' "$run/status.json" 2>/dev/null && break
-        command sleep 0.1
-      done
-      ;;
-    ambiguous)
-      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-        [ -s "$run/status.json.watcher-error.json" ] && break
-        command sleep 0.1
-      done
-      [ -s "$run/status.json.watcher-error.json" ] || {
-        echo "ambiguous Claude probe did not persist its bounded watcher error" >&2
-        return 1
-      }
-      ;;
-    probe-error)
-      # Exceed request timeout_s. Unknown probe evidence must still retain the
-      # live lease and may not synthesize a terminal.
-      command sleep 1.3
-      ;;
-  esac
-  case "$mode" in
-    initial-absent)
-      grep -q '"state":"failed"' "$run/status.json" || {
-        echo "initial Claude absence did not fail closed" >&2; return 1;
-      }
-      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-watch-initial-absent failed 80 0.1 || return 1
-      python3 -I - "$state/agent-lifecycle.jsonl" <<'PY'
-import json, pathlib, sys
-events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-actual = [event["event"] for event in events if event["run_id"] == "claude-watch-initial-absent"]
-assert actual == ["route_decided", "agent_started", "failed"], ("claude-watch-initial-absent", actual)
-PY
-      ;;
-    live-then-absent)
-      grep -q '"state":"failed"' "$run/status.json" || {
-        echo "observed-live Claude disappearance fabricated success" >&2; return 1;
-      }
-      ;;
-    explicit-completed)
-      grep -q '"state":"completed"' "$run/status.json" || {
-        echo "explicit Claude completion did not complete" >&2; return 1;
-      }
-      ;;
-    blocked|provider-blocked|idle)
-      grep -q '"state":"failed"' "$run/status.json" || {
-        echo "$mode Claude session did not terminalize" >&2; return 1;
-      }
-      wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" "claude-watch-$mode" failed 80 0.1 || return 1
-      python3 -I - "$state/agent-lifecycle.jsonl" "$mode" <<'PY'
-import json, pathlib, sys
-events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-terminal = [event for event in events if event.get("run_id") == "claude-watch-"+sys.argv[2] and event.get("event") == "failed"]
-expected = "provider_blocked" if sys.argv[2] == "provider-blocked" else "provider_permission_blocked"
-assert len(terminal) == 1 and terminal[0].get("error_class") == expected, terminal
-PY
-      ;;
-    ambiguous|probe-error)
-      python3 -I - "$run/status.json.watcher-error.json" <<'PY'
-import json,sys
-row=json.load(open(sys.argv[1]))
-assert row=={
- 'schema_version':1,'error':'provider_probe_failed','backend':'claude-bg',
- 'handle':'abc12345','terminal':'provider_probe_failed','attempts':3,
-},row
-PY
-      grep -q '"state":"running"' "$run/status.json" || {
-        echo "$mode Claude probe did not remain nonterminal" >&2; return 1;
-      }
-      if grep -Eq '"event":"(completed|failed|timed_out|cancelled|abandoned)"' "$state/agent-lifecycle.jsonl"; then
-        echo "$mode Claude probe fabricated a terminal event" >&2
-        return 1
-      fi
-      grep -R -q "run_id=claude-watch-$mode" "$state/semaphore-v1" || {
-        echo "$mode Claude probe released live capacity" >&2; return 1;
-      }
-      rm -rf "$run"
-      command sleep 0.2
-      ;;
-  esac
-}
-
-claude_watcher_case initial-absent
-claude_watcher_case live-then-absent
-claude_watcher_case explicit-completed
-claude_watcher_case blocked
-claude_watcher_case provider-blocked
-claude_watcher_case idle
-claude_watcher_case ambiguous
-claude_watcher_case probe-error
-
-claude_cancel_retry_case() {
-  mode="$1"
-  run="$TMP/claude-cancel-$mode"
-  mkdir -p "$run"
-  printf 'Claude cancellation retry prompt\n' > "$run/prompt.txt"
-  printf '[{"sessionId":"abc12345-full","state":"blocked","blockedReason":"Permission approval required"}]\n' > "$run/claude-agents.json"
-  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-cancel-"+sys.argv[2],"repository_id":"claude-cancel-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":94,"issue_num":94,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$mode")"
-  (
-    sleep() { command sleep 0.1; }
-    CROSS_CLAUDE_STATE="$run/claude-agents.json" \
-      CROSS_CLAUDE_STOP_MODE="$mode" CROSS_CLAUDE_STOP_COUNT="$run/stop-count" \
-      CROSS_CLAUDE_PROBE_COUNT="$run/probe-count" \
-      PATH="$CROSS_BIN:$PATH" uberdev_agent_dispatch "$request" \
-        "$run/prompt.txt" "$run/result.md" "$run/status.json"
-  )
-  state="$run/.agent-state-$(id -u)"
-  if [ "$mode" = once ]; then
-    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-once failed 80 0.1 || return 1
-    [ "$(cat "$run/stop-count")" -ge 2 ] || { echo "transient Claude stop failure was not retried" >&2; return 1; }
-    return 0
-  fi
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
-    [ -s "$run/status.json.watcher-error.json" ] && break
-    command sleep 0.1
-  done
-  python3 -I - "$run/status.json.watcher-error.json" "$mode" <<'PY'
-import json,sys
-row=json.load(open(sys.argv[1]))
-expected='provider_stop_failed' if sys.argv[2]=='never' else 'provider_cancel_unconfirmed'
-assert row['error']=='provider_cancel_failed' and row['attempts']==3 and row['reason']==expected,row
-PY
-  if [ "$mode" = delayed ]; then
-    wait_for_terminal_and_release "$state/agent-lifecycle.jsonl" "$state" claude-cancel-delayed cancelled 80 0.1 || return 1
-    [ "$(cat "$run/stop-count")" -eq 1 ] || {
-      echo "delayed Claude convergence reissued provider stop" >&2; return 1;
-    }
-    return 0
-  fi
-  stop_count="$(cat "$run/stop-count")"
-  command sleep 0.5
-  [ "$(cat "$run/stop-count")" = "$stop_count" ] || {
-    echo "durable Claude cancellation failure reissued provider stop" >&2; return 1;
-  }
-  grep -q '"state":"running"' "$run/status.json" || { echo "failed Claude stop fabricated a terminal" >&2; return 1; }
-  grep -R -q "run_id=claude-cancel-$mode" "$state/semaphore-v1" || { echo "failed Claude stop abandoned its lease" >&2; return 1; }
-  rm -rf "$run"
-  command sleep 0.2
-}
-
-claude_cancel_retry_case once
-claude_cancel_retry_case delayed
-claude_cancel_retry_case never
-claude_cancel_retry_case sticky
-
-# If both durable probe-error persistence and provider cancellation fail, the
-# watcher must retry both parent-observable operations instead of marking the
-# supervision failure as already reported after the first lost attempt.
-claude_probe_persistence_retry_case() {
-  local run="$TMP/claude-probe-persistence-retry" state request
-  mkdir -p "$run"
-  printf 'Claude probe persistence retry prompt\n' >"$run/prompt.txt"
-  printf '{not-json\n' >"$run/claude-agents.json"
-  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"claude-probe-persistence-retry","repository_id":"claude-probe-persistence-retry-repository","backend":"claude-bg","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run")"
-  (
-    sleep() { command sleep 0.05; }
-    eval "$(declare -f _uberdev_agent_persist_watcher_error_retry | sed '1s/_uberdev_agent_persist_watcher_error_retry/_real_probe_persist_retry/')"
-    _uberdev_agent_persist_watcher_error_retry() {
-      local count=0
-      [ ! -r "$run/persist-count" ] || read -r count <"$run/persist-count"
-      count=$((count + 1)); printf '%s\n' "$count" >"$run/persist-count"
-      [ "$count" -ge 3 ] || return 29
-      _real_probe_persist_retry "$@"
-    }
-    _uberdev_dispatch_cancel_backend() {
-      local count=0
-      [ ! -r "$run/cancel-count" ] || read -r count <"$run/cancel-count"
-      printf '%s\n' $((count + 1)) >"$run/cancel-count"
-      return 31
-    }
-    CROSS_CLAUDE_STATE="$run/claude-agents.json" PATH="$CROSS_BIN:$PATH" \
-      uberdev_agent_dispatch "$request" "$run/prompt.txt" "$run/result.md" "$run/status.json"
-  )
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-    [ -s "$run/status.json.watcher-error.json" ] && break
-    command sleep 0.1
-  done
-  [ "$(cat "$run/persist-count")" -ge 3 ]
-  [ "$(cat "$run/cancel-count")" -ge 3 ]
-  grep -q '"state":"running"' "$run/status.json"
-  state="$run/.agent-state-$(id -u)"
-  grep -R -q 'run_id=claude-probe-persistence-retry' "$state/semaphore-v1"
-  rm -rf "$run"
-  command sleep 0.2
-}
-
-claude_probe_persistence_retry_case
-
 cross_backend_case codex
 cross_backend_case background
-cross_backend_case claude-bg
 cross_backend_case wezterm
 
 # A numeric provider that disappears before publishing a terminal snapshot is

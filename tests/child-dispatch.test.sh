@@ -258,54 +258,13 @@ PY
 ! uberdev_create_child_handoff run-risk run-risk-explicit-mismatch "$RISK_INPUTS" '[]' >/dev/null 2>&1
 UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
 
-# Claude-backed children are eligible only when the installed provider exposes
-# both the inventory and exact-stop operations used by supervision.
-CLAUDE_OUT="$(make_context "$TMP/claude-preflight" inherit root-claude-preflight claude-bg)"
-CLAUDE_CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$CLAUDE_OUT")"
-CLAUDE_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$CLAUDE_OUT")"
-mkdir -p "$TMP/claude-preflight/inputs"; printf task >"$TMP/claude-preflight/inputs/task"; printf failure >"$TMP/claude-preflight/inputs/failure"
-UBERDEV_RUN_CARRIER_JSON="$(python3 - "$CLAUDE_CTX" "$CLAUDE_SHA" <<'PY'
-import json,sys
-print(json.dumps({'schema_version':1,'run_id':'root-claude-preflight','workflow':'solve','issue_num':42,'context_file':sys.argv[1],'context_sha256':sys.argv[2]},separators=(',',':')))
-PY
-)"
-CLAUDE_INPUTS="$(python3 - "$TMP/claude-preflight/inputs/task" "$TMP/claude-preflight" "$TMP/claude-preflight/inputs/failure" <<'PY'
-import json,sys
-print(json.dumps({'task_path':sys.argv[1],'working_dir':sys.argv[2],'allowed_paths':[sys.argv[1]],'denied_paths':[],'failure_path':sys.argv[3],'attempt':1},separators=(',',':')))
-PY
-)"
-uberdev_create_child_handoff sdd.task.implement claude-preflight-a1 "$CLAUDE_INPUTS" '[]' >/dev/null
-CLAUDE_HANDOFF_SHA256="$UBERDEV_CHILD_HANDOFF_SHA256"
-CLAUDE_CAP_BIN="$TMP/claude-cap-bin"
-mkdir -p "$CLAUDE_CAP_BIN"
-cat >"$CLAUDE_CAP_BIN/claude" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  'agents --all --json') printf '[]\n'; exit 0 ;;
-  'stop --help') [ "${CLAUDE_CAP_MODE:-supported}" = supported ]; exit ;;
-esac
-exit 2
-SH
-chmod +x "$CLAUDE_CAP_BIN/claude"
-CLAUDE_CAPABILITY_BODY="$(declare -f _uberdev_child_backend_cancellation_supported)"
-case "$CLAUDE_CAPABILITY_BODY" in
-  *'["claude","agents","--all","--json"]'*'["claude","stop","--help"]'*) ;;
-  *)
-    echo 'child-dispatch: Claude lifecycle capability probes are missing' >&2
-    exit 1
-    ;;
-esac
-PATH="$CLAUDE_CAP_BIN:$PATH" uberdev_preflight_child_batch \
-  "$UBERDEV_CHILD_HANDOFF" "$CLAUDE_HANDOFF_SHA256" >/dev/null
-[ ! -e "$TMP/claude-preflight/children/claude-preflight-a1" ]
-set +e
-CLAUDE_PREFLIGHT_ERROR="$(CLAUDE_CAP_MODE=no-stop PATH="$CLAUDE_CAP_BIN:$PATH" \
-  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$CLAUDE_HANDOFF_SHA256" 2>&1)"
-CLAUDE_PREFLIGHT_RC=$?
-set -e
-[ "$CLAUDE_PREFLIGHT_RC" -eq 2 ]
-grep -Fq 'backend lacks lifecycle supervision: claude-bg' <<<"$CLAUDE_PREFLIGHT_ERROR"
-UBERDEV_RUN_CARRIER_JSON="$SAVED_CARRIER"
+# The Claude-backed child preflight used to live here: it proved a detached
+# `claude --bg` child was refused unless the installed provider exposed BOTH
+# the inventory and the exact-stop operations supervision needs. That backend
+# was deleted (RFC 0015 section 7 as amended), so the capability probe it
+# exercised went with it. `_uberdev_child_backend_cancellation_supported`
+# still fails closed for any unknown backend -- its `*) return 2` arm -- which
+# the standalone refusal fixture below covers.
 
 # Native Windows Codex has no verifiable process-tree cancellation primitive.
 # Both workflow and child-batch preflight reject it before allocating a child.
@@ -332,7 +291,6 @@ for WINDOWS_NUMERIC_BACKEND in codex background; do
   [ "$WINDOWS_NUMERIC_RC" -eq 1 ]
   grep -Fq 'cannot supervise native Windows' <<<"$WINDOWS_NUMERIC_ERROR"
 done
-_uberdev_dispatch_numeric_supervision_supported claude-bg
 _uberdev_dispatch_numeric_supervision_supported wezterm
 eval "$(declare -f _real_dispatch_os_class | sed '1s/_real_dispatch_os_class/_uberdev_dispatch_os_class/')"
 
@@ -415,7 +373,7 @@ PY
   [ "$STANDALONE_UNAVAILABLE_RC" -ne 0 ]
   grep -Fq "skills/review-fleet/workflow.js" <<<"$STANDALONE_UNAVAILABLE_ERROR"
   # A refusal, never a silent demotion to some other transport.
-  ! grep -Eq "resolved.*(codex|claude-bg|wezterm|background)" <<<"$STANDALONE_UNAVAILABLE_ERROR"
+  ! grep -Eq "resolved.*(codex|wezterm|background)" <<<"$STANDALONE_UNAVAILABLE_ERROR"
   [ -z "$(find "$TMP/standalone-unavailable" -mindepth 1 -print -quit)" ]
 )
 

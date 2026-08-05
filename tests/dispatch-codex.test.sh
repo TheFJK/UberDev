@@ -2911,7 +2911,7 @@ rm -rf "$PACKAGE_TMP"
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
-  'auto\|workflow\|claude-bg\|wezterm\|background\|codex' \
+  'auto\|workflow\|wezterm\|background\|codex' \
   "backend enum includes codex (and the RFC 0015 workflow default)"
 assert_grep "$DISPATCH_LIB" \
   '_uberdev_dispatch_codex_available\(\)' \
@@ -3043,7 +3043,7 @@ fi
 
 echo "== goal-state backend-awareness =="
 assert_grep "$GOAL_LIB" \
-  'claude-bg\|wezterm\|background\|codex' \
+  'wezterm\|background\|codex' \
   "goal-state UBERDEV_RESOLVED_BACKEND allowlist includes codex"
 assert_grep "$GOAL_LIB" \
   'terminal completed/failed states return "not busy"' \
@@ -3099,7 +3099,7 @@ echo "== Public launcher parser accepts codex =="
 PARSER_OUT="$(mktemp)"
 if bash "$LAUNCHER" --auto-mode=0 -- --backend=codex >"$PARSER_OUT" 2>&1; then
   echo "  FAIL  parser-only invocation should exit with usage when no issue is supplied"; FAIL=$((FAIL + 1))
-elif grep -q "not in {auto,claude-bg,wezterm,background" "$PARSER_OUT"; then
+elif grep -q "not in {auto,wezterm,background" "$PARSER_OUT"; then
   echo "  FAIL  public launcher rejected --backend=codex"; cat "$PARSER_OUT"; FAIL=$((FAIL + 1))
 elif grep -q "routing_cli_invalid_issue" "$PARSER_OUT"; then
   echo "  PASS  public launcher parser accepts --backend=codex and then rejects the missing issue"; PASS=$((PASS + 1))

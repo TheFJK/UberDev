@@ -91,24 +91,29 @@ assert_grep "$SOLVE_PIPELINE" \
   "solve-pipeline skill (medium tier) dispatches --turbo into the pipeline"
 
 echo
-echo "== lib/dispatch.sh inline-prefix UBERDEV_TURBO=1 on claude --bg (AUTO_MODE=1 only, #97) =="
+# The ordering fixture below used to key off `_uberdev_dispatch_claude_bg`. That
+# arm was deleted with its backend (RFC 0015 section 7 as amended), so it is
+# RETARGETED at `_uberdev_dispatch_background` rather than dropped: the
+# invariant is the env(1)-prefix ordering (base -> length-gated BG_TURBO_ENV ->
+# provider argv), which is still live there and still the thing #97 fixed.
+echo "== lib/dispatch.sh inline-prefix UBERDEV_TURBO=1 on the detached provider argv (AUTO_MODE=1 only, #97) =="
 assert_grep "$DISPATCH_LIB" \
   'BG_TURBO_ENV=\( UBERDEV_TURBO=1 \)' \
   "lib/dispatch.sh declares BG_TURBO_ENV array under AUTO_MODE=1 (#97)"
 if python3 -I -B - "$DISPATCH_LIB" <<'PY'
 import sys
 source=open(sys.argv[1],encoding="utf-8").read()
-body=source.split("_uberdev_dispatch_claude_bg() {",1)[1].split("\n}",1)[0]
-base='local cmd=( "$TIMEOUT_BIN" "$BG_BOOTSTRAP_TIMEOUT" env )'
-turbo='[ "${#BG_TURBO_ENV[@]}" -eq 0 ] || cmd+=( "${BG_TURBO_ENV[@]}" )'
-provider='cmd+=( claude --bg )'
+body=source.split("_uberdev_dispatch_background() {",1)[1].split("\n}",1)[0]
+base='local PROVIDER_CMD=( env )'
+turbo='[ "${#BG_TURBO_ENV[@]}" -eq 0 ] || PROVIDER_CMD+=( "${BG_TURBO_ENV[@]}" )'
+provider='PROVIDER_CMD+=( claude -p "$PROMPT_BODY" --model "$MODEL" )'
 assert body.index(base) < body.index(turbo) < body.index(provider),body
 PY
 then
-  echo "  PASS  lib/dispatch.sh appends BG_TURBO_ENV before claude --bg with a nounset-safe length guard"
+  echo "  PASS  lib/dispatch.sh appends BG_TURBO_ENV before the provider argv with a nounset-safe length guard"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  lib/dispatch.sh must append BG_TURBO_ENV before claude --bg with a nounset-safe length guard"
+  echo "  FAIL  lib/dispatch.sh must append BG_TURBO_ENV before the provider argv with a nounset-safe length guard"
   FAIL=$((FAIL + 1))
 fi
 

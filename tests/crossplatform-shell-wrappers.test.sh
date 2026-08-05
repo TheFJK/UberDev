@@ -953,7 +953,7 @@ PY
     [ ! -e "$cancel_calls" ]
     ! _uberdev_dispatch_numeric_supervision_supported codex
     ! _uberdev_dispatch_numeric_supervision_supported background
-    _uberdev_dispatch_numeric_supervision_supported claude-bg
+    _uberdev_dispatch_numeric_supervision_supported wezterm
     _uberdev_dispatch_numeric_supervision_supported wezterm
     # RFC 0015: `workflow` spawns no OS process, so the numeric-supervision gate
     # does not apply to it — this is what makes native Windows a first-class

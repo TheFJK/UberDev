@@ -168,25 +168,24 @@ PY
   fi
 }
 
-echo "== C4: a new elif arm written on ONE line must red =="
-# The first edition asserted the general claim "a NEW case/elif arm must red"
-# and proved only one spelling: its harvest regex demanded a literal newline
-# after the `:`, so the one-line form below sailed through while C4 said green.
-# `paused` then means live at the classifier and not-live at all three
-# goal-state probes — #370 rank 7, live. C4 now fires that exact spelling.
-assert_mutation_reds C4 lib/agent-dispatch.sh \
-  'elif lifecycle in {"failed", "error"}:' \
-  'elif lifecycle == "paused": print("live", end="")
-elif lifecycle in {"failed", "error"}:' \
-  agent-liveness-value paused
+# C4 is RETIRED, not silently dropped. It seeded a one-line
+# `elif lifecycle == "paused": print("live")` into the `agent-liveness-value`
+# lifecycle CLASSIFIER and asserted the marker's bespoke harvest regex caught
+# it. That classifier lived inside the detached-session liveness probe and was
+# deleted with its backend (RFC 0015 section 7 as amended), taking the only
+# regex-mode copy of this contract with it. No surviving site spells the arm
+# that way, so re-seeding the mutation anywhere else would prove a claim about
+# a shape this repo no longer contains. C5 below still covers `!case-arm` mode
+# and C6 still covers the unmarked-copy scan; if a regex-mode marker is ever
+# reintroduced, restore a C4 against it.
 
 echo "== C5: a new arm on a ONE-LINER case must red (!case-arm mode) =="
 # C4 exercises harvest mode only. `!case-arm` derives its region from case/esac
 # depth precisely so a one-liner `case … esac` — which has nowhere to hang a
 # closing marker — still sees an appended arm. Two such sites shipped blind.
 assert_mutation_reds C5 lib/goal-state.sh \
-  'case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
-  'case "$v" in workflow|claude-bg|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; podman) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  'case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  'case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; podman) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
   dispatch-backend podman
 
 echo "== C6: an UNMARKED copy of a whole vocabulary must red =="

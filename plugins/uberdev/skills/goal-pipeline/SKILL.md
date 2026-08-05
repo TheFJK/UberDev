@@ -1,6 +1,6 @@
 ---
 name: goal-pipeline
-description: "Autonomous convergence pipeline for /uberdev:goal. Drives the cycle algorithm (RFC 0005 §3.3) and the PR/issue state machines from skills/goal-pipeline/workflow.js, with each phase in an independently-testable lib/goal-*.sh script. Runs on the Workflow-native backend (RFC 0015 §5) — the per-issue solvers come from skills/solve-fleet/workflow.js, not from a detached claude-bg session."
+description: "Autonomous convergence pipeline for /uberdev:goal. Drives the cycle algorithm (RFC 0005 §3.3) and the PR/issue state machines from skills/goal-pipeline/workflow.js, with each phase in an independently-testable lib/goal-*.sh script. Runs on the Workflow-native backend (RFC 0015 §5) — the per-issue solvers come from skills/solve-fleet/workflow.js, not from a detached `claude --bg` session."
 ---
 
 # Goal Pipeline (autonomous convergence body for /uberdev:goal)
@@ -122,7 +122,7 @@ fi
 
 ## No-Workflow fallback
 
-Codex, Gemini, Copilot and pre-Workflow Claude Code have no `Workflow` tool. There is **no detached-session fallback for `/goal`** — the interim `uberdev_dispatch_demote_workflow_to_detached` shim that used to demote a `workflow` resolution back onto `claude-bg` is deleted (RFC 0015 §5), because keeping it meant `claude-bg` stayed on a default path.
+Codex, Gemini, Copilot and pre-Workflow Claude Code have no `Workflow` tool. There is **no detached-session fallback for `/goal`** — the interim `uberdev_dispatch_demote_workflow_to_detached` shim that used to demote a `workflow` resolution back onto the detached `claude --bg` transport is deleted (RFC 0015 §5), because keeping it meant that transport stayed on a default path. The transport itself was deleted in turn (RFC 0015 §7 as amended).
 
 What remains is the manual sequence. Every phase script is a normal executable with a documented exit contract, so the loop can be driven by hand (or by any harness) without the driver:
 
@@ -131,11 +131,11 @@ Every phase script runs under **bash ≥ 4** (`lib/goal-watch.sh`'s verdict loca
 ```bash
 export CLAUDE_PLUGIN_ROOT=<plugin root>
 
-# Preflight ONCE. Name a detached backend explicitly — without a Workflow tool
-# there is nothing for `auto`'s `workflow` resolution to run on. Phase 0 prints
+# Preflight ONCE. Name a detached backend explicitly — with no `Workflow` tool
+# present, the default resolution has nothing to run on. Phase 0 prints
 # the resolved interpreter as the envelope's config.bashBin (and exports
 # UBERDEV_GOAL_BASH); GBASH below is that interpreter.
-bash "$CLAUDE_PLUGIN_ROOT/lib/goal-phase0.sh" 123 124 --backend=claude-bg
+bash "$CLAUDE_PLUGIN_ROOT/lib/goal-phase0.sh" 123 124 --backend=background
 GBASH="${UBERDEV_GOAL_BASH:-$(command -v bash)}"
 
 # Then, per cycle:
@@ -147,7 +147,7 @@ GBASH="${UBERDEV_GOAL_BASH:-$(command -v bash)}"
 #     EXACTLY the `dispatch` list — `--force` means an issue you add by hand
 #     here is solved without ever having been claimed.
 "$GBASH" "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=1 --turbo -- \
-  <claimed issues> --backend=claude-bg --force
+  <claimed issues> --backend=background --force
 #  3. reconcile: --mark-solving=<csv> on success, --mark-failed=<csv> otherwise.
 #     A non-zero exit here means a state transition did NOT land — stop and fix
 #     it; step 4 can never drive an issue whose row is stuck at `dispatched`.
@@ -162,7 +162,7 @@ done
 "$GBASH" "$CLAUDE_PLUGIN_ROOT/lib/goal-phase3.sh"
 ```
 
-`--backend=claude-bg` in that sequence is the deliberate escape hatch: it is the one path that still uses a detached transport, it prints its deprecation notice, and its removal target is v1.0.0. `auto` never selects it.
+`--backend=background` in that sequence is the deliberate escape hatch: it is a detached transport with a PID, a status file and a result file, so a harness with no `Workflow` tool can still supervise the run. `auto` never selects it. Inside a Codex session use `--backend=codex` instead.
 
 ## Scoped relaxations
 

@@ -95,6 +95,12 @@ A new sourced library, mirroring `lib/config-read.sh` (sourced never executed; i
 
 ### 3.5 The `claude-bg` backend (current behaviour, formalised)
 
+> **SUPERSEDED 2026-08-05 by RFC 0015 §7 (as amended).** This backend and
+> `_uberdev_dispatch_claude_bg` are deleted. The section is kept for the
+> historical record; nothing in it describes shipping code. The rest of
+> RFC 0004 — §3.6 `wezterm`, §3.7 `background`, the receipt and supervision
+> contracts — is unaffected and stays canonical.
+
 Today's dispatch lifted verbatim into `_uberdev_dispatch_claude_bg`: the `case "$BG_PROMPT_MODE" in file|stdin|argv` switch, `--worktree solve-issue-N`, the `env "${BG_TURBO_ENV[@]}"` prefix, `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`, the `timeout`/`gtimeout` wrap, the `backgrounded · <id>` session-id extraction, and the `agent_dispatched` audit event. **No behaviour change** — a pure extract-to-function refactor. macOS default; Windows-capable on v2.1.144+ but kept out of the Windows `auto` chain (§3.3, D8).
 
 ### 3.6 The `wezterm` backend

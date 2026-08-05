@@ -495,7 +495,47 @@ The contract is therefore enforced three ways:
 
 ## 7. Rejected alternatives
 
-- **Delete `claude-bg` outright.** Rejected: it is ~170 lines of mature,
+> **AMENDED 2026-08-05 — `claude-bg` is now DELETED.** The rejection below was
+> conditional ("Deprecate, then remove on evidence"), and the evidence arrived.
+> `workflow` shipped and stayed shipped across `/solve`, `/turbo` and `/goal`
+> (§5), and then across `/review-pr` and `/simplify` — the last two workflows
+> that structurally required a detached transport, because they need an atomic
+> child result artifact plus caller-workspace repair. Both halves now exist on
+> the Workflow-native path: every bound child publishes `result.md` and a
+> nonce-bearing `status.json` by same-directory rename, and the controller
+> digests both through `lib/code_fixer_contract.py`. With those two resolving
+> `workflow`, `claude-bg` was the transport that nothing selected and nothing
+> required, and `auto` had already been forbidden from reaching it.
+>
+> Two things the original rejection weighed are answered rather than waived:
+>
+> - *"no fallback if the new transport disappoints"* — `background` and `codex`
+>   remain. `background` is the same shape (detached, survives the parent,
+>   PID-tracked, status + result files) without the second agent surface that
+>   motivated this RFC, and it is the fallback the No-Workflow sections now name.
+> - *"~170 lines of mature, heavily-tested transport"* — the tests went with the
+>   code. `tests/dispatch-claude-bg.test.sh` is deleted rather than retargeted,
+>   and the S4a/S4b/S4c deprecation guards in
+>   `tests/solve-fleet-workflow.test.sh` are **inverted into tombstones** (the
+>   surface must now be ABSENT), mirroring
+>   `tests/ghostty-dispatch-no-instance-leak.test.sh`. No check that still
+>   guards live code was relaxed.
+>
+> **This also supersedes RFC 0004 §3.5** (*"The `claude-bg` backend (current
+> behaviour, formalised)"*), which described the extracted
+> `_uberdev_dispatch_claude_bg` provider arm. RFC 0004's remaining per-backend
+> transports (`wezterm`, `background`), receipts and supervision contracts are
+> untouched and stay canonical.
+>
+> Deleted with it, because each had exactly one consumer: the
+> `claude-bootstrap` long-poll + ownerless-generation reclaim protocol in
+> `lib/dispatch.sh`'s git-metadata mutex; `BG_PROMPT_MODE`; the
+> `_uberdev_agent_claude_probe` liveness classifier; the unattended-permissions
+> preflight; and the `provider_probe_failed` / `provider_cancel_failed`
+> watcher-error kinds, whose only writer was that probe's `blocked:` vocabulary.
+
+- **Delete `claude-bg` outright.** ~~Rejected~~ **— accepted on evidence, see the
+  amendment above.** The original reasoning: it is ~170 lines of mature,
   heavily-tested transport with real supervision, cancellation and receipt
   semantics, and removing it in the same change that introduces its replacement
   would leave no fallback if the new transport disappoints. Deprecate, then

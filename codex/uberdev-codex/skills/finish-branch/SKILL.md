@@ -120,7 +120,7 @@ Both sections are read-only dumps; finish-branch does not block on confidence th
 
 ```bash
 # Resolve run identity for the orchestrator artifact reads below. Environment
-# exports do NOT survive the claude-bg / Skill process boundary, so the
+# exports do NOT survive the detached-dispatch / Skill process boundary, so the
 # cross-process contract is the per-worktree sidecar written by orchestrator
 # Phase 0 — never a RUN_ID export. An in-process RUN_ID (same-agent chain) is
 # honoured first when it names a real run dir.

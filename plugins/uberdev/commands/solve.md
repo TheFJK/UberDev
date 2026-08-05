@@ -1,12 +1,12 @@
 ---
-description: "Spawn an autonomous solver per GitHub issue, with auto-triage and a tier-appropriate workflow. Solvers run in the session's Workflow runtime (one worktree-isolated agent per issue; watch with /workflows) — the default `workflow` backend. Detached transports (claude-bg / wezterm / background / codex) remain available via `--backend=<name>`. Accepts multiple issue numbers."
+description: "Spawn an autonomous solver per GitHub issue, with auto-triage and a tier-appropriate workflow. Solvers run in the session's Workflow runtime (one worktree-isolated agent per issue; watch with /workflows) — the default `workflow` backend. Detached transports (wezterm / background / codex) remain available via `--backend=<name>`. Accepts multiple issue numbers."
 argument-hint: "<issue-number> [<issue-number>...] [--force] [--routing-mode=adaptive|inherit] [--route=<route>|--model=<slug> --effort=<level>] [--service-tier=default|fast|flex|--fast] [--backend=<name>]"
 allowed-tools: ["Bash", "Read", "Task", "Workflow"]
 ---
 
 # Solve GitHub Issue
 
-Spawn an autonomous solver per GitHub issue in **#$ARGUMENTS** — multiple issue numbers run in parallel. On the default `workflow` backend each solver is a worktree-isolated agent in this session's Workflow runtime; watch them with `/workflows`. On the deprecated detached backends, monitor with `claude agents` (`claude-bg`), visible panes (`wezterm`), or the printed PID/log/result files (`background`, `codex`).
+Spawn an autonomous solver per GitHub issue in **#$ARGUMENTS** — multiple issue numbers run in parallel. On the default `workflow` backend each solver is a worktree-isolated agent in this session's Workflow runtime; watch them with `/workflows`. On the explicit detached backends, monitor with visible panes (`wezterm`) or the printed PID/log/result files (`background`, `codex`).
 
 **Multi-issue dispatch:** `/solve 5 6 7` validates all three issues up front (open + classifiable) and then spawns three independent sessions — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). Override flags apply batch-wide.
 
@@ -21,7 +21,7 @@ Spawn an autonomous solver per GitHub issue in **#$ARGUMENTS** — multiple issu
 - Routing: `--routing-mode=adaptive|inherit`, or force a declared route with `--route=luna|terra|sol|sol-high|sol-max|sol-ultra`, or an exact `--model=<slug> --effort=low|medium|high|xhigh|max|ultra` pair. `ultra` is Codex-only. Route/mode/exact-field conflicts fail before claims.
 - Service is independent: `--service-tier=default|fast|flex`; `--fast` is an alias for `fast` and never changes model or effort.
 - Claude legacy effort remains `low|medium|high|xhigh|max` via `UBERDEV_SOLVE_EFFORT`; Codex exact effort uses `UBERDEV_REASONING_EFFORT`.
-- `--backend=<name>` (`auto | workflow | claude-bg | wezterm | background | codex`) — selects how `/solve` runs each per-issue solver. `auto` (default) resolves to `workflow` on every Claude host and OS; a Codex session (`CODEX_HOME` set) or a Codex-only host still resolves to `codex`. `workflow` = one worktree-isolated solver agent per issue inside this session's Workflow runtime (`skills/solve-fleet/workflow.js`); watch with `/workflows`; no separate agent surface. `claude-bg` = **deprecated** (RFC 0015; removal target v1.0.0) detached `claude --bg` sessions parked in the separate `claude agents` surface — selecting it prints a one-line deprecation notice. `wezterm` = each agent in a visible WezTerm pane. `background` = a dependency-free `git worktree add` + detached headless `claude -p`. `codex` = detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>` in a per-issue worktree (monitor via PID/log/result file). An explicit `--backend=X` hard-errors if `X` is unusable on this host. Configurable repo-wide via `dispatch_backend:` in `.claude/uberdev.local.md` (env override: `UBERDEV_DISPATCH_BACKEND`). Precedence: CLI flag > env > config > default `auto`.
+- `--backend=<name>` (`auto | workflow | wezterm | background | codex`) — selects how `/solve` runs each per-issue solver. `auto` (default) resolves to `workflow` on every Claude host and OS; a Codex session (`CODEX_HOME` set) or a Codex-only host still resolves to `codex`. `workflow` = one worktree-isolated solver agent per issue inside this session's Workflow runtime (`skills/solve-fleet/workflow.js`); watch with `/workflows`; no separate agent surface. `wezterm` = each agent in a visible WezTerm pane. `background` = a dependency-free `git worktree add` + detached headless `claude -p`. `codex` = detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>` in a per-issue worktree (monitor via PID/log/result file). An explicit `--backend=X` hard-errors if `X` is unusable on this host. Configurable repo-wide via `dispatch_backend:` in `.claude/uberdev.local.md` (env override: `UBERDEV_DISPATCH_BACKEND`). Precedence: CLI flag > env > config > default `auto`.
 - `--force` / `-f` overrides the small-team issue-claim protocol. Claims are written only after the whole batch's triage, route, backend, and immutable root contexts validate.
 - Multi-issue example: `/solve 5 6 7` ⇒ three parallel agents, one per issue. Same flag set applies to all three.
 
@@ -86,5 +86,5 @@ say so explicitly and note that issues left unsolved still hold their
 **No-Workflow fallback:** if the `Workflow` tool is not among your tools
 (Codex, Gemini, Copilot, pre-Workflow Claude Code), re-run the same launcher
 call with an explicit detached backend appended — `--backend=codex` inside a
-Codex session, otherwise `--backend=claude-bg` — and report the dispatch summary
+Codex session, otherwise `--backend=background` — and report the dispatch summary
 the launcher prints. Do not attempt to emulate the fleet by hand.

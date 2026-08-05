@@ -53,7 +53,7 @@ Autonomous convergence orchestrator that drives one or more GitHub issues to mer
 - `--watch-budget=SECS` — bound each `lib/goal-watch.sh` invocation to a wall-clock budget, then exit for re-invocation. Default 0 (unbounded) — **except under the Claude-Code Bash tool** (`CLAUDECODE` env marker), where an otherwise-unbounded run defaults to `480` (#301, RFC 0012 §3.3 goal-R1 item 3): the tool's 600s call cap minus headroom for one worst-case serial gh walk, so the fence exits 42 for re-invocation instead of being SIGTERMed mid-pass. Pass an explicit `--watch-budget=0` (or `UBERDEV_GOAL_WATCH_BUDGET=0`) to force the unbounded loop there.
 - `--max-watch-ticks=N` — how many `lib/goal-watch.sh` invocations `skills/goal-pipeline/workflow.js` relays in ONE cycle before the CB3 tick breaker halts deterministically (default `40`, range `1..500`; same precedence as `--max-cycles`: CLI flag > `UBERDEV_GOAL_MAX_WATCH_TICKS` env > `goal.max_watch_ticks` config key > default). This is the driver-side complement to `--watch-budget`: the budget bounds ONE invocation, this bounds how many of them a cycle gets. Total worst-case watch wall-clock per cycle ≈ `max_watch_ticks × watch_budget`.
 - `GOAL_SINGLE_TICK=1` (env) — shorthand for `--watch-passes=1`.
-- `--backend=<name>` — pin a dispatch backend; otherwise auto-resolved once by Phase 0 preflight and frozen for the run. Since RFC 0015 `auto` resolves to `workflow` on every Claude host and `/goal`'s solvers run inside the calling session's Workflow runtime. The detached backends (`claude-bg` — deprecated, removal target v1.0.0 — `wezterm`, `background`, `codex`) are still reachable, but only by naming one explicitly: there is no demotion path back onto them.
+- `--backend=<name>` — pin a dispatch backend; otherwise auto-resolved once by Phase 0 preflight and frozen for the run. Since RFC 0015 `auto` resolves to `workflow` on every Claude host and `/goal`'s solvers run inside the calling session's Workflow runtime. The detached backends (`wezterm`, `background`, `codex`) are still reachable, but only by naming one explicitly: there is no demotion path back onto them.
 
 **Merge barrier (issue #211).** `/merge` does not fire per-PR the instant a PR turns GREEN.
 Instead, `/goal` holds until every PR in the cycle's batch is in a terminal state
@@ -102,7 +102,7 @@ pending rollup.
 
 ## Permission requirements (cmux/hooks caveat)
 
-Since RFC 0015 §5 the default `/goal` solvers are **Workflow agents in the calling session**, so they inherit that session's permission tier — there is no per-child argv to set (RFC 0015 §6 R-1b). The paragraphs below therefore apply to the **explicit detached backends** (`--backend=claude-bg|wezterm|background`) and to the `/merge` + `/review-pr` children `lib/goal-watch.sh` still dispatches through `lib/dispatch.sh`.
+Since RFC 0015 §5 the default `/goal` solvers are **Workflow agents in the calling session**, so they inherit that session's permission tier — there is no per-child argv to set (RFC 0015 §6 R-1b). The paragraphs below therefore apply to the **explicit detached backends** (`--backend=wezterm|background|codex`) and to the `/merge` + `/review-pr` children `lib/goal-watch.sh` still dispatches through `lib/dispatch.sh`.
 
 On those paths `/goal` runs each dispatched bg agent in `bypassPermissions` mode via a **pair** of argv flags — `--dangerously-skip-permissions` AND `--permission-mode bypassPermissions` — so the autonomous loop does not stall on cmux's `PermissionRequest` hook (or any other `--settings`-injected `PreToolUse` hook). The two flags target **different mechanisms** and both are needed (belt-and-suspenders, per #246):
 
@@ -133,6 +133,6 @@ The watch stage keeps its documented exit contract, and `skills/goal-pipeline/wo
 
 ## Session lifetime (RFC 0015 §6 R-1)
 
-The default solvers are Workflow agents in **this** session: if the session ends — closed, `/clear`, compacted — every in-flight solver dies with it. The on-disk run-state does not: `--resume` picks the run back up from the `goal-active-id.txt` pointer, and `plugins/uberdev/lib/goal-abort.sh` is the other half (release the `uberdev:active` claims and reap). Use `--backend=claude-bg` for the deliberate fire-and-forget case until its v1.0.0 removal.
+The default solvers are Workflow agents in **this** session: if the session ends — closed, `/clear`, compacted — every in-flight solver dies with it. The on-disk run-state does not: `--resume` picks the run back up from the `goal-active-id.txt` pointer, and `plugins/uberdev/lib/goal-abort.sh` is the other half (release the `uberdev:active` claims and reap). Use `--backend=background` (or `--backend=codex`) for the deliberate fire-and-forget case.
 
 Now invoke the `uberdev:goal-pipeline` skill — it runs the `lib/goal-phase0.sh` preflight and relays its args envelope into `Workflow({scriptPath: "${PLUGIN_ROOT:-${CODEX_HOME:-$HOME/.codex}/plugins/uberdev-codex}/skills/goal-pipeline/workflow.js"}, <args>)`, which owns the cycle loop. The skill renders inline, so `$ARGUMENTS` remains in scope for the preflight.
