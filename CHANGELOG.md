@@ -28,6 +28,32 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `tests/dispatch-child-worktree-teardown.test.sh` observes a real worktree and
   branch disappearing from a scratch repository.
 
+  **The SETUP/LAUNCH door is closed too.** The teardown above covers a child
+  that started and then finished. Every dispatcher-side failure *between* a
+  successful `git worktree add` and a running child had no teardown at all, on
+  either backend — `prompt_read`, `python_launcher` and `pid_target_unsafe` on
+  `background`; `worktree_path`, `native_path`, `prompt_read`, `python_launcher`
+  and a failed `wezterm cli spawn` on `wezterm`. A mux that is not up is
+  routine, so that last one was the most-travelled of them. Because the leaked
+  path derives purely from `ISSUE_NUM`, each leak also **blocked the next
+  dispatch of the same issue** rather than merely accumulating. A new
+  `_uberdev_dispatch_fail_after_worktree` now runs the same guarded transaction
+  (terminal `setup_failed`) at each of those sites; a teardown that cannot
+  safely run is reported on stderr, emits a new `dispatch_cleanup_failed` audit
+  naming the worktree and branch, and returns **74** instead of the plain setup
+  rc. The `dispatch` phase on `background` is deliberately excluded — the
+  wrapper is already launched there and owns its own teardown.
+
+  **The wezterm pane wrapper now arms an `EXIT` trap**, not only
+  `HUP INT TERM`. Its `write_status running null || exit 126` — and every other
+  bare `exit` before the finalizer — previously terminated the pane with the
+  worktree already on disk and nothing to remove it, an asymmetry with the
+  background wrapper, which has armed `EXIT` before the same call all along.
+  The one window that stays uncovered is the `. "$DISPATCH_LIB"` source itself:
+  the preservation guards live in that file, so before it loads there is
+  nothing safe to call. Both wrappers now **name the worktree on stderr** there
+  rather than force-removing it guardless or exiting silently.
+
 ### Removed
 
 - **BREAKING — adaptive per-rank model routing is retired as unenforceable**

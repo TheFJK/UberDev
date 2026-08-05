@@ -321,7 +321,9 @@ PY
 #
 # Backend-neutral teardown for a DISPATCHER-OWNED, CHILD-OWNED, isolated
 # worktree (#381 RULING 4). Removes the worktree and its branch once the child
-# reaches a terminal state, and refuses — loudly, with a distinct rc — whenever
+# reaches a terminal state — or, through `_uberdev_dispatch_fail_after_worktree`
+# and its own `setup_failed` terminal, once the DISPATCHER gives up before any
+# child could start — and refuses — loudly, with a distinct rc — whenever
 # removing would destroy work or the on-disk state no longer matches what the
 # dispatcher created.
 #
@@ -343,7 +345,8 @@ _uberdev_dispatch_cleanup_child_worktree_locked() {
   local repo_root="$1" relative="$2" branch="$3" start_head="$4" terminal="$5"
   local target branch_exists=0 show_ref_rc branch_head local_status target_head native_target
   # `setup_failed` is this cleanup path's own extra arm, not a manifest
-  # terminal status, so it is declared rather than smuggled in.
+  # terminal status, so it is declared rather than smuggled in. Its caller is
+  # `_uberdev_dispatch_fail_after_worktree` — the dispatcher-side door.
   # CONTRACT: run-terminal-status +setup_failed !case-arm
   case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 3 ;; esac
   case "$start_head" in
@@ -439,6 +442,50 @@ _uberdev_dispatch_cleanup_child_worktree() {
     [ "$release_rc" -ne 0 ] || trap - EXIT
     exit "$rc"
   )
+}
+
+# _uberdev_dispatch_fail_after_worktree ISSUE BACKEND PHASE SETUP_RC \
+#                                       REPO_ROOT RELATIVE BRANCH START_HEAD CHILD_OWNED
+#
+# The DISPATCHER-side twin of the wrapper's `cleanup_child_worktree` (#381
+# RULING 4). The wrapper's teardown only covers a child that actually started;
+# every setup/launch failure BETWEEN a successful `git worktree add` and a
+# running child is on this side of the fence, and before this helper existed
+# each of those paths returned while the worktree and its branch stayed on
+# disk. The leaked path derives purely from ISSUE_NUM, so the leak also blocks
+# the next dispatch of the same issue — it does not merely accumulate.
+#
+# `setup_failed` is exactly the extra terminal this cleanup path declares at
+# `_uberdev_dispatch_cleanup_child_worktree_locked`; the same preservation
+# guards apply, so a worktree the child already dirtied is refused (rc 3), not
+# destroyed. Cleanup failure is REPORTED — stderr + a `dispatch_cleanup_failed`
+# audit naming the worktree and branch — and folded into the returned rc as 74.
+# It is never swallowed into the plain setup rc.
+#
+# Emits the caller's `dispatch_setup_failed` audit first so the phase record is
+# written even if the teardown itself then fails.
+#
+# rc SETUP_RC  the setup failure stands, and nothing was left behind.
+# rc 74        the setup failure stands AND the worktree could not be removed.
+_uberdev_dispatch_fail_after_worktree() {
+  local issue="$1" backend="$2" phase="$3" setup_rc="$4"
+  local repo_root="$5" relative="$6" branch="$7" start_head="$8" child_owned="$9"
+  local cleanup_rc=0
+  _uberdev_dispatch_audit dispatch_setup_failed \
+    "{\"issue\":$issue,\"phase\":\"$phase\",\"backend\":\"$backend\",\"rc\":$setup_rc}"
+  # CHILD_OWNED=0 is a top-level /solve dispatch: that worktree IS the operator's
+  # deliverable workspace and survives a failed launch on purpose.
+  [ "$child_owned" = "1" ] || return "$setup_rc"
+  _uberdev_dispatch_cleanup_child_worktree \
+    "$repo_root" "$relative" "$branch" "$start_head" setup_failed || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || {
+    printf '%s dispatch: failed to clean child worktree %s (%s) after %s setup failure\n' \
+      "$backend" "$repo_root/$relative" "$branch" "$phase" >&2
+    _uberdev_dispatch_audit dispatch_cleanup_failed \
+      "{\"issue\":$issue,\"phase\":\"$phase\",\"backend\":\"$backend\",\"rc\":$cleanup_rc,\"worktree\":\"$repo_root/$relative\",\"branch\":\"$branch\"}"
+    return 74
+  }
+  return "$setup_rc"
 }
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
@@ -1521,11 +1568,11 @@ _uberdev_dispatch_background() {
   # audit event happily reporting success. Guard the cat read and surface
   # the failure as a dispatch_setup_failed audit + rc=1.
   if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"background\",\"rc\":1}"
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background prompt_read 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   # BG_TURBO_ENV: UBERDEV_TURBO + SKIP_PERMISSIONS propagation across the env(1)
   # boundary, per RFC 0005 §2.3 (scoped-relaxation contract).
@@ -1541,7 +1588,13 @@ _uberdev_dispatch_background() {
   PROVIDER_CMD+=( claude -p "$PROMPT_BODY" --model "$MODEL" )
   [ "${#PERM_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${PERM_FLAG[@]}" )
   [ "${#EFFORT_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${EFFORT_FLAG[@]}" )
-  _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
+  if ! _uberdev_dispatch_resolve_python; then
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background python_launcher 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
+  fi
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
   UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback
@@ -1586,7 +1639,17 @@ os.execvp("bash",argv)' '
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
     REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
     CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
-    . "$DISPATCH_LIB" || exit 126
+    # The one window no teardown can cover: the teardown transaction and every
+    # preservation guard it depends on live in $DISPATCH_LIB, so before this
+    # line there is nothing safe to call. A guardless inline `git worktree
+    # remove` here would be the exact destructive shortcut those guards exist
+    # to forbid. So this leak is REPORTED and left for the operator, not
+    # silently absorbed and not force-removed.
+    . "$DISPATCH_LIB" || {
+      [ "$CHILD_OWNED" != "1" ] || printf "background dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+        "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+      exit 126
+    }
     WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
     EMPTY_VALUE=
     WORKTREE_CLEANUP_DONE=0
@@ -1677,11 +1740,17 @@ finally:
   disown "$LAUNCH_PID" 2>/dev/null || true
   if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
     kill -TERM "$LAUNCH_PID" 2>/dev/null || true
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_target_unsafe\",\"backend\":\"background\",\"rc\":3}"
+    DISPATCH_LOG="$LOG_FILE"
+    # The SIGTERM above races the wrapper's own EXIT trap, which is armed only
+    # once it has sourced this library — so the wrapper may die before it can
+    # ever tear the worktree down. Tear it down from here too. Both teardowns
+    # take the same mutex, and the loser observes absent:absent and returns 0,
+    # so the double call is safe rather than merely tolerated.
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background pid_target_unsafe 3 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
     rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-    return 3
+    return "$DISPATCH_RC"
   fi
   # S10 cleanup: $STATUS_FILE.pid is a one-shot inter-subshell side file
   # whose only purpose is bridging the pid back from the subshell above.
@@ -1702,6 +1771,12 @@ finally:
   else
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
+    # Deliberately NOT a `_uberdev_dispatch_fail_after_worktree` site. Reaching
+    # here means the wrapper launched and its pid was captured — only the owned
+    # SESSION could not be observed — so a child may be running in that
+    # worktree right now, and it owns the teardown through its own EXIT trap.
+    # Every arm above this point aborts before any child can be running, which
+    # is exactly the line the dispatcher-side teardown is drawn on.
     _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"background\",\"rc\":$DISPATCH_RC}"
   fi
@@ -1822,14 +1897,20 @@ _uberdev_dispatch_wezterm() {
     return 1
   fi
   local WORKTREE_ABS WORKTREE_NATIVE STATUS_FILE_NATIVE
-  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)" || { DISPATCH_RC=1; return 1; }
+  if ! WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)"; then
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm worktree_path 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
+  fi
   if ! WORKTREE_NATIVE="$(_uberdev_dispatch_native_cli_path "$WORKTREE_ABS")" \
       || ! STATUS_FILE_NATIVE="$(_uberdev_dispatch_native_cli_path "$STATUS_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"native_path","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm native_path 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   local PROMPT_BODY
   # B5 fix (prompt-read), mirrored from the `background` backend: an
@@ -1838,18 +1919,18 @@ _uberdev_dispatch_wezterm() {
   # happily reporting success. Guard the cat read and surface the failure
   # as a dispatch_setup_failed audit + rc=1.
   if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"prompt_read","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm prompt_read 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   if ! _uberdev_dispatch_resolve_python; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"python_launcher","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm python_launcher 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
   # (headless print mode streaming into the pane) — detaching would empty the
@@ -1881,7 +1962,14 @@ _uberdev_dispatch_wezterm() {
       STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
       REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
       CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
-      . "$DISPATCH_LIB" || exit 126
+      # Same uncoverable pre-source window as the background wrapper, same
+      # ruling: report the worktree by name rather than force-remove it
+      # without the guards that live in $DISPATCH_LIB.
+      . "$DISPATCH_LIB" || {
+        [ "$CHILD_OWNED" != "1" ] || printf "wezterm dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+          "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        exit 126
+      }
       WRAPPER_PID="$$"
       EMPTY_VALUE=
       WORKTREE_CLEANUP_DONE=0
@@ -1909,6 +1997,13 @@ _uberdev_dispatch_wezterm() {
           "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
         return 2
       }
+      # Armed BEFORE `write_status running`, mirroring the background wrapper:
+      # that call can `exit 126`, and every other `exit` between here and the
+      # finalizer below is likewise a terminal pane with a worktree already on
+      # disk. Signal-only traps left all of those leaking silently, because a
+      # plain `exit` is not a signal. cleanup_child_worktree is idempotent via
+      # WORKTREE_CLEANUP_DONE, so the signal arm firing first costs nothing.
+      trap '\''cleanup_child_worktree cancelled || true'\'' EXIT
       trap '\''cleanup_child_worktree cancelled || true; exit 143'\'' HUP INT TERM
       write_status running null || exit 126
       "$@"
@@ -1917,7 +2012,7 @@ _uberdev_dispatch_wezterm() {
       if ! cleanup_child_worktree "$STATE"; then
         PROVIDER_RC=74; STATE=failed
       fi
-      trap - HUP INT TERM
+      trap - EXIT HUP INT TERM
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
     ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" \
@@ -1935,8 +2030,16 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"tier":"'"$TIER"'","backend":"wezterm","pane_id":"'"$DISPATCH_ID"'"}'
   else
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"dispatch","backend":"wezterm","rc":'"$DISPATCH_RC"'}'
+    # Unlike the background arm's `dispatch` phase, a failed `wezterm cli spawn`
+    # leaves NO reapable handle: there is no pane id to monitor and no status
+    # file the operator will ever be pointed at, so nothing downstream will
+    # take this worktree back down. A mux that is not up is routine, which is
+    # what makes this the most-travelled leak of the set. If a pane did come up
+    # despite the failure, its own wrapper tears down idempotently under the
+    # same mutex, and a pane that dirtied the tree is refused, not destroyed.
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm dispatch "$DISPATCH_RC" \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
   fi
   return "$DISPATCH_RC"
 }

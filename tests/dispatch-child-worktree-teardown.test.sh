@@ -25,6 +25,23 @@
 #       (non-zero) rather than destroying uncommitted work.
 #   T5  the wezterm arm is wired to the same teardown.
 #
+# T1-T5 cover the TERMINAL door: a child that started and then finished. The
+# SETUP/LAUNCH door was still wide open — every dispatcher-side failure between
+# a successful `git worktree add` and a running child returned with the
+# worktree and its branch still on disk, on BOTH surviving backends. Because
+# the leaked path derives purely from ISSUE_NUM, that also self-blocks the next
+# dispatch of the same issue. T6-T10 close it:
+#   T6  a child-owned BACKGROUND dispatch that fails setup after the worktree
+#       exists leaves NO worktree and NO branch (reproduced red first: rc 1
+#       with `solve-issue-77` still in `git worktree list`).
+#   T7  the same failure at CHILD_OWNED=0 still keeps the operator's workspace.
+#   T8  the same for the WEZTERM arm.
+#   T9  a dispatcher-side teardown that cannot safely run is REPORTED (rc 74 +
+#       stderr) and the work is PRESERVED — never swallowed into the plain
+#       setup rc.
+#   T10 the wezterm in-pane wrapper tears down on a bare `exit`, not only on a
+#       signal — it had no EXIT trap at all, unlike the background wrapper.
+#
 # Unix-runtime fixture: real `git worktree add`, real nohup detachment, real
 # POSIX ownership predicates. Skipped on windows-latest (see the ci-wiring
 # windows-skip-list marker block in .github/workflows/test.yml).
@@ -306,6 +323,236 @@ for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
     ok "T5 $arm reports a teardown failure instead of swallowing it"
   else
     ko "T5 $arm swallows teardown failures"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T6-T10 — the SETUP/LAUNCH-failure door
+# ---------------------------------------------------------------------------
+
+# A `wezterm` stub. It stands in for the mux, and $WEZTERM_FIXTURE_MODE selects
+# which real-world failure it reproduces:
+#   spawn-fail   the mux is not up -> `wezterm cli spawn` exits non-zero. This
+#                is the routine case: no pane id comes back, so nothing
+#                downstream will ever take the worktree down.
+#   dirty-fail   the same, but the pane got far enough to leave work behind, so
+#                the teardown must REFUSE and say so.
+#   run-pane     actually run the spawned wrapper locally, standing in for the
+#                pane process, with the wrapper's status path redirected at an
+#                unwritable location so `write_status running` exits 126.
+cat >"$TMP/bin/wezterm" <<'SH'
+#!/usr/bin/env bash
+case "${WEZTERM_FIXTURE_MODE:-spawn-fail}" in
+  spawn-fail) exit 3 ;;
+  dirty-fail)
+    printf 'pane work in progress\n' >"$WEZTERM_FIXTURE_WORKTREE/pane-scratch.txt"
+    exit 3
+    ;;
+  run-pane)
+    args=( "$@" )
+    index=0
+    while [ "$index" -lt "${#args[@]}" ] && [ "${args[$index]}" != "--" ]; do
+      index=$((index + 1))
+    done
+    index=$((index + 1))
+    pane=( "${args[@]:$index}" )
+    # pane = bash -c BODY _ PY PREFIX LIB STATUS ... ; index 7 is the wrapper's
+    # own $4 -> STATUS_FILE. Redirect it so write_status running fails.
+    pane[7]="$WEZTERM_FIXTURE_STATUS_OVERRIDE"
+    cd "$WEZTERM_FIXTURE_WORKTREE" || exit 1
+    "${pane[@]}"
+    exit $?
+    ;;
+esac
+exit 3
+SH
+chmod +x "$TMP/bin/wezterm"
+
+# Drive the real `_uberdev_dispatch_background` to a dispatcher-side SETUP
+# failure after `git worktree add` has already succeeded. An unreadable
+# $PROMPT_FILE is the cheapest real one (dispatch.sh's `prompt_read` arm).
+run_background_setup_failure() {
+  local repo="$1" runtime="$2" issue="$3" child_owned="$4" prompt="$5"
+  mkdir -p "$runtime"
+  (
+    cd "$repo" || exit 1
+    PATH="$TMP/bin:$PATH" \
+    UBERDEV_AGENT_CHILD_OWNED="$child_owned" \
+      /bin/bash -c '
+        set -u
+        . "$1"
+        _uberdev_dispatch_wait_owned_session() { return 0; }
+        MODEL=sonnet
+        AUTO_MODE=0
+        SKIP_PERMISSIONS=0
+        PERM_FLAG=()
+        EFFORT_FLAG=()
+        UBERDEV_TMPDIR="$2"
+        UBERDEV_AGENT_STATUS_FILE="$2/status.json"
+        UBERDEV_AGENT_RESULT_FILE="$2/result.md"
+        DISPATCH_RC=0
+        DISPATCH_ID=""
+        DISPATCH_LOG=""
+        _uberdev_dispatch_background "$4" medium "$3"
+      ' _ "$DISPATCH_LIB" "$runtime" "$prompt" "$issue"
+  ) >"$runtime/dispatch.out" 2>&1
+}
+
+# Drive the real `_uberdev_dispatch_wezterm`. Only the wezterm CONFIG probe is
+# stubbed out (it writes to the operator's real WezTerm config); the mux itself
+# is the $TMP/bin/wezterm stub above, and the worktree + teardown are REAL.
+run_wezterm_dispatch() {
+  local repo="$1" runtime="$2" issue="$3" child_owned="$4" prompt="$5" mode="$6"
+  local status_override="${7:-}"
+  mkdir -p "$runtime"
+  (
+    cd "$repo" || exit 1
+    PATH="$TMP/bin:$PATH" \
+    UBERDEV_AGENT_CHILD_OWNED="$child_owned" \
+    WEZTERM_FIXTURE_MODE="$mode" \
+    WEZTERM_FIXTURE_WORKTREE="$(cd "$repo" && pwd -P)/.claude/worktrees/solve-issue-$issue" \
+    WEZTERM_FIXTURE_STATUS_OVERRIDE="$status_override" \
+      /bin/bash -c '
+        set -u
+        . "$1"
+        _uberdev_dispatch_wezterm_config() { return 0; }
+        MODEL=sonnet
+        PERM_FLAG=()
+        EFFORT_FLAG=()
+        UBERDEV_TMPDIR="$2"
+        UBERDEV_AGENT_STATUS_FILE="$2/status.json"
+        DISPATCH_RC=0
+        DISPATCH_ID=""
+        DISPATCH_LOG=""
+        _uberdev_dispatch_wezterm "$4" medium "$3"
+      ' _ "$DISPATCH_LIB" "$runtime" "$prompt" "$issue"
+  ) >"$runtime/dispatch.out" 2>&1
+}
+
+echo "== T6: child-owned background SETUP failure leaves no worktree + no branch =="
+T6_REPO="$TMP/t6-repo"
+new_repo "$T6_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T6_ISSUE=906
+T6_WORKTREE="$(cd "$T6_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T6_ISSUE"
+T6_BRANCH="worktree-solve-issue-$T6_ISSUE"
+run_background_setup_failure "$T6_REPO" "$TMP/t6-runtime" "$T6_ISSUE" 1 "$TMP/no-such-prompt.txt"
+T6_RC=$?
+if [ "$T6_RC" -eq 0 ]; then
+  ko "T6 background dispatch reported success on an unreadable prompt file"
+else
+  ok "T6 background setup failure is still reported (rc=$T6_RC)"
+fi
+if [ -e "$T6_WORKTREE" ] || worktree_registered "$T6_REPO" "$T6_WORKTREE"; then
+  ko "T6 setup failure leaked the child worktree: $T6_WORKTREE"
+else
+  ok "T6 setup failure removed the child worktree and deregistered it"
+fi
+if branch_exists "$T6_REPO" "$T6_BRANCH"; then
+  ko "T6 setup failure leaked branch $T6_BRANCH — the next dispatch of this issue is now blocked"
+else
+  ok "T6 setup failure removed the child branch"
+fi
+
+echo "== T7: CHILD_OWNED=0 keeps its workspace through a setup failure =="
+T7_REPO="$TMP/t7-repo"
+new_repo "$T7_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T7_ISSUE=907
+T7_WORKTREE="$(cd "$T7_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T7_ISSUE"
+T7_BRANCH="worktree-solve-issue-$T7_ISSUE"
+run_background_setup_failure "$T7_REPO" "$TMP/t7-runtime" "$T7_ISSUE" 0 "$TMP/no-such-prompt.txt"
+if [ -d "$T7_WORKTREE" ] && branch_exists "$T7_REPO" "$T7_BRANCH"; then
+  ok "T7 top-level workspace survives a setup failure — the teardown stays inside CHILD_OWNED"
+else
+  ko "T7 setup-failure teardown crossed the CHILD_OWNED boundary"
+fi
+
+echo "== T8: child-owned wezterm SETUP failure leaves no worktree + no branch =="
+T8_REPO="$TMP/t8-repo"
+new_repo "$T8_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T8_ISSUE=908
+T8_WORKTREE="$(cd "$T8_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T8_ISSUE"
+T8_BRANCH="worktree-solve-issue-$T8_ISSUE"
+run_wezterm_dispatch "$T8_REPO" "$TMP/t8-runtime" "$T8_ISSUE" 1 "$TMP/no-such-prompt.txt" spawn-fail
+T8_RC=$?
+if [ "$T8_RC" -eq 0 ]; then
+  ko "T8 wezterm dispatch reported success on an unreadable prompt file"
+else
+  ok "T8 wezterm setup failure is still reported (rc=$T8_RC)"
+fi
+if [ -e "$T8_WORKTREE" ] || worktree_registered "$T8_REPO" "$T8_WORKTREE" \
+    || branch_exists "$T8_REPO" "$T8_BRANCH"; then
+  ko "T8 wezterm setup failure leaked the child worktree/branch: $T8_WORKTREE"
+else
+  ok "T8 wezterm setup failure removed the child worktree and its branch"
+fi
+
+echo "== T8b: a failed wezterm spawn does not leak the worktree it created =="
+T8B_REPO="$TMP/t8b-repo"
+new_repo "$T8B_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T8B_ISSUE=909
+T8B_WORKTREE="$(cd "$T8B_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T8B_ISSUE"
+T8B_BRANCH="worktree-solve-issue-$T8B_ISSUE"
+run_wezterm_dispatch "$T8B_REPO" "$TMP/t8b-runtime" "$T8B_ISSUE" 1 "$TMP/prompt.txt" spawn-fail
+if [ -e "$T8B_WORKTREE" ] || worktree_registered "$T8B_REPO" "$T8B_WORKTREE" \
+    || branch_exists "$T8B_REPO" "$T8B_BRANCH"; then
+  ko "T8b a mux that is not up leaked a worktree with no pane id to reap it"
+else
+  ok "T8b a failed spawn removes the worktree it created"
+fi
+
+echo "== T9: an unsafe dispatcher-side teardown is reported (rc 74), work preserved =="
+T9_REPO="$TMP/t9-repo"
+new_repo "$T9_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T9_ISSUE=910
+T9_WORKTREE="$(cd "$T9_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T9_ISSUE"
+T9_BRANCH="worktree-solve-issue-$T9_ISSUE"
+run_wezterm_dispatch "$T9_REPO" "$TMP/t9-runtime" "$T9_ISSUE" 1 "$TMP/prompt.txt" dirty-fail
+T9_RC=$?
+# rc 74 SPECIFICALLY. Plain "non-zero" would also be satisfied by the ordinary
+# setup rc 1, which is exactly the swallowing this assertion exists to forbid.
+if [ "$T9_RC" -eq 74 ]; then
+  ok "T9 a failed dispatcher-side teardown is folded into the rc as 74"
+else
+  ko "T9 teardown failure was swallowed into rc=$T9_RC (expected 74)"
+fi
+T9_OUT="$(cat "$TMP/t9-runtime/dispatch.out" 2>/dev/null || true)"
+case "$T9_OUT" in
+  *"failed to clean child worktree"*) ok "T9 the teardown failure names the worktree on stderr" ;;
+  *) ko "T9 teardown failure was silent: $(printf '%s' "$T9_OUT" | tr '\n' ';')" ;;
+esac
+if [ -d "$T9_WORKTREE" ] && branch_exists "$T9_REPO" "$T9_BRANCH"; then
+  ok "T9 the work the pane left behind is preserved, not force-deleted"
+else
+  ko "T9 the dispatcher-side teardown destroyed a worktree holding work"
+fi
+git -C "$T9_REPO" worktree remove --force "$T9_WORKTREE" >/dev/null 2>&1 || true
+git -C "$T9_REPO" branch -D "$T9_BRANCH" >/dev/null 2>&1 || true
+
+echo "== T10: the wezterm pane wrapper tears down on a bare exit, not only on a signal =="
+T10_REPO="$TMP/t10-repo"
+new_repo "$T10_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T10_ISSUE=911
+T10_WORKTREE="$(cd "$T10_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T10_ISSUE"
+T10_BRANCH="worktree-solve-issue-$T10_ISSUE"
+# $TMP/t10-unwritable does not exist, so the wrapper's own `write_status
+# running null || exit 126` fails and the pane exits WITHOUT a signal. Before
+# the EXIT trap was armed there, that exit stranded the worktree silently.
+run_wezterm_dispatch "$T10_REPO" "$TMP/t10-runtime" "$T10_ISSUE" 1 "$TMP/prompt.txt" \
+  run-pane "$TMP/t10-unwritable/status.json"
+if [ -e "$T10_WORKTREE" ] || worktree_registered "$T10_REPO" "$T10_WORKTREE" \
+    || branch_exists "$T10_REPO" "$T10_BRANCH"; then
+  ko "T10 the pane wrapper exited without a signal and stranded $T10_WORKTREE"
+else
+  ok "T10 the pane wrapper's EXIT trap tore the worktree down on a bare exit"
+fi
+
+echo "== T10b: both wrappers arm an EXIT trap, not only HUP INT TERM =="
+for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
+  BODY="$(arm_body "$arm")"
+  if printf '%s\n' "$BODY" | grep -Fq "cleanup_child_worktree cancelled || true'\\'' EXIT"; then
+    ok "T10b $arm arms an EXIT trap on its child wrapper"
+  else
+    ko "T10b $arm has no EXIT trap — a bare exit after worktree creation leaks"
   fi
 done
 
