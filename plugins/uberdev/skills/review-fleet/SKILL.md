@@ -21,26 +21,28 @@ the edge-id family and the authority family, both of which arrive as
 controller-supplied scalars. `skills/scan-fleet/workflow.js` is the shipped
 two-command precedent.
 
-> **P2 status — ENGINE ONLY. This script is currently UNREACHABLE.**
+> **P3 status — WIRED AND DEFAULT.** Both command files select this engine when
+> `UBERDEV_CARRIER_BACKEND=workflow`, and since #381 step 3 that is what `auto`
+> resolves to for `/review-pr` and `/simplify` on every non-Codex host.
+> `--backend=codex` remains explicitly selectable, and is the named escape hatch
+> for the one declared gap — /review-pr Phase 3, see the bottom of this log.
 >
-> No command emits `pipeline=review-fleet` yet: `grep -rn 'review-fleet'` outside
-> this directory returns zero hits, and neither `commands/review-pr.md` nor
-> `commands/simplify.md` contains a `Workflow(` block or a
-> `uberdev_emit_workflow_args` call. Nothing can select this engine today.
->
-> Everything below therefore describes the contract the wiring **will** satisfy,
-> not a path you can run right now. It is written in the present tense because it
-> is a specification; do not read it as a status report.
->
-> The next increment wires it, and owes exactly:
-> 1. the RFC 0012 §4.1 existence guard in both command files;
-> 2. the per-stage `uberdev_emit_workflow_args review-fleet …` calls;
-> 3. the per-child nonce mint, in the roster order fixed below;
-> 4. `mkdir -p <runDirAbs>/children/<slug>-iter<NN>/` before each stage;
+> All five caller obligations have landed in `commands/review-pr.md` (stages
+> `review`, `fix` ×2, `simplify`, `defer`) and `commands/simplify.md` (stages
+> `simplify`, `fix`, `defer`):
+> 1. the RFC 0012 §4.1 existence guard, inline in every stage fence;
+> 2. the per-stage `uberdev_emit_workflow_args review-fleet …` call;
+> 3. the per-child CSPRNG nonce mint, in the roster order fixed below
+>    (`review_fleet_mint_nonce`, `lib/review-fleet-args.sh`);
+> 4. `mkdir -p <runDirAbs>/children/<slug>-iter<NN>/` before every bind
+>    (`review_fleet_bind_roster` / `review_fleet_bind_fixer` /
+>    `review_fleet_bind_persistence`);
 > 5. the post-return capture verbs, per stage.
 >
-> Until all five land, the directive-emitter flow is not merely the default —
-> it is the only path that exists.
+> The roster order, the nonce mint, the child-directory formula and the three
+> binding producers live ONCE, on disk, in `lib/review-fleet-args.sh` — the same
+> reasoning as `lib/review-aggregate.sh`: every `bash` block in a command file is
+> a fresh shell, and a wire format duplicated across two markdown fences drifts.
 >
 > ### Gate log — what is retired, and what is not
 >
@@ -51,11 +53,11 @@ two-command precedent.
 > gate is tracked to a named, tested primitive.
 >
 > - ✅ **RETIRED (P1) — the launch-binding chain.** `bind_workflow_launch`
->   (`lib/code_fixer_contract.py:6414`) mints a binding keyed on `run_nonce`
->   instead of the detached triple, `_load_workflow_launch_binding` (`:6459`)
->   re-loads it, and `_validate_bound_workflow_child_status` (`:6718`) binds the
+>   (`lib/code_fixer_contract.py:6534`) mints a binding keyed on `run_nonce`
+>   instead of the detached triple, `_load_workflow_launch_binding` (`:6568`)
+>   re-loads it, and `_validate_bound_workflow_child_status` (`:6985`) binds the
 >   status file on that nonce and **rejects** `pid`/`process_identity`/
->   `lease_generation` outright (`DETACHED_SUPERVISION_KEYS`, `:6715`).
+>   `lease_generation` outright (`DETACHED_SUPERVISION_KEYS`, `:6964`).
 > - ✅ **RETIRED (#381 step 1) — the `review` stage's aggregate builders.**
 >   Three things were true and are no longer:
 >
@@ -84,25 +86,85 @@ two-command precedent.
 > - ✅ **RETIRED — both command files may call `Workflow`.** `Workflow` is in
 >   `allowed-tools` in `commands/review-pr.md:4` and `commands/simplify.md:4`,
 >   with the byte-matched `lib/aliases-sync.sh` rows.
-> - ❌ **OPEN — the `fix`, `simplify` and `defer` stages have no workflow-shaped
->   capture.** `capture_review_terminal` and `capture_standalone_terminal` load a
->   FIXER binding, and `_load_persistence_binding` rebuilds the detached
->   `LAUNCH_BINDING_KEYS` base before delegating
->   (`lib/code_fixer_contract.py:6692`), so a workflow binding cannot reach
->   any of them. `capture-bound-child` covers reviewer- and lens-shaped children
->   only; a fixer child additionally owes a disposition and an applied-content
->   artifact, and that verb must not grow them silently.
-> - ❌ **OPEN — nothing dispatches this engine.** `_uberdev_agent_dispatch_backend`
->   has no `workflow` provider arm by construction (`lib/dispatch.sh:1352-1356`),
->   and every review/simplify child still reaches it through
->   `uberdev_dispatch_child` → `uberdev_agent_dispatch`
->   (`lib/agent-dispatch.sh:1930`). Until items 1–4 above land in both command
->   files, resolving `workflow` for `/review-pr` or `/simplify` would fail
->   **after** the `RUN_ID` reservation and the workspace prepare. That is why the
->   `auto` arm still resolves `codex` for these two workflows.
+> - ✅ **RETIRED — the `fix`, `simplify` and `defer` stages have a
+>   workflow-shaped capture.** `_load_fixer_launch_binding` and
+>   `_load_persistence_binding` no longer rebuild the detached
+>   `LAUNCH_BINDING_KEYS` base unconditionally; both now pick it from the
+>   **declared backend** through `_binding_base_keys`
+>   (`lib/code_fixer_contract.py:6455`, called at `:6737` and `:6917`), so a
+>   workflow binding reaches all three `capture-*-terminal` verbs unchanged.
+>   `capture-bound-child` was *not* widened — a fixer child still owes more than
+>   a reviewer, and it still owes it here: the two new producers
+>   `bind_workflow_fixer_launch` (`:6681`) and `bind_workflow_persistence_launch`
+>   (`:6853`) pin exactly what their detached twins pin (the controller-created
+>   authority by path+digest and edge+worktree; the aggregate/disposition digests
+>   plus a recount of deferred blockers), and the capture still freezes the
+>   disposition and applied-content artifacts alongside status and result.
+>   The two launch shapes stay mutually exclusive — `DETACHED_ONLY_BINDING_KEYS`
+>   (`:6313`) and `WORKFLOW_ONLY_BINDING_KEYS` (`:6316`) are derived, not
+>   re-spelled, and neither shape may carry the other's members. An outcome's tie
+>   back to its launch is backend-shaped by `_launch_identity` (`:6967`): a
+>   workflow outcome reports `run_nonce`, never a relabelled `receipt_sha256`, so
+>   a consumer written to check a dispatch receipt fails closed rather than
+>   accepting a nonce as though a receipt had been verified.
+> - ✅ **RETIRED (#381 step 3) — both commands dispatch this engine.** The five
+>   obligations above are in both command files, and
+>   `uberdev_dispatch_preflight_backend` now admits `workflow` for `review-pr`
+>   and `simplify` (`lib/dispatch.sh`) instead of refusing it, so
+>   `--backend=workflow` reaches the wiring. The routed
+>   `uberdev_dispatch_child` call for each of these children is *replaced* on
+>   that transport, not run alongside it — every stage says so explicitly, and
+>   the review stage says so twice, because dispatching the roster through both
+>   `Skill(uberdev:post-impl-review)` and the engine would produce two ledgers
+>   for one wave.
 >
-> The opt-in selector itself is unblocked, but a selector that gates nothing is
-> not worth two flagship command files' churn.
+>   Two contract gaps were closed to make this reachable rather than merely
+>   plausible:
+>   - **the defer child is now a bound child.** `f2iPrompt` carries the
+>     bound-child protocol and the `defer` stage gates a one-nonce pool, because
+>     `capture-persistence-terminal` and `validate-persistence-result` read that
+>     child's own `result.md` and `status.json`. A detached backend gets that
+>     pair from the provider harness; a Workflow child has no harness, so
+>     without this the defer stage would have returned a plausible `issues`
+>     object with nothing to validate it against. Additive: the child owes more
+>     than it did, never less.
+>   - **`review_promote_validated_fixer_outcome` was taught the workflow outcome
+>     shape.** `_launch_identity` emits `run_nonce` where a detached outcome
+>     emits `receipt_sha256`, and the parser previously asserted the detached key
+>     set exactly. It now accepts EXACTLY ONE of the two, still requires 64-hex,
+>     and still refuses a document carrying both, neither, or any extra key.
+> - ✅ **RETIRED (#381 step 3) — `auto` resolves `workflow` for both workflows.**
+>   The review-pr/simplify special case that demanded the `codex` CLI is deleted
+>   from `uberdev_dispatch_preflight`; these two now take the same ladder as
+>   every other workflow. The two Codex arms stay AHEAD of it, so a Codex session
+>   (`CODEX_HOME` set) and a host with no `claude` on PATH still resolve `codex`
+>   — there is no Claude Workflow tool to mandate on either.
+>
+>   `auto` also cannot resolve a transport this install cannot execute.
+>   `_uberdev_dispatch_require_workflow_engine` checks that
+>   `skills/review-fleet/workflow.js` is actually on disk, against a plugin root
+>   the library derives from its OWN location (not `CLAUDE_PLUGIN_ROOT`, which
+>   could answer for a different install). A missing engine is a **loud refusal
+>   naming the path**, never a silent demotion to another backend — the retired
+>   per-OS matrix drifted back into default paths exactly that way. The same gate
+>   guards explicit `--backend=workflow` and `uberdev_dispatch_preflight_backend`,
+>   so all three refuse identically instead of at three different stages.
+> - ⚠️ **DECLARED GAP, travelling with the default — /review-pr Phase 3 has no
+>   Workflow-native transport.** `review_pr.ci.classify`, `review_pr.ci.fix_code`,
+>   `review_pr.ci.rebase`, `review_pr.ci.defer_refusal` and the conflict-resolver
+>   fanout are routed children, and `_uberdev_agent_dispatch_backend` has no
+>   `workflow` provider arm by construction (`lib/dispatch.sh`). Phase 3 is
+>   deliberately not dispatched from this script (see "Not built in P2"), so on
+>   this transport a **RED** check halts at 6c.3 CLASSIFY with a named refusal
+>   (`review_require_ci_capable_transport`,
+>   `subreason=ci_transport_unsupported`) rather than surfacing as an opaque
+>   provider-arm error mid-run. A green probe completes normally and reaches the
+>   trust anchor exactly as on codex.
+>
+>   This is a named, fail-closed refusal that tells the operator to re-run with
+>   `--backend=codex` or `--no-ci-fix` — not a silent degradation. It is the
+>   reason `codex` stays explicitly selectable through P4/P5, and Phase 3 owes
+>   its own increment (RFC 0012 §3.1) before that escape hatch can be removed.
 
 ---
 
@@ -283,7 +345,7 @@ child.
 | `review` | 0 `review_pr.review.correctness` · 1 `review_pr.review.silent_failures` · 2 `review_pr.review.types` · 3 `review_pr.review.comments` · 4 `review_pr.review.tests` · 5 `review_pr.review.general` |
 | `simplify` | 0 `review_pr.simplify.reuse` · 1 `review_pr.simplify.quality` · 2 `review_pr.simplify.efficiency` |
 | `fix` | 0 — the single fixer child |
-| `defer` | none — `findings-to-issues` writes no bound result file |
+| `defer` | 0 — the single `review_pr.defer.findings` child |
 
 A pool whose length does not match the roster **exactly** aborts the stage: a
 short pool leaves a child unbound, and a long one means the controller and the
@@ -362,12 +424,21 @@ agent-chosen location.
    empty aggregate terminates `/review-pr` immediately without dispatching the
    fixer, Phase 2, deferred findings or trust; it is infrastructure failure,
    never a zero-finding review. Exact `findings: []` is the valid zero form.
-3. For `fix`: `capture-review-terminal` → `validate-review-outcome` →
+3. For `fix`: mint the binding with `code_fixer_contract.py
+   bind-workflow-fixer-launch` **before** the Workflow call — not
+   `bind-workflow-launch`, which mints no authority pin — then
+   `capture-review-terminal` → `validate-review-outcome` →
    `review_track_validated_fixer_head`. `fixerStatus` is a **hint for logging
-   only** — the disposition artifact and the head movement are the truth.
+   only** — the disposition artifact and the head movement are the truth. The
+   outcome carries `run_nonce` where a detached outcome carries
+   `receipt_sha256`; a consumer that checks the detached key must be taught the
+   workflow shape rather than handed the nonce under the old name.
 4. For `simplify`: build the canonical aggregate and pipe it through
    `encode-aggregate --phase phase2` before any digest.
-5. For `defer`: `issues.halted` feeds the Phase-2.5 halt gate, which needs
+5. For `defer`: mint with `code_fixer_contract.py
+   bind-workflow-persistence-launch` **before** the Workflow call, then
+   `capture-persistence-terminal` → `validate-persistence-result`.
+   `issues.halted` feeds the Phase-2.5 halt gate, which needs
    `AskUserQuestion` (fail fast via `ToolSearch`; never silently auto-pick).
 6. Then the unchanged tail: the single Step-6a guarded push, Phase 3, the trust
    anchor, labels, the verdict JSON, and the existing exit-code contract

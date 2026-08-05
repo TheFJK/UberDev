@@ -360,31 +360,74 @@ PY
   [ ! -e "$TMP/run/children/prod-role-mismatch" ]
 )
 
-# Standalone simplify still fails closed before context allocation when its
-# required supervised provider is unavailable.
+# #381: standalone simplify no longer needs the codex CLI. `auto` resolves the
+# Workflow-native backend, so an absent codex binary is not a refusal any more —
+# it is simply irrelevant. The carrier must prepare, and it must prepare ON
+# workflow, or the two command files' Workflow wiring is unreachable by default.
 (
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON \
     UBERDEV_AGENT_PREPARED_REQUEST_JSON UBERDEV_RESOLVED_BACKEND
-  mkdir -p "$TMP/standalone-unavailable"
-  UBERDEV_TMPDIR="$TMP/standalone-unavailable"
+  mkdir -p "$TMP/standalone-nocodex"
+  UBERDEV_TMPDIR="$TMP/standalone-nocodex"
   UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
   export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED
+  unset CODEX_HOME
   _uberdev_dispatch_codex_available() { return 1; }
+  uberdev_prepare_run_carrier simplify 0 medium '[]' >"$TMP/standalone-nocodex-carrier.json"
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ "$UBERDEV_RESOLVED_BACKEND" = workflow ]
+  [ -n "${UBERDEV_RUN_CARRIER_JSON:-}" ]
+  python3 - "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" <<'PY'
+import json,sys
+prepared=json.loads(sys.argv[1])
+assert prepared['backend']=='workflow' and prepared['root_decision']['backend']=='workflow'
+PY
+)
+
+# The fail-closed-before-context-allocation property that fixture used to carry
+# now belongs to the case that genuinely CANNOT run: a plugin install whose
+# review-fleet engine is missing. `auto` must refuse loudly rather than demote
+# to another backend, and it must refuse before anything is written under
+# UBERDEV_TMPDIR. The library self-locates its plugin root, so pointing a fresh
+# shell at a copied, engine-less tree is exactly what a broken install does.
+(
+  ENGINELESS="$TMP/engineless"
+  mkdir -p "$ENGINELESS/lib" "$ENGINELESS/skills" "$TMP/standalone-unavailable"
+  cp "$ROOT/plugins/uberdev/lib/"* "$ENGINELESS/lib/" 2>/dev/null || true
+  [ -f "$ENGINELESS/lib/child-dispatch.sh" ]
+  [ ! -f "$ENGINELESS/skills/review-fleet/workflow.js" ]
   set +e
-  STANDALONE_UNAVAILABLE_ERROR="$(uberdev_prepare_run_carrier simplify 0 medium '[]' 2>&1)"
+  STANDALONE_UNAVAILABLE_ERROR="$(
+    env -u CODEX_HOME -u UBERDEV_RUN_CARRIER_JSON -u UBERDEV_AGENT_PREPARED_REQUEST_JSON \
+        -u UBERDEV_RESOLVED_BACKEND \
+        UBERDEV_CHILD_TEST_MODE=1 \
+        UBERDEV_CHILD_MANIFEST_PATH="$UBERDEV_CHILD_MANIFEST_PATH" \
+        UBERDEV_TMPDIR="$TMP/standalone-unavailable" \
+        UBERDEV_DISPATCH_BACKEND_REQUESTED=auto \
+      bash -c '
+        . "$1"
+        _uberdev_dispatch_codex_available() { return 1; }
+        uberdev_prepare_run_carrier simplify 0 medium "[]"
+      ' _ "$ENGINELESS/lib/child-dispatch.sh" 2>&1
+  )"
   STANDALONE_UNAVAILABLE_RC=$?
   set -e
-  [ "$STANDALONE_UNAVAILABLE_RC" -eq 1 ]
-  grep -Fq "simplify requires the 'codex' CLI" <<<"$STANDALONE_UNAVAILABLE_ERROR"
-  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
-  [ -z "${UBERDEV_RUN_CARRIER_JSON:-}" ]
-  [ -z "${UBERDEV_AGENT_PREPARED_REQUEST_JSON:-}" ]
+  [ "$STANDALONE_UNAVAILABLE_RC" -ne 0 ]
+  grep -Fq "skills/review-fleet/workflow.js" <<<"$STANDALONE_UNAVAILABLE_ERROR"
+  # A refusal, never a silent demotion to some other transport.
+  ! grep -Eq "resolved.*(codex|claude-bg|wezterm|background)" <<<"$STANDALONE_UNAVAILABLE_ERROR"
   [ -z "$(find "$TMP/standalone-unavailable" -mindepth 1 -print -quit)" ]
 )
 
 # Standalone simplify uses an honest workflow carrier with subject 0. This
 # fixture provides only the CLI capability probe; provider execution here is a
 # test failure because carrier preparation must not launch Codex.
+#
+# #381: the request is now an EXPLICIT --backend=codex. It used to be `auto`,
+# which resolved codex for simplify by rule; auto resolves workflow now, and
+# routing this through `auto` would quietly stop exercising the codex arm at
+# all. Codex stays explicitly selectable (it is /review-pr Phase 3's escape
+# hatch), so the codex carrier path keeps exactly the coverage it had.
 (
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH UBERDEV_RUN_CARRIER_JSON UBERDEV_AGENT_PREPARED_REQUEST_JSON
   mkdir -p "$TMP/standalone"
@@ -398,13 +441,13 @@ exit 97
 SH
   chmod +x "$STANDALONE_BIN/codex"
   UBERDEV_TMPDIR="$TMP/standalone"
-  UBERDEV_DISPATCH_BACKEND_REQUESTED=auto
+  UBERDEV_DISPATCH_BACKEND_REQUESTED=codex
   UBERDEV_RESOLVED_BACKEND=background
   PATH="$STANDALONE_BIN:$PATH"
   export UBERDEV_TMPDIR UBERDEV_DISPATCH_BACKEND_REQUESTED UBERDEV_RESOLVED_BACKEND PATH STANDALONE_CODEX_INVOKED
   uberdev_prepare_run_carrier simplify 0 medium '[]' >"$TMP/standalone-carrier.json"
   CARRIER="$(cat "$TMP/standalone-carrier.json")"
-  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = auto ]
+  [ "$UBERDEV_DISPATCH_BACKEND_REQUESTED" = codex ]
   [ "$UBERDEV_RESOLVED_BACKEND" = codex ]
   [ "$UBERDEV_RUN_CARRIER_JSON" = "$CARRIER" ]
   [ -n "$UBERDEV_AGENT_PREPARED_REQUEST_JSON" ]

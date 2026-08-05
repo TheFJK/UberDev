@@ -45,6 +45,11 @@ case "$_UBERDEV_DISPATCH_FILE" in
   *) _UBERDEV_DISPATCH_LIB_DIR='.' ;;
 esac
 _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd -P)"
+# The plugin root is derived from this file's own location, NOT from
+# CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT. The workflow-engine probe below asks "can the
+# install I was loaded from actually run this fleet?", and an env var set by a
+# different install would answer for the wrong tree.
+_UBERDEV_DISPATCH_PLUGIN_ROOT="${_UBERDEV_DISPATCH_LIB_DIR%/*}"
 # shellcheck source=/dev/null
 . "$_UBERDEV_DISPATCH_LIB_DIR/agent-dispatch.sh" || return 1
 # shellcheck source=/dev/null
@@ -997,14 +1002,46 @@ _uberdev_dispatch_codex_available() {
   command -v codex >/dev/null 2>&1
 }
 
+# _uberdev_dispatch_workflow_engine WORKFLOW -> prints the on-disk Workflow
+# script that backend `workflow` would run for that workflow; returns 1 when the
+# workflow has no fleet engine, meaning there is nothing for this shell to
+# probe.
+#
+# This is the ONE capability of the workflow backend a shell can honestly test.
+# The Workflow *tool* lives in the calling session and is not on PATH, so its
+# presence is the model's No-Workflow fallback decision (commands/solve.md:86).
+# The engine is different: it is a file this install either shipped or did not,
+# and if it is missing the mandated `Workflow({scriptPath: ...})` call cannot be
+# made at all. Resolving `workflow` in that state would burn a RUN_ID
+# reservation and a workspace prepare before failing — so it is refused here.
+_uberdev_dispatch_workflow_engine() {
+  case "${1:-}" in
+    review-pr|simplify) printf '%s' "$_UBERDEV_DISPATCH_PLUGIN_ROOT/skills/review-fleet/workflow.js" ;;
+    *) return 1 ;;
+  esac
+}
+
+# _uberdev_dispatch_require_workflow_engine WORKFLOW -> 0 when backend
+# `workflow` is executable here, 1 with a loud, path-naming refusal otherwise.
+# Shared by the `auto` arm, the explicit `workflow` arm, and
+# uberdev_dispatch_preflight_backend so all three refuse identically.
+_uberdev_dispatch_require_workflow_engine() {
+  local wf="${1:-}" engine
+  engine="$(_uberdev_dispatch_workflow_engine "$wf")" || return 0
+  [ -f "$engine" ] && return 0
+  echo "error: backend 'workflow' needs $engine, which is missing from this install" >&2
+  echo "       (RFC 0012 §4.1). Reinstall the plugin, or select a transport this" >&2
+  echo "       host can execute with --backend=codex." >&2
+  return 1
+}
+
 # uberdev_dispatch_preflight [WORKFLOW]
 # Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|claude-bg|wezterm|background|codex)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
-# explicit backend is unusable on this host. Auto selection is workflow-aware
-# for review-pr and simplify because their governed children require an atomic
-# result artifact and caller-workspace repair support. Emits
-# dispatch_backend_resolved.
+# explicit backend is unusable on this host, and (since #381) when `auto` would
+# land on `workflow` but this install has no engine on disk to run — a refusal,
+# never a silent demotion. Emits dispatch_backend_resolved.
 uberdev_dispatch_preflight() {
   local requested="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}"
   local workflow="${1:-}" os_class reason resolved
@@ -1012,11 +1049,13 @@ uberdev_dispatch_preflight() {
   case "$requested" in
     workflow)
       # The Workflow runtime lives in the calling session, not on PATH, so
-      # there is nothing for this shell to probe: no binary, no mux, no
-      # timeout(1). The caller (solve-launcher Step 5b' / goal Phase 0) emits
-      # the args envelope and the command file mandates the Workflow call;
-      # availability of the tool itself is the model's No-Workflow fallback
-      # decision, documented in commands/solve.md.
+      # there is no binary, no mux and no timeout(1) to probe. The caller
+      # (solve-launcher Step 5b' / goal Phase 0) emits the args envelope and the
+      # command file mandates the Workflow call; availability of the tool itself
+      # is the model's No-Workflow fallback decision, documented in
+      # commands/solve.md. What this shell CAN prove is that the engine the
+      # mandate names is on disk — refuse here rather than at stage time.
+      _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       resolved="workflow"; reason="explicit" ;;
     claude-bg|background)
       # claude-bg / background depend only on git + claude + shell — usable
@@ -1053,21 +1092,22 @@ uberdev_dispatch_preflight() {
       # wsl2/linux->claude-bg, windows-native->wezterm-or-hard-error) existed
       # only to pick a *detached process* supervisor; the Workflow runtime needs
       # no supervisor, which is why native Windows no longer hard-errors here.
-      # The Codex arms stay AHEAD of it: inside a Codex session there is no
-      # Claude Workflow tool to mandate, so `codex` remains the correct default.
-      if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
-        if _uberdev_dispatch_codex_available; then
-          resolved="codex"; reason="auto-${workflow}-result-artifact"
-        else
-          echo "error: $workflow requires the 'codex' CLI for supervised child result artifacts" >&2
-          echo "       Install Codex or explicitly run this workflow from a supported Codex host." >&2
-          return 1
-        fi
+      #
+      # #381: the review-pr/simplify SPECIAL CASE IS GONE. It required the codex
+      # CLI because those two workflows need an atomic child result artifact and
+      # caller-workspace repair, and `workflow` had no wiring to provide either:
+      # every child reached _uberdev_agent_dispatch_backend, which has no
+      # workflow provider arm. Both halves now exist — commands/review-pr.md and
+      # commands/simplify.md emit the args envelope and mandate the Workflow call
+      # at every stage, and each bound child's result.md/status.json pair is
+      # digested by lib/code_fixer_contract.py — so these two workflows now take
+      # the same ladder as everything else.
+      #
       # If we're running inside Codex itself (CODEX_HOME set), or claude is
       # absent but codex is present, the codex backend is the natural default —
       # dispatching a claude --bg session from inside Codex would be wrong.
       # Checked before the per-OS matrix below so it wins in auto mode.
-      elif [ -n "${CODEX_HOME:-}" ]; then
+      if [ -n "${CODEX_HOME:-}" ]; then
         if _uberdev_dispatch_codex_available; then
           resolved="codex"; reason="auto-codex-env"
         else
@@ -1078,6 +1118,12 @@ uberdev_dispatch_preflight() {
       elif ! command -v claude >/dev/null 2>&1 && _uberdev_dispatch_codex_available; then
         resolved="codex"; reason="auto-no-claude"
       else
+        # auto must never land on a backend this install cannot execute. The
+        # engine gate is a REFUSAL, not a fallback to codex: silently demoting
+        # the default transport is how the retired per-OS matrix drifted back
+        # into a default path, and the operator needs to know their install is
+        # broken rather than discover it as a different backend's behaviour.
+        _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
         resolved="workflow"; reason="auto-workflow"
       fi ;;
     *)
@@ -1284,11 +1330,34 @@ uberdev_dispatch_preflight_backend() {
   if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
     case "$backend" in
       codex) ;;
+      # `workflow` admitted per #381. The bar these two workflows set is an
+      # atomic result artifact plus caller-workspace repair, and the
+      # Workflow-native transport now meets BOTH -- it is not being waived.
+      # Result artifact: every bound child writes result.md.partial and
+      # publishes it with a same-directory rename, then writes a nonce-bearing
+      # status.json the same way, and the controller re-reads and digests both
+      # through lib/code_fixer_contract.py (capture-bound-child /
+      # capture-review-terminal / capture-standalone-terminal /
+      # capture-persistence-terminal) before anything downstream runs.
+      # Caller workspace: the code-fixer child commits onto the caller checkout
+      # with no worktree isolation -- already admitted for this backend in
+      # lib/agent-dispatch.sh's workspace_mode validator.
+      #
+      # #381 step 3 made this the DEFAULT: `auto` now resolves workflow for both
+      # workflows too. One declared gap travels with that flip -- /review-pr
+      # Phase 3 dispatches review_pr.ci.* through the routed adapter, which has
+      # no workflow provider arm, so a RED check halts loudly at 6c.3 CLASSIFY
+      # with subreason=ci_transport_unsupported and names --backend=codex as the
+      # escape hatch (commands/review-pr.md 6c). It is a named refusal, not a
+      # silent degradation, and codex stays explicitly selectable for it.
+      # (The engine gate is applied once, in the backend case below, so it
+      # covers every workflow rather than only these two.)
+      workflow) ;;
       claude-bg)
         echo "error: $workflow cannot use claude-bg because it does not export a supervised result artifact" >&2
         return 1
         ;;
-      wezterm|background|workflow)
+      wezterm|background)
         echo "error: $workflow requires a backend with result-artifact and caller-workspace repair support: $backend" >&2
         return 1
         ;;
@@ -1299,9 +1368,12 @@ uberdev_dispatch_preflight_backend() {
       return 0
       ;;
     workflow)
-      # Nothing to preflight: no provider binary, no permission tier to probe
-      # (the Workflow runtime inherits the session's), no timeout(1). The
-      # solve-fleet script's own preflight validated the on-disk workflow.js.
+      # No provider binary, no permission tier to probe (the Workflow runtime
+      # inherits the session's), no timeout(1). The one thing this shell can
+      # prove is that the engine the command file mandates actually shipped —
+      # same gate the resolver applies, so `--backend=workflow` and `auto`
+      # refuse a broken install identically instead of at different stages.
+      _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       return 0
       ;;
     claude-bg)

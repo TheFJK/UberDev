@@ -190,6 +190,7 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/review-pr-workflow.test.sh && \
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
@@ -209,7 +210,8 @@ jobs:
           bash tests/review-pr-codex-entry.test.sh && \
           bash tests/agent-dispatch.test.sh && \
           bash tests/review-pr-codex-six-child.test.sh && \
-          bash tests/worktree-receipts.test.sh
+          bash tests/worktree-receipts.test.sh && \
+          bash tests/review-pr-workflow.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -299,6 +301,9 @@ jobs:
         #   - review-child-inputs.test.sh
         #   - review-pr-codex-entry.test.sh
         #   - review-pr-codex-six-child.test.sh
+        #   - review-pr-workflow.test.sh    (python3 -c + the code_fixer_contract
+        #                                    round-trip over mktemp -d paths, same
+        #                                    reason as code-fixer-contract.test.sh)
         #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
         #   - route-context.test.sh

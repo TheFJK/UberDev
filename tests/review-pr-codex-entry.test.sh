@@ -109,8 +109,14 @@ fi
 grep -q 'does not export a supervised result artifact' "$TMP/claude-override.err"
 
 # Canonical standalone review is provider-neutral, but auto resolution is
-# workflow-aware before carrier creation. A usable macOS WezTerm or ambient
-# Claude install must not displace the result-producing Codex backend.
+# workflow-aware before carrier creation. A usable macOS WezTerm or an ambient
+# Claude install must not displace the result-producing backend.
+#
+# #381 step 3: that backend is now `workflow`, not `codex`. Both `codex` and
+# `claude` are on this fixture's PATH and CODEX_HOME is unset (env -i), so the
+# resolver's own ladder is what decides — and it must land on the transport the
+# command files actually wire, never on wezterm/claude-bg/background, none of
+# which can publish a governed child's result artifact.
 source_auto_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
@@ -120,7 +126,7 @@ source_auto_result="$(
     bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(request[\"backend\"])"' \
       _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-source-auto"
 )"
-[ "$source_auto_result" = codex ] || {
+[ "$source_auto_result" = workflow ] || {
   echo "standalone review auto-selected unsupported backend: $source_auto_result" >&2
   exit 1
 }
@@ -139,8 +145,11 @@ stale_result="$(
 [ "$stale_result" = codex ]
 
 # Standalone simplify uses the same workflow-aware boundary. This covers the
-# complete setup-to-fixer handoff contract: auto/stale routing resolves Codex,
-# and the phase-two fixer is prepared in the caller workspace.
+# complete setup-to-fixer handoff contract: auto/stale routing resolves the
+# wired transport (#381: `workflow`) even though the shell exports a stale
+# `background`, and the phase-two fixer is prepared in the CALLER workspace —
+# the caller-workspace half is the part that is backend-independent, and it is
+# what the fixer's commit authority depends on.
 simplify_fixer_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
@@ -180,7 +189,7 @@ simplify_fixer_result="$(
       python3 -I -B -c '\''import json,sys; v=json.loads(sys.argv[1]); print(v["request"]["backend"]+":"+v["request"]["workspace_mode"]+":"+v["request"]["workspace_dir"],end="")'\'' "$prepared"
     ' _ "$TMP/simplify-setup.sh" "$TMP/repo" "$TMP/runtime-simplify"
 )"
-[ "$simplify_fixer_result" = "codex:caller:$TMP/repo" ]
+[ "$simplify_fixer_result" = "workflow:caller:$TMP/repo" ]
 
 # With UBERDEV_TMPDIR absent, standalone review must select the secure runtime
 # helper default beneath TMPDIR instead of falling back to an ambient /tmp path.
@@ -197,6 +206,10 @@ private_result="$(
 python3 -I -B - "$private_result" "$PRIVATE_TMP" <<'PY'
 import json,os,stat,sys
 value=json.loads(sys.argv[1]); expected=os.path.join(sys.argv[2],f'uberdev-{os.geteuid()}')
+# Stays 'codex' after #381: this fixture sources the CODEX PORT ($GENERATED),
+# whose entry pins UBERDEV_DISPATCH_BACKEND_REQUESTED=codex by construction —
+# a Codex session has no Claude Workflow tool to mandate. Only the canonical
+# provider-neutral Claude entry ($SOURCE / source-setup.sh) resolves workflow.
 assert value=={'backend':'codex','run_dir':expected},value
 entry=os.lstat(expected)
 assert stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode)

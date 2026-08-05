@@ -4221,5 +4221,519 @@ for verb, argv in (
     parsed = cli.parse_args(argv)
     assert parsed.command == verb, parsed
 
+# === #381 STEP 2: fix / simplify / defer get a workflow-shaped capture ========
+#
+# Blocker A. capture_review_terminal and capture_standalone_terminal load a
+# FIXER binding, and _load_persistence_binding rebuilt the detached
+# LAUNCH_BINDING_KEYS base before delegating. All three assumed the detached key
+# set unconditionally, so a workflow binding -- which carries a run_nonce and
+# none of the receipt/handle/supervision members -- could reach NONE of them.
+# The fix, simplify and defer stages consequently had no capture at all.
+#
+# What is required is PARITY, not a cheaper path. A fixer child owes a
+# disposition artifact and an applied-content artifact on top of the status and
+# result a reviewer owes; every one of those proofs is exercised below on a
+# workflow binding, and the defer and simplify stages are driven all the way
+# through their outcome verbs so the capture is proved to be reachable, not
+# merely callable.
+
+# 1. The two launch shapes are structurally mutually exclusive, in BOTH
+#    directions. That exclusivity is what makes dispatching on the DECLARED
+#    backend sound: no binding can satisfy both key sets, so a mis-declared
+#    backend cannot be re-read as the other shape, it can only be refused.
+assert module.DETACHED_ONLY_BINDING_KEYS == {
+    "receipt_sha256", "handle", "launch_status_sha256",
+    "process_identity", "lease_generation",
+}, module.DETACHED_ONLY_BINDING_KEYS
+assert module.WORKFLOW_ONLY_BINDING_KEYS == {"run_nonce"}, (
+    module.WORKFLOW_ONLY_BINDING_KEYS
+)
+assert module.DETACHED_ONLY_BINDING_KEYS.isdisjoint(
+    module.WORKFLOW_ONLY_BINDING_KEYS
+)
+assert module.DETACHED_ONLY_BINDING_KEYS == (
+    module.LAUNCH_BINDING_KEYS - module.WORKFLOW_LAUNCH_BINDING_KEYS
+)
+assert module.WORKFLOW_ONLY_BINDING_KEYS == (
+    module.WORKFLOW_LAUNCH_BINDING_KEYS - module.LAUNCH_BINDING_KEYS
+)
+# The fixer and persistence shapes add the SAME members to whichever base they
+# sit on, so the obligations differ only in how the launch is identified.
+for detached_keys, workflow_keys, extra in (
+    (module.FIXER_LAUNCH_BINDING_KEYS,
+     module.WORKFLOW_FIXER_LAUNCH_BINDING_KEYS,
+     module.FIXER_BINDING_EXTRA_KEYS),
+    (module.PERSISTENCE_BINDING_KEYS,
+     module.WORKFLOW_PERSISTENCE_BINDING_KEYS,
+     module.PERSISTENCE_BINDING_EXTRA_KEYS),
+):
+    assert detached_keys == module.LAUNCH_BINDING_KEYS | extra, extra
+    assert workflow_keys == module.WORKFLOW_LAUNCH_BINDING_KEYS | extra, extra
+    assert detached_keys != workflow_keys, extra
+    assert module.DETACHED_ONLY_BINDING_KEYS.isdisjoint(workflow_keys), extra
+    assert module.WORKFLOW_ONLY_BINDING_KEYS.isdisjoint(detached_keys), extra
+
+WORKFLOW_NONCE_OTHER = "a1" * 32
+assert WORKFLOW_NONCE_OTHER != WORKFLOW_NONCE
+assert re.fullmatch(r"[0-9a-f]{64}", WORKFLOW_NONCE_OTHER)
+
+# 2. review_pr.fix.phase1 -- the authority-derived disposition and
+#    applied-content paths are still bound, and all four artifacts are frozen.
+with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "src").mkdir()
+    (repo / "src/a.py").write_text("A = 0\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py")
+    git(repo, "commit", "-qm", "test: workflow review base")
+    base = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "src/a.py").write_text("A = 1\n", encoding="utf-8")
+    git(repo, "add", "--", "src/a.py")
+    git(repo, "commit", "-qm", "test: workflow review head")
+    head = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    evidence = repo / ".uberdev/research/20260804-010203-abcdef0"
+    evidence.mkdir(parents=True)
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes(phase1_table([
+        ("code-reviewer", "blocker", "src/a.py", "1", "DEFERRED",
+         "correct alpha", "bounded"),
+    ]))
+    commit_range = evidence / "commit-range.txt"
+    commit_range.write_text(f"{base}..{head}\n", encoding="ascii")
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_bytes(b"")
+    authority_receipt = prepare(
+        repo, findings, digest(findings), commit_range, digest(commit_range),
+        disposition,
+    )
+    authority_path = pathlib.Path(authority_receipt["authority_path"])
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    published = module.publish_disposition(
+        authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+        disposition_path=str(disposition),
+        candidate=json.dumps(candidate(authority, [{
+            **authority["finding_keys"][0], "disposition": "SKIPPED",
+            "behavior_tag": "n/a", "reason": "deferred to a durable issue",
+        }])).encode(),
+    )
+    result_path = evidence / "phase1-fixer-result.md"
+    result_path.write_bytes(
+        b"```yaml\nstatus: NO_FIXES_NEEDED\nphase: phase1\ncommits: []\n"
+        b"findings_disposition: []\nrisks: []\n```\n"
+    )
+    status_path = evidence / "phase1-fixer-status.json"
+    review_instance = "review-pr-run-fix-phase1-iter01-attempt01"
+    wf_review_binding = module.bind_workflow_fixer_launch(
+        edge_id="review_pr.fix.phase1", instance_id=review_instance,
+        run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+        status_path=str(status_path), working_dir=str(repo),
+        authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+    )
+    status_path.write_text(json.dumps({
+        "backend": "workflow", "branch": "", "exit_code": 0,
+        "result": wf_review_binding["result_path"],
+        "run_nonce": WORKFLOW_NONCE, "state": "completed",
+        "workspace_mode": "caller", "worktree": wf_review_binding["worktree"],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    assert set(wf_review_binding) == module.WORKFLOW_FIXER_LAUNCH_BINDING_KEYS
+    assert wf_review_binding["backend"] == "workflow"
+    assert wf_review_binding["run_nonce"] == WORKFLOW_NONCE
+    assert not (module.DETACHED_ONLY_BINDING_KEYS & set(wf_review_binding))
+    wf_review_bytes = module._canonical_json(wf_review_binding)
+    assert module._load_fixer_launch_binding(
+        wf_review_bytes, "review_pr.fix.phase1") == wf_review_binding
+
+    review_terminal = module.capture_review_terminal(
+        launch_binding=wf_review_bytes,
+        disposition_path=str(disposition),
+        applied_content_path=published["applied_content_path"],
+    )
+    # Every proof a detached fixer capture produces, produced here from bytes
+    # THIS process read off disk -- no caller-supplied digest is accepted.
+    assert set(review_terminal) == {
+        "status_path", "status_sha256", "result_path", "result_sha256",
+        "disposition_path", "disposition_sha256",
+        "applied_content_path", "applied_content_sha256",
+    }, review_terminal
+    for path_key, sha_key, on_disk in (
+        ("status_path", "status_sha256", status_path),
+        ("result_path", "result_sha256", result_path),
+        ("disposition_path", "disposition_sha256", disposition),
+        ("applied_content_path", "applied_content_sha256",
+         pathlib.Path(published["applied_content_path"])),
+    ):
+        assert review_terminal[sha_key] == hashlib.sha256(
+            on_disk.read_bytes()).hexdigest(), path_key
+
+    # The authority-derived applied-content path is still the only one accepted.
+    foreign_content = evidence / "review-applied-content-forged.json"
+    foreign_content.write_bytes(pathlib.Path(
+        published["applied_content_path"]).read_bytes())
+    expect_contract_reason(
+        lambda: module.capture_review_terminal(
+            launch_binding=wf_review_bytes,
+            disposition_path=str(disposition),
+            applied_content_path=str(foreign_content)),
+        "validation_authority_mismatch",
+    )
+    expect_contract_reason(
+        lambda: module.capture_review_terminal(
+            launch_binding=wf_review_bytes,
+            disposition_path=str(evidence / "phase2-disposition.json"),
+            applied_content_path=published["applied_content_path"]),
+        "validation_authority_mismatch",
+    )
+
+    # Cross-backend smuggling is refused in BOTH directions. This pair is the
+    # load-bearing negative: without the exclusion guard a workflow binding
+    # carrying the supervision triple would be re-read as a detached one (and
+    # vice versa), which is exactly how an unproved child gets frozen.
+    smuggled_triple = {
+        **wf_review_binding,
+        "process_identity": "1|1|1|" + "0" * 64,
+    }
+    expect_contract_reason(
+        lambda: module._load_fixer_launch_binding(
+            module._canonical_json(smuggled_triple), "review_pr.fix.phase1"),
+        "fixer_binding_invalid",
+    )
+    detached_fixer = {
+        "schema_version": 1, "receipt_sha256": "0" * 64,
+        "edge_id": "review_pr.fix.phase1", "instance_id": review_instance,
+        "backend": "codex", "handle": "23456", "launch_status_sha256": "0" * 64,
+        "process_identity": "23456|23456|23456|" + "0" * 64,
+        "lease_generation": "0" * 32,
+        "result_path": wf_review_binding["result_path"],
+        "status_path": wf_review_binding["status_path"],
+        "workspace_mode": "caller", "worktree": wf_review_binding["worktree"],
+        "branch": "",
+        "authority_path": wf_review_binding["authority_path"],
+        "authority_sha256": wf_review_binding["authority_sha256"],
+    }
+    assert set(detached_fixer) == module.FIXER_LAUNCH_BINDING_KEYS
+    assert module._load_fixer_launch_binding(
+        module._canonical_json(detached_fixer),
+        "review_pr.fix.phase1") == detached_fixer
+    smuggled_nonce = {**detached_fixer, "run_nonce": WORKFLOW_NONCE}
+    expect_contract_reason(
+        lambda: module._load_fixer_launch_binding(
+            module._canonical_json(smuggled_nonce), "review_pr.fix.phase1"),
+        "fixer_binding_invalid",
+    )
+
+    # The edge id, the nonce shape, and the authority binding are all still
+    # enforced by the workflow producer.
+    # ...and refused identically for both shapes, from the shared base loader.
+    for shaped in (wf_review_binding, detached_fixer):
+        expect_contract_reason(
+            lambda b=shaped: module._load_fixer_launch_binding(
+                module._canonical_json(b), "review_pr.fix.phase2"),
+            "launch_binding_invalid",
+        )
+    for bad_nonce in ("", "g" * 64, "F" * 64, "f" * 63):
+        expect_contract_reason(
+            lambda n=bad_nonce: module.bind_workflow_fixer_launch(
+                edge_id="review_pr.fix.phase1", instance_id=review_instance,
+                run_nonce=n, result_path=str(result_path),
+                status_path=str(status_path), working_dir=str(repo),
+                authority_path=str(authority_path),
+                authority_sha256=authority_receipt["authority_sha256"]),
+            "launch_binding_invalid",
+        )
+    # A reviewer edge owes no disposition; it must not be mintable as a fixer.
+    for rejected_edge in (
+        "review_pr.review.correctness", "review_pr.defer.findings", "",
+    ):
+        expect_contract_reason(
+            lambda e=rejected_edge: module.bind_workflow_fixer_launch(
+                edge_id=e, instance_id=review_instance,
+                run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+                status_path=str(status_path), working_dir=str(repo),
+                authority_path=str(authority_path),
+                authority_sha256=authority_receipt["authority_sha256"]),
+            "fixer_binding_invalid",
+        )
+    # The authority must belong to the edge and the worktree being bound.
+    expect_contract_reason(
+        lambda: module.bind_workflow_fixer_launch(
+            edge_id="review_pr.fix.phase2", instance_id=review_instance,
+            run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+            status_path=str(status_path), working_dir=str(repo),
+            authority_path=str(authority_path),
+            authority_sha256=authority_receipt["authority_sha256"]),
+        "fixer_binding_invalid",
+    )
+
+# 3. review_pr.defer.findings -- capture AND outcome, end to end, on a workflow
+#    binding. The defer stage carries an aggregate and a disposition pin, and
+#    both survive the backend switch.
+with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as temporary:
+    working = pathlib.Path(temporary).resolve()
+    result_path = working / "result.md"
+    status_path = working / "status.json"
+    defer_aggregate = working / "simplify-empty.md"
+    defer_disposition = working / "phase2-empty-disposition.json"
+    defer_aggregate.write_bytes(aggregate("phase2"))
+    defer_aggregate_sha = digest(defer_aggregate)
+    defer_disposition.write_text(json.dumps({
+        "schema_version": 1, "phase": "phase2",
+        "aggregate_sha256": defer_aggregate_sha, "findings_disposition": [],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    defer_disposition_sha = digest(defer_disposition)
+    result_path.write_text(persistence_result("DONE"), encoding="utf-8")
+    defer_binding = module.bind_workflow_persistence_launch(
+        instance_id="review-pr-defer-findings-iter01-attempt01",
+        run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+        status_path=str(status_path), working_dir=str(working),
+        aggregate_path=str(defer_aggregate),
+        aggregate_sha256=defer_aggregate_sha,
+        disposition_path=str(defer_disposition),
+        disposition_sha256=defer_disposition_sha,
+        expected_deferred_blockers=0, require_clean=False,
+    )
+    assert set(defer_binding) == module.WORKFLOW_PERSISTENCE_BINDING_KEYS
+    assert defer_binding["edge_id"] == "review_pr.defer.findings"
+    assert not (module.DETACHED_ONLY_BINDING_KEYS & set(defer_binding))
+    defer_bytes = module._canonical_json(defer_binding)
+    assert module._load_persistence_binding(defer_bytes) == defer_binding
+
+    def defer_status(**overrides):
+        document = {
+            "backend": "workflow", "branch": "", "exit_code": 0,
+            "result": defer_binding["result_path"],
+            "run_nonce": WORKFLOW_NONCE, "state": "completed",
+            "workspace_mode": "caller", "worktree": defer_binding["worktree"],
+        }
+        document.update(overrides)
+        status_path.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    defer_status()
+    defer_terminal = module.capture_persistence_terminal(
+        launch_binding=defer_bytes)
+    assert defer_terminal["status_sha256"] == hashlib.sha256(
+        status_path.read_bytes()).hexdigest()
+    assert defer_terminal["result_sha256"] == hashlib.sha256(
+        result_path.read_bytes()).hexdigest()
+    defer_validated = module.validate_persistence_result(
+        launch_binding=defer_bytes,
+        status_sha256=defer_terminal["status_sha256"],
+        result_sha256=defer_terminal["result_sha256"],
+    )
+    assert defer_validated["status"] == "DONE", defer_validated
+    assert defer_validated["aggregate_sha256"] == defer_aggregate_sha
+
+    # A status file from a DIFFERENT launch is refused: the nonce is the whole
+    # binding for a workflow child, exactly as the triple is for a detached one.
+    for forgery in (
+        {"run_nonce": WORKFLOW_NONCE_OTHER},
+        {"pid": "23456"},
+        {"worktree": str(working / "elsewhere")},
+        {"result": str(working / "foreign-result.md")},
+    ):
+        defer_status(**forgery)
+        forged_terminal = module.capture_persistence_terminal(
+            launch_binding=defer_bytes)
+        expect_contract_reason(
+            lambda t=forged_terminal: module.validate_persistence_result(
+                launch_binding=defer_bytes,
+                status_sha256=t["status_sha256"],
+                result_sha256=t["result_sha256"]),
+            "child_status_invalid",
+        )
+    defer_status()
+
+    # Cross-backend smuggling, both directions, on the persistence shape.
+    expect_contract_reason(
+        lambda: module._load_persistence_binding(module._canonical_json({
+            **defer_binding, "process_identity": "1|1|1|" + "0" * 64})),
+        "persistence_binding_invalid",
+    )
+    detached_defer = {
+        "schema_version": 1, "receipt_sha256": "0" * 64,
+        "edge_id": "review_pr.defer.findings",
+        "instance_id": "review-pr-defer-findings-iter01-attempt01",
+        "backend": "codex", "handle": "34567", "launch_status_sha256": "0" * 64,
+        "process_identity": "34567|34567|34567|" + "0" * 64,
+        "lease_generation": "0" * 32,
+        "result_path": defer_binding["result_path"],
+        "status_path": defer_binding["status_path"],
+        "workspace_mode": "caller", "worktree": defer_binding["worktree"],
+        "branch": "",
+        "aggregate_path": defer_binding["aggregate_path"],
+        "aggregate_sha256": defer_aggregate_sha,
+        "disposition_path": defer_binding["disposition_path"],
+        "disposition_sha256": defer_disposition_sha,
+        "expected_deferred_blockers": 0, "require_clean": False,
+    }
+    assert set(detached_defer) == module.PERSISTENCE_BINDING_KEYS
+    assert module._load_persistence_binding(
+        module._canonical_json(detached_defer)) == detached_defer
+    expect_contract_reason(
+        lambda: module._load_persistence_binding(module._canonical_json({
+            **detached_defer, "run_nonce": WORKFLOW_NONCE})),
+        "persistence_binding_invalid",
+    )
+    # The deferred-blocker pin is not weakened by the backend switch.
+    expect_contract_reason(
+        lambda: module.bind_workflow_persistence_launch(
+            instance_id="review-pr-defer-findings-iter01-attempt01",
+            run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+            status_path=str(status_path), working_dir=str(working),
+            aggregate_path=str(defer_aggregate),
+            aggregate_sha256=defer_aggregate_sha,
+            disposition_path=str(defer_disposition),
+            disposition_sha256=defer_disposition_sha,
+            expected_deferred_blockers=1, require_clean=True),
+        "persistence_binding_invalid",
+    )
+
+# 4. simplify.fix.phase2 -- capture AND outcome, end to end, on a workflow
+#    binding, including the applied-content plan the fixer alone owes.
+with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-simplify-") as temporary:
+    repo = pathlib.Path(temporary) / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "config", "user.name", "Fixture")
+    (repo / "kept.txt").write_text("H0\n", encoding="utf-8")
+    git(repo, "add", "--", "kept.txt")
+    git(repo, "commit", "-qm", "test: workflow simplify base")
+    head = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    evidence = repo / ".uberdev/research/20260804-010204-abcdef0"
+    evidence.mkdir(parents=True)
+    diff_path = evidence / "pr-diff.md"
+    diff_path.write_bytes(
+        b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n'
+    )
+    snapshot_path = evidence / "standalone-snapshot.json"
+    snapshot_path.write_bytes(b"")
+    snapshot_receipt = module.capture_standalone_snapshot(
+        working_dir=str(repo), evidence_dir=str(evidence),
+        diff_path=str(diff_path), snapshot_path=str(snapshot_path),
+    )
+    findings = evidence / "simplify-final.md"
+    findings.write_bytes(phase2_empty)
+    disposition = evidence / "phase2-disposition.json"
+    disposition.write_bytes(b"")
+    authority_receipt = module.prepare_standalone_authority(
+        edge_id="simplify.fix.phase2", policy_phase="simplify_fix",
+        findings_path=str(findings), findings_sha256=digest(findings),
+        snapshot_path=str(snapshot_path),
+        snapshot_sha256=snapshot_receipt["snapshot_sha256"],
+        working_dir=str(repo), disposition_path=str(disposition),
+    )
+    authority_path = pathlib.Path(authority_receipt["authority_path"])
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    published = module.publish_disposition(
+        authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+        disposition_path=str(disposition),
+        candidate=json.dumps(candidate(authority, [])).encode(),
+    )
+    result_path = evidence / "fixer-result.md"
+    result_path.write_text(
+        "```yaml\nstatus: NO_FIXES_NEEDED\nphase: phase2\ncommits: []\n"
+        "findings_disposition: []\nrisks: []\n```\n",
+        encoding="utf-8",
+    )
+    status_path = evidence / "fixer-status.json"
+    simplify_binding = module.bind_workflow_fixer_launch(
+        edge_id="simplify.fix.phase2",
+        instance_id="simplify-fix-phase2-iter01-attempt01",
+        run_nonce=WORKFLOW_NONCE, result_path=str(result_path),
+        status_path=str(status_path), working_dir=str(repo),
+        authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+    )
+    status_path.write_text(json.dumps({
+        "backend": "workflow", "branch": "", "exit_code": 0,
+        "result": simplify_binding["result_path"],
+        "run_nonce": WORKFLOW_NONCE, "state": "completed",
+        "workspace_mode": "caller", "worktree": simplify_binding["worktree"],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    simplify_bytes = module._canonical_json(simplify_binding)
+    simplify_terminal = module.capture_standalone_terminal(
+        launch_binding=simplify_bytes, disposition_path=str(disposition),
+        applied_content_path=published["applied_content_path"],
+    )
+    simplify_outcome = module.validate_standalone_outcome(
+        launch_binding=simplify_bytes, authority_path=str(authority_path),
+        authority_sha256=authority_receipt["authority_sha256"],
+        disposition_path=str(disposition),
+        disposition_sha256=simplify_terminal["disposition_sha256"],
+        applied_content_path=simplify_terminal["applied_content_path"],
+        applied_content_sha256=simplify_terminal["applied_content_sha256"],
+        status_sha256=simplify_terminal["status_sha256"],
+        result_sha256=simplify_terminal["result_sha256"],
+        working_dir=str(repo), head_before=head, head_after=head,
+    )
+    assert simplify_outcome["status"] == "NO_FIXES_NEEDED", simplify_outcome
+    # The outcome's tie back to its launch is the NONCE, under its own key. It
+    # is not relabelled as a receipt digest -- a consumer written to check a
+    # dispatch receipt must not silently accept a workflow outcome instead.
+    assert set(simplify_outcome) == {
+        "status", "declared_tip", "run_nonce", "status_sha256", "result_sha256",
+        "disposition_sha256", "applied_content_sha256", "commit",
+    }, simplify_outcome
+    assert simplify_outcome["run_nonce"] == WORKFLOW_NONCE
+    # A status file that does not echo the minted nonce fails the outcome.
+    status_path.write_text(json.dumps({
+        "backend": "workflow", "branch": "", "exit_code": 0,
+        "result": simplify_binding["result_path"],
+        "run_nonce": WORKFLOW_NONCE_OTHER, "state": "completed",
+        "workspace_mode": "caller", "worktree": simplify_binding["worktree"],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    forged_terminal = module.capture_standalone_terminal(
+        launch_binding=simplify_bytes, disposition_path=str(disposition),
+        applied_content_path=published["applied_content_path"],
+    )
+    expect_contract_reason(
+        lambda: module.validate_standalone_outcome(
+            launch_binding=simplify_bytes, authority_path=str(authority_path),
+            authority_sha256=authority_receipt["authority_sha256"],
+            disposition_path=str(disposition),
+            disposition_sha256=forged_terminal["disposition_sha256"],
+            applied_content_path=forged_terminal["applied_content_path"],
+            applied_content_sha256=forged_terminal["applied_content_sha256"],
+            status_sha256=forged_terminal["status_sha256"],
+            result_sha256=forged_terminal["result_sha256"],
+            working_dir=str(repo), head_before=head, head_after=head),
+        "child_status_invalid",
+    )
+
+# 5. Both producers must be REACHABLE from the CLI. A minter with no subparser
+#    is dead code, which is what #381 found the first time.
+workflow_cli = module._parser()
+for verb, argv in (
+    ("bind-workflow-fixer-launch", [
+        "bind-workflow-fixer-launch", "--edge-id", "review_pr.fix.phase1",
+        "--instance-id", "review-pr-run-fix-phase1-iter01-attempt01",
+        "--run-nonce", WORKFLOW_NONCE, "--result-path", "/tmp/result.md",
+        "--status-path", "/tmp/status.json", "--working-dir", "/tmp",
+        "--authority-path", "/tmp/authority.json",
+        "--authority-sha256", "0" * 64]),
+    ("bind-workflow-persistence-launch", [
+        "bind-workflow-persistence-launch",
+        "--instance-id", "review-pr-defer-findings-iter01-attempt01",
+        "--run-nonce", WORKFLOW_NONCE, "--result-path", "/tmp/result.md",
+        "--status-path", "/tmp/status.json", "--working-dir", "/tmp",
+        "--aggregate-path", "/tmp/aggregate.md",
+        "--aggregate-sha256", "0" * 64,
+        "--disposition-path", "/tmp/disposition.json",
+        "--disposition-sha256", "0" * 64,
+        "--expected-deferred-blockers", "0", "--require-clean", "0"]),
+):
+    parsed = workflow_cli.parse_args(argv)
+    assert parsed.command == verb, parsed
+
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY
