@@ -249,7 +249,11 @@ MANDATE='Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow
 fence_has() {  # FILE TOKEN NEEDLE LABEL
   local body
   body="$(extract_fence "$1" "$2")" || { fail "$4 (no fence carrying '$2')"; return; }
-  if printf '%s' "$body" | grep -Fq "$3"; then pass "$4"; else fail "$4"; fi
+  # Herestring, not a pipe: `grep -Fq` exits at the first match, so a pipe
+  # writer can take EPIPE and — under `set -o pipefail` — turn a MATCH into a
+  # 141 pipeline status, i.e. a spurious fail. tests/epipe-guard.test.sh E2.O1
+  # declares the herestring the safe form.
+  if grep -Fq "$3" <<<"$body"; then pass "$4"; else fail "$4"; fi
 }
 
 # review-pr.md: four stages (fix runs twice, on two different edges).
@@ -357,7 +361,8 @@ else
 fi
 # Comment-strip first: the mint's own docstring NAMES the banned sources in
 # order to ban them, and a guard that punished the prose would be unfixable.
-if grep -v '^[[:space:]]*#' "$ARGS_LIB" | grep -Eq '\$RANDOM|date \+%s'; then
+ARGS_LIB_NONCOMMENT="$(grep -v '^[[:space:]]*#' "$ARGS_LIB")"
+if grep -Eq '\$RANDOM|date \+%s' <<<"$ARGS_LIB_NONCOMMENT"; then
   fail "G13b the nonce mint reaches for \$RANDOM or a timestamp"
 else
   pass "G13b the nonce mint never reaches for \$RANDOM or a timestamp"
@@ -369,8 +374,8 @@ fi
 # on its own by two other fixtures, so a gate in a neighbouring fence is a gate
 # they run without.
 CLASSIFY_FENCE="$(extract_fence "$REVIEW_CMD" 'review_pr.ci.classify \' || true)"
-if printf '%s' "$CLASSIFY_FENCE" | grep -Fq 'ci_transport_unsupported' \
-   && printf '%s' "$CLASSIFY_FENCE" | grep -Fq '"${UBERDEV_CARRIER_BACKEND:-}" = workflow'; then
+if grep -Fq 'ci_transport_unsupported' <<<"$CLASSIFY_FENCE" \
+   && grep -Fq '"${UBERDEV_CARRIER_BACKEND:-}" = workflow' <<<"$CLASSIFY_FENCE"; then
   pass "G14 the Phase 3 transport boundary is inline in the CLASSIFY fence, before the routed dispatch"
 else
   fail "G14 review-pr would dispatch a routed CI child on a backend with no provider arm"
