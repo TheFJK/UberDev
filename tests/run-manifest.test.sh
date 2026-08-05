@@ -124,7 +124,7 @@ fi
 if [ "${1:-}" != "--artifact-publication-only" ]; then
 SELF_IDENTITY="$(python3 "$MANIFEST" process-identity --pid "$$")" || exit 1
 
-LINUX_IDENTITY_CLASSIFICATION="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+LINUX_IDENTITY_CLASSIFICATION="$(python3 -I -B - "$MANIFEST" <<'PY'
 import builtins
 import errno
 import importlib.util
@@ -163,13 +163,13 @@ for index, module_path in enumerate(sys.argv[1:]):
     print(f"{missing}/{unavailable}")
 PY
 )"
-if [ "$LINUX_IDENTITY_CLASSIFICATION" = $'absent/unavailable\nabsent/unavailable' ]; then
-  pass "Linux vanished PIDs are absent while other identity I/O failures stay unavailable in both mirrors"
+if [ "$LINUX_IDENTITY_CLASSIFICATION" = 'absent/unavailable' ]; then
+  pass "Linux vanished PIDs are absent while other identity I/O failures stay unavailable"
 else
   fail "Linux process identity error classification" "$LINUX_IDENTITY_CLASSIFICATION"
 fi
 
-WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+WINDOWS_PARENT_PROBE_SPLIT="$(python3 -I -B - "$MANIFEST" <<'PY'
 import errno
 import importlib.util
 import json
@@ -434,13 +434,13 @@ for index, module_path in enumerate(sys.argv[1:]):
     )
 PY
 )"
-if [ "$WINDOWS_PARENT_PROBE_SPLIT" = $'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible\ncaptured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible' ]; then
+if [ "$WINDOWS_PARENT_PROBE_SPLIT" = 'captured/signaled-259-rejected/snapshot-unavailable/wait-errors-unavailable/close-failures-visible' ]; then
   pass "Windows liveness rejects signaled handles even when exit code is 259"
 else
   fail "Windows process identity/parent lookup split" "$WINDOWS_PARENT_PROBE_SPLIT"
 fi
 
-WINDOWS_PARENT_GENERATION_BINDING="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+WINDOWS_PARENT_GENERATION_BINDING="$(python3 -I -B - "$MANIFEST" <<'PY'
 import hashlib
 import importlib.util
 import pathlib
@@ -602,13 +602,13 @@ for index, module_path in enumerate(sys.argv[1:]):
     print("bound/recycled-rejected/newer-rejected")
 PY
 )"
-if [ "$WINDOWS_PARENT_GENERATION_BINDING" = $'bound/recycled-rejected/newer-rejected\nbound/recycled-rejected/newer-rejected' ]; then
+if [ "$WINDOWS_PARENT_GENERATION_BINDING" = 'bound/recycled-rejected/newer-rejected' ]; then
   pass "Windows parent traversal carries and validates bound process generations"
 else
   fail "Windows parent generation binding" "$WINDOWS_PARENT_GENERATION_BINDING"
 fi
 
-SUPPORTED_PLATFORM_POLICY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+SUPPORTED_PLATFORM_POLICY="$(python3 -I -B - "$MANIFEST" <<'PY'
 import importlib.util
 import sys
 
@@ -642,7 +642,7 @@ for index, module_path in enumerate(sys.argv[1:]):
     print(",".join(module.SUPPORTED_PROCESS_IDENTITY_PLATFORMS))
 PY
 )"
-if [ "$SUPPORTED_PLATFORM_POLICY" = $'linux,darwin,windows\nlinux,darwin,windows' ]; then
+if [ "$SUPPORTED_PLATFORM_POLICY" = 'linux,darwin,windows' ]; then
   pass "process identity explicitly supports only Linux, macOS, and Windows"
 else
   fail "process identity supported-platform policy" "$SUPPORTED_PLATFORM_POLICY"
@@ -655,7 +655,7 @@ else
   fail "README process-identity supported-platform contract" "supported trio is undocumented"
 fi
 
-PROCESS_IDENTITY_CANDIDATE_SECURITY="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+PROCESS_IDENTITY_CANDIDATE_SECURITY="$(python3 -I -B - "$MANIFEST" <<'PY'
 import importlib.util
 import pathlib
 import sys
@@ -754,7 +754,7 @@ for index, module_path in enumerate(sys.argv[1:]):
     print("candidate-secure")
 PY
 )"
-if [ "$PROCESS_IDENTITY_CANDIDATE_SECURITY" = $'candidate-secure\ncandidate-secure' ]; then
+if [ "$PROCESS_IDENTITY_CANDIDATE_SECURITY" = 'candidate-secure' ]; then
   pass "process identity securely binds, verifies, and rolls back its pre-created candidate"
 else
   fail "process identity candidate security" "$PROCESS_IDENTITY_CANDIDATE_SECURITY"
@@ -1938,7 +1938,7 @@ else
 fi
 fi
 
-WINDOWS_ARTIFACT_IDENTITY_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+WINDOWS_ARTIFACT_IDENTITY_RESULT="$(python3 -I -B - "$MANIFEST" "$TMP" <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -1993,7 +1993,7 @@ def windows_fd_view(
 
 
 failures = []
-for index, module_path in enumerate(sys.argv[1:3]):
+for index, module_path in enumerate(sys.argv[1:2]):
     spec = importlib.util.spec_from_file_location(
         f"run_manifest_windows_artifact_identity_{index}", module_path
     )
@@ -2001,7 +2001,7 @@ for index, module_path in enumerate(sys.argv[1:3]):
     assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    root = pathlib.Path(sys.argv[3]) / f"windows-artifact-identity-{index}"
+    root = pathlib.Path(sys.argv[2]) / f"windows-artifact-identity-{index}"
     root.mkdir()
     artifact = root / "artifact"
     artifact.write_bytes(b"verified bytes\n")
@@ -2553,20 +2553,20 @@ else
   fail "native Windows artifact identity normalization" "$WINDOWS_ARTIFACT_IDENTITY_RESULT"
 fi
 
-SECURE_CAPTURE_CLOSE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+SECURE_CAPTURE_CLOSE_RESULT="$(python3 -I -B - "$MANIFEST" "$TMP" <<'PY'
 import importlib.util
 import pathlib
 import sys
 from unittest import mock
 
 failures=[]
-for index,module_path in enumerate(sys.argv[1:3]):
+for index,module_path in enumerate(sys.argv[1:2]):
     spec=importlib.util.spec_from_file_location(f"run_manifest_capture_close_{index}",module_path)
     module=importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name]=module
     spec.loader.exec_module(module)
-    root=pathlib.Path(sys.argv[3])/f"capture-close-{index}"; root.mkdir()
+    root=pathlib.Path(sys.argv[2])/f"capture-close-{index}"; root.mkdir()
     artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
     original_open=module._secure_open_regular
     real_close=module.os.close
@@ -2635,12 +2635,12 @@ print("ok",end="")
 PY
 )"
 if [ "$SECURE_CAPTURE_CLOSE_RESULT" = ok ]; then
-  pass "artifact capture preserves primary failures and normalizes close-only failures in both mirrors"
+  pass "artifact capture preserves primary failures and normalizes close-only failures"
 else
   fail "artifact capture close failures" "$SECURE_CAPTURE_CLOSE_RESULT"
 fi
 
-SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+SECURE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$TMP" <<'PY'
 import hashlib
 import importlib.util
 import os
@@ -2649,13 +2649,13 @@ import stat
 import sys
 from unittest import mock
 
-for index,module_path in enumerate(sys.argv[1:3]):
+for index,module_path in enumerate(sys.argv[1:2]):
     spec=importlib.util.spec_from_file_location(f"run_manifest_capture_{index}",module_path)
     module=importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name]=module
     spec.loader.exec_module(module)
-    root=pathlib.Path(sys.argv[3])/f"capture-{index}"; root.mkdir()
+    root=pathlib.Path(sys.argv[2])/f"capture-{index}"; root.mkdir()
     artifact=root/"artifact"; artifact.write_bytes(b"verified bytes\n")
     payload,identity=module.secure_capture_regular(str(artifact),1,1024)
     # Identities are frozen dataclasses, not tuples (#343) — serialise through the
@@ -2902,7 +2902,7 @@ else
   fail "artifact publication isolates retries and never pathname-deletes replacements" "$SECURE_CAPTURE_RESULT"
 fi
 
-EXACT_PUBLICATION_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+EXACT_PUBLICATION_RESULT="$(python3 -I -B - "$MANIFEST" "$TMP" <<'PY'
 import hashlib
 import importlib.util
 import os
@@ -2953,14 +2953,14 @@ def expect_failure(module, operation, label, failures, expected_reason=None):
 
 
 failures = []
-for index, module_path in enumerate(sys.argv[1:3]):
+for index, module_path in enumerate(sys.argv[1:2]):
     module = load_module(module_path, index)
     publish = getattr(module, "secure_publish_exact_no_clobber", None)
     if publish is None:
         failures.append(f"{index}: public exact-name publisher is missing")
         continue
 
-    root = pathlib.Path(sys.argv[3]) / f"exact-publication-{index}"
+    root = pathlib.Path(sys.argv[2]) / f"exact-publication-{index}"
     root.mkdir()
     payload = b'{"schema_version":1,"value":"trusted"}\n'
     expected_digest = hashlib.sha256(payload).hexdigest()
@@ -3365,7 +3365,7 @@ else
   fail "exact-name publisher contract" "$EXACT_PUBLICATION_RESULT"
 fi
 
-PRIVATE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py" "$TMP" <<'PY'
+PRIVATE_CAPTURE_RESULT="$(python3 -I -B - "$MANIFEST" "$TMP" <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -3388,7 +3388,7 @@ def expect_rejected(module, operation, label):
     failures.append(f"{label}: unexpectedly succeeded")
 
 
-for index, module_path in enumerate(sys.argv[1:3]):
+for index, module_path in enumerate(sys.argv[1:2]):
     spec = importlib.util.spec_from_file_location(f"run_manifest_private_{index}", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -3400,7 +3400,7 @@ for index, module_path in enumerate(sys.argv[1:3]):
         failures.append(f"{index}: secure_remove_private_capture_dir is missing")
         continue
 
-    root = pathlib.Path(sys.argv[3]) / f"private-capture-{index}"
+    root = pathlib.Path(sys.argv[2]) / f"private-capture-{index}"
     root.mkdir()
 
     # The load-bearing case: secure_publish_captured NEVER unlinks its attempt
@@ -3526,7 +3526,7 @@ fi
 # A 3.10+-only construct (e.g. `@dataclass(slots=True)`) is a TypeError at
 # import there, and it surfaces several layers away as
 # `owner_process_identity_unavailable` — a diagnostic that points nowhere near
-# the cause. Import each distinct interpreter we can find, both mirrors.
+# the cause. Import each distinct interpreter we can find.
 IMPORT_FLOOR_FAIL=""
 IMPORT_FLOOR_SEEN=""
 for INTERP in /usr/bin/python3 /bin/python3 "$(command -v python3 2>/dev/null || true)"; do
@@ -3535,7 +3535,7 @@ for INTERP in /usr/bin/python3 /bin/python3 "$(command -v python3 2>/dev/null ||
   [ -n "$INTERP_REAL" ] || continue
   case " $IMPORT_FLOOR_SEEN " in *" $INTERP_REAL "*) continue ;; esac
   IMPORT_FLOOR_SEEN="$IMPORT_FLOOR_SEEN $INTERP_REAL"
-  for MODULE in "$MANIFEST" "$ROOT/codex/uberdev-codex/lib/run_manifest.py"; do
+  for MODULE in "$MANIFEST"; do
     if ! IMPORT_OUT="$("$INTERP" -I -B -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("run_manifest_import_floor", sys.argv[1])

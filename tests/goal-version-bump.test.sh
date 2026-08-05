@@ -176,13 +176,11 @@ git_id() {   # <repo>  — local identity so the fixture never depends on ~/.git
 write_surfaces() {  # <root> <version> <prev-version>
   local root="$1" ver="$2" prev="$3"
   mkdir -p "$root/plugins/uberdev/.claude-plugin" "$root/.claude-plugin" \
-           "$root/codex/uberdev-codex/.codex-plugin" "$root/tests"
+           "$root/tests"
   printf '{\n  "name": "uberdev",\n  "version": "%s"\n}\n' "$ver" \
     > "$root/plugins/uberdev/.claude-plugin/plugin.json"
   printf '{\n  "name": "uberdev",\n  "plugins": [\n    {\n      "name": "uberdev",\n      "version": "%s"\n    }\n  ]\n}\n' "$ver" \
     > "$root/.claude-plugin/marketplace.json"
-  printf '{\n  "name": "uberdev-codex",\n  "version": "%s"\n}\n' "$ver" \
-    > "$root/codex/uberdev-codex/.codex-plugin/plugin.json"
   printf '# Fixture\n\n[![Version](https://img.shields.io/badge/version-%s-blue)](./CHANGELOG.md)\n' "$ver" \
     > "$root/README.md"
   {
@@ -333,7 +331,7 @@ assert_eq "$(origin_subject "$S2" fix/101-thing)" "chore(release): v1.2.4" \
 # opposite fixes — the Windows argv-mangling class (see origin_file) presented
 # as "marketplace.json was never bumped" for exactly that reason.
 for v2_surface in plugins/uberdev/.claude-plugin/plugin.json .claude-plugin/marketplace.json \
-                  codex/uberdev-codex/.codex-plugin/plugin.json README.md CHANGELOG.md \
+                  README.md CHANGELOG.md \
                   tests/goal.test.sh tests/solve-claim.test.sh; do
   if [ -n "$(origin_file "$S2" fix/101-thing "$v2_surface")" ]; then
     pass "V2.readable: $v2_surface reads back from the pushed branch"
@@ -341,21 +339,19 @@ for v2_surface in plugins/uberdev/.claude-plugin/plugin.json .claude-plugin/mark
     fail "V2.readable: origin_file returned NOTHING for $v2_surface — the blob READ is broken (argv mangling / bad ref), not the bump"
   fi
 done
-# All seven CI-locked surfaces must carry the new version on the PR branch.
+# All six CI-locked surfaces must carry the new version on the PR branch.
 assert_eq "$(origin_file "$S2" fix/101-thing plugins/uberdev/.claude-plugin/plugin.json | grep -c '"version": "1\.2\.4"')" "1" \
   "V2.surface1: plugin.json (canonical SSOT)"
 assert_eq "$(origin_file "$S2" fix/101-thing .claude-plugin/marketplace.json | grep -c '"version": "1\.2\.4"')" "1" \
   "V2.surface2: marketplace.json"
-assert_eq "$(origin_file "$S2" fix/101-thing codex/uberdev-codex/.codex-plugin/plugin.json | grep -c '"version": "1\.2\.4"')" "1" \
-  "V2.surface3: the Codex plugin manifest"
 assert_eq "$(origin_file "$S2" fix/101-thing README.md | grep -c 'version-1\.2\.4-blue')" "1" \
-  "V2.surface4: the README version badge"
+  "V2.surface3: the README version badge"
 assert_eq "$(origin_file "$S2" fix/101-thing CHANGELOG.md | awk '/^## \[/ {print; exit}' | cut -c1-10)" "## [1.2.4]" \
-  "V2.surface5: the CHANGELOG's topmost section is the new version"
+  "V2.surface4: the CHANGELOG's topmost section is the new version"
 assert_eq "$(origin_file "$S2" fix/101-thing tests/goal.test.sh | grep -c 'version bump locked (1\.2\.4)')" "1" \
-  "V2.surface6: the tests/goal.test.sh version lock"
+  "V2.surface5: the tests/goal.test.sh version lock"
 assert_eq "$(origin_file "$S2" fix/101-thing tests/solve-claim.test.sh | grep -c 'Version bump 1\.2\.3 -> 1\.2\.4 propagated')" "1" \
-  "V2.surface7: the tests/solve-claim.test.sh version lock"
+  "V2.surface6: the tests/solve-claim.test.sh version lock"
 # The stub bump-version.sh writes is a placeholder, not release notes — it must
 # be replaced with content derived from the PR before the commit is made.
 S2_CL="$WORK/v2-changelog.md"

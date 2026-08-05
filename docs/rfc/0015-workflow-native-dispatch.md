@@ -281,6 +281,15 @@ colliding anywhere earlier. So `_uberdev_goal_ensure_version_bump <pr>`
   that as "already bumped". The predicate is strictly-greater.
 - **Kind from the PR's conventional-commit type** — `feat:` → minor, a `!`
   marker or a `BREAKING CHANGE:` footer → major, everything else → patch.
+> **AMENDED 2026-08-05 (issue #381).** "Seven surfaces" is now SIX everywhere
+> below. `codex/uberdev-codex/.codex-plugin/plugin.json` was surface 3 until the
+> Codex distribution was retired; `lib/bump-version.sh` and
+> `skills/merge-pipeline/lib/release-anchor.sh` both dropped it in the same
+> commit, and `tests/merge.test.sh` M98.ssot still asserts the two lists agree.
+> Nothing else about the release-anchor predicate changed — in particular two of
+> the six are still executable test files, which is why a path allow-list alone
+> is still not the predicate.
+
 - **`lib/bump-version.sh` owns the seven-surface edit.** It already refuses on
   drift (exit 3) and re-verifies every surface after writing (exit 4); this path
   leans on it rather than re-implementing the surface list. The work happens in a

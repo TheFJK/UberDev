@@ -4,10 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ATOMIC="$ROOT/plugins/uberdev/lib/atomic_move.py"
 RECEIPTS="$ROOT/plugins/uberdev/lib/worktree_receipts.py"
-ATOMIC_MIRROR="$ROOT/codex/uberdev-codex/lib/atomic_move.py"
-RECEIPTS_MIRROR="$ROOT/codex/uberdev-codex/lib/worktree_receipts.py"
 PLANNING="$ROOT/plugins/uberdev/lib/planning_research_output.py"
-PLANNING_MIRROR="$ROOT/codex/uberdev-codex/lib/planning_research_output.py"
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/worktree-receipts.XXXXXX")"
 trap 'chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 chmod 700 "$TMP"
@@ -16,9 +13,6 @@ fail() { printf 'worktree-receipts: FAIL: %s\n' "$1" >&2; exit 1; }
 
 [ -f "$ATOMIC" ] || fail 'atomic_move.py is missing'
 [ -f "$RECEIPTS" ] || fail 'worktree_receipts.py is missing'
-cmp -s "$ATOMIC" "$ATOMIC_MIRROR" || fail 'atomic move mirrors differ'
-cmp -s "$RECEIPTS" "$RECEIPTS_MIRROR" || fail 'receipt mirrors differ'
-cmp -s "$PLANNING" "$PLANNING_MIRROR" || fail 'planning helper mirrors differ'
 
 python3 -I -B - "$ATOMIC" "$RECEIPTS" "$PLANNING" "$TMP" <<'PY'
 import errno

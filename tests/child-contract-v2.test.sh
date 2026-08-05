@@ -3,11 +3,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
-LIB_MIRROR="$ROOT/codex/uberdev-codex/lib/child-dispatch.sh"
 CONTRACT="$ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
-CONTRACT_MIRROR="$ROOT/codex/uberdev-codex/shared/phase1-reviewer-output-v1.md"
 FINDINGS_AGENT="$ROOT/plugins/uberdev/agents/findings-to-issues.md"
-FINDINGS_AGENT_MIRROR="$ROOT/codex/uberdev-codex/agents/findings-to-issues.md"
 
 python3 -I -B - "$TREE" <<'PY'
 import json,sys
@@ -92,13 +89,9 @@ PY
 
 grep -q '^uberdev_preflight_child_batch()' "$LIB"
 grep -q '^uberdev_unwind_child()' "$LIB"
-# Generated Codex mirrors are verified by the dedicated generation/drift suite.
-# This source contract test intentionally remains runnable before regeneration.
-cmp "$CONTRACT" "$CONTRACT_MIRROR"
-
 python3 -I -B - \
-  "$LIB" "$LIB_MIRROR" "$CONTRACT" "$CONTRACT_MIRROR" \
-  "$FINDINGS_AGENT" "$FINDINGS_AGENT_MIRROR" <<'PY'
+  "$LIB" "$CONTRACT" \
+  "$FINDINGS_AGENT" <<'PY'
 import contextlib
 import errno
 import io
@@ -107,17 +100,13 @@ import pathlib
 import sys
 import tempfile
 
-lib_path,lib_mirror_path,contract_path,contract_mirror_path,*agent_paths=sys.argv[1:]
+lib_path,contract_path,*agent_paths=sys.argv[1:]
 lib=pathlib.Path(lib_path).read_text()
-lib_mirror=pathlib.Path(lib_mirror_path).read_text()
 contract=pathlib.Path(contract_path).read_text()
-contract_mirror=pathlib.Path(contract_mirror_path).read_text()
 failures=[]
 
-if "def safe_existing(" in lib or "def safe_existing(" in lib_mirror:
+if "def safe_existing(" in lib:
     failures.append("unused safe_existing helper remains")
-if contract != contract_mirror:
-    failures.append("reviewer contract mirrors drift")
 if "`` -?:,[]{}#&*!|>@` ``; contain" not in contract:
     failures.append("literal-backtick grammar does not use a safe code-span delimiter")
 

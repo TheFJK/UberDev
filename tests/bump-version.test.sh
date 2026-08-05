@@ -4,7 +4,7 @@
 #
 # bump-version.sh is the one-command release ritual: it propagates a new
 # SemVer to EVERY CI-locked version surface — plugin.json, marketplace.json,
-# the Codex plugin manifest, the README version badge, a dated CHANGELOG
+# the README version badge, a dated CHANGELOG
 # section stub, plus the two
 # `assert_version_bump` call-site args and the two cosmetic version echo
 # headers in tests/goal.test.sh / tests/solve-claim.test.sh — refuses on
@@ -21,7 +21,7 @@
 # Sections:
 #   B1 — structural: shebang, surfaces named, --repo-root documented, no
 #        non-portable in-place sed flag (edits go through tempfile copy-back)
-#   B2 — happy bump: all 9 anchors updated, dated CHANGELOG stub inserted,
+#   B2 — happy bump: all 8 anchors updated, dated CHANGELOG stub inserted,
 #        ritual checklist printed, git/gh never invoked
 #   B3 — idempotent: re-run with the same target is a byte-identical no-op
 #   B4 — manifest drift refusal: disagreeing marketplace.json -> exit 3,
@@ -154,7 +154,7 @@ done
 make_fixture() {
   local ver="$1" prev="${2:-1.2.2}" root
   root="$(mktemp -d)"
-  mkdir -p "$root/plugins/uberdev/.claude-plugin" "$root/.claude-plugin" "$root/codex/uberdev-codex/.codex-plugin" "$root/tests"
+  mkdir -p "$root/plugins/uberdev/.claude-plugin" "$root/.claude-plugin" "$root/tests"
   cat > "$root/plugins/uberdev/.claude-plugin/plugin.json" <<EOF
 {
   "name": "uberdev",
@@ -173,13 +173,6 @@ EOF
       "category": "workflow"
     }
   ]
-}
-EOF
-  cat > "$root/codex/uberdev-codex/.codex-plugin/plugin.json" <<EOF
-{
-  "name": "uberdev-codex",
-  "version": "$ver",
-  "license": "MIT"
 }
 EOF
   cat > "$root/README.md" <<EOF
@@ -223,7 +216,6 @@ fixture_cksums() {
   cksum \
     "$root/plugins/uberdev/.claude-plugin/plugin.json" \
     "$root/.claude-plugin/marketplace.json" \
-    "$root/codex/uberdev-codex/.codex-plugin/plugin.json" \
     "$root/README.md" \
     "$root/CHANGELOG.md" \
     "$root/tests/goal.test.sh" \
@@ -248,7 +240,6 @@ assert_grep "$BUMP_SH" 'plugins/uberdev/\.claude-plugin/plugin\.json' "B1.2 name
 assert_grep "$BUMP_SH" '\.claude-plugin/marketplace\.json' "B1.3 names marketplace.json"
 assert_grep "$BUMP_SH" 'README\.md' "B1.4 names README.md"
 assert_grep "$BUMP_SH" 'CHANGELOG\.md' "B1.5 names CHANGELOG.md"
-assert_grep "$BUMP_SH" 'codex/uberdev-codex/\.codex-plugin/plugin\.json' "B1.5b names Codex plugin manifest"
 assert_grep "$BUMP_SH" 'tests/goal\.test\.sh' "B1.6 names tests/goal.test.sh"
 assert_grep "$BUMP_SH" 'tests/solve-claim\.test\.sh' "B1.7 names tests/solve-claim.test.sh"
 assert_grep "$BUMP_SH" '\-\-repo-root' "B1.8 documents --repo-root"
@@ -262,13 +253,12 @@ assert_grep_not "$BUMP_SH" 'sed[[:space:]]+-i' "B1.10 no non-portable in-place s
 assert_grep_not "$BUMP_SH" 'mapfile|readarray|declare -A' "B1.11 bash-3.2-safe (no mapfile/readarray/declare -A)"
 
 echo
-echo "== B2: happy bump 1.2.3 -> 1.3.0 updates all 9 anchors =="
+echo "== B2: happy bump 1.2.3 -> 1.3.0 updates all 8 anchors =="
 FIX="$(make_fixture 1.2.3)"
 run_bump "$FIX" 1.3.0
 assert_rc 0 "B2.1 bump exits 0"
 assert_grep "$FIX/plugins/uberdev/.claude-plugin/plugin.json" '"version": "1\.3\.0"' "B2.2 plugin.json bumped"
 assert_grep "$FIX/.claude-plugin/marketplace.json" '"version": "1\.3\.0"' "B2.3 marketplace.json bumped"
-assert_grep "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json" '"version": "1\.3\.0"' "B2.3b Codex plugin.json bumped"
 assert_grep "$FIX/README.md" 'version-1\.3\.0-blue' "B2.4 README badge bumped"
 assert_grep_not "$FIX/README.md" 'version-1\.2\.3-blue' "B2.5 old README badge gone"
 assert_eq "$(changelog_top_header "$FIX" | cut -c1-10)" "## [1.3.0]" "B2.6 CHANGELOG topmost section is the new version"
@@ -324,19 +314,14 @@ assert_eq "$AFTER" "$BEFORE" "B4.3 refusal edits NOTHING (no half-bump)"
 assert_grep_not "$FIX/CHANGELOG.md" '^## \[1\.3\.0\]' "B4.4 no CHANGELOG stub inserted on refusal"
 
 echo
-echo "== B4b: manifest drift refusal (Codex plugin.json disagrees) =="
-FIX="$(make_fixture 1.2.3)"
-sed 's/"version": "1\.2\.3"/"version": "9.9.9"/' "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json" > "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json.tmp"
-cat "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json.tmp" > "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json"
-rm -f "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json.tmp"
-BEFORE="$(fixture_cksums "$FIX")"
-run_bump "$FIX" 1.3.0
-assert_rc 3 "B4b.1 Codex manifest drift refusal exits 3"
-assert_out 'Codex plugin\.json' "B4b.2 refusal names the drifted Codex surface"
-AFTER="$(fixture_cksums "$FIX")"
-assert_eq "$AFTER" "$BEFORE" "B4b.3 refusal edits NOTHING (no half-bump)"
+# B4b IS RETIRED, not silently dropped. It drove the drift pre-check through
+# codex/uberdev-codex/.codex-plugin/plugin.json, a surface bump-version.sh no
+# longer owns (issue #381 retired the Codex distribution). The manifest-drift
+# refusal it exercised is still covered by B4 (marketplace.json) against a
+# surface that still exists; re-seeding it on a deleted file would assert a
+# refusal nothing can trigger. Restore an equivalent case if a third manifest
+# surface is ever added.
 
-echo
 echo "== B5: test-lock drift refusal (assert_version_bump arg disagrees) =="
 FIX="$(make_fixture 1.2.3)"
 sed 's/assert_version_bump "$REPO_ROOT" "1.2.3"/assert_version_bump "$REPO_ROOT" "0.0.1"/' "$FIX/tests/goal.test.sh" > "$FIX/tests/goal.test.sh.tmp"
@@ -391,8 +376,6 @@ FIX="$(mktemp -d)"
 mkdir -p "$FIX/plugins/uberdev/.claude-plugin" "$FIX/.claude-plugin" "$FIX/tests"
 cp "$REPO_ROOT/plugins/uberdev/.claude-plugin/plugin.json" "$FIX/plugins/uberdev/.claude-plugin/plugin.json"
 cp "$REPO_ROOT/.claude-plugin/marketplace.json" "$FIX/.claude-plugin/marketplace.json"
-mkdir -p "$FIX/codex/uberdev-codex/.codex-plugin"
-cp "$REPO_ROOT/codex/uberdev-codex/.codex-plugin/plugin.json" "$FIX/codex/uberdev-codex/.codex-plugin/plugin.json"
 cp "$REPO_ROOT/README.md" "$FIX/README.md"
 cp "$REPO_ROOT/CHANGELOG.md" "$FIX/CHANGELOG.md"
 cp "$REPO_ROOT/tests/goal.test.sh" "$FIX/tests/goal.test.sh"

@@ -8,7 +8,7 @@
 #
 #   C1 — the extractor's own self-test passes (it is a producer too, and a
 #        producer with no oracle is exactly the hole #361 fell through).
-#   C2 — the live scan of plugins/uberdev/** + codex/uberdev-codex/** finds
+#   C2 — the live scan of plugins/uberdev/** finds
 #        every registered contract at its registered site count and every site
 #        agrees after its declared deltas are applied.
 #   C3 — the guard is not vacuous: a mutation at ONE site must red. C3 proves
@@ -48,7 +48,7 @@ if [ ! -r "$GUARD" ]; then
 fi
 
 # Windows Git Bash ships `python`, not `python3`; ubuntu-latest ships both.
-# Mirrors the resolver in tests/dispatch-codex.test.sh:40-44.
+# Mirrors the portable interpreter resolver used across the suite.
 if PY="$(command -v python3 2>/dev/null)" && [ -n "$PY" ]; then
   :
 elif PY="$(command -v python 2>/dev/null)" && [ -n "$PY" ]; then
@@ -87,14 +87,13 @@ else
 fi
 
 echo "== C3: the guard is not vacuous — a one-sided edit must red =="
-# Copy only the two scanned trees, mutate ONE member at ONE site, and assert the
+# Copy the scanned tree, mutate ONE member at ONE site, and assert the
 # scan turns red. Without this, a future refactor that quietly stopped finding
 # markers would keep reporting green (the tests/component-token-schema.py
 # failure mode #370 records: a guard that sits in CI and covers nothing).
 MUT="$TMP/mutant"
-mkdir -p "$MUT/plugins" "$MUT/codex" "$MUT/tests"
+mkdir -p "$MUT/plugins" "$MUT/tests"
 cp -R "$REPO_ROOT/plugins/uberdev" "$MUT/plugins/uberdev"
-cp -R "$REPO_ROOT/codex/uberdev-codex" "$MUT/codex/uberdev-codex"
 cp "$GUARD" "$MUT/tests/contract_markers.py"
 
 "$PY" -I -B - "$MUT/plugins/uberdev/lib/status.sh" <<'PY'
@@ -128,15 +127,14 @@ else
 fi
 
 # assert_mutation_reds LABEL FILE PY_OLD PY_NEW GREP_A GREP_B
-# Copies both trees, applies one literal substitution, and requires the scan to
+# Copies the scanned tree, applies one literal substitution, and requires the scan to
 # red AND to name both grep terms. Each case gets its own copy so one mutation
 # cannot mask another.
 assert_mutation_reds() {
   local label="$1" target="$2" old="$3" new="$4" needle_a="$5" needle_b="$6"
   local mut="$TMP/mutant-$label"
-  mkdir -p "$mut/plugins" "$mut/codex" "$mut/tests"
+  mkdir -p "$mut/plugins" "$mut/tests"
   cp -R "$REPO_ROOT/plugins/uberdev" "$mut/plugins/uberdev"
-  cp -R "$REPO_ROOT/codex/uberdev-codex" "$mut/codex/uberdev-codex"
   cp "$GUARD" "$mut/tests/contract_markers.py"
   if ! OLD="$old" NEW="$new" "$PY" -I -B - "$mut/plugins/uberdev/$target" <<'PY'
 import os, sys, pathlib

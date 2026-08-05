@@ -30,11 +30,6 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
-codex_helper = root / "codex/uberdev-codex/lib/code_fixer_contract.py"
-assert helper_path.read_bytes() == codex_helper.read_bytes(), (
-    "generated Codex helper drifted from the authoritative plugin source"
-)
-
 workflow = (root / ".github/workflows/test.yml").read_text(encoding="utf-8")
 windows_job_match = re.search(
     r"(?ms)^  shape-checks-windows:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow

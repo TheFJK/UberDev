@@ -436,8 +436,7 @@ fi
 echo
 echo "== run manifest: native Windows filesystem routing ignores mutable owner-depth models =="
 
-if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
-    "$REPO_ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
 import importlib.util,pathlib,sys,tempfile
 from unittest import mock
 

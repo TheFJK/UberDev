@@ -4,6 +4,52 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Removed
+
+- **BREAKING — the Codex CLI distribution is retired** (#381). The entire `codex/`
+  tree (225 files: the `uberdev-codex` native plugin, the 44 `codex/agents/*.toml`
+  subagents, `install-codex.sh`, and `codex/tools/`) is deleted, along with
+  `.agents/plugins/marketplace.json` and
+  `skills/using-uberdev/references/codex-tools.md`. It was generated output —
+  `codex/README.md` documented six idempotent regeneration commands and the `lib`
+  trees were byte-identical to `plugins/uberdev/lib` — so nothing unique was lost,
+  but UberDev no longer installs into the OpenAI Codex CLI at all.
+
+  **The `codex` DISPATCH BACKEND is unaffected.** `--backend=codex` still exists in
+  `plugins/uberdev/lib/dispatch.sh` and still spawns `codex exec` sessions from a
+  Claude Code host. What is gone is the *port* — running UberDev's own commands
+  inside a Codex session.
+
+  **Uninstalling an existing Codex install.** These are the three artifacts the
+  installer wrote; remove them by hand:
+
+  ```bash
+  rm -rf ~/.codex/plugins/uberdev-codex
+  rm -f ~/.codex/agents/uberdev-*.toml
+  # then edit ~/.codex/AGENTS.md and delete the uberdev-codex-primer block
+  ```
+
+  Also run `codex plugin marketplace remove prkit` / `uberdev` if you added the
+  Codex-native marketplace entry.
+
+### Changed
+
+- `lib/bump-version.sh` and `skills/merge-pipeline/lib/release-anchor.sh` now own
+  **six** version surfaces, not seven — `codex/uberdev-codex/.codex-plugin/plugin.json`
+  is gone. `tests/merge.test.sh` M98.ssot still asserts the two lists agree.
+- `tools/prkit/` no longer emits a Codex port: the `codex` stage,
+  `manifest-codex.txt`, the four `templates/codex-*.tmpl` scaffolds and
+  `verify.sh`'s `CODEX_REQUIRED` set are removed, and the generated repo's
+  `ci.yml` drops its TOML step. RFC 0014 §14's "mandatory native Codex port"
+  clause is **superseded** — see the dated note in that RFC.
+- `tests/contract_markers.py` walks **one** tree. Mirror parity used to be
+  structural (`SCAN_ROOTS`/`MIRROR_PAIR` + `expected_total = len(paths) * 2`);
+  the guard is now "every marked site agrees *within* `plugins/uberdev/`" and the
+  path-multiset ratchet is the only structural anti-vacuity device left. The
+  module docstring states the weakening explicitly and records how to restore it.
+
 ## [0.42.9] — 2026-08-01
 
 ### Added

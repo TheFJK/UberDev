@@ -39,6 +39,6 @@ prkit_apply_rewrites() {
     s/UBERDEV/PRKIT/g;   # env vars, macros
     s/UberDev/Prkit/g;   # CamelCase product name in prose
     s/Uberdev/Prkit/g;   # sentence-case
-    s/uberdev/prkit/g;   # everything else: uberdev:, _uberdev_, uberdev-codex, uberdev-cmd-, paths, labels, files
+    s/uberdev/prkit/g;   # everything else: uberdev:, _uberdev_, uberdev-cmd-, paths, labels, files
   ' "$f"
 }

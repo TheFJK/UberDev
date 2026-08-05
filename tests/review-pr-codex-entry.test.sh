@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
-# Issue #335: the generated Codex review entrypoint must preserve its provider
-# provenance even when CODEX_HOME is absent, while rejecting explicit
-# providers that cannot satisfy the governed result contract. The canonical
-# Claude command remains provider-neutral.
+# Issue #335: the review entrypoint must reject explicit providers that cannot
+# satisfy the governed result contract, and the canonical Claude command must
+# remain provider-neutral while auto resolution lands on the transport the
+# command files actually wire.
+#
+# #381: the GENERATED Codex entrypoint half of this file is gone with the Codex
+# distribution — codex/tools/convert-commands.py no longer exists to generate
+# it and codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md no longer
+# exists to compare against. What remains is exactly the part the file's own
+# header called provider-NEUTRAL: it now drives the canonical
+# plugins/uberdev/commands/review-pr.md setup block directly.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CONVERTER="$ROOT/codex/tools/convert-commands.py"
 SOURCE="$ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_SOURCE="$ROOT/plugins/uberdev/commands/simplify.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 
-python3 "$CONVERTER" "$ROOT/plugins/uberdev/commands" "$TMP/skills" >/dev/null
-GENERATED="$TMP/skills/uberdev-cmd-review-pr/SKILL.md"
-CHECKED_IN="$ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"
-
-for skill in "$GENERATED" "$CHECKED_IN"; do
-  # shellcheck disable=SC2016 # The generated shell expression is matched literally.
-  grep -q 'UBERDEV_DISPATCH_BACKEND_REQUESTED="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-codex}"' "$skill"
-  grep -q 'export UBERDEV_DISPATCH_BACKEND_REQUESTED' "$skill"
-  grep -q 'uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND"' "$skill"
-done
+# The three generated-skill assertions here (the `:-codex` provenance pin, its
+# export, and the carrier-backend preflight call) were retired with the
+# generated Codex entrypoint they read (#381). The canonical command has never
+# carried that pin — which is exactly what the next assertion still proves.
 if grep -q 'UBERDEV_DISPATCH_BACKEND_REQUESTED=.*codex' "$SOURCE"; then
   echo "canonical Claude review command must remain provider-neutral" >&2
   exit 1
 fi
 
-for doc in "$SOURCE" "$GENERATED" "$CHECKED_IN"; do
+for doc in "$SOURCE"; do
   grep -q 'normalized, non-empty POSIX repository-relative paths' "$doc"
   grep -q 'absolute paths, traversal, dot components, backslashes, control characters, and unsafe names are rejected' "$doc"
 done
@@ -38,14 +38,11 @@ awk '
   /uberdev-executable setup=review-pr/{active=1; next}
   active && /^```/{exit}
   active{print}
-' "$GENERATED" >"$TMP/setup.sh"
-test -s "$TMP/setup.sh"
-awk '
-  /uberdev-executable setup=review-pr/{active=1; next}
-  active && /^```/{exit}
-  active{print}
 ' "$SOURCE" >"$TMP/source-setup.sh"
 test -s "$TMP/source-setup.sh"
+# One setup block now, not two: run_setup below used to source the generated
+# Codex copy, which differed from the canonical one only by the retired pin.
+cp "$TMP/source-setup.sh" "$TMP/setup.sh"
 awk '
   /uberdev-executable setup=simplify/{active=1; next}
   active && /^```/{exit}
@@ -89,16 +86,12 @@ run_setup() {
   fi
 }
 
-# CODEX_HOME is intentionally absent in both clean environments. The generated
-# Codex skill supplies the provenance signal before standalone carrier setup.
-default_result="$(run_setup "$TMP/runtime-default")"
-python3 -I -B - "$default_result" "$TMP/runtime-default" <<'PY'
-import json, sys
-value = json.loads(sys.argv[1])
-run_dir=value.pop("run_dir")
-assert run_dir==sys.argv[2],(run_dir,sys.argv[2])
-assert value == {"requested": "codex", "backend": "codex", "model": "", "timeout": "", "permissions": "", "effort": ""}, value
-PY
+# The default_result block that used to sit here asserted the GENERATED Codex
+# skill supplied `requested=codex`/`backend=codex` provenance before standalone
+# carrier setup even with CODEX_HOME absent. That provenance came from the
+# retired `:-codex` pin in a file #381 deleted; the canonical command is
+# provider-neutral by design, so there is no provenance signal left to assert.
+# Auto resolution from the canonical entry is covered below.
 
 # wezterm cannot publish the required result.md artifact for governed review
 # children, so explicit selection fails during workflow preflight. (This used to
@@ -205,19 +198,17 @@ private_result="$(
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
     RUN_ID=20260716-000002-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
     bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(json.dumps({\"run_dir\":request[\"run_dir\"],\"backend\":request[\"backend\"]},sort_keys=True))"' \
-      _ "$TMP/setup.sh" "$TMP/repo"
+      _ "$TMP/source-setup.sh" "$TMP/repo"
 )"
 python3 -I -B - "$private_result" "$PRIVATE_TMP" <<'PY'
 import json,os,stat,sys
 value=json.loads(sys.argv[1]); expected=os.path.join(sys.argv[2],f'uberdev-{os.geteuid()}')
-# Stays 'codex' after #381: this fixture sources the CODEX PORT ($GENERATED),
-# whose entry pins UBERDEV_DISPATCH_BACKEND_REQUESTED=codex by construction —
-# a Codex session has no Claude Workflow tool to mandate. Only the canonical
-# provider-neutral Claude entry ($SOURCE / source-setup.sh) resolves workflow.
-assert value=={'backend':'codex','run_dir':expected},value
+# 'workflow' after #381: the canonical provider-neutral Claude entry is the only
+# entry left, and `auto` resolves the transport the command files actually wire.
+assert value=={'backend':'workflow','run_dir':expected},value
 entry=os.lstat(expected)
 assert stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode)
 assert entry.st_uid==os.geteuid() and stat.S_IMODE(entry.st_mode)==0o700
 PY
 
-echo "review-pr Codex entrypoint tests passed"
+echo "review-pr canonical entrypoint tests passed"

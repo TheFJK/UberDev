@@ -30,8 +30,6 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STATUS_LIB="$REPO_ROOT/plugins/uberdev/lib/status.sh"
 STATUS_CMD="$REPO_ROOT/plugins/uberdev/commands/status.md"
-CODEX_LIB="$REPO_ROOT/codex/uberdev-codex/lib/status.sh"
-CODEX_SKILL="$REPO_ROOT/codex/uberdev-codex/skills/uberdev-cmd-status/SKILL.md"
 
 for f in "$STATUS_LIB" "$STATUS_CMD"; do
   if [ ! -r "$f" ]; then
@@ -299,19 +297,10 @@ assert_not_in "$CODE_ONLY" \
   '(^|[^_[:alnum:]])(path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv)=' \
   "S1.17 no local shadows a zsh tied/special parameter (zsh's \`path\` IS \$PATH)"
 
-# ===========================================================================
-echo "== S2: codex mirror parity =="
-# ===========================================================================
-if [ -r "$CODEX_LIB" ] && cmp -s "$STATUS_LIB" "$CODEX_LIB"; then
-  pass "S2.1 codex/uberdev-codex/lib/status.sh is a byte-identical mirror"
-else
-  fail "S2.1 codex/uberdev-codex/lib/status.sh is a byte-identical mirror"
-fi
-if [ -r "$CODEX_SKILL" ]; then
-  pass "S2.2 codex uberdev-cmd-status skill is generated"
-else
-  fail "S2.2 codex uberdev-cmd-status skill is generated"
-fi
+# S2 IS RETIRED with the tree it compared: S2.1 required
+# codex/uberdev-codex/lib/status.sh to be a byte-identical mirror of
+# lib/status.sh and S2.2 required the generated uberdev-cmd-status skill. Issue
+# #381 deleted both. There is no second copy left to drift.
 
 # ===========================================================================
 echo "== S3: root discovery — BOTH roots present =="

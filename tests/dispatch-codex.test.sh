@@ -14,13 +14,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 GOAL_LIB="$REPO_ROOT/plugins/uberdev/lib/goal-state.sh"
 LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
-PLUGIN_HOOKS="$REPO_ROOT/codex/uberdev-codex/hooks/hooks.json"
-PLUGIN_ROOT="$REPO_ROOT/codex/uberdev-codex"
-CODEX_DISPATCH_LIB="$PLUGIN_ROOT/lib/dispatch.sh"
 AGENT_DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh"
-CODEX_AGENT_DISPATCH_LIB="$PLUGIN_ROOT/lib/agent-dispatch.sh"
-CODEX_GOAL_LIB="$PLUGIN_ROOT/lib/goal-state.sh"
-CODEX_CONFIG_LIB="$PLUGIN_ROOT/lib/config-read.sh"
 WORKTREE_RECEIPTS="$REPO_ROOT/plugins/uberdev/lib/worktree_receipts.py"
 
 grep -Fq 'child-receipts.py:is_link_or_reparse' "$DISPATCH_LIB" || {
@@ -171,7 +165,7 @@ retire_preserved_fixture() {
     _ "$DISPATCH_LIB" "$1" "$2" "$3" "$4" "$5"
 }
 
-for receipt_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
+for receipt_dispatch_mirror in "$DISPATCH_LIB"; do
   assert_grep "$receipt_dispatch_mirror" \
     '_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts\.py' \
     "worktree receipt lifecycle uses the absolute sibling helper ($(basename "$(dirname "$(dirname "$receipt_dispatch_mirror")")"))"
@@ -352,7 +346,7 @@ fi
 
 echo "== Native receipt helper preserves authority spelling =="
 NATIVE_AUTHORITY_TMP="$(mktemp -d)"
-for receipt_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
+for receipt_dispatch_mirror in "$DISPATCH_LIB"; do
   mirror_name="$(basename "$(dirname "$(dirname "$receipt_dispatch_mirror")")")"
   native_authority_args="$NATIVE_AUTHORITY_TMP/$mirror_name.args"
   native_authority_conversions="$NATIVE_AUTHORITY_TMP/$mirror_name.conversions"
@@ -438,7 +432,7 @@ PY
 done
 rm -rf "$NATIVE_AUTHORITY_TMP"
 
-for codex_dispatch_mirror in "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; do
+for codex_dispatch_mirror in "$DISPATCH_LIB"; do
   if grep -Fq '${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"}' \
       <<<"$(extract_function_body _uberdev_dispatch_codex "$codex_dispatch_mirror")"; then
     pass_msg "Codex optional turbo env is safe under Bash 3.2 nounset ($(basename "$(dirname "$(dirname "$codex_dispatch_mirror")")"))"
@@ -2774,140 +2768,21 @@ else
 fi
 rm -rf "$CALLER_TMP"
 
-echo "== Codex packaged runtime mirrors source libs =="
-if cmp -s "$DISPATCH_LIB" "$CODEX_DISPATCH_LIB"; then
-  pass_msg "packaged Codex dispatch.sh is byte-identical to source runtime lib"
-else
-  fail_msg "packaged Codex dispatch.sh drifted from source runtime lib"
-fi
-if cmp -s "$AGENT_DISPATCH_LIB" "$CODEX_AGENT_DISPATCH_LIB"; then
-  pass_msg "packaged Codex agent-dispatch.sh is byte-identical to source runtime lib"
-else
-  fail_msg "packaged Codex agent-dispatch.sh drifted from source runtime lib"
-fi
-if cmp -s "$GOAL_LIB" "$CODEX_GOAL_LIB"; then
-  pass_msg "packaged Codex goal-state.sh is byte-identical to source runtime lib"
-else
-  fail_msg "packaged Codex goal-state.sh drifted from source runtime lib"
-fi
-if [ -r "$CODEX_CONFIG_LIB" ]; then
-  pass_msg "packaged Codex config-read.sh exists for workflow-args runtime"
-else
-  fail_msg "packaged Codex config-read.sh missing"
-fi
-# #341: skills/merge-pipeline/lib/discover.sh joins this byte-lock. A bare `cmp`
-# is the correct assertion for it because codex/tools/port-skill.sh applies zero
-# transform to this file today -- the M2 guard below is what keeps that premise
-# honest. Deliberately no `[ -r ]` readability short-circuit: `cmp -s` exits 2 on
-# a missing file, so deleting a mirror must stay red rather than pass vacuously.
-for relative in lib/config-read.sh lib/model_routing.py lib/run_manifest.py lib/live-semaphore.sh \
-                policy/model-routing-v1.json skills/merge-pipeline/lib/discover.sh \
-                skills/merge-pipeline/lib/release-anchor.sh; do
-  if cmp -s "$REPO_ROOT/plugins/uberdev/$relative" "$PLUGIN_ROOT/$relative"; then
-    pass_msg "packaged Codex $relative is byte-identical to canonical runtime"
-  else
-    fail_msg "packaged Codex $relative drifted from canonical runtime"
-  fi
-done
-
-# #341: the byte-lock above is the correct assertion only while
-# codex/tools/port-skill.sh (14 sed rules, plus the trailing-whitespace strip in
-# its Python pass) has nothing to rewrite in this file. If discover.sh ever gains
-# one of these tokens the packaged mirror will LEGITIMATELY differ and the cmp
-# turns into a mystery red -- name the real cause instead of leaving a bare
-# "drifted". Every token is single-quoted on purpose: PLUGIN_ROOT is a live
-# variable in this file, so a double-quoted pattern would expand and never match.
-# grep -F keeps BRE/ERE brace escaping out of the comparison (GNU vs BSD grep).
-# The trailing-whitespace probe strips CR first: nothing pins line endings (no
-# .gitattributes), and under a CRLF checkout `[[:blank:]]$` would match the CR
-# instead of the space and go blind on the Windows job alone. No-op without CR.
-for canonical_rel in discover.sh release-anchor.sh; do
-  CANONICAL_MERGE_LIB="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/$canonical_rel"
-  if grep -Fq \
-       -e 'CLAUDE_PLUGIN_ROOT' \
-       -e '${PLUGIN_ROOT}/' \
-       -e '$PLUGIN_ROOT/' \
-       -e '${HOME}/.claude/plugins' \
-       -e '${HOME}/.cursor/plugins' \
-       -e '../_shared/' \
-       -e '.claude/uberdev.local.md' \
-       -e '~/.claude' \
-       "$CANONICAL_MERGE_LIB" ||
-     grep -q '[[:blank:]]$' <<<"$(tr -d '\r' < "$CANONICAL_MERGE_LIB")"; then
-    fail_msg "canonical merge-pipeline/lib/$canonical_rel left the port-skill no-transform envelope; the byte-lock above is no longer valid" \
-             "regenerate with codex/tools/port-skill.sh and replace the cmp with a regeneration diff"
-  else
-    pass_msg "canonical merge-pipeline/lib/$canonical_rel is inside the port-skill no-transform envelope (byte-lock stays valid)"
-  fi
-done
-
-# #341: cmp is depth-blind -- it passes even if BOTH copies move to a wrong
-# nesting depth. discover.sh resolves its own plugin root by hopping ../../..
-# from its sourced path; _uberdev_review_verdict_python then importlib-loads
-# <root>/lib/run_manifest.py and fails CLOSED to INDETERMINATE (SystemExit 2)
-# when that load fails, which would make every Codex-backend /merge and /goal
-# permanently INDETERMINATE with no test signal. merge-discovery-resilience.test.sh
-# builds this fixture shape but pins its LIB to the plugins/uberdev copy, so the
-# Codex layout is never the subject. Source in a subshell (discover.sh sets a
-# re-source guard and defines ~40 functions), `cd /` first so the resolution is
-# proven source-path-relative rather than cwd-relative, and normalise both sides
-# through `cd ... && pwd -P` because REPO_ROOT above uses a plain `pwd`.
-# This block sits inside one of the file's `set -e` regions, so both probes must
-# absorb their own non-zero exit into the empty string -- a bare `VAR="$(...)"`
-# assignment adopts the substitution's status and would abort the whole run
-# before fail_msg ever prints (observed: a gutted mirror truncated the run at
-# this line instead of reporting). The emptiness is not swallowed; it is exactly
-# what the assertion below reports as `resolved=<empty>`.
-CODEX_DISCOVER_LIB="$PLUGIN_ROOT/skills/merge-pipeline/lib/discover.sh"
-DISCOVER_ROOT="$(
-  LIB_PATH="$CODEX_DISCOVER_LIB" bash -c '
-    cd / || exit 1
-    . "$LIB_PATH" >/dev/null 2>&1 || exit 1
-    cd "${_UBERDEV_MERGE_DISCOVER_PLUGIN_ROOT:-/nonexistent}" 2>/dev/null || exit 1
-    pwd -P
-  '
-)" || DISCOVER_ROOT=''
-EXPECTED_DISCOVER_ROOT="$(cd "$PLUGIN_ROOT" 2>/dev/null && pwd -P)" || EXPECTED_DISCOVER_ROOT=''
-if [ -n "$DISCOVER_ROOT" ] && [ "$DISCOVER_ROOT" = "$EXPECTED_DISCOVER_ROOT" ] &&
-   [ -r "$DISCOVER_ROOT/lib/run_manifest.py" ]; then
-  pass_msg "packaged Codex discover.sh resolves its own runtime root to the Codex plugin root with run_manifest.py importable"
-else
-  fail_msg "packaged Codex discover.sh runtime-root hop is broken (verdict reader would fail closed to INDETERMINATE)" \
-           "resolved=${DISCOVER_ROOT:-<empty>} expected=$EXPECTED_DISCOVER_ROOT"
-fi
-
-PACKAGE_TMP="$(mktemp -d)"
-cp -R "$PLUGIN_ROOT" "$PACKAGE_TMP/uberdev-codex"
-mkdir -p "$PACKAGE_TMP/home" "$PACKAGE_TMP/codex-home" "$PACKAGE_TMP/outside"
-PACKAGE_SMOKE_LOG="$PACKAGE_TMP/smoke.log"
-if HOME="$PACKAGE_TMP/home" CODEX_HOME="$PACKAGE_TMP/codex-home" PWD="$PACKAGE_TMP" \
-  REPO_SENTINEL="$REPO_ROOT" PACKAGE_COPY="$PACKAGE_TMP/uberdev-codex" OUTSIDE_DIR="$PACKAGE_TMP/outside" \
-  INHERIT_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"inherit"}' \
-  ADAPTIVE_REQUEST='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' \
-  bash -c '
-    set -euo pipefail
-    cd "$OUTSIDE_DIR"
-    . "$PACKAGE_COPY/lib/dispatch.sh"
-    command -v uberdev_read_model_routing >/dev/null
-    uberdev_read_model_routing
-    [ "$UBERDEV_ROUTING_MODE" = inherit ]
-    inherit=$(uberdev_agent_resolve_request "$INHERIT_REQUEST")
-    adaptive=$(uberdev_agent_resolve_request "$ADAPTIVE_REQUEST")
-    python3 -I - "$inherit" "$adaptive" "$PACKAGE_COPY" "$REPO_SENTINEL" <<'''PY'''
-import json, pathlib, sys
-inherit, adaptive = map(json.loads, sys.argv[1:3])
-assert inherit["model"] is None and inherit["reasoning_effort"] is None
-assert adaptive["logical_route"] == "frontier" and adaptive["reasoning_effort"] == "max"
-package, repo = map(pathlib.Path, sys.argv[3:5])
-assert package.resolve() != repo.resolve()
-PY
-    case "$_UBERDEV_AGENT_ROUTER:$_UBERDEV_AGENT_POLICY:$_UBERDEV_AGENT_MANIFEST_TOOL" in *"$REPO_SENTINEL"*) exit 9 ;; esac
-  ' >"$PACKAGE_SMOKE_LOG" 2>&1; then
-  pass_msg "clean copied Codex package is a self-contained routing runtime"
-else
-  fail_msg "clean copied Codex package is a self-contained routing runtime" "$(tail -20 "$PACKAGE_SMOKE_LOG")"
-fi
-rm -rf "$PACKAGE_TMP"
+# THE "Codex packaged runtime mirrors source libs" SECTION IS RETIRED WITH THE
+# TREE IT COMPARED (issue #381). It byte-locked codex/uberdev-codex/lib/{dispatch,
+# agent-dispatch,goal-state,config-read,model_routing,run_manifest,live-semaphore}
+# and skills/merge-pipeline/lib/{discover,release-anchor} against the canonical
+# plugins/uberdev copies, checked the port-skill no-transform envelope those
+# byte-locks depended on, proved the packaged discover.sh resolved its own root
+# by hopping ../../.., and smoke-ran a relocated copy of the package as a
+# self-contained routing runtime. None of those files exist any more. The
+# `codex` DISPATCH BACKEND below is untouched: it lives in
+# plugins/uberdev/lib/dispatch.sh and is still selectable.
+#
+# The relocated-copy property that mattered — dispatch.sh works when sourced from
+# a plugin root that is not this repo — is still asserted by
+# tests/child-dispatch.test.sh's installed-package smoke, which was retargeted at
+# a copy of plugins/uberdev in the same commit.
 
 echo "== Enum + probe =="
 assert_grep "$DISPATCH_LIB" \
@@ -3880,17 +3755,10 @@ else
 fi
 rm -rf "$RACE_TMP"
 
-echo "== Codex plugin package is self-contained =="
-if [ -r "$PLUGIN_ROOT/lib/dispatch.sh" ] && [ -r "$PLUGIN_ROOT/lib/solve-launcher.sh" ] && [ -x "$PLUGIN_ROOT/hooks/session-start" ]; then
-  echo "  PASS  Codex plugin bundles runtime lib and executable session-start hook"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  Codex plugin missing runtime lib or executable session-start hook"; FAIL=$((FAIL + 1))
-fi
-if grep -q '\${PLUGIN_ROOT}/hooks/session-start' "$PLUGIN_HOOKS"; then
-  echo "  PASS  Codex hook points at plugin-local session-start"; PASS=$((PASS + 1))
-else
-  echo "  FAIL  Codex hook does not point at plugin-local session-start"; FAIL=$((FAIL + 1))
-fi
+# THE "Codex plugin package is self-contained" SECTION IS RETIRED: it required
+# codex/uberdev-codex to bundle lib/dispatch.sh, lib/solve-launcher.sh and an
+# executable hooks/session-start, and required hooks.json to point at the
+# plugin-local hook. Issue #381 deleted that package.
 
 echo ""
 echo "== Summary =="

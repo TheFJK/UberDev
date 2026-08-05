@@ -3,12 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
-PACKAGED="$ROOT/codex/uberdev-codex/lib/agent-dispatch.sh"
 DISPATCH="$ROOT/plugins/uberdev/lib/dispatch.sh"
 
 [ -r "$SOURCE" ] || { echo "missing source agent-dispatch.sh" >&2; exit 1; }
-[ -r "$PACKAGED" ] || { echo "missing packaged agent-dispatch.sh" >&2; exit 1; }
-cmp -s "$SOURCE" "$PACKAGED" || { echo "agent-dispatch runtime copies drifted" >&2; exit 1; }
 
 python3 - "$ROOT" <<'PY'
 import json, pathlib, subprocess, sys, tempfile

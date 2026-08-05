@@ -14,6 +14,22 @@ the marker itself is the durable anchor.
 
 ## 1. Context
 
+> **AMENDED 2026-08-05 (issue #381) — the two-tree clause is withdrawn.** UberDev
+> retired its Codex CLI distribution, so `codex/uberdev-codex/**` no longer exists.
+> Everywhere this RFC says the guard walks and compares BOTH trees — notably §2's
+> anti-vacuity rule 3 ("Both trees must be walked") and the mirror-parity half of
+> rule 1 — read it as ONE tree, `plugins/uberdev/**`. What that costs is stated,
+> not hidden: the guard was "every marked site agrees ACROSS two independently
+> shipped trees" and is now "every marked site agrees WITHIN one tree". The
+> cross-tree failure class is un-instantiable rather than untested, because there
+> is no second copy left to disagree with. Everything else stands: the per-contract
+> path MULTISET ratchet (now the only structural anti-vacuity device), the
+> two-site minimum, the denylist walk, the delta grammar and the `--selftest`
+> oracle. `tests/contract_markers.py`'s module docstring carries the same
+> statement plus the three-line change needed to restore two-tree comparison if a
+> second shipped tree ever returns.
+
+
 Six bugs shipped in the v0.42.x round from one shape: **one contract, two or
 more independent copies, and nothing comparing them.** #360 put the `--backend`
 enum in two whitelists and aborted every `/goal` cycle at dispatch for nine

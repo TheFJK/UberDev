@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# tools/prkit/verify.sh — prkit generation verify gate (RFC 0014 §5.6 + Codex addendum).
+# tools/prkit/verify.sh — prkit generation verify gate (RFC 0014 §5.6).
 #   verify.sh <target-repo-root>
 # Exit 0 iff the generated tree is correct. Prints each check. Covers the Claude
-# plugin (plugins/prkit) and the mandatory native Codex port (codex/).
+# plugin (plugins/prkit). RFC 0014 §14's "mandatory native Codex port" clause is
+# SUPERSEDED (2026-08-05, issue #381): the generator no longer emits a codex/
+# tree, so there is nothing left for this gate to require.
 #
 # Design invariant (issue #334 review): NO check may pass VACUOUSLY. An empty scan,
 # an errored grep (rc>=2), or a zero-file find is treated as a FAIL, never silently
@@ -82,20 +84,6 @@ CLAUDE_REQUIRED=(
   "shared/phase1-reviewer-output-v1.md"
   ".claude-plugin/plugin.json"
 )
-CODEX_REQUIRED=(
-  "codex/prkit-codex/.codex-plugin/plugin.json"
-  "codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md"
-  "codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md"
-  "codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md"
-  "codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md"
-  "codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md"
-  "codex/prkit-codex/policy/solve-run-tree-v1.json"
-  "codex/prkit-codex/lib/code_fixer_contract.py"
-  "codex/prkit-codex/shared/phase1-reviewer-output-v1.md"
-  "codex/install-codex.sh"
-  "codex/README.md"
-  "codex/AGENTS.md"
-)
 SCAFFOLD_REQUIRED=(
   "README.md"
   "LICENSE"
@@ -104,33 +92,28 @@ SCAFFOLD_REQUIRED=(
   ".gitignore"
   ".github/workflows/ci.yml"
   ".claude-plugin/marketplace.json"
-  ".agents/plugins/marketplace.json"
 )
 
 # Containment is established before the first recursive find/grep. Root trees
 # and known files must exist; a final sealed-tree walk rejects every nested
 # link, Windows reparse point, socket/FIFO/device, or other special entry.
-for tree in "plugins/prkit" "codex"; do
-  check_managed_path "$tree" required-tree \
-    || { echo "verify: unsafe/missing generated tree: $tree"; exit 2; }
-done
+check_managed_path "plugins/prkit" required-tree \
+  || { echo "verify: unsafe/missing generated tree: plugins/prkit"; exit 2; }
 for req in "${CLAUDE_REQUIRED[@]}"; do
   check_managed_path "plugins/prkit/$req" required-file \
     || { echo "verify: unsafe/missing Claude file: $req"; exit 2; }
 done
-for req in "${CODEX_REQUIRED[@]}" "${SCAFFOLD_REQUIRED[@]}"; do
+for req in "${SCAFFOLD_REQUIRED[@]}"; do
   check_managed_path "$req" required-file \
     || { echo "verify: unsafe/missing generated file: $req"; exit 2; }
 done
-for tree in "plugins/prkit" "codex"; do
-  check_managed_path "$tree" sealed-tree \
-    || { echo "verify: generated tree is not sealed: $tree"; exit 2; }
-done
+check_managed_path "plugins/prkit" sealed-tree \
+  || { echo "verify: generated tree is not sealed: plugins/prkit"; exit 2; }
 
 P="$ROOT/plugins/prkit"
-# Scan roots: the Claude plugin + the mandatory Codex port. Array
-# form keeps this space-safe for target paths like "/Volumes/FJK SSD/...".
-SCAN=("$P" "$ROOT/codex")
+# Scan root: the Claude plugin. Array form keeps this space-safe for target
+# paths like "/Volumes/FJK SSD/...".
+SCAN=("$P")
 rc=0
 fail(){ echo "  FAIL  $1"; rc=1; }
 ok(){ echo "  OK    $1"; }
@@ -147,7 +130,7 @@ else ok "non-vacuity: $SCANNED_FILES files under scan roots"; fi
 tok=$(grep -rilE 'uberdev' "${SCAN[@]}" 2>/dev/null); grc=$?
 case "$grc" in
   0) fail "token-guard: uberdev survives in:"; echo "$tok" | sed 's/^/         /' ;;
-  1) ok "token-guard: no uberdev token (plugins/prkit${SCAN[1]:+ + codex})" ;;
+  1) ok "token-guard: no uberdev token (plugins/prkit)" ;;
   *) fail "token-guard: token scan errored (grep rc=$grc) — cannot certify clean" ;;
 esac
 
@@ -216,37 +199,15 @@ else ok "syntax: python parse clean ($py_n files)"; fi
 jerr=0
 while IFS= read -r -d '' f; do jq empty "$f" 2>/dev/null || { echo "         jq failed: $f"; jerr=1; }; done < <(find "${SCAN[@]}" -name '*.json' -print0 2>/dev/null)
 [ "$jerr" -eq 0 ] && ok "syntax: jq clean" || fail "syntax: json errors"
-# TOML (Codex agents) — only when tomllib is available (py>=3.11); skip gracefully otherwise.
-if [ -d "$ROOT/codex" ]; then
-  if python3 -c 'import tomllib' 2>/dev/null; then
-    terr=0
-    while IFS= read -r -d '' f; do python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$f" 2>/dev/null || { echo "         toml parse failed: $f"; terr=1; }; done < <(find "$ROOT/codex" -name '*.toml' -print0 2>/dev/null)
-    [ "$terr" -eq 0 ] && ok "syntax: toml parse clean" || fail "syntax: toml errors"
-  else
-    ok "syntax: toml check skipped (no tomllib)"
-  fi
-fi
-
 # --- 7. Required tree shape ---
 for req in "${CLAUDE_REQUIRED[@]}"; do
   check_managed_path "plugins/prkit/$req" required-file \
     || fail "shape: missing/non-regular/link/reparse $req"
 done
 ok "shape: claude required-file presence checked"
-for req in "${CODEX_REQUIRED[@]}"; do
-  check_managed_path "$req" required-file \
-    || fail "shape: missing/non-regular/link/reparse $req"
-done
-# Coexistence: NO un-prefixed skill dir may exist in the flat Codex skills space
-# (would collide with an UberDev-for-Codex install in ~/.agents/skills/).
-for bad in post-impl-review merge-pipeline; do
-  [ -e "$ROOT/codex/prkit-codex/skills/$bad" ] && fail "shape: un-prefixed codex skill dir '$bad' would collide"
-done
-ok "shape: codex required-file presence + prkit-prefixed skills checked"
 
 # --- 7b. Standalone PR-policy integrity: strict JSON, closed PR-phase closure,
-# shipped provider roles/workflows/contracts, deterministic serialization, and
-# byte equality across Claude/Codex. Native Codex roles stay edge-local. ---
+# shipped provider roles/workflows/contracts, deterministic serialization. ---
 if python3 -I -B - "$ROOT" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
@@ -305,13 +266,7 @@ fixer_route_posture={
 }
 
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
-codex_roles={
-    path.name.removeprefix('prkit-').removesuffix('.toml')
-    for path in (root/'codex/agents').glob('prkit-*.toml')
-}
 assert claude_roles==expected_roles, ('claude role fleet',sorted(claude_roles))
-assert codex_roles==expected_roles, ('codex role fleet',sorted(codex_roles))
-assert claude_roles==codex_roles
 shipped_roles=claude_roles
 
 def reject_pairs(pairs):
@@ -388,29 +343,9 @@ def validate(plugin):
         assert row['required_inputs'].get('changed_paths')=='repo_path_array'
     return raw,(plugin/contract_rel).read_text()
 claude_policy,claude_contract=validate(root/'plugins/prkit')
-codex_plugin=root/'codex/prkit-codex'
-if codex_plugin.is_dir():
-    codex_policy,codex_contract=validate(codex_plugin)
-    assert codex_policy==claude_policy
-    assert codex_contract==claude_contract
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        tomllib=None
-    if tomllib is not None:
-        for role in ('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer'):
-            data=tomllib.loads((root/f'codex/agents/prkit-{role}.toml').read_text())
-            assert codex_contract not in data['developer_instructions'], role
 PY
-then ok "PR-policy: strict deterministic closure, shipped roles/workflows/contracts, runtime parity"
-else fail "PR-policy: projection, strict JSON, runtime parity, or contract scoping drift"; fi
-
-if cmp -s "$ROOT/plugins/prkit/lib/code_fixer_contract.py" \
-          "$ROOT/codex/prkit-codex/lib/code_fixer_contract.py"; then
-  ok "authority-helper: Claude/Codex runtime bytes match"
-else
-  fail "authority-helper: Claude/Codex runtime bytes diverged"
-fi
+then ok "PR-policy: strict deterministic closure, shipped roles/workflows/contracts"
+else fail "PR-policy: projection, strict JSON, or contract scoping drift"; fi
 
 # --- 8. Root scaffold files (outside the SCAN roots) — present, non-empty, valid ---
 for req in "${SCAFFOLD_REQUIRED[@]}"; do
@@ -634,73 +569,12 @@ elif [ "$ignore_infrastructure_error" -eq 0 ]; then
 fi
 
 jq empty "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null || fail "scaffold: marketplace.json is not valid JSON"
-jq empty "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null || fail "scaffold: native Codex marketplace.json is not valid JSON"
-if python3 -I -B - "$ROOT/.agents/plugins/marketplace.json" "$ROOT/codex/README.md" <<'PY'
-import json
-import pathlib
-import sys
-
-marketplace_path = pathlib.Path(sys.argv[1])
-readme_path = pathlib.Path(sys.argv[2])
-
-def reject_pairs(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f'duplicate JSON key: {key}')
-        result[key] = value
-    return result
-
-try:
-    marketplace = json.loads(
-        marketplace_path.read_text(encoding='utf-8'),
-        object_pairs_hook=reject_pairs,
-        parse_constant=lambda value: (_ for _ in ()).throw(
-            ValueError(f'non-finite JSON constant: {value}')
-        ),
-    )
-    readme = readme_path.read_text(encoding='utf-8')
-except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-    raise SystemExit(f'native Codex marketplace parse failed: {exc}')
-
-expected = {
-    'name': 'prkit',
-    'interface': {'displayName': 'prkit'},
-    'plugins': [{
-        'name': 'prkit-codex',
-        'source': {
-            'source': 'local',
-            'path': './codex/prkit-codex',
-        },
-        'policy': {
-            'installation': 'AVAILABLE',
-            'authentication': 'ON_INSTALL',
-        },
-        'category': 'workflow',
-    }],
-}
-if marketplace != expected:
-    raise SystemExit('native Codex marketplace shape or values differ from the canonical contract')
-selector = f"{marketplace['plugins'][0]['name']}@{marketplace['name']}"
-if selector != 'prkit-codex@prkit':
-    raise SystemExit(f'native Codex marketplace selector mismatch: {selector}')
-expected_command = f'codex plugin add {selector}'
-plugin_add_commands = [
-    line.strip()
-    for line in readme.splitlines()
-    if line.strip().startswith('codex plugin add ')
-]
-if plugin_add_commands != [expected_command]:
-    raise SystemExit('codex README must contain exactly one canonical marketplace selector')
-PY
-then ok "scaffold: root files present; both marketplaces valid; native selector canonical"
-else fail "scaffold: native Codex marketplace schema, availability, source, or README selector drift"; fi
 
 # --- 9. No unrendered generator placeholders leaked into generated output ---
 # Generator placeholders are uppercase identifiers (for example {{VERSION}}).
 # Lowercase doubled braces are valid runtime data, including Git's ^{tree}
 # spelling inside Python f-strings (`^{{tree}}`).
-PLH=$(grep -rlE '\{\{[A-Z][A-Z0-9_]*\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" "$ROOT/.agents/plugins/marketplace.json" 2>/dev/null)
+PLH=$(grep -rlE '\{\{[A-Z][A-Z0-9_]*\}\}' "${SCAN[@]}" "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/.claude-plugin/marketplace.json" 2>/dev/null)
 placeholder_status=$?
 case "$placeholder_status" in
   0)

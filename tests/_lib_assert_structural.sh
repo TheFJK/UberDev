@@ -136,7 +136,6 @@ assert_version_bump() {
   local v="${ver//./\\.}"   # escape dots so grep -E matches them literally
   _assert_version_bump_one "$root/plugins/uberdev/.claude-plugin/plugin.json" "\"version\": \"$v\"" "version-bump: plugin.json == $ver"
   _assert_version_bump_one "$root/.claude-plugin/marketplace.json"            "\"version\": \"$v\"" "version-bump: marketplace.json == $ver"
-  _assert_version_bump_one "$root/codex/uberdev-codex/.codex-plugin/plugin.json" "\"version\": \"$v\"" "version-bump: Codex plugin.json == $ver"
   _assert_version_bump_one "$root/README.md"                                  "version-$v-blue"     "version-bump: README badge == $ver"
   _assert_version_bump_one "$root/CHANGELOG.md"                               "## \[$v\]"           "version-bump: CHANGELOG [$ver] header"
 }

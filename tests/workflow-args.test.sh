@@ -40,10 +40,9 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE_HELPER="$REPO_ROOT/plugins/uberdev/lib/config-read.sh"
-CODEX_HELPER="$REPO_ROOT/codex/uberdev-codex/lib/config-read.sh"
 HELPER="$SOURCE_HELPER"
 
-for f in "$SOURCE_HELPER" "$CODEX_HELPER"; do
+for f in "$SOURCE_HELPER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v jq >/dev/null 2>&1 || {
@@ -183,7 +182,6 @@ fi
   && pass "W2.5 happy path emits nothing on stderr" \
   || fail "W2.5 happy path emits nothing on stderr (got: $_LAST_STDERR)"
 _assert_codex_home_plugin_root "$SOURCE_HELPER" "source helper"
-_assert_codex_home_plugin_root "$CODEX_HELPER" "packaged Codex helper"
 HELPER="$SOURCE_HELPER"
 
 # ---------------------------------------------------------------------------

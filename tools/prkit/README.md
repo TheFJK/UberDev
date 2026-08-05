@@ -1,8 +1,7 @@
 # tools/prkit — the prkit generator
 
 Generates the standalone **prkit** plugin (PR phase: review → fix → simplify → land)
-from this repo's `plugins/uberdev/` (Claude Code) and `codex/uberdev-codex/` (Codex CLI)
-as the single source of truth. See `docs/rfc/0014-prkit-standalone-plugin.md`.
+from this repo's `plugins/uberdev/` (Claude Code) as the single source of truth. See `docs/rfc/0014-prkit-standalone-plugin.md`.
 
 ## Run
 
@@ -12,8 +11,7 @@ tools/prkit/generate.sh --target /path/to/prkit-repo --version 0.1.0
 
 Stages: preflight → clean `plugins/prkit/` → copy (`manifest.txt`) → rewrite
 (`rewrite.sh`: de-namespace out-of-set refs, then blanket `uberdev`→`prkit`) →
-scaffold (`templates/`) → **Codex port** (`manifest-codex.txt` → `codex/prkit-codex/`,
-same rewrite) → verify (`verify.sh`, both trees) → summary. It never commits;
+scaffold (`templates/`) → verify (`verify.sh`) → summary. It never commits;
 commit in the target repo yourself. Without `--force`, Git targets must be clean
 and every managed replacement/overwrite path must also be free of ignored,
 untracked content; the generator rechecks each path immediately before mutation.
@@ -35,15 +33,14 @@ git -C ../prkit add -A && git -C ../prkit commit -m "chore: initial prkit 0.1.0"
 | File | Role |
 |---|---|
 | `manifest.txt` | Claude copy set (count-locked at 37 by `tests/prkit-manifest.test.sh`) |
-| `manifest-codex.txt` | Codex copy set (count-locked at 56 by `tests/prkit-codex-manifest.test.sh`) |
 | `managed-path-guard.py` | Shared generator/verifier containment guard: component-wise `lstat`, Windows reparse/reserved-name checks, required postconditions, and sealed-tree scans |
 | `rewrite.sh` | `prkit_neutralize` (de-namespace out-of-set) + `prkit_apply_rewrites` (slug + blanket); sourced |
-| `templates/` | Standalone-only scaffold files (`{{VERSION}}`/`{{DATE}}`), incl. `codex-*` |
-| `verify.sh` | Anti-drift gate (both trees): token guard, out-of-set resolution, referential integrity, syntax (sh/py/json/toml), scaffold + placeholder checks. Runs at **generation time in UberDev** — it is NOT copied into the prkit repo. |
+| `templates/` | Standalone-only scaffold files (`{{VERSION}}`/`{{DATE}}`) |
+| `verify.sh` | Anti-drift gate: token guard, out-of-set resolution, referential integrity, syntax (sh/py/json), scaffold + placeholder checks. Runs at **generation time in UberDev** — it is NOT copied into the prkit repo. |
 | `generate.sh` | Orchestrator |
 
 The generated prkit repo ships its own `.github/workflows/ci.yml`, which re-checks
-the committed tree with `bash -n` + `ast.parse` + `jq empty` + `tomllib` + an inline
+the committed tree with `bash -n` + `ast.parse` + `jq empty` + an inline
 `grep -rilE 'uberdev'` namespace guard (a subset of `verify.sh`'s token-guard).
 
 ## Filesystem threat model
@@ -64,9 +61,13 @@ documentation intentionally do not claim protection against that actor.
 
 ## Adding a file to prkit
 
-1. Add its path to `manifest.txt` (Claude) or `manifest-codex.txt` (Codex), and bump
-   the count assert in the matching `tests/prkit-*-manifest.test.sh` (37 / 56).
+1. Add its path to `manifest.txt`, and bump the count assert in
+   `tests/prkit-manifest.test.sh` (37).
 2. If it introduces a new `uberdev` pattern the blanket rule misses, or a new
    out-of-set `prkit:<name>` ref, the verify gate fails generation — extend
    `rewrite.sh` (never weaken the guard).
-3. Re-run `bash tests/prkit-generate.test.sh` (+ `prkit-codex-manifest.test.sh`).
+3. Re-run `bash tests/prkit-generate.test.sh`.
+
+> The Codex port stage (`manifest-codex.txt`, `templates/codex-*`, the `codex/`
+> verify roots) was removed with the Codex distribution — issue #381. RFC 0014
+> §14's "mandatory native Codex port" is superseded; see the dated note there.

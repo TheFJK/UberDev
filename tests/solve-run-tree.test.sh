@@ -107,12 +107,9 @@ assert policy['roles']['spec-compliance-reviewer']=={
 }
 PY
 
-# The Codex policy copy is generated packaging output. Canonical policy changes
-# are verified here; dedicated generation/manifest tests own mirror drift.
-cmp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$ROOT/codex/uberdev-codex/policy/model-routing-v1.json"
-cmp "$ROOT/plugins/uberdev/lib/solve-launcher.sh" "$ROOT/codex/uberdev-codex/lib/solve-launcher.sh"
-grep -q 'finish_branch.review_pr' "$ROOT/codex/uberdev-codex/skills/finish-branch/SKILL.md"
-grep -q 'uberdev_dispatch_child' "$ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md"
+# The four Codex-mirror assertions here (policy byte-equality, launcher
+# byte-equality, and the two ported-SKILL greps) went with the Codex tree in
+# issue #381. Their Claude-tree counterparts are asserted below.
 
 for file in \
   plugins/uberdev/commands/review-pr.md \
@@ -128,13 +125,6 @@ grep -q 'context_file' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"
 grep -q 'context_sha256' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"
 grep -q 'finish_branch.review_pr' "$ROOT/plugins/uberdev/skills/finish-branch/SKILL.md"
 grep -q 'review_pr.post_impl_review' "$ROOT/plugins/uberdev/commands/review-pr.md"
-
-for mirror in \
-  codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md \
-  codex/uberdev-codex/skills/uberdev-cmd-simplify/SKILL.md; do
-  grep -q 'uberdev_dispatch_child' "$ROOT/$mirror"
-  grep -q 'uberdev_wait_child' "$ROOT/$mirror"
-done
 
 # Provider invocations in Group-C command/skill sources must use the routed
 # adapter. Historical discussion may name the legacy tool, but executable

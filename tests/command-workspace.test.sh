@@ -53,7 +53,7 @@ file_link_count() {
 # Exercise the complete no-dir-fd path on the host filesystem. Native Windows
 # runs the same production branch again through review-child-handoff's wired
 # --windows-path-only mode.
-python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" "$TMP/portable" <<'PY'
+python3 -I -B - "$HELPER" "$TMP/portable" <<'PY'
 import hashlib
 import importlib.util
 import json
@@ -65,8 +65,8 @@ import sys
 import ctypes
 
 
-module_paths = sys.argv[1:3]
-fixture_root = pathlib.Path(sys.argv[3])
+module_paths = sys.argv[1:2]
+fixture_root = pathlib.Path(sys.argv[2])
 
 
 def expect_failure(module, code, operation):
@@ -653,7 +653,7 @@ for index, module_path in enumerate(module_paths):
     )
 PY
 
-python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" <<'PY'
+python3 -I -B - "$HELPER" <<'PY'
 import importlib.util
 import pathlib
 import subprocess
@@ -1074,8 +1074,5 @@ for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/
   grep -qF 'uberdev_command_workspace_prepare' "$doc"
   ! grep -nE 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
 done
-
-# The Codex package is a checked-in runtime mirror, not an independent helper.
-cmp "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py"
 
 echo 'command-workspace: PASS'

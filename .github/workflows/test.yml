@@ -95,7 +95,6 @@ jobs:
           bash tests/review-pr-codex-six-child.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/prkit-manifest.test.sh && \
-          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
           bash tests/prkit-generate.test.sh && \
@@ -193,8 +192,7 @@ jobs:
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh && \
-          bash tests/codex-port.test.sh
+          bash tests/contract-markers.test.sh
 
   supervision-smoke-macos:
     name: supervision-smoke-macos
@@ -317,10 +315,6 @@ jobs:
         #   - prkit-generate.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
-#   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
-#                                         issue on Git Bash, same as uberscan/
-#                                         uberthink; also calls rsync which isn't
-#                                         on windows-latest's Git Bash)
 #   - status.test.sh                      (#310 fixtures drive python3 over
 #                                         mktemp -d paths, POSIX ownership
 #                                         predicates and `touch -t` mtime
@@ -343,7 +337,6 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/prkit-manifest.test.sh && \
-          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           python -I -B tests/code-fixer-contract-windows.test.py && \

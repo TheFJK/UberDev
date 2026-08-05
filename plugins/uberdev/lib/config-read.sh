@@ -610,14 +610,16 @@ _uberdev_routing_policy_file() {
       return 0
     fi
   fi
-  for candidate in \
-    "${PWD}/plugins/uberdev/policy/model-routing-v1.json" \
-    "${PWD}/codex/uberdev-codex/policy/model-routing-v1.json"; do
-    if [ -n "$candidate" ] && [ -r "$candidate" ]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
+  # In-repo development fallback. The second candidate was
+  # ${PWD}/codex/uberdev-codex/policy/model-routing-v1.json until issue #381
+  # deleted that tree; it is unreachable, not merely unused. The CODEX_HOME
+  # branch above is a different thing and stays — it resolves an INSTALLED
+  # Codex runtime, which the `codex` dispatch backend still targets.
+  candidate="${PWD}/plugins/uberdev/policy/model-routing-v1.json"
+  if [ -r "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
   return 1
 }
 

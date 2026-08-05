@@ -50,7 +50,6 @@ PERSONAS="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/personas.yaml"
 REPORT_PY="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/report.py"
 FALSIFIER="$REPO_ROOT/plugins/uberdev/agents/uberthink-falsifier.md"
 FRAME_AGENT="$REPO_ROOT/plugins/uberdev/agents/uberthink-frame.md"
-CODEX_SKILL="$REPO_ROOT/codex/uberdev-codex/skills/uberthink-pipeline/SKILL.md"
 HARNESS="$REPO_ROOT/tests/_workflow_harness.js"
 
 for f in "$SKILL" "$WORKFLOW" "$PERSONAS" "$REPORT_PY" "$FALSIFIER" "$FRAME_AGENT" "$HARNESS"; do
@@ -218,11 +217,9 @@ grep -qF 'SINGLE assistant message' "$SKILL" \
   && pass "S-5 the fallback keeps the single-message fanout invariant" \
   || fail "S-5 the fallback lost the single-message fanout invariant"
 
-if [ -r "$CODEX_SKILL" ]; then
-  pass "S-6 the codex mirror of the pipeline SKILL.md exists"
-else
-  fail "S-6 codex/uberdev-codex/skills/uberthink-pipeline/SKILL.md missing (run the port scripts)"
-fi
+# S-6 IS RETIRED: it asserted the codex mirror of this pipeline SKILL.md was
+# present. Issue #381 deleted the Codex tree, so the file it required cannot
+# exist and its absence is no longer evidence of a missed port.
 
 # ---------------------------------------------------------------------------
 # T3 behavioral fixtures — drive workflow.js under the harness stubs.

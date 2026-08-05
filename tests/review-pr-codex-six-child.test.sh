@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Issue #335 end-to-end regression: a generated Codex review entrypoint creates
-# one immutable Codex carrier and supervises the six Phase 1 reviewer children
-# without touching Claude, colliding worktrees, or leaking capacity leases.
+# Issue #335 end-to-end regression: the review entrypoint creates one immutable
+# Codex carrier and supervises the six Phase 1 reviewer children without
+# touching Claude, colliding worktrees, or leaking capacity leases.
+#
+# #381: the runtime root is now the CANONICAL Claude plugin. It used to be the
+# generated Codex tree (codex/uberdev-codex), whose only material difference at
+# this seam was two lines pinning UBERDEV_DISPATCH_BACKEND_REQUESTED=codex. That
+# tree is gone; the pin is supplied by run_case's environment instead, so the
+# subject of this file is unchanged — the `codex` dispatch backend, which still
+# lives in plugins/uberdev/lib/dispatch.sh, driven end-to-end through six
+# reviewer children.
 
 set -euo pipefail
 
@@ -498,15 +506,14 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REAL_GIT="$(command -v git)"
-RUNTIME_ROOT="${SIX_CHILD_RUNTIME_ROOT:-$ROOT/codex/uberdev-codex}"
+RUNTIME_ROOT="${SIX_CHILD_RUNTIME_ROOT:-$ROOT/plugins/uberdev}"
 RUNTIME_NAMESPACE="${SIX_CHILD_RUNTIME_NAMESPACE:-uberdev}"
 case "$RUNTIME_NAMESPACE" in
-  uberdev) COMMAND_SKILL=uberdev-cmd-review-pr; POST_SKILL_DIR=post-impl-review ;;
-  prkit) COMMAND_SKILL=prkit-cmd-review-pr; POST_SKILL_DIR=prkit-post-impl-review ;;
+  uberdev) ;;
   *) echo "unknown SIX_CHILD_RUNTIME_NAMESPACE=$RUNTIME_NAMESPACE" >&2; exit 2 ;;
 esac
-SKILL="$RUNTIME_ROOT/skills/$COMMAND_SKILL/SKILL.md"
-POST_SKILL="$RUNTIME_ROOT/skills/$POST_SKILL_DIR/SKILL.md"
+SKILL="$RUNTIME_ROOT/commands/review-pr.md"
+POST_SKILL="$RUNTIME_ROOT/skills/post-impl-review/SKILL.md"
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
@@ -1625,11 +1632,6 @@ if [ "$case_name" = 1 ]; then expected_provider_launches=13; fi
 }
 SH
 RUN_CASE_SCRIPT="$TMP/run-case.sh"
-if [ "$RUNTIME_NAMESPACE" = prkit ]; then
-  RUN_CASE_SCRIPT="$TMP/run-case-prkit.sh"
-  sed -e 's/uberdev_/prkit_/g' -e 's/UBERDEV_/PRKIT_/g' \
-    "$TMP/run-case.sh" >"$RUN_CASE_SCRIPT"
-fi
 chmod +x "$RUN_CASE_SCRIPT"
 
 # Wall-clock hang guard, in seconds, for ONE reviewer child.
@@ -1713,6 +1715,7 @@ run_case() {
     SIX_CHILD_GIT_NEGATIVE_RESULT="$runtime/unprotected-probe.result" \
     SIX_CHILD_CASE_TAG="$name" \
     PLUGIN_ROOT="$RUNTIME_ROOT" WORKTREE_ROOT="$repo" \
+    UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
     UBERDEV_TMPDIR="$runtime" PRKIT_TMPDIR="$runtime" \
     CODEX_STUB_LOG="$codex_log" CLAUDE_STUB_LOG="$claude_log" \
     CODEX_STUB_READY_DIR="$ready_dir" CODEX_STUB_RELEASE_DIR="$release_dir" \
@@ -1749,4 +1752,4 @@ case "${SIX_CHILD_CASE:-all}" in
   *) echo "unknown SIX_CHILD_CASE=$SIX_CHILD_CASE" >&2; exit 2 ;;
 esac
 
-echo "review-pr Codex six-child integration tests passed"
+echo "review-pr codex-backend six-child integration tests passed"

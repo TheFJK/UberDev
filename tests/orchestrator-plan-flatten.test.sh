@@ -10,8 +10,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ORCHESTRATOR="$ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
 PLAN_WRITER="$ROOT/plugins/uberdev/agents/plan-writer.md"
 RUN_TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
-CODEX_PLAN_WRITER="$ROOT/codex/uberdev-codex/agents/plan-writer.md"
-CODEX_ORCHESTRATOR="$ROOT/codex/uberdev-codex/skills/orchestrator/SKILL.md"
 BRAINSTORM="$ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 WRITE_PLAN="$ROOT/plugins/uberdev/skills/write-plan/SKILL.md"
 RESEARCH_CODEBASE="$ROOT/plugins/uberdev/agents/research-codebase.md"
@@ -49,7 +47,6 @@ for required in \
   "$ORCHESTRATOR" \
   "$PLAN_WRITER" \
   "$RUN_TREE" \
-  "$CODEX_PLAN_WRITER" \
   "$BRAINSTORM" \
   "$WRITE_PLAN" \
   "$RESEARCH_CODEBASE" \
@@ -1686,16 +1683,16 @@ n=$(grep -cE '^\| small \|.*\| N/A \(orchestrator bypassed\) \|' "$ORCHESTRATOR"
 assert_eq 'F8 small-tier planning research is N/A because small bypasses orchestrator' 1 "$n"
 
 printf '%s\n' '== F9 routed helper, retry identity, cleanup, and lineage contracts =='
-if python3 - "$ORCHESTRATOR" "$BRAINSTORM" "$WRITE_PLAN" "$PLAN_WRITER" "$CODEX_PLAN_WRITER" "$RUN_TREE" <<'PY'
+if python3 - "$ORCHESTRATOR" "$BRAINSTORM" "$WRITE_PLAN" "$PLAN_WRITER" "$RUN_TREE" <<'PY'
 import json
 import re
 import sys
 from pathlib import Path
 
-orchestrator, brainstorm, write_plan, plan_writer, codex_plan_writer = (
-    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:6]
+orchestrator, brainstorm, write_plan, plan_writer = (
+    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:5]
 )
-manifest=json.loads(Path(sys.argv[6]).read_text(encoding="utf-8"))
+manifest=json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
 
 for name, text in (("orchestrator", orchestrator), ("brainstorm", brainstorm)):
     if 'uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"' not in text:
@@ -1768,7 +1765,7 @@ for forbidden in ('{"issue_body_path":','"qa_answers_path":','"summary_dir":','"
 if re.search(r'uberdev_design_dispatch .*\brun\b (?![\'\"]null[\'\"])',orchestrator):
     raise SystemExit("run-scope callsite does not pass literal null")
 
-for name, text in (("canonical plan-writer", plan_writer), ("Codex plan-writer", codex_plan_writer)):
+for name, text in (("canonical plan-writer", plan_writer),):
     for forbidden in ("Task tool", "Use the **Task**", "spawn_agent", "internal research subagents", "Internally dispatches"):
         if forbidden in text:
             raise SystemExit(f"{name}: delegation prose remains: {forbidden}")
@@ -1794,13 +1791,9 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -qE 'CLAUDE_PLUGIN_ROOT|~/\.claude|\$\{PLUGIN_ROOT\}/|\$PLUGIN_ROOT/' "$CODEX_ORCHESTRATOR"; then
-  printf '%s\n' '  FAIL F9b Codex orchestrator retains a Claude or bare-root path'
-  FAIL=$((FAIL + 1))
-else
-  printf '%s\n' '  PASS F9b Codex orchestrator is porter-safe'
-  PASS=$((PASS + 1))
-fi
+# F9b IS RETIRED with the Codex orchestrator SKILL.md it scanned: it asserted the
+# ported copy carried no Claude-only or bare-root path. Issue #381 deleted that
+# copy, so there is no ported file left to be porter-unsafe.
 
 if python3 - "$ORCHESTRATOR" "$BRAINSTORM" <<'PY'
 import re

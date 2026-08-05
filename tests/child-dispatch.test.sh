@@ -932,12 +932,17 @@ rm -rf "$TMP/run/children/implementation-0001"
   "$RESULT" "$STATUS" >/dev/null 2>&1
 
 grep -q 'implementation-worker' "$ROOT/plugins/uberdev/policy/model-routing-v1.json"
-# The Codex library copy is generated packaging output. Canonical dispatcher
-# changes are exercised above; prkit generation tests own mirror drift.
-cmp "$ROOT/plugins/uberdev/lib/agent-dispatch.sh" "$ROOT/codex/uberdev-codex/lib/agent-dispatch.sh"
-cmp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$ROOT/codex/uberdev-codex/policy/model-routing-v1.json"
-cmp "$ROOT/plugins/uberdev/agents/implementation-worker.md" "$ROOT/codex/uberdev-codex/agents/implementation-worker.md"
-cp -R "$ROOT/codex/uberdev-codex" "$TMP/installed-package"
+# The three cmp lines that guarded the checked-in Codex mirror of
+# agent-dispatch.sh / model-routing-v1.json / implementation-worker.md went with
+# that mirror (issue #381). The INSTALLED-PACKAGE dispatch smoke below is
+# retargeted at plugins/uberdev rather than retired: what it proves is that
+# child-dispatch.sh works from a copied, relocated plugin root — which is still
+# how the plugin is installed.
+cp -R "$ROOT/plugins/uberdev" "$TMP/installed-package"
+# A developer checkout carries gitignored __pycache__ dirs that a shipped
+# package never has. Strip them so the no-__pycache__ postcondition below still
+# means "this dispatch run wrote no bytecode", not "the source tree was clean".
+find "$TMP/installed-package" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 BEFORE="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 python3 - "$HANDOFF" "$TMP/package-handoff.json" "$TMP/run/inputs/task.md" "$TMP/run" "$TMP/run/inputs/failure.md" <<'PY'
 import json,sys

@@ -91,21 +91,6 @@ jq '.enabledPlugins["uberdev@uberdev"] = true' \
 
 </details>
 
-### Codex CLI
-
-UberDev also installs into the [OpenAI Codex CLI](https://developers.openai.com/codex) — same workflows (brainstorm → plan → execute, TDD, debugging, parallel PR review, autonomous issue resolution, the testers QA squad), adapted to Codex's skill / subagent / AGENTS.md model. Two paths:
-
-```bash
-# Path 1 — standalone installer (carries the 44 subagents; needed for /solve, /turbo, /review-pr fanout)
-curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-codex.sh | bash
-
-# Path 2 — Codex-native plugin (browse & toggle skills; pairs with Path 1)
-codex plugin marketplace add TheFJK/UberDev   # then /plugins → Space to enable
-```
-
-Restart Codex after install so the skills, hooks, and subagents load. The 13 slash commands surface as `$uberdev-cmd-*` skills (Codex custom prompts are deprecated; skills are the shareable replacement). See [`codex/README.md`](./codex/README.md) for the full guide, the tool-mapping shim, and known v1 limitations.
-The Codex one-liner bootstraps a temporary repo snapshot automatically; running `./codex/install-codex.sh` from a clone uses the local files.
-
 ---
 
 ## Updating
