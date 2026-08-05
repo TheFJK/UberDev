@@ -845,7 +845,20 @@ cat >"$TMP/wez-bin/wezterm" <<'SH'
 if [ "$1 $2" = 'cli spawn' ]; then
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
   nohup "$@" >/dev/null 2>&1 & pane_pid="$!"
-  sleep .5
+  # Block until the pane wrapper has actually exited, rather than guessing a
+  # fixed delay. The assertion this fixture makes ("the receipt is already
+  # `completed`") is a statement about post-terminal state, so the stub must
+  # gate on the wrapper's real exit. A fixed `sleep .5` used to be enough only
+  # because the wrapper's critical section was a stub `mkdir -p`; since #381
+  # RULING 4 the wrapper performs a real `git worktree add` plus a real
+  # mutex-serialized teardown (`git worktree remove` + `git branch -D`), which
+  # regularly outruns half a second and made this case flaky. Bounded at ~20s
+  # so a genuinely hung wrapper still fails the run instead of hanging CI.
+  wez_waited=0
+  while kill -0 "$pane_pid" 2>/dev/null && [ "$wez_waited" -lt 400 ]; do
+    sleep .05
+    wez_waited=$((wez_waited + 1))
+  done
   echo "$pane_pid"; exit 0
 fi
 if [ "$1 $2" = 'cli list-clients' ]; then exit 0; fi
