@@ -90,7 +90,7 @@ assert module.__all__ == (
     "bind_fixer_launch_receipt",
     "bind_persistence_launch_receipt",
     "route_authority", "beneath", "capture_standalone_snapshot",
-    "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
+    "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
     "publish_review_only_disposition",
     "count_deferred_blockers", "validate_persistence_result",
@@ -4062,6 +4062,164 @@ expect_contract_reason(
         module._canonical_json(wf_binding), "review_pr.fix.phase2"),
     "launch_binding_invalid",
 )
+
+# === #381 STEP 1: the review roster can be bound, and a bound child captured ===
+#
+# Two gaps kept a Workflow-dispatched REVIEW stage from proving its own
+# evidence, and neither was in the aggregate writers:
+#
+#   1. bind_workflow_launch's edge allowlist was the three FIXER edges only, so
+#      no reviewer or lens child could be bound at all.
+#   2. all three capture-*-terminal verbs are fixer/defer-shaped (they demand a
+#      disposition and an applied-content artifact a reviewer never writes), so
+#      there was no verb that could consume a reviewer child of ANY backend.
+
+# 1. Every contributor edge the Phase-1/Phase-2 aggregates re-validate is
+#    bindable, and the allowlist is still closed.
+for contributor_edge in (
+    module.PHASE_CONTRIBUTORS["phase1"] + module.PHASE_CONTRIBUTORS["phase2"]
+):
+    bound = module.bind_workflow_launch(
+        edge_id=contributor_edge, instance_id="correctness-iter01",
+        run_nonce=WORKFLOW_NONCE, result_path=WF_RESULT, status_path=WF_STATUS,
+        working_dir=str(publication_dir),
+    )
+    assert bound["edge_id"] == contributor_edge, bound
+    assert module._load_launch_binding(
+        module._canonical_json(bound), contributor_edge) == bound, bound
+for rejected_edge in ("review_pr.defer.findings", "review_pr.review.unknown", ""):
+    expect_contract_reason(
+        lambda e=rejected_edge: module.bind_workflow_launch(
+            edge_id=e, instance_id=WF_INSTANCE, run_nonce=WORKFLOW_NONCE,
+            result_path=WF_RESULT, status_path=WF_STATUS,
+            working_dir=str(publication_dir),
+        ),
+        "launch_binding_invalid",
+    )
+
+# 2. capture_bound_child over a real reviewer child.
+BC_EDGE = "review_pr.review.correctness"
+BC_CHILD = os.path.join(WF_RUN, "children", "correctness-iter01")
+os.makedirs(BC_CHILD, exist_ok=True)
+BC_RESULT = os.path.join(BC_CHILD, "result.md")
+BC_STATUS = os.path.join(BC_CHILD, "status.json")
+BC_RESULT_BYTES = b"## Findings\n\nnone\n"
+with open(BC_RESULT, "wb") as handle:
+    handle.write(BC_RESULT_BYTES)
+bc_binding = module.bind_workflow_launch(
+    edge_id=BC_EDGE, instance_id="correctness-iter01", run_nonce=WORKFLOW_NONCE,
+    result_path=BC_RESULT, status_path=BC_STATUS,
+    working_dir=str(publication_dir),
+)
+
+
+def write_bound_status(**overrides):
+    document = {
+        "backend": "workflow", "state": "completed", "exit_code": 0,
+        "run_nonce": WORKFLOW_NONCE,
+        "workspace_mode": bc_binding["workspace_mode"],
+        "worktree": bc_binding["worktree"], "branch": bc_binding["branch"],
+        "result": bc_binding["result_path"],
+    }
+    document.update(overrides)
+    for key, value in list(document.items()):
+        if value is None:
+            del document[key]
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    with open(BC_STATUS, "wb") as status_handle:
+        status_handle.write(payload)
+    return payload
+
+
+bc_status_bytes = write_bound_status()
+captured = module.capture_bound_child(
+    launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE)
+# Both digests are computed by the contract from bytes IT read. No caller-supplied
+# digest is accepted anywhere in this verb -- that is the whole point of it.
+assert captured == {
+    "edge_id": BC_EDGE,
+    "instance_id": "correctness-iter01",
+    "status_path": bc_binding["status_path"],
+    "status_sha256": hashlib.sha256(bc_status_bytes).hexdigest(),
+    "result_path": bc_binding["result_path"],
+    "result_sha256": hashlib.sha256(BC_RESULT_BYTES).hexdigest(),
+}, captured
+
+# A fabricated pid must not buy an accept. This is the single most important
+# negative in the whole nonce protocol: a synthetic supervision handle would
+# leave every downstream equality looking correct while proving nothing.
+write_bound_status(pid=4242)
+expect_contract_reason(
+    lambda: module.capture_bound_child(
+        launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE),
+    "child_status_invalid",
+)
+for smuggled in ({"process_identity": "1|1|1|" + "0" * 64},
+                 {"lease_generation": "0" * 32}):
+    write_bound_status(**smuggled)
+    expect_contract_reason(
+        lambda: module.capture_bound_child(
+            launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE),
+        "child_status_invalid",
+    )
+
+# A nonce the controller never minted binds nothing.
+write_bound_status(run_nonce="b" * 64)
+expect_contract_reason(
+    lambda: module.capture_bound_child(
+        launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE),
+    "child_status_invalid",
+)
+
+# An unfinished child is not a captured child.
+for unfinished in ({"state": "running"}, {"exit_code": 1}):
+    write_bound_status(**unfinished)
+    expect_contract_reason(
+        lambda: module.capture_bound_child(
+            launch_binding=module._canonical_json(bc_binding), edge_id=BC_EDGE),
+        "child_status_invalid",
+    )
+
+write_bound_status()
+# The edge is bound: a binding minted for one reviewer cannot be replayed as
+# another's evidence.
+expect_contract_reason(
+    lambda: module.capture_bound_child(
+        launch_binding=module._canonical_json(bc_binding),
+        edge_id="review_pr.review.types"),
+    "launch_binding_invalid",
+)
+# The verb is workflow-only. A detached binding has a supervision triple to
+# check and must go through the verbs that check it.
+detached_reviewer = {
+    "schema_version": 1, "receipt_sha256": "0" * 64, "edge_id": BC_EDGE,
+    "instance_id": "correctness-iter01", "backend": "codex", "handle": "123",
+    "launch_status_sha256": "0" * 64,
+    "process_identity": "1|1|1|" + "0" * 64, "lease_generation": "0" * 32,
+    "result_path": BC_RESULT, "status_path": BC_STATUS,
+    "workspace_mode": "caller", "worktree": str(publication_dir), "branch": "",
+}
+expect_contract_reason(
+    lambda: module.capture_bound_child(
+        launch_binding=module._canonical_json(detached_reviewer), edge_id=BC_EDGE),
+    "launch_binding_invalid",
+)
+
+# 3. Both verbs must be REACHABLE from the CLI. A function with no subparser is
+#    exactly the dead code #381 found the first time.
+cli = module._parser()
+for verb, argv in (
+    ("bind-workflow-launch", [
+        "bind-workflow-launch", "--edge-id", BC_EDGE,
+        "--instance-id", "correctness-iter01", "--run-nonce", WORKFLOW_NONCE,
+        "--result-path", BC_RESULT, "--status-path", BC_STATUS,
+        "--working-dir", str(publication_dir)]),
+    ("capture-bound-child", [
+        "capture-bound-child", "--edge-id", BC_EDGE,
+        "--launch-binding-json", module._canonical_json(bc_binding).decode()]),
+):
+    parsed = cli.parse_args(argv)
+    assert parsed.command == verb, parsed
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

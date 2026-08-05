@@ -531,10 +531,10 @@ fi
 # G2 — verify gate independently passes on the produced tree
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
-# G3 — EXACTLY 37 source files landed under plugins/prkit (manifest count-lock;
+# G3 — EXACTLY 38 source files landed under plugins/prkit (manifest count-lock;
 # -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 37 ] && ok "G3 exactly 37 copied files present" || no "G3 copied $n files (expected 37)"
+[ "$n" -eq 38 ] && ok "G3 exactly 38 copied files present" || no "G3 copied $n files (expected 38)"
 
 # G4 — scaffold files exist with interpolated version and a native Codex
 # marketplace whose selector matches the generated README.

@@ -498,6 +498,53 @@ else
 fi
 
 echo
+echo "== #381 — the review-fleet default flip is coupled to the wiring =="
+# lib/dispatch.sh has NO `workflow` provider arm by construction: reaching
+# _uberdev_agent_dispatch_backend with backend=workflow is a declared wiring bug
+# that fails loud. Every /review-pr and /simplify child still reaches it through
+# uberdev_dispatch_child_capture, so resolving `workflow` for those two workflows
+# BEFORE a command emits pipeline=review-fleet would fail after the RUN_ID
+# reservation and the workspace prepare -- strictly worse than being unreachable,
+# because it burns a real fanout's budget and leaves reservations behind.
+#
+# This guard is the mechanical form of that coupling. It is EXPECTED to flip:
+# when the command files gain their `Workflow(` block, the auto arm may resolve
+# `workflow`, and this assertion must be updated in the SAME commit. It exists so
+# the two halves cannot land apart.
+REVIEW_FLEET_EMITTED=0
+for command_file in "$REPO_ROOT/plugins/uberdev/commands/review-pr.md" \
+                    "$REPO_ROOT/plugins/uberdev/commands/simplify.md"; do
+  if grep -Fq 'pipeline=review-fleet' "$command_file" \
+     || grep -Fq 'uberdev_emit_workflow_args review-fleet' "$command_file"; then
+    REVIEW_FLEET_EMITTED=1
+  fi
+done
+REVIEW_FLEET_AUTO_ARM="$(
+  awk '/^    auto\)/ { active=1 } active { print } active && /^    \*\)/ { exit }' \
+    "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
+)"
+if [ -z "$REVIEW_FLEET_AUTO_ARM" ]; then
+  fail "#381 could not locate the uberdev_dispatch_preflight auto arm in lib/dispatch.sh"
+elif [ "$REVIEW_FLEET_EMITTED" -eq 1 ]; then
+  if grep -Fq 'resolved="workflow"' <<<"$REVIEW_FLEET_AUTO_ARM"; then
+    pass "#381 a command emits pipeline=review-fleet and the auto arm can resolve workflow"
+  else
+    fail "#381 a command emits pipeline=review-fleet but the auto arm never resolves workflow"
+  fi
+elif grep -Eq 'review-pr.*\|\|.*simplify' <<<"$REVIEW_FLEET_AUTO_ARM" \
+     && grep -Fq '_uberdev_dispatch_codex_available' <<<"$REVIEW_FLEET_AUTO_ARM"; then
+  pass "#381 no command emits pipeline=review-fleet, so review-pr/simplify auto stays off workflow"
+else
+  fail "#381 the review-pr/simplify auto arm changed while the review-fleet wiring is still absent"
+fi
+if grep -Fq "backend 'workflow' is dispatched by the session's Workflow tool" \
+     "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"; then
+  pass "#381 _uberdev_agent_dispatch_backend keeps its loud workflow refusal"
+else
+  fail "#381 the loud workflow refusal in _uberdev_agent_dispatch_backend is gone"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

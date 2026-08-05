@@ -37,66 +37,72 @@ two-command precedent.
 > 2. the per-stage `uberdev_emit_workflow_args review-fleet …` calls;
 > 3. the per-child nonce mint, in the roster order fixed below;
 > 4. `mkdir -p <runDirAbs>/children/<slug>-iter<NN>/` before each stage;
-> 5. the post-return `capture-review-terminal` / `validate-review-outcome` verbs.
+> 5. the post-return capture verbs, per stage.
 >
 > Until all five land, the directive-emitter flow is not merely the default —
 > it is the only path that exists.
 >
-> **Step 5 is blocked, and steps 1–4 must not ship without it.** Verified
-> 2026-08-04: the controller side cannot consume a `workflow`-backend child
-> today, so a stage wired now would dispatch a real fanout, spend real agent
-> budget, let the fixer commit onto the caller's checkout — and then fail its
-> proof. That is strictly worse than being unreachable, because the seam this
-> whole skill exists to defend is the proof *between* the stages. Three
-> independent gates, each of which must be retired first:
+> ### Gate log — what is retired, and what is not
 >
-> - **The launch-binding chain has three links and P1 fixed only the last one.**
->   Verified 2026-08-04 by reading all three:
+> A stage wired before its proof exists would dispatch a real fanout, spend real
+> agent budget, let the fixer commit onto the caller's checkout — and then fail
+> its proof. That is strictly worse than being unreachable, because the seam
+> this whole skill exists to defend is the proof *between* the stages. So each
+> gate is tracked to a named, tested primitive.
 >
->   1. **Producer — `bind_launch_receipt` (`lib/code_fixer_contract.py:6318-6330`).**
->      It captures the launch *status file* and hard-requires a `pid`, a
->      `process_identity` matching `PROCESS_IDENTITY`, and a `lease_generation`
->      matching `LEASE_GENERATION`. A workflow child has none of the three, so
->      **no binding can be produced at all.** This is the first gate, and it is
->      the one to fix first.
->   2. **Loader — `_load_launch_binding` (`:6360-6389`).** Demands
->      `set(value) == LAUNCH_BINDING_KEYS`; that set carries no `run_nonce`
->      (`:6225-6240`) and separately requires `process_identity` (`:6383`) and
->      `lease_generation` (`:6385`). So even a hand-built workflow binding
->      cannot be re-loaded.
->   3. **Status validator — `_validate_bound_child_status`.** ✅ P1 landed this,
->      along with the poller no-op (`lib/agent-dispatch.sh:1461-1473`).
+> - ✅ **RETIRED (P1) — the launch-binding chain.** `bind_workflow_launch`
+>   (`lib/code_fixer_contract.py:6414`) mints a binding keyed on `run_nonce`
+>   instead of the detached triple, `_load_workflow_launch_binding` (`:6459`)
+>   re-loads it, and `_validate_bound_workflow_child_status` (`:6718`) binds the
+>   status file on that nonce and **rejects** `pid`/`process_identity`/
+>   `lease_generation` outright (`DETACHED_SUPERVISION_KEYS`, `:6715`).
+> - ✅ **RETIRED (#381 step 1) — the `review` stage's aggregate builders.**
+>   Three things were true and are no longer:
 >
->   The consequence is worth stating plainly: **the `"workflow"` entry P1 added
->   to the backend allow-list at `:6375` is dead code.** The same boolean
->   rejects the binding on `process_identity` before that member is ever
->   consulted. P1's nonce validator is correct and tested, but nothing in
->   production can reach it until links 1 and 2 exist.
+>   1. *They had no on-disk executable.* The three functions now ship as
+>      `lib/review-aggregate.sh`, and `skills/post-impl-review/SKILL.md` sources
+>      that file rather than defining them. Every `bash` block is a fresh shell,
+>      so the old fence-text definitions were unreachable to any caller that was
+>      not the skill itself — that, and nothing about the proofs, was the gate.
+>   2. *The receipt/pid demand was mis-attributed.* Neither
+>      `post_review_capture_aggregation_inputs` nor
+>      `post_review_write_aggregate_v2` ever touched a receipt, a pid or a mode
+>      bit; the writer reads **only stdin**. The detached-shaped demand lived in
+>      a third function, `post_review_validated_evidence_complete`, and inside it
+>      in exactly one block: the `launched`-row receipt/handle/pid triple. That
+>      function now accepts a second launch-row shape,
+>      `{edge,index,instance,binding,result,status}`, and proves it through
+>      `code_fixer_contract.py capture-bound-child` — a verb that takes no
+>      caller-supplied digest and computes both itself. Every other check is
+>      byte-identical on both shapes, and one wave may not mix them.
+>   3. *The `0o400` result was blamed on the child.* No child of **any** backend
+>      writes `validated-result.md`. The controller does, through
+>      `uberdev_child_validate_phase1_review_result`
+>      (`lib/child-dispatch.sh:1211`, `os.fchmod(descriptor,0o400)` at `:1365`),
+>      which `/review-pr` already has in scope — it sources
+>      `lib/child-dispatch.sh` at `commands/review-pr.md:42`.
+> - ✅ **RETIRED — both command files may call `Workflow`.** `Workflow` is in
+>   `allowed-tools` in `commands/review-pr.md:4` and `commands/simplify.md:4`,
+>   with the byte-matched `lib/aliases-sync.sh` rows.
+> - ❌ **OPEN — the `fix`, `simplify` and `defer` stages have no workflow-shaped
+>   capture.** `capture_review_terminal` and `capture_standalone_terminal` load a
+>   FIXER binding, and `_load_persistence_binding` rebuilds the detached
+>   `LAUNCH_BINDING_KEYS` base before delegating
+>   (`lib/code_fixer_contract.py:6692`), so a workflow binding cannot reach
+>   any of them. `capture-bound-child` covers reviewer- and lens-shaped children
+>   only; a fixer child additionally owes a disposition and an applied-content
+>   artifact, and that verb must not grow them silently.
+> - ❌ **OPEN — nothing dispatches this engine.** `_uberdev_agent_dispatch_backend`
+>   has no `workflow` provider arm by construction (`lib/dispatch.sh:1352-1356`),
+>   and every review/simplify child still reaches it through
+>   `uberdev_dispatch_child` → `uberdev_agent_dispatch`
+>   (`lib/agent-dispatch.sh:1930`). Until items 1–4 above land in both command
+>   files, resolving `workflow` for `/review-pr` or `/simplify` would fail
+>   **after** the `RUN_ID` reservation and the workspace prepare. That is why the
+>   `auto` arm still resolves `codex` for these two workflows.
 >
->   The fix is additive and belongs inside `code_fixer_contract.py` so authority
->   never leaves it: a `WORKFLOW_LAUNCH_BINDING_KEYS` set keyed on `run_nonce`,
->   a `backend == "workflow"` branch in both the producer and the loader, and a
->   bind verb that derives from the Workflow call rather than from a dispatch
->   receipt (`bind-fixer-launch-receipt` derives from a receipt,
->   `commands/review-pr.md:1228-1230`, and a `Workflow()` call issues none).
->   `tests/code-fixer-contract.test.sh:3871-3878` already hand-builds such a
->   dict as a literal — that is the shape to formalise.
-> - **The `review` stage's aggregate writers are unreachable and
->   receipt-shaped.** `post_review_capture_aggregation_inputs` and
->   `post_review_write_aggregate_v2` are shell functions defined only inside
->   `skills/post-impl-review/SKILL.md` (`:736`, `:856`) — there is no on-disk
->   executable — and the trusted-ledger builder they feed requires a provider
->   artifact and an `0o400` result that a workflow child never writes. So
->   `Skill(uberdev:post-impl-review)` cannot simply be swapped out at
->   `commands/review-pr.md:1584`.
-> - **Neither command may call `Workflow` yet.** `commands/review-pr.md:4` and
->   `commands/simplify.md:4` both read
->   `allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]`.
->   Adding `"Workflow"` also requires the byte-matched row in
->   `lib/aliases-sync.sh` or `tests/aliases.test.sh` section A6 reds.
->
-> The opt-in selector itself is unblocked and can land with the bind verb, but
-> a selector that gates nothing is not worth two flagship command files' churn.
+> The opt-in selector itself is unblocked, but a selector that gates nothing is
+> not worth two flagship command files' churn.
 
 ---
 
@@ -114,7 +120,7 @@ computed a digest, the authority chain would silently degrade from *the
 controller proved it* to *an LLM said so* while every downstream equality check
 still looked correct. That is the same reasoning
 `_validate_bound_workflow_child_status` uses to forbid a synthesised pid
-(`lib/code_fixer_contract.py:6599-6601`).
+(`lib/code_fixer_contract.py:6729-6732`).
 
 Two consequences worth stating out loud:
 
@@ -259,7 +265,7 @@ Workflow call; the child echoes it verbatim into `status.json`. For a
 `workflow`-backend child that nonce **replaces** the
 `pid`/`process_identity`/`lease_generation` triple, which must be **absent** —
 see `_validate_bound_child_status` and `_validate_bound_workflow_child_status`
-(`lib/code_fixer_contract.py:6587-6642`). A Workflow child is awaited
+(`lib/code_fixer_contract.py:6715-6763`). A Workflow child is awaited
 in-session, so it owns no pid and nothing could probe its liveness; the await
 *is* the supervision (`lib/agent-dispatch.sh:1461-1473`).
 
@@ -338,9 +344,19 @@ agent-chosen location.
 
 1. `abortReason` non-empty ⇒ nothing was dispatched past the guard. Treat it as
    a preflight failure of the calling command, not as a review result.
-2. For `review`: run the per-child capture verbs over `children[].statusPath`
-   and `children[].resultPath`, build the trusted ledger, then
-   `post_review_write_aggregate_v2`. **Any `BLOCKED` reviewer blocks green
+2. For `review`: source `lib/review-aggregate.sh`, then for each child mint the
+   binding with `code_fixer_contract.py bind-workflow-launch` **before** the
+   Workflow call, validate the returned `children[].resultPath` through
+   `uberdev_child_validate_phase1_review_result` (which writes the canonical
+   `0o400 validated-result.md` — no child of any backend writes it), append a
+   `{edge,index,instance,binding,result,status}` row to the launched ledger and
+   a `{edge,index,instance,result,sha256}` row to the validated ledger, then
+   `post_review_validated_evidence_complete` →
+   `post_review_capture_aggregation_inputs` →
+   `post_review_write_aggregate_v2`. The binding row is proved by
+   `code_fixer_contract.py capture-bound-child`, invoked from that builder — the
+   verb accepts no caller-supplied digest and computes both itself. **Any
+   `BLOCKED` reviewer blocks green
    trust** — missing reviewer evidence is not advisory, and the ordinary
    aggregate exists only after all six slots have valid evidence. A missing or
    empty aggregate terminates `/review-pr` immediately without dispatching the

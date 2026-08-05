@@ -823,10 +823,10 @@ PY
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
 
-  WINDOWS_EVIDENCE_FUNCTIONS="$TMP/windows-evidence-functions.sh"
-  awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
-    "$POST" >"$WINDOWS_EVIDENCE_FUNCTIONS"
-  . "$WINDOWS_EVIDENCE_FUNCTIONS"
+  # #381: the evidence builder is on disk now (lib/review-aggregate.sh), so the
+  # awk carve-out of a markdown fence is gone. Sourcing the shipped file is
+  # what /review-pr, the skill and this test all do, which is the point.
+  . "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
   _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
   UBERDEV_CARRIER_BACKEND=codex
   WINDOWS_IDENTITY_PLUGIN_ROOT="$TMP/windows-identity-plugin"
@@ -895,10 +895,7 @@ PY
       "$WINDOWS_IDENTITY_DIAGNOSTIC"
   done
 
-  WINDOWS_AGGREGATION_FUNCTIONS="$TMP/windows-aggregation-functions.sh"
-  awk '/^post_review_capture_aggregation_inputs\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
-    "$POST" >"$WINDOWS_AGGREGATION_FUNCTIONS"
-  . "$WINDOWS_AGGREGATION_FUNCTIONS"
+  . "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
   UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
   WINDOWS_AGGREGATION_ROOT="$TMP/windows-aggregation"
   mkdir -p "$WINDOWS_AGGREGATION_ROOT"
@@ -1854,14 +1851,23 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 # Duplicate indices, impersonated instances, reused canonical artifacts, and
 # digest replacement must all fail before aggregation. A format repair keeps
 # the original edge/index but may prove itself with the fresh launched instance.
+. "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
 for EVIDENCE_FUNCTION in \
   post_review_validated_evidence_complete \
-  post_review_capture_aggregation_inputs; do
-  awk -v function_name="$EVIDENCE_FUNCTION" \
-    '$0 == function_name "() {" {active=1} active{print} active && /^}/{exit}' \
-    "$POST" >>"$TMP/evidence-runtime.sh"
+  post_review_capture_aggregation_inputs \
+  post_review_write_aggregate_v2; do
+  if ! declare -F "$EVIDENCE_FUNCTION" >/dev/null; then
+    echo "review-child-handoff: lib/review-aggregate.sh did not define $EVIDENCE_FUNCTION" >&2
+    exit 1
+  fi
 done
-. "$TMP/evidence-runtime.sh"
+# The skill must SOURCE that file, not redefine the functions: a second copy is
+# a second set of proofs, and only one of them gets maintained.
+if grep -Fq 'post_review_validated_evidence_complete() {' "$POST"; then
+  echo "review-child-handoff: post-impl-review SKILL.md redefines an on-disk evidence function" >&2
+  exit 1
+fi
+grep -Fq '. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh"' "$POST"
 UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
 _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
 UBERDEV_CARRIER_BACKEND=codex
@@ -2664,5 +2670,154 @@ grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"
 ! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
 ! grep -En 'format_repair' "$POST"
 grep -Eq 'format_retry' "$POST"
+
+# === #381 STEP 1: a Workflow-dispatched review wave can prove its own evidence ===
+#
+# The six children here carry NO dispatch receipt and NO pid, because a
+# Workflow() call issues neither. Each is bound instead by a single-use nonce
+# the controller minted BEFORE the call and the child echoed into status.json.
+# Everything else in the evidence builder is unchanged and must still hold:
+# the children-root/instance path equality, the controller-written 0o400
+# validated-result.md, digest recapture, the three-distinct-identity rule, and
+# the snapshot + trusted-ledger publish/recapture round trips.
+# Canonical from the start: the binding canonicalizes every path it stores
+# (_absolute_input resolves symlinks, so /var becomes /private/var on macOS) and
+# the evidence builder resolves the children root the same way. A fixture that
+# recorded the unresolved spelling would fail `unsafe-artifact` for a reason
+# that has nothing to do with the proof under test.
+mkdir -p "$TMP/workflow-evidence/children"
+WF_EVIDENCE_ROOT="$(cd "$TMP/workflow-evidence" && pwd -P)"
+WF_CONTRACT="$ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+WF_SLUGS=(correctness silent-failures types comments tests general)
+: >"$WF_EVIDENCE_ROOT/initial"
+: >"$WF_EVIDENCE_ROOT/validated"
+: >"$WF_EVIDENCE_ROOT/repair"
+wf_index=0
+for WF_EDGE in "${ROSTER_EDGES[@]}"; do
+  wf_index=$((wf_index + 1))
+  WF_INSTANCE="${WF_SLUGS[$((wf_index - 1))]}-iter01"
+  WF_CHILD="$WF_EVIDENCE_ROOT/children/$WF_INSTANCE"
+  mkdir -p "$WF_CHILD"
+  printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+    "confidence: high" '```' >"$WF_CHILD/result.md"
+  # A fresh nonce per child: a single-use token reused across two children would
+  # bind neither.
+  WF_NONCE="$(python3 -I -B -c 'import sys;print(("%02x"%int(sys.argv[1]))*32)' "$wf_index")"
+  WF_BINDING="$(python3 -I -B "$WF_CONTRACT" bind-workflow-launch \
+    --edge-id "$WF_EDGE" --instance-id "$WF_INSTANCE" --run-nonce "$WF_NONCE" \
+    --result-path "$WF_CHILD/result.md" --status-path "$WF_CHILD/status.json" \
+    --working-dir "$WF_EVIDENCE_ROOT")"
+  python3 -I -B - "$WF_CHILD/status.json" "$WF_NONCE" "$WF_BINDING" <<'PY'
+import json,sys
+path,nonce,binding=sys.argv[1:]
+bound=json.loads(binding)
+document={"backend":"workflow","state":"completed","exit_code":0,"run_nonce":nonce,
+          "workspace_mode":bound["workspace_mode"],"worktree":bound["worktree"],
+          "branch":bound["branch"],"result":bound["result_path"]}
+open(path,"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  # The 0o400 canonical artifact is written by the CONTROLLER, not by any child
+  # of any backend -- the same helper /review-pr already has in scope.
+  WF_VALIDATED="$WF_CHILD/validated-result.md"
+  WF_DIGEST="$(uberdev_child_validate_phase1_review_result \
+    "$WF_CHILD/result.md" '["README.md"]' "$WF_VALIDATED")"
+  [[ "$WF_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+  python3 -I -B - "$WF_EVIDENCE_ROOT/initial" "$WF_EDGE" "$wf_index" "$WF_INSTANCE" \
+    "$WF_BINDING" "$WF_CHILD/result.md" "$WF_CHILD/status.json" <<'PY'
+import json,sys
+ledger,edge,index,instance,binding,result,status=sys.argv[1:]
+row={"edge":edge,"index":int(index),"instance":instance,"binding":binding,
+     "result":result,"status":status}
+open(ledger,"a").write(json.dumps(row,separators=(",",":"))+"\n")
+PY
+  python3 -I -B - "$WF_EVIDENCE_ROOT/validated" "$WF_EDGE" "$wf_index" "$WF_INSTANCE" \
+    "$WF_VALIDATED" "$WF_DIGEST" <<'PY'
+import json,sys
+ledger,edge,index,instance,result,digest=sys.argv[1:]
+row={"edge":edge,"index":int(index),"instance":instance,"result":result,"sha256":digest}
+open(ledger,"a").write(json.dumps(row,separators=(",",":"))+"\n")
+PY
+done
+
+UBERDEV_CARRIER_BACKEND=workflow
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
+WF_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
+  "$WF_EVIDENCE_ROOT/validated" 6 "$WF_EVIDENCE_ROOT/initial" \
+  "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT")"
+[ -f "$WF_TRUSTED_LEDGER" ]
+WF_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs "$WF_TRUSTED_LEDGER" 6)"
+python3 -I -B - "$WF_AGGREGATION_INPUT" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert set(value)=={"schema_version","ledger_sha256","rows"},value
+assert value["schema_version"]==1 and len(value["rows"])==6,value
+assert value["rows"][0]["content"].startswith("```yaml\nverdict: APPROVE"),value
+PY
+
+# Every fail-closed probe below must still refuse, or the binding shape bought a
+# hole the receipt shape does not have.
+wf_evidence_must_fail() {
+  local label="$1" expected_class="$2" probe_rc
+  set +e
+  post_review_validated_evidence_complete "$WF_EVIDENCE_ROOT/validated" 6 \
+    "$WF_EVIDENCE_ROOT/initial" "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT" \
+    >"$WF_EVIDENCE_ROOT/$label.stdout" 2>"$WF_EVIDENCE_ROOT/$label.stderr"
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -ne 2 ]; then
+    echo "review-child-handoff workflow evidence: $label returned rc=$probe_rc expected=2" >&2
+    exit 1
+  fi
+  if ! grep -Fq "post_review_evidence_failure class=$expected_class" \
+      "$WF_EVIDENCE_ROOT/$label.stderr"; then
+    echo "review-child-handoff workflow evidence: $label wrong class ($(cat "$WF_EVIDENCE_ROOT/$label.stderr"))" >&2
+    exit 1
+  fi
+}
+
+# A fabricated pid must never buy an accept.
+WF_FIRST_STATUS="$WF_EVIDENCE_ROOT/children/correctness-iter01/status.json"
+cp "$WF_FIRST_STATUS" "$WF_EVIDENCE_ROOT/first-status.bak"
+python3 -I -B - "$WF_FIRST_STATUS" <<'PY'
+import json,sys
+document=json.load(open(sys.argv[1]))
+document["pid"]="4242"
+open(sys.argv[1],"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+wf_evidence_must_fail fabricated-pid roster-mismatch
+cp "$WF_EVIDENCE_ROOT/first-status.bak" "$WF_FIRST_STATUS"
+
+# A nonce the controller never minted binds nothing.
+python3 -I -B - "$WF_FIRST_STATUS" <<'PY'
+import json,sys
+document=json.load(open(sys.argv[1]))
+document["run_nonce"]="b"*64
+open(sys.argv[1],"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+wf_evidence_must_fail forged-nonce roster-mismatch
+cp "$WF_EVIDENCE_ROOT/first-status.bak" "$WF_FIRST_STATUS"
+
+# The carrier backend equality survives the shape change.
+UBERDEV_CARRIER_BACKEND=codex
+wf_evidence_must_fail carrier-backend-mismatch roster-mismatch
+UBERDEV_CARRIER_BACKEND=workflow
+
+# One dispatcher per wave: a ledger mixing a receipt row with binding rows
+# describes six children that did not come from one fanout.
+python3 -I -B - "$WF_EVIDENCE_ROOT/initial" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+first=rows[0]
+receipt=json.dumps({"schema_version":1,"edge_id":first["edge"],
+                    "instance_id":first["instance"],"backend":"workflow",
+                    "handle":"4242","state":"running",
+                    "result_file":first["result"],"status_file":first["status"]},
+                   sort_keys=True,separators=(",",":"))
+rows[0]={"edge":first["edge"],"index":first["index"],"instance":first["instance"],
+         "receipt":receipt,"result":first["result"],"status":first["status"]}
+open(sys.argv[1],"w").write("".join(
+    json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+PY
+wf_evidence_must_fail mixed-launch-shape roster-mismatch
 
 echo 'review-child-handoff: PASS'

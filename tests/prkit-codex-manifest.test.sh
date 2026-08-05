@@ -23,10 +23,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "C1 every codex-manifest path exists at repo root" \
   || no "C1 $missing codex-manifest path(s) do not exist"
 
-# C2 — count of real entries is 56
+# C2 — count of real entries is 57
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 56 ] && ok "C2 codex manifest lists exactly 56 files" \
-  || no "C2 codex manifest lists $count files (expected 56)"
+[ "$count" -eq 57 ] && ok "C2 codex manifest lists exactly 57 files" \
+  || no "C2 codex manifest lists $count files (expected 57)"
 
 # C3 — excluded files are NOT listed
 for bad in codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md \

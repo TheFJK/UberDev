@@ -34,7 +34,7 @@ codex/uberdev-codex/agents/merge-strategy-decider.md
 codex/uberdev-codex/agents/conflict-resolver.md
 codex/uberdev-codex/agents/findings-to-issues.md
 
-# --- lib (14 — shared dispatch/config/authority/receipt chain) ---
+# --- lib (15 — shared dispatch/config/authority/receipt chain) ---
 codex/uberdev-codex/lib/child-dispatch.sh
 codex/uberdev-codex/lib/agent-dispatch.sh
 codex/uberdev-codex/lib/dispatch.sh
@@ -44,6 +44,7 @@ codex/uberdev-codex/lib/run_manifest.py
 codex/uberdev-codex/lib/atomic_move.py
 codex/uberdev-codex/lib/worktree_receipts.py
 codex/uberdev-codex/lib/code_fixer_contract.py
+codex/uberdev-codex/lib/review-aggregate.sh
 codex/uberdev-codex/lib/live-semaphore.sh
 codex/uberdev-codex/lib/child-receipts.py
 codex/uberdev-codex/lib/child-inputs.py

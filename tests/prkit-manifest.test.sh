@@ -24,10 +24,10 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "M1 every manifest path exists in plugins/uberdev/" \
   || no "M1 $missing manifest path(s) do not exist"
 
-# M2 — count of real (non-comment, non-blank) entries is 37
+# M2 — count of real (non-comment, non-blank) entries is 38
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 37 ] && ok "M2 manifest lists exactly 37 files" \
-  || no "M2 manifest lists $count files (expected 37)"
+[ "$count" -eq 38 ] && ok "M2 manifest lists exactly 38 files" \
+  || no "M2 manifest lists $count files (expected 38)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \
