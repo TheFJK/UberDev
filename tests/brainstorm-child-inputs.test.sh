@@ -157,7 +157,7 @@ print(json.dumps({
     "run_dir": run,
     "run_id": run_id,
     "repository_id": repository,
-    "backend": "codex",
+    "backend": "background",
     "workflow": "solve",
     "phase": "lead",
     "role": "lead",
@@ -167,7 +167,6 @@ print(json.dumps({
     "issue_num": 42,
     "capacity": 4,
     "timeout_s": 20,
-    "routing_mode": "adaptive",
 }, separators=(",", ":")))
 PY
 )"
@@ -181,7 +180,7 @@ print(json.dumps({
     "run_id": run_id,
     "repository_id": repository,
     "workflow": "solve",
-    "backend": "codex",
+    "backend": "background",
     "issue_num": 42,
     "task_tier": "medium",
     "risk_signals": [],
@@ -222,7 +221,7 @@ PROVIDER_LOG="$TMP/provider-instances.log"
 _uberdev_agent_dispatch_backend() {
   local backend="$1" prompt="$4" result="$5" status="$6" decision="$7" instance edge
   [ "$#" -eq 7 ]
-  [ "$backend" = codex ]
+  [ "$backend" = background ]
   : "$prompt"
   instance="$(basename "$(dirname "$status")")"
   edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' \
@@ -244,7 +243,7 @@ PY
   printf 'completed by receipt provider seam\n' >"$result"
   chmod 600 "$result"
   DISPATCH_ID="brainstorm-receipt-provider-$instance"
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' \
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' \
     "$DISPATCH_ID" >"$status"
   chmod 600 "$status"
 }
@@ -258,7 +257,7 @@ if [ "${BRAINSTORM_MUTATE_AGENT_DISPATCH_WRAPPER:-0}" = 1 ]; then
     printf '%s\n' "$instance" >>"$PROVIDER_LOG"
     printf 'completed by mutated wrapper seam\n' >"$result"
     chmod 600 "$result"
-    printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"mutated-%s"}\n' \
+    printf '{"backend":"background","state":"completed","exit_code":0,"pid":"mutated-%s"}\n' \
       "$instance" >"$status"
     chmod 600 "$status"
   }
@@ -325,7 +324,7 @@ expected_lifecycle = [
 assert [(row.get('event'), row.get('run_id')) for row in lifecycle] == expected_lifecycle, lifecycle
 for row in lifecycle:
     assert row.get('agent_id') == row['run_id'], row
-    assert row.get('backend') == 'codex' and row.get('workflow') == 'solve', row
+    assert row.get('backend') == 'background' and row.get('workflow') == 'solve', row
     assert row.get('phase') == 'research' and row.get('risk_signals') == [], row
 
 semaphore = Path(semaphore_root)

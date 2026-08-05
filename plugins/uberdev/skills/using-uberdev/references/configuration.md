@@ -13,7 +13,7 @@ review_depth: full               # one of: quick, full
 parallel_solve: true
 auto_install_aliases: true       # Claude Code only: auto-install the short-form aliases (see aliases-sync.sh for the canonical set) at SessionStart (default: true; env override: UBERDEV_NO_AUTO_ALIAS=1). Codex uses $uberdev-cmd-* skills instead.
 integration_branch: main         # branch /merge lands PRs into; default = repo default branch
-dispatch_backend: auto           # one of: auto, workflow, wezterm, background, codex — how /solve & /turbo run per-issue solvers (RFC 0004/0012/0015); default auto (-> workflow on Claude hosts, codex inside Codex); env override: UBERDEV_DISPATCH_BACKEND
+dispatch_backend: auto           # one of: auto, workflow, wezterm, background — how /solve & /turbo run per-issue solvers (RFC 0004/0012/0015); default auto (-> workflow everywhere); env override: UBERDEV_DISPATCH_BACKEND
 auto_review_on_merge: false      # boolean — when true, /merge Phase 1.4 auto-dispatches /review-pr <N> --turbo once per PR with missing trust trail (whitelisted reasons only); default false; env override: UBERDEV_AUTO_REVIEW_ON_MERGE (#89)
 auto_confirm: false              # DEPRECATED — no behavioural effect. /merge is fully unattended (autopilot). Key parses for backward compat; first encounter emits a stderr deprecation notice.
 bot_authors_allow_list:          # DEPRECATED — no behavioural effect. /merge no longer gates on PR-author identity (any APPROVED + CI-green PR is eligible). Key parses for backward compat.
@@ -58,6 +58,32 @@ Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOU
 
 ## GPT-5.6 model routing (RFC 0013, v0.40)
 
+> **NOT ENFORCEABLE since v0.42.9 (issue #381) — read this first.**
+> Every setting in this section is still parsed and still validated exactly as
+> described below, but **no shipped dispatch backend can act on it.** UberDev no
+> longer owns the provider invocation: `workflow`, `wezterm` and `background`
+> children all inherit the ambient model and reasoning effort of the session
+> that launched them, and the `codex` backend that could pass `-m` and
+> `model_reasoning_effort` per child was retired.
+>
+> Consequently a `model_routing:` block that names anything **concrete** — a
+> `route`, a `reasoning_effort`, a non-`default` `service_tier`, `mode:
+> adaptive`, or any `roles:` / `workflows:` override entry — makes the dispatch
+> fail with the typed error **`route_unenforceable`** rather than silently
+> ignoring it. This is deliberate: asking for Sol-Ultra and being told it cannot
+> be honoured is safer than believing it was applied. Validation is kept so that
+> a typo'd effort or an unknown role is still caught at config-read time with a
+> precise message.
+>
+> What still works end to end is the **logical** half: `classify_minimum_route`
+> in `lib/model_routing.py` answers what capability rank a tier/role/risk
+> combination is entitled to, and `policy/model-routing-v1.json` still declares
+> route ranks, aliases, the lead-route matrix, the role inventory and the
+> `reasoning_efforts` vocabulary this file validates against. The concrete
+> resolver (`resolve_route`, `fallback_route`, `validate_catalog`, the per-route
+> provider catalog and the JSON CLI) was deleted rather than shipped as an
+> engine nothing can enter. See RFC 0013 §0 (2026-08-05 amendment).
+
 `model_routing.mode` accepts `inherit | adaptive`. Version 0.40 defaults to
 `inherit`, which is the safe rollback path: bundled workflows use an unpinned
 provider carrier and keep the ambient model/reasoning selection. `adaptive` is
@@ -83,11 +109,11 @@ and effort stay null unless the provider reports them).
 maps. Each accepts at most 64 entries and 16 KiB of normalized JSON. Keys use
 `A-Za-z0-9._-` (no traversal-shaped `..` or slash). A value is either a route
 name/alias or an object containing only `route`, `reasoning_effort` (the input
-alias `effort` normalizes to this exact resolver field), and/or `sandbox`.
-Reasoning effort must be declared by a canonical policy route; sandbox is
-`read-only | workspace-write`. A concrete route already supplies its canonical
-model/effort pair, so `route` and `reasoning_effort` are mutually exclusive in
-one override entry. Role names are loaded from the canonical
+alias `effort` normalizes to this exact field), and/or `sandbox`. Reasoning
+effort must appear in the policy's declared `reasoning_efforts` vocabulary
+(`low | medium | high | max | ultra`); sandbox is `read-only |
+workspace-write`. `route` and `reasoning_effort` are mutually exclusive in one
+override entry. Role names are loaded from the canonical
 `model-routing-v1.json`; the v0.40 public workflow scope is exactly `solve` and
 `turbo`. Duplicate or unknown keys, duplicate effort aliases, unknown fields,
 routes or efforts, malformed JSON/YAML, excessive input, and
@@ -198,7 +224,7 @@ fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural
 change; matches the `merge_strategy` chunking precedent).
 
-**`dispatch_backend` precedence (RFC 0004 / RFC 0012):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | workflow | wezterm | background | codex`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: a Codex session (`CODEX_HOME` set) or Codex-only host → `codex`; **everything else → `workflow`** (RFC 0015), on every OS class including native Windows. `workflow` runs one worktree-isolated solver agent per issue inside the calling session's Workflow runtime (`skills/solve-fleet/workflow.js`) — watch it with `/workflows`. The detached `claude --bg` backend was removed in RFC 0015 §7 as amended — naming it is now an enum error, not a deprecation warning. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm, or `--backend=codex` without `codex` on PATH). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
+**`dispatch_backend` precedence (RFC 0004 / RFC 0012):** CLI flag `--backend=<name>` > env var `UBERDEV_DISPATCH_BACKEND` > config file (this YAML) > default `auto`. Accepts `auto | workflow | wezterm | background`. `auto` resolves once per `/solve` or `/turbo` invocation via `lib/dispatch.sh`'s preflight: **everything → `workflow`** (RFC 0015), on every OS class including native Windows. `workflow` runs one worktree-isolated solver agent per issue inside the calling session's Workflow runtime (`skills/solve-fleet/workflow.js`) — watch it with `/workflows`. The detached `claude --bg` backend was removed in RFC 0015 §7 as amended, and the `codex` backend in #381 — naming either is now an enum error, not a deprecation warning. The resolved backend is committed for the whole batch — a fan-out is never split across backends. An explicit `--backend=X` hard-errors before any dispatch if `X` is unusable on the host (e.g. `--backend=wezterm` from WSL2 targeting a native-Windows WezTerm). Invalid values fall back to `auto` non-fatally and emit a `uberdev_config_invalid` audit event via the existing `uberdev_read_enum` machinery.
 
 **`command_timeouts.{solve, review_pr, merge}`:** per-command
 wall-clock timeout in seconds, range `[60, 86400]` (1m–24h).

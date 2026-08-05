@@ -1734,8 +1734,8 @@ PY
    `post_review_validated_evidence_complete` proves through
    `code_fixer_contract.py capture-bound-child` — a verb that takes no
    caller-supplied digest and computes both itself. One wave may not mix that
-   shape with the detached `receipt` shape, so a workflow wave and a codex wave
-   can never be aggregated together.
+   shape with the detached `receipt` shape, so a workflow wave and a detached
+   wave can never be aggregated together.
 
 5. **Apply Phase 1 Fixes — dispatch `code-fixer` subagent**
 
@@ -2655,14 +2655,26 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     as an opaque provider-arm refusal, mid-run, after the probe already spent
     its budget.
 
-    Since #381 step 3 the workflow transport is what `auto` resolves to, so this
-    gate is on the DEFAULT path, not an opt-in corner. It is still a refusal and
-    not a degradation: a **green** probe completes normally and reaches the trust
-    anchor exactly as on codex, and a **red** one exits naming its two remedies —
-    re-run with `--backend=codex` for CI classification and the CI fixers, or
-    pass `--no-ci-fix` to accept probe-only telemetry. Keeping `codex` explicitly
-    selectable is what makes that remedy real; it is deleted only once Phase 3
-    has a transport of its own.
+    > **BREAKING (#381) — Phase 3 CI classification and the CI fixers are
+    > UNAVAILABLE. There is no longer any transport that can run them.**
+    >
+    > Since #381 step 3 the workflow transport is what `auto` resolves to, so
+    > this gate is on the DEFAULT path, not an opt-in corner. Step 4 then
+    > deleted the `codex` backend, which was the ONLY transport with a provider
+    > arm for `review_pr.ci.*` — so the escape hatch this gate used to name is
+    > gone with it. `--backend=wezterm` and `--backend=background` are not
+    > substitutes: /review-pr refuses both in `uberdev_dispatch_preflight_backend`
+    > because neither publishes a governed child result artifact.
+    >
+    > **`--no-ci-fix` is the supported mode** until Phase 3 is rebuilt
+    > Workflow-natively. Under it the probe is telemetry only, dispatches no
+    > child, and the review completes normally.
+    >
+    > Without it, a **green** probe still completes normally and reaches the
+    > trust anchor; a **red** probe halts loudly at 6c.3 CLASSIFY with
+    > `subreason=ci_transport_unsupported`. That is a named refusal, not a
+    > silent degradation — but it is a capability the release no longer has,
+    > not a configuration the operator can fix.
 
     It is inline rather than a shared helper on purpose: the CLASSIFY block is
     extracted and executed on its own by `tests/review-pr-phase3-ci.test.sh` and
@@ -2672,7 +2684,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     Under `CI_FIX_PHASE=0` the probe is telemetry only and dispatches no child,
     so the gate sits at CLASSIFY — the first step that would launch one — not at
     6c.1. A green probe on the workflow transport therefore completes normally
-    and reaches the trust anchor exactly as it does on codex.
+    and reaches the trust anchor.
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
@@ -3291,7 +3303,7 @@ print(serialized,end="")
     # routed children and lib/dispatch.sh has no workflow provider arm, so this
     # is the first step that would dispatch one into a dead end.
     if [ "${UBERDEV_CARRIER_BACKEND:-}" = workflow ]; then
-      echo "error: Phase 3 CI health is not available on the workflow transport — review_pr.ci.* are routed children and lib/dispatch.sh has no workflow provider arm (RFC 0012 §3.1 'Not built in P2'); re-run with --backend=codex for CI classification and the CI fixers, or pass --no-ci-fix to accept probe-only telemetry" >&2
+      echo "error: Phase 3 CI classification and the CI fixers are UNAVAILABLE (BREAKING, #381) — review_pr.ci.* are routed children and lib/dispatch.sh has no workflow provider arm (RFC 0012 §3.1 'Not built in P2'), and the codex backend that was the only arm for them was deleted. There is no backend to re-run with: pass --no-ci-fix to accept probe-only telemetry until Phase 3 is rebuilt Workflow-natively" >&2
       audit ci_classify_returned subreason=ci_transport_unsupported
       OUTCOME=halted
       exit 1

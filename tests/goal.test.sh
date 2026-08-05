@@ -67,6 +67,21 @@ done
 PASS=0
 FAIL=0
 
+# Retired-surface complement: proves a pattern is ABSENT from live (non-comment)
+# lines. Tombstone comments naming what was removed must not read as live code.
+assert_absent_live() {
+  local file="$1" pattern="$2" label="$3"
+  if grep -qE -e "^[^#]*($pattern)" "$file"; then
+    FAIL=$((FAIL + 1))
+    printf '  FAIL  %s\n' "$label" >&2
+    printf '        file:            %s\n' "$file" >&2
+    printf '        still-live regex: %s\n' "$pattern" >&2
+  else
+    PASS=$((PASS + 1))
+    printf '  PASS  %s\n' "$label"
+  fi
+}
+
 assert_grep() {
   local file="$1" pattern="$2" label="$3"
   if grep -qE -e "$pattern" "$file"; then
@@ -660,7 +675,11 @@ assert_grep "$GOAL_LIB" 'jq -e --argjson pr'                                    
 assert_grep "$GOAL_LIB" '/uberdev:review-pr '                                      "G32.substring-name-regex"
 assert_grep "$GOAL_LIB" '(\$\|\[\^0-9\])'                                          "G32.regex-trailing-boundary"
 assert_grep "$GOAL_LIB" 'busy\|running\|starting\|working'                         "G32.status-whitelist"
-assert_grep "$GOAL_LIB" 'background\|codex'                                         "G32.codex-background-status-file-branch"
+# #381: this used to require the literal `background|codex` case arm (the
+# pattern is ERE, so `\|` matched a literal pipe). The codex arm is deleted, so
+# assert the LIVE arm and the retired one's absence rather than a merged label.
+assert_grep "$GOAL_LIB" '^[[:space:]]*background\)'                                "G32.background-pid-branch"
+assert_absent_live "$GOAL_LIB" '[[:space:]]*codex\)'                               "G32.no-codex-arm-survives"
 assert_grep "$GOAL_WATCH" 'uberdev_goal_review_pr_in_flight'                       "G32.called-from-watch"
 
 echo
@@ -776,21 +795,27 @@ assert_grep "$GOAL_WATCH" 'uberdev_goal_audit goal_issue_closed_without_pr' \
   "G39.audit-event-emitted"
 # See BT84/BT85 below for the behavioural complement.
 
-echo "== G39b: Phase 2 surfaces terminal Codex agent failure immediately =="
-assert_grep "$GOAL_LIB" '^uberdev_goal_codex_status_for_issue\(\)' \
-  "G39b.codex-status-helper-defined"
-assert_grep "$GOAL_WATCH" 'uberdev_goal_codex_status_for_issue "\$issue"' \
-  "G39b.phase2-checks-codex-terminal-status"
-assert_grep "$GOAL_LIB" 'Codex returns in-flight' \
-  "G39b.codex-review-pr-ambiguous-status-contract-documented"
-assert_grep "$GOAL_WATCH" 'codex agent for issue .* failed' \
-  "G39b.codex-failed-surfaces-immediately"
+# G39b — RETIRED SURFACE (#381). This asserted that Phase 2 surfaced a terminal
+# Codex agent failure immediately (helper defined, called from the watch script,
+# failed/completed-without-PR both circuit-breaking) instead of waiting out the
+# 150-minute solve timeout.
+#
+# COVERAGE DELIBERATELY DROPPED: `uberdev_goal_codex_status_for_issue` and the
+# watch-script branch that called it are deleted, and their precondition --
+# UBERDEV_RESOLVED_BACKEND=codex -- is unproducible now that `codex` is out of
+# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:462). No surviving backend
+# ships an equivalent sidecar, so there is no terminal-status signal left to
+# surface early. Inverted to the absence check; the solver_failed circuit
+# breaker itself is still asserted below, since that reason code is live.
+echo "== G39b: the Codex terminal-status fast path is gone (#381) =="
+assert_absent_live "$GOAL_LIB"   'uberdev_goal_codex_status_for_issue' "G39b.status-helper-deleted"
+assert_absent_live "$GOAL_WATCH" 'uberdev_goal_codex_status_for_issue' "G39b.watch-call-site-deleted"
+assert_absent_live "$GOAL_WATCH" '_codex_state'                       "G39b.no-codex-state-variable-survives"
+assert_absent_live "$GOAL_LIB"   'solve-codex-status-'                "G39b.no-codex-sidecar-path-survives"
 assert_grep "$GOAL_SKILL" 'GOAL_CIRCUIT_BREAKER_REASONS=.*solver_failed' \
   "G39b.solver-failed-reason-in-enum"
-assert_grep "$GOAL_WATCH" 'reason.*solver_failed' \
-  "G39b.codex-terminal-failure-circuit-breaks"
-assert_grep "$GOAL_WATCH" '\$_codex_state.*completed' \
-  "G39b.codex-completed-without-pr-is-terminal"
+assert_grep "$GOAL_SKILL" 'solver_failed' \
+  "G39b.solver-failed-reason-still-documented"
 
 echo "== G39c: Phase 0 threads parsed --backend into dispatch preflight =="
 assert_grep "$GOAL_P0" 'UBERDEV_DISPATCH_BACKEND_REQUESTED="\$\{backend_cli:-\$\{UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto\}\}"' \
@@ -2851,31 +2876,21 @@ _bt76_status_file() {
     FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
   fi
 }
-_bt76_status_file codex solve-codex-status-42.json "$$" 0 "BT76.codex-status-live-pid-in-flight"
+# #381: the codex rows here are RETIRED, not merely renamed. `background` is
+# the only PID-bearing backend left, so it keeps the full live/dead/zero-PID
+# matrix. The state-machine rows (completed/failed terminal, running-with-
+# unreadable-PID defers to in-flight) belonged to the codex sidecar's richer
+# status JSON, which lib/goal-state.sh no longer reads at all -- there is no
+# equivalent signal on `background`, so those rows have no subject.
+#
+# COVERAGE DELIBERATELY DROPPED: terminal-state short-circuiting and the
+# defer-on-ambiguous-running behaviour of uberdev_goal_review_pr_in_flight.
 _bt76_status_file background solve-bg-status-42.json "$$" 0 "BT76.background-status-live-pid-in-flight"
-_bt76_status_file codex solve-codex-status-42.json 999999999 1 "BT76.codex-status-dead-pid-not-in-flight"
-_bt76_status_file codex solve-codex-status-42.json 0 1 "BT76.codex-status-pid-zero-not-in-flight"
-_bt76_status_file_json() {
-  local json="$1" expected_rc="$2" label="$3"
-  local tmp got
-  tmp="$(mktemp -d)"
-  printf '%s\n' "$json" > "$tmp/solve-codex-status-42.json"
-  UBERDEV_TMPDIR="$tmp" UBERDEV_RESOLVED_BACKEND=codex bash -c '
-    . "'"$DISPATCH_LIB"'"
-    . "'"$GOAL_LIB"'"
-    uberdev_goal_review_pr_in_flight 42
-  '
-  got=$?
-  rm -rf "$tmp"
-  if [ "$got" -eq "$expected_rc" ]; then
-    PASS=$((PASS+1)); echo "  PASS  $label (rc=$got)"
-  else
-    FAIL=$((FAIL+1)); echo "  FAIL  $label (rc=$got want=$expected_rc)" >&2
-  fi
-}
-_bt76_status_file_json '{"issue":42,"backend":"codex","state":"completed","exit_code":0,"pid":"'"$$"'"}' 1 "BT76.codex-status-completed-not-in-flight"
-_bt76_status_file_json '{"issue":42,"backend":"codex","state":"failed","exit_code":17,"pid":"'"$$"'"}' 1 "BT76.codex-status-failed-not-in-flight"
-_bt76_status_file_json '{"issue":42,"backend":"codex","state":"running","exit_code":null,"pid":"not-a-pid"}' 0 "BT76.codex-status-running-invalid-pid-defers"
+_bt76_status_file background solve-bg-status-42.json 999999999 1 "BT76.background-status-dead-pid-not-in-flight"
+_bt76_status_file background solve-bg-status-42.json 0 1 "BT76.background-status-pid-zero-not-in-flight"
+# RETIRED SURFACE: a codex-backed probe must now answer "not in flight" through
+# the case statement's fall-through, never resurrect a sidecar reader.
+_bt76_status_file codex solve-codex-status-42.json "$$" 1 "BT76.codex-backend-no-longer-probed"
 
 echo "== BT77: Phase 2c emits goal_merge_deferred with mock in-flight /review-pr (issue #220 AC ❷) =="
 # B5 (post-impl-review): the original BT77 verified (a) the deferred event was

@@ -182,8 +182,8 @@ echo "== C5: a new arm on a ONE-LINER case must red (!case-arm mode) =="
 # depth precisely so a one-liner `case … esac` — which has nowhere to hang a
 # closing marker — still sees an appended arm. Two such sites shipped blind.
 assert_mutation_reds C5 lib/goal-state.sh \
-  'case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
-  'case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; podman) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  'case "$v" in workflow|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
+  'case "$v" in workflow|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; podman) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;' \
   dispatch-backend podman
 
 echo "== C6: an UNMARKED copy of a whole vocabulary must red =="

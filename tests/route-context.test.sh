@@ -44,15 +44,27 @@ python3 - "$INVALID" <<'PY'
 import json,sys
 p=json.loads(sys.argv[1]); assert p['mode']=={'source':'default','file':None}; assert 'secret-invalid-value' not in sys.argv[1]
 PY
-REQ='{"schema_version":1,"run_dir":"'"$TMP/run"'","run_id":"root-1","repository_id":"repo","backend":"codex","workflow":"solve","phase":"plan","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive","issue_or_pr":7,"issue_num":7,"capacity":2,"timeout_s":30}'
+# RETIRED SURFACE (#381): this request used to carry routing_mode=adaptive and
+# resolve to a concrete (frontier, max) pair. Adaptive per-rank routing is
+# unenforceable on every shipped backend, so the canonical request no longer
+# names a mode and the canonical decision is backend-neutral inherit. Asking for
+# adaptive is now a typed refusal, asserted immediately below.
+REQ='{"schema_version":1,"run_dir":"'"$TMP/run"'","run_id":"root-1","repository_id":"repo","backend":"workflow","workflow":"solve","phase":"plan","role":"plan-writer","task_tier":"medium","risk_signals":[],"issue_or_pr":7,"issue_num":7,"capacity":2,"timeout_s":30}'
 DECISION="$(uberdev_agent_resolve_request "$REQ")"
 python3 - "$DECISION" <<'PY'
 import json,sys
-d=json.loads(sys.argv[1]); assert d['logical_route']=='frontier'; assert d['reasoning_effort']=='max'
+d=json.loads(sys.argv[1])
+assert d['route_source']=='backend-neutral-inherit',d
+assert d['logical_route'] is None and d['reasoning_effort'] is None and d['model'] is None,d
+assert d['routing_mode']=='inherit' and d['effective_policy']=='inherit',d
+assert d['forced'] is False and d['minimum_route'] is None and d['fallback_chain']==[],d
 PY
+ADAPTIVE_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["routing_mode"]="adaptive";print(json.dumps(r,separators=(",",":")))' "$REQ")"
+! uberdev_agent_resolve_request "$ADAPTIVE_REQ" >/dev/null 2>"$TMP/adaptive.err"
+grep -q route_unenforceable "$TMP/adaptive.err"
 [ ! -e "$TMP/run/.agent-state-$(id -u)" ]
 PROV='{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}'
-META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"codex","issue_num":7,"task_tier":"medium","risk_signals":[]}'
+META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"workflow","issue_num":7,"task_tier":"medium","risk_signals":[]}'
 OUT="$(uberdev_agent_context_create "$TMP/run" "$REQ" "$DECISION" "$PROV" "$META" '2026-07-10T00:00:00Z')"
 CTX="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$OUT")"
 SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$OUT")"
@@ -73,10 +85,18 @@ ln "$CTX" "$TMP/hard"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run"
 mv "$CTX" "$TMP/real"; ln -s "$TMP/real" "$CTX"; ! uberdev_agent_context_validate "$CTX" "$SHA" "$TMP/run" >/dev/null 2>&1
 # Restore the immutable context, then prove a decision mismatch is rejected
 # before lifecycle publication, lease acquisition, or the provider boundary.
+# The guard is agent-dispatch.sh:1622 -- recomputed decision != sealed decision.
+# It is LIVE and still asserted here; only the mutation used to trip it changed.
+# This case used to flip task_tier medium->small, which changed the resolved
+# logical_route and so changed the decision. The decision is backend-neutral
+# now, so tier no longer appears in it and a tier flip no longer trips this
+# guard -- a real, stated loss: nothing at this seam compares the supplied
+# task_tier to the sealed one. `risk_signals` does still appear in the decision,
+# so it is the mutation that keeps the guard under test.
 rm "$CTX"; mv "$TMP/real" "$CTX"; chmod 600 "$CTX"
 BAD_CONTEXT_REQ="$(python3 - "$REQ" "$CTX" "$SHA" "$DECISION" <<'PY'
 import json,sys
-r=json.loads(sys.argv[1]); r['context_file']=sys.argv[2]; r['context_sha256']=sys.argv[3]; r['root_decision']=json.loads(sys.argv[4]); r['task_tier']='small'; print(json.dumps(r,separators=(',',':')))
+r=json.loads(sys.argv[1]); r['context_file']=sys.argv[2]; r['context_sha256']=sys.argv[3]; r['root_decision']=json.loads(sys.argv[4]); r['risk_signals']=['security']; print(json.dumps(r,separators=(',',':')))
 PY
 )"
 _uberdev_agent_dispatch_backend() { printf invoked >"$TMP/provider-invoked"; return 1; }
@@ -91,7 +111,7 @@ grep -q route_context_mismatch "$TMP/mismatch-error"
 (
   . "$ROOT/plugins/uberdev/lib/dispatch.sh"
   uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/assembled.json"; return 0; }
-  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 \
+  UBERDEV_RESOLVED_BACKEND=workflow UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 \
     UBERDEV_DISPATCH_ROUTE=sol-ultra UBERDEV_MODEL_ROUTING_MODE=adaptive UBERDEV_SERVICE_TIER=fast \
     UBERDEV_AGENT_WORKFLOW=turbo UBERDEV_AGENT_PHASE=plan UBERDEV_AGENT_ROLE=plan-writer \
     UBERDEV_AGENT_RISK_SIGNALS_JSON='["security"]' \
@@ -106,7 +126,7 @@ PY
 (
   . "$ROOT/plugins/uberdev/lib/dispatch.sh"
   uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/env-map-assembled.json"; return 0; }
-  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
+  UBERDEV_RESOLVED_BACKEND=workflow UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
     UBERDEV_MODEL_ROUTING_ROLES='{"plan-writer":"deep"}' UBERDEV_AGENT_ROLE=plan-writer UBERDEV_AGENT_PHASE=plan \
     uberdev_dispatch_one 7 medium "$TMP/run/prompt.txt"
 )
@@ -119,7 +139,7 @@ PY
 (
   . "$ROOT/plugins/uberdev/lib/dispatch.sh"
   uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/invalid-assembled.json"; return 0; }
-  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 \
+  UBERDEV_RESOLVED_BACKEND=workflow UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 \
     UBERDEV_MODEL_ROUTING_MODE=bogus UBERDEV_SERVICE_TIER=bogus \
     UBERDEV_MODEL_ROUTING_RISK_ESCALATION=bogus UBERDEV_MODEL_ROUTING_ADAPTIVE_FALLBACK=bogus UBERDEV_MODEL_ROUTING_SHADOW=bogus \
     UBERDEV_ROUTE=deep UBERDEV_MODEL=gpt-5.6-sol UBERDEV_REASONING_EFFORT=high \
@@ -133,17 +153,26 @@ PY
 (
   . "$ROOT/plugins/uberdev/lib/dispatch.sh"
   uberdev_agent_dispatch() { printf '%s' "$1" >"$TMP/invalid-risk.json"; return 0; }
-  UBERDEV_RESOLVED_BACKEND=codex UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
+  UBERDEV_RESOLVED_BACKEND=workflow UBERDEV_TMPDIR="$TMP/run" SOLVE_TIMEOUT=30 UBERDEV_MODEL_ROUTING_MODE=adaptive \
     UBERDEV_MODEL_ROUTING_RISK_ESCALATION=bogus UBERDEV_AGENT_ROLE=plan-writer UBERDEV_AGENT_PHASE=plan UBERDEV_AGENT_RISK_SIGNALS_JSON='["security"]' \
     uberdev_dispatch_one 7 small "$TMP/run/prompt.txt" 2>/dev/null
 )
-INVALID_RISK_DECISION="$(uberdev_agent_resolve_request "$(cat "$TMP/invalid-risk.json")")"
-python3 - "$INVALID_RISK_DECISION" <<'PY'
-import json,sys
-d=json.loads(sys.argv[1]); assert d['logical_route']=='ultra',d
+# The assembled request still carries the raw adaptive env value rather than a
+# resolved one -- that layering is live and asserted here. What changed is the
+# outcome: an invalid risk_escalation used to be dropped and the run resolved to
+# `ultra`; asking for adaptive at all is now refused, so there is no route to
+# escalate. LOST COVERAGE, named: risk escalation to the high-risk floor when
+# UBERDEV_MODEL_ROUTING_RISK_ESCALATION is invalid and falls back to true.
+python3 - "$TMP/invalid-risk.json" <<'PY'
+import json,pathlib,sys
+r=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert r['environment']=={'UBERDEV_MODEL_ROUTING_MODE':'adaptive'},r['environment']
+assert r['risk_signals']==['security'],r
 PY
-# Non-Codex backends reject every environment concrete/service pin, while
-# ambient inherit does not consult an unrelated unsafe Codex catalog.
+! uberdev_agent_resolve_request "$(cat "$TMP/invalid-risk.json")" >/dev/null 2>"$TMP/invalid-risk.err"
+grep -q route_unenforceable "$TMP/invalid-risk.err"
+# Every backend rejects every environment concrete/service pin, and the resolver
+# seam no longer has a catalog input to be pointed at an unsafe file.
 for key in UBERDEV_ROUTE UBERDEV_MODEL UBERDEV_REASONING_EFFORT UBERDEV_SERVICE_TIER; do
   VALUE=deep; [ "$key" != UBERDEV_MODEL ] || VALUE=gpt-5.6-sol; [ "$key" != UBERDEV_REASONING_EFFORT ] || VALUE=high; [ "$key" != UBERDEV_SERVICE_TIER ] || VALUE=fast
   PINNED="$(python3 - "$key" "$VALUE" <<'PY'
@@ -155,13 +184,19 @@ PY
   grep -q route_unenforceable "$TMP/noncodex-$key.err"
 done
 UBERDEV_MODEL_CATALOG_FILE="$TMP/missing-catalog" uberdev_agent_resolve_request '{"backend":"background","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[]}' >/dev/null
+# RETIRED SURFACE (#381): UBERDEV_MODEL_CATALOG_FILE was an injectable provider
+# catalog read by the resolver. The line above still proves a stale value in the
+# environment is inert, but the stronger statement is that the seam declares no
+# catalog input at all -- so it cannot be steered at an attacker-chosen file.
+! grep -q 'UBERDEV_MODEL_CATALOG_FILE' "$LIB"
+! grep -q 'catalog' "$LIB"
 
 # Recursive request shapes are closed and secret-shaped nested keys fail.
 for payload in \
-  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"AWS_SECRET_ACCESS_KEY":"x"}}' \
-  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"SURPRISE":"x"}}' \
-  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"project_routing":{"surprise":true}}' \
-  '{"backend":"codex","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"parent_run":{"surprise":"x"}}'; do
+  '{"backend":"workflow","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"AWS_SECRET_ACCESS_KEY":"x"}}' \
+  '{"backend":"workflow","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"environment":{"SURPRISE":"x"}}' \
+  '{"backend":"workflow","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"project_routing":{"surprise":true}}' \
+  '{"backend":"workflow","workflow":"solve","role":"lead","task_tier":"small","risk_signals":[],"parent_run":{"surprise":"x"}}'; do
   ! uberdev_agent_resolve_request "$payload" >/dev/null 2>"$TMP/nested.err"
 done
 
@@ -173,7 +208,7 @@ for kind in request decision provenance metadata created; do
     request) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["surprise"]=1;print(json.dumps(r))' "$REQ")" ;;
     decision) D='{"surprise":true}' ;;
     provenance) P='{"surprise":{"source":"env","file":null}}' ;;
-    metadata) M='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"codex","issue_num":7,"task_tier":"gigantic","risk_signals":["AWS_SECRET_ACCESS_KEY"]}' ;;
+    metadata) M='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"workflow","issue_num":7,"task_tier":"gigantic","risk_signals":["AWS_SECRET_ACCESS_KEY"]}' ;;
     created) C='' ;;
   esac
   ! uberdev_agent_context_create "$TMP/schema-root" "$R" "$D" "$P" "$M" "$C" >/dev/null 2>"$TMP/schema-$kind.err"
@@ -185,8 +220,14 @@ done
 SMALL_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["task_tier"]="small";print(json.dumps(r,separators=(",",":")))' "$REQ")"
 SMALL_DECISION="$(uberdev_agent_resolve_request "$SMALL_REQ")"
 RISK_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["task_tier"]="small";r["risk_signals"]=["security"];print(json.dumps(r,separators=(",",":")))' "$REQ")"
-RISK_META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"codex","issue_num":7,"task_tier":"small","risk_signals":["security"]}'
-for kind in env-bool project-scalar project-map parent-null decision-type request-decision risk-decision service-decision; do
+RISK_META='{"run_id":"root-1","repository_id":"repo","workflow":"solve","backend":"workflow","issue_num":7,"task_tier":"small","risk_signals":["security"]}'
+# `request-decision` used to seal SMALL_DECISION against the medium REQ: the two
+# differed because the resolved route was tier-dependent. Nothing in a
+# backend-neutral decision varies with tier, so that mutation no longer produces
+# a non-canonical pairing and the case was replaced by `backend-decision`, which
+# mutates a field the decision does still carry. The live coherence check
+# (agent-dispatch.sh:435 -- decision.backend vs metadata.backend) is unchanged.
+for kind in env-bool project-scalar project-map parent-null decision-type backend-decision risk-decision service-decision; do
   ROOT_CASE="$TMP/schema-$kind"; mkdir "$ROOT_CASE"
   R="$REQ"; D="$DECISION"; M="$META"
   case "$kind" in
@@ -195,9 +236,9 @@ for kind in env-bool project-scalar project-map parent-null decision-type reques
     project-map) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["project_routing"]={"roles":{"plan-writer":{"route":"bogus"}}};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
     parent-null) R="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r.pop("routing_mode",None);r["parent_run"]={"forced":True,"logical_route":None,"model":"gpt-5.6-sol","reasoning_effort":"ultra"};print(json.dumps(r,separators=(",",":")))' "$REQ")" ;;
     decision-type) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["forced"]="false";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
-    request-decision) D="$SMALL_DECISION" ;;
+    backend-decision) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["backend"]="background";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
     risk-decision) R="$RISK_REQ"; D="$SMALL_DECISION"; M="$RISK_META" ;;
-    service-decision) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["service_tier"]="fast";d["field_sources"]["service_tier"]="cli-service-tier";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
+    service-decision) D="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);d["service_tier"]="fast";print(json.dumps(d,separators=(",",":")))' "$DECISION")" ;;
   esac
   ! uberdev_agent_context_create "$ROOT_CASE" "$R" "$D" "$PROV" "$M" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/semantic-$kind.err"
   [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
@@ -205,7 +246,19 @@ for kind in env-bool project-scalar project-map parent-null decision-type reques
 done
 
 # Provenance must describe the selected config/env/project layer carried in the
-# immutable request; it may not contradict or invent that layer.
+# immutable request; it may not contradict or invent that layer. This is
+# uberdev_agent_context_create's guard. Be precise about what still proves what:
+# context_create re-resolves the request first (agent-dispatch.sh:453), so the
+# five cases whose request names a concrete env/project layer (env-mode-default,
+# env-service-default, project-role-default, project-source-wrong-file,
+# project-env-wins) are now rejected at that earlier resolve gate with
+# route_unenforceable, and no longer exercise the provenance comparison itself.
+# The four that still reach it -- env-risk-default, env-source-missing,
+# workflows-env-missing, invalid-source-file -- carry a request the resolver
+# accepts, so they remain true tests of the provenance guard. Every case still
+# proves the same user-facing property: the context is never sealed. The
+# decision passed in is the canonical backend-neutral one with risk_signals
+# matched to the case, since a per-case resolution can no longer be produced.
 for kind in env-mode-default env-service-default env-risk-default env-source-missing workflows-env-missing project-role-default project-source-wrong-file project-env-wins invalid-source-file; do
   ROOT_CASE="$TMP/provenance-$kind"; mkdir "$ROOT_CASE"
   CASE_DATA="$(python3 - "$REQ" "$PROV" "$TMP/project/.codex/uberdev.local.md" "$kind" <<'PY'
@@ -225,7 +278,13 @@ print(json.dumps(r,separators=(',',':'))); print(json.dumps(p,separators=(',',':
 PY
 )"
   CASE_REQ="$(printf '%s\n' "$CASE_DATA" | sed -n '1p')"; CASE_PROV="$(printf '%s\n' "$CASE_DATA" | sed -n '2p')"
-  CASE_DECISION="$(uberdev_agent_resolve_request "$CASE_REQ")"
+  CASE_DECISION="$(python3 - "$DECISION" "$CASE_REQ" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1]); r=json.loads(sys.argv[2])
+d['risk_signals']=r.get('risk_signals',[]); d['backend']=r['backend']
+print(json.dumps(d,sort_keys=True,separators=(',',':')),end='')
+PY
+)"
   CASE_META="$(python3 - "$CASE_REQ" <<'PY'
 import json,sys
 r=json.loads(sys.argv[1]); print(json.dumps({'run_id':'root-1','repository_id':'repo','workflow':r['workflow'],'backend':r['backend'],'issue_num':7,'task_tier':r['task_tier'],'risk_signals':r.get('risk_signals',[])},separators=(',',':')))
@@ -234,58 +293,50 @@ PY
   ! uberdev_agent_context_create "$ROOT_CASE" "$CASE_REQ" "$CASE_DECISION" "$CASE_PROV" "$CASE_META" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/provenance-$kind.err"
   [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
 done
+# The positive counterpart: env-sourced provenance IS accepted and seals, so the
+# rejections above are not a blanket refusal of the env layer. The env values
+# used to be adaptive/fast/{plan-writer:deep}; those are concrete and now refuse
+# at the resolve gate, so this case pins the strongest env layer that is still
+# enforceable -- explicitly selected, but equal to the ambient default.
 VALID_PROV_ROOT="$TMP/provenance-valid"; mkdir "$VALID_PROV_ROOT"
-VALID_PROV_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r.pop("routing_mode",None);r["environment"]={"UBERDEV_MODEL_ROUTING_MODE":"adaptive","UBERDEV_SERVICE_TIER":"fast","UBERDEV_MODEL_ROUTING_ROLES":{"plan-writer":"deep"}};print(json.dumps(r,separators=(",",":")))' "$REQ")"
+VALID_PROV_REQ="$(python3 -c 'import json,sys;r=json.loads(sys.argv[1]);r["environment"]={"UBERDEV_MODEL_ROUTING_MODE":"inherit","UBERDEV_SERVICE_TIER":"default","UBERDEV_MODEL_ROUTING_ROLES":{}};print(json.dumps(r,separators=(",",":")))' "$REQ")"
 VALID_PROV_DECISION="$(uberdev_agent_resolve_request "$VALID_PROV_REQ")"
 VALID_PROV="$(python3 -c 'import json,sys;p=json.loads(sys.argv[1]);p["mode"]={"source":"env","file":None};p["service_tier"]={"source":"env","file":None};p["roles"]={"source":"env","file":None};print(json.dumps(p,separators=(",",":")))' "$PROV")"
 VALID_PROV_OUT="$(uberdev_agent_context_create "$VALID_PROV_ROOT" "$VALID_PROV_REQ" "$VALID_PROV_DECISION" "$VALID_PROV" "$META" '2026-07-10T00:00:00Z')"
 VALID_PROV_FILE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_file"])' "$VALID_PROV_OUT")"; VALID_PROV_SHA="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["context_sha256"])' "$VALID_PROV_OUT")"
 uberdev_agent_context_validate "$VALID_PROV_FILE" "$VALID_PROV_SHA" "$VALID_PROV_ROOT" >/dev/null
 
-# Environment role/workflow maps replace the complete corresponding project
-# map. Non-overlapping project Ultra pins must not survive, and explicit `{}`
-# is a meaningful clear rather than an absent carrier.
+# RETIRED SURFACE (#381). These three blocks asserted resolver semantics that no
+# longer exist: (1) an environment role/workflow map replaced the whole project
+# map, so a non-overlapping project `ultra` pin could not survive and `{}` was a
+# meaningful clear; (2) a `sandbox` entry in either map selected the decision's
+# sandbox with an `environment-role`/`environment-workflow` field source; (3) a
+# plain route entry in either map produced logical_route `deep` with that same
+# source label. LOST COVERAGE, named exactly that. There is no route_source, no
+# field_sources and no sandbox selection left to assert -- see RFC 0013
+# (2026-08-05 amendment).
+# What is asserted instead is the property that actually protects the user: none
+# of these shapes silently becomes a route. Every one is refused, including the
+# `{}` clear paired with a project pin, so a project `ultra` can never leak
+# through as an unannounced escalation.
 for scope in roles workflows; do
-  for env_kind in nonoverlap empty; do
+  for env_kind in nonoverlap empty sandbox route; do
     MAP_REQ="$(python3 - "$scope" "$env_kind" <<'PY'
 import json,sys
 scope,kind=sys.argv[1:]
+env={'nonoverlap':{'code-simplifier':'deep'},'empty':{},'sandbox':{'plan-writer':{'sandbox':'read-only'}},'route':{'plan-writer':'deep'}}[kind]
 if scope=='roles':
- r={'backend':'codex','workflow':'solve','phase':'plan','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','project_routing':{'roles':{'plan-writer':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_ROLES':({'code-simplifier':'deep'} if kind=='nonoverlap' else {})}}
+ r={'backend':'workflow','workflow':'solve','phase':'plan','role':'plan-writer','task_tier':'medium','risk_signals':[],'project_routing':{'roles':{'plan-writer':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_ROLES':env}}
 else:
- r={'backend':'codex','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','project_routing':{'workflows':{'solve':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':({'turbo':'deep'} if kind=='nonoverlap' else {})}}
+ env={'nonoverlap':{'turbo':'deep'},'empty':{},'sandbox':{'solve':{'sandbox':'read-only'}},'route':{'solve':'deep'}}[kind]
+ r={'backend':'workflow','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'project_routing':{'workflows':{'solve':'ultra'}},'environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':env}}
 print(json.dumps(r,separators=(',',':')))
 PY
 )"
-    MAP_DECISION="$(uberdev_agent_resolve_request "$MAP_REQ")"
-    python3 - "$MAP_DECISION" "$scope" "$env_kind" <<'PY'
-import json,sys
-d=json.loads(sys.argv[1]); scope=sys.argv[2]
-if scope=='roles': assert (d['logical_route'],d['route_source'])==('frontier','role-policy'),d
-else: assert (d['logical_route'],d['route_source'])==('quality','task-policy'),d
-assert d['logical_route']!='ultra',d
-PY
+    ! uberdev_agent_resolve_request "$MAP_REQ" >/dev/null 2>"$TMP/map-$scope-$env_kind.err"
+    grep -q route_unenforceable "$TMP/map-$scope-$env_kind.err"
+    ! grep -q ultra "$TMP/map-$scope-$env_kind.err"
   done
-done
-
-for scope in roles workflows; do
-  SANDBOX_REQ="$(python3 - "$scope" <<'PY'
-import json,sys
-if sys.argv[1]=='roles':
-    request={'backend':'codex','workflow':'solve','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_ROLES':{'plan-writer':{'sandbox':'read-only'}}}}
-else:
-    request={'backend':'codex','workflow':'solve','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':{'solve':{'sandbox':'read-only'}}}}
-print(json.dumps(request,separators=(',',':')))
-PY
-)"
-  SANDBOX_DECISION="$(uberdev_agent_resolve_request "$SANDBOX_REQ")"
-  python3 - "$SANDBOX_DECISION" "$scope" <<'PY'
-import json,sys
-decision=json.loads(sys.argv[1]); expected='environment-role' if sys.argv[2]=='roles' else 'environment-workflow'
-assert decision['sandbox']=='read-only',decision
-assert decision['field_sources']['sandbox']==expected,decision
-assert decision['route_source'] in {'role-policy','task-policy'},decision
-PY
 done
 
 # Presence is provenance: an explicit project value equal to the canonical
@@ -307,24 +358,6 @@ PY
     ! uberdev_agent_context_create "$ROOT_CASE" "$CASE_REQ" "$CASE_DECISION" "$CASE_PROV" "$META" '2026-07-10T00:00:00Z' >/dev/null 2>"$TMP/project-default-$field-$source_case.err"
     [ ! -e "$ROOT_CASE/.agent-state-$(id -u)" ]
   done
-done
-
-for scope in roles workflows; do
-  SOURCE_REQ="$(python3 - "$scope" <<'PY'
-import json,sys
-if sys.argv[1]=='roles':
-    request={'backend':'codex','workflow':'solve','role':'plan-writer','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_ROLES':{'plan-writer':'deep'}}}
-else:
-    request={'backend':'codex','workflow':'solve','role':'lead','task_tier':'medium','risk_signals':[],'routing_mode':'adaptive','environment':{'UBERDEV_MODEL_ROUTING_WORKFLOWS':{'solve':'deep'}}}
-print(json.dumps(request,separators=(',',':')))
-PY
-)"
-  SOURCE_DECISION="$(uberdev_agent_resolve_request "$SOURCE_REQ")"
-  python3 - "$SOURCE_DECISION" "$scope" <<'PY'
-import json,sys
-decision=json.loads(sys.argv[1]); expected='environment-role' if sys.argv[2]=='roles' else 'environment-workflow'
-assert (decision['logical_route'],decision['route_source'])==('deep',expected),decision
-PY
 done
 
 # A state-directory ancestor cannot be replaced by a symlink outside run root.
@@ -364,11 +397,17 @@ mkdir -p "$TMP/runtime/lib" "$TMP/runtime/policy"
 cp "$ROOT/plugins/uberdev/lib/agent-dispatch.sh" "$ROOT/plugins/uberdev/lib/model_routing.py" "$ROOT/plugins/uberdev/lib/live-semaphore.sh" "$ROOT/plugins/uberdev/lib/run_manifest.py" "$TMP/runtime/lib/"
 cp "$ROOT/plugins/uberdev/policy/model-routing-v1.json" "$TMP/runtime/policy/"
 BEFORE="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
-( . "$TMP/runtime/lib/agent-dispatch.sh"; uberdev_agent_resolve_request '{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null; uberdev_agent_resolve_request '{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null )
+( . "$TMP/runtime/lib/agent-dispatch.sh"
+  uberdev_agent_resolve_request '{"backend":"workflow","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[]}' >/dev/null
+  uberdev_agent_resolve_request '{"backend":"workflow","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[]}' >/dev/null
+  # The refusal path must be as side-effect-free as the accept path.
+  uberdev_agent_resolve_request '{"backend":"workflow","workflow":"solve","role":"plan-writer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive"}' >/dev/null 2>&1 || true )
 AFTER="$(find "$TMP/runtime" -type f -exec shasum -a 256 {} + | sort)"
 [ "$BEFORE" = "$AFTER" ]
 [ ! -d "$TMP/runtime/lib/__pycache__" ]
-BAD='{"backend":"codex","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
+BAD='{"backend":"workflow","workflow":"solve","role":"plan-writer","task_tier":"small","risk_signals":[],"routing_mode":""}'
 ! uberdev_agent_resolve_request "$BAD" >/dev/null 2>"$TMP/error"
 ! grep -q "$TMP" "$TMP/error"
-echo 'route-context: 175 checks passed'
+# NB: this was a hardcoded literal, never a counter. It is now a plain verdict
+# rather than a number the file does not actually compute.
+echo 'route-context: PASS'

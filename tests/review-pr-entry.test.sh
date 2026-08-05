@@ -4,12 +4,11 @@
 # remain provider-neutral while auto resolution lands on the transport the
 # command files actually wire.
 #
-# #381: the GENERATED Codex entrypoint half of this file is gone with the Codex
-# distribution — codex/tools/convert-commands.py no longer exists to generate
-# it and codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md no longer
-# exists to compare against. What remains is exactly the part the file's own
-# header called provider-NEUTRAL: it now drives the canonical
-# plugins/uberdev/commands/review-pr.md setup block directly.
+# #381 renamed this file from review-pr-codex-entry.test.sh. The Codex half went
+# in two steps: first the GENERATED Codex entrypoint (the distribution that
+# produced it), then the `codex` dispatch backend itself. Nothing here was about
+# Codex by the end — the file's own header always called this half
+# provider-NEUTRAL — so the assertions were kept and the name was corrected.
 
 set -euo pipefail
 
@@ -20,11 +19,13 @@ TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 
-# The three generated-skill assertions here (the `:-codex` provenance pin, its
-# export, and the carrier-backend preflight call) were retired with the
-# generated Codex entrypoint they read (#381). The canonical command has never
-# carried that pin — which is exactly what the next assertion still proves.
-if grep -q 'UBERDEV_DISPATCH_BACKEND_REQUESTED=.*codex' "$SOURCE"; then
+# The canonical command must not pin ANY transport into
+# UBERDEV_DISPATCH_BACKEND_REQUESTED: resolution belongs to preflight, and a pin
+# in the command file is how a retired transport survives its own deletion.
+# (This used to name `codex` specifically, because a generated Codex entrypoint
+# did carry such a pin. The canonical command never has — which is what this
+# still proves, now against the whole flag rather than one value.)
+if grep -qE 'UBERDEV_DISPATCH_BACKEND_REQUESTED=[^"$]' "$SOURCE"; then
   echo "canonical Claude review command must remain provider-neutral" >&2
   exit 1
 fi
@@ -58,10 +59,8 @@ printf 'fixture\n' >"$TMP/repo/README.md"
 git -C "$TMP/repo" add README.md
 git -C "$TMP/repo" commit -qm init
 
-for provider in codex claude; do
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/$provider"
-  chmod +x "$TMP/bin/$provider"
-done
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/claude"
+chmod +x "$TMP/bin/claude"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/wezterm"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/bin/wezterm-mux-server"
 chmod +x "$TMP/bin/wezterm" "$TMP/bin/wezterm-mux-server"
@@ -87,11 +86,10 @@ run_setup() {
 }
 
 # The default_result block that used to sit here asserted the GENERATED Codex
-# skill supplied `requested=codex`/`backend=codex` provenance before standalone
-# carrier setup even with CODEX_HOME absent. That provenance came from the
-# retired `:-codex` pin in a file #381 deleted; the canonical command is
-# provider-neutral by design, so there is no provenance signal left to assert.
-# Auto resolution from the canonical entry is covered below.
+# skill supplied its own backend provenance before standalone carrier setup.
+# That provenance came from a pin in a file #381 deleted; the canonical command
+# is provider-neutral by design, so there is no provenance signal left to
+# assert. Auto resolution from the canonical entry is covered below.
 
 # wezterm cannot publish the required result.md artifact for governed review
 # children, so explicit selection fails during workflow preflight. (This used to
@@ -102,18 +100,18 @@ if run_setup "$TMP/runtime-override" wezterm >"$TMP/wezterm-override.out" 2>"$TM
   echo "standalone review accepted wezterm without a result artifact" >&2
   exit 1
 fi
-grep -q 'requires a backend with result-artifact and caller-workspace repair support' \
+grep -q 'needs a backend that publishes a governed child result artifact' \
   "$TMP/wezterm-override.err"
 
 # Canonical standalone review is provider-neutral, but auto resolution is
 # workflow-aware before carrier creation. A usable macOS WezTerm or an ambient
 # Claude install must not displace the result-producing backend.
 #
-# #381 step 3: that backend is now `workflow`, not `codex`. Both `codex` and
-# `claude` are on this fixture's PATH and CODEX_HOME is unset (env -i), so the
-# resolver's own ladder is what decides — and it must land on the transport the
-# command files actually wire, never on wezterm/background, neither of
-# which can publish a governed child's result artifact.
+# #381: that backend is now `workflow`. `claude` is on this fixture's PATH and
+# the environment is scrubbed (env -i), so the resolver's own ladder is what
+# decides — and it must land on the transport the command files actually wire,
+# never on wezterm/background, neither of which can publish a governed child's
+# result artifact.
 source_auto_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
@@ -129,17 +127,20 @@ source_auto_result="$(
 }
 
 # A new standalone carrier re-resolves from the requested provider even when a
-# reused shell exports a conflicting backend from an earlier invocation.
+# reused shell exports a conflicting backend from an earlier invocation. The
+# requested value used to be `codex`; #381 deleted that backend, so the case now
+# requests the wired transport explicitly. The claim is unchanged: the stale
+# UBERDEV_RESOLVED_BACKEND export must not survive a new carrier.
 stale_result="$(
   env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
     PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
-    UBERDEV_TMPDIR="$TMP/runtime-stale" UBERDEV_DISPATCH_BACKEND_REQUESTED=codex \
+    UBERDEV_TMPDIR="$TMP/runtime-stale" UBERDEV_DISPATCH_BACKEND_REQUESTED=workflow \
     UBERDEV_RESOLVED_BACKEND=wezterm \
     RUN_ID=20260716-000004-abcdef0 PR_NUMBER=335 ARGUMENTS='' \
     bash -c 'mkdir -p "$3"; cd "$2"; . "$1"; python3 -I -B -c "import json,os; print(json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"])[\"backend\"])"' \
       _ "$TMP/source-setup.sh" "$TMP/repo" "$TMP/runtime-stale"
 )"
-[ "$stale_result" = codex ]
+[ "$stale_result" = workflow ]
 
 # Standalone simplify uses the same workflow-aware boundary. This covers the
 # complete setup-to-fixer handoff contract: auto/stale routing resolves the

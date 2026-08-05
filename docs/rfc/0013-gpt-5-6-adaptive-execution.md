@@ -2,12 +2,98 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | Accepted |
+| **Status** | Accepted — **AMENDED 2026-08-05** (see §0) |
 | **Author** | TheFJK |
 | **Created** | 2026-07-09 |
 | **Tier** | Large, multi-release optimization program |
 | **Target ver** | 0.40.0–0.42.0: routing foundation → agent behavior → workflow efficiency |
 | **Related** | RFC 0012 (`docs/rfc/0012-ultracode-workflow-orchestration.md`), RFC 0004 (`docs/rfc/0004-cross-platform-dispatch-backends.md`), Codex port v0.39.0–v0.39.1 |
+
+---
+
+## 0. AMENDMENT — 2026-08-05: adaptive per-rank routing is unenforceable and has been retired
+
+**Issue #381. Applies to every section below that promises a concrete model,
+reasoning effort, service tier or sandbox. Those promises are no longer kept,
+and the code that made them has been deleted rather than left unreachable.**
+
+### 0.1 Why it is unenforceable
+
+This RFC's whole mechanism depends on one assumption, stated in §1: UberDev owns
+the provider invocation, so it can pass `-m` and `model_reasoning_effort` per
+child. That was only ever true of the Codex CLI backend. Issue #381 retired that
+backend — `codex` is no longer in `_UBERDEV_DISPATCH_BACKEND_ENUM`
+(`plugins/uberdev/lib/dispatch.sh:462`), and `--backend=codex` is now an enum
+error.
+
+Every remaining backend (`workflow`, `wezterm`, `background`) launches an agent
+that **inherits the ambient model and effort of the session it runs in**. There
+is no argument to set, so a resolved (model, reasoning_effort) pair is a value
+UberDev can compute and then cannot apply. Shipping it would have meant printing
+a route in telemetry that the provider never honoured.
+
+### 0.2 What replaced it
+
+`plugins/uberdev/lib/agent-dispatch.sh` now resolves **backend-neutral inherit**
+for every request: `route_source: "backend-neutral-inherit"`, with
+`logical_route`, `model`, `reasoning_effort`, `minimum_route` and `sandbox` all
+`null`. A request that names anything concrete — `explicit_route`,
+`explicit_model`, `explicit_effort`, a non-`default` service tier,
+`routing_mode: adaptive`, a forced parent, or a project/environment
+role/workflow override — is refused with the typed code **`route_unenforceable`**
+instead of being silently downgraded to inherit. Refusing is the point: a user
+who asks for Sol-Ultra learns that it cannot be honoured rather than believing it
+was.
+
+### 0.3 What was deleted
+
+- `lib/model_routing.py` lost `resolve_route`, `fallback_route`,
+  `validate_catalog`, `_route_provider`, `_canonical_pair`,
+  `_ranked_exact_route`, `_apply_catalog_availability`, the whole
+  precedence/provenance/shadow machinery, and the `resolve` /
+  `fallback` / `validate-catalog` JSON CLI. The module is library-only now
+  (1732 → ~350 lines).
+- `policy/model-routing-v1.json` lost the per-route `codex` provider block
+  (`model` + `reasoning_effort` + `service_tier`) — a route row is now a
+  capability **rank** and nothing else — and lost `plan-writer.tier_routes`,
+  which only the concrete resolver read.
+- `lib/agent-dispatch.sh` lost the router import, the policy load, the
+  synthesised catalog and the injectable `UBERDEV_MODEL_CATALOG_FILE` seam.
+- `tests/fixtures/model-routing/catalog-*.json` and `precedence-cases.json`.
+
+### 0.4 What is still live, and why
+
+- **`load_policy` + `_validate_policy` + `classify_minimum_route`.** These
+  answer a *logical* question — given a tier, a role and risk signals, what is
+  the lowest capability rank this invocation may run at — which needs no
+  provider. `lib/config-read.sh:399-422` loads the policy through them to
+  validate a project `model_routing:` block.
+- **Project-config validation.** Kept deliberately. It blocked on one thing:
+  `config-read.sh` built its accepted reasoning-effort set by scraping
+  `routes[*].codex.reasoning_effort`. That set is now **declared** as a
+  top-level `reasoning_efforts` key in the policy, validated against
+  `_CANONICAL_REASONING_EFFORTS`. The accepted tokens are byte-identical to
+  before (`low`, `medium`, `high`, `max`, `ultra`) — only the source moved from
+  derived to declared. Validation still catches a typo'd effort or an unknown
+  role at config-read time; the resulting override is then *refused* at dispatch
+  with `route_unenforceable` rather than pretended-at.
+- **The route/alias vocabulary.** `lib/solve_triage.py:342` still reads
+  `routes` + `aliases` to validate `--route=`. The flag parses and the dispatch
+  then refuses it — deliberately, per §0.2.
+
+### 0.5 Breaking
+
+A user-supplied `UBERDEV_ROUTING_POLICY_FILE` written against the old schema
+(per-route `codex` blocks, `plan-writer.tier_routes`, no `reasoning_efforts`)
+now **fails closed** in `_validate_policy`. That is the intended behaviour: a
+policy naming provider pairs is a policy about a backend that no longer exists.
+`policy_version` was bumped `2026-07-09` → `2026-08-05`.
+
+### 0.6 If a provider-owning backend ever returns
+
+Restore this from the RFC body plus git history, not from a partial catalog. The
+non-negotiable is the one this amendment exists to record: **do not reintroduce
+a routing engine before there is a dispatch path that can enforce it.**
 
 ---
 

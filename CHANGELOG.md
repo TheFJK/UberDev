@@ -30,6 +30,93 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Removed
 
+- **BREAKING — adaptive per-rank model routing is retired as unenforceable**
+  (#381, RFC 0013 §0 amendment 2026-08-05). With the `codex` backend gone,
+  UberDev no longer owns any provider invocation: `workflow`, `wezterm` and
+  `background` children all inherit the ambient model and reasoning effort, so a
+  resolved (model, reasoning_effort) pair was a value the resolver could compute
+  and then never apply. Rather than ship a routing engine no dispatch path can
+  enter, it is deleted.
+
+  `lib/model_routing.py` loses `resolve_route`, `fallback_route`,
+  `validate_catalog`, the whole precedence/provenance/shadow/fallback machinery
+  and the `resolve` / `fallback` / `validate-catalog` JSON CLI — 1732 lines down
+  to ~350, library-only. `policy/model-routing-v1.json` loses the per-route
+  `codex` provider block (a route row is now a capability **rank** and nothing
+  else) and `plan-writer.tier_routes`, which only the concrete resolver read.
+  `lib/agent-dispatch.sh` loses the router import, the policy load, the
+  synthesised catalog and the injectable `UBERDEV_MODEL_CATALOG_FILE` seam.
+
+  **The refusal is deliberate, not a downgrade to silence.** A request naming
+  `explicit_route`, `explicit_model`, `explicit_effort`, a non-`default` service
+  tier, `routing_mode: adaptive`, a forced parent, or any project/environment
+  role/workflow override fails with the typed code `route_unenforceable`. A user
+  who asks for Sol-Ultra is told it cannot be honoured instead of believing it
+  was applied.
+
+  **Project `model_routing:` validation is kept and still works.** It blocked on
+  one thing: `lib/config-read.sh` built its accepted reasoning-effort set by
+  scraping the deleted provider blocks. That vocabulary is now **declared** as a
+  top-level `reasoning_efforts` key in the policy. The accepted tokens are
+  byte-identical to before (`low`, `medium`, `high`, `max`, `ultra`) — only the
+  source moved from derived to declared — so a typo'd effort or unknown role is
+  still caught at config-read time.
+
+  **Still live:** `load_policy`, `_validate_policy` and `classify_minimum_route`
+  (the logical floor classifier, reached from `lib/config-read.sh`), plus the
+  route/alias vocabulary `lib/solve_triage.py` validates `--route=` against.
+
+  **BREAKING for custom policies:** a `UBERDEV_ROUTING_POLICY_FILE` written
+  against the old schema now **fails closed** in `_validate_policy`.
+  `policy_version` is bumped `2026-07-09` → `2026-08-05`.
+
+  **Coverage cost, stated rather than absorbed:** `tests/model-routing.test.sh`
+  drops from ~562 checks to 314. Lost with the engine: concrete pair selection
+  per route/alias/tier and every field-source provenance label, `forced` /
+  `forced-parent` inheritance and `route_conflict`, `route_below_risk_floor`,
+  shadow mode and its `adaptive_proposal`, `ignored_sources` / `ignored_fields`
+  precedence, sandbox selection from override entries, catalog availability
+  fallback and its `fallback_chain`, and CLI byte-determinism. Each retargeted
+  file names its own loss inline; `tests/fixtures/model-routing/catalog-*.json`
+  and `precedence-cases.json` are deleted.
+
+- **BREAKING — the `codex` dispatch backend is deleted** (#381).
+  `--backend=codex` is now an enum error, `auto` has exactly one answer
+  (`workflow`) on every host and OS class, and the two Codex-environment escapes
+  that used to pre-empt the resolver (`CODEX_HOME` set; `claude` absent with
+  `codex` present) are gone with no replacement. Deleted with it:
+  `_uberdev_dispatch_codex` and its whole worktree-receipt transaction family in
+  `lib/dispatch.sh`, `lib/worktree_receipts.py`, and the `codex` arms of the
+  cancellation path, the provider boundary, and the run-artifact naming switch.
+  `--effort=ultra` was an exact Codex route field, so it is now refused
+  unconditionally rather than "unless the backend is codex".
+
+  **BREAKING consequence — `/review-pr` Phase 3 CI classification and the CI
+  fixers are UNAVAILABLE.** `review_pr.ci.*` are routed children and
+  `lib/dispatch.sh` has no `workflow` provider arm for them (RFC 0012 §3.1, "Not
+  built in P2"); the `codex` backend was the only arm that could run them, and
+  the two remaining detached backends are refused by
+  `uberdev_dispatch_preflight_backend` because neither publishes a governed
+  child result artifact. A **green** CI probe still completes normally and
+  reaches the trust anchor; a **red** one halts loudly at 6c.3 CLASSIFY with
+  `subreason=ci_transport_unsupported`. **`--no-ci-fix` is the supported mode**
+  until Phase 3 is rebuilt Workflow-natively. This is a capability the release
+  no longer has, not a configuration an operator can fix — see
+  `commands/review-pr.md` §6c.
+
+  **`wezterm|background` are still refused for `/review-pr` and `/simplify`.**
+  Only the `codex) ;;` arm was removed from that preflight case; the live
+  refusal for the two remaining selectable detached transports stays, so
+  `/review-pr --backend=background` is still rejected rather than silently
+  admitted.
+
+  **Coverage cost, stated rather than absorbed:** `tests/worktree-receipts.test.sh`
+  was the only native-Windows runtime coverage for dispatcher-owned worktree
+  teardown. Its successor,
+  `tests/dispatch-child-worktree-teardown.test.sh`, is declared Unix-only, so the
+  `ci-wiring` W7 invariant now requires that teardown on Linux and macOS only.
+  The teardown *code* remains portable; the *fixture* is not.
+
 - **BREAKING — the Codex CLI distribution is retired** (#381). The entire `codex/`
   tree (225 files: the `uberdev-codex` native plugin, the 44 `codex/agents/*.toml`
   subagents, `install-codex.sh`, and `codex/tools/`) is deleted, along with
@@ -39,10 +126,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   trees were byte-identical to `plugins/uberdev/lib` — so nothing unique was lost,
   but UberDev no longer installs into the OpenAI Codex CLI at all.
 
-  **The `codex` DISPATCH BACKEND is unaffected.** `--backend=codex` still exists in
-  `plugins/uberdev/lib/dispatch.sh` and still spawns `codex exec` sessions from a
-  Claude Code host. What is gone is the *port* — running UberDev's own commands
-  inside a Codex session.
+  (This entry originally added "the `codex` DISPATCH BACKEND is unaffected". It
+  no longer is — the next entry deletes it.)
 
   **Uninstalling an existing Codex install.** These are the three artifacts the
   installer wrote; remove them by hand:

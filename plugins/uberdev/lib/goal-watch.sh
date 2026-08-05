@@ -293,46 +293,16 @@ while true; do
     if _uberdev_goal_watch_solver_busy "$issue"; then
       any_active=1
     else
-      _codex_state=""
-      _codex_exit=""
-      _codex_log=""
-      _codex_result=""
-      # Same reasoning as the liveness probe: the Codex status sidecar belongs
-      # to the SOLVER, so this branch keys on the solver backend, not on the
-      # child transport pinned above.
-      if [ "${UBERDEV_GOAL_SOLVER_BACKEND:-${UBERDEV_RESOLVED_BACKEND:-}}" = "codex" ]; then
-        if _codex_status="$(uberdev_goal_codex_status_for_issue "$issue")"; then
-          _codex_state="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $1}')"
-          _codex_exit="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $2}')"
-          _codex_log="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $3}')"
-          _codex_result="$(printf '%s' "$_codex_status" | awk -F '\t' '{print $4}')"
-        else
-          _codex_status_rc=$?
-          if [ "$_codex_status_rc" -eq 2 ]; then
-            printf 'goal-pipeline: invalid Codex status for issue %s — failing solver instead of waiting for timeout\n' "$issue" >&2
-            uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
-              || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (invalid status file)\n' "$issue" >&2
-            _uberdev_goal_phase2_release_claim "$issue" "invalid_status"
-            uberdev_goal_audit goal_circuit_breaker \
-              "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"invalid_status\",\"exit_code\":null}"
-            _uberdev_goal_reap_zombies || true
-            print_summary "$cycle"
-            exit 1
-          fi
-        fi
-        if [ "$_codex_state" = "failed" ]; then
-          printf 'goal-pipeline: codex agent for issue %s failed (exit_code=%s; log=%s; result=%s)\n' \
-            "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
-          uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
-            || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports failed)\n' "$issue" >&2
-          _uberdev_goal_phase2_release_claim "$issue" "codex_failed"
-          uberdev_goal_audit goal_circuit_breaker \
-            "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"failed\",\"exit_code\":${_codex_exit:-null}}"
-          _uberdev_goal_reap_zombies || true
-          print_summary "$cycle"
-          exit 1
-        fi
-      fi
+      # #381: the Codex solver-status sidecar branch lived here. It read
+      # solve-codex-status-<ISSUE>.json through uberdev_goal_codex_status_for_issue
+      # so a failed `codex exec` failed the issue immediately instead of waiting
+      # out SOLVE_TIMEOUT. It keyed on
+      # UBERDEV_GOAL_SOLVER_BACKEND/UBERDEV_RESOLVED_BACKEND == "codex", which
+      # _UBERDEV_DISPATCH_BACKEND_ENUM can no longer produce, and its helper was
+      # deleted from lib/goal-state.sh. No replacement: `background` has no
+      # equivalent sidecar and `workflow` reports through the Workflow runtime's
+      # structured return, so both fall through to the closed-issue probe and the
+      # SOLVE_TIMEOUT path below exactly as they did before.
       # Issue #249 — issue may have been legitimately closed without a PR
       # (orchestrator marked it stale / already-resolved / non-actionable —
       # concrete prior cases: #226 / #227). Probe GitHub state before falling
@@ -373,18 +343,12 @@ while true; do
           "$issue" "$gh_rc" >&2
         any_active=1
         continue
-      elif [ "$_codex_state" = "completed" ]; then
-        printf 'goal-pipeline: codex agent for issue %s completed without a PR or closed issue (exit_code=%s; log=%s; result=%s)\n' \
-          "$issue" "${_codex_exit:-unknown}" "${_codex_log:-unknown}" "${_codex_result:-unknown}" >&2
-        uberdev_goal_issue_state_transition "$GOAL_ID" "$issue" solving failed \
-          || printf 'goal-pipeline: WARN transition solving->failed failed for Codex issue %s (status file reports completed without PR)\n' "$issue" >&2
-        _uberdev_goal_phase2_release_claim "$issue" "codex_completed_no_pr"
-        uberdev_goal_audit goal_circuit_breaker \
-          "{\"reason\":\"solver_failed\",\"issue\":$issue,\"backend\":\"codex\",\"state\":\"completed\",\"exit_code\":${_codex_exit:-null}}"
-        _uberdev_goal_reap_zombies || true
-        print_summary "$cycle"
-        exit 1
       fi
+      # #381: an `elif [ "$_codex_state" = completed ]` arm sat here. It failed
+      # the issue immediately when the Codex sidecar reported a clean exit with
+      # no PR and no closed issue. $_codex_state was only ever set by the
+      # deleted sidecar branch above, so the arm was already unreachable; both
+      # surviving backends fall through to the SOLVE_TIMEOUT backstop below.
       dispatch_ts="$(uberdev_goal_issue_ts_in_state "$GOAL_ID" "$issue" solving 2>/dev/null)"
       # RFC 0015 §5 — UBERDEV_GOAL_SOLVERS_SETTLED short-circuits the wait.
       # _UBERDEV_GOAL_SOLVE_TIMEOUT (150m) answers "is the DETACHED solver still

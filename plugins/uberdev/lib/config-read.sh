@@ -416,9 +416,10 @@ def policy_data(path, validator_path):
     aliases = policy["aliases"]
     roles = policy["roles"]
     route_names = set(routes)
-    efforts = set()
-    for row in routes.values():
-        efforts.add(row["codex"]["reasoning_effort"])
+    # Reads the declared vocabulary rather than scraping it out of per-route
+    # provider blocks, which no longer exist (#381). The accepted token set is
+    # unchanged; only its source moved from derived to declared.
+    efforts = set(policy["reasoning_efforts"])
     return route_names | set(aliases), set(roles), efforts
 
 def scalar(raw):
@@ -614,7 +615,9 @@ _uberdev_routing_policy_file() {
   # ${PWD}/codex/uberdev-codex/policy/model-routing-v1.json until issue #381
   # deleted that tree; it is unreachable, not merely unused. The CODEX_HOME
   # branch above is a different thing and stays — it resolves an INSTALLED
-  # Codex runtime, which the `codex` dispatch backend still targets.
+  # Codex runtime: `.codex/uberdev.local.md` is still a supported project
+  # config family (`project-codex` provenance), independent of the deleted
+  # `codex` dispatch backend.
   candidate="${PWD}/plugins/uberdev/policy/model-routing-v1.json"
   if [ -r "$candidate" ]; then
     printf '%s' "$candidate"

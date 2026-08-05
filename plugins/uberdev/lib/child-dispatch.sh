@@ -943,7 +943,7 @@ PY
 
 _uberdev_child_backend_cancellation_supported() {
   case "$1" in
-    codex|background) _uberdev_dispatch_numeric_supervision_supported "$1" ;;
+    background) _uberdev_dispatch_numeric_supervision_supported "$1" ;;
     wezterm) command -v wezterm >/dev/null 2>&1 ;;
     # A Workflow child is awaited in-process and is cancelled by the calling
     # session's own abort signal, so there is no external binary to probe and
@@ -1013,7 +1013,7 @@ try:
  if not isinstance(s,dict) or set(s)-allowed or s.get('state') not in states: raise ValueError()
  backend=s.get('backend')
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','background','wezterm','workflow'}: raise ValueError()
+ if backend not in {'background','wezterm','workflow'}: raise ValueError()
  process_identity=s.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=s.get('lease_generation')
@@ -1107,14 +1107,14 @@ def watcher_message(path):
  owner_capture_reasons={'owner_process_identity_unavailable'}
  if reason and reason not in cancel_reasons|timeout_reasons|lease_reasons|owner_capture_reasons|{'supervisory_failure'}: raise ValueError()
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','background','wezterm','workflow'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
+ if backend not in {'background','wezterm','workflow'} or type(attempts) is not int or attempts<1 or attempts>3: raise ValueError()
  if not isinstance(handle,str) or len(handle)>256 or (handle and not all(ch.isalnum() or ch in '._:-' for ch in handle)): raise ValueError()
  if not isinstance(terminal,str) or len(terminal)>128: raise ValueError()
  if reason in owner_capture_reasons and not (error=='launch_finalize_failed' and not handle and terminal=='launch:owner_process_identity' and attempts==1): raise ValueError()
  if error=='process_identity_probe_failed':
-  if backend not in {'codex','background'} or not handle.isdigit() or terminal!='process_identity_probe_unavailable' or attempts!=3: raise ValueError()
+  if backend not in {'background'} or not handle.isdigit() or terminal!='process_identity_probe_unavailable' or attempts!=3: raise ValueError()
  elif error=='timeout_intent_recovery_failed':
-  if backend not in {'codex','background'} or not handle.isdigit() or terminal!='timeout_intent_recovery_failed' or attempts!=1 or reason not in timeout_reasons: raise ValueError()
+  if backend not in {'background'} or not handle.isdigit() or terminal!='timeout_intent_recovery_failed' or attempts!=1 or reason not in timeout_reasons: raise ValueError()
  elif error=='launch_finalize_failed':
   if handle or not re.fullmatch(r'launch:[a-z][a-z0-9_]{0,63}',terminal): raise ValueError()
   if terminal=='launch:owner_process_identity':
@@ -1146,7 +1146,7 @@ try:
  if not isinstance(value,dict) or set(value)-allowed or value.get('state') not in {'running','completed','failed','timed_out','cancelled'}: raise ValueError()
  backend=value.get('backend')
  # CONTRACT: dispatch-backend -auto
- if backend not in {'codex','background','wezterm','workflow'}: raise ValueError()
+ if backend not in {'background','wezterm','workflow'}: raise ValueError()
  process_identity=value.get('process_identity')
  if process_identity is not None and (not isinstance(process_identity,str) or not re.fullmatch(r'[1-9][0-9]*\|[1-9][0-9]*\|[1-9][0-9]*\|[0-9a-f]{64}',process_identity)): raise ValueError()
  lease_generation=value.get('lease_generation')

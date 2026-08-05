@@ -212,11 +212,11 @@ CONTRACTS: dict[str, list[str]] = {
     # rank 8 — terminal `state` a per-run status FILE may legally carry (4).
     # Three copies retired with the detached-session backend: the probe that
     # PRODUCED the vocabulary one word per arm, its supervision-lane case, and
-    # the opaque-handle cancel probe in lib/dispatch.sh.
-    # The SECOND lib/dispatch.sh copy is the backend-neutral child-worktree
-    # teardown gate added for #381 RULING 4 — it admits the same four terminal
-    # states plus this path's own `setup_failed`, exactly like the codex arm it
-    # was ported from, so both copies must keep agreeing.
+    # the opaque-handle cancel probe in lib/dispatch.sh. A FOURTH went with the
+    # codex arm in #381 — its cleanup gate declared the same four states plus
+    # that path's own `setup_failed`. The single surviving lib/dispatch.sh copy
+    # is the backend-neutral child-worktree teardown gate (#381 RULING 4), which
+    # carries that vocabulary now.
     "run-terminal-status": [
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
@@ -227,7 +227,6 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/code_fixer_contract.py",
-        "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/run_manifest.py",
         "lib/run_manifest.py",
@@ -325,12 +324,25 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
         ("plugins/uberdev/commands/solve.md", "multiple issue numbers run in parallel.", _COMMAND_PROSE),
         ("plugins/uberdev/commands/turbo.md", "auto-accepts brainstorm recommendations", _COMMAND_PROSE),
         ("plugins/uberdev/commands/turbo.md", "with **brainstorm Q&", _COMMAND_PROSE),
-        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "it instead dispatches one autonomous session per issue", _PROSE),
+
         ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "Monitor via `/workflows`", _PROSE),
         ("plugins/uberdev/commands/solve.md", "selects how `/solve` runs each per-issue solver", _COMMAND_PROSE),
         ("plugins/uberdev/commands/turbo.md", "selects how `/turbo` runs each per-issue solver", _COMMAND_PROSE),
         ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "one of: auto, workflow", _PROSE),
         ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "precedence (RFC 0004 / RFC 0012)", _PROSE),
+        # #381 shrank the enum from five members to four, so every restatement
+        # that names three of them now crosses the 3-of-N discovery threshold
+        # it used to sit under. These are prose or error strings, not
+        # declarations: none of them is the set anything is validated against.
+        ("plugins/uberdev/commands/testers.md", "Now invoke the `uberdev:testers-pipeline` skill", _COMMAND_PROSE),
+        ("plugins/uberdev/lib/dispatch.sh", "host can execute with --backend=wezterm or --backend=background.", _PROSE),
+        ("plugins/uberdev/lib/dispatch.sh", "needs a backend that publishes a governed child result artifact", _PROSE),
+        ("plugins/uberdev/lib/dispatch.sh", "wezterm|background) uberdev_dispatch_resolve_env", _PROSE),
+        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "On a detached backend", _PROSE),
+        # The #381 model-routing unenforceability notice. It names the surviving
+        # transports to explain WHY per-rank routing cannot be honoured; it is
+        # not the set anything validates against.
+        ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "longer owns the provider invocation", _PROSE),
     ],
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),

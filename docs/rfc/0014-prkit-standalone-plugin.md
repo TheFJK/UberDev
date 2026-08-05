@@ -108,7 +108,7 @@ Source paths under `plugins/uberdev/`. Authoritative, verified copy set.
 
 **skills/ (2 + skill-local lib):** `post-impl-review/SKILL.md`, `merge-pipeline/SKILL.md`, `merge-pipeline/lib/discover.sh`
 
-**lib/ (14):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `atomic_move.py`, `worktree_receipts.py`, `code_fixer_contract.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh`
+**lib/ (13):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `atomic_move.py`, `code_fixer_contract.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh` (`worktree_receipts.py` was removed in #381 with the codex dispatch backend, its only caller)
 
 **policy/ (2):** `model-routing-v1.json`, `solve-run-tree-v1.json` — default routing policy and canonical child run-tree projection loaded by copied runtime code.
 

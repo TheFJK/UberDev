@@ -85,10 +85,14 @@ for wf in review-pr simplify; do
   [ "$rc" = 0 ] \
     && pass "S1 uberdev_dispatch_preflight_backend workflow $wf returns 0 (the wiring is reachable)" \
     || fail "S1 uberdev_dispatch_preflight_backend workflow $wf returned $rc — the wiring is unreachable"
+  # INVERTED (#381): this asserted codex was STILL accepted here. `codex` is out
+  # of _UBERDEV_DISPATCH_BACKEND_ENUM, so uberdev_dispatch_preflight_backend must
+  # now refuse it through its unknown-backend `*)` arm for both governed
+  # workflows -- the same shape S3 locks for wezterm/background.
   rc="$(backend_probe codex "$wf")"
-  [ "$rc" = 0 ] \
-    && pass "S2 codex is still accepted for $wf (the default transport is untouched)" \
-    || fail "S2 codex is no longer accepted for $wf"
+  [ "$rc" != 0 ] \
+    && pass "S2 codex is refused for $wf (the transport is gone, not merely unselected)" \
+    || fail "S2 codex is still accepted for $wf — a deleted backend must not preflight clean"
 done
 
 # S3 — nothing was weakened for the backends that never met the bar.
@@ -117,13 +121,15 @@ fi
 # ---------------------------------------------------------------------------
 echo "== S5-S9: auto resolves workflow, and never resolves an unexecutable one =="
 
-# auto_probe DISPATCH_FILE WORKFLOW CODEX_AVAILABLE -> "<rc>|<resolved>|<stderr>"
+# auto_probe DISPATCH_FILE WORKFLOW -> "<rc>|<resolved>|<stderr>"
 #
-# `_uberdev_dispatch_codex_available` is redefined AFTER the source, which is
-# exactly the mission-test stub: it isolates the resolution logic from whether
-# this particular host happens to have the codex binary on PATH.
+# #381: this used to take a CODEX_AVAILABLE argument and stub
+# `_uberdev_dispatch_codex_available` after the source. That function no longer
+# exists, so the stub was an inert no-op — the probe read as though it isolated
+# resolution from the host's codex binary while isolating nothing. Resolution is
+# now genuinely codex-independent, which is the property S5/S7 assert.
 auto_probe() {
-  local dispatch_file="$1" wf="$2" avail="$3" errfile="$TMP/auto-probe.err"
+  local dispatch_file="$1" wf="$2" errfile="$TMP/auto-probe.err"
   # preflight EXPORTS its answer, so it must not run inside a command
   # substitution — that subshell would discard UBERDEV_RESOLVED_BACKEND and
   # every probe would read back empty. stderr goes to a file instead.
@@ -132,14 +138,10 @@ auto_probe() {
     bash -c '
       set +e
       . "$1" >/dev/null 2>&1
-      # $3 must be read BEFORE the function body: inside it, $3 would rebind to
-      # the function call'"'"'s own (absent) third positional parameter.
-      _UBERDEV_TEST_CODEX_RC="$3"
-      _uberdev_dispatch_codex_available() { return "$_UBERDEV_TEST_CODEX_RC"; }
       unset UBERDEV_RESOLVED_BACKEND
-      uberdev_dispatch_preflight "$2" >/dev/null 2>"$4"
+      uberdev_dispatch_preflight "$2" >/dev/null 2>"$3"
       printf "%s|%s" "$?" "${UBERDEV_RESOLVED_BACKEND-}"
-    ' _ "$dispatch_file" "$wf" "$avail" "$errfile"
+    ' _ "$dispatch_file" "$wf" "$errfile"
   )"
   printf '%s|%s' "$out" "$(tr '\n' ' ' <"$errfile" 2>/dev/null)"
 }
@@ -147,7 +149,7 @@ auto_probe() {
 # S5 — THE MISSION TEST. codex unavailable, and auto must still resolve a
 # concrete, wired backend for both governed workflows.
 for wf in review-pr simplify; do
-  probe="$(CODEX_HOME='' auto_probe "$DISPATCH" "$wf" 1)"
+  probe="$(CODEX_HOME='' auto_probe "$DISPATCH" "$wf")"
   rc="${probe%%|*}"; rest="${probe#*|}"; resolved="${rest%%|*}"; err="${rest#*|}"
   if [ "$rc" = 0 ] && [ "$resolved" = workflow ]; then
     pass "S5 uberdev_dispatch_preflight $wf resolves workflow with codex unavailable"
@@ -156,32 +158,37 @@ for wf in review-pr simplify; do
   fi
 done
 
-# S6 — codex is NOT deleted by this flip: it stays explicitly selectable, which
-# is the whole reason /review-pr Phase 3 still has an escape hatch.
+# S6 — INVERTED (#381). This asserted codex was NOT deleted by the default flip
+# and stayed explicitly selectable as /review-pr Phase 3's escape hatch. Step 4
+# deleted it: there is no escape hatch any more (--no-ci-fix is the supported
+# mode, see commands/review-pr.md 6c). An explicit --backend=codex must fail the
+# enum check and leave UBERDEV_RESOLVED_BACKEND UNSET — a nonzero rc that still
+# exported a backend would be worse than the old behaviour.
 for wf in review-pr simplify; do
   probe="$(
     bash -c '
       set +e
       . "$1" >/dev/null 2>&1
-      _uberdev_dispatch_codex_available() { return 0; }
       unset UBERDEV_RESOLVED_BACKEND
       UBERDEV_DISPATCH_BACKEND_REQUESTED=codex uberdev_dispatch_preflight "$2" >/dev/null 2>&1
       printf "%s|%s" "$?" "${UBERDEV_RESOLVED_BACKEND-}"
     ' _ "$DISPATCH" "$wf"
   )"
-  [ "$probe" = "0|codex" ] \
-    && pass "S6 --backend=codex still resolves codex for $wf" \
-    || fail "S6 --backend=codex for $wf gave '$probe'"
+  [ "$probe" = "1|" ] \
+    && pass "S6 --backend=codex is refused for $wf and resolves nothing" \
+    || fail "S6 --backend=codex for $wf gave '$probe' (want '1|')"
 done
 
-# S7 — a Codex session has no Claude Workflow tool to mandate, so auto must
-# keep choosing codex there. This arm is what stops the flip from resolving a
-# backend the HOST cannot execute.
+# S7 — INVERTED (#381). This asserted that an ambient CODEX_HOME made `auto`
+# keep choosing codex, because a Codex session has no Claude Workflow tool to
+# mandate. That CODEX_HOME escape ran BEFORE the per-OS matrix and was deleted
+# with the transport (lib/dispatch.sh:635-637): `auto` has exactly one answer
+# now, and an ambient environment variable must not steer it.
 for wf in review-pr simplify; do
-  probe="$(CODEX_HOME="$TMP/fake-codex-home" auto_probe "$DISPATCH" "$wf" 0)"
-  [ "${probe%%|*}" = 0 ] && [ "$(echo "$probe" | cut -d'|' -f2)" = codex ] \
-    && pass "S7 auto still resolves codex for $wf inside a Codex session (CODEX_HOME set)" \
-    || fail "S7 auto inside a Codex session gave '$probe' for $wf"
+  probe="$(CODEX_HOME="$TMP/fake-codex-home" auto_probe "$DISPATCH" "$wf")"
+  [ "${probe%%|*}" = 0 ] && [ "$(echo "$probe" | cut -d'|' -f2)" = workflow ] \
+    && pass "S7 auto resolves workflow for $wf even with CODEX_HOME set (the escape is gone)" \
+    || fail "S7 auto with CODEX_HOME set gave '$probe' for $wf (want rc 0, resolved workflow)"
 done
 
 # S8/S9 — the fail-loud arm for a host that cannot execute the Workflow, built

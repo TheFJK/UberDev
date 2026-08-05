@@ -54,9 +54,9 @@ _uberdev_agent_error() {
 # the detached `claude --bg` review/simplify fanout, whose children could not
 # service an interactive Claude permission prompt and had no operator attached
 # to answer one. That transport is gone (RFC 0015 §7 as amended). The remaining
-# review/simplify backends do not need it: `workflow` children inherit the
-# calling session's permission tier by construction, and `codex` runs
-# `--ask-for-approval never`.
+# review/simplify backend does not need it: `workflow` children inherit the
+# calling session's permission tier by construction. (`codex` was the other
+# non-prompting transport; #381 deleted it, so `workflow` is the whole set.)
 
 _uberdev_agent_json_get() {
   local raw="$1" key="$2"
@@ -228,12 +228,19 @@ print(path, end="")
 # `project_routing`, and an already-normalized descendant decision in
 # `parent_run`. Empty-string carrier values are rejected instead of silently
 # changing provenance.
+#
+# The resolution itself is backend-neutral since #381: every shipped backend
+# inherits the ambient model, so a request that names a concrete route, model,
+# effort, non-default service tier or project/environment override is refused
+# with `route_unenforceable` rather than resolved against a catalog nothing can
+# act on. There is no longer a router import, a policy load or an injectable
+# catalog here. See RFC 0013 (2026-08-05 amendment).
 _uberdev_agent_resolve_request_internal() {
-  local request_json="${1:-}" injected="${UBERDEV_MODEL_CATALOG_FILE:-}"
+  local request_json="${1:-}"
   [ "$#" -eq 1 ] || { _uberdev_agent_error 'resolve_request expects REQUEST_JSON'; return 2; }
   python3 -I -B -c '
-import hashlib, importlib.util, json, os, pathlib, stat, sys
-request_raw, policy_path, router_path, catalog_path = sys.argv[1:]
+import json, os, stat, sys
+request_raw, = sys.argv[1:]
 try:
     request=json.loads(request_raw)
     if not isinstance(request,dict): raise ValueError("request_not_object")
@@ -246,14 +253,15 @@ try:
     if workspace_mode=="isolated":
         if workspace_dir is not None: raise ValueError("unexpected_workspace_dir")
     else:
-        repository_id=request.get("repository_id"); backend=request.get("backend","codex")
+        repository_id=request.get("repository_id"); backend=request.get("backend","workflow")
         # workflow admitted per #381: skills/scan-fleet/workflow.js already runs
         # uberdev:code-fixer agents against the CALLER checkout with no worktree
         # isolation (git forbids two worktrees on one branch), writing a
         # digest-bound disposition artifact. Caller-workspace repair on this
-        # backend is shipped behaviour, not a new capability.
+        # backend is shipped behaviour, not a new capability. codex was the
+        # other admitted backend and #381 deleted it, so workflow is the set.
         # NB: this block is a single-quoted shell string -- no apostrophes.
-        if backend not in {"codex","workflow"}: raise ValueError("workspace_mode_unsupported")
+        if backend not in {"workflow"}: raise ValueError("workspace_mode_unsupported")
         if not isinstance(workspace_dir,str) or not os.path.isabs(workspace_dir) or not os.path.isdir(workspace_dir): raise ValueError("invalid_workspace_dir")
         entry=os.lstat(workspace_dir)
         reparse=getattr(entry,"st_file_attributes",0)&getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0)
@@ -293,67 +301,25 @@ try:
             validate_project(project["model_routing"])
         else: validate_project(project)
     routing={key:value for key,value in request.items() if key not in {"schema_version","run_dir","run_id","repository_id","issue_or_pr","issue_num","capacity","timeout_s","parent_run_id","agent_id","context_file","context_sha256","root_decision","triage_decision","workspace_mode","workspace_dir"}}
-    backend=routing.get("backend","codex")
-    if backend!="codex":
-        project=request.get("project_routing") or request.get("project_config") or {}
-        if isinstance(project,dict) and "model_routing" in project: project=project["model_routing"]
-        role=routing.get("role","lead"); workflow=routing.get("workflow","")
-        project_concrete=(project.get("service_tier") not in (None,"","default") or (isinstance(project.get("roles"),dict) and project["roles"].get(role) is not None) or (isinstance(project.get("workflows"),dict) and project["workflows"].get(workflow) is not None))
-        environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default") or any(environment.get(key) for key in ("UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"))
-        service=routing.get("explicit_service_tier") or environment.get("UBERDEV_SERVICE_TIER") or project.get("service_tier") or "default"
-        adaptive_requested=(routing.get("routing_mode")=="adaptive" or environment.get("UBERDEV_MODEL_ROUTING_MODE")=="adaptive" or project.get("mode",project.get("routing_mode"))=="adaptive")
-        if adaptive_requested or any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
-            class Unenforceable(Exception): code="route_unenforceable"
-            raise Unenforceable()
-        decision={"schema_version":1,"backend":backend,"routing_mode":"inherit","effective_policy":"inherit","logical_route":None,"model":None,"reasoning_effort":None,"service_tier":"default","sandbox":None,"forced":False,"route_source":"backend-neutral-inherit","risk_signals":routing.get("risk_signals",[]),"fallback_chain":[],"minimum_route":None}
-        print(json.dumps(decision,sort_keys=True,separators=(",",":")),end=""); raise SystemExit(0)
-    spec=importlib.util.spec_from_file_location("_uberdev_model_routing",router_path)
-    if spec is None or spec.loader is None: raise ValueError("router_unavailable")
-    module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module)
-    policy=module.load_policy(pathlib.Path(policy_path))
-    if catalog_path:
-        path=pathlib.Path(catalog_path)
-        if not path.is_absolute() or path.is_symlink() or not path.is_file(): raise ValueError("unsafe_catalog")
-        catalog=json.loads(path.read_text(encoding="utf-8"))
-    else:
-        models={}; ranked=[]; available=[]; tiers={"default","fast","flex"}
-        for route,row in sorted(policy["routes"].items(),key=lambda item:item[1]["rank"]):
-            provider=row["codex"]; model=provider["model"]; effort=provider["reasoning_effort"]
-            models.setdefault(model,{"reasoning_efforts":[]})["reasoning_efforts"].append(effort)
-            ranked.append({"logical_route":route,"rank":row["rank"],"model":model,"reasoning_effort":effort})
-            available.append({"model":model,"reasoning_effort":effort}); tiers.add(provider["service_tier"])
-        for row in models.values(): row["reasoning_efforts"]=list(dict.fromkeys(row["reasoning_efforts"]))
-        catalog={"schema_version":1,"provider":"codex","models":models,"ranked_pairs":ranked,"available_pairs":available,"service_tiers":sorted(tiers),"source_roles":sorted(policy["roles"])}
-    resolver_request=dict(routing); resolver_environment=dict(environment)
-    project_config=dict(request.get("project_routing") or {})
-    for env_key,scope in (("UBERDEV_MODEL_ROUTING_WORKFLOWS","workflows"),("UBERDEV_MODEL_ROUTING_ROLES","roles")):
-        env_map=resolver_environment.pop(env_key,None)
-        if env_map is not None:
-            project_config[scope]=dict(env_map)
-    if resolver_environment: resolver_request["environment"]=resolver_environment
-    else: resolver_request.pop("environment",None)
-    if project_config: resolver_request["project_routing"]=project_config
-    decision=module.resolve_route(policy,catalog,resolver_request)
-    role=resolver_request.get("role","lead"); workflow=resolver_request.get("workflow","")
-    source_rewrites=[]
-    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_ROLES"),dict) and role in environment["UBERDEV_MODEL_ROUTING_ROLES"]:
-        source_rewrites.append(("project-role","environment-role"))
-    if isinstance(environment.get("UBERDEV_MODEL_ROUTING_WORKFLOWS"),dict) and workflow in environment["UBERDEV_MODEL_ROUTING_WORKFLOWS"]:
-        source_rewrites.append(("project-workflow","environment-workflow"))
-    def rewrite_source_tokens(value,old,new):
-        if isinstance(value,dict): return {key:rewrite_source_tokens(item,old,new) for key,item in value.items()}
-        if isinstance(value,list): return [rewrite_source_tokens(item,old,new) for item in value]
-        if isinstance(value,str) and (value==old or value.startswith(old+"-")): return new+value[len(old):]
-        return value
-    for old,new in source_rewrites:
-        decision=rewrite_source_tokens(decision,old,new)
-    print(json.dumps(decision,sort_keys=True,separators=(",",":")),end="")
+    backend=routing.get("backend","workflow")
+    project=request.get("project_routing") or request.get("project_config") or {}
+    if isinstance(project,dict) and "model_routing" in project: project=project["model_routing"]
+    role=routing.get("role","lead"); workflow=routing.get("workflow","")
+    project_concrete=(project.get("service_tier") not in (None,"","default") or (isinstance(project.get("roles"),dict) and project["roles"].get(role) is not None) or (isinstance(project.get("workflows"),dict) and project["workflows"].get(workflow) is not None))
+    environment_concrete=any(environment.get(key) not in (None,"") for key in ("UBERDEV_ROUTE","UBERDEV_MODEL","UBERDEV_REASONING_EFFORT")) or environment.get("UBERDEV_SERVICE_TIER") not in (None,"","default") or any(environment.get(key) for key in ("UBERDEV_MODEL_ROUTING_WORKFLOWS","UBERDEV_MODEL_ROUTING_ROLES"))
+    service=routing.get("explicit_service_tier") or environment.get("UBERDEV_SERVICE_TIER") or project.get("service_tier") or "default"
+    adaptive_requested=(routing.get("routing_mode")=="adaptive" or environment.get("UBERDEV_MODEL_ROUTING_MODE")=="adaptive" or project.get("mode",project.get("routing_mode"))=="adaptive")
+    if adaptive_requested or any(routing.get(k) not in (None,"") for k in ("explicit_route","explicit_model","explicit_effort")) or parent.get("forced") is True or service!="default" or environment_concrete or project_concrete:
+        class Unenforceable(Exception): code="route_unenforceable"
+        raise Unenforceable()
+    decision={"schema_version":1,"backend":backend,"routing_mode":"inherit","effective_policy":"inherit","logical_route":None,"model":None,"reasoning_effort":None,"service_tier":"default","sandbox":None,"forced":False,"route_source":"backend-neutral-inherit","risk_signals":routing.get("risk_signals",[]),"fallback_chain":[],"minimum_route":None}
+    print(json.dumps(decision,sort_keys=True,separators=(",",":")),end=""); raise SystemExit(0)
 except Exception as exc:
     code=getattr(exc,"code","invalid_request")
     # Deliberately redact exception detail: request values and paths can carry secrets.
     print(json.dumps({"error":{"code":code,"detail":"routing request rejected"}},sort_keys=True,separators=(",",":")),file=sys.stderr)
     raise SystemExit(2)
-' "$request_json" "$_UBERDEV_AGENT_POLICY" "$_UBERDEV_AGENT_ROUTER" "$injected"
+' "$request_json"
 }
 
 uberdev_agent_resolve_request() {
@@ -1556,7 +1522,7 @@ _uberdev_agent_abort_after_launch() {
   fi
   process_identity="$(_uberdev_agent_process_identity "$handle" 2>/dev/null || true)"
   case "$backend" in
-    codex|background)
+    background)
       if [ -n "$process_identity" ]; then
         _uberdev_dispatch_cancel_backend "$backend" "$handle" "$process_identity" || cancel_rc=$?
       else
@@ -1834,7 +1800,7 @@ uberdev_agent_dispatch() {
   process_identity=''
   if [ -z "$terminal_event" ]; then
     case "$backend" in
-      background|codex)
+      background)
         case "$handle" in
           ''|*[!0-9]*) ;;
           *)

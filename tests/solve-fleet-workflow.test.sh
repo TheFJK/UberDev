@@ -50,9 +50,12 @@ echo "## solve-fleet-workflow (RFC 0015) — shell seam + shape greps + T3 behav
 # ---------------------------------------------------------------------------
 echo "== S: lib/dispatch.sh backend enum + auto resolution =="
 
-grep -q "^_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background|codex'$" "$DISPATCH" \
-  && pass "S1 enum includes workflow, ordered right after auto" \
-  || fail "S1 backend enum does not declare workflow in the canonical position"
+# #381: `codex` is OUT of the enum. The assertion is pinned to the exact
+# alternation, so it doubles as the retired-surface check -- re-adding a
+# `|codex` member fails this line rather than passing a looser substring match.
+grep -q "^_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background'$" "$DISPATCH" \
+  && pass "S1 enum includes workflow ordered right after auto, and no longer declares codex" \
+  || fail "S1 backend enum does not declare exactly {auto,workflow,wezterm,background}"
 
 # S2 — `auto` must resolve to workflow, and must NEVER resolve to a deprecated
 # detached backend. This is the whole point of the RFC: the old per-OS matrix
@@ -141,10 +144,16 @@ grep -q 'UBERDEV_KEEP_TMPDIR=1' "$LAUNCHER" \
   && pass "S10 the run dir is kept (fleet agents read prompts after the launcher exits)" \
   || fail "S10 the launcher does not keep its tmpdir for the fleet"
 
-# S11 — the parser accepts the new backend name.
-grep -q 'auto|workflow|wezterm|background|codex) ;;' "$LAUNCHER" \
-  && pass "S11 --backend=workflow parses, and the retired backend does not" \
-  || fail "S11 the --backend parser does not accept exactly {auto,workflow,wezterm,background,codex}"
+# S11 — the parser accepts exactly the live enum. #381 removed `codex`, so the
+# parser alternation and _UBERDEV_DISPATCH_BACKEND_ENUM must agree member for
+# member; a `--backend=codex` that parsed here but died in the resolver would be
+# a worse failure than one refused at the flag.
+grep -q 'auto|workflow|wezterm|background) ;;' "$LAUNCHER" \
+  && pass "S11 --backend=workflow parses, and the retired codex backend does not" \
+  || fail "S11 the --backend parser does not accept exactly {auto,workflow,wezterm,background}"
+grep -qE '^[^#]*\bcodex\b' "$LAUNCHER" \
+  && fail "S11b the launcher still names the retired codex backend outside a comment" \
+  || pass "S11b the launcher names codex nowhere outside a comment"
 
 echo "== S: command files mandate the Workflow call =="
 for f in "$SOLVE_CMD" "$TURBO_CMD"; do

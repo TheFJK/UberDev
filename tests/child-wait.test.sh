@@ -27,13 +27,13 @@ terminal_manifest() {
   printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >>"$MANIFEST"
   printf '{"schema_version":1,"event":"%s","timestamp":"2026-07-10T00:00:02.000Z","run_id":"worker-0001"}\n' "$terminal" >>"$MANIFEST"
 }
-printf 'completed result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
+printf 'completed result\n' >"$RESULT"; printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
 uberdev_unwind_child "$STATUS" "$RESULT" 2
 
 # A fully verified terminal timeout has the same public return code whether this
 # waiter won the timeout CAS or observed the durable terminal state afterward.
-printf '{"backend":"codex","state":"timed_out","exit_code":124,"pid":"321"}\n' >"$STATUS"
+printf '{"backend":"background","state":"timed_out","exit_code":124,"pid":"321"}\n' >"$STATUS"
 terminal_manifest timed_out
 set +e
 uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
@@ -44,7 +44,7 @@ set -e
 # Other fully verified non-success terminals retain the generic failure code;
 # callers must not mistake them for a scheduler timeout.
 for TERMINAL_FAILURE_STATE in failed cancelled; do
-  printf '{"backend":"codex","state":"%s","exit_code":1,"pid":"321"}\n' \
+  printf '{"backend":"background","state":"%s","exit_code":1,"pid":"321"}\n' \
     "$TERMINAL_FAILURE_STATE" >"$STATUS"
   terminal_manifest "$TERMINAL_FAILURE_STATE"
   set +e
@@ -60,7 +60,7 @@ TERMINAL_GENERATION=11111111111111111111111111111111
 TERMINAL_LEASE_DIR="$TMP/run/.agent-state-$(id -u)/semaphore-v1/$(printf 'e%.0s' {1..64}).scope"
 TERMINAL_LEASE="$TERMINAL_LEASE_DIR/${TERMINAL_GENERATION}$(printf 'f%.0s' {1..32}).lease"
 mkdir -p "$TERMINAL_LEASE_DIR"
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
   "$TERMINAL_GENERATION" >"$STATUS"
 terminal_manifest completed
 printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=321\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
@@ -113,9 +113,9 @@ rmdir "$VANISHED_SCOPE"
 
 : >"$RESULT"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 printf x >"$RESULT"; printf '{bad\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
-printf '{"backend":"codex","state":"completed","exit_code":1,"pid":"321"}\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
-printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"background","state":"completed","exit_code":1,"pid":"321"}\n' >"$STATUS"; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"background","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest failed; ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 
 # rc 1 covers two conditions a caller must never confuse: the provider itself
 # reached a non-success terminal, and this caller's own wall-clock budget
@@ -124,7 +124,7 @@ printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$
 # at whatever terminal state the provider published for itself, so nothing
 # downstream can recover the distinction after the fact — the wait must name it
 # when it takes the decision, and name which step was still pending (#365).
-printf '{"backend":"codex","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"
+printf '{"backend":"background","state":"failed","exit_code":1,"pid":"321"}\n' >"$STATUS"
 terminal_manifest failed
 set +e
 PROVIDER_FAILURE_DIAGNOSTIC="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1 >/dev/null)"
@@ -133,7 +133,7 @@ set -e
 [ "$PROVIDER_FAILURE_RC" -eq 1 ]
 ! grep -q 'child settle budget exhausted' <<<"$PROVIDER_FAILURE_DIAGNOSTIC"
 
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
 terminal_manifest failed
 set +e
 SETTLE_LIFECYCLE_DIAGNOSTIC="$(uberdev_wait_child "$STATUS" "$RESULT" 1 2>&1 >/dev/null)"
@@ -144,7 +144,7 @@ grep -Fq 'child settle budget exhausted: instance=worker-0001 state=completed bu
   <<<"$SETTLE_LIFECYCLE_DIAGNOSTIC"
 
 mkdir -p "$TERMINAL_LEASE_DIR"
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321","lease_generation":"%s"}\n' \
   "$TERMINAL_GENERATION" >"$STATUS"
 terminal_manifest completed
 printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=321\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
@@ -163,10 +163,10 @@ rm -f "$TERMINAL_LEASE"; rmdir "$TERMINAL_LEASE_DIR"
 # identity / lease-generation fields before timeout or cancellation logic.
 for malformed_status in \
   '{"backend":"unknown","state":"running","exit_code":null,"pid":"321"}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","process_identity":7}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","process_identity":"321|321|321|short"}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":9}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"xyz"}'; do
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","process_identity":7}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","process_identity":"321|321|321|short"}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","lease_generation":9}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","lease_generation":"xyz"}'; do
   printf '%s\n' "$malformed_status" >"$STATUS"
   set +e
   uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
@@ -174,7 +174,7 @@ for malformed_status in \
   set -e
   [ "$MALFORMED_STATUS_RC" -eq 2 ]
 done
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321","process_identity":"321|321|321|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321","process_identity":"321|321|321|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
 terminal_manifest completed
 uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null
 
@@ -188,7 +188,7 @@ uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null
 # the writer and reader cannot silently drift on reason or attempt count.
 rm -f "$STATUS" "$STATUS.watcher-error.json"
 OWNER_CAPTURE_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
-_uberdev_agent_fail_owner_capture "$STATUS" "$OWNER_CAPTURE_FALLBACK" codex
+_uberdev_agent_fail_owner_capture "$STATUS" "$OWNER_CAPTURE_FALLBACK" background
 set +e
 WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
 WATCHER_WAIT_RC=$?
@@ -196,14 +196,14 @@ set -e
 [ "$WATCHER_WAIT_RC" -eq 70 ]
 grep -Fq 'provider supervision failed: owner_process_identity_unavailable' \
   <<<"$WATCHER_WAIT_ERROR"
-grep -Fq 'backend=codex; capacity=not-reserved' <<<"$WATCHER_WAIT_ERROR"
+grep -Fq 'backend=background; capacity=not-reserved' <<<"$WATCHER_WAIT_ERROR"
 rm -f "$STATUS.watcher-error.json"
 
 # The detached numeric-process watcher emits a distinct durable record when
 # its kernel identity probe remains indeterminate. Exercise the producer and
 # the public waiter together so their closed schemas cannot drift apart.
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
-_uberdev_agent_persist_watcher_error "$STATUS" codex 321 \
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
+_uberdev_agent_persist_watcher_error "$STATUS" background 321 \
   process_identity_probe_unavailable 3
 set +e
 WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
@@ -218,7 +218,7 @@ rm -f "$STATUS.watcher-error.json"
 # Timeout-capability recovery failures use their own closed supervisory phase.
 # The waiter must surface them as retained-capacity failures rather than a
 # generic terminal-finalization error.
-_uberdev_agent_persist_watcher_error "$STATUS" codex 321 \
+_uberdev_agent_persist_watcher_error "$STATUS" background 321 \
   timeout_intent_recovery_failed 1 '' timeout_intent_identity_unavailable
 set +e
 WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
@@ -235,7 +235,7 @@ rm -f "$STATUS.watcher-error.json"
 # live waiter identity, and stale variants are classified without suppressing
 # provider terminalization.
 INTENT_GENERATION=1234567890abcdef1234567890abcdef
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"321","lease_generation":"%s"}\n' \
   "$INTENT_GENERATION" >"$STATUS"
 INTENT_SNAPSHOT="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
 _uberdev_child_timeout_intent_write "$STATUS" 321 "$INTENT_GENERATION" "$INTENT_SNAPSHOT"
@@ -293,7 +293,7 @@ rm -f "$INTENT_PATH"
 # `provider_cancel_failed` error kind, whose only writer was the retired
 # opaque-session supervision lane. The lease-acquire branch is unchanged.
 for watcher_reason in lease_acquire_rollback_failed; do
-  watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"codex\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
+  watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"background\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
   printf '%s\n' "$watcher_payload" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e
@@ -309,7 +309,7 @@ rm -f "$STATUS.watcher-error.json"
 # If the child status directory becomes unwritable, the detached watcher uses
 # the independently monitored controller-state fallback for the same union.
 WATCHER_FALLBACK="$TMP/run/.agent-state-$(id -u)/worker-0001.watcher-error.json"
-printf '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"process_identity_probe_unavailable","attempts":3}\n' >"$WATCHER_FALLBACK"
+printf '{"schema_version":1,"error":"process_identity_probe_failed","backend":"background","handle":"321","terminal":"process_identity_probe_unavailable","attempts":3}\n' >"$WATCHER_FALLBACK"
 chmod 600 "$WATCHER_FALLBACK"
 set +e
 WATCHER_WAIT_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 10 2>&1)"
@@ -321,13 +321,13 @@ rm -f "$WATCHER_FALLBACK"
 
 for malformed_watcher_error in \
   '{"schema_version":1,"error":"process_identity_probe_failed","backend":"unknown","handle":"321","terminal":"process_identity_probe_unavailable","attempts":3}' \
-  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"","terminal":"process_identity_probe_unavailable","attempts":3}' \
-  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"process_identity_probe_unavailable","attempts":0}' \
-  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"codex","handle":"321","terminal":"failed","attempts":3}' \
-  '{"schema_version":1,"error":"terminal_finalize_failed","backend":"codex","handle":"321","terminal":"failed","attempts":1,"reason":"owner_process_identity_unavailable"}' \
-  '{"schema_version":1,"error":"timeout_intent_recovery_failed","backend":"codex","handle":"321","terminal":"timeout_intent_recovery_failed","attempts":1,"reason":"not-in-the-closed-enum"}' \
-  '{"schema_version":1,"error":"provider_probe_failed","backend":"codex","handle":"321","terminal":"provider_probe_failed","attempts":3}' \
-  '{"schema_version":1,"error":"provider_cancel_failed","backend":"codex","handle":"321","terminal":"blocked:permission","attempts":3}'; do
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"background","handle":"","terminal":"process_identity_probe_unavailable","attempts":3}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"background","handle":"321","terminal":"process_identity_probe_unavailable","attempts":0}' \
+  '{"schema_version":1,"error":"process_identity_probe_failed","backend":"background","handle":"321","terminal":"failed","attempts":3}' \
+  '{"schema_version":1,"error":"terminal_finalize_failed","backend":"background","handle":"321","terminal":"failed","attempts":1,"reason":"owner_process_identity_unavailable"}' \
+  '{"schema_version":1,"error":"timeout_intent_recovery_failed","backend":"background","handle":"321","terminal":"timeout_intent_recovery_failed","attempts":1,"reason":"not-in-the-closed-enum"}' \
+  '{"schema_version":1,"error":"provider_probe_failed","backend":"background","handle":"321","terminal":"provider_probe_failed","attempts":3}' \
+  '{"schema_version":1,"error":"provider_cancel_failed","backend":"background","handle":"321","terminal":"blocked:permission","attempts":3}'; do
   printf '%s\n' "$malformed_watcher_error" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e
@@ -445,10 +445,10 @@ uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
 # mode has one absolute execution directory and no branch; isolated mode has
 # one absolute worktree and a non-empty dispatcher branch.
 for malformed_workspace_status in \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"unknown","worktree":"/tmp/work","branch":"branch"}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"relative","branch":""}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"/tmp/work","branch":"unexpected"}' \
-  '{"backend":"codex","state":"running","exit_code":null,"pid":"321","workspace_mode":"isolated","worktree":"/tmp/work","branch":""}'; do
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","workspace_mode":"unknown","worktree":"/tmp/work","branch":"branch"}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"relative","branch":""}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","workspace_mode":"caller","worktree":"/tmp/work","branch":"unexpected"}' \
+  '{"backend":"background","state":"running","exit_code":null,"pid":"321","workspace_mode":"isolated","worktree":"/tmp/work","branch":""}'; do
   printf '%s\n' "$malformed_workspace_status" >"$STATUS"
   ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 done
@@ -456,7 +456,7 @@ done
 # A running status without the exact lifecycle lease is not cancellation
 # authority: never signal or synthesize timed_out.
 ( trap 'exit 0' TERM; while :; do sleep 1; done ) & SLEEP_PID=$!
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$SLEEP_PID" >"$STATUS"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$SLEEP_PID" >"$STATUS"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 ! uberdev_wait_child "$STATUS" "$RESULT" 1 >/dev/null 2>&1
 kill -0 "$SLEEP_PID"
@@ -492,10 +492,10 @@ python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 &
 for _ in 1 2 3 4 5 6 7 8 9 10; do PROVIDER_CHILD="$(pgrep -P "$PID_GUARD" | head -1 || true)"; [ -z "$PROVIDER_CHILD" ] || break; sleep .1; done
 [ -n "$PROVIDER_CHILD" ] && kill -0 "$PROVIDER_CHILD"
 IDENTITY="$(_uberdev_agent_process_identity "$PID_GUARD")"
-! _uberdev_dispatch_cancel_backend codex "$PID_GUARD" 'reused-group-identity'
+! _uberdev_dispatch_cancel_backend background "$PID_GUARD" 'reused-group-identity'
 kill -0 "$PID_GUARD"
 kill -0 "$PROVIDER_CHILD"
-_uberdev_dispatch_cancel_backend codex "$PID_GUARD" "$IDENTITY"
+_uberdev_dispatch_cancel_backend background "$PID_GUARD" "$IDENTITY"
 ! kill -0 "$PID_GUARD" 2>/dev/null
 ! kill -0 "$PROVIDER_CHILD" 2>/dev/null
 
@@ -525,7 +525,7 @@ _uberdev_dispatch_process_identity() { return 2; }
 _uberdev_dispatch_group_owned_session() { return 0; }
 kill() { : >"$UNAVAILABLE_CANCEL_SIGNAL"; return 0; }
 set +e
-_uberdev_dispatch_cancel_backend codex 4242 \
+_uberdev_dispatch_cancel_backend background 4242 \
   '4242|4242|4242|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 UNAVAILABLE_CANCEL_RC=$?
 set -e
@@ -551,7 +551,7 @@ rm -f "${RESULT}.partial.992"
 # race and must be atomically canonicalized, not parsed as malformed JSON.
 ZERO_STATUS="$TMP/run/children/worker-0001/zero-status.json"
 ( umask 077; : >"$ZERO_STATUS" )
-_uberdev_agent_publish_status "$ZERO_STATUS" codex 999 running '' create \
+_uberdev_agent_publish_status "$ZERO_STATUS" background 999 running '' create \
   '999|999|999|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
   0123456789abcdef0123456789abcdef
 python3 - "$ZERO_STATUS" <<'PY'
@@ -579,7 +579,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$LOCK_READY" ] && break; sleep .1; done
 [ -s "$LOCK_READY" ]
 (
   set +e
-  _uberdev_agent_publish_status "$ZERO_STATUS" codex 999 completed 0 replace \
+  _uberdev_agent_publish_status "$ZERO_STATUS" background 999 completed 0 replace \
     '999|999|999|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
     0123456789abcdef0123456789abcdef
   printf '%s\n' "$?" >"$LOCK_RESULT"
@@ -618,10 +618,10 @@ chmod 600 "$LEASE"
 # terminal instead of reporting a supervisory failure.
 eval "$(declare -f _uberdev_child_find_lease | sed '1s/_uberdev_child_find_lease/_real_child_find_lease/')"
 printf 'race result\n' >"$RESULT"
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
 printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS" "$GENERATION" >"$LEASE"
 _uberdev_child_find_lease() {
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"777","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
   terminal_manifest completed
   rm -f "$LEASE"
   return 2
@@ -634,12 +634,12 @@ eval "$(declare -f _real_child_find_lease | sed '1s/_real_child_find_lease/_uber
 # obsolete lease.
 eval "$(declare -f _uberdev_agent_lease_identity | sed '1s/_uberdev_agent_lease_identity/_real_agent_lease_identity/')"
 eval "$(declare -f _uberdev_dispatch_cancel_backend | sed '1s/_uberdev_dispatch_cancel_backend/_real_dispatch_cancel_backend/')"
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
 printf 'run_id=worker-0001\nstatus_path=%s\ngeneration=%s\n' "$STATUS_REAL" "$GENERATION" >"$LEASE"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 _uberdev_agent_lease_identity() { printf 'fixture-identity'; }
 _uberdev_dispatch_cancel_backend() {
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"778","lease_generation":"%s"}\n' "$GENERATION" >"$STATUS"
   terminal_manifest completed
   rm -f "$LEASE"
   return 2
@@ -649,9 +649,9 @@ eval "$(declare -f _real_agent_lease_identity | sed '1s/_real_agent_lease_identi
 eval "$(declare -f _real_dispatch_cancel_backend | sed '1s/_real_dispatch_cancel_backend/_uberdev_dispatch_cancel_backend/')"
 
 # CAS cannot overwrite a provider completion that wins the timeout race.
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
 OLD_SHA="$(shasum -a 256 "$STATUS" | awk '{print $1}')"
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"777","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$STATUS"
 ! _uberdev_child_timeout_cas "$STATUS" "$OLD_SHA" 777 0123456789abcdef0123456789abcdef >/dev/null 2>&1
 grep -q '"state":"completed"' "$STATUS"
 
@@ -690,21 +690,29 @@ set -e
   'timeout_partial_result_cleanup_failed; backend=background; capacity=retained; action=resolve the retained lifecycle lease before retrying' ]
 rm -f "$STATUS.watcher-error.json" "$RACE_LEASE"
 
+# The failing partial-cleanup stub above stays installed until here on purpose
+# (the case immediately above is the one that asserts it). The race cases below
+# are about the timeout/completion race itself, so they need cleanup to SUCCEED.
+# They used to get that for free by running on `codex`, whose arm skipped
+# `_uberdev_dispatch_cleanup_dead_partial_result` entirely -- #381 deleted that
+# backend, so the skip has to be stated rather than inherited.
+_uberdev_dispatch_cleanup_dead_partial_result() { return 0; }
+
 for RACE_WINNER in timeout completion; do
   printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=779\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
     "$RACE_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$RACE_LEASE"
   chmod 600 "$RACE_LEASE"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"779","lease_generation":"%s"}\n' \
     "$RACE_GENERATION" >"$STATUS"
-  printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001","backend":"codex"}\n' >"$MANIFEST"
-  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"codex","owner_pid":%s,"owner_process_identity":"%s","status_path":"%s","timeout_s":30}\n' \
+  printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001","backend":"background"}\n' >"$MANIFEST"
+  printf '{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001","backend":"background","owner_pid":%s,"owner_process_identity":"%s","status_path":"%s","timeout_s":30}\n' \
     "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >>"$MANIFEST"
   _uberdev_dispatch_cancel_backend() {
     if [ "$RACE_WINNER" = completion ]; then
       printf 'completed race result\n' >"$RESULT"
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"779","lease_generation":"%s"}\n' \
+      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"779","lease_generation":"%s"}\n' \
         "$RACE_GENERATION" >"$STATUS"
-      printf '{"schema_version":1,"event":"completed","timestamp":"2026-07-10T00:00:02.000Z","run_id":"worker-0001","backend":"codex","terminal_status":"completed"}\n' >>"$MANIFEST"
+      printf '{"schema_version":1,"event":"completed","timestamp":"2026-07-10T00:00:02.000Z","run_id":"worker-0001","backend":"background","terminal_status":"completed"}\n' >>"$MANIFEST"
       _uberdev_agent_release_exact_lease "$RACE_LEASE" "$(_uberdev_agent_lease_identity "$RACE_LEASE")"
       return 2
     fi
@@ -731,17 +739,17 @@ rmdir "$RACE_SCOPE"
 
 # zsh can source and execute the public wait API without colliding with its
 # readonly `status` special parameter.
-printf 'zsh result\n' >"$RESULT"; printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
+printf 'zsh result\n' >"$RESULT"; printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"; terminal_manifest completed
 zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" >/dev/null
 
 # Zero is rejected: cleanup uses the bounded uberdev_unwind_child API. A normal
 # positive wait still observes a delayed real terminal without fabrication.
-printf '{"backend":"codex","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
+printf '{"backend":"background","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
 (
   sleep .2
   printf 'drained result\n' >"$RESULT"
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
   terminal_manifest completed
 ) & DRAIN_WRITER=$!
 ! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1

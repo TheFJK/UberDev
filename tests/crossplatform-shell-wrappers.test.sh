@@ -958,7 +958,10 @@ PY
     # does not apply to it — this is what makes native Windows a first-class
     # host without WezTerm.
     _uberdev_dispatch_numeric_supervision_supported workflow
-    _uberdev_dispatch_codex_available() { return 0; }
+    # #381: the `_uberdev_dispatch_codex_available() { return 0; }` stub that
+    # sat here is gone with the function. It was inert, and it implied `codex`
+    # was rejected below only because native Windows cannot supervise it —
+    # `codex` is now rejected everywhere, by the enum, available binary or not.
     for rejected_backend in codex background; do
       unset UBERDEV_RESOLVED_BACKEND
       UBERDEV_DISPATCH_BACKEND_REQUESTED="$rejected_backend"

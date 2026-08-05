@@ -36,7 +36,6 @@
 #   uberdev_goal_gh_failure_breaker_check      GOAL_ID [THRESHOLD]   (issue #290.3)
 #   uberdev_goal_gh_failure_count              GOAL_ID               (issue #329 review)
 #   uberdev_goal_agent_busy_for_issue          ISSUE_NUM   (claude agents; issue #180)
-#   uberdev_goal_codex_status_for_issue        ISSUE_NUM   (Codex status JSON; issue #329 review)
 #   uberdev_goal_list_prs_in_state             GOAL_ID STATE
 #   uberdev_goal_read_merge_result             PR_NUM
 #   uberdev_goal_write_run_state               (env-driven)
@@ -335,9 +334,10 @@ _uberdev_goal_is_object_name() {
 # _uberdev_goal_pid_for_issue ISSUE_NUM   (issue #220 simplify pass — R1 SSOT)
 # Returns the validated PID stored in the backend status JSON on stdout with
 # rc=0, or empty on stdout + rc=1 if the file is missing, the security guard
-# fails, jq extraction fails, or the value is not a positive integer. Codex
-# writes solve-codex-status-<ISSUE>.json; the legacy background backend writes
-# solve-bg-status-<ISSUE>.json.
+# fails, jq extraction fails, or the value is not a positive integer. The
+# background backend writes solve-bg-status-<ISSUE>.json; it is the only
+# PID-bearing backend left since #381 retired the codex transport and its
+# solve-codex-status-<ISSUE>.json sidecar.
 # Replaces three near-identical 4-line blocks: _uberdev_goal_any_attempt_stuck,
 # _uberdev_goal_reap_zombies, and the SKILL.md Phase 2b stuck-on-dialog audit
 # payload extraction.
@@ -347,9 +347,6 @@ _uberdev_goal_pid_for_issue() {
   local tmpdir="${UBERDEV_TMPDIR:-/tmp}"
   local status_file expected_backend pid status_backend status_issue
   case "${UBERDEV_RESOLVED_BACKEND:-background}" in
-    codex)
-      status_file="$tmpdir/solve-codex-status-$issue.json"
-      expected_backend="codex" ;;
     background|"")
       status_file="$tmpdir/solve-bg-status-$issue.json"
       expected_backend="background" ;;
@@ -368,63 +365,13 @@ _uberdev_goal_pid_for_issue() {
   printf '%s' "$pid"
 }
 
-# uberdev_goal_codex_status_for_issue ISSUE_NUM
-# Emits: state<TAB>exit_code<TAB>log<TAB>result
-#
-# Codex dispatch is PID-polled for liveness, but the detached wrapper also
-# writes a terminal status JSON. /goal uses this to surface a failed codex exec
-# immediately instead of waiting for the generic solve timeout.
-# rc 0: valid status emitted on stdout.
-# rc 1: no usable status yet (wrong backend, missing file, zero-byte startup
-#       placeholder, or helper unavailable).
-# rc 2: non-empty status file exists but is unreadable, malformed, or
-#       schema-invalid.
-uberdev_goal_codex_status_for_issue() {
-  local issue="$1"
-  _uberdev_goal_validate_int "$issue" || return 1
-  [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ] || return 1
-  command -v _uberdev_dispatch_tmp_target_safe >/dev/null 2>&1 || return 1
-
-  local status_file
-  status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$issue.json"
-  _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
-  [ -e "$status_file" ] || return 1
-  [ -s "$status_file" ] || return 1
-  if [ ! -r "$status_file" ]; then
-    printf 'goal-state: unreadable Codex status file for issue %s (%s)\n' \
-      "$issue" "$status_file" >&2
-    return 2
-  fi
-
-  local jq_out
-  jq_out="$(jq -er --argjson issue "$issue" '
-    select(.backend == "codex" and .issue == $issue)
-    | .state as $state
-    | select($state == "running" or $state == "completed" or $state == "failed")
-    | .exit_code as $exit_code
-    | select($exit_code == null or ($exit_code | type) == "number")
-    | [
-        $state,
-        (if $exit_code == null then "null" else ($exit_code | tostring) end),
-        (.log // ""),
-        (.result // "")
-      ]
-    | @tsv
-  ' < "$status_file" 2>&1)"
-  case $? in
-    0) ;;
-    *)
-      printf 'goal-state: invalid Codex status file for issue %s (%s): %s\n' \
-        "$issue" "$status_file" "$jq_out" >&2
-      return 2 ;;
-  esac
-  [ -n "$jq_out" ] || {
-    printf 'goal-state: invalid Codex status file for issue %s (%s): empty parsed row\n' \
-      "$issue" "$status_file" >&2
-    return 2
-  }
-  printf '%s' "$jq_out"
-}
+# #381: `uberdev_goal_codex_status_for_issue` lived here. It read the detached
+# Codex wrapper's terminal status sidecar (solve-codex-status-<ISSUE>.json) so
+# /goal could surface a failed `codex exec` immediately instead of waiting out
+# the generic solve timeout. The codex backend is gone from
+# _UBERDEV_DISPATCH_BACKEND_ENUM, so UBERDEV_RESOLVED_BACKEND can never equal
+# `codex` and the helper's first guard could never pass. Deliberately no shim:
+# a dormant reader is how a retired sidecar format drifts back into a live path.
 
 # _uberdev_goal_glob_worktree SUFFIX
 # Emit (one per line, on stdout) every READABLE path matching
@@ -1728,9 +1675,7 @@ uberdev_goal_gh_failure_breaker_check() {
 # uberdev_goal_agent_busy_for_issue ISSUE_NUM   (issue #180)
 # rc 0 iff the resolved backend still has an active solver for issue N:
 # wezterm polls `claude agents --json` for a live session in the
-# solver worktree; background polls the recorded wrapper PID; codex first
-# treats terminal completed/failed status files as not busy, then falls back to
-# the wrapper PID. Phase 2a uses this to disambiguate "solver still working,
+# solver worktree; background polls the recorded wrapper PID. Phase 2a uses this to disambiguate "solver still working,
 # no PR yet" from "solver died" before the per-issue solve-timeout fires.
 # Deliberately NOT used to gate review-readiness: the leaf solver routinely
 # goes idle for ~20m while its OWN finish-branch /review-pr runs, so keying
@@ -1742,14 +1687,11 @@ uberdev_goal_gh_failure_breaker_check() {
 uberdev_goal_agent_busy_for_issue() {
   local n="$1"
   _uberdev_goal_validate_int "$n" || return 1
-  # Backend-aware liveness (RFC 0012 §3.4 codex-port). wezterm
-  # dispatches named sessions queryable via `claude agents --json`; background
-  # dispatch tracks only a wrapper PID. Codex has a richer status JSON, so
-  # terminal completed/failed states return "not busy" before PID probing; this
-  # lets Phase 2a surface terminal Codex failures instead of skipping them just
-  # because the wrapper PID is still alive or reused. Same fail-safe default as
-  # the claude arm: missing status file / unreadable PID / dead process all
-  # yield rc 1 (not busy), so goal proceeds rather than stalling on a lost
+  # Backend-aware liveness. wezterm dispatches named sessions queryable via
+  # `claude agents --json`; background dispatch tracks only a wrapper PID. The
+  # richer status-JSON arm belonged to the codex transport and went with it in
+  # #381. Fail-safe default: missing status file / unreadable PID / dead process
+  # all yield rc 1 (not busy), so goal proceeds rather than stalling on a lost
   # session.
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
     background)
@@ -1758,28 +1700,6 @@ uberdev_goal_agent_busy_for_issue() {
       [ -n "$pid" ] || return 1
       kill -0 "$pid" 2>/dev/null
       return $?
-      ;;
-    codex)
-      local pid status_file status_state
-      status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$n.json"
-      _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
-      [ -r "$status_file" ] || return 1
-      status_state="$(jq -r --argjson issue "$n" '
-        if (.backend == "codex" and .issue == $issue) then (.state // "")
-        else "__mismatch__"
-        end
-      ' < "$status_file" 2>/dev/null)" || return 1
-      case "$status_state" in
-        completed|failed)
-          return 1 ;;
-        running|"")
-          pid="$(_uberdev_goal_pid_for_issue "$n" 2>/dev/null)" || return 1
-          [ -n "$pid" ] || return 1
-          kill -0 "$pid" 2>/dev/null
-          return $? ;;
-        *)
-          return 1 ;;
-      esac
       ;;
     workflow)
       # RFC 0015 — a Workflow solver is an agent inside the calling session's
@@ -1825,10 +1745,10 @@ uberdev_goal_agent_busy_for_issue() {
 # rc 0 means a review-pr dispatch must be treated as in-flight. For
 # wezterm this means `claude agents --json` shows a live
 # /uberdev:review-pr <pr> agent (status ∈ busy|running|starting|working). For
-# background it means the tracked wrapper PID is alive. Codex returns in-flight
-# for ambiguous running status files (malformed JSON or running state with an
-# unreadable/empty PID) so Phase 2b/2c defers duplicate dispatch instead of
-# launching a second reviewer while the status writer may still be updating.
+# background it means the tracked wrapper PID is alive. The codex arm used to
+# return in-flight for ambiguous running status files so Phase 2b/2c deferred
+# duplicate dispatch rather than launching a second reviewer while the status
+# writer might still be updating; it was removed with the transport (#381).
 # --argjson safely passes the validated PR int as a JSON number. The regex uses
 # an unanchored substring match (no leading ^) because the agent's .name field
 # is the verbatim prompt body, and post-#235 dispatch bodies open with a
@@ -1839,10 +1759,11 @@ uberdev_goal_agent_busy_for_issue() {
 uberdev_goal_review_pr_in_flight() {
   local pr="$1"
   _uberdev_goal_validate_int "$pr" || return 1
-  # RFC 0012 §3.4 codex-port: wezterm has `claude agents --json`;
-  # background/codex have only the status JSON written by dispatch.sh. For the
-  # PID-based backends, review-pr in-flight means the tracked wrapper process
-  # for this PR is still alive.
+  # wezterm has `claude agents --json`; background has only the status JSON
+  # written by dispatch.sh. For that PID-based backend, review-pr in-flight
+  # means the tracked wrapper process for this PR is still alive. The
+  # status-JSON arm that deferred on ambiguity belonged to the codex transport
+  # and was removed with it (#381).
   case "${UBERDEV_RESOLVED_BACKEND:-}" in
     background)
       local pid
@@ -1850,42 +1771,6 @@ uberdev_goal_review_pr_in_flight() {
       [ -n "$pid" ] || return 1
       kill -0 "$pid" 2>/dev/null
       return $?
-      ;;
-    codex)
-      local pid status_file status_state
-      status_file="${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$pr.json"
-      _uberdev_dispatch_tmp_target_safe "$status_file" || return 1
-      [ -r "$status_file" ] || return 1
-      status_state="$(jq -r --argjson issue "$pr" '
-        if (.backend == "codex" and .issue == $issue) then (.state // "")
-        else "__mismatch__"
-        end
-      ' < "$status_file" 2>/dev/null)" || {
-        printf 'goal-state: codex review-pr status for PR %s is unreadable; deferring duplicate dispatch\n' "$pr" >&2
-        return 0
-      }
-      case "$status_state" in
-        completed|failed)
-          return 1 ;;
-        running)
-          pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || {
-            printf 'goal-state: codex review-pr status for PR %s is running but PID is unreadable; deferring duplicate dispatch\n' "$pr" >&2
-            return 0
-          }
-          [ -n "$pid" ] || {
-            printf 'goal-state: codex review-pr status for PR %s is running but PID is empty; deferring duplicate dispatch\n' "$pr" >&2
-            return 0
-          }
-          kill -0 "$pid" 2>/dev/null
-          return $? ;;
-        "")
-          pid="$(_uberdev_goal_pid_for_issue "$pr" 2>/dev/null)" || return 1
-          [ -n "$pid" ] || return 1
-          kill -0 "$pid" 2>/dev/null
-          return $? ;;
-        "__mismatch__"|*)
-          return 1 ;;
-      esac
       ;;
     workflow)
       # RFC 0015 — same leaf-constraint reasoning as agent_busy_for_issue: a
@@ -3615,7 +3500,7 @@ uberdev_goal_read_run_state() {
         # `background` session. Keep this list byte-aligned with the dispatch
         # enum minus `auto` (auto is a REQUEST, never a resolution).
         # CONTRACT: dispatch-backend -auto !case-arm
-        case "$v" in workflow|wezterm|background|codex) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
+        case "$v" in workflow|wezterm|background) UBERDEV_RESOLVED_BACKEND="$v" ;; esac ;;
       *) : ;;   # reject unknown keys (allowlist only)
     esac
   done < "$sc"
@@ -3728,11 +3613,10 @@ _uberdev_goal_reap_zombies() {
         "{\"goal_id\":\"$goal_id\",\"backend\":\"workflow\",\"reason\":\"runtime_owned_lifecycle\"}" || true
       return 0
       ;;
-    # background + codex: fall through to the PID-based reap below. Both
-    # backends capture the spawned process PID in the per-issue status file
+    # background: falls through to the PID-based reap below. It captures the
+    # spawned process PID in the per-issue status file
     # (_uberdev_goal_pid_for_issue reads it), so the kill -0 / kill -TERM
-    # contract applies identically. codex exec is nohup-detached like the
-    # background arm's claude -p, so it reaps the same way.
+    # contract applies. #381 removed the codex arm that shared this path.
   esac
 
   local issue pid result owner_me pr _ts _state

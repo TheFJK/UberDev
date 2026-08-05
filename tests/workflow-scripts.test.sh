@@ -526,13 +526,16 @@ for command_file in "$REPO_ROOT/plugins/uberdev/commands/review-pr.md" \
   fi
 done
 
-# codex forced unavailable and CODEX_HOME cleared, so the answer is the
-# resolver's RULE and not this particular host's PATH.
+# CODEX_HOME cleared, so the answer is the resolver's RULE and not this
+# particular host's environment. #381 removed the
+# `_uberdev_dispatch_codex_available` stub that used to sit here: the function
+# was deleted with the transport, so redefining it was an inert no-op that made
+# this probe read as though it forced a capability answer when it forced
+# nothing. The resolution is now codex-independent by construction.
 review_fleet_resolved() {  # WORKFLOW -> "<rc>:<resolved>"
   env -u CODEX_HOME bash -c '
     set +e
     . "$1" >/dev/null 2>&1
-    _uberdev_dispatch_codex_available() { return 1; }
     unset UBERDEV_RESOLVED_BACKEND
     uberdev_dispatch_preflight "$2" >/dev/null 2>&1
     printf "%s:%s" "$?" "${UBERDEV_RESOLVED_BACKEND-}"

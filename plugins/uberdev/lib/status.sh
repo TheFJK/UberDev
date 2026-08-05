@@ -12,7 +12,7 @@
 # UberDev keeps run state in FIVE disjoint stores:
 #
 #   1. /solve + /turbo claims      the `uberdev:active` GitHub label plus
-#                                  per-issue solve-{bg,codex}-status-<N>.json
+#                                  per-issue solve-bg-status-<N>.json
 #                                  under the runtime root
 #   2. /goal                       GOAL_ID-keyed sidecars (1 jsonl + 7 TSVs +
 #                                  the runstate scalar/array files), reachable
@@ -584,10 +584,10 @@ if len(issues) > limit:
       _uberdev_status_readable_file "$role" "$file" || continue
       issue="${file##*-}"; issue="${issue%.json}"
       _uberdev_status_is_int "$issue" || continue
-      case "${file##*/}" in
-        solve-codex-status-*) backend='codex' ;;
-        *) backend='background' ;;
-      esac
+      # `background` is the only detached numeric backend that writes a
+      # per-issue status file; the codex arm that owned solve-codex-status-*
+      # was deleted in #381 along with its file-naming scheme.
+      backend='background'
       if [ "$announced" -eq 0 ]; then
         announced=1
         found=1

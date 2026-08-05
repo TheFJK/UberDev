@@ -1,7 +1,7 @@
 {
   "name": "uberdev",
   "version": "0.42.9",
-  "description": "Production-grade Claude Code plugin: parallel-fanout PR review, autonomous GitHub issue triage and resolution via Workflow-native solver fleets (one worktree-isolated agent per issue; detached wezterm / background / codex transports remain opt-in; cross-platform — macOS, Linux, WSL2, native Windows), brainstorm/plan/execute workflows with wave-based subagent dispatch.",
+  "description": "Production-grade Claude Code plugin: parallel-fanout PR review, autonomous GitHub issue triage and resolution via Workflow-native solver fleets (one worktree-isolated agent per issue; detached wezterm / background transports remain opt-in; cross-platform — macOS, Linux, WSL2, native Windows), brainstorm/plan/execute workflows with wave-based subagent dispatch.",
   "author": {
     "name": "TheFJK",
     "url": "https://github.com/TheFJK"

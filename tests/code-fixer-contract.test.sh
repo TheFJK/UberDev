@@ -608,7 +608,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-persistence-result-") as tem
     disposition0_sha = digest(disposition0)
     disposition1_sha = digest(disposition1)
     status_path.write_text(json.dumps({
-        "backend":"codex", "branch":"", "exit_code":0,
+        "backend":"background", "branch":"", "exit_code":0,
         "lease_generation":"0123456789abcdef0123456789abcdef", "pid":"34567",
         "process_identity":"34567|34567|34567|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "result":str(result_path), "state":"completed", "workspace_mode":"caller",
@@ -617,7 +617,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-persistence-result-") as tem
     receipt = json.dumps({
         "schema_version":1, "edge_id":"review_pr.defer.findings",
         "instance_id":"simplify-defer-findings-iter01-attempt01",
-        "backend":"codex", "handle":"34567", "state":"completed",
+        "backend":"background", "handle":"34567", "state":"completed",
         "result_file":str(result_path), "status_file":str(status_path),
     },sort_keys=True,separators=(",",":")).encode()
     def persistence_binding(expected):
@@ -1068,7 +1068,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
     )
     review_lease = "0123456789abcdef0123456789abcdef"
     review_status_document = {
-        "backend": "codex",
+        "backend": "background",
         "branch": "",
         "exit_code": None,
         "lease_generation": review_lease,
@@ -1090,7 +1090,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
             "schema_version": 1,
             "edge_id": "review_pr.fix.phase1",
             "instance_id": review_instance_id,
-            "backend": "codex",
+            "backend": "background",
             "handle": "23456",
             "state": "running",
             "result_file": str(review_result_path.resolve()),
@@ -2992,7 +2992,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
     status_path = evidence / "fixer-status.json"
     status_path.write_text(
         json.dumps(
-            {"backend": "codex", "branch": "", "state": "completed",
+            {"backend": "background", "branch": "", "state": "completed",
              "exit_code": 0, "pid": "12345",
              "process_identity": "12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
              "lease_generation": "0123456789abcdef0123456789abcdef",
@@ -3006,7 +3006,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         {
             "schema_version": 1, "edge_id": "simplify.fix.phase2",
             "instance_id": "simplify-fix-phase2-iter01-attempt01",
-            "backend": "codex", "handle": "12345",
+            "backend": "background", "handle": "12345",
             "state": "completed", "result_file": str(result_path.resolve()),
             "status_file": str(status_path.resolve()),
         },
@@ -3315,7 +3315,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as tempo
     )
     status_path = evidence / "fixer-status.json"
     status_path.write_text(json.dumps({
-        "backend":"codex", "branch":"", "exit_code":0,
+        "backend":"background", "branch":"", "exit_code":0,
         "lease_generation":"abcdef0123456789abcdef0123456789", "pid":"23456",
         "process_identity":"23456|23456|23456|abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
         "result":str(result_path.resolve()), "state":"completed",
@@ -3325,7 +3325,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as tempo
         {
             "schema_version": 1, "edge_id": "simplify.fix.phase2",
             "instance_id": "simplify-empty-iter01-attempt01",
-            "backend": "codex", "handle": "23456", "state": "completed",
+            "backend": "background", "handle": "23456", "state": "completed",
             "result_file": str(result_path.resolve()),
             "status_file": str(status_path.resolve()),
         },
@@ -3952,9 +3952,9 @@ expect_contract_reason(
 # of the triple it is still required to carry.
 expect_contract_reason(
     lambda: module._validate_bound_child_status(
-        {**workflow_binding, "backend": "codex", "handle": "9",
+        {**workflow_binding, "backend": "background", "handle": "9",
          "process_identity": "9|9|9|" + "0" * 64, "lease_generation": "0" * 32},
-        workflow_status(backend="codex"),
+        workflow_status(backend="background"),
     ),
     "child_status_invalid",
 )
@@ -4038,7 +4038,7 @@ expect_contract_reason(
 
 detached_with_nonce = {
     "schema_version": 1, "receipt_sha256": "0" * 64, "edge_id": WF_EDGE,
-    "instance_id": WF_INSTANCE, "backend": "codex", "handle": "123",
+    "instance_id": WF_INSTANCE, "backend": "background", "handle": "123",
     "launch_status_sha256": "0" * 64,
     "process_identity": "1|1|1|" + "0" * 64, "lease_generation": "0" * 32,
     "result_path": WF_RESULT, "status_path": WF_STATUS,
@@ -4188,7 +4188,7 @@ expect_contract_reason(
 # check and must go through the verbs that check it.
 detached_reviewer = {
     "schema_version": 1, "receipt_sha256": "0" * 64, "edge_id": BC_EDGE,
-    "instance_id": "correctness-iter01", "backend": "codex", "handle": "123",
+    "instance_id": "correctness-iter01", "backend": "background", "handle": "123",
     "launch_status_sha256": "0" * 64,
     "process_identity": "1|1|1|" + "0" * 64, "lease_generation": "0" * 32,
     "result_path": BC_RESULT, "status_path": BC_STATUS,
@@ -4401,7 +4401,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as tempor
     detached_fixer = {
         "schema_version": 1, "receipt_sha256": "0" * 64,
         "edge_id": "review_pr.fix.phase1", "instance_id": review_instance,
-        "backend": "codex", "handle": "23456", "launch_status_sha256": "0" * 64,
+        "backend": "background", "handle": "23456", "launch_status_sha256": "0" * 64,
         "process_identity": "23456|23456|23456|" + "0" * 64,
         "lease_generation": "0" * 32,
         "result_path": wf_review_binding["result_path"],
@@ -4556,7 +4556,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as tempora
         "schema_version": 1, "receipt_sha256": "0" * 64,
         "edge_id": "review_pr.defer.findings",
         "instance_id": "review-pr-defer-findings-iter01-attempt01",
-        "backend": "codex", "handle": "34567", "launch_status_sha256": "0" * 64,
+        "backend": "background", "handle": "34567", "launch_status_sha256": "0" * 64,
         "process_identity": "34567|34567|34567|" + "0" * 64,
         "lease_generation": "0" * 32,
         "result_path": defer_binding["result_path"],

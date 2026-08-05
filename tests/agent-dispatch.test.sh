@@ -83,7 +83,7 @@ os.name = "nt"
 if original_fchmod is not None:
     del os.fchmod
 try:
-    sys.argv = ["watcher-error", output_path, "codex", "handle-1", "failed", "3"]
+    sys.argv = ["watcher-error", output_path, "background", "handle-1", "failed", "3"]
     exec(compile(snippet, "watcher-error-publisher", "exec"), {})
 finally:
     os.name = original_name
@@ -134,7 +134,7 @@ def sleep(seconds):
 
 def publish(path, mode, state, exit_code):
     sys.argv = [
-        "agent-status", path, mode, "codex", state, exit_code, "handle-1",
+        "agent-status", path, mode, "background", state, exit_code, "handle-1",
         "", "", "", "", "", "", "", "", "", "", "0",
     ]
     exec(compile(snippet, "agent-status-publisher", "exec"), {})
@@ -575,13 +575,17 @@ print(json.dumps({
     "run_dir": run,
     "run_id": "agent-dispatch-test",
     "repository_id": "fixture-repository",
-    "backend": "codex",
+    "backend": "background",
     "workflow": "solve",
     "phase": "review",
     "role": "code-simplifier",
     "task_tier": "medium",
     "risk_signals": [],
-    "routing_mode": "adaptive",
+    # #381 RULING 1: `adaptive` is unenforceable on every surviving backend --
+    # lib/agent-dispatch.sh raises route_unenforceable for it -- so this
+    # adapter fixture carries the only mode a real caller can now use. The
+    # subject of this file is the dispatch adapter, not route selection.
+    "routing_mode": "inherit",
     "issue_or_pr": "42",
     "issue_num": 42,
     "capacity": 20,
@@ -629,7 +633,7 @@ PY
   case "$5" in
     *fast-terminal-race.md)
       printf 'fast terminal result\n' > "$5"
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       chmod 600 "$6"
       printf 'ready\n' > "$FAST_TERMINAL_READY"
       fast_terminal_wait=0
@@ -641,7 +645,7 @@ PY
       ;;
     *sync-result.md)
       printf 'synchronous result\n' > "$5"
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *fast-terminal-context.md)
       printf 'trusted fast terminal result\n' > "$5"
@@ -651,7 +655,7 @@ PY
       DISPATCH_STATUS_WORKTREE="$FAST_CONTEXT_WORKTREE"
       DISPATCH_STATUS_BRANCH="$FAST_CONTEXT_BRANCH"
       DISPATCH_STATUS_WORKSPACE_MODE=isolated
-      printf '{"backend":"codex","state":"failed","exit_code":74,"pid":"opaque:test-handle","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
+      printf '{"backend":"background","state":"failed","exit_code":74,"pid":"opaque:test-handle","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
         "$TMP/run/forged-fast-terminal.log" "$TMP/run/forged-fast-terminal.md" \
         "$TMP/run/forged-fast-terminal-worktree" > "$6"
       ;;
@@ -659,35 +663,41 @@ PY
       :
       ;;
     *async-terminal.md)
-      printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       (
         sleep 1
-        printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+        printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ) &
       ;;
     *generation-race.md)
-      printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-invalid-backend-exit.md)
       printf '{"backend":"background","state":"completed","exit_code":9,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-backend-mismatch.md)
-      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      # DELIBERATELY the wrong backend: the request is dispatched on
+      # `background`, so a terminal claiming a different one must be refused.
+      # This used to say `codex`; #381 deleted that backend, and a blanket
+      # rename to `background` would have silently turned the mismatch into a
+      # match and stopped testing anything. `wezterm` is the nearest still-valid
+      # value that is not this dispatch's backend.
+      printf '{"backend":"wezterm","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-multiple-state.md)
-      printf '{"backend":"codex","state":"completed","status":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","status":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-bool-exit.md)
-      printf '{"backend":"codex","state":"completed","exit_code":true,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","exit_code":true,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-string-exit.md)
-      printf '{"backend":"codex","state":"completed","exit_code":"0","pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","exit_code":"0","pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *terminal-handle-mismatch.md)
-      printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:other-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:other-handle"}\n' > "$6"
       ;;
     *result.md)
-      printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
+      printf '{"backend":"background","state":"running","exit_code":null,"pid":"opaque:test-handle"}\n' > "$6"
       ;;
     *)
       printf '{"backend":"%s","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' "$1" > "$6"
@@ -942,17 +952,23 @@ python3 - "$TMP/backend.json" "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/statu
 import json, os, pathlib, stat, sys
 capture = json.loads(pathlib.Path(sys.argv[1]).read_text())
 decision = capture["decision"]
-assert capture["backend"] == "codex"
+assert capture["backend"] == "background"
 assert capture["workspace_mode"] == "isolated" and capture["workspace_dir"] == ""
-assert decision["logical_route"] == "quality", decision
-assert decision["model"] == "gpt-5.6-sol", decision
-assert decision["reasoning_effort"] == "medium", decision
+# #381 RULING 1: the per-role adaptive decision this used to assert was
+# produced only for the codex backend. Every surviving backend takes the
+# backend-neutral-inherit branch, which selects nothing. The invariant that
+# remains true -- and that the adapter is actually responsible for -- is that
+# the neutral decision reaches the provider boundary intact.
+assert decision["logical_route"] is None, decision
+assert decision["model"] is None, decision
+assert decision["reasoning_effort"] is None, decision
 assert decision["service_tier"] == "default", decision
-assert decision["sandbox"] == "read-only", decision
+assert decision["sandbox"] is None, decision
+assert decision["route_source"] == "backend-neutral-inherit", decision
 events = [json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
 assert [event["event"] for event in events] == ["route_decided", "agent_started"], events
 assert {event["schema_version"] for event in events} == {2}, events
-assert events[0]["effective_model"] == "gpt-5.6-sol"
+assert events[0].get("effective_model") in (None, "")
 assert "backend_handle" not in events[1]
 assert events[1]["status_path"] == str(pathlib.Path(sys.argv[3]).resolve())
 assert events[1]["owner_process_identity"].split("|",1)[0] == str(events[1]["owner_pid"]), events[1]
@@ -968,7 +984,7 @@ PY
 # Opaque handles remain live for reconciliation and retain their lease.
 LEASES="$(find "$STATE_DIR" -name '*.lease' -type f | wc -l | tr -d ' ')"
 [ "$LEASES" = 1 ] || { echo "expected one registered opaque lease, got $LEASES" >&2; exit 1; }
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/status.json"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/status.json"
 for _ in 1 2 3 4 5; do
   ! grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
   sleep 1
@@ -986,6 +1002,12 @@ CALLER_REPO="$(cd "$TMP/caller-repo" && pwd -P)"
 CALLER_REQUEST="$(python3 -I - "$REQUEST" "$CALLER_REPO" <<'PY'
 import json,sys
 request=json.loads(sys.argv[1]); request['run_id']='agent-dispatch-caller'
+# #381: caller-workspace mode is admitted for `workflow` only. It used to be
+# {codex, workflow}; the codex half was deleted with the backend, so this
+# fixture names the one backend the validator still accepts. The subject of
+# the case -- caller metadata reaches the provider adapter and is excluded
+# from the routing projection -- is unchanged.
+request['backend']='workflow'
 request['repository_id']=sys.argv[2]; request['workspace_mode']='caller'; request['workspace_dir']=sys.argv[2]
 print(json.dumps(request,sort_keys=True,separators=(',',':')))
 PY
@@ -994,10 +1016,11 @@ uberdev_agent_dispatch "$CALLER_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/caller-
 python3 -I - "$TMP/backend.json" "$CALLER_REPO" <<'PY'
 import json,pathlib,sys
 capture=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert capture['backend']=='workflow'
 assert capture['workspace_mode']=='caller' and capture['workspace_dir']==sys.argv[2]
 assert 'workspace_mode' not in capture['decision'] and 'workspace_dir' not in capture['decision']
 PY
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/caller-status.json"
+printf '{"backend":"workflow","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/caller-status.json"
 wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-caller completed 80 0.1
 
 workspace_provider_before="$(cat "$TMP/provider-count")"
@@ -1130,7 +1153,7 @@ PY
   if ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null; then
     terminal_validation_failures="$terminal_validation_failures lease-released:$terminal_case"
   fi
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$terminal_status"
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$terminal_status"
   for _ in 1 2 3 4 5; do
     ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null && break
     sleep 1
@@ -1141,15 +1164,22 @@ if [ -n "$terminal_validation_failures" ]; then
   exit 1
 fi
 
+# #381 RULING 1: `shadow` used to answer with an inherit decision PLUS a
+# concrete adaptive_proposal naming a codex provider pair. That proposal named
+# a pair no surviving transport can execute, so it is gone -- the neutral
+# branch emits no adaptive_proposal key at all. A shadow request is therefore
+# answered, truthfully, with "nothing was proposed"; asserting a proposal here
+# would be asserting an enforcement no consumer honours.
 SHADOW_REQUEST="$(variant_request agent-dispatch-shadow shadow)"
 uberdev_agent_dispatch "$SHADOW_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/shadow.md" "$TMP/run/shadow.json"
 python3 - "$TMP/backend.json" <<'PY'
 import json, pathlib, sys
 decision = json.loads(pathlib.Path(sys.argv[1]).read_text())["decision"]
-assert decision["routing_mode"] == "shadow", decision
+assert decision["routing_mode"] == "inherit", decision
 assert decision["effective_policy"] == "inherit", decision
 assert decision["model"] is None, decision
-assert decision["adaptive_proposal"]["model"] == "gpt-5.6-sol", decision
+assert decision["route_source"] == "backend-neutral-inherit", decision
+assert "adaptive_proposal" not in decision, decision
 PY
 
 INHERIT_REQUEST="$(variant_request agent-dispatch-inherit inherit)"
@@ -1162,14 +1192,14 @@ assert decision["model"] is None and decision["reasoning_effort"] is None
 assert decision["service_tier"] == "default"
 PY
 
+# Same #381 RULING 1 consequence for an EXPLICIT route: `--route=sol-ultra`
+# named a codex-only provider pair, and forcing it now has no enforcer. The
+# refusal is the assertion.
 ULTRA_REQUEST="$(variant_request agent-dispatch-ultra ultra)"
-uberdev_agent_dispatch "$ULTRA_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/ultra.md" "$TMP/run/ultra.json"
-python3 - "$TMP/backend.json" <<'PY'
-import json, pathlib, sys
-decision = json.loads(pathlib.Path(sys.argv[1]).read_text())["decision"]
-assert decision["forced"] is True
-assert (decision["logical_route"], decision["model"], decision["reasoning_effort"]) == ("ultra", "gpt-5.6-sol", "ultra")
-PY
+if uberdev_agent_dispatch "$ULTRA_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/ultra.md" "$TMP/run/ultra.json" >/dev/null 2>"$TMP/ultra.err"; then
+  echo "explicit route was accepted with no transport to enforce it" >&2; exit 1
+fi
+grep -q route_unenforceable "$TMP/ultra.err"
 
 CLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"
 uberdev_agent_dispatch "$CLAUDE_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/claude.md" "$TMP/run/claude.json"
@@ -1195,7 +1225,7 @@ grep -q '"state":"running"' "$TMP/run/no-status.json" || {
 grep -R -q "run_id=agent-dispatch-no-status" "$STATE_DIR/semaphore-v1" || {
   echo "opaque dispatch without current status was not registered" >&2; exit 1;
 }
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/no-status.json"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/no-status.json"
 for _ in 1 2 3 4 5; do
   ! grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
   sleep 1
@@ -1234,7 +1264,7 @@ finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
 PY
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/generation-race.json"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/generation-race.json"
 for _ in 1 2 3 4 5; do
   grep -q 'agent-dispatch-generation-race.*"event":"completed"\|"event":"completed".*agent-dispatch-generation-race' \
     "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
@@ -1418,7 +1448,7 @@ if kill -0 "$fast_terminal_transient_owner" 2>/dev/null \
   wait "$fast_terminal_pid" 2>/dev/null || true
   exit 1
 fi
-fast_terminal_sibling="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 \
+fast_terminal_sibling="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository background 20 \
   agent-dispatch-fast-terminal-sibling 30)"
 if [ -f "$fast_terminal_lease" ] \
     && [ "$(sed -n 's/^generation=//p' "$fast_terminal_lease")" = "$fast_terminal_generation" ]; then
@@ -1496,7 +1526,7 @@ if grep -R -q 'run_id=agent-dispatch-fail' "$STATE_DIR/semaphore-v1" 2>/dev/null
   echo "provider launch failure retained its capacity lease" >&2
   exit 1
 fi
-FAIL_RELEASE_PROBE="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository codex 20 provider-failure-release-probe 30)" || {
+FAIL_RELEASE_PROBE="$(uberdev_semaphore_acquire "$STATE_DIR" fixture-repository background 20 provider-failure-release-probe 30)" || {
   echo "provider launch failure capacity could not be reacquired" >&2; exit 1;
 }
 uberdev_semaphore_release "$FAIL_RELEASE_PROBE"
@@ -1511,7 +1541,7 @@ zsh -f -c '
   unsetopt nullglob
   . "$1"
   make_request() {
-    python3 -I -c '\''import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":sys.argv[2],"repository_id":"zsh-fixture","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":77,"issue_num":77,"capacity":2,"timeout_s":10},separators=(",",":")))'\'' "$1" "$2"
+    python3 -I -c '\''import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":sys.argv[2],"repository_id":"zsh-fixture","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":77,"issue_num":77,"capacity":2,"timeout_s":10},separators=(",",":")))'\'' "$1" "$2"
   }
   _uberdev_agent_dispatch_backend() {
     DISPATCH_ID="opaque:zsh"
@@ -1635,7 +1665,7 @@ _uberdev_agent_dispatch_backend() {
       printf '{"backend":"wezterm","state":"running","exit_code":null,"pid":"pane"}\n' > "$status_path"
       chmod 600 "$status_path"
       ;;
-    codex|background)
+    background|background)
       nohup sleep 5 >/dev/null 2>&1 &
       DISPATCH_ID="$!"
       printf '{"backend":"%s","state":"running","exit_code":null,"pid":"%s"}\n' "$backend" "$DISPATCH_ID" > "$status_path"
@@ -1646,7 +1676,8 @@ _uberdev_agent_dispatch_backend() {
   return 0
 }
 
-cross_backend_case codex
+# The `codex` case that led this list is gone with the backend (#381); the two
+# remaining detached transports are the whole set.
 cross_backend_case background
 cross_backend_case wezterm
 
@@ -1660,7 +1691,7 @@ DEAD_RESULT="$DEAD_RUN/trusted-result.md"
 DEAD_WORKTREE="$DEAD_RUN/trusted-worktree"
 DEAD_BRANCH="worktree-trusted-dead-provider"
 printf 'trusted provider log\n' > "$DEAD_LOG"
-DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
+DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
 _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(1)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
@@ -1671,7 +1702,7 @@ _uberdev_agent_dispatch_backend() {
   DISPATCH_STATUS_WORKTREE="$DEAD_WORKTREE"
   DISPATCH_STATUS_BRANCH="$DEAD_BRANCH"
   DISPATCH_STATUS_WORKSPACE_MODE=isolated
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s","log":"%s","result":"%s","worktree":"%s","branch":"forged-branch","workspace_mode":"caller"}\n' \
     "$DISPATCH_ID" "$DEAD_RUN/forged.log" "$DEAD_RUN/forged-result.md" "$DEAD_RUN/forged-worktree" > "$6"
   chmod 600 "$6"
 }
@@ -1706,14 +1737,14 @@ PY
 ORPHAN_RUN="$TMP/wrapper-death-with-live-provider"
 mkdir -p "$ORPHAN_RUN"
 printf 'wrapper death prompt\n' >"$ORPHAN_RUN/prompt.txt"
-ORPHAN_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-wrapper-death","repository_id":"adapter-wrapper-death-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$ORPHAN_RUN")"
+ORPHAN_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-wrapper-death","repository_id":"adapter-wrapper-death-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$ORPHAN_RUN")"
 _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & echo $! > \"$1\"; wait","_",sys.argv[1]])' \
     "$ORPHAN_RUN/provider-child.pid" >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   printf '%s\n' "$DISPATCH_ID" >"$ORPHAN_RUN/wrapper.pid"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$ORPHAN_REQUEST" "$ORPHAN_RUN/prompt.txt" "$ORPHAN_RUN/result.md" "$ORPHAN_RUN/status.json"
@@ -1748,7 +1779,7 @@ KILL_CHILD="$(cat "$KILL_RUN/child.pid")"
 : >"$KILL_RUN/release"
 wait "$KILL_LEADER"
 _uberdev_dispatch_group_live "$KILL_LEADER"
-_uberdev_dispatch_cancel_backend codex "$KILL_LEADER" "$KILL_IDENTITY"
+_uberdev_dispatch_cancel_backend background "$KILL_LEADER" "$KILL_IDENTITY"
 ! _uberdev_dispatch_group_live "$KILL_LEADER"
 ! kill -0 "$KILL_CHILD" 2>/dev/null
 
@@ -1758,7 +1789,7 @@ _uberdev_dispatch_cancel_backend codex "$KILL_LEADER" "$KILL_IDENTITY"
 PRE_RUN="$TMP/pre-launch-identity-failure"
 mkdir -p "$PRE_RUN"
 printf 'pre-launch failure prompt\n' > "$PRE_RUN/prompt.txt"
-PRE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-pre-launch-identity-failure","repository_id":"adapter-prelaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$PRE_RUN")"
+PRE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-pre-launch-identity-failure","repository_id":"adapter-prelaunch-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":95,"issue_num":95,"capacity":1,"timeout_s":20},separators=(",",":")))' "$PRE_RUN")"
 eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_prelaunch_set_handle/')"
 uberdev_semaphore_set_handle() { return 23; }
 rm -f "$PRE_RUN/provider-called"
@@ -1776,7 +1807,7 @@ assert len(terminal)==1 and terminal[0].get('error_class')=='dispatch_setup_fail
 PY
 ! grep -R -q 'run_id=adapter-pre-launch-identity-failure' "$PRE_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 eval "$(declare -f _real_prelaunch_set_handle | sed '1s/_real_prelaunch_set_handle/uberdev_semaphore_set_handle/')"
-PRE_REACQUIRED="$(uberdev_semaphore_acquire "$PRE_RUN/.agent-state-$(id -u)" adapter-prelaunch-repository codex 1 adapter-prelaunch-reacquired 20)"
+PRE_REACQUIRED="$(uberdev_semaphore_acquire "$PRE_RUN/.agent-state-$(id -u)" adapter-prelaunch-repository background 1 adapter-prelaunch-reacquired 20)"
 uberdev_semaphore_release "$PRE_REACQUIRED"
 
 # Event construction and manifest persistence fail before provider launch. The
@@ -1837,7 +1868,7 @@ prelaunch_event_failure_case() {
   run="$TMP/pre-launch-event-$suffix"
   mkdir -p "$run"
   printf 'pre-launch event failure prompt\n' >"$run/prompt.txt"
-  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-prelaunch-event-"+sys.argv[2],"repository_id":"adapter-prelaunch-event-repository-"+sys.argv[2],"backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$suffix")"
+  request="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-prelaunch-event-"+sys.argv[2],"repository_id":"adapter-prelaunch-event-repository-"+sys.argv[2],"backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$run" "$suffix")"
   PRE_EVENT_MODE="$mode"
   PRE_EVENT_COUNTER="$run/failure-injected"
   PRE_RELEASE_COUNTER="$run/release-attempts"
@@ -1887,7 +1918,7 @@ prelaunch_event_failure_case append_once append-once
 prelaunch_event_failure_case append_always append-always
 prelaunch_event_failure_case append_release append-release
 )
-PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always codex 1 adapter-prelaunch-event-reacquired 20)"
+PRE_EVENT_REACQUIRED="$(uberdev_semaphore_acquire "$TMP/pre-launch-event-append-always/.agent-state-$(id -u)" adapter-prelaunch-event-repository-append-always background 1 adapter-prelaunch-event-reacquired 20)"
 uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
 
 # Once launch succeeds, a failure to bind the exact handle must cancel that
@@ -1895,7 +1926,7 @@ uberdev_semaphore_release "$PRE_EVENT_REACQUIRED"
 POST_RUN="$TMP/post-launch-setup-failure"
 mkdir -p "$POST_RUN"
 printf 'post-launch failure prompt\n' > "$POST_RUN/prompt.txt"
-POST_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-post-launch-failure","repository_id":"adapter-postlaunch-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":92,"issue_num":92,"capacity":1,"timeout_s":20},separators=(",",":")))' "$POST_RUN")"
+POST_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-post-launch-failure","repository_id":"adapter-postlaunch-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":92,"issue_num":92,"capacity":1,"timeout_s":20},separators=(",",":")))' "$POST_RUN")"
 eval "$(declare -f uberdev_semaphore_set_handle | sed '1s/uberdev_semaphore_set_handle/_real_postlaunch_set_handle/')"
 POST_SET_CALLS_FILE="$POST_RUN/set-handle-calls"
 printf '0\n' > "$POST_SET_CALLS_FILE"
@@ -1910,7 +1941,7 @@ _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""; printf '%s\n' "$DISPATCH_ID" > "$POST_RUN/provider.pid"
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
   chmod 600 "$6"
 }
 if uberdev_agent_dispatch "$POST_REQUEST" "$POST_RUN/prompt.txt" "$POST_RUN/result.md" "$POST_RUN/status.json"; then
@@ -1930,7 +1961,7 @@ eval "$(declare -f _real_postlaunch_set_handle | sed '1s/_real_postlaunch_set_ha
 IDENTITY_RUN="$TMP/post-launch-process-identity-failure"
 mkdir -p "$IDENTITY_RUN"
 printf 'process identity failure prompt\n' >"$IDENTITY_RUN/prompt.txt"
-IDENTITY_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-process-identity-failure","repository_id":"adapter-process-identity-failure-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_RUN")"
+IDENTITY_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-process-identity-failure","repository_id":"adapter-process-identity-failure-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":96,"issue_num":96,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_RUN")"
 eval "$(declare -f _uberdev_agent_process_identity | sed '1s/_uberdev_agent_process_identity/_real_agent_process_identity/')"
 printf '0\n' >"$IDENTITY_RUN/identity-probes"
 _uberdev_agent_process_identity() {
@@ -1950,7 +1981,7 @@ _uberdev_agent_dispatch_backend() {
   printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_RUN/provider.pid"
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   : >"$IDENTITY_RUN/identity-capture-armed"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
   chmod 600 "$6"
 }
 set +e
@@ -1983,13 +2014,13 @@ fi
 IDENTITY_TERMINAL_RUN="$TMP/post-launch-identity-absent-terminal"
 mkdir -p "$IDENTITY_TERMINAL_RUN"
 printf 'identity absent terminal prompt\n' >"$IDENTITY_TERMINAL_RUN/prompt.txt"
-IDENTITY_TERMINAL_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-identity-absent-terminal","repository_id":"adapter-identity-absent-terminal-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_TERMINAL_RUN")"
+IDENTITY_TERMINAL_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-identity-absent-terminal","repository_id":"adapter-identity-absent-terminal-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$IDENTITY_TERMINAL_RUN")"
 (
 _uberdev_agent_process_identity() {
   [ -f "$IDENTITY_TERMINAL_RUN/provider.pid" ] \
     && [ "$1" = "$(cat "$IDENTITY_TERMINAL_RUN/provider.pid")" ] || return 2
   printf 'terminal result\n' >"$IDENTITY_TERMINAL_RUN/result.md"
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$1" \
     >"$IDENTITY_TERMINAL_RUN/status.json"
   chmod 600 "$IDENTITY_TERMINAL_RUN/status.json"
   : >"$IDENTITY_TERMINAL_RUN/terminal-published-during-identity"
@@ -2000,7 +2031,7 @@ _uberdev_agent_dispatch_backend() {
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_TERMINAL_RUN/provider.pid"
   wait "$DISPATCH_ID"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$IDENTITY_TERMINAL_REQUEST" "$IDENTITY_TERMINAL_RUN/prompt.txt" \
@@ -2022,7 +2053,7 @@ PY
 EXITED_RUN="$TMP/post-launch-provider-already-exited"
 mkdir -p "$EXITED_RUN"
 printf 'already exited provider prompt\n' >"$EXITED_RUN/prompt.txt"
-EXITED_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-provider-already-exited","repository_id":"adapter-postlaunch-provider-already-exited-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":98,"issue_num":98,"capacity":1,"timeout_s":20},separators=(",",":")))' "$EXITED_RUN")"
+EXITED_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-provider-already-exited","repository_id":"adapter-postlaunch-provider-already-exited-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":98,"issue_num":98,"capacity":1,"timeout_s":20},separators=(",",":")))' "$EXITED_RUN")"
 _uberdev_agent_dispatch_backend() {
   python3 -I -c 'import os; os.setsid()' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
@@ -2052,7 +2083,7 @@ PY
 REPLACEMENT_RUN="$TMP/post-launch-replacement-capability"
 mkdir -p "$REPLACEMENT_RUN"
 printf 'replacement capability prompt\n' > "$REPLACEMENT_RUN/prompt.txt"
-REPLACEMENT_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-replacement","repository_id":"adapter-postlaunch-replacement-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":97,"issue_num":97,"capacity":1,"timeout_s":20},separators=(",",":")))' "$REPLACEMENT_RUN")"
+REPLACEMENT_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-postlaunch-replacement","repository_id":"adapter-postlaunch-replacement-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":97,"issue_num":97,"capacity":1,"timeout_s":20},separators=(",",":")))' "$REPLACEMENT_RUN")"
 eval "$(declare -f _uberdev_semaphore_lease_identity | sed '1s/_uberdev_semaphore_lease_identity/_real_replacement_lease_identity/')"
 eval "$(declare -f _uberdev_semaphore_remove_lease | sed '1s/_uberdev_semaphore_remove_lease/_real_replacement_remove_lease/')"
 _uberdev_semaphore_lease_identity() {
@@ -2077,7 +2108,7 @@ _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '%s\n' "$DISPATCH_ID" > "$REPLACEMENT_RUN/provider.pid"
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
   chmod 600 "$6"
   : > "$REPLACEMENT_RUN/provider-launched"
 }
@@ -2096,7 +2127,7 @@ kill -0 "$REPLACEMENT_PID" 2>/dev/null && {
   "$REPLACEMENT_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
 REPLACEMENT_REACQUIRED="$(uberdev_semaphore_acquire \
   "$REPLACEMENT_RUN/.agent-state-$(id -u)" adapter-postlaunch-replacement-repository \
-  codex 1 adapter-postlaunch-replacement-reacquired 20)"
+  background 1 adapter-postlaunch-replacement-reacquired 20)"
 uberdev_semaphore_release "$REPLACEMENT_REACQUIRED"
 eval "$(declare -f _real_replacement_lease_identity | sed '1s/_real_replacement_lease_identity/_uberdev_semaphore_lease_identity/')"
 eval "$(declare -f _real_replacement_remove_lease | sed '1s/_real_replacement_remove_lease/_uberdev_semaphore_remove_lease/')"
@@ -2106,13 +2137,13 @@ eval "$(declare -f _real_replacement_remove_lease | sed '1s/_real_replacement_re
 WATCH_RUN="$TMP/watcher-finalize-failure"
 mkdir -p "$WATCH_RUN"
 printf 'watcher failure prompt\n' > "$WATCH_RUN/prompt.txt"
-WATCH_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-watcher-finalize-failure","repository_id":"adapter-watcher-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":93,"issue_num":93,"capacity":1,"timeout_s":20},separators=(",",":")))' "$WATCH_RUN")"
+WATCH_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-watcher-finalize-failure","repository_id":"adapter-watcher-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":93,"issue_num":93,"capacity":1,"timeout_s":20},separators=(",",":")))' "$WATCH_RUN")"
 eval "$(declare -f _uberdev_agent_finalize_terminal | sed '1s/_uberdev_agent_finalize_terminal/_real_watcher_finalize_terminal/')"
 _uberdev_agent_finalize_terminal() { return 29; }
 _uberdev_agent_dispatch_backend() {
   nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(5)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
 }
 uberdev_agent_dispatch "$WATCH_REQUEST" "$WATCH_RUN/prompt.txt" "$WATCH_RUN/result.md" "$WATCH_RUN/status.json"
 WATCH_LEASE="$(python3 -I - "$WATCH_RUN/.agent-state-$(id -u)/semaphore-v1" <<'PY'
@@ -2151,7 +2182,7 @@ WATCH_LEASE_NATIVE_IDENTITY="$(_uberdev_semaphore_lease_identity \
   echo "watcher-finalize-failure exact lease identity capture failed: path=$WATCH_LEASE generation=$WATCH_LEASE_GENERATION" >&2
   exit 1
 }
-_uberdev_agent_publish_status "$WATCH_RUN/status.json" codex "$DISPATCH_ID" completed 0 provider
+_uberdev_agent_publish_status "$WATCH_RUN/status.json" background "$DISPATCH_ID" completed 0 provider
 for _ in $(seq 1 100); do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 0.1; done
 python3 -I - "$WATCH_RUN/status.json.watcher-error.json" <<'PY'
 import json,sys
@@ -2189,11 +2220,11 @@ eval "$(declare -f _real_watcher_finalize_terminal | sed '1s/_real_watcher_final
 RACE_RUN="$TMP/reconcile-wins"
 mkdir -p "$RACE_RUN"
 printf 'reconcile race prompt\n' > "$RACE_RUN/prompt.txt"
-RACE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-reconcile-wins","repository_id":"adapter-race-repository","backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":90,"issue_num":90,"capacity":1,"timeout_s":20},separators=(",",":")))' "$RACE_RUN")"
+RACE_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-reconcile-wins","repository_id":"adapter-race-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":90,"issue_num":90,"capacity":1,"timeout_s":20},separators=(",",":")))' "$RACE_RUN")"
 _uberdev_agent_dispatch_backend() {
   DISPATCH_ID="opaque:race-handle"
   DISPATCH_LOG=""
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"opaque:race-handle"}\n' > "$6"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"opaque:race-handle"}\n' > "$6"
   chmod 600 "$6"
   DISPATCH_RC=0
   return 0
@@ -2209,7 +2240,7 @@ _uberdev_agent_start_watcher() {
   RACE_DECISION="$8"
 }
 uberdev_agent_dispatch "$RACE_REQUEST" "$RACE_RUN/prompt.txt" "$RACE_RUN/result.md" "$RACE_RUN/status.json"
-printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"opaque:race-handle"}\n' > "$RACE_RUN/status.json"
+printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:race-handle"}\n' > "$RACE_RUN/status.json"
 python3 -I "$ROOT/plugins/uberdev/lib/run_manifest.py" reconcile --manifest "$RACE_MANIFEST" >/dev/null
 _uberdev_agent_finalize_terminal "$RACE_MANIFEST" "$RACE_LEASE" "$RACE_LEASE_IDENTITY" \
   "$RACE_STATUS" "$RACE_BACKEND" "$RACE_HANDLE" "$RACE_REQUEST_CAPTURE" "$RACE_DECISION" completed
@@ -2282,7 +2313,7 @@ _uberdev_agent_dispatch_backend() {
 import json,os,pathlib,sys
 path=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])
 payload={
-    'backend':'codex', 'state':'failed', 'exit_code':74, 'pid':1,
+    'backend':'background', 'state':'failed', 'exit_code':74, 'pid':1,
     'log':str(root/'forged.log'), 'result':str(root/'forged-result.md'),
     'worktree':str(root/'forged-worktree'), 'branch':'forged-branch',
     'workspace_mode':'caller',
@@ -2301,7 +2332,7 @@ import json,sys
 run,kind=sys.argv[1:]
 print(json.dumps({
     'schema_version':1, 'run_dir':run, 'run_id':'adapter-attest-'+kind,
-    'repository_id':'adapter-attest-'+kind+'-repository', 'backend':'codex',
+    'repository_id':'adapter-attest-'+kind+'-repository', 'backend':'background',
     'workflow':'solve', 'phase':'lead', 'role':'lead', 'task_tier':'small',
     'risk_signals':[], 'routing_mode':'inherit', 'issue_or_pr':98,
     'issue_num':98, 'capacity':1, 'timeout_s':20,

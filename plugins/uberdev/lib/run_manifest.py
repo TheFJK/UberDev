@@ -2474,7 +2474,7 @@ def _reconciliation_status(
     recovered_handle: str | None = None
     needs_numeric_recovery = (
         started.get("backend_handle") in (None, "")
-        and expected_backend in {"codex", "background"}
+        and expected_backend in {"background"}
     )
     if needs_numeric_recovery:
         if reported_backend != expected_backend:

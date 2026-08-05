@@ -36,7 +36,6 @@ lib/config-read.sh
 lib/model_routing.py
 lib/run_manifest.py
 lib/atomic_move.py
-lib/worktree_receipts.py
 lib/code_fixer_contract.py
 lib/review-aggregate.sh
 lib/live-semaphore.sh

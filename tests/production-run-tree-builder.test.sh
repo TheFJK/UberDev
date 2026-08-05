@@ -40,7 +40,7 @@ def governed_source(edge):
 def context(workflow,issue):
  if workflow in contexts:return contexts[workflow]
  run=root/workflow; state=run/f'.agent-state-{uid}'; state.mkdir(parents=True); state.chmod(0o700)
- metadata={'run_id':f'root-{workflow}','repository_id':str(repository),'workflow':workflow,'backend':'codex','issue_num':issue,'task_tier':'medium','risk_signals':['security']}
+ metadata={'run_id':f'root-{workflow}','repository_id':str(repository),'workflow':workflow,'backend':'background','issue_num':issue,'task_tier':'medium','risk_signals':['security']}
  payload={'schema_version':1,'metadata':metadata,'routing_request':{},'root_decision':{}}
  raw=json.dumps(payload,sort_keys=True,separators=(',',':')).encode(); path=state/f'route-context-v1-root-{workflow}.json'
  path.write_bytes(raw); path.chmod(0o600)

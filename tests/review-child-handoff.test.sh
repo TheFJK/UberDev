@@ -470,12 +470,19 @@ else:
 PY
 )"
 
+  # RETIRED SURFACE (#381). Every carrier fixture in this file used to be built
+  # with backend:"codex" + routing_mode:"adaptive", which reached the concrete
+  # resolver. Both are gone: `codex` is not in the backend enum and `adaptive`
+  # is refused with route_unenforceable, so a carrier can no longer be sealed
+  # from either. These fixtures are about handoff identity and digest binding,
+  # not routing, so they now use the shape a real carrier has -- backend
+  # `workflow` with no routing_mode. Nothing about what they assert changed.
   WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
   WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
-    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600}')"
   WINDOWS_DECISION="$(uberdev_agent_resolve_request "$WINDOWS_REQUEST")"
   WINDOWS_METADATA="$(jq -cn --arg repo "$WINDOWS_REPO_ID" \
-    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:91,task_tier:"medium",risk_signals:[]}')"
+    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:91,task_tier:"medium",risk_signals:[]}')"
   WINDOWS_CONTEXT_OUT="$(uberdev_agent_context_create "$WINDOWS_RUN" "$WINDOWS_REQUEST" "$WINDOWS_DECISION" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$WINDOWS_METADATA" '2026-07-26T00:00:00Z')"
@@ -966,9 +973,9 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'confidence: high' 'findin
 ! uberdev_child_validate_phase1_review_result "$TMP/revisions-empty.md"
 ! uberdev_child_validate_phase1_review_result "$TMP/reject-suggestion-only.md"
 uberdev_child_validate_phase1_review_result "$TMP/revisions-blocker.md"
-request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600}')"
 decision="$(uberdev_agent_resolve_request "$request")"
-metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
+metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
 context_out="$(uberdev_agent_context_create "$TMP/run" "$request" "$decision" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$metadata" '2026-07-10T00:00:00Z')"
@@ -978,9 +985,9 @@ export UBERDEV_RUN_CARRIER_JSON
 REVIEW_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON"
 
 mkdir -p "$TMP/simplify-run"
-simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"codex",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"workflow",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600}')"
 simplify_decision="$(uberdev_agent_resolve_request "$simplify_request")"
-simplify_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"simplify-contract",repository_id:$repo,workflow:"simplify",backend:"codex",issue_num:0,task_tier:"medium",risk_signals:[]}')"
+simplify_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"simplify-contract",repository_id:$repo,workflow:"simplify",backend:"workflow",issue_num:0,task_tier:"medium",risk_signals:[]}')"
 simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simplify_request" "$simplify_decision" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$simplify_metadata" '2026-07-10T00:00:00Z')"
@@ -1208,9 +1215,9 @@ finally:
     UBERDEV_TEST_PORTABLE_REPARSE_PATH="$portable_manifest" _uberdev_child_manifest_path >/dev/null 2>&1
 
   portable_run="$TMP/portable-run"; mkdir -p "$portable_run"; portable_run="$(cd "$portable_run" && pwd -P)"
-  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600}')"
   portable_decision="$(uberdev_agent_resolve_request "$portable_request")"
-  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:[]}')"
+  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:1,task_tier:"medium",risk_signals:[]}')"
   portable_context_out="$(uberdev_agent_context_create "$portable_run" "$portable_request" "$portable_decision" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$portable_metadata" '2026-07-10T00:00:00Z')"
@@ -1706,10 +1713,10 @@ exercise_parent_review_carrier() {
   local defer_handoff defer_sha256 defer_result defer_status defer_prepared
   mkdir -p "$parent_run"
   request="$(jq -cn --arg run "$parent_run" --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
-    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"workflow",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600}')"
   decision="$(uberdev_agent_resolve_request "$request")"
   metadata="$(jq -cn --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
-    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"codex",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
+    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"workflow",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
   context_out="$(uberdev_agent_context_create "$parent_run" "$request" "$decision" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$metadata" '2026-07-26T00:00:00Z')"

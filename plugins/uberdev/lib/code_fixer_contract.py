@@ -6390,7 +6390,7 @@ def bind_launch_receipt(
         or value.get("instance_id") != instance_id
         or value.get("backend")
         # CONTRACT: dispatch-backend -auto
-        not in {"codex", "background", "wezterm", "workflow"}
+        not in {"background", "wezterm", "workflow"}
         or not isinstance(value.get("handle"), str)
         or not value["handle"]
         or value.get("state")
@@ -6612,7 +6612,7 @@ def _load_launch_binding(payload: bytes, expected_edge_id: str) -> dict[str, Any
         or not value["instance_id"]
         or value.get("backend")
         # CONTRACT: dispatch-backend -auto
-        not in {"codex", "background", "wezterm", "workflow"}
+        not in {"background", "wezterm", "workflow"}
         or not isinstance(value.get("handle"), str)
         or not value["handle"]
         or not isinstance(value.get("receipt_sha256"), str)
