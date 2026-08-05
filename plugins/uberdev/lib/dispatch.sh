@@ -57,11 +57,12 @@ _UBERDEV_DISPATCH_PLUGIN_ROOT="${_UBERDEV_DISPATCH_LIB_DIR%/*}"
 _UBERDEV_DISPATCH_LOADED=1
 
 # A provider-managed worktree may finish its final git worktree unlock at the
-# same time as the Codex supervisor starts cleanup. Retry only transient Git
-# metadata/probe failures (rc2); preservation decisions (rc3) are terminal.
-_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS=3
-_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S=0.05
-_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S=0.10
+# same time as the dispatching supervisor starts cleanup. Retry only transient
+# Git metadata/probe failures (rc2); preservation decisions (rc3) are terminal.
+# Shared by every dispatcher-owned worktree teardown, not just one backend's.
+_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS=3
+_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S=0.05
+_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S=0.10
 _UBERDEV_CODEX_CREATE_MAX_ATTEMPTS=3
 _UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S=0.05
 _UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S=0.10
@@ -251,11 +252,21 @@ _uberdev_dispatch_with_git_metadata_mutex() {
   )
 }
 
+# _uberdev_dispatch_git_worktree_add_locked REPO_ROOT TARGET BRANCH LOG_FILE [START_POINT]
+# START_POINT is optional and additive: when supplied the new worktree is
+# pinned to that exact commit, which is what makes the child teardown's
+# "HEAD has not moved" preservation guard decidable. Omitting it keeps the
+# historical "branch from current HEAD" behaviour for callers that own their
+# worktree for the whole session and never tear it down.
 _uberdev_dispatch_git_worktree_add_locked() {
-  local repo_root="$1" target="$2" branch="$3" log_file="$4" native_target
+  local repo_root="$1" target="$2" branch="$3" log_file="$4" start_point="${5:-}" native_target
   native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return $?
   cd "$repo_root" || return 2
-  MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" >"$log_file" 2>&1
+  if [ -n "$start_point" ]; then
+    MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" "$start_point" >"$log_file" 2>&1
+  else
+    MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" >"$log_file" 2>&1
+  fi
 }
 
 _uberdev_dispatch_git_worktree_add() {
@@ -395,7 +406,7 @@ if value!={"state":"retired"}: raise SystemExit(3)
 PY
 }
 
-_uberdev_dispatch_classify_codex_worktree_registry() {
+_uberdev_dispatch_classify_worktree_registry() {
   local repo_root="$1" target="$2" branch="$3" listing classified
   listing="$(cd "$repo_root" && git worktree list --porcelain)" || return 2
   classified="$(_uberdev_dispatch_python -I -B - "$target" "$branch" "$listing" <<'PY'
@@ -419,15 +430,15 @@ branch_state="present" if any(ref==expected_ref for _,ref in records) else "abse
 print(exact_state+"\t"+branch_state,end="")
 PY
 )" || return 2
-  _UBERDEV_CODEX_REGISTRY_EXACT="${classified%%$'\t'*}"
-  _UBERDEV_CODEX_REGISTRY_BRANCH="${classified#*$'\t'}"
-  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+  _UBERDEV_DISPATCH_REGISTRY_EXACT="${classified%%$'\t'*}"
+  _UBERDEV_DISPATCH_REGISTRY_BRANCH="${classified#*$'\t'}"
+  case "$_UBERDEV_DISPATCH_REGISTRY_EXACT:$_UBERDEV_DISPATCH_REGISTRY_BRANCH" in
     absent:absent|absent:present|expected:present|wrong:absent|wrong:present) ;;
     *) return 2 ;;
   esac
 }
 
-_uberdev_dispatch_validate_codex_worktree_directory() {
+_uberdev_dispatch_validate_worktree_directory() {
   _uberdev_dispatch_python -I -B - "$1" <<'PY'
 import os,stat,sys
 path=sys.argv[1]
@@ -439,6 +450,131 @@ if (os.path.islink(path) or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entr
     or bool(getattr(entry,"st_file_attributes",0)&reparse)
     or (uid is not None and entry.st_uid!=uid)): raise SystemExit(3)
 PY
+}
+
+# _uberdev_dispatch_cleanup_child_worktree_locked REPO_ROOT RELATIVE BRANCH START_HEAD TERMINAL
+#
+# Backend-neutral teardown for a DISPATCHER-OWNED, CHILD-OWNED, isolated
+# worktree (#381 RULING 4). Removes the worktree and its branch once the child
+# reaches a terminal state, and refuses — loudly, with a distinct rc — whenever
+# removing would destroy work or the on-disk state no longer matches what the
+# dispatcher created.
+#
+# Relationship to the codex arm's receipt transaction: the receipt gave the
+# codex supervisor a crash-safe, forgery-resistant record of "I created this
+# exact worktree at this exact HEAD". The detached `background` and `wezterm`
+# arms have no receipt to authenticate against, so START_HEAD is threaded to
+# the child through its own launch argv instead. Everything downstream of that
+# authority — registry classification, symlink/ownership validation, the
+# clean-tree and unmoved-HEAD preservation guards, the post-removal absence
+# re-verification — is IDENTICAL, because those checks are what actually keep a
+# teardown from deleting someone's work.
+#
+# rc 0  worktree and branch are gone (or were already gone).
+# rc 2  transient/unexpected Git or filesystem failure — the caller retries.
+# rc 3  PRESERVE: the state does not match what we created, or the worktree
+#       holds work. Nothing was removed. This is a REPORTABLE outcome, never a
+#       silent success.
+_uberdev_dispatch_cleanup_child_worktree_locked() {
+  local repo_root="$1" relative="$2" branch="$3" start_head="$4" terminal="$5"
+  local target branch_exists=0 show_ref_rc branch_head local_status target_head native_target
+  # `setup_failed` is this cleanup path's own extra arm, not a manifest
+  # terminal status, so it is declared rather than smuggled in.
+  # CONTRACT: run-terminal-status +setup_failed !case-arm
+  case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 3 ;; esac
+  case "$start_head" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 3 ;;
+  esac
+  [ -n "$relative" ] && [ -n "$branch" ] || return 3
+  target="$(_uberdev_dispatch_python -I -B -c \
+    'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
+    "$repo_root" "$relative")" || return 2
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    branch_exists=1
+    branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
+    # The child committed. Deleting the branch would drop those commits on the
+    # floor, so preserve and report instead.
+    [ "$branch_head" = "$start_head" ] || return 3
+  else
+    show_ref_rc=$?
+    [ "$show_ref_rc" -eq 1 ] || return 2
+  fi
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  case "$_UBERDEV_DISPATCH_REGISTRY_EXACT:$_UBERDEV_DISPATCH_REGISTRY_BRANCH" in
+    expected:present) [ "$branch_exists" -eq 1 ] || return 3 ;;
+    absent:absent) ;;
+    *) return 3 ;;
+  esac
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ] || return 3
+    _uberdev_dispatch_validate_worktree_directory "$target" || return $?
+    local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || return 2
+    [ -z "$local_status" ] || return 3
+    target_head="$(git -C "$target" rev-parse HEAD)" || return 2
+    [ "$target_head" = "$start_head" ] || return 3
+  fi
+  if [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ]; then
+    native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return 2
+    cd "$repo_root" || return 2
+    MSYS_NO_PATHCONV=1 git worktree remove --force "$native_target" || return 2
+  fi
+  [ ! -e "$target" ] && [ ! -L "$target" ] || return 2
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_DISPATCH_REGISTRY_BRANCH" = absent ] || return 2
+  if [ "$branch_exists" -eq 1 ]; then
+    branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
+    [ "$branch_head" = "$start_head" ] || return 3
+    cd "$repo_root" || return 2
+    git branch -D "$branch" >/dev/null || return 2
+  fi
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 2
+  else
+    show_ref_rc=$?
+    [ "$show_ref_rc" -eq 1 ] || return 2
+  fi
+  return 0
+}
+
+# _uberdev_dispatch_cleanup_child_worktree REPO_ROOT RELATIVE BRANCH START_HEAD TERMINAL
+# Mutex-serialized, transient-retrying wrapper around the locked transaction
+# above. Same rc vocabulary.
+_uberdev_dispatch_cleanup_child_worktree() {
+  local repo_root="$1" scope rc release_rc attempt=1 retry_delay
+  scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
+  (
+    _uberdev_semaphore_mutex_acquire "$scope" || exit $?
+    trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
+    while :; do
+      if _uberdev_dispatch_cleanup_child_worktree_locked "$@"; then rc=0; else rc=$?; fi
+      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" ]; then
+        break
+      fi
+      case "$attempt" in
+        1) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S" ;;
+        2) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S" ;;
+        *) rc=2; break ;;
+      esac
+      printf 'uberdev child worktree cleanup: transient attempt %s/%s; retrying in %ss\n' \
+        "$attempt" "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
+      sleep "$retry_delay" || { rc=2; break; }
+      attempt=$((attempt + 1))
+    done
+    _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
+    release_rc=$?
+    [ "$release_rc" -eq 0 ] \
+      || printf 'uberdev child worktree cleanup: mutex release failed after cleanup transaction\n' >&2 \
+      || true
+    [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
+    [ "$release_rc" -ne 0 ] || trap - EXIT
+    exit "$rc"
+  )
 }
 
 _uberdev_dispatch_cleanup_codex_worktree_locked() {
@@ -456,9 +592,9 @@ _uberdev_dispatch_cleanup_codex_worktree_locked() {
       'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
       "$repo_root" "$relative")" || return 2
     [ ! -e "$target" ] && [ ! -L "$target" ] || return 3
-    _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-      && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
+    _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+    [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = absent ] \
+      && [ "$_UBERDEV_DISPATCH_REGISTRY_BRANCH" = absent ] || return 3
     if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
       return 3
     else
@@ -487,29 +623,29 @@ _uberdev_dispatch_cleanup_codex_worktree_locked() {
     show_ref_rc=$?
     [ "$show_ref_rc" -eq 1 ] || return 2
   fi
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  case "$_UBERDEV_DISPATCH_REGISTRY_EXACT:$_UBERDEV_DISPATCH_REGISTRY_BRANCH" in
     expected:present) [ "$branch_exists" -eq 1 ] || return 3 ;;
     absent:absent) ;;
     *) return 3 ;;
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
-    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ] || return 3
-    _uberdev_dispatch_validate_codex_worktree_directory "$target" || return $?
+    [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ] || return 3
+    _uberdev_dispatch_validate_worktree_directory "$target" || return $?
     local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || return 2
     [ -z "$local_status" ] || return 3
     target_head="$(git -C "$target" rev-parse HEAD)" || return 2
     [ "$target_head" = "$start_head" ] || return 3
   fi
-  if [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ]; then
+  if [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ]; then
     native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return 2
     cd "$repo_root" || return 2
     MSYS_NO_PATHCONV=1 git worktree remove --force "$native_target" || return 2
   fi
   [ ! -e "$target" ] && [ ! -L "$target" ] || return 2
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 2
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_DISPATCH_REGISTRY_BRANCH" = absent ] || return 2
   if [ "$branch_exists" -eq 1 ]; then
     branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
     [ "$branch_head" = "$start_head" ] || return 3
@@ -541,16 +677,16 @@ _uberdev_dispatch_cleanup_codex_worktree() {
     _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
     while :; do
       if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then rc=0; else rc=$?; fi
-      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ]; then
+      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" ]; then
         break
       fi
       case "$attempt" in
-        1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
-        2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
+        1) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S" ;;
+        2) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S" ;;
         *) rc=2; break ;;
       esac
       printf 'uberdev codex cleanup: transient attempt %s/%s; retrying in %ss\n' \
-        "$attempt" "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
+        "$attempt" "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
       sleep "$retry_delay" || { rc=2; break; }
       attempt=$((attempt + 1))
     done
@@ -600,11 +736,11 @@ _uberdev_dispatch_retry_codex_cleanup_locked() {
     else
       rc=$?
     fi
-    [ "$rc" -eq 2 ] && [ "$attempt" -lt "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ] \
+    [ "$rc" -eq 2 ] && [ "$attempt" -lt "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" ] \
       || return "$rc"
     case "$attempt" in
-      1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
-      2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
+      1) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S" ;;
+      2) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S" ;;
       *) return 2 ;;
     esac
     sleep "$retry_delay" || return 2
@@ -621,9 +757,9 @@ _uberdev_dispatch_codex_worktree_absent_locked() {
     show_ref_rc=$?
     [ "$show_ref_rc" -eq 1 ] || return 2
   fi
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_DISPATCH_REGISTRY_BRANCH" = absent ] || return 3
 }
 
 _uberdev_dispatch_create_codex_worktree_locked() {
@@ -1759,6 +1895,12 @@ _uberdev_dispatch_background() {
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-result-$ISSUE_NUM.md}"
   local REPOSITORY_ROOT WORKTREE_DIR
+  # #381 RULING 4: a routed child (agent_id set -> CHILD_OWNED=1) owns its
+  # isolated worktree for the length of one bounded task, so the dispatcher —
+  # not the operator — must take it back down. A top-level /solve dispatch
+  # (CHILD_OWNED=0) keeps its worktree: that one IS the deliverable workspace.
+  local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
+  local CLEANUP_START_HEAD=''
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     DISPATCH_RC=1
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -1767,6 +1909,18 @@ _uberdev_dispatch_background() {
   }
   REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
+  # Captured BEFORE any mutation: without a pinned start commit the teardown
+  # cannot tell "nothing happened here" from "the child committed", so it would
+  # have to choose between leaking and destroying. Fail closed here instead —
+  # no worktree exists yet, so there is nothing to leak.
+  if [ "$CHILD_OWNED" = "1" ]; then
+    CLEANUP_START_HEAD="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
+      DISPATCH_RC=1
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"start_head\",\"backend\":\"background\",\"rc\":1}"
+      return 1
+    }
+  fi
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
@@ -1785,7 +1939,7 @@ _uberdev_dispatch_background() {
   # worktree-isolation bug #40164 in the --bg backend's own --worktree path
   # handling. MSYS_NO_PATHCONV stops Git Bash rewriting the POSIX path.
   if ! _uberdev_dispatch_git_worktree_add \
-      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" "$CLEANUP_START_HEAD"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -1860,15 +2014,43 @@ os.execvp("bash",argv)' '
     }
     python3() { run_python "$@"; }
     export -n -f run_python python3 2>/dev/null || exit 126
-    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
+    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
+    REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
+    CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
     . "$DISPATCH_LIB" || exit 126
     WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
     EMPTY_VALUE=
+    WORKTREE_CLEANUP_DONE=0
     write_status() {
       _uberdev_agent_publish_status_record "$STATUS_FILE" provider background "$1" "$2" "$WRAPPER_PID" \
         "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
         "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
     }
+    # #381 RULING 4: the dispatcher created this worktree, so this wrapper — the
+    # process that owns the child lifetime — takes it back down. Runs from
+    # REPOSITORY_ROOT in a subshell because our own cwd IS the worktree being
+    # removed. Failure is surfaced on stderr and folded into the child rc; it is
+    # never swallowed into a "completed".
+    cleanup_child_worktree() {
+      [ "$WORKTREE_CLEANUP_DONE" -eq 0 ] || return 0
+      if [ "$CHILD_OWNED" != "1" ]; then WORKTREE_CLEANUP_DONE=1; return 0; fi
+      if (
+        cd "$REPOSITORY_ROOT" || exit 2
+        . "$DISPATCH_LIB" || exit 2
+        _uberdev_dispatch_cleanup_child_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" \
+          "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$1"
+      ); then
+        WORKTREE_CLEANUP_DONE=1
+        return 0
+      fi
+      printf "background dispatch: failed to clean child worktree %s (%s)\n" \
+        "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+      return 2
+    }
+    # Armed BEFORE the cd: a failed `cd` into the worktree, or a signal landing
+    # between here and the full finalizer below, is still a terminal child and
+    # must not strand the worktree.
+    trap '\''cleanup_child_worktree cancelled || true'\'' EXIT
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
     TMP_RESULT="${RESULT_FILE}.partial.${WRAPPER_PID}"
@@ -1890,7 +2072,13 @@ except FileNotFoundError: pass
 finally:
  os.close(f) if f is not None else None; os.close(d)'\'' "$TMP_RESULT" "$TMP_RESULT_ID" >/dev/null 2>&1 || true
     }
-    trap cleanup_partial EXIT
+    finalize_on_exit() {
+      cleanup_partial
+      # An abnormal exit (signal, unexpected `exit`) is still a terminal state
+      # for the child, so the worktree still has to go.
+      cleanup_child_worktree cancelled || true
+    }
+    trap finalize_on_exit EXIT
     trap '\''exit 143'\'' HUP INT TERM
     "$@" > "$TMP_RESULT"
     PROVIDER_RC=$?
@@ -1906,10 +2094,14 @@ finally:
     else
       rm -f -- "$TMP_RESULT"
     fi
+    if ! cleanup_child_worktree "$STATE"; then
+      PROVIDER_RC=74; STATE=failed
+    fi
     trap - EXIT HUP INT TERM
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
-  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"
@@ -2435,6 +2627,11 @@ _uberdev_dispatch_wezterm() {
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   local REPOSITORY_ROOT WORKTREE_DIR
+  # #381 RULING 4 — identical teardown boundary to the background arm: a routed
+  # child (CHILD_OWNED=1) gets its isolated worktree removed when it
+  # terminalizes; a top-level attended pane keeps its workspace.
+  local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
+  local CLEANUP_START_HEAD=''
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     DISPATCH_RC=1
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2443,6 +2640,14 @@ _uberdev_dispatch_wezterm() {
   }
   REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
+  if [ "$CHILD_OWNED" = "1" ]; then
+    CLEANUP_START_HEAD="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
+      DISPATCH_RC=1
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        '{"issue":'"$ISSUE_NUM"',"phase":"start_head","backend":"wezterm","rc":1}'
+      return 1
+    }
+  fi
   # TOCTOU hardening (#155): guard + 0600-create the predictable log path
   # before the worktree-add redirect below — the wezterm backend writes the
   # SAME world-writable path the background backend hardens, so it
@@ -2457,7 +2662,7 @@ _uberdev_dispatch_wezterm() {
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.
   if ! _uberdev_dispatch_git_worktree_add \
-      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" "$CLEANUP_START_HEAD"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2521,22 +2726,50 @@ _uberdev_dispatch_wezterm() {
       }
       python3() { run_python "$@"; }
       export -n -f run_python python3 2>/dev/null || exit 126
-      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; shift 3
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
+      REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
+      CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
       . "$DISPATCH_LIB" || exit 126
       WRAPPER_PID="$$"
       EMPTY_VALUE=
+      WORKTREE_CLEANUP_DONE=0
       write_status() {
         _uberdev_agent_publish_status_record "$STATUS_FILE" provider wezterm "$1" "$2" \
           "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
           "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
       }
+      # #381 RULING 4 — same teardown contract as the background arm. The pane
+      # cwd IS the worktree, so the transaction runs from REPOSITORY_ROOT in a
+      # subshell. A failure is printed into the pane and folded into the rc.
+      cleanup_child_worktree() {
+        [ "$WORKTREE_CLEANUP_DONE" -eq 0 ] || return 0
+        if [ "$CHILD_OWNED" != "1" ]; then WORKTREE_CLEANUP_DONE=1; return 0; fi
+        if (
+          cd "$REPOSITORY_ROOT" || exit 2
+          . "$DISPATCH_LIB" || exit 2
+          _uberdev_dispatch_cleanup_child_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" \
+            "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$1"
+        ); then
+          WORKTREE_CLEANUP_DONE=1
+          return 0
+        fi
+        printf "wezterm dispatch: failed to clean child worktree %s (%s)\n" \
+          "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        return 2
+      }
+      trap '\''cleanup_child_worktree cancelled || true; exit 143'\'' HUP INT TERM
       write_status running null || exit 126
       "$@"
       PROVIDER_RC=$?
       if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
+      if ! cleanup_child_worktree "$STATE"; then
+        PROVIDER_RC=74; STATE=failed
+      fi
+      trap - HUP INT TERM
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
-    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED" "$WORKTREE_ABS" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then

@@ -572,11 +572,11 @@ for action,suffix in (
     body=function_body(prefix+suffix)
     assert re.search(rf"{re.escape(helper_name)}\s+{action}\b",body),action
 
-classifier_name=prefix+"classify_codex_worktree_registry"
+classifier_name=prefix+"classify_worktree_registry"
 classifier=function_body(classifier_name)
 assert re.search(r"git\s+worktree\s+list\s+--porcelain",classifier),classifier
-assert f"_{upper}_CODEX_REGISTRY_EXACT" in classifier,classifier
-assert f"_{upper}_CODEX_REGISTRY_BRANCH" in classifier,classifier
+assert f"_{upper}_DISPATCH_REGISTRY_EXACT" in classifier,classifier
+assert f"_{upper}_DISPATCH_REGISTRY_BRANCH" in classifier,classifier
 
 cleanup=function_body(prefix+"cleanup_codex_worktree_locked")
 inspect_name=prefix+"inspect_codex_worktree_receipt"
@@ -606,8 +606,8 @@ after=[position for position in classifications if position>remove]
 assert before and after,classifications
 pre_registry=cleanup[max(before):remove]
 post_registry=cleanup[min(after):retire]
-exact=f"_{upper}_CODEX_REGISTRY_EXACT"
-branch=f"_{upper}_CODEX_REGISTRY_BRANCH"
+exact=f"_{upper}_DISPATCH_REGISTRY_EXACT"
+branch=f"_{upper}_DISPATCH_REGISTRY_BRANCH"
 assert exact in pre_registry and "expected" in pre_registry and "present" in pre_registry,pre_registry
 assert exact in post_registry and branch in post_registry and post_registry.count("absent")>=2,post_registry
 

@@ -143,7 +143,7 @@ The guard is therefore WEAKER, and the weakening is stated rather than hidden:
 What survives is the whole reason the mechanism was built (#360/#361/#362): one
 contract with N textually-comparable copies inside `plugins/uberdev/`, and a
 comparator that reds when any one of them drifts.  `dispatch-backend` still has
-13 such copies; `run-terminal-status` still has 12.  The path-multiset ratchet
+13 such copies; `run-terminal-status` still has 13.  The path-multiset ratchet
 is now the ONLY structural anti-vacuity device — it is what still catches a
 marker that was moved off a file, so do not relax it into a bare count.
 
@@ -213,6 +213,10 @@ CONTRACTS: dict[str, list[str]] = {
     # Three copies retired with the detached-session backend: the probe that
     # PRODUCED the vocabulary one word per arm, its supervision-lane case, and
     # the opaque-handle cancel probe in lib/dispatch.sh.
+    # The SECOND lib/dispatch.sh copy is the backend-neutral child-worktree
+    # teardown gate added for #381 RULING 4 — it admits the same four terminal
+    # states plus this path's own `setup_failed`, exactly like the codex arm it
+    # was ported from, so both copies must keep agreeing.
     "run-terminal-status": [
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
@@ -223,6 +227,7 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/code_fixer_contract.py",
+        "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/run_manifest.py",
         "lib/run_manifest.py",

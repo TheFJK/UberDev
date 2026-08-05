@@ -159,6 +159,7 @@ jobs:
           bash tests/dispatch-background.test.sh && \
           bash tests/dispatch-codex.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
+          bash tests/dispatch-child-worktree-teardown.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/simplify.test.sh && \
@@ -321,6 +322,14 @@ jobs:
 #                                         forgery; lib/status.sh itself stays
 #                                         portable — only the harness is
 #                                         Unix-bound)
+#   - dispatch-child-worktree-teardown.test.sh
+#                                         (#381 RULING 4: real `git worktree
+#                                         add` + nohup detachment + the POSIX
+#                                         ownership predicate in
+#                                         _uberdev_dispatch_validate_worktree_directory,
+#                                         same Unix-bound harness class as
+#                                         status.test.sh; the teardown code
+#                                         itself stays portable)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;

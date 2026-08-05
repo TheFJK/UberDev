@@ -760,8 +760,18 @@ grep -q '"event":"timed_out".*"run_id":"timeout-0003"' "$TMP/run/.agent-state-$(
 BG_OUT="$(make_context "$TMP/background-timeout-run" inherit root-background-timeout background)"
 BG_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$BG_OUT")"
 BG_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$BG_OUT")"
-mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin" \
-  "$TMP/background-timeout-repo/.git"
+mkdir -p "$TMP/background-timeout-run/inputs" "$TMP/background-timeout-bin"
+# A REAL repository, not a `.git` directory plus a stub `git` (#381 RULING 4).
+# The background arm now pins the child worktree to a captured start commit and
+# tears it down when the child terminalizes, so the fixture has to be able to
+# answer `rev-parse --verify HEAD` and to actually own a worktree. Faking those
+# would test the fake, not the teardown.
+git init -q "$TMP/background-timeout-repo"
+git -C "$TMP/background-timeout-repo" config user.email fixture@example.com
+git -C "$TMP/background-timeout-repo" config user.name fixture
+printf 'seed\n' >"$TMP/background-timeout-repo/seed.txt"
+git -C "$TMP/background-timeout-repo" add seed.txt
+git -C "$TMP/background-timeout-repo" commit -qm seed
 printf 'background timeout input\n' >"$TMP/background-timeout-run/inputs/task.md"
 python3 - "$TMP/background-timeout-handoff.json" "$BG_CTX" "$BG_SHA" "$TMP/background-timeout-run/inputs/task.md" <<'PY'
 import json,sys
@@ -769,23 +779,13 @@ p,c,s,i=sys.argv[1:]
 json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-background-timeout','workflow':'solve','issue_num':42,'context_file':c,'context_sha256':s},'edge_id':'background-timeout','instance_id':'background-timeout-0004','parent_run_id':'root-background-timeout','role':'implementation-worker','phase':'implementation','risk_scope':'subtask','risk_signals':[],'inputs':{'paths':[i]}},open(p,'w'),separators=(',',':'))
 PY
 BG_HANDOFF_SHA256="$(file_sha256 "$TMP/background-timeout-handoff.json")"
-cat >"$TMP/background-timeout-bin/git" <<'SH'
-#!/usr/bin/env bash
-if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
-if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
-  printf '.git\n'
-  exit 0
-fi
-if [ "$1" = worktree ] && [ "$2" = add ]; then mkdir -p "$3"; exit 0; fi
-exit 1
-SH
 cat >"$TMP/background-timeout-bin/claude" <<'SH'
 #!/usr/bin/env bash
 printf 'SENSITIVE-PARTIAL-RESULT\n'
 trap '' TERM
 while :; do sleep 1; done
 SH
-chmod +x "$TMP/background-timeout-bin/git" "$TMP/background-timeout-bin/claude"
+chmod +x "$TMP/background-timeout-bin/claude"
 (
   cd "$TMP/background-timeout-repo"
   PATH="$TMP/background-timeout-bin:/usr/bin:/bin" MODEL=sonnet AUTO_MODE=0 SKIP_PERMISSIONS=0 \
@@ -818,7 +818,17 @@ grep -q '"event":"timed_out".*"run_id":"background-timeout-0004"' "$TMP/backgrou
 WEZ_OUT="$(make_context "$TMP/wez-run" inherit root-wezterm wezterm)"
 WEZ_CTX="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_file"])' "$WEZ_OUT")"
 WEZ_SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["context_sha256"])' "$WEZ_OUT")"
-mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home" "$TMP/wez-repo/.git"
+mkdir -p "$TMP/wez-run/inputs" "$TMP/wez-bin" "$TMP/wez-home"
+# Real repository for the same reason as the background-timeout fixture above:
+# the wezterm arm now pins and tears down the child worktree (#381 RULING 4),
+# and this case asserts the child still terminalizes `completed` — which is only
+# a meaningful assertion if the teardown genuinely ran and succeeded.
+git init -q "$TMP/wez-repo"
+git -C "$TMP/wez-repo" config user.email fixture@example.com
+git -C "$TMP/wez-repo" config user.name fixture
+printf 'seed\n' >"$TMP/wez-repo/seed.txt"
+git -C "$TMP/wez-repo" add seed.txt
+git -C "$TMP/wez-repo" commit -qm seed
 printf wez >"$TMP/wez-run/inputs/task.md"
 python3 - "$TMP/wez-handoff.json" "$WEZ_CTX" "$WEZ_SHA" "$TMP/wez-run/inputs/task.md" <<'PY'
 import json,sys
@@ -826,16 +836,6 @@ p,c,s,i=sys.argv[1:]
 json.dump({'schema_version':1,'carrier':{'schema_version':1,'run_id':'root-wezterm','workflow':'solve','issue_num':42,'context_file':c,'context_sha256':s},'edge_id':'wezterm.child','instance_id':'wezterm-0001','parent_run_id':'root-wezterm','role':'implementation-worker','phase':'implementation','risk_scope':'subtask','risk_signals':[],'inputs':{'paths':[i]}},open(p,'w'),separators=(',',':'))
 PY
 WEZ_HANDOFF_SHA256="$(file_sha256 "$TMP/wez-handoff.json")"
-cat >"$TMP/wez-bin/git" <<'SH'
-#!/usr/bin/env bash
-if [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then pwd -P; exit 0; fi
-if [ "$1" = -C ] && [ "$3" = rev-parse ] && [ "$4" = --git-common-dir ]; then
-  printf '.git\n'
-  exit 0
-fi
-if [ "$1 $2" = 'worktree add' ]; then mkdir -p "$3"; exit 0; fi
-exit 2
-SH
 cat >"$TMP/wez-bin/claude" <<'SH'
 #!/usr/bin/env bash
 printf 'wezterm result\n' >"$UBERDEV_AGENT_RESULT_FILE"
@@ -852,7 +852,7 @@ if [ "$1 $2" = 'cli list-clients' ]; then exit 0; fi
 if [ "$1 $2" = 'cli list' ]; then printf '[]\n'; exit 0; fi
 exit 2
 SH
-chmod +x "$TMP/wez-bin/git" "$TMP/wez-bin/claude" "$TMP/wez-bin/wezterm"
+chmod +x "$TMP/wez-bin/claude" "$TMP/wez-bin/wezterm"
 _uberdev_agent_dispatch_backend() { _real_uberdev_agent_dispatch_backend "$@"; }
 (
   cd "$TMP/wez-repo"

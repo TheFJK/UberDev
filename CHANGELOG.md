@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## Unreleased
 
+### Fixed
+
+- **Isolated child worktrees are no longer leaked by the `background` and
+  `wezterm` backends** (#381). Both arms created a dispatcher-owned worktree
+  unconditionally (`lib/dispatch.sh`) and never removed it; the only teardown in
+  the tree lived inside the codex arm's receipt transaction and was unreachable
+  from either. A routed child — `workspace_mode` defaults to `isolated`, and
+  `CHILD_OWNED` is set purely on `agent_id`, with `background`/`wezterm` both
+  admitted by `_uberdev_child_backend_cancellation_supported` — therefore left a
+  worktree **and** its branch behind permanently, once per dispatch.
+
+  A backend-neutral `_uberdev_dispatch_cleanup_child_worktree` now removes the
+  worktree and its branch when a child-owned isolated dispatch terminalizes, on
+  both surviving detached backends. It keeps the codex transaction's preservation
+  guards (registry classification, symlink/ownership validation, clean tree,
+  unmoved HEAD): work is never force-deleted, and a teardown that cannot safely
+  run is **reported** — stderr on the child log, provider exit 74, `failed`
+  status — never swallowed into a `completed`. A top-level `/solve` worktree
+  (`CHILD_OWNED=0`) is untouched: that one is the deliverable workspace.
+  `tests/dispatch-child-worktree-teardown.test.sh` observes a real worktree and
+  branch disappearing from a scratch repository.
+
 ### Removed
 
 - **BREAKING — the Codex CLI distribution is retired** (#381). The entire `codex/`
