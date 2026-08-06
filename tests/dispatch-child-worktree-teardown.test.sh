@@ -57,6 +57,29 @@
 #   T13  the same for the WEZTERM arm, against a mux that spawns successfully.
 #   T14  the probe is ordered BEFORE `git worktree add` in both arms.
 #
+# T11-T14 prove the refusal FIRES and is ordered first. They say nothing about
+# whether it is CORRECT, and every one of them still passed when the probe was
+# switched to `zsh -c` or `sh -c` — the property that answers #384's stated
+# objection was matched only by a comment. T15-T18 close that:
+#   T15  a `bash` SHELL FUNCTION in the dispatcher must not be mistaken for the
+#        child's interpreter. `command -v bash` returns the bare word `bash`
+#        for a function, so the old probe refused EVERY dispatch and blamed a
+#        missing interpreter that was on PATH all along. T15 also asserts the
+#        function is never INVOKED, which the "did not refuse" assertion alone
+#        does not: dropping only the `-x` half of the old check stops the
+#        refusal and runs the probe through the function table.
+#   T15b the mirror image — a host with genuinely no `bash` on PATH is still
+#        refused, and with the no-interpreter wording rather than a load error.
+#   T16  the probe runs under the SAME interpreter the wrapper spawns. Observed
+#        at both ends: a recording shim standing in for $DISPATCH_LIB writes the
+#        interpreter that sourced it, once from the preflight and once from the
+#        wrapper, and the rows must agree. Reds under `zsh -c` and `sh -c`.
+#   T18  no pre-source `exit 126` in either wrapper is silent. The preflight
+#        covers the library; it does not cover the argv/interpreter validations
+#        that run in the same window, and those exited without printing at all.
+# (There is no T17: the "the refusal reaches $DISPATCH_LOG" assertions belong to
+# the cases that produce a refusal and live inside T11/T12/T13/T15b.)
+#
 # Unix-runtime fixture: real `git worktree add`, real nohup detachment, real
 # POSIX ownership predicates. Skipped on windows-latest (see the ci-wiring
 # windows-skip-list marker block in .github/workflows/test.yml).
@@ -139,8 +162,13 @@ chmod +x "$TMP/bin/claude"
 # is exactly the argv slot both wrappers unpack, so reassigning it AFTER the
 # dispatcher has loaded the real library reproduces the issue precisely — this
 # process is fine, the child is not — without chmod'ing a file in the repo.
+# $7 (optional) is a shell snippet eval'd in the DISPATCHER's shell immediately
+# before the dispatch call. It exists for T15: the only way to reproduce a
+# `bash` shell function shadowing the child's PATH interpreter is to define one
+# in the process that runs the preflight.
 run_background_dispatch() {
   local repo="$1" runtime="$2" issue="$3" child_owned="$4" mode="$5" child_lib="${6:-}"
+  local prelude="${7:-}"
   mkdir -p "$runtime"
   (
     cd "$repo" || exit 1
@@ -163,8 +191,9 @@ run_background_dispatch() {
         DISPATCH_ID=""
         DISPATCH_LOG=""
         [ -z "$5" ] || _UBERDEV_DISPATCH_FILE="$5"
+        [ -z "$6" ] || eval "$6"
         _uberdev_dispatch_background "$4" medium "$3"
-      ' _ "$DISPATCH_LIB" "$runtime" "$TMP/prompt.txt" "$issue" "$child_lib"
+      ' _ "$DISPATCH_LIB" "$runtime" "$TMP/prompt.txt" "$issue" "$child_lib" "$prelude"
   ) >"$runtime/dispatch.out" 2>&1
 }
 
@@ -648,6 +677,33 @@ case "$T11_OUT" in
     ok "T11 the refusal is loud and names the library it could not load" ;;
   *) ko "T11 the refusal did not name the library: $(printf '%s' "$T11_OUT" | tr '\n' ';')" ;;
 esac
+# A LOAD failure and a "loaded, but the teardown symbol is absent" failure are
+# different faults with different remedies (a permissions/path problem vs. a
+# truncated file). Collapsing both into one message sends the operator looking
+# for a problem that does not exist, so each wording is asserted PRESENT here
+# and ABSENT in the other case's test.
+case "$T11_OUT" in
+  *"cannot load the dispatch library"*) ok "T11 the refusal says the library could not be LOADED" ;;
+  *) ko "T11 refusal text does not diagnose a load failure: $(printf '%s' "$T11_OUT" | tr '\n' ';')" ;;
+esac
+case "$T11_OUT" in
+  *"does not define"*)
+    ko "T11 a load failure was misreported as a missing-symbol failure" ;;
+  *) ok "T11 a load failure is not misreported as a missing teardown symbol" ;;
+esac
+# #384 finding 4 — the refusal has ONE consumer that matters and it is not a
+# terminal: lib/solve-launcher.sh reports `tail -3 "$DISPATCH_LOG"` for every
+# failed dispatch in a /turbo fanout. A refusal that only reaches the
+# dispatcher's stderr shows up there as an EMPTY file, in exactly the scenario
+# this preflight exists to make legible. Assert through the consumer's own
+# expression, not through the file's mere existence.
+T11_DISPATCH_LOG="$TMP/t11-runtime/solve-bg-stdout-$T11_ISSUE.log"
+T11_TAIL="$(tail -3 "$T11_DISPATCH_LOG" 2>/dev/null | tr '\n' ' ')"
+case "$T11_TAIL" in
+  *"refusing to create a child worktree"*)
+    ok "T11 the refusal reaches \$DISPATCH_LOG, where the /turbo fanout report tails it" ;;
+  *) ko "T11 \$DISPATCH_LOG ($T11_DISPATCH_LOG) does not carry the refusal: tail=[$T11_TAIL]" ;;
+esac
 
 echo "== T11b: the refusal does not depend on CHILD_OWNED =="
 # A child that cannot source the library never does any work for anybody, so
@@ -683,6 +739,26 @@ if [ "$T12_RC" -eq 1 ] && [ ! -e "$T12_WORKTREE" ] \
 else
   ko "T12 a truncated library still got a worktree: rc=$T12_RC out=$(tr '\n' ';' <"$TMP/t12-runtime/dispatch.out" 2>/dev/null)"
 fi
+# The other half of the T11 message-split assertion. $PARTIAL_CHILD_LIB loads
+# CLEANLY — it is readable, it is valid shell, `. "$lib"` returns 0. Telling
+# the operator the library "cannot be loaded" here is a false statement that
+# sends them to check permissions and paths that are all fine.
+T12_OUT="$(cat "$TMP/t12-runtime/dispatch.out" 2>/dev/null || true)"
+case "$T12_OUT" in
+  *"does not define"*"_uberdev_dispatch_cleanup_child_worktree"*)
+    ok "T12 the refusal names the teardown symbol the library failed to define" ;;
+  *) ko "T12 refusal text does not diagnose a missing teardown symbol: $(printf '%s' "$T12_OUT" | tr '\n' ';')" ;;
+esac
+case "$T12_OUT" in
+  *"cannot load the dispatch library"*)
+    ko "T12 a library that loaded fine was misreported as unloadable: $(printf '%s' "$T12_OUT" | tr '\n' ';')" ;;
+  *) ok "T12 a library that loads fine is not misreported as a load failure" ;;
+esac
+T12_TAIL="$(tail -3 "$TMP/t12-runtime/solve-bg-stdout-$T12_ISSUE.log" 2>/dev/null | tr '\n' ' ')"
+case "$T12_TAIL" in
+  *"does not define"*) ok "T12 the incomplete-library refusal also reaches \$DISPATCH_LOG" ;;
+  *) ko "T12 \$DISPATCH_LOG does not carry the incomplete-library refusal: tail=[$T12_TAIL]" ;;
+esac
 
 echo "== T13: the wezterm arm refuses before the pane's worktree exists =="
 T13_REPO="$TMP/t13-repo"
@@ -713,6 +789,12 @@ case "$T13_OUT" in
     ok "T13 the wezterm refusal names the library it could not load" ;;
   *) ko "T13 the wezterm refusal did not name the library: $(printf '%s' "$T13_OUT" | tr '\n' ';')" ;;
 esac
+T13_TAIL="$(tail -3 "$TMP/t13-runtime/solve-bg-stdout-$T13_ISSUE.log" 2>/dev/null | tr '\n' ' ')"
+case "$T13_TAIL" in
+  *"refusing to create a child worktree"*)
+    ok "T13 the wezterm refusal also reaches \$DISPATCH_LOG" ;;
+  *) ko "T13 the wezterm \$DISPATCH_LOG does not carry the refusal: tail=[$T13_TAIL]" ;;
+esac
 
 echo "== T14: both arms probe the child's library BEFORE git worktree add =="
 for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
@@ -725,6 +807,205 @@ for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
     ok "T14 $arm probes the child's dispatch library before creating the worktree"
   else
     ko "T14 $arm preflight=${PREFLIGHT_LINE:-none} worktree-add=${ADD_LINE:-none} — the probe must come first"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T15-T18 — the preflight's own correctness.
+#
+# T11-T14 prove the refusal fires and is ordered first. They say nothing about
+# the properties that decide whether it is CORRECT: that the probe resolves the
+# child's interpreter the way the child does (T15/T15b) and then RUNS under it
+# (T16), and that the pre-source exits the preflight does NOT cover are at least
+# not silent (T18). Legibility of a refusal to its actual consumer is asserted
+# where refusals happen, inside T11/T12/T13/T15b, so there is no T17.
+# ---------------------------------------------------------------------------
+
+echo "== T15: a shell FUNCTION named bash must not be mistaken for the child's interpreter =="
+# `command -v bash` answers "what would THIS SHELL run", and that includes
+# shell functions and aliases: with `bash()` defined it prints the bare word
+# `bash`, so `[ -x "bash" ]` is false and a preflight built on it refuses EVERY
+# dispatch, blaming a missing interpreter that is right there on PATH.
+# The child cannot have that problem — `os.execvp("bash", …)` and
+# `shutil.which("bash")` search PATH and cannot see a shell function — so a
+# probe that refuses here refuses when the child would have succeeded.
+# The function is a PASS-THROUGH: if anything downstream genuinely runs `bash`
+# it still works, so a failure here can only be the shadowing bug itself.
+T15_REPO="$TMP/t15-repo"
+new_repo "$T15_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T15_ISSUE=916
+T15_WORKTREE="$(cd "$T15_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T15_ISSUE"
+T15_BRANCH="worktree-solve-issue-$T15_ISSUE"
+T15_FUNC_CALLS="$TMP/t15-bash-function-calls.txt"
+: >"$T15_FUNC_CALLS"
+run_background_dispatch "$T15_REPO" "$TMP/t15-runtime" "$T15_ISSUE" 1 clean "" \
+  'bash() { printf "%s\n" called >>"'"$T15_FUNC_CALLS"'"; command bash "$@"; }'
+T15_RC=$?
+T15_OUT="$(cat "$TMP/t15-runtime/dispatch.out" 2>/dev/null || true)"
+case "$T15_OUT" in
+  *"refusing to create a child worktree"*)
+    ko "T15 a shell function named bash made the preflight refuse a healthy dispatch: $(printf '%s' "$T15_OUT" | tr '\n' ';')" ;;
+  *) ok "T15 a shell function named bash does not shadow the child's PATH interpreter" ;;
+esac
+if [ "$T15_RC" -eq 0 ]; then
+  ok "T15 the dispatch proceeds (rc=0) with a bash shell function defined"
+else
+  ko "T15 expected rc 0, got rc=$T15_RC: $(printf '%s' "$T15_OUT" | tr '\n' ';')"
+fi
+if wait_terminal "$TMP/t15-runtime/status.json" 60; then
+  ok "T15 the child dispatched under the shadowing function reached a terminal state"
+else
+  ko "T15 the child never reached a terminal state: $(cat "$TMP/t15-runtime/status.json" 2>/dev/null)"
+fi
+# "Did not refuse" is necessary but not sufficient. Dropping only the `-x` half
+# of the old check would also stop the refusal — and would then run the probe
+# THROUGH the shell function, because `command -v` hands back the bare word
+# `bash`. The child cannot do that, so neither may the probe: the resolved
+# interpreter has to be a path, invoked as a path. A pass-through function
+# would hide that difference behind a correct-looking result, so it records
+# every invocation instead.
+if [ -s "$T15_FUNC_CALLS" ]; then
+  ko "T15 the preflight invoked the SHELL FUNCTION named bash ($(wc -l <"$T15_FUNC_CALLS" | tr -d ' ') call(s)) — it must reach the interpreter by resolved path"
+else
+  ok "T15 the preflight never routed through the shell function table"
+fi
+git -C "$T15_REPO" worktree remove --force "$T15_WORKTREE" >/dev/null 2>&1 || true
+git -C "$T15_REPO" branch -D "$T15_BRANCH" >/dev/null 2>&1 || true
+
+echo "== T15b: with genuinely no bash on PATH the preflight still refuses =="
+# The other side of T15. Without this, "stop refusing when a bash function is
+# defined" could be satisfied by deleting the interpreter check outright, and
+# a host with no bash would sail past the preflight into the leak.
+# Driven as a unit call: shrinking PATH around a whole dispatch would starve
+# `git` too, and the fault under test is entirely inside this one function.
+mkdir -p "$TMP/nobash-bin"
+T15B_LOG="$TMP/t15b-dispatch.log"
+: >"$T15B_LOG"
+T15B_OUT="$(
+  /bin/bash -c '
+    set -u
+    . "$1"
+    PATH="$2"
+    _uberdev_dispatch_preflight_child_lib 917 background "$3"
+  ' _ "$DISPATCH_LIB" "$TMP/nobash-bin" "$T15B_LOG" 2>&1
+)"
+T15B_RC=$?
+if [ "$T15B_RC" -eq 1 ]; then
+  ok "T15b an empty PATH is refused (rc=1)"
+else
+  ko "T15b expected rc 1 with no bash on PATH, got rc=$T15B_RC: $(printf '%s' "$T15B_OUT" | tr '\n' ';')"
+fi
+case "$T15B_OUT" in
+  *"refusing to create a child worktree"*"PATH"*)
+    ok "T15b the refusal says the PATH search found no interpreter" ;;
+  *) ko "T15b refusal text does not diagnose an empty PATH: $(printf '%s' "$T15B_OUT" | tr '\n' ';')" ;;
+esac
+case "$(cat "$T15B_LOG" 2>/dev/null)" in
+  *"refusing to create a child worktree"*) ok "T15b the no-interpreter refusal also reaches \$DISPATCH_LOG" ;;
+  *) ko "T15b \$DISPATCH_LOG is empty for the no-interpreter refusal" ;;
+esac
+
+echo "== T16: the probe runs under the SAME interpreter the wrapper spawns =="
+# THE property the fix rests on, and the one T11-T14 leave untested: every one
+# of them still passes if the probe is switched to `zsh -c` or `sh -c`, because
+# they only ever exercise libraries that fail under EVERY interpreter. A probe
+# under the wrong shell answers a question nobody asked — it can pass a library
+# the child cannot load, and refuse one the child could.
+#
+# Rather than assert the spelling of the probe, this observes both ends: a shim
+# standing in for $DISPATCH_LIB records which interpreter sourced it and then
+# loads the real library, so ONE successful dispatch writes a `probe` row (the
+# preflight, where WORKTREE_DIR is unset) and `child` rows (the wrapper, which
+# assigns WORKTREE_DIR from argv before it sources). The rows must agree.
+T16_REPO="$TMP/t16-repo"
+new_repo "$T16_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T16_ISSUE=918
+T16_WORKTREE="$(cd "$T16_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T16_ISSUE"
+T16_BRANCH="worktree-solve-issue-$T16_ISSUE"
+T16_RECORD="$TMP/t16-interpreters.tsv"
+: >"$T16_RECORD"
+T16_SHIM="$TMP/t16-recording-dispatch-lib.sh"
+# The record must survive process boundaries (the child is a detached
+# grandchild), so the paths are baked in rather than exported.
+cat >"$T16_SHIM" <<SH
+# Fixture shim for \$DISPATCH_LIB: fingerprint the interpreter that is sourcing
+# this file, then hand over to the real library so the dispatch behaves exactly
+# as it otherwise would.
+if [ -n "\${WORKTREE_DIR:-}" ]; then _uir_phase=child; else _uir_phase=probe; fi
+# \$BASH is the discriminator, NOT \`ps -o comm=\`: comm follows argv[0], and the
+# child arrives through os.execvp("bash", …) with argv[0]="bash" while the
+# probe is spawned by resolved path, so comm disagrees for one binary. \$BASH
+# is the path bash resolved for ITSELF and matches across both routes; it is
+# /bin/sh under \`sh -c\` even where /bin/sh IS bash, and unset under zsh, so
+# every mutation the reviewer named is separated. Physical-path normalisation
+# keeps /bin/bash and /usr/bin/bash from reading as two interpreters on
+# distributions where /bin is a symlink into /usr.
+_uir_exe="\${BASH:-none}"
+case "\$_uir_exe" in
+  /*) _uir_dir="\${_uir_exe%/*}"; _uir_base="\${_uir_exe##*/}"
+      _uir_dir="\$(cd "\$_uir_dir" 2>/dev/null && pwd -P)" || _uir_dir=''
+      [ -z "\$_uir_dir" ] || _uir_exe="\${_uir_dir}/\${_uir_base}" ;;
+esac
+printf '%s\t%s\tbash=%s\tzsh=%s\n' "\$_uir_phase" "\$_uir_exe" \\
+  "\${BASH_VERSION:-none}" "\${ZSH_VERSION:-none}" >>'$T16_RECORD'
+unset _uir_phase _uir_exe _uir_dir _uir_base
+. '$DISPATCH_LIB'
+SH
+run_background_dispatch "$T16_REPO" "$TMP/t16-runtime" "$T16_ISSUE" 1 clean "$T16_SHIM"
+T16_RC=$?
+wait_terminal "$TMP/t16-runtime/status.json" 60 || true
+if [ "$T16_RC" -ne 0 ]; then
+  ko "T16 the recording dispatch did not run (rc=$T16_RC): $(tr '\n' ';' <"$TMP/t16-runtime/dispatch.out" 2>/dev/null)"
+else
+  ok "T16 the recording dispatch ran end to end"
+fi
+T16_PROBE_FPS="$(awk -F'\t' '$1=="probe"{print $2"\t"$3"\t"$4}' "$T16_RECORD" 2>/dev/null | sort -u)"
+T16_CHILD_FPS="$(awk -F'\t' '$1=="child"{print $2"\t"$3"\t"$4}' "$T16_RECORD" 2>/dev/null | sort -u)"
+# Non-vacuity built in: with no probe row or no child row there is nothing to
+# compare, and "nothing to compare" must never read as agreement.
+if [ -z "$T16_PROBE_FPS" ]; then
+  ko "T16 no preflight row was recorded — the probe never sourced the library"
+elif [ -z "$T16_CHILD_FPS" ]; then
+  ko "T16 no child row was recorded — the wrapper never sourced the library"
+elif [ "$T16_PROBE_FPS" = "$T16_CHILD_FPS" ]; then
+  ok "T16 the preflight and the wrapper sourced the library under the same interpreter"
+else
+  ko "T16 the probe ran under a DIFFERENT interpreter than the wrapper: probe=[$(printf '%s' "$T16_PROBE_FPS" | tr '\n\t' '; ')] child=[$(printf '%s' "$T16_CHILD_FPS" | tr '\n\t' '; ')]"
+fi
+git -C "$T16_REPO" worktree remove --force "$T16_WORKTREE" >/dev/null 2>&1 || true
+git -C "$T16_REPO" branch -D "$T16_BRANCH" >/dev/null 2>&1 || true
+
+echo "== T18: no pre-source exit in either wrapper is silent =="
+# The preflight covers the `. "\$DISPATCH_LIB"` failure. It does NOT cover the
+# argv/interpreter validations that run in the same window — after the
+# dispatcher created the worktree, before the child has any teardown. Those
+# `exit 126`s printed nothing at all, so reaching one leaked a worktree AND a
+# branch with no trace anywhere. #384's class, same window, same remedy: name
+# what leaked.
+presource_window() {
+  # The arm body up to (not including) the child's first `. "$DISPATCH_LIB"`.
+  # That statement's own failure branch is asserted separately (T11/T13) and
+  # spans several lines, so it is deliberately outside this window.
+  # Comment lines are dropped: they cannot exit, and prose ABOUT an exit path
+  # would otherwise be counted as one.
+  arm_body "$1" | awk '/^[[:space:]]*\. "[$]DISPATCH_LIB"/ {exit} /^[[:space:]]*#/ {next} {print}'
+}
+for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
+  WINDOW="$(presource_window "$arm")"
+  EXIT_LINES="$(printf '%s\n' "$WINDOW" | grep -c 'exit 126' || true)"
+  # If the window extraction ever stops finding those lines this assertion
+  # would pass by covering nothing, which is the failure mode it exists to
+  # prevent elsewhere. Demand they are all still there.
+  if [ "$EXIT_LINES" -ne 3 ]; then
+    ko "T18 $arm: expected 3 pre-source \`exit 126\` paths in the window, found $EXIT_LINES — re-point this test"
+  else
+    ok "T18 $arm still has its 3 pre-source exit paths in the window"
+  fi
+  UNREPORTED="$(printf '%s\n' "$WINDOW" | grep 'exit 126' | grep -vc 'report_presource_leak' || true)"
+  if [ "$UNREPORTED" -eq 0 ]; then
+    ok "T18 $arm reports the leaked worktree on every pre-source exit"
+  else
+    ko "T18 $arm has $UNREPORTED pre-source \`exit 126\` path(s) that leak silently: $(printf '%s\n' "$WINDOW" | grep 'exit 126' | grep -v 'report_presource_leak' | tr '\n' ';')"
   fi
 done
 

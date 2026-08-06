@@ -1509,7 +1509,87 @@ _uberdev_dispatch_capture_supervisor_pid() {
   printf '%s' "$captured"
 }
 
-# _uberdev_dispatch_preflight_child_lib ISSUE_NUM BACKEND
+# _uberdev_dispatch_path_lookup NAME
+#
+# Print what a PATH SEARCH would run for NAME, and nothing else.
+#
+# This is deliberately NOT `command -v`. `command -v` answers "what would THIS
+# SHELL run", and that includes shell functions, aliases and builtins: with a
+# `bash() { … }` function defined anywhere up the call chain — a debug wrapper,
+# a test fixture, an interactive rc file — `command -v bash` prints the bare
+# word `bash`, and every `-x` test on that answer is a test of `./bash`.
+#
+# The child never sees any of that. The background arm reaches its interpreter
+# through `os.execvp("bash", …)` (and `shutil.which("bash")` on the Windows
+# branch), and the wezterm arm through `wezterm cli spawn -- bash -c`; all
+# three are PATH searches performed outside any shell. So the probe has to ask
+# the same question, or it refuses dispatches the child would have run fine and
+# passes ones it would not.
+#
+# The execvp semantics reproduced here, deliberately and in order:
+#   - a NAME containing a slash is not searched for at all;
+#   - an EMPTY PATH element means the current directory;
+#   - PATH unset (not merely empty) falls back to `os.defpath`, ":/bin:/usr/bin";
+#   - the FIRST executable regular file wins.
+# The loop peels elements with parameter expansion rather than word-splitting
+# `$PATH`, because `for d in $PATH` under `IFS=:` does not split in zsh and this
+# file is sourced by zsh-backed callers.
+#
+# rc 0 with the path on stdout; rc 1 when nothing on PATH would run.
+_uberdev_dispatch_path_lookup() {
+  local name="$1" search rest dir candidate
+  case "$name" in
+    */*)
+      # execvp treats this as a path, not a name. No search.
+      [ -f "$name" ] && [ -x "$name" ] || return 1
+      printf '%s' "$name"
+      return 0
+      ;;
+  esac
+  if [ -n "${PATH+set}" ]; then search="$PATH"; else search=":/bin:/usr/bin"; fi
+  # The appended separator makes the LAST element visible to the peel loop,
+  # including a trailing empty one ("/usr/bin:" also searches the cwd). Braced
+  # because `"$search:"` is a modifier expansion in zsh.
+  rest="${search}:"
+  while :; do
+    case "$rest" in
+      *:*) dir="${rest%%:*}"; rest="${rest#*:}" ;;
+      *) break ;;
+    esac
+    if [ -n "$dir" ]; then candidate="${dir}/${name}"; else candidate="./${name}"; fi
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _uberdev_dispatch_preflight_report LOG_FILE MESSAGE
+#
+# A refusal that reaches only the dispatcher's stderr is invisible where it
+# matters. lib/solve-launcher.sh reports every failed dispatch as
+# `tail -3 "${DISPATCH_LOG:-/dev/null}"`, so in a /turbo fanout a
+# stderr-only refusal prints "(no output captured; check <path>)" and points
+# the operator at an EMPTY file — in precisely the scenario this preflight
+# exists to make legible. The message goes to BOTH sinks.
+#
+# The log path is already guarded and 0600-created by
+# _uberdev_dispatch_prepare_tmp_target at both call sites, so this only ever
+# appends to a target that has passed the #155 TOCTOU checks.
+_uberdev_dispatch_preflight_report() {
+  local log="$1" message="$2"
+  printf '%s\n' "$message" >&2
+  [ -n "$log" ] || return 0
+  printf '%s\n' "$message" >>"$log" 2>/dev/null || {
+    # Not swallowed: the operator has to know the log they are about to read
+    # is missing the reason, otherwise an empty tail reads as "no diagnosis".
+    printf 'dispatch: warning: the refusal above could not be appended to %s\n' "$log" >&2
+  }
+  return 0
+}
+
+# _uberdev_dispatch_preflight_child_lib ISSUE_NUM BACKEND [LOG_FILE]
 #
 # #384 — the one window no teardown covers. A child wrapper's first safe
 # instruction is `. "$DISPATCH_LIB"`; by the time it runs, the worktree and its
@@ -1528,9 +1608,27 @@ _uberdev_dispatch_capture_supervisor_pid() {
 #     `os.execvp("bash", ...)` inside a nohup'd python that inherited this
 #     process's PATH, environment and cwd, so the probe resolves the same
 #     binary and starts from the same state the wrapper will.
+# That last point is a CONTRACT between two sites that no compiler compares:
+# the interpreter resolved HERE and the one each wrapper actually spawns. It is
+# resolved by _uberdev_dispatch_path_lookup — an execvp-shaped PATH search —
+# and NOT by `command -v`, which answers for THIS shell (functions and aliases
+# included) about a process that has neither.
+# It is NOT expressed as a `# CONTRACT:` marker: that mechanism compares closed
+# VOCABULARIES and rejects anything under tests/contract_markers.py's
+# MIN_MEMBERS=2, and this contract's vocabulary is the single token `bash`.
+# The binding is enforced behaviourally instead, by
+# tests/dispatch-child-worktree-teardown.test.sh T16: it records which
+# interpreter sourced the library at the probe and at the wrapper during one
+# real dispatch, and reds when the two diverge. T15/T15b hold the resolver
+# itself.
 # It also asserts the teardown entry point is REACHABLE after the source rather
 # than just that the source returned 0 — a truncated or partially checked-out
-# library does the latter and still leaves the child with no teardown.
+# library does the latter and still leaves the child with no teardown. Those two
+# outcomes are DIFFERENT faults with different remedies, so they get different
+# refusals: probe rc 4 is "loaded, symbol absent" (an incomplete file), anything
+# else non-zero is "did not load" (unreadable, absent, a syntax error). Only the
+# probe body produces 4, and an ambiguous rc falls to the conservative
+# did-not-load wording rather than asserting a shape it cannot see.
 #
 # HONEST LIMIT — this NARROWS the window; it does not close it:
 #   - the library can still be made unloadable BETWEEN this probe and the
@@ -1541,37 +1639,49 @@ _uberdev_dispatch_capture_supervisor_pid() {
 #     wezterm mux server's environment, not by ours, and the pane's cwd is the
 #     worktree rather than our cwd; there this is a close proxy, not an exact
 #     rehearsal.
-#   - the wrapper's three python-validation `exit 126` paths sit in the same
-#     pre-source window and are NOT covered here.
+#   - the wrapper's three python/argv validations sit in the same pre-source
+#     window and are NOT covered here — this proves the LIBRARY is loadable,
+#     not that the argv survived the trip. They are no longer silent: each one
+#     now names the worktree it strands before `exit 126`, and
+#     tests/dispatch-child-worktree-teardown.test.sh T18 holds that for both
+#     arms.
 #
 # rc 0  the child can load the library and reach the teardown.
 # rc 1  it cannot, and nothing has been created, so nothing has leaked.
 _uberdev_dispatch_preflight_child_lib() {
-  local issue="$1" backend="$2"
+  local issue="$1" backend="$2" log="${3:-}"
   local lib="$_UBERDEV_DISPATCH_FILE" child_bash probe_out probe_rc=0
-  child_bash="$(command -v bash 2>/dev/null)"
-  if [ -z "$child_bash" ] || [ ! -x "$child_bash" ]; then
-    printf '%s dispatch: refusing to create a child worktree for issue %s — the child wrapper is a `bash -c` body and there is no executable `bash` on PATH. Nothing was created.\n' \
-      "$backend" "$issue" >&2
+  child_bash="$(_uberdev_dispatch_path_lookup bash)" || child_bash=''
+  if [ -z "$child_bash" ]; then
+    # The PATH value is deliberately NOT interpolated: this message is read
+    # through `tail -3` of a log, where a 4KB line buries the other two, and
+    # `echo $PATH` is the operator's obvious next command anyway.
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child wrapper is a `bash -c` body and a PATH search found no executable `bash`. Nothing was created.' \
+      "$backend" "$issue")"
     _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
     return 1
   fi
+  # 3 = the source itself failed; 4 = it loaded and the teardown is absent.
   probe_out="$("$child_bash" -c '
-    . "$1" || exit 1
-    command -v _uberdev_dispatch_cleanup_child_worktree >/dev/null 2>&1 || exit 1
+    . "$1" || exit 3
+    command -v _uberdev_dispatch_cleanup_child_worktree >/dev/null 2>&1 || exit 4
   ' _ "$lib" 2>&1)" || probe_rc=$?
-  if [ "$probe_rc" -ne 0 ]; then
-    printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s cannot load the dispatch library %s (probe rc %s). The child teardown lives in that library, so a worktree created now could not be taken back down. Nothing was created.\n' \
-      "$backend" "$issue" "$child_bash" "$lib" "$probe_rc" >&2
-    if [ -n "$probe_out" ]; then
-      printf '%s dispatch: dispatch library probe reported: %s\n' "$backend" "$probe_out" >&2
-    fi
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
-    return 1
+  if [ "$probe_rc" -eq 4 ]; then
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s LOADED the dispatch library %s cleanly, but it does not define `_uberdev_dispatch_cleanup_child_worktree`. The file is readable and valid; it is INCOMPLETE (a truncated write or a partial checkout), so the child would have no teardown. Nothing was created.' \
+      "$backend" "$issue" "$child_bash" "$lib")"
+  elif [ "$probe_rc" -ne 0 ]; then
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s cannot load the dispatch library %s (probe rc %s). The child teardown lives in that library, so a worktree created now could not be taken back down. Nothing was created.' \
+      "$backend" "$issue" "$child_bash" "$lib" "$probe_rc")"
+  else
+    return 0
   fi
-  return 0
+  if [ -n "$probe_out" ]; then
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: dispatch library probe reported: %s' "$backend" "$probe_out")"
+  fi
+  _uberdev_dispatch_audit dispatch_setup_failed \
+    "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
+  return 1
 }
 
 # _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE
@@ -1631,7 +1741,10 @@ _uberdev_dispatch_background() {
   # scoped by CHILD_OWNED — the teardown boundary is, but this is a
   # precondition: a child that cannot load this library never does any work for
   # anybody, so creating a worktree for it is pure cost either way.
-  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" background; then
+  # $LOG_FILE is passed, not just recorded in DISPATCH_LOG: the /turbo fanout
+  # report tails that file, so a refusal that never lands in it is reported as
+  # "(no output captured)".
+  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" background "$LOG_FILE"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     return 1
@@ -1713,17 +1826,29 @@ if os.name=="nt":
 os.setsid()
 os.execvp("bash",argv)' '
     PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
-    case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
-    [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
+    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
+    REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
+    CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
+    # The worktree argv is unpacked FIRST so the validations below can name what
+    # they are about to strand. #384: these three sit in the same pre-source
+    # window as the `. "$DISPATCH_LIB"` failure — the worktree and branch exist,
+    # the teardown does not — and every one of them used to `exit 126` in total
+    # silence, leaking both with no trace anywhere. They are not covered by the
+    # dispatcher preflight either: it proves the LIBRARY is loadable, not that
+    # this argv survived the trip. Same ruling as the source failure: report by
+    # name, never force-remove without the guards that live in $DISPATCH_LIB.
+    report_presource_leak() {
+      [ "$CHILD_OWNED" != "1" ] || printf "background dispatch: %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+        "$1" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+    }
+    case "$PYTHON_PREFIX" in ""|-3) ;; *) report_presource_leak "refusing an unrecognised python launcher prefix '\''$PYTHON_PREFIX'\''"; exit 126 ;; esac
+    [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || { report_presource_leak "python launcher '\''$PYTHON_EXE'\'' is missing or not executable"; exit 126; }
     _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
     run_python() {
       if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
     }
     python3() { run_python "$@"; }
-    export -n -f run_python python3 2>/dev/null || exit 126
-    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
-    REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
-    CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
+    export -n -f run_python python3 2>/dev/null || { report_presource_leak "this interpreter cannot scope the python3 shim (export -f unsupported)"; exit 126; }
     # The window no teardown can cover: the teardown transaction and every
     # preservation guard it depends on live in $DISPATCH_LIB, so before this
     # line there is nothing safe to call. A guardless inline `git worktree
@@ -1981,7 +2106,7 @@ _uberdev_dispatch_wezterm() {
   # there is still nothing on disk. A pane whose spawn SUCCEEDS and whose body
   # then dies at `. "$DISPATCH_LIB"` is the worst shape of this bug — the
   # dispatcher sees a pane id, so no dispatcher-side teardown ever runs.
-  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" wezterm; then
+  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" wezterm "$LOG_FILE"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     return 1
@@ -2052,17 +2177,26 @@ _uberdev_dispatch_wezterm() {
     --domain-name uberdev --cwd "$WORKTREE_NATIVE" -- \
     bash -c '
       PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
-      case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
-      [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
+      REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
+      CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
+      # Same ruling and same reordering as the background arm: the worktree argv
+      # is unpacked first so these three pre-source validations can name what
+      # they would strand instead of exiting 126 in silence. The pane is the
+      # only process that could ever remove this worktree, so a silent death
+      # here leaks it with the dispatcher believing the spawn succeeded.
+      report_presource_leak() {
+        [ "$CHILD_OWNED" != "1" ] || printf "wezterm dispatch: %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+          "$1" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+      }
+      case "$PYTHON_PREFIX" in ""|-3) ;; *) report_presource_leak "refusing an unrecognised python launcher prefix '\''$PYTHON_PREFIX'\''"; exit 126 ;; esac
+      [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || { report_presource_leak "python launcher '\''$PYTHON_EXE'\'' is missing or not executable"; exit 126; }
       _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
       run_python() {
         if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
       }
       python3() { run_python "$@"; }
-      export -n -f run_python python3 2>/dev/null || exit 126
-      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
-      REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
-      CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
+      export -n -f run_python python3 2>/dev/null || { report_presource_leak "this interpreter cannot scope the python3 shim (export -f unsupported)"; exit 126; }
       # Same pre-source window as the background wrapper, same ruling: report
       # the worktree by name rather than force-remove it without the guards
       # that live in $DISPATCH_LIB. Also narrowed by the #384 preflight, and
