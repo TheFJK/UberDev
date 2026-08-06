@@ -22,7 +22,12 @@
 #         from the actual skip set.
 #   W5  — the Linux job retains its evidence-based 40-minute hang guard.
 #   W6  — the Windows job retains its evidence-based 30-minute hang guard.
-#   W7  — receipt retirement runs on Linux, macOS, and native Windows.
+#   W7  — the dispatcher-owned child-worktree teardown runs on Linux AND
+#         macOS. It used to be receipt retirement on all three runners; #381
+#         deleted lib/worktree_receipts.py with the codex backend that was its
+#         only caller, and the teardown that replaced it (RULING 4) is a
+#         declared Unix-only fixture, so native Windows is no longer in the set.
+#         Recorded as a real coverage loss, not quietly dropped.
 #
 # Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
 # (native bash) and windows-latest (Git Bash) without any extra deps.
@@ -34,9 +39,18 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
 
+# macOS is the only BSD/userland signal in the matrix, and process-supervision
+# primitives are exactly where it diverges. #381 removed three fixtures from
+# this job (review-pr-codex-entry -> renamed, review-pr-codex-six-child and
+# worktree-receipts -> deleted with the codex backend), so the job is BACKFILLED
+# rather than left thinner: the renamed entrypoint test, the Workflow-native
+# review driver that replaced the six-child codex driver, and the real-git
+# child-worktree teardown that replaced the receipt transaction.
 macos_supervision_block=$(awk '/^  supervision-smoke-macos:/,/^  shape-checks-windows:/' "$WORKFLOW")
-for required in review-pr-codex-entry.test.sh agent-dispatch.test.sh \
-                review-pr-codex-six-child.test.sh worktree-receipts.test.sh; do
+for required in review-pr-entry.test.sh agent-dispatch.test.sh \
+                dispatch-child-worktree-teardown.test.sh \
+                child-dispatch.test.sh \
+                review-pr-workflow.test.sh; do
   if ! grep -q "bash tests/$required" <<<"$macos_supervision_block"; then
     echo "  FAIL  macOS supervision smoke job is missing $required"
     exit 1
@@ -190,26 +204,29 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# W7 — the receipt-retirement helper exercises real filesystem semantics on
-# every supported runner, including native Windows rather than only Git Bash
-# shape inspection on Unix.
-receipt_test='bash tests/worktree-receipts.test.sh'
-missing_receipt_jobs=''
+# W7 — the dispatcher-owned child-worktree teardown exercises real git and real
+# filesystem semantics on both POSIX runners. It is the successor to the receipt
+# transaction #381 deleted; native Windows is NOT in the set because the fixture
+# is declared Unix-only in the windows-skip-list (real `git worktree add`, nohup
+# detachment, a POSIX geteuid predicate). Losing the Windows runner for this
+# guarantee is a stated cost of retiring the codex arm, recorded here so it
+# cannot be mistaken for coverage that still exists.
+teardown_test='bash tests/dispatch-child-worktree-teardown.test.sh'
+missing_teardown_jobs=''
 for job_and_block in \
   "Linux|$linux_job_block" \
-  "macOS|$macos_supervision_block" \
-  "Windows|$windows_job_block"; do
+  "macOS|$macos_supervision_block"; do
   job=${job_and_block%%|*}
   block=${job_and_block#*|}
-  if ! grep -qF "$receipt_test" <<<"$block"; then
-    missing_receipt_jobs="${missing_receipt_jobs}${missing_receipt_jobs:+, }$job"
+  if ! grep -qF "$teardown_test" <<<"$block"; then
+    missing_teardown_jobs="${missing_teardown_jobs}${missing_teardown_jobs:+, }$job"
   fi
 done
-if [ -z "$missing_receipt_jobs" ]; then
-  echo "  PASS  W7 worktree receipt retirement runs on Linux, macOS, and native Windows"
+if [ -z "$missing_teardown_jobs" ]; then
+  echo "  PASS  W7 child-worktree teardown runs on Linux and macOS"
   PASS=$((PASS+1))
 else
-  echo "  FAIL  W7 worktree receipt retirement is missing from: $missing_receipt_jobs"
+  echo "  FAIL  W7 child-worktree teardown is missing from: $missing_teardown_jobs"
   FAIL=$((FAIL+1))
 fi
 

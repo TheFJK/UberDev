@@ -10,6 +10,7 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_FILE="$REPO_ROOT/tests/post-impl-review.test.sh"
 POST_IMPL="$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
+REVIEW_AGG="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
 PHASE1_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-final.sample.md"
 PHASE1_EMPTY_ORACLE_RELPATH="tests/fixtures/findings-to-issues/post-impl-review-empty.sample.md"
 SOLVE_CMD="$REPO_ROOT/plugins/uberdev/commands/solve.md"
@@ -93,10 +94,17 @@ assert_grep "$POST_IMPL" 'uberdev_preflight_child_batch "\$\{preflight_refs\[@\]
   "preflight receives controller-held handoff/digest pairs"
 assert_grep "$POST_IMPL" 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$status"' \
   "dispatch receives the controller-held creation-time digest"
-assert_grep "$POST_IMPL" '"\$_UBERDEV_DISPATCH_BACKEND_ENUM" "\$UBERDEV_CARRIER_BACKEND"' \
+# #381: the evidence builder moved to lib/review-aggregate.sh so a caller that
+# is not this skill can reach it. The proofs are unchanged, so the assertions
+# are unchanged -- only the file they read.
+assert_grep "$REVIEW_AGG" '"\$_UBERDEV_DISPATCH_BACKEND_ENUM" "\$UBERDEV_CARRIER_BACKEND"' \
   "evidence validation receives the closed backend policy and carrier-selected backend"
-assert_grep "$POST_IMPL" "receipt.get\\('backend'\\)!=expected_backend" \
+assert_grep "$REVIEW_AGG" "receipt.get\\('backend'\\)!=expected_backend" \
   "evidence validation requires the receipt backend to match the carrier exactly"
+assert_grep "$POST_IMPL" '^\. "\$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate\.sh"' \
+  "the skill sources the on-disk evidence/aggregate builders instead of redefining them"
+assert_no_grep "$POST_IMPL" '^post_review_validated_evidence_complete\(\) \{' \
+  "the skill keeps no second copy of the evidence builder"
 
 echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
@@ -503,12 +511,10 @@ fi
 echo
 echo "== Canonical aggregate writer runtime =="
 POST_REVIEW_V2_TMP="$(mktemp -d)"
-POST_REVIEW_V2_FUNCTION="$POST_REVIEW_V2_TMP/writer.sh"
-awk '
-  /^post_review_write_aggregate_v2\(\) \{/ { active=1 }
-  active { print }
-  active && /^}$/ { exit }
-' "$POST_IMPL" >"$POST_REVIEW_V2_FUNCTION"
+# #381: the writer is on disk in lib/review-aggregate.sh. The skill sources it
+# instead of defining it, so the runtime probes below source the shipped file --
+# the same bytes /review-pr would run.
+POST_REVIEW_V2_FUNCTION="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
 python3 -I -B - "$POST_REVIEW_V2_TMP/nonempty-input.json" "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/structural-input.json" "$POST_REVIEW_V2_TMP/structural-document.json" "$POST_REVIEW_V2_TMP/duplicate-input.json" "$POST_REVIEW_V2_TMP/duplicate-document.json" <<'PY'
 import hashlib,json,pathlib,sys
 
@@ -607,7 +613,12 @@ V2_RUNTIME_WRITER_REGION="$(awk '
   /^post_review_write_aggregate_v2\(\) \{/ { active=1 }
   active { print }
   active && /^}$/ { exit }
-' "$POST_IMPL")"
+' "$POST_REVIEW_V2_FUNCTION")"
+if [ -z "$V2_RUNTIME_WRITER_REGION" ]; then
+  echo "  FAIL  V2.7b0 — canonical aggregate writer not found in lib/review-aggregate.sh"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  V2.7b0 — canonical aggregate writer ships on disk, not as fence text"; PASS=$((PASS + 1))
+fi
 if grep -qE '/dev/fd|/proc' <<<"$V2_RUNTIME_WRITER_REGION"; then
   echo "  FAIL  V2.7b — aggregate writer must not depend on POSIX pseudo-files"; FAIL=$((FAIL + 1))
 else

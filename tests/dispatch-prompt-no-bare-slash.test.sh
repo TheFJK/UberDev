@@ -15,7 +15,7 @@
 # body so it does not start with a slash. The bodies are rewritten to a
 # natural-language imperative that still references the slash command, e.g.:
 #
-#     Invoke the slash command /uberdev:turbo 222 --turbo --backend=claude-bg
+#     Invoke the slash command /uberdev:turbo 222 --turbo --backend=background
 #     now. Do not respond conversationally — execute it.
 #
 # This guard scans the three known prompt-build callsite files and fails CI

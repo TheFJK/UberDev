@@ -1,9 +1,9 @@
 /* META-BEGIN */
-export const meta = { "name": "goal-pipeline", "description": "Workflow-native convergence driver for /uberdev:goal (RFC 0015 §5). Owns the cycle loop in JS variables that span the whole run — queue, cycle counter, per-cycle records and fingerprints — and drives each cycle through four relay-run shell phases: lib/goal-phase1.sh claims the issues, ONE nested workflow() call into skills/solve-fleet/workflow.js solves the whole cycle, lib/goal-watch.sh polls the merge lane under its documented 0/42/1 exit contract, and lib/goal-phase3.sh collects the next queue. Replaces the per-issue detached claude-bg dispatch that used to live in the goal-pipeline SKILL.md fences.", "phases": ["dispatch", "watch", "collect", "finalize"], "whenToUse": "Invoked verbatim by skills/goal-pipeline/SKILL.md after lib/goal-phase0.sh emits the args envelope between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END." };
+export const meta = { "name": "goal-pipeline", "description": "Workflow-native convergence driver for /uberdev:goal (RFC 0015 §5). Owns the cycle loop in JS variables that span the whole run — queue, cycle counter, per-cycle records and fingerprints — and drives each cycle through four relay-run shell phases: lib/goal-phase1.sh claims the issues, ONE nested workflow() call into skills/solve-fleet/workflow.js solves the whole cycle, lib/goal-watch.sh polls the merge lane under its documented 0/42/1 exit contract, and lib/goal-phase3.sh collects the next queue. Replaces the per-issue detached `claude --bg` dispatch that used to live in the goal-pipeline SKILL.md fences.", "phases": ["dispatch", "watch", "collect", "finalize"], "whenToUse": "Invoked verbatim by skills/goal-pipeline/SKILL.md after lib/goal-phase0.sh emits the args envelope between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END." };
 /* META-END */
 
 // skills/goal-pipeline/workflow.js — RFC 0015 §5 (the /goal half of the
-// claude-bg retirement).
+// detached-session retirement).
 //
 // WHY THIS EXISTS, STRUCTURALLY.
 // /goal used to be five ```bash fences in a SKILL.md. The Claude-Code Bash tool

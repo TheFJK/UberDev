@@ -127,7 +127,6 @@ git -C "$IGNORED_LOCAL" config user.name "prkit test"
 git -C "$IGNORED_LOCAL" commit --allow-empty -qm "test: local exclude fixture"
 ignored_paths=(
   "plugins/prkit/ignored-sentinel.txt"
-  "codex/ignored-sentinel.txt"
   "README.md"
   "LICENSE"
   "NOTICE"
@@ -135,7 +134,6 @@ ignored_paths=(
   ".gitignore"
   ".github/workflows/ci.yml"
   ".claude-plugin/marketplace.json"
-  ".agents/plugins/marketplace.json"
 )
 local_exclude="$(git -C "$IGNORED_LOCAL" rev-parse --git-path info/exclude)"
 case "$local_exclude" in
@@ -249,49 +247,21 @@ else
   no "G1k --force non-Git override failed or touched unrelated bytes"
 fi
 
-# G1l/G1m — Codex source inputs are mandatory, not an optional late-stage
-# enhancement. A missing manifest or source directory must fail in preflight,
-# before any target byte changes. Test-only path overrides exercise the real
-# readability/existence checks without renaming shared repository inputs.
-CODEX_MANIFEST_TARGET="$_B9/missing manifest target"
-mkdir -p "$CODEX_MANIFEST_TARGET"
-git -C "$CODEX_MANIFEST_TARGET" init -q
-git -C "$CODEX_MANIFEST_TARGET" config user.email prkit-test@example.invalid
-git -C "$CODEX_MANIFEST_TARGET" config user.name "prkit test"
-printf 'missing manifest sentinel\n' > "$CODEX_MANIFEST_TARGET/tracked.txt"
-git -C "$CODEX_MANIFEST_TARGET" add tracked.txt
-git -C "$CODEX_MANIFEST_TARGET" commit -qm "test: missing Codex manifest fixture"
-before_status="$(git -C "$CODEX_MANIFEST_TARGET" status --porcelain --untracked-files=all)"
-if PRKIT_GENERATOR_TEST_MODE=1 PRKIT_TEST_CODEX_MANIFEST_PATH="$_B9/does-not-exist.txt" \
-     bash "$GEN" --target "$CODEX_MANIFEST_TARGET" --version 0.1.0 >/dev/null 2>&1 \
-   || [ "$(cat "$CODEX_MANIFEST_TARGET/tracked.txt" 2>/dev/null)" != "missing manifest sentinel" ] \
-   || [ "$(git -C "$CODEX_MANIFEST_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
-  no "G1l missing Codex manifest was accepted or mutated target bytes"
-else
-  ok "G1l missing Codex manifest fails preflight and preserves target bytes"
-fi
-
-CODEX_SOURCE_TARGET="$_B10/missing source target"
-mkdir -p "$CODEX_SOURCE_TARGET"
-git -C "$CODEX_SOURCE_TARGET" init -q
-git -C "$CODEX_SOURCE_TARGET" config user.email prkit-test@example.invalid
-git -C "$CODEX_SOURCE_TARGET" config user.name "prkit test"
-printf 'missing source sentinel\n' > "$CODEX_SOURCE_TARGET/tracked.txt"
-git -C "$CODEX_SOURCE_TARGET" add tracked.txt
-git -C "$CODEX_SOURCE_TARGET" commit -qm "test: missing Codex source fixture"
-before_status="$(git -C "$CODEX_SOURCE_TARGET" status --porcelain --untracked-files=all)"
-if PRKIT_GENERATOR_TEST_MODE=1 PRKIT_TEST_CODEX_SOURCE_PATH="$_B10/does-not-exist" \
-     bash "$GEN" --target "$CODEX_SOURCE_TARGET" --version 0.1.0 >/dev/null 2>&1 \
-   || [ "$(cat "$CODEX_SOURCE_TARGET/tracked.txt" 2>/dev/null)" != "missing source sentinel" ] \
-   || [ "$(git -C "$CODEX_SOURCE_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
-  no "G1m missing Codex source was accepted or mutated target bytes"
-else
-  ok "G1m missing Codex source fails preflight and preserves target bytes"
-fi
+# G1l/G1m ARE RETIRED, not silently dropped. They drove the two mandatory-Codex-
+# input preflight refusals (PRKIT_TEST_CODEX_MANIFEST_PATH /
+# PRKIT_TEST_CODEX_SOURCE_PATH). Issue #381 removed the Codex stage, both
+# overrides, and both refusals from tools/prkit/generate.sh, so there is no
+# refusal left to exercise. The mandatory-input class is still covered for the
+# surfaces that remain: the SSOT dir and manifest.txt checks fire from the same
+# preflight block. Restore an equivalent pair if a second mandatory source tree
+# is ever reintroduced.
 
 # G1n/G1o — every existing component below resolved TARGET must be a real
 # directory, never a symlink. Use independent clean tracked fixtures so an early
-# plugins rejection cannot mask an unsafe later .agents publication boundary.
+# plugins rejection cannot mask an unsafe later publication boundary. G1o's
+# victim was `.agents/` until issue #381 removed that managed path with the
+# Codex marketplace; it is RETARGETED at `.claude-plugin/`, the surviving
+# render_managed publication ancestor, not dropped.
 DELETE_TARGET="$_B11/delete symlink target"
 DELETE_OUTSIDE="$_B11/delete outside"
 mkdir -p "$DELETE_TARGET" "$DELETE_OUTSIDE/prkit"
@@ -325,23 +295,23 @@ printf 'external write sentinel\n' > "$WRITE_OUTSIDE/sentinel.txt"
 git -C "$WRITE_TARGET" init -q
 git -C "$WRITE_TARGET" config user.email prkit-test@example.invalid
 git -C "$WRITE_TARGET" config user.name "prkit test"
-ln -s "$WRITE_OUTSIDE" "$WRITE_TARGET/.agents"
-git -C "$WRITE_TARGET" add .agents
+ln -s "$WRITE_OUTSIDE" "$WRITE_TARGET/.claude-plugin"
+git -C "$WRITE_TARGET" add .claude-plugin
 git -C "$WRITE_TARGET" commit -qm "test: publication ancestor symlink fixture"
 before_status="$(git -C "$WRITE_TARGET" status --porcelain --untracked-files=all)"
 if bash "$GEN" --target "$WRITE_TARGET" --version 0.1.0 >/dev/null 2>&1 \
    || [ "$(cat "$WRITE_OUTSIDE/sentinel.txt" 2>/dev/null)" != "external write sentinel" ] \
-   || [ -e "$WRITE_OUTSIDE/plugins/marketplace.json" ] \
+   || [ -e "$WRITE_OUTSIDE/marketplace.json" ] \
    || [ "$(git -C "$WRITE_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
-  no "G1o .agents ancestor symlink escaped target containment"
+  no "G1o .claude-plugin ancestor symlink escaped target containment"
 else
-  ok "G1o .agents ancestor symlink cannot write external bytes"
+  ok "G1o .claude-plugin ancestor symlink cannot write external bytes"
 fi
 if bash "$GEN" --target "$WRITE_TARGET" --version 0.1.0 --force >/dev/null 2>&1 \
    || [ "$(cat "$WRITE_OUTSIDE/sentinel.txt" 2>/dev/null)" != "external write sentinel" ] \
-   || [ -e "$WRITE_OUTSIDE/plugins/marketplace.json" ] \
+   || [ -e "$WRITE_OUTSIDE/marketplace.json" ] \
    || [ "$(git -C "$WRITE_TARGET" status --porcelain --untracked-files=all)" != "$before_status" ]; then
-  no "G1oa --force bypassed .agents ancestor containment"
+  no "G1oa --force bypassed .claude-plugin ancestor containment"
 else
   ok "G1oa --force cannot bypass external-write containment"
 fi
@@ -532,48 +502,26 @@ fi
 if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated tree"; else no "G2 verify failed on generated tree"; fi
 
 # G3 — EXACTLY 37 source files landed under plugins/prkit (manifest count-lock;
-# -eq not -ge so a silently-dropped copy OR a stray extra file both fail)
+# -eq not -ge so a silently-dropped copy OR a stray extra file both fail).
+# #381 took it from 38 to 37 by dropping lib/worktree_receipts.py along with the
+# codex dispatch backend. This is the twin of tests/prkit-manifest.test.sh's M2
+# lock over tools/prkit/manifest.txt -- the two MUST stay equal, since generate
+# copies exactly what the manifest lists.
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" -eq 37 ] && ok "G3 exactly 37 copied files present" || no "G3 copied $n files (expected 37)"
 
-# G4 — scaffold files exist with interpolated version and a native Codex
-# marketplace whose selector matches the generated README.
+# G4 — scaffold files exist with interpolated version.
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"
 [ -f "$T1/README.md" ] && [ -f "$T1/.claude-plugin/marketplace.json" ] && ok "G4b README + marketplace scaffolded" || no "G4b scaffold files missing"
-if python3 -I -B - "$T1" <<'PY'
-import json
-import pathlib
-import sys
+# G4c IS RETIRED with the native Codex marketplace it validated
+# (.agents/plugins/marketplace.json + codex/README.md selector). Both are gone
+# with the Codex distribution (issue #381).
 
-root = pathlib.Path(sys.argv[1])
-marketplace = json.loads((root / '.agents/plugins/marketplace.json').read_text())
-assert marketplace['name'] == 'prkit'
-assert marketplace['plugins'][0]['name'] == 'prkit-codex'
-assert marketplace['plugins'][0]['source'] == {
-    'source': 'local',
-    'path': './codex/prkit-codex',
-}
-assert marketplace['plugins'][0]['policy'] == {
-    'installation': 'AVAILABLE',
-    'authentication': 'ON_INSTALL',
-}
-selector = f"{marketplace['plugins'][0]['name']}@{marketplace['name']}"
-assert selector == 'prkit-codex@prkit'
-readme = (root / 'codex/README.md').read_text()
-commands = [
-    line.strip()
-    for line in readme.splitlines()
-    if line.strip().startswith('codex plugin add ')
-]
-assert commands == [f'codex plugin add {selector}']
-PY
-then ok "G4c native Codex marketplace backs README selector prkit-codex@prkit"
-else no "G4c native Codex marketplace missing, malformed, or disconnected from README selector"; fi
-if grep -qF 'scaffolded 12, verified.' <<<"$G1_OUTPUT" \
-   && grep -qF '.agents/plugins/marketplace.json' "$T1/.github/workflows/ci.yml"; then
-  ok "G4d native marketplace is counted and covered by generated JSON syntax CI"
+if grep -qF 'scaffolded 8, verified.' <<<"$G1_OUTPUT" \
+   && grep -qF '.claude-plugin/marketplace.json' "$T1/.github/workflows/ci.yml"; then
+  ok "G4d the marketplace descriptor is counted and covered by generated JSON syntax CI"
 else
-  no "G4d native marketplace missing from scaffold count or generated JSON syntax CI"
+  no "G4d marketplace descriptor missing from scaffold count or generated JSON syntax CI"
 fi
 if [ "$(grep -cF 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2' "$T1/.github/workflows/ci.yml")" -eq 1 ] \
    && ! grep -qE 'actions/checkout@v[0-9]+' "$T1/.github/workflows/ci.yml"; then
@@ -581,17 +529,15 @@ if [ "$(grep -cF 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 else
   no "G4da generated CI checkout action is missing its immutable pin or regressed to a tag"
 fi
-if grep -qF 'test -d plugins/prkit && test -d codex' "$T1/.github/workflows/ci.yml" \
-   && [ "$(grep -cF "find plugins/prkit codex -type f -name '" "$T1/.github/workflows/ci.yml")" -eq 4 ] \
-   && [ "$(grep -cF 'test -s "$manifest"' "$T1/.github/workflows/ci.yml")" -eq 4 ] \
+if grep -qF 'test -d plugins/prkit || exit 1' "$T1/.github/workflows/ci.yml" \
+   && [ "$(grep -cF "find plugins/prkit -type f -name '" "$T1/.github/workflows/ci.yml")" -eq 3 ] \
+   && [ "$(grep -cF 'test -s "$manifest"' "$T1/.github/workflows/ci.yml")" -eq 3 ] \
    && grep -qF 'find plugins/prkit -type f -print0 > "$claude_manifest" || exit 1' "$T1/.github/workflows/ci.yml" \
-   && grep -qF 'find codex -type f -print0 > "$codex_manifest" || exit 1' "$T1/.github/workflows/ci.yml" \
-   && grep -qF "grep -rilE 'uberdev' plugins/prkit codex" "$T1/.github/workflows/ci.yml" \
+   && grep -qF 'test -s "$claude_manifest" || exit 1' "$T1/.github/workflows/ci.yml" \
+   && grep -qF "grep -rilE 'uberdev' plugins/prkit" "$T1/.github/workflows/ci.yml" \
    && grep -qF 'case "$grep_status" in' "$T1/.github/workflows/ci.yml" \
-   && ! grep -qF '$([ -d codex ] && echo codex)' "$T1/.github/workflows/ci.yml" \
-   && ! grep -qF 'grep -rilE '\''uberdev'\'' plugins/prkit codex || true' "$T1/.github/workflows/ci.yml" \
-   && ! grep -qi 'codex/ is optional' "$T1/.github/workflows/ci.yml"; then
-  ok "G4db generated CI requires nonempty Codex/Claude scans and preserves namespace-scan errors"
+   && ! grep -qF "grep -rilE 'uberdev' plugins/prkit || true" "$T1/.github/workflows/ci.yml"; then
+  ok "G4db generated CI requires a nonempty Claude scan and preserves namespace-scan errors"
 else
   no "G4db generated CI permits a missing/empty scan or masks namespace-scan errors"
 fi
@@ -614,7 +560,7 @@ Path(sys.argv[2]).write_text("\n".join(body) + "\n", encoding="utf-8")
 PY
 JSON_CI_TARGET="$_B16/json-ci-empty-runtime"
 cp -R "$T1" "$JSON_CI_TARGET"
-find "$JSON_CI_TARGET/plugins/prkit" "$JSON_CI_TARGET/codex" -type f -name '*.json' -delete
+find "$JSON_CI_TARGET/plugins/prkit" -type f -name '*.json' -delete
 if (cd "$T1" && bash "$JSON_CI_SCRIPT") >/dev/null 2>&1 \
    && ! (cd "$JSON_CI_TARGET" && bash "$JSON_CI_SCRIPT") >/dev/null 2>&1; then
   ok "G4dc generated JSON CI accepts runtime JSON and rejects empty runtime discovery"
@@ -629,7 +575,7 @@ PUBLISH_TARGET="$_B6/publication target"
 mkdir -p "$PUBLISH_TARGET"
 git -C "$PUBLISH_TARGET" init -q
 bash "$GEN" --target "$PUBLISH_TARGET" --version 0.1.0 >/dev/null 2>&1
-PUBLISH_FILE="$PUBLISH_TARGET/.agents/plugins/marketplace.json"
+PUBLISH_FILE="$PUBLISH_TARGET/.claude-plugin/marketplace.json"
 cp "$PUBLISH_FILE" "$_B6/expected-marketplace.json"
 if PRKIT_GENERATOR_TEST_MODE=1 PRKIT_TEST_RENDER_PUBLISH_FAIL="$PUBLISH_FILE" \
      bash "$GEN" --target "$PUBLISH_TARGET" --version 0.1.0 --force >/dev/null 2>&1; then
@@ -647,55 +593,12 @@ bash "$GEN" --target "$T2" --version 0.1.0 >/dev/null 2>&1
 if diff -r "$T1/plugins/prkit" "$T2/plugins/prkit" >/dev/null 2>&1; then ok "G5 deterministic (diff -r empty)"; else no "G5 non-deterministic output"; fi
 if diff -r -x .git "$T1" "$T2" >/dev/null 2>&1; then ok "G5b complete generated tree is deterministic"; else no "G5b complete generated tree is non-deterministic"; fi
 
-# G6 — Codex port generated: prkit-cmd-* skills, renamed TOML, installer, manifest,
-# and prkit-PREFIXED support skills (flat ~/.agents/skills/ coexistence) with NO
-# un-prefixed post-impl-review/merge-pipeline dir that would collide with UberDev-codex
-if [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-review-pr/SKILL.md" ] \
-   && [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-simplify/SKILL.md" ] \
-   && [ -f "$T1/codex/prkit-codex/skills/prkit-cmd-merge/SKILL.md" ] \
-   && [ -f "$T1/codex/prkit-codex/skills/prkit-post-impl-review/SKILL.md" ] \
-   && [ -f "$T1/codex/prkit-codex/skills/prkit-merge-pipeline/SKILL.md" ] \
-   && [ ! -e "$T1/codex/prkit-codex/skills/post-impl-review" ] \
-   && [ ! -e "$T1/codex/prkit-codex/skills/merge-pipeline" ] \
-   && [ -f "$T1/codex/agents/prkit-code-reviewer.toml" ] \
-   && [ -f "$T1/codex/install-codex.sh" ] \
-   && grep -q '"name": "prkit-codex"' "$T1/codex/prkit-codex/.codex-plugin/plugin.json"; then
-  ok "G6 codex port generated (prkit-cmd-* + prkit-prefixed support skills, no flat collision)"
-else no "G6 codex port incomplete or has un-prefixed support skill"; fi
-
-# G6a — the copied full-UberDev installer is rewritten to the standalone
-# manifest's actual fleet size. These hints are user-facing verification, so a
-# successful install must not claim the full 39/44 fleet.
-if grep -qF '# 5 prkit skills' "$T1/codex/install-codex.sh" \
-   && grep -qF '# 14 prkit-*.toml subagents' "$T1/codex/install-codex.sh" \
-   && grep -qF 'NOT the 14 agents' "$T1/codex/install-codex.sh" \
-   && ! grep -Eq '(^|[^0-9])(39|44)([^0-9]|$)' "$T1/codex/install-codex.sh"; then
-  ok "G6a standalone installer reports the manifest-true 5 skills / 14 agents"
-else no "G6a standalone installer retains full-UberDev fleet counts"; fi
-
-# G6aa — exercise the rewrite transaction itself against synthetic drift. A
-# traversal/count mismatch and a missing substitution anchor must both fail
-# before touching the installer.
-if python3 -I -B - "$GEN" <<'PY'
-import pathlib,subprocess,sys,tempfile
-source=pathlib.Path(sys.argv[1]).read_text()
-marker='  python3 -I -B - "$TARGET" <<\'PY\' || {'
-snippet=source.split(marker,1)[1].split('\nPY\n',1)[0]
-anchors='NOT the 44 agents\n# ~39 Prkit skills incl. command-skills\n# 44 prkit-*.toml subagents\n'
-def fixture(skills,installer_text):
- root=pathlib.Path(tempfile.mkdtemp()); (root/'codex/prkit-codex/skills').mkdir(parents=True); (root/'codex/agents').mkdir()
- for index in range(skills): (root/f'codex/prkit-codex/skills/s{index}').mkdir()
- for index in range(14): (root/f'codex/agents/prkit-a{index}.toml').write_text('x')
- target=root/'codex/install-codex.sh'; target.write_text(installer_text)
- return root,target
-for root,target in (fixture(6,anchors),fixture(5,anchors.replace('NOT the 44 agents','anchor drift'))):
- before=target.read_bytes()
- result=subprocess.run([sys.executable,'-I','-B','-',str(root)],input=snippet,text=True,capture_output=True)
- assert result.returncode!=0,result
- assert target.read_bytes()==before
-PY
-then ok "G6aa count discovery and anchor drift fail closed without mutation"
-else no "G6aa generator count/anchor transaction accepted drift"; fi
+# G6 / G6a / G6aa ARE RETIRED with the Codex port stage they exercised
+# (prkit-cmd-* skills, the renamed agent TOMLs, install-codex.sh and its
+# fleet-count rewrite transaction). Issue #381 removed that stage from
+# tools/prkit/generate.sh; there is no generated codex/ tree to inspect and no
+# installer rewrite to drive. G6ab below still covers the atomic-publication /
+# fail-closed-transaction class against the policy projection, which survives.
 
 # G6ab — projection accepts only the canonical edge semantics and publishes
 # atomically. Relationship drift must fail before mutation; an injected replace
@@ -748,21 +651,16 @@ PY
 then ok "G6ab policy projection enforces canonical edge semantics and atomic failure cleanup"
 else no "G6ab policy projection accepted relationship drift or leaked partial publication"; fi
 
-# G6b — both standalone runtimes ship one byte-identical, closed PR-phase policy
-# projection and the manifest-declared reviewer contract, while native Codex
-# role TOMLs remain edge-agnostic.
+# G6b — the standalone runtime ships one closed PR-phase policy projection, the
+# manifest-declared reviewer contract, and the authority helper. The
+# cross-runtime byte-equality half went with the Codex port (issue #381).
 if [ -f "$T1/plugins/prkit/policy/solve-run-tree-v1.json" ] \
    && [ -f "$T1/plugins/prkit/shared/phase1-reviewer-output-v1.md" ] \
-   && [ -f "$T1/codex/prkit-codex/policy/solve-run-tree-v1.json" ] \
-   && [ -f "$T1/codex/prkit-codex/shared/phase1-reviewer-output-v1.md" ] \
    && [ -f "$T1/plugins/prkit/lib/code_fixer_contract.py" ] \
-   && [ -f "$T1/codex/prkit-codex/lib/code_fixer_contract.py" ] \
    && python3 -I -B - "$T1" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 claude_path=root/'plugins/prkit/policy/solve-run-tree-v1.json'
-codex_path=root/'codex/prkit-codex/policy/solve-run-tree-v1.json'
-assert claude_path.read_bytes()==codex_path.read_bytes()
 
 def reject_pairs(pairs):
  result={}
@@ -788,8 +686,7 @@ expected_roles={
  'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
-codex_roles={path.name.removeprefix('prkit-').removesuffix('.toml') for path in (root/'codex/agents').glob('prkit-*.toml')}
-assert claude_roles==codex_roles==expected_roles
+assert claude_roles==expected_roles
 structural_edges={'review_pr.post_impl_review'}
 provider_edges={
  'review_pr.review.correctness','review_pr.review.silent_failures',
@@ -854,16 +751,10 @@ assert (
  edges['simplify.fix.phase2']['required'],
  edges['simplify.fix.phase2']['cardinality'],
 )==('simplify_fix','caller','run',False,'zero_or_one_per_review_iteration')
-assert (root/'plugins/prkit/lib/code_fixer_contract.py').read_bytes()==(
- root/'codex/prkit-codex/lib/code_fixer_contract.py'
-).read_bytes()
 referenced={edge['output_contract'] for edge in edges.values() if 'output_contract' in edge}
 assert set(tree.get('output_contracts',{}))==referenced
-contract=(root/'codex/prkit-codex/shared/phase1-reviewer-output-v1.md').read_text()
-roles=('code-reviewer','silent-failure-hunter','type-design-analyzer','comment-analyzer','pr-test-analyzer')
-assert all(contract not in (root/f'codex/agents/prkit-{role}.toml').read_text() for role in roles)
 PY
-then ok "G6b PR-phase policy and authority helper are identical and closed across runtimes"
+then ok "G6b PR-phase policy is closed and the authority helper + reviewer contract ship"
 else no "G6b standalone policy projection or reviewer contract scope is incorrect"; fi
 
 # G6bc — standalone /simplify uses PR_NUMBER=0. Execute the origin-derivation
@@ -912,27 +803,18 @@ PY
 then ok "G6bc generated standalone prkit derives PR_NUMBER=0 origin from validated HEAD"
 else no "G6bc generated standalone prkit PR_NUMBER=0 origin derivation failed"; fi
 
-# G6c — the generated standalone Codex runtime must execute the focused
-# six-reviewer happy path, not merely pass structural namespace scans.
-if SIX_CHILD_RUNTIME_ROOT="$T1/codex/prkit-codex" \
-   SIX_CHILD_RUNTIME_NAMESPACE=prkit SIX_CHILD_CASE=1 \
-   bash "$REPO_ROOT/tests/review-pr-codex-six-child.test.sh" >/dev/null 2>&1; then
-  ok "G6c generated standalone prkit executes six-child review path"
-else no "G6c generated standalone prkit six-child runtime failed"; fi
+# G6c / G7 / G8 ARE RETIRED with the generated codex/ tree: the six-child
+# runtime smoke, the codex-tree token guard and the codex-tree determinism diff
+# all scanned a directory the generator no longer emits (issue #381). The
+# equivalent Claude-tree guards are live above — the token guard in verify.sh
+# and G5/G5b (determinism over the whole generated tree).
 
-# G7 — no uberdev token survives anywhere under codex/
-if grep -rilE 'uberdev' "$T1/codex" >/dev/null 2>&1; then no "G7 uberdev token survives under codex/"; else ok "G7 codex tree is uberdev-free"; fi
-
-# G8 — codex tree deterministic across the two generations (spaced vs plain path)
-if diff -r "$T1/codex" "$T2/codex" >/dev/null 2>&1; then ok "G8 codex deterministic (diff -r empty)"; else no "G8 codex non-deterministic"; fi
-
-# G9 — regeneration CLEANS stale files (the rm -rf clean stage). Plant strays in
-# both trees, regenerate into the SAME target, assert they are gone.
+# G9 — regeneration CLEANS stale files (the rm -rf clean stage). Plant a stray,
+# regenerate into the SAME target, assert it is gone.
 printf 'stale\n' > "$T1/plugins/prkit/STALE_CLAUDE.txt"
-printf 'stale\n' > "$T1/codex/STALE_CODEX.txt"
 bash "$GEN" --target "$T1" --version 0.1.0 --force >/dev/null 2>&1
-if [ ! -e "$T1/plugins/prkit/STALE_CLAUDE.txt" ] && [ ! -e "$T1/codex/STALE_CODEX.txt" ]; then
-  ok "G9 regeneration removes stale files from both trees"
+if [ ! -e "$T1/plugins/prkit/STALE_CLAUDE.txt" ]; then
+  ok "G9 regeneration removes stale files from the generated tree"
 else no "G9 stale files survived regeneration"; fi
 
 echo "  Result: $PASS passed, $FAIL failed"

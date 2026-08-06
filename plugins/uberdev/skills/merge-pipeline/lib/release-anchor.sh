@@ -19,14 +19,14 @@
 # and the gate behaves exactly as it did before this file existed.
 #
 # THE PREDICATE IS THE SECURITY BOUNDARY. A subject match alone would be a way
-# to smuggle arbitrary code past the trust gate — two of the seven version
+# to smuggle arbitrary code past the trust gate — two of the six version
 # surfaces (tests/goal.test.sh, tests/solve-claim.test.sh) are executable test
 # files, so a path allow-list alone is not enough either. Every one of these
 # must hold:
 #   1. the commit has exactly ONE parent (no merges),
 #   2. its subject is exactly `chore(release): vX.Y.Z`,
 #   3. its parent is NOT itself a release commit (tolerance depth is exactly 1),
-#   4. its diff is non-empty and touches ONLY the seven version surfaces,
+#   4. its diff is non-empty and touches ONLY the six version surfaces,
 #   5. the canonical manifest version strictly ADVANCES, to the X.Y.Z named in
 #      the subject,
 #   6. every changed line outside CHANGELOG.md is a pure version-token
@@ -56,13 +56,16 @@ set -u
 RELEASE_ANCHOR_MAX_CHANGELOG_LINES=40
 RELEASE_ANCHOR_MAX_DIFF_LINES=400
 
-# The seven version surfaces. SSOT is lib/bump-version.sh, which owns the edit;
+# The six version surfaces. SSOT is lib/bump-version.sh, which owns the edit;
 # tests/merge.test.sh asserts this list has not drifted from that script.
+# It was SEVEN until the Codex distribution was retired (issue #381) and
+# codex/uberdev-codex/.codex-plugin/plugin.json stopped existing; the entry was
+# removed here because bump-version.sh no longer owns that path, not to widen
+# what a release commit may touch.
 release_anchor_surfaces() {
   cat <<'SURFACES'
 plugins/uberdev/.claude-plugin/plugin.json
 .claude-plugin/marketplace.json
-codex/uberdev-codex/.codex-plugin/plugin.json
 README.md
 CHANGELOG.md
 tests/goal.test.sh
@@ -179,7 +182,7 @@ main() {
     return 0
   fi
 
-  # (4) the changed path set is non-empty and a SUBSET of the seven surfaces.
+  # (4) the changed path set is non-empty and a SUBSET of the six surfaces.
   local changed surfaces stray
   changed="$(git diff --name-only "$parent" "$head" 2>/dev/null)"
   if [ -z "$changed" ]; then

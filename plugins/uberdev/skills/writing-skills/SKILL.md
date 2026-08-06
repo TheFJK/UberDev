@@ -454,7 +454,7 @@ Every SKILL.md that mandates a Workflow call also carries a
 `## No-Workflow fallback` section: a SHORT degraded recipe (sequential
 inline execution or the retained legacy path), gated on the model
 self-checking its tool list ("if Workflow is not among your tools…").
-Platforms without the tool (see `references/{gemini,copilot,codex}-tools.md`)
+Platforms without the tool (see `references/{gemini,copilot}-tools.md`)
 degrade instead of breaking. The shape guard in
 `tests/workflow-scripts.test.sh` fails any `skills/*/workflow.js` whose
 sibling SKILL.md lacks the invocation block or the fallback marker. Keep

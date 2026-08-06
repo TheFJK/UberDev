@@ -285,7 +285,7 @@ if extract_region argparse "$GOAL_P0" > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FEN
     DRV_AP="$WORK/drv_argparse.sh"
     {
       echo 'set -u'
-      echo 'ARGUMENTS="101 --max-cycles=7 202 --only-mine --dry-run --backend=claude-bg 303"'
+      echo 'ARGUMENTS="101 --max-cycles=7 202 --only-mine --dry-run --backend=background 303"'
       echo "source '$ARGPARSE_FENCE'"
       echo 'echo "queue=[${queue[*]}] mc=[$max_cycles_cli] om=[$only_mine] dr=[$dry_run] be=[$backend_cli]"'
     } > "$DRV_AP"
@@ -294,7 +294,7 @@ if extract_region argparse "$GOAL_P0" > "$ARGPARSE_FENCE" && [ -s "$ARGPARSE_FEN
     if [ "$AP_RC" -eq 0 ] \
        && grep -q 'queue=\[101 202 303\]' <<<"$AP_OUT" \
        && grep -q 'mc=\[7\]' <<<"$AP_OUT" \
-       && grep -q 'om=\[1\] dr=\[1\] be=\[claude-bg\]' <<<"$AP_OUT"; then
+       && grep -q 'om=\[1\] dr=\[1\] be=\[background\]' <<<"$AP_OUT"; then
       pass "P0e: arg-parse fence under the resolved bash collects positional issues (101/202/303) + flags (got: $AP_OUT)"
     else
       fail "P0e: arg-parse fence mis-parsed under the resolved bash (rc=$AP_RC, out=[$AP_OUT])"
@@ -882,75 +882,48 @@ else
 fi
 
 # ==========================================================================
-# W3 — Phase-2 Codex malformed-status fail-closed (#329 review).
+# W3 — RETIRED SURFACE (#381): the Phase-2 Codex malformed-status scenario.
 #
-# The no-PR branch asks `uberdev_goal_codex_status_for_issue` whether the Codex
-# solver wrapper has reached a terminal state. A malformed status JSON is not
-# equivalent to "no status yet": it is a corrupted/unknown terminal signal and
-# must be surfaced immediately. The regression this catches was
-# `2>/dev/null || true`, which normalized parser/schema failures to empty state
-# and then fell through to the generic solve timeout path.
+# This drove the step-2a no-PR branch with a corrupt
+# solve-codex-status-<ISSUE>.json and proved a malformed sidecar failed CLOSED
+# (immediate solving->failed, release breadcrumb, solver_failed audit) instead
+# of being normalized to "no status yet" and falling through to the 150-minute
+# timeout -- the `2>/dev/null || true` regression from the #329 review.
+#
+# COVERAGE DELIBERATELY DROPPED: that fail-closed behaviour no longer has a
+# subject. `uberdev_goal_codex_status_for_issue` was the only reader of the
+# sidecar and is deleted from lib/goal-state.sh; the branch that called it is
+# deleted from lib/goal-watch.sh; and UBERDEV_RESOLVED_BACKEND=codex -- the
+# scenario's precondition -- is no longer producible, because `codex` is not in
+# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:509). `background` ships no
+# equivalent sidecar and `workflow` reports through the runtime's structured
+# return, so there is no malformed-status class left to fail closed on.
+#
+# What replaces it is the absence check: neither the reader nor its call site
+# may come back, since a dormant sidecar reader is exactly how a retired status
+# format drifts back onto a live path.
 # ==========================================================================
-echo "== W3: Codex malformed solver status is surfaced, not swallowed (#329 review) =="
-
+# The step-2a no-PR loop is still sliced here: W3b/W3c below drive it. #381
+# dropped only the `uberdev_goal_codex_status_for_issue` grep from this
+# extraction guard, because that call site no longer exists in the slice.
 W3_STEP2A="$WORK/w3_step2a.slice.sh"
 if slice_file '_uberdev_goal_phase2_release_claim() {' '2b. Read the leaf /review-pr verdict' "$GOAL_WATCH" > "$W3_STEP2A" \
    && [ -s "$W3_STEP2A" ] \
-   && grep -q 'uberdev_goal_codex_status_for_issue' "$W3_STEP2A" \
-   && grep -q '_uberdev_goal_phase2_release_claim "$issue" "invalid_status"' "$W3_STEP2A" \
+   && grep -q 'gh issue view "$issue" --json state' "$W3_STEP2A" \
    && grep -qE '^[[:space:]]*done' "$W3_STEP2A"; then
   pass "W3.extract: sliced the step-2a no-PR solver-status loop from the watch script"
 else
   fail "W3.extract: could NOT slice the step-2a loop (loop head / step-2b marker moved?)"
 fi
 
-W3_STATE="$WORK/w3-state"
-mkdir -p "$W3_STATE" || { echo "FATAL: mkdir -p $W3_STATE failed" >&2; exit 3; }
-printf '{bad json\n' > "$W3_STATE/solve-codex-status-42.json"
-DRV_W3="$WORK/drv_w3.zsh"
-{
-  echo 'set -u'
-  echo "export UBERDEV_TMPDIR='$W3_STATE'"
-  echo "export GOAL_ID='pipew3'"
-  echo "export UBERDEV_GOAL_ID='pipew3'"
-  echo 'export UBERDEV_RESOLVED_BACKEND=codex'
-  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/dispatch.sh\""
-  echo ". \"\$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh\""
-  echo 'active_issues=(42)'
-  echo 'now="$(date +%s)"'
-  echo 'cycle=1'
-  echo 'any_active=0'
-  echo '_UBERDEV_GOAL_SOLVE_TIMEOUT=3600'
-  echo 'uberdev_goal_get_issue_state() { printf "solving"; }'
-  # Step 2a resolves PRs from the per-pass snapshot (#301), not the retired
-  # per-issue live finder. Stub BOTH halves to "no PR yet" — that is the
-  # precondition for the no-PR solver-status branch this test exercises.
-  echo 'uberdev_goal_pr_list_snapshot() { :; }'
-  echo 'uberdev_goal_find_pr_for_issue_from_json() { :; }'
-  echo 'uberdev_goal_gh_failure_count() { printf "0"; }'
-  echo 'uberdev_goal_agent_busy_for_issue() { return 1; }'
-  echo 'uberdev_goal_issue_ts_in_state() { printf "%s" "$now"; }'
-  echo 'uberdev_goal_issue_state_transition() { echo "$2:$3->$4" > "$UBERDEV_TMPDIR/w3-transition"; return 0; }'
-  echo 'uberdev_goal_audit() { printf "%s %s\n" "$1" "$2" >> "$UBERDEV_TMPDIR/w3-audit"; }'
-  echo '_uberdev_goal_reap_zombies() { echo reaped > "$UBERDEV_TMPDIR/w3-reaped"; }'
-  echo 'print_summary() { :; }'
-  echo 'gh() { case "$1 $2" in "issue view") printf "OPEN";; "issue edit") printf "edit denied\n" >&2; return 9;; *) return 0;; esac; }'
-  echo "source '$W3_STEP2A'"
-  echo 'echo "W3-FELL-THROUGH any_active=$any_active"'
-} > "$DRV_W3"
-
-W3_OUT="$("$ZSH_BIN" -f "$DRV_W3" 2>"$WORK/w3.err")"; W3_RC=$?
-W3_ERR="$(cat "$WORK/w3.err" 2>/dev/null)"
-if [ "$W3_RC" -eq 1 ] \
-   && grep -q 'invalid Codex status for issue 42' <<<"$W3_ERR" \
-   && grep -q 'release uberdev:active claim failed for issue 42' <<<"$W3_ERR" \
-   && grep -q 'edit denied' <<<"$W3_ERR" \
-   && grep -q '"reason":"solver_failed"' "$W3_STATE/w3-audit" 2>/dev/null \
-   && grep -q '"state":"invalid_status"' "$W3_STATE/w3-audit" 2>/dev/null \
-   && grep -q '42:solving->failed' "$W3_STATE/w3-transition" 2>/dev/null; then
-  pass "W3: malformed Codex status file fails closed with diagnostic, release breadcrumb, failed transition, and solver_failed audit"
+echo "== W3: the Codex solver-status sidecar reader is gone (#381) =="
+# Comment lines are excluded on purpose: both files keep a tombstone comment
+# naming what was removed, and that documentation must not read as live code.
+if ! grep -qE '^[^#]*uberdev_goal_codex_status_for_issue' "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh" "$GOAL_WATCH" \
+   && ! grep -qE '^[^#]*solve-codex-status-' "$CLAUDE_PLUGIN_ROOT/lib/goal-state.sh" "$GOAL_WATCH"; then
+  pass "W3: no Codex status-sidecar reader or call site survives in goal-state.sh / goal-watch.sh"
 else
-  fail "W3: malformed Codex status should fail closed with release breadcrumb (rc=$W3_RC, out=[$W3_OUT], err=[$W3_ERR], audit=[$(cat "$W3_STATE/w3-audit" 2>/dev/null)], transition=[$(cat "$W3_STATE/w3-transition" 2>/dev/null)])"
+  fail "W3: a Codex status-sidecar reader or call site is still live (grep goal-state.sh / goal-watch.sh for uberdev_goal_codex_status_for_issue / solve-codex-status-)"
 fi
 
 # ==========================================================================

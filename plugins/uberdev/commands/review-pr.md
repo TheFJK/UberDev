@@ -1,7 +1,7 @@
 ---
 description: "Comprehensive PR review using specialized agents"
 argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--no-defer-issues] [--turbo]"
-allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Write"]
+allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 ---
 
 # Comprehensive PR Review
@@ -1587,6 +1587,156 @@ PY
 
    **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
 
+   **4w. Phase 1 on the Workflow-native transport** (run this INSTEAD of the
+   `Skill(uberdev:post-impl-review)` invocation above, and only when
+   `UBERDEV_CARRIER_BACKEND=workflow`)
+
+   `lib/dispatch.sh` has no `workflow` provider arm by construction, so on that
+   backend the six reviewers are dispatched by the session's Workflow tool
+   through `skills/review-fleet/workflow.js` instead of by the routed child
+   adapter. Everything else is unchanged: the same six edges, the same enveloped
+   diff artifact read BY PATH, the same `uberdev_child_validate_phase1_review_result`
+   boundary, the same trusted ledger, and the same
+   `post_review_write_aggregate_v2` writer. **Do not also invoke
+   `Skill(uberdev:post-impl-review)` on this path** — that would dispatch the
+   same roster twice and produce two ledgers for one wave.
+
+   Run 4w.1, then the mandated `Workflow` call, then 4w.2. The three are one
+   proof: 4w.1 mints a binding per child BEFORE anything is dispatched, and 4w.2
+   is the only thing that decides whether the wave produced evidence.
+
+   **4w.1 — existence guard, per-child layout, nonce mint, bindings, envelope.**
+
+   ```bash uberdev-executable origin=review-pr
+   # RFC 0012 §4.1: validate the on-disk Workflow script BEFORE mandating the
+   # call. A missing or misnamed workflow.js on a target install must refuse
+   # here, not at the runtime layer after the RUN_ID is already reserved.
+   REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+   [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+   # The script derives every child path from runDirAbs and every capture verb
+   # canonicalises the same paths afterwards, so both sides must start from the
+   # realpath rather than from a symlinked or relative spelling of it.
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
+   REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)" || return 2
+   [ "${SEQUENTIAL:-0}" != 1 ] || REVIEW_FLEET_CAP=1
+   REVIEW_FLEET_ASPECTS="$(printf '%s' "${ASPECT_LIST[*]:-}" | tr ' ' ',')"
+   # mkdir -p per child, one CSPRNG nonce per child in the roster order the
+   # script consumes, one bind-workflow-launch per child — all BEFORE dispatch,
+   # the only moment a binding can be minted that the child could not influence.
+   review_fleet_bind_roster review "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$REVIEW_FLEET_LAUNCHED" || return 2
+   uberdev_emit_workflow_args review-fleet \
+     mode=review-pr \
+     stage=review \
+     run_id="$RUN_ID" \
+     runId="$RUN_ID" \
+     runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+     pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+     repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+     workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+     prNumber="$PR_NUMBER" \
+     repoSlug="$REVIEW_REPO_SLUG" \
+     reviewIteration="$REVIEW_ITERATION" \
+     diffPathAbs="$DIFF_ARTIFACT_PATH" \
+     aspects="$REVIEW_FLEET_ASPECTS" \
+     fanoutCap="$REVIEW_FLEET_CAP" \
+     maxAgents=40 \
+     workspaceMode=caller \
+     worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+     branchName= \
+     runNonces="$REVIEW_FLEET_NONCE_POOL" || return 2
+   ```
+
+   `branchName` is emitted EMPTY on purpose. `bind-workflow-launch` records
+   `branch: ""`, and `_validate_bound_workflow_child_status` requires the
+   child's `status.json` branch to equal the binding's — a non-empty value here
+   would make every child's status refuse.
+
+   **Workflow mandate:** the fence above validated
+   `[ -f "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js" ]`. Relay the JSON
+   between `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** (DR-2 — no
+   LLM-composed handoffs) into:
+
+   ```
+   Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
+   ```
+
+   **4w.2 — the capture verbs, in the calling session's Bash.** The script's
+   return is a report, not evidence: this fence re-derives every path itself and
+   judges the artifacts on disk. A child the script reported `BLOCKED` simply has
+   no valid artifacts, and the evidence builder fails closed on it.
+
+   ```bash uberdev-executable origin=review-pr
+   # child-dispatch.sh for uberdev_child_validate_phase1_review_result, and for
+   # the backend-policy enum the evidence builder reads; review-aggregate.sh for
+   # the three builders themselves. Both are sourced HERE because this fence is
+   # a fresh shell and neither survives from the setup fence.
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh" || return 2
+   REVIEW_EDGES=(
+     review_pr.review.correctness review_pr.review.silent_failures
+     review_pr.review.types review_pr.review.comments
+     review_pr.review.tests review_pr.review.general
+   )
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
+   REVIEW_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+   POST_REVIEW_VALIDATED_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-review.validated"
+   : >"$POST_REVIEW_VALIDATED_LEDGER" || return 2
+   REVIEW_WAVE_BLOCKED=0
+   while IFS= read -r REVIEW_FLEET_ROW; do
+     [ -n "$REVIEW_FLEET_ROW" ] || continue
+     REVIEW_FLEET_EDGE="$(jq -er .edge <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_INDEX="$(jq -er .index <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_INSTANCE="$(jq -er .instance <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_RESULT="$(jq -er .result <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_VALIDATED="$(dirname "$REVIEW_FLEET_RESULT")/validated-result.md"
+     # No child of ANY backend writes validated-result.md. The controller does,
+     # through the canonical boundary that also rejects an APPROVE carrying a
+     # blocker, and it publishes the artifact 0o400.
+     if REVIEW_FLEET_DIGEST="$(uberdev_child_validate_phase1_review_result "$REVIEW_FLEET_RESULT" "$CHANGED_PATHS_JSON" "$REVIEW_FLEET_VALIDATED")" \
+        && [[ "$REVIEW_FLEET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+       jq -cn --arg edge "$REVIEW_FLEET_EDGE" --argjson index "$REVIEW_FLEET_INDEX" \
+         --arg instance "$REVIEW_FLEET_INSTANCE" --arg result "$REVIEW_FLEET_VALIDATED" \
+         --arg sha256 "$REVIEW_FLEET_DIGEST" \
+         '{edge:$edge,index:$index,instance:$instance,result:$result,sha256:$sha256}' \
+         >>"$POST_REVIEW_VALIDATED_LEDGER" || REVIEW_WAVE_BLOCKED=1
+     else
+       REVIEW_WAVE_BLOCKED=1
+     fi
+   done <"$REVIEW_FLEET_LAUNCHED"
+   if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] \
+       && POST_REVIEW_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
+            "$POST_REVIEW_VALIDATED_LEDGER" "$REVIEW_EXPECTED_COUNT" \
+            "$REVIEW_FLEET_LAUNCHED" '' "$REVIEW_FLEET_RUN_DIR")" \
+       && POST_REVIEW_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
+            "$POST_REVIEW_TRUSTED_LEDGER" "$REVIEW_EXPECTED_COUNT")" \
+       && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH"; then
+     POST_REVIEW_AGGREGATION_INPUT=
+     unset POST_REVIEW_AGGREGATION_INPUT
+   else
+     # Identical fail-closed boundary to the skill's: a missing or empty
+     # aggregate is infrastructure failure, never a zero-finding review. Any
+     # BLOCKED reviewer lands here, and nothing downstream runs.
+     rm -f -- "$AGG_PATH"
+     echo "error: review-fleet Phase 1 evidence incomplete; aggregate suppressed" >&2
+     return 70
+   fi
+   ```
+
+   The binding rows in `review-fleet-review.launched` are the
+   `{edge,index,instance,binding,result,status}` shape
+   `post_review_validated_evidence_complete` proves through
+   `code_fixer_contract.py capture-bound-child` — a verb that takes no
+   caller-supplied digest and computes both itself. One wave may not mix that
+   shape with the detached `receipt` shape, so a workflow wave and a detached
+   wave can never be aggregated together.
+
 5. **Apply Phase 1 Fixes — dispatch `code-fixer` subagent**
 
    Read the findings aggregate from the canonical path:
@@ -1660,6 +1810,132 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    }
    ```
 
+   **5w. The Phase 1 fixer on the Workflow-native transport** (run this INSTEAD
+   of the `review_fixer_child_bound` dispatch above, and only when
+   `UBERDEV_CARRIER_BACKEND=workflow`)
+
+   The authority is prepared exactly as above — the transport changes, the proof
+   does not. The fixer child is bound with `bind-workflow-fixer-launch`, never
+   with `bind-workflow-launch`: only the fixer producer pins the
+   controller-created authority by path and digest, and a fixer owes a
+   disposition and an applied-content artifact that a reviewer does not.
+
+   **5w.1 — authority, binding, envelope.**
+
+   ```bash uberdev-executable origin=review-pr
+   REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+   [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   PHASE1_FINDINGS_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+   PHASE1_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE1_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter${REVIEW_ITERATION}.json"
+   PHASE1_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase1 --policy-phase review_fix \
+     --findings-path "$PHASE1_FINDINGS_PATH" --findings-sha256 "$PHASE1_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE1_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase1" or value["commit_type"]!="fix" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AUTHORITY_PATH")" || return 74
+   PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
+   REVIEW_FLEET_FIX_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase1-iter${REVIEW_ITERATION}.launch.json"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   review_fleet_bind_fixer review_pr.fix.phase1 "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
+     "$PHASE1_AUTHORITY_PATH" "$PHASE1_AUTHORITY_SHA256" \
+     "$FIXER_HEAD_BEFORE" "$REVIEW_FLEET_FIX_SIDECAR" || return 74
+   uberdev_emit_workflow_args review-fleet \
+     mode=review-pr \
+     stage=fix \
+     run_id="$RUN_ID" \
+     runId="$RUN_ID" \
+     runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+     pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+     repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+     workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+     prNumber="$PR_NUMBER" \
+     repoSlug="$REVIEW_REPO_SLUG" \
+     reviewIteration="$REVIEW_ITERATION" \
+     fixerEdgeId=review_pr.fix.phase1 \
+     commitType=fix \
+     findingsPathAbs="$PHASE1_FINDINGS_PATH" \
+     findingsSha256="$PHASE1_FINDINGS_SHA256" \
+     commitRangePathAbs="$COMMIT_RANGE_PATH" \
+     commitRangeSha256="$FIXER_COMMIT_RANGE_SHA256" \
+     authorityPathAbs="$PHASE1_AUTHORITY_PATH" \
+     authoritySha256="$PHASE1_AUTHORITY_SHA256" \
+     dispositionPathAbs="$PHASE1_DISPOSITION_PATH" \
+     appliedContentPathAbs="$PHASE1_APPLIED_CONTENT_PATH" \
+     maxAgents=40 \
+     workspaceMode=caller \
+     worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+     branchName= \
+     runNonces="$REVIEW_FLEET_NONCE_POOL" || return 74
+   ```
+
+   **Workflow mandate:** relay the JSON between
+   `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** into:
+
+   ```
+   Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
+   ```
+
+   **5w.2 — capture the terminal, validate the outcome, promote the head.** The
+   script's `fixerStatus` is a hint for logging only; the disposition artifact
+   and the head movement are the truth.
+
+   ```bash uberdev-executable origin=review-pr
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_FIX_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase1-iter${REVIEW_ITERATION}.launch.json"
+   REVIEW_FIXER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" binding)" || return 74
+   FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" head_before)" || return 74
+   # Read the authority pins OUT OF THE BINDING rather than recomputing them:
+   # validate-review-outcome re-reads the authority file and requires it to
+   # match this digest, so a file swapped after the mint fails closed.
+   PHASE1_AUTHORITY_PATH="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_path)" || return 74
+   PHASE1_AUTHORITY_SHA256="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_sha256)" || return 74
+   PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
+   REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --disposition-path "$PHASE1_DISPOSITION_PATH" \
+     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   PHASE1_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE1_AUTHORITY_PATH" --authority-sha256 "$PHASE1_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE1_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   ```
+
+   A workflow outcome carries `run_nonce` where a detached outcome carries
+   `receipt_sha256` — deliberately different keys, so a consumer written to check
+   a dispatch receipt fails closed instead of accepting a nonce as though a
+   receipt had been verified. `review_promote_validated_fixer_outcome` accepts
+   exactly one of the two and nothing else.
+
    The agent applies edits and creates exactly one routed `fix:` conventional commit when any Phase 1 finding is APPLIED, returning that SHA in its YAML. This **review-phase commit** stays distinct from the Phase 2 simplify commit (separate-commit invariant — see `tests/review-pr.test.sh` for the assertion that locks this boundary). Capture the agent's `commits[].sha` for the final aggregation table's "Auto-applied" column. Surface every `findings_disposition` row where `disposition != APPLIED` in the aggregation table's "Advisory findings" column so they are never silently dropped.
 
    Capture `FIXER_HEAD_BEFORE` immediately before dispatch,
@@ -1693,11 +1969,19 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      local outcome="$1" before="$2" after="$3" parsed status declared_tip extra
      parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
-expected={"status","declared_tip","receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
-if not isinstance(value,dict) or set(value)!=expected: raise SystemExit(74)
+base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
+if not isinstance(value,dict): raise SystemExit(74)
+# EXACTLY ONE launch-identity key, chosen by the backend, never by the child:
+# a detached outcome is tied to its dispatch receipt, a workflow outcome to the
+# nonce the controller minted before the call (code_fixer_contract.py
+# _launch_identity). Accepting both is not a relaxation -- the set equality is
+# still exact for each shape, both keys are still required 64-hex below, and a
+# document carrying BOTH, NEITHER, or any extra key is still refused.
+launch=set(value)-base
+if launch not in ({"receipt_sha256"},{"run_nonce"}) or set(value)-launch!=base: raise SystemExit(74)
 status=value["status"]; tip=value["declared_tip"]
 if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,str): raise SystemExit(74)
-if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in ("receipt_sha256","status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
+if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in (*launch,"status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
 if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
 print(status+"\t"+tip,end="")' "$outcome")" || return 74
      IFS=$'\t' read -r status declared_tip extra <<<"$parsed"
@@ -1780,6 +2064,92 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    review_child_wait_all "$SIMPLIFY_LAUNCHED" "$REVIEW_PR_TIMEOUT"
    ```
 
+   **6w. The three lenses on the Workflow-native transport** (run this INSTEAD
+   of the `review_child_fanout` above, and only when
+   `UBERDEV_CARRIER_BACKEND=workflow`)
+
+   ```bash uberdev-executable origin=review-pr
+   REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+   [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+   # Phase 1 may have advanced HEAD. Rebuild the enveloped diff and the
+   # commit-range artifact from that exact post-fix snapshot first, exactly as
+   # the routed path does.
+   review_refresh_phase1_scope "$BASE_SHA" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   REVIEW_FLEET_LENS_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
+   review_fleet_bind_roster simplify "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$REVIEW_FLEET_LENS_LAUNCHED" || return 2
+   uberdev_emit_workflow_args review-fleet \
+     mode=review-pr \
+     stage=simplify \
+     run_id="$RUN_ID" \
+     runId="$RUN_ID" \
+     runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+     pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+     repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+     workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+     prNumber="$PR_NUMBER" \
+     repoSlug="$REVIEW_REPO_SLUG" \
+     reviewIteration="$REVIEW_ITERATION" \
+     diffPathAbs="$DIFF_ARTIFACT_PATH" \
+     focus="$FOCUS" \
+     maxAgents=40 \
+     workspaceMode=caller \
+     worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+     branchName= \
+     runNonces="$REVIEW_FLEET_NONCE_POOL" || return 2
+   ```
+
+   **Workflow mandate:** relay the JSON between
+   `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** into:
+
+   ```
+   Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
+   ```
+
+   `lensConcurrency` is deliberately omitted: the script clamps it to 3, which
+   is one wave of three — byte-for-byte the routed path's behaviour, which has
+   no lens cap either.
+
+   Then capture every lens child before reading a single finding. `capture-bound-child`
+   takes no caller-supplied digest: it binds the child on the nonce, freezes
+   `status.json` and `result.md`, and computes both digests itself.
+
+   ```bash uberdev-executable origin=review-pr
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_LENS_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
+   REVIEW_FLEET_LENS_CAPTURED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.captured"
+   : >"$REVIEW_FLEET_LENS_CAPTURED" || return 2
+   REVIEW_FLEET_LENS_COUNT=0
+   while IFS= read -r REVIEW_FLEET_ROW; do
+     [ -n "$REVIEW_FLEET_ROW" ] || continue
+     REVIEW_FLEET_EDGE="$(jq -er .edge <<<"$REVIEW_FLEET_ROW")" || return 2
+     REVIEW_FLEET_BINDING="$(jq -er .binding <<<"$REVIEW_FLEET_ROW")" || return 2
+     python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
+       --edge-id "$REVIEW_FLEET_EDGE" \
+       --launch-binding-json "$REVIEW_FLEET_BINDING" >>"$REVIEW_FLEET_LENS_CAPTURED" || {
+       echo "error: review-fleet Phase 2 lens $REVIEW_FLEET_EDGE produced no bound evidence" >&2
+       return 2
+     }
+     printf '\n' >>"$REVIEW_FLEET_LENS_CAPTURED"
+     REVIEW_FLEET_LENS_COUNT=$((REVIEW_FLEET_LENS_COUNT + 1))
+   done <"$REVIEW_FLEET_LENS_LAUNCHED"
+   [ "$REVIEW_FLEET_LENS_COUNT" -eq 3 ] || {
+     echo "error: review-fleet Phase 2 captured $REVIEW_FLEET_LENS_COUNT of 3 lenses; Phase 2 is blocked" >&2
+     return 2
+   }
+   ```
+
+   A lens that returned nothing, wrote outside the derived layout, or echoed a
+   nonce this controller never minted has no captured row, so Phase 2 is
+   `blocked` (step 8 exit-code 2) rather than silently aggregating two lenses
+   into a three-lens document.
+
    The lens-by-lens checklist (what each lens looks for) is the canonical definition in `/uberdev:simplify` Phase 2 — refer there rather than restate.
 
    **Brief preparation** (mirrors `uberdev:post-impl-review` Step 1):
@@ -1844,6 +2214,111 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
+   PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
+     --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$FIXER_DISPOSITION_SHA256" \
+     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH" --applied-content-sha256 "$FIXER_APPLIED_CONTENT_SHA256" \
+     --status-sha256 "$FIXER_STATUS_SHA256" --result-sha256 "$FIXER_RESULT_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   ```
+
+   **6bw. The Phase 2 fixer on the Workflow-native transport** (run this INSTEAD
+   of the `review_fixer_child_bound review_pr.fix.phase2` dispatch above, and
+   only when `UBERDEV_CARRIER_BACKEND=workflow`)
+
+   ```bash uberdev-executable origin=review-pr
+   REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+   [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   PHASE2_FINDINGS_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
+   PHASE2_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
+   FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
+   PHASE2_AUTHORITY_PATH="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter${REVIEW_ITERATION}.json"
+   PHASE2_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-authority \
+     --edge-id review_pr.fix.phase2 --policy-phase simplify_fix \
+     --findings-path "$PHASE2_FINDINGS_PATH" --findings-sha256 "$PHASE2_FINDINGS_SHA256" \
+     --commit-range-path "$COMMIT_RANGE_PATH" --commit-range-sha256 "$FIXER_COMMIT_RANGE_SHA256" \
+     --working-dir "$WORKTREE_ROOT" --disposition-path "$PHASE2_DISPOSITION_PATH" \
+     --authority-output-path "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,re,sys
+value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","phase","commit_type","target_paths"}
+if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase2" or value["commit_type"]!="refactor" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
+print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AUTHORITY_PATH")" || return 74
+   PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
+   REVIEW_FLEET_FIX2_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase2-iter${REVIEW_ITERATION}.launch.json"
+   FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
+   review_fleet_bind_fixer review_pr.fix.phase2 "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+     "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
+     "$PHASE2_AUTHORITY_PATH" "$PHASE2_AUTHORITY_SHA256" \
+     "$FIXER_HEAD_BEFORE" "$REVIEW_FLEET_FIX2_SIDECAR" || return 74
+   uberdev_emit_workflow_args review-fleet \
+     mode=review-pr \
+     stage=fix \
+     run_id="$RUN_ID" \
+     runId="$RUN_ID" \
+     runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+     pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+     repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+     workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+     prNumber="$PR_NUMBER" \
+     repoSlug="$REVIEW_REPO_SLUG" \
+     reviewIteration="$REVIEW_ITERATION" \
+     fixerEdgeId=review_pr.fix.phase2 \
+     commitType=refactor \
+     findingsPathAbs="$PHASE2_FINDINGS_PATH" \
+     findingsSha256="$PHASE2_FINDINGS_SHA256" \
+     commitRangePathAbs="$COMMIT_RANGE_PATH" \
+     commitRangeSha256="$FIXER_COMMIT_RANGE_SHA256" \
+     authorityPathAbs="$PHASE2_AUTHORITY_PATH" \
+     authoritySha256="$PHASE2_AUTHORITY_SHA256" \
+     dispositionPathAbs="$PHASE2_DISPOSITION_PATH" \
+     appliedContentPathAbs="$PHASE2_APPLIED_CONTENT_PATH" \
+     maxAgents=40 \
+     workspaceMode=caller \
+     worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+     branchName= \
+     runNonces="$REVIEW_FLEET_NONCE_POOL" || return 74
+   ```
+
+   **Workflow mandate:** relay the JSON between
+   `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** into:
+
+   ```
+   Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
+   ```
+
+   ```bash uberdev-executable origin=review-pr
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_FLEET_FIX2_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase2-iter${REVIEW_ITERATION}.launch.json"
+   REVIEW_FIXER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX2_SIDECAR" binding)" || return 74
+   FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX2_SIDECAR" head_before)" || return 74
+   PHASE2_AUTHORITY_PATH="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_path)" || return 74
+   PHASE2_AUTHORITY_SHA256="$(printf '%s' "$REVIEW_FIXER_LAUNCH_BINDING" | jq -er .authority_sha256)" || return 74
+   PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
+   REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
+     --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
+     --disposition-path "$PHASE2_DISPOSITION_PATH" \
+     --applied-content-path "$PHASE2_APPLIED_CONTENT_PATH")" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_HEAD_AFTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
+   FIXER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_DISPOSITION_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
+   FIXER_APPLIED_CONTENT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$REVIEW_FIXER_TERMINAL")" || return 74
    PHASE2_FIXER_OUTCOME="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
      --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
      --authority-path "$PHASE2_AUTHORITY_PATH" --authority-sha256 "$PHASE2_AUTHORITY_SHA256" \
@@ -1955,6 +2430,111 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     review_child_single review_pr.defer.findings "$(uberdev_child_instance_id "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01")" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
 
+    **2.5w. The defer child on the Workflow-native transport** (run this INSTEAD
+    of the `review_child_single review_pr.defer.findings` dispatch above, and
+    only when `UBERDEV_CARRIER_BACKEND=workflow`)
+
+    The defer edge has exactly one bindable producer — `bind-workflow-persistence-launch`
+    — and it pins the Phase 2 aggregate and disposition by path and digest and
+    **re-counts the deferred blockers from those pinned bytes**. That count, not
+    a declared one, is what `DEFER_REQUIRE_CLEAN` gates on. The Phase 1 pair
+    still travels as a prompt input (the child files from both), but the binding
+    pins the Phase 2 pair, mirroring `/uberdev:simplify` exactly; the routed
+    path here pins neither, so this is strictly more proof than the transport it
+    replaces, not less.
+
+    ```bash uberdev-executable origin=review-pr
+    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+    DEFER_PHASE1_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+    DEFER_PHASE2_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
+    DEFER_PHASE2_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$DEFER_PHASE2_PATH" --minimum 1 --maximum 16777216)" || return 74
+    DEFER_PHASE2_DISPOSITION_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_DISPOSITION_PATH" --minimum 1 --maximum 16777216)" || return 74
+    DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+      --findings-path "$DEFER_PHASE2_PATH" --findings-sha256 "$DEFER_PHASE2_SHA256" \
+      --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$DEFER_PHASE2_DISPOSITION_SHA256")" || return 74
+    case "$DEFERRED_BLOCKER_COUNT" in ''|*[!0-9]*) return 74 ;; esac
+    DEFER_REQUIRE_CLEAN=0
+    [ "$DEFERRED_BLOCKER_COUNT" -eq 0 ] || DEFER_REQUIRE_CLEAN=1
+    # The documented MAX_NEW=10 cap for this command (step 7 table). Passed as a
+    # declared scalar rather than left to the script default so the two cannot
+    # drift apart silently.
+    DEFER_MAX_NEW=10
+    REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
+    review_fleet_bind_persistence "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+      "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
+      "$DEFER_PHASE2_PATH" "$DEFER_PHASE2_SHA256" \
+      "$PHASE2_DISPOSITION_PATH" "$DEFER_PHASE2_DISPOSITION_SHA256" \
+      "$DEFERRED_BLOCKER_COUNT" "$DEFER_REQUIRE_CLEAN" "$REVIEW_FLEET_DEFER_SIDECAR" || return 74
+    uberdev_emit_workflow_args review-fleet \
+      mode=review-pr \
+      stage=defer \
+      run_id="$RUN_ID" \
+      runId="$RUN_ID" \
+      runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+      pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+      repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+      workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+      prNumber="$PR_NUMBER" \
+      repoSlug="$REVIEW_REPO_SLUG" \
+      reviewIteration="$REVIEW_ITERATION" \
+      phase1PathAbs="$DEFER_PHASE1_PATH" \
+      phase2PathAbs="$DEFER_PHASE2_PATH" \
+      phase1DispositionPathAbs="$PHASE1_DISPOSITION_PATH" \
+      phase2DispositionPathAbs="$PHASE2_DISPOSITION_PATH" \
+      maxNew="$DEFER_MAX_NEW" \
+      maxAgents=40 \
+      workspaceMode=caller \
+      worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+      branchName= \
+      runNonces="$REVIEW_FLEET_NONCE_POOL" || return 74
+    ```
+
+    **Workflow mandate:** relay the JSON between
+    `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** into:
+
+    ```
+    Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js"}, <the JSON between the markers>)
+    ```
+
+    ```bash uberdev-executable origin=review-pr
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+    REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
+    REVIEW_DEFER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_DEFER_SIDECAR" binding)" || return 74
+    REVIEW_DEFER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-persistence-terminal \
+      --launch-binding-json "$REVIEW_DEFER_LAUNCH_BINDING")" || return 74
+    DEFER_STATUS_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$REVIEW_DEFER_TERMINAL")" || return 74
+    DEFER_RESULT_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$REVIEW_DEFER_TERMINAL")" || return 74
+    DEFER_PERSISTENCE_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-persistence-result \
+      --launch-binding-json "$REVIEW_DEFER_LAUNCH_BINDING" \
+      --status-sha256 "$DEFER_STATUS_SHA256" \
+      --result-sha256 "$DEFER_RESULT_SHA256")" || {
+      # A refused, malformed or unbindable persistence result is normalized to
+      # MALFORMED and handled by the status gate below — never read as "no
+      # deferred findings".
+      DEFER_PERSISTENCE_STATUS=MALFORMED
+      DEFER_PERSISTENCE_RECEIPT=
+    }
+    if [ -n "${DEFER_PERSISTENCE_RECEIPT:-}" ]; then
+      DEFER_PERSISTENCE_STATUS="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status"],end="")' "$DEFER_PERSISTENCE_RECEIPT")" || return 74
+      PHASE2_5_HALTED="$(python3 -I -B -c 'import json,sys; print(str(json.loads(sys.argv[1])["halted"]).lower(),end="")' "$DEFER_PERSISTENCE_RECEIPT")" || return 74
+    else
+      PHASE2_5_HALTED=true
+    fi
+    ```
+
+    Feed `DEFER_PERSISTENCE_STATUS` into `review_apply_phase2_5_status` below —
+    the same gate the routed path uses, unchanged. The counts and URLs for the
+    Step 7 table come from the script's `issues` return; the HALT decision does
+    not. `PHASE2_5_HALTED` above is the validated persistence receipt's,
+    computed from the child's own frozen result bytes.
+
     **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML before treating absent arrays as zero issues.
 
     Publication/origin/parse failures are infrastructure failures, not a
@@ -2061,6 +2641,50 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     Phase 3 runs after Phase 2 and before trust-signal emission. It probes live CI on the post-Phase-2 HEAD, monitors pending runs, classifies red runs into one of six failure classes (`CI_FAILURE_CLASS_ENUM` defined in `plugins/uberdev/skills/merge-pipeline/SKILL.md` Constants), routes to specialized fixer agents for resolvable classes, and halts via `AskUserQuestion` (or audit-only under `--turbo`) for the two classes no code change can resolve. The trust-signal anchor commit (Step 7) is gated on Phase 3's outcome.
 
     Loop counter and cap defined in 6c.7 LOOP GUARD below (`CI_FIX_LOOP_CAP = 3`, declared in `merge-pipeline/SKILL.md` Constants). On cap exhaustion → `OUTCOME=loop_cap_exhausted`, exit 1. **The "MUST NOT introduce any additional retry path" anti-pattern guard from `merge-pipeline/SKILL.md` "PARK is the terminal floor" prose is restated here.**
+
+    **Declared transport boundary — Phase 3 has no Workflow-native fanout.**
+    `skills/review-fleet/workflow.js` deliberately does not dispatch Phase 3
+    (RFC 0012 §3.1: it is the arm with the deepest git-mutation authority chain —
+    per-iteration `CI_RUN_ID` re-derivation, the rebase lease,
+    `--force-with-lease`, the mid-rebase abort path — and moving it needs its own
+    RFC amendment and its own tests). Its `review_pr.ci.*` children therefore
+    still take the routed adapter, which has **no `workflow` provider arm by
+    construction** (`lib/dispatch.sh`). The gate is spelled INLINE at the 6c.3
+    CLASSIFY dispatch below (`subreason=ci_transport_unsupported`), so a red
+    check on that transport halts with a named reason instead of surfacing later
+    as an opaque provider-arm refusal, mid-run, after the probe already spent
+    its budget.
+
+    > **BREAKING (#381) — Phase 3 CI classification and the CI fixers are
+    > UNAVAILABLE. There is no longer any transport that can run them.**
+    >
+    > Since #381 step 3 the workflow transport is what `auto` resolves to, so
+    > this gate is on the DEFAULT path, not an opt-in corner. Step 4 then
+    > deleted the `codex` backend, which was the ONLY transport with a provider
+    > arm for `review_pr.ci.*` — so the escape hatch this gate used to name is
+    > gone with it. `--backend=wezterm` and `--backend=background` are not
+    > substitutes: /review-pr refuses both in `uberdev_dispatch_preflight_backend`
+    > because neither publishes a governed child result artifact.
+    >
+    > **`--no-ci-fix` is the supported mode** until Phase 3 is rebuilt
+    > Workflow-natively. Under it the probe is telemetry only, dispatches no
+    > child, and the review completes normally.
+    >
+    > Without it, a **green** probe still completes normally and reaches the
+    > trust anchor; a **red** probe halts loudly at 6c.3 CLASSIFY with
+    > `subreason=ci_transport_unsupported`. That is a named refusal, not a
+    > silent degradation — but it is a capability the release no longer has,
+    > not a configuration the operator can fix.
+
+    It is inline rather than a shared helper on purpose: the CLASSIFY block is
+    extracted and executed on its own by `tests/review-pr-phase3-ci.test.sh` and
+    `tests/review-child-inputs.test.sh`, and a gate that lives in a different
+    fence is a gate those fixtures run without.
+
+    Under `CI_FIX_PHASE=0` the probe is telemetry only and dispatches no child,
+    so the gate sits at CLASSIFY — the first step that would launch one — not at
+    6c.1. A green probe on the workflow transport therefore completes normally
+    and reaches the trust anchor.
 
     ### 6c.1 PROBE — gh pr checks JSON probe
 
@@ -2675,6 +3299,15 @@ print(serialized,end="")
       head_sha "$(review_json_member "$CI_LOG_AUTHORITY_JSON" head_sha)" \
       log_content "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_content)" \
       log_sha256 "$(review_json_member "$CI_LOG_AUTHORITY_JSON" log_sha256)")"
+    # Declared transport boundary (see the 6c preamble): review_pr.ci.* are
+    # routed children and lib/dispatch.sh has no workflow provider arm, so this
+    # is the first step that would dispatch one into a dead end.
+    if [ "${UBERDEV_CARRIER_BACKEND:-}" = workflow ]; then
+      echo "error: Phase 3 CI classification and the CI fixers are UNAVAILABLE (BREAKING, #381) — review_pr.ci.* are routed children and lib/dispatch.sh has no workflow provider arm (RFC 0012 §3.1 'Not built in P2'), and the codex backend that was the only arm for them was deleted. There is no backend to re-run with: pass --no-ci-fix to accept probe-only telemetry until Phase 3 is rebuilt Workflow-natively" >&2
+      audit ci_classify_returned subreason=ci_transport_unsupported
+      OUTCOME=halted
+      exit 1
+    fi
     if review_child_single review_pr.ci.classify "$(uberdev_child_instance_id "review-pr-${RUN_ID}-ci-classify-iter${CI_FIX_LOOP_ITER:-1}-attempt01")" "$CI_CLASSIFY_INPUTS" '[]' "$RESEARCH_DIR_ABS/ci-classify" "$REVIEW_PR_TIMEOUT"; then
       :
     else

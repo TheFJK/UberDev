@@ -98,7 +98,7 @@
 #      fence ever gains `set -o pipefail`.
 #
 # SCAN SET. Every tracked `*.sh` file in the repo — tests, `plugins/uberdev/lib`,
-# the Codex mirror, `codex/tools`, `tools/prkit`, `install.sh` — that turns
+# `tools/prkit`, `install.sh` — that turns
 # pipefail on. Files that do NOT set pipefail are not exposed (the pipeline's rc
 # is the last command's rc) and are out of scope by construction; the day one of
 # them adds `set -o pipefail`, this guard reds on every site it just exposed.

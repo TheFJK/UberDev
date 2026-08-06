@@ -242,7 +242,7 @@ print(json.dumps({
     "run_dir": run,
     "run_id": "review-receipt-root",
     "repository_id": repository,
-    "backend": "codex",
+    "backend": "workflow",
     "workflow": "review-pr",
     "phase": "lead",
     "role": "lead",
@@ -252,7 +252,6 @@ print(json.dumps({
     "issue_num": 73,
     "capacity": 20,
     "timeout_s": 20,
-    "routing_mode": "adaptive",
 }, sort_keys=True, separators=(",", ":")))
 PY
 )"
@@ -266,7 +265,7 @@ print(json.dumps({
     "run_id": "review-receipt-root",
     "repository_id": sys.argv[1],
     "workflow": "review-pr",
-    "backend": "codex",
+    "backend": "workflow",
     "issue_num": 73,
     "task_tier": "medium",
     "risk_signals": ["security"],
@@ -457,7 +456,7 @@ review_provider_args_validate() {
   local backend="$1" issue="$2" tier="$3" prompt="$4" result="$5" status="$6" decision="$7"
   local instance
   instance="$(basename "$(dirname "$status")")"
-  [ "$backend" = codex ] || return 1
+  [ "$backend" = workflow ] || return 1
   [ "$issue" = 73 ] || return 1
   [ "$tier" = medium ] || return 1
   [ "$prompt" = "$CARRIER_RUN/children/$instance/prompt.txt" ] || return 1
@@ -477,8 +476,29 @@ _uberdev_agent_dispatch_backend() {
   instance="$(basename "$(dirname "$status")")"
   edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' "$HANDOFFS/$instance.json")"
   if [ "${REVIEW_FIXTURE_FORCE_BIND_FAILURE:-0}" = 1 ]; then
-    python3 -I -B -c 'import os,time; os.setsid(); time.sleep(60)' >/dev/null 2>&1 &
+    # The simulated provider leads its own session and is ALREADY TERMINAL, which
+    # is what a workflow-backed child actually looks like at unwind time.
+    #
+    # This used to `time.sleep(60)`, modelling a detached provider still running
+    # when the controller unwinds. That shape cannot occur here any more: after
+    # #381 the only backend uberdev_dispatch_preflight_backend admits for
+    # review_pr.fix.* is `workflow`, and a workflow child owns no process at all
+    # -- lib/dispatch.sh has no workflow provider arm BY CONSTRUCTION, so
+    # _uberdev_agent_dispatch_backend (which this function stubs) is never
+    # reached on that path. The Workflow call has already returned by the time
+    # the controller unwinds; there is nothing left to signal.
+    #
+    # Keeping the sleep would have asserted that unwind reaps a process
+    # production never creates -- a test passing only because a fixture invented
+    # the thing it then checked for. The assertions that carry the real value are
+    # unchanged and still enforced below: rc=73 is not masked by 74, exactly one
+    # terminal lifecycle event is recorded, and NO capacity lease is left behind.
+    # Detached-backend leak reaping is covered where a detached backend can
+    # actually run -- tests/dispatch-child-worktree-teardown.test.sh and
+    # tests/child-dispatch.test.sh.
+    python3 -I -B -c 'import os; os.setsid()' >/dev/null 2>&1 &
     DISPATCH_ID="$!"
+    wait "$DISPATCH_ID" 2>/dev/null || true
     printf '%s\n' "$DISPATCH_ID" >"$REVIEW_BIND_FAILURE_PROVIDER_PID"
     chmod 600 "$REVIEW_BIND_FAILURE_PROVIDER_PID"
     return 0
@@ -662,11 +682,24 @@ raw=open(sys.argv[1],encoding='utf-8').read()
 assert '[diff summarized:' in raw and 'large.txt' in raw
 assert os.path.getsize(sys.argv[1]) < 16*1024*1024
 PY
+  # Deliberately hostile fixture: point the commit-range artifact at a
+  # DIRECTORY. review_refresh_phase1_scope's replace_private
+  # (plugins/uberdev/commands/review-pr.md:1554) does os.replace(tmp, path),
+  # which cannot clobber a directory, so the refresh must refuse rather than
+  # leave the stale range in place. The refusal surfaces as a Python traceback
+  # on stderr -- that IS the diagnostic, and it is expected here. Capture it so
+  # a deliberate refusal does not read as a suite failure in the transcript,
+  # and assert both halves: non-zero exit AND a non-empty diagnostic.
   STALE_RANGE_PATH="$COMMIT_RANGE_PATH"
+  SCOPE_BLOCKED_LOG="$TMP/scope-range-blocked.log"
   mkdir "$TMP/scope-range-blocked"
   COMMIT_RANGE_PATH="$TMP/scope-range-blocked"
-  if . "$TMP/review-scope.sh"; then
+  if . "$TMP/review-scope.sh" 2>"$SCOPE_BLOCKED_LOG"; then
     echo 'review-child-inputs: failed Phase 1 scope refresh reused stale artifacts' >&2
+    exit 1
+  fi
+  if ! [ -s "$SCOPE_BLOCKED_LOG" ]; then
+    echo 'review-child-inputs: blocked scope refresh refused without any diagnostic' >&2
     exit 1
   fi
   COMMIT_RANGE_PATH="$STALE_RANGE_PATH"
@@ -848,7 +881,33 @@ wave=()
 ) & wave+=("$!")
 (. "$TMP/review-phase2.sh") & wave+=("$!")
 (. "$TMP/review-defer.sh") & wave+=("$!")
-(. "$TMP/review-classify.sh") & wave+=("$!")
+# RETIRED SURFACE (#381): the Phase 3 CI classify child no longer dispatches.
+# commands/review-pr.md:3305 refuses `review_pr.ci.*` outright once the carrier
+# backend is `workflow` -- and `workflow` is now the ONLY backend
+# uberdev_dispatch_preflight_backend admits for review-pr, so this refusal is
+# unconditional in production. Assert the refusal instead of the dispatch: the
+# builder still has to construct CI_CLASSIFY_INPUTS before reaching the guard,
+# so the input-closure half of this scenario is still exercised.
+#
+# That closure is the payload the retired dispatch used to prove, so capture it
+# on the way out. The extracted fence `exit 1`s at the guard, which terminates
+# the command-substitution subshell -- an EXIT trap set inside that subshell is
+# the only place CI_CLASSIFY_INPUTS is still in scope. The exact payload is then
+# asserted below against this capture instead of against a handoff that
+# production no longer writes, so no assertion is lost to the retirement.
+CLASSIFY_INPUTS_CAPTURE="$TMP/ci-classify-inputs.json"
+(
+  set +e
+  CLASSIFY_REFUSAL="$(
+    trap 'printf "%s" "${CI_CLASSIFY_INPUTS-}" >"$CLASSIFY_INPUTS_CAPTURE"' EXIT
+    . "$TMP/review-classify.sh" 2>&1
+  )"
+  CLASSIFY_RC=$?
+  set -e
+  [ "$CLASSIFY_RC" -ne 0 ] || { echo "review-classify: CI classify dispatched despite the #381 transport gap" >&2; exit 1; }
+  grep -Fq 'Phase 3 CI classification and the CI fixers are UNAVAILABLE (BREAKING, #381)' <<<"$CLASSIFY_REFUSAL"     || { echo "review-classify: refused without the documented BREAKING diagnostic: $CLASSIFY_REFUSAL" >&2; exit 1; }
+  [ -s "$CLASSIFY_INPUTS_CAPTURE" ] || { echo 'review-classify: refused before building the CI classify input closure' >&2; exit 1; }
+) & wave+=("$!")
 review_wait_jobs "${wave[@]}"
 PHASE1_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter7.json"
 PHASE2_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase2-iter7.json"
@@ -1050,7 +1109,6 @@ review_cases = (
     ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter8-attempt01"),
     ("review_pr.fix.phase2", f"review-pr-{run_id}-fix-phase2-iter7-attempt01"),
     ("review_pr.defer.findings", f"review-pr-{run_id}-defer-findings-iter7-attempt01"),
-    ("review_pr.ci.classify", f"review-pr-{run_id}-ci-classify-iter3-attempt01"),
     ("review_pr.ci.fix_code", f"review-pr-{run_id}-ci-fix-iter3-attempt01"),
     ("review_pr.ci.rebase", f"review-pr-{run_id}-ci-rebase-iter3-attempt01"),
     ("review_pr.ci.defer_refusal", f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01"),
@@ -1059,15 +1117,38 @@ review_cases = (
 for edge, instance in review_cases:
     expect(review_source, edge, instance)
 
-expected_pairs = set(expected.values())
-if len(expected_pairs) != 17 or len(expected) != 22:
+# RETIRED SURFACE (#381), INVERTED -- not dropped. review_pr.ci.classify is
+# still BUILT: plugins/uberdev/commands/review-pr.md:3285 constructs
+# CI_CLASSIFY_INPUTS, which emits a `build` receipt, and only then does the
+# transport gate at :3305 refuse. So the edge keeps a source/edge pair the
+# receipt closure below still REQUIRES to be present, while owning no instance:
+# no handoff, no dispatch, no provider call, no lifecycle row. Every one of
+# those absences is asserted -- `retired_edge` immediately below for the
+# receipts and handoff files, and `expected.get(instance)` in validate_provider
+# / validate_lifecycle, which admit only instances in `expected`.
+retired_edge = "review_pr.ci.classify"
+build_only_pairs = {(review_source, retired_edge)}
+
+expected_pairs = set(expected.values()) | build_only_pairs
+if len(expected_pairs) != 17 or len(expected) != 21:
     raise SystemExit("invalid receipt expectation fixture")
+if any(edge == retired_edge for _, edge in expected.values()):
+    raise SystemExit(f"retired edge must own no dispatching instance: {retired_edge}")
 
 handoff_root = Path(handoff_dir)
 actual_files = {path.stem: path for path in handoff_root.glob("*.json")}
 if set(actual_files) != set(expected):
     raise SystemExit(
         f"handoff identity mismatch: expected={sorted(expected)!r} actual={sorted(actual_files)!r}"
+    )
+retired_handoffs = sorted(
+    str(path) for path in handoff_root.glob("*.json")
+    if json.loads(path.read_text(encoding="utf-8")).get("edge_id") == retired_edge
+)
+if retired_handoffs:
+    raise SystemExit(
+        f"retired surface regressed: {retired_edge} reached a handoff despite the "
+        f"#381 transport gate: {retired_handoffs!r}"
     )
 
 expected_correlated = Counter()
@@ -1120,6 +1201,22 @@ def validate_receipts(candidate_rows):
         )
         target = handoff if event == "handoff" else dispatch
         target[(source, edge, instance, digest)] += 1
+
+    # Inverted expectation for the #381-retired edge: its input closure MUST
+    # still run (>=1 build receipt) and it MUST NOT reach a terminal receipt.
+    retired_builds = [
+        row for row in candidate_rows
+        if row["edge_id"] == retired_edge and row["event"] == "build"
+    ]
+    retired_terminals = [
+        row for row in candidate_rows
+        if row["edge_id"] == retired_edge and row["event"] != "build"
+    ]
+    assert retired_builds, f"retired edge lost its input closure: {retired_edge}"
+    assert not retired_terminals, (
+        f"retired surface regressed: {retired_edge} emitted a terminal receipt: "
+        f"{retired_terminals!r}"
+    )
 
     assert actual_pairs == expected_pairs and len(actual_pairs) == 17, (
         f"unique source/edge closure mismatch: expected={expected_pairs!r} "
@@ -1196,7 +1293,7 @@ def validate_provider(candidate_rows):
         args = row["args"]
         assert isinstance(args, list) and len(args) == 7, f"provider argc mismatch: {row!r}"
         expected_args = [
-            "codex",
+            "workflow",
             "73",
             "medium",
             f"{run_dir}/children/{instance}/prompt.txt",
@@ -1208,7 +1305,7 @@ def validate_provider(candidate_rows):
             f"provider args mismatch: expected={expected_args!r} actual={args!r}"
         )
         decision = json.loads(row["adapter_decision"])
-        assert isinstance(decision, dict) and decision.get("backend") == "codex", (
+        assert isinstance(decision, dict) and decision.get("backend") == "workflow", (
             f"invalid provider decision: {row!r}"
         )
         actual[(source, edge, instance)] += 1
@@ -1246,7 +1343,7 @@ def validate_lifecycle(candidate_rows, residual_leases):
         assert row.get("parent_run_id") == "review-receipt-root", (
             f"lifecycle parent mismatch: {row!r}"
         )
-        assert row.get("backend") == "codex" and row.get("workflow") == "review-pr", (
+        assert row.get("backend") == "workflow" and row.get("workflow") == "review-pr", (
             f"lifecycle routing mismatch: {row!r}"
         )
         assert row.get("phase") == handoff_value["phase"], f"lifecycle phase mismatch: {row!r}"
@@ -1293,6 +1390,7 @@ export PHASE1_AUTHORITY_SHA256_FIXTURE PHASE2_AUTHORITY_SHA256_FIXTURE
 export CLASSIFICATION_PATH CI_LOG_CONTENT CI_LOG_SHA256 CI_REFUSED_AGGREGATE_PATH CONFLICT_PATH
 export failure_class signal_anchor
 export CI_RUN_ID FOCUS CI_CLASSIFICATION_HEAD_SHA CI_BASE_SHA pr_head_branch base_branch BASE_SHA
+export CLASSIFY_INPUTS_CAPTURE
 
 # Exact payload assertions catch wrong callsite variable mappings while retaining
 # hostile quotes, whitespace, backslashes, globs, arrays, dynamic simplify
@@ -1396,16 +1494,33 @@ exact(
         "pr_number": 73,
     },
 )
-exact(
-    f"review-pr-{run_id}-ci-classify-iter3-attempt01",
-    {
-        "pr_number": 73,
-        "run_id": env["CI_RUN_ID"],
-        "head_sha": env["CI_CLASSIFICATION_HEAD_SHA"],
-        "log_content": env["CI_LOG_CONTENT"],
-        "log_sha256": env["CI_LOG_SHA256"],
-    },
+# RETIRED SURFACE (#381), INVERTED -- not dropped. The classify child is
+# refused at plugins/uberdev/commands/review-pr.md:3305 before it can reach a
+# handoff, so this payload is asserted against the closure the production
+# builder at :3285 actually produced (captured off the refusing subshell's EXIT
+# trap), and the handoff is asserted ABSENT. The inline log bytes still have to
+# be the ones captured BEFORE the controller-only source file was replaced.
+classify_instance = f"review-pr-{run_id}-ci-classify-iter3-attempt01"
+if (handoff_root / f"{classify_instance}.json").exists():
+    raise SystemExit(
+        f"retired surface regressed: {classify_instance} reached a handoff despite "
+        "the #381 transport gate"
+    )
+classify_actual = json.loads(
+    Path(env["CLASSIFY_INPUTS_CAPTURE"]).read_text(encoding="utf-8")
 )
+classify_expected = {
+    "pr_number": 73,
+    "run_id": env["CI_RUN_ID"],
+    "head_sha": env["CI_CLASSIFICATION_HEAD_SHA"],
+    "log_content": env["CI_LOG_CONTENT"],
+    "log_sha256": env["CI_LOG_SHA256"],
+}
+if classify_actual != classify_expected:
+    raise SystemExit(
+        f"payload mismatch for review_pr.ci.classify: expected={classify_expected!r} "
+        f"actual={classify_actual!r}"
+    )
 exact(
     f"review-pr-{run_id}-ci-fix-iter3-attempt01",
     {
@@ -1445,6 +1560,9 @@ exact(
     },
 )
 
+# Edge -> risk-signal mapping. `review_pr.ci.classify` stays listed even though
+# #381 retired its dispatch: this is the declared mapping, not an expectation of
+# presence, and the loop below only visits handoffs that actually exist.
 subtask_edges = {
     "review_pr.review.correctness",
     "review_pr.review.silent_failures",
@@ -1667,4 +1785,4 @@ SH
   [ "$EARLY_PROBE_FAILURES" -eq 0 ] || exit 1
 fi
 
-printf 'review-child-inputs: PASS (17 unique source/edge pairs; 22 complete chains, dual simplify focus, lifecycle closed)\n'
+printf 'review-child-inputs: PASS (17 unique source/edge pairs; 21 complete chains + 1 build-only retired edge, dual simplify focus, lifecycle closed)\n'

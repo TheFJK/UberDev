@@ -2,13 +2,29 @@
 
 | Field            | Value                                                                |
 | ---------------- | -------------------------------------------------------------------- |
-| **Status**       | Draft                                                                |
+| **Status**       | Draft — **DORMANT since 2026-08-05 (issue #381)**, see the note below |
 | **Author**       | TheFJK                                                               |
 | **Created**      | 2026-05-06                                                           |
 | **Targets**      | `plugins/uberdev/commands/review-pr.md`, new agents, new SKILL phase |
 | **Supersedes**   | —                                                                    |
 | **Tracking**     | [Issue #76](https://github.com/TheFJK/UberDev/issues/76)             |
 | **Tier**         | Medium (multi-agent, multi-file, contract-affecting)                 |
+
+---
+
+> **AMENDED 2026-08-05 (issue #381) — this RFC's phase has no transport.**
+> `/review-pr` Phase 3 CI health is the capability specified here. #381 deleted
+> the `codex` dispatch backend, the only transport with a provider arm for the
+> `review_pr.ci.*` routed children; `auto` resolves `workflow` unconditionally,
+> and `/review-pr` refuses `wezterm` and `background` for its own children
+> because neither publishes a governed child result artifact. The **probe** half
+> of this RFC still runs and still reports; the **classifier and fixer** halves
+> cannot be dispatched, so a red probe halts at 6c.3 CLASSIFY with
+> `subreason=ci_transport_unsupported` and `--no-ci-fix` is the supported mode.
+> The status stays **Draft** rather than becoming Superseded: nothing replaces
+> the design, and rebuilding Phase 3 Workflow-natively (RFC 0012 §3.1) restores
+> it as written. See the sibling amendment in RFC 0002 for what this does and
+> does not change about the GREEN predicate.
 
 ---
 

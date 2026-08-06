@@ -28,7 +28,7 @@ skills/post-impl-review/SKILL.md
 skills/merge-pipeline/SKILL.md
 skills/merge-pipeline/lib/discover.sh
 
-# --- lib (14 — shared dispatch/config/authority/receipt chain) ---
+# --- lib (15 — shared dispatch/config/authority/receipt chain) ---
 lib/child-dispatch.sh
 lib/agent-dispatch.sh
 lib/dispatch.sh
@@ -36,8 +36,8 @@ lib/config-read.sh
 lib/model_routing.py
 lib/run_manifest.py
 lib/atomic_move.py
-lib/worktree_receipts.py
 lib/code_fixer_contract.py
+lib/review-aggregate.sh
 lib/live-semaphore.sh
 lib/child-receipts.py
 lib/child-inputs.py

@@ -1,56 +1,26 @@
 {
   "schema_version": 1,
-  "policy_version": "2026-07-09",
+  "policy_version": "2026-08-05",
   "release_default_mode": "inherit",
   "default_sandbox": "workspace-write",
   "routes": {
     "economy": {
-      "rank": 0,
-      "codex": {
-        "model": "gpt-5.6-luna",
-        "reasoning_effort": "low",
-        "service_tier": "default"
-      }
+      "rank": 0
     },
     "standard": {
-      "rank": 1,
-      "codex": {
-        "model": "gpt-5.6-terra",
-        "reasoning_effort": "medium",
-        "service_tier": "default"
-      }
+      "rank": 1
     },
     "quality": {
-      "rank": 2,
-      "codex": {
-        "model": "gpt-5.6-sol",
-        "reasoning_effort": "medium",
-        "service_tier": "default"
-      }
+      "rank": 2
     },
     "deep": {
-      "rank": 3,
-      "codex": {
-        "model": "gpt-5.6-sol",
-        "reasoning_effort": "high",
-        "service_tier": "default"
-      }
+      "rank": 3
     },
     "frontier": {
-      "rank": 4,
-      "codex": {
-        "model": "gpt-5.6-sol",
-        "reasoning_effort": "max",
-        "service_tier": "default"
-      }
+      "rank": 4
     },
     "ultra": {
-      "rank": 5,
-      "codex": {
-        "model": "gpt-5.6-sol",
-        "reasoning_effort": "ultra",
-        "service_tier": "default"
-      }
+      "rank": 5
     }
   },
   "aliases": {
@@ -92,6 +62,13 @@
     "release-infrastructure",
     "schema-migration",
     "security"
+  ],
+  "reasoning_efforts": [
+    "low",
+    "medium",
+    "high",
+    "max",
+    "ultra"
   ],
   "fallback_order": [
     "ultra",
@@ -208,12 +185,6 @@
     },
     "plan-writer": {
       "route": "deep",
-      "tier_routes": {
-        "trivial": "deep",
-        "small": "deep",
-        "medium": "frontier",
-        "large": "ultra"
-      },
       "high_risk_route": "ultra",
       "risk_floor": "deep",
       "sandbox_ceiling": "workspace-write",

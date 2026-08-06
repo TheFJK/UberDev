@@ -308,21 +308,28 @@ PY
   request="$(python3 - "$UBERDEV_ROUTING_WORKFLOWS" "$UBERDEV_ROUTING_ROLES" <<PY
 import json, sys
 w, r = map(json.loads, sys.argv[1:])
-print(json.dumps({"backend":"codex","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"adaptive","project_config":{"model_routing":{"workflows":w,"roles":r}}}))
+print(json.dumps({"backend":"workflow","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"project_config":{"model_routing":{"workflows":w,"roles":r}}}))
 PY
 )"
-  decision="$(python3 "$ROOT/plugins/uberdev/lib/model_routing.py" resolve \
-    --policy "$ROOT/plugins/uberdev/policy/model-routing-v1.json" \
-    --catalog "$ROOT/tests/fixtures/model-routing/catalog-gpt-5.6.json" \
-    --input-json "$request")" || exit 1
-  python3 - "$decision" <<PY
-import json, sys
-d = json.loads(sys.argv[1])
-assert d["logical_route"] == "quality"
-assert d["route_source"] == "project-workflow"
-PY
+  # RETIRED SURFACE (#381): the parsed map used to be handed to
+  # model_routing.py resolve, which turned a project-workflow override into a
+  # concrete logical_route. No shipped backend owns the provider invocation any
+  # more, so the live consumer is uberdev_agent_resolve_request and the honest
+  # outcome is a typed refusal, not a fabricated route. The bounded-JSON
+  # normalization above is still the point of R4a; what changed is who reads it.
+  . "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+  if decision="$(uberdev_agent_resolve_request "$request" 2>/dev/null)"; then
+    echo "project override resolved instead of being refused: $decision" >&2
+    exit 1
+  fi
+  err="$(uberdev_agent_resolve_request "$request" 2>&1 >/dev/null || true)"
+  case "$err" in
+    *route_unenforceable*) : ;;
+    *) echo "expected route_unenforceable, got: $err" >&2; exit 1 ;;
+  esac
+  python3 -c "import json,sys; json.loads(sys.argv[1])" "$request"
 '
-[ "$_STATUS" -eq 0 ] && pass "R4a: YAML maps normalize to resolver-compatible bounded JSON data" || fail "R4a: YAML map parsing/resolver handoff: $_LAST_STDERR"
+[ "$_STATUS" -eq 0 ] && pass "R4a: YAML maps normalize to bounded JSON data and a project override is refused, not routed" || fail "R4a: YAML map parsing/refusal handoff: $_LAST_STDERR"
 
 _isolate '
   UBERDEV_MODEL_ROUTING_ROLES='"'"'{"code-reviewer":{"reasoning_effort":"ultra"}}'"'"'
@@ -332,15 +339,27 @@ _isolate '
   request="$(python3 - "$UBERDEV_ROUTING_ROLES" <<PY
 import json, sys
 roles = json.loads(sys.argv[1])
-print(json.dumps({"backend":"codex","workflow":"solve","phase":"review","role":"code-reviewer","task_tier":"medium","risk_signals":[],"routing_mode":"adaptive","project_config":{"model_routing":{"roles":roles}}}))
+print(json.dumps({"backend":"workflow","workflow":"solve","phase":"review","role":"code-reviewer","task_tier":"medium","risk_signals":[],"project_config":{"model_routing":{"roles":roles}}}))
 PY
 )"
-  python3 "$ROOT/plugins/uberdev/lib/model_routing.py" resolve \
-    --policy "$ROOT/plugins/uberdev/policy/model-routing-v1.json" \
-    --catalog "$ROOT/tests/fixtures/model-routing/catalog-gpt-5.6.json" \
-    --input-json "$request" >/dev/null
+  # RETIRED SURFACE (#381): this used to invoke `model_routing.py resolve` and
+  # rely on a zero exit. That CLI is deleted -- and the module is still
+  # executable, so an unchanged invocation would now exit 0 having done nothing
+  # and the case would pass vacuously. The live consumer is the dispatch seam,
+  # and it must refuse a project-supplied reasoning_effort rather than quietly
+  # dropping it. The config-read half above (the effort survives parsing as an
+  # independent field) is unchanged and is still the point of R4b.
+  . "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+  if uberdev_agent_resolve_request "$request" >/dev/null 2>&1; then
+    echo "project reasoning_effort resolved instead of being refused" >&2; exit 1
+  fi
+  err="$(uberdev_agent_resolve_request "$request" 2>&1 >/dev/null || true)"
+  case "$err" in
+    *route_unenforceable*) : ;;
+    *) echo "expected route_unenforceable, got: $err" >&2; exit 1 ;;
+  esac
 '
-[ "$_STATUS" -eq 0 ] && pass "R4b: independent reasoning_effort survives resolver handoff" || fail "R4b: reasoning_effort resolver handoff: $_LAST_STDERR"
+[ "$_STATUS" -eq 0 ] && pass "R4b: independent reasoning_effort survives config parsing and is refused, not dropped" || fail "R4b: reasoning_effort handoff: $_LAST_STDERR"
 
 _isolate '
   UBERDEV_MODEL_ROUTING_WORKFLOWS='"'"'{"solve":{"effort":"extreme"}}'"'"'

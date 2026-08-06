@@ -470,12 +470,19 @@ else:
 PY
 )"
 
+  # RETIRED SURFACE (#381). Every carrier fixture in this file used to be built
+  # with backend:"codex" + routing_mode:"adaptive", which reached the concrete
+  # resolver. Both are gone: `codex` is not in the backend enum and `adaptive`
+  # is refused with route_unenforceable, so a carrier can no longer be sealed
+  # from either. These fixtures are about handoff identity and digest binding,
+  # not routing, so they now use the shape a real carrier has -- backend
+  # `workflow` with no routing_mode. Nothing about what they assert changed.
   WINDOWS_RUN="$WINDOWS_REPO_ID/.uberdev/runs/windows-review-carrier"; mkdir -p "$WINDOWS_RUN"
   WINDOWS_REQUEST="$(jq -cn --arg run "$WINDOWS_RUN" --arg repo "$WINDOWS_REPO_ID" \
-    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+    '{schema_version:1,run_dir:$run,run_id:"windows-review-carrier",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:91,issue_num:91,capacity:6,timeout_s:600}')"
   WINDOWS_DECISION="$(uberdev_agent_resolve_request "$WINDOWS_REQUEST")"
   WINDOWS_METADATA="$(jq -cn --arg repo "$WINDOWS_REPO_ID" \
-    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:91,task_tier:"medium",risk_signals:[]}')"
+    '{run_id:"windows-review-carrier",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:91,task_tier:"medium",risk_signals:[]}')"
   WINDOWS_CONTEXT_OUT="$(uberdev_agent_context_create "$WINDOWS_RUN" "$WINDOWS_REQUEST" "$WINDOWS_DECISION" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$WINDOWS_METADATA" '2026-07-26T00:00:00Z')"
@@ -823,11 +830,11 @@ PY
   [ "$serialized_context" = "$WINDOWS_CONTEXT" ]
   ! _uberdev_child_context_run_dir 'C:\repo\.uberdev\runs\review-1\state\..\context.json' >/dev/null 2>&1
 
-  WINDOWS_EVIDENCE_FUNCTIONS="$TMP/windows-evidence-functions.sh"
-  awk '/^post_review_validated_evidence_complete\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
-    "$POST" >"$WINDOWS_EVIDENCE_FUNCTIONS"
-  . "$WINDOWS_EVIDENCE_FUNCTIONS"
-  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+  # #381: the evidence builder is on disk now (lib/review-aggregate.sh), so the
+  # awk carve-out of a markdown fence is gone. Sourcing the shipped file is
+  # what /review-pr, the skill and this test all do, which is the point.
+  . "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
+  _UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex'
   UBERDEV_CARRIER_BACKEND=codex
   WINDOWS_IDENTITY_PLUGIN_ROOT="$TMP/windows-identity-plugin"
   write_evidence_identity_helper "$WINDOWS_IDENTITY_PLUGIN_ROOT"
@@ -895,10 +902,7 @@ PY
       "$WINDOWS_IDENTITY_DIAGNOSTIC"
   done
 
-  WINDOWS_AGGREGATION_FUNCTIONS="$TMP/windows-aggregation-functions.sh"
-  awk '/^post_review_capture_aggregation_inputs\(\) \{/{active=1} active{print} active && /^\}/{exit}' \
-    "$POST" >"$WINDOWS_AGGREGATION_FUNCTIONS"
-  . "$WINDOWS_AGGREGATION_FUNCTIONS"
+  . "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
   UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
   WINDOWS_AGGREGATION_ROOT="$TMP/windows-aggregation"
   mkdir -p "$WINDOWS_AGGREGATION_ROOT"
@@ -969,9 +973,9 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'confidence: high' 'findin
 ! uberdev_child_validate_phase1_review_result "$TMP/revisions-empty.md"
 ! uberdev_child_validate_phase1_review_result "$TMP/reject-suggestion-only.md"
 uberdev_child_validate_phase1_review_result "$TMP/revisions-blocker.md"
-request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+request="$(jq -cn --arg run "$TMP/run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"review-contract",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:["security"],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600}')"
 decision="$(uberdev_agent_resolve_request "$request")"
-metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
+metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"review-contract",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:1,task_tier:"medium",risk_signals:["security"]}')"
 context_out="$(uberdev_agent_context_create "$TMP/run" "$request" "$decision" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$metadata" '2026-07-10T00:00:00Z')"
@@ -981,9 +985,9 @@ export UBERDEV_RUN_CARRIER_JSON
 REVIEW_CARRIER_JSON="$UBERDEV_RUN_CARRIER_JSON"
 
 mkdir -p "$TMP/simplify-run"
-simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"codex",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+simplify_request="$(jq -cn --arg run "$TMP/simplify-run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"simplify-contract",repository_id:$repo,backend:"workflow",workflow:"simplify",phase:"simplify",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:0,issue_num:0,capacity:6,timeout_s:600}')"
 simplify_decision="$(uberdev_agent_resolve_request "$simplify_request")"
-simplify_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"simplify-contract",repository_id:$repo,workflow:"simplify",backend:"codex",issue_num:0,task_tier:"medium",risk_signals:[]}')"
+simplify_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"simplify-contract",repository_id:$repo,workflow:"simplify",backend:"workflow",issue_num:0,task_tier:"medium",risk_signals:[]}')"
 simplify_context_out="$(uberdev_agent_context_create "$TMP/simplify-run" "$simplify_request" "$simplify_decision" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$simplify_metadata" '2026-07-10T00:00:00Z')"
@@ -1211,9 +1215,9 @@ finally:
     UBERDEV_TEST_PORTABLE_REPARSE_PATH="$portable_manifest" _uberdev_child_manifest_path >/dev/null 2>&1
 
   portable_run="$TMP/portable-run"; mkdir -p "$portable_run"; portable_run="$(cd "$portable_run" && pwd -P)"
-  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"codex",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+  portable_request="$(jq -cn --arg run "$portable_run" --arg repo "$TEST_REPO" '{schema_version:1,run_dir:$run,run_id:"portable-review",repository_id:$repo,backend:"workflow",workflow:"review-pr",phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:1,issue_num:1,capacity:6,timeout_s:600}')"
   portable_decision="$(uberdev_agent_resolve_request "$portable_request")"
-  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"codex",issue_num:1,task_tier:"medium",risk_signals:[]}')"
+  portable_metadata="$(jq -cn --arg repo "$TEST_REPO" '{run_id:"portable-review",repository_id:$repo,workflow:"review-pr",backend:"workflow",issue_num:1,task_tier:"medium",risk_signals:[]}')"
   portable_context_out="$(uberdev_agent_context_create "$portable_run" "$portable_request" "$portable_decision" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$portable_metadata" '2026-07-10T00:00:00Z')"
@@ -1709,10 +1713,10 @@ exercise_parent_review_carrier() {
   local defer_handoff defer_sha256 defer_result defer_status defer_prepared
   mkdir -p "$parent_run"
   request="$(jq -cn --arg run "$parent_run" --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
-    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"workflow",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600}')"
   decision="$(uberdev_agent_resolve_request "$request")"
   metadata="$(jq -cn --arg repo "$TEST_REPO" --arg workflow "$workflow" --arg run_id "parent-$workflow" --argjson issue "$issue" \
-    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"codex",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
+    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"workflow",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
   context_out="$(uberdev_agent_context_create "$parent_run" "$request" "$decision" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$metadata" '2026-07-26T00:00:00Z')"
@@ -1854,16 +1858,25 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 # Duplicate indices, impersonated instances, reused canonical artifacts, and
 # digest replacement must all fail before aggregation. A format repair keeps
 # the original edge/index but may prove itself with the fresh launched instance.
+. "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
 for EVIDENCE_FUNCTION in \
   post_review_validated_evidence_complete \
-  post_review_capture_aggregation_inputs; do
-  awk -v function_name="$EVIDENCE_FUNCTION" \
-    '$0 == function_name "() {" {active=1} active{print} active && /^}/{exit}' \
-    "$POST" >>"$TMP/evidence-runtime.sh"
+  post_review_capture_aggregation_inputs \
+  post_review_write_aggregate_v2; do
+  if ! declare -F "$EVIDENCE_FUNCTION" >/dev/null; then
+    echo "review-child-handoff: lib/review-aggregate.sh did not define $EVIDENCE_FUNCTION" >&2
+    exit 1
+  fi
 done
-. "$TMP/evidence-runtime.sh"
+# The skill must SOURCE that file, not redefine the functions: a second copy is
+# a second set of proofs, and only one of them gets maintained.
+if grep -Fq 'post_review_validated_evidence_complete() {' "$POST"; then
+  echo "review-child-handoff: post-impl-review SKILL.md redefines an on-disk evidence function" >&2
+  exit 1
+fi
+grep -Fq '. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh"' "$POST"
 UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|claude-bg|wezterm|background|codex'
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|wezterm|background|codex'
 UBERDEV_CARRIER_BACKEND=codex
 REVIEW_EDGES=("${ROSTER_EDGES[@]}")
 EVIDENCE_ROOT="$TMP/evidence"
@@ -1976,7 +1989,7 @@ evidence_carrier_config_must_fail() {
 evidence_carrier_config_must_fail invalid-backend-policy \
   'auto|codex|codex' codex
 evidence_carrier_config_must_fail invalid-expected-backend \
-  'auto|claude-bg|wezterm|background|codex' auto
+  'auto|wezterm|background|codex' auto
 
 WRONG_BACKEND_LAUNCHED="$EVIDENCE_ROOT/wrong-backend-initial"
 WRONG_BACKEND_STATUS="$EVIDENCE_ROOT/children/review-1-attempt01/status.json"
@@ -2664,5 +2677,154 @@ grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"
 ! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
 ! grep -En 'format_repair' "$POST"
 grep -Eq 'format_retry' "$POST"
+
+# === #381 STEP 1: a Workflow-dispatched review wave can prove its own evidence ===
+#
+# The six children here carry NO dispatch receipt and NO pid, because a
+# Workflow() call issues neither. Each is bound instead by a single-use nonce
+# the controller minted BEFORE the call and the child echoed into status.json.
+# Everything else in the evidence builder is unchanged and must still hold:
+# the children-root/instance path equality, the controller-written 0o400
+# validated-result.md, digest recapture, the three-distinct-identity rule, and
+# the snapshot + trusted-ledger publish/recapture round trips.
+# Canonical from the start: the binding canonicalizes every path it stores
+# (_absolute_input resolves symlinks, so /var becomes /private/var on macOS) and
+# the evidence builder resolves the children root the same way. A fixture that
+# recorded the unresolved spelling would fail `unsafe-artifact` for a reason
+# that has nothing to do with the proof under test.
+mkdir -p "$TMP/workflow-evidence/children"
+WF_EVIDENCE_ROOT="$(cd "$TMP/workflow-evidence" && pwd -P)"
+WF_CONTRACT="$ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+WF_SLUGS=(correctness silent-failures types comments tests general)
+: >"$WF_EVIDENCE_ROOT/initial"
+: >"$WF_EVIDENCE_ROOT/validated"
+: >"$WF_EVIDENCE_ROOT/repair"
+wf_index=0
+for WF_EDGE in "${ROSTER_EDGES[@]}"; do
+  wf_index=$((wf_index + 1))
+  WF_INSTANCE="${WF_SLUGS[$((wf_index - 1))]}-iter01"
+  WF_CHILD="$WF_EVIDENCE_ROOT/children/$WF_INSTANCE"
+  mkdir -p "$WF_CHILD"
+  printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+    "confidence: high" '```' >"$WF_CHILD/result.md"
+  # A fresh nonce per child: a single-use token reused across two children would
+  # bind neither.
+  WF_NONCE="$(python3 -I -B -c 'import sys;print(("%02x"%int(sys.argv[1]))*32)' "$wf_index")"
+  WF_BINDING="$(python3 -I -B "$WF_CONTRACT" bind-workflow-launch \
+    --edge-id "$WF_EDGE" --instance-id "$WF_INSTANCE" --run-nonce "$WF_NONCE" \
+    --result-path "$WF_CHILD/result.md" --status-path "$WF_CHILD/status.json" \
+    --working-dir "$WF_EVIDENCE_ROOT")"
+  python3 -I -B - "$WF_CHILD/status.json" "$WF_NONCE" "$WF_BINDING" <<'PY'
+import json,sys
+path,nonce,binding=sys.argv[1:]
+bound=json.loads(binding)
+document={"backend":"workflow","state":"completed","exit_code":0,"run_nonce":nonce,
+          "workspace_mode":bound["workspace_mode"],"worktree":bound["worktree"],
+          "branch":bound["branch"],"result":bound["result_path"]}
+open(path,"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  # The 0o400 canonical artifact is written by the CONTROLLER, not by any child
+  # of any backend -- the same helper /review-pr already has in scope.
+  WF_VALIDATED="$WF_CHILD/validated-result.md"
+  WF_DIGEST="$(uberdev_child_validate_phase1_review_result \
+    "$WF_CHILD/result.md" '["README.md"]' "$WF_VALIDATED")"
+  [[ "$WF_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+  python3 -I -B - "$WF_EVIDENCE_ROOT/initial" "$WF_EDGE" "$wf_index" "$WF_INSTANCE" \
+    "$WF_BINDING" "$WF_CHILD/result.md" "$WF_CHILD/status.json" <<'PY'
+import json,sys
+ledger,edge,index,instance,binding,result,status=sys.argv[1:]
+row={"edge":edge,"index":int(index),"instance":instance,"binding":binding,
+     "result":result,"status":status}
+open(ledger,"a").write(json.dumps(row,separators=(",",":"))+"\n")
+PY
+  python3 -I -B - "$WF_EVIDENCE_ROOT/validated" "$WF_EDGE" "$wf_index" "$WF_INSTANCE" \
+    "$WF_VALIDATED" "$WF_DIGEST" <<'PY'
+import json,sys
+ledger,edge,index,instance,result,digest=sys.argv[1:]
+row={"edge":edge,"index":int(index),"instance":instance,"result":result,"sha256":digest}
+open(ledger,"a").write(json.dumps(row,separators=(",",":"))+"\n")
+PY
+done
+
+UBERDEV_CARRIER_BACKEND=workflow
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background|codex'
+WF_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
+  "$WF_EVIDENCE_ROOT/validated" 6 "$WF_EVIDENCE_ROOT/initial" \
+  "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT")"
+[ -f "$WF_TRUSTED_LEDGER" ]
+WF_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs "$WF_TRUSTED_LEDGER" 6)"
+python3 -I -B - "$WF_AGGREGATION_INPUT" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert set(value)=={"schema_version","ledger_sha256","rows"},value
+assert value["schema_version"]==1 and len(value["rows"])==6,value
+assert value["rows"][0]["content"].startswith("```yaml\nverdict: APPROVE"),value
+PY
+
+# Every fail-closed probe below must still refuse, or the binding shape bought a
+# hole the receipt shape does not have.
+wf_evidence_must_fail() {
+  local label="$1" expected_class="$2" probe_rc
+  set +e
+  post_review_validated_evidence_complete "$WF_EVIDENCE_ROOT/validated" 6 \
+    "$WF_EVIDENCE_ROOT/initial" "$WF_EVIDENCE_ROOT/repair" "$WF_EVIDENCE_ROOT" \
+    >"$WF_EVIDENCE_ROOT/$label.stdout" 2>"$WF_EVIDENCE_ROOT/$label.stderr"
+  probe_rc=$?
+  set -e
+  if [ "$probe_rc" -ne 2 ]; then
+    echo "review-child-handoff workflow evidence: $label returned rc=$probe_rc expected=2" >&2
+    exit 1
+  fi
+  if ! grep -Fq "post_review_evidence_failure class=$expected_class" \
+      "$WF_EVIDENCE_ROOT/$label.stderr"; then
+    echo "review-child-handoff workflow evidence: $label wrong class ($(cat "$WF_EVIDENCE_ROOT/$label.stderr"))" >&2
+    exit 1
+  fi
+}
+
+# A fabricated pid must never buy an accept.
+WF_FIRST_STATUS="$WF_EVIDENCE_ROOT/children/correctness-iter01/status.json"
+cp "$WF_FIRST_STATUS" "$WF_EVIDENCE_ROOT/first-status.bak"
+python3 -I -B - "$WF_FIRST_STATUS" <<'PY'
+import json,sys
+document=json.load(open(sys.argv[1]))
+document["pid"]="4242"
+open(sys.argv[1],"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+wf_evidence_must_fail fabricated-pid roster-mismatch
+cp "$WF_EVIDENCE_ROOT/first-status.bak" "$WF_FIRST_STATUS"
+
+# A nonce the controller never minted binds nothing.
+python3 -I -B - "$WF_FIRST_STATUS" <<'PY'
+import json,sys
+document=json.load(open(sys.argv[1]))
+document["run_nonce"]="b"*64
+open(sys.argv[1],"w").write(json.dumps(document,sort_keys=True,separators=(",",":"))+"\n")
+PY
+wf_evidence_must_fail forged-nonce roster-mismatch
+cp "$WF_EVIDENCE_ROOT/first-status.bak" "$WF_FIRST_STATUS"
+
+# The carrier backend equality survives the shape change.
+UBERDEV_CARRIER_BACKEND=codex
+wf_evidence_must_fail carrier-backend-mismatch roster-mismatch
+UBERDEV_CARRIER_BACKEND=workflow
+
+# One dispatcher per wave: a ledger mixing a receipt row with binding rows
+# describes six children that did not come from one fanout.
+python3 -I -B - "$WF_EVIDENCE_ROOT/initial" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+first=rows[0]
+receipt=json.dumps({"schema_version":1,"edge_id":first["edge"],
+                    "instance_id":first["instance"],"backend":"workflow",
+                    "handle":"4242","state":"running",
+                    "result_file":first["result"],"status_file":first["status"]},
+                   sort_keys=True,separators=(",",":"))
+rows[0]={"edge":first["edge"],"index":first["index"],"instance":first["instance"],
+         "receipt":receipt,"result":first["result"],"status":first["status"]}
+open(sys.argv[1],"w").write("".join(
+    json.dumps(row,separators=(",",":"))+"\n" for row in rows))
+PY
+wf_evidence_must_fail mixed-launch-shape roster-mismatch
 
 echo 'review-child-handoff: PASS'

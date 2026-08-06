@@ -4,6 +4,255 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- **Isolated child worktrees are no longer leaked by the `background` and
+  `wezterm` backends** (#381). Both arms created a dispatcher-owned worktree
+  unconditionally (`lib/dispatch.sh`) and never removed it; the only teardown in
+  the tree lived inside the codex arm's receipt transaction and was unreachable
+  from either. A routed child — `workspace_mode` defaults to `isolated`, and
+  `CHILD_OWNED` is set purely on `agent_id`, with `background`/`wezterm` both
+  admitted by `_uberdev_child_backend_cancellation_supported` — therefore left a
+  worktree **and** its branch behind permanently, once per dispatch.
+
+  A backend-neutral `_uberdev_dispatch_cleanup_child_worktree` now removes the
+  worktree and its branch when a child-owned isolated dispatch terminalizes, on
+  both surviving detached backends. It keeps the codex transaction's preservation
+  guards (registry classification, symlink/ownership validation, clean tree,
+  unmoved HEAD): work is never force-deleted, and a teardown that cannot safely
+  run is **reported** — stderr on the child log, provider exit 74, `failed`
+  status — never swallowed into a `completed`. A top-level `/solve` worktree
+  (`CHILD_OWNED=0`) is untouched: that one is the deliverable workspace.
+  `tests/dispatch-child-worktree-teardown.test.sh` observes a real worktree and
+  branch disappearing from a scratch repository.
+
+  **The SETUP/LAUNCH door is closed too.** The teardown above covers a child
+  that started and then finished. Every dispatcher-side failure *between* a
+  successful `git worktree add` and a running child had no teardown at all, on
+  either backend — `prompt_read`, `python_launcher` and `pid_target_unsafe` on
+  `background`; `worktree_path`, `native_path`, `prompt_read`, `python_launcher`
+  and a failed `wezterm cli spawn` on `wezterm`. A mux that is not up is
+  routine, so that last one was the most-travelled of them. Because the leaked
+  path derives purely from `ISSUE_NUM`, each leak also **blocked the next
+  dispatch of the same issue** rather than merely accumulating. A new
+  `_uberdev_dispatch_fail_after_worktree` now runs the same guarded transaction
+  (terminal `setup_failed`) at each of those sites; a teardown that cannot
+  safely run is reported on stderr, emits a new `dispatch_cleanup_failed` audit
+  naming the worktree and branch, and returns **74** instead of the plain setup
+  rc. The `dispatch` phase on `background` is deliberately excluded — the
+  wrapper is already launched there and owns its own teardown.
+
+  **The wezterm pane wrapper now arms an `EXIT` trap**, not only
+  `HUP INT TERM`. Its `write_status running null || exit 126` — and every other
+  bare `exit` before the finalizer — previously terminated the pane with the
+  worktree already on disk and nothing to remove it, an asymmetry with the
+  background wrapper, which has armed `EXIT` before the same call all along.
+  The one window that stays uncovered is the `. "$DISPATCH_LIB"` source itself:
+  the preservation guards live in that file, so before it loads there is
+  nothing safe to call. Both wrappers now **name the worktree on stderr** there
+  rather than force-removing it guardless or exiting silently.
+
+### Removed
+
+- **BREAKING — the `claude-bg` dispatch backend is deleted** (#381, RFC 0015 §7
+  amendment 2026-08-05). `--backend=claude-bg` is no longer a deprecation
+  warning: it is an **enum error** (`lib/solve-launcher.sh`,
+  `error: --backend='claude-bg' not in {auto,workflow,wezterm,background}`).
+  `_uberdev_dispatch_claude_bg` is gone, and with it five surfaces that each had
+  exactly one consumer: the `claude-bootstrap` long-poll + ownerless-generation
+  reclaim protocol in `lib/dispatch.sh`'s git-metadata mutex; `BG_PROMPT_MODE`;
+  the `_uberdev_agent_claude_probe` liveness classifier; the
+  unattended-permissions preflight; and the `provider_probe_failed` /
+  `provider_cancel_failed` watcher-error kinds. (`provider_cancel_unconfirmed`,
+  the *reason* the retired kind used to carry, is still live — it is now hosted
+  under `terminal_finalize_failed`, and `tests/child-wait.test.sh` drives the
+  waiter on it in that shape.) `tests/dispatch-claude-bg.test.sh` is deleted rather than
+  retargeted, and the S4a/S4b/S4c deprecation guards in
+  `tests/solve-fleet-workflow.test.sh` are **inverted into tombstones** — the
+  surface must now be ABSENT. No check that still guards live code was relaxed.
+
+  **Migration: `--backend=background`.** Same shape — detached, survives the
+  parent, PID-tracked, status + result files — without the second agent surface
+  that motivated RFC 0015. It is what the No-Workflow fallback sections name.
+
+  **This lands ahead of the published removal target.** The v0.41.0 entry below
+  (2026-07-30) said "Removal target v1.0.0"; that promise is **retracted**, and
+  the entry now carries a pointer here. The evidence that moved it: `workflow`
+  shipped and stayed shipped across `/solve`, `/turbo`, `/goal`, and then
+  `/review-pr` and `/simplify` — the last two workflows that structurally
+  required a detached transport. With those resolving `workflow`, `auto` had
+  already been forbidden from reaching `claude-bg`, so it was the transport that
+  nothing selected and nothing required. Deleting it five days early is a
+  breaking change taken deliberately, on that evidence, and it is the reason
+  this release is called out here rather than only in the RFC.
+
+- **BREAKING — adaptive per-rank model routing is retired as unenforceable**
+  (#381, RFC 0013 §0 amendment 2026-08-05). With the `codex` backend gone,
+  UberDev no longer owns any provider invocation: `workflow`, `wezterm` and
+  `background` children all inherit the ambient model and reasoning effort, so a
+  resolved (model, reasoning_effort) pair was a value the resolver could compute
+  and then never apply. Rather than ship a routing engine no dispatch path can
+  enter, it is deleted.
+
+  `lib/model_routing.py` loses `resolve_route`, `fallback_route`,
+  `validate_catalog`, the whole precedence/provenance/shadow/fallback machinery
+  and the `resolve` / `fallback` / `validate-catalog` JSON CLI — 1732 lines down
+  to ~350, library-only. `policy/model-routing-v1.json` loses the per-route
+  `codex` provider block (a route row is now a capability **rank** and nothing
+  else) and `plan-writer.tier_routes`, which only the concrete resolver read.
+  `lib/agent-dispatch.sh` loses the router import, the policy load, the
+  synthesised catalog and the injectable `UBERDEV_MODEL_CATALOG_FILE` seam.
+
+  **The refusal is deliberate, not a downgrade to silence.** A request naming
+  `explicit_route`, `explicit_model`, `explicit_effort`, a non-`default` service
+  tier, `routing_mode: adaptive`, a forced parent, or any project/environment
+  role/workflow override fails with the typed code `route_unenforceable`. A user
+  who asks for Sol-Ultra is told it cannot be honoured instead of believing it
+  was applied.
+
+  **Project `model_routing:` validation is kept and still works.** It blocked on
+  one thing: `lib/config-read.sh` built its accepted reasoning-effort set by
+  scraping the deleted provider blocks. That vocabulary is now **declared** as a
+  top-level `reasoning_efforts` key in the policy. The accepted tokens are
+  byte-identical to before (`low`, `medium`, `high`, `max`, `ultra`) — only the
+  source moved from derived to declared — so a typo'd effort or unknown role is
+  still caught at config-read time.
+
+  **Still live:** `load_policy`, `_validate_policy` and `classify_minimum_route`
+  (the logical floor classifier, reached from `lib/config-read.sh`), plus the
+  route/alias vocabulary `lib/solve_triage.py` validates `--route=` against.
+
+  **BREAKING for custom policies:** a `UBERDEV_ROUTING_POLICY_FILE` written
+  against the old schema now **fails closed** in `_validate_policy`.
+  `policy_version` is bumped `2026-07-09` → `2026-08-05`.
+
+  **Coverage cost, stated rather than absorbed:** `tests/model-routing.test.sh`
+  drops from ~562 checks to 314. Lost with the engine: concrete pair selection
+  per route/alias/tier and every field-source provenance label, `forced` /
+  `forced-parent` inheritance and `route_conflict`, `route_below_risk_floor`,
+  shadow mode and its `adaptive_proposal`, `ignored_sources` / `ignored_fields`
+  precedence, sandbox selection from override entries, catalog availability
+  fallback and its `fallback_chain`, and CLI byte-determinism. Each retargeted
+  file names its own loss inline; `tests/fixtures/model-routing/catalog-*.json`
+  and `precedence-cases.json` are deleted.
+
+- **BREAKING — the `codex` dispatch backend is deleted** (#381).
+  `--backend=codex` is now an enum error, `auto` has exactly one answer
+  (`workflow`) on every host and OS class, and the two Codex-environment escapes
+  that used to pre-empt the resolver (`CODEX_HOME` set; `claude` absent with
+  `codex` present) are gone with no replacement. Deleted with it:
+  `_uberdev_dispatch_codex` and its whole worktree-receipt transaction family in
+  `lib/dispatch.sh`, `lib/worktree_receipts.py`, and the `codex` arms of the
+  cancellation path, the provider boundary, and the run-artifact naming switch.
+  `--effort=ultra` was an exact Codex route field, so it is now refused
+  unconditionally rather than "unless the backend is codex".
+
+  **BREAKING consequence — `/review-pr` Phase 3 CI classification and the CI
+  fixers are UNAVAILABLE.** `review_pr.ci.*` are routed children and
+  `lib/dispatch.sh` has no `workflow` provider arm for them (RFC 0012 §3.1, "Not
+  built in P2"); the `codex` backend was the only arm that could run them, and
+  the two remaining detached backends are refused by
+  `uberdev_dispatch_preflight_backend` because neither publishes a governed
+  child result artifact. A **green** CI probe still completes normally and
+  reaches the trust anchor; a **red** one halts loudly at 6c.3 CLASSIFY with
+  `subreason=ci_transport_unsupported`. **`--no-ci-fix` is the supported mode**
+  until Phase 3 is rebuilt Workflow-natively. This is a capability the release
+  no longer has, not a configuration an operator can fix — see
+  `commands/review-pr.md` §6c.
+
+  **`wezterm|background` are still refused for `/review-pr` and `/simplify`.**
+  Only the `codex) ;;` arm was removed from that preflight case; the live
+  refusal for the two remaining selectable detached transports stays, so
+  `/review-pr --backend=background` is still rejected rather than silently
+  admitted.
+
+  **Coverage cost, stated rather than absorbed:** `tests/worktree-receipts.test.sh`
+  was the only native-Windows runtime coverage for dispatcher-owned worktree
+  teardown. Its successor,
+  `tests/dispatch-child-worktree-teardown.test.sh`, is declared Unix-only, so the
+  `ci-wiring` W7 invariant now requires that teardown on Linux and macOS only.
+  The teardown *code* remains portable; the *fixture* is not.
+
+  **Coverage restored rather than lost:** that same deletion also removed the
+  only direct coverage of `lib/atomic_move.py`, which is **not** codex-scoped —
+  it still ships, is still required by `tools/prkit/manifest.txt`, and is loaded
+  by `lib/code_fixer_contract.py` and `lib/planning_research_output.py` for every
+  artifact publication. The ~80 atomic-move-only lines are ported into a new
+  `tests/atomic-move.test.sh` (11 assertions, wired into the Linux, Windows and
+  macOS jobs), covering no-overwrite semantics and non-mutation on collision,
+  `_native_call` errno normalization, cross-parent refusal,
+  `require_atomic_rename_noreplace_support()` failing closed, and the
+  `_windows_move_noreplace` / `_mapped_windows_error` family.
+
+- **BREAKING — the Codex CLI distribution is retired** (#381). The entire `codex/`
+  tree (225 files: the `uberdev-codex` native plugin, the 44 `codex/agents/*.toml`
+  subagents, `install-codex.sh`, and `codex/tools/`) is deleted, along with
+  `.agents/plugins/marketplace.json` and
+  `skills/using-uberdev/references/codex-tools.md`. It was generated output —
+  `codex/README.md` documented six idempotent regeneration commands and the `lib`
+  trees were byte-identical to `plugins/uberdev/lib` — so nothing unique was lost,
+  but UberDev no longer installs into the OpenAI Codex CLI at all.
+
+  (This entry originally added "the `codex` DISPATCH BACKEND is unaffected". It
+  no longer is — the next entry deletes it.)
+
+  **Uninstalling an existing Codex install.** The deleted installer shipped a
+  tested `--uninstall` mode that handles all of this correctly — the
+  marker-gated skill walk, both primer files, and failure reporting. Prefer it:
+
+  ```bash
+  git show 24fe6b1^:codex/install-codex.sh > /tmp/install-codex.sh
+  bash /tmp/install-codex.sh --uninstall
+  ```
+
+  (`24fe6b1` is the deletion commit — `git log --diff-filter=D -1 --
+  codex/install-codex.sh` finds it in any clone — and `^` is the last tree that
+  still had the file.)
+
+  By hand, these are the **four** artifact families the installer wrote — the
+  earlier edition of this entry said three and omitted the first, which is the
+  part Codex actually loads:
+
+  ```bash
+  # 1. the managed skills, MARKER-GATED -- other tools install into this
+  #    directory, so never `rm -rf ~/.agents/skills/*`
+  for d in ~/.agents/skills/*/; do
+    [ -f "$d/.uberdev-codex-managed" ] && rm -rf "$d"
+  done
+  # 2. the subagent definitions
+  rm -f ~/.codex/agents/uberdev-*.toml
+  # 3. the plugin tree
+  rm -rf ~/.codex/plugins/uberdev-codex
+  # 4. the primer block, in BOTH files -- the installer writes whichever exists
+  #    and a user may create or remove the override between install and uninstall
+  # then edit ~/.codex/AGENTS.md and ~/.codex/AGENTS.override.md and delete the
+  # uberdev-codex-primer block from each
+  ```
+
+  Removing the runtime while leaving the ~39 managed skills live in the session
+  is the worst half-state available, which is why the skill walk is step 1.
+
+  Also run `codex plugin marketplace remove prkit` / `uberdev` if you added the
+  Codex-native marketplace entry.
+
+### Changed
+
+- `lib/bump-version.sh` and `skills/merge-pipeline/lib/release-anchor.sh` now own
+  **six** version surfaces, not seven — `codex/uberdev-codex/.codex-plugin/plugin.json`
+  is gone. `tests/merge.test.sh` M98.ssot still asserts the two lists agree.
+- `tools/prkit/` no longer emits a Codex port: the `codex` stage,
+  `manifest-codex.txt`, the four `templates/codex-*.tmpl` scaffolds and
+  `verify.sh`'s `CODEX_REQUIRED` set are removed, and the generated repo's
+  `ci.yml` drops its TOML step. RFC 0014 §14's "mandatory native Codex port"
+  clause is **superseded** — see the dated note in that RFC.
+- `tests/contract_markers.py` walks **one** tree. Mirror parity used to be
+  structural (`SCAN_ROOTS`/`MIRROR_PAIR` + `expected_total = len(paths) * 2`);
+  the guard is now "every marked site agrees *within* `plugins/uberdev/`" and the
+  path-multiset ratchet is the only structural anti-vacuity device left. The
+  module docstring states the weakening explicitly and records how to restore it.
+
 ## [0.42.9] — 2026-08-01
 
 ### Added
@@ -292,7 +541,9 @@ _Solved end-to-end by the Workflow-native `/ubergoal` fleet (RFC 0015): claim �
 
 ### Deprecated
 
-- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. Removal target v1.0.0. `wezterm`, `background` and `codex` remain fully supported explicit choices, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. ~~Removal target v1.0.0.~~ ~~`wezterm`, `background` and `codex` remain fully supported explicit choices~~, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+
+  > **RETRACTED (#381, Unreleased).** `claude-bg` was deleted ahead of the v1.0.0 target — see the `claude-bg` entry under `## Unreleased` `### Removed`. `codex` was deleted in the same issue and is likewise no longer a supported choice; `wezterm` and `background` are.
 
 ### Tests
 

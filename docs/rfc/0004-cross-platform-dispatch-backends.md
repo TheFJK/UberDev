@@ -81,7 +81,7 @@ Resolution preference order:
 - **`auto` + WSL2** → `claude-bg` (it is Linux; `claude --bg` is native and reliable there).
 - **Explicit `--backend=X`** → use `X`; preflight still validates `X` is usable on this host and **hard-errors** if not (the user asked for `X` specifically — no silent downgrade).
 
-`claude-bg` is deliberately **absent from the Windows `auto` chain** (D8): `claude agents` was deadlocking on Windows as recently as v2.1.142 (five days before this RFC). It remains forceable via `--backend=claude-bg` for users on v2.1.144+ who want Agent View.
+`claude-bg` is deliberately **absent from the Windows `auto` chain** (D8): `claude agents` was deadlocking on Windows as recently as v2.1.142 (five days before this RFC). ~~It remains forceable via `--backend=claude-bg` for users on v2.1.144+ who want Agent View.~~ (Backend deleted in #381 — see §3.5.)
 
 ### 3.4 `lib/dispatch.sh` — code structure
 
@@ -94,6 +94,12 @@ A new sourced library, mirroring `lib/config-read.sh` (sourced never executed; i
 `solve-pipeline/SKILL.md` Step 5b' sources `lib/dispatch.sh` and calls `uberdev_dispatch_one` inside the existing wave-batching loop, replacing the inline `case "$BG_PROMPT_MODE"`. The `argv`/`file`/`stdin` prompt sub-modes move *inside* `_uberdev_dispatch_claude_bg`, preserved verbatim. This keeps the 66 KB SKILL.md from growing and makes each backend independently shape-checkable — exactly as `config-read.sh` is tested by `config-override.test.sh`.
 
 ### 3.5 The `claude-bg` backend (current behaviour, formalised)
+
+> **SUPERSEDED 2026-08-05 by RFC 0015 §7 (as amended).** This backend and
+> `_uberdev_dispatch_claude_bg` are deleted. The section is kept for the
+> historical record; nothing in it describes shipping code. The rest of
+> RFC 0004 — §3.6 `wezterm`, §3.7 `background`, the receipt and supervision
+> contracts — is unaffected and stays canonical.
 
 Today's dispatch lifted verbatim into `_uberdev_dispatch_claude_bg`: the `case "$BG_PROMPT_MODE" in file|stdin|argv` switch, `--worktree solve-issue-N`, the `env "${BG_TURBO_ENV[@]}"` prefix, `"${PERM_FLAG[@]}" "${EFFORT_FLAG[@]}"`, the `timeout`/`gtimeout` wrap, the `backgrounded · <id>` session-id extraction, and the `agent_dispatched` audit event. **No behaviour change** — a pure extract-to-function refactor. macOS default; Windows-capable on v2.1.144+ but kept out of the Windows `auto` chain (§3.3, D8).
 
@@ -160,7 +166,7 @@ Backend-independent — the pipeline is bash and must run under Git Bash on nati
 | native Windows, no Git Bash | Phase A fails fast: "install Git for Windows, or use WSL2". |
 | `background`: `git worktree add` fails for an issue | That dispatch fails (recorded in `DISPATCH_FAILED`); siblings proceed; claim rolled back — today's per-issue failure path. |
 | repo under `/mnt/c` in WSL2 | Phase A warning (9P slowness); proceed. |
-| `--backend=claude-bg` on native Windows < v2.1.144 | Phase A note: `claude --bg` may be gated; suggest `--backend=background` or an upgrade. |
+| ~~`--backend=claude-bg` on native Windows < v2.1.144~~ (backend deleted, #381 — see §3.5) | Phase A note: `claude --bg` may be gated; suggest `--backend=background` or an upgrade. |
 | mixed backends mid-fanout | Forbidden — preflight resolves once and commits for the whole batch. |
 
 ## 4. File impact summary
@@ -231,6 +237,6 @@ None. The Windows-support strategy, the three-backend set, the fallback chain, a
 | D5 | Code structure | **`lib/dispatch.sh`** — one sourced module: preflight + fallback resolver + three backend functions. | Author — v0.22.0 untested-code lesson + the `config-read.sh` precedent. |
 | D6 | Opt-in surface | New `--backend=` flag + `dispatch_backend:` config key; the deprecated `--terminal=` is **not** repurposed. | Author. |
 | D7 | `auto` resolution order | macOS `[wezterm, claude-bg]`; native Windows `[wezterm, background]`; WSL2 `[claude-bg]`. | Author — from the WezTerm same-OS-mux constraint. |
-| D8 | `claude-bg` on Windows | **Out of the Windows `auto` chain**; forceable via `--backend=claude-bg`. | Author — `claude agents` was deadlocking on Windows as recently as v2.1.142. |
+| D8 | `claude-bg` on Windows | ~~**Out of the Windows `auto` chain**; forceable via `--backend=claude-bg`.~~ Backend deleted in #381 — see §3.5. | Author — `claude agents` was deadlocking on Windows as recently as v2.1.142. |
 | D9 | Published design artifact | This RFC (`docs/rfc/0004-…`). The brainstorm default `docs/uberdev/specs/` is gitignored — mirrors RFC 0003 D9. | Author. |
 | D10 | Windows CI | Run the shape-check suite on `windows-latest` under Git Bash (`shell: bash`). | Author. |

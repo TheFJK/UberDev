@@ -436,8 +436,7 @@ fi
 echo
 echo "== run manifest: native Windows filesystem routing ignores mutable owner-depth models =="
 
-if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
-    "$REPO_ROOT/codex/uberdev-codex/lib/run_manifest.py" <<'PY'
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
 import importlib.util,pathlib,sys,tempfile
 from unittest import mock
 
@@ -953,13 +952,16 @@ PY
     [ ! -e "$cancel_calls" ]
     ! _uberdev_dispatch_numeric_supervision_supported codex
     ! _uberdev_dispatch_numeric_supervision_supported background
-    _uberdev_dispatch_numeric_supervision_supported claude-bg
+    _uberdev_dispatch_numeric_supervision_supported wezterm
     _uberdev_dispatch_numeric_supervision_supported wezterm
     # RFC 0015: `workflow` spawns no OS process, so the numeric-supervision gate
     # does not apply to it — this is what makes native Windows a first-class
     # host without WezTerm.
     _uberdev_dispatch_numeric_supervision_supported workflow
-    _uberdev_dispatch_codex_available() { return 0; }
+    # #381: the `_uberdev_dispatch_codex_available() { return 0; }` stub that
+    # sat here is gone with the function. It was inert, and it implied `codex`
+    # was rejected below only because native Windows cannot supervise it —
+    # `codex` is now rejected everywhere, by the enum, available binary or not.
     for rejected_backend in codex background; do
       unset UBERDEV_RESOLVED_BACKEND
       UBERDEV_DISPATCH_BACKEND_REQUESTED="$rejected_backend"

@@ -1,6 +1,6 @@
 ---
 name: solve-fleet
-description: Workflow-native per-issue solver fleet backing /uberdev:solve and /uberdev:turbo. Not invoked directly — lib/solve-launcher.sh emits the args envelope with backend=workflow and the command files mandate the Workflow call into skills/solve-fleet/workflow.js. RFC 0015 (the claude-bg retirement).
+description: Workflow-native per-issue solver fleet backing /uberdev:solve and /uberdev:turbo. Not invoked directly — lib/solve-launcher.sh emits the args envelope with backend=workflow and the command files mandate the Workflow call into skills/solve-fleet/workflow.js. RFC 0015 (the detached-session retirement).
 model: inherit
 ---
 
@@ -12,9 +12,9 @@ is not a second pipeline: `solve-pipeline` still owns the whole user-facing
 lifecycle (flags, triage, claims). This is only the **transport** — the thing
 that replaced detached `claude --bg` sessions (RFC 0015).
 
-## Why this replaced claude-bg
+## Why this replaced the detached `claude --bg` transport
 
-`claude-bg` dispatched each issue as a detached `claude --bg` session. Those
+That backend dispatched each issue as a detached `claude --bg` session. Those
 sessions:
 
 - live in a **separate agent surface** the user has to switch to and poll —
@@ -27,8 +27,11 @@ sessions:
 The Workflow runtime gives the same parallelism with a live `/workflows`
 progress tree, deterministic control flow with real counters, structured
 per-issue returns, and **no second surface**. `auto` therefore resolves to
-`workflow` on every Claude host. `claude-bg` remains selectable with an explicit
-`--backend=claude-bg` and emits a deprecation notice; removal target **v1.0.0**.
+`workflow` on every Claude host. The detached `claude --bg` backend was first
+deprecated and then **deleted** once /review-pr and /simplify resolved
+`workflow` too and nothing on any default path could still reach it (RFC 0015
+§7 as amended). `codex` was deleted with it in the same issue. `background`
+and `wezterm` remain as the explicit detached transports.
 
 ## The leaf constraint (why the design phases live in the script)
 
@@ -51,10 +54,10 @@ would vanish (the artifact path-leak class this project has hit before).
 
 | Loss | Detail | Escape hatch |
 |---|---|---|
-| Survive-the-parent | closing the session, `/clear` or a compact kills every in-flight solver | `--backend=claude-bg` |
-| Per-child model / effort / permission tier | the Workflow API has no per-agent effort or permission option, so solvers inherit the **session's** model, effort and tier. `/turbo --auto`'s bypass is no longer scoped to children. | raise the session's own settings, or `--backend=claude-bg` |
+| Survive-the-parent | closing the session, `/clear` or a compact kills every in-flight solver | `--backend=background` |
+| Per-child model / effort / permission tier | the Workflow API has no per-agent effort or permission option, so solvers inherit the **session's** model, effort and tier. `/turbo --auto`'s bypass is no longer scoped to children. | raise the session's own settings, or `--backend=background` |
 | In-flight cancellation via `lib/dispatch.sh` | cancellation belongs to the Workflow runtime (`TaskStop` / skip), not to this library | `/workflows`, `TaskStop` |
-| Status records / lifecycle manifest / capacity lease | the fleet's observability is the progress tree + the structured return, not machine-readable per-issue JSON | `--backend=claude-bg` for machine consumers |
+| Status records / lifecycle manifest / capacity lease | the fleet's observability is the progress tree + the structured return, not machine-readable per-issue JSON | `--backend=background` for machine consumers |
 | Claim safety on a never-relayed run | claims are written by the launcher *before* the model relays the args, so an un-relayed run holds claims with nothing running | `gh issue edit N --remove-label uberdev:active` (a `--reap-stale-claims` sweep is owed) |
 
 ## What did NOT move
@@ -129,13 +132,16 @@ command — opening the PR is where it stops.
 
 ## No-Workflow fallback
 
-On a runtime without the `Workflow` tool (Codex, Gemini, Copilot, pre-Workflow
-Claude Code), re-run the launcher with an explicit detached backend:
+On a runtime without the `Workflow` tool (Gemini, Copilot, pre-Workflow Claude
+Code), re-run the launcher with an explicit detached backend:
 
 ```bash
-bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=<0|1> -- <args> --backend=claude-bg
+bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=<0|1> -- <args> --backend=background
 ```
 
-`--backend=codex` is the right choice inside a Codex session (and is what `auto`
-already resolves to there). The detached backends are unchanged and remain fully
+`--backend=background` is the only detached backend this fallback names, and it
+is complete on its own. **`--backend=codex` is an enum error** — #381 deleted
+that backend (`lib/dispatch.sh:509`) along with the `CODEX_HOME` auto-escape
+(`lib/dispatch.sh:682-685`), so there is nothing to select inside a Codex
+session either. The surviving detached backends are unchanged and remain fully
 tested; only their selection priority changed.

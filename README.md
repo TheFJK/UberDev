@@ -91,21 +91,6 @@ jq '.enabledPlugins["uberdev@uberdev"] = true' \
 
 </details>
 
-### Codex CLI
-
-UberDev also installs into the [OpenAI Codex CLI](https://developers.openai.com/codex) — same workflows (brainstorm → plan → execute, TDD, debugging, parallel PR review, autonomous issue resolution, the testers QA squad), adapted to Codex's skill / subagent / AGENTS.md model. Two paths:
-
-```bash
-# Path 1 — standalone installer (carries the 44 subagents; needed for /solve, /turbo, /review-pr fanout)
-curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/codex/install-codex.sh | bash
-
-# Path 2 — Codex-native plugin (browse & toggle skills; pairs with Path 1)
-codex plugin marketplace add TheFJK/UberDev   # then /plugins → Space to enable
-```
-
-Restart Codex after install so the skills, hooks, and subagents load. The 13 slash commands surface as `$uberdev-cmd-*` skills (Codex custom prompts are deprecated; skills are the shareable replacement). See [`codex/README.md`](./codex/README.md) for the full guide, the tool-mapping shim, and known v1 limitations.
-The Codex one-liner bootstraps a temporary repo snapshot automatically; running `./codex/install-codex.sh` from a clone uses the local files.
-
 ---
 
 ## Updating
@@ -131,7 +116,7 @@ Disable Claude Code's auto-updater globally with `DISABLE_AUTOUPDATER=1` in your
 |---|---|
 | **`gh` CLI** authenticated against your target repos | Repo detection, label/scope validation, dedup search, issue & PR ops |
 | **`jq`** | Used by `install.sh` and `/merge` |
-| **Claude Code >= 2.1.139** with plugin support | Required for `/plugin marketplace add` AND for `claude --bg` (Agent View). `/solve` and `/turbo` hard-fail on older versions with an actionable `npm i -g @anthropic-ai/claude-code@latest` pointer. |
+| **Claude Code >= 2.1.139** with plugin support | Required for `/plugin marketplace add`. `/solve` and `/turbo` hard-fail on older versions with an actionable `npm i -g @anthropic-ai/claude-code@latest` pointer. |
 | **`bash` >= 4 — `/ubergoal` (`/uberdev:goal`) only** | The `/goal` watch loop's verdict locator relies on bash's unmatched-glob semantics (zsh fatals with `no matches found`; stock macOS `/bin/bash` is 3.2). On macOS run `brew install bash` once (→ `/opt/homebrew/bin/bash` 5.x); `/goal` auto-discovers it (Phase 0 publishes `UBERDEV_GOAL_BASH` and runs the fences under it — see `commands/goal.md` "Execution contract"). Other commands run fine under the default zsh. |
 
 ---
@@ -171,16 +156,14 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 
 Monitor with **`/workflows`** — the progress tree lives in the session you started, and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`). There is no separate agent surface to poll.
 
-**Detached transports** are still available for fire-and-forget runs: `--backend=claude-bg` (deprecated, removal target v1.0.0), `--backend=wezterm`, `--backend=background`, `--backend=codex`. Those spawn a real session per issue:
+**Detached transports** are still available for fire-and-forget runs: `--backend=wezterm`, `--backend=background`. Those spawn a real session per issue:
 
 ```bash
-claude --bg \
-  --prompt-file /tmp/solve-prompt-123.txt \
-  --worktree solve-issue-123 \
-  --model 'claude-opus-4-8[1m]'
+git worktree add .claude/worktrees/solve-issue-123 -b worktree-solve-issue-123
+claude -p "<prompt>" --model 'claude-opus-4-8[1m]'   # detached, PID-tracked
 ```
 
-and are monitored with `claude agents` (the Agent View peek panel handles `AskUserQuestion` prompts inline). `auto` never selects them.
+and are monitored through visible WezTerm panes or the printed PID / log / result files. `auto` never selects them. The `claude --bg` transport that used to head this list was removed in RFC 0015 §7 as amended, and `--backend=codex` was deleted the same way in #381 — both are now enum errors, not deprecations.
 
 **Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
 
@@ -199,7 +182,7 @@ Identical to `/solve` for trivial / small. For medium / large, the brainstorm ph
 
 `/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` bypasses Claude Code's permission system entirely (post-#241 follow-up: `--permission-mode auto` was silently refusing some agent tools — notably Search — so the middle tier was dead weight; `--auto` now resolves to `--dangerously-skip-permissions`, the same strict bypass as `SKIP_PERMISSIONS=1`).
 
-**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and spawns three independent `claude --bg` sessions — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
+**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and runs three independent solvers — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
 
 Spec & plan are still written to disk before implementation — audit them mid-flight to course-correct.
 
@@ -282,7 +265,7 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 ---
 solve_auto: false             # auto-accept brainstorm recommendations (= /turbo)
 fanout_concurrency:
-  solve_bg: 6                 # /turbo parallel claude --bg fanout cap (default 6, range [1, 50])
+  solve_bg: 6                 # /turbo parallel solver fanout cap (default 6, range [1, 50])
 auto_install_aliases: true    # install short-form forwarders at SessionStart
 integration_branch: main      # /merge target branch (overrides gh repo view default)
 goal:
@@ -292,7 +275,7 @@ goal:
 
 | Env var | File key | Purpose |
 |---|---|---|
-| `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel `claude --bg` sessions dispatched by `/turbo`; int [1, 50], default 6 |
+| `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel solvers dispatched by `/turbo`; int [1, 50], default 6 |
 | `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--dangerously-skip-permissions` (post-#241 follow-up: AUTO tier collapsed into bypass) |
 | `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
@@ -357,7 +340,7 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 | **Repo-agnostic by default** | Commands derive `$REPO` from `gh repo view` at runtime. No hardcoded org/project IDs. |
 | **No GitHub Project board auto-add** | Portability over board affordance. May return via opt-in `.claude/board.json`. |
 | **Model pin baked in** *(in `lib/dispatch.sh`)* | Spawned agents run on `claude-opus-4-8[1m]` for reproducibility. Forks should adjust. |
-| **Background sessions via `claude --bg`** | `/solve` and `/turbo` dispatch into Agent View — supervised by Claude Code's daemon, isolated per-worktree, platform-agnostic. No terminal emulator required. |
+| **Workflow-native solver fleets** | `/solve` and `/turbo` run one worktree-isolated agent per issue inside the calling session's Workflow runtime — watch them in `/workflows`, platform-agnostic. No terminal emulator required. |
 | **Triage hint in every issue body** | `/solve` skips re-classification and picks the right workflow without re-reading the body. |
 | **Conventional commits enforced** | `feat(scope):` / `fix(scope):` / `chore(scope):` / `refactor(scope):`. `enhancement` is a label, never a type. |
 | **`/merge` autopilot has no author gate** | Trust anchor is `reviewDecision == "APPROVED"` + GitHub branch protections. Bot vs. human vs. external contributor — same eligibility. |
@@ -394,7 +377,7 @@ Personal brand. Marketplace and repo are `UberDev`; the plugin inside is `uberde
 <details>
 <summary><strong>Will <code>/solve</code> work outside macOS?</strong></summary>
 
-Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. On the default `workflow` backend there is no OS-specific supervision at all (the Workflow runtime owns every agent), which is why native Windows no longer requires WezTerm. Process-identity reconciliation is supported on Linux, macOS, and native Windows for the explicit detached backends; other kernels fail closed instead of using a degraded PID fingerprint, and `claude --bg` sessions are monitored with `claude agents`. Requires Claude Code >= 2.1.139.
+Yes — `/solve` and `/turbo` support Linux, macOS, and native Windows. On the default `workflow` backend there is no OS-specific supervision at all (the Workflow runtime owns every agent), which is why native Windows no longer requires WezTerm. Process-identity reconciliation is supported on Linux, macOS, and native Windows for the explicit detached backends; other kernels fail closed instead of using a degraded PID fingerprint. Requires Claude Code >= 2.1.139.
 
 </details>
 

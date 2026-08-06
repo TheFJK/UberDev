@@ -6,8 +6,6 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$THIS_DIR/.." && pwd)"
 FIX="$THIS_DIR/fixtures/findings-to-issues"
 AGENT_MD="$REPO_ROOT/plugins/uberdev/agents/findings-to-issues.md"
-RUNTIME_AGENT_MD="$REPO_ROOT/codex/uberdev-codex/agents/findings-to-issues.md"
-PACKAGED_AGENT_TOML="$REPO_ROOT/codex/agents/uberdev-findings-to-issues.toml"
 REVIEW_PR_MD="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_MD="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
@@ -471,8 +469,6 @@ assert_in_section "$AGENT_MD" '^## Refusal triggers' '^## Failure-mode summary' 
   'S16.8 — refusal contract separates probe failure from low numeric budget'
 assert_no_grep "$AGENT_MD" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
   'S16.9 — Search prose does not conflate the separate code-search hourly limit'
-assert_no_grep "$PACKAGED_AGENT_TOML" 'Search bucket \(30 req/min, 1000/hr authenticated\)' \
-  'S16.10 — packaged Codex agent preserves the corrected Search-bucket contract'
 
 ### Suite 17: routed origin variants + exact PR binding ----------
 echo
@@ -514,15 +510,9 @@ extract_origin_helper() {
   awk '/^findings_derive_review_origin\(\) \{/{active=1} active{print} active && /^\}/{exit}' "$source" >"$output"
 }
 extract_origin_helper "$AGENT_MD" "$ORIGIN_TMP/canonical.sh"
-python3 -I -B - "$PACKAGED_AGENT_TOML" "$ORIGIN_TMP/packaged.md" <<'PY'
-import pathlib,sys,tomllib
-source=tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
-pathlib.Path(sys.argv[2]).write_text(source['developer_instructions'],encoding='utf-8')
-PY
-extract_origin_helper "$ORIGIN_TMP/packaged.md" "$ORIGIN_TMP/packaged.sh"
 
 ORIGIN_RUNTIME_FAILURES=0
-for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
+for helper in "$ORIGIN_TMP/canonical.sh"; do
   ORIGIN_GH_LOG="$ORIGIN_TMP/$(basename "$helper").gh"
   : >"$ORIGIN_GH_LOG"
   set +e
@@ -561,13 +551,13 @@ for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
     || ORIGIN_RUNTIME_FAILURES=$((ORIGIN_RUNTIME_FAILURES + 1))
 done
 if [ "$ORIGIN_RUNTIME_FAILURES" -eq 0 ]; then
-  echo "  PASS  S17.7 — canonical and generated origins accept exact head, reject mismatch/malformed, and perform no writes"; PASS=$((PASS + 1))
+  echo "  PASS  S17.7 — the canonical origin accepts exact head, rejects mismatch/malformed, and performs no writes"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S17.7 — origin runtime failures=$ORIGIN_RUNTIME_FAILURES"; FAIL=$((FAIL + 1))
 fi
 
 ORIGIN_MATRIX_FAILURES=0
-for helper in "$ORIGIN_TMP/canonical.sh" "$ORIGIN_TMP/packaged.sh"; do
+for helper in "$ORIGIN_TMP/canonical.sh"; do
   for row in \
     '0 simplify 0 review_pr.defer.findings standalone' \
     '7 review-pr 7 review_pr.defer.findings pr' \
@@ -674,7 +664,7 @@ assert_grep "$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline/SKILL.md" \
 
 echo
 echo "### Suite 20: findings publication refusal is fail-closed in every executor contract"
-for contract in "$AGENT_MD" "$RUNTIME_AGENT_MD" "$PACKAGED_AGENT_TOML"; do
+for contract in "$AGENT_MD"; do
   assert_grep "$contract" \
     'REFUSED.*infrastructure failure|infrastructure failure.*REFUSED' \
     "S20.1 — $(basename "$contract") classifies REFUSED publication as infrastructure failure"

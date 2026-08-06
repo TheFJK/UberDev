@@ -20,9 +20,19 @@ host and every OS class, `/solve` and `/turbo` now run their per-issue solvers
 inside the calling session's **Workflow runtime** — one worktree-isolated agent
 per issue, orchestrated by `skills/solve-fleet/workflow.js`.
 
-`claude-bg` is **deprecated**, not deleted: `--backend=claude-bg` still works,
+~~`claude-bg` is **deprecated**, not deleted: `--backend=claude-bg` still works,
 still passes its full test suite, and now prints a one-line deprecation notice.
-Removal target **v1.0.0**.
+Removal target **v1.0.0**.~~
+
+> **AMENDED 2026-08-05 (issue #381).** `claude-bg` was **DELETED**, ahead of the
+> v1.0.0 target stated above. Every clause struck through is now false:
+> `--backend=claude-bg` is an enum error, not a working flag
+> (`_UBERDEV_DISPATCH_BACKEND_ENUM` is `auto|workflow|wezterm|background`,
+> `lib/dispatch.sh:509`); its test suite was removed with it; and the
+> deprecation-notice machinery was deleted rather than left dormant, because a
+> dormant alias is how a retired transport drifts back onto a default path.
+> See §7 for the reasoning and the retraction of the objections this section
+> originally raised.
 
 ### Why
 
@@ -72,9 +82,9 @@ session — and the §5 landing settles what that means for `/goal`. `/goal`'s
 `/goal` genuinely needs to outlive a session is its **state**, not its
 processes, and that was always on disk in `lib/goal-state.sh`. So the constraint
 now binds one narrow thing: an operator who deliberately wants fire-and-forget
-must name a detached backend explicitly (`--backend=claude-bg`, until its v1.0.0
-removal). Nothing reaches a detached transport by default any more, on any
-command.
+must name a detached backend explicitly (~~`--backend=claude-bg`, until its v1.0.0
+removal~~ — **#381 deleted that backend; read `--backend=background`, §7**).
+Nothing reaches a detached transport by default any more, on any command.
 
 ---
 
@@ -281,6 +291,15 @@ colliding anywhere earlier. So `_uberdev_goal_ensure_version_bump <pr>`
   that as "already bumped". The predicate is strictly-greater.
 - **Kind from the PR's conventional-commit type** — `feat:` → minor, a `!`
   marker or a `BREAKING CHANGE:` footer → major, everything else → patch.
+> **AMENDED 2026-08-05 (issue #381).** "Seven surfaces" is now SIX everywhere
+> below. `codex/uberdev-codex/.codex-plugin/plugin.json` was surface 3 until the
+> Codex distribution was retired; `lib/bump-version.sh` and
+> `skills/merge-pipeline/lib/release-anchor.sh` both dropped it in the same
+> commit, and `tests/merge.test.sh` M98.ssot still asserts the two lists agree.
+> Nothing else about the release-anchor predicate changed — in particular two of
+> the six are still executable test files, which is why a path allow-list alone
+> is still not the predicate.
+
 - **`lib/bump-version.sh` owns the seven-surface edit.** It already refuses on
   drift (exit 3) and re-verifies every surface after writing (exit 4); this path
   leans on it rather than re-implementing the surface list. The work happens in a
@@ -398,8 +417,9 @@ Every loss below is **printed, never silent** — in this section, in
   fixed-path `goal-active-id.txt` pointer and carries on, and
   `plugins/uberdev/lib/goal-abort.sh` is the other half — it releases the
   `uberdev:active` claims and reaps. The detached backends remain available for
-  the deliberate fire-and-forget case, and `--backend=claude-bg` is exactly that
-  escape hatch until v1.0.0.
+  the deliberate fire-and-forget case, and ~~`--backend=claude-bg`~~ was exactly
+  that escape hatch until v1.0.0 — **#381 deleted it; `--backend=background` is
+  the surviving one, see §7**.
 - **R-1b — per-child model, effort and permission tier are inexpressible.**
   The detached backends passed `--model`, `--effort` and the
   `--dangerously-skip-permissions --permission-mode bypassPermissions` pair as
@@ -409,7 +429,8 @@ Every loss below is **printed, never silent** — in this section, in
   no longer scoped to the children — it is whatever the session already has;
   and a session running below `max` effort produces lower-effort solvers than
   the same command would have on a detached backend. Users who need the pinned
-  tier should use `--backend=claude-bg` or raise the session's own settings.
+  tier should use `--backend=claude-bg` (**deleted in #381 — read
+  `--backend=background`, see §7**) or raise the session's own settings.
   `/goal` inherits this as of §5, and it costs it more than it costs `/solve`:
   `lib/goal-phase0.sh` still exports `SKIP_PERMISSIONS=1`, but that now only
   reaches the children `lib/goal-watch.sh` still dispatches through
@@ -436,7 +457,8 @@ Every loss below is **printed, never silent** — in this section, in
   not identical translation of `/uberdev:orchestrator` (no SDD wave
   decomposition, one bounded review round instead of the always-on
   writer/reviewer pairs). RFC 0012 Phase 6 remains the path to full parity;
-  until then `--backend=claude-bg` reaches the original pipeline.
+  until then `--backend=claude-bg` reaches the original pipeline (**#381 deleted
+  that backend; `--backend=background` reaches it now, see §7**).
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not
@@ -451,8 +473,15 @@ Every loss below is **printed, never silent** — in this section, in
   uberdev:active` is the manual recovery.
 - **R-4 — no Workflow tool.** Codex, Gemini, Copilot and pre-Workflow Claude
   Code have no `Workflow` tool. Every surface carries a **No-Workflow
-  fallback** naming the explicit backend to re-run with, and `auto` still
-  resolves to `codex` inside a Codex session.
+  fallback** naming the explicit backend to re-run with, and ~~`auto` still
+  resolves to `codex` inside a Codex session~~.
+
+  > **AMENDED 2026-08-05 (issue #381).** `auto` no longer resolves `codex`
+  > anywhere — the backend and both of its `auto` escapes are deleted
+  > (`lib/dispatch.sh:509`, `:682-685`). The mitigation is unchanged in
+  > substance but narrower in fact: the No-Workflow fallback names
+  > `--backend=background`, which is the only detached transport a Codex
+  > session (or any other runtime without the tool) can now select.
 
 ---
 
@@ -495,7 +524,50 @@ The contract is therefore enforced three ways:
 
 ## 7. Rejected alternatives
 
-- **Delete `claude-bg` outright.** Rejected: it is ~170 lines of mature,
+> **AMENDED 2026-08-05 — `claude-bg` is now DELETED.** The rejection below was
+> conditional ("Deprecate, then remove on evidence"), and the evidence arrived.
+> `workflow` shipped and stayed shipped across `/solve`, `/turbo` and `/goal`
+> (§5), and then across `/review-pr` and `/simplify` — the last two workflows
+> that structurally required a detached transport, because they need an atomic
+> child result artifact plus caller-workspace repair. Both halves now exist on
+> the Workflow-native path: every bound child publishes `result.md` and a
+> nonce-bearing `status.json` by same-directory rename, and the controller
+> digests both through `lib/code_fixer_contract.py`. With those two resolving
+> `workflow`, `claude-bg` was the transport that nothing selected and nothing
+> required, and `auto` had already been forbidden from reaching it.
+>
+> Two things the original rejection weighed are answered rather than waived:
+>
+> - *"no fallback if the new transport disappoints"* — `background` remains.
+>   (`codex` was named here when this note was written and was deleted two
+>   commits later in the same issue; only `background` survives, which
+>   strengthens rather than weakens the argument — the fallback that was kept is
+>   the one every No-Workflow section actually names.) `background` is the same
+>   shape (detached, survives the parent, PID-tracked, status + result files)
+>   without the second agent surface that motivated this RFC.
+> - *"~170 lines of mature, heavily-tested transport"* — the tests went with the
+>   code. `tests/dispatch-claude-bg.test.sh` is deleted rather than retargeted,
+>   and the S4a/S4b/S4c deprecation guards in
+>   `tests/solve-fleet-workflow.test.sh` are **inverted into tombstones** (the
+>   surface must now be ABSENT), mirroring
+>   `tests/ghostty-dispatch-no-instance-leak.test.sh`. No check that still
+>   guards live code was relaxed.
+>
+> **This also supersedes RFC 0004 §3.5** (*"The `claude-bg` backend (current
+> behaviour, formalised)"*), which described the extracted
+> `_uberdev_dispatch_claude_bg` provider arm. RFC 0004's remaining per-backend
+> transports (`wezterm`, `background`), receipts and supervision contracts are
+> untouched and stay canonical.
+>
+> Deleted with it, because each had exactly one consumer: the
+> `claude-bootstrap` long-poll + ownerless-generation reclaim protocol in
+> `lib/dispatch.sh`'s git-metadata mutex; `BG_PROMPT_MODE`; the
+> `_uberdev_agent_claude_probe` liveness classifier; the unattended-permissions
+> preflight; and the `provider_probe_failed` / `provider_cancel_failed`
+> watcher-error kinds, whose only writer was that probe's `blocked:` vocabulary.
+
+- **Delete `claude-bg` outright.** ~~Rejected~~ **— accepted on evidence, see the
+  amendment above.** The original reasoning: it is ~170 lines of mature,
   heavily-tested transport with real supervision, cancellation and receipt
   semantics, and removing it in the same change that introduces its replacement
   would leave no fallback if the new transport disappoints. Deprecate, then

@@ -410,7 +410,7 @@ def parse_cli(tokens: list[str]) -> dict[str, Any]:
             # the very first thing lib/solve-launcher.sh runs, and the exact flag
             # /goal's driver passes, so every /goal cycle failed at dispatch.
             # CONTRACT: dispatch-backend
-            if value not in {"auto", "workflow", "claude-bg", "wezterm", "background", "codex"}: fail("routing_cli_invalid")
+            if value not in {"auto", "workflow", "wezterm", "background"}: fail("routing_cli_invalid")
             assign("backend", value)
         elif token.startswith("--terminal="):
             assign("terminal", token.split("=", 1)[1])
@@ -435,8 +435,8 @@ def parse_cli(tokens: list[str]) -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     # Public launcher flags may precede issue numbers. Bypass argparse's
-    # option parser for this opaque-token subcommand so `--backend=codex 12`
-    # and `12 --backend=codex` are equivalent.
+    # option parser for this opaque-token subcommand so `--backend=workflow 12`
+    # and `12 --backend=workflow` are equivalent.
     if argv and argv[0] == "parse-cli":
         print(canonical(parse_cli(argv[1:])))
         return 0

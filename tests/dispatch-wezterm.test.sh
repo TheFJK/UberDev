@@ -166,11 +166,11 @@ assert_grep "$DISPATCH_LIB" \
 echo "== #246 D-perm/D-skip: wezterm backend inherits paired PERM_FLAG from shared resolver =="
 # The PR body and CHANGELOG claim "all three dispatch backends inherit the change
 # because they all expand \"\${PERM_FLAG[@]}\" from the same resolver." That is
-# structurally true, but the only functional coverage lives in
-# tests/dispatch-claude-bg.test.sh (lines 633-674). A future regression where
+# structurally true, but the only functional coverage used to live in the
+# now-retired detached-session fixture. A future regression where
 # someone hand-edits `_uberdev_dispatch_wezterm` to strip / hard-code PERM_FLAG
-# would only red-CI the claude-bg test file. Mirror the claude-bg D-perm / D-skip
-# subshell cases here to lock the "wezterm backend inherits" claim against that
+# would have red-CI'd only that one file. The D-perm / D-skip subshell cases
+# are mirrored here to lock the "wezterm backend inherits" claim against that
 # regression class. The assertion shape is IDENTICAL across backends because
 # PERM_FLAG is set by the SHARED `uberdev_dispatch_resolve_env` (not by per-backend
 # code); this test verifies that resolver is reachable from the wezterm backend's

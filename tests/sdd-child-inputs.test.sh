@@ -110,7 +110,7 @@ print(json.dumps({
     "run_dir": run,
     "run_id": run_id,
     "repository_id": "sdd-receipt-fixture",
-    "backend": "codex",
+    "backend": "background",
     "workflow": "solve",
     "phase": "lead",
     "role": "lead",
@@ -120,7 +120,6 @@ print(json.dumps({
     "issue_num": 42,
     "capacity": 4,
     "timeout_s": 20,
-    "routing_mode": "adaptive",
 }, separators=(",", ":")))
 PY
 )"
@@ -133,7 +132,7 @@ print(json.dumps({
     "run_id": sys.argv[1],
     "repository_id": "sdd-receipt-fixture",
     "workflow": "solve",
-    "backend": "codex",
+    "backend": "background",
     "issue_num": 42,
     "task_tier": "large",
     "risk_signals": [],
@@ -248,7 +247,7 @@ PY
   printf 'completed %s\n' "$instance" >"$5"
   chmod 600 "$5"
   DISPATCH_ID="sdd-receipt-provider-$instance"
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' \
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' \
     "$DISPATCH_ID" >"$6"
   chmod 600 "$6"
 }
@@ -613,7 +612,7 @@ for row in provider_rows:
     }, row
     instance = row["instance_id"]
     route, minimum, effort, sandbox, _, _ = expectations[instance]
-    assert (row["backend"], row["issue"], row["tier"]) == ("codex", 42, "large")
+    assert (row["backend"], row["issue"], row["tier"]) == ("background", 42, "large")
     child = Path(row["prompt"]).parent
     assert child.name == instance
     assert Path(row["prompt"]).name == "prompt.txt" and Path(row["prompt"]).is_file()
@@ -621,24 +620,32 @@ for row in provider_rows:
     assert Path(row["status"]).parent == child and Path(row["status"]).name == "status.json"
     assert Path(row["result"]).is_file() and Path(row["status"]).is_file()
     decision = row["decision"]
-    assert set(decision) == decision_keys, decision
-    assert decision["schema_version"] == 1 and decision["backend"] == "codex"
-    assert decision["effective_policy"] == "adaptive" and decision["routing_mode"] == "adaptive"
-    assert decision["route_source"] == "role-policy" and decision["reason_codes"] == ["role-default"]
-    assert decision["logical_route"] == route and decision["minimum_route"] == minimum
-    assert decision["reasoning_effort"] == effort and decision["sandbox"] == sandbox
-    assert decision["risk_scope"] == "subtask" and decision["risk_signals"] == []
-    assert decision["service_tier"] == "default" and isinstance(decision["model"], str)
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", decision["policy_version"])
-    assert decision["adaptive_fallback"] is True and decision["adaptive_proposal"] is None
-    assert decision["fallback_chain"] == [] and decision["forced"] is False
-    assert decision["ignored_fields"] == [] and decision["ignored_sources"] == []
-    assert decision["field_sources"] == {
-        "model": "role-policy",
-        "reasoning_effort": "role-policy",
-        "sandbox": "parent-ceiling" if "-implement-" in instance else "role-policy",
-        "service_tier": "route-default",
-    }
+    # #381 RULING 1: the adaptive per-rank decision this block used to assert
+    # was produced ONLY for the codex backend. Every surviving backend takes
+    # lib/agent-dispatch.sh's backend-neutral-inherit branch, whose decision is
+    # a fixed, deliberately empty shape: no logical route, no model, no
+    # reasoning_effort, no sandbox, no policy_version, no field_sources. The
+    # per-role route/effort/sandbox expectations above are therefore no longer
+    # decidable at this seam, and asserting them would assert an enforcement no
+    # consumer honours. What IS still true, and what a child's authority
+    # actually depends on, is that the decision is explicitly and completely
+    # neutral -- so that is what is asserted, exactly, key for key.
+    assert decision == {
+        "schema_version": 1,
+        "backend": "background",
+        "routing_mode": "inherit",
+        "effective_policy": "inherit",
+        "route_source": "backend-neutral-inherit",
+        "logical_route": None,
+        "minimum_route": None,
+        "model": None,
+        "reasoning_effort": None,
+        "sandbox": None,
+        "service_tier": "default",
+        "forced": False,
+        "risk_signals": [],
+        "fallback_chain": [],
+    }, decision
     provider_by_instance[instance] = row
 
 assert len(lifecycle_rows) == len(expectations) * 3, lifecycle_rows
@@ -647,16 +654,21 @@ for instance, (route, _, effort, sandbox, role, phase) in expectations.items():
     events = [row for row in lifecycle_rows if row["run_id"] == instance]
     assert [row["event"] for row in events] == ["route_decided", "agent_started", "completed"], events
     for row in events:
-        assert row["agent_id"] == instance and row["backend"] == "codex"
+        assert row["agent_id"] == instance and row["backend"] == "background"
         assert row["workflow"] == "solve" and row["task_tier"] == "large"
         assert row["parent_run_id"] == "sdd-receipt-root"
         assert row["role"] == role and row["phase"] == phase
-        assert row["decision_logical_route"] == route
-        assert row["decision_reasoning_effort"] == effort
-        assert row["effective_logical_route"] == route
-        assert row["effective_reasoning_effort"] == effort
-        assert row["effective_sandbox"] == sandbox
-        assert row["effective_model"] == provider_by_instance[instance]["decision"]["model"]
+        # Same #381 RULING 1 consequence as the decision block above: the
+        # lifecycle row relays whatever the decision carried, and the neutral
+        # decision carries nothing. These must be absent-or-null rather than a
+        # per-role route, or the guard would be re-asserting the retired
+        # enforcement one layer out.
+        assert row.get("decision_logical_route") in (None, ""), row
+        assert row.get("decision_reasoning_effort") in (None, ""), row
+        assert row.get("effective_logical_route") in (None, ""), row
+        assert row.get("effective_reasoning_effort") in (None, ""), row
+        assert row.get("effective_sandbox") in (None, ""), row
+        assert row.get("effective_model") in (None, ""), row
     assert events[1]["status_path"] == provider_by_instance[instance]["status"]
     assert events[1]["timeout_s"] == 3600 and type(events[1]["owner_pid"]) is int
     assert events[2]["terminal_status"] == "completed"

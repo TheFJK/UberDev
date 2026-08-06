@@ -2,7 +2,7 @@
 # lib/solve-launcher.sh — shared /solve + /turbo launcher (RFC 0012 §3.4 / §7.5; issue #304).
 #
 # Invocation contract (commands/solve.md + commands/turbo.md pass LITERALS;
-# Codex command-skills pass PLUGIN_ROOT instead):
+# embedders that set only PLUGIN_ROOT):
 #   bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=0 -- <ARGUMENTS>   # /solve
 #   bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=1 --turbo -- <ARGUMENTS>   # /turbo
 #
@@ -171,7 +171,7 @@ OVERRIDE=$(echo "$ARGUMENTS" | grep -oE '\-\-(trivial|small|full)' | head -1 | s
 # --- Phase A: --terminal= deprecation shim (v0.22.0) ---
 # Parsed without effect; emits TERMINAL_FLAG_DEPRECATED_NOTE once per run and
 # records a `deprecated_flag_used` audit event. Keep this assignment at
-# column 0 — tests/dispatch-claude-bg.test.sh anchors `^TERMINAL_FLAG_DEPRECATED_NOTE=`.
+# column 0 — tests/solve-effort-flag.test.sh anchors `^TERMINAL_FLAG_DEPRECATED_NOTE=`.
 TERMINAL_FLAG_DEPRECATED_NOTE='warning: --terminal=cmux|ghostty|iterm|terminal|nohup is deprecated in v0.22.0; /solve and /turbo now dispatch claude --bg background sessions visible in claude agents. The flag is parsed without effect and will be removed in v1.0.0.'
 TERMINAL_FLAG_USED="$(echo "$ARGUMENTS" | grep -oE '\-\-terminal=[a-z]+' | head -1 || true)"
 if [[ -n "$TERMINAL_FLAG_USED" ]]; then
@@ -263,7 +263,7 @@ else
   if command -v uberdev_read_enum >/dev/null 2>&1; then
     # CONTRACT: dispatch-backend
     DISPATCH_BACKEND="$(uberdev_read_enum dispatch_backend UBERDEV_DISPATCH_BACKEND \
-      'auto|workflow|claude-bg|wezterm|background|codex' 'auto')"
+      'auto|workflow|wezterm|background' 'auto')"
     # /CONTRACT: dispatch-backend
   else
     DISPATCH_BACKEND=auto
@@ -271,11 +271,11 @@ else
 fi
 # CONTRACT: dispatch-backend !case-arm
 case "$DISPATCH_BACKEND" in
-  auto|workflow|claude-bg|wezterm|background|codex) ;;
+  auto|workflow|wezterm|background) ;;
   # The operator-facing set is a THIRD copy in this file; #360 shipped
   # because updating only the files that carry markers looks like enough.
   # CONTRACT: dispatch-backend
-  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,workflow,claude-bg,wezterm,background,codex}" >&2; exit 1 ;;
+  *) echo "error: --backend='$DISPATCH_BACKEND' not in {auto,workflow,wezterm,background}" >&2; exit 1 ;;
 esac
 export UBERDEV_DISPATCH_BACKEND_REQUESTED="$DISPATCH_BACKEND"
 if [[ ${#ISSUE_NUMS[@]} -eq 0 ]]; then
@@ -629,8 +629,8 @@ fi
 
 # --- Phase A: bg dispatch probes + fanout cap (v0.22.0) ---
 # Batch-invariant; resolved once, hoisted out of the Phase B per-issue loop.
-# (The backend-specific version/availability gate runs after preflight resolves
-# the backend — see the codex/claude branch just below the dispatch source.)
+# (The backend availability gate runs after preflight resolves the backend —
+# see the gate just below the dispatch source.)
 if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/config-read.sh" ]; then
   # shellcheck source=/dev/null
   . "${UBERDEV_PLUGIN_ROOT}/lib/config-read.sh"
@@ -643,8 +643,8 @@ _uberdev_audit_emit effort_resolved \
   "{\"source\":\"$EFFORT_SOURCE\",\"level\":\"$EFFORT_LEVEL\"}" || true
 
 # Source lib/dispatch.sh and resolve the backend ONCE for the whole batch.
-# PLUGIN_ROOT (Codex) is accepted alongside CLAUDE_PLUGIN_ROOT so the launcher
-# works when sourced from a Codex plugin context too.
+# PLUGIN_ROOT is accepted alongside CLAUDE_PLUGIN_ROOT for embedders that set
+# only the former.
 if [ -r "${UBERDEV_PLUGIN_ROOT:-}/lib/dispatch.sh" ]; then
   # shellcheck source=/dev/null
   . "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh"
@@ -656,34 +656,30 @@ else
   exit 1
 fi
 
-# Backend-specific availability gate (RFC 0012 §3.4 codex-port). claude-bg /
-# wezterm / background exec `claude` and need >= 2.1.152 (--permission-mode
-# bypassPermissions, #246); the codex backend execs `codex exec` and needs the
-# codex CLI on PATH. Branching after preflight means a Codex-only host (claude
-# absent, codex present) isn't blocked by a claude version check, and vice versa.
-if [ "${UBERDEV_RESOLVED_BACKEND:-}" = "codex" ]; then
-  if ! command -v codex >/dev/null 2>&1; then
-    echo "error: /solve and /turbo resolved to the codex backend but 'codex' is not on PATH" >&2
-    echo "       install Codex from https://developers.openai.com/codex or use --backend=claude-bg" >&2
-    echo "no claims written; no agents dispatched" >&2
-    exit 1
-  fi
-else
-  if [ "${UBERDEV_DISPATCH_REASONING_EFFORT:-}" = "ultra" ]; then
-    echo "error: --effort=ultra is Codex-only; resolved backend is ${UBERDEV_RESOLVED_BACKEND:-unknown}" >&2
-    echo "no claims written; no agents dispatched" >&2
-    exit 1
-  fi
-  # On Claude-backed providers --effort is the legacy child effort flag, not
-  # an exact Codex route field. Keep EFFORT_LEVEL/EFFORT_FLAG and clear only
-  # the provider-neutral request carrier before route enforceability checks.
-  UBERDEV_DISPATCH_REASONING_EFFORT=""
-  export UBERDEV_DISPATCH_REASONING_EFFORT
-  _uberdev_require_claude_version "2.1.152" || {
-    echo "no claims written; no agents dispatched" >&2
-    exit 1
-  }
+# Backend availability gate. The codex arm that used to sit above this one is
+# gone (#381): it was the only backend that did NOT exec `claude`, so the whole
+# branch collapsed. Every surviving backend runs `claude` and needs >= 2.1.152
+# (--permission-mode bypassPermissions, #246).
+#
+# `--effort=ultra` is still REFUSED, and this refusal is now unconditional
+# rather than "unless the backend is codex". `ultra` was an exact Codex route
+# field with no Claude equivalent, and deleting the transport did not make it
+# resolvable — it made it unresolvable everywhere. Accepting it silently would
+# hand the operator a route nothing honours.
+if [ "${UBERDEV_DISPATCH_REASONING_EFFORT:-}" = "ultra" ]; then
+  echo "error: --effort=ultra has no provider on any surviving backend; resolved backend is ${UBERDEV_RESOLVED_BACKEND:-unknown}" >&2
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
 fi
+# On Claude-backed providers --effort is the legacy child effort flag, not an
+# exact route field. Keep EFFORT_LEVEL/EFFORT_FLAG and clear only the
+# provider-neutral request carrier before route enforceability checks.
+UBERDEV_DISPATCH_REASONING_EFFORT=""
+export UBERDEV_DISPATCH_REASONING_EFFORT
+_uberdev_require_claude_version "2.1.152" || {
+  echo "no claims written; no agents dispatched" >&2
+  exit 1
+}
 
 # Resolve every lead route and create its immutable context before the first
 # GitHub claim write. A single unenforceable route aborts the whole batch.
@@ -1255,20 +1251,15 @@ echo "dispatched ${#SPAWNED[@]} background session(s)" >&2
 if [[ ${#SPAWNED[@]} -gt 0 ]]; then
   printf '  %s\n' "${SPAWNED[@]}" >&2
 fi
-case "${UBERDEV_RESOLVED_BACKEND:-claude-bg}" in
-  claude-bg)
-    echo "Monitor the dispatched agents with:  claude agents" >&2 ;;
+# No default: an unresolved backend gets no monitoring line rather than a
+# guess. The historical default here named the retired detached backend.
+case "${UBERDEV_RESOLVED_BACKEND:-}" in
   wezterm)
     echo "The dispatched agents are running in WezTerm panes — switch to the WezTerm window to watch them live." >&2 ;;
   background)
     echo "The dispatched agents are detached background processes. Per-issue logs + status files:" >&2
     for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
       echo "  #$ISSUE_NUM: tail -f $UBERDEV_TMPDIR/solve-bg-stdout-$ISSUE_NUM.log   (exit code in $UBERDEV_TMPDIR/solve-bg-status-$ISSUE_NUM.json)" >&2
-    done ;;
-  codex)
-    echo "The dispatched Codex agents are detached background processes. Per-issue logs + status/result files:" >&2
-    for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
-      echo "  #$ISSUE_NUM: tail -f $UBERDEV_TMPDIR/solve-codex-stdout-$ISSUE_NUM.log   (status: $UBERDEV_TMPDIR/solve-codex-status-$ISSUE_NUM.json; result: $UBERDEV_TMPDIR/solve-codex-result-$ISSUE_NUM.md)" >&2
     done ;;
 esac
 

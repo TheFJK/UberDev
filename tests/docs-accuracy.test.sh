@@ -555,9 +555,9 @@ assert_grep "$WORKFLOW_RFC" 'only successful verdict publication retires' \
 assert_grep "$WORKFLOW_RFC" 'at or after.*selected timestamp is indeterminate' \
   "T9.8 RFC 0012 qualifies indeterminacy as positional (at-or-after the selected timestamp)"
 
-# claude-bg retirement (RFC 0015) annotations — annotate, never delete.
+# Detached-session retirement (RFC 0015) annotations — annotate, never delete.
 assert_grep "$WORKFLOW_RFC" 'SUPERSEDED IN PART — RFC 0015' \
-  "T9.9 RFC 0012 annotates the claude-bg-dependent verdicts as superseded by RFC 0015"
+  "T9.9 RFC 0012 annotates the detached-dispatch-dependent verdicts as superseded by RFC 0015"
 assert_grep "$WORKFLOW_RFC" 'hybrid — shell preflight \+ solve-fleet workflow' \
   "T9.10 §3.0 verdict row for the /solve+/turbo launcher reads hybrid, not keep-shell"
 assert_grep "$WORKFLOW_RFC" 'skills/goal-pipeline/workflow\.js' \
@@ -630,6 +630,92 @@ else
   echo "  FAIL  T9.21 B14 claims reparse-ancestor rejection but run_manifest.py no longer implements it"
   echo "        file: $RUN_MANIFEST_PY"; FAIL=$((FAIL + 1))
 fi
+
+# ── T10: no shipped doc may RECOMMEND a deleted dispatch backend (#381) ────────
+# The class: `codex` and `claude-bg` were deleted from
+# _UBERDEV_DISPATCH_BACKEND_ENUM, so `--backend=<either>` is an enum error at
+# lib/solve-launcher.sh. Nine shipped surfaces still instructed the codex form
+# after the deletion, TWO of them inside `## No-Workflow fallback` sections --
+# the exact recipe a runtime WITHOUT the Workflow tool is routed to, where the
+# model has no way to self-correct by re-running the primary path.
+#
+# A blanket "the string must not appear" grep is the wrong shape: every mention
+# that survives is a deliberate TOMBSTONE, and tombstones are the thing that
+# stops the surface silently coming back. So the rule is narrower and exactly
+# matches the defect: every line naming `--backend=<deleted>` must ALSO carry a
+# token that marks it dead on the same line. A line that names it with no such
+# marker is an instruction, and instructions are what red here.
+#
+# CHANGELOG.md is exempt: it is an append-only historical record whose older
+# entries legitimately describe the backends as live at the time of writing.
+DEAD_BACKEND_MARKER='enum error|deleted|removed|retired|no longer|#381|~~|RETRACTED|was the'
+# NEGATION BEATS THE TOMBSTONE, and must be tested FIRST.
+#
+# The marker above contains the bare word `deleted`, so a line reading
+#   "`claude-bg` is deprecated, not deleted: --backend=claude-bg still works"
+# MATCHED it and was skipped as a tombstone -- the very word that makes the
+# claim false was the word certifying it as dead. That is not hypothetical:
+# docs/rfc/0015 §1 shipped exactly that sentence on this branch and this guard
+# waved it through.
+#
+# A line asserting the backend still works cannot be a tombstone no matter what
+# else it contains, so this pattern is evaluated BEFORE the skip and a hit here
+# is unconditional.
+DEAD_BACKEND_NEGATION='not (deleted|removed|retired|gone)|still works|still passes|still (fully )?supported|remains? (fully )?supported|still (an? )?(available|selectable|valid)'
+dead_backend_hits=""
+while IFS= read -r shipped_doc; do
+  case "$shipped_doc" in
+    ./CHANGELOG.md|./.git/*|*/node_modules/*) continue ;;
+  esac
+  while IFS= read -r offending_line; do
+    [ -n "$offending_line" ] || continue
+    # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
+    # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
+    # Three tiers, in this order and no other:
+    #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
+    #      A ~~...~~ line is the amend-in-place form this repo already uses; its
+    #      text is quoted precisely to be contradicted.
+    #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
+    #      even alongside a tombstone word, because that is the shape where the
+    #      falsifying word is also the certifying word.
+    #   3. otherwise, an ordinary tombstone word excuses the line.
+    grep -qE -e '~~' <<<"$offending_line" && continue
+    if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"$offending_line"; then
+      grep -qE -e "$DEAD_BACKEND_MARKER" <<<"$offending_line" && continue
+    fi
+    dead_backend_hits="${dead_backend_hits}${shipped_doc}: ${offending_line}
+"
+  done <<EOF
+$(grep -nE -e '--backend=(codex|claude-bg)' "$shipped_doc" 2>/dev/null || true)
+EOF
+done <<EOF
+$(cd "$REPO_ROOT" && find . -type f \( -name '*.md' -o -name '*.json' \) \
+    -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+EOF
+if [ -z "$dead_backend_hits" ]; then
+  echo "  PASS  T10.1 no shipped .md/.json instructs a deleted dispatch backend"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T10.1 a shipped doc names --backend=codex/claude-bg with nothing marking it dead"
+  printf '%s' "$dead_backend_hits" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+# Anti-vacuity: the scan must actually have looked at the surfaces that shipped
+# the defect, or an empty/misrooted find would report a silent PASS.
+for dead_backend_witness in \
+  plugins/uberdev/skills/solve-fleet/SKILL.md \
+  plugins/uberdev/skills/review-fleet/SKILL.md \
+  plugins/uberdev/skills/goal-pipeline/SKILL.md \
+  README.md; do
+  if grep -qE -e '--backend=(codex|claude-bg)' "$REPO_ROOT/$dead_backend_witness"; then
+    echo "  PASS  T10.2 $dead_backend_witness still carries a tombstone the scan reads"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T10.2 $dead_backend_witness has no --backend= mention at all — T10.1 may be vacuous"
+    echo "        file: $REPO_ROOT/$dead_backend_witness"
+    FAIL=$((FAIL + 1))
+  fi
+done
 
 echo
 echo "== Summary =="

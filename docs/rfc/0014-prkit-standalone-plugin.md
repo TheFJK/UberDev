@@ -108,7 +108,7 @@ Source paths under `plugins/uberdev/`. Authoritative, verified copy set.
 
 **skills/ (2 + skill-local lib):** `post-impl-review/SKILL.md`, `merge-pipeline/SKILL.md`, `merge-pipeline/lib/discover.sh`
 
-**lib/ (14):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `atomic_move.py`, `worktree_receipts.py`, `code_fixer_contract.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh`
+**lib/ (13):** `child-dispatch.sh`, `agent-dispatch.sh`, `dispatch.sh`, `config-read.sh`, `model_routing.py`, `run_manifest.py`, `atomic_move.py`, `code_fixer_contract.py`, `live-semaphore.sh`, `child-receipts.py`, `child-inputs.py`, `command-workspace.py`, `secret-scan.sh` (`worktree_receipts.py` was removed in #381 with the codex dispatch backend, its only caller)
 
 **policy/ (2):** `model-routing-v1.json`, `solve-run-tree-v1.json` — default routing policy and canonical child run-tree projection loaded by copied runtime code.
 
@@ -255,7 +255,44 @@ Terminal step of brainstorm: invoke `uberdev:write-plan` to produce the wave-dec
 
 ---
 
-## 14. Codex port addendum (SHIPPED)
+## 14. Codex port addendum (SHIPPED) — **SUPERSEDED 2026-08-05 (issue #381)**
+
+> **SUPERSEDED — 2026-08-05, issue #381.** Everything in §14 below is retained as
+> historical record and is no longer implemented. UberDev retired its Codex CLI
+> distribution: `codex/` (the `uberdev-codex` native plugin, the `codex/agents/*.toml`
+> subagents, `install-codex.sh` and `codex/tools/`) was deleted, and the generator's
+> Codex stage went with the SSOT it extracted from. Concretely, the following clauses
+> no longer hold:
+>
+> - §14 "UberDev supports **two runtimes**" — one runtime, Claude Code.
+> - §14.1 `tools/prkit/manifest-codex.txt` (count-locked at 56) — file deleted;
+>   `tests/prkit-codex-manifest.test.sh` deleted with it.
+> - §14.3 the `codex/prkit-codex/` copy set and the four `codex-*.tmpl` authored
+>   templates — the copy stage and all four templates are removed.
+> - §14.4 `verify.sh` "scans both trees", its TOML validation, its Codex shape check
+>   and the `CODEX_REQUIRED` set — removed; the gate scans `plugins/prkit` only.
+>   `prkit-generate.test.sh` G6–G8 are retired in place with tombstones.
+> - §14.5 the `config-read.sh` codex-fallback rewrite — the in-repo
+>   `${PWD}/codex/uberdev-codex/...` candidate is unreachable and was removed from
+>   the canonical helper. The `${CODEX_HOME}/plugins/...` branch is a different
+>   thing and survives, for the reason written into `lib/config-read.sh`
+>   alongside it: it resolves an INSTALLED Codex runtime, and
+>   `.codex/uberdev.local.md` is still a supported project-config family
+>   (`project-codex` provenance).
+>
+> The phrase `verify.sh` quotes — "the mandatory native Codex port" — is withdrawn.
+> This is a supersede of §14 only; §§1–13 are unaffected.
+>
+> **AMENDED 2026-08-05 (issue #381).** This note originally read "**The `codex`
+> dispatch backend is NOT superseded by this note**: it remains in
+> `plugins/uberdev/lib/dispatch.sh` and remains selectable with
+> `--backend=codex`." That is no longer true, and it was falsified inside this
+> same issue: step 4 (`9e4b7c5`) **also deleted** the `codex` dispatch backend.
+> `--backend=codex` is an enum error (`plugins/uberdev/lib/dispatch.sh:509`) and
+> the two Codex-environment `auto` escapes are gone with no replacement
+> (`lib/dispatch.sh:682-685`). The §14.5 bullet above is rewritten accordingly:
+> the surviving `${CODEX_HOME}` branch now rests on the project-config
+> rationale, not on a dispatch backend.
 
 UberDev supports **two runtimes**: Claude Code (`plugins/uberdev/`) and the OpenAI Codex CLI (`codex/uberdev-codex/` native plugin + `codex/install-codex.sh` one-liner). The Claude-only extraction above left prkit unusable on Codex, so the generator was extended to also emit a Codex port — same SSOT extract+rewrite model.
 

@@ -684,11 +684,11 @@ uberdev_semaphore_release "$aba_new" >/dev/null 2>&1 || true
 OPAQUE_STATE="$TMP/opaque-handle-state"
 opaque_status="$TMP/opaque-status.json"
 cp "$FIXTURES/running-status.json" "$opaque_status"
-opaque_lease="$(uberdev_semaphore_acquire "$OPAQUE_STATE" repo claude-bg 1 opaque-run 5)"
+opaque_lease="$(uberdev_semaphore_acquire "$OPAQUE_STATE" repo wezterm 1 opaque-run 5)"
 capture uberdev_semaphore_set_handle "$opaque_lease" 'agent:opaque-123' "$opaque_status"
 opaque_set_rc="$CAPTURE_RC"
 printf '{"state":"completed"}\n' > "$opaque_status"
-capture uberdev_semaphore_reconcile "$OPAQUE_STATE" repo claude-bg
+capture uberdev_semaphore_reconcile "$OPAQUE_STATE" repo wezterm
 if [ "$opaque_set_rc" -eq 0 ] && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$opaque_lease" ]; then
   pass "opaque backend handles use their canonical status path"
 else
@@ -700,12 +700,12 @@ MISSING_STATUS_LEASE_FILE="$TMP/missing-status-lease"
 MISSING_STATUS_PATH="$TMP/status-never-created.json"
 /bin/bash -c '
   . "$1"
-  lease="$(uberdev_semaphore_acquire "$2" repo claude-bg 1 missing-status-run 30)" || exit 1
+  lease="$(uberdev_semaphore_acquire "$2" repo wezterm 1 missing-status-run 30)" || exit 1
   uberdev_semaphore_set_handle "$lease" provider-job-123 "$3" || exit 1
   printf "%s\n" "$lease" > "$4"
 ' _ "$LIB" "$MISSING_STATUS_STATE" "$MISSING_STATUS_PATH" "$MISSING_STATUS_LEASE_FILE"
 missing_status_lease="$(cat "$MISSING_STATUS_LEASE_FILE")"
-capture uberdev_semaphore_reconcile "$MISSING_STATUS_STATE" repo claude-bg
+capture uberdev_semaphore_reconcile "$MISSING_STATUS_STATE" repo wezterm
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '1' ] && [ ! -e "$missing_status_lease" ]; then
   pass "dead owner with never-created opaque status eventually releases capacity"
 else

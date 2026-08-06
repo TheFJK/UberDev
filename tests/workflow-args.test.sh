@@ -40,10 +40,9 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE_HELPER="$REPO_ROOT/plugins/uberdev/lib/config-read.sh"
-CODEX_HELPER="$REPO_ROOT/codex/uberdev-codex/lib/config-read.sh"
 HELPER="$SOURCE_HELPER"
 
-for f in "$SOURCE_HELPER" "$CODEX_HELPER"; do
+for f in "$SOURCE_HELPER"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 command -v jq >/dev/null 2>&1 || {
@@ -100,6 +99,11 @@ _payload() {
   printf '%s\n' "$_LAST_STDOUT" | sed -n '/^WORKFLOW_ARGS_BEGIN$/,/^WORKFLOW_ARGS_END$/p' | sed '1d;$d'
 }
 
+# LEGACY SURFACE, retained deliberately (#381). ${CODEX_HOME}/plugins/uberdev-codex
+# is a path only a stale pre-#381 install can produce -- the distribution that
+# wrote it is deleted and the CHANGELOG uninstall recipe removes it. This case
+# pins that the arm still RESOLVES for such a host; it does not assert that the
+# path is a supported install target. See lib/config-read.sh's comment at the arm.
 _assert_codex_home_plugin_root() {
   local helper_path="$1" label="$2" payload expected_codex_root
   HELPER="$helper_path"
@@ -183,7 +187,6 @@ fi
   && pass "W2.5 happy path emits nothing on stderr" \
   || fail "W2.5 happy path emits nothing on stderr (got: $_LAST_STDERR)"
 _assert_codex_home_plugin_root "$SOURCE_HELPER" "source helper"
-_assert_codex_home_plugin_root "$CODEX_HELPER" "packaged Codex helper"
 HELPER="$SOURCE_HELPER"
 
 # ---------------------------------------------------------------------------

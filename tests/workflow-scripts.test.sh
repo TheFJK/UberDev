@@ -498,6 +498,72 @@ else
 fi
 
 echo
+echo "== #381 — the review-fleet default flip is coupled to the wiring =="
+# lib/dispatch.sh has NO `workflow` provider arm by construction: reaching
+# _uberdev_agent_dispatch_backend with backend=workflow is a declared wiring bug
+# that fails loud. Every /review-pr and /simplify child still reaches it through
+# uberdev_dispatch_child_capture, so resolving `workflow` for those two workflows
+# BEFORE a command emits pipeline=review-fleet would fail after the RUN_ID
+# reservation and the workspace prepare -- strictly worse than being unreachable,
+# because it burns a real fanout's budget and leaves reservations behind.
+#
+# This guard is the mechanical form of that coupling, and it is BIDIRECTIONAL.
+# It was written to red at the flip; the flip has now landed (#381 step 3), so
+# the side it enforces has moved from "auto must stay OFF workflow" to "auto
+# must resolve workflow" -- and if the wiring is ever ripped back out of the
+# command files, it reds again from the other direction.
+#
+# It is a LIVE RESOLUTION PROBE now, not a grep over the arm's source. The old
+# grep passed on the mere presence of the string `resolved="workflow"` anywhere
+# in the ladder, which after the flip is true on a branch review-pr may never
+# reach -- it would have gone green without proving the flip at all.
+REVIEW_FLEET_EMITTED=0
+for command_file in "$REPO_ROOT/plugins/uberdev/commands/review-pr.md" \
+                    "$REPO_ROOT/plugins/uberdev/commands/simplify.md"; do
+  if grep -Fq 'pipeline=review-fleet' "$command_file" \
+     || grep -Fq 'uberdev_emit_workflow_args review-fleet' "$command_file"; then
+    REVIEW_FLEET_EMITTED=1
+  fi
+done
+
+# CODEX_HOME cleared, so the answer is the resolver's RULE and not this
+# particular host's environment. #381 removed the
+# `_uberdev_dispatch_codex_available` stub that used to sit here: the function
+# was deleted with the transport, so redefining it was an inert no-op that made
+# this probe read as though it forced a capability answer when it forced
+# nothing. The resolution is now codex-independent by construction.
+review_fleet_resolved() {  # WORKFLOW -> "<rc>:<resolved>"
+  env -u CODEX_HOME bash -c '
+    set +e
+    . "$1" >/dev/null 2>&1
+    unset UBERDEV_RESOLVED_BACKEND
+    uberdev_dispatch_preflight "$2" >/dev/null 2>&1
+    printf "%s:%s" "$?" "${UBERDEV_RESOLVED_BACKEND-}"
+  ' _ "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh" "$1"
+}
+
+for review_fleet_wf in review-pr simplify; do
+  REVIEW_FLEET_RESOLUTION="$(review_fleet_resolved "$review_fleet_wf")"
+  if [ "$REVIEW_FLEET_EMITTED" -eq 1 ]; then
+    if [ "$REVIEW_FLEET_RESOLUTION" = "0:workflow" ]; then
+      pass "#381 the command files emit review-fleet and auto resolves workflow for $review_fleet_wf"
+    else
+      fail "#381 the command files emit review-fleet but auto gave '$REVIEW_FLEET_RESOLUTION' for $review_fleet_wf"
+    fi
+  elif [ "$REVIEW_FLEET_RESOLUTION" = "0:workflow" ]; then
+    fail "#381 auto resolves workflow for $review_fleet_wf but no command emits review-fleet — the halves have drifted apart"
+  else
+    pass "#381 no command emits review-fleet, so $review_fleet_wf auto stays off workflow"
+  fi
+done
+if grep -Fq "backend 'workflow' is dispatched by the session's Workflow tool" \
+     "$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"; then
+  pass "#381 _uberdev_agent_dispatch_backend keeps its loud workflow refusal"
+else
+  fail "#381 the loud workflow refusal in _uberdev_agent_dispatch_backend is gone"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

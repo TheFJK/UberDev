@@ -150,16 +150,16 @@ ROOT_REQUEST_JSON="$(python3 -I -B - "$RUN_DIR" <<'PY'
 import json,sys
 print(json.dumps({
  'schema_version':1,'run_dir':sys.argv[1],'run_id':'orchestrator-receipt-root',
- 'repository_id':'fixture-repository','backend':'codex','workflow':'solve',
+ 'repository_id':'fixture-repository','backend':'background','workflow':'solve',
  'phase':'lead','role':'lead','task_tier':'large',
  'risk_signals':['concurrency','security'],'issue_or_pr':42,'issue_num':42,
- 'capacity':6,'timeout_s':20,'routing_mode':'adaptive',
+ 'capacity':6,'timeout_s':20,
 },sort_keys=True,separators=(',',':')))
 PY
 )"
 mkdir -p "$RUN_DIR"
 ROOT_DECISION_JSON="$(uberdev_agent_resolve_request "$ROOT_REQUEST_JSON")"
-ROOT_METADATA_JSON='{"run_id":"orchestrator-receipt-root","repository_id":"fixture-repository","workflow":"solve","backend":"codex","issue_num":42,"task_tier":"large","risk_signals":["concurrency","security"]}'
+ROOT_METADATA_JSON='{"run_id":"orchestrator-receipt-root","repository_id":"fixture-repository","workflow":"solve","backend":"background","issue_num":42,"task_tier":"large","risk_signals":["concurrency","security"]}'
 ROOT_CONTEXT_OUT="$(uberdev_agent_context_create "$RUN_DIR" "$ROOT_REQUEST_JSON" "$ROOT_DECISION_JSON" \
   '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
   "$ROOT_METADATA_JSON" '2026-07-11T00:00:00Z')"
@@ -193,7 +193,7 @@ import hashlib,json,pathlib,re,sys
 )=sys.argv[1:]
 handoff=json.loads(pathlib.Path(handoff_path).read_text())
 instance=handoff['instance_id']; edge=handoff['edge_id']
-if (backend,issue,tier)!=('codex','42','large'):
+if (backend,issue,tier)!=('background','42','large'):
     raise SystemExit(f'backend arguments mismatch: {(backend,issue,tier)!r}')
 child=pathlib.Path(result_path).parent
 if pathlib.Path(prompt_path)!=child/'prompt.txt' or pathlib.Path(status_path)!=child/'status.json' or child.name!=instance:
@@ -208,14 +208,19 @@ if (last.get('event'),last.get('source'),last.get('edge_id'),last.get('instance_
 
 decision=json.loads(decision_raw)
 if (
- decision.get('schema_version')!=1 or decision.get('backend')!='codex' or
- decision.get('risk_scope')!=handoff.get('risk_scope') or
+ decision.get('schema_version')!=1 or decision.get('backend')!='background' or
  decision.get('risk_signals')!=handoff.get('risk_signals') or
  decision.get('forced') is not False or
- not isinstance(decision.get('model'),str) or not decision.get('model') or
- not isinstance(decision.get('reasoning_effort'),str) or not decision.get('reasoning_effort') or
- decision.get('routing_mode') not in {'adaptive','forced','inherit','shadow'} or
- decision.get('effective_policy') not in {'adaptive','forced','inherit'}
+ # #381 RULING 1: adaptive per-rank routing had exactly one consumer, the codex
+ # backend, and it is deleted. Every surviving backend takes the
+ # backend-neutral-inherit branch in lib/agent-dispatch.sh, which selects NO
+ # model, NO reasoning_effort and carries no risk_scope at all (the neutral
+ # decision has no such key). Asserting a non-empty model/effort here would
+ # be asserting an enforcement no consumer honours; the honest invariant is that
+ # the decision is explicitly neutral, which is what a child must carry.
+ decision.get('model') is not None or decision.get('reasoning_effort') is not None or
+ decision.get('route_source')!='backend-neutral-inherit' or
+ decision.get('routing_mode')!='inherit' or decision.get('effective_policy')!='inherit'
 ):
     raise SystemExit(f'backend decision mismatch: {instance}')
 
@@ -248,7 +253,7 @@ PY
   DISPATCH_LOG=''
   printf 'fixture result for %s\n' "$instance" >"$result"
   chmod 600 "$result" || return 2
-  printf '{"backend":"codex","state":"completed","exit_code":0,"pid":"%s"}\n' "$DISPATCH_ID" >"$status"
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$DISPATCH_ID" >"$status"
   chmod 600 "$status" || return 2
   return 0
 }
@@ -547,7 +552,7 @@ for instance,edge in expected_instances.items():
         correlated=(
           row.get('run_id')==instance and row.get('agent_id')==instance and
           row.get('parent_run_id')=='orchestrator-receipt-root' and
-          row.get('backend')=='codex' and row.get('workflow')=='solve' and
+          row.get('backend')=='background' and row.get('workflow')=='solve' and
           row.get('phase')==handoff.get('phase') and row.get('role')==handoff.get('role') and
           row.get('task_tier')=='large' and row.get('risk_signals')==handoff.get('risk_signals')
         )
@@ -573,7 +578,7 @@ for row in provider_rows:
     if set(row)!={'edge_id','instance_id','backend','issue_num','tier','decision_sha256','lease_generation'}:
         raise SystemExit(f'provider capture shape mismatch: {row!r}')
     if (
-      row.get('backend')!='codex' or row.get('issue_num')!=42 or row.get('tier')!='large' or
+      row.get('backend')!='background' or row.get('issue_num')!=42 or row.get('tier')!='large' or
       not re.fullmatch(r'[0-9a-f]{64}',row.get('decision_sha256','')) or
       not re.fullmatch(r'[A-Za-z0-9._:-]+',row.get('lease_generation',''))
     ):

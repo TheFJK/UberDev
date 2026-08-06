@@ -34,11 +34,15 @@
 
 set -u
 
-# Plugin-root resolution. `CLAUDE_PLUGIN_ROOT` is always set under the Claude
-# plugin, but the byte-identical Codex mirror of this file runs with
-# `PLUGIN_ROOT` instead — and under `set -u` a bare ${CLAUDE_PLUGIN_ROOT} there
-# is a FATAL unbound-variable abort, not a graceful missing-file skip. Resolve
-# once, using the same fallback chain lib/dispatch.sh uses.
+# Plugin-root resolution. Keep the whole chain: it is `set -u` safety plus
+# parity with lib/dispatch.sh's own resolution order, and BOTH still apply.
+# Under `set -u` a bare ${CLAUDE_PLUGIN_ROOT} is a FATAL unbound-variable abort,
+# not a graceful missing-file skip, and CLAUDE_PLUGIN_ROOT is unset whenever
+# this file is sourced outside a plugin session (a direct `bash lib/goal-*.sh`,
+# and every fixture that does the same). Do NOT "simplify" this to the single
+# CLAUDE_PLUGIN_ROOT read. (#381 note: the reason this comment used to give —
+# a byte-identical Codex mirror running with `PLUGIN_ROOT` — is void, that tree
+# is deleted. The chain is not: it was always load-bearing for the above.)
 UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
 
 # >>> region: bash4-resolver
@@ -242,7 +246,7 @@ export WATCH_PASSES WATCH_BUDGET
 # spawned by skills/solve-fleet/workflow.js from inside the calling session,
 # NOT by lib/dispatch.sh. The interim
 # `uberdev_dispatch_demote_workflow_to_detached` call that used to sit here is
-# GONE; there is no demotion, and claude-bg is no longer on any default path.
+# GONE; there is no demotion, and no detached transport is on any default path.
 [ -r "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh" ] && . "${UBERDEV_PLUGIN_ROOT}/lib/dispatch.sh"
 UBERDEV_DISPATCH_BACKEND_REQUESTED="${backend_cli:-${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}}"
 export UBERDEV_DISPATCH_BACKEND_REQUESTED
@@ -257,7 +261,7 @@ export AUTO_MODE=1            # matches commands/turbo.md (enables UBERDEV_TURBO
 # /turbo + /solve defensively unset this var. EFFORT_LEVEL stays unset ->
 # helper applies :-max.
 export SKIP_PERMISSIONS=1     # (#241) /goal autonomous-loop opt-in
-uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG/BG_PROMPT_MODE once
+uberdev_dispatch_resolve_env "${UBERDEV_RESOLVED_BACKEND:-}" || exit 1   # establishes TIMEOUT_BIN/SOLVE_TIMEOUT/MODEL/PERM_FLAG/EFFORT_FLAG once
 # <<< region: backend
 
 # >>> region: goal-id

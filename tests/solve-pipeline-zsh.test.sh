@@ -182,7 +182,7 @@ else
     printf '          %s\n' "${(@f)$(cat "$CAPTURE_FILE_2")}"
   fi
   # Regression guard: --permission-mode auto MUST NOT appear in the spawned argv
-  # (auto-mode-collapse regression — see lib/dispatch.sh and tests/dispatch-claude-bg.test.sh).
+  # (auto-mode-collapse regression — see lib/dispatch.sh and tests/config-override.test.sh).
   if grep -qx -- '--permission-mode auto' "$CAPTURE_FILE_2"; then
     fail "R3b: auto-mode-collapse regression — '--permission-mode auto' re-appeared in spawned argv after post-#241 collapse"
   else

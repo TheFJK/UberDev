@@ -76,6 +76,14 @@ RANGE_LIMIT = 256
 DISPOSITION_LIMIT = 1_048_576
 INDEX_LIMIT = 268_435_456
 PERSISTENCE_RESULT_LIMIT = 1_048_576
+# A reviewer/lens child writes the same provider `result.md` a detached child
+# writes, so the bound-child capture uses the SAME ceiling the Phase-1 evidence
+# builder already applies to that artifact (16 MiB). Deliberately not the
+# 1 MiB persistence bound: that one covers findings-to-issues output, not a
+# reviewer report, and reusing it here would reject long-but-legitimate reports
+# as `artifact_invalid` -- an infrastructure failure wearing a proof failure's
+# error class.
+BOUND_CHILD_RESULT_LIMIT = 16_777_216
 
 __all__ = (
     "Phase",
@@ -91,6 +99,7 @@ __all__ = (
     "capture_standalone_terminal",
     "capture_review_terminal",
     "capture_persistence_terminal",
+    "capture_bound_child",
     "capture_expected",
     "consume_authority",
     "encode_aggregate",
@@ -6238,18 +6247,104 @@ LAUNCH_BINDING_KEYS = {
     "worktree",
     "branch",
 }
-PERSISTENCE_BINDING_KEYS = LAUNCH_BINDING_KEYS | {
-    "aggregate_path",
-    "aggregate_sha256",
-    "disposition_path",
-    "disposition_sha256",
-    "expected_deferred_blockers",
-    "require_clean",
+# A Workflow-native child is awaited in-process, so three of the detached
+# binding's members cannot exist and two more have nothing to describe:
+#
+#   process_identity / lease_generation / handle -- no pid, no process group,
+#       no lease, no provider handle. Synthesising any of them would make the
+#       binding look verified while proving nothing.
+#   receipt_sha256 / launch_status_sha256 -- a Workflow() call issues no
+#       dispatch receipt, and the status file does not exist yet at mint time.
+#
+# `run_nonce` replaces all five. The controller mints it before the Workflow
+# call and the child echoes it back, which is the same binding property the
+# detached triple provided: this status file belongs to THIS launch.
+WORKFLOW_LAUNCH_BINDING_KEYS = {
+    "schema_version",
+    "edge_id",
+    "instance_id",
+    "backend",
+    "run_nonce",
+    "result_path",
+    "status_path",
+    "workspace_mode",
+    "worktree",
+    "branch",
 }
-FIXER_LAUNCH_BINDING_KEYS = LAUNCH_BINDING_KEYS | {
-    "authority_path",
-    "authority_sha256",
-}
+# Every edge whose child the calling session's Workflow tool may dispatch as a
+# BOUND child -- one that publishes a result file the controller must later
+# prove. The three fixer edges arrived first; the Phase-1 and Phase-2
+# contributor rosters join them because skills/review-fleet/workflow.js
+# dispatches those two fanouts as bound children too, and an edge whose binding
+# cannot be minted is an edge whose evidence cannot be proved.
+#
+# Derived from PHASE_CONTRIBUTORS rather than re-spelled, so the roster this
+# binds and the roster post_review_write_aggregate_v2 re-validates can never
+# drift apart. Widening it is a deliberate act: an edge listed here can carry a
+# nonce-bound status file in place of the detached supervision triple.
+# A fixer child additionally owes a disposition and an applied-content artifact.
+# Named once so the two consumers below cannot drift: bind_workflow_launch mints
+# for these, capture_bound_child REFUSES them.
+WORKFLOW_FIXER_EDGE_IDS = frozenset(
+    (
+        "review_pr.fix.phase1",
+        "review_pr.fix.phase2",
+        "simplify.fix.phase2",
+    )
+)
+
+# Reviewer- and lens-shaped children: one result, one status, nothing else.
+WORKFLOW_REVIEWER_EDGE_IDS = frozenset(
+    PHASE_CONTRIBUTORS["phase1"] + PHASE_CONTRIBUTORS["phase2"]
+)
+
+WORKFLOW_BOUND_EDGE_IDS = WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS
+
+# The defer stage's own edge. Kept out of WORKFLOW_BOUND_EDGE_IDS on purpose:
+# a persistence child carries an aggregate and a disposition pin, so it is never
+# bindable through the plain (reviewer-shaped) workflow producer.
+WORKFLOW_PERSISTENCE_EDGE_IDS = frozenset(("review_pr.defer.findings",))
+
+# The exact members that make the two launch shapes mutually exclusive. Derived,
+# never re-spelled: every loader below refuses a binding that carries any member
+# of the OTHER shape, so a mis-declared backend can only be refused -- it can
+# never be re-read as the shape it is not. Widening either base set therefore
+# widens the exclusion automatically instead of silently opening a hole.
+DETACHED_ONLY_BINDING_KEYS = frozenset(
+    LAUNCH_BINDING_KEYS - WORKFLOW_LAUNCH_BINDING_KEYS
+)
+WORKFLOW_ONLY_BINDING_KEYS = frozenset(
+    WORKFLOW_LAUNCH_BINDING_KEYS - LAUNCH_BINDING_KEYS
+)
+
+# The members a fixer/persistence binding adds on top of whichever launch base
+# it sits on. Named once so the detached and workflow shapes cannot drift into
+# owing different proofs: the ONLY difference between them is how the launch is
+# identified, never what the child owes.
+FIXER_BINDING_EXTRA_KEYS = frozenset(
+    (
+        "authority_path",
+        "authority_sha256",
+    )
+)
+PERSISTENCE_BINDING_EXTRA_KEYS = frozenset(
+    (
+        "aggregate_path",
+        "aggregate_sha256",
+        "disposition_path",
+        "disposition_sha256",
+        "expected_deferred_blockers",
+        "require_clean",
+    )
+)
+PERSISTENCE_BINDING_KEYS = LAUNCH_BINDING_KEYS | PERSISTENCE_BINDING_EXTRA_KEYS
+FIXER_LAUNCH_BINDING_KEYS = LAUNCH_BINDING_KEYS | FIXER_BINDING_EXTRA_KEYS
+WORKFLOW_PERSISTENCE_BINDING_KEYS = (
+    WORKFLOW_LAUNCH_BINDING_KEYS | PERSISTENCE_BINDING_EXTRA_KEYS
+)
+WORKFLOW_FIXER_LAUNCH_BINDING_KEYS = (
+    WORKFLOW_LAUNCH_BINDING_KEYS | FIXER_BINDING_EXTRA_KEYS
+)
 CHILD_STATUS_KEYS = {
     "issue",
     "tier",
@@ -6265,6 +6360,11 @@ CHILD_STATUS_KEYS = {
     "workspace_mode",
     "process_identity",
     "lease_generation",
+    # Workflow-native children only. Mutually exclusive with the
+    # pid/process_identity/lease_generation triple — see
+    # _validate_bound_child_status, which enforces the exclusion in both
+    # directions rather than merely permitting the key here.
+    "run_nonce",
 }
 
 
@@ -6289,7 +6389,8 @@ def bind_launch_receipt(
         or value.get("edge_id") != edge_id
         or value.get("instance_id") != instance_id
         or value.get("backend")
-        not in {"codex", "claude-bg", "background", "wezterm"}
+        # CONTRACT: dispatch-backend -auto
+        not in {"background", "wezterm", "workflow"}
         or not isinstance(value.get("handle"), str)
         or not value["handle"]
         or value.get("state")
@@ -6351,13 +6452,158 @@ def bind_launch_receipt(
     }
 
 
+def _binding_base_keys(value: Any, reason: str) -> frozenset[str]:
+    """Pick the launch-binding base key set from the DECLARED backend.
+
+    Every derived loader (fixer, persistence) used to rebuild the detached
+    LAUNCH_BINDING_KEYS base unconditionally before delegating, which is why no
+    workflow binding could reach the fix, simplify or defer captures at all.
+
+    Dispatching on the DECLARED backend -- rather than on which members happen
+    to be present -- is what keeps the choice honest: a binding that declares
+    `workflow` and also carries the detached supervision triple is refused,
+    never quietly re-read as a detached binding whose triple was never proved
+    (and vice versa).
+
+    The explicit cross-shape rejection below is defence in depth, not the sole
+    barrier: each caller also compares the FULL key set for exact equality, and
+    a mutation run confirmed that either check alone refuses today's smuggling
+    inputs. It is kept because the equality check is the one a future edit is
+    likely to relax when a third shape arrives -- with the equality relaxed to a
+    subset test, this rejection is the only thing that still refuses a workflow
+    binding carrying `process_identity`. It reads the two derived sets, so
+    widening either base set widens the exclusion with it.
+    """
+    if not isinstance(value, dict):
+        fail(reason)
+    if value.get("backend") == "workflow":
+        if DETACHED_ONLY_BINDING_KEYS & set(value):
+            fail(reason)
+        return frozenset(WORKFLOW_LAUNCH_BINDING_KEYS)
+    if WORKFLOW_ONLY_BINDING_KEYS & set(value):
+        fail(reason)
+    return frozenset(LAUNCH_BINDING_KEYS)
+
+
+def _mint_workflow_launch(
+    *,
+    edge_id: str,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+    allowed_edge_ids: frozenset[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Shared body of every workflow launch producer.
+
+    The edge allowlist is a parameter, not a constant, because the three
+    producers admit different rosters: reviewer/lens plus fixer edges for the
+    plain producer, the fixer edges alone for the fixer producer, and the single
+    defer edge for the persistence producer. Sharing the body keeps the nonce
+    rule, the path canonicalisation and the emitted key set identical across all
+    three, so no producer can mint a shape the loaders will not accept.
+    """
+    if (
+        not isinstance(run_nonce, str)
+        or re.fullmatch(r"[0-9a-f]{64}", run_nonce) is None
+    ):
+        fail(reason)
+    if edge_id not in allowed_edge_ids:
+        fail(reason)
+    if not isinstance(instance_id, str) or not instance_id:
+        fail(reason)
+    canonical_result = _absolute_input(result_path, reason)
+    canonical_status = _absolute_input(status_path, reason)
+    canonical_working = _absolute_input(working_dir, reason)
+    return {
+        "schema_version": 1,
+        "edge_id": edge_id,
+        "instance_id": instance_id,
+        "backend": "workflow",
+        "run_nonce": run_nonce,
+        "result_path": canonical_result,
+        "status_path": canonical_status,
+        "workspace_mode": "caller",
+        "worktree": canonical_working,
+        "branch": "",
+    }
+
+
+def bind_workflow_launch(
+    *,
+    edge_id: str,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+) -> dict[str, Any]:
+    """Mint the launch binding for a Workflow-native child.
+
+    Deliberately NOT a variant of bind_launch_receipt. That function derives its
+    binding from a dispatch receipt and a launch status file; a Workflow() call
+    issues no receipt, and at mint time the status file does not exist yet --
+    the controller mints the nonce BEFORE the call, which is the only moment the
+    binding can be created without the child having had a chance to influence
+    it. Deriving from a child-written artifact would let the child choose its
+    own binding.
+
+    The detached triple is not merely omitted here, it is unrepresentable: the
+    key set has no place to put it.
+    """
+    return _mint_workflow_launch(
+        edge_id=edge_id,
+        instance_id=instance_id,
+        run_nonce=run_nonce,
+        result_path=result_path,
+        status_path=status_path,
+        working_dir=working_dir,
+        allowed_edge_ids=WORKFLOW_BOUND_EDGE_IDS,
+        reason="launch_binding_invalid",
+    )
+
+
+def _load_workflow_launch_binding(
+    value: dict[str, Any], expected_edge_id: str, payload: bytes
+) -> dict[str, Any]:
+    if (
+        set(value) != WORKFLOW_LAUNCH_BINDING_KEYS
+        or _canonical_json(value) != payload
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or value.get("edge_id") != expected_edge_id
+        or not isinstance(value.get("instance_id"), str)
+        or not value["instance_id"]
+        or not isinstance(value.get("run_nonce"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["run_nonce"]) is None
+        or value.get("workspace_mode") != "caller"
+        or value.get("branch") != ""
+    ):
+        fail("launch_binding_invalid")
+    for key in ("result_path", "status_path", "worktree"):
+        item = value.get(key)
+        if not isinstance(item, str) or _absolute_input(
+            item, "launch_binding_invalid"
+        ) != item:
+            fail("launch_binding_invalid")
+    return value
+
+
 def _load_launch_binding(payload: bytes, expected_edge_id: str) -> dict[str, Any]:
     if not isinstance(payload, bytes) or not payload or len(payload) > 65_536:
         fail("launch_binding_invalid")
     value = _parse_json(payload, "launch_binding_invalid")
+    if not isinstance(value, dict):
+        fail("launch_binding_invalid")
+    # The two key sets are disjoint on the members that matter, so a binding
+    # cannot satisfy both. Dispatching on the declared backend keeps the
+    # exclusion explicit rather than letting a smuggled member decide.
+    if value.get("backend") == "workflow":
+        return _load_workflow_launch_binding(value, expected_edge_id, payload)
     if (
-        not isinstance(value, dict)
-        or set(value) != LAUNCH_BINDING_KEYS
+        set(value) != LAUNCH_BINDING_KEYS
         or _canonical_json(value) != payload
         or type(value.get("schema_version")) is not int
         or value["schema_version"] != 1
@@ -6365,7 +6611,8 @@ def _load_launch_binding(payload: bytes, expected_edge_id: str) -> dict[str, Any
         or not isinstance(value.get("instance_id"), str)
         or not value["instance_id"]
         or value.get("backend")
-        not in {"codex", "claude-bg", "background", "wezterm"}
+        # CONTRACT: dispatch-backend -auto
+        not in {"background", "wezterm", "workflow"}
         or not isinstance(value.get("handle"), str)
         or not value["handle"]
         or not isinstance(value.get("receipt_sha256"), str)
@@ -6431,15 +6678,65 @@ def bind_fixer_launch_receipt(
     return binding
 
 
+def bind_workflow_fixer_launch(
+    *,
+    edge_id: str,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+    authority_path: str,
+    authority_sha256: str,
+) -> dict[str, Any]:
+    """Mint the fixer launch binding for a Workflow-native child.
+
+    The workflow twin of `bind_fixer_launch_receipt`, and deliberately owing the
+    SAME extra proof: the controller-created authority is pinned by path and
+    digest, and it must name this edge and this worktree. A fixer child owes a
+    disposition and an applied-content artifact that a reviewer never writes, so
+    the reviewer-shaped `bind_workflow_launch` is not a substitute -- and the
+    edge allowlist here is the fixer roster alone, so a reviewer edge cannot be
+    minted into a fixer binding and skip those obligations.
+    """
+    if edge_id not in WORKFLOW_FIXER_EDGE_IDS:
+        fail("fixer_binding_invalid")
+    canonical_authority = _absolute_input(authority_path, "authority_path_invalid")
+    authority = _load_authority(canonical_authority, authority_sha256)
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    if (
+        authority["edge_id"] != edge_id
+        or authority["working_dir"] != canonical_working
+    ):
+        fail("fixer_binding_invalid")
+    binding = _mint_workflow_launch(
+        edge_id=edge_id,
+        instance_id=instance_id,
+        run_nonce=run_nonce,
+        result_path=result_path,
+        status_path=status_path,
+        working_dir=canonical_working,
+        allowed_edge_ids=WORKFLOW_FIXER_EDGE_IDS,
+        reason="launch_binding_invalid",
+    )
+    binding.update(
+        {
+            "authority_path": canonical_authority,
+            "authority_sha256": authority_sha256,
+        }
+    )
+    return binding
+
+
 def _load_fixer_launch_binding(
     payload: bytes, expected_edge_id: str
 ) -> dict[str, Any]:
     if not isinstance(payload, bytes) or not payload or len(payload) > 65_536:
         fail("fixer_binding_invalid")
     value = _parse_json(payload, "fixer_binding_invalid")
+    base_keys = _binding_base_keys(value, "fixer_binding_invalid")
     if (
-        not isinstance(value, dict)
-        or set(value) != FIXER_LAUNCH_BINDING_KEYS
+        set(value) != base_keys | FIXER_BINDING_EXTRA_KEYS
         or _canonical_json(value) != payload
         or not isinstance(value.get("authority_path"), str)
         or _absolute_input(value["authority_path"], "fixer_binding_invalid")
@@ -6448,7 +6745,7 @@ def _load_fixer_launch_binding(
         or SHA256.fullmatch(value["authority_sha256"]) is None
     ):
         fail("fixer_binding_invalid")
-    base = {key: value[key] for key in LAUNCH_BINDING_KEYS}
+    base = {key: value[key] for key in base_keys}
     _load_launch_binding(_canonical_json(base), expected_edge_id)
     authority = _load_authority(value["authority_path"], value["authority_sha256"])
     if (
@@ -6479,6 +6776,55 @@ def bind_persistence_launch_receipt(
     canonical_disposition = _absolute_input(
         disposition_path, "disposition_path_invalid"
     )
+    _validate_persistence_authority(
+        edge_id=edge_id,
+        canonical_working=canonical_working,
+        canonical_aggregate=canonical_aggregate,
+        aggregate_sha256=aggregate_sha256,
+        canonical_disposition=canonical_disposition,
+        disposition_sha256=disposition_sha256,
+        expected_deferred_blockers=expected_deferred_blockers,
+        require_clean=require_clean,
+    )
+    binding = bind_launch_receipt(
+        receipt=receipt,
+        edge_id=edge_id,
+        instance_id=instance_id,
+        result_path=result_path,
+        status_path=status_path,
+        working_dir=working_dir,
+    )
+    binding.update(
+        {
+            "aggregate_path": canonical_aggregate,
+            "aggregate_sha256": aggregate_sha256,
+            "disposition_path": canonical_disposition,
+            "disposition_sha256": disposition_sha256,
+            "expected_deferred_blockers": expected_deferred_blockers,
+            "require_clean": require_clean,
+        }
+    )
+    return binding
+
+
+def _validate_persistence_authority(
+    *,
+    edge_id: str,
+    canonical_working: str,
+    canonical_aggregate: str,
+    aggregate_sha256: str,
+    canonical_disposition: str,
+    disposition_sha256: str,
+    expected_deferred_blockers: int,
+    require_clean: bool,
+) -> None:
+    """The defer stage's extra obligations, shared by both producers.
+
+    Named once so the detached and workflow persistence bindings cannot drift
+    into pinning different things: same edge, same containment rule, same digest
+    shapes, and the same recount of deferred blockers against the pinned
+    aggregate and disposition bytes.
+    """
     if (
         edge_id != "review_pr.defer.findings"
         or not beneath(canonical_working, canonical_aggregate)
@@ -6502,13 +6848,54 @@ def bind_persistence_launch_receipt(
     )
     if observed_deferred_blockers != expected_deferred_blockers:
         fail("persistence_binding_invalid")
-    binding = bind_launch_receipt(
-        receipt=receipt,
+
+
+def bind_workflow_persistence_launch(
+    *,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+    aggregate_path: str,
+    aggregate_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+    expected_deferred_blockers: int,
+    require_clean: bool,
+) -> dict[str, Any]:
+    """Mint the persistence launch binding for a Workflow-native defer child.
+
+    The workflow twin of `bind_persistence_launch_receipt`. It takes no edge id
+    because there is exactly one defer edge, and it re-counts the deferred
+    blockers from the pinned bytes here rather than trusting the caller's
+    number -- the same obligation the detached producer carries.
+    """
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    canonical_aggregate = _absolute_input(aggregate_path, "findings_path_invalid")
+    canonical_disposition = _absolute_input(
+        disposition_path, "disposition_path_invalid"
+    )
+    edge_id = "review_pr.defer.findings"
+    _validate_persistence_authority(
+        edge_id=edge_id,
+        canonical_working=canonical_working,
+        canonical_aggregate=canonical_aggregate,
+        aggregate_sha256=aggregate_sha256,
+        canonical_disposition=canonical_disposition,
+        disposition_sha256=disposition_sha256,
+        expected_deferred_blockers=expected_deferred_blockers,
+        require_clean=require_clean,
+    )
+    binding = _mint_workflow_launch(
         edge_id=edge_id,
         instance_id=instance_id,
+        run_nonce=run_nonce,
         result_path=result_path,
         status_path=status_path,
-        working_dir=working_dir,
+        working_dir=canonical_working,
+        allowed_edge_ids=WORKFLOW_PERSISTENCE_EDGE_IDS,
+        reason="launch_binding_invalid",
     )
     binding.update(
         {
@@ -6527,9 +6914,9 @@ def _load_persistence_binding(payload: bytes) -> dict[str, Any]:
     if not isinstance(payload, bytes) or not payload or len(payload) > 65_536:
         fail("persistence_binding_invalid")
     value = _parse_json(payload, "persistence_binding_invalid")
+    base_keys = _binding_base_keys(value, "persistence_binding_invalid")
     if (
-        not isinstance(value, dict)
-        or set(value) != PERSISTENCE_BINDING_KEYS
+        set(value) != base_keys | PERSISTENCE_BINDING_EXTRA_KEYS
         or _canonical_json(value) != payload
         or not isinstance(value.get("aggregate_sha256"), str)
         or SHA256.fullmatch(value["aggregate_sha256"]) is None
@@ -6551,7 +6938,7 @@ def _load_persistence_binding(payload: bytes) -> dict[str, Any]:
         or not beneath(value.get("worktree"), value["disposition_path"])
     ):
         fail("persistence_binding_invalid")
-    base = {key: value[key] for key in LAUNCH_BINDING_KEYS}
+    base = {key: value[key] for key in base_keys}
     _load_launch_binding(
         _canonical_json(base), "review_pr.defer.findings"
     )
@@ -6574,16 +6961,89 @@ def capture_persistence_terminal(*, launch_binding: bytes) -> dict[str, Any]:
     }
 
 
+DETACHED_SUPERVISION_KEYS = {"pid", "process_identity", "lease_generation"}
+
+
+def _launch_identity(binding: dict[str, Any]) -> dict[str, str]:
+    """The outcome's tie back to THE launch that produced it.
+
+    A detached outcome is identified by the dispatch receipt's digest. A
+    Workflow() call issues no receipt, so a workflow outcome is identified by
+    the nonce the controller minted before the call -- a real value this process
+    read out of the binding, not a synthesised digest.
+
+    They are emitted under DIFFERENT keys deliberately. Relabelling the nonce as
+    `receipt_sha256` would let a consumer written to check a dispatch receipt
+    accept a workflow outcome as though a receipt had been verified; a distinct
+    key makes such a consumer fail closed until it is taught the workflow shape.
+    """
+    if binding.get("backend") == "workflow":
+        return {"run_nonce": binding["run_nonce"]}
+    return {"receipt_sha256": binding["receipt_sha256"]}
+
+
+def _validate_bound_workflow_child_status(
+    binding: dict[str, Any], status_document: dict[str, Any]
+) -> None:
+    """Bind a Workflow-native child's status on a nonce instead of a PID.
+
+    A Workflow child is awaited in-process: it owns no pid, no process group and
+    no lease, so the detached triple cannot be populated. What that triple
+    defends against -- a status file written by a different or recycled process,
+    or by a stale detached agent -- cannot occur for an awaited call, so a
+    single-use nonce the controller mints and the relay agent echoes back
+    carries the same binding.
+
+    The triple must be ABSENT, not null and not fabricated. A synthetic pid
+    would leave every downstream equality check looking correct while proving
+    nothing, which is strictly worse than having no check at all.
+    """
+    nonce = binding.get("run_nonce")
+    if (
+        set(status_document) - CHILD_STATUS_KEYS
+        or DETACHED_SUPERVISION_KEYS & set(status_document)
+        or not {
+            "backend",
+            "state",
+            "exit_code",
+            "run_nonce",
+            "workspace_mode",
+            "worktree",
+            "branch",
+        }.issubset(status_document)
+        or status_document.get("backend") != "workflow"
+        or status_document.get("state") != "completed"
+        or type(status_document.get("exit_code")) is not int
+        or status_document["exit_code"] != 0
+        or not isinstance(nonce, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", nonce)
+        or status_document.get("run_nonce") != nonce
+        or status_document.get("workspace_mode") != binding["workspace_mode"]
+        or status_document.get("worktree") != binding["worktree"]
+        or status_document.get("branch") != binding["branch"]
+        or (
+            "result" in status_document
+            and status_document["result"] != binding["result_path"]
+        )
+    ):
+        fail("child_status_invalid")
+
+
 def _validate_bound_child_status(
     binding: dict[str, Any], status_payload: bytes
 ) -> None:
     status_document = _parse_json(status_payload, "child_status_invalid")
-    status_handle = (
-        status_document.get("pid") if isinstance(status_document, dict) else None
-    )
+    if not isinstance(status_document, dict):
+        fail("child_status_invalid")
+    if binding.get("backend") == "workflow":
+        _validate_bound_workflow_child_status(binding, status_document)
+        return
+    status_handle = status_document.get("pid")
     if (
-        not isinstance(status_document, dict)
-        or set(status_document) - CHILD_STATUS_KEYS
+        set(status_document) - CHILD_STATUS_KEYS
+        # A detached backend still owes the supervision triple; it must not
+        # smuggle a workflow nonce in place of it.
+        or "run_nonce" in status_document
         or status_document.get("backend") != binding["backend"]
         or status_document.get("state") != "completed"
         or not {
@@ -6614,6 +7074,65 @@ def _validate_bound_child_status(
         )
     ):
         fail("child_status_invalid")
+
+
+def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any]:
+    """Freeze a bound child's artifacts and prove the binding, for ANY roster edge.
+
+    The reviewer-shaped sibling of `capture_review_terminal`. The three existing
+    `capture-*-terminal` verbs are all fixer/defer-shaped: each loads a binding
+    carrying a disposition and an applied-content artifact, which a reviewer or
+    a simplifier lens never writes. There was consequently NO verb that could
+    consume a reviewer child of any backend, which is why a Workflow-dispatched
+    review stage could not prove its own evidence.
+
+    This verb adds no new trust surface. It is the composition of two shipped
+    primitives -- `_load_launch_binding` (which already dispatches to the
+    workflow loader on `backend == "workflow"`) and `_validate_bound_child_status`
+    (which already dispatches to the nonce validator) -- over `_capture_regular`,
+    the same bounded reader every other capture uses.
+
+    Both digests are computed HERE, from bytes this process read off disk. No
+    caller-supplied digest is accepted and none is compared: a verb that took a
+    digest as input could be handed one an agent computed, which is precisely
+    the degradation from *the controller proved it* to *an LLM said so* that the
+    review-fleet seam exists to prevent.
+
+    The status file is captured and validated BEFORE the result file is read, so
+    a child that never bound itself costs a refusal rather than a capture.
+    """
+    # Enforce the contract this docstring states. bind_workflow_launch mints
+    # bindings for the fixer edges too, so without this a fixer child could be
+    # frozen by the reviewer-shaped verb and skip the disposition and
+    # applied-content artifacts it owes -- the capture would look complete and
+    # would have proved strictly less.
+    if edge_id in WORKFLOW_FIXER_EDGE_IDS:
+        fail("bound_child_edge_unsupported")
+    if edge_id not in WORKFLOW_REVIEWER_EDGE_IDS:
+        fail("bound_child_edge_unsupported")
+    binding = _load_launch_binding(launch_binding, edge_id)
+    if binding.get("backend") != "workflow":
+        fail("launch_binding_invalid")
+    status_payload, status_identity = _capture_regular(
+        binding["status_path"], 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    result_payload, result_identity = _capture_regular(
+        binding["result_path"], 1, BOUND_CHILD_RESULT_LIMIT
+    )
+    # Two distinct artifacts, not one file reached by two names. Without this a
+    # symlinked or hardlinked status.json -> result.md would satisfy every
+    # equality below while carrying a single set of bytes.
+    if status_identity == result_identity:
+        fail("child_status_invalid")
+    return {
+        "edge_id": binding["edge_id"],
+        "instance_id": binding["instance_id"],
+        "status_path": binding["status_path"],
+        "status_sha256": hashlib.sha256(status_payload).hexdigest(),
+        "result_path": binding["result_path"],
+        "result_sha256": hashlib.sha256(result_payload).hexdigest(),
+    }
 
 
 def capture_standalone_terminal(
@@ -6921,7 +7440,7 @@ def validate_standalone_outcome(
     return {
         "status": derived_status,
         "declared_tip": declared_tip,
-        "receipt_sha256": binding["receipt_sha256"],
+        **_launch_identity(binding),
         "status_sha256": status_sha256,
         "result_sha256": result_sha256,
         "disposition_sha256": disposition_sha256,
@@ -7049,7 +7568,7 @@ def validate_review_outcome(
     return {
         "status": derived_status,
         "declared_tip": declared_tip,
-        "receipt_sha256": binding["receipt_sha256"],
+        **_launch_identity(binding),
         "status_sha256": status_sha256,
         "result_sha256": result_sha256,
         "disposition_sha256": disposition_sha256,
@@ -7195,6 +7714,49 @@ def _parser() -> argparse.ArgumentParser:
     bind_fixer.add_argument("--working-dir", required=True)
     bind_fixer.add_argument("--authority-path", required=True)
     bind_fixer.add_argument("--authority-sha256", required=True)
+    # A Workflow() call issues no dispatch receipt, so this verb takes no stdin
+    # and derives its binding entirely from controller-supplied scalars. The
+    # nonce is minted by the caller BEFORE the Workflow call -- the only moment
+    # a binding can be created that the child had no chance to influence.
+    bind_workflow = commands.add_parser("bind-workflow-launch", add_help=False)
+    bind_workflow.add_argument("--edge-id", required=True)
+    bind_workflow.add_argument("--instance-id", required=True)
+    bind_workflow.add_argument("--run-nonce", required=True)
+    bind_workflow.add_argument("--result-path", required=True)
+    bind_workflow.add_argument("--status-path", required=True)
+    bind_workflow.add_argument("--working-dir", required=True)
+    # The fixer and defer twins of bind-workflow-launch. Same no-stdin rule:
+    # there is no dispatch receipt to read, and the nonce is minted before the
+    # Workflow call. Each still pins everything its detached twin pins.
+    bind_workflow_fixer = commands.add_parser(
+        "bind-workflow-fixer-launch", add_help=False
+    )
+    bind_workflow_fixer.add_argument("--edge-id", required=True)
+    bind_workflow_fixer.add_argument("--instance-id", required=True)
+    bind_workflow_fixer.add_argument("--run-nonce", required=True)
+    bind_workflow_fixer.add_argument("--result-path", required=True)
+    bind_workflow_fixer.add_argument("--status-path", required=True)
+    bind_workflow_fixer.add_argument("--working-dir", required=True)
+    bind_workflow_fixer.add_argument("--authority-path", required=True)
+    bind_workflow_fixer.add_argument("--authority-sha256", required=True)
+    bind_workflow_persistence = commands.add_parser(
+        "bind-workflow-persistence-launch", add_help=False
+    )
+    bind_workflow_persistence.add_argument("--instance-id", required=True)
+    bind_workflow_persistence.add_argument("--run-nonce", required=True)
+    bind_workflow_persistence.add_argument("--result-path", required=True)
+    bind_workflow_persistence.add_argument("--status-path", required=True)
+    bind_workflow_persistence.add_argument("--working-dir", required=True)
+    bind_workflow_persistence.add_argument("--aggregate-path", required=True)
+    bind_workflow_persistence.add_argument("--aggregate-sha256", required=True)
+    bind_workflow_persistence.add_argument("--disposition-path", required=True)
+    bind_workflow_persistence.add_argument("--disposition-sha256", required=True)
+    bind_workflow_persistence.add_argument(
+        "--expected-deferred-blockers", type=int, required=True
+    )
+    bind_workflow_persistence.add_argument(
+        "--require-clean", choices=("0", "1"), required=True
+    )
     bind_persistence = commands.add_parser(
         "bind-persistence-launch-receipt", add_help=False
     )
@@ -7225,6 +7787,9 @@ def _parser() -> argparse.ArgumentParser:
         "capture-persistence-terminal", add_help=False
     )
     persistence_terminal.add_argument("--launch-binding-json", required=True)
+    bound_child = commands.add_parser("capture-bound-child", add_help=False)
+    bound_child.add_argument("--launch-binding-json", required=True)
+    bound_child.add_argument("--edge-id", required=True)
     outcome = commands.add_parser("validate-standalone-outcome", add_help=False)
     outcome.add_argument("--launch-binding-json", required=True)
     outcome.add_argument("--authority-path", required=True)
@@ -7494,6 +8059,46 @@ def main() -> int:
                     authority_sha256=arguments.authority_sha256,
                 )
             )
+        elif arguments.command == "bind-workflow-launch":
+            output = _compact(
+                bind_workflow_launch(
+                    edge_id=arguments.edge_id,
+                    instance_id=arguments.instance_id,
+                    run_nonce=arguments.run_nonce,
+                    result_path=arguments.result_path,
+                    status_path=arguments.status_path,
+                    working_dir=arguments.working_dir,
+                )
+            )
+        elif arguments.command == "bind-workflow-fixer-launch":
+            output = _compact(
+                bind_workflow_fixer_launch(
+                    edge_id=arguments.edge_id,
+                    instance_id=arguments.instance_id,
+                    run_nonce=arguments.run_nonce,
+                    result_path=arguments.result_path,
+                    status_path=arguments.status_path,
+                    working_dir=arguments.working_dir,
+                    authority_path=arguments.authority_path,
+                    authority_sha256=arguments.authority_sha256,
+                )
+            )
+        elif arguments.command == "bind-workflow-persistence-launch":
+            output = _compact(
+                bind_workflow_persistence_launch(
+                    instance_id=arguments.instance_id,
+                    run_nonce=arguments.run_nonce,
+                    result_path=arguments.result_path,
+                    status_path=arguments.status_path,
+                    working_dir=arguments.working_dir,
+                    aggregate_path=arguments.aggregate_path,
+                    aggregate_sha256=arguments.aggregate_sha256,
+                    disposition_path=arguments.disposition_path,
+                    disposition_sha256=arguments.disposition_sha256,
+                    expected_deferred_blockers=arguments.expected_deferred_blockers,
+                    require_clean=arguments.require_clean == "1",
+                )
+            )
         elif arguments.command == "bind-persistence-launch-receipt":
             receipt = sys.stdin.buffer.read(65_537)
             output = _compact(
@@ -7532,6 +8137,13 @@ def main() -> int:
             output = _compact(
                 capture_persistence_terminal(
                     launch_binding=arguments.launch_binding_json.encode("utf-8")
+                )
+            )
+        elif arguments.command == "capture-bound-child":
+            output = _compact(
+                capture_bound_child(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    edge_id=arguments.edge_id,
                 )
             )
         elif arguments.command == "validate-standalone-outcome":

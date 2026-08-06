@@ -416,9 +416,10 @@ def policy_data(path, validator_path):
     aliases = policy["aliases"]
     roles = policy["roles"]
     route_names = set(routes)
-    efforts = set()
-    for row in routes.values():
-        efforts.add(row["codex"]["reasoning_effort"])
+    # Reads the declared vocabulary rather than scraping it out of per-route
+    # provider blocks, which no longer exist (#381). The accepted token set is
+    # unchanged; only its source moved from derived to declared.
+    efforts = set(policy["reasoning_efforts"])
     return route_names | set(aliases), set(roles), efforts
 
 def scalar(raw):
@@ -610,14 +611,18 @@ _uberdev_routing_policy_file() {
       return 0
     fi
   fi
-  for candidate in \
-    "${PWD}/plugins/uberdev/policy/model-routing-v1.json" \
-    "${PWD}/codex/uberdev-codex/policy/model-routing-v1.json"; do
-    if [ -n "$candidate" ] && [ -r "$candidate" ]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
+  # In-repo development fallback. The second candidate was
+  # ${PWD}/codex/uberdev-codex/policy/model-routing-v1.json until issue #381
+  # deleted that tree; it is unreachable, not merely unused. The CODEX_HOME
+  # branch above is a different thing and stays — it resolves an INSTALLED
+  # Codex runtime: `.codex/uberdev.local.md` is still a supported project
+  # config family (`project-codex` provenance), independent of the deleted
+  # `codex` dispatch backend.
+  candidate="${PWD}/plugins/uberdev/policy/model-routing-v1.json"
+  if [ -r "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
   return 1
 }
 
@@ -894,6 +899,13 @@ uberdev_emit_workflow_args() {
   local run_id plugin_root repo_root cwd
   run_id="$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x%04x' "$$" "$RANDOM")"
   plugin_root="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+  # LEGACY-INSTALL ARM ONLY (#381). ${CODEX_HOME}/plugins/uberdev-codex is a
+  # path nothing in this release can produce -- the Codex distribution that
+  # wrote it is deleted, and the CHANGELOG's uninstall recipe tells existing
+  # users to remove that directory. It is kept, not deleted, because a machine
+  # that still has the stale tree resolves SOMETHING here instead of an empty
+  # plugin_root; retiring it is a deliberate follow-up, not an oversight.
+  # tests/workflow-args.test.sh W2.6 pins this arm as legacy, not as intent.
   if [ -z "$plugin_root" ] && [ -n "${CODEX_HOME:-}" ]; then
     plugin_root="${CODEX_HOME}/plugins/uberdev-codex"
   fi

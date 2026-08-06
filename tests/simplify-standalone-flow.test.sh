@@ -158,7 +158,7 @@ raw_receipt = {
     "schema_version": 1,
     "edge_id": edge_id,
     "instance_id": instance_id,
-    "backend": "codex",
+    "backend": "background",
     "handle": "12345",
     "state": "completed",
     "result_file": raw_result,
@@ -524,7 +524,7 @@ path,handle,worktree,result=sys.argv[1:]
 worktree=os.path.realpath(os.path.abspath(worktree))
 result=os.path.realpath(os.path.abspath(result))
 value={
-    "backend":"codex",
+    "backend":"background",
     "branch":"",
     "exit_code":0,
     "lease_generation":"0123456789abcdef0123456789abcdef",
@@ -545,7 +545,7 @@ import json,os,sys
 edge,instance,result,status=sys.argv[1:]
 result=os.path.realpath(os.path.abspath(result))
 status=os.path.realpath(os.path.abspath(status))
-print(json.dumps({"schema_version":1,"edge_id":edge,"instance_id":instance,"backend":"codex","handle":"12345","state":"completed","result_file":result,"status_file":status},sort_keys=True,separators=(",",":")),end="")
+print(json.dumps({"schema_version":1,"edge_id":edge,"instance_id":instance,"backend":"background","handle":"12345","state":"completed","result_file":result,"status_file":status},sort_keys=True,separators=(",",":")),end="")
 PY
 )"
   }

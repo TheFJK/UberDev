@@ -10,15 +10,14 @@
 #   uberdev_dispatch_resolve_env                      -> sets the 6 dispatch-env vars; call after preflight
 #   uberdev_dispatch_one  ISSUE_NUM TIER PROMPT_FILE  -> dispatch one issue
 # Internal:
-#   _uberdev_dispatch_claude_bg / _uberdev_dispatch_wezterm /
-#   _uberdev_dispatch_background / _uberdev_dispatch_codex
+#   _uberdev_dispatch_wezterm / _uberdev_dispatch_background
 #
 # Sourced by:
 #   - skills/solve-pipeline/SKILL.md Step 5b
 #   - skills/goal-pipeline/SKILL.md Phase 0
 #   - commands/review-pr.md executable setup and routed child adapter
-#   - tests/dispatch-claude-bg.test.sh, dispatch-fallback.test.sh,
-#     dispatch-background.test.sh, dispatch-wezterm.test.sh
+#   - tests/dispatch-fallback.test.sh, dispatch-background.test.sh,
+#     dispatch-wezterm.test.sh
 #
 # All variable expansions are double-quoted (mirrors lib/config-read.sh discipline).
 # Source-time idempotent: the guard below makes repeat `source` calls cheap.
@@ -45,6 +44,11 @@ case "$_UBERDEV_DISPATCH_FILE" in
   *) _UBERDEV_DISPATCH_LIB_DIR='.' ;;
 esac
 _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd -P)"
+# The plugin root is derived from this file's own location, NOT from
+# CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT. The workflow-engine probe below asks "can the
+# install I was loaded from actually run this fleet?", and an env var set by a
+# different install would answer for the wrong tree.
+_UBERDEV_DISPATCH_PLUGIN_ROOT="${_UBERDEV_DISPATCH_LIB_DIR%/*}"
 # shellcheck source=/dev/null
 . "$_UBERDEV_DISPATCH_LIB_DIR/agent-dispatch.sh" || return 1
 # shellcheck source=/dev/null
@@ -52,29 +56,18 @@ _UBERDEV_DISPATCH_LIB_DIR="$(cd "$_UBERDEV_DISPATCH_LIB_DIR" 2>/dev/null && pwd 
 _UBERDEV_DISPATCH_LOADED=1
 
 # A provider-managed worktree may finish its final git worktree unlock at the
-# same time as the Codex supervisor starts cleanup. Retry only transient Git
-# metadata/probe failures (rc2); preservation decisions (rc3) are terminal.
-_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS=3
-_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S=0.05
-_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S=0.10
-_UBERDEV_CODEX_CREATE_MAX_ATTEMPTS=3
-_UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S=0.05
-_UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S=0.10
-_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S=60
-_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S=300
-_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS=8
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS=8
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_POLLS_PER_SECOND=4
-_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S=0.05
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S=0.10
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S=0.25
-_UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND=20
-_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS=1
-_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS=2
-_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS=5
-_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S=1
-_UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S=2
-_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS=3
+# same time as the dispatching supervisor starts cleanup. Retry only transient
+# Git metadata/probe failures (rc2); preservation decisions (rc3) are terminal.
+# Shared by every dispatcher-owned worktree teardown, not just one backend's.
+_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS=3
+_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S=0.05
+_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S=0.10
+# The long-poll / ownerless-generation reclaim budget that used to live here
+# existed for ONE caller: the synchronous `claude --bg --worktree` bootstrap,
+# which could legitimately own the repository metadata mutex for its whole
+# provider timeout. That backend is gone (RFC 0015 §7), so every remaining
+# caller is an ordinary short Git transaction served by the semaphore's own
+# default acquisition policy.
 
 _uberdev_dispatch_resolve_python() {
   local candidate='' prefix='' candidate_dir candidate_base
@@ -222,153 +215,25 @@ PY
     "$common_dir" git-worktree-metadata
 }
 
-_uberdev_dispatch_claude_bootstrap_queue_slots() {
-  local slots expected
-  if [ -n "${POST_IMPL_REVIEW_CAP:-}" ]; then
-    slots="$POST_IMPL_REVIEW_CAP"
-    expected="${REVIEW_EXPECTED_COUNT:-}"
-  elif [ -n "${MAX_PARALLEL_BG_AGENTS:-}" ]; then
-    slots="$MAX_PARALLEL_BG_AGENTS"
-    expected="${TOTAL_ISSUES:-}"
-  else
-    slots=1
-    expected=''
-  fi
-  case "$slots" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
-  if [ -n "$expected" ]; then
-    case "$expected" in [1-9]|[1-4][0-9]|50) ;; *) return 2 ;; esac
-    [ "$expected" -ge "$slots" ] || slots="$expected"
-  fi
-  printf '%s\n' "$slots"
-}
-
-# Claude's synchronous `--bg --worktree` bootstrap may legitimately own the
-# repository mutex for its full provider timeout. Poll it at a low frequency
-# with backoff, one ownership-safe acquisition attempt per poll. The wait
-# budget is derived from the actual enforced fanout wave, so ordinary Git
-# add/cleanup callers retain the semaphore's short default policy.
+# Every remaining metadata transaction (worktree add, child-worktree
+# cleanup) is a short synchronous Git command, so the semaphore's own default
+# acquisition policy is the whole protocol. The long-poll + ownerless-generation
+# reclaim path this used to carry was reachable ONLY from the `claude-bootstrap`
+# phase, which no longer exists (RFC 0015 §7): it was there because a detached
+# `claude --bg --worktree` bootstrap could hold the mutex for its full provider
+# timeout, and nothing else ever asked for a wait budget that long.
 _uberdev_dispatch_git_metadata_mutex_acquire() {
-  local scope="$1" phase="$2" operation_timeout="${3:-}" queue_slots provider_wait_seconds
-  local scheduled_wait_seconds wall_wait_seconds
-  local wait_tick_limit grace_ticks max_polls polls=0 waited_ticks=0 delay delay_ticks acquire_rc
-  local wall_started wall_elapsed
-  local observed_state observed_identity ownerless_identity='' ownerless_first_tick=0 ownerless_confirmations=0
-  local stable_ticks reclaim_rc
-  if [ "$phase" != claude-bootstrap ] || [ -z "$operation_timeout" ]; then
-    _uberdev_semaphore_mutex_acquire "$scope"
-    return $?
-  fi
-  case "$operation_timeout" in
-    [1-9]|[1-9][0-9]|[12][0-9][0-9]|300) ;;
-    *) return 2 ;;
-  esac
-  queue_slots="$(_uberdev_dispatch_claude_bootstrap_queue_slots)" || return 2
-  provider_wait_seconds=$((operation_timeout * queue_slots))
-  scheduled_wait_seconds=$((provider_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S))
-  wall_wait_seconds=$((scheduled_wait_seconds + _UBERDEV_GIT_METADATA_MUTEX_WALL_PROBE_ALLOWANCE_S))
-  wait_tick_limit=$((scheduled_wait_seconds * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
-  grace_ticks=$((_UBERDEV_GIT_METADATA_MUTEX_PUBLICATION_GRACE_S * _UBERDEV_GIT_METADATA_MUTEX_WAIT_TICKS_PER_SECOND))
-  max_polls=$((wait_tick_limit \
-    + _UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS))
-  wall_started="$SECONDS"
-  while [ "$polls" -lt "$max_polls" ]; do
-    wall_elapsed=$((SECONDS - wall_started))
-    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    if UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=1 UBERDEV_SEMAPHORE_MUTEX_QUIET_BUSY=1 \
-        UBERDEV_SEMAPHORE_MUTEX_PROBE_ONLY=1 \
-        _uberdev_semaphore_mutex_acquire "$scope"; then
-      return 0
-    else
-      acquire_rc=$?
-    fi
-    [ "$acquire_rc" -eq 75 ] || {
-      printf 'uberdev git metadata mutex: acquisition failed for %s (rc=%s)\n' \
-        "$phase" "$acquire_rc" >&2
-      return "$acquire_rc"
-    }
-    polls=$((polls + 1))
-    wall_elapsed=$((SECONDS - wall_started))
-    if [ "$wall_elapsed" -gt "$wall_wait_seconds" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$wall_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    observed_state="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_STATE:-unknown}"
-    observed_identity="${_UBERDEV_SEMAPHORE_MUTEX_OBSERVED_IDENTITY:-}"
-    case "$observed_state" in
-      ownerless)
-        [ -n "$observed_identity" ] || return 2
-        if [ "$observed_identity" = "$ownerless_identity" ]; then
-          ownerless_confirmations=$((ownerless_confirmations + 1))
-        else
-          ownerless_identity="$observed_identity"
-          ownerless_first_tick="$waited_ticks"
-          ownerless_confirmations=1
-        fi
-        stable_ticks=$((waited_ticks - ownerless_first_tick))
-        if [ "$stable_ticks" -ge "$grace_ticks" ] \
-            && [ "$ownerless_confirmations" -ge "$_UBERDEV_GIT_METADATA_MUTEX_OWNERLESS_CONFIRMATIONS" ]; then
-          if _uberdev_semaphore_mutex_reclaim_ownerless_generation "$scope" "$ownerless_identity"; then
-            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-            continue
-          else
-            reclaim_rc=$?
-          fi
-          if [ "$reclaim_rc" -eq 1 ]; then
-            ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-          else
-            printf 'uberdev git metadata mutex: ownerless reclaim failed for %s (rc=%s)\n' \
-              "$phase" "$reclaim_rc" >&2
-            return "$reclaim_rc"
-          fi
-        fi
-        ;;
-      published-live|published-dead|absent)
-        ownerless_identity=''; ownerless_confirmations=0; ownerless_first_tick="$waited_ticks"
-        ;;
-      *)
-        printf 'uberdev git metadata mutex: unsafe probe state for %s (%s)\n' \
-          "$phase" "$observed_state" >&2
-        return 2
-        ;;
-    esac
-    if [ "$waited_ticks" -ge "$wait_tick_limit" ] || [ "$polls" -ge "$max_polls" ]; then
-      printf 'uberdev git metadata mutex: acquisition timed out for %s after %ss (queue_slots=%s)\n' \
-        "$phase" "$scheduled_wait_seconds" "$queue_slots" >&2
-      return 75
-    fi
-    if [ "$polls" -le "$_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS" ]; then
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_FAST_DELAY_TICKS"
-    elif [ "$polls" -le $((_UBERDEV_GIT_METADATA_MUTEX_FAST_POLLS + _UBERDEV_GIT_METADATA_MUTEX_MEDIUM_POLLS)) ]; then
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_MEDIUM_DELAY_TICKS"
-    else
-      delay="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_S"
-      delay_ticks="$_UBERDEV_GIT_METADATA_MUTEX_STEADY_DELAY_TICKS"
-    fi
-    sleep "$delay" || {
-      printf 'uberdev git metadata mutex: acquisition wait interrupted for %s\n' "$phase" >&2
-      return 2
-    }
-    waited_ticks=$((waited_ticks + delay_ticks))
-  done
-  return 75
+  _uberdev_semaphore_mutex_acquire "$1"
 }
 
 _uberdev_dispatch_with_git_metadata_mutex() {
   local repo_root="$1" phase="$2" scope rc release_rc
-  local operation_timeout="${_UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT:-}"
   shift 2
   [ "$#" -gt 0 ] || return 2
   case "$phase" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
   scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
   (
-    _uberdev_dispatch_git_metadata_mutex_acquire "$scope" "$phase" "$operation_timeout" || exit $?
+    _uberdev_dispatch_git_metadata_mutex_acquire "$scope" || exit $?
     trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
     "$@"
     rc=$?
@@ -383,11 +248,21 @@ _uberdev_dispatch_with_git_metadata_mutex() {
   )
 }
 
+# _uberdev_dispatch_git_worktree_add_locked REPO_ROOT TARGET BRANCH LOG_FILE [START_POINT]
+# START_POINT is optional and additive: when supplied the new worktree is
+# pinned to that exact commit, which is what makes the child teardown's
+# "HEAD has not moved" preservation guard decidable. Omitting it keeps the
+# historical "branch from current HEAD" behaviour for callers that own their
+# worktree for the whole session and never tear it down.
 _uberdev_dispatch_git_worktree_add_locked() {
-  local repo_root="$1" target="$2" branch="$3" log_file="$4" native_target
+  local repo_root="$1" target="$2" branch="$3" log_file="$4" start_point="${5:-}" native_target
   native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return $?
   cd "$repo_root" || return 2
-  MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" >"$log_file" 2>&1
+  if [ -n "$start_point" ]; then
+    MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" "$start_point" >"$log_file" 2>&1
+  else
+    MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" >"$log_file" 2>&1
+  fi
 }
 
 _uberdev_dispatch_git_worktree_add() {
@@ -396,165 +271,7 @@ _uberdev_dispatch_git_worktree_add() {
     _uberdev_dispatch_git_worktree_add_locked "$@"
 }
 
-_uberdev_dispatch_claude_bootstrap_timeout() {
-  local solve_timeout="$1" configured="${UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT:-$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_DEFAULT_S}"
-  _uberdev_dispatch_python -I -B - "$solve_timeout" "$configured" \
-    "$_UBERDEV_CLAUDE_BOOTSTRAP_TIMEOUT_MAX_S" <<'PY'
-import sys
-
-solve_raw, configured_raw, maximum = sys.argv[1:]
-
-def bounded_decimal(raw):
-    if not raw or not raw.isascii() or not raw.isdecimal():
-        raise SystemExit(2)
-    value = raw.lstrip("0")
-    if not value:
-        raise SystemExit(2)
-    if len(value) > len(maximum) or (len(value) == len(maximum) and value > maximum):
-        return maximum
-    return value
-
-solve = bounded_decimal(solve_raw)
-configured = bounded_decimal(configured_raw)
-if len(configured) < len(solve) or (len(configured) == len(solve) and configured < solve):
-    print(configured)
-else:
-    print(solve)
-PY
-}
-
-# Receipt authority is created before `git worktree add`, classified only while
-# the repository metadata mutex is held, and retired (P -> immutable T) before
-# that mutex is released.  Invoke the sibling helper by its resolved absolute
-# path so PATH or the caller's working directory cannot substitute authority.
-_uberdev_dispatch_worktree_receipt_helper() {
-  local helper="$_UBERDEV_DISPATCH_LIB_DIR/worktree_receipts.py" native_helper
-  case "$helper" in /*|[A-Za-z]:[\\/]*) ;; *) return 2 ;; esac
-  [ -f "$helper" ] || return 2
-  # Only the trusted existing helper needs shell-to-native syntax conversion.
-  # Repo and receipt are authenticated authority: preserve their caller bytes
-  # so Python can reject short-name, case, symlink, and junction aliases. The
-  # launch guard also disables Git Bash's implicit argv path rewriting.
-  native_helper="$(_uberdev_dispatch_native_cli_path "$helper")" || return $?
-  MSYS_NO_PATHCONV=1 _uberdev_dispatch_python -I -B "$native_helper" "$@"
-}
-
-_uberdev_dispatch_parse_codex_worktree_create_output() {
-  local output="$1" start_head="$2" parsed
-  parsed="$(_uberdev_dispatch_python -I -B - "$output" "$start_head" <<'PY'
-import json,re,sys
-try: value=json.loads(sys.argv[1])
-except (TypeError,json.JSONDecodeError): raise SystemExit(3)
-if not isinstance(value,dict) or set(value)!={"state","token"}: raise SystemExit(3)
-state=value.get("state"); token=value.get("token"); start=sys.argv[2]
-if state not in {"active","active_unconfirmed"}: raise SystemExit(3)
-if not isinstance(token,str) or re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{40}",token) is None or token.rsplit(":",1)[1]!=start: raise SystemExit(3)
-print(state+"\t"+token,end="")
-PY
-)" || return 3
-  _UBERDEV_CODEX_CREATE_STATE="${parsed%%$'\t'*}"
-  _UBERDEV_CODEX_CREATE_TOKEN="${parsed#*$'\t'}"
-}
-
-_uberdev_dispatch_create_codex_worktree_receipt_at_head() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" start_head="$5"
-  local output='' rc
-  _UBERDEV_CODEX_CREATE_STATE=''
-  _UBERDEV_CODEX_CREATE_TOKEN=''
-  if output="$(_uberdev_dispatch_worktree_receipt_helper create \
-      --repo "$repo_root" --relative "$relative" --branch "$branch" \
-      --receipt "$receipt" --start-head "$start_head")"; then
-    _uberdev_dispatch_parse_codex_worktree_create_output "$output" "$start_head" || return $?
-    [ "$_UBERDEV_CODEX_CREATE_STATE" = active ] || return 3
-    return 0
-  else
-    rc=$?
-    case "$rc" in
-      2)
-        [ -n "$output" ] || return 2
-        _uberdev_dispatch_parse_codex_worktree_create_output "$output" "$start_head" || return 3
-        [ "$_UBERDEV_CODEX_CREATE_STATE" = active_unconfirmed ] || return 3
-        return 2
-        ;;
-      3) return 3 ;;
-      *) return 2 ;;
-    esac
-  fi
-}
-
-_uberdev_dispatch_create_codex_worktree_receipt() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" start_head rc
-  start_head="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || return 2
-  if _uberdev_dispatch_create_codex_worktree_receipt_at_head \
-      "$repo_root" "$relative" "$branch" "$receipt" "$start_head"; then
-    printf '%s' "$_UBERDEV_CODEX_CREATE_TOKEN"
-    return 0
-  else
-    rc=$?
-  fi
-  [ -z "$_UBERDEV_CODEX_CREATE_TOKEN" ] || printf '%s' "$_UBERDEV_CODEX_CREATE_TOKEN"
-  return "$rc"
-}
-
-_uberdev_dispatch_inspect_codex_worktree_receipt() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" start_head="$6"
-  local output normalized rc
-  if output="$(_uberdev_dispatch_worktree_receipt_helper inspect \
-      --repo "$repo_root" --relative "$relative" --branch "$branch" \
-      --receipt "$receipt" --start-head "$start_head" --token "$token")"; then
-    :
-  else
-    rc=$?
-    case "$rc" in 2|3) return "$rc" ;; *) return 2 ;; esac
-  fi
-  normalized="$(_uberdev_dispatch_python -I -B - "$output" "$repo_root" "$relative" "$start_head" <<'PY'
-import json,os,sys
-try: value=json.loads(sys.argv[1])
-except (TypeError,json.JSONDecodeError): raise SystemExit(3)
-state=value.get("state") if isinstance(value,dict) else None
-if state=="retired":
- if value!={"state":"retired"}: raise SystemExit(3)
-elif state=="active":
- if set(value)!={"state","start_head","worktree"} or value.get("start_head")!=sys.argv[4]: raise SystemExit(3)
- expected=os.path.abspath(os.path.join(os.path.realpath(sys.argv[2]),*sys.argv[3].split("/")))
- worktree=value.get("worktree")
- if not isinstance(worktree,str) or os.path.normcase(os.path.normpath(worktree))!=os.path.normcase(os.path.normpath(expected)): raise SystemExit(3)
-else: raise SystemExit(3)
-print(json.dumps(value,ensure_ascii=True,separators=(",",":"),sort_keys=True),end="")
-PY
-)" || return 3
-  _UBERDEV_CODEX_RECEIPT_STATE="$(_uberdev_dispatch_python -I -B -c \
-    'import json,sys; print(json.loads(sys.argv[1])["state"],end="")' "$normalized")" || return 3
-  _UBERDEV_CODEX_RECEIPT_START_HEAD=''
-  _UBERDEV_CODEX_RECEIPT_WORKTREE=''
-  if [ "$_UBERDEV_CODEX_RECEIPT_STATE" = active ]; then
-    _UBERDEV_CODEX_RECEIPT_START_HEAD="$(_uberdev_dispatch_python -I -B -c \
-      'import json,sys; print(json.loads(sys.argv[1])["start_head"],end="")' "$normalized")" || return 3
-    _UBERDEV_CODEX_RECEIPT_WORKTREE="$(_uberdev_dispatch_python -I -B -c \
-      'import json,sys; print(json.loads(sys.argv[1])["worktree"],end="")' "$normalized")" || return 3
-  fi
-}
-
-_uberdev_dispatch_retire_codex_worktree_receipt() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" start_head="$6"
-  local output rc
-  if output="$(_uberdev_dispatch_worktree_receipt_helper retire \
-      --repo "$repo_root" --relative "$relative" --branch "$branch" \
-      --receipt "$receipt" --start-head "$start_head" --token "$token")"; then
-    :
-  else
-    rc=$?
-    case "$rc" in 2|3) return "$rc" ;; *) return 2 ;; esac
-  fi
-  _uberdev_dispatch_python -I -B - "$output" <<'PY'
-import json,sys
-try: value=json.loads(sys.argv[1])
-except (TypeError,json.JSONDecodeError): raise SystemExit(3)
-if value!={"state":"retired"}: raise SystemExit(3)
-PY
-}
-
-_uberdev_dispatch_classify_codex_worktree_registry() {
+_uberdev_dispatch_classify_worktree_registry() {
   local repo_root="$1" target="$2" branch="$3" listing classified
   listing="$(cd "$repo_root" && git worktree list --porcelain)" || return 2
   classified="$(_uberdev_dispatch_python -I -B - "$target" "$branch" "$listing" <<'PY'
@@ -578,15 +295,15 @@ branch_state="present" if any(ref==expected_ref for _,ref in records) else "abse
 print(exact_state+"\t"+branch_state,end="")
 PY
 )" || return 2
-  _UBERDEV_CODEX_REGISTRY_EXACT="${classified%%$'\t'*}"
-  _UBERDEV_CODEX_REGISTRY_BRANCH="${classified#*$'\t'}"
-  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+  _UBERDEV_DISPATCH_REGISTRY_EXACT="${classified%%$'\t'*}"
+  _UBERDEV_DISPATCH_REGISTRY_BRANCH="${classified#*$'\t'}"
+  case "$_UBERDEV_DISPATCH_REGISTRY_EXACT:$_UBERDEV_DISPATCH_REGISTRY_BRANCH" in
     absent:absent|absent:present|expected:present|wrong:absent|wrong:present) ;;
     *) return 2 ;;
   esac
 }
 
-_uberdev_dispatch_validate_codex_worktree_directory() {
+_uberdev_dispatch_validate_worktree_directory() {
   _uberdev_dispatch_python -I -B - "$1" <<'PY'
 import os,stat,sys
 path=sys.argv[1]
@@ -600,75 +317,83 @@ if (os.path.islink(path) or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entr
 PY
 }
 
-_uberdev_dispatch_cleanup_codex_worktree_locked() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" token="$5" terminal="$6"
-  local start_head target branch_exists=0 show_ref_rc branch_head local_status target_head native_target rc
+# _uberdev_dispatch_cleanup_child_worktree_locked REPO_ROOT RELATIVE BRANCH START_HEAD TERMINAL
+#
+# Backend-neutral teardown for a DISPATCHER-OWNED, CHILD-OWNED, isolated
+# worktree (#381 RULING 4). Removes the worktree and its branch once the child
+# reaches a terminal state — or, through `_uberdev_dispatch_fail_after_worktree`
+# and its own `setup_failed` terminal, once the DISPATCHER gives up before any
+# child could start — and refuses — loudly, with a distinct rc — whenever
+# removing would destroy work or the on-disk state no longer matches what the
+# dispatcher created.
+#
+# START_HEAD is the creation authority: the dispatcher captures the repository
+# HEAD before it creates anything, pins the worktree to it, and threads it to
+# the child through the child's own launch argv. Everything downstream of that
+# authority — registry classification, symlink/ownership validation, the
+# clean-tree and unmoved-HEAD preservation guards, the post-removal absence
+# re-verification — is what actually keeps a teardown from deleting someone's
+# work. (This replaced the retired codex arm's on-disk receipt transaction,
+# which carried the same authority in a crash-safe file; #381 RULING 4.)
+#
+# rc 0  worktree and branch are gone (or were already gone).
+# rc 2  transient/unexpected Git or filesystem failure — the caller retries.
+# rc 3  PRESERVE: the state does not match what we created, or the worktree
+#       holds work. Nothing was removed. This is a REPORTABLE outcome, never a
+#       silent success.
+_uberdev_dispatch_cleanup_child_worktree_locked() {
+  local repo_root="$1" relative="$2" branch="$3" start_head="$4" terminal="$5"
+  local target branch_exists=0 show_ref_rc branch_head local_status target_head native_target
   # `setup_failed` is this cleanup path's own extra arm, not a manifest
-  # terminal status, so it is declared rather than smuggled in.
+  # terminal status, so it is declared rather than smuggled in. Its caller is
+  # `_uberdev_dispatch_fail_after_worktree` — the dispatcher-side door.
   # CONTRACT: run-terminal-status +setup_failed !case-arm
   case "$terminal" in completed|failed|timed_out|cancelled|setup_failed) ;; *) return 3 ;; esac
-  start_head="${token##*:}"
-  _uberdev_dispatch_inspect_codex_worktree_receipt \
-    "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head" || return $?
-  if [ "$_UBERDEV_CODEX_RECEIPT_STATE" = retired ]; then
-    target="$(_uberdev_dispatch_python -I -B -c \
-      'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
-      "$repo_root" "$relative")" || return 2
-    [ ! -e "$target" ] && [ ! -L "$target" ] || return 3
-    _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-      && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
-    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
-      return 3
-    else
-      show_ref_rc=$?
-      [ "$show_ref_rc" -eq 1 ] || return 2
-    fi
-    _uberdev_dispatch_retire_codex_worktree_receipt \
-      "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head"
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=1
-      return "$rc"
-    fi
-    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
-    return 0
-  fi
-  [ "$_UBERDEV_CODEX_RECEIPT_STATE" = active ] || return 3
-  target="$_UBERDEV_CODEX_RECEIPT_WORKTREE"
-  [ "$_UBERDEV_CODEX_RECEIPT_START_HEAD" = "$start_head" ] || return 3
+  case "$start_head" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 3 ;;
+  esac
+  [ -n "$relative" ] && [ -n "$branch" ] || return 3
+  target="$(_uberdev_dispatch_python -I -B -c \
+    'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
+    "$repo_root" "$relative")" || return 2
 
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
     branch_exists=1
     branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
+    # The child committed. Deleting the branch would drop those commits on the
+    # floor, so preserve and report instead.
     [ "$branch_head" = "$start_head" ] || return 3
   else
     show_ref_rc=$?
     [ "$show_ref_rc" -eq 1 ] || return 2
   fi
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  case "$_UBERDEV_CODEX_REGISTRY_EXACT:$_UBERDEV_CODEX_REGISTRY_BRANCH" in
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  case "$_UBERDEV_DISPATCH_REGISTRY_EXACT:$_UBERDEV_DISPATCH_REGISTRY_BRANCH" in
     expected:present) [ "$branch_exists" -eq 1 ] || return 3 ;;
     absent:absent) ;;
     *) return 3 ;;
   esac
   if [ -e "$target" ] || [ -L "$target" ]; then
-    [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ] || return 3
-    _uberdev_dispatch_validate_codex_worktree_directory "$target" || return $?
+    [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ] || return 3
+    _uberdev_dispatch_validate_worktree_directory "$target" || return $?
     local_status="$(git -C "$target" status --porcelain --untracked-files=all)" || return 2
     [ -z "$local_status" ] || return 3
     target_head="$(git -C "$target" rev-parse HEAD)" || return 2
     [ "$target_head" = "$start_head" ] || return 3
   fi
-  if [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = expected ]; then
+  if [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = expected ]; then
     native_target="$(_uberdev_dispatch_native_cli_path "$target")" || return 2
     cd "$repo_root" || return 2
     MSYS_NO_PATHCONV=1 git worktree remove --force "$native_target" || return 2
   fi
   [ ! -e "$target" ] && [ ! -L "$target" ] || return 2
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 2
+  _uberdev_dispatch_classify_worktree_registry "$repo_root" "$target" "$branch" || return $?
+  [ "$_UBERDEV_DISPATCH_REGISTRY_EXACT" = absent ] \
+    && [ "$_UBERDEV_DISPATCH_REGISTRY_BRANCH" = absent ] || return 2
   if [ "$branch_exists" -eq 1 ]; then
     branch_head="$(git -C "$repo_root" rev-parse "refs/heads/$branch")" || return 2
     [ "$branch_head" = "$start_head" ] || return 3
@@ -681,45 +406,37 @@ _uberdev_dispatch_cleanup_codex_worktree_locked() {
     show_ref_rc=$?
     [ "$show_ref_rc" -eq 1 ] || return 2
   fi
-  _uberdev_dispatch_retire_codex_worktree_receipt \
-    "$repo_root" "$relative" "$branch" "$receipt" "$token" "$start_head"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=1
-    return "$rc"
-  fi
   return 0
 }
 
-_uberdev_dispatch_cleanup_codex_worktree() {
+# _uberdev_dispatch_cleanup_child_worktree REPO_ROOT RELATIVE BRANCH START_HEAD TERMINAL
+# Mutex-serialized, transient-retrying wrapper around the locked transaction
+# above. Same rc vocabulary.
+_uberdev_dispatch_cleanup_child_worktree() {
   local repo_root="$1" scope rc release_rc attempt=1 retry_delay
   scope="$(_uberdev_dispatch_git_metadata_mutex_scope "$repo_root")" || return 2
   (
     _uberdev_semaphore_mutex_acquire "$scope" || exit $?
     trap '_uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1 || true' EXIT
-    _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
     while :; do
-      if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then rc=0; else rc=$?; fi
-      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ]; then
+      if _uberdev_dispatch_cleanup_child_worktree_locked "$@"; then rc=0; else rc=$?; fi
+      if [ "$rc" -ne 2 ] || [ "$attempt" -ge "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" ]; then
         break
       fi
       case "$attempt" in
-        1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
-        2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
+        1) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_1_S" ;;
+        2) retry_delay="$_UBERDEV_DISPATCH_CLEANUP_RETRY_DELAY_2_S" ;;
         *) rc=2; break ;;
       esac
-      printf 'uberdev codex cleanup: transient attempt %s/%s; retrying in %ss\n' \
-        "$attempt" "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
+      printf 'uberdev child worktree cleanup: transient attempt %s/%s; retrying in %ss\n' \
+        "$attempt" "$_UBERDEV_DISPATCH_CLEANUP_MAX_ATTEMPTS" "$retry_delay" >&2
       sleep "$retry_delay" || { rc=2; break; }
       attempt=$((attempt + 1))
     done
-    if [ "$rc" -ne 0 ] && [ "$_UBERDEV_CODEX_CLEANUP_RETIRE_FAILED" -eq 1 ]; then
-      printf 'uberdev codex cleanup: receipt retirement failed after cleanup transaction\n' >&2 || true
-    fi
     _uberdev_semaphore_mutex_release "$scope" >/dev/null 2>&1
     release_rc=$?
     [ "$release_rc" -eq 0 ] \
-      || printf 'uberdev codex cleanup: mutex release failed after cleanup transaction\n' >&2 \
+      || printf 'uberdev child worktree cleanup: mutex release failed after cleanup transaction\n' >&2 \
       || true
     [ "$release_rc" -eq 0 ] || [ "$rc" -ne 0 ] || rc=2
     [ "$release_rc" -ne 0 ] || trap - EXIT
@@ -727,153 +444,48 @@ _uberdev_dispatch_cleanup_codex_worktree() {
   )
 }
 
-_uberdev_dispatch_emit_codex_worktree_transaction() {
-  local state="$1" token="$2"
-  case "$state" in active|active_unconfirmed|retired) ;; *) return 3 ;; esac
-  printf '{"state":"%s","token":"%s"}\n' "$state" "$token"
-}
-
-_uberdev_dispatch_parse_codex_worktree_transaction() {
-  local output="$1" parsed
-  parsed="$(_uberdev_dispatch_python -I -B - "$output" <<'PY'
-import json,re,sys
-try: value=json.loads(sys.argv[1])
-except (TypeError,json.JSONDecodeError): raise SystemExit(3)
-if not isinstance(value,dict) or set(value)!={"state","token"}: raise SystemExit(3)
-state=value.get("state"); token=value.get("token")
-if state not in {"active","active_unconfirmed","retired"}: raise SystemExit(3)
-if not isinstance(token,str) or re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{40}",token) is None: raise SystemExit(3)
-print(state+"\t"+token,end="")
-PY
-)" || return 3
-  _UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE="${parsed%%$'\t'*}"
-  _UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN="${parsed#*$'\t'}"
-}
-
-_uberdev_dispatch_retry_codex_cleanup_locked() {
-  local rc attempt=1 retry_delay
-  _UBERDEV_CODEX_CLEANUP_RETIRE_FAILED=0
-  while :; do
-    if _uberdev_dispatch_cleanup_codex_worktree_locked "$@"; then
-      return 0
-    else
-      rc=$?
-    fi
-    [ "$rc" -eq 2 ] && [ "$attempt" -lt "$_UBERDEV_CODEX_CLEANUP_MAX_ATTEMPTS" ] \
-      || return "$rc"
-    case "$attempt" in
-      1) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_1_S" ;;
-      2) retry_delay="$_UBERDEV_CODEX_CLEANUP_RETRY_DELAY_2_S" ;;
-      *) return 2 ;;
-    esac
-    sleep "$retry_delay" || return 2
-    attempt=$((attempt + 1))
-  done
-}
-
-_uberdev_dispatch_codex_worktree_absent_locked() {
-  local repo_root="$1" target="$2" branch="$3" show_ref_rc
-  [ ! -e "$target" ] && [ ! -L "$target" ] || return 3
-  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
-    return 3
-  else
-    show_ref_rc=$?
-    [ "$show_ref_rc" -eq 1 ] || return 2
-  fi
-  _uberdev_dispatch_classify_codex_worktree_registry "$repo_root" "$target" "$branch" || return $?
-  [ "$_UBERDEV_CODEX_REGISTRY_EXACT" = absent ] \
-    && [ "$_UBERDEV_CODEX_REGISTRY_BRANCH" = absent ] || return 3
-}
-
-_uberdev_dispatch_create_codex_worktree_locked() {
-  local repo_root="$1" relative="$2" branch="$3" receipt="$4" log_file="$5"
-  local actual_root requested_root start_head target native_target create_rc cleanup_rc add_rc
-  local attempt=1 retry_delay token=''
-  actual_root="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null)" || return 2
-  actual_root="$(cd "$actual_root" 2>/dev/null && pwd -P)" || return 2
-  requested_root="$(cd "$repo_root" 2>/dev/null && pwd -P)" || return 2
-  [ "$actual_root" = "$requested_root" ] || return 3
-  start_head="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null)" || return 2
-  case "$start_head" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) return 3 ;;
-  esac
-  target="$(_uberdev_dispatch_python -I -B -c \
-    'import os,sys; print(os.path.abspath(os.path.join(os.path.realpath(sys.argv[1]),*sys.argv[2].split("/"))),end="")' \
-    "$repo_root" "$relative")" || return 2
-  _uberdev_dispatch_codex_worktree_absent_locked "$repo_root" "$target" "$branch" || return $?
-
-  while :; do
-    if _uberdev_dispatch_create_codex_worktree_receipt_at_head \
-        "$repo_root" "$relative" "$branch" "$receipt" "$start_head"; then
-      token="$_UBERDEV_CODEX_CREATE_TOKEN"
-      break
-    else
-      create_rc=$?
-    fi
-    if [ "$create_rc" -eq 3 ]; then
-      return 3
-    fi
-    [ "$create_rc" -eq 2 ] || return 2
-    if [ "$_UBERDEV_CODEX_CREATE_STATE" = active_unconfirmed ] \
-        && [ -n "$_UBERDEV_CODEX_CREATE_TOKEN" ]; then
-      token="$_UBERDEV_CODEX_CREATE_TOKEN"
-      if _uberdev_dispatch_retry_codex_cleanup_locked \
-          "$repo_root" "$relative" "$branch" "$receipt" "$token" setup_failed; then
-        :
-      else
-        cleanup_rc=$?
-        _uberdev_dispatch_emit_codex_worktree_transaction active_unconfirmed "$token" || true
-        return "$cleanup_rc"
-      fi
-      token=''
-    elif [ -n "$_UBERDEV_CODEX_CREATE_STATE" ] || [ -n "$_UBERDEV_CODEX_CREATE_TOKEN" ]; then
-      return 3
-    fi
-    [ "$attempt" -lt "$_UBERDEV_CODEX_CREATE_MAX_ATTEMPTS" ] || return 2
-    case "$attempt" in
-      1) retry_delay="$_UBERDEV_CODEX_CREATE_RETRY_DELAY_1_S" ;;
-      2) retry_delay="$_UBERDEV_CODEX_CREATE_RETRY_DELAY_2_S" ;;
-      *) return 2 ;;
-    esac
-    sleep "$retry_delay" || return 2
-    attempt=$((attempt + 1))
-    _uberdev_dispatch_codex_worktree_absent_locked "$repo_root" "$target" "$branch" || return $?
-  done
-
-  native_target="$(_uberdev_dispatch_native_cli_path "$target")" || {
-    _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
-    return 2
+# _uberdev_dispatch_fail_after_worktree ISSUE BACKEND PHASE SETUP_RC \
+#                                       REPO_ROOT RELATIVE BRANCH START_HEAD CHILD_OWNED
+#
+# The DISPATCHER-side twin of the wrapper's `cleanup_child_worktree` (#381
+# RULING 4). The wrapper's teardown only covers a child that actually started;
+# every setup/launch failure BETWEEN a successful `git worktree add` and a
+# running child is on this side of the fence, and before this helper existed
+# each of those paths returned while the worktree and its branch stayed on
+# disk. The leaked path derives purely from ISSUE_NUM, so the leak also blocks
+# the next dispatch of the same issue — it does not merely accumulate.
+#
+# `setup_failed` is exactly the extra terminal this cleanup path declares at
+# `_uberdev_dispatch_cleanup_child_worktree_locked`; the same preservation
+# guards apply, so a worktree the child already dirtied is refused (rc 3), not
+# destroyed. Cleanup failure is REPORTED — stderr + a `dispatch_cleanup_failed`
+# audit naming the worktree and branch — and folded into the returned rc as 74.
+# It is never swallowed into the plain setup rc.
+#
+# Emits the caller's `dispatch_setup_failed` audit first so the phase record is
+# written even if the teardown itself then fails.
+#
+# rc SETUP_RC  the setup failure stands, and nothing was left behind.
+# rc 74        the setup failure stands AND the worktree could not be removed.
+_uberdev_dispatch_fail_after_worktree() {
+  local issue="$1" backend="$2" phase="$3" setup_rc="$4"
+  local repo_root="$5" relative="$6" branch="$7" start_head="$8" child_owned="$9"
+  local cleanup_rc=0
+  _uberdev_dispatch_audit dispatch_setup_failed \
+    "{\"issue\":$issue,\"phase\":\"$phase\",\"backend\":\"$backend\",\"rc\":$setup_rc}"
+  # CHILD_OWNED=0 is a top-level /solve dispatch: that worktree IS the operator's
+  # deliverable workspace and survives a failed launch on purpose.
+  [ "$child_owned" = "1" ] || return "$setup_rc"
+  _uberdev_dispatch_cleanup_child_worktree \
+    "$repo_root" "$relative" "$branch" "$start_head" setup_failed || cleanup_rc=$?
+  [ "$cleanup_rc" -eq 0 ] || {
+    printf '%s dispatch: failed to clean child worktree %s (%s) after %s setup failure\n' \
+      "$backend" "$repo_root/$relative" "$branch" "$phase" >&2
+    _uberdev_dispatch_audit dispatch_cleanup_failed \
+      "{\"issue\":$issue,\"phase\":\"$phase\",\"backend\":\"$backend\",\"rc\":$cleanup_rc,\"worktree\":\"$repo_root/$relative\",\"branch\":\"$branch\"}"
+    return 74
   }
-  cd "$repo_root" || {
-    _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
-    return 2
-  }
-  MSYS_NO_PATHCONV=1 git worktree add "$native_target" -b "$branch" "$start_head" \
-    >"$log_file" 2>&1
-  add_rc=$?
-  if [ "$add_rc" -eq 0 ]; then
-    _uberdev_dispatch_emit_codex_worktree_transaction active "$token"
-    return 0
-  fi
-  if _uberdev_dispatch_retry_codex_cleanup_locked \
-      "$repo_root" "$relative" "$branch" "$receipt" "$token" setup_failed; then
-    _uberdev_dispatch_emit_codex_worktree_transaction retired "$token" || true
-    return "$add_rc"
-  else
-    cleanup_rc=$?
-  fi
-  _uberdev_dispatch_emit_codex_worktree_transaction active "$token" || true
-  return "$cleanup_rc"
-}
-
-_uberdev_dispatch_create_codex_worktree() {
-  local repo_root="$1"
-  _uberdev_dispatch_with_git_metadata_mutex "$repo_root" codex-worktree-create \
-    _uberdev_dispatch_create_codex_worktree_locked "$@"
+  return "$setup_rc"
 }
 
 # The dispatch_backend enum — identical to the --backend= flag's accepted set.
@@ -881,32 +493,20 @@ _uberdev_dispatch_create_codex_worktree() {
 # the main session's Workflow runtime (skills/solve-fleet/workflow.js), so this
 # library never spawns anything for it — the launcher emits the args envelope
 # and the command file mandates the Workflow call.
-# `codex` is the OpenAI Codex CLI backend (RFC 0012 §3.4 codex-port): execs
-# `codex exec` headless + nohup-detached, PID-tracked like `background`.
-# `claude-bg` is DEPRECATED (RFC 0015; removal target v1.0.0) — detached
-# `claude --bg` sessions parked in the separate `claude agents` surface.
+# The `codex` backend is GONE (#381). It was the OpenAI Codex CLI transport
+# (RFC 0012 §3.4 codex-port) and the last consumer of the codex-keyed routing
+# catalog; the Codex distribution it served was retired first, and nothing on
+# any default path resolved it once /review-pr and /simplify took `workflow`.
+#
+# The detached `claude --bg` backend is GONE (RFC 0015 §7 as amended). It was
+# deprecated when `workflow` shipped for /solve, /turbo and /goal, and removed
+# once /review-pr and /simplify resolved `workflow` too — at which point nothing
+# on any default path could reach it and no workflow still required it. There is
+# deliberately no deprecation shim left behind: a dormant alias is how a retired
+# transport drifts back onto a default path. Naming it now fails the enum check
+# below, loudly, listing the accepted set.
 # CONTRACT: dispatch-backend
-_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|claude-bg|wezterm|background|codex'
-
-# Detached-provider backends scheduled for retirement. Selecting one emits a
-# one-line stderr deprecation notice (once per process — the sentinel below).
-# `auto` NEVER resolves to a deprecated backend; only an explicit request does.
-_UBERDEV_DISPATCH_DEPRECATED_BACKENDS='claude-bg'
-_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=0
-
-# _uberdev_dispatch_deprecation_notice BACKEND
-# Verbatim, constant-template stderr notice (mirrors the v0.22.0 --terminal=
-# retirement shape in lib/solve-launcher.sh). Emitted once per process.
-_uberdev_dispatch_deprecation_notice() {
-  case " $_UBERDEV_DISPATCH_DEPRECATED_BACKENDS " in
-    *" ${1:-} "*) ;;
-    *) return 0 ;;
-  esac
-  [ "$_UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED" = "1" ] && return 0
-  _UBERDEV_DISPATCH_DEPRECATION_NOTICE_EMITTED=1
-  echo "warning: --backend=$1 is deprecated (RFC 0015); /solve, /turbo and /goal now dispatch their per-issue solvers through the Workflow runtime (--backend=workflow, the auto default) instead of detached sessions in the separate 'claude agents' surface. The backend still works and will be removed in v1.0.0." >&2
-  return 0
-}
+_UBERDEV_DISPATCH_BACKEND_ENUM='auto|workflow|wezterm|background'
 
 # _uberdev_dispatch_os_class -> prints one of: macos | windows-native | wsl2 | linux
 # WSL2 is detected via /proc/version containing "microsoft" (case-insensitive);
@@ -935,8 +535,8 @@ _uberdev_dispatch_os_class() {
 # backend before launch or cancellation. WSL remains POSIX-supervisable.
 _uberdev_dispatch_numeric_supervision_supported() {
   case "${1:-}" in
-    codex|background) [ "$(_uberdev_dispatch_os_class)" != windows-native ] ;;
-    claude-bg|wezterm) return 0 ;;
+    background) [ "$(_uberdev_dispatch_os_class)" != windows-native ] ;;
+    wezterm) return 0 ;;
     # `workflow` spawns no OS process at all: the Workflow runtime owns every
     # agent's lifetime, cancellation and result capture in-session. There is
     # no process tree for this library to supervise, so the native-Windows
@@ -988,23 +588,46 @@ _uberdev_dispatch_wezterm_available() {
   _wt_probe
 }
 
-# _uberdev_dispatch_codex_available -> exit 0 if the codex CLI is usable, 1 otherwise.
-# Usable = the `codex` binary is on PATH. No mux/domain probe needed (unlike
-# wezterm): `codex exec` is a self-contained headless invocation with no shared
-# server state to warm up. Kept as a named probe for symmetry with the wezterm
-# arm and so the preflight + dispatch_one switch call the same gate.
-_uberdev_dispatch_codex_available() {
-  command -v codex >/dev/null 2>&1
+# _uberdev_dispatch_workflow_engine WORKFLOW -> prints the on-disk Workflow
+# script that backend `workflow` would run for that workflow; returns 1 when the
+# workflow has no fleet engine, meaning there is nothing for this shell to
+# probe.
+#
+# This is the ONE capability of the workflow backend a shell can honestly test.
+# The Workflow *tool* lives in the calling session and is not on PATH, so its
+# presence is the model's No-Workflow fallback decision (commands/solve.md:86).
+# The engine is different: it is a file this install either shipped or did not,
+# and if it is missing the mandated `Workflow({scriptPath: ...})` call cannot be
+# made at all. Resolving `workflow` in that state would burn a RUN_ID
+# reservation and a workspace prepare before failing — so it is refused here.
+_uberdev_dispatch_workflow_engine() {
+  case "${1:-}" in
+    review-pr|simplify) printf '%s' "$_UBERDEV_DISPATCH_PLUGIN_ROOT/skills/review-fleet/workflow.js" ;;
+    *) return 1 ;;
+  esac
+}
+
+# _uberdev_dispatch_require_workflow_engine WORKFLOW -> 0 when backend
+# `workflow` is executable here, 1 with a loud, path-naming refusal otherwise.
+# Shared by the `auto` arm, the explicit `workflow` arm, and
+# uberdev_dispatch_preflight_backend so all three refuse identically.
+_uberdev_dispatch_require_workflow_engine() {
+  local wf="${1:-}" engine
+  engine="$(_uberdev_dispatch_workflow_engine "$wf")" || return 0
+  [ -f "$engine" ] && return 0
+  echo "error: backend 'workflow' needs $engine, which is missing from this install" >&2
+  echo "       (RFC 0012 §4.1). Reinstall the plugin, or select a transport this" >&2
+  echo "       host can execute with --backend=wezterm or --backend=background." >&2
+  return 1
 }
 
 # uberdev_dispatch_preflight [WORKFLOW]
-# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|claude-bg|wezterm|background|codex)
+# Resolves UBERDEV_DISPATCH_BACKEND_REQUESTED (auto|workflow|wezterm|background)
 # to a concrete UBERDEV_RESOLVED_BACKEND, ONCE per invocation, committed for
 # the whole batch (no mid-fanout switch). Hard-errors (return 1) when an
-# explicit backend is unusable on this host. Auto selection is workflow-aware
-# for review-pr and simplify because their governed children require an atomic
-# result artifact and caller-workspace repair support. Emits
-# dispatch_backend_resolved.
+# explicit backend is unusable on this host, and (since #381) when `auto` would
+# land on `workflow` but this install has no engine on disk to run — a refusal,
+# never a silent demotion. Emits dispatch_backend_resolved.
 uberdev_dispatch_preflight() {
   local requested="${UBERDEV_DISPATCH_BACKEND_REQUESTED:-auto}"
   local workflow="${1:-}" os_class reason resolved
@@ -1012,26 +635,18 @@ uberdev_dispatch_preflight() {
   case "$requested" in
     workflow)
       # The Workflow runtime lives in the calling session, not on PATH, so
-      # there is nothing for this shell to probe: no binary, no mux, no
-      # timeout(1). The caller (solve-launcher Step 5b' / goal Phase 0) emits
-      # the args envelope and the command file mandates the Workflow call;
-      # availability of the tool itself is the model's No-Workflow fallback
-      # decision, documented in commands/solve.md.
+      # there is no binary, no mux and no timeout(1) to probe. The caller
+      # (solve-launcher Step 5b' / goal Phase 0) emits the args envelope and the
+      # command file mandates the Workflow call; availability of the tool itself
+      # is the model's No-Workflow fallback decision, documented in
+      # commands/solve.md. What this shell CAN prove is that the engine the
+      # mandate names is on disk — refuse here rather than at stage time.
+      _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       resolved="workflow"; reason="explicit" ;;
-    claude-bg|background)
-      # claude-bg / background depend only on git + claude + shell — usable
-      # on every OS class. No capability gate.
-      _uberdev_dispatch_deprecation_notice "$requested"
+    background)
+      # background depends only on git + claude + shell — usable on every OS
+      # class. No capability gate.
       resolved="$requested"; reason="explicit" ;;
-    codex)
-      # codex backend needs the `codex` CLI on PATH. No OS constraint (codex
-      # exec is cross-platform); single capability gate is the binary itself.
-      if ! _uberdev_dispatch_codex_available; then
-        echo "error: --backend=codex requested but the 'codex' CLI is unavailable" >&2
-        echo "       (binary missing on PATH). Install Codex or use another backend." >&2
-        return 1
-      fi
-      resolved="codex"; reason="explicit" ;;
     wezterm)
       # Explicit wezterm: validate mux usability AND the same-OS constraint.
       if [ "$os_class" = "wsl2" ]; then
@@ -1049,37 +664,33 @@ uberdev_dispatch_preflight() {
       resolved="wezterm"; reason="explicit" ;;
     auto)
       # RFC 0015: `auto` resolves to `workflow` on every Claude host and every
-      # OS class. The historical per-OS matrix below it (macos->wezterm/claude-bg,
-      # wsl2/linux->claude-bg, windows-native->wezterm-or-hard-error) existed
-      # only to pick a *detached process* supervisor; the Workflow runtime needs
-      # no supervisor, which is why native Windows no longer hard-errors here.
-      # The Codex arms stay AHEAD of it: inside a Codex session there is no
-      # Claude Workflow tool to mandate, so `codex` remains the correct default.
-      if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
-        if _uberdev_dispatch_codex_available; then
-          resolved="codex"; reason="auto-${workflow}-result-artifact"
-        else
-          echo "error: $workflow requires the 'codex' CLI for supervised child result artifacts" >&2
-          echo "       Install Codex or explicitly run this workflow from a supported Codex host." >&2
-          return 1
-        fi
-      # If we're running inside Codex itself (CODEX_HOME set), or claude is
-      # absent but codex is present, the codex backend is the natural default —
-      # dispatching a claude --bg session from inside Codex would be wrong.
-      # Checked before the per-OS matrix below so it wins in auto mode.
-      elif [ -n "${CODEX_HOME:-}" ]; then
-        if _uberdev_dispatch_codex_available; then
-          resolved="codex"; reason="auto-codex-env"
-        else
-          echo "error: CODEX_HOME is set but the 'codex' CLI is unavailable on PATH" >&2
-          echo "       Fix the Codex install/PATH, or explicitly choose a non-Codex backend with --backend=<name>." >&2
-          return 1
-        fi
-      elif ! command -v claude >/dev/null 2>&1 && _uberdev_dispatch_codex_available; then
-        resolved="codex"; reason="auto-no-claude"
-      else
-        resolved="workflow"; reason="auto-workflow"
-      fi ;;
+      # OS class. The historical per-OS matrix below it existed only to pick a
+      # *detached process* supervisor for the retired default transport; the
+      # Workflow runtime needs no supervisor, which is why native Windows no
+      # longer hard-errors here.
+      #
+      # #381: the review-pr/simplify SPECIAL CASE IS GONE. It required the codex
+      # CLI because those two workflows need an atomic child result artifact and
+      # caller-workspace repair, and `workflow` had no wiring to provide either:
+      # every child reached _uberdev_agent_dispatch_backend, which has no
+      # workflow provider arm. Both halves now exist — commands/review-pr.md and
+      # commands/simplify.md emit the args envelope and mandate the Workflow call
+      # at every stage, and each bound child's result.md/status.json pair is
+      # digested by lib/code_fixer_contract.py — so these two workflows now take
+      # the same ladder as everything else.
+      #
+      # #381 also removed the two Codex-environment escapes that used to run
+      # BEFORE the per-OS matrix (CODEX_HOME set, or claude absent with codex
+      # present). Both resolved a backend that no longer exists; there is no
+      # replacement, because `auto` has exactly one answer now.
+      #
+      # auto must never land on a backend this install cannot execute. The
+      # engine gate is a REFUSAL, not a fallback: silently demoting the default
+      # transport is how the retired per-OS matrix drifted back into a default
+      # path, and the operator needs to know their install is broken rather
+      # than discover it as a different backend's behaviour.
+      _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
+      resolved="workflow"; reason="auto-workflow" ;;
     *)
       echo "error: dispatch backend '$requested' not in {$_UBERDEV_DISPATCH_BACKEND_ENUM}" >&2
       return 1 ;;
@@ -1102,7 +713,7 @@ uberdev_dispatch_preflight() {
 # uberdev_dispatch_one itself and therefore could not use the `workflow` backend
 # (the fleet is spawned by the calling session's Workflow tool, not by this
 # library). It re-resolved a `workflow` selection back down to the pre-RFC-0015
-# per-OS detached matrix — which meant `claude-bg`, a DEPRECATED backend, was
+# per-OS detached matrix — which meant the since-removed detached default was
 # still reachable from `auto` on the default /goal path.
 #
 # /goal no longer dispatches: lib/goal-phase1.sh claims only, and
@@ -1114,8 +725,11 @@ uberdev_dispatch_preflight() {
 
 # ---------------------------------------------------------------------------
 # uberdev_dispatch_resolve_env [BACKEND]
-# Resolves the six deterministic dispatch-env vars consumed by every backend:
-#   BG_PROMPT_MODE, MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
+# Resolves the five deterministic dispatch-env vars consumed by every backend:
+#   MODEL, PERM_FLAG[], EFFORT_FLAG[], SOLVE_TIMEOUT, TIMEOUT_BIN.
+# There used to be a sixth — the prompt-delivery mode. Its only consumer was
+# the retired detached `claude --bg` provider arm's file/stdin/argv switch, so
+# it went with it (RFC 0015 §7 as amended).
 # SSOT for both solve-pipeline (replaces its inline Phase A block) and
 # goal-pipeline (Phase 0). Sourced, NEVER exec'd — PERM_FLAG/EFFORT_FLAG are
 # bash arrays that cannot survive an env(1)/fork+exec boundary, so they must be
@@ -1123,9 +737,9 @@ uberdev_dispatch_preflight() {
 # rebuilt each call. Returns 1 (fail-loud) when no timeout(1)/gtimeout(1) is on
 # PATH for Claude-backed backends. Does NOT read or write
 # UBERDEV_RESOLVED_BACKEND (that is preflight's; RFC 0005 D15 constrains
-# backend resolution only — env resolution is exempt). Codex callers pass
-# BACKEND=codex explicitly so this helper can skip timeout(1) without reading
-# preflight's global.
+# backend resolution only — env resolution is exempt). Callers pass BACKEND
+# explicitly so this helper can skip timeout(1) for transports that launch no
+# OS process, without reading preflight's global.
 # Inputs (read with safe defaults so goal-pipeline, which has no arg-parser,
 # can call it). Exhaustive list — this is the SSOT for both solve-pipeline
 # Phase A and goal-pipeline Phase 0 callers; any new opt-in env var must be
@@ -1147,22 +761,6 @@ uberdev_dispatch_preflight() {
 #   EFFORT_LEVEL     (default max)
 uberdev_dispatch_resolve_env() {
   local _dispatch_env_backend="${1:-}"
-  # BG_PROMPT_MODE: hardcoded `argv`. Verified 2026-05-28 against claude-code
-  # 2.1.153 via tests/manual/probe-prompt-file-slash-expansion.sh — probe verdict
-  # was `INDETERMINATE`: --prompt-file is accepted as a flag (session backgrounds
-  # successfully), but the file body is not promoted to the session-name surface
-  # — the spawned session's name remained the short id rather than the opening
-  # prompt body, unlike argv-mode where name = the opening message verbatim. The
-  # session went idle within the probe's 30s window without the name field ever
-  # diverging. Slash-expansion firing is therefore unobservable from outside the
-  # session, but the name-surface divergence suggests the body is processed
-  # through a different parser path (or not at all) — either way, the natural-
-  # language wrapper at the 5 prompt-build callsites (issue #235 / PR #238)
-  # remains canonical. The `file`/`stdin` arms in _uberdev_dispatch_claude_bg
-  # remain pre-wired migration targets for a future CLI revision per RFC 0004
-  # §3.4. Closes #240 (won't-fix).
-  BG_PROMPT_MODE=argv
-
   # MODEL: single-quoted to keep zsh from glob-evaluating [1m] under NOMATCH.
   MODEL='claude-opus-4-8[1m]'
 
@@ -1227,16 +825,13 @@ uberdev_dispatch_resolve_env() {
     SOLVE_TIMEOUT=3600
   fi
 
-  # Codex does not wrap `codex exec` in timeout(1): the wrapper PID + status
-  # JSON are the liveness contract. Do not require GNU coreutils on Codex-only
-  # hosts just to resolve Claude-backed dispatch settings.
-  #
-  # `workflow` launches no OS process either: the Workflow runtime owns each
-  # agent's lifetime and cancellation, so there is nothing to wrap and no
-  # reason to demand GNU coreutils on the host (RFC 0015 §4). SOLVE_TIMEOUT
-  # above is still resolved — it is relayed into the args envelope as the
-  # per-issue advisory budget the fleet script reports on.
-  if [ "$_dispatch_env_backend" = "codex" ] || [ "$_dispatch_env_backend" = "workflow" ]; then
+  # `workflow` launches no OS process: the Workflow runtime owns each agent's
+  # lifetime and cancellation, so there is nothing to wrap and no reason to
+  # demand GNU coreutils on the host (RFC 0015 §4). SOLVE_TIMEOUT above is
+  # still resolved — it is relayed into the args envelope as the per-issue
+  # advisory budget the fleet script reports on. (`codex` shared this skip for
+  # the same reason and went with the backend in #381.)
+  if [ "$_dispatch_env_backend" = "workflow" ]; then
     TIMEOUT_BIN=""
     return 0
   fi
@@ -1264,17 +859,17 @@ uberdev_dispatch_resolve_env() {
 }
 
 # Validate the selected provider environment before a governed workflow starts
-# constructing children. Native Codex needs no Claude CLI model, permission, or
-# timeout variables; every Claude-backed transport shares the resolver above.
+# constructing children. `workflow` needs no Claude CLI model, permission, or
+# timeout variables; every detached transport shares the resolver above.
 uberdev_dispatch_preflight_backend() {
   local backend="${1:-}" workflow="${2:-}" backend_label
   # The supervision-capable subset: every backend EXCEPT the two that are
   # never a detached provider session. Declared, not silently narrower.
   # CONTRACT: dispatch-backend -auto -workflow !case-arm
   case "$backend" in
-    codex|claude-bg|background|wezterm)
+    background|wezterm)
       if ! _uberdev_dispatch_numeric_supervision_supported "$backend"; then
-        backend_label="$backend"; [ "$backend" != codex ] || backend_label=Codex
+        backend_label="$backend"
         echo "error: $workflow cannot supervise native Windows $backend_label process trees" >&2
         echo "       use WezTerm, WSL2, or another POSIX host" >&2
         return 1
@@ -1282,33 +877,63 @@ uberdev_dispatch_preflight_backend() {
       ;;
   esac
   if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
+    # Also exhaustive over the resolved set, and its `*)`-less shape is the
+    # reason it must be compared: a fifth backend with no arm here is silently
+    # ADMITTED for /review-pr and /simplify, which is the #360 shape inverted.
+    # `-auto` for the same reason as the switch below.
+    # CONTRACT: dispatch-backend -auto !case-arm
     case "$backend" in
-      codex) ;;
-      claude-bg)
-        echo "error: $workflow cannot use claude-bg because it does not export a supervised result artifact" >&2
-        return 1
-        ;;
-      wezterm|background|workflow)
-        echo "error: $workflow requires a backend with result-artifact and caller-workspace repair support: $backend" >&2
+      # `workflow` admitted per #381. The bar these two workflows set is an
+      # atomic result artifact plus caller-workspace repair, and the
+      # Workflow-native transport now meets BOTH -- it is not being waived.
+      # Result artifact: every bound child writes result.md.partial and
+      # publishes it with a same-directory rename, then writes a nonce-bearing
+      # status.json the same way, and the controller re-reads and digests both
+      # through lib/code_fixer_contract.py (capture-bound-child /
+      # capture-review-terminal / capture-standalone-terminal /
+      # capture-persistence-terminal) before anything downstream runs.
+      # Caller workspace: the code-fixer child commits onto the caller checkout
+      # with no worktree isolation -- already admitted for this backend in
+      # lib/agent-dispatch.sh's workspace_mode validator.
+      #
+      # #381 step 3 made this the DEFAULT: `auto` now resolves workflow for both
+      # workflows too. One BREAKING gap travels with that flip -- /review-pr
+      # Phase 3 dispatches review_pr.ci.* through the routed adapter, which has
+      # no workflow provider arm, so a RED check halts loudly at 6c.3 CLASSIFY
+      # with subreason=ci_transport_unsupported. Step 4 deleted the codex
+      # backend that used to be the named escape hatch, so there is no longer
+      # ANY transport that can run Phase 3 CI classification or the CI fixers:
+      # --no-ci-fix is the supported mode until Phase 3 is rebuilt
+      # Workflow-natively (commands/review-pr.md 6c, CHANGELOG BREAKING note).
+      # (The engine gate is applied once, in the backend case below, so it
+      # covers every workflow rather than only these two.)
+      workflow) ;;
+      # STILL LIVE, and deliberately kept when `codex) ;;` was deleted in #381.
+      # Both of these remain selectable via --backend=, and neither can publish
+      # a governed child result artifact or repair the caller workspace, so
+      # removing this arm would silently admit `/review-pr --backend=background`.
+      wezterm|background)
+        echo "error: $workflow needs a backend that publishes a governed child result artifact and can repair the caller workspace; '$backend' does neither" >&2
+        echo "       use the default (workflow) for $workflow" >&2
         return 1
         ;;
     esac
   fi
+  # The exhaustive resolved-backend dispatch: every member gets an arm and the
+  # `*)` arm is a refusal, so adding a fifth backend and forgetting THIS switch
+  # is exactly the #360 shape. `-auto` because `auto` is a REQUEST that
+  # `uberdev_dispatch_preflight` has already resolved before anything reaches
+  # here — the same delta `lib/goal-state.sh` declares for the same reason.
+  # CONTRACT: dispatch-backend -auto !case-arm
   case "$backend" in
-    codex)
-      return 0
-      ;;
     workflow)
-      # Nothing to preflight: no provider binary, no permission tier to probe
-      # (the Workflow runtime inherits the session's), no timeout(1). The
-      # solve-fleet script's own preflight validated the on-disk workflow.js.
+      # No provider binary, no permission tier to probe (the Workflow runtime
+      # inherits the session's), no timeout(1). The one thing this shell can
+      # prove is that the engine the command file mandates actually shipped —
+      # same gate the resolver applies, so `--backend=workflow` and `auto`
+      # refuse a broken install identically instead of at different stages.
+      _uberdev_dispatch_require_workflow_engine "$workflow" || return 1
       return 0
-      ;;
-    claude-bg)
-      uberdev_dispatch_resolve_env "$backend" || return $?
-      if [ -n "$workflow" ] && command -v _uberdev_agent_claude_permissions_preflight >/dev/null 2>&1; then
-        _uberdev_agent_claude_permissions_preflight "$workflow" || return $?
-      fi
       ;;
     wezterm|background) uberdev_dispatch_resolve_env "$backend" ;;
     *)
@@ -1340,10 +965,8 @@ _uberdev_agent_dispatch_backend() {
   export UBERDEV_AGENT_ROUTING_MODE UBERDEV_AGENT_EFFECTIVE_POLICY UBERDEV_AGENT_ROUTE_MODEL UBERDEV_AGENT_ROUTE_EFFORT
   export UBERDEV_AGENT_SERVICE_TIER UBERDEV_AGENT_SANDBOX UBERDEV_AGENT_RESULT_FILE UBERDEV_AGENT_STATUS_FILE
   case "$backend" in
-    claude-bg)   _uberdev_dispatch_claude_bg "$issue_num" "$tier" "$prompt_file" ;;
     wezterm)     _uberdev_dispatch_wezterm "$issue_num" "$tier" "$prompt_file" ;;
     background)  _uberdev_dispatch_background "$issue_num" "$tier" "$prompt_file" ;;
-    codex)       _uberdev_dispatch_codex "$issue_num" "$tier" "$prompt_file" ;;
     # `workflow` has no provider arm BY CONSTRUCTION: the fleet is spawned by
     # the calling session's Workflow tool, not by this library. Reaching here
     # means a caller resolved `workflow` and then took the detached-dispatch
@@ -1356,56 +979,6 @@ _uberdev_agent_dispatch_backend() {
       return 1 ;;
     *) DISPATCH_RC=1; DISPATCH_ID=""; DISPATCH_LOG="unsupported backend: $backend"; return 1 ;;
   esac
-}
-
-_uberdev_dispatch_cancel_claude_bg() {
-  local handle="${1:-}" resolved probe probe_rc attempts=0 absent_count=0 saw_valid=0
-  _UBERDEV_DISPATCH_CANCEL_REASON=''
-  [ "${#handle}" -eq 8 ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  printf '%s\n' "$handle" | LC_ALL=C grep -Eq '^[0-9a-f]{8}$' \
-    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  resolved="$(claude agents --all --json 2>/dev/null | _uberdev_dispatch_python -I -B -c '
-import json,sys
-prefix=sys.argv[1]
-try: rows=json.load(sys.stdin)
-except Exception: raise SystemExit(2)
-matches=[row["sessionId"] for row in rows if isinstance(row,dict) and isinstance(row.get("sessionId"),str) and row["sessionId"].startswith(prefix)] if isinstance(rows,list) else []
-if len(matches)!=1: raise SystemExit(2)
-print(matches[0],end="")
-' "$handle")" || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  [ -n "$resolved" ] || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_session_resolution_failed; return 2; }
-  claude stop "$resolved" >/dev/null 2>&1 \
-    || { _UBERDEV_DISPATCH_CANCEL_REASON=provider_stop_failed; return 2; }
-  while [ "$attempts" -lt 20 ]; do
-    if probe="$(_uberdev_agent_claude_probe "$resolved" exact 2>/dev/null)"; then
-      probe_rc=0; saw_valid=1
-    else
-      probe_rc=$?
-    fi
-    if [ "$probe_rc" -eq 0 ]; then
-      # `absent` is the CANCEL PROBE's own word, declared as a +delta. The
-      # `live|blocked:permission|blocked:provider` arm carries a colon, so the
-      # whole alternation is outside the arm grammar and contributes nothing.
-      # CONTRACT: run-terminal-status +absent !case-arm
-      case "$probe" in
-        completed|failed|timed_out|cancelled) return 0 ;;
-        absent)
-          absent_count=$((absent_count + 1))
-          [ "$absent_count" -lt 3 ] || return 0
-          ;;
-        live|blocked:permission|blocked:provider) absent_count=0 ;;
-        *) saw_valid=0 ;;
-      esac
-    fi
-    sleep 0.05
-    attempts=$((attempts + 1))
-  done
-  if [ "$saw_valid" -eq 0 ]; then
-    _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_probe_failed
-    return 2
-  fi
-  _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
-  return 1
 }
 
 _uberdev_dispatch_group_live() {
@@ -1596,7 +1169,7 @@ _uberdev_dispatch_cancel_backend() {
   local backend="$1" handle="$2" expected_identity="${3:-}" pane attempts group_rc identity_pid identity_pgid identity_sid identity_started
   _UBERDEV_DISPATCH_CANCEL_REASON=''
   case "$backend" in
-    codex|background)
+    background)
       _uberdev_dispatch_numeric_supervision_supported "$backend" || {
         _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
         return 2
@@ -1643,9 +1216,6 @@ EOF_IDENTITY
       _UBERDEV_DISPATCH_CANCEL_REASON=provider_cancel_unconfirmed
       return 1
       ;;
-    claude-bg)
-      _uberdev_dispatch_cancel_claude_bg "$handle"
-      ;;
     wezterm)
       pane="${handle#pane:}"; case "$pane" in ''|*[!0-9]*) return 2 ;; esac
       wezterm cli --domain-name uberdev kill-pane --pane-id "$pane" >/dev/null 2>&1 || return 2
@@ -1657,6 +1227,21 @@ except Exception: raise SystemExit(2)
 if any(isinstance(row,dict) and row.get("pane_id")==pane for row in rows): raise SystemExit(1)
 ' "$pane"
       ;;
+    # A Workflow child is awaited in-process by the calling session and is
+    # cancelled by that session's own abort signal. There is no external
+    # process to signal and no provider handle to resolve, so cancellation is
+    # confirmed by construction: once the await is abandoned the child cannot
+    # still be running.
+    #
+    # This arm pairs with _uberdev_child_backend_cancellation_supported's
+    # `workflow) return 0` (lib/child-dispatch.sh). Without it the two
+    # disagreed: the capability check admitted a workflow child through
+    # uberdev_preflight_child_batch, and the actual cancel then fell to `*)`
+    # and returned 2 -- provider_cancel_unconfirmed, capacity RETAINED. The
+    # capability check claimed something the cancel path did not implement,
+    # which is the same looks-correct-does-nothing shape this branch exists to
+    # delete. Keep the two arms in step.
+    workflow) return 0 ;;
     *) return 2 ;;
   esac
 }
@@ -1682,16 +1267,10 @@ uberdev_dispatch_one() {
   fi
   UBERDEV_TMPDIR="$run_dir"
   export UBERDEV_TMPDIR
-  case "$UBERDEV_RESOLVED_BACKEND" in
-    codex)
-      result_file="$run_dir/solve-codex-result-$ISSUE_NUM.md"
-      status_file="$run_dir/solve-codex-status-$ISSUE_NUM.json"
-      ;;
-    *)
-      result_file="$run_dir/solve-bg-result-$ISSUE_NUM.md"
-      status_file="$run_dir/solve-bg-status-$ISSUE_NUM.json"
-      ;;
-  esac
+  # One naming scheme now that the codex arm (the only backend with its own
+  # solve-codex-* pair) is gone (#381).
+  result_file="$run_dir/solve-bg-result-$ISSUE_NUM.md"
+  status_file="$run_dir/solve-bg-status-$ISSUE_NUM.json"
   repository_id="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
   provenance="${UBERDEV_ROUTING_PROVENANCE_JSON:-}"; [ -n "$provenance" ] || provenance='{}'
   workflow_routes="${UBERDEV_ROUTING_WORKFLOWS:-}"; [ -n "$workflow_routes" ] || workflow_routes='{}'
@@ -1802,9 +1381,6 @@ uberdev_dispatch_prepare_root() {
   printf '%s' "$prepared"
 }
 
-# _uberdev_dispatch_claude_bg ISSUE_NUM TIER PROMPT_FILE
-# Launch the Claude background provider under the current routed lifecycle and
-# capacity contract. Sets DISPATCH_RC and DISPATCH_ID for the caller.
 # --- TOCTOU symlink-swap / pre-creation guard for predictable tmp paths (#155) ---
 # Standard dispatch sets $UBERDEV_TMPDIR to a private EUID-owned directory.
 # Caller overrides and legacy direct invocation can still select shared roots,
@@ -1933,169 +1509,6 @@ _uberdev_dispatch_capture_supervisor_pid() {
   printf '%s' "$captured"
 }
 
-_uberdev_dispatch_claude_bg() {
-  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
-  DISPATCH_RC=0
-  DISPATCH_ID=""
-  local INSTANCE_SUFFIX='' INSTANCE_SLUG=''
-  if [ -n "${UBERDEV_AGENT_INSTANCE_ID:-}" ]; then
-    INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || return 3
-    INSTANCE_SUFFIX="-$INSTANCE_SLUG"
-  fi
-  local BG_STDOUT_LOG="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM$INSTANCE_SUFFIX.log"
-  # TOCTOU hardening (#155): guard + 0600-create the predictable bg-stdout path
-  # before any case arm redirects to it (3 redirect sites below).
-  if ! _uberdev_dispatch_prepare_tmp_target "$BG_STDOUT_LOG" "$ISSUE_NUM" "claude-bg"; then
-    DISPATCH_RC=3
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    return 3
-  fi
-  # UBERDEV_TURBO=1 chain-wide signal for /turbo (AUTO_MODE=1) only; env(1)
-  # mediates the inline-prefix because timeout(1) is argv[0]. Empty array
-  # under AUTO_MODE=0 -> no-op passthrough. See commands/turbo.md + commands/
-  # solve.md + RFC 0005 §2.3 (scoped-relaxation contract — propagation
-  # rules for unattended-mode signals).
-  # SKIP_PERMISSIONS=1 is /goal's autonomous-loop opt-in (#241); propagated
-  # to the bg child so its own uberdev_dispatch_resolve_env call sees the
-  # bypass tier. Gates on SKIP_PERMISSIONS directly, NOT on AUTO_MODE — the
-  # defensive `unset` in commands/turbo.md + commands/solve.md (RFC 0005 §2.3
-  # scoped-relaxation contract) is the pollution gate. `+=` (append)
-  # preserves any UBERDEV_TURBO=1 set above.
-  local BG_TURBO_ENV=()
-  [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-  [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
-  [[ "${AUTO_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( AUTO_PERMISSIONS=1 )
-  local BG_WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
-  local BG_EXECUTION_DIR BG_WORKTREE_ARGS=()
-  case "$BG_WORKSPACE_MODE" in
-    isolated)
-      BG_EXECUTION_DIR="$(pwd -P)" || return 3
-      BG_WORKTREE_ARGS=( --worktree "solve-issue-$ISSUE_NUM$INSTANCE_SUFFIX" )
-      ;;
-    caller)
-      BG_EXECUTION_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
-      [ -n "$BG_EXECUTION_DIR" ] && [ -d "$BG_EXECUTION_DIR" ] || return 3
-      BG_EXECUTION_DIR="$(cd "$BG_EXECUTION_DIR" 2>/dev/null && pwd -P)" || return 3
-      ;;
-    *) return 3 ;;
-  esac
-  local BG_PROMPT_MODE="${BG_PROMPT_MODE:-argv}" BG_STDIN_FILE='' PROMPT_BODY BG_BOOTSTRAP_TIMEOUT
-  if ! BG_BOOTSTRAP_TIMEOUT="$(_uberdev_dispatch_claude_bootstrap_timeout "$SOLVE_TIMEOUT")"; then
-    DISPATCH_RC=3
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"bootstrap_timeout\",\"backend\":\"claude-bg\",\"rc\":3}"
-    return 3
-  fi
-  local cmd=( "$TIMEOUT_BIN" "$BG_BOOTSTRAP_TIMEOUT" env )
-  [ "${#BG_TURBO_ENV[@]}" -eq 0 ] || cmd+=( "${BG_TURBO_ENV[@]}" )
-  cmd+=( claude --bg )
-  case "$BG_PROMPT_MODE" in
-    file)
-      # Trusted path arg; file contents never reach the shell as argv.
-      cmd+=( --prompt-file "$PROMPT_FILE" )
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      ;;
-    stdin)
-      # File content streamed on FD 0; no argv quoting concern.
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      BG_STDIN_FILE="$PROMPT_FILE"
-      ;;
-    argv)
-      # Bash array form (spec-reviewer finding 1) — single argv slot, no eval.
-      # B5 fix (prompt-read), mirrored from the `background` backend: an
-      # unreadable $PROMPT_FILE would otherwise leave PROMPT_BODY="" and
-      # dispatch `claude --bg … -- ""` (garbage agent), with the audit event
-      # happily reporting success. Guard the cat read and surface the failure
-      # as a dispatch_setup_failed audit + rc=1.
-      if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$BG_STDOUT_LOG")"; then
-        DISPATCH_RC=1
-        DISPATCH_LOG="$BG_STDOUT_LOG"
-        _uberdev_dispatch_audit dispatch_setup_failed \
-          "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"claude-bg\",\"rc\":1}"
-        return 1
-      fi
-      [ "${#BG_WORKTREE_ARGS[@]}" -eq 0 ] || cmd+=( "${BG_WORKTREE_ARGS[@]}" )
-      cmd+=( --model "$MODEL" )
-      ;;
-    *)
-      # Defensive default arm (silent-failure-hunter finding B2) — rc=127
-      # instead of a silent no-op that would report DISPATCH_RC=0.
-      echo "error: BG_PROMPT_MODE='$BG_PROMPT_MODE' is not one of {file, stdin, argv}" > "$BG_STDOUT_LOG"
-      DISPATCH_RC=127
-      ;;
-  esac
-  if [ "$DISPATCH_RC" -eq 0 ]; then
-    [ "${#PERM_FLAG[@]}" -eq 0 ] || cmd+=( "${PERM_FLAG[@]}" )
-    [ "${#EFFORT_FLAG[@]}" -eq 0 ] || cmd+=( "${EFFORT_FLAG[@]}" )
-    [ "$BG_PROMPT_MODE" != argv ] || cmd+=( -- "$PROMPT_BODY" )
-    # Claude owns its --worktree semantics (hooks, base ref, session cleanup).
-    # Serialize only the synchronous bootstrap that creates and locks the
-    # worktree. The mutex is released before handle parsing and detached work.
-    (
-      cd "$BG_EXECUTION_DIR" || exit 3
-      if [ -n "$BG_STDIN_FILE" ]; then exec < "$BG_STDIN_FILE" || exit 1; fi
-      if [ "$BG_WORKSPACE_MODE" = isolated ]; then
-        _UBERDEV_GIT_METADATA_MUTEX_OPERATION_TIMEOUT="$BG_BOOTSTRAP_TIMEOUT" \
-          _uberdev_dispatch_with_git_metadata_mutex "$BG_EXECUTION_DIR" claude-bootstrap "${cmd[@]}"
-      else
-        "${cmd[@]}"
-      fi
-    ) > "$BG_STDOUT_LOG" 2>&1
-    DISPATCH_RC=$?
-  fi
-  if [[ "$DISPATCH_RC" -eq 0 ]]; then
-    # Combined #143 (ANSI-strip + line-anchor + hex-validate) + #154 (capture
-    # grep's OWN rc to tell a retryable pipeline error from non-retryable marker
-    # drift). ANSI-strip first — `claude --bg` may wrap the `backgrounded · <id>`
-    # marker in CSI color codes; the line-anchor `^...$` additionally rejects
-    # OSC/DCS-wrapped markers (defense-in-depth). The cleaned stream is piped to
-    # `grep -m1` so `$?` is grep's rc: grep is the LAST command in the
-    # `printf|grep` pipeline, so the subshell exits with grep's rc and `$()`
-    # propagates it as `$?`. (The subshell's PIPESTATUS is just not visible to
-    # the outer scope — a scoping fact, not destruction.)
-    # `${ID_RAW##* }` reproduces `awk '{print $NF}'`; the hex-validate sentinel
-    # rejects any partial/garbage token. Mirrors the wezterm B4 SPAWN_RC=$? precedent.
-    local ID_CLEAN ID_RAW ID_GREP_RC ID_SUBPHASE
-    ID_CLEAN="$(sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g' "$BG_STDOUT_LOG")"
-    ID_RAW="$(printf '%s\n' "$ID_CLEAN" | grep -m1 -aoE '^backgrounded · [0-9a-f]{8}$')"
-    ID_GREP_RC=$?
-    DISPATCH_ID="${ID_RAW##* }"
-    DISPATCH_ID="${DISPATCH_ID//[^0-9a-f]/}"
-    [[ "${#DISPATCH_ID}" -eq 8 ]] || DISPATCH_ID=""  # sentinel: empty == validation failed (B3 guard below)
-    # B3 fix (preserved): `claude --bg` exited 0 but the marker was absent or
-    # the extraction pipeline errored. Recording bg_session_id="" as a
-    # "successful dispatch" would let /solve drop the claim-label while the user
-    # has no way to `claude agents`-monitor or recover. Surface rc=2 with a
-    # subphase discriminator so incident responders can tell drift
-    # (marker_absent) from infra (pipeline_error).
-    if [[ "$ID_GREP_RC" -ge 2 || -z "$DISPATCH_ID" ]]; then
-      # subphase from a TWO-ELEMENT LITERAL SET only (D7 injection guard):
-      # never derived from $ID_RAW or $BG_STDOUT_LOG content, which is
-      # untrusted and would forge/break the unescaped audit JSONL.
-      ID_SUBPHASE="marker_absent"
-      [[ "$ID_GREP_RC" -ge 2 ]] && ID_SUBPHASE="pipeline_error"
-      DISPATCH_RC=2
-      DISPATCH_LOG="$BG_STDOUT_LOG"
-      # Defense-in-depth (wezterm B4): stamp empty so the success arm can
-      # never fire on a partial token from a failed extraction.
-      DISPATCH_ID=""
-      _uberdev_dispatch_audit dispatch_setup_failed \
-        "{\"issue\":$ISSUE_NUM,\"phase\":\"id_extract\",\"subphase\":\"$ID_SUBPHASE\",\"backend\":\"claude-bg\",\"rc\":2,\"mode\":\"$BG_PROMPT_MODE\"}"
-      return 2
-    fi
-    _uberdev_dispatch_audit agent_dispatched \
-      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"claude-bg\",\"bg_session_id\":\"$DISPATCH_ID\",\"mode\":\"$BG_PROMPT_MODE\"}"
-  else
-    DISPATCH_LOG="$BG_STDOUT_LOG"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"claude-bg\",\"rc\":$DISPATCH_RC}"
-  fi
-  return "$DISPATCH_RC"
-}
-
 # _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE
 # Dependency-free fallback: explicit `git worktree add` + detached headless
 # `claude -p`. Sets DISPATCH_RC and DISPATCH_ID (the detached pid).
@@ -2109,6 +1522,12 @@ _uberdev_dispatch_background() {
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-result-$ISSUE_NUM.md}"
   local REPOSITORY_ROOT WORKTREE_DIR
+  # #381 RULING 4: a routed child (agent_id set -> CHILD_OWNED=1) owns its
+  # isolated worktree for the length of one bounded task, so the dispatcher —
+  # not the operator — must take it back down. A top-level /solve dispatch
+  # (CHILD_OWNED=0) keeps its worktree: that one IS the deliverable workspace.
+  local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
+  local CLEANUP_START_HEAD=''
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     DISPATCH_RC=1
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2117,6 +1536,18 @@ _uberdev_dispatch_background() {
   }
   REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
+  # Captured BEFORE any mutation: without a pinned start commit the teardown
+  # cannot tell "nothing happened here" from "the child committed", so it would
+  # have to choose between leaking and destroying. Fail closed here instead —
+  # no worktree exists yet, so there is nothing to leak.
+  if [ "$CHILD_OWNED" = "1" ]; then
+    CLEANUP_START_HEAD="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
+      DISPATCH_RC=1
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        "{\"issue\":$ISSUE_NUM,\"phase\":\"start_head\",\"backend\":\"background\",\"rc\":1}"
+      return 1
+    }
+  fi
   # TOCTOU hardening (#155): guard + 0600-create the predictable log + pid
   # paths before any redirect writes to them (world-writable $UBERDEV_TMPDIR).
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "background"; then
@@ -2135,7 +1566,7 @@ _uberdev_dispatch_background() {
   # worktree-isolation bug #40164 in the --bg backend's own --worktree path
   # handling. MSYS_NO_PATHCONV stops Git Bash rewriting the POSIX path.
   if ! _uberdev_dispatch_git_worktree_add \
-      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" "$CLEANUP_START_HEAD"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2148,13 +1579,14 @@ _uberdev_dispatch_background() {
   # audit event happily reporting success. Guard the cat read and surface
   # the failure as a dispatch_setup_failed audit + rc=1.
   if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"background\",\"rc\":1}"
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background prompt_read 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
-  # BG_TURBO_ENV: same propagation contract as the claude-bg arm — see lines ~359-369 for the rationale (UBERDEV_TURBO + SKIP_PERMISSIONS, RFC 0005 §2.3 scoped-relaxation contract).
+  # BG_TURBO_ENV: UBERDEV_TURBO + SKIP_PERMISSIONS propagation across the env(1)
+  # boundary, per RFC 0005 §2.3 (scoped-relaxation contract).
   local BG_TURBO_ENV=()
   [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
   [[ "${SKIP_PERMISSIONS:-0}" == "1" ]] && BG_TURBO_ENV+=( SKIP_PERMISSIONS=1 )
@@ -2167,7 +1599,13 @@ _uberdev_dispatch_background() {
   PROVIDER_CMD+=( claude -p "$PROMPT_BODY" --model "$MODEL" )
   [ "${#PERM_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${PERM_FLAG[@]}" )
   [ "${#EFFORT_FLAG[@]}" -eq 0 ] || PROVIDER_CMD+=( "${EFFORT_FLAG[@]}" )
-  _uberdev_dispatch_resolve_python || { DISPATCH_RC=1; DISPATCH_LOG="$LOG_FILE"; return 1; }
+  if ! _uberdev_dispatch_resolve_python; then
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background python_launcher 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
+  fi
   local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
   [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
   UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback
@@ -2209,15 +1647,53 @@ os.execvp("bash",argv)' '
     }
     python3() { run_python "$@"; }
     export -n -f run_python python3 2>/dev/null || exit 126
-    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"; shift 5
-    . "$DISPATCH_LIB" || exit 126
+    WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
+    REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
+    CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
+    # The one window no teardown can cover: the teardown transaction and every
+    # preservation guard it depends on live in $DISPATCH_LIB, so before this
+    # line there is nothing safe to call. A guardless inline `git worktree
+    # remove` here would be the exact destructive shortcut those guards exist
+    # to forbid. So this leak is REPORTED and left for the operator, not
+    # silently absorbed and not force-removed.
+    . "$DISPATCH_LIB" || {
+      [ "$CHILD_OWNED" != "1" ] || printf "background dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+        "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+      exit 126
+    }
     WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
     EMPTY_VALUE=
+    WORKTREE_CLEANUP_DONE=0
     write_status() {
       _uberdev_agent_publish_status_record "$STATUS_FILE" provider background "$1" "$2" "$WRAPPER_PID" \
         "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
         "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
     }
+    # #381 RULING 4: the dispatcher created this worktree, so this wrapper — the
+    # process that owns the child lifetime — takes it back down. Runs from
+    # REPOSITORY_ROOT in a subshell because our own cwd IS the worktree being
+    # removed. Failure is surfaced on stderr and folded into the child rc; it is
+    # never swallowed into a "completed".
+    cleanup_child_worktree() {
+      [ "$WORKTREE_CLEANUP_DONE" -eq 0 ] || return 0
+      if [ "$CHILD_OWNED" != "1" ]; then WORKTREE_CLEANUP_DONE=1; return 0; fi
+      if (
+        cd "$REPOSITORY_ROOT" || exit 2
+        . "$DISPATCH_LIB" || exit 2
+        _uberdev_dispatch_cleanup_child_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" \
+          "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$1"
+      ); then
+        WORKTREE_CLEANUP_DONE=1
+        return 0
+      fi
+      printf "background dispatch: failed to clean child worktree %s (%s)\n" \
+        "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+      return 2
+    }
+    # Armed BEFORE the cd: a failed `cd` into the worktree, or a signal landing
+    # between here and the full finalizer below, is still a terminal child and
+    # must not strand the worktree.
+    trap '\''cleanup_child_worktree cancelled || true'\'' EXIT
     write_status running null || exit 126
     cd "$WORKTREE_DIR" || { write_status failed 127; exit 127; }
     TMP_RESULT="${RESULT_FILE}.partial.${WRAPPER_PID}"
@@ -2239,7 +1715,13 @@ except FileNotFoundError: pass
 finally:
  os.close(f) if f is not None else None; os.close(d)'\'' "$TMP_RESULT" "$TMP_RESULT_ID" >/dev/null 2>&1 || true
     }
-    trap cleanup_partial EXIT
+    finalize_on_exit() {
+      cleanup_partial
+      # An abnormal exit (signal, unexpected `exit`) is still a terminal state
+      # for the child, so the worktree still has to go.
+      cleanup_child_worktree cancelled || true
+    }
+    trap finalize_on_exit EXIT
     trap '\''exit 143'\'' HUP INT TERM
     "$@" > "$TMP_RESULT"
     PROVIDER_RC=$?
@@ -2255,21 +1737,31 @@ finally:
     else
       rm -f -- "$TMP_RESULT"
     fi
+    if ! cleanup_child_worktree "$STATE"; then
+      PROVIDER_RC=74; STATE=failed
+    fi
     trap - EXIT HUP INT TERM
     write_status "$STATE" "$PROVIDER_RC" || exit 126
     exit "$PROVIDER_RC"
-  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+  ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$WORKTREE_DIR" "$STATUS_FILE" "$RESULT_FILE" "$ISSUE_NUM" "$TIER" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED" "${PROVIDER_CMD[@]}" \
     >"$LOG_FILE" 2>&1 &
   DISPATCH_RC=$?
   local LAUNCH_PID="$!"
   disown "$LAUNCH_PID" 2>/dev/null || true
   if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
     kill -TERM "$LAUNCH_PID" 2>/dev/null || true
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_target_unsafe\",\"backend\":\"background\",\"rc\":3}"
+    DISPATCH_LOG="$LOG_FILE"
+    # The SIGTERM above races the wrapper's own EXIT trap, which is armed only
+    # once it has sourced this library — so the wrapper may die before it can
+    # ever tear the worktree down. Tear it down from here too. Both teardowns
+    # take the same mutex, and the loser observes absent:absent and returns 0,
+    # so the double call is safe rather than merely tolerated.
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" background pid_target_unsafe 3 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
     rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-    return 3
+    return "$DISPATCH_RC"
   fi
   # S10 cleanup: $STATUS_FILE.pid is a one-shot inter-subshell side file
   # whose only purpose is bridging the pid back from the subshell above.
@@ -2290,425 +1782,14 @@ finally:
   else
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
+    # Deliberately NOT a `_uberdev_dispatch_fail_after_worktree` site. Reaching
+    # here means the wrapper launched and its pid was captured — only the owned
+    # SESSION could not be observed — so a child may be running in that
+    # worktree right now, and it owns the teardown through its own EXIT trap.
+    # Every arm above this point aborts before any child can be running, which
+    # is exactly the line the dispatcher-side teardown is drawn on.
     _uberdev_dispatch_audit dispatch_setup_failed \
       "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"background\",\"rc\":$DISPATCH_RC}"
-  fi
-  return "$DISPATCH_RC"
-}
-
-_uberdev_dispatch_report_codex_setup_cleanup_failure() {
-  local issue_num="$1" phase="$2" repo_root="$3" worktree_relative="$4"
-  local branch="$5" receipt="$6" token="$7" log_file="$8"
-  if _uberdev_dispatch_cleanup_codex_worktree "$repo_root" "$worktree_relative" "$branch" \
-      "$receipt" "$token" failed; then
-    return 0
-  fi
-  printf 'codex dispatch: setup cleanup failed after %s; worktree=%s branch=%s receipt=%s\n' \
-    "$phase" "$repo_root/$worktree_relative" "$branch" "$receipt" >>"$log_file"
-  _uberdev_dispatch_audit dispatch_cleanup_failed \
-    "{\"issue\":$issue_num,\"phase\":\"$phase\",\"backend\":\"codex\",\"rc\":74}"
-  return 74
-}
-
-# _uberdev_dispatch_codex ISSUE_NUM TIER PROMPT_FILE
-#
-# Codex CLI backend (RFC 0012 §3.4 codex-port). Isolated children use a
-# dispatcher-controlled worktree; caller-workspace children execute directly
-# in the validated repository and intentionally create no worktree. Both modes
-# read the prompt from $PROMPT_FILE, launch a detached headless process, capture
-# its PID in DISPATCH_ID, and publish status JSON for liveness polling.
-#
-# What's different from `background`:
-#   - execs `codex exec` instead of `claude -p` (Codex's headless non-interactive
-#     mode). The wrapper `cd`s into the selected execution directory; --json
-#     streams progress to the log and -o captures the final message.
-#   - isolated mode creates a dispatcher-owned worktree and normally selects
-#     workspace-write. Caller mode creates no worktree, runs in the validated
-#     repository root, and uses the route-selected sandbox (reviewers may be
-#     read-only while fixer routes use workspace-write).
-#   - --skip-git-repo-check is NOT passed in either mode: both execution
-#     directories are validated git checkouts, so Codex's repo guard remains a
-#     useful safety net.
-#   - MODEL/PERM_FLAG/EFFORT_FLAG from the claude arms don't apply: codex
-#     selects model via -m / config.toml, and sandbox mode replaces the
-#     permission-flag mechanism. BG_TURBO_ENV still propagates UBERDEV_TURBO
-#     so the spawned agent knows it's in turbo mode.
-#   - Liveness is PID-based (kill -0), same as background — there is no
-#     `claude agents --json` equivalent to poll. The launcher's goal-state
-#     polling reuses the background path's kill -0 contract unchanged.
-_uberdev_dispatch_timeout_intent_matches() {
-  local probe
-  probe="$(_uberdev_agent_timeout_intent_probe "$1" "$2" 2>/dev/null)" || return 1
-  [ "$probe" = valid ]
-}
-
-_uberdev_dispatch_codex() {
-  local ISSUE_NUM="$1" TIER="$2" PROMPT_FILE="$3"
-  DISPATCH_RC=0
-  DISPATCH_ID=""
-  DISPATCH_STATUS_CONTEXT=0
-  DISPATCH_STATUS_LOG=''
-  DISPATCH_STATUS_RESULT=''
-  DISPATCH_STATUS_WORKTREE=''
-  DISPATCH_STATUS_BRANCH=''
-  DISPATCH_STATUS_WORKSPACE_MODE=''
-  local INSTANCE_SLUG
-  INSTANCE_SLUG="$(_uberdev_dispatch_instance_slug)" || { DISPATCH_RC=1; return 1; }
-  local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-status-$ISSUE_NUM.json}"
-  local LOG_FILE="${STATUS_FILE}.log"
-  local RESULT_FILE="${UBERDEV_AGENT_RESULT_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-codex-result-$ISSUE_NUM.md}"
-  local WORKSPACE_MODE="${UBERDEV_AGENT_WORKSPACE_MODE:-isolated}"
-  local WORKSPACE_DIR="${UBERDEV_AGENT_WORKSPACE_DIR:-}"
-  local WORKTREE_RELATIVE=".claude/worktrees/solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
-  local WORKTREE_DIR=''
-  local WORKTREE_BRANCH="worktree-solve-issue-$ISSUE_NUM-$INSTANCE_SLUG"
-  local EXECUTION_DIR=''
-  local ROUTE_MODEL="${UBERDEV_AGENT_ROUTE_MODEL:-gpt-5.6-sol}"
-  local ROUTE_EFFORT="${UBERDEV_AGENT_ROUTE_EFFORT:-medium}"
-  local ROUTE_SERVICE_TIER="${UBERDEV_AGENT_SERVICE_TIER:-default}"
-  local ROUTE_SANDBOX="${UBERDEV_AGENT_SANDBOX:-workspace-write}"
-  local EFFECTIVE_POLICY="${UBERDEV_AGENT_EFFECTIVE_POLICY:-${UBERDEV_AGENT_ROUTING_MODE:-adaptive}}"
-  local REPOSITORY_ROOT WORKTREE_RECEIPT WORKTREE_TOKEN='' ABORT_PID ABORT_CANDIDATE WORKTREE_ADD_RC=0
-  local WORKTREE_TRANSACTION_OUTPUT='' WORKTREE_TRANSACTION_RC=0
-  local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
-  REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)" || { DISPATCH_RC=1; return 1; }
-  WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
-  EXECUTION_DIR="$WORKTREE_DIR"
-  case "$WORKSPACE_MODE" in
-    isolated) [ -z "$WORKSPACE_DIR" ] || { DISPATCH_RC=3; return 3; } ;;
-    caller)
-      [ -n "$WORKSPACE_DIR" ] && [ -d "$WORKSPACE_DIR" ] || { DISPATCH_RC=3; return 3; }
-      WORKSPACE_DIR="$(cd "$WORKSPACE_DIR" 2>/dev/null && pwd -P)" || { DISPATCH_RC=3; return 3; }
-      [ "$WORKSPACE_DIR" = "$REPOSITORY_ROOT" ] || { DISPATCH_RC=3; return 3; }
-      EXECUTION_DIR="$WORKSPACE_DIR"
-      WORKTREE_RELATIVE=''
-      WORKTREE_DIR=''
-      WORKTREE_BRANCH=''
-      ;;
-    *) DISPATCH_RC=3; return 3 ;;
-  esac
-  WORKTREE_RECEIPT="$STATUS_FILE.worktree-owner.json"
-  if [ "$EFFECTIVE_POLICY" = inherit ]; then
-    ROUTE_MODEL=""
-    ROUTE_EFFORT=""
-  fi
-  # TOCTOU hardening (#155): guard + 0600-create the predictable paths before
-  # any redirect writes to them (mirrors the background arm exactly).
-  if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "codex"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE.pid" "$ISSUE_NUM" "codex"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "codex"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if ! _uberdev_dispatch_prepare_tmp_target "$RESULT_FILE" "$ISSUE_NUM" "codex"; then
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
-  fi
-  if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ]; then
-    if WORKTREE_TRANSACTION_OUTPUT="$(_uberdev_dispatch_create_codex_worktree \
-        "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" \
-        "$WORKTREE_RECEIPT" "$LOG_FILE")"; then
-      WORKTREE_TRANSACTION_RC=0
-    else
-      WORKTREE_TRANSACTION_RC=$?
-    fi
-    _UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE=''
-    _UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN=''
-    if [ -n "$WORKTREE_TRANSACTION_OUTPUT" ] \
-        && ! _uberdev_dispatch_parse_codex_worktree_transaction "$WORKTREE_TRANSACTION_OUTPUT"; then
-      DISPATCH_RC=74; DISPATCH_LOG="$LOG_FILE"; return 74
-    fi
-    if [ "$WORKTREE_TRANSACTION_RC" -eq 0 ]; then
-      if [ "$_UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE" != active ]; then
-        DISPATCH_RC=74; DISPATCH_LOG="$LOG_FILE"; return 74
-      fi
-      WORKTREE_TOKEN="$_UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN"
-    else
-      case "$_UBERDEV_CODEX_WORKTREE_TRANSACTION_STATE" in
-        active|active_unconfirmed)
-          WORKTREE_TOKEN="$_UBERDEV_CODEX_WORKTREE_TRANSACTION_TOKEN"
-          printf 'uberdev codex setup: recoverable worktree transaction failure\n' >>"$LOG_FILE" 2>/dev/null || true
-          DISPATCH_RC=74
-          ;;
-        retired)
-          DISPATCH_RC=1
-          ;;
-        '')
-          case "$WORKTREE_TRANSACTION_RC" in
-            2|3) DISPATCH_RC="$WORKTREE_TRANSACTION_RC" ;;
-            *) DISPATCH_RC=1 ;;
-          esac
-          ;;
-        *) DISPATCH_RC=74 ;;
-      esac
-      DISPATCH_LOG="$LOG_FILE"
-      _uberdev_dispatch_audit dispatch_setup_failed \
-        "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"codex\",\"rc\":$DISPATCH_RC}"
-      return "$DISPATCH_RC"
-    fi
-  fi
-  # Explicit dispatcher-controlled worktree (same rationale as the background
-  # arm — sidesteps backend-specific worktree handling; MSYS_NO_PATHCONV for
-  # Git Bash on Windows).
-  if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" != "1" ]; then
-    _uberdev_dispatch_git_worktree_add "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" \
-      || WORKTREE_ADD_RC=$?
-  fi
-  if [ "$WORKTREE_ADD_RC" -ne 0 ]; then
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"worktree\",\"backend\":\"codex\",\"rc\":1}"
-    return 1
-  fi
-  # Validate readability without copying prompt content into argv. Codex exec
-  # accepts positional `-` and reads the instruction from stdin.
-  if [ ! -f "$PROMPT_FILE" ] || [ ! -r "$PROMPT_FILE" ]; then
-    if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ] && \
-        ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" prompt_read \
-          "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
-      DISPATCH_RC=74
-      DISPATCH_LOG="$LOG_FILE"
-      return 74
-    fi
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"prompt_read\",\"backend\":\"codex\",\"rc\":1}"
-    return 1
-  fi
-  # BG_TURBO_ENV: same propagation contract as the other arms. UBERDEV_TURBO=1
-  # so the spawned codex agent knows it's in turbo mode. SKIP_PERMISSIONS is a
-  # claude-specific flag; codex autonomy comes from --sandbox workspace-write,
-  # so it's intentionally NOT propagated here (would be a no-op env var).
-  local BG_TURBO_ENV=()
-  [[ "${AUTO_MODE:-0}" == "1" ]] && BG_TURBO_ENV=( UBERDEV_TURBO=1 )
-  # Detached wrapper around headless codex exec. The wrapper owns both status
-  # writes (running -> terminal) so a fast codex exit cannot race with the parent
-  # and be overwritten back to "running". Track the wrapper PID, not the raw
-  # codex child, so /goal can poll a process that owns the final status write.
-  if ! _uberdev_dispatch_resolve_python; then
-    if [ "$WORKSPACE_MODE" = isolated ] && [ "$CHILD_OWNED" = "1" ] && \
-        ! _uberdev_dispatch_report_codex_setup_cleanup_failure "$ISSUE_NUM" python_launcher \
-          "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$LOG_FILE"; then
-      DISPATCH_RC=74
-      DISPATCH_LOG="$LOG_FILE"
-      return 74
-    fi
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"python_launcher\",\"backend\":\"codex\",\"rc\":1}"
-    return 1
-  fi
-  local PYTHON_LAUNCH=( "$_UBERDEV_PYTHON_EXE" )
-  [ -z "$_UBERDEV_PYTHON_PREFIX" ] || PYTHON_LAUNCH+=( "$_UBERDEV_PYTHON_PREFIX" )
-  UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup "${PYTHON_LAUNCH[@]}" -I -c 'import os,shutil,stat,subprocess,sys,traceback
-argv=["bash","-c",*sys.argv[1:]]
-if os.name=="nt":
- pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]
- fd=os.open(pid_path,os.O_WRONLY|getattr(os,"O_NOFOLLOW",0))
- try:
-  opened=os.fstat(fd); current=os.lstat(pid_path)
-  if not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(current.st_mode) or opened.st_nlink!=1 or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino): raise RuntimeError("unsafe supervisor pid file")
-  payload=str(os.getpid()).encode("ascii")
-  if os.write(fd,payload)!=len(payload): raise RuntimeError("short supervisor pid write")
-  os.ftruncate(fd,len(payload)); os.fsync(fd)
- finally: os.close(fd)
- os.environ["UBERDEV_WRAPPER_PID"]=str(os.getpid())
- flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
- diagnostic=os.environ.get("UBERDEV_DETACH_DIAGNOSTICS")=="1"
- bash_path=shutil.which("bash")
- launch_argv=[bash_path]
- if diagnostic: launch_argv.append("-x")
- launch_argv.extend(["-c",*sys.argv[1:]])
- if diagnostic: print(f"detach diagnostic: bash={bash_path!r} cwd={os.getcwd()!r} flags={flags} argv={launch_argv!r}",file=sys.stderr,flush=True)
- try: child=subprocess.Popen(launch_argv,stdout=sys.stdout,stderr=sys.stderr,creationflags=flags)
- except BaseException:
-  if diagnostic: traceback.print_exc(file=sys.stderr)
-  raise
- if diagnostic: print(f"detach diagnostic: child_pid={child.pid}",file=sys.stderr,flush=True)
- rc=child.wait()
- if diagnostic: print(f"detach diagnostic: child_rc={rc}",file=sys.stderr,flush=True)
- raise SystemExit(rc)
-os.setsid()
-os.execvp("bash",argv)' '
-      PYTHON_EXE="$1"; PYTHON_PREFIX="$2"; DISPATCH_LIB="$3"; shift 3
-      case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac
-      [ -n "$PYTHON_EXE" ] && [ -x "$PYTHON_EXE" ] || exit 126
-      _UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"
-      run_python() {
-        if [ -n "$PYTHON_PREFIX" ]; then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi
-      }
-      python3() { run_python "$@"; }
-      export -n -f run_python python3 2>/dev/null || exit 126
-      ISSUE_NUM="$1"
-      TIER="$2"
-      STATUS_FILE="$3"
-      RESULT_FILE="$4"
-      LOG_FILE="$5"
-      EXECUTION_DIR="$6"
-      WORKTREE_RELATIVE="$7"
-      WORKTREE_BRANCH="$8"
-      PROMPT_FILE="$9"
-      ROUTE_MODEL="${10}"
-      ROUTE_EFFORT="${11}"
-      ROUTE_SERVICE_TIER="${12}"
-      ROUTE_SANDBOX="${13}"
-      REPOSITORY_ROOT="${14}"
-      WORKTREE_RECEIPT="${15}"
-      WORKTREE_TOKEN="${16}"
-      CHILD_OWNED="${17}"
-      WORKSPACE_MODE="${18}"
-      shift 18
-      . "$DISPATCH_LIB" || exit 126
-      WRAPPER_PID="${UBERDEV_WRAPPER_PID:-$$}"
-      EMPTY_VALUE=
-      CLEANUP_DONE=0
-      FINAL_STATUS_WRITTEN=0
-      TERMINAL_STATE=failed
-      CLEANUP_PROVIDER_RC=null
-
-      cleanup_worktree() {
-        [ "$CLEANUP_DONE" -eq 0 ] || return 0
-        if [ "$WORKSPACE_MODE" = caller ] || [ "$CHILD_OWNED" != "1" ]; then CLEANUP_DONE=1; return 0; fi
-        if (
-          cd "$REPOSITORY_ROOT" || exit 2
-          . "$DISPATCH_LIB" || exit 2
-          _uberdev_dispatch_cleanup_codex_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" \
-            "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$TERMINAL_STATE"
-        ); then
-          CLEANUP_DONE=1
-          return 0
-        fi
-        return 2
-      }
-
-      finalize_on_exit() {
-        _exit_rc=$?
-        [ "$FINAL_STATUS_WRITTEN" -eq 0 ] || return 0
-        _exit_state="$TERMINAL_STATE"
-        if ! cleanup_worktree; then
-          printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
-          CLEANUP_PROVIDER_RC="$_exit_rc"
-          _exit_rc=74
-          _exit_state=failed
-        elif [ "$_exit_state" = cancelled ]; then
-          _exit_rc=143
-          if _uberdev_dispatch_timeout_intent_matches "$STATUS_FILE" "$WRAPPER_PID"; then
-            # The public waiter owns timeout classification after it has
-            # published an exact cancellation intent. Preserve the running
-            # snapshot so its compare-and-swap can write `timed_out`.
-            return 0
-          fi
-        else
-          _exit_state=failed
-          [ "$_exit_rc" -ne 0 ] || _exit_rc=70
-        fi
-        write_status "$_exit_state" "$_exit_rc" || \
-          printf "codex dispatch: failed to write terminal status file: %s\n" "$STATUS_FILE" >&2
-      }
-
-      trap finalize_on_exit EXIT
-      trap "TERMINAL_STATE=cancelled; exit 143" HUP INT TERM
-
-      write_status() {
-        _uberdev_agent_publish_status_record "$STATUS_FILE" provider codex "$1" "$2" "$WRAPPER_PID" \
-          "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" "$CLEANUP_PROVIDER_RC" "$LOG_FILE" "$RESULT_FILE" \
-          "$EXECUTION_DIR" "$WORKTREE_BRANCH" "$WORKSPACE_MODE" 1
-      }
-
-      if ! write_status running null; then
-        printf "codex dispatch: failed to write running status file: %s\n" "$STATUS_FILE" >&2
-        exit 126
-      fi
-
-      if cd "$EXECUTION_DIR"; then
-        CODEX_ROUTE_ARGS=()
-        [ -z "$ROUTE_MODEL" ] || CODEX_ROUTE_ARGS+=( -m "$ROUTE_MODEL" )
-        [ -z "$ROUTE_EFFORT" ] || CODEX_ROUTE_ARGS+=( -c "model_reasoning_effort=\"$ROUTE_EFFORT\"" )
-        env "$@" codex --ask-for-approval never exec \
-        --sandbox "$ROUTE_SANDBOX" \
-        "${CODEX_ROUTE_ARGS[@]}" \
-        -c "service_tier=\"$ROUTE_SERVICE_TIER\"" \
-        -c "features.multi_agent=false" \
-        --json \
-        -o "$RESULT_FILE" \
-        - < "$PROMPT_FILE"
-        CODEX_RC=$?
-      else
-        CODEX_RC=127
-      fi
-      CODEX_STATE=failed
-      [ "$CODEX_RC" -eq 0 ] && CODEX_STATE=completed
-      if [ "$CODEX_RC" -eq 0 ] && [ ! -s "$RESULT_FILE" ]; then
-        printf "codex dispatch: completed without a result file: %s\n" "$RESULT_FILE" >&2
-        CODEX_RC=65
-        CODEX_STATE=failed
-      fi
-      TERMINAL_STATE="$CODEX_STATE"
-      if ! cleanup_worktree; then
-        printf "codex dispatch: failed to clean child worktree %s (%s)\n" "$EXECUTION_DIR" "$WORKTREE_BRANCH" >&2
-        CLEANUP_PROVIDER_RC="$CODEX_RC"
-        CODEX_RC=74
-        CODEX_STATE=failed
-        TERMINAL_STATE=failed
-      else
-        trap - EXIT
-      fi
-      if ! write_status "$CODEX_STATE" "$CODEX_RC"; then
-        printf "codex dispatch: failed to write final status file: %s\n" "$STATUS_FILE" >&2
-        exit 126
-      fi
-      FINAL_STATUS_WRITTEN=1
-      exit "$CODEX_RC"
-    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$ISSUE_NUM" "$TIER" "$STATUS_FILE" "$RESULT_FILE" "$LOG_FILE" "$EXECUTION_DIR" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$PROMPT_FILE" \
-    "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_SERVICE_TIER" "$ROUTE_SANDBOX" \
-    "$REPOSITORY_ROOT" "$WORKTREE_RECEIPT" "$WORKTREE_TOKEN" "$CHILD_OWNED" "$WORKSPACE_MODE" \
-    ${BG_TURBO_ENV[@]+"${BG_TURBO_ENV[@]}"} \
-    >"$LOG_FILE" 2>&1 &
-  DISPATCH_RC=$?
-  local LAUNCH_PID="$!"
-  DISPATCH_STATUS_CONTEXT=1
-  DISPATCH_STATUS_LOG="$LOG_FILE"
-  DISPATCH_STATUS_RESULT="$RESULT_FILE"
-  DISPATCH_STATUS_WORKTREE="$EXECUTION_DIR"
-  DISPATCH_STATUS_BRANCH="$WORKTREE_BRANCH"
-  DISPATCH_STATUS_WORKSPACE_MODE="$WORKSPACE_MODE"
-  disown 2>/dev/null || true
-  if ! DISPATCH_ID="$(_uberdev_dispatch_capture_supervisor_pid "$LAUNCH_PID" "$STATUS_FILE.pid")"; then
-    ABORT_PID="$LAUNCH_PID"
-    if [ "$(_uberdev_dispatch_os_class)" = windows-native ]; then
-      ABORT_CANDIDATE="$(_uberdev_dispatch_read_secure_pid_file "$STATUS_FILE.pid" 2>/dev/null || true)"
-      [ -z "$ABORT_CANDIDATE" ] || ABORT_PID="$ABORT_CANDIDATE"
-    fi
-    case "$ABORT_PID" in ''|*[!0-9]*|0) kill -TERM "$LAUNCH_PID" 2>/dev/null || true ;; *) DISPATCH_ID="$ABORT_PID" ;; esac
-    DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"pid_capture\",\"backend\":\"codex\",\"rc\":3}"
-    rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-    return 3
-  fi
-  rm -f "$STATUS_FILE.pid" 2>/dev/null || true
-  if [[ -n "$DISPATCH_ID" ]] && ! _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"; then
-    if ! _uberdev_dispatch_accept_immediate_terminal codex "$DISPATCH_ID" "$STATUS_FILE" "$RESULT_FILE" >/dev/null; then
-      DISPATCH_RC=1
-      DISPATCH_ID=""
-    fi
-  fi
-  # A fast `codex exec` failure is a terminal agent outcome, not a parent
-  # dispatch setup failure. The wrapper records that in the final status JSON;
-  # the parent succeeds once it has forked the wrapper and captured its PID.
-  if [[ "$DISPATCH_RC" -eq 0 && -n "$DISPATCH_ID" ]]; then
-    _uberdev_dispatch_audit agent_dispatched \
-      "{\"issue\":$ISSUE_NUM,\"tier\":\"$TIER\",\"backend\":\"codex\",\"pid\":\"$DISPATCH_ID\",\"log\":\"$LOG_FILE\"}"
-  else
-    DISPATCH_RC=1
-    DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      "{\"issue\":$ISSUE_NUM,\"phase\":\"dispatch\",\"backend\":\"codex\",\"rc\":$DISPATCH_RC}"
   fi
   return "$DISPATCH_RC"
 }
@@ -2755,7 +1836,7 @@ LUA
 # Spawns each agent as a foreground headless `claude -p` in a visible WezTerm
 # pane. Sets DISPATCH_RC and DISPATCH_ID (the spawned pane id).
 #
-# Intentional asymmetry vs. claude-bg / background backends: this backend does
+# Intentional asymmetry vs. the background backend: this backend does
 # NOT env(1)-wrap the spawn with BG_TURBO_ENV (no UBERDEV_TURBO / SKIP_PERMISSIONS
 # propagation). Per design Q4 (see `docs/uberdev/specs/...-goal-skip-permissions-propagation-design.md` §Q4 / Non-goals), wezterm is the attended-mode backend — visible panes,
 # operator can approve permission prompts manually — so the cmux PermissionRequest
@@ -2784,6 +1865,11 @@ _uberdev_dispatch_wezterm() {
   local LOG_FILE="${UBERDEV_TMPDIR:-/tmp}/solve-bg-stdout-$ISSUE_NUM.log"
   local STATUS_FILE="${UBERDEV_AGENT_STATUS_FILE:-${UBERDEV_TMPDIR:-/tmp}/solve-bg-status-$ISSUE_NUM.json}"
   local REPOSITORY_ROOT WORKTREE_DIR
+  # #381 RULING 4 — identical teardown boundary to the background arm: a routed
+  # child (CHILD_OWNED=1) gets its isolated worktree removed when it
+  # terminalizes; a top-level attended pane keeps its workspace.
+  local CHILD_OWNED="${UBERDEV_AGENT_CHILD_OWNED:-0}"
+  local CLEANUP_START_HEAD=''
   REPOSITORY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     DISPATCH_RC=1
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2792,9 +1878,17 @@ _uberdev_dispatch_wezterm() {
   }
   REPOSITORY_ROOT="$(cd "$REPOSITORY_ROOT" 2>/dev/null && pwd -P)" || { DISPATCH_RC=1; return 1; }
   WORKTREE_DIR="$REPOSITORY_ROOT/$WORKTREE_RELATIVE"
+  if [ "$CHILD_OWNED" = "1" ]; then
+    CLEANUP_START_HEAD="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
+      DISPATCH_RC=1
+      _uberdev_dispatch_audit dispatch_setup_failed \
+        '{"issue":'"$ISSUE_NUM"',"phase":"start_head","backend":"wezterm","rc":1}'
+      return 1
+    }
+  fi
   # TOCTOU hardening (#155): guard + 0600-create the predictable log path
   # before the worktree-add redirect below — the wezterm backend writes the
-  # SAME world-writable path the claude-bg / background backends harden, so it
+  # SAME world-writable path the background backend hardens, so it
   # must fail-CLOSED on a symlink/foreign-owned target too.
   if ! _uberdev_dispatch_prepare_tmp_target "$LOG_FILE" "$ISSUE_NUM" "wezterm"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
@@ -2806,7 +1900,7 @@ _uberdev_dispatch_wezterm() {
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.
   if ! _uberdev_dispatch_git_worktree_add \
-      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE"; then
+      "$REPOSITORY_ROOT" "$WORKTREE_DIR" "$WORKTREE_BRANCH" "$LOG_FILE" "$CLEANUP_START_HEAD"; then
     DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
     _uberdev_dispatch_audit dispatch_setup_failed \
@@ -2814,14 +1908,20 @@ _uberdev_dispatch_wezterm() {
     return 1
   fi
   local WORKTREE_ABS WORKTREE_NATIVE STATUS_FILE_NATIVE
-  WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)" || { DISPATCH_RC=1; return 1; }
+  if ! WORKTREE_ABS="$(cd "$WORKTREE_DIR" && pwd -P)"; then
+    DISPATCH_LOG="$LOG_FILE"
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm worktree_path 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
+  fi
   if ! WORKTREE_NATIVE="$(_uberdev_dispatch_native_cli_path "$WORKTREE_ABS")" \
       || ! STATUS_FILE_NATIVE="$(_uberdev_dispatch_native_cli_path "$STATUS_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"native_path","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm native_path 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   local PROMPT_BODY
   # B5 fix (prompt-read), mirrored from the `background` backend: an
@@ -2830,18 +1930,18 @@ _uberdev_dispatch_wezterm() {
   # happily reporting success. Guard the cat read and surface the failure
   # as a dispatch_setup_failed audit + rc=1.
   if ! PROMPT_BODY="$(cat "$PROMPT_FILE" 2>>"$LOG_FILE")"; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"prompt_read","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm prompt_read 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   if ! _uberdev_dispatch_resolve_python; then
-    DISPATCH_RC=1
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"python_launcher","backend":"wezterm","rc":1}'
-    return 1
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm python_launcher 1 \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
+    return "$DISPATCH_RC"
   fi
   # wezterm cli spawn into the pinned uberdev domain. Foreground claude -p
   # (headless print mode streaming into the pane) — detaching would empty the
@@ -2870,22 +1970,64 @@ _uberdev_dispatch_wezterm() {
       }
       python3() { run_python "$@"; }
       export -n -f run_python python3 2>/dev/null || exit 126
-      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"; shift 3
-      . "$DISPATCH_LIB" || exit 126
+      STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
+      REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
+      CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
+      # Same uncoverable pre-source window as the background wrapper, same
+      # ruling: report the worktree by name rather than force-remove it
+      # without the guards that live in $DISPATCH_LIB.
+      . "$DISPATCH_LIB" || {
+        [ "$CHILD_OWNED" != "1" ] || printf "wezterm dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
+          "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        exit 126
+      }
       WRAPPER_PID="$$"
       EMPTY_VALUE=
+      WORKTREE_CLEANUP_DONE=0
       write_status() {
         _uberdev_agent_publish_status_record "$STATUS_FILE" provider wezterm "$1" "$2" \
           "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$ISSUE_NUM" "$TIER" \
           "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" "$EMPTY_VALUE" 0
       }
+      # #381 RULING 4 — same teardown contract as the background arm. The pane
+      # cwd IS the worktree, so the transaction runs from REPOSITORY_ROOT in a
+      # subshell. A failure is printed into the pane and folded into the rc.
+      cleanup_child_worktree() {
+        [ "$WORKTREE_CLEANUP_DONE" -eq 0 ] || return 0
+        if [ "$CHILD_OWNED" != "1" ]; then WORKTREE_CLEANUP_DONE=1; return 0; fi
+        if (
+          cd "$REPOSITORY_ROOT" || exit 2
+          . "$DISPATCH_LIB" || exit 2
+          _uberdev_dispatch_cleanup_child_worktree "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" \
+            "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$1"
+        ); then
+          WORKTREE_CLEANUP_DONE=1
+          return 0
+        fi
+        printf "wezterm dispatch: failed to clean child worktree %s (%s)\n" \
+          "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
+        return 2
+      }
+      # Armed BEFORE `write_status running`, mirroring the background wrapper:
+      # that call can `exit 126`, and every other `exit` between here and the
+      # finalizer below is likewise a terminal pane with a worktree already on
+      # disk. Signal-only traps left all of those leaking silently, because a
+      # plain `exit` is not a signal. cleanup_child_worktree is idempotent via
+      # WORKTREE_CLEANUP_DONE, so the signal arm firing first costs nothing.
+      trap '\''cleanup_child_worktree cancelled || true'\'' EXIT
+      trap '\''cleanup_child_worktree cancelled || true; exit 143'\'' HUP INT TERM
       write_status running null || exit 126
       "$@"
       PROVIDER_RC=$?
       if [ "$PROVIDER_RC" -eq 0 ]; then STATE=completed; else STATE=failed; fi
+      if ! cleanup_child_worktree "$STATE"; then
+        PROVIDER_RC=74; STATE=failed
+      fi
+      trap - EXIT HUP INT TERM
       write_status "$STATE" "$PROVIDER_RC" || exit 126
       exit "$PROVIDER_RC"
-    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" "${PROVIDER_CMD[@]}" \
+    ' _ "$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE" "$STATUS_FILE_NATIVE" "$ISSUE_NUM" "$TIER" \
+    "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED" "$WORKTREE_ABS" "${PROVIDER_CMD[@]}" \
     2> >(tee -a "$LOG_FILE" >&2))"
   SPAWN_RC=$?
   if [[ "$SPAWN_RC" -ne 0 || -z "$DISPATCH_ID" ]]; then
@@ -2899,8 +2041,16 @@ _uberdev_dispatch_wezterm() {
       '{"issue":'"$ISSUE_NUM"',"tier":"'"$TIER"'","backend":"wezterm","pane_id":"'"$DISPATCH_ID"'"}'
   else
     DISPATCH_LOG="$LOG_FILE"
-    _uberdev_dispatch_audit dispatch_setup_failed \
-      '{"issue":'"$ISSUE_NUM"',"phase":"dispatch","backend":"wezterm","rc":'"$DISPATCH_RC"'}'
+    # Unlike the background arm's `dispatch` phase, a failed `wezterm cli spawn`
+    # leaves NO reapable handle: there is no pane id to monitor and no status
+    # file the operator will ever be pointed at, so nothing downstream will
+    # take this worktree back down. A mux that is not up is routine, which is
+    # what makes this the most-travelled leak of the set. If a pane did come up
+    # despite the failure, its own wrapper tears down idempotently under the
+    # same mutex, and a pane that dirtied the tree is refused, not destroyed.
+    _uberdev_dispatch_fail_after_worktree "$ISSUE_NUM" wezterm dispatch "$DISPATCH_RC" \
+      "$REPOSITORY_ROOT" "$WORKTREE_RELATIVE" "$WORKTREE_BRANCH" "$CLEANUP_START_HEAD" "$CHILD_OWNED"
+    DISPATCH_RC=$?
   fi
   return "$DISPATCH_RC"
 }

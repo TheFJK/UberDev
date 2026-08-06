@@ -5,7 +5,7 @@
 # Pre-RFC-0015 this logic lived in a SKILL.md fence and ended with a
 # `uberdev_dispatch_one` call per issue: one DETACHED `claude --bg` session per
 # issue, running `/uberdev:orchestrator --turbo`. That is the last thing that
-# kept claude-bg on a default path. It is gone.
+# kept the detached default transport on a default path. Both are gone.
 #
 # This script now does the *claim* half only:
 #   - provision the `uberdev:active` label,
@@ -43,11 +43,15 @@
 
 set -u
 
-# Plugin-root resolution. `CLAUDE_PLUGIN_ROOT` is always set under the Claude
-# plugin, but the byte-identical Codex mirror of this file runs with
-# `PLUGIN_ROOT` instead — and under `set -u` a bare ${CLAUDE_PLUGIN_ROOT} there
-# is a FATAL unbound-variable abort, not a graceful missing-file skip. Resolve
-# once, using the same fallback chain lib/dispatch.sh uses.
+# Plugin-root resolution. Keep the whole chain: it is `set -u` safety plus
+# parity with lib/dispatch.sh's own resolution order, and BOTH still apply.
+# Under `set -u` a bare ${CLAUDE_PLUGIN_ROOT} is a FATAL unbound-variable abort,
+# not a graceful missing-file skip, and CLAUDE_PLUGIN_ROOT is unset whenever
+# this file is sourced outside a plugin session (a direct `bash lib/goal-*.sh`,
+# and every fixture that does the same). Do NOT "simplify" this to the single
+# CLAUDE_PLUGIN_ROOT read. (#381 note: the reason this comment used to give —
+# a byte-identical Codex mirror running with `PLUGIN_ROOT` — is void, that tree
+# is deleted. The chain is not: it was always load-bearing for the above.)
 UBERDEV_PLUGIN_ROOT="${UBERDEV_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
 
 GOAL_ID_CLI=""

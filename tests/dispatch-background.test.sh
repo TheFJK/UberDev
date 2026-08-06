@@ -254,11 +254,11 @@ assert_grep "$DISPATCH_LIB" \
 echo "== #246 D-perm/D-skip: background backend inherits paired PERM_FLAG from shared resolver =="
 # The PR body and CHANGELOG claim "all three dispatch backends inherit the change
 # because they all expand \"\${PERM_FLAG[@]}\" from the same resolver." That is
-# structurally true, but the only functional coverage lives in
-# tests/dispatch-claude-bg.test.sh (lines 633-674). A future regression where
+# structurally true, but the only functional coverage used to live in the
+# now-retired detached-session fixture. A future regression where
 # someone hand-edits `_uberdev_dispatch_background` to strip / hard-code
-# PERM_FLAG would only red-CI the claude-bg test file. Mirror the claude-bg
-# D-perm / D-skip subshell cases here to lock the "background backend inherits"
+# PERM_FLAG would have red-CI'd only that one file. The D-perm / D-skip
+# subshell cases are mirrored here to lock the "background backend inherits"
 # claim against that regression class. The assertion shape is IDENTICAL across
 # backends because PERM_FLAG is set by the SHARED `uberdev_dispatch_resolve_env`
 # (not by per-backend code); this test verifies that resolver is reachable from
@@ -441,16 +441,24 @@ nested_cache_count="$(grep -Fc '_UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTH
 nested_prefix_guard_count="$(grep -Fc 'case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac' "$DISPATCH_LIB")"
 nested_argv_count="$(grep -Fc '"$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE"' "$DISPATCH_LIB")"
 nested_unexport_count="$(grep -Fc 'export -n -f run_python python3 2>/dev/null || exit 126' "$DISPATCH_LIB")"
-if [ "$detached_resolver_count" -eq 2 ] \
-    && [ "$nested_bridge_count" -eq 3 ] \
-    && [ "$nested_command_count" -eq 3 ] \
-    && [ "$nested_cache_count" -eq 3 ] \
-    && [ "$nested_prefix_guard_count" -eq 3 ] \
-    && [ "$nested_argv_count" -eq 3 ] \
-    && [ "$nested_unexport_count" -eq 3 ]; then
-  echo "  PASS  all three process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"; PASS=$((PASS + 1))
+# POPULATION COUNT-LOCK. #381 deleted the codex arm of
+# _uberdev_agent_dispatch_backend, and with it the third process-separated
+# wrapper, so every count below dropped by exactly one. The two survivors are
+# _uberdev_dispatch_background (lib/dispatch.sh:1504) and
+# _uberdev_dispatch_wezterm (lib/dispatch.sh:1837); only background is
+# nohup-detached, which is why detached_resolver_count is 1 and the rest are 2.
+# The INVARIANT is unchanged and these stay `-eq`, not `-ge`: a dropped bridge
+# and a newly-added wrapper that forgets one must both still fail here.
+if [ "$detached_resolver_count" -eq 1 ] \
+    && [ "$nested_bridge_count" -eq 2 ] \
+    && [ "$nested_command_count" -eq 2 ] \
+    && [ "$nested_cache_count" -eq 2 ] \
+    && [ "$nested_prefix_guard_count" -eq 2 ] \
+    && [ "$nested_argv_count" -eq 2 ] \
+    && [ "$nested_unexport_count" -eq 2 ]; then
+  echo "  PASS  both process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  all three process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"
+  echo "  FAIL  both process-separated wrappers preserve validated Python executable/prefix argv and install recursion-safe local bridges"
   echo "        detached=$detached_resolver_count bridge=$nested_bridge_count command=$nested_command_count cache=$nested_cache_count prefix_guard=$nested_prefix_guard_count argv=$nested_argv_count unexport=$nested_unexport_count"
   FAIL=$((FAIL + 1))
 fi
@@ -681,12 +689,17 @@ wrapper_pid_bridge_count="$(grep -Fc 'os.environ["UBERDEV_WRAPPER_PID"]=str(os.g
 supervisor_pid_file_count="$(grep -Fc 'UBERDEV_SUPERVISOR_PID_FILE="$STATUS_FILE.pid" nohup' "$DISPATCH_LIB")"
 secure_pid_writer_count="$(grep -Fc 'pid_path=os.environ["UBERDEV_SUPERVISOR_PID_FILE"]' "$DISPATCH_LIB")"
 absolute_bash_launcher_count="$(grep -Fc 'launch_argv=[bash_path]' "$DISPATCH_LIB")"
-if [ "$windows_detach_count" -eq 2 ] \
-    && [ "$posix_setsid_count" -eq 2 ] \
-    && [ "$wrapper_pid_bridge_count" -eq 2 ] \
-    && [ "$supervisor_pid_file_count" -eq 2 ] \
-    && [ "$secure_pid_writer_count" -eq 2 ] \
-    && [ "$absolute_bash_launcher_count" -eq 2 ] \
+# POPULATION COUNT-LOCK, same cause as above: `background` is the only detached
+# launcher left since #381 removed the codex one, so all six markers went 2->1
+# together. A marker that fails to move with the others means one launcher lost
+# its Windows supervisor-PID bridge or its POSIX setsid, which is the whole
+# point of locking them as a group.
+if [ "$windows_detach_count" -eq 1 ] \
+    && [ "$posix_setsid_count" -eq 1 ] \
+    && [ "$wrapper_pid_bridge_count" -eq 1 ] \
+    && [ "$supervisor_pid_file_count" -eq 1 ] \
+    && [ "$secure_pid_writer_count" -eq 1 ] \
+    && [ "$absolute_bash_launcher_count" -eq 1 ] \
     && grep -Fq '_uberdev_dispatch_read_secure_pid_file' "$DISPATCH_LIB" \
     && ! grep -Fq 'os.setsid(); os.execvp' "$DISPATCH_LIB"; then
   echo "  PASS  detached launchers securely bridge native Windows supervisor PIDs and preserve POSIX setsid"; PASS=$((PASS + 1))

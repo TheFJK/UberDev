@@ -13,7 +13,7 @@ bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=0 -- <user argument
 bash "$CLAUDE_PLUGIN_ROOT/lib/solve-launcher.sh" --auto-mode=1 --turbo -- <user arguments>   # /turbo
 ```
 
-On Codex, the command-skills call the same launcher through `$PLUGIN_ROOT`.
+Embedders that set only `$PLUGIN_ROOT` call the same launcher through it.
 
 Why one call, why a lib file (#304 root fix, RFC 0012 §3.4): Bash tool calls
 share **no shell state** — the historical multi-fence pipeline silently lost
@@ -56,20 +56,16 @@ backend (RFC 0015) it stops at **Step 5w**: it writes
 `$UBERDEV_TMPDIR/solve-fleet-manifest.json`, emits the args envelope, and the
 command file mandates one `Workflow` call into
 `skills/solve-fleet/workflow.js`, which runs one worktree-isolated solver agent
-per issue. On a detached backend (`claude-bg` / `wezterm` / `background` /
-`codex`) it instead dispatches one autonomous session per issue (Phase B) via
-`lib/dispatch.sh`.
-The `codex` backend is also available under Codex or via `--backend=codex`;
-it runs detached `codex --ask-for-approval never exec --sandbox workspace-write --json -o <result>`.
+per issue. On a detached backend (`wezterm` / `background`) it instead
+dispatches one autonomous session per issue (Phase B) via `lib/dispatch.sh`.
+The `codex` backend was deleted in #381.
 Per-issue artifacts (`$UBERDEV_TMPDIR/solve-prompt-N.txt`,
-`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `$UBERDEV_TMPDIR/solve-codex-stdout-N.log`,
-`$UBERDEV_TMPDIR/solve-codex-status-N.json`, `$UBERDEV_TMPDIR/solve-codex-result-N.md`,
+`$UBERDEV_TMPDIR/solve-bg-stdout-N.log`, `$UBERDEV_TMPDIR/solve-bg-status-N.json`,
 `.claude/worktrees/solve-issue-N/`, `worktree-solve-issue-N` branch) are
 namespaced by issue number, so concurrent spawns are collision-free. Override flags
 (`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service
 flags, `--backend=<name>`) apply batch-wide. Monitor via `/workflows` (workflow — the
-default), `claude agents` (claude-bg), visible panes (wezterm), or
-PID/log/result files (background/codex).
+default), visible panes (wezterm), or PID/log/result files (background).
 
 ## Constants
 
@@ -82,14 +78,14 @@ is the documentation surface.
 | Name | Value (verbatim) | Where used |
 |---|---|---|
 | `TERMINAL_FLAG_DEPRECATED_NOTE` | see the column-0 binding in `lib/solve-launcher.sh` (verbatim note also quoted under `## Deprecated Flags` in both command files) | Phase A stderr emission on first `--terminal=` / `$SOLVE_TERMINAL` encounter. |
-| `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (`claude --bg` needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
-| `DISPATCH_BACKEND_ENUM` | `auto \| workflow \| claude-bg \| wezterm \| background \| codex` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight, which resolves `workflow` on every Claude host (RFC 0015). `claude-bg` is deprecated — removal target v1.0.0. |
+| `MIN_CLAUDE_VERSION` | `2.1.152` | Phase A hard gate (plugin support needs 2.1.139+; `--permission-mode bypassPermissions` needs 2.1.152+, #246). |
+| `DISPATCH_BACKEND_ENUM` | `auto \| workflow \| wezterm \| background` | `--backend=` parser; `auto` defers to `lib/dispatch.sh` preflight, which resolves `workflow` on every Claude host (RFC 0015). The detached `claude --bg` backend was removed in RFC 0015 §7 as amended; the `codex` backend was removed in #381. |
 | `FANOUT_CONCURRENCY_SOLVE_BG_DEFAULT` | `6` | `MAX_PARALLEL_BG_AGENTS` default (dispatch-burst chunk size). |
 | `GH_PARALLEL_CAP` | `8` | Chunk size for the parallel gh stages (validation reads, claim writes) — GitHub secondary-rate-limit courtesy. |
 | `EFFORT_LEVEL_DEFAULT` | `max` | /turbo is unattended — quality > cost. |
-| `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max \| ultra` | Public parser; `ultra` is rejected unless backend resolution selects Codex. Claude legacy effort remains the first five values. |
+| `EFFORT_LEVEL_ENUM` | `low \| medium \| high \| xhigh \| max \| ultra` | Public parser; `ultra` is now rejected UNCONDITIONALLY — it was an exact Codex route field and #381 deleted the only transport that could honour it. Claude legacy effort remains the first five values. |
 | `EFFORT_SOURCE_ENUM` | `cli \| env \| config \| default` | Source tag in the `effort_resolved` audit event. |
-| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `solve_workflow_fleet_prepared`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed` | Audit-log writers (launcher + `lib/dispatch.sh`). `dispatch_setup_failed` carries `phase` (+ `subphase` ∈ {`marker_absent`, `pipeline_error`} on `id_extract`); `claim_collision` carries `phase:"post_write_verification"` when the post-write re-read lost to a racing dispatcher. |
+| `SOLVE_AUDIT_EVENT_ENUM` | `agent_dispatched`, `deprecated_flag_used`, `solve_bg_fanout_wave_started`, `solve_workflow_fleet_prepared`, `effort_resolved`, `error`, `claim_acquired`, `claim_collision`, `claim_force_override`, `claim_write_failed`, `claim_released`, `dispatch_backend_resolved`, `dispatch_setup_failed`, `dispatch_cleanup_failed` | Audit-log writers (launcher + `lib/dispatch.sh`). `dispatch_setup_failed` carries `phase` (+ `subphase` ∈ {`marker_absent`, `pipeline_error`} on `id_extract`); `dispatch_cleanup_failed` follows it on the same `phase` when the child-owned worktree could not be torn down after that setup failure, carrying `worktree` and `branch` so the leak is named; `claim_collision` carries `phase:"post_write_verification"` when the post-write re-read lost to a racing dispatcher. |
 | `UBERDEV_ACTIVE_LABEL` | `uberdev:active` | Step 4.5 claim protocol — applied on dispatch; cleared by `/merge` post-merge or the dispatch-failure rollback. NEVER set or removed by hand (color `D93F0B`; description ≤100 chars — GitHub 422s longer). |
 | `CLAIM_COMMENT_MARKER` | `<!-- uberdev-claim-comment v1 -->` | HTML-comment fingerprint on every claim audit comment — the only safe parser surface. Collision checks match the **version-stripped prefix** so rolling v1/v2 upgrades stay mutually visible (#123 B7); adding optional body fields is backward-compatible (missing fields parse as `"?"`), removing/renaming fields MUST bump the marker version. |
 

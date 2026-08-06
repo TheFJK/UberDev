@@ -164,9 +164,7 @@ CAP_WAVE_PATTERN='one or more cap-controlled waves.*every child in (each|a) wave
 for cap_wave_doc in \
   "$REPO_ROOT/README.md" \
   "$REPO_ROOT/plugins/uberdev/docs/testing.md" \
-  "$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md" \
-  "$REPO_ROOT/codex/uberdev-codex/skills/post-impl-review/SKILL.md" \
-  "$REPO_ROOT/codex/uberdev-codex/skills/uberdev-cmd-review-pr/SKILL.md"; do
+  "$REPO_ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"; do
   assert_grep "$cap_wave_doc" "$CAP_WAVE_PATTERN" \
     "$(basename "$cap_wave_doc"): cap-controlled dispatch-before-wait wording"
 done

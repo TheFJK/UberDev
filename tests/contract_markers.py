@@ -115,14 +115,42 @@ of this shape can sit in CI, look right, and cover nothing.  Therefore:
   * No contract may have fewer than 2 sites; a one-site "contract" needs no
     comparator, so its presence in the registry means someone marked the wrong
     thing.
-  * Both trees must be walked and both must contribute sites — the
-    `codex/uberdev-codex/**` mirror is a real copy, and a scan that silently
-    missed it would be this very bug one level up.
-  * Per contract, the set of marked relative paths under `plugins/uberdev/`
-    must equal the set under `codex/uberdev-codex/`, so a marker added to one
-    tree and forgotten in the other reds.
+  * Per contract, the MULTISET of marked relative paths under `plugins/uberdev/`
+    must equal the registry's list exactly, so a marker that is moved,
+    duplicated, or dropped reds rather than silently shifting which declaration
+    gets compared.
   * `--selftest` exercises the extractor itself against synthetic fixtures,
     including the negative cases (zero members, stale delta, unknown contract).
+
+WHAT THIS GUARD MEANS AFTER THE CODEX TREE WAS RETIRED (issue #381)
+===================================================================
+This file previously walked TWO trees — `plugins/uberdev/**` and the generated
+`codex/uberdev-codex/**` mirror — and mirror parity was STRUCTURAL: `SCAN_ROOTS`
+and `MIRROR_PAIR` both named the mirror, `expected_total` was
+`len(expected_paths) * len(MIRROR_PAIR)`, and the per-tree loop demanded the
+same path multiset on both sides.  The Codex distribution is gone, so that
+second copy no longer exists.
+
+The guard is therefore WEAKER, and the weakening is stated rather than hidden:
+
+  BEFORE — "every marked site agrees, ACROSS TWO INDEPENDENTLY-SHIPPED TREES".
+           A rewrite applied to one tree and forgotten in the other reds even
+           when both trees are internally consistent.
+  NOW    — "every marked site agrees WITHIN ONE TREE".  The cross-tree class is
+           not merely untested, it is un-instantiable: there is no second copy
+           to disagree with.
+
+What survives is the whole reason the mechanism was built (#360/#361/#362): one
+contract with N textually-comparable copies inside `plugins/uberdev/`, and a
+comparator that reds when any one of them drifts.  `dispatch-backend` still has
+13 such copies; `run-terminal-status` still has 13.  The path-multiset ratchet
+is now the ONLY structural anti-vacuity device — it is what still catches a
+marker that was moved off a file, so do not relax it into a bare count.
+
+If a second shipped tree is ever reintroduced, restore `MIRROR_PAIR`, put both
+roots back in `SCAN_ROOTS`, and multiply `expected_total` by the number of
+trees again; the per-tree comparison loop below is written so that change is a
+three-line edit.
 
 Usage::
 
@@ -140,8 +168,8 @@ from pathlib import Path
 
 # --------------------------------------------------------------------------
 # Registry — the ratchet.  name -> the EXACT multiset of plugin-tree-relative
-# paths expected to declare it.  Both trees must present this same multiset, so
-# the expected site count is 2x the list length.
+# paths expected to declare it.  One tree is walked (issue #381 retired the
+# Codex mirror), so the expected site count is exactly the list length.
 #
 # Pinning PATHS, not a bare count, is deliberate: a count-only ratchet lets a
 # marker be moved off one file and duplicated onto another (the count and the
@@ -155,6 +183,13 @@ CONTRACTS: dict[str, list[str]] = {
     # copies were already correct but uncompared, which is the distinction this
     # convention exists to make.
     "dispatch-backend": [
+        "lib/child-dispatch.sh",
+        "lib/child-dispatch.sh",
+        "lib/child-dispatch.sh",
+        "lib/code_fixer_contract.py",
+        "lib/code_fixer_contract.py",
+        "lib/dispatch.sh",
+        "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/goal-state.sh",
@@ -164,18 +199,27 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/solve_triage.py",
         "skills/solve-pipeline/SKILL.md",
     ],
-    # rank 7 — `claude agents --json` row values that mean "this agent is alive"
+    # rank 7 — `claude agents --json` row values that mean "this agent is alive".
+    # The lib/agent-dispatch.sh copy was the lifecycle CLASSIFIER inside the
+    # detached-session liveness probe; it went with that backend (RFC 0015 §7 as
+    # amended). The three goal-state probes and the run_manifest reader remain,
+    # and the `-queued` divergence they declare is now declared against
+    # run_manifest.py rather than against the deleted classifier.
     "agent-liveness-value": [
-        "lib/agent-dispatch.sh",
         "lib/goal-state.sh",
         "lib/goal-state.sh",
         "lib/goal-state.sh",
         "lib/run_manifest.py",
     ],
-    # rank 8 — terminal `state` a per-run status FILE may legally carry (4)
+    # rank 8 — terminal `state` a per-run status FILE may legally carry (4).
+    # Three copies retired with the detached-session backend: the probe that
+    # PRODUCED the vocabulary one word per arm, its supervision-lane case, and
+    # the opaque-handle cancel probe in lib/dispatch.sh. A FOURTH went with the
+    # codex arm in #381 — its cleanup gate declared the same four states plus
+    # that path's own `setup_failed`. The single surviving lib/dispatch.sh copy
+    # is the backend-neutral child-worktree teardown gate (#381 RULING 4), which
+    # carries that vocabulary now.
     "run-terminal-status": [
-        "lib/agent-dispatch.sh",
-        "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
         "lib/agent-dispatch.sh",
@@ -185,7 +229,6 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/child-dispatch.sh",
         "lib/child-dispatch.sh",
         "lib/code_fixer_contract.py",
-        "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/run_manifest.py",
         "lib/run_manifest.py",
@@ -256,7 +299,6 @@ CONTRACTS: dict[str, list[str]] = {
 JSON_SITES: dict[str, list[tuple[str, str]]] = {
     "risk-signal": [
         ("plugins/uberdev/policy/model-routing-v1.json", "risk_signals"),
-        ("codex/uberdev-codex/policy/model-routing-v1.json", "risk_signals"),
     ],
 }
 
@@ -272,65 +314,66 @@ _PROSE = (
     "made a deleted pair of parentheses red CI; the sentence is documentation "
     "ABOUT the contract, and the contract's real copies are all marked."
 )
-_PORTED_PROSE = (
-    "command prose, ported by codex/tools/convert-commands.py to a DIFFERENT "
-    "relative path in the Codex tree (commands/x.md -> skills/uberdev-cmd-x/"
-    "SKILL.md). A marker here could never satisfy the per-tree path-multiset "
-    "check, and the line is prose. " + _PROSE
+_COMMAND_PROSE = (
+    "command prose in commands/*.md — a file the registry does not list as a "
+    "declaration site for this contract, so a marker here would fail the "
+    "path-multiset ratchet, and the line is prose anyway. " + _PROSE
 )
 TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
     "dispatch-backend": [
-        ("plugins/uberdev/commands/goal.md", "pin a dispatch backend", _PORTED_PROSE),
-        ("plugins/uberdev/commands/solve.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _PORTED_PROSE),
-        ("plugins/uberdev/commands/solve.md", "multiple issue numbers run in parallel.", _PORTED_PROSE),
-        ("plugins/uberdev/commands/turbo.md", "auto-accepts brainstorm recommendations", _PORTED_PROSE),
-        ("plugins/uberdev/commands/turbo.md", "with **brainstorm Q&", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "multiple issue numbers run in parallel.", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "auto-accepts brainstorm recommendations", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "with **brainstorm Q&", _PORTED_PROSE),
-        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "it instead dispatches one autonomous session per issue", _PROSE),
+        ("plugins/uberdev/commands/goal.md", "pin a dispatch backend", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/solve.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/solve.md", "multiple issue numbers run in parallel.", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "auto-accepts brainstorm recommendations", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "with **brainstorm Q&", _COMMAND_PROSE),
+
         ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "Monitor via `/workflows`", _PROSE),
-        ("codex/uberdev-codex/skills/solve-pipeline/SKILL.md", "it instead dispatches one autonomous session per issue", _PROSE),
-        ("codex/uberdev-codex/skills/solve-pipeline/SKILL.md", "Monitor via `/workflows`", _PROSE),
-        ("plugins/uberdev/commands/solve.md", "selects how `/solve` runs each per-issue solver", _PORTED_PROSE),
-        ("plugins/uberdev/commands/turbo.md", "selects how `/turbo` runs each per-issue solver", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-goal/SKILL.md", "pin a dispatch backend", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-solve/SKILL.md", "selects how `/solve` runs each per-issue solver", _PORTED_PROSE),
-        ("codex/uberdev-codex/skills/uberdev-cmd-turbo/SKILL.md", "selects how `/turbo` runs each per-issue solver", _PORTED_PROSE),
+        ("plugins/uberdev/commands/solve.md", "selects how `/solve` runs each per-issue solver", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "selects how `/turbo` runs each per-issue solver", _COMMAND_PROSE),
         ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "one of: auto, workflow", _PROSE),
         ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "precedence (RFC 0004 / RFC 0012)", _PROSE),
-        ("codex/uberdev-codex/skills/using-uberdev/references/configuration.md", "one of: auto, workflow", _PROSE),
-        ("codex/uberdev-codex/skills/using-uberdev/references/configuration.md", "precedence (RFC 0004 / RFC 0012)", _PROSE),
+        # #381 shrank the enum from five members to four, so every restatement
+        # that names three of them now crosses the 3-of-N discovery threshold
+        # it used to sit under. These are prose or error strings, not
+        # declarations: none of them is the set anything is validated against.
+        # The two `case` arms in lib/dispatch.sh that this block briefly also
+        # covered were NOT of that kind and are now marked at the site instead
+        # (uberdev_dispatch_preflight_backend, both switches).
+        ("plugins/uberdev/commands/testers.md", "Now invoke the `uberdev:testers-pipeline` skill", _COMMAND_PROSE),
+        ("plugins/uberdev/lib/dispatch.sh", "host can execute with --backend=wezterm or --backend=background.", _PROSE),
+        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "On a detached backend", _PROSE),
+        ("plugins/uberdev/skills/solve-fleet/SKILL.md", "as the explicit detached transports", _PROSE),
+        # The #381 model-routing unenforceability notice. It names the surviving
+        # transports to explain WHY per-rank routing cannot be honoured; it is
+        # not the set anything validates against.
+        ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "longer owns the provider invocation", _PROSE),
     ],
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
-        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
     ],
     "trust-signal": [
         # Adjacent, UNRELATED enums in the same constants block share tokens
         # (`green` is a PR state as well as a trust signal); the block itself is
         # marked line-by-line via @anchor.
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "GOAL_ISSUE_STATE_ENUM=", _PROSE),
-        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "GOAL_ISSUE_STATE_ENUM=", _PROSE),
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "the 8 states the PR machine", _PROSE),
-        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "the 8 states the PR machine", _PROSE),
         # An instruction to an LLM relay. Extracting a member set from an
         # English sentence needs a regex over the member NAMES, which RFC 0016
         # section 2.2 forbids as vacuous — so it is exempted, not marked.
         ("plugins/uberdev/skills/goal-pipeline/workflow.js", "Each output line is", _PROSE),
-        ("codex/uberdev-codex/skills/goal-pipeline/workflow.js", "Each output line is", _PROSE),
     ],
     "park-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "uberdev_goal_read_merge_result` returns", _PROSE),
-        ("codex/uberdev-codex/skills/goal-pipeline/SKILL.md", "uberdev_goal_read_merge_result` returns", _PROSE),
         ("plugins/uberdev/skills/merge-pipeline/SKILL.md", "Conditional render.", _PROSE),
-        ("codex/uberdev-codex/skills/merge-pipeline/SKILL.md", "Conditional render.", _PROSE),
     ],
 }
 
-SCAN_ROOTS = ("plugins/uberdev", "codex/uberdev-codex")
-MIRROR_PAIR = ("plugins/uberdev", "codex/uberdev-codex")
+# ONE shipped tree, walked and compared.  This was a two-element SCAN_ROOTS plus
+# a MIRROR_PAIR of the same two roots until issue #381 retired the Codex
+# distribution; see "WHAT THIS GUARD MEANS AFTER THE CODEX TREE WAS RETIRED" in
+# the module docstring for exactly what that costs and how to restore it.
+SCAN_ROOTS = ("plugins/uberdev",)
+PLUGIN_TREE = "plugins/uberdev"
 
 # A contract with one site needs no comparator.
 MIN_SITES = 2
@@ -1302,7 +1345,7 @@ def report(sites: list[Site], failures: list[str], dump: bool) -> None:
 
     for name, expected_paths in sorted(CONTRACTS.items()):
         found = sorted(by_contract.get(name, []), key=lambda s: (s.path, s.line))
-        expected_total = len(expected_paths) * len(MIRROR_PAIR)
+        expected_total = len(expected_paths)
         if expected_total < MIN_SITES:
             failures.append(
                 f"contract {name!r}: registry declares {expected_total} site(s); a contract needs >= {MIN_SITES}"
@@ -1313,12 +1356,15 @@ def report(sites: list[Site], failures: list[str], dump: bool) -> None:
         if len(found) < MIN_SITES:
             failures.append(f"contract {name!r}: only {len(found)} site(s) — no comparator is possible")
 
-        # Path ratchet + mirror parity in one comparison.  A per-tree path
-        # MULTISET is pinned, not a bare count: a count-only ratchet passes when
-        # a marker is moved off one file and duplicated onto another, which
-        # leaves the abandoned declaration uncompared while every counter agrees.
+        # Path ratchet.  A path MULTISET is pinned, not a bare count: a
+        # count-only ratchet passes when a marker is moved off one file and
+        # duplicated onto another, which leaves the abandoned declaration
+        # uncompared while every counter agrees.  With the Codex mirror retired
+        # (#381) this is the only STRUCTURAL anti-vacuity device left, so it
+        # must stay a multiset.  Loop over one tree; restore MIRROR_PAIR here if
+        # a second shipped tree ever returns.
         expected_counter = Counter(expected_paths)
-        for tree in MIRROR_PAIR:
+        for tree in (PLUGIN_TREE,):
             prefix = tree + "/"
             actual = Counter(s.path[len(prefix):] for s in found if s.path.startswith(prefix))
             if actual == expected_counter:
@@ -1679,7 +1725,7 @@ def main(argv: list[str]) -> int:
     if failures:
         print(f"contract-markers: {len(sites)} sites across {len(CONTRACTS)} contracts, {len(failures)} failure(s)")
         return 1
-    print(f"  PASS  {len(sites)} sites across {len(CONTRACTS)} contracts agree (both trees walked)")
+    print(f"  PASS  {len(sites)} sites across {len(CONTRACTS)} contracts agree (one tree walked)")
     print(f"contract-markers: {len(sites)} sites across {len(CONTRACTS)} contracts, 0 failures")
     return 0
 

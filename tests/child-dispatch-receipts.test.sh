@@ -418,13 +418,13 @@ make_context() {
   request="$(python3 -I -B - "$run" "$run_id" <<'PY'
 import json,sys
 run,run_id=sys.argv[1:]
-print(json.dumps({'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':'codex','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20,'routing_mode':'adaptive'},separators=(',',':')))
+print(json.dumps({'schema_version':1,'run_dir':run,'run_id':run_id,'repository_id':'fixture-repository','backend':'background','workflow':'solve','phase':'lead','role':'lead','task_tier':'medium','risk_signals':[],'issue_or_pr':42,'issue_num':42,'capacity':4,'timeout_s':20},separators=(',',':')))
 PY
 )"
   decision="$(uberdev_agent_resolve_request "$request")"
   metadata="$(python3 -I -B - "$run_id" <<'PY'
 import json,sys
-print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':'codex','issue_num':42,'task_tier':'medium','risk_signals':[]},separators=(',',':')))
+print(json.dumps({'run_id':sys.argv[1],'repository_id':'fixture-repository','workflow':'solve','backend':'background','issue_num':42,'task_tier':'medium','risk_signals':[]},separators=(',',':')))
 PY
 )"
   uberdev_agent_context_create "$run" "$request" "$decision" \
@@ -473,7 +473,7 @@ import json,pathlib,sys
 last=json.loads(pathlib.Path(sys.argv[1]).read_text().splitlines()[-1])
 assert last['event']=='dispatch' and last['source']==sys.argv[2] and last['instance_id']==sys.argv[3]
 PY
-  printf '{"backend":"codex","state":"running","exit_code":null,"pid":"receipt-provider","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
+  printf '{"backend":"background","state":"running","exit_code":null,"pid":"receipt-provider","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
   chmod 600 "$4"
 }
 

@@ -2,7 +2,7 @@
 # tests/orchestrator-phase-6-doc.test.sh
 #
 # Validates the orchestrator/SKILL.md Phase 6 cascade doc (issue #94, PR-time fix).
-# Mirrors the anchored-grep style of tests/dispatch-claude-bg.test.sh.
+# Mirrors the anchored-grep style of tests/dispatch-background.test.sh.
 #
 # Each assertion echoes pass/fail and increments PASS / FAIL counters.
 

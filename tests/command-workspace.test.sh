@@ -53,7 +53,7 @@ file_link_count() {
 # Exercise the complete no-dir-fd path on the host filesystem. Native Windows
 # runs the same production branch again through review-child-handoff's wired
 # --windows-path-only mode.
-python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" "$TMP/portable" <<'PY'
+python3 -I -B - "$HELPER" "$TMP/portable" <<'PY'
 import hashlib
 import importlib.util
 import json
@@ -65,8 +65,8 @@ import sys
 import ctypes
 
 
-module_paths = sys.argv[1:3]
-fixture_root = pathlib.Path(sys.argv[3])
+module_paths = sys.argv[1:2]
+fixture_root = pathlib.Path(sys.argv[2])
 
 
 def expect_failure(module, code, operation):
@@ -653,7 +653,7 @@ for index, module_path in enumerate(module_paths):
     )
 PY
 
-python3 -I -B - "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py" <<'PY'
+python3 -I -B - "$HELPER" <<'PY'
 import importlib.util
 import pathlib
 import subprocess
@@ -702,11 +702,15 @@ PY
 make_carrier() {
   local workflow="$1" issue="$2" repo="$3" run="$4" request decision metadata context_out context sha
   mkdir -p "$run"
+  # #381: `codex` is gone from the backend enum and `routing_mode:"adaptive"`
+  # is now refused with route_unenforceable, so a carrier can no longer be
+  # sealed from either. This fixture is about workspace identity, not routing --
+  # `workflow` with no routing_mode is the shape a real /review-pr carrier has.
   request="$(jq -cn --arg run "$run" --arg repo "$repo" --arg workflow "$workflow" --arg run_id "root-$workflow" --argjson issue "$issue" \
-    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"codex",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600,routing_mode:"adaptive"}')"
+    '{schema_version:1,run_dir:$run,run_id:$run_id,repository_id:$repo,backend:"workflow",workflow:$workflow,phase:"review",role:"lead",task_tier:"medium",risk_signals:[],issue_or_pr:$issue,issue_num:$issue,capacity:6,timeout_s:600}')"
   decision="$(uberdev_agent_resolve_request "$request")"
   metadata="$(jq -cn --arg repo "$repo" --arg workflow "$workflow" --arg run_id "root-$workflow" --argjson issue "$issue" \
-    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"codex",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
+    '{run_id:$run_id,repository_id:$repo,workflow:$workflow,backend:"workflow",issue_num:$issue,task_tier:"medium",risk_signals:[]}')"
   context_out="$(uberdev_agent_context_create "$run" "$request" "$decision" \
     '{"mode":{"source":"default","file":null},"service_tier":{"source":"default","file":null},"risk_escalation":{"source":"default","file":null},"adaptive_fallback":{"source":"default","file":null},"shadow":{"source":"default","file":null},"workflows":{"source":"default","file":null},"roles":{"source":"default","file":null}}' \
     "$metadata" '2026-07-10T00:00:00Z')"
@@ -1074,8 +1078,5 @@ for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/
   grep -qF 'uberdev_command_workspace_prepare' "$doc"
   ! grep -nE 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
 done
-
-# The Codex package is a checked-in runtime mirror, not an independent helper.
-cmp "$HELPER" "$ROOT/codex/uberdev-codex/lib/command-workspace.py"
 
 echo 'command-workspace: PASS'

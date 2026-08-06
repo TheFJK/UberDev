@@ -12,31 +12,28 @@ jobs:
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
       # NOTE: `find ... -exec cmd \;` returns 0 even when cmd fails, so an explicit
-      # `|| exit 1` is required for these to actually gate. Both generated runtime
-      # roots and their marketplace descriptors are mandatory release surfaces.
+      # `|| exit 1` is required for these to actually gate. The generated runtime
+      # root and its marketplace descriptor are mandatory release surfaces.
       - name: Required generated surfaces
         run: |
-          test -d plugins/prkit && test -d codex || exit 1
+          test -d plugins/prkit || exit 1
           test -s .claude-plugin/marketplace.json || exit 1
-          test -s .agents/plugins/marketplace.json || exit 1
           claude_manifest="$(mktemp)" || exit 1
-          codex_manifest="$(mktemp)" || exit 1
-          trap 'rm -f "$claude_manifest" "$codex_manifest"' EXIT
+          trap 'rm -f "$claude_manifest"' EXIT
           find plugins/prkit -type f -print0 > "$claude_manifest" || exit 1
-          find codex -type f -print0 > "$codex_manifest" || exit 1
-          test -s "$claude_manifest" && test -s "$codex_manifest" || exit 1
+          test -s "$claude_manifest" || exit 1
       - name: Syntax — shell
         run: |
           manifest="$(mktemp)" || exit 1
           trap 'rm -f "$manifest"' EXIT
-          find plugins/prkit codex -type f -name '*.sh' -print0 > "$manifest" || exit 1
+          find plugins/prkit -type f -name '*.sh' -print0 > "$manifest" || exit 1
           test -s "$manifest" || exit 1
           while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done < "$manifest"
       - name: Syntax — python
         run: |
           manifest="$(mktemp)" || exit 1
           trap 'rm -f "$manifest"' EXIT
-          find plugins/prkit codex -type f -name '*.py' -print0 > "$manifest" || exit 1
+          find plugins/prkit -type f -name '*.py' -print0 > "$manifest" || exit 1
           test -s "$manifest" || exit 1
           while IFS= read -r -d '' f; do
             python3 -c 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read(), sys.argv[1])' "$f" || exit 1
@@ -45,22 +42,13 @@ jobs:
         run: |
           manifest="$(mktemp)" || exit 1
           trap 'rm -f "$manifest"' EXIT
-          find plugins/prkit codex -type f -name '*.json' -print0 > "$manifest" || exit 1
+          find plugins/prkit -type f -name '*.json' -print0 > "$manifest" || exit 1
           test -s "$manifest" || exit 1
-          printf '%s\0' .claude-plugin/marketplace.json .agents/plugins/marketplace.json >> "$manifest" || exit 1
+          printf '%s\0' .claude-plugin/marketplace.json >> "$manifest" || exit 1
           while IFS= read -r -d '' f; do jq empty "$f" || exit 1; done < "$manifest"
-      - name: Syntax — toml
-        run: |
-          manifest="$(mktemp)" || exit 1
-          trap 'rm -f "$manifest"' EXIT
-          find plugins/prkit codex -type f -name '*.toml' -print0 > "$manifest" || exit 1
-          test -s "$manifest" || exit 1
-          while IFS= read -r -d '' f; do
-            python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$f" || exit 1
-          done < "$manifest"
       - name: Namespace guard — no uberdev token survives (root NOTICE/LICENSE are out of scope)
         run: |
-          if hits=$(grep -rilE 'uberdev' plugins/prkit codex); then
+          if hits=$(grep -rilE 'uberdev' plugins/prkit); then
             echo "surviving uberdev token:"
             echo "$hits"
             exit 1

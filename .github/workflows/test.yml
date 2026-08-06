@@ -91,11 +91,9 @@ jobs:
           bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
-          bash tests/review-pr-codex-entry.test.sh && \
-          bash tests/review-pr-codex-six-child.test.sh && \
+          bash tests/review-pr-entry.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
           bash tests/prkit-manifest.test.sh && \
-          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
           bash tests/prkit-generate.test.sh && \
@@ -114,7 +112,6 @@ jobs:
           bash tests/install.test.sh && \
           bash tests/merge.test.sh && \
           bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
-          bash tests/dispatch-claude-bg.test.sh && \
           bash tests/solve-effort-flag.test.sh && \
           zsh tests/solve-pipeline-zsh.test.sh && \
           zsh tests/goal-state-zsh.test.sh && \
@@ -133,7 +130,7 @@ jobs:
           bash tests/agent-dispatch.test.sh && \
           bash tests/child-dispatch.test.sh && \
           bash tests/child-dispatch-receipts.test.sh && \
-          bash tests/worktree-receipts.test.sh && \
+          bash tests/atomic-move.test.sh && \
           bash tests/child-inputs.test.sh && \
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
@@ -159,8 +156,8 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-codex.test.sh && \
           bash tests/dispatch-wezterm.test.sh && \
+          bash tests/dispatch-child-worktree-teardown.test.sh && \
           bash tests/ubersimplify.test.sh && \
           bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/simplify.test.sh && \
@@ -190,11 +187,11 @@ jobs:
           bash tests/testers-workflow.test.sh && \
           bash tests/scan-fleet-workflow.test.sh && \
           bash tests/solve-fleet-workflow.test.sh && \
+          bash tests/review-pr-workflow.test.sh && \
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh && \
-          bash tests/codex-port.test.sh
+          bash tests/contract-markers.test.sh
 
   supervision-smoke-macos:
     name: supervision-smoke-macos
@@ -206,10 +203,12 @@ jobs:
         run: brew install coreutils
       - name: Run focused supervision smoke tests
         run: |
-          bash tests/review-pr-codex-entry.test.sh && \
+          bash tests/review-pr-entry.test.sh && \
           bash tests/agent-dispatch.test.sh && \
-          bash tests/review-pr-codex-six-child.test.sh && \
-          bash tests/worktree-receipts.test.sh
+          bash tests/child-dispatch.test.sh && \
+          bash tests/dispatch-child-worktree-teardown.test.sh && \
+          bash tests/review-pr-workflow.test.sh && \
+          bash tests/atomic-move.test.sh
 
   shape-checks-windows:
     name: shape-checks-windows
@@ -297,8 +296,10 @@ jobs:
         #   - orchestrator-child-inputs.test.sh
         #   - sdd-child-inputs.test.sh
         #   - review-child-inputs.test.sh
-        #   - review-pr-codex-entry.test.sh
-        #   - review-pr-codex-six-child.test.sh
+        #   - review-pr-entry.test.sh
+        #   - review-pr-workflow.test.sh    (python3 -c + the code_fixer_contract
+        #                                    round-trip over mktemp -d paths, same
+        #                                    reason as code-fixer-contract.test.sh)
         #   - routed-provider-bypass.test.sh
         #   - run-tree-callsite-contract.test.sh
         #   - route-context.test.sh
@@ -313,16 +314,20 @@ jobs:
         #   - prkit-generate.test.sh
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
-#   - codex-port.test.sh                  (python3 -c + mktemp -d path-translation
-#                                         issue on Git Bash, same as uberscan/
-#                                         uberthink; also calls rsync which isn't
-#                                         on windows-latest's Git Bash)
 #   - status.test.sh                      (#310 fixtures drive python3 over
 #                                         mktemp -d paths, POSIX ownership
 #                                         predicates and `touch -t` mtime
 #                                         forgery; lib/status.sh itself stays
 #                                         portable — only the harness is
 #                                         Unix-bound)
+#   - dispatch-child-worktree-teardown.test.sh
+#                                         (#381 RULING 4: real `git worktree
+#                                         add` + nohup detachment + the POSIX
+#                                         ownership predicate in
+#                                         _uberdev_dispatch_validate_worktree_directory,
+#                                         same Unix-bound harness class as
+#                                         status.test.sh; the teardown code
+#                                         itself stays portable)
 # === END ci-wiring windows-skip-list ===
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
@@ -339,7 +344,6 @@ jobs:
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/prkit-manifest.test.sh && \
-          bash tests/prkit-codex-manifest.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           python -I -B tests/code-fixer-contract-windows.test.py && \
@@ -352,7 +356,6 @@ jobs:
           bash tests/install.test.sh && \
           bash tests/merge.test.sh && \
           bash tests/ghostty-dispatch-no-instance-leak.test.sh && \
-          bash tests/dispatch-claude-bg.test.sh && \
           bash tests/solve-effort-flag.test.sh && \
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
@@ -364,9 +367,8 @@ jobs:
           bash tests/solve-claim.test.sh && \
           bash tests/dispatch-fallback.test.sh && \
           bash tests/dispatch-background.test.sh && \
-          bash tests/dispatch-codex.test.sh && \
           bash tests/child-dispatch-receipts.test.sh && \
-          bash tests/worktree-receipts.test.sh && \
+          bash tests/atomic-move.test.sh && \
           bash tests/review-child-handoff.test.sh --windows-path-only && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
