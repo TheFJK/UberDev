@@ -350,13 +350,16 @@ not a missing one, and the script only enforces its presence in `review-pr` mode
 | Key | Stages | Meaning |
 |---|---|---|
 | `ciLoopIter` | all four | `[1,3]`, default 1. Phase 3's own loop counter. It keys the **slug** (`ciSlug`), never the child-directory formula — `iterSuffix()` still owns that suffix, so `<runDir>/children/ci-rebase-ci02-iter01` is unique in both counters through ONE formula. |
-| `ciAuthorityPathAbs`, `ciAuthoritySha256` | all four | the CI authority document, minted no-clobber by `prepare-ci-authority` and pinned into the binding by digest |
-| `ciInputSha256` | all four | the digest of the child's own pinned input document. The PATH is **not** an envelope key — the script derives it as `<childDir>/input.json`, so no agent-visible scalar can steer a sibling's read. |
+| `ciAuthorityPathAbs`, `ciAuthoritySha256` | `ci-classify`, `ci-fix`, `ci-defer` | the CI authority document, minted no-clobber by `prepare-ci-authority` and pinned into the binding by digest. **Not `ci-conflicts`** — see `ciConflictAuthorityPrefixAbs`. |
+| `ciInputSha256` | `ci-classify`, `ci-fix`, `ci-defer` | the digest of the child's own pinned input document. The PATH is **not** an envelope key — the script derives it as `<childDir>/input.json`, so no agent-visible scalar can steer a sibling's read. |
 | `ciFixerEdgeId` | `ci-fix` | `review_pr.ci.fix_code` \| `review_pr.ci.rebase`, keyed into the script's `CI_FIX_ARMS` table. Anything else aborts `unknown_ci_fixer_edge`. |
 | `ciFailureClass`, `ciSignalAnchor` | `ci-fix` | what `validate-ci-classification` returned to the CONTROLLER, never what the classify child returned to the script. The class/edge pairing is re-checked in-script as a REFUSAL, not a blessing. |
 | `ciRunId`, `ciHeadSha`, `ciBaseSha` | `ci-fix`, `ci-conflicts` | prompt scalars |
 | `ciPrBranch`, `ciBaseBranch` | `ci-fix`, `ci-conflicts` | gated with `isSafeBindingScalar` |
-| `ciConflictCount`, `ciConflictCap`, `ciConflictWave` | `ci-conflicts` | the resolver COUNT, never the path list |
+| `ciConflictCount` | `ci-conflicts` | the resolver COUNT, never the path list |
+| `ciConflictCap` | `ci-conflicts` | the TOTAL ceiling on the fanout (50, matching `ciConflictCount`'s clamp and `lib/review-fleet-args.sh`'s `REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP`). NOT `fanout_concurrency.conflict_resolver` — that key is a concurrency knob, and forwarding it here refused an 11-conflict PR with zero resolvers dispatched. |
+| `ciConflictWave` | `ci-conflicts` | the CONCURRENCY knob (`fanout_concurrency.conflict_resolver`, default 10) handed to `dispatchRoster`, which batches a larger roster into sequential waves |
+| `ciConflictAuthorityPrefixAbs` | `ci-conflicts` | the per-resolver authority pathname MINUS its index: the script appends `<index>.json`, so ONE spelling of the rule crosses the boundary and resolver N is told about resolver N's authority. No digest is carried — a per-resolver digest cannot be forwarded as one scalar, and the controller re-checks each one itself when it judges. |
 | `ciAggregatePathAbs`, `ciAggregateSha256` | `ci-defer` | the one-row `ci-refused-synthetic` aggregate |
 
 **`lease_sha` is not in this table and never will be.** It is a member of the CI

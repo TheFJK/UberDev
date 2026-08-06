@@ -705,6 +705,7 @@ const wrapped = '(async () => {\n' + body + '\n})()';
 
 const logs = [];
 const labels = [];
+const prompts = [];
 const sandbox = {
   args: fs.readFileSync(process.argv[3], 'utf8'),   // the runtime hands a STRING
   log: (m) => { logs.push(String(m)); },
@@ -717,6 +718,7 @@ const sandbox = {
       throw new Error('prompt builder produced a non-string prompt');
     }
     labels.push(opts && opts.label);
+    prompts.push(prompt);
     return { status: 'COMPLETE', issuesCreated: [], commentedUrls: [], skipped: 0,
              halted: false, resultPath: '', statusPath: '' };
   },
@@ -748,6 +750,7 @@ process.stdout.write(JSON.stringify({
   abortReason: result ? result.abortReason : 'NO_RESULT_EMITTED',
   dispatched: result ? result.dispatched : -1,
   labels: labels,
+  prompts: prompts,
 }) + '\n');
 WHARNESS
 
@@ -834,11 +837,86 @@ assert_stage_runs ci-fix-rebase ci-fix "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.rebase",
      ciFailureClass:"stale_base", ciSignalAnchor:"gh-run-12345:1"}')" 1
 assert_stage_runs ci-conflicts ci-conflicts "$W_NONCE1,$W_NONCE2" \
-  "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciConflictCount:2, ciConflictCap:10,
-     ciConflictWave:10}')" 2
+  "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciConflictCount:2, ciConflictCap:50,
+     ciConflictWave:10,
+     ciConflictAuthorityPrefixAbs:"/r/run/ci-authority-resolve-conflict-iter1-ci1-"}')" 2
 assert_stage_runs ci-defer ci-defer "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq --arg sha "$W_HEX64_A" \
      '. + {ciAggregatePathAbs:"/r/run/agg.md", ciAggregateSha256:$sha}')" 1
+
+# --- W-CONFLICT: the two defects the ci-conflicts stage shipped with ---------
+#
+# 1. ONE authority scalar was forwarded for the WHOLE stage — the last iteration
+#    of the controller's mint loop — and ciAuthorityContract() rendered it into
+#    EVERY resolver's prompt under "Treat every value as exact". With N files,
+#    N-1 resolvers were told their scope was the authority pinning someone
+#    else's file. Nothing asserted per-resolver distinctness, so the bug was
+#    invisible to the suite.
+# 2. `ciConflictCap` was fed from `fanout_concurrency.conflict_resolver` — a
+#    CONCURRENCY knob, default 10 — and used as a hard TOTAL, so an 11-conflict
+#    PR aborted `bad_ci_conflict_count` with zero resolvers dispatched, while
+#    dispatchRoster's wave loop two lines later existed to batch exactly that.
+W_CONFLICT_PREFIX="/r/run/ci-authority-resolve-conflict-iter1-ci1-"
+stage_args ci-conflicts "$W_NONCE1,$W_NONCE2,$W_NONCE3" \
+  "$(printf '%s' "$W_CI_COMMON" | jq --arg p "$W_CONFLICT_PREFIX" \
+     '. + {ciConflictCount:3, ciConflictCap:50, ciConflictWave:10,
+           ciConflictAuthorityPrefixAbs:$p}')"
+W_CONFLICT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+W_CONFLICT_AUTHORITIES="$(printf '%s' "$W_CONFLICT_OUT" \
+  | jq -r '[.prompts[] | capture("ci_authority_path   = (?<p>[^\n]+)").p] | @csv' 2>/dev/null)"
+W_CONFLICT_DISTINCT="$(printf '%s' "$W_CONFLICT_OUT" \
+  | jq -r '[.prompts[] | capture("ci_authority_path   = (?<p>[^\n]+)").p] | unique | length' 2>/dev/null)"
+if [ "$W_CONFLICT_DISTINCT" = 3 ] \
+   && [ "$W_CONFLICT_AUTHORITIES" = "\"${W_CONFLICT_PREFIX}1.json\",\"${W_CONFLICT_PREFIX}2.json\",\"${W_CONFLICT_PREFIX}3.json\"" ]; then
+  pass "W[ci-conflicts-authority] each resolver's prompt pins its OWN authority (1,2,3 — never one shared scalar)"
+else
+  fail "W[ci-conflicts-authority] resolvers share an authority pin: distinct=$W_CONFLICT_DISTINCT paths=$W_CONFLICT_AUTHORITIES"
+fi
+# ...and no digest is quoted to a child, because a per-resolver digest cannot be
+# forwarded as one scalar and the wrong one is worse than none.
+if ! printf '%s' "$W_CONFLICT_OUT" | jq -e '[.prompts[] | select(test("ci_authority_sha256"))] | length > 0' >/dev/null 2>&1; then
+  pass "W[ci-conflicts-authority] no resolver prompt quotes a stage-wide authority digest"
+else
+  fail "W[ci-conflicts-authority] a resolver prompt still quotes ci_authority_sha256 — one scalar, N children"
+fi
+# The wave/total split: 11 conflicts, wave 10 -> ALL 11 dispatch, in 2 waves.
+stage_args ci-conflicts "$(for i in $(seq 11); do printf '%s,' "$(printf '0%.0s' $(seq 62))$(printf '%02d' "$i")"; done | sed 's/,$//')" \
+  "$(printf '%s' "$W_CI_COMMON" | jq --arg p "$W_CONFLICT_PREFIX" \
+     '. + {ciConflictCount:11, ciConflictCap:50, ciConflictWave:10,
+           ciConflictAuthorityPrefixAbs:$p}')"
+W_WAVE_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+W_WAVE_ABORT="$(printf '%s' "$W_WAVE_OUT" | jq -r '.abortReason')"
+W_WAVE_AGENTS="$(printf '%s' "$W_WAVE_OUT" | jq -r '.labels | length')"
+if [ -z "$W_WAVE_ABORT" ] && [ "$W_WAVE_AGENTS" = 11 ]; then
+  pass "W[ci-conflicts-wave] 11 conflicts with a wave size of 10 dispatch ALL 11 (the knob is the wave, not the cap)"
+else
+  fail "W[ci-conflicts-wave] abort='$W_WAVE_ABORT' dispatched=$W_WAVE_AGENTS (want no abort, 11)"
+fi
+# ...the DEFAULT total ceiling is the 50 that matches ciConflictCount's own
+# clamp and lib/review-fleet-args.sh's REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP, NOT
+# the wave knob's 10. Omit ciConflictCap entirely and 11 must still dispatch.
+stage_args ci-conflicts "$(for i in $(seq 11); do printf '%s,' "$(printf '0%.0s' $(seq 62))$(printf '%02d' "$i")"; done | sed 's/,$//')" \
+  "$(printf '%s' "$W_CI_COMMON" | jq --arg p "$W_CONFLICT_PREFIX" \
+     '. + {ciConflictCount:11, ciConflictWave:10, ciConflictAuthorityPrefixAbs:$p}')"
+W_DEFAULT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+if [ -z "$(printf '%s' "$W_DEFAULT_OUT" | jq -r '.abortReason')" ] \
+   && [ "$(printf '%s' "$W_DEFAULT_OUT" | jq -r '.labels | length')" = 11 ]; then
+  pass "W[ci-conflicts-wave] the DEFAULT total ceiling is 50, not the wave knob's 10"
+else
+  fail "W[ci-conflicts-wave] ciConflictCap still defaults to the concurrency knob: $W_DEFAULT_OUT"
+fi
+# ...and the TOTAL ceiling still fails closed above itself, so the guard is live
+# rather than merely widened away.
+stage_args ci-conflicts "$W_NONCE1,$W_NONCE2" \
+  "$(printf '%s' "$W_CI_COMMON" | jq --arg p "$W_CONFLICT_PREFIX" \
+     '. + {ciConflictCount:6, ciConflictCap:5, ciConflictWave:10,
+           ciConflictAuthorityPrefixAbs:$p}')"
+if [ "$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1 | jq -r '.abortReason')" \
+     = bad_ci_conflict_count ]; then
+  pass "W[ci-conflicts-wave] a set above the TOTAL ceiling still refuses (bad_ci_conflict_count)"
+else
+  fail "W[ci-conflicts-wave] the total ceiling no longer fails closed"
+fi
 
 # /simplify reaches `defer` too, on the mode branch that has no Phase 1
 # aggregate — the arm f2iPrompt's own phase1Path prose is written for.

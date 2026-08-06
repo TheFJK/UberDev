@@ -80,6 +80,46 @@
 > fence and the lock is void. The lease is the cross-run guard and `git rebase`
 > refuses a second in-progress rebase on its own.
 >
+> **Fresh-shell handoffs are FOUND, never recomputed.** The counter-keyed
+> artifact name is the trap the first implementation fell into twice. Both loop
+> counters live in `ci-loop-state.json` and every fence that keys a pathname on
+> them reads them back first — the classify and fix mint fences did not, so CI
+> iteration 2 recomputed iteration 1's authority pathname and
+> `prepare-ci-authority`, which publishes no-clobber, refused
+> `authority_preexists` with no audit event. And the `ci-fix` launch sidecar
+> cannot be recomputed at all: the CONFLICT arm's restage deliberately advances
+> `CI_FIX_LOOP_ITER` (the restage IS a loop iteration, which is what bounds it)
+> while the sidecar keeps the name it was minted under, so the push fence looked
+> for a file nothing had written and aborted the whole arm. The mint fence
+> therefore publishes a fixed-name POINTER to the sidecar it wrote, and every
+> later reader follows it.
+>
+> **Two numbers, not one, for the conflict fanout.**
+> `fanout_concurrency.conflict_resolver` is a CONCURRENCY knob — its documented
+> behaviour is "split into `ceil(N / cap)` sequential waves" — so it is the wave
+> size and nothing else. The TOTAL ceiling on auto-resolvable conflicted files is
+> its own constant (`REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP`, 50, matching the
+> engine's own clamp). Forwarding the knob as the total made an 11-conflict PR
+> refuse with zero resolvers dispatched.
+>
+> **One authority per resolver means one authority per resolver's PROMPT.** The
+> envelope carries an authority-path PREFIX to which the engine appends the
+> resolver's own index; it carries no digest at all, because a per-resolver
+> digest cannot be forwarded as one scalar and the controller re-checks each one
+> itself when it judges. A single shared scalar told N-1 of N resolvers that
+> their controller-blessed scope was somebody else's file.
+>
+> **The CONFLICT terminal owes a residue proof too.** It cannot be
+> `_require_clean_worktree` — a conflicted rebase has unmerged index entries by
+> construction — but it can be, and now is, untracked-confinement plus "no
+> tracked path whose worktree differs from the index outside the unmerged set".
+> Without it the CONFLICT path was the only mutating CI terminal with no
+> worktree proof at all before the leased force-push. And a BINARY conflict is
+> refused outright (`ci_conflict_binary_unresolvable`): git writes the "ours"
+> blob with no conflict markers for one, so the marker scan cannot tell a
+> resolver that did nothing from one that resolved, and no resolver can merge a
+> binary anyway.
+>
 > Status stays **Draft**.
 
 ---

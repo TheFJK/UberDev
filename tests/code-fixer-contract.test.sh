@@ -5403,7 +5403,11 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     git(cf_repo, "config", "user.name", "Fixture")
     (cf_repo / "src").mkdir()
     (cf_repo / "src/app.py").write_text("APP = 0\n", encoding="utf-8")
-    git(cf_repo, "add", "--", "src/app.py")
+    # A SECOND tracked file neither side touches. Without one, "a tracked path
+    # edited outside the conflict set" cannot be modelled at all: the only
+    # tracked file would be the unmerged one.
+    (cf_repo / "src/keep.py").write_text("KEEP = 1\n", encoding="utf-8")
+    git(cf_repo, "add", "--", "src/app.py", "src/keep.py")
     git(cf_repo, "commit", "-qm", "test: conflict fixture base")
     cf_fork = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
     # main advances over the same line the branch will touch.
@@ -5480,6 +5484,40 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
         lambda: rb_outcome(remote_head_sha="c" * 40),
         "ci_rebase_remote_moved_during_child",
     )
+    # ci_rebase_base_not_ancestor — the ONLY ancestry proof before a force-push,
+    # and it had zero assertions anywhere. `cf_fork` predates the pinned base, so
+    # a HEAD sitting there is not the result of rebasing onto it. Ordered before
+    # the CONFLICT short-circuit on purpose: a mid-rebase state must not buy an
+    # exemption from ancestry.
+    expect_contract_reason(
+        lambda: rb_outcome(head_after=cf_fork), "ci_rebase_base_not_ancestor")
+
+    # ---- the CONFLICT terminal's own residue proof -------------------------
+    # It returns BEFORE _ci_require_residue_closed (a conflicted rebase has
+    # unmerged index entries by construction, which that predicate calls
+    # index_dirty), and for one revision that left the CONFLICT path as the only
+    # mutating CI terminal with NO worktree proof at all — while ending in the
+    # same leased force-push as the other two. Two halves, both sound mid-rebase.
+    (cf_repo / "src/dropped.py").write_text("DROPPED = 1\n", encoding="utf-8")
+    expect_contract_reason(rb_outcome, "ci_rebase_conflict_scope_escape")
+    (cf_repo / "src/dropped.py").unlink()
+    assert rb_outcome()["status"] == "CONFLICT"
+    # A TRACKED file edited outside the conflict set: git's replay STAGES every
+    # path it merged cleanly, so a worktree-vs-index divergence outside the
+    # unmerged entries is somebody's hand edit — the one that used to ride
+    # `rebase --continue` onto the remote with every equality still verified.
+    cf_keep_bytes = (cf_repo / "src/keep.py").read_bytes()
+    (cf_repo / "src/keep.py").write_text("KEEP = 'tampered'\n", encoding="utf-8")
+    expect_contract_reason(rb_outcome, "ci_rebase_conflict_scope_escape")
+    (cf_repo / "src/keep.py").write_bytes(cf_keep_bytes)
+    assert rb_outcome()["status"] == "CONFLICT"
+    # ...and the UU path itself is NEVER the escapee: the resolver rewrites it
+    # in place and never stages it, so a predicate that read `UU` as "dirty"
+    # would refuse every correct resolution.
+    cf_app_conflicted = (cf_repo / "src/app.py").read_bytes()
+    (cf_repo / "src/app.py").write_text("APP = 'resolved'\n", encoding="utf-8")
+    assert rb_outcome()["status"] == "CONFLICT"
+    (cf_repo / "src/app.py").write_bytes(cf_app_conflicted)
 
     # ---- one resolver, resolved IN PLACE and deliberately NOT staged -------
     # agents/conflict-resolver.md and the ci-conflicts prompt both forbid
@@ -5532,6 +5570,17 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     (cf_repo / "src/invented.py").unlink()
     assert rs_outcome()["status"] == "RESOLVED"
 
+    # A BINARY conflict has no liveness signal at all. git records `UU` for it
+    # but writes the "ours" blob to the worktree with NO markers, so the marker
+    # scan judges a resolver that did nothing identical to one that resolved —
+    # and conflict-resolver.md cannot merge a binary either. Passing it RESOLVED
+    # staged "ours", committed it, and force-pushed the base branch's version of
+    # the binary silently discarded. The honest terminal is a refusal.
+    (cf_repo / "src/app.py").write_bytes(b"\x89PNG\r\x1a\n\x00\x00\x00binary\n")
+    expect_contract_reason(rs_outcome, "ci_conflict_binary_unresolvable")
+    (cf_repo / "src/app.py").write_text("APP = 'merged'\n", encoding="utf-8")
+    assert rs_outcome()["status"] == "RESOLVED"
+
     # ---- and the clean-rebase terminal is unchanged ------------------------
     # Widening the rebase arm must not turn a NON-conflicted rebase into a
     # CONFLICT, and must not stop refusing a dirty index outside a rebase. This
@@ -5558,6 +5607,144 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     (cf_repo / "src/stray.py").write_text("STRAY = 1\n", encoding="utf-8")
     expect_contract_reason(
         lambda: rb_outcome(head_after=cf_clean_head), "worktree_untracked")
+    (cf_repo / "src/stray.py").unlink()
+
+    # ---- ci_conflict_not_mid_rebase ---------------------------------------
+    # The ONLY thing stopping a resolver terminal from being judged after the
+    # rebase has been aborted or completed — and it had zero assertions
+    # anywhere, so reordering the CONFLICT terminal above it, or dropping the
+    # `_ci_rebase_dir` precondition, left the whole suite green. The rebase was
+    # aborted above; the very same binding must now refuse.
+    assert not module._ci_rebase_dir(str(cf_repo)), "the fixture is still mid-rebase"
+    expect_contract_reason(rs_outcome, "ci_conflict_not_mid_rebase")
+
+    # ---- ci_mutation_edge_unsupported -------------------------------------
+    # A read-only CI edge routed into the MUTATING verb. Also uncovered.
+    cy_child = cf_child("ci-classify-ci01-iter01")
+    cy_input, cy_input_sha = cf_input(cy_child, b'{"edge":"classify"}\n')
+    cy_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.classify", pr_number=41, run_id="77",
+        head_sha=cf_head, working_dir=str(cf_repo), input_path=cy_input,
+        input_sha256=cy_input_sha,
+        authority_output_path=str(
+            cf_evidence / "ci-authority-classify-iter01-ci01.json"))
+    cy_binding_bytes, cy_terminal = cf_bind(
+        "review_pr.ci.classify", "ci-classify-ci01-iter01", cy_receipt)
+    expect_contract_reason(
+        lambda: module.validate_ci_mutation_outcome(
+            launch_binding=cy_binding_bytes,
+            status_sha256=cy_terminal["status_sha256"],
+            result_sha256=cy_terminal["result_sha256"],
+            working_dir=str(cf_repo), head_before=cf_head,
+            head_after=cf_clean_head, remote_head_sha=""),
+        "ci_mutation_edge_unsupported",
+    )
+
+    # ---- the remaining CI terminals nothing asserted anywhere --------------
+    # Every one of these was reachable and correct, and every one of them could
+    # have been deleted without reddening a single row.
+    expect_contract_reason(
+        lambda: module.capture_ci_terminal(
+            launch_binding=cy_binding_bytes, edge_id="review_pr.fix.phase1"),
+        "ci_terminal_edge_unsupported",
+    )
+    expect_contract_reason(
+        lambda: module.validate_ci_mutation_outcome(
+            launch_binding=rb_binding_bytes,
+            status_sha256=rb_terminal["status_sha256"],
+            result_sha256=rb_terminal["result_sha256"],
+            working_dir="", head_before=cf_head, head_after=cf_clean_head,
+            remote_head_sha=cf_head),
+        "working_dir_invalid",
+    )
+    expect_contract_reason(
+        lambda: module.validate_residue(
+            working_dir=str(cf_repo), evidence_dir=str(cf_repo)),
+        "evidence_dir_invalid",
+    )
+    # An authority pathname outside the worktree, and one whose basename does
+    # not carry the edge/iteration key the whole run tree is indexed by.
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.classify", pr_number=41, run_id="77",
+            head_sha=cf_head, working_dir=str(cf_repo), input_path=cy_input,
+            input_sha256=cy_input_sha,
+            authority_output_path=str(pathlib.Path(temporary) / "outside.json")),
+        "ci_authority_path_invalid",
+    )
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.classify", pr_number=41, run_id="77",
+            head_sha=cf_head, working_dir=str(cf_repo), input_path=cy_input,
+            input_sha256=cy_input_sha,
+            authority_output_path=str(cf_evidence / "ci-authority-classify.json")),
+        "ci_authority_path_invalid",
+    )
+    # ci_classification_log_mismatch — the classifier's pinned input IS the
+    # fetched GH-Actions log, and a GH-Actions log is fetched once and is
+    # unreachable afterwards. If those bytes moved, the classification was made
+    # against something other than what the controller froze.
+    cy_status_sha = module.capture_ci_terminal(
+        launch_binding=cy_binding_bytes,
+        edge_id="review_pr.ci.classify")["status_sha256"]
+    cy_result_sha = module.capture_ci_terminal(
+        launch_binding=cy_binding_bytes,
+        edge_id="review_pr.ci.classify")["result_sha256"]
+    pathlib.Path(cy_input).write_bytes(b'{"edge":"classify-TAMPERED"}\n')
+    expect_contract_reason(
+        lambda: module.validate_ci_classification(
+            launch_binding=cy_binding_bytes,
+            status_sha256=cy_status_sha, result_sha256=cy_result_sha),
+        "ci_classification_log_mismatch",
+    )
+    pathlib.Path(cy_input).write_bytes(b'{"edge":"classify"}\n')
+
+    # ---- validate_ci_persistence_result: the fifth edge's own terminal -----
+    # It shipped with argparse reachability only (`parse_args(...).command ==
+    # verb`), so the suite could not tell a correct judge from one that returned
+    # DONE for a REFUSED child — which is exactly what the controller routes the
+    # CI-REFUSED halt on. `persistence_result_refused` had 0 mentions in any
+    # test.
+    dr_child = cf_child("ci-defer-ci01-iter01")
+    dr_input, dr_input_sha = cf_input(dr_child, b'{"edge":"defer"}\n')
+    dr_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.defer_refusal", pr_number=41, run_id="77",
+        head_sha=cf_head, working_dir=str(cf_repo), input_path=dr_input,
+        input_sha256=dr_input_sha,
+        authority_output_path=str(
+            cf_evidence / "ci-authority-defer-refusal-iter01-ci01.json"))
+    dr_binding_bytes, _dr_terminal = cf_bind(
+        "review_pr.ci.defer_refusal", "ci-defer-ci01-iter01", dr_receipt)
+
+    def dr_outcome(document):
+        result_path = cf_child("ci-defer-ci01-iter01") / "result.md"
+        payload = document.encode("utf-8")
+        result_path.write_bytes(payload)
+        terminal = module.capture_ci_terminal(
+            launch_binding=dr_binding_bytes, edge_id="review_pr.ci.defer_refusal")
+        return module.validate_ci_persistence_result(
+            launch_binding=dr_binding_bytes,
+            status_sha256=terminal["status_sha256"],
+            result_sha256=terminal["result_sha256"])
+
+    dr_done = dr_outcome(persistence_result("DONE"))
+    assert dr_done["status"] == "DONE", dr_done
+    # realpath on both sides: prepare_ci_authority canonicalises, and macOS
+    # resolves /var -> /private/var under a mktemp fixture.
+    assert (os.path.realpath(dr_done["aggregate_path"])
+            == os.path.realpath(dr_input)), dr_done
+    assert dr_done["run_nonce"] == CI_NONCE, dr_done
+    dr_halted = dr_outcome(persistence_result("DONE", halted=True, blocker_count=2))
+    assert dr_halted["halted"] is True and dr_halted["by_severity_blocker"] == 2, dr_halted
+    expect_contract_reason(
+        lambda: dr_outcome(persistence_result("REFUSED")),
+        "persistence_result_refused")
+    # ...and it must NOT inherit validate_persistence_result's schema-v2
+    # blocker recount: this stage's aggregate is the one-row ci-refused-synthetic
+    # envelope, which that recount cannot parse. A document with no fence is
+    # still malformed, though.
+    expect_contract_reason(
+        lambda: dr_outcome("no fence at all\n"), "persistence_result_malformed")
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

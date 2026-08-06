@@ -7908,28 +7908,42 @@ def _ci_require_residue_closed(authority: dict[str, Any], working_dir: str) -> N
     )
 
 
+CI_REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
+
+
 def _ci_rebase_dir(working_dir: str) -> str:
-    """The live `rebase-merge` state directory, or "" when no rebase is running.
+    """The live rebase state directory, or "" when no rebase is running.
 
     ONE definition, because the rebase judge and the conflict judge must agree
     about what "mid-rebase" means: the first must return CONFLICT in exactly the
     state the second is allowed to run in, and two spellings of the probe are
-    two chances for them to disagree.
+    two chances for them to disagree. `review_fleet_rebase_dir` in
+    lib/review-fleet-args.sh is the shell half of the same definition and probes
+    the same two directories in the same order.
+
+    BOTH backends. `git rebase` has defaulted to the merge backend since 2.26,
+    but `rebase.backend=apply` and an explicit `git rebase --apply` use
+    `rebase-apply` instead — and a probe that knows only one of them answers
+    "no rebase" for the other, which turns the mandated conflicted state into
+    an `index_dirty` refusal and aborts the rebase the CONFLICT arm needs.
     """
-    observed = _git(working_dir, "rev-parse", "--git-path", "rebase-merge")
-    if observed.returncode != 0:
-        fail("git_state_unreadable")
-    try:
-        rebase_dir = observed.stdout.decode("utf-8").strip()
-    except UnicodeError:
-        fail("git_state_unreadable")
-    if not rebase_dir:
-        return ""
-    absolute = (
-        rebase_dir if os.path.isabs(rebase_dir)
-        else os.path.join(working_dir, rebase_dir)
-    )
-    return absolute if os.path.isdir(absolute) else ""
+    for component in CI_REBASE_STATE_DIRS:
+        observed = _git(working_dir, "rev-parse", "--git-path", component)
+        if observed.returncode != 0:
+            fail("git_state_unreadable")
+        try:
+            rebase_dir = observed.stdout.decode("utf-8").strip()
+        except UnicodeError:
+            fail("git_state_unreadable")
+        if not rebase_dir:
+            fail("git_state_unreadable")
+        absolute = (
+            rebase_dir if os.path.isabs(rebase_dir)
+            else os.path.join(working_dir, rebase_dir)
+        )
+        if os.path.isdir(absolute):
+            return absolute
+    return ""
 
 
 def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
@@ -8004,6 +8018,69 @@ def _validate_ci_fix_code_outcome(
     return "APPLIED"
 
 
+def _ci_worktree_dirty_paths(working_dir: str) -> tuple[str, ...]:
+    """Tracked paths the WORKTREE has diverged on, excluding unmerged entries.
+
+    Porcelain v1 `XY <path>`: X is the index-vs-HEAD column and Y the
+    worktree-vs-index column. Mid-rebase, git stages every cleanly-replayed path
+    (`M `, `A `, `D `) and marks the conflicted ones unmerged (`UU`, and the
+    `AA`/`DD`/`AU`/`UA`/`DU`/`UD` variants). What it never produces is a tracked
+    path whose WORKTREE differs from the index — so a non-space Y outside the
+    unmerged set is an edit somebody made by hand.
+    """
+    observed = _git(working_dir, "status", "--porcelain", "-z")
+    if observed.returncode != 0:
+        fail("git_state_unreadable")
+    dirty: list[str] = []
+    for record in observed.stdout.split(b"\x00"):
+        if len(record) < 4 or record[2:3] != b" ":
+            continue
+        index_column = record[0:1]
+        worktree_column = record[1:2]
+        if index_column == b"?" or index_column == b"!":
+            continue  # untracked/ignored: _require_untracked_confined_to_evidence
+        pair = record[0:2]
+        if b"U" in pair or pair in (b"AA", b"DD"):
+            continue  # a legitimate unmerged entry
+        if worktree_column == b" ":
+            continue
+        try:
+            dirty.append(record[3:].decode("utf-8"))
+        except UnicodeError:
+            fail("git_state_unreadable")
+    return tuple(dirty)
+
+
+def _ci_require_conflict_residue_closed(
+    authority: dict[str, Any], working_dir: str
+) -> None:
+    """The residue proof the CONFLICT terminal CAN answer.
+
+    `_ci_require_residue_closed` cannot run here: a conflicted rebase has
+    unmerged index entries by construction, and demanding a clean index judged
+    the very state `agents/ci-rebase-handler.md` Step 5 mandates. But returning
+    CONFLICT with NO residue proof at all made this the one mutating CI terminal
+    with none — and the CONFLICT path ends in the same leased force-push as the
+    other two. A ci-rebase-handler that, alongside the conflicted rebase, wrote
+    an unrelated tracked file or dropped a new untracked one passed as CONFLICT,
+    rode `rebase --continue` onto the remote, and every downstream equality
+    check still read as verified.
+
+    Two halves, both sound mid-rebase and neither of them the index:
+      - untracked paths confined to the run's evidence tree. `git rebase` does
+        not create untracked files, so anything else came from the child.
+      - no tracked path whose WORKTREE differs from the index outside the
+        unmerged set (see `_ci_worktree_dirty_paths`).
+    """
+    _require_untracked_confined_to_evidence(
+        working_dir,
+        _ci_evidence_dir(authority, working_dir),
+        outside_failure="ci_rebase_conflict_scope_escape",
+    )
+    if _ci_worktree_dirty_paths(working_dir):
+        fail("ci_rebase_conflict_scope_escape")
+
+
 def _validate_ci_rebase_outcome(
     authority: dict[str, Any],
     working_dir: str,
@@ -8044,6 +8121,7 @@ def _validate_ci_rebase_outcome(
     # pushed anyway is still refused before the controller's own push, and a
     # HEAD that is not descended from the pinned base is still not a rebase.
     if _ci_rebase_dir(working_dir) and _ci_unmerged_paths(working_dir):
+        _ci_require_conflict_residue_closed(authority, working_dir)
         return "CONFLICT"
     _ci_require_residue_closed(authority, working_dir)
     return "REBASED"
@@ -8079,6 +8157,20 @@ def _has_conflict_markers(path: str) -> bool:
     return False
 
 
+# git's own binary heuristic (`buffer_is_binary`): a NUL byte anywhere in the
+# leading 8000 bytes. Same constant, so "binary" means here what it means to the
+# merge driver that produced the conflict.
+CI_BINARY_SNIFF_BYTES = 8000
+
+
+def _is_binary_worktree_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return b"\x00" in handle.read(CI_BINARY_SNIFF_BYTES)
+    except OSError:
+        fail("git_state_unreadable")
+
+
 def _validate_ci_conflict_outcome(
     authority: dict[str, Any], working_dir: str
 ) -> str:
@@ -8103,6 +8195,17 @@ def _validate_ci_conflict_outcome(
     if not os.path.isfile(target_absolute) or os.path.islink(target_absolute):
         # A `UU` path that no longer exists was deleted, not resolved.
         fail("ci_conflict_unresolved")
+    # THE MARKER SCAN HAS NO ANSWER FOR A BINARY. For a binary path git records
+    # `UU` in the index but writes the "ours" blob to the worktree with no
+    # `<<<<<<<`/`>>>>>>>` in it, so a resolver that did nothing at all is
+    # byte-for-byte indistinguishable from one that resolved — and
+    # `agents/conflict-resolver.md` cannot meaningfully merge a binary either.
+    # Passing it RESOLVED staged the "ours" side, committed it on
+    # `rebase --continue`, and force-pushed the base branch's version of the
+    # binary silently discarded. There is no liveness signal to recover here, so
+    # the honest terminal is a refusal: a binary conflict is a human's job.
+    if _is_binary_worktree_file(target_absolute):
+        fail("ci_conflict_binary_unresolvable")
     if _has_conflict_markers(target_absolute):
         fail("ci_conflict_unresolved")
     # A conflict resolver rewrites conflicted files in place. It never creates

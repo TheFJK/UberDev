@@ -3361,6 +3361,14 @@ if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
     raise SystemExit(74)
 print(value["authority_sha256"],end="")' "$1" "$2" "$3"
     }
+    # BOTH counters off disk, before ANY artifact pathname is derived from
+    # them. Iteration 2 of the CI loop re-enters this fence in a fresh shell,
+    # where `${CI_FIX_LOOP_ITER:-1}` is 1 again -- so it recomputed iteration
+    # 1's authority pathname, and `prepare-ci-authority` publishes no-clobber:
+    # `authority_preexists`, `return 74`, no audit event, CI_FIX_LOOP_CAP=3
+    # unreachable in practice. Same single source of truth the push fence and
+    # the CONFLICT arm already read.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     CI_CLASSIFY_SLUG="$(review_fleet_ci_slug ci-classify "${CI_FIX_LOOP_ITER:-1}")" || return 2
     CI_CLASSIFY_CHILD_DIR="$(review_fleet_child_dir "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" "$CI_CLASSIFY_SLUG")" || return 2
     mkdir -p "$CI_CLASSIFY_CHILD_DIR" || return 2
@@ -3447,6 +3455,7 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
           ;;
       esac
     }
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     REVIEW_FLEET_CI_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-ci-classify-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launch.json"
     CI_CLASSIFY_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" binding)" || {
       audit ci_classify_returned subreason=classifier_binding_unreadable
@@ -3669,6 +3678,8 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
     # discovered by the child, one dispatch too late.
     printf '%s' "$CI_FIXER_INPUTS" | jq -e 'type == "object"' >/dev/null 2>&1 \
       || { audit ci_fix_dispatch_inputs_invalid reason="${CI_FIXER_SLUG_BASE}"; OUTCOME=halted; exit 1; }
+    # Counters off disk BEFORE any pathname is keyed on them -- see 6c.3w.1.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     CI_FIXER_SLUG="$(review_fleet_ci_slug "$CI_FIXER_SLUG_BASE" "${CI_FIX_LOOP_ITER:-1}")" || return 2
     CI_FIXER_CHILD_DIR="$(review_fleet_child_dir "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" "$CI_FIXER_SLUG")" || return 2
     mkdir -p "$CI_FIXER_CHILD_DIR" || return 2
@@ -3705,6 +3716,15 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
     review_fleet_bind_ci "$CI_FIXER_EDGE_ID" "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
       "${CI_FIX_LOOP_ITER:-1}" "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
       "$CI_AUTHORITY_PATH" "$CI_AUTHORITY_SHA256" "$CI_FIXER_HEAD_BEFORE" "$REVIEW_FLEET_CI_SIDECAR" || return 74
+    # THE POINTER. Every later reader of this sidecar (6c.4w.2, the CONFLICT
+    # arm's step 2, and 6c.4w.3 THE SINGLE LEASED PUSH) follows this fixed-name
+    # file instead of recomputing the counter-keyed filename. The restage inside
+    # the CONFLICT arm legitimately advances CI_FIX_LOOP_ITER on disk while this
+    # sidecar keeps the name it was written under, so recomputation and reality
+    # diverge by exactly one after any multi-stage rebase -- and the push fence
+    # then aborted `ci_fixer_binding_unreadable` and destroyed the rebase.
+    review_fleet_write_ci_pointer "$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer.txt" \
+      "$REVIEW_FLEET_CI_SIDECAR" || return 74
     uberdev_emit_workflow_args review-fleet \
       mode=review-pr \
       stage=ci-fix \
@@ -3766,7 +3786,10 @@ if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
 member=value[sys.argv[2]]
 print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "$1" "$2"
     }
-    REVIEW_FLEET_CI_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-ci-fix-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launch.json"
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+    # The sidecar is found through the pointer 6c.4w.1 published, never
+    # recomputed from the counters -- see the pointer comment in 6c.4w.1.
+    REVIEW_FLEET_CI_SIDECAR="$(review_fleet_read_ci_pointer "$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer.txt")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
     CI_FIXER_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" binding)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
     CI_FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" head_before)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
     CI_FIXER_EDGE_ID="$(printf '%s' "$CI_FIXER_BINDING" | jq -er .edge_id)" || return 74
@@ -3804,7 +3827,12 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
       # rebase IN PROGRESS") is a validated outcome rather than an error. Without
       # that terminal this line ran on every conflicted rebase and destroyed the
       # exact rebase the CONFLICT-RESOLVE arm below needs.
-      if [ -d "$(git -C "$WORKTREE_ROOT" rev-parse --git-path rebase-merge)" ]; then
+      #
+      # `review_fleet_rebase_dir`, NOT `[ -d "$(git … --git-path rebase-merge)" ]`:
+      # `--git-path` prints `.git/rebase-merge` RELATIVE to the -C directory, so
+      # the bare `-d` test was answered by the harness shell's own cwd and this
+      # cleanup silently became a no-op from any directory but the repo root.
+      if review_fleet_rebase_dir "$WORKTREE_ROOT" >/dev/null; then
         git -C "$WORKTREE_ROOT" rebase --abort || true
       fi
       audit ci_phase_outcome data.outcome=halted data.subreason="${CI_MUTATION_REASON:-ci_mutation_invalid}"
@@ -3842,26 +3870,46 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     without re-checking the digest, and the digest re-check is the entire point
     for a value that authorises a force-push against a PR head.
 
+    It finds that sidecar through the fixed-name POINTER 6c.4w.1 writes, not by
+    recomputing the sidecar's counter-keyed filename. The two answers are not the
+    same after a CONFLICT-arm restage: the restage advances `CI_FIX_LOOP_ITER` on
+    disk — deliberately, because the restage IS a loop iteration and that is what
+    bounds it — while the sidecar keeps the name it was minted under. Recomputing
+    it here looked for `…-ci2.launch.json` when only `…-ci1.launch.json` had ever
+    been written, so the third terminal this fence exists to serve aborted
+    `ci_fixer_binding_unreadable`, ran `git rebase --abort`, and destroyed every
+    resolved conflict with nothing pushed.
+
     ```bash uberdev-executable origin=review-pr
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     uberdev_command_workspace_prepare || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     review_ci_push_abort() {
-      if [ -d "$(git -C "$WORKTREE_ROOT" rev-parse --git-path rebase-merge)" ]; then
+      if review_fleet_rebase_dir "$WORKTREE_ROOT" >/dev/null; then
         git -C "$WORKTREE_ROOT" rebase --abort || true
       fi
       audit ci_phase_outcome data.outcome=halted data.subreason="$1"
       OUTCOME=halted
       exit 1
     }
-    CI_LOOP_STATE="$REVIEW_FLEET_RUN_DIR/ci-loop-state.json"
-    if [ -r "$CI_LOOP_STATE" ]; then
-      CI_FIX_LOOP_ITER="$(review_fleet_read_ci_state "$CI_LOOP_STATE" ci_loop_iter)" || return 74
-      REVIEW_ITERATION="$(review_fleet_read_ci_state "$CI_LOOP_STATE" review_iteration)" || return 74
-    fi
-    REVIEW_FLEET_CI_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-ci-fix-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launch.json"
+    # ONE reader for the counter pair, shared with every other Phase 3 fence:
+    # two spellings of "read the counters" is how half of them ended up not
+    # reading them at all. It also supplies the first-iteration default, so an
+    # absent state file cannot leave REVIEW_ITERATION unset under `set -u`.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+    # The ci-fix sidecar is located through the POINTER 6c.4w.1 published, not
+    # by recomputing its counter-keyed filename. Those two answers diverge by
+    # exactly one after a CONFLICT-arm restage — the restage advances
+    # CI_FIX_LOOP_ITER on disk (it IS a loop iteration) while the sidecar keeps
+    # the name it was written under — and this fence then aborted
+    # `ci_fixer_binding_unreadable` and ran `git rebase --abort`, destroying
+    # every resolved conflict with nothing pushed. The counters above are still
+    # read off disk: the `.launched` ledger below IS re-minted per restage wave,
+    # so that one is correctly keyed on the current counter.
+    REVIEW_FLEET_CI_SIDECAR="$(review_fleet_read_ci_pointer "$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer.txt")" || review_ci_push_abort ci_fixer_binding_unreadable
     CI_FIXER_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" binding)" || review_ci_push_abort ci_fixer_binding_unreadable
+    CI_FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" head_before)" || review_ci_push_abort ci_fixer_binding_unreadable
     CI_FIXER_EDGE_ID="$(printf '%s' "$CI_FIXER_BINDING" | jq -er .edge_id)" || review_ci_push_abort ci_fixer_binding_unreadable
     CI_AUTHORITY_PATH="$(printf '%s' "$CI_FIXER_BINDING" | jq -er .ci_authority_path)" || review_ci_push_abort ci_fixer_binding_unreadable
     CI_AUTHORITY_SHA256="$(printf '%s' "$CI_FIXER_BINDING" | jq -er .ci_authority_sha256)" || review_ci_push_abort ci_fixer_binding_unreadable
@@ -3883,9 +3931,30 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     # Derived HERE, after the rebase/commit has settled, so nothing depends on a
     # sha computed in an earlier shell.
     NEW_HEAD_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
-    if [ -d "$(git -C "$WORKTREE_ROOT" rev-parse --git-path rebase-merge)" ]; then
-      # Pushing mid-rebase would publish an interior state as the PR head.
-      review_ci_push_abort rebase_still_in_progress
+    # THREE-valued, because "git could not answer" must not read as "no rebase":
+    # rc 0 = live rebase, rc 1 = none, rc 2 = the probe itself failed. The old
+    # `[ -d "$(git … --git-path rebase-merge)" ]` asked the question of the
+    # harness shell's own cwd — `--git-path` prints `.git/rebase-merge`, a path
+    # relative to the -C directory — so from any directory but the repo root it
+    # answered "no rebase" mid-rebase and this guard force-pushed the interior
+    # state (for a first-commit conflict, the BASE branch tip) onto the PR head.
+    CI_REBASE_PROBE_RC=0
+    review_fleet_rebase_dir "$WORKTREE_ROOT" >/dev/null || CI_REBASE_PROBE_RC=$?
+    case "$CI_REBASE_PROBE_RC" in
+      0) review_ci_push_abort rebase_still_in_progress ;;  # interior state as the PR head
+      1) ;;
+      *) review_ci_push_abort ci_rebase_state_unreadable ;;
+    esac
+    # NO_CHANGE has no push. `_validate_ci_fix_code_outcome` returns it when
+    # head_after == head_before, and 6c.5's prose says "do NOT run 6c.4w.3" —
+    # prose with no reader. Pushing an unchanged HEAD satisfies the lease,
+    # exits 0 ("Everything up-to-date"), and writes `ci_fix_pushed` naming a
+    # commit that fixed nothing, so Phase 1 re-enters on identical code and the
+    # loop burns an iteration. Every terminal that legitimately reaches this
+    # fence moved HEAD: APPLIED adds one commit, REBASED requires HEAD to have
+    # moved, and CONFLICT reaches here only after `rebase --continue`.
+    if [ "$CI_FIXER_HEAD_BEFORE" = "$NEW_HEAD_SHA" ]; then
+      review_ci_push_abort ci_fix_no_change
     fi
     if [ "$CI_FIXER_EDGE_ID" = review_pr.ci.fix_code ]; then
       CI_FIX_BY_AGENT=ci-code-fixer
@@ -3940,7 +4009,7 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     conflicted rebase is judged `CONFLICT` here and routed accordingly:
 
     - `CI_FIXER_TERMINAL_STATUS=APPLIED` — `ci-code-fixer` `status: APPLIED` (commit SHA returned, no remote write per `agents/ci-code-fixer.md` Step 6) → run **6c.4w.3 THE SINGLE LEASED PUSH**, then fall through to "Phase 1 re-entry" below.
-    - `CI_FIXER_TERMINAL_STATUS=NO_CHANGE` — the fixer made no commit at all. There is nothing to push and nothing new to review: do **not** run 6c.4w.3, do **not** re-enter Phase 1. Emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fix_no_change`, and exit 1 — re-probing the same unchanged head would burn the loop cap against an unchanged remote.
+    - `CI_FIXER_TERMINAL_STATUS=NO_CHANGE` — the fixer made no commit at all. There is nothing to push and nothing new to review: do **not** run 6c.4w.3, do **not** re-enter Phase 1. Emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fix_no_change`, and exit 1 — re-probing the same unchanged head would burn the loop cap against an unchanged remote. **This one is ENFORCED, not asked for:** 6c.4w.3 compares the HEAD it is about to push against the sidecar's `head_before` and halts `ci_fix_no_change` itself. An orchestrator that ran the fence anyway used to satisfy the lease, get `Everything up-to-date` and exit 0, and then record `ci_fix_pushed` naming a commit that fixed nothing.
     - `ci-code-fixer` `status: REFUSED` (RFC 0002 §3.2 — single-attempt halt; **do NOT retry**): the loop-counter cap from 6c.7 LOOP GUARD is bypassed for this terminal class because `REFUSED` is a deterministic decision (forbidden-pattern guard), not flake; retrying re-classifies the same red CI, re-dispatches the same fixer, and consumes 3 iterations of compute that the user could have spent reading the halt prose.
 
        Three actions in order:
@@ -3952,6 +4021,13 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
+          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+          # Counters off disk before the aggregate pathname is keyed on them —
+          # the mint fence below re-derives the SAME name from the SAME two
+          # sources ($RESEARCH_DIR_ABS and ci-loop-state.json), so the two
+          # fences cannot disagree about which file was written. Inherited, this
+          # named `…-ci1.md` on every iteration after the first.
+          review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
           CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
           if ! (umask 077; set -C; : >"$CI_REFUSED_AGGREGATE_PATH"); then
             audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_create_failed
@@ -4019,6 +4095,30 @@ if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
     raise SystemExit(74)
 print(value["authority_sha256"],end="")' "$1" "$2" "$3"
           }
+          # Self-contained, exactly like the classify/fix mint fences: counters
+          # off disk, the aggregate pathname re-derived from them, the run
+          # identity read back out of the digest-pinned ci-fix authority, and
+          # the one value that CANNOT be re-derived here — the child inputs,
+          # which carry the fixer's own rationale — checked rather than
+          # trusted. Inherited, all of these were empty in a fresh shell:
+          # `review_fleet_child_dir "$RUN" "" "$SLUG"` returns rc=2, and an
+          # unset CI_DEFER_INPUTS writes a 1-byte input.json that passes
+          # `--minimum 1` and is then pinned by digest as garbage.
+          review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+          CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
+          [ -s "$CI_REFUSED_AGGREGATE_PATH" ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_missing; exit 1; }
+          printf '%s' "${CI_DEFER_INPUTS:-}" | jq -e 'type == "object"' >/dev/null 2>&1 \
+            || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_defer_inputs_invalid; exit 1; }
+          CI_FIX_SIDECAR="$(review_fleet_read_ci_pointer "$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer.txt")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+          CI_FIX_BINDING="$(review_fleet_read_sidecar "$CI_FIX_SIDECAR" binding)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+          CI_FIX_AUTHORITY_PATH="$(printf '%s' "$CI_FIX_BINDING" | jq -er .ci_authority_path)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+          CI_FIX_AUTHORITY_SHA256="$(printf '%s' "$CI_FIX_BINDING" | jq -er .ci_authority_sha256)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+          CI_RUN_ID="$(python3 -I -B "$CODE_FIXER_CONTRACT" read-ci-authority-member \
+            --authority-path "$CI_FIX_AUTHORITY_PATH" --authority-sha256 "$CI_FIX_AUTHORITY_SHA256" \
+            --member run_id)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_authority_unreadable; exit 1; }
+          CI_CLASSIFICATION_HEAD_SHA="$(python3 -I -B "$CODE_FIXER_CONTRACT" read-ci-authority-member \
+            --authority-path "$CI_FIX_AUTHORITY_PATH" --authority-sha256 "$CI_FIX_AUTHORITY_SHA256" \
+            --member head_sha)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_authority_unreadable; exit 1; }
           CI_DEFER_SLUG="$(review_fleet_ci_slug ci-defer "${CI_FIX_LOOP_ITER:-1}")" || return 2
           CI_DEFER_CHILD_DIR="$(review_fleet_child_dir "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" "$CI_DEFER_SLUG")" || return 2
           mkdir -p "$CI_DEFER_CHILD_DIR" || return 2
@@ -4091,6 +4191,7 @@ if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
 member=value[sys.argv[2]]
 print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "$1" "$2"
           }
+          review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
           REVIEW_FLEET_CI_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-ci-defer-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launch.json"
           CI_DEFER_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" binding)" || { CI_REFUSED_ISSUE_URL=""; CI_DEFER_STATUS=MALFORMED; }
           if [ "${CI_DEFER_STATUS:-}" != MALFORMED ]; then
@@ -4159,6 +4260,18 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     single shared authority would make every resolver's scope the union of all
     of them.
 
+    That per-resolver pin has to reach the resolver's PROMPT too, and for one
+    revision it did not: the envelope forwarded a single `ciAuthorityPathAbs`
+    — the LAST iteration of the mint loop — and `workflow.js` rendered it into
+    every resolver's prompt under "Immutable controller authority … Treat every
+    value as exact". With N conflicted files, N-1 resolvers were handed the
+    authority pinning someone else's file, so the one authoritative scope
+    statement in the prompt contradicted the (correct) per-child `input.json`.
+    The envelope now carries `ciConflictAuthorityPrefixAbs` — ONE spelling of
+    the pathname rule, to which the script appends the resolver's own index —
+    and no digest at all, because a per-resolver digest cannot be forwarded as
+    one scalar and the controller re-checks each one itself when it judges.
+
     **One push site.** All three terminal paths — `fix_code` `APPLIED`, clean
     rebase, and conflict→all-resolved — reach the SAME `--force-with-lease`
     fence, and it is **6c.4w.3 above**, not a copy of it down here. This arm's
@@ -4183,11 +4296,14 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
        REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
        mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
-       CI_LOOP_STATE="$REVIEW_FLEET_RUN_DIR/ci-loop-state.json"
-       if [ -r "$CI_LOOP_STATE" ]; then
-         CI_FIX_LOOP_ITER="$(review_fleet_read_ci_state "$CI_LOOP_STATE" ci_loop_iter)" || return 74
-         REVIEW_ITERATION="$(review_fleet_read_ci_state "$CI_LOOP_STATE" review_iteration)" || return 74
-       fi
+       review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+       # WAVE SIZE, not a total. `fanout_concurrency.conflict_resolver` is a
+       # concurrency knob — its documented behaviour is "split into
+       # ceil(N / cap) sequential waves" — and forwarding it as the fanout's
+       # TOTAL ceiling meant an 11-conflict PR aborted `bad_ci_conflict_count`
+       # with zero resolvers dispatched, defeating the very batching the script
+       # already implements. The ceiling is
+       # REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP, below.
        CONFLICT_RESOLVER_CAP="$(uberdev_read_int_in_range fanout_concurrency.conflict_resolver UBERDEV_FANOUT_CONFLICT_RESOLVER 1 50 10)" || CONFLICT_RESOLVER_CAP=10
        # `-z` + read -d '': paths with spaces or newlines survive. `mapfile` on a
        # newline-split porcelain stream does not.
@@ -4202,6 +4318,15 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
          audit ci_phase_outcome data.outcome=halted data.subreason=rebase_conflict_set_empty
          exit 1
        fi
+       # Refuse HERE, with a reason that names the real cause, rather than
+       # minting N authorities and N bindings and letting the script abort on
+       # `bad_ci_conflict_count` — a refusal whose data names the count and
+       # never says the set was simply too large to auto-resolve.
+       if [ "${#conflicted_files[@]}" -gt "$REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP" ]; then
+         git -C "$WORKTREE_ROOT" rebase --abort || true
+         audit ci_phase_outcome data.outcome=halted data.subreason=rebase_conflict_set_too_large
+         exit 1
+       fi
        # The set has to survive into step 3's staging fence, three fences and one
        # Workflow call later. NUL-delimited on disk, never a shell array.
        CONFLICT_PATHS_FILE="$REVIEW_FLEET_RUN_DIR/ci-conflict-paths-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.zlist"
@@ -4213,14 +4338,42 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
        ```bash uberdev-executable origin=review-pr
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+       . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
        uberdev_command_workspace_prepare || return 2
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
        REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
-       CI_LOOP_STATE="$REVIEW_FLEET_RUN_DIR/ci-loop-state.json"
-       if [ -r "$CI_LOOP_STATE" ]; then
-         CI_FIX_LOOP_ITER="$(review_fleet_read_ci_state "$CI_LOOP_STATE" ci_loop_iter)" || return 74
-         REVIEW_ITERATION="$(review_fleet_read_ci_state "$CI_LOOP_STATE" review_iteration)" || return 74
-       fi
+       review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+       # EVERY cross-fence scalar this fence needs, re-derived HERE.
+       #
+       # 6c.4 ROUTE, 6c.3w.2 and step 1 are all dead shells by now, and under
+       # `set -u` a nested `$(review_json_string "$CI_BASE_SHA")` kills only the
+       # INNER subshell: the parent stays rc=0 and the child's pinned input.json
+       # gets an EMPTY value with no error at all. `CONFLICT_RESOLVER_CAP` was
+       # worse — a bare unset expansion in the argument list, which under
+       # `set -u` kills the fence with a raw "unbound variable", no audit and no
+       # rebase cleanup. The branches, the base sha and the run identity all
+       # live as required members of the digest-pinned ci-fix rebase authority,
+       # so they are read back through `read-ci-authority-member` (never `jq` —
+       # jq would read the document without re-checking the digest) and the cap
+       # is re-resolved from config, which is idempotent by construction.
+       CONFLICT_RESOLVER_CAP="$(uberdev_read_int_in_range fanout_concurrency.conflict_resolver UBERDEV_FANOUT_CONFLICT_RESOLVER 1 50 10)" || CONFLICT_RESOLVER_CAP=10
+       CI_FIX_SIDECAR="$(review_fleet_read_ci_pointer "$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer.txt")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+       CI_FIX_BINDING="$(review_fleet_read_sidecar "$CI_FIX_SIDECAR" binding)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+       CI_REBASE_AUTHORITY_PATH="$(printf '%s' "$CI_FIX_BINDING" | jq -er .ci_authority_path)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+       CI_REBASE_AUTHORITY_SHA256="$(printf '%s' "$CI_FIX_BINDING" | jq -er .ci_authority_sha256)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_binding_unreadable; exit 1; }
+       for CI_AUTHORITY_MEMBER in pr_branch base_branch base_sha run_id head_sha; do
+         CI_AUTHORITY_VALUE="$(python3 -I -B "$CODE_FIXER_CONTRACT" read-ci-authority-member \
+           --authority-path "$CI_REBASE_AUTHORITY_PATH" --authority-sha256 "$CI_REBASE_AUTHORITY_SHA256" \
+           --member "$CI_AUTHORITY_MEMBER")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_authority_unreadable; exit 1; }
+         [ -n "$CI_AUTHORITY_VALUE" ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_authority_unreadable; exit 1; }
+         case "$CI_AUTHORITY_MEMBER" in
+           pr_branch)   CI_PR_HEAD_BRANCH="$CI_AUTHORITY_VALUE" ;;
+           base_branch) CI_BASE_BRANCH="$CI_AUTHORITY_VALUE" ;;
+           base_sha)    CI_BASE_SHA="$CI_AUTHORITY_VALUE" ;;
+           run_id)      CI_RUN_ID="$CI_AUTHORITY_VALUE" ;;
+           head_sha)    CI_CLASSIFICATION_HEAD_SHA="$CI_AUTHORITY_VALUE" ;;
+         esac
+       done
        CONFLICT_PATHS_FILE="$REVIEW_FLEET_RUN_DIR/ci-conflict-paths-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.zlist"
        conflicted_files=()
        while IFS= read -r -d '' CONFLICT_PATH; do
@@ -4242,6 +4395,10 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
        }
        CONFLICT_AUTHORITY_LEDGER="$REVIEW_FLEET_RUN_DIR/ci-conflict-authorities-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.tsv"
        ( umask 077 && : >"$CONFLICT_AUTHORITY_LEDGER" ) || return 74
+       # ONE spelling of the per-resolver authority pathname crosses into the
+       # script: this prefix, to which the script appends `<index>.json`. The
+       # loop below mints exactly `${CONFLICT_AUTHORITY_PREFIX}${CONFLICT_INDEX}.json`.
+       CONFLICT_AUTHORITY_PREFIX="$REVIEW_FLEET_RUN_DIR/ci-authority-resolve-conflict-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}-"
        CONFLICT_INDEX=0
        for CONFLICT_PATH in "${conflicted_files[@]}"; do
          CONFLICT_INDEX=$((CONFLICT_INDEX + 1))
@@ -4256,7 +4413,7 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
            base_sha "$(review_json_string "$CI_BASE_SHA")")" || return 74
          ( umask 077 && printf '%s\n' "$CONFLICT_INPUTS" >"$CONFLICT_CHILD_DIR/input.json" ) || return 74
          CONFLICT_INPUT_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$CONFLICT_CHILD_DIR/input.json" --minimum 1 --maximum 1048576)" || return 74
-         CONFLICT_AUTHORITY_PATH="$REVIEW_FLEET_RUN_DIR/ci-authority-resolve-conflict-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}-${CONFLICT_INDEX}.json"
+         CONFLICT_AUTHORITY_PATH="${CONFLICT_AUTHORITY_PREFIX}${CONFLICT_INDEX}.json"
          CONFLICT_AUTHORITY_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" prepare-ci-authority \
            --edge-id review_pr.ci.resolve_conflict \
            --pr-number "$PR_NUMBER" --run-id "$CI_RUN_ID" --head-sha "$CI_CLASSIFICATION_HEAD_SHA" \
@@ -4267,7 +4424,6 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
            --authority-output-path "$CONFLICT_AUTHORITY_PATH")" || return 74
          CONFLICT_AUTHORITY_SHA256="$(review_ci_authority_digest "$CONFLICT_AUTHORITY_RECEIPT" "$CONFLICT_AUTHORITY_PATH" review_pr.ci.resolve_conflict)" || return 74
          printf '%s\t%s\n' "$CONFLICT_AUTHORITY_PATH" "$CONFLICT_AUTHORITY_SHA256" >>"$CONFLICT_AUTHORITY_LEDGER" || return 74
-         CONFLICT_LAST_INPUT_SHA256="$CONFLICT_INPUT_SHA256"
        done
        CONFLICT_LAUNCHED="$REVIEW_FLEET_RUN_DIR/ci-conflicts-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launched"
        review_fleet_bind_ci_conflicts "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
@@ -4286,16 +4442,14 @@ print(value["authority_sha256"],end="")' "$1" "$2" "$3"
          repoSlug="$REVIEW_REPO_SLUG" \
          reviewIteration="$REVIEW_ITERATION" \
          ciLoopIter="${CI_FIX_LOOP_ITER:-1}" \
-         ciAuthorityPathAbs="$CONFLICT_AUTHORITY_PATH" \
-         ciAuthoritySha256="$CONFLICT_AUTHORITY_SHA256" \
-         ciInputSha256="$CONFLICT_LAST_INPUT_SHA256" \
+         ciConflictAuthorityPrefixAbs="$CONFLICT_AUTHORITY_PREFIX" \
          ciRunId="$CI_RUN_ID" \
          ciHeadSha="$CI_CLASSIFICATION_HEAD_SHA" \
          ciBaseSha="$CI_BASE_SHA" \
          ciPrBranch="$CI_PR_HEAD_BRANCH" \
          ciBaseBranch="$CI_BASE_BRANCH" \
          ciConflictCount="$REVIEW_FLEET_CONFLICT_COUNT" \
-         ciConflictCap="$CONFLICT_RESOLVER_CAP" \
+         ciConflictCap="$REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP" \
          ciConflictWave="$CONFLICT_RESOLVER_CAP" \
          maxAgents=40 \
          workspaceMode=caller \
@@ -4327,7 +4481,11 @@ member=value[sys.argv[2]]
 print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "$1" "$2"
        }
        review_ci_conflict_abort() {
-         if [ -d "$(git -C "$WORKTREE_ROOT" rev-parse --git-path rebase-merge)" ]; then
+         # review_fleet_rebase_dir, never a bare `-d "$(git … --git-path …)"`:
+         # that spelling resolves `.git/rebase-merge` against the FENCE's cwd,
+         # so from anywhere but the repo root this cleanup silently did nothing
+         # and left the worktree mid-rebase.
+         if review_fleet_rebase_dir "$WORKTREE_ROOT" >/dev/null; then
            git -C "$WORKTREE_ROOT" rebase --abort || true
          fi
          audit ci_phase_outcome data.outcome=halted data.subreason="$1"

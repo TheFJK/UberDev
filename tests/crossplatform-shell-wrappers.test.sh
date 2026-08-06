@@ -351,6 +351,98 @@ else
 fi
 
 echo
+echo "== zsh tied parameters: a \`local path=\` REPLACES the command search path =="
+
+# THE CLASS, and the #370/#371 shape: one contract, enforced in ONE copy.
+# lib/status.sh:78-84 documents this rule in full and tests/status.test.sh S1.17
+# enforces it — for lib/status.sh alone. Every other library was unguarded, and
+# lib/review-fleet-args.sh promptly shipped four `local path="$1"` writers whose
+# `jq` calls die `command not found` under zsh. That matters because the
+# harness executes command/skill `bash` fences through /bin/zsh on macOS, while
+# CI runs `bash tests/...` on ubuntu and windows only — so the whole suite is
+# blind to it by construction unless a row drives zsh on purpose.
+#
+# The tied/special names are zsh's, not a style preference: `path` IS `$PATH`,
+# `cdpath` IS `$CDPATH`, and `status`/`argv` are reserved.
+ZSH_TIED_NAMES='path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv'
+ZSH_TIED_HITS=""
+while IFS= read -r zsh_tied_file; do
+  # Comment-stripped: the surviving call sites NAME the broken shape in order to
+  # explain why `target` is load-bearing, and a guard that punished its own
+  # explanation would be unfixable (the S13.11d/S21.9 precedent).
+  zsh_tied_hit="$(grep -v '^[[:space:]]*#' "$zsh_tied_file" \
+    | grep -nE "^[[:space:]]*(local|typeset|declare)[[:space:]]+(.*[^_[:alnum:]])?($ZSH_TIED_NAMES)=" \
+    || true)"
+  [ -n "$zsh_tied_hit" ] || continue
+  ZSH_TIED_HITS="$ZSH_TIED_HITS${ZSH_TIED_HITS:+
+}$zsh_tied_file: $zsh_tied_hit"
+done <<EOF_ZSH_TIED
+$(find "$REPO_ROOT/plugins/uberdev/lib" -type f -name '*.sh' 2>/dev/null | sort)
+EOF_ZSH_TIED
+if [ -z "$ZSH_TIED_HITS" ]; then
+  echo "  PASS  no plugin library declares a local named after a zsh tied/special parameter"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a local shadows a zsh tied parameter — rename it (target/file/dir/root)"
+  printf '        %s\n' "$ZSH_TIED_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# Anti-vacuity: the detector must fire on the exact shape that shipped.
+if printf '%s\n' '  local path="$1" ci_iter="$2" payload' \
+   | grep -qE "^[[:space:]]*(local|typeset|declare)[[:space:]]+(.*[^_[:alnum:]])?($ZSH_TIED_NAMES)="; then
+  echo "  PASS  the detector reds on the exact shape that shipped"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector does not match the shape it exists to find (vacuous)"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and the MECHANISM, live, plus the shipped writers driven under zsh. A
+# structural grep alone would go green the day someone reintroduces the shape
+# with a name the regex missed.
+if ! command -v zsh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP  live zsh tied-parameter proof (zsh or jq not on PATH)"
+else
+  ZSH_TIED_PROBE="$(zsh -c 'f() { local path=/tmp/x.json; command -v jq >/dev/null 2>&1 && print -r -- found || print -r -- lost; }; f' 2>/dev/null)"
+  if [ "$ZSH_TIED_PROBE" = lost ]; then
+    echo "  PASS  live zsh: a \`local path=\` really does lose every external command"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh tied-parameter behaviour drifted: probe said '$ZSH_TIED_PROBE'"
+    FAIL=$((FAIL + 1))
+  fi
+  # The three review-fleet writers that ship on the Phase 3 push path. Driven
+  # under ZSH, not bash: every existing row for them uses an explicit `bash -c`,
+  # which is precisely why the class was invisible. review_fleet_write_ci_push
+  # is the sharpest — it runs IMMEDIATELY AFTER a successful force-push, so an
+  # rc=2 there lands the remote mutation and then aborts before the audit event.
+  ZSH_ARGS_LIB="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+  ZSH_ARGS_TMP="$(mktemp -d)"
+  ZSH_WRITER_RESULT="$(zsh -c '
+    set -u
+    . "$1" || exit 90
+    review_fleet_write_ci_state "$2/state.json" 2 1 "[]" "[]" || exit 91
+    review_fleet_write_ci_push "$2/push.json" "'"$(printf 'a%.0s' $(seq 40))"'" ci-rebase-handler || exit 92
+    review_fleet_write_sidecar "$2/sidecar.json" bind "$2" inst || exit 93
+    review_fleet_write_conflict_paths "$2/paths.zlist" "src/a b.py" || exit 94
+    review_fleet_write_ci_pointer "$2/ptr.txt" "$2/sidecar.json" || exit 95
+    [ -s "$2/state.json" ] && [ -s "$2/push.json" ] && [ -s "$2/sidecar.json" ] \
+      && [ -s "$2/paths.zlist" ] && [ -s "$2/ptr.txt" ] || exit 96
+    print -r -- "$(review_fleet_read_ci_pointer "$2/ptr.txt")"
+  ' _ "$ZSH_ARGS_LIB" "$ZSH_ARGS_TMP" 2>&1)"
+  ZSH_WRITER_RC=$?
+  if [ "$ZSH_WRITER_RC" = 0 ] && [ "$ZSH_WRITER_RESULT" = "$ZSH_ARGS_TMP/sidecar.json" ]; then
+    echo "  PASS  every review-fleet cross-fence writer runs under zsh and lands its file"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  a review-fleet writer failed under zsh (rc=$ZSH_WRITER_RC): $ZSH_WRITER_RESULT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$ZSH_ARGS_TMP"
+fi
+
+echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \

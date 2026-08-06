@@ -128,16 +128,21 @@ _uberdev_semaphore_python() {
 # native Windows consumer. Keep all other pane argv in POSIX spelling: the
 # spawned Git Bash owns those arguments and understands them directly.
 _uberdev_dispatch_native_cli_path() {
-  local path="$1"
+  # `target`, NEVER `path`: zsh TIES the lowercase `path` array to $PATH, so a
+  # `local path=` replaces the command search path for this whole call frame
+  # and both `command -v cygpath` and `cygpath` become not-found. Same rule as
+  # lib/status.sh:78-84, now enforced across every plugin library by
+  # tests/crossplatform-shell-wrappers.test.sh instead of for status.sh alone.
+  local target="$1"
   case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
     MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
       if ! command -v cygpath >/dev/null 2>&1; then
         echo 'error: cygpath is required to normalize a native-Windows dispatch path' >&2
         return 127
       fi
-      cygpath -m "$path"
+      cygpath -m "$target"
       ;;
-    *) printf '%s' "$path" ;;
+    *) printf '%s' "$target" ;;
   esac
 }
 

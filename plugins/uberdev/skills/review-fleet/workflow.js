@@ -295,8 +295,25 @@ const ciBaseBranch = String(CFG.ciBaseBranch || "");
 // bytes the controller enumerated from `git status --porcelain` UU entries in
 // its own checkout, and each child reads its own at a script-derived path.
 const ciConflictCount = clampInt(CFG.ciConflictCount, 0, 50, 0);
-const ciConflictCap = clampInt(CFG.ciConflictCap, 1, 50, 10);
+// TWO different numbers, and conflating them cost every resolver on an
+// 11-conflict PR. `ciConflictCap` is the TOTAL ceiling on the fanout — its 50
+// matches ciConflictCount's clamp and lib/review-fleet-args.sh's
+// REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP. `ciConflictWave` is the CONCURRENCY knob
+// (`fanout_concurrency.conflict_resolver`, default 10), which dispatchRoster
+// below already uses to batch a larger roster into sequential waves. When the
+// wave size was forwarded as the cap, `11 > 10` aborted `bad_ci_conflict_count`
+// with zero resolvers dispatched — refusing the exact case the batching exists
+// to serve.
+const ciConflictCap = clampInt(CFG.ciConflictCap, 1, 50, 50);
 const ciConflictWave = clampInt(CFG.ciConflictWave, 1, 50, 10);
+// The controller mints one authority per resolver at
+// `<prefix><index>.json`; only the index differs, so ONE string crosses the
+// boundary and the per-child pathname is derived the same way childInputPath()
+// derives the per-child input. A single shared ciAuthorityPathAbs used to be
+// forwarded here and rendered into EVERY resolver's prompt, which named
+// resolver N's authority — the one pinning file N in `target_paths` — to
+// resolvers 1..N-1, under the header "Treat every value as exact".
+const ciConflictAuthorityPrefixAbs = String(CFG.ciConflictAuthorityPrefixAbs || "");
 const ciAggregatePathAbs = String(CFG.ciAggregatePathAbs || "");
 const ciAggregateSha256 = String(CFG.ciAggregateSha256 || "");
 
@@ -1000,12 +1017,39 @@ function ciRebasePrompt(nonce) {
   return lines.join("\n");
 }
 
+// The conflict fanout is the ONE stage with an authority PER CHILD, so it
+// cannot use the shared ciAuthorityContract(): that builder renders a single
+// scalar pair, and rendering it here told resolvers 1..N-1 that their
+// controller-blessed scope was the authority pinning resolver N's file. The
+// prompt then carried two contradictory scopes — the (correct) per-child
+// input.json and the (wrong) authority — with the authority under the more
+// emphatic header. Each resolver now sees its OWN authority pathname, derived
+// from the one prefix the controller emits.
+function ciConflictAuthorityContract(entry) {
+  return [
+    "",
+    "Immutable controller authority — computed before you were dispatched. Treat every",
+    "value as exact and never recompute, repair or substitute one:",
+    "  ci_authority_path   = " + ciConflictAuthorityPrefixAbs + entry.index + ".json",
+    "  working_dir         = " + workingDirAbs,
+    "  pr_number           = " + prNumber,
+    "  run_id              = " + ciRunId,
+    "  head_sha            = " + ciHeadSha,
+    "  ci_loop_iteration   = " + ciLoopIter,
+    "",
+    "That authority is YOURS ALONE — one was minted per conflicted file, and its",
+    "`target_paths` names the single path you may touch. The controller re-checks its",
+    "sha256 itself when it judges you, so no digest is quoted to you here: a digest a",
+    "child could read is a digest a child could be steered by.",
+  ].join("\n");
+}
+
 function conflictPrompt(entry, nonce) {
   const lines = [];
   lines.push("Read the agent instructions at " + pluginRootAbs
     + "/agents/conflict-resolver.md and follow them exactly. You are resolver "
     + entry.index + " of " + ciConflictCount + " on edge `" + entry.edge + "`.");
-  lines.push(ciAuthorityContract());
+  lines.push(ciConflictAuthorityContract(entry));
   lines.push("  base_sha            = " + ciBaseSha);
   lines.push("  pr_branch           = " + ciPrBranch);
   lines.push("  integration_branch  = " + ciBaseBranch);
@@ -1608,8 +1652,9 @@ async function main() {
       if (mode !== "review-pr") {
         return abort("stage_not_available_in_mode", "Phase 3 is /review-pr only");
       }
-      if (!isSafeAbsPath(ciAuthorityPathAbs)) return abort("bad_ci_authority_path", ciAuthorityPathAbs);
-      if (!isSha256(ciAuthoritySha256)) return abort("bad_ci_authority_sha256", "");
+      if (!isSafeAbsPath(ciConflictAuthorityPrefixAbs)) {
+        return abort("bad_ci_authority_path", ciConflictAuthorityPrefixAbs);
+      }
       if (!isSafeAbsPath(workingDirAbs)) return abort("bad_working_dir", workingDirAbs);
       if (!isSafeBindingScalar(ciPrBranch) || !isSafeBindingScalar(ciBaseBranch)) {
         return abort("bad_ci_branch_scalar", ciPrBranch + "|" + ciBaseBranch);
@@ -1617,7 +1662,6 @@ async function main() {
       if (ciConflictCount < 1 || ciConflictCount > ciConflictCap) {
         return abort("bad_ci_conflict_count", String(ciConflictCount));
       }
-      if (!isSha256(ciInputSha256)) return abort("bad_ci_input_sha256", "");
       // The roster is DYNAMIC: one child per conflicted path. The paths never
       // enter this script — they are bulk untrusted bytes, so each child's
       // input travels the diffPathAbs way, BY PATH, at a script-derived

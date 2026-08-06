@@ -386,6 +386,19 @@ review_fleet_bind_ci_conflicts() {
   [ "$index" -gt 0 ] || return 2
 }
 
+# The TOTAL number of conflicted files the Phase 3 CONFLICT arm will resolve in
+# one wave-batched fanout. NOT `fanout_concurrency.conflict_resolver`: that key
+# is a CONCURRENCY knob whose documented behaviour is "split into ceil(N / cap)
+# sequential waves" (using-uberdev/references/configuration.md), and forwarding
+# it as the total made an 11-conflict PR abort `bad_ci_conflict_count` with zero
+# resolvers dispatched — while the wave batching two lines later existed
+# precisely to chunk that many. This is the ceiling; the knob is the wave size.
+#
+# 50 mirrors the `ciConflictCount` clamp in skills/review-fleet/workflow.js, so
+# a set this fence accepts is a set the script accepts. Asserted equal by
+# tests/review-pr-phase3-ci.test.sh.
+REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP=50
+
 # review_fleet_write_ci_state PATH CI_ITER REVIEW_ITER FIX_PUSHES_JSON CLASSES_JSON
 #
 # Phase 3's loop counters CANNOT live in shell variables: every bash block in
@@ -397,7 +410,12 @@ review_fleet_bind_ci_conflicts() {
 # accumulator instead of an improvised one.
 review_fleet_write_ci_state() {
   [ "$#" -eq 5 ] || return 2
-  local path="$1" ci_iter="$2" review_iter="$3" fix_pushes="$4" classes="$5" payload
+  # `target`, NEVER `path`: zsh TIES the lowercase `path` array to $PATH, so a
+  # `local path=` here replaces the command search path for the whole call
+  # frame and the `jq` two lines down is command-not-found. Same rule, same
+  # reason as lib/status.sh:78-84; asserted repo-wide by
+  # tests/crossplatform-shell-wrappers.test.sh.
+  local target="$1" ci_iter="$2" review_iter="$3" fix_pushes="$4" classes="$5" payload
   case "$ci_iter$review_iter" in '' | *[!0-9]*) return 2 ;; esac
   payload="$(jq -cn \
     --argjson ci_loop_iter "$ci_iter" \
@@ -405,7 +423,32 @@ review_fleet_write_ci_state() {
     --argjson fix_pushes "${fix_pushes:-[]}" \
     --argjson failure_classes_seen "${classes:-[]}" \
     '{ci_loop_iter:$ci_loop_iter,review_iteration:$review_iteration,fix_pushes:$fix_pushes,failure_classes_seen:$failure_classes_seen}')" || return 2
-  ( umask 077 && printf '%s\n' "$payload" >"$path" ) || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+# review_fleet_load_ci_counters RUN_DIR
+#
+# The counter pair, read back in whichever fence needs it. It exists because
+# "read them off disk" was implemented in five fences and NOT implemented in
+# six others, and the six that skipped it recomputed iteration 1's artifact
+# pathnames on iteration 2 -- `prepare-ci-authority` publishes no-clobber, so
+# the second CI iteration died on `authority_preexists` with `return 74` and no
+# audit event, and CI_FIX_LOOP_CAP=3 was unreachable in practice. Two sources of
+# truth for one counter is the defect; this is the one source.
+#
+# Absent state file = the first fence of the first iteration, which is the only
+# time the fresh-shell default is the right answer.
+review_fleet_load_ci_counters() {
+  [ "$#" -eq 1 ] || return 2
+  local state="$1/ci-loop-state.json"
+  if [ -r "$state" ]; then
+    CI_FIX_LOOP_ITER="$(review_fleet_read_ci_state "$state" ci_loop_iter)" || return 2
+    REVIEW_ITERATION="$(review_fleet_read_ci_state "$state" review_iteration)" || return 2
+  else
+    CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
+    REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
+  fi
+  case "$CI_FIX_LOOP_ITER$REVIEW_ITERATION" in '' | *[!0-9]*) return 2 ;; esac
 }
 
 # review_fleet_read_ci_state PATH FIELD -> one recorded counter, in a new shell.
@@ -426,7 +469,11 @@ review_fleet_read_ci_state() {
 # worse than no entry at all because it reads as a push that happened.
 review_fleet_write_ci_push() {
   [ "$#" -eq 3 ] || return 2
-  local path="$1" sha="$2" by_agent="$3" payload
+  # `target`, never `path` -- see review_fleet_write_ci_state. This one is the
+  # sharpest instance: it is called IMMEDIATELY AFTER a successful
+  # `git push --force-with-lease`, so a zsh-only rc=2 here lands the remote
+  # mutation and then hard-fails the fence before `audit ci_fix_pushed`.
+  local target="$1" sha="$2" by_agent="$3" payload
   case "$sha" in
     *[!0-9a-f]*) return 2 ;;
     *) [ "${#sha}" -eq 40 ] || return 2 ;;
@@ -434,7 +481,7 @@ review_fleet_write_ci_push() {
   [ -n "$by_agent" ] || return 2
   payload="$(jq -cn --arg sha "$sha" --arg by_agent "$by_agent" \
     '{sha:$sha,by_agent:$by_agent}')" || return 2
-  ( umask 077 && printf '%s\n' "$payload" >"$path" ) || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
 }
 
 # review_fleet_read_ci_push PATH FIELD -> one recorded push field, in a new shell.
@@ -458,14 +505,14 @@ review_fleet_read_ci_push() {
 # newline; the reader is the same `read -r -d ''` loop the enumerator uses.
 review_fleet_write_conflict_paths() {
   [ "$#" -ge 1 ] || return 2
-  local path="$1"
+  local target="$1"        # NEVER `path` -- see review_fleet_write_ci_state
   shift
   [ "$#" -ge 1 ] || return 2
-  ( umask 077 && : >"$path" ) || return 2
+  ( umask 077 && : >"$target" ) || return 2
   local entry
   for entry in "$@"; do
     [ -n "$entry" ] || return 2
-    printf '%s\0' "$entry" >>"$path" || return 2
+    printf '%s\0' "$entry" >>"$target" || return 2
   done
 }
 
@@ -478,12 +525,13 @@ review_fleet_write_conflict_paths() {
 # because the nonce the child echoes was fixed by the envelope that was already
 # emitted.
 review_fleet_write_sidecar() {
-  local path="$1" binding="$2" child_dir="$3" instance="$4" head_before="${5:-}"
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" binding="$2" child_dir="$3" instance="$4" head_before="${5:-}"
   local payload
   payload="$(jq -cn --arg binding "$binding" --arg child_dir "$child_dir" \
     --arg instance "$instance" --arg head_before "$head_before" \
     '{binding:$binding,child_dir:$child_dir,instance:$instance,head_before:$head_before}')" || return 2
-  ( umask 077 && printf '%s\n' "$payload" >"$path" ) || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
 }
 
 # review_fleet_read_sidecar PATH FIELD -> one recorded field, after the call.
@@ -493,4 +541,91 @@ review_fleet_read_sidecar() {
     return 2
   }
   jq -er --arg field "$2" '.[$field]' <"$1"
+}
+
+# review_fleet_write_ci_pointer POINTER TARGET / review_fleet_read_ci_pointer
+#
+# THE MINT<->PUSH NAMING AGREEMENT, made explicit instead of recomputed.
+#
+# The ci-fix launch sidecar is named `...-iter<R>-ci<C>.launch.json`, and the
+# fence that WRITES it (6c.4w.1) and the fence that READS it (6c.4w.3, the
+# single leased push) are different shells that disagreed about C. The
+# CONFLICT-RESOLVE arm's restage deliberately advances CI_FIX_LOOP_ITER and
+# persists it -- the restage IS a loop iteration -- so after any multi-stage
+# rebase the push fence recomputed `...-ci2.launch.json` while only
+# `...-ci1.launch.json` had ever been written. `review_fleet_read_sidecar`
+# failed, `review_ci_push_abort ci_fixer_binding_unreadable` ran
+# `git rebase --abort`, and every resolved conflict was destroyed with nothing
+# pushed. Recomputing a filename from a counter whose value legitimately moves
+# between the two fences cannot be made correct; the writer therefore publishes
+# WHERE it wrote, at a fixed name, and every reader follows the pointer.
+review_fleet_write_ci_pointer() {
+  [ "$#" -eq 2 ] || return 2
+  local pointer="$1" target="$2"
+  [ -n "$pointer" ] && [ -n "$target" ] || return 2
+  # A newline in the recorded path would make the single-line reader below
+  # return a truncated pathname, which is the failure this file exists to stop.
+  # A LITERAL newline in the pattern, never `*"$(printf '\n')"*`: command
+  # substitution strips trailing newlines, so that spelling degrades to `*""*`
+  # and matches every path.
+  case "$target" in
+    *'
+'*) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$target" >"$pointer" ) || return 2
+}
+
+review_fleet_read_ci_pointer() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI launch pointer missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  [ -n "$recorded" ] || return 2
+  [ -r "$recorded" ] || {
+    echo "error: review-fleet CI launch pointer names an unreadable sidecar: $recorded" >&2
+    return 2
+  }
+  printf '%s' "$recorded"
+}
+
+# review_fleet_rebase_dir WORKTREE -> the live rebase state dir, or "" if none.
+#
+# `git -C <dir> rev-parse --git-path rebase-merge` prints `.git/rebase-merge` --
+# a path RELATIVE TO <dir>, not to the caller. `[ -d "$(git -C "$W" rev-parse
+# --git-path rebase-merge)" ]` therefore asked the question of whatever
+# directory the harness shell happened to be in: from a plain subdirectory of
+# the SAME repository it answers "no rebase" mid-rebase. That silently bypassed
+# the `rebase_still_in_progress` refusal guarding the force-push and made three
+# `git rebase --abort` cleanups no-ops. The Python twin
+# (code_fixer_contract.py::_ci_rebase_dir) has always joined the relative result
+# with working_dir; this is the shell side of the same ONE definition.
+#
+# BOTH backends, in the same order as the Python twin's CI_REBASE_STATE_DIRS:
+# `git rebase` has defaulted to the merge backend since 2.26, but
+# `rebase.backend=apply` and an explicit `git rebase --apply` use `rebase-apply`
+# instead, and a probe that knows only one of them answers "no rebase" for the
+# other.
+#
+# Exit codes are THREE-valued on purpose: 0 = a rebase is live (path printed),
+# 1 = no rebase (probe succeeded), 2 = the probe itself failed. A two-valued
+# probe maps "git could not answer" onto "no rebase", which is the direction
+# that force-pushes an interior mid-rebase HEAD.
+review_fleet_rebase_dir() {
+  [ "$#" -eq 1 ] || return 2
+  local worktree="$1" relative absolute component
+  for component in rebase-merge rebase-apply; do
+    relative="$(git -C "$worktree" rev-parse --git-path "$component" 2>/dev/null)" || return 2
+    [ -n "$relative" ] || return 2
+    case "$relative" in
+      /* | [A-Za-z]:/* | [A-Za-z]:\\*) absolute="$relative" ;;
+      *) absolute="$worktree/$relative" ;;
+    esac
+    if [ -d "$absolute" ]; then
+      printf '%s' "$absolute"
+      return 0
+    fi
+  done
+  return 1
 }
