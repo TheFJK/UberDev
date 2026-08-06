@@ -56,6 +56,38 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Removed
 
+- **BREAKING — the `claude-bg` dispatch backend is deleted** (#381, RFC 0015 §7
+  amendment 2026-08-05). `--backend=claude-bg` is no longer a deprecation
+  warning: it is an **enum error** (`lib/solve-launcher.sh`,
+  `error: --backend='claude-bg' not in {auto,workflow,wezterm,background}`).
+  `_uberdev_dispatch_claude_bg` is gone, and with it five surfaces that each had
+  exactly one consumer: the `claude-bootstrap` long-poll + ownerless-generation
+  reclaim protocol in `lib/dispatch.sh`'s git-metadata mutex; `BG_PROMPT_MODE`;
+  the `_uberdev_agent_claude_probe` liveness classifier; the
+  unattended-permissions preflight; and the `provider_probe_failed` /
+  `provider_cancel_failed` watcher-error kinds. (`provider_cancel_unconfirmed`,
+  the *reason* the retired kind used to carry, is still live — it is now hosted
+  under `terminal_finalize_failed`, and `tests/child-wait.test.sh` drives the
+  waiter on it in that shape.) `tests/dispatch-claude-bg.test.sh` is deleted rather than
+  retargeted, and the S4a/S4b/S4c deprecation guards in
+  `tests/solve-fleet-workflow.test.sh` are **inverted into tombstones** — the
+  surface must now be ABSENT. No check that still guards live code was relaxed.
+
+  **Migration: `--backend=background`.** Same shape — detached, survives the
+  parent, PID-tracked, status + result files — without the second agent surface
+  that motivated RFC 0015. It is what the No-Workflow fallback sections name.
+
+  **This lands ahead of the published removal target.** The v0.41.0 entry below
+  (2026-07-30) said "Removal target v1.0.0"; that promise is **retracted**, and
+  the entry now carries a pointer here. The evidence that moved it: `workflow`
+  shipped and stayed shipped across `/solve`, `/turbo`, `/goal`, and then
+  `/review-pr` and `/simplify` — the last two workflows that structurally
+  required a detached transport. With those resolving `workflow`, `auto` had
+  already been forbidden from reaching `claude-bg`, so it was the transport that
+  nothing selected and nothing required. Deleting it five days early is a
+  breaking change taken deliberately, on that evidence, and it is the reason
+  this release is called out here rather than only in the RFC.
+
 - **BREAKING — adaptive per-rank model routing is retired as unenforceable**
   (#381, RFC 0013 §0 amendment 2026-08-05). With the `codex` backend gone,
   UberDev no longer owns any provider invocation: `workflow`, `wezterm` and
@@ -143,6 +175,17 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `ci-wiring` W7 invariant now requires that teardown on Linux and macOS only.
   The teardown *code* remains portable; the *fixture* is not.
 
+  **Coverage restored rather than lost:** that same deletion also removed the
+  only direct coverage of `lib/atomic_move.py`, which is **not** codex-scoped —
+  it still ships, is still required by `tools/prkit/manifest.txt`, and is loaded
+  by `lib/code_fixer_contract.py` and `lib/planning_research_output.py` for every
+  artifact publication. The ~80 atomic-move-only lines are ported into a new
+  `tests/atomic-move.test.sh` (11 assertions, wired into the Linux, Windows and
+  macOS jobs), covering no-overwrite semantics and non-mutation on collision,
+  `_native_call` errno normalization, cross-parent refusal,
+  `require_atomic_rename_noreplace_support()` failing closed, and the
+  `_windows_move_noreplace` / `_mapped_windows_error` family.
+
 - **BREAKING — the Codex CLI distribution is retired** (#381). The entire `codex/`
   tree (225 files: the `uberdev-codex` native plugin, the 44 `codex/agents/*.toml`
   subagents, `install-codex.sh`, and `codex/tools/`) is deleted, along with
@@ -155,14 +198,41 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   (This entry originally added "the `codex` DISPATCH BACKEND is unaffected". It
   no longer is — the next entry deletes it.)
 
-  **Uninstalling an existing Codex install.** These are the three artifacts the
-  installer wrote; remove them by hand:
+  **Uninstalling an existing Codex install.** The deleted installer shipped a
+  tested `--uninstall` mode that handles all of this correctly — the
+  marker-gated skill walk, both primer files, and failure reporting. Prefer it:
 
   ```bash
-  rm -rf ~/.codex/plugins/uberdev-codex
-  rm -f ~/.codex/agents/uberdev-*.toml
-  # then edit ~/.codex/AGENTS.md and delete the uberdev-codex-primer block
+  git show 24fe6b1^:codex/install-codex.sh > /tmp/install-codex.sh
+  bash /tmp/install-codex.sh --uninstall
   ```
+
+  (`24fe6b1` is the deletion commit — `git log --diff-filter=D -1 --
+  codex/install-codex.sh` finds it in any clone — and `^` is the last tree that
+  still had the file.)
+
+  By hand, these are the **four** artifact families the installer wrote — the
+  earlier edition of this entry said three and omitted the first, which is the
+  part Codex actually loads:
+
+  ```bash
+  # 1. the managed skills, MARKER-GATED -- other tools install into this
+  #    directory, so never `rm -rf ~/.agents/skills/*`
+  for d in ~/.agents/skills/*/; do
+    [ -f "$d/.uberdev-codex-managed" ] && rm -rf "$d"
+  done
+  # 2. the subagent definitions
+  rm -f ~/.codex/agents/uberdev-*.toml
+  # 3. the plugin tree
+  rm -rf ~/.codex/plugins/uberdev-codex
+  # 4. the primer block, in BOTH files -- the installer writes whichever exists
+  #    and a user may create or remove the override between install and uninstall
+  # then edit ~/.codex/AGENTS.md and ~/.codex/AGENTS.override.md and delete the
+  # uberdev-codex-primer block from each
+  ```
+
+  Removing the runtime while leaving the ~39 managed skills live in the session
+  is the worst half-state available, which is why the skill walk is step 1.
 
   Also run `codex plugin marketplace remove prkit` / `uberdev` if you added the
   Codex-native marketplace entry.
@@ -471,7 +541,9 @@ _Solved end-to-end by the Workflow-native `/ubergoal` fleet (RFC 0015): claim �
 
 ### Deprecated
 
-- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. Removal target v1.0.0. `wezterm`, `background` and `codex` remain fully supported explicit choices, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+- `--backend=claude-bg`. The transport still works, still passes its full suite, and now prints a one-line deprecation notice when selected; `auto` never picks it. ~~Removal target v1.0.0.~~ ~~`wezterm`, `background` and `codex` remain fully supported explicit choices~~, and every migrated surface documents a No-Workflow fallback for runtimes without the `Workflow` tool.
+
+  > **RETRACTED (#381, Unreleased).** `claude-bg` was deleted ahead of the v1.0.0 target — see the `claude-bg` entry under `## Unreleased` `### Removed`. `codex` was deleted in the same issue and is likewise no longer a supported choice; `wezterm` and `background` are.
 
 ### Tests
 

@@ -72,9 +72,9 @@ session — and the §5 landing settles what that means for `/goal`. `/goal`'s
 `/goal` genuinely needs to outlive a session is its **state**, not its
 processes, and that was always on disk in `lib/goal-state.sh`. So the constraint
 now binds one narrow thing: an operator who deliberately wants fire-and-forget
-must name a detached backend explicitly (`--backend=claude-bg`, until its v1.0.0
-removal). Nothing reaches a detached transport by default any more, on any
-command.
+must name a detached backend explicitly (~~`--backend=claude-bg`, until its v1.0.0
+removal~~ — **#381 deleted that backend; read `--backend=background`, §7**).
+Nothing reaches a detached transport by default any more, on any command.
 
 ---
 
@@ -407,8 +407,9 @@ Every loss below is **printed, never silent** — in this section, in
   fixed-path `goal-active-id.txt` pointer and carries on, and
   `plugins/uberdev/lib/goal-abort.sh` is the other half — it releases the
   `uberdev:active` claims and reaps. The detached backends remain available for
-  the deliberate fire-and-forget case, and `--backend=claude-bg` is exactly that
-  escape hatch until v1.0.0.
+  the deliberate fire-and-forget case, and ~~`--backend=claude-bg`~~ was exactly
+  that escape hatch until v1.0.0 — **#381 deleted it; `--backend=background` is
+  the surviving one, see §7**.
 - **R-1b — per-child model, effort and permission tier are inexpressible.**
   The detached backends passed `--model`, `--effort` and the
   `--dangerously-skip-permissions --permission-mode bypassPermissions` pair as
@@ -418,7 +419,8 @@ Every loss below is **printed, never silent** — in this section, in
   no longer scoped to the children — it is whatever the session already has;
   and a session running below `max` effort produces lower-effort solvers than
   the same command would have on a detached backend. Users who need the pinned
-  tier should use `--backend=claude-bg` or raise the session's own settings.
+  tier should use `--backend=claude-bg` (**deleted in #381 — read
+  `--backend=background`, see §7**) or raise the session's own settings.
   `/goal` inherits this as of §5, and it costs it more than it costs `/solve`:
   `lib/goal-phase0.sh` still exports `SKIP_PERMISSIONS=1`, but that now only
   reaches the children `lib/goal-watch.sh` still dispatches through
@@ -445,7 +447,8 @@ Every loss below is **printed, never silent** — in this section, in
   not identical translation of `/uberdev:orchestrator` (no SDD wave
   decomposition, one bounded review round instead of the always-on
   writer/reviewer pairs). RFC 0012 Phase 6 remains the path to full parity;
-  until then `--backend=claude-bg` reaches the original pipeline.
+  until then `--backend=claude-bg` reaches the original pipeline (**#381 deleted
+  that backend; `--backend=background` reaches it now, see §7**).
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not
@@ -460,8 +463,15 @@ Every loss below is **printed, never silent** — in this section, in
   uberdev:active` is the manual recovery.
 - **R-4 — no Workflow tool.** Codex, Gemini, Copilot and pre-Workflow Claude
   Code have no `Workflow` tool. Every surface carries a **No-Workflow
-  fallback** naming the explicit backend to re-run with, and `auto` still
-  resolves to `codex` inside a Codex session.
+  fallback** naming the explicit backend to re-run with, and ~~`auto` still
+  resolves to `codex` inside a Codex session~~.
+
+  > **AMENDED 2026-08-05 (issue #381).** `auto` no longer resolves `codex`
+  > anywhere — the backend and both of its `auto` escapes are deleted
+  > (`lib/dispatch.sh:509`, `:682-685`). The mitigation is unchanged in
+  > substance but narrower in fact: the No-Workflow fallback names
+  > `--backend=background`, which is the only detached transport a Codex
+  > session (or any other runtime without the tool) can now select.
 
 ---
 
@@ -518,10 +528,13 @@ The contract is therefore enforced three ways:
 >
 > Two things the original rejection weighed are answered rather than waived:
 >
-> - *"no fallback if the new transport disappoints"* — `background` and `codex`
->   remain. `background` is the same shape (detached, survives the parent,
->   PID-tracked, status + result files) without the second agent surface that
->   motivated this RFC, and it is the fallback the No-Workflow sections now name.
+> - *"no fallback if the new transport disappoints"* — `background` remains.
+>   (`codex` was named here when this note was written and was deleted two
+>   commits later in the same issue; only `background` survives, which
+>   strengthens rather than weakens the argument — the fallback that was kept is
+>   the one every No-Workflow section actually names.) `background` is the same
+>   shape (detached, survives the parent, PID-tracked, status + result files)
+>   without the second agent surface that motivated this RFC.
 > - *"~170 lines of mature, heavily-tested transport"* — the tests went with the
 >   code. `tests/dispatch-claude-bg.test.sh` is deleted rather than retargeted,
 >   and the S4a/S4b/S4c deprecation guards in

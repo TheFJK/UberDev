@@ -58,7 +58,7 @@ Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOU
 
 ## GPT-5.6 model routing (RFC 0013, v0.40)
 
-> **NOT ENFORCEABLE since v0.42.9 (issue #381) — read this first.**
+> **NOT ENFORCEABLE since #381 — read this first.**
 > Every setting in this section is still parsed and still validated exactly as
 > described below, but **no shipped dispatch backend can act on it.** UberDev no
 > longer owns the provider invocation: `workflow`, `wezterm` and `background`

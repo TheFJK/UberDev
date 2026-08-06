@@ -877,6 +877,11 @@ uberdev_dispatch_preflight_backend() {
       ;;
   esac
   if [ "$workflow" = review-pr ] || [ "$workflow" = simplify ]; then
+    # Also exhaustive over the resolved set, and its `*)`-less shape is the
+    # reason it must be compared: a fifth backend with no arm here is silently
+    # ADMITTED for /review-pr and /simplify, which is the #360 shape inverted.
+    # `-auto` for the same reason as the switch below.
+    # CONTRACT: dispatch-backend -auto !case-arm
     case "$backend" in
       # `workflow` admitted per #381. The bar these two workflows set is an
       # atomic result artifact plus caller-workspace repair, and the
@@ -914,6 +919,12 @@ uberdev_dispatch_preflight_backend() {
         ;;
     esac
   fi
+  # The exhaustive resolved-backend dispatch: every member gets an arm and the
+  # `*)` arm is a refusal, so adding a fifth backend and forgetting THIS switch
+  # is exactly the #360 shape. `-auto` because `auto` is a REQUEST that
+  # `uberdev_dispatch_preflight` has already resolved before anything reaches
+  # here — the same delta `lib/goal-state.sh` declares for the same reason.
+  # CONTRACT: dispatch-backend -auto !case-arm
   case "$backend" in
     workflow)
       # No provider binary, no permission tier to probe (the Workflow runtime

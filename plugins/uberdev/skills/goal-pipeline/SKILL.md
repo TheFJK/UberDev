@@ -162,7 +162,7 @@ done
 "$GBASH" "$CLAUDE_PLUGIN_ROOT/lib/goal-phase3.sh"
 ```
 
-`--backend=background` in that sequence is the deliberate escape hatch: it is a detached transport with a PID, a status file and a result file, so a harness with no `Workflow` tool can still supervise the run. `auto` never selects it. Inside a Codex session use `--backend=codex` instead.
+`--backend=background` in that sequence is the deliberate escape hatch: it is a detached transport with a PID, a status file and a result file, so a harness with no `Workflow` tool can still supervise the run. `auto` never selects it. It is also the only such transport: `--backend=codex` is an enum error since #381 deleted that backend (`lib/dispatch.sh:509`), so a Codex session takes this same line.
 
 ## Scoped relaxations
 

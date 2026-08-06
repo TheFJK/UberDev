@@ -1642,7 +1642,7 @@ for invalid_handleless_terminal_case in "${invalid_handleless_terminal_cases[@]}
   invalid_handleless_terminal_payload="${invalid_handleless_terminal_case#*|}"
   printf '%s\n' "$invalid_handleless_terminal_payload" > "$HANDLELESS_TERMINAL_STATUS"
   capture python3 "$MANIFEST" probe-terminal \
-    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex
+    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend wezterm
   if [ "$CAPTURE_RC" -ne 0 ] || [ "$CAPTURE_OUT" != unknown ]; then
     invalid_handleless_terminal_accepted="${invalid_handleless_terminal_accepted}${invalid_handleless_terminal_name}:${CAPTURE_RC}/${CAPTURE_OUT} "
   fi
@@ -1655,17 +1655,17 @@ fi
 
 valid_handleless_terminal_results=""
 for valid_handleless_terminal_case in \
-  '{"backend":"codex","state":"completed","exit_code":0}' \
-  '{"backend":"codex","state":"completed","exit_code":0,"pid":"41"}' \
-  '{"backend":"codex","state":"completed","exit_code":0,"backend_handle":"provider-job-41"}'; do
+  '{"backend":"wezterm","state":"completed","exit_code":0}' \
+  '{"backend":"wezterm","state":"completed","exit_code":0,"pid":"41"}' \
+  '{"backend":"wezterm","state":"completed","exit_code":0,"backend_handle":"provider-job-41"}'; do
   printf '%s\n' "$valid_handleless_terminal_case" > "$HANDLELESS_TERMINAL_STATUS"
   capture python3 "$MANIFEST" probe-terminal \
-    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex
+    --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend wezterm
   valid_handleless_terminal_results="${valid_handleless_terminal_results}${CAPTURE_RC}/${CAPTURE_OUT} "
 done
-printf '%s\n' '{"backend":"codex","state":"completed","exit_code":0,"pid":"42"}' > "$HANDLELESS_TERMINAL_STATUS"
+printf '%s\n' '{"backend":"wezterm","state":"completed","exit_code":0,"pid":"42"}' > "$HANDLELESS_TERMINAL_STATUS"
 capture python3 "$MANIFEST" probe-terminal \
-  --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend codex \
+  --status-path "$HANDLELESS_TERMINAL_STATUS" --expected-backend wezterm \
   --expected-handle 41
 if [ "$valid_handleless_terminal_results" = '0/completed 0/completed 0/completed ' ] \
    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = unknown ]; then

@@ -899,6 +899,13 @@ uberdev_emit_workflow_args() {
   local run_id plugin_root repo_root cwd
   run_id="$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x%04x' "$$" "$RANDOM")"
   plugin_root="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+  # LEGACY-INSTALL ARM ONLY (#381). ${CODEX_HOME}/plugins/uberdev-codex is a
+  # path nothing in this release can produce -- the Codex distribution that
+  # wrote it is deleted, and the CHANGELOG's uninstall recipe tells existing
+  # users to remove that directory. It is kept, not deleted, because a machine
+  # that still has the stale tree resolves SOMETHING here instead of an empty
+  # plugin_root; retiring it is a deliberate follow-up, not an oversight.
+  # tests/workflow-args.test.sh W2.6 pins this arm as legacy, not as intent.
   if [ -z "$plugin_root" ] && [ -n "${CODEX_HOME:-}" ]; then
     plugin_root="${CODEX_HOME}/plugins/uberdev-codex"
   fi

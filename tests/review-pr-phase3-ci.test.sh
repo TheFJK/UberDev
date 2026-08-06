@@ -655,6 +655,19 @@ else
   echo "  FAIL  S10.14 — $CLASSIFY_STRICT_INVALID malformed classifier documents were accepted"; FAIL=$((FAIL + 1))
 fi
 
+# RETIRED SURFACE, retained deliberately (#381). `review_child_result_path`'s
+# sole caller is commands/review-pr.md:3319, which sits behind the unconditional
+# workflow-only refusal at :3305 -- so on the shipped tree the function is
+# unreachable in production, and every carrier value below is one production can
+# no longer emit (`codex` was deleted from _UBERDEV_DISPATCH_BACKEND_ENUM;
+# `wezterm`/`background` are refused by uberdev_dispatch_preflight_backend for
+# /review-pr). The enum override below is therefore a FIXTURE enum, not the
+# production one -- it is deliberately NOT narrowed to the live set, because
+# narrowing it would turn the carrier-mismatch cases into vacuous passes exactly
+# the way tests/agent-dispatch.test.sh:678-685 refuses to rename its own codex
+# fixture. This block is kept against a future Workflow-native Phase 3 (RFC 0012
+# §3.1), which is when the function becomes reachable again; retarget it THEN,
+# with the production enum, rather than now against a gate nothing can pass.
 RESULT_PATH_HELPER="$(mktemp)"
 RESULT_PATH_TMP="$(mktemp -d)"
 RESULT_PATH_TMP="$(cd "$RESULT_PATH_TMP" && pwd -P)"

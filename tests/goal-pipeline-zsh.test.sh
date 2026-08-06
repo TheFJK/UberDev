@@ -895,7 +895,7 @@ fi
 # sidecar and is deleted from lib/goal-state.sh; the branch that called it is
 # deleted from lib/goal-watch.sh; and UBERDEV_RESOLVED_BACKEND=codex -- the
 # scenario's precondition -- is no longer producible, because `codex` is not in
-# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:462). `background` ships no
+# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:509). `background` ships no
 # equivalent sidecar and `workflow` reports through the runtime's structured
 # return, so there is no malformed-status class left to fail closed on.
 #

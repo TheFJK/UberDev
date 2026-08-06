@@ -99,6 +99,11 @@ _payload() {
   printf '%s\n' "$_LAST_STDOUT" | sed -n '/^WORKFLOW_ARGS_BEGIN$/,/^WORKFLOW_ARGS_END$/p' | sed '1d;$d'
 }
 
+# LEGACY SURFACE, retained deliberately (#381). ${CODEX_HOME}/plugins/uberdev-codex
+# is a path only a stale pre-#381 install can produce -- the distribution that
+# wrote it is deleted and the CHANGELOG uninstall recipe removes it. This case
+# pins that the arm still RESOLVES for such a host; it does not assert that the
+# path is a supported install target. See lib/config-read.sh's comment at the arm.
 _assert_codex_home_plugin_root() {
   local helper_path="$1" label="$2" payload expected_codex_root
   HELPER="$helper_path"

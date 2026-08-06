@@ -767,7 +767,7 @@ uberdev_agent_dispatch() { _capture_dispatch "$@"; }
 # happens in lib/agent-dispatch.sh's routing engine, which is gated behind
 # `if backend!="codex":` at agent-dispatch.sh:298 -- the concrete-route resolver
 # is the ELSE arm, so it runs for `codex` and nothing else. `codex` is no longer
-# in _UBERDEV_DISPATCH_BACKEND_ENUM (dispatch.sh:462), so no live backend can
+# in _UBERDEV_DISPATCH_BACKEND_ENUM (dispatch.sh:509), so no live backend can
 # reach that arm: every live backend takes the backend-neutral-inherit path,
 # which raises `route_unenforceable` the moment an explicit route is requested.
 #
@@ -868,8 +868,8 @@ _uberdev_agent_dispatch_backend() {
   # _uberdev_dispatch_cleanup_dead_partial_result, which opens the canonical
   # result file before looking for the wrapper's `.partial.<pid>` staging file.
   # The REAL background arm creates that file up front —
-  # lib/dispatch.sh:1489 calls _uberdev_dispatch_prepare_tmp_target, which does
-  # `( umask 077; set -C; : > "$target" )` at lib/dispatch.sh:1377 — and this
+  # lib/dispatch.sh:1551 calls _uberdev_dispatch_prepare_tmp_target, which does
+  # `( umask 077; set -C; : > "$target" )` at lib/dispatch.sh:1439 — and this
   # stub stands in for exactly that layer, so it has to establish the same
   # precondition. Omitting it would test a state production never reaches.
   ( umask 077; set -C; : > "$5" ) || return 2

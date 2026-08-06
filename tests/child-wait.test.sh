@@ -289,11 +289,31 @@ rm -f "$INTENT_PATH"
 
 # Producer-shaped cancellation and lease-acquisition failures carry a bounded
 # reason. The child reports that reason without rejecting the closed schema.
-# `provider_cancel_unconfirmed` dropped out of this loop with the
-# `provider_cancel_failed` error kind, whose only writer was the retired
-# opaque-session supervision lane. The lease-acquire branch is unchanged.
-for watcher_reason in lease_acquire_rollback_failed; do
-  watcher_payload="{\"schema_version\":1,\"error\":\"launch_finalize_failed\",\"backend\":\"background\",\"handle\":\"\",\"terminal\":\"launch:lease_identity\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
+#
+# #381 retired the `provider_cancel_failed` ERROR KIND -- lib/child-dispatch.sh
+# admits only process_identity_probe_failed | timeout_intent_recovery_failed |
+# terminal_finalize_failed | launch_finalize_failed -- and this loop briefly lost
+# its cancel case with it. The REASON was not retired: lib/agent-dispatch.sh:1380
+# and :1539 still write ${_UBERDEV_DISPATCH_CANCEL_REASON:-provider_cancel_unconfirmed}
+# for background/wezterm, _uberdev_agent_persist_watcher_error maps their
+# terminal="failed" onto the LIVE `terminal_finalize_failed` kind, and
+# lib/child-dispatch.sh still accepts the full cancel_reasons set. So the reason
+# was RE-HOSTED under a different kind, not deleted, and the case below drives
+# the waiter on it in that live shape. Without it, no test drives the waiter on
+# any cancel reason at all, and a regression that reported capacity=not-reserved
+# on a cancel failure -- leaking a lifecycle lease -- would go unnoticed.
+#
+# Each row is: error|handle|terminal|reason.
+for watcher_case in \
+  'launch_finalize_failed||launch:lease_identity|lease_acquire_rollback_failed' \
+  'terminal_finalize_failed|321|failed|provider_cancel_unconfirmed'; do
+  watcher_error="${watcher_case%%|*}"
+  watcher_rest="${watcher_case#*|}"
+  watcher_handle="${watcher_rest%%|*}"
+  watcher_rest="${watcher_rest#*|}"
+  watcher_terminal="${watcher_rest%%|*}"
+  watcher_reason="${watcher_rest#*|}"
+  watcher_payload="{\"schema_version\":1,\"error\":\"$watcher_error\",\"backend\":\"background\",\"handle\":\"$watcher_handle\",\"terminal\":\"$watcher_terminal\",\"attempts\":3,\"reason\":\"$watcher_reason\"}"
   printf '%s\n' "$watcher_payload" >"$STATUS.watcher-error.json"
   chmod 600 "$STATUS.watcher-error.json"
   set +e

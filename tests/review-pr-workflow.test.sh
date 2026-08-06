@@ -182,7 +182,7 @@ done
 # S7 — INVERTED (#381). This asserted that an ambient CODEX_HOME made `auto`
 # keep choosing codex, because a Codex session has no Claude Workflow tool to
 # mandate. That CODEX_HOME escape ran BEFORE the per-OS matrix and was deleted
-# with the transport (lib/dispatch.sh:635-637): `auto` has exactly one answer
+# with the transport (lib/dispatch.sh:682-685): `auto` has exactly one answer
 # now, and an ambient environment variable must not steer it.
 for wf in review-pr simplify; do
   probe="$(CODEX_HOME="$TMP/fake-codex-home" auto_probe "$DISPATCH" "$wf")"

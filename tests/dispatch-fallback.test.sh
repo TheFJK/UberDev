@@ -118,7 +118,7 @@ fi
 # INVERTED, not deleted (#381). This block used to prove that a Codex
 # environment WON `auto`: CODEX_HOME being set was one of two escapes that ran
 # BEFORE the per-OS matrix and resolved the codex backend. Both escapes were
-# removed with the transport (lib/dispatch.sh:635-637), so the property to lock
+# removed with the transport (lib/dispatch.sh:682-685), so the property to lock
 # is the opposite one -- an ambient CODEX_HOME must no longer steer resolution.
 # The stub for _uberdev_dispatch_codex_available is gone too: the function no
 # longer exists, so redefining it was an inert no-op that made this block look

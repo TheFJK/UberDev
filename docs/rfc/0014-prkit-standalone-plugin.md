@@ -275,13 +275,24 @@ Terminal step of brainstorm: invoke `uberdev:write-plan` to produce the wave-dec
 > - §14.5 the `config-read.sh` codex-fallback rewrite — the in-repo
 >   `${PWD}/codex/uberdev-codex/...` candidate is unreachable and was removed from
 >   the canonical helper. The `${CODEX_HOME}/plugins/...` branch is a different
->   thing and survives: it resolves an INSTALLED Codex runtime, which the `codex`
->   DISPATCH BACKEND still targets.
+>   thing and survives, for the reason written into `lib/config-read.sh`
+>   alongside it: it resolves an INSTALLED Codex runtime, and
+>   `.codex/uberdev.local.md` is still a supported project-config family
+>   (`project-codex` provenance).
 >
 > The phrase `verify.sh` quotes — "the mandatory native Codex port" — is withdrawn.
-> **The `codex` dispatch backend is NOT superseded by this note**: it remains in
-> `plugins/uberdev/lib/dispatch.sh` and remains selectable with `--backend=codex`.
 > This is a supersede of §14 only; §§1–13 are unaffected.
+>
+> **AMENDED 2026-08-05 (issue #381).** This note originally read "**The `codex`
+> dispatch backend is NOT superseded by this note**: it remains in
+> `plugins/uberdev/lib/dispatch.sh` and remains selectable with
+> `--backend=codex`." That is no longer true, and it was falsified inside this
+> same issue: step 4 (`9e4b7c5`) **also deleted** the `codex` dispatch backend.
+> `--backend=codex` is an enum error (`plugins/uberdev/lib/dispatch.sh:509`) and
+> the two Codex-environment `auto` escapes are gone with no replacement
+> (`lib/dispatch.sh:682-685`). The §14.5 bullet above is rewritten accordingly:
+> the surviving `${CODEX_HOME}` branch now rests on the project-config
+> rationale, not on a dispatch backend.
 
 UberDev supports **two runtimes**: Claude Code (`plugins/uberdev/`) and the OpenAI Codex CLI (`codex/uberdev-codex/` native plugin + `codex/install-codex.sh` one-liner). The Claude-only extraction above left prkit unusable on Codex, so the generator was extended to also emit a Codex port — same SSOT extract+rewrite model.
 

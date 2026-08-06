@@ -803,7 +803,7 @@ assert_grep "$GOAL_WATCH" 'uberdev_goal_audit goal_issue_closed_without_pr' \
 # COVERAGE DELIBERATELY DROPPED: `uberdev_goal_codex_status_for_issue` and the
 # watch-script branch that called it are deleted, and their precondition --
 # UBERDEV_RESOLVED_BACKEND=codex -- is unproducible now that `codex` is out of
-# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:462). No surviving backend
+# _UBERDEV_DISPATCH_BACKEND_ENUM (lib/dispatch.sh:509). No surviving backend
 # ships an equivalent sidecar, so there is no terminal-status signal left to
 # surface early. Inverted to the absence check; the solver_failed circuit
 # breaker itself is still asserted below, since that reason code is live.

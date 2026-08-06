@@ -23,8 +23,8 @@ This RFC's whole mechanism depends on one assumption, stated in §1: UberDev own
 the provider invocation, so it can pass `-m` and `model_reasoning_effort` per
 child. That was only ever true of the Codex CLI backend. Issue #381 retired that
 backend — `codex` is no longer in `_UBERDEV_DISPATCH_BACKEND_ENUM`
-(`plugins/uberdev/lib/dispatch.sh:462`), and `--backend=codex` is now an enum
-error.
+(`plugins/uberdev/lib/dispatch.sh:509`), and `--backend=codex` is now an enum error
+(#381).
 
 Every remaining backend (`workflow`, `wezterm`, `background`) launches an agent
 that **inherits the ambient model and effort of the session it runs in**. There

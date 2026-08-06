@@ -3458,7 +3458,8 @@ uberdev_goal_read_run_state() {
           # DECLARED DIVERGENCE, not intent (found while wiring #370's Half A
           # guard, NOT in its register): goal-pipeline/SKILL.md's
           # GOAL_CIRCUIT_BREAKER_REASONS has NINE reasons; this rehydration
-          # allowlist has eight — `solver_failed` (goal-phase3.sh, goal-watch.sh)
+          # allowlist has eight — `solver_failed` (goal-phase3.sh; goal-watch.sh's three
+          # sites went with the codex solver-status branch #381 deleted)
           # is missing. Latent today: only `agent_stuck_on_dialog` is ever
           # assigned to CIRCUIT_BREAKER_HALT, so nothing is dropped yet. The
           # arm has no else branch, so if that changes the value vanishes on the

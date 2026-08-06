@@ -190,6 +190,8 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/code_fixer_contract.py",
         "lib/dispatch.sh",
         "lib/dispatch.sh",
+        "lib/dispatch.sh",
+        "lib/dispatch.sh",
         "lib/goal-state.sh",
         "lib/solve-launcher.sh",
         "lib/solve-launcher.sh",
@@ -334,11 +336,13 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
         # that names three of them now crosses the 3-of-N discovery threshold
         # it used to sit under. These are prose or error strings, not
         # declarations: none of them is the set anything is validated against.
+        # The two `case` arms in lib/dispatch.sh that this block briefly also
+        # covered were NOT of that kind and are now marked at the site instead
+        # (uberdev_dispatch_preflight_backend, both switches).
         ("plugins/uberdev/commands/testers.md", "Now invoke the `uberdev:testers-pipeline` skill", _COMMAND_PROSE),
         ("plugins/uberdev/lib/dispatch.sh", "host can execute with --backend=wezterm or --backend=background.", _PROSE),
-        ("plugins/uberdev/lib/dispatch.sh", "needs a backend that publishes a governed child result artifact", _PROSE),
-        ("plugins/uberdev/lib/dispatch.sh", "wezterm|background) uberdev_dispatch_resolve_env", _PROSE),
         ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "On a detached backend", _PROSE),
+        ("plugins/uberdev/skills/solve-fleet/SKILL.md", "as the explicit detached transports", _PROSE),
         # The #381 model-routing unenforceability notice. It names the surviving
         # transports to explain WHY per-rank routing cannot be honoured; it is
         # not the set anything validates against.

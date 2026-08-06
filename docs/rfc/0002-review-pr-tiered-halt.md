@@ -13,6 +13,42 @@
 
 ---
 
+> **AMENDED 2026-08-05 (issue #381) — the Phase 3 classifier/router path this
+> RFC coordinates with is DORMANT.** #381 deleted the `codex` dispatch backend,
+> which was the only transport with a provider arm for the `review_pr.ci.*`
+> children, and `auto` now resolves `workflow` unconditionally. `/review-pr`
+> refuses `wezterm` and `background` for its own children, so there is no
+> transport left that can run Phase 3 CI classification or the CI fixers;
+> `--no-ci-fix` is the supported mode until Phase 3 is rebuilt Workflow-natively
+> (RFC 0012 §3.1). What that does and does not change here:
+>
+> - **§3.7's simultaneous-halt precedence is dormant, not deleted.** Phase 2.5
+>   halt-aggregation still runs first; the Phase 3 leg it hands to can no longer
+>   dispatch a classifier, so the ordering has nothing to order today. Rebuild
+>   Phase 3 and this section applies unchanged.
+> - **The §3.5 GREEN predicate at "GREEN predicate" below is UNCHANGED and still
+>   correct.** `green` and `skipped_no_checks` remain reachable — a green CI
+>   probe still completes normally and reaches the trust anchor. `green_after_fix`
+>   and `loop_cap_exhausted` are produced only past 6c.4 ROUTE — the former by
+>   the 6c.5 POST-FIX re-entry terminating at 6c.7 LOOP GUARD
+>   (`commands/review-pr.md:3512`, `:3775`), the latter at `:3776` — and are
+>   therefore unreachable; an
+>   unreachable enum member simply never matches, so the predicate stays sound.
+>   They are still advertised as live members of `CI_OUTCOME_ENUM`
+>   (`skills/merge-pipeline/SKILL.md:79`, and the audit schemas at
+>   `commands/review-pr.md:3788` and `:4126`), where they are now annotated as
+>   dormant rather than removed — removing a member from a closed vocabulary
+>   would break every consumer that validates historical audit JSON.
+> - **A red probe halts loudly**, at 6c.3 CLASSIFY with
+>   `subreason=ci_transport_unsupported`, rather than degrading silently.
+>
+> Nothing in §§1–3.6 or §4 onward is superseded. This note exists because RFC
+> 0002 is the document that SPECIFIES the removed capability, and five sibling
+> RFCs (0004, 0013, 0014, 0015, 0016) received a #381 amendment while this one
+> did not.
+
+---
+
 ## 1. Summary
 
 Promote `/uberdev:review-pr`'s findings-to-issues sub-phase (added in PR #112) from purely-advisory to **severity-tiered gating**. Wire deferred-blocker filings into the trust-trail JSON so `/merge`'s trust-trail-evaluator can see them. Surface CI fixer refusals as user-visible halts instead of silent 3-iteration loop exhaustion. Net effect: a green `/review-pr` trail can no longer co-exist with unresolved blocker findings on the same HEAD.

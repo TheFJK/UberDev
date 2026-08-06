@@ -444,8 +444,8 @@ nested_unexport_count="$(grep -Fc 'export -n -f run_python python3 2>/dev/null |
 # POPULATION COUNT-LOCK. #381 deleted the codex arm of
 # _uberdev_agent_dispatch_backend, and with it the third process-separated
 # wrapper, so every count below dropped by exactly one. The two survivors are
-# _uberdev_dispatch_background (lib/dispatch.sh:1442) and
-# _uberdev_dispatch_wezterm (lib/dispatch.sh:1747); only background is
+# _uberdev_dispatch_background (lib/dispatch.sh:1504) and
+# _uberdev_dispatch_wezterm (lib/dispatch.sh:1837); only background is
 # nohup-detached, which is why detached_resolver_count is 1 and the rest are 2.
 # The INVARIANT is unchanged and these stay `-eq`, not `-ge`: a dropped bridge
 # and a newly-added wrapper that forgets one must both still fail here.

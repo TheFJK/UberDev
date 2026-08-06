@@ -16,16 +16,18 @@ receipt, the push gate, the trust anchor and the verdict.
 Why one script, not two: RFC 0012 §3.1 rejects splitting `/review-pr` per phase
 because Phase 3 re-enters Phase 1, so the phases have to share one control flow.
 And `/simplify`'s canonical position in the chain **is** `/review-pr`'s Phase 2
-(`commands/simplify.md:604`) — its stages are a strict subset. The divergence is
+(`commands/simplify.md:294-295`) — its stages are a strict subset. The divergence is
 the edge-id family and the authority family, both of which arrive as
 controller-supplied scalars. `skills/scan-fleet/workflow.js` is the shipped
 two-command precedent.
 
 > **P3 status — WIRED AND DEFAULT.** Both command files select this engine when
 > `UBERDEV_CARRIER_BACKEND=workflow`, and since #381 step 3 that is what `auto`
-> resolves to for `/review-pr` and `/simplify` on every non-Codex host.
-> `--backend=codex` remains explicitly selectable, and is the named escape hatch
-> for the one declared gap — /review-pr Phase 3, see the bottom of this log.
+> resolves to for `/review-pr` and `/simplify` — unconditionally, on every host.
+> `--backend=codex` is an **enum error** since #381 step 4 deleted the backend
+> (`lib/dispatch.sh:509`); it is not an escape hatch for anything. The one
+> declared gap — /review-pr Phase 3 — has **no backend to re-run with**, and
+> `--no-ci-fix` is its supported mode. See the bottom of this log.
 >
 > All five caller obligations have landed in `commands/review-pr.md` (stages
 > `review`, `fix` ×2, `simplify`, `defer`) and `commands/simplify.md` (stages
@@ -80,7 +82,7 @@ two-command precedent.
 >   3. *The `0o400` result was blamed on the child.* No child of **any** backend
 >      writes `validated-result.md`. The controller does, through
 >      `uberdev_child_validate_phase1_review_result`
->      (`lib/child-dispatch.sh:1211`, `os.fchmod(descriptor,0o400)` at `:1365`),
+>      (`lib/child-dispatch.sh:1189`, `os.fchmod(descriptor,0o400)` at `:1343`),
 >      which `/review-pr` already has in scope — it sources
 >      `lib/child-dispatch.sh` at `commands/review-pr.md:42`.
 > - ✅ **RETIRED — both command files may call `Workflow`.** `Workflow` is in
@@ -127,7 +129,13 @@ two-command precedent.
 >     pair from the provider harness; a Workflow child has no harness, so
 >     without this the defer stage would have returned a plausible `issues`
 >     object with nothing to validate it against. Additive: the child owes more
->     than it did, never less.
+>     than it did, never less. `f2iPrompt` states that debt explicitly — the
+>     `result.md` Return-Contract fence `validate-persistence-result` parses, and
+>     a narrowly scoped precedence note over `agents/findings-to-issues.md`'s
+>     `## Tools authorised` section, which was written for a transport whose
+>     provider harness published those two artifacts FOR the agent. That section
+>     stays as-is: the carve-out is the controller's, per-dispatch, and names
+>     exactly what it does and does not relax.
 >   - **`review_promote_validated_fixer_outcome` was taught the workflow outcome
 >     shape.** `_launch_identity` emits `run_nonce` where a detached outcome
 >     emits `receipt_sha256`, and the parser previously asserted the detached key
@@ -136,9 +144,11 @@ two-command precedent.
 > - ✅ **RETIRED (#381 step 3) — `auto` resolves `workflow` for both workflows.**
 >   The review-pr/simplify special case that demanded the `codex` CLI is deleted
 >   from `uberdev_dispatch_preflight`; these two now take the same ladder as
->   every other workflow. The two Codex arms stay AHEAD of it, so a Codex session
->   (`CODEX_HOME` set) and a host with no `claude` on PATH still resolve `codex`
->   — there is no Claude Workflow tool to mandate on either.
+>   every other workflow. #381 step 4 then removed the two Codex-environment
+>   escapes that used to run AHEAD of the per-OS matrix (`CODEX_HOME` set, or
+>   `claude` absent with `codex` present) — both resolved a backend that no
+>   longer exists, and there is no replacement, because `auto` has exactly one
+>   answer now (`lib/dispatch.sh:682-685`).
 >
 >   `auto` also cannot resolve a transport this install cannot execute.
 >   `_uberdev_dispatch_require_workflow_engine` checks that
@@ -149,22 +159,32 @@ two-command precedent.
 >   per-OS matrix drifted back into default paths exactly that way. The same gate
 >   guards explicit `--backend=workflow` and `uberdev_dispatch_preflight_backend`,
 >   so all three refuse identically instead of at three different stages.
-> - ⚠️ **DECLARED GAP, travelling with the default — /review-pr Phase 3 has no
->   Workflow-native transport.** `review_pr.ci.classify`, `review_pr.ci.fix_code`,
+> - ⚠️ **BREAKING (#381) — /review-pr Phase 3 CI classification and the CI
+>   fixers are UNAVAILABLE. There is no longer any transport that can run
+>   them.** `review_pr.ci.classify`, `review_pr.ci.fix_code`,
 >   `review_pr.ci.rebase`, `review_pr.ci.defer_refusal` and the conflict-resolver
 >   fanout are routed children, and `_uberdev_agent_dispatch_backend` has no
 >   `workflow` provider arm by construction (`lib/dispatch.sh`). Phase 3 is
->   deliberately not dispatched from this script (see "Not built in P2"), so on
->   this transport a **RED** check halts at 6c.3 CLASSIFY with a named refusal
->   (`review_require_ci_capable_transport`,
->   `subreason=ci_transport_unsupported`) rather than surfacing as an opaque
->   provider-arm error mid-run. A green probe completes normally and reaches the
->   trust anchor exactly as on codex.
+>   deliberately not dispatched from this script (see "Not built in P2").
 >
->   This is a named, fail-closed refusal that tells the operator to re-run with
->   `--backend=codex` or `--no-ci-fix` — not a silent degradation. It is the
->   reason `codex` stays explicitly selectable through P4/P5, and Phase 3 owes
->   its own increment (RFC 0012 §3.1) before that escape hatch can be removed.
+>   Since #381 step 3 the workflow transport is what `auto` resolves to, so this
+>   gate is on the DEFAULT path, not an opt-in corner. Step 4 then deleted the
+>   `codex` backend, which was the ONLY transport with a provider arm for
+>   `review_pr.ci.*` — so the escape hatch this gate used to name is gone with
+>   it. `--backend=wezterm` and `--backend=background` are not substitutes:
+>   /review-pr refuses both in `uberdev_dispatch_preflight_backend` because
+>   neither publishes a governed child result artifact.
+>
+>   **`--no-ci-fix` is the supported mode** until Phase 3 is rebuilt
+>   Workflow-natively (RFC 0012 §3.1). Under it the probe is telemetry only,
+>   dispatches no child, and the review completes normally.
+>
+>   Without it, a **green** probe still completes normally and reaches the trust
+>   anchor; a **red** probe halts loudly at 6c.3 CLASSIFY. The gate is the inline
+>   `if` at `commands/review-pr.md:3305-3310` — there is no named helper — and it
+>   audits `ci_classify_returned subreason=ci_transport_unsupported`. That is a
+>   named refusal, not a silent degradation, but it is a capability the release
+>   no longer has, not a configuration the operator can fix.
 
 ---
 
@@ -182,7 +202,8 @@ computed a digest, the authority chain would silently degrade from *the
 controller proved it* to *an LLM said so* while every downstream equality check
 still looked correct. That is the same reasoning
 `_validate_bound_workflow_child_status` uses to forbid a synthesised pid
-(`lib/code_fixer_contract.py:6729-6732`).
+(`lib/code_fixer_contract.py:6985`; the reasoning is its docstring at
+`:6997-6999` and the guard is `DETACHED_SUPERVISION_KEYS` at `:7004`).
 
 Two consequences worth stating out loud:
 
@@ -215,12 +236,19 @@ both look harmless:
   aggregate is published by `post_review_write_aggregate_v2`, a deterministic
   writer that re-validates the closed six-edge roster and "does not use any
   pathname as aggregation authority"
-  (`skills/post-impl-review/SKILL.md:1118-1122`). It is a shell function defined
-  inside that SKILL.md — not an on-disk executable a relay could even invoke.
+  (`skills/post-impl-review/SKILL.md:693-697`). Since #381 it IS on disk, at
+  `lib/review-aggregate.sh:330` — so "no on-disk executable to invoke" no longer
+  carries the rejection. What carries it is the seam itself: the controller
+  proves, it never delegates the proof to an LLM. `lib/review-aggregate.sh`
+  exists so the CALLING SESSION can source the builders across its fresh-shell
+  `bash` blocks, which is the opposite of handing them to a relay.
 - **line 157, "push agent (haiku): git push origin HEAD".** Rejected. Pushing
-  goes through `review_publish_same_repo_pr_head`, which proves same-repo
-  authority, remote-ref equality, live-PR-head equality, local-HEAD equality and
-  clean residue before it moves a ref (`commands/review-pr.md:1898`, `:3380`).
+  goes through `review_publish_same_repo_pr_head` — fence text inside
+  `commands/review-pr.md` (`:1344-1376`, called at `:2373` and `:4013`), so
+  unlike the aggregate writer it is genuinely not an on-disk executable a relay
+  could invoke — and it proves same-repo authority, remote-ref equality,
+  live-PR-head equality, local-HEAD equality and clean residue before it moves
+  a ref.
 
 There is also **no brief relay** (RFC §3.1 line 148). The controller already
 writes the enveloped diff artifact atomically in Bash
@@ -283,7 +311,7 @@ are re-split and re-validated in-script.
 | Key | Meaning |
 |---|---|
 | `diffPathAbs` | the **already-enveloped** diff artifact, written atomically in Bash. Read by path; never re-wrapped. |
-| `aspects` | CSV emphasis tokens. Emphasis only — it never gates fanout membership (`commands/review-pr.md:3874-3875`). |
+| `aspects` | CSV emphasis tokens. Emphasis only — it never gates fanout membership (`commands/review-pr.md:1324`, `:4507`). |
 | `focus` | `/simplify`'s free-text `## Additional Focus`, kept OUTSIDE the envelope |
 | `fanoutCap` | reviewer wave size, `[1,50]` default 6. `sequential` ⇒ 1. |
 | `lensConcurrency` | lens wave size, `[1,3]` default 3 |
@@ -327,9 +355,10 @@ Workflow call; the child echoes it verbatim into `status.json`. For a
 `workflow`-backend child that nonce **replaces** the
 `pid`/`process_identity`/`lease_generation` triple, which must be **absent** —
 see `_validate_bound_child_status` and `_validate_bound_workflow_child_status`
-(`lib/code_fixer_contract.py:6715-6763`). A Workflow child is awaited
+(`lib/code_fixer_contract.py:7032` and `:6985`). A Workflow child is awaited
 in-session, so it owns no pid and nothing could probe its liveness; the await
-*is* the supervision (`lib/agent-dispatch.sh:1461-1473`).
+*is* the supervision (`lib/agent-dispatch.sh:1291-1302` — the
+non-numeric-handle arm is a deliberate no-op, not a fall-through).
 
 The nonce is a **binding token, not authority**. A garbled nonce makes the
 child write one the controller never minted, and validation fails closed — it
@@ -438,7 +467,12 @@ agent-chosen location.
 5. For `defer`: mint with `code_fixer_contract.py
    bind-workflow-persistence-launch` **before** the Workflow call, then
    `capture-persistence-terminal` → `validate-persistence-result`.
-   `issues.halted` feeds the Phase-2.5 halt gate, which needs
+   `issues.halted` is a **reporting hint only** — the same status
+   `fixerStatus` holds in item 3. The Phase-2.5 HALT decision comes from
+   `validate-persistence-result`'s receipt, computed from the child's own frozen
+   result bytes, never from the script's agent-declared return
+   (`commands/review-pr.md:2534-2536`). The script's `issues` return supplies
+   the counts and URLs for the Step 7 table and nothing else. That gate needs
    `AskUserQuestion` (fail fast via `ToolSearch`; never silently auto-pick).
 6. Then the unchanged tail: the single Step-6a guarded push, Phase 3, the trust
    anchor, labels, the verdict JSON, and the existing exit-code contract

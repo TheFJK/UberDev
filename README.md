@@ -156,14 +156,14 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 
 Monitor with **`/workflows`** — the progress tree lives in the session you started, and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`). There is no separate agent surface to poll.
 
-**Detached transports** are still available for fire-and-forget runs: `--backend=wezterm`, `--backend=background`, `--backend=codex`. Those spawn a real session per issue:
+**Detached transports** are still available for fire-and-forget runs: `--backend=wezterm`, `--backend=background`. Those spawn a real session per issue:
 
 ```bash
 git worktree add .claude/worktrees/solve-issue-123 -b worktree-solve-issue-123
 claude -p "<prompt>" --model 'claude-opus-4-8[1m]'   # detached, PID-tracked
 ```
 
-and are monitored through visible WezTerm panes or the printed PID / log / result files. `auto` never selects them. The `claude --bg` transport that used to head this list was removed in RFC 0015 §7 as amended.
+and are monitored through visible WezTerm panes or the printed PID / log / result files. `auto` never selects them. The `claude --bg` transport that used to head this list was removed in RFC 0015 §7 as amended, and `--backend=codex` was deleted the same way in #381 — both are now enum errors, not deprecations.
 
 **Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
 

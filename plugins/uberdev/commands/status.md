@@ -12,7 +12,7 @@ state across:
 
 | # | Store | Where it lives |
 |---|-------|----------------|
-| 1 | `/solve` + `/turbo` claims | the `uberdev:active` GitHub label + `solve-{bg,codex}-status-<N>.json` under the runtime root |
+| 1 | `/solve` + `/turbo` claims | the `uberdev:active` GitHub label + `solve-bg-status-<N>.json` under the runtime root |
 | 2 | `/goal` | `GOAL_ID`-keyed sidecars (1 jsonl + 7 TSVs + the runstate files), found through the fixed-path `goal-active-id.txt` pointer |
 | 3 | `/review-pr` | `.uberdev/runs/<RUN_ID>/{locked,pr-context.json}` |
 | 4 | `/merge` | `<git-dir>/uberdev-merge.lock.d/{record.json,heartbeat}` + the repo-root `.uberdev/audit.jsonl` |

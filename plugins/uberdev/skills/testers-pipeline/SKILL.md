@@ -217,7 +217,7 @@ If `return.politeBreach` is `true`, additionally print `[testers] --rps-cap=<N> 
 
 ## No-Workflow fallback
 
-Run this path when **Workflow is not among your tools** (Gemini / Copilot / pre-Workflow Claude Code — see `references/{gemini,copilot,codex}-tools.md`) OR when the user passed `--watch` (the retained inline directive path, which is also the interactive mode that keeps the QA-squad windows visible — workflow agent transcripts never reach the main session, so the watch-the-squad UX is otherwise unrecoverable).
+Run this path when **Workflow is not among your tools** (Gemini / Copilot / pre-Workflow Claude Code — see `references/{gemini,copilot}-tools.md`) OR when the user passed `--watch` (the retained inline directive path, which is also the interactive mode that keeps the QA-squad windows visible — workflow agent transcripts never reach the main session, so the watch-the-squad UX is otherwise unrecoverable).
 
 The never-worked master-dispatch mode is **removed**, not guarded: `lib/dispatch.sh` never provided `dispatch_master` (its public surface is `uberdev_dispatch_preflight`/`_resolve_env`/`_one`), so the old default printed "dispatched master" with nothing running (#306). There is no detached-session path here — use the inline directive recipe below.
 
