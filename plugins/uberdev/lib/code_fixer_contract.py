@@ -3156,28 +3156,15 @@ def _persistence_scalar(
     return matches[0]
 
 
-def validate_persistence_result(
-    *,
-    launch_binding: bytes,
-    status_sha256: str,
-    result_sha256: str,
-) -> dict[str, Any]:
-    binding = _load_persistence_binding(launch_binding)
-    observed_deferred_blockers = count_deferred_blockers(
-        findings_path=binding["aggregate_path"],
-        findings_sha256=binding["aggregate_sha256"],
-        disposition_path=binding["disposition_path"],
-        disposition_sha256=binding["disposition_sha256"],
-    )
-    if observed_deferred_blockers != binding["expected_deferred_blockers"]:
-        fail("persistence_result_authority_mismatch")
-    status_payload = capture_expected(
-        binding["status_path"], status_sha256, 1, 65_536
-    )
-    _validate_bound_child_status(binding, status_payload)
-    payload = capture_expected(
-        binding["result_path"], result_sha256, 1, PERSISTENCE_RESULT_LIMIT
-    )
+def _parse_persistence_result_document(payload: bytes) -> dict[str, Any]:
+    """The findings-to-issues Return-Contract fence, parsed as a strict document.
+
+    Extracted from validate_persistence_result (#383) so review_pr.defer.findings
+    and review_pr.ci.defer_refusal share ONE parser. They deliberately do NOT
+    share the blocker recount that follows it: the defer stage recounts against
+    a schema-v2 aggregate, and the CI refusal stage's aggregate is the one-row
+    ci-refused-synthetic envelope, which count_deferred_blockers cannot parse.
+    """
     if b"\x00" in payload or b"\r" in payload or not payload.endswith(b"\n```\n"):
         fail("persistence_result_malformed")
     try:
@@ -3203,10 +3190,6 @@ def validate_persistence_result(
         r"DONE|DONE_WITH_CONCERNS|REFUSED",
         "persistence_result_malformed",
     )
-    if status == "REFUSED":
-        fail("persistence_result_refused")
-    if binding["require_clean"] and status != "DONE":
-        fail("persistence_result_concerns")
     halted_text = _persistence_scalar(
         lines, "halted", r"true|false", "persistence_result_malformed"
     )
@@ -3255,9 +3238,47 @@ def validate_persistence_result(
             if lines[index].startswith("  - ") and 'tier: "BLOCKER"' in lines[index]:
                 skipped_blockers += 1
             index += 1
+    return {
+        "status": status,
+        "halted": halted,
+        "halted_due_to_overflow": overflow_halt,
+        "by_severity_blocker": blocker_count,
+        "skipped_blockers": skipped_blockers,
+    }
+
+
+def validate_persistence_result(
+    *,
+    launch_binding: bytes,
+    status_sha256: str,
+    result_sha256: str,
+) -> dict[str, Any]:
+    binding = _load_persistence_binding(launch_binding)
+    observed_deferred_blockers = count_deferred_blockers(
+        findings_path=binding["aggregate_path"],
+        findings_sha256=binding["aggregate_sha256"],
+        disposition_path=binding["disposition_path"],
+        disposition_sha256=binding["disposition_sha256"],
+    )
+    if observed_deferred_blockers != binding["expected_deferred_blockers"]:
+        fail("persistence_result_authority_mismatch")
+    status_payload = capture_expected(
+        binding["status_path"], status_sha256, 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    payload = capture_expected(
+        binding["result_path"], result_sha256, 1, PERSISTENCE_RESULT_LIMIT
+    )
+    parsed = _parse_persistence_result_document(payload)
+    status = parsed["status"]
+    if status == "REFUSED":
+        fail("persistence_result_refused")
+    if binding["require_clean"] and status != "DONE":
+        fail("persistence_result_concerns")
+    blocker_count = parsed["by_severity_blocker"]
     if (
         binding["expected_deferred_blockers"]
-        != blocker_count + skipped_blockers
+        != blocker_count + parsed["skipped_blockers"]
     ):
         fail("persistence_result_authority_mismatch")
     capture_expected(
@@ -3281,8 +3302,8 @@ def validate_persistence_result(
         "disposition_path": binding["disposition_path"],
         "disposition_sha256": binding["disposition_sha256"],
         "expected_deferred_blockers": binding["expected_deferred_blockers"],
-        "halted": halted,
-        "halted_due_to_overflow": overflow_halt,
+        "halted": parsed["halted"],
+        "halted_due_to_overflow": parsed["halted_due_to_overflow"],
         "require_clean": binding["require_clean"],
         "result_sha256": result_sha256,
         "status": status,
@@ -6345,6 +6366,75 @@ WORKFLOW_PERSISTENCE_BINDING_KEYS = (
 WORKFLOW_FIXER_LAUNCH_BINDING_KEYS = (
     WORKFLOW_LAUNCH_BINDING_KEYS | FIXER_BINDING_EXTRA_KEYS
 )
+
+# The five review_pr.ci.* edges get their OWN binding producer and their OWN
+# capture verb rather than joining WORKFLOW_BOUND_EDGE_IDS, because none of the
+# three shipped shapes is the shape they owe. This is a fourth shape, not a
+# widening, and the difference is load-bearing:
+#
+#   capture_bound_child freezes result + status and nothing else. That is the
+#   COMPLETE debt of a reviewer, whose only authority is a diff artifact every
+#   sibling reviewer read too and that the controller wrote itself. A CI child's
+#   authority is a GitHub Actions log: bytes this run fetched once, that no
+#   later reader can re-derive, and that the next push makes unreachable.
+#   Freezing only the child's two outputs would prove it wrote something and
+#   prove nothing about what it read. Adding a ci edge to
+#   WORKFLOW_REVIEWER_EDGE_IDS would therefore not widen a verb -- it would
+#   silently DROP a pin, and every downstream equality would still pass.
+#
+#   capture_review_terminal / capture_standalone_terminal freeze a disposition
+#   and an applied-content plan on top. A CI fixer owes neither: its input is a
+#   log line, not a schema-v2 findings row, so there is nothing to dispose of
+#   per finding and no per-finding content plan to compare. Routing a ci edge
+#   through _load_review_fixer_binding fails at the first _load_authority call,
+#   and "making it pass" would mean minting an AUTHORITY_KEYS document with
+#   fabricated finding_keys and target_paths -- a lie in the shape of a proof.
+#
+#   capture_persistence_terminal recounts deferred blockers from a schema-v2
+#   aggregate. review_pr.ci.defer_refusal's aggregate is the one-row
+#   ci-refused-synthetic envelope (commands/review-pr.md), which
+#   count_deferred_blockers cannot parse -- so that verb refuses it
+#   structurally, and correctly.
+#
+# What a CI child actually owes is: its two bound outputs, PLUS the exact bytes
+# of the untrusted artifact it was pointed at, PLUS -- for the three mutating
+# edges -- the git identity the controller pinned before dispatch (parent_sha,
+# base_sha, lease_sha). Four obligations, four-shaped verb.
+#
+# capture_ci_terminal takes NO caller-supplied digest and compares none, for the
+# same reason capture_bound_child takes none (see its docstring): a digest
+# parameter is a slot an agent's arithmetic can occupy, and a verb that accepted
+# one would still satisfy every equality downstream while proving that the
+# controller and the agent agree rather than that the bytes are what the
+# controller pinned.
+WORKFLOW_CI_EDGE_IDS = frozenset(
+    (
+        "review_pr.ci.classify",
+        "review_pr.ci.fix_code",
+        "review_pr.ci.rebase",
+        "review_pr.ci.defer_refusal",
+        "review_pr.ci.resolve_conflict",
+    )
+)
+
+# Read-only CI children: they consume the pinned artifact and write a report.
+# Everything else mutates the caller's checkout and additionally owes the git
+# identity the controller froze before dispatch.
+CI_READ_EDGE_IDS = frozenset(
+    ("review_pr.ci.classify", "review_pr.ci.defer_refusal")
+)
+CI_MUTATION_EDGE_IDS = frozenset(WORKFLOW_CI_EDGE_IDS - CI_READ_EDGE_IDS)
+
+# Deliberately NOT the names authority_path / authority_sha256: those two carry
+# the AUTHORITY_KEYS document shape, and _load_fixer_launch_binding would
+# _load_authority() a CI authority and reject it. Distinct names make a CI
+# binding structurally unreadable as a fixer binding and vice versa --
+# _binding_base_keys' cross-shape discipline applied one level up.
+CI_BINDING_EXTRA_KEYS = frozenset(("ci_authority_path", "ci_authority_sha256"))
+WORKFLOW_CI_LAUNCH_BINDING_KEYS = (
+    WORKFLOW_LAUNCH_BINDING_KEYS | CI_BINDING_EXTRA_KEYS
+)
+
 CHILD_STATUS_KEYS = {
     "issue",
     "tier",
@@ -7108,6 +7198,10 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
     # would have proved strictly less.
     if edge_id in WORKFLOW_FIXER_EDGE_IDS:
         fail("bound_child_edge_unsupported")
+    # The ci edges are refused by the same door for the same reason: they carry
+    # a pinned log/aggregate authority this verb has no slot for, so freezing a
+    # CI child here would prove strictly less while looking complete. See
+    # WORKFLOW_CI_EDGE_IDS and capture_ci_terminal (#383).
     if edge_id not in WORKFLOW_REVIEWER_EDGE_IDS:
         fail("bound_child_edge_unsupported")
     binding = _load_launch_binding(launch_binding, edge_id)
@@ -7132,6 +7226,853 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
         "status_sha256": hashlib.sha256(status_payload).hexdigest(),
         "result_path": binding["result_path"],
         "result_sha256": hashlib.sha256(result_payload).hexdigest(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 CI authority (#383) -- the fourth shape.
+# ---------------------------------------------------------------------------
+# The phase is pinned PER EDGE rather than taken as a free scalar. It mirrors
+# policy/solve-run-tree-v1.json's `phase` for each edge; a caller cannot mint a
+# rebase authority that claims to be a classify authority.
+CI_AUTHORITY_PHASE_BY_EDGE = {
+    "review_pr.ci.classify": "ci",
+    "review_pr.ci.fix_code": "ci_fix",
+    "review_pr.ci.rebase": "ci_fix",
+    "review_pr.ci.defer_refusal": "defer_findings",
+    "review_pr.ci.resolve_conflict": "conflict_resolution",
+}
+
+CI_READ_AUTHORITY_KEYS = {
+    "schema_version",
+    "edge_id",
+    "phase",
+    "pr_number",
+    "run_id",
+    "head_sha",
+    "working_dir",
+    "input_path",
+    "input_sha256",
+}
+CI_MUTATION_AUTHORITY_KEYS = CI_READ_AUTHORITY_KEYS | {
+    "failure_class",
+    "signal_anchor",
+    "parent_sha",
+    "parent_tree_sha",
+    "base_sha",
+    "lease_sha",
+    "pr_branch",
+    "base_branch",
+    "target_paths",
+}
+
+# Per-edge required-non-empty members. The mint refuses a missing one, so a
+# rebase whose lease was never captured never reaches a Workflow call at all --
+# it fails at the moment the controller could still do something about it,
+# rather than after a child has already run.
+CI_AUTHORITY_REQUIRED_MEMBERS = {
+    "review_pr.ci.fix_code": ("failure_class", "signal_anchor", "parent_sha",
+                              "parent_tree_sha"),
+    "review_pr.ci.rebase": ("base_sha", "lease_sha", "pr_branch", "base_branch"),
+    "review_pr.ci.resolve_conflict": ("base_sha", "pr_branch", "base_branch"),
+}
+
+# The six members of CI_FAILURE_CLASS_ENUM (skills/merge-pipeline/SKILL.md
+# Constants). Spelled here because an authority that named an unknown class
+# would license a fixer arm nothing routes.
+CI_FAILURE_CLASSES = (
+    "code_bug",
+    "env_drift",
+    "stale_base",
+    "flaky",
+    "billing_quota",
+    "platform_outage",
+)
+
+CI_INPUT_LIMIT = 1_048_576
+CI_RESULT_LIMIT = 1_048_576
+
+# A CI fix may touch the anchor's own file plus AT MOST ONE lockfile. The set is
+# closed on purpose: `forbidden-pattern-multi-lockfile-churn` is enforced by the
+# controller here rather than asked of the agent, because an agent that ignored
+# the rule would still return a plausible result.
+CI_LOCKFILE_BASENAMES = frozenset(
+    (
+        "Cargo.lock",
+        "Gemfile.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "uv.lock",
+        "yarn.lock",
+        "composer.lock",
+        "go.sum",
+    )
+)
+
+CI_BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}")
+CI_RUN_ID = re.compile(r"[1-9][0-9]{0,18}")
+
+
+def _ci_edge_slug(edge_id: str) -> str:
+    return edge_id.rsplit(".", 1)[-1].replace("_", "-")
+
+
+def _ci_authority_shape(edge_id: str, value: dict[str, Any]) -> None:
+    """Every rule the CI authority document owes, checked at mint AND at load.
+
+    Named once because a mint-only check is a check a swapped file bypasses, and
+    a load-only check is a check the controller discovers after it has already
+    dispatched.
+    """
+    expected_keys = (
+        CI_READ_AUTHORITY_KEYS
+        if edge_id in CI_READ_EDGE_IDS
+        else CI_MUTATION_AUTHORITY_KEYS
+    )
+    if set(value) != expected_keys:
+        fail("ci_authority_invalid")
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or value.get("edge_id") != edge_id
+        or value.get("phase") != CI_AUTHORITY_PHASE_BY_EDGE[edge_id]
+        or type(value.get("pr_number")) is not int
+        or value["pr_number"] <= 0
+        or value["pr_number"] > 100_000_000
+        or not isinstance(value.get("run_id"), str)
+        or CI_RUN_ID.fullmatch(value["run_id"]) is None
+        or not isinstance(value.get("head_sha"), str)
+        or SHA1.fullmatch(value["head_sha"]) is None
+        or not isinstance(value.get("input_sha256"), str)
+        or SHA256.fullmatch(value["input_sha256"]) is None
+    ):
+        fail("ci_authority_invalid")
+    for key in ("working_dir", "input_path"):
+        item = value.get(key)
+        if not isinstance(item, str) or _absolute_input(
+            item, "ci_authority_invalid"
+        ) != item:
+            fail("ci_authority_invalid")
+    if not beneath(value["working_dir"], value["input_path"]):
+        fail("ci_authority_invalid")
+    if edge_id in CI_READ_EDGE_IDS:
+        return
+    for key in ("parent_sha", "parent_tree_sha", "base_sha", "lease_sha"):
+        item = value.get(key)
+        if not isinstance(item, str) or (
+            item and SHA1.fullmatch(item) is None
+        ):
+            fail("ci_authority_invalid")
+    for key in ("pr_branch", "base_branch"):
+        item = value.get(key)
+        if not isinstance(item, str) or (
+            item and CI_BRANCH_NAME.fullmatch(item) is None
+        ):
+            fail("ci_authority_invalid")
+    failure_class = value.get("failure_class")
+    if not isinstance(failure_class, str) or (
+        failure_class and failure_class not in CI_FAILURE_CLASSES
+    ):
+        fail("ci_authority_invalid")
+    anchor = value.get("signal_anchor")
+    if not isinstance(anchor, str) or len(anchor) > 512:
+        fail("ci_authority_invalid")
+    target_paths = value.get("target_paths")
+    if not isinstance(target_paths, list) or len(target_paths) > 1:
+        fail("ci_authority_invalid")
+    for item in target_paths:
+        if not isinstance(item, str):
+            fail("ci_authority_invalid")
+        _repo_path_from_location(f"{item}:1")
+    # resolve_conflict names exactly the ONE path its child may resolve; the
+    # other two mutating edges derive their scope from the anchor and must not
+    # carry a second, competing scope declaration.
+    if edge_id == "review_pr.ci.resolve_conflict":
+        if len(target_paths) != 1:
+            fail("ci_authority_invalid")
+    elif target_paths:
+        fail("ci_authority_invalid")
+    for required in CI_AUTHORITY_REQUIRED_MEMBERS.get(edge_id, ()):
+        if not value.get(required):
+            fail("ci_authority_invalid")
+
+
+def prepare_ci_authority(
+    *,
+    edge_id: str,
+    pr_number: int,
+    run_id: str,
+    head_sha: str,
+    working_dir: str,
+    input_path: str,
+    input_sha256: str,
+    authority_output_path: str,
+    failure_class: str = "",
+    signal_anchor: str = "",
+    parent_sha: str = "",
+    parent_tree_sha: str = "",
+    base_sha: str = "",
+    lease_sha: str = "",
+    pr_branch: str = "",
+    base_branch: str = "",
+    target_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Mint and publish the CI authority a Phase 3 child is dispatched against.
+
+    Published through `_publish_new_exact_record`, the same no-clobber,
+    identity-rechecked publisher `prepare_authority` uses: an authority a
+    binding already pins can never be replaced in place.
+
+    The pinned input bytes are captured against `input_sha256` HERE, so an
+    authority can only be minted over an artifact that really exists under that
+    digest at mint time. capture_ci_terminal re-captures the same pair after the
+    child returns, which is what turns the pin into a proof rather than a claim.
+    """
+    if edge_id not in WORKFLOW_CI_EDGE_IDS:
+        fail("ci_authority_invalid")
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    if not os.path.isdir(canonical_working):
+        fail("working_dir_invalid")
+    _require_repository(canonical_working)
+    canonical_input = _absolute_input(input_path, "ci_authority_invalid")
+    # Digest-first: the authority names bytes, not a pathname.
+    capture_expected(canonical_input, input_sha256, 1, CI_INPUT_LIMIT)
+    authority: dict[str, Any] = {
+        "schema_version": 1,
+        "edge_id": edge_id,
+        "phase": CI_AUTHORITY_PHASE_BY_EDGE.get(edge_id, ""),
+        "pr_number": pr_number,
+        "run_id": run_id,
+        "head_sha": head_sha,
+        "working_dir": canonical_working,
+        "input_path": canonical_input,
+        "input_sha256": input_sha256,
+    }
+    if edge_id not in CI_READ_EDGE_IDS:
+        authority.update(
+            {
+                "failure_class": failure_class,
+                "signal_anchor": signal_anchor,
+                "parent_sha": parent_sha,
+                "parent_tree_sha": parent_tree_sha,
+                "base_sha": base_sha,
+                "lease_sha": lease_sha,
+                "pr_branch": pr_branch,
+                "base_branch": base_branch,
+                "target_paths": list(target_paths),
+            }
+        )
+    _ci_authority_shape(edge_id, authority)
+    canonical_output = _absolute_input(
+        authority_output_path, "ci_authority_path_invalid"
+    )
+    if not beneath(canonical_working, canonical_output):
+        fail("ci_authority_path_invalid")
+    # The basename carries BOTH loop counters, so iteration 2 can never publish
+    # over iteration 1's authority and the no-clobber publisher never has to
+    # arbitrate between two live runs.
+    if (
+        re.fullmatch(
+            rf"ci-authority-{re.escape(_ci_edge_slug(edge_id))}"
+            r"-iter[0-9]{1,3}-ci[0-9]{1,3}(?:-[0-9]{1,4})?\.json",
+            os.path.basename(canonical_output),
+        )
+        is None
+    ):
+        fail("ci_authority_path_invalid")
+    payload = _canonical_json(authority) + b"\n"
+    published_path, digest = _publish_new_exact(canonical_output, payload)
+    return {
+        "authority_path": published_path,
+        "authority_sha256": digest,
+        "edge_id": edge_id,
+        "phase": authority["phase"],
+    }
+
+
+def _load_ci_authority(path: str, digest: str) -> dict[str, Any]:
+    payload = capture_expected(path, digest, 1, AUTHORITY_LIMIT)
+    value = _parse_json(payload, "ci_authority_invalid")
+    if not isinstance(value, dict):
+        fail("ci_authority_invalid")
+    edge_id = value.get("edge_id")
+    if edge_id not in WORKFLOW_CI_EDGE_IDS:
+        fail("ci_authority_invalid")
+    _ci_authority_shape(edge_id, value)
+    if _canonical_json(value) + b"\n" != payload:
+        fail("ci_authority_invalid")
+    return value
+
+
+def read_ci_authority_member(
+    *, authority_path: str, authority_sha256: str, member: str
+) -> str:
+    """Read ONE member back out of a digest-pinned CI authority.
+
+    This exists so the controller never reaches for `jq`. Reading the authority
+    with jq would read it WITHOUT re-checking the digest, and the digest
+    re-check is the entire point: the lease SHA the controller force-pushes
+    against must be the one it minted, not whatever the file says now.
+    """
+    if not isinstance(member, str) or member in {"", "schema_version"}:
+        fail("ci_authority_member_invalid")
+    authority = _load_ci_authority(authority_path, authority_sha256)
+    if member not in authority:
+        fail("ci_authority_member_invalid")
+    value = authority[member]
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        fail("ci_authority_member_invalid")
+    return str(value)
+
+
+def bind_workflow_ci_launch(
+    *,
+    edge_id: str,
+    instance_id: str,
+    run_nonce: str,
+    result_path: str,
+    status_path: str,
+    working_dir: str,
+    ci_authority_path: str,
+    ci_authority_sha256: str,
+) -> dict[str, Any]:
+    """Mint the launch binding for a Workflow-native Phase 3 CI child.
+
+    The CI twin of `bind_workflow_fixer_launch`, and deliberately a DIFFERENT
+    producer: the extra members are `ci_authority_path`/`ci_authority_sha256`,
+    not `authority_path`/`authority_sha256`, so a CI binding cannot be re-read
+    as a fixer binding by a loader that would then `_load_authority()` a
+    document of the wrong shape.
+    """
+    if edge_id not in WORKFLOW_CI_EDGE_IDS:
+        fail("ci_binding_invalid")
+    canonical_authority = _absolute_input(
+        ci_authority_path, "ci_authority_path_invalid"
+    )
+    authority = _load_ci_authority(canonical_authority, ci_authority_sha256)
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    if (
+        authority["edge_id"] != edge_id
+        or authority["working_dir"] != canonical_working
+    ):
+        fail("ci_binding_invalid")
+    binding = _mint_workflow_launch(
+        edge_id=edge_id,
+        instance_id=instance_id,
+        run_nonce=run_nonce,
+        result_path=result_path,
+        status_path=status_path,
+        working_dir=canonical_working,
+        allowed_edge_ids=WORKFLOW_CI_EDGE_IDS,
+        reason="ci_binding_invalid",
+    )
+    binding.update(
+        {
+            "ci_authority_path": canonical_authority,
+            "ci_authority_sha256": ci_authority_sha256,
+        }
+    )
+    return binding
+
+
+def _load_ci_launch_binding(
+    payload: bytes, expected_edge_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load a CI binding AND the authority it pins, as one indivisible pair.
+
+    Returned together rather than stashed on the binding dict: every caller
+    needs both, and a loader that handed back only the binding would invite a
+    second, unpinned `_load_ci_authority` call somewhere downstream.
+    """
+    if not isinstance(payload, bytes) or not payload or len(payload) > 65_536:
+        fail("ci_binding_invalid")
+    value = _parse_json(payload, "ci_binding_invalid")
+    if not isinstance(value, dict):
+        fail("ci_binding_invalid")
+    # CI children exist only on the workflow transport -- #382 deleted the last
+    # detached backend that had a provider arm for them -- so there is no
+    # detached CI binding shape to dispatch on. Anything else is refused.
+    if value.get("backend") != "workflow":
+        fail("ci_binding_invalid")
+    if (
+        set(value) != WORKFLOW_CI_LAUNCH_BINDING_KEYS
+        or _canonical_json(value) != payload
+        or not isinstance(value.get("ci_authority_path"), str)
+        or _absolute_input(value["ci_authority_path"], "ci_binding_invalid")
+        != value["ci_authority_path"]
+        or not isinstance(value.get("ci_authority_sha256"), str)
+        or SHA256.fullmatch(value["ci_authority_sha256"]) is None
+    ):
+        fail("ci_binding_invalid")
+    base = {key: value[key] for key in WORKFLOW_LAUNCH_BINDING_KEYS}
+    _load_launch_binding(_canonical_json(base), expected_edge_id)
+    authority = _load_ci_authority(
+        value["ci_authority_path"], value["ci_authority_sha256"]
+    )
+    if (
+        authority["edge_id"] != expected_edge_id
+        or authority["working_dir"] != value["worktree"]
+    ):
+        fail("ci_binding_invalid")
+    return value, authority
+
+
+def capture_ci_terminal(
+    *, launch_binding: bytes, edge_id: str
+) -> dict[str, Any]:
+    """Freeze a Phase 3 CI child's TWO outputs AND its ONE pinned input.
+
+    The third freeze is the whole reason this verb exists rather than a widened
+    `capture_bound_child`. A GH-Actions log is fetched once and is unreachable
+    afterwards; without re-capturing it against the digest the authority pinned,
+    the controller would prove the child wrote something and prove nothing about
+    what it read.
+
+    Status is captured and validated BEFORE the result is read, so a child that
+    never bound itself costs a refusal rather than a capture. Both output
+    digests are computed here from bytes this process read; no caller-supplied
+    digest is accepted and none is compared.
+    """
+    if edge_id not in WORKFLOW_CI_EDGE_IDS:
+        fail("ci_terminal_edge_unsupported")
+    binding, authority = _load_ci_launch_binding(launch_binding, edge_id)
+    status_payload, status_identity = _capture_regular(
+        binding["status_path"], 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    result_payload, result_identity = _capture_regular(
+        binding["result_path"], 1, CI_RESULT_LIMIT
+    )
+    if status_identity == result_identity:
+        fail("child_status_invalid")
+    # The pin. If the log bytes moved since the mint, this refuses.
+    capture_expected(
+        authority["input_path"], authority["input_sha256"], 1, CI_INPUT_LIMIT
+    )
+    return {
+        "edge_id": binding["edge_id"],
+        "instance_id": binding["instance_id"],
+        "status_path": binding["status_path"],
+        "status_sha256": hashlib.sha256(status_payload).hexdigest(),
+        "result_path": binding["result_path"],
+        "result_sha256": hashlib.sha256(result_payload).hexdigest(),
+        "input_path": authority["input_path"],
+        "input_sha256": authority["input_sha256"],
+    }
+
+
+CI_CLASSIFIER_FIELDS = {
+    "status",
+    "failure_class",
+    "signal_anchor",
+    "rationale",
+    "risks",
+}
+CI_CLASSIFIER_SCALAR = re.compile(r"[A-Za-z0-9_./:+ -]{1,256}")
+
+
+def _ci_classifier_scalar(raw: str) -> str | None:
+    if raw == "null":
+        return None
+    try:
+        if raw.startswith('"'):
+            parsed = json.loads(raw)
+        elif re.fullmatch(r"'(?:[^']|'')*'", raw):
+            parsed = raw[1:-1].replace("''", "'")
+        elif CI_CLASSIFIER_SCALAR.fullmatch(raw):
+            parsed = raw
+        else:
+            fail("ci_classification_contract_invalid")
+    except (ValueError, json.JSONDecodeError):
+        fail("ci_classification_contract_invalid")
+    if (
+        not isinstance(parsed, str)
+        or not parsed
+        or len(parsed) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in parsed)
+    ):
+        fail("ci_classification_contract_invalid")
+    return parsed
+
+
+def _ci_anchor_names_repository_file(working_dir: str, component: str) -> bool:
+    if component.startswith("/") or "\\" in component:
+        return False
+    parts = component.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    try:
+        root_path = os.path.realpath(working_dir)
+        target = os.path.realpath(os.path.join(root_path, component))
+    except (OSError, TypeError, ValueError):
+        return False
+    return (
+        target != root_path
+        and beneath(root_path, target)
+        and os.path.isfile(target)
+    )
+
+
+def _parse_ci_classification(payload: bytes, working_dir: str) -> dict[str, str]:
+    """The classifier contract, moved out of the /review-pr heredoc (#383).
+
+    It used to be a python heredoc inside commands/review-pr.md, which meant it
+    was LLM-rendered markdown rather than tested code. The predicate is
+    unchanged: closed field set, closed status set, a legal class/anchor
+    pairing, and -- for code_bug/env_drift -- an anchor that names an EXISTING
+    repository file. `:121`, `file:0`, absolute and traversal anchors are
+    contract violations, and an invalid result is never repaired into
+    platform_outage or flaky.
+    """
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError:
+        fail("ci_classification_contract_invalid")
+    document = re.search(
+        r"(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z", text, re.DOTALL
+    )
+    if document is None:
+        fail("ci_classification_contract_invalid")
+    fields: dict[str, str] = {}
+    for line in document.group(1).splitlines():
+        match = re.fullmatch(r"([a-z_][a-z0-9_]*):[ \t]*(.*)", line)
+        if match is None:
+            fail("ci_classification_contract_invalid")
+        key, value = match.groups()
+        if key in fields:
+            fail("ci_classification_contract_invalid")
+        fields[key] = value.strip()
+    if set(fields) != CI_CLASSIFIER_FIELDS or fields["risks"] != "[]":
+        fail("ci_classification_contract_invalid")
+    status = _ci_classifier_scalar(fields["status"])
+    failure_class = _ci_classifier_scalar(fields["failure_class"])
+    anchor = _ci_classifier_scalar(fields["signal_anchor"])
+    rationale = _ci_classifier_scalar(fields["rationale"])
+    if status == "AMBIGUOUS":
+        if failure_class is not None or anchor is not None:
+            fail("ci_classification_contract_invalid")
+        # Shipped semantics: the controller routes AMBIGUOUS to flaky AFTER
+        # emitting ci_classify_ambiguous_routing_as_flaky. Reported, not halted,
+        # so that audit event stays reachable.
+        return {
+            "status": "AMBIGUOUS",
+            "failure_class": "flaky",
+            "signal_anchor": "",
+            "rationale": rationale or "",
+        }
+    if status == "REFUSED":
+        if failure_class is not None or anchor is not None or not rationale:
+            fail("ci_classification_contract_invalid")
+        fail("ci_classification_refused")
+    if status != "CLASSIFIED" or failure_class not in CI_FAILURE_CLASSES:
+        fail("ci_classification_contract_invalid")
+    if anchor is None:
+        fail("ci_classification_contract_invalid")
+    match = re.fullmatch(r"(.+):([1-9][0-9]*)", anchor)
+    if match is None:
+        fail("ci_classification_contract_invalid")
+    component = match.group(1)
+    is_run = re.fullmatch(r"gh-run-[1-9][0-9]*", component) is not None
+    is_repo = _ci_anchor_names_repository_file(working_dir, component)
+    if failure_class in {"code_bug", "env_drift"}:
+        if not is_repo:
+            fail("ci_classification_contract_invalid")
+    elif not (is_run or is_repo):
+        fail("ci_classification_contract_invalid")
+    return {
+        "status": "CLASSIFIED",
+        "failure_class": failure_class,
+        "signal_anchor": anchor,
+        "rationale": rationale or "",
+    }
+
+
+def validate_ci_classification(
+    *, launch_binding: bytes, status_sha256: str, result_sha256: str
+) -> dict[str, Any]:
+    """Judge the classifier child, from the CONTROLLER's side of the seam.
+
+    Four things the script cannot do and must not be asked to: re-capture the
+    pinned log bytes, bind the status file to the minted nonce, re-read the
+    frozen result bytes, and run the classifier contract against the real
+    worktree. The routing scalar the mutating arm keys on comes from HERE, never
+    from the classify child's structured return.
+    """
+    binding, authority = _load_ci_launch_binding(
+        launch_binding, "review_pr.ci.classify"
+    )
+    try:
+        capture_expected(
+            authority["input_path"], authority["input_sha256"], 1, CI_INPUT_LIMIT
+        )
+    except ContractFailure:
+        fail("ci_classification_log_mismatch")
+    status_payload = capture_expected(
+        binding["status_path"], status_sha256, 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    result_payload = capture_expected(
+        binding["result_path"], result_sha256, 1, CI_RESULT_LIMIT
+    )
+    classification = _parse_ci_classification(result_payload, binding["worktree"])
+    return {
+        **classification,
+        "status_sha256": status_sha256,
+        "result_sha256": result_sha256,
+        **_launch_identity(binding),
+    }
+
+
+def _ci_require_residue_closed(authority: dict[str, Any], working_dir: str) -> None:
+    """Reuse the SHIPPED residue predicate rather than inventing a CI-only one.
+
+    `_require_clean_worktree` is what every other mutating verb in this file
+    already answers to, and it carries the one piece of nuance a fresh
+    `git status --porcelain` check would get wrong: the run's own evidence
+    directory is legitimately untracked, and everything else is not. The
+    evidence directory is DERIVED from the pinned input artifact rather than
+    taken as a parameter, so a caller cannot widen the exemption.
+    """
+    evidence_dir = os.path.dirname(authority["input_path"])
+    if (
+        not evidence_dir
+        or evidence_dir == working_dir
+        or not beneath(working_dir, evidence_dir)
+    ):
+        fail("evidence_dir_invalid")
+    _require_clean_worktree(working_dir, evidence_dir)
+
+
+def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
+    observed = _git(working_dir, "status", "--porcelain", "-z")
+    if observed.returncode != 0:
+        fail("git_state_unreadable")
+    unmerged: list[str] = []
+    for record in observed.stdout.split(b"\x00"):
+        if len(record) < 4 or record[:2] != b"UU":
+            continue
+        try:
+            unmerged.append(record[3:].decode("utf-8"))
+        except UnicodeError:
+            fail("git_state_unreadable")
+    return tuple(unmerged)
+
+
+def _ci_changed_paths(working_dir: str, before: str, after: str) -> tuple[str, ...]:
+    observed = _git(
+        working_dir, "diff", "--name-only", "-z", f"{before}..{after}"
+    )
+    if observed.returncode != 0:
+        fail("git_state_unreadable")
+    return _decode_git_paths(observed.stdout, "git_state_unreadable")
+
+
+def _validate_ci_fix_code_outcome(
+    authority: dict[str, Any],
+    working_dir: str,
+    head_before: str,
+    head_after: str,
+) -> str:
+    if head_before != authority["parent_sha"]:
+        fail("ci_fix_head_moved_unexpectedly")
+    if head_after == head_before:
+        _ci_require_residue_closed(authority, working_dir)
+        return "NO_CHANGE"
+    count = _git(working_dir, "rev-list", "--count", f"{head_before}..{head_after}")
+    parent = _git(working_dir, "rev-parse", "--verify", f"{head_after}^")
+    if count.returncode != 0 or parent.returncode != 0:
+        fail("git_state_unreadable")
+    try:
+        commit_count = count.stdout.decode("ascii").strip()
+        parent_sha = parent.stdout.decode("ascii").strip()
+    except UnicodeError:
+        fail("git_state_unreadable")
+    if commit_count != "1" or parent_sha != head_before:
+        fail("ci_fix_head_moved_unexpectedly")
+    subject = _git(working_dir, "log", "-1", "--format=%s", head_after)
+    if subject.returncode != 0:
+        fail("git_state_unreadable")
+    try:
+        subject_text = subject.stdout.decode("utf-8").strip()
+    except UnicodeError:
+        fail("git_state_unreadable")
+    if re.match(r"^(?:fix\(ci\)|chore\(deps\)): \S", subject_text) is None:
+        fail("ci_fix_commit_subject_invalid")
+    anchor_path = authority["signal_anchor"].rsplit(":", 1)[0]
+    changed = _ci_changed_paths(working_dir, head_before, head_after)
+    lockfiles = [
+        path
+        for path in changed
+        if posixpath.basename(path) in CI_LOCKFILE_BASENAMES
+    ]
+    for path in changed:
+        if path == anchor_path or path in lockfiles:
+            continue
+        fail("ci_fix_scope_escape")
+    if len(lockfiles) > 1:
+        fail("ci_fix_multi_lockfile")
+    _ci_require_residue_closed(authority, working_dir)
+    return "APPLIED"
+
+
+def _validate_ci_rebase_outcome(
+    authority: dict[str, Any],
+    working_dir: str,
+    head_before: str,
+    head_after: str,
+    remote_head_sha: str,
+) -> str:
+    # THE LEASE CHECK. The child was demoted from pusher to preparer
+    # (agents/ci-rebase-handler.md), and this is what makes the demotion
+    # enforceable rather than aspirational: if the child pushed anyway, the
+    # remote tip no longer equals the lease the controller pinned before
+    # dispatch, and the controller refuses BEFORE its own force-push.
+    if (
+        not isinstance(remote_head_sha, str)
+        or SHA1.fullmatch(remote_head_sha) is None
+        or remote_head_sha != authority["lease_sha"]
+    ):
+        fail("ci_rebase_remote_moved_during_child")
+    if head_after == head_before:
+        fail("ci_rebase_head_did_not_move")
+    ancestry = _git(
+        working_dir, "merge-base", "--is-ancestor", authority["base_sha"], head_after
+    )
+    if ancestry.returncode != 0:
+        fail("ci_rebase_base_not_ancestor")
+    _ci_require_residue_closed(authority, working_dir)
+    return "REBASED"
+
+
+def _validate_ci_conflict_outcome(
+    authority: dict[str, Any], working_dir: str
+) -> str:
+    rebase_state = _git(working_dir, "rev-parse", "--git-path", "rebase-merge")
+    if rebase_state.returncode != 0:
+        fail("git_state_unreadable")
+    try:
+        rebase_dir = rebase_state.stdout.decode("utf-8").strip()
+    except UnicodeError:
+        fail("git_state_unreadable")
+    if not rebase_dir or not os.path.isdir(
+        rebase_dir if os.path.isabs(rebase_dir)
+        else os.path.join(working_dir, rebase_dir)
+    ):
+        fail("ci_conflict_not_mid_rebase")
+    target = authority["target_paths"][0]
+    if target in _ci_unmerged_paths(working_dir):
+        fail("ci_conflict_unresolved")
+    # A conflict resolver rewrites conflicted files in place. It never creates
+    # one, so any new untracked path is scope escape by construction.
+    untracked = _git(working_dir, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked.returncode != 0:
+        fail("git_state_unreadable")
+    if untracked.stdout.strip(b"\x00"):
+        fail("ci_conflict_scope_escape")
+    return "RESOLVED"
+
+
+def validate_ci_mutation_outcome(
+    *,
+    launch_binding: bytes,
+    status_sha256: str,
+    result_sha256: str,
+    working_dir: str,
+    head_before: str,
+    head_after: str,
+    remote_head_sha: str = "",
+) -> dict[str, Any]:
+    """Judge one of the three MUTATING CI children against real git state.
+
+    The edge is read from the binding, never taken as a parameter: a caller that
+    could name the arm could name the cheap one. `head_before` crosses the
+    Workflow boundary in the controller's sidecar, exactly as FIXER_HEAD_BEFORE
+    does, so the child can never be the source of the value it is judged
+    against.
+    """
+    value = _parse_json(launch_binding, "ci_binding_invalid")
+    edge_id = value.get("edge_id") if isinstance(value, dict) else None
+    if edge_id not in CI_MUTATION_EDGE_IDS:
+        fail("ci_mutation_edge_unsupported")
+    binding, authority = _load_ci_launch_binding(launch_binding, edge_id)
+    canonical_working = _absolute_input(working_dir, "working_dir_invalid")
+    if (
+        canonical_working != authority["working_dir"]
+        or binding["worktree"] != canonical_working
+    ):
+        fail("validation_authority_mismatch")
+    if (
+        SHA1.fullmatch(head_before or "") is None
+        or SHA1.fullmatch(head_after or "") is None
+    ):
+        fail("commit_identity_invalid")
+    status_payload = capture_expected(
+        binding["status_path"], status_sha256, 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    capture_expected(binding["result_path"], result_sha256, 1, CI_RESULT_LIMIT)
+    capture_expected(
+        authority["input_path"], authority["input_sha256"], 1, CI_INPUT_LIMIT
+    )
+    if edge_id == "review_pr.ci.fix_code":
+        status = _validate_ci_fix_code_outcome(
+            authority, canonical_working, head_before, head_after
+        )
+    elif edge_id == "review_pr.ci.rebase":
+        status = _validate_ci_rebase_outcome(
+            authority, canonical_working, head_before, head_after, remote_head_sha
+        )
+    else:
+        status = _validate_ci_conflict_outcome(authority, canonical_working)
+    return {
+        "status": status,
+        "edge_id": edge_id,
+        "head_before": head_before,
+        "head_after": head_after,
+        "status_sha256": status_sha256,
+        "result_sha256": result_sha256,
+        **_launch_identity(binding),
+    }
+
+
+def validate_ci_persistence_result(
+    *, launch_binding: bytes, status_sha256: str, result_sha256: str
+) -> dict[str, Any]:
+    """Judge the review_pr.ci.defer_refusal child's terminal.
+
+    It reuses `validate_persistence_result`'s fence parser and NOT its
+    `count_deferred_blockers` recount: this stage's aggregate is the one-row
+    `ci-refused-synthetic` envelope, which that recount cannot parse, and
+    forcing it to would mean minting a schema-v2 document with fabricated
+    findings just so a number could be compared to itself.
+    """
+    binding, authority = _load_ci_launch_binding(
+        launch_binding, "review_pr.ci.defer_refusal"
+    )
+    capture_expected(
+        authority["input_path"], authority["input_sha256"], 1, CI_INPUT_LIMIT
+    )
+    status_payload = capture_expected(
+        binding["status_path"], status_sha256, 1, 65_536
+    )
+    _validate_bound_child_status(binding, status_payload)
+    result_payload = capture_expected(
+        binding["result_path"], result_sha256, 1, PERSISTENCE_RESULT_LIMIT
+    )
+    parsed = _parse_persistence_result_document(result_payload)
+    if parsed["status"] == "REFUSED":
+        fail("persistence_result_refused")
+    return {
+        "status": parsed["status"],
+        "halted": parsed["halted"],
+        "halted_due_to_overflow": parsed["halted_due_to_overflow"],
+        "by_severity_blocker": parsed["by_severity_blocker"],
+        "aggregate_path": authority["input_path"],
+        "aggregate_sha256": authority["input_sha256"],
+        "status_sha256": status_sha256,
+        "result_sha256": result_sha256,
+        **_launch_identity(binding),
     }
 
 
@@ -7790,6 +8731,65 @@ def _parser() -> argparse.ArgumentParser:
     bound_child = commands.add_parser("capture-bound-child", add_help=False)
     bound_child.add_argument("--launch-binding-json", required=True)
     bound_child.add_argument("--edge-id", required=True)
+    # ---- Phase 3 CI (#383) -------------------------------------------------
+    ci_authority = commands.add_parser("prepare-ci-authority", add_help=False)
+    ci_authority.add_argument("--edge-id", required=True)
+    ci_authority.add_argument("--pr-number", type=int, required=True)
+    ci_authority.add_argument("--run-id", required=True)
+    ci_authority.add_argument("--head-sha", required=True)
+    ci_authority.add_argument("--working-dir", required=True)
+    ci_authority.add_argument("--input-path", required=True)
+    ci_authority.add_argument("--input-sha256", required=True)
+    ci_authority.add_argument("--authority-output-path", required=True)
+    ci_authority.add_argument("--failure-class", default="")
+    ci_authority.add_argument("--signal-anchor", default="")
+    ci_authority.add_argument("--parent-sha", default="")
+    ci_authority.add_argument("--parent-tree-sha", default="")
+    ci_authority.add_argument("--base-sha", default="")
+    ci_authority.add_argument("--lease-sha", default="")
+    ci_authority.add_argument("--pr-branch", default="")
+    ci_authority.add_argument("--base-branch", default="")
+    # At most one target path (resolve_conflict's single conflicted file), so
+    # `append` cannot smuggle a wider scope than the authority shape permits.
+    ci_authority.add_argument("--target-path", action="append", default=[])
+    read_ci_member = commands.add_parser("read-ci-authority-member", add_help=False)
+    read_ci_member.add_argument("--authority-path", required=True)
+    read_ci_member.add_argument("--authority-sha256", required=True)
+    read_ci_member.add_argument("--member", required=True)
+    bind_ci = commands.add_parser("bind-workflow-ci-launch", add_help=False)
+    bind_ci.add_argument("--edge-id", required=True)
+    bind_ci.add_argument("--instance-id", required=True)
+    bind_ci.add_argument("--run-nonce", required=True)
+    bind_ci.add_argument("--result-path", required=True)
+    bind_ci.add_argument("--status-path", required=True)
+    bind_ci.add_argument("--working-dir", required=True)
+    bind_ci.add_argument("--ci-authority-path", required=True)
+    bind_ci.add_argument("--ci-authority-sha256", required=True)
+    ci_terminal = commands.add_parser("capture-ci-terminal", add_help=False)
+    ci_terminal.add_argument("--launch-binding-json", required=True)
+    ci_terminal.add_argument("--edge-id", required=True)
+    ci_classification = commands.add_parser(
+        "validate-ci-classification", add_help=False
+    )
+    ci_classification.add_argument("--launch-binding-json", required=True)
+    ci_classification.add_argument("--status-sha256", required=True)
+    ci_classification.add_argument("--result-sha256", required=True)
+    ci_mutation = commands.add_parser(
+        "validate-ci-mutation-outcome", add_help=False
+    )
+    ci_mutation.add_argument("--launch-binding-json", required=True)
+    ci_mutation.add_argument("--status-sha256", required=True)
+    ci_mutation.add_argument("--result-sha256", required=True)
+    ci_mutation.add_argument("--working-dir", required=True)
+    ci_mutation.add_argument("--head-before", required=True)
+    ci_mutation.add_argument("--head-after", required=True)
+    ci_mutation.add_argument("--remote-head-sha", default="")
+    ci_persistence = commands.add_parser(
+        "validate-ci-persistence-result", add_help=False
+    )
+    ci_persistence.add_argument("--launch-binding-json", required=True)
+    ci_persistence.add_argument("--status-sha256", required=True)
+    ci_persistence.add_argument("--result-sha256", required=True)
     outcome = commands.add_parser("validate-standalone-outcome", add_help=False)
     outcome.add_argument("--launch-binding-json", required=True)
     outcome.add_argument("--authority-path", required=True)
@@ -8144,6 +9144,82 @@ def main() -> int:
                 capture_bound_child(
                     launch_binding=arguments.launch_binding_json.encode("utf-8"),
                     edge_id=arguments.edge_id,
+                )
+            )
+        elif arguments.command == "prepare-ci-authority":
+            output = _compact(
+                prepare_ci_authority(
+                    edge_id=arguments.edge_id,
+                    pr_number=arguments.pr_number,
+                    run_id=arguments.run_id,
+                    head_sha=arguments.head_sha,
+                    working_dir=arguments.working_dir,
+                    input_path=arguments.input_path,
+                    input_sha256=arguments.input_sha256,
+                    authority_output_path=arguments.authority_output_path,
+                    failure_class=arguments.failure_class,
+                    signal_anchor=arguments.signal_anchor,
+                    parent_sha=arguments.parent_sha,
+                    parent_tree_sha=arguments.parent_tree_sha,
+                    base_sha=arguments.base_sha,
+                    lease_sha=arguments.lease_sha,
+                    pr_branch=arguments.pr_branch,
+                    base_branch=arguments.base_branch,
+                    target_paths=tuple(arguments.target_path),
+                )
+            )
+        elif arguments.command == "read-ci-authority-member":
+            output = read_ci_authority_member(
+                authority_path=arguments.authority_path,
+                authority_sha256=arguments.authority_sha256,
+                member=arguments.member,
+            )
+        elif arguments.command == "bind-workflow-ci-launch":
+            output = _compact(
+                bind_workflow_ci_launch(
+                    edge_id=arguments.edge_id,
+                    instance_id=arguments.instance_id,
+                    run_nonce=arguments.run_nonce,
+                    result_path=arguments.result_path,
+                    status_path=arguments.status_path,
+                    working_dir=arguments.working_dir,
+                    ci_authority_path=arguments.ci_authority_path,
+                    ci_authority_sha256=arguments.ci_authority_sha256,
+                )
+            )
+        elif arguments.command == "capture-ci-terminal":
+            output = _compact(
+                capture_ci_terminal(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    edge_id=arguments.edge_id,
+                )
+            )
+        elif arguments.command == "validate-ci-classification":
+            output = _compact(
+                validate_ci_classification(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    status_sha256=arguments.status_sha256,
+                    result_sha256=arguments.result_sha256,
+                )
+            )
+        elif arguments.command == "validate-ci-mutation-outcome":
+            output = _compact(
+                validate_ci_mutation_outcome(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    status_sha256=arguments.status_sha256,
+                    result_sha256=arguments.result_sha256,
+                    working_dir=arguments.working_dir,
+                    head_before=arguments.head_before,
+                    head_after=arguments.head_after,
+                    remote_head_sha=arguments.remote_head_sha,
+                )
+            )
+        elif arguments.command == "validate-ci-persistence-result":
+            output = _compact(
+                validate_ci_persistence_result(
+                    launch_binding=arguments.launch_binding_json.encode("utf-8"),
+                    status_sha256=arguments.status_sha256,
+                    result_sha256=arguments.result_sha256,
                 )
             )
         elif arguments.command == "validate-standalone-outcome":
