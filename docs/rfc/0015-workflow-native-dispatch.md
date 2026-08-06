@@ -20,9 +20,19 @@ host and every OS class, `/solve` and `/turbo` now run their per-issue solvers
 inside the calling session's **Workflow runtime** — one worktree-isolated agent
 per issue, orchestrated by `skills/solve-fleet/workflow.js`.
 
-`claude-bg` is **deprecated**, not deleted: `--backend=claude-bg` still works,
+~~`claude-bg` is **deprecated**, not deleted: `--backend=claude-bg` still works,
 still passes its full test suite, and now prints a one-line deprecation notice.
-Removal target **v1.0.0**.
+Removal target **v1.0.0**.~~
+
+> **AMENDED 2026-08-05 (issue #381).** `claude-bg` was **DELETED**, ahead of the
+> v1.0.0 target stated above. Every clause struck through is now false:
+> `--backend=claude-bg` is an enum error, not a working flag
+> (`_UBERDEV_DISPATCH_BACKEND_ENUM` is `auto|workflow|wezterm|background`,
+> `lib/dispatch.sh:509`); its test suite was removed with it; and the
+> deprecation-notice machinery was deleted rather than left dormant, because a
+> dormant alias is how a retired transport drifts back onto a default path.
+> See §7 for the reasoning and the retraction of the objections this section
+> originally raised.
 
 ### Why
 

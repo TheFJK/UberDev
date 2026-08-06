@@ -649,6 +649,19 @@ fi
 # CHANGELOG.md is exempt: it is an append-only historical record whose older
 # entries legitimately describe the backends as live at the time of writing.
 DEAD_BACKEND_MARKER='enum error|deleted|removed|retired|no longer|#381|~~|RETRACTED|was the'
+# NEGATION BEATS THE TOMBSTONE, and must be tested FIRST.
+#
+# The marker above contains the bare word `deleted`, so a line reading
+#   "`claude-bg` is deprecated, not deleted: --backend=claude-bg still works"
+# MATCHED it and was skipped as a tombstone -- the very word that makes the
+# claim false was the word certifying it as dead. That is not hypothetical:
+# docs/rfc/0015 §1 shipped exactly that sentence on this branch and this guard
+# waved it through.
+#
+# A line asserting the backend still works cannot be a tombstone no matter what
+# else it contains, so this pattern is evaluated BEFORE the skip and a hit here
+# is unconditional.
+DEAD_BACKEND_NEGATION='not (deleted|removed|retired|gone)|still works|still passes|still (fully )?supported|remains? (fully )?supported|still (an? )?(available|selectable|valid)'
 dead_backend_hits=""
 while IFS= read -r shipped_doc; do
   case "$shipped_doc" in
@@ -658,7 +671,18 @@ while IFS= read -r shipped_doc; do
     [ -n "$offending_line" ] || continue
     # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
     # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
-    grep -qE -e "$DEAD_BACKEND_MARKER" <<<"$offending_line" && continue
+    # Three tiers, in this order and no other:
+    #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
+    #      A ~~...~~ line is the amend-in-place form this repo already uses; its
+    #      text is quoted precisely to be contradicted.
+    #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
+    #      even alongside a tombstone word, because that is the shape where the
+    #      falsifying word is also the certifying word.
+    #   3. otherwise, an ordinary tombstone word excuses the line.
+    grep -qE -e '~~' <<<"$offending_line" && continue
+    if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"$offending_line"; then
+      grep -qE -e "$DEAD_BACKEND_MARKER" <<<"$offending_line" && continue
+    fi
     dead_backend_hits="${dead_backend_hits}${shipped_doc}: ${offending_line}
 "
   done <<EOF
