@@ -117,6 +117,21 @@ review_fleet_child_dir() {
   printf '%s/children/%s-%s' "$1" "$3" "$suffix"
 }
 
+# review_fleet_ci_slug BASE CI_ITER -> the script's ciSlug() rule (#383).
+#
+# Phase 3's loop counter advances INSIDE one reviewIteration, so it cannot key
+# the child directory: iterSuffix() already owns that suffix on both sides, and
+# a second directory formula is exactly the drift review_fleet_child_dir exists
+# to prevent. It keys the SLUG instead, which leaves child_dir (and the test
+# that pins /run/children/correctness-iter07) byte-identical while still making
+# `<runDir>/children/ci-rebase-ci02-iter01` unique in both counters.
+review_fleet_ci_slug() {
+  [ "$#" -eq 2 ] || return 2
+  case "${2:-}" in '' | *[!0-9]*) return 2 ;; esac
+  [ -n "${1:-}" ] || return 2
+  printf '%s-ci%02d' "$1" "$((10#$2))"
+}
+
 # review_fleet_edge_slug EDGE -> the script's fixer/defer slug rule: lowercased,
 # every non-alphanumeric run collapsed to '-', no leading or trailing '-'.
 review_fleet_edge_slug() {
@@ -269,6 +284,137 @@ review_fleet_bind_persistence() {
   REVIEW_FLEET_NONCE_POOL="$nonce"
   REVIEW_FLEET_CHILD_DIR="$dir"
   REVIEW_FLEET_INSTANCE="$instance"
+}
+
+# review_fleet_bind_ci EDGE RUN_DIR ITER CI_ITER WORKTREE CONTRACT
+#                      CI_AUTHORITY_PATH CI_AUTHORITY_SHA256 HEAD_BEFORE SIDECAR
+#
+# The single-child Phase 3 stages (ci-classify, ci-fix, ci-defer). It uses
+# bind-workflow-ci-launch and NOTHING else: a CI child owes the exact bytes of
+# the untrusted artifact it was pointed at, and only the CI producer pins that
+# input by path and digest. bind-workflow-launch would mint a binding that
+# proves the child wrote something and proves nothing about what it read, and
+# every downstream equality would still pass.
+#
+# HEAD_BEFORE crosses the Workflow call in the sidecar for the same reason
+# review_fleet_bind_fixer records it: the fence after the call is a different
+# shell, and reading it here — before dispatch — is what stops the child from
+# being the source of the value it is later judged against. It is empty for the
+# two read-only edges.
+review_fleet_bind_ci() {
+  [ "$#" -eq 10 ] || return 2
+  local edge="$1" run_dir="$2" iter="$3" ci_iter="$4" worktree="$5" contract="$6"
+  local authority_path="$7" authority_sha256="$8" head_before="$9" sidecar="${10}"
+  local base slug dir instance nonce binding
+  case "$edge" in
+    review_pr.ci.classify)       base=ci-classify ;;
+    review_pr.ci.fix_code)       base=ci-fix-code ;;
+    review_pr.ci.rebase)         base=ci-rebase ;;
+    review_pr.ci.defer_refusal)  base=ci-defer ;;
+    *)
+      echo "error: review_fleet_bind_ci: unknown single-child CI edge '$edge'" >&2
+      return 2
+      ;;
+  esac
+  case "$head_before" in
+    '') ;;
+    *[!0-9a-f]*) return 2 ;;
+    *) [ "${#head_before}" -eq 40 ] || return 2 ;;
+  esac
+  slug="$(review_fleet_ci_slug "$base" "$ci_iter")" || return 2
+  dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
+  instance="${dir##*/}"
+  mkdir -p "$dir" || return 2
+  nonce="$(review_fleet_mint_nonce)" || return 2
+  binding="$(python3 -I -B "$contract" bind-workflow-ci-launch \
+    --edge-id "$edge" --instance-id "$instance" --run-nonce "$nonce" \
+    --result-path "$dir/result.md" --status-path "$dir/status.json" \
+    --working-dir "$worktree" \
+    --ci-authority-path "$authority_path" \
+    --ci-authority-sha256 "$authority_sha256")" || return 2
+  review_fleet_write_sidecar "$sidecar" "$binding" "$dir" "$instance" "$head_before" || return 2
+  REVIEW_FLEET_NONCE_POOL="$nonce"
+  REVIEW_FLEET_CHILD_DIR="$dir"
+  REVIEW_FLEET_INSTANCE="$instance"
+}
+
+# review_fleet_bind_ci_conflicts RUN_DIR ITER CI_ITER WORKTREE CONTRACT
+#                                AUTHORITY_LEDGER LEDGER
+#
+# The N-child conflict fanout. AUTHORITY_LEDGER carries one
+# `<ci_authority_path>\t<ci_authority_sha256>` row per conflicted file, in the
+# controller's own UU-enumeration order — which IS the nonce wire format for
+# this stage, exactly as review_fleet_roster's order is for the reviewers.
+#
+# One authority per child, not one shared authority: each resolver's pinned
+# input names the single path it may touch, and validate-ci-mutation-outcome
+# reads that path back out of the authority to judge it. A shared authority
+# would make every resolver's scope the union of all of them.
+review_fleet_bind_ci_conflicts() {
+  [ "$#" -eq 7 ] || return 2
+  local run_dir="$1" iter="$2" ci_iter="$3" worktree="$4" contract="$5"
+  local authority_ledger="$6" ledger="$7"
+  local edge=review_pr.ci.resolve_conflict
+  local authority_path authority_sha256 slug dir instance nonce binding index=0 row
+  REVIEW_FLEET_NONCE_POOL=''
+  : >"$ledger" || return 2
+  while IFS="$(printf '\t')" read -r authority_path authority_sha256; do
+    [ -n "$authority_path" ] || continue
+    index=$((index + 1))
+    slug="$(review_fleet_ci_slug "$(printf 'ci-conflict-%02d' "$index")" "$ci_iter")" || return 2
+    dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
+    instance="${dir##*/}"
+    mkdir -p "$dir" || return 2
+    nonce="$(review_fleet_mint_nonce)" || return 2
+    binding="$(python3 -I -B "$contract" bind-workflow-ci-launch \
+      --edge-id "$edge" --instance-id "$instance" --run-nonce "$nonce" \
+      --result-path "$dir/result.md" --status-path "$dir/status.json" \
+      --working-dir "$worktree" \
+      --ci-authority-path "$authority_path" \
+      --ci-authority-sha256 "$authority_sha256")" || return 2
+    row="$(jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" \
+      --arg binding "$binding" --arg result "$dir/result.md" --arg status "$dir/status.json" \
+      '{edge:$edge,index:$index,instance:$instance,binding:$binding,result:$result,status:$status}')" || return 2
+    printf '%s\n' "$row" >>"$ledger" || return 2
+    if [ -z "$REVIEW_FLEET_NONCE_POOL" ]; then
+      REVIEW_FLEET_NONCE_POOL="$nonce"
+    else
+      REVIEW_FLEET_NONCE_POOL="$REVIEW_FLEET_NONCE_POOL,$nonce"
+    fi
+  done <"$authority_ledger"
+  REVIEW_FLEET_CONFLICT_COUNT="$index"
+  [ "$index" -gt 0 ] || return 2
+}
+
+# review_fleet_write_ci_state PATH CI_ITER REVIEW_ITER FIX_PUSHES_JSON CLASSES_JSON
+#
+# Phase 3's loop counters CANNOT live in shell variables: every bash block in
+# commands/review-pr.md is a FRESH harness shell, so an incremented
+# CI_FIX_LOOP_ITER is gone before the next fence reads it and the
+# CI_FIX_LOOP_CAP=3 guard degrades to whatever the orchestrator happens to
+# remember. That is the fence-scoped-shell-state class, not a detail. On disk it
+# is a real counter, and phases.phase3.iterations / .fix_pushes get a real
+# accumulator instead of an improvised one.
+review_fleet_write_ci_state() {
+  [ "$#" -eq 5 ] || return 2
+  local path="$1" ci_iter="$2" review_iter="$3" fix_pushes="$4" classes="$5" payload
+  case "$ci_iter$review_iter" in '' | *[!0-9]*) return 2 ;; esac
+  payload="$(jq -cn \
+    --argjson ci_loop_iter "$ci_iter" \
+    --argjson review_iteration "$review_iter" \
+    --argjson fix_pushes "${fix_pushes:-[]}" \
+    --argjson failure_classes_seen "${classes:-[]}" \
+    '{ci_loop_iter:$ci_loop_iter,review_iteration:$review_iteration,fix_pushes:$fix_pushes,failure_classes_seen:$failure_classes_seen}')" || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$path" ) || return 2
+}
+
+# review_fleet_read_ci_state PATH FIELD -> one recorded counter, in a new shell.
+review_fleet_read_ci_state() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI loop state missing: ${1:-}" >&2
+    return 2
+  }
+  jq -er --arg field "$2" '.[$field] | if type=="array" then tojson else . end' <"$1"
 }
 
 # review_fleet_write_sidecar PATH BINDING CHILD_DIR INSTANCE [HEAD_BEFORE]

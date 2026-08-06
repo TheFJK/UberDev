@@ -394,6 +394,105 @@ grep -Fq 'nothing dispatches this engine' "$SKILL" \
   || pass "G15 review-fleet/SKILL.md no longer records the engine as undispatched"
 
 # ---------------------------------------------------------------------------
+# G16-G18 — Phase 3 (#383). The CI edge set had FOUR uncompared copies, which
+# is exactly the "one contract, N uncompared copies" class #370/#371 named.
+# ---------------------------------------------------------------------------
+CONTRACT_PY="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+MANIFEST="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+
+G16="$(python3 - "$WORKFLOW" "$CONTRACT_PY" "$REVIEW_CMD" "$MANIFEST" <<'PY'
+import importlib.util, json, re, sys
+workflow_js, contract_py, review_md, manifest_json = sys.argv[1:5]
+
+js = open(workflow_js, encoding="utf-8").read()
+js_edges = set(re.findall(r'"(review_pr\.ci\.[a-z_]+)"', js))
+
+spec = importlib.util.spec_from_file_location("cfc", contract_py)
+module = importlib.util.module_from_spec(spec)
+sys.modules["cfc"] = module
+spec.loader.exec_module(module)
+contract_edges = set(module.WORKFLOW_CI_EDGE_IDS)
+
+md = open(review_md, encoding="utf-8").read()
+block = re.search(
+    r"<!-- BEGIN child-callsite-contracts-v1 -->\s*```json\n(.*?)\n```",
+    md, re.DOTALL)
+registry = json.loads(block.group(1)) if block else {}
+registry_edges = {k for k in registry if k.startswith("review_pr.ci.")}
+
+policy = json.load(open(manifest_json, encoding="utf-8"))
+policy_edges = {k for k in policy.get("edges", {}) if k.startswith("review_pr.ci.")}
+
+problems = []
+for label, observed in (("workflow.js", js_edges), ("registry", registry_edges),
+                        ("manifest", policy_edges)):
+    if observed != contract_edges:
+        problems.append("%s=%s" % (label, sorted(observed ^ contract_edges)))
+print("ok" if not problems else "; ".join(problems))
+print(len(contract_edges))
+PY
+)"
+G16_STATE="$(printf '%s' "$G16" | sed -n 1p)"
+G16_COUNT="$(printf '%s' "$G16" | sed -n 2p)"
+[ "$G16_STATE" = ok ] && [ "$G16_COUNT" = 5 ] \
+  && pass "G16 the five review_pr.ci.* edges agree across workflow.js, code_fixer_contract.py, the review-pr registry and the run-tree manifest" \
+  || fail "G16 the CI edge set drifted between its four copies: $G16_STATE (contract count=$G16_COUNT)"
+
+# G17 — every Phase 3 phase() literal is declared in meta.phases. T2 checks this
+# globally; G17 exists so the failure message names Phase 3 rather than a
+# generic drift.
+G17_MISSING=""
+for literal in 'Phase 3 — CI classify' 'Phase 3 — CI fix' 'Phase 3 — CI conflicts' 'Phase 3 — CI defer'; do
+  grep -Fq "phase(\"$literal\")" "$WORKFLOW" || G17_MISSING="$G17_MISSING no-phase-call[$literal]"
+  # META-BEGIN/META-END block must declare it.
+  sed -n '/META-BEGIN/,/META-END/p' "$WORKFLOW" | grep -Fq "\"$literal\"" \
+    || G17_MISSING="$G17_MISSING undeclared[$literal]"
+done
+[ -z "$G17_MISSING" ] \
+  && pass "G17 all four Phase 3 phase() literals exist and are declared in meta.phases" \
+  || fail "G17 Phase 3 phase literals:$G17_MISSING"
+
+# G18 — the CI slug rule is computed on BOTH sides with no envelope scalar, and
+# it must NOT have introduced a second child-directory formula: the CI loop
+# counter lives in the slug, and iterSuffix() still owns the directory suffix.
+grep -Fq 'function ciSlug(base) { return base + "-ci" + pad2(ciLoopIter); }' "$WORKFLOW" \
+  && pass "G18a workflow.js keys the CI loop counter into the SLUG" \
+  || fail "G18a workflow.js ciSlug rule is missing or changed shape"
+SH_CI_SLUG="$(bash -c '. "$1"; review_fleet_ci_slug ci-rebase 2' _ "$ARGS_LIB")"
+[ "$SH_CI_SLUG" = "ci-rebase-ci02" ] \
+  && pass "G18b the shell ciSlug mirror agrees (ci-rebase-ci02)" \
+  || fail "G18b shell ciSlug produced '$SH_CI_SLUG', expected ci-rebase-ci02"
+SH_CI_DIR="$(bash -c '. "$1"; review_fleet_child_dir /run 1 "$(review_fleet_ci_slug ci-rebase 2)"' _ "$ARGS_LIB")"
+[ "$SH_CI_DIR" = "/run/children/ci-rebase-ci02-iter01" ] \
+  && pass "G18c a CI child directory is unique in BOTH counters via the one formula" \
+  || fail "G18c CI child dir was '$SH_CI_DIR'"
+# The trap this replaces: a second childDirAbs-style formula keyed on the CI
+# counter would silently clobber iteration 1's artifacts.
+[ "$(grep -c 'runDirAbs + "/children/"' "$WORKFLOW")" = 1 ] \
+  && pass "G18d there is still exactly ONE child-directory formula in workflow.js" \
+  || fail "G18d a second child-directory formula appeared — CI iterations would clobber each other"
+
+# G19 — the CI stages must use the CI producer. A reviewer- or fixer-shaped
+# producer would mint a binding with no slot for the pinned log artifact, and
+# every downstream equality would still pass while proving strictly less.
+grep -Fq 'bind-workflow-ci-launch' "$ARGS_LIB" \
+  && grep -Fq 'review_fleet_bind_ci()' "$ARGS_LIB" \
+  && grep -Fq 'review_fleet_bind_ci_conflicts()' "$ARGS_LIB" \
+  && pass "G19a review-fleet-args.sh binds CI children with bind-workflow-ci-launch" \
+  || fail "G19a review-fleet-args.sh has no CI producer"
+CI_BIND_BODY="$(sed -n '/^review_fleet_bind_ci()/,/^}/p;/^review_fleet_bind_ci_conflicts()/,/^}/p' "$ARGS_LIB")"
+if grep -Eq 'bind-workflow-launch|bind-workflow-fixer-launch|bind-workflow-persistence-launch' <<<"$CI_BIND_BODY"; then
+  fail "G19b a CI binder reaches for a non-CI producer — the input pin would be dropped"
+else
+  pass "G19b no CI binder reaches for a non-CI producer"
+fi
+# G19c — the loop counters are persisted, because every fence is a fresh shell.
+grep -Fq 'review_fleet_write_ci_state()' "$ARGS_LIB" \
+  && grep -Fq 'review_fleet_read_ci_state()' "$ARGS_LIB" \
+  && pass "G19c the Phase 3 loop counters have an on-disk home" \
+  || fail "G19c the Phase 3 loop counters would die with their fence"
+
+# ---------------------------------------------------------------------------
 # B — behavioral: run the mint fences the command files actually carry
 # ---------------------------------------------------------------------------
 echo "== B: the extracted mint fences really mint, bind and emit =="
