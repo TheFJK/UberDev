@@ -49,6 +49,27 @@
 
 ---
 
+> **AMENDED 2026-08-06 (issue #383) — the dormancy above is LIFTED.**
+>
+> Phase 3 is dispatched by `skills/review-fleet/workflow.js` as four stages, so:
+>
+> - **§3.7's simultaneous-halt precedence is live again**, unchanged.
+> - **`green_after_fix` and `loop_cap_exhausted` are REACHABLE again.**
+>   `green_after_fix` is produced by the 6c.5 POST-FIX re-entry terminating at
+>   6c.7 LOOP GUARD; `loop_cap_exhausted` at the cap check in the re-entry
+>   fence, which now reads its counter from an on-disk sidecar rather than from
+>   a shell variable that died with its fence. The DORMANT annotations on those
+>   two members are removed from `skills/merge-pipeline/SKILL.md` and from both
+>   `commands/review-pr.md` audit schemas, in lockstep with this amendment.
+> - **The §3.5 GREEN predicate is still unchanged.** It already accepted
+>   `green_after_fix`; no edit was needed there when the member went dormant and
+>   none is needed now that it is live.
+> - **`ci_transport_unsupported` no longer exists.** A red probe now classifies
+>   and routes; the loud refusals that remain are the classifier contract's own
+>   (`classifier_refused`, `contract_invalid`) and the mutation judges'.
+
+---
+
 ## 1. Summary
 
 Promote `/uberdev:review-pr`'s findings-to-issues sub-phase (added in PR #112) from purely-advisory to **severity-tiered gating**. Wire deferred-blocker filings into the trust-trail JSON so `/merge`'s trust-trail-evaluator can see them. Surface CI fixer refusals as user-visible halts instead of silent 3-iteration loop exhaustion. Net effect: a green `/review-pr` trail can no longer co-exist with unresolved blocker findings on the same HEAD.

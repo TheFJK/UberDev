@@ -29,8 +29,11 @@ CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+CONTRACT_PY="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+ARGS_LIB_PHASE3="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+WORKFLOW_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 
-for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE"; do
+for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE" "$CONTRACT_PY" "$WORKFLOW_JS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -314,6 +317,17 @@ assert_grep "$REVIEW_PR" 'CI_FIX_PHASE' \
   "S6.2 — CI_FIX_PHASE variable documented (mirrors SIMPLIFY_PHASE)"
 assert_grep "$REVIEW_PR" 'CI_FIX_PHASE=0|--no-ci-fix.*probe' \
   "S6.3 — --no-ci-fix sets CI_FIX_PHASE=0 / probe-only"
+# #383: the mode is ENFORCED IN SHELL now. CI_FIX_PHASE previously had no reader
+# anywhere in this file, so "probe/monitor/classify run, ROUTE/POST-FIX/HALT are
+# skipped" was orchestrator prose that nothing could hold the command to.
+assert_grep "$REVIEW_PR" 'if \[ "\$\{CI_FIX_PHASE:-1\}" = 0 \]' \
+  "S6.4 — --no-ci-fix is enforced by a real shell guard at the head of ROUTE"
+assert_grep "$REVIEW_PR" 'ci_probe_only_skipped' \
+  "S6.5 — the probe-only skip emits its own audit event"
+assert_no_grep "$REVIEW_PR" '\-\-no-ci-fix.*supported mode' \
+  "S6.6 — the --no-ci-fix-is-the-supported-mode language is gone (#383)"
+assert_no_grep "$REVIEW_PR" 'ci_transport_unsupported' \
+  "S6.7 — the Phase 3 transport refusal no longer exists"
 
 echo
 echo "== S7: --turbo on halt classes — no AskUserQuestion, exit 1, no trust signal =="
@@ -383,20 +397,26 @@ assert_no_grep "$CLASSIFIER" '^.*data\.quote' \
   "S10.4 — no data.quote field in return contract (secret-leak guard)"
 assert_grep "$CLASSIFIER" 'CLASSIFIED.*AMBIGUOUS.*REFUSED|status: CLASSIFIED' \
   "S10.5 — refusal triggers + AMBIGUOUS path documented"
-assert_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+assert_grep "$REVIEW_PR" 'validate-ci-classification' \
   "S10.6 — controller validates classifier output before routing"
+assert_no_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+  "S10.6b — the classifier predicate is no longer an LLM-rendered heredoc in the command file (#383)"
+assert_grep "$CONTRACT_PY" '_parse_ci_classification' \
+  "S10.6c — the classifier predicate lives in lib/code_fixer_contract.py, where it is testable"
 assert_grep "$REVIEW_PR" 'ci_classify_returned.*contract_invalid' \
   "S10.7 — invalid class/anchor fails closed with an audit event"
-assert_grep "$REVIEW_PR" 'gh-run-.*\[1-9\].*signal_anchor|signal_anchor.*positive integer' \
-  "S10.8 — blank and zero-line signal anchors are rejected"
+assert_grep "$CONTRACT_PY" 'gh-run-\[1-9\]' \
+  "S10.8 — blank and zero-line signal anchors are rejected (predicate now in the contract)"
 assert_grep "$REVIEW_PR" 'CI_REFUSED_AGGREGATE_PATH.*RESEARCH_DIR_ABS/ci-refused-synthetic' \
   "S10.9 — CI refusal aggregate stays inside the run research directory"
 assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
   "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
-assert_grep "$REVIEW_PR" 'review_child_result_path.*ci-classify\.launched.*review_pr\.ci\.classify' \
-  "S10.10a — classifier validation resolves the routed child's canonical result ledger"
-assert_grep "$REVIEW_PR" 'if review_child_single review_pr\.ci\.classify' \
-  "S10.10a1 — classifier lifecycle failure is checked before artifact discovery"
+assert_grep "$REVIEW_PR" 'capture-ci-terminal .*--edge-id review_pr\.ci\.classify|--edge-id review_pr\.ci\.classify' \
+  "S10.10a — classifier evidence is frozen by capture-ci-terminal, which also re-pins the log bytes"
+assert_grep "$REVIEW_PR" 'review_fleet_bind_ci review_pr\.ci\.classify ' \
+  "S10.10a1 — the classify child is bound with the CI producer BEFORE the Workflow call"
+assert_no_grep "$REVIEW_PR" 'review_child_single review_pr\.ci\.' \
+  "S10.10a1b — no Phase 3 edge takes the routed adapter any more (#383)"
 assert_grep "$REVIEW_PR" 'classifier_child_failed' \
   "S10.10a2 — classifier lifecycle failure is audited and halts routing"
 assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-classification-' \
@@ -438,41 +458,48 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# RE-POINTED (#383). The lifecycle this asserts is unchanged -- a classifier
+# child that does not produce provable evidence must audit
+# `classifier_child_failed` with the real exit code and must block artifact
+# discovery, routing and the fixer. Only the seam moved: the routed
+# `review_child_single` dispatch became the ci-classify Workflow stage, and the
+# lifecycle check is now the `capture-ci-terminal` return in the post-call
+# fence. The fence is EXTRACTED AND RUN, not grepped.
 CLASSIFY_LIFECYCLE_FIXTURE="$(mktemp)"
 CLASSIFY_LIFECYCLE_LOG="$(mktemp)"
 awk '
-  /^[[:space:]]*CI_CLASSIFY_INPUTS="/ { capture=1 }
-  capture && /^[[:space:]]*CI_CLASSIFICATION_PATH="/ { exit }
+  /^[[:space:]]*CI_CLASSIFY_TERMINAL="\$\(python3/ { capture=1 }
+  capture && /^[[:space:]]*CI_CLASSIFY_STATUS_SHA256=/ { exit }
   capture { sub(/^[[:space:]]{4}/,""); print }
 ' "$REVIEW_PR" >"$CLASSIFY_LIFECYCLE_FIXTURE"
 cat >>"$CLASSIFY_LIFECYCLE_FIXTURE" <<'SH'
-review_child_result_path() { printf 'result-discovery\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
+validate_classification() { printf 'validate\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
 route_classifier() { printf 'routing\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
 dispatch_fixer() { printf 'fixer\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
-review_child_result_path
+validate_classification
 route_classifier
 dispatch_fixer
 SH
+[ -s "$CLASSIFY_LIFECYCLE_FIXTURE" ] || {
+  echo "  FAIL  S10.10a3 — the ci-classify capture fence could not be extracted"; FAIL=$((FAIL + 1))
+}
 set +e
 CLASSIFY_LIFECYCLE_LOG="$CLASSIFY_LIFECYCLE_LOG" \
-PR_NUMBER=1 CI_RUN_ID=123 RUN_ID=fixture \
-CI_LOG_AUTHORITY_JSON='{"pr_number":1,"run_id":"123","head_sha":"0123456789abcdef0123456789abcdef01234567","log_content":"wrapped","log_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' \
-CI_FIX_LOOP_ITER=2 RESEARCH_DIR_ABS=/tmp/research REVIEW_PR_TIMEOUT=9 \
+CODE_FIXER_CONTRACT=/nonexistent/contract.py \
+CI_CLASSIFY_BINDING='{"backend":"workflow"}' \
 bash -c '
-  review_json_string() { printf "\"%s\"" "$1"; }
-  review_json_member() { python3 -I -B -c '"'"'import json,sys; print(json.dumps(json.loads(sys.argv[1])[sys.argv[2]]),end="")'"'"' "$1" "$2"; }
-  uberdev_child_inputs_build() { printf "{}"; }
-  uberdev_child_instance_id() { printf "%s" "$1"; }
-  review_child_single() { printf "child\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
+  # Stand in for the real contract subprocess: a child whose evidence cannot be
+  # captured exits 37, exactly as the real verb would exit non-zero.
+  python3() { printf "child-capture\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
   audit() { printf "audit:%s:%s:%s\n" "$1" "$2" "$3" >>"$CLASSIFY_LIFECYCLE_LOG"; }
   . "$1"
 ' _ "$CLASSIFY_LIFECYCLE_FIXTURE"
 CLASSIFY_LIFECYCLE_RC=$?
 set +e
 if [ "$CLASSIFY_LIFECYCLE_RC" -eq 1 ] \
-    && grep -q '^child$' "$CLASSIFY_LIFECYCLE_LOG" \
+    && grep -q '^child-capture$' "$CLASSIFY_LIFECYCLE_LOG" \
     && grep -q 'classifier_child_failed.*exit_code=37' "$CLASSIFY_LIFECYCLE_LOG" \
-    && ! grep -Eq 'result-discovery|routing|fixer' "$CLASSIFY_LIFECYCLE_LOG"; then
+    && ! grep -Eq 'validate|routing|fixer' "$CLASSIFY_LIFECYCLE_LOG"; then
   echo "  PASS  S10.10a3 — classifier lifecycle failure records rc=37 and blocks discovery, routing, and fixer"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.10a3 — classifier lifecycle failure reached a downstream canary"; FAIL=$((FAIL + 1))
@@ -481,11 +508,53 @@ rm -f "$CLASSIFY_LIFECYCLE_FIXTURE" "$CLASSIFY_LIFECYCLE_LOG"
 
 CLASSIFY_HELPER="$(mktemp)"
 CLASSIFY_CASE="$(mktemp)"
-awk '
-  /^[[:space:]]*review_validate_ci_classification\(\) \{/ { capture=1 }
-  capture { print }
-  capture && /^[[:space:]]*\}$/ { exit }
-' "$REVIEW_PR" > "$CLASSIFY_HELPER"
+# RE-POINTED (#383). `review_validate_ci_classification` was a python heredoc
+# inside commands/review-pr.md, which meant the predicate deciding whether a
+# MUTATING fixer runs was LLM-rendered markdown with no test of its own. It now
+# lives in lib/code_fixer_contract.py as `_parse_ci_classification`. The cases
+# below are UNCHANGED and still run against real bytes -- only the callee moved,
+# so no assertion is lost to the move. The tab-joined shim keeps the existing
+# expectations byte-identical.
+cat >"$CLASSIFY_HELPER" <<'SHIM'
+review_validate_ci_classification() {
+  python3 -I -B - "$1" "$2" "$2/plugins/uberdev/lib/code_fixer_contract.py" <<'PYSHIM'
+import importlib.util, sys
+case_path, root, contract = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("cfc_classify", contract)
+module = importlib.util.module_from_spec(spec)
+sys.modules["cfc_classify"] = module
+spec.loader.exec_module(module)
+payload = open(case_path, "rb").read()
+# The shipped bound: validate_ci_classification captures the result through
+# capture_expected(..., 1, CI_RESULT_LIMIT), so a document over the cap is
+# refused before the parser ever sees it. Mirror that here or the byte-boundary
+# case below would silently start passing on an oversized document.
+if not payload or len(payload) > module.CI_CLASSIFICATION_RESULT_LIMIT:
+    raise SystemExit(2)
+try:
+    parsed = module._parse_ci_classification(payload, root)
+except module.ContractFailure as error:
+    if str(error) == "ci_classification_refused":
+        # The contract makes REFUSED terminal; the shell surface reported it as
+        # a row. Re-derive the row from the same bytes so the historical
+        # expectations keep exercising the same predicate.
+        import re as _re
+        body = _re.search(r"(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z",
+                          payload.decode("utf-8"), _re.DOTALL).group(1)
+        rationale = ""
+        for line in body.splitlines():
+            if line.startswith("rationale:"):
+                rationale = module._ci_classifier_scalar(line.split(":", 1)[1].strip()) or ""
+        print("REFUSED\t-\t-\t" + rationale)
+        raise SystemExit(0)
+    raise SystemExit(2)
+if parsed["status"] == "AMBIGUOUS":
+    print("AMBIGUOUS\tflaky\t-\t-")
+else:
+    print("CLASSIFIED\t" + parsed["failure_class"] + "\t" + parsed["signal_anchor"] + "\t-")
+PYSHIM
+}
+SHIM
 write_classifier_case() {
   local status="$1" failure_class="$2" signal_anchor="$3" rationale="$4"
   printf '```yaml\nstatus: %s\nfailure_class: %s\nsignal_anchor: %s\nrationale: %s\nrisks: []\n```\n' \
@@ -742,9 +811,29 @@ RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.cla
 write_result_carrier_fixture codex
 
 chmod 600 "$RESULT_PATH_RESOLVED"
+# RE-POINTED (#383). The routed transport proved "the bytes cannot be replaced
+# after discovery" through the digest embedded in the published
+# `.trusted.md.attempt-<32hex>-<64hex>` filename. The Workflow transport proves
+# the SAME property one layer down and more directly: capture-ci-terminal
+# digests the result, and validate-ci-classification re-captures it against that
+# digest, so any post-capture replacement refuses. Exercised on real bytes.
+CLASSIFY_GOOD_DIGEST="$(python3 -I -B "$CONTRACT_PY" digest --path "$RESULT_PATH_RESOLVED" --minimum 1 --maximum 65536)"
 write_classifier_case AMBIGUOUS null null '"replacement after discovery"'
 cp "$CLASSIFY_CASE" "$RESULT_PATH_RESOLVED"
-if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT"; then
+if python3 -I -B - "$CONTRACT_PY" "$RESULT_PATH_RESOLVED" "$CLASSIFY_GOOD_DIGEST" <<'RECAPTURE_PY'
+import importlib.util, sys
+contract, path, digest = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("cfc_recapture", contract)
+module = importlib.util.module_from_spec(spec)
+sys.modules["cfc_recapture"] = module
+spec.loader.exec_module(module)
+try:
+    module.capture_expected(path, digest, 1, module.CI_CLASSIFICATION_RESULT_LIMIT)
+except module.ContractFailure:
+    raise SystemExit(1)
+raise SystemExit(0)
+RECAPTURE_PY
+then
   RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 fi
 python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
@@ -910,8 +999,12 @@ echo "== S13: stale_base CONFLICT-resolve arm (#80) =="
 # (ci-rebase-handler.md:57 + agents/conflict-resolver.md exist) but unwired.
 # These assertions lock the procedural arm into the prose so a future edit
 # can't silently regress it back to "POST-FIX assumes REBASED".
-assert_subagent_type "$REVIEW_PR" 'conflict-resolver' \
-  "S13.1 — review-pr.md dispatches uberdev:conflict-resolver in Phase 3 CONFLICT path"
+assert_grep "$REVIEW_PR" 'stage=ci-conflicts' \
+  "S13.1 — review-pr.md dispatches the conflict fanout as the ci-conflicts Workflow stage"
+assert_grep "$WORKFLOW_JS" 'uberdev:conflict-resolver' \
+  "S13.1b — the ci-conflicts stage dispatches uberdev:conflict-resolver"
+assert_grep "$REVIEW_PR" 'review_fleet_bind_ci_conflicts ' \
+  "S13.1c — one CI binding per conflicted path is minted BEFORE the call"
 assert_grep "$REVIEW_PR" 'conflicted_files' \
   "S13.2 — review-pr.md prose names the conflicted_files YAML field from ci-rebase-handler return"
 assert_grep "$REVIEW_PR" 'status: CONFLICT' \
@@ -930,8 +1023,23 @@ assert_grep "$REVIEW_PR" 'force-with-lease=' \
   "S13.9 — post-resolution push uses explicit-form --force-with-lease=<branch>:<sha>"
 assert_grep "$REVIEW_PR" 'force-if-includes' \
   "S13.10 — post-resolution push pairs --force-with-lease with --force-if-includes"
-assert_grep "$REVIEW_PR" 'EXPECTED_OLD_SHA' \
-  "S13.11 — original-lease SHA name (EXPECTED_OLD_SHA) referenced for resume push"
+assert_grep "$REVIEW_PR" 'CI_LEASE_SHA=.*rev-parse "refs/remotes/origin/\$CI_PR_HEAD_BRANCH"' \
+  "S13.11 — the lease is the PR HEAD's prior tip, captured by the controller (never origin/<base>)"
+assert_grep "$REVIEW_PR" 'read-ci-authority-member' \
+  "S13.11a — the lease is read back through a DIGEST re-check, never with jq"
+assert_no_grep "$REVIEW_PR" 'EXPECTED_OLD_SHA' \
+  "S13.11b — the agent-held lease name is gone: the child no longer captures or holds it (#383)"
+assert_no_grep "$REBASE_HANDLER" '^[^-]*git push [^i]' \
+  "S13.11c — ci-rebase-handler proposes no push command"
+# The agent file NAMES the retired lock in order to ban it (a future reader must
+# not "restore" a lock that cannot work across fences), so strip the prose that
+# does the banning before checking that no live recipe remains.
+REBASE_HANDLER_LIVE="$(sed -n '/^## No lock file/,/^## Process/!p' "$REBASE_HANDLER")"
+if printf '%s\n' "$REBASE_HANDLER_LIVE" | grep -Eq 'exec 200|flock -n'; then
+  echo "  FAIL  S13.11d — a live flock recipe survives outside the deletion note"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S13.11d — the void fence-scoped flock lock is deleted, not ported"; PASS=$((PASS + 1))
+fi
 assert_grep "$REVIEW_PR" 'rebase --continue|git rebase --continue' \
   "S13.12 — RESOLVED path runs git rebase --continue before push"
 assert_grep "$REVIEW_PR" 'rebase --abort|git rebase --abort' \
@@ -1592,6 +1700,173 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$CI_LOG_STREAM_FIXTURE"
+
+# ---------------------------------------------------------------------------
+# S21-S23 (#383) — the Workflow-native Phase 3 stage machine
+# ---------------------------------------------------------------------------
+echo "== S21: the ROUTE stage machine =="
+assert_grep "$REVIEW_PR" 'CI_FIXER_EDGE_ID=review_pr\.ci\.fix_code' \
+  "S21.1 — code_bug/env_drift routes to the fix_code edge"
+assert_grep "$REVIEW_PR" 'CI_FIXER_EDGE_ID=review_pr\.ci\.rebase' \
+  "S21.2 — stale_base routes to the rebase edge"
+assert_grep "$REVIEW_PR" 'gh run rerun "\$CI_RUN_ID"' \
+  "S21.3 — the flaky arm re-runs in Bash with the REAL run id"
+assert_no_grep "$REVIEW_PR" 'gh run rerun <run-id>' \
+  "S21.4 — the literal <run-id> placeholder that made the ROUTE fence unexecutable is gone"
+assert_no_grep "$REVIEW_PR" 'jump to 6c\.6 HALT' \
+  "S21.5 — the prose-inside-a-case that was a syntax error is gone"
+assert_grep "$REVIEW_PR" 'stage=ci-classify' \
+  "S21.6 — CLASSIFY is a Workflow stage"
+assert_grep "$REVIEW_PR" 'stage=ci-fix' \
+  "S21.7 — the routed fixer is a Workflow stage"
+assert_grep "$REVIEW_PR" 'stage=ci-defer' \
+  "S21.8 — the CI-REFUSED defer is a Workflow stage"
+# The forward-reference bug: base_branch was bound only in the CONFLICT arm,
+# which runs strictly AFTER ROUTE, so ROUTE either aborted under set -u or
+# silently resolved `origin/` to nothing and poisoned base_sha.
+# Comment-strip first: the ROUTE fence NAMES the old expression in order to
+# record the bug, and a guard that punished the explanation would be unfixable.
+if grep -v '^[[:space:]]*#' "$REVIEW_PR" | grep -q 'git merge-base HEAD "origin/${base_branch}"'; then
+  echo "  FAIL  S21.9 — the forward-referenced base_branch merge-base is still live"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S21.9 — the forward-referenced base_branch merge-base is gone"; PASS=$((PASS + 1))
+fi
+assert_grep "$REVIEW_PR" 'CI_BASE_SHA=.*merge-base' \
+  "S21.10 — the base SHA is derived from refs bound in the SAME fence"
+
+echo "== S22: the rebase lease is controller-held =="
+assert_grep "$REVIEW_PR" 'force-with-lease="\$CI_PR_HEAD_BRANCH":"\$CI_LEASE_SHA"' \
+  "S22.1 — explicit-form lease against the PR head branch"
+assert_grep "$REVIEW_PR" 'force-if-includes' \
+  "S22.2 — paired with --force-if-includes"
+# The bare shorthand uses @{upstream} and is forbidden; so is bare --force.
+# Only EXECUTABLE lines: the prose deliberately names the forbidden shorthand in
+# order to forbid it. A push line must carry the explicit `<branch>:<sha>` form.
+# Executable push lines only: leading `git push` or a `git -C <dir> push`, never
+# a prose sentence that merely mentions one (the trust-anchor section explains
+# that it NEVER needs --force-with-lease, and that sentence must stay sayable).
+PUSH_LINES="$(grep -v '^[[:space:]]*#' "$REVIEW_PR" \
+  | grep -E '^[[:space:]]*([A-Z_]+="\$\()?git( -C "[^"]+")? push ' || true)"
+if printf '%s\n' "$PUSH_LINES" | grep -qE '\-\-force-with-lease([^=]|$)'; then
+  echo "  FAIL  S22.3 — a bare --force-with-lease (the @{upstream} shorthand) reached a push command"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S22.3 — every --force-with-lease on a push carries an explicit <branch>:<sha>"; PASS=$((PASS + 1))
+fi
+if printf '%s\n' "$PUSH_LINES" | grep -qE '\-\-force([^-]|$)'; then
+  echo "  FAIL  S22.4 — a bare --force push reached the command"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S22.4 — no bare --force push anywhere in the command"; PASS=$((PASS + 1))
+fi
+
+echo "== S22-RUNTIME: the lease really refuses a stale push (offline, two local repos) =="
+LEASE_TMP="$(mktemp -d)"
+LEASE_TMP="$(cd "$LEASE_TMP" && pwd -P)"
+(
+  set -e
+  git init -q --bare "$LEASE_TMP/origin.git"
+  git clone -q "$LEASE_TMP/origin.git" "$LEASE_TMP/work" 2>/dev/null
+  cd "$LEASE_TMP/work"
+  git config user.email fixture@example.invalid
+  git config user.name Fixture
+  git checkout -qb feature 2>/dev/null || git checkout -q -b feature
+  printf 'one\n' >file.txt
+  git add file.txt
+  git commit -qm "test: base"
+  git push -q origin feature
+) >/dev/null 2>&1
+LEASE_SHA="$(git -C "$LEASE_TMP/work" rev-parse refs/remotes/origin/feature 2>/dev/null)"
+# Case 1: a correctly captured lease pushes.
+(
+  cd "$LEASE_TMP/work"
+  printf 'two\n' >file.txt
+  git add file.txt
+  git commit -qm "fix(ci): amend"
+) >/dev/null 2>&1
+LEASE_PUSH_STDERR="$(git -C "$LEASE_TMP/work" push origin feature \
+  --force-with-lease=feature:"$LEASE_SHA" --force-if-includes 2>&1 1>/dev/null)"
+LEASE_PUSH_RC=$?
+# Case 2: a third party pushes behind the runner's back, so the captured lease
+# is now stale. The SAME fence must fail, and its stderr must match the
+# classifier that distinguishes rebase_lease_mismatch from rebase_push_failed.
+(
+  set -e
+  git clone -q "$LEASE_TMP/origin.git" "$LEASE_TMP/other" 2>/dev/null
+  cd "$LEASE_TMP/other"
+  git config user.email other@example.invalid
+  git config user.name Other
+  git checkout -q feature
+  printf 'three\n' >file.txt
+  git add file.txt
+  git commit -qm "fix: external"
+  git push -q origin feature
+) >/dev/null 2>&1
+(
+  cd "$LEASE_TMP/work"
+  printf 'four\n' >file.txt
+  git add file.txt
+  git commit -qm "fix(ci): racing"
+) >/dev/null 2>&1
+STALE_PUSH_STDERR="$(git -C "$LEASE_TMP/work" push origin feature \
+  --force-with-lease=feature:"$LEASE_SHA" --force-if-includes 2>&1 1>/dev/null)" \
+  && STALE_PUSH_RC=0 || STALE_PUSH_RC=$?
+# git writes its progress banner to stderr on success, so only the RC is
+# meaningful for the happy case.
+if [ "$LEASE_PUSH_RC" -eq 0 ] && [ "${STALE_PUSH_RC:-0}" -ne 0 ]; then
+  echo "  PASS  S22-RT.1 — a correct lease pushes and a stale lease is rejected by git itself"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S22-RT.1 — lease behaviour drifted (ok_rc=$LEASE_PUSH_RC stale_rc=${STALE_PUSH_RC:-0})"; FAIL=$((FAIL + 1))
+fi
+if printf '%s' "$STALE_PUSH_STDERR" | grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)'; then
+  echo "  PASS  S22-RT.2 — the stale-lease stderr matches the command's rebase_lease_mismatch classifier"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S22-RT.2 — stale-lease stderr would mis-route to rebase_push_failed: $STALE_PUSH_STDERR"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$LEASE_TMP"
+
+echo "== S23: re-entry never re-mints RUN_ID, and BOTH counters advance =="
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_state\(\)' \
+  "S23.1 — the CI loop counters have an on-disk home"
+assert_grep "$REVIEW_PR" 'review_fleet_read_ci_state "\$CI_LOOP_STATE" ci_loop_iter' \
+  "S23.2 — the re-entry fence reads the counter back from disk"
+CI_ITER_INCREMENTS="$(grep -c 'CI_FIX_LOOP_ITER=\$((CI_FIX_LOOP_ITER + 1))' "$REVIEW_PR")"
+REVIEW_ITER_INCREMENTS="$(grep -c 'REVIEW_ITERATION=\$((REVIEW_ITERATION + 1))' "$REVIEW_PR")"
+if [ "$CI_ITER_INCREMENTS" = 1 ] && [ "$REVIEW_ITER_INCREMENTS" = 1 ]; then
+  echo "  PASS  S23.3 — exactly ONE site increments each counter, so they cannot disagree"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23.3 — counter increment sites: ci=$CI_ITER_INCREMENTS review=$REVIEW_ITER_INCREMENTS (want 1 and 1)"; FAIL=$((FAIL + 1))
+fi
+# THE TRAP THIS CLOSES: childDirAbs() keys on reviewIteration ALONE. Without the
+# lockstep increment, iteration 2 rebinds iteration 1's result.md paths and the
+# capture verbs freeze STALE bytes while every equality still passes.
+# EXECUTABLE lines only, inside the Phase 3 byte range: the re-entry prose names
+# both identifiers precisely in order to explain why neither may run again.
+PHASE3_SLICE="$(awk '
+  /^6c\. \*\*Phase 3 — CI Health\*\*/ { inphase = 1 }
+  /^### Phase 3 audit JSON shape/ { if (inphase) exit }
+  inphase && /^[ \t]*```bash/ { fence = 1; next }
+  inphase && fence && /^[ \t]*```[ \t]*$/ { fence = 0; next }
+  inphase && fence { print }
+' "$REVIEW_PR")"
+if printf '%s\n' "$PHASE3_SLICE" | grep -qE 'REVIEW_RUN_ID_REQUEST|review_reserve_run_directory'; then
+  echo "  FAIL  S23.4 — Phase 3 re-mints RUN_ID; the evidence directory would fork mid-run"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S23.4 — Phase 3 never re-mints RUN_ID (re-entry goes to Step 4, not Step 1)"; PASS=$((PASS + 1))
+fi
+
+echo "== S23-RUNTIME: the counters survive a FRESH shell with a cleared environment =="
+CI_STATE_TMP="$(mktemp -d)"
+bash -c '. "$1"; review_fleet_write_ci_state "$2/ci.json" 3 2 "[]" "[\"code_bug\"]"' \
+  _ "$ARGS_LIB_PHASE3" "$CI_STATE_TMP" >/dev/null 2>&1
+# env -i: an env-passing probe would MASK the whole class this exists to catch.
+CI_STATE_READBACK="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_read_ci_state "$2/ci.json" ci_loop_iter' \
+  _ "$ARGS_LIB_PHASE3" "$CI_STATE_TMP" 2>/dev/null)"
+if [ "$CI_STATE_READBACK" = 3 ]; then
+  echo "  PASS  S23-RT.1 — the cap check reads 3 in a shell that inherited nothing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23-RT.1 — the loop counter did not survive a fresh shell: '$CI_STATE_READBACK'"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$CI_STATE_TMP"
+
 
 echo
 echo "== Summary =="

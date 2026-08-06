@@ -897,14 +897,13 @@ uberdev_dispatch_preflight_backend() {
       # lib/agent-dispatch.sh's workspace_mode validator.
       #
       # #381 step 3 made this the DEFAULT: `auto` now resolves workflow for both
-      # workflows too. One BREAKING gap travels with that flip -- /review-pr
-      # Phase 3 dispatches review_pr.ci.* through the routed adapter, which has
-      # no workflow provider arm, so a RED check halts loudly at 6c.3 CLASSIFY
-      # with subreason=ci_transport_unsupported. Step 4 deleted the codex
-      # backend that used to be the named escape hatch, so there is no longer
-      # ANY transport that can run Phase 3 CI classification or the CI fixers:
-      # --no-ci-fix is the supported mode until Phase 3 is rebuilt
-      # Workflow-natively (commands/review-pr.md 6c, CHANGELOG BREAKING note).
+      # workflows too. The BREAKING Phase-3 gap that travelled with that flip is
+      # CLOSED as of #383: review_pr.ci.* no longer take the routed adapter at
+      # all. They are dispatched by skills/review-fleet/workflow.js, like the
+      # other four stages, through the four Phase 3 stages ci-classify, ci-fix,
+      # ci-conflicts and ci-defer -- so nothing in Phase 3 reaches
+      # _uberdev_agent_dispatch_backend's hard-failing `workflow)` arm, for the
+      # same reason nothing in Phase 1 or Phase 2 does.
       # (The engine gate is applied once, in the backend case below, so it
       # covers every workflow rather than only these two.)
       workflow) ;;

@@ -2,7 +2,7 @@
 
 | Field            | Value                                                                |
 | ---------------- | -------------------------------------------------------------------- |
-| **Status**       | Draft — **DORMANT since 2026-08-05 (issue #381)**, see the note below |
+| **Status**       | Draft — dormant 2026-08-05 (#381), **RESTORED 2026-08-06 (#383)**; see the notes below |
 | **Author**       | TheFJK                                                               |
 | **Created**      | 2026-05-06                                                           |
 | **Targets**      | `plugins/uberdev/commands/review-pr.md`, new agents, new SKILL phase |
@@ -25,6 +25,40 @@
 > the design, and rebuilding Phase 3 Workflow-natively (RFC 0012 §3.1) restores
 > it as written. See the sibling amendment in RFC 0002 for what this does and
 > does not change about the GREEN predicate.
+
+---
+
+> **AMENDED 2026-08-06 (issue #383) — the capability is RESTORED, and this
+> RFC's design is amended in exactly one respect.**
+>
+> Phase 3's five `review_pr.ci.*` children are dispatched by
+> `skills/review-fleet/workflow.js` as four stages — `ci-classify`, `ci-fix`,
+> `ci-conflicts`, `ci-defer` — like the other four review-fleet stages. Nothing
+> in Phase 3 reaches the routed adapter, so the `ci_transport_unsupported`
+> refusal is deleted rather than merely unreachable. `--no-ci-fix` survives as a
+> legitimate opt-out and is now enforced in shell.
+>
+> **The one design change: the `--force-with-lease` lease is CONTROLLER-HELD,
+> not agent-held.** This RFC (and `agents/ci-rebase-handler.md` as written)
+> had `ci-rebase-handler` capture `EXPECTED_OLD_SHA` itself and perform the
+> push. That is an LLM holding the lease: git then compares the remote against
+> a value the agent chose, the flag still appears on the command line, and the
+> safety property is gone while every downstream check still reads as verified.
+> The agent is demoted from pusher to preparer — its tool list drops `git push`
+> entirely — and `commands/review-pr.md` captures the lease at 6c.4 ROUTE
+> (`rev-parse refs/remotes/origin/<pr_head_branch>`, never `origin/<base>`),
+> stores it in a digest-pinned CI authority, and performs the single leased push
+> itself. `validate-ci-mutation-outcome` compares the live remote tip against
+> that pinned lease BEFORE the controller pushes, so a child that pushed anyway
+> is caught rather than trusted.
+>
+> The `flock` lock this RFC specified is deleted with no replacement: under the
+> demotion it would have to be held by the controller across a Workflow call,
+> and every command fence is a fresh shell, so the descriptor dies with the
+> fence and the lock is void. The lease is the cross-run guard and `git rebase`
+> refuses a second in-progress rebase on its own.
+>
+> Status stays **Draft**.
 
 ---
 

@@ -22,7 +22,7 @@ Every heavy uberdev pipeline today is a **directive-emitter**: the `SKILL.md` ba
 1. **Fence-scoped shell state death.** Each bash fence is a fresh process; `trap EXIT`, PID stamps, exports and arrays die at fence end:
    - the `/merge` single-instance lock is void — next run's `kill -0` sees the dead fence PID and steals it (merge-pipeline `Step 1.1 — Acquire the single-instance lock`, #303);
    - `/goal` Phase-3 builds `new_candidates` in the candidate-query fence and loses it before the terminal-gate fence reads it → **false converge with BLOCKER findings still open** (#301 CRITICAL);
-   - historically, `/review-pr`'s locked marker + EXIT trap lived milliseconds (the marker write that is now `review_reserve_run_directory` in the `### Executable setup` fence, #302); the directive fallback now carries marker authority across shells in an identity/digest receipt, while the `EXPECTED_OLD_SHA` force-push lease still splits across fences (its capture in the Step-6c CONFLICT arm vs. the later `--force-with-lease` push fence);
+   - historically, `/review-pr`'s locked marker + EXIT trap lived milliseconds (the marker write that is now `review_reserve_run_directory` in the `### Executable setup` fence, #302); the directive fallback now carries marker authority across shells in an identity/digest receipt, while the Phase-3 force-push lease still splits across fences (its capture in Step 6c.4 ROUTE vs. the later `--force-with-lease` push fence — now carried between them in a digest-pinned CI authority rather than in a shell variable, #383);
    - `/testers`' `POLITE_BREACH` fail-the-run contract can never fire (the testers-pipeline breach gate, #306).
 2. **zsh/bash divergence.** The Bash tool runs `/bin/zsh` on macOS:
    - `ARR=($VAR)` scalar-split both scan wave loops into one garbage element (the uberscan and ubersimplify chunk-id wave loops, #305) — the replacement fans out one `areaPrompt` per area inside `skills/scan-fleet/workflow.js`, so the shell array is gone rather than patched;
@@ -140,7 +140,65 @@ Claude Code now ships the **Workflow tool ("ultracode")**: a deterministic backg
            "conflictWave":10, "maxNew":10, "settleReprobes":3, "settleAgeSec":120, "fanoutCap":6} }
 ```
 
-**Script shape** (`skills/review-pr/workflow.js`; meta phases `["Phase 1 — Review fanout","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI health","Verdict"]`):
+> **AMENDED 2026-08-06 (issue #383) — Phase 3 is BUILT. The pseudocode below is
+> the original proposal and is retained as history; five of its moves were
+> REJECTED during implementation. Read this block before treating any line of it
+> as a specification.**
+>
+> 1. **The script is `skills/review-fleet/workflow.js`**, not
+>    `skills/review-pr/workflow.js` — one engine serves `/review-pr` and
+>    `/simplify`. The Phase 3 phase literals are `Phase 3 — CI classify`,
+>    `Phase 3 — CI fix`, `Phase 3 — CI conflicts` and `Phase 3 — CI defer`; there
+>    is no `"Phase 3 — CI health"` phase and no `"Verdict"` phase (the
+>    trust-anchor tail stays in Bash).
+> 2. **Rejected from this pseudocode, with reasons.** Each of these looks like an
+>    optimisation and each deletes a proof:
+>    - *"finisher agent does add + rebase --continue + push --force-with-lease
+>      with the JS-held lease"* and *"recreate-conflict agent returns
+>      EXPECTED_OLD_SHA/BASE_SHA → JS vars"*. **Rejected.** An LLM-supplied lease
+>      makes `--force-with-lease` compare the remote against a value the agent
+>      chose: the flag stays on the command line, the safety property is gone,
+>      and nothing downstream can tell. This is the single worst outcome
+>      available in the command. The controller captures the lease, pins it in a
+>      digest-bound CI authority, and pushes itself; `ci-rebase-handler` has no
+>      `git push` tool at all, and `validate-ci-mutation-outcome` compares the
+>      live remote tip against the pinned lease before the controller pushes.
+>    - *"haiku push agent: git push origin HEAD"* and *"haiku writer emits
+>      post-impl-review-final.md"*. **Rejected**, already recorded in
+>      `skills/review-fleet/workflow.js`'s header for Phase 1; the same reasoning
+>      applies one authority level higher to Phase 3.
+>    - *"null/throw from ANY arm agent mid-rebase → dispatch a `git rebase
+>      --abort` cleanup agent"*. **Rejected.** The controller's post-call fence
+>      runs unconditionally after the Workflow returns; the abort is a guarded
+>      Bash line there. An agent dispatched to clean up after a dead agent is a
+>      second thing that can die.
+>    - *"classifier ... via agentType (oneOf schema enforces the
+>      status/failure_class pairing)"* as the ROUTING input. **Rejected.** The
+>      schema is a shape gate, and shape gates are refusals, not blessings. The
+>      class the MUTATING arm routes on comes from
+>      `validate-ci-classification`, which re-reads the child's frozen result
+>      bytes in the controller's Bash and additionally proves that a
+>      `code_bug`/`env_drift` anchor names a real file on disk — something no
+>      in-script schema can do.
+> 3. **There is no in-script `while` and no `caps.ciFixLoop` counter.** The loop
+>    is the CONTROLLER re-entering Phase 1, and the cap is enforced against an
+>    on-disk state sidecar (`review_fleet_write_ci_state`). An in-script counter
+>    would lose its value the moment the Workflow call returned.
+> 4. **MONITOR did not move in-script.** `caps.monitorPassSec` / `monitorPasses`
+>    stay Bash-side: DR-7 forbids a wall clock in a Workflow script, so the 480 s
+>    per-fence and `CI_MONITOR_DEADLINE_SEC` across-fence budgets are not
+>    expressible there. Nor did PROBE, `gh run rerun`, `git add`,
+>    `rebase --continue`, the push, or 6c.6 HALT — none of them dispatches an
+>    agent.
+> 5. **`ci-classify` → `ci-fix` and `ci-fix` → `ci-conflicts` are separate
+>    Workflow calls because they are PROOF POINTS**, not because of an agent
+>    budget. The rejected alternative *"Per-phase review-pr workflows"* below is
+>    still rejected: this design adds stages to the ONE script.
+>
+> What was kept as written: RUN_ID is never re-minted on re-entry, and the
+> conflict fanout is one child per conflicted file sliced by a wave cap.
+
+**Script shape** (ORIGINAL PROPOSAL, superseded in the five respects above; `skills/review-pr/workflow.js`; meta phases `["Phase 1 — Review fanout","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI health","Verdict"]`):
 
 ```text
 async function reviewFixCycle(iter):

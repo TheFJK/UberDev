@@ -7291,6 +7291,11 @@ CI_FAILURE_CLASSES = (
 
 CI_INPUT_LIMIT = 1_048_576
 CI_RESULT_LIMIT = 1_048_576
+# The classifier's report is a short YAML fence, and the routed transport bounded
+# it at 65,536 bytes. Keeping that bound is not cosmetic: the parser scans for the
+# LAST fence in the document, so an unbounded report is an unbounded scan over
+# bytes an agent chose.
+CI_CLASSIFICATION_RESULT_LIMIT = 65_536
 
 # A CI fix may touch the anchor's own file plus AT MOST ONE lockfile. The set is
 # closed on purpose: `forbidden-pattern-multi-lockfile-churn` is enforced by the
@@ -7813,7 +7818,7 @@ def validate_ci_classification(
     )
     _validate_bound_child_status(binding, status_payload)
     result_payload = capture_expected(
-        binding["result_path"], result_sha256, 1, CI_RESULT_LIMIT
+        binding["result_path"], result_sha256, 1, CI_CLASSIFICATION_RESULT_LIMIT
     )
     classification = _parse_ci_classification(result_payload, binding["worktree"])
     return {
