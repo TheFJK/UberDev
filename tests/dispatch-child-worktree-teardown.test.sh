@@ -80,6 +80,23 @@
 # (There is no T17: the "the refusal reaches $DISPATCH_LOG" assertions belong to
 # the cases that produce a refusal and live inside T11/T12/T13/T15b.)
 #
+# T11-T18 all assume the probe ANSWERS. Moving the failure earlier also moved a
+# subprocess from the detached child — which the dispatcher never waits on —
+# into the dispatcher's own foreground, where `_uberdev_dispatch_background`
+# runs inside the /turbo fanout's SERIAL loop. A probe that blocks therefore
+# stalls every remaining issue, not one child. T19-T21 hold that:
+#   T19  a $DISPATCH_LIB that BLOCKS at source time (rather than failing to
+#        parse) must be refused on a wall-clock bound, with its own wording.
+#        Reproduced red first: the probe was still running after the deadline
+#        with an empty $DISPATCH_LOG, i.e. the dispatch loop was wedged and the
+#        fanout report had nothing to print.
+#   T20  the probe must not inherit the dispatcher's stdin. Reproduced red
+#        first: a library that reads one line at source time ate the
+#        dispatcher's, which then read EOF.
+#   T21  T15's fault applied to the bound itself: `$TIMEOUT_BIN` is a BARE NAME
+#        on the resolver's `command -v` branch, so a `timeout` shell function
+#        would answer for it and the bound would cap nothing.
+#
 # Unix-runtime fixture: real `git worktree add`, real nohup detachment, real
 # POSIX ownership predicates. Skipped on windows-latest (see the ci-wiring
 # windows-skip-list marker block in .github/workflows/test.yml).
@@ -1008,6 +1025,150 @@ for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
     ko "T18 $arm has $UNREPORTED pre-source \`exit 126\` path(s) that leak silently: $(printf '%s\n' "$WINDOW" | grep 'exit 126' | grep -v 'report_presource_leak' | tr '\n' ';')"
   fi
 done
+
+echo "== T19: a library that BLOCKS at source time is refused on a wall-clock bound =="
+# T11/T12 use libraries that FAIL — unreadable, or missing the teardown. Both
+# answer the probe immediately, so neither says anything about a library that
+# simply never returns: a stalled network mount holding the file, or a mid-edit
+# save that leaves a blocking top-level statement. Before the bound, that probe
+# was an unbounded FOREGROUND subprocess of the dispatcher, so the blast radius
+# was not this child but the whole serial dispatch loop, with nothing written
+# to the log the /turbo fanout reports.
+#
+# Driven as a unit call for the same reason as T15b: the fault is entirely
+# inside this one function, and the assertion is "it RETURNS", which a fixture
+# that also has to reach `git worktree add` would only muddy.
+T19_RUNTIME="$TMP/t19-runtime"
+mkdir -p "$T19_RUNTIME"
+T19_LOG="$T19_RUNTIME/dispatch.log"
+: >"$T19_LOG"
+T19_RC_FILE="$T19_RUNTIME/rc"
+T19_LIB="$TMP/t19-blocking-dispatch-lib.sh"
+# `sleep`, not a blocking read: a read is answered by the probe's own
+# `</dev/null` (that is T20's property), and this case has to stay blocked even
+# with no stdin. Self-terminating so a RED run leaves nothing behind.
+cat >"$T19_LIB" <<'SH'
+sleep 60
+_uberdev_dispatch_cleanup_child_worktree() { :; }
+SH
+(
+  /bin/bash -c '
+    set -u
+    . "$1"
+    _UBERDEV_DISPATCH_FILE="$2"
+    UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT=2
+    _uberdev_dispatch_preflight_child_lib 919 background "$3"
+    printf "%s\n" "$?" >"$4"
+  ' _ "$DISPATCH_LIB" "$T19_LIB" "$T19_LOG" "$T19_RC_FILE"
+) >"$T19_RUNTIME/out" 2>&1 &
+T19_PID=$!
+T19_STARTED=$SECONDS
+while [ ! -s "$T19_RC_FILE" ] && [ $((SECONDS - T19_STARTED)) -lt 15 ]; do
+  sleep 0.2
+done
+T19_ELAPSED=$((SECONDS - T19_STARTED))
+if [ ! -s "$T19_RC_FILE" ]; then
+  ko "T19 the probe never returned (${T19_ELAPSED}s after a 2s budget) — it is unbounded and wedges the whole dispatch loop"
+  kill "$T19_PID" 2>/dev/null || true
+else
+  ok "T19 the probe returned (${T19_ELAPSED}s) instead of blocking the dispatcher"
+  T19_RC="$(cat "$T19_RC_FILE" 2>/dev/null || true)"
+  if [ "$T19_RC" = "1" ]; then
+    ok "T19 a source-time block is refused (rc=1)"
+  else
+    ko "T19 expected rc 1 for a blocking library, got rc=$T19_RC"
+  fi
+  T19_OUT="$(cat "$T19_RUNTIME/out" 2>/dev/null || true)"
+  # Its OWN wording: folding a timeout into the generic "cannot load" refusal
+  # sends the operator to look for a syntax error in a file that is fine.
+  case "$T19_OUT" in
+    *"refusing to create a child worktree"*"2s"*)
+      ok "T19 the timeout gets its own refusal wording, naming the budget" ;;
+    *) ko "T19 the timeout has no distinct refusal naming the budget: $(printf '%s' "$T19_OUT" | tr '\n' ';')" ;;
+  esac
+  case "$(cat "$T19_LOG" 2>/dev/null)" in
+    *"refusing to create a child worktree"*) ok "T19 the timeout refusal also reaches \$DISPATCH_LOG" ;;
+    *) ko "T19 \$DISPATCH_LOG is empty for the timeout refusal — the fanout would report '(no output captured)'" ;;
+  esac
+fi
+wait "$T19_PID" 2>/dev/null || true
+
+echo "== T20: the probe must not consume the dispatcher's stdin =="
+# The probe is a command substitution, so it captures stdout — and inherits
+# stdin. A $DISPATCH_LIB that reads at source time therefore ate the
+# DISPATCHER's stdin, silently, on a probe that otherwise reported success.
+T20_LIB="$TMP/t20-stdin-eating-dispatch-lib.sh"
+cat >"$T20_LIB" <<'SH'
+read -r _swallowed
+_uberdev_dispatch_cleanup_child_worktree() { :; }
+SH
+T20_OUT="$(printf 'DISPATCHER-STDIN-SENTINEL\n' | /bin/bash -c '
+    set -u
+    . "$1"
+    _UBERDEV_DISPATCH_FILE="$2"
+    _uberdev_dispatch_preflight_child_lib 920 background "" >/dev/null 2>&1
+    printf "preflight_rc=%s\n" "$?"
+    if read -r _line; then printf "dispatcher_read=%s\n" "$_line"; else printf "dispatcher_read=<EOF>\n"; fi
+  ' _ "$DISPATCH_LIB" "$T20_LIB")"
+case "$T20_OUT" in
+  *"dispatcher_read=DISPATCHER-STDIN-SENTINEL"*)
+    ok "T20 the dispatcher's stdin survives the probe" ;;
+  *) ko "T20 the probe swallowed the dispatcher's stdin: $(printf '%s' "$T20_OUT" | tr '\n' ';')" ;;
+esac
+# Anti-vacuity: closing stdin must not turn an otherwise loadable library into
+# a refusal, or T20 could be "satisfied" by refusing everything.
+case "$T20_OUT" in
+  *"preflight_rc=0"*) ok "T20 a library that reads at source time still probes clean" ;;
+  *) ko "T20 closing the probe's stdin turned a loadable library into a refusal: $(printf '%s' "$T20_OUT" | tr '\n' ';')" ;;
+esac
+
+echo "== T21: a shell FUNCTION named timeout must not stand in for the bound =="
+# T15's fault in a second costume. `uberdev_dispatch_resolve_env` sets
+# `TIMEOUT_BIN=timeout` — a BARE NAME — on its `command -v` branch, and a bare
+# name in command position is answered by the shell's function table before
+# any PATH search. A `timeout` function up the call chain would then BE the
+# bound, so the probe that the bound exists to cap runs uncapped.
+T21_RUNTIME="$TMP/t21-runtime"
+mkdir -p "$T21_RUNTIME"
+T21_RC_FILE="$T21_RUNTIME/rc"
+T21_FUNC_CALLS="$T21_RUNTIME/timeout-function-calls.txt"
+: >"$T21_FUNC_CALLS"
+# Reuses T19's blocking fixture: without something for the bound to cut short,
+# "the probe returned" would be true whether or not a bound ran at all.
+[ -s "$T19_LIB" ] || { echo "  ABORT  T21 needs T19's blocking fixture"; exit 99; }
+(
+  /bin/bash -c '
+    set -u
+    . "$1"
+    # Captured OUT of the positional parameters before the function is
+    # defined: inside a shell function, $4 is the fourth argument passed to
+    # THAT FUNCTION, not the fourth argument of this bash -c body.
+    _t21_calls="$4"
+    timeout() { printf "%s\n" called >>"$_t21_calls"; command timeout "$@"; }
+    TIMEOUT_BIN=timeout
+    _UBERDEV_DISPATCH_FILE="$2"
+    UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT=2
+    _uberdev_dispatch_preflight_child_lib 921 background "" >/dev/null 2>&1
+    printf "%s\n" "$?" >"$3"
+  ' _ "$DISPATCH_LIB" "$T19_LIB" "$T21_RC_FILE" "$T21_FUNC_CALLS"
+) >"$T21_RUNTIME/out" 2>&1 &
+T21_PID=$!
+T21_STARTED=$SECONDS
+while [ ! -s "$T21_RC_FILE" ] && [ $((SECONDS - T21_STARTED)) -lt 15 ]; do
+  sleep 0.2
+done
+if [ ! -s "$T21_RC_FILE" ]; then
+  ko "T21 the probe never returned ($((SECONDS - T21_STARTED))s) — a bare \$TIMEOUT_BIN let the function table answer for the bound"
+  kill "$T21_PID" 2>/dev/null || true
+else
+  ok "T21 a bare \$TIMEOUT_BIN still bounds the probe ($((SECONDS - T21_STARTED))s)"
+fi
+if [ -s "$T21_FUNC_CALLS" ]; then
+  ko "T21 the probe invoked the SHELL FUNCTION named timeout ($(wc -l <"$T21_FUNC_CALLS" | tr -d ' ') call(s)) — it must reach the binary by resolved path"
+else
+  ok "T21 the probe never routed the bound through the shell function table"
+fi
+wait "$T21_PID" 2>/dev/null || true
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
