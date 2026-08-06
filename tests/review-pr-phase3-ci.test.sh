@@ -1035,7 +1035,7 @@ assert_no_grep "$REBASE_HANDLER" '^[^-]*git push [^i]' \
 # not "restore" a lock that cannot work across fences), so strip the prose that
 # does the banning before checking that no live recipe remains.
 REBASE_HANDLER_LIVE="$(sed -n '/^## No lock file/,/^## Process/!p' "$REBASE_HANDLER")"
-if printf '%s\n' "$REBASE_HANDLER_LIVE" | grep -Eq 'exec 200|flock -n'; then
+if grep -Eq 'exec 200|flock -n' <<<"$REBASE_HANDLER_LIVE"; then
   echo "  FAIL  S13.11d — a live flock recipe survives outside the deletion note"; FAIL=$((FAIL + 1))
 else
   echo "  PASS  S13.11d — the void fence-scoped flock lock is deleted, not ported"; PASS=$((PASS + 1))
@@ -1052,8 +1052,20 @@ assert_grep "$REVIEW_PR" 'Phase 3.*halt|halt Phase 3|OUTCOME=halted' \
 # success. The original bug was Step 6c.5 silently falling through to Phase 1
 # re-entry on a CONFLICT return. The procedural arm must explicitly gate
 # POST-FIX on REBASED (or call the CONFLICT-resolve arm before fix-push).
-assert_grep "$REVIEW_PR" 'status: REBASED' \
-  "S13.16 — POST-FIX path explicitly conditions on ci-rebase-handler status: REBASED"
+#
+# S13.16 USED TO BE `assert_grep "$REVIEW_PR" 'status: REBASED'`. That is the
+# #370/#371 class in miniature: the only line it could match was the prose
+# sentence "(the agent already pushed; new HEAD is on remote)", which was
+# FACTUALLY WRONG — the agent had been demoted to preparer and nothing pushed
+# on that path at all. The assertion was disjoint from the behaviour it named,
+# so it stayed green over the bug AND would have stayed green over the fix.
+# It now keys on the VALIDATED terminal scalar and on the routing target.
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=REBASED' \
+  "S13.16 — POST-FIX branches on the VALIDATED rebase terminal, not the agent's self-report"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=CONFLICT' \
+  "S13.16b — the CONFLICT terminal has its own routing bullet"
+assert_no_grep "$REVIEW_PR" 'the agent already pushed' \
+  "S13.16c — the retired 'the agent already pushed' claim is gone (the agent has no remote-write tool)"
 assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
@@ -1726,7 +1738,8 @@ assert_grep "$REVIEW_PR" 'stage=ci-defer' \
 # silently resolved `origin/` to nothing and poisoned base_sha.
 # Comment-strip first: the ROUTE fence NAMES the old expression in order to
 # record the bug, and a guard that punished the explanation would be unfixable.
-if grep -v '^[[:space:]]*#' "$REVIEW_PR" | grep -q 'git merge-base HEAD "origin/${base_branch}"'; then
+REVIEW_PR_LIVE="$(grep -v '^[[:space:]]*#' "$REVIEW_PR")"
+if grep -q 'git merge-base HEAD "origin/${base_branch}"' <<<"$REVIEW_PR_LIVE"; then
   echo "  FAIL  S21.9 — the forward-referenced base_branch merge-base is still live"; FAIL=$((FAIL + 1))
 else
   echo "  PASS  S21.9 — the forward-referenced base_branch merge-base is gone"; PASS=$((PASS + 1))
@@ -1745,14 +1758,14 @@ assert_grep "$REVIEW_PR" 'force-if-includes' \
 # Executable push lines only: leading `git push` or a `git -C <dir> push`, never
 # a prose sentence that merely mentions one (the trust-anchor section explains
 # that it NEVER needs --force-with-lease, and that sentence must stay sayable).
-PUSH_LINES="$(grep -v '^[[:space:]]*#' "$REVIEW_PR" \
-  | grep -E '^[[:space:]]*([A-Z_]+="\$\()?git( -C "[^"]+")? push ' || true)"
-if printf '%s\n' "$PUSH_LINES" | grep -qE '\-\-force-with-lease([^=]|$)'; then
+PUSH_LINES="$(grep -E '^[[:space:]]*([A-Z_]+="\$\()?git( -C "[^"]+")? push ' \
+  <<<"$REVIEW_PR_LIVE" || true)"
+if grep -qE '\-\-force-with-lease([^=]|$)' <<<"$PUSH_LINES"; then
   echo "  FAIL  S22.3 — a bare --force-with-lease (the @{upstream} shorthand) reached a push command"; FAIL=$((FAIL + 1))
 else
   echo "  PASS  S22.3 — every --force-with-lease on a push carries an explicit <branch>:<sha>"; PASS=$((PASS + 1))
 fi
-if printf '%s\n' "$PUSH_LINES" | grep -qE '\-\-force([^-]|$)'; then
+if grep -qE '\-\-force([^-]|$)' <<<"$PUSH_LINES"; then
   echo "  FAIL  S22.4 — a bare --force push reached the command"; FAIL=$((FAIL + 1))
 else
   echo "  PASS  S22.4 — no bare --force push anywhere in the command"; PASS=$((PASS + 1))
@@ -1816,7 +1829,7 @@ if [ "$LEASE_PUSH_RC" -eq 0 ] && [ "${STALE_PUSH_RC:-0}" -ne 0 ]; then
 else
   echo "  FAIL  S22-RT.1 — lease behaviour drifted (ok_rc=$LEASE_PUSH_RC stale_rc=${STALE_PUSH_RC:-0})"; FAIL=$((FAIL + 1))
 fi
-if printf '%s' "$STALE_PUSH_STDERR" | grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)'; then
+if grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$STALE_PUSH_STDERR"; then
   echo "  PASS  S22-RT.2 — the stale-lease stderr matches the command's rebase_lease_mismatch classifier"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S22-RT.2 — stale-lease stderr would mis-route to rebase_push_failed: $STALE_PUSH_STDERR"; FAIL=$((FAIL + 1))
@@ -1828,13 +1841,43 @@ assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_state\(\)' \
   "S23.1 — the CI loop counters have an on-disk home"
 assert_grep "$REVIEW_PR" 'review_fleet_read_ci_state "\$CI_LOOP_STATE" ci_loop_iter' \
   "S23.2 — the re-entry fence reads the counter back from disk"
-CI_ITER_INCREMENTS="$(grep -c 'CI_FIX_LOOP_ITER=\$((CI_FIX_LOOP_ITER + 1))' "$REVIEW_PR")"
+# REVIEW_ITERATION advances ONLY when Phase 1 actually re-runs, so it keeps its
+# single site. CI_FIX_LOOP_ITER now has TWO, because the multi-stage-rebase
+# restage is a loop iteration too — the arm's own comment always said it was
+# "bounded by CI_FIX_LOOP_CAP", and nothing advanced the counter, so wave 2
+# recomputed wave 1's authority pathname and died on `authority_preexists`.
+# The invariant that replaces "exactly one site" is: EVERY site that advances
+# the counter must also cap-check it and persist it, or the next fresh shell
+# reads the old value back and the advance never happened.
 REVIEW_ITER_INCREMENTS="$(grep -c 'REVIEW_ITERATION=\$((REVIEW_ITERATION + 1))' "$REVIEW_PR")"
-if [ "$CI_ITER_INCREMENTS" = 1 ] && [ "$REVIEW_ITER_INCREMENTS" = 1 ]; then
-  echo "  PASS  S23.3 — exactly ONE site increments each counter, so they cannot disagree"; PASS=$((PASS + 1))
+if [ "$REVIEW_ITER_INCREMENTS" = 1 ]; then
+  echo "  PASS  S23.3 — exactly ONE site increments REVIEW_ITERATION (it tracks Phase 1 re-runs)"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  S23.3 — counter increment sites: ci=$CI_ITER_INCREMENTS review=$REVIEW_ITER_INCREMENTS (want 1 and 1)"; FAIL=$((FAIL + 1))
+  echo "  FAIL  S23.3 — REVIEW_ITERATION increment sites: $REVIEW_ITER_INCREMENTS (want 1)"; FAIL=$((FAIL + 1))
 fi
+# Every CI_FIX_LOOP_ITER advance, in its own fence, followed by a cap check and
+# an on-disk write. Checked per fence so a site that skipped either is named.
+CI_ITER_FENCE_REPORT="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "CI_FIX_LOOP_ITER=$((") > 0) {
+      sites += 1
+      if (index(buf, "-gt 3") > 0 && index(buf, "review_fleet_write_ci_state") > 0) good += 1
+    }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { printf "%d %d", sites, good }
+' "$REVIEW_PR")"
+CI_ITER_SITES="${CI_ITER_FENCE_REPORT% *}"
+CI_ITER_GOOD="${CI_ITER_FENCE_REPORT#* }"
+if [ "$CI_ITER_SITES" -ge 2 ] && [ "$CI_ITER_SITES" = "$CI_ITER_GOOD" ]; then
+  echo "  PASS  S23.3b — all $CI_ITER_SITES CI_FIX_LOOP_ITER advance sites cap-check AND persist"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23.3b — $CI_ITER_SITES advance site(s), only $CI_ITER_GOOD cap-check and persist"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" 'rebase_conflict_restage_cap' \
+  "S23.3c — the restage path has its own cap terminal (it is not an unbounded re-entry)"
 # THE TRAP THIS CLOSES: childDirAbs() keys on reviewIteration ALONE. Without the
 # lockstep increment, iteration 2 rebinds iteration 1's result.md paths and the
 # capture verbs freeze STALE bytes while every equality still passes.
@@ -1847,7 +1890,7 @@ PHASE3_SLICE="$(awk '
   inphase && fence && /^[ \t]*```[ \t]*$/ { fence = 0; next }
   inphase && fence { print }
 ' "$REVIEW_PR")"
-if printf '%s\n' "$PHASE3_SLICE" | grep -qE 'REVIEW_RUN_ID_REQUEST|review_reserve_run_directory'; then
+if grep -qE 'REVIEW_RUN_ID_REQUEST|review_reserve_run_directory' <<<"$PHASE3_SLICE"; then
   echo "  FAIL  S23.4 — Phase 3 re-mints RUN_ID; the evidence directory would fork mid-run"; FAIL=$((FAIL + 1))
 else
   echo "  PASS  S23.4 — Phase 3 never re-mints RUN_ID (re-entry goes to Step 4, not Step 1)"; PASS=$((PASS + 1))
@@ -1867,6 +1910,175 @@ else
 fi
 rm -rf "$CI_STATE_TMP"
 
+echo "== S24: ONE push site, reachable from every terminal, self-contained =="
+# The bug this block exists over: `ci-code-fixer` and `ci-rebase-handler` were
+# BOTH demoted to preparers (neither has a remote-write tool), and the only
+# `git push` in Phase 3 sat inside the CONFLICT-RESOLVE arm. So the two common
+# terminals — a clean rebase and an APPLIED code fix — produced local commits
+# that nothing published, the next 6c.1 PROBE re-derived the same red run off an
+# unchanged remote head, and the loop burned to loop_cap_exhausted. The headline
+# capability of the phase was absent while the prose claimed it was wired.
+PHASE3_FENCES="$(awk '
+  /^6c\. \*\*Phase 3 — CI Health\*\*/ { inphase = 1 }
+  /^### Phase 3 audit JSON shape/ { if (inphase) exit }
+  inphase && /^[ \t]*```bash/ { fence = 1; next }
+  inphase && fence && /^[ \t]*```[ \t]*$/ { fence = 0; next }
+  inphase && fence { print }
+' "$REVIEW_PR")"
+PHASE3_PUSH_SITES="$(grep -cE '^[^#]*git .*[^-]push ' <<<"$PHASE3_FENCES")"
+if [ "$PHASE3_PUSH_SITES" = 1 ]; then
+  echo "  PASS  S24.1 — Phase 3 has EXACTLY one executable push site"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.1 — Phase 3 has $PHASE3_PUSH_SITES executable push sites (want exactly 1)"; FAIL=$((FAIL + 1))
+fi
+if grep -qE 'push origin "\$\{NEW_HEAD_SHA\}:refs/heads/\$\{CI_PR_HEAD_BRANCH\}"' <<<"$PHASE3_FENCES"; then
+  echo "  PASS  S24.2 — the push names an explicit SHA and an explicit ref, never symbolic HEAD"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.2 — the Phase 3 push does not publish an explicit sha:ref pair"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" '6c\.4w\.3' \
+  "S24.3 — the single leased push is a NAMED step both fix arms can route to"
+# Reachability, per terminal. A push nothing reaches is the bug this block is
+# about, so each producing terminal must name the step by number.
+for terminal in APPLIED REBASED; do
+  if grep -qE "CI_FIXER_TERMINAL_STATUS=$terminal\b[^\`]*(\`|.)*6c\.4w\.3" "$REVIEW_PR"; then
+    echo "  PASS  S24.4[$terminal] — the $terminal terminal routes to 6c.4w.3"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S24.4[$terminal] — the $terminal terminal does not route to the push step"; FAIL=$((FAIL + 1))
+  fi
+done
+# The push fence must be SELF-CONTAINED: a fresh harness shell inherits nothing,
+# and a lease read from an unset $CI_AUTHORITY_PATH degrades to
+# `--force-with-lease=":"` against `origin ""`.
+PUSH_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "--force-with-lease=") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || PUSH_FENCE=""
+PUSH_SELF_CONTAINED=ok
+for token in 'review_fleet_read_sidecar' 'read-ci-authority-member' \
+             'review_fleet_read_ci_state' 'review_ci_push_abort()' \
+             'rev-parse HEAD'; do
+  grep -qF -- "$token" <<<"$PUSH_FENCE" \
+    || PUSH_SELF_CONTAINED="missing:$token"
+done
+if [ "$PUSH_SELF_CONTAINED" = ok ]; then
+  echo "  PASS  S24.5 — the push fence re-derives binding, lease, branch, counters and HEAD itself"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.5 — the push fence depends on a dead shell ($PUSH_SELF_CONTAINED)"; FAIL=$((FAIL + 1))
+fi
+# ...and it must REFUSE an empty lease rather than force-push against nothing.
+if grep -qF 'ci_authority_unreadable' <<<"$PUSH_FENCE"; then
+  echo "  PASS  S24.6 — an unreadable/empty lease or branch halts instead of pushing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.6 — the push fence does not refuse an empty lease"; FAIL=$((FAIL + 1))
+fi
+# The staged set: `git add --` with ZERO pathspecs exits 0 and stages nothing,
+# so the `|| abort` guard is silent. The list must come off disk in the SAME
+# fence that stages it.
+STAGE_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "add -- \"${conflicted_files[@]}\"") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || STAGE_FENCE=""
+if grep -qF 'CONFLICT_PATHS_FILE' <<<"$STAGE_FENCE" \
+   && grep -qF 'conflicted_files+=(' <<<"$STAGE_FENCE"; then
+  echo "  PASS  S24.7 — the staging fence rebuilds conflicted_files from the on-disk list"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.7 — git add reads a shell array built in a different fence (stages nothing, exits 0)"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_conflict_paths\(\)' \
+  "S24.8 — the conflicted-file set has an on-disk home"
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_push\(\)' \
+  "S24.9 — the pushed sha/agent pair has an on-disk home"
+# 6c.4 ROUTE and 6c.4w.1 are different shells too. Every ROUTE scalar the mint
+# fence consumes must land in something that FAILS CLOSED on an empty value —
+# prepare-ci-authority's required-member table for most of them, and an explicit
+# guard for the two it does not see.
+MINT_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "review_fleet_bind_ci \"$CI_FIXER_EDGE_ID\"") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || MINT_FENCE=""
+if grep -qE 'case "\$CI_FIXER_SLUG_BASE" in' <<<"$MINT_FENCE" \
+   && grep -qF 'ci_fix_dispatch_slug_base_invalid' <<<"$MINT_FENCE"; then
+  echo "  PASS  S24.10 — a lost CI_FIXER_SLUG_BASE halts instead of splitting the child directory"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.10 — CI_FIXER_SLUG_BASE is unchecked; bind and emit could disagree on the child dir"; FAIL=$((FAIL + 1))
+fi
+if grep -qF "CI_FIXER_INPUTS\" | jq -e 'type == \"object\"'" <<<"$MINT_FENCE"; then
+  echo "  PASS  S24.11 — a lost CI_FIXER_INPUTS halts before it is pinned by digest as garbage"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.11 — CI_FIXER_INPUTS is written and digested without a shape check"; FAIL=$((FAIL + 1))
+fi
+# ...and the lease/branch half must be enforced by the CONTRACT, at mint, for
+# BOTH mutating arms — not by prose asking the fence to remember them.
+assert_grep "$CONTRACT_PY" '"review_pr\.ci\.fix_code": \("failure_class", "signal_anchor", "parent_sha",' \
+  "S24.12 — the fix_code authority has a required-member list"
+if python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("cfc", sys.argv[1])
+m = importlib.util.module_from_spec(spec); sys.modules["cfc"] = m
+spec.loader.exec_module(m)
+for edge in ("review_pr.ci.fix_code", "review_pr.ci.rebase"):
+    required = m.CI_AUTHORITY_REQUIRED_MEMBERS[edge]
+    assert "lease_sha" in required and "pr_branch" in required, (edge, required)
+' "$CONTRACT_PY" 2>/dev/null; then
+  echo "  PASS  S24.13 — BOTH mutating arms refuse at mint without a lease and a branch"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.13 — a mutating CI authority can be minted with no lease, then reach 6c.4w.3"; FAIL=$((FAIL + 1))
+fi
+
+echo "== S24-RUNTIME: the cross-fence records survive a shell that inherited nothing =="
+S24_TMP="$(mktemp -d)"
+# A path with a SPACE and one with a NEWLINE: git reports both, and a
+# newline-split handoff silently truncates the set it is about to stage.
+bash -c '. "$1"; review_fleet_write_conflict_paths "$2/paths.zlist" "src/a b.py" "src/plain.py"' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1
+S24_READBACK="$(env -i PATH="$PATH" bash -c '
+  count=0
+  while IFS= read -r -d "" p; do count=$((count + 1)); last="$p"; done <"$1/paths.zlist"
+  printf "%s|%s" "$count" "$last"' _ "$S24_TMP" 2>/dev/null)"
+if [ "$S24_READBACK" = '2|src/plain.py' ]; then
+  echo "  PASS  S24-RT.1 — the conflicted-path list round-trips (space-bearing path intact)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24-RT.1 — conflicted-path handoff drifted: '$S24_READBACK'"; FAIL=$((FAIL + 1))
+fi
+# An empty set must REFUSE to publish a list, or step 3 stages nothing again.
+if bash -c '. "$1"; review_fleet_write_conflict_paths "$2/empty.zlist"' \
+     _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1; then
+  echo "  FAIL  S24-RT.2 — an empty conflicted-file set was accepted"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S24-RT.2 — an empty conflicted-file set is refused, not published"; PASS=$((PASS + 1))
+fi
+bash -c '. "$1"; review_fleet_write_ci_push "$2/push.json" "'"$(printf 'a%.0s' $(seq 40))"'" ci-rebase-handler' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1
+S24_PUSH_SHA="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_read_ci_push "$2/push.json" sha' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" 2>/dev/null)"
+if [ "$S24_PUSH_SHA" = "$(printf 'a%.0s' $(seq 40))" ]; then
+  echo "  PASS  S24-RT.3 — the pushed sha reaches the re-entry fence through a cleared environment"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24-RT.3 — the push record did not survive a fresh shell: '$S24_PUSH_SHA'"; FAIL=$((FAIL + 1))
+fi
+if bash -c '. "$1"; review_fleet_write_ci_push "$2/bad.json" "" ci-rebase-handler' \
+     _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1; then
+  echo "  FAIL  S24-RT.4 — an empty sha was recorded as a push"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S24-RT.4 — an empty sha is refused, so fix_pushes can never name no commit"; PASS=$((PASS + 1))
+fi
+rm -rf "$S24_TMP"
 
 echo
 echo "== Summary =="

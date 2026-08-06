@@ -808,7 +808,12 @@ function f2iPrompt(notes, nonce) {
   lines.push("  working_dir              = " + workingDirAbs);
   lines.push("  pr_number                = " + prNumber);
   lines.push("  max_new                  = " + maxNew);
-  lines.push("  input_document           = " + childInputPath(slug));
+  // NO `input_document` line here. childInputPath() is a PHASE 3 helper: only
+  // the four CI stages have a controller-written <childDir>/input.json (
+  // commands/review-pr.md writes one per ci-classify / ci-fix / ci-conflicts /
+  // ci-defer child and pins it by digest in the CI authority). The defer stage
+  // has no such artifact — its inputs are the two aggregates above — so naming
+  // one would point the child at a path nothing ever wrote.
   lines.push("");
   lines.push("Each aggregate ALREADY carries its <external-untrusted-input> envelope as the file's own "
     + "leading and trailing bytes — read them BY PATH and do NOT re-wrap. You OWN the max_new, dedupe "

@@ -508,9 +508,13 @@ assert_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   'review_publish_same_repo_pr_head' \
   "R9.12 — anchor publication is delegated to the immutable same-repo push gate"
+# BRACED form only. The unbraced `"$publish_sha:refs/heads/..."` this used to
+# pin is a zsh `:r` parameter modifier — the fences run under /bin/zsh, so the
+# refspec silently became `<sha>efs/heads/<branch>` and every anchor push died
+# with "src refspec ... does not match any".
 assert_grep "$REVIEW_PR" \
-  '"\$publish_sha:refs/heads/\$live_branch"' \
-  "R9.12b — push refspec uses immutable anchor SHA and explicit validated PR branch"
+  '"\$\{publish_sha\}:refs/heads/\$\{live_branch\}"' \
+  "R9.12b — push refspec uses immutable anchor SHA and explicit validated PR branch (brace-safe under zsh)"
 assert_grep "$REVIEW_PR" \
   'ls-remote.*refs/heads/\$live_branch|review_assert_selected_pr_head.*anchor_sha' \
   "R9.12c — remote branch and live/local PR head are authenticated after push"

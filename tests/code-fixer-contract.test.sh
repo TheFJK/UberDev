@@ -5162,7 +5162,34 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
         head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
         input_sha256=ci_log_sha, failure_class="code_bug",
         signal_anchor="src/app.py:1", parent_sha=ci_head, parent_tree_sha=ci_tree,
+        lease_sha="b" * 40, pr_branch="fix/383-phase3",
         authority_output_path=str(fix_authority_path),
+    )
+    # The lease is REQUIRED on this edge too: the fix_code terminal reaches the
+    # same single leased push the rebase terminal does, so an authority minted
+    # without one would send the controller to a push with nothing to lease
+    # against. Refused AT MINT, before the child runs.
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.fix_code", pr_number=41, run_id="77",
+            head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
+            input_sha256=ci_log_sha, failure_class="code_bug",
+            signal_anchor="src/app.py:1", parent_sha=ci_head,
+            parent_tree_sha=ci_tree, lease_sha="", pr_branch="fix/383-phase3",
+            authority_output_path=str(
+                ci_evidence / "ci-authority-fix-code-iter01-ci06.json")),
+        "ci_authority_invalid",
+    )
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.fix_code", pr_number=41, run_id="77",
+            head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
+            input_sha256=ci_log_sha, failure_class="code_bug",
+            signal_anchor="src/app.py:1", parent_sha=ci_head,
+            parent_tree_sha=ci_tree, lease_sha="b" * 40, pr_branch="",
+            authority_output_path=str(
+                ci_evidence / "ci-authority-fix-code-iter01-ci05.json")),
+        "ci_authority_invalid",
     )
     fix_child = ci_child_dir("ci-fix-code-ci01-iter01")
     fix_binding = module.bind_workflow_ci_launch(
@@ -5352,6 +5379,185 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     ):
         parsed = ci_cli.parse_args(argv)
         assert parsed.command == verb, parsed
+
+# === #383 follow-up: the CONFLICT arm judged against a REAL conflicted rebase ==
+#
+# Everything above judges the rebase arm on a repository that is NOT mid-rebase,
+# which is the one state the CONFLICT terminal never occupies. That is why the
+# arm shipped unreachable: `_validate_ci_rebase_outcome` ended in
+# `_ci_require_residue_closed`, and the mid-rebase index the design REQUIRES the
+# child to leave behind (agents/ci-rebase-handler.md Step 5: "leave the rebase
+# IN PROGRESS") is `index_dirty` by that predicate. So this block builds the
+# real thing — two divergent commits over one line, `git rebase` run to its
+# actual conflict — and drives the PUBLIC verb over it.
+#
+# The evidence directory is deliberately NOT ignored here. The uberdev
+# repository lists `.uberdev/` in its own .gitignore, so `ls-files --others`
+# returns nothing and every untracked-path check is vacuous against it. A
+# consumer repository has no such line, and that is the shape these rows model.
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
+    cf_repo = pathlib.Path(temporary) / "repo"
+    cf_repo.mkdir()
+    git(cf_repo, "init", "-q", "-b", "main")
+    git(cf_repo, "config", "user.email", "fixture@example.invalid")
+    git(cf_repo, "config", "user.name", "Fixture")
+    (cf_repo / "src").mkdir()
+    (cf_repo / "src/app.py").write_text("APP = 0\n", encoding="utf-8")
+    git(cf_repo, "add", "--", "src/app.py")
+    git(cf_repo, "commit", "-qm", "test: conflict fixture base")
+    cf_fork = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # main advances over the same line the branch will touch.
+    (cf_repo / "src/app.py").write_text("APP = 'main'\n", encoding="utf-8")
+    git(cf_repo, "commit", "-qam", "test: main advances")
+    cf_base = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    git(cf_repo, "checkout", "-q", "-b", "fix/383-conflict", cf_fork)
+    (cf_repo / "src/app.py").write_text("APP = 'branch'\n", encoding="utf-8")
+    git(cf_repo, "commit", "-qam", "test: branch diverges")
+    cf_head = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
+
+    cf_evidence = cf_repo / ".uberdev/research/20260806-111111-beef111"
+    (cf_evidence / "children").mkdir(parents=True)
+
+    def cf_child(slug):
+        target = cf_evidence / "children" / slug
+        target.mkdir(exist_ok=True)
+        return target
+
+    def cf_input(child, payload):
+        path = child / "input.json"
+        path.write_bytes(payload)
+        return str(path), hashlib.sha256(payload).hexdigest()
+
+    def cf_bind(edge, slug, authority_receipt):
+        child = cf_child(slug)
+        binding = module.bind_workflow_ci_launch(
+            edge_id=edge, instance_id=slug, run_nonce=CI_NONCE,
+            result_path=str(child / "result.md"),
+            status_path=str(child / "status.json"), working_dir=str(cf_repo),
+            ci_authority_path=authority_receipt["authority_path"],
+            ci_authority_sha256=authority_receipt["authority_sha256"])
+        (child / "result.md").write_bytes(b"child report\n")
+        (child / "status.json").write_bytes(ci_status_document(binding))
+        payload = module._canonical_json(binding)
+        terminal = module.capture_ci_terminal(launch_binding=payload, edge_id=edge)
+        return payload, terminal
+
+    # ---- the rebase arm's CONFLICT terminal --------------------------------
+    rb_child = cf_child("ci-rebase-ci01-iter01")
+    rb_input, rb_input_sha = cf_input(rb_child, b'{"edge":"rebase"}\n')
+    rb_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
+        head_sha=cf_head, working_dir=str(cf_repo), input_path=rb_input,
+        input_sha256=rb_input_sha, base_sha=cf_base, lease_sha=cf_head,
+        pr_branch="fix/383-conflict", base_branch="main",
+        authority_output_path=str(
+            cf_evidence / "ci-authority-rebase-iter01-ci01.json"))
+    rb_binding_bytes, rb_terminal = cf_bind(
+        "review_pr.ci.rebase", "ci-rebase-ci01-iter01", rb_receipt)
+
+    rebase_run = git(cf_repo, "rebase", "main", check=False)
+    assert rebase_run.returncode != 0, "the fixture rebase was expected to conflict"
+    cf_mid_head = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert b"UU src/app.py" in git(
+        cf_repo, "status", "--porcelain").stdout, "no unmerged path in the fixture"
+
+    def rb_outcome(**overrides):
+        arguments = dict(
+            launch_binding=rb_binding_bytes,
+            status_sha256=rb_terminal["status_sha256"],
+            result_sha256=rb_terminal["result_sha256"],
+            working_dir=str(cf_repo), head_before=cf_head,
+            head_after=cf_mid_head, remote_head_sha=cf_head)
+        arguments.update(overrides)
+        return module.validate_ci_mutation_outcome(**arguments)
+
+    # THE regression: the terminal the whole CONFLICT-RESOLVE arm hangs off.
+    conflict_terminal = rb_outcome()
+    assert conflict_terminal["status"] == "CONFLICT", conflict_terminal
+    # The lease is NOT relaxed mid-rebase. A child that pushed anyway is still
+    # refused before the controller's own push, conflicts or not.
+    expect_contract_reason(
+        lambda: rb_outcome(remote_head_sha="c" * 40),
+        "ci_rebase_remote_moved_during_child",
+    )
+
+    # ---- one resolver, resolved IN PLACE and deliberately NOT staged -------
+    # agents/conflict-resolver.md and the ci-conflicts prompt both forbid
+    # `git add`; the controller stages only after this judgement returns. A
+    # validator that refused an unmerged index would therefore refuse every
+    # resolver that obeyed its instructions.
+    rs_child = cf_child("ci-conflict-01-ci01")
+    rs_input, rs_input_sha = cf_input(rs_child, b'{"file":"src/app.py"}\n')
+    rs_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.resolve_conflict", pr_number=41, run_id="77",
+        head_sha=cf_head, working_dir=str(cf_repo), input_path=rs_input,
+        input_sha256=rs_input_sha, base_sha=cf_base,
+        pr_branch="fix/383-conflict", base_branch="main",
+        target_paths=("src/app.py",),
+        authority_output_path=str(
+            cf_evidence / "ci-authority-resolve-conflict-iter01-ci01-1.json"))
+    rs_binding_bytes, rs_terminal = cf_bind(
+        "review_pr.ci.resolve_conflict", "ci-conflict-01-ci01", rs_receipt)
+
+    def rs_outcome():
+        return module.validate_ci_mutation_outcome(
+            launch_binding=rs_binding_bytes,
+            status_sha256=rs_terminal["status_sha256"],
+            result_sha256=rs_terminal["result_sha256"],
+            working_dir=str(cf_repo), head_before=cf_mid_head,
+            head_after=cf_mid_head, remote_head_sha="")
+
+    # Still carrying git's markers: unresolved, whatever the child claimed.
+    assert b"<<<<<<<" in (cf_repo / "src/app.py").read_bytes()
+    expect_contract_reason(rs_outcome, "ci_conflict_unresolved")
+
+    (cf_repo / "src/app.py").write_text("APP = 'merged'\n", encoding="utf-8")
+    resolved = rs_outcome()
+    assert resolved["status"] == "RESOLVED", resolved
+    assert resolved["run_nonce"] == CI_NONCE, resolved
+    # And the run's own untracked evidence tree is NOT scope escape: every path
+    # above lives under .uberdev/research/<run>/ and none of it is ignored here.
+    assert git(cf_repo, "ls-files", "--others", "--exclude-standard",
+               "--", ".uberdev").stdout, "the fixture evidence tree is not untracked"
+
+    # A resolver that deleted its file has not resolved it.
+    (cf_repo / "src/app.py").unlink()
+    expect_contract_reason(rs_outcome, "ci_conflict_unresolved")
+    (cf_repo / "src/app.py").write_text("APP = 'merged'\n", encoding="utf-8")
+    assert rs_outcome()["status"] == "RESOLVED"
+
+    # A NEW untracked file outside the evidence tree is still scope escape.
+    (cf_repo / "src/invented.py").write_text("INVENTED = 1\n", encoding="utf-8")
+    expect_contract_reason(rs_outcome, "ci_conflict_scope_escape")
+    (cf_repo / "src/invented.py").unlink()
+    assert rs_outcome()["status"] == "RESOLVED"
+
+    # ---- and the clean-rebase terminal is unchanged ------------------------
+    # Widening the rebase arm must not turn a NON-conflicted rebase into a
+    # CONFLICT, and must not stop refusing a dirty index outside a rebase. This
+    # row doubles as the evidence-exemption proof for the CLEAN path: the whole
+    # .uberdev/research tree above is untracked and NOT ignored here, so a
+    # residue predicate that exempted only the child's own directory would
+    # refuse a perfectly clean rebase over a sibling child's `input.json`.
+    git(cf_repo, "rebase", "--abort", check=False)
+    git(cf_repo, "checkout", "-q", "-B", "fix/383-clean", cf_fork)
+    (cf_repo / "src/other.py").write_text("OTHER = 1\n", encoding="utf-8")
+    git(cf_repo, "add", "--", "src/other.py")
+    git(cf_repo, "commit", "-qm", "test: a non-conflicting branch commit")
+    git(cf_repo, "rebase", "main")
+    cf_clean_head = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert not module._ci_rebase_dir(str(cf_repo)), "the clean rebase left state behind"
+    clean = rb_outcome(head_after=cf_clean_head)
+    assert clean["status"] == "REBASED", clean
+    (cf_repo / "src/other.py").write_text("OTHER = 2\n", encoding="utf-8")
+    git(cf_repo, "add", "--", "src/other.py")
+    expect_contract_reason(
+        lambda: rb_outcome(head_after=cf_clean_head), "index_dirty")
+    git(cf_repo, "reset", "-q", "--hard", cf_clean_head)
+    # An untracked file outside the evidence tree still fails the clean path.
+    (cf_repo / "src/stray.py").write_text("STRAY = 1\n", encoding="utf-8")
+    expect_contract_reason(
+        lambda: rb_outcome(head_after=cf_clean_head), "worktree_untracked")
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

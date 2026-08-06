@@ -417,6 +417,58 @@ review_fleet_read_ci_state() {
   jq -er --arg field "$2" '.[$field] | if type=="array" then tojson else . end' <"$1"
 }
 
+# review_fleet_write_ci_push PATH SHA BY_AGENT
+#
+# The SINGLE leased push (6c.4w.3) and the Phase 1 re-entry fence that records
+# it are two different shells, for exactly the reason review_fleet_write_ci_state
+# exists. Passing $NEW_HEAD_SHA between them in a variable recorded an EMPTY sha
+# into phases.phase3.fix_pushes -- an audit trail naming no commit, which is
+# worse than no entry at all because it reads as a push that happened.
+review_fleet_write_ci_push() {
+  [ "$#" -eq 3 ] || return 2
+  local path="$1" sha="$2" by_agent="$3" payload
+  case "$sha" in
+    *[!0-9a-f]*) return 2 ;;
+    *) [ "${#sha}" -eq 40 ] || return 2 ;;
+  esac
+  [ -n "$by_agent" ] || return 2
+  payload="$(jq -cn --arg sha "$sha" --arg by_agent "$by_agent" \
+    '{sha:$sha,by_agent:$by_agent}')" || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$path" ) || return 2
+}
+
+# review_fleet_read_ci_push PATH FIELD -> one recorded push field, in a new shell.
+review_fleet_read_ci_push() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI push record missing: ${1:-}" >&2
+    return 2
+  }
+  jq -er --arg field "$2" '.[$field]' <"$1"
+}
+
+# review_fleet_write_conflict_paths PATH -- PATH...
+#
+# The conflicted-file set crosses TWO fences (enumerate -> stage) and one
+# Workflow call. Held in a shell array it was gone by the time
+# `git add -- "${conflicted_files[@]}"` ran, and `git add --` with ZERO
+# pathspecs prints "Nothing specified, nothing added." and exits 0 -- so the
+# `|| abort` guard never fired, `git rebase --continue` then failed on the still
+# unmerged index, and the re-conflict scan sent the orchestrator back to step 1
+# forever. NUL-delimited on disk because a repository path may contain a
+# newline; the reader is the same `read -r -d ''` loop the enumerator uses.
+review_fleet_write_conflict_paths() {
+  [ "$#" -ge 1 ] || return 2
+  local path="$1"
+  shift
+  [ "$#" -ge 1 ] || return 2
+  ( umask 077 && : >"$path" ) || return 2
+  local entry
+  for entry in "$@"; do
+    [ -n "$entry" ] || return 2
+    printf '%s\0' "$entry" >>"$path" || return 2
+  done
+}
+
 # review_fleet_write_sidecar PATH BINDING CHILD_DIR INSTANCE [HEAD_BEFORE]
 #
 # The binding has to cross a Workflow call, and the fence after that call is a

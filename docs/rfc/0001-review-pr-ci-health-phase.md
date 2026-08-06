@@ -52,6 +52,28 @@
 > that pinned lease BEFORE the controller pushes, so a child that pushed anyway
 > is caught rather than trusted.
 >
+> **Where that push actually lives: `commands/review-pr.md` 6c.4w.3.** The
+> demotion applies to BOTH fixer agents — `ci-code-fixer` never writes to a
+> remote either — so the controller owes a push on every terminal that produces
+> new history: `fix_code` `APPLIED`, clean `REBASED`, and
+> `CONFLICT → all RESOLVED → rebase --continue`. All three re-run the one
+> 6c.4w.3 fence, which re-derives the launch binding, the lease and the branch
+> off disk rather than inheriting them, because each fence is a fresh shell. The
+> lease and `pr_branch` are required members of BOTH mutating authorities, so a
+> value lost between fences costs a refusal at mint instead of a force-push
+> against an empty ref.
+>
+> **The rebase judge has a CONFLICT terminal.** `ci-rebase-handler` is required
+> to leave a conflicted rebase IN PROGRESS so the controller can enumerate the
+> unmerged paths from its own `git status`. That state has unmerged index
+> entries by construction, so `validate-ci-mutation-outcome` must recognise it
+> as an outcome rather than judging it `index_dirty` — otherwise the caller's
+> failure branch aborts the very rebase the conflict arm needs, and the arm is
+> unreachable. For the same reason the per-resolver judge asks whether the
+> WORKTREE still carries conflict markers, not whether the path is still `UU`:
+> the resolver is forbidden `git add`, and the controller stages only after the
+> judgement.
+>
 > The `flock` lock this RFC specified is deleted with no replacement: under the
 > demotion it would have to be held by the controller across a Workflow call,
 > and every command fence is a fresh shell, so the descriptor dies with the

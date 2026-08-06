@@ -288,6 +288,69 @@ EOF_ZSH_BASH_ENV
 fi
 
 echo
+echo "== zsh parameter modifiers: an unbraced \$var:<letter> silently eats the colon =="
+
+# THE CLASS. Every `bash` fence in a command/skill markdown is executed by the
+# harness through /bin/zsh on macOS, and zsh applies HISTORY-STYLE MODIFIERS to
+# a brace-less parameter expansion: `"$sha:refs/heads/x"` expands as
+# `${sha:r}` + `efs/heads/x`, i.e. `<sha>efs/heads/x`. The colon is gone, the
+# refspec is garbage, and `git push` dies with "src refspec ... does not match
+# any" — a failure whose message names neither zsh nor the modifier. bash
+# expands the identical string correctly, so a bash-only local run never sees
+# it. Found live on the trust-anchor publish in commands/review-pr.md, which had
+# shipped this shape and whose test pinned the broken literal.
+ZSH_MODIFIER_LETTERS='aAcefFghlpqQrstuUwWxX'
+# Comment-stripped, because the two braced call sites NAME the broken shape in
+# order to explain why the braces are load-bearing — and a guard that punished
+# its own explanation would be unfixable (the S13.11d/S21.9 precedent).
+ZSH_MODIFIER_HITS=""
+while IFS= read -r zsh_scan_file; do
+  zsh_scan_hit="$(grep -v '^[[:space:]]*#' "$zsh_scan_file" \
+    | grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" || true)"
+  [ -n "$zsh_scan_hit" ] || continue
+  ZSH_MODIFIER_HITS="$ZSH_MODIFIER_HITS${ZSH_MODIFIER_HITS:+
+}$zsh_scan_file: $zsh_scan_hit"
+done <<EOF_ZSH_SCAN
+$(find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
+       "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
+       "$REPO_ROOT/plugins/uberdev/hooks" \
+       -type f \( -name '*.md' -o -name '*.sh' \) 2>/dev/null | sort)
+EOF_ZSH_SCAN
+if [ -z "$ZSH_MODIFIER_HITS" ]; then
+  echo "  PASS  no unbraced \$var:<modifier-letter> expansion in any plugin shell surface"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  an unbraced \$var:<modifier-letter> would be mangled by zsh — brace it as \${var}:"
+  printf '        %s\n' "$ZSH_MODIFIER_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# Anti-vacuity: the grep above must actually fire on the shape, and zsh must
+# actually mangle it. Both proven here so a future edit cannot quietly relax
+# either half into a check that can never red.
+if printf '%s\n' 'git push origin "$publish_sha:refs/heads/$live_branch"' \
+   | grep -qE "\\\$[A-Za-z_][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]"; then
+  echo "  PASS  the detector reds on the exact shape that shipped"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector does not match the shape it exists to find (vacuous)"
+  FAIL=$((FAIL + 1))
+fi
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  SKIP  live zsh mangling proof (zsh not on PATH)"
+else
+  ZSH_UNBRACED="$(zsh -c 'V=abc123; print -r -- "$V:refs/heads/x"' 2>/dev/null)"
+  ZSH_BRACED="$(zsh -c 'V=abc123; print -r -- "${V}:refs/heads/x"' 2>/dev/null)"
+  if [ "$ZSH_UNBRACED" = 'abc123efs/heads/x' ] && [ "$ZSH_BRACED" = 'abc123:refs/heads/x' ]; then
+    echo "  PASS  live zsh: unbraced loses the colon ('$ZSH_UNBRACED'), braced survives"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh modifier behaviour drifted: unbraced='$ZSH_UNBRACED' braced='$ZSH_BRACED'"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+echo
 echo "== run manifest: Windows reconciliation uses a non-signaling native probe =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \

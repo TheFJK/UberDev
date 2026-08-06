@@ -1945,14 +1945,22 @@ def _reserved_evidence_residue(path: str) -> bool:
     )
 
 
-def _require_worktree_residue_closed(working_dir: str, evidence_dir: str) -> None:
-    (unstaged,) = _observe_worktree_with_index_lock(
-        working_dir, (("diff", "--quiet", "--exit-code", "--"),)
-    )
-    if unstaged.returncode == 1:
-        fail("worktree_unstaged")
-    if unstaged.returncode != 0:
-        fail("git_state_unreadable")
+def _require_untracked_confined_to_evidence(
+    working_dir: str, evidence_dir: str, *, outside_failure: str
+) -> None:
+    """The ONE answer to "which untracked path is legitimate mid-verb".
+
+    Named once because two spellings of it drift: the Phase 3 conflict judge
+    started life with a bare "any untracked path at all is scope escape" scan,
+    which contradicted this predicate twenty lines away and refused every
+    resolver in any repository that had not ignored `.uberdev/` — the run's own
+    evidence tree is untracked THERE and only masked HERE by this repository's
+    own .gitignore.
+
+    `outside_failure` is the only per-caller difference: a residue check calls
+    an escapee `worktree_untracked`, the conflict judge calls it
+    `ci_conflict_scope_escape`, and both mean the same thing.
+    """
     untracked = _git(
         working_dir,
         "ls-files",
@@ -1972,14 +1980,27 @@ def _require_worktree_residue_closed(working_dir: str, evidence_dir: str) -> Non
         try:
             os.lstat(absolute)
         except OSError:
-            fail("worktree_untracked")
+            fail(outside_failure)
         in_evidence = (
             path_components[: len(evidence_components)] == evidence_components
         )
         if not in_evidence:
-            fail("worktree_untracked")
+            fail(outside_failure)
         if _reserved_evidence_residue(path):
             fail("temporary_residue")
+
+
+def _require_worktree_residue_closed(working_dir: str, evidence_dir: str) -> None:
+    (unstaged,) = _observe_worktree_with_index_lock(
+        working_dir, (("diff", "--quiet", "--exit-code", "--"),)
+    )
+    if unstaged.returncode == 1:
+        fail("worktree_unstaged")
+    if unstaged.returncode != 0:
+        fail("git_state_unreadable")
+    _require_untracked_confined_to_evidence(
+        working_dir, evidence_dir, outside_failure="worktree_untracked"
+    )
 
 
 def _require_clean_worktree(working_dir: str, evidence_dir: str) -> None:
@@ -7271,8 +7292,13 @@ CI_MUTATION_AUTHORITY_KEYS = CI_READ_AUTHORITY_KEYS | {
 # it fails at the moment the controller could still do something about it,
 # rather than after a child has already run.
 CI_AUTHORITY_REQUIRED_MEMBERS = {
+    # fix_code carries the lease and the branch for the SAME reason rebase does:
+    # both terminals reach the ONE leased push in commands/review-pr.md 6c.4w.3,
+    # and a push whose lease went missing between fences would either force
+    # against an empty ref or degrade to an unleased push. Refusing here costs a
+    # halt before the child runs; discovering it at the push costs a wrong ref.
     "review_pr.ci.fix_code": ("failure_class", "signal_anchor", "parent_sha",
-                              "parent_tree_sha"),
+                              "parent_tree_sha", "lease_sha", "pr_branch"),
     "review_pr.ci.rebase": ("base_sha", "lease_sha", "pr_branch", "base_branch"),
     "review_pr.ci.resolve_conflict": ("base_sha", "pr_branch", "base_branch"),
 }
@@ -7829,24 +7855,81 @@ def validate_ci_classification(
     }
 
 
-def _ci_require_residue_closed(authority: dict[str, Any], working_dir: str) -> None:
-    """Reuse the SHIPPED residue predicate rather than inventing a CI-only one.
+def _ci_evidence_dir(authority: dict[str, Any], working_dir: str) -> str:
+    """The run's evidence directory, DERIVED from the pinned input artifact.
 
-    `_require_clean_worktree` is what every other mutating verb in this file
-    already answers to, and it carries the one piece of nuance a fresh
-    `git status --porcelain` check would get wrong: the run's own evidence
-    directory is legitimately untracked, and everything else is not. The
-    evidence directory is DERIVED from the pinned input artifact rather than
-    taken as a parameter, so a caller cannot widen the exemption.
+    Never a parameter: a caller that could name the exempt directory could
+    exempt the whole worktree.
+
+    Every Phase 3 child's input lives at the layout
+    `skills/review-fleet/workflow.js:childInputPath()` mints and
+    `lib/review-fleet-args.sh:review_fleet_child_dir` mirrors —
+
+        <run_dir>/children/<slug>-iterNN/input.json
+
+    — so the RUN directory is two levels above the input's own directory, and
+    the `children` component is ASSERTED rather than assumed. Stopping at the
+    child directory instead (which is what this did first) is narrower than the
+    residue contract every other mutating verb answers to: `validate-residue` is
+    invoked with `RESEARCH_DIR_ABS`, the run directory, everywhere else in
+    `commands/review-pr.md`. Under the narrow form a sibling resolver's own
+    `input.json` — a file this command wrote itself, moments earlier — counted
+    as foreign untracked residue, and every CI verb refused in any repository
+    that had not already ignored `.uberdev/`.
+
+    An input that is NOT under a `children/` pair keeps the narrow reading: it
+    is its own directory's evidence and nothing above it is exempt.
     """
-    evidence_dir = os.path.dirname(authority["input_path"])
+    input_dir = os.path.dirname(authority["input_path"])
+    parent = os.path.dirname(input_dir)
+    evidence_dir = (
+        os.path.dirname(parent) if os.path.basename(parent) == "children"
+        else input_dir
+    )
     if (
         not evidence_dir
         or evidence_dir == working_dir
         or not beneath(working_dir, evidence_dir)
     ):
         fail("evidence_dir_invalid")
-    _require_clean_worktree(working_dir, evidence_dir)
+    return evidence_dir
+
+
+def _ci_require_residue_closed(authority: dict[str, Any], working_dir: str) -> None:
+    """Reuse the SHIPPED residue predicate rather than inventing a CI-only one.
+
+    `_require_clean_worktree` is what every other mutating verb in this file
+    already answers to, and it carries the one piece of nuance a fresh
+    `git status --porcelain` check would get wrong: the run's own evidence
+    directory is legitimately untracked, and everything else is not.
+    """
+    _require_clean_worktree(
+        working_dir, _ci_evidence_dir(authority, working_dir)
+    )
+
+
+def _ci_rebase_dir(working_dir: str) -> str:
+    """The live `rebase-merge` state directory, or "" when no rebase is running.
+
+    ONE definition, because the rebase judge and the conflict judge must agree
+    about what "mid-rebase" means: the first must return CONFLICT in exactly the
+    state the second is allowed to run in, and two spellings of the probe are
+    two chances for them to disagree.
+    """
+    observed = _git(working_dir, "rev-parse", "--git-path", "rebase-merge")
+    if observed.returncode != 0:
+        fail("git_state_unreadable")
+    try:
+        rebase_dir = observed.stdout.decode("utf-8").strip()
+    except UnicodeError:
+        fail("git_state_unreadable")
+    if not rebase_dir:
+        return ""
+    absolute = (
+        rebase_dir if os.path.isabs(rebase_dir)
+        else os.path.join(working_dir, rebase_dir)
+    )
+    return absolute if os.path.isdir(absolute) else ""
 
 
 def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
@@ -7946,35 +8029,94 @@ def _validate_ci_rebase_outcome(
     )
     if ancestry.returncode != 0:
         fail("ci_rebase_base_not_ancestor")
+    # THE CONFLICT TERMINAL. `agents/ci-rebase-handler.md` Step 5 REQUIRES the
+    # child to leave a conflicted rebase IN PROGRESS ("do NOT abort it") so the
+    # controller can enumerate the unmerged paths from its own `git status`
+    # rather than from the child's return. That state has unmerged index
+    # entries by construction, so falling through to `_ci_require_residue_closed`
+    # judged the mandated state `index_dirty` — and the caller's failure branch
+    # then ran `git rebase --abort`, destroying the exact rebase the
+    # CONFLICT-RESOLVE arm needs. The arm was unreachable in every run: this
+    # function could only ever return "REBASED".
+    #
+    # Ordered AFTER the lease and ancestry checks on purpose. A conflicted
+    # rebase relaxes the residue requirement and NOTHING else: a child that
+    # pushed anyway is still refused before the controller's own push, and a
+    # HEAD that is not descended from the pinned base is still not a rebase.
+    if _ci_rebase_dir(working_dir) and _ci_unmerged_paths(working_dir):
+        return "CONFLICT"
     _ci_require_residue_closed(authority, working_dir)
     return "REBASED"
+
+
+# git writes conflict hunks with `conflict-marker-size` (default 7) repeats of
+# `<`, `|`, `=` and `>` at the start of a line. `<<<<<<<` and `>>>>>>>` are the
+# two that essentially never occur in real content — `=======` is a markdown
+# underline and `|||||||` is a table row — so those two alone are the predicate.
+# Either one surviving means the hunk was never finished.
+CI_CONFLICT_MARKERS = (b"<<<<<<<", b">>>>>>>")
+
+
+def _has_conflict_markers(path: str) -> bool:
+    """True when the file still carries an unfinished git conflict hunk.
+
+    Streamed line by line rather than read whole: the file is a repository
+    source file of unbounded size, and a size cap here would have to choose
+    between refusing a large legitimate file and skipping the scan on one.
+    """
+    try:
+        with open(path, "rb") as handle:
+            for line in handle:
+                stripped = line.lstrip(b"\xef\xbb\xbf")
+                for marker in CI_CONFLICT_MARKERS:
+                    if stripped.startswith(marker) and (
+                        len(stripped) == len(marker)
+                        or stripped[len(marker):len(marker) + 1] in (b" ", b"\n", b"\r")
+                    ):
+                        return True
+    except OSError:
+        fail("git_state_unreadable")
+    return False
 
 
 def _validate_ci_conflict_outcome(
     authority: dict[str, Any], working_dir: str
 ) -> str:
-    rebase_state = _git(working_dir, "rev-parse", "--git-path", "rebase-merge")
-    if rebase_state.returncode != 0:
-        fail("git_state_unreadable")
-    try:
-        rebase_dir = rebase_state.stdout.decode("utf-8").strip()
-    except UnicodeError:
-        fail("git_state_unreadable")
-    if not rebase_dir or not os.path.isdir(
-        rebase_dir if os.path.isabs(rebase_dir)
-        else os.path.join(working_dir, rebase_dir)
-    ):
+    if not _ci_rebase_dir(working_dir):
         fail("ci_conflict_not_mid_rebase")
     target = authority["target_paths"][0]
-    if target in _ci_unmerged_paths(working_dir):
+    # NOT "is the path still `UU`". The resolver is forbidden `git add` — both
+    # agents/conflict-resolver.md and the ci-conflicts prompt say so, and the
+    # controller stages only AFTER this judgement returns, one fence later — so
+    # the index legitimately still carries the unmerged entry for every resolver
+    # that obeyed its instructions. Refusing on that made a correct resolution
+    # indistinguishable from no resolution at all, and the arm could never reach
+    # a green terminal.
+    #
+    # The observable that actually separates resolved from unresolved, given the
+    # resolver may not touch the index, is the WORKTREE bytes. Deliberately
+    # index-state agnostic: it judges the same whether the caller stages before
+    # or after, so moving the `git add` can never silently vacate the check.
+    target_absolute = os.path.join(working_dir, *target.split("/"))
+    if not beneath(working_dir, target_absolute):
+        fail("ci_conflict_scope_escape")
+    if not os.path.isfile(target_absolute) or os.path.islink(target_absolute):
+        # A `UU` path that no longer exists was deleted, not resolved.
+        fail("ci_conflict_unresolved")
+    if _has_conflict_markers(target_absolute):
         fail("ci_conflict_unresolved")
     # A conflict resolver rewrites conflicted files in place. It never creates
-    # one, so any new untracked path is scope escape by construction.
-    untracked = _git(working_dir, "ls-files", "--others", "--exclude-standard", "-z")
-    if untracked.returncode != 0:
-        fail("git_state_unreadable")
-    if untracked.stdout.strip(b"\x00"):
-        fail("ci_conflict_scope_escape")
+    # one, so a new untracked path is scope escape by construction — with the
+    # single exemption every other verb in this file already grants, the run's
+    # own evidence tree (`_require_untracked_confined_to_evidence`). Without
+    # that exemption this refused every resolver in any repository that has not
+    # ignored `.uberdev/`, because the controller's own per-child `input.json`
+    # documents are untracked there.
+    _require_untracked_confined_to_evidence(
+        working_dir,
+        _ci_evidence_dir(authority, working_dir),
+        outside_failure="ci_conflict_scope_escape",
+    )
     return "RESOLVED"
 
 

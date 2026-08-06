@@ -478,10 +478,14 @@ G16_COUNT="$(printf '%s' "$G16" | sed -n 2p)"
 # globally; G17 exists so the failure message names Phase 3 rather than a
 # generic drift.
 G17_MISSING=""
+# Extracted ONCE into a variable, then read with a herestring: a piped
+# `grep -Fq` exits early, EPIPEs the writer, and pipefail promotes that to a
+# false non-zero on the CI runner (tests/epipe-guard.test.sh, #313).
+WORKFLOW_META_BLOCK="$(sed -n '/META-BEGIN/,/META-END/p' "$WORKFLOW")"
 for literal in 'Phase 3 — CI classify' 'Phase 3 — CI fix' 'Phase 3 — CI conflicts' 'Phase 3 — CI defer'; do
   grep -Fq "phase(\"$literal\")" "$WORKFLOW" || G17_MISSING="$G17_MISSING no-phase-call[$literal]"
   # META-BEGIN/META-END block must declare it.
-  sed -n '/META-BEGIN/,/META-END/p' "$WORKFLOW" | grep -Fq "\"$literal\"" \
+  grep -Fq "\"$literal\"" <<<"$WORKFLOW_META_BLOCK" \
     || G17_MISSING="$G17_MISSING undeclared[$literal]"
 done
 [ -z "$G17_MISSING" ] \
@@ -662,6 +666,206 @@ GUARD_RC="$(bash -c '. "$1"; review_fleet_pool_guard review "not-hex,not-hex,not
 [ "$GUARD_RC" != 0 ] \
   && pass "B-neg a right-sized pool of malformed nonces is still refused" \
   || fail "B-neg malformed nonces passed the pool guard"
+
+# ---------------------------------------------------------------------------
+# W — EVERY stage is EXECUTED, not grepped
+# ---------------------------------------------------------------------------
+# The gap this closes: a ReferenceError inside one stage's prompt builder is
+# invisible to every other check in this repo. The G-section greps read the
+# command files, not the script; tests/workflow-scripts.test.sh T3 runs the
+# script once with `config: {}`, so `stage` is "" and it guard-aborts before
+# any prompt builder is entered; and main()'s DR-8 catch SWALLOWS the throw
+# into a `run_threw` audit event and still returns a structured result with
+# `dispatched` already incremented. The observable failure is therefore a
+# successful-looking return with no child — the exact shape the controller
+# then normalises to MALFORMED.
+#
+# So: run the real script, once per stage, under the same preprocess the
+# workflow harness uses (strip the meta block, wrap in an async IIFE, execute
+# under stubs), and require of every stage that it dispatched the children it
+# claims to and recorded NO run_threw. `abortReason` must be empty too — a
+# stage that guard-aborts on a valid envelope is a wiring bug, not a refusal.
+echo
+echo "== W: every review-fleet stage EXECUTES (prompt builders included) =="
+
+W_HARNESS="$TMP/stage_harness.mjs"
+cat >"$W_HARNESS" <<'WHARNESS'
+// Executes skills/review-fleet/workflow.js for ONE stage under runtime stubs.
+// argv: <workflow.js> <args-json-file>. Prints one JSON line:
+//   {"threw":<string|null>,"abortReason":...,"dispatched":N,"labels":[...]}
+import fs from 'node:fs';
+import vm from 'node:vm';
+
+const scriptPath = process.argv[2];
+const source = fs.readFileSync(scriptPath, 'utf8');
+// Same preprocess as tests/_workflow_harness.js: the meta block is an ESM
+// `export`, which vm cannot evaluate, and the file's top level is `await`ed.
+const body = source.replace(/\/\* META-BEGIN \*\/[\s\S]*?\/\* META-END \*\//, '');
+const wrapped = '(async () => {\n' + body + '\n})()';
+
+const logs = [];
+const labels = [];
+const sandbox = {
+  args: fs.readFileSync(process.argv[3], 'utf8'),   // the runtime hands a STRING
+  log: (m) => { logs.push(String(m)); },
+  phase: () => {},
+  // A canned return that satisfies every stage's schema loosely; the point of
+  // this harness is reaching and evaluating the prompt builders, not asserting
+  // on the returns (recordChild's path check is covered by the B section).
+  agent: async (prompt, opts) => {
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw new Error('prompt builder produced a non-string prompt');
+    }
+    labels.push(opts && opts.label);
+    return { status: 'COMPLETE', issuesCreated: [], commentedUrls: [], skipped: 0,
+             halted: false, resultPath: '', statusPath: '' };
+  },
+  parallel: async (thunks) => Promise.all(thunks.map(async (t) => {
+    try { return await t(); } catch { return null; }
+  })),
+  pipeline: async () => [],
+  workflow: async () => ({}),
+  budget: null,
+};
+sandbox.globalThis = sandbox;
+
+let threw = null;
+try {
+  await vm.runInNewContext(wrapped, vm.createContext(sandbox),
+    { filename: scriptPath, timeout: 20000 });
+} catch (e) {
+  threw = (e && e.message) ? e.message : String(e);
+}
+const resultLine = logs.filter((l) => l.indexOf('WORKFLOW_RESULT ') === 0).pop();
+const result = resultLine ? JSON.parse(resultLine.slice('WORKFLOW_RESULT '.length)) : null;
+// main()'s catch turns an in-stage throw into a `run_threw` audit event rather
+// than a rejection, so surface BOTH channels or the swallowed one stays hidden.
+const swallowed = result && Array.isArray(result.auditEvents)
+  ? result.auditEvents.filter((e) => e && e.event === 'run_threw').map((e) => e.reason)
+  : [];
+process.stdout.write(JSON.stringify({
+  threw: threw || (swallowed.length ? swallowed.join('; ') : null),
+  abortReason: result ? result.abortReason : 'NO_RESULT_EMITTED',
+  dispatched: result ? result.dispatched : -1,
+  labels: labels,
+}) + '\n');
+WHARNESS
+
+W_HEX64_A="$(printf 'ab%.0s' $(seq 32))"
+W_NONCE1="$(printf '0%.0s' $(seq 63))1"
+W_NONCE2="$(printf '0%.0s' $(seq 63))2"
+W_NONCE3="$(printf '0%.0s' $(seq 63))3"
+W_NONCE4="$(printf '0%.0s' $(seq 63))4"
+W_NONCE5="$(printf '0%.0s' $(seq 63))5"
+W_NONCE6="$(printf '0%.0s' $(seq 63))6"
+
+# stage_args STAGE NONCES EXTRA_JSON -> writes $TMP/w-args.json
+stage_args() {
+  jq -n --arg stage "$1" --arg nonces "$2" --arg sha "$W_HEX64_A" \
+        --argjson extra "$3" '
+    {v:1, run_id:"W-RUN", now_epoch:0, now_iso:"1970-01-01T00:00:00Z",
+     plugin_root:"/p", repo_root:"/r", cwd:"/r",
+     config: ({
+       mode:"review-pr", stage:$stage,
+       pluginRootAbs:"/p", repoRootAbs:"/r", workingDirAbs:"/r",
+       runDirAbs:"/r/run", startedAtIso:"1970-01-01T00:00:00Z",
+       prNumber:1, reviewIteration:1, repoSlug:"o/r",
+       diffPathAbs:"/r/run/diff.txt",
+       phase1PathAbs:"/r/run/p1.md", phase2PathAbs:"/r/run/p2.md",
+       phase1DispositionPathAbs:"/r/run/d1.json",
+       phase2DispositionPathAbs:"/r/run/d2.json",
+       workspaceMode:"caller", worktreeAbs:"/r", branchName:"feat/x",
+       runNonces:$nonces
+     } + $extra)}' >"$TMP/w-args.json"
+}
+
+# assert_stage_runs LABEL STAGE NONCES EXTRA_JSON EXPECTED_CHILDREN
+assert_stage_runs() {
+  local label="$1" stage="$2" nonces="$3" extra="$4" expected="$5" out
+  stage_args "$stage" "$nonces" "$extra"
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)" || {
+    fail "W[$label] harness itself failed: $out"; return
+  }
+  local threw abort dispatched
+  threw="$(printf '%s' "$out" | jq -r '.threw // "null"')"
+  abort="$(printf '%s' "$out" | jq -r '.abortReason')"
+  dispatched="$(printf '%s' "$out" | jq -r '.dispatched')"
+  if [ "$threw" != null ]; then
+    fail "W[$label] stage=$stage THREW: $threw"
+    return
+  fi
+  if [ -n "$abort" ]; then
+    fail "W[$label] stage=$stage guard-aborted on a valid envelope: $abort"
+    return
+  fi
+  local agents
+  agents="$(printf '%s' "$out" | jq -r '.labels | length')"
+  if [ "$agents" != "$expected" ]; then
+    fail "W[$label] stage=$stage dispatched $agents agent(s), expected $expected (dispatched=$dispatched)"
+    return
+  fi
+  pass "W[$label] stage=$stage executes end-to-end and dispatches $expected child(ren)"
+}
+
+W_CI_COMMON="$(jq -n --arg sha "$W_HEX64_A" '{
+  ciLoopIter:1, ciAuthorityPathAbs:"/r/run/ci-auth.json",
+  ciAuthoritySha256:$sha, ciInputSha256:$sha,
+  ciRunId:"12345", ciHeadSha:"0000000000000000000000000000000000000000",
+  ciBaseSha:"0000000000000000000000000000000000000000",
+  ciPrBranch:"feat/x", ciBaseBranch:"main"}')"
+
+assert_stage_runs review review \
+  "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}' 6
+assert_stage_runs simplify simplify "$W_NONCE1,$W_NONCE2,$W_NONCE3" '{}' 3
+assert_stage_runs fix fix "$W_NONCE1" \
+  "$(jq -n --arg sha "$W_HEX64_A" '{fixerEdgeId:"review_pr.fix.phase1", commitType:"fix",
+     findingsPathAbs:"/r/run/f.md", findingsSha256:$sha,
+     commitRangePathAbs:"/r/run/cr.json", commitRangeSha256:$sha,
+     authorityPathAbs:"/r/run/a.json", authoritySha256:$sha,
+     dispositionPathAbs:"/r/run/disp.json", appliedContentPathAbs:"/r/run/ac.json"}')" 1
+# THE #383 REGRESSION: the shipped Phase 2.5 stage. It is reached by BOTH
+# /review-pr and /simplify and it is the one stage no other test executes.
+assert_stage_runs defer defer "$W_NONCE1" '{}' 1
+assert_stage_runs ci-classify ci-classify "$W_NONCE1" "$W_CI_COMMON" 1
+assert_stage_runs ci-fix-code ci-fix "$W_NONCE1" \
+  "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.fix_code",
+     ciFailureClass:"code_bug", ciSignalAnchor:"src/app.py:1"}')" 1
+assert_stage_runs ci-fix-rebase ci-fix "$W_NONCE1" \
+  "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.rebase",
+     ciFailureClass:"stale_base", ciSignalAnchor:"gh-run-12345:1"}')" 1
+assert_stage_runs ci-conflicts ci-conflicts "$W_NONCE1,$W_NONCE2" \
+  "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciConflictCount:2, ciConflictCap:10,
+     ciConflictWave:10}')" 2
+assert_stage_runs ci-defer ci-defer "$W_NONCE1" \
+  "$(printf '%s' "$W_CI_COMMON" | jq --arg sha "$W_HEX64_A" \
+     '. + {ciAggregatePathAbs:"/r/run/agg.md", ciAggregateSha256:$sha}')" 1
+
+# /simplify reaches `defer` too, on the mode branch that has no Phase 1
+# aggregate — the arm f2iPrompt's own phase1Path prose is written for.
+stage_args defer "$W_NONCE1" '{}'
+jq '.config.mode = "simplify" | .config.phase1PathAbs = ""' \
+  "$TMP/w-args.json" >"$TMP/w-args-simplify.json"
+W_SIMPLIFY_DEFER="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args-simplify.json" 2>&1)"
+if [ "$(printf '%s' "$W_SIMPLIFY_DEFER" | jq -r '.threw // "null"')" = null ] \
+   && [ -z "$(printf '%s' "$W_SIMPLIFY_DEFER" | jq -r '.abortReason')" ] \
+   && [ "$(printf '%s' "$W_SIMPLIFY_DEFER" | jq -r '.labels | length')" = 1 ]; then
+  pass "W[defer-simplify] /simplify's Phase 2.5 executes with an empty phase1_path"
+else
+  fail "W[defer-simplify] /simplify's Phase 2.5 broke: $W_SIMPLIFY_DEFER"
+fi
+
+# W-neg — the harness must be able to SEE a swallowed throw, or every row above
+# is vacuous. Inject one into a copy of the script and require a red.
+W_SABOTAGE="$TMP/sabotaged-workflow.js"
+sed 's|^function f2iPrompt(notes, nonce) {|function f2iPrompt(notes, nonce) {\n  lines_that_do_not_exist.push(childInputPath(undeclared_slug));|' \
+  "$WORKFLOW" >"$W_SABOTAGE"
+stage_args defer "$W_NONCE1" '{}'
+W_SAB_OUT="$(node "$W_HARNESS" "$W_SABOTAGE" "$TMP/w-args.json" 2>&1)"
+if [ "$(printf '%s' "$W_SAB_OUT" | jq -r '.threw // "null"')" != null ]; then
+  pass "W-neg an undeclared identifier inside a prompt builder is caught (the #383 shape)"
+else
+  fail "W-neg the harness MISSED an injected ReferenceError — every W row above is vacuous"
+fi
 
 echo ""
 echo "== Summary =="
