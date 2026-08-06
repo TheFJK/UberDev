@@ -1509,6 +1509,71 @@ _uberdev_dispatch_capture_supervisor_pid() {
   printf '%s' "$captured"
 }
 
+# _uberdev_dispatch_preflight_child_lib ISSUE_NUM BACKEND
+#
+# #384 — the one window no teardown covers. A child wrapper's first safe
+# instruction is `. "$DISPATCH_LIB"`; by the time it runs, the worktree and its
+# branch already exist, and `_uberdev_dispatch_cleanup_child_worktree` plus
+# every preservation guard it depends on still live only in the file that just
+# failed to load. A guardless inline `git worktree remove` there would invert
+# the very safety property those guards exist to hold, so the failure is moved
+# EARLIER instead: refuse before `git worktree add` runs, while there is still
+# nothing on disk to strand.
+#
+# The probe runs in a FRESH `bash -c`, never in this shell, for two reasons:
+#   - re-sourcing here proves nothing — the guard at the top of this file
+#     short-circuits on `_UBERDEV_DISPATCH_LOADED=1` and returns immediately,
+#     and every function the child needs is already defined in this process; and
+#   - `bash` IS the child's interpreter. The background arm reaches it through
+#     `os.execvp("bash", ...)` inside a nohup'd python that inherited this
+#     process's PATH, environment and cwd, so the probe resolves the same
+#     binary and starts from the same state the wrapper will.
+# It also asserts the teardown entry point is REACHABLE after the source rather
+# than just that the source returned 0 — a truncated or partially checked-out
+# library does the latter and still leaves the child with no teardown.
+#
+# HONEST LIMIT — this NARROWS the window; it does not close it:
+#   - the library can still be made unloadable BETWEEN this probe and the
+#     child's own source (a mid-edit save). That residual is why both wrappers
+#     keep naming the worktree on stderr before `exit 126` — the backstop is
+#     still load-bearing, not vestigial.
+#   - for the wezterm arm the pane's `bash` is resolved by the long-lived
+#     wezterm mux server's environment, not by ours, and the pane's cwd is the
+#     worktree rather than our cwd; there this is a close proxy, not an exact
+#     rehearsal.
+#   - the wrapper's three python-validation `exit 126` paths sit in the same
+#     pre-source window and are NOT covered here.
+#
+# rc 0  the child can load the library and reach the teardown.
+# rc 1  it cannot, and nothing has been created, so nothing has leaked.
+_uberdev_dispatch_preflight_child_lib() {
+  local issue="$1" backend="$2"
+  local lib="$_UBERDEV_DISPATCH_FILE" child_bash probe_out probe_rc=0
+  child_bash="$(command -v bash 2>/dev/null)"
+  if [ -z "$child_bash" ] || [ ! -x "$child_bash" ]; then
+    printf '%s dispatch: refusing to create a child worktree for issue %s — the child wrapper is a `bash -c` body and there is no executable `bash` on PATH. Nothing was created.\n' \
+      "$backend" "$issue" >&2
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
+    return 1
+  fi
+  probe_out="$("$child_bash" -c '
+    . "$1" || exit 1
+    command -v _uberdev_dispatch_cleanup_child_worktree >/dev/null 2>&1 || exit 1
+  ' _ "$lib" 2>&1)" || probe_rc=$?
+  if [ "$probe_rc" -ne 0 ]; then
+    printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s cannot load the dispatch library %s (probe rc %s). The child teardown lives in that library, so a worktree created now could not be taken back down. Nothing was created.\n' \
+      "$backend" "$issue" "$child_bash" "$lib" "$probe_rc" >&2
+    if [ -n "$probe_out" ]; then
+      printf '%s dispatch: dispatch library probe reported: %s\n' "$backend" "$probe_out" >&2
+    fi
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
+    return 1
+  fi
+  return 0
+}
+
 # _uberdev_dispatch_background ISSUE_NUM TIER PROMPT_FILE
 # Dependency-free fallback: explicit `git worktree add` + detached headless
 # `claude -p`. Sets DISPATCH_RC and DISPATCH_ID (the detached pid).
@@ -1561,6 +1626,15 @@ _uberdev_dispatch_background() {
   fi
   if ! _uberdev_dispatch_prepare_tmp_target "$RESULT_FILE" "$ISSUE_NUM" "background"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
+  fi
+  # #384: the last statement before anything exists to leak. Deliberately NOT
+  # scoped by CHILD_OWNED — the teardown boundary is, but this is a
+  # precondition: a child that cannot load this library never does any work for
+  # anybody, so creating a worktree for it is pure cost either way.
+  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" background; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    return 1
   fi
   # Explicit dispatcher-controlled worktree — sidesteps the Windows
   # worktree-isolation bug #40164 in the --bg backend's own --worktree path
@@ -1650,12 +1724,19 @@ os.execvp("bash",argv)' '
     WORKTREE_DIR="$1"; STATUS_FILE="$2"; RESULT_FILE="$3"; ISSUE_NUM="$4"; TIER="$5"
     REPOSITORY_ROOT="$6"; WORKTREE_RELATIVE="$7"; WORKTREE_BRANCH="$8"
     CLEANUP_START_HEAD="$9"; CHILD_OWNED="${10}"; shift 10
-    # The one window no teardown can cover: the teardown transaction and every
+    # The window no teardown can cover: the teardown transaction and every
     # preservation guard it depends on live in $DISPATCH_LIB, so before this
     # line there is nothing safe to call. A guardless inline `git worktree
     # remove` here would be the exact destructive shortcut those guards exist
     # to forbid. So this leak is REPORTED and left for the operator, not
     # silently absorbed and not force-removed.
+    #
+    # #384 NARROWED this window; it did not close it. Before creating the
+    # worktree the dispatcher now runs this same source, under this same
+    # interpreter, in a fresh process (_uberdev_dispatch_preflight_child_lib)
+    # and refuses outright if it fails. What survives is the interval between
+    # that probe and this line — a mid-edit save, a checkout landing under us.
+    # This report is the backstop for that remainder, not dead code.
     . "$DISPATCH_LIB" || {
       [ "$CHILD_OWNED" != "1" ] || printf "background dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
         "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2
@@ -1896,6 +1977,15 @@ _uberdev_dispatch_wezterm() {
   if ! _uberdev_dispatch_prepare_tmp_target "$STATUS_FILE" "$ISSUE_NUM" "wezterm"; then
     DISPATCH_RC=3; DISPATCH_LOG="$LOG_FILE"; return 3
   fi
+  # #384, same placement and same rationale as the background arm: refuse while
+  # there is still nothing on disk. A pane whose spawn SUCCEEDS and whose body
+  # then dies at `. "$DISPATCH_LIB"` is the worst shape of this bug — the
+  # dispatcher sees a pane id, so no dispatcher-side teardown ever runs.
+  if ! _uberdev_dispatch_preflight_child_lib "$ISSUE_NUM" wezterm; then
+    DISPATCH_RC=1
+    DISPATCH_LOG="$LOG_FILE"
+    return 1
+  fi
   # The backend runs its own worktree add — a pane's `claude -p` does not get
   # native --worktree. Absolute path, quoted (repo path may contain spaces).
   # MSYS_NO_PATHCONV stops Git Bash rewriting the path.
@@ -1973,9 +2063,11 @@ _uberdev_dispatch_wezterm() {
       STATUS_FILE="$1"; ISSUE_NUM="$2"; TIER="$3"
       REPOSITORY_ROOT="$4"; WORKTREE_RELATIVE="$5"; WORKTREE_BRANCH="$6"
       CLEANUP_START_HEAD="$7"; CHILD_OWNED="$8"; WORKTREE_DIR="$9"; shift 9
-      # Same uncoverable pre-source window as the background wrapper, same
-      # ruling: report the worktree by name rather than force-remove it
-      # without the guards that live in $DISPATCH_LIB.
+      # Same pre-source window as the background wrapper, same ruling: report
+      # the worktree by name rather than force-remove it without the guards
+      # that live in $DISPATCH_LIB. Also narrowed by the #384 preflight, and
+      # narrowed LESS here: the bash that runs this body is resolved by the
+      # wezterm mux server, not by the process that ran the probe.
       . "$DISPATCH_LIB" || {
         [ "$CHILD_OWNED" != "1" ] || printf "wezterm dispatch: cannot source %s; child worktree %s (%s) is left in place and needs manual removal\n" \
           "$DISPATCH_LIB" "$WORKTREE_DIR" "$WORKTREE_BRANCH" >&2

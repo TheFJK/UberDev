@@ -42,6 +42,21 @@
 #   T10 the wezterm in-pane wrapper tears down on a bare `exit`, not only on a
 #       signal — it had no EXIT trap at all, unlike the background wrapper.
 #
+# T1-T10 all assume the child got far enough to HAVE a teardown. #384 is the
+# last window where it did not: the wrapper's first safe instruction is
+# `. "$DISPATCH_LIB"`, and by then the worktree and branch already exist while
+# `_uberdev_dispatch_cleanup_child_worktree` — and every preservation guard it
+# depends on — still lives only in the file that just failed to load. T11-T14
+# close it from the DISPATCHER side, before anything exists to leak:
+#   T11  a dispatch whose child could not load the library creates NOTHING
+#        (reproduced red first: rc 0 and `solve-issue-912` still registered).
+#   T11b the refusal does not depend on CHILD_OWNED.
+#   T12  a library that LOADS but does not define the teardown is refused too —
+#        which is what forces the probe into a fresh child process instead of
+#        re-checking this shell's already-loaded copy.
+#   T13  the same for the WEZTERM arm, against a mux that spawns successfully.
+#   T14  the probe is ordered BEFORE `git worktree add` in both arms.
+#
 # Unix-runtime fixture: real `git worktree add`, real nohup detachment, real
 # POSIX ownership predicates. Skipped on windows-latest (see the ci-wiring
 # windows-skip-list marker block in .github/workflows/test.yml).
@@ -119,8 +134,13 @@ chmod +x "$TMP/bin/claude"
 # Drive the real `_uberdev_dispatch_background` against a scratch repository.
 # Only `_uberdev_dispatch_wait_owned_session` is stubbed (the fixture has no
 # process-group supervisor); `git worktree add` and the teardown are REAL.
+# $6 (optional) is the #384 injection: the path the CHILD is handed as its
+# `$DISPATCH_LIB`. `_UBERDEV_DISPATCH_FILE` is a plain, non-readonly global and
+# is exactly the argv slot both wrappers unpack, so reassigning it AFTER the
+# dispatcher has loaded the real library reproduces the issue precisely — this
+# process is fine, the child is not — without chmod'ing a file in the repo.
 run_background_dispatch() {
-  local repo="$1" runtime="$2" issue="$3" child_owned="$4" mode="$5"
+  local repo="$1" runtime="$2" issue="$3" child_owned="$4" mode="$5" child_lib="${6:-}"
   mkdir -p "$runtime"
   (
     cd "$repo" || exit 1
@@ -142,8 +162,9 @@ run_background_dispatch() {
         DISPATCH_RC=0
         DISPATCH_ID=""
         DISPATCH_LOG=""
+        [ -z "$5" ] || _UBERDEV_DISPATCH_FILE="$5"
         _uberdev_dispatch_background "$4" medium "$3"
-      ' _ "$DISPATCH_LIB" "$runtime" "$TMP/prompt.txt" "$issue"
+      ' _ "$DISPATCH_LIB" "$runtime" "$TMP/prompt.txt" "$issue" "$child_lib"
   ) >"$runtime/dispatch.out" 2>&1
 }
 
@@ -340,6 +361,11 @@ done
 #   run-pane     actually run the spawned wrapper locally, standing in for the
 #                pane process, with the wrapper's status path redirected at an
 #                unwritable location so `write_status running` exits 126.
+#   run-pane-ok  a mux that WORKS: it runs the spawned wrapper, then returns a
+#                pane id and exits 0. This is the #384 shape — the dispatcher
+#                sees a successful spawn, so no dispatcher-side teardown ever
+#                runs, and whatever the pane does to itself is the only
+#                teardown there is.
 cat >"$TMP/bin/wezterm" <<'SH'
 #!/usr/bin/env bash
 case "${WEZTERM_FIXTURE_MODE:-spawn-fail}" in
@@ -362,6 +388,20 @@ case "${WEZTERM_FIXTURE_MODE:-spawn-fail}" in
     cd "$WEZTERM_FIXTURE_WORKTREE" || exit 1
     "${pane[@]}"
     exit $?
+    ;;
+  run-pane-ok)
+    args=( "$@" )
+    index=0
+    while [ "$index" -lt "${#args[@]}" ] && [ "${args[$index]}" != "--" ]; do
+      index=$((index + 1))
+    done
+    index=$((index + 1))
+    pane=( "${args[@]:$index}" )
+    cd "$WEZTERM_FIXTURE_WORKTREE" || exit 1
+    "${pane[@]}" >/dev/null 2>&1
+    # The spawn itself succeeded, whatever the pane body then did.
+    printf '731\n'
+    exit 0
     ;;
 esac
 exit 3
@@ -401,9 +441,11 @@ run_background_setup_failure() {
 # Drive the real `_uberdev_dispatch_wezterm`. Only the wezterm CONFIG probe is
 # stubbed out (it writes to the operator's real WezTerm config); the mux itself
 # is the $TMP/bin/wezterm stub above, and the worktree + teardown are REAL.
+# $8 (optional) is the same #384 child-library injection as
+# run_background_dispatch's $6.
 run_wezterm_dispatch() {
   local repo="$1" runtime="$2" issue="$3" child_owned="$4" prompt="$5" mode="$6"
-  local status_override="${7:-}"
+  local status_override="${7:-}" child_lib="${8:-}"
   mkdir -p "$runtime"
   (
     cd "$repo" || exit 1
@@ -424,8 +466,9 @@ run_wezterm_dispatch() {
         DISPATCH_RC=0
         DISPATCH_ID=""
         DISPATCH_LOG=""
+        [ -z "$5" ] || _UBERDEV_DISPATCH_FILE="$5"
         _uberdev_dispatch_wezterm "$4" medium "$3"
-      ' _ "$DISPATCH_LIB" "$runtime" "$prompt" "$issue"
+      ' _ "$DISPATCH_LIB" "$runtime" "$prompt" "$issue" "$child_lib"
   ) >"$runtime/dispatch.out" 2>&1
 }
 
@@ -553,6 +596,135 @@ for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
     ok "T10b $arm arms an EXIT trap on its child wrapper"
   else
     ko "T10b $arm has no EXIT trap — a bare exit after worktree creation leaks"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T11-T14 — the PRE-SOURCE door (#384)
+#
+# Everything above assumes the child reached `. "$DISPATCH_LIB"` successfully.
+# When it does not, the worktree and branch exist and the teardown does not, so
+# the only fix that does not invert the preservation guards is to refuse
+# EARLIER — before `git worktree add` — on the dispatcher side.
+# ---------------------------------------------------------------------------
+
+# Never created: the "partial checkout / file is gone" shape.
+MISSING_CHILD_LIB="$TMP/no-such-dispatch-lib.sh"
+# Loads without error and defines NONE of the teardown surface: the "truncated
+# library" shape. A preflight that only asks whether `. "$lib"` returned 0 —
+# or that re-checks THIS shell, where the real functions are already defined —
+# passes this one and still hands the child a worktree it cannot remove.
+PARTIAL_CHILD_LIB="$TMP/partial-dispatch-lib.sh"
+cat >"$PARTIAL_CHILD_LIB" <<'SH'
+# Deliberately truncated stand-in for plugins/uberdev/lib/dispatch.sh.
+_UBERDEV_PARTIAL_FIXTURE_LOADED=1
+SH
+
+echo "== T11: a child that cannot load the dispatch library gets no worktree at all =="
+T11_REPO="$TMP/t11-repo"
+new_repo "$T11_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T11_ISSUE=912
+T11_WORKTREE="$(cd "$T11_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T11_ISSUE"
+T11_BRANCH="worktree-solve-issue-$T11_ISSUE"
+run_background_dispatch "$T11_REPO" "$TMP/t11-runtime" "$T11_ISSUE" 1 clean "$MISSING_CHILD_LIB"
+T11_RC=$?
+# rc 1 SPECIFICALLY. rc 0 is the pre-fix behaviour (the dispatch "succeeded"
+# and leaked), and rc 74 would mean a worktree WAS created and then had to be
+# torn down — the exact sequence this preflight exists to make impossible.
+if [ "$T11_RC" -eq 1 ]; then
+  ok "T11 the dispatcher refuses (rc=1) instead of dispatching a child that cannot clean up"
+else
+  ko "T11 expected rc 1, got rc=$T11_RC: $(tr '\n' ';' <"$TMP/t11-runtime/dispatch.out" 2>/dev/null)"
+fi
+if [ -e "$T11_WORKTREE" ] || worktree_registered "$T11_REPO" "$T11_WORKTREE" \
+    || branch_exists "$T11_REPO" "$T11_BRANCH"; then
+  ko "T11 the child could not load $MISSING_CHILD_LIB and still got a worktree: $T11_WORKTREE"
+else
+  ok "T11 no worktree and no branch were ever created"
+fi
+T11_OUT="$(cat "$TMP/t11-runtime/dispatch.out" 2>/dev/null || true)"
+case "$T11_OUT" in
+  *"refusing to create a child worktree"*"$MISSING_CHILD_LIB"*)
+    ok "T11 the refusal is loud and names the library it could not load" ;;
+  *) ko "T11 the refusal did not name the library: $(printf '%s' "$T11_OUT" | tr '\n' ';')" ;;
+esac
+
+echo "== T11b: the refusal does not depend on CHILD_OWNED =="
+# A child that cannot source the library never does any work for anybody, so
+# creating a top-level workspace and launching a child that dies immediately is
+# strictly worse than saying so. The teardown boundary is CHILD_OWNED; this
+# precondition is not.
+T11B_REPO="$TMP/t11b-repo"
+new_repo "$T11B_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T11B_ISSUE=913
+T11B_WORKTREE="$(cd "$T11B_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T11B_ISSUE"
+T11B_BRANCH="worktree-solve-issue-$T11B_ISSUE"
+run_background_dispatch "$T11B_REPO" "$TMP/t11b-runtime" "$T11B_ISSUE" 0 clean "$MISSING_CHILD_LIB"
+T11B_RC=$?
+if [ "$T11B_RC" -eq 1 ] && [ ! -e "$T11B_WORKTREE" ] \
+    && ! branch_exists "$T11B_REPO" "$T11B_BRANCH"; then
+  ok "T11b a top-level dispatch is refused the same way (rc=1, nothing created)"
+else
+  ko "T11b expected rc 1 and no worktree, got rc=$T11B_RC worktree_exists=$([ -e "$T11B_WORKTREE" ] && echo yes || echo no)"
+fi
+
+echo "== T12: a library that loads but has no teardown is refused too =="
+T12_REPO="$TMP/t12-repo"
+new_repo "$T12_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T12_ISSUE=914
+T12_WORKTREE="$(cd "$T12_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T12_ISSUE"
+T12_BRANCH="worktree-solve-issue-$T12_ISSUE"
+run_background_dispatch "$T12_REPO" "$TMP/t12-runtime" "$T12_ISSUE" 1 clean "$PARTIAL_CHILD_LIB"
+T12_RC=$?
+if [ "$T12_RC" -eq 1 ] && [ ! -e "$T12_WORKTREE" ] \
+    && ! worktree_registered "$T12_REPO" "$T12_WORKTREE" \
+    && ! branch_exists "$T12_REPO" "$T12_BRANCH"; then
+  ok "T12 the probe asks whether the TEARDOWN is reachable, not merely whether the source returned 0"
+else
+  ko "T12 a truncated library still got a worktree: rc=$T12_RC out=$(tr '\n' ';' <"$TMP/t12-runtime/dispatch.out" 2>/dev/null)"
+fi
+
+echo "== T13: the wezterm arm refuses before the pane's worktree exists =="
+T13_REPO="$TMP/t13-repo"
+new_repo "$T13_REPO" || { echo "  ABORT  cannot create fixture repo"; exit 99; }
+T13_ISSUE=915
+T13_WORKTREE="$(cd "$T13_REPO" && pwd -P)/.claude/worktrees/solve-issue-$T13_ISSUE"
+T13_BRANCH="worktree-solve-issue-$T13_ISSUE"
+# run-pane-ok: the mux is up and the spawn succeeds, so NOTHING on the
+# dispatcher side will ever take this worktree back down — only the pane could,
+# and the pane is the process that cannot load the library.
+run_wezterm_dispatch "$T13_REPO" "$TMP/t13-runtime" "$T13_ISSUE" 1 "$TMP/prompt.txt" \
+  run-pane-ok "" "$MISSING_CHILD_LIB"
+T13_RC=$?
+if [ "$T13_RC" -eq 1 ]; then
+  ok "T13 the wezterm arm refuses (rc=1) before spawning a pane that cannot clean up"
+else
+  ko "T13 expected rc 1, got rc=$T13_RC: $(tr '\n' ';' <"$TMP/t13-runtime/dispatch.out" 2>/dev/null)"
+fi
+if [ -e "$T13_WORKTREE" ] || worktree_registered "$T13_REPO" "$T13_WORKTREE" \
+    || branch_exists "$T13_REPO" "$T13_BRANCH"; then
+  ko "T13 a successful spawn of a pane that cannot source the library leaked $T13_WORKTREE"
+else
+  ok "T13 no worktree and no branch were ever created"
+fi
+T13_OUT="$(cat "$TMP/t13-runtime/dispatch.out" 2>/dev/null || true)"
+case "$T13_OUT" in
+  *"refusing to create a child worktree"*"$MISSING_CHILD_LIB"*)
+    ok "T13 the wezterm refusal names the library it could not load" ;;
+  *) ko "T13 the wezterm refusal did not name the library: $(printf '%s' "$T13_OUT" | tr '\n' ';')" ;;
+esac
+
+echo "== T14: both arms probe the child's library BEFORE git worktree add =="
+for arm in _uberdev_dispatch_background _uberdev_dispatch_wezterm; do
+  BODY="$(arm_body "$arm")"
+  PREFLIGHT_LINE="$(printf '%s\n' "$BODY" | grep -nF '_uberdev_dispatch_preflight_child_lib' | head -1 | cut -d: -f1)"
+  ADD_LINE="$(printf '%s\n' "$BODY" | grep -nF '_uberdev_dispatch_git_worktree_add' | head -1 | cut -d: -f1)"
+  # Ordering is the whole property: a probe that runs after the add guards
+  # nothing, because by then the thing it would have prevented already exists.
+  if [ -n "$PREFLIGHT_LINE" ] && [ -n "$ADD_LINE" ] && [ "$PREFLIGHT_LINE" -lt "$ADD_LINE" ]; then
+    ok "T14 $arm probes the child's dispatch library before creating the worktree"
+  else
+    ko "T14 $arm preflight=${PREFLIGHT_LINE:-none} worktree-add=${ADD_LINE:-none} — the probe must come first"
   fi
 done
 
