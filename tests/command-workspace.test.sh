@@ -1163,8 +1163,11 @@ workspace_grep_fixture_probe() {
   bare="$(printf '%s\n' "$hits" | grep '^2:' || true)"
   [ -n "$bare" ] || { echo "$1: corpus grep is blind to a bare zero-argument call at end of line" >&2; return 1; }
   [ "$(workspace_arity_of "${bare#*:}")" = 0 ] || { echo "$1: bare call parsed as $(workspace_arity_of "${bare#*:}") arguments, expected 0" >&2; return 1; }
-  printf '%s\n' "$hits" | grep -q '^1:' || { echo "$1: corpus grep lost an ordinary six-argument call" >&2; return 1; }
-  if printf '%s\n' "$hits" | grep -q '^3:'; then
+  # Herestrings, not `printf | grep -q`: `-q` exits at the first match and the
+  # writer takes SIGPIPE, which is the shape tests/epipe-guard.test.sh forbids
+  # anywhere in a `pipefail` file. A herestring has no writer process at all.
+  grep -q '^1:' <<<"$hits" || { echo "$1: corpus grep lost an ordinary six-argument call" >&2; return 1; }
+  if grep -q '^3:' <<<"$hits"; then
     echo "$1: corpus grep now reads a commented-out call as a call site" >&2; return 1
   fi
 }
