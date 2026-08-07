@@ -377,8 +377,8 @@ finally:
 PY
 
 write_aggregate() {
-  local path="$1" target="${2:-}"
-  python3 -I -B - "$target" <<'PY' | python3 -I -B "$CONTRACT" encode-aggregate --phase phase2 >"$path"
+  local aggregate_path="$1" target="${2:-}"
+  python3 -I -B - "$target" <<'PY' | python3 -I -B "$CONTRACT" encode-aggregate --phase phase2 >"$aggregate_path"
 import json,sys
 target=sys.argv[1]
 findings=[] if not target else [{

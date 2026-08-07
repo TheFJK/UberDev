@@ -487,9 +487,9 @@ awk '
   capture && /^[[:space:]]*\}$/ { exit }
 ' "$REVIEW_PR" > "$CLASSIFY_HELPER"
 write_classifier_case() {
-  local status="$1" failure_class="$2" signal_anchor="$3" rationale="$4"
+  local classifier_status="$1" failure_class="$2" signal_anchor="$3" rationale="$4"
   printf '```yaml\nstatus: %s\nfailure_class: %s\nsignal_anchor: %s\nrationale: %s\nrisks: []\n```\n' \
-    "$status" "$failure_class" "$signal_anchor" "$rationale" > "$CLASSIFY_CASE"
+    "$classifier_status" "$failure_class" "$signal_anchor" "$rationale" > "$CLASSIFY_CASE"
 }
 write_classifier_case CLASSIFIED code_bug '"README.md:42"' '"repository test failure"'
 CLASSIFY_SPLIT="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3"' _ "$CLASSIFY_HELPER" "$CLASSIFY_CASE" "$REPO_ROOT")"

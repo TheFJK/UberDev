@@ -39,12 +39,12 @@ mode_of() {
   fi
 }
 wait_for_file() {
-  local path="$1" tries=0
-  while [ ! -s "$path" ] && [ "$tries" -lt 200 ]; do
+  local target_path="$1" tries=0
+  while [ ! -s "$target_path" ] && [ "$tries" -lt 200 ]; do
     sleep 0.01
     tries=$((tries + 1))
   done
-  [ -s "$path" ]
+  [ -s "$target_path" ]
 }
 
 if [ ! -f "$LIB" ]; then

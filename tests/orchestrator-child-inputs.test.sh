@@ -176,7 +176,7 @@ export UBERDEV_RUN_CARRIER_JSON UBERDEV_AGENT_PREPARED_REQUEST_JSON
 # Keep the complete production design, child-dispatch, route-resolution,
 # lifecycle, and lease stack. Only the detached backend provider is replaced.
 _uberdev_agent_dispatch_backend() {
-  local backend="$1" issue="$2" tier_arg="$3" prompt="$4" result="$5" status="$6" decision="$7"
+  local backend="$1" issue="$2" tier_arg="$3" prompt="$4" result="$5" child_status="$6" decision="$7"
   local instance edge
   [ "$#" -eq 7 ] || return 2
   instance="${result%/result.md}"
@@ -185,7 +185,7 @@ _uberdev_agent_dispatch_backend() {
   python3 -I -B - \
     "$RECEIPTS" "$UBERDEV_CHILD_TEST_SOURCE" "$HANDOFFS/$instance.json" \
     "$LIFECYCLE" "$RUN_DIR/.agent-state-$(id -u)" "$PROVIDER_CALLS" \
-    "$backend" "$issue" "$tier_arg" "$prompt" "$result" "$status" "$decision" <<'PY'
+    "$backend" "$issue" "$tier_arg" "$prompt" "$result" "$child_status" "$decision" <<'PY'
 import hashlib,json,pathlib,re,sys
 (
  receipt_path,source,handoff_path,lifecycle_path,state_dir,provider_path,
@@ -253,8 +253,8 @@ PY
   DISPATCH_LOG=''
   printf 'fixture result for %s\n' "$instance" >"$result"
   chmod 600 "$result" || return 2
-  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$DISPATCH_ID" >"$status"
-  chmod 600 "$status" || return 2
+  printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' "$DISPATCH_ID" >"$child_status"
+  chmod 600 "$child_status" || return 2
   return 0
 }
 
