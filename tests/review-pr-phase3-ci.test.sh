@@ -2245,6 +2245,16 @@ echo "== S27: BOTH loop counters come off disk in every fence keyed on them =="
 # published — and prepare-ci-authority publishes NO-CLOBBER, so it died
 # `authority_preexists` with `return 74` and no audit event. CI_FIX_LOOP_CAP=3
 # was unreachable in practice.
+#
+# REVIEW_ITERATION is the same defect one phase earlier, and it was left out of
+# this section's first cut on the grounds that Phase 1/2 "run once". They do
+# not: 6c.4w.3 pushes a CI fix, the re-entry fence advances BOTH counters, and
+# Phase 1 re-runs. Its first fence is a fresh shell too, so REVIEW_ITERATION
+# arrived either empty -- `review_fleet_child_dir` rejects it rc=2 and the
+# Phase 3 -> Phase 1 loop cannot complete a second pass -- or as a stale
+# inherited 1, which rebinds pass 2 onto pass 1's result.md paths and freezes
+# STALE bytes while every equality still passes. That is the worse half: not a
+# crash, a clean green built on the previous iteration's evidence.
 assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_load_ci_counters\(\)' \
   "S27.1 — ONE reader for the counter pair"
 S27_VERDICT="$(python3 - "$REVIEW_PR" <<'PY_S27'
@@ -2278,13 +2288,22 @@ fences = [
 # A fence that KEYS an artifact pathname on a loop counter must have read that
 # counter off disk in the SAME fence -- there is no other way for it to be
 # right on iteration 2.
-# Scoped to the Phase 3 CI loop counter on purpose: CI_FIX_LOOP_ITER is the one
-# this file advances in three different fences, so it is the one whose
-# fresh-shell default silently recomputes an already-published pathname.
-keyed = re.compile(
+# BOTH counters, because the re-entry fence advances both in lockstep and both
+# are keyed on. CI_FIX_LOOP_ITER keys Phase 3's own authority and sidecar names;
+# REVIEW_ITERATION keys the Phase 1/2 authority, applied-content, sidecar and
+# instance-id names AND -- through `reviewIteration` and the `bind_*` binders --
+# every child directory workflow.js derives, since childDirAbs() keys on
+# reviewIteration ALONE.
+ci_keyed = re.compile(
     r"(-ci\$\{CI_FIX_LOOP_ITER"
     r"|ci-refused-synthetic-\$\{CI_FIX_LOOP_ITER"
     r"|review_fleet_ci_slug [^\n]*\$\{CI_FIX_LOOP_ITER)"
+)
+review_keyed = re.compile(
+    r"(-iter\$\{REVIEW_ITERATION\}"
+    r"|reviewIteration=\"\$REVIEW_ITERATION\""
+    r"|review_fleet_bind_[a-z_]+ [^\n]*\"\$REVIEW_ITERATION\""
+    r"|review_fleet_child_dir [^\n]*\"\$REVIEW_ITERATION\")"
 )
 # THE SHARED READER, not "any spelling of reading". Accepting an open-coded
 # `review_fleet_read_ci_state` pair is what let the CONFLICT arm's step-3 fence
@@ -2294,29 +2313,37 @@ keyed = re.compile(
 # audit events, worktree left mid-rebase. Two spellings of "read the counters"
 # IS the defect this section exists to end.
 reads = re.compile(r"review_fleet_load_ci_counters")
-offenders, examined = [], 0
+offenders, ci_examined, review_examined = [], 0, 0
 for body in fences:
-    if not keyed.search(body):
+    on_ci, on_review = bool(ci_keyed.search(body)), bool(review_keyed.search(body))
+    if not (on_ci or on_review):
         continue
-    examined += 1
+    ci_examined += on_ci
+    review_examined += on_review
     if reads.search(body):
         continue
     first = next((row.strip() for row in body.split("\n") if row.strip()), "<empty>")
     offenders.append(first[:70])
 
-# Anti-vacuity: if the detector stops FINDING counter-keyed fences it must fail,
-# not go green on an empty set.
-if examined < 8:
-    print("VACUOUS:only %d CI-counter-keyed fence(s) found" % examined)
+# Anti-vacuity, PER COUNTER: if the detector stops FINDING counter-keyed fences
+# it must fail, not go green on an empty set -- and one counter's spelling
+# changing must not be masked by the other counter's fences still being found.
+# That masking is not hypothetical: this section shipped scoped to CI_FIX_LOOP_ITER
+# alone and read green across twelve REVIEW_ITERATION-keyed fences that had no
+# reader at all.
+if ci_examined < 8:
+    print("VACUOUS:only %d CI-counter-keyed fence(s) found" % ci_examined)
+elif review_examined < 18:
+    print("VACUOUS:only %d REVIEW_ITERATION-keyed fence(s) found" % review_examined)
 elif offenders:
     print("LEAKS:" + " | ".join(offenders))
 else:
-    print("OK:%d" % examined)
+    print("OK:%d CI-keyed + %d REVIEW_ITERATION-keyed" % (ci_examined, review_examined))
 PY_S27
 )"
 case "$S27_VERDICT" in
   OK:*)
-    echo "  PASS  S27.2 — all ${S27_VERDICT#OK:} counter-keyed Phase 3 fences read the counters off disk first"
+    echo "  PASS  S27.2 — all ${S27_VERDICT#OK:} fences read the counters off disk first"
     PASS=$((PASS + 1))
     ;;
   *)

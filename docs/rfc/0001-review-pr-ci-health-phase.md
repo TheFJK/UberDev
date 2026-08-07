@@ -94,6 +94,19 @@
 > therefore publishes a fixed-name POINTER to the sidecar it wrote, and every
 > later reader follows it.
 >
+> That rule is FILE-WIDE, not Phase-3-local. `REVIEW_ITERATION` is the other
+> counter this phase advances, and Phase 1 and Phase 2 key their authority,
+> applied-content, sidecar and instance-id names on it — and, through
+> `reviewIteration`, every child directory `workflow.js` derives, since
+> `childDirAbs()` keys on that argument alone. Those fences were left binding it
+> from their own `${REVIEW_ITERATION:-1}` on the grounds that they "run once".
+> They do not: this phase re-enters them. A fence that inherited nothing got
+> `review_fleet_child_dir` rc=2 and the re-entry loop could not complete a second
+> pass; one that inherited a stale `1` rebound pass 2 onto pass 1's `result.md`
+> paths and froze STALE bytes with every equality still passing — a clean green
+> built on the previous iteration's evidence. Both counters now come from
+> `review_fleet_load_ci_counters`, in the same fence that keys on them.
+>
 > **Two numbers, not one, for the conflict fanout.**
 > `fanout_concurrency.conflict_resolver` is a CONCURRENCY knob — its documented
 > behaviour is "split into `ceil(N / cap)` sequential waves" — so it is the wave

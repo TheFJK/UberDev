@@ -1626,6 +1626,10 @@ PY
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
    REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)" || return 2
    [ "${SEQUENTIAL:-0}" != 1 ] || REVIEW_FLEET_CAP=1
@@ -1753,6 +1757,11 @@ PY
    Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The edge and manifest phase are the only phase/type authority; the payload carries only immutable artifact authority:
 
    ```bash
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
    PHASE1_FINDINGS_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
    PHASE1_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
    FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
@@ -1835,6 +1844,10 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    PHASE1_FINDINGS_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
    PHASE1_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
    FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
@@ -1899,6 +1912,10 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    ```bash uberdev-executable origin=review-pr
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_FIX_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase1-iter${REVIEW_ITERATION}.launch.json"
    REVIEW_FIXER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" binding)" || return 74
    FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX_SIDECAR" head_before)" || return 74
@@ -2039,6 +2056,11 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    **The post-Phase-1 diff is attacker-controllable** and MUST be persisted at `DIFF_ARTIFACT_PATH` with literal leading `<external-untrusted-input source="pr-diff">` and trailing `</external-untrusted-input>` bytes. Concrete dispatch uses three immutable instances and issues the whole wave before waiting:
 
    ```bash
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
    # Phase 1 may have advanced HEAD. Rebuild both the enveloped diff and the
    # commit-range artifact from that exact post-fix snapshot before any Phase 2
    # lens or fixer receives authority.
@@ -2085,6 +2107,10 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_LENS_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
    review_fleet_bind_roster simplify "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
      "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$REVIEW_FLEET_LENS_LAUNCHED" || return 2
@@ -2167,6 +2193,11 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer`; `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
 
    ```bash
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
    PHASE2_FINDINGS_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
    PHASE2_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
    FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
@@ -2245,6 +2276,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    PHASE2_FINDINGS_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
    PHASE2_FINDINGS_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_FINDINGS_PATH" --minimum 1 --maximum 16777216)" || return 74
    FIXER_COMMIT_RANGE_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$COMMIT_RANGE_PATH" --minimum 1 --maximum 256)" || return 74
@@ -2305,6 +2340,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    ```bash uberdev-executable origin=review-pr
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+   # fence advances and persists it; this fresh shell's `:-1` default would
+   # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_FIX2_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase2-iter${REVIEW_ITERATION}.launch.json"
    REVIEW_FIXER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX2_SIDECAR" binding)" || return 74
    FIXER_HEAD_BEFORE="$(review_fleet_read_sidecar "$REVIEW_FLEET_FIX2_SIDECAR" head_before)" || return 74
@@ -2425,6 +2464,11 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     **Dispatch one routed findings child:**
 
     ```bash
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+    # fence advances and persists it; this fresh shell's `:-1` default would
+    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+    review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
     DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings \
       phase1_path "$(review_json_string "$RESEARCH_DIR_ABS/post-impl-review-final.md")" \
       phase2_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
@@ -2456,6 +2500,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
     mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+    # fence advances and persists it; this fresh shell's `:-1` default would
+    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     DEFER_PHASE1_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
     DEFER_PHASE2_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
     DEFER_PHASE2_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$DEFER_PHASE2_PATH" --minimum 1 --maximum 16777216)" || return 74
@@ -2510,6 +2558,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     ```bash uberdev-executable origin=review-pr
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
+    # fence advances and persists it; this fresh shell's `:-1` default would
+    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
     REVIEW_DEFER_LAUNCH_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_DEFER_SIDECAR" binding)" || return 74
     REVIEW_DEFER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-persistence-terminal \

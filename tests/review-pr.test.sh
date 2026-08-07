@@ -116,10 +116,25 @@ if len(selected) != 1:
     raise SystemExit(2)
 print(selected[0])
 PY
+PHASE1_FIXTURE_RESEARCH="$(mktemp -d)"
+# The fence sources lib/review-fleet-args.sh and reads both loop counters back
+# out of $RESEARCH_DIR_ABS, so both have to be REAL here: a stub plugin root
+# fails `set -u` at the source line and a non-existent research dir fails the
+# `cd`, and neither is what this row is testing.
+#
+# The state file says review_iteration=4 while the inherited shell scalar below
+# says 1 — the exact disagreement Phase 3's re-entry fence creates when it
+# advances the counter and Phase 1 re-runs in a fresh shell. Disk must win: on
+# the losing side the fence re-keys pass 4's authority onto pass 1's name, which
+# `prepare-authority` publishes NO-CLOBBER and refuses.
+printf '%s\n' \
+  '{"ci_loop_iter":3,"review_iteration":4,"fix_pushes":[],"failure_classes_seen":[]}' \
+  >"$PHASE1_FIXTURE_RESEARCH/ci-loop-state.json"
 if bash -c '
   set -u
   unset findings_path
-  RESEARCH_DIR_ABS=/repo/.uberdev/research/20260728-010203-abcdef0
+  UBERDEV_REVIEW_PLUGIN_ROOT="$2"
+  RESEARCH_DIR_ABS="$3"
   CODE_FIXER_CONTRACT=/contract.py
   COMMIT_RANGE_PATH="$RESEARCH_DIR_ABS/commit-range.txt"
   PHASE1_DISPOSITION_PATH="$RESEARCH_DIR_ABS/phase1-disposition.json"
@@ -135,15 +150,18 @@ if bash -c '
   review_child_single() { :; }
   . "$1"
   [ "$PHASE1_FINDINGS_PATH" = "$RESEARCH_DIR_ABS/post-impl-review-final.md" ]
-' _ "$PHASE1_FIXTURE"
+  [ "$REVIEW_ITERATION" = 4 ]
+  [ "$PHASE1_AUTHORITY_PATH" = "$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter4.json" ]
+' _ "$PHASE1_FIXTURE" "$REPO_ROOT/plugins/uberdev" "$PHASE1_FIXTURE_RESEARCH"
 then
-  echo "  PASS  Phase 1 fixer callsite executes under set -u with findings_path unset"
+  echo "  PASS  Phase 1 fixer callsite runs under set -u and keys on the ON-DISK iteration"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Phase 1 fixer callsite is not set-u safe without legacy findings_path"
+  echo "  FAIL  Phase 1 fixer callsite is not set-u safe, or keyed on a stale inherited iteration"
   FAIL=$((FAIL + 1))
 fi
 rm -f "$PHASE1_FIXTURE"
+rm -rf "$PHASE1_FIXTURE_RESEARCH"
 assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*findings_sha256.*commit_range_sha256' \
   "Phase 2 fixer callsite declares both immutable source digests"
 assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \

@@ -27,6 +27,12 @@
 #   WORKTREE_ROOT                the caller checkout the children run against
 #   RESEARCH_DIR_ABS             .uberdev/research/<RUN_ID> (the script's runDirAbs)
 #   REVIEW_ITERATION             the per-iteration artifact key
+#
+# The first three are run-invariant, so a fresh fence re-deriving them lands on
+# the same value. REVIEW_ITERATION is NOT: Phase 3's re-entry fence advances it,
+# so a fence that binds it from its own `${REVIEW_ITERATION:-1}` default is
+# reading a counter that moved. Get it -- and CI_FIX_LOOP_ITER -- from
+# review_fleet_load_ci_counters below, in the same fence that keys on it.
 
 # review_fleet_roster STAGE -> one "<slug>\t<edge>" row per child, IN ORDER.
 #
