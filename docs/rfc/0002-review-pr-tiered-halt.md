@@ -49,6 +49,32 @@
 
 ---
 
+> **AMENDED 2026-08-06 (issue #383, half one) — the ENGINE is rebuilt; the
+> dormancy above is NOT lifted.**
+>
+> `skills/review-fleet/workflow.js` now carries the four Phase 3 stages
+> (`ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer`) and
+> `lib/code_fixer_contract.py` carries their producer, capture verb and judges.
+> `commands/review-pr.md` has **not** been re-pointed at them, so:
+>
+> - **§3.7's simultaneous-halt precedence stays dormant**, unchanged.
+> - **`green_after_fix` and `loop_cap_exhausted` remain UNREACHABLE.** The
+>   transport that will reach them exists; the caller that would use it does
+>   not. Their DORMANT annotations in `skills/merge-pipeline/SKILL.md` and in
+>   both `commands/review-pr.md` audit schemas therefore stay in place, and are
+>   re-dated to point at this amendment.
+> - **The §3.5 GREEN predicate is still unchanged.** It already accepted
+>   `green_after_fix`; no edit was needed when the member went dormant and none
+>   is needed while it stays dormant.
+> - **`ci_transport_unsupported` still exists and still fires.** A red probe
+>   still halts there. The follow-up that wires Phase 3 is what deletes it.
+>
+> The design amendments this engine implements — the controller-held lease, the
+> CONFLICT terminal, the deleted `flock`, the counter sidecar — are recorded in
+> RFC 0001's 2026-08-06 amendment rather than duplicated here.
+
+---
+
 ## 1. Summary
 
 Promote `/uberdev:review-pr`'s findings-to-issues sub-phase (added in PR #112) from purely-advisory to **severity-tiered gating**. Wire deferred-blocker filings into the trust-trail JSON so `/merge`'s trust-trail-evaluator can see them. Surface CI fixer refusals as user-visible halts instead of silent 3-iteration loop exhaustion. Net effect: a green `/review-pr` trail can no longer co-exist with unresolved blocker findings on the same HEAD.
