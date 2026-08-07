@@ -1602,6 +1602,19 @@ _uberdev_dispatch_preflight_report() {
 # legitimately that slow.
 _UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT_DEFAULT=30
 
+# Grace between the deadline's SIGTERM and the SIGKILL that follows it.
+#
+# timeout(1) signals and then WAITS. A probe that ignores SIGTERM — a library
+# whose top level installs `trap '' TERM` mid-edit, or an interpreter wedged in
+# a handler — is therefore never cut off at all without `--kill-after`, and the
+# budget above degrades from a bound into a suggestion. The grace is short and
+# fixed rather than proportional to the budget: it is not "how slow may this
+# host be" (that is the budget) but "how long may a process that has already
+# been told to die take to die", and the answer does not scale with filesystem
+# speed. It deliberately does NOT close the D-state case documented on the
+# probe: no signal reaches an uninterruptible syscall.
+_UBERDEV_DISPATCH_PREFLIGHT_KILL_GRACE=5
+
 # _uberdev_dispatch_preflight_timeout -> the probe budget, in whole seconds.
 # A malformed override is reported and ignored rather than silently taken as
 # "no bound" — that is the failure this budget exists to prevent.
@@ -1710,15 +1723,21 @@ _uberdev_dispatch_preflight_timeout_bin() {
 #     now names the worktree it strands before `exit 126`, and
 #     tests/dispatch-child-worktree-teardown.test.sh T18 holds that for both
 #     arms.
-#   - the wall-clock bound rests on timeout(1) delivering SIGTERM to the
-#     probe's process group. A probe wedged in an uninterruptible syscall (the
-#     classic D-state NFS stall) outlives that signal, and no signal would help;
+#   - the wall-clock bound rests on timeout(1) delivering SIGTERM and then, if
+#     that is ignored, SIGKILL. A probe wedged in an uninterruptible syscall
+#     (the classic D-state NFS stall) outlives BOTH, and no signal would help;
 #     the bound turns "the dispatcher hangs forever" into "the dispatcher hangs
 #     as long as the kernel does", which is as far as a userspace probe reaches.
 #     It also needs a timeout(1) to exist. A host with none runs this probe
 #     unbounded — but that host has already been refused by
 #     `uberdev_dispatch_preflight_backend` for both arms that call this, so the
 #     uncovered case is a caller that skipped the resolver, not a dispatch.
+#     Signalling alone is NOT the whole bound: the dispatcher must also not be
+#     waiting on something timeout(1) does not supervise. That is why the probe
+#     transcript goes to a file rather than through `$(...)` — a command
+#     substitution waits for EOF on the capture pipe, which an orphan spawned
+#     at source time keeps open long after the interpreter and the timeout have
+#     both exited. Both escapes are held by T22.
 #
 # rc 0  the child can load the library and reach the teardown.
 # rc 1  it cannot, and nothing has been created, so nothing has leaked.
@@ -1726,7 +1745,7 @@ _uberdev_dispatch_preflight_timeout_bin() {
 _uberdev_dispatch_preflight_child_lib() {
   local issue="$1" backend="$2" log="${3:-}"
   local lib="$_UBERDEV_DISPATCH_FILE" child_bash probe_out probe_rc=0
-  local timeout_bin probe_budget
+  local timeout_bin probe_budget probe_out_file
   local probe_cmd=()
   child_bash="$(_uberdev_dispatch_path_lookup bash)" || child_bash=''
   if [ -z "$child_bash" ]; then
@@ -1744,27 +1763,60 @@ _uberdev_dispatch_preflight_child_lib() {
   # Built as an ARRAY, never as an unquoted `${TIMEOUT_BIN:+$TIMEOUT_BIN 30}`:
   # zsh does not word-split unquoted parameter expansions, so that idiom would
   # try to exec one file literally named `timeout 30` here. Bash+zsh array.
-  [ -z "$timeout_bin" ] || probe_cmd=( "$timeout_bin" "$probe_budget" )
+  # `-k` is what makes the deadline a BOUND rather than a request. It adds no
+  # portability assumption this probe did not already make: the 124 branch
+  # below only reads as "I killed it" on a timeout(1) that reports 124 for a
+  # deadline, and every implementation that does (GNU coreutils, busybox) also
+  # takes --kill-after. The resolver above is what pins that build on Windows.
+  [ -z "$timeout_bin" ] || probe_cmd=( "$timeout_bin" -k "$_UBERDEV_DISPATCH_PREFLIGHT_KILL_GRACE" "$probe_budget" )
   # 3 = the source itself failed; 4 = it loaded and the teardown is absent.
-  # `</dev/null`, because this is a command substitution: it captures the
-  # probe's stdout and INHERITS the dispatcher's stdin, so a library that reads
-  # at source time ate the dispatcher's input on a probe that then reported
-  # success. The child never has that stdin either — the background arm is
-  # nohup'd and the wezterm arm runs in a pane — so closing it is also the
-  # more faithful rehearsal.
+  # `</dev/null` because a library that reads at source time would otherwise eat
+  # the DISPATCHER's stdin on a probe that then reported success. The child
+  # never has that stdin either — the background arm is nohup'd and the wezterm
+  # arm runs in a pane — so closing it is also the more faithful rehearsal.
   probe_cmd+=( "$child_bash" -c '
     . "$1" || exit 3
     command -v _uberdev_dispatch_cleanup_child_worktree >/dev/null 2>&1 || exit 4
   ' _ "$lib" )
-  probe_out="$("${probe_cmd[@]}" </dev/null 2>&1)" || probe_rc=$?
-  # 124 is timeout(1)'s "I killed it". Guarded on the wrapper actually being in
-  # front, so a library that itself `exit 124`s at source time is still read as
-  # a load failure rather than as a stall that never happened.
-  if [ -n "$timeout_bin" ] && [ "$probe_rc" -eq 124 ]; then
+  # The transcript goes to a FILE, not through `$(...)`. A command substitution
+  # waits for EOF on the capture pipe rather than for timeout(1)'s child, and a
+  # library that BACKGROUNDS anything at source time hands that write end to an
+  # orphan: the interpreter exits 0 at once, timeout never fires, and the
+  # dispatcher then blocks on the orphan for as long as it lives — past the
+  # budget, with no refusal and nothing in the log. Reading a regular file
+  # after the wait cannot block on a writer that is still holding it open.
+  probe_out_file="${UBERDEV_TMPDIR:-/tmp}/dispatch-lib-preflight-$backend-$issue.out"
+  if ! _uberdev_dispatch_prepare_tmp_target "$probe_out_file" "$issue" "$backend"; then
+    # Fail CLOSED. Running the probe with its transcript redirected somewhere
+    # unguarded, or with no transcript at all, is exactly the unbounded
+    # foreground subprocess this budget exists to prevent.
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the dispatch-library probe could not create its transcript at %s (see the error above). Nothing was created.' \
+      "$backend" "$issue" "$probe_out_file")"
+    _uberdev_dispatch_audit dispatch_setup_failed \
+      "{\"issue\":$issue,\"phase\":\"dispatch_lib_preflight\",\"backend\":\"$backend\",\"rc\":1}"
+    return 1
+  fi
+  "${probe_cmd[@]}" </dev/null >"$probe_out_file" 2>&1 || probe_rc=$?
+  if ! probe_out="$(cat "$probe_out_file" 2>/dev/null)"; then
+    # Not swallowed: an unreadable transcript is otherwise indistinguishable
+    # from an empty one, and the operator would read "no diagnosis" as "the
+    # probe said nothing".
+    probe_out="(the probe transcript at $probe_out_file could not be read)"
+  fi
+  rm -f -- "$probe_out_file" 2>/dev/null
+  # 124 is timeout(1)'s "I killed it"; 137 is 128+SIGKILL, which is what the
+  # `-k` escalation above exits with when the first SIGTERM was ignored. Both
+  # are the same fault with the same remedy, so both get the stall wording —
+  # folding 137 into "cannot load" would send the operator hunting a syntax
+  # error in a file that never got the chance to have one. Guarded on the
+  # wrapper actually being in front, so a library that itself `exit 124`s at
+  # source time is still read as a load failure rather than as a stall that
+  # never happened.
+  if [ -n "$timeout_bin" ] && { [ "$probe_rc" -eq 124 ] || [ "$probe_rc" -eq 137 ]; }; then
     # Its OWN wording, not folded into "cannot load": that refusal sends the
     # operator hunting a syntax error in a file that may be perfectly valid.
-    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s did not finish loading the dispatch library %s within %ss, so the probe was killed (rc 124). The file is not failing, it is BLOCKING (a stalled mount, or a save caught mid-write); the child would block on it the same way, and the dispatcher cannot wait on that with the rest of the fanout behind it. Nothing was created. Raise UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT if this host is legitimately that slow.' \
-      "$backend" "$issue" "$child_bash" "$lib" "$probe_budget")"
+    _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s did not finish loading the dispatch library %s within %ss, so the probe was killed (rc %s; 137 means it ignored the deadline SIGTERM and was SIGKILLed %ss later). The file is not failing, it is BLOCKING (a stalled mount, or a save caught mid-write); the child would block on it the same way, and the dispatcher cannot wait on that with the rest of the fanout behind it. Nothing was created. Raise UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT if this host is legitimately that slow.' \
+      "$backend" "$issue" "$child_bash" "$lib" "$probe_budget" "$probe_rc" "$_UBERDEV_DISPATCH_PREFLIGHT_KILL_GRACE")"
   elif [ "$probe_rc" -eq 4 ]; then
     _uberdev_dispatch_preflight_report "$log" "$(printf '%s dispatch: refusing to create a child worktree for issue %s — the child interpreter %s LOADED the dispatch library %s cleanly, but it does not define `_uberdev_dispatch_cleanup_child_worktree`. The file is readable and valid; it is INCOMPLETE (a truncated write or a partial checkout), so the child would have no teardown. Nothing was created.' \
       "$backend" "$issue" "$child_bash" "$lib")"

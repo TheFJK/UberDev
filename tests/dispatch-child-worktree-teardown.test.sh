@@ -67,7 +67,11 @@
 #        missing interpreter that was on PATH all along. T15 also asserts the
 #        function is never INVOKED, which the "did not refuse" assertion alone
 #        does not: dropping only the `-x` half of the old check stops the
-#        refusal and runs the probe through the function table.
+#        refusal and runs the probe through the function table. That last
+#        assertion is only meaningful where the interpreter is in COMMAND
+#        position, and a resolved timeout(1) normally fronts it — so T15 drives
+#        the unbounded arm too, which is where the mutation would otherwise
+#        land unchallenged on every host that has timeout(1) (both CI jobs do).
 #   T15b the mirror image — a host with genuinely no `bash` on PATH is still
 #        refused, and with the no-interpreter wording rather than a load error.
 #   T16  the probe runs under the SAME interpreter the wrapper spawns. Observed
@@ -84,7 +88,7 @@
 # subprocess from the detached child — which the dispatcher never waits on —
 # into the dispatcher's own foreground, where `_uberdev_dispatch_background`
 # runs inside the /turbo fanout's SERIAL loop. A probe that blocks therefore
-# stalls every remaining issue, not one child. T19-T21 hold that:
+# stalls every remaining issue, not one child. T19-T22 hold that:
 #   T19  a $DISPATCH_LIB that BLOCKS at source time (rather than failing to
 #        parse) must be refused on a wall-clock bound, with its own wording.
 #        Reproduced red first: the probe was still running after the deadline
@@ -96,6 +100,13 @@
 #   T21  T15's fault applied to the bound itself: `$TIMEOUT_BIN` is a BARE NAME
 #        on the resolver's `command -v` branch, so a `timeout` shell function
 #        would answer for it and the bound would cap nothing.
+#   T22  T19's stall is COOPERATIVE — one `sleep`, killed by the first SIGTERM,
+#        holding nothing open. Both escapes from that were measured: (a) a
+#        library that backgrounds a process at source time hands the capture
+#        pipe to an orphan, and a `$(...)` probe waits for EOF on it long after
+#        timeout(1) has exited 0 — the dispatcher stalled and then reported
+#        SUCCESS; (b) a library that ignores SIGTERM is never escalated to
+#        SIGKILL without `--kill-after`. Both ran 25s on a 2s budget.
 #
 # Unix-runtime fixture: real `git worktree add`, real nohup detachment, real
 # POSIX ownership predicates. Skipped on windows-latest (see the ci-wiring
@@ -881,10 +892,55 @@ fi
 # interpreter has to be a path, invoked as a path. A pass-through function
 # would hide that difference behind a correct-looking result, so it records
 # every invocation instead.
+#
+# This recording is only MEANINGFUL where `$child_bash` is in command position,
+# and in the dispatch above it is not: a resolved timeout(1) fronts the probe
+# as `probe_cmd[0]`, so the interpreter is one of timeout's execvp arguments
+# and the shell's function table is never consulted however `child_bash` was
+# resolved. Every host that runs this file has timeout(1) — ubuntu-latest ships
+# /usr/bin/timeout, and the macOS job installs coreutils — so on its own this
+# assertion passes by covering nothing, exactly where the `-x`-half mutation
+# lands. It is kept because it is the honest reading of THIS dispatch; the
+# unbounded arm below is what makes the property observable.
 if [ -s "$T15_FUNC_CALLS" ]; then
   ko "T15 the preflight invoked the SHELL FUNCTION named bash ($(wc -l <"$T15_FUNC_CALLS" | tr -d ' ') call(s)) — it must reach the interpreter by resolved path"
 else
-  ok "T15 the preflight never routed through the shell function table"
+  ok "T15 the bounded probe never routed through the shell function table"
+fi
+# The arm where command position is real. `_uberdev_dispatch_preflight_child_lib`
+# runs the probe with no timeout(1) in front whenever this host has none — the
+# documented fallback for a caller that drove an arm without
+# `uberdev_dispatch_resolve_env` — and there `$child_bash` IS `probe_cmd[0]`.
+# Driven as a unit call with the bound's resolver stubbed out, because a whole
+# dispatch cannot reach that state on a host that has timeout(1) at all.
+T15_UNBOUND_CALLS="$TMP/t15-unbounded-bash-function-calls.txt"
+: >"$T15_UNBOUND_CALLS"
+T15_UNBOUND_OUT="$(
+  /bin/bash -c '
+    set -u
+    . "$1"
+    # Captured OUT of the positional parameters before the function exists:
+    # inside a shell function $3 is that FUNCTION s third argument, not this
+    # bash -c body s (the trap T21 documents).
+    _t15_calls="$3"
+    bash() { printf "%s\n" called >>"$_t15_calls"; command bash "$@"; }
+    _uberdev_dispatch_preflight_timeout_bin() { return 1; }
+    _UBERDEV_DISPATCH_FILE="$2"
+    _uberdev_dispatch_preflight_child_lib 916 background ""
+    printf "preflight_rc=%s\n" "$?"
+  ' _ "$DISPATCH_LIB" "$DISPATCH_LIB" "$T15_UNBOUND_CALLS" 2>&1
+)"
+# Anti-vacuity: no recorded call must mean "it reached the interpreter by
+# path", never "it never got as far as running a probe".
+case "$T15_UNBOUND_OUT" in
+  *"preflight_rc=0"*)
+    ok "T15 the unbounded probe ran and passed against the real library" ;;
+  *) ko "T15 the unbounded probe did not reach a clean probe: $(printf '%s' "$T15_UNBOUND_OUT" | tr '\n' ';')" ;;
+esac
+if [ -s "$T15_UNBOUND_CALLS" ]; then
+  ko "T15 with the interpreter in command position the preflight invoked the SHELL FUNCTION named bash ($(wc -l <"$T15_UNBOUND_CALLS" | tr -d ' ') call(s)) — it must reach the interpreter by resolved path"
+else
+  ok "T15 the interpreter is reached by resolved path even in command position"
 fi
 git -C "$T15_REPO" worktree remove --force "$T15_WORKTREE" >/dev/null 2>&1 || true
 git -C "$T15_REPO" branch -D "$T15_BRANCH" >/dev/null 2>&1 || true
@@ -1169,6 +1225,109 @@ else
   ok "T21 the probe never routed the bound through the shell function table"
 fi
 wait "$T21_PID" 2>/dev/null || true
+
+echo "== T22: the wall-clock bound is ABSOLUTE, not advisory =="
+# T19 proves the bound cuts off a COOPERATIVE stall: a bare `sleep` at source
+# time, killed by the first SIGTERM, with nothing else holding a descriptor
+# open. Both of those properties are assumptions, and dropping either one lets
+# the probe outrun its budget by an unbounded margin — in the dispatcher's own
+# FOREGROUND, inside lib/solve-launcher.sh's serial per-issue loop, which is
+# the blast radius this whole bound exists to cap. Two escapes, both measured:
+#   a) a library that BACKGROUNDS a process at source time. The interpreter
+#      finishes sourcing and exits 0 immediately, so timeout(1) never fires at
+#      all — but a probe captured with `$(...)` waits for EOF on the capture
+#      pipe, and the orphan still holds its write end. The dispatcher stalls
+#      for the orphan's whole lifetime and then reports SUCCESS, with no
+#      refusal and no log line: the bound is bypassed without being reached.
+#   b) a library that IGNORES SIGTERM. timeout(1) signals its child and then
+#      waits for a process that will not die, so with no `--kill-after` there
+#      is never an escalation to SIGKILL and the deadline is advisory.
+# Both fixtures outlive the budget by the same 25s, so "returned early" is
+# itself the measurement — no assertion here depends on the wording of a clock.
+T22_BUDGET=2
+T22_WATCHDOG=15   # < the fixtures' 25s, so "it returned" cannot mean "it ran out"
+# run_probe_fixture LIB RUNTIME_DIR ISSUE — sets $PROBE_ELAPSED, $PROBE_RC
+# (empty when the probe never returned) and $PROBE_OUT. Backgrounded and
+# polled, so an unbounded probe fails an assertion instead of wedging the suite
+# exactly the way it would wedge a /turbo fanout.
+run_probe_fixture() {
+  local lib="$1" runtime="$2" issue="$3" rc_file pid started
+  mkdir -p "$runtime"
+  rc_file="$runtime/rc"
+  : >"$runtime/out"
+  (
+    /bin/bash -c '
+      set -u
+      . "$1"
+      _UBERDEV_DISPATCH_FILE="$2"
+      UBERDEV_DISPATCH_PREFLIGHT_TIMEOUT="$4"
+      _uberdev_dispatch_preflight_child_lib "$5" background ""
+      printf "%s\n" "$?" >"$3"
+    ' _ "$DISPATCH_LIB" "$lib" "$rc_file" "$T22_BUDGET" "$issue"
+  ) >"$runtime/out" 2>&1 &
+  pid=$!
+  started=$SECONDS
+  while [ ! -s "$rc_file" ] && [ $((SECONDS - started)) -lt "$T22_WATCHDOG" ]; do
+    sleep 0.2
+  done
+  PROBE_ELAPSED=$((SECONDS - started))
+  PROBE_RC="$(cat "$rc_file" 2>/dev/null || true)"
+  PROBE_OUT="$(cat "$runtime/out" 2>/dev/null || true)"
+  if [ ! -s "$rc_file" ]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+# (a) The orphan that holds the capture pipe. Nothing here blocks the
+# INTERPRETER — that is the point: the source completes, the teardown is
+# defined, and the only correct answer is a fast rc 0.
+T22A_LIB="$TMP/t22a-orphaning-dispatch-lib.sh"
+cat >"$T22A_LIB" <<'SH'
+sleep 25 &
+_uberdev_dispatch_cleanup_child_worktree() { :; }
+SH
+run_probe_fixture "$T22A_LIB" "$TMP/t22a-runtime" 922
+if [ -z "$PROBE_RC" ]; then
+  ko "T22a a library that backgrounds a process at source time held the dispatcher for ${PROBE_ELAPSED}s on a ${T22_BUDGET}s budget — the capture pipe outlives the bound"
+else
+  ok "T22a an orphan holding the probe's output does not hold the dispatcher (${PROBE_ELAPSED}s)"
+  # Anti-vacuity in the other direction: "returned fast" must not have been
+  # bought by refusing a library that is perfectly loadable.
+  if [ "$PROBE_RC" = "0" ]; then
+    ok "T22a the library still probes clean (rc=0) — the fix is the capture, not a refusal"
+  else
+    ko "T22a a loadable library that backgrounds a process was refused (rc=$PROBE_RC): $(printf '%s' "$PROBE_OUT" | tr '\n' ';')"
+  fi
+fi
+
+# (b) The child that ignores SIGTERM. Only an escalation to SIGKILL ends this,
+# so without --kill-after the budget is a suggestion.
+T22B_LIB="$TMP/t22b-sigterm-proof-dispatch-lib.sh"
+cat >"$T22B_LIB" <<'SH'
+trap '' TERM
+sleep 25
+_uberdev_dispatch_cleanup_child_worktree() { :; }
+SH
+run_probe_fixture "$T22B_LIB" "$TMP/t22b-runtime" 923
+if [ -z "$PROBE_RC" ]; then
+  ko "T22b a probe that ignores SIGTERM ran ${PROBE_ELAPSED}s on a ${T22_BUDGET}s budget — the bound never escalates to SIGKILL"
+else
+  ok "T22b an uncooperative probe is escalated and cut off (${PROBE_ELAPSED}s)"
+  if [ "$PROBE_RC" = "1" ]; then
+    ok "T22b the escalated stall is refused (rc=1)"
+  else
+    ko "T22b expected rc 1 for a SIGTERM-proof stall, got rc=$PROBE_RC"
+  fi
+  # An escalation exits 137 (128+SIGKILL), not 124, so a bound that only
+  # recognises 124 diagnoses a stalled mount as a syntax error and sends the
+  # operator hunting a fault that is not there.
+  case "$PROBE_OUT" in
+    *"refusing to create a child worktree"*"${T22_BUDGET}s"*)
+      ok "T22b the escalated stall still gets the timeout wording, naming the budget" ;;
+    *) ko "T22b a SIGKILL escalation was not diagnosed as a stall: $(printf '%s' "$PROBE_OUT" | tr '\n' ';')" ;;
+  esac
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
