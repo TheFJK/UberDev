@@ -106,9 +106,13 @@ canonicalize() {
 # attack where a malicious cwd plants a regular `events` file under a symlinked
 # parent dir — `[ -L "$f" ]` alone misses that, so we walk every component.
 is_safe_path() {
-  local root="$1" path="$2"
+  # `candidate`, never `path`: zsh ties `path` to `$PATH`, and this hook is a
+  # shipped executable whose interpreter is whatever the harness gives it. An
+  # emptied search path would break the `canonicalize` helper's python3/realpath
+  # calls, collapsing this symlink/traversal check to a blanket refusal.
+  local root="$1" candidate="$2"
   local canonical canonical_root
-  canonical="$(canonicalize "$path")" || return 1
+  canonical="$(canonicalize "$candidate")" || return 1
   canonical_root="$(canonicalize "$root")" || return 1
   [ -n "$canonical" ] && [ -n "$canonical_root" ] || return 1
   case "$canonical" in
@@ -116,7 +120,7 @@ is_safe_path() {
     *) return 1 ;;
   esac
   # Walk literal path components: reject if any is a symlink.
-  local p="$path"
+  local p="$candidate"
   while [ "$p" != "$root" ] && [ "$p" != "/" ] && [ -n "$p" ]; do
     [ -L "$p" ] && return 1
     p="$(dirname "$p")"
