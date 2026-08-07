@@ -4,9 +4,47 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.43.0] — 2026-08-07
 
 ### Fixed
+
+- **A child worktree no longer outlives a wrapper that exits before the dispatch
+  library loads** (#384). Both surviving wrappers open with
+  `. "$DISPATCH_LIB" || exit 126`. At that instant the child worktree and its
+  branch already exist — `git worktree add` runs before the wrapper is launched —
+  but the teardown does not: `_uberdev_dispatch_cleanup_child_worktree` and every
+  preservation guard it depends on are defined *inside the file that just failed
+  to load*. So the worktree and branch survived the exit. This was the last known
+  way an isolated child worktree could outlive its child; #382 closed the other
+  eight.
+
+  The fix refuses **before anything exists to leak**: the dispatcher now probes
+  that the child can source the library and reach the teardown symbol, and skips
+  `git worktree add` entirely if it cannot. Crucially the probe runs under the
+  *child's* interpreter, resolved the way `os.execvp("bash", …)` resolves it — a
+  PATH search that ignores shell functions and aliases — rather than re-using the
+  dispatcher's already-loaded copy, which would prove nothing about the child and
+  would be vacuously green (the load guard short-circuits on
+  `_UBERDEV_DISPATCH_LOADED`). A `bash` shell function in the dispatcher no longer
+  refuses every dispatch; an empty PATH still does.
+
+  Deliberately **not** done: a guardless inline `git worktree remove --force`
+  (running a guardless removal precisely when the guard code is unavailable
+  inverts the safety property), a duplicated minimal teardown (drift risk), and a
+  reaper daemon. The probe is wall-clock bounded with its stdin closed, so a
+  library that stalls at source time cannot hang the dispatcher or a `/turbo`
+  fanout.
+
+  A residual TOCTOU window remains — the library can be made unreadable *between*
+  the probe and the child's own source — and is **reported, not papered over**:
+  both wrapper preambles still name the worktree and branch on stderr, the two
+  refusal wordings distinguish "cannot load" from "loaded but does not define",
+  and the reason now reaches `DISPATCH_LOG` so a `/turbo` fanout no longer shows
+  `(no output captured)`. The three other `exit 126` paths in each wrapper, which
+  sit in the same post-worktree/pre-source window, report before exiting too.
+  `tests/dispatch-child-worktree-teardown.test.sh` covers all of it against real
+  worktrees and branches, including a mutation guard that reds if the probe ever
+  stops using the child's interpreter.
 
 - **Isolated child worktrees are no longer leaked by the `background` and
   `wezterm` backends** (#381). Both arms created a dispatcher-owned worktree
