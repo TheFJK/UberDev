@@ -1151,6 +1151,167 @@ else
   fail "E6b at cap+1 the engine returned '$E_OVER_CAP' (want 'bad_ci_conflict_count|0')"
 fi
 
+# ---------------------------------------------------------------------------
+# E7 — the CI BINDERS are EXECUTED, against the real contract
+# ---------------------------------------------------------------------------
+# review_fleet_bind_ci and review_fleet_bind_ci_conflicts mint every Phase 3
+# child's launch binding and are the only callers of `bind-workflow-ci-launch`.
+# Until this section they had structural coverage ONLY: G19a greps for the
+# function names, G19b seds the bodies out and checks they do not name a non-CI
+# producer. Nothing executed either one. Section B cannot reach them (it runs
+# mint fences extracted from the command files, and PR 1 correctly ships no CI
+# command fence) and the crossplatform zsh probe drives the writers, not the
+# binders — so the 10-arg arity check, the closed edge-slug case, the 40-hex
+# head_before check and, above all, the authority digest that ties a CI child to
+# its authority document were all unproven. Blanking
+# `--ci-authority-sha256` inside review_fleet_bind_ci left this suite,
+# review-pr-phase3-ci, crossplatform-shell-wrappers and review-child-inputs ALL
+# green; the first signal would have been a runtime ci_binding_invalid.
+E7_ROOT="$TMP/e7"
+mkdir -p "$E7_ROOT"
+(
+  set -e
+  cd "$E7_ROOT"
+  git init -q -b main repo
+  cd repo
+  git config user.email fixture@example.invalid
+  git config user.name Fixture
+  printf 'print("hi")\n' >app.py
+  git add -- app.py
+  git commit -qm 'test: base'
+) >/dev/null 2>&1
+E7_REPO="$(cd "$E7_ROOT/repo" && pwd -P)"
+E7_RUN="$E7_REPO/.uberdev/research/E7RUN"
+mkdir -p "$E7_RUN"
+printf 'FAIL test_alpha\n' >"$E7_RUN/ci-log.txt"
+E7_LOG_SHA="$(python3 -I -B -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),end="")' "$E7_RUN/ci-log.txt")"
+E7_HEAD="$(git -C "$E7_REPO" rev-parse HEAD)"
+
+# e7_mint EDGE OUTPUT_BASENAME [EXTRA ARGS...] -> "<authority_path>|<sha256>"
+e7_mint() {
+  local edge="$1" basename="$2"; shift 2
+  python3 -I -B "$CONTRACT" prepare-ci-authority \
+    --edge-id "$edge" --pr-number 41 --run-id 77 --head-sha "$E7_HEAD" \
+    --working-dir "$E7_REPO" --input-path "$E7_RUN/ci-log.txt" \
+    --input-sha256 "$E7_LOG_SHA" \
+    --authority-output-path "$E7_RUN/$basename" "$@" \
+    | jq -r '"\(.authority_path)|\(.authority_sha256)"'
+}
+E7_CLASSIFY="$(e7_mint review_pr.ci.classify ci-authority-classify-iter01-ci01.json 2>/dev/null || true)"
+if [ -z "$E7_CLASSIFY" ]; then
+  fail "E7 setup: prepare-ci-authority produced no classify authority — every row below would be vacuous"
+else
+  E7_AUTH_PATH="${E7_CLASSIFY%%|*}"
+  E7_AUTH_SHA="${E7_CLASSIFY##*|}"
+  # e7_bind_ci ARGS... -> "<rc>|<child_dir>|<sidecar ci_authority_sha256>"
+  e7_bind_ci() {
+    env -i PATH="$PATH" HOME="$HOME" bash -c '
+      . "$1"; shift
+      sidecar="$1"; shift
+      rc=0
+      review_fleet_bind_ci "$@" >/dev/null 2>&1 || rc=$?
+      pinned=""
+      if [ -r "$sidecar" ]; then
+        pinned="$(jq -r ".binding" <"$sidecar" | jq -r ".ci_authority_sha256 // \"\"")"
+      fi
+      printf "%s|%s|%s" "$rc" "${REVIEW_FLEET_CHILD_DIR:-}" "$pinned"' \
+      _ "$ARGS_LIB" "$@"
+  }
+  E7_SIDECAR="$E7_RUN/classify.launch.json"
+  E7_OK="$(e7_bind_ci "$E7_SIDECAR" review_pr.ci.classify "$E7_RUN" 1 1 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" '' "$E7_SIDECAR")"
+  if [ "$E7_OK" = "0|$E7_RUN/children/ci-classify-ci01-iter01|$E7_AUTH_SHA" ]; then
+    pass "E7a review_fleet_bind_ci mints a real binding at the script-derived dir, pinned to the authority digest"
+  else
+    fail "E7a bind_ci returned '$E7_OK' (want '0|$E7_RUN/children/ci-classify-ci01-iter01|$E7_AUTH_SHA')"
+  fi
+  # The digest pin is the point of using the CI producer at all. Blank it and
+  # the binder must refuse rather than mint an unpinned CI binding.
+  E7_BLANK="$(e7_bind_ci "$E7_RUN/blank.launch.json" review_pr.ci.classify "$E7_RUN" 1 2 \
+    "$E7_REPO" "$CONTRACT" "$E7_AUTH_PATH" '' '' "$E7_RUN/blank.launch.json")"
+  case "$E7_BLANK" in
+    0\|*) fail "E7b an EMPTY --ci-authority-sha256 minted a binding: '$E7_BLANK'" ;;
+    *)    pass "E7b an empty authority digest is refused, not minted as an unpinned CI binding" ;;
+  esac
+  # Arity, the closed edge set and the 40-hex head_before are all rc-2 refusals.
+  # Matched with `case`, never `| grep -q`: this file sets `set -o pipefail` and
+  # tests/epipe-guard.test.sh refuses a pipe into an early-exiting reader.
+  E7_NEG=0
+  e7_expect_rc2() {
+    local observed
+    observed="$(e7_bind_ci "$@")"
+    case "$observed" in
+      2\|*) ;;
+      *) E7_NEG=$((E7_NEG + 1)) ;;
+    esac
+  }
+  # 9 args (the sidecar dropped) — the one slip that silently writes nowhere.
+  e7_expect_rc2 "$E7_RUN/n1.json" review_pr.ci.classify "$E7_RUN" 1 3 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" ''
+  # 11 args. This is the case the arity check ALONE catches: with an extra
+  # trailing argument every positional the body reads is still bound, so
+  # without `[ "$#" -eq 10 ]` the binder happily mints a child for a call whose
+  # shape the caller and the callee disagree about.
+  e7_expect_rc2 "$E7_RUN/n1b.json" review_pr.ci.classify "$E7_RUN" 1 3 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" '' "$E7_RUN/n1b.json" extra
+  # An edge outside the closed single-child set.
+  e7_expect_rc2 "$E7_RUN/n2.json" review_pr.ci.resolve_conflict "$E7_RUN" 1 3 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" '' "$E7_RUN/n2.json"
+  # head_before that is neither empty nor 40 hex.
+  e7_expect_rc2 "$E7_RUN/n3.json" review_pr.ci.classify "$E7_RUN" 1 3 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" "${E7_HEAD}0" "$E7_RUN/n3.json"
+  e7_expect_rc2 "$E7_RUN/n4.json" review_pr.ci.classify "$E7_RUN" 1 3 "$E7_REPO" \
+    "$CONTRACT" "$E7_AUTH_PATH" "$E7_AUTH_SHA" "$(printf 'z%.0s' $(seq 40))" "$E7_RUN/n4.json"
+  if [ "$E7_NEG" -eq 0 ]; then
+    pass "E7c bad arity, an out-of-set edge and a non-40-hex head_before are all rc-2 refusals"
+  else
+    fail "E7c $E7_NEG of the 5 bind_ci argument refusals did not return rc 2"
+  fi
+
+  # The N-child fanout. One authority per resolver, so the ledger must carry N
+  # DISTINCT instances and each row's own authority — never one shared pin.
+  E7_LEDGER_IN="$E7_RUN/authority.ledger"
+  : >"$E7_LEDGER_IN"
+  E7_LEDGER_OK=1
+  for i in 1 2 3; do
+    E7_ROW="$(e7_mint review_pr.ci.resolve_conflict \
+      "ci-authority-resolve-conflict-iter01-ci01-$i.json" \
+      --base-sha "$E7_HEAD" --pr-branch feat/x --base-branch main \
+      --target-path app.py 2>/dev/null || true)"
+    [ -n "$E7_ROW" ] || { E7_LEDGER_OK=0; break; }
+    printf '%s\t%s\n' "${E7_ROW%%|*}" "${E7_ROW##*|}" >>"$E7_LEDGER_IN"
+  done
+  if [ "$E7_LEDGER_OK" != 1 ]; then
+    fail "E7 setup: no resolve_conflict authority could be minted — E7d/E7e would be vacuous"
+  else
+    E7_FANOUT="$(env -i PATH="$PATH" HOME="$HOME" bash -c '
+      . "$1"
+      rc=0
+      review_fleet_bind_ci_conflicts "$2" 1 1 "$3" "$4" "$5" "$6" >/dev/null 2>&1 || rc=$?
+      printf "%s|%s|%s" "$rc" "${REVIEW_FLEET_CONFLICT_COUNT:-}" \
+        "$(printf "%s" "${REVIEW_FLEET_NONCE_POOL:-}" | tr "," "\n" | grep -c "^[0-9a-f]\{64\}$")"' \
+      _ "$ARGS_LIB" "$E7_RUN" "$E7_REPO" "$CONTRACT" "$E7_LEDGER_IN" "$E7_RUN/conflicts.ledger")"
+    E7_INSTANCES="$(jq -r '.instance' <"$E7_RUN/conflicts.ledger" 2>/dev/null | sort -u | grep -c . || echo 0)"
+    E7_PINS="$(jq -r '.binding | fromjson | .ci_authority_path' <"$E7_RUN/conflicts.ledger" 2>/dev/null | sort -u | grep -c . || echo 0)"
+    if [ "$E7_FANOUT" = '0|3|3' ] && [ "$E7_INSTANCES" = 3 ] && [ "$E7_PINS" = 3 ]; then
+      pass "E7d review_fleet_bind_ci_conflicts mints 3 distinct children, 3 nonces and 3 DISTINCT authority pins"
+    else
+      fail "E7d conflict fanout returned '$E7_FANOUT' instances=$E7_INSTANCES distinct-pins=$E7_PINS (want '0|3|3', 3, 3)"
+    fi
+    : >"$E7_RUN/empty.ledger"
+    E7_EMPTY_RC=0
+    env -i PATH="$PATH" HOME="$HOME" bash -c '. "$1"
+      review_fleet_bind_ci_conflicts "$2" 1 1 "$3" "$4" "$5" "$6"' \
+      _ "$ARGS_LIB" "$E7_RUN" "$E7_REPO" "$CONTRACT" "$E7_RUN/empty.ledger" \
+      "$E7_RUN/empty-out.ledger" >/dev/null 2>&1 || E7_EMPTY_RC=$?
+    if [ "$E7_EMPTY_RC" != 0 ]; then
+      pass "E7e an empty authority ledger is refused, so a zero-child conflict wave cannot be published"
+    else
+      fail "E7e an empty authority ledger minted a zero-child conflict wave"
+    fi
+  fi
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"

@@ -200,7 +200,8 @@ two-command precedent.
 >   **#383 half one narrows the remaining work without lifting this gate.** The
 >   four CI stages below EXIST in this script and their contract surface exists
 >   in `lib/code_fixer_contract.py`; both are exercised by
->   `tests/review-pr-workflow.test.sh` (section W runs every stage) and
+>   `tests/review-pr-workflow.test.sh` (section W runs every stage, E6 drives the
+>   conflict fanout at its ceiling, E7 executes the CI binders) and
 >   `tests/code-fixer-contract.test.sh` (real git repos, real conflicts). What is
 >   still missing is the caller: `commands/review-pr.md` has not been re-pointed
 >   at them, so the inline gate above is still the live behaviour and
@@ -374,7 +375,13 @@ The keys below are read by the four `ci-*` stages in `workflow.js` and minted by
 `lib/review-fleet-args.sh`. **No command file emits them yet** — `/review-pr`'s
 Phase 3 is unchanged in this PR — so this table is the contract the wiring will
 have to satisfy, and the executable proofs are `tests/review-pr-workflow.test.sh`
-section W (every stage run for real) plus `tests/code-fixer-contract.test.sh`.
+section W (every stage run for real), section E6 (the conflict fanout driven at
+its ceiling and one past it) and section E7 (the CI binders executed against the
+real contract), plus `tests/code-fixer-contract.test.sh`. The classifier
+predicate also has a second copy — the python heredoc still live in
+`commands/review-pr.md` — and `tests/review-pr-phase3-ci.test.sh` S10.14c is the
+comparator that keeps the two byte-equal in verdict; retire it in the same
+commit that deletes the heredoc.
 
 | Key | Stages | Meaning |
 |---|---|---|

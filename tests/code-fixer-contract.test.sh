@@ -5093,11 +5093,13 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     assert "receipt_sha256" not in ci_classification, ci_classification
 
 
-    def reclassify(body):
-        payload = b"CI classification\n\n```yaml\n" + body + b"```\n"
+    def reclassify_raw(payload):
         (classify_child / "result.md").write_bytes(payload)
         return module.capture_ci_terminal(
             launch_binding=classify_binding_bytes, edge_id="review_pr.ci.classify")
+
+    def reclassify(body):
+        return reclassify_raw(b"CI classification\n\n```yaml\n" + body + b"```\n")
 
     # An anchor that names no repository file cannot license a code_bug fix.
     bad = reclassify(
@@ -5151,6 +5153,114 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
         result_sha256=ambiguous["result_sha256"])
     assert ambiguous_outcome["status"] == "AMBIGUOUS", ambiguous_outcome
     assert ambiguous_outcome["failure_class"] == "flaky", ambiguous_outcome
+
+    # ---- the classifier PREDICATE's own edge cases --------------------------
+    #
+    # Everything above reaches _parse_ci_classification through reclassify(),
+    # which only ever emits BARE unquoted scalars (`code_bug`, `src/app.py:1`,
+    # `x`, `null`). That leaves five guard clauses with zero behavioural
+    # coverage: the 256-character scalar cap, the C0/DEL rejection, the
+    # single-quoted YAML decoder, the closed field set + `risks: []`, and the
+    # duplicate-field refusal — plus the 65,536-byte document limit. Each was
+    # verified by mutation: gutting the length/control test, replacing the
+    # single-quote branch with `raw.startswith("'")` / `raw[1:-1]`, turning the
+    # field-set check into `if False`, and deleting the duplicate-key check ALL
+    # left this suite green before these rows existed.
+    #
+    # Driven against the predicate directly rather than through reclassify():
+    # the document limit is the only row that needs the capture round-trip, and
+    # paying for one per hostile scalar would add ~40 subprocess git repos.
+    def classify_bytes(body: bytes) -> bytes:
+        return b"CI classification\n\n```yaml\n" + body + b"```\n"
+
+    def parse_classification(body: bytes):
+        return module._parse_ci_classification(classify_bytes(body), str(ci_repo))
+
+    def expect_classification_invalid(body: bytes):
+        expect_contract_reason(
+            lambda: parse_classification(body),
+            "ci_classification_contract_invalid",
+        )
+
+    def refused_body(rationale: bytes) -> bytes:
+        return (b"status: REFUSED\nfailure_class: null\nsignal_anchor: null\n"
+                b"rationale: " + rationale + b"\nrisks: []\n")
+
+    # The 256-character cap is a real boundary: 256 is legal, 257 is not.
+    expect_contract_reason(
+        lambda: parse_classification(
+            refused_body(json.dumps("x" * 256).encode("utf-8"))),
+        "ci_classification_refused",
+    )
+    expect_classification_invalid(
+        refused_body(json.dumps("x" * 257).encode("utf-8")))
+    # A DECODED control character is the one an unquoted-scalar regex cannot
+    # see: it arrives through the JSON escape or the single-quote branch.
+    for control in (0, 1, 31, 127):
+        hostile_scalar = "boun" + chr(control) + "ded"
+        expect_classification_invalid(
+            refused_body(json.dumps(hostile_scalar).encode("utf-8")))
+        expect_classification_invalid(
+            refused_body(
+                ("'" + hostile_scalar.replace("'", "''") + "'").encode("utf-8")))
+    # The single-quoted branch DECODES: a doubled apostrophe is one apostrophe,
+    # in the rationale and in the anchor alike.
+    expect_contract_reason(
+        lambda: parse_classification(refused_body(b"'can''t reproduce it'")),
+        "ci_classification_refused",
+    )
+    single_quoted_anchor = parse_classification(
+        b"status: CLASSIFIED\nfailure_class: code_bug\n"
+        b"signal_anchor: 'src/app.py:42'\nrationale: 'it''s red'\nrisks: []\n")
+    assert single_quoted_anchor["signal_anchor"] == "src/app.py:42", single_quoted_anchor
+    assert single_quoted_anchor["rationale"] == "it's red", single_quoted_anchor
+    # ...and it is a real YAML single-quoted scalar or nothing. An unterminated
+    # quote and an unpaired inner apostrophe are both contract violations; a
+    # naive `raw[1:-1]` accepts the first and mis-decodes the second.
+    for malformed in (b"'unterminated", b"'can't reproduce it'", b"'"):
+        expect_classification_invalid(refused_body(malformed))
+    # The bare-scalar charset is closed too — `@` is not in it.
+    expect_classification_invalid(refused_body(b"boun@ded"))
+    # The field set is CLOSED, `risks` must be the empty list, and a repeated
+    # key is a violation rather than a last-writer-wins overwrite.
+    expect_classification_invalid(
+        b"status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: src/app.py:1\n"
+        b"rationale: x\nrisks: []\nextra: smuggled\n")
+    expect_classification_invalid(
+        b"status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: src/app.py:1\n"
+        b"risks: []\n")
+    expect_classification_invalid(
+        b"status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: src/app.py:1\n"
+        b"rationale: x\nrisks: [drop-tests]\n")
+    expect_classification_invalid(
+        b"status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: src/app.py:1\n"
+        b"rationale: x\nrisks: []\nfailure_class: flaky\n")
+    # REFUSED without a rationale is a violation, not a refusal: the halt prose
+    # and the filed issue both quote it.
+    expect_classification_invalid(
+        b"status: REFUSED\nfailure_class: null\nsignal_anchor: null\n"
+        b"rationale: null\nrisks: []\n")
+    # The 65,536-byte document limit bounds the LAST-fence scan over bytes an
+    # agent chose. This one needs the capture round-trip, because the limit is
+    # applied by validate-ci-classification, not by the predicate.
+    classification_document = classify_bytes(
+        b"status: REFUSED\nfailure_class: null\nsignal_anchor: null\n"
+        b"rationale: bounded\nrisks: []\n")
+    for document_size, expected_reason in (
+        (module.CI_CLASSIFICATION_RESULT_LIMIT, "ci_classification_refused"),
+        (module.CI_CLASSIFICATION_RESULT_LIMIT + 1, "artifact_size_invalid"),
+    ):
+        padding = b"x" * (document_size - len(classification_document) - 1) + b"\n"
+        sized = reclassify_raw(padding + classification_document)
+        assert len(padding + classification_document) == document_size
+        expect_contract_reason(
+            lambda s=sized: module.validate_ci_classification(
+                launch_binding=classify_binding_bytes,
+                status_sha256=s["status_sha256"],
+                result_sha256=s["result_sha256"]),
+            expected_reason,
+        )
+
     reclassify(
         b"status: CLASSIFIED\nfailure_class: code_bug\nsignal_anchor: src/app.py:1\n"
         b"rationale: assertion failed in test_alpha\nrisks: []\n")
