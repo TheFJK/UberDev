@@ -35,11 +35,11 @@ assert_eq() {
   fi
 }
 assert_absent() {
-  local path="$1" label="$2"
-  if [ ! -e "$path" ]; then
+  local target_path="$1" label="$2"
+  if [ ! -e "$target_path" ]; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "$label"
   else
-    FAIL=$((FAIL + 1)); printf '  FAIL  %s (path exists: %s)\n' "$label" "$path" >&2
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s (path exists: %s)\n' "$label" "$target_path" >&2
   fi
 }
 

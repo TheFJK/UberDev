@@ -216,16 +216,19 @@ if ! mkdir "$GENERATION_LOCK"; then
 fi
 GENERATION_LOCK_HELD=1
 cleanup_generation_lock(){
-  local status=$?
+  # `exit_status`, never `status`: this is the EXIT trap, so under zsh — where
+  # `status` is the read-only alias for `$?` — the declaration would be fatal
+  # exactly here, taking the `rmdir` release with it and stranding the lock.
+  local exit_status=$?
   trap - EXIT
   if [ "$GENERATION_LOCK_HELD" -eq 1 ]; then
     if ! rmdir "$GENERATION_LOCK"; then
       echo "generate: cannot remove generation lock safely: $GENERATION_LOCK" >&2
-      [ "$status" -ne 0 ] || status=1
+      [ "$exit_status" -ne 0 ] || exit_status=1
     fi
     GENERATION_LOCK_HELD=0
   fi
-  exit "$status"
+  exit "$exit_status"
 }
 trap cleanup_generation_lock EXIT
 trap 'exit 129' HUP

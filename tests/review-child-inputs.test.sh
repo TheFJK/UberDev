@@ -470,27 +470,27 @@ SEMAPHORE_ROOT="$STATE_DIR/semaphore-v1"
 
 review_provider_args_validate() {
   [ "$#" -eq 7 ] || return 1
-  local backend="$1" issue="$2" tier="$3" prompt="$4" result="$5" status="$6" decision="$7"
+  local backend="$1" issue="$2" tier="$3" prompt="$4" result="$5" child_status="$6" decision="$7"
   local instance
-  instance="$(basename "$(dirname "$status")")"
+  instance="$(basename "$(dirname "$child_status")")"
   [ "$backend" = workflow ] || return 1
   [ "$issue" = 73 ] || return 1
   [ "$tier" = medium ] || return 1
   [ "$prompt" = "$CARRIER_RUN/children/$instance/prompt.txt" ] || return 1
   [ "$result" = "$CARRIER_RUN/children/$instance/result.md" ] || return 1
-  [ "$status" = "$CARRIER_RUN/children/$instance/status.json" ] || return 1
+  [ "$child_status" = "$CARRIER_RUN/children/$instance/status.json" ] || return 1
   [ -n "${UBERDEV_AGENT_DECISION_JSON:-}" ] || return 1
   [ "$decision" = "$UBERDEV_AGENT_DECISION_JSON" ] || return 1
 }
 
 _uberdev_agent_dispatch_backend() {
-  local backend="$1" prompt="$4" result="$5" status="$6"
+  local backend="$1" prompt="$4" result="$5" child_status="$6"
   local instance edge
   review_provider_args_validate "$@" || {
     echo 'review-child-inputs: invalid provider arguments' >&2
     return 2
   }
-  instance="$(basename "$(dirname "$status")")"
+  instance="$(basename "$(dirname "$child_status")")"
   edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' "$HANDOFFS/$instance.json")"
   if [ "${REVIEW_FIXTURE_FORCE_BIND_FAILURE:-0}" = 1 ]; then
     # The simulated provider leads its own session and is ALREADY TERMINAL, which
@@ -563,7 +563,7 @@ row = {
 with open(path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-  _uberdev_agent_publish_status "$status" "$backend" "$DISPATCH_ID" completed 0 create
+  _uberdev_agent_publish_status "$child_status" "$backend" "$DISPATCH_ID" completed 0 create
 }
 
 # Source the production post-review setup/record/fanout definitions against the

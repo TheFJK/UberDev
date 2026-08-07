@@ -6,8 +6,8 @@ PASS=0; FAIL=0
 check() { if eval "$2"; then echo "  PASS  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
 
 check_v2() {
-  local label="$1" path="$2" expected_count="$3"
-  if python3 -I -B - "$path" "$expected_count" <<'PY'
+  local label="$1" aggregate_path="$2" expected_count="$3"
+  if python3 -I -B - "$aggregate_path" "$expected_count" <<'PY'
 import json, pathlib, sys
 
 path, expected_count = pathlib.Path(sys.argv[1]), int(sys.argv[2])

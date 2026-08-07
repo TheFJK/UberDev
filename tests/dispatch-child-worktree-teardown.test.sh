@@ -73,13 +73,13 @@ printf 'child worktree teardown\n' >"$TMP/prompt.txt"
 # ---------------------------------------------------------------------------
 
 new_repo() {
-  local path="$1"
-  git init -q "$path" || return 1
-  git -C "$path" config user.email fixture@example.com || return 1
-  git -C "$path" config user.name fixture || return 1
-  printf 'seed\n' >"$path/seed.txt" || return 1
-  git -C "$path" add seed.txt || return 1
-  git -C "$path" commit -qm seed || return 1
+  local repo_path="$1"
+  git init -q "$repo_path" || return 1
+  git -C "$repo_path" config user.email fixture@example.com || return 1
+  git -C "$repo_path" config user.name fixture || return 1
+  printf 'seed\n' >"$repo_path/seed.txt" || return 1
+  git -C "$repo_path" add seed.txt || return 1
+  git -C "$repo_path" commit -qm seed || return 1
 }
 
 worktree_registered() {
@@ -93,10 +93,10 @@ branch_exists() {
 
 wait_terminal() {
   # wait_terminal STATUS_FILE BUDGET_S -> 0 once a terminal state is published
-  local status_file="$1" budget="$2" started=$SECONDS status
+  local status_file="$1" budget="$2" started=$SECONDS child_status
   while [ $((SECONDS - started)) -lt "$budget" ]; do
-    status="$(cat "$status_file" 2>/dev/null || true)"
-    case "$status" in
+    child_status="$(cat "$status_file" 2>/dev/null || true)"
+    case "$child_status" in
       *'"state":"completed"'*|*'"state":"failed"'*|*'"state":"timed_out"'*|*'"state":"cancelled"'*)
         return 0 ;;
     esac

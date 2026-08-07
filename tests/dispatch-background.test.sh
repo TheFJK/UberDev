@@ -123,10 +123,10 @@ _dispatch_test_wait_background_terminal() {
   local runtime_dir="$1" provider_log_file="$2" budget_s="$3"
   local status_file="$runtime_dir/status.json" result_file="$runtime_dir/result.md"
   local child_log_file="$runtime_dir/solve-bg-stdout-346.log"
-  local started=$SECONDS status='' result provider_log child_log reason=timeout
+  local started=$SECONDS child_status='' result provider_log child_log reason=timeout
   while [ $((SECONDS - started)) -lt "$budget_s" ]; do
-    status="$(cat "$status_file" 2>/dev/null)"
-    case "$status" in
+    child_status="$(cat "$status_file" 2>/dev/null)"
+    case "$child_status" in
       *\"state\":\"completed\"*) return 0 ;;
       *\"state\":\"failed\"*) reason=unexpected_terminal; break ;;
     esac
@@ -136,7 +136,7 @@ _dispatch_test_wait_background_terminal() {
   provider_log="$(tail -n 20 "$provider_log_file" 2>/dev/null | tr '\n' ';')"
   child_log="$(tail -n 20 "$child_log_file" 2>/dev/null | tr '\n' ';')"
   printf 'background terminal evidence failure: reason=%s budget_s=%s status_file=%s status=%s result_file=%s result=%s provider_log_file=%s provider_log=%s child_log_file=%s child_log=%s\n' \
-    "$reason" "$budget_s" "$status_file" "${status:-missing}" "$result_file" "${result:-missing}" \
+    "$reason" "$budget_s" "$status_file" "${child_status:-missing}" "$result_file" "${result:-missing}" \
     "$provider_log_file" "${provider_log:-empty}" "$child_log_file" "${child_log:-empty}" >&2
   return 1
 }
@@ -760,20 +760,20 @@ IMMEDIATE_OUT="$(
     UBERDEV_DETACH_DIAGNOSTICS=1; export UBERDEV_DETACH_DIAGNOSTICS
     fixture_pids=(); fixture_running_count=0
     _uberdev_dispatch_wait_owned_session() {
-      local status attempts=0 terminal_seen=0 running_seen=0
+      local observed_status attempts=0 terminal_seen=0 running_seen=0
       fixture_pids+=("$1")
       while [ "$attempts" -lt 200 ]; do
-        status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
-        if [[ "$status" == *\"state\":\"running\"* && "$running_seen" -eq 0 ]]; then
+        observed_status="$(cat "$UBERDEV_AGENT_STATUS_FILE" 2>/dev/null)"
+        if [[ "$observed_status" == *\"state\":\"running\"* && "$running_seen" -eq 0 ]]; then
           running_seen=1; fixture_running_count=$((fixture_running_count + 1))
         fi
-        if [[ "$status" == *\"state\":\"completed\"* \
-            && "$status" == *\"exit_code\":0* \
+        if [[ "$observed_status" == *\"state\":\"completed\"* \
+            && "$observed_status" == *\"exit_code\":0* \
             && -s "$UBERDEV_AGENT_RESULT_FILE" ]]; then
           terminal_seen=1; break
         fi
-        if [[ "$status" == *\"state\":\"failed\"* \
-            && "$status" =~ \"exit_code\":-?[1-9][0-9]* ]]; then
+        if [[ "$observed_status" == *\"state\":\"failed\"* \
+            && "$observed_status" =~ \"exit_code\":-?[1-9][0-9]* ]]; then
           terminal_seen=1; break
         fi
         sleep 0.025; attempts=$((attempts + 1))

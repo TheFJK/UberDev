@@ -34,20 +34,24 @@ ROOT="$ROOT_PARENT/$ROOT_NAME"
 # this as the single trap installation point so later checks cannot clobber it.
 VERIFY_TEMP_PATHS=()
 cleanup_verify_temp_paths(){
-  local i path cleanup_failed=0
+  # `temp_path`, never `path`: zsh ties `path` to `$PATH`, so declaring it local
+  # would empty the command search path for this whole body — `rm` would stop
+  # resolving and every temporary would leak while the loop reported failure.
+  # Matches the `original_status` spelling in the EXIT handler just below.
+  local i temp_path cleanup_failed=0
   for ((i=0; i<${#VERIFY_TEMP_PATHS[@]}; i++)); do
-    path="${VERIFY_TEMP_PATHS[$i]}"
-    [ -n "$path" ] || continue
-    case "$path" in
+    temp_path="${VERIFY_TEMP_PATHS[$i]}"
+    [ -n "$temp_path" ] || continue
+    case "$temp_path" in
       /)
-        echo "verify: refusing unsafe temporary cleanup target: $path" >&2
+        echo "verify: refusing unsafe temporary cleanup target: $temp_path" >&2
         cleanup_failed=1
         ;;
       *)
-        if rm -rf -- "$path"; then
+        if rm -rf -- "$temp_path"; then
           VERIFY_TEMP_PATHS[$i]=""
         else
-          echo "verify: temporary cleanup failed: $path" >&2
+          echo "verify: temporary cleanup failed: $temp_path" >&2
           cleanup_failed=1
         fi
         ;;
