@@ -438,9 +438,17 @@ detached_resolver_count="$(grep -Fc 'nohup "${PYTHON_LAUNCH[@]}"' "$DISPATCH_LIB
 nested_bridge_count="$(grep -Fc 'python3() { run_python "$@"; }' "$DISPATCH_LIB")"
 nested_command_count="$(grep -Fc 'then command "$PYTHON_EXE" "$PYTHON_PREFIX" "$@"; else command "$PYTHON_EXE" "$@"; fi' "$DISPATCH_LIB")"
 nested_cache_count="$(grep -Fc '_UBERDEV_PYTHON_EXE="$PYTHON_EXE"; _UBERDEV_PYTHON_PREFIX="$PYTHON_PREFIX"' "$DISPATCH_LIB")"
-nested_prefix_guard_count="$(grep -Fc 'case "$PYTHON_PREFIX" in ""|-3) ;; *) exit 126 ;; esac' "$DISPATCH_LIB")"
+# #384 re-pointed these two anchors. Both guards still exist in both wrappers
+# and still `exit 126`; what changed is that they now NAME the worktree they
+# are about to strand first (`report_presource_leak`), because they sit in the
+# post-worktree/pre-source window and used to exit in total silence. The
+# patterns became EREs rather than fixed strings only so the message argument
+# — which contains embedded single quotes — can be skipped over; both ends of
+# each statement are still pinned, so a dropped guard or a dropped exit fails
+# here exactly as before.
+nested_prefix_guard_count="$(grep -Ec 'case "\$PYTHON_PREFIX" in ""\|-3\) ;; \*\) report_presource_leak .*; exit 126 ;; esac' "$DISPATCH_LIB")"
 nested_argv_count="$(grep -Fc '"$_UBERDEV_PYTHON_EXE" "$_UBERDEV_PYTHON_PREFIX" "$_UBERDEV_DISPATCH_FILE"' "$DISPATCH_LIB")"
-nested_unexport_count="$(grep -Fc 'export -n -f run_python python3 2>/dev/null || exit 126' "$DISPATCH_LIB")"
+nested_unexport_count="$(grep -Ec 'export -n -f run_python python3 2>/dev/null \|\| \{ report_presource_leak .*; exit 126; \}' "$DISPATCH_LIB")"
 # POPULATION COUNT-LOCK. #381 deleted the codex arm of
 # _uberdev_agent_dispatch_backend, and with it the third process-separated
 # wrapper, so every count below dropped by exactly one. The two survivors are
