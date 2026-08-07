@@ -299,14 +299,23 @@ echo "== zsh parameter modifiers: an unbraced \$var:<letter> silently eats the c
 # expands the identical string correctly, so a bash-only local run never sees
 # it. Found live on the trust-anchor publish in commands/review-pr.md, which had
 # shipped this shape and whose test pinned the broken literal.
-ZSH_MODIFIER_LETTERS='aAcefFghlpqQrstuUwWxX'
+# `P` (realpath) is in the list because zsh has it and omitting it made the
+# guard blind to `"$dir:Pxyz"` — proven live: `zsh -c 'V=/tmp/x; print -r --
+# "$V:Prefs"'` prints `/private/tmp/xrefs`, the colon and the `P` both eaten.
+ZSH_MODIFIER_LETTERS='aAcefFghlpPqQrstuUwWxX'
+# The name class admits DIGITS and the punctuation parameters, because a
+# positional parameter is mangled exactly like a named one and the old
+# `\$[A-Za-z_]` anchor could never match it: `zsh -c 'f(){ print -r --
+# "$1:refs/heads/x"; }; f abc123'` prints `abc123efs/heads/x`. A helper doing
+# `git push origin "$1:refs/heads/$b"` was invisible to this guard.
+ZSH_MODIFIER_NAME_HEAD='A-Za-z_0-9@*#?-'
 # Comment-stripped, because the two braced call sites NAME the broken shape in
 # order to explain why the braces are load-bearing — and a guard that punished
 # its own explanation would be unfixable (the S13.11d/S21.9 precedent).
 ZSH_MODIFIER_HITS=""
 while IFS= read -r zsh_scan_file; do
   zsh_scan_hit="$(grep -v '^[[:space:]]*#' "$zsh_scan_file" \
-    | grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" || true)"
+    | grep -nE "\\\$[$ZSH_MODIFIER_NAME_HEAD][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" || true)"
   [ -n "$zsh_scan_hit" ] || continue
   ZSH_MODIFIER_HITS="$ZSH_MODIFIER_HITS${ZSH_MODIFIER_HITS:+
 }$zsh_scan_file: $zsh_scan_hit"
@@ -328,12 +337,24 @@ fi
 # Anti-vacuity: the grep above must actually fire on the shape, and zsh must
 # actually mangle it. Both proven here so a future edit cannot quietly relax
 # either half into a check that can never red.
-if printf '%s\n' 'git push origin "$publish_sha:refs/heads/$live_branch"' \
-   | grep -qE "\\\$[A-Za-z_][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]"; then
-  echo "  PASS  the detector reds on the exact shape that shipped"
+ZSH_MODIFIER_DETECTOR_GAPS=""
+while IFS= read -r zsh_modifier_shape; do
+  [ -n "$zsh_modifier_shape" ] || continue
+  printf '%s\n' "$zsh_modifier_shape" \
+    | grep -qE "\\\$[$ZSH_MODIFIER_NAME_HEAD][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" \
+    || ZSH_MODIFIER_DETECTOR_GAPS="$ZSH_MODIFIER_DETECTOR_GAPS${ZSH_MODIFIER_DETECTOR_GAPS:+
+}$zsh_modifier_shape"
+done <<'EOF_ZSH_MODIFIER_SHAPES'
+git push origin "$publish_sha:refs/heads/$live_branch"
+git push origin "$1:refs/heads/$live_branch"
+printf '%s\n' "$dir:Pxyz"
+EOF_ZSH_MODIFIER_SHAPES
+if [ -z "$ZSH_MODIFIER_DETECTOR_GAPS" ]; then
+  echo "  PASS  the detector reds on every mangled shape, named and positional"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  the detector does not match the shape it exists to find (vacuous)"
+  echo "  FAIL  the detector does not match shapes it exists to find (vacuous)"
+  printf '        %s\n' "$ZSH_MODIFIER_DETECTOR_GAPS"
   FAIL=$((FAIL + 1))
 fi
 if ! command -v zsh >/dev/null 2>&1; then
@@ -341,11 +362,16 @@ if ! command -v zsh >/dev/null 2>&1; then
 else
   ZSH_UNBRACED="$(zsh -c 'V=abc123; print -r -- "$V:refs/heads/x"' 2>/dev/null)"
   ZSH_BRACED="$(zsh -c 'V=abc123; print -r -- "${V}:refs/heads/x"' 2>/dev/null)"
-  if [ "$ZSH_UNBRACED" = 'abc123efs/heads/x' ] && [ "$ZSH_BRACED" = 'abc123:refs/heads/x' ]; then
-    echo "  PASS  live zsh: unbraced loses the colon ('$ZSH_UNBRACED'), braced survives"
+  # The two shapes the shipped detector could not see, proven mangled for real
+  # so neither half of the widening can be relaxed back into a vacuous check.
+  ZSH_POSITIONAL="$(zsh -c 'f(){ print -r -- "$1:refs/heads/x"; }; f abc123' 2>/dev/null)"
+  ZSH_REALPATH="$(zsh -c 'V=abc123; print -r -- "$V:Prefs"' 2>/dev/null)"
+  if [ "$ZSH_UNBRACED" = 'abc123efs/heads/x' ] && [ "$ZSH_BRACED" = 'abc123:refs/heads/x' ] \
+     && [ "$ZSH_POSITIONAL" = 'abc123efs/heads/x' ] && [ "$ZSH_REALPATH" != 'abc123:Prefs' ]; then
+    echo "  PASS  live zsh: unbraced loses the colon ('$ZSH_UNBRACED'), positional and :P too, braced survives"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  zsh modifier behaviour drifted: unbraced='$ZSH_UNBRACED' braced='$ZSH_BRACED'"
+    echo "  FAIL  zsh modifier behaviour drifted: unbraced='$ZSH_UNBRACED' braced='$ZSH_BRACED' positional='$ZSH_POSITIONAL' realpath='$ZSH_REALPATH'"
     FAIL=$((FAIL + 1))
   fi
 fi
@@ -364,6 +390,20 @@ echo "== zsh tied parameters: a \`local path=\` REPLACES the command search path
 #
 # The tied/special names are zsh's, not a style preference: `path` IS `$PATH`,
 # `cdpath` IS `$CDPATH`, and `status`/`argv` are reserved.
+#
+# THE CORPUS IS THE POINT, and it was wrong on arrival: this guard scanned
+# `plugins/uberdev/lib/**/*.sh` only — libraries — while its own header says the
+# class matters because "the harness executes command/skill `bash` fences
+# through /bin/zsh on macOS". The predicate was disjoint from the drift it must
+# find, the #370/#371 shape a third time. `commands/review-pr.md` was carrying
+# four live hits at the time (three `local status=`, one `local … path=`) and
+# `skills/post-impl-review/SKILL.md` three more; one of them,
+# `review_apply_ci_classification_status`, sat on the mandatory Phase 3 routing
+# path. `local status=` is the more severe half of the family: `local path=`
+# degrades the next command to `command not found`, while `local status=` is a
+# HARD script kill (`read-only variable: status`) that takes the whole fence
+# with it. The corpus below is now the same one the zsh-modifier guard above
+# scans — commands, skills, lib, agents, hooks.
 ZSH_TIED_NAMES='path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv'
 ZSH_TIED_HITS=""
 while IFS= read -r zsh_tied_file; do
@@ -377,10 +417,13 @@ while IFS= read -r zsh_tied_file; do
   ZSH_TIED_HITS="$ZSH_TIED_HITS${ZSH_TIED_HITS:+
 }$zsh_tied_file: $zsh_tied_hit"
 done <<EOF_ZSH_TIED
-$(find "$REPO_ROOT/plugins/uberdev/lib" -type f -name '*.sh' 2>/dev/null | sort)
+$(find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
+       "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
+       "$REPO_ROOT/plugins/uberdev/hooks" \
+       -type f \( -name '*.md' -o -name '*.sh' \) 2>/dev/null | sort)
 EOF_ZSH_TIED
 if [ -z "$ZSH_TIED_HITS" ]; then
-  echo "  PASS  no plugin library declares a local named after a zsh tied/special parameter"
+  echo "  PASS  no plugin shell surface declares a local named after a zsh tied/special parameter"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  a local shadows a zsh tied parameter — rename it (target/file/dir/root)"

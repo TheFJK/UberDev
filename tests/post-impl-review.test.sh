@@ -92,7 +92,11 @@ assert_grep "$POST_IMPL" 'handoff_sha256:\$handoff_sha256' \
   "descriptor audit rows retain each creation-time handoff digest"
 assert_grep "$POST_IMPL" 'uberdev_preflight_child_batch "\$\{preflight_refs\[@\]\}"' \
   "preflight receives controller-held handoff/digest pairs"
-assert_grep "$POST_IMPL" 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$status"' \
+# `child_status`, NOT `status`: under /bin/zsh — how the harness runs a
+# command/skill `bash` fence on macOS — `status` is the read-only alias for `$?`,
+# so `local … status=…` (and any later assignment to a bare-declared `status`)
+# is a FATAL error that kills the whole fence.
+assert_grep "$POST_IMPL" 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$child_status"' \
   "dispatch receives the controller-held creation-time digest"
 # #381: the evidence builder moved to lib/review-aggregate.sh so a caller that
 # is not this skill can reach it. The proofs are unchanged, so the assertions

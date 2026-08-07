@@ -2012,16 +2012,40 @@ MINT_FENCE="$(awk '
   fence { buf = buf $0 "\n" }
   END { if (!found) exit 1 }
 ' "$REVIEW_PR")" || MINT_FENCE=""
-if grep -qE 'case "\$CI_FIXER_SLUG_BASE" in' <<<"$MINT_FENCE" \
+# The guard's own case WORD must carry `${…:-}`. Under `set -u` the word is
+# expanded BEFORE any arm is selected, so a bare `"$CI_FIXER_SLUG_BASE"` killed
+# the fence with a raw unbound-variable message in exactly the case the `*)` arm
+# documents — the guard could never fire for the value it exists to catch.
+if grep -qF 'case "${CI_FIXER_SLUG_BASE:-}" in' <<<"$MINT_FENCE" \
    && grep -qF 'ci_fix_dispatch_slug_base_invalid' <<<"$MINT_FENCE"; then
   echo "  PASS  S24.10 — a lost CI_FIXER_SLUG_BASE halts instead of splitting the child directory"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  S24.10 — CI_FIXER_SLUG_BASE is unchecked; bind and emit could disagree on the child dir"; FAIL=$((FAIL + 1))
+  echo "  FAIL  S24.10 — CI_FIXER_SLUG_BASE is unchecked (or its case word is a bare expansion that dies under set -u)"; FAIL=$((FAIL + 1))
 fi
-if grep -qF "CI_FIXER_INPUTS\" | jq -e 'type == \"object\"'" <<<"$MINT_FENCE"; then
+if grep -qF "\${CI_FIXER_INPUTS:-}\" | jq -e 'type == \"object\"'" <<<"$MINT_FENCE"; then
   echo "  PASS  S24.11 — a lost CI_FIXER_INPUTS halts before it is pinned by digest as garbage"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  S24.11 — CI_FIXER_INPUTS is written and digested without a shape check"; FAIL=$((FAIL + 1))
+  echo "  FAIL  S24.11 — CI_FIXER_INPUTS is written and digested without a set-u-safe shape check"; FAIL=$((FAIL + 1))
+fi
+# ...and the SAME guard on the FIRST Phase 3 stage, which shipped without one.
+# `digest --minimum 1` accepts a lone newline, so an unset CI_CLASSIFY_INPUTS
+# was pinned as garbage and `prepare-ci-authority` then died
+# `ci_authority_invalid` rc=74 with NO audit event — the precise failure mode
+# the counter fix removed everywhere else. Its two siblings both fail closed.
+CLASSIFY_MINT_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "review_fleet_bind_ci review_pr.ci.classify") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || CLASSIFY_MINT_FENCE=""
+if grep -qF "\${CI_CLASSIFY_INPUTS:-}\" | jq -e 'type == \"object\"'" <<<"$CLASSIFY_MINT_FENCE" \
+   && grep -qF 'classification_inputs_invalid' <<<"$CLASSIFY_MINT_FENCE"; then
+  echo "  PASS  S24.11b — a lost CI_CLASSIFY_INPUTS halts with an audit event, like both siblings"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.11b — the classify mint fence writes and digests its inputs unchecked"; FAIL=$((FAIL + 1))
 fi
 # ...and the lease/branch half must be enforced by the CONTRACT, at mint, for
 # BOTH mutating arms — not by prose asking the fence to remember them.
@@ -2240,6 +2264,17 @@ for line in lines:
     if current is not None:
         current.append(line)
 
+# COMMENT-STRIPPED, the S13.11d/S21.9 precedent. Every one of these fences
+# EXPLAINS why it reads the counters off disk, and several name
+# `review_fleet_load_ci_counters` inside that explanation -- so a fence whose
+# actual call was deleted stayed green on its own prose. Proven by mutation:
+# removing the call from the CONFLICT arm's step-3 fence left this row at PASS
+# until the strip below landed.
+fences = [
+    "\n".join(row for row in body.split("\n") if not row.lstrip().startswith("#"))
+    for body in fences
+]
+
 # A fence that KEYS an artifact pathname on a loop counter must have read that
 # counter off disk in the SAME fence -- there is no other way for it to be
 # right on iteration 2.
@@ -2251,7 +2286,14 @@ keyed = re.compile(
     r"|ci-refused-synthetic-\$\{CI_FIX_LOOP_ITER"
     r"|review_fleet_ci_slug [^\n]*\$\{CI_FIX_LOOP_ITER)"
 )
-reads = re.compile(r"review_fleet_load_ci_counters|review_fleet_read_ci_state")
+# THE SHARED READER, not "any spelling of reading". Accepting an open-coded
+# `review_fleet_read_ci_state` pair is what let the CONFLICT arm's step-3 fence
+# ship its own copy WITHOUT the else-branch default the helper supplies — and on
+# the first CI iteration there is no ci-loop-state.json yet, so the very next
+# line dereferenced `${REVIEW_ITERATION}` bare under `set -u`: rc=126, zero
+# audit events, worktree left mid-rebase. Two spellings of "read the counters"
+# IS the defect this section exists to end.
+reads = re.compile(r"review_fleet_load_ci_counters")
 offenders, examined = [], 0
 for body in fences:
     if not keyed.search(body):
@@ -2322,12 +2364,33 @@ CONFLICT_MINT_FENCE="$(awk '
   fence { buf = buf $0 "\n" }
   END { if (!found) exit 1 }
 ' "$REVIEW_PR")" || CONFLICT_MINT_FENCE=""
+# COMMENT-STRIPPED, the S13.11d/S21.9 precedent. The fence's own prose block
+# NAMES `read-ci-authority-member` in order to explain why it is used instead of
+# `jq`, so the raw-text grep was satisfied by the explanation rather than by the
+# code: deleting the entire six-scalar re-derivation loop — the whole fix — left
+# this suite at `failed: 0`. The other three tokens were non-vacuous already;
+# this makes all four judge code only.
+CONFLICT_MINT_CODE="$(grep -v '^[[:space:]]*#' <<<"$CONFLICT_MINT_FENCE")"
 S29_MISSING=""
 for token in 'review_fleet_load_ci_counters' 'read-ci-authority-member' \
              'uberdev_read_int_in_range fanout_concurrency.conflict_resolver' \
              'lib/config-read.sh'; do
-  grep -qF -- "$token" <<<"$CONFLICT_MINT_FENCE" || S29_MISSING="$S29_MISSING $token"
+  grep -qF -- "$token" <<<"$CONFLICT_MINT_CODE" || S29_MISSING="$S29_MISSING $token"
 done
+# ...and the loop that reads those members back is judged as a LOOP, not as a
+# lone token: five members, each bound to its own scalar, each refused when the
+# pinned document hands back an empty value.
+S29_LOOP_MISSING=""
+for token in 'for CI_AUTHORITY_MEMBER in pr_branch base_branch base_sha run_id head_sha' \
+             '--member "$CI_AUTHORITY_MEMBER"' \
+             '[ -n "$CI_AUTHORITY_VALUE" ]'; do
+  grep -qF -- "$token" <<<"$CONFLICT_MINT_CODE" || S29_LOOP_MISSING="$S29_LOOP_MISSING|$token"
+done
+if [ -z "$S29_LOOP_MISSING" ]; then
+  echo "  PASS  S29.1b — the six-scalar re-derivation loop itself is present, not just its name"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S29.1b — the conflict mint fence lost its re-derivation loop:$S29_LOOP_MISSING"; FAIL=$((FAIL + 1))
+fi
 if [ -z "$S29_MISSING" ]; then
   echo "  PASS  S29.1 — the conflict mint fence re-derives its counters, refs and cap itself"; PASS=$((PASS + 1))
 else
@@ -2355,6 +2418,40 @@ if grep -qF 'ci_fix_no_change' <<<"$PUSH_FENCE" \
 else
   echo "  FAIL  S30.1 — the NO_CHANGE rule is still prose with no reader in the push fence"; FAIL=$((FAIL + 1))
 fi
+
+echo "== S31: the ci-defer arm has a reachable trigger and a bound issue URL =="
+# THE ARM HAD NO TRIGGER. `_validate_ci_fix_code_outcome` returned only APPLIED
+# or NO_CHANGE, a refusing ci-code-fixer makes no commit (so head_after ==
+# head_before), and 6c.5 mandates branching on the VALIDATED terminal — so
+# REFUSED and NO_CHANGE were indistinguishable and an orchestrator following
+# this file always took the NO_CHANGE bullet. Four fences, an authority edge and
+# a Workflow arm were dead code on every documented path.
+assert_grep "$CONTRACT_PY" '_ci_fix_code_declared_refusal' \
+  "S31.1 — the contract can derive a REFUSED terminal at all"
+assert_grep "$CONTRACT_PY" 'return \("REFUSED", rationale\) if rationale else \("NO_CHANGE", ""\)' \
+  "S31.2 — the refusal is read ONLY when HEAD did not move (it can never authorise a push)"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_RATIONALE="\$\(review_ci_json_member "\$CI_MUTATION_OUTCOME" rationale\)"' \
+  "S31.3 — 6c.4w.2 captures the sanitised rationale off the validated receipt"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=REFUSED' \
+  "S31.4 — 6c.5 routes the REFUSED terminal, not the agent's self-report"
+assert_grep "$CODE_FIXER_CI" '^rationale:' \
+  "S31.5 — the ci-code-fixer return contract documents the field the terminal depends on"
+# ...and the URL the arm exists to hand the operator. CI_REFUSED_ISSUE_URL was
+# assigned ONLY in the two MALFORMED branches, and the validated receipt carried
+# no URL at all — so the halt prose's `filed issue:` line and the audit field
+# `phases.phase3.ci_refused_issue_url` named an unbound variable exactly when
+# the filing had WORKED.
+assert_grep "$CONTRACT_PY" '"created_url": parsed\["created_url"\]' \
+  "S31.6 — validate-ci-persistence-result returns the filed issue URL"
+assert_grep "$REVIEW_PR" 'CI_REFUSED_ISSUE_URL="\$\(review_ci_json_member "\$CI_DEFER_RECEIPT" created_url\)"' \
+  "S31.7 — the capture fence binds CI_REFUSED_ISSUE_URL on the SUCCESS path"
+# The accumulated class comes off the digest-pinned authority, not from a
+# soft-defaulted scalar three stages upstream: `${failure_class:-unknown}` made
+# `phases.phase3.failure_classes_seen` read ["unknown"] on every single run.
+assert_grep "$REVIEW_PR" '--member failure_class' \
+  "S31.8 — the re-entry fence reads the class back out of the ci-fix authority"
+assert_no_grep "$REVIEW_PR" '\-\-arg class "\$\{failure_class:-unknown\}"' \
+  "S31.9 — no soft-defaulted class is recorded into the audit accumulator"
 
 echo
 echo "== Summary =="

@@ -1079,4 +1079,52 @@ for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/
   ! grep -nE 'UBERDEV_SETUP_BOUNDARY_JSON|mkdir -p "\$RESEARCH_DIR_ABS"|DIFF_ARTIFACT_PATH="\$\{DIFF_ARTIFACT_PATH|CRITERIA_PATH="\$\{CRITERIA_PATH' "$doc"
 done
 
+# THE ARITY. `uberdev_command_workspace_prepare` hard-refuses anything but six
+# arguments (`[ "$#" -eq 6 ]`, above), so a call site that passes none aborts
+# rc=2 on its own line before it derives RESEARCH_DIR_ABS or WORKTREE_ROOT.
+# `commands/review-pr.md` shipped twelve zero-argument calls — one at the head
+# of every Phase 3 fence — and every one of them killed its fence before any
+# counter, authority, sidecar or push logic ran. Nothing caught it: the runtime
+# rows above always pass six arguments, and the prose rows above only assert the
+# NAME appears. This row parses each markdown call site's own argument list.
+workspace_arity_of() {
+  # One call line -> its argument count, honouring quoted arguments that
+  # contain spaces (`"${WORKTREE_ROOT:-}"`, `'[]'`) and stopping at a trailing
+  # redirection or `||`. Emits the count, or `bad` when the line is unparseable.
+  python3 -I -B - "$1" <<'PY'
+import re, shlex, sys
+line = sys.argv[1].strip()
+line = re.split(r'\s(?:\|\||&&|[0-9]?>|\|)', line, maxsplit=1)[0]
+try:
+    fields = shlex.split(line, comments=False)
+except ValueError:
+    print('bad'); raise SystemExit(0)
+if not fields or fields[0] != 'uberdev_command_workspace_prepare':
+    print('bad'); raise SystemExit(0)
+print(len(fields) - 1)
+PY
+}
+WORKSPACE_ARITY_BAD=0
+for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/commands/simplify.md" "$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"; do
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    hit_line="${hit%%:*}"
+    hit_text="${hit#*:}"
+    arity="$(workspace_arity_of "$hit_text")"
+    if [ "$arity" != 6 ]; then
+      echo "workspace prepare arity is $arity, expected 6: $doc:$hit_line" >&2
+      WORKSPACE_ARITY_BAD=1
+    fi
+  done <<EOF_WORKSPACE_ARITY
+$(grep -nE '(^|[^_[:alnum:]])uberdev_command_workspace_prepare[[:space:]]' "$doc" | grep -v '^[0-9]*:[[:space:]]*#' || true)
+EOF_WORKSPACE_ARITY
+done
+[ "$WORKSPACE_ARITY_BAD" -eq 0 ] || { echo 'a markdown call site does not pass CALLER SUBJECT TIER RISK_JSON RUN_ID REQUESTED_ROOT' >&2; exit 1; }
+
+# Anti-vacuity: the parser must actually count, and it must actually red on the
+# zero-argument shape that shipped.
+[ "$(workspace_arity_of 'uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {')" = 6 ]
+[ "$(workspace_arity_of '    uberdev_command_workspace_prepare || return 2')" = 0 ]
+[ "$(workspace_arity_of "uberdev_command_workspace_prepare simplify 0 medium '[]' \"\$RUN_ID\" \"\${WORKTREE_ROOT:-}\" >/dev/null || {")" = 6 ]
+
 echo 'command-workspace: PASS'

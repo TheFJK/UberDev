@@ -81,12 +81,22 @@ Return overall `status: REFUSED` with `rationale: "<reason>"` if:
 ```yaml
 status: APPLIED | REFUSED
 failure_class: code_bug | env_drift
+rationale: <one lowercase kebab-case token, REQUIRED on REFUSED>
 commit:
   sha: <40-hex>
   type: "fix(ci):" | "chore(deps):"
   summary: <one-line>
 risks: []
 ```
+
+`rationale` is load-bearing and was missing from this block while the prose
+below already depended on it. It is the ONLY signal that separates a refusal
+from an ordinary no-change: a refusing fixer makes no commit, so the
+controller's git-derived terminal is `NO_CHANGE` either way, and
+`validate-ci-mutation-outcome` reads this field out of the frozen result bytes
+to return `REFUSED` instead. Use one of the documented tokens above
+(`forbidden-pattern-<name>`, `input-malformed`, `head-moved-since-classify`,
+`path-traversal-blocked`); anything else is recorded as `unspecified`.
 
 The caller (`/review-pr`) captures `commit.sha` and (on `status: APPLIED`) handles the upload-to-remote step.
 

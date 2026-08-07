@@ -3265,7 +3265,46 @@ def _parse_persistence_result_document(payload: bytes) -> dict[str, Any]:
         "halted_due_to_overflow": overflow_halt,
         "by_severity_blocker": blocker_count,
         "skipped_blockers": skipped_blockers,
+        "created_url": _persistence_first_created_url(lines),
     }
+
+
+# `created_urls: - { url: "https://github.com/<owner>/<repo>/issues/<n>", … }`.
+# Deliberately narrow: the value is rendered into operator-facing halt prose and
+# into the audit JSON, and it comes from a child that read untrusted CI logs.
+# The owner and repo segments must START alphanumeric (owner) or
+# alphanumeric/underscore (repo), so `.`/`..` can never be a path segment: a
+# child that emitted `https://github.com/../../issues/1` would otherwise be
+# handed straight to the operator as the issue it filed.
+PERSISTENCE_ISSUE_URL = re.compile(
+    r'  - \{ *url: "(https://github\.com/[A-Za-z0-9][A-Za-z0-9-]{0,38}'
+    r'/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}'
+    r'/issues/[1-9][0-9]{0,9})"'
+)
+
+
+def _persistence_first_created_url(lines: list[str]) -> str:
+    """`created_urls[0].url`, or "" when the child created nothing.
+
+    `validate-ci-persistence-result` returned status/halt/counts and the
+    aggregate identity — and no URL at all — while the ci-defer arm's prose says
+    "the caller captures … `CI_REFUSED_ISSUE_URL` from `created_urls[0].url`".
+    Nothing assigned it on the SUCCESS path: the only two assignments were in
+    the MALFORMED branches, so the halt prose's `filed issue:` line and the
+    audit field `phases.phase3.ci_refused_issue_url` referenced an unbound
+    variable exactly when the filing had worked.
+    """
+    for index, line in enumerate(lines):
+        if line != "created_urls:":
+            continue
+        for entry in lines[index + 1:]:
+            if not entry.startswith("  "):
+                break
+            match = PERSISTENCE_ISSUE_URL.match(entry)
+            if match is not None:
+                return match.group(1)
+        break
+    return ""
 
 
 def validate_persistence_result(
@@ -7946,12 +7985,46 @@ def _ci_rebase_dir(working_dir: str) -> str:
     return ""
 
 
-def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
+def _ci_porcelain_entries(working_dir: str) -> tuple[bytes, ...]:
+    """`git status --porcelain -z` STATUS records, rename origins removed.
+
+    Porcelain v1 emits one `XY <path>` field per entry — except a rename or a
+    copy, which emits TWO: `R  <new>\\0<old>\\0`. That second field is a bare
+    pathname with no XY prefix, so splitting the stream on NUL alone yields it
+    as if it were a status record of its own, and every consumer then reads the
+    path's own first bytes as status columns.
+
+    `_ci_worktree_dirty_paths` only required offset 2 to be a space — true of
+    any path with a space there, `my file.md` among them — so a conflicted
+    rebase whose replayed commit contained such a rename reported the
+    nonexistent path `file.md` as worktree-dirty and failed
+    `ci_rebase_conflict_scope_escape`, taking the CONFLICT-RESOLVE arm with it.
+    `_ci_unmerged_paths` was safe only by accident (its filter is the two exact
+    bytes `UU`). Both read through this one splitter now, so neither depends on
+    which accident it was relying on.
+    """
     observed = _git(working_dir, "status", "--porcelain", "-z")
     if observed.returncode != 0:
         fail("git_state_unreadable")
+    fields = observed.stdout.split(b"\x00")
+    entries: list[bytes] = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        entries.append(record)
+        # X or Y == 'R'/'C' is git's own signal that the NEXT field belongs to
+        # THIS entry (the rename/copy source), not to a new one.
+        if record[0:1] in (b"R", b"C") or record[1:2] in (b"R", b"C"):
+            index += 1
+    return tuple(entries)
+
+
+def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
     unmerged: list[str] = []
-    for record in observed.stdout.split(b"\x00"):
+    for record in _ci_porcelain_entries(working_dir):
         if len(record) < 4 or record[:2] != b"UU":
             continue
         try:
@@ -7970,17 +8043,71 @@ def _ci_changed_paths(working_dir: str, before: str, after: str) -> tuple[str, .
     return _decode_git_paths(observed.stdout, "git_state_unreadable")
 
 
+# The documented ci-code-fixer refusal rationales (`agents/ci-code-fixer.md`
+# "Forbidden patterns" and "Refusal triggers") are all lowercase kebab-case
+# tokens. The controller renders the value into
+# `data.subreason=ci_fixer_refused_<rationale>`, so anything outside this shape
+# is recorded as `unspecified` rather than smuggled into an audit field.
+CI_FIXER_RATIONALE = re.compile(r"[a-z][a-z0-9-]{0,63}")
+
+
+def _ci_fix_code_declared_refusal(result_payload: bytes) -> str:
+    """The child's own REFUSED declaration, from its FROZEN result bytes.
+
+    Everything else about this terminal is derived from git, and rightly so: a
+    child cannot be trusted to claim it committed. A REFUSAL is the opposite
+    kind of claim — the child declining to act — and git cannot express it at
+    all. A refusing `ci-code-fixer` makes no commit, so `head_after ==
+    head_before` and the git-derived terminal was `NO_CHANGE`, byte-identical to
+    a fixer that found nothing to change. 6c.5 branches on the validated
+    terminal only ("never on the agent's self-report"), so with the two
+    conflated the entire ci-defer stage — four fences, an authority edge and a
+    Workflow arm — was unreachable and a REFUSED fixer halted `ci_fix_no_change`
+    with no CRITICAL issue filed.
+
+    Reading it here does not weaken that rule: the declaration is taken from the
+    result bytes the controller already pinned by digest, and it can only ever
+    DOWNGRADE a no-commit terminal into a halt. It can never turn an unmoved
+    HEAD into a push, and it is not consulted at all once HEAD has moved.
+
+    Returns the sanitised rationale, or "" when the child did not declare a
+    refusal in the canonical trailing fence.
+    """
+    try:
+        text = result_payload.decode("utf-8")
+    except UnicodeError:
+        return ""
+    document = re.search(
+        r"(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z", text, re.DOTALL
+    )
+    if document is None:
+        return ""
+    fields: dict[str, str] = {}
+    for line in document.group(1).splitlines():
+        match = re.fullmatch(r"([a-z_][a-z0-9_]*):[ \t]*(.*)", line)
+        if match is not None:
+            fields.setdefault(match.group(1), match.group(2).strip())
+    if fields.get("status") != "REFUSED":
+        return ""
+    rationale = fields.get("rationale", "").strip("\"'")
+    if CI_FIXER_RATIONALE.fullmatch(rationale) is None:
+        return "unspecified"
+    return rationale
+
+
 def _validate_ci_fix_code_outcome(
     authority: dict[str, Any],
     working_dir: str,
     head_before: str,
     head_after: str,
-) -> str:
+    result_payload: bytes,
+) -> tuple[str, str]:
     if head_before != authority["parent_sha"]:
         fail("ci_fix_head_moved_unexpectedly")
     if head_after == head_before:
         _ci_require_residue_closed(authority, working_dir)
-        return "NO_CHANGE"
+        rationale = _ci_fix_code_declared_refusal(result_payload)
+        return ("REFUSED", rationale) if rationale else ("NO_CHANGE", "")
     count = _git(working_dir, "rev-list", "--count", f"{head_before}..{head_after}")
     parent = _git(working_dir, "rev-parse", "--verify", f"{head_after}^")
     if count.returncode != 0 or parent.returncode != 0:
@@ -8015,7 +8142,7 @@ def _validate_ci_fix_code_outcome(
     if len(lockfiles) > 1:
         fail("ci_fix_multi_lockfile")
     _ci_require_residue_closed(authority, working_dir)
-    return "APPLIED"
+    return ("APPLIED", "")
 
 
 def _ci_worktree_dirty_paths(working_dir: str) -> tuple[str, ...]:
@@ -8027,12 +8154,13 @@ def _ci_worktree_dirty_paths(working_dir: str) -> tuple[str, ...]:
     `AA`/`DD`/`AU`/`UA`/`DU`/`UD` variants). What it never produces is a tracked
     path whose WORKTREE differs from the index — so a non-space Y outside the
     unmerged set is an edit somebody made by hand.
+
+    Reads through `_ci_porcelain_entries`, never the raw NUL split: the filter
+    below accepts any record with a space at offset 2, and a rename ORIGIN
+    field is exactly such a bare pathname.
     """
-    observed = _git(working_dir, "status", "--porcelain", "-z")
-    if observed.returncode != 0:
-        fail("git_state_unreadable")
     dirty: list[str] = []
-    for record in observed.stdout.split(b"\x00"):
+    for record in _ci_porcelain_entries(working_dir):
         if len(record) < 4 or record[2:3] != b" ":
             continue
         index_column = record[0:1]
@@ -8261,13 +8389,16 @@ def validate_ci_mutation_outcome(
         binding["status_path"], status_sha256, 1, 65_536
     )
     _validate_bound_child_status(binding, status_payload)
-    capture_expected(binding["result_path"], result_sha256, 1, CI_RESULT_LIMIT)
+    result_payload = capture_expected(
+        binding["result_path"], result_sha256, 1, CI_RESULT_LIMIT
+    )
     capture_expected(
         authority["input_path"], authority["input_sha256"], 1, CI_INPUT_LIMIT
     )
+    rationale = ""
     if edge_id == "review_pr.ci.fix_code":
-        status = _validate_ci_fix_code_outcome(
-            authority, canonical_working, head_before, head_after
+        status, rationale = _validate_ci_fix_code_outcome(
+            authority, canonical_working, head_before, head_after, result_payload
         )
     elif edge_id == "review_pr.ci.rebase":
         status = _validate_ci_rebase_outcome(
@@ -8277,6 +8408,9 @@ def validate_ci_mutation_outcome(
         status = _validate_ci_conflict_outcome(authority, canonical_working)
     return {
         "status": status,
+        # Empty on every terminal but fix_code REFUSED. It is what the caller
+        # renders into `data.subreason=ci_fixer_refused_<rationale>`.
+        "rationale": rationale,
         "edge_id": edge_id,
         "head_before": head_before,
         "head_after": head_after,
@@ -8318,6 +8452,9 @@ def validate_ci_persistence_result(
         "halted": parsed["halted"],
         "halted_due_to_overflow": parsed["halted_due_to_overflow"],
         "by_severity_blocker": parsed["by_severity_blocker"],
+        # The filed issue's URL, which the ci-defer arm records as
+        # CI_REFUSED_ISSUE_URL. Empty when the child filed nothing.
+        "created_url": parsed["created_url"],
         "aggregate_path": authority["input_path"],
         "aggregate_sha256": authority["input_sha256"],
         "status_sha256": status_sha256,

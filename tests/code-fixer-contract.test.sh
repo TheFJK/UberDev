@@ -5220,6 +5220,68 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     no_change = fix_outcome(ci_head)
     assert no_change["status"] == "NO_CHANGE", no_change
     assert no_change["run_nonce"] == CI_NONCE, no_change
+    assert no_change["rationale"] == "", no_change
+
+    # ---- the REFUSED terminal, which git cannot express -------------------
+    # A refusing ci-code-fixer makes no commit, so head_after == head_before and
+    # the git-derived terminal is NO_CHANGE — byte-identical to a fixer that
+    # simply found nothing to change. 6c.5 branches on the VALIDATED terminal
+    # only, so with those two conflated the whole ci-defer stage (four fences,
+    # an authority edge, a Workflow arm) was unreachable on the documented path:
+    # a REFUSED fixer halted `ci_fix_no_change` and no CRITICAL issue was ever
+    # filed. The declaration is read HERE, controller-side, out of the child's
+    # digest-pinned result bytes — and it can only ever downgrade a no-commit
+    # terminal into a halt, never authorise a push.
+    refused_child = ci_child_dir("ci-fix-code-ci09-iter01")
+    refused_binding = module.bind_workflow_ci_launch(
+        edge_id="review_pr.ci.fix_code", instance_id="ci-fix-code-ci09-iter01",
+        run_nonce=CI_NONCE, result_path=str(refused_child / "result.md"),
+        status_path=str(refused_child / "status.json"), working_dir=str(ci_repo),
+        ci_authority_path=fix_receipt["authority_path"],
+        ci_authority_sha256=fix_receipt["authority_sha256"],
+    )
+    (refused_child / "status.json").write_bytes(ci_status_document(refused_binding))
+    refused_binding_bytes = module._canonical_json(refused_binding)
+
+    def refused_outcome(result_text, head_after=ci_head):
+        (refused_child / "result.md").write_text(result_text, encoding="utf-8")
+        terminal = module.capture_ci_terminal(
+            launch_binding=refused_binding_bytes, edge_id="review_pr.ci.fix_code")
+        return module.validate_ci_mutation_outcome(
+            launch_binding=refused_binding_bytes,
+            status_sha256=terminal["status_sha256"],
+            result_sha256=terminal["result_sha256"],
+            working_dir=str(ci_repo), head_before=ci_head, head_after=head_after,
+            remote_head_sha="")
+
+    refused = refused_outcome(
+        "the forbidden-pattern guard fired\n\n"
+        "```yaml\n"
+        "status: REFUSED\n"
+        "failure_class: code_bug\n"
+        "rationale: forbidden-pattern-no-verify\n"
+        "risks: []\n"
+        "```\n"
+    )
+    assert refused["status"] == "REFUSED", refused
+    assert refused["rationale"] == "forbidden-pattern-no-verify", refused
+    # A rationale outside the documented shape still refuses — it just cannot
+    # smuggle arbitrary bytes into `data.subreason=ci_fixer_refused_<rationale>`.
+    unspecified = refused_outcome(
+        "```yaml\nstatus: REFUSED\nrationale: Ceci n'est pas un rationale\n```\n")
+    assert unspecified["status"] == "REFUSED", unspecified
+    assert unspecified["rationale"] == "unspecified", unspecified
+    # A missing rationale is still a refusal, not a silent NO_CHANGE.
+    bare = refused_outcome("```yaml\nstatus: REFUSED\n```\n")
+    assert bare["status"] == "REFUSED", bare
+    assert bare["rationale"] == "unspecified", bare
+    # ...and the child NEVER gets to talk its way OUT of a real commit or INTO
+    # one. `status: APPLIED` over an unmoved HEAD is still NO_CHANGE.
+    still_no_change = refused_outcome(
+        "```yaml\nstatus: APPLIED\nrationale: trust me\n```\n")
+    assert still_no_change["status"] == "NO_CHANGE", still_no_change
+    unfenced = refused_outcome("status: REFUSED\nrationale: not-in-a-fence\n")
+    assert unfenced["status"] == "NO_CHANGE", unfenced
 
     (ci_repo / "src/app.py").write_text("APP = 2\n", encoding="utf-8")
     git(ci_repo, "add", "--", "src/app.py")
@@ -5407,7 +5469,16 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     # edited outside the conflict set" cannot be modelled at all: the only
     # tracked file would be the unmerged one.
     (cf_repo / "src/keep.py").write_text("KEEP = 1\n", encoding="utf-8")
-    git(cf_repo, "add", "--", "src/app.py", "src/keep.py")
+    # A THIRD tracked file, at the repository root, whose name carries a SPACE
+    # AT OFFSET 2. The branch renames it, so `git status --porcelain -z` emits
+    # `R  renamed.md\0my file.md\0` mid-rebase — two NUL-terminated fields for
+    # one entry, the second a bare pathname with no XY prefix. A parser that
+    # splits on NUL alone reads `my file.md` as a status record: X='m', Y='y',
+    # offset 2 is the space every real record has there, and the dirty-path set
+    # gains `file.md` — a path that does not exist. The whole CONFLICT arm then
+    # refuses `ci_rebase_conflict_scope_escape` on a clean conflicted rebase.
+    (cf_repo / "my file.md").write_text("RENAME ME\n", encoding="utf-8")
+    git(cf_repo, "add", "--", "src/app.py", "src/keep.py", "my file.md")
     git(cf_repo, "commit", "-qm", "test: conflict fixture base")
     cf_fork = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
     # main advances over the same line the branch will touch.
@@ -5416,6 +5487,10 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     cf_base = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
     git(cf_repo, "checkout", "-q", "-b", "fix/383-conflict", cf_fork)
     (cf_repo / "src/app.py").write_text("APP = 'branch'\n", encoding="utf-8")
+    # The rename rides the SAME commit as the conflicting edit, so it is part of
+    # what `git rebase` replays and is present in the porcelain stream at the
+    # moment every CONFLICT-terminal predicate below reads it.
+    git(cf_repo, "mv", "my file.md", "renamed.md")
     git(cf_repo, "commit", "-qam", "test: branch diverges")
     cf_head = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
 
@@ -5464,6 +5539,15 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     cf_mid_head = git(cf_repo, "rev-parse", "HEAD").stdout.decode().strip()
     assert b"UU src/app.py" in git(
         cf_repo, "status", "--porcelain").stdout, "no unmerged path in the fixture"
+    # The fixture must really produce the two-field rename entry, or every row
+    # that depends on it below is vacuous.
+    cf_porcelain = git(cf_repo, "status", "--porcelain", "-z").stdout
+    assert b"my file.md\x00" in cf_porcelain, cf_porcelain
+    assert b"R" == cf_porcelain[:1], cf_porcelain
+    assert module._ci_worktree_dirty_paths(str(cf_repo)) == (), (
+        "a rename ORIGIN path was parsed as a status record")
+    assert module._ci_unmerged_paths(str(cf_repo)) == ("src/app.py",), (
+        module._ci_unmerged_paths(str(cf_repo)))
 
     def rb_outcome(**overrides):
         arguments = dict(
@@ -5745,6 +5829,44 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     # still malformed, though.
     expect_contract_reason(
         lambda: dr_outcome("no fence at all\n"), "persistence_result_malformed")
+
+    # ---- created_urls[0].url, the ci-defer arm's ONE output ----------------
+    # The ci-defer prose says "the caller captures … CI_REFUSED_ISSUE_URL from
+    # created_urls[0].url", and this receipt carried no URL at all — so the only
+    # two sites that ever assigned it were the arm's MALFORMED branches. The
+    # halt prose's `filed issue:` line and `phases.phase3.ci_refused_issue_url`
+    # therefore named an unbound variable exactly when the filing had WORKED.
+    assert dr_done["created_url"] == "", dr_done
+
+    def dr_with_urls(entries):
+        return dr_outcome(
+            persistence_result("DONE", halted=True, blocker_count=0).replace(
+                "created_urls: []\n", "created_urls:\n" + entries, 1
+            ).replace("halted: true", "halted: false")
+        )
+
+    filed = dr_with_urls(
+        '  - { url: "https://github.com/TheFJK/TurboDev/issues/383", '
+        'file: "src/app.py:1", fingerprint: "abc1234567890def", tier: "CRITICAL" }\n'
+    )
+    assert filed["created_url"] == "https://github.com/TheFJK/TurboDev/issues/383", filed
+    # FIRST entry, not last: the arm files exactly one issue and the prose says
+    # `created_urls[0]`.
+    two = dr_with_urls(
+        '  - { url: "https://github.com/TheFJK/TurboDev/issues/383", tier: "CRITICAL" }\n'
+        '  - { url: "https://github.com/TheFJK/TurboDev/issues/999", tier: "CRITICAL" }\n'
+    )
+    assert two["created_url"] == "https://github.com/TheFJK/TurboDev/issues/383", two
+    # The value reaches operator-facing halt prose and the audit JSON from a
+    # child that read untrusted CI logs, so anything but a real GitHub issue URL
+    # is dropped rather than rendered.
+    for hostile in (
+        '  - { url: "javascript:alert(1)", tier: "CRITICAL" }\n',
+        '  - { url: "https://evil.example/TheFJK/TurboDev/issues/1", tier: "CRITICAL" }\n',
+        '  - { url: "https://github.com/TheFJK/TurboDev/issues/0", tier: "CRITICAL" }\n',
+        '  - { url: "https://github.com/../../issues/1", tier: "CRITICAL" }\n',
+    ):
+        assert dr_with_urls(hostile)["created_url"] == "", hostile
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY
