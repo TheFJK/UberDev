@@ -3607,13 +3607,36 @@ PY
        3. **Audit + exit** — emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); record `CI_REFUSED_ISSUE_URL` in the audit JSON under `phases.phase3.ci_refused_issue_url`; exit 1.
 
        Under `TURBO=1`, the same three actions fire — the prose goes to stderr, the issue is still filed (no `AskUserQuestion` involved here; this is a deterministic halt, not a user-choice gate), and exit 1 surfaces to the orchestrator chain.
+
+    > **STALE — this ROUTE-return block and the CONFLICT-RESOLVE arm below still
+    > describe the PRE-#383 `ci-rebase-handler`, and #383 half one has already
+    > replaced that agent.** Nothing here is reachable today: 6c.4 CLASSIFY exits
+    > at the `ci_transport_unsupported` gate above, before ROUTE. The recipes
+    > below are left as `main` has them on purpose — half one ships the engine
+    > and changes NO Phase 3 behaviour — but a reader wiring the fences from
+    > them would be working from a contract the shipped agent no longer
+    > honours. Precisely three statements below are now false, and
+    > `plugins/uberdev/agents/ci-rebase-handler.md` is the authority in every case:
+    >
+    > | Said below | Shipped agent (#383) |
+    > |---|---|
+    > | "the agent already pushed; new HEAD is on remote" | The agent is a PREPARER, not a pusher. `git push` **in any form** is on its explicit denylist, `EXPECTED_OLD_SHA` no longer exists in that file, and the controller captures the lease and performs the single leased push itself. |
+    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN `git status --porcelain` UU entries — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
+    > | "Step 6 the agent has already aborted the in-progress rebase" | Step 5 says the opposite in capitals — **leave the rebase IN PROGRESS**, do NOT `git rebase --abort` — and Step 6 is "Stop." The live mid-rebase state IS the `ci-conflicts` stage's input; step 1's re-fetch-and-re-rebase below would destroy it. |
+    >
+    > Half two (the Phase 3 fence wiring) replaces this whole block with the
+    > `ci-fix` / `ci-conflicts` Workflow stages that `skills/review-fleet/workflow.js`
+    > and `lib/review-fleet-args.sh` already ship. Do not re-add an agent-held
+    > lease while re-wiring it: an LLM choosing the SHA git compares against is
+    > exactly the hole the demotion closes.
+
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
     - `ci-rebase-handler` `status: REFUSED, rationale: <reason>` (∈ {`pr-already-merged`, `head-moved-since-classify`, `lease-mismatch`}) → emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_rebase_refused_<reason>` (lowercase, dashes-to-underscores normalised; e.g. `lease-mismatch` → `ci_rebase_refused_lease_mismatch`); exit 1.
 
     #### CONFLICT-RESOLVE arm (mirrors `merge-pipeline/SKILL.md` Phase 3.3.iii–iv)
 
-    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
+    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease. (Both sentences are in the STALE table above — the shipped agent returns a count and leaves the rebase running.)
 
     **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
 
@@ -3629,8 +3652,12 @@ PY
        ```bash
        git fetch origin "$pr_head_branch" "$base_branch"
        # Captured BEFORE the second rebase — used as the resume-push lease so an
-       # external push that lands during the resume window is detected. Mirrors
-       # the EXPECTED_OLD_SHA capture in agents/ci-rebase-handler.md Step 4.
+       # external push that lands during the resume window is detected. This
+       # used to mirror an EXPECTED_OLD_SHA capture inside the rebase agent;
+       # #383 deleted it (agents/ci-rebase-handler.md Step 4 is now the rebase
+       # itself, and "Lease form (load-bearing) — the CONTROLLER's, not yours"
+       # in that file is where the capture lives). The controller holding the
+       # lease is the point, so this local capture is the shape half two keeps.
        EXPECTED_OLD_SHA="$(git rev-parse origin/$pr_head_branch)"
        BASE_SHA="$(git merge-base origin/$pr_head_branch origin/$base_branch)"
        git rebase "origin/$base_branch"   # exits non-zero with markers — that is expected
@@ -4496,10 +4523,11 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Commits as `fix(ci):` (code_bug) or `chore(deps):` (env_drift); never pushes (caller handles)
 
 **uberdev:ci-rebase-handler** (`subagent_type: uberdev:ci-rebase-handler`):
-- Rebases the PR branch onto its base for `stale_base` class
-- Uses `--force-with-lease=<branch>:<sha> --force-if-includes` (sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant)
-- Worktree-scoped lock prevents parallel-run lease races
-- Returns `CONFLICT` for caller to fan out `conflict-resolver` agents (single message)
+- Rebases the PR branch onto its base for `stale_base` class, and **stops there** — #383 demoted it from pusher to preparer
+- Does **not** push. `git push` in any form is on its explicit denylist. The `--force-with-lease=<branch>:<sha> --force-if-includes` pair (the sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant) is captured and consumed by the CONTROLLER, which is the whole safety property: the lease's value must not be one an agent chose
+- No lock file. The lease is the cross-run concurrency guard, and `git rebase` refuses on its own when `.git/rebase-merge` already exists — a controller-held `flock` cannot work here, because every `bash` block is a fresh shell and the file descriptor dies with the fence
+- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the UU paths itself and fan out `conflict-resolver` agents
+- **Not reachable on the shipped tree**: half one ships the `ci-fix` engine stage, half two wires Phase 3 to call it
 
 ## Notes:
 
