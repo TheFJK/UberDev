@@ -4,6 +4,75 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.0] — 2026-08-07
+
+### Added
+
+- **The Phase 3 CI engine, shipped but not yet wired** (#383, half one).
+  `045743b` (#382) deleted the codex backend, which was the only transport that
+  could run `/uberdev:review-pr` Phase 3's five `review_pr.ci.*` routed children —
+  `lib/dispatch.sh` has no workflow provider arm for them by construction. A red
+  CI check therefore halts loudly at 6c.3 CLASSIFY with
+  `subreason=ci_transport_unsupported`.
+
+  This release lands the **engine** for the replacement: `lib/code_fixer_contract.py`
+  gains the CI producer (`prepare-ci-authority`, `bind-workflow-ci-launch`), its own
+  capture verb (`capture-ci-terminal`, `read-ci-authority-member`) and the judges
+  (`validate-ci-classification`, `validate-ci-mutation-outcome`,
+  `validate-ci-persistence-result`); `skills/review-fleet/workflow.js` gains the four
+  CI stages (`ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer`); and
+  `lib/review-fleet-args.sh` gains the CI binders and the on-disk counter/pointer
+  state the fences will read.
+
+  `capture-bound-child` was **not** widened. It refuses the fixer edges on purpose,
+  because a fixer child owes a disposition and an applied-content artifact; the CI
+  edges owe the same, so they got their own capture verb rather than a silent
+  loosening of an existing one.
+
+  **`/uberdev:review-pr` behaviour is unchanged in this release.** No command file
+  emits the new stages yet — Phase 3 still halts loudly on red CI exactly as before,
+  and `--no-ci-fix` remains the supported mode. The `commands/review-pr.md` fence
+  wiring is deferred to half two, gated on a fence-execution harness: three review
+  rounds found four arm-killing blockers in that wiring that a green 290-assertion
+  suite could not see, because every test in the repo asserts on fence *text* and
+  none executes a fence.
+
+  `agents/ci-rebase-handler.md` is demoted from pusher to preparer — `git push` in
+  any form is on its denylist, and the `--force-with-lease=<branch>:<sha>
+  --force-if-includes` pair is captured and consumed by the **controller**. An agent
+  choosing the SHA that git compares against is precisely the hole the demotion
+  closes.
+
+### Fixed
+
+- **Three zsh parameter hazards that kill live `/uberdev:review-pr` fences** (found
+  while reviewing #383; all pre-existing on `main`).
+
+  `local status=` is **fatal** under zsh: `status` is a read-only special parameter,
+  and the assignment terminates the whole fence rather than just the function. Live
+  at three sites in `commands/review-pr.md` and three in
+  `skills/post-impl-review/SKILL.md`, all on the **non-CI** path — so this broke
+  `/review-pr` for every PR, not only red-CI ones. `local path=` is the softer half
+  of the same family: zsh ties lowercase `path` to `$PATH`, so the assignment
+  destroys command lookup for the rest of the call frame and the next `jq` or
+  `python3` dies "command not found". All renamed to `child_status` / `record_path`.
+
+  An unbraced `"$publish_sha:refs/heads/$live_branch"` parses `:r` as zsh's
+  remove-extension **modifier**, eating the colon: the refspec silently became
+  `<sha>efs/heads/<branch>` and the trust-anchor `git push` died with "src refspec
+  does not match any". Verify with `zsh -c 'V=abc; print "$V:refs/x"'`.
+
+  `tests/crossplatform-shell-wrappers.test.sh` gains a repo-wide guard for both
+  classes. Its corpus was `lib/**/*.sh` only — disjoint from `commands/` and
+  `skills/`, where every live instance actually was. That is the same
+  guard-cannot-reach-the-drift shape #370/#371 addressed, one level up.
+
+- **`uberdev_command_workspace_prepare` arity is now guarded**
+  (`tests/command-workspace.test.sh`). The function hard-requires six arguments and
+  returns 2 with an error otherwise; nothing asserted that its callers pass them, so
+  a zero-argument call would abort a fence on its own preamble with every downstream
+  test still green.
+
 ## [0.43.0] — 2026-08-07
 
 ### Fixed
