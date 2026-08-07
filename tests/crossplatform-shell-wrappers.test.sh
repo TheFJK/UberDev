@@ -377,7 +377,7 @@ else
 fi
 
 echo
-echo "== zsh tied parameters: a \`local path=\` REPLACES the command search path =="
+echo "== zsh tied parameters: a \`local path\`/\`local … status\` breaks the fence =="
 
 # THE CLASS, and the #370/#371 shape: one contract, enforced in ONE copy.
 # lib/status.sh:78-84 documents this rule in full and tests/status.test.sh S1.17
@@ -404,14 +404,43 @@ echo "== zsh tied parameters: a \`local path=\` REPLACES the command search path
 # HARD script kill (`read-only variable: status`) that takes the whole fence
 # with it. The corpus below is now the same one the zsh-modifier guard above
 # scans — commands, skills, lib, agents, hooks.
+#
+# THE SHAPE WAS ALSO WRONG, and it let the more severe half through: the
+# terminator was `=`, so the guard only saw a declaration that ASSIGNS at the
+# point of declaration. A BARE declaration in a multi-name list —
+# `local index status result cleanup_rc=0` — is accepted by zsh and then kills
+# the script at the FIRST LATER ASSIGNMENT, which is the shape the dispatch
+# helpers actually use:
+#   zsh -c 'f(){ local a status; status=hi; echo "$status"; }; f'
+#   -> f: read-only variable: status   (rc=1, the whole fence dies)
+# Sixteen such bare `status` declarations were live across commands/simplify.md
+# and the brainstorm / orchestrator / subagent-driven-dev skills — every one on
+# a child dispatch/wait/unwind path — plus a bare `local path` in
+# merge-pipeline/lib/release-anchor.sh. The terminator is therefore
+# `([=[:space:]]|$)`: assigned, followed by another name, or last on the line.
+#
+# `[^#]*`, not `.*`, for the pre-name span. Only WHOLE-LINE comments are
+# stripped above, so with `.*` a trailing comment would manufacture a false
+# positive out of prose — `local dir  # returns status` would match on the bare
+# arm. Bounding the span to non-`#` bytes means a tied name is only ever read
+# from the code half of the line. The cost is a declaration that reaches a tied
+# name only by crossing a literal `#` (inside a quoted default, say) — no such
+# line exists in the corpus, and the trailing-comment false positive is the
+# larger hazard now that a bare name is enough to red.
 ZSH_TIED_NAMES='path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv'
+# ONE detector, four consumers: the corpus scan, the two anti-vacuity rows
+# (assignment arm, bare arm) and the negative row. A second copy of this regex
+# is exactly the "one contract, N uncompared copies" drift this file's own header
+# is about — every row below must fire on the same regex the scan uses, or it is
+# proving something about a detector that is not the one shipping.
+ZSH_TIED_DECL="^[[:space:]]*(local|typeset|declare)[[:space:]]+([^#]*[^_[:alnum:]])?($ZSH_TIED_NAMES)([=[:space:]]|\$)"
 ZSH_TIED_HITS=""
 while IFS= read -r zsh_tied_file; do
   # Comment-stripped: the surviving call sites NAME the broken shape in order to
   # explain why `target` is load-bearing, and a guard that punished its own
   # explanation would be unfixable (the S13.11d/S21.9 precedent).
   zsh_tied_hit="$(grep -v '^[[:space:]]*#' "$zsh_tied_file" \
-    | grep -nE "^[[:space:]]*(local|typeset|declare)[[:space:]]+(.*[^_[:alnum:]])?($ZSH_TIED_NAMES)=" \
+    | grep -nE "$ZSH_TIED_DECL" \
     || true)"
   [ -n "$zsh_tied_hit" ] || continue
   ZSH_TIED_HITS="$ZSH_TIED_HITS${ZSH_TIED_HITS:+
@@ -433,11 +462,61 @@ fi
 
 # Anti-vacuity: the detector must fire on the exact shape that shipped.
 if printf '%s\n' '  local path="$1" ci_iter="$2" payload' \
-   | grep -qE "^[[:space:]]*(local|typeset|declare)[[:space:]]+(.*[^_[:alnum:]])?($ZSH_TIED_NAMES)="; then
+   | grep -qE "$ZSH_TIED_DECL"; then
   echo "  PASS  the detector reds on the exact shape that shipped"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  the detector does not match the shape it exists to find (vacuous)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Anti-vacuity for the BARE arm, which is the half the `=` terminator missed.
+# Every one of these is a real declaration that shipped: mid-list, last-on-line,
+# and a `typeset` flag form. All die under zsh at the first later assignment.
+ZSH_TIED_BARE_GAPS=""
+while IFS= read -r zsh_tied_bare; do
+  [ -n "$zsh_tied_bare" ] || continue
+  printf '%s\n' "$zsh_tied_bare" | grep -qE "$ZSH_TIED_DECL" \
+    || ZSH_TIED_BARE_GAPS="$ZSH_TIED_BARE_GAPS${ZSH_TIED_BARE_GAPS:+
+}$zsh_tied_bare"
+done <<'EOF_ZSH_TIED_BARE'
+  local index status result cleanup_rc=0
+  local records="$1" descriptors="$2" row edge result status receipt index
+  local path removed added chg_added bad
+  local index status
+  typeset -g status
+EOF_ZSH_TIED_BARE
+if [ -z "$ZSH_TIED_BARE_GAPS" ]; then
+  echo "  PASS  the detector reds on the BARE declaration too, mid-list and last-on-line"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector misses a bare tied declaration (the severe half is vacuous)"
+  printf '        %s\n' "$ZSH_TIED_BARE_GAPS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must NOT punish the fix, or the corpus can never go green: a widened
+# terminator that also fires on `child_status` / `record_path` / a trailing
+# comment would make every rename futile and the guard unfixable.
+ZSH_TIED_FALSE_POSITIVES=""
+while IFS= read -r zsh_tied_clean; do
+  [ -n "$zsh_tied_clean" ] || continue
+  ! printf '%s\n' "$zsh_tied_clean" | grep -qE "$ZSH_TIED_DECL" \
+    || ZSH_TIED_FALSE_POSITIVES="$ZSH_TIED_FALSE_POSITIVES${ZSH_TIED_FALSE_POSITIVES:+
+}$zsh_tied_clean"
+done <<'EOF_ZSH_TIED_CLEAN'
+  local index child_status result cleanup_rc=0
+  local edge="$1" record_path="$2" ledger_path="$3"
+  local changed_path removed added chg_added bad
+  local status_file="$1" mystatus="$2" pathological=1
+  local dir  # the caller reads status from here
+EOF_ZSH_TIED_CLEAN
+if [ -z "$ZSH_TIED_FALSE_POSITIVES" ]; then
+  echo "  PASS  the detector ignores the renamed forms and a trailing-comment mention"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector reds on a CORRECT declaration — the corpus could never go green"
+  printf '        %s\n' "$ZSH_TIED_FALSE_POSITIVES"
   FAIL=$((FAIL + 1))
 fi
 
@@ -453,6 +532,22 @@ else
     PASS=$((PASS + 1))
   else
     echo "  FAIL  zsh tied-parameter behaviour drifted: probe said '$ZSH_TIED_PROBE'"
+    FAIL=$((FAIL + 1))
+  fi
+  # The BARE arm's mechanism, live: the DECLARATION is accepted, so nothing looks
+  # wrong at that line — the function dies at the first later assignment, and the
+  # rc is the function's, not a warning. This is why the `=`-only terminator read
+  # as "no hits" while sixteen live declarations were one assignment from death.
+  ZSH_BARE_OUT="$(zsh -c 'f() { local a status; status=hi; print -r -- "$status"; }; f' 2>/dev/null)"
+  ZSH_BARE_RC=$?
+  ZSH_BARE_FIXED="$(zsh -c 'f() { local a child_status; child_status=hi; print -r -- "$child_status"; }; f' 2>/dev/null)"
+  ZSH_BARE_FIXED_RC=$?
+  if [ "$ZSH_BARE_RC" -ne 0 ] && [ -z "$ZSH_BARE_OUT" ] \
+     && [ "$ZSH_BARE_FIXED_RC" -eq 0 ] && [ "$ZSH_BARE_FIXED" = hi ]; then
+    echo "  PASS  live zsh: a bare \`local … status\` dies on its first assignment, the rename does not"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh bare tied-declaration behaviour drifted: rc=$ZSH_BARE_RC out='$ZSH_BARE_OUT' fixed_rc=$ZSH_BARE_FIXED_RC fixed='$ZSH_BARE_FIXED'"
     FAIL=$((FAIL + 1))
   fi
   # The three review-fleet writers that ship on the Phase 3 push path. Driven

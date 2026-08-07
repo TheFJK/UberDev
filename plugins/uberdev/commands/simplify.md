@@ -47,7 +47,7 @@ with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'in
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
   local preflight_refs=()
   local launch_edges=() launch_handoffs=() launch_handoff_sha256s=()
   local launch_results=() launch_statuses=()
@@ -72,20 +72,20 @@ PY
   for ((index=0; index<${#launch_handoffs[@]}; index++)); do
     edge="${launch_edges[$index]}"; handoff="${launch_handoffs[$index]}"
     handoff_sha256="${launch_handoff_sha256s[$index]}"
-    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
-    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+    result="${launch_results[$index]}"; child_status="${launch_statuses[$index]}"
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status"; then
       receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
       return "$dispatch_rc"
     fi
-    if python3 -I -B - "$edge" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$receipt" "$result" "$child_status" "$launched" <<'PY'
 import json,sys
 edge,receipt,result,status,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
@@ -94,11 +94,11 @@ PY
       :
     else
       ledger_rc=$?; cleanup_rc=0
-      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
@@ -106,17 +106,17 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
+  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+    child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+    if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
       continue
     else
       wait_rc=$?
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
-    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+    uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
   if [ "$first_rc" -ne 0 ]; then
     [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
