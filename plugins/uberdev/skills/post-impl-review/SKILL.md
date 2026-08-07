@@ -118,7 +118,18 @@ UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN
 uberdev_command_workspace_prepare post-impl-review 0 medium '[]' "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {
   rc=$?; return "$rc" 2>/dev/null || exit "$rc"
 }
-REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || { return 2 2>/dev/null || exit 2; }
+# REVIEW_ITERATION off disk, NOT off this fresh shell. `/review-pr` Phase 3
+# pushes a CI fix, its re-entry fence advances the counter, and Phase 1
+# dispatches this skill AGAIN — so the `${REVIEW_ITERATION:-1}` this line used
+# to be minted pass 2's six children under pass 1's `…-iter1-attempt01`
+# instance ids. `uberdev_command_workspace_prepare` above already exported
+# RESEARCH_DIR_ABS for the PARENT run id, so `ci-loop-state.json` is the same
+# file `/review-pr` wrote; a caller-threaded `review_iteration` input would be
+# a second source of truth for one counter, which is the defect this reader
+# exists to end. Absent state file = first iteration, the one time the
+# fresh-shell default is the right answer.
+review_fleet_load_ci_counters "$RESEARCH_DIR_ABS" || { return 74 2>/dev/null || exit 74; }
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CHANGED_PATHS_JSON="${CHANGED_PATHS_JSON:-[]}"
 EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
@@ -567,6 +578,12 @@ and digest replacement all fail closed.
 # skill left no callable function behind (#302, #381). Moving them changed no
 # proof -- the file is sourced, not re-implemented.
 . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh" || exit 2
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 2
+# Same reason as the setup fence, and this one is a SEPARATE shell from it: the
+# `-attempt02` instance ids below are keyed on REVIEW_ITERATION, so an
+# inherited-or-defaulted counter re-mints the repair children under the
+# previous pass's names.
+review_fleet_load_ci_counters "$RESEARCH_DIR_ABS" || exit 74
 FORMAT_EXAMPLE_PATH="${FORMAT_EXAMPLE_PATH:-$CRITERIA_PATH}"
 REPAIR_PREFIX="$RESEARCH_DIR_ABS/post-review-repair"
 post_review_init_ledger "$REPAIR_PREFIX.records" || exit 2
