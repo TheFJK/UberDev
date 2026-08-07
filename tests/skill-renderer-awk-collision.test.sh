@@ -307,10 +307,13 @@ cat > "$fixture_bash_bad" <<'EOF_BASH_BAD'
 # never executes the function, so the zsh-abort issue is irrelevant — and the
 # diff against R5.safe (which uses `topic_status`) preserves the contrast.
 # Do NOT "consistency-fix" this to `topic_status`; that would weaken the
-# inverse proof.
+# inverse proof. The trailing marker is what buys that exemption from the
+# repo-wide tied-parameter scan in tests/crossplatform-shell-wrappers.test.sh,
+# which reads tests/ as of the corpus widening — a per-line marker rather than a
+# path exclusion, so the other four hundred lines of this file stay scanned.
 emit_topic_log() {
   local topic="$1"
-  local status="$2"
+  local status="$2"  # zsh-tied-fixture: the deliberate half of the bad/safe pair
   local note="$3"
   echo "research-$topic $status $note"
 }

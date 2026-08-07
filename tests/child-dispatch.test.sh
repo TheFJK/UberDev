@@ -121,9 +121,9 @@ uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_S
 # Preflight must authenticate a bounded, stable regular-file capture before it
 # decodes even the edge/run-directory fields used to call the full validator.
 preflight_must_reject() {
-  local label="$1" path="$2" expected_sha256="$3" diagnostic="$4" output rc
+  local label="$1" handoff_path="$2" expected_sha256="$3" diagnostic="$4" output rc
   set +e
-  output="$(uberdev_preflight_child_batch "$path" "$expected_sha256" 2>&1)"
+  output="$(uberdev_preflight_child_batch "$handoff_path" "$expected_sha256" 2>&1)"
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || {
@@ -599,14 +599,14 @@ if declare -F _uberdev_child_dispatch_receipt_file >/dev/null; then
   eval "$(declare -f _uberdev_child_dispatch_receipt_file | sed '1s/_uberdev_child_dispatch_receipt_file/_real_uberdev_child_dispatch_receipt_file/')"
 fi
 _uberdev_child_dispatch_receipt_file() {
-  local operation="$1" subject="$2" path
+  local operation="$1" subject="$2" receipt_path
   printf '%s\n' "$operation" >>"$TMP/receipt-file-helper-called"
   if [ "$operation" = create ]; then
     [ "$RECEIPT_FILE_HELPER_DEFINED" -eq 1 ] || return 74
-    path="$(_real_uberdev_child_dispatch_receipt_file "$operation" "$subject")" || return $?
-    rm -f "$path"
-    ln -s "$TMP/receipt-redirection-victim" "$path"
-    printf '%s' "$path"
+    receipt_path="$(_real_uberdev_child_dispatch_receipt_file "$operation" "$subject")" || return $?
+    rm -f "$receipt_path"
+    ln -s "$TMP/receipt-redirection-victim" "$receipt_path"
+    printf '%s' "$receipt_path"
     return 0
   fi
   _real_uberdev_child_dispatch_receipt_file "$operation" "$subject"

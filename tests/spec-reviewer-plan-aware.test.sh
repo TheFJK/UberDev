@@ -93,8 +93,13 @@ assert_grep "$SUBAGENT_DRIVEN" \
 assert_grep "$SUBAGENT_DRIVEN" \
   'sdd_unwind_child_receipts' \
   "SDD unwinds all earlier receipts after a partial fanout failure"
+# `child_status`, NOT `status`: the pinned property is the bounded timeout
+# argument, but under /bin/zsh (how the harness runs a command/skill `bash`
+# fence on macOS) `status` is the read-only alias for `$?`, so a local of that
+# name kills the fence at its first assignment. Only the renamed spelling is
+# accepted, so a green test cannot readmit the fatal one.
 assert_grep "$SUBAGENT_DRIVEN" \
-  'uberdev_unwind_child "\$status" "\$result" "\$SDD_CHILD_TIMEOUT"' \
+  'uberdev_unwind_child "\$child_status" "\$result" "\$SDD_CHILD_TIMEOUT"' \
   "SDD unwind is bounded by the configured positive timeout"
 if grep -qF 'model_invocation: false' <<<"$(grep -A1 -F 'edge_id: sdd.finish_branch' "$SUBAGENT_DRIVEN")"; then
   echo "  PASS  SDD finish-branch transition has stable non-model lineage"

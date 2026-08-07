@@ -2356,12 +2356,12 @@ uberdev_create_child_handoff() {
   UBERDEV_CHILD_HANDOFF_SHA256="$(mock_file_sha256 "$UBERDEV_CHILD_HANDOFF")"
 }
 uberdev_preflight_child_batch() {
-  local path expected
+  local handoff_path expected
   printf 'preflight %s\n' "$#" >>"$log"
   [ "$#" -eq 4 ] || return 2
   while [ "$#" -gt 0 ]; do
-    path="$1"; expected="$2"; shift 2
-    [ "$(mock_file_sha256 "$path")" = "$expected" ] || return 3
+    handoff_path="$1"; expected="$2"; shift 2
+    [ "$(mock_file_sha256 "$handoff_path")" = "$expected" ] || return 3
   done
   python3 -I -B - "$descriptors" <<'PY'
 import json,sys
@@ -2435,11 +2435,11 @@ uberdev_create_child_handoff() {
   UBERDEV_CHILD_HANDOFF_SHA256="$(mock_file_sha256 "$UBERDEV_CHILD_HANDOFF")"
 }
 uberdev_preflight_child_batch() {
-  local path expected
+  local handoff_path expected
   [ "$#" -eq 4 ] || return 2
   while [ "$#" -gt 0 ]; do
-    path="$1"; expected="$2"; shift 2
-    [ "$(mock_file_sha256 "$path")" = "$expected" ] || return 3
+    handoff_path="$1"; expected="$2"; shift 2
+    [ "$(mock_file_sha256 "$handoff_path")" = "$expected" ] || return 3
   done
 }
 uberdev_dispatch_child_capture() {

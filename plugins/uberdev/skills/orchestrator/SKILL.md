@@ -232,11 +232,11 @@ uberdev_design_reset_batch() {
 }
 
 uberdev_unwind_child_receipts() {
-  local index status result cleanup_rc=0
+  local index child_status result cleanup_rc=0
   for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
-    status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+    child_status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
     result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
-    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
+    if ! uberdev_unwind_child "$child_status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
       cleanup_rc=1
     fi
   done
@@ -245,7 +245,7 @@ uberdev_unwind_child_receipts() {
 }
 
 uberdev_design_drain_after_wait_failure() {
-  local index instance waited status result skip cleanup_rc=0
+  local index instance waited child_status result skip cleanup_rc=0
   for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
     instance="${UBERDEV_DESIGN_DISPATCH_RECEIPTS[$index]}"
     skip=0
@@ -253,9 +253,9 @@ uberdev_design_drain_after_wait_failure() {
       [ "$instance" = "$waited" ] && skip=1 && break
     done
     [ "$skip" -eq 1 ] && continue
-    status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+    child_status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
     result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
-    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
+    if ! uberdev_unwind_child "$child_status" "$result" "$UBERDEV_DESIGN_UNWIND_TIMEOUT"; then
       cleanup_rc=1
     fi
   done
@@ -265,7 +265,7 @@ uberdev_design_drain_after_wait_failure() {
 
 uberdev_design_dispatch() {
   local edge="${@:1:1}" instance="${@:2:1}" role="${@:3:1}" phase="${@:4:1}" risk_scope="${@:5:1}" risks_json="${@:6:1}" inputs_json="${@:7:1}"
-  local handoff handoff_sha256 result status create_rc cleanup_rc
+  local handoff handoff_sha256 result child_status create_rc cleanup_rc
   : "$role" "$phase" "$risk_scope" # edge manifest is the authority for these fields
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
     :
@@ -278,17 +278,17 @@ uberdev_design_dispatch() {
   handoff="$UBERDEV_CHILD_HANDOFF"
   handoff_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
   result="$UBERDEV_CHILD_RESULT"
-  status="$UBERDEV_CHILD_STATUS"
+  child_status="$UBERDEV_CHILD_STATUS"
   UBERDEV_DESIGN_PREPARED_EDGES+=("$edge")
   UBERDEV_DESIGN_PREPARED_INSTANCES+=("$instance")
   UBERDEV_DESIGN_PREPARED_HANDOFFS+=("$handoff")
   UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   UBERDEV_DESIGN_PREPARED_RESULTS+=("$result")
-  UBERDEV_DESIGN_PREPARED_STATUSES+=("$status")
+  UBERDEV_DESIGN_PREPARED_STATUSES+=("$child_status")
 }
 
 uberdev_design_launch_batch() {
-  local index edge instance handoff handoff_sha256 result status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result child_status dispatch_rc cleanup_rc
   local preflight_refs=()
   [ "${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
   [ "${#UBERDEV_DESIGN_PREPARED_HANDOFFS[@]}" -eq "${#UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
@@ -304,10 +304,10 @@ uberdev_design_launch_batch() {
     handoff="${UBERDEV_DESIGN_PREPARED_HANDOFFS[$index]}"
     handoff_sha256="${UBERDEV_DESIGN_PREPARED_HANDOFF_SHA256S[$index]}"
     result="${UBERDEV_DESIGN_PREPARED_RESULTS[$index]}"
-    status="${UBERDEV_DESIGN_PREPARED_STATUSES[$index]}"
-    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status" >/dev/null; then
+    child_status="${UBERDEV_DESIGN_PREPARED_STATUSES[$index]}"
+    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status" >/dev/null; then
       UBERDEV_DESIGN_DISPATCH_RECEIPTS+=("$instance")
-      UBERDEV_DESIGN_RECEIPT_STATUSES+=("$status")
+      UBERDEV_DESIGN_RECEIPT_STATUSES+=("$child_status")
       UBERDEV_DESIGN_RECEIPT_RESULTS+=("$result")
     else
       dispatch_rc=$?; cleanup_rc=0
@@ -320,16 +320,16 @@ uberdev_design_launch_batch() {
 }
 
 uberdev_design_wait() {
-  local wanted="${@:1:1}" timeout_s="${@:2:1}" index instance status result wait_rc cleanup_rc
+  local wanted="${@:1:1}" timeout_s="${@:2:1}" index instance child_status result wait_rc cleanup_rc
   if [ "$UBERDEV_DESIGN_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_design_launch_batch || return $?
   fi
   for ((index=0; index<${#UBERDEV_DESIGN_DISPATCH_RECEIPTS[@]}; index++)); do
     instance="${UBERDEV_DESIGN_DISPATCH_RECEIPTS[$index]}"
     if [ "$instance" = "$wanted" ]; then
-      status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
+      child_status="${UBERDEV_DESIGN_RECEIPT_STATUSES[$index]}"
       result="${UBERDEV_DESIGN_RECEIPT_RESULTS[$index]}"
-      if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
         :
       else
         wait_rc=$?; cleanup_rc=0

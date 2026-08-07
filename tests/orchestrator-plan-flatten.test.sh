@@ -1707,9 +1707,20 @@ for name, text in (("orchestrator", orchestrator), ("brainstorm", brainstorm)):
         raise SystemExit(f"{name}: wait path is caller-computed instead of receipt-derived")
     if 'DISPATCH_RECEIPTS' not in text or 'uberdev_unwind_child_receipts' not in text:
         raise SystemExit(f"{name}: missing partial-fanout receipt unwind")
-    if 'uberdev_unwind_child "$status" "$result" "$' not in text:
+    # `child_status`, NOT `status`. The property being pinned is the BOUNDED
+    # timeout — the third argument is a `"$`-prefixed variable, never a literal
+    # 0 — and the variable's name is incidental to it. But the `status` spelling
+    # is not merely a style choice: under /bin/zsh, which is how the harness runs
+    # a command/skill `bash` fence on macOS, `status` is the read-only alias for
+    # `$?`, so a local of that name kills the whole fence at its first
+    # assignment. Accepting both spellings here would let the fatal one back in
+    # behind a green test, so only the renamed form is pinned — matching
+    # post-impl-review.test.sh and the tied-parameter scan in
+    # tests/crossplatform-shell-wrappers.test.sh, which now rejects it
+    # structurally.
+    if 'uberdev_unwind_child "$child_status" "$result" "$' not in text:
         raise SystemExit(f"{name}: bounded production unwind missing")
-    if 'uberdev_wait_child "$status" "$result" 0' in text:
+    if 'uberdev_wait_child "$child_status" "$result" 0' in text:
         raise SystemExit(f"{name}: infinite wait remains in unwind")
     if 'os.open(path' in text or 'handoff_dir="$run_dir/handoffs"' in text:
         raise SystemExit(f"{name}: caller-owned raw handoff writer remains")
@@ -1872,7 +1883,14 @@ def function(text: str, name: str) -> str:
 
 for path, prefix, ledger in cases:
     text = path.read_text(encoding="utf-8")
-    if '"$instance|$status|$result"' in text:
+    # Name-agnostic on the status component, unlike the positive anchors above.
+    # This one is a NEGATIVE assertion, so pinning a single spelling silently
+    # retires it: once both files renamed the fatal `status` local to
+    # `child_status`, the literal `"$instance|$status|$result"` became
+    # unmatchable and a reintroduced delimiter-packed receipt spelled with
+    # `$child_status` would have sailed past a green test. The property is the
+    # PACKING, not the variable's name, so match either spelling.
+    if re.search(r'"\$instance\|\$(?:child_)?status\|\$result"', text):
         raise SystemExit(f"{path}: delimiter-packed receipt remains")
     reset = function(text, f"{prefix}_reset_batch")
     drain = function(text, f"{prefix}_drain_after_wait_failure")

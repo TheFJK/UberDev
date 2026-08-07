@@ -219,11 +219,11 @@ export UBERDEV_RUN_CARRIER_JSON
 PROVIDER_LOG="$TMP/provider-instances.log"
 : >"$PROVIDER_LOG"
 _uberdev_agent_dispatch_backend() {
-  local backend="$1" prompt="$4" result="$5" status="$6" decision="$7" instance edge
+  local backend="$1" prompt="$4" result="$5" child_status="$6" decision="$7" instance edge
   [ "$#" -eq 7 ]
   [ "$backend" = background ]
   : "$prompt"
-  instance="$(basename "$(dirname "$status")")"
+  instance="$(basename "$(dirname "$child_status")")"
   edge="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_id"],end="")' \
     "$CHAIN_RUN/handoffs/$instance.json")"
   python3 -I -B - "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" "$edge" "$instance" "$decision" <<'PY'
@@ -244,22 +244,22 @@ PY
   chmod 600 "$result"
   DISPATCH_ID="brainstorm-receipt-provider-$instance"
   printf '{"backend":"background","state":"completed","exit_code":0,"pid":"%s"}\n' \
-    "$DISPATCH_ID" >"$status"
-  chmod 600 "$status"
+    "$DISPATCH_ID" >"$child_status"
+  chmod 600 "$child_status"
 }
 
 # Receipt-only wrapper stubs were the false-positive mutation: all nine receipt
 # events could exist while routing, lifecycle, and lease handling were skipped.
 if [ "${BRAINSTORM_MUTATE_AGENT_DISPATCH_WRAPPER:-0}" = 1 ]; then
   uberdev_agent_dispatch() {
-    local request="$1" result="$3" status="$4" instance
+    local request="$1" result="$3" child_status="$4" instance
     instance="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["run_id"],end="")' "$request")"
     printf '%s\n' "$instance" >>"$PROVIDER_LOG"
     printf 'completed by mutated wrapper seam\n' >"$result"
     chmod 600 "$result"
     printf '{"backend":"background","state":"completed","exit_code":0,"pid":"mutated-%s"}\n' \
-      "$instance" >"$status"
-    chmod 600 "$status"
+      "$instance" >"$child_status"
+    chmod 600 "$child_status"
   }
 fi
 

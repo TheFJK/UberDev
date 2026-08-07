@@ -4,6 +4,47 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.1] — 2026-08-07
+
+### Fixed
+
+- **Bare `local status` / `local path` declarations no longer corrupt the shell
+  they run in** (#390). Every `bash` fence in a command or SKILL.md executes
+  under `/bin/zsh`, where `status` and `path` are *tied parameters*: `path` is
+  tied to `$PATH` and `status` to `$?`. Declaring either bare inside a function
+  blanks the tied variable for the rest of that scope — a `local path` in
+  `skills/merge-pipeline/lib/release-anchor.sh` emptied `$PATH`, so every
+  subsequent command in the fence resolved to nothing. Renamed across the
+  shipped surfaces (`commands/simplify.md`, `skills/brainstorm/SKILL.md`,
+  `skills/orchestrator/SKILL.md`, `skills/subagent-driven-dev/SKILL.md`,
+  `skills/merge-pipeline/lib/release-anchor.sh`).
+
+- **`hooks/inject-brainstorm-answers` had a live instance the guard could not
+  see** (#392). Its `is_safe_path()` opened `local root="$1" path="$2"`. Not a
+  live break — both wirings reach it under bash (`run-hook.cmd`'s Unix arm is
+  `exec bash`, and `hooks-cursor.json` uses the shebang) — but verified
+  counterfactually: the pre-rename body accepts a legitimate path under bash and
+  refuses it under zsh.
+
+### Changed
+
+- **The cross-platform shell guard now detects bare tied-parameter declarations,
+  and its corpus reaches the files that carry them** (#390, #392). The corpus
+  filtered on `-name '*.sh' -o -name '*.md'`, which silently skipped every
+  extension-less file — and all four shipped hooks plus `lib/rl-curl` have no
+  extension, so `hooks/` had been listed in that corpus since it was written and
+  never once read. The predicate is now "names it like a shell file, OR says it
+  is one", matched on the *basename* (repo worktree paths contain dots, so a
+  full-path `*.*` test skips nearly everything). The corpus also widened from
+  `plugins/**` to `plugins/** + tests/ + tools/`.
+
+  Deliberately-broken fixtures are exempted by a per-line
+  `# zsh-tied-fixture: <reason>` marker rather than a path exclusion, with two
+  honesty rows: a marker must sit on a line the matcher really catches, so it
+  cannot decorate an innocent line or neutralise a region; and the marked-line
+  inventory is pinned per file, so adding an exemption is a reviewable diff and a
+  count that *drops* also reds — catching a fixture someone "consistency-fixed".
+
 ## [0.44.0] — 2026-08-07
 
 ### Added

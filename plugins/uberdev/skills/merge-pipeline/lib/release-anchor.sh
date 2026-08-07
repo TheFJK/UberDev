@@ -229,18 +229,20 @@ main() {
     return 0
   fi
 
-  # (6)/(7) per-path content shape.
-  local path removed added chg_added bad
+  # (6)/(7) per-path content shape. The loop variable is `changed_path`, not
+  # `path`: in zsh `path` IS `$PATH`, so `local path` would empty the command
+  # search path and turn the very next `git` call into `command not found`.
+  local changed_path removed added chg_added bad
   bad=""
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if [ "$path" = "$RELEASE_ANCHOR_CHANGELOG" ]; then
+  while IFS= read -r changed_path; do
+    [ -n "$changed_path" ] || continue
+    if [ "$changed_path" = "$RELEASE_ANCHOR_CHANGELOG" ]; then
       # (7) insertion-only, bounded, and every inserted line is release-section
       # shaped: the dated header, a bullet, the pending-notes stub, or blank.
-      if [ -n "$(release_anchor_hunk_lines "$parent" "$head" "$path" -)" ]; then
+      if [ -n "$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" -)" ]; then
         bad="changelog_deletions"; break
       fi
-      chg_added="$(release_anchor_hunk_lines "$parent" "$head" "$path" +)"
+      chg_added="$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" +)"
       if [ "$(printf '%s\n' "$chg_added" | wc -l | tr -d '[:space:]')" -gt "$RELEASE_ANCHOR_MAX_CHANGELOG_LINES" ]; then
         bad="changelog_too_large"; break
       fi
@@ -254,8 +256,8 @@ main() {
     # tokens are normalised away. Sequence, not set: a multiset comparison would
     # let an attacker REORDER lines of tests/goal.test.sh — executable code —
     # while every individual line stayed byte-identical.
-    removed="$(release_anchor_hunk_lines "$parent" "$head" "$path" - | release_anchor_normalize)"
-    added="$(release_anchor_hunk_lines "$parent" "$head" "$path" + | release_anchor_normalize)"
+    removed="$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" - | release_anchor_normalize)"
+    added="$(release_anchor_hunk_lines "$parent" "$head" "$changed_path" + | release_anchor_normalize)"
     if [ "$removed" != "$added" ]; then
       bad="content_not_version_only"; break
     fi
