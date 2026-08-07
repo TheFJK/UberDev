@@ -536,8 +536,12 @@ review_fleet_write_conflict_paths() {
   # BEFORE the arity check, never after: `PATH --` names zero conflicted files,
   # which is the empty set the guard below exists to refuse wearing the
   # documented spelling. Shifting it after the check would let it through.
-  # `case`, not `[ "${1:-}" = -- ] && shift`: a false `&&` at statement level
-  # returns 1, and this file is sourced into fences that may run under `set -e`.
+  # `case`, not `[ "${1:-}" = -- ] && shift`: with no separator the `&&` is
+  # false, so that statement's status is 1. Harmless only because four more
+  # statements follow it -- errexit ignores every command of an AND-OR list but
+  # the last, and a non-final statement does not set the function's own status.
+  # Both of those are positional luck. `case` is 0 either way, so the guard
+  # stays correct if it is ever moved to the end of the body.
   case "${1:-}" in
     '--') shift ;;
   esac
