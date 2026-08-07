@@ -999,18 +999,18 @@ review_json_string() {
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5"
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
-  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$record_path" <<'PY'
 import json,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
   local preflight_refs=()
   local launch_edges=() launch_instances=() launch_handoffs=()
   local launch_handoff_sha256s=() launch_results=() launch_statuses=()
@@ -1037,20 +1037,20 @@ PY
     edge="${launch_edges[$index]}"; instance="${launch_instances[$index]}"
     handoff="${launch_handoffs[$index]}"
     handoff_sha256="${launch_handoff_sha256s[$index]}"
-    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
-    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+    result="${launch_results[$index]}"; child_status="${launch_statuses[$index]}"
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status"; then
       receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
       return "$dispatch_rc"
     fi
-    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$child_status" "$launched" <<'PY'
 import json,sys
 edge,instance,receipt,result,status,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
@@ -1059,11 +1059,11 @@ PY
       :
     else
       ledger_rc=$?; cleanup_rc=0
-      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
@@ -1071,17 +1071,17 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
+  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+    child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+    if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
       continue
     else
       wait_rc=$?
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
-    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+    uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
   if [ "$first_rc" -ne 0 ]; then
     [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
@@ -1359,7 +1359,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
      observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
      [ "$observed_head" = "$publish_sha" ] || return 79
-     git -C "$worktree_root" push origin "$publish_sha:refs/heads/$live_branch" || return 79
+     # BRACES ARE LOAD-BEARING. These fences run under /bin/zsh, where an
+     # unbraced `$publish_sha:refs/...` parses `:r` as the remove-extension
+     # MODIFIER: the refspec silently becomes `<sha>efs/heads/<branch>` and the
+     # push dies with "src refspec ... does not match any". Proven with
+     # `zsh -c 'V=abc; print "$V:refs/x"'` -> `abcefs/x`.
+     git -C "$worktree_root" push origin "${publish_sha}:refs/heads/${live_branch}" || return 79
      remote_identity="$(git -C "$worktree_root" ls-remote --exit-code --heads origin "refs/heads/$live_branch")" || return 79
      [[ "$remote_identity" != *$'\n'* ]] || return 79
      IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
@@ -1944,12 +1949,12 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     local child_status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
      residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
      [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
      [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
-     case "$status" in
+     case "$child_status" in
        APPLIED)
          [ "$before" != "$after" ] || return 77
          [ "$declared_tip" = "$after" ] || return 77
@@ -1966,7 +1971,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    }
    review_promote_validated_fixer_outcome() {
      [ "$#" -eq 3 ] || return 2
-     local outcome="$1" before="$2" after="$3" parsed status declared_tip extra
+     local outcome="$1" before="$2" after="$3" parsed child_status declared_tip extra
      parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
 base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
@@ -1984,9 +1989,9 @@ if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,s
 if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in (*launch,"status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
 if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
 print(status+"\t"+tip,end="")' "$outcome")" || return 74
-     IFS=$'\t' read -r status declared_tip extra <<<"$parsed"
+     IFS=$'\t' read -r child_status declared_tip extra <<<"$parsed"
      [ -z "${extra:-}" ] || return 74
-     review_track_validated_fixer_head "$status" "$before" "$after" "$declared_tip"
+     review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip"
    }
    ```
 
@@ -2542,8 +2547,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     ```bash uberdev-executable origin=review-pr
     review_apply_phase2_5_status() {
-      local status="$1"
-      case "$status" in
+      local child_status="$1"
+      case "$child_status" in
         DONE|DONE_WITH_CONCERNS) return 0 ;;
         REFUSED)
           PHASE2_5_STATUS=blocked
@@ -3418,8 +3423,13 @@ print('CLASSIFIED\t'+failure_class+'\t'+anchor+'\t-')
 PY
     }
     review_apply_ci_classification_status() {
-      local status="$1" rationale="${2:-}"
-      case "$status" in
+      # NOT `local status=` — under /bin/zsh, which is how the harness runs a
+      # command `bash` fence on macOS, `status` is the read-only alias for `$?`
+      # and `local status=…` is a FATAL error that kills the whole fence, not
+      # just the function. Every routing decision below would then be
+      # unreachable, with no audit event and no OUTCOME.
+      local child_status="$1" rationale="${2:-}"
+      case "$child_status" in
         AMBIGUOUS)
           audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS
           return 0

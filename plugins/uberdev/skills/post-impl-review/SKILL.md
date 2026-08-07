@@ -168,11 +168,11 @@ PY
 }
 
 post_review_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5" roster_index="$6"
+  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5" roster_index="$6"
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
-  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" "$roster_index" <<'PY'
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$record_path" "$roster_index" <<'PY'
 import json,os,sys
 edge,instance,inputs,risks,path,index=sys.argv[1:]
 index=int(index)
@@ -183,8 +183,8 @@ with open(path,'a') as f:
 PY
 }
 post_review_roster_complete() {
-  local path="$1" expected="$2"; shift 2
-  python3 -I -B - "$path" "$expected" "$@" <<'PY'
+  local ledger_path="$1" expected="$2"; shift 2
+  python3 -I -B - "$ledger_path" "$expected" "$@" <<'PY'
 import json,sys
 path,expected,*allowed=sys.argv[1:]
 try:
@@ -200,31 +200,31 @@ except Exception: raise SystemExit(2)
 PY
 }
 post_review_unwind_one() {
-  local edge="$1" status="$2" result="$3" timeout_s="$4" origin_edge="$5" origin_rc="$6" cleanup_rc
-  if uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+  local edge="$1" child_status="$2" result="$3" timeout_s="$4" origin_edge="$5" origin_rc="$6" cleanup_rc
+  if uberdev_unwind_child "$child_status" "$result" "$timeout_s"; then
     cleanup_rc=0
   else
     cleanup_rc=$?
   fi
   printf 'cleanup: edge=%s status=%s cleanup_rc=%s origin_edge=%s origin_rc=%s\n' \
-    "$edge" "$status" "$cleanup_rc" "$origin_edge" "$origin_rc" >&2
+    "$edge" "$child_status" "$cleanup_rc" "$origin_edge" "$origin_rc" >&2
   [ "$cleanup_rc" -eq 0 ]
 }
 post_review_unwind_ledger() {
-  local launched="$1" timeout_s="$2" origin_edge="$3" origin_rc="$4" row edge status result cleanup_failed=0
+  local launched="$1" timeout_s="$2" origin_edge="$3" origin_rc="$4" row edge child_status result cleanup_failed=0
   [ -f "$launched" ] || {
     printf 'cleanup: ledger=%s cleanup_rc=70 origin_edge=%s origin_rc=%s\n' \
       "$launched" "$origin_edge" "$origin_rc" >&2
     return 70
   }
   while IFS= read -r row; do
-    edge="$(jq -r .edge <<<"$row")"; status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
-    post_review_unwind_one "$edge" "$status" "$result" "$timeout_s" "$origin_edge" "$origin_rc" || cleanup_failed=1
+    edge="$(jq -r .edge <<<"$row")"; child_status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    post_review_unwind_one "$edge" "$child_status" "$result" "$timeout_s" "$origin_edge" "$origin_rc" || cleanup_failed=1
   done <"$launched"
   [ "$cleanup_failed" -eq 0 ] || return 70
 }
 post_review_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc launch_index
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc launch_index
   local preflight_refs=()
   local launch_edges=() launch_indexes=() launch_instances=()
   local launch_handoffs=() launch_handoff_sha256s=()
@@ -248,20 +248,20 @@ post_review_fanout() {
     edge="${launch_edges[$launch_index]}"; index="${launch_indexes[$launch_index]}"
     instance="${launch_instances[$launch_index]}"; handoff="${launch_handoffs[$launch_index]}"
     handoff_sha256="${launch_handoff_sha256s[$launch_index]}"
-    result="${launch_results[$launch_index]}"; status="${launch_statuses[$launch_index]}"
-    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+    result="${launch_results[$launch_index]}"; child_status="${launch_statuses[$launch_index]}"
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status"; then
       receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?
       post_review_unwind_ledger "$launched" "$timeout_s" "$edge" "$dispatch_rc" || return 70
       return "$dispatch_rc"
     fi
-    if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg receipt "$receipt" --arg result "$result" --arg status "$status" \
+    if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg receipt "$receipt" --arg result "$result" --arg status "$child_status" \
       '{edge:$edge,index:$index,instance:$instance,receipt:$receipt,result:$result,status:$status}' >>"$launched"; then
       :
     else
       ledger_rc=$?; cleanup_rc=0
-      post_review_unwind_one "$edge" "$status" "$result" "$timeout_s" "$edge" "$ledger_rc" || cleanup_rc=70
+      post_review_unwind_one "$edge" "$child_status" "$result" "$timeout_s" "$edge" "$ledger_rc" || cleanup_rc=70
       post_review_unwind_ledger "$launched" "$timeout_s" "$edge" "$ledger_rc" || cleanup_rc=70
       [ "$cleanup_rc" -eq 0 ] || return 70
       return "$ledger_rc"
@@ -269,7 +269,7 @@ post_review_fanout() {
   done
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge index instance status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge index instance child_status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
   local validated_result validation_digest
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
@@ -277,8 +277,8 @@ post_review_wait_all() {
   if [ -n "$failed_path" ] && ! post_review_init_ledger "$failed_path"; then POST_REVIEW_INFRA_FAILURE=1; return 2; fi
   while IFS= read -r row; do
     edge="$(jq -r .edge <<<"$row")"; index="$(jq -r .index <<<"$row")"; instance="$(jq -r .instance <<<"$row")"
-    status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+    child_status="$(jq -r .status <<<"$row")"; result="$(jq -r .result <<<"$row")"
+    if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
       validated_result="$(dirname "$result")/validated-result.md"
       if validation_digest="$(uberdev_child_validate_phase1_review_result "$result" "$CHANGED_PATHS_JSON" "$validated_result")"; then
         if ! [[ "$validation_digest" =~ ^[0-9a-f]{64}$ ]]; then
@@ -292,14 +292,14 @@ post_review_wait_all() {
         fi
         POST_REVIEW_INFRA_FAILURE=1
         [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
-        if ! uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+        if ! uberdev_unwind_child "$child_status" "$result" "$timeout_s"; then
           echo "error: cleanup failed after validated reviewer evidence persistence edge=$edge" >&2
         fi
         continue
       else
         validation_rc=$?
       fi
-      if uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+      if uberdev_unwind_child "$child_status" "$result" "$timeout_s"; then
         :
       else
         unwind_rc=$?
@@ -319,7 +319,7 @@ post_review_wait_all() {
         [ "$first_rc" -ne 0 ] || first_rc="${validation_rc:-2}"
         continue
       fi
-      if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg status "$status" --arg result "$result" \
+      if jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" --arg status "$child_status" --arg result "$result" \
           '{edge:$edge,index:$index,instance:$instance,status:$status,result:$result}' >>"$failed_path"; then
         format_failures=$((format_failures + 1))
       else
@@ -343,7 +343,7 @@ post_review_wait_all() {
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
     POST_REVIEW_INFRA_FAILURE=1
-    if ! uberdev_unwind_child "$status" "$result" "$timeout_s"; then
+    if ! uberdev_unwind_child "$child_status" "$result" "$timeout_s"; then
       echo "error: cleanup failed after child wait edge=$edge" >&2
     fi
   done <"$launched"

@@ -2666,7 +2666,15 @@ for doc in "$REVIEW" "$SIMPLIFY" "$POST"; do
   grep -Fq 'preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
   grep -Fq 'uberdev_preflight_child_batch "${preflight_refs[@]}"' "$doc"
   grep -Fq 'launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
-  grep -Fq 'uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"' "$doc"
+  # The property is the DIGEST argument — that dispatch receives the
+  # controller-held creation-time sha256, not one recomputed at dispatch. The
+  # status variable's NAME is incidental, and `review-pr.md` /
+  # `post-impl-review/SKILL.md` had to rename theirs to `child_status`: under
+  # /bin/zsh (how the harness runs a command/skill `bash` fence on macOS)
+  # `status` is the read-only alias for `$?`, so assigning to a local of that
+  # name is a fatal error that kills the whole fence. Both spellings accepted;
+  # the digest argument is pinned either way.
+  grep -Eq 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$(child_)?status"' "$doc"
 done
 grep -Fq "'handoff_sha256':handoff_sha256" "$REVIEW"
 grep -Fq "'handoff_sha256':handoff_sha256" "$SIMPLIFY"
