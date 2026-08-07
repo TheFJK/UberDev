@@ -427,36 +427,172 @@ echo "== zsh tied parameters: a \`local path\`/\`local … status\` breaks the f
 # name only by crossing a literal `#` (inside a quoted default, say) — no such
 # line exists in the corpus, and the trailing-comment false positive is the
 # larger hazard now that a bare name is enough to red.
+#
+# THE CORPUS WAS STILL NARROWER THAN THE CLASS, a fourth time: it stopped at
+# `plugins/`, so `tests/` and `tools/` were unguarded, and the widened detector
+# found twenty more live declarations there — including two `trap`-installed
+# cleanup handlers in `tools/prkit/{generate,verify}.sh`, one of which captures
+# `local status=$?` as its first act and would take the generation-lock release
+# with it. None of them run under zsh TODAY (CI drives only the four
+# `*-zsh.test.sh` files that way, and those are clean), so this half is cheap
+# insurance rather than a live-bug fix: the shapes break the moment a helper is
+# moved into a zsh-driven fence or a `*-zsh.test.sh` file, which is exactly how
+# the plugin-side hits got there.
 ZSH_TIED_NAMES='path|cdpath|fpath|manpath|mailpath|module_path|psvar|watch|status|argv'
-# ONE detector, four consumers: the corpus scan, the two anti-vacuity rows
-# (assignment arm, bare arm) and the negative row. A second copy of this regex
-# is exactly the "one contract, N uncompared copies" drift this file's own header
-# is about — every row below must fire on the same regex the scan uses, or it is
-# proving something about a detector that is not the one shipping.
+# ONE detector, five consumers: the corpus scan, the two anti-vacuity rows
+# (assignment arm, bare arm), the negative row, and the dead-marker row. A
+# second copy of this regex is exactly the "one contract, N uncompared copies"
+# drift this file's own header is about — every row below must fire on the same
+# regex the scan uses, or it is proving something about a detector that is not
+# the one shipping.
 ZSH_TIED_DECL="^[[:space:]]*(local|typeset|declare)[[:space:]]+([^#]*[^_[:alnum:]])?($ZSH_TIED_NAMES)([=[:space:]]|\$)"
+# THE EXCLUSION, and why it is a per-line marker and not a path. Widening the
+# corpus sweeps in the rows that MUST keep the broken shape: this file's own
+# anti-vacuity fixtures below, and the `fixture_bash_bad` heredoc in
+# tests/skill-renderer-awk-collision.test.sh, whose comment says in so many
+# words "Do NOT `consistency-fix` this to `topic_status`; that would weaken the
+# inverse proof". Excluding those FILES would go blind to real drift in the
+# same files — skill-renderer-awk-collision.test.sh is four hundred lines of
+# live helper code wrapped around that one fixture, and this file is a thousand.
+# So the exclusion is keyed on a marker that must sit in a TRAILING COMMENT on
+# the declaration itself, and the two rows after the scan keep it honest: every
+# marker must sit on a line the detector really would have caught (no
+# decoration), and the marked-line inventory is pinned per file (no silent
+# growth). Marker and matcher are separate variables on purpose — the matcher
+# needs a literal `#`, so interpolating the marker keeps these two definitions
+# from registering as markers themselves.
+ZSH_TIED_MARKER='zsh-tied-fixture'
+ZSH_TIED_ALLOW="#[^#]*$ZSH_TIED_MARKER"
 ZSH_TIED_HITS=""
+ZSH_TIED_MARKED=""
 while IFS= read -r zsh_tied_file; do
-  # Comment-stripped: the surviving call sites NAME the broken shape in order to
-  # explain why `target` is load-bearing, and a guard that punished its own
-  # explanation would be unfixable (the S13.11d/S21.9 precedent).
-  zsh_tied_hit="$(grep -v '^[[:space:]]*#' "$zsh_tied_file" \
-    | grep -nE "$ZSH_TIED_DECL" \
+  # THE FILE FILTER WAS ALSO NARROWER THAN THE CLASS, a fifth time, and this one
+  # hid a PRODUCTION file rather than a test helper. `hooks/` has been in the
+  # corpus all along, but the predicate was `-name '*.sh' -o -name '*.md'` and
+  # NONE of the shipped hooks carry an extension — `session-start`,
+  # `session-end`, `pre-compact`, `inject-brainstorm-answers`, plus
+  # `lib/rl-curl`, were all listed as scanned and none of them ever were.
+  # Behind that gap sat `is_safe_path() { local root="$1" path="$2"; ... }` in
+  # inject-brainstorm-answers, the hook's symlink/traversal check.
+  #
+  # Both shipped wirings reach it through bash — hooks.json goes via
+  # `run-hook.cmd`, whose Unix arm is `exec bash`, and hooks-cursor.json execs
+  # the file so its `#!/usr/bin/env bash` shebang governs — so it was NOT broken
+  # in production, and this is the same insurance tier as the rest. What makes
+  # it worth calling out is the direction of the failure: `canonicalize` shells
+  # out to python3/realpath, so with `$PATH` emptied the check cannot resolve
+  # anything and refuses EVERY path, including legitimate ones (verified live:
+  # the pre-rename body accepts under bash and refuses under zsh). A security
+  # check that fails closed is the good direction; a security check that has
+  # silently never been scanned is not.
+  #
+  # So the predicate is now "names it like a shell file, OR says it is one" —
+  # matched on the BASENAME, because the repo's own worktree paths contain dots
+  # (`.claude/worktrees/...`) and a full-path `*.*` test would skip nearly
+  # everything.
+  zsh_tied_base="${zsh_tied_file##*/}"
+  case "$zsh_tied_base" in
+    *.sh|*.md) ;;
+    *.*) continue ;;
+    *) head -n 1 "$zsh_tied_file" 2>/dev/null \
+         | grep -qE '^#!.*[/ ](ba|z|k|a|da)?sh([[:space:]]|$)' || continue ;;
+  esac
+  zsh_tied_rel="${zsh_tied_file#"$REPO_ROOT"/}"
+  # Numbered BEFORE either filter, so a reported number is the line's real one.
+  # The pre-widening form stripped comments first and reported post-strip
+  # offsets; that was survivable across five plugin directories and is not
+  # across two hundred test files, where the reader has to find the hit by hand.
+  # The comment filter is kept (rather than dropped as redundant) because it is
+  # only redundant while the detector stays anchored at the declaration keyword:
+  # the surviving call sites NAME the broken shape to explain why `target` is
+  # load-bearing, and a guard that punished its own explanation would be
+  # unfixable (the S13.11d/S21.9 precedent).
+  zsh_tied_hit="$(grep -nE "$ZSH_TIED_DECL" "$zsh_tied_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -vE "$ZSH_TIED_ALLOW" \
     || true)"
-  [ -n "$zsh_tied_hit" ] || continue
-  ZSH_TIED_HITS="$ZSH_TIED_HITS${ZSH_TIED_HITS:+
-}$zsh_tied_file: $zsh_tied_hit"
+  # EVERY line gets the path, not just the first. `grep -n` emits one line per
+  # hit, so prefixing the block once left later hits reading as a bare `255:`
+  # with no file — cosmetic in the failure report, fatal for the marked list,
+  # which the two rows below actually PARSE back apart on `:`.
+  while IFS= read -r zsh_tied_line; do
+    [ -n "$zsh_tied_line" ] || continue
+    ZSH_TIED_HITS="$ZSH_TIED_HITS${ZSH_TIED_HITS:+
+}$zsh_tied_rel:$zsh_tied_line"
+  done <<EOF_ZSH_TIED_HIT
+$zsh_tied_hit
+EOF_ZSH_TIED_HIT
+  # Every marked line, for the two allow-list honesty rows below.
+  zsh_tied_mark="$(grep -nE "$ZSH_TIED_ALLOW" "$zsh_tied_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    || true)"
+  while IFS= read -r zsh_tied_line; do
+    [ -n "$zsh_tied_line" ] || continue
+    ZSH_TIED_MARKED="$ZSH_TIED_MARKED${ZSH_TIED_MARKED:+
+}$zsh_tied_rel:$zsh_tied_line"
+  done <<EOF_ZSH_TIED_MARK
+$zsh_tied_mark
+EOF_ZSH_TIED_MARK
 done <<EOF_ZSH_TIED
 $(find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
        "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
        "$REPO_ROOT/plugins/uberdev/hooks" \
-       -type f \( -name '*.md' -o -name '*.sh' \) 2>/dev/null | sort)
+       "$REPO_ROOT/tests" "$REPO_ROOT/tools" \
+       -type f 2>/dev/null | sort)
 EOF_ZSH_TIED
 if [ -z "$ZSH_TIED_HITS" ]; then
-  echo "  PASS  no plugin shell surface declares a local named after a zsh tied/special parameter"
+  echo "  PASS  no plugin, test or tool shell surface declares a local named after a zsh tied/special parameter"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  a local shadows a zsh tied parameter — rename it (target/file/dir/root)"
   printf '        %s\n' "$ZSH_TIED_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# The allow-list must not be able to hide anything. A marker on a line the
+# detector would NOT have caught is either decoration or a fishing attempt to
+# neutralise a whole region, and either way it makes the exemption unreviewable.
+ZSH_TIED_DEAD_MARKERS=""
+while IFS= read -r zsh_tied_entry; do
+  [ -n "$zsh_tied_entry" ] || continue
+  # `rel:NNN:content` — two shortest-prefix strips leave the content, and the
+  # content is what the detector has to agree is a real tied declaration.
+  zsh_tied_body="${zsh_tied_entry#*:}"
+  zsh_tied_body="${zsh_tied_body#*:}"
+  printf '%s\n' "$zsh_tied_body" | grep -qE "$ZSH_TIED_DECL" && continue
+  ZSH_TIED_DEAD_MARKERS="$ZSH_TIED_DEAD_MARKERS${ZSH_TIED_DEAD_MARKERS:+
+}$zsh_tied_entry"
+done <<EOF_ZSH_TIED_DEAD
+$ZSH_TIED_MARKED
+EOF_ZSH_TIED_DEAD
+if [ -z "$ZSH_TIED_DEAD_MARKERS" ]; then
+  echo "  PASS  every $ZSH_TIED_MARKER marker sits on a declaration the detector really catches"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a $ZSH_TIED_MARKER marker exempts a line the detector would not have flagged"
+  printf '        %s\n' "$ZSH_TIED_DEAD_MARKERS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must not grow silently. The inventory is pinned per file, so ADDING
+# an exemption is a diff a reviewer has to approve rather than a line that
+# quietly stops being scanned. Both directions matter: a count that DROPS means
+# a deliberately-broken fixture got "consistency-fixed", which is the failure
+# the skill-renderer file warns about in its own comment.
+ZSH_TIED_INVENTORY="$(printf '%s\n' "$ZSH_TIED_MARKED" \
+  | grep -v '^$' \
+  | sed 's/:[0-9][0-9]*:.*$//' \
+  | sort | uniq -c \
+  | sed 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]][[:space:]]*\(.*\)$/\2 \1/')"
+ZSH_TIED_INVENTORY_EXPECTED='tests/crossplatform-shell-wrappers.test.sh 5
+tests/skill-renderer-awk-collision.test.sh 1'
+if [ "$ZSH_TIED_INVENTORY" = "$ZSH_TIED_INVENTORY_EXPECTED" ]; then
+  echo "  PASS  the tied-parameter allow-list is exactly the pinned fixture inventory"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the tied-parameter allow-list drifted from its pinned inventory"
+  printf '        expected: %s\n' "$ZSH_TIED_INVENTORY_EXPECTED"
+  printf '        actual:   %s\n' "$ZSH_TIED_INVENTORY"
   FAIL=$((FAIL + 1))
 fi
 
@@ -473,6 +609,15 @@ fi
 # Anti-vacuity for the BARE arm, which is the half the `=` terminator missed.
 # Every one of these is a real declaration that shipped: mid-list, last-on-line,
 # and a `typeset` flag form. All die under zsh at the first later assignment.
+#
+# These five rows carry the allow marker because the corpus scan above now
+# reads THIS file too, and they have to keep the broken shape or the row proves
+# nothing. The marker is load-bearing in both directions: the scan skips them,
+# and the dead-marker row re-checks that each one still matches the detector —
+# which is the same assertion this row makes, from the other side. Note the
+# marker also makes each row a trailing-comment case, so together with the
+# negative row below they pin both halves of the `[^#]*` span rule: a tied name
+# BEFORE the `#` still reds, one after it does not.
 ZSH_TIED_BARE_GAPS=""
 while IFS= read -r zsh_tied_bare; do
   [ -n "$zsh_tied_bare" ] || continue
@@ -480,11 +625,11 @@ while IFS= read -r zsh_tied_bare; do
     || ZSH_TIED_BARE_GAPS="$ZSH_TIED_BARE_GAPS${ZSH_TIED_BARE_GAPS:+
 }$zsh_tied_bare"
 done <<'EOF_ZSH_TIED_BARE'
-  local index status result cleanup_rc=0
-  local records="$1" descriptors="$2" row edge result status receipt index
-  local path removed added chg_added bad
-  local index status
-  typeset -g status
+  local index status result cleanup_rc=0  # zsh-tied-fixture: anti-vacuity row
+  local records="$1" descriptors="$2" row edge result status receipt index  # zsh-tied-fixture: anti-vacuity row
+  local path removed added chg_added bad  # zsh-tied-fixture: anti-vacuity row
+  local index status  # zsh-tied-fixture: anti-vacuity row
+  typeset -g status  # zsh-tied-fixture: anti-vacuity row
 EOF_ZSH_TIED_BARE
 if [ -z "$ZSH_TIED_BARE_GAPS" ]; then
   echo "  PASS  the detector reds on the BARE declaration too, mid-list and last-on-line"
