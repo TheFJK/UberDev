@@ -123,17 +123,17 @@ uberdev_brainstorm_reset_batch() {
   UBERDEV_BRAINSTORM_WAITED=0; UBERDEV_BRAINSTORM_BATCH_LAUNCHED=0
 }
 uberdev_unwind_child_receipts() {
-  local index status result cleanup_rc=0
+  local index child_status result cleanup_rc=0
   for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
-    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    child_status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
     result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
-    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
+    if ! uberdev_unwind_child "$child_status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
   done
   uberdev_brainstorm_reset_batch
   return "$cleanup_rc"
 }
 uberdev_brainstorm_drain_after_wait_failure() {
-  local index instance waited status result skip cleanup_rc=0
+  local index instance waited child_status result skip cleanup_rc=0
   for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
     instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
     skip=0
@@ -141,16 +141,16 @@ uberdev_brainstorm_drain_after_wait_failure() {
       [ "$instance" = "$waited" ] && skip=1 && break
     done
     [ "$skip" -eq 1 ] && continue
-    status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+    child_status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
     result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
-    if ! uberdev_unwind_child "$status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
+    if ! uberdev_unwind_child "$child_status" "$result" "$UBERDEV_BRAINSTORM_UNWIND_TIMEOUT"; then cleanup_rc=1; fi
   done
   uberdev_brainstorm_reset_batch
   return "$cleanup_rc"
 }
 uberdev_brainstorm_dispatch() {
   local edge="$1" instance="$2" role="$3" inputs_json="$4"
-  local risks_json='[]' handoff handoff_sha256 result status create_rc cleanup_rc
+  local risks_json='[]' handoff handoff_sha256 result child_status create_rc cleanup_rc
   : "$role" # the registered edge manifest selects the role
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
     :
@@ -163,16 +163,16 @@ uberdev_brainstorm_dispatch() {
   handoff="$UBERDEV_CHILD_HANDOFF"
   handoff_sha256="$UBERDEV_CHILD_HANDOFF_SHA256"
   result="$UBERDEV_CHILD_RESULT"
-  status="$UBERDEV_CHILD_STATUS"
+  child_status="$UBERDEV_CHILD_STATUS"
   UBERDEV_BRAINSTORM_PREPARED_EDGES+=("$edge")
   UBERDEV_BRAINSTORM_PREPARED_INSTANCES+=("$instance")
   UBERDEV_BRAINSTORM_PREPARED_HANDOFFS+=("$handoff")
   UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   UBERDEV_BRAINSTORM_PREPARED_RESULTS+=("$result")
-  UBERDEV_BRAINSTORM_PREPARED_STATUSES+=("$status")
+  UBERDEV_BRAINSTORM_PREPARED_STATUSES+=("$child_status")
 }
 uberdev_brainstorm_launch_batch() {
-  local index edge instance handoff handoff_sha256 result status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result child_status dispatch_rc cleanup_rc
   local preflight_refs=()
   [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
   [ "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[@]}" -eq "${#UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
@@ -188,10 +188,10 @@ uberdev_brainstorm_launch_batch() {
     handoff="${UBERDEV_BRAINSTORM_PREPARED_HANDOFFS[$index]}"
     handoff_sha256="${UBERDEV_BRAINSTORM_PREPARED_HANDOFF_SHA256S[$index]}"
     result="${UBERDEV_BRAINSTORM_PREPARED_RESULTS[$index]}"
-    status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
-    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$status" >/dev/null; then
+    child_status="${UBERDEV_BRAINSTORM_PREPARED_STATUSES[$index]}"
+    if uberdev_dispatch_child "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status" >/dev/null; then
       UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS+=("$instance")
-      UBERDEV_BRAINSTORM_RECEIPT_STATUSES+=("$status")
+      UBERDEV_BRAINSTORM_RECEIPT_STATUSES+=("$child_status")
       UBERDEV_BRAINSTORM_RECEIPT_RESULTS+=("$result")
     else
       dispatch_rc=$?; cleanup_rc=0
@@ -203,16 +203,16 @@ uberdev_brainstorm_launch_batch() {
   UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
 }
 uberdev_brainstorm_wait() {
-  local wanted="$1" timeout_s="${2:-300}" index instance status result wait_rc cleanup_rc
+  local wanted="$1" timeout_s="${2:-300}" index instance child_status result wait_rc cleanup_rc
   if [ "$UBERDEV_BRAINSTORM_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_brainstorm_launch_batch || return $?
   fi
   for ((index=0; index<${#UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[@]}; index++)); do
     instance="${UBERDEV_BRAINSTORM_DISPATCH_RECEIPTS[$index]}"
     if [ "$instance" = "$wanted" ]; then
-      status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
+      child_status="${UBERDEV_BRAINSTORM_RECEIPT_STATUSES[$index]}"
       result="${UBERDEV_BRAINSTORM_RECEIPT_RESULTS[$index]}"
-      if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+      if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
         :
       else
         wait_rc=$?; cleanup_rc=0
