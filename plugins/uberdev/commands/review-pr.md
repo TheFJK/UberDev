@@ -999,18 +999,18 @@ review_json_string() {
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" path="$5"
+  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5"
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
-  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$path" <<'PY'
+  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$record_path" <<'PY'
 import json,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
   local preflight_refs=()
   local launch_edges=() launch_instances=() launch_handoffs=()
   local launch_handoff_sha256s=() launch_results=() launch_statuses=()
@@ -1037,20 +1037,20 @@ PY
     edge="${launch_edges[$index]}"; instance="${launch_instances[$index]}"
     handoff="${launch_handoffs[$index]}"
     handoff_sha256="${launch_handoff_sha256s[$index]}"
-    result="${launch_results[$index]}"; status="${launch_statuses[$index]}"
-    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$status"; then
+    result="${launch_results[$index]}"; child_status="${launch_statuses[$index]}"
+    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status"; then
       receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
     else
       dispatch_rc=$?; cleanup_rc=0
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
       return "$dispatch_rc"
     fi
-    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$status" "$launched" <<'PY'
+    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$child_status" "$launched" <<'PY'
 import json,sys
 edge,instance,receipt,result,status,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
@@ -1059,11 +1059,11 @@ PY
       :
     else
       ledger_rc=$?; cleanup_rc=0
-      uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+      uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       while IFS= read -r row; do
         result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
       done <"$launched"
       [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
       return "$ledger_rc"
@@ -1071,17 +1071,17 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result status wait_rc first_rc=0 cleanup_rc=0
+  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if uberdev_wait_child "$status" "$result" "$timeout_s"; then
+    child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
+    if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
       continue
     else
       wait_rc=$?
     fi
     [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
-    uberdev_unwind_child "$status" "$result" "$timeout_s" || cleanup_rc=1
+    uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
   done <"$launched"
   if [ "$first_rc" -ne 0 ]; then
     [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
@@ -1359,7 +1359,12 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
      observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
      [ "$observed_head" = "$publish_sha" ] || return 79
-     git -C "$worktree_root" push origin "$publish_sha:refs/heads/$live_branch" || return 79
+     # BRACES ARE LOAD-BEARING. These fences run under /bin/zsh, where an
+     # unbraced `$publish_sha:refs/...` parses `:r` as the remove-extension
+     # MODIFIER: the refspec silently becomes `<sha>efs/heads/<branch>` and the
+     # push dies with "src refspec ... does not match any". Proven with
+     # `zsh -c 'V=abc; print "$V:refs/x"'` -> `abcefs/x`.
+     git -C "$worktree_root" push origin "${publish_sha}:refs/heads/${live_branch}" || return 79
      remote_identity="$(git -C "$worktree_root" ls-remote --exit-code --heads origin "refs/heads/$live_branch")" || return 79
      [[ "$remote_identity" != *$'\n'* ]] || return 79
      IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
@@ -1944,12 +1949,12 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     local child_status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
      residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
      [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
      [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
-     case "$status" in
+     case "$child_status" in
        APPLIED)
          [ "$before" != "$after" ] || return 77
          [ "$declared_tip" = "$after" ] || return 77
@@ -1966,7 +1971,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    }
    review_promote_validated_fixer_outcome() {
      [ "$#" -eq 3 ] || return 2
-     local outcome="$1" before="$2" after="$3" parsed status declared_tip extra
+     local outcome="$1" before="$2" after="$3" parsed child_status declared_tip extra
      parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
 base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
@@ -1984,9 +1989,9 @@ if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,s
 if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in (*launch,"status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
 if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
 print(status+"\t"+tip,end="")' "$outcome")" || return 74
-     IFS=$'\t' read -r status declared_tip extra <<<"$parsed"
+     IFS=$'\t' read -r child_status declared_tip extra <<<"$parsed"
      [ -z "${extra:-}" ] || return 74
-     review_track_validated_fixer_head "$status" "$before" "$after" "$declared_tip"
+     review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip"
    }
    ```
 
@@ -2542,8 +2547,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     ```bash uberdev-executable origin=review-pr
     review_apply_phase2_5_status() {
-      local status="$1"
-      case "$status" in
+      local child_status="$1"
+      case "$child_status" in
         DONE|DONE_WITH_CONCERNS) return 0 ;;
         REFUSED)
           PHASE2_5_STATUS=blocked
@@ -3418,8 +3423,13 @@ print('CLASSIFIED\t'+failure_class+'\t'+anchor+'\t-')
 PY
     }
     review_apply_ci_classification_status() {
-      local status="$1" rationale="${2:-}"
-      case "$status" in
+      # NOT `local status=` — under /bin/zsh, which is how the harness runs a
+      # command `bash` fence on macOS, `status` is the read-only alias for `$?`
+      # and `local status=…` is a FATAL error that kills the whole fence, not
+      # just the function. Every routing decision below would then be
+      # unreachable, with no audit event and no OUTCOME.
+      local child_status="$1" rationale="${2:-}"
+      case "$child_status" in
         AMBIGUOUS)
           audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS
           return 0
@@ -3597,13 +3607,36 @@ PY
        3. **Audit + exit** — emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); record `CI_REFUSED_ISSUE_URL` in the audit JSON under `phases.phase3.ci_refused_issue_url`; exit 1.
 
        Under `TURBO=1`, the same three actions fire — the prose goes to stderr, the issue is still filed (no `AskUserQuestion` involved here; this is a deterministic halt, not a user-choice gate), and exit 1 surfaces to the orchestrator chain.
+
+    > **STALE — this ROUTE-return block and the CONFLICT-RESOLVE arm below still
+    > describe the PRE-#383 `ci-rebase-handler`, and #383 half one has already
+    > replaced that agent.** Nothing here is reachable today: 6c.4 CLASSIFY exits
+    > at the `ci_transport_unsupported` gate above, before ROUTE. The recipes
+    > below are left as `main` has them on purpose — half one ships the engine
+    > and changes NO Phase 3 behaviour — but a reader wiring the fences from
+    > them would be working from a contract the shipped agent no longer
+    > honours. Precisely three statements below are now false, and
+    > `plugins/uberdev/agents/ci-rebase-handler.md` is the authority in every case:
+    >
+    > | Said below | Shipped agent (#383) |
+    > |---|---|
+    > | "the agent already pushed; new HEAD is on remote" | The agent is a PREPARER, not a pusher. `git push` **in any form** is on its explicit denylist, `EXPECTED_OLD_SHA` no longer exists in that file, and the controller captures the lease and performs the single leased push itself. |
+    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN `git status --porcelain` UU entries — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
+    > | "Step 6 the agent has already aborted the in-progress rebase" | Step 5 says the opposite in capitals — **leave the rebase IN PROGRESS**, do NOT `git rebase --abort` — and Step 6 is "Stop." The live mid-rebase state IS the `ci-conflicts` stage's input; step 1's re-fetch-and-re-rebase below would destroy it. |
+    >
+    > Half two (the Phase 3 fence wiring) replaces this whole block with the
+    > `ci-fix` / `ci-conflicts` Workflow stages that `skills/review-fleet/workflow.js`
+    > and `lib/review-fleet-args.sh` already ship. Do not re-add an agent-held
+    > lease while re-wiring it: an LLM choosing the SHA git compares against is
+    > exactly the hole the demotion closes.
+
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
     - `ci-rebase-handler` `status: REFUSED, rationale: <reason>` (∈ {`pr-already-merged`, `head-moved-since-classify`, `lease-mismatch`}) → emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_rebase_refused_<reason>` (lowercase, dashes-to-underscores normalised; e.g. `lease-mismatch` → `ci_rebase_refused_lease_mismatch`); exit 1.
 
     #### CONFLICT-RESOLVE arm (mirrors `merge-pipeline/SKILL.md` Phase 3.3.iii–iv)
 
-    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease.
+    Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease. (Both sentences are in the STALE table above — the shipped agent returns a count and leaves the rebase running.)
 
     **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
 
@@ -3619,8 +3652,12 @@ PY
        ```bash
        git fetch origin "$pr_head_branch" "$base_branch"
        # Captured BEFORE the second rebase — used as the resume-push lease so an
-       # external push that lands during the resume window is detected. Mirrors
-       # the EXPECTED_OLD_SHA capture in agents/ci-rebase-handler.md Step 4.
+       # external push that lands during the resume window is detected. This
+       # used to mirror an EXPECTED_OLD_SHA capture inside the rebase agent;
+       # #383 deleted it (agents/ci-rebase-handler.md Step 4 is now the rebase
+       # itself, and "Lease form (load-bearing) — the CONTROLLER's, not yours"
+       # in that file is where the capture lives). The controller holding the
+       # lease is the point, so this local capture is the shape half two keeps.
        EXPECTED_OLD_SHA="$(git rev-parse origin/$pr_head_branch)"
        BASE_SHA="$(git merge-base origin/$pr_head_branch origin/$base_branch)"
        git rebase "origin/$base_branch"   # exits non-zero with markers — that is expected
@@ -4486,10 +4523,11 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Commits as `fix(ci):` (code_bug) or `chore(deps):` (env_drift); never pushes (caller handles)
 
 **uberdev:ci-rebase-handler** (`subagent_type: uberdev:ci-rebase-handler`):
-- Rebases the PR branch onto its base for `stale_base` class
-- Uses `--force-with-lease=<branch>:<sha> --force-if-includes` (sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant)
-- Worktree-scoped lock prevents parallel-run lease races
-- Returns `CONFLICT` for caller to fan out `conflict-resolver` agents (single message)
+- Rebases the PR branch onto its base for `stale_base` class, and **stops there** — #383 demoted it from pusher to preparer
+- Does **not** push. `git push` in any form is on its explicit denylist. The `--force-with-lease=<branch>:<sha> --force-if-includes` pair (the sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant) is captured and consumed by the CONTROLLER, which is the whole safety property: the lease's value must not be one an agent chose
+- No lock file. The lease is the cross-run concurrency guard, and `git rebase` refuses on its own when `.git/rebase-merge` already exists — a controller-held `flock` cannot work here, because every `bash` block is a fresh shell and the file descriptor dies with the fence
+- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the UU paths itself and fan out `conflict-resolver` agents
+- **Not reachable on the shipped tree**: half one ships the `ci-fix` engine stage, half two wires Phase 3 to call it
 
 ## Notes:
 

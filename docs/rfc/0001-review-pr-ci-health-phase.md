@@ -2,7 +2,7 @@
 
 | Field            | Value                                                                |
 | ---------------- | -------------------------------------------------------------------- |
-| **Status**       | Draft — **DORMANT since 2026-08-05 (issue #381)**, see the note below |
+| **Status**       | Draft — **DORMANT since 2026-08-05 (issue #381)**; engine rebuilt 2026-08-06 (#383 half one), caller not yet re-pointed. See both notes below |
 | **Author**       | TheFJK                                                               |
 | **Created**      | 2026-05-06                                                           |
 | **Targets**      | `plugins/uberdev/commands/review-pr.md`, new agents, new SKILL phase |
@@ -25,6 +25,97 @@
 > the design, and rebuilding Phase 3 Workflow-natively (RFC 0012 §3.1) restores
 > it as written. See the sibling amendment in RFC 0002 for what this does and
 > does not change about the GREEN predicate.
+
+---
+
+> **AMENDED 2026-08-06 (issue #383, half one) — the ENGINE for this phase is
+> rebuilt; the capability is NOT restored yet.**
+>
+> `skills/review-fleet/workflow.js` now carries four Phase 3 stages —
+> `ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer` — and
+> `lib/code_fixer_contract.py` carries their producer (`prepare-ci-authority`,
+> `bind-workflow-ci-launch`), their capture verb (`capture-ci-terminal`,
+> `read-ci-authority-member`) and their judges (`validate-ci-classification`,
+> `validate-ci-mutation-outcome`, `validate-ci-persistence-result`).
+>
+> **`commands/review-pr.md` has not been re-pointed at any of them.** Its Phase
+> 3 is unchanged: PROBE, MONITOR and CLASSIFY telemetry, then the loud
+> `ci_transport_unsupported` halt on a red check, with `--no-ci-fix` as the
+> supported mode. The dormancy note above therefore still describes what a user
+> gets today. The fence wiring is a separate change, because no test in this
+> repo executes a `review-pr.md` fence — the engine could be verified by
+> execution and the wiring could not, so they do not belong in one PR.
+>
+> The design amendments below are recorded now because they are what the SHIPPED
+> engine implements; the RFC as originally written no longer describes it.
+>
+> **The `--force-with-lease` lease is CONTROLLER-HELD, not agent-held.** This
+> RFC (and `agents/ci-rebase-handler.md` as written) had `ci-rebase-handler`
+> capture `EXPECTED_OLD_SHA` itself and perform the push. That is an LLM holding
+> the lease: git then compares the remote against a value the agent chose, the
+> flag still appears on the command line, and the safety property is gone while
+> every downstream check still reads as verified. The agent is demoted from
+> pusher to preparer — its tool list drops `git push` entirely — and the
+> controller will capture the lease at 6c.4 ROUTE
+> (`rev-parse refs/remotes/origin/<pr_head_branch>`, never `origin/<base>`),
+> store it in a digest-pinned CI authority, and perform the single leased push
+> itself. `validate-ci-mutation-outcome` compares the live remote tip against
+> that pinned lease BEFORE the controller pushes, so a child that pushed anyway
+> is caught rather than trusted. The demotion applies to BOTH fixer agents —
+> `ci-code-fixer` never writes to a remote either — so the controller owes a
+> push on every terminal that produces new history: `fix_code` `APPLIED`, clean
+> `REBASED`, and `CONFLICT → all RESOLVED → rebase --continue`, all through ONE
+> fence.
+>
+> **The rebase judge has a CONFLICT terminal.** `ci-rebase-handler` is required
+> to leave a conflicted rebase IN PROGRESS so the controller can enumerate the
+> unmerged paths from its own `git status`. That state has unmerged index
+> entries by construction, so `validate-ci-mutation-outcome` must recognise it
+> as an outcome rather than judging it `index_dirty` — otherwise the caller's
+> failure branch aborts the very rebase the conflict arm needs, and the arm is
+> unreachable. For the same reason the per-resolver judge asks whether the
+> WORKTREE still carries conflict markers, not whether the path is still `UU`:
+> the resolver is forbidden `git add`, and the controller stages only after the
+> judgement. A BINARY conflict is refused outright
+> (`ci_conflict_binary_unresolvable`): git writes the "ours" blob with no
+> conflict markers for one, so the marker scan cannot tell a resolver that did
+> nothing from one that resolved, and no resolver can merge a binary anyway.
+>
+> The `flock` lock this RFC specified is deleted with no replacement: under the
+> demotion it would have to be held by the controller across a Workflow call,
+> and every command fence is a fresh shell, so the descriptor dies with the
+> fence and the lock is void. The lease is the cross-run guard and `git rebase`
+> refuses a second in-progress rebase on its own.
+>
+> **Fresh-shell handoffs must be FOUND, never recomputed.** Both loop counters
+> live in `ci-loop-state.json` (`review_fleet_write_ci_state` /
+> `review_fleet_load_ci_counters`) and every fence that keys a pathname on them
+> has to read them back first — `prepare-ci-authority` publishes no-clobber, so
+> a recomputed pathname on CI iteration 2 refuses `authority_preexists`. And the
+> `ci-fix` launch sidecar cannot be recomputed at all: the CONFLICT arm's
+> restage deliberately advances the CI loop counter while the sidecar keeps the
+> name it was minted under. The mint fence therefore publishes a fixed-name
+> POINTER (`review_fleet_write_ci_pointer`) and every later reader follows it.
+>
+> **Two numbers, not one, for the conflict fanout.**
+> `fanout_concurrency.conflict_resolver` is a CONCURRENCY knob — its documented
+> behaviour is "split into `ceil(N / cap)` sequential waves" — so it is the wave
+> size and nothing else. The TOTAL ceiling on auto-resolvable conflicted files is
+> its own constant (`REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP`, 50, matching the
+> engine's own clamp).
+>
+> **One authority per resolver means one authority per resolver's PROMPT.** The
+> envelope carries an authority-path PREFIX to which the engine appends the
+> resolver's own index; it carries no digest at all, because a per-resolver
+> digest cannot be forwarded as one scalar and the controller re-checks each one
+> itself when it judges.
+>
+> **The CONFLICT terminal owes a residue proof too.** It cannot be
+> `_require_clean_worktree` — a conflicted rebase has unmerged index entries by
+> construction — but it is untracked-confinement plus "no tracked path whose
+> worktree differs from the index outside the unmerged set".
+>
+> Status stays **Draft**.
 
 ---
 

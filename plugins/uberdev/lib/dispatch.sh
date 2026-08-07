@@ -128,16 +128,21 @@ _uberdev_semaphore_python() {
 # native Windows consumer. Keep all other pane argv in POSIX spelling: the
 # spawned Git Bash owns those arguments and understands them directly.
 _uberdev_dispatch_native_cli_path() {
-  local path="$1"
+  # `target`, NEVER `path`: zsh TIES the lowercase `path` array to $PATH, so a
+  # `local path=` replaces the command search path for this whole call frame
+  # and both `command -v cygpath` and `cygpath` become not-found. Same rule as
+  # lib/status.sh:78-84, now enforced across every plugin library by
+  # tests/crossplatform-shell-wrappers.test.sh instead of for status.sh alone.
+  local target="$1"
   case "${MSYSTEM:-}:$(uname -s 2>/dev/null)" in
     MINGW*:*|MSYS*:*|CYGWIN*:*|*:MINGW*|*:MSYS*|*:CYGWIN*)
       if ! command -v cygpath >/dev/null 2>&1; then
         echo 'error: cygpath is required to normalize a native-Windows dispatch path' >&2
         return 127
       fi
-      cygpath -m "$path"
+      cygpath -m "$target"
       ;;
-    *) printf '%s' "$path" ;;
+    *) printf '%s' "$target" ;;
   esac
 }
 
@@ -897,14 +902,20 @@ uberdev_dispatch_preflight_backend() {
       # lib/agent-dispatch.sh's workspace_mode validator.
       #
       # #381 step 3 made this the DEFAULT: `auto` now resolves workflow for both
-      # workflows too. One BREAKING gap travels with that flip -- /review-pr
-      # Phase 3 dispatches review_pr.ci.* through the routed adapter, which has
-      # no workflow provider arm, so a RED check halts loudly at 6c.3 CLASSIFY
-      # with subreason=ci_transport_unsupported. Step 4 deleted the codex
-      # backend that used to be the named escape hatch, so there is no longer
-      # ANY transport that can run Phase 3 CI classification or the CI fixers:
-      # --no-ci-fix is the supported mode until Phase 3 is rebuilt
-      # Workflow-natively (commands/review-pr.md 6c, CHANGELOG BREAKING note).
+      # workflows too. One BREAKING gap still travels with that flip --
+      # /review-pr Phase 3 dispatches review_pr.ci.* through the routed adapter,
+      # which has no workflow provider arm, so a RED check halts loudly at 6c.3
+      # CLASSIFY with subreason=ci_transport_unsupported. Step 4 deleted the
+      # codex backend that used to be the named escape hatch, so --no-ci-fix is
+      # the supported mode.
+      #
+      # #383 half one narrowed the gap WITHOUT closing it: the four Phase 3
+      # stages (ci-classify, ci-fix, ci-conflicts, ci-defer) now exist in
+      # skills/review-fleet/workflow.js, and their producer/capture/judges exist
+      # in lib/code_fixer_contract.py. What has not happened is the caller --
+      # commands/review-pr.md has not been re-pointed at them, so Phase 3 still
+      # reaches _uberdev_agent_dispatch_backend's hard-failing `workflow)` arm
+      # exactly as before. Delete this paragraph when the fence wiring lands.
       # (The engine gate is applied once, in the backend case below, so it
       # covers every workflow rather than only these two.)
       workflow) ;;

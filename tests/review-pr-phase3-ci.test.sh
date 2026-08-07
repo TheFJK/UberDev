@@ -655,6 +655,145 @@ else
   echo "  FAIL  S10.14 — $CLASSIFY_STRICT_INVALID malformed classifier documents were accepted"; FAIL=$((FAIL + 1))
 fi
 
+# ---------------------------------------------------------------------------
+# S10.14c — THE COMPARATOR. Two copies of the classifier predicate, one guard.
+# ---------------------------------------------------------------------------
+# #383 half one shipped `_parse_ci_classification` in
+# plugins/uberdev/lib/code_fixer_contract.py as the tested form of the predicate
+# the heredoc above carries — same fenced-document regex, same field regex, same
+# scalar decoder, same class set, same anchor rules, written twice. That is the
+# #370/#371 "one contract, N uncompared copies" shape, and the repo's
+# CONTRACT: marker machinery cannot retire it: that comparator works on closed
+# TOKEN SETS, and what is duplicated here is a PREDICATE.
+#
+# So the comparator is behavioural. One corpus, both implementations, byte-equal
+# verdicts required. Every row above proves one copy; this row proves they are
+# still the same copy. When the Phase 3 fence wiring deletes the heredoc and
+# routes on the python, this section is what makes that deletion visible instead
+# of silent — retire it in the SAME commit that removes the heredoc.
+CLASSIFY_DIFF_DIR="$(mktemp -d)"
+CLASSIFY_DIFF_DIR="$(cd "$CLASSIFY_DIFF_DIR" && pwd -P)"
+python3 -I -B - "$CLASSIFY_DIFF_DIR" <<'PY'
+import json, pathlib, sys
+
+out = pathlib.Path(sys.argv[1])
+def document(status, failure_class, anchor, rationale, risks="[]", extra=""):
+    return (f"```yaml\nstatus: {status}\nfailure_class: {failure_class}\n"
+            f"signal_anchor: {anchor}\nrationale: {rationale}\n"
+            f"risks: {risks}\n{extra}```\n")
+
+cases = [
+    # accepted shapes
+    document("CLASSIFIED", "code_bug", '"README.md:42"', '"repository failure"'),
+    document("CLASSIFIED", "env_drift", "README.md:5", "bare scalar"),
+    document("CLASSIFIED", "flaky", '"gh-run-123:42"', '"transient runner"'),
+    document("CLASSIFIED", "stale_base", "gh-run-9:3", "base moved"),
+    document("AMBIGUOUS", "null", "null", '"no supported signal"'),
+    document("REFUSED", "null", "null", '"input-malformed"'),
+    "prose before the fence\n\n" + document(
+        "CLASSIFIED", "flaky", '"gh-run-123:42"', '"transient runner"'),
+    # the single-quoted YAML decoder, both members
+    document("REFUSED", "null", "null", "'can''t reproduce it'"),
+    document("CLASSIFIED", "code_bug", "'README.md:42'", "'it''s red'"),
+    document("REFUSED", "null", "null", "'unterminated"),
+    document("REFUSED", "null", "null", "'can't reproduce it'"),
+    document("REFUSED", "null", "null", "'"),
+    # scalar bounds and decoded control characters
+    document("REFUSED", "null", "null", json.dumps("x" * 256)),
+    document("REFUSED", "null", "null", json.dumps("x" * 257)),
+    document("REFUSED", "null", "null", json.dumps("boun\x00ded")),
+    document("REFUSED", "null", "null", json.dumps("boun\x1fded")),
+    document("REFUSED", "null", "null", json.dumps("boun\x7fded")),
+    document("REFUSED", "null", "null", "'boun" + chr(1) + "ded'"),
+    document("REFUSED", "null", "null", "boun@ded"),
+    document("REFUSED", "null", "null", "null"),
+    # anchors
+    document("CLASSIFIED", "code_bug", '":121"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"README.md:0"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"/etc/passwd:1"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"../README.md:1"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"missing.ts:1"', '"x"'),
+    document("CLASSIFIED", "code_bug", '""', '"x"'),
+    document("CLASSIFIED", "code_bug", '"gh-run-123:42"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"tests:1"', '"x"'),
+    # class set and field set
+    document("CLASSIFIED", "vibes", '"README.md:12"', '"x"'),
+    document("CLASSIFIED", "code_bug", '"README.md:1"', '"x"', extra="unknown: v\n"),
+    document("CLASSIFIED", "code_bug", '"README.md:1"', '"x"', risks="[drop-tests]"),
+    document("CLASSIFIED", "code_bug", '"README.md:1"', '"x"',
+             extra="failure_class: flaky\n"),
+    document("AMBIGUOUS", "code_bug", '"README.md:1"', '"x"'),
+    # a fence that is not the LAST thing in the document
+    document("CLASSIFIED", "code_bug", '"README.md:1"', '"x"') + "trailing content\n",
+    # documents with no fence at all
+    "no fenced document here\n",
+    "```yaml\nstatus: CLASSIFIED\n",
+]
+for index, case in enumerate(cases, start=1):
+    (out / f"case-{index:02d}.md").write_text(case, encoding="utf-8")
+print(len(cases))
+PY
+CLASSIFY_DIFF_COUNT="$(ls "$CLASSIFY_DIFF_DIR" | grep -c '^case-')"
+cat > "$CLASSIFY_DIFF_DIR/judge.py" <<'PY'
+# The python copy, normalised onto the heredoc copy's stdout wire format.
+import importlib.util, pathlib, re, sys
+
+module_path, case_path, working_dir = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_ci_contract", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+payload = pathlib.Path(case_path).read_bytes()
+try:
+    parsed = module._parse_ci_classification(payload, working_dir)
+except module.ContractFailure as error:
+    if str(error) != "ci_classification_refused":
+        raise SystemExit(2)
+    # The heredoc copy PRINTS the refusal rationale; this copy raises before
+    # returning it, so re-decode it with the same scalar decoder rather than
+    # comparing the two on a field only one of them emits.
+    body = re.search(r"(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z",
+                     payload.decode("utf-8"), re.DOTALL).group(1)
+    rationale = ""
+    for line in body.splitlines():
+        if line.startswith("rationale:"):
+            rationale = module._ci_classifier_scalar(line.split(":", 1)[1].strip()) or ""
+    print("REFUSED\t-\t-\t" + rationale)
+    raise SystemExit(0)
+if parsed["status"] == "AMBIGUOUS":
+    print("AMBIGUOUS\tflaky\t-\t-")
+else:
+    print("CLASSIFIED\t" + parsed["failure_class"] + "\t" + parsed["signal_anchor"] + "\t-")
+PY
+CLASSIFY_DIFF_MISMATCH=0
+CLASSIFY_DIFF_FIRST=''
+CLASSIFY_DIFF_ACCEPTED=0
+for case_file in "$CLASSIFY_DIFF_DIR"/case-*.md; do
+  HEREDOC_OUT="$(bash -c '. "$1"; review_validate_ci_classification "$2" "$3" 2>/dev/null' \
+    _ "$CLASSIFY_HELPER" "$case_file" "$REPO_ROOT")" && HEREDOC_VERDICT="$HEREDOC_OUT" \
+    || HEREDOC_VERDICT='<REFUSED-BY-CONTRACT>'
+  PYTHON_OUT="$(python3 -I -B "$CLASSIFY_DIFF_DIR/judge.py" \
+    "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" "$case_file" "$REPO_ROOT" 2>/dev/null)" \
+    && PYTHON_VERDICT="$PYTHON_OUT" || PYTHON_VERDICT='<REFUSED-BY-CONTRACT>'
+  [ "$HEREDOC_VERDICT" = '<REFUSED-BY-CONTRACT>' ] \
+    || CLASSIFY_DIFF_ACCEPTED=$((CLASSIFY_DIFF_ACCEPTED + 1))
+  if [ "$HEREDOC_VERDICT" != "$PYTHON_VERDICT" ]; then
+    CLASSIFY_DIFF_MISMATCH=$((CLASSIFY_DIFF_MISMATCH + 1))
+    [ -n "$CLASSIFY_DIFF_FIRST" ] || CLASSIFY_DIFF_FIRST="$(basename "$case_file"): heredoc='$HEREDOC_VERDICT' python='$PYTHON_VERDICT'"
+  fi
+done
+# A corpus that is refused wholesale proves nothing — both copies would "agree"
+# by refusing everything. Require real accepted shapes in it.
+if [ "$CLASSIFY_DIFF_MISMATCH" -ne 0 ]; then
+  echo "  FAIL  S10.14c — the two classifier predicates DIVERGED on $CLASSIFY_DIFF_MISMATCH/$CLASSIFY_DIFF_COUNT documents; first: $CLASSIFY_DIFF_FIRST"; FAIL=$((FAIL + 1))
+elif [ "$CLASSIFY_DIFF_COUNT" -lt 30 ] || [ "$CLASSIFY_DIFF_ACCEPTED" -lt 8 ]; then
+  echo "  FAIL  S10.14c — VACUOUS: $CLASSIFY_DIFF_COUNT cases, only $CLASSIFY_DIFF_ACCEPTED accepted by the live copy"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S10.14c — both copies of the classifier predicate agree on all $CLASSIFY_DIFF_COUNT corpus documents ($CLASSIFY_DIFF_ACCEPTED accepted)"; PASS=$((PASS + 1))
+fi
+rm -rf "$CLASSIFY_DIFF_DIR"
+
 # RETIRED SURFACE, retained deliberately (#381). `review_child_result_path`'s
 # sole caller is commands/review-pr.md:3319, which sits behind the unconditional
 # workflow-only refusal at :3305 -- so on the shipped tree the function is
