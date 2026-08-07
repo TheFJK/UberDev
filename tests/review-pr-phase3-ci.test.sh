@@ -29,15 +29,21 @@ CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+CONTRACT_PY="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 # The three further surfaces that restate the CONFLICT arm's enumeration claim.
 # S13.23 sweeps all five together — the claim was wrong in ten places at once
 # (#398), which is what makes a per-file sweep worth more than one grep.
 REVIEW_FLEET_SKILL="$REPO_ROOT/plugins/uberdev/skills/review-fleet/SKILL.md"
 REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+# The Phase 3 wiring rows (S21-S31) address those same two files under their own
+# names. Alias, never re-derive: one relocation must not leave half the suite
+# pointing at a stale path while the other half still resolves.
+WORKFLOW_JS="$REVIEW_FLEET_WORKFLOW"
+ARGS_LIB_PHASE3="$REVIEW_FLEET_ARGS"
 
 for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE" \
-         "$REVIEW_FLEET_SKILL" "$REVIEW_FLEET_WORKFLOW" "$REVIEW_FLEET_ARGS"; do
+         "$CONTRACT_PY" "$REVIEW_FLEET_SKILL" "$REVIEW_FLEET_WORKFLOW" "$REVIEW_FLEET_ARGS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -321,6 +327,17 @@ assert_grep "$REVIEW_PR" 'CI_FIX_PHASE' \
   "S6.2 — CI_FIX_PHASE variable documented (mirrors SIMPLIFY_PHASE)"
 assert_grep "$REVIEW_PR" 'CI_FIX_PHASE=0|--no-ci-fix.*probe' \
   "S6.3 — --no-ci-fix sets CI_FIX_PHASE=0 / probe-only"
+# #383: the mode is ENFORCED IN SHELL now. CI_FIX_PHASE previously had no reader
+# anywhere in this file, so "probe/monitor/classify run, ROUTE/POST-FIX/HALT are
+# skipped" was orchestrator prose that nothing could hold the command to.
+assert_grep "$REVIEW_PR" 'if \[ "\$\{CI_FIX_PHASE:-1\}" = 0 \]' \
+  "S6.4 — --no-ci-fix is enforced by a real shell guard at the head of ROUTE"
+assert_grep "$REVIEW_PR" 'ci_probe_only_skipped' \
+  "S6.5 — the probe-only skip emits its own audit event"
+assert_no_grep "$REVIEW_PR" '\-\-no-ci-fix.*supported mode' \
+  "S6.6 — the --no-ci-fix-is-the-supported-mode language is gone (#383)"
+assert_no_grep "$REVIEW_PR" 'ci_transport_unsupported' \
+  "S6.7 — the Phase 3 transport refusal no longer exists"
 
 echo
 echo "== S7: --turbo on halt classes — no AskUserQuestion, exit 1, no trust signal =="
@@ -390,20 +407,26 @@ assert_no_grep "$CLASSIFIER" '^.*data\.quote' \
   "S10.4 — no data.quote field in return contract (secret-leak guard)"
 assert_grep "$CLASSIFIER" 'CLASSIFIED.*AMBIGUOUS.*REFUSED|status: CLASSIFIED' \
   "S10.5 — refusal triggers + AMBIGUOUS path documented"
-assert_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+assert_grep "$REVIEW_PR" 'validate-ci-classification' \
   "S10.6 — controller validates classifier output before routing"
+assert_no_grep "$REVIEW_PR" 'review_validate_ci_classification' \
+  "S10.6b — the classifier predicate is no longer an LLM-rendered heredoc in the command file (#383)"
+assert_grep "$CONTRACT_PY" '_parse_ci_classification' \
+  "S10.6c — the classifier predicate lives in lib/code_fixer_contract.py, where it is testable"
 assert_grep "$REVIEW_PR" 'ci_classify_returned.*contract_invalid' \
   "S10.7 — invalid class/anchor fails closed with an audit event"
-assert_grep "$REVIEW_PR" 'gh-run-.*\[1-9\].*signal_anchor|signal_anchor.*positive integer' \
-  "S10.8 — blank and zero-line signal anchors are rejected"
+assert_grep "$CONTRACT_PY" 'gh-run-\[1-9\]' \
+  "S10.8 — blank and zero-line signal anchors are rejected (predicate now in the contract)"
 assert_grep "$REVIEW_PR" 'CI_REFUSED_AGGREGATE_PATH.*RESEARCH_DIR_ABS/ci-refused-synthetic' \
   "S10.9 — CI refusal aggregate stays inside the run research directory"
 assert_no_grep "$REVIEW_PR" 'tmp-synthetic-aggregate|freshly-created `mktemp`' \
   "S10.10 — CI refusal handoff no longer points at a system mktemp artifact"
-assert_grep "$REVIEW_PR" 'review_child_result_path.*ci-classify\.launched.*review_pr\.ci\.classify' \
-  "S10.10a — classifier validation resolves the routed child's canonical result ledger"
-assert_grep "$REVIEW_PR" 'if review_child_single review_pr\.ci\.classify' \
-  "S10.10a1 — classifier lifecycle failure is checked before artifact discovery"
+assert_grep "$REVIEW_PR" 'capture-ci-terminal .*--edge-id review_pr\.ci\.classify|--edge-id review_pr\.ci\.classify' \
+  "S10.10a — classifier evidence is frozen by capture-ci-terminal, which also re-pins the log bytes"
+assert_grep "$REVIEW_PR" 'review_fleet_bind_ci review_pr\.ci\.classify ' \
+  "S10.10a1 — the classify child is bound with the CI producer BEFORE the Workflow call"
+assert_no_grep "$REVIEW_PR" 'review_child_single review_pr\.ci\.' \
+  "S10.10a1b — no Phase 3 edge takes the routed adapter any more (#383)"
 assert_grep "$REVIEW_PR" 'classifier_child_failed' \
   "S10.10a2 — classifier lifecycle failure is audited and halts routing"
 assert_no_grep "$REVIEW_PR" 'CI_CLASSIFICATION_PATH="\$RESEARCH_DIR_ABS/ci-classification-' \
@@ -445,41 +468,48 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# RE-POINTED (#383). The lifecycle this asserts is unchanged -- a classifier
+# child that does not produce provable evidence must audit
+# `classifier_child_failed` with the real exit code and must block artifact
+# discovery, routing and the fixer. Only the seam moved: the routed
+# `review_child_single` dispatch became the ci-classify Workflow stage, and the
+# lifecycle check is now the `capture-ci-terminal` return in the post-call
+# fence. The fence is EXTRACTED AND RUN, not grepped.
 CLASSIFY_LIFECYCLE_FIXTURE="$(mktemp)"
 CLASSIFY_LIFECYCLE_LOG="$(mktemp)"
 awk '
-  /^[[:space:]]*CI_CLASSIFY_INPUTS="/ { capture=1 }
-  capture && /^[[:space:]]*CI_CLASSIFICATION_PATH="/ { exit }
+  /^[[:space:]]*CI_CLASSIFY_TERMINAL="\$\(python3/ { capture=1 }
+  capture && /^[[:space:]]*CI_CLASSIFY_STATUS_SHA256=/ { exit }
   capture { sub(/^[[:space:]]{4}/,""); print }
 ' "$REVIEW_PR" >"$CLASSIFY_LIFECYCLE_FIXTURE"
 cat >>"$CLASSIFY_LIFECYCLE_FIXTURE" <<'SH'
-review_child_result_path() { printf 'result-discovery\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
+validate_classification() { printf 'validate\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
 route_classifier() { printf 'routing\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
 dispatch_fixer() { printf 'fixer\n' >>"$CLASSIFY_LIFECYCLE_LOG"; }
-review_child_result_path
+validate_classification
 route_classifier
 dispatch_fixer
 SH
+[ -s "$CLASSIFY_LIFECYCLE_FIXTURE" ] || {
+  echo "  FAIL  S10.10a3 — the ci-classify capture fence could not be extracted"; FAIL=$((FAIL + 1))
+}
 set +e
 CLASSIFY_LIFECYCLE_LOG="$CLASSIFY_LIFECYCLE_LOG" \
-PR_NUMBER=1 CI_RUN_ID=123 RUN_ID=fixture \
-CI_LOG_AUTHORITY_JSON='{"pr_number":1,"run_id":"123","head_sha":"0123456789abcdef0123456789abcdef01234567","log_content":"wrapped","log_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}' \
-CI_FIX_LOOP_ITER=2 RESEARCH_DIR_ABS=/tmp/research REVIEW_PR_TIMEOUT=9 \
+CODE_FIXER_CONTRACT=/nonexistent/contract.py \
+CI_CLASSIFY_BINDING='{"backend":"workflow"}' \
 bash -c '
-  review_json_string() { printf "\"%s\"" "$1"; }
-  review_json_member() { python3 -I -B -c '"'"'import json,sys; print(json.dumps(json.loads(sys.argv[1])[sys.argv[2]]),end="")'"'"' "$1" "$2"; }
-  uberdev_child_inputs_build() { printf "{}"; }
-  uberdev_child_instance_id() { printf "%s" "$1"; }
-  review_child_single() { printf "child\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
+  # Stand in for the real contract subprocess: a child whose evidence cannot be
+  # captured exits 37, exactly as the real verb would exit non-zero.
+  python3() { printf "child-capture\n" >>"$CLASSIFY_LIFECYCLE_LOG"; return 37; }
   audit() { printf "audit:%s:%s:%s\n" "$1" "$2" "$3" >>"$CLASSIFY_LIFECYCLE_LOG"; }
   . "$1"
 ' _ "$CLASSIFY_LIFECYCLE_FIXTURE"
 CLASSIFY_LIFECYCLE_RC=$?
 set +e
 if [ "$CLASSIFY_LIFECYCLE_RC" -eq 1 ] \
-    && grep -q '^child$' "$CLASSIFY_LIFECYCLE_LOG" \
+    && grep -q '^child-capture$' "$CLASSIFY_LIFECYCLE_LOG" \
     && grep -q 'classifier_child_failed.*exit_code=37' "$CLASSIFY_LIFECYCLE_LOG" \
-    && ! grep -Eq 'result-discovery|routing|fixer' "$CLASSIFY_LIFECYCLE_LOG"; then
+    && ! grep -Eq 'validate|routing|fixer' "$CLASSIFY_LIFECYCLE_LOG"; then
   echo "  PASS  S10.10a3 — classifier lifecycle failure records rc=37 and blocks discovery, routing, and fixer"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10.10a3 — classifier lifecycle failure reached a downstream canary"; FAIL=$((FAIL + 1))
@@ -488,11 +518,53 @@ rm -f "$CLASSIFY_LIFECYCLE_FIXTURE" "$CLASSIFY_LIFECYCLE_LOG"
 
 CLASSIFY_HELPER="$(mktemp)"
 CLASSIFY_CASE="$(mktemp)"
-awk '
-  /^[[:space:]]*review_validate_ci_classification\(\) \{/ { capture=1 }
-  capture { print }
-  capture && /^[[:space:]]*\}$/ { exit }
-' "$REVIEW_PR" > "$CLASSIFY_HELPER"
+# RE-POINTED (#383). `review_validate_ci_classification` was a python heredoc
+# inside commands/review-pr.md, which meant the predicate deciding whether a
+# MUTATING fixer runs was LLM-rendered markdown with no test of its own. It now
+# lives in lib/code_fixer_contract.py as `_parse_ci_classification`. The cases
+# below are UNCHANGED and still run against real bytes -- only the callee moved,
+# so no assertion is lost to the move. The tab-joined shim keeps the existing
+# expectations byte-identical.
+cat >"$CLASSIFY_HELPER" <<'SHIM'
+review_validate_ci_classification() {
+  python3 -I -B - "$1" "$2" "$2/plugins/uberdev/lib/code_fixer_contract.py" <<'PYSHIM'
+import importlib.util, sys
+case_path, root, contract = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("cfc_classify", contract)
+module = importlib.util.module_from_spec(spec)
+sys.modules["cfc_classify"] = module
+spec.loader.exec_module(module)
+payload = open(case_path, "rb").read()
+# The shipped bound: validate_ci_classification captures the result through
+# capture_expected(..., 1, CI_RESULT_LIMIT), so a document over the cap is
+# refused before the parser ever sees it. Mirror that here or the byte-boundary
+# case below would silently start passing on an oversized document.
+if not payload or len(payload) > module.CI_CLASSIFICATION_RESULT_LIMIT:
+    raise SystemExit(2)
+try:
+    parsed = module._parse_ci_classification(payload, root)
+except module.ContractFailure as error:
+    if str(error) == "ci_classification_refused":
+        # The contract makes REFUSED terminal; the shell surface reported it as
+        # a row. Re-derive the row from the same bytes so the historical
+        # expectations keep exercising the same predicate.
+        import re as _re
+        body = _re.search(r"(?:^|\n)```yaml\r?\n(.*?)\r?\n```\r?\n?\Z",
+                          payload.decode("utf-8"), _re.DOTALL).group(1)
+        rationale = ""
+        for line in body.splitlines():
+            if line.startswith("rationale:"):
+                rationale = module._ci_classifier_scalar(line.split(":", 1)[1].strip()) or ""
+        print("REFUSED\t-\t-\t" + rationale)
+        raise SystemExit(0)
+    raise SystemExit(2)
+if parsed["status"] == "AMBIGUOUS":
+    print("AMBIGUOUS\tflaky\t-\t-")
+else:
+    print("CLASSIFIED\t" + parsed["failure_class"] + "\t" + parsed["signal_anchor"] + "\t-")
+PYSHIM
+}
+SHIM
 write_classifier_case() {
   local classifier_status="$1" failure_class="$2" signal_anchor="$3" rationale="$4"
   printf '```yaml\nstatus: %s\nfailure_class: %s\nsignal_anchor: %s\nrationale: %s\nrisks: []\n```\n' \
@@ -888,9 +960,29 @@ RESULT_REASON="$(bash -c '. "$1"; review_child_result_path "$2" review_pr.ci.cla
 write_result_carrier_fixture codex
 
 chmod 600 "$RESULT_PATH_RESOLVED"
+# RE-POINTED (#383). The routed transport proved "the bytes cannot be replaced
+# after discovery" through the digest embedded in the published
+# `.trusted.md.attempt-<32hex>-<64hex>` filename. The Workflow transport proves
+# the SAME property one layer down and more directly: capture-ci-terminal
+# digests the result, and validate-ci-classification re-captures it against that
+# digest, so any post-capture replacement refuses. Exercised on real bytes.
+CLASSIFY_GOOD_DIGEST="$(python3 -I -B "$CONTRACT_PY" digest --path "$RESULT_PATH_RESOLVED" --minimum 1 --maximum 65536)"
 write_classifier_case AMBIGUOUS null null '"replacement after discovery"'
 cp "$CLASSIFY_CASE" "$RESULT_PATH_RESOLVED"
-if bash -c '. "$1"; review_validate_ci_classification "$2" "$3" >/dev/null' _ "$CLASSIFY_HELPER" "$RESULT_PATH_RESOLVED" "$REPO_ROOT"; then
+if python3 -I -B - "$CONTRACT_PY" "$RESULT_PATH_RESOLVED" "$CLASSIFY_GOOD_DIGEST" <<'RECAPTURE_PY'
+import importlib.util, sys
+contract, path, digest = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("cfc_recapture", contract)
+module = importlib.util.module_from_spec(spec)
+sys.modules["cfc_recapture"] = module
+spec.loader.exec_module(module)
+try:
+    module.capture_expected(path, digest, 1, module.CI_CLASSIFICATION_RESULT_LIMIT)
+except module.ContractFailure:
+    raise SystemExit(1)
+raise SystemExit(0)
+RECAPTURE_PY
+then
   RESULT_PATH_INVALID=$((RESULT_PATH_INVALID + 1))
 fi
 python3 -I -B - "$RESULT_LEDGER" "$RESULT_PATH" "$RESULT_STATUS" <<'PY'
@@ -1056,10 +1148,21 @@ echo "== S13: stale_base CONFLICT-resolve arm (#80) =="
 # (ci-rebase-handler.md:57 + agents/conflict-resolver.md exist) but unwired.
 # These assertions lock the procedural arm into the prose so a future edit
 # can't silently regress it back to "POST-FIX assumes REBASED".
-assert_subagent_type "$REVIEW_PR" 'conflict-resolver' \
-  "S13.1 — review-pr.md dispatches uberdev:conflict-resolver in Phase 3 CONFLICT path"
-assert_grep "$REVIEW_PR" 'conflicted_files' \
-  "S13.2 — review-pr.md prose names the conflicted_files YAML field from ci-rebase-handler return"
+assert_grep "$REVIEW_PR" 'stage=ci-conflicts' \
+  "S13.1 — review-pr.md dispatches the conflict fanout as the ci-conflicts Workflow stage"
+assert_grep "$WORKFLOW_JS" 'uberdev:conflict-resolver' \
+  "S13.1b — the ci-conflicts stage dispatches uberdev:conflict-resolver"
+assert_grep "$REVIEW_PR" 'review_fleet_bind_ci_conflicts ' \
+  "S13.1c — one CI binding per conflicted path is minted BEFORE the call"
+# The rebase child returns a COUNT, not a path list -- the set a resolver may
+# touch must not be chosen by the agent whose failure produced it. Asserting
+# `conflicted_files` here would pass on the controller's own shell array of that
+# name and so could not tell the two apart; these two assert the return shape
+# and the rule that motivates it.
+assert_grep "$REVIEW_PR" 'conflict_count' \
+  "S13.2 — review-pr.md prose names the conflict_count field the rebase child actually returns"
+assert_grep "$REVIEW_PR" 'COUNT, never a path list' \
+  "S13.2a — and states why: the child never chooses its successors' scope"
 assert_grep "$REVIEW_PR" 'status: CONFLICT' \
   "S13.3 — review-pr.md prose conditions on status: CONFLICT return"
 assert_grep "$REVIEW_PR" 'SINGLE message|single message|single assistant message|single assistant turn|SINGLE assistant turn' \
@@ -1076,8 +1179,23 @@ assert_grep "$REVIEW_PR" 'force-with-lease=' \
   "S13.9 — post-resolution push uses explicit-form --force-with-lease=<branch>:<sha>"
 assert_grep "$REVIEW_PR" 'force-if-includes' \
   "S13.10 — post-resolution push pairs --force-with-lease with --force-if-includes"
-assert_grep "$REVIEW_PR" 'EXPECTED_OLD_SHA' \
-  "S13.11 — original-lease SHA name (EXPECTED_OLD_SHA) referenced for resume push"
+assert_grep "$REVIEW_PR" 'CI_LEASE_SHA=.*rev-parse "refs/remotes/origin/\$CI_PR_HEAD_BRANCH"' \
+  "S13.11 — the lease is the PR HEAD's prior tip, captured by the controller (never origin/<base>)"
+assert_grep "$REVIEW_PR" 'read-ci-authority-member' \
+  "S13.11a — the lease is read back through a DIGEST re-check, never with jq"
+assert_no_grep "$REVIEW_PR" 'EXPECTED_OLD_SHA' \
+  "S13.11b — the agent-held lease name is gone: the child no longer captures or holds it (#383)"
+assert_no_grep "$REBASE_HANDLER" '^[^-]*git push [^i]' \
+  "S13.11c — ci-rebase-handler proposes no push command"
+# The agent file NAMES the retired lock in order to ban it (a future reader must
+# not "restore" a lock that cannot work across fences), so strip the prose that
+# does the banning before checking that no live recipe remains.
+REBASE_HANDLER_LIVE="$(sed -n '/^## No lock file/,/^## Process/!p' "$REBASE_HANDLER")"
+if grep -Eq 'exec 200|flock -n' <<<"$REBASE_HANDLER_LIVE"; then
+  echo "  FAIL  S13.11d — a live flock recipe survives outside the deletion note"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S13.11d — the void fence-scoped flock lock is deleted, not ported"; PASS=$((PASS + 1))
+fi
 assert_grep "$REVIEW_PR" 'rebase --continue|git rebase --continue' \
   "S13.12 — RESOLVED path runs git rebase --continue before push"
 assert_grep "$REVIEW_PR" 'rebase --abort|git rebase --abort' \
@@ -1090,8 +1208,20 @@ assert_grep "$REVIEW_PR" 'Phase 3.*halt|halt Phase 3|OUTCOME=halted' \
 # success. The original bug was Step 6c.5 silently falling through to Phase 1
 # re-entry on a CONFLICT return. The procedural arm must explicitly gate
 # POST-FIX on REBASED (or call the CONFLICT-resolve arm before fix-push).
-assert_grep "$REVIEW_PR" 'status: REBASED' \
-  "S13.16 — POST-FIX path explicitly conditions on ci-rebase-handler status: REBASED"
+#
+# S13.16 USED TO BE `assert_grep "$REVIEW_PR" 'status: REBASED'`. That is the
+# #370/#371 class in miniature: the only line it could match was the prose
+# sentence "(the agent already pushed; new HEAD is on remote)", which was
+# FACTUALLY WRONG — the agent had been demoted to preparer and nothing pushed
+# on that path at all. The assertion was disjoint from the behaviour it named,
+# so it stayed green over the bug AND would have stayed green over the fix.
+# It now keys on the VALIDATED terminal scalar and on the routing target.
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=REBASED' \
+  "S13.16 — POST-FIX branches on the VALIDATED rebase terminal, not the agent's self-report"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=CONFLICT' \
+  "S13.16b — the CONFLICT terminal has its own routing bullet"
+assert_no_grep "$REVIEW_PR" 'the agent already pushed' \
+  "S13.16c — the retired 'the agent already pushed' claim is gone (the agent has no remote-write tool)"
 assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
@@ -1771,8 +1901,792 @@ else
 fi
 rm -f "$CI_LOG_STREAM_FIXTURE"
 
+# ---------------------------------------------------------------------------
+# S21-S23 (#383) — the Workflow-native Phase 3 stage machine
+# ---------------------------------------------------------------------------
+echo "== S21: the ROUTE stage machine =="
+assert_grep "$REVIEW_PR" 'CI_FIXER_EDGE_ID=review_pr\.ci\.fix_code' \
+  "S21.1 — code_bug/env_drift routes to the fix_code edge"
+assert_grep "$REVIEW_PR" 'CI_FIXER_EDGE_ID=review_pr\.ci\.rebase' \
+  "S21.2 — stale_base routes to the rebase edge"
+assert_grep "$REVIEW_PR" 'gh run rerun "\$CI_RUN_ID"' \
+  "S21.3 — the flaky arm re-runs in Bash with the REAL run id"
+assert_no_grep "$REVIEW_PR" 'gh run rerun <run-id>' \
+  "S21.4 — the literal <run-id> placeholder that made the ROUTE fence unexecutable is gone"
+assert_no_grep "$REVIEW_PR" 'jump to 6c\.6 HALT' \
+  "S21.5 — the prose-inside-a-case that was a syntax error is gone"
+assert_grep "$REVIEW_PR" 'stage=ci-classify' \
+  "S21.6 — CLASSIFY is a Workflow stage"
+assert_grep "$REVIEW_PR" 'stage=ci-fix' \
+  "S21.7 — the routed fixer is a Workflow stage"
+assert_grep "$REVIEW_PR" 'stage=ci-defer' \
+  "S21.8 — the CI-REFUSED defer is a Workflow stage"
+# The forward-reference bug: base_branch was bound only in the CONFLICT arm,
+# which runs strictly AFTER ROUTE, so ROUTE either aborted under set -u or
+# silently resolved `origin/` to nothing and poisoned base_sha.
+# Comment-strip first: the ROUTE fence NAMES the old expression in order to
+# record the bug, and a guard that punished the explanation would be unfixable.
+REVIEW_PR_LIVE="$(grep -v '^[[:space:]]*#' "$REVIEW_PR")"
+if grep -q 'git merge-base HEAD "origin/${base_branch}"' <<<"$REVIEW_PR_LIVE"; then
+  echo "  FAIL  S21.9 — the forward-referenced base_branch merge-base is still live"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S21.9 — the forward-referenced base_branch merge-base is gone"; PASS=$((PASS + 1))
+fi
+assert_grep "$REVIEW_PR" 'CI_BASE_SHA=.*merge-base' \
+  "S21.10 — the base SHA is derived from refs bound in the SAME fence"
+
+echo "== S22: the rebase lease is controller-held =="
+assert_grep "$REVIEW_PR" 'force-with-lease="\$CI_PR_HEAD_BRANCH":"\$CI_LEASE_SHA"' \
+  "S22.1 — explicit-form lease against the PR head branch"
+assert_grep "$REVIEW_PR" 'force-if-includes' \
+  "S22.2 — paired with --force-if-includes"
+# The bare shorthand uses @{upstream} and is forbidden; so is bare --force.
+# Only EXECUTABLE lines: the prose deliberately names the forbidden shorthand in
+# order to forbid it. A push line must carry the explicit `<branch>:<sha>` form.
+# Executable push lines only: leading `git push` or a `git -C <dir> push`, never
+# a prose sentence that merely mentions one (the trust-anchor section explains
+# that it NEVER needs --force-with-lease, and that sentence must stay sayable).
+PUSH_LINES="$(grep -E '^[[:space:]]*([A-Z_]+="\$\()?git( -C "[^"]+")? push ' \
+  <<<"$REVIEW_PR_LIVE" || true)"
+if grep -qE '\-\-force-with-lease([^=]|$)' <<<"$PUSH_LINES"; then
+  echo "  FAIL  S22.3 — a bare --force-with-lease (the @{upstream} shorthand) reached a push command"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S22.3 — every --force-with-lease on a push carries an explicit <branch>:<sha>"; PASS=$((PASS + 1))
+fi
+if grep -qE '\-\-force([^-]|$)' <<<"$PUSH_LINES"; then
+  echo "  FAIL  S22.4 — a bare --force push reached the command"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S22.4 — no bare --force push anywhere in the command"; PASS=$((PASS + 1))
+fi
+
+echo "== S22-RUNTIME: the lease really refuses a stale push (offline, two local repos) =="
+LEASE_TMP="$(mktemp -d)"
+LEASE_TMP="$(cd "$LEASE_TMP" && pwd -P)"
+(
+  set -e
+  git init -q --bare "$LEASE_TMP/origin.git"
+  git clone -q "$LEASE_TMP/origin.git" "$LEASE_TMP/work" 2>/dev/null
+  cd "$LEASE_TMP/work"
+  git config user.email fixture@example.invalid
+  git config user.name Fixture
+  git checkout -qb feature 2>/dev/null || git checkout -q -b feature
+  printf 'one\n' >file.txt
+  git add file.txt
+  git commit -qm "test: base"
+  git push -q origin feature
+) >/dev/null 2>&1
+LEASE_SHA="$(git -C "$LEASE_TMP/work" rev-parse refs/remotes/origin/feature 2>/dev/null)"
+# Case 1: a correctly captured lease pushes.
+(
+  cd "$LEASE_TMP/work"
+  printf 'two\n' >file.txt
+  git add file.txt
+  git commit -qm "fix(ci): amend"
+) >/dev/null 2>&1
+LEASE_PUSH_STDERR="$(git -C "$LEASE_TMP/work" push origin feature \
+  --force-with-lease=feature:"$LEASE_SHA" --force-if-includes 2>&1 1>/dev/null)"
+LEASE_PUSH_RC=$?
+# Case 2: a third party pushes behind the runner's back, so the captured lease
+# is now stale. The SAME fence must fail, and its stderr must match the
+# classifier that distinguishes rebase_lease_mismatch from rebase_push_failed.
+(
+  set -e
+  git clone -q "$LEASE_TMP/origin.git" "$LEASE_TMP/other" 2>/dev/null
+  cd "$LEASE_TMP/other"
+  git config user.email other@example.invalid
+  git config user.name Other
+  git checkout -q feature
+  printf 'three\n' >file.txt
+  git add file.txt
+  git commit -qm "fix: external"
+  git push -q origin feature
+) >/dev/null 2>&1
+(
+  cd "$LEASE_TMP/work"
+  printf 'four\n' >file.txt
+  git add file.txt
+  git commit -qm "fix(ci): racing"
+) >/dev/null 2>&1
+STALE_PUSH_STDERR="$(git -C "$LEASE_TMP/work" push origin feature \
+  --force-with-lease=feature:"$LEASE_SHA" --force-if-includes 2>&1 1>/dev/null)" \
+  && STALE_PUSH_RC=0 || STALE_PUSH_RC=$?
+# git writes its progress banner to stderr on success, so only the RC is
+# meaningful for the happy case.
+if [ "$LEASE_PUSH_RC" -eq 0 ] && [ "${STALE_PUSH_RC:-0}" -ne 0 ]; then
+  echo "  PASS  S22-RT.1 — a correct lease pushes and a stale lease is rejected by git itself"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S22-RT.1 — lease behaviour drifted (ok_rc=$LEASE_PUSH_RC stale_rc=${STALE_PUSH_RC:-0})"; FAIL=$((FAIL + 1))
+fi
+if grep -qE '\[rejected\].*(stale info|fetch first|non-fast-forward)' <<<"$STALE_PUSH_STDERR"; then
+  echo "  PASS  S22-RT.2 — the stale-lease stderr matches the command's rebase_lease_mismatch classifier"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S22-RT.2 — stale-lease stderr would mis-route to rebase_push_failed: $STALE_PUSH_STDERR"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$LEASE_TMP"
+
+echo "== S23: re-entry never re-mints RUN_ID, and BOTH counters advance =="
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_state\(\)' \
+  "S23.1 — the CI loop counters have an on-disk home"
+assert_grep "$REVIEW_PR" 'review_fleet_read_ci_state "\$CI_LOOP_STATE" ci_loop_iter' \
+  "S23.2 — the re-entry fence reads the counter back from disk"
+# REVIEW_ITERATION advances ONLY when Phase 1 actually re-runs, so it keeps its
+# single site. CI_FIX_LOOP_ITER now has TWO, because the multi-stage-rebase
+# restage is a loop iteration too — the arm's own comment always said it was
+# "bounded by CI_FIX_LOOP_CAP", and nothing advanced the counter, so wave 2
+# recomputed wave 1's authority pathname and died on `authority_preexists`.
+# The invariant that replaces "exactly one site" is: EVERY site that advances
+# the counter must also cap-check it and persist it, or the next fresh shell
+# reads the old value back and the advance never happened.
+REVIEW_ITER_INCREMENTS="$(grep -c 'REVIEW_ITERATION=\$((REVIEW_ITERATION + 1))' "$REVIEW_PR")"
+if [ "$REVIEW_ITER_INCREMENTS" = 1 ]; then
+  echo "  PASS  S23.3 — exactly ONE site increments REVIEW_ITERATION (it tracks Phase 1 re-runs)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23.3 — REVIEW_ITERATION increment sites: $REVIEW_ITER_INCREMENTS (want 1)"; FAIL=$((FAIL + 1))
+fi
+# Every CI_FIX_LOOP_ITER advance, in its own fence, followed by a cap check and
+# an on-disk write. Checked per fence so a site that skipped either is named.
+CI_ITER_FENCE_REPORT="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "CI_FIX_LOOP_ITER=$((") > 0) {
+      sites += 1
+      if (index(buf, "-gt 3") > 0 && index(buf, "review_fleet_write_ci_state") > 0) good += 1
+    }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { printf "%d %d", sites, good }
+' "$REVIEW_PR")"
+CI_ITER_SITES="${CI_ITER_FENCE_REPORT% *}"
+CI_ITER_GOOD="${CI_ITER_FENCE_REPORT#* }"
+if [ "$CI_ITER_SITES" -ge 2 ] && [ "$CI_ITER_SITES" = "$CI_ITER_GOOD" ]; then
+  echo "  PASS  S23.3b — all $CI_ITER_SITES CI_FIX_LOOP_ITER advance sites cap-check AND persist"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23.3b — $CI_ITER_SITES advance site(s), only $CI_ITER_GOOD cap-check and persist"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" 'rebase_conflict_restage_cap' \
+  "S23.3c — the restage path has its own cap terminal (it is not an unbounded re-entry)"
+# THE TRAP THIS CLOSES: childDirAbs() keys on reviewIteration ALONE. Without the
+# lockstep increment, iteration 2 rebinds iteration 1's result.md paths and the
+# capture verbs freeze STALE bytes while every equality still passes.
+# EXECUTABLE lines only, inside the Phase 3 byte range: the re-entry prose names
+# both identifiers precisely in order to explain why neither may run again.
+PHASE3_SLICE="$(awk '
+  /^6c\. \*\*Phase 3 — CI Health\*\*/ { inphase = 1 }
+  /^### Phase 3 audit JSON shape/ { if (inphase) exit }
+  inphase && /^[ \t]*```bash/ { fence = 1; next }
+  inphase && fence && /^[ \t]*```[ \t]*$/ { fence = 0; next }
+  inphase && fence { print }
+' "$REVIEW_PR")"
+if grep -qE 'REVIEW_RUN_ID_REQUEST|review_reserve_run_directory' <<<"$PHASE3_SLICE"; then
+  echo "  FAIL  S23.4 — Phase 3 re-mints RUN_ID; the evidence directory would fork mid-run"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S23.4 — Phase 3 never re-mints RUN_ID (re-entry goes to Step 4, not Step 1)"; PASS=$((PASS + 1))
+fi
+
+echo "== S23-RUNTIME: the counters survive a FRESH shell with a cleared environment =="
+CI_STATE_TMP="$(mktemp -d)"
+bash -c '. "$1"; review_fleet_write_ci_state "$2/ci.json" 3 2 "[]" "[\"code_bug\"]"' \
+  _ "$ARGS_LIB_PHASE3" "$CI_STATE_TMP" >/dev/null 2>&1
+# env -i: an env-passing probe would MASK the whole class this exists to catch.
+CI_STATE_READBACK="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_read_ci_state "$2/ci.json" ci_loop_iter' \
+  _ "$ARGS_LIB_PHASE3" "$CI_STATE_TMP" 2>/dev/null)"
+if [ "$CI_STATE_READBACK" = 3 ]; then
+  echo "  PASS  S23-RT.1 — the cap check reads 3 in a shell that inherited nothing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S23-RT.1 — the loop counter did not survive a fresh shell: '$CI_STATE_READBACK'"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$CI_STATE_TMP"
+
+echo "== S24: ONE push site, reachable from every terminal, self-contained =="
+# The bug this block exists over: `ci-code-fixer` and `ci-rebase-handler` were
+# BOTH demoted to preparers (neither has a remote-write tool), and the only
+# `git push` in Phase 3 sat inside the CONFLICT-RESOLVE arm. So the two common
+# terminals — a clean rebase and an APPLIED code fix — produced local commits
+# that nothing published, the next 6c.1 PROBE re-derived the same red run off an
+# unchanged remote head, and the loop burned to loop_cap_exhausted. The headline
+# capability of the phase was absent while the prose claimed it was wired.
+PHASE3_FENCES="$(awk '
+  /^6c\. \*\*Phase 3 — CI Health\*\*/ { inphase = 1 }
+  /^### Phase 3 audit JSON shape/ { if (inphase) exit }
+  inphase && /^[ \t]*```bash/ { fence = 1; next }
+  inphase && fence && /^[ \t]*```[ \t]*$/ { fence = 0; next }
+  inphase && fence { print }
+' "$REVIEW_PR")"
+PHASE3_PUSH_SITES="$(grep -cE '^[^#]*git .*[^-]push ' <<<"$PHASE3_FENCES")"
+if [ "$PHASE3_PUSH_SITES" = 1 ]; then
+  echo "  PASS  S24.1 — Phase 3 has EXACTLY one executable push site"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.1 — Phase 3 has $PHASE3_PUSH_SITES executable push sites (want exactly 1)"; FAIL=$((FAIL + 1))
+fi
+if grep -qE 'push origin "\$\{NEW_HEAD_SHA\}:refs/heads/\$\{CI_PR_HEAD_BRANCH\}"' <<<"$PHASE3_FENCES"; then
+  echo "  PASS  S24.2 — the push names an explicit SHA and an explicit ref, never symbolic HEAD"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.2 — the Phase 3 push does not publish an explicit sha:ref pair"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$REVIEW_PR" '6c\.4w\.3' \
+  "S24.3 — the single leased push is a NAMED step both fix arms can route to"
+# Reachability, per terminal. A push nothing reaches is the bug this block is
+# about, so each producing terminal must name the step by number.
+for terminal in APPLIED REBASED; do
+  if grep -qE "CI_FIXER_TERMINAL_STATUS=$terminal\b[^\`]*(\`|.)*6c\.4w\.3" "$REVIEW_PR"; then
+    echo "  PASS  S24.4[$terminal] — the $terminal terminal routes to 6c.4w.3"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S24.4[$terminal] — the $terminal terminal does not route to the push step"; FAIL=$((FAIL + 1))
+  fi
+done
+# The push fence must be SELF-CONTAINED: a fresh harness shell inherits nothing,
+# and a lease read from an unset $CI_AUTHORITY_PATH degrades to
+# `--force-with-lease=":"` against `origin ""`.
+PUSH_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "--force-with-lease=") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || PUSH_FENCE=""
+PUSH_SELF_CONTAINED=ok
+for token in 'review_fleet_read_sidecar' 'read-ci-authority-member' \
+             'review_fleet_load_ci_counters' 'review_ci_push_abort()' \
+             'review_fleet_read_ci_pointer' 'rev-parse HEAD'; do
+  grep -qF -- "$token" <<<"$PUSH_FENCE" \
+    || PUSH_SELF_CONTAINED="missing:$token"
+done
+if [ "$PUSH_SELF_CONTAINED" = ok ]; then
+  echo "  PASS  S24.5 — the push fence re-derives binding, lease, branch, counters and HEAD itself"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.5 — the push fence depends on a dead shell ($PUSH_SELF_CONTAINED)"; FAIL=$((FAIL + 1))
+fi
+# ...and it must REFUSE an empty lease rather than force-push against nothing.
+if grep -qF 'ci_authority_unreadable' <<<"$PUSH_FENCE"; then
+  echo "  PASS  S24.6 — an unreadable/empty lease or branch halts instead of pushing"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.6 — the push fence does not refuse an empty lease"; FAIL=$((FAIL + 1))
+fi
+# The staged set: `git add --` with ZERO pathspecs exits 0 and stages nothing,
+# so the `|| abort` guard is silent. The list must come off disk in the SAME
+# fence that stages it.
+STAGE_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "add -- \"${conflicted_files[@]}\"") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || STAGE_FENCE=""
+if grep -qF 'CONFLICT_PATHS_FILE' <<<"$STAGE_FENCE" \
+   && grep -qF 'conflicted_files+=(' <<<"$STAGE_FENCE"; then
+  echo "  PASS  S24.7 — the staging fence rebuilds conflicted_files from the on-disk list"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.7 — git add reads a shell array built in a different fence (stages nothing, exits 0)"; FAIL=$((FAIL + 1))
+fi
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_conflict_paths\(\)' \
+  "S24.8 — the conflicted-file set has an on-disk home"
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_push\(\)' \
+  "S24.9 — the pushed sha/agent pair has an on-disk home"
+# 6c.4 ROUTE and 6c.4w.1 are different shells too. Every ROUTE scalar the mint
+# fence consumes must land in something that FAILS CLOSED on an empty value —
+# prepare-ci-authority's required-member table for most of them, and an explicit
+# guard for the two it does not see.
+MINT_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "review_fleet_bind_ci \"$CI_FIXER_EDGE_ID\"") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || MINT_FENCE=""
+# The guard's own case WORD must carry `${…:-}`. Under `set -u` the word is
+# expanded BEFORE any arm is selected, so a bare `"$CI_FIXER_SLUG_BASE"` killed
+# the fence with a raw unbound-variable message in exactly the case the `*)` arm
+# documents — the guard could never fire for the value it exists to catch.
+if grep -qF 'case "${CI_FIXER_SLUG_BASE:-}" in' <<<"$MINT_FENCE" \
+   && grep -qF 'ci_fix_dispatch_slug_base_invalid' <<<"$MINT_FENCE"; then
+  echo "  PASS  S24.10 — a lost CI_FIXER_SLUG_BASE halts instead of splitting the child directory"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.10 — CI_FIXER_SLUG_BASE is unchecked (or its case word is a bare expansion that dies under set -u)"; FAIL=$((FAIL + 1))
+fi
+if grep -qF "\${CI_FIXER_INPUTS:-}\" | jq -e 'type == \"object\"'" <<<"$MINT_FENCE"; then
+  echo "  PASS  S24.11 — a lost CI_FIXER_INPUTS halts before it is pinned by digest as garbage"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.11 — CI_FIXER_INPUTS is written and digested without a set-u-safe shape check"; FAIL=$((FAIL + 1))
+fi
+# ...and the SAME guard on the FIRST Phase 3 stage, which shipped without one.
+# `digest --minimum 1` accepts a lone newline, so an unset CI_CLASSIFY_INPUTS
+# was pinned as garbage and `prepare-ci-authority` then died
+# `ci_authority_invalid` rc=74 with NO audit event — the precise failure mode
+# the counter fix removed everywhere else. Its two siblings both fail closed.
+CLASSIFY_MINT_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "review_fleet_bind_ci review_pr.ci.classify") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || CLASSIFY_MINT_FENCE=""
+if grep -qF "\${CI_CLASSIFY_INPUTS:-}\" | jq -e 'type == \"object\"'" <<<"$CLASSIFY_MINT_FENCE" \
+   && grep -qF 'classification_inputs_invalid' <<<"$CLASSIFY_MINT_FENCE"; then
+  echo "  PASS  S24.11b — a lost CI_CLASSIFY_INPUTS halts with an audit event, like both siblings"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.11b — the classify mint fence writes and digests its inputs unchecked"; FAIL=$((FAIL + 1))
+fi
+# ...and the lease/branch half must be enforced by the CONTRACT, at mint, for
+# BOTH mutating arms — not by prose asking the fence to remember them.
+assert_grep "$CONTRACT_PY" '"review_pr\.ci\.fix_code": \("failure_class", "signal_anchor", "parent_sha",' \
+  "S24.12 — the fix_code authority has a required-member list"
+if python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("cfc", sys.argv[1])
+m = importlib.util.module_from_spec(spec); sys.modules["cfc"] = m
+spec.loader.exec_module(m)
+for edge in ("review_pr.ci.fix_code", "review_pr.ci.rebase"):
+    required = m.CI_AUTHORITY_REQUIRED_MEMBERS[edge]
+    assert "lease_sha" in required and "pr_branch" in required, (edge, required)
+' "$CONTRACT_PY" 2>/dev/null; then
+  echo "  PASS  S24.13 — BOTH mutating arms refuse at mint without a lease and a branch"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24.13 — a mutating CI authority can be minted with no lease, then reach 6c.4w.3"; FAIL=$((FAIL + 1))
+fi
+
+echo "== S24-RUNTIME: the cross-fence records survive a shell that inherited nothing =="
+S24_TMP="$(mktemp -d)"
+# A path with a SPACE and one with a NEWLINE: git reports both, and a
+# newline-split handoff silently truncates the set it is about to stage.
+bash -c '. "$1"; review_fleet_write_conflict_paths "$2/paths.zlist" "src/a b.py" "src/plain.py"' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1
+S24_READBACK="$(env -i PATH="$PATH" bash -c '
+  count=0
+  while IFS= read -r -d "" p; do count=$((count + 1)); last="$p"; done <"$1/paths.zlist"
+  printf "%s|%s" "$count" "$last"' _ "$S24_TMP" 2>/dev/null)"
+if [ "$S24_READBACK" = '2|src/plain.py' ]; then
+  echo "  PASS  S24-RT.1 — the conflicted-path list round-trips (space-bearing path intact)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24-RT.1 — conflicted-path handoff drifted: '$S24_READBACK'"; FAIL=$((FAIL + 1))
+fi
+# An empty set must REFUSE to publish a list, or step 3 stages nothing again.
+if bash -c '. "$1"; review_fleet_write_conflict_paths "$2/empty.zlist"' \
+     _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1; then
+  echo "  FAIL  S24-RT.2 — an empty conflicted-file set was accepted"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S24-RT.2 — an empty conflicted-file set is refused, not published"; PASS=$((PASS + 1))
+fi
+bash -c '. "$1"; review_fleet_write_ci_push "$2/push.json" "'"$(printf 'a%.0s' $(seq 40))"'" ci-rebase-handler' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1
+S24_PUSH_SHA="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_read_ci_push "$2/push.json" sha' \
+  _ "$ARGS_LIB_PHASE3" "$S24_TMP" 2>/dev/null)"
+if [ "$S24_PUSH_SHA" = "$(printf 'a%.0s' $(seq 40))" ]; then
+  echo "  PASS  S24-RT.3 — the pushed sha reaches the re-entry fence through a cleared environment"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S24-RT.3 — the push record did not survive a fresh shell: '$S24_PUSH_SHA'"; FAIL=$((FAIL + 1))
+fi
+if bash -c '. "$1"; review_fleet_write_ci_push "$2/bad.json" "" ci-rebase-handler' \
+     _ "$ARGS_LIB_PHASE3" "$S24_TMP" >/dev/null 2>&1; then
+  echo "  FAIL  S24-RT.4 — an empty sha was recorded as a push"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S24-RT.4 — an empty sha is refused, so fix_pushes can never name no commit"; PASS=$((PASS + 1))
+fi
+rm -rf "$S24_TMP"
+
+echo "== S25: the ci-fix sidecar is FOUND, never recomputed =="
+# The mint fence (6c.4w.1) writes `…-iter<R>-ci<C>.launch.json` under the
+# counter it holds; the push fence (6c.4w.3) used to recompute that filename
+# from the counter it read back off ci-loop-state.json. Those are the same
+# number only until the CONFLICT arm's restage advances it — deliberately,
+# because the restage IS a loop iteration and that is what bounds it. After any
+# multi-stage rebase the push fence looked for `…-ci2.launch.json` while only
+# `…-ci1.launch.json` had ever been written, aborted `ci_fixer_binding_unreadable`
+# and ran `git rebase --abort`: every resolved conflict destroyed, nothing
+# pushed. Recomputation cannot be made correct here; the writer publishes WHERE
+# it wrote and every reader follows the pointer.
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_write_ci_pointer\(\)' \
+  "S25.1 — the launch sidecar has a fixed-name pointer producer"
+assert_grep "$REVIEW_PR" 'review_fleet_write_ci_pointer "\$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer\.txt"' \
+  "S25.2 — the ci-fix mint fence publishes where it wrote the sidecar"
+# EXACTLY ONE fence may derive that filename — the one that writes the sidecar
+# and then publishes the pointer. Every other occurrence is a recomputation.
+S25_DERIVATIONS="$(grep -c 'REVIEW_FLEET_CI_SIDECAR="\$REVIEW_FLEET_RUN_DIR/review-fleet-ci-fix-iter' "$REVIEW_PR" || true)"
+if [ "$S25_DERIVATIONS" = 1 ]; then
+  echo "  PASS  S25.3 — exactly one fence derives the ci-fix sidecar filename (the one that writes it)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S25.3 — $S25_DERIVATIONS fences derive the ci-fix sidecar filename (want exactly 1)"; FAIL=$((FAIL + 1))
+fi
+S25_PTR_READERS="$(grep -c 'review_fleet_read_ci_pointer "\$REVIEW_FLEET_RUN_DIR/ci-fix-launch-pointer\.txt"' "$REVIEW_PR")"
+if [ "$S25_PTR_READERS" -ge 4 ]; then
+  echo "  PASS  S25.4 — all four downstream readers (capture, push, conflict step 2, ci-defer) follow the pointer"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S25.4 — only $S25_PTR_READERS fence(s) follow the ci-fix launch pointer (want >= 4)"; FAIL=$((FAIL + 1))
+fi
+
+echo "== S25-RUNTIME: the restage that used to break the push =="
+S25_TMP="$(mktemp -d)"
+# Mint under ci1, exactly as 6c.4w.1 does.
+bash -c '. "$1"
+  review_fleet_write_sidecar "$2/review-fleet-ci-fix-iter1-ci1.launch.json" '"'"'{"edge_id":"review_pr.ci.rebase"}'"'"' "$2/child" inst 0000000000000000000000000000000000000000
+  review_fleet_write_ci_pointer "$2/ci-fix-launch-pointer.txt" "$2/review-fleet-ci-fix-iter1-ci1.launch.json"' \
+  _ "$ARGS_LIB_PHASE3" "$S25_TMP" >/dev/null 2>&1
+# The CONFLICT arm's restage advances the counter and PERSISTS it.
+bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 2 1 "[]" "[]"' \
+  _ "$ARGS_LIB_PHASE3" "$S25_TMP" >/dev/null 2>&1
+# The OLD derivation, in a fresh shell that read the counters back: the file it
+# names does not exist. If this ever stops being true the row below is vacuous.
+S25_OLD="$(env -i PATH="$PATH" bash -c '. "$1"
+  review_fleet_load_ci_counters "$2" || exit 9
+  test -r "$2/review-fleet-ci-fix-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER}.launch.json" && echo found || echo missing' \
+  _ "$ARGS_LIB_PHASE3" "$S25_TMP" 2>&1)"
+S25_NEW="$(env -i PATH="$PATH" bash -c '. "$1"
+  sidecar="$(review_fleet_read_ci_pointer "$2/ci-fix-launch-pointer.txt")" || exit 9
+  review_fleet_read_sidecar "$sidecar" binding' _ "$ARGS_LIB_PHASE3" "$S25_TMP" 2>&1)"
+if [ "$S25_OLD" = missing ] && [ "$S25_NEW" = '{"edge_id":"review_pr.ci.rebase"}' ]; then
+  echo "  PASS  S25-RT.1 — after a restage the recomputed name is gone and the pointer still resolves"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S25-RT.1 — recomputed='$S25_OLD' pointer='$S25_NEW'"; FAIL=$((FAIL + 1))
+fi
+# A pointer naming a sidecar that is not there must REFUSE, never return "".
+if bash -c '. "$1"
+    review_fleet_write_ci_pointer "$2/dangling.txt" "$2/nothing-here.json"
+    review_fleet_read_ci_pointer "$2/dangling.txt"' _ "$ARGS_LIB_PHASE3" "$S25_TMP" >/dev/null 2>&1; then
+  echo "  FAIL  S25-RT.2 — a dangling pointer read as success"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S25-RT.2 — a pointer to a missing sidecar refuses instead of yielding an empty path"; PASS=$((PASS + 1))
+fi
+rm -rf "$S25_TMP"
+
+echo "== S26: the rebase-state probe is answered by the WORKTREE, not the cwd =="
+# `git -C <dir> rev-parse --git-path rebase-merge` prints `.git/rebase-merge` —
+# RELATIVE to <dir>. `[ -d "$(…)" ]` therefore asked the question of whatever
+# directory the harness shell happened to be in: from a plain subdirectory of
+# the SAME repository it answers "no rebase" mid-rebase. At the push fence that
+# silently bypassed `rebase_still_in_progress` and force-pushed the interior
+# mid-rebase HEAD; at the three cleanup sites it made `git rebase --abort` a
+# no-op. The Python twin has always joined the relative result with working_dir.
+assert_no_grep "$REVIEW_PR" '\[ -d "\$\(git -C "\$WORKTREE_ROOT" rev-parse --git-path' \
+  "S26.1 — no fence tests a relative --git-path result against its own cwd"
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_rebase_dir\(\)' \
+  "S26.2 — ONE shell definition of \"is a rebase live\", next to the Python twin's"
+S26_SITES="$(grep -c 'review_fleet_rebase_dir "\$WORKTREE_ROOT"' "$REVIEW_PR")"
+if [ "$S26_SITES" -ge 4 ]; then
+  echo "  PASS  S26.3 — all four rebase-state sites use the shared probe"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S26.3 — only $S26_SITES site(s) use review_fleet_rebase_dir (want >= 4)"; FAIL=$((FAIL + 1))
+fi
+# ...and "git could not answer" must not read as "no rebase" at the push fence.
+assert_grep "$REVIEW_PR" 'ci_rebase_state_unreadable' \
+  "S26.4 — an unreadable rebase state halts instead of licensing the push"
+
+echo "== S26-RUNTIME: a real mid-rebase fixture, probed from three directories =="
+S26_TMP="$(mktemp -d)"
+(
+  set -e
+  cd "$S26_TMP"
+  git init -q -b main repo
+  cd repo
+  git config user.email fixture@example.invalid
+  git config user.name Fixture
+  mkdir sub
+  printf 'base\n' >f.txt
+  git add -- f.txt
+  git commit -qm 'test: base'
+  git checkout -qb feat
+  printf 'feat\n' >f.txt
+  git commit -qam 'test: feat'
+  git checkout -q main
+  printf 'main\n' >f.txt
+  git commit -qam 'test: main'
+  git checkout -q feat
+  git rebase main
+) >/dev/null 2>&1 || true    # the fixture rebase MUST conflict; `set -e` is live here
+S26_REPO="$S26_TMP/repo"
+if [ -n "$(git -C "$S26_REPO" status --porcelain | grep '^UU ' || true)" ]; then
+  S26_PROBE_OLD="$(cd "$S26_REPO/sub" && [ -d "$(git -C "$S26_REPO" rev-parse --git-path rebase-merge)" ] && echo detected || echo missed)"
+  S26_PROBE_NEW="$(cd "$S26_REPO/sub" && bash -c '. "$1"; review_fleet_rebase_dir "$2" >/dev/null && echo detected || echo missed' _ "$ARGS_LIB_PHASE3" "$S26_REPO")"
+  S26_PROBE_TMP="$(cd / && bash -c '. "$1"; review_fleet_rebase_dir "$2" >/dev/null && echo detected || echo missed' _ "$ARGS_LIB_PHASE3" "$S26_REPO")"
+  if [ "$S26_PROBE_OLD" = missed ] && [ "$S26_PROBE_NEW" = detected ] && [ "$S26_PROBE_TMP" = detected ]; then
+    echo "  PASS  S26-RT.1 — the old cwd-relative test MISSES a live rebase; the shared probe finds it from anywhere"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S26-RT.1 — old=$S26_PROBE_OLD new(subdir)=$S26_PROBE_NEW new(/)=$S26_PROBE_TMP"; FAIL=$((FAIL + 1))
+  fi
+  # rc must be THREE-valued: 1 for a clean repo, 2 when git cannot answer.
+  S26_CLEAN_RC=0
+  bash -c '. "$1"; review_fleet_rebase_dir "$2" >/dev/null' _ "$ARGS_LIB_PHASE3" "$REPO_ROOT" || S26_CLEAN_RC=$?
+  S26_BROKEN_RC=0
+  bash -c '. "$1"; review_fleet_rebase_dir "$2" >/dev/null' _ "$ARGS_LIB_PHASE3" "$S26_TMP/not-a-repo" || S26_BROKEN_RC=$?
+  if [ "$S26_CLEAN_RC" = 1 ] && [ "$S26_BROKEN_RC" = 2 ]; then
+    echo "  PASS  S26-RT.2 — no-rebase (rc 1) and probe-failed (rc 2) are distinguishable"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S26-RT.2 — clean rc=$S26_CLEAN_RC broken rc=$S26_BROKEN_RC (want 1 and 2)"; FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  S26-RT — the mid-rebase fixture did not conflict; the rows above would be vacuous"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$S26_TMP"
+
+echo "== S27: BOTH loop counters come off disk in every fence keyed on them =="
+# Half of Phase 3 read the counters off ci-loop-state.json and half interpolated
+# the fresh-shell defaults. Two sources of truth for one counter: on CI
+# iteration 2 the classify mint fence recomputed
+# `ci-authority-classify-iter1-ci1.json`, which iteration 1 had already
+# published — and prepare-ci-authority publishes NO-CLOBBER, so it died
+# `authority_preexists` with `return 74` and no audit event. CI_FIX_LOOP_CAP=3
+# was unreachable in practice.
+#
+# REVIEW_ITERATION is the same defect one phase earlier, and it was left out of
+# this section's first cut on the grounds that Phase 1/2 "run once". They do
+# not: 6c.4w.3 pushes a CI fix, the re-entry fence advances BOTH counters, and
+# Phase 1 re-runs. Its first fence is a fresh shell too, so REVIEW_ITERATION
+# arrived either empty -- `review_fleet_child_dir` rejects it rc=2 and the
+# Phase 3 -> Phase 1 loop cannot complete a second pass -- or as a stale
+# inherited 1, which rebinds pass 2 onto pass 1's result.md paths and freezes
+# STALE bytes while every equality still passes. That is the worse half: not a
+# crash, a clean green built on the previous iteration's evidence.
+assert_grep "$ARGS_LIB_PHASE3" 'review_fleet_load_ci_counters\(\)' \
+  "S27.1 — ONE reader for the counter pair"
+S27_VERDICT="$(python3 - "$REVIEW_PR" <<'PY_S27'
+import re, sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+fences, current, indent = [], None, 0
+for line in lines:
+    opening = re.match(r"^([ \t]*)```bash\b", line)
+    if opening and current is None:
+        current, indent = [], len(opening.group(1))
+        continue
+    if current is not None and re.match(r"^[ \t]*```[ \t]*$", line):
+        fences.append("\n".join(current))
+        current = None
+        continue
+    if current is not None:
+        current.append(line)
+
+# COMMENT-STRIPPED, the S13.11d/S21.9 precedent. Every one of these fences
+# EXPLAINS why it reads the counters off disk, and several name
+# `review_fleet_load_ci_counters` inside that explanation -- so a fence whose
+# actual call was deleted stayed green on its own prose. Proven by mutation:
+# removing the call from the CONFLICT arm's step-3 fence left this row at PASS
+# until the strip below landed.
+fences = [
+    "\n".join(row for row in body.split("\n") if not row.lstrip().startswith("#"))
+    for body in fences
+]
+
+# A fence that KEYS an artifact pathname on a loop counter must have read that
+# counter off disk in the SAME fence -- there is no other way for it to be
+# right on iteration 2.
+# BOTH counters, because the re-entry fence advances both in lockstep and both
+# are keyed on. CI_FIX_LOOP_ITER keys Phase 3's own authority and sidecar names;
+# REVIEW_ITERATION keys the Phase 1/2 authority, applied-content, sidecar and
+# instance-id names AND -- through `reviewIteration` and the `bind_*` binders --
+# every child directory workflow.js derives, since childDirAbs() keys on
+# reviewIteration ALONE.
+ci_keyed = re.compile(
+    r"(-ci\$\{CI_FIX_LOOP_ITER"
+    r"|ci-refused-synthetic-\$\{CI_FIX_LOOP_ITER"
+    r"|review_fleet_ci_slug [^\n]*\$\{CI_FIX_LOOP_ITER)"
+)
+review_keyed = re.compile(
+    r"(-iter\$\{REVIEW_ITERATION\}"
+    r"|reviewIteration=\"\$REVIEW_ITERATION\""
+    r"|review_fleet_bind_[a-z_]+ [^\n]*\"\$REVIEW_ITERATION\""
+    r"|review_fleet_child_dir [^\n]*\"\$REVIEW_ITERATION\")"
+)
+# THE SHARED READER, not "any spelling of reading". Accepting an open-coded
+# `review_fleet_read_ci_state` pair is what let the CONFLICT arm's step-3 fence
+# ship its own copy WITHOUT the else-branch default the helper supplies — and on
+# the first CI iteration there is no ci-loop-state.json yet, so the very next
+# line dereferenced `${REVIEW_ITERATION}` bare under `set -u`: rc=126, zero
+# audit events, worktree left mid-rebase. Two spellings of "read the counters"
+# IS the defect this section exists to end.
+reads = re.compile(r"review_fleet_load_ci_counters")
+offenders, ci_examined, review_examined = [], 0, 0
+for body in fences:
+    on_ci, on_review = bool(ci_keyed.search(body)), bool(review_keyed.search(body))
+    if not (on_ci or on_review):
+        continue
+    ci_examined += on_ci
+    review_examined += on_review
+    if reads.search(body):
+        continue
+    first = next((row.strip() for row in body.split("\n") if row.strip()), "<empty>")
+    offenders.append(first[:70])
+
+# Anti-vacuity, PER COUNTER: if the detector stops FINDING counter-keyed fences
+# it must fail, not go green on an empty set -- and one counter's spelling
+# changing must not be masked by the other counter's fences still being found.
+# That masking is not hypothetical: this section shipped scoped to CI_FIX_LOOP_ITER
+# alone and read green across twelve REVIEW_ITERATION-keyed fences that had no
+# reader at all.
+if ci_examined < 8:
+    print("VACUOUS:only %d CI-counter-keyed fence(s) found" % ci_examined)
+elif review_examined < 18:
+    print("VACUOUS:only %d REVIEW_ITERATION-keyed fence(s) found" % review_examined)
+elif offenders:
+    print("LEAKS:" + " | ".join(offenders))
+else:
+    print("OK:%d CI-keyed + %d REVIEW_ITERATION-keyed" % (ci_examined, review_examined))
+PY_S27
+)"
+case "$S27_VERDICT" in
+  OK:*)
+    echo "  PASS  S27.2 — all ${S27_VERDICT#OK:} fences read the counters off disk first"
+    PASS=$((PASS + 1))
+    ;;
+  *)
+    echo "  FAIL  S27.2 — $S27_VERDICT"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
+echo "== S28: the conflict fanout's cap is a TOTAL, its wave is the concurrency knob =="
+# `fanout_concurrency.conflict_resolver` is documented as a concurrency knob —
+# "split into ceil(N / cap) sequential waves" — and it was forwarded as BOTH
+# ciConflictCap and ciConflictWave. An 11-conflict PR therefore aborted
+# `bad_ci_conflict_count` with zero resolvers dispatched, refusing the exact
+# case dispatchRoster's wave loop exists to serve.
+assert_grep "$REVIEW_PR" 'ciConflictWave="\$CONFLICT_RESOLVER_CAP"' \
+  "S28.1 — the concurrency knob is the WAVE size"
+assert_no_grep "$REVIEW_PR" 'ciConflictCap="\$CONFLICT_RESOLVER_CAP"' \
+  "S28.2 — the concurrency knob is NOT the total ceiling"
+assert_grep "$REVIEW_PR" 'ciConflictCap="\$REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP"' \
+  "S28.3 — the total ceiling is its own named constant"
+assert_grep "$REVIEW_PR" 'rebase_conflict_set_too_large' \
+  "S28.4 — a set above the ceiling refuses with a reason that names the cause"
+# The shell constant must equal the ceiling the engine EFFECTIVELY enforces, or
+# the enumerator accepts a set the engine then refuses. That ceiling is
+# `min(ciConflictCap clamp default, maxAgents clamp default)`, not the
+# ciConflictCap literal: #383 wrapped the clamp in `Math.min(..., maxAgents)`
+# because a cap above maxAgents passes the enumerator and is then refused by
+# ceilingGate() with zero children dispatched. Comparing the ciConflictCap
+# literal alone cannot see that drift -- the script's own comment above the
+# Math.min says exactly that -- so this reads BOTH defaults and does the min.
+S28_SHELL="$(bash -c '. "$1"; printf "%s" "$REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP"' _ "$ARGS_LIB_PHASE3" 2>/dev/null)"
+S28_CLAMP="$(sed -nE 's/^const ciConflictCap = Math\.min\(clampInt\(CFG\.ciConflictCap, 1, [0-9]+, ([0-9]+)\), maxAgents\);$/\1/p' "$WORKFLOW_JS")"
+S28_MAX="$(sed -nE 's/^const maxAgents = clampInt\(CFG\.maxAgents, 1, [0-9]+, ([0-9]+)\);$/\1/p' "$WORKFLOW_JS")"
+if [ -n "$S28_CLAMP" ] && [ -n "$S28_MAX" ]; then
+  if [ "$S28_CLAMP" -lt "$S28_MAX" ]; then S28_JS="$S28_CLAMP"; else S28_JS="$S28_MAX"; fi
+else
+  S28_JS=''
+fi
+if [ -n "$S28_SHELL" ] && [ "$S28_SHELL" = "$S28_JS" ]; then
+  echo "  PASS  S28.5 — the controller ceiling ($S28_SHELL) and the engine's effective ceiling (min($S28_CLAMP,$S28_MAX)) agree"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S28.5 — ceiling drift: shell='$S28_SHELL' effective='$S28_JS' (ciConflictCap='$S28_CLAMP' maxAgents='$S28_MAX')"; FAIL=$((FAIL + 1))
+fi
+
+echo "== S29: the CONFLICT arm's fences are self-contained =="
+# Step 2 was the one fence the on-disk-handoff treatment missed. Under `set -u`
+# a nested `$(review_json_string "$CI_BASE_SHA")` kills only the INNER subshell
+# — the parent stays rc=0 and pins an EMPTY value into the child's input.json
+# with no error at all — while a bare `$CONFLICT_RESOLVER_CAP` in the argument
+# list kills the fence with a raw "unbound variable", no audit, no cleanup.
+CONFLICT_MINT_FENCE="$(awk '
+  /^[ \t]*```bash/ { fence = 1; buf = ""; next }
+  fence && /^[ \t]*```[ \t]*$/ {
+    if (index(buf, "review_fleet_bind_ci_conflicts ") > 0) { printf "%s", buf; found = 1; exit }
+    fence = 0; buf = ""; next
+  }
+  fence { buf = buf $0 "\n" }
+  END { if (!found) exit 1 }
+' "$REVIEW_PR")" || CONFLICT_MINT_FENCE=""
+# COMMENT-STRIPPED, the S13.11d/S21.9 precedent. The fence's own prose block
+# NAMES `read-ci-authority-member` in order to explain why it is used instead of
+# `jq`, so the raw-text grep was satisfied by the explanation rather than by the
+# code: deleting the entire six-scalar re-derivation loop — the whole fix — left
+# this suite at `failed: 0`. The other three tokens were non-vacuous already;
+# this makes all four judge code only.
+CONFLICT_MINT_CODE="$(grep -v '^[[:space:]]*#' <<<"$CONFLICT_MINT_FENCE")"
+S29_MISSING=""
+for token in 'review_fleet_load_ci_counters' 'read-ci-authority-member' \
+             'uberdev_read_int_in_range fanout_concurrency.conflict_resolver' \
+             'lib/config-read.sh'; do
+  grep -qF -- "$token" <<<"$CONFLICT_MINT_CODE" || S29_MISSING="$S29_MISSING $token"
+done
+# ...and the loop that reads those members back is judged as a LOOP, not as a
+# lone token: five members, each bound to its own scalar, each refused when the
+# pinned document hands back an empty value.
+S29_LOOP_MISSING=""
+for token in 'for CI_AUTHORITY_MEMBER in pr_branch base_branch base_sha run_id head_sha' \
+             '--member "$CI_AUTHORITY_MEMBER"' \
+             '[ -n "$CI_AUTHORITY_VALUE" ]'; do
+  grep -qF -- "$token" <<<"$CONFLICT_MINT_CODE" || S29_LOOP_MISSING="$S29_LOOP_MISSING|$token"
+done
+if [ -z "$S29_LOOP_MISSING" ]; then
+  echo "  PASS  S29.1b — the six-scalar re-derivation loop itself is present, not just its name"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S29.1b — the conflict mint fence lost its re-derivation loop:$S29_LOOP_MISSING"; FAIL=$((FAIL + 1))
+fi
+if [ -z "$S29_MISSING" ]; then
+  echo "  PASS  S29.1 — the conflict mint fence re-derives its counters, refs and cap itself"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S29.1 — the conflict mint fence still inherits:$S29_MISSING"; FAIL=$((FAIL + 1))
+fi
+# ...and the per-resolver authority pin reaches the PROMPT as a per-resolver
+# value, not as the last loop iteration's scalar shared by everyone.
+assert_grep "$REVIEW_PR" 'ciConflictAuthorityPrefixAbs="\$CONFLICT_AUTHORITY_PREFIX"' \
+  "S29.2 — the envelope carries the authority PREFIX, one spelling of the rule"
+assert_no_grep "$REVIEW_PR" 'ciAuthorityPathAbs="\$CONFLICT_AUTHORITY_PATH"' \
+  "S29.3 — no single authority path is forwarded for the whole conflict stage"
+assert_grep "$WORKFLOW_JS" 'ciConflictAuthorityPrefixAbs \+ entry\.index' \
+  "S29.4 — each resolver's prompt names its OWN authority"
+
+echo "== S30: the single leased push refuses an unchanged HEAD =="
+# `_validate_ci_fix_code_outcome` returns NO_CHANGE when head_after ==
+# head_before, and 6c.5's "do NOT run 6c.4w.3" was prose with no reader. An
+# orchestrator that ran the fence anyway pushed the unchanged HEAD, the lease
+# matched, `git push` exited 0 ("Everything up-to-date"), and `ci_fix_pushed`
+# recorded a commit that fixed nothing — Phase 1 then re-entered on identical
+# code and the loop burned an iteration.
+if grep -qF 'ci_fix_no_change' <<<"$PUSH_FENCE" \
+   && grep -qF 'review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" head_before' <<<"$PUSH_FENCE"; then
+  echo "  PASS  S30.1 — the push fence compares the HEAD it is about to push against the sidecar's head_before"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S30.1 — the NO_CHANGE rule is still prose with no reader in the push fence"; FAIL=$((FAIL + 1))
+fi
+
+echo "== S31: the ci-defer arm has a reachable trigger and a bound issue URL =="
+# THE ARM HAD NO TRIGGER. `_validate_ci_fix_code_outcome` returned only APPLIED
+# or NO_CHANGE, a refusing ci-code-fixer makes no commit (so head_after ==
+# head_before), and 6c.5 mandates branching on the VALIDATED terminal — so
+# REFUSED and NO_CHANGE were indistinguishable and an orchestrator following
+# this file always took the NO_CHANGE bullet. Four fences, an authority edge and
+# a Workflow arm were dead code on every documented path.
+assert_grep "$CONTRACT_PY" '_ci_fix_code_declared_refusal' \
+  "S31.1 — the contract can derive a REFUSED terminal at all"
+assert_grep "$CONTRACT_PY" 'return \("REFUSED", rationale\) if rationale else \("NO_CHANGE", ""\)' \
+  "S31.2 — the refusal is read ONLY when HEAD did not move (it can never authorise a push)"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_RATIONALE="\$\(review_ci_json_member "\$CI_MUTATION_OUTCOME" rationale\)"' \
+  "S31.3 — 6c.4w.2 captures the sanitised rationale off the validated receipt"
+assert_grep "$REVIEW_PR" 'CI_FIXER_TERMINAL_STATUS=REFUSED' \
+  "S31.4 — 6c.5 routes the REFUSED terminal, not the agent's self-report"
+assert_grep "$CODE_FIXER_CI" '^rationale:' \
+  "S31.5 — the ci-code-fixer return contract documents the field the terminal depends on"
+# ...and the URL the arm exists to hand the operator. CI_REFUSED_ISSUE_URL was
+# assigned ONLY in the two MALFORMED branches, and the validated receipt carried
+# no URL at all — so the halt prose's `filed issue:` line and the audit field
+# `phases.phase3.ci_refused_issue_url` named an unbound variable exactly when
+# the filing had WORKED.
+assert_grep "$CONTRACT_PY" '"created_url": parsed\["created_url"\]' \
+  "S31.6 — validate-ci-persistence-result returns the filed issue URL"
+assert_grep "$REVIEW_PR" 'CI_REFUSED_ISSUE_URL="\$\(review_ci_json_member "\$CI_DEFER_RECEIPT" created_url\)"' \
+  "S31.7 — the capture fence binds CI_REFUSED_ISSUE_URL on the SUCCESS path"
+# The accumulated class comes off the digest-pinned authority, not from a
+# soft-defaulted scalar three stages upstream: `${failure_class:-unknown}` made
+# `phases.phase3.failure_classes_seen` read ["unknown"] on every single run.
+assert_grep "$REVIEW_PR" '--member failure_class' \
+  "S31.8 — the re-entry fence reads the class back out of the ci-fix authority"
+assert_no_grep "$REVIEW_PR" '\-\-arg class "\$\{failure_class:-unknown\}"' \
+  "S31.9 — no soft-defaulted class is recorded into the audit accumulator"
+
 echo
-echo "== S21: Phase 3's push target is same-repository-gated BEFORE the lease (#395) =="
+echo "== S32: Phase 3's push target is same-repository-gated BEFORE the lease (#395) =="
+# Numbered S32, not S21: this block and the ROUTE-stage-machine block above both
+# arrived as "S21" (this one from #395, that one from #383 half two) and the two
+# id spaces collided on the rebase. The Phase 3 wiring rows own S21-S31 because
+# they are contiguous; the #395 rows moved to the next free number.
+#
 # Phase 3 used to bind its push target with a bare
 # `gh pr view --json headRefName,baseRefName` and then fetch, lease and push
 # `origin <headRefName>`. `origin` is the repository the PR was opened AGAINST:
@@ -1784,47 +2698,54 @@ echo "== S21: Phase 3's push target is same-repository-gated BEFORE the lease (#
 PUSH_TARGET_LIB="$REPO_ROOT/plugins/uberdev/lib/review-push-target.sh"
 
 if [ -r "$PUSH_TARGET_LIB" ]; then
-  echo "  PASS  S21.1 — the resolver ships on disk (lib/review-push-target.sh)"
+  echo "  PASS  S32.1 — the resolver ships on disk (lib/review-push-target.sh)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S21.1 — missing resolver: $PUSH_TARGET_LIB"
+  echo "  FAIL  S32.1 — missing resolver: $PUSH_TARGET_LIB"
   echo "        a helper that takes arguments cannot live in a rendered command"
   echo "        fence — the templater substitutes every positional (#404)"
   FAIL=$((FAIL + 1))
 fi
 
 assert_grep "$REVIEW_PR" 'lib/review-push-target\.sh' \
-  "S21.2 — the Phase 3 arm sources the on-disk resolver"
+  "S32.2 — the Phase 3 arm sources the on-disk resolver"
 assert_grep "$REVIEW_PR" 'review_resolve_same_repo_push_target' \
-  "S21.3 — pr_head_branch/base_branch are bound through the resolver"
+  "S32.3 — pr_head_branch/base_branch are bound through the resolver"
 assert_no_grep "$REVIEW_PR" \
   'gh pr view "\$PR_NUMBER" --json headRefName,baseRefName' \
-  "S21.4 — the ungated headRefName binding is gone"
+  "S32.4 — the ungated headRefName binding is gone"
 assert_grep "$REVIEW_PR" 'ci_push_target_cross_repository' \
-  "S21.5 — typed data.subreason ci_push_target_cross_repository documented"
+  "S32.5 — typed data.subreason ci_push_target_cross_repository documented"
 assert_grep "$REVIEW_PR" 'ci_push_target_unresolved' \
-  "S21.6 — typed data.subreason ci_push_target_unresolved documented"
+  "S32.6 — typed data.subreason ci_push_target_unresolved documented"
 
-# S21.7 — ORDER IS THE POINT. #395 asks for the check "before the lease is
+# S32.7 — ORDER IS THE POINT. #395 asks for the check "before the lease is
 # captured rather than after": a lease over a ref the run could not identify
 # proves nothing, and `git fetch origin <fork-branch>` has already failed by
-# then. Both `git fetch origin` and the EXPECTED_OLD_SHA capture must sit BELOW
-# the gate in the file.
-S21_GATE_LINE="$(awk '/review_resolve_same_repo_push_target/ {print NR; exit}' "$REVIEW_PR")"
-S21_FETCH_LINE="$(awk '/^[[:space:]]*git fetch origin "\$pr_head_branch"/ {print NR; exit}' "$REVIEW_PR")"
-S21_LEASE_LINE="$(awk '/^[[:space:]]*EXPECTED_OLD_SHA="/ {print NR; exit}' "$REVIEW_PR")"
-if [ -n "$S21_GATE_LINE" ] && [ -n "$S21_FETCH_LINE" ] && [ -n "$S21_LEASE_LINE" ] \
-   && [ "$S21_GATE_LINE" -lt "$S21_FETCH_LINE" ] && [ "$S21_GATE_LINE" -lt "$S21_LEASE_LINE" ]; then
-  echo "  PASS  S21.7 — the gate resolves before the fetch and before the lease capture"
+# then. Both the fetch and the lease capture must sit BELOW the gate in the file.
+#
+# The two probes are name-adapted to the wired Phase 3 (#383 half two): the
+# lease scalar is `CI_LEASE_SHA`, captured with `rev-parse` inside the ROUTE
+# fence, and the fetch may carry a `-C "$WORKTREE_ROOT"`. `EXPECTED_OLD_SHA` —
+# what this row probed while the arm was still dead — is now BANNED from this
+# file by S13.11b, so the old probe could only ever have gone silent. The
+# `rev-parse` conjunct keeps the lease probe off the later authority read-back,
+# which re-reads the same scalar through code_fixer_contract.py.
+S32_GATE_LINE="$(awk '/review_resolve_same_repo_push_target/ {print NR; exit}' "$REVIEW_PR")"
+S32_FETCH_LINE="$(awk '/^[[:space:]]*git .*fetch origin/ {print NR; exit}' "$REVIEW_PR")"
+S32_LEASE_LINE="$(awk '/^[[:space:]]*CI_LEASE_SHA=/ && /rev-parse/ {print NR; exit}' "$REVIEW_PR")"
+if [ -n "$S32_GATE_LINE" ] && [ -n "$S32_FETCH_LINE" ] && [ -n "$S32_LEASE_LINE" ] \
+   && [ "$S32_GATE_LINE" -lt "$S32_FETCH_LINE" ] && [ "$S32_GATE_LINE" -lt "$S32_LEASE_LINE" ]; then
+  echo "  PASS  S32.7 — the gate resolves before the fetch and before the lease capture"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S21.7 — gate/fetch/lease ordering is wrong or a site is missing"
-  echo "        gate: ${S21_GATE_LINE:-<none>}  fetch: ${S21_FETCH_LINE:-<none>}  lease: ${S21_LEASE_LINE:-<none>}"
+  echo "  FAIL  S32.7 — gate/fetch/lease ordering is wrong or a site is missing"
+  echo "        gate: ${S32_GATE_LINE:-<none>}  fetch: ${S32_FETCH_LINE:-<none>}  lease: ${S32_LEASE_LINE:-<none>}"
   FAIL=$((FAIL + 1))
 fi
 
 echo
-echo "== S21-RT: the resolver refuses the fork shape for real (executed) =="
+echo "== S32-RT: the resolver refuses the fork shape for real (executed) =="
 # Runtime cover, not prose cover. The resolver is sourced and CALLED with a
 # stubbed `gh` and `git`, once per shape. The stub records every call, so the
 # rows can also prove the negative that matters most: the resolver itself never
@@ -1888,66 +2809,66 @@ push_target_row() {
 
 if [ -r "$PUSH_TARGET_LIB" ]; then
   : >"$PUSH_TARGET_LOG"
-  push_target_row "S21-RT.1 — a same-repository PR resolves to its head and base branch" \
+  push_target_row "S32-RT.1 — a same-repository PR resolves to its head and base branch" \
     "0|$(printf 'fix/395-guard\tmain')" \
     "$(push_target_case bash same-repo owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.2 — a fork PR is a NAMED refusal (rc 78), not a push attempt" \
+  push_target_row "S32-RT.2 — a fork PR is a NAMED refusal (rc 78), not a push attempt" \
     "78|" "$(push_target_case bash fork owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.3 — a fork branch that SHADOWS a base-repo branch name is refused too" \
+  push_target_row "S32-RT.3 — a fork branch that SHADOWS a base-repo branch name is refused too" \
     "78|" "$(push_target_case bash fork-shadow-name owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.4 — a head repository that is not the review repo is refused (rc 78)" \
+  push_target_row "S32-RT.4 — a head repository that is not the review repo is refused (rc 78)" \
     "78|" "$(push_target_case bash head-repo-drift owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.5 — an unidentifiable head repository is refused, never assumed same-repo" \
+  push_target_row "S32-RT.5 — an unidentifiable head repository is refused, never assumed same-repo" \
     "78|" "$(push_target_case bash empty-head-repo owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.6 — an unreachable gh halts the push path (rc 79), it does not proceed" \
+  push_target_row "S32-RT.6 — an unreachable gh halts the push path (rc 79), it does not proceed" \
     "79|" "$(push_target_case bash gh-down owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.7 — a short projection is refused, not silently mis-bound" \
+  push_target_row "S32-RT.7 — a short projection is refused, not silently mis-bound" \
     "79|" "$(push_target_case bash short-projection owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.8 — an over-long projection is refused" \
+  push_target_row "S32-RT.8 — an over-long projection is refused" \
     "79|" "$(push_target_case bash extra-field owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.9 — an unroutable head branch name is refused" \
+  push_target_row "S32-RT.9 — an unroutable head branch name is refused" \
     "79|" "$(push_target_case bash unroutable-head owner/repo 73 /repo)"
 
-  push_target_row "S21-RT.10 — an unroutable base branch name is refused" \
+  push_target_row "S32-RT.10 — an unroutable base branch name is refused" \
     "79|" "$(push_target_case bash unroutable-base owner/repo 73 /repo)"
 
   # Malformed caller arguments never reach the network at all.
   : >"$PUSH_TARGET_LOG"
-  S21_ARG_RCS=""
+  S32_ARG_RCS=""
   for bad_args in "owner/repo 73" "owner/repo 73 /repo extra" "owner/repo 0 /repo" \
                   "owner/repo 7x /repo" "owner 73 /repo" "owner/repo 73 relative/path"; do
     # shellcheck disable=SC2086
-    S21_ARG_RCS="$S21_ARG_RCS$(push_target_case bash same-repo $bad_args) "
+    S32_ARG_RCS="$S32_ARG_RCS$(push_target_case bash same-repo $bad_args) "
   done
-  if [ "$S21_ARG_RCS" = "2| 2| 2| 2| 2| 2| " ] && [ ! -s "$PUSH_TARGET_LOG" ]; then
-    echo "  PASS  S21-RT.11 — malformed arguments are rc 2 and never call gh"
+  if [ "$S32_ARG_RCS" = "2| 2| 2| 2| 2| 2| " ] && [ ! -s "$PUSH_TARGET_LOG" ]; then
+    echo "  PASS  S32-RT.11 — malformed arguments are rc 2 and never call gh"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  S21-RT.11 — malformed arguments leaked past validation"
-    echo "        rcs: $S21_ARG_RCS"
+    echo "  FAIL  S32-RT.11 — malformed arguments leaked past validation"
+    echo "        rcs: $S32_ARG_RCS"
     echo "        calls: $(cat "$PUSH_TARGET_LOG")"
     FAIL=$((FAIL + 1))
   fi
 
   # The negative that matters: the resolver is read-only on the remote.
   : >"$PUSH_TARGET_LOG"
-  S21_RO_OUT="$(push_target_case bash same-repo owner/repo 73 /repo)"
-  S21_RO_LOG="$(cat "$PUSH_TARGET_LOG")"
-  if [ "${S21_RO_OUT%%|*}" = 0 ] \
-     && ! grep -qE '^git (push|fetch|rebase|commit)' <<<"$S21_RO_LOG"; then
-    echo "  PASS  S21-RT.12 — the resolver never pushes, fetches, rebases or commits"
+  S32_RO_OUT="$(push_target_case bash same-repo owner/repo 73 /repo)"
+  S32_RO_LOG="$(cat "$PUSH_TARGET_LOG")"
+  if [ "${S32_RO_OUT%%|*}" = 0 ] \
+     && ! grep -qE '^git( -C [^[:space:]]+)? (push|fetch|rebase|commit)' <<<"$S32_RO_LOG"; then
+    echo "  PASS  S32-RT.12 — the resolver never pushes, fetches, rebases or commits"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  S21-RT.12 — the resolver mutated the repository or the remote"
-    echo "        calls: $S21_RO_LOG"
+    echo "  FAIL  S32-RT.12 — the resolver mutated the repository or the remote"
+    echo "        calls: $S32_RO_LOG"
     FAIL=$((FAIL + 1))
   fi
 
@@ -1955,39 +2876,51 @@ if [ -r "$PUSH_TARGET_LIB" ]; then
   # there — this is the shell that turned an unbraced `$sha:refs/…` into a `:r`
   # modifier and killed every anchor push (R9.12b in review-pr.test.sh).
   if command -v zsh >/dev/null 2>&1; then
-    S21_ZSH_OK=1
-    [ "$(push_target_case zsh same-repo owner/repo 73 /repo)" = "0|$(printf 'fix/395-guard\tmain')" ] || S21_ZSH_OK=0
-    [ "$(push_target_case zsh fork owner/repo 73 /repo)" = "78|" ] || S21_ZSH_OK=0
-    [ "$(push_target_case zsh gh-down owner/repo 73 /repo)" = "79|" ] || S21_ZSH_OK=0
-    if [ "$S21_ZSH_OK" = 1 ]; then
-      echo "  PASS  S21-RT.13 — same verdicts under /bin/zsh, the shell the fences run in"
+    S32_ZSH_OK=1
+    [ "$(push_target_case zsh same-repo owner/repo 73 /repo)" = "0|$(printf 'fix/395-guard\tmain')" ] || S32_ZSH_OK=0
+    [ "$(push_target_case zsh fork owner/repo 73 /repo)" = "78|" ] || S32_ZSH_OK=0
+    [ "$(push_target_case zsh gh-down owner/repo 73 /repo)" = "79|" ] || S32_ZSH_OK=0
+    if [ "$S32_ZSH_OK" = 1 ]; then
+      echo "  PASS  S32-RT.13 — same verdicts under /bin/zsh, the shell the fences run in"
       PASS=$((PASS + 1))
     else
-      echo "  FAIL  S21-RT.13 — the resolver diverges under zsh"
+      echo "  FAIL  S32-RT.13 — the resolver diverges under zsh"
       FAIL=$((FAIL + 1))
     fi
   else
-    echo "  SKIP  S21-RT.13 — zsh unavailable on this runner"
+    echo "  SKIP  S32-RT.13 — zsh unavailable on this runner"
   fi
 
-  # S21-RT.14/15 — EXECUTE THE FENCE ITSELF, not a paraphrase of it. Every other
+  # S32-RT.14/15 — EXECUTE THE FENCE ITSELF, not a paraphrase of it. Every other
   # Phase 3 assertion in this file greps fence *text*; #394 documents four
   # arm-killing blockers that a 290-assertion green suite could not see for
   # exactly that reason. So the binding fence is extracted from review-pr.md
   # verbatim, sourced under `set -u` with a stubbed gh/git/audit, and asked what
   # it actually does with a fork PR.
-  S21_FENCE="$(mktemp)"
-  S21_DRIVER="$(mktemp)"
-  S21_FENCE_LOG="$(mktemp)"
+  #
+  # Two adaptations to the wired Phase 3 (#383 half two):
+  #   * the fence opener now carries an info string (```bash uberdev-executable
+  #     origin=review-pr), so the extractor keys on the ```bash PREFIX and picks
+  #     the fence by its CROSS-REPOSITORY GATE marker, not by a bare opener;
+  #   * the wiring renamed the bound scalars to CI_PR_HEAD_BRANCH/CI_BASE_BRANCH,
+  #     so the driver reports whichever pair the gate actually binds.
+  # What is NOT adapted away: the gate has to sit in a fence that can be sourced
+  # on its own. That is the same self-containment property S29 asserts for the
+  # CONFLICT arm — a gate welded into a fence that first needs child-dispatch.sh
+  # and a dispatch table is a gate no test can execute, which is how #395 became
+  # invisible in the first place.
+  S32_FENCE="$(mktemp)"
+  S32_DRIVER="$(mktemp)"
+  S32_FENCE_LOG="$(mktemp)"
   awk '
-    /^    ```bash$/ { collecting = 1; buf = ""; next }
+    /^    ```bash/ { collecting = 1; buf = ""; next }
     collecting && /^    ```$/ {
       if (buf ~ /CROSS-REPOSITORY GATE/) { printf "%s", buf; exit }
       collecting = 0; next
     }
     collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
-  ' "$REVIEW_PR" >"$S21_FENCE"
-  cat >"$S21_DRIVER" <<'S21DRIVER'
+  ' "$REVIEW_PR" >"$S32_FENCE"
+  cat >"$S32_DRIVER" <<'S32DRIVER'
 set -u
 audit() { printf 'audit %s\n' "$*" >>"$FENCE_LOG"; }
 gh() {
@@ -2004,65 +2937,80 @@ git() {
   printf 'git %s\n' "$*" >>"$FENCE_LOG"
   case "$1" in
     rev-parse) printf '/repo\n' ;;
-    -C)        [ "$3" = check-ref-format ] || return 93 ;;
-    *)         return 93 ;;
+    -C)
+      case "${3:-}" in
+        check-ref-format) : ;;
+        rev-parse)        printf '%040d\n' 0 ;;
+        fetch)            : ;;
+        *)                return 93 ;;
+      esac
+      ;;
+    *) return 93 ;;
   esac
 }
 PR_NUMBER=73
+WORKTREE_ROOT=/repo
 . "$FENCE_FIXTURE"
-printf 'bound %s %s\n' "$pr_head_branch" "$base_branch" >>"$FENCE_LOG"
-S21DRIVER
+printf 'bound %s %s\n' \
+  "${pr_head_branch:-${CI_PR_HEAD_BRANCH:-}}" \
+  "${base_branch:-${CI_BASE_BRANCH:-}}" >>"$FENCE_LOG"
+S32DRIVER
 
-  # run_fence SHELL SCENARIO -> "<rc>" with the call log left in $S21_FENCE_LOG
-  run_s21_fence() {
+  # run_fence SHELL SCENARIO -> "<rc>" with the call log left in $S32_FENCE_LOG
+  run_s32_fence() {
     local runner="$1" scenario="$2" rc=0
-    : >"$S21_FENCE_LOG"
-    FENCE_FIXTURE="$S21_FENCE" FENCE_LOG="$S21_FENCE_LOG" SCENARIO="$scenario" \
+    : >"$S32_FENCE_LOG"
+    FENCE_FIXTURE="$S32_FENCE" FENCE_LOG="$S32_FENCE_LOG" SCENARIO="$scenario" \
       UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-      "$runner" "$S21_DRIVER" >/dev/null 2>&1 || rc=$?
+      "$runner" "$S32_DRIVER" >/dev/null 2>&1 || rc=$?
     printf '%s' "$rc"
   }
 
-  if [ ! -s "$S21_FENCE" ]; then
-    echo "  FAIL  S21-RT.14 — the cross-repository gate fence could not be extracted"
-    echo "  FAIL  S21-RT.15 — no fence to execute"
+  if [ ! -s "$S32_FENCE" ]; then
+    echo "  FAIL  S32-RT.14 — the cross-repository gate fence could not be extracted"
+    echo "  FAIL  S32-RT.15 — no fence to execute"
     FAIL=$((FAIL + 2))
   else
-    for s21_shell in bash zsh; do
-      if ! command -v "$s21_shell" >/dev/null 2>&1; then
-        echo "  SKIP  S21-RT.14/15 ($s21_shell) — shell unavailable on this runner"
+    for s32_shell in bash zsh; do
+      if ! command -v "$s32_shell" >/dev/null 2>&1; then
+        echo "  SKIP  S32-RT.14/15 ($s32_shell) — shell unavailable on this runner"
         continue
       fi
-      S21_OK_RC="$(run_s21_fence "$s21_shell" same-repo)"
-      S21_OK_LOG="$(cat "$S21_FENCE_LOG")"
-      if [ "$S21_OK_RC" = 0 ] && grep -qxF 'bound fix/395-guard main' <<<"$S21_OK_LOG"; then
-        echo "  PASS  S21-RT.14 ($s21_shell) — the fence executes and binds the same-repo head/base pair"
+      S32_OK_RC="$(run_s32_fence "$s32_shell" same-repo)"
+      S32_OK_LOG="$(cat "$S32_FENCE_LOG")"
+      if [ "$S32_OK_RC" = 0 ] && grep -qxF 'bound fix/395-guard main' <<<"$S32_OK_LOG"; then
+        echo "  PASS  S32-RT.14 ($s32_shell) — the fence executes and binds the same-repo head/base pair"
         PASS=$((PASS + 1))
       else
-        echo "  FAIL  S21-RT.14 ($s21_shell) — the fence did not bind pr_head_branch/base_branch"
-        echo "        rc: $S21_OK_RC"
-        echo "        calls: $S21_OK_LOG"
+        echo "  FAIL  S32-RT.14 ($s32_shell) — the fence bound neither pr_head_branch/base_branch nor CI_PR_HEAD_BRANCH/CI_BASE_BRANCH"
+        echo "        rc: $S32_OK_RC"
+        echo "        calls: $S32_OK_LOG"
         FAIL=$((FAIL + 1))
       fi
 
-      S21_FORK_RC="$(run_s21_fence "$s21_shell" fork)"
-      S21_FORK_LOG="$(cat "$S21_FENCE_LOG")"
-      if [ "$S21_FORK_RC" = 1 ] \
-         && grep -qxF 'audit ci_phase_outcome data.outcome=halted data.subreason=ci_push_target_cross_repository' <<<"$S21_FORK_LOG" \
-         && ! grep -qE '^git (fetch|push|rebase)' <<<"$S21_FORK_LOG"; then
-        echo "  PASS  S21-RT.15 ($s21_shell) — a fork PR halts with the typed audit event, before any fetch/lease/push"
+      S32_FORK_RC="$(run_s32_fence "$s32_shell" fork)"
+      S32_FORK_LOG="$(cat "$S32_FENCE_LOG")"
+      # The audit line is matched on its typed subreason rather than byte-for-byte:
+      # the wiring is free to carry extra `data.*` fields, but it is NOT free to
+      # halt anonymously. The negative below is the row's real property, and it
+      # tolerates the wired form's `git -C "$WORKTREE_ROOT" fetch`.
+      if [ "$S32_FORK_RC" = 1 ] \
+         && grep -qE '^audit .*ci_phase_outcome.*data\.outcome=halted' <<<"$S32_FORK_LOG" \
+         && grep -qF 'data.subreason=ci_push_target_cross_repository' <<<"$S32_FORK_LOG" \
+         && ! grep -qE '^git( -C [^[:space:]]+)? (fetch|push|rebase)' <<<"$S32_FORK_LOG"; then
+        echo "  PASS  S32-RT.15 ($s32_shell) — a fork PR halts with the typed audit event, before any fetch/lease/push"
         PASS=$((PASS + 1))
       else
-        echo "  FAIL  S21-RT.15 ($s21_shell) — a fork PR was not refused as a named halt"
-        echo "        rc: $S21_FORK_RC"
-        echo "        calls: $S21_FORK_LOG"
+        echo "  FAIL  S32-RT.15 ($s32_shell) — a fork PR was not refused as a named halt"
+        echo "        rc: $S32_FORK_RC"
+        echo "        calls: $S32_FORK_LOG"
         FAIL=$((FAIL + 1))
       fi
     done
   fi
-  rm -f "$S21_FENCE" "$S21_DRIVER" "$S21_FENCE_LOG"
+  rm -f "$S32_FENCE" "$S32_DRIVER" "$S32_FENCE_LOG"
 else
-  echo "  FAIL  S21-RT.* — resolver missing, no runtime cover could execute"
+  echo "  FAIL  S32-RT.* — resolver missing, no runtime cover could execute"
   FAIL=$((FAIL + 1))
 fi
 rm -f "$PUSH_TARGET_STUB" "$PUSH_TARGET_LOG"

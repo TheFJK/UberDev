@@ -5,23 +5,23 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 // skills/review-fleet/workflow.js — RFC 0012 §3.1, built to the P2 seam.
 //
 // ---------------------------------------------------------------------------
-// SCOPE OF #383 HALF ONE — the four `ci-*` stages ship UNCALLED.
+// SCOPE OF #383 — the four `ci-*` stages are the ENGINE; review-pr.md calls.
 // ---------------------------------------------------------------------------
 // The Phase 3 stages below (ci-classify, ci-fix, ci-conflicts, ci-defer) are
 // complete and tested — tests/review-pr-workflow.test.sh section W executes
 // every one of them under runtime stubs, and tests/code-fixer-contract.test.sh
-// drives their contract verbs against real git repositories. But
-// `commands/review-pr.md` has NOT been re-pointed at them: its Phase 3 still
-// halts a red check at 6c.3 CLASSIFY with `ci_transport_unsupported`, and
-// `--no-ci-fix` is still the supported mode. Nothing dispatches these four
-// stages in this release.
+// drives their contract verbs against real git repositories. Half two re-pointed
+// `commands/review-pr.md` at them: its Phase 3 dispatches these four stages
+// instead of halting a red check at 6c.3 CLASSIFY on an unsupported transport,
+// so every comment below that names a caller fence (6c.4 ROUTE, 6c.4w.3) names
+// a fence that exists.
 //
-// The split is deliberate. No test in this repo executes a `review-pr.md`
-// fence — every assertion against that file checks fence TEXT — so the engine
-// could be verified by execution and the wiring could not. Shipping them
-// together would have hidden the wiring's defects behind the engine's green
-// suite. Comments here that name a caller fence (6c.4 ROUTE, 6c.4w.3) describe
-// what the wiring will owe, not a fence that exists today.
+// Splitting engine from wiring across two releases was deliberate, and it is
+// why the comments here read as a CONTRACT the caller owes rather than a
+// description of it. No test in this repo executes a `review-pr.md` fence —
+// every assertion against that file checks fence TEXT — so the engine could be
+// verified by execution and the wiring could not. Shipping them together would
+// have hidden the wiring's defects behind the engine's green suite.
 //
 // ONE script serves BOTH /uberdev:review-pr and /uberdev:simplify. RFC 0012
 // §3.1 rejects splitting review-pr per phase because Phase 3 re-enters Phase 1;
@@ -892,8 +892,9 @@ function f2iPrompt(notes, nonce) {
   lines.push("  max_new                  = " + maxNew);
   // NO `input_document` line here. childInputPath() is a PHASE 3 helper: only
   // the four CI stages have a controller-written <childDir>/input.json (the
-  // Phase 3 wiring writes one per ci-classify / ci-fix / ci-conflicts /
-  // ci-defer child and pins it by digest in the CI authority). The defer stage
+  // Phase 3 fences in commands/review-pr.md write one per ci-classify / ci-fix /
+  // ci-conflicts / ci-defer child and pin it by digest in the CI authority). The
+  // defer stage
   // has no such artifact — its inputs are the two aggregates above — so naming
   // one would point the child at a path nothing ever wrote.
   lines.push("");

@@ -902,20 +902,20 @@ uberdev_dispatch_preflight_backend() {
       # lib/agent-dispatch.sh's workspace_mode validator.
       #
       # #381 step 3 made this the DEFAULT: `auto` now resolves workflow for both
-      # workflows too. One BREAKING gap still travels with that flip --
-      # /review-pr Phase 3 dispatches review_pr.ci.* through the routed adapter,
-      # which has no workflow provider arm, so a RED check halts loudly at 6c.3
-      # CLASSIFY with subreason=ci_transport_unsupported. Step 4 deleted the
-      # codex backend that used to be the named escape hatch, so --no-ci-fix is
-      # the supported mode.
-      #
-      # #383 half one narrowed the gap WITHOUT closing it: the four Phase 3
-      # stages (ci-classify, ci-fix, ci-conflicts, ci-defer) now exist in
-      # skills/review-fleet/workflow.js, and their producer/capture/judges exist
-      # in lib/code_fixer_contract.py. What has not happened is the caller --
-      # commands/review-pr.md has not been re-pointed at them, so Phase 3 still
-      # reaches _uberdev_agent_dispatch_backend's hard-failing `workflow)` arm
-      # exactly as before. Delete this paragraph when the fence wiring lands.
+      # workflows too. The BREAKING Phase-3 gap that travelled with that flip is
+      # CLOSED as of #383: review_pr.ci.* no longer take the routed adapter at
+      # all. Half one built the four Phase 3 stages -- ci-classify, ci-fix,
+      # ci-conflicts and ci-defer -- in skills/review-fleet/workflow.js with
+      # their producer/capture/judges in lib/code_fixer_contract.py, and half
+      # two re-pointed the caller: commands/review-pr.md's Phase 3 fences now
+      # dispatch those stages the way Phase 1 and Phase 2 dispatch theirs. So
+      # nothing in Phase 3 reaches _uberdev_agent_dispatch_backend's
+      # hard-failing `workflow)` arm, the 6c.3 CLASSIFY transport refusal that
+      # used to halt a red check is gone, and `--no-ci-fix` is a user choice
+      # again rather than the only supported mode. The retired refusal is not
+      # named here on purpose: tests/review-pr-workflow.test.sh G14a greps this
+      # file for its reason string and fails on ANY occurrence, comments
+      # included, so that a retired surface cannot survive as prose.
       # (The engine gate is applied once, in the backend case below, so it
       # covers every workflow rather than only these two.)
       workflow) ;;

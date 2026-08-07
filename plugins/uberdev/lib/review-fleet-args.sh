@@ -27,6 +27,12 @@
 #   WORKTREE_ROOT                the caller checkout the children run against
 #   RESEARCH_DIR_ABS             .uberdev/research/<RUN_ID> (the script's runDirAbs)
 #   REVIEW_ITERATION             the per-iteration artifact key
+#
+# The first three are run-invariant, so a fresh fence re-deriving them lands on
+# the same value. REVIEW_ITERATION is NOT: Phase 3's re-entry fence advances it,
+# so a fence that binds it from its own `${REVIEW_ITERATION:-1}` default is
+# reading a counter that moved. Get it -- and CI_FIX_LOOP_ITER -- from
+# review_fleet_load_ci_counters below, in the same fence that keys on it.
 
 # review_fleet_roster STAGE -> one "<slug>\t<edge>" row per child, IN ORDER.
 #
@@ -670,11 +676,13 @@ review_fleet_read_ci_push() {
 # newline; the reader is the same `read -r -d ''` loop the enumerator uses.
 #
 # THE `--` IS OPTIONAL AND IS CONSUMED. This signature is the only one of the
-# ~25 in this file that carries a `--`, so it reads as a real separator and the
-# callers half two of #383 writes are the ones that will spell it
-# `review_fleet_write_conflict_paths "$list" -- "${conflicted[@]}"`. A body that
-# only shifted the target wrote a literal `--` as the FIRST NUL entry; the
-# consumer's `read -r -d ''` loop then handed it to
+# ~25 in this file that carries a `--`, so it reads as a real separator: the
+# CONFLICT-arm caller half two of #383 landed (commands/review-pr.md step 1)
+# spells it WITHOUT one, but the neighbouring `git add -- "$@"` lines make
+# `review_fleet_write_conflict_paths "$list" -- "${conflicted[@]}"` the spelling
+# a later caller reaches for, and that spelling must not silently corrupt the
+# list. A body that only shifted the target wrote a literal `--` as the FIRST
+# NUL entry; the consumer's `read -r -d ''` loop then handed it to
 # `git add -- "${conflicted_files[@]}"` as a pathspec, git answered
 # "pathspec '--' did not match any files", the stage guard fired, and the
 # CONFLICT arm aborted a mid-rebase it could have completed. Consuming it is the

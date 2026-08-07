@@ -49,29 +49,45 @@
 
 ---
 
-> **AMENDED 2026-08-06 (issue #383, half one) — the ENGINE is rebuilt; the
-> dormancy above is NOT lifted.**
+> **AMENDED 2026-08-06 / 2026-08-07 (issue #383) — the dormancy above is
+> LIFTED.**
 >
-> `skills/review-fleet/workflow.js` now carries the four Phase 3 stages
+> `#383` landed in two halves: half one (2026-08-06) shipped the engine —
+> `skills/review-fleet/workflow.js` carries the four Phase 3 stages
 > (`ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer`) and
-> `lib/code_fixer_contract.py` carries their producer, capture verb and judges.
-> `commands/review-pr.md` has **not** been re-pointed at them, so:
+> `lib/code_fixer_contract.py` carries their producer, capture verb and judges —
+> and half two (2026-08-07) re-pointed `commands/review-pr.md` at them. Phase 3
+> is now dispatched by `skills/review-fleet/workflow.js` as those four stages,
+> so:
 >
-> - **§3.7's simultaneous-halt precedence stays dormant**, unchanged.
-> - **`green_after_fix` and `loop_cap_exhausted` remain UNREACHABLE.** The
->   transport that will reach them exists; the caller that would use it does
->   not. Their DORMANT annotations in `skills/merge-pipeline/SKILL.md` and in
->   both `commands/review-pr.md` audit schemas therefore stay in place, and are
->   re-dated to point at this amendment.
+> - **§3.7's simultaneous-halt precedence is live again**, unchanged.
+> - **`loop_cap_exhausted` is PRODUCED again**, at the cap check in the re-entry
+>   fence, which now reads its counter from an on-disk sidecar rather than from
+>   a shell variable that died with its fence. Its DORMANT annotation is removed
+>   from `skills/merge-pipeline/SKILL.md` and from both `commands/review-pr.md`
+>   audit schemas, in lockstep with this amendment.
+>
+> - **`green_after_fix` is REACHABLE but NOT YET PRODUCED.** The 6c.5 POST-FIX
+>   re-entry that would justify it now runs, but no fence assigns the value: the
+>   6c.1 PROBE green arm sets `OUTCOME=green` whether or not a fixer rewrote the
+>   head first, because the fix-push ledger it would have to consult lives on
+>   disk under `RESEARCH_DIR_ABS` and that fence holds no cross-fence state at
+>   all. So `phases.phase3.outcome` reads the same for a PR that was always
+>   green and one the autopilot force-pushed. Both are accepted by the Step 7
+>   trust predicate, so nothing mis-trusts — the distinction the member exists
+>   to express is simply unavailable to consumers. Its DORMANT annotation stays
+>   until a fence produces it. Tracked separately; do not read the
+>   `loop_cap_exhausted` removal above as covering it.
 > - **The §3.5 GREEN predicate is still unchanged.** It already accepted
->   `green_after_fix`; no edit was needed when the member went dormant and none
->   is needed while it stays dormant.
-> - **`ci_transport_unsupported` still exists and still fires.** A red probe
->   still halts there. The follow-up that wires Phase 3 is what deletes it.
+>   `green_after_fix`; no edit was needed there when the member went dormant and
+>   none is needed now that it is live.
+> - **`ci_transport_unsupported` no longer exists.** A red probe now classifies
+>   and routes; the loud refusals that remain are the classifier contract's own
+>   (`classifier_refused`, `contract_invalid`) and the mutation judges'.
 >
 > The design amendments this engine implements — the controller-held lease, the
 > CONFLICT terminal, the deleted `flock`, the counter sidecar — are recorded in
-> RFC 0001's 2026-08-06 amendment rather than duplicated here.
+> RFC 0001's #383 amendment rather than duplicated here.
 
 ---
 

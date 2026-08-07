@@ -6468,24 +6468,26 @@ WORKFLOW_FIXER_LAUNCH_BINDING_KEYS = (
 # controller and the agent agree rather than that the bytes are what the
 # controller pinned.
 # ---------------------------------------------------------------------------
-# SCOPE OF #383 HALF ONE -- read this before the CI verbs below.
+# SCOPE OF THE PHASE 3 CI VERBS -- read this before the CI verbs below.
 # ---------------------------------------------------------------------------
-# Everything from here to the end of the Phase 3 block is the ENGINE half: the
+# Everything from here to the end of the Phase 3 block is the ENGINE: the
 # producer, the capture verb and the judges for the five review_pr.ci.* edges,
 # dispatched by skills/review-fleet/workflow.js's four ci-* stages. It is
-# complete and it is tested (tests/code-fixer-contract.test.sh drives real git
+# tested directly (tests/code-fixer-contract.test.sh drives real git
 # repositories with real conflicts; tests/review-pr-workflow.test.sh section W
 # executes every stage).
 #
-# `commands/review-pr.md` HAS NOT BEEN RE-POINTED AT IT. Its Phase 3 still
-# halts a red check at 6c.3 CLASSIFY with ci_transport_unsupported, exactly as
-# it did before, and --no-ci-fix is still the supported mode. Nothing below is
-# reachable from a user-facing run in this release.
+# It shipped UNCALLED in #383 half one: `commands/review-pr.md` still halted a
+# red check at 6c.3 CLASSIFY with `ci_transport_unsupported`, and `--no-ci-fix`
+# was the supported mode. HALF TWO RETIRED THAT GATE. Every caller fence named
+# below (6c.4 ROUTE, 6c.4w.3, 6c.5 POST-FIX) now exists in
+# `commands/review-pr.md`, and a red check reaches these verbs on a real run.
 #
-# Comments below that name a caller fence (6c.4 ROUTE, 6c.4w.3, 6c.5 POST-FIX)
-# describe the obligation the wiring will owe, NOT a fence that exists today.
-# They are written that way on purpose: these verbs enforce those obligations
-# already, so the wiring has one place to read what it must satisfy.
+# So the obligations these comments describe are live contracts, not a
+# specification for wiring still to come. Changing one changes what a
+# user-facing /review-pr run does. The half-one/half-two split is preserved in
+# the comments only where it explains WHY a verb enforces something its own
+# caller could not have enforced at the time it was written.
 WORKFLOW_CI_EDGE_IDS = frozenset(
     (
         "review_pr.ci.classify",
@@ -7351,7 +7353,7 @@ CI_MUTATION_AUTHORITY_KEYS = CI_READ_AUTHORITY_KEYS | {
 # rather than after a child has already run.
 CI_AUTHORITY_REQUIRED_MEMBERS = {
     # fix_code carries the lease and the branch for the SAME reason rebase does:
-    # both terminals will reach the ONE leased push the wiring owes (6c.4w.3),
+    # both terminals reach the ONE leased push in commands/review-pr.md 6c.4w.3,
     # and a push whose lease went missing between fences would either force
     # against an empty ref or degrade to an unleased push. Refusing here costs a
     # halt before the child runs; discovering it at the push costs a wrong ref.
@@ -8152,11 +8154,11 @@ def _ci_fix_code_declared_refusal(result_payload: bytes) -> str:
     kind of claim — the child declining to act — and git cannot express it at
     all. A refusing `ci-code-fixer` makes no commit, so `head_after ==
     head_before` and the git-derived terminal was `NO_CHANGE`, byte-identical to
-    a fixer that found nothing to change. 6c.5 must branch on the validated
+    a fixer that found nothing to change. 6c.5 branches on the validated
     terminal only ("never on the agent's self-report"), so with the two
     conflated the entire ci-defer stage — four fences, an authority edge and a
-    Workflow arm — would be unreachable and a REFUSED fixer would halt
-    `ci_fix_no_change` with no CRITICAL issue filed.
+    Workflow arm — was unreachable and a REFUSED fixer halted `ci_fix_no_change`
+    with no CRITICAL issue filed.
 
     Reading it here does not weaken that rule: the declaration is taken from the
     result bytes the controller already pinned by digest, and it can only ever
