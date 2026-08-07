@@ -4802,7 +4802,15 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     (ci_repo / "src").mkdir()
     (ci_repo / "src/app.py").write_text("APP = 1\n", encoding="utf-8")
     (ci_repo / "package-lock.json").write_text("{}\n", encoding="utf-8")
-    git(ci_repo, "add", "--", "src/app.py", "package-lock.json")
+    # A tracked file OUTSIDE the anchor set that already exists at the pinned
+    # parent. The scope rows below must be able to model a commit that DELETES
+    # such a path, and a fix commit is required to be a single commit off
+    # `ci_head` — so the deletion's source has to be in the base tree or the
+    # rename-escape row cannot be written at all.
+    (ci_repo / "src/security_guard.py").write_text(
+        "GUARD = 1\nALLOWLIST = ()\n", encoding="utf-8")
+    git(ci_repo, "add", "--",
+        "src/app.py", "package-lock.json", "src/security_guard.py")
     git(ci_repo, "commit", "-qm", "test: ci fixture base")
     ci_head = git(ci_repo, "rev-parse", "HEAD").stdout.decode().strip()
     ci_tree = git(ci_repo, "rev-parse", "HEAD^{tree}").stdout.decode().strip()
@@ -5446,6 +5454,22 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     git(ci_repo, "commit", "-qm", "chore(deps): churn two lockfiles at once")
     two_lock_head = git(ci_repo, "rev-parse", "HEAD").stdout.decode().strip()
     expect_contract_reason(lambda: fix_outcome(two_lock_head), "ci_fix_multi_lockfile")
+
+    # A RENAME out of the anchor set is a DELETION the scope check must see.
+    # git's rename detection is on by default, and it collapses a rename to its
+    # DESTINATION path alone — so `src/security_guard.py -> Cargo.lock` alongside
+    # a legitimate anchor edit reported `['Cargo.lock', 'src/app.py']`: one
+    # anchor plus one lockfile, exactly the permitted shape. `ci_fix_scope_escape`
+    # never fired, the terminal was APPLIED, and the arbitrary deletion rode the
+    # leased force-push. The source path has to be enumerated for the loop below
+    # it to have anything to refuse, which is what `--no-renames` buys.
+    git(ci_repo, "reset", "-q", "--hard", ci_head)
+    (ci_repo / "src/app.py").write_text("APP = 6\n", encoding="utf-8")
+    git(ci_repo, "mv", "src/security_guard.py", "Cargo.lock")
+    git(ci_repo, "add", "--", "src/app.py")
+    git(ci_repo, "commit", "-qm", "chore(deps): hide a deletion behind a rename")
+    renamed_head = git(ci_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    expect_contract_reason(lambda: fix_outcome(renamed_head), "ci_fix_scope_escape")
     git(ci_repo, "reset", "-q", "--hard", ci_head)
 
     # ---- validate-ci-mutation-outcome: rebase (the lease) ------------------
@@ -5752,6 +5776,24 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     assert git(cf_repo, "ls-files", "--others", "--exclude-standard",
                "--", ".uberdev").stdout, "the fixture evidence tree is not untracked"
 
+    # `conflict-marker-size` is a per-path gitattribute, so seven is a DEFAULT
+    # and not a guarantee. At size 10 git writes `<<<<<<<<<< HEAD`, and a
+    # boundary test pinned to a fixed seven-character marker read offset 7 as
+    # `<` rather than a space — so the predicate said "no markers", the arm
+    # returned RESOLVED for a file still holding a raw conflict hunk, and the
+    # controller staged it and force-pushed it.
+    (cf_repo / "src/app.py").write_text(
+        "<" * 10 + " HEAD\n"
+        "APP = 'ours'\n"
+        + "=" * 10 + "\n"
+        "APP = 'theirs'\n"
+        + ">" * 10 + " fix/383-conflict\n",
+        encoding="utf-8",
+    )
+    expect_contract_reason(rs_outcome, "ci_conflict_unresolved")
+    (cf_repo / "src/app.py").write_text("APP = 'merged'\n", encoding="utf-8")
+    assert rs_outcome()["status"] == "RESOLVED"
+
     # A resolver that deleted its file has not resolved it.
     (cf_repo / "src/app.py").unlink()
     expect_contract_reason(rs_outcome, "ci_conflict_unresolved")
@@ -5977,6 +6019,91 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
         '  - { url: "https://github.com/../../issues/1", tier: "CRITICAL" }\n',
     ):
         assert dr_with_urls(hostile)["created_url"] == "", hostile
+
+# === #383 follow-up: "unmerged" meant two different sets in one file ==========
+#
+# The block above conflicts on a path BOTH sides already tracked, which git
+# records as `UU` — the one porcelain pair `_ci_unmerged_paths` recognised. Every
+# other unmerged pair (`AA`, `DD`, `AU`, `UA`, `DU`, `UD`) was invisible to it,
+# while `_ci_worktree_dirty_paths` ten lines away already knew the full set. So
+# for an add/add rebase conflict the CONFLICT guard saw no unmerged paths at all,
+# fell through to `_ci_require_residue_closed`, and refused `index_dirty` — the
+# exact failure the CONFLICT terminal exists to prevent, and whose caller then
+# runs `git rebase --abort` and destroys the mid-rebase state the CONFLICT-RESOLVE
+# arm needs. A fresh repository rather than a new branch in the fixture above:
+# the add/add conflict must be the ONLY unmerged entry, or a stray `UU` alongside
+# it makes the row pass for the wrong reason.
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-addadd-") as temporary:
+    aa_repo = pathlib.Path(temporary) / "repo"
+    aa_repo.mkdir()
+    git(aa_repo, "init", "-q", "-b", "main")
+    git(aa_repo, "config", "user.email", "fixture@example.invalid")
+    git(aa_repo, "config", "user.name", "Fixture")
+    (aa_repo / "src").mkdir()
+    (aa_repo / "src/keep.py").write_text("KEEP = 1\n", encoding="utf-8")
+    git(aa_repo, "add", "--", "src/keep.py")
+    git(aa_repo, "commit", "-qm", "test: add/add fixture base")
+    aa_fork = git(aa_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # BOTH sides create the same path with different content: neither side has a
+    # common ancestor blob for it, which is what makes git record `AA` instead of
+    # `UU`.
+    (aa_repo / "src/collide.py").write_text("COLLIDE = 'main'\n", encoding="utf-8")
+    git(aa_repo, "add", "--", "src/collide.py")
+    git(aa_repo, "commit", "-qm", "test: main adds the colliding path")
+    aa_base = git(aa_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    git(aa_repo, "checkout", "-q", "-b", "fix/383-addadd", aa_fork)
+    (aa_repo / "src/collide.py").write_text("COLLIDE = 'branch'\n", encoding="utf-8")
+    git(aa_repo, "add", "--", "src/collide.py")
+    git(aa_repo, "commit", "-qm", "test: the branch adds it too")
+    aa_head = git(aa_repo, "rev-parse", "HEAD").stdout.decode().strip()
+
+    aa_evidence = aa_repo / ".uberdev/research/20260806-222222-face222"
+    aa_child = aa_evidence / "children" / "ci-rebase-ci01-iter01"
+    aa_child.mkdir(parents=True)
+    aa_input = aa_child / "input.json"
+    aa_input_bytes = b'{"edge":"rebase"}\n'
+    aa_input.write_bytes(aa_input_bytes)
+    aa_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
+        head_sha=aa_head, working_dir=str(aa_repo), input_path=str(aa_input),
+        input_sha256=hashlib.sha256(aa_input_bytes).hexdigest(),
+        base_sha=aa_base, lease_sha=aa_head,
+        pr_branch="fix/383-addadd", base_branch="main",
+        authority_output_path=str(
+            aa_evidence / "ci-authority-rebase-iter01-ci01.json"))
+    aa_binding = module.bind_workflow_ci_launch(
+        edge_id="review_pr.ci.rebase", instance_id="ci-rebase-ci01-iter01",
+        run_nonce=CI_NONCE, result_path=str(aa_child / "result.md"),
+        status_path=str(aa_child / "status.json"), working_dir=str(aa_repo),
+        ci_authority_path=aa_receipt["authority_path"],
+        ci_authority_sha256=aa_receipt["authority_sha256"])
+    (aa_child / "result.md").write_bytes(b"left the rebase in progress\n")
+    (aa_child / "status.json").write_bytes(ci_status_document(aa_binding))
+    aa_binding_bytes = module._canonical_json(aa_binding)
+    aa_terminal = module.capture_ci_terminal(
+        launch_binding=aa_binding_bytes, edge_id="review_pr.ci.rebase")
+
+    aa_rebase = git(aa_repo, "rebase", "main", check=False)
+    assert aa_rebase.returncode != 0, "the add/add fixture rebase was expected to conflict"
+    aa_mid_head = git(aa_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # The fixture must really produce `AA`, and NO `UU` anywhere: a single `UU`
+    # in the status satisfies the old two-byte filter too, which would make the
+    # row below pass for the wrong reason. (`?? .uberdev/` is the run's own
+    # untracked evidence tree, exempted by the residue half of the terminal.)
+    aa_porcelain = git(aa_repo, "status", "--porcelain").stdout
+    assert b"AA src/collide.py\n" in aa_porcelain, aa_porcelain
+    assert b"UU " not in aa_porcelain, aa_porcelain
+    assert module._ci_unmerged_paths(str(aa_repo)) == ("src/collide.py",), (
+        module._ci_unmerged_paths(str(aa_repo)))
+
+    aa_outcome = module.validate_ci_mutation_outcome(
+        launch_binding=aa_binding_bytes,
+        status_sha256=aa_terminal["status_sha256"],
+        result_sha256=aa_terminal["result_sha256"],
+        working_dir=str(aa_repo), head_before=aa_head,
+        head_after=aa_mid_head, remote_head_sha=aa_head)
+    assert aa_outcome["status"] == "CONFLICT", aa_outcome
+    git(aa_repo, "rebase", "--abort", check=False)
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

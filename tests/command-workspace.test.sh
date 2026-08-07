@@ -1104,6 +1104,25 @@ if not fields or fields[0] != 'uberdev_command_workspace_prepare':
 print(len(fields) - 1)
 PY
 }
+workspace_call_sites() {
+  # One markdown file -> every line that CALLS the helper, as `LINE:TEXT`, with
+  # comment rows dropped so prose about the helper is never parsed as a call.
+  # This lives in a function so the fixture probe below greps with the very
+  # pattern the corpus rows grep with: two copies of the regex would let the
+  # probe stay green while the corpus row silently rotted past it. Optional `$2`
+  # lets that probe replay the identical pattern under a second grep
+  # implementation without duplicating the pattern.
+  #
+  # The terminator is `([[:space:]]|$)`, never a bare `[[:space:]]`: a
+  # zero-argument call ends the line right after the name, so a space-only
+  # terminator cannot match the one shape this whole row exists to catch. With
+  # it, the grep returned nothing, the caller's `while` body never ran,
+  # `WORKSPACE_ARITY_BAD` stayed 0, and the guard passed while blind to its own
+  # motivating bug.
+  local matcher="${2:-grep}"
+  "$matcher" -nE '(^|[^_[:alnum:]])uberdev_command_workspace_prepare([[:space:]]|$)' "$1" \
+    | "$matcher" -v '^[0-9]*:[[:space:]]*#' || true
+}
 WORKSPACE_ARITY_BAD=0
 for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/commands/simplify.md" "$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"; do
   while IFS= read -r hit; do
@@ -1116,7 +1135,7 @@ for doc in "$ROOT/plugins/uberdev/commands/review-pr.md" "$ROOT/plugins/uberdev/
       WORKSPACE_ARITY_BAD=1
     fi
   done <<EOF_WORKSPACE_ARITY
-$(grep -nE '(^|[^_[:alnum:]])uberdev_command_workspace_prepare[[:space:]]' "$doc" | grep -v '^[0-9]*:[[:space:]]*#' || true)
+$(workspace_call_sites "$doc")
 EOF_WORKSPACE_ARITY
 done
 [ "$WORKSPACE_ARITY_BAD" -eq 0 ] || { echo 'a markdown call site does not pass CALLER SUBJECT TIER RISK_JSON RUN_ID REQUESTED_ROOT' >&2; exit 1; }
@@ -1126,5 +1145,49 @@ done
 [ "$(workspace_arity_of 'uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {')" = 6 ]
 [ "$(workspace_arity_of '    uberdev_command_workspace_prepare || return 2')" = 0 ]
 [ "$(workspace_arity_of "uberdev_command_workspace_prepare simplify 0 medium '[]' \"\$RUN_ID\" \"\${WORKTREE_ROOT:-}\" >/dev/null || {")" = 6 ]
+
+# Anti-vacuity for the GREP, not just the parser. The three rows above hand
+# `workspace_arity_of` a hand-built string, so they exercise the parser and never
+# the corpus grep — and the zero-argument one among them ends in ` || return 2`,
+# so the only reason it looks covered is that trailing space. A real bare call
+# ends the line at the name, and a terminator of `[[:space:]]` alone cannot match
+# end-of-line: the `while` body never runs, `WORKSPACE_ARITY_BAD` stays 0, and
+# the corpus row passes while blind to the exact twelve-call shape it was written
+# for. So mint that shape in a fixture and require the pipeline itself to surface
+# it. `workspace_arity_of` is asserted on the same hit so a grep that matched but
+# handed the parser a truncated line still reds.
+workspace_grep_fixture_probe() {
+  # `$1` is the grep binary to replay the corpus pattern with.
+  local hits bare
+  hits="$(workspace_call_sites "$WORKSPACE_FIXTURE_DOC" "$1")"
+  bare="$(printf '%s\n' "$hits" | grep '^2:' || true)"
+  [ -n "$bare" ] || { echo "$1: corpus grep is blind to a bare zero-argument call at end of line" >&2; return 1; }
+  [ "$(workspace_arity_of "${bare#*:}")" = 0 ] || { echo "$1: bare call parsed as $(workspace_arity_of "${bare#*:}") arguments, expected 0" >&2; return 1; }
+  printf '%s\n' "$hits" | grep -q '^1:' || { echo "$1: corpus grep lost an ordinary six-argument call" >&2; return 1; }
+  if printf '%s\n' "$hits" | grep -q '^3:'; then
+    echo "$1: corpus grep now reads a commented-out call as a call site" >&2; return 1
+  fi
+}
+WORKSPACE_FIXTURE_DOC="$TMP/workspace-arity-fixture.md"
+printf '%s\n' \
+  'uberdev_command_workspace_prepare review-pr "$PR_NUMBER" medium "$RISK_JSON" "$RUN_ID" "${WORKTREE_ROOT:-}" >/dev/null || {' \
+  '  uberdev_command_workspace_prepare' \
+  '# uberdev_command_workspace_prepare review-pr 0 medium "[]" "$RUN_ID" ""' \
+  >"$WORKSPACE_FIXTURE_DOC"
+workspace_grep_fixture_probe grep
+# Replay under the vendor grep as well, unconditionally rather than only when it
+# differs from the PATH one. An end-of-line alternation is precisely the ERE
+# where a drop-in grep can disagree, and which binary `grep` names is decided by
+# the caller's PATH, not by this file: interactive shells here resolve it to
+# ugrep while `bash tests/...` resolves it to /usr/bin/grep, so a "skip when they
+# look identical" branch silently drops the second dialect on the very host that
+# has two. Pinning the vendor path costs one redundant grep when they are the
+# same file and buys a dialect assertion that always fires. The existence guard
+# is for shells that ship no /usr/bin/grep at all — those skip the extra dialect
+# instead of reding the suite.
+if [ -x /usr/bin/grep ]; then
+  workspace_grep_fixture_probe /usr/bin/grep
+fi
+rm -f "$WORKSPACE_FIXTURE_DOC"
 
 echo 'command-workspace: PASS'

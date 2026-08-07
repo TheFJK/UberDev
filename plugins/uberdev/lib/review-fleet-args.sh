@@ -505,7 +505,7 @@ review_fleet_read_ci_push() {
   jq -er --arg field "$2" '.[$field]' <"$1"
 }
 
-# review_fleet_write_conflict_paths PATH -- PATH...
+# review_fleet_write_conflict_paths PATH [--] PATH...
 #
 # The conflicted-file set crosses TWO fences (enumerate -> stage) and one
 # Workflow call. Held in a shell array it was gone by the time
@@ -515,10 +515,32 @@ review_fleet_read_ci_push() {
 # unmerged index, and the re-conflict scan sent the orchestrator back to step 1
 # forever. NUL-delimited on disk because a repository path may contain a
 # newline; the reader is the same `read -r -d ''` loop the enumerator uses.
+#
+# THE `--` IS OPTIONAL AND IS CONSUMED. This signature is the only one of the
+# ~25 in this file that carries a `--`, so it reads as a real separator and the
+# callers half two of #383 writes are the ones that will spell it
+# `review_fleet_write_conflict_paths "$list" -- "${conflicted[@]}"`. A body that
+# only shifted the target wrote a literal `--` as the FIRST NUL entry; the
+# consumer's `read -r -d ''` loop then handed it to
+# `git add -- "${conflicted_files[@]}"` as a pathspec, git answered
+# "pathspec '--' did not match any files", the stage guard fired, and the
+# CONFLICT arm aborted a mid-rebase it could have completed. Consuming it is the
+# fix rather than deleting it from the comment, because git gives `--` exactly
+# this meaning and a file literally NAMED `--` is not a case this stage can
+# reach -- git's own porcelain could not enumerate one without the same
+# separator.
 review_fleet_write_conflict_paths() {
   [ "$#" -ge 1 ] || return 2
   local target="$1"        # NEVER `path` -- see review_fleet_write_ci_state
   shift
+  # BEFORE the arity check, never after: `PATH --` names zero conflicted files,
+  # which is the empty set the guard below exists to refuse wearing the
+  # documented spelling. Shifting it after the check would let it through.
+  # `case`, not `[ "${1:-}" = -- ] && shift`: a false `&&` at statement level
+  # returns 1, and this file is sourced into fences that may run under `set -e`.
+  case "${1:-}" in
+    '--') shift ;;
+  esac
   [ "$#" -ge 1 ] || return 2
   ( umask 077 && : >"$target" ) || return 2
   local entry

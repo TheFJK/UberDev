@@ -8020,9 +8020,20 @@ def _ci_porcelain_entries(working_dir: str) -> tuple[bytes, ...]:
     rebase whose replayed commit contained such a rename reported the
     nonexistent path `file.md` as worktree-dirty and failed
     `ci_rebase_conflict_scope_escape`, taking the CONFLICT-RESOLVE arm with it.
-    `_ci_unmerged_paths` was safe only by accident (its filter is the two exact
-    bytes `UU`). Both read through this one splitter now, so neither depends on
-    which accident it was relying on.
+    `_ci_unmerged_paths` was not safe either, in the opposite direction: its
+    filter was the two exact bytes `UU` and NO layout check, so a bare origin
+    named `UUnamed.md` passed it and was emitted as the phantom path `amed.md`.
+    Requiring the space at offset 2 — which it now does, because the pair test
+    became a membership check that no longer implies the layout on its own —
+    is what closes that one.
+
+    What neither can distinguish is an origin whose first two bytes really are
+    an unmerged pair AND whose third is a space: `AA x.txt` reads as a status
+    record however carefully it is filtered. That residual is conservative in
+    both callers — here it adds a path to the unmerged set, so
+    `_validate_ci_rebase_outcome` takes the CONFLICT arm rather than declaring
+    a clean REBASED. Both read through this one splitter, so neither can drift
+    into a different answer about which shapes it is exposed to.
     """
     observed = _git(working_dir, "status", "--porcelain", "-z")
     if observed.returncode != 0:
@@ -8043,10 +8054,36 @@ def _ci_porcelain_entries(working_dir: str) -> tuple[bytes, ...]:
     return tuple(entries)
 
 
+def _ci_is_unmerged_pair(pair: bytes) -> bool:
+    """True for every porcelain XY pair git uses to mean "unmerged".
+
+    ONE definition, for the same reason `_ci_rebase_dir` is one: the rebase judge
+    and the residue judge must agree about what an unmerged entry IS. They did
+    not. `_ci_unmerged_paths` matched the two exact bytes `UU` while
+    `_ci_worktree_dirty_paths` below already carried the full set, so an add/add
+    rebase conflict — porcelain `AA`, not `UU` — was an unmerged path to one and
+    invisible to the other. The CONFLICT guard in `_validate_ci_rebase_outcome`
+    then saw no unmerged paths, fell through to `_ci_require_residue_closed`, and
+    refused `index_dirty` on the exact state `agents/ci-rebase-handler.md` Step 5
+    mandates — whose caller answers by running `git rebase --abort`, destroying
+    the mid-rebase state the CONFLICT-RESOLVE arm needs.
+
+    git's unmerged pairs are `DD`, `AU`, `UD`, `UA`, `DU`, `AA` and `UU`
+    (`git status` "Unmerged paths"). Every one but `AA` and `DD` carries a `U`,
+    so the membership test is that `U` plus those two named exceptions.
+    """
+    return b"U" in pair or pair in (b"AA", b"DD")
+
+
 def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
     unmerged: list[str] = []
     for record in _ci_porcelain_entries(working_dir):
-        if len(record) < 4 or record[:2] != b"UU":
+        # The space at offset 2 is porcelain's `XY <path>` separator. Required
+        # explicitly now that the pair test is a membership check rather than the
+        # two literal bytes `UU`, which used to imply the layout on its own.
+        if len(record) < 4 or record[2:3] != b" ":
+            continue
+        if not _ci_is_unmerged_pair(record[0:2]):
             continue
         try:
             unmerged.append(record[3:].decode("utf-8"))
@@ -8056,8 +8093,16 @@ def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
 
 
 def _ci_changed_paths(working_dir: str, before: str, after: str) -> tuple[str, ...]:
+    # `--no-renames`, for the same reason `_changed_paths` passes it on all three
+    # of its invocations: rename detection is ON by default, and it collapses a
+    # rename to its DESTINATION path only. The scope check in
+    # `_validate_ci_fix_code_outcome` is built entirely on this tuple, so a fixer
+    # that did `git mv src/security_guard.py Cargo.lock` alongside a legitimate
+    # anchor edit reported one anchor plus one lockfile — the permitted shape —
+    # and `ci_fix_scope_escape` never fired on the deletion. Enumerating both
+    # sides of the rename is what gives the loop a path to refuse.
     observed = _git(
-        working_dir, "diff", "--name-only", "-z", f"{before}..{after}"
+        working_dir, "diff", "--name-only", "-z", "--no-renames", f"{before}..{after}", "--"
     )
     if observed.returncode != 0:
         fail("git_state_unreadable")
@@ -8188,8 +8233,7 @@ def _ci_worktree_dirty_paths(working_dir: str) -> tuple[str, ...]:
         worktree_column = record[1:2]
         if index_column == b"?" or index_column == b"!":
             continue  # untracked/ignored: _require_untracked_confined_to_evidence
-        pair = record[0:2]
-        if b"U" in pair or pair in (b"AA", b"DD"):
+        if _ci_is_unmerged_pair(record[0:2]):
             continue  # a legitimate unmerged entry
         if worktree_column == b" ":
             continue
@@ -8276,12 +8320,28 @@ def _validate_ci_rebase_outcome(
     return "REBASED"
 
 
-# git writes conflict hunks with `conflict-marker-size` (default 7) repeats of
-# `<`, `|`, `=` and `>` at the start of a line. `<<<<<<<` and `>>>>>>>` are the
-# two that essentially never occur in real content — `=======` is a markdown
-# underline and `|||||||` is a table row — so those two alone are the predicate.
-# Either one surviving means the hunk was never finished.
-CI_CONFLICT_MARKERS = (b"<<<<<<<", b">>>>>>>")
+# git writes conflict hunks with `conflict-marker-size` repeats of `<`, `|`, `=`
+# and `>` at the start of a line. Runs of `<` and `>` are the two that
+# essentially never occur in real content — a run of `=` is a markdown underline
+# and a run of `|` is a table row — so those two alone are the predicate. Either
+# one surviving means the hunk was never finished.
+#
+# A RUN of the character, NOT a fixed-width literal. `conflict-marker-size` is a
+# per-path gitattribute and 7 is only its default: at size 10 git writes
+# `<<<<<<<<<< HEAD`, and a boundary test anchored at offset 7 read the eighth `<`
+# as the byte that had to be a space or a newline. The predicate answered "no
+# markers" for a file still holding a raw conflict hunk, so
+# `_validate_ci_conflict_outcome` returned RESOLVED and the controller staged it
+# and force-pushed it.
+#
+# 7 is the floor rather than 1 because git honours a CONFIGURED size below the
+# default too, and a shorter run is not distinguishable from ordinary content:
+# `>>> ` opens every Python doctest line and `<<<` a shell here-string, so a
+# lower floor would refuse the whole CONFLICT-RESOLVE arm on file shapes that
+# carry no conflict at all. A sub-default `conflict-marker-size` therefore stays
+# outside what this scan can see; anything at the default or above is caught.
+CI_CONFLICT_MARKER_CHARS = (b"<", b">")
+CI_CONFLICT_MARKER_MIN_RUN = 7
 
 
 def _has_conflict_markers(path: str) -> bool:
@@ -8295,10 +8355,15 @@ def _has_conflict_markers(path: str) -> bool:
         with open(path, "rb") as handle:
             for line in handle:
                 stripped = line.lstrip(b"\xef\xbb\xbf")
-                for marker in CI_CONFLICT_MARKERS:
-                    if stripped.startswith(marker) and (
-                        len(stripped) == len(marker)
-                        or stripped[len(marker):len(marker) + 1] in (b" ", b"\n", b"\r")
+                for character in CI_CONFLICT_MARKER_CHARS:
+                    # The run's own length, measured rather than assumed, so the
+                    # boundary is tested AFTER however many repeats git wrote.
+                    run = len(stripped) - len(stripped.lstrip(character))
+                    if run < CI_CONFLICT_MARKER_MIN_RUN:
+                        continue
+                    if (
+                        len(stripped) == run
+                        or stripped[run:run + 1] in (b" ", b"\n", b"\r")
                     ):
                         return True
     except OSError:

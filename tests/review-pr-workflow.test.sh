@@ -991,6 +991,34 @@ if bash -c '. "$1"; review_fleet_write_conflict_paths "$2/empty.zlist"' _ "$ARGS
 else
   pass "E2b an empty conflicted-file set is refused, not published"
 fi
+# E2c — the DOCUMENTED spelling. The signature comment is `PATH -- PATH...`,
+# and it is the only `--` among ~25 signature comments in that file, so the
+# callers half two of #383 writes are the ones that will follow it. A body that
+# does not consume the separator writes a literal `--` as the FIRST NUL entry,
+# the reader feeds it into `git add -- "${conflicted_files[@]}"` as a pathspec,
+# git answers "pathspec '--' did not match any files", the stage guard fires,
+# and the CONFLICT arm aborts a rebase it could have finished. Assert on the
+# FIRST entry, not just the count: a trailing check would pass on the literal.
+bash -c '. "$1"; review_fleet_write_conflict_paths "$2/sep.zlist" -- "src/a b.py" "src/plain.py"' \
+  _ "$ARGS_LIB" "$E_TMP" >/dev/null 2>&1
+E_SEP_PATHS="$(env -i PATH="$PATH" bash -c '
+  count=0; first=; last=
+  while IFS= read -r -d "" p; do
+    count=$((count + 1)); last="$p"
+    [ "$count" -eq 1 ] && first="$p"
+  done <"$1/sep.zlist"
+  printf "%s|%s|%s" "$count" "$first" "$last"' _ "$E_TMP" 2>/dev/null)"
+[ "$E_SEP_PATHS" = '2|src/a b.py|src/plain.py' ] \
+  && pass "E2c the documented \`PATH -- PATH...\` spelling publishes ONLY the real paths" \
+  || fail "E2c the \`--\` separator leaked into the pathspec list: '$E_SEP_PATHS'"
+# E2d — and consuming the separator must not open a hole in the arity guard:
+# `PATH --` names zero conflicted files, which is E2b's defect wearing the
+# documented spelling.
+if bash -c '. "$1"; review_fleet_write_conflict_paths "$2/sep-empty.zlist" --' _ "$ARGS_LIB" "$E_TMP" >/dev/null 2>&1; then
+  fail "E2d \`PATH --\` with no paths was accepted — an empty list under the documented spelling"
+else
+  pass "E2d \`PATH --\` with no paths is refused, same as the bare empty set"
+fi
 
 # E3 — the push record. Passing $NEW_HEAD_SHA between fences in a variable
 # recorded an EMPTY sha into phases.phase3.fix_pushes: an audit row naming no
