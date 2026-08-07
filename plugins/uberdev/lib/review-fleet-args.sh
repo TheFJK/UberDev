@@ -394,10 +394,22 @@ review_fleet_bind_ci_conflicts() {
 # resolvers dispatched — while the wave batching two lines later existed
 # precisely to chunk that many. This is the ceiling; the knob is the wave size.
 #
-# 50 mirrors the `ciConflictCount` clamp in skills/review-fleet/workflow.js, so
-# a set this fence accepts is a set the script accepts. Asserted equal by
-# tests/review-pr-phase3-ci.test.sh.
-REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP=50
+# 40, not 50, and the difference is the whole point. `ciConflictCount`'s clamp
+# in skills/review-fleet/workflow.js is 50, but the conflict roster is
+# dispatched as ONE roster whose length goes straight into that script's
+# ceilingGate(), and `maxAgents` — 40 at every review-fleet call site in
+# commands/review-pr.md and commands/simplify.md — is a SECOND ceiling sitting
+# under the first. At 50 this fence accepted 45 conflicted files that the script
+# then killed with `agent_ceiling` and zero resolvers dispatched: the same
+# zero-dispatch shape as the 11-conflict bug above, one number further out.
+#
+# So the number here is the LOWER of the two ceilings, which is what the script
+# now enforces too (`Math.min(ciConflictCap, maxAgents)`). A set this fence
+# accepts is a set the script dispatches, and a set above it is refused HERE,
+# before any Workflow call. Asserted behaviourally — at the cap and at cap+1,
+# against the maxAgents the call sites actually emit — by
+# tests/review-pr-workflow.test.sh E6.
+REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP=40
 
 # review_fleet_write_ci_state PATH CI_ITER REVIEW_ITER FIX_PUSHES_JSON CLASSES_JSON
 #

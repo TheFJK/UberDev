@@ -882,16 +882,17 @@ if [ -z "$W_WAVE_ABORT" ] && [ "$W_WAVE_AGENTS" = 11 ]; then
 else
   fail "W[ci-conflicts-wave] abort='$W_WAVE_ABORT' dispatched=$W_WAVE_AGENTS (want no abort, 11)"
 fi
-# ...the DEFAULT total ceiling is the 50 that matches ciConflictCount's own
-# clamp and lib/review-fleet-args.sh's REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP, NOT
-# the wave knob's 10. Omit ciConflictCap entirely and 11 must still dispatch.
+# ...and the DEFAULT total ceiling is NOT the wave knob's 10: omit
+# ciConflictCap entirely and 11 must still dispatch. (What the default resolves
+# to exactly — `min(50, maxAgents)` — is E6a/E6b's job, driven against the
+# maxAgents the call sites emit rather than against a literal.)
 stage_args ci-conflicts "$(for i in $(seq 11); do printf '%s,' "$(printf '0%.0s' $(seq 62))$(printf '%02d' "$i")"; done | sed 's/,$//')" \
   "$(printf '%s' "$W_CI_COMMON" | jq --arg p "$W_CONFLICT_PREFIX" \
      '. + {ciConflictCount:11, ciConflictWave:10, ciConflictAuthorityPrefixAbs:$p}')"
 W_DEFAULT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
 if [ -z "$(printf '%s' "$W_DEFAULT_OUT" | jq -r '.abortReason')" ] \
    && [ "$(printf '%s' "$W_DEFAULT_OUT" | jq -r '.labels | length')" = 11 ]; then
-  pass "W[ci-conflicts-wave] the DEFAULT total ceiling is 50, not the wave knob's 10"
+  pass "W[ci-conflicts-wave] the DEFAULT total ceiling is not the wave knob's 10"
 else
   fail "W[ci-conflicts-wave] ciConflictCap still defaults to the concurrency knob: $W_DEFAULT_OUT"
 fi
@@ -1087,16 +1088,67 @@ else
   fail "E5 the mid-rebase fixture did not conflict; the rows above would be vacuous"
 fi
 
-# E6 — the conflict ceiling is ONE number on both sides of the boundary. The
-# shell constant is what an enumerator would refuse against; the script's clamp
-# default is what the engine refuses against. A drift accepts a set the engine
-# then rejects with zero resolvers dispatched.
+# E6 — the conflict ceiling is ONE number on both sides of the boundary, and
+# that number is NOT the one either side spells.
+#
+# The row this replaces compared the shell constant against the script's
+# `ciConflictCap` clamp default (50 == 50) and passed — while the ci-conflicts
+# roster is dispatched as ONE roster whose length goes into ceilingGate(), so
+# `maxAgents` (40 at every review-fleet call site) was a second, LOWER ceiling
+# that neither literal named. 45 conflicted files were accepted here and then
+# aborted `agent_ceiling` with zero resolvers dispatched — the exact failure the
+# cap/wave split was introduced to eliminate. A cap-to-cap comparison is
+# structurally incapable of seeing that, so this row does not compare literals:
+# it DRIVES the shipped script at the cap and at cap+1 under the maxAgents the
+# call sites really emit, and separately pins the shell constant to the lowest
+# maxAgents any call site emits.
 E_CAP_SHELL="$(bash -c '. "$1"; printf "%s" "$REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP"' _ "$ARGS_LIB" 2>/dev/null)"
-E_CAP_JS="$(grep -oE 'const ciConflictCap = clampInt\(CFG\.ciConflictCap, 1, [0-9]+, ([0-9]+)\);' "$WORKFLOW" | grep -oE '[0-9]+\);' | tr -d ');')"
-if [ -n "$E_CAP_SHELL" ] && [ "$E_CAP_SHELL" = "$E_CAP_JS" ]; then
-  pass "E6 the controller ceiling ($E_CAP_SHELL) and the script's default agree"
+# The minimum maxAgents literal across EVERY review-fleet emit site. Reading it
+# from the command files rather than hardcoding 40 is what keeps this row alive
+# if a future PR retunes the ceiling. The min is taken by awk, not `sort -n |
+# head -1`: this file sets `set -o pipefail`, and tests/epipe-guard.test.sh
+# refuses a pipe into an early-exiting reader repo-wide.
+E_MAX_AGENTS_MIN="$(grep -hoE 'maxAgents=[0-9]+' "$REVIEW_CMD" "$SIMPLIFY_CMD" \
+  | awk -F= 'NR == 1 || $2 < lowest { lowest = $2 } END { if (NR) print lowest }')"
+if [ -n "$E_CAP_SHELL" ] && [ -n "$E_MAX_AGENTS_MIN" ] \
+   && [ "$E_CAP_SHELL" -le "$E_MAX_AGENTS_MIN" ]; then
+  pass "E6 the controller ceiling ($E_CAP_SHELL) is at or under the lowest emitted maxAgents ($E_MAX_AGENTS_MIN)"
 else
-  fail "E6 ceiling drift: shell='$E_CAP_SHELL' workflow.js='$E_CAP_JS'"
+  fail "E6 ceiling drift: shell cap='$E_CAP_SHELL' lowest emitted maxAgents='$E_MAX_AGENTS_MIN'"
+fi
+
+# E6a/E6b — BEHAVIOURAL. Drive the real ci-conflicts stage with the emitted
+# maxAgents. At the cap every resolver must dispatch; at cap+1 the refusal must
+# be the NAMED up-front one, never `agent_ceiling` (accept-then-kill is the bug).
+e6_nonces() {  # e6_nonces N -> N distinct 64-hex nonces, comma-joined
+  local n="$1" i out=''
+  for i in $(seq "$n"); do
+    out="$out,$(printf '0%.0s' $(seq 58))$(printf '%06d' "$i")"
+  done
+  printf '%s' "${out#,}"
+}
+e6_drive() {  # e6_drive N -> "<abortReason>|<dispatched>"
+  local n="$1" out
+  stage_args ci-conflicts "$(e6_nonces "$n")" \
+    "$(printf '%s' "$W_CI_COMMON" | jq --argjson n "$n" --argjson m "$E_MAX_AGENTS_MIN" \
+       --arg p "/r/run/ci-authority-resolve-conflict-iter1-ci1-" \
+       '. + {maxAgents:$m, ciConflictCount:$n, ciConflictWave:10,
+             ciConflictAuthorityPrefixAbs:$p}')"
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+  printf '%s|%s' "$(printf '%s' "$out" | jq -r '.abortReason')" \
+                 "$(printf '%s' "$out" | jq -r '.labels | length')"
+}
+E_AT_CAP="$(e6_drive "$E_CAP_SHELL")"
+if [ "$E_AT_CAP" = "|$E_CAP_SHELL" ]; then
+  pass "E6a a set AT the controller ceiling ($E_CAP_SHELL) dispatches every resolver"
+else
+  fail "E6a at the cap the engine returned '$E_AT_CAP' (want '|$E_CAP_SHELL')"
+fi
+E_OVER_CAP="$(e6_drive "$((E_CAP_SHELL + 1))")"
+if [ "$E_OVER_CAP" = "bad_ci_conflict_count|0" ]; then
+  pass "E6b a set ABOVE it refuses by name up-front, not agent_ceiling after acceptance"
+else
+  fail "E6b at cap+1 the engine returned '$E_OVER_CAP' (want 'bad_ci_conflict_count|0')"
 fi
 
 echo ""

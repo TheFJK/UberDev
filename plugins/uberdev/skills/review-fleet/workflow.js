@@ -314,16 +314,27 @@ const ciBaseBranch = String(CFG.ciBaseBranch || "");
 // bytes the controller enumerated from `git status --porcelain` UU entries in
 // its own checkout, and each child reads its own at a script-derived path.
 const ciConflictCount = clampInt(CFG.ciConflictCount, 0, 50, 0);
-// TWO different numbers, and conflating them cost every resolver on an
-// 11-conflict PR. `ciConflictCap` is the TOTAL ceiling on the fanout — its 50
-// matches ciConflictCount's clamp and lib/review-fleet-args.sh's
-// REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP. `ciConflictWave` is the CONCURRENCY knob
-// (`fanout_concurrency.conflict_resolver`, default 10), which dispatchRoster
-// below already uses to batch a larger roster into sequential waves. When the
-// wave size was forwarded as the cap, `11 > 10` aborted `bad_ci_conflict_count`
-// with zero resolvers dispatched — refusing the exact case the batching exists
-// to serve.
-const ciConflictCap = clampInt(CFG.ciConflictCap, 1, 50, 50);
+// THREE different numbers, and conflating any two of them costs every resolver
+// on the run. `ciConflictCap` is the TOTAL ceiling on the fanout.
+// `ciConflictWave` is the CONCURRENCY knob (`fanout_concurrency.conflict_resolver`,
+// default 10), which dispatchRoster below already uses to batch a larger roster
+// into sequential waves. When the wave size was forwarded as the cap, `11 > 10`
+// aborted `bad_ci_conflict_count` with zero resolvers dispatched — refusing the
+// exact case the batching exists to serve.
+//
+// `maxAgents` is the THIRD, and it is the one the first fix missed. The
+// conflict roster is dispatched as ONE roster whose length goes straight into
+// ceilingGate(), so a cap ABOVE maxAgents accepts a set the ceiling gate then
+// kills — 45 conflicted files under the 40 every review-fleet call site emits
+// aborted `agent_ceiling` with zero resolvers dispatched. That is the same
+// zero-dispatch shape as the 11-conflict bug, one number further out. So the
+// effective total is the LOWER of the two, and a set above it is refused
+// up-front by name (`bad_ci_conflict_count`) at exactly the number
+// lib/review-fleet-args.sh's REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP refuses at, on
+// the controller's side of the boundary. Asserted BEHAVIOURALLY — at the cap
+// and at cap+1 — by tests/review-pr-workflow.test.sh E6; a cap-to-cap literal
+// comparison cannot see this drift, because neither literal is maxAgents.
+const ciConflictCap = Math.min(clampInt(CFG.ciConflictCap, 1, 50, 50), maxAgents);
 const ciConflictWave = clampInt(CFG.ciConflictWave, 1, 50, 10);
 // The controller mints one authority per resolver at
 // `<prefix><index>.json`; only the index differs, so ONE string crosses the
