@@ -158,17 +158,51 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-run_ci_monitor_case() {
-  local name="$1" plan="$2" want="$3" want_audit="$4"
-  # Optional cross-fence carry — exactly what the orchestrator rebinds when the
-  # previous fence returned `resume`.
-  local carry_deadline="${5:-}" carry_passes="${6:-}"
-  local log got audit_line
-  log="$(mktemp)"
-  got="$(
-    CI_MONITOR_PLAN="$plan" CI_MONITOR_LOG="$log" \
-    CI_MONITOR_CARRY_DEADLINE="$carry_deadline" CI_MONITOR_CARRY_PASSES="$carry_passes" \
-    bash -c '
+# The MONITOR fence establishes its own run directory (#400) and reads the
+# fix-push ledger out of it to decide WHICH green it reached. Every row below
+# therefore needs a real directory on disk — `cd … && pwd -P` refuses a path
+# that does not exist, which is the point: a garbage RUN_ID must be a hard
+# failure, not a resolve-to-nothing that answers the silently-wrong `green`.
+#
+# `git rev-parse --show-toplevel` is STUBBED rather than backed by a real repo:
+# the part carrying the bug is the `$ROOT/.uberdev/research/$RUN_ID`
+# composition and the `cd` guard, not git itself, so the suite stays offline.
+CI_MONITOR_RUN_ID_DEFAULT=20260809-000000-abc1234
+CI_MONITOR_ROOTS="$(mktemp -d)"
+# Builds a fixture repo root whose research dir contains the ledger described by
+# $2: `none` (no file at all), `empty` (a real ledger recording zero pushes),
+# `pushed` (one recorded ci-code-fixer push), `zero` (0-byte) or `garbage`.
+make_ci_monitor_root() {
+  local name="$1" kind="$2" run_id="${3:-$CI_MONITOR_RUN_ID_DEFAULT}"
+  local root="$CI_MONITOR_ROOTS/$name" rundir sha40
+  rundir="$root/.uberdev/research/$run_id"
+  mkdir -p "$rundir"
+  sha40="$(printf 'c%.0s' $(seq 40))"
+  case "$kind" in
+    none) : ;;
+    empty)
+      bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 1 1 "[]" "[]"' \
+        _ "$ARGS_LIB_PHASE3" "$rundir" >/dev/null 2>&1 ;;
+    pushed)
+      bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 2 2 \
+        "[{\"sha\":\"$3\",\"by_agent\":\"ci-code-fixer\"}]" "[\"code_bug\"]"' \
+        _ "$ARGS_LIB_PHASE3" "$rundir" "$sha40" >/dev/null 2>&1 ;;
+    zero) : >"$rundir/ci-loop-state.json" ;;
+    garbage) printf 'not json' >"$rundir/ci-loop-state.json" ;;
+  esac
+  printf '%s\n' "$root"
+}
+
+CI_MONITOR_ROOT_NONE="$(make_ci_monitor_root noledger none)"
+CI_MONITOR_ROOT_EMPTY="$(make_ci_monitor_root emptyledger empty)"
+CI_MONITOR_ROOT_PUSHED="$(make_ci_monitor_root pushedledger pushed)"
+CI_MONITOR_ROOT_ZERO="$(make_ci_monitor_root zeroledger zero)"
+CI_MONITOR_ROOT_GARBAGE="$(make_ci_monitor_root garbageledger garbage)"
+
+# The shared `bash -c` body both runners drive. Kept in one variable so the halt
+# runner cannot drift from the state runner — they must exercise byte-identical
+# stubs, or a halt row would be proving a different fence than the rows around it.
+CI_MONITOR_DRIVER='
       # `set -e`, not just `set -u`: the command fences run under it, so a
       # short-circuit like `[ x ] && continue` (rc 1 when the test is false)
       # would abort the whole MONITOR fence in production. Lock that here.
@@ -183,6 +217,9 @@ run_ci_monitor_case() {
       # `sleep` onto the same fake clock so a zero-elapsed pass still costs wall
       # time here exactly as it does in production.
       sleep(){ FAKE_NOW=$((FAKE_NOW + $1)); }
+      # The fence recomputes its own working dir; only the toplevel lookup is
+      # faked, so the path composition and the `cd` guard stay under test.
+      git(){ printf "%s\n" "$CI_MONITOR_FAKE_ROOT"; }
       # shellcheck disable=SC2206
       PLAN_ITEMS=($CI_MONITOR_PLAN)
       PLAN_INDEX=0
@@ -195,10 +232,31 @@ run_ci_monitor_case() {
       }
       [ -z "$CI_MONITOR_CARRY_DEADLINE" ] || CI_MONITOR_DEADLINE_SEC="$CI_MONITOR_CARRY_DEADLINE"
       [ -z "$CI_MONITOR_CARRY_PASSES" ] || CI_MONITOR_PASSES_USED="$CI_MONITOR_CARRY_PASSES"
+      # Opt-in exactly like the carries: an EMPTY CI_MONITOR_RUN_ID leaves RUN_ID
+      # genuinely unset, which is the fence-entered-without-its-carry case.
+      [ -z "$CI_MONITOR_RUN_ID" ] || RUN_ID="$CI_MONITOR_RUN_ID"
       . "$1"
       printf "%s %s %s %s\n" "$CI_MONITOR_VERDICT" "$OUTCOME" \
         "$CI_MONITOR_PASSES_USED" "$CI_MONITOR_ELAPSED_SEC"
-    ' _ "$CI_MONITOR_FIXTURE" 2>/dev/null
+'
+
+run_ci_monitor_case() {
+  local name="$1" plan="$2" want="$3" want_audit="$4"
+  # Optional cross-fence carry — exactly what the orchestrator rebinds when the
+  # previous fence returned `resume`.
+  local carry_deadline="${5:-}" carry_passes="${6:-}"
+  # #400 bindings. `${8-…}` (no colon) so an explicit '' means "unset RUN_ID".
+  local fake_root="${7:-$CI_MONITOR_ROOT_NONE}"
+  local run_id="${8-$CI_MONITOR_RUN_ID_DEFAULT}" fix_phase="${9:-1}"
+  local log got audit_line
+  log="$(mktemp)"
+  got="$(
+    CI_MONITOR_PLAN="$plan" CI_MONITOR_LOG="$log" \
+    CI_MONITOR_CARRY_DEADLINE="$carry_deadline" CI_MONITOR_CARRY_PASSES="$carry_passes" \
+    CI_MONITOR_FAKE_ROOT="$fake_root" CI_MONITOR_RUN_ID="$run_id" \
+    CI_FIX_PHASE="$fix_phase" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c "$CI_MONITOR_DRIVER" _ "$CI_MONITOR_FIXTURE" 2>/dev/null
   )"
   audit_line="$(head -n 1 "$log" 2>/dev/null)"
   if [ "$got" = "$want" ] && [ "$audit_line" = "$want_audit" ]; then
@@ -215,19 +273,61 @@ run_ci_monitor_case() {
   rm -f "$log"
 }
 
+# The halt paths cannot go through run_ci_monitor_case: they end in `exit 1` (or
+# a `return 2` out of the sourced fence), which kills the whole `bash -c` before
+# the state line is printed. Comparing an empty `$got` against a `want` string
+# would "pass" for any reason at all, including the fence never running. Assert
+# the rc and the audit event instead — and assert positively that no green
+# leaked out, because the entire point of the halt is that an unreadable ledger
+# must NOT resolve to an outcome.
+run_ci_monitor_halt_case() {
+  local name="$1" plan="$2" want_rc="$3" want_audit="$4"
+  local fake_root="${5:-$CI_MONITOR_ROOT_NONE}"
+  local run_id="${6-$CI_MONITOR_RUN_ID_DEFAULT}" fix_phase="${7:-1}"
+  local log got rc audit_line
+  log="$(mktemp)"
+  got="$(
+    CI_MONITOR_PLAN="$plan" CI_MONITOR_LOG="$log" \
+    CI_MONITOR_CARRY_DEADLINE="" CI_MONITOR_CARRY_PASSES="" \
+    CI_MONITOR_FAKE_ROOT="$fake_root" CI_MONITOR_RUN_ID="$run_id" \
+    CI_FIX_PHASE="$fix_phase" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c "$CI_MONITOR_DRIVER" _ "$CI_MONITOR_FIXTURE" 2>/dev/null
+  )"
+  rc=$?
+  audit_line="$(head -n 1 "$log" 2>/dev/null)"
+  if [ "$rc" = "$want_rc" ] && [ "$audit_line" = "$want_audit" ] \
+     && ! grep -q green <<<"$got"; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name"
+    echo "        plan:          $plan"
+    echo "        want rc:       $want_rc"
+    echo "        got  rc:       $rc"
+    echo "        want audit:    $want_audit"
+    echo "        got  audit:    $audit_line"
+    echo "        got  stdout:   $got   (must contain no 'green')"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$log"
+}
+
 if [ -s "$CI_MONITOR_FIXTURE" ]; then
   # THE #302 regression: pass 1 burns its FULL window and comes back with a code
   # that is neither 0 nor 8 (a harness kill reports its own code, not 124). That
   # is a truncated watch, not a failed check — it must NOT reach CLASSIFY.
   run_ci_monitor_case \
     "S2-RT.1 — full-window non-8 truncation is pending, next pass sees the green" \
-    "240:137 45:0" "green green 2 285" "ci_monitor_green passes=2 elapsed_sec=285"
+    "240:137 45:0" "green green 2 285" \
+    "ci_monitor_green outcome=green passes=2 elapsed_sec=285"
   run_ci_monitor_case \
     "S2-RT.2 — timeout's own 124 is pending, never red" \
-    "240:124 60:0" "green green 2 300" "ci_monitor_green passes=2 elapsed_sec=300"
+    "240:124 60:0" "green green 2 300" \
+    "ci_monitor_green outcome=green passes=2 elapsed_sec=300"
   run_ci_monitor_case \
     "S2-RT.3 — gh's documented 8 (checks pending) continues to the next pass" \
-    "240:8 20:0" "green green 2 260" "ci_monitor_green passes=2 elapsed_sec=260"
+    "240:8 20:0" "green green 2 260" \
+    "ci_monitor_green outcome=green passes=2 elapsed_sec=260"
   # Only an EARLY non-zero non-8 is gh reporting a genuinely failed check.
   run_ci_monitor_case \
     "S2-RT.4 — early non-zero non-8 is red and proceeds to CLASSIFY" \
@@ -249,7 +349,8 @@ if [ -s "$CI_MONITOR_FIXTURE" ]; then
     240 4
   run_ci_monitor_case \
     "S2-RT.7 — an immediately green first pass short-circuits the loop" \
-    "40:0" "green green 1 40" "ci_monitor_green passes=1 elapsed_sec=40"
+    "40:0" "green green 1 40" \
+    "ci_monitor_green outcome=green passes=1 elapsed_sec=40"
   # S2-RT.8 — the hot-loop guard. Every pass returns in 0s with gh's rc 8; with
   # no minimum-progress floor the loop would never advance its clock and would
   # hammer the API forever. The floor makes each pass cost CI_MONITOR_MIN_PASS_SEC,
@@ -267,8 +368,189 @@ if [ -s "$CI_MONITOR_FIXTURE" ]; then
     "" "pending halted 48 0" \
     "ci_monitor_timeout subreason=monitor_timeout passes=48 elapsed_sec=0" \
     1200 48
+
+  # ---- #400: WHICH green ----------------------------------------------------
+  # A green from MONITOR is not one outcome, it is two: `green` (the head the
+  # author pushed passed) and `green_after_fix` (an autopilot committed, rebased
+  # and force-pushed, and THAT head passed). Before this, both serialised
+  # identically into phases.phase3.outcome — seven readers, zero producers — so
+  # a /merge trust-trail reader could not tell a rewritten head from a clean one.
+  run_ci_monitor_case \
+    "S2-RT.10 — a green with no ledger on disk is a plain green (first probe of the run)" \
+    "40:0" "green green 1 40" \
+    "ci_monitor_green outcome=green passes=1 elapsed_sec=40" \
+    "" "" "$CI_MONITOR_ROOT_NONE"
+  run_ci_monitor_case \
+    "S2-RT.11 — a ledger recording zero fix pushes is still a plain green" \
+    "40:0" "green green 1 40" \
+    "ci_monitor_green outcome=green passes=1 elapsed_sec=40" \
+    "" "" "$CI_MONITOR_ROOT_EMPTY"
+  # S2-RT.12 is THE regression row: identical watch plan, identical verdict,
+  # different ledger. It is the only thing separating the two enum members.
+  run_ci_monitor_case \
+    "S2-RT.12 — a green reached AFTER a recorded fix push is green_after_fix" \
+    "40:0" "green green_after_fix 1 40" \
+    "ci_monitor_green outcome=green_after_fix passes=1 elapsed_sec=40" \
+    "" "" "$CI_MONITOR_ROOT_PUSHED"
+  # S2-RT.13/14 — an unreadable ledger must HALT, not default. Folding a
+  # truncated or crashed producer to "no fixes" is the `jq length … || echo 0`
+  # masking class (#263/#265), and here it launders a rewritten head into a
+  # clean one — precisely the signal being carried.
+  run_ci_monitor_halt_case \
+    "S2-RT.13 — a 0-byte ledger halts the green terminal instead of defaulting" \
+    "40:0" 1 "ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable" \
+    "$CI_MONITOR_ROOT_ZERO"
+  run_ci_monitor_halt_case \
+    "S2-RT.14 — a non-JSON ledger halts the green terminal instead of defaulting" \
+    "40:0" 1 "ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable" \
+    "$CI_MONITOR_ROOT_GARBAGE"
+  # S2-RT.15 — RUN_ID is the one documented cross-fence carry. Entered without
+  # it, the ledger resolves under a path that does not exist, and "does not
+  # exist" is the answer `green` — a wrong outcome indistinguishable from a
+  # right one. It must be a hard error before any watch runs, with no audit
+  # event claiming a verdict the fence never reached.
+  run_ci_monitor_halt_case \
+    "S2-RT.15 — the fence refuses to run at all without RUN_ID (no silent green)" \
+    "40:0" 2 "" "$CI_MONITOR_ROOT_PUSHED" ""
+  # S2-RT.16 — probe-only (`--no-ci-fix`) never upgrades: 6c.4 skips the fixer
+  # arms, so a ledger left by an earlier run is not evidence about this head.
+  run_ci_monitor_case \
+    "S2-RT.16 — CI_FIX_PHASE=0 answers green even with a recorded push on disk" \
+    "40:0" "green green 1 40" \
+    "ci_monitor_green outcome=green passes=1 elapsed_sec=40" \
+    "" "" "$CI_MONITOR_ROOT_PUSHED" "$CI_MONITOR_RUN_ID_DEFAULT" 0
+  # S2-RT.17 — the ledger read must not leak into the non-green arms. Re-run the
+  # red and resume plans against a NON-EMPTY ledger and require byte-identical
+  # outcomes to S2-RT.4 / S2-RT.5.
+  run_ci_monitor_case \
+    "S2-RT.17a — a red verdict is unchanged by a non-empty ledger (matches S2-RT.4)" \
+    "12:1" "red unset 1 12" "ci_monitor_red passes=1 elapsed_sec=12 rc=1" \
+    "" "" "$CI_MONITOR_ROOT_PUSHED"
+  run_ci_monitor_case \
+    "S2-RT.17b — a resume is unchanged by a non-empty ledger (matches S2-RT.5)" \
+    "240:8 240:8" "resume unset 2 480" "" \
+    "" "" "$CI_MONITOR_ROOT_PUSHED"
 fi
 rm -f "$CI_MONITOR_FIXTURE"
+
+echo
+echo "== S2B-RUNTIME: the 6c.1 PROBE green terminal assigns an OUTCOME (#400) =="
+# 6c.1's green row was PROSE — a terminal-mapping table cell reading `green`.
+# Prose cannot assign an OUTCOME, and this is the arm a post-fix re-probe most
+# often takes: after a fix push the flow re-enters at Step 4, Phase 1
+# re-approves, and control returns HERE, where the fast path skips MONITOR
+# entirely. So the one terminal most likely to see a rewritten head was the one
+# with no executable terminal at all.
+CI_PROBE_FIXTURE="$(mktemp)"
+awk '
+  /# BEGIN ci-probe-green-terminal-v1/ { active=1; next }
+  /# END ci-probe-green-terminal-v1/ { exit }
+  active { sub(/^    /, ""); print }
+' "$REVIEW_PR" >"$CI_PROBE_FIXTURE"
+if [ -s "$CI_PROBE_FIXTURE" ]; then
+  echo "  PASS  S2B-RT.0 — sliced the ci-probe-green-terminal-v1 region out of review-pr.md"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S2B-RT.0 — could not slice ci-probe-green-terminal-v1 out of review-pr.md (markers missing/renamed?)"
+  FAIL=$((FAIL + 1))
+fi
+
+CI_PROBE_DRIVER='
+      set -eu
+      audit(){ printf "%s\n" "$*" >>"$CI_PROBE_LOG"; }
+      OUTCOME=unset
+      git(){ printf "%s\n" "$CI_PROBE_FAKE_ROOT"; }
+      [ -z "$CI_PROBE_RUN_ID" ] || RUN_ID="$CI_PROBE_RUN_ID"
+      [ -z "$CI_PROBE_VERDICT_IN" ] || PROBE_VERDICT="$CI_PROBE_VERDICT_IN"
+      . "$1"
+      printf "%s\n" "$OUTCOME"
+'
+
+run_ci_probe_case() {
+  local name="$1" verdict="$2" want="$3" want_audit="$4"
+  local fake_root="${5:-$CI_MONITOR_ROOT_NONE}"
+  local run_id="${6-$CI_MONITOR_RUN_ID_DEFAULT}" fix_phase="${7:-1}"
+  local log got audit_line
+  log="$(mktemp)"
+  got="$(
+    CI_PROBE_LOG="$log" CI_PROBE_FAKE_ROOT="$fake_root" \
+    CI_PROBE_RUN_ID="$run_id" CI_PROBE_VERDICT_IN="$verdict" \
+    CI_FIX_PHASE="$fix_phase" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c "$CI_PROBE_DRIVER" _ "$CI_PROBE_FIXTURE" 2>/dev/null
+  )"
+  audit_line="$(head -n 1 "$log" 2>/dev/null)"
+  if [ "$got" = "$want" ] && [ "$audit_line" = "$want_audit" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name"
+    echo "        PROBE_VERDICT: $verdict"
+    echo "        want OUTCOME:  $want"
+    echo "        got  OUTCOME:  $got"
+    echo "        want audit:    $want_audit"
+    echo "        got  audit:    $audit_line"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$log"
+}
+
+run_ci_probe_halt_case() {
+  local name="$1" verdict="$2" want_rc="$3" want_audit="$4"
+  local fake_root="${5:-$CI_MONITOR_ROOT_NONE}"
+  local run_id="${6-$CI_MONITOR_RUN_ID_DEFAULT}" fix_phase="${7:-1}"
+  local log got rc audit_line
+  log="$(mktemp)"
+  got="$(
+    CI_PROBE_LOG="$log" CI_PROBE_FAKE_ROOT="$fake_root" \
+    CI_PROBE_RUN_ID="$run_id" CI_PROBE_VERDICT_IN="$verdict" \
+    CI_FIX_PHASE="$fix_phase" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c "$CI_PROBE_DRIVER" _ "$CI_PROBE_FIXTURE" 2>/dev/null
+  )"
+  rc=$?
+  audit_line="$(head -n 1 "$log" 2>/dev/null)"
+  if [ "$rc" = "$want_rc" ] && [ "$audit_line" = "$want_audit" ] \
+     && ! grep -q green <<<"$got"; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name"
+    echo "        want rc:       $want_rc"
+    echo "        got  rc:       $rc"
+    echo "        want audit:    $want_audit"
+    echo "        got  audit:    $audit_line"
+    echo "        got  stdout:   $got   (must contain no 'green')"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$log"
+}
+
+if [ -s "$CI_PROBE_FIXTURE" ]; then
+  run_ci_probe_case \
+    "S2B-RT.1 — a green probe with no ledger records a plain green" \
+    green green "ci_phase_outcome data.outcome=green" "$CI_MONITOR_ROOT_NONE"
+  # S2B-RT.2 is the regression row for the fast path: same verdict, same probe,
+  # different ledger.
+  run_ci_probe_case \
+    "S2B-RT.2 — a green probe after a recorded fix push records green_after_fix" \
+    green green_after_fix "ci_phase_outcome data.outcome=green_after_fix" \
+    "$CI_MONITOR_ROOT_PUSHED"
+  run_ci_probe_case \
+    "S2B-RT.3 — CI_FIX_PHASE=0 keeps the fast path at a plain green" \
+    green green "ci_phase_outcome data.outcome=green" \
+    "$CI_MONITOR_ROOT_PUSHED" "$CI_MONITOR_RUN_ID_DEFAULT" 0
+  # S2B-RT.4 — the non-green verdicts are NON-TERMINAL here: they proceed to
+  # MONITOR. This fence must leave OUTCOME alone and audit nothing, or a
+  # still-running CI would be recorded as a phase outcome it never reached.
+  run_ci_probe_case \
+    "S2B-RT.4 — a pending probe assigns no OUTCOME and audits nothing" \
+    pending unset "" "$CI_MONITOR_ROOT_PUSHED"
+  run_ci_probe_halt_case \
+    "S2B-RT.5 — a green probe over a malformed ledger halts instead of defaulting" \
+    green 1 "ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable" \
+    "$CI_MONITOR_ROOT_GARBAGE"
+fi
+rm -f "$CI_PROBE_FIXTURE"
+rm -rf "$CI_MONITOR_ROOTS"
 
 echo
 echo "== S3: pending → red → ci-code-fixer → green (full happy path) =="
@@ -278,6 +560,134 @@ assert_grep "$REVIEW_PR" 'green_after_fix' \
   "S3.2 — green_after_fix outcome documented"
 assert_grep "$REVIEW_PR" 're-enter Phase 1|re-enter at Step 4|post-fix.*re-enter' \
   "S3.3 — post-fix HEAD re-enters Phase 1 fanout (Q4 invariant)"
+# S3.2a — S3.2 above greps for the WORD, which passed happily against a file
+# where `green_after_fix` had seven readers and zero producers (#400). Documented
+# is not produced. Pin the producer by name.
+assert_grep "$REVIEW_PR" 'review_fleet_ci_green_outcome' \
+  "S3.2a — the green_after_fix PRODUCER is called by name, not merely documented"
+# S3.2b — BOTH reachable green terminals must call it. 6c.1's fast path (a
+# post-fix re-probe that skips MONITOR entirely) is the one most likely to see a
+# rewritten head; one terminal wired and one not is the same defect at half the
+# blast radius.
+S32B_CALLS="$(grep -cE 'OUTCOME="\$\(review_fleet_ci_green_outcome ' "$REVIEW_PR" || true)"
+if [ "$S32B_CALLS" -ge 2 ]; then
+  echo "  PASS  S3.2b — both reachable green terminals derive the outcome ($S32B_CALLS call sites)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S3.2b — expected >= 2 green terminals calling review_fleet_ci_green_outcome, found $S32B_CALLS"
+  FAIL=$((FAIL + 1))
+fi
+# ...and no surviving claim that the member is dormant. The annotation was
+# correct for as long as nothing produced the value; leaving it in place now
+# would make the docs the last remaining source of the original confusion.
+assert_no_grep "$REVIEW_PR" 'green_after_fix.*(DORMANT|never assigned|no fence assigns|UNREACHABLE)' \
+  "S3.2c — review-pr.md carries no surviving dormancy claim for green_after_fix"
+
+# S3.4 — exactly ONE literal `OUTCOME=green` assignment may survive, and it must
+# be the probe-only arm. Every other green terminal has to defer to the library
+# derivation; a second literal is a second answer to "which green", which is the
+# defect itself. The pattern deliberately excludes `OUTCOME=green_after_fix`.
+#
+# COMMENT-STRIPPED and fence-scoped, for the same reason as S3.5: the surviving
+# literal is the one the surrounding comment has to NAME in order to explain why
+# it is allowed to stay. A raw line count reds on that explanation and teaches
+# the next author to delete it.
+S34_REPORT="$(python3 - "$REVIEW_PR" <<'PY_S34'
+import re, sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+fences, current = [], None
+for line in lines:
+    if re.match(r"^[ \t]*```bash\b", line) and current is None:
+        current = []
+        continue
+    if current is not None and re.match(r"^[ \t]*```[ \t]*$", line):
+        fences.append("\n".join(current))
+        current = None
+        continue
+    if current is not None:
+        current.append(line)
+
+fences = [
+    "\n".join(r for r in body.split("\n") if not r.lstrip().startswith("#"))
+    for body in fences
+]
+
+literal = re.compile(r"OUTCOME=green([^_a-z]|$)")
+total = sum(len(literal.findall(body)) for body in fences)
+holders = [b for b in fences if literal.search(b)]
+print("COUNT=%d" % total)
+if len(holders) != 1:
+    print("GUARD=expected exactly 1 bash fence holding a literal OUTCOME=green, found %d" % len(holders))
+elif '[ "${CI_FIX_PHASE:-1}" = 0 ]' not in holders[0]:
+    print("GUARD=the surviving literal OUTCOME=green is NOT inside the CI_FIX_PHASE=0 probe-only guard")
+else:
+    print("GUARD=OK")
+PY_S34
+)"
+S34_COUNT="$(sed -n 's/^COUNT=//p' <<<"$S34_REPORT")"
+S34_GUARD="$(sed -n 's/^GUARD=//p' <<<"$S34_REPORT")"
+if [ "$S34_COUNT" = 1 ]; then
+  echo "  PASS  S3.4a — exactly one executable literal OUTCOME=green survives in review-pr.md"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S3.4a — expected exactly 1 executable literal OUTCOME=green, found ${S34_COUNT:-none}"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$S34_GUARD" = OK ]; then
+  echo "  PASS  S3.4b — the surviving literal sits inside the CI_FIX_PHASE=0 probe-only guard"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S3.4b — $S34_GUARD"
+  FAIL=$((FAIL + 1))
+fi
+
+# S3.5 — regression guard on the masking idiom itself. `jq length … || echo 0`
+# maps a crashed or 0-byte producer to "no fixes", which on THIS path launders a
+# force-pushed autopilot head into a clean one (#263/#265).
+#
+# COMMENT-STRIPPED, and not negotiable: the code that must not use the idiom is
+# precisely the code whose comments NAME the idiom in order to explain why it is
+# banned. A bare `assert_no_grep` reds on the explanation and would push the next
+# author to delete the reasoning rather than keep the guard.
+S35_VERDICT="$(python3 - "$REVIEW_PR" "$ARGS_LIB_PHASE3" <<'PY_S35'
+import re, sys
+
+md, lib = sys.argv[1], sys.argv[2]
+
+def strip_comments(body):
+    return "\n".join(r for r in body.split("\n") if not r.lstrip().startswith("#"))
+
+fences, current = [], None
+for line in open(md, encoding="utf-8").read().split("\n"):
+    if re.match(r"^[ \t]*```bash\b", line) and current is None:
+        current = []
+        continue
+    if current is not None and re.match(r"^[ \t]*```[ \t]*$", line):
+        fences.append("\n".join(current))
+        current = None
+        continue
+    if current is not None:
+        current.append(line)
+
+masking = re.compile(r"\|\|\s*echo\s+0\b")
+offenders = []
+for i, body in enumerate(fences):
+    if masking.search(strip_comments(body)):
+        offenders.append("review-pr.md bash fence #%d" % (i + 1))
+if masking.search(strip_comments(open(lib, encoding="utf-8").read())):
+    offenders.append("lib/review-fleet-args.sh")
+
+print("OK" if not offenders else "the `|| echo 0` masking idiom is LIVE in: " + ", ".join(offenders))
+PY_S35
+)"
+if [ "$S35_VERDICT" = OK ]; then
+  echo "  PASS  S3.5 — no executable line in Phase 3 folds a failed count to 0"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S3.5 — $S35_VERDICT"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== S4: 6 classification paths — classifier dispatched + ROUTE picks correct downstream =="

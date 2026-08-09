@@ -1098,6 +1098,120 @@ E_DEFAULT="$(env -i PATH="$PATH" bash -c '. "$1"
   && pass "E1c an absent state file defaults to iteration 1 of both counters" \
   || fail "E1c absent-state default drifted: '$E_DEFAULT'"
 
+# E8 — WHICH green. `green` and `green_after_fix` are two CI_OUTCOME_ENUM
+# members separated by ONE fact — whether an autopilot rewrote the head the CI
+# just passed on — and that fact lives in ci-loop-state.json's `fix_pushes`,
+# never in the fence that observes the green. #400: the member had seven readers
+# and zero producers, so a rewritten head and a human-pushed one serialised
+# IDENTICALLY into phases.phase3.outcome. These rows pin the single derivation
+# both green terminals now call. `env -i` for the same reason as every other E
+# row: the ledger is the only channel, so a probe that inherits state proves
+# nothing.
+E8_DIR="$E_TMP/green-outcome"
+mkdir -p "$E8_DIR/absent"
+E8_SHA="$(printf 'a%.0s' $(seq 40))"
+
+E8_ABSENT="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/absent" 2>/dev/null)"
+[ "$E8_ABSENT" = green ] \
+  && pass "E8a an absent ledger is the first probe of the run, not an error: green" \
+  || fail "E8a absent-ledger outcome drifted: '$E8_ABSENT'"
+# ...and it must be SILENT. `green` is the answer on this path, so a diagnostic
+# on stderr here is noise that trains the operator to ignore the real ones.
+E8_ABSENT_ERR="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1 >/dev/null' \
+  _ "$ARGS_LIB" "$E8_DIR/absent" 2>&1)"
+[ -z "$E8_ABSENT_ERR" ] \
+  && pass "E8a2 the absent-ledger path writes nothing to stderr" \
+  || fail "E8a2 absent ledger wrote to stderr: '$E8_ABSENT_ERR'"
+
+mkdir -p "$E8_DIR/empty"
+bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 1 1 "[]" "[]"' \
+  _ "$ARGS_LIB" "$E8_DIR/empty" >/dev/null 2>&1
+E8_EMPTY="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/empty" 2>/dev/null)"
+[ "$E8_EMPTY" = green ] \
+  && pass "E8b a ledger recording zero fix pushes is a plain green" \
+  || fail "E8b empty-fix_pushes outcome drifted: '$E8_EMPTY'"
+
+mkdir -p "$E8_DIR/pushed"
+bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 2 2 \
+  "[{\"sha\":\"$3\",\"by_agent\":\"ci-code-fixer\"}]" "[\"code_bug\"]"' \
+  _ "$ARGS_LIB" "$E8_DIR/pushed" "$E8_SHA" >/dev/null 2>&1
+E8_PUSHED="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/pushed" 2>/dev/null)"
+[ "$E8_PUSHED" = green_after_fix ] \
+  && pass "E8c a recorded fix push upgrades the same green to green_after_fix" \
+  || fail "E8c a rewritten head still serialised as a plain green: '$E8_PUSHED'"
+
+# E8d/E8e/E8f — present-but-broken is NOT "no fixes". Folding a truncated,
+# crashed or wrong-typed producer to 0 is the `jq length … || echo 0` masking
+# class (#263/#265), and HERE it would launder a rewritten head into a clean
+# one: the exact inverse of the signal this function carries.
+#
+# These three assert rc is EXACTLY 2, not merely non-zero. An absent function
+# exits 127 with empty output, which satisfies "non-zero and silent" perfectly —
+# so the loose form would go green against a tree with no implementation at all
+# and prove nothing. 2 is the refusal code every other refusal in this library
+# uses, and 127 is distinguishable from it.
+mkdir -p "$E8_DIR/zero"
+: >"$E8_DIR/zero/ci-loop-state.json"
+E8_ZERO="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/zero" 2>/dev/null)"
+E8_ZERO_RC=$?
+{ [ "$E8_ZERO_RC" -eq 2 ] && [ -z "$E8_ZERO" ]; } \
+  && pass "E8d a 0-byte ledger is refused (rc 2), not folded to 'no fixes'" \
+  || fail "E8d 0-byte ledger returned rc=$E8_ZERO_RC out='$E8_ZERO' (want rc 2, empty)"
+
+mkdir -p "$E8_DIR/garbage"
+printf 'not json' >"$E8_DIR/garbage/ci-loop-state.json"
+E8_GARBAGE="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/garbage" 2>/dev/null)"
+E8_GARBAGE_RC=$?
+{ [ "$E8_GARBAGE_RC" -eq 2 ] && [ -z "$E8_GARBAGE" ]; } \
+  && pass "E8e a non-JSON ledger is refused (rc 2), not folded to 'no fixes'" \
+  || fail "E8e non-JSON ledger returned rc=$E8_GARBAGE_RC out='$E8_GARBAGE' (want rc 2, empty)"
+
+# E8f is the row that justifies the `type == "array"` guard specifically: for
+# this fixture review_fleet_read_ci_state returns rc 0 PRINTING `3`, so an rc
+# check alone waves it straight through to `[ 3 -gt 0 ]` → green_after_fix on a
+# ledger that recorded no push at all.
+mkdir -p "$E8_DIR/nonarray"
+printf '{"ci_loop_iter":1,"review_iteration":1,"fix_pushes":3,"failure_classes_seen":[]}\n' \
+  >"$E8_DIR/nonarray/ci-loop-state.json"
+E8_NONARRAY="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+  _ "$ARGS_LIB" "$E8_DIR/nonarray" 2>/dev/null)"
+E8_NONARRAY_RC=$?
+{ [ "$E8_NONARRAY_RC" -eq 2 ] && [ -z "$E8_NONARRAY" ]; } \
+  && pass "E8f a non-array fix_pushes is refused (rc 0 from the reader is NOT the detector)" \
+  || fail "E8f non-array fix_pushes returned rc=$E8_NONARRAY_RC out='$E8_NONARRAY' (want rc 2, empty)"
+
+# E8g — probe-only (`--no-ci-fix`, CI_FIX_PHASE=0) never upgrades. 6c.4 skips
+# the fixer arms entirely, so by construction no fixer ran; a ledger some prior
+# non-probe-only run left behind is not evidence about THIS head.
+E8_PROBE_ONLY="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 0' \
+  _ "$ARGS_LIB" "$E8_DIR/pushed" 2>/dev/null)"
+[ "$E8_PROBE_ONLY" = green ] \
+  && pass "E8g probe-only mode answers green even with a non-empty ledger on disk" \
+  || fail "E8g probe-only outcome drifted: '$E8_PROBE_ONLY'"
+
+# E8h — arity and the fix-phase domain. A silently-accepted third argument or an
+# unrecognised phase is how a caller's typo becomes a wrong outcome.
+E8_ARITY_OK=1
+for e8_args in 1 3 badphase; do
+  case "$e8_args" in
+    1) env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2"' \
+         _ "$ARGS_LIB" "$E8_DIR/empty" >/dev/null 2>&1 ;;
+    3) env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1 extra' \
+         _ "$ARGS_LIB" "$E8_DIR/empty" >/dev/null 2>&1 ;;
+    badphase) env -i PATH="$PATH" bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 2' \
+         _ "$ARGS_LIB" "$E8_DIR/empty" >/dev/null 2>&1 ;;
+  esac
+  [ "$?" -eq 2 ] || E8_ARITY_OK=0
+done
+[ "$E8_ARITY_OK" = 1 ] \
+  && pass "E8h wrong arity and an unrecognised CI_FIX_PHASE are refused with rc 2" \
+  || fail "E8h a malformed call was accepted instead of returning rc 2"
+
 # E2 — the conflicted-path list. Held in a shell array it was gone by the time
 # `git add -- "${conflicted_files[@]}"` ran, and `git add --` with zero
 # pathspecs exits 0, so the `|| abort` guard never fired.

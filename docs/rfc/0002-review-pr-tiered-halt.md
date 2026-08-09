@@ -67,7 +67,10 @@
 >   from `skills/merge-pipeline/SKILL.md` and from both `commands/review-pr.md`
 >   audit schemas, in lockstep with this amendment.
 >
-> - **`green_after_fix` is REACHABLE but NOT YET PRODUCED.** The 6c.5 POST-FIX
+> - **`green_after_fix` is REACHABLE but NOT YET PRODUCED.**
+>   *(SUPERSEDED 2026-08-09 by the #400 amendment below — the member is now
+>   produced. The paragraph is kept verbatim because it is the diagnosis the fix
+>   was built from.)* The 6c.5 POST-FIX
 >   re-entry that would justify it now runs, but no fence assigns the value: the
 >   6c.1 PROBE green arm sets `OUTCOME=green` whether or not a fixer rewrote the
 >   head first, because the fix-push ledger it would have to consult lives on
@@ -75,9 +78,8 @@
 >   all. So `phases.phase3.outcome` reads the same for a PR that was always
 >   green and one the autopilot force-pushed. Both are accepted by the Step 7
 >   trust predicate, so nothing mis-trusts — the distinction the member exists
->   to express is simply unavailable to consumers. Its DORMANT annotation stays
->   until a fence produces it. Tracked separately; do not read the
->   `loop_cap_exhausted` removal above as covering it.
+>   to express is simply unavailable to consumers. Tracked separately as #400;
+>   do not read the `loop_cap_exhausted` removal above as covering it.
 > - **The §3.5 GREEN predicate is still unchanged.** It already accepted
 >   `green_after_fix`; no edit was needed there when the member went dormant and
 >   none is needed now that it is live.
@@ -88,6 +90,45 @@
 > The design amendments this engine implements — the controller-held lease, the
 > CONFLICT terminal, the deleted `flock`, the counter sidecar — are recorded in
 > RFC 0001's #383 amendment rather than duplicated here.
+
+---
+
+> **AMENDED 2026-08-09 (issue #400) — `green_after_fix` is PRODUCED.**
+>
+> The bullet above diagnosed the gap correctly: the member had seven readers and
+> zero producers, so `phases.phase3.outcome` serialised an autopilot-rewritten
+> head and a human-pushed one identically. It is now produced.
+>
+> - **One derivation, in the library.** `review_fleet_ci_green_outcome RUN_DIR
+>   CI_FIX_PHASE` (`lib/review-fleet-args.sh`) answers *which* green by reading
+>   `fix_pushes` out of `ci-loop-state.json`. `green` and `green_after_fix` are
+>   separated by exactly one fact — whether a fixer rewrote the head the CI
+>   passed on — and that fact never lives in the fence that observes the green.
+>   Restating the decision at a call site would recreate the defect one site
+>   over, so no call site restates it.
+> - **Both reachable green terminals call it.** 6c.2 MONITOR's `green)` arm, and
+>   a new executable terminal in 6c.1 PROBE (`ci-probe-green-terminal-v1`) whose
+>   green row had been prose — the fast path a post-fix re-probe takes, and so
+>   the terminal most likely to be looking at a rewritten head.
+> - **6c.4 ROUTE's `--no-ci-fix` arm keeps its literal `OUTCOME=green`,
+>   deliberately.** That is the helper's `fix_phase=0` case, whose answer is
+>   statically `green`: probe-only skips every fixer arm, so by construction no
+>   fixer ran. Calling the helper there would make `RUN_ID` a hard requirement of
+>   a fence that needs no ledger to be right. The equivalence is asserted
+>   behaviourally rather than assumed.
+> - **NEW FAILURE MODE — an unreadable ledger now HALTS a green terminal**
+>   (`ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable`,
+>   exit 1). This is a behaviour change on a path that previously had none. It is
+>   deliberate: folding a 0-byte, truncated or wrong-typed ledger to "no fixes"
+>   is the `jq length … || echo 0` masking class, and here it would launder a
+>   force-pushed head into a clean one — the exact inverse of the signal. An
+>   *absent* ledger is still the normal first-probe case and still means `green`.
+> - **The §3.5 GREEN predicate is UNCHANGED and still correct.** It already
+>   accepted `green_after_fix`; the member going live changes which value is
+>   emitted, not which values are trusted. `CI_OUTCOME_ENUM` membership and
+>   ordering are unchanged in all four copies.
+> - **The DORMANT annotation is removed** from `skills/merge-pipeline/SKILL.md`,
+>   in lockstep with this amendment.
 
 ---
 

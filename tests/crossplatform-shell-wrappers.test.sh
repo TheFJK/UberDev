@@ -725,24 +725,35 @@ else
   # rc=2 there lands the remote mutation and then aborts before the audit event.
   ZSH_ARGS_LIB="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
   ZSH_ARGS_TMP="$(mktemp -d)"
+  ZSH_SHA40="$(printf 'a%.0s' $(seq 40))"
   ZSH_WRITER_RESULT="$(zsh -c '
     set -u
     . "$1" || exit 90
     review_fleet_write_ci_state "$2/state.json" 2 1 "[]" "[]" || exit 91
-    review_fleet_write_ci_push "$2/push.json" "'"$(printf 'a%.0s' $(seq 40))"'" ci-rebase-handler || exit 92
+    review_fleet_write_ci_push "$2/push.json" "$3" ci-rebase-handler || exit 92
     review_fleet_write_sidecar "$2/sidecar.json" bind "$2" inst || exit 93
     review_fleet_write_conflict_paths "$2/paths.zlist" "src/a b.py" || exit 94
     review_fleet_write_ci_pointer "$2/ptr.txt" "$2/sidecar.json" || exit 95
     [ -s "$2/state.json" ] && [ -s "$2/push.json" ] && [ -s "$2/sidecar.json" ] \
       && [ -s "$2/paths.zlist" ] && [ -s "$2/ptr.txt" ] || exit 96
+    # review_fleet_ci_green_outcome (#400) reads the ledger under its CANONICAL
+    # name, so write that too and drive the reader in the same zsh frame. Its
+    # `local target` is the tied-parameter rule again: spelled `path` it would
+    # blow away $PATH for the whole frame and the jq below would be
+    # command-not-found — the failure would land on a green CI run, upgrading
+    # nothing and reporting no error.
+    review_fleet_write_ci_state "$2/ci-loop-state.json" 2 1 \
+      "[{\"sha\":\"$3\",\"by_agent\":\"ci-code-fixer\"}]" "[\"code_bug\"]" || exit 97
+    ZSH_GREEN_OUTCOME="$(review_fleet_ci_green_outcome "$2" 1)" || exit 98
+    [ "$ZSH_GREEN_OUTCOME" = green_after_fix ] || exit 99
     print -r -- "$(review_fleet_read_ci_pointer "$2/ptr.txt")"
-  ' _ "$ZSH_ARGS_LIB" "$ZSH_ARGS_TMP" 2>&1)"
+  ' _ "$ZSH_ARGS_LIB" "$ZSH_ARGS_TMP" "$ZSH_SHA40" 2>&1)"
   ZSH_WRITER_RC=$?
   if [ "$ZSH_WRITER_RC" = 0 ] && [ "$ZSH_WRITER_RESULT" = "$ZSH_ARGS_TMP/sidecar.json" ]; then
-    echo "  PASS  every review-fleet cross-fence writer runs under zsh and lands its file"
+    echo "  PASS  every review-fleet cross-fence primitive runs under zsh and lands its file"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  a review-fleet writer failed under zsh (rc=$ZSH_WRITER_RC): $ZSH_WRITER_RESULT"
+    echo "  FAIL  a review-fleet primitive failed under zsh (rc=$ZSH_WRITER_RC): $ZSH_WRITER_RESULT"
     FAIL=$((FAIL + 1))
   fi
 
@@ -1032,6 +1043,40 @@ else
     echo "  FAIL  trap-RETURN behaviour drifted: zsh-dead='$ZTR_ZSH_DEAD' zsh-fixed='$ZTR_ZSH_FIXED' bash-dead='$ZTR_BASH_DEAD'"
     FAIL=$((FAIL + 1))
   fi
+fi
+
+echo
+echo "== which green: review_fleet_ci_green_outcome, driven portably (#400) =="
+# The zsh row above proves the tied-parameter rule; THIS one is the portable
+# behavioural signal. Both review-pr-phase3-ci.test.sh and
+# review-pr-workflow.test.sh are on the windows-latest skip list, so without
+# these two rows the whole `green` vs `green_after_fix` derivation would ship
+# with zero coverage on the Git Bash job — and the zsh block above skips there
+# too, because windows-latest carries no zsh.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP  review_fleet_ci_green_outcome rows (jq not on PATH)"
+else
+  GREEN_LIB="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+  GREEN_TMP="$(mktemp -d)"
+  GREEN_SHA40="$(printf 'b%.0s' $(seq 40))"
+  mkdir -p "$GREEN_TMP/clean" "$GREEN_TMP/fixed"
+
+  bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 1 1 "[]" "[]"' \
+    _ "$GREEN_LIB" "$GREEN_TMP/clean" >/dev/null 2>&1
+  GREEN_CLEAN="$(bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+    _ "$GREEN_LIB" "$GREEN_TMP/clean" 2>/dev/null)"
+  assert_eq "$GREEN_CLEAN" green \
+    "a ledger with no recorded fix push resolves to green"
+
+  bash -c '. "$1"; review_fleet_write_ci_state "$2/ci-loop-state.json" 2 2 \
+    "[{\"sha\":\"$3\",\"by_agent\":\"ci-code-fixer\"}]" "[\"code_bug\"]"' \
+    _ "$GREEN_LIB" "$GREEN_TMP/fixed" "$GREEN_SHA40" >/dev/null 2>&1
+  GREEN_FIXED="$(bash -c '. "$1"; review_fleet_ci_green_outcome "$2" 1' \
+    _ "$GREEN_LIB" "$GREEN_TMP/fixed" 2>/dev/null)"
+  assert_eq "$GREEN_FIXED" green_after_fix \
+    "a ledger with a recorded fix push resolves to green_after_fix"
+
+  rm -rf "$GREEN_TMP"
 fi
 
 echo
