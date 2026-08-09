@@ -1294,7 +1294,28 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      ```
      `${ARGUMENTS:-}` is defense-in-depth against `set -u` and mirrors the `${UBERDEV_TURBO:-0}` half of the OR for symmetry (#97 follow-up).
      Rationale: `merge-pipeline` invokes `Skill("uberdev:review-pr", args: "${PR} --turbo")` (out-of-scope for #97) — arg form must remain accepted. `finish-branch` chains via `Skill("uberdev:review-pr")` with no flag (env-var inheritance, #97) — env form must also be accepted. The hybrid OR detector closes both call sites.
-   - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal).
+   - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal). The decision is **persisted**, not merely bound:
+     ```bash
+     CI_FIX_PHASE=1
+     if [[ "${ARGUMENTS:-}" == *"--no-ci-fix"* ]]; then
+       CI_FIX_PHASE=0
+     fi
+     # THE FLAG HAS TO CROSS TO 6c.4 ROUTE (#399), which is a different harness
+     # shell thousands of lines later. Held only in this scalar it was gone
+     # before ROUTE's `${CI_FIX_PHASE:-1}` ever ran, so the documented default
+     # won every invocation and `--no-ci-fix` silently mutated code and
+     # force-pushed. Same run-dir carrier as ci-loop-state.json; ROUTE refuses
+     # to run the mutating phase at all if this file is missing or unreadable,
+     # so a failure to record it must abort HERE rather than be discovered as a
+     # halt three phases in.
+     CI_FIX_PHASE_RUN_DIR="${RESEARCH_DIR_ABS:?RESEARCH_DIR_ABS must be bound before the --no-ci-fix decision is recorded}"
+     mkdir -p "$CI_FIX_PHASE_RUN_DIR" || { return 2 2>/dev/null || exit 2; }
+     CI_FIX_PHASE_RUN_DIR="$(cd "$CI_FIX_PHASE_RUN_DIR" && pwd -P)" || { return 2 2>/dev/null || exit 2; }
+     ( umask 077 && printf '%s\n' "$CI_FIX_PHASE" >"$CI_FIX_PHASE_RUN_DIR/ci-fix-phase.txt" ) || {
+       echo "error: /uberdev:review-pr — could not record the --no-ci-fix decision to $CI_FIX_PHASE_RUN_DIR/ci-fix-phase.txt" >&2
+       return 2 2>/dev/null || exit 2
+     }
+     ```
    - Detect `--no-defer-issues` token in `$ARGUMENTS` and strip it from the aspect list — sets `DEFER_ISSUES_PHASE=0` (skip findings-to-issues sub-phase), otherwise `DEFER_ISSUES_PHASE=1` (default). Mirrors `--no-ci-fix` / `--no-simplify` shape. When `DEFER_ISSUES_PHASE=0`, the Phase 2.5 dispatch is skipped entirely and the Step 7 Final Aggregation "Issues filed" row shows `(skipped: --no-defer-issues)`.
    - Default: Run all applicable reviews + Phase 2 simplify pass
    - **Capture aspect tokens.** Tokenise the remaining arguments (after the `--no-simplify` and `--turbo` flags are stripped) into `ASPECT_LIST` (an array). Example: `/uberdev:review-pr tests errors` → `ASPECT_LIST=("tests" "errors")`. Empty arguments → `ASPECT_LIST=()`. The `all` token is treated as "no emphasis" (i.e., default behavior — every reviewer's brief receives no emphasis section).
@@ -1312,7 +1333,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    |---|---|---|---|
    | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
    | `SEQUENTIAL` | `sequential` token | `0` | `1` binds `POST_IMPL_FANOUT_CAP=1`, forwarded to `Skill(uberdev:post-impl-review)` as the `fanout_cap` input (stderr notice emitted) |
-   | `CI_FIX_PHASE` | `--no-ci-fix` token | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). |
+   | `CI_FIX_PHASE` | `--no-ci-fix` token, recorded to `$RESEARCH_DIR_ABS/ci-fix-phase.txt` | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). ROUTE reads the recorded value, not the variable; an unreadable record halts `ci_fix_phase_unreadable` rather than defaulting the mutating phase on. |
    | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
    | `DEFER_ISSUES_PHASE` | `--no-defer-issues` token | `1` | `0` skips Phase 2.5 (findings-to-issues sub-phase); the effective enable is AND-of-flag-and-config — `defer_issues_enabled=false` in `.claude/uberdev.local.md` short-circuits identically. |
@@ -3695,6 +3716,43 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
       exit 1
     fi
     IFS=$'\t' read -r pr_head_branch base_branch <<<"$CI_PUSH_TARGET"
+    # THE PAIR CROSSES ON DISK, NOT IN THESE TWO SCALARS (#399). ROUTE below is
+    # a DIFFERENT harness shell, so `pr_head_branch` / `base_branch` are gone
+    # before it runs: its `${pr_head_branch:-}` guard read the empty string on
+    # every single run and halted `ci_fix_dispatch_refs_unreadable`
+    # unconditionally, which made fix_code, stale_base, the CONFLICT-RESOLVE arm
+    # and the single leased push unreachable the moment #399 made ROUTE
+    # reachable at all. Same run-dir carrier idiom as ci-loop-state.json /
+    # ci-last-push.json / ci-fix-launch-pointer.txt, and the line written is the
+    # resolver's own TAB-separated output verbatim so this fence invents no
+    # second encoding of the pair.
+    #
+    # Deliberately NOT via lib/review-fleet-args.sh: this gate must stay
+    # executable on its own (tests/review-pr-phase3-ci.test.sh S32-RT.14/15
+    # extracts and runs exactly this fence under bash and zsh), and a gate that
+    # first needs a dispatch library is a gate no test can execute — which is
+    # how #395 shipped invisible.
+    CI_PUSH_TARGET_RUN_DIR=
+    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+      CI_PUSH_TARGET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_PUSH_TARGET_RUN_DIR=
+    fi
+    if [ -n "$CI_PUSH_TARGET_RUN_DIR" ]; then
+      # A run dir that IS bound and still cannot take the carrier halts HERE,
+      # not at ROUTE: the gh call has already been spent, so a silent non-write
+      # would strand an answer this run paid for.
+      if ! ( umask 077 && printf '%s\n' "$CI_PUSH_TARGET" >"$CI_PUSH_TARGET_RUN_DIR/ci-push-target.tsv" ); then
+        echo "error: /uberdev:review-pr — Phase 3 resolved PR #$PR_NUMBER's push target but could not persist it to $CI_PUSH_TARGET_RUN_DIR/ci-push-target.tsv; refusing to hand ROUTE a target it cannot read." >&2
+        audit ci_phase_outcome data.outcome=halted data.subreason=ci_push_target_uncarried
+        exit 1
+      fi
+    else
+      # No run dir bound => this fence is running OUTSIDE a Phase 3 run (the
+      # S32-RT self-containment cover is exactly that shape). The pair is still
+      # bound for a same-shell caller and the miss is TYPED rather than silent;
+      # ROUTE's reader then halts `ci_fix_dispatch_refs_unreadable` because the
+      # carrier is absent, so the failure is closed either way.
+      audit ci_push_target_uncarried data.reason=no_run_dir
+    fi
     ```
 
     Both halts are terminal for the run: `ci_push_target_cross_repository` (fork
@@ -3706,9 +3764,39 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
 
     ```bash uberdev-executable origin=review-pr
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+    # EVERY cross-fence scalar this fence needs comes off disk FIRST, from the
+    # one run dir every other Phase 3 fence already reads (#399). Nothing below
+    # may reference a name a previous fence merely bound in its own shell.
+    CI_ROUTE_RUN_DIR=
+    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+      CI_ROUTE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_ROUTE_RUN_DIR=
+    fi
+    [ -n "$CI_ROUTE_RUN_DIR" ] || { echo "error: /uberdev:review-pr — Phase 3 ROUTE cannot resolve the run directory; refusing to run the mutating fix phase without its carriers." >&2; audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_run_dir_unreadable; OUTCOME=halted; exit 1; }
     # --no-ci-fix, ENFORCED IN SHELL. CI_FIX_PHASE had no reader anywhere in
     # this file: PROBE/MONITOR/CLASSIFY-run-but-ROUTE-is-skipped was
     # orchestrator prose only, so the documented mode was unenforceable (#383).
+    # It then had a reader and no reachable PRODUCER (#399): Step 1 binds it in
+    # a fence that ended thousands of lines and many shells earlier, so
+    # `${CI_FIX_PHASE:-1}` resolved to 1 on EVERY run and `--no-ci-fix` silently
+    # mutated code and force-pushed anyway. The DOCUMENTED default is still 1,
+    # but only when Step 1 actually recorded it: "the flag was absent" and "this
+    # fence cannot tell" are different answers, and only the first is allowed to
+    # reach a code-mutating, remote-writing arm. An unreadable, empty or
+    # out-of-vocabulary carrier is the second, and it halts.
+    CI_FIX_PHASE_CARRIER="$CI_ROUTE_RUN_DIR/ci-fix-phase.txt"
+    CI_FIX_PHASE=
+    if [ -r "$CI_FIX_PHASE_CARRIER" ]; then
+      IFS= read -r CI_FIX_PHASE <"$CI_FIX_PHASE_CARRIER" || true
+    fi
+    case "${CI_FIX_PHASE:-}" in
+      0 | 1) ;;
+      *)
+        echo "error: /uberdev:review-pr — Phase 3 could not read the --no-ci-fix decision from $CI_FIX_PHASE_CARRIER; refusing to default a code-mutating, force-pushing phase ON when the user's flag is unknown." >&2
+        audit ci_phase_outcome data.outcome=halted data.subreason=ci_fix_phase_unreadable
+        OUTCOME=halted
+        exit 1
+        ;;
+    esac
     if [ "${CI_FIX_PHASE:-1}" = 0 ]; then
       audit ci_probe_only_skipped state="${PROBE_VERDICT:-unknown}"
       if [ "${PROBE_VERDICT:-}" = green ]; then OUTCOME=green; else OUTCOME=halted; fi
@@ -3732,13 +3820,27 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     # `set -u` or silently resolved `origin/` to nothing and poisoned base_sha
     # (#383).
     #
-    # The gate ran in a DIFFERENT shell, so neither name is trusted across the
-    # boundary: `${…:-}` keeps `set -u` from killing the fence with a raw
-    # unbound-variable message, and the emptiness check below is the same halt
-    # the gate itself would have taken.
-    CI_PR_HEAD_BRANCH="${pr_head_branch:-}"
-    CI_BASE_BRANCH="${base_branch:-}"
-    [ -n "$CI_PR_HEAD_BRANCH" ] && [ -n "$CI_BASE_BRANCH" ] || { audit ci_fix_dispatch_refs_unreadable; OUTCOME=halted; exit 1; }
+    # The gate ran in a DIFFERENT shell, so neither name is READABLE across the
+    # boundary — and reading `${pr_head_branch:-}` here was not a defensive
+    # spelling of the same value, it was the empty string on every run (#399).
+    # The pair now travels the way every other Phase 3 value travels: the gate
+    # writes its own resolver output to the run dir and this fence reads that
+    # file. `${…:-}` on the two scalars is gone deliberately, so a future edit
+    # cannot re-introduce a silent forward reference that "defaults" cleanly.
+    CI_PUSH_TARGET_CARRIER="$CI_ROUTE_RUN_DIR/ci-push-target.tsv"
+    CI_PUSH_TARGET=
+    if [ -r "$CI_PUSH_TARGET_CARRIER" ]; then
+      IFS= read -r CI_PUSH_TARGET <"$CI_PUSH_TARGET_CARRIER" || true
+    fi
+    CI_PR_HEAD_BRANCH=
+    CI_BASE_BRANCH=
+    CI_PUSH_TARGET_EXTRA=
+    IFS=$'\t' read -r CI_PR_HEAD_BRANCH CI_BASE_BRANCH CI_PUSH_TARGET_EXTRA <<<"$CI_PUSH_TARGET" || true
+    # A THIRD field means the carrier is not the two-column line the gate wrote,
+    # so it is refused rather than silently truncated into a push target: a
+    # two-variable `read` would have folded `head<TAB>base<TAB>junk` into
+    # base="base<TAB>junk" and fetched a ref named after the junk.
+    [ -n "$CI_PR_HEAD_BRANCH" ] && [ -n "$CI_BASE_BRANCH" ] && [ -z "$CI_PUSH_TARGET_EXTRA" ] || { echo "error: /uberdev:review-pr — Phase 3 ROUTE could not read PR #$PR_NUMBER's push target from $CI_PUSH_TARGET_CARRIER; refusing to fetch, lease or push a ref it cannot name." >&2; audit ci_fix_dispatch_refs_unreadable; OUTCOME=halted; exit 1; }
     git -C "$WORKTREE_ROOT" fetch origin "$CI_PR_HEAD_BRANCH" "$CI_BASE_BRANCH" || { audit ci_fix_dispatch_fetch_failed; OUTCOME=halted; exit 1; }
     # origin/<HEAD>, never origin/<base>. The lease's safety property IS the PR
     # head's prior tip; capturing the base's tip satisfies the lease
@@ -4022,12 +4124,41 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     # arm below never has to re-read the child's result itself. Empty on every
     # terminal but fix_code REFUSED.
     CI_FIXER_TERMINAL_RATIONALE="$(review_ci_json_member "$CI_MUTATION_OUTCOME" rationale)" || return 74
+    # BOTH scalars are SURFACED, because neither consumer is in this shell
+    # (#399). 6c.5's routing table is executed by the orchestrator, which cannot
+    # observe a variable this fence bound and never emitted — so the terminal it
+    # must branch on was invisible on every path. And the REFUSED arm's
+    # synthetic-aggregate fence is a fresh shell whose
+    # `${CI_FIXER_TERMINAL_RATIONALE:-unspecified}` was therefore ALWAYS
+    # `unspecified`, filing every CI-refusal issue with the reason erased.
+    #
+    # Two surfaces, both already used by this phase, no third invented: the
+    # typed audit event is how the orchestrator sees it, and the run-dir record
+    # is how the later fence reads it — the same pair the push record uses
+    # (`review_fleet_write_ci_push` + `audit ci_fix_pushed`).
+    ( umask 077 && jq -cn \
+        --arg status "$CI_FIXER_TERMINAL_STATUS" \
+        --arg rationale "$CI_FIXER_TERMINAL_RATIONALE" \
+        '{status:$status,rationale:$rationale}' \
+        >"$REVIEW_FLEET_RUN_DIR/ci-fixer-terminal.json" ) || return 74
+    audit ci_fix_terminal data.status="$CI_FIXER_TERMINAL_STATUS" data.rationale="${CI_FIXER_TERMINAL_RATIONALE:-unspecified}"
     ```
 
     `CI_FIXER_TERMINAL_STATUS` — **not** the agent's self-reported status — is
     what 6c.5 branches on. It is one of `APPLIED` / `NO_CHANGE` / `REFUSED` (fix_code),
     `REBASED` / `CONFLICT` (rebase). The agent's own YAML is a hint for logging;
     every routing decision below reads this validated scalar.
+
+    **Read it from `ci_fix_terminal` / `ci-fixer-terminal.json`, never from the
+    variable.** The fence above ends where its shell ends. Until #399 the
+    terminal was the last assignment in that fence and was never echoed,
+    audited or written down, so the one scalar 6c.5's whole routing table keys
+    on could not be observed by the thing doing the routing — every branch below
+    was formally unreachable, including the CONFLICT arm and the REFUSED arm's
+    issue filing. The `audit ci_fix_terminal` event carries `data.status` and
+    `data.rationale` for the orchestrator; `$RESEARCH_DIR_ABS/ci-fixer-terminal.json`
+    carries the same two members for any later fence, and the REFUSED arm below
+    re-reads them from there rather than trusting an inherited name.
 
     `REFUSED` is the one terminal git cannot derive on its own, and conflating
     it with `NO_CHANGE` is what made the whole ci-defer stage dead code. A
@@ -4216,11 +4347,35 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
           ```bash
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
           # Counters off disk before the aggregate pathname is keyed on them —
-          # the mint fence below re-derives the SAME name from the SAME two
-          # sources ($RESEARCH_DIR_ABS and ci-loop-state.json), so the two
-          # fences cannot disagree about which file was written. Inherited, this
-          # named `…-ci1.md` on every iteration after the first.
+          # the closure fence and the mint fence below re-derive the SAME name
+          # from the SAME two sources ($RESEARCH_DIR_ABS and ci-loop-state.json),
+          # so no two of the three can disagree about which file was written.
+          # Inherited, this named `…-ci1.md` on every iteration after the first.
           review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
+          # The terminal comes off the SAME disk the counters do (#399). This is
+          # a different shell from 6c.4w.2, so the inherited
+          # `${CI_FIXER_TERMINAL_RATIONALE:-unspecified}` below was literally
+          # always `unspecified` — every CI-refusal issue was filed with the
+          # refusal reason erased, and the halt subreason with it. Refusing an
+          # unreadable record is the only safe answer: a synthetic CRITICAL
+          # issue that names no cause is worse than a typed halt.
+          #
+          # It reads it HERE and not in the closure fence below on purpose: this
+          # fence is the one that writes the aggregate, so this is the fence
+          # whose output is wrong when the rationale is missing. Keeping the
+          # halt out of the closure builder also keeps that builder a pure
+          # payload oracle — `tests/review-child-inputs.test.sh` executes it in
+          # isolation, and a builder that first demands three Phase 3 artifacts
+          # is a builder no oracle can execute.
+          CI_FIXER_TERMINAL_CARRIER="$(cd "$RESEARCH_DIR_ABS" && pwd -P)/ci-fixer-terminal.json" || return 74
+          [ -s "$CI_FIXER_TERMINAL_CARRIER" ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_terminal_uncarried; exit 1; }
+          CI_FIXER_TERMINAL_STATUS="$(jq -er '.status' <"$CI_FIXER_TERMINAL_CARRIER")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_terminal_uncarried; exit 1; }
+          CI_FIXER_TERMINAL_RATIONALE="$(jq -er '.rationale' <"$CI_FIXER_TERMINAL_CARRIER")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_terminal_uncarried; exit 1; }
+          # This arm exists for exactly one terminal. Reaching it on any other
+          # one means the orchestrator routed off a stale or mis-read value, and
+          # filing a CRITICAL refusal issue for a fixer that did not refuse is
+          # not a recoverable mistake.
+          [ "$CI_FIXER_TERMINAL_STATUS" = REFUSED ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_terminal_mismatch; exit 1; }
           CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
           if ! (umask 077; set -C; : >"$CI_REFUSED_AGGREGATE_PATH"); then
             audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_create_failed
@@ -4265,6 +4420,23 @@ PY
             audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_write_failed
             exit 1
           fi
+          ```
+
+          The closure is built in its OWN fence, the way every other
+          `review_pr.ci.*` edge builds one. It re-derives
+          `CI_REFUSED_AGGREGATE_PATH` from the same two run-invariant sources
+          the mint fence below uses (`$RESEARCH_DIR_ABS` and
+          `ci-loop-state.json`) rather than inheriting it, because the fence
+          above has already ended.
+
+          ```bash
+          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+          # Counters off disk before the aggregate pathname is keyed on them, in
+          # THIS fence — the aggregate-mint fence above and the launch-mint
+          # fence below each read them for themselves, so all three land on the
+          # same name without any of them inheriting it.
+          review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
+          CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
           CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal \
             phase1_path "$(review_json_string "$CI_REFUSED_AGGREGATE_PATH")" \
             working_dir "$(review_json_string "$WORKTREE_ROOT")" \
