@@ -29,8 +29,15 @@ CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+# The three further surfaces that restate the CONFLICT arm's enumeration claim.
+# S13.23 sweeps all five together — the claim was wrong in ten places at once
+# (#398), which is what makes a per-file sweep worth more than one grep.
+REVIEW_FLEET_SKILL="$REPO_ROOT/plugins/uberdev/skills/review-fleet/SKILL.md"
+REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
 
-for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE"; do
+for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE" \
+         "$REVIEW_FLEET_SKILL" "$REVIEW_FLEET_WORKFLOW" "$REVIEW_FLEET_ARGS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -1087,6 +1094,38 @@ assert_grep "$REVIEW_PR" 'status: REBASED' \
   "S13.16 — POST-FIX path explicitly conditions on ci-rebase-handler status: REBASED"
 assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
+
+# Issue #398: the arm's own Step-4 re-bind disagreed with the judge that put it
+# there. `mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU /')`
+# was two defects in one line — the two exact bytes `UU` against
+# code_fixer_contract.py's seven-pair unmerged membership test (so an add/add
+# conflict enumerated ZERO files and "all RESOLVED" was vacuously true), and a
+# bash-only builtin in a fence the harness runs under /bin/zsh (so the array was
+# empty there too, silently, with nothing consuming the 127). Both failure modes
+# are INVISIBLE to a syntax gate: `bash -n` and `zsh -n` both parse that line
+# happily. These rows are the gate.
+assert_no_grep "$REVIEW_PR" 'mapfile|readarray' \
+  "S13.18 — the bash-only array-slurp builtin never returns to this command file (its fences run under zsh)"
+assert_no_grep "$REVIEW_PR" '\^UU' \
+  "S13.19 — the narrow two-byte status pattern is gone from the CONFLICT arm"
+assert_grep "$REVIEW_PR" 'review_fleet_unmerged_paths' \
+  "S13.20 — the re-bind calls the shared enumerator instead of parsing porcelain itself"
+assert_grep "$REVIEW_PR" 'git add -- ' \
+  "S13.21 — the staging call carries the -- separator so a path named like a flag cannot be one"
+assert_grep "$REVIEW_PR" 'rebase_enumerate_failed' \
+  "S13.22 — a failed enumeration halts under its OWN subreason, not rebase_continue_failed"
+# S13.23 — doc-drift sweep. The `UU` claim was restated in ten places across
+# five files; correcting the code and leaving the prose is how the next reader
+# re-derives the bug. One row per file so a regression names its own file.
+for f_desc in \
+  "$REVIEW_PR|commands/review-pr.md" \
+  "$REBASE_HANDLER|agents/ci-rebase-handler.md" \
+  "$REVIEW_FLEET_SKILL|skills/review-fleet/SKILL.md" \
+  "$REVIEW_FLEET_WORKFLOW|skills/review-fleet/workflow.js" \
+  "$REVIEW_FLEET_ARGS|lib/review-fleet-args.sh"; do
+  assert_no_grep "${f_desc%%|*}" 'UU[ -](entries|enumeration|paths)|UU-enumeration' \
+    "S13.23 — ${f_desc##*|} no longer describes the conflict set as the UU entries"
+done
 
 echo
 echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks post-O5 findings-to-issues dispatch shape =="

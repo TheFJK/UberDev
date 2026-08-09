@@ -745,6 +745,92 @@ else
     echo "  FAIL  a review-fleet writer failed under zsh (rc=$ZSH_WRITER_RC): $ZSH_WRITER_RESULT"
     FAIL=$((FAIL + 1))
   fi
+
+  # Z2 — NEGATIVE CONTROL, the #398 bashism's mechanism, live and first.
+  # `mapfile` is a bash builtin with no zsh equivalent, and the Step-4 conflict
+  # re-bind in commands/review-pr.md used it inside a markdown `bash` fence —
+  # which the harness executes under /bin/zsh. Nothing consumed its rc, so the
+  # array it was supposed to fill stayed EMPTY and the very next statement
+  # (`[ "${#conflicted_files[@]}" -gt 0 ]`) read a missing builtin as "no
+  # conflicts to resolve". Fed from a HERESTRING, never a pipe:
+  # tests/epipe-guard.test.sh refuses a pipe into an early-exiting reader.
+  # `slurp_rc=$?` on its own line, not `"rc=$?:count=…"` inline: zsh reads the
+  # `:c` in `$?:count` as a history-style `:c` modifier and swallows it, so the
+  # inline spelling renders `rc=127ount=0`.
+  ZSH_SLURP="$(zsh -f -c '
+    mapfile -t zsh_slurp_probe <<< "one" 2>/dev/null
+    slurp_rc=$?
+    print -r -- "rc=${slurp_rc}:count=${#zsh_slurp_probe[@]}"' 2>/dev/null)"
+  if [ "$ZSH_SLURP" = "rc=127:count=0" ]; then
+    echo "  PASS  live zsh: bash's array-slurp builtin is absent and leaves an EMPTY array behind"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh array-slurp behaviour drifted: probe said '$ZSH_SLURP' (want rc=127:count=0)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Z1 — and the replacement really works in that same shell. The enumerator is
+  # driven under `zsh -c` against a real add/add rebase conflict (the shape the
+  # retired `^UU` filter could not see), and its payload must be byte-identical
+  # to what bash produces for the same repository. SKIPs rather than FAILs
+  # without git/python3: this suite also runs on the windows job.
+  if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "  SKIP  live zsh conflict-enumerator proof (git or python3 not on PATH)"
+  else
+    ZSH_AA_REPO="$ZSH_ARGS_TMP/aa/repo"
+    mkdir -p "$ZSH_ARGS_TMP/aa"
+    (
+      set -e
+      cd "$ZSH_ARGS_TMP/aa"
+      git init -q -b main repo
+      cd repo
+      git config user.email fixture@example.invalid
+      git config user.name Fixture
+      mkdir src
+      printf 'KEEP = 1\n' >src/keep.py
+      git add -- src/keep.py
+      git commit -qm 'test: base'
+      printf "COLLIDE = 'main'\n" >src/collide.py
+      git add -- src/collide.py
+      git commit -qm 'test: main adds the colliding path'
+      git checkout -qb fix/398-collide HEAD~1
+      printf "COLLIDE = 'branch'\n" >src/collide.py
+      git add -- src/collide.py
+      git commit -qm 'test: the branch adds it too'
+      git rebase main
+    ) >/dev/null 2>&1 || true    # the fixture rebase MUST conflict
+    ZSH_AA_PORCELAIN="$(git -C "$ZSH_AA_REPO" status --porcelain 2>/dev/null)"
+    case "$ZSH_AA_PORCELAIN" in
+      *'AA '*) ZSH_AA_GATE=ok ;;
+      *) ZSH_AA_GATE=no-aa ;;
+    esac
+    case "$ZSH_AA_PORCELAIN" in
+      *'UU '*) ZSH_AA_GATE=stray-uu ;;
+    esac
+    if [ "$ZSH_AA_GATE" != ok ]; then
+      echo "  FAIL  the add/add fixture did not conflict as AA ($ZSH_AA_GATE); the row below would be vacuous"
+      FAIL=$((FAIL + 1))
+    else
+      ZSH_CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+      ZSH_ENUM_RC=0
+      zsh -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+        _ "$ZSH_ARGS_LIB" "$ZSH_AA_REPO" "$ZSH_CONTRACT" "$ZSH_ARGS_TMP/zsh.zlist" \
+        >/dev/null 2>&1 || ZSH_ENUM_RC=$?
+      ZSH_ENUM_BASH_RC=0
+      bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+        _ "$ZSH_ARGS_LIB" "$ZSH_AA_REPO" "$ZSH_CONTRACT" "$ZSH_ARGS_TMP/bash.zlist" \
+        >/dev/null 2>&1 || ZSH_ENUM_BASH_RC=$?
+      if [ "$ZSH_ENUM_RC" = 0 ] && [ "$ZSH_ENUM_BASH_RC" = 0 ] \
+         && [ -s "$ZSH_ARGS_TMP/zsh.zlist" ] \
+         && cmp -s "$ZSH_ARGS_TMP/zsh.zlist" "$ZSH_ARGS_TMP/bash.zlist"; then
+        echo "  PASS  live zsh: review_fleet_unmerged_paths enumerates the AA conflict identically to bash"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  conflict enumerator under zsh rc=$ZSH_ENUM_RC (bash rc=$ZSH_ENUM_BASH_RC) — payloads differ or empty"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
+  fi
   rm -rf "$ZSH_ARGS_TMP"
 fi
 

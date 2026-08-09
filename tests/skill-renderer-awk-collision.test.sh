@@ -146,8 +146,13 @@ fi
 # R1b — issue #237 audit: command files (plugins/uberdev/commands/*.md) are
 # slash-arg-substituted by the Skill loader exactly like SKILL.md, so an awk
 # script body with a bare `$N` inside an EXECUTED block is the same #222 bug
-# class (concrete prior site: review-pr.md's conflict-file mapfile extraction,
-# `awk '/^UU / {print $2}'`, where `$2` is clobbered by the PR-number argv).
+# class. The concrete prior site WAS review-pr.md's conflict-file extraction,
+# `awk '/^UU / {print $2}'`, where `$2` is clobbered by the PR-number argv;
+# #398 retired that line entirely (the conflict set now comes from
+# `code_fixer_contract.py list-ci-unmerged-paths`, no awk at all), so the
+# fixtures below are built on a different, still-plausible command-file awk
+# site. They exist to prove the `$N` vs `-v cN=N` distinction, not to bless any
+# particular line.
 # agents/*.md are intentionally NOT scanned: agent system prompts receive a
 # task prompt, never positional slash args, so their `awk '{print $1}'` field
 # refs are legitimate and would false-positive here.
@@ -264,7 +269,7 @@ fi
 # (#266 review — pr-test-analyzer).
 cat > "$fixture_cmd_bad" <<'EOF_CMD_BAD'
 # fake command-file awk site — R1b's scan MUST flag this
-mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU / {print $2}')
+FAILING_CHECKS="$(gh pr checks "$PR_NUMBER" | awk '/fail/ {print $1}')"
 EOF_CMD_BAD
 cmd_bad_flat="$(tr '\n' ' ' < "$fixture_cmd_bad")"
 if grep -qE "$GUARD_REGEX" <<<"$cmd_bad_flat"; then
@@ -277,7 +282,7 @@ else
 fi
 cat > "$fixture_cmd_safe" <<'EOF_CMD_SAFE'
 # renderer-safe parameterised command-file awk — R1b's scan must NOT flag this
-mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
+FAILING_CHECKS="$(gh pr checks "$PR_NUMBER" | awk -v c1=1 '/fail/ {print $c1}')"
 EOF_CMD_SAFE
 cmd_safe_flat="$(tr '\n' ' ' < "$fixture_cmd_safe")"
 if grep -qE "$GUARD_REGEX" <<<"$cmd_safe_flat"; then

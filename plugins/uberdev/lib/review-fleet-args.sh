@@ -343,8 +343,9 @@ review_fleet_bind_ci() {
 #
 # The N-child conflict fanout. AUTHORITY_LEDGER carries one
 # `<ci_authority_path>\t<ci_authority_sha256>` row per conflicted file, in the
-# controller's own UU-enumeration order — which IS the nonce wire format for
-# this stage, exactly as review_fleet_roster's order is for the reviewers.
+# controller's own unmerged-path enumeration order — which IS the nonce wire
+# format for this stage, exactly as review_fleet_roster's order is for the
+# reviewers.
 #
 # One authority per child, not one shared authority: each resolver's pinned
 # input names the single path it may touch, and validate-ci-mutation-outcome
@@ -552,6 +553,50 @@ review_fleet_write_conflict_paths() {
     [ -n "$entry" ] || return 2
     printf '%s\0' "$entry" >>"$target" || return 2
   done
+}
+
+# review_fleet_unmerged_paths WORKTREE CONTRACT TARGET
+#
+# THE enumerator. review_fleet_write_conflict_paths above is the WRITER of this
+# set and review_fleet_bind_ci_conflicts is its BINDER; until #398 there was no
+# PRODUCER, so the Step-4 re-bind in commands/review-pr.md inlined its own
+# porcelain parse, matching the two exact bytes `UU` against
+# code_fixer_contract.py's seven-pair membership test. An add/add rebase
+# conflict (porcelain `AA`) was therefore CONFLICT to the judge and the EMPTY
+# set to the enumerator: zero resolvers dispatched, "all RESOLVED" vacuously
+# true, and the arm aborted a mid-rebase it could have finished.
+#
+# There is no pair vocabulary here. The answer comes from the ONE definition,
+# `_ci_is_unmerged_pair`, through the `list-ci-unmerged-paths` verb -- which
+# also carries `_ci_porcelain_entries`' rename/copy-origin skipping and its
+# offset-2 space requirement, the two rules that stopped a `UU`-prefixed
+# FILENAME from being read as a status pair. A shell re-implementation would
+# have to reproduce all three and would be free to drift from any of them. So
+# NOTHING in this file parses porcelain itself, deliberately: a whole-file grep
+# for a status invocation must stay empty, or a second vocabulary has grown
+# back.
+#
+# A FILE, not a command substitution: `$( … )` cannot carry NUL bytes and strips
+# trailing newlines, and a conflicted path may contain a space or a newline.
+# `-z` porcelain is unquoted where the plain form C-quotes a spaced path, so the
+# transport is byte-identical to review_fleet_write_conflict_paths' and the
+# reader is the same `read -r -d ''` loop.
+#
+# Exit codes are THREE-valued for the same reason review_fleet_rebase_dir's are:
+#   0 = >=1 conflicted path, written NUL-delimited to TARGET
+#   1 = the probe succeeded and there are no unmerged paths (TARGET, zero bytes)
+#   2 = the probe itself failed
+# A two-valued probe maps "python3 missing / git unreadable" onto "no conflicts
+# to resolve" -- which is exactly the silent-empty collapse this issue is about.
+review_fleet_unmerged_paths() {
+  [ "$#" -eq 3 ] || return 2
+  # `target`, NEVER `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local worktree="$1" contract="$2" target="$3"
+  [ -d "$worktree" ] && [ -r "$contract" ] || return 2
+  ( umask 077 && python3 -I -B "$contract" list-ci-unmerged-paths \
+      --working-dir "$worktree" >"$target" ) || return 2
+  [ -s "$target" ] || return 1
 }
 
 # review_fleet_write_sidecar PATH BINDING CHILD_DIR INSTANCE [HEAD_BEFORE]
