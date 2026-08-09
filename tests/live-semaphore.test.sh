@@ -46,6 +46,36 @@ wait_for_file() {
   done
   [ -s "$target_path" ]
 }
+# Age a published lease deterministically by backdating its recorded
+# start_epoch, so an expiry assertion tests the staleness RULE instead of racing
+# the lease's own deadline against the row's setup cost. A `sleep`-past-the-TTL
+# row silently requires acquire + set_handle + the first reconcile to all fit
+# inside timeout_s; under CPU contention they do not, the first reconcile then
+# reclaims a lease the row required to still be fresh, and the row reds on a
+# staleness rule that behaved correctly.
+#
+# The rewrite is an in-place truncate, so the lease keeps its dev:inode identity
+# (what secure-remove-lease verifies) and its 0600 mode, and every other line —
+# including `generation=`, which must keep matching the filename — is preserved
+# byte for byte. Returns non-zero unless exactly the start_epoch line moved, so
+# a lease-format change surfaces as an explicit backdate failure rather than as
+# a silently vacuous assertion.
+backdate_lease_start() {
+  local lease_path="$1" seconds="$2" now line rewritten='' rewrote=0
+  [ -f "$lease_path" ] && [ ! -L "$lease_path" ] || return 1
+  now="$(date +%s)" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      start_epoch=*)
+        line="start_epoch=$((now - seconds))"
+        rewrote=$((rewrote + 1))
+        ;;
+    esac
+    rewritten="$rewritten$line"$'\n'
+  done < "$lease_path"
+  [ "$rewrote" -eq 1 ] || return 1
+  printf '%s' "$rewritten" > "$lease_path" || return 1
+}
 
 if [ ! -f "$LIB" ]; then
   printf '  FAIL  live-semaphore.sh is missing: %s\n' "$LIB"
@@ -961,6 +991,15 @@ printf '== live semaphore: eight-way cap race ==\n'
 RACE_STATE="$TMP/race-state"
 RACE_GATE="$TMP/race-release"
 RACE_BARRIER_ERR="$TMP/race-barrier.err"
+# This block's subject is the CAP, not lease expiry, so the race leases carry a
+# TTL far longer than any barrier handshake can take. Nothing renews them, and
+# the five losing contenders reconcile on every retry: a TTL the handshake could
+# outrun would let a straggler's reconcile reclaim a lease its holder still owns
+# and still means to release, turning a slow machine into a release failure that
+# reads as a cap defect. With this TTL the only failure paths left are the real
+# ones — cap exceeded, a lease left behind, or the explicit barrier/gate
+# timeout diagnostics.
+RACE_TIMEOUT_S=600
 printf '0\n' > "$TMP/max"
 : > "$RACE_BARRIER_ERR"
 record_max() {
@@ -1064,7 +1103,7 @@ while [ "$n" -le 8 ]; do
     export UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES
     # shellcheck source=/dev/null
     . "$LIB"
-    lease="$(uberdev_semaphore_acquire "$RACE_STATE" race-repo codex 3 "run-$n" 5)" || exit 1
+    lease="$(uberdev_semaphore_acquire "$RACE_STATE" race-repo codex 3 "run-$n" "$RACE_TIMEOUT_S")" || exit 1
     [ -n "$lease" ] || exit 1
     active="$(count_race_leases)" || exit 1
     record_max "$active" || exit 1
@@ -1368,16 +1407,25 @@ else
 fi
 
 STALE_STATE="$TMP/stale-state"
-stale_lease="$(uberdev_semaphore_acquire "$STALE_STATE" repo codex 1 stale-run 1)"
+# The TTL is generous rather than one second, so the "still fresh" half asserts
+# the rule (a live owner keeps a lease whose deadline has not passed, even with
+# a dead backend handle) instead of asserting that this row's own acquire +
+# set_handle + reconcile fit inside the deadline. Expiry is then driven by
+# backdating the lease's start_epoch, so the "now stale" half is equally
+# independent of machine speed.
+STALE_TIMEOUT_S=30
+stale_lease="$(uberdev_semaphore_acquire "$STALE_STATE" repo codex 1 stale-run "$STALE_TIMEOUT_S")"
 uberdev_semaphore_set_handle "$stale_lease" 999999 ''
 capture uberdev_semaphore_reconcile "$STALE_STATE" repo codex
 pre_stale_out="$CAPTURE_OUT"; pre_stale_rc="$CAPTURE_RC"
-sleep 2
+stale_backdate_rc=0
+backdate_lease_start "$stale_lease" "$((STALE_TIMEOUT_S + 1))" || stale_backdate_rc=$?
 capture uberdev_semaphore_reconcile "$STALE_STATE" repo codex
-if [ "$pre_stale_rc" -eq 0 ] && [ "$pre_stale_out" = "0" ] && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$stale_lease" ]; then
+if [ "$pre_stale_rc" -eq 0 ] && [ "$pre_stale_out" = "0" ] && [ "$stale_backdate_rc" -eq 0 ] \
+   && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$stale_lease" ]; then
   pass "live-owner lease is stale only after timeout plus failed backend liveness"
 else
-  fail "live-owner lease is stale only after timeout plus failed backend liveness" "before=$pre_stale_rc/$pre_stale_out after=$CAPTURE_RC/$CAPTURE_OUT"
+  fail "live-owner lease is stale only after timeout plus failed backend liveness" "before=$pre_stale_rc/$pre_stale_out backdate=$stale_backdate_rc after=$CAPTURE_RC/$CAPTURE_OUT"
 fi
 
 STALE_STATUS_STATE="$TMP/stale-status-state"
@@ -1464,29 +1512,39 @@ fi
 
 PREHANDLE_DEAD_STATE="$TMP/terminal-prehandle-dead-state"
 prehandle_dead_path_file="$TMP/terminal-prehandle-dead-path"
+# Same treatment as the stale-lease row above, and for the same reason: the
+# retention half must not have to outrun a one-second deadline that the fork,
+# the library source, the acquire, the set_handle and the path handshake have
+# already spent. A generous TTL makes retention unconditional; backdating
+# start_epoch then expires the lease exactly, with no sleep.
+PREHANDLE_DEAD_TIMEOUT_S=30
 /bin/bash -c '
   . "$1"
   owner_pid="${BASHPID:-$$}"
   lease="$(UBERDEV_SEMAPHORE_OWNER_PID="$owner_pid" \
-    uberdev_semaphore_acquire "$2" repo codex 1 terminal-prehandle-dead 1)" || exit 1
+    uberdev_semaphore_acquire "$2" repo codex 1 terminal-prehandle-dead "$5")" || exit 1
   uberdev_semaphore_set_handle "$lease" "" "$3" || exit 1
   printf "%s\n" "$lease" >"$4"
-' _ "$LIB" "$PREHANDLE_DEAD_STATE" "$prehandle_status" "$prehandle_dead_path_file"
+' _ "$LIB" "$PREHANDLE_DEAD_STATE" "$prehandle_status" "$prehandle_dead_path_file" \
+  "$PREHANDLE_DEAD_TIMEOUT_S"
 prehandle_dead_lease="$(cat "$prehandle_dead_path_file")"
 capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
 prehandle_dead_fresh_rc="$CAPTURE_RC"
 prehandle_dead_fresh_out="$CAPTURE_OUT"
 prehandle_dead_fresh_present=0
 [ ! -f "$prehandle_dead_lease" ] || prehandle_dead_fresh_present=1
-sleep 2
+prehandle_dead_backdate_rc=0
+backdate_lease_start "$prehandle_dead_lease" "$((PREHANDLE_DEAD_TIMEOUT_S + 1))" \
+  || prehandle_dead_backdate_rc=$?
 capture uberdev_semaphore_reconcile "$PREHANDLE_DEAD_STATE" repo codex
 if [ -n "$prehandle_dead_lease" ] && [ "$prehandle_dead_fresh_rc" -eq 0 ] \
     && [ "$prehandle_dead_fresh_out" = 0 ] && [ "$prehandle_dead_fresh_present" -eq 1 ] \
+    && [ "$prehandle_dead_backdate_rc" -eq 0 ] \
     && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 1 ] && [ ! -e "$prehandle_dead_lease" ]; then
   pass "dead-owner terminal pre-handle is retained only until its deadline"
 else
   fail "dead-owner terminal pre-handle is retained only until its deadline" \
-    "fresh=$prehandle_dead_fresh_rc/$prehandle_dead_fresh_out/$prehandle_dead_fresh_present expired=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_dead_lease" && printf present || printf absent)"
+    "fresh=$prehandle_dead_fresh_rc/$prehandle_dead_fresh_out/$prehandle_dead_fresh_present backdate=$prehandle_dead_backdate_rc expired=$CAPTURE_RC/$CAPTURE_OUT lease=$(test -e "$prehandle_dead_lease" && printf present || printf absent)"
 fi
 
 PREHANDLE_EXPIRED_STATE="$TMP/terminal-prehandle-expired-state"

@@ -1679,11 +1679,54 @@ finally:
  child.wait(timeout=10)
 PY
     windows_child_controller=$!
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      [ ! -s "$windows_child_pid_file" ] || break
+    # #396-class: this wait is a HANG DETECTOR, not a budget, and an expired
+    # wait must name ITSELF.
+    #
+    # The bound was ten 0.1s ticks — a hard 1.0s for a backgrounded CPython to
+    # cold-start, CreateProcess/fork a SECOND CPython, and land the child pid on
+    # disk. That is a fixed iteration count, not a condition: on expiry the loop
+    # fell THROUGH instead of failing, `cat` yielded an empty pid, and the next
+    # command died under `set -e`. The operator-visible verdict became "did not
+    # preserve one live native identity" with stage=runtime-assertion and
+    # raw=<unavailable> — accusing identity binding while the diagnostic printed
+    # four IDENTICAL, correct identities (owner/lease/event/intent). The verdict
+    # moved with machine speed, and the surviving evidence blamed a knob that was
+    # provably working. Worse, this block is native-Windows-only, so the bound was
+    # sized against a fork-based host (~135ms observed) but only ever ran where
+    # each interpreter start is 150-400ms and process creation is CreateProcess.
+    #
+    # Three changes, none of which weakens the row:
+    #   1. the deadline is 10s, matching the `child.wait(timeout=10)` the payload
+    #      itself already trusts — generous enough that only a real hang reaches it;
+    #   2. the poll condition is the state the rest of the block actually
+    #      consumes — a positive-integer pid — instead of `-s`, which only proves
+    #      the file is non-empty. It is strictly stronger: everything it admits,
+    #      `-s` admitted too, while `0`, `0123`, ` 4321`, `43x` and a file holding
+    #      just a newline (non-empty to `-s`, EMPTY after `$(cat)` strips it — the
+    #      very fall-through that produced the empty pid) now keep it waiting;
+    #   3. expiry routes into the existing windows_stage diagnostic, so a starved
+    #      runner reds as `child_pid_file_never_written` under its own stage name
+    #      instead of being laundered into another row's failure text.
+    windows_child_pid=''
+    windows_child_waits=0
+    while [ "$windows_child_waits" -lt 100 ]; do
+      windows_child_candidate="$(cat "$windows_child_pid_file" 2>/dev/null || true)"
+      case "$windows_child_candidate" in
+        ''|0|0*|*[!0-9]*) windows_child_candidate='' ;;
+      esac
+      if [ -n "$windows_child_candidate" ]; then
+        windows_child_pid="$windows_child_candidate"
+        break
+      fi
       sleep 0.1
+      windows_child_waits=$((windows_child_waits + 1))
     done
-    windows_child_pid="$(cat "$windows_child_pid_file")"
+    if [ -z "$windows_child_pid" ]; then
+      windows_stage=child-pid-timeout
+      windows_stage_rc=1
+      windows_stage_raw='{"error":"child_pid_file_never_written"}'
+      false
+    fi
     windows_child_identity="$(python3 -I -B \
       "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" process-identity --pid "$windows_child_pid")"
     cancel_calls="$WINDOWS_BRIDGE_ROOT/cancel-calls"

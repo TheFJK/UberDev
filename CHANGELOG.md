@@ -4,6 +4,23 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.3] — 2026-08-09
+
+### Fixed
+
+- **`#396.2` was itself starvation-intolerant, the exact defect #396 exists to
+  retire** (#420). The row proved the `UBERDEV_HARNESS_TIMEOUT_MS` knob drives
+  the real per-case budget by running the harness self-test at 1 ms and
+  requiring a `failed: [1-9]` summary. Under contention the self-test can abort
+  before it prints a summary at all — rc is still 1, but there is no line to
+  match, so the row reds and blames a knob that is demonstrably working.
+  Measured on a loaded host: 4 of 20 runs had rc=1 with no summary. It red
+  `shape-checks-windows` on `main` and `shape-checks` on the #399 branch, on
+  byte-identical harnesses, while passing every unloaded local run. The
+  evidence is now the per-case diagnostic, which names the overridden value and
+  so is strictly stronger than a failure count. `#396.2a` pins that the
+  diagnostic reports the override rather than the shipped default.
+
 ## [0.44.2] — 2026-08-09
 
 ### Fixed

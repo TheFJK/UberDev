@@ -28,6 +28,50 @@ export UBERDEV_CHILD_TEST_MODE=1
 export UBERDEV_CHILD_MANIFEST_PATH="$ROOT/tests/_fixtures/child-run-tree-v1.json"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 [ -r "$LIB" ] || { echo "RED: child dispatch runtime missing" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Settle budgets (issue #396 class)
+# ---------------------------------------------------------------------------
+# Every budget below is a HANG DETECTOR — "does this child ever settle?" — and
+# NEVER a performance assertion. Nothing in this suite is timed. What the waits
+# below are waiting FOR is produced asynchronously (the watcher writes the
+# terminal lifecycle record; the reconciler releases the capacity lease) or sits
+# behind several python3 spawns per poll. So a tight budget separates nothing
+# except "was this host fast enough", and when it loses that race it reds while
+# naming a knob that is provably working — `child settle budget exhausted …
+# reason=lifecycle_record_pending` says "has not happened yet", never "is wrong".
+#
+# It cost exactly that. The hard-coded `5` on the integration wait red 2 of 2
+# runs under `taskpolicy -b -d throttle`, with two DIFFERENT pending reasons
+# (lifecycle_record_pending and lease_release_pending) — both of them the async
+# producer losing the race, neither of them a defect; the same call consumed
+# 1.682s of its 5s under ordinary contention, i.e. ~3x margin on a laptop.
+#
+# 60s still fails a genuinely stuck settle in a small fraction of the 40-minute
+# CI job budget, and production itself unwinds post-launch cleanup at 600s.
+#
+# ONE knob, so a slower host moves every budget together instead of leaving a
+# literal behind. Exported because the zsh/bash/python3 fixtures below re-enter
+# the runtime in child processes that must size their waits identically.
+#
+# A malformed override is a hard refusal, not a fallback: running the suite
+# under a budget nobody chose is how a wrong oracle ships.
+UBERDEV_CHILD_TEST_SETTLE_BUDGET_S="${UBERDEV_CHILD_TEST_SETTLE_BUDGET_S:-60}"
+case "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" in
+  ''|*[!0-9]*|0)
+    printf 'FATAL: UBERDEV_CHILD_TEST_SETTLE_BUDGET_S="%s" is not a positive integer number of seconds; unset it for the 60 default\n' \
+      "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >&2
+    exit 2
+    ;;
+esac
+export UBERDEV_CHILD_TEST_SETTLE_BUDGET_S
+# NON-SCALING by design (cf. HANG_PROBE_TIMEOUT_MS in tests/_workflow_harness.js).
+# The two timeout fixtures below assert that a wait budget EXPIRES against a
+# provider that never terminalizes, and that the expiry drives cancellation to
+# 124. A starved host can only DELAY that expiry, never prevent it, so scaling
+# this value would add its difference to every run and buy nothing.
+UBERDEV_CHILD_TEST_TIMEOUT_TRIGGER_S=1
+export UBERDEV_CHILD_TEST_TIMEOUT_TRIGGER_S
 python3 -I -B - "$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" "$UBERDEV_CHILD_MANIFEST_PATH" <<'PY'
 import json,sys
 source,fixture=(json.load(open(path,encoding='utf-8')) for path in sys.argv[1:])
@@ -162,15 +206,24 @@ preflight_must_reject oversized "$OVERSIZED_HANDOFF" \
   "$OVERSIZED_SHA256" invalid_handoff
 
 # A FIFO with a syntactically valid digest must be rejected from lstat without
-# blocking in open()/json.load(). Run it out of process so a regression has a
-# deterministic two-second wall rather than hanging the suite.
+# blocking in open()/json.load(). Run it out of process so a regression hits a
+# wall rather than hanging the suite. The wall is the shared hang-detector
+# budget, NOT a performance bound: the only distinction it has to draw is
+# "blocks forever on a FIFO" vs "does not", and the bounded command is a whole
+# `bash` startup plus a `. child-dispatch.sh` plus a preflight pipeline that
+# spawns python3 of its own. The hard 2s it used to carry measured 0.13-0.93s
+# naturally (47% of the wall; 6.6x spread inside one batch of 96) and expired on
+# 24 of 25 runs under `taskpolicy -b -d throttle`, where a 30s wall let the SAME
+# command finish correctly in ~1.0-1.6s — the verdict flipped on the wall alone.
+# The real oracle is unchanged and unconditional: rc 2 plus `invalid_handoff`.
 FIFO_HANDOFF="$TMP/preflight-fifo.json"
 mkfifo "$FIFO_HANDOFF"
 python3 -I -B - "$LIB" "$FIFO_HANDOFF" \
   0000000000000000000000000000000000000000000000000000000000000000 \
-  "$UBERDEV_CHILD_MANIFEST_PATH" <<'PY'
+  "$UBERDEV_CHILD_MANIFEST_PATH" "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" <<'PY'
 import os,subprocess,sys
-library,handoff,digest,manifest=sys.argv[1:]
+library,handoff,digest,manifest,wall=sys.argv[1:]
+wall=int(wall)
 environment=os.environ.copy()
 environment.update({
     'UBERDEV_CHILD_TEST_MODE':'1',
@@ -180,10 +233,18 @@ try:
     result=subprocess.run(
         ['bash','-c','. "$1"; uberdev_preflight_child_batch "$2" "$3"',
          '_',library,handoff,digest],
-        capture_output=True,text=True,env=environment,timeout=2,
+        capture_output=True,text=True,env=environment,timeout=wall,
     )
 except subprocess.TimeoutExpired as error:
-    raise SystemExit('child preflight blocked while opening a FIFO') from error
+    # Report what was OBSERVED. An expiry cannot tell "blocked in open()" from
+    # "slower than the wall", so it must not assert the first — a starved runner
+    # used to red here accusing a guard that had done nothing wrong.
+    raise SystemExit(
+        f'child preflight did not return within {wall}s '
+        f'(UBERDEV_CHILD_TEST_SETTLE_BUDGET_S). If it never returns, '
+        f'uberdev_preflight_child_batch is opening the FIFO instead of '
+        f'rejecting it from lstat.'
+    ) from error
 if result.returncode != 2 or 'invalid_handoff' not in result.stderr:
     raise SystemExit(
         f'FIFO preflight returned rc={result.returncode} stderr={result.stderr!r}'
@@ -847,12 +908,23 @@ PY
 printf 'done\n' >"$TMP/run/children/integration-0002/result.md"
 printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:child"}\n' >"$TMP/run/children/integration-0002/status.json"
 chmod 600 "$TMP/run/children/integration-0002/status.json"
-uberdev_wait_child "$TMP/run/children/integration-0002/status.json" "$TMP/run/children/integration-0002/result.md" 5 >/dev/null
-for _ in 1 2 3 4 5; do
-  grep -q '"event":"completed".*"run_id":"integration-0002"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl" && break
+# Both halves of this settle are asynchronous — the watcher writes the
+# `completed` lifecycle record, the reconciler releases the capacity lease — so
+# the budget is the shared hang detector rather than a claim about host speed.
+# rc 0 still demands all three invariants (manifest terminal == status terminal,
+# lease absent, non-empty owned regular result file), so nothing is weakened:
+# break any of them in the runtime and this row still reds, just later.
+uberdev_wait_child "$TMP/run/children/integration-0002/status.json" "$TMP/run/children/integration-0002/result.md" \
+  "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >/dev/null
+INTEGRATION_MANIFEST="$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+# Poll to a generous deadline instead of a fixed five ticks. The loop exits the
+# instant the record appears; only the final unconditional grep decides.
+INTEGRATION_DEADLINE=$(( $(date +%s) + UBERDEV_CHILD_TEST_SETTLE_BUDGET_S ))
+until grep -q '"event":"completed".*"run_id":"integration-0002"' "$INTEGRATION_MANIFEST"; do
+  [ "$(date +%s)" -lt "$INTEGRATION_DEADLINE" ] || break
   sleep 1
 done
-grep -q '"event":"completed".*"run_id":"integration-0002"' "$TMP/run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
+grep -q '"event":"completed".*"run_id":"integration-0002"' "$INTEGRATION_MANIFEST"
 
 # A real numeric child timeout uses launch identity + lease generation, proves
 # provider death, CAS-publishes timed_out, reconciles the manifest, and releases
@@ -873,15 +945,42 @@ _uberdev_agent_dispatch_backend() {
   # stub stands in for exactly that layer, so it has to establish the same
   # precondition. Omitting it would test a state production never reaches.
   ( umask 077; set -C; : > "$5" ) || return 2
-  nohup python3 -I -c 'import os; os.setsid(); os.execvp("sleep",["sleep","30"])' >/dev/null 2>&1 & DISPATCH_ID="$!"
+  # The provider must still be alive when the cancel path reaches it, so its
+  # lifetime is derived from the budgets that decide when that happens rather
+  # than from a literal a slow host can outrun. It is killed by the verified
+  # group-death path below, so this only bounds an orphan after an early abort.
+  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("sleep",["sleep",sys.argv[1]])' \
+    "$((UBERDEV_CHILD_TEST_SETTLE_BUDGET_S * 2))" >/dev/null 2>&1 & DISPATCH_ID="$!"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"; chmod 600 "$6"
   DISPATCH_RC=0; return 0
 }
 uberdev_agent_dispatch() { _real_uberdev_agent_dispatch "$@"; }
 uberdev_dispatch_child timeout "$TMP/timeout-handoff.json" "$TIMEOUT_HANDOFF_SHA256" \
   "$TMP/run/children/timeout-0003/result.md" "$TMP/run/children/timeout-0003/status.json" >/dev/null
+# `uberdev_unwind_child` fuses two unrelated clocks into its single timeout
+# argument, and only one of them is a deadline. It forwards the value to
+# `uberdev_wait_child`, where expiry is the DELIBERATE timeout trigger against a
+# provider that never terminalizes, and then reuses the same value for its tail
+# lease-proof loop, which is a genuine settle deadline against an asynchronous
+# release. Fused at 1, that tail loop granted AT MOST ONE retry — and whether it
+# granted even that was decided by which side of a wall-clock second the
+# python3-backed lease proof landed on. Same bytes, two verdicts.
+#
+# Drive them separately: fire the trigger explicitly at the non-scaling 1s and
+# assert the 124 this fixture is named after — previously invisible, because
+# unwind accepts 0|1|124 from its inner wait without distinguishing them — then
+# unwind on the shared hang-detector budget so the settle proof gets a real
+# allowance. The second call re-enters the same wait/proof code with the child
+# already terminal, so nothing that used to run is skipped.
 set +e
-uberdev_unwind_child "$TMP/run/children/timeout-0003/status.json" "$TMP/run/children/timeout-0003/result.md" 1 >/dev/null
+uberdev_wait_child "$TMP/run/children/timeout-0003/status.json" "$TMP/run/children/timeout-0003/result.md" \
+  "$UBERDEV_CHILD_TEST_TIMEOUT_TRIGGER_S" >/dev/null
+TIMEOUT_TRIGGER_RC=$?
+set -e
+[ "$TIMEOUT_TRIGGER_RC" -eq 124 ]
+set +e
+uberdev_unwind_child "$TMP/run/children/timeout-0003/status.json" "$TMP/run/children/timeout-0003/result.md" \
+  "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >/dev/null
 TIMEOUT_RC=$?
 set -e
 [ "$TIMEOUT_RC" -eq 0 ]
@@ -936,7 +1035,10 @@ chmod +x "$TMP/background-timeout-bin/claude"
       uberdev_dispatch_child background-timeout "$BG_HANDOFF" "$BG_HANDOFF_SHA256" \
         "$BG_RESULT" "$BG_STATUS" >/dev/null
       set +e
-      uberdev_wait_child "$BG_STATUS" "$BG_RESULT" 1 >/dev/null
+      # Non-scaling trigger, same reasoning as the timeout-0003 fixture: this
+      # provider ignores TERM and never terminalizes, so starvation can only
+      # delay the expiry that drives cancellation, never prevent it.
+      uberdev_wait_child "$BG_STATUS" "$BG_RESULT" "$UBERDEV_CHILD_TEST_TIMEOUT_TRIGGER_S" >/dev/null
       rc=$?
       set -e
       [ "$rc" -eq 124 ]
@@ -988,10 +1090,13 @@ if [ "$1 $2" = 'cli spawn' ]; then
   # because the wrapper's critical section was a stub `mkdir -p`; since #381
   # RULING 4 the wrapper performs a real `git worktree add` plus a real
   # mutex-serialized teardown (`git worktree remove` + `git branch -D`), which
-  # regularly outruns half a second and made this case flaky. Bounded at ~20s
-  # so a genuinely hung wrapper still fails the run instead of hanging CI.
+  # regularly outruns half a second and made this case flaky. Bounded by the
+  # suite's exported hang-detector budget (50ms ticks) so a genuinely hung
+  # wrapper still fails the run, while a starved host that merely needs longer
+  # than a hard-coded 20s moves with every other wait instead of reding.
+  wez_limit=$(( ${UBERDEV_CHILD_TEST_SETTLE_BUDGET_S:-60} * 20 ))
   wez_waited=0
-  while kill -0 "$pane_pid" 2>/dev/null && [ "$wez_waited" -lt 400 ]; do
+  while kill -0 "$pane_pid" 2>/dev/null && [ "$wez_waited" -lt "$wez_limit" ]; do
     sleep .05
     wez_waited=$((wez_waited + 1))
   done
@@ -1017,7 +1122,8 @@ assert r['state']=='completed',r
 assert s['backend']=='wezterm' and s['state']=='completed' and s['exit_code']==0,s
 assert 'pid' not in s and 'lease_generation' not in s,s
 PY
-  uberdev_wait_child "$TMP/wez-run/children/wezterm-0001/status.json" "$TMP/wez-run/children/wezterm-0001/result.md" 8 >/dev/null
+  uberdev_wait_child "$TMP/wez-run/children/wezterm-0001/status.json" "$TMP/wez-run/children/wezterm-0001/result.md" \
+    "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >/dev/null
 )
 grep -q '"event":"completed".*"run_id":"wezterm-0001"' "$TMP/wez-run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 ! grep -R -q 'run_id=wezterm-0001' "$TMP/wez-run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
@@ -1039,7 +1145,7 @@ CHILD_LIB="$LIB" ZSH_HANDOFF="$TMP/zsh-handoff.json" ZSH_HANDOFF_SHA256="$ZSH_HA
   }
   uberdev_dispatch_child zsh.runtime "$ZSH_HANDOFF" "$ZSH_HANDOFF_SHA256" \
     "$ZSH_RESULT" "$ZSH_STATUS" >/dev/null
-  uberdev_wait_child "$ZSH_STATUS" "$ZSH_RESULT" 2 >/dev/null
+  uberdev_wait_child "$ZSH_STATUS" "$ZSH_RESULT" "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >/dev/null
 '
 
 # Return to the capture seam for rejection tests below.
@@ -1111,9 +1217,9 @@ PACKAGE_LIB="$TMP/installed-package/lib/child-dispatch.sh" PACKAGE_HANDOFF="$TMP
   unset UBERDEV_CHILD_TEST_MODE UBERDEV_CHILD_MANIFEST_PATH
   uberdev_dispatch_child sdd.task.implement "$PACKAGE_HANDOFF" "$PACKAGE_HANDOFF_SHA256" \
     "$PACKAGE_RESULT" "$PACKAGE_STATUS" >/dev/null
-  uberdev_wait_child "$PACKAGE_STATUS" "$PACKAGE_RESULT" 2 >/dev/null
+  uberdev_wait_child "$PACKAGE_STATUS" "$PACKAGE_RESULT" "$UBERDEV_CHILD_TEST_SETTLE_BUDGET_S" >/dev/null
 '
 AFTER="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 [ "$BEFORE" = "$AFTER" ]
 [ ! -d "$TMP/installed-package/lib/__pycache__" ]
-echo 'child-dispatch: 101 checks passed'
+echo 'child-dispatch: 102 checks passed'
