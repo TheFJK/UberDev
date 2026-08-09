@@ -247,6 +247,25 @@ def run(argv, *, stdin=None, expected=0):
     return result.stdout
 
 
+def run_bytes(argv, *, expected=0):
+    """`run`, but byte-exact.
+
+    `run` passes `text=True`, so the CLI's stdout comes back decoded and a NUL
+    byte in it is indistinguishable from any other codepoint once Python has
+    normalised newlines. `list-ci-unmerged-paths` is NUL-TERMINATED on purpose,
+    so the rows that pin its payload have to read raw bytes. Returns the whole
+    CompletedProcess rather than just stdout: the rc-74 row asserts on stderr's
+    reason token too.
+    """
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(helper_path), *argv],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == expected, (argv, result.returncode, result.stdout, result.stderr)
+    return result
+
+
 def git(repository, *args, check=True):
     return subprocess.run(
         ["git", "-C", str(repository), *args],
@@ -6103,7 +6122,109 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-addadd-") as temporary:
         working_dir=str(aa_repo), head_before=aa_head,
         head_after=aa_mid_head, remote_head_sha=aa_head)
     assert aa_outcome["status"] == "CONFLICT", aa_outcome
+
+    # === #398: the CONTROLLER's enumerator has to reach the same set ==========
+    #
+    # The judge above says CONFLICT for this `AA`. The shell side of the
+    # CONFLICT-RESOLVE arm was hand-rolling `git status --porcelain | awk
+    # '/^UU /'` to decide WHICH files to hand to conflict-resolver, so it
+    # enumerated zero here and the arm resolved nothing. P1/P2 pin the CLI verb
+    # that closes that gap. They live INSIDE this block, before the
+    # `rebase --abort` below: after the abort the unmerged set is empty and both
+    # rows would assert on `b""` and pass for the wrong reason. The block's own
+    # `AA ... in aa_porcelain` / `UU  not in aa_porcelain` asserts above are
+    # what keep them honest.
+    #
+    # P1 — the payload is exactly the one conflicted path, NUL-TERMINATED.
+    assert run_bytes(
+        ["list-ci-unmerged-paths", "--working-dir", str(aa_repo)]
+    ).stdout == b"src/collide.py\x00"
+    # P2 — and it is the SAME set the judge used, not a second opinion that
+    # happens to agree today. This is the row that reds if anyone re-forks the
+    # unmerged-pair vocabulary into the transport.
+    assert run_bytes(
+        ["list-ci-unmerged-paths", "--working-dir", str(aa_repo)]
+    ).stdout == "".join(
+        entry + "\x00" for entry in module._ci_unmerged_paths(str(aa_repo))
+    ).encode("utf-8")
+
     git(aa_repo, "rebase", "--abort", check=False)
+
+
+def conflicting_repo(root, colliding_path):
+    """An add/add rebase left IN PROGRESS, colliding on `colliding_path`.
+
+    Same recipe as the block above (both sides create the path, so there is no
+    common ancestor blob and git records `AA`, not `UU`), reduced to just the
+    git state: these rows exercise the enumerator, not the authority envelope.
+    """
+    repository = pathlib.Path(root) / "repo"
+    repository.mkdir()
+    git(repository, "init", "-q", "-b", "main")
+    git(repository, "config", "user.email", "fixture@example.invalid")
+    git(repository, "config", "user.name", "Fixture")
+    (repository / "src").mkdir()
+    (repository / "src/keep.py").write_text("KEEP = 1\n", encoding="utf-8")
+    git(repository, "add", "--", "src/keep.py")
+    git(repository, "commit", "-qm", "test: base")
+    fork = git(repository, "rev-parse", "HEAD").stdout.decode().strip()
+    (repository / colliding_path).write_text("COLLIDE = 'main'\n", encoding="utf-8")
+    git(repository, "add", "--", colliding_path)
+    git(repository, "commit", "-qm", "test: main adds the colliding path")
+    git(repository, "checkout", "-q", "-b", "fix/398-collide", fork)
+    (repository / colliding_path).write_text("COLLIDE = 'branch'\n", encoding="utf-8")
+    git(repository, "add", "--", colliding_path)
+    git(repository, "commit", "-qm", "test: the branch adds it too")
+    rebase = git(repository, "rebase", "main", check=False)
+    assert rebase.returncode != 0, "the add/add fixture rebase was expected to conflict"
+    return repository
+
+
+# P3 — a conflicted path containing a SPACE survives as ONE record. The retired
+# `awk … {print $c2}` shape got this doubly wrong: non-`-z` porcelain C-QUOTES a
+# spaced path (`AA "src/a b.py"`, asserted below) precisely because ` ` would
+# otherwise be ambiguous with the rename arrow, and whitespace-splitting that
+# line yields `"src/a`. The arm then handed a nonexistent pathspec to `git add`.
+# `-z` porcelain — what `_ci_porcelain_entries` reads — is unquoted and
+# unambiguous, which is why the answer has to come from there.
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-spaced-") as temporary:
+    spaced_repo = conflicting_repo(temporary, "src/a b.py")
+    assert b'AA "src/a b.py"\n' in git(spaced_repo, "status", "--porcelain").stdout
+    assert b"AA src/a b.py\x00" in git(spaced_repo, "status", "--porcelain", "-z").stdout
+    assert run_bytes(
+        ["list-ci-unmerged-paths", "--working-dir", str(spaced_repo)]
+    ).stdout == b"src/a b.py\x00"
+    git(spaced_repo, "rebase", "--abort", check=False)
+
+# P4 — the empty set is the EMPTY payload, at rc 0. Terminated rather than
+# joined precisely so this case has no representation of its own to confuse with
+# "one empty path".
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-clean-") as temporary:
+    clean_repo = pathlib.Path(temporary) / "repo"
+    clean_repo.mkdir()
+    git(clean_repo, "init", "-q", "-b", "main")
+    git(clean_repo, "config", "user.email", "fixture@example.invalid")
+    git(clean_repo, "config", "user.name", "Fixture")
+    (clean_repo / "keep.py").write_text("KEEP = 1\n", encoding="utf-8")
+    git(clean_repo, "add", "--", "keep.py")
+    git(clean_repo, "commit", "-qm", "test: base")
+    assert git(clean_repo, "status", "--porcelain").stdout == b""
+    assert run_bytes(
+        ["list-ci-unmerged-paths", "--working-dir", str(clean_repo)]
+    ).stdout == b""
+
+# P5 — an unreadable git state fails LOUD. The whole point of routing the set
+# through the contract is that "git could not answer" must not arrive at the
+# shell wearing the same clothes as "no conflicts to resolve", so the one shape
+# this must never produce is `(0, b"")`.
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-nonrepo-") as temporary:
+    unreadable = run_bytes(
+        ["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
+    assert unreadable.stdout == b"", unreadable.stdout
+    assert unreadable.stderr == b"git_state_unreadable\n", unreadable.stderr
+    # ...and through `run`, which owns the one-line/space-free/slash-free stderr
+    # diagnostic shape every other rc-74 verb is held to.
+    run(["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

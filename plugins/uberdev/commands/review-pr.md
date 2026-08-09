@@ -3621,7 +3621,7 @@ PY
     > | Said below | Shipped agent (#383) |
     > |---|---|
     > | "the agent already pushed; new HEAD is on remote" | The agent is a PREPARER, not a pusher. `git push` **in any form** is on its explicit denylist, `EXPECTED_OLD_SHA` no longer exists in that file, and the controller captures the lease and performs the single leased push itself. |
-    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN `git status --porcelain` UU entries — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
+    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN unmerged-path enumeration (`code_fixer_contract.py list-ci-unmerged-paths`) — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
     > | "Step 6 the agent has already aborted the in-progress rebase" | Step 5 says the opposite in capitals — **leave the rebase IN PROGRESS**, do NOT `git rebase --abort` — and Step 6 is "Stop." The live mid-rebase state IS the `ci-conflicts` stage's input; step 1's re-fetch-and-re-rebase below would destroy it. |
     >
     > Half two (the Phase 3 fence wiring) replaces this whole block with the
@@ -3702,30 +3702,59 @@ PY
        - **All `status: RESOLVED`:**
 
          ```bash
-         git add "${conflicted_files[@]}"
+         # `git add --` with ZERO pathspecs prints "Nothing specified, nothing
+         # added." and exits 0, so an empty set would stage nothing and then fail
+         # the continue on the still-unmerged index. Refuse it here instead.
+         [ "${#conflicted_files[@]}" -gt 0 ] || {
+           git rebase --abort
+           audit ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed
+           exit 1
+         }
+         git add -- "${conflicted_files[@]}"
          if ! git rebase --continue; then
            # `git rebase --continue` exited non-zero. Two sub-cases:
            #   (a) Multi-stage rebase: continuation surfaced a NEW conflict set.
-           #       Re-bind `conflicted_files` from the live rebase state via
-           #       `git status --porcelain | awk -v c2=2 '/^UU / {print $c2}'` and re-enter
-           #       step 3 against the NEW list (NOT the agent's original list —
-           #       conflict-resolver REFUSES paths outside its pre-computed set per
-           #       `agents/conflict-resolver.md` Refusal triggers + Inputs). Bounded
-           #       by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD — single-shot per dispatch,
-           #       NOT a separate retry path (anti-pattern guard restated from
-           #       merge-pipeline/SKILL.md "PARK is the terminal floor" prose).
+           #       Re-bind `conflicted_files` from the live rebase state and
+           #       re-enter step 3 against the NEW list (NOT the agent's original
+           #       list — conflict-resolver REFUSES paths outside its pre-computed
+           #       set per `agents/conflict-resolver.md` Refusal triggers +
+           #       Inputs). Bounded by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD —
+           #       single-shot per dispatch, NOT a separate retry path
+           #       (anti-pattern guard restated from merge-pipeline/SKILL.md
+           #       "PARK is the terminal floor" prose).
            #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
-           #       failure, etc): no UU entries → halt.
-           # Use mapfile -t (NOT unquoted expansion) so paths with spaces survive.
-           mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
-           if [ "${#conflicted_files[@]}" -gt 0 ]; then
-             # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
-             :
-           else
-             git rebase --abort
-             audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
-             exit 1
-           fi
+           #       failure, etc): the unmerged set is empty → halt.
+           # The set comes from lib/code_fixer_contract.py through
+           # review_fleet_unmerged_paths, NOT from a local porcelain parse: the
+           # judge that returned CONFLICT covers all seven porcelain unmerged
+           # pairs (UU AA DD AU UA DU UD), and a second copy of that vocabulary
+           # here is exactly what made an add/add conflict enumerate zero files
+           # (#398). Delivered NUL-delimited through a file because a conflicted
+           # path may contain a space or a newline, and read back with
+           # `read -r -d ''` because these fences run under /bin/zsh, where
+           # bash's array-slurp builtin does not exist and fails to an EMPTY
+           # array with nothing consuming its 127.
+           # THREE outcomes, not two: rc 2 means the probe itself failed, which
+           # must never arrive here wearing "no conflicts to resolve".
+           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 1
+           CONFLICT_PATHS="$RESEARCH_DIR_ABS/conflicts.paths"
+           CONFLICT_ENUM_RC=0
+           review_fleet_unmerged_paths "$REPO_ROOT" "$CODE_FIXER_CONTRACT" "$CONFLICT_PATHS" \
+             || CONFLICT_ENUM_RC=$?
+           case "$CONFLICT_ENUM_RC" in
+             0) ;;
+             1) git rebase --abort
+                audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
+                exit 1 ;;
+             *) git rebase --abort
+                audit ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed
+                exit 1 ;;
+           esac
+           conflicted_files=()
+           while IFS= read -r -d '' conflict_entry; do
+             conflicted_files+=("$conflict_entry")
+           done <"$CONFLICT_PATHS"
+           # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
          fi
          NEW_HEAD_SHA="$(git rev-parse HEAD)"
          # Capture push stderr so the lease-mismatch branch is reachable.
@@ -3755,6 +3784,7 @@ PY
          - On push lease-mismatch (server rejects because origin/`$pr_head_branch` no longer matches `$EXPECTED_OLD_SHA`): the conditional above runs `git rebase --abort` and emits `ci_phase_outcome data.outcome=halted data.subreason=rebase_lease_mismatch`; exit 1. (External push during the resume window — the user re-issues `/review-pr` against the new HEAD.)
          - On push failure for any other reason (auth, pre-receive hook, rate-limit, network): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed`; exit 1.
          - On `git rebase --continue` failure with no fresh conflict set (pre-commit hook reject / signing failure / etc): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed`; exit 1.
+         - On a failed *enumeration* — `review_fleet_unmerged_paths` rc 2 (python3 missing, git state unreadable), or an empty `conflicted_files` at the staging guard: `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed`; exit 1. A distinct subreason from `rebase_continue_failed` on purpose: "git could not answer" and "there is genuinely nothing unmerged" are opposite facts, and collapsing them is the #398 defect in miniature.
 
        - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge-pipeline/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
 
@@ -4526,7 +4556,7 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Rebases the PR branch onto its base for `stale_base` class, and **stops there** — #383 demoted it from pusher to preparer
 - Does **not** push. `git push` in any form is on its explicit denylist. The `--force-with-lease=<branch>:<sha> --force-if-includes` pair (the sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant) is captured and consumed by the CONTROLLER, which is the whole safety property: the lease's value must not be one an agent chose
 - No lock file. The lease is the cross-run concurrency guard, and `git rebase` refuses on its own when `.git/rebase-merge` already exists — a controller-held `flock` cannot work here, because every `bash` block is a fresh shell and the file descriptor dies with the fence
-- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the UU paths itself and fan out `conflict-resolver` agents
+- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the unmerged paths itself and fan out `conflict-resolver` agents
 - **Not reachable on the shipped tree**: half one ships the `ci-fix` engine stage, half two wires Phase 3 to call it
 
 ## Notes:

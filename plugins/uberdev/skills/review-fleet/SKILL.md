@@ -445,7 +445,7 @@ child.
 | `defer` | 0 — the single `review_pr.defer.findings` child |
 | `ci-classify` | 0 — the single `review_pr.ci.classify` child |
 | `ci-fix` | 0 — the single `review_pr.ci.fix_code` **or** `review_pr.ci.rebase` child |
-| `ci-conflicts` | 0..N-1 — one `review_pr.ci.resolve_conflict` child per conflicted path, in the CONTROLLER's own `git status --porcelain` UU-enumeration order |
+| `ci-conflicts` | 0..N-1 — one `review_pr.ci.resolve_conflict` child per conflicted path, in the CONTROLLER's own unmerged-path enumeration order |
 | `ci-defer` | 0 — the single `review_pr.ci.defer_refusal` child |
 
 A pool whose length does not match the roster **exactly** aborts the stage: a
@@ -655,8 +655,9 @@ re-implementation.
    given a push tool** — the controller holds the lease and pushes.
 7. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
    path in ONE message, each reading only its own input document. The path list
-   comes from the controller's own `git status --porcelain` UU enumeration,
-   never from the rebase child's return.
+   comes from the controller's own unmerged-path enumeration
+   (`code_fixer_contract.py list-ci-unmerged-paths`), never from the rebase
+   child's return.
 8. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
    `ci-refused-synthetic` aggregate, with the three other aggregate/disposition
    inputs declared empty.

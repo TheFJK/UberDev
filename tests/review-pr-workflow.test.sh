@@ -1340,6 +1340,155 @@ else
   fi
 fi
 
+# E8 — the conflict ENUMERATOR (#398). E7 binds the fanout and E2c/E2d lock the
+# writer, but nothing PRODUCED the set: the Step-4 re-bind in
+# commands/review-pr.md inlined `git status --porcelain | awk '/^UU /'` in a
+# markdown fence. Two exact bytes against code_fixer_contract.py's seven-pair
+# membership test, so an add/add rebase conflict was CONFLICT to the judge and
+# the empty set to the enumerator — zero resolvers dispatched, "all RESOLVED"
+# vacuously true, and the arm aborted a mid-rebase it could have finished.
+#
+# Mutation guard (revert the named production fix in your worktree, re-run):
+#   revert the CLI verb to `^UU` only  -> P1, P2 (contract suite), E8a red
+#   revert `read -r -d ''` to bash's array-slurp builtin
+#                                      -> crossplatform-shell-wrappers Z1 red
+#   collapse the rc to two values      -> E8d red
+#   drop the `--` from `git add`       -> review-pr-phase3-ci S13.21 red
+#   leave the prose saying "UU"        -> review-pr-phase3-ci S13.23 red
+# ubuntu's apt zsh is CI's ONLY proxy for the macOS Bash-tool runtime these
+# fences actually execute in — there is no macOS shape-check job.
+E8_TMP="$TMP/engine-unmerged"
+mkdir -p "$E8_TMP"
+# Same recipe as E5's, but an ADD/ADD: BOTH sides create the colliding path, so
+# there is no common ancestor blob and git records `AA`, never `UU`. That is the
+# whole point — a `UU` fixture passes under the retired shape too.
+e8_conflict_repo() {
+  (
+    set -e
+    cd "$1"
+    git init -q -b main repo
+    cd repo
+    git config user.email fixture@example.invalid
+    git config user.name Fixture
+    mkdir src
+    printf 'KEEP = 1\n' >src/keep.py
+    git add -- src/keep.py
+    git commit -qm 'test: base'
+    printf "COLLIDE = 'main'\n" >"$2"
+    git add -- "$2"
+    git commit -qm 'test: main adds the colliding path'
+    git checkout -qb fix/398-collide HEAD~1
+    printf "COLLIDE = 'branch'\n" >"$2"
+    git add -- "$2"
+    git commit -qm 'test: the branch adds it too'
+    git rebase main
+  ) >/dev/null 2>&1 || true    # the fixture rebase MUST conflict
+}
+mkdir -p "$E8_TMP/plain"
+e8_conflict_repo "$E8_TMP/plain" src/collide.py
+E8_REPO="$E8_TMP/plain/repo"
+E8_PORCELAIN="$(git -C "$E8_REPO" status --porcelain 2>/dev/null)"
+case "$E8_PORCELAIN" in
+  *'AA '*) E8_GATE=ok ;;
+  *) E8_GATE=no-aa ;;
+esac
+case "$E8_PORCELAIN" in
+  *'UU '*) E8_GATE=stray-uu ;;
+esac
+if [ "$E8_GATE" != ok ]; then
+  fail "E8 the add/add fixture did not conflict as AA ($E8_GATE); the rows below would be vacuous"
+else
+  E8_OUT="$E8_TMP/paths.zlist"
+  E8_WANT="$E8_TMP/want.zlist"
+  printf 'src/collide.py\0' >"$E8_WANT"
+  E8_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_REPO" "$CONTRACT" "$E8_OUT" >/dev/null 2>&1 || E8_RC=$?
+  if [ "$E8_RC" = 0 ] && cmp -s "$E8_OUT" "$E8_WANT"; then
+    pass "E8a the enumerator reaches the AA conflict the judge already calls CONFLICT"
+  else
+    fail "E8a rc=$E8_RC payload='$(od -c <"$E8_OUT" 2>/dev/null | tr '\n' ' ')' (want rc 0 and src/collide.py NUL)"
+  fi
+
+  # E8e — NEGATIVE CONTROL, placed before the rows that depend on it: without
+  # this, E8a passes for the wrong reason the day someone reverts the widening.
+  E8_RETIRED="$(git -C "$E8_REPO" status --porcelain | awk -v c2=2 '/^UU / {print $c2}' | wc -l | tr -d ' ')"
+  if [ "$E8_RETIRED" = 0 ]; then
+    pass "E8e the retired \`^UU\` shape enumerates ZERO files on the same fixture"
+  else
+    fail "E8e the retired shape found $E8_RETIRED file(s) — the fixture is not add/add and E8a is vacuous"
+  fi
+
+  # E8b — a conflicted path with a SPACE is ONE record. `-z` porcelain is
+  # unquoted; the non-`-z` form C-quotes it, which is the second half of why the
+  # retired whitespace-split shape truncated it.
+  mkdir -p "$E8_TMP/spaced"
+  e8_conflict_repo "$E8_TMP/spaced" 'src/a b.py'
+  E8_SPACED_REPO="$E8_TMP/spaced/repo"
+  E8_SPACED_OUT="$E8_TMP/spaced.zlist"
+  E8_SPACED_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_SPACED_REPO" "$CONTRACT" "$E8_SPACED_OUT" >/dev/null 2>&1 || E8_SPACED_RC=$?
+  E8_SPACED_FILES=()
+  while IFS= read -r -d '' e8_entry; do
+    E8_SPACED_FILES+=("$e8_entry")
+  done <"$E8_SPACED_OUT"
+  if [ "$E8_SPACED_RC" = 0 ] && [ "${#E8_SPACED_FILES[@]}" -eq 1 ] \
+     && [ "${E8_SPACED_FILES[0]}" = 'src/a b.py' ]; then
+    pass "E8b a conflicted path containing a space reads back as ONE entry"
+  else
+    fail "E8b rc=$E8_SPACED_RC count=${#E8_SPACED_FILES[@]} first='${E8_SPACED_FILES[0]:-}'"
+  fi
+
+  # E8c/E8d — three-valued, for the same reason review_fleet_rebase_dir is
+  # (E5b). A two-valued probe maps "python3 missing / git unreadable" onto "no
+  # conflicts to resolve", which is the silent-empty collapse this issue is
+  # about. Compared separately so a run where BOTH are wrong cannot pass.
+  E8_CLEAN_OUT="$E8_TMP/clean.zlist"
+  E8_CLEAN_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$REPO_ROOT" "$CONTRACT" "$E8_CLEAN_OUT" >/dev/null 2>&1 || E8_CLEAN_RC=$?
+  if [ "$E8_CLEAN_RC" = 1 ] && [ -f "$E8_CLEAN_OUT" ] && [ ! -s "$E8_CLEAN_OUT" ]; then
+    pass "E8c a repository with no unmerged paths answers rc 1 and an empty payload"
+  else
+    fail "E8c rc=$E8_CLEAN_RC (want 1) exists=$([ -f "$E8_CLEAN_OUT" ] && echo y || echo n) size=$(wc -c <"$E8_CLEAN_OUT" 2>/dev/null | tr -d ' ')"
+  fi
+  E8_BROKEN_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_TMP/not-a-repo" "$CONTRACT" "$E8_TMP/broken.zlist" >/dev/null 2>&1 || E8_BROKEN_RC=$?
+  if [ "$E8_BROKEN_RC" = 2 ] && [ "$E8_CLEAN_RC" = 1 ]; then
+    pass "E8d no-conflicts (rc 1) and probe-failed (rc 2) are distinguishable"
+  else
+    fail "E8d clean rc=$E8_CLEAN_RC broken rc=$E8_BROKEN_RC (want 1 and 2)"
+  fi
+
+  # E8f — CHAIN PROOF. The set the enumerator produces, read back the way the
+  # fence reads it, is a set the locked writer reproduces byte-for-byte. This is
+  # what joins the new producer to review_fleet_write_conflict_paths (E2c/E2d)
+  # and to review_fleet_bind_ci_conflicts (E7d) as one wire format.
+  E8_CHAIN=()
+  while IFS= read -r -d '' e8_entry; do
+    E8_CHAIN+=("$e8_entry")
+  done <"$E8_OUT"
+  E8_CHAIN_OUT="$E8_TMP/chain.zlist"
+  E8_CHAIN_RC=0
+  # Guarded, not because the empty set is interesting here but because bash 3.2
+  # (the macOS system bash) treats `"${arr[@]}"` on an EMPTY array as unbound
+  # under `set -u` — an E8a failure would otherwise abort the run instead of
+  # reporting E8f.
+  if [ "${#E8_CHAIN[@]}" -eq 0 ]; then
+    E8_CHAIN_RC=90
+  else
+    bash -c '. "$1"; shift; target="$1"; shift; review_fleet_write_conflict_paths "$target" -- "$@"' \
+      _ "$ARGS_LIB" "$E8_CHAIN_OUT" "${E8_CHAIN[@]}" >/dev/null 2>&1 || E8_CHAIN_RC=$?
+  fi
+  if [ "$E8_CHAIN_RC" = 0 ] && cmp -s "$E8_OUT" "$E8_CHAIN_OUT"; then
+    pass "E8f the enumerated set round-trips through review_fleet_write_conflict_paths byte-identically"
+  else
+    fail "E8f rc=$E8_CHAIN_RC payloads differ between the enumerator and the writer"
+  fi
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"

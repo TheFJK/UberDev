@@ -8092,6 +8092,33 @@ def _ci_unmerged_paths(working_dir: str) -> tuple[str, ...]:
     return tuple(unmerged)
 
 
+def list_ci_unmerged_paths(working_dir: str) -> str:
+    """NUL-TERMINATED conflicted paths, for the shell side of the CONFLICT arm.
+
+    The controller's Step-4 re-bind needs the same answer
+    `_validate_ci_rebase_outcome` reached, and had been hand-rolling
+    `git status --porcelain | awk '/^UU /'` to get it -- two exact bytes against
+    this module's seven-pair membership test, so an add/add rebase conflict was
+    CONFLICT to the judge and the EMPTY set to the enumerator (#398). Zero
+    resolvers were dispatched, "all RESOLVED" was vacuously true, and the arm
+    aborted a mid-rebase it could have finished.
+
+    There is no second copy of the vocabulary here: this is a transport for
+    `_ci_unmerged_paths`, which is a transport for `_ci_is_unmerged_pair`. The
+    rename/copy-origin skipping and the offset-2 space requirement in
+    `_ci_porcelain_entries` come along for free -- a shell re-implementation
+    would have to reproduce both to avoid re-inventing the phantom
+    `UUnamed.md` -> `amed.md` path.
+
+    NUL-TERMINATED rather than newline-joined because a repository path may
+    contain a newline (and, far more commonly, a space); TERMINATED rather than
+    JOINED so that the empty set is the empty payload rather than one empty
+    record. Byte-identical to what `review_fleet_write_conflict_paths` writes,
+    so both are read back by the same `read -r -d ''` loop.
+    """
+    return "".join(entry + "\x00" for entry in _ci_unmerged_paths(working_dir))
+
+
 def _ci_changed_paths(working_dir: str, before: str, after: str) -> tuple[str, ...]:
     # `--no-renames`, for the same reason `_changed_paths` passes it on all three
     # of its invocations: rename detection is ON by default, and it collapses a
@@ -9229,6 +9256,8 @@ def _parser() -> argparse.ArgumentParser:
     read_ci_member.add_argument("--authority-path", required=True)
     read_ci_member.add_argument("--authority-sha256", required=True)
     read_ci_member.add_argument("--member", required=True)
+    list_unmerged = commands.add_parser("list-ci-unmerged-paths", add_help=False)
+    list_unmerged.add_argument("--working-dir", required=True)
     bind_ci = commands.add_parser("bind-workflow-ci-launch", add_help=False)
     bind_ci.add_argument("--edge-id", required=True)
     bind_ci.add_argument("--instance-id", required=True)
@@ -9647,6 +9676,8 @@ def main() -> int:
                 authority_sha256=arguments.authority_sha256,
                 member=arguments.member,
             )
+        elif arguments.command == "list-ci-unmerged-paths":
+            output = list_ci_unmerged_paths(working_dir=arguments.working_dir)
         elif arguments.command == "bind-workflow-ci-launch":
             output = _compact(
                 bind_workflow_ci_launch(

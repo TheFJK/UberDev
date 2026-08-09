@@ -311,8 +311,8 @@ const ciBaseSha = String(CFG.ciBaseSha || "");
 const ciPrBranch = String(CFG.ciPrBranch || "");
 const ciBaseBranch = String(CFG.ciBaseBranch || "");
 // The conflicted-file COUNT, never the file list: the paths are bulk untrusted
-// bytes the controller enumerated from `git status --porcelain` UU entries in
-// its own checkout, and each child reads its own at a script-derived path.
+// bytes the controller enumerated from its own unmerged-path enumeration in its
+// own checkout, and each child reads its own at a script-derived path.
 const ciConflictCount = clampInt(CFG.ciConflictCount, 0, 50, 0);
 // THREE different numbers, and conflating any two of them costs every resolver
 // on the run. `ciConflictCap` is the TOTAL ceiling on the fanout.
@@ -637,9 +637,9 @@ const S = {
       resultPath: { type: "string" },
       statusPath: { type: "string" },
       // A COUNT, never the list. The conflicted paths are enumerated by the
-      // controller from `git status --porcelain` UU entries in its own
-      // checkout; taking them from here would let the child choose the set its
-      // own successors are allowed to touch.
+      // controller from its own unmerged-path enumeration in its own checkout;
+      // taking them from here would let the child choose the set its own
+      // successors are allowed to touch.
       conflictCount: { type: "integer", minimum: 0 },
       note: { type: "string" },
     } },
@@ -1086,7 +1086,7 @@ function conflictPrompt(entry, nonce) {
   lines.push("");
   lines.push("Your ONE conflicted file is named in the JSON document at this PATH: "
     + childInputPath(entry.slug) + ". The controller wrote it there from its own "
-    + "`git status --porcelain` UU enumeration before this dispatch. Read it by path. "
+    + "unmerged-path enumeration before this dispatch. Read it by path. "
     + "Resolve THAT file and nothing else: the repository is mid-rebase, your siblings "
     + "own the other conflicted paths, and the controller refuses the phase if any new "
     + "file appears or if your file is still unmerged when you return.");
