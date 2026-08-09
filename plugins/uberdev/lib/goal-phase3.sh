@@ -94,8 +94,12 @@ trap '_goal_phase3_on_exit "$?"' EXIT
 goal_start_iso="$(date -u -r "$watch_start" +%FT%TZ 2>/dev/null \
   || date -u -d "@$watch_start" +%FT%TZ)"
 
-# In-process gh query — mirror discover.sh:152-183 mktemp/EXIT-trap stderr
-# isolation pattern (no shell-piped --template, never an external jq pipe).
+# In-process gh query — mirror discover.sh's mktemp stderr-isolation pattern
+# (no shell-piped --template, never an external jq pipe). That library releases
+# its capture file with an explicit `rm -f` on every return path and installs no
+# trap at all: `RETURN` is an undefined signal in zsh, so the trap it used to
+# carry never installed (#401), and `EXIT` is unavailable to a SOURCED library
+# for the reason spelled out immediately below.
 #
 # #301 — $findings_err is created HERE and removed by the single process-wide
 # EXIT handler registered above (_goal_phase3_on_exit). In the fence era each

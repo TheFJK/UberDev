@@ -100,17 +100,47 @@ Ensure compliance with the project's error handling requirements:
 - Never use empty catch blocks
 - Handle errors explicitly, never suppress them
 
-## Your Output Format
+## Result file output contract
 
-For each issue you find, provide:
+Your findings go into the result file the dispatching prompt names. Its
+serialization is declared **once**, in `shared/phase1-reviewer-output-v1.md`
+(contract id `phase1-reviewer-v1`) — the dispatching prompt gives you its
+absolute path. Read that file and follow it exactly. It OVERRIDES every
+response-formatting instruction above, and this section deliberately restates
+none of its schema — a second copy would drift from the validator without
+anybody noticing.
 
-1. **Location**: File path and line number(s)
-2. **Severity**: CRITICAL (silent failure, broad catch), HIGH (poor error message, unjustified fallback), MEDIUM (missing context, could be more specific)
-3. **Issue Description**: What's wrong and why it's problematic
-4. **Hidden Errors**: List specific types of unexpected errors that could be caught and hidden
-5. **User Impact**: How this affects the user experience and debugging
-6. **Recommendation**: Specific code changes needed to fix the issue
-7. **Example**: Show what the corrected code should look like
+Two rules decide whether the whole wave counts, so they are repeated here:
+
+- **Whole file.** The entire contents of the result file must be exactly one
+  fenced YAML document — a triple-backtick fence tagged `yaml` — with no
+  heading, prose or blank-line preamble before the opening fence and nothing
+  whatsoever after the closing fence. The boundary is a full-file match, not a
+  search for the last fenced block of a reply.
+- **Two severities.** `severity` is `blocker` or `suggestion`. No other
+  vocabulary is accepted.
+
+Map your native error-handling severity into that pair, and keep the original
+label as the `detail:` prefix so nothing is lost:
+
+- a silent failure or a broad catch that swallows errors → `severity: blocker`,
+  `detail: "CRITICAL — …"`
+- a poor error message or an unjustified fallback → `severity: suggestion`,
+  `detail: "HIGH — …"`
+- missing context that could be more specific → `severity: suggestion`,
+  `detail: "MEDIUM — …"`
+
+Put the rest of your analysis in that same `detail:` field, in your own words
+and on one physical line: the hidden error types, the user and debugging
+impact, and the concrete change you recommend. Do not paste corrected code —
+describe it (see the secret-leak rule below).
+
+`location` is a `path:line` that appears in the reviewed diff; an out-of-scope
+location rejects the whole result, not just that finding. One or more blocker
+findings require `verdict: REVISIONS_REQUIRED` or `REJECT`; zero blockers
+require `verdict: APPROVE`, including a review that found only suggestions.
+Zero findings is `findings: []` with `verdict: APPROVE` — valid, and never
+padded to look thorough.
 
 ## Your Tone
 

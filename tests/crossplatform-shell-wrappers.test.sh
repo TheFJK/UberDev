@@ -376,6 +376,59 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# ONE corpus enumeration and ONE file predicate, shared by the two zsh
+# runtime-class guards below (tied parameters, and `trap … RETURN`). Extracted
+# when the second consumer arrived (#401): a hand-rolled second copy would be
+# the "one contract, N uncompared copies" drift (#370/#371) that this file's own
+# header is about, in the file that is about it.
+#
+# DECLARED BOUNDARY: the zsh-MODIFIER guard above keeps its own, narrower `find`
+# (plugins only, extension-only). Folding it in here would silently widen an
+# unrelated guard's corpus — a behaviour change, and its own issue.
+#
+# The enumeration was widened five times (plugins/lib → +commands/skills/agents/
+# hooks → +tests/tools); each widening found live hits, so it is deliberately
+# `-type f` over whole directories with the shape decision made by the predicate.
+_xshell_corpus() {
+  find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
+       "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
+       "$REPO_ROOT/plugins/uberdev/hooks" \
+       "$REPO_ROOT/tests" "$REPO_ROOT/tools" \
+       -type f 2>/dev/null | sort
+}
+
+# THE FILE PREDICATE, and the fifth widening it encodes. It used to be
+# `-name '*.sh' -o -name '*.md'`, and NONE of the shipped hooks carry an
+# extension — `session-start`, `session-end`, `pre-compact`,
+# `inject-brainstorm-answers`, plus `lib/rl-curl` — so all of them were listed
+# as scanned and none of them ever were. Behind that gap sat
+# `is_safe_path() { local root="$1" path="$2"; ... }` in
+# inject-brainstorm-answers, the hook's symlink/traversal check.
+#
+# Both shipped wirings reach that hook through bash (hooks.json goes via
+# `run-hook.cmd`, whose Unix arm is `exec bash`; hooks-cursor.json execs the file
+# so its `#!/usr/bin/env bash` shebang governs), so it was NOT broken in
+# production. What made it worth calling out is the direction of the failure:
+# `canonicalize` shells out to python3/realpath, so with `$PATH` emptied by the
+# tied `path` the check cannot resolve anything and refuses EVERY path,
+# including legitimate ones (verified live: the pre-rename body accepts under
+# bash and refuses under zsh). A security check that fails closed is the good
+# direction; a security check that has silently never been scanned is not.
+#
+# So the predicate is "names it like a shell file, OR says it is one" — matched
+# on the BASENAME, because the repo's own worktree paths contain dots
+# (`.claude/worktrees/...`) and a full-path `*.*` test would skip nearly
+# everything.
+_xshell_is_shell_surface() {
+  case "${1##*/}" in
+    *.sh|*.md) return 0 ;;
+    *.*)       return 1 ;;
+    *) head -n 1 "$1" 2>/dev/null \
+         | grep -qE '^#!.*[/ ](ba|z|k|a|da)?sh([[:space:]]|$)' ;;
+  esac
+}
+
 echo
 echo "== zsh tied parameters: a \`local path\`/\`local … status\` breaks the fence =="
 
@@ -466,37 +519,11 @@ ZSH_TIED_ALLOW="#[^#]*$ZSH_TIED_MARKER"
 ZSH_TIED_HITS=""
 ZSH_TIED_MARKED=""
 while IFS= read -r zsh_tied_file; do
-  # THE FILE FILTER WAS ALSO NARROWER THAN THE CLASS, a fifth time, and this one
-  # hid a PRODUCTION file rather than a test helper. `hooks/` has been in the
-  # corpus all along, but the predicate was `-name '*.sh' -o -name '*.md'` and
-  # NONE of the shipped hooks carry an extension — `session-start`,
-  # `session-end`, `pre-compact`, `inject-brainstorm-answers`, plus
-  # `lib/rl-curl`, were all listed as scanned and none of them ever were.
-  # Behind that gap sat `is_safe_path() { local root="$1" path="$2"; ... }` in
-  # inject-brainstorm-answers, the hook's symlink/traversal check.
-  #
-  # Both shipped wirings reach it through bash — hooks.json goes via
-  # `run-hook.cmd`, whose Unix arm is `exec bash`, and hooks-cursor.json execs
-  # the file so its `#!/usr/bin/env bash` shebang governs — so it was NOT broken
-  # in production, and this is the same insurance tier as the rest. What makes
-  # it worth calling out is the direction of the failure: `canonicalize` shells
-  # out to python3/realpath, so with `$PATH` emptied the check cannot resolve
-  # anything and refuses EVERY path, including legitimate ones (verified live:
-  # the pre-rename body accepts under bash and refuses under zsh). A security
-  # check that fails closed is the good direction; a security check that has
-  # silently never been scanned is not.
-  #
-  # So the predicate is now "names it like a shell file, OR says it is one" —
-  # matched on the BASENAME, because the repo's own worktree paths contain dots
-  # (`.claude/worktrees/...`) and a full-path `*.*` test would skip nearly
-  # everything.
-  zsh_tied_base="${zsh_tied_file##*/}"
-  case "$zsh_tied_base" in
-    *.sh|*.md) ;;
-    *.*) continue ;;
-    *) head -n 1 "$zsh_tied_file" 2>/dev/null \
-         | grep -qE '^#!.*[/ ](ba|z|k|a|da)?sh([[:space:]]|$)' || continue ;;
-  esac
+  # THE FILE FILTER WAS ALSO NARROWER THAN THE CLASS, a fifth time, and it hid a
+  # PRODUCTION file rather than a test helper — see `_xshell_is_shell_surface`
+  # above, which now owns that predicate for this guard and for the
+  # `trap … RETURN` guard below it.
+  _xshell_is_shell_surface "$zsh_tied_file" || continue
   zsh_tied_rel="${zsh_tied_file#"$REPO_ROOT"/}"
   # Numbered BEFORE either filter, so a reported number is the line's real one.
   # The pre-widening form stripped comments first and reported post-strip
@@ -534,11 +561,7 @@ EOF_ZSH_TIED_HIT
 $zsh_tied_mark
 EOF_ZSH_TIED_MARK
 done <<EOF_ZSH_TIED
-$(find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
-       "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
-       "$REPO_ROOT/plugins/uberdev/hooks" \
-       "$REPO_ROOT/tests" "$REPO_ROOT/tools" \
-       -type f 2>/dev/null | sort)
+$(_xshell_corpus)
 EOF_ZSH_TIED
 if [ -z "$ZSH_TIED_HITS" ]; then
   echo "  PASS  no plugin, test or tool shell surface declares a local named after a zsh tied/special parameter"
@@ -722,7 +745,293 @@ else
     echo "  FAIL  a review-fleet writer failed under zsh (rc=$ZSH_WRITER_RC): $ZSH_WRITER_RESULT"
     FAIL=$((FAIL + 1))
   fi
+
+  # Z2 — NEGATIVE CONTROL, the #398 bashism's mechanism, live and first.
+  # `mapfile` is a bash builtin with no zsh equivalent, and the Step-4 conflict
+  # re-bind in commands/review-pr.md used it inside a markdown `bash` fence —
+  # which the harness executes under /bin/zsh. Nothing consumed its rc, so the
+  # array it was supposed to fill stayed EMPTY and the very next statement
+  # (`[ "${#conflicted_files[@]}" -gt 0 ]`) read a missing builtin as "no
+  # conflicts to resolve". Fed from a HERESTRING, never a pipe:
+  # tests/epipe-guard.test.sh refuses a pipe into an early-exiting reader.
+  # `slurp_rc=$?` on its own line, not `"rc=$?:count=…"` inline: zsh reads the
+  # `:c` in `$?:count` as a history-style `:c` modifier and swallows it, so the
+  # inline spelling renders `rc=127ount=0`.
+  ZSH_SLURP="$(zsh -f -c '
+    mapfile -t zsh_slurp_probe <<< "one" 2>/dev/null
+    slurp_rc=$?
+    print -r -- "rc=${slurp_rc}:count=${#zsh_slurp_probe[@]}"' 2>/dev/null)"
+  if [ "$ZSH_SLURP" = "rc=127:count=0" ]; then
+    echo "  PASS  live zsh: bash's array-slurp builtin is absent and leaves an EMPTY array behind"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh array-slurp behaviour drifted: probe said '$ZSH_SLURP' (want rc=127:count=0)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Z1 — and the replacement really works in that same shell. The enumerator is
+  # driven under `zsh -c` against a real add/add rebase conflict (the shape the
+  # retired `^UU` filter could not see), and its payload must be byte-identical
+  # to what bash produces for the same repository. SKIPs rather than FAILs
+  # without git/python3: this suite also runs on the windows job.
+  if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "  SKIP  live zsh conflict-enumerator proof (git or python3 not on PATH)"
+  else
+    ZSH_AA_REPO="$ZSH_ARGS_TMP/aa/repo"
+    mkdir -p "$ZSH_ARGS_TMP/aa"
+    (
+      set -e
+      cd "$ZSH_ARGS_TMP/aa"
+      git init -q -b main repo
+      cd repo
+      git config user.email fixture@example.invalid
+      git config user.name Fixture
+      mkdir src
+      printf 'KEEP = 1\n' >src/keep.py
+      git add -- src/keep.py
+      git commit -qm 'test: base'
+      printf "COLLIDE = 'main'\n" >src/collide.py
+      git add -- src/collide.py
+      git commit -qm 'test: main adds the colliding path'
+      git checkout -qb fix/398-collide HEAD~1
+      printf "COLLIDE = 'branch'\n" >src/collide.py
+      git add -- src/collide.py
+      git commit -qm 'test: the branch adds it too'
+      git rebase main
+    ) >/dev/null 2>&1 || true    # the fixture rebase MUST conflict
+    ZSH_AA_PORCELAIN="$(git -C "$ZSH_AA_REPO" status --porcelain 2>/dev/null)"
+    case "$ZSH_AA_PORCELAIN" in
+      *'AA '*) ZSH_AA_GATE=ok ;;
+      *) ZSH_AA_GATE=no-aa ;;
+    esac
+    case "$ZSH_AA_PORCELAIN" in
+      *'UU '*) ZSH_AA_GATE=stray-uu ;;
+    esac
+    if [ "$ZSH_AA_GATE" != ok ]; then
+      echo "  FAIL  the add/add fixture did not conflict as AA ($ZSH_AA_GATE); the row below would be vacuous"
+      FAIL=$((FAIL + 1))
+    else
+      ZSH_CONTRACT="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
+      ZSH_ENUM_RC=0
+      zsh -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+        _ "$ZSH_ARGS_LIB" "$ZSH_AA_REPO" "$ZSH_CONTRACT" "$ZSH_ARGS_TMP/zsh.zlist" \
+        >/dev/null 2>&1 || ZSH_ENUM_RC=$?
+      ZSH_ENUM_BASH_RC=0
+      bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+        _ "$ZSH_ARGS_LIB" "$ZSH_AA_REPO" "$ZSH_CONTRACT" "$ZSH_ARGS_TMP/bash.zlist" \
+        >/dev/null 2>&1 || ZSH_ENUM_BASH_RC=$?
+      if [ "$ZSH_ENUM_RC" = 0 ] && [ "$ZSH_ENUM_BASH_RC" = 0 ] \
+         && [ -s "$ZSH_ARGS_TMP/zsh.zlist" ] \
+         && cmp -s "$ZSH_ARGS_TMP/zsh.zlist" "$ZSH_ARGS_TMP/bash.zlist"; then
+        echo "  PASS  live zsh: review_fleet_unmerged_paths enumerates the AA conflict identically to bash"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  conflict enumerator under zsh rc=$ZSH_ENUM_RC (bash rc=$ZSH_ENUM_BASH_RC) — payloads differ or empty"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
+  fi
   rm -rf "$ZSH_ARGS_TMP"
+fi
+
+echo
+echo "== zsh trap RETURN: a function-scoped cleanup trap never installs (#401) =="
+
+# THE CLASS, same family as the tied parameters above and the same reason it was
+# invisible: `RETURN` is not a signal zsh accepts. `trap "rm -f \"$f\"" RETURN`
+# is a hard `undefined signal: RETURN` error under zsh, so the trap NEVER
+# INSTALLS — and under bash it is a perfectly ordinary, correct idiom. A file
+# whose cleanup depends on it is clean in every bash-run test and leaks on every
+# call in the shell the harness actually executes command/skill `bash` fences in.
+#
+# It shipped for real. lib/rate-limit-curl.sh documents the hazard three separate
+# times and releases its mutex explicitly at every return — while
+# merge-pipeline/lib/discover.sh, in the same plugin, guarded all three of its
+# public functions with the dead trap. Every `/merge` run printed three
+# `undefined signal: RETURN` lines and leaked three temp files, and under
+# errexit the trap line aborted discovery outright. Four files carried the rule
+# in PROSE and none of them could enforce it; that is what this block is.
+#
+# `docs/` stays out of the corpus on purpose: this is a code-surface class, and
+# an RFC may legitimately name the construct while explaining it.
+#
+# ONE detector, five consumers — the corpus scan, the dead-marker row, the
+# anti-vacuity row, the anti-false-positive row, and the live proof — so no row
+# can end up proving something about a detector that is not the one shipping.
+#
+# STATEMENT-ANCHORED (`^[[:space:]]*trap[[:space:]]`) is what makes it land
+# green on a repo that talks about the construct constantly: it skips the
+# `assert_grep "$LIB" 'trap…RETURN'` shape, the `echo "… (trap RETURN
+# regression)"` message in testers-rate-limit-wrapper.test.sh, and every prose
+# mention that is not a trap STATEMENT.
+#
+# `[^#]*`, not `.*`, for the span before RETURN — only WHOLE-LINE comments are
+# stripped below, so an unbounded span would manufacture a false positive out of
+# a trailing comment (`trap "rm -f \"$t\"" EXIT  # not RETURN` must stay clean).
+# Same reasoning, same shape, as ZSH_TIED_DECL above.
+ZSH_TRAP_RETURN_DETECT='^[[:space:]]*trap[[:space:]][^#]*[[:space:]]RETURN([[:space:]]|;|\)|$)'
+# Marker and matcher are separate variables for the same reason as the tied
+# guard's: the matcher needs a literal `#`, so interpolating the marker keeps
+# these two definitions from registering as markers themselves.
+ZSH_TRAP_RETURN_MARKER='zsh-trap-return-fixture'
+ZSH_TRAP_RETURN_ALLOW="#[^#]*$ZSH_TRAP_RETURN_MARKER"
+ZSH_TRAP_RETURN_HITS=""
+ZSH_TRAP_RETURN_MARKED=""
+while IFS= read -r ztr_file; do
+  _xshell_is_shell_surface "$ztr_file" || continue
+  ztr_rel="${ztr_file#"$REPO_ROOT"/}"
+  ztr_hit="$(grep -nE "$ZSH_TRAP_RETURN_DETECT" "$ztr_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -vE "$ZSH_TRAP_RETURN_ALLOW" \
+    || true)"
+  # EVERY line carries the path, not just the first — the two rows below parse
+  # these entries back apart on `:`.
+  while IFS= read -r ztr_line; do
+    [ -n "$ztr_line" ] || continue
+    ZSH_TRAP_RETURN_HITS="$ZSH_TRAP_RETURN_HITS${ZSH_TRAP_RETURN_HITS:+
+}$ztr_rel:$ztr_line"
+  done <<EOF_ZTR_HIT
+$ztr_hit
+EOF_ZTR_HIT
+  ztr_mark="$(grep -nE "$ZSH_TRAP_RETURN_ALLOW" "$ztr_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    || true)"
+  while IFS= read -r ztr_line; do
+    [ -n "$ztr_line" ] || continue
+    ZSH_TRAP_RETURN_MARKED="$ZSH_TRAP_RETURN_MARKED${ZSH_TRAP_RETURN_MARKED:+
+}$ztr_rel:$ztr_line"
+  done <<EOF_ZTR_MARK
+$ztr_mark
+EOF_ZTR_MARK
+done <<EOF_ZTR
+$(_xshell_corpus)
+EOF_ZTR
+if [ -z "$ZSH_TRAP_RETURN_HITS" ]; then
+  echo "  PASS  no plugin, test or tool shell surface installs a \`trap … RETURN\`"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a \`trap … RETURN\` never installs under zsh — release explicitly on every return path"
+  printf '        %s\n' "$ZSH_TRAP_RETURN_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# The allow-list must not be able to hide anything: a marker on a line the
+# detector would NOT have caught is decoration or a fishing attempt, and either
+# way it makes the exemption unreviewable.
+ZSH_TRAP_RETURN_DEAD_MARKERS=""
+while IFS= read -r ztr_entry; do
+  [ -n "$ztr_entry" ] || continue
+  ztr_body="${ztr_entry#*:}"
+  ztr_body="${ztr_body#*:}"
+  printf '%s\n' "$ztr_body" | grep -qE "$ZSH_TRAP_RETURN_DETECT" && continue
+  ZSH_TRAP_RETURN_DEAD_MARKERS="$ZSH_TRAP_RETURN_DEAD_MARKERS${ZSH_TRAP_RETURN_DEAD_MARKERS:+
+}$ztr_entry"
+done <<EOF_ZTR_DEAD
+$ZSH_TRAP_RETURN_MARKED
+EOF_ZTR_DEAD
+if [ -z "$ZSH_TRAP_RETURN_DEAD_MARKERS" ]; then
+  echo "  PASS  every $ZSH_TRAP_RETURN_MARKER marker sits on a trap statement the detector really catches"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a $ZSH_TRAP_RETURN_MARKER marker exempts a line the detector would not have flagged"
+  printf '        %s\n' "$ZSH_TRAP_RETURN_DEAD_MARKERS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must not grow silently. Both directions red: growth means a new
+# exemption slipped in unreviewed, shrinkage means a deliberately-broken fixture
+# got "consistency-fixed" and the anti-vacuity row stopped proving anything.
+ZSH_TRAP_RETURN_INVENTORY="$(printf '%s\n' "$ZSH_TRAP_RETURN_MARKED" \
+  | grep -v '^$' \
+  | sed 's/:[0-9][0-9]*:.*$//' \
+  | sort | uniq -c \
+  | sed 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]][[:space:]]*\(.*\)$/\2 \1/')"
+ZSH_TRAP_RETURN_INVENTORY_EXPECTED='tests/crossplatform-shell-wrappers.test.sh 2'
+if [ "$ZSH_TRAP_RETURN_INVENTORY" = "$ZSH_TRAP_RETURN_INVENTORY_EXPECTED" ]; then
+  echo "  PASS  the trap-RETURN allow-list is exactly the pinned fixture inventory"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the trap-RETURN allow-list drifted from its pinned inventory"
+  printf '        expected: %s\n' "$ZSH_TRAP_RETURN_INVENTORY_EXPECTED"
+  printf '        actual:   %s\n' "$ZSH_TRAP_RETURN_INVENTORY"
+  FAIL=$((FAIL + 1))
+fi
+
+# Anti-vacuity. The first line is the exact byte sequence that shipped in
+# lib/discover.sh; the second is the unquoted form, because a detector that only
+# knew the quoted one would miss the next author. Both carry the marker — the
+# corpus scan above reads THIS file — which is what pins the inventory at 2, and
+# the dead-marker row re-checks each of them from the other side.
+ZSH_TRAP_RETURN_GAPS=""
+while IFS= read -r ztr_bad; do
+  [ -n "$ztr_bad" ] || continue
+  printf '%s\n' "$ztr_bad" | grep -qE "$ZSH_TRAP_RETURN_DETECT" \
+    || ZSH_TRAP_RETURN_GAPS="$ZSH_TRAP_RETURN_GAPS${ZSH_TRAP_RETURN_GAPS:+
+}$ztr_bad"
+done <<'EOF_ZTR_BAD'
+  trap "rm -f \"$gh_err\"" RETURN  # zsh-trap-return-fixture: anti-vacuity row
+  trap cleanup RETURN  # zsh-trap-return-fixture: anti-vacuity row
+EOF_ZTR_BAD
+if [ -z "$ZSH_TRAP_RETURN_GAPS" ]; then
+  echo "  PASS  the detector reds on the exact shape that shipped, quoted and unquoted"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector does not match the shape it exists to find (vacuous)"
+  printf '        %s\n' "$ZSH_TRAP_RETURN_GAPS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must NOT punish anything legitimate, or the corpus could never go
+# green. Traps of real signals, trap RESET, multi-signal traps, a trailing
+# comment that merely says RETURN, and the two shapes this repo uses to TALK
+# about the bug — a grep assertion and an error message — all stay clean.
+ZSH_TRAP_RETURN_FALSE_POSITIVES=""
+while IFS= read -r ztr_clean; do
+  [ -n "$ztr_clean" ] || continue
+  ! printf '%s\n' "$ztr_clean" | grep -qE "$ZSH_TRAP_RETURN_DETECT" \
+    || ZSH_TRAP_RETURN_FALSE_POSITIVES="$ZSH_TRAP_RETURN_FALSE_POSITIVES${ZSH_TRAP_RETURN_FALSE_POSITIVES:+
+}$ztr_clean"
+done <<'EOF_ZTR_CLEAN'
+trap '_goal_phase3_on_exit "$?"' EXIT
+  trap - EXIT
+  trap 'x' INT TERM
+  trap 'rm -f "$x"' EXIT INT TERM
+  trap "rm -f \"$t\"" EXIT  # not RETURN
+  [ ! -d "$D/.lock" ] || { echo "mutex leaked under zsh (trap RETURN regression)"; exit 1; }
+assert_grep "$LIB" 'trap[[:space:]]+.*RETURN' \
+EOF_ZTR_CLEAN
+if [ -z "$ZSH_TRAP_RETURN_FALSE_POSITIVES" ]; then
+  echo "  PASS  the detector ignores real-signal traps and every prose mention of the bug"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector reds on a legitimate line — the corpus could never go green"
+  printf '        %s\n' "$ZSH_TRAP_RETURN_FALSE_POSITIVES"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and the MECHANISM, live, in BOTH shells. The bash twin is not decoration:
+# it is the demonstration of why every bash-run test in this repo was blind to
+# the class. Written as single-line `zsh -c`/`bash -c` probes so the embedded
+# `trap` is never line-initial and therefore never trips the scan above.
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  SKIP  live trap-RETURN mechanism proof (zsh not on PATH — the Windows shape-check job)"
+else
+  ZTR_TMP="$(mktemp -d)"
+  ZTR_ZSH_DEAD="$(ZTR_TMP="$ZTR_TMP" zsh -c 'f() { : > "$ZTR_TMP/z"; trap "rm -f \"$ZTR_TMP/z\"" RETURN; }; f; [ -e "$ZTR_TMP/z" ] && print -r -- LEAKED || print -r -- CLEAN' 2>&1)"
+  ZTR_ZSH_FIXED="$(ZTR_TMP="$ZTR_TMP" zsh -c 'f() { : > "$ZTR_TMP/zf"; rm -f "$ZTR_TMP/zf"; }; f; [ -e "$ZTR_TMP/zf" ] && print -r -- LEAKED || print -r -- CLEAN' 2>&1)"
+  ZTR_BASH_DEAD="$(ZTR_TMP="$ZTR_TMP" bash -c 'f() { : > "$ZTR_TMP/b"; trap "rm -f \"$ZTR_TMP/b\"" RETURN; }; f; [ -e "$ZTR_TMP/b" ] && echo LEAKED || echo CLEAN' 2>&1)"
+  rm -rf "$ZTR_TMP"
+  case "$ZTR_ZSH_DEAD" in
+    *"undefined signal"*LEAKED*) ztr_zsh_dead_ok=1 ;;
+    *) ztr_zsh_dead_ok=0 ;;
+  esac
+  if [ "$ztr_zsh_dead_ok" = 1 ] && [ "$ZTR_ZSH_FIXED" = CLEAN ] && [ "$ZTR_BASH_DEAD" = CLEAN ]; then
+    echo "  PASS  live: zsh rejects RETURN and leaks the file, the explicit release does not — and bash cleans up either way"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  trap-RETURN behaviour drifted: zsh-dead='$ZTR_ZSH_DEAD' zsh-fixed='$ZTR_ZSH_FIXED' bash-dead='$ZTR_BASH_DEAD'"
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 echo

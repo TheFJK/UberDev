@@ -14,7 +14,7 @@ This skill is invoked inline by `commands/goal.md`. It preflights the run, then 
 Every phase of `/goal` used to be a ```bash fence in this file. Two structural facts made that shape unfixable:
 
 1. **Each fence is a separate shell.** The cycle counter, the rollover queue, the candidate array, the EXIT/INT/TERM traps and every accumulated counter died at the fence boundary. The false-converge, the rollover wipe and the dead circuit breakers were all the same bug wearing different clothes — and each was patched individually until the next variable died.
-2. **The Skill renderer substitutes `$ARGUMENTS`' positional tokens into the whole body**, including inside single-quoted `awk` one-liners. `lib/*.sh` is never rendered, so `$1`/`$2`/`$3` are safe there.
+2. **The Skill renderer substitutes `$ARGUMENTS`' positional tokens into the whole body**, including inside single-quoted `awk` one-liners and — per #404 — every shell positional in a `bash` fence, braced or not. `lib/*.sh` is never rendered, so bare positional refs are safe there. This sentence carries no literal dollar-digit token for the same reason.
 
 So the executable body now lives in four shebang'd, independently-testable scripts, and the loop that used to be an instruction to the model is a real loop in a real driver.
 

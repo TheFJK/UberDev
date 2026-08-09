@@ -25,7 +25,7 @@ This is enforced, not requested. After you return, and BEFORE it pushes, the con
 
 - `pr_number`, `run_id`, `check_name` (trusted).
 - `base_branch` — the PR's base ref (e.g., `main`).
-- `pr_head_branch` — the PR's head ref name (e.g., `fix/123-add-thing`). Resolved by the caller via `gh pr view <pr_number> --json headRefName --jq .headRefName`. Distinct from `base_branch` — the lease's safety property requires capturing the head's prior tip, not the base's.
+- `pr_head_branch` — the PR's head ref name (e.g., `fix/123-add-thing`). Resolved by the caller through `lib/review-push-target.sh`'s `review_resolve_same_repo_push_target`, never from a bare `gh pr view --json headRefName`: for a fork PR that name belongs to the contributor's repository, so `origin/<pr_head_branch>` — the lease below, the fetch, and the controller's push — addresses a ref that does not exist or, worse, an unrelated same-named branch in the base repo (#395). The resolver refuses that shape before the lease is captured. Distinct from `base_branch` — the lease's safety property requires capturing the head's prior tip, not the base's.
 - `working_dir` — absolute worktree path.
 
 ## Tools authorised
@@ -72,7 +72,7 @@ the fence-scoped-shell-state class, not a detail.
 2. **Re-check PR liveness:** `gh pr view <pr_number> --json mergedAt,headRefOid`. If `mergedAt != null` → `status: REFUSED`, `rationale: "pr-already-merged"`. If `headRefOid != $LOCAL_HEAD_PRE_REBASE` → `status: REFUSED`, `rationale: "head-moved-since-classify"`. (The controller re-checks `mergedAt` again in its own post-call fence, where an LLM no longer decides whether to proceed.)
 3. **Fetch base:** `git fetch origin "$base_branch"`. The controller already fetched both refs and captured the lease before dispatching you; you need the base only as the rebase target.
 4. **Rebase:** `git rebase "origin/$base_branch"`. On clean rebase → return `REBASED`. On conflict → step 5.
-5. **Conflict handling:** **leave the rebase IN PROGRESS** — do NOT `git rebase --abort`, and do NOT resolve the conflicts yourself. Return `status: CONFLICT` with `conflict_count`. The controller enumerates the conflicted paths from its OWN `git status --porcelain` UU entries and dispatches one `uberdev:conflict-resolver` per file as the `ci-conflicts` stage. Taking that set from your return instead would let the agent whose failure produced the conflict choose which files its successors may touch.
+5. **Conflict handling:** **leave the rebase IN PROGRESS** — do NOT `git rebase --abort`, and do NOT resolve the conflicts yourself. Return `status: CONFLICT` with `conflict_count`. The controller enumerates the conflicted paths from its OWN unmerged-path enumeration (`code_fixer_contract.py list-ci-unmerged-paths`, which covers every porcelain unmerged pair, not just `UU`) and dispatches one `uberdev:conflict-resolver` per file as the `ci-conflicts` stage. Taking that set from your return instead would let the agent whose failure produced the conflict choose which files its successors may touch.
 6. **Stop.** The controller validates your terminal against real git state, stages, continues the rebase and performs the single leased push. On any conflict-resolver returning `AMBIGUOUS` or `REFUSED`, the controller aborts the rebase and halts Phase 3 (bounded by the loop cap).
 
 ## Refusal triggers

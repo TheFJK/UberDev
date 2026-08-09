@@ -4,6 +4,145 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.2] — 2026-08-09
+
+### Fixed
+
+- **`/review-pr` Phase 3 no longer pushes a fork PR's head to the base
+  repository** (#395). Phase 3 bound its push target from a bare `gh pr view
+  --json headRefName,baseRefName` and then fetched, leased and pushed `origin
+  <headRefName>` — but `origin` is the repository the PR was opened *against*,
+  so for a fork PR that branch name belongs to the contributor's repository.
+  The push either fails, or (when the base repo carries a branch of the same
+  name — `main`, `dev`, `release` guarantee exactly that) addresses an
+  unrelated ref. A new `lib/review-push-target.sh` resolver answers "may Phase 3
+  push this PR's head to `origin`" before the fetch and before the lease
+  capture, returning named rcs (78 cross-repository, 79 unidentifiable, 2
+  malformed call) that the fence maps to `ci_push_target_cross_repository` /
+  `ci_push_target_unresolved` audit subreasons. Head identity is read as
+  `headRepositoryOwner.login` + `headRepository.name`, **not**
+  `headRepository.nameWithOwner` — gh declares that last field and never
+  populates it (measured on gh 2.83.1), so a gate keyed on it turns "refuse
+  forks" into "refuse everything".
+
+- **The workflow-harness dry-run budget is a hang detector, not a stopwatch on
+  the runner** (#396). `tests/_workflow_harness.js` hard-coded a 2000 ms budget
+  at every self-test call site. That number is not a property of the code under
+  test — H11 builds its script from `VALID_META` and asserts on the recorders,
+  so it settles in microseconds — which meant a starved `shape-checks-windows`
+  runner reddened H11.1/H11.2/H11.3 on one attempt and passed twenty minutes
+  later with a byte-identical harness. One named, generous, env-overridable
+  budget (`UBERDEV_HARNESS_TIMEOUT_MS`, default 30 s) replaces every per-call-site
+  literal; a malformed override refuses with rc=2 rather than silently falling
+  back to a budget nobody chose. H15 keeps a short budget on purpose (its script
+  never settles), H7/H8's wall-clock probes derive from the shared knob, and a
+  failing self-test row now names its cause on the `FAIL` line.
+
+- **`/merge`'s release-anchor inert-release check no longer misses a rename's
+  source path** (#397). `git diff --name-only` has rename detection on by
+  default and reports a rename as its *destination* alone, so the deleted source
+  never reached step (4)'s path set — and a subset test is only sound over a
+  total set. `git mv src/security_guard.sh CHANGELOG.md` folded into an
+  otherwise-clean version bump therefore reported six surfaces, the permitted
+  shape, and rode the trust gate with an arbitrary deletion attached. All three
+  `git diff` invocations now carry `--no-renames` and a `--` terminator,
+  including the `RELEASE_ANCHOR_MAX_DIFF_LINES` bound (which had been measuring
+  git's rename-collapsed rendering, 36 lines, instead of the real 1044-line
+  walk). Same defect class as #393.
+
+- **`/review-pr` Phase 3's conflict enumerator reads the one unmerged
+  definition** (#398). The CONFLICT-RESOLVE arm's Step-4 re-bind hand-rolled
+  `mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU /')` —
+  two independent defects with one observable, a silently empty array. It never
+  followed #393's widening of `_ci_unmerged_paths` from the two exact bytes `UU`
+  to all seven porcelain unmerged pairs, so an add/add conflict yielded zero
+  conflict-resolver children and a vacuously true "all RESOLVED"; and `mapfile`
+  is a bash builtin, absent under the `/bin/zsh` these fences execute in, with
+  nothing consuming its 127. Non-`-z` porcelain also C-quotes spaced paths, so
+  whitespace-splitting truncated them. The second copy of the vocabulary is
+  deleted rather than widened: `code_fixer_contract.py` grows a NUL-terminated
+  `list-ci-unmerged-paths` transport, `review-fleet-args.sh` grows the missing
+  three-valued producer `review_fleet_unmerged_paths` (0 paths / 1 none /
+  2 probe-failed), and the fence branches on all three rcs, halting under a new
+  `rebase_enumerate_failed` subreason.
+
+- **`merge-pipeline/lib/discover.sh` releases its stderr capture explicitly —
+  `trap … RETURN` is dead under zsh** (#401). All three public functions guarded
+  their `mktemp` capture with `trap "rm -f …" RETURN`. zsh does not accept
+  `RETURN` as a signal and SKILL.md `bash` fences execute under `/bin/zsh`, so
+  the trap never installed: one leaked temp file per call plus `undefined
+  signal: RETURN` on stderr on every discovery, and under `errexit` the trap
+  line aborted the function outright, letting the caller's `|| N=0` normalise a
+  real single-PR fast path to "no PRs". Cleanup is now an explicit `rm -f` on
+  all nine return paths; no trap of any signal survives (`EXIT` is not the
+  alternative — the library is sourced, so it would install on the caller's
+  shell). A5b, which asserted the buggy literal was *present*, is repointed at
+  the real invariant, and a repo-wide `trap … RETURN` guard now runs on both
+  shape-check jobs.
+
+- **`/review-pr` declares its `aggregate` artifact, so `AGG_PATH` is never
+  empty** (#402). `CALLERS["review-pr"]["artifacts"]` declared five artifacts
+  and no `aggregate`, while four downstream copies of that vocabulary were
+  written as if it had one. `uberdev_command_workspace_prepare review-pr`
+  therefore exported `AGG_PATH=""`, the Phase 1 fence handed that empty string
+  to `post_review_write_aggregate_v2`, the writer classified it `unsafe-output`
+  (`os.path.isabs("")` is False) and the fence returned 70 — so no fixer, no
+  Phase 2 and no Phase 2.5 ever ran, on any transport. review-pr now declares
+  `"aggregate": ("post-impl-review-final.md", b"")`, `name_to_global` is
+  promoted verbatim to the module constant `NAME_TO_GLOBAL` so the new
+  declared-vs-consumed subset guard reads the same mapping `main()` uses, and
+  `finish-branch` skips zero-byte `post-impl-review-*.md` reports now that the
+  file exists (empty) from prepare onward.
+
+- **The six Phase 1 reviewers deliver the machine contract instead of five prose
+  ones** (#403). The Phase 1 result boundary is `re.fullmatch` over the whole
+  result file with `severity` restricted to `blocker|suggestion`, but
+  `skills/review-fleet/workflow.js` told each child to write "in your agent
+  file's declared output contract" while the Workflow composer delivered no
+  contract at all, and five of the six agent files declared their own shape
+  (four prose report formats plus an inline-YAML one) with colliding severity
+  vocabularies. Every Phase 1 wave came back BLOCKED and the aggregate was
+  suppressed. The policy fact now has one declaration and two readers:
+  `review_fleet_contract_path` resolves the manifest declaration in shell
+  (re-expressing the routed path's Python safety predicate), `commands/review-pr.md`
+  4w.1 emits `phase1ContractPathAbs`, `workflow.js` gates it with `isSafeAbsPath`
+  *before* the nonce gate and renders it into all six prompts, and the five agent
+  files now point at `shared/phase1-reviewer-output-v1.md`. Fixing it exposed a
+  second defect: `! cmd` is exempt from `set -e`, so the entire reject corpus in
+  `tests/child-wait.test.sh` was vacuous — a `re.fullmatch` → `re.search`
+  mutation left the suite green.
+
+- **Rendered command fences bind their positionals at call time, not at render
+  time** (#404). The slash-command renderer substitutes `$ARGUMENTS`' positional
+  tokens into the *entire* rendered body, not only into single-quoted awk script
+  bodies (#222's half), so every shell positional in every `bash` fence of a
+  rendered command or skill is rewritten at load time: a helper written as
+  `local repository_root="$1"` is hard-wired to whatever the caller's first
+  argument happened to be. `/uberdev:review-pr 647 --no-simplify` rendered that
+  line as `local repository_root="--no-simplify"` and died at the third
+  executable step of setup — before RUN_ID reservation, before Phase 1, before
+  any reviewer dispatch — so the command could not run at all with a non-empty
+  argument. Braces are not an escape (`${N}` is replaced when positional N
+  exists and merely brace-stripped back when it does not). All 64 sites across
+  9 templated files are re-spelled `${@:N:1}`, which has no
+  dollar-immediately-followed-by-digit substring; 37 helpers gain
+  `[ "$#" -ge N ] || return 2` since a slice yields empty under `set -u` where a
+  bare `$N` would abort. One of those was a live fail-open, not hardening:
+  `abort_if_secret` ends `[[ "$scan_rc" -eq 0 ]] && return 0`, and
+  `[[ "" -eq 0 ]]` is true — a missing third argument reported "no secret found".
+
+### Changed
+
+- **The shell ratchets widened so these classes cannot return** (#401, #404).
+  `BASH_GUARD_REGEX` goes from `\$[0-9]` to `\$\{?[0-9]`, so a `$N` → `${N}`
+  non-fix can never be certified clean; R4 is re-scoped from
+  `orchestrator/SKILL.md` alone to the whole templated corpus (every
+  `skills/**/SKILL.md` ∪ every `commands/*.md`) with an anti-vacuity arm that
+  keeps a broken `find` from reporting a green ratchet over zero files. The
+  tied-parameter guard's corpus enumeration and file predicate are extracted
+  into `_xshell_corpus` / `_xshell_is_shell_surface` and shared with the new
+  `trap … RETURN` guard.
+
 ## [0.44.1] — 2026-08-07
 
 ### Fixed

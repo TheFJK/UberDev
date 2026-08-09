@@ -217,6 +217,17 @@ if [ -n "$REVIEW_FILES" ]; then
     # skipped. The read-loop is word-split-independent (identical under bash/zsh).
     while IFS= read -r f; do
       [ -f "$f" ] || continue
+      # A zero-byte report is workspace pre-allocation, never a review result:
+      # command-workspace.py CALLERS["review-pr"] allocates the Phase 1
+      # aggregate (post-impl-review-final.md) with empty initial bytes at
+      # prepare time, so a run that never reached Phase 1 — or whose Phase 1
+      # suppressed its aggregate — leaves an empty file on this glob path.
+      # Empty bytes are rejected by the review-pr digest gate anyway
+      # (code_fixer_contract.py digest --minimum 1, review-pr.md:1757/:1839),
+      # so omitting the file loses no findings, whereas the strict validator
+      # below would abort the entire PR body over it. NON-empty invalid bytes
+      # still exit 1 below — this skip is zero-byte-only.
+      [ -s "$f" ] || continue
       echo "### $(basename "$f")"
       case "$(basename "$f")" in
         post-impl-review-*.md)
@@ -339,9 +350,10 @@ source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"
 # and preserves worktree. Captures stderr into $SCAN_DIAG so the abort message
 # names the offending pattern.
 abort_if_secret() {
-  local label="$1"
-  local scan_diag="$2"
-  local scan_rc="$3"
+  local label="${@:1:1}"
+  local scan_diag="${@:2:1}"
+  local scan_rc="${@:3:1}"
+  [ "$#" -ge 3 ] || return 2
   [[ "$scan_rc" -eq 0 ]] && return 0
   # The library rc is TRI-STATE and the two non-zero cases need opposite
   # advice: rc 1 is a detected secret (offer the escape hatch); rc>=2 means the

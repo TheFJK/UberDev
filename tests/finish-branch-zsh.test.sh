@@ -283,6 +283,81 @@ else
   fail "F6: secret-scan misbehaves under zsh:$F6_FAILURES (got: $(tr '\n' ' ' <<<"$F6_OUT"))"
 fi
 
+# --------------------------------------------------------------------------
+# FBZ-1 / FBZ-2 (#402) — the composer must distinguish "no findings yet" from
+# "corrupt findings".
+#
+# command-workspace.py CALLERS["review-pr"] pre-allocates every declared
+# artifact with its initial bytes at prepare time, and the Phase 1 aggregate's
+# initial bytes are EMPTY. So a run that prepares its workspace and then stops
+# before Phase 1 writes (or whose Phase 1 suppressed the aggregate and left the
+# pre-allocated file behind) leaves a ZERO-BYTE post-impl-review-final.md on the
+# glob path this composer walks. Zero bytes can never be a canonical v2
+# aggregate, so the strict validator below exits 2 and the composer hard-aborts
+# the whole PR-body composition — a workspace pre-allocation detail killing an
+# otherwise-fine `gh pr create`.
+#
+# Contract: a zero-byte report is SKIPPED (it carries no findings, so omitting
+# it loses nothing); NON-EMPTY bytes that fail validation still hard-fail, so
+# the relaxation cannot be widened into "swallow corrupt aggregates".
+#
+# Mutation guard: delete the `[ -s "$f" ] || continue` guard from SKILL.md
+# => FBZ-1 RED (rc 1 + "invalid canonical Phase 1 review aggregate"). Relax it
+# to skip on validator failure instead => FBZ-2 RED (rc 0, no error).
+# --------------------------------------------------------------------------
+echo
+echo "== FBZ-1: a zero-byte Phase 1 aggregate is skipped, not fatal =="
+SEED_DIR_EMPTY="$WORK/seed-empty"
+mkdir -p "$SEED_DIR_EMPTY"
+: > "$SEED_DIR_EMPTY/post-impl-review-final.md"
+cp "$SEED_DIR/pr-test-analyzer.md" "$SEED_DIR_EMPTY/pr-test-analyzer.md"
+REVIEW_FILES_EMPTY="$(ls -t "$SEED_DIR_EMPTY"/post-impl-review-*.md "$SEED_DIR_EMPTY"/pr-test-analyzer.md 2>/dev/null)"
+EMPTY_RENDERED="$("$ZSH_BIN" -f -c '
+  set -u
+  REVIEW_FILES="'"$REVIEW_FILES_EMPTY"'"
+  '"$(cat "$COMPOSER")"'
+' 2>"$WORK/composer-empty.err")"
+EMPTY_RC=$?
+FBZ1_FAILURES=''
+[ "$EMPTY_RC" -eq 0 ] || FBZ1_FAILURES="$FBZ1_FAILURES rc=$EMPTY_RC(want-0)"
+grep -qF '### pr-test-analyzer.md' <<<"$EMPTY_RENDERED" \
+  || FBZ1_FAILURES="$FBZ1_FAILURES legacy-report-not-rendered"
+grep -qF '### post-impl-review-final.md' <<<"$EMPTY_RENDERED" \
+  && FBZ1_FAILURES="$FBZ1_FAILURES zero-byte-aggregate-rendered-a-header"
+grep -qF 'ERROR: invalid canonical Phase 1 review aggregate' <"$WORK/composer-empty.err" \
+  && FBZ1_FAILURES="$FBZ1_FAILURES zero-byte-aggregate-hard-failed"
+if [ -z "$FBZ1_FAILURES" ]; then
+  pass "FBZ-1: zero-byte post-impl-review-*.md is skipped; the rest of the body still composes"
+else
+  fail "FBZ-1: zero-byte aggregate mishandled:$FBZ1_FAILURES"
+  printf '        rendered=[%s]\n' "$(printf '%s' "$EMPTY_RENDERED" | tr '\n' '|')"
+  printf '        stderr=[%s]\n' "$(tr '\n' '|' < "$WORK/composer-empty.err")"
+fi
+
+echo
+echo "== FBZ-2: a NON-EMPTY invalid Phase 1 aggregate still hard-fails =="
+SEED_DIR_BAD="$WORK/seed-bad"
+mkdir -p "$SEED_DIR_BAD"
+printf '%s\n' 'not-an-aggregate' > "$SEED_DIR_BAD/post-impl-review-final.md"
+REVIEW_FILES_BAD="$(ls -t "$SEED_DIR_BAD"/post-impl-review-*.md 2>/dev/null)"
+BAD_RENDERED="$("$ZSH_BIN" -f -c '
+  set -u
+  REVIEW_FILES="'"$REVIEW_FILES_BAD"'"
+  '"$(cat "$COMPOSER")"'
+' 2>"$WORK/composer-bad.err")"
+BAD_RC=$?
+FBZ2_FAILURES=''
+[ "$BAD_RC" -eq 1 ] || FBZ2_FAILURES="$FBZ2_FAILURES rc=$BAD_RC(want-1)"
+grep -qF 'ERROR: invalid canonical Phase 1 review aggregate' <"$WORK/composer-bad.err" \
+  || FBZ2_FAILURES="$FBZ2_FAILURES no-invalid-aggregate-error"
+if [ -z "$FBZ2_FAILURES" ]; then
+  pass "FBZ-2: non-empty invalid aggregate bytes still abort composition (the skip is zero-byte-only)"
+else
+  fail "FBZ-2: corrupt aggregate was not rejected:$FBZ2_FAILURES"
+  printf '        rendered=[%s]\n' "$(printf '%s' "$BAD_RENDERED" | tr '\n' '|')"
+  printf '        stderr=[%s]\n' "$(tr '\n' '|' < "$WORK/composer-bad.err")"
+fi
+
 echo
 echo "== Summary =="
 echo "  launcher: $LAUNCH_SHELL  (composer ran under: $ZSH_BIN)"

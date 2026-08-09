@@ -522,6 +522,28 @@ grep -Fq 'review_fleet_write_ci_state()' "$ARGS_LIB" \
   && pass "G19c the Phase 3 loop counters have an on-disk home" \
   || fail "G19c the Phase 3 loop counters would die with their fence"
 
+# G20 — the Phase 1 reviewer OUTPUT contract crosses the envelope (#403). The
+# script has no filesystem, so a contract nobody hands it is a contract the six
+# children never see; they then improvise a serialization
+# uberdev_child_validate_phase1_review_result's re.fullmatch always rejects.
+fence_has "$REVIEW_CMD" 'stage=review' 'review_fleet_contract_path' \
+  "G20a review-pr.md [stage=review] resolves the reviewer output contract from the policy manifest"
+fence_has "$REVIEW_CMD" 'stage=review' 'phase1ContractPathAbs=' \
+  "G20b review-pr.md [stage=review] emits the resolved contract path in the args envelope"
+grep -Fq 'phase1ContractPathAbs' "$SKILL" \
+  && pass "G20c the review-fleet SKILL.md documents the phase1ContractPathAbs key" \
+  || fail "G20c phase1ContractPathAbs is undocumented — the envelope contract is the SKILL.md table"
+# G20d — the no-copy guard. policy/solve-run-tree-v1.json is the ONE place the
+# relative path is declared; a copy in the command file or the script is a
+# second declaration that drifts silently. This row passes today and must never
+# start failing.
+if grep -Fq 'shared/phase1-reviewer-output-v1' "$REVIEW_CMD" \
+   || grep -Fq 'shared/phase1-reviewer-output-v1' "$WORKFLOW"; then
+  fail "G20d the contract path is re-declared in review-pr.md or workflow.js instead of resolved"
+else
+  pass "G20d neither review-pr.md nor workflow.js re-declares the contract's relative path"
+fi
+
 # ---------------------------------------------------------------------------
 # B — behavioral: run the mint fences the command files actually carry
 # ---------------------------------------------------------------------------
@@ -639,6 +661,28 @@ PY
 }
 
 assert_stage review-stage "$REVIEW_CMD" 'stage=review' review-pr review 6 review-fleet-review.launched
+
+# B[review-contract] — the review stage is the only stage that owns an output
+# contract, so this is a standalone block rather than a parameter on the shared
+# assert_stage helper (which also drives stage=simplify and stage=defer). It
+# runs the REAL fence against the REAL plugin root, so it proves the value the
+# envelope carries is the file the plugin ships — not merely that a key exists.
+B_CONTRACT_OUT="$TMP/b-review-contract"
+mkdir -p "$B_CONTRACT_OUT"
+if B_CONTRACT_RAW="$(run_stage_fence "$REVIEW_CMD" 'stage=review' "$B_CONTRACT_OUT")"; then
+  B_CONTRACT_ENV="$(printf '%s\n' "$B_CONTRACT_RAW" | envelope_of)"
+  B_CONTRACT_VAL="$(printf '%s' "$B_CONTRACT_ENV" | jq -r '.config.phase1ContractPathAbs // ""')"
+  B_CONTRACT_WANT="$REPO_ROOT/plugins/uberdev/$(jq -r '.output_contracts["phase1-reviewer-v1"] // empty' \
+    "$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json")"
+  [ "$B_CONTRACT_VAL" = "$B_CONTRACT_WANT" ] \
+    && pass "B[review-contract] the envelope carries the manifest-resolved contract path" \
+    || fail "B[review-contract] envelope carried '$B_CONTRACT_VAL', manifest resolves to '$B_CONTRACT_WANT'"
+  [ -n "$B_CONTRACT_VAL" ] && [ -f "$B_CONTRACT_VAL" ] \
+    && pass "B[review-contract] the emitted contract path names a file that exists on disk" \
+    || fail "B[review-contract] the emitted contract path is not a readable file: '$B_CONTRACT_VAL'"
+else
+  fail "B[review-contract] the extracted fence did not run: $(head -3 "$B_CONTRACT_OUT/fence.err" 2>/dev/null)"
+fi
 assert_stage lens-stage-simplify-cmd "$SIMPLIFY_CMD" 'stage=simplify' simplify simplify 3 review-fleet-simplify.launched
 assert_stage lens-stage-review-cmd "$REVIEW_CMD" 'stage=simplify' review-pr simplify 3 review-fleet-simplify.launched
 
@@ -764,6 +808,12 @@ stage_args() {
        runDirAbs:"/r/run", startedAtIso:"1970-01-01T00:00:00Z",
        prNumber:1, reviewIteration:1, repoSlug:"o/r",
        diffPathAbs:"/r/run/diff.txt",
+       # The Phase 1 reviewer output contract, resolved by the controller and
+       # carried BY PATH (#403). The root is fake and the script never opens it
+       # — this key exists in the base object rather than per-call `extra` so
+       # every existing assert_stage_runs row stays green once the review arm
+       # fails closed on a missing one.
+       phase1ContractPathAbs:"/p/shared/phase1-reviewer-output-v1.md",
        phase1PathAbs:"/r/run/p1.md", phase2PathAbs:"/r/run/p2.md",
        phase1DispositionPathAbs:"/r/run/d1.json",
        phase2DispositionPathAbs:"/r/run/d2.json",
@@ -833,6 +883,66 @@ assert_stage_runs ci-conflicts ci-conflicts "$W_NONCE1,$W_NONCE2" \
 assert_stage_runs ci-defer ci-defer "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq --arg sha "$W_HEX64_A" \
      '. + {ciAggregatePathAbs:"/r/run/agg.md", ciAggregateSha256:$sha}')" 1
+
+# --- W-CONTRACT: the Phase 1 reviewers must be TOLD the output contract (#403)
+#
+# lib/child-dispatch.sh validates a reviewer result with re.fullmatch over the
+# WHOLE file, and lib/review-aggregate.sh re-parses with the byte-identical
+# regex. A prompt that delegates the serialization to "your agent file's
+# declared output contract" delegates it to five prose sections that regex can
+# never accept, so every Phase 1 wave comes back BLOCKED and the aggregate is
+# suppressed. These rows read the PROMPTS the script actually builds.
+stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}'
+W_CONTRACT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length')" = 6 ]; then
+  pass "W[review-contract-path] all six reviewer prompts carry the contract path"
+else
+  fail "W[review-contract-path] the contract path reaches $(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length') of 6 reviewer prompts"
+fi
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("entire contents of the result file"))] | length')" = 6 ] \
+   && [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("agent file.s declared output contract"))] | length')" = 0 ]; then
+  pass "W[review-contract-wholefile] every reviewer prompt binds the WHOLE result file and delegates to no agent file"
+else
+  fail "W[review-contract-wholefile] a reviewer prompt still delegates the serialization to its agent file"
+fi
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("blocker") and test("suggestion"))] | length')" = 6 ]; then
+  pass "W[review-contract-vocab] every reviewer prompt states the blocker/suggestion severity vocabulary"
+else
+  fail "W[review-contract-vocab] the severity vocabulary the validator accepts is not in every prompt"
+fi
+
+# The gate. A wiring regression must abort BEFORE the nonce gate, so no nonce is
+# burned and no child is dispatched into an unstated contract.
+w_contract_abort() {  # LABEL JQ_MUTATION
+  local label="$1" mutation="$2" out abort prompts labels
+  stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}'
+  jq "$mutation" "$TMP/w-args.json" >"$TMP/w-args-contract.json"
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args-contract.json" 2>&1)"
+  abort="$(printf '%s' "$out" | jq -r '.abortReason')"
+  prompts="$(printf '%s' "$out" | jq -r '.prompts | length')"
+  labels="$(printf '%s' "$out" | jq -r '.labels | length')"
+  if [ "$abort" = bad_contract_path ] && [ "$prompts" = 0 ] && [ "$labels" = 0 ]; then
+    pass "W[$label] aborts bad_contract_path with zero prompts and zero dispatches"
+  else
+    fail "W[$label] abort='$abort' prompts=$prompts labels=$labels (want bad_contract_path/0/0)"
+  fi
+}
+w_contract_abort review-contract-missing 'del(.config.phase1ContractPathAbs)'
+w_contract_abort review-contract-empty '.config.phase1ContractPathAbs = ""'
+w_contract_abort review-contract-relative '.config.phase1ContractPathAbs = "shared/x.md"'
+w_contract_abort review-contract-traversal '.config.phase1ContractPathAbs = "/p/../etc/x"'
+
+# The gate is REVIEW-SCOPED. Hoisting it into commonPreflight() would break
+# /simplify entirely and no other row in this file would notice.
+stage_args simplify "$W_NONCE1,$W_NONCE2,$W_NONCE3" '{}'
+jq 'del(.config.phase1ContractPathAbs)' "$TMP/w-args.json" >"$TMP/w-args-simplify-contract.json"
+W_SIMPLIFY_NC="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args-simplify-contract.json" 2>&1)"
+if [ -z "$(printf '%s' "$W_SIMPLIFY_NC" | jq -r '.abortReason')" ] \
+   && [ "$(printf '%s' "$W_SIMPLIFY_NC" | jq -r '.labels | length')" = 3 ]; then
+  pass "W[simplify-contract-not-required] the lens stage still dispatches 3 without a Phase 1 contract"
+else
+  fail "W[simplify-contract-not-required] the contract gate leaked out of the review arm: $W_SIMPLIFY_NC"
+fi
 
 # --- W-CONFLICT: the two defects the ci-conflicts stage shipped with ---------
 #
@@ -1338,6 +1448,359 @@ else
       fail "E7e an empty authority ledger minted a zero-child conflict wave"
     fi
   fi
+fi
+
+# E8 — the conflict ENUMERATOR (#398). E7 binds the fanout and E2c/E2d lock the
+# writer, but nothing PRODUCED the set: the Step-4 re-bind in
+# commands/review-pr.md inlined `git status --porcelain | awk '/^UU /'` in a
+# markdown fence. Two exact bytes against code_fixer_contract.py's seven-pair
+# membership test, so an add/add rebase conflict was CONFLICT to the judge and
+# the empty set to the enumerator — zero resolvers dispatched, "all RESOLVED"
+# vacuously true, and the arm aborted a mid-rebase it could have finished.
+#
+# Mutation guard (revert the named production fix in your worktree, re-run):
+#   revert the CLI verb to `^UU` only  -> P1, P2 (contract suite), E8a red
+#   revert `read -r -d ''` to bash's array-slurp builtin
+#                                      -> crossplatform-shell-wrappers Z1 red
+#   collapse the rc to two values      -> E8d red
+#   drop the `--` from `git add`       -> review-pr-phase3-ci S13.21 red
+#   leave the prose saying "UU"        -> review-pr-phase3-ci S13.23 red
+# ubuntu's apt zsh is CI's ONLY proxy for the macOS Bash-tool runtime these
+# fences actually execute in — there is no macOS shape-check job.
+E8_TMP="$TMP/engine-unmerged"
+mkdir -p "$E8_TMP"
+# Same recipe as E5's, but an ADD/ADD: BOTH sides create the colliding path, so
+# there is no common ancestor blob and git records `AA`, never `UU`. That is the
+# whole point — a `UU` fixture passes under the retired shape too.
+e8_conflict_repo() {
+  (
+    set -e
+    cd "$1"
+    git init -q -b main repo
+    cd repo
+    git config user.email fixture@example.invalid
+    git config user.name Fixture
+    mkdir src
+    printf 'KEEP = 1\n' >src/keep.py
+    git add -- src/keep.py
+    git commit -qm 'test: base'
+    printf "COLLIDE = 'main'\n" >"$2"
+    git add -- "$2"
+    git commit -qm 'test: main adds the colliding path'
+    git checkout -qb fix/398-collide HEAD~1
+    printf "COLLIDE = 'branch'\n" >"$2"
+    git add -- "$2"
+    git commit -qm 'test: the branch adds it too'
+    git rebase main
+  ) >/dev/null 2>&1 || true    # the fixture rebase MUST conflict
+}
+mkdir -p "$E8_TMP/plain"
+e8_conflict_repo "$E8_TMP/plain" src/collide.py
+E8_REPO="$E8_TMP/plain/repo"
+E8_PORCELAIN="$(git -C "$E8_REPO" status --porcelain 2>/dev/null)"
+case "$E8_PORCELAIN" in
+  *'AA '*) E8_GATE=ok ;;
+  *) E8_GATE=no-aa ;;
+esac
+case "$E8_PORCELAIN" in
+  *'UU '*) E8_GATE=stray-uu ;;
+esac
+if [ "$E8_GATE" != ok ]; then
+  fail "E8 the add/add fixture did not conflict as AA ($E8_GATE); the rows below would be vacuous"
+else
+  E8_OUT="$E8_TMP/paths.zlist"
+  E8_WANT="$E8_TMP/want.zlist"
+  printf 'src/collide.py\0' >"$E8_WANT"
+  E8_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_REPO" "$CONTRACT" "$E8_OUT" >/dev/null 2>&1 || E8_RC=$?
+  if [ "$E8_RC" = 0 ] && cmp -s "$E8_OUT" "$E8_WANT"; then
+    pass "E8a the enumerator reaches the AA conflict the judge already calls CONFLICT"
+  else
+    fail "E8a rc=$E8_RC payload='$(od -c <"$E8_OUT" 2>/dev/null | tr '\n' ' ')' (want rc 0 and src/collide.py NUL)"
+  fi
+
+  # E8e — NEGATIVE CONTROL, placed before the rows that depend on it: without
+  # this, E8a passes for the wrong reason the day someone reverts the widening.
+  E8_RETIRED="$(git -C "$E8_REPO" status --porcelain | awk -v c2=2 '/^UU / {print $c2}' | wc -l | tr -d ' ')"
+  if [ "$E8_RETIRED" = 0 ]; then
+    pass "E8e the retired \`^UU\` shape enumerates ZERO files on the same fixture"
+  else
+    fail "E8e the retired shape found $E8_RETIRED file(s) — the fixture is not add/add and E8a is vacuous"
+  fi
+
+  # E8b — a conflicted path with a SPACE is ONE record. `-z` porcelain is
+  # unquoted; the non-`-z` form C-quotes it, which is the second half of why the
+  # retired whitespace-split shape truncated it.
+  mkdir -p "$E8_TMP/spaced"
+  e8_conflict_repo "$E8_TMP/spaced" 'src/a b.py'
+  E8_SPACED_REPO="$E8_TMP/spaced/repo"
+  E8_SPACED_OUT="$E8_TMP/spaced.zlist"
+  E8_SPACED_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_SPACED_REPO" "$CONTRACT" "$E8_SPACED_OUT" >/dev/null 2>&1 || E8_SPACED_RC=$?
+  E8_SPACED_FILES=()
+  while IFS= read -r -d '' e8_entry; do
+    E8_SPACED_FILES+=("$e8_entry")
+  done <"$E8_SPACED_OUT"
+  if [ "$E8_SPACED_RC" = 0 ] && [ "${#E8_SPACED_FILES[@]}" -eq 1 ] \
+     && [ "${E8_SPACED_FILES[0]}" = 'src/a b.py' ]; then
+    pass "E8b a conflicted path containing a space reads back as ONE entry"
+  else
+    fail "E8b rc=$E8_SPACED_RC count=${#E8_SPACED_FILES[@]} first='${E8_SPACED_FILES[0]:-}'"
+  fi
+
+  # E8c/E8d — three-valued, for the same reason review_fleet_rebase_dir is
+  # (E5b). A two-valued probe maps "python3 missing / git unreadable" onto "no
+  # conflicts to resolve", which is the silent-empty collapse this issue is
+  # about. Compared separately so a run where BOTH are wrong cannot pass.
+  E8_CLEAN_OUT="$E8_TMP/clean.zlist"
+  E8_CLEAN_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$REPO_ROOT" "$CONTRACT" "$E8_CLEAN_OUT" >/dev/null 2>&1 || E8_CLEAN_RC=$?
+  if [ "$E8_CLEAN_RC" = 1 ] && [ -f "$E8_CLEAN_OUT" ] && [ ! -s "$E8_CLEAN_OUT" ]; then
+    pass "E8c a repository with no unmerged paths answers rc 1 and an empty payload"
+  else
+    fail "E8c rc=$E8_CLEAN_RC (want 1) exists=$([ -f "$E8_CLEAN_OUT" ] && echo y || echo n) size=$(wc -c <"$E8_CLEAN_OUT" 2>/dev/null | tr -d ' ')"
+  fi
+  E8_BROKEN_RC=0
+  bash -c '. "$1"; review_fleet_unmerged_paths "$2" "$3" "$4"' \
+    _ "$ARGS_LIB" "$E8_TMP/not-a-repo" "$CONTRACT" "$E8_TMP/broken.zlist" >/dev/null 2>&1 || E8_BROKEN_RC=$?
+  if [ "$E8_BROKEN_RC" = 2 ] && [ "$E8_CLEAN_RC" = 1 ]; then
+    pass "E8d no-conflicts (rc 1) and probe-failed (rc 2) are distinguishable"
+  else
+    fail "E8d clean rc=$E8_CLEAN_RC broken rc=$E8_BROKEN_RC (want 1 and 2)"
+  fi
+
+  # E8f — CHAIN PROOF. The set the enumerator produces, read back the way the
+  # fence reads it, is a set the locked writer reproduces byte-for-byte. This is
+  # what joins the new producer to review_fleet_write_conflict_paths (E2c/E2d)
+  # and to review_fleet_bind_ci_conflicts (E7d) as one wire format.
+  E8_CHAIN=()
+  while IFS= read -r -d '' e8_entry; do
+    E8_CHAIN+=("$e8_entry")
+  done <"$E8_OUT"
+  E8_CHAIN_OUT="$E8_TMP/chain.zlist"
+  E8_CHAIN_RC=0
+  # Guarded, not because the empty set is interesting here but because bash 3.2
+  # (the macOS system bash) treats `"${arr[@]}"` on an EMPTY array as unbound
+  # under `set -u` — an E8a failure would otherwise abort the run instead of
+  # reporting E8f.
+  if [ "${#E8_CHAIN[@]}" -eq 0 ]; then
+    E8_CHAIN_RC=90
+  else
+    bash -c '. "$1"; shift; target="$1"; shift; review_fleet_write_conflict_paths "$target" -- "$@"' \
+      _ "$ARGS_LIB" "$E8_CHAIN_OUT" "${E8_CHAIN[@]}" >/dev/null 2>&1 || E8_CHAIN_RC=$?
+  fi
+  if [ "$E8_CHAIN_RC" = 0 ] && cmp -s "$E8_OUT" "$E8_CHAIN_OUT"; then
+    pass "E8f the enumerated set round-trips through review_fleet_write_conflict_paths byte-identically"
+  else
+    fail "E8f rc=$E8_CHAIN_RC payloads differ between the enumerator and the writer"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# E9 — the Phase 1 reviewer output contract is RESOLVED, never re-declared (#403)
+# ---------------------------------------------------------------------------
+# policy/solve-run-tree-v1.json is the single declaration of which file the
+# Phase 1 reviewers must obey; lib/child-dispatch.sh already resolves it for the
+# ROUTED path. The Workflow composer has no filesystem, so the controller must
+# resolve the same declaration and hand the absolute path across the envelope.
+# A hardcoded literal in the lib would satisfy E9a and fail E9b, which is the
+# whole reason E9b computes the expected value from the manifest independently.
+echo
+echo "== E9: the Phase 1 reviewer output contract resolves from the policy manifest =="
+
+E9_ROOT="$REPO_ROOT/plugins/uberdev"
+E9_MANIFEST="$E9_ROOT/policy/solve-run-tree-v1.json"
+E9_TMP="$TMP/e9"
+mkdir -p "$E9_TMP"
+
+# e9_call ROOT ARGS... -> stdout on fd 1, stderr into $E9_TMP/err, rc in $E9_RC
+e9_call() {
+  E9_OUT="$(env -i PATH="$PATH" bash -c '. "$1"; shift; review_fleet_contract_path "$@"' \
+    _ "$ARGS_LIB" "$@" 2>"$E9_TMP/err")"
+  E9_RC=$?
+}
+
+# E9a — it resolves, and it prints the file the plugin actually ships.
+e9_call "$E9_ROOT" phase1-reviewer-v1
+E9_EXPECT="$E9_ROOT/$(jq -r '.output_contracts["phase1-reviewer-v1"] // empty' "$E9_MANIFEST")"
+if [ "$E9_RC" = 0 ] && [ "$E9_OUT" = "$E9_EXPECT" ] && [ -f "$E9_OUT" ]; then
+  pass "E9a review_fleet_contract_path resolves phase1-reviewer-v1 to an existing file"
+else
+  fail "E9a resolver returned rc=$E9_RC '$E9_OUT' (expected rc 0 and '$E9_EXPECT')"
+fi
+
+# E9b — THE COMPARATOR. The printed value must be the manifest's declaration
+# joined onto the plugin root, not a literal spelled a second time in the lib.
+# A hardcoded path passes E9a (it equals today's declaration) and fails here.
+mkdir -p "$E9_TMP/alt/policy" "$E9_TMP/alt/shared"
+printf 'alternate\n' >"$E9_TMP/alt/shared/alternate-contract.md"
+jq -n '{output_contracts:{"phase1-reviewer-v1":"shared/alternate-contract.md"}}' \
+  >"$E9_TMP/alt/policy/solve-run-tree-v1.json"
+e9_call "$E9_TMP/alt" phase1-reviewer-v1
+if [ "$E9_RC" = 0 ] && [ "$E9_OUT" = "$E9_TMP/alt/shared/alternate-contract.md" ] \
+   && ! grep -Fq 'shared/phase1-reviewer-output-v1' "$ARGS_LIB"; then
+  pass "E9b the resolver FOLLOWS the manifest declaration and spells no second copy of the path"
+else
+  fail "E9b resolver ignored the manifest declaration (rc=$E9_RC, '$E9_OUT') or re-declares the path"
+fi
+
+# E9c — an unknown id is a NAMED refusal, never a silent empty string.
+e9_call "$E9_ROOT" bogus-contract-id
+E9_ERR_LINES="$(grep -c . "$E9_TMP/err" 2>/dev/null || echo 0)"
+if [ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] && [ "$E9_ERR_LINES" = 1 ] \
+   && grep -Fq 'bogus-contract-id' "$E9_TMP/err"; then
+  pass "E9c an unknown contract id is rc 2, empty stdout and exactly one diagnostic naming the id"
+else
+  fail "E9c unknown id returned rc=$E9_RC stdout='$E9_OUT' stderr-lines=$E9_ERR_LINES"
+fi
+
+# E9d — unsafe manifest values. Each fixture CREATES the file the unsafe value
+# would reach, so the refusal is attributable to the predicate and not merely to
+# a missing file.
+e9_fixture() {  # DECLARED_VALUE -> builds $E9_TMP/fx and echoes its root
+  rm -rf "$E9_TMP/fx"
+  mkdir -p "$E9_TMP/fx/policy" "$E9_TMP/fx/shared" "$E9_TMP/fx/a"
+  jq -n --arg v "$1" '{output_contracts:{"phase1-reviewer-v1":$v}}' \
+    >"$E9_TMP/fx/policy/solve-run-tree-v1.json"
+  printf 'contract\n' >"$E9_TMP/fx/shared/phase1-reviewer-output-v1.md"
+  printf 'contract\n' >"$E9_TMP/fx/abs.md"
+  printf 'contract\n' >"$E9_TMP/fx/a.md"
+  printf 'contract\n' >"$E9_TMP/fx/b.md"
+  printf 'contract\n' >"$E9_TMP/fx/a/b.md"
+  printf 'contract\n' >"$E9_TMP/escape.md"
+  printf 'contract\n' >"$E9_TMP/fx/sh\\ared.md"
+  printf '%s' "$E9_TMP/fx"
+}
+E9_UNSAFE_BAD=0
+E9_UNSAFE_WHICH=""
+for e9_value in '../escape.md' '/abs.md' 'a//b.md' './a.md' 'a/../b.md' 'sh\ared.md' ''; do
+  e9_call "$(e9_fixture "$e9_value")" phase1-reviewer-v1
+  if [ "$E9_RC" != 2 ] || [ -n "$E9_OUT" ]; then
+    E9_UNSAFE_BAD=$((E9_UNSAFE_BAD + 1))
+    E9_UNSAFE_WHICH="$E9_UNSAFE_WHICH '$e9_value'(rc=$E9_RC)"
+  fi
+done
+if [ "$E9_UNSAFE_BAD" = 0 ]; then
+  pass "E9d every traversal, absolute, dot-component, double-slash, backslash and empty declaration is rc 2 with empty stdout"
+else
+  fail "E9d $E9_UNSAFE_BAD unsafe declaration(s) were accepted:$E9_UNSAFE_WHICH"
+fi
+
+# E9e — a declared-but-absent file is a refusal, not a path to a file the child
+# would then fail to read halfway through a wave.
+e9_call "$(e9_fixture 'shared/does-not-exist.md')" phase1-reviewer-v1
+[ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] \
+  && pass "E9e a declared contract file that does not exist is refused (rc 2)" \
+  || fail "E9e a missing contract file returned rc=$E9_RC '$E9_OUT'"
+
+# E9f — the contract FILE is itself a symlink. This pins the `[ ! -L ]` guard,
+# and ONLY that guard: `-L` is tested one line before the containment check, so
+# this fixture is refused before realpath is ever consulted. It used to claim
+# the containment check was the only predicate that could see it, which was
+# false and left that check with zero coverage — E9i is the row that reaches it.
+E9_FX="$(e9_fixture 'shared/link.md')"
+ln -sf "$E9_TMP/escape.md" "$E9_FX/shared/link.md"
+e9_call "$E9_FX" phase1-reviewer-v1
+[ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] \
+  && pass "E9f a contract symlinked out of the plugin root is refused" \
+  || fail "E9f a symlinked contract escaped the root check: rc=$E9_RC '$E9_OUT'"
+
+# E9g — a relative plugin root. The resolved value is emitted into an envelope
+# key skills/review-fleet/workflow.js gates with isSafeAbsPath(), which requires
+# a leading '/'; a relative answer would abort the whole wave downstream.
+E9_OUT="$(env -i PATH="$PATH" bash -c 'cd "$2" || exit 9; . "$1"; review_fleet_contract_path plugins/uberdev phase1-reviewer-v1' \
+  _ "$ARGS_LIB" "$REPO_ROOT" 2>/dev/null)"
+E9_RC=$?
+[ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] \
+  && pass "E9g a relative PLUGIN_ROOT is refused (the envelope key must be absolute)" \
+  || fail "E9g a relative PLUGIN_ROOT resolved to '$E9_OUT' (rc=$E9_RC)"
+
+# E9h — arity. Both a missing id and a stray third word are wiring bugs.
+E9_ARITY_BAD=0
+e9_call; [ "$E9_RC" = 2 ] || E9_ARITY_BAD=$((E9_ARITY_BAD + 1))
+e9_call "$E9_ROOT"; [ "$E9_RC" = 2 ] || E9_ARITY_BAD=$((E9_ARITY_BAD + 1))
+e9_call "$E9_ROOT" phase1-reviewer-v1 extra; [ "$E9_RC" = 2 ] || E9_ARITY_BAD=$((E9_ARITY_BAD + 1))
+[ "$E9_ARITY_BAD" = 0 ] \
+  && pass "E9h 0, 1 and 3 arguments are each rc 2" \
+  || fail "E9h $E9_ARITY_BAD of the 3 arity refusals did not return rc 2"
+
+# E9i — THE CONTAINMENT PREDICATE, and the only row that can reach it.
+#
+# E9f symlinks the contract FILE, so `[ ! -L "$contract_abs" ]` refuses it one
+# line before `beneath(realpath(root), realpath(target))` runs — proven by
+# mutation: blanking the two realpath assignments and the case that consumes
+# them left the whole suite green. Here the DIRECTORY COMPONENT is the symlink
+# and a plain regular file sits at the far end, so `-f`, `-r` and `! -L` all
+# pass on the contract itself (asserted below, so this row cannot silently
+# decay into a second copy of E9f) and only the realpath containment can refuse.
+E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+mkdir -p "$E9_TMP/outside"
+printf 'contract\n' >"$E9_TMP/outside/phase1-reviewer-output-v1.md"
+rm -rf "$E9_FX/shared"
+ln -s "$E9_TMP/outside" "$E9_FX/shared"
+E9_ESCAPED="$E9_FX/shared/phase1-reviewer-output-v1.md"
+e9_call "$E9_FX" phase1-reviewer-v1
+if [ -f "$E9_ESCAPED" ] && [ -r "$E9_ESCAPED" ] && [ ! -L "$E9_ESCAPED" ] \
+   && [ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ]; then
+  pass "E9i a contract behind a symlinked DIRECTORY component is refused by the realpath containment check"
+elif [ ! -f "$E9_ESCAPED" ] || [ -L "$E9_ESCAPED" ]; then
+  fail "E9i fixture did not defeat the -f/-L guards, so it cannot reach the containment check"
+else
+  fail "E9i a symlinked directory component escaped the containment check: rc=$E9_RC '$E9_OUT'"
+fi
+
+# E9j — st_nlink != 1. lib/child-dispatch.sh, resolving the SAME contract id for
+# the SAME six edges, calls a hardlinked contract `invalid_output_contract`; a
+# Workflow transport that accepts it hands six reviewers an authority the routed
+# transport would have refused. The fixture is verified to really be a hard link
+# before the assertion is read, so a platform that copies instead of linking
+# fails loudly rather than passing vacuously.
+E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+printf 'contract\n' >"$E9_TMP/fx/hardlink-origin.md"
+rm -f "$E9_FX/shared/phase1-reviewer-output-v1.md"
+ln "$E9_TMP/fx/hardlink-origin.md" "$E9_FX/shared/phase1-reviewer-output-v1.md" 2>/dev/null
+E9_NLINK="$(python3 -I -B -c 'import os,sys;print(os.lstat(sys.argv[1]).st_nlink)' \
+  "$E9_FX/shared/phase1-reviewer-output-v1.md" 2>/dev/null)"
+e9_call "$E9_FX" phase1-reviewer-v1
+if [ "$E9_NLINK" = 2 ] && [ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] \
+   && grep -Fq 'hard links' "$E9_TMP/err"; then
+  pass "E9j a hardlinked contract (st_nlink=2) is refused under its own diagnostic, matching the routed resolver"
+else
+  fail "E9j hardlinked contract: nlink='$E9_NLINK' rc=$E9_RC out='$E9_OUT' err='$(cat "$E9_TMP/err")'"
+fi
+
+# E9k — the 1..65536 size window, at both edges AND just inside the upper one.
+# The accept row is what stops "refuse everything big" from passing as "enforce
+# the twin's bound". OWNERSHIP (st_uid == euid, the third refusal the routed
+# resolver carries) is NOT covered here: constructing a regular file owned by
+# another uid needs root, and this suite runs unprivileged on ubuntu and macOS.
+# It is asserted only by the shared predicate being written once, in the same
+# probe as these two — not by a row of its own.
+E9_SIZE_BAD=0
+E9_SIZE_WHICH=""
+for e9_size in 0 65537 65536; do
+  E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+  python3 -I -B -c 'import sys
+with open(sys.argv[1],"wb") as fh: fh.write(b"x"*int(sys.argv[2]))' \
+    "$E9_FX/shared/phase1-reviewer-output-v1.md" "$e9_size"
+  e9_call "$E9_FX" phase1-reviewer-v1
+  if [ "$e9_size" = 65536 ]; then
+    if [ "$E9_RC" != 0 ] || [ "$E9_OUT" != "$E9_FX/shared/phase1-reviewer-output-v1.md" ]; then
+      E9_SIZE_BAD=$((E9_SIZE_BAD + 1))
+      E9_SIZE_WHICH="$E9_SIZE_WHICH ${e9_size}B-should-be-accepted(rc=$E9_RC)"
+    fi
+  elif [ "$E9_RC" != 2 ] || [ -n "$E9_OUT" ] || ! grep -Fq '1..65536 bytes' "$E9_TMP/err"; then
+    E9_SIZE_BAD=$((E9_SIZE_BAD + 1))
+    E9_SIZE_WHICH="$E9_SIZE_WHICH ${e9_size}B-should-be-refused(rc=$E9_RC)"
+  fi
+done
+if [ "$E9_SIZE_BAD" = 0 ]; then
+  pass "E9k an empty and an oversized contract are refused by size while exactly 65536 bytes is accepted"
+else
+  fail "E9k $E9_SIZE_BAD size boundary case(s) went the wrong way:$E9_SIZE_WHICH"
 fi
 
 echo ""

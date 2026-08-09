@@ -2208,6 +2208,100 @@ assert_grep "$REVIEW_PR" '\*\*post-push\*\* command' \
 rm -rf "$R33_TMP"
 
 echo
+echo "== R30 (#403): the 5 Phase-1 agent files POINT AT the reviewer output contract =="
+# lib/child-dispatch.sh validates a reviewer result with re.fullmatch over the
+# WHOLE file and lib/review-aggregate.sh re-parses with the byte-identical
+# regex, so an agent file that declares prose — or YAML "as the last fenced
+# block of your reply" — declares a shape the boundary can never accept. Every
+# Phase 1 wave then comes back BLOCKED with the aggregate suppressed.
+#
+# The repair is a POINTER, never a copy: shared/phase1-reviewer-output-v1.md is
+# the one declaration, and R30g is the guard that keeps it that way.
+PHASE1_CONTRACT="$REPO_ROOT/plugins/uberdev/shared/phase1-reviewer-output-v1.md"
+if [ ! -r "$PHASE1_CONTRACT" ]; then
+  echo "  FAIL  R30 — the Phase 1 reviewer output contract is missing: $PHASE1_CONTRACT"
+  FAIL=$((FAIL + 1))
+fi
+for f in "${AGENT_FILES[@]}"; do
+  b="$(basename "$f")"
+  assert_grep "$f" 'shared/phase1-reviewer-output-v1\.md' \
+    "R30a — $b points at the shared Phase 1 reviewer output contract"
+  assert_grep "$f" 'phase1-reviewer-v1' \
+    "R30b — $b names the contract id the policy manifest declares"
+  assert_grep "$f" 'entire contents of the result file' \
+    "R30c — $b binds the WHOLE result file, not the tail of a reply"
+  assert_grep "$f" 'blocker' \
+    "R30d — $b states the 'blocker' severity the validator accepts"
+  assert_grep "$f" 'suggestion' \
+    "R30d — $b states the 'suggestion' severity the validator accepts"
+  assert_grep "$f" 'zero blocker' \
+    "R30e — $b states the zero-blockers half of the verdict invariant"
+  assert_grep "$f" 'APPROVE' \
+    "R30e — $b names the APPROVE verdict the invariant requires"
+  assert_grep "$f" 'reviewed diff' \
+    "R30f — $b scopes location to the reviewed diff"
+  assert_grep "$f" 'rejects the whole result' \
+    "R30f — $b states that an out-of-scope location rejects the whole result"
+  # R30g part 1 — no agent file may carry a ```yaml fence of its own. A restated
+  # schema is a second declaration that drifts from the validator silently.
+  if [ "$(grep -c '```yaml' "$f")" = 0 ]; then
+    echo "  PASS  R30g — $b restates no \`\`\`yaml fence of its own"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R30g — $b carries $(grep -c '```yaml' "$f") \`\`\`yaml fence(s); it must POINT at the contract"
+    FAIL=$((FAIL + 1))
+  fi
+done
+# R30g part 2 — belt and braces: neither the contract's own bytes nor its
+# canonical schema line may appear inside any agent file.
+if python3 -I -B - "$PHASE1_CONTRACT" "${AGENT_FILES[@]}" <<'PY'
+import sys
+contract = open(sys.argv[1], encoding="utf-8").read()
+bad = []
+for path in sys.argv[2:]:
+    text = open(path, encoding="utf-8").read()
+    if contract.strip() and contract.strip() in text:
+        bad.append(path + ": copies the contract verbatim")
+    if "verdict: APPROVE | REVISIONS_REQUIRED | REJECT" in text:
+        bad.append(path + ": restates the contract's schema line")
+if bad:
+    print("\n".join(bad))
+    raise SystemExit(1)
+PY
+then
+  echo "  PASS  R30g — no agent file copies the contract's bytes or restates its schema line"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R30g — an agent file copies the contract instead of pointing at it"
+  FAIL=$((FAIL + 1))
+fi
+# R30h — pr-test-analyzer's specific repairs. Its old text claimed the other
+# reviewers use "this exact shape", which was false, and pointed the aggregation
+# story at a SKILL.md step that is not the aggregator on the Workflow path.
+PR_TEST_AGENT="$AGENTS_DIR/pr-test-analyzer.md"
+assert_no_grep "$PR_TEST_AGENT" 'last fenced block of your reply' \
+  "R30h — pr-test-analyzer no longer declares a reply-tail fence"
+assert_no_grep "$PR_TEST_AGENT" 'use this exact shape' \
+  "R30h — pr-test-analyzer no longer claims the other reviewers share its inline shape"
+assert_no_grep "$PR_TEST_AGENT" 'SKILL\.md.{0,3} Step 4' \
+  "R30h — pr-test-analyzer no longer pins aggregation to post-impl-review SKILL.md Step 4"
+assert_grep "$PR_TEST_AGENT" 'post_review_write_aggregate_v2' \
+  "R30h — pr-test-analyzer names the aggregator that is true on both dispatch paths"
+assert_grep "$PR_TEST_AGENT" 'criticality: ' \
+  "R30h — pr-test-analyzer keeps the criticality detail: prefix"
+# R30i — the legacy severity vocabularies are retired at their DECLARATION
+# spelling. A bare-word `Critical` assertion would red on unrelated prose.
+assert_no_grep "$AGENTS_DIR/code-reviewer.md" 'Group issues by severity \(Critical: 90-100' \
+  "R30i — code-reviewer no longer declares the Critical/Important severity buckets"
+assert_no_grep "$AGENTS_DIR/silent-failure-hunter.md" 'CRITICAL \(silent failure' \
+  "R30i — silent-failure-hunter no longer declares the CRITICAL/HIGH/MEDIUM severity axis"
+# R30j — type-design's per-axis ratings survive as detail: prose, not as a
+# competing report shape.
+assert_grep "$AGENTS_DIR/type-design-analyzer.md" 'detail' \
+  "R30j — type-design-analyzer routes its axis ratings into the contract's detail: field"
+assert_no_grep "$AGENTS_DIR/type-design-analyzer.md" '^### Ratings$' \
+  "R30j — type-design-analyzer no longer emits a competing '### Ratings' report block"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

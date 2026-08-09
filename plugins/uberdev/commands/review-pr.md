@@ -58,7 +58,7 @@ RUN_ID_RESERVATION_MAX_ATTEMPTS=16
 REVIEW_RESERVATION_REAP_SECS="${REVIEW_RESERVATION_REAP_SECS:-7200}"
 REVIEW_RUN_MANIFEST="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py"
 review_prepare_run_root() {
-  local repository_root="$1"
+  local repository_root="${@:1:1}"
   [ "$#" -eq 1 ] || return 2
   python3 -I -B - "$repository_root" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -179,7 +179,7 @@ except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeErro
 PY
 }
 review_publish_local_ignore() {
-  local runs_root="$1" runs_identity_json="$2"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}"
   [ "$#" -eq 2 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -224,8 +224,8 @@ except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeErro
 PY
 }
 review_reserve_run_directory() {
-  local runs_root="$1" runs_identity_json="$2" requested_run_id="$3"
-  local explicit_run_id="$4" pr_number="$5"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}" requested_run_id="${@:3:1}"
+  local explicit_run_id="${@:4:1}" pr_number="${@:5:1}"
   [ "$#" -eq 5 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$requested_run_id" \
     "$explicit_run_id" "$pr_number" "$RUN_ID_RESERVATION_MAX_ATTEMPTS" \
@@ -511,7 +511,7 @@ PY
 # receipt design forbids one) and never removes a directory or a verdict — only
 # the two receipt-shaped markers of a run that is demonstrably abandoned.
 review_reap_stale_run_reservations() {
-  local runs_root="$1" runs_identity_json="$2" reap_secs="$3"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}" reap_secs="${@:3:1}"
   [ "$#" -eq 3 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$reap_secs" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -705,7 +705,7 @@ print(reaped, end="")
 PY
 }
 review_abandon_run_reservation() {
-  local reservation_receipt="$1"
+  local reservation_receipt="${@:1:1}"
   [ "$#" -eq 1 ] && [ -n "$reservation_receipt" ] || return 2
   python3 -I -B - "$reservation_receipt" "$REVIEW_RUN_MANIFEST" <<'PY'
 import base64
@@ -992,14 +992,16 @@ CI_RUN_EVENT="${CI_RUN_EVENT:-}"
 CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
 review_json_string() {
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 ```
 
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" record_path="${@:5:1}"
+  [ "$#" -ge 5 ] || return 2
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
@@ -1010,7 +1012,8 @@ with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'i
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="${@:1:1}" descriptors="${@:2:1}" launched="${@:3:1}" timeout_s="${@:4:1}" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  [ "$#" -ge 4 ] || return 2
   local preflight_refs=()
   local launch_edges=() launch_instances=() launch_handoffs=()
   local launch_handoff_sha256s=() launch_results=() launch_statuses=()
@@ -1071,7 +1074,8 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  [ "$#" -ge 2 ] || return 2
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
@@ -1090,7 +1094,8 @@ review_child_wait_all() {
   return 0
 }
 review_child_result_path() {
-  local launched="$1" edge="$2"
+  local launched="${@:1:1}" edge="${@:2:1}"
+  [ "$#" -ge 2 ] || return 2
   python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" \
     "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
 import hashlib,importlib.util,json,os,stat,sys
@@ -1190,7 +1195,8 @@ print(published,end='')
 PY
 }
 review_child_single() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
+  [ "$#" -ge 6 ] || return 2
   : >"$prefix.records"
   review_child_record "$edge" "$instance" "$inputs" "$risks" "$prefix.records"
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
@@ -1200,7 +1206,7 @@ review_child_single() {
 # BEGIN review-failed-return-guard-v1
 review_guard_failed_fixer_return() {
   [ "$#" -eq 2 ] || return 2
-  local head_before="$1" original_rc="$2" guard_receipt
+  local head_before="${@:1:1}" original_rc="${@:2:1}" guard_receipt
   case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
   guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
     --working-dir "$WORKTREE_ROOT" \
@@ -1218,8 +1224,8 @@ review_guard_failed_fixer_return() {
 # END review-failed-return-guard-v1
 review_fixer_child_bound() {
   [ "$#" -eq 10 ] || return 2
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
-  local authority_path="$7" authority_sha256="$8" disposition_path="$9" applied_content_path="${10}"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
+  local authority_path="${@:7:1}" authority_sha256="${@:8:1}" disposition_path="${@:9:1}" applied_content_path="${@:10:1}"
   local receipt wait_rc
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
   uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
@@ -1331,8 +1337,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    ```bash uberdev-executable origin=review-pr
    review_assert_selected_pr_head() {
-     local repo_slug="$1" pr_number="$2" expected_head="$3" worktree_root="$4"
+     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
      local live_head local_head
+     [ "$#" -ge 4 ] || return 2
      [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
      [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
      [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -1343,8 +1350,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    review_publish_same_repo_pr_head() {
      [ "$#" -eq 7 ] || return 2
-     local repo_slug="$1" pr_number="$2" expected_remote_head_sha="$3" publish_sha="$4"
-     local worktree_root="$5" contract_helper="$6" evidence_dir="$7"
+     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_remote_head_sha="${@:3:1}" publish_sha="${@:4:1}"
+     local worktree_root="${@:5:1}" contract_helper="${@:6:1}" evidence_dir="${@:7:1}"
      local live_identity live_head live_branch live_cross_repository live_head_repo extra
      local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
      [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
@@ -1461,7 +1468,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    ```bash
    review_resolve_phase1_base() {
-     python3 -I -B - "$1" "$2" "$3" <<'PY'
+     [ "$#" -ge 3 ] || return 2
+     python3 -I -B - "${@:1:1}" "${@:2:1}" "${@:3:1}" <<'PY'
 import json,re,subprocess,sys
 pr,root,repo=sys.argv[1:]
 if re.fullmatch(r'[1-9][0-9]*',pr) is None: raise SystemExit(2)
@@ -1484,7 +1492,8 @@ print(base,end='')
 PY
    }
    review_refresh_phase1_scope() {
-     local base="$1"
+     local base="${@:1:1}"
+     [ "$#" -ge 1 ] || return 2
      CHANGED_PATHS_JSON="$(python3 -I -B - "$WORKTREE_ROOT" "$base" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" <<'PY'
 import json,os,re,stat,subprocess,sys,tempfile
 root,base,diff_path,range_path=sys.argv[1:]
@@ -1635,6 +1644,13 @@ PY
    # the only moment a binding can be minted that the child could not influence.
    review_fleet_bind_roster review "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
      "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$REVIEW_FLEET_LAUNCHED" || return 2
+   # The Workflow composer is a courier with no filesystem, so the output
+   # contract the policy manifest binds to every review_pr.review.* edge travels
+   # BY PATH -- the diffPathAbs way. Resolved HERE from
+   # policy/solve-run-tree-v1.json so the Workflow path and the routed path read
+   # ONE declaration instead of the routed path reading it and this one
+   # re-declaring it as prose (#403).
+   REVIEW_FLEET_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" phase1-reviewer-v1)" || return 2
    uberdev_emit_workflow_args review-fleet \
      mode=review-pr \
      stage=review \
@@ -1648,6 +1664,7 @@ PY
      repoSlug="$REVIEW_REPO_SLUG" \
      reviewIteration="$REVIEW_ITERATION" \
      diffPathAbs="$DIFF_ARTIFACT_PATH" \
+     phase1ContractPathAbs="$REVIEW_FLEET_CONTRACT_PATH" \
      aspects="$REVIEW_FLEET_ASPECTS" \
      fanoutCap="$REVIEW_FLEET_CAP" \
      maxAgents=40 \
@@ -1949,7 +1966,8 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local child_status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
+     [ "$#" -ge 3 ] || return 2
      residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
      [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -1971,7 +1989,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    }
    review_promote_validated_fixer_outcome() {
      [ "$#" -eq 3 ] || return 2
-     local outcome="$1" before="$2" after="$3" parsed child_status declared_tip extra
+     local outcome="${@:1:1}" before="${@:2:1}" after="${@:3:1}" parsed child_status declared_tip extra
      parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
 base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
@@ -2547,7 +2565,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     ```bash uberdev-executable origin=review-pr
     review_apply_phase2_5_status() {
-      local child_status="$1"
+      local child_status="${@:1:1}"
+      [ "$#" -ge 1 ] || return 2
       case "$child_status" in
         DONE|DONE_WITH_CONCERNS) return 0 ;;
         REFUSED)
@@ -2709,7 +2728,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
     }
     review_select_failed_ci_run() {
-      local probe_json="${1:-}" repo_slug="${2:-}"
+      local probe_json="${@:1:1}" repo_slug="${@:2:1}"
       python3 -I -B - "$repo_slug" 3<<<"$probe_json" <<'PY'
 import json,os,re,sys
 from urllib.parse import urlsplit
@@ -3075,7 +3094,7 @@ PY
 
     ```bash
     review_capture_ci_classification_head() {
-      local expected_head="${1:-}" local_head live_identity live_head live_branch
+      local expected_head="${@:1:1}" local_head live_identity live_head live_branch
       local target_head run_json run_failure
       local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
         printf 'classification_local_head_query_failed'
@@ -3231,7 +3250,7 @@ import json,sys
 value=json.loads(sys.argv[1])
 if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
 print(json.dumps(value[sys.argv[2]],separators=(",",":")),end="")
-' "$1" "$2"
+' "${@:1:1}" "${@:2:1}"
     }
     review_capture_ci_log_authority() {
       (
@@ -3340,8 +3359,13 @@ print(serialized,end="")
 
     ```bash
     review_validate_ci_classification() {
-      local helper_root="${3:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$2/plugins/uberdev}}"
-      python3 -I -B - "$1" "$2" "$helper_root" <<'PY'
+      # The optional third argument is bound through a named local first: a
+      # nested default cannot be re-spelled in place, because `${@:3:1}` is a
+      # slice, not a parameter, and has no `:-` fallback form.
+      local helper_arg="${@:3:1}" repo_arg="${@:2:1}"
+      local helper_root="${helper_arg:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$repo_arg/plugins/uberdev}}"
+      [ "$#" -ge 2 ] || return 2
+      python3 -I -B - "${@:1:1}" "$repo_arg" "$helper_root" <<'PY'
 import hashlib,importlib.util,json,os,pathlib,re,sys
 path,root,helper_root=sys.argv[1:]
 spec=importlib.util.spec_from_file_location('uberdev_classifier_artifacts',os.path.join(helper_root,'lib','run_manifest.py'))
@@ -3428,7 +3452,8 @@ PY
       # and `local status=…` is a FATAL error that kills the whole fence, not
       # just the function. Every routing decision below would then be
       # unreachable, with no audit event and no OUTCOME.
-      local child_status="$1" rationale="${2:-}"
+      local child_status="${@:1:1}" rationale="${@:2:1}"
+      [ "$#" -ge 1 ] || return 2
       case "$child_status" in
         AMBIGUOUS)
           audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS
@@ -3621,7 +3646,7 @@ PY
     > | Said below | Shipped agent (#383) |
     > |---|---|
     > | "the agent already pushed; new HEAD is on remote" | The agent is a PREPARER, not a pusher. `git push` **in any form** is on its explicit denylist, `EXPECTED_OLD_SHA` no longer exists in that file, and the controller captures the lease and performs the single leased push itself. |
-    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN `git status --porcelain` UU entries — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
+    > | `conflicted_files: [...]` in the return | The return contract emits `conflict_count: <int>`. The controller enumerates the paths from its OWN unmerged-path enumeration (`code_fixer_contract.py list-ci-unmerged-paths`) — taking the set from the agent would let the agent whose failure produced the conflict choose which files its successors may touch. |
     > | "Step 6 the agent has already aborted the in-progress rebase" | Step 5 says the opposite in capitals — **leave the rebase IN PROGRESS**, do NOT `git rebase --abort` — and Step 6 is "Stop." The live mid-rebase state IS the `ci-conflicts` stage's input; step 1's re-fetch-and-re-rebase below would destroy it. |
     >
     > Half two (the Phase 3 fence wiring) replaces this whole block with the
@@ -3629,6 +3654,24 @@ PY
     > and `lib/review-fleet-args.sh` already ship. Do not re-add an agent-held
     > lease while re-wiring it: an LLM choosing the SHA git compares against is
     > exactly the hole the demotion closes.
+    >
+    > Two things below are NOT stale, and both must survive the rewiring:
+    >
+    > 1. The cross-repository push gate in the variable-binding fence (#395). It
+    >    is the only thing standing between a fork PR and a raw `git push` error,
+    >    it lives on disk in `lib/review-push-target.sh` precisely so the rewiring
+    >    can call it unchanged, and it must stay AHEAD of the lease capture
+    >    wherever the push ends up.
+    > 2. Step 4's unmerged-path enumeration (#398). The second row of the table
+    >    above already points at it — `code_fixer_contract.py
+    >    list-ci-unmerged-paths`, reached via `review_fleet_unmerged_paths` — so
+    >    that recipe is the LIVE one, not `main`'s retired shape. It matches the
+    >    add/add status as well as the both-modified one: an add/add rebase
+    >    conflict has no common ancestor blob, so git records it as the former
+    >    and never the latter, which is how the retired both-modified-only
+    >    pattern returned the empty set and made "all RESOLVED" vacuously true.
+    >    It also slurps with `read -r -d ''` rather than bash's array-slurp
+    >    builtin, which zsh does not provide.
 
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
@@ -3638,14 +3681,65 @@ PY
 
     Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease. (Both sentences are in the STALE table above — the shipped agent returns a count and leaves the rebase running.)
 
-    **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
+    **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195). The binding runs through the **same-repository push gate** (`lib/review-push-target.sh`), so a fork PR is refused here — before the fetch, before the lease, and with a typed audit event instead of a raw `git push` error.
 
     ```bash
-    # Single gh call returns both refs to avoid two API roundtrips (one core
-    # bucket request, not two — matters under tight rate-limit budgets).
-    read -r pr_head_branch base_branch <<< "$(gh pr view "$PR_NUMBER" --json headRefName,baseRefName --jq '"\(.headRefName) \(.baseRefName)"')"
-    REPO_ROOT="$(git rev-parse --show-toplevel)"
+    # CROSS-REPOSITORY GATE (#395). One gh call still returns both refs (one
+    # core-bucket request, not two — that matters under tight rate-limit
+    # budgets), but the projection now carries the head-repository identity too,
+    # and the branch names are only bound when that identity IS this repository.
+    #
+    # `origin` is the repository the PR was opened AGAINST. For a fork PR
+    # `headRefName` names a branch in the CONTRIBUTOR's repository, so
+    # `git fetch origin "$pr_head_branch"`, the `origin/$pr_head_branch` lease
+    # and the leased push below all address a ref that either does not exist or
+    # is an unrelated same-named branch in the base repo. Phase 1 and Phase 2
+    # refuse that shape before publishing (`review_publish_same_repo_pr_head`);
+    # this is Phase 3's copy of the guarantee, and it runs BEFORE the lease is
+    # captured because a lease over a ref the run could not identify proves
+    # nothing.
+    #
+    # The resolver lives in lib/ rather than in this fence deliberately: the
+    # templater substitutes every positional of a rendered command fence (#404),
+    # so a helper that takes arguments cannot survive here.
+    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+    REVIEW_PUSH_TARGET_LIB="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-push-target.sh"
+    CI_PUSH_TARGET_RC=0
+    if [ -r "$REVIEW_PUSH_TARGET_LIB" ] && . "$REVIEW_PUSH_TARGET_LIB"; then
+      REPO_ROOT="$(git rev-parse --show-toplevel)"
+      REVIEW_REPO_SLUG="${REVIEW_REPO_SLUG:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+      CI_PUSH_TARGET="$(review_resolve_same_repo_push_target \
+        "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REPO_ROOT")" || CI_PUSH_TARGET_RC=$?
+    else
+      # An unreadable gate is not a reason to push unguarded — it is the same
+      # halt as an unidentifiable target, with its own stderr line so the
+      # operator can tell a broken install from a fork PR.
+      CI_PUSH_TARGET_RC=79
+      echo "error: /uberdev:review-pr — Phase 3 could not load the same-repository push gate: $REVIEW_PUSH_TARGET_LIB" >&2
+    fi
+    if [ "$CI_PUSH_TARGET_RC" -ne 0 ]; then
+      case "$CI_PUSH_TARGET_RC" in
+        78)
+          CI_PUSH_TARGET_SUBREASON=ci_push_target_cross_repository
+          echo "error: /uberdev:review-pr — Phase 3 cannot push PR #$PR_NUMBER: its head branch lives in another repository (fork). Re-run the CI fix from a checkout of the head repository, or land the fix as a PR from this one." >&2
+          ;;
+        *)
+          CI_PUSH_TARGET_SUBREASON=ci_push_target_unresolved
+          echo "error: /uberdev:review-pr — Phase 3 could not identify PR #$PR_NUMBER's push target (resolver rc=$CI_PUSH_TARGET_RC); refusing to fetch, lease or push a ref it cannot name." >&2
+          ;;
+      esac
+      audit ci_phase_outcome data.outcome=halted data.subreason=$CI_PUSH_TARGET_SUBREASON
+      exit 1
+    fi
+    IFS=$'\t' read -r pr_head_branch base_branch <<<"$CI_PUSH_TARGET"
     ```
+
+    Both halts are terminal for the run: `ci_push_target_cross_repository` (fork
+    head — `data.subreason` is typed so an audit consumer can route it) and
+    `ci_push_target_unresolved` (`gh` unreachable, or a projection this run
+    cannot trust). The second is deliberately NOT the `ci_probe_unreachable`
+    carve-out that 6c.1 PROBE applies to a `gh` outage: a probe that cannot read
+    checks may proceed, a push that cannot name its ref may not.
 
     1. **Re-create conflict state.** Re-fetch and re-rebase in the current `/review-pr` checkout (`$REPO_ROOT`) to surface conflict markers in `conflicted_files`:
 
@@ -3702,30 +3796,59 @@ PY
        - **All `status: RESOLVED`:**
 
          ```bash
-         git add "${conflicted_files[@]}"
+         # `git add --` with ZERO pathspecs prints "Nothing specified, nothing
+         # added." and exits 0, so an empty set would stage nothing and then fail
+         # the continue on the still-unmerged index. Refuse it here instead.
+         [ "${#conflicted_files[@]}" -gt 0 ] || {
+           git rebase --abort
+           audit ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed
+           exit 1
+         }
+         git add -- "${conflicted_files[@]}"
          if ! git rebase --continue; then
            # `git rebase --continue` exited non-zero. Two sub-cases:
            #   (a) Multi-stage rebase: continuation surfaced a NEW conflict set.
-           #       Re-bind `conflicted_files` from the live rebase state via
-           #       `git status --porcelain | awk -v c2=2 '/^UU / {print $c2}'` and re-enter
-           #       step 3 against the NEW list (NOT the agent's original list —
-           #       conflict-resolver REFUSES paths outside its pre-computed set per
-           #       `agents/conflict-resolver.md` Refusal triggers + Inputs). Bounded
-           #       by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD — single-shot per dispatch,
-           #       NOT a separate retry path (anti-pattern guard restated from
-           #       merge-pipeline/SKILL.md "PARK is the terminal floor" prose).
+           #       Re-bind `conflicted_files` from the live rebase state and
+           #       re-enter step 3 against the NEW list (NOT the agent's original
+           #       list — conflict-resolver REFUSES paths outside its pre-computed
+           #       set per `agents/conflict-resolver.md` Refusal triggers +
+           #       Inputs). Bounded by CI_FIX_LOOP_CAP from 6c.7 LOOP GUARD —
+           #       single-shot per dispatch, NOT a separate retry path
+           #       (anti-pattern guard restated from merge-pipeline/SKILL.md
+           #       "PARK is the terminal floor" prose).
            #   (b) Non-conflict failure (pre-commit hook rejection, GPG signing
-           #       failure, etc): no UU entries → halt.
-           # Use mapfile -t (NOT unquoted expansion) so paths with spaces survive.
-           mapfile -t conflicted_files < <(git status --porcelain | awk -v c2=2 '/^UU / {print $c2}')
-           if [ "${#conflicted_files[@]}" -gt 0 ]; then
-             # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
-             :
-           else
-             git rebase --abort
-             audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
-             exit 1
-           fi
+           #       failure, etc): the unmerged set is empty → halt.
+           # The set comes from lib/code_fixer_contract.py through
+           # review_fleet_unmerged_paths, NOT from a local porcelain parse: the
+           # judge that returned CONFLICT covers all seven porcelain unmerged
+           # pairs (UU AA DD AU UA DU UD), and a second copy of that vocabulary
+           # here is exactly what made an add/add conflict enumerate zero files
+           # (#398). Delivered NUL-delimited through a file because a conflicted
+           # path may contain a space or a newline, and read back with
+           # `read -r -d ''` because these fences run under /bin/zsh, where
+           # bash's array-slurp builtin does not exist and fails to an EMPTY
+           # array with nothing consuming its 127.
+           # THREE outcomes, not two: rc 2 means the probe itself failed, which
+           # must never arrive here wearing "no conflicts to resolve".
+           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 1
+           CONFLICT_PATHS="$RESEARCH_DIR_ABS/conflicts.paths"
+           CONFLICT_ENUM_RC=0
+           review_fleet_unmerged_paths "$REPO_ROOT" "$CODE_FIXER_CONTRACT" "$CONFLICT_PATHS" \
+             || CONFLICT_ENUM_RC=$?
+           case "$CONFLICT_ENUM_RC" in
+             0) ;;
+             1) git rebase --abort
+                audit ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed
+                exit 1 ;;
+             *) git rebase --abort
+                audit ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed
+                exit 1 ;;
+           esac
+           conflicted_files=()
+           while IFS= read -r -d '' conflict_entry; do
+             conflicted_files+=("$conflict_entry")
+           done <"$CONFLICT_PATHS"
+           # Re-enter step 3 with the new list (single-shot per CI_FIX_LOOP_CAP).
          fi
          NEW_HEAD_SHA="$(git rev-parse HEAD)"
          # Capture push stderr so the lease-mismatch branch is reachable.
@@ -3755,6 +3878,7 @@ PY
          - On push lease-mismatch (server rejects because origin/`$pr_head_branch` no longer matches `$EXPECTED_OLD_SHA`): the conditional above runs `git rebase --abort` and emits `ci_phase_outcome data.outcome=halted data.subreason=rebase_lease_mismatch`; exit 1. (External push during the resume window — the user re-issues `/review-pr` against the new HEAD.)
          - On push failure for any other reason (auth, pre-receive hook, rate-limit, network): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_push_failed`; exit 1.
          - On `git rebase --continue` failure with no fresh conflict set (pre-commit hook reject / signing failure / etc): `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_continue_failed`; exit 1.
+         - On a failed *enumeration* — `review_fleet_unmerged_paths` rc 2 (python3 missing, git state unreadable), or an empty `conflicted_files` at the staging guard: `git rebase --abort`; emit `ci_phase_outcome data.outcome=halted data.subreason=rebase_enumerate_failed`; exit 1. A distinct subreason from `rebase_continue_failed` on purpose: "git could not answer" and "there is genuinely nothing unmerged" are opposite facts, and collapsing them is the #398 defect in miniature.
 
        - **Any `status: AMBIGUOUS`:** `git rebase --abort`; emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=rebase_conflict_ambiguous`; exit 1. (Mirrors `merge-pipeline/SKILL.md` Phase 3.3.iv park-on-AMBIGUOUS, but for `/review-pr` the equivalent terminal action is run-halt — the trail records the unresolvable conflict; the user surfaces it via the Phase 3 halt prose. Per `agents/conflict-resolver.md` line 56, AMBIGUOUS carries `resolution_summary` + `risks[]` for handoff context.)
 
@@ -3997,7 +4121,7 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    ```bash
    review_validate_trust_anchor() {
      [ "$#" -eq 4 ] || return 2
-     local reviewed_head_sha="$1" parent_sha="$2" anchor_sha="$3" expected_message_sha256="$4"
+     local reviewed_head_sha="${@:1:1}" parent_sha="${@:2:1}" anchor_sha="${@:3:1}" expected_message_sha256="${@:4:1}"
      local observed_head observed_parents observed_message_sha256 residue_receipt
      [[ "$reviewed_head_sha" =~ ^[0-9a-f]{40}$ && "$parent_sha" =~ ^[0-9a-f]{40}$ && "$anchor_sha" =~ ^[0-9a-f]{40}$ && "$expected_message_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
      [ "$parent_sha" = "$reviewed_head_sha" ] || return 79
@@ -4526,7 +4650,7 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Rebases the PR branch onto its base for `stale_base` class, and **stops there** — #383 demoted it from pusher to preparer
 - Does **not** push. `git push` in any form is on its explicit denylist. The `--force-with-lease=<branch>:<sha> --force-if-includes` pair (the sanctioned exception to `merge-pipeline/SKILL.md`'s never-`--force-with-lease`-against-PR-head invariant) is captured and consumed by the CONTROLLER, which is the whole safety property: the lease's value must not be one an agent chose
 - No lock file. The lease is the cross-run concurrency guard, and `git rebase` refuses on its own when `.git/rebase-merge` already exists — a controller-held `flock` cannot work here, because every `bash` block is a fresh shell and the file descriptor dies with the fence
-- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the UU paths itself and fan out `conflict-resolver` agents
+- Returns `CONFLICT` with a `conflict_count`, leaving the rebase IN PROGRESS, for the controller to enumerate the unmerged paths itself and fan out `conflict-resolver` agents
 - **Not reachable on the shipped tree**: half one ships the `ci-fix` engine stage, half two wires Phase 3 to call it
 
 ## Notes:

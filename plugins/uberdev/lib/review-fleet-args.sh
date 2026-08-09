@@ -169,6 +169,158 @@ review_fleet_require_engine() {
   printf '%s' "$script"
 }
 
+# review_fleet_contract_path PLUGIN_ROOT CONTRACT_ID -> absolute path on stdout.
+#
+# THE BINDING IS DATA, NOT PROSE. policy/solve-run-tree-v1.json declares
+# output_contracts[<id>] and attaches it to the six review_pr.review.* edges;
+# lib/child-dispatch.sh resolves that same declaration for the ROUTED path and
+# appends the file's bytes to the child prompt. The Workflow composer has no
+# filesystem, so the controller resolves it HERE and the path travels across the
+# args envelope -- the diffPathAbs pattern. Both composers then read ONE
+# declaration instead of one reading it and the other re-declaring it as prose,
+# which is exactly the drift #403 filed.
+#
+# Refuses rather than defaults: an unresolvable contract must stop the wave at
+# the controller, not produce six children improvising a serialization the
+# validator's re.fullmatch can never accept.
+#
+# `contract_rel` / `contract_abs`, NEVER `path` or `status`: zsh ties both, and
+# tests/crossplatform-shell-wrappers.test.sh scans this file for exactly that.
+review_fleet_contract_path() {
+  [ "$#" -eq 2 ] || {
+    echo "error: review_fleet_contract_path: usage: review_fleet_contract_path PLUGIN_ROOT CONTRACT_ID" >&2
+    return 2
+  }
+  local plugin_root="$1" contract_id="$2" manifest contract_rel contract_abs root_real dir_real
+  local contract_probe contract_verdict contract_detail
+  case "$plugin_root" in
+    /*) ;;
+    *) echo "error: review_fleet_contract_path: PLUGIN_ROOT must be absolute: '$plugin_root'" >&2; return 2 ;;
+  esac
+  manifest="$plugin_root/policy/solve-run-tree-v1.json"
+  [ -r "$manifest" ] || {
+    echo "error: review_fleet_contract_path: unreadable policy manifest $manifest" >&2
+    return 2
+  }
+  # `// empty` rather than `-e`: an absent key must reach the named refusal
+  # below, not turn into a jq exit status the caller has to re-interpret.
+  contract_rel="$(jq -r --arg id "$contract_id" '.output_contracts[$id] // empty' <"$manifest" 2>/dev/null)" \
+    || contract_rel=''
+  [ -n "$contract_rel" ] || {
+    echo "error: review_fleet_contract_path: no output contract declared for id '$contract_id' in $manifest" >&2
+    return 2
+  }
+  # posixpath.normpath(rel) == rel, expressed as globs: no absolute spelling, no
+  # backslash, no empty / '.' / '..' component, no trailing slash. Plus the '"'
+  # that skills/review-fleet/workflow.js isSafeAbsPath() also refuses.
+  case "$contract_rel" in
+    /* | *\\* | *'"'* | . | .. | ./* | ../* | */. | */.. | */./* | */../* | *//* | */)
+      echo "error: review_fleet_contract_path: unsafe contract path '$contract_rel' for id '$contract_id'" >&2
+      return 2 ;;
+  esac
+  # A LITERAL newline, never "$(printf '\n')" -- command substitution strips the
+  # trailing newline and the pattern would match nothing (the same trap
+  # review_fleet_write_ci_pointer documents).
+  case "$contract_rel" in
+    *'
+'*)
+      echo "error: review_fleet_contract_path: newline in contract path for id '$contract_id'" >&2
+      return 2 ;;
+  esac
+  contract_abs="$plugin_root/$contract_rel"
+  # The value the caller emits is gated downstream by isSafeAbsPath(); refusing
+  # here means a bad PLUGIN_ROOT names itself instead of aborting a whole wave
+  # under `bad_contract_path` six dispatches later.
+  case "$contract_abs" in
+    *..* | *'"'*)
+      echo "error: review_fleet_contract_path: resolved path '$contract_abs' is not envelope-safe" >&2
+      return 2 ;;
+  esac
+  [ -f "$contract_abs" ] && [ -r "$contract_abs" ] || {
+    echo "error: review_fleet_contract_path: '$contract_abs' is not a readable regular file" >&2
+    return 2
+  }
+  [ ! -L "$contract_abs" ] || {
+    echo "error: review_fleet_contract_path: '$contract_abs' is a symlink; the contract must be the shipped file" >&2
+    return 2
+  }
+  # beneath(realpath(root), realpath(target)) -- the globs above cannot see a
+  # symlinked directory component, and a contract read from outside the plugin
+  # root is not the manifest's contract.
+  root_real="$(cd "$plugin_root" 2>/dev/null && pwd -P)" || return 2
+  dir_real="$(cd "$(dirname "$contract_abs")" 2>/dev/null && pwd -P)" || return 2
+  case "$dir_real/" in
+    "$root_real"/*) ;;
+    *) echo "error: review_fleet_contract_path: '$contract_abs' escapes the plugin root $root_real" >&2; return 2 ;;
+  esac
+  # THE SAME ACCEPTANCE TEST AS THE ROUTED TRANSPORT, not a looser one.
+  #
+  # lib/child-dispatch.sh resolves THIS contract id for THE SAME six edges, and
+  # its `invalid_output_contract` arm refuses more than `-f`/`-r`/`! -L`: a file
+  # not owned by the running euid, one with st_nlink != 1, and one whose size
+  # falls outside 1..65536 bytes. Two transports reading one declaration must
+  # also agree on what the declaration resolves TO. Without these three, a file
+  # the routed path calls `invalid_output_contract` was ACCEPTED here and its
+  # path handed to six reviewer subagents told to obey it -- the drift #403
+  # filed, one layer down from the path itself.
+  #
+  # python3, not `stat`: st_uid / st_nlink / st_size have no portable shell
+  # spelling (`stat -c` is GNU, `stat -f` is BSD and means --file-system on
+  # GNU), and python3 is ALREADY a hard dependency of this file --
+  # review_fleet_bind_roster shells every binding out to it. Mirroring the twin
+  # in the twin's own language is what keeps the two predicates comparable.
+  #
+  # os.lstat, never os.stat: a stat that follows a link would read the far end's
+  # metadata and answer for a file the `-L` guard above already refused.
+  contract_probe="$(python3 -I -B -c '
+import os,stat,sys
+try:
+    entry=os.lstat(sys.argv[1])
+except OSError:
+    print("unstattable 0");raise SystemExit(0)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+euid=os.geteuid() if callable(getattr(os,"geteuid",None)) else None
+if stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,"st_file_attributes",0)&reparse):
+    print("symlink 0")
+elif not stat.S_ISREG(entry.st_mode):
+    print("not_regular 0")
+elif euid is not None and hasattr(entry,"st_uid") and entry.st_uid!=euid:
+    print("not_owned %d"%entry.st_uid)
+elif entry.st_nlink!=1:
+    print("hardlinked %d"%entry.st_nlink)
+elif entry.st_size<1 or entry.st_size>65536:
+    print("bad_size %d"%entry.st_size)
+else:
+    print("ok 0")
+' "$contract_abs" 2>/dev/null)" || contract_probe='probe_failed 0'
+  contract_verdict="${contract_probe%% *}"
+  contract_detail="${contract_probe#* }"
+  case "$contract_verdict" in
+    ok) ;;
+    not_owned)
+      echo "error: review_fleet_contract_path: '$contract_abs' is owned by uid $contract_detail, not the running user; the contract must be the shipped file" >&2
+      return 2 ;;
+    hardlinked)
+      echo "error: review_fleet_contract_path: '$contract_abs' has $contract_detail hard links; the contract must be the shipped file, not an alias to it" >&2
+      return 2 ;;
+    bad_size)
+      echo "error: review_fleet_contract_path: '$contract_abs' is $contract_detail bytes; the contract must be 1..65536 bytes like the routed resolver requires" >&2
+      return 2 ;;
+    symlink)
+      echo "error: review_fleet_contract_path: '$contract_abs' is a symlink or reparse point; the contract must be the shipped file" >&2
+      return 2 ;;
+    not_regular)
+      echo "error: review_fleet_contract_path: '$contract_abs' is not a regular file" >&2
+      return 2 ;;
+    *)
+      # unstattable / probe_failed / anything unrecognised. Fails CLOSED: a
+      # predicate that cannot be evaluated is not a predicate that passed.
+      echo "error: review_fleet_contract_path: could not verify '$contract_abs' against the routed resolver's file predicate" >&2
+      return 2 ;;
+  esac
+  printf '%s' "$contract_abs"
+}
+
 # review_fleet_bind_roster STAGE RUN_DIR ITER WORKTREE CONTRACT LEDGER
 #
 # For every roster child, in order: make the directory the script derives, mint
@@ -343,8 +495,9 @@ review_fleet_bind_ci() {
 #
 # The N-child conflict fanout. AUTHORITY_LEDGER carries one
 # `<ci_authority_path>\t<ci_authority_sha256>` row per conflicted file, in the
-# controller's own UU-enumeration order — which IS the nonce wire format for
-# this stage, exactly as review_fleet_roster's order is for the reviewers.
+# controller's own unmerged-path enumeration order — which IS the nonce wire
+# format for this stage, exactly as review_fleet_roster's order is for the
+# reviewers.
 #
 # One authority per child, not one shared authority: each resolver's pinned
 # input names the single path it may touch, and validate-ci-mutation-outcome
@@ -552,6 +705,50 @@ review_fleet_write_conflict_paths() {
     [ -n "$entry" ] || return 2
     printf '%s\0' "$entry" >>"$target" || return 2
   done
+}
+
+# review_fleet_unmerged_paths WORKTREE CONTRACT TARGET
+#
+# THE enumerator. review_fleet_write_conflict_paths above is the WRITER of this
+# set and review_fleet_bind_ci_conflicts is its BINDER; until #398 there was no
+# PRODUCER, so the Step-4 re-bind in commands/review-pr.md inlined its own
+# porcelain parse, matching the two exact bytes `UU` against
+# code_fixer_contract.py's seven-pair membership test. An add/add rebase
+# conflict (porcelain `AA`) was therefore CONFLICT to the judge and the EMPTY
+# set to the enumerator: zero resolvers dispatched, "all RESOLVED" vacuously
+# true, and the arm aborted a mid-rebase it could have finished.
+#
+# There is no pair vocabulary here. The answer comes from the ONE definition,
+# `_ci_is_unmerged_pair`, through the `list-ci-unmerged-paths` verb -- which
+# also carries `_ci_porcelain_entries`' rename/copy-origin skipping and its
+# offset-2 space requirement, the two rules that stopped a `UU`-prefixed
+# FILENAME from being read as a status pair. A shell re-implementation would
+# have to reproduce all three and would be free to drift from any of them. So
+# NOTHING in this file parses porcelain itself, deliberately: a whole-file grep
+# for a status invocation must stay empty, or a second vocabulary has grown
+# back.
+#
+# A FILE, not a command substitution: `$( … )` cannot carry NUL bytes and strips
+# trailing newlines, and a conflicted path may contain a space or a newline.
+# `-z` porcelain is unquoted where the plain form C-quotes a spaced path, so the
+# transport is byte-identical to review_fleet_write_conflict_paths' and the
+# reader is the same `read -r -d ''` loop.
+#
+# Exit codes are THREE-valued for the same reason review_fleet_rebase_dir's are:
+#   0 = >=1 conflicted path, written NUL-delimited to TARGET
+#   1 = the probe succeeded and there are no unmerged paths (TARGET, zero bytes)
+#   2 = the probe itself failed
+# A two-valued probe maps "python3 missing / git unreadable" onto "no conflicts
+# to resolve" -- which is exactly the silent-empty collapse this issue is about.
+review_fleet_unmerged_paths() {
+  [ "$#" -eq 3 ] || return 2
+  # `target`, NEVER `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local worktree="$1" contract="$2" target="$3"
+  [ -d "$worktree" ] && [ -r "$contract" ] || return 2
+  ( umask 077 && python3 -I -B "$contract" list-ci-unmerged-paths \
+      --working-dir "$worktree" >"$target" ) || return 2
+  [ -s "$target" ] || return 1
 }
 
 # review_fleet_write_sidecar PATH BINDING CHILD_DIR INSTANCE [HEAD_BEFORE]

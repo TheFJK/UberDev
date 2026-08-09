@@ -29,8 +29,15 @@ CODE_FIXER_CI="$REPO_ROOT/plugins/uberdev/agents/ci-code-fixer.md"
 REBASE_HANDLER="$REPO_ROOT/plugins/uberdev/agents/ci-rebase-handler.md"
 MERGE_SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 RUN_TREE="$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
+# The three further surfaces that restate the CONFLICT arm's enumeration claim.
+# S13.23 sweeps all five together — the claim was wrong in ten places at once
+# (#398), which is what makes a per-file sweep worth more than one grep.
+REVIEW_FLEET_SKILL="$REPO_ROOT/plugins/uberdev/skills/review-fleet/SKILL.md"
+REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
 
-for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE"; do
+for f in "$REVIEW_PR" "$CLASSIFIER" "$CODE_FIXER_CI" "$REBASE_HANDLER" "$MERGE_SKILL" "$RUN_TREE" \
+         "$REVIEW_FLEET_SKILL" "$REVIEW_FLEET_WORKFLOW" "$REVIEW_FLEET_ARGS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -1088,6 +1095,38 @@ assert_grep "$REVIEW_PR" 'status: REBASED' \
 assert_grep "$REVIEW_PR" 'by_agent="ci-rebase-handler\+conflict-resolver"' \
   "S13.17 — ci_fix_pushed audit event names both contributing agents on conflict-resolve push success"
 
+# Issue #398: the arm's own Step-4 re-bind disagreed with the judge that put it
+# there. `mapfile -t conflicted_files < <(git status --porcelain | awk '/^UU /')`
+# was two defects in one line — the two exact bytes `UU` against
+# code_fixer_contract.py's seven-pair unmerged membership test (so an add/add
+# conflict enumerated ZERO files and "all RESOLVED" was vacuously true), and a
+# bash-only builtin in a fence the harness runs under /bin/zsh (so the array was
+# empty there too, silently, with nothing consuming the 127). Both failure modes
+# are INVISIBLE to a syntax gate: `bash -n` and `zsh -n` both parse that line
+# happily. These rows are the gate.
+assert_no_grep "$REVIEW_PR" 'mapfile|readarray' \
+  "S13.18 — the bash-only array-slurp builtin never returns to this command file (its fences run under zsh)"
+assert_no_grep "$REVIEW_PR" '\^UU' \
+  "S13.19 — the narrow two-byte status pattern is gone from the CONFLICT arm"
+assert_grep "$REVIEW_PR" 'review_fleet_unmerged_paths' \
+  "S13.20 — the re-bind calls the shared enumerator instead of parsing porcelain itself"
+assert_grep "$REVIEW_PR" 'git add -- ' \
+  "S13.21 — the staging call carries the -- separator so a path named like a flag cannot be one"
+assert_grep "$REVIEW_PR" 'rebase_enumerate_failed' \
+  "S13.22 — a failed enumeration halts under its OWN subreason, not rebase_continue_failed"
+# S13.23 — doc-drift sweep. The `UU` claim was restated in ten places across
+# five files; correcting the code and leaving the prose is how the next reader
+# re-derives the bug. One row per file so a regression names its own file.
+for f_desc in \
+  "$REVIEW_PR|commands/review-pr.md" \
+  "$REBASE_HANDLER|agents/ci-rebase-handler.md" \
+  "$REVIEW_FLEET_SKILL|skills/review-fleet/SKILL.md" \
+  "$REVIEW_FLEET_WORKFLOW|skills/review-fleet/workflow.js" \
+  "$REVIEW_FLEET_ARGS|lib/review-fleet-args.sh"; do
+  assert_no_grep "${f_desc%%|*}" 'UU[ -](entries|enumeration|paths)|UU-enumeration' \
+    "S13.23 — ${f_desc##*|} no longer describes the conflict set as the UU entries"
+done
+
 echo
 echo "== S14: ci-code-fixer REFUSED halt path (Phase 3 6c.5) — locks post-O5 findings-to-issues dispatch shape =="
 
@@ -1731,6 +1770,302 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$CI_LOG_STREAM_FIXTURE"
+
+echo
+echo "== S21: Phase 3's push target is same-repository-gated BEFORE the lease (#395) =="
+# Phase 3 used to bind its push target with a bare
+# `gh pr view --json headRefName,baseRefName` and then fetch, lease and push
+# `origin <headRefName>`. `origin` is the repository the PR was opened AGAINST:
+# for a fork PR that branch name belongs to the CONTRIBUTOR's repository, so the
+# push fails — or, worse, addresses an unrelated same-named branch in the base
+# repo. Phase 1/2 have always refused that shape before publishing
+# (`review_publish_same_repo_pr_head`); these rows are Phase 3's copy of the
+# guarantee, and they are the fork-shaped regression cover issue #395 asks for.
+PUSH_TARGET_LIB="$REPO_ROOT/plugins/uberdev/lib/review-push-target.sh"
+
+if [ -r "$PUSH_TARGET_LIB" ]; then
+  echo "  PASS  S21.1 — the resolver ships on disk (lib/review-push-target.sh)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S21.1 — missing resolver: $PUSH_TARGET_LIB"
+  echo "        a helper that takes arguments cannot live in a rendered command"
+  echo "        fence — the templater substitutes every positional (#404)"
+  FAIL=$((FAIL + 1))
+fi
+
+assert_grep "$REVIEW_PR" 'lib/review-push-target\.sh' \
+  "S21.2 — the Phase 3 arm sources the on-disk resolver"
+assert_grep "$REVIEW_PR" 'review_resolve_same_repo_push_target' \
+  "S21.3 — pr_head_branch/base_branch are bound through the resolver"
+assert_no_grep "$REVIEW_PR" \
+  'gh pr view "\$PR_NUMBER" --json headRefName,baseRefName' \
+  "S21.4 — the ungated headRefName binding is gone"
+assert_grep "$REVIEW_PR" 'ci_push_target_cross_repository' \
+  "S21.5 — typed data.subreason ci_push_target_cross_repository documented"
+assert_grep "$REVIEW_PR" 'ci_push_target_unresolved' \
+  "S21.6 — typed data.subreason ci_push_target_unresolved documented"
+
+# S21.7 — ORDER IS THE POINT. #395 asks for the check "before the lease is
+# captured rather than after": a lease over a ref the run could not identify
+# proves nothing, and `git fetch origin <fork-branch>` has already failed by
+# then. Both `git fetch origin` and the EXPECTED_OLD_SHA capture must sit BELOW
+# the gate in the file.
+S21_GATE_LINE="$(awk '/review_resolve_same_repo_push_target/ {print NR; exit}' "$REVIEW_PR")"
+S21_FETCH_LINE="$(awk '/^[[:space:]]*git fetch origin "\$pr_head_branch"/ {print NR; exit}' "$REVIEW_PR")"
+S21_LEASE_LINE="$(awk '/^[[:space:]]*EXPECTED_OLD_SHA="/ {print NR; exit}' "$REVIEW_PR")"
+if [ -n "$S21_GATE_LINE" ] && [ -n "$S21_FETCH_LINE" ] && [ -n "$S21_LEASE_LINE" ] \
+   && [ "$S21_GATE_LINE" -lt "$S21_FETCH_LINE" ] && [ "$S21_GATE_LINE" -lt "$S21_LEASE_LINE" ]; then
+  echo "  PASS  S21.7 — the gate resolves before the fetch and before the lease capture"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S21.7 — gate/fetch/lease ordering is wrong or a site is missing"
+  echo "        gate: ${S21_GATE_LINE:-<none>}  fetch: ${S21_FETCH_LINE:-<none>}  lease: ${S21_LEASE_LINE:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S21-RT: the resolver refuses the fork shape for real (executed) =="
+# Runtime cover, not prose cover. The resolver is sourced and CALLED with a
+# stubbed `gh` and `git`, once per shape. The stub records every call, so the
+# rows can also prove the negative that matters most: the resolver itself never
+# fetches and never pushes — it answers "may Phase 3 push this, and under which
+# names", and the caller does the pushing.
+PUSH_TARGET_STUB="$(mktemp)"
+PUSH_TARGET_LOG="$(mktemp)"
+cat >"$PUSH_TARGET_STUB" <<'STUB'
+. "$PUSH_TARGET_LIB"
+
+gh() {
+  printf 'gh %s\n' "$*" >>"$PUSH_TARGET_LOG"
+  [ "$1" = pr ] && [ "$2" = view ] || return 90
+  case "$SCENARIO" in
+    same-repo)         printf 'fix/395-guard\nmain\nfalse\nowner/repo\n' ;;
+    fork)              printf 'fix/395-guard\nmain\ntrue\ncontributor/repo\n' ;;
+    fork-shadow-name)  printf 'main\nmain\ntrue\ncontributor/repo\n' ;;
+    head-repo-drift)   printf 'fix/395-guard\nmain\nfalse\nattacker/repo\n' ;;
+    empty-head-repo)   printf 'fix/395-guard\nmain\nfalse\n/\n' ;;
+    gh-down)           return 91 ;;
+    short-projection)  printf 'fix/395-guard\nmain\nfalse\n' ;;
+    extra-field)       printf 'fix/395-guard\nmain\nfalse\nowner/repo\nsurprise\n' ;;
+    unroutable-head)   printf 'bad branch\nmain\nfalse\nowner/repo\n' ;;
+    unroutable-base)   printf 'fix/395-guard\nbad base\nfalse\nowner/repo\n' ;;
+    *)                 return 92 ;;
+  esac
+}
+
+git() {
+  printf 'git %s\n' "$*" >>"$PUSH_TARGET_LOG"
+  [ "$1" = -C ] && [ "$2" = /repo ] || return 91
+  [ "$3" = check-ref-format ] && [ "$4" = --branch ] || return 93
+  case "$5" in
+    *' '*) return 1 ;;
+    *)     return 0 ;;
+  esac
+}
+
+review_resolve_same_repo_push_target "$@"
+STUB
+
+# push_target_case RUNNER SCENARIO ARGS… -> "<rc>|<stdout>"
+push_target_case() {
+  local runner="$1" scenario="$2"
+  shift 2
+  local out rc=0
+  out="$(PUSH_TARGET_LIB="$PUSH_TARGET_LIB" PUSH_TARGET_LOG="$PUSH_TARGET_LOG" \
+        SCENARIO="$scenario" "$runner" "$PUSH_TARGET_STUB" "$@" 2>/dev/null)" || rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+
+push_target_row() {
+  local desc="$1" expected="$2" actual="$3"
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        expected: $expected"; echo "        actual:   $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+if [ -r "$PUSH_TARGET_LIB" ]; then
+  : >"$PUSH_TARGET_LOG"
+  push_target_row "S21-RT.1 — a same-repository PR resolves to its head and base branch" \
+    "0|$(printf 'fix/395-guard\tmain')" \
+    "$(push_target_case bash same-repo owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.2 — a fork PR is a NAMED refusal (rc 78), not a push attempt" \
+    "78|" "$(push_target_case bash fork owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.3 — a fork branch that SHADOWS a base-repo branch name is refused too" \
+    "78|" "$(push_target_case bash fork-shadow-name owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.4 — a head repository that is not the review repo is refused (rc 78)" \
+    "78|" "$(push_target_case bash head-repo-drift owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.5 — an unidentifiable head repository is refused, never assumed same-repo" \
+    "78|" "$(push_target_case bash empty-head-repo owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.6 — an unreachable gh halts the push path (rc 79), it does not proceed" \
+    "79|" "$(push_target_case bash gh-down owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.7 — a short projection is refused, not silently mis-bound" \
+    "79|" "$(push_target_case bash short-projection owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.8 — an over-long projection is refused" \
+    "79|" "$(push_target_case bash extra-field owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.9 — an unroutable head branch name is refused" \
+    "79|" "$(push_target_case bash unroutable-head owner/repo 73 /repo)"
+
+  push_target_row "S21-RT.10 — an unroutable base branch name is refused" \
+    "79|" "$(push_target_case bash unroutable-base owner/repo 73 /repo)"
+
+  # Malformed caller arguments never reach the network at all.
+  : >"$PUSH_TARGET_LOG"
+  S21_ARG_RCS=""
+  for bad_args in "owner/repo 73" "owner/repo 73 /repo extra" "owner/repo 0 /repo" \
+                  "owner/repo 7x /repo" "owner 73 /repo" "owner/repo 73 relative/path"; do
+    # shellcheck disable=SC2086
+    S21_ARG_RCS="$S21_ARG_RCS$(push_target_case bash same-repo $bad_args) "
+  done
+  if [ "$S21_ARG_RCS" = "2| 2| 2| 2| 2| 2| " ] && [ ! -s "$PUSH_TARGET_LOG" ]; then
+    echo "  PASS  S21-RT.11 — malformed arguments are rc 2 and never call gh"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S21-RT.11 — malformed arguments leaked past validation"
+    echo "        rcs: $S21_ARG_RCS"
+    echo "        calls: $(cat "$PUSH_TARGET_LOG")"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # The negative that matters: the resolver is read-only on the remote.
+  : >"$PUSH_TARGET_LOG"
+  S21_RO_OUT="$(push_target_case bash same-repo owner/repo 73 /repo)"
+  S21_RO_LOG="$(cat "$PUSH_TARGET_LOG")"
+  if [ "${S21_RO_OUT%%|*}" = 0 ] \
+     && ! grep -qE '^git (push|fetch|rebase|commit)' <<<"$S21_RO_LOG"; then
+    echo "  PASS  S21-RT.12 — the resolver never pushes, fetches, rebases or commits"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S21-RT.12 — the resolver mutated the repository or the remote"
+    echo "        calls: $S21_RO_LOG"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # The fences execute under /bin/zsh, so the resolver must behave identically
+  # there — this is the shell that turned an unbraced `$sha:refs/…` into a `:r`
+  # modifier and killed every anchor push (R9.12b in review-pr.test.sh).
+  if command -v zsh >/dev/null 2>&1; then
+    S21_ZSH_OK=1
+    [ "$(push_target_case zsh same-repo owner/repo 73 /repo)" = "0|$(printf 'fix/395-guard\tmain')" ] || S21_ZSH_OK=0
+    [ "$(push_target_case zsh fork owner/repo 73 /repo)" = "78|" ] || S21_ZSH_OK=0
+    [ "$(push_target_case zsh gh-down owner/repo 73 /repo)" = "79|" ] || S21_ZSH_OK=0
+    if [ "$S21_ZSH_OK" = 1 ]; then
+      echo "  PASS  S21-RT.13 — same verdicts under /bin/zsh, the shell the fences run in"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  S21-RT.13 — the resolver diverges under zsh"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo "  SKIP  S21-RT.13 — zsh unavailable on this runner"
+  fi
+
+  # S21-RT.14/15 — EXECUTE THE FENCE ITSELF, not a paraphrase of it. Every other
+  # Phase 3 assertion in this file greps fence *text*; #394 documents four
+  # arm-killing blockers that a 290-assertion green suite could not see for
+  # exactly that reason. So the binding fence is extracted from review-pr.md
+  # verbatim, sourced under `set -u` with a stubbed gh/git/audit, and asked what
+  # it actually does with a fork PR.
+  S21_FENCE="$(mktemp)"
+  S21_DRIVER="$(mktemp)"
+  S21_FENCE_LOG="$(mktemp)"
+  awk '
+    /^    ```bash$/ { collecting = 1; buf = ""; next }
+    collecting && /^    ```$/ {
+      if (buf ~ /CROSS-REPOSITORY GATE/) { printf "%s", buf; exit }
+      collecting = 0; next
+    }
+    collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
+  ' "$REVIEW_PR" >"$S21_FENCE"
+  cat >"$S21_DRIVER" <<'S21DRIVER'
+set -u
+audit() { printf 'audit %s\n' "$*" >>"$FENCE_LOG"; }
+gh() {
+  printf 'gh %s\n' "$*" >>"$FENCE_LOG"
+  if [ "$1" = repo ]; then printf 'owner/repo\n'; return 0; fi
+  [ "$1" = pr ] && [ "$2" = view ] || return 90
+  case "$SCENARIO" in
+    same-repo) printf 'fix/395-guard\nmain\nfalse\nowner/repo\n' ;;
+    fork)      printf 'fix/395-guard\nmain\ntrue\ncontributor/repo\n' ;;
+    *)         return 92 ;;
+  esac
+}
+git() {
+  printf 'git %s\n' "$*" >>"$FENCE_LOG"
+  case "$1" in
+    rev-parse) printf '/repo\n' ;;
+    -C)        [ "$3" = check-ref-format ] || return 93 ;;
+    *)         return 93 ;;
+  esac
+}
+PR_NUMBER=73
+. "$FENCE_FIXTURE"
+printf 'bound %s %s\n' "$pr_head_branch" "$base_branch" >>"$FENCE_LOG"
+S21DRIVER
+
+  # run_fence SHELL SCENARIO -> "<rc>" with the call log left in $S21_FENCE_LOG
+  run_s21_fence() {
+    local runner="$1" scenario="$2" rc=0
+    : >"$S21_FENCE_LOG"
+    FENCE_FIXTURE="$S21_FENCE" FENCE_LOG="$S21_FENCE_LOG" SCENARIO="$scenario" \
+      UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+      "$runner" "$S21_DRIVER" >/dev/null 2>&1 || rc=$?
+    printf '%s' "$rc"
+  }
+
+  if [ ! -s "$S21_FENCE" ]; then
+    echo "  FAIL  S21-RT.14 — the cross-repository gate fence could not be extracted"
+    echo "  FAIL  S21-RT.15 — no fence to execute"
+    FAIL=$((FAIL + 2))
+  else
+    for s21_shell in bash zsh; do
+      if ! command -v "$s21_shell" >/dev/null 2>&1; then
+        echo "  SKIP  S21-RT.14/15 ($s21_shell) — shell unavailable on this runner"
+        continue
+      fi
+      S21_OK_RC="$(run_s21_fence "$s21_shell" same-repo)"
+      S21_OK_LOG="$(cat "$S21_FENCE_LOG")"
+      if [ "$S21_OK_RC" = 0 ] && grep -qxF 'bound fix/395-guard main' <<<"$S21_OK_LOG"; then
+        echo "  PASS  S21-RT.14 ($s21_shell) — the fence executes and binds the same-repo head/base pair"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S21-RT.14 ($s21_shell) — the fence did not bind pr_head_branch/base_branch"
+        echo "        rc: $S21_OK_RC"
+        echo "        calls: $S21_OK_LOG"
+        FAIL=$((FAIL + 1))
+      fi
+
+      S21_FORK_RC="$(run_s21_fence "$s21_shell" fork)"
+      S21_FORK_LOG="$(cat "$S21_FENCE_LOG")"
+      if [ "$S21_FORK_RC" = 1 ] \
+         && grep -qxF 'audit ci_phase_outcome data.outcome=halted data.subreason=ci_push_target_cross_repository' <<<"$S21_FORK_LOG" \
+         && ! grep -qE '^git (fetch|push|rebase)' <<<"$S21_FORK_LOG"; then
+        echo "  PASS  S21-RT.15 ($s21_shell) — a fork PR halts with the typed audit event, before any fetch/lease/push"
+        PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S21-RT.15 ($s21_shell) — a fork PR was not refused as a named halt"
+        echo "        rc: $S21_FORK_RC"
+        echo "        calls: $S21_FORK_LOG"
+        FAIL=$((FAIL + 1))
+      fi
+    done
+  fi
+  rm -f "$S21_FENCE" "$S21_DRIVER" "$S21_FENCE_LOG"
+else
+  echo "  FAIL  S21-RT.* — resolver missing, no runtime cover could execute"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$PUSH_TARGET_STUB" "$PUSH_TARGET_LOG"
 
 echo
 echo "== Summary =="

@@ -109,6 +109,13 @@ if "def safe_existing(" in lib:
     failures.append("unused safe_existing helper remains")
 if "`` -?:,[]{}#&*!|>@` ``; contain" not in contract:
     failures.append("literal-backtick grammar does not use a safe code-span delimiter")
+# #403: the boundary is re.fullmatch over the RESULT FILE, but the contract used
+# to bind "the final content of your response" — reply-scoped wording that
+# permits a leading sentence the validator always refuses.
+if "entire contents of the result file" not in contract:
+    failures.append("contract is reply-scoped; it must bind the RESULT FILE's whole contents")
+if "as the final content of your response" in contract:
+    failures.append("contract still carries the reply-scoped wording that permits leading prose")
 
 for agent_path in agent_paths:
     value=pathlib.Path(agent_path).read_text()

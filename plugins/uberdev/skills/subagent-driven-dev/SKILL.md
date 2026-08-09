@@ -95,7 +95,8 @@ empty paths, escapes, and allow/deny overlap are rejected.
 
 ```bash
 sdd_validate_instance_dimensions() {
-  local wave="$1" task="$2" stage="$3" attempt="$4"
+  local wave="${@:1:1}" task="${@:2:1}" stage="${@:3:1}" attempt="${@:4:1}"
+  [ "$#" -ge 4 ] || return 2
   sdd_validate_positive_decimal "$wave" || return 2
   sdd_validate_positive_decimal "$task" || return 2
   sdd_validate_positive_decimal "$attempt" || return 2
@@ -103,7 +104,8 @@ sdd_validate_instance_dimensions() {
 }
 
 sdd_validate_positive_decimal() {
-  case "$1" in
+  [ "$#" -ge 1 ] || return 2
+  case "${@:1:1}" in
     ''|*[!0-9]*) return 2 ;;
     *[1-9]*) return 0 ;;
     *) return 2 ;;
@@ -111,7 +113,8 @@ sdd_validate_positive_decimal() {
 }
 
 sdd_canonicalize_owned_paths() {
-  local inputs_json="$1"
+  local inputs_json="${@:1:1}"
+  [ "$#" -ge 1 ] || return 2
   python3 -I -B - "$SDD_WORKTREE" "$inputs_json" <<'PY'
 import json,os,sys
 root=os.path.realpath(sys.argv[1]); value=json.loads(sys.argv[2])
@@ -162,7 +165,8 @@ sdd_unwind_child_receipts() {
 }
 
 sdd_dispatch_prepared() {
-  local edge_id="$1" instance_id="$2" inputs_json="$3" risk_json="$4"
+  local edge_id="${@:1:1}" instance_id="${@:2:1}" inputs_json="${@:3:1}" risk_json="${@:4:1}"
+  [ "$#" -ge 4 ] || return 2
   local handoff handoff_sha256 result child_status create_rc cleanup_rc
   if uberdev_create_child_handoff "$edge_id" "$instance_id" "$inputs_json" "$risk_json"; then
     :
@@ -210,7 +214,8 @@ sdd_launch_prepared_batch() {
 }
 
 sdd_wait_prepared_batch() {
-  local timeout="$1" index child_status result wait_rc first_rc=0 cleanup_rc=0
+  local timeout="${@:1:1}" index child_status result wait_rc first_rc=0 cleanup_rc=0
+  [ "$#" -ge 1 ] || return 2
   case "$timeout" in ''|*[!0-9]*|0) return 2 ;; esac
   [ "${#SDD_RECEIPT_INSTANCES[@]}" -gt 0 ] || return 2
   for ((index=0; index<${#SDD_RECEIPT_INSTANCES[@]}; index++)); do
@@ -233,16 +238,17 @@ sdd_wait_prepared_batch() {
 
 sdd_json_string() {
   [ "$#" -eq 1 ] || return 2
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 
 sdd_json_decimal_integer() {
   [ "$#" -eq 1 ] || return 2
-  python3 -I -B -c 'import re,sys; raw=sys.argv[1]; re.fullmatch(r"[0-9]+",raw) or sys.exit(2); print(str(int(raw,10)),end="")' "$1"
+  python3 -I -B -c 'import re,sys; raw=sys.argv[1]; re.fullmatch(r"[0-9]+",raw) or sys.exit(2); print(str(int(raw,10)),end="")' "${@:1:1}"
 }
 
 sdd_inputs_for_task() {
-  local edge_id="$1" task_id="$2"
+  local edge_id="${@:1:1}" task_id="${@:2:1}"
+  [ "$#" -ge 2 ] || return 2
   local task_path_json working_dir_json failure_path_json attempt_json spec_path_json
   local plan_path_json commit_sha_json report_path_json base_sha_json head_sha_json
   local commit_range_path_json acceptance_path_json summary_path_json

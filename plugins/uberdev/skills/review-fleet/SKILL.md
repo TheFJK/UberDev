@@ -351,6 +351,12 @@ are re-split and re-validated in-script.
 | `lensConcurrency` | lens wave size, `[1,3]` default 3 |
 | `runNonces` | the nonce pool — see below |
 
+### `review` stage only
+
+| Key | Meaning |
+|---|---|
+| `phase1ContractPathAbs` | absolute path to the Phase 1 reviewer output contract, resolved by the controller from `policy/solve-run-tree-v1.json` `output_contracts["phase1-reviewer-v1"]` (`lib/review-fleet-args.sh review_fleet_contract_path`). The script re-declares nothing: it has no filesystem, and a second spelling of the path would be a second declaration that drifts. Absent, relative or traversal-bearing ⇒ `abort("bad_contract_path")` with **zero** dispatches. |
+
 ### `fix` stage — controller-supplied authority, forwarded verbatim
 
 `fixerEdgeId` (`review_pr.fix.phase1` \| `review_pr.fix.phase2` \|
@@ -445,7 +451,7 @@ child.
 | `defer` | 0 — the single `review_pr.defer.findings` child |
 | `ci-classify` | 0 — the single `review_pr.ci.classify` child |
 | `ci-fix` | 0 — the single `review_pr.ci.fix_code` **or** `review_pr.ci.rebase` child |
-| `ci-conflicts` | 0..N-1 — one `review_pr.ci.resolve_conflict` child per conflicted path, in the CONTROLLER's own `git status --porcelain` UU-enumeration order |
+| `ci-conflicts` | 0..N-1 — one `review_pr.ci.resolve_conflict` child per conflicted path, in the CONTROLLER's own unmerged-path enumeration order |
 | `ci-defer` | 0 — the single `review_pr.ci.defer_refusal` child |
 
 A pool whose length does not match the roster **exactly** aborts the stage: a
@@ -567,6 +573,7 @@ the point of the seam.
 |---|---|
 | projected-agent ceiling | computed before any dispatch; **aborts** rather than degrading, because a half-run fanout produces a partial aggregate and a partial aggregate is indistinguishable from a clean zero-finding review |
 | nonce-pool gate | size or grammar mismatch aborts the stage before dispatch |
+| Phase 1 output contract | `review` only. An absent, relative or traversal-bearing `phase1ContractPathAbs` aborts `bad_contract_path` **before** the nonce gate, so no nonce is burned. Six reviewers dispatched without a stated serialization all fail `uberdev_child_validate_phase1_review_result` and the whole aggregate is suppressed — a full fanout spent to learn a wiring bug (#403) |
 | commit-type / edge pairing | `phase1`⇒`fix:`, `phase2`⇒`refactor:`; a mismatch aborts |
 | runtime `budget` | checked between waves with `budget && budget.total && budget.remaining() <= 0` — `parallel()` never rejects, so a budget throw would otherwise arrive as a silent `null` |
 
@@ -655,8 +662,9 @@ re-implementation.
    given a push tool** — the controller holds the lease and pushes.
 7. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
    path in ONE message, each reading only its own input document. The path list
-   comes from the controller's own `git status --porcelain` UU enumeration,
-   never from the rebase child's return.
+   comes from the controller's own unmerged-path enumeration
+   (`code_fixer_contract.py list-ci-unmerged-paths`), never from the rebase
+   child's return.
 8. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
    `ci-refused-synthetic` aggregate, with the three other aggregate/disposition
    inputs declared empty.

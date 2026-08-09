@@ -252,6 +252,175 @@ else
   grep '^  FAIL' "$TMPDIR_FIXTURES/selftest.out" | sed -n '1,10s/^/      /p'
 fi
 
+# ---------------------------------------------------------------------------
+# #396 — the per-case dry-run budget is a HANG DETECTOR, not a stopwatch.
+#
+# H11 reddened otherwise-green PRs at random on `shape-checks-windows`. The
+# harness is byte-identical across branches and the H11 block is self-contained
+# (it builds its script from VALID_META and asserts on the recorders), so there
+# is no data path from repo content into it; the same commit passed on a re-run
+# twenty minutes later, with the whole T2/T3 block 6.3x slower on the failing
+# attempt. The only wall-clock-sensitive input was a hard-coded 2000 ms
+# runScript budget — a number that says nothing about correctness and
+# everything about how contended the runner was.
+#
+# Two properties are locked here, and the second is why the first was hard to
+# find: the suite surfaces harness failures with `grep '^  FAIL'` (above), so a
+# cause printed on a continuation line never reaches the CI log. A silent
+# budget overrun therefore read as "stub drift or wrapper bug".
+# ---------------------------------------------------------------------------
+echo "== #396: self-test budget is starvation-tolerant + failures name their cause =="
+
+# Read the SHIPPED default with the override cleared, so a host-level export
+# cannot mask a regression in the committed value.
+HARNESS_BUDGET="$(env -u UBERDEV_HARNESS_TIMEOUT_MS \
+  node -e 'process.stdout.write(String(require(process.argv[1]).RUN_TIMEOUT_MS))' "$HARNESS" 2>/dev/null)"
+case "$HARNESS_BUDGET" in
+  ''|*[!0-9]*)
+    fail "#396.1 the harness exports no numeric RUN_TIMEOUT_MS (got '$HARNESS_BUDGET') — the dry-run budget is still a per-call-site literal"
+    ;;
+  *)
+    if [ "$HARNESS_BUDGET" -ge 10000 ]; then
+      pass "#396.1 the shipped dry-run budget is a generous hang detector (${HARNESS_BUDGET}ms >= 10000ms)"
+    else
+      fail "#396.1 the shipped dry-run budget is ${HARNESS_BUDGET}ms — tight enough for a starved runner to red a byte-identical harness (>= 10000ms required)"
+    fi
+    ;;
+esac
+
+# End-to-end proof the knob drives the REAL budget: at 1 ms every gated case
+# (H7/H8 hold an agent() call open across a wall-clock probe) must overrun, on
+# any machine — starvation can only make the overrun more certain, never less.
+TINY_SELFTEST="$TMPDIR_FIXTURES/selftest-tiny.out"
+UBERDEV_HARNESS_TIMEOUT_MS=1 node "$HARNESS" self-test >"$TINY_SELFTEST" 2>&1
+TINY_RC=$?
+if [ "$TINY_RC" -eq 1 ] && grep -qE '^  failed: [1-9]' "$TINY_SELFTEST"; then
+  pass "#396.2 UBERDEV_HARNESS_TIMEOUT_MS drives the real per-case budget (1ms reds the self-test)"
+else
+  fail "#396.2 UBERDEV_HARNESS_TIMEOUT_MS is decorative (rc=$TINY_RC) — the budget is not sourced from one overridable knob"
+fi
+
+TINY_FAILS="$(grep '^  FAIL' "$TINY_SELFTEST" 2>/dev/null || true)"
+if grep -qF 'timed out after 1ms' <<<"$TINY_FAILS"; then
+  pass "#396.3 a budget overrun names its cause on the FAIL line itself (so \`grep '^  FAIL'\` carries it into the CI log)"
+else
+  fail "#396.3 the self-test's FAIL lines print row names only — the errors array is swallowed, so a starved-runner timeout reads as stub drift"
+fi
+
+# Ratchet: every dry-run budget comes from the shared knob. A re-introduced
+# literal (H11's 2000 was one) is invisible to the probes above, because a
+# tight literal only reds under contention this suite cannot reproduce.
+#
+# STATEMENT-SCOPED, NOT LINE-SCOPED. `grep` matches per line, so the original
+# line-anchored form required `runScript(` AND the numeric argument on the SAME
+# line. The harness has exactly ONE multi-line `runScript(` call — the T3
+# `validate` path in main(), i.e. the call that executes against every shipped
+# skills/*/workflow.js in CI, which is precisely where #396's starvation flake
+# reproduces. The line-anchored predicate was therefore disjoint from the drift
+# this ratchet exists to find: mutating that call's `RUN_TIMEOUT_MS` to `2000`
+# left the grep with zero hits, which this row read as clean and printed PASS.
+# #396.2/#396.3 cannot compensate — both drive `self-test`, which never reaches
+# main().
+#
+# So flatten first (`tr '\n' ' '`), the same idiom
+# tests/skill-renderer-awk-collision.test.sh uses for its multi-line awk shape.
+# Line numbers are sacrificed by the flatten; the matched call text is printed
+# instead (`grep -n 'runScript(' tests/_workflow_harness.js` locates it).
+#
+# Why the argument list is bounded by `[^;]` — a JS STATEMENT boundary — and
+# NOT by `[^)]`, measured on the mutated copy rather than assumed:
+#   * `.*` after a flatten spans the entire file and would match digits from
+#     anywhere, so an unbounded form is not an option.
+#   * `[^)]` is TOO TIGHT for the one call site that matters: it carries a
+#     nested `path.basename(file)` whose closing paren ends the character class
+#     before the budget argument is ever reached, so a `[^)]`-bounded flatten
+#     stays exactly as blind as the line-anchored form it replaced.
+#   * `[^;]` reaches the end of the statement, nested parens included, and
+#     catches it.
+# The cost of `[^;]` is deliberate over-inclusion: a future call passing a
+# numeric literal to some OTHER nested call (`runScript(src(x, 3), …)`) would
+# also be flagged. For a ratchet that is the safe direction — the hit prints the
+# offending call text and is fixed in one edit, whereas the failure mode being
+# retired here was silent.
+BUDGET_LITERAL_REGEX='runScript\([^;]*,[[:space:]]*[0-9]+[[:space:]]*\)'
+
+# SSOT for the scan itself, not merely for its regex. The live ratchet below and
+# the inverse fixtures after it call THIS function, so an edit that drops the
+# `tr` flatten reds the fixtures too. A fixture that re-implemented the flatten
+# inline would keep passing while the live scan silently went line-scoped again
+# — which is the precise vacuity this whole block exists to retire (measured:
+# with the fixtures flattening their own input, reverting the live scan to
+# `grep -nE ... "$HARNESS"` left every #396.4* row green).
+scan_budget_literals() {  # <file> -> one matched call fragment per line
+  tr '\n' ' ' <"$1" | grep -oE "$BUDGET_LITERAL_REGEX" || true
+}
+
+BUDGET_LITERALS="$(scan_budget_literals "$HARNESS")"
+if [ -z "$BUDGET_LITERALS" ]; then
+  pass "#396.4 no runScript() call site carries a hard-coded numeric budget (statement-scoped scan)"
+else
+  fail "#396.4 hard-coded runScript() budget literal(s) — a starved runner reds them at random:"
+  while IFS= read -r hit; do
+    [ -n "$hit" ] && echo "        $hit"
+  done <<<"$BUDGET_LITERALS"
+  echo "        (locate with: grep -n 'runScript(' tests/_workflow_harness.js)"
+fi
+
+# Inverse fixtures for #396.4 — this ratchet went vacuous once by being
+# line-scoped; these rows make it impossible for it to go vacuous the same way
+# twice. The fixture reproduces the SHAPE of the real blind spot: the call split
+# across two lines, with the nested `path.basename(file)` that defeats a
+# `[^)]`-bounded scan. Built in $TMPDIR_FIXTURES — the real harness on disk is
+# never mutated.
+BUDGET_FIXTURE_BAD="$TMPDIR_FIXTURES/budget-literal-multiline.js"
+{
+  echo '      const { errors, record } = await runScript('
+  echo '        source, { args: argsValue }, `${path.basename(file)} [args:${shapeName}]`, 2000);'
+} > "$BUDGET_FIXTURE_BAD"
+
+if [ -n "$(scan_budget_literals "$BUDGET_FIXTURE_BAD")" ]; then
+  pass "#396.4a the live scan flags a TWO-LINE runScript() call carrying a numeric budget"
+else
+  fail "#396.4a the live scan MISSES a two-line runScript() budget literal — it has gone line-scoped again, and the harness's only multi-line call site (the T3 validate path that runs against every shipped workflow.js) is invisible to #396.4"
+fi
+
+# Pins that the fixture is genuinely TWO-LINE-shaped, so #396.4a cannot be
+# satisfied by a fixture someone quietly collapsed onto one line: the SAME
+# regex applied WITHOUT the flatten must still miss it. That is what isolates
+# the flatten as the load-bearing half. Deliberately re-uses BUDGET_LITERAL_REGEX
+# rather than an independent literal, so narrowing the regex re-evaluates both
+# rows consistently instead of letting them drift apart.
+if grep -qE "$BUDGET_LITERAL_REGEX" "$BUDGET_FIXTURE_BAD"; then
+  fail "#396.4b the fixture is no longer multi-line — an unflattened grep matches it, so #396.4a no longer proves the flatten is load-bearing"
+else
+  pass "#396.4b the same regex without the flatten misses that fixture (the flatten is what buys the catch)"
+fi
+
+# Over-breadth guard: the SHIPPED shape (budget sourced from the knob) split
+# across the same two lines must NOT be flagged, or #396.4 reds CI on correct
+# code and teaches contributors to distrust it.
+BUDGET_FIXTURE_SAFE="$TMPDIR_FIXTURES/budget-knob-multiline.js"
+{
+  echo '      const { errors, record } = await runScript('
+  echo '        source, { args: argsValue }, `${path.basename(file)} [args:${shapeName}]`, RUN_TIMEOUT_MS);'
+} > "$BUDGET_FIXTURE_SAFE"
+if [ -n "$(scan_budget_literals "$BUDGET_FIXTURE_SAFE")" ]; then
+  fail "#396.4c the live scan false-positives on a two-line runScript() that sources its budget from RUN_TIMEOUT_MS — #396.4 would red CI on the shipped shape"
+else
+  pass "#396.4c the live scan spares a two-line runScript() whose budget comes from the shared knob"
+fi
+
+# An unparseable override must refuse loudly: silently falling back to the
+# default would run the whole suite under a budget nobody chose.
+BAD_BUDGET_OUT="$TMPDIR_FIXTURES/selftest-bad-budget.out"
+UBERDEV_HARNESS_TIMEOUT_MS=soon node "$HARNESS" self-test >"$BAD_BUDGET_OUT" 2>&1
+BAD_BUDGET_RC=$?
+if [ "$BAD_BUDGET_RC" -eq 2 ] && grep -qF 'UBERDEV_HARNESS_TIMEOUT_MS' "$BAD_BUDGET_OUT"; then
+  pass "#396.5 an unparseable UBERDEV_HARNESS_TIMEOUT_MS refuses with rc=2 and names the variable"
+else
+  fail "#396.5 an unparseable UBERDEV_HARNESS_TIMEOUT_MS gave rc=$BAD_BUDGET_RC — it must refuse loudly, not fall back to a budget nobody chose"
+fi
+
 # Harness CLI contract controls (the per-script loop below relies on these
 # exit codes; lock them against harness refactors).
 GOOD_FLOW="$TMPDIR_FIXTURES/good-flow.js"

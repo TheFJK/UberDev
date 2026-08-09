@@ -26,7 +26,9 @@
 #   1. the commit has exactly ONE parent (no merges),
 #   2. its subject is exactly `chore(release): vX.Y.Z`,
 #   3. its parent is NOT itself a release commit (tolerance depth is exactly 1),
-#   4. its diff is non-empty and touches ONLY the six version surfaces,
+#   4. its diff — enumerated with rename detection DISABLED, so a rename's
+#      deleted SOURCE is in the set and not collapsed away — is non-empty and
+#      touches ONLY the six version surfaces,
 #   5. the canonical manifest version strictly ADVANCES, to the X.Y.Z named in
 #      the subject,
 #   6. every changed line outside CHANGELOG.md is a pure version-token
@@ -117,8 +119,14 @@ release_anchor_semver_gt() {
 # Everything before the first `@@` is dropped rather than filtered by pattern:
 # `--- a/x` and a removed content line `--foo` both start with `---` in a raw
 # diff, so a `grep -Ev '^---'` header filter silently eats real deletions.
+# `--no-renames` is a PROVEN NO-OP here (#397): the single-path pathspec already
+# keeps git from pairing a rename, because the counterpart is outside it —
+# output is byte-identical with and without the flag. It is present because that
+# immunity is a property of the PATHSPEC, so widening or dropping the pathspec
+# in a future refactor would silently reintroduce the collapse; the flag is what
+# would keep this function sound if that happened.
 release_anchor_hunk_lines() {
-  git diff --unified=0 "$1" "$2" -- "$3" 2>/dev/null \
+  git diff --unified=0 --no-renames "$1" "$2" -- "$3" 2>/dev/null \
     | sed -n '/^@@/,$p' \
     | grep -v '^@@' \
     | sed -n "s/^[$4]//p"
@@ -183,8 +191,15 @@ main() {
   fi
 
   # (4) the changed path set is non-empty and a SUBSET of the six surfaces.
+  # `--no-renames`: rename detection is ON by default and collapses a rename to
+  # its DESTINATION path only, so the deleted SOURCE reaches this set nowhere. A
+  # subset test is only sound over a TOTAL set — a collapsed rename is vacuously
+  # a subset, satisfied by exactly the path it omits. `git mv src/guard.sh
+  # CHANGELOG.md` inside an otherwise-clean bump therefore reported six
+  # surfaces, the permitted shape, and rode the trust gate with an arbitrary
+  # deletion attached (#397). Same defect as #393 (lib/code_fixer_contract.py).
   local changed surfaces stray
-  changed="$(git diff --name-only "$parent" "$head" 2>/dev/null)"
+  changed="$(git diff --name-only --no-renames "$parent" "$head" -- 2>/dev/null)"
   if [ -z "$changed" ]; then
     release_anchor_emit "$head" none empty_release_commit
     return 0
@@ -220,7 +235,7 @@ main() {
   # Bound the whole probe so a pathological commit cannot turn the trust gate
   # into an unbounded diff walk.
   local total
-  total="$(git diff --unified=0 "$parent" "$head" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  total="$(git diff --unified=0 --no-renames "$parent" "$head" -- 2>/dev/null | wc -l | tr -d '[:space:]')"
   # An unreadable size is treated as OVER the bound, not under it: this is a
   # trust gate, so an unusable measurement must never widen what it tolerates.
   case "$total" in ''|*[!0-9]*) total=$(( RELEASE_ANCHOR_MAX_DIFF_LINES + 1 )) ;; esac
