@@ -2901,6 +2901,130 @@ M98SURF
     fail "M98.paths — expected none/non_version_paths, got: [$M98_OUT]"
   fi
 
+  # 4b/4c/4d. RENAME COLLAPSE (#397). `git diff --name-only` has rename
+  #     detection ON by default and reports a rename as its DESTINATION path
+  #     alone — the deleted SOURCE reaches step (4)'s path set nowhere. Step (4)
+  #     is a SUBSET test, and a subset test is only sound over a TOTAL set: a
+  #     collapsed rename is vacuously a subset, satisfied by exactly the path it
+  #     omits. These rows need their OWN repo: m98_surfaces() always writes
+  #     CHANGELOG.md, and git only pairs a deletion with an ADDED destination,
+  #     so a CHANGELOG.md present at the parent makes the deletion visible and
+  #     the row vacuous. bump-version.sh also refuses (EXIT_DRIFT=3) on a
+  #     missing surface, so the fixture is hand-built.
+  M98_RN_TMP="$(mktemp -d)"
+  M98_RN_R="$M98_RN_TMP/repo"
+  M98_RN_REVIEWED=""
+  m98_rn_five() {   # the five NON-CHANGELOG surfaces at <version>; prev=<2>
+    printf '{\n  "name": "uberdev",\n  "version": "%s"\n}\n' "$1" \
+      > "$M98_RN_R/plugins/uberdev/.claude-plugin/plugin.json"
+    printf '{\n  "name": "uberdev",\n  "plugins": [\n    {\n      "name": "uberdev",\n      "version": "%s"\n    }\n  ]\n}\n' "$1" \
+      > "$M98_RN_R/.claude-plugin/marketplace.json"
+    printf '#!/usr/bin/env bash\necho "== G20: version bump locked (%s) =="\nassert_version_bump "$REPO_ROOT" "%s"\n' "$1" "$1" \
+      > "$M98_RN_R/tests/goal.test.sh"
+    printf '#!/usr/bin/env bash\necho "== Version bump %s -> %s propagated =="\nassert_version_bump "$REPO_ROOT" "%s"\n' "$2" "$1" "$1" \
+      > "$M98_RN_R/tests/solve-claim.test.sh"
+  }
+  m98_rn_readme() {  # the badge form, at <version>
+    printf '# Fixture\n\n[![Version](https://img.shields.io/badge/version-%s-blue)](./CHANGELOG.md)\n' "$1" \
+      > "$M98_RN_R/README.md"
+  }
+  m98_rn_build() {   # <guard|surface|bulk> -> a reviewed base + a renaming release commit
+    rm -rf "$M98_RN_R"
+    mkdir -p "$M98_RN_R/plugins/uberdev/.claude-plugin" "$M98_RN_R/.claude-plugin" \
+             "$M98_RN_R/tests" "$M98_RN_R/src"
+    m98_rn_five 1.2.3 1.2.2
+    # The payload is LOAD-BEARING: once renamed onto CHANGELOG.md every line is
+    # an insertion, so it must satisfy step (7)'s release-section shape regex
+    # (`[-*] .*` / `_.*`) or the UNPATCHED helper refuses with changelog_shape
+    # and the row is green before the fix, i.e. vacuous.
+    case "$1" in
+      guard)   m98_rn_readme 1.2.3
+               printf -- '- guard note\n_internal_guard\n' > "$M98_RN_R/src/security_guard.sh" ;;
+      surface) printf -- '- guard note\n_internal_guard\n' > "$M98_RN_R/README.md" ;;
+      bulk)    : > "$M98_RN_R/README.md"
+               m98_rn_i=1
+               while [ "$m98_rn_i" -le 500 ]; do
+                 printf -- '- line %s\n' "$m98_rn_i" >> "$M98_RN_R/README.md"
+                 m98_rn_i=$((m98_rn_i + 1))
+               done ;;
+    esac
+    git -C "$M98_RN_R" init -q
+    git -C "$M98_RN_R" config user.email "fixture@uberdev.invalid"
+    git -C "$M98_RN_R" config user.name "UberDev Fixture"
+    git -C "$M98_RN_R" config commit.gpgsign false
+    # Both pins are load-bearing for the RED-before-fix property. core.autocrlf
+    # would rewrite the payload on the Windows runner and drop the R100
+    # similarity pairing; diff.renames is CALLER-CONTROLLED ambient state (a
+    # contributor or runner with diff.renames=false makes git emit A+D, the
+    # deletion becomes visible to the unpatched helper, and all three rows pass
+    # before the fix). Pin both, then pre-assert the pairing anyway.
+    git -C "$M98_RN_R" config core.autocrlf false
+    git -C "$M98_RN_R" config diff.renames true
+    git -C "$M98_RN_R" add -A >/dev/null 2>&1
+    git -C "$M98_RN_R" commit -q -m "feat: reviewed work"
+    M98_RN_REVIEWED="$(git -C "$M98_RN_R" rev-parse HEAD)"
+    m98_rn_five 1.2.4 1.2.3
+    case "$1" in
+      guard) m98_rn_readme 1.2.4
+             git -C "$M98_RN_R" mv src/security_guard.sh CHANGELOG.md ;;
+      *)     git -C "$M98_RN_R" mv README.md CHANGELOG.md ;;
+    esac
+    git -C "$M98_RN_R" add -A >/dev/null 2>&1
+    git -C "$M98_RN_R" commit -q -m "chore(release): v1.2.4"
+  }
+  m98_rn_run() { bash "$RA_LIB" HEAD "$M98_RN_R" 2>/dev/null; }
+  m98_rn_paired() {  # the fixture really is a RENAME, not an add+delete pair
+    assert_grep_str "$(git -C "$M98_RN_R" diff --name-status "$M98_RN_REVIEWED" HEAD)" \
+      '^R[0-9]' "$1"
+  }
+
+  # 4b. A tracked NON-SURFACE file renamed onto an absent CHANGELOG.md. Verified
+  #     against the pre-fix helper: tolerated / inert_release_commit / 1.2.4.
+  m98_rn_build guard
+  m98_rn_paired "M98.rename.pair — the non-surface fixture really is a rename (R), not add+delete"
+  M98_OUT="$(m98_rn_run)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ] \
+     && [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR_REASON)" = "non_version_paths" ]; then
+    pass "M98.rename — a rename that DELETES a non-version path is NOT tolerated (rename source counts)"
+  else
+    fail "M98.rename — expected none/non_version_paths, got: [$M98_OUT]"
+  fi
+
+  # 4c. Surface -> surface. The whole path set is inside the six surfaces even
+  #     after the flag, so step (6) is the backstop: README.md's lines were
+  #     REMOVED with nothing added, which is not a version-token substitution.
+  #     Verified against the pre-fix helper: tolerated / inert_release_commit.
+  m98_rn_build surface
+  m98_rn_paired "M98.rename.surface.pair — the surface fixture really is a rename (R), not add+delete"
+  M98_OUT="$(m98_rn_run)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR)" = "none" ] \
+     && [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR_REASON)" = "content_not_version_only" ]; then
+    pass "M98.rename.surface — renaming one SURFACE onto another silently deletes it and is NOT tolerated"
+  else
+    fail "M98.rename.surface — expected none/content_not_version_only, got: [$M98_OUT]"
+  fi
+
+  # 4d. RELEASE_ANCHOR_MAX_DIFF_LINES must bound the REAL walk, not git's
+  #     rename-collapsed rendering (36 lines vs 1044 for a 500-line payload).
+  #     With only the step-(4) flag this reports changelog_too_large.
+  m98_rn_build bulk
+  m98_rn_paired "M98.rename.bound.pair — the bulk fixture really is a rename (R), not add+delete"
+  M98_OUT="$(m98_rn_run)"
+  if [ "$(m98_field "$M98_OUT" RELEASE_ANCHOR_REASON)" = "diff_too_large" ]; then
+    pass "M98.rename.bound — the diff-size bound measures the un-collapsed diff (renames disabled)"
+  else
+    fail "M98.rename.bound — expected diff_too_large, got: [$M98_OUT]"
+  fi
+
+  # 4e. Structural ratchet for the `--` terminator, which is not behaviourally
+  #     observable. NOT a substitute for 4b-4d.
+  assert_grep "$RA_LIB" 'git diff --name-only --no-renames "\$parent" "\$head" --' \
+    "M98.rename.shape — step (4) enumerates paths with rename detection OFF and a -- terminator"
+  assert_grep "$RA_LIB" 'git diff --unified=0 --no-renames "\$parent" "\$head" --' \
+    "M98.rename.shape — the diff-size bound enumerates with rename detection OFF and a -- terminator"
+
+  rm -rf "$M98_RN_TMP"
+
   # 5. A version that does not advance is not a release.
   m98_reset_release
   git -C "$M98_R" reset -q --hard "$M98_REVIEWED"
