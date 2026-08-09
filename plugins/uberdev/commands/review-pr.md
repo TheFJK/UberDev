@@ -58,7 +58,7 @@ RUN_ID_RESERVATION_MAX_ATTEMPTS=16
 REVIEW_RESERVATION_REAP_SECS="${REVIEW_RESERVATION_REAP_SECS:-7200}"
 REVIEW_RUN_MANIFEST="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py"
 review_prepare_run_root() {
-  local repository_root="$1"
+  local repository_root="${@:1:1}"
   [ "$#" -eq 1 ] || return 2
   python3 -I -B - "$repository_root" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -179,7 +179,7 @@ except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeErro
 PY
 }
 review_publish_local_ignore() {
-  local runs_root="$1" runs_identity_json="$2"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}"
   [ "$#" -eq 2 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -224,8 +224,8 @@ except (OSError, ValueError, module.ManifestRejected, module.ManifestRuntimeErro
 PY
 }
 review_reserve_run_directory() {
-  local runs_root="$1" runs_identity_json="$2" requested_run_id="$3"
-  local explicit_run_id="$4" pr_number="$5"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}" requested_run_id="${@:3:1}"
+  local explicit_run_id="${@:4:1}" pr_number="${@:5:1}"
   [ "$#" -eq 5 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$requested_run_id" \
     "$explicit_run_id" "$pr_number" "$RUN_ID_RESERVATION_MAX_ATTEMPTS" \
@@ -511,7 +511,7 @@ PY
 # receipt design forbids one) and never removes a directory or a verdict — only
 # the two receipt-shaped markers of a run that is demonstrably abandoned.
 review_reap_stale_run_reservations() {
-  local runs_root="$1" runs_identity_json="$2" reap_secs="$3"
+  local runs_root="${@:1:1}" runs_identity_json="${@:2:1}" reap_secs="${@:3:1}"
   [ "$#" -eq 3 ] || return 2
   python3 -I -B - "$runs_root" "$runs_identity_json" "$reap_secs" "$REVIEW_RUN_MANIFEST" <<'PY'
 import importlib.util
@@ -705,7 +705,7 @@ print(reaped, end="")
 PY
 }
 review_abandon_run_reservation() {
-  local reservation_receipt="$1"
+  local reservation_receipt="${@:1:1}"
   [ "$#" -eq 1 ] && [ -n "$reservation_receipt" ] || return 2
   python3 -I -B - "$reservation_receipt" "$REVIEW_RUN_MANIFEST" <<'PY'
 import base64
@@ -992,14 +992,16 @@ CI_RUN_EVENT="${CI_RUN_EVENT:-}"
 CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
 review_json_string() {
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 ```
 
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" record_path="${@:5:1}"
+  [ "$#" -ge 5 ] || return 2
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
@@ -1010,7 +1012,8 @@ with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'i
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="${@:1:1}" descriptors="${@:2:1}" launched="${@:3:1}" timeout_s="${@:4:1}" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  [ "$#" -ge 4 ] || return 2
   local preflight_refs=()
   local launch_edges=() launch_instances=() launch_handoffs=()
   local launch_handoff_sha256s=() launch_results=() launch_statuses=()
@@ -1071,7 +1074,8 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  [ "$#" -ge 2 ] || return 2
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
@@ -1090,7 +1094,8 @@ review_child_wait_all() {
   return 0
 }
 review_child_result_path() {
-  local launched="$1" edge="$2"
+  local launched="${@:1:1}" edge="${@:2:1}"
+  [ "$#" -ge 2 ] || return 2
   python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" \
     "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
 import hashlib,importlib.util,json,os,stat,sys
@@ -1190,7 +1195,8 @@ print(published,end='')
 PY
 }
 review_child_single() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
+  [ "$#" -ge 6 ] || return 2
   : >"$prefix.records"
   review_child_record "$edge" "$instance" "$inputs" "$risks" "$prefix.records"
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
@@ -1200,7 +1206,7 @@ review_child_single() {
 # BEGIN review-failed-return-guard-v1
 review_guard_failed_fixer_return() {
   [ "$#" -eq 2 ] || return 2
-  local head_before="$1" original_rc="$2" guard_receipt
+  local head_before="${@:1:1}" original_rc="${@:2:1}" guard_receipt
   case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
   guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
     --working-dir "$WORKTREE_ROOT" \
@@ -1218,8 +1224,8 @@ review_guard_failed_fixer_return() {
 # END review-failed-return-guard-v1
 review_fixer_child_bound() {
   [ "$#" -eq 10 ] || return 2
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
-  local authority_path="$7" authority_sha256="$8" disposition_path="$9" applied_content_path="${10}"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
+  local authority_path="${@:7:1}" authority_sha256="${@:8:1}" disposition_path="${@:9:1}" applied_content_path="${@:10:1}"
   local receipt wait_rc
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
   uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
@@ -1331,8 +1337,9 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    ```bash uberdev-executable origin=review-pr
    review_assert_selected_pr_head() {
-     local repo_slug="$1" pr_number="$2" expected_head="$3" worktree_root="$4"
+     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
      local live_head local_head
+     [ "$#" -ge 4 ] || return 2
      [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
      [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
      [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -1343,8 +1350,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    review_publish_same_repo_pr_head() {
      [ "$#" -eq 7 ] || return 2
-     local repo_slug="$1" pr_number="$2" expected_remote_head_sha="$3" publish_sha="$4"
-     local worktree_root="$5" contract_helper="$6" evidence_dir="$7"
+     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_remote_head_sha="${@:3:1}" publish_sha="${@:4:1}"
+     local worktree_root="${@:5:1}" contract_helper="${@:6:1}" evidence_dir="${@:7:1}"
      local live_identity live_head live_branch live_cross_repository live_head_repo extra
      local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
      [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
@@ -1461,7 +1468,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
 
    ```bash
    review_resolve_phase1_base() {
-     python3 -I -B - "$1" "$2" "$3" <<'PY'
+     [ "$#" -ge 3 ] || return 2
+     python3 -I -B - "${@:1:1}" "${@:2:1}" "${@:3:1}" <<'PY'
 import json,re,subprocess,sys
 pr,root,repo=sys.argv[1:]
 if re.fullmatch(r'[1-9][0-9]*',pr) is None: raise SystemExit(2)
@@ -1484,7 +1492,8 @@ print(base,end='')
 PY
    }
    review_refresh_phase1_scope() {
-     local base="$1"
+     local base="${@:1:1}"
+     [ "$#" -ge 1 ] || return 2
      CHANGED_PATHS_JSON="$(python3 -I -B - "$WORKTREE_ROOT" "$base" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" <<'PY'
 import json,os,re,stat,subprocess,sys,tempfile
 root,base,diff_path,range_path=sys.argv[1:]
@@ -1949,7 +1958,8 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    ```bash uberdev-executable origin=review-pr
    review_track_validated_fixer_head() {
-     local child_status="$1" before="$2" after="$3" declared_tip="${4:-}" commit_count residue_receipt
+     local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
+     [ "$#" -ge 3 ] || return 2
      residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
      [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
      [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -1971,7 +1981,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    }
    review_promote_validated_fixer_outcome() {
      [ "$#" -eq 3 ] || return 2
-     local outcome="$1" before="$2" after="$3" parsed child_status declared_tip extra
+     local outcome="${@:1:1}" before="${@:2:1}" after="${@:3:1}" parsed child_status declared_tip extra
      parsed="$(python3 -I -B -c 'import json,re,sys
 value=json.loads(sys.argv[1])
 base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
@@ -2547,7 +2557,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     ```bash uberdev-executable origin=review-pr
     review_apply_phase2_5_status() {
-      local child_status="$1"
+      local child_status="${@:1:1}"
+      [ "$#" -ge 1 ] || return 2
       case "$child_status" in
         DONE|DONE_WITH_CONCERNS) return 0 ;;
         REFUSED)
@@ -2709,7 +2720,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
     }
     review_select_failed_ci_run() {
-      local probe_json="${1:-}" repo_slug="${2:-}"
+      local probe_json="${@:1:1}" repo_slug="${@:2:1}"
       python3 -I -B - "$repo_slug" 3<<<"$probe_json" <<'PY'
 import json,os,re,sys
 from urllib.parse import urlsplit
@@ -3075,7 +3086,7 @@ PY
 
     ```bash
     review_capture_ci_classification_head() {
-      local expected_head="${1:-}" local_head live_identity live_head live_branch
+      local expected_head="${@:1:1}" local_head live_identity live_head live_branch
       local target_head run_json run_failure
       local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
         printf 'classification_local_head_query_failed'
@@ -3231,7 +3242,7 @@ import json,sys
 value=json.loads(sys.argv[1])
 if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
 print(json.dumps(value[sys.argv[2]],separators=(",",":")),end="")
-' "$1" "$2"
+' "${@:1:1}" "${@:2:1}"
     }
     review_capture_ci_log_authority() {
       (
@@ -3340,8 +3351,13 @@ print(serialized,end="")
 
     ```bash
     review_validate_ci_classification() {
-      local helper_root="${3:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$2/plugins/uberdev}}"
-      python3 -I -B - "$1" "$2" "$helper_root" <<'PY'
+      # The optional third argument is bound through a named local first: a
+      # nested default cannot be re-spelled in place, because `${@:3:1}` is a
+      # slice, not a parameter, and has no `:-` fallback form.
+      local helper_arg="${@:3:1}" repo_arg="${@:2:1}"
+      local helper_root="${helper_arg:-${UBERDEV_REVIEW_PLUGIN_ROOT:-$repo_arg/plugins/uberdev}}"
+      [ "$#" -ge 2 ] || return 2
+      python3 -I -B - "${@:1:1}" "$repo_arg" "$helper_root" <<'PY'
 import hashlib,importlib.util,json,os,pathlib,re,sys
 path,root,helper_root=sys.argv[1:]
 spec=importlib.util.spec_from_file_location('uberdev_classifier_artifacts',os.path.join(helper_root,'lib','run_manifest.py'))
@@ -3428,7 +3444,8 @@ PY
       # and `local status=…` is a FATAL error that kills the whole fence, not
       # just the function. Every routing decision below would then be
       # unreachable, with no audit event and no OUTCOME.
-      local child_status="$1" rationale="${2:-}"
+      local child_status="${@:1:1}" rationale="${@:2:1}"
+      [ "$#" -ge 1 ] || return 2
       case "$child_status" in
         AMBIGUOUS)
           audit ci_classify_ambiguous_routing_as_flaky original_status=AMBIGUOUS
@@ -4054,7 +4071,7 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    ```bash
    review_validate_trust_anchor() {
      [ "$#" -eq 4 ] || return 2
-     local reviewed_head_sha="$1" parent_sha="$2" anchor_sha="$3" expected_message_sha256="$4"
+     local reviewed_head_sha="${@:1:1}" parent_sha="${@:2:1}" anchor_sha="${@:3:1}" expected_message_sha256="${@:4:1}"
      local observed_head observed_parents observed_message_sha256 residue_receipt
      [[ "$reviewed_head_sha" =~ ^[0-9a-f]{40}$ && "$parent_sha" =~ ^[0-9a-f]{40}$ && "$anchor_sha" =~ ^[0-9a-f]{40}$ && "$expected_message_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
      [ "$parent_sha" = "$reviewed_head_sha" ] || return 79

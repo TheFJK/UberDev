@@ -26,10 +26,25 @@
 #
 # R1-R3 scan every plugins/uberdev/skills/*/SKILL.md for the awk shape and
 # fail CI when it finds a bare `$N` field ref inside a single-quoted awk
-# script body. R4 scans orchestrator/SKILL.md for any bare `$N` anywhere
-# (issue #225's stated scope); the broader bash-positional sweep across
-# other pipeline SKILL.md files (7+ known sites in solve/goal/finish/
-# testers/ubersimplify) is a documented follow-up (NOT enforced here).
+# script body.
+#
+# R4 was issue #225's narrow scan of orchestrator/SKILL.md alone. Issue #404
+# proved that narrowness was the bug: 64 live sites across 9 other templated
+# files, one of them fatal (`/uberdev:review-pr` could not start with a
+# non-empty argument — `local repository_root="$1"` rendered as
+# `local repository_root="--no-simplify"` and the third executable step of
+# setup died). R4 now scans the ENTIRE templated corpus — every
+# `plugins/uberdev/skills/**/SKILL.md` plus every `plugins/uberdev/commands/*.md`,
+# which is exactly R1's corpus unioned with R1b's.
+#
+# WHAT DELIBERATELY STAYS OUT, and why an unstated limit is worse than a
+# stated one: `plugins/uberdev/agents/*.md` (agents receive a task prompt, never
+# positional slash args), non-`SKILL.md` files under `skills/`,
+# `plugins/uberdev/lib/**/*.sh`, `skills/*/lib/*.sh`,
+# `skills/brainstorm/scripts/*.sh` and `tests/**`. None of those is ever passed
+# through the renderer, so their ~42 bare positionals are correct as written —
+# `lib/child-dispatch.sh` alone has 26 and works. Widening to them would red CI
+# on correct code and teach contributors to distrust this guard.
 #
 # Portable: bash + grep + find + sort + tr. Runs on ubuntu-latest (native
 # bash) and windows-latest (Git Bash) without any extra deps.
@@ -81,15 +96,23 @@ SKILLS_DIR="$REPO_ROOT/plugins/uberdev/skills"
 # file; the operator greps for the site).
 GUARD_REGEX="awk[^']*'[^']*\\\$[0-9]"
 
-# Bash-surface regex (#225). Bare `$N` anywhere in a bash script context —
-# function body, command substitution, here-doc — gets substituted by the
-# Skill renderer just as awk script bodies do. Used by R4 (scans
-# orchestrator/SKILL.md) and the R5 inverse fixtures. SSOT'd here for the
-# same reason GUARD_REGEX is SSOT'd above — if a future contributor narrows
-# the pattern (e.g. `\$[1-9]` to skip `$0`), the inverse-fixture proofs
-# (R5.bad / R5.safe) re-evaluate against the SAME pattern, not an
+# Bash-surface regex (#225, widened by #404). A positional ref anywhere in a
+# bash script context — function body, command substitution, here-doc — gets
+# substituted by the Skill renderer just as awk script bodies do. Used by R4
+# (scans the whole templated corpus) and the R5/R5b inverse fixtures. SSOT'd
+# here for the same reason GUARD_REGEX is SSOT'd above — if a future
+# contributor narrows the pattern (e.g. `\$[1-9]` to skip `$0`), the
+# inverse-fixture proofs re-evaluate against the SAME pattern, not an
 # independent literal that silently diverges.
-BASH_GUARD_REGEX='\$[0-9]'
+#
+# Why the optional `{` (#404). Braces do NOT protect a positional: the renderer
+# replaces `${N}` when positional N exists and merely brace-strips it to `$N`
+# when it does not, so `$1` -> `${1}` changes the spelling and nothing else.
+# `\$\{?[0-9]` catches both spellings in one pass and still spares the fix:
+# on `${@:1:1}` the optional `{` matches and `[0-9]` must then match `@`
+# (fail); with the `{` left unmatched, `[0-9]` must match `{` (fail). R5b.safe
+# pins that both ways round.
+BASH_GUARD_REGEX='\$\{?[0-9]'
 
 PASS=0; FAIL=0
 echo "## skill-renderer collision drift guard (#222 awk + #225 bash)"
@@ -164,7 +187,9 @@ fixture_emit_topic_log_src="$(mktemp)"
 r6_log_tmp="$(mktemp)"
 fixture_cmd_bad="$(mktemp)"
 fixture_cmd_safe="$(mktemp)"
-trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp" "$fixture_cmd_bad" "$fixture_cmd_safe"' EXIT
+fixture_bash_braced_bad="$(mktemp)"
+fixture_bash_braced_safe="$(mktemp)"
+trap 'rm -f "$fixture_simple" "$fixture_multi" "$fixture_safe" "$fixture_bash_bad" "$fixture_bash_safe" "$fixture_emit_topic_log_src" "$r6_log_tmp" "$fixture_cmd_bad" "$fixture_cmd_safe" "$fixture_bash_braced_bad" "$fixture_bash_braced_safe"' EXIT
 
 # R2 — fixture proof: a synthetic SKILL.md fragment containing the bad shape
 # MUST be detected by the same regex. This is an inside-out check that the
@@ -264,27 +289,73 @@ else
   PASS=$((PASS+1))
 fi
 
-# R4 — issue #225 follow-up: orchestrator/SKILL.md must contain NO bare `$N`
-# anywhere (any surface, awk OR bash). The orchestrator skill is loaded by
-# both /uberdev:orchestrator (interactive) and the chain-dispatch from
-# /uberdev:solve / /uberdev:turbo, so every $N in its body is at risk.
-# Scope is intentionally narrow to issue #225's stated surface; the broader
-# bash-positional sweep across other pipeline SKILL.md files is documented
-# in the header comment as a follow-up and NOT enforced here (would red CI
-# on 7+ known sites in solve/goal/finish/testers/ubersimplify pipelines).
+# R4 — issue #225, widened by issue #404. NO templated markdown file may
+# contain a renderer-substitutable positional ref anywhere in its body, on any
+# surface (awk OR bash), in either spelling (`$N` or `${N}`). Corpus is R1's
+# unioned with R1b's — see the header comment for what deliberately stays out.
+#
+# Every file here is rendered by the Skill loader before the model or the shell
+# ever sees it, so a positional token in the SOURCE is not a positional at
+# RUNTIME: it is whatever the caller's Nth argument happened to be. Escaping
+# cannot fix it (`${N}` is substituted too), which is why the guard is a
+# spelling ratchet and not a lint suggestion.
+#
+# ORCH_SKILL is still resolved here — R6 below sources the live emit_topic_log
+# out of it.
 ORCH_SKILL="$SKILLS_DIR/orchestrator/SKILL.md"
-if [ ! -r "$ORCH_SKILL" ]; then
-  echo "  FAIL  R4 orchestrator/SKILL.md unreadable: $ORCH_SKILL"
-  FAIL=$((FAIL+1))
-elif grep -qE "$BASH_GUARD_REGEX" "$ORCH_SKILL"; then
-  echo "  FAIL  R4 orchestrator/SKILL.md contains bare \$N positional refs:"
-  grep -nE "$BASH_GUARD_REGEX" "$ORCH_SKILL" | sed 's/^/          /'
-  echo "         Fix: replace bare \`\$N\` with \`\${@:N:1}\` in bash function bodies"
-  echo "         (or \`-v cN=N\` + \`\$cN\` if inside an awk script body)."
-  FAIL=$((FAIL+1))
-else
-  echo "  PASS  R4 orchestrator/SKILL.md contains no bare \$N positional refs"
+bash_corpus_files=""
+bash_corpus_hits=""
+while IFS= read -r -d '' corpus_file; do
+  bash_corpus_files="$bash_corpus_files${corpus_file#"$REPO_ROOT"/}"$'\n'
+  corpus_hit="$(grep -nE "$BASH_GUARD_REGEX" "$corpus_file" || true)"
+  [ -n "$corpus_hit" ] || continue
+  while IFS= read -r corpus_line; do
+    [ -n "$corpus_line" ] || continue
+    bash_corpus_hits="$bash_corpus_hits${corpus_file#"$REPO_ROOT"/}:$corpus_line"$'\n'
+  done <<EOF_CORPUS_HIT
+$corpus_hit
+EOF_CORPUS_HIT
+done < <(find "$SKILLS_DIR" -name "SKILL.md" -print0; find "$COMMANDS_DIR" -name "*.md" -print0)
+
+if [ -z "$bash_corpus_hits" ]; then
+  echo "  PASS  R4 no templated SKILL.md / command file contains a renderer-substitutable positional ref"
   PASS=$((PASS+1))
+else
+  echo "  FAIL  R4 these templated files contain renderer-substitutable positional refs:"
+  printf '%s' "$bash_corpus_hits" | sed 's/^/          /'
+  echo "         Fix: replace \`\$N\` / \`\${N}\` with \`\${@:N:1}\` in bash function bodies"
+  echo "         (or \`-v cN=N\` + \`\$cN\` if inside an awk script body). Braces alone do"
+  echo "         NOT help — the renderer substitutes \`\${N}\` too (issue #404)."
+  FAIL=$((FAIL+1))
+fi
+
+# R4.corpus — anti-vacuity. A `find` that silently matches nothing (renamed
+# directory, wrong -name pattern, unreadable path) would make R4 above pass on
+# an empty corpus and report a green ratchet over zero files. Assert the corpus
+# is non-empty AND still contains the two files #404 measured as the worst
+# offenders (30 and 11 sites respectively).
+#
+# orchestrator/SKILL.md is required readable in the same row: R4's predecessor
+# checked that directly and R6 below still depends on it — an unreadable file
+# makes R6's slice empty, which R6 reports as the legitimate post-#308
+# "function retired" PASS rather than as a broken corpus.
+r4_corpus_missing=""
+for corpus_expected in \
+  plugins/uberdev/commands/review-pr.md \
+  plugins/uberdev/skills/post-impl-review/SKILL.md; do
+  case $'\n'"$bash_corpus_files" in
+    *$'\n'"$corpus_expected"$'\n'*) ;;
+    *) r4_corpus_missing="$r4_corpus_missing $corpus_expected" ;;
+  esac
+done
+[ -r "$ORCH_SKILL" ] || r4_corpus_missing="$r4_corpus_missing $ORCH_SKILL(unreadable)"
+if [ -n "$bash_corpus_files" ] && [ -z "$r4_corpus_missing" ]; then
+  echo "  PASS  R4.corpus the scanned corpus is non-empty and includes the known high-density files"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R4.corpus the scanned corpus is empty or lost a known file:$r4_corpus_missing"
+  echo "         R4 above would report PASS over a corpus it never actually read."
+  FAIL=$((FAIL+1))
 fi
 
 # R5 — fixture proof for the bash surface, mirroring R2/R3 for the awk surface.
@@ -345,6 +416,62 @@ if grep -qE "$BASH_GUARD_REGEX" "$fixture_bash_safe"; then
   FAIL=$((FAIL+1))
 else
   echo "  PASS  R5.safe the bare-\$N regex does NOT false-positive on the safe \`\${@:N:1}\` shape"
+  PASS=$((PASS+1))
+fi
+
+# R5b — issue #404's half of the inverse proof: the BRACED spelling. The #404
+# author first "fixed" the corruption by rewriting `$N` -> `${N}`, reasoning
+# that `${2:-}` and `${10}` had survived a live render. They had survived only
+# because those positionals did not exist. The verified rule is:
+#   `${N}` where positional N EXISTS       -> replaced by the argument
+#   `${N}` where N has NO argument         -> brace-stripped to `$N` (harmless)
+# So braces change the spelling, not the outcome, and a guard that only knew
+# `\$[0-9]` would have certified that non-fix as clean. R5b.bad pins that the
+# widened regex catches the braced spelling with NO bare form present at all,
+# and R5b.safe pins that widening did not swallow the recommended fix — the
+# braced-but-safe `${@:N:1}` and ordinary `${VAR:-default}` expansions.
+#
+# Neither fixture declares a zsh-tied local (`status`, `path`, `dir`, `argv`, …):
+# the marked-line inventory in tests/crossplatform-shell-wrappers.test.sh is
+# pinned per file, and this file's allowance is exactly one line (R5.bad's).
+cat > "$fixture_bash_braced_bad" <<'EOF_BRACED_BAD'
+# braced positional refs, no bare `$N` anywhere — the renderer rewrites these
+# exactly as it rewrites the bare form, so the guard MUST flag them.
+emit_topic_log() {
+  local topic="${1}"
+  local topic_status="${2}"
+  local note="${10}"
+  echo "research-$topic $topic_status $note"
+}
+EOF_BRACED_BAD
+if grep -qE "$BASH_GUARD_REGEX" "$fixture_bash_braced_bad"; then
+  echo "  PASS  R5b.bad the widened regex flags the braced \`\${N}\` spelling"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  R5b.bad the widened regex misses the braced \`\${N}\` spelling"
+  echo "         A \`\$N\` -> \`\${N}\` non-fix would pass R4 while staying corrupted (#404)."
+  FAIL=$((FAIL+1))
+fi
+
+cat > "$fixture_bash_braced_safe" <<'EOF_BRACED_SAFE'
+# renderer-safe forms that a naively-widened regex would false-positive on:
+# the array-slice fix (including a two-digit index) and ordinary parameter
+# expansions whose default value happens to be numeric.
+emit_topic_log() {
+  local topic="${@:1:1}"
+  local topic_status="${@:2:1}"
+  local note="${@:10:1}"
+  local timeout_s="${TIMEOUT:-300}"
+  local extra="${VAR:-}"
+  echo "research-$topic $topic_status $note $timeout_s $extra"
+}
+EOF_BRACED_SAFE
+if grep -qE "$BASH_GUARD_REGEX" "$fixture_bash_braced_safe"; then
+  echo "  FAIL  R5b.safe the widened regex false-positives on \`\${@:N:1}\` or \`\${VAR:-N}\`"
+  echo "         R4 would now red CI on the recommended fix and on ordinary defaults."
+  FAIL=$((FAIL+1))
+else
+  echo "  PASS  R5b.safe the widened regex spares \`\${@:N:1}\` and \`\${VAR:-default}\`"
   PASS=$((PASS+1))
 fi
 
