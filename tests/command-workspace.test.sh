@@ -28,6 +28,65 @@ assert fail_hints["return"] is typing.NoReturn, (
 )
 PY
 
+# #402 — declared-vs-consumed guard. CALLERS is the single source of truth for
+# the workspace artifact vocabulary, but the artifact PATH GLOBALS it produces
+# are consumed by hand-written command docs that CALLERS cannot see. The #402
+# drift was exactly that gap: review-pr.md consumed $AGG_PATH while
+# CALLERS["review-pr"] declared no "aggregate" artifact, so the prepare exported
+# an empty string and every Phase 1 aggregation returned 70.
+#
+# CONTRACT: for each caller doc, referenced globals must be a SUBSET of the
+# globals its caller declares. Subset only — do NOT tighten this to equality.
+# Declaring an artifact a doc never expands by name is legitimate (review-pr
+# declares "criteria" and hands CRITERIA_PATH to its child through the
+# descriptor, not through a $CRITERIA_PATH expansion in its own prose), and an
+# equality check would red on that.
+python3 -I -B - "$HELPER" \
+  "$ROOT/plugins/uberdev/commands/review-pr.md" \
+  "$ROOT/plugins/uberdev/commands/simplify.md" \
+  "$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md" <<'PY'
+import importlib.util
+import pathlib
+import re
+import sys
+
+module_path, review_doc, simplify_doc, post_impl_doc = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("command_workspace_vocabulary", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+# The artifact-key -> shell-global map must be a module-level constant so this
+# guard can read the same mapping main() uses, instead of a second copy.
+mapping = module.NAME_TO_GLOBAL
+declared_keys = set().union(*(set(caller["artifacts"]) for caller in module.CALLERS.values()))
+missing_keys = sorted(declared_keys - set(mapping))
+assert not missing_keys, f"CALLERS declares artifacts with no NAME_TO_GLOBAL entry: {missing_keys}"
+
+for caller, doc_path in (
+    ("review-pr", review_doc),
+    ("simplify", simplify_doc),
+    ("post-impl-review", post_impl_doc),
+):
+    declared = {mapping[key] for key in module.CALLERS[caller]["artifacts"]}
+    if caller == "post-impl-review":
+        # The child inherits every parent artifact global (main() overlays the
+        # parent descriptor onto expected_globals), so its doc may reference the
+        # full review-pr set as well.
+        declared |= {mapping[key] for key in module.CALLERS["review-pr"]["artifacts"]}
+    text = pathlib.Path(doc_path).read_text(encoding="utf-8")
+    referenced = {
+        global_name for global_name in mapping.values()
+        if re.search(r"\$\{?" + global_name + r"\b", text)
+    }
+    undeclared = sorted(referenced - declared)
+    assert not undeclared, (
+        f"{caller} consumes artifact globals its CALLERS entry does not declare: {undeclared} "
+        f"(an undeclared global is exported as the empty string)"
+    )
+PY
+
 . "$LIB"
 
 file_mode() {
@@ -951,20 +1010,30 @@ EXPECTED="$REPO/.uberdev/research/$RUN_ID"
 [ "$COMMIT_RANGE_PATH" = "$EXPECTED/commit-range.txt" ]
 [ "$PHASE1_DISPOSITION_PATH" = "$EXPECTED/phase1-disposition.json" ]
 [ "$PHASE2_DISPOSITION_PATH" = "$EXPECTED/phase2-disposition.json" ]
-for path in "$DIFF_ARTIFACT_PATH" "$CRITERIA_PATH" "$COMMIT_RANGE_PATH" "$PHASE1_DISPOSITION_PATH" "$PHASE2_DISPOSITION_PATH"; do
+# #402 — the review-pr caller owns the Phase 1 aggregate. Without this
+# declaration child-dispatch.sh exported AGG_PATH="" and the Phase 1 fence
+# handed an empty destination to post_review_write_aggregate_v2, which returns
+# unsafe-output; the fence then returned 70 on every run and Phase 2 never ran.
+[ "$AGG_PATH" = "$EXPECTED/post-impl-review-final.md" ]
+for path in "$DIFF_ARTIFACT_PATH" "$CRITERIA_PATH" "$COMMIT_RANGE_PATH" "$PHASE1_DISPOSITION_PATH" "$PHASE2_DISPOSITION_PATH" "$AGG_PATH"; do
   [ "$(file_mode "$path")" = 600 ]
   [ "$(file_link_count "$path")" = 1 ]
 done
 [ ! -s "$PHASE1_DISPOSITION_PATH" ]
 [ ! -s "$PHASE2_DISPOSITION_PATH" ]
+[ ! -s "$AGG_PATH" ]
 grep -q '^<external-untrusted-input source="pr-diff">$' "$DIFF_ARTIFACT_PATH"
-jq -e '.caller=="review-pr" and .carrier_workflow=="solve" and .repository_root==$repo and .research_dir==$research and (.artifacts|keys)==["commit_range","criteria","diff","phase1_disposition","phase2_disposition"]' \
+jq -e '.caller=="review-pr" and .carrier_workflow=="solve" and .repository_root==$repo and .research_dir==$research and (.artifacts|keys)==["aggregate","commit_range","criteria","diff","phase1_disposition","phase2_disposition"]' \
   --arg repo "$REPO" --arg research "$EXPECTED" <<<"$UBERDEV_COMMAND_WORKSPACE_JSON" >/dev/null
 
 # Re-entry preserves safe existing bytes.
 printf 'preserve-me\n' >"$CRITERIA_PATH"; chmod 600 "$CRITERIA_PATH"
+printf 'agg-preserve-me\n' >"$AGG_PATH"; chmod 600 "$AGG_PATH"
 uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" >/dev/null
 grep -qx 'preserve-me' "$CRITERIA_PATH"
+# A re-prepare must never truncate an aggregate Phase 1 already wrote.
+grep -qx 'agg-preserve-me' "$AGG_PATH"
+[ "$(file_mode "$AGG_PATH")" = 600 ]
 
 # Artifact globals are output-only; a mismatched preset fails without touching it.
 OUTSIDE="$TMP/outside-sentinel"

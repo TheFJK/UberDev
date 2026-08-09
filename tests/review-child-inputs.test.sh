@@ -308,6 +308,15 @@ export CI_RUN_ID=9001
 export FOCUS=$'focus "quoted" \\glob*?[x]\t'
 
 . "$TMP/review-setup.sh"
+# #402 — the extracted setup fence runs the real uberdev_command_workspace_prepare,
+# so it must leave AGG_PATH bound to the Phase 1 aggregate the command later hands
+# to post_review_write_aggregate_v2. AGG_PATH is unset above, so a pass here cannot
+# come from ambient state. Behavioural, not a grep: when CALLERS["review-pr"] had
+# no "aggregate" artifact the prepare exported AGG_PATH="" and the Phase 1 fence
+# returned 70 on every run.
+[ -n "${AGG_PATH:-}" ] || { echo 'review-child-inputs: review setup left AGG_PATH unbound' >&2; exit 1; }
+[ "$AGG_PATH" = "$RESEARCH_DIR_ABS/post-impl-review-final.md" ] \
+  || { echo "review-child-inputs: review setup bound AGG_PATH=$AGG_PATH, expected $RESEARCH_DIR_ABS/post-impl-review-final.md" >&2; exit 1; }
 . "$TMP/review-builder.sh"
 REVIEW_WORKSPACE_JSON="$UBERDEV_COMMAND_WORKSPACE_JSON"
 eval "$(declare -f review_fixer_child_bound | sed '1s/^review_fixer_child_bound/review_fixer_child_bound_production/')"

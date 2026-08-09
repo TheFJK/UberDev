@@ -704,6 +704,26 @@ PY
 else
   echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract"; FAIL=$((FAIL + 1))
 fi
+# V2.8b (#402) — MECHANISM PIN, not a red-first test: this passes on the buggy
+# tree too. It locks WHY an undeclared workspace artifact was fatal rather than
+# silently lossy. When CALLERS["review-pr"] carried no "aggregate" key,
+# child-dispatch.sh exported AGG_PATH="" and the Phase 1 fence handed that empty
+# string straight to the writer, which classifies it `unsafe-output` (os.path.isabs("")
+# is False) and exits 1 — so the fence returned 70 and Phase 2 / Phase 2.5 never
+# ran. The declaration fix must not be allowed to rot back into a writer that
+# accepts an empty destination and writes somewhere relative to the cwd.
+if (
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "" \
+      2>"$POST_REVIEW_V2_TMP/empty-path.err"
+  grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err"
+); then
+  echo "  PASS  V2.8b — an empty aggregate destination is refused as unsafe-output (the #402 failure mechanism stays fail-closed)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  V2.8b — writer must refuse an empty aggregate destination with class=unsafe-output"; FAIL=$((FAIL + 1))
+fi
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" <<'PY'
 import hashlib,importlib.util,os,pathlib,subprocess,sys
 

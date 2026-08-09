@@ -23,6 +23,14 @@ CALLERS = {
         "workflows": {"review-pr", "solve", "turbo"},
         "artifacts": {
             "diff": ("pr-diff.md", b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n'),
+            # The Phase 1 aggregate. The basename is pinned by RFC 0012 sec 3.1 and
+            # hardcoded by every consumer (commands/review-pr.md,
+            # skills/post-impl-review/SKILL.md), so any other name silently
+            # desynchronises AGG_PATH from PHASE1_FINDINGS_PATH. Initial bytes are
+            # b"" (allocate empty) rather than None (must already exist): review-pr
+            # is the caller that CREATES this file, so None would fail the first
+            # prepare with required_artifact_missing.
+            "aggregate": ("post-impl-review-final.md", b""),
             "criteria": ("review-criteria.md", b""),
             "commit_range": ("commit-range.txt", b""),
             "phase1_disposition": ("phase1-disposition.json", b""),
@@ -46,6 +54,16 @@ CALLERS = {
             "criteria": ("review-criteria.md", None),
         },
     },
+}
+# Artifact key -> exported shell global. Module scope, not main()-local, so the
+# declared-vs-consumed guard in tests/command-workspace.test.sh can compare what
+# CALLERS declares against what the command docs actually expand, instead of
+# keeping a second copy of this mapping (#402).
+NAME_TO_GLOBAL = {
+    "diff": "DIFF_ARTIFACT_PATH", "criteria": "CRITERIA_PATH", "commit_range": "COMMIT_RANGE_PATH",
+    "phase1_disposition": "PHASE1_DISPOSITION_PATH", "phase2_disposition": "PHASE2_DISPOSITION_PATH",
+    "aggregate": "AGG_PATH",
+    "standalone_snapshot": "STANDALONE_SNAPSHOT_PATH",
 }
 DESCRIPTOR_KEYS = {
     "schema_version", "caller", "carrier_workflow", "carrier_run_id",
@@ -1359,17 +1377,11 @@ def main() -> int:
             fail("invalid_parent_workspace")
     artifacts = CALLERS[args.caller]["artifacts"]
     expected_globals = {}
-    name_to_global = {
-        "diff": "DIFF_ARTIFACT_PATH", "criteria": "CRITERIA_PATH", "commit_range": "COMMIT_RANGE_PATH",
-        "phase1_disposition": "PHASE1_DISPOSITION_PATH", "phase2_disposition": "PHASE2_DISPOSITION_PATH",
-        "aggregate": "AGG_PATH",
-        "standalone_snapshot": "STANDALONE_SNAPSHOT_PATH",
-    }
     for key, (name, _initial) in artifacts.items():
-        expected_globals[name_to_global[key]] = os.path.join(expected_workspace, name)
+        expected_globals[NAME_TO_GLOBAL[key]] = os.path.join(expected_workspace, name)
     if args.caller == "post-impl-review":
         for key, path in parent["artifacts"].items():
-            global_name = name_to_global.get(key)
+            global_name = NAME_TO_GLOBAL.get(key)
             if global_name:
                 expected_globals[global_name] = path
     try:

@@ -766,6 +766,10 @@ descriptor=json.loads(sys.argv[1])
 workspace=descriptor["research_dir"]
 expected={
     "diff":b'<external-untrusted-input source="pr-diff">\n</external-untrusted-input>\n',
+    # #402 — the Phase 1 aggregate is a declared review-pr artifact; it is
+    # allocated empty and Phase 1 fills it. The key-set assert below makes the
+    # empty payload load-bearing, not decorative.
+    "aggregate":b"",
     "criteria":b"",
     "commit_range":b"",
     "phase1_disposition":b"",
