@@ -3655,11 +3655,23 @@ PY
     > lease while re-wiring it: an LLM choosing the SHA git compares against is
     > exactly the hole the demotion closes.
     >
-    > One thing below is NOT stale: the cross-repository push gate in the
-    > variable-binding fence (#395). It is the only thing standing between a fork
-    > PR and a raw `git push` error, it lives on disk in
-    > `lib/review-push-target.sh` precisely so the rewiring can call it unchanged,
-    > and it must stay AHEAD of the lease capture wherever the push ends up.
+    > Two things below are NOT stale, and both must survive the rewiring:
+    >
+    > 1. The cross-repository push gate in the variable-binding fence (#395). It
+    >    is the only thing standing between a fork PR and a raw `git push` error,
+    >    it lives on disk in `lib/review-push-target.sh` precisely so the rewiring
+    >    can call it unchanged, and it must stay AHEAD of the lease capture
+    >    wherever the push ends up.
+    > 2. Step 4's unmerged-path enumeration (#398). The second row of the table
+    >    above already points at it — `code_fixer_contract.py
+    >    list-ci-unmerged-paths`, reached via `review_fleet_unmerged_paths` — so
+    >    that recipe is the LIVE one, not `main`'s retired shape. It matches the
+    >    add/add status as well as the both-modified one: an add/add rebase
+    >    conflict has no common ancestor blob, so git records it as the former
+    >    and never the latter, which is how the retired both-modified-only
+    >    pattern returned the empty set and made "all RESOLVED" vacuously true.
+    >    It also slurps with `read -r -d ''` rather than bash's array-slurp
+    >    builtin, which zsh does not provide.
 
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
