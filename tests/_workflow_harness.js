@@ -27,7 +27,13 @@
  *   node tests/_workflow_harness.js meta <file>
  *       Print the parsed meta JSON (utility for other tests / debugging).
  *
- * Exit codes: 0 = all green; 1 = assertion failures; 2 = usage / IO error.
+ * Exit codes: 0 = all green; 1 = assertion failures; 2 = usage / IO error
+ * (including a malformed UBERDEV_HARNESS_TIMEOUT_MS — see the budget block).
+ *
+ * ENV: UBERDEV_HARNESS_TIMEOUT_MS overrides the per-script/per-case dry-run
+ * budget (positive integer milliseconds). It is a HANG detector, not a
+ * stopwatch — see the "Dry-run budgets" block below for why that distinction
+ * is load-bearing on a contended CI runner.
  *
  * T3 EXECUTION PATH (encoded choice per RFC 0012 §4.4): strip the
  * `export const meta` statement (T2 already parses it from the markers), wrap
@@ -85,7 +91,60 @@ const META_BEGIN = '/* META-BEGIN */';
 const META_END = '/* META-END */';
 const SHARED_BEGIN_RE = /^[ \t]*\/\/ === SHARED:([A-Za-z0-9._-]+) v([0-9]+) ===[ \t]*$/;
 const SHARED_END_RE = /^[ \t]*\/\/ === END SHARED ===[ \t]*$/;
-const DEFAULT_RUN_TIMEOUT_MS = 10000;
+
+/* ------------------------------------------------------------------ *
+ * Dry-run budgets (issue #396)
+ * ------------------------------------------------------------------ *
+ * Every budget below is a HANG DETECTOR — "does this script ever settle?" —
+ * and NEVER a performance assertion. Nothing the harness runs is timed: the
+ * self-test scripts do a handful of setImmediate hops, and a migrated
+ * workflow.js dry-run only walks its own control flow under stubs. So the only
+ * thing a budget must separate is "settles" from "never settles", and sizing
+ * it tight buys nothing while costing CI flakes.
+ *
+ * It cost one: a hard-coded 2000 ms at every self-test call site reddened H11
+ * at random on `shape-checks-windows` (#396) — byte-identical harness, no code
+ * change between a failing and a passing attempt of the same commit, the whole
+ * block 6.3x slower on the failing one with the preceding step taking 24.5 s.
+ * A starved runner can stall this process for seconds; that is a fact about
+ * the runner, not a defect in the script under test.
+ *
+ * ONE knob, so a slower host moves every budget together instead of leaving a
+ * literal behind. Non-scaling by design: HANG_PROBE_TIMEOUT_MS (H15 asserts a
+ * timeout FIRES on a script that never settles — starvation can only delay
+ * that, never break it, and a scaled value would just make the suite slower).
+ */
+const RUN_TIMEOUT_ENV = 'UBERDEV_HARNESS_TIMEOUT_MS';
+const DEFAULT_RUN_TIMEOUT_MS = 30000;
+
+// A malformed override is a hard refusal, not a fallback: running the whole
+// suite under a budget nobody chose is how a wrong oracle ships (cf. the ARGS
+// SHAPE note on the `validate` CLI below).
+function resolveRunTimeoutMs(env) {
+  const raw = env[RUN_TIMEOUT_ENV];
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_RUN_TIMEOUT_MS;
+  const parsed = Number(String(raw).trim());
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    console.error(
+      `FATAL: ${RUN_TIMEOUT_ENV}="${raw}" is not a positive integer number of milliseconds. `
+      + `Unset it to use the ${DEFAULT_RUN_TIMEOUT_MS} ms default.`);
+    process.exit(2);
+  }
+  return parsed;
+}
+
+// Per-script/per-case dry-run budget (T3 `validate` and every self-test case).
+const RUN_TIMEOUT_MS = resolveRunTimeoutMs(process.env);
+// H15 only: the script under test awaits forever, so this fires on any runner.
+const HANG_PROBE_TIMEOUT_MS = 300;
+// Ceiling on the wall-clock interleaving probes in the gated cases (H7/H8).
+// Strictly below RUN_TIMEOUT_MS so a probe can never outlive the run it
+// observes, at any override value.
+const GATE_PROBE_TIMEOUT_MS = Math.max(1, Math.floor(RUN_TIMEOUT_MS / 3));
+const GATE_POLL_INTERVAL_MS = 10;
+// H7's "has it settled yet?" nudge. Not a race: the gate is still held, so a
+// settle within this window would be a genuine barrier defect.
+const SETTLE_PROBE_MS = 50;
 
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
@@ -482,7 +541,7 @@ async function runScript(source, fixture, label, timeoutMs) {
 
   const record = makeRecord();
   const { sandbox } = makeSandbox(fixture, meta, record);
-  const run = await executeWrapped(pre.wrapped, sandbox, label, timeoutMs || DEFAULT_RUN_TIMEOUT_MS);
+  const run = await executeWrapped(pre.wrapped, sandbox, label, timeoutMs || RUN_TIMEOUT_MS);
   if (run.error) {
     errors.push(`[T3] dry-run failed: ${run.error}`);
   }
@@ -584,18 +643,39 @@ const VALID_META = [
   '/* META-END */',
 ];
 
+// Compose the one-line `  FAIL  <desc> — <cause>` row.
+//
+// The cause MUST ride on the FAIL line ITSELF. tests/workflow-scripts.test.sh
+// surfaces a red self-test with `grep '^  FAIL'`, so anything printed on a
+// continuation line never reaches the CI log — which is exactly how a silent
+// dry-run budget overrun read as "stub drift or wrapper bug" and sent the #396
+// investigation the wrong way. Whitespace is folded for the same reason: one
+// row, one line, no matter how the cause was formatted.
+function failLine(desc, cause) {
+  const text = cause === undefined || cause === null
+    ? '' : String(cause).replace(/\s+/g, ' ').trim();
+  return text === '' ? `  FAIL  ${desc}` : `  FAIL  ${desc} — ${text}`;
+}
+
 async function selfTest() {
   let pass = 0;
   let fail = 0;
-  const ok = (cond, desc) => {
+  // `detail` is a string or a thunk (evaluated only when the row fails).
+  const ok = (cond, desc, detail) => {
     if (cond) {
       console.log(`  PASS  ${desc}`);
       pass += 1;
-    } else {
-      console.log(`  FAIL  ${desc}`);
-      fail += 1;
+      return;
     }
+    console.log(failLine(desc, typeof detail === 'function' ? detail() : detail));
+    fail += 1;
   };
+  // The standard cause for any row gated on a clean dry-run: name the harness
+  // errors, and say so explicitly when there are none (then the row's own
+  // predicate is what is false — real stub drift, not an environment stall).
+  const why = (errors) => () => (errors && errors.length > 0
+    ? `harness errors: ${errors.join(' ; ')}`
+    : 'dry-run was clean, so the assertion itself is false (stub drift)');
 
   /* H1 — meta extraction happy path */
   {
@@ -630,14 +710,14 @@ async function selfTest() {
   /* H3 — static phase-literal discipline */
   {
     const good = src([...VALID_META, 'phase("Alpha");', 'await agent("p", { phase: "Beta" });']);
-    const { errors } = await runScript(good, {}, 'h3-good', 2000);
-    ok(errors.length === 0, `H3.1 declared phase()/opts.phase literals pass (${errors.join('; ') || 'no errors'})`);
+    const { errors } = await runScript(good, {}, 'h3-good', RUN_TIMEOUT_MS);
+    ok(errors.length === 0, 'H3.1 declared phase()/opts.phase literals pass', why(errors));
     const bad = src([...VALID_META, 'phase("Gamma");']);
-    const res = await runScript(bad, {}, 'h3-bad', 2000);
-    ok(res.errors.some((e) => e.includes('"Gamma"')), 'H3.2 undeclared phase() literal fails T2');
+    const res = await runScript(bad, {}, 'h3-bad', RUN_TIMEOUT_MS);
+    ok(res.errors.some((e) => e.includes('"Gamma"')), 'H3.2 undeclared phase() literal fails T2', why(res.errors));
     const badProp = src([...VALID_META, 'await agent("p", { phase: "Delta" });']);
-    const resProp = await runScript(badProp, {}, 'h3-badprop', 2000);
-    ok(resProp.errors.some((e) => e.includes('"Delta"')), 'H3.3 undeclared opts.phase literal fails T2');
+    const resProp = await runScript(badProp, {}, 'h3-badprop', RUN_TIMEOUT_MS);
+    ok(resProp.errors.some((e) => e.includes('"Delta"')), 'H3.3 undeclared opts.phase literal fails T2', why(resProp.errors));
   }
 
   /* H4 — preprocessing */
@@ -650,9 +730,9 @@ async function selfTest() {
     const leftover = preprocess(src([...VALID_META, 'export const other = 1;']));
     ok(!!leftover.error && leftover.error.includes('leftover export'),
       'H4.3 leftover export statement after meta strip is a preprocessing error');
-    const { errors, record } = await runScript(src([...VALID_META, 'log("alive");', 'await Promise.resolve(1);']), {}, 'h4-run', 2000);
+    const { errors, record } = await runScript(src([...VALID_META, 'log("alive");', 'await Promise.resolve(1);']), {}, 'h4-run', RUN_TIMEOUT_MS);
     ok(errors.length === 0 && record.logs.length === 1 && record.logs[0] === 'alive',
-      'H4.4 preprocessed body executes in the sandbox (top-level await works inside the IIFE)');
+      'H4.4 preprocessed body executes in the sandbox (top-level await works inside the IIFE)', why(errors));
   }
 
   /* H5 — agent() canned returns */
@@ -674,13 +754,13 @@ async function selfTest() {
       'const withSchema = await agent("p5", { label: "review-1", schema: { "type": "object" } });',
       'log(JSON.stringify([byLabel, byType, skipped, dflt]));',
     ]);
-    const { errors, record } = await runScript(script, fixture, 'h5', 2000);
+    const { errors, record } = await runScript(script, fixture, 'h5', RUN_TIMEOUT_MS);
     const got = errors.length === 0 ? JSON.parse(record.logs[0]) : null;
-    ok(errors.length === 0 && got && got[0].verdict === 'GREEN', 'H5.1 canned return keyed by opts.label');
-    ok(got && got[1].findings === 2, 'H5.2 canned return keyed by opts.agentType');
-    ok(got && got[2] === null, 'H5.3 canned null models user-skip / terminal API error (resolves null, never rejects)');
-    ok(got && got[3].fallback === true, 'H5.4 unmatched label falls through to the fixture default');
-    ok(record.agentCalls.filter((c) => c.hasSchema).length === 1, 'H5.5 schema presence recorded per call');
+    ok(errors.length === 0 && got && got[0].verdict === 'GREEN', 'H5.1 canned return keyed by opts.label', why(errors));
+    ok(got && got[1].findings === 2, 'H5.2 canned return keyed by opts.agentType', why(errors));
+    ok(got && got[2] === null, 'H5.3 canned null models user-skip / terminal API error (resolves null, never rejects)', why(errors));
+    ok(got && got[3].fallback === true, 'H5.4 unmatched label falls through to the fixture default', why(errors));
+    ok(record.agentCalls.filter((c) => c.hasSchema).length === 1, 'H5.5 schema presence recorded per call', why(errors));
   }
 
   /* H6 — budget semantics */
@@ -691,11 +771,12 @@ async function selfTest() {
       'for (let i = 0; i < 5; i++) { await agent("p" + i, { label: "any" }); }',
       'log("spent:" + String(budget.spent()));',
     ]);
-    const r1 = await runScript(noCeiling, {}, 'h6-null', 2000);
+    const r1 = await runScript(noCeiling, {}, 'h6-null', RUN_TIMEOUT_MS);
     ok(r1.errors.length === 0 && r1.record.logs[0] === 'total:null',
-      'H6.1 budget.total is null (falsy) by default — loop guards can check budget.total && budget.remaining()');
+      'H6.1 budget.total is null (falsy) by default — loop guards can check budget.total && budget.remaining()',
+      why(r1.errors));
     ok(r1.errors.length === 0 && r1.record.agentCalls.length === 5 && r1.record.logs[1] === 'spent:5',
-      'H6.2 no ceiling: agent() never throws, spent() counts costs');
+      'H6.2 no ceiling: agent() never throws, spent() counts costs', why(r1.errors));
 
     const ceiling = src([
       ...VALID_META,
@@ -705,18 +786,19 @@ async function selfTest() {
       '} catch (e) { log("caught:" + e.message); }',
       'log("remaining:" + String(budget.remaining()));',
     ]);
-    const r2 = await runScript(ceiling, { budgetTotal: 2 }, 'h6-cap', 2000);
+    const r2 = await runScript(ceiling, { budgetTotal: 2 }, 'h6-cap', RUN_TIMEOUT_MS);
     ok(r2.errors.length === 0 && r2.record.agentCalls.length === 2 && r2.record.budgetThrows === 1,
-      'H6.3 with total=2 the third agent() call throws past the ceiling (and is not recorded as dispatched)');
+      'H6.3 with total=2 the third agent() call throws past the ceiling (and is not recorded as dispatched)',
+      why(r2.errors));
     ok(r2.errors.length === 0 && r2.record.logs.some((l) => l.startsWith('caught:workflow budget exceeded')),
-      'H6.4 the budget throw is catchable inside the script (DR-8 finalize pattern)');
+      'H6.4 the budget throw is catchable inside the script (DR-8 finalize pattern)', why(r2.errors));
     ok(r2.errors.length === 0 && r2.record.logs.includes('remaining:0'),
-      'H6.5 budget.remaining() reaches 0 at the ceiling');
+      'H6.5 budget.remaining() reaches 0 at the ceiling', why(r2.errors));
 
     const escaped = src([...VALID_META, 'await agent("a", {}); await agent("b", {});']);
-    const r3 = await runScript(escaped, { budgetTotal: 1 }, 'h6-escape', 2000);
+    const r3 = await runScript(escaped, { budgetTotal: 1 }, 'h6-escape', RUN_TIMEOUT_MS);
     ok(r3.errors.some((e) => e.includes('budget exceeded')),
-      'H6.6 an uncaught budget throw fails the dry-run (the DR-8 violation surfaces)');
+      'H6.6 an uncaught budget throw fails the dry-run (the DR-8 violation surfaces)', why(r3.errors));
   }
 
   /* H7 — parallel(): barrier + thunk-throws-to-null + order */
@@ -737,24 +819,25 @@ async function selfTest() {
       'log("barrier-released");',
       'log(JSON.stringify(results));',
     ]);
-    const runPromise = runScript(script, fixture, 'h7', 4000);
+    const runPromise = runScript(script, fixture, 'h7', RUN_TIMEOUT_MS);
     // Give the fast thunk time to finish while the slow gate is still held.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_PROBE_MS));
     const fixtureRecordProbe = 'barrier holds: run not settled while one thunk is gated';
     let settledEarly = false;
     const probe = runPromise.then(() => { settledEarly = true; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    ok(!settledEarly, `H7.1 ${fixtureRecordProbe}`);
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_PROBE_MS));
+    ok(!settledEarly, `H7.1 ${fixtureRecordProbe}`,
+      'the gated run settled before its gate was released (barrier broken, or the run budget expired under it)');
     release();
     const { errors, record } = await runPromise;
     await probe;
     const results = errors.length === 0 ? JSON.parse(record.logs[1]) : null;
     ok(errors.length === 0 && record.logs[0] === 'barrier-released',
-      'H7.2 parallel() resolves only after ALL thunks settle (barrier)');
+      'H7.2 parallel() resolves only after ALL thunks settle (barrier)', why(errors));
     ok(results && results[0].id === 'slow' && results[1].id === 'fast',
-      'H7.3 parallel() preserves thunk order in the results array');
+      'H7.3 parallel() preserves thunk order in the results array', why(errors));
     ok(results && results[2] === null,
-      'H7.4 a throwing thunk resolves to null in its slot (parallel never rejects)');
+      'H7.4 a throwing thunk resolves to null in its slot (parallel never rejects)', why(errors));
   }
 
   /* H8 — pipeline(): callback args + drop-to-null + NO inter-stage barrier */
@@ -780,28 +863,32 @@ async function selfTest() {
       ');',
       'log("out:" + JSON.stringify(out));',
     ]);
-    const runPromise = runScript(script, fixture, 'h8', 4000);
+    const runPromise = runScript(script, fixture, 'h8', RUN_TIMEOUT_MS);
     // Item b should clear BOTH stages while item a is still gated in stage 1.
     // Poll (instead of a fixed sleep) so a slow CI runner can't false-FAIL:
     // the gate on stage1-a is held, so 's2-a' CANNOT appear until releaseA().
+    // The ceiling is a fraction of the run budget so the probe can never
+    // outlive the run it is observing, at any override value (#396).
     {
-      const deadline = Date.now() + 2000;
+      const deadline = Date.now() + GATE_PROBE_TIMEOUT_MS;
       while (!events.includes('s2-b') && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((resolve) => setTimeout(resolve, GATE_POLL_INTERVAL_MS));
       }
     }
     const bFinishedFirst = events.includes('s2-b') && !events.includes('s2-a');
     releaseA();
     const { errors, record } = await runPromise;
-    ok(errors.length === 0, `H8.0 pipeline fixture runs clean (${errors.join('; ') || 'no errors'})`);
+    ok(errors.length === 0, 'H8.0 pipeline fixture runs clean', why(errors));
     const shapeLog = record.logs.find((l) => l.startsWith('argshape:'));
     ok(!!shapeLog && shapeLog.includes('["a","a",0]'),
-      'H8.1 stage callbacks receive (prevResult, originalItem, index); the first stage sees the item as prevResult');
+      'H8.1 stage callbacks receive (prevResult, originalItem, index); the first stage sees the item as prevResult',
+      why(errors));
     ok(bFinishedFirst,
-      'H8.2 NO inter-stage barrier: item b reached stage 2 while item a was still in stage 1');
+      'H8.2 NO inter-stage barrier: item b reached stage 2 while item a was still in stage 1',
+      () => `stage events after ${GATE_PROBE_TIMEOUT_MS}ms: [${events.join(',')}]`);
     const outLog = record.logs.find((l) => l.startsWith('out:'));
     ok(!!outLog && JSON.parse(outLog.slice(4)).length === 2,
-      'H8.3 pipeline() returns an array index-aligned with items');
+      'H8.3 pipeline() returns an array index-aligned with items', why(errors));
 
     const dropScript = src([
       ...VALID_META,
@@ -811,12 +898,13 @@ async function selfTest() {
       ');',
       'log(JSON.stringify(out));',
     ]);
-    const dropRun = await runScript(dropScript, {}, 'h8-drop', 2000);
+    const dropRun = await runScript(dropScript, {}, 'h8-drop', RUN_TIMEOUT_MS);
     const dropOut = dropRun.errors.length === 0 ? JSON.parse(dropRun.record.logs[0]) : null;
     ok(dropOut && dropOut[0] === 11 && dropOut[1] === null && dropOut[2] === 31,
-      'H8.4 a throwing stage drops that item to null and skips its remaining stages (others unaffected)');
+      'H8.4 a throwing stage drops that item to null and skips its remaining stages (others unaffected)',
+      why(dropRun.errors));
     ok(dropRun.record.pipelineDrops.length === 1 && dropRun.record.pipelineDrops[0].index === 1,
-      'H8.5 the drop is recorded with the item index');
+      'H8.5 the drop is recorded with the item index', why(dropRun.errors));
   }
 
   /* H9 — forbidden-global shadows THROW */
@@ -827,8 +915,8 @@ async function selfTest() {
       ['argless new Date()', 'const d = new Date();'],
     ];
     for (const [name, line] of cases) {
-      const { errors } = await runScript(src([...VALID_META, line]), {}, 'h9', 2000);
-      ok(errors.some((e) => e.includes('forbidden')), `H9 ${name} throws inside the sandbox`);
+      const { errors } = await runScript(src([...VALID_META, line]), {}, 'h9', RUN_TIMEOUT_MS);
+      ok(errors.some((e) => e.includes('forbidden')), `H9 ${name} throws inside the sandbox`, why(errors));
     }
     const allowed = src([
       ...VALID_META,
@@ -836,18 +924,18 @@ async function selfTest() {
       'const f = Math.floor(2.7);',
       'log("ok:" + d.getUTCFullYear() + ":" + f);',
     ]);
-    const r = await runScript(allowed, {}, 'h9-allowed', 2000);
+    const r = await runScript(allowed, {}, 'h9-allowed', RUN_TIMEOUT_MS);
     ok(r.errors.length === 0 && r.record.logs[0] === 'ok:2023:2',
-      'H9.4 new Date(value) with arguments and non-random Math statics stay usable');
+      'H9.4 new Date(value) with arguments and non-random Math statics stay usable', why(r.errors));
   }
 
   /* H10 — args verbatim */
   {
     const fixture = { args: { v: 1, run_id: 'r-1', config: { areas: 8, nested: { deep: true } } } };
     const script = src([...VALID_META, 'log(JSON.stringify(args));']);
-    const { errors, record } = await runScript(script, fixture, 'h10', 2000);
+    const { errors, record } = await runScript(script, fixture, 'h10', RUN_TIMEOUT_MS);
     ok(errors.length === 0 && record.logs[0] === JSON.stringify(fixture.args),
-      'H10.1 args arrive verbatim (deep-equal round-trip)');
+      'H10.1 args arrive verbatim (deep-equal round-trip)', why(errors));
   }
 
   /* H11 — phase/log recorders + per-phase agent counts */
@@ -862,14 +950,14 @@ async function selfTest() {
       'await agent("b1", {});',
       'await agent("b2", { phase: "Alpha" });',
     ]);
-    const { errors, record } = await runScript(script, {}, 'h11', 2000);
+    const { errors, record } = await runScript(script, {}, 'h11', RUN_TIMEOUT_MS);
     ok(errors.length === 0 && record.phases.join(',') === 'Alpha,Beta',
-      'H11.1 phase() recorder captures titles in order');
+      'H11.1 phase() recorder captures titles in order', why(errors));
     ok(errors.length === 0 && record.logs.join(',') === 'in alpha',
-      'H11.2 log() recorder captures messages');
+      'H11.2 log() recorder captures messages', why(errors));
     const counts = countAgentsByPhase(record);
     ok(errors.length === 0 && counts.Alpha === 3 && counts.Beta === 1,
-      'H11.3 agent-call counts per phase (opts.phase overrides the current phase() group)');
+      'H11.3 agent-call counts per phase (opts.phase overrides the current phase() group)', why(errors));
   }
 
   /* H12 — runtime phase discipline catches dynamic titles */
@@ -879,9 +967,10 @@ async function selfTest() {
       'const dynamic = ["Gam", "ma"].join("");',
       'phase(dynamic);',
     ]);
-    const { errors } = await runScript(script, {}, 'h12', 2000);
+    const { errors } = await runScript(script, {}, 'h12', RUN_TIMEOUT_MS);
     ok(errors.some((e) => e.includes('not declared in meta.phases')),
-      'H12.1 a dynamic phase title not in meta.phases is caught at run time (static scan cannot see it)');
+      'H12.1 a dynamic phase title not in meta.phases is caught at run time (static scan cannot see it)',
+      why(errors));
   }
 
   /* H13 — T4 shared-block drift guard */
@@ -918,32 +1007,35 @@ async function selfTest() {
       'const b = await workflow("saved-name", {});',
       'log(JSON.stringify([a, b]));',
     ]);
-    const { errors, record } = await runScript(script, fixture, 'h14', 2000);
+    const { errors, record } = await runScript(script, fixture, 'h14', RUN_TIMEOUT_MS);
     const got = errors.length === 0 ? JSON.parse(record.logs[0]) : null;
     ok(errors.length === 0 && got && got[0].child === 'ran',
-      'H14.1 workflow() canned return keyed by scriptPath');
+      'H14.1 workflow() canned return keyed by scriptPath', why(errors));
     ok(errors.length === 0 && record.workflowCalls.length === 2,
-      'H14.2 workflow() calls are recorded');
+      'H14.2 workflow() calls are recorded', why(errors));
   }
 
   /* H15 — hung script hits the timeout */
   {
+    // The one case that keeps a SHORT budget on purpose: the script under test
+    // never settles, so the timeout fires however starved the runner is, and
+    // scaling it with RUN_TIMEOUT_MS would only make the suite slower (#396).
     const script = src([...VALID_META, 'await new Promise(() => {});']);
-    const { errors } = await runScript(script, {}, 'h15', 300);
+    const { errors } = await runScript(script, {}, 'h15', HANG_PROBE_TIMEOUT_MS);
     ok(errors.some((e) => e.includes('timed out')),
-      'H15.1 a hung await fails the dry-run with a timeout (scripts must not poll/sleep)');
+      'H15.1 a hung await fails the dry-run with a timeout (scripts must not poll/sleep)', why(errors));
   }
 
   /* H16 — sandbox has no timers / Node APIs */
   {
     const script = src([...VALID_META, 'setTimeout(() => {}, 10);']);
-    const { errors } = await runScript(script, {}, 'h16', 2000);
+    const { errors } = await runScript(script, {}, 'h16', RUN_TIMEOUT_MS);
     ok(errors.some((e) => e.includes('setTimeout')),
-      'H16.1 setTimeout is absent from the sandbox (constraint 3: no script-level timers)');
+      'H16.1 setTimeout is absent from the sandbox (constraint 3: no script-level timers)', why(errors));
     const script2 = src([...VALID_META, 'const data = fs.readFileSync("/etc/hosts");']);
-    const r2 = await runScript(script2, {}, 'h16-fs', 2000);
+    const r2 = await runScript(script2, {}, 'h16-fs', RUN_TIMEOUT_MS);
     ok(r2.errors.some((e) => e.includes('fs')),
-      'H16.2 fs is absent from the sandbox (constraint 6: the script cannot touch the filesystem)');
+      'H16.2 fs is absent from the sandbox (constraint 6: the script cannot touch the filesystem)', why(r2.errors));
   }
 
   console.log('');
@@ -1016,7 +1108,7 @@ async function main() {
       const shapeErrors = [];
       for (const [shapeName, argsValue] of shapes) {
         const { errors, record } = await runScript(
-          source, { args: argsValue }, `${path.basename(file)} [args:${shapeName}]`, DEFAULT_RUN_TIMEOUT_MS);
+          source, { args: argsValue }, `${path.basename(file)} [args:${shapeName}]`, RUN_TIMEOUT_MS);
         for (const e of errors) shapeErrors.push(`[args:${shapeName}] ${e}`);
         // CONSUMPTION ORACLE — the load-bearing half. Running both shapes is
         // NOT enough on its own: the real failure is a SILENT NO-OP, not a
@@ -1107,4 +1199,10 @@ module.exports = {
   countAgentsByPhase,
   extractSharedBlocks,
   checkSharedDrift,
+  failLine,
+  // Budget surface (#396): the resolved value is what per-pipeline fixture
+  // suites should pass when they need one, so a slow host moves them together.
+  RUN_TIMEOUT_MS,
+  RUN_TIMEOUT_ENV,
+  DEFAULT_RUN_TIMEOUT_MS,
 };
