@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"
+# The cancellation fixtures below launch setsid process groups whose members
+# deliberately ignore TERM. Each one is torn down by the cancellation call it
+# exists to prove -- but if any assertion aborts the run before reaching that
+# call, a disowned busy-spinning group would outlive this suite and burn CI
+# cores for the rest of the job. Every guard registers its group id here at
+# launch, and teardown reaps whatever cancellation did not. It signals through
+# `command kill` so the stubbed `kill` one fixture below installs can never
+# capture the teardown.
+CHILD_WAIT_GUARD_GROUPS=''
+_child_wait_teardown() {
+  local guard
+  for guard in $CHILD_WAIT_GUARD_GROUPS; do
+    command kill -9 -- -"$guard" 2>/dev/null || true
+  done
+  rm -rf "$TMP"
+}
+trap _child_wait_teardown EXIT
 [ -r "$LIB" ] || { echo "RED: child wait runtime missing" >&2; exit 1; }
 . "$LIB"
 
@@ -66,16 +83,37 @@ terminal_manifest completed
 printf 'version=1\ngeneration=%s\nrun_id=worker-0001\nowner_pid=%s\nowner_identity=%s\nbackend_handle=321\nbackend_identity=\nstart_epoch=1\ntimeout_s=30\nstatus_path=%s\n' \
   "$TERMINAL_GENERATION" "$$" "$TEST_OWNER_IDENTITY" "$STATUS_REAL" >"$TERMINAL_LEASE"
 chmod 600 "$TERMINAL_LEASE"
-( sleep .2; rm -f "$TERMINAL_LEASE" ) & TERMINAL_RELEASE_PID=$!
+# Drive the two lease states directly instead of racing a `sleep .2` releaser
+# against the wait's settle budget. That budget is spent as integer `date +%s`
+# arithmetic over a one-second poll, so its real deadline is as low as ~1.0s --
+# a stalled fork used to be enough to flip this row. Both halves below are
+# speed-monotone: while the exact lease is present the wait must exhaust its
+# budget and name lease_release_pending no matter how long that takes, and once
+# the lease is gone the same call must succeed. (The converge-mid-flight
+# polling path is proven by the delayed-terminal drain fixture at the end of
+# this file, which handshakes on the wait's own first observation.)
 set +e
-uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
-TERMINAL_WAIT_RC=$?
-[ -e "$TERMINAL_LEASE" ]
-TERMINAL_LEASE_RETAINED=$?
-wait "$TERMINAL_RELEASE_PID"
+TERMINAL_RETAINED_ERROR="$(uberdev_wait_child "$STATUS" "$RESULT" 2 2>&1 >/dev/null)"
+TERMINAL_RETAINED_RC=$?
 set -e
-[ "$TERMINAL_WAIT_RC" -eq 0 ]
-[ "$TERMINAL_LEASE_RETAINED" -ne 0 ]
+[ "$TERMINAL_RETAINED_RC" -eq 1 ] || {
+  echo "FAIL: retained lifecycle lease reported rc=$TERMINAL_RETAINED_RC, expected 1 (terminal success must not be published while the exact lease is held)" >&2
+  exit 1
+}
+grep -Fq 'child settle budget exhausted' <<<"$TERMINAL_RETAINED_ERROR" || {
+  echo "FAIL: retained lifecycle lease did not name the settle budget: $TERMINAL_RETAINED_ERROR" >&2
+  exit 1
+}
+grep -Fq 'reason=lease_release_pending' <<<"$TERMINAL_RETAINED_ERROR" || {
+  echo "FAIL: retained lifecycle lease named the wrong reason: $TERMINAL_RETAINED_ERROR" >&2
+  exit 1
+}
+[ -e "$TERMINAL_LEASE" ] || { echo 'FAIL: fixture lease vanished before the retention proof' >&2; exit 1; }
+rm -f "$TERMINAL_LEASE"
+uberdev_wait_child "$STATUS" "$RESULT" 5 >/dev/null || {
+  echo 'FAIL: released lifecycle lease still blocked the terminal success' >&2
+  exit 1
+}
 rmdir "$TERMINAL_LEASE_DIR"
 
 # Terminal proof fails closed on a malformed lease entry instead of skipping it
@@ -541,12 +579,34 @@ set -e
 eval "$(declare -f _real_cancel_os_class | sed '1s/_real_cancel_os_class/_uberdev_dispatch_os_class/')"
 eval "$(declare -f _real_cancel_owned_group_state | sed '1s/_real_cancel_owned_group_state/_uberdev_dispatch_owned_group_state/')"
 
+# Both cancellation fixtures below must first discover a grandchild that a
+# freshly forked python interpreter has not necessarily created yet. That
+# discovery is pure harness setup: how fast this host can start an interpreter
+# says nothing about the cancellation contract under test, so poll against a
+# deadline generous enough to be a hang detector rather than counting a fixed
+# number of pgrep execs (ten back-to-back pgreps are ~300ms of grace, which
+# interpreter startup under CI contention can and does exceed). A miss is
+# reported as harness starvation by name, because the alternative -- letting a
+# later `kill -0 ""` abort the run -- prints only ``kill: `': not a pid'' and
+# names neither the fixture nor the contract.
+_child_wait_await_provider_child() {
+  local guard="$1" label="$2" deadline=$((SECONDS + 30)) child=''
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    child="$(pgrep -P "$guard" | head -1 || true)"
+    if [ -n "$child" ]; then printf '%s' "$child"; return 0; fi
+    sleep .1
+  done
+  echo "FAIL: $label: provider child of $guard never appeared within 30s (harness starvation, not a cancellation regression)" >&2
+  return 1
+}
+
 # PID/group reuse defense: launch an owned session whose wrapper has a live
 # provider child. Wrong identity is rejected; exact cancellation proves the
 # complete group is gone, not merely the wrapper.
 python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & wait"])' & PID_GUARD=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do PROVIDER_CHILD="$(pgrep -P "$PID_GUARD" | head -1 || true)"; [ -z "$PROVIDER_CHILD" ] || break; sleep .1; done
-[ -n "$PROVIDER_CHILD" ] && kill -0 "$PROVIDER_CHILD"
+CHILD_WAIT_GUARD_GROUPS="$CHILD_WAIT_GUARD_GROUPS $PID_GUARD"
+PROVIDER_CHILD="$(_child_wait_await_provider_child "$PID_GUARD" 'owned-session cancel')"
+kill -0 "$PROVIDER_CHILD"
 IDENTITY="$(_uberdev_agent_process_identity "$PID_GUARD")"
 ! _uberdev_dispatch_cancel_backend background "$PID_GUARD" 'reused-group-identity'
 kill -0 "$PID_GUARD"
@@ -560,12 +620,16 @@ _uberdev_dispatch_cancel_backend background "$PID_GUARD" "$IDENTITY"
 # non-zombie members remain. A mismatched launch identity never signals either
 # the wrapper or its resistant child.
 python3 -I -c 'import os; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" TERM; (trap \"\" TERM; while :; do :; done) & wait"])' & TERM_GUARD=$!
+CHILD_WAIT_GUARD_GROUPS="$CHILD_WAIT_GUARD_GROUPS $TERM_GUARD"
 disown "$TERM_GUARD" 2>/dev/null || true
-for _ in 1 2 3 4 5 6 7 8 9 10; do TERM_CHILD="$(pgrep -P "$TERM_GUARD" | head -1 || true)"; [ -z "$TERM_CHILD" ] || break; done
-[ -n "$TERM_CHILD" ] && kill -0 "$TERM_CHILD"
+TERM_CHILD="$(_child_wait_await_provider_child "$TERM_GUARD" 'TERM-resistant cancel')"
+kill -0 "$TERM_CHILD"
 TERM_IDENTITY="$(_uberdev_agent_process_identity "$TERM_GUARD")"
 ! _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "${TERM_IDENTITY%|*}|reused"
-kill -0 "$TERM_GUARD" && kill -0 "$TERM_CHILD"
+# One assertion per line: a non-final element of an `A && B` list is exempt from
+# `set -e`, so the paired form silently skipped the wrapper half.
+kill -0 "$TERM_GUARD"
+kill -0 "$TERM_CHILD"
 _uberdev_dispatch_cancel_backend background "$TERM_GUARD" "$TERM_IDENTITY"
 ! _uberdev_dispatch_group_live "$TERM_GUARD"
 ! kill -0 "$TERM_GUARD" 2>/dev/null
@@ -802,15 +866,48 @@ zsh -f -c '. "$1"; uberdev_wait_child "$2" "$3" 2' _ "$LIB" "$STATUS" "$RESULT" 
 # positive wait still observes a delayed real terminal without fabrication.
 printf '{"backend":"background","state":"running","exit_code":null,"pid":"321"}\n' >"$STATUS"
 printf '{"schema_version":1,"event":"route_decided","timestamp":"2026-07-10T00:00:00.000Z","run_id":"worker-0001"}\n{"schema_version":1,"event":"agent_started","timestamp":"2026-07-10T00:00:01.000Z","run_id":"worker-0001"}\n' >"$MANIFEST"
+# The terminal has to land AFTER the wait is already polling. The old fixture
+# bought that ordering with `sleep .2` and a 2s budget -- a wall-clock bet
+# against the wait's own integer-second settle arithmetic, whose real deadline
+# is as low as ~1.0s. Hand the writer the wait's first observation instead: it
+# publishes as soon as a poll has actually read the running status, so the
+# ordering is an invariant rather than a hope, and the budget is left generous
+# so it can only ever act as a hang detector. The observation log then proves
+# what the old row could only assume -- that this wait really did see `running`
+# first and converge on the provider's own terminal afterwards.
+DRAIN_OBSERVED="$TMP/drain-observed-states"
+: >"$DRAIN_OBSERVED"
+eval "$(declare -f _uberdev_child_wait_projection | sed '1s/_uberdev_child_wait_projection/_drain_real_wait_projection/')"
+_uberdev_child_wait_projection() {
+  local drain_projection='' drain_rc=0 drain_kind='' drain_state='' drain_rest=''
+  drain_projection="$(_drain_real_wait_projection "$@")"; drain_rc=$?
+  IFS=$'\x1f' read -r drain_kind drain_state drain_rest <<<"$drain_projection" || true
+  printf '%s\n' "$drain_state" >>"$DRAIN_OBSERVED"
+  printf '%s' "$drain_projection"
+  return "$drain_rc"
+}
 (
-  sleep .2
+  DRAIN_DEADLINE=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$DRAIN_DEADLINE" ] && [ ! -s "$DRAIN_OBSERVED" ]; do sleep .1; done
   printf 'drained result\n' >"$RESULT"
   printf '{"backend":"background","state":"completed","exit_code":0,"pid":"321"}\n' >"$STATUS"
   terminal_manifest completed
 ) & DRAIN_WRITER=$!
 ! uberdev_wait_child "$STATUS" "$RESULT" 0 >/dev/null 2>&1
-uberdev_wait_child "$STATUS" "$RESULT" 2 >/dev/null
+uberdev_wait_child "$STATUS" "$RESULT" 10 >/dev/null || {
+  echo "FAIL: the wait did not converge on the delayed provider terminal (rc=$?)" >&2
+  exit 1
+}
 wait "$DRAIN_WRITER"
+eval "$(declare -f _drain_real_wait_projection | sed '1s/_drain_real_wait_projection/_uberdev_child_wait_projection/')"
+[ "$(head -1 "$DRAIN_OBSERVED")" = running ] || {
+  echo "FAIL: the wait never observed the pre-terminal running status: $(tr '\n' ',' <"$DRAIN_OBSERVED")" >&2
+  exit 1
+}
+grep -qx completed "$DRAIN_OBSERVED" || {
+  echo "FAIL: the wait never observed the delayed provider terminal: $(tr '\n' ',' <"$DRAIN_OBSERVED")" >&2
+  exit 1
+}
 grep -q '"state":"completed"' "$STATUS"
 ! grep -q 'timed_out\|cancel' "$STATUS"
 

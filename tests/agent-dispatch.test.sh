@@ -55,7 +55,61 @@ finally:
 PY
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# Fixtures that stand in for a live provider are long-running by construction:
+# an invariant of the form "capacity is held while the provider is live" must be
+# asserted against a process that is still there, never against a sleep short
+# enough to expire under load. Every such pid is recorded the moment it is known
+# so this trap reaps it even when a row fails and exits early.
+FIXTURE_PIDS="$TMP/fixture-pids"
+record_fixture_pid() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s\n' "$1" >> "$FIXTURE_PIDS"
+}
+reap_fixture_pids() {
+  local pid
+  [ -s "$FIXTURE_PIDS" ] || return 0
+  while read -r pid; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    # Group first: a recorded setsid leader carries its descendants with it.
+    # A recorded non-leader leads no group, so this simply finds nothing.
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  done < "$FIXTURE_PIDS"
+}
+# A bounded poll whose exhaustion is silent is not an assertion. `cat` on a file
+# that never appeared aborts the suite with nothing but cat's stderr, and a pid
+# read as empty makes a later `! kill -0 "$pid"` pass vacuously -- success
+# claimed while nothing was proved. Wait generously, then fail by name.
+read_fixture_pid() {
+  # `target`, not `path`: zsh ties `path` to the PATH array, so a bare
+  # `local path=` corrupts PATH for the rest of the fence (#390, 391fade).
+  # tests/crossplatform-shell-wrappers.test.sh scans every shell surface in the
+  # repo for that shape, tests/ included, so this is a hard CI gate on bytes
+  # even though this suite is bash-only.
+  local target="$1" label="$2" pid=''
+  for _ in $(seq 1 200); do
+    if [ -s "$target" ]; then
+      pid="$(cat "$target" 2>/dev/null || true)"
+      case "$pid" in
+        ''|*[!0-9]*) pid='' ;;
+        *) break ;;
+      esac
+    fi
+    command sleep 0.1
+  done
+  case "$pid" in
+    ''|*[!0-9]*)
+      echo "$label never published a numeric child pid: path=$target observed='$pid'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$pid"
+}
+trap 'reap_fixture_pids; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/run"
 STATE_DIR="$TMP/run/.agent-state-$(id -u)"
 printf 'instrumented prompt\n' > "$TMP/run/prompt.txt"
@@ -1621,6 +1675,21 @@ cross_backend_case() {
   [ -r "$run/status.json" ] && grep -q '"state":"running"' "$run/status.json" || {
     echo "$backend did not publish live canonical status" >&2; return 1;
   }
+  # "Capacity is not released while the provider is live" is only a statement
+  # about the code if the provider really is live at probe time. Read that fact
+  # out of the canonical status and assert it, instead of inferring it from how
+  # long a fixture sleep happens to last -- a provider that died first makes
+  # reconciliation's reclaim correct and the probe below blame the wrong thing.
+  provider_pid="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid",""))' "$run/status.json")"
+  case "$provider_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      kill -0 "$provider_pid" 2>/dev/null || {
+        echo "$backend fixture provider $provider_pid was not live at the capacity probe" >&2
+        return 1
+      }
+      ;;
+  esac
   if UBERDEV_SEMAPHORE_ACQUIRE_MAX_TRIES=1 \
       probe="$(uberdev_semaphore_acquire "$state" cross-repository "$backend" 1 "probe-live-$backend" 20 2>/dev/null)"; then
     uberdev_semaphore_release "$probe" >/dev/null 2>&1 || true
@@ -1638,12 +1707,24 @@ cross_backend_case() {
   fi
   chmod 600 "$tmp_status"
   mv "$tmp_status" "$run/status.json"
-  for _ in 1 2 3 4 5 6; do
-    grep -q '"state":"completed"' "$run/status.json" 2>/dev/null \
-      && ! grep -R -q "run_id=cross-$backend" "$state/semaphore-v1" 2>/dev/null \
-      && break
-    sleep 1
+  # The release is asynchronous, so this loop is a hang detector, not the
+  # oracle: it must be generous, and its exhaustion must be a named failure
+  # rather than a fall-through into whatever the retrying acquire below happens
+  # to do. The provider is still live, so the only thing that can return this
+  # capacity is the watcher releasing on the terminal status.
+  cross_released=0
+  for _ in $(seq 1 120); do
+    if grep -q '"state":"completed"' "$run/status.json" 2>/dev/null \
+        && ! grep -R -q "run_id=cross-$backend" "$state/semaphore-v1" 2>/dev/null; then
+      cross_released=1
+      break
+    fi
+    command sleep 0.25
   done
+  [ "$cross_released" -eq 1 ] || {
+    echo "$backend never released the lease for run_id=cross-$backend after terminal status" >&2
+    return 1
+  }
   probe="$(uberdev_semaphore_acquire "$state" cross-repository "$backend" 1 "probe-terminal-$backend" 20)" || {
     echo "$backend did not recover capacity after terminal" >&2; return 1;
   }
@@ -1666,8 +1747,14 @@ _uberdev_agent_dispatch_backend() {
       chmod 600 "$status_path"
       ;;
     background|background)
-      nohup sleep 5 >/dev/null 2>&1 &
+      # Long-lived on purpose: this process IS the "provider is live" fact the
+      # capacity invariant is asserted against. A 5s sleep made that fact a
+      # countdown -- once it expired, reconciliation reclaimed the lease and the
+      # row red as "released capacity while provider status was live" on a
+      # machine that was merely slow. reap_fixture_pids kills it at exit.
+      nohup sleep 600 >/dev/null 2>&1 &
       DISPATCH_ID="$!"
+      record_fixture_pid "$DISPATCH_ID"
       printf '{"backend":"%s","state":"running","exit_code":null,"pid":"%s"}\n' "$backend" "$DISPATCH_ID" > "$status_path"
       chmod 600 "$status_path"
       ;;
@@ -1739,7 +1826,11 @@ mkdir -p "$ORPHAN_RUN"
 printf 'wrapper death prompt\n' >"$ORPHAN_RUN/prompt.txt"
 ORPHAN_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-wrapper-death","repository_id":"adapter-wrapper-death-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":99,"issue_num":99,"capacity":1,"timeout_s":20},separators=(",",":")))' "$ORPHAN_RUN")"
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","sleep 30 & echo $! > \"$1\"; wait","_",sys.argv[1]])' \
+  # The descendant sleeps far longer than this suite can run: the row proves the
+  # cancellation path killed it, so its death must be attributable to that path
+  # alone. A 30s child could expire by itself on a starved machine and hand the
+  # containment assertion below a free pass.
+  nohup python3 -I -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","sleep 600 & echo $! > \"$1\"; wait","_",sys.argv[1]])' \
     "$ORPHAN_RUN/provider-child.pid" >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
@@ -1749,13 +1840,31 @@ _uberdev_agent_dispatch_backend() {
 }
 uberdev_agent_dispatch "$ORPHAN_REQUEST" "$ORPHAN_RUN/prompt.txt" "$ORPHAN_RUN/result.md" "$ORPHAN_RUN/status.json"
 ORPHAN_WRAPPER="$(cat "$ORPHAN_RUN/wrapper.pid")"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$ORPHAN_RUN/provider-child.pid" ] && break; sleep .1; done
-ORPHAN_CHILD="$(cat "$ORPHAN_RUN/provider-child.pid")"
+record_fixture_pid "$ORPHAN_WRAPPER"
+ORPHAN_CHILD="$(read_fixture_pid "$ORPHAN_RUN/provider-child.pid" 'wrapper-death provider')"
+record_fixture_pid "$ORPHAN_CHILD"
+# The containment assertion further down is only meaningful if this descendant
+# was alive to begin with; assert the premise so the row cannot pass by killing
+# something that was already gone.
+kill -0 "$ORPHAN_CHILD" 2>/dev/null || {
+  echo "wrapper-death provider child $ORPHAN_CHILD was not live before the wrapper kill" >&2
+  exit 1
+}
 kill -KILL "$ORPHAN_WRAPPER"
 wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$ORPHAN_RUN/status.json"
-! _uberdev_dispatch_group_live "$ORPHAN_WRAPPER"
-! kill -0 "$ORPHAN_CHILD" 2>/dev/null
+# Written as explicit failures, not as `! cmd`: bash exempts a negated command
+# from errexit (POSIX XCU 2.11, verified on 3.2 and 5.3), so `! kill -0 "$pid"`
+# is a no-op that reports success no matter what the pid is doing. This is the
+# only place the wrapper-death containment claim is checked.
+if _uberdev_dispatch_group_live "$ORPHAN_WRAPPER"; then
+  echo "wrapper-death cancellation left process group $ORPHAN_WRAPPER live" >&2
+  exit 1
+fi
+if kill -0 "$ORPHAN_CHILD" 2>/dev/null; then
+  echo "wrapper-death cancellation orphaned provider child $ORPHAN_CHILD" >&2
+  exit 1
+fi
 python3 -I - "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" <<'PY'
 import json,pathlib,sys
 rows=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -1772,16 +1881,28 @@ KILL_RUN="$TMP/wrapper-death-term-resistant"
 mkdir -p "$KILL_RUN"
 nohup python3 -I -B -c 'import os,sys; os.setsid(); os.execvp("bash",["bash","-c","trap \"\" HUP; (trap \"\" TERM HUP; while :; do sleep 1; done) & echo $! > \"$1/child.pid\"; while [ ! -e \"$1/release\" ]; do sleep .05; done; exit 0","_",sys.argv[1]])' "$KILL_RUN" >/dev/null 2>&1 &
 KILL_LEADER=$!
+record_fixture_pid "$KILL_LEADER"
 _uberdev_dispatch_wait_owned_session "$KILL_LEADER"
 KILL_IDENTITY="$(_uberdev_agent_process_identity "$KILL_LEADER")"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$KILL_RUN/child.pid" ] && break; sleep .1; done
-KILL_CHILD="$(cat "$KILL_RUN/child.pid")"
+KILL_CHILD="$(read_fixture_pid "$KILL_RUN/child.pid" 'term-resistant provider')"
+record_fixture_pid "$KILL_CHILD"
+kill -0 "$KILL_CHILD" 2>/dev/null || {
+  echo "term-resistant provider child $KILL_CHILD was not live before cancellation" >&2
+  exit 1
+}
 : >"$KILL_RUN/release"
 wait "$KILL_LEADER"
 _uberdev_dispatch_group_live "$KILL_LEADER"
 _uberdev_dispatch_cancel_backend background "$KILL_LEADER" "$KILL_IDENTITY"
-! _uberdev_dispatch_group_live "$KILL_LEADER"
-! kill -0 "$KILL_CHILD" 2>/dev/null
+# Same errexit exemption as the wrapper-death row above: `! cmd` cannot fail.
+if _uberdev_dispatch_group_live "$KILL_LEADER"; then
+  echo "term-resistant cancellation left process group $KILL_LEADER live" >&2
+  exit 1
+fi
+if kill -0 "$KILL_CHILD" 2>/dev/null; then
+  echo "term-resistant cancellation orphaned provider child $KILL_CHILD" >&2
+  exit 1
+fi
 
 # Before provider launch, exact-identity registration failure must reconcile a
 # terminal and release only the generation acquired for this request.
