@@ -339,9 +339,10 @@ source "${CLAUDE_PLUGIN_ROOT}/lib/secret-scan.sh"
 # and preserves worktree. Captures stderr into $SCAN_DIAG so the abort message
 # names the offending pattern.
 abort_if_secret() {
-  local label="$1"
-  local scan_diag="$2"
-  local scan_rc="$3"
+  local label="${@:1:1}"
+  local scan_diag="${@:2:1}"
+  local scan_rc="${@:3:1}"
+  [ "$#" -ge 3 ] || return 2
   [[ "$scan_rc" -eq 0 ]] && return 0
   # The library rc is TRI-STATE and the two non-zero cases need opposite
   # advice: rc 1 is a detected secret (offer the escape hatch); rc>=2 means the

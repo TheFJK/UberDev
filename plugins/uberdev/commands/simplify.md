@@ -40,14 +40,16 @@ FOCUS="${FOCUS:-${ARGUMENTS:-}}"
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
 review_child_record() {
-  python3 -I -B - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  [ "$#" -ge 5 ] || return 2
+  python3 -I -B - "${@:1:1}" "${@:2:1}" "${@:3:1}" "${@:4:1}" "${@:5:1}" <<'PY'
 import json,sys
 edge,instance,inputs,risks,path=sys.argv[1:]
 with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
 PY
 }
 review_child_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  local records="${@:1:1}" descriptors="${@:2:1}" launched="${@:3:1}" timeout_s="${@:4:1}" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
+  [ "$#" -ge 4 ] || return 2
   local preflight_refs=()
   local launch_edges=() launch_handoffs=() launch_handoff_sha256s=()
   local launch_results=() launch_statuses=()
@@ -106,7 +108,8 @@ PY
   done
 }
 review_child_wait_all() {
-  local launched="$1" timeout_s="$2" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" row result child_status wait_rc first_rc=0 cleanup_rc=0
+  [ "$#" -ge 2 ] || return 2
   while IFS= read -r row; do
     result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
     child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
@@ -125,7 +128,8 @@ review_child_wait_all() {
   return 0
 }
 review_child_single() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
+  [ "$#" -ge 6 ] || return 2
   : >"$prefix.records"
   review_child_record "$edge" "$instance" "$inputs" "$risks" "$prefix.records"
   review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
@@ -134,7 +138,7 @@ review_child_single() {
 # BEGIN simplify-fixer-child-bound-v2
 simplify_fixer_child_bound() {
   [ "$#" -eq 6 ] || return 2
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
   local receipt wait_rc
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
   uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
@@ -175,7 +179,7 @@ PY
 # BEGIN simplify-defer-child-bound-v2
 simplify_defer_child_bound() {
   [ "$#" -eq 6 ] || return 2
-  local edge="$1" instance="$2" inputs="$3" risks="$4" prefix="$5" timeout_s="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
   local receipt wait_rc
   uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
   uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
@@ -455,7 +459,7 @@ standalone edge:
 # BEGIN simplify-standalone-controller-v2
 simplify_guard_failed_fixer_return() {
   [ "$#" -eq 2 ] || return 2
-  local head_before="$1" original_rc="$2" guard_receipt
+  local head_before="${@:1:1}" original_rc="${@:2:1}" guard_receipt
   case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
   guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
     --working-dir "$WORKTREE_ROOT" \

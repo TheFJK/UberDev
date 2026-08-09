@@ -19,7 +19,7 @@ the orchestrating session fires all `Task()` calls in ONE message per wave.
 
 ## Constraints
 - State persists to `$RUN_DIR/run-state.txt` between phases (each `bash` fence is a fresh shell — memory `project_uberdev_pipeline_directive_emitter`).
-- NO awk `$1`/`$2`/`$3` column refs (skill-renderer `$N` collision — memory `project_uberdev_skill_renderer_dollar_arg_collision`).
+- NO bare awk column refs — spell them `-v cN=N` + `$cN` (skill-renderer `$N` collision — memory `project_uberdev_skill_renderer_dollar_arg_collision`). Same rule for shell positionals in a `bash` fence: `${@:N:1}`, never a bare dollar-digit. This line names the hazard without containing it, because the renderer would rewrite the example too (#404).
 - NO `t y p e   - t` or `B A S H _ R E M A T C H` (zsh-incompatible bashisms — memory `project_uberdev_type_t_bashism_zsh`). Use `command -v` for function detection; use `case` glob for regex matching.
 - All gh-issue writes (close, edit, comment subcommands) use `--body-file -` or `--comment "$(cat …)"`, NEVER the unsafe `--body` form with a variable expansion. See security.md §Q2.
 

@@ -128,7 +128,8 @@ EMPHASIS_JSON="${EMPHASIS_JSON:-[]}"
 FANOUT_CAP_INPUT="${FANOUT_CAP_INPUT:-}"
 post_review_resolve_cap() {
   # <config_cap> — echoes the effective cap; refuses an out-of-band input.
-  local config_cap="$1"
+  local config_cap="${@:1:1}"
+  [ "$#" -ge 1 ] || return 2
   if [ -z "$FANOUT_CAP_INPUT" ]; then
     printf '%s' "$config_cap"
     return 0
@@ -146,11 +147,13 @@ post_review_resolve_cap() {
   printf '%s' "$FANOUT_CAP_INPUT"
 }
 post_review_json_string() {
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "$1"
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 
 post_review_init_ledger() {
-  python3 -I -B - "$1" <<'PY'
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B - "${@:1:1}" <<'PY'
 import os,stat,sys,tempfile
 path=os.path.abspath(sys.argv[1]); parent=os.path.dirname(path)
 descriptor,temporary=tempfile.mkstemp(prefix='.post-review-ledger.',dir=parent)
@@ -168,7 +171,8 @@ PY
 }
 
 post_review_record() {
-  local edge="$1" instance="$2" inputs="$3" risks="$4" record_path="$5" roster_index="$6"
+  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" record_path="${@:5:1}" roster_index="${@:6:1}"
+  [ "$#" -ge 6 ] || return 2
   if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
     inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
   fi
@@ -183,7 +187,11 @@ with open(path,'a') as f:
 PY
 }
 post_review_roster_complete() {
-  local ledger_path="$1" expected="$2"; shift 2
+  # The slices bind BEFORE the shift; the guard has to as well, or it would be
+  # reading a `$#` the shift has already reduced by two.
+  local ledger_path="${@:1:1}" expected="${@:2:1}"
+  [ "$#" -ge 2 ] || return 2
+  shift 2
   python3 -I -B - "$ledger_path" "$expected" "$@" <<'PY'
 import json,sys
 path,expected,*allowed=sys.argv[1:]
@@ -200,7 +208,8 @@ except Exception: raise SystemExit(2)
 PY
 }
 post_review_unwind_one() {
-  local edge="$1" child_status="$2" result="$3" timeout_s="$4" origin_edge="$5" origin_rc="$6" cleanup_rc
+  local edge="${@:1:1}" child_status="${@:2:1}" result="${@:3:1}" timeout_s="${@:4:1}" origin_edge="${@:5:1}" origin_rc="${@:6:1}" cleanup_rc
+  [ "$#" -ge 6 ] || return 2
   if uberdev_unwind_child "$child_status" "$result" "$timeout_s"; then
     cleanup_rc=0
   else
@@ -211,7 +220,8 @@ post_review_unwind_one() {
   [ "$cleanup_rc" -eq 0 ]
 }
 post_review_unwind_ledger() {
-  local launched="$1" timeout_s="$2" origin_edge="$3" origin_rc="$4" row edge child_status result cleanup_failed=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" origin_edge="${@:3:1}" origin_rc="${@:4:1}" row edge child_status result cleanup_failed=0
+  [ "$#" -ge 4 ] || return 2
   [ -f "$launched" ] || {
     printf 'cleanup: ledger=%s cleanup_rc=70 origin_edge=%s origin_rc=%s\n' \
       "$launched" "$origin_edge" "$origin_rc" >&2
@@ -224,7 +234,8 @@ post_review_unwind_ledger() {
   [ "$cleanup_failed" -eq 0 ] || return 70
 }
 post_review_fanout() {
-  local records="$1" descriptors="$2" launched="$3" timeout_s="$4" row edge index instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc launch_index
+  local records="${@:1:1}" descriptors="${@:2:1}" launched="${@:3:1}" timeout_s="${@:4:1}" row edge index instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc launch_index
+  [ "$#" -ge 4 ] || return 2
   local preflight_refs=()
   local launch_edges=() launch_indexes=() launch_instances=()
   local launch_handoffs=() launch_handoff_sha256s=()
@@ -269,7 +280,8 @@ post_review_fanout() {
   done
 }
 post_review_wait_all() {
-  local launched="$1" timeout_s="$2" failed_path="${3:-}" row edge index instance child_status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" failed_path="${@:3:1}" row edge index instance child_status result wait_rc validation_rc ledger_rc unwind_rc first_rc=0 valid_count=0 format_failures=0
+  [ "$#" -ge 2 ] || return 2
   local validated_result validation_digest
   POST_REVIEW_VALID_COUNT=0
   POST_REVIEW_FORMAT_FAILURE_COUNT=0
@@ -357,7 +369,8 @@ post_review_wait_all() {
 # Any failure after a wave has launched but before its normal wait boundary
 # must boundedly collect every child recorded for that wave.
 post_review_fail_after_wave_launch() {
-  local launched="$1" timeout_s="$2" reason="$3" original_rc="$4" row cleanup_rc=0
+  local launched="${@:1:1}" timeout_s="${@:2:1}" reason="${@:3:1}" original_rc="${@:4:1}" row cleanup_rc=0
+  [ "$#" -ge 4 ] || return 2
   while IFS= read -r row; do
     uberdev_unwind_child "$(jq -r .status <<<"$row")" "$(jq -r .result <<<"$row")" "$timeout_s" || cleanup_rc=1
   done <"$launched"
@@ -369,7 +382,8 @@ post_review_fail_after_wave_launch() {
 # Aggregate ledgers preserve global roster order so format-repair instance IDs
 # remain unique when cap-one/cap-two execution creates multiple waves.
 post_review_run_capped() {
-  local records="$1" expected="$2" cap="$3" descriptors="$4" launched="$5" failed="$6" timeout_s="$7" prefix="$8"
+  local records="${@:1:1}" expected="${@:2:1}" cap="${@:3:1}" descriptors="${@:4:1}" launched="${@:5:1}" failed="${@:6:1}" timeout_s="${@:7:1}" prefix="${@:8:1}"
+  [ "$#" -ge 8 ] || return 2
   local offset=0 end wave=0 wave_expected wave_records wave_descriptors wave_launched wave_failed wave_rc post_launch_rc
   local total_valid=0 total_format=0 any_infra=0
   POST_REVIEW_VALID_COUNT=0

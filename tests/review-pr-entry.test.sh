@@ -212,4 +212,138 @@ assert stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode)
 assert entry.st_uid==os.geteuid() and stat.S_IMODE(entry.st_mode)==0o700
 PY
 
+# --------------------------------------------------------------------------
+# Issue #404: the setup fence must survive the Claude Code slash-command
+# renderer. `/uberdev:review-pr 647 --no-simplify` used to die at the THIRD
+# executable step of setup — `review_prepare_run_root "$REVIEW_RUN_REPO_ROOT"`
+# with `local repository_root="$1"` rendered as
+# `local repository_root="--no-simplify"` — before RUN_ID reservation, before
+# Phase 1, before any reviewer dispatch. The command could not run at all with
+# a non-empty argument, and zero arguments cannot carry `--no-simplify`.
+#
+# `render_positionals` models the EXTERNAL renderer (upstream Claude Code), not
+# anything in this repository: `$N` and `${N}` anywhere in the body are replaced
+# by the Nth whitespace-separated token of $ARGUMENTS. If the loader's behaviour
+# ever changes, this function is where to look.
+#
+# The model is DELIBERATELY STRICTER than the observed renderer in one respect.
+# #404 measured that a positional with no corresponding argument survives (the
+# braced form is merely brace-stripped back to `$N`), which is why `$2`-`$9`
+# looked safe in the reported render — the arg string produced exactly one
+# positional. Reproducing that would make RR2's verdict depend on how many
+# tokens the probe argument string happens to have, i.e. would let `$9` pass on
+# a two-token render and fail on a nine-token one. So an absent positional maps
+# to the empty string here: the assertion becomes "the fence contains NO
+# positional token", independent of arg count. Only one property is load-bearing
+# either way — that SOMETHING is substituted; RR2 asserts byte-identity, so the
+# exact slot-to-token mapping (#404 notes the leading `647` never became a
+# positional at all) cannot change the verdict.
+render_positionals() {  # <src-file> <arguments-string>
+  local src="$1" arguments="$2"
+  awk -v argstr="$arguments" '
+    BEGIN { n = split(argstr, tok, /[ \t]+/) }
+    {
+      line = $0; out = ""
+      while (match(line, /\$\{[0-9]+\}|\$[0-9]/)) {
+        pre  = substr(line, 1, RSTART - 1)
+        token = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        idx  = token; gsub(/[^0-9]/, "", idx)
+        out  = out pre ((idx + 0) <= n ? tok[idx + 0] : "")
+      }
+      print out line
+    }
+  ' "$src"
+}
+
+# RR1 — transform fidelity. RR2 below asserts a NO-OP, which is vacuously true
+# for a simulator that transforms nothing. This proves the simulator really does
+# rewrite all three vulnerable spellings, and really does spare the fix.
+cat >"$TMP/rr1-vulnerable.in" <<'EOF_RR1_BAD'
+bare="$1"
+braced="${1}"
+two_digit="${10}"
+EOF_RR1_BAD
+render_positionals "$TMP/rr1-vulnerable.in" '647 --no-simplify' >"$TMP/rr1-vulnerable.out"
+grep -q '^bare="647"$' "$TMP/rr1-vulnerable.out" || {
+  echo "renderer model does not substitute the bare \$N spelling" >&2; exit 1
+}
+grep -q '^braced="647"$' "$TMP/rr1-vulnerable.out" || {
+  echo "renderer model does not substitute the braced \${N} spelling" >&2; exit 1
+}
+grep -q '^two_digit=""$' "$TMP/rr1-vulnerable.out" || {
+  echo "renderer model leaves a two-digit positional in place (see the strictness note above)" >&2
+  exit 1
+}
+cat >"$TMP/rr1-safe.in" <<'EOF_RR1_SAFE'
+sliced="${@:1:1} ${@:10:1}"
+defaults="${TIMEOUT:-300} ${VAR:-}"
+EOF_RR1_SAFE
+render_positionals "$TMP/rr1-safe.in" '647 --no-simplify' >"$TMP/rr1-safe.out"
+cmp -s "$TMP/rr1-safe.in" "$TMP/rr1-safe.out" || {
+  echo "renderer model corrupts the \${@:N:1} fix shape — RR2 below would be meaningless" >&2
+  exit 1
+}
+
+# RR2 — both setup fences are render-stable. This is the property that makes the
+# commands invokable with arguments at all; escaping inside the markdown cannot
+# provide it, because the renderer substitutes `${N}` just as it substitutes
+# `$N`. `simplify.md`'s fence carries no positional today, so its half is a
+# cheap regression guard rather than proof — the review-pr half is the proof.
+for rendered_fence in source-setup simplify-setup; do
+  render_positionals "$TMP/$rendered_fence.sh" '647 --no-simplify' >"$TMP/$rendered_fence.rendered.sh"
+  cmp -s "$TMP/$rendered_fence.sh" "$TMP/$rendered_fence.rendered.sh" || {
+    echo "$rendered_fence is not render-stable; positional refs survive in the fence" >&2
+    diff "$TMP/$rendered_fence.sh" "$TMP/$rendered_fence.rendered.sh" >&2 || true
+    exit 1
+  }
+done
+
+# RR3 — and the rendered fence actually EXECUTES through run-root preparation.
+#
+# Neither the sourcing rc nor the prepared-request JSON is a discriminator here,
+# and both were measured rather than assumed. The fence's failure path is
+# `return "$rc" 2>/dev/null || exit "$rc"`; `return` at the top level of a
+# SOURCED file returns to the SOURCING shell, which then carries straight on —
+# so the corrupted fence still reaches carrier preparation and still exports a
+# perfectly valid UBERDEV_AGENT_PREPARED_REQUEST_JSON. Verified against the
+# pre-fix file: the probe printed `{"backend":"workflow","run_dir":…}` at rc 0
+# with `error: could not prepare private review run root: …/repo/647` on stderr.
+#
+# What DOES separate the two is the private review run root itself — the third
+# executable step of setup, and the one #404 reported dying. Post-fix it sets
+# REVIEW_RUNS_ROOT and reserves RUN_ID under it; pre-fix REVIEW_RUNS_ROOT is
+# never assigned, no reservation exists, and the diagnostic above is on stderr.
+# All three are asserted, so no single one of them can go vacuous unnoticed.
+RENDERED_RUN_ID=20260716-000006-abcdef0
+run_setup_with_arguments() {
+  local runtime="$1" arguments="$2"
+  mkdir -p "$runtime"
+  render_positionals "$TMP/source-setup.sh" "$arguments" >"$TMP/rendered-setup.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the isolated child shell.
+  env -i HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+    PLUGIN_ROOT="$ROOT/plugins/uberdev" WORKTREE_ROOT="$TMP/repo" \
+    UBERDEV_TMPDIR="$runtime" RUN_ID="$RENDERED_RUN_ID" PR_NUMBER=647 \
+    ARGUMENTS="$arguments" \
+    bash -c 'cd "$2"; . "$1"; python3 -I -B -c "import json,os,sys; request=json.loads(os.environ[\"UBERDEV_AGENT_PREPARED_REQUEST_JSON\"]); print(json.dumps({\"backend\":request[\"backend\"],\"run_dir\":request[\"run_dir\"],\"runs_root\":sys.argv[1]},sort_keys=True))" "${REVIEW_RUNS_ROOT:-}"' \
+      _ "$TMP/rendered-setup.sh" "$TMP/repo"
+}
+rendered_result="$(run_setup_with_arguments "$TMP/runtime-rendered" '647 --no-simplify' 2>"$TMP/rendered-setup.err")"
+# The reaper writes `notice:` lines for the reservations the cases above left
+# behind, so the assertion is on `error:` specifically, not on empty stderr.
+if grep -q '^error:' "$TMP/rendered-setup.err"; then
+  echo "rendered setup emitted a setup diagnostic:" >&2
+  cat "$TMP/rendered-setup.err" >&2
+  exit 1
+fi
+python3 -I -B - "$rendered_result" "$TMP/runtime-rendered" "$TMP/repo/.uberdev/runs" <<'PY'
+import json,sys
+value=json.loads(sys.argv[1])
+assert value=={'backend':'workflow','run_dir':sys.argv[2],'runs_root':sys.argv[3]},value
+PY
+test -f "$TMP/repo/.uberdev/runs/$RENDERED_RUN_ID/locked" || {
+  echo "rendered setup never reserved a run directory for $RENDERED_RUN_ID" >&2
+  exit 1
+}
+
 echo "review-pr canonical entrypoint tests passed"

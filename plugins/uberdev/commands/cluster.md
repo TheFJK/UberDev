@@ -69,8 +69,10 @@ fi
 Then invoke `Skill(uberdev:cluster-pipeline)` with the same `$ARGUMENTS`.
 
 <!-- IMPORTANT (cluster-pipeline/SKILL.md must avoid these zsh/skill-renderer traps):
-     1. No positional column refs ($1, $2, $3) in awk bodies — skill-renderer $N
+     1. No bare positional column refs in awk bodies — skill-renderer $N
         collision (see memory project_uberdev_skill_renderer_dollar_arg_collision).
+        Spell them `-v cN=N` + `$cN`; this note deliberately carries no literal
+        dollar-digit token, because the renderer would substitute it here too.
      2. No bashisms incompatible with zsh: the `-t` form of `type` returns empty
         under zsh — use `command -v` instead (see memory
         project_uberdev_type_t_bashism_zsh).

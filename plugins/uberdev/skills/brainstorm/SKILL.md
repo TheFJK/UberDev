@@ -149,7 +149,8 @@ uberdev_brainstorm_drain_after_wait_failure() {
   return "$cleanup_rc"
 }
 uberdev_brainstorm_dispatch() {
-  local edge="$1" instance="$2" role="$3" inputs_json="$4"
+  local edge="${@:1:1}" instance="${@:2:1}" role="${@:3:1}" inputs_json="${@:4:1}"
+  [ "$#" -ge 4 ] || return 2
   local risks_json='[]' handoff handoff_sha256 result child_status create_rc cleanup_rc
   : "$role" # the registered edge manifest selects the role
   if uberdev_create_child_handoff "$edge" "$instance" "$inputs_json" "$risks_json"; then
@@ -203,7 +204,11 @@ uberdev_brainstorm_launch_batch() {
   UBERDEV_BRAINSTORM_BATCH_LAUNCHED=1
 }
 uberdev_brainstorm_wait() {
-  local wanted="$1" timeout_s="${2:-300}" index instance child_status result wait_rc cleanup_rc
+  # A non-empty default cannot ride along on the slice — `${@:2:1}` is a slice,
+  # not a parameter, so the `:-300` fallback has to be a second assignment.
+  local wanted="${@:1:1}" timeout_s="${@:2:1}" index instance child_status result wait_rc cleanup_rc
+  [ "$#" -ge 1 ] || return 2
+  timeout_s="${timeout_s:-300}"
   if [ "$UBERDEV_BRAINSTORM_BATCH_LAUNCHED" -eq 0 ]; then
     uberdev_brainstorm_launch_batch || return $?
   fi
