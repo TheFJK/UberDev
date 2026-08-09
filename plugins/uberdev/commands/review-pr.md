@@ -3629,6 +3629,12 @@ PY
     > and `lib/review-fleet-args.sh` already ship. Do not re-add an agent-held
     > lease while re-wiring it: an LLM choosing the SHA git compares against is
     > exactly the hole the demotion closes.
+    >
+    > One thing below is NOT stale: the cross-repository push gate in the
+    > variable-binding fence (#395). It is the only thing standing between a fork
+    > PR and a raw `git push` error, it lives on disk in
+    > `lib/review-push-target.sh` precisely so the rewiring can call it unchanged,
+    > and it must stay AHEAD of the lease capture wherever the push ends up.
 
     - `ci-rebase-handler` `status: REBASED, new_head_sha: <40-hex>` → fall through to "Phase 1 re-entry" below (the agent already pushed; new HEAD is on remote).
     - `ci-rebase-handler` `status: CONFLICT, conflicted_files: [...]` → execute the **CONFLICT-RESOLVE arm** below BEFORE Phase 1 re-entry. Closes #80 — the arm was previously unwired in this command, defeating the autopilot for any `stale_base` PR with conflicts.
@@ -3638,14 +3644,65 @@ PY
 
     Trigger: `ci-rebase-handler` returned `status: CONFLICT, conflicted_files: [...]`. Per `agents/ci-rebase-handler.md` Step 6 the agent has already aborted the in-progress rebase, so the worktree is back to its pre-rebase state. The caller's main turn re-creates the conflict state in the current `/review-pr` checkout (`$REPO_ROOT`), fans out `conflict-resolver` per file in a SINGLE assistant turn, then continues the rebase under the original lease. (Both sentences are in the STALE table above — the shipped agent returns a count and leaves the rebase running.)
 
-    **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195).
+    **Variable bindings (caller binds before step 1).** The arm uses `$pr_head_branch`, `$base_branch`, and `$REPO_ROOT` in its bash recipes and routed child calls prompts. Bind them in the caller's main turn from the PR (mirrors `agents/ci-rebase-handler.md:19-21` Inputs). `$PR_NUMBER` was already bound at 6c.1 PROBE (line 195). The binding runs through the **same-repository push gate** (`lib/review-push-target.sh`), so a fork PR is refused here — before the fetch, before the lease, and with a typed audit event instead of a raw `git push` error.
 
     ```bash
-    # Single gh call returns both refs to avoid two API roundtrips (one core
-    # bucket request, not two — matters under tight rate-limit budgets).
-    read -r pr_head_branch base_branch <<< "$(gh pr view "$PR_NUMBER" --json headRefName,baseRefName --jq '"\(.headRefName) \(.baseRefName)"')"
-    REPO_ROOT="$(git rev-parse --show-toplevel)"
+    # CROSS-REPOSITORY GATE (#395). One gh call still returns both refs (one
+    # core-bucket request, not two — that matters under tight rate-limit
+    # budgets), but the projection now carries the head-repository identity too,
+    # and the branch names are only bound when that identity IS this repository.
+    #
+    # `origin` is the repository the PR was opened AGAINST. For a fork PR
+    # `headRefName` names a branch in the CONTRIBUTOR's repository, so
+    # `git fetch origin "$pr_head_branch"`, the `origin/$pr_head_branch` lease
+    # and the leased push below all address a ref that either does not exist or
+    # is an unrelated same-named branch in the base repo. Phase 1 and Phase 2
+    # refuse that shape before publishing (`review_publish_same_repo_pr_head`);
+    # this is Phase 3's copy of the guarantee, and it runs BEFORE the lease is
+    # captured because a lease over a ref the run could not identify proves
+    # nothing.
+    #
+    # The resolver lives in lib/ rather than in this fence deliberately: the
+    # templater substitutes every positional of a rendered command fence (#404),
+    # so a helper that takes arguments cannot survive here.
+    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+    REVIEW_PUSH_TARGET_LIB="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-push-target.sh"
+    CI_PUSH_TARGET_RC=0
+    if [ -r "$REVIEW_PUSH_TARGET_LIB" ] && . "$REVIEW_PUSH_TARGET_LIB"; then
+      REPO_ROOT="$(git rev-parse --show-toplevel)"
+      REVIEW_REPO_SLUG="${REVIEW_REPO_SLUG:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+      CI_PUSH_TARGET="$(review_resolve_same_repo_push_target \
+        "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REPO_ROOT")" || CI_PUSH_TARGET_RC=$?
+    else
+      # An unreadable gate is not a reason to push unguarded — it is the same
+      # halt as an unidentifiable target, with its own stderr line so the
+      # operator can tell a broken install from a fork PR.
+      CI_PUSH_TARGET_RC=79
+      echo "error: /uberdev:review-pr — Phase 3 could not load the same-repository push gate: $REVIEW_PUSH_TARGET_LIB" >&2
+    fi
+    if [ "$CI_PUSH_TARGET_RC" -ne 0 ]; then
+      case "$CI_PUSH_TARGET_RC" in
+        78)
+          CI_PUSH_TARGET_SUBREASON=ci_push_target_cross_repository
+          echo "error: /uberdev:review-pr — Phase 3 cannot push PR #$PR_NUMBER: its head branch lives in another repository (fork). Re-run the CI fix from a checkout of the head repository, or land the fix as a PR from this one." >&2
+          ;;
+        *)
+          CI_PUSH_TARGET_SUBREASON=ci_push_target_unresolved
+          echo "error: /uberdev:review-pr — Phase 3 could not identify PR #$PR_NUMBER's push target (resolver rc=$CI_PUSH_TARGET_RC); refusing to fetch, lease or push a ref it cannot name." >&2
+          ;;
+      esac
+      audit ci_phase_outcome data.outcome=halted data.subreason=$CI_PUSH_TARGET_SUBREASON
+      exit 1
+    fi
+    IFS=$'\t' read -r pr_head_branch base_branch <<<"$CI_PUSH_TARGET"
     ```
+
+    Both halts are terminal for the run: `ci_push_target_cross_repository` (fork
+    head — `data.subreason` is typed so an audit consumer can route it) and
+    `ci_push_target_unresolved` (`gh` unreachable, or a projection this run
+    cannot trust). The second is deliberately NOT the `ci_probe_unreachable`
+    carve-out that 6c.1 PROBE applies to a `gh` outage: a probe that cannot read
+    checks may proceed, a push that cannot name its ref may not.
 
     1. **Re-create conflict state.** Re-fetch and re-rebase in the current `/review-pr` checkout (`$REPO_ROOT`) to surface conflict markers in `conflicted_files`:
 

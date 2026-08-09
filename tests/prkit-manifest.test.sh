@@ -24,12 +24,14 @@ done < "$MANIFEST"
 [ "$missing" -eq 0 ] && ok "M1 every manifest path exists in plugins/uberdev/" \
   || no "M1 $missing manifest path(s) do not exist"
 
-# M2 — count of real (non-comment, non-blank) entries is 37 (was 38 until #381
-# dropped lib/worktree_receipts.py with the codex dispatch backend).
+# M2 — count of real (non-comment, non-blank) entries is 38 (38 → 37 when #381
+# dropped lib/worktree_receipts.py with the codex dispatch backend; back to 38
+# with lib/review-push-target.sh, the Phase 3 same-repository push gate #395
+# moved out of the command markdown).
 #
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 37 ] && ok "M2 manifest lists exactly 37 files" \
-  || no "M2 manifest lists $count files (expected 37)"
+[ "$count" -eq 38 ] && ok "M2 manifest lists exactly 38 files" \
+  || no "M2 manifest lists $count files (expected 38)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \

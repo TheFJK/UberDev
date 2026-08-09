@@ -25,7 +25,7 @@ This is enforced, not requested. After you return, and BEFORE it pushes, the con
 
 - `pr_number`, `run_id`, `check_name` (trusted).
 - `base_branch` — the PR's base ref (e.g., `main`).
-- `pr_head_branch` — the PR's head ref name (e.g., `fix/123-add-thing`). Resolved by the caller via `gh pr view <pr_number> --json headRefName --jq .headRefName`. Distinct from `base_branch` — the lease's safety property requires capturing the head's prior tip, not the base's.
+- `pr_head_branch` — the PR's head ref name (e.g., `fix/123-add-thing`). Resolved by the caller through `lib/review-push-target.sh`'s `review_resolve_same_repo_push_target`, never from a bare `gh pr view --json headRefName`: for a fork PR that name belongs to the contributor's repository, so `origin/<pr_head_branch>` — the lease below, the fetch, and the controller's push — addresses a ref that does not exist or, worse, an unrelated same-named branch in the base repo (#395). The resolver refuses that shape before the lease is captured. Distinct from `base_branch` — the lease's safety property requires capturing the head's prior tip, not the base's.
 - `working_dir` — absolute worktree path.
 
 ## Tools authorised
