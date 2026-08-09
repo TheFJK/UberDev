@@ -372,6 +372,29 @@ for agent in "${DIFF_REVIEWER_AGENTS[@]}"; do
 done
 
 echo
+echo "== Reviewer serialization: the Phase 1 agents POINT AT one output contract (#403) =="
+# The Phase 1 result boundary is a re.fullmatch over the WHOLE result file
+# (lib/child-dispatch.sh) re-parsed byte-identically by lib/review-aggregate.sh.
+# An agent file that declares its own shape declares one the boundary can never
+# accept. code-simplifier is EXCLUDED by basename: it is the Phase 2 lens agent
+# and owns a different '## Return contract', consumed by a different aggregator.
+for agent in "${DIFF_REVIEWER_AGENTS[@]}"; do
+  base="$(basename "$agent")"
+  [ "$base" != "code-simplifier.md" ] || continue
+  [ -r "$agent" ] || continue
+  assert_grep "$agent" 'shared/phase1-reviewer-output-v1\.md' \
+    "$base points at shared/phase1-reviewer-output-v1.md instead of declaring its own shape"
+  assert_grep "$agent" 'entire contents of the result file' \
+    "$base binds the WHOLE result file (the boundary is a fullmatch, not a tail search)"
+  if [ "$(grep -c '```yaml' "$agent")" = 0 ]; then
+    echo "  PASS  $base restates no \`\`\`yaml fence of its own"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $base carries a \`\`\`yaml fence; a restated schema drifts from the validator silently"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
 echo "== Prompt-injection: post-impl-review dispatch wraps the diff in a pr-diff envelope (#271) =="
 # Step 1 of the brief assembly pastes the commit_range diff inline. It MUST be
 # wrapped in <external-untrusted-input source="pr-diff">…</external-untrusted-input>

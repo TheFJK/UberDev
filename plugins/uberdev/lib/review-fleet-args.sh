@@ -169,6 +169,92 @@ review_fleet_require_engine() {
   printf '%s' "$script"
 }
 
+# review_fleet_contract_path PLUGIN_ROOT CONTRACT_ID -> absolute path on stdout.
+#
+# THE BINDING IS DATA, NOT PROSE. policy/solve-run-tree-v1.json declares
+# output_contracts[<id>] and attaches it to the six review_pr.review.* edges;
+# lib/child-dispatch.sh resolves that same declaration for the ROUTED path and
+# appends the file's bytes to the child prompt. The Workflow composer has no
+# filesystem, so the controller resolves it HERE and the path travels across the
+# args envelope -- the diffPathAbs pattern. Both composers then read ONE
+# declaration instead of one reading it and the other re-declaring it as prose,
+# which is exactly the drift #403 filed.
+#
+# Refuses rather than defaults: an unresolvable contract must stop the wave at
+# the controller, not produce six children improvising a serialization the
+# validator's re.fullmatch can never accept.
+#
+# `contract_rel` / `contract_abs`, NEVER `path` or `status`: zsh ties both, and
+# tests/crossplatform-shell-wrappers.test.sh scans this file for exactly that.
+review_fleet_contract_path() {
+  [ "$#" -eq 2 ] || {
+    echo "error: review_fleet_contract_path: usage: review_fleet_contract_path PLUGIN_ROOT CONTRACT_ID" >&2
+    return 2
+  }
+  local plugin_root="$1" contract_id="$2" manifest contract_rel contract_abs root_real dir_real
+  case "$plugin_root" in
+    /*) ;;
+    *) echo "error: review_fleet_contract_path: PLUGIN_ROOT must be absolute: '$plugin_root'" >&2; return 2 ;;
+  esac
+  manifest="$plugin_root/policy/solve-run-tree-v1.json"
+  [ -r "$manifest" ] || {
+    echo "error: review_fleet_contract_path: unreadable policy manifest $manifest" >&2
+    return 2
+  }
+  # `// empty` rather than `-e`: an absent key must reach the named refusal
+  # below, not turn into a jq exit status the caller has to re-interpret.
+  contract_rel="$(jq -r --arg id "$contract_id" '.output_contracts[$id] // empty' <"$manifest" 2>/dev/null)" \
+    || contract_rel=''
+  [ -n "$contract_rel" ] || {
+    echo "error: review_fleet_contract_path: no output contract declared for id '$contract_id' in $manifest" >&2
+    return 2
+  }
+  # posixpath.normpath(rel) == rel, expressed as globs: no absolute spelling, no
+  # backslash, no empty / '.' / '..' component, no trailing slash. Plus the '"'
+  # that skills/review-fleet/workflow.js isSafeAbsPath() also refuses.
+  case "$contract_rel" in
+    /* | *\\* | *'"'* | . | .. | ./* | ../* | */. | */.. | */./* | */../* | *//* | */)
+      echo "error: review_fleet_contract_path: unsafe contract path '$contract_rel' for id '$contract_id'" >&2
+      return 2 ;;
+  esac
+  # A LITERAL newline, never "$(printf '\n')" -- command substitution strips the
+  # trailing newline and the pattern would match nothing (the same trap
+  # review_fleet_write_ci_pointer documents).
+  case "$contract_rel" in
+    *'
+'*)
+      echo "error: review_fleet_contract_path: newline in contract path for id '$contract_id'" >&2
+      return 2 ;;
+  esac
+  contract_abs="$plugin_root/$contract_rel"
+  # The value the caller emits is gated downstream by isSafeAbsPath(); refusing
+  # here means a bad PLUGIN_ROOT names itself instead of aborting a whole wave
+  # under `bad_contract_path` six dispatches later.
+  case "$contract_abs" in
+    *..* | *'"'*)
+      echo "error: review_fleet_contract_path: resolved path '$contract_abs' is not envelope-safe" >&2
+      return 2 ;;
+  esac
+  [ -f "$contract_abs" ] && [ -r "$contract_abs" ] || {
+    echo "error: review_fleet_contract_path: '$contract_abs' is not a readable regular file" >&2
+    return 2
+  }
+  [ ! -L "$contract_abs" ] || {
+    echo "error: review_fleet_contract_path: '$contract_abs' is a symlink; the contract must be the shipped file" >&2
+    return 2
+  }
+  # beneath(realpath(root), realpath(target)) -- the globs above cannot see a
+  # symlinked directory component, and a contract read from outside the plugin
+  # root is not the manifest's contract.
+  root_real="$(cd "$plugin_root" 2>/dev/null && pwd -P)" || return 2
+  dir_real="$(cd "$(dirname "$contract_abs")" 2>/dev/null && pwd -P)" || return 2
+  case "$dir_real/" in
+    "$root_real"/*) ;;
+    *) echo "error: review_fleet_contract_path: '$contract_abs' escapes the plugin root $root_real" >&2; return 2 ;;
+  esac
+  printf '%s' "$contract_abs"
+}
+
 # review_fleet_bind_roster STAGE RUN_DIR ITER WORKTREE CONTRACT LEDGER
 #
 # For every roster child, in order: make the directory the script derives, mint

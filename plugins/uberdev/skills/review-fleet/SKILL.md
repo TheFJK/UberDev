@@ -351,6 +351,12 @@ are re-split and re-validated in-script.
 | `lensConcurrency` | lens wave size, `[1,3]` default 3 |
 | `runNonces` | the nonce pool — see below |
 
+### `review` stage only
+
+| Key | Meaning |
+|---|---|
+| `phase1ContractPathAbs` | absolute path to the Phase 1 reviewer output contract, resolved by the controller from `policy/solve-run-tree-v1.json` `output_contracts["phase1-reviewer-v1"]` (`lib/review-fleet-args.sh review_fleet_contract_path`). The script re-declares nothing: it has no filesystem, and a second spelling of the path would be a second declaration that drifts. Absent, relative or traversal-bearing ⇒ `abort("bad_contract_path")` with **zero** dispatches. |
+
 ### `fix` stage — controller-supplied authority, forwarded verbatim
 
 `fixerEdgeId` (`review_pr.fix.phase1` \| `review_pr.fix.phase2` \|
@@ -567,6 +573,7 @@ the point of the seam.
 |---|---|
 | projected-agent ceiling | computed before any dispatch; **aborts** rather than degrading, because a half-run fanout produces a partial aggregate and a partial aggregate is indistinguishable from a clean zero-finding review |
 | nonce-pool gate | size or grammar mismatch aborts the stage before dispatch |
+| Phase 1 output contract | `review` only. An absent, relative or traversal-bearing `phase1ContractPathAbs` aborts `bad_contract_path` **before** the nonce gate, so no nonce is burned. Six reviewers dispatched without a stated serialization all fail `uberdev_child_validate_phase1_review_result` and the whole aggregate is suppressed — a full fanout spent to learn a wiring bug (#403) |
 | commit-type / edge pairing | `phase1`⇒`fix:`, `phase2`⇒`refactor:`; a mismatch aborts |
 | runtime `budget` | checked between waves with `budget && budget.total && budget.remaining() <= 0` — `parallel()` never rejects, so a budget throw would otherwise arrive as a silent `null` |
 

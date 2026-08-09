@@ -391,6 +391,15 @@ BLOCK_SCALAR_REVIEW="$TMP/run/children/worker-0001/block-scalar-review.md"
 ESCAPED_NEWLINE_REVIEW="$TMP/run/children/worker-0001/escaped-newline-review.md"
 ESCAPED_NUL_REVIEW="$TMP/run/children/worker-0001/escaped-nul-review.md"
 QUOTED_LEADING_SPACE_REVIEW="$TMP/run/children/worker-0001/quoted-leading-space-review.md"
+# #403's reproduction table, locked in the corpus. These three shapes are what
+# the five Phase 1 agent files USED to declare — prose around a fence, and the
+# agents' own CRITICAL/HIGH/MEDIUM vocabulary. The validator already refuses all
+# three (this is a LOCK on correct behaviour, not a red-first test); the fix was
+# producer-side, and these rows are what stops a future "be lenient about a
+# leading sentence" from quietly reopening the drift.
+PROSE_THEN_FENCE_REVIEW="$TMP/run/children/worker-0001/prose-then-fence-review.md"
+FENCE_THEN_PROSE_REVIEW="$TMP/run/children/worker-0001/fence-then-prose-review.md"
+SEVERITY_CRITICAL_REVIEW="$TMP/run/children/worker-0001/severity-critical-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -446,20 +455,47 @@ printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings:' \
   '  - severity: suggestion' '    location: tests/example.test.sh:1' \
   '    summary: " leading space"' '    detail: bounded detail' \
   'confidence: high' '```' >"$QUOTED_LEADING_SPACE_REVIEW"
-uberdev_child_validate_phase1_review_result "$VALID_REVIEW"
-uberdev_child_validate_phase1_review_result "$REJECT_REVIEW"
-uberdev_child_validate_phase1_review_result "$EMPTY_REVIEW"
-uberdev_child_validate_phase1_review_result "$ADVISORY_ONE_REVIEW"
-uberdev_child_validate_phase1_review_result "$ADVISORY_MULTI_REVIEW"
-! uberdev_child_validate_phase1_review_result "$INVALID_REVIEW"
-! uberdev_child_validate_phase1_review_result "$NULL_FINDINGS_REVIEW"
-! uberdev_child_validate_phase1_review_result "$INVALID_SCALAR_REVIEW"
-! uberdev_child_validate_phase1_review_result "$DRIVE_RELATIVE_REVIEW"
-! uberdev_child_validate_phase1_review_result "$DRIVE_QUALIFIED_REVIEW"
-! uberdev_child_validate_phase1_review_result "$BLOCK_SCALAR_REVIEW"
-! uberdev_child_validate_phase1_review_result "$ESCAPED_NEWLINE_REVIEW"
-! uberdev_child_validate_phase1_review_result "$ESCAPED_NUL_REVIEW"
-! uberdev_child_validate_phase1_review_result "$QUOTED_LEADING_SPACE_REVIEW"
+printf '%s\n' 'Here is my review.' '' '```yaml' 'verdict: APPROVE' 'findings: []' \
+  'confidence: high' '```' >"$PROSE_THEN_FENCE_REVIEW"
+printf '%s\n' '```yaml' 'verdict: APPROVE' 'findings: []' \
+  'confidence: high' '```' '' 'Hope this helps.' >"$FENCE_THEN_PROSE_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: CRITICAL' '    location: tests/example.test.sh:1' \
+  '    summary: legacy severity vocabulary' '    detail: bounded detail' \
+  'confidence: high' '```' >"$SEVERITY_CRITICAL_REVIEW"
+# `! cmd` is EXEMPT from `set -e` (bash manual, the "return value is being
+# inverted with !" clause), so a bare `! uberdev_child_validate_… ` row can
+# never fail this script — the whole reject corpus below was vacuous, which a
+# two-way mutation probe caught: swapping the boundary's `re.fullmatch` for
+# `re.search` left the suite GREEN. These two helpers exit, so the corpus is
+# load-bearing.
+accept_review() {
+  uberdev_child_validate_phase1_review_result "$1" \
+    || { echo "RED: a valid reviewer result was refused: $1" >&2; exit 1; }
+}
+reject_review() {
+  if uberdev_child_validate_phase1_review_result "$1" 2>/dev/null; then
+    echo "RED: an invalid reviewer result was ACCEPTED: $1" >&2
+    exit 1
+  fi
+}
+accept_review "$VALID_REVIEW"
+accept_review "$REJECT_REVIEW"
+accept_review "$EMPTY_REVIEW"
+accept_review "$ADVISORY_ONE_REVIEW"
+accept_review "$ADVISORY_MULTI_REVIEW"
+reject_review "$INVALID_REVIEW"
+reject_review "$NULL_FINDINGS_REVIEW"
+reject_review "$INVALID_SCALAR_REVIEW"
+reject_review "$DRIVE_RELATIVE_REVIEW"
+reject_review "$DRIVE_QUALIFIED_REVIEW"
+reject_review "$BLOCK_SCALAR_REVIEW"
+reject_review "$ESCAPED_NEWLINE_REVIEW"
+reject_review "$ESCAPED_NUL_REVIEW"
+reject_review "$QUOTED_LEADING_SPACE_REVIEW"
+reject_review "$PROSE_THEN_FENCE_REVIEW"
+reject_review "$FENCE_THEN_PROSE_REVIEW"
+reject_review "$SEVERITY_CRITICAL_REVIEW"
 
 # Workspace metadata is a closed union whenever a provider reports it. Caller
 # mode has one absolute execution directory and no branch; isolated mode has

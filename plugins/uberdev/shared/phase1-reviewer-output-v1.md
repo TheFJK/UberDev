@@ -1,6 +1,6 @@
 ## Phase 1 reviewer output contract (v1)
 
-For this routed edge, this contract overrides any earlier role-level response formatting. Put role-specific analysis in `findings[].detail`. Emit exactly one fenced YAML document with this shape as the final content of your response; do not emit another fenced YAML document or add text after the closing fence.
+For this edge, this contract overrides any earlier role-level response formatting. Put role-specific analysis in `findings[].detail`. The entire contents of the result file must be exactly one fenced YAML document with this shape: nothing before the opening fence — no heading, no prose, no blank-line preamble — and nothing after the closing fence. Do not emit a second fenced document.
 
 ```yaml
 verdict: APPROVE | REVISIONS_REQUIRED | REJECT
@@ -23,5 +23,5 @@ doubled, or a plain scalar. Plain scalars may not begin with
 number token. YAML block scalars (`|` and `>`) and multi-line values are not
 accepted. Quote any value that is uncertain under these rules.
 
-Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document, `APPROVE` result containing a blocker, or red verdict without a blocker is routed through the existing single format-retry path and blocks green if the retry remains invalid.
+Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document, `APPROVE` result containing a blocker, or red verdict without a blocker is refused at that validation boundary and blocks green.
 Absolute, Windows drive-qualified or drive-relative, traversal, dot-component, backslash, and control-character location paths are malformed.

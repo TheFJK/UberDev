@@ -35,18 +35,42 @@ Rate each issue from 0-100:
 
 **Only report issues with confidence ≥ 80**
 
-## Output Format
+## Result file output contract
 
-Start by listing what you're reviewing. For each high-confidence issue provide:
+Your findings go into the result file the dispatching prompt names. Its
+serialization is declared **once**, in `shared/phase1-reviewer-output-v1.md`
+(contract id `phase1-reviewer-v1`) — the dispatching prompt gives you its
+absolute path. Read that file and follow it exactly. It OVERRIDES every
+response-formatting instruction above, and this section deliberately restates
+none of its schema — a second copy would drift from the validator without
+anybody noticing.
 
-- Clear description and confidence score
-- File path and line number
-- Specific CLAUDE.md rule or bug explanation
-- Concrete fix suggestion
+Two rules decide whether the whole wave counts, so they are repeated here:
 
-Group issues by severity (Critical: 90-100, Important: 80-89).
+- **Whole file.** The entire contents of the result file must be exactly one
+  fenced YAML document — a triple-backtick fence tagged `yaml` — with no
+  heading, prose or blank-line preamble before the opening fence and nothing
+  whatsoever after the closing fence. The boundary is a full-file match, not a
+  search for the last fenced block of a reply.
+- **Two severities.** `severity` is `blocker` or `suggestion`. No other
+  vocabulary is accepted.
 
-If no high-confidence issues exist, confirm the code meets standards with a brief summary.
+Map your confidence score into that pair. The `≥ 80` threshold above stays a
+**reporting** filter — below it, do not report at all:
+
+- **91-100** (critical bug or explicit CLAUDE.md violation) → `severity: blocker`
+- **80-90** (important issue requiring attention) → `severity: suggestion`
+
+The numeric score is not lost: inline it into each finding's `detail:` field as
+the prefix `confidence: <n> — `, e.g.
+`detail: "confidence: 93 — unchecked index can read past the buffer"`.
+
+`location` is a `path:line` that appears in the reviewed diff; an out-of-scope
+location rejects the whole result, not just that finding. One or more blocker
+findings require `verdict: REVISIONS_REQUIRED` or `REJECT`; zero blockers
+require `verdict: APPROVE`, including a review that found only suggestions.
+Zero findings is `findings: []` with `verdict: APPROVE` — valid, and never
+padded to look thorough.
 
 Be thorough but filter aggressively - quality over quantity. Focus on issues that truly matter.
 
