@@ -148,9 +148,21 @@ discover_bare_fast_path() {
   local current_branch="$1"
   local gh_err
   gh_err="$(mktemp)"
-  # Function-scoped trap; bash 3.2 supports RETURN trap idiom.
-  # shellcheck disable=SC2064  # intentional immediate expansion of $gh_err
-  trap "rm -f \"$gh_err\"" RETURN
+  # NO `trap ... RETURN` here: zsh rejects RETURN as an undefined signal, so the
+  # trap never installs, $gh_err leaks on every call, `undefined signal: RETURN`
+  # goes to stderr, and under errexit the function aborts at that line (#401).
+  # merge-pipeline/SKILL.md `bash` fences execute under /bin/zsh, so this file's
+  # production shell is zsh, not bash. Every return path past this point MUST
+  # `rm -f "$gh_err"` explicitly, and the release must come AFTER
+  # _uberdev_discover_warn and _uberdev_discover_emit_audit — both READ the file.
+  #
+  # `trap ... EXIT` is not the alternative either: this library is SOURCED, so an
+  # EXIT trap installs on the CALLER's shell, the third call would replace the
+  # first two, and lib/goal-phase3.sh (which sources this library) already owns
+  # the single process-wide EXIT slot for its decision emitter.
+  #
+  # Mirrors the explicit-release discipline lib/rate-limit-curl.sh documents and
+  # uses for its mutex.
 
   local result
   result="$(gh pr list \
@@ -165,6 +177,7 @@ discover_bare_fast_path() {
   if [ "$gh_exit" -ne 0 ]; then
     _uberdev_discover_warn "bare-mode discovery failed" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "gh_failed" "1.0.5" "$gh_exit" "$gh_err"
+    rm -f "$gh_err"
     return 1
   fi
 
@@ -175,11 +188,13 @@ discover_bare_fast_path() {
     ''|*[!0-9]*)
       _uberdev_discover_warn "bare-mode discovery returned non-integer" "$gh_exit" "$gh_err"
       _uberdev_discover_emit_audit "jq_failed" "1.0.5" "$gh_exit" "$gh_err"
+      rm -f "$gh_err"
       return 1
       ;;
   esac
 
   printf '%s\n' "$result"
+  rm -f "$gh_err"
   return 0
 }
 
@@ -195,8 +210,9 @@ discover_multi() {
   local integration_branch="$1"
   local gh_err
   gh_err="$(mktemp)"
-  # shellcheck disable=SC2064
-  trap "rm -f \"$gh_err\"" RETURN
+  # No trap — see the release note in discover_bare_fast_path (#401): `RETURN` is
+  # an undefined signal in zsh and `EXIT` would install on the sourcing shell.
+  # Every return path below releases $gh_err explicitly, after the readers.
 
   local result
   result="$(gh pr list \
@@ -212,6 +228,7 @@ discover_multi() {
     _uberdev_discover_warn "multi-discover failed" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "gh_failed" "1.2.5" "$gh_exit" "$gh_err"
     printf '[]\n'
+    rm -f "$gh_err"
     return 0
   fi
 
@@ -221,10 +238,12 @@ discover_multi() {
     _uberdev_discover_warn "multi-discover returned empty stdout" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "jq_failed" "1.2.5" "$gh_exit" "$gh_err"
     printf '[]\n'
+    rm -f "$gh_err"
     return 0
   fi
 
   printf '%s\n' "$result"
+  rm -f "$gh_err"
   return 0
 }
 
@@ -241,8 +260,9 @@ pr_view_projection() {
   local pr_number="$1"
   local gh_err
   gh_err="$(mktemp)"
-  # shellcheck disable=SC2064
-  trap "rm -f \"$gh_err\"" RETURN
+  # No trap — see the release note in discover_bare_fast_path (#401): `RETURN` is
+  # an undefined signal in zsh and `EXIT` would install on the sourcing shell.
+  # Every return path below releases $gh_err explicitly, after the readers.
 
   local result
   result="$(gh pr view "$pr_number" \
@@ -254,16 +274,19 @@ pr_view_projection() {
   if [ "$gh_exit" -ne 0 ]; then
     _uberdev_discover_warn "pr_view_projection #$pr_number failed" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "gh_failed" "1.4" "$gh_exit" "$gh_err" "$pr_number"
+    rm -f "$gh_err"
     return 1
   fi
 
   if [ -z "$result" ]; then
     _uberdev_discover_warn "pr_view_projection #$pr_number returned empty stdout" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "jq_failed" "1.4" "$gh_exit" "$gh_err" "$pr_number"
+    rm -f "$gh_err"
     return 1
   fi
 
   printf '%s\n' "$result"
+  rm -f "$gh_err"
   return 0
 }
 
