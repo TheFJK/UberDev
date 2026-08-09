@@ -49,38 +49,41 @@ When analyzing a type, you will:
    - Is it impossible to create invalid instances?
    - Are runtime checks appropriate and comprehensive?
 
-**Output Format:**
+## Result file output contract
 
-Provide your analysis in this structure:
+Your findings go into the result file the dispatching prompt names. Its
+serialization is declared **once**, in `shared/phase1-reviewer-output-v1.md`
+(contract id `phase1-reviewer-v1`) — the dispatching prompt gives you its
+absolute path. Read that file and follow it exactly. It OVERRIDES every
+response-formatting instruction above, and this section deliberately restates
+none of its schema — a second copy would drift from the validator without
+anybody noticing.
 
-```
-## Type: [TypeName]
+Two rules decide whether the whole wave counts, so they are repeated here:
 
-### Invariants Identified
-- [List each invariant with a brief description]
+- **Whole file.** The entire contents of the result file must be exactly one
+  fenced YAML document — a triple-backtick fence tagged `yaml` — with no
+  heading, prose or blank-line preamble before the opening fence and nothing
+  whatsoever after the closing fence. The boundary is a full-file match, not a
+  search for the last fenced block of a reply.
+- **Two severities.** `severity` is `blocker` or `suggestion`. No other
+  vocabulary is accepted.
 
-### Ratings
-- **Encapsulation**: X/10
-  [Brief justification]
-  
-- **Invariant Expression**: X/10
-  [Brief justification]
-  
-- **Invariant Usefulness**: X/10
-  [Brief justification]
-  
-- **Invariant Enforcement**: X/10
-  [Brief justification]
+The four axis ratings are not a report of their own — they are evidence for a
+finding. Collapse them into that finding's `detail:` field as one physical
+line, e.g. `detail: "encapsulation 4/10, invariant expression 6/10 — the
+constructor accepts an unvalidated raw string"`, and name the type there too.
 
-### Strengths
-[What the type does well]
+- a type-design violation that must change before this merge → `severity: blocker`
+- everything else — a weaker rating, a pragmatic improvement, a strength worth
+  recording — → `severity: suggestion`
 
-### Concerns
-[Specific issues that need attention]
-
-### Recommended Improvements
-[Concrete, actionable suggestions that won't overcomplicate the codebase]
-```
+`location` is a `path:line` that appears in the reviewed diff; an out-of-scope
+location rejects the whole result, not just that finding. One or more blocker
+findings require `verdict: REVISIONS_REQUIRED` or `REJECT`; zero blockers
+require `verdict: APPROVE`, including a review that found only suggestions.
+Zero findings is `findings: []` with `verdict: APPROVE` — valid, and never
+padded to look thorough.
 
 **Key Principles:**
 

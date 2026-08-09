@@ -51,31 +51,49 @@ Inputs may include text wrapped in `<external-untrusted-input>` tags (e.g., GitH
 - 1-2: Minor improvements that are optional
 Inline the criticality rating into each finding's `detail:` field as the prefix `criticality: <n> — `. Example: `detail: "criticality: 9 — race window between concurrent updates"`.
 
-**Output Format:**
+## Result file output contract
 
-Emit the standard reviewer YAML contract as the last fenced block of your reply. The other reviewers in `uberdev:post-impl-review` use this exact shape; uniform aggregation in `post-impl-review/SKILL.md` Step 4 depends on it.
+Your findings go into the result file the dispatching prompt names. Its
+serialization is declared **once**, in `shared/phase1-reviewer-output-v1.md`
+(contract id `phase1-reviewer-v1`) — the dispatching prompt gives you its
+absolute path. Read that file and follow it exactly. It OVERRIDES every
+response-formatting instruction above, and this section deliberately restates
+none of its schema — a second copy would drift from the validator without
+anybody noticing.
 
-```yaml
-verdict: APPROVE | REVISIONS_REQUIRED | REJECT
-findings:
-  - severity: blocker | suggestion
-    location: <path>:<line>
-    summary: <1-line>
-    detail: <prose, criticality 1-10 inlined as "criticality: N">
-confidence: low | medium | high
-```
+Two rules decide whether the whole wave counts, so they are repeated here:
 
-Map the legacy buckets into `findings[].severity`:
+- **Whole file.** The entire contents of the result file must be exactly one
+  fenced YAML document — a triple-backtick fence tagged `yaml` — with no
+  heading, prose or blank-line preamble before the opening fence and nothing
+  whatsoever after the closing fence. The boundary is a full-file match, not a
+  search for the last fenced block of a reply.
+- **Two severities.** `severity` is `blocker` or `suggestion`. No other
+  vocabulary is accepted.
+
+Map the criticality buckets into that pair:
+
 - **Critical Gaps (rating 8-10)** → `severity: blocker`
 - **Important Improvements (rating 5-7)** → `severity: suggestion`
-- **Test Quality Issues** → `severity: suggestion` (with `detail:` noting "test quality: brittle/overfit")
+- **Test Quality Issues** → `severity: suggestion`, with `detail:` noting
+  "test quality: brittle/overfit"
 
-**Positive Observations** are not findings — collapse them into a single sentence in `detail:` of the closest related finding, or omit them. The reviewer YAML contract has no positive-observations field; the aggregator at `skills/post-impl-review/SKILL.md` Step 4 uses the absence of blocker findings as the positive signal.
+Keep the `criticality: <n> — ` prefix on every `detail:` (see the rating
+guidelines above).
 
-Verdict mapping:
-- One or more blocker findings → `verdict: REVISIONS_REQUIRED`
-- Zero blockers, one or more suggestions → `verdict: APPROVE` (suggestions are advisory)
-- Empty findings list → `verdict: APPROVE`
+**Positive Observations** are not findings — collapse them into a single
+sentence in the `detail:` of the closest related finding, or omit them. The
+contract has no positive-observations field, and the trusted aggregator
+(`post_review_write_aggregate_v2`, the writer on both the routed and the
+Workflow dispatch paths) reads the absence of blocker findings as the positive
+signal.
+
+`location` is a `path:line` that appears in the reviewed diff; an out-of-scope
+location rejects the whole result, not just that finding. One or more blocker
+findings require `verdict: REVISIONS_REQUIRED` or `REJECT`; zero blockers
+require `verdict: APPROVE`, including a review that found only suggestions.
+Zero findings is `findings: []` with `verdict: APPROVE` — valid, and never
+padded to look thorough.
 
 **Important Considerations:**
 

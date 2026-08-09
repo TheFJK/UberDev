@@ -1635,6 +1635,13 @@ PY
    # the only moment a binding can be minted that the child could not influence.
    review_fleet_bind_roster review "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
      "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" "$REVIEW_FLEET_LAUNCHED" || return 2
+   # The Workflow composer is a courier with no filesystem, so the output
+   # contract the policy manifest binds to every review_pr.review.* edge travels
+   # BY PATH -- the diffPathAbs way. Resolved HERE from
+   # policy/solve-run-tree-v1.json so the Workflow path and the routed path read
+   # ONE declaration instead of the routed path reading it and this one
+   # re-declaring it as prose (#403).
+   REVIEW_FLEET_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" phase1-reviewer-v1)" || return 2
    uberdev_emit_workflow_args review-fleet \
      mode=review-pr \
      stage=review \
@@ -1648,6 +1655,7 @@ PY
      repoSlug="$REVIEW_REPO_SLUG" \
      reviewIteration="$REVIEW_ITERATION" \
      diffPathAbs="$DIFF_ARTIFACT_PATH" \
+     phase1ContractPathAbs="$REVIEW_FLEET_CONTRACT_PATH" \
      aspects="$REVIEW_FLEET_ASPECTS" \
      fanoutCap="$REVIEW_FLEET_CAP" \
      maxAgents=40 \
