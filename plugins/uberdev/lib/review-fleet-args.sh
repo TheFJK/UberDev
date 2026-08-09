@@ -192,6 +192,7 @@ review_fleet_contract_path() {
     return 2
   }
   local plugin_root="$1" contract_id="$2" manifest contract_rel contract_abs root_real dir_real
+  local contract_probe contract_verdict contract_detail
   case "$plugin_root" in
     /*) ;;
     *) echo "error: review_fleet_contract_path: PLUGIN_ROOT must be absolute: '$plugin_root'" >&2; return 2 ;;
@@ -251,6 +252,71 @@ review_fleet_contract_path() {
   case "$dir_real/" in
     "$root_real"/*) ;;
     *) echo "error: review_fleet_contract_path: '$contract_abs' escapes the plugin root $root_real" >&2; return 2 ;;
+  esac
+  # THE SAME ACCEPTANCE TEST AS THE ROUTED TRANSPORT, not a looser one.
+  #
+  # lib/child-dispatch.sh resolves THIS contract id for THE SAME six edges, and
+  # its `invalid_output_contract` arm refuses more than `-f`/`-r`/`! -L`: a file
+  # not owned by the running euid, one with st_nlink != 1, and one whose size
+  # falls outside 1..65536 bytes. Two transports reading one declaration must
+  # also agree on what the declaration resolves TO. Without these three, a file
+  # the routed path calls `invalid_output_contract` was ACCEPTED here and its
+  # path handed to six reviewer subagents told to obey it -- the drift #403
+  # filed, one layer down from the path itself.
+  #
+  # python3, not `stat`: st_uid / st_nlink / st_size have no portable shell
+  # spelling (`stat -c` is GNU, `stat -f` is BSD and means --file-system on
+  # GNU), and python3 is ALREADY a hard dependency of this file --
+  # review_fleet_bind_roster shells every binding out to it. Mirroring the twin
+  # in the twin's own language is what keeps the two predicates comparable.
+  #
+  # os.lstat, never os.stat: a stat that follows a link would read the far end's
+  # metadata and answer for a file the `-L` guard above already refused.
+  contract_probe="$(python3 -I -B -c '
+import os,stat,sys
+try:
+    entry=os.lstat(sys.argv[1])
+except OSError:
+    print("unstattable 0");raise SystemExit(0)
+reparse=getattr(stat,"FILE_ATTRIBUTE_REPARSE_POINT",0x400)
+euid=os.geteuid() if callable(getattr(os,"geteuid",None)) else None
+if stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,"st_file_attributes",0)&reparse):
+    print("symlink 0")
+elif not stat.S_ISREG(entry.st_mode):
+    print("not_regular 0")
+elif euid is not None and hasattr(entry,"st_uid") and entry.st_uid!=euid:
+    print("not_owned %d"%entry.st_uid)
+elif entry.st_nlink!=1:
+    print("hardlinked %d"%entry.st_nlink)
+elif entry.st_size<1 or entry.st_size>65536:
+    print("bad_size %d"%entry.st_size)
+else:
+    print("ok 0")
+' "$contract_abs" 2>/dev/null)" || contract_probe='probe_failed 0'
+  contract_verdict="${contract_probe%% *}"
+  contract_detail="${contract_probe#* }"
+  case "$contract_verdict" in
+    ok) ;;
+    not_owned)
+      echo "error: review_fleet_contract_path: '$contract_abs' is owned by uid $contract_detail, not the running user; the contract must be the shipped file" >&2
+      return 2 ;;
+    hardlinked)
+      echo "error: review_fleet_contract_path: '$contract_abs' has $contract_detail hard links; the contract must be the shipped file, not an alias to it" >&2
+      return 2 ;;
+    bad_size)
+      echo "error: review_fleet_contract_path: '$contract_abs' is $contract_detail bytes; the contract must be 1..65536 bytes like the routed resolver requires" >&2
+      return 2 ;;
+    symlink)
+      echo "error: review_fleet_contract_path: '$contract_abs' is a symlink or reparse point; the contract must be the shipped file" >&2
+      return 2 ;;
+    not_regular)
+      echo "error: review_fleet_contract_path: '$contract_abs' is not a regular file" >&2
+      return 2 ;;
+    *)
+      # unstattable / probe_failed / anything unrecognised. Fails CLOSED: a
+      # predicate that cannot be evaluated is not a predicate that passed.
+      echo "error: review_fleet_contract_path: could not verify '$contract_abs' against the routed resolver's file predicate" >&2
+      return 2 ;;
   esac
   printf '%s' "$contract_abs"
 }

@@ -730,12 +730,19 @@ function diffContract() {
 // verbatim to its child prompts (lib/child-dispatch.sh), so both paths bind the
 // children to one declaration. The summary below is deliberately redundant with
 // the file: a reviewer that skips the read still has the two rules whose breach
-// costs the whole wave (whole-file fence, blocker|suggestion).
+// costs the whole wave (whole-file fence, blocker|suggestion). The override is
+// scoped to FORMAT on purpose — the agent files' `## Output Rules — secret-leak
+// prevention` section governs finding CONTENT, and an unbounded "overrides your
+// agent file" would read as permission to quote a credential into detail:.
 function phase1OutputContract() {
-  return "## Output contract (overrides your agent file)\n"
+  return "## Output contract (overrides your agent file's output FORMAT)\n"
     + "Read the Phase 1 reviewer output contract at " + phase1ContractPathAbs + " and follow it "
     + "exactly. It OVERRIDES every response-formatting instruction in your agent file, including "
-    + "any Output Format section. The entire contents of the result file must be exactly one bare "
+    + "any Output Format section. It does NOT override your agent file's secret-leak prevention "
+    + "rule: that rule governs what a finding may CONTAIN, not how the result is serialized, and "
+    + "it still binds. Never quote source code or a secret-shaped value verbatim into any field — "
+    + "cite the `path:line` and describe the problem in your own words. The entire contents of "
+    + "the result file must be exactly one bare "
     + "```yaml fence: no heading, prose or blank-line preamble before the opening fence, and "
     + "nothing whatsoever after the closing fence. `severity` is `blocker` or `suggestion` — no "
     + "other vocabulary is accepted. Every `location` must be a `path:line` that appears in the "

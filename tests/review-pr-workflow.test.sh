@@ -1696,8 +1696,11 @@ e9_call "$(e9_fixture 'shared/does-not-exist.md')" phase1-reviewer-v1
   && pass "E9e a declared contract file that does not exist is refused (rc 2)" \
   || fail "E9e a missing contract file returned rc=$E9_RC '$E9_OUT'"
 
-# E9f — a symlinked contract escaping the plugin root. The glob predicate cannot
-# see this; only the containment check can.
+# E9f — the contract FILE is itself a symlink. This pins the `[ ! -L ]` guard,
+# and ONLY that guard: `-L` is tested one line before the containment check, so
+# this fixture is refused before realpath is ever consulted. It used to claim
+# the containment check was the only predicate that could see it, which was
+# false and left that check with zero coverage — E9i is the row that reaches it.
 E9_FX="$(e9_fixture 'shared/link.md')"
 ln -sf "$E9_TMP/escape.md" "$E9_FX/shared/link.md"
 e9_call "$E9_FX" phase1-reviewer-v1
@@ -1723,6 +1726,82 @@ e9_call "$E9_ROOT" phase1-reviewer-v1 extra; [ "$E9_RC" = 2 ] || E9_ARITY_BAD=$(
 [ "$E9_ARITY_BAD" = 0 ] \
   && pass "E9h 0, 1 and 3 arguments are each rc 2" \
   || fail "E9h $E9_ARITY_BAD of the 3 arity refusals did not return rc 2"
+
+# E9i — THE CONTAINMENT PREDICATE, and the only row that can reach it.
+#
+# E9f symlinks the contract FILE, so `[ ! -L "$contract_abs" ]` refuses it one
+# line before `beneath(realpath(root), realpath(target))` runs — proven by
+# mutation: blanking the two realpath assignments and the case that consumes
+# them left the whole suite green. Here the DIRECTORY COMPONENT is the symlink
+# and a plain regular file sits at the far end, so `-f`, `-r` and `! -L` all
+# pass on the contract itself (asserted below, so this row cannot silently
+# decay into a second copy of E9f) and only the realpath containment can refuse.
+E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+mkdir -p "$E9_TMP/outside"
+printf 'contract\n' >"$E9_TMP/outside/phase1-reviewer-output-v1.md"
+rm -rf "$E9_FX/shared"
+ln -s "$E9_TMP/outside" "$E9_FX/shared"
+E9_ESCAPED="$E9_FX/shared/phase1-reviewer-output-v1.md"
+e9_call "$E9_FX" phase1-reviewer-v1
+if [ -f "$E9_ESCAPED" ] && [ -r "$E9_ESCAPED" ] && [ ! -L "$E9_ESCAPED" ] \
+   && [ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ]; then
+  pass "E9i a contract behind a symlinked DIRECTORY component is refused by the realpath containment check"
+elif [ ! -f "$E9_ESCAPED" ] || [ -L "$E9_ESCAPED" ]; then
+  fail "E9i fixture did not defeat the -f/-L guards, so it cannot reach the containment check"
+else
+  fail "E9i a symlinked directory component escaped the containment check: rc=$E9_RC '$E9_OUT'"
+fi
+
+# E9j — st_nlink != 1. lib/child-dispatch.sh, resolving the SAME contract id for
+# the SAME six edges, calls a hardlinked contract `invalid_output_contract`; a
+# Workflow transport that accepts it hands six reviewers an authority the routed
+# transport would have refused. The fixture is verified to really be a hard link
+# before the assertion is read, so a platform that copies instead of linking
+# fails loudly rather than passing vacuously.
+E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+printf 'contract\n' >"$E9_TMP/fx/hardlink-origin.md"
+rm -f "$E9_FX/shared/phase1-reviewer-output-v1.md"
+ln "$E9_TMP/fx/hardlink-origin.md" "$E9_FX/shared/phase1-reviewer-output-v1.md" 2>/dev/null
+E9_NLINK="$(python3 -I -B -c 'import os,sys;print(os.lstat(sys.argv[1]).st_nlink)' \
+  "$E9_FX/shared/phase1-reviewer-output-v1.md" 2>/dev/null)"
+e9_call "$E9_FX" phase1-reviewer-v1
+if [ "$E9_NLINK" = 2 ] && [ "$E9_RC" = 2 ] && [ -z "$E9_OUT" ] \
+   && grep -Fq 'hard links' "$E9_TMP/err"; then
+  pass "E9j a hardlinked contract (st_nlink=2) is refused under its own diagnostic, matching the routed resolver"
+else
+  fail "E9j hardlinked contract: nlink='$E9_NLINK' rc=$E9_RC out='$E9_OUT' err='$(cat "$E9_TMP/err")'"
+fi
+
+# E9k — the 1..65536 size window, at both edges AND just inside the upper one.
+# The accept row is what stops "refuse everything big" from passing as "enforce
+# the twin's bound". OWNERSHIP (st_uid == euid, the third refusal the routed
+# resolver carries) is NOT covered here: constructing a regular file owned by
+# another uid needs root, and this suite runs unprivileged on ubuntu and macOS.
+# It is asserted only by the shared predicate being written once, in the same
+# probe as these two — not by a row of its own.
+E9_SIZE_BAD=0
+E9_SIZE_WHICH=""
+for e9_size in 0 65537 65536; do
+  E9_FX="$(e9_fixture 'shared/phase1-reviewer-output-v1.md')"
+  python3 -I -B -c 'import sys
+with open(sys.argv[1],"wb") as fh: fh.write(b"x"*int(sys.argv[2]))' \
+    "$E9_FX/shared/phase1-reviewer-output-v1.md" "$e9_size"
+  e9_call "$E9_FX" phase1-reviewer-v1
+  if [ "$e9_size" = 65536 ]; then
+    if [ "$E9_RC" != 0 ] || [ "$E9_OUT" != "$E9_FX/shared/phase1-reviewer-output-v1.md" ]; then
+      E9_SIZE_BAD=$((E9_SIZE_BAD + 1))
+      E9_SIZE_WHICH="$E9_SIZE_WHICH ${e9_size}B-should-be-accepted(rc=$E9_RC)"
+    fi
+  elif [ "$E9_RC" != 2 ] || [ -n "$E9_OUT" ] || ! grep -Fq '1..65536 bytes' "$E9_TMP/err"; then
+    E9_SIZE_BAD=$((E9_SIZE_BAD + 1))
+    E9_SIZE_WHICH="$E9_SIZE_WHICH ${e9_size}B-should-be-refused(rc=$E9_RC)"
+  fi
+done
+if [ "$E9_SIZE_BAD" = 0 ]; then
+  pass "E9k an empty and an oversized contract are refused by size while exactly 65536 bytes is accepted"
+else
+  fail "E9k $E9_SIZE_BAD size boundary case(s) went the wrong way:$E9_SIZE_WHICH"
+fi
 
 echo ""
 echo "== Summary =="
