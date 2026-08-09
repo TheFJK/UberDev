@@ -305,11 +305,130 @@ assert_count_at_least "$SKILL" 'CLAUDE_PLUGIN_ROOT.*skills/merge-pipeline/lib/di
   "A4d: SKILL.md sources lib via \${CLAUDE_PLUGIN_ROOT} at all 3 hot spots"
 
 echo
-echo "== A5: lib/discover.sh uses mktemp + trap RETURN cleanup =="
-assert_grep "$LIB" 'mktemp' \
-  "A5a: mktemp present (stderr capture file)"
-assert_grep "$LIB" 'trap[[:space:]]+.*RETURN' \
-  "A5b: trap ... RETURN present (function-scoped cleanup)"
+echo "== A5: lib/discover.sh releases its mktemp stderr file on every return path =="
+# THE CLASS (#401). The three public functions used to guard their mktemp
+# stderr-capture file with `trap "rm -f \"$gh_err\"" RETURN`. zsh does not
+# accept RETURN as a signal, and merge-pipeline/SKILL.md `bash` fences execute
+# under /bin/zsh — so in the shell this library actually runs in the trap NEVER
+# INSTALLS: the file leaks once per call, `undefined signal: RETURN` goes to
+# stderr on every discovery, and under `setopt err_return` / `set -e` the
+# function aborts at the trap line before ever calling gh.
+#
+# The A5b that shipped here asserted the literal string `trap ... RETURN` was
+# PRESENT — a guard enforcing the bug. It encoded "cleanup happens" as "this
+# one construct appears", read against bash semantics for a file bash does not
+# run. It is repointed at the real invariant: every return path releases the
+# file, and no trap of any signal survives.
+#
+# ONE extractor, ONE probe, ONE verdict — five consumers. A second copy of the
+# comparator would be the same "one contract, N uncompared copies" drift
+# (#370/#371) this fix is about, so A5d exercises the SAME `_a5_verdict` that
+# A5b ships, from the other side.
+
+# Extract ONE function body from $LIB, whole-line comments stripped. Anchored on
+# the `name() {` opener at column 0 and the matching `}` at column 0 — the shape
+# every function in this file uses. Scoped to NAMED functions, never file-wide:
+# the unrelated `mktemp -d` secure-capture boundary in the verdict-discovery
+# half has its own explicit cleanup and must not be swept into this count.
+_a5_body() {
+  awk -v fn="$1" '
+    $0 ~ "^"fn"\\(\\)[[:space:]]*\\{[[:space:]]*$" { inb=1; next }
+    inb && /^\}[[:space:]]*$/                      { inb=0; next }
+    inb                                            { print }
+  ' "$LIB" | grep -v '^[[:space:]]*#'
+}
+
+# "<lines> <returns> <releases> <returns-not-immediately-preceded-by-a-release>"
+_a5_probe() {
+  printf '%s\n' "$1" | awk '
+    { lines++ }
+    /^[[:space:]]*return[[:space:]]/ {
+      ret++
+      if (prev !~ /^[[:space:]]*rm -f "\$gh_err"[[:space:]]*$/) bad++
+    }
+    /^[[:space:]]*rm -f "\$gh_err"[[:space:]]*$/ { rel++ }
+    { prev = $0 }
+    END { printf "%d %d %d %d\n", lines+0, ret+0, rel+0, bad+0 }
+  '
+}
+
+# rc 0 = clean, rc 1 = violation. An EMPTY body is a violation, not a vacuous
+# pass — that is the whole point of A5d's second arm.
+_a5_verdict() {
+  [ -n "$1" ] || return 1
+  local a5_probe a5_ret a5_rel a5_bad
+  a5_probe="$(_a5_probe "$1")"
+  IFS=' ' read -r _ a5_ret a5_rel a5_bad <<<"$a5_probe"
+  [ "$a5_ret" = 3 ] && [ "$a5_rel" = 3 ] && [ "$a5_bad" = 0 ]
+}
+
+# Tightened from the bare `mktemp` grep, which stayed green through a template
+# change and could not tell the three capture sites apart from any other use.
+assert_count_eq "$LIB" 'gh_err="\$\(mktemp\)"' 3 \
+  "A5a: three gh_err mktemp stderr-capture sites"
+
+for a5_fn in discover_bare_fast_path discover_multi pr_view_projection; do
+  A5_BODY="$(_a5_body "$a5_fn")"
+  if [ -n "$A5_BODY" ]; then
+    echo "  PASS  A5b.$a5_fn.extracted: function body extracted from lib/discover.sh"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  A5b.$a5_fn.extracted: no function body extracted — the extractor is blind"
+    FAIL=$((FAIL + 1))
+  fi
+  if _a5_verdict "$A5_BODY"; then
+    echo "  PASS  A5b.$a5_fn: 3 returns, 3 explicit \$gh_err releases, none unguarded"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  A5b.$a5_fn: a return path does not release \$gh_err"
+    echo "        probe (lines returns releases unguarded-returns): $(_a5_probe "$A5_BODY")"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# No trap of ANY signal, not just RETURN. `trap ... EXIT` is not the fix either:
+# this library is SOURCED, so an EXIT trap installs on the CALLER's shell and
+# the third call would silently replace the first two — and lib/goal-phase3.sh,
+# which sources this library, already owns the single process-wide EXIT slot.
+assert_no_grep "$LIB" '^[[:space:]]*trap[[:space:]]' \
+  "A5c: no trap statement of any signal survives in lib/discover.sh"
+
+# Anti-vacuity, both arms through the SAME verdict A5b uses.
+A5_SYNTH="$(cat <<'EOF_A5_SYNTH'
+  rm -f "$gh_err"
+  return 1
+  rm -f "$gh_err"
+  return 1
+  printf '%s\n' "$result"
+  return 0
+EOF_A5_SYNTH
+)"
+if _a5_verdict "$A5_SYNTH"; then
+  echo "  FAIL  A5d.i: the verdict accepts a 3-return / 2-release body (vacuous)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  A5d.i: a body whose last return is unguarded is rejected"
+  PASS=$((PASS + 1))
+fi
+A5_MISSING="$(_a5_body __a5_no_such_function__)"
+if [ -z "$A5_MISSING" ] && ! _a5_verdict "$A5_MISSING"; then
+  echo "  PASS  A5d.ii: an extractor that matches nothing is a violation, not a 0==0 pass"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  A5d.ii: an empty body passes the verdict — A5b could go green on a blind extractor"
+  FAIL=$((FAIL + 1))
+fi
+
+# The one position an inserted statement is FORBIDDEN: between the gh capture
+# and `local gh_exit=$?`. Anything in between rewrites gh_exit to that
+# statement's status and destroys the audit event's exit_code field.
+A5E_COUNT="$(printf '%s\n' "$LIB_NORMALISED" | awk '
+  /^[[:space:]]*local gh_exit=\$\?[[:space:]]*$/ && a5prev ~ /^[[:space:]]*result="\$\(gh / { n++ }
+  { a5prev = $0 }
+  END { print n+0 }
+')"
+assert_eq "$A5E_COUNT" "3" \
+  "A5e: \`local gh_exit=\$?\` still immediately follows each \`result=\"\$(gh …)\"\` capture"
 
 echo
 echo "== A6: lib/discover.sh uses configurable audit-log path =="
@@ -1927,6 +2046,199 @@ else
 fi
 rm -rf "$B22_TMP"
 _b12_clear
+
+echo
+echo "== B23: the three gh_err functions run clean under zsh (the shell SKILL fences use) (#401) =="
+# WHY A RUN AND NOT ANOTHER GREP. Every prior instance of this class — `type -t`,
+# `${BASH_REMATCH[…]}`, `mapfile`, zsh tied parameters — was found by RUNNING
+# under zsh; a shape-grep is blind to it by construction. Layer B's
+# `_run_lib_call` sources the library in a subshell of the BASH test process,
+# and this file's one existing zsh row (B9) drives discover_review_verdict_json.
+# The three gh_err functions had never been executed under zsh anywhere in the
+# suite — which is exactly how a `trap … RETURN` that zsh rejects outright
+# shipped, survived a full Layer A + Layer B suite, and was found by a human
+# running /merge.
+#
+# HARD-FAIL, never SKIP, when zsh is missing: this is the only row that proves
+# the fix in the shell production actually uses. This file runs on the ubuntu
+# shape-check job only (it is in test.yml's windows skip-list), that job installs
+# zsh, and macOS ships it — so an absent zsh is a broken runner, not a platform
+# to tolerate quietly.
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  FAIL  B23.pre: zsh not on PATH — the only row proving the #401 fix in the production shell must never SKIP"
+  FAIL=$((FAIL + 1))
+else
+  B23_SANDBOX="$(mktemp -d)"
+  B23_LEAKDIR="$B23_SANDBOX/leak"
+  B23_BIN="$B23_SANDBOX/bin"
+  B23_AUDIT="$B23_SANDBOX/audit.jsonl"
+  B23_REAL_MKTEMP="$(command -v mktemp)"
+  mkdir -p "$B23_LEAKDIR" "$B23_BIN"
+  # A `mktemp` shim — the same technique this file already uses for `gh`. It
+  # relocates ONLY the no-argument form (the one lib/discover.sh calls) into a
+  # private directory, so "did the function release its capture file?" is an
+  # ABSOLUTE emptiness check instead of a before/after delta over the shared
+  # temp dir. The delta form races with every other process on the box, and it
+  # cannot be sandboxed away on macOS: mktemp there reads the Darwin user temp
+  # dir from confstr and ignores TMPDIR entirely (verified live — `TMPDIR=$s
+  # mktemp` still lands in /var/folders/…/T). Every other argv shape passes
+  # straight through, so nothing else in the library changes behaviour.
+  cat > "$B23_BIN/mktemp" <<'EOF_B23_MKTEMP'
+#!/usr/bin/env bash
+set -u
+if [ "$#" -eq 0 ]; then
+  exec "$UBERDEV_TEST_REAL_MKTEMP" "$UBERDEV_TEST_LEAK_DIR/tmp.XXXXXXXXXX"
+fi
+exec "$UBERDEV_TEST_REAL_MKTEMP" "$@"
+EOF_B23_MKTEMP
+  chmod +x "$B23_BIN/mktemp"
+
+  # $1 = FAKE_GH_MODE, $2 = shell text to run after sourcing, $3 = optional
+  # prelude executed BEFORE the source (B23g needs `setopt err_return` to be in
+  # force while the library is read, exactly as a fence would set it).
+  #
+  # Env goes on the command as a PREFIX, never inlined into the `-c` string, and
+  # $LIB is single-quoted inside it: this repo's checkout path contains a space
+  # and every other form splits it.
+  _b23_run() {
+    local b23_err b23_prelude
+    b23_prelude="${3:-}"
+    b23_err="$(mktemp)"
+    rm -rf "$B23_LEAKDIR"
+    mkdir -p "$B23_LEAKDIR"
+    : > "$B23_AUDIT"
+    _B23_OUT="$(
+      PATH="$B23_BIN:$FAKE_GH_DIR:$PATH" \
+      FAKE_GH_MODE="$1" \
+      UBERDEV_AUDIT_LOG_PATH="$B23_AUDIT" \
+      UBERDEV_TEST_REAL_MKTEMP="$B23_REAL_MKTEMP" \
+      UBERDEV_TEST_LEAK_DIR="$B23_LEAKDIR" \
+      zsh -c "$b23_prelude . '$LIB' && $2" 2>"$b23_err"
+    )"
+    _B23_RC=$?
+    _B23_ERR="$(cat "$b23_err")"
+    rm -f "$b23_err"
+    # The harness's own scratch files are made by the PARENT bash, which has no
+    # shim on PATH, so they can never be miscounted as the child's leak.
+    _B23_LEAK="$(ls -A "$B23_LEAKDIR" 2>/dev/null)"
+  }
+
+  # Every row asserts its own subject PLUS the two facts the bug produced.
+  _b23_assert_clean() {
+    local b23_label="$1"
+    case "$_B23_ERR" in
+      *"undefined signal"*)
+        echo "  FAIL  $b23_label.signal: zsh rejected a trap signal — a \`trap … RETURN\` is back: $_B23_ERR"
+        FAIL=$((FAIL + 1))
+        ;;
+      *)
+        echo "  PASS  $b23_label.signal: no 'undefined signal' on stderr under zsh"
+        PASS=$((PASS + 1))
+        ;;
+    esac
+    if [ -z "$_B23_LEAK" ]; then
+      echo "  PASS  $b23_label.leak: the mktemp stderr-capture file was released"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  $b23_label.leak: capture file(s) survived the call: $_B23_LEAK"
+      FAIL=$((FAIL + 1))
+    fi
+  }
+
+  _b23_run success-bare 'discover_bare_fast_path feat/x'
+  assert_eq "$_B23_OUT" "2" "B23a: discover_bare_fast_path prints the count under zsh"
+  assert_eq "$_B23_RC" "0" "B23a.rc: success exits 0"
+  _b23_assert_clean B23a
+
+  _b23_run success-multi 'discover_multi main'
+  assert_eq "$_B23_RC" "0" "B23b.rc: discover_multi exits 0 under zsh"
+  assert_eq "$(jq 'length' <<<"$_B23_OUT" 2>/dev/null)" "2" \
+    "B23b: discover_multi emits the two-candidate array under zsh"
+  _b23_assert_clean B23b
+
+  _b23_run success-pr-view 'pr_view_projection 42'
+  assert_eq "$_B23_RC" "0" "B23c.rc: pr_view_projection exits 0 under zsh"
+  assert_eq "$(jq -r '.state' <<<"$_B23_OUT" 2>/dev/null)" "OPEN" \
+    "B23c: pr_view_projection emits the projection under zsh"
+  _b23_assert_clean B23c
+
+  # THE ROW THAT CATCHES A TOO-EARLY RELEASE. Both _uberdev_discover_warn and
+  # _uberdev_discover_emit_audit READ $gh_err; an `rm -f` hoisted above them
+  # empties the breadcrumb while leaving every other row green.
+  _b23_run fail-net 'discover_bare_fast_path feat/x'
+  assert_eq "$_B23_RC" "1" "B23d.rc: gh failure propagates exit 1 under zsh"
+  case "$_B23_ERR" in
+    *"warning: bare-mode discovery failed"*"network unreachable"*)
+      echo "  PASS  B23d: the failure breadcrumb still carries gh's stderr (release is after the readers)"
+      PASS=$((PASS + 1))
+      ;;
+    *)
+      echo "  FAIL  B23d: breadcrumb missing or emptied — was \$gh_err released before the readers? [$_B23_ERR]"
+      FAIL=$((FAIL + 1))
+      ;;
+  esac
+  _b23_assert_clean B23d
+
+  # discover_multi's contract is "always exits 0, '[]' on failure" — two of its
+  # three returns are on failure arms an error-only probe would never reach.
+  _b23_run fail-net 'discover_multi main'
+  assert_eq "$_B23_RC" "0" "B23e.rc: discover_multi still exits 0 on gh failure under zsh"
+  assert_eq "$_B23_OUT" "[]" "B23e: discover_multi falls back to '[]' under zsh"
+  case "$_B23_ERR" in
+    *"warning: multi-discover failed"*"network unreachable"*)
+      echo "  PASS  B23e: multi-discover breadcrumb intact"
+      PASS=$((PASS + 1))
+      ;;
+    *)
+      echo "  FAIL  B23e: multi-discover breadcrumb missing or emptied [$_B23_ERR]"
+      FAIL=$((FAIL + 1))
+      ;;
+  esac
+  _b23_assert_clean B23e
+
+  _b23_run fail-pr-view 'pr_view_projection 42'
+  assert_eq "$_B23_RC" "1" "B23f.rc: pr_view_projection normalises gh's exit 2 to 1 under zsh"
+  case "$_B23_ERR" in
+    *"warning: pr_view_projection #42 failed (gh exit 2)"*)
+      echo "  PASS  B23f: pr_view_projection breadcrumb carries the real gh exit code"
+      PASS=$((PASS + 1))
+      ;;
+    *)
+      echo "  FAIL  B23f: pr_view_projection breadcrumb missing or emptied [$_B23_ERR]"
+      FAIL=$((FAIL + 1))
+      ;;
+  esac
+  _b23_assert_clean B23f
+
+  # The errexit half, pinned CONDITIONALLY and on purpose. Under default zsh
+  # options the dead trap only leaked and printed; under `setopt err_return` (or
+  # `set -e`) it ABORTED the function at that line, so the caller's `|| N=0`
+  # normalised a real single-PR fast path to "no PRs" and /merge re-discovered
+  # the whole queue. merge-pipeline/SKILL.md sets no errexit today, so this was
+  # one `set -e` away rather than live — and no row here asserts a non-zero
+  # return under default options, because that behaviour does not exist.
+  _b23_run success-bare 'discover_bare_fast_path feat/x' 'setopt err_return;'
+  assert_eq "$_B23_RC" "0" "B23g.rc: survives \`setopt err_return\` (pre-fix this aborted with rc=1)"
+  assert_eq "$_B23_OUT" "2" "B23g: still prints the count under \`setopt err_return\`"
+  _b23_assert_clean B23g
+
+  # The audit event is the other reader of $gh_err, and its exit_code field is
+  # the thing a stray statement between the gh capture and `local gh_exit=$?`
+  # would silently rewrite (A5e locks the source side; this locks the runtime).
+  _b23_run fail-net 'discover_bare_fast_path feat/x'
+  B23_EVENTS="$(jq -s -c '[.[] | select(.event=="discovery_gh_failed")]' "$B23_AUDIT" 2>/dev/null)"
+  assert_eq "$(jq 'length' <<<"${B23_EVENTS:-[]}" 2>/dev/null)" "1" \
+    "B23h: exactly one discovery_gh_failed event written under zsh"
+  assert_eq "$(jq -r '.[0].data.step // empty' <<<"${B23_EVENTS:-[]}" 2>/dev/null)" "1.0.5" \
+    "B23h.step: the event carries step 1.0.5"
+  assert_eq "$(jq -r '.[0].data.exit_code | type' <<<"${B23_EVENTS:-[]}" 2>/dev/null)" "number" \
+    "B23h.exit_code: exit_code is numeric (not rewritten by an inserted statement)"
+  assert_eq "$(jq -r '(.[0].data.gh_stderr // "") | length > 0' <<<"${B23_EVENTS:-[]}" 2>/dev/null)" "true" \
+    "B23h.gh_stderr: gh's stderr reached the audit log (release is after the readers)"
+  _b23_assert_clean B23h
+
+  rm -rf "$B23_SANDBOX"
+fi
 
 echo
 echo "== Summary =="
