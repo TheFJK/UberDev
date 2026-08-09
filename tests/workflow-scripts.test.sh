@@ -291,13 +291,37 @@ esac
 # End-to-end proof the knob drives the REAL budget: at 1 ms every gated case
 # (H7/H8 hold an agent() call open across a wall-clock probe) must overrun, on
 # any machine — starvation can only make the overrun more certain, never less.
+#
+# The EVIDENCE is the per-case diagnostic, not the run summary. This row used to
+# require `^  failed: [1-9]`, and that made it starvation-INTOLERANT — the exact
+# defect #396 exists to retire, one layer up. At 1 ms under contention the
+# self-test can abort before it prints its summary at all: rc is still 1, but
+# there is no `failed:` line to match, so the row reds and blames a knob that is
+# demonstrably working. Measured on a loaded host: 4 of 20 runs had rc=1 with no
+# summary; every one of those 20 carried the diagnostic below. It red both CI
+# jobs on byte-identical harnesses (ubuntu on #399, windows on main @ b2ad5db)
+# while passing every unloaded local run.
+#
+# The diagnostic is also STRICTLY STRONGER than the summary was: it names the
+# OVERRIDDEN value, so it can only appear if 1 reached the timeout path. A
+# `failed:` count merely proved that something, anything, failed — which a stub
+# drift or a wrapper bug would satisfy just as well.
 TINY_SELFTEST="$TMPDIR_FIXTURES/selftest-tiny.out"
 UBERDEV_HARNESS_TIMEOUT_MS=1 node "$HARNESS" self-test >"$TINY_SELFTEST" 2>&1
 TINY_RC=$?
-if [ "$TINY_RC" -eq 1 ] && grep -qE '^  failed: [1-9]' "$TINY_SELFTEST"; then
+if [ "$TINY_RC" -eq 1 ] && grep -qF 'timed out after 1ms' "$TINY_SELFTEST"; then
   pass "#396.2 UBERDEV_HARNESS_TIMEOUT_MS drives the real per-case budget (1ms reds the self-test)"
 else
   fail "#396.2 UBERDEV_HARNESS_TIMEOUT_MS is decorative (rc=$TINY_RC) — the budget is not sourced from one overridable knob"
+fi
+
+# Anti-vacuity for the row above: the diagnostic must carry the OVERRIDDEN value,
+# so a harness that ignored the knob and timed out on its shipped default could
+# not satisfy it. Pinned against the default, which must NOT appear at 1 ms.
+if grep -qF "timed out after ${HARNESS_BUDGET}ms" "$TINY_SELFTEST"; then
+  fail "#396.2a the 1ms run reports the shipped ${HARNESS_BUDGET}ms budget — the override never reached the timeout path"
+else
+  pass "#396.2a the 1ms run never reports the shipped ${HARNESS_BUDGET}ms default (the override, not the default, drove it)"
 fi
 
 TINY_FAILS="$(grep '^  FAIL' "$TINY_SELFTEST" 2>/dev/null || true)"
