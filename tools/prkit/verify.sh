@@ -4,7 +4,9 @@
 # Exit 0 iff the generated tree is correct. Prints each check. Covers the Claude
 # plugin (plugins/prkit). RFC 0014 §14's "mandatory native Codex port" clause is
 # SUPERSEDED (2026-08-05, issue #381): the generator no longer emits a codex/
-# tree, so there is nothing left for this gate to require.
+# tree, so this gate ASSERTS the retirement (check 10) rather than requiring the
+# port. A target generated before #381 keeps its stale codex/ tree forever
+# otherwise — no MANAGED_PATH covers a path the generator never writes.
 #
 # Design invariant (issue #334 review): NO check may pass VACUOUSLY. An empty scan,
 # an errored grep (rc>=2), or a zero-file find is treated as a FAIL, never silently
@@ -588,6 +590,24 @@ case "$placeholder_status" in
   1) ok "placeholders: no unrendered {{...}} in output" ;;
   *) fail "placeholders: scan errored (grep rc=$placeholder_status) — cannot certify clean" ;;
 esac
+
+# --- 10. The Codex tree stays retired (#381, and the drift it hid: #410) ---
+# The generator no longer emits codex/ and no MANAGED_PATH covers it, so a
+# pre-#381 target keeps its stale tree FOREVER while every gate scoped to
+# plugins/prkit stays green over it — the published prkit repo was carrying 54
+# such files, months after the port stage was removed here.
+#
+# This is an ASSERTION, not a deletion: the generator's destructive authority is
+# deliberately not widened to a path it never writes, so the gate fails loudly
+# instead of removing someone's directory.
+#
+# `-e || -L`, not `-e`: -e FOLLOWS symlinks, so a DANGLING link named codex — a
+# plausible leftover of a hand-cleanup — would pass a bare -e test.
+if [ -e "$ROOT/codex" ] || [ -L "$ROOT/codex" ]; then
+  fail "codex-retired: generated target still carries a codex/ tree (UberDev #381)"
+else
+  ok "codex-retired: no codex/ tree in the generated target"
+fi
 
 if ! cleanup_verify_temp_paths; then
   fail "cleanup: verifier temporary removal failed"

@@ -1,0 +1,166 @@
+{
+  "copyset": [
+    {
+      "path": "agents/ci-code-fixer.md",
+      "sha256": "80d91063f6e9e435782037414daae5c289bdd7d9b67eb983f43dc3f6eecee26e"
+    },
+    {
+      "path": "agents/ci-failure-classifier.md",
+      "sha256": "125e97b4e1d42c922947df7ef745d79c1306139dded23f07094dfc584fbb9367"
+    },
+    {
+      "path": "agents/ci-rebase-handler.md",
+      "sha256": "9a7082eda6a47a0fa49e794e0597c1dfbb67fb3a3d80d328936037ec75e894cd"
+    },
+    {
+      "path": "agents/code-fixer.md",
+      "sha256": "99f4ca42266a39c7730ec1ec833238e5f98e7b7a038bf7cfbcda78fb12d18463"
+    },
+    {
+      "path": "agents/code-reviewer.md",
+      "sha256": "3d84c8db70e20bb764680d861608633b4302439b112bd710d5d0f141a12ef45e"
+    },
+    {
+      "path": "agents/code-simplifier.md",
+      "sha256": "83154568ad999c21c06885b304e862da030d2f69c4773f9847c10ec873ed86c3"
+    },
+    {
+      "path": "agents/comment-analyzer.md",
+      "sha256": "9b01e5fc01b7e5aeb549d5638acdd7a63d9b4b6bc5c917f723ccf2134ba1cc0f"
+    },
+    {
+      "path": "agents/conflict-resolver.md",
+      "sha256": "83b43c244cb7a83be0dfdd81fa1ec379891fd7cf5aec1a7470a4b4911bec20f6"
+    },
+    {
+      "path": "agents/findings-to-issues.md",
+      "sha256": "c804e598a01eeb0703a69e203b7598d6b6177f39e15142fd8e5d3ed8b8ac4a3d"
+    },
+    {
+      "path": "agents/merge-strategy-decider.md",
+      "sha256": "fddbdd110b493a613ece250386aa942bef3a019e88702d77b73cd6204350da31"
+    },
+    {
+      "path": "agents/pr-test-analyzer.md",
+      "sha256": "16f7bb61d876f379ec5f34f984fbcc0bbb8413f7678db6232bdfe4644a595f23"
+    },
+    {
+      "path": "agents/silent-failure-hunter.md",
+      "sha256": "df2d2c2c367bc183d87906a4754c316731b2b284ab9dc3d2a56c3f9bf0a24c16"
+    },
+    {
+      "path": "agents/trust-trail-evaluator.md",
+      "sha256": "f641a60444acd6c8961a7e5a506e7e4a0fa3ddcb4891e259d12b0a37bf6b54d1"
+    },
+    {
+      "path": "agents/type-design-analyzer.md",
+      "sha256": "52cafe31c0b39ee225b3b88b4f57bcef59d2054e4af1819c5a51063600c38c99"
+    },
+    {
+      "path": "commands/merge.md",
+      "sha256": "54d242bfe59e490021d86d13ea6323fa4dd60fcd58a8925460d50ae26e1c137c"
+    },
+    {
+      "path": "commands/review-pr.md",
+      "sha256": "b28b1f0ae8dd2458e3e9eb282865b37c224bf69892924d9effffcff80935644e"
+    },
+    {
+      "path": "commands/simplify.md",
+      "sha256": "23b3fd64648edfb12b4e47838f3e3c1b8cf07c34d43111454409112cbe401bd3"
+    },
+    {
+      "path": "lib/agent-dispatch.sh",
+      "sha256": "ad1cf880b7874cbdbcd6a3f4637cccb28cca91e4035c7f229b67fa3e48c353c2"
+    },
+    {
+      "path": "lib/atomic_move.py",
+      "sha256": "69a44dff53eecdb49f1346f4704821ff7064ba2f03bb638eef8bb2b885c4c730"
+    },
+    {
+      "path": "lib/child-dispatch.sh",
+      "sha256": "0c37c8b28d9648b2aafe094672283b4cc355bf24d63d76b455aac9885d3e9b42"
+    },
+    {
+      "path": "lib/child-inputs.py",
+      "sha256": "8c3e3b7ef7bd4879d5abe8165a446c9408954183b018e65ca484080c96f40038"
+    },
+    {
+      "path": "lib/child-receipts.py",
+      "sha256": "cb3328984c5329ac7bde6abde2f54ee10303a69b360de9abb261772c801f0b57"
+    },
+    {
+      "path": "lib/code_fixer_contract.py",
+      "sha256": "cf2ccafb1ca18ce452ef0b44ff1b54ade6169cba6c7e6ff5156a0818840c94e7"
+    },
+    {
+      "path": "lib/command-workspace.py",
+      "sha256": "685528e046773d3f81792df68012e49b4265eec0897126f3950ea1a364493d9c"
+    },
+    {
+      "path": "lib/config-read.sh",
+      "sha256": "0e08c11d4084fd2030ccab4220d8ad7def82744e46ef3944b13899eeca251611"
+    },
+    {
+      "path": "lib/dispatch.sh",
+      "sha256": "ead757f6ac184402216086c202dbaf46bcd56537463b9674f3223cb4f5675bdd"
+    },
+    {
+      "path": "lib/live-semaphore.sh",
+      "sha256": "9f9421a6e89ca07bdeaca4e5d2f83b5c73a6541290b324f492a99f32569f1d0b"
+    },
+    {
+      "path": "lib/model_routing.py",
+      "sha256": "076024a7ac6ea34ff0ff9e3a60ca0647611cd78fe1f89ef50c1cad1bf84bd068"
+    },
+    {
+      "path": "lib/review-aggregate.sh",
+      "sha256": "8517ea2a98a2a16537689ec2e3f0f997aa4433122ccd491ac090ff9d0e28e930"
+    },
+    {
+      "path": "lib/review-push-target.sh",
+      "sha256": "551b4d6e0a93912428b4aae7aa83de18f87980ce194440f2b7b1513f4a0d04fc"
+    },
+    {
+      "path": "lib/run_manifest.py",
+      "sha256": "129d39af7c5dc0481e875b8640ffd1f154305d2f85a7d06ecaa53f5624b4d2c6"
+    },
+    {
+      "path": "lib/secret-scan.sh",
+      "sha256": "9f6ce5cef032d291c7ce3faaee9825418de3eed3453d2f8afc34a6305e46c587"
+    },
+    {
+      "path": "policy/model-routing-v1.json",
+      "sha256": "0fd9f718607a4abab137faab6d103213310cd6358e1018d18f738cb0b4bca9fc"
+    },
+    {
+      "path": "policy/solve-run-tree-v1.json",
+      "sha256": "6c7806cbba8e5c41a95a0bd2ceabae3b3fbdffcfd8dee9382c6d1867c5851dcb"
+    },
+    {
+      "path": "shared/phase1-reviewer-output-v1.md",
+      "sha256": "33ef287be76843fe1d01a5000548781a4d20850240aed22db1d5a60c26dc359e"
+    },
+    {
+      "path": "skills/merge-pipeline/SKILL.md",
+      "sha256": "15db6d0420a87a38442d4ebd2bf33d1e1ba12109b44efabea66eb753be500516"
+    },
+    {
+      "path": "skills/merge-pipeline/lib/discover.sh",
+      "sha256": "2824aa8a23b1d8f2a94a8d8993e091c0c4b5f9fff54546f9a8e9295728e6898d"
+    },
+    {
+      "path": "skills/post-impl-review/SKILL.md",
+      "sha256": "fa5331b3efe5e1a369392e2cec1a99328a1099bb55acf5e360bf88abbf1ac04f"
+    }
+  ],
+  "pending": [
+    "agents/conflict-resolver.md",
+    "agents/trust-trail-evaluator.md",
+    "commands/merge.md",
+    "commands/review-pr.md",
+    "lib/code_fixer_contract.py",
+    "skills/merge-pipeline/SKILL.md",
+    "skills/merge-pipeline/lib/discover.sh"
+  ],
+  "prkit_version": "0.1.3"
+}

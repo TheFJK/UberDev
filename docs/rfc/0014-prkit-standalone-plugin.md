@@ -151,12 +151,27 @@ Emitted/refreshed from `tools/prkit/templates/`, not copied from UberDev:
 
 ### 5.6 Verify gate (anti-drift / anti-broken-namespace)
 
-Runs at the end of every generation; non-zero exit fails the build. Also runnable standalone in prkit CI.
+Runs at the end of every generation; non-zero exit fails the build. It runs **only in UberDev**, at generation time — `verify.sh` is not in `manifest.txt` and is never copied downstream. The generated `ci.yml` is a **declared subset** of it (`bash -n` + `ast.parse` + `jq empty` + an inline `grep -rilE 'uberdev'` namespace guard), re-checking the committed tree; it is not the same gate and does not claim to be.
+
+Corollary, recorded after #410: guards for source-level classes are **not** duplicated downstream either. The `trap … RETURN` class is gated upstream by `tests/crossplatform-shell-wrappers.test.sh`, whose corpus already covers `plugins/uberdev/skills` (the copy source) and `tools/` (the generator, including `templates/*.tmpl`). A second copy of that detector inside prkit would be the "one contract, N uncompared copies" drift RFC 0016 is about. What the generator alone cannot answer — *is the published artifact current with the source it was built from?* — is answered by `tools/prkit/published.json` instead (§5.7).
 
 - **Token guard:** no `uberdev` (case-insensitive) or `UBERDEV_` survives under `plugins/prkit/`, except an explicit allowlist (LICENSE/NOTICE origin attribution).
 - **Referential integrity:** every `subagent_type: prkit:X` ↔ `agents/X.md`; every `Skill(prkit:X)` ↔ `skills/X/SKILL.md`; every `${CLAUDE_PLUGIN_ROOT}/lib/Y` and `/policy/Z` reference resolves to a copied file; **no** residual out-of-set ref (`prkit:goal`, `prkit:solve`).
 - **Syntax:** `bash -n` on every `.sh`; `python3 -m py_compile` on every `.py`; `jq empty` on every `.json`.
 - **Manifest completeness** is enforced by `tests/prkit-manifest.test.sh` (count-lock + every source exists), not by `verify.sh`; verify's own non-vacuity + shape checks assert the generated tree is plausibly-sized and has the required files.
+- **Codex retirement** (added #410): the target must carry no `codex/` entry. The generator stopped emitting one with #381 and no managed path covers it, so a pre-#381 target would keep its stale tree forever. The check asserts (`-e || -L`, so a dangling symlink cannot slip through); it deliberately does not delete a path the generator never writes.
+
+### 5.7 Publication currency register (added 2026-08-10, issue #410)
+
+`verify.sh` certifies that a **freshly generated** tree is internally correct. It cannot say whether the tree that is actually **published** at `TheFJK/prkit` was generated from the current source — and nothing else could either, so the published plugin silently accumulated three divergences at once: the `trap … RETURN` bug #401 fixed here, five manifest files it never received, and the 54-file `codex/` tree #381 retired.
+
+`tools/prkit/published.json` closes that axis: the prkit version last published, the sha256 of every copy-set source file at that moment, and an explicit `pending` list of paths knowingly ahead of the artifact. `tools/prkit/published-check.py` compares record against tree (both directions against `manifest.txt`, and both directions between actual and declared divergence); `tests/prkit-publish.test.sh` runs it in CI, so a fix landing in a copy-set file reds the build until prkit is regenerated or the divergence is declared.
+
+Two invariants worth stating, because both were measured rather than assumed:
+- `copyset` is a **list of `{path, sha256}` objects**, never a map. In map form the path and its 64-hex digest share a line, which gitleaks scores `generic-api-key`; `finish-branch`'s pre-push scan then hard-stops the push with no override. `published-check.py` enforces the layout, and `--refresh` re-checks its own output before writing.
+- It is **not** wired into `generate.sh`. Regenerating from a stale record is how staleness gets fixed, so a build-time gate would block the cure.
+
+Unix-only in CI: no `.gitattributes` exists, so a Windows checkout (`core.autocrlf=true`) rewrites LF→CRLF and every digest would differ.
 
 ---
 
