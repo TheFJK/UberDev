@@ -4,6 +4,57 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.10] — 2026-08-10
+
+### Fixed
+
+- **Phase 3 could force-push a branch another open PR was stacked on, with no
+  check at all** (#438). `--force-with-lease` + `--force-if-includes` protect only
+  *this* PR's head; they say nothing about who bases on that branch. Measured:
+  `gh pr list` appeared **zero** times in the entire Phase 3 surface. Reproduced —
+  the push returned 0, the downstream PR's merge-base collapsed, and its diff
+  silently grew from `{fb}` to `{fa, fb}` with no audit event, no halt and no
+  prompt. A reviewer opening that PR afterwards is shown commits nobody put there.
+
+  The push is now gated on the push **shape** rather than on the edge id: if the
+  lease SHA is an ancestor of the new head the push is a fast-forward, which cannot
+  move any dependent PR's merge-base, and the gate is skipped. Otherwise a
+  dependent-PR query runs and a non-empty result halts with
+  `data.subreason=ci_push_would_rewrite_stacked_base`. Gating on the edge instead
+  would have refused every `fix_code` push — which only appends a commit — and made
+  Phase 3 auto-fix permanently unusable on any branch with a stacked child.
+
+  The query pins `--repo` to the slug resolved from the very remote the push names.
+  Every other `gh` call in the file pins `--repo`; this one initially did not, and
+  gh's implicit remote resolution (`upstream` > `github` > `origin`, plus
+  `gh repo set-default` and `GH_REPO`) would have made the gate answer about a
+  *different repository* — returning a valid empty array, passing the shape check,
+  and letting the force-push proceed with an audit trail recording it as stack-safe.
+  A failing ancestry probe or an unparseable remote falls through to the strict
+  branch, so "cannot tell whether this rewrites" runs the stricter path.
+
+- **The rebase guard could not tell a correct rebase from a stack-detaching one.**
+  `lib/code_fixer_contract.py` asserted `merge-base --is-ancestor
+  authority["base_sha"] head_after`, where `base_sha` is the *pre-rebase
+  merge-base*, not the base branch tip. Once the base branch is force-pushed that
+  merge-base collapses to the fork point, which every candidate rebase target
+  contains, so the assertion passed unconditionally. Differential test, same pinned
+  authority: rebase onto the real base → `rc=0 REBASED`, 1 commit; rebase onto the
+  detaching target → `rc=0 REBASED`, 3 commits with the parent's two duplicated. It
+  was the only predicate consumer of `base_sha` in the whole contract, so nothing
+  else caught it.
+
+  A new `base_tip_sha` required member is pinned in the `review_pr.ci.rebase`
+  authority and asserted **alongside** the existing merge-base predicate, under its
+  own `ci_rebase_base_tip_not_ancestor` terminal.
+
+  Known limitation, tracked by #427: `base_tip_sha` crosses the ROUTE → mint fence
+  boundary as a bare scalar, exactly as the pre-existing `lease_sha`, `base_sha` and
+  `base_branch` do on the same hop. It is fail-closed — an empty value is refused at
+  mint as a missing required member — but it is not carried, so this half is subject
+  to the same end-to-end cross-fence blocker as the rest of Phase 3. Closing that hop
+  is #427's scope, not this change's.
+
 ## [0.45.9] — 2026-08-10
 
 ### Fixed
