@@ -4,6 +4,50 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.5] — 2026-08-10
+
+### Fixed
+
+- **The zsh parameter-modifier guard read neither `tests/`, nor `tools/`, nor a
+  single extension-less shipped hook** (#413). It enumerated its own corpus —
+  `plugins/**` filtered by `-name '*.md' -o -name '*.sh'` — while the
+  tied-parameter and `trap … RETURN` guards beside it already shared
+  `_xshell_corpus` + `_xshell_is_shell_surface`. Those are the exact two gaps the
+  tied guard had had to close twice, finding live hits each time. #401 declared
+  the boundary in a comment instead of folding the third copy in, which is the
+  #370/#371 shape: a declared boundary is still a second copy of the contract.
+
+  Pointing it at the shared pair found **seven** live mangled shapes in `tests/`:
+  five refspec assertions in `review-pr.test.sh` (`"$SHA:refs/…"`, where zsh's
+  `:r` eats the colon) and two `doc:name` pairing loops in
+  `review-child-handoff.test.sh`, where `:r` silently strips `.md` off the doc
+  path and `:s` is a hard `bad substitution`. All are braced; the change is inert
+  under bash and correct under zsh.
+
+  The seventh was found while rebasing onto v0.45.3 and is the sharpest instance
+  of the class yet — `review-pr.test.sh:782`. The same PR that introduced it also
+  wrote the comment eleven lines above the production pin (`:529-532`) explaining
+  that the unbraced form is a zsh `:r` modifier which made *"every anchor push die
+  with src refspec does not match any"*, pinned the production side to the braced
+  form, and then spelled its own assertion string unbraced.
+
+- **The guard's modifier letter class was wrong in the direction that makes a
+  guard unfixable.** `p`, `U`, `W`, `x` and `X` were listed and zsh applies none
+  of them to a parameter expansion, so the widened corpus immediately reddened
+  PowerShell (`"-Path $env:UBERDEV_JUNCTION_PATH"` is a namespace reference no
+  shell expands). The class is now exactly the set zsh really applies, and it is
+  no longer a claim: two live rows drive every ASCII letter through the real
+  shell and red in both directions — a listed letter zsh leaves alone is
+  decoration, an applied letter the class misses is a blind spot. The comparison
+  is colon-based so filesystem-resolving modifiers do not diverge between macOS
+  and ubuntu.
+
+  Because the scan now reads its own file, its anti-vacuity heredoc and three
+  live probes carry the same allow-marker mechanism the tied guard uses —
+  trailing-comment marker, dead-marker honesty row, per-file pinned inventory —
+  plus an anti-false-positive row. Hits are numbered before the comment filter
+  and carry their path on every line, which the previous form did not.
+
 ## [0.45.4] — 2026-08-10
 
 ### Fixed
