@@ -4,6 +4,62 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.11] — 2026-08-10
+
+### Fixed
+
+- **A GREEN trust trail survived a base change it never validated** (#440). A
+  review is a statement about a *delta*, but the trail recorded only one endpoint:
+  `review_resolve_phase1_base` computed the base at `review-pr.md:1659` and it was
+  discarded one line later. The trailer carried PR number + parent SHA, the
+  `uberdev-approved` label is a bare literal, the audit JSON had no base member, and
+  all three `trust-trail-evaluator` primitives are two-commit tests between
+  `trailer_sha` and `head_ref_oid`. So `gh pr edit <N> --base <other>` after a GREEN
+  swapped the reviewed delta for an arbitrary one, every artifact stayed
+  byte-identical, the evaluator returned PASS, and `/merge` merged it.
+
+  The producer now writes a typed `review-base-identity.tsv` carrier (40-hex SHA +
+  control-char-free ref, validated on both sides, typed `review_base_uncarried` /
+  `review_base_unreadable` halts — never a soft default), the anchor commit carries
+  `Reviewed-base: uberdev/review-pr@<sha> ref=<name>` under the existing
+  `ANCHOR_MESSAGE_SHA256`, and the audit JSON gains a top-level `base`. A missing
+  `base` maps onto the existing legacy → STALE path, so pre-change trails prompt a
+  re-run rather than passing.
+
+- **The gate deliberately does not fire on the automatic post-merge retarget.**
+  "Merge-base moved ⇒ STALE" was rejected as the predicate: under squash merges —
+  this repo's default — the integration branch never contains the parent's commit,
+  the merge-base collapses to the root, and every child of a stacked run would
+  false-STALE. A trust gate that cries wolf on an ordinary workflow is worse than
+  the gap it replaces, because it trains the operator to override.
+
+  The predicate is landed-delta equivalence, compared as **tree OIDs** via
+  `git merge-tree --write-tree`, not as diff text. Diff text has three independent
+  degrees of freedom that all produce false mismatches on an ordinary retarget: the
+  `index <blob>..<blob>` header changes whenever the base touches a file the PR also
+  touches; context lines shift when the base advances near the PR's hunks; and `@@`
+  offsets shift when the base inserts a line anywhere earlier in a shared file.
+  Tree OIDs have none of them.
+
+- **`$TRAILER_SHA` had no producer.** The `(b.5)` fence in `merge-pipeline/SKILL.md`
+  passed a name nothing in the repo ever bound — `grep -rn` found only the comment,
+  the call site, and the lib's usage doc. Every retargeted PR would have degraded to
+  `unavailable` and therefore STALE. The fence now binds it and refuses with
+  `trust_trail_trailer_missing` rather than degrading.
+
+- **YELLOW trust trails were silently unmergeable.** `review-pr.md` appends
+  `TRAILER_SUFFIX` (` severity=critical-deferred count=N`) to the anchor, so a
+  `$`-anchored 40-hex trailer regex matched nothing on a deferred-critical PR.
+
+- **A pre-existing cross-fence dereference in the Phase 2 scope refresh.**
+  `review-pr.md:2157` and `:2196` were already reading a `BASE_SHA` that nothing in
+  their shell bound — a live instance of the #418 / #419 class. Both now read the
+  carrier with typed halts.
+
+  The evaluator's tool allowlist is untouched: still no `gh` and no `merge-tree`.
+  The five inputs are threaded caller-side exactly as `status_check_rollup` is,
+  preserving the deliberate boundary that the agent never queries live PR state.
+
 ## [0.45.10] — 2026-08-10
 
 ### Fixed
