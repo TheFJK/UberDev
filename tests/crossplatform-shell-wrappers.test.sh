@@ -746,6 +746,21 @@ else
       "[{\"sha\":\"$3\",\"by_agent\":\"ci-code-fixer\"}]" "[\"code_bug\"]" || exit 97
     ZSH_GREEN_OUTCOME="$(review_fleet_ci_green_outcome "$2" 1)" || exit 98
     [ "$ZSH_GREEN_OUTCOME" = green_after_fix ] || exit 99
+    # The three #418 carriers, written AND read in the same zsh frame. They are
+    # the newest members of this family and they run on the same Phase 3 path:
+    # the probe verdict decides `--no-ci-fix` OUTCOME, the classification decides
+    # which fixer (if any) mutates code, and the check name is filed into a
+    # CRITICAL issue. `local check_name` / `local verdict` are safe names, but a
+    # future edit reaching for `local path` or `local status` here would die
+    # exactly like the writers above -- which is why they are driven under zsh
+    # rather than trusted to the bash rows in review-pr-phase3-ci.test.sh.
+    review_fleet_write_ci_probe_verdict "$2/ci-probe-verdict.txt" green || exit 100
+    review_fleet_write_ci_check_name "$2/ci-check-name.txt" "shape-checks (pull_request)" || exit 101
+    review_fleet_write_ci_classification "$2/ci-classification.json" code_bug "tests/foo.test.sh:12" || exit 102
+    [ "$(review_fleet_read_ci_probe_verdict "$2/ci-probe-verdict.txt")" = green ] || exit 103
+    [ "$(review_fleet_read_ci_check_name "$2/ci-check-name.txt")" = "shape-checks (pull_request)" ] || exit 104
+    [ "$(review_fleet_read_ci_classification "$2/ci-classification.json" failure_class)" = code_bug ] || exit 105
+    [ "$(review_fleet_read_ci_classification "$2/ci-classification.json" signal_anchor)" = "tests/foo.test.sh:12" ] || exit 106
     print -r -- "$(review_fleet_read_ci_pointer "$2/ptr.txt")"
   ' _ "$ZSH_ARGS_LIB" "$ZSH_ARGS_TMP" "$ZSH_SHA40" 2>&1)"
   ZSH_WRITER_RC=$?

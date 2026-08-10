@@ -717,6 +717,164 @@ review_fleet_read_ci_push() {
   jq -er --arg field "$2" '.[$field]' <"$1"
 }
 
+# ---------------------------------------------------------------------------
+# The three carriers #418 added, for the four Phase 3 values that were still
+# read across a fence boundary they could not cross.
+#
+# THE CLASS. Every `bash` block in commands/review-pr.md is its own harness
+# shell, so a name bound in one fence is GONE in the next. Written
+# `${name:-<default>}`, that is not a defensive spelling of the same value: it
+# is the default, on every run, forever. #399 moved three such scalars onto
+# run-dir carriers; these are the remaining four:
+#
+#   failure_class / signal_anchor  bound in 6c.3w.2 CLASSIFY, read by 6c.4 ROUTE
+#                                  and by the REFUSED arm's aggregate writer
+#   check_name                     consumed by that aggregate and bound NOWHERE
+#   PROBE_VERDICT                  bound in 6c.1 PROBE, read by ROUTE's
+#                                  probe-only (`--no-ci-fix`) arm
+#
+# WHY EACH ONE VALIDATES ON BOTH SIDES. The issue's rule is that "absent, use
+# the documented default" and "this shell cannot tell" are different answers,
+# and only the first may reach a routing decision. None of these four HAS a
+# documented default -- `unknown` and `unknown:1` are placeholders invented at
+# the read site -- so both halves refuse rather than invent: the writer never
+# records a value outside its vocabulary, and the reader never returns one.
+# A caller that gets rc=2 is being told "cannot tell", which is the only honest
+# input to a typed halt.
+#
+# NOT one combined record: each value is bound in a different fence, and a
+# single JSON document would need read-modify-write from three writers running
+# minutes apart. Three single-writer files cannot half-update each other.
+# ---------------------------------------------------------------------------
+
+# review_fleet_write_ci_probe_verdict PATH VERDICT
+# review_fleet_read_ci_probe_verdict  PATH -> the recorded verdict
+#
+# The four tokens are 6c.1's own jq vocabulary (empty / green / pending / red).
+# ROUTE's probe-only arm compares the verdict to `green` to decide between
+# OUTCOME=green and OUTCOME=halted, so a reader that accepted anything else
+# would answer "not green" for a probe that never ran -- and `--no-ci-fix` would
+# report a halt on green CI, which is exactly what it did.
+review_fleet_write_ci_probe_verdict() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" verdict="$2"
+  case "$verdict" in
+    empty | green | pending | red) ;;
+    *) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$verdict" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_probe_verdict() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI probe verdict missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  case "$recorded" in
+    empty | green | pending | red) printf '%s' "$recorded" ;;
+    *)
+      echo "error: review-fleet CI probe verdict is not one of empty/green/pending/red: ${recorded:-<empty>}" >&2
+      return 2
+      ;;
+  esac
+}
+
+# review_fleet_write_ci_check_name PATH NAME
+# review_fleet_read_ci_check_name  PATH -> the recorded check name
+#
+# The NAME of the check that failed, as selected by review_select_failed_ci_run
+# from the same row it took the run id from. This is the value the REFUSED arm
+# files into a CRITICAL issue so a human knows WHICH check refused; it had no
+# producer at all, so that issue always named `unknown`.
+#
+# A control character is refused rather than escaped: the record is one line and
+# the reader takes one line, so an embedded newline would silently truncate the
+# name to its first segment, and a TAB would split the selector's own TSV column
+# upstream. Both are "the value did not survive", spelled as success.
+review_fleet_write_ci_check_name() {
+  [ "$#" -eq 2 ] || return 2
+  local target="$1" check_name="$2"
+  [ -n "$check_name" ] || return 2
+  [ "${#check_name}" -le 512 ] || return 2
+  case "$check_name" in
+    *[[:cntrl:]]*) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$check_name" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_check_name() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI check name missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  [ -n "$recorded" ] || return 2
+  case "$recorded" in
+    *[[:cntrl:]]*) return 2 ;;
+  esac
+  printf '%s' "$recorded"
+}
+
+# review_fleet_write_ci_classification PATH FAILURE_CLASS SIGNAL_ANCHOR
+# review_fleet_read_ci_classification  PATH FIELD -> failure_class | signal_anchor
+#
+# The classifier's whole routing output, from the fence that VALIDATED it
+# (6c.3w.2, via `validate-ci-classification`) to the two fences that consume it.
+# Recording it here rather than re-reading the child's result bytes downstream
+# keeps one judge: `validate-ci-classification` is the only site allowed to turn
+# child bytes into a routing scalar.
+#
+# THE EMPTY ANCHOR IS LEGAL, and only for the AMBIGUOUS shape: the contract
+# reports `failure_class: flaky` with `signal_anchor: ""` so the caller can emit
+# ci_classify_ambiguous_routing_as_flaky and re-run once. A writer that demanded
+# a non-empty anchor would halt every AMBIGUOUS run -- a new outage on the
+# commonest red path, introduced by the fix for the old one. The CLASS is what
+# is closed here, and it is closed against the same six-member enum
+# code_fixer_contract.py validates.
+review_fleet_write_ci_classification() {
+  [ "$#" -eq 3 ] || return 2
+  local target="$1" failure_class="$2" signal_anchor="$3" payload
+  case "$failure_class" in
+    code_bug | billing_quota | platform_outage | flaky | env_drift | stale_base) ;;
+    *) return 2 ;;
+  esac
+  case "$signal_anchor" in
+    *[[:cntrl:]]*) return 2 ;;
+  esac
+  payload="$(jq -cn --arg failure_class "$failure_class" \
+    --arg signal_anchor "$signal_anchor" \
+    '{failure_class:$failure_class,signal_anchor:$signal_anchor}')" || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_classification() {
+  [ "$#" -eq 2 ] || return 2
+  [ -r "$1" ] || {
+    echo "error: review-fleet CI classification record missing: $1" >&2
+    return 2
+  }
+  local recorded
+  # The membership test is INSIDE jq, not a `-e` truthiness check: `-e` alone
+  # reports failure for `null` and `false` but success for a MISSING member of a
+  # document that happens to be an object, and a missing member is precisely the
+  # "cannot tell" this carrier exists to distinguish. An empty-string member
+  # (the AMBIGUOUS anchor) must stay rc 0, which rules out `[ -n ]` here too.
+  recorded="$(jq -er --arg field "$2" '
+    if type == "object" and has($field) and ((.[$field] | type) == "string")
+    then .[$field]
+    else error("ci_classification_member_invalid")
+    end' <"$1")" || return 2
+  case "$recorded" in
+    *[[:cntrl:]]*) return 2 ;;
+  esac
+  printf '%s' "$recorded"
+}
+
 # review_fleet_write_conflict_paths PATH [--] PATH...
 #
 # The conflicted-file set crosses TWO fences (enumerate -> stage) and one

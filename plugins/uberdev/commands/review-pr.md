@@ -1333,7 +1333,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    |---|---|---|---|
    | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
    | `SEQUENTIAL` | `sequential` token | `0` | `1` binds `POST_IMPL_FANOUT_CAP=1`, forwarded to `Skill(uberdev:post-impl-review)` as the `fanout_cap` input (stderr notice emitted) |
-   | `CI_FIX_PHASE` | `--no-ci-fix` token, recorded to `$RESEARCH_DIR_ABS/ci-fix-phase.txt` | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). ROUTE reads the recorded value, not the variable; an unreadable record halts `ci_fix_phase_unreadable` rather than defaulting the mutating phase on. |
+   | `CI_FIX_PHASE` | `--no-ci-fix` token, recorded to `$RESEARCH_DIR_ABS/ci-fix-phase.txt` | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). ROUTE reads the recorded value, not the variable; an unreadable record halts `ci_fix_phase_unreadable` rather than defaulting the mutating phase on. "Probe was green" is read the same way — off `ci-probe-verdict.txt`, written by 6c.1 — because `${PROBE_VERDICT:-unknown}` was bound in another shell and answered `unknown` on every probe-only run (#418); an unreadable verdict halts `ci_probe_verdict_unreadable` rather than reporting a halt for CI it never saw. |
    | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
    | `DEFER_ISSUES_PHASE` | `--no-defer-issues` token | `1` | `0` skips Phase 2.5 (findings-to-issues sub-phase); the effective enable is AND-of-flag-and-config — `defer_issues_enabled=false` in `.claude/uberdev.local.md` short-circuits identically. |
@@ -2872,6 +2872,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       CI_RUN_ID=
       CI_RUN_EVENT=
       CI_RUN_CHECK_LINK=
+      CI_RUN_CHECK_NAME=
       unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
     }
     review_select_failed_ci_run() {
@@ -2915,7 +2916,11 @@ for row in failed:
     workflow=row.get('workflow')
     if event not in {'pull_request','push'} or not isinstance(link,str) or not link:
         raise SystemExit(2)
-    if not isinstance(workflow,str) or any(ord(char)<32 or ord(char)==127 for char in event+link+workflow):
+    # `name` joins the control-character test because it LEAVES this function
+    # now (#418): it is the fourth output column and then a single-line run-dir
+    # carrier, so a TAB in it would split the column and a newline would
+    # truncate the record -- both spelled as success.
+    if not isinstance(workflow,str) or any(ord(char)<32 or ord(char)==127 for char in event+link+workflow+row['name']):
         raise SystemExit(2)
     parsed=urlsplit(link)
     match=link_pattern.fullmatch(parsed.path)
@@ -2928,8 +2933,14 @@ for row in failed:
     candidates.append((0 if event=='pull_request' else 1,workflow,row['name'],int(run_id),event,link))
 if not candidates:
     raise SystemExit(2)
-_,_,_,run_id,event,link=min(candidates)
-print(f'{run_id}\t{event}\t{link}')
+# FOUR columns. The selected row's NAME is the only producer of `check_name`
+# anywhere in this file: the REFUSED arm files it into a CRITICAL issue so a
+# human can see WHICH check refused, and it consumed `${check_name:-unknown}`
+# against a name nothing had ever bound (#418). It is already this function's
+# tie-break key, so emitting it invents no second answer about which check
+# failed.
+_,_,check_name,run_id,event,link=min(candidates)
+print(f'{run_id}\t{event}\t{link}\t{check_name}')
 PY
     }
     review_clear_ci_run_selection
@@ -3018,6 +3029,58 @@ PY
           else "red" end
       end
     ' <<<"$PROBE_JSON" 2>/dev/null)"
+    # THE VERDICT CROSSES ON DISK (#418). 6c.4 ROUTE's probe-only (`--no-ci-fix`)
+    # arm is a DIFFERENT harness shell, so its `${PROBE_VERDICT:-unknown}` read
+    # the EMPTY string on every run: it audited `ci_probe_only_skipped
+    # state=unknown` and, comparing "" against `green`, forced OUTCOME=halted
+    # even when this very jq had just answered `green`. Same run-dir carrier
+    # idiom as ci-push-target.tsv / ci-fix-phase.txt, and the recorded token is
+    # this jq's own output verbatim so no second vocabulary appears.
+    #
+    # The plugin root is re-derived here the way 6c.4's same-repository push
+    # gate re-derives it: the setup fence's binding is a SHELL variable and this
+    # is a different shell, so a fence that newly depends on a library must
+    # resolve the root itself or it fails where nothing failed before.
+    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    # THE CARRY MUST NOT OUTRANK THE CARVE-OUT. The `gh`-unreachable and
+    # rate-limit-low branches above do NOT exit this fence -- they audit
+    # `ci_probe_unreachable` and the run proceeds to Step 7 with the phases.phase3
+    # block omitted. The jq then leaves PROBE_VERDICT empty (it parsed stderr, not
+    # checks), and an unconditional persist-or-halt here would convert that
+    # documented carve-out into a phase halt: a `gh` outage would go from "Phase 3
+    # is omitted" to "Phase 3 failed", on a fence that observed nothing. So the
+    # write is attempted only when there IS a verdict in the documented
+    # vocabulary; anything else is recorded as a TYPED miss and left to ROUTE,
+    # whose reader halts if that phase ever runs.
+    case "${PROBE_VERDICT:-}" in
+      empty | green | pending | red)
+        CI_PROBE_VERDICT_RUN_DIR=
+        if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+          CI_PROBE_VERDICT_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_PROBE_VERDICT_RUN_DIR=
+        fi
+        if [ -n "$CI_PROBE_VERDICT_RUN_DIR" ]; then
+          # A run dir that IS bound, with a verdict in hand, and still cannot take
+          # the carrier halts HERE: the gh call has already been spent, and the
+          # only reader downstream is a mutating phase that must not guess.
+          if ! review_fleet_write_ci_probe_verdict "$CI_PROBE_VERDICT_RUN_DIR/ci-probe-verdict.txt" "$PROBE_VERDICT"; then
+            echo "error: /uberdev:review-pr — Phase 3 classified the probe as '$PROBE_VERDICT' but could not persist it to $CI_PROBE_VERDICT_RUN_DIR/ci-probe-verdict.txt; refusing to hand ROUTE a verdict it cannot read." >&2
+            audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_uncarried
+            OUTCOME=halted
+            exit 1
+          fi
+        else
+          # No run dir bound => this fence is running OUTSIDE a Phase 3 run. The
+          # verdict is still bound for a same-shell caller and the miss is TYPED
+          # rather than silent; ROUTE's reader then halts because the carrier is
+          # absent, so the failure is closed either way.
+          audit ci_probe_verdict_uncarried data.reason=no_run_dir
+        fi
+        ;;
+      *)
+        audit ci_probe_verdict_uncarried data.reason=no_verdict
+        ;;
+    esac
     ```
 
     **Settle window for empty-checks (#302).** A JUST-pushed head (the Step 6a post-fixer push, or any fresh PR push) reports "no checks" for the first ~10–30 s while GitHub fans the workflow runs out — mapping that window straight to `skipped_no_checks` makes a GREEN-eligible outcome out of CI that was about to start. When the probe resolves `empty` (the jq `empty` verdict OR gh's `no checks reported on the` stderr signature) AND the head commit is younger than the settle threshold, re-probe before accepting `skipped_no_checks`. Literals: `CI_SETTLE_AGE_SEC = 120` and `CI_SETTLE_REPROBES = 3` (declared HERE — `/review-pr`-owned settle constants, kept numeric inline like the other 6c literals); re-probe interval 30 s (mirrors `CI_WATCH_INTERVAL_SEC`).
@@ -3045,6 +3108,37 @@ PY
       # re-probes exhausted) maps to skipped_no_checks in the terminal table below;
       # carry settle_reprobes_used + head_age_sec in the ci_probe_skipped_no_checks
       # audit payload for post-mortem.
+      #
+      # A re-probe REBINDS the verdict, so the carrier written above is now the
+      # pre-settle answer. Refresh it here, inside the arm that owns the
+      # re-probe, and only from a verdict this fence actually re-derived: the
+      # write sits INSIDE the settle arm, which a fresh shell never enters (the
+      # guard's own `$PROBE_VERDICT` is unbound there -- false under the arm's
+      # own terms, and a hard abort under `set -u`). So it cannot overwrite a
+      # good carrier with an empty one, and the writer refuses anything outside
+      # the four documented tokens regardless.
+      # Same vocabulary gate as the initial write, and for the same reason: a
+      # re-probe can itself hit the `gh` outage the carve-out covers, and a
+      # settle window is not a licence to turn that into a phase halt.
+      UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+      case "${PROBE_VERDICT:-}" in
+        empty | green | pending | red)
+          if [ -n "${RESEARCH_DIR_ABS:-}" ] && CI_SETTLE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)"; then
+            if ! review_fleet_write_ci_probe_verdict "$CI_SETTLE_RUN_DIR/ci-probe-verdict.txt" "$PROBE_VERDICT"; then
+              echo "error: /uberdev:review-pr — Phase 3 re-probed to '$PROBE_VERDICT' but could not refresh $CI_SETTLE_RUN_DIR/ci-probe-verdict.txt." >&2
+              audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_uncarried
+              OUTCOME=halted
+              exit 1
+            fi
+          else
+            audit ci_probe_verdict_uncarried data.reason=no_run_dir
+          fi
+          ;;
+        *)
+          audit ci_probe_verdict_uncarried data.reason=no_verdict
+          ;;
+      esac
     fi
     ```
 
@@ -3277,11 +3371,13 @@ PY
     projection. `CI_RUN_ID` is never accepted from setup/environment state:
 
     ```bash
-    if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
         review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
       ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
         && [[ "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]] \
-        && [ -n "$CI_RUN_CHECK_LINK" ]; then
+        && [ -n "$CI_RUN_CHECK_LINK" ] && [ -n "$CI_RUN_CHECK_NAME" ]; then
       :
     else
       review_clear_ci_run_selection
@@ -3289,6 +3385,41 @@ PY
       OUTCOME=halted
       exit 1
     fi
+    # THE NAME CROSSES ON DISK (#418). The REFUSED arm's aggregate writer is
+    # thousands of lines and many shells away, and it consumed
+    # `${check_name:-unknown}` -- a name NOTHING in this file had ever bound, so
+    # every CI-refusal issue the autopilot filed named `unknown` as the check
+    # that failed. Same run-dir carrier idiom as ci-push-target.tsv /
+    # ci-fix-phase.txt / ci-fixer-terminal.json, written by the fence that binds
+    # the value.
+    #
+    # A resolved answer this run PAID a gh call for and cannot persist halts
+    # here, not at the reader: the alternative is discovering it after the fixer
+    # has already refused, when the only remaining move is to file a CRITICAL
+    # issue that names no check.
+    #
+    # `[ -n … ]` BEFORE the `cd`, never `cd "$RESEARCH_DIR_ABS"` alone: these
+    # fences run under /bin/zsh, where `cd ""` SUCCEEDS and leaves the shell in
+    # the current directory (bash refuses it as a null directory). Unguarded,
+    # an unbound run dir would silently write the carrier into the repository
+    # working tree — untracked residue the mutating verbs then refuse over, from
+    # a fence that reported success.
+    CI_SELECTION_RUN_DIR=
+    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+      CI_SELECTION_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_SELECTION_RUN_DIR=
+    fi
+    [ -n "$CI_SELECTION_RUN_DIR" ] || {
+      echo "error: /uberdev:review-pr — Phase 3 CLASSIFY cannot resolve the run directory to record the failed check's name." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_check_name_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    review_fleet_write_ci_check_name "$CI_SELECTION_RUN_DIR/ci-check-name.txt" "$CI_RUN_CHECK_NAME" || {
+      echo "error: /uberdev:review-pr — Phase 3 selected failed check '$CI_RUN_CHECK_NAME' but could not persist it to $CI_SELECTION_RUN_DIR/ci-check-name.txt; refusing to file a refusal issue that cannot name the check." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_check_name_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     ```
 
     Then bind the classifier to one immutable PR-head identity before reading
@@ -3727,6 +3858,27 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     signal_anchor="$(review_ci_json_member "$CI_CLASSIFICATION_JSON" signal_anchor)" || return 74
     classifier_rationale="$(review_ci_json_member "$CI_CLASSIFICATION_JSON" rationale)" || return 74
     review_apply_ci_classification_status "$classification_status" "$classifier_rationale" || exit 1
+    # THE ROUTING PAIR CROSSES ON DISK (#418). 6c.4 ROUTE and the REFUSED arm's
+    # aggregate writer are both DIFFERENT shells: ROUTE's `case $failure_class`
+    # saw the empty string and fell through to `ci_fix_dispatch_unknown_class`
+    # on every run, and the aggregate's `${failure_class:-unknown}` /
+    # `${signal_anchor:-unknown:1}` filed every CI-refusal issue with the
+    # classifier's entire output replaced by placeholders. The values recorded
+    # here are the VALIDATED ones -- `validate-ci-classification` stays the only
+    # judge that turns child bytes into a routing scalar; this records its
+    # answer, it does not re-derive one.
+    #
+    # AFTER review_apply_ci_classification_status, never before: a REFUSED
+    # classification exits above, so no refusal can leave a routing pair on disk
+    # for a later fence to pick up.
+    review_fleet_write_ci_classification \
+      "$REVIEW_FLEET_RUN_DIR/ci-classification.json" \
+      "$failure_class" "$signal_anchor" || {
+      echo "error: /uberdev:review-pr — Phase 3 validated the classification ($failure_class) but could not persist it to $REVIEW_FLEET_RUN_DIR/ci-classification.json; refusing to hand ROUTE a class it cannot read." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     if CI_ROUTE_HEAD_SHA="$(review_capture_ci_classification_head \
         "$CI_CLASSIFICATION_HEAD_SHA")"; then
       unset CI_ROUTE_HEAD_SHA
@@ -3884,6 +4036,7 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
 
     ```bash uberdev-executable origin=review-pr
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     # EVERY cross-fence scalar this fence needs comes off disk FIRST, from the
     # one run dir every other Phase 3 fence already reads (#399). Nothing below
     # may reference a name a previous fence merely bound in its own shell.
@@ -3918,7 +4071,19 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
         ;;
     esac
     if [ "${CI_FIX_PHASE:-1}" = 0 ]; then
-      audit ci_probe_only_skipped state="${PROBE_VERDICT:-unknown}"
+      # 6c.1 PROBE bound the verdict in ITS shell, so `${PROBE_VERDICT:-unknown}`
+      # here recorded `state=unknown` on every probe-only run and, comparing ""
+      # against `green`, halted a `--no-ci-fix` review of GREEN CI (#418). The
+      # verdict now comes off the carrier PROBE wrote, and an unreadable one is
+      # "cannot tell", never "not green": this arm ASSIGNS the phase outcome, so
+      # a guess here is a trust-signal answer nobody measured.
+      CI_PROBE_VERDICT="$(review_fleet_read_ci_probe_verdict "$CI_ROUTE_RUN_DIR/ci-probe-verdict.txt")" || {
+        echo "error: /uberdev:review-pr — Phase 3 could not read the probe verdict from $CI_ROUTE_RUN_DIR/ci-probe-verdict.txt; refusing to answer green or halted for a probe this fence cannot see." >&2
+        audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_unreadable
+        OUTCOME=halted
+        exit 1
+      }
+      audit ci_probe_only_skipped state="$CI_PROBE_VERDICT"
       # The ONE surviving literal `OUTCOME=green`, and it is deliberate: this is
       # `review_fleet_ci_green_outcome`'s fix_phase=0 case, whose answer is
       # STATICALLY green -- probe-only skips every fixer arm, so by construction
@@ -3926,9 +4091,33 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
       # requirement of a fence that needs no ledger to be right, for no extra
       # information. The equivalence is asserted behaviourally (E8g, S2-RT.16,
       # S2B-RT.3), and S3.4 pins this as the only literal left in the file.
-      if [ "${PROBE_VERDICT:-}" = green ]; then OUTCOME=green; else OUTCOME=halted; fi
+      if [ "$CI_PROBE_VERDICT" = green ]; then OUTCOME=green; else OUTCOME=halted; fi
       return 0
     fi
+    # The classifier's routing pair, off the carrier 6c.3w.2 wrote. Bound HERE,
+    # above every consumer, for the same reason the push target is: `case
+    # $failure_class` and the fix_code inputs below both ran against the empty
+    # string, so `code_bug` fell through to `ci_fix_dispatch_unknown_class` and
+    # the whole fixer routing table was unreachable the moment #399 made ROUTE
+    # reachable at all (#418). `${...:-}` on the two scalars is deliberately
+    # absent so a later edit cannot re-introduce a silent forward reference that
+    # "defaults" cleanly.
+    CI_CLASSIFICATION_CARRIER="$CI_ROUTE_RUN_DIR/ci-classification.json"
+    failure_class="$(review_fleet_read_ci_classification "$CI_CLASSIFICATION_CARRIER" failure_class)" || {
+      echo "error: /uberdev:review-pr — Phase 3 ROUTE could not read the validated failure class from $CI_CLASSIFICATION_CARRIER; refusing to route a mutating fixer on a class it cannot name." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_unreadable
+      OUTCOME=halted
+      exit 1
+    }
+    # The anchor is read with the SAME halt: an AMBIGUOUS classification carries
+    # an empty anchor legitimately (routed as flaky, which needs none), so
+    # emptiness is not the failure -- an unreadable RECORD is.
+    signal_anchor="$(review_fleet_read_ci_classification "$CI_CLASSIFICATION_CARRIER" signal_anchor)" || {
+      echo "error: /uberdev:review-pr — Phase 3 ROUTE could not read the validated signal anchor from $CI_CLASSIFICATION_CARRIER; refusing to hand a fixer an anchor it cannot name." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_unreadable
+      OUTCOME=halted
+      exit 1
+    }
     CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code \
       failure_class "$(review_json_string "$failure_class")" \
       signal_anchor "$(review_json_string "$signal_anchor")" \
@@ -4469,7 +4658,7 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
 
           This replaces the previous inline `gh issue create` with a `routed child (subagent_type: uberdev:findings-to-issues)` dispatch that funnels CI-REFUSED issue creation through the same agent that handles all other deferred-finding issue creation; eliminates the prose-drift risk between the two issue-creation sites.
 
-          Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, `failure_class: <from-ci-code-fixer-return>`, `check_name: <from-ci-code-fixer-return>`, `signal_anchor: <from-ci-code-fixer-return>`, and `rationale: <from-ci-code-fixer-return>`. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
+          Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, and four values that each come off the run-dir carrier written by the fence that BOUND them (#418) — `failure_class` and `signal_anchor` from `ci-classification.json` (6c.3w.2's validated classification), `check_name` from `ci-check-name.txt` (6c.3's failed-check selection), and `rationale` from `ci-fixer-terminal.json` (6c.4w.2's validated terminal). None of the four is a value `ci-code-fixer` returns, and none of them survives a fence boundary in a shell variable: read that way they were `unknown` / `unknown:1` / `unspecified` on every run, which filed a CRITICAL issue with the entire diagnosis erased. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
@@ -4503,6 +4692,25 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
           # filing a CRITICAL refusal issue for a fixer that did not refuse is
           # not a recoverable mistake.
           [ "$CI_FIXER_TERMINAL_STATUS" = REFUSED ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_fixer_terminal_mismatch; exit 1; }
+          # The other three finding-row values, off the carriers written by the
+          # fences that BOUND them (#418). Read as shell variables they were the
+          # empty string here — a different shell again — so the aggregate went
+          # out as `unknown` / `unknown:1`: an issue that names neither the
+          # failure class, nor the check, nor the file:line, filed at CRITICAL
+          # against a human. That is the same failure as the erased rationale
+          # above, and it takes the same answer: refuse, typed, rather than file
+          # a diagnosis nobody can act on.
+          # `[ -n … ]` first: under /bin/zsh `cd ""` succeeds and stays put, so
+          # an unbound run dir would read the carriers from whatever directory
+          # this fence happened to start in.
+          CI_REFUSED_CARRIER_DIR=
+          if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+            CI_REFUSED_CARRIER_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_REFUSED_CARRIER_DIR=
+          fi
+          [ -n "$CI_REFUSED_CARRIER_DIR" ] || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_unreadable; exit 1; }
+          CI_REFUSED_FAILURE_CLASS="$(review_fleet_read_ci_classification "$CI_REFUSED_CARRIER_DIR/ci-classification.json" failure_class)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_unreadable; exit 1; }
+          CI_REFUSED_SIGNAL_ANCHOR="$(review_fleet_read_ci_classification "$CI_REFUSED_CARRIER_DIR/ci-classification.json" signal_anchor)" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_classification_unreadable; exit 1; }
+          CI_REFUSED_CHECK_NAME="$(review_fleet_read_ci_check_name "$CI_REFUSED_CARRIER_DIR/ci-check-name.txt")" || { audit ci_phase_outcome data.outcome=halted data.subreason=ci_check_name_unreadable; exit 1; }
           CI_REFUSED_AGGREGATE_PATH="$RESEARCH_DIR_ABS/ci-refused-synthetic-${CI_FIX_LOOP_ITER:-1}.md"
           if ! (umask 077; set -C; : >"$CI_REFUSED_AGGREGATE_PATH"); then
             audit ci_phase_outcome data.outcome=halted data.subreason=ci_refused_aggregate_create_failed
@@ -4512,9 +4720,12 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
           # (CI_FIXER_TERMINAL_RATIONALE), not a re-read of the child's YAML:
           # `validate-ci-mutation-outcome` already sanitised it to the
           # documented kebab-case token set, and the same value feeds the halt
-          # prose and `data.subreason=ci_fixer_refused_<rationale>` below.
-          python3 -I -B - "$CI_REFUSED_AGGREGATE_PATH" "${failure_class:-unknown}" \
-            "${check_name:-unknown}" "${signal_anchor:-unknown:1}" "${CI_FIXER_TERMINAL_RATIONALE:-unspecified}" <<'PY'
+          # prose and `data.subreason=ci_fixer_refused_<rationale>` below. Every
+          # positional below is now a carrier-read scalar with its own halt, so
+          # `${...:-<placeholder>}` is gone from all four: a defaulted diagnosis
+          # is indistinguishable from a real one once the issue is filed.
+          python3 -I -B - "$CI_REFUSED_AGGREGATE_PATH" "$CI_REFUSED_FAILURE_CLASS" \
+            "$CI_REFUSED_CHECK_NAME" "$CI_REFUSED_SIGNAL_ANCHOR" "$CI_FIXER_TERMINAL_RATIONALE" <<'PY'
 import json,os,stat,sys
 path,failure_class,check_name,signal_anchor,rationale=sys.argv[1:]
 if any(len(value)>8192 or any(char in value for char in '\r\n\0') for value in (failure_class,check_name,signal_anchor,rationale)):
@@ -4743,12 +4954,17 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
 
           ```
           /uberdev:review-pr — Phase 3 halt: ci-code-fixer REFUSED
-            failure class:   $failure_class
-            signal anchor:   $signal_anchor
-            rationale:       $rationale (e.g. forbidden-pattern-no-verify)
+            failure class:   $CI_REFUSED_FAILURE_CLASS
+            signal anchor:   $CI_REFUSED_SIGNAL_ANCHOR
+            rationale:       $CI_FIXER_TERMINAL_RATIONALE (e.g. forbidden-pattern-no-verify)
             filed issue:     $CI_REFUSED_ISSUE_URL
             next step:       /uberdev:solve $CI_REFUSED_ISSUE_URL  (or fix manually)
           ```
+
+          The three diagnosis lines name the carrier-read scalars from action 1,
+          not `$failure_class` / `$signal_anchor` / `$rationale`: those were
+          bound in fences this prose's shell never shared, so the halt message
+          the operator actually saw carried three empty fields (#418).
 
        3. **Audit + exit** — emit `ci_phase_outcome` with `data.outcome=halted` and `data.subreason=ci_fixer_refused_<rationale>` (lowercase, dashes-to-underscores normalised, e.g. `forbidden-pattern-no-verify` → `ci_fixer_refused_forbidden_pattern_no_verify`); record `CI_REFUSED_ISSUE_URL` in the audit JSON under `phases.phase3.ci_refused_issue_url`; exit 1.
 

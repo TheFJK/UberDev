@@ -2012,20 +2012,27 @@ else
 
   # Default/unset CI_RUN_ID is non-authoritative: the failed check's exact
   # Actions URL supplies the positive run id and event.
+  #
+  # FOUR columns since #418: the SELECTED row's check NAME leaves the selector
+  # too. `check_name` had no producer anywhere in review-pr.md while the REFUSED
+  # arm's aggregate consumed `${check_name:-unknown}` — so every CI-refusal issue
+  # named `unknown` as the check that failed. The name is already the selector's
+  # own tie-break key; emitting it is what makes the field producible at all.
   SELECTION_PROBE="$(_run_probe ci-checks-red)"
   unset CI_RUN_ID
-  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
     bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
       _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
   )
   if [ "$CI_RUN_ID" = 991 ] && [ "$CI_RUN_EVENT" = pull_request ] \
-      && [ "$CI_RUN_CHECK_LINK" = "https://github.com/owner/repo/actions/runs/991/job/1012" ]; then
+      && [ "$CI_RUN_CHECK_LINK" = "https://github.com/owner/repo/actions/runs/991/job/1012" ] \
+      && [ "${CI_RUN_CHECK_NAME:-}" = test ]; then
     echo "  PASS  S18-RT.1 — unset run id is derived from the selected failed check"; PASS=$((PASS + 1))
   else
-    echo "  FAIL  S18-RT.1 — unset run id was not derived exactly (id=$CI_RUN_ID event=$CI_RUN_EVENT link=$CI_RUN_CHECK_LINK)"; FAIL=$((FAIL + 1))
+    echo "  FAIL  S18-RT.1 — unset run id was not derived exactly (id=$CI_RUN_ID event=$CI_RUN_EVENT link=$CI_RUN_CHECK_LINK name=${CI_RUN_CHECK_NAME:-<none>})"; FAIL=$((FAIL + 1))
   fi
   CI_RUN_ID=0
-  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK < <(
+  IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
     bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
       _ "$CI_AUTHORITY_FIXTURE" "$SELECTION_PROBE"
   )
@@ -2135,15 +2142,29 @@ else
       CI_RUN_ID=991
       CI_RUN_EVENT=pull_request
       CI_RUN_CHECK_LINK=https://github.com/owner/repo/actions/runs/991/job/1012
+      CI_RUN_CHECK_NAME=test
       review_clear_ci_run_selection
-      [ -z "$CI_RUN_ID$CI_RUN_EVENT$CI_RUN_CHECK_LINK" ] || exit 3
+      [ -z "$CI_RUN_ID$CI_RUN_EVENT$CI_RUN_CHECK_LINK$CI_RUN_CHECK_NAME" ] || exit 3
       review_select_failed_ci_run "$2" owner/repo
     ' _ "$CI_AUTHORITY_FIXTURE" "$RESELECT_PROBE"
   )"
-  if [ "$RESELECT_RESULT" = $'992\tpull_request\thttps://github.com/owner/repo/actions/runs/992/job/1022' ]; then
+  if [ "$RESELECT_RESULT" = $'992\tpull_request\thttps://github.com/owner/repo/actions/runs/992/job/1022\ttest' ]; then
     echo "  PASS  S18-RT.8 — post-push re-entry clears and reselects the new run"; PASS=$((PASS + 1))
   else
     echo "  FAIL  S18-RT.8 — post-push selection reused stale authority ($RESELECT_RESULT)"; FAIL=$((FAIL + 1))
+  fi
+
+  # S18-RT.9 — the check name crosses a fence boundary now (#418), so a control
+  # character in it would either truncate the carrier's single line or split its
+  # own TSV column. The selector already rejects control characters in
+  # event/link/workflow; the NAME had been exempt from that check while being
+  # the one field with a free-text value the check author controls.
+  CONTROL_NAME_PROBE='[{"name":"tes\tt","state":"FAILURE","bucket":"fail","event":"pull_request","link":"https://github.com/owner/repo/actions/runs/993/job/1","workflow":"Tests"}]'
+  if bash -c '. "$1"; review_select_failed_ci_run "$2" owner/repo' \
+      _ "$CI_AUTHORITY_FIXTURE" "$CONTROL_NAME_PROBE" >/dev/null 2>&1; then
+    echo "  FAIL  S18-RT.9 — a control character in the check name was selected, not refused"; FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  S18-RT.9 — a control character in the check name fails closed"; PASS=$((PASS + 1))
   fi
 fi
 rm -f "$CI_AUTHORITY_FIXTURE"
@@ -3311,7 +3332,13 @@ if [ -r "$PUSH_TARGET_LIB" ]; then
   # Two adaptations to the wired Phase 3 (#383 half two):
   #   * the fence opener now carries an info string (```bash uberdev-executable
   #     origin=review-pr), so the extractor keys on the ```bash PREFIX and picks
-  #     the fence by its CROSS-REPOSITORY GATE marker, not by a bare opener;
+  #     the fence by the resolver CALL it must contain, not by a bare opener.
+  #     The key is the code token `review_resolve_same_repo_push_target`, not the
+  #     gate's prose marker: keyed on prose, the FIRST fence that merely MENTIONS
+  #     the gate wins, so a comment added anywhere earlier in the file silently
+  #     re-points this cover at a fence that never resolves a push target — and
+  #     the row then reports a fork PR "not refused" while the real gate is
+  #     untested (#418 tripped exactly that, from a comment in 6c.1 PROBE);
   #   * the wiring renamed the bound scalars to CI_PR_HEAD_BRANCH/CI_BASE_BRANCH,
   #     so the driver reports whichever pair the gate actually binds.
   # What is NOT adapted away: the gate has to sit in a fence that can be sourced
@@ -3325,7 +3352,7 @@ if [ -r "$PUSH_TARGET_LIB" ]; then
   awk '
     /^    ```bash/ { collecting = 1; buf = ""; next }
     collecting && /^    ```$/ {
-      if (buf ~ /CROSS-REPOSITORY GATE/) { printf "%s", buf; exit }
+      if (buf ~ /review_resolve_same_repo_push_target/) { printf "%s", buf; exit }
       collecting = 0; next
     }
     collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
@@ -3424,6 +3451,319 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$PUSH_TARGET_STUB" "$PUSH_TARGET_LOG"
+
+echo
+echo "== S33: the four values #418 left stranded across fence boundaries =="
+# #399 put three cross-fence scalars onto run-dir carriers. FOUR more kept the
+# `${name:-<default>}` spelling, which in a fresh harness shell reads the EMPTY
+# string and takes the default every single time:
+#
+#   ${failure_class:-unknown} / ${check_name:-unknown} / ${signal_anchor:-unknown:1}
+#       — the REFUSED arm's synthetic aggregate. Every CI-refusal issue the
+#         autopilot filed recorded `unknown` / `unknown:1`: the classifier's
+#         entire output erased at the moment it was written down.
+#   ${PROBE_VERDICT:-unknown}
+#       — ROUTE's probe-only arm. `--no-ci-fix` audited `state=unknown` and
+#         forced OUTCOME=halted even when the probe had just seen green CI.
+#
+# A default is only legitimate where the ABSENCE is itself documented. None of
+# these four has a documented default, so the fix is the carrier idiom plus a
+# typed halt, never a friendlier-looking placeholder.
+#
+# COMMENT-STRIPPED and fence-scoped, for the same reason as S3.4/S3.5: the code
+# that must not carry the placeholder is exactly the code whose comments have to
+# NAME the placeholder to explain why it is gone. A raw grep reds on the
+# explanation and teaches the next author to delete the reasoning.
+S33_REPORT="$(python3 - "$REVIEW_PR" <<'PY_S33'
+import re, sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+fences, current = [], None
+for line in lines:
+    if re.match(r"^[ \t]*```bash\b", line) and current is None:
+        current = []
+        continue
+    if current is not None and re.match(r"^[ \t]*```[ \t]*$", line):
+        fences.append("\n".join(current))
+        current = None
+        continue
+    if current is not None:
+        current.append(line)
+
+executable = "\n".join(
+    "\n".join(r for r in body.split("\n") if not r.lstrip().startswith("#"))
+    for body in fences
+)
+
+for token in ("${failure_class:-unknown}", "${check_name:-unknown}",
+              "${signal_anchor:-unknown:1}", "${PROBE_VERDICT:-unknown}"):
+    print("%d\t%s" % (executable.count(token), token))
+PY_S33
+)"
+s33_placeholder_row() {
+  local token="$1" desc="$2" seen
+  seen="$(awk -F'\t' -v want="$token" '$2 == want { print $1 }' <<<"$S33_REPORT")"
+  if [ "$seen" = 0 ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        executable occurrences of $token: ${seen:-<token not scanned>}"
+    FAIL=$((FAIL + 1))
+  fi
+}
+s33_placeholder_row '${failure_class:-unknown}' \
+  "S33.1 — no executable line defaults failure_class to a placeholder"
+s33_placeholder_row '${check_name:-unknown}' \
+  "S33.2 — no executable line defaults check_name to a placeholder"
+s33_placeholder_row '${signal_anchor:-unknown:1}' \
+  "S33.3 — no executable line defaults signal_anchor to unknown:1"
+s33_placeholder_row '${PROBE_VERDICT:-unknown}' \
+  "S33.4 — no executable line defaults PROBE_VERDICT to a placeholder"
+# ...and `check_name` must have a PRODUCER, not merely a non-defaulting reader:
+# it was consumed in one place and bound in none, which is why the placeholder
+# read as harmless prose for as long as it did.
+assert_grep "$REVIEW_PR" 'CI_RUN_CHECK_NAME' \
+  "S33.5 — the failed check's NAME is bound from the run selection (a producer exists)"
+assert_no_grep "$REVIEW_PR" 'check_name: <from-ci-code-fixer-return>' \
+  "S33.6 — the aggregate no longer claims check_name comes from the fixer's return"
+
+for s33_fn in review_fleet_write_ci_probe_verdict review_fleet_read_ci_probe_verdict \
+              review_fleet_write_ci_check_name review_fleet_read_ci_check_name \
+              review_fleet_write_ci_classification review_fleet_read_ci_classification; do
+  assert_grep "$ARGS_LIB_PHASE3" "^$s33_fn\(\) \{" \
+    "S33.7.$s33_fn — the carrier primitive ships in lib/review-fleet-args.sh"
+  assert_grep "$REVIEW_PR" "$s33_fn " \
+    "S33.8.$s33_fn — Phase 3 calls it by name"
+done
+
+# Both halves of every carrier are typed: a write that cannot land halts where
+# the answer was PAID FOR, and a read that cannot resolve halts rather than
+# routing on a value it invented.
+for s33_subreason in ci_probe_verdict_uncarried ci_probe_verdict_unreadable \
+                     ci_check_name_uncarried ci_check_name_unreadable \
+                     ci_classification_uncarried ci_classification_unreadable; do
+  assert_grep "$REVIEW_PR" "data\.subreason=$s33_subreason" \
+    "S33.9.$s33_subreason — the carrier failure is a typed halt, not a default"
+done
+
+echo
+echo "== S33-RUNTIME: the #418 carriers survive a shell that inherited nothing =="
+S33_TMP="$(mktemp -d)"
+# Every case runs under `env -i`: the defect being fixed is invisible to any
+# test that lets the writer's environment reach the reader (the env-passing trap
+# that masked the goal-pipeline run-state bugs). A fresh interpreter with a
+# cleared environment is the only shape that proves the value travels on DISK.
+s33_case() {
+  local name="$1" want="$2" script="$3" got rc=0 out
+  out="$(env -i PATH="$PATH" bash -c "$script" _ "$ARGS_LIB_PHASE3" "$S33_TMP" 2>/dev/null)" || rc=$?
+  got="$rc|$out"
+  if [ "$got" = "$want" ]; then
+    echo "  PASS  $name"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $name"; echo "        want rc|stdout: $want"; echo "        got  rc|stdout: $got"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+s33_case "S33-RT.1 — the probe verdict is written by 6c.1's shell" "0|" \
+  '. "$1"; review_fleet_write_ci_probe_verdict "$2/verdict.txt" green'
+s33_case "S33-RT.2 — ...and read back whole by ROUTE's" "0|green" \
+  '. "$1"; review_fleet_read_ci_probe_verdict "$2/verdict.txt"'
+s33_case "S33-RT.3 — a verdict outside the documented four is refused, never recorded" "2|" \
+  '. "$1"; review_fleet_write_ci_probe_verdict "$2/rejected.txt" unknown'
+if [ ! -e "$S33_TMP/rejected.txt" ]; then
+  echo "  PASS  S33-RT.4 — the refused verdict left no carrier behind"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S33-RT.4 — a refused verdict still created $S33_TMP/rejected.txt"; FAIL=$((FAIL + 1))
+fi
+printf 'unknown\n' >"$S33_TMP/poisoned.txt"
+s33_case "S33-RT.5 — the reader refuses the very placeholder the old default invented" "2|" \
+  '. "$1"; review_fleet_read_ci_probe_verdict "$2/poisoned.txt"'
+s33_case "S33-RT.6 — an absent verdict carrier is 'cannot tell', not a silent green" "2|" \
+  '. "$1"; review_fleet_read_ci_probe_verdict "$2/never-written.txt"'
+
+s33_case "S33-RT.7 — the failed check's name crosses the boundary intact (spaces kept)" "0|" \
+  '. "$1"; review_fleet_write_ci_check_name "$2/check.txt" "shape-checks (pull_request)"'
+s33_case "S33-RT.8 — ...and the REFUSED arm reads exactly what CLASSIFY selected" \
+  "0|shape-checks (pull_request)" \
+  '. "$1"; review_fleet_read_ci_check_name "$2/check.txt"'
+s33_case "S33-RT.9 — an empty check name is refused, so no issue can name nothing" "2|" \
+  '. "$1"; review_fleet_write_ci_check_name "$2/empty.txt" ""'
+s33_case "S33-RT.10 — a newline-bearing name is refused, not silently truncated" "2|" \
+  '. "$1"; review_fleet_write_ci_check_name "$2/multiline.txt" "$(printf "a\nb")"'
+
+s33_case "S33-RT.11 — the classification is written by 6c.3w.2's shell" "0|" \
+  '. "$1"; review_fleet_write_ci_classification "$2/class.json" code_bug "tests/foo.test.sh:12"'
+s33_case "S33-RT.12 — ROUTE reads the class the classifier actually returned" "0|code_bug" \
+  '. "$1"; review_fleet_read_ci_classification "$2/class.json" failure_class'
+s33_case "S33-RT.13 — ...and the anchor, not unknown:1" "0|tests/foo.test.sh:12" \
+  '. "$1"; review_fleet_read_ci_classification "$2/class.json" signal_anchor'
+# The AMBIGUOUS shape is the one legitimate EMPTY anchor: validate-ci-classification
+# reports `flaky` + "" so the caller can emit ci_classify_ambiguous_routing_as_flaky
+# and re-run once. A writer that demanded a non-empty anchor would halt every
+# AMBIGUOUS run — turning this fix into a new outage on the commonest red path.
+s33_case "S33-RT.14 — the AMBIGUOUS shape (flaky + empty anchor) is carried, not refused" "0|" \
+  '. "$1"; review_fleet_write_ci_classification "$2/ambiguous.json" flaky ""'
+s33_case "S33-RT.15 — ...and its empty anchor reads back as empty, with rc 0" "0|" \
+  '. "$1"; review_fleet_read_ci_classification "$2/ambiguous.json" signal_anchor'
+s33_case "S33-RT.16 — a class outside CI_FAILURE_CLASS_ENUM is refused at the writer" "2|" \
+  '. "$1"; review_fleet_write_ci_classification "$2/bad-class.json" unknown "tests/foo.test.sh:12"'
+s33_case "S33-RT.17 — a member the record does not carry is rc 2, never an empty default" "2|" \
+  '. "$1"; review_fleet_read_ci_classification "$2/class.json" check_name'
+: >"$S33_TMP/zero-byte.json"
+s33_case "S33-RT.18 — a 0-byte record halts the reader (the crashed-producer class)" "2|" \
+  '. "$1"; review_fleet_read_ci_classification "$2/zero-byte.json" failure_class'
+rm -rf "$S33_TMP"
+
+echo
+echo "== S33-FENCE: the two arms the carriers changed, EXECUTED (#418) =="
+# The rows above prove the primitives. These execute the FENCES that call them,
+# extracted from review-pr.md verbatim, because the two things most easily got
+# wrong here are not primitive behaviour:
+#
+#   * ROUTE's probe-only arm must now answer `green` from the carrier, which is
+#     the whole user-visible defect (`--no-ci-fix` reported a halt on green CI);
+#   * 6c.1's write must NOT outrank the `ci_probe_unreachable` carve-out. That
+#     branch does not exit the fence, so a `gh` outage reaches the carrier code
+#     with NO verdict — and an unconditional persist-or-halt there would turn a
+#     documented "Phase 3 omitted" into "Phase 3 failed". Structural greps and
+#     primitive round-trips both report green on that mistake; only running the
+#     fence catches it.
+S33F_TMP="$(mktemp -d)"
+S33F_ROUTE="$S33F_TMP/route.sh"
+S33F_PROBE="$S33F_TMP/probe.sh"
+# Keyed on the code each fence must contain, never on prose: see the S32-RT note.
+awk '
+  /^    ```bash/ { collecting = 1; buf = ""; next }
+  collecting && /^    ```$/ {
+    if (buf ~ /ci_route_run_dir_unreadable/) { printf "%s", buf; exit }
+    collecting = 0; next
+  }
+  collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
+' "$REVIEW_PR" >"$S33F_ROUTE"
+awk '
+  /^    ```bash/ { collecting = 1; buf = ""; next }
+  collecting && /^    ```$/ {
+    if (buf ~ /PROBE_VERDICT="\$\(jq -r/) { printf "%s", buf; exit }
+    collecting = 0; next
+  }
+  collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
+' "$REVIEW_PR" >"$S33F_PROBE"
+
+cat >"$S33F_TMP/route-driver.sh" <<'S33F_ROUTE_DRIVER'
+set -u
+audit() { printf 'audit %s\n' "$*" >>"$S33F_LOG"; }
+OUTCOME=unset
+RESEARCH_DIR_ABS="$S33F_RUN"
+UBERDEV_REVIEW_PLUGIN_ROOT="$S33F_PLUGIN"
+. "$S33F_FENCE"
+printf 'OUTCOME=%s\n' "$OUTCOME"
+S33F_ROUTE_DRIVER
+
+cat >"$S33F_TMP/probe-driver.sh" <<'S33F_PROBE_DRIVER'
+set -u
+audit() { printf 'audit %s\n' "$*" >>"$S33F_LOG"; }
+OUTCOME=unset
+PR_NUMBER=73
+RESEARCH_DIR_ABS="$S33F_RUN"
+UBERDEV_REVIEW_PLUGIN_ROOT="$S33F_PLUGIN"
+# The documented outage shape: gh exits non-zero and prints stderr text where
+# the JSON projection should be.
+gh() { printf 'gh: connection refused\n'; return 1; }
+. "$S33F_FENCE"
+printf 'OUTCOME=%s\n' "$OUTCOME"
+S33F_PROBE_DRIVER
+
+# s33f_run DRIVER FENCE -> "<rc>|<stdout>", audit lines left in $S33F_TMP/audit.log
+s33f_run() {
+  local driver="$1" fence="$2" rc=0 out
+  : >"$S33F_TMP/audit.log"
+  out="$(
+    S33F_LOG="$S33F_TMP/audit.log" S33F_RUN="$S33F_TMP/run" S33F_FENCE="$fence" \
+    S33F_PLUGIN="$REPO_ROOT/plugins/uberdev" \
+      bash "$driver" 2>/dev/null
+  )" || rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+
+if [ ! -s "$S33F_ROUTE" ] || [ ! -s "$S33F_PROBE" ]; then
+  echo "  FAIL  S33-FENCE.0 — could not extract the ROUTE and 6c.1 PROBE fences"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S33-FENCE.0 — extracted the ROUTE and 6c.1 PROBE fences from review-pr.md"
+  PASS=$((PASS + 1))
+
+  mkdir -p "$S33F_TMP/run"
+  printf '0\n' >"$S33F_TMP/run/ci-fix-phase.txt"
+  printf 'green\n' >"$S33F_TMP/run/ci-probe-verdict.txt"
+  S33F_GREEN="$(s33f_run "$S33F_TMP/route-driver.sh" "$S33F_ROUTE")"
+  S33F_GREEN_LOG="$(cat "$S33F_TMP/audit.log")"
+  if [ "$S33F_GREEN" = "0|OUTCOME=green" ] \
+     && grep -qxF 'audit ci_probe_only_skipped state=green' <<<"$S33F_GREEN_LOG"; then
+    echo "  PASS  S33-FENCE.1 — --no-ci-fix over a green probe answers green, and audits state=green"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S33-FENCE.1 — the probe-only arm did not read the carrier"
+    echo "        rc|stdout: $S33F_GREEN"
+    echo "        audit:     $S33F_GREEN_LOG"
+    FAIL=$((FAIL + 1))
+  fi
+
+  printf 'red\n' >"$S33F_TMP/run/ci-probe-verdict.txt"
+  S33F_RED="$(s33f_run "$S33F_TMP/route-driver.sh" "$S33F_ROUTE")"
+  S33F_RED_LOG="$(cat "$S33F_TMP/audit.log")"
+  if [ "$S33F_RED" = "0|OUTCOME=halted" ] \
+     && grep -qxF 'audit ci_probe_only_skipped state=red' <<<"$S33F_RED_LOG"; then
+    echo "  PASS  S33-FENCE.2 — a red probe still halts probe-only, with the REAL state in the trail"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S33-FENCE.2 — the probe-only arm mis-answered a red probe"
+    echo "        rc|stdout: $S33F_RED"
+    echo "        audit:     $S33F_RED_LOG"
+    FAIL=$((FAIL + 1))
+  fi
+
+  rm -f "$S33F_TMP/run/ci-probe-verdict.txt"
+  S33F_MISSING="$(s33f_run "$S33F_TMP/route-driver.sh" "$S33F_ROUTE")"
+  S33F_MISSING_LOG="$(cat "$S33F_TMP/audit.log")"
+  if [ "$S33F_MISSING" = "1|" ] \
+     && grep -qF 'data.subreason=ci_probe_verdict_unreadable' <<<"$S33F_MISSING_LOG" \
+     && ! grep -qF 'state=unknown' <<<"$S33F_MISSING_LOG"; then
+    echo "  PASS  S33-FENCE.3 — an absent verdict is a typed halt, never state=unknown"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S33-FENCE.3 — the probe-only arm guessed instead of halting"
+    echo "        rc|stdout: $S33F_MISSING"
+    echo "        audit:     $S33F_MISSING_LOG"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # THE CARVE-OUT. `gh` is down: the fence audits ci_probe_unreachable and keeps
+  # going (that branch has no exit), so the carrier code runs with no verdict.
+  # It must record a typed miss and leave the run's outcome alone -- Step 7 then
+  # proceeds with the phases.phase3 block omitted, exactly as documented.
+  S33F_OUTAGE="$(s33f_run "$S33F_TMP/probe-driver.sh" "$S33F_PROBE")"
+  S33F_OUTAGE_LOG="$(cat "$S33F_TMP/audit.log")"
+  if [ "$S33F_OUTAGE" = "0|OUTCOME=unset" ] \
+     && grep -qF 'ci_probe_unreachable' <<<"$S33F_OUTAGE_LOG" \
+     && grep -qF 'ci_probe_verdict_uncarried data.reason=no_verdict' <<<"$S33F_OUTAGE_LOG" \
+     && ! grep -qF 'data.outcome=halted' <<<"$S33F_OUTAGE_LOG"; then
+    echo "  PASS  S33-FENCE.4 — a gh outage stays the documented carve-out; the carry never halts it"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S33-FENCE.4 — the probe-verdict carry promoted a gh outage to a phase halt"
+    echo "        rc|stdout: $S33F_OUTAGE"
+    echo "        audit:     $S33F_OUTAGE_LOG"
+    FAIL=$((FAIL + 1))
+  fi
+  if [ ! -e "$S33F_TMP/run/ci-probe-verdict.txt" ]; then
+    echo "  PASS  S33-FENCE.5 — and it wrote no carrier for a probe that observed nothing"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S33-FENCE.5 — a verdict-less probe still left a carrier behind"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+rm -rf "$S33F_TMP"
 
 echo
 echo "== Summary =="
