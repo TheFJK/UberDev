@@ -38,13 +38,62 @@ mode_of() {
     stat -c '%a' "$1" 2>/dev/null
   fi
 }
+# Generous, self-describing hang detector for "a background publisher wrote its
+# handshake file". Every caller races a fork, a full source of live-semaphore.sh
+# and a complete uberdev_semaphore_acquire against this budget. The former
+# ceiling was 200 tries of sleep 0.01 — a ~2s wall — which made it a correctness
+# oracle rather than a hang guard: a publisher that was merely slow blew it, and
+# because every caller swallowed the timeout the row then reported an empty
+# lease path instead of naming the budget that had actually expired.
+#
+# The budget is now hang-detector sized and wall-clock, read from the SECONDS
+# builtin so the wait costs no forks that would slow the publisher it is waiting
+# for. The loop returns the instant the file appears, so an unloaded run still
+# costs milliseconds. WAIT_FOR_FILE_LAST carries the reason for the caller to
+# print, and the rcs keep the failure modes apart — 3 the deadline, 4 a
+# publisher that died before publishing. Every call site folds that rc into its
+# assertion, so a wait that stopped working reds instead of degrading its row
+# into a blank diagnostic.
+#
+# The size is measured, not guessed. Timing these same publishers on this repo:
+# ~0.6s on a healthy machine, ~5-9s under throttled background QoS, and one
+# 134.8s outlier for the plain-subshell publisher when four throttled copies of
+# this suite ran concurrently against spin loops. A 60s budget red on that
+# outlier. 300s keeps ~2x headroom over the worst starvation observed and ~500x
+# over the healthy case, while staying an unambiguous hang signal: the whole
+# suite finishes in ~75s and the CI job allows 40 minutes, so a five-minute wait
+# for one handshake can only mean stuck — and it reports by name instead of
+# letting the job time out with nothing to read.
+WAIT_FOR_FILE_BUDGET_S="${UBERDEV_TEST_WAIT_FOR_FILE_BUDGET_S:-300}"
+WAIT_FOR_FILE_LAST=""
 wait_for_file() {
-  local target_path="$1" tries=0
-  while [ ! -s "$target_path" ] && [ "$tries" -lt 200 ]; do
-    sleep 0.01
-    tries=$((tries + 1))
+  local target_path="$1" guard_pid="${2-}" deadline
+  deadline=$((SECONDS + WAIT_FOR_FILE_BUDGET_S))
+  while :; do
+    if [ -s "$target_path" ]; then
+      WAIT_FOR_FILE_LAST=ok
+      return 0
+    fi
+    if [ -n "$guard_pid" ] && ! kill -0 "$guard_pid" 2>/dev/null; then
+      # Re-check after observing the death: a publisher may write and exit
+      # between the two probes.
+      if [ -s "$target_path" ]; then
+        WAIT_FOR_FILE_LAST=ok
+        return 0
+      fi
+      WAIT_FOR_FILE_LAST="publisher pid $guard_pid exited before writing $target_path"
+      return 4
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      WAIT_FOR_FILE_LAST="timed out after ${WAIT_FOR_FILE_BUDGET_S}s waiting for $target_path"
+      return 3
+    fi
+    # Deliberately unhurried: on a starved machine the poller and the publisher
+    # compete for the same CPU, so waking 50 times a second slows down the very
+    # work being waited on. 20 wakeups a second is still far finer than any
+    # assertion here can notice.
+    sleep 0.05
   done
-  [ -s "$target_path" ]
 }
 # Age a published lease deterministically by backdating its recorded
 # start_epoch, so an expiry assertion tests the staleness RULE instead of racing
@@ -1250,7 +1299,14 @@ eval "$(declare -f _real_semaphore_process_identity | sed '1s/_real_semaphore_pr
 printf '== live semaphore: lifecycle lease PID reuse identity ==\n'
 LEASE_IDENTITY_STATE="$TMP/lease-pid-reuse-state"
 LEASE_IDENTITY_PATH_FILE="$TMP/lease-pid-reuse-path"
-sleep 30 & backend_pid=$!
+# One live process is the backend-liveness token for this whole block: the
+# retention row below and the two identity-probe rewrites that follow all read
+# it. A short-lived provider turns "the backend is live" into a countdown the
+# block has to beat — if it exits first, reconcile correctly reclaims the lease
+# and the row reds on a rule that behaved perfectly. The provider therefore
+# outlives any plausible runner; it is reaped explicitly at the end of the block
+# and again by the EXIT trap, so nothing leaks.
+sleep 600 & backend_pid=$!
 LEASE_BACKEND_IDENTITY="$(_uberdev_semaphore_process_identity "$backend_pid")"
 /bin/bash -c '
   . "$1"
@@ -1259,11 +1315,18 @@ LEASE_BACKEND_IDENTITY="$(_uberdev_semaphore_process_identity "$backend_pid")"
   printf "%s\n" "$lease" >"$5"
 ' _ "$LIB" "$LEASE_IDENTITY_STATE" "$backend_pid" "$LEASE_BACKEND_IDENTITY" "$LEASE_IDENTITY_PATH_FILE"
 lease_identity_path="$(cat "$LEASE_IDENTITY_PATH_FILE")"
+# The premise the retention rule needs — the recorded backend really is alive —
+# is asserted rather than assumed, so a provider that died reds by name instead
+# of masquerading as a retention defect.
+lease_identity_backend_live=0
+kill -0 "$backend_pid" 2>/dev/null && lease_identity_backend_live=1
 capture uberdev_semaphore_reconcile "$LEASE_IDENTITY_STATE" repo codex
-if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = 0 ] && [ -f "$lease_identity_path" ]; then
+if [ "$lease_identity_backend_live" -eq 1 ] && [ "$CAPTURE_RC" -eq 0 ] \
+    && [ "$CAPTURE_OUT" = 0 ] && [ -f "$lease_identity_path" ]; then
   pass "matching backend identity retains lifecycle capacity"
 else
-  fail "matching backend identity retains lifecycle capacity" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "matching backend identity retains lifecycle capacity" \
+    "backend_live=$lease_identity_backend_live rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 eval "$(declare -f _uberdev_semaphore_process_identity | sed '1s/_uberdev_semaphore_process_identity/_real_lease_process_identity/')"
 _uberdev_semaphore_process_identity() {
@@ -1310,17 +1373,23 @@ SUBSHELL_PATH_FILE="$TMP/subshell-killed-lease-path"
   sleep 30
 ) &
 subshell_owner_pid=$!
-wait_for_file "$SUBSHELL_PATH_FILE" || true
+# The handshake wait is part of the assertion. Swallowing it let an exhausted
+# poll budget surface as `lease=` with nothing to say that the wait, and not the
+# semaphore, was what gave out.
+subshell_wait_rc=0
+wait_for_file "$SUBSHELL_PATH_FILE" "$subshell_owner_pid" || subshell_wait_rc=$?
+subshell_wait_detail="$WAIT_FOR_FILE_LAST"
 subshell_killed_lease="$(cat "$SUBSHELL_PATH_FILE" 2>/dev/null || true)"
 subshell_recorded_owner="$(sed -n 's/^owner_pid=//p' "$subshell_killed_lease" 2>/dev/null || true)"
 kill -9 "$subshell_owner_pid" 2>/dev/null || true
 wait "$subshell_owner_pid" 2>/dev/null || true
 capture uberdev_semaphore_reconcile "$SUBSHELL_STATE" repo codex
-if [ -n "$subshell_killed_lease" ] && [ "$subshell_recorded_owner" = "$subshell_owner_pid" ] \
+if [ "$subshell_wait_rc" -eq 0 ] && [ -n "$subshell_killed_lease" ] \
+   && [ "$subshell_recorded_owner" = "$subshell_owner_pid" ] \
    && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$subshell_killed_lease" ]; then
   pass "Bash 3.2 background worker identity is recorded and recovered after death"
 else
-  fail "Bash 3.2 background worker identity is recorded and recovered after death" "worker=$subshell_owner_pid recorded=$subshell_recorded_owner rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$subshell_killed_lease"
+  fail "Bash 3.2 background worker identity is recorded and recovered after death" "wait=$subshell_wait_detail worker=$subshell_owner_pid recorded=$subshell_recorded_owner rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$subshell_killed_lease"
 fi
 
 printf '== live semaphore: canonical top-level status parsing ==\n'
@@ -1363,25 +1432,32 @@ KILLED_PATH_FILE="$TMP/killed-lease-path"
   sleep 30
 ' _ "$LIB" "$KILLED_STATE" "$KILLED_PATH_FILE" &
 owner_pid=$!
-if wait_for_file "$KILLED_PATH_FILE"; then
-  killed_lease="$(cat "$KILLED_PATH_FILE")"
-else
-  killed_lease=""
-fi
+killed_wait_rc=0
+wait_for_file "$KILLED_PATH_FILE" "$owner_pid" || killed_wait_rc=$?
+killed_wait_detail="$WAIT_FOR_FILE_LAST"
+killed_lease="$(cat "$KILLED_PATH_FILE" 2>/dev/null || true)"
 kill -9 "$owner_pid" 2>/dev/null || true
 wait "$owner_pid" 2>/dev/null || true
 owner_pid=""
 capture uberdev_semaphore_reconcile "$KILLED_STATE" repo codex
-if [ -n "$killed_lease" ] && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$killed_lease" ]; then
+if [ "$killed_wait_rc" -eq 0 ] && [ -n "$killed_lease" ] && [ "$CAPTURE_RC" -eq 0 ] \
+   && [ "$CAPTURE_OUT" = "1" ] && [ ! -e "$killed_lease" ]; then
   recovered="$(uberdev_semaphore_acquire "$KILLED_STATE" repo codex 1 recovered 5)"
   uberdev_semaphore_release "$recovered" >/dev/null
   pass "killed owner with no live backend releases capacity before timeout"
 else
-  fail "killed owner with no live backend releases capacity before timeout" "rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$killed_lease"
+  fail "killed owner with no live backend releases capacity before timeout" "wait=$killed_wait_detail rc=$CAPTURE_RC removed=$CAPTURE_OUT lease=$killed_lease"
 fi
 
 BACKEND_STATE="$TMP/backend-live-state"
-sleep 10 & backend_pid=$!
+# This provider process IS the "backend handle is live" premise of the row
+# below, and the row spends a fork, a library source, an acquire, a set_handle
+# and a path handshake before it reconciles. A 10s provider made that premise a
+# countdown the setup had to beat; when it lost, reconcile correctly reclaimed
+# the lease and the row red on preservation logic that was right. It now
+# outlives any plausible runner, and it is reaped a few lines below by the same
+# kill/wait the second half of the pair already needed.
+sleep 600 & backend_pid=$!
 BACKEND_PATH_FILE="$TMP/backend-live-lease-path"
 /bin/bash -c '
   . "$1"
@@ -1390,11 +1466,15 @@ BACKEND_PATH_FILE="$TMP/backend-live-lease-path"
   printf "%s\n" "$lease" > "$4"
 ' _ "$LIB" "$BACKEND_STATE" "$backend_pid" "$BACKEND_PATH_FILE"
 backend_lease="$(cat "$BACKEND_PATH_FILE")"
+backend_live_pre=0
+kill -0 "$backend_pid" 2>/dev/null && backend_live_pre=1
 capture uberdev_semaphore_reconcile "$BACKEND_STATE" repo codex
-if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "0" ] && [ -f "$backend_lease" ]; then
+if [ "$backend_live_pre" -eq 1 ] && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "0" ] \
+   && [ -f "$backend_lease" ]; then
   pass "dead owner lease is preserved while backend handle is live"
 else
-  fail "dead owner lease is preserved while backend handle is live" "rc=$CAPTURE_RC removed=$CAPTURE_OUT"
+  fail "dead owner lease is preserved while backend handle is live" \
+    "backend_live=$backend_live_pre rc=$CAPTURE_RC removed=$CAPTURE_OUT"
 fi
 kill "$backend_pid" 2>/dev/null || true
 wait "$backend_pid" 2>/dev/null || true
@@ -1442,15 +1522,32 @@ else
 fi
 
 ALIVE_TIMEOUT_STATE="$TMP/alive-timeout-state"
-sleep 10 & backend_pid=$!
-alive_timeout_lease="$(uberdev_semaphore_acquire "$ALIVE_TIMEOUT_STATE" repo codex 1 alive-timeout 1)"
+# Subject: an EXPIRED lease is never evicted while its backend handle is live.
+# The row used to give itself a 1s TTL and then burn two of its provider's ten
+# seconds on `sleep 2` to age past it, so it silently required acquire +
+# set_handle + reconcile to fit in whatever was left. When they did not, the
+# provider died first, reconcile correctly reclaimed the lease, and the row red
+# on the very rule it was defending. Both clocks are now independent of machine
+# speed: the TTL is generous and expiry is driven by backdating start_epoch (so
+# the age premise is exact and instant), and the provider outlives any plausible
+# runner. Both premises — the backdate and the provider's liveness — are folded
+# into the verdict, so a broken helper or a dead provider reds by name instead
+# of reading as an eviction defect.
+ALIVE_TIMEOUT_S=30
+sleep 600 & backend_pid=$!
+alive_timeout_lease="$(uberdev_semaphore_acquire "$ALIVE_TIMEOUT_STATE" repo codex 1 alive-timeout "$ALIVE_TIMEOUT_S")"
 uberdev_semaphore_set_handle "$alive_timeout_lease" "$backend_pid" ''
-sleep 2
+alive_timeout_backdate_rc=0
+backdate_lease_start "$alive_timeout_lease" "$((ALIVE_TIMEOUT_S + 1))" || alive_timeout_backdate_rc=$?
+alive_timeout_backend_live=0
+kill -0 "$backend_pid" 2>/dev/null && alive_timeout_backend_live=1
 capture uberdev_semaphore_reconcile "$ALIVE_TIMEOUT_STATE" repo codex
-if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "0" ] && [ -f "$alive_timeout_lease" ]; then
+if [ "$alive_timeout_backdate_rc" -eq 0 ] && [ "$alive_timeout_backend_live" -eq 1 ] \
+   && [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = "0" ] && [ -f "$alive_timeout_lease" ]; then
   pass "timeout never evicts a live backend"
 else
-  fail "timeout never evicts a live backend" "rc=$CAPTURE_RC removed=$CAPTURE_OUT"
+  fail "timeout never evicts a live backend" \
+    "backdate=$alive_timeout_backdate_rc backend_live=$alive_timeout_backend_live rc=$CAPTURE_RC removed=$CAPTURE_OUT"
 fi
 kill "$backend_pid" 2>/dev/null || true
 wait "$backend_pid" 2>/dev/null || true
@@ -1664,14 +1761,16 @@ PAUSE_LEASE_FILE="$TMP/paused-mutex-lease"
   uberdev_semaphore_release "$lease"
 ) &
 paused_pid=$!
+# Same ~2s hand-rolled ceiling wait_for_file used to carry, on the same shape of
+# publisher (a fork that must reach the library's post-mkdir pause hook), so it
+# is answered the same way: one generous, self-describing budget, and the wait's
+# own verdict folded into the row below instead of collapsing into a bare
+# `pause=0`.
+pause_wait_rc=0
+wait_for_file "$PAUSE_MARKER" "$paused_pid" || pause_wait_rc=$?
+pause_wait_detail="$WAIT_FOR_FILE_LAST"
 pause_seen=0
-tries=0
-while [ "$tries" -lt 200 ]; do
-  if [ -s "$PAUSE_MARKER" ]; then pause_seen=1; break; fi
-  kill -0 "$paused_pid" 2>/dev/null || break
-  tries=$((tries + 1))
-  sleep 0.01
-done
+[ "$pause_wait_rc" -ne 0 ] || pause_seen=1
 pause_contender=''
 if [ "$pause_seen" -eq 1 ]; then
   UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=3
@@ -1692,7 +1791,7 @@ if [ "$pause_seen" -eq 1 ] && [ "$contender_rc" -eq 0 ] && [ "$paused_rc" -eq 0 
    && [ -s "$PAUSE_LEASE_FILE" ] && [ -z "$remaining_pause_mutexes" ]; then
   pass "ownerless mutex is quarantined and displaced live holder retries before entry"
 else
-  fail "ownerless mutex is quarantined and displaced live holder retries before entry" "pause=$pause_seen contender=$contender_rc holder=$paused_rc"
+  fail "ownerless mutex is quarantined and displaced live holder retries before entry" "pause=$pause_wait_detail contender=$contender_rc holder=$paused_rc"
 fi
 rm -f "$mutex_scope/.mutex/owner_pid"
 rmdir "$mutex_scope/.mutex"
@@ -1753,19 +1852,24 @@ MUTEX_SUBSHELL_READY="$TMP/mutex-subshell-ready"
   sleep 30
 ) &
 mutex_subshell_pid=$!
-wait_for_file "$MUTEX_SUBSHELL_READY" || true
+# Swallowing this wait was not just a lost diagnostic, it was a route to
+# vacuity: if the holder never took the mutex, the acquire below succeeds with
+# nothing to reclaim and the row passes without exercising reclamation at all.
+mutex_ready_rc=0
+wait_for_file "$MUTEX_SUBSHELL_READY" "$mutex_subshell_pid" || mutex_ready_rc=$?
+mutex_ready_detail="$WAIT_FOR_FILE_LAST"
 kill -9 "$mutex_subshell_pid" 2>/dev/null || true
 wait "$mutex_subshell_pid" 2>/dev/null || true
 UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES=3
 export UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES
 capture uberdev_semaphore_acquire "$MUTEX_STATE" repo codex 1 killed-mutex-subshell 5
 unset UBERDEV_SEMAPHORE_MUTEX_MAX_TRIES
-if [ "$CAPTURE_RC" -eq 0 ] && [ -f "$CAPTURE_OUT" ]; then
+if [ "$mutex_ready_rc" -eq 0 ] && [ "$CAPTURE_RC" -eq 0 ] && [ -f "$CAPTURE_OUT" ]; then
   killed_mutex_lease="$CAPTURE_OUT"
   uberdev_semaphore_release "$killed_mutex_lease" >/dev/null
   pass "Bash 3.2 killed background mutex holder is reclaimed"
 else
-  fail "Bash 3.2 killed background mutex holder is reclaimed" "worker=$mutex_subshell_pid rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "Bash 3.2 killed background mutex holder is reclaimed" "ready=$mutex_ready_detail worker=$mutex_subshell_pid rc=$CAPTURE_RC out=$CAPTURE_OUT"
 fi
 
 printf '\nlive-semaphore: PASS=%s FAIL=%s observed_max=%s\n' "$PASS" "$FAIL" "$observed_max"
