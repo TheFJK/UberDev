@@ -2,7 +2,7 @@
 
 | Field            | Value                                                                |
 | ---------------- | -------------------------------------------------------------------- |
-| **Status**       | Draft — **DORMANT since 2026-08-05 (issue #381)**; engine rebuilt 2026-08-06 (#383 half one), caller not yet re-pointed. See both notes below |
+| **Status**       | Draft — dormant 2026-08-05 (#381), engine rebuilt 2026-08-06 (#383 half one), **RESTORED 2026-08-07 (#383 half two)**. See both notes below |
 | **Author**       | TheFJK                                                               |
 | **Created**      | 2026-05-06                                                           |
 | **Targets**      | `plugins/uberdev/commands/review-pr.md`, new agents, new SKILL phase |
@@ -28,26 +28,33 @@
 
 ---
 
-> **AMENDED 2026-08-06 (issue #383, half one) — the ENGINE for this phase is
-> rebuilt; the capability is NOT restored yet.**
+> **AMENDED 2026-08-06 / 2026-08-07 (issue #383) — the ENGINE and its WIRING
+> both shipped, so the capability is RESTORED.**
 >
-> `skills/review-fleet/workflow.js` now carries four Phase 3 stages —
-> `ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer` — and
-> `lib/code_fixer_contract.py` carries their producer (`prepare-ci-authority`,
-> `bind-workflow-ci-launch`), their capture verb (`capture-ci-terminal`,
-> `read-ci-authority-member`) and their judges (`validate-ci-classification`,
-> `validate-ci-mutation-outcome`, `validate-ci-persistence-result`).
+> `#383` landed in two halves, and the split is worth recording because the
+> reason for it is structural: no test in this repo executes a `review-pr.md`
+> fence, so the engine could be verified by execution and the wiring could not.
+> They did not belong in one PR.
 >
-> **`commands/review-pr.md` has not been re-pointed at any of them.** Its Phase
-> 3 is unchanged: PROBE, MONITOR and CLASSIFY telemetry, then the loud
-> `ci_transport_unsupported` halt on a red check, with `--no-ci-fix` as the
-> supported mode. The dormancy note above therefore still describes what a user
-> gets today. The fence wiring is a separate change, because no test in this
-> repo executes a `review-pr.md` fence — the engine could be verified by
-> execution and the wiring could not, so they do not belong in one PR.
+> **Half one (2026-08-06) — the engine.** `skills/review-fleet/workflow.js`
+> carries four Phase 3 stages — `ci-classify`, `ci-fix`, `ci-conflicts`,
+> `ci-defer` — and `lib/code_fixer_contract.py` carries their producer
+> (`prepare-ci-authority`, `bind-workflow-ci-launch`), their capture verb
+> (`capture-ci-terminal`, `read-ci-authority-member`) and their judges
+> (`validate-ci-classification`, `validate-ci-mutation-outcome`,
+> `validate-ci-persistence-result`). It shipped UNCALLED.
 >
-> The design amendments below are recorded now because they are what the SHIPPED
-> engine implements; the RFC as originally written no longer describes it.
+> **Half two (2026-08-07) — the wiring.** `commands/review-pr.md` is re-pointed
+> at those stages: Phase 3's five `review_pr.ci.*` children are dispatched by
+> `skills/review-fleet/workflow.js` as the same four stages, like the other four
+> review-fleet stages. Nothing in Phase 3 reaches the routed adapter, so the
+> `ci_transport_unsupported` refusal is DELETED rather than merely unreachable,
+> and the dormancy note above is now history rather than a description of what a
+> user gets. `--no-ci-fix` survives as a legitimate opt-out and is now enforced
+> in shell.
+>
+> The design amendments below are what the SHIPPED engine implements; the RFC as
+> originally written no longer describes it.
 >
 > **The `--force-with-lease` lease is CONTROLLER-HELD, not agent-held.** This
 > RFC (and `agents/ci-rebase-handler.md` as written) had `ci-rebase-handler`
@@ -55,17 +62,24 @@
 > the lease: git then compares the remote against a value the agent chose, the
 > flag still appears on the command line, and the safety property is gone while
 > every downstream check still reads as verified. The agent is demoted from
-> pusher to preparer — its tool list drops `git push` entirely — and the
-> controller will capture the lease at 6c.4 ROUTE
+> pusher to preparer — its tool list drops `git push` entirely — and
+> `commands/review-pr.md` captures the lease at 6c.4 ROUTE
 > (`rev-parse refs/remotes/origin/<pr_head_branch>`, never `origin/<base>`),
-> store it in a digest-pinned CI authority, and perform the single leased push
+> stores it in a digest-pinned CI authority, and performs the single leased push
 > itself. `validate-ci-mutation-outcome` compares the live remote tip against
 > that pinned lease BEFORE the controller pushes, so a child that pushed anyway
-> is caught rather than trusted. The demotion applies to BOTH fixer agents —
-> `ci-code-fixer` never writes to a remote either — so the controller owes a
-> push on every terminal that produces new history: `fix_code` `APPLIED`, clean
-> `REBASED`, and `CONFLICT → all RESOLVED → rebase --continue`, all through ONE
-> fence.
+> is caught rather than trusted.
+>
+> **Where that push actually lives: `commands/review-pr.md` 6c.4w.3.** The
+> demotion applies to BOTH fixer agents — `ci-code-fixer` never writes to a
+> remote either — so the controller owes a push on every terminal that produces
+> new history: `fix_code` `APPLIED`, clean `REBASED`, and
+> `CONFLICT → all RESOLVED → rebase --continue`. All three re-run the ONE
+> 6c.4w.3 fence, which re-derives the launch binding, the lease and the branch
+> off disk rather than inheriting them, because each fence is a fresh shell. The
+> lease and `pr_branch` are required members of BOTH mutating authorities, so a
+> value lost between fences costs a refusal at mint instead of a force-push
+> against an empty ref.
 >
 > **The rebase judge has a CONFLICT terminal.** `ci-rebase-handler` is required
 > to leave a conflicted rebase IN PROGRESS so the controller can enumerate the
@@ -87,33 +101,57 @@
 > fence and the lock is void. The lease is the cross-run guard and `git rebase`
 > refuses a second in-progress rebase on its own.
 >
-> **Fresh-shell handoffs must be FOUND, never recomputed.** Both loop counters
-> live in `ci-loop-state.json` (`review_fleet_write_ci_state` /
+> **Fresh-shell handoffs must be FOUND, never recomputed.** The counter-keyed
+> artifact name is the trap the first implementation fell into twice. Both loop
+> counters live in `ci-loop-state.json` (`review_fleet_write_ci_state` /
 > `review_fleet_load_ci_counters`) and every fence that keys a pathname on them
-> has to read them back first — `prepare-ci-authority` publishes no-clobber, so
-> a recomputed pathname on CI iteration 2 refuses `authority_preexists`. And the
-> `ci-fix` launch sidecar cannot be recomputed at all: the CONFLICT arm's
-> restage deliberately advances the CI loop counter while the sidecar keeps the
-> name it was minted under. The mint fence therefore publishes a fixed-name
-> POINTER (`review_fleet_write_ci_pointer`) and every later reader follows it.
+> has to read them back first — the classify and fix mint fences did not, so CI
+> iteration 2 recomputed iteration 1's authority pathname and
+> `prepare-ci-authority`, which publishes no-clobber, refused
+> `authority_preexists` with no audit event. And the `ci-fix` launch sidecar
+> cannot be recomputed at all: the CONFLICT arm's restage deliberately advances
+> `CI_FIX_LOOP_ITER` (the restage IS a loop iteration, which is what bounds it)
+> while the sidecar keeps the name it was minted under, so the push fence looked
+> for a file nothing had written and aborted the whole arm. The mint fence
+> therefore publishes a fixed-name POINTER (`review_fleet_write_ci_pointer`) to
+> the sidecar it wrote, and every later reader follows it.
+>
+> That rule is FILE-WIDE, not Phase-3-local. `REVIEW_ITERATION` is the other
+> counter this phase advances, and Phase 1 and Phase 2 key their authority,
+> applied-content, sidecar and instance-id names on it — and, through
+> `reviewIteration`, every child directory `workflow.js` derives, since
+> `childDirAbs()` keys on that argument alone. Those fences were left binding it
+> from their own `${REVIEW_ITERATION:-1}` on the grounds that they "run once".
+> They do not: this phase re-enters them. A fence that inherited nothing got
+> `review_fleet_child_dir` rc=2 and the re-entry loop could not complete a second
+> pass; one that inherited a stale `1` rebound pass 2 onto pass 1's `result.md`
+> paths and froze STALE bytes with every equality still passing — a clean green
+> built on the previous iteration's evidence. Both counters now come from
+> `review_fleet_load_ci_counters`, in the same fence that keys on them.
 >
 > **Two numbers, not one, for the conflict fanout.**
 > `fanout_concurrency.conflict_resolver` is a CONCURRENCY knob — its documented
 > behaviour is "split into `ceil(N / cap)` sequential waves" — so it is the wave
 > size and nothing else. The TOTAL ceiling on auto-resolvable conflicted files is
 > its own constant (`REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP`, 50, matching the
-> engine's own clamp).
+> engine's own clamp). Forwarding the knob as the total made an 11-conflict PR
+> refuse with zero resolvers dispatched.
 >
 > **One authority per resolver means one authority per resolver's PROMPT.** The
 > envelope carries an authority-path PREFIX to which the engine appends the
 > resolver's own index; it carries no digest at all, because a per-resolver
 > digest cannot be forwarded as one scalar and the controller re-checks each one
-> itself when it judges.
+> itself when it judges. A single shared scalar told N-1 of N resolvers that
+> their controller-blessed scope was somebody else's file.
 >
 > **The CONFLICT terminal owes a residue proof too.** It cannot be
 > `_require_clean_worktree` — a conflicted rebase has unmerged index entries by
-> construction — but it is untracked-confinement plus "no tracked path whose
-> worktree differs from the index outside the unmerged set".
+> construction — but it can be, and now is, untracked-confinement plus "no
+> tracked path whose worktree differs from the index outside the unmerged set".
+> Without it the CONFLICT path was the only mutating CI terminal with no
+> worktree proof at all before the leased force-push. (The BINARY refusal that
+> pairs with it is stated once, above, with the marker-scan rationale it comes
+> from.)
 >
 > Status stays **Draft**.
 

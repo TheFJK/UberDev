@@ -267,12 +267,9 @@ fence_has() {  # FILE TOKEN NEEDLE LABEL
   if grep -Fq "$3" <<<"$body"; then pass "$4"; else fail "$4"; fi
 }
 
-# review-pr.md: four stages (fix runs twice, on two different edges).
-# The four Phase 3 CI stages are NOT here: #383 half one shipped the engine and
-# left `commands/review-pr.md` on its pre-existing Phase 3, so no command fence
-# emits `stage=ci-*` yet. The stages themselves are executed by section W below;
-# these rows read the CALLER, and the caller has nothing to read yet.
-for stage_token in 'stage=review' 'fixerEdgeId=review_pr.fix.phase1' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer'; do
+# review-pr.md: four stages (fix runs twice, on two different edges) plus the
+# four Phase 3 CI stages (#383).
+for stage_token in 'stage=review' 'fixerEdgeId=review_pr.fix.phase1' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer' 'stage=ci-classify' 'stage=ci-fix' 'stage=ci-conflicts' 'stage=ci-defer'; do
   label="review-pr.md [$stage_token]"
   fence_has "$REVIEW_CMD" "$stage_token" "$GUARD" "G1 $label carries the RFC 0012 §4.1 existence guard"
   fence_has "$REVIEW_CMD" "$stage_token" 'mkdir -p "$REVIEW_FLEET_RUN_DIR/children"' "G2 $label makes the per-child layout root"
@@ -383,23 +380,40 @@ else
   pass "G13b the nonce mint never reaches for \$RANDOM or a timestamp"
 fi
 
-# G14 — Phase 3 has no workflow transport, and that boundary must be DECLARED
-# rather than discovered at runtime as an opaque provider-arm error.
-# The gate must live INSIDE the CLASSIFY fence: that block is extracted and run
-# on its own by two other fixtures, so a gate in a neighbouring fence is a gate
-# they run without.
-#
-# STILL ASSERTED AFTER #383 half one, deliberately. That PR shipped the engine
-# (four `ci-*` stages, their producer, capture verb and judges) and did NOT
-# re-point `commands/review-pr.md` at it, so the inline refusal is still exactly
-# what a red-CI PR gets. Inverting this row before the wiring lands would assert
-# a capability the release does not have.
-CLASSIFY_FENCE="$(extract_fence "$REVIEW_CMD" 'review_pr.ci.classify \' || true)"
-if grep -Fq 'ci_transport_unsupported' <<<"$CLASSIFY_FENCE" \
-   && grep -Fq '"${UBERDEV_CARRIER_BACKEND:-}" = workflow' <<<"$CLASSIFY_FENCE"; then
-  pass "G14 the Phase 3 transport boundary is inline in the CLASSIFY fence, before the routed dispatch"
+# G14 — INVERTED (#383). This used to LOCK the refusal that made a red PR halt:
+# it asserted the inline `ci_transport_unsupported` gate lived inside the
+# CLASSIFY fence. Leaving it asserting the gate it retires is exactly the trap
+# that keeps a retired surface alive, so it now asserts the opposite in three
+# independent ways.
+for target in "$REVIEW_CMD" "$SKILL" "$DISPATCH"; do
+  base="$(basename "$target")"
+  if grep -Fq 'ci_transport_unsupported' "$target"; then
+    # SKILL.md's gate log keeps the reason as HISTORY inside its "Was (#381)"
+    # block; that is the one place it may still be named.
+    if [ "$target" = "$SKILL" ] && grep -Fq 'Was (#381)' "$target"; then
+      pass "G14a $base names ci_transport_unsupported only in the historical gate-log entry"
+    else
+      fail "G14a $base still carries the retired ci_transport_unsupported refusal"
+    fi
+  else
+    pass "G14a $base no longer carries the retired ci_transport_unsupported refusal"
+  fi
+done
+
+# G14b — the CLASSIFY step now EMITS a stage instead of refusing one, and the
+# routed single-child dispatch is gone from every Phase 3 edge.
+CLASSIFY_FENCE="$(extract_fence "$REVIEW_CMD" 'stage=ci-classify' || true)"
+if grep -Fq 'uberdev_emit_workflow_args review-fleet' <<<"$CLASSIFY_FENCE" \
+   && grep -Fq 'review_fleet_bind_ci review_pr.ci.classify ' <<<"$CLASSIFY_FENCE" \
+   && ! grep -Fq 'review_child_single' <<<"$CLASSIFY_FENCE"; then
+  pass "G14b the CLASSIFY step binds a CI child and emits a review-fleet envelope"
 else
-  fail "G14 review-pr would dispatch a routed CI child on a backend with no provider arm"
+  fail "G14b the CLASSIFY step does not dispatch through the review-fleet engine"
+fi
+if grep -Eq 'review_child_single review_pr\.ci\.' "$REVIEW_CMD"; then
+  fail "G14b2 a Phase 3 edge still takes the routed adapter, which has no workflow provider arm"
+else
+  pass "G14b2 no Phase 3 edge takes the routed adapter any more"
 fi
 
 # G14c — PHANTOM-NAME LOCK. #382's review caught a doc naming a

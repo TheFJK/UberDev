@@ -22,7 +22,7 @@ Every heavy uberdev pipeline today is a **directive-emitter**: the `SKILL.md` ba
 1. **Fence-scoped shell state death.** Each bash fence is a fresh process; `trap EXIT`, PID stamps, exports and arrays die at fence end:
    - the `/merge` single-instance lock is void — next run's `kill -0` sees the dead fence PID and steals it (merge-pipeline `Step 1.1 — Acquire the single-instance lock`, #303);
    - `/goal` Phase-3 builds `new_candidates` in the candidate-query fence and loses it before the terminal-gate fence reads it → **false converge with BLOCKER findings still open** (#301 CRITICAL);
-   - historically, `/review-pr`'s locked marker + EXIT trap lived milliseconds (the marker write that is now `review_reserve_run_directory` in the `### Executable setup` fence, #302); the directive fallback now carries marker authority across shells in an identity/digest receipt, while the `EXPECTED_OLD_SHA` force-push lease still splits across fences (its capture in the Step-6c CONFLICT arm vs. the later `--force-with-lease` push fence);
+   - historically, `/review-pr`'s locked marker + EXIT trap lived milliseconds (the marker write that is now `review_reserve_run_directory` in the `### Executable setup` fence, #302); the directive fallback now carries marker authority across shells in an identity/digest receipt, while the Phase-3 force-push lease still splits across fences (its capture in Step 6c.4 ROUTE vs. the later `--force-with-lease` push fence — now carried between them in a digest-pinned CI authority rather than in a shell variable, #383);
    - `/testers`' `POLITE_BREACH` fail-the-run contract can never fire (the testers-pipeline breach gate, #306).
 2. **zsh/bash divergence.** The Bash tool runs `/bin/zsh` on macOS:
    - `ARR=($VAR)` scalar-split both scan wave loops into one garbage element (the uberscan and ubersimplify chunk-id wave loops, #305) — the replacement fans out one `areaPrompt` per area inside `skills/scan-fleet/workflow.js`, so the shell array is gone rather than patched;
@@ -140,20 +140,21 @@ Claude Code now ships the **Workflow tool ("ultracode")**: a deterministic backg
            "conflictWave":10, "maxNew":10, "settleReprobes":3, "settleAgeSec":120, "fanoutCap":6} }
 ```
 
-> **AMENDED 2026-08-06 (issue #383, half one) — the Phase 3 ENGINE is built.
+> **AMENDED 2026-08-06 / 2026-08-07 (issue #383) — Phase 3 is BUILT and WIRED.
 > The pseudocode below is the original proposal and is retained as history; five
 > of its moves were REJECTED during implementation. Read this block before
 > treating any line of it as a specification.**
 >
-> **Scope of #383 half one.** It ships the ENGINE only: four stages in
+> **#383 landed in two halves, and the split is worth recording.** Half one
+> (2026-08-06) shipped the ENGINE: four stages in
 > `skills/review-fleet/workflow.js` plus their contract surface in
-> `lib/code_fixer_contract.py`. `commands/review-pr.md` is NOT re-pointed at
-> them — its Phase 3 still halts loudly on a red check with
-> `ci_transport_unsupported`, and `--no-ci-fix` is still the supported mode.
-> Wiring the fences is a separate change, because no test in this repo executes
-> a `review-pr.md` fence: the engine could be verified by execution and the
-> wiring could not, so shipping them together would have hidden the wiring's
-> defects behind the engine's green suite.
+> `lib/code_fixer_contract.py`, deliberately UNCALLED. Half two (2026-08-07)
+> re-pointed `commands/review-pr.md` at them and deleted the
+> `ci_transport_unsupported` halt; `--no-ci-fix` survives as an opt-out. They
+> shipped separately because no test in this repo executes a `review-pr.md`
+> fence: the engine could be verified by execution and the wiring could not, so
+> shipping them together would have hidden the wiring's defects behind the
+> engine's green suite.
 >
 > 1. **The script is `skills/review-fleet/workflow.js`**, not
 >    `skills/review-pr/workflow.js` — one engine serves `/review-pr` and

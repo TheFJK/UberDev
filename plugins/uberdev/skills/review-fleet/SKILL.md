@@ -26,19 +26,17 @@ two-command precedent.
 > resolves to for `/review-pr` and `/simplify` — unconditionally, on every host.
 > `--backend=codex` is an **enum error** since #381 step 4 deleted the backend
 > (`lib/dispatch.sh:509`); it is not an escape hatch for anything. The one
-> declared gap — /review-pr Phase 3 — has **no backend to re-run with**, and
-> `--no-ci-fix` is its supported mode. See the bottom of this log.
+> declared gap — /review-pr Phase 3 — was CLOSED by #383: its five
+> `review_pr.ci.*` children are dispatched by this script as the `ci-classify`,
+> `ci-fix`, `ci-conflicts` and `ci-defer` stages. See the bottom of this log.
 >
-> **#383 half one — the ENGINE for Phase 3 ships here, the caller does not use
-> it yet.** This script now carries four more stages (`ci-classify`, `ci-fix`,
-> `ci-conflicts`, `ci-defer`) and `lib/code_fixer_contract.py` carries their
-> producer, capture verb and judges. **`commands/review-pr.md` does not call
-> them.** Its Phase 3 is byte-for-byte what it was: PROBE, MONITOR, CLASSIFY
-> telemetry and then the same loud `ci_transport_unsupported` halt on a red
-> check. Nothing about /review-pr's behaviour changed in this PR. The fence
-> wiring — and the tests that pin it — land in the follow-up; until then treat
-> every Phase 3 row below as *the engine's contract*, not as *what the command
-> does today*.
+> **#383 shipped in two halves.** Half one added the four stages
+> (`ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer`) to this script and their
+> producer, capture verb and judges to `lib/code_fixer_contract.py`, without
+> re-pointing the caller — so for that one release the Phase 3 rows below were
+> the engine's contract rather than what the command did. Half two removed the
+> `ci_transport_unsupported` gate and wired `commands/review-pr.md`'s Phase 3
+> fences at them, so every row below is now both.
 >
 > All five caller obligations have landed in `commands/review-pr.md` (stages
 > `review`, `fix` ×2, `simplify`, `defer`) and `commands/simplify.md` (stages
@@ -170,43 +168,42 @@ two-command precedent.
 >   per-OS matrix drifted back into default paths exactly that way. The same gate
 >   guards explicit `--backend=workflow` and `uberdev_dispatch_preflight_backend`,
 >   so all three refuse identically instead of at three different stages.
-> - ⚠️ **BREAKING (#381) — /review-pr Phase 3 CI classification and the CI
->   fixers are UNAVAILABLE. There is no longer any transport that can run
->   them.** `review_pr.ci.classify`, `review_pr.ci.fix_code`,
->   `review_pr.ci.rebase`, `review_pr.ci.defer_refusal` and the conflict-resolver
->   fanout are routed children, and `_uberdev_agent_dispatch_backend` has no
->   `workflow` provider arm by construction (`lib/dispatch.sh`). Phase 3 is
->   deliberately not dispatched from this script (see "Not built in P2").
+> - ✅ **RESOLVED (#383) — /review-pr Phase 3 CI classification and the CI
+>   fixers are BACK, Workflow-natively.** The entry below is kept as HISTORY,
+>   not as current state: the gate log records what was true when it was
+>   written, and deleting it would lose why the capability ever went away.
 >
->   Since #381 step 3 the workflow transport is what `auto` resolves to, so this
->   gate is on the DEFAULT path, not an opt-in corner. Step 4 then deleted the
->   `codex` backend, which was the ONLY transport with a provider arm for
->   `review_pr.ci.*` — so the escape hatch this gate used to name is gone with
->   it. `--backend=wezterm` and `--backend=background` are not substitutes:
->   /review-pr refuses both in `uberdev_dispatch_preflight_backend` because
->   neither publishes a governed child result artifact.
+>   **Was (#381):** `review_pr.ci.classify`, `review_pr.ci.fix_code`,
+>   `review_pr.ci.rebase`, `review_pr.ci.defer_refusal` and the
+>   conflict-resolver fanout were routed children, and
+>   `_uberdev_agent_dispatch_backend` has no `workflow` provider arm by
+>   construction. Step 3 made `workflow` what `auto` resolves to and step 4
+>   deleted `codex` — the only transport that ever had an arm for those edges —
+>   so a red check halted at 6c.3 CLASSIFY with
+>   `subreason=ci_transport_unsupported`, and `--no-ci-fix` was the supported
+>   mode.
 >
->   **`--no-ci-fix` is the supported mode** until Phase 3 is rebuilt
->   Workflow-natively (RFC 0012 §3.1). Under it the probe is telemetry only,
->   dispatches no child, and the review completes normally.
+>   **Is (#383):** those five edges are dispatched by THIS script, as four
+>   stages — `ci-classify`, `ci-fix`, `ci-conflicts`, `ci-defer` — so nothing in
+>   Phase 3 reaches the routed adapter, for the same reason nothing in Phase 1
+>   or Phase 2 does. The inline gate is deleted and the
+>   `ci_transport_unsupported` reason no longer exists anywhere in the plugin.
+>   `--no-ci-fix` survives as a legitimate opt-out (probe/monitor/classify for
+>   telemetry, ROUTE/POST-FIX/HALT skipped) and is now **enforced in shell** at
+>   the head of the ROUTE fence rather than being orchestrator prose with no
+>   reader anywhere in the file.
 >
->   Without it, a **green** probe still completes normally and reaches the trust
->   anchor; a **red** probe halts loudly at 6c.3 CLASSIFY. The gate is the inline
->   `if` in the CLASSIFY fence — there is no named helper — and it audits
->   `ci_classify_returned subreason=ci_transport_unsupported`. That is a named
->   refusal, not a silent degradation, but it is a capability the release no
->   longer has, not a configuration the operator can fix.
+>   New contract surface, all in `lib/code_fixer_contract.py`:
+>   `prepare-ci-authority`, `bind-workflow-ci-launch`, `capture-ci-terminal`,
+>   `read-ci-authority-member`, `validate-ci-classification`,
+>   `validate-ci-mutation-outcome`, `validate-ci-persistence-result`. The CI
+>   edges got their OWN producer and their OWN capture verb rather than joining
+>   `WORKFLOW_BOUND_EDGE_IDS` — see the design note above.
 >
->   **#383 half one narrows the remaining work without lifting this gate.** The
->   four CI stages below EXIST in this script and their contract surface exists
->   in `lib/code_fixer_contract.py`; both are exercised by
+>   The executable proofs for both halves are
 >   `tests/review-pr-workflow.test.sh` (section W runs every stage, E6 drives the
 >   conflict fanout at its ceiling, E7 executes the CI binders) and
->   `tests/code-fixer-contract.test.sh` (real git repos, real conflicts). What is
->   still missing is the caller: `commands/review-pr.md` has not been re-pointed
->   at them, so the inline gate above is still the live behaviour and
->   `--no-ci-fix` is still the supported mode. When the wiring lands, this entry
->   becomes history and that sentence is the one to delete.
+>   `tests/code-fixer-contract.test.sh` (real git repos, real conflicts).
 
 ---
 
@@ -249,17 +246,9 @@ optimisation — it is the deletion of a proof.**
 | `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md:341-348`) → `digest` → `prepare-authority` |
 | `defer` | ONE `findings-to-issues` child | halt handling (`AskUserQuestion`), then the GREEN/YELLOW/RED predicate |
 | `ci-classify` | ONE `ci-failure-classifier` child | `capture-ci-terminal` → `validate-ci-classification` (closed class enum, class/anchor pairing, anchor names a REAL repository file) → the routing scalar the mutating arm keys on |
-| `ci-fix` | ONE `ci-code-fixer` **or** `ci-rebase-handler` child | `capture-ci-terminal` → `validate-ci-mutation-outcome` (parent identity, one commit, subject form, anchor+one-lockfile scope for `fix_code`; head moved, base is ancestor, **remote tip still equals the pinned lease**, and `CONFLICT` when the child left a live rebase with unmerged paths, for `rebase`) → on `APPLIED`/`REBASED`, ONE controller-held `--force-with-lease` push |
-| `ci-conflicts` | N `conflict-resolver` children, one per conflicted path | `capture-ci-terminal` + `validate-ci-mutation-outcome` per resolver (worktree carries no conflict markers — the resolver is forbidden `git add`, so the index is legitimately still unmerged here) → `git add` → `git rebase --continue` → **the same single leased push**, re-run |
+| `ci-fix` | ONE `ci-code-fixer` **or** `ci-rebase-handler` child | `capture-ci-terminal` → `validate-ci-mutation-outcome` (parent identity, one commit, subject form, anchor+one-lockfile scope for `fix_code`; head moved, base is ancestor, **remote tip still equals the pinned lease**, and `CONFLICT` when the child left a live rebase with unmerged paths, for `rebase`) → on `APPLIED`/`REBASED`, the single controller-held `--force-with-lease` push at `commands/review-pr.md` **6c.4w.3** |
+| `ci-conflicts` | N `conflict-resolver` children, one per conflicted path | `capture-ci-terminal` + `validate-ci-mutation-outcome` per resolver (worktree carries no conflict markers — the resolver is forbidden `git add`, so the index is legitimately still unmerged here) → `git add` → `git rebase --continue` → **the same 6c.4w.3 leased-push fence**, re-run |
 | `ci-defer` | ONE `findings-to-issues` child | `capture-ci-terminal` → `validate-ci-persistence-result` → the CI-REFUSED halt prose and audit |
-
-> **The four `ci-*` rows are the ENGINE's contract, not today's caller
-> behaviour.** `commands/review-pr.md` has not been re-pointed at them yet
-> (#383 half one shipped the engine; the fence wiring is the follow-up), so the
-> "calling-session Bash then proves" column describes the obligations the caller
-> will owe, and the tests that hold it to them ship with the wiring. The stages
-> themselves are executed today by `tests/review-pr-workflow.test.sh` section W
-> and their contract verbs by `tests/code-fixer-contract.test.sh`.
 
 ### What the script deliberately does **not** do
 
@@ -375,19 +364,14 @@ the pairing is checked, and a mismatch aborts before dispatch),
 because no Phase 1 ran (`commands/simplify.md:547`) — that is a declared value,
 not a missing one, and the script only enforces its presence in `review-pr` mode.
 
-### Phase 3 CI stages (#383) — engine contract, caller not yet wired
+### Phase 3 CI stages (#383)
 
-The keys below are read by the four `ci-*` stages in `workflow.js` and minted by
-`lib/review-fleet-args.sh`. **No command file emits them yet** — `/review-pr`'s
-Phase 3 is unchanged in this PR — so this table is the contract the wiring will
-have to satisfy, and the executable proofs are `tests/review-pr-workflow.test.sh`
-section W (every stage run for real), section E6 (the conflict fanout driven at
-its ceiling and one past it) and section E7 (the CI binders executed against the
-real contract), plus `tests/code-fixer-contract.test.sh`. The classifier
-predicate also has a second copy — the python heredoc still live in
-`commands/review-pr.md` — and `tests/review-pr-phase3-ci.test.sh` S10.14c is the
-comparator that keeps the two byte-equal in verdict; retire it in the same
-commit that deletes the heredoc.
+The keys below are read by the four `ci-*` stages in `workflow.js`, minted by
+`lib/review-fleet-args.sh`, and emitted by `commands/review-pr.md`'s Phase 3
+fences. The executable proofs are `tests/review-pr-workflow.test.sh` section W
+(every stage run for real), section E6 (the conflict fanout driven at its
+ceiling and one past it) and section E7 (the CI binders executed against the
+real contract), plus `tests/code-fixer-contract.test.sh`.
 
 | Key | Stages | Meaning |
 |---|---|---|
@@ -399,7 +383,7 @@ commit that deletes the heredoc.
 | `ciRunId`, `ciHeadSha`, `ciBaseSha` | `ci-fix`, `ci-conflicts` | prompt scalars |
 | `ciPrBranch`, `ciBaseBranch` | `ci-fix`, `ci-conflicts` | gated with `isSafeBindingScalar` |
 | `ciConflictCount` | `ci-conflicts` | the resolver COUNT, never the path list |
-| `ciConflictCap` | `ci-conflicts` | the TOTAL ceiling on the fanout, re-clamped in-script to `min(ciConflictCap, maxAgents)`. The effective number is therefore **40** under the `maxAgents=40` every call site emits, which is what `lib/review-fleet-args.sh`'s `REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP` refuses at on the controller's side. NOT `fanout_concurrency.conflict_resolver` — that key is a concurrency knob, and forwarding it here refuses an 11-conflict PR with zero resolvers dispatched; and NOT `ciConflictCount`'s bare 50 clamp either, because the roster length goes straight into `ceilingGate()` and a cap above `maxAgents` aborts `agent_ceiling` with zero resolvers dispatched. |
+| `ciConflictCap` | `ci-conflicts` | the TOTAL ceiling on the fanout, re-clamped in-script to `min(ciConflictCap, maxAgents)`. The effective number is therefore **40** under the `maxAgents=40` every call site emits — including `commands/review-pr.md`'s CONFLICT-RESOLVE arm — which is what `lib/review-fleet-args.sh`'s `REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP` refuses at on the controller's side. NOT `fanout_concurrency.conflict_resolver` — that key is a concurrency knob, and forwarding it here refuses an 11-conflict PR with zero resolvers dispatched; and NOT `ciConflictCount`'s bare 50 clamp either, because the roster length goes straight into `ceilingGate()` and a cap above `maxAgents` aborts `agent_ceiling` with zero resolvers dispatched. |
 | `ciConflictWave` | `ci-conflicts` | the CONCURRENCY knob (`fanout_concurrency.conflict_resolver`, default 10) handed to `dispatchRoster`, which batches a larger roster into sequential waves |
 | `ciConflictAuthorityPrefixAbs` | `ci-conflicts` | the per-resolver authority pathname MINUS its index: the script appends `<index>.json`, so ONE spelling of the rule crosses the boundary and resolver N is told about resolver N's authority. No digest is carried — a per-resolver digest cannot be forwarded as one scalar, and the controller re-checks each one itself when it judges. |
 | `ciAggregatePathAbs`, `ciAggregateSha256` | `ci-defer` | the one-row `ci-refused-synthetic` aggregate |
@@ -597,17 +581,10 @@ pinned only by harness self-tests.
 `/review-pr` keeps its existing Bash for it, and that phase is not declared in
 `meta.phases`.
 
-**Phase 3 — CI health: the four stages EXIST here, and `/review-pr` still does
-not call them.** #383 half one shipped the engine (four stages, their producer,
-capture verb and judges, all executed by tests); the caller-side fence wiring in
-`commands/review-pr.md` is deliberately NOT in that PR, because no test in this
-repo executes a `review-pr.md` fence, so wiring and engine could not be verified
-by the same evidence. Until the wiring lands, `/review-pr` Phase 3 behaves
-exactly as it did: PROBE, MONITOR, CLASSIFY telemetry, then the loud
-`ci_transport_unsupported` halt on a red check, with `--no-ci-fix` as the
-supported mode.
-
-What will stay behind in Bash even after the wiring, and why, is not a leftover:
+**Phase 3 — CI health was in this section until #383 built it**, in two halves:
+half one shipped the four `ci-*` stages, their producer, capture verb and
+judges, and half two re-pointed `commands/review-pr.md`'s fences at them. What
+stayed behind in Bash, and why, is not a leftover:
 
 - **6c.1 PROBE and 6c.2 MONITOR dispatch no agent.** MONITOR additionally
   *cannot* move: `Date.now()` / `new Date()` throw inside a Workflow script and
@@ -668,9 +645,6 @@ re-implementation.
 8. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
    `ci-refused-synthetic` aggregate, with the three other aggregate/disposition
    inputs declared empty.
-
-Items 5-8 describe the engine's `ci-*` stages, which no command file reaches
-yet; they become live directives when the Phase 3 fence wiring lands.
 
 Between every pair of stages, run the same calling-session Bash the staged table
 above lists. Do not skip a proof because the fanout came from `Task` — the

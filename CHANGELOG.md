@@ -4,6 +4,46 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0] — 2026-08-09
+
+### Changed
+
+- **BREAKING: `/review-pr` Phase 3 now fixes red CI instead of halting on it**
+  (#383, half two). Half one (#393) shipped the Phase 3 CI engine — the five
+  `review_pr.ci.*` contract edges and the four `ci-classify` / `ci-fix` /
+  `ci-conflicts` / `ci-defer` stages — deliberately UNCALLED: a red check still
+  halted at 6c.3 CLASSIFY with `subreason=ci_transport_unsupported`, and
+  `--no-ci-fix` was the supported mode. This retires that gate. A red check now
+  routes to the classifier, and a `code_bug`, `env_drift` or `stale_base`
+  verdict dispatches a real fixer whose commit reaches the PR under ONE leased
+  push.
+
+  This is user-facing and mutating. `/review-pr` on a PR with failing CI may now
+  commit, rebase and force-push to the PR head, where before it refused. Pass
+  `--no-ci-fix` for the previous behaviour.
+
+### Fixed
+
+- **BOTH Phase 3 conflicted-path enumerators now agree with the judge they
+  feed** (#398). `_ci_unmerged_paths` has covered all seven porcelain unmerged
+  pairs since #393, but the CONFLICT-RESOLVE arm carries two `^UU `-only
+  matchers, not one. Step 1 enumerated zero files for an add/add or
+  modify/delete conflict, staged nothing, and failed `git rebase --continue` on
+  the still-unmerged index. Step 3's re-conflict detector had the same blind
+  spot one rebase stage later, and worse: a second-stage conflict counted as
+  zero re-conflicts, so the arm skipped its RESTAGE branch and ran
+  `git rebase --abort`, discarding the stage-1 resolution the resolvers had just
+  produced and reporting `rebase_continue_failed` — the wrong cause. Nothing in
+  `tests/` covers either matcher's pair set, so the suite was green with the bug
+  present.
+
+- **The Phase 3 ceiling test compared the wrong number.** `S28.5` re-derived the
+  engine's conflict cap by grepping for a bare `clampInt(CFG.ciConflictCap, …)`
+  literal. #393 wrapped that clamp in `Math.min(…, maxAgents)` precisely because
+  a cap above `maxAgents` passes the enumerator and is then refused by
+  `ceilingGate()` with zero children dispatched — so the literal comparison
+  could not see the drift it existed to catch, as `workflow.js`'s own comment
+  says. It now reads both defaults and asserts against their minimum.
 ## [0.44.3] — 2026-08-09
 
 ### Fixed

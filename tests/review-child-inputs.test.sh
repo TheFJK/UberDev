@@ -176,16 +176,6 @@ if len(builder_fences) != 1:
     raise SystemExit("review child builder must contain one canonical bash fence")
 write("review-builder.sh", builder_fences[0][1])
 
-write("review-phase1.sh", containing(review, 'PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1'))
-write("review-simplify.sh", containing(review, 'SIMPLIFY_RECORDS="$RESEARCH_DIR_ABS/simplify.records"'))
-write("review-phase2.sh", containing(review, 'PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2'))
-write("review-defer.sh", containing(review, 'DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings'))
-write("review-classify.sh", containing(review, 'CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify'))
-write("review-defer-refusal.sh", containing(review, 'CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal'))
-write("review-conflict.sh", containing(review, 'CONFLICT_RECORDS="$RESEARCH_DIR_ABS/conflicts.records"'))
-
-route = containing(review, 'CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code')
-
 def assignment(block, variable):
     lines = block.splitlines()
     starts = [
@@ -196,31 +186,58 @@ def assignment(block, variable):
         raise SystemExit(f"{variable} constructor occurrence drifted")
     selected = []
     for line in lines[starts[0]:]:
-        selected.append(line.strip())
-        if line.rstrip().endswith(')"'):
+        stripped = line.strip()
+        if stripped.endswith(')"'):
+            selected.append(stripped)
             break
+        # #383: the builders now carry an `|| { audit ...; exit 1; }` failure arm
+        # on the terminating line. Take the constructor and drop the arm -- this
+        # fixture exists to prove the PAYLOAD, and the failure arm is asserted
+        # where it belongs, in tests/review-pr-phase3-ci.test.sh. Anchored on the
+        # arm, never on a bare `)"`, because every interior line of a builder
+        # ends with `)" \` too.
+        armed = re.match(r'^(.*\)")\s*\|\|\s*(?:\{.*\}|return [0-9]+|exit [0-9]+)$', stripped)
+        if armed is not None:
+            selected.append(armed.group(1))
+            break
+        selected.append(stripped)
     else:
         raise SystemExit(f"{variable} constructor terminator missing")
     return "\n".join(selected)
 
-fix_dispatch = re.search(
-    r"^\s*code_bug \| env_drift\)\s*(review_child_single review_pr\.ci\.fix_code .*?)\s*;;$",
+write("review-phase1.sh", containing(review, 'PHASE1_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase1'))
+write("review-simplify.sh", containing(review, 'SIMPLIFY_RECORDS="$RESEARCH_DIR_ABS/simplify.records"'))
+write("review-phase2.sh", containing(review, 'PHASE2_INPUTS="$(uberdev_child_inputs_build review_pr.fix.phase2'))
+write("review-defer.sh", containing(review, 'DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings'))
+write("review-classify.sh", containing(review, 'CI_CLASSIFY_INPUTS="$(uberdev_child_inputs_build review_pr.ci.classify'))
+write("review-defer-refusal.sh", containing(review, 'CI_DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.ci.defer_refusal'))
+conflict_fence = containing(review, 'CONFLICT_INPUTS="$(uberdev_child_inputs_build review_pr.ci.resolve_conflict')
+write("review-conflict.sh", assignment(conflict_fence, "CONFLICT_INPUTS"))
+
+route = containing(review, 'CI_FIX_INPUTS="$(uberdev_child_inputs_build review_pr.ci.fix_code')
+
+# RE-POINTED (#383). The ROUTE arms used to be `review_child_single
+# review_pr.ci.fix_code ...` / `... .rebase ...`; Phase 3 now dispatches through
+# skills/review-fleet/workflow.js, so the arms SELECT an edge and the Workflow
+# stage carries it. The arms are still asserted -- a route that stopped naming
+# its edge would be exactly as broken as one that stopped dispatching -- but
+# against what the file now says.
+fix_arm = re.search(
+    r"^\s*code_bug \| env_drift\)\s*\n\s*CI_FIXER_EDGE_ID=review_pr\.ci\.fix_code$",
     route,
     re.MULTILINE,
 )
-rebase_dispatch = re.search(
-    r"^\s*stale_base\)\s*(review_child_single review_pr\.ci\.rebase .*?)\s*;;$",
+rebase_arm = re.search(
+    r"^\s*stale_base\)\s*\n\s*CI_FIXER_EDGE_ID=review_pr\.ci\.rebase$",
     route,
     re.MULTILINE,
 )
-if fix_dispatch is None or rebase_dispatch is None:
-    raise SystemExit("review CI route dispatch arms drifted")
+if fix_arm is None or rebase_arm is None:
+    raise SystemExit("review CI route arms drifted")
 write(
     "review-ci-builders.sh",
     assignment(route, "CI_FIX_INPUTS") + "\n" + assignment(route, "CI_REBASE_INPUTS"),
 )
-write("review-ci-fix-dispatch.sh", fix_dispatch.group(1))
-write("review-ci-rebase-dispatch.sh", rebase_dispatch.group(1))
 PY
 
 for extracted in "$TMP"/*.sh; do
@@ -890,32 +907,25 @@ wave=()
 ) & wave+=("$!")
 (. "$TMP/review-phase2.sh") & wave+=("$!")
 (. "$TMP/review-defer.sh") & wave+=("$!")
-# RETIRED SURFACE (#381): the Phase 3 CI classify child no longer dispatches.
-# commands/review-pr.md:3305 refuses `review_pr.ci.*` outright once the carrier
-# backend is `workflow` -- and `workflow` is now the ONLY backend
-# uberdev_dispatch_preflight_backend admits for review-pr, so this refusal is
-# unconditional in production. Assert the refusal instead of the dispatch: the
-# builder still has to construct CI_CLASSIFY_INPUTS before reaching the guard,
-# so the input-closure half of this scenario is still exercised.
+# WORKFLOW-NATIVE SURFACE (#383). The Phase 3 CI classify child no longer takes
+# the ROUTED adapter -- it is dispatched by skills/review-fleet/workflow.js as
+# the `ci-classify` stage -- so this fixture asserts the INPUT CLOSURE, which is
+# what the routed dispatch used to prove, and nothing about a handoff production
+# no longer writes. The receipt closure below independently requires that the
+# edge emits a `build` receipt and NEVER a handoff, dispatch or lifecycle row.
 #
-# That closure is the payload the retired dispatch used to prove, so capture it
-# on the way out. The extracted fence `exit 1`s at the guard, which terminates
-# the command-substitution subshell -- an EXIT trap set inside that subshell is
-# the only place CI_CLASSIFY_INPUTS is still in scope. The exact payload is then
-# asserted below against this capture instead of against a handoff that
-# production no longer writes, so no assertion is lost to the retirement.
+# The builder is captured on the way out through an EXIT trap: the extracted
+# fence runs inside a command-substitution subshell, and that trap is the only
+# place CI_CLASSIFY_INPUTS is still in scope.
 CLASSIFY_INPUTS_CAPTURE="$TMP/ci-classify-inputs.json"
 (
   set +e
-  CLASSIFY_REFUSAL="$(
+  CLASSIFY_OUTPUT="$(
     trap 'printf "%s" "${CI_CLASSIFY_INPUTS-}" >"$CLASSIFY_INPUTS_CAPTURE"' EXIT
     . "$TMP/review-classify.sh" 2>&1
   )"
-  CLASSIFY_RC=$?
   set -e
-  [ "$CLASSIFY_RC" -ne 0 ] || { echo "review-classify: CI classify dispatched despite the #381 transport gap" >&2; exit 1; }
-  grep -Fq 'Phase 3 CI classification and the CI fixers are UNAVAILABLE (BREAKING, #381)' <<<"$CLASSIFY_REFUSAL"     || { echo "review-classify: refused without the documented BREAKING diagnostic: $CLASSIFY_REFUSAL" >&2; exit 1; }
-  [ -s "$CLASSIFY_INPUTS_CAPTURE" ] || { echo 'review-classify: refused before building the CI classify input closure' >&2; exit 1; }
+  [ -s "$CLASSIFY_INPUTS_CAPTURE" ] || { echo "review-classify: never built the CI classify input closure: $CLASSIFY_OUTPUT" >&2; exit 1; }
 ) & wave+=("$!")
 review_wait_jobs "${wave[@]}"
 PHASE1_AUTHORITY_FIXTURE="$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter7.json"
@@ -1043,12 +1053,24 @@ printf 'replacement classifier says env_drift at package-lock.json:1\n' \
 
 CI_BASE_SHA=$'base "quoted" \\sha*?[x]\t'
 . "$TMP/review-ci-builders.sh"
+CI_FIX_INPUTS_CAPTURE="$TMP/ci-fix-inputs.json"
+CI_REBASE_INPUTS_CAPTURE="$TMP/ci-rebase-inputs.json"
+CI_DEFER_INPUTS_CAPTURE="$TMP/ci-defer-inputs.json"
+CONFLICT_INPUTS_CAPTURE="$TMP/ci-conflict-inputs.json"
+export CI_FIX_INPUTS_CAPTURE CI_REBASE_INPUTS_CAPTURE CI_DEFER_INPUTS_CAPTURE CONFLICT_INPUTS_CAPTURE
+printf '%s' "$CI_FIX_INPUTS" >"$CI_FIX_INPUTS_CAPTURE"
+printf '%s' "$CI_REBASE_INPUTS" >"$CI_REBASE_INPUTS_CAPTURE"
 
 conflicted_files=("$CONFLICT_PATH")
 REPO_ROOT="$MUTATION_WORKTREE"
 pr_head_branch=$'feature/"quoted"\\branch*?[x]\t'
 base_branch=$'main-"quoted"\\branch*?[x]\t'
 BASE_SHA=$'conflict-base-"quoted"\\sha*?[x]\t'
+# #383: the CONFLICT arm now reads the refs the ROUTE fence bound, so the
+# fixture binds the production names. The hostile values are unchanged -- the
+# point of this oracle is that quoting/tabs/globs survive the projection.
+CI_PR_HEAD_BRANCH="$pr_head_branch"
+CI_BASE_BRANCH="$base_branch"
 
 wave=()
 (
@@ -1056,10 +1078,20 @@ wave=()
   FOCUS=
   . "$TMP/review-simplify.sh"
 ) & wave+=("$!")
-(. "$TMP/review-ci-fix-dispatch.sh") & wave+=("$!")
-(. "$TMP/review-ci-rebase-dispatch.sh") & wave+=("$!")
-(. "$TMP/review-defer-refusal.sh") & wave+=("$!")
-(. "$TMP/review-conflict.sh") & wave+=("$!")
+# #383: the five review_pr.ci.* edges BUILD their input closure here and are
+# dispatched by the Workflow engine, not by review_child_single. The builders
+# still run -- that is the payload oracle this file exists for -- and the
+# receipt closure below requires each one to emit a `build` receipt and NO
+# handoff, dispatch, provider call or lifecycle row.
+(
+  trap 'printf "%s" "${CI_DEFER_INPUTS-}" >"$CI_DEFER_INPUTS_CAPTURE"' EXIT
+  . "$TMP/review-defer-refusal.sh"
+) & wave+=("$!")
+(
+  CONFLICT_PATH="${conflicted_files[0]}"
+  trap 'printf "%s" "${CONFLICT_INPUTS-}" >"$CONFLICT_INPUTS_CAPTURE"' EXIT
+  . "$TMP/review-conflict.sh"
+) & wave+=("$!")
 review_wait_jobs "${wave[@]}"
 REVIEW_ITERATION=7
 FOCUS="$FOCUS_PRESENT"
@@ -1118,10 +1150,6 @@ review_cases = (
     ("review_pr.simplify.efficiency", f"review-pr-{run_id}-simplify-efficiency-iter8-attempt01"),
     ("review_pr.fix.phase2", f"review-pr-{run_id}-fix-phase2-iter7-attempt01"),
     ("review_pr.defer.findings", f"review-pr-{run_id}-defer-findings-iter7-attempt01"),
-    ("review_pr.ci.fix_code", f"review-pr-{run_id}-ci-fix-iter3-attempt01"),
-    ("review_pr.ci.rebase", f"review-pr-{run_id}-ci-rebase-iter3-attempt01"),
-    ("review_pr.ci.defer_refusal", f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01"),
-    ("review_pr.ci.resolve_conflict", f"review-pr-{run_id}-conflict-1-iter3-attempt01"),
 )
 for edge, instance in review_cases:
     expect(review_source, edge, instance)
@@ -1132,17 +1160,25 @@ for edge, instance in review_cases:
 # transport gate at :3305 refuse. So the edge keeps a source/edge pair the
 # receipt closure below still REQUIRES to be present, while owning no instance:
 # no handoff, no dispatch, no provider call, no lifecycle row. Every one of
-# those absences is asserted -- `retired_edge` immediately below for the
+# those absences is asserted -- `retired_edges` immediately below for the
 # receipts and handoff files, and `expected.get(instance)` in validate_provider
 # / validate_lifecycle, which admit only instances in `expected`.
-retired_edge = "review_pr.ci.classify"
-build_only_pairs = {(review_source, retired_edge)}
+retired_edges = {
+    "review_pr.ci.classify",
+    "review_pr.ci.fix_code",
+    "review_pr.ci.rebase",
+    "review_pr.ci.defer_refusal",
+    "review_pr.ci.resolve_conflict",
+}
+build_only_pairs = {(review_source, edge) for edge in retired_edges}
 
 expected_pairs = set(expected.values()) | build_only_pairs
-if len(expected_pairs) != 17 or len(expected) != 21:
+if len(expected_pairs) != 17 or len(expected) != 17:
     raise SystemExit("invalid receipt expectation fixture")
-if any(edge == retired_edge for _, edge in expected.values()):
-    raise SystemExit(f"retired edge must own no dispatching instance: {retired_edge}")
+if any(edge in retired_edges for _, edge in expected.values()):
+    raise SystemExit(
+        f"retired edges must own no dispatching instance: {sorted(retired_edges)}"
+    )
 
 handoff_root = Path(handoff_dir)
 actual_files = {path.stem: path for path in handoff_root.glob("*.json")}
@@ -1152,12 +1188,12 @@ if set(actual_files) != set(expected):
     )
 retired_handoffs = sorted(
     str(path) for path in handoff_root.glob("*.json")
-    if json.loads(path.read_text(encoding="utf-8")).get("edge_id") == retired_edge
+    if json.loads(path.read_text(encoding="utf-8")).get("edge_id") in retired_edges
 )
 if retired_handoffs:
     raise SystemExit(
-        f"retired surface regressed: {retired_edge} reached a handoff despite the "
-        f"#381 transport gate: {retired_handoffs!r}"
+        f"routed surface regressed: a review_pr.ci.* edge reached a routed handoff, "
+        f"but Phase 3 dispatches through the Workflow engine (#383): {retired_handoffs!r}"
     )
 
 expected_correlated = Counter()
@@ -1211,21 +1247,24 @@ def validate_receipts(candidate_rows):
         target = handoff if event == "handoff" else dispatch
         target[(source, edge, instance, digest)] += 1
 
-    # Inverted expectation for the #381-retired edge: its input closure MUST
-    # still run (>=1 build receipt) and it MUST NOT reach a terminal receipt.
-    retired_builds = [
-        row for row in candidate_rows
-        if row["edge_id"] == retired_edge and row["event"] == "build"
-    ]
-    retired_terminals = [
-        row for row in candidate_rows
-        if row["edge_id"] == retired_edge and row["event"] != "build"
-    ]
-    assert retired_builds, f"retired edge lost its input closure: {retired_edge}"
-    assert not retired_terminals, (
-        f"retired surface regressed: {retired_edge} emitted a terminal receipt: "
-        f"{retired_terminals!r}"
-    )
+    # Inverted expectation for every review_pr.ci.* edge (#383): each one's
+    # input closure MUST still run (>=1 build receipt) and NONE of them may
+    # reach a terminal receipt, because Phase 3 dispatches through the Workflow
+    # engine rather than through the routed adapter.
+    for retired_edge in sorted(retired_edges):
+        retired_builds = [
+            row for row in candidate_rows
+            if row["edge_id"] == retired_edge and row["event"] == "build"
+        ]
+        retired_terminals = [
+            row for row in candidate_rows
+            if row["edge_id"] == retired_edge and row["event"] != "build"
+        ]
+        assert retired_builds, f"routed edge lost its input closure: {retired_edge}"
+        assert not retired_terminals, (
+            f"routed surface regressed: {retired_edge} emitted a terminal receipt: "
+            f"{retired_terminals!r}"
+        )
 
     assert actual_pairs == expected_pairs and len(actual_pairs) == 17, (
         f"unique source/edge closure mismatch: expected={expected_pairs!r} "
@@ -1530,8 +1569,26 @@ if classify_actual != classify_expected:
         f"payload mismatch for review_pr.ci.classify: expected={classify_expected!r} "
         f"actual={classify_actual!r}"
     )
-exact(
-    f"review-pr-{run_id}-ci-fix-iter3-attempt01",
+# The other four review_pr.ci.* edges are asserted the same way, and for the
+# same reason (#383): they are dispatched by skills/review-fleet/workflow.js, so
+# no ROUTED handoff exists to read. The PAYLOAD oracle is what this file is for,
+# and it is unchanged -- hostile quoting, tabs, backslashes and globs still have
+# to survive the projection byte-for-byte.
+def exact_capture(edge, capture_key, expected):
+    path = Path(env[capture_key])
+    if not path.is_file() or not path.read_text(encoding="utf-8"):
+        raise SystemExit(f"{edge}: builder never produced an input closure")
+    actual = json.loads(path.read_text(encoding="utf-8"))
+    if actual != expected:
+        raise SystemExit(
+            f"payload mismatch for {edge}: expected={expected!r} actual={actual!r}"
+        )
+    routed = handoff_root / f"review-pr-{run_id}-{edge.rsplit('.', 1)[1]}.json"
+    if routed.exists():
+        raise SystemExit(f"routed surface regressed: {edge} reached a routed handoff")
+
+exact_capture(
+    "review_pr.ci.fix_code", "CI_FIX_INPUTS_CAPTURE",
     {
         "failure_class": env["failure_class"],
         "signal_anchor": env["signal_anchor"],
@@ -1541,8 +1598,8 @@ exact(
         "pr_number": 73,
     },
 )
-exact(
-    f"review-pr-{run_id}-ci-rebase-iter3-attempt01",
+exact_capture(
+    "review_pr.ci.rebase", "CI_REBASE_INPUTS_CAPTURE",
     {
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
@@ -1550,22 +1607,22 @@ exact(
         "base_sha": env["CI_BASE_SHA"],
     },
 )
-exact(
-    f"review-pr-{run_id}-ci-defer-refusal-iter3-attempt01",
+exact_capture(
+    "review_pr.ci.defer_refusal", "CI_DEFER_INPUTS_CAPTURE",
     {
         "phase1_path": str(Path(env["POST_FINAL"]).parent / "ci-refused-synthetic-3.md"),
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_number": 73,
     },
 )
-exact(
-    f"review-pr-{run_id}-conflict-1-iter3-attempt01",
+exact_capture(
+    "review_pr.ci.resolve_conflict", "CONFLICT_INPUTS_CAPTURE",
     {
         "file_path": env["CONFLICT_PATH"],
         "working_dir": env["MUTATION_WORKTREE"],
         "pr_branch": env["pr_head_branch"],
         "integration_branch": env["base_branch"],
-        "base_sha": env["BASE_SHA"],
+        "base_sha": env["CI_BASE_SHA"],
     },
 )
 
@@ -1794,4 +1851,4 @@ SH
   [ "$EARLY_PROBE_FAILURES" -eq 0 ] || exit 1
 fi
 
-printf 'review-child-inputs: PASS (17 unique source/edge pairs; 21 complete chains + 1 build-only retired edge, dual simplify focus, lifecycle closed)\n'
+printf 'review-child-inputs: PASS (17 unique source/edge pairs; 17 complete chains + 5 build-only review_pr.ci.* edges, dual simplify focus, lifecycle closed)\n'

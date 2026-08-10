@@ -1024,6 +1024,105 @@ fi
 rm -rf "$POST_REVIEW_APPEND_TMP"
 
 echo
+echo "== RI: every fence keyed on REVIEW_ITERATION reads it off disk =="
+# This skill is dispatched BY /review-pr Phase 1, and Phase 3 re-enters Phase 1
+# after a CI fix push. Both fences here bound the counter from their own
+# `${REVIEW_ITERATION:-1}`, so pass 2 minted its six children -- and its repair
+# children -- under pass 1's `…-iter1-attempt01` / `-attempt02` instance ids.
+# The counter is not this skill's to default: `uberdev_command_workspace_prepare`
+# exports RESEARCH_DIR_ABS for the PARENT run id, so ci-loop-state.json here is
+# the same file /review-pr wrote, and the shared reader is the one source.
+RI_VERDICT="$(python3 - "$POST_IMPL" <<'PY_RI'
+import re, sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+fences, current = [], None
+for line in lines:
+    if re.match(r"^[ \t]*```bash\b", line) and current is None:
+        current = []
+        continue
+    if current is not None and re.match(r"^[ \t]*```[ \t]*$", line):
+        fences.append("\n".join(current))
+        current = None
+        continue
+    if current is not None:
+        current.append(line)
+
+# COMMENT-STRIPPED, the S27 precedent in tests/review-pr-phase3-ci.test.sh:
+# both fences EXPLAIN why they read the counter off disk, so a raw-text grep is
+# satisfied by the prose after the call itself is deleted.
+fences = [
+    "\n".join(row for row in body.split("\n") if not row.lstrip().startswith("#"))
+    for body in fences
+]
+
+keyed = re.compile(r"-iter\$\{REVIEW_ITERATION\}")
+reads = re.compile(r"review_fleet_load_ci_counters")
+# The default this replaced. It must not come back in ANY fence: a fence that
+# both reads the counter and then re-defaults it is back to two sources.
+stale = re.compile(r'REVIEW_ITERATION="\$\{REVIEW_ITERATION:-1\}"')
+
+offenders, examined = [], 0
+for body in fences:
+    on_keyed, has_stale = bool(keyed.search(body)), bool(stale.search(body))
+    if not (on_keyed or has_stale):
+        continue
+    # Counted BEFORE the stale check, so a fence that reintroduces the default
+    # is reported as the leak it is rather than shrinking the examined set into
+    # a VACUOUS verdict that blames the detector for the code's regression.
+    if on_keyed:
+        examined += 1
+    if has_stale:
+        offenders.append("re-defaults REVIEW_ITERATION")
+        continue
+    if not reads.search(body):
+        first = next((row.strip() for row in body.split("\n") if row.strip()), "<empty>")
+        offenders.append(first[:70])
+
+# Anti-vacuity: the setup fence and the repair fence. If the detector stops
+# finding them it must fail, not go green on an empty set.
+if examined < 2:
+    print("VACUOUS:only %d counter-keyed fence(s) found" % examined)
+elif offenders:
+    print("LEAKS:" + " | ".join(offenders))
+else:
+    print("OK:%d" % examined)
+PY_RI
+)"
+case "$RI_VERDICT" in
+  OK:*)
+    echo "  PASS  RI.1 — all ${RI_VERDICT#OK:} counter-keyed fences read REVIEW_ITERATION off disk"
+    PASS=$((PASS + 1))
+    ;;
+  *)
+    echo "  FAIL  RI.1 — $RI_VERDICT"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+# ...and the reader actually wins over an inherited scalar, at the position and
+# with the argument this skill calls it with.
+RI_TMP="$(mktemp -d)"
+printf '%s\n' \
+  '{"ci_loop_iter":2,"review_iteration":5,"fix_pushes":[],"failure_classes_seen":[]}' \
+  >"$RI_TMP/ci-loop-state.json"
+RI_OBSERVED="$(env -i PATH="$PATH" bash -c '
+  set -u
+  . "$1/lib/review-fleet-args.sh" || exit 2
+  RESEARCH_DIR_ABS="$2"
+  REVIEW_ITERATION=1
+  RUN_ID=20260807-010203-abcdef0
+  REVIEW_INDEX=3
+  review_fleet_load_ci_counters "$RESEARCH_DIR_ABS" || exit 74
+  printf "post-review-${RUN_ID}-r${REVIEW_INDEX}-iter${REVIEW_ITERATION}-attempt01"
+' _ "$REPO_ROOT/plugins/uberdev" "$RI_TMP" 2>&1)"
+if [ "$RI_OBSERVED" = 'post-review-20260807-010203-abcdef0-r3-iter5-attempt01' ]; then
+  echo "  PASS  RI.2 — the on-disk iteration beats the inherited scalar in the instance id"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  RI.2 — instance id was '$RI_OBSERVED' (wanted …-iter5-attempt01)"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$RI_TMP"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
