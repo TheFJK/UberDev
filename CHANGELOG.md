@@ -4,6 +4,47 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.4] — 2026-08-10
+
+### Fixed
+
+- **Phase 3 recorded `unknown` for its own diagnosis, and `--no-ci-fix` halted on
+  green CI** (#418). Every `bash` fence in `commands/review-pr.md` is its own
+  harness shell, so a name bound in one fence is gone in the next. Written
+  `${name:-<default>}`, that is not a defensive spelling of the same value — it
+  is the default, on every run. #399 moved three such scalars onto run-dir
+  carriers; four more were still live:
+
+  - `${failure_class:-unknown}`, `${check_name:-unknown}` and
+    `${signal_anchor:-unknown:1}` in the REFUSED arm's aggregate writer, so every
+    CI-refusal issue the autopilot filed recorded `unknown` / `unknown:1` — the
+    classifier's whole diagnosis erased at the moment it was written down, in a
+    CRITICAL issue aimed at a human.
+  - `${PROBE_VERDICT:-unknown}` in ROUTE's probe-only arm, so `--no-ci-fix`
+    audited `state=unknown` and, comparing `""` against `green`, forced
+    `OUTCOME=halted` even on green CI.
+
+  `failure_class` and `signal_anchor` are also what ROUTE's `case` keys on, so
+  `code_bug` fell through to `ci_fix_dispatch_unknown_class` on every run.
+  `check_name` had no producer anywhere in the file — consumed once, bound
+  nowhere.
+
+  Fixed with three single-writer run-dir carriers, each written by the fence that
+  *binds* the value, in the idiom `ci-push-target.tsv` / `ci-fix-phase.txt`
+  already use: `ci-probe-verdict.txt`, `ci-check-name.txt` and
+  `ci-classification.json`. `review_select_failed_ci_run` now emits the selected
+  row's check name as a fourth column (already its tie-break key) and rejects
+  control characters in it, which is what makes `check_name` producible at all.
+
+  Both halves of every carrier validate. None of the four values has a documented
+  default, so a writer never records a token outside its vocabulary and a reader
+  never returns one; unreadable is "cannot tell" and halts with a typed subreason
+  (`ci_*_uncarried` on the write side, `ci_*_unreadable` on the read side) rather
+  than routing a mutating fixer on an invented value. The carry never outranks the
+  `ci_probe_unreachable` carve-out — a `gh` outage reaches the carrier code with
+  no verdict at all, so the write is attempted only for a verdict in the
+  documented vocabulary.
+
 ## [0.45.3] — 2026-08-10
 
 ### Fixed
