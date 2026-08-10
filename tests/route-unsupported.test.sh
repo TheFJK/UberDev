@@ -25,6 +25,17 @@ grep -q 'error: --effort=ultra has no provider on any surviving backend' "$ROOT/
 # RETIRED SURFACE: nothing outside a comment may name the transport again --
 # a re-introduced `codex` arm here is how the refusal would silently become
 # conditional a second time.
-! grep -qE '^[^#]*\bcodex\b' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"; PASS=$((PASS+1))
+# Spelled as an explicit `if` + `exit 1`, NEVER as `! grep -q …`: under
+# `set -e` a pipeline whose return value is inverted with `!` is exempt from
+# errexit, so the negated form could not fail. With the regression on disk it
+# scored the same "6 passed" as a clean tree -- the guard against the retired
+# transport was itself the thing that had silently retired. Capturing `grep -n`
+# also makes the verdict name the offending line instead of dying mute.
+if codex_arms="$(grep -nE '^[^#]*\bcodex\b' "$ROOT/plugins/uberdev/lib/solve-launcher.sh")"; then
+  echo "FAIL: retired codex transport re-introduced outside a comment in lib/solve-launcher.sh:" >&2
+  printf '%s\n' "$codex_arms" >&2
+  exit 1
+fi
+PASS=$((PASS+1))
 grep -q 'no claims written; no agents dispatched' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"; PASS=$((PASS+1))
 echo "route-unsupported: $PASS passed"

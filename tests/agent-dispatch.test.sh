@@ -16,11 +16,11 @@ claude=source.split('\nCLAUDE_REQUEST="$(variant_request agent-dispatch-claude c
 assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed' in claude
 assert '[ ! -e "$TMP/run/claude.json.watcher-error.json" ]' in claude
 sync=source.split('\nSYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"',1)[1].split('\n# Every file argument',1)[0]
-assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"' in sync
+assert 'wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 600 0.1 "$TMP/run/sync-status.json"' in sync
 dead=source.split('\nDEAD_RUN="$TMP/dead-without-terminal"',1)[1].split('\n# Killing only the detached wrapper',1)[0]
-assert 'wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed' in dead
+assert 'wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 600 0.1 "$DEAD_RUN/status.json" provider_execution_failed' in dead
 orphan=source.split('\nORPHAN_RUN="$TMP/wrapper-death-with-live-provider"',1)[1].split('\n# The same orphan-group proof',1)[0]
-assert 'wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed' in orphan
+assert 'wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 600 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed' in orphan
 for helper in (
     '_uberdev_agent_capture_owner_process_record', '_real_owner_process_record',
     '_uberdev_agent_persist_watcher_error', '_real_prelaunch_persist_error',
@@ -108,6 +108,34 @@ read_fixture_pid() {
       ;;
   esac
   printf '%s\n' "$pid"
+}
+# "Cleanup killed the provider" is only proved by a provider that could not have
+# died on its own. A `sleep 30` stand-in expires unaided on a starved machine and
+# `wait` then returns success, so the row passes exactly when the cancellation it
+# guards never happened. Every such fixture now outlives any run, which makes the
+# blocking `wait` unbounded -- so death is polled instead, generously, and the
+# exhaustion is a named failure rather than a hang. A killed child stays visible
+# as a zombie until reaped, so "gone" means absent, or zombie plus an explicit
+# wait; the caller's own `kill -0` assertion remains the oracle, so a helper that
+# returned 0 too early would leave a live pid and still red there.
+wait_fixture_process_gone() {
+  local label="$1" pid="$2" tries="${3:-600}" state
+  case "$pid" in
+    ''|*[!0-9]*)
+      echo "$label: refusing to wait on non-numeric pid '$pid'" >&2
+      return 1
+      ;;
+  esac
+  for _ in $(seq 1 "$tries"); do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    case "$state" in
+      '') return 0 ;;
+      Z*) wait "$pid" 2>/dev/null || true ;;
+    esac
+    command sleep 0.1
+  done
+  echo "$label: provider $pid was still live after $((tries / 10))s" >&2
+  return 1
 }
 trap 'reap_fixture_pids; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/run"
@@ -690,8 +718,16 @@ PY
       printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$6"
       chmod 600 "$6"
       printf 'ready\n' > "$FAST_TERMINAL_READY"
+      # This pause is released only after the caller has published a transient
+      # owner, taken the scope mutex, republished the lease and driven a full
+      # sibling acquisition -- half a dozen python3 spawns plus a reconciliation
+      # pass. The old 5s ceiling was shorter than that sequence takes on a loaded
+      # machine, and expiring it returns 98, which reds the row for "dispatch
+      # failed after sibling reconciliation" when nothing failed but the clock.
+      # 60s is a hang detector for a resume that is never written; `return 98`
+      # still names the pause as the thing that never ended.
       fast_terminal_wait=0
-      while [ ! -e "$FAST_TERMINAL_RESUME" ] && [ "$fast_terminal_wait" -lt 500 ]; do
+      while [ ! -e "$FAST_TERMINAL_RESUME" ] && [ "$fast_terminal_wait" -lt 6000 ]; do
         command sleep 0.01
         fast_terminal_wait=$((fast_terminal_wait + 1))
       done
@@ -892,8 +928,17 @@ grep -Fq 'UBERDEV_SEMAPHORE_OWNER_PID="$_UBERDEV_AGENT_OWNER_PID" PYTHONPATH= PY
   exit 1
 }
 
+# Every terminal here is published by a detached watcher that probes on a 1s
+# cadence and needs three consecutive absent probes before it may cancel, each
+# probe a fresh python3 spawn. Measured on an idle host that costs ~3.3s; the
+# retired 80-tick ceiling bought roughly 20-40s of wall clock and this suite has
+# been observed exhausting it -- eight runs, all four of a parallel batch at
+# once -- on a host whose load spiked, with the terminal arriving unharmed
+# moments later. The loop already returns the instant the tuple holds and
+# already fails by name with the full observed state, so the ceiling costs
+# nothing but the patience of a genuine hang: 600 ticks it is.
 wait_for_terminal_and_release() {
-  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-80}" delay="${6:-0.1}"
+  local manifest="$1" state_dir="$2" run_id="$3" terminal="$4" attempts="${5:-600}" delay="${6:-0.1}"
   local status_file="${7:-}" error_class="${8:-}" actual lease watcher_error
   for _ in $(seq 1 "$attempts"); do
     if python3 -I - "$manifest" "$run_id" "$terminal" "$status_file" "$error_class" <<'PY'
@@ -1039,11 +1084,19 @@ PY
 LEASES="$(find "$STATE_DIR" -name '*.lease' -type f | wc -l | tr -d ' ')"
 [ "$LEASES" = 1 ] || { echo "expected one registered opaque lease, got $LEASES" >&2; exit 1; }
 printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/status.json"
-for _ in 1 2 3 4 5; do
-  ! grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
-  sleep 1
+# The watcher polls on a 1s cadence and finalizes through several python3
+# spawns, so 5 one-second ticks was a budget a loaded machine could miss while
+# the code was perfectly correct. Poll fast, wait long: this returns the instant
+# the lease is gone and only reds after a hang-detector-sized 60s.
+opaque_released=0
+for _ in $(seq 1 240); do
+  if ! grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+    opaque_released=1
+    break
+  fi
+  command sleep 0.25
 done
-if grep -R -q 'run_id=agent-dispatch-test' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+if [ "$opaque_released" -ne 1 ]; then
   echo "terminalized opaque fixture retained its lease" >&2
   exit 1
 fi
@@ -1075,7 +1128,7 @@ assert capture['workspace_mode']=='caller' and capture['workspace_dir']==sys.arg
 assert 'workspace_mode' not in capture['decision'] and 'workspace_dir' not in capture['decision']
 PY
 printf '{"backend":"workflow","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/caller-status.json"
-wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-caller completed 80 0.1
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-caller completed 600 0.1
 
 workspace_provider_before="$(cat "$TMP/provider-count")"
 for workspace_case in invalid missing mismatch unsupported unexpected; do
@@ -1152,7 +1205,7 @@ fi
 # reconciliation record.
 ASYNC_REQUEST="${REQUEST/agent-dispatch-test/agent-dispatch-async}"
 uberdev_agent_dispatch "$ASYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/async-terminal.md" "$TMP/run/async-terminal.json"
-wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-async completed 150 0.1
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-async completed 600 0.1
 python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -1208,10 +1261,21 @@ PY
     terminal_validation_failures="$terminal_validation_failures lease-released:$terminal_case"
   fi
   printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$terminal_status"
-  for _ in 1 2 3 4 5; do
-    ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null && break
-    sleep 1
+  # Replacing the rejected terminal with a canonical one must make the watcher
+  # release: that is the other half of the claim asserted three lines up, and
+  # leaving it unasserted also let leases accumulate silently in the shared
+  # fixture-repository scope that a later cap=20 acquisition draws from. Per
+  # case, by name, on the same generous poll as every other release probe.
+  terminal_released=0
+  for _ in $(seq 1 240); do
+    if ! grep -R -q "run_id=$terminal_run_id" "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+      terminal_released=1
+      break
+    fi
+    command sleep 0.25
   done
+  [ "$terminal_released" -eq 1 ] || \
+    terminal_validation_failures="$terminal_validation_failures lease-retained:$terminal_case"
 done
 if [ -n "$terminal_validation_failures" ]; then
   echo "terminal status validation failed:$terminal_validation_failures" >&2
@@ -1257,7 +1321,7 @@ grep -q route_unenforceable "$TMP/ultra.err"
 
 CLAUDE_REQUEST="$(variant_request agent-dispatch-claude claude)"
 uberdev_agent_dispatch "$CLAUDE_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/claude.md" "$TMP/run/claude.json"
-wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed 80 0.1
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-claude completed 600 0.1
 [ ! -e "$TMP/run/claude.json.watcher-error.json" ]
 ! grep -R -q 'run_id=agent-dispatch-claude' "$STATE_DIR/semaphore-v1" 2>/dev/null
 python3 - "$TMP/backend.json" <<'PY'
@@ -1280,11 +1344,16 @@ grep -R -q "run_id=agent-dispatch-no-status" "$STATE_DIR/semaphore-v1" || {
   echo "opaque dispatch without current status was not registered" >&2; exit 1;
 }
 printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/no-status.json"
-for _ in 1 2 3 4 5; do
-  ! grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null && break
-  sleep 1
+# Same asynchronous release, same hang-detector budget as the opaque row above.
+no_status_released=0
+for _ in $(seq 1 240); do
+  if ! grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+    no_status_released=1
+    break
+  fi
+  command sleep 0.25
 done
-if grep -R -q 'run_id=agent-dispatch-no-status' "$STATE_DIR/semaphore-v1" 2>/dev/null; then
+if [ "$no_status_released" -ne 1 ]; then
   echo "terminalized no-status fixture retained its lease" >&2
   exit 1
 fi
@@ -1319,11 +1388,25 @@ finally:
         os.unlink(temporary)
 PY
 printf '{"backend":"background","state":"completed","exit_code":0,"pid":"opaque:test-handle"}\n' > "$TMP/run/generation-race.json"
-for _ in 1 2 3 4 5; do
-  grep -q 'agent-dispatch-generation-race.*"event":"completed"\|"event":"completed".*agent-dispatch-generation-race' \
-    "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null && break
-  sleep 1
+# The claim below is "the old watcher did NOT delete the replacement". A watcher
+# that has not run yet has deleted nothing either, so falling out of this poll
+# on exhaustion made the assertion pass for the one reason that proves nothing --
+# and on a loaded machine 5 one-second ticks is exactly when that happens. The
+# watcher reaching its terminal is now the precondition, asserted by name, so the
+# survival check can only be read after the deletion had its chance.
+generation_terminalized=0
+for _ in $(seq 1 240); do
+  if grep -q 'agent-dispatch-generation-race.*"event":"completed"\|"event":"completed".*agent-dispatch-generation-race' \
+      "$STATE_DIR/agent-lifecycle.jsonl" 2>/dev/null; then
+    generation_terminalized=1
+    break
+  fi
+  command sleep 0.25
 done
+[ "$generation_terminalized" -eq 1 ] || {
+  echo "generation-race watcher never finalized its terminal, so the replacement-lease claim was never exercised" >&2
+  exit 1
+}
 [ -f "$generation_lease" ] && grep -q '^run_id=replacement-generation-race$' "$generation_lease" || {
   echo "old watcher removed a replacement lease" >&2
   exit 1
@@ -1403,7 +1486,7 @@ fi
 # released immediately instead of being left for reconciliation.
 SYNC_REQUEST="$(variant_request agent-dispatch-sync inherit)"
 uberdev_agent_dispatch "$SYNC_REQUEST" "$TMP/run/prompt.txt" "$TMP/run/sync-result.md" "$TMP/run/sync-status.json"
-wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 80 0.1 "$TMP/run/sync-status.json"
+wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" agent-dispatch-sync completed 600 0.1 "$TMP/run/sync-status.json"
 python3 - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -1426,7 +1509,7 @@ FAST_CONTEXT_REQUEST="$(variant_request agent-dispatch-fast-terminal-context inh
 uberdev_agent_dispatch "$FAST_CONTEXT_REQUEST" "$TMP/run/prompt.txt" \
   "$TMP/run/fast-terminal-context.md" "$TMP/run/fast-terminal-context.json"
 wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" \
-  agent-dispatch-fast-terminal-context failed 80 0.1 "$TMP/run/fast-terminal-context.json"
+  agent-dispatch-fast-terminal-context failed 600 0.1 "$TMP/run/fast-terminal-context.json"
 python3 -I -B - "$STATE_DIR/agent-lifecycle.jsonl" "$TMP/run/fast-terminal-context.json" \
   "$FAST_CONTEXT_LOG" "$TMP/run/fast-terminal-context.md" "$FAST_CONTEXT_WORKTREE" \
   "$FAST_CONTEXT_BRANCH" <<'PY'
@@ -1459,8 +1542,13 @@ FAST_TERMINAL_REQUEST="$(variant_request agent-dispatch-fast-terminal-prehandle 
   printf '%s' "$fast_terminal_output") \
   >"$TMP/run/fast-terminal-race.out" 2>"$TMP/run/fast-terminal-race.err" &
 fast_terminal_pid=$!
+# Reaching the pause means a full dispatch -- validation, state-dir preparation,
+# lease acquisition and several python3 spawns -- has completed in a background
+# subshell. 5s of that is a machine-speed measurement, not a contract; 60s is a
+# hang detector for a fixture that never got there, and the named failure below
+# is unchanged.
 fast_terminal_ready_tries=0
-while [ ! -s "$FAST_TERMINAL_READY" ] && [ "$fast_terminal_ready_tries" -lt 500 ]; do
+while [ ! -s "$FAST_TERMINAL_READY" ] && [ "$fast_terminal_ready_tries" -lt 6000 ]; do
   command sleep 0.01
   fast_terminal_ready_tries=$((fast_terminal_ready_tries + 1))
 done
@@ -1527,7 +1615,7 @@ if [ "$fast_terminal_rc" -ne 0 ]; then
   exit 1
 fi
 wait_for_terminal_and_release "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR" \
-  agent-dispatch-fast-terminal-prehandle completed 80 0.1 "$TMP/run/fast-terminal-race.json"
+  agent-dispatch-fast-terminal-prehandle completed 600 0.1 "$TMP/run/fast-terminal-race.json"
 python3 -I -B - "$STATE_DIR/agent-lifecycle.jsonl" <<'PY'
 import json, pathlib, sys
 events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
@@ -1780,8 +1868,20 @@ DEAD_BRANCH="worktree-trusted-dead-provider"
 printf 'trusted provider log\n' > "$DEAD_LOG"
 DEAD_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_version":1,"run_dir":sys.argv[1],"run_id":"adapter-dead-without-terminal","repository_id":"adapter-death-repository","backend":"background","workflow":"solve","phase":"lead","role":"lead","task_tier":"small","risk_signals":[],"routing_mode":"inherit","issue_or_pr":91,"issue_num":91,"capacity":1,"timeout_s":20},separators=(",",":")))' "$DEAD_RUN")"
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(1)' >/dev/null 2>&1 &
+  # The provider must vanish AFTER registration, and it used to do that by
+  # sleeping 1s: a window a starved machine can close before the launcher has
+  # even confirmed the owned session two lines down, which fails dispatch with
+  # no evidence at all. Death is a state the test drives, not a clock it races --
+  # the fixture waits for a release file the row writes once dispatch returns,
+  # and the 600s ceiling only exists so an aborted row cannot strand it.
+  nohup python3 -I -B -c 'import os,sys,time
+os.setsid()
+deadline = time.monotonic() + 600
+while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
+    time.sleep(0.05)' "$DEAD_RUN/release" >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
+  record_fixture_pid "$DISPATCH_ID"
+  printf '%s\n' "$DISPATCH_ID" >"$DEAD_RUN/provider.pid"
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   DISPATCH_STATUS_CONTEXT=1
   DISPATCH_STATUS_LOG="$DEAD_LOG"
@@ -1794,7 +1894,18 @@ _uberdev_agent_dispatch_backend() {
   chmod 600 "$6"
 }
 uberdev_agent_dispatch "$DEAD_REQUEST" "$DEAD_RUN/prompt.txt" "$DEAD_RUN/result.md" "$DEAD_RUN/status.json"
-wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 80 0.1 "$DEAD_RUN/status.json" provider_execution_failed
+DEAD_PID="$(read_fixture_pid "$DEAD_RUN/provider.pid" 'dead-without-terminal provider')"
+# Registration is complete, so the disappearance the watcher must notice can now
+# be caused deliberately. Asserting the provider was live until this point is
+# what makes the failure below attributable to a death the adapter observed
+# rather than to one that beat it to the state dir.
+kill -0 "$DEAD_PID" 2>/dev/null || {
+  echo "dead-without-terminal provider $DEAD_PID died before its registration completed" >&2
+  exit 1
+}
+: >"$DEAD_RUN/release"
+wait_fixture_process_gone 'dead-without-terminal' "$DEAD_PID" || exit 1
+wait_for_terminal_and_release "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/.agent-state-$(id -u)" adapter-dead-without-terminal failed 600 0.1 "$DEAD_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$DEAD_RUN/status.json" || { echo "dead provider retained running status" >&2; exit 1; }
 python3 -I - "$DEAD_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$DEAD_RUN/status.json" \
   "$DEAD_LOG" "$DEAD_RESULT" "$DEAD_WORKTREE" "$DEAD_BRANCH" <<'PY'
@@ -1851,7 +1962,7 @@ kill -0 "$ORPHAN_CHILD" 2>/dev/null || {
   exit 1
 }
 kill -KILL "$ORPHAN_WRAPPER"
-wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 80 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed
+wait_for_terminal_and_release "$ORPHAN_RUN/.agent-state-$(id -u)/agent-lifecycle.jsonl" "$ORPHAN_RUN/.agent-state-$(id -u)" adapter-wrapper-death failed 600 0.1 "$ORPHAN_RUN/status.json" provider_execution_failed
 grep -q '"state":"failed"' "$ORPHAN_RUN/status.json"
 # Written as explicit failures, not as `! cmd`: bash exempts a negated command
 # from errexit (POSIX XCU 2.11, verified on 3.2 and 5.3), so `! kill -0 "$pid"`
@@ -2059,8 +2170,12 @@ uberdev_semaphore_set_handle() {
   _real_postlaunch_set_handle "$@"
 }
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  # 600s, not 30s: the assertion below is that CLEANUP killed this provider, and
+  # a 30s stand-in reaches its own end while the suite is still working, after
+  # which `wait` returns and the row passes whether or not anything cancelled it.
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(600)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""; printf '%s\n' "$DISPATCH_ID" > "$POST_RUN/provider.pid"
+  record_fixture_pid "$DISPATCH_ID"
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
   chmod 600 "$6"
@@ -2068,9 +2183,8 @@ _uberdev_agent_dispatch_backend() {
 if uberdev_agent_dispatch "$POST_REQUEST" "$POST_RUN/prompt.txt" "$POST_RUN/result.md" "$POST_RUN/status.json"; then
   echo "post-launch setup failure was reported as success" >&2; exit 1
 fi
-POST_PID="$(cat "$POST_RUN/provider.pid")"
-for _ in 1 2 3 4 5; do kill -0 "$POST_PID" 2>/dev/null || break; sleep .1; done
-wait "$POST_PID" 2>/dev/null || true
+POST_PID="$(read_fixture_pid "$POST_RUN/provider.pid" 'post-launch provider')"
+wait_fixture_process_gone 'post-launch setup failure' "$POST_PID" || exit 1
 kill -0 "$POST_PID" 2>/dev/null && { echo "post-launch setup failure orphaned provider $POST_PID" >&2; exit 1; }
 grep -q '"state":"failed"' "$POST_RUN/status.json"
 ! grep -R -q 'run_id=adapter-post-launch-failure' "$POST_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
@@ -2097,9 +2211,13 @@ _uberdev_agent_process_identity() {
   _real_agent_process_identity "$@"
 }
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  # 600s for the same reason as the post-launch row: "live=1" below must mean
+  # the cleanup path failed to cancel, never that a 30s stand-in outlasted the
+  # suite's own bookkeeping or, worse, expired before it and excused the bug.
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(600)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '%s\n' "$DISPATCH_ID" >"$IDENTITY_RUN/provider.pid"
+  record_fixture_pid "$DISPATCH_ID"
   _uberdev_dispatch_wait_owned_session "$DISPATCH_ID"
   : >"$IDENTITY_RUN/identity-capture-armed"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" >"$6"
@@ -2111,20 +2229,24 @@ uberdev_agent_dispatch "$IDENTITY_REQUEST" "$IDENTITY_RUN/prompt.txt" \
 identity_dispatch_rc=$?
 set -e
 eval "$(declare -f _real_agent_process_identity | sed '1s/_real_agent_process_identity/_uberdev_agent_process_identity/')"
-IDENTITY_PID="$(cat "$IDENTITY_RUN/provider.pid")"
+IDENTITY_PID="$(read_fixture_pid "$IDENTITY_RUN/provider.pid" 'process-identity provider')"
 if [ "$identity_dispatch_rc" -eq 0 ]; then
   kill "$IDENTITY_PID" 2>/dev/null || true
 fi
-for _ in 1 2 3 4 5; do kill -0 "$IDENTITY_PID" 2>/dev/null || break; sleep .1; done
-wait "$IDENTITY_PID" 2>/dev/null || true
-if [ "$identity_dispatch_rc" -eq 0 ] || kill -0 "$IDENTITY_PID" 2>/dev/null \
+# The reaper's own verdict is folded into the coherence check below, so a helper
+# that gave up early cannot be mistaken for a provider that was cleaned up.
+identity_reaped=0
+if wait_fixture_process_gone 'process-identity failure' "$IDENTITY_PID"; then
+  identity_reaped=1
+fi
+if [ "$identity_dispatch_rc" -eq 0 ] || [ "$identity_reaped" -ne 1 ] || kill -0 "$IDENTITY_PID" 2>/dev/null \
     || ! grep -q '"state":"failed"' "$IDENTITY_RUN/status.json" \
     || grep -R -q 'run_id=adapter-process-identity-failure' "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null; then
   identity_provider_live=0
   kill -0 "$IDENTITY_PID" 2>/dev/null && identity_provider_live=1
   identity_status="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$IDENTITY_RUN/status.json" 2>/dev/null || true)"
   identity_lease_count="$(find "$IDENTITY_RUN/.agent-state-$(id -u)/semaphore-v1" -name '*.lease' -type f 2>/dev/null | wc -l | tr -d ' ')"
-  echo "numeric backend identity-capture failure was not closed coherently: rc=$identity_dispatch_rc live=$identity_provider_live status=${identity_status:-missing} leases=$identity_lease_count probes=$(cat "$IDENTITY_RUN/identity-probes")" >&2
+  echo "numeric backend identity-capture failure was not closed coherently: rc=$identity_dispatch_rc live=$identity_provider_live reaped=$identity_reaped status=${identity_status:-missing} leases=$identity_lease_count probes=$(cat "$IDENTITY_RUN/identity-probes")" >&2
   exit 1
 fi
 
@@ -2226,9 +2348,13 @@ _uberdev_semaphore_remove_lease() {
   _real_replacement_remove_lease "$@"
 }
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(30)' >/dev/null 2>&1 &
+  # 600s: "cleanup consumed the replacement capability and cancelled the
+  # provider" must be proved by a provider that could only have died from that
+  # cancellation, not by one whose own sleep ran out first.
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(600)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
   printf '%s\n' "$DISPATCH_ID" > "$REPLACEMENT_RUN/provider.pid"
+  record_fixture_pid "$DISPATCH_ID"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"
   chmod 600 "$6"
   : > "$REPLACEMENT_RUN/provider-launched"
@@ -2237,9 +2363,8 @@ if uberdev_agent_dispatch "$REPLACEMENT_REQUEST" "$REPLACEMENT_RUN/prompt.txt" \
     "$REPLACEMENT_RUN/result.md" "$REPLACEMENT_RUN/status.json"; then
   echo "replacement-capability failure was reported as success" >&2; exit 1
 fi
-REPLACEMENT_PID="$(cat "$REPLACEMENT_RUN/provider.pid")"
-for _ in 1 2 3 4 5; do kill -0 "$REPLACEMENT_PID" 2>/dev/null || break; sleep .1; done
-wait "$REPLACEMENT_PID" 2>/dev/null || true
+REPLACEMENT_PID="$(read_fixture_pid "$REPLACEMENT_RUN/provider.pid" 'replacement-capability provider')"
+wait_fixture_process_gone 'replacement-capability cleanup' "$REPLACEMENT_PID" || exit 1
 kill -0 "$REPLACEMENT_PID" 2>/dev/null && {
   echo "replacement-capability cleanup orphaned provider $REPLACEMENT_PID" >&2; exit 1;
 }
@@ -2262,8 +2387,16 @@ WATCH_REQUEST="$(python3 -I -c 'import json,sys; print(json.dumps({"schema_versi
 eval "$(declare -f _uberdev_agent_finalize_terminal | sed '1s/_uberdev_agent_finalize_terminal/_real_watcher_finalize_terminal/')"
 _uberdev_agent_finalize_terminal() { return 29; }
 _uberdev_agent_dispatch_backend() {
-  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(5)' >/dev/null 2>&1 &
+  # 5s was shorter than the dozen python3 spawns between here and the lease that
+  # is re-read at the end of the row, so on a slow machine the watcher reached
+  # the wrapper-death branch instead of the terminal branch and the sidecar this
+  # row reads was written by a different cause. The verdict happened to survive
+  # that swap when it was measured, which is luck, not an invariant: 600s keeps
+  # the fixture constant so the sidecar is attributable to the injected finalize
+  # failure alone. reap_fixture_pids kills it at exit.
+  nohup python3 -I -c 'import os,time; os.setsid(); time.sleep(600)' >/dev/null 2>&1 &
   DISPATCH_ID="$!"; DISPATCH_LOG=""
+  record_fixture_pid "$DISPATCH_ID"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"%s"}\n' "$DISPATCH_ID" > "$6"; chmod 600 "$6"
 }
 uberdev_agent_dispatch "$WATCH_REQUEST" "$WATCH_RUN/prompt.txt" "$WATCH_RUN/result.md" "$WATCH_RUN/status.json"
@@ -2304,7 +2437,22 @@ WATCH_LEASE_NATIVE_IDENTITY="$(_uberdev_semaphore_lease_identity \
   exit 1
 }
 _uberdev_agent_publish_status "$WATCH_RUN/status.json" background "$DISPATCH_ID" completed 0 provider
-for _ in $(seq 1 100); do [ -s "$WATCH_RUN/status.json.watcher-error.json" ] && break; sleep 0.1; done
+# The sidecar is written only after the watcher has retried finalization three
+# times, each retry a fresh python3 spawn. Exhausting the old 10s budget dropped
+# straight into json.load on a file that does not exist yet, so a slow machine
+# red with a traceback instead of a verdict. Poll long, name the timeout.
+watch_sidecar=0
+for _ in $(seq 1 480); do
+  if [ -s "$WATCH_RUN/status.json.watcher-error.json" ]; then
+    watch_sidecar=1
+    break
+  fi
+  command sleep 0.25
+done
+[ "$watch_sidecar" -eq 1 ] || {
+  echo "watcher-finalize-failure never persisted its durable sidecar: $WATCH_RUN/status.json.watcher-error.json" >&2
+  exit 1
+}
 python3 -I - "$WATCH_RUN/status.json.watcher-error.json" <<'PY'
 import json,sys
 row=json.load(open(sys.argv[1]))
@@ -2515,7 +2663,7 @@ uberdev_agent_dispatch "$NUMERIC_ATTEST_REQUEST" "$NUMERIC_ATTEST_RUN/prompt.txt
   "$NUMERIC_ATTEST_RUN/result.md" "$NUMERIC_ATTEST_RUN/status.json" >/dev/null
 NUMERIC_ATTEST_STATE="$NUMERIC_ATTEST_RUN/.agent-state-$(id -u)"
 wait_for_terminal_and_release "$NUMERIC_ATTEST_STATE/agent-lifecycle.jsonl" \
-  "$NUMERIC_ATTEST_STATE" adapter-attest-numeric failed 80 0.1 "$NUMERIC_ATTEST_RUN/status.json"
+  "$NUMERIC_ATTEST_STATE" adapter-attest-numeric failed 600 0.1 "$NUMERIC_ATTEST_RUN/status.json"
 python3 -I -B - "$NUMERIC_ATTEST_STATE/agent-lifecycle.jsonl" "$NUMERIC_ATTEST_RUN/status.json" \
   "$NUMERIC_ATTEST_RUN/trusted.log" "$NUMERIC_ATTEST_RUN/result.md" \
   "$NUMERIC_ATTEST_RUN/trusted-worktree" <<'PY'

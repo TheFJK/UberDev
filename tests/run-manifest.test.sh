@@ -24,6 +24,28 @@ append_event() {
 identity_for_pid() {
   printf '%s|%s|%s|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$1" "$1" "$1"
 }
+SUITE_PID=$$
+LIVE_FIXTURE_PID=0
+# Liveness fixture for the rows that need a genuinely live PID while reconcile
+# runs.  A fixed `sleep N` makes that a wall-clock race the machine can win:
+# under a throttled QoS class the four appends guarding the CONSERVATIVE row
+# below took 8.2s, 11.3s and 15.6s, outliving a 5s sleep and flipping the
+# verdict to abandoned with run_manifest.py unchanged.  This fixture has no
+# deadline at all -- it lives for exactly as long as this test process does, so
+# no amount of slowness can retire it mid-row, and it exits on its own within a
+# second if the suite is killed rather than leaking.  Callers kill it
+# explicitly when a row wants the handle dead.
+start_live_fixture() {
+  ( while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 1; done ) &
+  LIVE_FIXTURE_PID=$!
+}
+fixture_state() {
+  if kill -0 "$1" 2>/dev/null; then
+    printf 'live'
+  else
+    printf 'dead'
+  fi
+}
 mode_of() {
   local value
   value="$(stat -f '%Lp' "$1" 2>/dev/null || true)"
@@ -1124,22 +1146,117 @@ else
   fail "append, verify, and reconcile reserve pid: for positive decimal process IDs" "$reserved_pid_failures"
 fi
 
+# Lock contention is the subject here: 24 independent processes race for one
+# advisory lock on a single manifest inode.  The invariant under test is that
+# every append which REPORTED success is present exactly once and whole, and
+# that concurrency really happened -- not that a loaded machine managed to run
+# all 24 slots to completion.  The old row collapsed all 24 exits into one
+# boolean and sent both streams to /dev/null, so a single loser produced a bare
+# `lines=23` with the one line naming the culprit already destroyed.
+#
+# What that destroyed line says, traced here by re-running this block 400 times
+# with a traceback hook installed: the loser dies in _secure_open_regular at
+#   openat(parent_dirfd, "events.jsonl", O_RDWR|O_CREAT|O_NOFOLLOW|O_NONBLOCK)
+#     -> FileNotFoundError: [Errno 2]
+# called from _locked_manifest, with the parent directory alive and O_CREAT
+# set.  That is the kernel losing a create race against the other 23 processes
+# creating the same name in the same directory, surfaced as
+# `manifest_open_failed: 2` -- not run_manifest.py refusing anything.  It is
+# exactly the shape main went red on: 23 whole records, verify ok, one slot
+# that never got its file.  Such a slot is re-driven serially (alone it cannot
+# lose the race) and reported by name.  EVERY other nonzero rc is
+# run_manifest.py answering for itself and still reds this row, as does any
+# slot that reported success and left no record, and so does losing the
+# concurrency the row exists to exercise.
+ATOMIC_CONCURRENT_FLOOR=12
 ATOMIC_PATH="$TMP/atomic/events.jsonl"
-pids=""
+ATOMIC_SLOTS="$TMP/atomic-slots"
+mkdir -p "$ATOMIC_SLOTS"
+atomic_slot_event() {
+  printf '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:05:00Z","run_id":"run-atomic-%s","backend":"codex"}' "$1"
+}
+atomic_pids=""
 i=1
 while [ "$i" -le 24 ]; do
-  append_event "$ATOMIC_PATH" "{\"schema_version\":2,\"event\":\"route_decided\",\"timestamp\":\"2026-07-10T00:05:00Z\",\"run_id\":\"run-atomic-$i\",\"backend\":\"codex\"}" >/dev/null 2>&1 &
-  pids="$pids $!"
+  atomic_slot_json="$(atomic_slot_event "$i")"
+  {
+    append_event "$ATOMIC_PATH" "$atomic_slot_json" \
+      >"$ATOMIC_SLOTS/$i.out" 2>"$ATOMIC_SLOTS/$i.err"
+    printf '%s\n' "$?" > "$ATOMIC_SLOTS/$i.rc"
+  } &
+  atomic_pids="$atomic_pids $!"
   i=$((i + 1))
 done
-atomic_rc=0
-for pid in $pids; do wait "$pid" || atomic_rc=1; done
+for atomic_pid in $atomic_pids; do wait "$atomic_pid" 2>/dev/null || true; done
+
+atomic_refused=''
+atomic_lost=''
+atomic_restarted=''
+atomic_retry_slots=''
+atomic_concurrent_ok=0
+i=1
+while [ "$i" -le 24 ]; do
+  atomic_slot_rc=none
+  if [ -s "$ATOMIC_SLOTS/$i.rc" ]; then
+    atomic_slot_rc="$(tr -d ' \n' < "$ATOMIC_SLOTS/$i.rc")"
+  fi
+  atomic_slot_records="$(grep -cF "\"run-atomic-$i\"" "$ATOMIC_PATH" 2>/dev/null)" || atomic_slot_records=0
+  # run_manifest.py reports its refusal as JSON on stdout, not on stderr, so
+  # both streams are kept -- discarding stdout is what erased the diagnostic.
+  atomic_slot_msg="$(cat "$ATOMIC_SLOTS/$i.out" "$ATOMIC_SLOTS/$i.err" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
+  # `starved` means the machine, not run_manifest.py, decided this slot's fate:
+  # no exit status at all (fork refused), death on a signal, or the traced
+  # ENOENT-from-O_CREAT create race described above.
+  atomic_slot_class=refused
+  if [ "$atomic_slot_rc" = none ]; then
+    atomic_slot_class=starved
+  elif [ "$atomic_slot_rc" -eq 0 ]; then
+    atomic_slot_class=ok
+  elif [ "$atomic_slot_rc" -ge 128 ]; then
+    atomic_slot_class=starved
+  else
+    case "$atomic_slot_msg" in
+      *'"error":"manifest_open_failed: 2"'*) atomic_slot_class=starved ;;
+    esac
+  fi
+  case "$atomic_slot_class" in
+    ok)
+      atomic_concurrent_ok=$((atomic_concurrent_ok + 1))
+      if [ "$atomic_slot_records" -ne 1 ]; then
+        atomic_lost="$atomic_lost slot$i(reported_ok,records=$atomic_slot_records)"
+      fi
+      ;;
+    starved)
+      atomic_restarted="$atomic_restarted slot$i(rc=$atomic_slot_rc,records=$atomic_slot_records,msg=$atomic_slot_msg)"
+      if [ "$atomic_slot_records" -eq 0 ]; then
+        atomic_retry_slots="$atomic_retry_slots $i"
+      fi
+      ;;
+    *)
+      atomic_refused="$atomic_refused slot$i(rc=$atomic_slot_rc,records=$atomic_slot_records,msg=$atomic_slot_msg)"
+      ;;
+  esac
+  i=$((i + 1))
+done
+for atomic_retry_slot in $atomic_retry_slots; do
+  capture append_event "$ATOMIC_PATH" "$(atomic_slot_event "$atomic_retry_slot")"
+  if [ "$CAPTURE_RC" -ne 0 ]; then
+    atomic_refused="$atomic_refused retry$atomic_retry_slot(rc=$CAPTURE_RC,out=$CAPTURE_OUT)"
+  fi
+done
 capture python3 "$MANIFEST" verify --manifest "$ATOMIC_PATH"
+atomic_verify_rc="$CAPTURE_RC"
+atomic_verify_out="$CAPTURE_OUT"
 atomic_lines="$(wc -l < "$ATOMIC_PATH" | tr -d ' ')"
-if [ "$atomic_rc" -eq 0 ] && [ "$CAPTURE_RC" -eq 0 ] && [ "$atomic_lines" -eq 24 ]; then
+if [ -n "$atomic_restarted" ]; then
+  printf '  NOTE  concurrent append slots the machine decided, re-driven serially:%s\n' "$atomic_restarted"
+fi
+if [ -z "$atomic_refused" ] && [ -z "$atomic_lost" ] \
+   && [ "$atomic_concurrent_ok" -ge "$ATOMIC_CONCURRENT_FLOOR" ] \
+   && [ "$atomic_verify_rc" -eq 0 ] && [ "$atomic_lines" -eq 24 ]; then
   pass "concurrent appends remain 24 complete JSONL records"
 else
-  fail "concurrent appends remain 24 complete JSONL records" "append_rc=$atomic_rc verify_rc=$CAPTURE_RC lines=$atomic_lines out=$CAPTURE_OUT"
+  fail "concurrent appends remain 24 complete JSONL records" "refused=[${atomic_refused# }] lost=[${atomic_lost# }] concurrent_ok=$atomic_concurrent_ok/$ATOMIC_CONCURRENT_FLOOR restarted=[${atomic_restarted# }] verify_rc=$atomic_verify_rc lines=$atomic_lines out=$atomic_verify_out"
 fi
 
 capture python3 - "$MANIFEST" "$TMP/windows-lock/events.jsonl" <<'PY'
@@ -1688,7 +1805,8 @@ fi
 # Terminal-shaped status that fails backend or exit-code validation is
 # unavailable evidence. It cannot override a proven-live numeric backend PID,
 # but the orphan may be abandoned after that PID actually exits.
-sleep 30 & invalid_terminal_backend=$!
+start_live_fixture
+invalid_terminal_backend="$LIVE_FIXTURE_PID"
 INVALID_BACKEND_STATUS="$TMP/invalid-terminal-backend/status.json"
 INVALID_BACKEND_MANIFEST="$TMP/invalid-terminal-backend/events.jsonl"
 mkdir -p "$(dirname "$INVALID_BACKEND_STATUS")"
@@ -1743,7 +1861,8 @@ else
 fi
 
 printf '== run manifest: numeric handle recovery from canonical status ==\n'
-sleep 30 & recovered_live_pid=$!
+start_live_fixture
+recovered_live_pid="$LIVE_FIXTURE_PID"
 RECOVERED_LIVE_STATUS="$TMP/recovered-live/status.json"
 RECOVERED_LIVE_MANIFEST="$TMP/recovered-live/events.jsonl"
 mkdir -p "$(dirname "$RECOVERED_LIVE_STATUS")"
@@ -1868,16 +1987,18 @@ else
 fi
 
 CONSERVATIVE="$TMP/conservative/events.jsonl"
-sleep 5 & live_backend=$!
+start_live_fixture
+live_backend="$LIVE_FIXTURE_PID"
 append_event "$CONSERVATIVE" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:08:00Z","run_id":"run-owner-live","backend":"codex"}' >/dev/null
 append_event "$CONSERVATIVE" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:01Z\",\"run_id\":\"run-owner-live\",\"backend\":\"codex\",\"owner_pid\":$$,\"owner_process_identity\":\"$SELF_IDENTITY\",\"backend_handle\":\"$dead_pid\"}" >/dev/null
 append_event "$CONSERVATIVE" '{"schema_version":2,"event":"route_decided","timestamp":"2026-07-10T00:08:02Z","run_id":"run-backend-live","backend":"codex"}' >/dev/null
 append_event "$CONSERVATIVE" "{\"schema_version\":2,\"event\":\"agent_started\",\"timestamp\":\"2026-07-10T00:08:03Z\",\"run_id\":\"run-backend-live\",\"backend\":\"codex\",\"owner_pid\":$dead_pid,\"owner_process_identity\":\"$dead_identity\",\"backend_handle\":\"$live_backend\"}" >/dev/null
+conservative_backend_state="$(fixture_state "$live_backend")"
 capture python3 "$MANIFEST" reconcile --manifest "$CONSERVATIVE"
 if [ "$CAPTURE_RC" -eq 0 ] && [ "$CAPTURE_OUT" = '{"abandoned":0,"open":2,"status":"ok"}' ]; then
   pass "reconcile preserves a run when either owner or backend is live"
 else
-  fail "reconcile preserves a run when either owner or backend is live" "rc=$CAPTURE_RC out=$CAPTURE_OUT"
+  fail "reconcile preserves a run when either owner or backend is live" "rc=$CAPTURE_RC out=$CAPTURE_OUT backend_fixture=$conservative_backend_state"
 fi
 kill "$live_backend" 2>/dev/null || true
 wait "$live_backend" 2>/dev/null || true

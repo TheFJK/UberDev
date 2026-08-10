@@ -4,6 +4,34 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.2] — 2026-08-09
+
+### Fixed
+
+- **The second half of the starvation-intolerant assertion sweep** (#420 covered
+  the first). The remaining 55 of the 110 CI suites were scanned, and eight more
+  files carried assertions whose verdict turned on machine speed rather than on
+  whether the code was right:
+  - `run-manifest`: a `sleep 5 &` fixture had to outlive four appends plus a
+    reconcile — five CPython startups — and under throttled QoS consumed 4.136s
+    of its 5.000s budget, a 12.5x swing driven purely by machine QoS. Also an
+    exact-count oracle over 24 concurrently-forked appenders that reported only
+    an aggregate, with every child's stderr sent to `/dev/null`: the one line
+    naming the failing appender was destroyed at the moment it was produced.
+  - `live-semaphore`: a `sleep 10` provider that then deliberately burned 2s of
+    its own budget ageing a lease.
+  - `dispatch-background`, `review-pr`, `route-context`, `route-unsupported`,
+    `production-run-tree-builder`, `agent-dispatch`: wall-clock windows,
+    resource-dependent counts, and fixed timeouts acting as correctness oracles
+    rather than hang detectors.
+- **Twenty-plus assertions that could never fail.** POSIX exempts a command whose
+  status is inverted with `!` from `errexit`, so `! some_cmd` as an assertion is
+  dead — it reports nothing whether it holds or not. `route-context` alone had
+  20 (the finding said 17; the fixer counted them itself rather than trusting
+  the number). More in `route-unsupported` and `production-run-tree-builder`.
+  These are worse than flakes: a flaky test tells you something is wrong, a
+  vacuous one tells you nothing forever.
+
 ## [0.45.1] — 2026-08-09
 
 ### Fixed

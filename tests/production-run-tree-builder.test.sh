@@ -159,7 +159,15 @@ pathlib.Path(sys.argv[3]).write_text(removed['edge_id'])
 PY
 build_case_fixture "$TMP/omitted-contract.json" "$TMP/mutation-runtime" >"$TMP/omitted-cases.tsv"
 [ "$(wc -l <"$TMP/omitted-cases.tsv" | tr -d ' ')" -lt "$EXPECTED_COUNT" ]
-! grep -Fq "$(<"$TMP/omitted-edge")" "$TMP/omitted-cases.tsv"
+[ -s "$TMP/omitted-edge" ]
+OMITTED_EDGE="$(<"$TMP/omitted-edge")"
+OMITTED_LEAK_RC=0
+grep -Fq -e "$OMITTED_EDGE" "$TMP/omitted-cases.tsv" || OMITTED_LEAK_RC=$?
+if [ "$OMITTED_LEAK_RC" -eq 0 ]; then
+  echo "production-run-tree-builder: omitted contract $OMITTED_EDGE leaked back into the generated case set" >&2
+  exit 1
+fi
+[ "$OMITTED_LEAK_RC" -eq 1 ]
 if coverage_is_complete "$TMP/omitted-cases.tsv"; then
   echo 'production-run-tree-builder: fixture omission silently restored from manifest' >&2
   exit 1

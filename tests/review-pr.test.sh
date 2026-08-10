@@ -1897,19 +1897,36 @@ awk '
   active && /^REVIEW_RUN_REPO_ROOT=/ { exit }
   active { print }
 ' "$REVIEW_PR" >"$R36_TMP/helpers.sh"
-R36_SEED() {  # <run-id> <age-mode: stale|fresh> [extra-file...]
-  local id="$1" age="$2"; shift 2
+# The reaper's decision is `(now - locked.st_mtime) <= reap_secs`, so EVERY
+# seeded marker states its age explicitly, in seconds before now, and the policy
+# handed to the reaper sits ~a day away from both classes.
+#
+# The live marker used to inherit its mtime from `: >"$dir/locked"` — "however
+# long ago this row happened to run" — against the 60s floor policy. That made
+# the verdict a stopwatch on the harness rather than a statement about the code:
+# 60s of runner starvation between seeding and the reaper's own `time.time()`
+# means the live directory IS past policy, the reaper correctly retires it, and
+# the row scores correct behaviour as `[ 2 = 1 ]` — a diagnostic that reads as a
+# selection defect and sends the reader to the wrong file (#396.2 class).
+# Deterministic ages also make the row STRONGER: a reaper that ignored its
+# policy argument and applied any threshold below 300s now reds, where a marker
+# stamped 0s ago could never catch one.
+R36_REAP_SECS=86400        # policy under test (1 day; the reaper accepts 60..604800)
+R36_LIVE_AGE=300           # "still running" — 5 minutes old, ~24h inside the policy
+R36_ABANDONED_AGE=172800   # "abandoned" — 2 days old, a full day past the policy
+R36_SEED() {  # <run-id> <marker-age-in-seconds> [extra-file...]
+  local id="$1" age_seconds="$2"; shift 2
   local dir="$R36_RUNS_ROOT/$id"
-  mkdir "$dir"
-  : >"$dir/locked"
-  printf '{"issue":0,"pr":73}\n' >"$dir/pr-context.json"
+  mkdir "$dir" || return 1
+  : >"$dir/locked" || return 1
+  printf '{"issue":0,"pr":73}\n' >"$dir/pr-context.json" || return 1
   local extra
-  for extra in "$@"; do printf 'x\n' >"$dir/$extra"; done
-  if [ "$age" = stale ]; then
-    python3 -I -B -c 'import os,sys
-for path in sys.argv[1:]:
-    os.utime(path, (0, 0))' "$dir/locked" "$dir/pr-context.json"
-  fi
+  for extra in "$@"; do printf 'x\n' >"$dir/$extra" || return 1; done
+  python3 -I -B -c 'import os,sys,time
+stamp = time.time() - float(sys.argv[1])
+for target in sys.argv[2:]:
+    os.utime(target, (stamp, stamp))' \
+    "$age_seconds" "$dir/locked" "$dir/pr-context.json"
 }
 if (
   set -u
@@ -1939,24 +1956,21 @@ if (
   R36_RUNS_ROOT="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["path"],end="")' "$root_record")" || exit 1
   runs_identity="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"],separators=(",",":")),end="")' "$root_record")" || exit 1
   r36_require review_publish_local_ignore "$R36_RUNS_ROOT" "$runs_identity"
-  r36_require R36_SEED 20260101-000000-aaaaaaaa stale
-  r36_require R36_SEED 20260101-000001-bbbbbbbb fresh
-  r36_require R36_SEED 20260101-000002-cccccccc stale review-pr-verdict.json
-  r36_require R36_SEED 20260101-000003-dddddddd stale surprise.txt
-  reaped="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>"$R36_TMP/reap.err")" || exit 1
-  r36_require [ "$reaped" = 1 ]
-  # Observability: the documented contract is a `notice:` line for what it
-  # reaped AND for every directory that still looks live but was left alone.
-  # An operator debugging a /goal stall reads these; silence there is the same
-  # failure mode as the stall itself.
-  r36_require grep -q "retired abandoned reservation markers in .*20260101-000000-aaaaaaaa" "$R36_TMP/reap.err"
-  r36_require grep -q "20260101-000001-bbbbbbbb/locked is .*s old, under the 60s reap policy" "$R36_TMP/reap.err"
-  r36_require grep -q "20260101-000003-dddddddd holds unrecognized entries" "$R36_TMP/reap.err"
+  r36_require R36_SEED 20260101-000000-aaaaaaaa "$R36_ABANDONED_AGE"
+  r36_require R36_SEED 20260101-000001-bbbbbbbb "$R36_LIVE_AGE"
+  r36_require R36_SEED 20260101-000002-cccccccc "$R36_ABANDONED_AGE" review-pr-verdict.json
+  r36_require R36_SEED 20260101-000003-dddddddd "$R36_ABANDONED_AGE" surprise.txt
+  reaped="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" "$R36_REAP_SECS" 2>"$R36_TMP/reap.err")" || exit 1
+  # Per-directory state first, aggregate count last: each assertion below names
+  # the directory the reaper mis-handled, so a selection defect is legible from
+  # the failure line alone. The `reaped` total is a real claim (nothing OUTSIDE
+  # these four moved) but a count mismatch names no directory on its own.
   # (a) abandoned: markers gone, directory preserved as evidence
   r36_require [ -d "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa" ]
   r36_require [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/locked" ]
   r36_require [ ! -e "$R36_RUNS_ROOT/20260101-000000-aaaaaaaa/pr-context.json" ]
-  # (b) fresh run: a live /review-pr must never be reaped out from under itself
+  # (b) live run: a /review-pr still inside the policy window must never be
+  # reaped out from under itself
   r36_require [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/locked" ]
   r36_require [ -f "$R36_RUNS_ROOT/20260101-000001-bbbbbbbb/pr-context.json" ]
   # (c) published run: a verdict means the final fence owns the markers
@@ -1967,14 +1981,32 @@ if (
   r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/locked" ]
   r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/pr-context.json" ]
   r36_require [ -f "$R36_RUNS_ROOT/20260101-000003-dddddddd/surprise.txt" ]
+  # Observability: the documented contract is a `notice:` line for what it
+  # reaped AND for every directory that still looks live but was left alone.
+  # An operator debugging a /goal stall reads these; silence there is the same
+  # failure mode as the stall itself. The skip line must render a numeric age
+  # and echo the policy it was actually handed — a reaper applying some other
+  # threshold shows up here as well as in (b).
+  r36_require grep -q "retired abandoned reservation markers in .*20260101-000000-aaaaaaaa" "$R36_TMP/reap.err"
+  r36_require grep -q "20260101-000001-bbbbbbbb/locked is [0-9][0-9]*s old, under the ${R36_REAP_SECS}s reap policy" "$R36_TMP/reap.err"
+  r36_require grep -q "20260101-000003-dddddddd holds unrecognized entries" "$R36_TMP/reap.err"
+  # Totality: exactly one of the four was retired, so nothing outside the cases
+  # asserted above moved either.
+  r36_require [ "reaped=$reaped" = "reaped=1" ]
   # The reaper is idempotent and reports 0 on a second pass.
-  second_pass="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" 60 2>/dev/null)" || exit 1
-  r36_require [ "$second_pass" = 0 ]
+  second_pass="$(review_reap_stale_run_reservations "$R36_RUNS_ROOT" "$runs_identity" "$R36_REAP_SECS" 2>/dev/null)" || exit 1
+  r36_require [ "second_pass=$second_pass" = "second_pass=0" ]
 ); then
   echo "  PASS  R36.4 — reaps only abandoned, verdict-less, recognized reservations (idempotent)"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  R36.4 — reaper selection contract failed"
+  if [ -s "$R36_TMP/reap.err" ]; then
+    echo "        reaper notices from the first pass:"
+    sed 's/^/          /' "$R36_TMP/reap.err"
+  else
+    echo "        reaper emitted no notices on the first pass"
+  fi
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$R36_TMP"
