@@ -393,6 +393,13 @@ authority document, pinned by digest, and the controller reads it back through
 `read-ci-authority-member` (which re-checks the digest) at push time. The script
 never sees it, because the script never pushes.
 
+**`base_tip_sha` is not in this table either, for exactly that reason.** It is
+the base branch's tip as the controller observed it before dispatch, and it
+exists to prove — at push time, in the controller — that the head about to be
+force-pushed is still descended from the branch the PR is based on (#438). Like
+the lease, it is a controller-side proof value about a push the script does not
+perform, so it lives in the authority document and nowhere else.
+
 `childNotes` is optional and **untrusted**: the short `note` strings the earlier
 stages' children returned, concatenated by the controller from those runs'
 `children[]` returns. Because the stages are separate Workflow calls, this

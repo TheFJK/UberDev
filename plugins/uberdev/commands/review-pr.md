@@ -4165,6 +4165,35 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     CI_LEASE_SHA="$(git -C "$WORKTREE_ROOT" rev-parse "refs/remotes/origin/$CI_PR_HEAD_BRANCH")" || { audit ci_fix_dispatch_lease_unreadable; OUTCOME=halted; exit 1; }
     CI_BASE_SHA="$(git -C "$WORKTREE_ROOT" merge-base \
       "refs/remotes/origin/$CI_PR_HEAD_BRANCH" "refs/remotes/origin/$CI_BASE_BRANCH")" || { audit ci_fix_dispatch_base_unreadable; OUTCOME=halted; exit 1; }
+    # THE BASE BRANCH'S TIP, captured as its own value and never folded into the
+    # merge-base above. The two are different nouns and only one of them can
+    # prove where a rebase LANDED (#438).
+    #
+    # `CI_BASE_SHA` is the merge-base. The moment the base branch is itself
+    # rewritten, that merge-base collapses to the shared fork point with the
+    # default branch -- and every candidate rebase target contains the fork
+    # point, so the contract's ancestry assertion passes for a rebase onto
+    # `main` exactly as it does for a rebase onto the branch the PR is stacked
+    # on. The tip is the ref `agents/ci-rebase-handler.md` Step 4 actually tells
+    # the child to rebase onto, so it is the value the result must contain.
+    #
+    # It crosses the SAME dead shell as the lease, so it travels the SAME way:
+    # pinned into the digest-pinned rebase authority at 6c.4w.1 and read back
+    # with `read-ci-authority-member` at 6c.4w.3. It is a REQUIRED member there
+    # (code_fixer_contract.py CI_AUTHORITY_REQUIRED_MEMBERS), so a value lost
+    # between fences is refused at the mint rather than defaulted at the push --
+    # the #418/#419 discipline, applied to the value that fixes #438.
+    #
+    # That covers MINT -> PUSH. The ROUTE -> MINT hop below is NOT covered, and
+    # this value does not fix it: `CI_LEASE_SHA`, `CI_BASE_SHA`,
+    # `CI_PR_HEAD_BRANCH`, `CI_BASE_BRANCH`, `CI_FIXER_EDGE_ID`,
+    # `CI_FIXER_INPUTS`, `failure_class` and `signal_anchor` all reach 6c.4w.1 as
+    # bare scalars out of this shell, and the tip joins that queue rather than
+    # jumping it. The hop is fail-closed (every one of them is a required member
+    # refused at mint when empty), so nothing defaults -- but the whole cluster
+    # has to move together, and the command-wide cross-fence rebuild is #427.
+    # Do not read #438 as having closed it.
+    CI_BASE_TIP_SHA="$(git -C "$WORKTREE_ROOT" rev-parse "refs/remotes/origin/$CI_BASE_BRANCH")" || { audit ci_fix_dispatch_base_tip_unreadable; OUTCOME=halted; exit 1; }
     CI_REBASE_INPUTS="$(uberdev_child_inputs_build review_pr.ci.rebase \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       pr_number "$PR_NUMBER" \
@@ -4230,6 +4259,15 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     because the script never pushes. `prepare-ci-authority` refuses a rebase
     authority with an empty `lease_sha` **at mint**, so a missing lease costs a
     refusal before the Workflow call rather than after a child has run.
+
+    It carries `base_tip_sha` on exactly the same terms, and for the same class
+    of reason (#438). `base_sha` is the pre-rebase MERGE-BASE; `base_tip_sha` is
+    `refs/remotes/origin/<base_branch>` as ROUTE observed it, which is the ref
+    the child is told to rebase onto. Only the tip can prove where a rebase
+    landed once the base branch has itself been rewritten — at that point the
+    merge-base collapses to the shared fork point, and every candidate rebase
+    target contains it. Both are required members, so neither can go missing
+    across the dead shell between ROUTE and this fence and reappear as a default.
 
     ```bash uberdev-executable origin=review-pr
     REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
@@ -4303,7 +4341,8 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
         --pr-number "$PR_NUMBER" --run-id "$CI_RUN_ID" --head-sha "$CI_CLASSIFICATION_HEAD_SHA" \
         --working-dir "$REVIEW_FLEET_WORKTREE" \
         --input-path "$CI_FIXER_CHILD_DIR/input.json" --input-sha256 "$CI_FIXER_INPUT_SHA256" \
-        --base-sha "$CI_BASE_SHA" --lease-sha "$CI_LEASE_SHA" \
+        --base-sha "$CI_BASE_SHA" --base-tip-sha "$CI_BASE_TIP_SHA" \
+        --lease-sha "$CI_LEASE_SHA" \
         --pr-branch "$CI_PR_HEAD_BRANCH" --base-branch "$CI_BASE_BRANCH" \
         --authority-output-path "$CI_AUTHORITY_PATH")" || return 74
     fi
@@ -4594,12 +4633,125 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     if [ "$CI_FIXER_HEAD_BEFORE" = "$NEW_HEAD_SHA" ]; then
       review_ci_push_abort ci_fix_no_change
     fi
+    # THE BASE-TIP PROOF (#438). `validate-ci-mutation-outcome` judges the
+    # rebase, but the CONFLICT terminal reaches THIS fence a SECOND time after
+    # `rebase --continue` and the judge does not run again -- so the post-continue
+    # head was never base-tip-checked by anything. Proving it here covers all
+    # three terminals uniformly and does not depend on when the judge ran.
+    #
+    # The pin is the base branch's tip as ROUTE observed it, read back out of the
+    # digest-pinned authority exactly as the lease is. `merge-base --is-ancestor`
+    # against it answers the one question the lease cannot: the lease proves
+    # nobody else moved the PR HEAD, while this proves the head about to be
+    # force-pushed is still descended from the branch the PR is based on. A
+    # rebase onto the wrong target satisfies the lease perfectly.
+    #
+    # Rebase edge only: `fix_code` commits on top of the existing head and does
+    # not change base ancestry, and its authority carries no tip to check.
+    if [ "$CI_FIXER_EDGE_ID" = review_pr.ci.rebase ]; then
+      CI_BASE_TIP_SHA="$(python3 -I -B "$CODE_FIXER_CONTRACT" read-ci-authority-member \
+        --authority-path "$CI_AUTHORITY_PATH" --authority-sha256 "$CI_AUTHORITY_SHA256" \
+        --member base_tip_sha)" || review_ci_push_abort ci_authority_unreadable
+      # A required member of the rebase authority, so an empty value here means
+      # the pin itself is wrong. Refuse rather than run `--is-ancestor ""`, which
+      # is an error git reports the same way it reports a real refusal.
+      case "$CI_BASE_TIP_SHA" in
+        *[!0-9a-f]*) review_ci_push_abort ci_authority_unreadable ;;
+        *) [ "${#CI_BASE_TIP_SHA}" -eq 40 ] || review_ci_push_abort ci_authority_unreadable ;;
+      esac
+      git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$CI_BASE_TIP_SHA" "$NEW_HEAD_SHA" \
+        || review_ci_push_abort ci_push_head_detached_from_base
+    fi
     if [ "$CI_FIXER_EDGE_ID" = review_pr.ci.fix_code ]; then
       CI_FIX_BY_AGENT=ci-code-fixer
     elif [ -s "$REVIEW_FLEET_RUN_DIR/ci-conflicts-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launched" ]; then
       CI_FIX_BY_AGENT="ci-rebase-handler+conflict-resolver"
     else
       CI_FIX_BY_AGENT=ci-rebase-handler
+    fi
+    # THE DEPENDENT-PR GATE (#438). `--force-with-lease` and `--force-if-includes`
+    # protect exactly ONE thing: this PR's own head. They say nothing about who
+    # BASES on that branch. A leased push that rewrites a branch another open PR
+    # is stacked on returns 0 and reports success -- while that PR's merge-base
+    # collapses and its diff silently grows to include commits its author never
+    # wrote. There was no audit event and no halt, because there was no reader.
+    #
+    # The question is a LIVE fact about the remote, so it is asked HERE, in the
+    # fence that pushes, and not at the cross-repository gate ~2000 lines and one
+    # child dispatch earlier: an answer from before the child ran describes a
+    # repository state that no longer exists.
+    #
+    # ASKED ONLY OF A PUSH THAT REWRITES. Both mutating edges land in this one
+    # fence, and only one of them rewrites history: `_validate_ci_fix_code_outcome`
+    # pins the `fix_code` terminal to exactly one commit whose parent is
+    # `head_before`, so that edge's push is an APPEND. Appending cannot move any
+    # dependent PR's merge-base -- the new commits are not reachable from that
+    # PR's head, so its merge-base and therefore its diff are unchanged. Halting
+    # an append would refuse a push that harms nobody, and would take Phase 3 CI
+    # autofix permanently offline on exactly the stacked branches #438 exists to
+    # protect.
+    #
+    # The discriminator is the SHAPE of the push, never the name of the edge:
+    # `--force-with-lease` below has already fixed the remote ref at
+    # `$CI_LEASE_SHA`, so "the lease is an ancestor of the new head" IS "this
+    # push fast-forwards". A CONFLICT-terminal rebase that happens to
+    # fast-forward is equally harmless and is equally let through; a `fix_code`
+    # run that somehow did NOT fast-forward is equally gated. If the ancestry
+    # probe itself fails, git answers rc>1, the `else` arm runs, and the gate
+    # asks its question anyway -- "cannot tell whether this rewrites" falls
+    # through to the STRICTER branch, never past it.
+    if git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$CI_LEASE_SHA" "$NEW_HEAD_SHA"; then
+      : # fast-forward: append-only, no dependent PR's base can move
+    else
+      # `gh` is PINNED to the repository the push targets, and that repository is
+      # named by the very remote the push names -- `origin` of `$WORKTREE_ROOT`.
+      # Left unpinned, `gh` resolves a repository from the cwd's remotes on its
+      # own precedence (upstream > github > origin) and also honours `$GH_REPO`
+      # and `remote.<n>.gh-resolved`, so a fork chain, a contributor clone or a
+      # stale `gh repo set-default` makes it answer about a DIFFERENT repository
+      # -- returning a well-formed empty array, which is a fail-OPEN answer in a
+      # fail-closed gate. The `--repo` flag outranks both of those sources
+      # (verified against gh 2.83.1), so pinning it is sufficient.
+      CI_PUSH_REMOTE_URL="$(git -C "$WORKTREE_ROOT" remote get-url origin)" \
+        || review_ci_push_abort ci_dependent_pr_probe_unreadable
+      # owner/name is the last two path segments with any `.git` suffix removed --
+      # the same shape `gh` itself derives from a remote URL, and it covers the
+      # scp-form (`git@host:owner/name.git`) and URL forms alike because both
+      # `:` and `/` separate segments. An unparseable remote is "cannot tell
+      # which repository I am about to rewrite", which is the outage answer.
+      # NO INDENTED PYTHON LINES. `tests/review-pr-phase3-ci.test.sh` S34-FENCE
+      # extracts THIS fence and runs it for real, and its extractor strips four
+      # leading spaces from every line — which is exactly the four spaces a
+      # nested python block would use. An indented block therefore arrives as an
+      # IndentationError under execution, halting the gate
+      # `ci_dependent_pr_probe_unreadable` on every run. Single-line `if` and a
+      # comprehension keep every statement at column zero.
+      CI_PUSH_REPO_SLUG="$(python3 -I -B -c 'import re,sys
+url=re.sub(r"\.git$","",sys.argv[1].strip().rstrip("/")).rstrip("/")
+slug="/".join([p for p in re.split(r"[:/]",url) if p][-2:])
+if re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+",slug) is None: raise SystemExit(74)
+sys.stdout.write(slug)' "$CI_PUSH_REMOTE_URL")" \
+        || review_ci_push_abort ci_dependent_pr_probe_unreadable
+      # This HALTS on a `gh` failure; it is deliberately NOT the `ci_probe_unreachable`
+      # carve-out 6c.1 PROBE applies to a `gh` outage. That carve-out is justified
+      # entirely by the probe being READ-ONLY -- an unreachable probe costs a trust
+      # signal, not a repository. This gate stands in front of a FORCE-PUSH, and
+      # "gh is down" is a different answer from "no PR is stacked on this branch".
+      # Same rule, same reason as 6c.4w.0: a probe that cannot read checks may
+      # proceed, a push that cannot clear its ref may not.
+      #
+      # The two outcomes get DIFFERENT typed subreasons on purpose, so an audit
+      # consumer can tell "there is a stacked PR" from "I could not ask".
+      CI_DEPENDENT_PRS="$(gh pr list --repo "$CI_PUSH_REPO_SLUG" --base "$CI_PR_HEAD_BRANCH" --state open --json number)" \
+        || review_ci_push_abort ci_dependent_pr_probe_unreadable
+      # rc alone is not enough: a failing `gh` writes prose where the JSON
+      # projection should be, and an empty/garbage payload must never read as "no
+      # dependents". Shape first, then count -- the `jq length || echo 0` idiom
+      # this repository has been bitten by maps a crashed producer onto zero.
+      jq -e 'type == "array"' >/dev/null 2>&1 <<<"$CI_DEPENDENT_PRS" || review_ci_push_abort ci_dependent_pr_probe_unreadable
+      CI_DEPENDENT_PR_COUNT="$(jq -r 'length' <<<"$CI_DEPENDENT_PRS")" || review_ci_push_abort ci_dependent_pr_probe_unreadable
+      case "$CI_DEPENDENT_PR_COUNT" in '' | *[!0-9]*) review_ci_push_abort ci_dependent_pr_probe_unreadable ;; esac
+      [ "$CI_DEPENDENT_PR_COUNT" -eq 0 ] || review_ci_push_abort ci_push_would_rewrite_stacked_base
     fi
     # Explicit-form lease + --force-if-includes. The bare `--force-with-lease`
     # shorthand (which uses @{upstream}) stays forbidden, and so does bare
@@ -4628,6 +4780,20 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     ```
 
     - On push success: fall through to "Phase 1 re-entry" below.
+    - On a head that is no longer descended from the base branch tip the
+      authority pinned: `data.subreason=ci_push_head_detached_from_base`, exit 1.
+      The rebase landed somewhere other than the branch this PR is based on;
+      the lease cannot see that, because the lease only guards this PR's head.
+    - On a REWRITING push to a branch another open PR is based on:
+      `data.subreason=ci_push_would_rewrite_stacked_base`, exit 1. Nothing is
+      pushed. A fast-forward push is not gated — it cannot move a dependent
+      PR's merge-base — so this halt never fires on the `fix_code` edge.
+    - When the dependent-PR question cannot be asked at all (`gh` failure,
+      non-array payload, unparseable `origin` URL):
+      `data.subreason=ci_dependent_pr_probe_unreadable`, exit 1. "I could not
+      ask" is a different answer from "nobody is stacked", and unlike 6c.1's
+      read-only probe this one stands in front of a force-push, so it does
+      **not** take the `ci_probe_unreachable` carve-out.
     - On lease mismatch (`origin/$CI_PR_HEAD_BRANCH` no longer matches the
       pinned lease): `git rebase --abort` if one is live,
       `data.subreason=rebase_lease_mismatch`, exit 1. An external push landed

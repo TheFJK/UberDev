@@ -2579,9 +2579,14 @@ PUSH_FENCE="$(awk '
   END { if (!found) exit 1 }
 ' "$REVIEW_PR")" || PUSH_FENCE=""
 PUSH_SELF_CONTAINED=ok
+# #438 adds two more obligations to the SAME fence, listed here so neither can
+# be silently deleted: the dependent-PR gate (`gh pr list --repo`, pinned to the
+# push target's own remote rather than resolved out of the cwd) and the base-tip
+# ancestry proof read off the pinned authority (`base_tip_sha`).
 for token in 'review_fleet_read_sidecar' 'read-ci-authority-member' \
              'review_fleet_load_ci_counters' 'review_ci_push_abort()' \
-             'review_fleet_read_ci_pointer' 'rev-parse HEAD'; do
+             'review_fleet_read_ci_pointer' 'rev-parse HEAD' \
+             'gh pr list --repo' 'base_tip_sha'; do
   grep -qF -- "$token" <<<"$PUSH_FENCE" \
     || PUSH_SELF_CONTAINED="missing:$token"
 done
@@ -2678,6 +2683,12 @@ spec.loader.exec_module(m)
 for edge in ("review_pr.ci.fix_code", "review_pr.ci.rebase"):
     required = m.CI_AUTHORITY_REQUIRED_MEMBERS[edge]
     assert "lease_sha" in required and "pr_branch" in required, (edge, required)
+# #438 — the base TIP crosses the SAME dead shell (6c.4 ROUTE -> 6c.4w.1 MINT)
+# as the lease, so it gets the same fail-closed device rather than a
+# `${CI_BASE_TIP_SHA:-}` default, which would re-open the #418 class inside the
+# fix for #438.
+assert "base_tip_sha" in m.CI_AUTHORITY_REQUIRED_MEMBERS["review_pr.ci.rebase"], (
+    m.CI_AUTHORITY_REQUIRED_MEMBERS["review_pr.ci.rebase"])
 ' "$CONTRACT_PY" 2>/dev/null; then
   echo "  PASS  S24.13 — BOTH mutating arms refuse at mint without a lease and a branch"; PASS=$((PASS + 1))
 else
@@ -4258,6 +4269,454 @@ beta gamma.txt' >/dev/null
   done
 fi
 rm -rf "$S33_TMP"
+
+echo
+echo "== S34: Phase 3's leased push is STACK-SAFE (#438) =="
+# Two halves of one defect, and they ship together because half one manufactures
+# exactly the repository state half two cannot police.
+#
+#   HALF 1 — `--force-with-lease` + `--force-if-includes` protect only THIS PR's
+#     head. They say nothing about who BASES on that branch. A leased push that
+#     rewrites a branch another open PR is stacked on returns 0, collapses that
+#     PR's merge-base, and silently grows its diff — with no audit event and no
+#     halt. The gate is a `gh pr list --base <head branch>` query immediately
+#     before the push, in the SAME fence.
+#
+#   HALF 2 — the rebase guard asserted ancestry against `base_sha`, which 6c.4
+#     ROUTE pins as a MERGE-BASE. Once the base branch is force-pushed that
+#     merge-base collapses to the main fork point, which every candidate rebase
+#     target contains, so the assertion passes unconditionally. The base TIP is
+#     the value that discriminates, and it travels on the SAME digest-pinned
+#     authority channel the lease does.
+assert_grep "$REVIEW_PR" 'CI_BASE_TIP_SHA="\$\(git -C "\$WORKTREE_ROOT" rev-parse "refs/remotes/origin/\$CI_BASE_BRANCH"\)"' \
+  "S34.1 — 6c.4 ROUTE captures the base branch's TIP, not only the merge-base"
+# ...and the capture must be a SEPARATE statement: S21.10 pins the merge-base
+# spelling, and folding the two into one command would silently retire it.
+assert_grep "$REVIEW_PR" 'CI_BASE_SHA=.*merge-base' \
+  "S34.2 — the pre-rebase merge-base pin survives alongside the tip"
+if grep -qF -- '--base-tip-sha "$CI_BASE_TIP_SHA"' <<<"$MINT_FENCE"; then
+  echo "  PASS  S34.3 — the rebase mint pins the base tip into the authority"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S34.3 — the base tip never reaches the digest-pinned authority (it dies with ROUTE's shell)"; FAIL=$((FAIL + 1))
+fi
+# The typed halts, registered the way ci_push_target_cross_repository is: a
+# doc-presence grep here, a runtime assertion on the audit line below.
+for s34_subreason in ci_push_would_rewrite_stacked_base \
+                     ci_dependent_pr_probe_unreadable \
+                     ci_push_head_detached_from_base; do
+  if grep -qF "review_ci_push_abort $s34_subreason" <<<"$PUSH_FENCE"; then
+    echo "  PASS  S34.4.$s34_subreason — the halt is typed and lives in the push fence"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  S34.4.$s34_subreason — no typed halt for this state in the push fence"; FAIL=$((FAIL + 1))
+  fi
+done
+# A gh outage is NOT the 6c.1 `ci_probe_unreachable` carve-out. That carve-out's
+# whole justification is that a probe is READ-ONLY: an unreachable probe costs a
+# trust signal, not a repository. This gate guards a FORCE-PUSH, and "gh is down"
+# is a different answer from "no PR is stacked on this branch". Same precedent
+# the cross-repository gate cites at 6c.4w.0: a probe that cannot read checks may
+# proceed, a push that cannot name — or clear — its ref may not.
+# Comment-stripped, like S29.1b: the fence is REQUIRED to explain why it does not
+# take the carve-out, and a grep that cannot tell prose from code would forbid
+# the explanation instead of the behaviour.
+PUSH_FENCE_CODE="$(sed -e 's/[[:space:]]*#.*$//' <<<"$PUSH_FENCE")"
+if ! grep -qF 'ci_probe_unreachable' <<<"$PUSH_FENCE_CODE"; then
+  echo "  PASS  S34.5 — the push fence does not borrow the read-only probe's carve-out"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S34.5 — a gh outage can reach the force-push wearing ci_probe_unreachable"; FAIL=$((FAIL + 1))
+fi
+# BOTH ancestry proofs, never one replacing the other.
+if grep -qF 'ci_rebase_base_not_ancestor' "$CONTRACT_PY" \
+   && grep -qF 'ci_rebase_base_tip_not_ancestor' "$CONTRACT_PY"; then
+  echo "  PASS  S34.6 — the judge keeps the merge-base proof AND gains the base-tip proof"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S34.6 — the rebase judge has only one ancestry predicate"; FAIL=$((FAIL + 1))
+fi
+# The gate refuses REWRITES, not pushes. `fix_code`'s terminal is pinned to a
+# single commit on top of head_before, so its push is a fast-forward and cannot
+# move any dependent PR's merge-base; gating it would disable Phase 3 CI autofix
+# on every stacked branch for no safety gain. The discriminator has to be the
+# push SHAPE — is the lease an ancestor of the new head — because the CONFLICT
+# terminal re-enters this fence and the edge id alone cannot answer it.
+if grep -qF 'merge-base --is-ancestor "$CI_LEASE_SHA" "$NEW_HEAD_SHA"' <<<"$PUSH_FENCE"; then
+  echo "  PASS  S34.7 — the dependent-PR gate is asked only of a push that rewrites"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S34.7 — the gate refuses fast-forward pushes that rewrite nothing"; FAIL=$((FAIL + 1))
+fi
+# Unpinned, `gh` resolves a repository from the cwd's remotes on its own
+# precedence (upstream > github > origin) and honours $GH_REPO and
+# remote.<n>.gh-resolved — so it can return a well-formed empty array for a
+# DIFFERENT repository. That is fail-OPEN inside a fail-closed gate, so the
+# query must name the repository the push targets.
+if grep -qF 'gh pr list --repo "$CI_PUSH_REPO_SLUG" --base "$CI_PR_HEAD_BRANCH" --state open --json number' <<<"$PUSH_FENCE" \
+   && grep -qF 'git -C "$WORKTREE_ROOT" remote get-url origin' <<<"$PUSH_FENCE"; then
+  echo "  PASS  S34.8 — the dependent-PR query is pinned to the push target's own remote"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S34.8 — the query lets gh pick a repository out of the cwd"; FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== S34-FENCE: THE SINGLE LEASED PUSH, executed against a real remote (#438) =="
+# Structural greps cannot answer "did it push?". These rows extract 6c.4w.3
+# verbatim, hand it a real two-repository fixture, a real digest-pinned
+# authority and a stubbed `gh`, and assert on the RECORDED GIT ARGV — the only
+# evidence that distinguishes "halted before the push" from "halted after it".
+S34_TMP="$(mktemp -d)"
+S34_PLUGIN="$REPO_ROOT/plugins/uberdev"
+S34_CONTRACT="$S34_PLUGIN/lib/code_fixer_contract.py"
+S34_ARGS="$S34_PLUGIN/lib/review-fleet-args.sh"
+awk '
+  /^    ```bash/ { collecting = 1; buf = ""; next }
+  collecting && /^    ```$/ {
+    if (buf ~ /--force-with-lease=/) { printf "%s", buf; exit }
+    collecting = 0; next
+  }
+  collecting { line = $0; sub(/^    /, "", line); buf = buf line "\n" }
+' "$REVIEW_PR" >"$S34_TMP/push-fence.sh"
+
+cat >"$S34_TMP/driver.sh" <<'S34DRIVER'
+set -u
+audit() { printf 'audit %s\n' "$*" >>"$S34_LOG"; }
+# EVERY git invocation is recorded before it runs, so "no push happened" is an
+# assertion about argv rather than about an exit code that a halt also produces.
+git() { printf 'git %s\n' "$*" >>"$S34_GITLOG"; command git "$@"; }
+gh() {
+  printf 'gh %s\n' "$*" >>"$S34_GITLOG"
+  case "$S34_GH" in
+    none)      printf '[]\n' ;;
+    dependent) printf '[{"number":99}]\n' ;;
+    outage)    printf 'gh: could not connect to api.github.com\n' >&2; return 1 ;;
+    prose)     printf 'not json at all\n' ;;
+    *)         return 90 ;;
+  esac
+}
+OUTCOME=unset
+PR_NUMBER=438
+WORKTREE_ROOT="$S34_REPO"
+RESEARCH_DIR_ABS="$S34_RUN"
+CODE_FIXER_CONTRACT="$S34_CONTRACT_PY"
+UBERDEV_REVIEW_PLUGIN_ROOT="$S34_PLUGIN_ROOT"
+. "$S34_FENCE"
+printf 'OUTCOME=%s\n' "$OUTCOME"
+S34DRIVER
+
+# s34_build HEAD_MODE TIP_MODE -> rebuilds the fixture from scratch.
+#   HEAD_MODE  stacked   = local fix/b descends from origin/fix/b (a FAST-FORWARD
+#                          push: what the fix_code edge always produces)
+#              rewritten = local fix/b was rebuilt off origin/fix/a's tip, so it
+#                          still descends from the pinned base tip but NOT from
+#                          the lease — a genuine history REWRITE
+#              detached  = local fix/b was rebuilt off main instead
+#   TIP_MODE   pinned   = the authority carries the real base tip
+#              lost     = the authority carries an empty base_tip_sha
+#
+# `origin` deliberately lives at <owner>/<name>.git and a second `upstream`
+# remote is deliberately present: the dependent-PR query must name the
+# repository the PUSH targets, and an unpinned `gh` would resolve `upstream`
+# first (gh's own remote precedence is upstream > github > origin).
+s34_build() {
+  local head_mode="$1" tip_mode="$2"
+  rm -rf "$S34_TMP/fixture-owner" "$S34_TMP/other-owner" "$S34_TMP/repo" "$S34_TMP/run"
+  mkdir -p "$S34_TMP/run" "$S34_TMP/fixture-owner" "$S34_TMP/other-owner"
+  command git init -q --bare "$S34_TMP/fixture-owner/fixture-repo.git"
+  command git init -q --bare "$S34_TMP/other-owner/other-repo.git"
+  command git init -q -b main "$S34_TMP/repo"
+  command git -C "$S34_TMP/repo" config user.email fixture@example.invalid
+  command git -C "$S34_TMP/repo" config user.name Fixture
+  printf 'm0\n' >"$S34_TMP/repo/m.txt"
+  command git -C "$S34_TMP/repo" add -- m.txt
+  command git -C "$S34_TMP/repo" commit -qm 'test: m0'
+  command git -C "$S34_TMP/repo" checkout -q -b fix/a
+  printf 'A1\n' >"$S34_TMP/repo/a.txt"
+  command git -C "$S34_TMP/repo" add -- a.txt
+  command git -C "$S34_TMP/repo" commit -qm 'test: A1'
+  command git -C "$S34_TMP/repo" checkout -q -b fix/b
+  printf 'B1\n' >"$S34_TMP/repo/b.txt"
+  command git -C "$S34_TMP/repo" add -- b.txt
+  command git -C "$S34_TMP/repo" commit -qm 'test: B1'
+  command git -C "$S34_TMP/repo" remote add origin "$S34_TMP/fixture-owner/fixture-repo.git"
+  command git -C "$S34_TMP/repo" remote add upstream "$S34_TMP/other-owner/other-repo.git"
+  command git -C "$S34_TMP/repo" push -q origin main fix/a fix/b
+  command git -C "$S34_TMP/repo" fetch -q origin
+  S34_LEASE="$(command git -C "$S34_TMP/repo" rev-parse refs/remotes/origin/fix/b)"
+  S34_BASE_TIP="$(command git -C "$S34_TMP/repo" rev-parse refs/remotes/origin/fix/a)"
+  S34_MERGE_BASE="$(command git -C "$S34_TMP/repo" merge-base \
+    refs/remotes/origin/fix/b refs/remotes/origin/fix/a)"
+  if [ "$head_mode" = detached ]; then
+    # What a rebase onto the WRONG target leaves behind: HEAD moved, the lease
+    # still holds, the worktree is clean — and the PR is no longer descended
+    # from the branch it is stacked on.
+    command git -C "$S34_TMP/repo" checkout -q -B fix/b refs/remotes/origin/main
+  elif [ "$head_mode" = rewritten ]; then
+    # What a real rebase leaves behind: B1 is replaced, so the new head still
+    # descends from the pinned base tip (origin/fix/a) but NOT from the lease
+    # (origin/fix/b). This is the only push shape that can collapse a dependent
+    # PR's merge-base, and therefore the only shape the gate may refuse.
+    command git -C "$S34_TMP/repo" checkout -q -B fix/b refs/remotes/origin/fix/a
+  fi
+  # The fixer's own commit, so the fence's ci_fix_no_change guard passes.
+  printf 'FIXED\n' >"$S34_TMP/repo/fix.txt"
+  command git -C "$S34_TMP/repo" add -- fix.txt
+  command git -C "$S34_TMP/repo" commit -qm 'test: the fixer commit'
+  S34_NEW_HEAD="$(command git -C "$S34_TMP/repo" rev-parse HEAD)"
+
+  local evidence="$S34_TMP/repo/.uberdev/research/20260810-131313-438f438"
+  local child="$evidence/children/ci-rebase-ci01-iter01"
+  mkdir -p "$child"
+  printf '{"edge":"rebase"}\n' >"$child/input.json"
+  local input_sha
+  input_sha="$(python3 -I -B -c '
+import hashlib, sys
+sys.stdout.write(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+' "$child/input.json")"
+  S34_AUTHORITY="$evidence/ci-authority-rebase-iter01-ci01.json"
+  local receipt
+  receipt="$(python3 -I -B "$S34_CONTRACT" prepare-ci-authority \
+    --edge-id review_pr.ci.rebase --pr-number 438 --run-id 77 \
+    --head-sha "$S34_LEASE" --working-dir "$S34_TMP/repo" \
+    --input-path "$child/input.json" --input-sha256 "$input_sha" \
+    --base-sha "$S34_MERGE_BASE" --base-tip-sha "$S34_BASE_TIP" \
+    --lease-sha "$S34_LEASE" --pr-branch fix/b --base-branch fix/a \
+    --authority-output-path "$S34_AUTHORITY")" || return 2
+  S34_AUTHORITY_SHA="$(jq -er .authority_sha256 <<<"$receipt")" || return 2
+  local binding
+  binding="$(python3 -I -B "$S34_CONTRACT" bind-workflow-ci-launch \
+    --edge-id review_pr.ci.rebase --instance-id ci-rebase-ci01-iter01 \
+    --run-nonce "$(printf '4%.0s' $(seq 64))" \
+    --result-path "$child/result.md" --status-path "$child/status.json" \
+    --working-dir "$S34_TMP/repo" \
+    --ci-authority-path "$S34_AUTHORITY" \
+    --ci-authority-sha256 "$S34_AUTHORITY_SHA")" || return 2
+  if [ "$tip_mode" = lost ]; then
+    # THE #418/#419 SHAPE. The value went missing between the fence that binds
+    # it and the fence that force-pushes on it. The digest is re-pointed too, so
+    # this is not a tampering row: it models the authority genuinely carrying no
+    # tip, and asks whether the push fence defaults or halts.
+    python3 -I -B -c '
+import json, hashlib, os, sys, importlib.util
+spec = importlib.util.spec_from_file_location("cfc", sys.argv[2])
+m = importlib.util.module_from_spec(spec)
+# Registered BEFORE exec_module: @dataclass resolves its own module out of
+# sys.modules, and an unregistered one dies AttributeError on 3.14.
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+doc = json.loads(open(sys.argv[1], "rb").read())
+doc["base_tip_sha"] = ""
+payload = m._canonical_json(doc) + b"\n"
+# The publisher leaves the authority read-only on purpose, so the fixture
+# replaces the file rather than writing through it.
+os.chmod(sys.argv[1], 0o600)
+os.unlink(sys.argv[1])
+with open(sys.argv[1], "wb") as handle:
+    handle.write(payload)
+sys.stdout.write(hashlib.sha256(payload).hexdigest())
+' "$S34_AUTHORITY" "$S34_CONTRACT" >"$S34_TMP/relost.txt" || return 2
+    S34_AUTHORITY_SHA="$(cat "$S34_TMP/relost.txt")"
+    binding="$(jq -c --arg d "$S34_AUTHORITY_SHA" '.ci_authority_sha256 = $d' <<<"$binding")" || return 2
+  fi
+  printf 'child report\n' >"$child/result.md"
+  printf '{}\n' >"$child/status.json"
+  bash -c '. "$1"; review_fleet_write_sidecar "$2" "$3" "$4" ci-rebase-ci01-iter01 "$5"' \
+    _ "$S34_ARGS" "$S34_TMP/run/sidecar.json" "$binding" "$child" "$S34_LEASE" || return 2
+  bash -c '. "$1"; review_fleet_write_ci_pointer "$2" "$3"' \
+    _ "$S34_ARGS" "$S34_TMP/run/ci-fix-launch-pointer.txt" "$S34_TMP/run/sidecar.json" || return 2
+}
+
+# s34_run SHELL GH_MODE -> "<rc>|<stdout>"; audit in $S34_TMP/audit.log, argv in
+# $S34_TMP/git.log
+s34_run() {
+  local runner="$1" gh_mode="$2" rc=0 out
+  : >"$S34_TMP/audit.log"
+  : >"$S34_TMP/git.log"
+  out="$(
+    S34_LOG="$S34_TMP/audit.log" S34_GITLOG="$S34_TMP/git.log" \
+    S34_GH="$gh_mode" S34_REPO="$S34_TMP/repo" S34_RUN="$S34_TMP/run" \
+    S34_FENCE="$S34_TMP/push-fence.sh" S34_CONTRACT_PY="$S34_CONTRACT" \
+    S34_PLUGIN_ROOT="$S34_PLUGIN" \
+      "$runner" "$S34_TMP/driver.sh" 2>/dev/null
+  )" || rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+
+# s34_pushed -> 0 when the recorded argv contains the leased push
+s34_pushed() {
+  grep -qE '^git( -C [^ ]+)? push origin [0-9a-f]{40}:refs/heads/fix/b' \
+    <<<"$(cat "$S34_TMP/git.log")"
+}
+
+# s34_asked -> 0 when the dependent-PR query ran at all
+s34_asked() {
+  grep -qF 'gh pr list' <<<"$(cat "$S34_TMP/git.log")"
+}
+
+# s34_asked_pinned -> 0 when the query named the repository the push targets.
+# `origin` is <owner>/<name>.git and a decoy `upstream` remote exists, so an
+# unpinned gh would have answered about other-owner/other-repo.
+s34_asked_pinned() {
+  grep -qF 'gh pr list --repo fixture-owner/fixture-repo --base fix/b --state open --json number' \
+    <<<"$(cat "$S34_TMP/git.log")"
+}
+
+if [ ! -s "$S34_TMP/push-fence.sh" ]; then
+  echo "  FAIL  S34-FENCE.0 — could not extract 6c.4w.3 from review-pr.md"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S34-FENCE.0 — extracted THE SINGLE LEASED PUSH fence"; PASS=$((PASS + 1))
+  for s34_shell in bash zsh; do
+    if ! command -v "$s34_shell" >/dev/null 2>&1; then
+      echo "  SKIP  S34-FENCE.* ($s34_shell) — shell unavailable on this runner"
+      continue
+    fi
+
+    # ROW 1 — THE NORMAL PATH IS UNCHANGED. No PR is based on this branch, so
+    # the gate is silent and the leased push happens exactly as before.
+    if s34_build rewritten pinned >/dev/null 2>&1; then
+      S34_R="$(s34_run "$s34_shell" none)"
+      S34_A="$(cat "$S34_TMP/audit.log")"
+      if [ "${S34_R%%|*}" = 0 ] && s34_pushed \
+         && grep -qF 'audit ci_fix_pushed' <<<"$S34_A" \
+         && ! grep -qF 'data.outcome=halted' <<<"$S34_A"; then
+        echo "  PASS  S34-FENCE.1 ($s34_shell) — with no dependent PR the leased push still happens"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.1 ($s34_shell) — the gate broke the normal push path"
+        echo "        rc|stdout: $S34_R"
+        echo "        audit:     $S34_A"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+      # ...and it asked the question of the repository the PUSH targets. An
+      # unpinned `gh` would have resolved the decoy `upstream` remote and
+      # answered, well-formed and empty, about a DIFFERENT repository — which is
+      # fail-OPEN inside a fail-closed gate.
+      if s34_asked_pinned; then
+        echo "  PASS  S34-FENCE.1b ($s34_shell) — the dependent-PR query is pinned to the push target's repo"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.1b ($s34_shell) — the query let gh resolve a repository from the cwd"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      echo "  FAIL  S34-FENCE.1 ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+    fi
+
+    # ROW 2 — THE DEFECT. An open PR is based on this PR's head branch and the
+    # push REWRITES that branch. It would rewrite that PR's base out from under
+    # it, collapsing its merge-base and growing its diff with commits its author
+    # never wrote. Nothing may be pushed, and the halt must be typed.
+    if s34_build rewritten pinned >/dev/null 2>&1; then
+      S34_R="$(s34_run "$s34_shell" dependent)"
+      S34_A="$(cat "$S34_TMP/audit.log")"
+      if [ "${S34_R%%|*}" = 1 ] \
+         && grep -qF 'data.subreason=ci_push_would_rewrite_stacked_base' <<<"$S34_A" \
+         && grep -qF 'data.outcome=halted' <<<"$S34_A" \
+         && ! s34_pushed; then
+        echo "  PASS  S34-FENCE.2 ($s34_shell) — a stacked dependent PR halts the REWRITING push, and NOTHING is pushed"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.2 ($s34_shell) — the push rewrote a branch another open PR is based on"
+        echo "        rc|stdout: $S34_R"
+        echo "        audit:     $S34_A"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      echo "  FAIL  S34-FENCE.2 ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+    fi
+
+    # ROW 2b — THE GATE MUST NOT BECOME A BLANKET REFUSAL. A fast-forward push
+    # appends; the new commits are unreachable from a dependent PR's head, so
+    # its merge-base and its diff are untouched. This is the shape the
+    # `fix_code` edge ALWAYS produces (`_validate_ci_fix_code_outcome` pins its
+    # terminal to one commit whose parent is head_before), so gating on the edge
+    # rather than on the push shape would take Phase 3 CI autofix permanently
+    # offline on exactly the stacked branches #438 exists to protect. The query
+    # is not merely ignored here — it is never asked.
+    if s34_build stacked pinned >/dev/null 2>&1; then
+      S34_R="$(s34_run "$s34_shell" dependent)"
+      S34_A="$(cat "$S34_TMP/audit.log")"
+      if [ "${S34_R%%|*}" = 0 ] && s34_pushed \
+         && grep -qF 'audit ci_fix_pushed' <<<"$S34_A" \
+         && ! grep -qF 'data.outcome=halted' <<<"$S34_A" \
+         && ! s34_asked; then
+        echo "  PASS  S34-FENCE.2b ($s34_shell) — a fast-forward push with a dependent PR present is not gated"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.2b ($s34_shell) — an append-only push was refused as a stack rewrite"
+        echo "        rc|stdout: $S34_R"
+        echo "        audit:     $S34_A"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      echo "  FAIL  S34-FENCE.2b ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+    fi
+
+    # ROW 3 — "I COULD NOT ASK" IS NOT "NOBODY IS STACKED". A gh outage gets its
+    # OWN subreason so an audit consumer can tell the two apart, and it HALTS:
+    # the read-only probe's carve-out does not extend to a force-push.
+    for s34_broken in outage prose; do
+      if s34_build rewritten pinned >/dev/null 2>&1; then
+        S34_R="$(s34_run "$s34_shell" "$s34_broken")"
+        S34_A="$(cat "$S34_TMP/audit.log")"
+        if [ "${S34_R%%|*}" = 1 ] \
+           && grep -qF 'data.subreason=ci_dependent_pr_probe_unreadable' <<<"$S34_A" \
+           && ! grep -qF 'ci_push_would_rewrite_stacked_base' <<<"$S34_A" \
+           && ! s34_pushed; then
+          echo "  PASS  S34-FENCE.3.$s34_broken ($s34_shell) — an unanswerable dependent-PR probe halts under its own name"; PASS=$((PASS + 1))
+        else
+          echo "  FAIL  S34-FENCE.3.$s34_broken ($s34_shell) — a gh failure was read as 'no dependents'"
+          echo "        rc|stdout: $S34_R"
+          echo "        audit:     $S34_A"
+          echo "        argv:      $(cat "$S34_TMP/git.log")"
+          FAIL=$((FAIL + 1))
+        fi
+      else
+        echo "  FAIL  S34-FENCE.3.$s34_broken ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+      fi
+    done
+
+    # ROW 4 — HALF TWO AT THE PUSH. The CONFLICT terminal reaches this fence a
+    # SECOND time after `rebase --continue`, and the judge never re-runs, so the
+    # controller proves base-tip ancestry itself. A head rebuilt off main keeps
+    # the lease and moves HEAD — only the tip proof catches it.
+    if s34_build detached pinned >/dev/null 2>&1; then
+      S34_R="$(s34_run "$s34_shell" none)"
+      S34_A="$(cat "$S34_TMP/audit.log")"
+      if [ "${S34_R%%|*}" = 1 ] \
+         && grep -qF 'data.subreason=ci_push_head_detached_from_base' <<<"$S34_A" \
+         && ! s34_pushed; then
+        echo "  PASS  S34-FENCE.4 ($s34_shell) — a head no longer descended from the pinned base tip is not pushed"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.4 ($s34_shell) — a stack-detached head reached the force-push"
+        echo "        rc|stdout: $S34_R"
+        echo "        audit:     $S34_A"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      echo "  FAIL  S34-FENCE.4 ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+    fi
+
+    # ROW 5 — THE CARRIER DISCIPLINE (#418/#419). An authority that carries no
+    # base tip is "cannot tell", and cannot degrade to a default that skips the
+    # proof. It must halt, typed, with nothing pushed.
+    if s34_build stacked lost >/dev/null 2>&1; then
+      S34_R="$(s34_run "$s34_shell" none)"
+      S34_A="$(cat "$S34_TMP/audit.log")"
+      if [ "${S34_R%%|*}" = 1 ] \
+         && grep -qE 'data\.subreason=ci_(authority_unreadable|push_head_detached_from_base)' <<<"$S34_A" \
+         && ! s34_pushed; then
+        echo "  PASS  S34-FENCE.5 ($s34_shell) — a missing base tip is a typed halt, never a skipped proof"; PASS=$((PASS + 1))
+      else
+        echo "  FAIL  S34-FENCE.5 ($s34_shell) — the base-tip proof defaulted itself away"
+        echo "        rc|stdout: $S34_R"
+        echo "        audit:     $S34_A"
+        echo "        argv:      $(cat "$S34_TMP/git.log")"
+        FAIL=$((FAIL + 1))
+      fi
+    else
+      echo "  FAIL  S34-FENCE.5 ($s34_shell) — fixture build failed"; FAIL=$((FAIL + 1))
+    fi
+  done
+fi
+rm -rf "$S34_TMP"
 
 echo
 echo "== Summary =="

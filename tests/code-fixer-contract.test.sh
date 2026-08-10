@@ -4895,6 +4895,42 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
             authority_output_path=str(ci_evidence / "ci-authority-rebase-iter01-ci09.json")),
         "ci_authority_invalid",
     )
+    # #438 — the BASE TIP is a member of the mutating authority, and a REQUIRED
+    # one for the rebase edge. `base_sha` is a MERGE-BASE, and once the base
+    # branch is itself force-pushed that merge-base collapses to the fork point
+    # every candidate rebase target already contains; the tip is the only pinned
+    # value that can tell a correct rebase from a stack-detaching one. Required,
+    # not optional, for the same reason `lease_sha` is: the value crosses a dead
+    # shell between 6c.4 ROUTE and 6c.4w.1 MINT, and a soft default there is the
+    # #418/#419 class re-opened inside the fix for #438.
+    assert "base_tip_sha" in module.CI_MUTATION_AUTHORITY_KEYS, (
+        module.CI_MUTATION_AUTHORITY_KEYS)
+    assert "base_tip_sha" not in module.CI_READ_AUTHORITY_KEYS, (
+        module.CI_READ_AUTHORITY_KEYS)
+    assert "base_tip_sha" in module.CI_AUTHORITY_REQUIRED_MEMBERS[
+        "review_pr.ci.rebase"], module.CI_AUTHORITY_REQUIRED_MEMBERS
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
+            head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
+            input_sha256=ci_log_sha, base_sha=ci_head, lease_sha="b" * 40,
+            base_tip_sha="",
+            pr_branch="fix/383", base_branch="main",
+            authority_output_path=str(ci_evidence / "ci-authority-rebase-iter01-ci10.json")),
+        "ci_authority_invalid",
+    )
+    # ...and a non-SHA1 tip is refused by the shape check, not carried as prose
+    # into a `merge-base --is-ancestor` argument.
+    expect_contract_reason(
+        lambda: module.prepare_ci_authority(
+            edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
+            head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
+            input_sha256=ci_log_sha, base_sha=ci_head, lease_sha="b" * 40,
+            base_tip_sha="origin/main",
+            pr_branch="fix/383", base_branch="main",
+            authority_output_path=str(ci_evidence / "ci-authority-rebase-iter01-ci11.json")),
+        "ci_authority_invalid",
+    )
     expect_contract_reason(
         lambda: module.prepare_ci_authority(
             edge_id="review_pr.ci.fix_code", pr_number=41, run_id="77",
@@ -5497,7 +5533,8 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
     rebase_receipt = module.prepare_ci_authority(
         edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
         head_sha=ci_head, working_dir=str(ci_repo), input_path=str(ci_log),
-        input_sha256=ci_log_sha, base_sha=ci_head, lease_sha=lease_sha,
+        input_sha256=ci_log_sha, base_sha=ci_head, base_tip_sha=ci_head,
+        lease_sha=lease_sha,
         pr_branch="fix/383-phase3", base_branch="main",
         authority_output_path=str(rebase_authority_path),
     )
@@ -5680,7 +5717,8 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     rb_receipt = module.prepare_ci_authority(
         edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
         head_sha=cf_head, working_dir=str(cf_repo), input_path=rb_input,
-        input_sha256=rb_input_sha, base_sha=cf_base, lease_sha=cf_head,
+        input_sha256=rb_input_sha, base_sha=cf_base, base_tip_sha=cf_base,
+        lease_sha=cf_head,
         pr_branch="fix/383-conflict", base_branch="main",
         authority_output_path=str(
             cf_evidence / "ci-authority-rebase-iter01-ci01.json"))
@@ -6039,6 +6077,168 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
     ):
         assert dr_with_urls(hostile)["created_url"] == "", hostile
 
+# === #438: the rebase guard was BASE-TIP-BLIND ================================
+#
+# `_validate_ci_rebase_outcome` asserted `merge-base --is-ancestor
+# authority["base_sha"] head_after`, and `base_sha` is the MERGE-BASE that
+# commands/review-pr.md 6c.4 ROUTE pins before dispatch. That is the wrong noun.
+# The child's own instruction is `git rebase "origin/$base_branch"`
+# (agents/ci-rebase-handler.md Step 4), so the value that proves where the
+# rebase LANDED is the base branch's TIP.
+#
+# The difference only becomes visible once the base branch is itself rewritten —
+# which is exactly the state the missing dependent-PR gate (#438 half one) lets
+# Phase 3 manufacture. After `fix/a` is force-pushed, merge-base(fix/b, fix/a)
+# collapses to the shared `main` fork point, and EVERY candidate rebase target
+# contains that fork point. The assertion is then satisfied unconditionally: a
+# rebase onto `main` — which detaches `fix/b` from its stack and duplicates
+# `fix/a`'s commits into its diff — passes identically to the correct one.
+#
+# This fixture reproduces that topology exactly and drives the PUBLIC verb over
+# both outcomes with the SAME authority. The base-tip assertion is what has to
+# discriminate; `base_sha` ancestry must still be checked ALONGSIDE it, never
+# replaced by it, so the row below asserts the old refusal still fires too.
+with tempfile.TemporaryDirectory(prefix="code-fixer-ci-stack438-") as temporary:
+    st_repo = pathlib.Path(temporary) / "repo"
+    st_repo.mkdir()
+    git(st_repo, "init", "-q", "-b", "main")
+    git(st_repo, "config", "user.email", "fixture@example.invalid")
+    git(st_repo, "config", "user.name", "Fixture")
+    (st_repo / "m.txt").write_text("m0\n", encoding="utf-8")
+    git(st_repo, "add", "--", "m.txt")
+    git(st_repo, "commit", "-qm", "test: m0")
+    st_m0 = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    (st_repo / "m.txt").write_text("m1\n", encoding="utf-8")
+    git(st_repo, "commit", "-qam", "test: m1")
+    st_fork = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # fix/a — the base branch of the PR under repair. Two commits, on their own
+    # file, so nothing below conflicts and every refusal is about ANCESTRY.
+    git(st_repo, "checkout", "-q", "-b", "fix/a", st_fork)
+    (st_repo / "a.txt").write_text("A1\n", encoding="utf-8")
+    git(st_repo, "add", "--", "a.txt")
+    git(st_repo, "commit", "-qm", "test: A1")
+    (st_repo / "a.txt").write_text("A2\n", encoding="utf-8")
+    git(st_repo, "commit", "-qam", "test: A2")
+    st_a_old = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # fix/b — the PR Phase 3 is repairing. It is STACKED on fix/a.
+    git(st_repo, "checkout", "-q", "-b", "fix/b", st_a_old)
+    (st_repo / "b.txt").write_text("B1\n", encoding="utf-8")
+    git(st_repo, "add", "--", "b.txt")
+    git(st_repo, "commit", "-qm", "test: B1")
+    st_b_before = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    # THE STACK-BREAKING REWRITE. main advances, fix/a is rebased onto it — the
+    # push #438 half one refuses to make, modelled here as the state half two
+    # must be able to police.
+    git(st_repo, "checkout", "-q", "main")
+    (st_repo / "m.txt").write_text("m2\n", encoding="utf-8")
+    git(st_repo, "commit", "-qam", "test: m2")
+    st_main_tip = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    git(st_repo, "checkout", "-q", "fix/a")
+    git(st_repo, "rebase", "-q", "main")
+    # A commit that exists ONLY on the rewritten fix/a. Without it the fixture is
+    # a coin flip: rebasing fix/b onto main replays A1 and A2 onto the same
+    # parent, with the same trees, author and (usually) the same committer
+    # second — so the replayed commits can hash IDENTICALLY to fix/a's own, and
+    # the tip becomes an ancestor of the detached head by accident. The row below
+    # asserts the topology it depends on, so that can never silently return.
+    (st_repo / "a.txt").write_text("A3\n", encoding="utf-8")
+    git(st_repo, "commit", "-qam", "test: A3, only on the rewritten fix/a")
+    st_a_tip = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert st_a_tip != st_a_old, "the fixture rewrite did not move fix/a"
+    # The merge-base has now collapsed to the shared main fork point, which is
+    # the whole defect. Assert it, or every row below is vacuous.
+    st_merge_base = git(
+        st_repo, "merge-base", "fix/b", "fix/a").stdout.decode().strip()
+    assert st_merge_base == st_fork, (st_merge_base, st_fork, st_a_tip)
+
+    st_evidence = st_repo / ".uberdev/research/20260810-121212-438f438"
+    st_child = st_evidence / "children" / "ci-rebase-ci01-iter01"
+    st_child.mkdir(parents=True)
+    st_input = st_child / "input.json"
+    st_input_bytes = b'{"edge":"rebase"}\n'
+    st_input.write_bytes(st_input_bytes)
+    st_receipt = module.prepare_ci_authority(
+        edge_id="review_pr.ci.rebase", pr_number=438, run_id="77",
+        head_sha=st_b_before, working_dir=str(st_repo), input_path=str(st_input),
+        input_sha256=hashlib.sha256(st_input_bytes).hexdigest(),
+        # EXACTLY what review-pr.md:4166 pins — a merge-base, not a tip.
+        base_sha=st_merge_base, base_tip_sha=st_a_tip, lease_sha=st_b_before,
+        pr_branch="fix/b", base_branch="fix/a",
+        authority_output_path=str(
+            st_evidence / "ci-authority-rebase-iter01-ci01.json"))
+    # Both proofs are readable back out of the digest-pinned document, and they
+    # are DIFFERENT values — the pin the shell reads at 6c.4w.3 is the tip.
+    assert module.read_ci_authority_member(
+        authority_path=st_receipt["authority_path"],
+        authority_sha256=st_receipt["authority_sha256"],
+        member="base_tip_sha") == st_a_tip
+    assert module.read_ci_authority_member(
+        authority_path=st_receipt["authority_path"],
+        authority_sha256=st_receipt["authority_sha256"],
+        member="base_sha") == st_merge_base
+    st_binding = module.bind_workflow_ci_launch(
+        edge_id="review_pr.ci.rebase", instance_id="ci-rebase-ci01-iter01",
+        run_nonce=CI_NONCE, result_path=str(st_child / "result.md"),
+        status_path=str(st_child / "status.json"), working_dir=str(st_repo),
+        ci_authority_path=st_receipt["authority_path"],
+        ci_authority_sha256=st_receipt["authority_sha256"])
+    (st_child / "result.md").write_bytes(b"rebased\n")
+    (st_child / "status.json").write_bytes(ci_status_document(st_binding))
+    st_binding_bytes = module._canonical_json(st_binding)
+    st_terminal = module.capture_ci_terminal(
+        launch_binding=st_binding_bytes, edge_id="review_pr.ci.rebase")
+
+    def st_outcome(**overrides):
+        arguments = dict(
+            launch_binding=st_binding_bytes,
+            status_sha256=st_terminal["status_sha256"],
+            result_sha256=st_terminal["result_sha256"],
+            working_dir=str(st_repo), head_before=st_b_before,
+            remote_head_sha=st_b_before)
+        arguments.update(overrides)
+        return module.validate_ci_mutation_outcome(**arguments)
+
+    # CASE 1 — the CORRECT rebase: fix/b onto the real base branch's tip.
+    git(st_repo, "checkout", "-q", "fix/b")
+    git(st_repo, "rebase", "-q", "fix/a")
+    st_correct = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert git(
+        st_repo, "rev-list", "--count", f"fix/a..{st_correct}"
+    ).stdout.decode().strip() == "1", "the correct rebase should replay ONE commit"
+    assert st_outcome(head_after=st_correct)["status"] == "REBASED", st_outcome(
+        head_after=st_correct)
+
+    # CASE 2 — the STACK-DETACHING rebase: fix/b onto main. It satisfies the
+    # collapsed merge-base identically, moves HEAD, keeps the lease, leaves a
+    # clean worktree, and duplicates fix/a's commits into the PR's own diff.
+    git(st_repo, "checkout", "-q", "-B", "fix/b", st_b_before)
+    git(st_repo, "rebase", "-q", "main")
+    st_detached = git(st_repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert git(
+        st_repo, "rev-list", "--count", f"main..{st_detached}"
+    ).stdout.decode().strip() == "3", (
+        "the detaching rebase should replay A1+A2+B1 — three commits")
+    # The OLD predicate cannot see it: base_sha ancestry passes for both.
+    assert module._git(
+        str(st_repo), "merge-base", "--is-ancestor", st_merge_base, st_detached
+    ).returncode == 0, "the fixture no longer reproduces the collapsed merge-base"
+    # ...and the topology the NEW one relies on really holds, so a replayed
+    # commit that happened to hash back onto fix/a cannot make the row vacuous.
+    assert module._git(
+        str(st_repo), "merge-base", "--is-ancestor", st_a_tip, st_detached
+    ).returncode != 0, "the detaching head still contains fix/a's tip"
+    # The NEW one discriminates.
+    expect_contract_reason(
+        lambda: st_outcome(head_after=st_detached),
+        "ci_rebase_base_tip_not_ancestor",
+    )
+    # ...and the merge-base proof is still CHECKED, not replaced: a head that
+    # predates the pinned merge-base is still refused under its OWN reason, and
+    # ordered FIRST, so the two proofs stay independently attributable in the
+    # audit trail rather than collapsing into one.
+    expect_contract_reason(
+        lambda: st_outcome(head_after=st_m0), "ci_rebase_base_not_ancestor")
+
 # === #383 follow-up: "unmerged" meant two different sets in one file ==========
 #
 # The block above conflicts on a path BOTH sides already tracked, which git
@@ -6086,7 +6286,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-addadd-") as temporary:
         edge_id="review_pr.ci.rebase", pr_number=41, run_id="77",
         head_sha=aa_head, working_dir=str(aa_repo), input_path=str(aa_input),
         input_sha256=hashlib.sha256(aa_input_bytes).hexdigest(),
-        base_sha=aa_base, lease_sha=aa_head,
+        base_sha=aa_base, base_tip_sha=aa_base, lease_sha=aa_head,
         pr_branch="fix/383-addadd", base_branch="main",
         authority_output_path=str(
             aa_evidence / "ci-authority-rebase-iter01-ci01.json"))

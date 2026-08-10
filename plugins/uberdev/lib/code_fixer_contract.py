@@ -7341,6 +7341,17 @@ CI_MUTATION_AUTHORITY_KEYS = CI_READ_AUTHORITY_KEYS | {
     "parent_sha",
     "parent_tree_sha",
     "base_sha",
+    # THE BASE BRANCH'S TIP, distinct from `base_sha` on purpose. `base_sha` is
+    # the MERGE-BASE the controller pins before dispatch; `base_tip_sha` is
+    # `refs/remotes/origin/<base_branch>` at that same moment, which is the ref
+    # the child is actually told to rebase onto (agents/ci-rebase-handler.md
+    # Step 4: `git rebase "origin/$base_branch"`).
+    #
+    # Two values because the merge-base cannot prove where a rebase LANDED once
+    # the base branch has itself been rewritten: the merge-base then collapses to
+    # the shared fork point, and every candidate rebase target contains the fork
+    # point. See _validate_ci_rebase_outcome (#438).
+    "base_tip_sha",
     "lease_sha",
     "pr_branch",
     "base_branch",
@@ -7359,7 +7370,13 @@ CI_AUTHORITY_REQUIRED_MEMBERS = {
     # halt before the child runs; discovering it at the push costs a wrong ref.
     "review_pr.ci.fix_code": ("failure_class", "signal_anchor", "parent_sha",
                               "parent_tree_sha", "lease_sha", "pr_branch"),
-    "review_pr.ci.rebase": ("base_sha", "lease_sha", "pr_branch", "base_branch"),
+    # `base_tip_sha` is required for the SAME reason `lease_sha` is: it is
+    # captured in 6c.4 ROUTE and consumed two dead shells later (6c.4w.1's mint
+    # and 6c.4w.3's push), so a `${CI_BASE_TIP_SHA:-}` default would silently
+    # retire the only predicate that can tell a correct rebase from a
+    # stack-detaching one. Refusing here costs a halt before the child runs.
+    "review_pr.ci.rebase": ("base_sha", "base_tip_sha", "lease_sha", "pr_branch",
+                            "base_branch"),
     "review_pr.ci.resolve_conflict": ("base_sha", "pr_branch", "base_branch"),
 }
 
@@ -7449,7 +7466,8 @@ def _ci_authority_shape(edge_id: str, value: dict[str, Any]) -> None:
         fail("ci_authority_invalid")
     if edge_id in CI_READ_EDGE_IDS:
         return
-    for key in ("parent_sha", "parent_tree_sha", "base_sha", "lease_sha"):
+    for key in ("parent_sha", "parent_tree_sha", "base_sha", "base_tip_sha",
+                "lease_sha"):
         item = value.get(key)
         if not isinstance(item, str) or (
             item and SHA1.fullmatch(item) is None
@@ -7504,6 +7522,7 @@ def prepare_ci_authority(
     parent_sha: str = "",
     parent_tree_sha: str = "",
     base_sha: str = "",
+    base_tip_sha: str = "",
     lease_sha: str = "",
     pr_branch: str = "",
     base_branch: str = "",
@@ -7548,6 +7567,7 @@ def prepare_ci_authority(
                 "parent_sha": parent_sha,
                 "parent_tree_sha": parent_tree_sha,
                 "base_sha": base_sha,
+                "base_tip_sha": base_tip_sha,
                 "lease_sha": lease_sha,
                 "pr_branch": pr_branch,
                 "base_branch": base_branch,
@@ -8328,6 +8348,38 @@ def _validate_ci_rebase_outcome(
     )
     if ancestry.returncode != 0:
         fail("ci_rebase_base_not_ancestor")
+    # ...AND the base branch's TIP, which is a strictly stronger claim and the
+    # only one that survives the base branch being rewritten (#438).
+    #
+    # `base_sha` is a MERGE-BASE. Once the base branch is force-pushed — the
+    # state Phase 3 itself used to be able to manufacture, before the
+    # dependent-PR gate in commands/review-pr.md 6c.4w.3 — that merge-base
+    # collapses to the shared fork point with `main`. EVERY candidate rebase
+    # target contains the fork point, so the check above passes unconditionally:
+    # a rebase onto `main` (which detaches the PR from its stack and duplicates
+    # the base branch's commits into its own diff) is accepted identically to a
+    # rebase onto the branch the PR is actually stacked on.
+    #
+    # The tip is what the child was told to rebase onto, so it is what the
+    # result must contain. Two consequences, both correct and both intended:
+    # a base branch that merely FAST-FORWARDED during the child still contains
+    # the pinned tip and passes; a base branch force-pushed during the child does
+    # not, and this refuses rather than pushing a head built on a base that no
+    # longer exists.
+    #
+    # Kept ALONGSIDE the merge-base check, never in place of it: the two answer
+    # different questions, and the pair is cheaper than arguing about which one
+    # subsumes the other. Ordered before the CONFLICT short-circuit for the same
+    # reason the merge-base check is — a mid-rebase state must not buy an
+    # exemption from ancestry — and sound there because `git rebase` checks out
+    # the onto-target before replaying anything, so the pinned tip is an ancestor
+    # of HEAD even when the FIRST commit conflicts (`--is-ancestor` is reflexive).
+    tip_ancestry = _git(
+        working_dir, "merge-base", "--is-ancestor",
+        authority["base_tip_sha"], head_after,
+    )
+    if tip_ancestry.returncode != 0:
+        fail("ci_rebase_base_tip_not_ancestor")
     # THE CONFLICT TERMINAL. `agents/ci-rebase-handler.md` Step 5 REQUIRES the
     # child to leave a conflicted rebase IN PROGRESS ("do NOT abort it") so the
     # controller can enumerate the unmerged paths from its own `git status`
@@ -9248,6 +9300,7 @@ def _parser() -> argparse.ArgumentParser:
     ci_authority.add_argument("--parent-sha", default="")
     ci_authority.add_argument("--parent-tree-sha", default="")
     ci_authority.add_argument("--base-sha", default="")
+    ci_authority.add_argument("--base-tip-sha", default="")
     ci_authority.add_argument("--lease-sha", default="")
     ci_authority.add_argument("--pr-branch", default="")
     ci_authority.add_argument("--base-branch", default="")
@@ -9666,6 +9719,7 @@ def main() -> int:
                     parent_sha=arguments.parent_sha,
                     parent_tree_sha=arguments.parent_tree_sha,
                     base_sha=arguments.base_sha,
+                    base_tip_sha=arguments.base_tip_sha,
                     lease_sha=arguments.lease_sha,
                     pr_branch=arguments.pr_branch,
                     base_branch=arguments.base_branch,
