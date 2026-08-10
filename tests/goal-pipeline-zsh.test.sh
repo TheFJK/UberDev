@@ -472,7 +472,7 @@ mkdir -p "$WT_STATE" "$WT_VERDICT_DIR" || { echo "FATAL: mkdir -p worktree-mirro
 # rather than absence (RFC 0005 B13), so `sha` must be a full 40-hex object
 # name — an abbreviated one makes the candidate identity-unknown and the loop
 # never reaches green. Mirrors the fixture shape in tests/goal.test.sh.
-printf '%s\n' '{"pr":200,"sha":"cafe010000000000000000000000000000000000","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' \
+printf '%s\n' '{"pr":200,"sha":"cafe010000000000000000000000000000000000","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}' \
   > "$WT_VERDICT_DIR/review-pr-verdict.json"
 
 W_GID="pipewatch01"

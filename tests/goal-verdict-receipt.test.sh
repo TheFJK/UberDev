@@ -77,12 +77,16 @@ SHA_OTHER='0f1e2d3c4b5a6978869504132435465768798a0b'
 # hand-writing the closed JSON) is what makes this a regression guard on the
 # producer/consumer PAIR instead of on one hand-written string.
 # ---------------------------------------------------------------------------
+# #440 — a `current` audit must name the base it reviewed as well as the head.
+# A verdict without the top-level `base` member degrades to `legacy`, which
+# read_trust_signal already maps to `stale`; that is the intended migration, and
+# these rows are about the colour logic, not about the migration.
 mint_receipt() {
   local pr="$1" blocker="$2" critical="$3" halted="$4" sha="$5" overflow="${6:-false}"
   local scratch; scratch="$(mktemp -d)"
   mkdir -p "$scratch/.uberdev/runs/20260401-101112-deadbeef"
   cat > "$scratch/.uberdev/runs/20260401-101112-deadbeef/review-pr-verdict.json" <<EOF
-{"pr":$pr,"sha":"$sha","phases":{"phase2_5":{"by_severity":{"blocker":$blocker,"critical":$critical},"halted":$halted,"halted_due_to_overflow":$overflow}}}
+{"pr":$pr,"sha":"$sha","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":$blocker,"critical":$critical},"halted":$halted,"halted_due_to_overflow":$overflow}}}
 EOF
   ( cd "$scratch" && . "$GOAL_LIB" && uberdev_goal_locate_review_pr_audit_by_pr "$pr" 2>/dev/null )
   rm -rf "$scratch"
@@ -128,6 +132,22 @@ R_LEGACY="$(jq -c '.audit_state = "legacy"' <<<"$R_GREEN" 2>/dev/null)"
 assert_eq "$(signal_for "$R_LEGACY" "$SHA_OK")" "stale" "A7.stale — audit_state=legacy short-circuits before the colour decision"
 R_CURRENT="$(jq -c '.audit_state = "current"' <<<"$R_GREEN" 2>/dev/null)"
 assert_eq "$(signal_for "$R_CURRENT" "$SHA_OK")" "green" "A8.control — the same receipt with audit_state=current IS green"
+
+# #440 — the base half of the trail, end to end through the real locator. A
+# verdict that names no base cannot say WHAT delta it approved, so it must reach
+# /goal as `stale` and not as a colour. A9 and A10 differ by exactly the `base`
+# member, which is what makes this a test of the migration rather than of jq.
+R_NO_BASE_MINT="$(mktemp -d)"
+mkdir -p "$R_NO_BASE_MINT/.uberdev/runs/20260401-101112-deadbeef"
+cat > "$R_NO_BASE_MINT/.uberdev/runs/20260401-101112-deadbeef/review-pr-verdict.json" <<EOF
+{"pr":4109,"sha":"$SHA_OK","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false,"halted_due_to_overflow":false}}}
+EOF
+R_NO_BASE="$( cd "$R_NO_BASE_MINT" && . "$GOAL_LIB" && uberdev_goal_locate_review_pr_audit_by_pr 4109 2>/dev/null )"
+rm -rf "$R_NO_BASE_MINT"
+assert_eq "$(signal_for "$R_NO_BASE" "$SHA_OK")" "stale" \
+  "A.base1.stale — a verdict with no base member reaches /goal as stale, not green"
+assert_eq "$(signal_for "$(mint_receipt 4110 0 0 false "$SHA_OK")" "$SHA_OK")" "green" \
+  "A.base2.control — the same verdict WITH a base member is green"
 
 echo "== A (#347): every clause of the closed shape gate maps to \`missing\` =="
 # One mutation per clause. `missing` (not stale, not a colour) is the required

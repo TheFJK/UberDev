@@ -2595,13 +2595,38 @@ M95_RUNNER_EOF
     fi
   }
 
+  M95_BASE_SHA="dddddddddddddddddddddddddddddddddddddddd"
+
   # 1. A valid current verdict resolves to found/current with the cached SHA and
-  #    a cleaned carrier.
+  #    a cleaned carrier. Post-#440 "current" also requires a top-level `base`
+  #    member: an artifact that cannot name the base it reviewed cannot
+  #    corroborate that the reviewed delta still applies.
+  rm -rf "${M95_SANDBOX:?}/.uberdev"
+  mkdir -p "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1"
+  printf '{"pr":42,"sha":"%s","base":{"sha":"%s","ref":"main"},"phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0},"override_reason":null}}}\n' \
+    "$M95_SHA" "$M95_BASE_SHA" > "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+  m95_assert_case "current" 42 found current "$M95_SHA"
+
+  # 1b. #440 — a pre-#440 artifact has a modern phase2_5 block and NO base. It
+  #     must degrade to the EXISTING `legacy` state (which trust-trail-evaluator
+  #     already maps to STALE), not be minted a new audit-state token:
+  #     lib/goal-state.sh and tests/goal-verdict-receipt.test.sh both pin the
+  #     vocabulary to legacy|current.
   rm -rf "${M95_SANDBOX:?}/.uberdev"
   mkdir -p "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1"
   printf '{"pr":42,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0},"override_reason":null}}}\n' \
     "$M95_SHA" > "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
-  m95_assert_case "current" 42 found current "$M95_SHA"
+  m95_assert_case "base-absent-is-legacy" 42 found legacy "$M95_SHA"
+
+  # 1c. #440 — a PRESENT but corrupt `base` is malformed, not legacy. "This
+  #     predates the schema" is recoverable by a /review-pr re-run; "this field
+  #     is garbage" is a contract violation and must not be laundered into the
+  #     recoverable state.
+  rm -rf "${M95_SANDBOX:?}/.uberdev"
+  mkdir -p "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1"
+  printf '{"pr":42,"sha":"%s","base":{"sha":"nope","ref":"main"}}\n' \
+    "$M95_SHA" > "$M95_SANDBOX/.uberdev/runs/20260101-010101-a1/review-pr-verdict.json"
+  m95_assert_case "base-malformed" 42 indeterminate indeterminate ""
 
   # 2. An exhaustively empty search surface is absent telemetry, not a failure.
   rm -rf "${M95_SANDBOX:?}/.uberdev"

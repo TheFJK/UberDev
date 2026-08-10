@@ -1232,10 +1232,15 @@ _b12_clear() {
   : > "$B12_ERR"
 }
 
+# A CURRENT artifact is one that can name both endpoints of what it reviewed, so
+# post-#440 the `base` member is part of the baseline payload. The base-absent
+# and base-malformed shapes get their own explicit rows in B13.
+B12_BASE_SHA="dddddddddddddddddddddddddddddddddddddddd"
+
 _b12_payload() {
   local pr="$1" sha="$2" blocker="${3:-0}" critical="${4:-0}"
-  printf '{"pr":%s,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":%s,"critical":%s},"override_reason":null}}}\n' \
-    "$pr" "$sha" "$blocker" "$critical"
+  printf '{"pr":%s,"sha":"%s","base":{"sha":"%s","ref":"main"},"phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":%s,"critical":%s},"override_reason":null}}}\n' \
+    "$pr" "$sha" "$B12_BASE_SHA" "$blocker" "$critical"
 }
 
 _b12_write() {
@@ -1617,16 +1622,45 @@ _b13_valid "phase2_5-missing" \
   "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{}}" \
   legacy false 0 0 null
 _b13_valid "phase2_5-empty" \
-  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{}}}" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\",\"ref\":\"main\"},\"phases\":{\"phase2_5\":{}}}" \
   current false 0 0 null
 _b13_valid "nullable-defaults" \
-  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":null,\"by_severity\":null,\"override_reason\":null}}}" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\",\"ref\":\"main\"},\"phases\":{\"phase2_5\":{\"halted\":null,\"by_severity\":null,\"override_reason\":null}}}" \
   current false 0 0 null
 _b13_valid "typed-values" \
-  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":true,\"by_severity\":{\"blocker\":2,\"critical\":3},\"override_reason\":\"user-selected-emit-green-on-blocker-deferred\"}}}" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\",\"ref\":\"main\"},\"phases\":{\"phase2_5\":{\"halted\":true,\"by_severity\":{\"blocker\":2,\"critical\":3},\"override_reason\":\"user-selected-emit-green-on-blocker-deferred\"}}}" \
   current true 2 3 user-selected-emit-green-on-blocker-deferred
 
+# #440 — base identity is the second endpoint of the reviewed delta. An artifact
+# that omits it is pre-#440 telemetry and degrades to the EXISTING `legacy`
+# state, no matter how modern its phase2_5 block: recording no base is not
+# evidence that the base is unchanged. Minting a new audit-state token instead
+# would red lib/goal-state.sh and goal-verdict-receipt.test.sh, which both pin
+# the vocabulary to legacy|current.
+_b13_valid "base-missing-degrades-to-legacy" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"phases\":{\"phase2_5\":{\"halted\":true,\"by_severity\":{\"blocker\":2,\"critical\":3}}}}" \
+  legacy false 0 0 null
+_b13_valid "base-null-degrades-to-legacy" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":null,\"phases\":{\"phase2_5\":{}}}" \
+  legacy false 0 0 null
+
 _b13_invalid "top-level-array" '[]'
+_b13_invalid "base-not-object" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":\"main\"}"
+_b13_invalid "base-array" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":[]}"
+_b13_invalid "base-sha-missing" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"ref\":\"main\"}}"
+_b13_invalid "base-sha-short" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"aaaa\",\"ref\":\"main\"}}"
+_b13_invalid "base-sha-uppercase" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"ref\":\"main\"}}"
+_b13_invalid "base-ref-missing" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\"}}"
+_b13_invalid "base-ref-empty" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\",\"ref\":\"\"}}"
+_b13_invalid "base-ref-nonstring" \
+  "{\"pr\":42,\"sha\":\"$B12_SHA_A\",\"base\":{\"sha\":\"$B12_BASE_SHA\",\"ref\":7}}"
 _b13_invalid "duplicate-pr" \
   "{\"pr\":42,\"pr\":42,\"sha\":\"$B12_SHA_A\"}"
 _b13_invalid "pr-bool" \
@@ -1786,16 +1820,16 @@ echo "== B16: the selector receipt carries phase2_5_halted_due_to_overflow =="
 B16_ROOT="$(mktemp -d)"
 mkdir -p "$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01"
 B16_SHA="$(printf 'a%.0s' $(seq 40))"
-printf '{"pr":340,"sha":"%s","phases":{"phase2_5":{"halted":false,"halted_due_to_overflow":true,"by_severity":{"blocker":0,"critical":0}}}}\n' \
-  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+printf '{"pr":340,"sha":"%s","base":{"sha":"%s","ref":"main"},"phases":{"phase2_5":{"halted":false,"halted_due_to_overflow":true,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" "$B12_BASE_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
 B16_RECEIPT="$( cd "$B16_ROOT" && git init -q . 2>/dev/null; cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 340 2>/dev/null )"
 B16_RC=$?
 assert_eq "$B16_RC" "0" "B16.found: verdict carrying halted_due_to_overflow is discoverable"
 assert_eq "$(printf '%s' "$B16_RECEIPT" | jq -r '.phase2_5_halted_due_to_overflow')" "true" \
   "B16.overflow-true: receipt carries phase2_5_halted_due_to_overflow=true"
 # A verdict without the field must default to false, not null/absent.
-printf '{"pr":341,"sha":"%s","phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0}}}}\n' \
-  "$B16_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
+printf '{"pr":341,"sha":"%s","base":{"sha":"%s","ref":"main"},"phases":{"phase2_5":{"halted":false,"by_severity":{"blocker":0,"critical":0}}}}\n' \
+  "$B16_SHA" "$B12_BASE_SHA" >"$B16_ROOT/.uberdev/runs/20260730-101112-abcdef01/review-pr-verdict.json"
 B16_RECEIPT2="$( cd "$B16_ROOT" && . "$LIB" && discover_review_verdict_json 341 2>/dev/null )"
 assert_eq "$(printf '%s' "$B16_RECEIPT2" | jq -r '.phase2_5_halted_due_to_overflow')" "false" \
   "B16.overflow-default: absent halted_due_to_overflow defaults to false"

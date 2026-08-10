@@ -636,6 +636,12 @@ case "$7" in
     [ "$#" -eq 7 ] || exit 2
     printf '{"baseRefOid":"%s","baseRefName":"main"}\n' "$SCOPE_EXPECTED_BASE"
     ;;
+  baseRefName)
+    # #440 — the fence resolves the base ref NAME alongside the merge-base so
+    # the trust trail can name what it reviewed against, not just where.
+    [ "$#" -eq 9 ] && [ "$8" = --jq ] && [ "$9" = .baseRefName ] || exit 2
+    printf 'main\n'
+    ;;
   headRefOid)
     [ "$#" -eq 9 ] && [ "$8" = --jq ] && [ "$9" = .headRefOid ] || exit 2
     git -C "$SCOPE_REPO" rev-parse HEAD
@@ -658,9 +664,31 @@ git -C "$SCOPE_REPO" commit -qm 'test: create initial review change'
   PR_NUMBER=73
   REVIEW_REPO_SLUG="$SCOPE_EXPECTED_REPO_SLUG"
   [[ "$REVIEW_REPO_SLUG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+  # #440 — this fence is the ONLY writer of the reviewed-base identity, and the
+  # anchor/audit consumers live 48+ fences downstream in different harness
+  # shells. Give it the run dir and the audit emitter a real run has, so the
+  # carrier write is executed rather than asserted about.
+  UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+  RESEARCH_DIR_ABS="$TMP/scope-run"
+  mkdir -p "$RESEARCH_DIR_ABS"
+  audit() { printf 'audit %s\n' "$*" >>"$TMP/scope-audit.log"; }
   . "$TMP/review-head-assert.sh"
   unset BASE_SHA
   . "$TMP/review-scope.sh"
+  # The carrier exists, holds the base this fence resolved, and round-trips
+  # through the typed reader every downstream consumer uses.
+  . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh"
+  SCOPE_CARRIED="$(review_fleet_read_review_base "$RESEARCH_DIR_ABS/review-base-identity.tsv")"
+  if [ "$SCOPE_CARRIED" != "$(printf '%s\tmain' "$SCOPE_EXPECTED_BASE")" ]; then
+    echo "review-child-inputs: reviewed-base carrier did not round-trip: ${SCOPE_CARRIED:-<empty>}" >&2
+    exit 1
+  fi
+  # And a run that cannot record its base is TYPED, never defaulted: no audit
+  # line may claim the carrier was skipped when it was in fact written.
+  if [ -s "$TMP/scope-audit.log" ] && grep -q review_base_uncarried "$TMP/scope-audit.log"; then
+    echo "review-child-inputs: base carrier reported uncarried despite a bound run dir" >&2
+    exit 1
+  fi
   python3 -I -B - "$CHANGED_PATHS_JSON" "$DIFF_ARTIFACT_PATH" <<'PY'
 import json,sys
 paths=json.loads(sys.argv[1]); raw=open(sys.argv[2],encoding='utf-8').read()
@@ -893,6 +921,16 @@ review_wait_jobs() {
 review_refresh_phase1_scope() {
   return 0
 }
+
+# #440 — the Phase 2 scope refresh no longer dereferences a BASE_SHA no fence in
+# its shell ever bound; it reads the identity Phase 1 carried. Stand in for
+# Phase 1 here so the fence under test has the carrier a real run would give it.
+# Deliberately NOT `export BASE_SHA=...`: env-passing a value the production
+# fence cannot see is exactly what masked this class in #418/#419.
+( . "$ROOT/plugins/uberdev/lib/review-fleet-args.sh" \
+  && review_fleet_write_review_base "$RESEARCH_DIR_ABS/review-base-identity.tsv" \
+       "$SCOPE_EXPECTED_BASE" main ) \
+  || { echo "review-child-inputs: could not seed the reviewed-base carrier" >&2; exit 1; }
 
 wave=()
 (

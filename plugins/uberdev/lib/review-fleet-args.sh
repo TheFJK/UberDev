@@ -783,6 +783,77 @@ review_fleet_read_ci_probe_verdict() {
   esac
 }
 
+# review_fleet_write_review_base TARGET BASE_SHA BASE_REF_NAME
+# review_fleet_read_review_base  TARGET -> "<base_sha>\t<base_ref_name>"
+#
+# The identity of the base the review was actually computed against (#440).
+# Phase 1 resolves it once -- the merge-base of the PR head and the live
+# `baseRefOid`, plus the base ref's NAME -- and every later consumer needs it:
+# the Phase 2 scope refresh, the trust-trail anchor's `Reviewed-base:` trailer,
+# and the audit JSON's top-level `base` member. Those consumers are 48 and 52
+# bash fences downstream of the bind, so the value cannot travel in a variable:
+# a fence that merely READS `$BASE_SHA` sees the empty string and every
+# `${BASE_SHA:-...}` around it turns "this shell cannot tell" into a confident
+# wrong answer. That is exactly how #418 and #419 shipped.
+#
+# Both halves validate the SAME domain, so neither can launder a value the other
+# would refuse: 40 lowercase hex for the SHA, and a non-empty control-character
+# free ref name. A TAB or newline inside the ref name is refused rather than
+# escaped -- the record is one TAB-separated line, so an embedded TAB would
+# split the reader's own columns and an embedded newline would truncate the
+# record to its first segment. Both are "the value did not survive", spelled as
+# success.
+#
+# A THIRD field is refused rather than ignored: a reader that silently drops
+# trailing columns cannot tell a two-field record from a corrupted one, and this
+# record gates a trust signal.
+_review_fleet_base_sha_ok() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  return 0
+}
+
+_review_fleet_base_ref_ok() {
+  [ -n "$1" ] || return 1
+  case "$1" in
+    *[[:cntrl:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+review_fleet_write_review_base() {
+  [ "$#" -eq 3 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" base_sha="$2" base_ref="$3"
+  _review_fleet_base_sha_ok "$base_sha" || return 2
+  _review_fleet_base_ref_ok "$base_ref" || return 2
+  ( umask 077 && printf '%s\t%s\n' "$base_sha" "$base_ref" >"$target" ) || return 2
+}
+
+review_fleet_read_review_base() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet reviewed-base identity missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded base_sha base_ref extra
+  IFS= read -r recorded <"$1" || return 2
+  base_sha=""; base_ref=""; extra=""
+  # Herestring, never an unquoted `<<EOF` heredoc: a heredoc re-expands its body,
+  # so a ref name containing `$` -- which git permits -- would be substituted
+  # away before the validator ever saw it.
+  IFS=$'\t' read -r base_sha base_ref extra <<<"$recorded"
+  if ! _review_fleet_base_sha_ok "$base_sha" \
+    || ! _review_fleet_base_ref_ok "$base_ref" \
+    || [ -n "$extra" ]; then
+    echo "error: review-fleet reviewed-base identity is not <40-hex>TAB<ref-name>: ${recorded:-<empty>}" >&2
+    return 2
+  fi
+  printf '%s\t%s' "$base_sha" "$base_ref"
+}
+
 # review_fleet_write_ci_check_name PATH NAME
 # review_fleet_read_ci_check_name  PATH -> the recorded check name
 #

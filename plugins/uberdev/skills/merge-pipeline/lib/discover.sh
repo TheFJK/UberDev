@@ -358,7 +358,7 @@ pr_view_projection() {
 
   local result
   result="$(gh pr view "$pr_number" \
-    --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author \
+    --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,baseRefOid,body,commits,labels,createdAt,author \
     --jq '.' \
     2>"$gh_err")"
   local gh_exit=$?
@@ -668,11 +668,54 @@ def parse_phase2_5(value):
     return ("current", halted, counts[0], counts[1], override, overflow)
 
 
+def parse_base(value):
+    """Top-level `base` member: the identity of what the review was scoped to (#440).
+
+    Three outcomes, and the difference between the last two is the whole point:
+
+      * present and well-formed -> (sha, ref)
+      * ABSENT                  -> None, which the caller folds into the existing
+        `legacy` audit state. An artifact that cannot say which base it reviewed
+        cannot corroborate that the reviewed delta still applies, and recording
+        no base is not evidence that the base is unchanged. Reusing `legacy`
+        rather than minting a new token is deliberate: `lib/goal-state.sh` and
+        `tests/goal-verdict-receipt.test.sh` both pin the audit-state vocabulary
+        to `legacy | current`, and the legacy branch already carries exactly the
+        soft, operator-driven "re-run /review-pr" recovery this needs.
+      * present and CORRUPT     -> VerdictError, i.e. `malformed`. "This predates
+        the schema" is recoverable by a re-run; "this field is garbage" is a
+        contract violation and must not be laundered into the recoverable state.
+    """
+
+    base = value.get("base")
+    if base is None:
+        return None
+    if not isinstance(base, dict):
+        raise VerdictError("base must be an object or null")
+    base_sha = base.get("sha")
+    if not isinstance(base_sha, str) or SHA_RE.fullmatch(base_sha) is None:
+        raise VerdictError("base.sha must be 40 lowercase hexadecimal characters")
+    base_ref = base.get("ref")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise VerdictError("base.ref must be a non-empty string")
+    if any(ord(char) < 32 or ord(char) == 127 for char in base_ref):
+        raise VerdictError("base.ref must not contain control characters")
+    return (base_sha, base_ref)
+
+
 def validate_target(value):
     artifact_sha = value.get("sha")
     if not isinstance(artifact_sha, str) or SHA_RE.fullmatch(artifact_sha) is None:
         raise VerdictError("top-level sha must be 40 lowercase hexadecimal characters")
-    return artifact_sha, parse_phase2_5(value)
+    base = parse_base(value)
+    phase = parse_phase2_5(value)
+    if base is None:
+        # A base-less artifact is pre-#440 telemetry regardless of how modern its
+        # phase2_5 block looks, so it degrades to the same `legacy` tuple the
+        # phase2_5 migration already uses. Downgrading here rather than at the
+        # receipt keeps ONE place that decides what "current" means.
+        phase = ("legacy", False, 0, 0, None, False)
+    return artifact_sha, phase, base
 
 
 def receipt_identity(value):
@@ -915,11 +958,11 @@ def discover(expected_pr, capture_dir):
         if candidate_pr != expected_pr:
             continue
         try:
-            artifact_sha, phase = validate_target(value)
+            artifact_sha, phase, base = validate_target(value)
         except VerdictError:
             unknown_timestamps.append(timestamp)
             continue
-        targets.append((timestamp, payload, artifact_sha, phase))
+        targets.append((timestamp, payload, artifact_sha, phase, base))
     verify_bound_roots(bound_roots)
     if not targets:
         if unknown_timestamps:
@@ -939,6 +982,9 @@ def discover(expected_pr, capture_dir):
         )
     artifact_sha = selected[0][2]
     state, halted, blocker, critical, override, overflow = selected[0][3]
+    base = selected[0][4]
+    base_sha = base[0] if base is not None else None
+    base_ref = base[1] if base is not None else None
 
     snapshot_path, snapshot_identity, snapshot_digest = (
         runtime.secure_publish_captured(
@@ -961,6 +1007,12 @@ def discover(expected_pr, capture_dir):
         ),
         "pr": expected_pr,
         "artifact_sha": artifact_sha,
+        # Corroborating-only mirror of the anchor's `Reviewed-base:` trailer
+        # (#440). The TRAILER is the load-bearing artifact -- `.uberdev/` is
+        # gitignored and does not cross-clone -- so these two are advisory and
+        # null on any pre-#440 artifact.
+        "base_sha": base_sha,
+        "base_ref": base_ref,
         "audit_state": state,
         "phase2_5_halted": halted,
         "phase2_5_blocker_count": blocker,
