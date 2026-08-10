@@ -4,6 +4,25 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.1] — 2026-08-09
+
+### Fixed
+
+- **`green_after_fix` has a producer, so an autopilot-rewritten head no longer
+  reads as a clean one** (#400). It was a `CI_OUTCOME_ENUM` member with seven
+  readers and zero producers, so `phases.phase3.outcome` serialised identically
+  for a PR whose CI was always green and one whose head a fixer committed to,
+  rebased and force-pushed — a `/merge` trust-trail reader could not tell them
+  apart. The two differ by exactly one fact, whether a fixer rewrote the head
+  the CI passed on, and that fact lives in `ci-loop-state.json`'s `fix_pushes`,
+  not in the fence observing the green. One derivation,
+  `review_fleet_ci_green_outcome RUN_DIR CI_FIX_PHASE`, now answers it and no
+  call site restates it — two spellings of "which green" is the defect itself.
+  6c.2 MONITOR's `green)` arm replaces its literal and 6c.1 PROBE gains an
+  executable terminal where its green row had been prose in a table, which is
+  the fast path a post-fix re-probe takes and so the terminal most likely to be
+  looking at a rewritten head.
+
 ## [0.45.0] — 2026-08-09
 
 ### Changed

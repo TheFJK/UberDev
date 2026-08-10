@@ -839,6 +839,23 @@ assert_grep "$MERGE_SKILL" '\| `CI_FAILURE_CLASS_ENUM` \|' \
   "R20.2 — CI_FAILURE_CLASS_ENUM row present"
 assert_grep "$MERGE_SKILL" '\| `CI_OUTCOME_ENUM` \|' \
   "R20.3 — CI_OUTCOME_ENUM row present"
+# R20.3a/b (#400) — the DORMANT annotation was true for as long as no fence
+# assigned the member. Both reachable green terminals now derive it from the
+# fix-push ledger, so a surviving dormancy claim here would leave the constants
+# table as the last source of the original confusion — and this table is what a
+# /merge trust-trail reader consults to decide what the audit JSON can mean.
+#
+# The POSITIVE row carries the weight: it pins the producer by name, so the row
+# cannot go stale by silently losing the wiring it advertises. The negative row
+# is deliberately sentence-scoped (`[^.]*`) rather than line-scoped: this table
+# row also carries a HISTORICAL sentence about members annotated DORMANT between
+# #381 and #383, which must survive — consumers validating old audit JSON depend
+# on it. A line-wide `green_after_fix.*DORMANT` reds on that sentence and would
+# push the next author to delete real history to get to green.
+assert_grep "$MERGE_SKILL" '`green_after_fix` is LIVE.*review_fleet_ci_green_outcome' \
+  "R20.3a — CI_OUTCOME_ENUM row records green_after_fix as live, naming its producer"
+assert_no_grep "$MERGE_SKILL" 'green_after_fix`?[^.]*(remains|is|stays|still) DORMANT' \
+  "R20.3b — no surviving dormancy claim about green_after_fix"
 assert_grep "$MERGE_SKILL" '\| `CI_FIX_LOOP_CAP` \|' \
   "R20.4 — CI_FIX_LOOP_CAP row present (value 3)"
 assert_grep "$MERGE_SKILL" '\| `RERUN_FLAKY_CAP` \|' \

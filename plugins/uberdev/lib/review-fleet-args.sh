@@ -622,6 +622,59 @@ review_fleet_load_ci_counters() {
   case "$CI_FIX_LOOP_ITER$REVIEW_ITERATION" in '' | *[!0-9]*) return 2 ;; esac
 }
 
+# review_fleet_ci_green_outcome RUN_DIR CI_FIX_PHASE -> `green` | `green_after_fix`
+#
+# WHICH green this is. `green` and `green_after_fix` are two CI_OUTCOME_ENUM
+# members separated by exactly ONE fact -- whether an autopilot rewrote the head
+# the CI just passed on -- and that fact does not live in the fence that
+# OBSERVES the green. It lives in ci-loop-state.json's `fix_pushes`, written by
+# review_fleet_write_ci_push from a different shell entirely.
+#
+# So every green terminal a fixer can reach calls THIS, and none of them restate
+# the decision locally. Two spellings of "which green" IS the defect (#400): the
+# member had seven readers and zero producers, so `phases.phase3.outcome`
+# serialised a force-pushed autopilot head and a human-pushed one identically,
+# and a /merge trust-trail reader could not tell them apart.
+review_fleet_ci_green_outcome() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, NEVER `path`: zsh TIES the lowercase `path` array to $PATH, so a
+  # `local path=` here would replace the command search path for the whole call
+  # frame and the `jq` below would be command-not-found. Same rule, same reason
+  # as review_fleet_write_ci_state -- and this instance fails on a GREEN CI run,
+  # where nothing else is going wrong to prompt a second look.
+  local target="$1/ci-loop-state.json" fix_phase="$2" pushes count
+  # Probe-only (`--no-ci-fix`, CI_FIX_PHASE=0): 6c.4 ROUTE skips the fixer arms
+  # entirely, so by construction no fixer ran and the head under test is the one
+  # the author pushed. Answer WITHOUT reading the ledger -- a file some earlier
+  # non-probe-only run left behind is not evidence about THIS head.
+  case "$fix_phase" in
+    0) printf '%s\n' green; return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  # An absent ledger is the FIRST probe of the run, not an error: no fix loop has
+  # run yet, so the head is exactly what the author pushed. Same precedent and
+  # same reason as review_fleet_load_ci_counters -- and, as there, the ONLY state
+  # that gets a fresh-shell default.
+  [ -e "$target" ] || { printf '%s\n' green; return 0; }
+  # Present-but-broken is NOT "no fixes". A truncated, empty or crashed producer
+  # folded to 0 is the recorded `jq length … || echo 0` masking class (#263,
+  # #265); HERE it would launder a rewritten head into a clean one -- the exact
+  # inverse of the signal this function carries. Fail, and let the caller audit
+  # the halt rather than emit a silently-wrong outcome.
+  [ -r "$target" ] && [ -s "$target" ] || return 2
+  pushes="$(review_fleet_read_ci_state "$target" fix_pushes)" || return 2
+  # review_fleet_read_ci_state `tojson`s array fields, so `pushes` is a JSON
+  # STRING that must be re-parsed. And its rc is NOT the detector: a
+  # `"fix_pushes": 3` ledger comes back rc 0 printing `3`, which an rc check
+  # alone waves straight through to `[ 3 -gt 0 ]`. The `type == "array"` /
+  # error() pair is what rejects a non-array. `jq -e` alone is not it either --
+  # 0 is truthy in jq, so a length of 0 also exits 0.
+  count="$(jq -e 'if type == "array" then length else error("fix_pushes is not an array") end' <<<"$pushes")" || return 2
+  case "$count" in '' | *[!0-9]*) return 2 ;; esac
+  if [ "$count" -gt 0 ]; then printf '%s\n' green_after_fix; else printf '%s\n' green; fi
+}
+
 # review_fleet_read_ci_state PATH FIELD -> one recorded counter, in a new shell.
 review_fleet_read_ci_state() {
   [ -r "${1:-}" ] || {

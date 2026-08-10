@@ -3002,12 +3002,52 @@ PY
     | `PROBE_JSON` content | `PROBE_VERDICT` | OUTCOME | Audit event |
     |---|---|---|---|
     | stderr matches `no checks reported on the` (or empty `[]`) AND the settle window above is exhausted (head age ≥ 120 s, or 3 re-probes used) | `empty` | `skipped_no_checks` | `ci_probe_skipped_no_checks` (payload carries `settle_reprobes_used` + `head_age_sec`) |
-    | all deduped names `bucket ∈ {pass, skipping}` | `green` | `green` | `ci_phase_outcome` (terminal, payload `outcome=green` — fast-path skip past MONITOR/CLASSIFY) |
+    | all deduped names `bucket ∈ {pass, skipping}` | `green` | `green` or `green_after_fix` (`review_fleet_ci_green_outcome`) | `ci_phase_outcome` (terminal, payload `data.outcome=$OUTCOME` — fast-path skip past MONITOR/CLASSIFY) |
     | any deduped name `bucket == pending` (and none `fail`/`cancel`) | `pending` | (proceed to MONITOR) | `ci_probe_started` |
     | any deduped name `bucket ∈ {fail, cancel}` | `red` | (proceed to MONITOR + classify if all settled) | `ci_probe_started` |
     | `gh` exit non-zero AND no usable JSON | — | (carve-out — `phases.phase3` block omitted from audit JSON; Step 7 proceeds as if `OUTCOME=skipped_no_checks`) | `ci_probe_unreachable` |
 
     The `gh pr checks` output MUST be parsed as JSON, never line-grepped.
+
+    The `green` row above is the only terminal in this table, and it used to be
+    prose — a table cell reading `green`. Prose cannot assign an `OUTCOME`, and
+    this is the arm a **post-fix re-probe** most often takes: after a fix push
+    the flow re-enters at Step 4, Phase 1 re-approves, control returns here, and
+    the fast path skips MONITOR entirely. So the terminal most likely to be
+    looking at an autopilot-rewritten head was the one with no executable
+    terminal at all (#400).
+
+    ```bash uberdev-executable origin=review-pr
+    # BEGIN ci-probe-green-terminal-v1
+    # Everything this fence needs is established INSIDE the green arm, not at the
+    # top: `pending` and `red` are non-terminal here (they proceed to MONITOR,
+    # which establishes its own), so demanding RUN_ID and a resolvable run dir on
+    # those paths would be a hard failure in a fence that had no question to
+    # answer. 6c.2 validates eagerly for the opposite reason -- it is about to
+    # spend up to 480 s watching CI, and finding out afterwards is worse.
+    if [ "${PROBE_VERDICT:-}" = green ]; then
+      # The same sanctioned recompute pair as 6c.2, for the same reason: nothing
+      # survives between fences, and the ledger that separates `green` from
+      # `green_after_fix` lives on disk under this run's research dir. NEVER a
+      # second uberdev_command_workspace_prepare -- see the note in 6c.2.
+      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+      # RUN_ID absent is a HARD ERROR, not a default: it would resolve the ledger
+      # under a path that does not exist, and "does not exist" is the answer
+      # `green` -- silently wrong, and indistinguishable from correct.
+      [ -n "${RUN_ID:-}" ] || { echo "error: 6c.1 PROBE green terminal entered without RUN_ID" >&2; return 2; }
+      CI_PROBE_WORKING_DIR_ABS="$(git rev-parse --show-toplevel)" || return 2
+      CI_PROBE_RUN_DIR="$(cd "$CI_PROBE_WORKING_DIR_ABS/.uberdev/research/$RUN_ID" && pwd -P)" || return 2
+      OUTCOME="$(review_fleet_ci_green_outcome "$CI_PROBE_RUN_DIR" "${CI_FIX_PHASE:-1}")" || {
+        # An unreadable ledger is NOT "no fixes" -- defaulting here reports a
+        # force-pushed autopilot head as a clean one. Halt instead.
+        audit ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable
+        OUTCOME=halted
+        exit 1
+      }
+      audit ci_phase_outcome data.outcome="$OUTCOME"
+    fi
+    # END ci-probe-green-terminal-v1
+    ```
 
     ### 6c.2 MONITOR — bounded `gh pr checks --watch` passes
 
@@ -3024,6 +3064,25 @@ PY
 
     ```bash
     # BEGIN ci-monitor-bounded-loop-v1
+    # Fence-scoped state, re-established HERE. Nothing survives from 6c.1, and
+    # the ledger that separates `green` from `green_after_fix` lives on disk
+    # under this run's research dir. This is the SANCTIONED recompute pair (the
+    # same two lines as 6b, and the same `cd … && pwd -P` guard as every other
+    # site) -- never a second uberdev_command_workspace_prepare: without RUN_ID
+    # that re-mints a different ID off the post-fix HEAD and forks
+    # .uberdev/research/<RUN_ID>; with RUN_ID it hits the single-shot
+    # reservation and exits 2.
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    # RUN_ID is the one documented cross-fence carry. Absent, it is a HARD
+    # ERROR, not a default: an empty RUN_ID resolves the ledger under a path
+    # that does not exist, and "does not exist" is the answer `green` -- a
+    # silently wrong outcome indistinguishable from a correct one.
+    [ -n "${RUN_ID:-}" ] || { echo "error: 6c.2 MONITOR fence entered without RUN_ID" >&2; return 2; }
+    CI_MONITOR_WORKING_DIR_ABS="$(git rev-parse --show-toplevel)" || return 2
+    # `cd … && pwd -P`, not bare concatenation: it makes a GARBAGE RUN_ID a hard
+    # failure instead of a path that merely fails to exist -- whose answer would
+    # again be the silently-wrong `green`.
+    CI_MONITOR_RUN_DIR="$(cd "$CI_MONITOR_WORKING_DIR_ABS/.uberdev/research/$RUN_ID" && pwd -P)" || return 2
     CI_MONITOR_PASS_SEC=240          # one watch pass
     CI_MONITOR_FENCE_SEC=480         # this FENCE's share of the budget (2 passes)
     CI_MONITOR_MIN_PASS_SEC=30       # = CI_WATCH_INTERVAL_SEC; minimum-progress floor
@@ -3094,8 +3153,18 @@ PY
     CI_MONITOR_ELAPSED_SEC=$(( 1200 - ( CI_MONITOR_DEADLINE_SEC - $(date +%s) ) ))
     case "$CI_MONITOR_VERDICT" in
       green)
-        OUTCOME=green
-        audit ci_monitor_green passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC
+        # WHICH green. The watch reports only that CI passed; whether an
+        # autopilot rewrote the head it passed on is recorded in the fix-push
+        # ledger, which this fence never wrote and cannot infer. One derivation,
+        # in the library, called by every green terminal (#400).
+        OUTCOME="$(review_fleet_ci_green_outcome "$CI_MONITOR_RUN_DIR" "${CI_FIX_PHASE:-1}")" || {
+          # An unreadable ledger is NOT "no fixes". Defaulting here would report
+          # a force-pushed autopilot head as a clean one; halt instead.
+          audit ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable
+          OUTCOME=halted
+          exit 1
+        }
+        audit ci_monitor_green outcome=$OUTCOME passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC
         ;;
       red)
         audit ci_monitor_red passes=$CI_MONITOR_PASSES_USED elapsed_sec=$CI_MONITOR_ELAPSED_SEC rc=$CI_MONITOR_RC
@@ -3799,6 +3868,13 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     esac
     if [ "${CI_FIX_PHASE:-1}" = 0 ]; then
       audit ci_probe_only_skipped state="${PROBE_VERDICT:-unknown}"
+      # The ONE surviving literal `OUTCOME=green`, and it is deliberate: this is
+      # `review_fleet_ci_green_outcome`'s fix_phase=0 case, whose answer is
+      # STATICALLY green -- probe-only skips every fixer arm, so by construction
+      # no fixer ran. Calling the helper here would make RUN_ID a hard
+      # requirement of a fence that needs no ledger to be right, for no extra
+      # information. The equivalence is asserted behaviourally (E8g, S2-RT.16,
+      # S2B-RT.3), and S3.4 pins this as the only literal left in the file.
       if [ "${PROBE_VERDICT:-}" = green ]; then OUTCOME=green; else OUTCOME=halted; fi
       return 0
     fi
