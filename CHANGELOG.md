@@ -4,6 +4,49 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.6] — 2026-08-10
+
+### Added
+
+- **The `/merge` SKILL fences now execute under a real zsh** (#412). #401 closed
+  the library half of this blind spot (`lib/discover.sh` runs under `zsh -c`,
+  B23). The fence half stayed open by construction: `tests/merge.test.sh` is the
+  only thing that executes merge fence bodies (M95, M97) and it is bash-bound —
+  wired into `shape-checks-windows`, so it runs under Git Bash there and under
+  bash on ubuntu, never under zsh. Every bashism living in the SKILL body rather
+  than in a library was therefore invisible in the one command whose fences the
+  Bash tool actually runs through `/bin/zsh`.
+
+  `tests/merge-pipeline-zsh.test.sh` adds 43 rows. It slices each
+  contract-delimited fence out of the Markdown **by marker name** — never by line
+  number or fence ordinal, so the RFC 0012 §3.2 thin-SKILL rewrite cannot leave it
+  silently slicing the wrong block — assembles a real child script, and runs it
+  under `zsh -f` against on-disk sandboxes:
+
+  - `MZ0` harness floor, marker contract, extract anchors (6 markers)
+  - `MZ1` Step 1.1 acquire: contention / stale-reclaim / crashed-acquisition /
+    hostile inherited `RUN_ID` / filesystem-error-is-not-contention
+  - `MZ2` heartbeat touch + Step 4.6 release, holder-verified both ways
+  - `MZ3` Step 3.4 issue cleanup against a recording `gh` function stub
+  - `MZ4` Step 1.4.5 dispatch guard ladder, on-disk cap and rc classifier
+  - `MZ5` Step (c.0) trust-gate — two-shell parity for a block `merge.test.sh`
+    M95 only ever executed under bash
+  - `MZ6` negative controls: the zsh scalar-split class and `trap … RETURN`
+
+  No divergence exists between the two shells today, so this is a regression lock,
+  not a bugfix. Its falsifiability is bought rather than asserted: the header
+  carries a mutation-guard table naming the production line whose revert reds each
+  row, and all 17 of those mutations were executed against a mutated copy of
+  `SKILL.md` — each reds exactly its named row.
+
+  There is no SKIP path: a missing `zsh`/`jq`/`git`/`python3` is FATAL + exit 2,
+  because a green run that proved nothing is the failure mode this fixture closes.
+
+  `merge-pipeline/SKILL.md` gains ten inert `# BEGIN`/`# END` marker comments plus
+  one prose sentence per fence naming the consumer test — the file's own declared
+  `merge-trust-gate-fence-v1` convention. No fence logic is edited, reordered or
+  reindented.
+
 ## [0.45.5] — 2026-08-10
 
 ### Fixed

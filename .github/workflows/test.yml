@@ -117,6 +117,7 @@ jobs:
           zsh tests/goal-state-zsh.test.sh && \
           zsh tests/goal-pipeline-zsh.test.sh && \
           zsh tests/finish-branch-zsh.test.sh && \
+          zsh tests/merge-pipeline-zsh.test.sh && \
           bash tests/lib-assert-count.test.sh && \
           bash tests/crossplatform-shell-wrappers.test.sh && \
           bash tests/docs-accuracy.test.sh && \
@@ -269,6 +270,7 @@ jobs:
         #   - finish-branch-zsh.test.sh
         #   - goal-pipeline-zsh.test.sh
         #   - goal-state-zsh.test.sh
+        #   - merge-pipeline-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh
         #   - simplify-standalone-flow.test.sh
         #   - testers-pipeline.test.sh
