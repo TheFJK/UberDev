@@ -245,9 +245,10 @@ The lock is a `mkdir`-atomic directory at `LOCK_FILE_PATH` (declared in `## Cons
 
 **Staleness rule.** The lock is stale iff the heartbeat file's age exceeds `max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC)` seconds (threshold floor `900`). NEVER classify by `started_at` age — a live long run (the Step 1.4.5 auto-review intercept alone can hold the lock past `CI_MONITOR_TIMEOUT_SEC=1200` seconds) would be mis-stolen. A missing or non-integer heartbeat in an existing lock dir means a crashed acquisition: treat as stale.
 
-Concrete acquisition pattern (no trap — release is explicit; see Step 4.6):
+Concrete acquisition pattern (no trap — release is explicit; see Step 4.6). The fence below is delimited by `# BEGIN merge-lock-acquire-fence-v1` / `# END merge-lock-acquire-fence-v1`. Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` — the shell the Claude-Code Bash tool actually runs these fences with — against on-disk lock sandboxes. Keep the block self-contained (it may assume only `CLAUDE_PLUGIN_ROOT`, a git work tree, and an optionally-inherited `RUN_ID`), and bump the marker version if the contract changes.
 
 ```bash
+# BEGIN merge-lock-acquire-fence-v1
 # Step 1.1 — mkdir-atomic lock + run-scoped record + heartbeat (#303).
 # Self-contained fence: re-resolves command_timeouts.merge itself (fence-scoped
 # shell state from Step 1.0a does not survive into this fence).
@@ -335,6 +336,7 @@ fi
 # and does NOT survive into the later touch/release fences, which must re-establish it
 # verbatim (see "Lock heartbeat protocol"). This line is the canonical source of that literal.
 echo "merge lock acquired (run_id $RUN_ID)"
+# END merge-lock-acquire-fence-v1
 ```
 
 **Load-bearing failure-mode distinctions** (these silent-collapse cases were the reason issue #51 was misdiagnosed; do not let a future simplification re-collapse them):
@@ -347,9 +349,10 @@ echo "merge lock acquired (run_id $RUN_ID)"
 
 ### Lock heartbeat protocol (touch sites + release sites)
 
-The landing loop proves liveness by touching the heartbeat. **Canonical holder-verified touch snippet** (run it verbatim at every touch site; the `run_id` match guards against writing into a lock another run reclaimed after this run blew the staleness threshold):
+The landing loop proves liveness by touching the heartbeat. **Canonical holder-verified touch snippet** (run it verbatim at every touch site; the `run_id` match guards against writing into a lock another run reclaimed after this run blew the staleness threshold). It is delimited by `# BEGIN merge-lock-heartbeat-touch-fence-v1` / `# END merge-lock-heartbeat-touch-fence-v1` — a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts and EXECUTES it under `zsh -f` (it may assume only `LOCK_DIR`'s literal and an externally-supplied `RUN_ID`). Bump the marker version if the contract changes.
 
 ```bash
+# BEGIN merge-lock-heartbeat-touch-fence-v1
 # Lock heartbeat touch (holder-verified).
 LOCK_DIR=".git/uberdev-merge.lock.d"
 if [ -f "$LOCK_DIR/record.json" ] \
@@ -358,6 +361,7 @@ if [ -f "$LOCK_DIR/record.json" ] \
 else
   echo "warning: merge lock not held by this run (record missing or run_id mismatch) — heartbeat skipped; a stale-lock reclaim may have occurred, or RUN_ID was not re-established in this fence" >&2
 fi
+# END merge-lock-heartbeat-touch-fence-v1
 ```
 
 **RUN_ID provisioning (MANDATORY — `RUN_ID` does not survive fences).** Every touch and release fence runs in a fresh per-fence shell where `$RUN_ID` is unset, so the holder check above (and the Step 4.6 release) silently mismatches and warn-skips unless the orchestrator re-establishes it. When composing each touch/release fence, the orchestrator MUST carry the exact `run_id` echoed by the Step 1.1 acquire fence (`merge lock acquired (run_id <value>)`) and **prepend the literal `RUN_ID=<value>`** to the snippet (`RUN_ID=20260612-091500-a1b2c3d` followed by the touch/release body). The orchestrator MUST NOT re-derive `run_id` from `record.json` at touch time — reading the holder's own value back and comparing it to itself vacates the holder check (a steal-reclaimed lock would then be heartbeated by the dispossessed run). An unset `RUN_ID` always mismatches; a re-derived `RUN_ID` always matches — both defeat the protocol, so the literal from Step 1.1 is the only correct source.
@@ -720,7 +724,10 @@ The existing `AUTO_REVIEW_DISPATCH_CAP = 1` and the on-disk `AUTO_REVIEW_MARKER_
 
 **Dispatch sequence (cap-ordering invariant).** When all three conditions hold, execute in this exact order. This fence is a fresh per-fence shell: re-establish `LOCK_DIR` (a literal) and prepend the `RUN_ID=<value>` literal carried from the Step 1.1 acquire echo, exactly as the touch/release fences do.
 
+The dispatch fence is delimited by `# BEGIN merge-autoreview-dispatch-fence-v1` / `# END merge-autoreview-dispatch-fence-v1`. Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them, substitutes the one `Skill(…)` dispatch line for a mocked exit status, and EXECUTES the whole guard ladder under `zsh -f`. Keep the block self-contained (it may assume only `RUN_ID`, `PR`, `reason`, an existing lock dir and a `.uberdev/` directory), and bump the marker version if the contract changes.
+
 ```bash
+# BEGIN merge-autoreview-dispatch-fence-v1
 # 1. Claim the cap BEFORE dispatch — an atomic on-disk test-and-set that no
 #    fence boundary can erase (the retired `declare -A AUTO_REVIEW_DISPATCHED`
 #    was re-declared empty in every fence, so the cap never held; #303).
@@ -790,6 +797,7 @@ printf '{"event":"auto_review_returned","run_id":"%s","ts":"%s","data":{"pr":%d,
   "$RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$outcome" "$duration_ms" >> ".uberdev/audit.jsonl"
 
 fi   # closes the marker-claim guard opened at step 1
+# END merge-autoreview-dispatch-fence-v1
 ```
 
 **The marker is never removed inside the run.** Not on green, not on `blocked`, not on `refused_non_green`, not on dispatch failure. Removing it would restore the unbounded-re-dispatch class the fence-scoped array had. It is retired only when the lock directory is (Step 4.6 release, or a later run's stale-lock reclaim).
@@ -1043,7 +1051,10 @@ The cleanup loop calls TWO `gh issue edit` mutations per linked issue: `--remove
 
 Failure-soft semantics: a PR with no closing keywords is a no-op (drive-by PR, manual issue close). A `gh issue edit --remove-label` failure is silently ignored (issue may already be closed by GitHub's auto-close or the label may have been removed by hand). The `--remove-assignee "@me"` call is independently fail-soft for the same reason (issue may already be unassigned, or assignee may differ from @me if a teammate triaged the issue before /solve ran). The dispatch-time stale-claim sweeper in `solve-pipeline/SKILL.md` Step 4 (state==CLOSED + label present → auto-prune) is the safety net for any cleanup the merge step misses.
 
+The cleanup fence is delimited by `# BEGIN merge-issue-cleanup-fence-v1` / `# END merge-issue-cleanup-fence-v1`. Those markers are a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts everything between them and EXECUTES it under `zsh -f` against a recording `gh` stub. Keep the block self-contained (it may assume only `PR`, `PR_JSON`, a `gh` on `PATH` and an `_uberdev_audit_emit` emitter), and bump the marker version if the contract changes.
+
 ```bash
+# BEGIN merge-issue-cleanup-fence-v1
 # --- Step 3.4: post-merge issue cleanup (NEW v0.28.0) ---
 # $PR (the merged PR number) and $PR_JSON (cached projection with .body field)
 # are in scope per the Phase 3 per-PR loop convention. Parse closing keywords
@@ -1086,6 +1097,7 @@ for CLEAR_ISSUE_NUM in "${CLOSED_ISSUES[@]}"; do
       "{\"issue\":$CLEAR_ISSUE_NUM,\"pr\":$PR,\"reason\":\"merge\"}" || true
   fi
 done
+# END merge-issue-cleanup-fence-v1
 ```
 
 ### Step 3.5 — Failure-mode summary
@@ -1288,9 +1300,12 @@ For each stale branch, the agent decides (per-branch). Each decision emits one `
 
 ### Step 4.6 — Release the lock (explicit — no trap exists)
 
+The release fence is delimited by `# BEGIN merge-lock-release-fence-v1` / `# END merge-lock-release-fence-v1` — a CONTRACT, not a comment: `tests/merge-pipeline-zsh.test.sh` extracts and EXECUTES it under `zsh -f`. Bump the marker version if the contract changes.
+
 Release is an explicit, holder-verified removal of the lock directory. There is NO trap to rely on (a fence-scoped trap would have fired when its fence exited — at the START of the run — which is the void-lock class Step 1.1 retires; see RFC 0012 §3.2). Like every touch fence, this release fence is a fresh per-fence shell: the orchestrator MUST prepend the literal `RUN_ID=<value>` carried from the Step 1.1 acquire echo (see "Lock heartbeat protocol" → RUN_ID provisioning), or the holder check below mismatches and the lock is left held for up to the staleness threshold. Run this verbatim (after the `RUN_ID=<value>` prefix):
 
 ```bash
+# BEGIN merge-lock-release-fence-v1
 # Step 4.6 — explicit lock release (holder-verified).
 LOCK_DIR=".git/uberdev-merge.lock.d"
 if [ -f "$LOCK_DIR/record.json" ] \
@@ -1299,6 +1314,7 @@ if [ -f "$LOCK_DIR/record.json" ] \
 else
   echo "warning: merge lock record missing or owned by a different run_id at release time — not removing (a stale-lock reclaim may have occurred mid-run, or RUN_ID was not re-established in this fence)" >&2
 fi
+# END merge-lock-release-fence-v1
 ```
 
 The same release snippet runs at every documented post-acquisition early exit (Step 1.2 branch-name abort, Step 1.3 fallback-branch-missing exit, Step 1.7 nothing-to-merge clean exit) — Phase 4.6 is simply the normal-completion site. The safety net for a crashed or SIGKILL'd run that never released is the NEXT `/merge` invocation's heartbeat-age staleness probe (Step 1.1): once the heartbeat is older than `max(command_timeouts.merge, LOCK_STALE_FLOOR_SEC)` seconds, the dead lock is reclaimed via the stale-cleanup-and-retry path. The holder verification (run_id match) prevents this run from deleting a lock that a later run legitimately reclaimed after this run blew the staleness threshold.
