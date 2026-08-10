@@ -3766,6 +3766,500 @@ fi
 rm -rf "$S33F_TMP"
 
 echo
+echo "== S33-RT: cross-fence carriers, executed as TWO shells (#419) =="
+# ---------------------------------------------------------------------------
+# S33-RT — THE CARRIER RATCHET (#419).
+#
+# Every structural row above this one greps fence TEXT. A grep cannot observe a
+# value that never crosses a shell boundary, so the four cross-fence carriers
+# Phase 3's fix path is built on — `ci-fix-phase.txt`, `ci-push-target.tsv`,
+# `ci-fixer-terminal.json` and the CONFLICT-RESOLVE arm's step 1 -> step 3 path
+# set — could each be stranded and this suite would stay green. That is not
+# hypothetical: #399 shipped three of them stranded behind a 290-assertion green
+# run, and the whole fix path was unreachable from line one.
+#
+# S32-RT.14/15 established the only shape that CAN see it: extract the fence
+# from review-pr.md verbatim and RUN it. This section extends that shape to the
+# carriers themselves. The PRODUCING fence and the CONSUMING fence are executed
+# as TWO SEPARATE shell invocations that share nothing but a run directory —
+# which is exactly the boundary production crosses, since every `bash` block in
+# commands/review-pr.md is a fresh shell. Each carrier gets two rows:
+#
+#   round-trip  — the consumer OBSERVES the value the producer wrote, proven by
+#                 an effect only that value can produce (the branch names in the
+#                 `git fetch` argv, the rationale bytes inside the synthetic
+#                 aggregate, the conflicted pathnames in the `git add` argv).
+#   fail-closed — with the carrier DELETED, the consumer halts under its
+#                 documented `data.subreason` and performs no mutation.
+#
+# THREE FURTHER CARRIERS ARE SEEDED HERE, NOT COVERED HERE. `ci-probe-verdict.txt`,
+# `ci-classification.json` and `ci-check-name.txt` (#424) are read by the same two
+# consumers, ABOVE the carriers this section is about, so a row cannot reach its
+# own subject without them — the rows seed them literally (s33_seed_ci_* below)
+# and assert nothing about them. Their own coverage is elsewhere: S33-RUNTIME
+# round-trips all three through their real primitives under `env -i`,
+# S33-FENCE.1-5 round-trips the probe verdict against the real 6c.1 PROBE and
+# 6c.4 ROUTE fences, and S33.9 pins all six typed halts.
+#
+# Only the fences' DEPENDENCIES are faked (the audit sink, the `gh`/`git` CLIs,
+# `code_fixer_contract.py`, and child-dispatch.sh's input builder), never the
+# fences: every byte executed below is review-pr.md's own, dedented and sourced.
+# Both shells are exercised, because the harness runs these fences under
+# /bin/zsh and the carriers move through `read`, `$'\t'` and array expansions
+# that do not behave identically there.
+# ---------------------------------------------------------------------------
+S33_TMP="$(mktemp -d)" || { echo "FATAL: S33-RT could not create a scratch dir" >&2; exit 2; }
+S33_LOG="$S33_TMP/fence.log"
+S33_OUT="$S33_TMP/fence.out"
+S33_ERR="$S33_TMP/fence.err"
+S33_TRAIL="$S33_TMP/row.trail"
+S33_WORKTREE="$S33_TMP/worktree"
+S33_CONTRACT="$S33_TMP/contract.py"
+S33_PRELUDE="$S33_TMP/prelude.sh"
+S33_PLUGIN="$S33_TMP/plugin"
+S33_SIDECAR="$S33_TMP/ci-fix-iter1-ci1.launch.json"
+mkdir -p "$S33_WORKTREE" "$S33_PLUGIN/lib" \
+  || { echo "FATAL: S33-RT could not seed its scratch tree" >&2; exit 2; }
+: >"$S33_TRAIL" || { echo "FATAL: S33-RT could not seed its scratch tree" >&2; exit 2; }
+
+# s33_extract MARKER OUTFILE — the FIRST ```bash fence in review-pr.md whose
+# BODY matches MARKER, dedented to column 0. Keyed on the body and not on the
+# opener because Phase 3 mixes plain openers with info-string ones
+# (```bash uberdev-executable origin=review-pr), and keyed on the opener's own
+# indentation so a fence nested four or ten columns deep in a numbered list
+# survives verbatim — including the column-0 heredoc bodies inside it.
+s33_extract() {
+  awk -v marker="$1" '
+    !collecting && /^[[:space:]]*```bash([[:space:]]|$)/ {
+      collecting = 1; indent = $0; sub(/```bash.*$/, "", indent); buf = ""; next
+    }
+    collecting && $0 == indent "```" {
+      if (buf ~ marker) { printf "%s", buf; exit }
+      collecting = 0; next
+    }
+    collecting {
+      line = $0
+      if (indent != "" && index(line, indent) == 1) line = substr(line, length(indent) + 1)
+      buf = buf line "\n"
+    }
+  ' "$REVIEW_PR" >"$2"
+  [ -s "$2" ]
+}
+
+# The shared driver prelude. Everything here is a DEPENDENCY of the fences, not
+# a paraphrase of one: `audit` is the orchestrator's sink, `git`/`gh` are the
+# CLIs, `review_json_string` is defined by the setup fence at the top of
+# review-pr.md (a fence no carrier row is about). Calls are logged one
+# <angle-bracketed> argv element per token so an assertion on `git add -- a "b c"`
+# cannot be satisfied by a differently-split argument list.
+cat >"$S33_PRELUDE" <<'S33PRELUDE'
+audit() { printf 'audit %s\n' "$*" >>"$FENCE_LOG"; }
+s33_log_call() {
+  local s33_name="$1" s33_arg
+  shift
+  printf '%s' "$s33_name" >>"$FENCE_LOG"
+  for s33_arg in "$@"; do printf ' <%s>' "$s33_arg" >>"$FENCE_LOG"; done
+  printf '\n' >>"$FENCE_LOG"
+}
+review_json_string() { printf '"%s"' "${1:-}"; }
+git() {
+  local s33_verb=
+  s33_log_call git "$@"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -C | -c)
+        shift
+        if [ "$#" -gt 0 ]; then shift; fi
+        ;;
+      *) s33_verb="$1"; break ;;
+    esac
+  done
+  case "$s33_verb" in
+    fetch | add | rebase | check-ref-format) return 0 ;;
+    merge-base) printf '%040d\n' 2 ;;
+    rev-parse)
+      case "${2:-}" in
+        --show-toplevel) printf '/repo\n' ;;
+        --git-path)      return 93 ;;
+        *)               printf '%040d\n' 1 ;;
+      esac
+      ;;
+    *) return 93 ;;
+  esac
+}
+gh() {
+  s33_log_call gh "$@"
+  case "${1:-}" in
+    repo) printf 'owner/repo\n' ;;
+    pr)   printf 'fix/395-guard\nmain\nfalse\nowner/repo\n' ;;
+    *)    return 90 ;;
+  esac
+}
+S33PRELUDE
+
+# The child-dispatch adapter, reduced to the one helper the ROUTE fence calls.
+# The real file loads the entire provider boundary; a carrier row must not be
+# able to fail for that reason.
+cat >"$S33_PLUGIN/lib/child-dispatch.sh" <<'S33CHILD'
+uberdev_child_inputs_build() { printf '{"s33":"stub"}'; }
+S33CHILD
+
+# review-fleet-args.sh and review-push-target.sh are reached through the fixture
+# root but are the REAL libraries: they own the carrier readers/writers
+# (`review_fleet_load_ci_counters`, `review_fleet_read_sidecar`,
+# `review_fleet_read_ci_pointer`, `review_fleet_unmerged_paths`) and the
+# same-repository resolver whose output IS the ci-push-target carrier. Stubbing
+# them would hide exactly the class this section exists to catch.
+printf '. "%s" || return 1\n' "$REVIEW_FLEET_ARGS" >"$S33_PLUGIN/lib/review-fleet-args.sh"
+printf '. "%s" || return 1\n' "$REPO_ROOT/plugins/uberdev/lib/review-push-target.sh" \
+  >"$S33_PLUGIN/lib/review-push-target.sh"
+
+# The code_fixer_contract.py verbs the fences shell out to, as a fixture. The
+# real contract's judging logic has its own suite (code-fixer-contract.test.sh);
+# what is under test HERE is whether the answer survives the shell boundary, so
+# the answer is made deterministic and read from the environment.
+cat >"$S33_CONTRACT" <<'S33PY'
+import json, os, sys
+
+verb = sys.argv[1] if len(sys.argv) > 1 else ""
+if verb == "capture-ci-terminal":
+    sys.stdout.write(json.dumps({"status_sha256": "a" * 64, "result_sha256": "b" * 64}))
+elif verb == "validate-ci-mutation-outcome":
+    sys.stdout.write(json.dumps({
+        "status": os.environ.get("S33_TERMINAL_STATUS", "REFUSED"),
+        "rationale": os.environ.get("S33_TERMINAL_RATIONALE", "forbidden-pattern"),
+    }))
+elif verb == "read-ci-authority-member":
+    sys.stdout.write("s33-authority-member")
+elif verb == "list-ci-unmerged-paths":
+    for entry in os.environ.get("S33_UNMERGED_PATHS", "").split("\n"):
+        if entry:
+            sys.stdout.write(entry + "\0")
+else:
+    raise SystemExit(2)
+S33PY
+
+# The ci-fix launch sidecar 6c.4w.2 follows its pointer to. Written as literal
+# bytes rather than through review_fleet_write_sidecar so the producer row is
+# testing the READER, not a writer it also owns.
+cat >"$S33_SIDECAR" <<'S33SIDECAR'
+{"binding":"{\"edge_id\":\"review_pr.ci.fix_code\",\"ci_authority_path\":\"/s33/authority.json\",\"ci_authority_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}","child_dir":"children/s33","instance":"s33","head_before":"0000000000000000000000000000000000000000"}
+S33SIDECAR
+
+S33_FENCE_FLAG="$S33_TMP/fence-flag.sh"
+S33_FENCE_GATE="$S33_TMP/fence-gate.sh"
+S33_FENCE_ROUTE="$S33_TMP/fence-route.sh"
+S33_FENCE_TERMINAL="$S33_TMP/fence-terminal.sh"
+S33_FENCE_REFUSED="$S33_TMP/fence-refused.sh"
+S33_FENCE_CONFLICT1="$S33_TMP/fence-conflict1.sh"
+S33_FENCE_CONFLICT3="$S33_TMP/fence-conflict3.sh"
+
+S33_MISSING=
+s33_extract 'CI_FIX_PHASE_RUN_DIR'      "$S33_FENCE_FLAG"      || S33_MISSING="$S33_MISSING flag-producer"
+s33_extract 'CROSS-REPOSITORY GATE'     "$S33_FENCE_GATE"      || S33_MISSING="$S33_MISSING gate-producer"
+s33_extract 'CI_FIX_PHASE_CARRIER'      "$S33_FENCE_ROUTE"     || S33_MISSING="$S33_MISSING route-consumer"
+s33_extract 'CI_MUTATION_OUTCOME'       "$S33_FENCE_TERMINAL"  || S33_MISSING="$S33_MISSING terminal-producer"
+s33_extract 'CI_FIXER_TERMINAL_CARRIER' "$S33_FENCE_REFUSED"   || S33_MISSING="$S33_MISSING refused-consumer"
+s33_extract 'CONFLICT_ENUM_RC'          "$S33_FENCE_CONFLICT1" || S33_MISSING="$S33_MISSING conflict-step1"
+s33_extract 'CI_HEAD_BEFORE_CONTINUE'   "$S33_FENCE_CONFLICT3" || S33_MISSING="$S33_MISSING conflict-step3"
+
+# The flag producer's own fence.
+cat >"$S33_TMP/driver-flag.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# The CROSS-REPOSITORY GATE, run WITH a run dir bound so it takes the carrier
+# branch (S32-RT.14/15 deliberately runs it without one).
+cat >"$S33_TMP/driver-gate.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+PR_NUMBER=73
+WORKTREE_ROOT=/repo
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# 6c.4 ROUTE — the consumer of BOTH ci-fix-phase.txt and ci-push-target.tsv.
+cat >"$S33_TMP/driver-route.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+PR_NUMBER=73
+WORKTREE_ROOT=/repo
+PROBE_VERDICT=red
+failure_class=code_bug
+signal_anchor=tests/s33.test.sh:1
+CI_RUN_ID=4242
+CI_CLASSIFICATION_HEAD_SHA=00000000000000000000000000000000000000ff
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# 6c.4w.2 — the producer of ci-fixer-terminal.json.
+cat >"$S33_TMP/driver-terminal.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+WORKTREE_ROOT=/repo
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# 6c.5's REFUSED arm — the consumer of ci-fixer-terminal.json.
+cat >"$S33_TMP/driver-refused.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+WORKTREE_ROOT=/repo
+failure_class=code_bug
+check_name=shape-checks
+signal_anchor=tests/s33.test.sh:1
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# CONFLICT-RESOLVE step 1 (enumerate) and step 3 (stage + continue).
+cat >"$S33_TMP/driver-conflict1.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+PR_NUMBER=73
+WORKTREE_ROOT="$S33_WORKTREE"
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+cat >"$S33_TMP/driver-conflict3.sh" <<'S33DRV'
+set -u
+. "$S33_PRELUDE"
+WORKTREE_ROOT="$S33_WORKTREE"
+. "$FENCE_FIXTURE"
+printf 'fence-returned %s\n' "$?" >>"$FENCE_LOG"
+S33DRV
+
+# s33_run SHELL DRIVER FENCE RUN_DIR [KEY=VALUE...] -> rc, with the call log in
+# $S33_LOG. `${@+"$@"}` and not `"$@"`: bash before 4.4 treats a bare `"$@"` with
+# no positional parameters as an unbound expansion under `set -u`, and most of
+# these runs pass no extra environment at all.
+#
+# EVERY invocation — producer runs included — is appended to $S33_TRAIL with its
+# rc, its call log and its stderr. Only the CONSUMER's rc is asserted on (a
+# producer that dies strands the carrier, which is what the consumer row is
+# already the detector for), so without the trail a dead producer would surface
+# as a red consumer row naming the wrong shell. Nothing is discarded silently.
+s33_run() {
+  local runner="$1" driver="$2" fence="$3" run_dir="$4" rc=0
+  shift 4
+  : >"$S33_LOG"
+  : >"$S33_OUT"
+  : >"$S33_ERR"
+  env ${@+"$@"} \
+    FENCE_FIXTURE="$fence" \
+    FENCE_LOG="$S33_LOG" \
+    RESEARCH_DIR_ABS="$run_dir" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$S33_PLUGIN" \
+    CODE_FIXER_CONTRACT="$S33_CONTRACT" \
+    S33_PRELUDE="$S33_PRELUDE" \
+    S33_WORKTREE="$S33_WORKTREE" \
+    "$runner" "$driver" >"$S33_OUT" 2>"$S33_ERR" || rc=$?
+  {
+    printf -- '--- %s %s rc=%s\n' "$runner" "${driver##*/}" "$rc"
+    cat "$S33_LOG"
+    cat "$S33_ERR"
+  } >>"$S33_TRAIL"
+  printf '%s' "$rc"
+}
+
+# s33_note LINE — fold a fact that lives on disk (a carrier's bytes, an
+# artifact's bytes) into the same log the assertion reads, so one comparator
+# covers "the consumer branched" and "the consumer wrote the value through".
+s33_note() { printf '%s\n' "$1" >>"$S33_LOG"; }
+
+# s33_seed_ci_classification DIR / s33_seed_ci_check_name DIR — the OTHER
+# run-dir carriers a consumer fence reads on its way to the one a row is about.
+# Neither is this section's subject; both are its PRECONDITION, because each
+# consumer reads its carriers in a fixed order and every reader below the first
+# miss is unreachable:
+#
+#   6c.4 ROUTE      ci-fix-phase.txt (review-pr.md:4059) -> ci-probe-verdict.txt
+#                   (:4080, probe-only arm only) -> ci-classification.json
+#                   (:4106,:4115) -> ci-push-target.tsv (:4146)
+#   6c.5 REFUSED    ci-fixer-terminal.json (:4686) -> ci-classification.json
+#                   (:4711-4712) -> ci-check-name.txt (:4713)
+#
+# So a row about ci-push-target.tsv never reaches the push target, and a row
+# about ci-fixer-terminal.json never reaches the aggregate, unless the carriers
+# ABOVE them exist. Seeding those restores the row's reach; it is the opposite
+# of relaxing what the row asserts, which stays byte-identical.
+#
+# Literal bytes in the shapes their own writers emit
+# (`review_fleet_write_ci_classification` / `review_fleet_write_ci_check_name`,
+# lib/review-fleet-args.sh:839,798), for the same reason $S33_SIDECAR is
+# literal: a seed built by a writer this section also owns would make the row
+# depend on that writer. The values match the drivers' own decoy scalars, so
+# what each row proves is unchanged from before these carriers existed —
+# `code_bug` in particular keeps ROUTE on the fix_code arm it has always taken.
+s33_seed_ci_classification() {
+  printf '{"failure_class":"code_bug","signal_anchor":"tests/s33.test.sh:1"}\n' \
+    >"$1/ci-classification.json"
+}
+s33_seed_ci_check_name() { printf 'shape-checks\n' >"$1/ci-check-name.txt"; }
+
+# s33_assert DESC RC WANT_RC PRESENT_ERE ABSENT_ERE — empty pattern = not checked.
+# Consumes the row's trail either way, so each row reports only its own runs.
+# Herestrings, never `printf | grep -q`: an early-exiting reader on the right of
+# a pipe poisons the pipeline rc under pipefail on CI (tests/epipe-guard.test.sh).
+s33_assert() {
+  local desc="$1" rc="$2" want_rc="$3" present="$4" absent="$5" log
+  log="$(cat "$S33_LOG")"
+  if [ "$rc" = "$want_rc" ] \
+     && { [ -z "$present" ] || grep -qE -e "$present" <<<"$log"; } \
+     && { [ -z "$absent" ] || ! grep -qE -e "$absent" <<<"$log"; }; then
+    echo "  PASS  $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"
+    echo "        consumer rc: $rc (want $want_rc)"
+    [ -n "$present" ] && echo "        expected to match: $present"
+    [ -n "$absent" ] && echo "        expected NOT to match: $absent"
+    echo "        consumer log: $log"
+    echo "        every run in this row (producers first):"
+    cat "$S33_TRAIL"
+    FAIL=$((FAIL + 1))
+  fi
+  : >"$S33_TRAIL"
+}
+
+if [ -n "$S33_MISSING" ]; then
+  echo "  FAIL  S33-RT — fences could not be extracted from review-pr.md:$S33_MISSING"
+  FAIL=$((FAIL + 1))
+else
+  for s33_shell in bash zsh; do
+    if ! command -v "$s33_shell" >/dev/null 2>&1; then
+      echo "  SKIP  S33-RT.* ($s33_shell) — shell unavailable on this runner"
+      continue
+    fi
+
+    # --- ci-fix-phase.txt : Step 1 argument parsing -> 6c.4 ROUTE -------------
+    # The flag that decides whether a code-mutating, force-pushing phase runs at
+    # all. Held in a scalar it was gone before ROUTE read it, so `--no-ci-fix`
+    # silently mutated and pushed on every run (#399).
+    S33_DIR="$S33_TMP/flag-roundtrip-$s33_shell"
+    mkdir -p "$S33_DIR"
+    s33_run "$s33_shell" "$S33_TMP/driver-flag.sh" "$S33_FENCE_FLAG" "$S33_DIR" ARGUMENTS=--no-ci-fix >/dev/null
+    # The probe-only arm this row drives ROUTE into is exactly the fence that
+    # reads 6c.1's verdict carrier (review-pr.md:4080), so the carrier has to be
+    # there for the arm to be reachable at all. Same seed shape as S33-FENCE.1,
+    # which is the row that owns this carrier's own round-trip.
+    printf 'green\n' >"$S33_DIR/ci-probe-verdict.txt"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-route.sh" "$S33_FENCE_ROUTE" "$S33_DIR")"
+    s33_note "carrier <$(cat "$S33_DIR/ci-fix-phase.txt" 2>/dev/null)>"
+    s33_assert "S33-RT.1 ($s33_shell) — --no-ci-fix crosses to ROUTE: probe-only, no fetch" \
+      "$S33_RC" 0 '^audit ci_probe_only_skipped' '<fetch>|ci_fix_phase_unreadable'
+
+    S33_DIR="$S33_TMP/flag-failclosed-$s33_shell"
+    mkdir -p "$S33_DIR"
+    s33_run "$s33_shell" "$S33_TMP/driver-flag.sh" "$S33_FENCE_FLAG" "$S33_DIR" ARGUMENTS=--no-ci-fix >/dev/null
+    rm -f "$S33_DIR/ci-fix-phase.txt"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-route.sh" "$S33_FENCE_ROUTE" "$S33_DIR")"
+    s33_assert "S33-RT.2 ($s33_shell) — carrier deleted: ROUTE halts ci_fix_phase_unreadable, mutates nothing" \
+      "$S33_RC" 1 'data\.subreason=ci_fix_phase_unreadable' '<fetch>|fence-returned'
+
+    # --- ci-push-target.tsv : CROSS-REPOSITORY GATE -> 6c.4 ROUTE ------------
+    # The head/base pair. Read as `${pr_head_branch:-}` across the boundary it
+    # was the empty string on every run, so ROUTE halted unconditionally and
+    # fix_code / stale_base / the CONFLICT arm / the leased push were all
+    # unreachable (#399). The proof it crossed is the fetch argv.
+    S33_DIR="$S33_TMP/target-roundtrip-$s33_shell"
+    mkdir -p "$S33_DIR"
+    s33_run "$s33_shell" "$S33_TMP/driver-flag.sh" "$S33_FENCE_FLAG" "$S33_DIR" ARGUMENTS=--no-simplify >/dev/null
+    s33_run "$s33_shell" "$S33_TMP/driver-gate.sh" "$S33_FENCE_GATE" "$S33_DIR" >/dev/null
+    s33_seed_ci_classification "$S33_DIR"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-route.sh" "$S33_FENCE_ROUTE" "$S33_DIR")"
+    s33_note "carrier <$(cat "$S33_DIR/ci-push-target.tsv" 2>/dev/null)>"
+    s33_assert "S33-RT.3 ($s33_shell) — the resolver's head/base pair reaches ROUTE's fetch argv" \
+      "$S33_RC" 0 '^git <-C> </repo> <fetch> <origin> <fix/395-guard> <main>$' \
+      'ci_fix_dispatch_refs_unreadable|ci_probe_only_skipped'
+
+    S33_DIR="$S33_TMP/target-failclosed-$s33_shell"
+    mkdir -p "$S33_DIR"
+    s33_run "$s33_shell" "$S33_TMP/driver-flag.sh" "$S33_FENCE_FLAG" "$S33_DIR" ARGUMENTS=--no-simplify >/dev/null
+    s33_run "$s33_shell" "$S33_TMP/driver-gate.sh" "$S33_FENCE_GATE" "$S33_DIR" >/dev/null
+    # Seeded, then the push target ALONE is deleted: with every carrier ROUTE
+    # reads before it present, the halt below is attributable to this carrier's
+    # absence and nothing else.
+    s33_seed_ci_classification "$S33_DIR"
+    rm -f "$S33_DIR/ci-push-target.tsv"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-route.sh" "$S33_FENCE_ROUTE" "$S33_DIR")"
+    s33_assert "S33-RT.4 ($s33_shell) — carrier deleted: ROUTE halts ci_fix_dispatch_refs_unreadable, never fetches" \
+      "$S33_RC" 1 '^audit ci_fix_dispatch_refs_unreadable$' '<fetch>|fence-returned'
+
+    # --- ci-fixer-terminal.json : 6c.4w.2 -> 6c.5 REFUSED arm ----------------
+    # The validated terminal and its rationale. Inherited as a variable the
+    # rationale was ALWAYS `unspecified`, so every CI-refusal issue was filed
+    # with the cause erased (#399). The proof it crossed is the rationale inside
+    # the synthetic aggregate the arm writes.
+    S33_DIR="$S33_TMP/terminal-roundtrip-$s33_shell"
+    mkdir -p "$S33_DIR"
+    printf '%s\n' "$S33_SIDECAR" >"$S33_DIR/ci-fix-launch-pointer.txt"
+    s33_run "$s33_shell" "$S33_TMP/driver-terminal.sh" "$S33_FENCE_TERMINAL" "$S33_DIR" >/dev/null
+    s33_seed_ci_classification "$S33_DIR"
+    s33_seed_ci_check_name "$S33_DIR"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-refused.sh" "$S33_FENCE_REFUSED" "$S33_DIR")"
+    s33_note "carrier <$(cat "$S33_DIR/ci-fixer-terminal.json" 2>/dev/null)>"
+    s33_note "aggregate <$(tr -d '\n' <"$S33_DIR/ci-refused-synthetic-1.md" 2>/dev/null)>"
+    s33_assert "S33-RT.5 ($s33_shell) — the validated terminal + rationale reach the REFUSED arm's aggregate" \
+      "$S33_RC" 0 '^aggregate <.*"rationale":"forbidden-pattern".*>$' \
+      'ci_fixer_terminal_uncarried|ci_fixer_terminal_mismatch'
+
+    S33_DIR="$S33_TMP/terminal-failclosed-$s33_shell"
+    mkdir -p "$S33_DIR"
+    printf '%s\n' "$S33_SIDECAR" >"$S33_DIR/ci-fix-launch-pointer.txt"
+    s33_run "$s33_shell" "$S33_TMP/driver-terminal.sh" "$S33_FENCE_TERMINAL" "$S33_DIR" >/dev/null
+    # Seeded, then the terminal ALONE is deleted — same reason as S33-RT.4: the
+    # arm's two later carrier reads are present, so ci_fixer_terminal_uncarried
+    # is the halt this row's deletion caused.
+    s33_seed_ci_classification "$S33_DIR"
+    s33_seed_ci_check_name "$S33_DIR"
+    rm -f "$S33_DIR/ci-fixer-terminal.json"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-refused.sh" "$S33_FENCE_REFUSED" "$S33_DIR")"
+    s33_note "aggregate-exists <$([ -e "$S33_DIR/ci-refused-synthetic-1.md" ] && echo yes || echo no)>"
+    s33_assert "S33-RT.6 ($s33_shell) — carrier deleted: the REFUSED arm halts ci_fixer_terminal_uncarried, files nothing" \
+      "$S33_RC" 1 'data\.subreason=ci_fixer_terminal_uncarried' 'aggregate-exists <yes>|fence-returned'
+
+    # --- ci-conflict-paths-*.zlist : CONFLICT-RESOLVE step 1 -> step 3 --------
+    # The conflicted-path set. Held in a shell array it was EMPTY in step 3, and
+    # `git add --` with zero pathspecs exits 0 — so "all RESOLVED" was vacuous
+    # and the `rebase --continue` that followed failed on a still-unmerged index
+    # forever. NUL transport is load-bearing: a conflicted path may contain a
+    # space, so the set below carries one.
+    S33_DIR="$S33_TMP/conflict-roundtrip-$s33_shell"
+    mkdir -p "$S33_DIR"
+    printf '{"binding":"{\\"edge_id\\":\\"review_pr.ci.resolve_conflict\\"}"}\n' \
+      >"$S33_DIR/ci-conflicts-iter1-ci1.launched"
+    s33_run "$s33_shell" "$S33_TMP/driver-conflict1.sh" "$S33_FENCE_CONFLICT1" "$S33_DIR" \
+      S33_UNMERGED_PATHS='alpha.txt
+beta gamma.txt' >/dev/null
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-conflict3.sh" "$S33_FENCE_CONFLICT3" "$S33_DIR")"
+    s33_assert "S33-RT.7 ($s33_shell) — step 1's enumerated set reaches step 3's git add argv, spaces intact" \
+      "$S33_RC" 0 '^git <-C> <.*> <add> <--> <alpha\.txt> <beta gamma\.txt>$' \
+      'rebase_conflict_paths_missing|rebase_conflict_ledger_missing'
+
+    S33_DIR="$S33_TMP/conflict-failclosed-$s33_shell"
+    mkdir -p "$S33_DIR"
+    printf '{"binding":"{\\"edge_id\\":\\"review_pr.ci.resolve_conflict\\"}"}\n' \
+      >"$S33_DIR/ci-conflicts-iter1-ci1.launched"
+    s33_run "$s33_shell" "$S33_TMP/driver-conflict1.sh" "$S33_FENCE_CONFLICT1" "$S33_DIR" \
+      S33_UNMERGED_PATHS='alpha.txt
+beta gamma.txt' >/dev/null
+    rm -f "$S33_DIR/ci-conflict-paths-iter1-ci1.zlist"
+    S33_RC="$(s33_run "$s33_shell" "$S33_TMP/driver-conflict3.sh" "$S33_FENCE_CONFLICT3" "$S33_DIR")"
+    s33_assert "S33-RT.8 ($s33_shell) — carrier deleted: step 3 halts rebase_conflict_paths_missing, stages nothing" \
+      "$S33_RC" 1 'data\.subreason=rebase_conflict_paths_missing' '<add>|fence-returned'
+  done
+fi
+rm -rf "$S33_TMP"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

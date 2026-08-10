@@ -4,6 +4,59 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.7] — 2026-08-10
+
+### Added
+
+- **Phase 3's cross-fence carriers are now executed, not grepped** (#419).
+  `tests/review-pr-phase3-ci.test.sh` greps fence *text* everywhere except
+  S32-RT.14/15. A grep cannot observe a value that never crosses a shell
+  boundary, so the carriers Phase 3's fix path is built on could each be stranded
+  and the suite would stay green. That is not hypothetical: #399 shipped three of
+  them stranded behind a 290-assertion green run, with the whole fix path
+  unreachable from line one.
+
+  S33-RT extends S32-RT.14/15's shape to the carriers themselves. It extracts the
+  PRODUCING fence and the CONSUMING fence from `commands/review-pr.md` verbatim
+  and runs them as **two separate shell invocations sharing nothing but a run
+  directory** — the boundary production actually crosses. Per carrier, two rows:
+
+  - *round-trip* — the consumer OBSERVES the produced value, proven by an effect
+    only that value can produce (the branch names in ROUTE's `git fetch` argv, the
+    rationale bytes inside the REFUSED arm's synthetic aggregate, the conflicted
+    pathnames in `git add`).
+  - *fail-closed* — with the carrier DELETED, the consumer halts under its
+    documented `data.subreason` and mutates nothing.
+
+  Carriers covered: `ci-fix-phase.txt` (Step 1 → 6c.4 ROUTE), `ci-push-target.tsv`
+  (CROSS-REPOSITORY GATE → ROUTE), `ci-fixer-terminal.json` (6c.4w.2 → 6c.5's
+  REFUSED arm) and `ci-conflict-paths-*.zlist` (CONFLICT-RESOLVE step 1 → step 3).
+  Run under bash and zsh, because the harness runs these fences under `/bin/zsh`
+  and the carriers move through `read -d ''`, `$'\t'` and array expansions that do
+  not behave identically there.
+
+  Only the fences' *dependencies* are faked (the audit sink, the gh/git CLIs,
+  `code_fixer_contract.py`'s four verbs, `child-dispatch.sh`'s input builder);
+  `review-fleet-args.sh` and `review-push-target.sh` are reached through a fixture
+  plugin root but are the REAL libraries, because they own the carrier
+  readers/writers this section exists to exercise.
+
+  Every run — producers included — is appended to a per-row trail with its rc,
+  call log and stderr, printed on failure: only the consumer's rc is asserted on,
+  so a producer that dies must not surface as a red row naming the wrong cause.
+
+  Verified by mutation, not by the rows passing: stranding each producer onto a
+  different filename reds its round-trip row, and reverting each consumer to the
+  inherited-variable / soft-default form it had before #399 reds its fail-closed
+  row. All seven mutations detected; none survived.
+
+  The three carriers v0.45.4 added (`ci-probe-verdict.txt`, `ci-classification.json`,
+  `ci-check-name.txt`) are read by the same two consumers *ahead of* the carriers
+  four of these rows target, so they are seeded as preconditions. The section
+  header states plainly that they are seeded here and covered elsewhere
+  (S33-RUNTIME, S33-FENCE) — a comment that overclaims coverage is the defect
+  class this file exists to close.
+
 ## [0.45.6] — 2026-08-10
 
 ### Added
