@@ -1788,8 +1788,11 @@ for doc in "$REVIEW" "$SIMPLIFY"; do
   builder_line="$(head -1 <<<"$(grep -n 'review_child_record()' "$doc")" | cut -d: -f1)"
   [ "$setup_line" -lt "$builder_line" ]
 done
-# Extract each production setup fence.
-for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify" "$POST:post-impl-review"; do
+# Extract each production setup fence. The braces are load-bearing: zsh reads an
+# unbraced parameter followed by a colon and a letter as a history-style
+# modifier, eats the colon, and hands back a garbage pair — `:r` would silently
+# strip the `.md` off the doc path here, and `:s` is a hard `bad substitution`.
+for spec in "${REVIEW}:review-pr" "${SIMPLIFY}:simplify" "${POST}:post-impl-review"; do
   doc="${spec%:*}"; name="${spec##*:}"; setup="$TMP/setup-$name.sh"
   awk -v marker="uberdev-executable setup=$name" '
     index($0,marker){active=1; next}
@@ -2291,7 +2294,8 @@ cat >"$FAKE_PLUGIN/lib/child-dispatch.sh" <<'SH'
 uberdev_prepare_run_carrier() { return 17; }
 SH
 setup_index=0
-for spec in "$REVIEW:review-pr" "$SIMPLIFY:simplify"; do
+# Braced for the same reason as the pairing loop above.
+for spec in "${REVIEW}:review-pr" "${SIMPLIFY}:simplify"; do
   setup_index=$((setup_index + 1))
   doc="${spec%:*}"; name="${spec##*:}"; setup="$TMP/setup-$name.sh"
 

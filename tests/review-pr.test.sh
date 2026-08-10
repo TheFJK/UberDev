@@ -600,7 +600,10 @@ if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
           [ "$4" = --branch ] && [ "$5" = feature/anchor ]
           ;;
         push)
-          [ "$4" = origin ] && [ "$5" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || return 92
+          # Braced: an unbraced parameter followed by `:r` is a zsh history
+          # modifier, so this expected refspec is the very shape the guard in
+          # tests/crossplatform-shell-wrappers.test.sh exists to find.
+          [ "$4" = origin ] && [ "$5" = "${ANCHOR_COMMIT}:refs/heads/feature/anchor" ] || return 92
           printf "%s\n" "$5" >>"$ANCHOR_PUSH_LOG"
           [ "${MUTATE_DURING_PUSH:-0}" != 1 ] || LOCAL_MOVED=1
           ;;
@@ -613,13 +616,13 @@ if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
     }
     reset_fixture
     review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence || exit 11
-    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 12
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "${ANCHOR_COMMIT}:refs/heads/feature/anchor" ] || exit 12
     reset_fixture
     MUTATED_BEFORE_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 13
     [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 14
     reset_fixture
     MUTATE_DURING_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 15
-    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 16
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "${ANCHOR_COMMIT}:refs/heads/feature/anchor" ] || exit 16
     reset_fixture
     STALE_REMOTE=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 17
     [ ! -s "$ANCHOR_PUSH_LOG" ] || exit 18
@@ -638,7 +641,7 @@ if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
     LIVE_MISMATCH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 26
     reset_fixture
     RESIDUE_DURING_PUSH=1 review_publish_same_repo_pr_head owner/repo 73 "$ANCHOR_REVIEWED" "$ANCHOR_COMMIT" /repo /contract.py /evidence && exit 27
-    [ "$(cat "$ANCHOR_PUSH_LOG")" = "$ANCHOR_COMMIT:refs/heads/feature/anchor" ] || exit 28
+    [ "$(cat "$ANCHOR_PUSH_LOG")" = "${ANCHOR_COMMIT}:refs/heads/feature/anchor" ] || exit 28
     exit 0
   ' _ "$ANCHOR_PUSH_FIXTURE"
 then
@@ -776,7 +779,7 @@ JSON
       dump_projection
       exit 31
     fi
-    [ "$(cat "$REAL_GH_PUSH_LOG")" = "$PUB_SHA:refs/heads/feature/real" ] || exit 32
+    [ "$(cat "$REAL_GH_PUSH_LOG")" = "${PUB_SHA}:refs/heads/feature/real" ] || exit 32
     # (b) ANTI-VACUITY: a genuine fork is still refused, and still never pushes.
     reset_fixture
     FORK=1 review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence && exit 33
