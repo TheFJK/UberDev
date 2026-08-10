@@ -1074,6 +1074,29 @@ if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
     exit 2
   fi
 
+  # --- BEGIN solve-fleet base capture (#439) ---
+  # The base branch each solver's PR must target (#439). The launcher is the ONLY
+  # process that still sees the real checkout: the fleet's worktrees are cut by
+  # the Workflow runtime, so the script never learns what ref they came from.
+  # Capture it here or a run launched from a stacked branch opens every PR
+  # against the repository default. Empty on detached HEAD — no invented
+  # fallback; the fleet omits `--base` entirely in that case.
+  SOLVE_FLEET_BASE_BRANCH="$(git branch --show-current 2>/dev/null)" || SOLVE_FLEET_BASE_BRANCH=""
+  # `gh pr create --base <branch>` HARD-FAILS when the branch does not exist on
+  # the remote, and /solve + /turbo deliberately do NOT read pr_base_branch, so
+  # there is no operator override to recover with: launching a fleet from a
+  # local-only branch (a worktree, or a feature branch not pushed yet) would fail
+  # PR creation for EVERY issue in the run, where before #439 the PR was opened
+  # against the repository default. Emit the value only when it is a real remote
+  # branch — workflow.js emits no --base instruction for an empty value, so this
+  # degrades to exactly the pre-#439 behaviour instead of hard-failing. Mirrors
+  # the `git rev-parse --verify` check finish-branch runs on its own base.
+  if [ -n "$SOLVE_FLEET_BASE_BRANCH" ] \
+     && ! git rev-parse --verify --quiet "refs/remotes/origin/$SOLVE_FLEET_BASE_BRANCH" >/dev/null 2>&1; then
+    SOLVE_FLEET_BASE_BRANCH=""
+  fi
+  # --- END solve-fleet base capture (#439) ---
+
   # Per-issue manifest (the scan-fleet manifestPathAbs convention): one JSON
   # file the fleet's `intake` relay reads, instead of stuffing per-issue
   # records into envelope scalars. Titles are NOT embedded anywhere in a
@@ -1123,6 +1146,7 @@ print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
     concurrency="$MAX_PARALLEL_BG_AGENTS" \
     autoMode="$([[ "$AUTO_MODE" == "1" ]] && echo true || echo false)" \
     repoSlug="$REPO_SLUG" \
+    baseBranch="$SOLVE_FLEET_BASE_BRANCH" \
     branchPrefix="worktree-solve-issue-" \
     solveTimeoutS="${SOLVE_TIMEOUT:-3600}" \
     maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-250}"

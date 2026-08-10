@@ -144,6 +144,34 @@ assert_grep "$FINISH_BRANCH" \
   "SKILL.md sources the secret-scan library"
 
 echo
+echo "== Issue #439: --base passthrough + single base resolution =="
+# The base is resolved ONCE and feeds BOTH the pre-push scan range and
+# `gh pr create --base`, so a stacked (dependent) PR targets its parent branch.
+assert_grep "$FINISH_BRANCH" \
+  '# --- BEGIN pr-base resolution \(#439\) ---' \
+  "base resolution lives in one extractable block (#439)"
+assert_grep "$FINISH_BRANCH" \
+  'uberdev_read_string pr_base_branch UBERDEV_PR_BASE_BRANCH' \
+  "base override read through the shared config helper (env > file > default)"
+# HARD LOCK: the new flag must be appended AFTER the recorded `--title` substring.
+assert_grep "$FINISH_BRANCH" \
+  'gh pr create --title "\$PR_TITLE_VAR" --body-file "\$PR_BODY_FILE" \$\{PR_BASE_ARGS' \
+  "--base args appended AFTER --title/--body-file (recorded-command lock intact)"
+# An ARRAY, never a scalar: zsh does not word-split an unquoted scalar, so a
+# `$PR_BASE_ARG` holding `--base main` would reach gh as ONE argument.
+assert_not_grep "$FINISH_BRANCH" \
+  'gh pr create.*\$PR_BASE_ARG[^S]' \
+  "no unquoted scalar base arg (zsh does not word-split — would pass '--base main' as one argv)"
+# The dead pipeline-|| fallback chain must be gone: `||` binds to the PIPELINE
+# and `sed` exits 0 on empty input, so every fallback arm was unreachable.
+assert_not_grep "$FINISH_BRANCH" \
+  'symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \| sed' \
+  "no symbolic-ref|sed||fallback pipeline (its || arms were provably dead code — #439)"
+assert_grep "$FINISH_BRANCH" \
+  'git diff "\$BASE_REF\.\.HEAD"' \
+  "pre-push scan ranges from the resolved base, not from origin/HEAD"
+
+echo
 echo "== gitleaks-missing fail-open warning =="
 assert_grep "$SECRET_SCAN_LIB" \
   'brew install gitleaks|gitleaks not installed|regex fallback only' \

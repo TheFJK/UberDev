@@ -97,6 +97,10 @@ const runDirAbs = CFG.runDirAbs || "";
 const manifestPathAbs = CFG.manifestPathAbs || "";
 const nowIso = CFG.timestampIso || A.now_iso || "";
 const repoSlug = String(CFG.repoSlug || "");
+// The branch the launcher was standing on when it emitted this envelope (#439).
+// Solvers work in runtime-cut worktrees and cannot recover it themselves, so an
+// empty value means "unknown" and the PR instruction omits --base entirely.
+const baseBranch = String(CFG.baseBranch || "");
 const branchPrefix = String(CFG.branchPrefix || "worktree-solve-issue-");
 const autoMode = CFG.autoMode === true || CFG.autoMode === 1 || CFG.autoMode === "1"
   || CFG.autoMode === "true";
@@ -320,6 +324,19 @@ function solvePrompt(rec, planPath) {
   // (the research/design agents are read-only). It owns the whole write path:
   // branch, edits, tests, commit, push, PR.
   var tier = rec.tier;
+  // Conditional --base, mirroring scan-fleet/workflow.js's baseArg: an unknown
+  // base emits NO instruction at all rather than a guessed branch name. The
+  // resolved value is interpolated as a LITERAL (not a shell variable) because
+  // an LLM reads this prompt and has no variable to define. The launcher already
+  // verified this branch exists on origin before sending it (lib/solve-launcher.sh,
+  // `# --- BEGIN solve-fleet base capture (#439) ---`), so a rejection here means
+  // the branch moved mid-run — report it, never paper over it.
+  var baseInstruction = baseBranch
+    ? ("   The PR MUST target the branch this run was launched from — pass `--base \"" + baseBranch
+      + "\"` to `gh pr create`. Omitting it retargets the repository default branch, which silently "
+      + "breaks a stacked PR. If gh rejects that base, do NOT retry without the flag: report the "
+      + "failure in your summary and leave the branch pushed.\n")
+    : "";
   var designed = planPath
     ? ('\n3. Read the implementation plan at "' + planPath + '" and execute it in order. It was written '
       + "for this issue by the design phase of this run; follow it unless you find it factually wrong, "
@@ -354,6 +371,7 @@ function solvePrompt(rec, planPath) {
     + "d. Push the branch and open a PR with `gh pr create`. Build the PR body in a FILE and pass "
     + "`--body-file` (never inline `--body`). The body MUST contain the line `Closes #" + rec.issue + "` "
     + "so the merge auto-closes the issue.\n"
+    + baseInstruction
     + "e. Do NOT merge, do NOT run /merge, and do NOT chain into a review command. Opening the PR is "
     + "where your job ends.\n\n"
     + "If the issue is already fixed on this branch's base, make no changes and report NO_CHANGES_NEEDED "

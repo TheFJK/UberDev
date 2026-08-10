@@ -359,6 +359,54 @@ else
 fi
 
 echo
+echo "== FBZ-3: the --base arg reaches gh as TWO argv words under zsh (#439) =="
+# zsh does NOT word-split an unquoted scalar (SH_WORD_SPLIT is off), so the
+# obvious `PR_BASE_ARG="--base $PR_BASE"; gh … $PR_BASE_ARG` shape hands gh a
+# SINGLE argument `--base feat/parent` and every stacked PR silently retargets
+# the default branch. Only an ARRAY expansion splits correctly in both shells.
+#
+# Mutation guard: rebuild PR_BASE_ARGS as a scalar in SKILL.md => FBZ-3 RED
+# (argc collapses from 3 to 2 and the flag word is never seen alone).
+FBZ3_BLOCK="$(sed -n '/^# --- BEGIN pr-base resolution (#439) ---$/,/^# --- END pr-base resolution (#439) ---$/p' "$FINISH_BRANCH")"
+FBZ3_FAILURES=''
+if [ -z "$FBZ3_BLOCK" ]; then
+  FBZ3_FAILURES="$FBZ3_FAILURES base-block-not-extractable"
+else
+  FBZ3_REPO="$WORK/fbz3-repo"
+  mkdir -p "$FBZ3_REPO"
+  (
+    cd "$FBZ3_REPO" || exit 2
+    git init -q . >/dev/null 2>&1 || exit 2
+    git config user.email fixture@example.invalid
+    git config user.name Fixture
+    git config commit.gpgsign false
+    printf 'one\n' > a.txt && git add a.txt && git commit -qm one >/dev/null 2>&1 || exit 2
+    git update-ref refs/remotes/origin/feat/parent HEAD || exit 2
+  ) || FBZ3_FAILURES="$FBZ3_FAILURES fixture-setup-failed"
+
+  FBZ3_DRIVER="$WORK/fbz3-driver.zsh"
+  {
+    printf '%s\n' "$FBZ3_BLOCK"
+    printf '%s\n' 'gh_probe() { print -r -- "argc=$#"; for a in "$@"; do print -r -- "arg=[$a]"; done }'
+    # Byte-identical argv shape to the shipped `gh pr create` invocation tail.
+    printf '%s\n' 'gh_probe --body-file "/tmp/body" ${PR_BASE_ARGS[@]+"${PR_BASE_ARGS[@]}"}'
+  } > "$FBZ3_DRIVER"
+
+  FBZ3_OUT="$(cd "$FBZ3_REPO" && env -u UBERDEV_CONFIG_FILE \
+    UBERDEV_PR_BASE_BRANCH=feat/parent CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    "$ZSH_BIN" "$FBZ3_DRIVER" 2>/dev/null)"
+  grep -qF 'argc=4' <<<"$FBZ3_OUT"        || FBZ3_FAILURES="$FBZ3_FAILURES argc-not-4"
+  grep -qF 'arg=[--base]' <<<"$FBZ3_OUT"  || FBZ3_FAILURES="$FBZ3_FAILURES flag-not-its-own-word"
+  grep -qF 'arg=[feat/parent]' <<<"$FBZ3_OUT" || FBZ3_FAILURES="$FBZ3_FAILURES value-not-its-own-word"
+fi
+if [ -z "$FBZ3_FAILURES" ]; then
+  pass "FBZ-3: PR_BASE_ARGS expands to two separate argv words under zsh"
+else
+  fail "FBZ-3: base arg does not survive zsh expansion:$FBZ3_FAILURES"
+  printf '        out=[%s]\n' "$(printf '%s' "${FBZ3_OUT:-}" | tr '\n' '|')"
+fi
+
+echo
 echo "== Summary =="
 echo "  launcher: $LAUNCH_SHELL  (composer ran under: $ZSH_BIN)"
 echo "  passed: $PASS"

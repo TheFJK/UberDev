@@ -39,12 +39,31 @@ Stop. Don't proceed to Step 2.
 
 ### Step 2: Determine Base Branch
 
-```bash
-# Try common base branches
-git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null
-```
+Do NOT guess. finish-branch runs while already standing on the feature branch, and
+"what did I branch from" is not reliably recoverable from git — `git merge-base` answers
+a different question (the shared ancestor with a branch you name), so on a stacked branch
+it happily confirms `main` while the real parent is another PR's branch.
 
-Or ask: "This branch split from main - is that correct?"
+Resolution is EXPLICIT-FIRST, and the executable fence in Option 2 below implements exactly
+this chain (`# --- BEGIN pr-base resolution (#439) ---`):
+
+1. **Operator override** — `UBERDEV_PR_BASE_BRANCH=<branch>` in the environment.
+2. **Per-project config** — `pr_base_branch: <branch>` in `.claude/uberdev.local.md`
+   (see `using-uberdev/references/configuration.md`).
+3. **The origin default branch** — `refs/remotes/origin/HEAD`, then `origin/main`,
+   then `origin/master`. This is the unchanged legacy behaviour.
+
+The resolved base has exactly two consumers, and they must agree: the pre-push secret-scan
+range, and `gh pr create --base`. Tiers 1 and 2 emit `--base`; tier 3 does not, because the
+resolved value already IS what `gh` targets by default.
+
+**Opening a stacked (dependent) PR:** set tier 1 or 2 to the parent PR's branch. That both
+points the new PR at its parent and stops the scan from re-reading the parent's commits.
+
+If a configured base names a branch this checkout has never fetched (or a typo), `--base` is
+still passed to `gh` — GitHub has the branch even when this clone does not — but the scan
+range degrades to the origin default branch and says so on stderr. It never degrades to the
+branch root commit, which would scan strictly more than the pre-#439 range.
 
 ### Step 3: Mode selection (precedence: UBERDEV_TURBO=1 > --interactive > default)
 
@@ -376,6 +395,112 @@ abort_if_secret() {
   exit 1
 }
 
+# --- BEGIN pr-base resolution (#439) ---
+# Resolve the PR base branch ONCE. It feeds BOTH the pre-push scan range and
+# `gh pr create --base`, so a stacked (dependent) PR targets its parent branch
+# instead of the repository default — and the scan stops re-reading the commits
+# of the parent PR, whose secret-shaped TEST FIXTURES would otherwise hard-abort
+# the push of the child with no override.
+#
+# Precedence is EXPLICIT-FIRST, because "what did I branch from" is not
+# recoverable from git once you are standing on the feature branch:
+#   1. env override   UBERDEV_PR_BASE_BRANCH
+#   2. project config pr_base_branch (.claude/uberdev.local.md)
+#   3. the origin default branch (unchanged legacy behaviour)
+# `command -v`, never `type -t`: this fence executes under zsh, where `type -t`
+# prints nothing and the guard would misfire into a redundant re-source.
+
+# The origin default branch NAME, or empty when no probe answers. Used by BOTH
+# tier 3 and the "configured base did not resolve" recovery below, so the two can
+# never drift into disagreeing about what "the default" is. Each probe is
+# rc-checked SEPARATELY — see the dead-pipeline note in the tier-3 arm.
+uberdev_origin_default_branch() {
+  local _sym
+  _sym="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"
+  if [ -n "$_sym" ]; then printf '%s' "${_sym#refs/remotes/origin/}"; return 0; fi
+  if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then printf '%s' "main"; return 0; fi
+  if git rev-parse --verify --quiet origin/master >/dev/null 2>&1; then printf '%s' "master"; return 0; fi
+  printf '%s' ""
+}
+
+if ! command -v uberdev_read_string >/dev/null 2>&1; then
+  source "${CLAUDE_PLUGIN_ROOT}/lib/config-read.sh"
+fi
+PR_BASE=""
+PR_BASE_EXPLICIT=0
+if command -v uberdev_read_string >/dev/null 2>&1; then
+  PR_BASE="$(uberdev_read_string pr_base_branch UBERDEV_PR_BASE_BRANCH '^[A-Za-z0-9._/-]{1,255}$' '')"
+elif [ -n "${UBERDEV_PR_BASE_BRANCH:-}" ]; then
+  # The reader did not load but an override IS set. Degrading to tier 3 here is
+  # survivable; doing it SILENTLY is not — the PR would target the default
+  # branch while the operator believes it is stacked.
+  echo "WARNING: lib/config-read.sh did not load, so UBERDEV_PR_BASE_BRANCH is being ignored; the PR will target the origin default branch." >&2
+fi
+if [ -n "$PR_BASE" ]; then
+  PR_BASE_EXPLICIT=1
+else
+  # Tier 3 — the origin default branch. The previous shape chained the probes
+  # through a single pipeline:
+  #   BASE_REF=$(git symbolic-ref … | sed … || git rev-parse --verify origin/main …)
+  # `||` binds to the whole PIPELINE, and `sed` exits 0 on empty input, so when
+  # symbolic-ref failed the pipeline STILL returned 0: BASE_REF came back empty
+  # and every fallback arm below it was unreachable dead code. The scan then
+  # degraded to `git diff --staged`, which on a fully-committed branch scans
+  # nothing — a fail-OPEN security control, not a cosmetic bug (#439).
+  PR_BASE="$(uberdev_origin_default_branch)"
+fi
+
+# Diff range for the pre-push scan: prefer the remote-tracking ref, then a local
+# branch of the same name.
+BASE_REF=""
+if [ -n "$PR_BASE" ]; then
+  if git rev-parse --verify --quiet "origin/$PR_BASE" >/dev/null 2>&1; then
+    BASE_REF="origin/$PR_BASE"
+  elif git rev-parse --verify --quiet "$PR_BASE" >/dev/null 2>&1; then
+    BASE_REF="$PR_BASE"
+  fi
+fi
+# A CONFIGURED base that resolves to no ref here is the NORMAL state of a fresh
+# stacked worktree: the parent PR was pushed from somewhere else and this clone
+# never fetched it. `--base` stays correct (GitHub has the branch), but the scan
+# has no narrow range to use — so widen to the origin default branch, NEVER to
+# the root commit. The root commit is strictly WIDER than pre-#439 behaviour and
+# drags the secret-shaped test fixtures of the parent back into range, re-creating
+# the exact hard-abort-with-no-override this change exists to prevent. Say so out
+# loud, too: a silent widening reaches the operator only as an unexplained
+# secret-scan abort.
+if [ -z "$BASE_REF" ] && [ "$PR_BASE_EXPLICIT" = "1" ]; then
+  echo "WARNING: configured PR base '$PR_BASE' resolves to no ref in this checkout (try: git fetch origin $PR_BASE). --base is still passed to gh, but the pre-push secret scan is widening to the origin default branch, so that base branch's own commits are in scan range." >&2
+  PR_BASE_FALLBACK="$(uberdev_origin_default_branch)"
+  if [ -n "$PR_BASE_FALLBACK" ] && git rev-parse --verify --quiet "origin/$PR_BASE_FALLBACK" >/dev/null 2>&1; then
+    BASE_REF="origin/$PR_BASE_FALLBACK"
+  fi
+fi
+# Last resort — the branch root commit: scan everything since creation. Reached
+# only when NO base resolved at all (no origin default branch either), so the
+# widening is the safe direction, but it is still worth naming.
+# `--max-count=1` keeps a multi-root repo from producing a multi-line value that
+# `git diff "$BASE_REF..HEAD"` could not parse.
+if [ -z "$BASE_REF" ]; then
+  echo "WARNING: no base ref resolved (no origin default branch found); the pre-push secret scan is ranging from the branch root commit, so every commit in this branch's history is in scope." >&2
+  BASE_REF="$(git rev-list --max-parents=0 --max-count=1 HEAD 2>/dev/null)"
+fi
+
+# `--base` is emitted ONLY when the base was explicitly configured (tier 1 or 2).
+# With no override the resolved base IS the repository default, which is exactly
+# what `gh pr create` targets on its own — so the unset path stays byte-identical
+# to the previous invocation, flag and all.
+#
+# An ARRAY, never a scalar: zsh does not word-split an unquoted scalar, so a
+# `$PR_BASE_ARG` holding `--base main` would reach gh as ONE argument. The
+# `${a[@]+"${a[@]}"}` guard keeps the empty case a zero-word expansion even under
+# `set -u` on bash 3.2 (macOS), where a bare `"${a[@]}"` errors instead.
+PR_BASE_ARGS=()
+if [ "$PR_BASE_EXPLICIT" = "1" ]; then
+  PR_BASE_ARGS=(--base "$PR_BASE")
+fi
+# --- END pr-base resolution (#439) ---
+
 # Scan target 1: the diff that will actually be pushed (commits ahead of upstream).
 # Falls back to staged diff for fresh branches that have no remote tracking yet.
 # Capture stderr (matched lines) into $SCAN_DIAG and the function exit code
@@ -383,15 +508,12 @@ abort_if_secret() {
 if PUSH_DIFF=$(git diff @{u}..HEAD 2>/dev/null) && [[ -n "$PUSH_DIFF" ]]; then
   SCAN_DIAG=$(printf '%s' "$PUSH_DIFF" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
 else
-  # No upstream set or empty diff → scan from origin default branch. Falls
-  # back to literal main/master, then to the branch root commit (catches
-  # everything since branch creation). Note: `git merge-base HEAD HEAD~1` is
-  # degenerate (= HEAD~1) and was removed — it scanned only the last commit.
-  BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@' \
-          || git rev-parse --verify origin/main 2>/dev/null \
-          || git rev-parse --verify origin/master 2>/dev/null \
-          || git rev-list --max-parents=0 HEAD 2>/dev/null \
-          || echo "")
+  # No upstream set or empty diff → scan from $BASE_REF, the range derived from
+  # the ONE resolved PR base above. On a stacked branch that is the PARENT
+  # branch, not origin/HEAD, so the commits of the parent PR (and their
+  # secret-shaped test fixtures) fall correctly outside this push range. Note:
+  # `git merge-base HEAD HEAD~1` is degenerate (= HEAD~1) and was removed — it
+  # scanned only the last commit.
   if [[ -n "$BASE_REF" ]]; then
     SCAN_DIAG=$(git diff "$BASE_REF..HEAD" | uberdev_run_secret_scan_stdin 2>&1 >/dev/null); SCAN_RC=$?
   else
@@ -425,7 +547,7 @@ fi
 # errors. The negated-conditional branch below surfaces the gh failure
 # explicitly (PR_URL captures stderr via 2>&1 in the failure case to keep
 # the diagnostic).
-if ! PR_URL=$(gh pr create --title "$PR_TITLE_VAR" --body-file "$PR_BODY_FILE" 2>&1); then
+if ! PR_URL=$(gh pr create --title "$PR_TITLE_VAR" --body-file "$PR_BODY_FILE" ${PR_BASE_ARGS[@]+"${PR_BASE_ARGS[@]}"} 2>&1); then
   echo "ERROR: gh pr create failed: $PR_URL" >&2
   echo "Branch state preserved. Worktree retained. Investigate and rerun." >&2
   rm -f "$TITLE_FILE" "$PR_BODY_FILE"
