@@ -4,6 +4,64 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.3] — 2026-08-10
+
+### Fixed
+
+- **`/uberdev:review-pr` could not complete on any PR, and therefore no PR could
+  ever be merged** (#429). `review_publish_same_repo_pr_head` projected the head
+  repository as `.headRepository.nameWithOwner`. `gh` declares that field and
+  never populates it — measured on gh 2.83.1, `gh pr view 422 --json
+  headRepository` returns `{"id":"R_kgDOSOF5tw","name":"UberDev",
+  "nameWithOwner":""}`. The gate's identity conjunct therefore compared `""`
+  against the repository slug and returned 79 on every invocation, turning
+  "refuse forks" into "refuse everything".
+
+  Both call sites map 79 to `exit 2`: the Step 6a post-fixer push, and — the one
+  that mattered — the trust-trail anchor publication immediately before the
+  `uberdev-approved` label add. Since the broken gate *is* the step that emits
+  the trail, no PR could obtain one, and `/merge` Phase 1.4 PATH_2 consequently
+  gated every PR out with `trust_trail_label_missing`. The two commands were
+  deadlocked against each other.
+
+  The identity is now read as `headRepositoryOwner.login` + `headRepository.name`
+  — the same resolution `lib/review-push-target.sh` has always used. That lib
+  documented this exact failure in its header comment and was wired into a single
+  call site (the Phase 3 ROUTE gate); the publish gate never received it. One
+  fact, two uncompared copies.
+
+  The projection also moves from a tab-joined line to one field per line. Tab is
+  IFS whitespace, so a tab-joined projection containing an empty field collapses
+  under `read`: the fields shift left and a malformed identity parses as a
+  well-formed *different* one. `review-push-target.sh` had already switched for
+  this reason.
+
+### Changed
+
+- `tests/review-pr.test.sh` gains **R9.17**, which runs the gate's own `--jq`
+  filter through real `jq` against a document shaped like gh 2.83.1's actual
+  response. The pre-existing R9.13 block stubs `gh` and emits the projection's
+  *output*, so it can never exercise the filter — which is precisely why CI
+  stayed green through this bug: the stub's `head_repo=owner/repo` is a value
+  real `gh` never emits, and the test agreed with the fiction rather than with
+  reality. R9.17 carries two anti-vacuity cases (a genuine fork, and a foreign
+  head-repository owner with `isCrossRepository` lying) so the conjunct cannot be
+  satisfied by deleting it.
+
+- The two awk extractors for `review_publish_same_repo_pr_head` now bound the
+  function on a column-0 `}` rather than any indented one. The gate body now
+  legitimately contains `  } <<<"$live_identity"`, and the previous bound
+  truncated the function there — an extractor that silently returns half a
+  function makes every assertion below it vacuous rather than red.
+
+### Known issues
+
+- `skills/merge-pipeline/SKILL.md` Step 1.6 fork preflight reads
+  `headRepository.owner.type`. Real `gh` does not populate `headRepository.owner`
+  in that projection either — the owner lives in the sibling
+  `headRepositoryOwner`. This is currently prose with no executable consumer, so
+  it is latent rather than live; tracked on #429 as the out-of-scope twin.
+
 ## [0.45.2] — 2026-08-09
 
 ### Fixed

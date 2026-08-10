@@ -1379,11 +1379,48 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
      [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
      [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
-     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
-     [[ "$live_identity" != *$'\n'* ]] || return 79
-     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     # The head-repository identity is `headRepositoryOwner.login` +
+     # `headRepository.name`, NEVER `headRepository.nameWithOwner` (#429).
+     # gh DECLARES that last field and never populates it -- gh 2.83.1:
+     #
+     #     gh pr view 422 --repo TheFJK/UberDev --json headRepository
+     #     {"headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""}}
+     #
+     # A gate keyed on the empty string can never pass, which turned "refuse
+     # forks" into "refuse everything": every /review-pr run exited 2 here and
+     # at the trust-trail anchor push below, so no PR could ever obtain a trail
+     # and /merge gated all of them out. The owner/name composite is populated
+     # for every PR, fork and same-repo alike. Same resolution as
+     # `lib/review-push-target.sh`, which had this fix from the start and was
+     # wired into ONE call site only -- keep the two in step.
+     #
+     # One field per LINE, not one tab-separated line. Tab is IFS whitespace, so
+     # a tab-joined projection with an empty field COLLAPSES under `read`: the
+     # fields shift left and a malformed identity parses as a well-formed
+     # DIFFERENT one. Line-per-field cannot shift -- git refuses a ref name
+     # containing a newline, so a stray newline can only make the projection
+     # over-long, which the trailing read refuses.
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
+       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
+       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
+             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
+       2>/dev/null)" || return 79
+     {
+       IFS= read -r live_head || return 79
+       IFS= read -r live_branch || return 79
+       IFS= read -r live_cross_repository || return 79
+       IFS= read -r live_head_repo || return 79
+       if IFS= read -r extra; then return 79; fi
+     } <<<"$live_identity"
      [ "$live_head" = "$expected_remote_head_sha" ] || return 79
-     [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     # No `[ -z "$extra" ]` here, and its absence is not an oversight: with
+     # line-per-field, over-length is refused INSIDE the read block above, which
+     # returns 79 the moment a fifth line exists. A trailing emptiness test on
+     # `extra` is therefore unreachable-false -- it can only ever be reached
+     # when `extra` is already empty. The tab-joined form it replaced DID need
+     # it, because there a fifth field arrived on the same single line and the
+     # read could not refuse it.
+     [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
      git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
      observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
      [ "$observed_head" = "$publish_sha" ] || return 79
@@ -1397,11 +1434,25 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      [[ "$remote_identity" != *$'\n'* ]] || return 79
      IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
      [ "$remote_head" = "$publish_sha" ] && [ "$remote_ref" = "refs/heads/$live_branch" ] && [ -z "$remote_extra" ] || return 79
-     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid,headRefName,isCrossRepository,headRepository --jq '"\(.headRefOid)\t\(.headRefName)\t\(.isCrossRepository)\t\(.headRepository.nameWithOwner)"' 2>/dev/null)" || return 79
-     [[ "$live_identity" != *$'\n'* ]] || return 79
-     IFS=$'\t' read -r live_head live_branch live_cross_repository live_head_repo extra <<<"$live_identity" || return 79
+     # Post-push re-projection. Same owner/name composite and same
+     # line-per-field read as the pre-push probe above (#429) -- the two must
+     # never drift, since this one is what proves the ref we just wrote is still
+     # the PR's head in the repository we think it is.
+     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
+       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
+       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
+             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
+       2>/dev/null)" || return 79
+     {
+       IFS= read -r live_head || return 79
+       IFS= read -r live_branch || return 79
+       IFS= read -r live_cross_repository || return 79
+       IFS= read -r live_head_repo || return 79
+       if IFS= read -r extra; then return 79; fi
+     } <<<"$live_identity"
      [ "$live_head" = "$publish_sha" ] || return 79
-     [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] && [ -z "$extra" ] || return 79
+     # See the pre-push probe: `extra` is intentionally unassigned on success.
+     [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
      observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
      [ "$observed_head" = "$publish_sha" ] || return 79
      residue_receipt="$(python3 -I -B "$contract_helper" validate-residue --working-dir "$worktree_root" --evidence-dir "$evidence_dir")" || return 79

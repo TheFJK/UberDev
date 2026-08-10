@@ -546,7 +546,12 @@ assert_grep "$REVIEW_PR" \
 # R9.13 — execute the production push gate with adversarial local movement
 # immediately after anchor validation and during the push hook window.
 ANCHOR_PUSH_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^[[:space:]]*\}/{exit}' \
+# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
+# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
+# since #429, and `^[[:space:]]*\}` would truncate the function there — an
+# extractor that silently returns half a function makes every assertion below
+# it vacuous rather than red.
+awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
   "$REVIEW_PR" >"$ANCHOR_PUSH_FIXTURE"
 ANCHOR_PUSH_LOG="$(mktemp)"
 ANCHOR_GH_STATE="$(mktemp)"
@@ -573,7 +578,12 @@ if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
       [ "${CROSS_REPO:-0}" != 1 ] || cross=true
       head_repo=owner/repo
       [ "${WRONG_HEAD_REPO:-0}" != 1 ] || head_repo=attacker/fork
-      printf "%s\t%s\t%s\t%s\n" "$live_oid" "$live_branch" "$cross" "$head_repo"
+      # Line-per-field, matching the gate projection since #429. This stub
+      # emits the projection OUTPUT rather than running its filter, which is
+      # why it is blind to the field-name class — R9.17 below covers that by
+      # running the real filter against a real gh document.
+      # (No apostrophes above: this body is a single-quoted bash -c string.)
+      printf "%s\n%s\n%s\n%s\n" "$live_oid" "$live_branch" "$cross" "$head_repo"
     }
     python3() {
       [ "${RESIDUE_DURING_PUSH:-0}" != 1 ] || return 74
@@ -639,6 +649,106 @@ else
   FAIL=$((FAIL + 1))
 fi
 rm -f "$ANCHOR_PUSH_FIXTURE" "$ANCHOR_PUSH_LOG" "$ANCHOR_GH_STATE"
+
+# R9.17 (#429) — the publish gate's identity projection, exercised through REAL
+# jq against a REAL-gh-shaped document.
+#
+# R9.13 above stubs `gh` and printf's the projection's OUTPUT directly, so it
+# can never exercise the `--jq` filter — and that is precisely how #429 shipped.
+# The gate projected `.headRepository.nameWithOwner`; gh 2.83.1 DECLARES that
+# field and always returns it EMPTY; the stub's `head_repo=owner/repo` is a
+# value real gh never emits. The test agreed with the fiction, CI stayed green,
+# and `/review-pr` could not complete on any PR — including at the trust-trail
+# anchor push, which is the one step that makes a PR mergeable.
+#
+# This block closes the class rather than the instance: it feeds gh's actual
+# response shape through the gate's OWN filter, so any projection that cannot
+# recover the head-repository slug from a real document fails here.
+REAL_GH_FIXTURE="$(mktemp)"
+# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
+# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
+# since #429, and `^[[:space:]]*\}` would truncate the function there — an
+# extractor that silently returns half a function makes every assertion below
+# it vacuous rather than red.
+awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
+  "$REVIEW_PR" >"$REAL_GH_FIXTURE"
+REAL_GH_PUSH_LOG="$(mktemp)"
+REAL_GH_STATE="$(mktemp)"
+if [ -s "$REAL_GH_FIXTURE" ] && \
+  REAL_GH_PUSH_LOG="$REAL_GH_PUSH_LOG" REAL_GH_STATE="$REAL_GH_STATE" bash -c '
+    # `set -u`, which the R9.13 harness lacks: a `bash -c` subshell does NOT
+    # inherit it from this test file, so an unbound-variable defect in the gate
+    # would be invisible to every existing block. It matters because `local x`
+    # leaves x UNSET in bash but EMPTY in zsh, and these fences run under zsh at
+    # runtime while the suites drive them under bash — a defect of that shape
+    # reaches exactly one platform, which is the worst kind to ship.
+    set -u
+    . "$1"
+    PRE_SHA="$(printf a%.0s {1..40})"
+    PUB_SHA="$(printf b%.0s {1..40})"
+    reset_fixture() { printf "0\n" >"$REAL_GH_STATE"; : >"$REAL_GH_PUSH_LOG"; }
+    # FAITHFUL stub: real gh parses --jq and applies it to the response
+    # document. A stub that emits the projection'"'"'s output instead re-creates
+    # the #429 blind spot, so this one runs the real filter through real jq.
+    gh() {
+      [ "$1" = pr ] && [ "$2" = view ] || return 90
+      want=0; filter=""
+      for a in "$@"; do
+        if [ "$want" = 1 ]; then filter="$a"; want=0; continue; fi
+        [ "$a" = "--jq" ] && want=1
+      done
+      [ -n "$filter" ] || return 90
+      n="$(cat "$REAL_GH_STATE")"; n=$((n + 1)); printf "%s\n" "$n" >"$REAL_GH_STATE"
+      oid="$PRE_SHA"; [ "$n" -eq 1 ] || oid="$PUB_SHA"
+      owner="TheFJK"; [ "${WRONG_OWNER:-0}" != 1 ] || owner="attacker"
+      cross=false;    [ "${FORK:-0}" != 1 ]        || cross=true
+      # gh 2.83.1 verbatim: nameWithOwner is DECLARED and ALWAYS EMPTY, and the
+      # owner login lives in the sibling headRepositoryOwner object.
+      jq -r "$filter" <<JSON
+{"headRefOid":"$oid",
+ "headRefName":"feature/real",
+ "isCrossRepository":$cross,
+ "headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""},
+ "headRepositoryOwner":{"id":"U_kgDOBmOp1Q","login":"$owner"}}
+JSON
+    }
+    python3() { printf "{\"status\":\"clean\"}\n"; }
+    git() {
+      [ "$1" = -C ] && [ "$2" = /repo ] || return 91
+      case "$3" in
+        rev-parse)        printf "%s\n" "$PUB_SHA" ;;
+        check-ref-format) [ "$4" = --branch ] && [ "$5" = feature/real ] ;;
+        push)             printf "%s\n" "$5" >>"$REAL_GH_PUSH_LOG" ;;
+        ls-remote)        printf "%s\trefs/heads/feature/real\n" "$PUB_SHA" ;;
+        *) return 93 ;;
+      esac
+    }
+    # (a) A same-repository PR MUST publish. Pre-#429 this returned 79, because
+    #     the projection recovered "" for the head-repository slug.
+    reset_fixture
+    review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 31
+    [ "$(cat "$REAL_GH_PUSH_LOG")" = "$PUB_SHA:refs/heads/feature/real" ] || exit 32
+    # (b) ANTI-VACUITY: a genuine fork is still refused, and still never pushes.
+    reset_fixture
+    FORK=1 review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence && exit 33
+    [ ! -s "$REAL_GH_PUSH_LOG" ] || exit 34
+    # (c) ANTI-VACUITY: the slug conjunct itself must still discriminate — a head
+    #     repository owned by someone else is refused even when isCrossRepository
+    #     lies and says false. Without this, (a) could be satisfied by deleting
+    #     the conjunct outright.
+    reset_fixture
+    WRONG_OWNER=1 review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence && exit 35
+    [ ! -s "$REAL_GH_PUSH_LOG" ] || exit 36
+    exit 0
+  ' _ "$REAL_GH_FIXTURE"
+then
+  echo "  PASS  R9.17 (#429) — publish gate recovers the head-repository slug from gh's real response shape, still refuses forks and foreign head repos"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R9.17 (#429) — publish gate cannot identify a same-repo PR from gh's real response shape"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$REAL_GH_FIXTURE" "$REAL_GH_PUSH_LOG" "$REAL_GH_STATE"
 
 # R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
 # `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
