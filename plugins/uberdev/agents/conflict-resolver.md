@@ -14,8 +14,8 @@ You resolve ONE conflicted file from a PR merge. You operate in a scratch worktr
 
 - `file_path` — absolute path to the conflicted file in the scratch worktree (must be in the pre-computed conflict set; reject out-of-set requests with `status: REFUSED`).
 - `pr_branch` — head ref of the PR being merged.
-- `integration_branch` — target ref.
-- `base_sha` — common-ancestor commit SHA.
+- `integration_branch` — target ref: the ref this PR is being merged INTO. **This is the PR's own `baseRefName`, `origin/`-qualified (`origin/<baseRefName>`), not the repo's global integration branch** — for a PR stacked on another PR's head those differ, and it is the same ref your scratch worktree was based on (#437). Use it verbatim; never substitute `main` or a bare local branch name.
+- `base_sha` — common-ancestor commit SHA: the merge-base of `integration_branch` and `pr_branch`.
 - `working_dir` — scratch worktree root (`.claude/worktrees/merge-<run-id>/`).
 
 ## Tools authorised
