@@ -4,6 +4,69 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.9] — 2026-08-10
+
+### Fixed
+
+- **`/merge` resolved one repo-global `integration_branch` and used it for every PR
+  in the run, ignoring each PR's real base** (#437). `baseRefName` was fetched in
+  five places in the merge pipeline and read in zero:
+
+      $ grep -rn 'baseRefName' plugins/uberdev/skills/merge-pipeline/ | grep -v -- '--json'
+      rc=1
+
+  The wrong base flowed into the Step 3.1 probe, the Step 3.3.ii scratch worktree,
+  the Step 3.3.iii conflict-resolver inputs and the STRATEGY-SWITCH re-probe — and
+  then Step 3.3.v pushed the result. Reproduced in both directions on a
+  `main → fix/a → fix/b` fixture:
+
+  - *phantom conflict* — `merge-tree fix/a fix/b` exits 0 while
+    `merge-tree main fix/b` exits 1, so `/merge` invented a conflict and dispatched
+    conflict-resolvers at it;
+  - *invisible real conflict* — a genuine `fix/a`-vs-`fix/b` conflict was missed
+    because `main`-vs-`fix/b` was clean, so `/merge` proceeded down the clean path
+    and fired `gh pr merge`.
+
+  `/goal` dispatches this mode (`lib/goal-state.sh:2449`), so autonomous runs
+  inherited it. Every site now resolves the PR's own base from the Step 1.4
+  `pr_view_projection`, and the `origin/`-qualified invariant (#303) is re-scoped
+  from "every Phase-3 write site" to *every site naming a base ref* — Steps 1.5 and
+  2.2 were per-PR but still spelled the ref bare, which for a stacked PR is
+  `fatal: ambiguous argument` with empty stdout, silently reading as "no file
+  overlap" and scheduling parallel conflict-resolve against a PR touching the same
+  files.
+
+- **Stacked PRs were invisible to `/merge` entirely.** `lib/discover.sh` filtered
+  `gh pr list --base "$integration_branch"` — an exact match — so a stacked PR
+  returned zero candidates and `/merge` exited 0 reporting "nothing to merge",
+  which is the false-convergence signal `/goal` consumes.
+
+  Discovery now filters client-side to `baseRefName == integration_branch` **or**
+  the head branch of another candidate, applied transitively to a fixpoint. This
+  makes the ordering rule at Step 2.1 reachable for the first time: its base-ref
+  edge ("a PR-B base ref equal to PR-A head ref → PR-A must land before PR-B") could
+  never fire while the wire filter guaranteed every survivor shared one base. Its
+  other edge source, the `Depends on #N` body parse, was always reachable and is
+  unchanged.
+
+- **Discovery silently truncated at 30 PRs.** Dropping `--base` from the wire query
+  widened it to every open PR, and `gh pr list` defaults to `--limit 30`. An
+  explicit `--limit 200` is now passed (matching `lib/goal-state.sh`), declared as a
+  named constant, integer-validated, with a stderr breadcrumb when the window
+  saturates.
+
+- **A skipped parent could strand its stack children.** If a parent PR is gated out,
+  its dependents were still queued against a base that will not land. A reachability
+  prune re-runs the closure over the surviving set (reusing the same filter function,
+  so the two cannot drift), and Step 3.2 additionally gates `gh pr merge` per
+  iteration on the parent having actually landed. Both surface the new
+  `pr_base_parent_skipped` gate-fail reason.
+
+  Failure modes are conservative throughout: an unresolvable per-PR base skips the PR
+  with a typed `GATE_FAIL_REASON_ENUM` member rather than falling back to the global
+  branch, and a failed base range records the pair as *overlapping* rather than as
+  disjoint.
+
 ## [0.45.8] — 2026-08-10
 
 ### Added
