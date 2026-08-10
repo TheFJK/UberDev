@@ -686,8 +686,8 @@ assert_grep "$SKILL_FILE" 'uberdev_review_trail'    "M36.tea2 — TRUST_ANCHOR_E
 assert_grep "$SKILL_FILE" 'bypass_with_waiver'      "M36.tea3 — TRUST_ANCHOR_ENUM value bypass_with_waiver"
 
 echo
-echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 13 members (issue #52, narrowed by #78) =="
-# M37 row composition: 8 trust-resolution + 4 pre-condition + 1 infrastructure-failure = 13.
+echo "== M37: SKILL.md GATE_FAIL_REASON_ENUM — 15 members (issue #52, narrowed by #78, +2 by #437) =="
+# M37 row composition: 8 trust-resolution + 4 pre-condition + 3 infrastructure-failure = 15.
 # Issue #52 split the (d) sub-condition's JSON-absent vs JSON-present-but-SHA-mismatch cases:
 # absent → advisory only (by-design on fresh clone, see D1); present-but-mismatch → gate_fail
 # trust_trail_json_sha_mismatch (genuine staleness signal). Earlier issue #47 added
@@ -712,18 +712,20 @@ assert_grep "$SKILL_FILE" 'is_draft'                           "M37.precond2 —
 assert_grep "$SKILL_FILE" 'ci_red'                             "M37.precond3 — pre-condition reason ci_red"
 assert_grep "$SKILL_FILE" 'merge_state_blocked'                "M37.precond4 — pre-condition reason merge_state_blocked"
 assert_grep "$SKILL_FILE" 'pr_view_unreachable'                "M37.infra1 — infrastructure-failure reason pr_view_unreachable (R2 lib-call failure)"
+assert_grep "$SKILL_FILE" 'pr_base_unresolvable'               "M37.infra2 — infrastructure-failure reason pr_base_unresolvable (#437: the PR's own base ref could not be resolved — absent/empty baseRefName, BRANCH_NAME_REGEX reject, or a missing origin/<base> after the fetch). Falling back to integration_branch here IS the bug, so the reason must be typed and the PR skipped."
+assert_grep "$SKILL_FILE" 'pr_base_parent_skipped'             "M37.infra3 — dependency-failure reason pr_base_parent_skipped (#437: the PR is stacked on a candidate that did NOT land this run). Merging it anyway lands it into its PARENT's branch and emits merge_executed — the event /goal reads as convergence — while the integration branch receives nothing."
 ENUM_ROW=$(grep -E '\| `GATE_FAIL_REASON_ENUM` \|' "$SKILL_FILE" || true)
 # `[a-z_]+` matches lowercase snake_case reason tokens only (not the
 # UPPERCASE enum-name `GATE_FAIL_REASON_ENUM` itself, and not dotted
 # tokens like `gate_fail.data.reason`), so the count equals exactly
 # the number of reasons backticked in the row: 8 trust-resolution + 4
-# pre-condition + 1 infrastructure-failure (R2; v0.19.3) = 13.
+# pre-condition + 3 infrastructure-failure (R2 v0.19.3; #437) = 15.
 REASON_COUNT=$(echo "$ENUM_ROW" | grep -oE '`[a-z_]+`' | wc -l | tr -d ' ')
-if [ "$REASON_COUNT" -eq 13 ]; then
-  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 13 reasons (8 trust-resolution + 4 pre-condition + 1 infrastructure-failure)"
+if [ "$REASON_COUNT" -eq 15 ]; then
+  echo "  PASS  M37.count — GATE_FAIL_REASON_ENUM row contains exactly 15 reasons (8 trust-resolution + 4 pre-condition + 3 infrastructure-failure)"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 13"
+  echo "  FAIL  M37.count — GATE_FAIL_REASON_ENUM row contains $REASON_COUNT reasons; expected exactly 15"
   FAIL=$((FAIL + 1))
 fi
 
@@ -1549,12 +1551,32 @@ if [ "$DISCOVERY_FILTER_ROWS" = "1" ]; then
 else
   fail "M65.unique — DISCOVERY_FILTER MUST be declared exactly once in Constants table (got $DISCOVERY_FILTER_ROWS rows; spec Components § SKILL.md item 1 / Q4)"
 fi
-# Value-cell content checks — must reference --base, --state open, draft:false.
+# Value-cell content checks — must reference --state open, draft:false, and
+# (RETARGETED by #437) the CLIENT-SIDE stack filter that replaced --base.
+#
+# WHY --base HAD TO GO. `gh pr list --base <branch>` is an exact server-side
+# match, so a PR stacked on another PR's head is never returned at all; the
+# candidate set comes back empty and /merge exits 0 reporting "nothing to
+# merge" — the false-convergence signal /goal consumes. A server-side exact
+# match cannot be repaired client-side because the stacked rows never arrive,
+# so the wire query drops --base and integration_branch is re-applied in
+# process as the ROOT of a transitive reachability closure. The old assertion
+# would have locked the unfixable half in place.
 DISCOVERY_FILTER_ROW=$(grep -E '^\| `DISCOVERY_FILTER` \|' "$SKILL_FILE" || true)
 if grep -qE 'gh pr list --base' <<<"$DISCOVERY_FILTER_ROW"; then
-  pass "M65.base-flag — DISCOVERY_FILTER value cites 'gh pr list --base'"
+  fail "M65.base-flag — DISCOVERY_FILTER value MUST NOT cite 'gh pr list --base' (the exact server-side match hides stacked PRs; #437)"
 else
-  fail "M65.base-flag — DISCOVERY_FILTER value MUST cite 'gh pr list --base' (canonical query; spec Q4)"
+  pass "M65.base-flag — DISCOVERY_FILTER value no longer cites the stacked-PR-hiding 'gh pr list --base' (#437)"
+fi
+if grep -qE 'gh pr list --state open' <<<"$DISCOVERY_FILTER_ROW"; then
+  pass "M65.wire-query — DISCOVERY_FILTER value still cites the canonical 'gh pr list --state open' wire query"
+else
+  fail "M65.wire-query — DISCOVERY_FILTER value MUST cite 'gh pr list --state open' (canonical query; spec Q4)"
+fi
+if grep -qE 'stack filter|reachability|transitive' <<<"$DISCOVERY_FILTER_ROW"; then
+  pass "M65.stack-filter — DISCOVERY_FILTER value documents the client-side transitive stack filter (#437)"
+else
+  fail "M65.stack-filter — DISCOVERY_FILTER value MUST document the client-side transitive stack filter that replaced --base (#437)"
 fi
 if grep -qE -- '--state open' <<<"$DISCOVERY_FILTER_ROW"; then
   pass "M65.state-open — DISCOVERY_FILTER value cites '--state open'"
@@ -1565,6 +1587,45 @@ if grep -qE 'draft:false' <<<"$DISCOVERY_FILTER_ROW"; then
   pass "M65.draft-filter — DISCOVERY_FILTER value cites 'draft:false'"
 else
   fail "M65.draft-filter — DISCOVERY_FILTER value MUST cite 'draft:false' (canonical query; spec Q4)"
+fi
+# The wire window is load-bearing once the base filter leaves the wire (#437).
+# gh pr list defaults to --limit 30 (gh 2.83.1). With --base on the wire that
+# window was spent on integration-branch PRs only; without it the SAME window
+# spans every base branch in the repo and the base filter runs on whatever
+# survived truncation — so in a repo with >30 open PRs, eligible candidates are
+# dropped before the filter sees them and /merge reports a short or empty set.
+# That is the false-convergence signal /goal consumes, in a new form.
+if grep -qE -- '--limit' <<<"$DISCOVERY_FILTER_ROW"; then
+  pass "M65.limit — DISCOVERY_FILTER value cites an explicit --limit (the wire window must not be gh's default 30 once the base filter is client-side; #437)"
+else
+  fail "M65.limit — DISCOVERY_FILTER value MUST cite an explicit --limit: dropping --base re-pointed gh's default 30-row window at EVERY open PR in the repo (#437)"
+fi
+
+echo
+echo "== M65b: SKILL.md Constants declares DISCOVERY_WIRE_LIMIT exactly once (#437) =="
+# The bound must be a named constant, not a magic number buried in the lib.
+WIRE_LIMIT_ROWS=$(grep -cE '^\| `DISCOVERY_WIRE_LIMIT` \|' "$SKILL_FILE" || true)
+if [ "$WIRE_LIMIT_ROWS" = "1" ]; then
+  pass "M65b.unique — DISCOVERY_WIRE_LIMIT declared exactly once in Constants table"
+else
+  fail "M65b.unique — DISCOVERY_WIRE_LIMIT MUST be declared exactly once in Constants table (got $WIRE_LIMIT_ROWS rows; #437)"
+fi
+WIRE_LIMIT_ROW=$(grep -E '^\| `DISCOVERY_WIRE_LIMIT` \|' "$SKILL_FILE" || true)
+if grep -qE '`200`' <<<"$WIRE_LIMIT_ROW"; then
+  pass "M65b.value — DISCOVERY_WIRE_LIMIT is 200 (matches lib/goal-state.sh's existing --limit 200 PR enumerations)"
+else
+  fail "M65b.value — DISCOVERY_WIRE_LIMIT MUST declare the literal 200; gh's default 30 is what silently truncates the candidate set (#437)"
+fi
+if grep -qE '30' <<<"$WIRE_LIMIT_ROW"; then
+  pass "M65b.rationale — the row records WHY the default (30) is wrong here, so a future reader cannot 'simplify' the flag away"
+else
+  fail "M65b.rationale — DISCOVERY_WIRE_LIMIT MUST record gh's default of 30 and why it stopped being safe once the base filter moved client-side (#437)"
+fi
+# And the lib must actually carry it — a Constants row nobody reads is decoration.
+if grep -qE -- '--limit "\$UBERDEV_DISCOVERY_WIRE_LIMIT"' "$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/lib/discover.sh"; then
+  pass "M65b.wired — discover_multi's gh query consumes DISCOVERY_WIRE_LIMIT (not a hardcoded literal)"
+else
+  fail "M65b.wired — lib/discover.sh's discover_multi MUST pass --limit \"\$UBERDEV_DISCOVERY_WIRE_LIMIT\" (#437)"
 fi
 
 echo
@@ -2197,21 +2258,40 @@ assert_grep "$SKILL_FILE" 'git fetch origin "<integration_branch>" "<headRefName
 assert_grep "$SKILL_FILE" 'top of EACH landing iteration' \
   "M90.3 — fetch is per-iteration (not once per run)"
 PHASE_3_BLOCK=$(awk '/^## Phase 3/,/^## Phase 4/' "$SKILL_FILE")
-ORIGIN_PROBE_COUNT=$(echo "$PHASE_3_BLOCK" | grep -cF 'git merge-tree --write-tree origin/<integration_branch> <headRefOid>' || true)
+# RETARGETED by #437. The two-sites contract and the origin/-qualification are
+# both still correct and still locked; only the PLACEHOLDER moved, from the
+# repo-global <integration_branch> to the PR's own <PR_BASE>. A PR stacked on
+# another PR's head has a base that is NOT the integration branch, and probing
+# it against the global branch invents conflicts in one direction and hides
+# real ones in the other (tests/merge-discovery-resilience.test.sh B26 executes
+# both). Keeping the old needle here would have locked the bug.
+ORIGIN_PROBE_COUNT=$(echo "$PHASE_3_BLOCK" | grep -cF 'git merge-tree --write-tree origin/<PR_BASE> <headRefOid>' || true)
 if [ "${ORIGIN_PROBE_COUNT:-0}" = "2" ]; then
-  pass "M90.4 — Phase 3 probes origin/<integration_branch> at both sites (Step 3.1 + strategy-switch re-probe)"
+  pass "M90.4 — Phase 3 probes origin/<PR_BASE> at both sites (Step 3.1 + strategy-switch re-probe)"
 else
-  fail "M90.4 — Phase 3 must probe 'git merge-tree --write-tree origin/<integration_branch> <headRefOid>' at exactly 2 sites (Step 3.1 + strategy-switch), got ${ORIGIN_PROBE_COUNT:-0}"
+  fail "M90.4 — Phase 3 must probe 'git merge-tree --write-tree origin/<PR_BASE> <headRefOid>' at exactly 2 sites (Step 3.1 + strategy-switch), got ${ORIGIN_PROBE_COUNT:-0}"
 fi
-if grep -qE 'merge-tree --write-tree <integration_branch>' <<<"$PHASE_3_BLOCK"; then
-  fail "M90.5 — Phase 3 must NOT probe the bare local <integration_branch> (the local-ref probe is the actual stale-tip bug; #303)"
+# The #303 negative, re-pointed at the NEW placeholder so it keeps guarding
+# something. Both spellings are checked: a bare <PR_BASE> is the live regression
+# risk, and a re-appearing bare <integration_branch> would be the old one.
+M90_5_BARE=0
+for M90_5_NEEDLE in 'merge-tree --write-tree <PR_BASE>' 'merge-tree --write-tree <integration_branch>'; do
+  if grep -qF -- "$M90_5_NEEDLE" <<<"$PHASE_3_BLOCK"; then
+    M90_5_BARE=1
+    echo "        found bare-local probe: $M90_5_NEEDLE"
+  fi
+done
+if [ "$M90_5_BARE" = "1" ]; then
+  fail "M90.5 — Phase 3 must NOT probe a bare local ref (the local-ref probe is the actual stale-tip bug; #303 — invariant preserved across #437's per-PR retarget)"
 else
-  pass "M90.5 — no Phase 3 probe against the bare local integration ref remains"
+  pass "M90.5 — no Phase 3 probe against a bare local ref remains (neither <PR_BASE> nor <integration_branch>)"
 fi
-assert_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> origin/<integration_branch>' \
-  "M90.6 — scratch worktree (3.3.ii) is based on origin/<integration_branch>"
+assert_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> origin/<PR_BASE>' \
+  "M90.6 — scratch worktree (3.3.ii) is based on origin/<PR_BASE> (the PR's own base; #437)"
+assert_no_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> <PR_BASE>' \
+  "M90.7 — no scratch worktree based on the bare local per-PR ref remains (#303 invariant across #437)"
 assert_no_grep "$SKILL_FILE" 'git worktree add \.claude/worktrees/merge-<run-id> <integration_branch>' \
-  "M90.7 — no scratch worktree based on the bare local integration ref remains (#303)"
+  "M90.7b — no scratch worktree based on the bare local integration ref remains (#303)"
 assert_grep "$SKILL_FILE" 'git_fetch_failed' \
   "M90.8 — fetch-failure path documented (non-fatal: warn + error audit event, probe degrades to last-fetched tip)"
 assert_grep "$SKILL_FILE" 'fetch alone is NOT sufficient' \
@@ -3070,6 +3150,202 @@ M98SURF
 
   rm -rf "$M98_TMP"
 fi
+
+echo
+echo "== M99 (#437): /merge is per-PR base aware end to end =="
+# THE CLASS. `/merge` fetched every PR's `baseRefName` in five places and read
+# it in ZERO. One repo-global `integration_branch` (Step 1.2) drove the probe,
+# the scratch worktree, the conflict-resolver inputs, the re-probe and the
+# discovery query — for every PR in the run, whatever its actual base was.
+# The runtime consequences are executed in
+# tests/merge-discovery-resilience.test.sh B24-B27; these rows lock the
+# SKILL-side contract that the executable half implements.
+
+M99_PHASE3=$(awk '/^## Phase 3/,/^## Phase 4/' "$SKILL_FILE")
+
+# --- Step 3.0: resolve the base FRESH, per iteration -----------------------
+# GitHub auto-retargets a stacked PR's base the moment its parent merges, so a
+# PR_BASE cached at Step 1.4 is stale for the rest of the run: iteration N+1
+# would probe a ref `git fetch --prune` may have just deleted, and the PR would
+# gate-fail AFTER its dependency landed. Step 3.0 already re-fetches per
+# iteration for the twin "the tip moved" reason; the base re-read belongs there.
+if grep -qE 're-read|refresh(ed)?|re-project' <<<"$(awk '/^### Step 3\.0/,/^### Step 3\.1/' "$SKILL_FILE")"; then
+  pass "M99.1 — Step 3.0 re-reads the PR's base per iteration (never a value cached from Phase 1)"
+else
+  fail "M99.1 — Step 3.0 MUST re-read baseRefName per iteration; GitHub auto-retargets a stacked PR's base when its parent merges (#437)"
+fi
+assert_grep "$SKILL_FILE" 'Do NOT cache .{0,4}PR_BASE' \
+  "M99.2 — the no-caching rule for PR_BASE is stated explicitly"
+
+# --- The fail-closed gate --------------------------------------------------
+# A missing origin/<base> makes `git merge-tree` exit 1 — the SAME code as a
+# genuine conflict (merge-discovery-resilience B26f). `git rev-parse --verify`
+# is the only honest discriminator, and it must run BEFORE the probe.
+assert_grep "$SKILL_FILE" 'git rev-parse --verify' \
+  "M99.3 — the base ref is proven present before the probe (a missing ref and a real conflict share exit 1)"
+assert_grep "$SKILL_FILE" 'resolve_pr_base' \
+  "M99.4 — Phase 3 resolves the per-PR base through the lib helper (never an improvised inline read)"
+assert_grep "$SKILL_FILE" 'BRANCH_NAME_REGEX' \
+  "M99.5 — baseRefName is regex-gated: it is GitHub-supplied text reaching git argv, same surface Step 1.2 already gates"
+# The load-bearing negative for the whole issue.
+assert_grep "$SKILL_FILE" 'pr_base_unresolvable' \
+  "M99.6 — an unresolvable per-PR base is a typed gate_fail reason"
+if grep -qiE 'never (silently )?fall back to [^.]{0,40}integration branch|never fall back to .{0,4}integration_branch' "$SKILL_FILE"; then
+  pass "M99.7 — the skill states that an unresolvable base must NEVER fall back to integration_branch"
+else
+  fail "M99.7 — the skill MUST forbid falling back to integration_branch on an unresolvable base; that silent substitution IS #437"
+fi
+
+# --- The four write sites --------------------------------------------------
+# M90.4/.6 lock the probe and the worktree. This is the third: the
+# conflict-resolver's `integration_branch` input is what the agent runs
+# `git show <integration_branch>:<file_path>` against, so a wrong value there
+# corrupts the "theirs" side of every hunk — a semantic failure, not a wasted
+# dispatch. It must be the SAME ref the scratch worktree was based on.
+if grep -qF 'integration_branch=origin/<PR_BASE>' <<<"$M99_PHASE3"; then
+  pass "M99.8 — the conflict-resolver receives the PR's own base (origin/<PR_BASE>), the same ref its worktree is based on"
+else
+  fail "M99.8 — Step 3.3.iii MUST pass integration_branch=origin/<PR_BASE> to conflict-resolver (a wrong base corrupts the 'theirs' side of every hunk; #437)"
+fi
+# `base_sha=<merge-base>` was unqualified — a merge-base of WHAT against what.
+if grep -qE 'base_sha=<merge-base of origin/<PR_BASE>' <<<"$M99_PHASE3"; then
+  pass "M99.9 — base_sha names both of its operands (merge-base of origin/<PR_BASE> and the head)"
+else
+  fail "M99.9 — Step 3.3.iii's base_sha MUST name its operands: <merge-base of origin/<PR_BASE> and <headRefOid>> (#437)"
+fi
+assert_grep "$AGENT_FILE" 'baseRefName' \
+  "M99.10 — conflict-resolver.md defines its target ref as the PR's OWN base, not the repo-global branch"
+
+# --- The non-stacked path is untouched -------------------------------------
+# "Behaves exactly as before" is the other half of the contract: a PR based on
+# the integration branch must produce the SAME argv it did pre-#437. The
+# per-iteration fetch keeps its original two-refspec form and only adds a
+# second, conditional fetch when the base actually differs.
+assert_grep "$SKILL_FILE" 'git fetch origin "<integration_branch>" "<headRefName>"' \
+  "M99.11 — the per-iteration fetch argv is unchanged on the non-stacked path (M90.2's literal survives)"
+if grep -qE 'differs from .{0,4}<integration_branch>|when .{0,4}<PR_BASE>. differs' <<<"$M99_PHASE3"; then
+  pass "M99.12 — the extra base fetch is conditional on the base actually differing (no argv change when it does not)"
+else
+  fail "M99.12 — Step 3.0 MUST make the per-PR base fetch conditional so the non-stacked argv is byte-identical (#437)"
+fi
+
+# --- Half 2: discovery + ordering ------------------------------------------
+assert_grep "$SKILL_FILE" 'transitive' \
+  "M99.13 — Step 1.2.5 documents the client-side transitive stack closure that replaced the --base wire filter"
+# THE PRECISE CLAIM (do not overclaim). Step 2.1 has two edge sources. The
+# `Depends on #N` body parse WORKS today. The base-ref edge does not: in
+# multi-discover mode the --base filter guaranteed every survivor shared one
+# base, so edge (a) needed a PR from main into main; and in single-PR mode
+# Step 2.1 is skipped outright. So the BASE-REF EDGE was unreachable — the
+# ordering RULE was never dead code. Half 2 makes the edge reachable, and the
+# topo-sort itself needs no change because it is source-agnostic.
+M99_ORDER=$(awk '/^### Step 2\.1/,/^### Step 2\.2/' "$SKILL_FILE")
+if grep -qiE 'base-ref edge was unreachable' <<<"$M99_ORDER"; then
+  pass "M99.14 — Step 2.1 records that the base-ref edge was unreachable before #437 (and why)"
+else
+  fail "M99.14 — Step 2.1 MUST record that the base-ref edge was previously unreachable (the --base filter + the single-PR skip), so a future reader does not delete it as dead code (#437)"
+fi
+if grep -qF 'topo-sort the resulting graph' <<<"$M99_ORDER"; then
+  pass "M99.15 — the topo-sort is unchanged: it consumes edges without caring which source produced them"
+else
+  fail "M99.15 — Step 2.1 must keep the source-agnostic topo-sort (#437 adds edges, it does not change the sort)"
+fi
+# Ordering assertion (the rule had NO test lock at all before #437).
+if grep -qE 'PR-B base ref equal to PR-A head ref .{0,3} PR-A must land before PR-B' <<<"$M99_ORDER"; then
+  pass "M99.16 — the hard-dependency edge orders the parent PR before the stacked one"
+else
+  fail "M99.16 — Step 2.1 must keep the 'PR-B base == PR-A head -> PR-A lands first' edge (now reachable; #437)"
+fi
+
+# --- The adjacent per-PR-base-sensitive inputs -----------------------------
+# Step 1.5's overlap matrix and Step 2.2's strategy inputs are diffed against
+# the base too. For a stacked PR-B, `<integration_branch>..<head>` includes
+# PR-A's commits: the overlap matrix reports a phantom A-B overlap (they always
+# "overlap", by construction) and merge-strategy-decider picks squash-vs-rebase
+# on an inflated commit count computed over someone else's diff. Advisory
+# inputs, so they cannot corrupt a merge — but wrong for exactly the PRs this
+# issue exists to support.
+#
+# Both ranges are `origin/`-QUALIFIED, and that is not cosmetic. `git fetch`
+# writes refs/remotes/ only, and a stacked PR's base is another PR's branch,
+# which has NO local ref in the merge runner's clone — so a bare
+# `<PR_BASE>..<head>` does not give a wrong answer, it exits 128 with
+# `fatal: ambiguous argument`, for exactly the PRs #437 exists to admit.
+# Verified against real git in a throwaway origin+clone fixture:
+#   git rev-list --count fix/a..<sha>        -> fatal: ambiguous argument, rc=128
+#   git rev-list --count origin/fix/a..<sha> -> 1, rc=0
+# Step 1.5's empty output would then read as "no file overlap" (scheduling a
+# stacked PR for PARALLEL conflict-resolve — the Q1 degradation the matrix
+# exists to prevent), and Step 2.2 would feed merge-strategy-decider an empty
+# commit_count. Pre-#437 these sites used <integration_branch>, which always
+# resolves locally, so the bare per-PR form is a NEW failure mode, not a
+# pre-existing one.
+assert_grep "$SKILL_FILE" 'git diff --name-only origin/<PR_BASE>\.\.<pr-N-head>' \
+  "M99.17 — Step 1.5's overlap matrix diffs against each PR's own base, origin/-qualified (bare = rc 128 on a stacked PR)"
+assert_grep "$SKILL_FILE" 'git rev-list --count origin/<PR_BASE>\.\.<head_ref_oid>' \
+  "M99.18 — Step 2.2's commit_count counts each PR's own commits, not its parent PR's, origin/-qualified"
+assert_grep "$SKILL_FILE" 'git log origin/<PR_BASE>\.\.<head_ref_oid>' \
+  "M99.21 — Step 2.2's conventional_commit_ratio / wip_marker_present log range is origin/-qualified too"
+if grep -qF 'the merge-base is taken against `origin/<PR_BASE>`' "$SKILL_FILE"; then
+  pass "M99.22 — Step 2.2's divergence_commits merge-base is taken against the origin/-qualified per-PR base"
+else
+  fail "M99.22 — Step 2.2's divergence_commits merge-base MUST name origin/<PR_BASE> (a bare ref is unresolvable for a stacked PR; #437)"
+fi
+# The bare form must be gone from BOTH sites — a negative, because a leftover
+# bare range is exactly what green CI hid.
+if grep -qE 'git (diff --name-only|rev-list --count|log) <PR_BASE>\.\.' "$SKILL_FILE"; then
+  fail "M99.23 — a BARE <PR_BASE>.. range remains: it exits 128 in the merge runner's clone for a stacked PR, whose base has no local ref (#303 invariant applies to Phase 1/2 too)"
+else
+  pass "M99.23 — no bare <PR_BASE>.. range remains anywhere (the origin/-qualified invariant is not Phase-3-only)"
+fi
+# And the Phase-1/2 binding must say where it comes from, and what an empty
+# result means. `<PR_BASE>` is first USED at Step 1.5; Step 3.0(a)'s
+# "re-read per iteration, never a Phase-1 value" rule governs Phase 3 only.
+if grep -qF 'Where the Phase-1 base binding comes from' "$SKILL_FILE"; then
+  pass "M99.24 — the Phase-1/2 binding source for <PR_BASE> is stated (Step 1.4's pr_view_projection), not left implicit"
+else
+  fail "M99.24 — Steps 1.5/2.2 USE <PR_BASE> before Step 3.0 DEFINES it; the Phase-1 binding must be stated and reconciled with Step 3.0(a)'s re-read rule (#437)"
+fi
+assert_grep "$SKILL_FILE" 'base_range_failed' \
+  "M99.25 — a failed base range is typed and degrades SAFELY; empty stdout must never be read as 'no overlap' or as commit_count 0"
+
+# --- The orphaned-stack-child guard (Half 2's own hazard) -------------------
+# Half 2 admits stacked candidates; Step 1.4 then removes some of them. A green
+# child of a REMOVED parent still reaches Step 3.2, and `gh pr merge <B>` merges
+# into GitHub's RECORDED base — the parent's branch — emitting merge_executed,
+# the event /goal's uberdev_goal_read_merge_result selects. The run reports
+# converged, B's `Closes #N` closes the issue, and main never receives the code.
+assert_grep "$SKILL_FILE" 'prune_orphaned_candidates' \
+  "M99.26 — Step 1.4.6 prunes candidates orphaned by the Phase-1 gate through the shared lib helper"
+if grep -qF 'Parent-landed guard' "$SKILL_FILE"; then
+  pass "M99.27 — Step 3.2 re-checks per iteration that the parent actually LANDED before gh pr merge (a parent can also fail during Phase 3)"
+else
+  fail "M99.27 — Step 3.2 MUST gate gh pr merge on the parent having landed this run; gh merges into GitHub's recorded base, not the ref /merge probed (#437)"
+fi
+
+# --- Enum registration completeness ----------------------------------------
+# The new reason is an INFRASTRUCTURE failure (sibling of pr_view_unreachable),
+# not a trust-resolution one, so it must appear in every exhaustive non-trigger
+# enumeration. Re-running /review-pr cannot conjure a missing base ref, so it
+# must never join the auto-review trigger whitelist.
+for M99_REASON in pr_base_unresolvable pr_base_parent_skipped; do
+  for M99_SITE in "$SKILL_FILE" "$CMD_FILE"; do
+    M99_HITS=$(grep -c "$M99_REASON" "$M99_SITE" || true)
+    if [ "${M99_HITS:-0}" -ge 1 ]; then
+      pass "M99.19 — $(basename "$M99_SITE") registers $M99_REASON (count=$M99_HITS)"
+    else
+      fail "M99.19 — $(basename "$M99_SITE") MUST register $M99_REASON in its gate-fail enumerations (#437)"
+    fi
+  done
+done
+M99_TRIGGER_LINE=$(grep -F 'reason ∈ {trust_trail_label_missing, trust_trail_trailer_missing}' "$SKILL_FILE" || true)
+for M99_REASON in pr_base_unresolvable pr_base_parent_skipped; do
+  if grep -qF "$M99_REASON" <<<"$M99_TRIGGER_LINE"; then
+    pass "M99.20 — $M99_REASON is listed among the explicit auto-review NON-triggers"
+  else
+    fail "M99.20 — Step 1.4.5's exhaustive non-trigger enumeration MUST list $M99_REASON (#437)"
+  fi
+done
 
 echo
 echo "== Summary =="

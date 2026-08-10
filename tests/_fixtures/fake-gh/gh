@@ -12,6 +12,13 @@
 #                        simulates a non-empty bare-discovery result. stdout=2.
 #   success-multi      : emits a JSON array with two non-draft PR objects
 #                        carrying the fields downstream code reads.
+#   success-stacked    : #437 — a 3-deep STACK (feat/a -> feat/b -> feat/c)
+#                        rooted on main, plus one PR based on an unrelated
+#                        branch that no candidate heads. Emitted UNFILTERED
+#                        regardless of argv, so a discover_multi that still
+#                        relied on a server-side `--base` filter would keep
+#                        the unrelated PR and the client-side transitive
+#                        closure has something real to prove.
 #   success-pr-view    : emits a JSON object with all 15 fields
 #                        (state, isDraft, reviewDecision, ...).
 #   fail-net           : simulates a network-unreachable failure. exit 1,
@@ -94,6 +101,70 @@ case "$mode" in
     "state": "OPEN",
     "author": {"login": "bob"},
     "createdAt": "2026-05-02T00:00:00Z"
+  }
+]
+JSON
+    exit 0
+    ;;
+
+  success-stacked)
+    # #437: PR 101 sits on the integration branch; 102 is stacked on 101's
+    # head; 103 is stacked on 102's head (3-deep). 109 is based on a branch
+    # that is nobody's head and must NOT be reachable from the root. 110 has
+    # a null baseRefName (defensive: GitHub can omit it on a deleted base).
+    # Deliberately emitted out of stack order so the closure cannot be an
+    # accident of input ordering.
+    cat <<'JSON'
+[
+  {
+    "number": 101,
+    "headRefName": "feat/branch-a",
+    "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseRefName": "main",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "alice"},
+    "createdAt": "2026-05-01T00:00:00Z"
+  },
+  {
+    "number": 103,
+    "headRefName": "feat/branch-c",
+    "headRefOid": "cccccccccccccccccccccccccccccccccccccccc",
+    "baseRefName": "feat/branch-b",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "carol"},
+    "createdAt": "2026-05-03T00:00:00Z"
+  },
+  {
+    "number": 102,
+    "headRefName": "feat/branch-b",
+    "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "baseRefName": "feat/branch-a",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "bob"},
+    "createdAt": "2026-05-02T00:00:00Z"
+  },
+  {
+    "number": 109,
+    "headRefName": "feat/branch-z",
+    "headRefOid": "dddddddddddddddddddddddddddddddddddddddd",
+    "baseRefName": "release/2.0",
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "dan"},
+    "createdAt": "2026-05-04T00:00:00Z"
+  },
+  {
+    "number": 110,
+    "headRefName": "feat/branch-y",
+    "headRefOid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "baseRefName": null,
+    "isDraft": false,
+    "state": "OPEN",
+    "author": {"login": "erin"},
+    "createdAt": "2026-05-05T00:00:00Z"
   }
 ]
 JSON
@@ -244,7 +315,7 @@ JSON
 
   *)
     printf 'fake-gh: unknown FAKE_GH_MODE=%s\n' "${mode}" >&2
-    printf 'fake-gh: known modes: success-bare, success-multi, success-pr-view, fail-net, fail-malformed, spinner-leak, fail-pr-view, ci-checks-no-checks, ci-checks-pending, ci-checks-green, ci-checks-red, ci-checks-mixed, gh-unreachable, ci-rate-limit-low\n' >&2
+    printf 'fake-gh: known modes: success-bare, success-multi, success-stacked, success-pr-view, fail-net, fail-malformed, spinner-leak, fail-pr-view, ci-checks-no-checks, ci-checks-pending, ci-checks-green, ci-checks-red, ci-checks-mixed, gh-unreachable, ci-rate-limit-low\n' >&2
     exit 99
     ;;
 esac

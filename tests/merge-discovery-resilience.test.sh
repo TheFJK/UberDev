@@ -245,7 +245,10 @@ echo
 echo "== A2: lib/discover.sh defines all four functions =="
 # Match either `funcname() {` (with optional whitespace) or `function funcname`.
 # We accept both POSIX-style and bash `function` keyword styles.
-for fn in discover_bare_fast_path discover_multi pr_view_projection emit_gate_fail; do
+# `resolve_pr_base` joined the list in #437: /merge must resolve each PR's OWN
+# base ref, and the resolution has to fail closed rather than silently fall
+# back to the repo-global integration branch.
+for fn in discover_bare_fast_path discover_multi pr_view_projection emit_gate_fail resolve_pr_base; do
   assert_grep "$LIB" \
     "^${fn}[[:space:]]*\([[:space:]]*\)[[:space:]]*\{|^function[[:space:]]+${fn}([[:space:]]|\(|\{|$)" \
     "A2: function ${fn} defined"
@@ -468,6 +471,69 @@ assert_grep "$SKILL" 'discovery_gh_failed' \
   "A9a: SKILL.md mentions new audit event 'discovery_gh_failed'"
 assert_grep "$SKILL" 'pr_view_unreachable' \
   "A9b: SKILL.md mentions new gate_fail reason 'pr_view_unreachable'"
+
+echo
+echo "== A15: discovery is stack-aware — the --base wire filter is gone (#437) =="
+# THE BUG. `gh pr list --base "$integration_branch"` is an EXACT server-side
+# match, so a PR stacked on another PR's head returns ZERO candidates and
+# /merge exits 0 reporting "nothing to merge" — the false-convergence signal
+# /goal consumes. The fix drops --base from the wire query and re-applies the
+# integration branch client-side as the ROOT of a transitive reachability set
+# (baseRefName == root, OR baseRefName == the headRefName of another
+# candidate, applied until fixpoint).
+assert_no_grep "$LIB" '^[[:space:]]*--base "\$integration_branch"' \
+  "A15a: discover_multi's gh query no longer carries --base (the exact-match filter that hid stacked PRs)"
+assert_grep "$LIB" '_uberdev_discover_stack_filter' \
+  "A15b: lib/discover.sh defines/uses the client-side stack filter"
+# The filter must be transitive, not one-hop: a fixpoint/bounded-iteration
+# construct is the anchor a one-hop `select(.baseRefName == $root)` cannot fake.
+assert_grep "$LIB" 'reduce range\(0; \(\$prs\|length\)\)' \
+  "A15c: the closure iterates to a fixpoint (bounded by candidate count), so a 3-deep stack roots"
+# The root still comes from integration_branch — Half 2 changes its ROLE
+# (exact filter -> root of the reachability set), it does not retire it.
+assert_grep "$LIB" '\-\-arg root "\$integration_branch"' \
+  "A15d: integration_branch is still load-bearing, now as the stack ROOT"
+
+echo
+echo "== A16: Phase 3 writes target the PR's OWN base, never the global branch (#437) =="
+# Every Phase-3 write site used origin/<integration_branch> for a PR whose base
+# may be another branch. Both directions were reproduced: a stacked PR probes
+# CONFLICT against main while its real base merges clean (phantom conflict ->
+# conflict-resolvers dispatched at nothing), and a genuine base-vs-head conflict
+# probes CLEAN against main (invisible conflict -> gh pr merge fired at a PR
+# that does not merge). B26 executes both.
+A16_PHASE3="$(awk '/^## Phase 3/,/^## Phase 4/' "$SKILL")"
+for a16_probe in \
+  'git merge-tree --write-tree origin/<PR_BASE> <headRefOid>' \
+  'git worktree add .claude/worktrees/merge-<run-id> origin/<PR_BASE>' \
+  'resolve_pr_base'
+do
+  if grep -qF -- "$a16_probe" <<<"$A16_PHASE3"; then
+    echo "  PASS  A16: Phase 3 cites '$a16_probe'"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  A16: Phase 3 must cite '$a16_probe' (#437 per-PR base awareness)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+# The #303 invariant must survive the retarget: still `origin/`-qualified,
+# never the bare local ref — for EITHER placeholder.
+for a16_bare in \
+  'merge-tree --write-tree <PR_BASE>' \
+  'merge-tree --write-tree <integration_branch>' \
+  'git worktree add .claude/worktrees/merge-<run-id> <PR_BASE>' \
+  'git worktree add .claude/worktrees/merge-<run-id> <integration_branch>'
+do
+  if grep -qF -- "$a16_bare" <<<"$A16_PHASE3"; then
+    echo "  FAIL  A16.bare: Phase 3 must NOT use the bare local ref '$a16_bare' (#303 invariant survives #437)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  A16.bare: no Phase-3 '$a16_bare' (bare local ref) remains"
+    PASS=$((PASS + 1))
+  fi
+done
+assert_grep "$SKILL" 'pr_base_unresolvable' \
+  "A16.reason: SKILL.md registers the typed gate_fail reason 'pr_base_unresolvable'"
 
 echo
 echo "== A10: solve-pipeline canary preserved (21ad417 fix intact) =="
@@ -2239,6 +2305,390 @@ EOF_B23_MKTEMP
 
   rm -rf "$B23_SANDBOX"
 fi
+
+echo
+echo "== B24: discover_multi finds stacked PRs and roots them transitively (#437) =="
+# Half 2. `--base` is an EXACT server-side match, so a PR whose base is another
+# PR's head returned 0 candidates and /merge exited 0 with "nothing to merge".
+# The fake-gh `success-stacked` mode ignores argv and returns the FULL set, so
+# this row measures the CLIENT-SIDE filter and nothing else:
+#   101 base=main            -> in  (root)
+#   102 base=feat/branch-a   -> in  (1 hop:  head of 101)
+#   103 base=feat/branch-b   -> in  (2 hops: head of 102)   <-- transitivity
+#   109 base=release/2.0     -> OUT (nobody's head)
+#   110 base=null            -> OUT (defensive: null base is not the root)
+B24_AUDIT="$(mktemp)"; rm -f "$B24_AUDIT"
+B24_CALLLOG="$(mktemp)"; : > "$B24_CALLLOG"
+_run_lib_call "success-stacked" \
+  'discover_multi main' \
+  "export UBERDEV_AUDIT_LOG_PATH='$B24_AUDIT'; export FAKE_GH_CALL_LOG='$B24_CALLLOG'"
+assert_eq "$_LB_EXIT" "0" "B24a: exit 0 (discover_multi never aborts the run)"
+B24_NUMS="$(jq -c '[.[].number]' <<<"${_LB_STDOUT:-[]}" 2>/dev/null)"
+assert_eq "${B24_NUMS:-PARSE_FAILED}" "[101,103,102]" \
+  "B24b: the whole 3-deep stack survives, input order preserved, unrelated bases dropped"
+# Falsifiability floor: prove the fixture really did offer the two PRs that
+# must be excluded, so B24b is a filter result and not an empty-input pass.
+B24_RAW_COUNT="$(FAKE_GH_MODE=success-stacked "$FAKE_GH_DIR/gh" pr list | jq 'length' 2>/dev/null)"
+assert_eq "${B24_RAW_COUNT:-0}" "5" \
+  "B24c: the fixture offered 5 candidates (so B24b's 3 is a real exclusion, not an empty set)"
+# The wire query must no longer carry --base at all: a server-side exact match
+# is unfixable client-side because the stacked rows never arrive.
+if grep -q -e '--base' "$B24_CALLLOG" 2>/dev/null; then
+  echo "  FAIL  B24d: the gh wire query still carries --base (stacked PRs never reach the client-side filter)"
+  echo "        call log: $(cat "$B24_CALLLOG")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  B24d: the gh wire query carries no --base (recorded argv)"
+  PASS=$((PASS + 1))
+fi
+# Anti-vacuity for B24d: the stub must actually have been called and logged.
+if [ -s "$B24_CALLLOG" ]; then
+  echo "  PASS  B24e: the fake-gh call log is non-empty (B24d is a real argv assertion)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  B24e: the fake-gh call log is empty — B24d would pass vacuously"
+  FAIL=$((FAIL + 1))
+fi
+# B24d is a NEGATIVE argv assertion, and a negative alone cannot catch a MISSING
+# bound. Dropping --base moved the base filter off the wire, so gh's default
+# `--limit 30` (gh 2.83.1) stopped applying to the integration-branch subset and
+# started applying to EVERY open PR in the repo — eligible candidates truncated
+# away before the client-side filter ever sees them, i.e. the false-convergence
+# signal /goal consumes, reintroduced in a new form. The window must therefore be
+# explicit and wide.
+if grep -q -e '--limit' "$B24_CALLLOG" 2>/dev/null; then
+  echo "  PASS  B24i: the gh wire query carries an explicit --limit (recorded argv)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  B24i: the gh wire query has NO --limit — gh's default 30-row window now spans every base branch in the repo, silently truncating candidates (#437)"
+  echo "        call log: $(cat "$B24_CALLLOG")"
+  FAIL=$((FAIL + 1))
+fi
+# ...and wide enough to matter. A `--limit 30` would satisfy B24i while changing
+# nothing, so pin the literal the Constants table declares.
+if grep -q -e '--limit 200' "$B24_CALLLOG" 2>/dev/null; then
+  echo "  PASS  B24j: the wire window is DISCOVERY_WIRE_LIMIT=200 (matches lib/goal-state.sh's PR enumerations)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  B24j: the wire window must be 200, not gh's default 30 (#437 — the base filter now runs AFTER truncation)"
+  echo "        call log: $(cat "$B24_CALLLOG")"
+  FAIL=$((FAIL + 1))
+fi
+if [ -s "$B24_AUDIT" ]; then
+  echo "  FAIL  B24f: audit log unexpectedly non-empty on the happy stacked path: $(cat "$B24_AUDIT")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  B24f: no discovery_gh_failed event on the happy stacked path"
+  PASS=$((PASS + 1))
+fi
+# Non-stacked repos must be BIT-IDENTICAL to pre-#437: success-multi is two
+# PRs both based on main, and both must still come back.
+_run_lib_call "success-multi" 'discover_multi main'
+assert_eq "$(jq -c '[.[].number]' <<<"${_LB_STDOUT:-[]}" 2>/dev/null)" "[101,102]" \
+  "B24g: the non-stacked path is unchanged (both main-based PRs still returned)"
+# A root that no PR is based on yields an empty set, not the whole list.
+_run_lib_call "success-stacked" 'discover_multi trunk'
+assert_eq "$(jq -c '.' <<<"${_LB_STDOUT:-null}" 2>/dev/null)" "[]" \
+  "B24h: an unmatched root returns [] (the filter is a filter, not a pass-through)"
+rm -f "$B24_AUDIT" "$B24_CALLLOG"
+
+echo
+echo "== B25: resolve_pr_base fails CLOSED on every unresolvable base (#437) =="
+# Silently substituting integration_branch is precisely the bug, so the
+# contract is: stdout carries the resolved ref ONLY on success; every failure
+# arm emits gate_fail reason=pr_base_unresolvable and prints nothing.
+# `baseRefName` is GitHub-supplied text that reaches `git` argv, so it gets the
+# same BRANCH_NAME_REGEX gate SKILL.md Step 1.2 applies to the global branch.
+B25_REPO="$(mktemp -d)"
+(
+  cd "$B25_REPO" || exit 1
+  git init -q -b main .
+  git config user.email t@example.com
+  git config user.name Tester
+  printf 'l1\nl2\n' > f.txt
+  git add f.txt
+  git commit -q -m M0
+  git update-ref refs/remotes/origin/main main
+  git checkout -q -b feat/a
+  printf 'l1\na1\n' > f.txt
+  git commit -q -am A1
+  git update-ref refs/remotes/origin/feat/a feat/a
+) >/dev/null 2>&1
+
+# $1 = base-ref argument, $2 = audit-log path. Runs with cwd inside the git
+# fixture so the rev-parse guard has real refs to resolve against.
+_b25_run() {
+  local b25_out b25_err
+  b25_out="$(mktemp)"; b25_err="$(mktemp)"
+  : > "$2"
+  (
+    cd "$B25_REPO" || exit 127
+    UBERDEV_AUDIT_LOG_PATH="$2"
+    export UBERDEV_AUDIT_LOG_PATH
+    # shellcheck source=/dev/null
+    . "$LIB"
+    resolve_pr_base 42 "$1"
+  ) >"$b25_out" 2>"$b25_err"
+  _B25_RC=$?
+  _B25_OUT="$(cat "$b25_out")"
+  _B25_ERR="$(cat "$b25_err")"
+  rm -f "$b25_out" "$b25_err"
+}
+
+B25_AUDIT="$(mktemp)"
+
+_b25_run 'feat/a' "$B25_AUDIT"
+assert_eq "$_B25_RC" "0"              "B25a: a resolvable per-PR base exits 0"
+assert_eq "$_B25_OUT" "origin/feat/a" "B25b: stdout is the origin/-qualified remote-tracking ref (#303 invariant)"
+assert_eq "$([ -s "$B25_AUDIT" ] && echo nonempty || echo empty)" "empty" \
+  "B25c: no gate_fail on the happy path"
+
+# Four failure arms. Each must exit 1, print NOTHING, and type the failure.
+#   empty  -> baseRefName absent/empty from the projection
+#   null   -> GitHub's JSON null rendered by `jq -r`
+#   space  -> BRANCH_NAME_REGEX reject (argv-injection surface)
+#   nl     -> embedded newline (a line-oriented regex gate would let the
+#             second line through; this is the arm a naive `grep -qE` fails)
+#   ghost  -> refs/remotes/origin/<base> absent: `git merge-tree` against a
+#             missing ref exits 1, byte-indistinguishable from a real conflict
+B25_NL="$(printf 'feat/a\nevil')"
+for b25_case in "empty::" "null:null:" "space:feat/a evil:" "ghost:no/such/branch:"; do
+  b25_label="${b25_case%%:*}"
+  b25_rest="${b25_case#*:}"
+  b25_arg="${b25_rest%:*}"
+  _b25_run "$b25_arg" "$B25_AUDIT"
+  assert_eq "$_B25_RC" "1" "B25.$b25_label.rc: unresolvable base ('$b25_arg') exits 1"
+  assert_eq "$_B25_OUT" ""  "B25.$b25_label.stdout: prints nothing — NEVER falls back to integration_branch"
+  assert_grep "$B25_AUDIT" '"event":"gate_fail"' \
+    "B25.$b25_label.audit: emits a gate_fail audit row"
+  assert_grep "$B25_AUDIT" '"reason":"pr_base_unresolvable"' \
+    "B25.$b25_label.reason: the reason is the typed GATE_FAIL_REASON_ENUM member"
+done
+_b25_run "$B25_NL" "$B25_AUDIT"
+assert_eq "$_B25_RC" "1" "B25.newline.rc: an embedded newline in baseRefName is rejected"
+assert_eq "$_B25_OUT" ""  "B25.newline.stdout: prints nothing"
+# The load-bearing negative: no failure arm may leak the global branch.
+_b25_run 'no/such/branch' "$B25_AUDIT"
+case "$_B25_OUT" in
+  *main*) echo "  FAIL  B25.no-fallback: stdout leaked 'main' on an unresolvable base — that IS #437"
+          FAIL=$((FAIL + 1)) ;;
+  *)      echo "  PASS  B25.no-fallback: an unresolvable base never yields the integration branch"
+          PASS=$((PASS + 1)) ;;
+esac
+rm -f "$B25_AUDIT"
+rm -rf "$B25_REPO"
+
+echo
+echo "== B26: the per-PR base is what makes the probe TRUTHFUL (#437, both directions) =="
+# Executed against real git, not asserted. Both directions were reproduced on
+# the issue and are reproduced here from the ref resolve_pr_base returns.
+# Capability probe by EXECUTION (never `--help`, which pages): merge-tree
+# --write-tree landed in git 2.38 and is the primitive Step 3.1 mandates.
+B26_CAP="$(mktemp -d)"
+(
+  cd "$B26_CAP" || exit 1
+  git init -q -b main .
+  git config user.email t@example.com; git config user.name Tester
+  printf 'x\n' > f.txt; git add f.txt; git commit -q -m c1
+  git merge-tree --write-tree main main
+) >/dev/null 2>&1
+B26_CAPRC=$?
+rm -rf "$B26_CAP"
+if [ "$B26_CAPRC" -ne 0 ]; then
+  echo "  FAIL  B26.pre: git merge-tree --write-tree unavailable (rc=$B26_CAPRC) — the probe under test cannot be executed"
+  FAIL=$((FAIL + 1))
+else
+  # Direction 1 — PHANTOM CONFLICT. fix/b is stacked on fix/a; main advanced
+  # after fix/a was cut. Probing fix/b against main invents a conflict that
+  # does not exist on the merge /merge is actually performing.
+  B26_FX1="$(mktemp -d)"
+  (
+    cd "$B26_FX1" || exit 1
+    git init -q -b main .
+    git config user.email t@example.com; git config user.name Tester
+    printf 'l1\nl2\n' > f.txt; git add f.txt; git commit -q -m M0
+    git checkout -q -b fix/a; printf 'l1\na1\n' > f.txt; git commit -q -am A1
+    git checkout -q -b fix/b; printf 'l1\nb1\n' > f.txt; git commit -q -am B1
+    git checkout -q main;     printf 'l1\nm1\n' > f.txt; git commit -q -am M1
+    git update-ref refs/remotes/origin/main main
+    git update-ref refs/remotes/origin/fix/a fix/a
+  ) >/dev/null 2>&1
+  B26_BASE1="$( cd "$B26_FX1" && . "$LIB" && resolve_pr_base 102 'fix/a' )"
+  ( cd "$B26_FX1" && git merge-tree --write-tree origin/main fix/b ) >/dev/null 2>&1
+  B26_WRONG1=$?
+  ( cd "$B26_FX1" && git merge-tree --write-tree "$B26_BASE1" fix/b ) >/dev/null 2>&1
+  B26_RIGHT1=$?
+  assert_eq "$B26_BASE1" "origin/fix/a" "B26a: resolve_pr_base returns the stacked PR's own base"
+  assert_eq "$B26_WRONG1" "1" "B26b: probing against the GLOBAL branch reports a conflict (the phantom /merge invents today)"
+  assert_eq "$B26_RIGHT1" "0" "B26c: probing against the RESOLVED per-PR base is clean — no conflict-resolver fanout is warranted"
+  rm -rf "$B26_FX1"
+
+  # Direction 2 — INVISIBLE REAL CONFLICT. fix/b was cut from fix/a@A1 and
+  # fix/a then advanced divergently. main-vs-fix/b is clean, so /merge takes
+  # the clean path and fires `gh pr merge` at a PR that does not merge.
+  B26_FX2="$(mktemp -d)"
+  (
+    cd "$B26_FX2" || exit 1
+    git init -q -b main .
+    git config user.email t@example.com; git config user.name Tester
+    printf 'l1\nl2\n' > f.txt; git add f.txt; git commit -q -m M0
+    git checkout -q -b fix/a; printf 'l1\na1\n' > f.txt; git commit -q -am A1
+    git checkout -q -b fix/b; printf 'l1\nb1\n' > f.txt; git commit -q -am B1
+    git checkout -q fix/a;    printf 'l1\na2\n' > f.txt; git commit -q -am A2
+    git update-ref refs/remotes/origin/main main
+    git update-ref refs/remotes/origin/fix/a fix/a
+  ) >/dev/null 2>&1
+  B26_BASE2="$( cd "$B26_FX2" && . "$LIB" && resolve_pr_base 202 'fix/a' )"
+  ( cd "$B26_FX2" && git merge-tree --write-tree origin/main fix/b ) >/dev/null 2>&1
+  B26_WRONG2=$?
+  ( cd "$B26_FX2" && git merge-tree --write-tree "$B26_BASE2" fix/b ) >/dev/null 2>&1
+  B26_RIGHT2=$?
+  # Anti-vacuity for B26e: `git merge-tree --write-tree "" <head>` also exits 1,
+  # so without this row a resolve_pr_base that returned nothing would keep B26e
+  # green for the wrong reason.
+  assert_eq "$B26_BASE2" "origin/fix/a" "B26d.base: the resolved ref is the real base, not an empty string"
+  assert_eq "$B26_WRONG2" "0" "B26d: probing against the GLOBAL branch is clean — the real conflict is INVISIBLE"
+  assert_eq "$B26_RIGHT2" "1" "B26e: probing against the RESOLVED per-PR base DETECTS the real conflict"
+  rm -rf "$B26_FX2"
+
+  # The rc-collision that makes the fetch guard load-bearing: a base ref that
+  # was never fetched makes merge-tree exit 1 — the SAME code as a genuine
+  # conflict. `git rev-parse --verify` is the only honest discriminator, and
+  # resolve_pr_base runs it BEFORE the probe.
+  B26_FX3="$(mktemp -d)"
+  (
+    cd "$B26_FX3" || exit 1
+    git init -q -b main .
+    git config user.email t@example.com; git config user.name Tester
+    printf 'l1\n' > f.txt; git add f.txt; git commit -q -m M0
+    git update-ref refs/remotes/origin/main main
+  ) >/dev/null 2>&1
+  ( cd "$B26_FX3" && git merge-tree --write-tree origin/fix/a main ) >/dev/null 2>&1
+  assert_eq "$?" "1" "B26f: an unfetched base makes merge-tree exit 1 — indistinguishable from a real conflict"
+  ( cd "$B26_FX3" && . "$LIB" && UBERDEV_AUDIT_LOG_PATH=/dev/null resolve_pr_base 42 'fix/a' ) >/dev/null 2>&1
+  assert_eq "$?" "1" "B26g: resolve_pr_base gate-fails on the unfetched base instead of letting it read as a conflict"
+  rm -rf "$B26_FX3"
+fi
+
+echo
+echo "== B27: the #437 helpers run clean under zsh (the shell SKILL fences use) (#401 class) =="
+# Same reasoning as B23: a shape-grep is blind to `type -t`, $BASH_REMATCH and
+# friends. resolve_pr_base does regex validation and discover_multi now runs a
+# jq closure — both are exactly the shapes that historically differed.
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  FAIL  B27.pre: zsh not on PATH — the production-shell row must never SKIP"
+  FAIL=$((FAIL + 1))
+else
+  B27_REPO="$(mktemp -d)"
+  (
+    cd "$B27_REPO" || exit 1
+    git init -q -b main .
+    git config user.email t@example.com; git config user.name Tester
+    printf 'l1\n' > f.txt; git add f.txt; git commit -q -m M0
+    git update-ref refs/remotes/origin/main main
+  ) >/dev/null 2>&1
+  B27_ERR="$(mktemp)"
+  B27_OUT="$(
+    cd "$B27_REPO" && \
+    UBERDEV_AUDIT_LOG_PATH=/dev/null \
+    zsh -c ". '$LIB' && resolve_pr_base 42 main" 2>"$B27_ERR"
+  )"
+  B27_RC=$?
+  assert_eq "$B27_RC"  "0"           "B27a: resolve_pr_base exits 0 under zsh"
+  assert_eq "$B27_OUT" "origin/main" "B27b: resolve_pr_base returns the same ref under zsh"
+  assert_eq "$(cat "$B27_ERR")" ""   "B27c: resolve_pr_base is stderr-clean under zsh (no 'bad pattern'/'undefined signal')"
+  B27_STACK="$(
+    PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_MODE=success-stacked UBERDEV_AUDIT_LOG_PATH=/dev/null \
+    zsh -c ". '$LIB' && discover_multi main" 2>"$B27_ERR"
+  )"
+  assert_eq "$(jq -c '[.[].number]' <<<"${B27_STACK:-[]}" 2>/dev/null)" "[101,103,102]" \
+    "B27d: the stack closure produces the same set under zsh"
+  assert_eq "$(cat "$B27_ERR")" "" "B27e: discover_multi is stderr-clean under zsh on the stacked path"
+  # TWO dropped candidates, deliberately. zsh does not word-split an unquoted
+  # parameter expansion (SH_WORD_SPLIT is off), so a `for n in $dropped` over the
+  # multi-line jq output would iterate ONCE over the whole blob and emit a single
+  # gate_fail whose "PR number" is a newline-joined string. A one-element fixture
+  # passes under both shells and proves nothing — the row needs >=2 drops to see it.
+  B27_PRUNE_SET='[{"number":101,"headRefName":"feat/branch-a","baseRefName":"main"},{"number":102,"headRefName":"feat/branch-b","baseRefName":"feat/gone"},{"number":103,"headRefName":"feat/branch-c","baseRefName":"feat/also-gone"}]'
+  B27_PRUNE_AUDIT="$(mktemp)"; : > "$B27_PRUNE_AUDIT"
+  B27_PRUNE="$(
+    UBERDEV_AUDIT_LOG_PATH="$B27_PRUNE_AUDIT" \
+    zsh -c ". '$LIB' && prune_orphaned_candidates main '$B27_PRUNE_SET'" 2>"$B27_ERR"
+  )"
+  assert_eq "$(jq -c '[.[].number]' <<<"${B27_PRUNE:-[]}" 2>/dev/null)" "[101]" \
+    "B27f: prune_orphaned_candidates produces the same set under zsh"
+  assert_eq "$(grep -c '"reason":"pr_base_parent_skipped"' "$B27_PRUNE_AUDIT" || true)" "2" \
+    "B27g: BOTH drops are emitted as separate rows under zsh (a \`for n in \$dropped\` loop would emit ONE row with a newline-joined pr number)"
+  assert_eq "$(jq -sc '[.[].pr] | sort' "$B27_PRUNE_AUDIT" 2>/dev/null)" "[102,103]" \
+    "B27h: each row carries a real integer pr number under zsh (not a joined blob sanitised to 0)"
+  rm -f "$B27_PRUNE_AUDIT"
+  rm -f "$B27_ERR"
+  rm -rf "$B27_REPO"
+fi
+
+echo
+echo "== B28: a stacked child whose parent did NOT survive is pruned, not merged (#437) =="
+# Half 2 admits stacked candidates. Step 1.4 then REMOVES some of them, and
+# nothing used to drop their children. That state is silent and severe: PR-A
+# gate-fails on an ordinary reason (ci_red, trust_trail_missing), PR-B is
+# stacked on A's head and is green, so PR-B reaches Step 3.2 and
+# `gh pr merge <B>` merges it into GitHub's RECORDED base — fix/a, not the
+# integration branch. That emits merge_executed, the event /goal's
+# uberdev_goal_read_merge_result selects, so the run reports converged and B's
+# `Closes #N` closes the issue while main never receives the code. Before #437
+# every survivor shared one base and this was structurally impossible.
+#
+# Fixture: the SAME 3-deep stack as B24, minus PR 101 (the root) — i.e. the
+# state after 101 gate-fails at Phase 1.4. 102 and 103 are both green and both
+# unmergeable.
+B28_AUDIT="$(mktemp)"; : > "$B28_AUDIT"
+B28_ERRF="$(mktemp)"
+B28_ORPHANS='[{"number":102,"headRefName":"feat/branch-b","baseRefName":"feat/branch-a"},{"number":103,"headRefName":"feat/branch-c","baseRefName":"feat/branch-b"}]'
+B28_OUT="$(
+  UBERDEV_AUDIT_LOG_PATH="$B28_AUDIT" \
+  bash -c ". '$LIB' && prune_orphaned_candidates main '$B28_ORPHANS'" 2>"$B28_ERRF"
+)"
+assert_eq "$(jq -c '.' <<<"${B28_OUT:-null}" 2>/dev/null)" "[]" \
+  "B28a: both orphans are dropped — a green child of a skipped parent is NOT mergeable"
+# TRANSITIVITY: 103's parent is 102, which is itself an orphan. A one-hop
+# parent check would keep 103 and merge it into feat/branch-b.
+assert_eq "$(grep -c '"reason":"pr_base_parent_skipped"' "$B28_AUDIT" || true)" "2" \
+  "B28b: BOTH dropped candidates emit the typed gate_fail (the closure is transitive, not one-hop)"
+assert_grep "$B28_AUDIT" '"pr":103' \
+  "B28c: the 2-hop orphan is dropped too (dropping PR-B must drop whatever is stacked on PR-B)"
+if grep -q 'stacked on a PR that did not survive' "$B28_ERRF"; then
+  echo "  PASS  B28d: each drop leaves a stderr breadcrumb (never a silent drop)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  B28d: a dropped candidate MUST surface on stderr — silent drops are how false convergence hides"
+  echo "        stderr: $(cat "$B28_ERRF")"
+  FAIL=$((FAIL + 1))
+fi
+# The other half of the contract: survivors rooted on the integration branch
+# are untouched, so this is a filter and not a blanket refusal.
+B28_SET='[{"number":101,"headRefName":"feat/branch-a","baseRefName":"main"},{"number":109,"headRefName":"feat/branch-z","baseRefName":"release/2.0"}]'
+: > "$B28_AUDIT"
+B28_KEEP="$(
+  UBERDEV_AUDIT_LOG_PATH="$B28_AUDIT" \
+  bash -c ". '$LIB' && prune_orphaned_candidates main '$B28_SET'" 2>/dev/null
+)"
+assert_eq "$(jq -c '[.[].number]' <<<"${B28_KEEP:-[]}" 2>/dev/null)" "[101]" \
+  "B28e: an integration-rooted candidate survives; an unrelated-base one does not"
+# FAIL-OPEN on malformed input. Every arm of this function only REMOVES
+# candidates, so a jq failure that emitted '[]' would convert a transient tool
+# error into "nothing to merge" — the exact false-convergence signal the
+# function exists to prevent. Returning the input unchanged is the safe
+# direction; Step 3.2's per-iteration parent-landed guard still gates the merge.
+: > "$B28_AUDIT"
+B28_BAD="$(
+  UBERDEV_AUDIT_LOG_PATH="$B28_AUDIT" \
+  bash -c ". '$LIB' && prune_orphaned_candidates main 'not json'" 2>/dev/null
+)"
+assert_eq "$B28_BAD" "not json" \
+  "B28f: an unevaluable reachability check FAILS OPEN (returns the input) — never '[]', which would BE false convergence"
+assert_eq "$([ -s "$B28_AUDIT" ] && echo nonempty || echo empty)" "empty" \
+  "B28g: the fail-open path emits no gate_fail (it dropped nobody, so it must accuse nobody)"
+rm -f "$B28_AUDIT" "$B28_ERRF"
 
 echo
 echo "== Summary =="

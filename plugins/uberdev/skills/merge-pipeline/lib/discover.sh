@@ -198,14 +198,80 @@ discover_bare_fast_path() {
   return 0
 }
 
+# _uberdev_discover_stack_filter INTEGRATION_BRANCH PRS_JSON
+# Stdout: the subset of PRS_JSON reachable from INTEGRATION_BRANCH, in input
+#         order. Empty stdout on any jq failure (the caller treats that as
+#         jq_failed and falls back to '[]').
+#
+# WHY THIS IS CLIENT-SIDE (#437). discover_multi used to filter on the wire with
+# `gh pr list --base "$integration_branch"`, an EXACT server-side match. A PR
+# stacked on another PR's head therefore came back in ZERO candidates, /merge
+# exited 0 reporting "nothing to merge", and that is precisely the
+# false-convergence signal /goal consumes. A server-side exact match cannot be
+# repaired downstream because the stacked rows never arrive — so the filter has
+# to move in-process. `integration_branch` is NOT retired by this: its role
+# changes from "exact filter" to "root of the reachability set".
+#
+# The closure is TRANSITIVE, not one-hop: a candidate is in scope when its
+# baseRefName is the root OR the headRefName of another in-scope candidate,
+# applied until fixpoint. One hop would root a 2-deep stack and silently strand
+# the third PR. The reduce is bounded by the candidate count, which is a strict
+# upper bound on the depth of any chain drawn from that same set, so the
+# iteration terminates even on a malformed graph that contains a cycle.
+#
+# A null baseRefName (GitHub can omit it when the base branch was deleted) is
+# never reachable — it is not the root and it is not any candidate's head.
+_uberdev_discover_stack_filter() {
+  local integration_branch="$1"
+  local prs_json="$2"
+  jq -c --arg root "$integration_branch" '
+    . as $prs
+    | reduce range(0; ($prs|length)) as $_ ([$root];
+        . as $roots
+        | . + [ $prs[]
+                | select(.baseRefName != null and (.baseRefName as $b | $roots | index($b)) != null)
+                | .headRefName ]
+        | map(select(. != null))
+        | unique)
+    | . as $reach
+    | [ $prs[] | select(.baseRefName != null and (.baseRefName as $b | $reach | index($b)) != null) ]
+  ' <<<"$prs_json" 2>/dev/null
+}
+
+# DISCOVERY_WIRE_LIMIT — the `gh pr list` fetch window for discover_multi.
+#
+# WHY THIS IS EXPLICIT AND WHY IT IS NOT 30 (#437). `gh pr list` defaults to
+# `--limit 30` (verified on gh 2.83.1). While the base filter was ON THE WIRE,
+# that 30-row window was spent entirely on PRs already narrowed to the
+# integration branch. Moving the filter client-side re-points the SAME window at
+# EVERY open PR in the repo — release branches, long-lived integration branches,
+# everything — and the base filter then runs on whatever survived truncation. In
+# a repo with more than 30 open PRs that silently drops eligible candidates
+# before the filter ever sees them, and /merge reports a short or empty set:
+# the exact false-convergence signal /goal consumes that #437 exists to kill.
+# Widening the query without widening the window converts a server-side bound
+# into a client-side one. 200 matches the repo's existing precedent for
+# enumerating PRs (lib/goal-state.sh `--limit 200`).
+UBERDEV_DISCOVERY_WIRE_LIMIT="${UBERDEV_DISCOVERY_WIRE_LIMIT:-200}"
+# Integer-validate the override: this value reaches `gh` argv AND a `[ -ge ]`
+# arithmetic test, where a non-numeric would raise a shell error rather than a
+# clean fallback. Anything that is not a positive integer resolves to the
+# default rather than narrowing the window silently.
+case "$UBERDEV_DISCOVERY_WIRE_LIMIT" in
+  ''|*[!0-9]*|0) UBERDEV_DISCOVERY_WIRE_LIMIT=200 ;;
+esac
+
 # discover_multi INTEGRATION_BRANCH
 # Stdout: JSON array of candidate PRs (or '[]' on failure — Step 1.7's
 #         clean-exit-0 contract still applies).
 # Exit:   0 always (gh-or-jq failure → '[]' + audit event).
-# Stderr: warning on failure.
+# Stderr: warning on failure; a saturation breadcrumb when the wire window fills.
 # Audit:  discovery_gh_failed with step="1.2.5" on failure.
 # Implementation: gh's in-process --jq filter does the isDraft==false
-# belt-and-suspenders filter; no external jq pipe.
+# belt-and-suspenders filter; no external jq pipe. The base-branch filter is
+# then applied in process by _uberdev_discover_stack_filter (#437) — see that
+# function for why it cannot stay on the wire, and DISCOVERY_WIRE_LIMIT for why
+# the explicit --limit is load-bearing once the filter moves off the wire.
 discover_multi() {
   local integration_branch="$1"
   local gh_err
@@ -216,8 +282,8 @@ discover_multi() {
 
   local result
   result="$(gh pr list \
-    --base "$integration_branch" \
     --state open \
+    --limit "$UBERDEV_DISCOVERY_WIRE_LIMIT" \
     --search 'draft:false' \
     --json number,title,headRefOid,headRefName,baseRefName,isDraft,createdAt,reviewDecision,labels,body,author,headRepositoryOwner \
     --jq '[.[] | select(.isDraft==false)]' \
@@ -232,8 +298,34 @@ discover_multi() {
     return 0
   fi
 
+  # Saturation breadcrumb. A returned row count equal to the window means the
+  # window is the binding constraint, so the candidate set may be truncated and
+  # a missing PR is NOT evidence that it does not exist. Fail-soft: a jq failure
+  # here must not lose the result, so it is read into its own variable and any
+  # non-numeric value simply skips the check.
+  local wire_rows
+  wire_rows="$(jq 'length' <<<"$result" 2>/dev/null)"
+  case "$wire_rows" in
+    ''|*[!0-9]*) : ;;
+    *)
+      if [ "$wire_rows" -ge "$UBERDEV_DISCOVERY_WIRE_LIMIT" ]; then
+        printf 'warning: multi-discover filled its --limit %s wire window (%s rows); the candidate set may be truncated. Raise UBERDEV_DISCOVERY_WIRE_LIMIT if PRs are missing.\n' \
+          "$UBERDEV_DISCOVERY_WIRE_LIMIT" "$wire_rows" >&2
+      fi
+      ;;
+  esac
+
+  # Apply the base filter in process (#437). Runs on bytes gh already produced
+  # through its own in-process --jq, so this is a herestring read of a clean
+  # string, not a pipe off gh's stdout — the R1 FD-pollution surface is not
+  # reopened. A legitimately empty result is the two-character string '[]',
+  # which is NOT empty, so the emptiness check below still means "something
+  # went wrong" and never "no candidates".
+  result="$(_uberdev_discover_stack_filter "$integration_branch" "$result")"
+
   # Empty stdout on a 0-exit gh is unexpected (jq identity on empty would
-  # have errored); treat as jq_failed and fall back to '[]'.
+  # have errored); a stack-filter failure lands here too (jq exits non-zero
+  # and prints nothing). Treat both as jq_failed and fall back to '[]'.
   if [ -z "$result" ]; then
     _uberdev_discover_warn "multi-discover returned empty stdout" "$gh_exit" "$gh_err"
     _uberdev_discover_emit_audit "jq_failed" "1.2.5" "$gh_exit" "$gh_err"
@@ -1073,10 +1165,11 @@ emit_gate_fail() {
   # Bare-numeric pr_number in JSON; sanitise non-integer input to 0 so the
   # emitted line stays valid JSON regardless of caller bugs.
   case "$pr_number" in ''|*[!0-9]*) pr_number=0 ;; esac
-  # JSON-escape reason. Today's only caller passes the static enum
-  # GATE_FAIL_REASON_ENUM literal "pr_view_unreachable" — escape is a no-op
-  # there. Defense-in-depth so the function contract no longer relies on
-  # caller discipline (mirrors _uberdev_discover_emit_audit).
+  # JSON-escape reason. Every caller today passes a static GATE_FAIL_REASON_ENUM
+  # literal ("pr_view_unreachable", "pr_base_unresolvable",
+  # "pr_base_parent_skipped") — escape is a no-op there. Defense-in-depth so the
+  # function contract no longer relies on caller discipline (mirrors
+  # _uberdev_discover_emit_audit).
   local reason_escaped
   reason_escaped="$(_uberdev_discover_json_escape_str "$reason")"
   local audit_path
@@ -1090,4 +1183,164 @@ emit_gate_fail() {
     "$ts" "$pr_number" "$reason_escaped" \
     >> "$audit_path" 2>/dev/null || true
   printf 'gate_fail: PR #%s reason=%s\n' "$pr_number" "$reason" >&2
+}
+
+# _uberdev_discover_base_fail PR_NUMBER DETAIL
+# One stderr breadcrumb carrying the arm that failed, plus the typed
+# gate_fail audit row. The reason is deliberately ONE enum member for all
+# three arms — the audit row's stderr breadcrumb carries the detail, so the
+# enum does not grow a member per failure mode.
+_uberdev_discover_base_fail() {
+  local pr_number="$1"
+  local detail="$2"
+  printf 'warning: PR #%s base unresolvable: %s\n' "$pr_number" "$detail" >&2
+  emit_gate_fail "$pr_number" "pr_base_unresolvable"
+}
+
+# resolve_pr_base PR_NUMBER BASE_REF_NAME
+# Resolve the ref a SINGLE PR is actually being merged into (#437).
+#
+# Stdout: the `origin/`-qualified remote-tracking ref, on success only.
+# Exit:   0 on success; 1 when the PR's own base is unresolvable.
+# Stderr: one warning naming the failing arm.
+# Audit:  gate_fail with reason="pr_base_unresolvable" on every failure arm.
+#
+# WHY THIS IS NOT `$integration_branch`. /merge fetched every PR's `baseRefName`
+# in five places and read it in ZERO: one repo-global integration branch drove
+# the probe, the scratch worktree, the conflict-resolver inputs and the
+# strategy-switch re-probe, for every PR in the run. For a PR stacked on another
+# PR's head that ref is wrong in BOTH directions — it invents conflicts that do
+# not exist on the merge actually being performed (so conflict-resolvers fan out
+# at nothing), and it hides conflicts that do (so `gh pr merge` fires at a PR
+# that does not merge).
+#
+# WHY `origin/` AND NEVER THE BARE LOCAL REF. `git fetch` updates `refs/remotes/`
+# only; it never moves a local branch ref. Probing the bare local ref defeats the
+# fetch entirely — that is the #303 stale-tip bug, and it is a separate, still
+# correct invariant that #437 must not regress. Returning the qualified ref here
+# rather than the bare name is what keeps callers from having to re-derive it.
+#
+# FAIL CLOSED. Every failure arm prints NOTHING to stdout and returns 1, so the
+# caller skips that PR. There is no fallback path: silently substituting
+# `integration_branch` is exactly the defect this function exists to fix.
+resolve_pr_base() {
+  local pr_number="$1"
+  local base_ref="${2:-}"
+  local nl
+  nl='
+'
+
+  # Arm 1 — absent / empty. `jq -r` renders a JSON null as the four-character
+  # string `null`, so both spellings are the same failure.
+  case "$base_ref" in
+    ''|null)
+      _uberdev_discover_base_fail "$pr_number" "baseRefName absent or null in the PR projection"
+      return 1
+      ;;
+  esac
+
+  # Arm 2 — BRANCH_NAME_REGEX (`^[A-Za-z0-9._/-]{1,255}$`). `baseRefName` is
+  # GitHub-supplied text that reaches `git` argv, so it gets the same gate
+  # SKILL.md Step 1.2 applies to the global integration branch before any shell
+  # argv use. The embedded-newline check runs FIRST and separately: grep is
+  # line-oriented, so a two-line value whose second line is well-formed would
+  # otherwise satisfy the anchored pattern and pass the gate.
+  case "$base_ref" in
+    *"$nl"*)
+      _uberdev_discover_base_fail "$pr_number" "baseRefName contains a newline"
+      return 1
+      ;;
+  esac
+  # Herestring, never `printf … | grep -q`: an EPIPE on the writer poisons the
+  # pipeline rc under pipefail on a SIGPIPE-ignoring runner (#313).
+  if ! LC_ALL=C grep -qE '^[A-Za-z0-9._/-]{1,255}$' <<<"$base_ref"; then
+    _uberdev_discover_base_fail "$pr_number" "baseRefName fails BRANCH_NAME_REGEX"
+    return 1
+  fi
+
+  # Arm 3 — the remote-tracking ref must actually be present after Step 3.0's
+  # fetch. `git merge-tree` exits 1 for a ref it cannot resolve, which is
+  # BYTE-INDISTINGUISHABLE from a genuine conflict; classifying a missing ref as
+  # a conflict would re-create the phantom-conflict half of this bug through the
+  # back door. `git rev-parse --verify` is the only honest discriminator and it
+  # has to run BEFORE the probe.
+  if ! git rev-parse --verify -q "refs/remotes/origin/$base_ref" >/dev/null 2>&1; then
+    _uberdev_discover_base_fail "$pr_number" "refs/remotes/origin/$base_ref absent after the Step 3.0 fetch"
+    return 1
+  fi
+
+  printf 'origin/%s\n' "$base_ref"
+  return 0
+}
+
+# prune_orphaned_candidates INTEGRATION_BRANCH SURVIVORS_JSON
+# Drop every candidate whose base is the head of a candidate that did NOT
+# survive the Phase-1.4 gate (#437).
+#
+# Stdout: the reachable subset of SURVIVORS_JSON, in input order. On a jq
+#         failure stdout is the INPUT, unchanged — see FAIL-OPEN below.
+# Exit:   0 always (this is a planning-phase filter, never a halt).
+# Stderr: one line per dropped candidate.
+# Audit:  gate_fail with reason="pr_base_parent_skipped" per dropped candidate.
+#
+# WHY THIS IS NOT REDUNDANT WITH DISCOVERY. Step 1.2.5's closure ran over the
+# DISCOVERED set. Step 1.4 then removes candidates from it. A child whose parent
+# was just removed is still in the set and still green, so it reaches Step 3.2 —
+# and `gh pr merge` merges into GitHub's RECORDED base, which is the parent's
+# branch, not the integration branch. That emits `merge_executed`, the event
+# /goal's uberdev_goal_read_merge_result selects, so the run reports converged
+# and the child's `Closes #N` closes the issue while the integration branch
+# received nothing. Before #437 every survivor shared one base and this state was
+# structurally impossible; admitting stacked candidates is what creates it.
+#
+# The prune is the SAME transitive fixpoint as discovery, not a one-hop parent
+# check: dropping PR-B must also drop whatever is stacked on PR-B. Reusing
+# _uberdev_discover_stack_filter is deliberate — a second, independently written
+# closure is a drift surface, and the two must agree by construction.
+#
+# FAIL-OPEN, deliberately, and it is the safe direction here. Every arm of this
+# function only ever REMOVES candidates. A jq failure that emitted '[]' would
+# silently convert a transient tool error into "nothing to merge" — the very
+# false-convergence signal this function exists to prevent. Returning the input
+# unchanged instead leaves the run exactly where it was without the extra
+# guard, and Step 3.2's per-iteration parent-landed check still gates the actual
+# merge. The two guards are redundant on purpose: this one is a planning
+# convenience, Step 3.2's is the one that must never be skipped.
+prune_orphaned_candidates() {
+  local integration_branch="$1"
+  local survivors_json="$2"
+  local kept
+  kept="$(_uberdev_discover_stack_filter "$integration_branch" "$survivors_json")"
+
+  if [ -z "$kept" ]; then
+    printf 'warning: orphan prune could not evaluate reachability; keeping the candidate set as-is (Step 3.2 still gates each merge)\n' >&2
+    printf '%s\n' "$survivors_json"
+    return 0
+  fi
+
+  # Report and audit each dropped candidate. `jq -r` over the set difference by
+  # PR number; a herestring feeds both reads so no pipe off a producer exists.
+  local dropped
+  dropped="$(jq -r --argjson kept "$kept" '
+    ($kept | map(.number)) as $k
+    | .[] | select((.number as $n | $k | index($n)) == null) | .number
+  ' <<<"$survivors_json" 2>/dev/null)"
+
+  # `while read` over a HERESTRING, never `for n in $dropped`: zsh does not
+  # word-split an unquoted parameter expansion (SH_WORD_SPLIT is off), so the
+  # `for` form would iterate ONCE over the whole multi-line blob and emit a
+  # single gate_fail carrying a newline-joined "PR number". A one-element fixture
+  # cannot tell the two apart — this shape is correct in both shells. Herestring
+  # rather than a pipe so no EPIPE can poison the rc under pipefail (#313).
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    printf 'warning: PR #%s is stacked on a PR that did not survive the pre-flight gate; it cannot land into the integration branch this run\n' "$n" >&2
+    emit_gate_fail "$n" "pr_base_parent_skipped"
+  done <<EOF
+$dropped
+EOF
+
+  printf '%s\n' "$kept"
+  return 0
 }
