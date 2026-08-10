@@ -4,6 +4,59 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.12] — 2026-08-10
+
+### Added
+
+- **A publication currency register for prkit** (#410). The published prkit carried
+  the `trap … RETURN` bug #401 fixed here, was five manifest files short (33 of 38),
+  and still tracked the 54-file `codex/` tree #381 retired — three divergences, zero
+  red tests, because nothing recorded what the downstream artifact was generated
+  from. Every gate certified the *source*.
+
+  `tools/prkit/published.json` + `published-check.py` record the prkit version last
+  published, a per-file source sha256, and explicit `pending` divergences. The
+  comparator checks key sets against `manifest.txt` in both directions and actual
+  vs declared divergence in both directions. `tests/prkit-publish.test.sh` P4 is the
+  row that would have redded #401 when the fix landed. Unix-only in CI: no
+  `.gitattributes` exists, so a Windows checkout rewrites LF and every digest would
+  differ.
+
+  `copyset` is a list of `{path, sha256}` objects, never a map. Measured: the map
+  form puts `lib/secret-scan.sh` beside a 64-hex digest on one line, gitleaks scores
+  it `generic-api-key`, and `finish-branch`'s pre-push scan hard-stops the push with
+  no override. Check D enforces the layout and `--refresh` re-checks its own output,
+  so the trap cannot be re-armed by a reformat.
+
+  Deliberately not wired into `generate.sh` — regenerating from a stale record is how
+  staleness gets fixed, so a build-time gate would block the cure.
+
+  The register lands with **seven declared pending divergences, not zero**:
+  `agents/conflict-resolver.md`, `agents/trust-trail-evaluator.md`,
+  `commands/merge.md`, `commands/review-pr.md`, `lib/code_fixer_contract.py`,
+  `skills/merge-pipeline/SKILL.md` and `skills/merge-pipeline/lib/discover.sh` — every
+  one changed by v0.45.4–v0.45.11. `--refresh` was deliberately not used to clear
+  them: it re-records current digests, which would assert the published artifact
+  matches when it does not.
+
+- **`verify.sh` gains a `codex-retired` assertion.** The generator stopped emitting
+  `codex/` and no managed path covers it, so a pre-#381 target keeps its stale tree
+  forever while every `plugins/prkit`-scoped check stays green. It asserts rather
+  than deletes (the generator's destructive authority is not widened to a path it
+  never writes), and tests `-e || -L` so a dangling symlink cannot slip through.
+
+- **`*.tmpl` joins the shell-surface predicate.** `tools/prkit/templates/` is in the
+  corpus but every file there ends `.tmpl`, so the `*.*` arm skipped all eight —
+  including `ci.yml.tmpl`, the one template that emits shell into the generated repo.
+  Both zsh detectors were blind to the generator's own output.
+
+### Changed
+
+- Docs reconciled: README said the manifest was count-locked at 37 (it is 38); RFC
+  0014 §5.6 claimed `verify.sh` is "also runnable standalone in prkit CI" (it is never
+  copied downstream); RFC 0016 §1 claimed "there is no second copy left to disagree
+  with" (prkit is one, outside `contract_markers.py`'s reach).
+
 ## [0.45.11] — 2026-08-10
 
 ### Fixed
