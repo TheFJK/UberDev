@@ -720,13 +720,38 @@ if [ -s "$REAL_GH_FIXTURE" ] && \
       cross=false;    [ "${FORK:-0}" != 1 ]        || cross=true
       # gh 2.83.1 verbatim: nameWithOwner is DECLARED and ALWAYS EMPTY, and the
       # owner login lives in the sibling headRepositoryOwner object.
-      jq -r "$filter" <<JSON
+      #
+      # `tr -d \r` is REQUIRED for fidelity, not a workaround. Real gh is a Go
+      # binary and writes LF on every platform, including Windows. This stub
+      # shells out to the external jq.exe, which on windows-latest opens stdout
+      # in TEXT mode and writes CRLF. `read -r` strips LF but keeps CR, so every
+      # projected field arrived with a trailing CR, the head-SHA equality failed,
+      # and the gate refused a legitimate same-repo PR (inner rc=31) on Windows
+      # only. Emitting CRLF here would be the stub modelling something gh never
+      # does -- the same class of fiction as the `head_repo=owner/repo` value
+      # this whole block exists to replace.
+      # Double quotes, NOT '\r': this whole harness body is a single-quoted
+      # `bash -c` string, so an inner single quote closes it early and yields
+      # valid-but-wrong shell that `bash -n` accepts.
+      jq -r "$filter" <<JSON | tr -d "\r"
 {"headRefOid":"$oid",
  "headRefName":"feature/real",
  "isCrossRepository":$cross,
  "headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""},
  "headRepositoryOwner":{"id":"U_kgDOBmOp1Q","login":"$owner"}}
 JSON
+    }
+    # Byte-level diagnostic, printed only when assertion (a) fails. rc alone
+    # narrowed the last Windows failure to "the gate refused a valid PR" but not
+    # to WHY; dumping the projection bytes makes an invisible CR (or any other
+    # platform-specific mangling) self-evident in the CI log instead of costing
+    # another round-trip.
+    dump_projection() {
+      printf "    R9.17 diag: stub projection bytes (look for \\\\r):\n" >&2
+      printf "0\n" >"$REAL_GH_STATE"
+      gh pr view 422 --repo TheFJK/UberDev \
+        --jq ".headRefOid, ((.headRepositoryOwner.login // \"\") + \"/\" + (.headRepository.name // \"\"))" \
+        2>/dev/null | od -c | head -4 >&2
     }
     python3() { printf "{\"status\":\"clean\"}\n"; }
     git() {
@@ -742,7 +767,10 @@ JSON
     # (a) A same-repository PR MUST publish. Pre-#429 this returned 79, because
     #     the projection recovered "" for the head-repository slug.
     reset_fixture
-    review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 31
+    if ! review_publish_same_repo_pr_head TheFJK/UberDev 422 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence; then
+      dump_projection
+      exit 31
+    fi
     [ "$(cat "$REAL_GH_PUSH_LOG")" = "$PUB_SHA:refs/heads/feature/real" ] || exit 32
     # (b) ANTI-VACUITY: a genuine fork is still refused, and still never pushes.
     reset_fixture
