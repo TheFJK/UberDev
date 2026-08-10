@@ -4,6 +4,56 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.8] — 2026-08-10
+
+### Added
+
+- **The PR-creating surfaces can target a branch other than the default one**
+  (#439), which is what a dependent (stacked) PR requires. Of the four live
+  `gh pr create` call sites in the plugin, only `skills/scan-fleet/workflow.js`
+  passed `--base`; `skills/finish-branch/SKILL.md` and
+  `skills/solve-fleet/workflow.js` silently targeted the repository default.
+
+  `finish-branch` resolves the base explicit-first — `UBERDEV_PR_BASE_BRANCH` in
+  the environment, then `pr_base_branch` in `.claude/uberdev.local.md`, then the
+  origin default branch — through the existing `uberdev_read_string` helper with a
+  validating regex, not a hand-rolled parser. With no override set the resolution
+  lands on the default branch and **no `--base` flag is emitted at all**, so the
+  previous behaviour is preserved byte-for-byte. The resolved base feeds both the
+  `gh pr create` invocation and the pre-push secret-scan range, so the two cannot
+  disagree.
+
+  `solve-fleet` forwards the branch its run was launched from, but only after
+  verifying it exists on origin — an unverified local-only branch would otherwise
+  make `gh pr create --base` fail for every issue in the fleet, which is strictly
+  worse than the old behaviour. When it does not verify, no instruction is emitted
+  and the run degrades to exactly the previous default.
+
+### Fixed
+
+- **The pre-push secret scan could scan nothing at all, and said so to no one.**
+  `finish-branch`'s base resolution was written as
+
+      BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed '…' \
+              || git rev-parse --verify origin/main 2>/dev/null || …)
+
+  `||` binds to the *pipeline*, and `sed` exits 0 even on empty input. So when
+  `symbolic-ref` failed, `sed` still succeeded, `BASE_REF` came back empty, and
+  the `origin/main` / `origin/master` / root-commit fallbacks were all
+  unreachable — measured identically under bash and zsh. The empty value then
+  failed the `[[ -n ]]` guard and the scan degraded to `git diff --staged`, which
+  on a fully-committed branch scans **nothing**. A security control that fails
+  open, silently.
+
+- **An explicitly-configured base that does not resolve no longer widens the scan
+  to the whole history.** The root-commit last resort is now reached only on the
+  no-base-configured path; a configured-but-unresolvable base warns loudly on
+  stderr naming the base, and falls back to the origin default branch. Falling
+  through to the root commit is strictly *wider* than the previous behaviour and
+  re-creates the hard-abort-with-no-override failure this work exists to remove —
+  a stacked branch would inherit its parent's secret-shaped test fixtures into
+  scan range and abort the push.
+
 ## [0.45.7] — 2026-08-10
 
 ### Added

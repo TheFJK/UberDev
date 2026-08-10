@@ -228,6 +228,155 @@ else
   echo "  FAIL  F11 abort_if_secret tri-state advice broken:$F11_FAILURES"; FAIL=$((FAIL+1))
 fi
 
+# F12: the PR base is resolved ONCE (#439), explicit-first, and — critically —
+# the tier-3 fallback chain is REACHABLE. The shipped shape used to be
+#   BASE_REF=$(git symbolic-ref … | sed … || git rev-parse --verify origin/main …)
+# where `||` binds to the whole PIPELINE and `sed` exits 0 on empty input: when
+# symbolic-ref failed the pipeline still returned 0, BASE_REF came back EMPTY,
+# and every fallback arm was unreachable dead code. The scan then degraded to
+# `git diff --staged`, which on a fully-committed branch scans nothing — a
+# fail-OPEN security control.
+#
+# The block is EXTRACTED from SKILL.md and EXECUTED against a real git fixture,
+# so this asserts shipped behaviour rather than the presence of a string.
+#
+# Mutation guard (revert the fix in your worktree, re-run):
+#   - restore the `| sed … || git rev-parse …` chain  => F12b RED (empty base).
+#   - gate `--base` on nothing (always emit)          => F12a RED (flag leaks
+#                                                        into the default path).
+#   - build the flag as a scalar `PR_BASE_ARG="--base $PR_BASE"` => F12c RED
+#     under zsh (see finish-branch-zsh.test.sh FBZ-3 for the argv proof).
+F12_FAILURES=''
+F12_BLOCK="$(sed -n '/^# --- BEGIN pr-base resolution (#439) ---$/,/^# --- END pr-base resolution (#439) ---$/p' "$SKILL")"
+if [[ -z "$F12_BLOCK" ]]; then
+  F12_FAILURES="$F12_FAILURES base-block-not-extractable"
+else
+  F12_ROOT="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 2; }
+  F12_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  (
+    cd "$F12_ROOT" || exit 2
+    git init -q . >/dev/null 2>&1 || exit 2
+    git config user.email fixture@example.invalid
+    git config user.name Fixture
+    git config commit.gpgsign false
+    # Three commits, and the repo default deliberately AHEAD of the root: that is
+    # what separates "scan from the origin default branch" (RANGE=c.txt) from
+    # "scan the whole branch history" (RANGE=b.txt,c.txt). In a 1-commit fixture
+    # those two refs coincide and the difference is invisible.
+    printf 'one\n' > a.txt && git add a.txt && git commit -qm one >/dev/null 2>&1 || exit 2
+    git update-ref refs/remotes/origin/feat/parent HEAD || exit 2
+    # The repo default is deliberately AHEAD of the root commit.
+    printf 'two\n' > b.txt && git add b.txt && git commit -qm two >/dev/null 2>&1 || exit 2
+    git update-ref refs/remotes/origin/main HEAD || exit 2
+    printf 'three\n' > c.txt && git add c.txt && git commit -qm three >/dev/null 2>&1 || exit 2
+  ) || F12_FAILURES="$F12_FAILURES fixture-setup-failed"
+
+  F12_DRIVER="$F12_ROOT/f12-driver.sh"
+  {
+    printf '%s\n' "$F12_BLOCK"
+    printf '%s\n' 'printf "PR_BASE=%s\n" "$PR_BASE"'
+    printf '%s\n' 'printf "PR_BASE_EXPLICIT=%s\n" "$PR_BASE_EXPLICIT"'
+    printf '%s\n' 'printf "BASE_REF=%s\n" "$BASE_REF"'
+    # Index-free rendering: zsh arrays are 1-based, so ${a[0]} is not portable.
+    # ARGN is the load-bearing empty-case assertion — `printf "%s|"` with zero
+    # arguments still applies the format once and prints a bare "|", so the
+    # joined form cannot distinguish "no args" from "one empty arg".
+    printf '%s\n' 'printf "ARGN=%s\n" "${#PR_BASE_ARGS[@]}"'
+    printf '%s\n' 'printf "ARGS=[%s]\n" "$(printf "%s|" ${PR_BASE_ARGS[@]+"${PR_BASE_ARGS[@]}"})"'
+    # The range the pre-push secret scan will actually read. Asserting the REF
+    # NAME alone is not enough: it cannot tell a narrowed range from a widened
+    # one when two refs happen to point at the same commit.
+    printf '%s\n' 'printf "RANGE=%s\n" "$(git diff --name-only "$BASE_REF..HEAD" | tr "\n" ",")"'
+  } > "$F12_DRIVER"
+
+  f12_run() {  # f12_run <extra-env-assignment-or-empty>
+    ( cd "$F12_ROOT" \
+      && env -u UBERDEV_PR_BASE_BRANCH -u UBERDEV_CONFIG_FILE \
+             CLAUDE_PLUGIN_ROOT="$F12_PLUGIN_ROOT" ${1:+"$1"} \
+             bash "$F12_DRIVER" 2>/dev/null )
+  }
+  f12_run_err() {  # f12_run_err <extra-env-assignment-or-empty>  -> stderr only
+    ( cd "$F12_ROOT" \
+      && env -u UBERDEV_PR_BASE_BRANCH -u UBERDEV_CONFIG_FILE \
+             CLAUDE_PLUGIN_ROOT="$F12_PLUGIN_ROOT" ${1:+"$1"} \
+             bash "$F12_DRIVER" 2>&1 >/dev/null )
+  }
+  f12_expect() {  # f12_expect <output> <needle> <tag>
+    grep -qF "$2" <<<"$1" || F12_FAILURES="$F12_FAILURES $3"
+  }
+  f12_refute() {  # f12_refute <output> <needle> <tag>
+    grep -qF "$2" <<<"$1" && F12_FAILURES="$F12_FAILURES $3"
+    return 0
+  }
+
+  # F12a — legacy path: origin/HEAD present, no override. Base resolves to the
+  # repo default AND NO --base flag is emitted (byte-identical to today).
+  ( cd "$F12_ROOT" && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main )
+  F12_A="$(f12_run "")"
+  f12_expect "$F12_A" 'PR_BASE=main'         a-base
+  f12_expect "$F12_A" 'PR_BASE_EXPLICIT=0'   a-explicit
+  f12_expect "$F12_A" 'BASE_REF=origin/main' a-ref
+  f12_expect "$F12_A" 'ARGN=0'               a-noflag
+
+  # F12b — THE LATENT BUG: origin/HEAD missing. The fallback must FIRE.
+  ( cd "$F12_ROOT" && git symbolic-ref -d refs/remotes/origin/HEAD )
+  F12_B="$(f12_run "")"
+  f12_expect "$F12_B" 'PR_BASE=main'         b-fallback-unreachable
+  f12_expect "$F12_B" 'BASE_REF=origin/main' b-scan-range-empty
+  f12_expect "$F12_B" 'ARGN=0'               b-noflag
+
+  # F12c — tier 1: explicit env override wins and reaches BOTH consumers.
+  F12_C="$(f12_run "UBERDEV_PR_BASE_BRANCH=feat/parent")"
+  f12_expect "$F12_C" 'PR_BASE=feat/parent'         c-base
+  f12_expect "$F12_C" 'PR_BASE_EXPLICIT=1'          c-explicit
+  f12_expect "$F12_C" 'BASE_REF=origin/feat/parent' c-scan-range
+  f12_expect "$F12_C" 'ARGN=2'                      c-argc
+  f12_expect "$F12_C" 'ARGS=[--base|feat/parent|]'  c-flag
+
+  # F12e — a CONFIGURED base that resolves to NO ref here (the normal state of a
+  # fresh stacked worktree that never fetched the parent branch, and also what a
+  # typo produces). The scan range must degrade to the origin default branch, NOT
+  # to the branch root commit: the root commit is strictly wider than pre-#439
+  # behaviour and drags the parent PR's secret-shaped fixtures back into range,
+  # re-creating the hard-abort-with-no-override this change exists to prevent.
+  # And it must not do it silently. `--base` is still emitted — GitHub has the
+  # branch even when this clone does not, so dropping the flag would silently
+  # retarget the default branch.
+  #
+  # Mutation guard: collapse the two arms back into one bare
+  #   if [ -z "$BASE_REF" ]; then BASE_REF="$(git rev-list --max-parents=0 …)"; fi
+  # => e-widened-to-root AND e-silent both RED.
+  F12_ROOT_COMMIT="$( cd "$F12_ROOT" && git rev-list --max-parents=0 --max-count=1 HEAD )"
+  F12_E="$(f12_run "UBERDEV_PR_BASE_BRANCH=feat/never-fetched")"
+  f12_expect "$F12_E" 'PR_BASE=feat/never-fetched'  e-base
+  f12_expect "$F12_E" 'BASE_REF=origin/main'        e-degrades-to-default
+  f12_refute "$F12_E" "BASE_REF=$F12_ROOT_COMMIT"   e-widened-to-root
+  # The semantic form of the same claim, and the load-bearing one: the ref NAME
+  # alone cannot separate a narrowed range from a widened one when two refs point
+  # at the same commit. origin/main is deliberately AHEAD of the root here, so
+  # the root-commit fallback yields RANGE=b.txt,c.txt and this assertion goes RED.
+  f12_expect "$F12_E" 'RANGE=c.txt,'                e-range-not-narrowed
+  f12_expect "$F12_E" 'ARGN=2'                      e-base-still-passed
+  F12_E_ERR="$(f12_run_err "UBERDEV_PR_BASE_BRANCH=feat/never-fetched")"
+  f12_expect "$F12_E_ERR" 'feat/never-fetched'      e-silent
+  f12_expect "$F12_E_ERR" 'WARNING'                 e-not-a-warning
+
+  # F12d — tier 2: the per-project config key, read through the shared helper.
+  mkdir -p "$F12_ROOT/.claude"
+  printf -- '---\npr_base_branch: feat/parent\n---\n' > "$F12_ROOT/.claude/uberdev.local.md"
+  F12_D="$(f12_run "")"
+  f12_expect "$F12_D" 'PR_BASE=feat/parent'         d-base
+  f12_expect "$F12_D" 'PR_BASE_EXPLICIT=1'          d-explicit
+  f12_expect "$F12_D" 'ARGN=2'                      d-argc
+  f12_expect "$F12_D" 'ARGS=[--base|feat/parent|]'  d-flag
+  rm -rf "$F12_ROOT"
+fi
+if [[ -z "$F12_FAILURES" ]]; then
+  echo "  PASS  F12 PR base resolves explicit-first, the tier-3 fallback is reachable, and --base is emitted only when configured"; PASS=$((PASS+1))
+else
+  echo "  FAIL  F12 base resolution broken:$F12_FAILURES"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

@@ -144,6 +144,34 @@ grep -q 'UBERDEV_KEEP_TMPDIR=1' "$LAUNCHER" \
   && pass "S10 the run dir is kept (fleet agents read prompts after the launcher exits)" \
   || fail "S10 the launcher does not keep its tmpdir for the fleet"
 
+# S21 (#439) — the launcher is the ONLY process that still sees the real
+# checkout; the fleet's worktrees are cut by the runtime and the script never
+# learns what ref they came from. Capture the branch here and thread it, or a
+# solver launched from a stacked branch opens its PR against the repo default.
+grep -q 'git branch --show-current' "$LAUNCHER" \
+  && pass "S21a the launcher captures the base branch from the real checkout" \
+  || fail "S21a no 'git branch --show-current' capture in the launcher"
+grep -q 'baseBranch=' "$LAUNCHER" \
+  && pass "S21b the base branch is carried in the solve-fleet args envelope" \
+  || fail "S21b the envelope does not carry baseBranch"
+# S21c — the captured branch is only forwarded when it EXISTS ON THE REMOTE.
+# `gh pr create --base <branch>` hard-fails on a base GitHub does not have, and
+# /solve + /turbo deliberately do not read pr_base_branch, so there is no
+# operator override to recover with: launching from a local-only branch would
+# fail PR creation for EVERY issue in the fleet, where pre-#439 the PR was opened
+# against the repo default. workflow.js emits no --base for an empty value, so
+# blanking it degrades to the old behaviour instead of hard-failing.
+# Mutation guard: delete the rev-parse arm => S21c RED.
+SOLVE_BASE_BLOCK="$(sed -n '/# --- BEGIN solve-fleet base capture (#439) ---/,/# --- END solve-fleet base capture (#439) ---/p' "$LAUNCHER")"
+if [ -z "$SOLVE_BASE_BLOCK" ]; then
+  fail "S21c the base-capture block is not delimited by its #439 markers"
+elif grep -q 'rev-parse --verify --quiet "refs/remotes/origin/\$SOLVE_FLEET_BASE_BRANCH"' <<<"$SOLVE_BASE_BLOCK" \
+  && grep -q 'SOLVE_FLEET_BASE_BRANCH=""' <<<"$SOLVE_BASE_BLOCK"; then
+  pass "S21c a base branch missing from origin is blanked, not forwarded into gh pr create --base"
+else
+  fail "S21c the captured base is forwarded without checking it exists on origin"
+fi
+
 # S11 — the parser accepts exactly the live enum. #381 removed `codex`, so the
 # parser alternation and _UBERDEV_DISPATCH_BACKEND_ENUM must agree member for
 # member; a `--backend=codex` that parsed here but died in the resolver would be
@@ -424,6 +452,16 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const solverJ = recJ.agentCalls.find(function (c) { return c.label === "solve:#11 (medium)"; });
   out.jNoLeak = !!(solverJ && solverJ.prompt.indexOf("/etc/passwd") < 0);
 
+  // Run K (#439) — a known base branch reaches the solver prompt as a literal
+  // `--base "<branch>"` instruction; an unknown base emits NO --base at all
+  // (detached HEAD must not produce a bogus flag). Mirrors the conditional
+  // baseArg in scan-fleet/workflow.js, the reference implementation.
+  const recK = await run(buildArgs(null, { baseBranch: "feat/parent" }), { agentReturns: trivialReturns() });
+  const solverK = recK.agentCalls.find(function (c) { return c.label === "solve:#11 (trivial)"; });
+  out.kBaseInPrompt = !!(solverK && solverK.prompt.indexOf("--base \"feat/parent\"") >= 0);
+  const solverA = recA.agentCalls.find(function (c) { return c.label === "solve:#11 (trivial)"; });
+  out.kNoBaseWhenUnknown = !!(solverA && solverA.prompt.indexOf("--base") < 0);
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -497,6 +535,9 @@ else
 
   check jDesigned 0          "B43 an out-of-run-dir plan path is rejected"
   check jNoLeak true         "B44 the rejected path never reaches the solver prompt"
+
+  check kBaseInPrompt true      "B45 a known base branch reaches the solver as --base \"<branch>\" (#439)"
+  check kNoBaseWhenUnknown true "B46 an unknown base emits NO --base flag (detached HEAD safety)"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="
