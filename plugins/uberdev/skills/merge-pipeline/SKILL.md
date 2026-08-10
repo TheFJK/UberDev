@@ -59,6 +59,9 @@ All magic strings/numbers used by this skill are declared here once. Later phase
 | `UBERDEV_APPROVED_LABEL` | `uberdev-approved` | Phase 1.4 (PATH_2 label presence check) |
 | `REVIEW_PR_PENDING_LABEL` | `review-pr:pending` | `finish-branch/SKILL.md` (add — C1), `commands/review-pr.md` (remove — C2), `merge-pipeline/SKILL.md` Step 1.4.5 probe (C3) |
 | `REVIEW_PR_TRAILER_PREFIX` | `Reviewed-by: uberdev/review-pr@` | Phase 1.4 (PATH_2 trailer extraction); regex form `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` |
+| `REVIEW_PR_BASE_TRAILER_PREFIX` | `Reviewed-base: uberdev/review-pr@` | Phase 1.4 PATH_2 sub-condition (b.5) base-identity extraction; regex form `^Reviewed-base: uberdev/review-pr@([a-f0-9]{40}) ref=(.+)$` (#440) |
+| `BASE_IDENTITY_HELPER` | `skills/merge-pipeline/lib/base-identity.sh` (sole implementation of the landed-delta-equivalence predicate; never inline a merge-base comparison — see (b.5) for why the naive form false-STALEs every squash-merged stack — and never compare two `git diff` TEXTS, which false-STALEs whenever the base touches a file the PR also touches) | Phase 1.4 PATH_2 sub-condition (b.5) base-move resolution (#440) |
+| `BASE_DELTA_EQUIVALENCE_ENUM` | `match`, `mismatch`, `unavailable` (helper stdout), plus `not_evaluated` (caller-only: the base did not move — same ref NAME **and** same OID — so no probe ran; the name alone never licenses this token). `unavailable` is "cannot tell" and the agent maps it to STALE, never PASS. | Phase 1.4 PATH_2 (b.5); `trust-trail-evaluator` dispatch input `base_delta_equivalence` |
 | `RELEASE_ANCHOR_HELPER` | `skills/merge-pipeline/lib/release-anchor.sh` (sole implementation of the inert-release-commit predicate; never inline a subject match) | Phase 1.4 PATH_2 sub-condition (a.5) trust-head resolution (#364) |
 | `RELEASE_ANCHOR_SUBJECT_RE` | `^chore\(release\): v[0-9]+\.[0-9]+\.[0-9]+$` — necessary but **never sufficient**; the helper additionally requires single-parent, non-chained, version-surface-only, strictly-advancing, order-sensitive version-token-only diffs | `release-anchor.sh`; Phase 1.4 PATH_2 (a.5) |
 | `RELEASE_ANCHOR_STATE_ENUM` | `none`, `tolerated` (helper stdout `RELEASE_ANCHOR=`; anything but `tolerated`, including a non-zero helper exit, resolves `TRUST_HEAD` back to `headRefOid`) | Phase 1.4 PATH_2 (a.5); `gate_pass.data.release_anchor` when tolerated |
@@ -461,7 +464,7 @@ PR_STATE=$(jq -r .state <<<"$PR_JSON")
 # `--jq '.'` identity filter; no external pipe = no FD-pollution surface).
 ```
 
-The `pr_view_projection` function wraps `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,body,commits,labels,createdAt,author --jq '.'` (R1 — the identity `--jq '.'` filter routes the projection through gh's in-process JSON parser before the bytes ever reach stdout, so subsequent `jq <<<"$PR_JSON"` calls cannot crash on spinner / progress pollution). On gh-or-jq failure the lib emits a `discovery_gh_failed` audit event with `data.step="1.4"` and `data.pr_number=$PR_NUMBER`, prints a `warning:` breadcrumb to stderr, and returns exit 1; the caller's `|| { … }` block then emits `gate_fail` with `data.reason="pr_view_unreachable"` (∈ `GATE_FAIL_REASON_ENUM`) via `emit_gate_fail`, skips this PR, and the queue continues. This is the only Phase-1 path where a non-trust-related infrastructure failure can park a PR.
+The `pr_view_projection` function wraps `gh pr view <N> --json state,isDraft,reviewDecision,statusCheckRollup,headRepository,maintainerCanModify,isCrossRepository,headRefName,headRefOid,baseRefName,baseRefOid,body,commits,labels,createdAt,author --jq '.'` (R1 — the identity `--jq '.'` filter routes the projection through gh's in-process JSON parser before the bytes ever reach stdout, so subsequent `jq <<<"$PR_JSON"` calls cannot crash on spinner / progress pollution). On gh-or-jq failure the lib emits a `discovery_gh_failed` audit event with `data.step="1.4"` and `data.pr_number=$PR_NUMBER`, prints a `warning:` breadcrumb to stderr, and returns exit 1; the caller's `|| { … }` block then emits `gate_fail` with `data.reason="pr_view_unreachable"` (∈ `GATE_FAIL_REASON_ENUM`) via `emit_gate_fail`, skips this PR, and the queue continues. This is the only Phase-1 path where a non-trust-related infrastructure failure can park a PR.
 
 Pre-conditions that ALL must pass regardless of trust path (real blockers):
 
@@ -507,7 +510,119 @@ a.5. **Resolve the TRUST HEAD before (b) reads anything (issue #364).** `/goal` 
    When `RELEASE_ANCHOR == "tolerated"`, the eventual `gate_pass` carries `data.release_anchor="inert_release_commit"` and `data.release_anchor_version="<X.Y.Z>"` alongside its unchanged `data.trust_anchor="uberdev_review_trail"` (a D15 field-level extension — `TRUST_ANCHOR_ENUM` and `GATE_FAIL_REASON_ENUM` are unchanged). Omit both fields otherwise.
 
 b. The `TRUST_HEAD` commit body contains a trailer matching `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$` (extract via `git log -1 --format=%B "$TRUST_HEAD" | grep -E ...`; see `REVIEW_PR_TRAILER_PREFIX` constant) — else gate_fail with `data.reason="trust_trail_trailer_missing"`. With no tolerated release anchor `TRUST_HEAD == headRefOid`, so this is the most-recent commit exactly as before.
-c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. The PR joins the pending-evaluation list; every pending PR's `Task("trust-trail-evaluator")` is dispatched together in ONE assistant message (see "Two-pass shape" above) with inputs `pr_number=<N>`, `head_ref_oid=<$TRUST_HEAD, the trust head resolved in (a.5) — identical to .headRefOid from the cached PR_JSON projection unless an inert release commit was tolerated>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, `status_check_rollup=<.statusCheckRollup from the cached PR_JSON projection, compact JSON>`, `commit_shas=<[.commits[].oid] from the cached PR_JSON projection, compact JSON array>`, and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
+
+b.5. **Resolve the BASE half of the trail before (c) dispatches (#440).** The `Reviewed-by:` trailer names one endpoint of the reviewed delta. On its own it lets a GREEN survive `gh pr edit <N> --base <other-branch>`: no push occurs, so `headRefOid` cannot move; the trailer is bytes inside an immutable commit; the `uberdev-approved` label is a bare literal with no payload. Every trust artifact stays byte-identical, the evaluator's three structural primitives all return their PASS values, and this skill maps that to `gate_pass` while an entirely unreviewed delta lands. So read the second endpoint off the SAME commit body, and answer the base question HERE — the evaluator has neither `gh` nor `git merge-tree`, and that boundary is not relaxed for this feature:
+
+   ```bash
+   # BEGIN merge-base-identity-fence-v1
+   # This block is delimited because `tests/trust-trail-base-identity.test.sh`
+   # EXTRACTS and EXECUTES it. Grepping it only ever proved the words were here;
+   # the two defects this delimiter exists to catch -- a dereference of a name no
+   # fence binds, and a trigger condition that skips the probe -- are both
+   # invisible to grep and both look like correct fail-closed behaviour at
+   # runtime. Keep the block self-contained: it may assume only
+   # CLAUDE_PLUGIN_ROOT, TRUST_HEAD, PR_JSON and the cwd.
+   if [ -r "${CLAUDE_PLUGIN_ROOT:?}/skills/merge-pipeline/lib/base-identity.sh" ]; then
+     . "${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/base-identity.sh"
+   else
+     echo "error: lib/base-identity.sh not found at ${CLAUDE_PLUGIN_ROOT}/skills/merge-pipeline/lib/" >&2
+     exit 1
+   fi
+   # RE-EXTRACT the `Reviewed-by:` SHA here; never inherit it from (b). Every
+   # bash fence in this skill is its own harness shell, and (b) is PROSE that
+   # binds no variable at all, so a name "carried over" arrives EMPTY -- the
+   # helper's 40-hex domain check then returns `unavailable`, the evaluator maps
+   # that to STALE, and EVERY retargeted PR (including every automatic one) fails
+   # closed while wearing the costume of correct fail-closed behaviour. That is
+   # the #418/#419 class, and the only durable fix is for this fence to own the
+   # binding.
+   # `|| true` is load-bearing, not defensive noise: "there is no such trailer" is
+   # an EXPECTED state this fence exists to classify, but a no-match `grep` exits
+   # 1, and under `set -e -o pipefail` that aborts the whole fence before the
+   # refusal below can ever run. Absence must reach the classifier as a value.
+   # The `( .*)?$` tail is REQUIRED, not defensive: a YELLOW trail emits
+   # `Reviewed-by: uberdev/review-pr@<40-hex> severity=critical-deferred count=N`
+   # (review-pr.md TRAILER_SUFFIX, RFC 0002 §3.4). A `$`-anchored 40-hex regex
+   # silently fails to match every deferred-critical PR, and this fence would then
+   # refuse a trailer the producer really did write.
+   TRUST_TRAILER_LINE="$(git log -1 --format=%B "$TRUST_HEAD" \
+                         | grep -E '^Reviewed-by: uberdev/review-pr@[a-f0-9]{40}( .*)?$')" || true
+   # First line via parameter expansion, never a `| head -n 1` stage: `head`
+   # exits after one line and EPIPEs its producer, which under `set -o pipefail`
+   # turns a successful extraction into a failed one.
+   TRUST_TRAILER_LINE="${TRUST_TRAILER_LINE%%$'\n'*}"
+   TRAILER_SHA="${TRUST_TRAILER_LINE#Reviewed-by: uberdev/review-pr@}"
+   TRAILER_SHA="${TRAILER_SHA%% *}"
+   BASE_IDENTITY_REFUSAL=
+   if [ "${#TRAILER_SHA}" -ne 40 ]; then
+     BASE_IDENTITY_REFUSAL=trust_trail_trailer_missing
+   else
+     case "$TRAILER_SHA" in
+       *[!0-9a-f]*) BASE_IDENTITY_REFUSAL=trust_trail_trailer_missing ;;
+     esac
+   fi
+   # Same `|| true` for the same reason: a legacy trail with no `Reviewed-base:`
+   # line is the migration case, and it must be CLASSIFIED (as null -> STALE),
+   # not crash the fence.
+   TRUST_BASE_LINE="$(git log -1 --format=%B "$TRUST_HEAD" \
+                      | grep -E '^Reviewed-base: uberdev/review-pr@[a-f0-9]{40} ref=.+$')" || true
+   TRUST_BASE_LINE="${TRUST_BASE_LINE%%$'\n'*}"
+   REVIEWED_BASE_SHA=null; REVIEWED_BASE_REF=null
+   if [ -n "$TRUST_BASE_LINE" ]; then
+     REVIEWED_BASE_SHA="${TRUST_BASE_LINE#Reviewed-base: uberdev/review-pr@}"
+     REVIEWED_BASE_SHA="${REVIEWED_BASE_SHA%% *}"
+     REVIEWED_BASE_REF="${TRUST_BASE_LINE#* ref=}"
+   fi
+   CURRENT_BASE_REF="$(jq -r .baseRefName <<<"$PR_JSON")"
+   CURRENT_BASE_OID="$(jq -r .baseRefOid  <<<"$PR_JSON")"
+   # Fast path FIRST -- but it requires BOTH endpoints to be unchanged. The ref
+   # NAME alone is not base identity: `git reset --hard`, a force-push to the
+   # integration branch, and delete-and-recreate all swap the reviewed delta
+   # while the name holds still. Skipping the probe there tells the evaluator
+   # `not_evaluated`, whose declared meaning is "the base ref never moved, so
+   # there is nothing to compare" -- a claim this fence would not have
+   # established. Ordinary forward motion on the base resolves to `match`, so
+   # requiring the OID costs correctness nothing.
+   BASE_DELTA_EQUIVALENCE=not_evaluated
+   if [ -n "$BASE_IDENTITY_REFUSAL" ]; then
+     BASE_DELTA_EQUIVALENCE=unavailable
+   elif [ "$REVIEWED_BASE_SHA" != "null" ] \
+        && { [ "$REVIEWED_BASE_REF" != "$CURRENT_BASE_REF" ] \
+             || [ "$REVIEWED_BASE_SHA" != "$CURRENT_BASE_OID" ]; }; then
+     # $TRAILER_SHA + $REVIEWED_BASE_SHA name the reviewed delta exactly;
+     # $TRUST_HEAD + $CURRENT_BASE_OID name the delta that would land now.
+     BASE_DELTA_EQUIVALENCE="$(merge_resolve_base_delta_equivalence \
+       "$PWD" "$REVIEWED_BASE_SHA" "$TRAILER_SHA" "$CURRENT_BASE_OID" "$TRUST_HEAD")"
+     if [ "$BASE_DELTA_EQUIVALENCE" = "unavailable" ]; then
+       # The base gate's whole reason to exist is "a parent PR just landed and
+       # this PR was retargeted", which is precisely when the local clone is most
+       # likely to be missing the new base tip -- /merge does not fetch until
+       # Phase 3. One bounded, non-recursive `git fetch`, reusing the max-retry=1
+       # policy already specified for `trailer_sha_not_in_local_clone`, then
+       # re-probe ONCE and accept whatever comes back.
+       git fetch --prune --quiet origin "$CURRENT_BASE_REF" >/dev/null 2>&1 || true
+       BASE_DELTA_EQUIVALENCE="$(merge_resolve_base_delta_equivalence \
+         "$PWD" "$REVIEWED_BASE_SHA" "$TRAILER_SHA" "$CURRENT_BASE_OID" "$TRUST_HEAD")"
+     fi
+     case "$BASE_DELTA_EQUIVALENCE" in
+       match | mismatch | unavailable) ;;
+       *) BASE_DELTA_EQUIVALENCE=unavailable ;;
+     esac
+   fi
+   # END merge-base-identity-fence-v1
+   ```
+
+   **When `$BASE_IDENTITY_REFUSAL` is non-empty this fence REFUSES**: emit `gate_fail` with `data.reason="$BASE_IDENTITY_REFUSAL"` (`trust_trail_trailer_missing`, already in `GATE_FAIL_REASON_ENUM`), skip this PR, and continue the queue. This fence re-derives the trailer SHA from the commit body rather than trusting a name bound in another shell, so its answer is always about evidence it read itself.
+
+   **Sub-condition (b)'s stated regex is narrower than what the producer emits.** (b) above quotes `^Reviewed-by: uberdev/review-pr@([a-f0-9]{40})$`, but `review-pr.md` appends `TRAILER_SUFFIX` — ` severity=critical-deferred count=N` — on every YELLOW trail (RFC 0002 §3.4). The `$`-anchored form therefore matches no deferred-critical PR at all. (b.5) uses the suffix-tolerant `( .*)?$` and strips the suffix with `%% *`, so it recovers the SHA the producer actually wrote. Aligning (b)'s quoted regex is tracked separately; do NOT "simplify" (b.5) back to the `$`-anchored form to match it.
+
+   **The predicate is delta equivalence, NEVER "the merge-base moved".** `merge_resolve_base_delta_equivalence` compares two TREES: `git merge-tree --write-tree <baseRefOid> <TRUST_HEAD>` (what would actually land) against `git merge-tree --write-tree --merge-base=<REVIEWED_BASE_SHA> <baseRefOid> <TRAILER_SHA>` (the reviewed delta and nothing else, replayed onto the current base). Both use the same non-destructive primitive D9 mandates in Phase 3.1. The naive ancestry/merge-base comparison looks equivalent and is not: when a parent PR lands by **squash** (this skill's own default strategy) the integration branch does not contain the parent's commit, so the recomputed merge-base collapses to the root and every child PR would go STALE. Ditto a merge-commit landing, and ditto ordinary forward motion on the integration branch. All three are the **automatic post-merge retarget**, in which the three-way merge lands exactly the reviewed bytes and the GREEN is still honest; only the deliberate retarget changes what lands. A gate that fires on every ordinary retarget trains the operator to ignore STALE, which is strictly worse than the base-blind trail it replaces.
+
+   **Trees, never two `git diff` texts.** A diff is a rendering, and three of its degrees of freedom move without any reviewed byte moving: the `index <blob>..<blob>` header (whenever the base touches a file the PR also touches), context lines (whenever the base edits within three lines of a reviewed hunk), and `@@` hunk headers (whenever the base inserts or deletes any earlier line in a shared file — which no amount of `-U0` or `^index` stripping can normalise away). All three occur on the **automatic** retarget, and in this repo children are routinely retargeted to main while main accumulates PRs touching the same hot files. Text comparison therefore false-STALEs the common path; tree OIDs have none of those degrees of freedom. `tests/trust-trail-base-identity.test.sh` executes the full scenario matrix — including the three shared-file automatic-retarget shapes and the base-rewound-under-the-same-name deliberate shape — against a real git fixture, and executes this very fence; that matrix is the contract.
+
+   A trail whose anchor carries no `Reviewed-base:` line is **not** evidence that the base is unchanged — it is a trail emitted before this schema, and it is passed through as `reviewed_base_sha=null` for the evaluator to STALE (the same additive-schema migration `phases.phase2_5` used in v0.26.0).
+
+c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` agent for verdict resolution. The PR joins the pending-evaluation list; every pending PR's `Task("trust-trail-evaluator")` is dispatched together in ONE assistant message (see "Two-pass shape" above) with inputs `pr_number=<N>`, `head_ref_oid=<$TRUST_HEAD, the trust head resolved in (a.5) — identical to .headRefOid from the cached PR_JSON projection unless an inert release commit was tolerated>`, `trailer_sha=<extracted from trailer regex match>`, `working_dir=<cwd>`, `status_check_rollup=<.statusCheckRollup from the cached PR_JSON projection, compact JSON>`, `commit_shas=<[.commits[].oid] from the cached PR_JSON projection, compact JSON array>`, the five base-identity inputs resolved in (b.5) — `reviewed_base_sha=<$REVIEWED_BASE_SHA, 40-hex or the literal null>`, `reviewed_base_ref=<$REVIEWED_BASE_REF, ref name or the literal null>`, `current_base_ref=<$CURRENT_BASE_REF, .baseRefName from the cached PR_JSON projection>`, `current_base_oid=<$CURRENT_BASE_OID, .baseRefOid from that same projection>`, `base_delta_equivalence=<$BASE_DELTA_EQUIVALENCE ∈ match|mismatch|unavailable|not_evaluated>` — and the optional `pr_body_excerpt` / `commit_messages_excerpt` wrapped in `<external-untrusted-input source="github-pr-body">…</external-untrusted-input>` and `<external-untrusted-input source="github-commits">…</external-untrusted-input>` envelopes respectively.
 
    **Corroborators come from the caller's cached projection, never from a fresh fetch inside the agent (#303).** `pr_view_projection` already requested `headRefOid`, `statusCheckRollup`, and `commits` for this PR in the fence above, so the agent re-running `gh pr view <N> --json statusCheckRollup` and `gh api repos/:owner/:repo/pulls/<N>/commits` bought two extra API round-trips per PR — and worse, sampled GitHub state at a LATER instant than the `headRefOid` the structural probes are bound to, so the agent could corroborate a head the verdict was not computed against. Extract all three from `$PR_JSON` and pass them in the dispatch prompt. The agent MUST treat them as its only PR-state corroborators and MUST NOT re-fetch. When the green-path re-eval of Step 1.4.5 refreshes `PR_JSON`, the refreshed values are what a re-dispatch carries.
 

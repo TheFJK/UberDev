@@ -606,7 +606,8 @@ Z14_OUT="$(
   cd "$Z14_TMP" || exit 2
   mkdir -p .uberdev/runs/20260401-101112-deadbeef
   mint() {
-    printf '{"pr":%s,"sha":"%s","phases":{"phase2_5":{"by_severity":{"blocker":%s,"critical":%s},"halted":%s}}}\n' \
+    # #440 — a `current` audit names BOTH endpoints of the reviewed delta.
+    printf '{"pr":%s,"sha":"%s","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":%s,"critical":%s},"halted":%s}}}\n' \
       "$1" "$Z14_SHA" "$2" "$3" "$4" > .uberdev/runs/20260401-101112-deadbeef/review-pr-verdict.json
     uberdev_goal_locate_review_pr_audit_by_pr "$1" 2>/dev/null
   }

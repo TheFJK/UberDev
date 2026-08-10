@@ -1657,11 +1657,44 @@ PY
 )" || return 2
    }
    BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT" "$REVIEW_REPO_SLUG")" || return 2
+   BASE_REF_NAME="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json baseRefName --jq .baseRefName)" || return 2
    REENTRY_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json headRefOid --jq .headRefOid)" || return 2
    review_assert_selected_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REENTRY_HEAD_SHA" "$WORKTREE_ROOT" || return 2
    REVIEWED_HEAD_SHA="$REENTRY_HEAD_SHA"
    VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"
    review_refresh_phase1_scope "$BASE_SHA" || return 2
+   # THE ONLY WRITER of the reviewed-base identity (#440). This fence is the one
+   # place in the run where the pair is live: `review_resolve_phase1_base` just
+   # computed the merge-base the whole review is scoped to, and `baseRefName`
+   # names the branch that merge-base was taken against. Every consumer -- the
+   # two Phase 2 scope refreshes, the trust-trail anchor's `Reviewed-base:`
+   # trailer, the audit JSON's `base` member -- runs in a DIFFERENT harness
+   # shell, 48 and 52 bash fences downstream, where `$BASE_SHA` is the empty
+   # string. Same run-dir carrier idiom as ci-push-target.tsv / ci-fix-phase.txt,
+   # through the typed lib pair so neither half can record or return a value the
+   # other would refuse.
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   REVIEW_BASE_RUN_DIR=
+   if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
+     REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || REVIEW_BASE_RUN_DIR=
+   fi
+   if [ -n "$REVIEW_BASE_RUN_DIR" ]; then
+     # A run dir that IS bound and still cannot take the carrier halts HERE, not
+     # at the anchor: the base has already been resolved and the whole review is
+     # about to be scoped to it, so a silent non-write would produce a trust
+     # signal nobody can attribute to a base.
+     review_fleet_write_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv" "$BASE_SHA" "$BASE_REF_NAME" || {
+       echo "error: /uberdev:review-pr — resolved PR #$PR_NUMBER's review base ($BASE_SHA on $BASE_REF_NAME) but could not persist it to $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to review a delta whose base no later fence can name." >&2
+       audit review_base_uncarried data.reason=write_failed
+       return 2
+     }
+   else
+     # No run dir bound => this fence is running OUTSIDE a real review run. The
+     # pair is still bound for a same-shell caller and the miss is TYPED rather
+     # than silent; every downstream reader then halts `review_base_unreadable`
+     # because the carrier is absent, so the failure is closed either way.
+     audit review_base_uncarried data.reason=no_run_dir
+   fi
    ```
 
    Invoke the post-impl-review skill through the context-only run-tree edge
@@ -2154,6 +2187,20 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    # Phase 1 may have advanced HEAD. Rebuild both the enveloped diff and the
    # commit-range artifact from that exact post-fix snapshot before any Phase 2
    # lens or fixer receives authority.
+   #
+   # BASE_SHA comes off the carrier Phase 1 wrote, never from this shell (#440).
+   # It was bound 48 fences ago and had NO producer here: every real run passed
+   # the empty string into `review_refresh_phase1_scope`, whose own `40-hex`
+   # guard then failed the whole Phase 2 scope rebuild. Same #418/#419 class as
+   # CI_FIX_PHASE and PROBE_VERDICT, sitting in the Phase 2 refresh.
+   REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_BASE_IDENTITY="$(review_fleet_read_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv")" || {
+     echo "error: /uberdev:review-pr — Phase 2 cannot read the reviewed-base identity from $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to rebuild the review scope against a base it cannot name." >&2
+     audit review_base_unreadable data.phase=phase2_routed
+     return 2
+   }
+   BASE_SHA="${REVIEW_BASE_IDENTITY%%$(printf '\t')*}"
+   BASE_REF_NAME="${REVIEW_BASE_IDENTITY#*$(printf '\t')}"
    review_refresh_phase1_scope "$BASE_SHA" || return 2
    # routed-provider-edge: review_pr.simplify.reuse
    # routed-provider-edge: review_pr.simplify.quality
@@ -2192,7 +2239,16 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
    # Phase 1 may have advanced HEAD. Rebuild the enveloped diff and the
    # commit-range artifact from that exact post-fix snapshot first, exactly as
-   # the routed path does.
+   # the routed path does — including taking BASE_SHA off the Phase 1 carrier
+   # rather than from a name this shell never bound (#440).
+   REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   REVIEW_BASE_IDENTITY="$(review_fleet_read_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv")" || {
+     echo "error: /uberdev:review-pr — Phase 2 cannot read the reviewed-base identity from $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to rebuild the review scope against a base it cannot name." >&2
+     audit review_base_unreadable data.phase=phase2_workflow
+     return 2
+   }
+   BASE_SHA="${REVIEW_BASE_IDENTITY%%$(printf '\t')*}"
+   BASE_REF_NAME="${REVIEW_BASE_IDENTITY#*$(printf '\t')}"
    review_refresh_phase1_scope "$BASE_SHA" || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -5920,7 +5976,24 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
      OUTCOME=halted
      exit 2
    fi
-   ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX")" || exit 2
+   # The base half of the trust trail (#440). `Reviewed-by:` names WHAT was
+   # reviewed and at WHICH head; without a base the trailer describes a delta
+   # with only one endpoint, so `gh pr edit <N> --base <other-branch>` swaps the
+   # reviewed delta for an arbitrary one while every trust artifact stays
+   # byte-identical. Read off the Phase 1 carrier — this fence is ~4000 lines and
+   # 52 fences downstream of the bind, so `$BASE_SHA` here is the empty string.
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 2
+   REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || exit 2
+   REVIEW_BASE_IDENTITY="$(review_fleet_read_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv")" || {
+     echo "error: MUTATED_BLOCKED — the reviewed-base identity is unreadable at $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to emit a base-blind trust anchor." >&2
+     audit review_base_unreadable data.phase=trust_anchor
+     FIXER_TERMINAL_STATE=MUTATED_BLOCKED
+     OUTCOME=halted
+     exit 2
+   }
+   REVIEWED_BASE_SHA="${REVIEW_BASE_IDENTITY%%$(printf '\t')*}"
+   REVIEWED_BASE_REF="${REVIEW_BASE_IDENTITY#*$(printf '\t')}"
+   ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s\nReviewed-base: uberdev/review-pr@%s ref=%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX" "$REVIEWED_BASE_SHA" "$REVIEWED_BASE_REF")" || exit 2
    ANCHOR_MESSAGE_SHA256="$(python3 -I -B -c 'import hashlib,sys
 print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_MESSAGE")" || exit 2
    [[ "$ANCHOR_MESSAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
@@ -5956,8 +6029,9 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
    - **Empty diff proven after hooks** (`--allow-empty` plus `review_validate_trust_anchor`). `--allow-empty` alone does not force emptiness when a hook or concurrent writer stages bytes, so the controller verifies the exact parent and an empty tree diff before push. `trust-trail-evaluator` PASSes via the empty-cumulative-diff path: `git merge-base --is-ancestor <PARENT_SHA> HEAD` → YES, `git diff <PARENT_SHA> HEAD` → empty → `PASS`. Independent of how many Phase 1 / Phase 2 commits landed.
    - **Always a fresh new commit on top.** `git commit --amend` is **NEVER** used, so push **never** requires `--force-with-lease`. Works identically whether Phase 1 / Phase 2 already pushed mid-run or batched their pushes.
    - **Self-pinning trailer.** The trailer references the anchor's parent — the actual end-of-run HEAD before the anchor — so the SHA is captured *deterministically* at the only moment it can be written without chicken-and-egg. No reliance on amend-recompute or sibling-equivalence heuristics on the agent side.
+   - **Both endpoints of the reviewed delta, not one (#440).** `Reviewed-by:` alone names a head; a review is a statement about a *delta*, and a delta needs a base. Without `Reviewed-base:` a GREEN survives `gh pr edit <N> --base <other-branch>` untouched: no push occurs, so `headRefOid` cannot move; the trailer is bytes inside an immutable commit object; the `uberdev-approved` label is a bare literal with no payload. All three structural primitives return their PASS values while a delta nobody reviewed rides in. The base identity therefore travels in the **commit body**, next to the head identity — not only in the audit JSON, which is gitignored local telemetry and corroborator-only per D1.
 
-   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailer is procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The trailer payload (`Reviewed-by: uberdev/review-pr@<40-hex>`) is the only trailer in the body. `review_validate_trust_anchor` authenticates the SHA-256 of the complete post-hook subject/body bytes against `ANCHOR_MESSAGE_SHA256`, including exact equality of the `Reviewed-by` payload to `PARENT_SHA`, before proceeding to artifact 2.
+   The anchor commit goes through pre-commit hooks normally — never `--no-verify`. Author = current `git config user.email` / `user.name`; the trailers are procedural attribution to the `/review-pr` command. Per global CLAUDE.md, the anchor commit MUST NOT include a `Co-Authored-By: Claude` trailer or any `🤖 Generated with Claude Code` footer. The two trailer payloads — `Reviewed-by: uberdev/review-pr@<40-hex>` and `Reviewed-base: uberdev/review-pr@<40-hex> ref=<base-ref-name>` — are the only trailers in the body. `review_validate_trust_anchor` authenticates the SHA-256 of the complete post-hook subject/body bytes against `ANCHOR_MESSAGE_SHA256`, so **both** payloads are covered by the same digest: exact equality of the `Reviewed-by` payload to `PARENT_SHA` and of the `Reviewed-base` payload to the carried Phase 1 base identity, before proceeding to artifact 2.
 
 2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
@@ -6028,6 +6102,7 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
 {
   "pr": <int>,
   "sha": "${ANCHOR_SHA}",
+  "base": {"sha": "${REVIEWED_BASE_SHA}", "ref": "${REVIEWED_BASE_REF}"},
   "verdict": "APPROVE" | "REVISIONS_REQUIRED" | "REJECT" | "BLOCKED",
   "trust_trail_state": "GREEN" | "YELLOW" | "RED",
   "phases": {
@@ -6262,6 +6337,8 @@ re-running would hit the no-clobber refusal; the stale markers are reclaimed by
 `review_reap_stale_run_reservations` pass.
 
 **`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
+
+**`base` member (#440)** — top-level sibling of `sha`, and the audit-JSON mirror of the anchor commit's `Reviewed-base:` trailer. `base.sha` is the 40-hex merge-base the whole review was scoped to (`review_resolve_phase1_base`'s output, carried on `review-base-identity.tsv`); `base.ref` is the name of the branch that merge-base was taken against (`baseRefName` at Phase 1 entry). Base identity is a property of the *run*, not of any one phase, which is why it sits at the JSON root next to `sha` rather than inside `phases`. Legacy audit JSON without a `base` member cannot say what the review was scoped to, so `/merge`'s artifact parser maps it to the existing `legacy` audit state and trust-trail-evaluator emits STALE, prompting a `/review-pr` re-run — the identical additive-block migration the `phases.phase2_5` block used in v0.26.0, deliberately reusing that state token rather than inventing a second convention. A `base` member that is PRESENT but shape-invalid (non-object, non-40-hex `sha`, empty or control-character-bearing `ref`) is `malformed`, not `legacy`: "the field predates this schema" and "the field is corrupt" are different answers and only the first is recoverable by a re-run.
 
 **`trust_trail_state` field (RFC 0002 §3.4)** — top-level GREEN/YELLOW/RED discriminator, redundant with the `phases.*` blocks but exposed at the JSON root for faster downstream gating (`/merge` can branch on a single string instead of recomputing the predicate from each phase block).
 

@@ -105,6 +105,7 @@ jobs:
           bash tests/review-child-handoff.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
+          bash tests/trust-trail-base-identity.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \
           bash tests/finish-branch.test.sh && \
           bash tests/secret-scan.test.sh && \
@@ -322,6 +323,14 @@ jobs:
 #                                         forgery; lib/status.sh itself stays
 #                                         portable — only the harness is
 #                                         Unix-bound)
+#   - trust-trail-base-identity.test.sh   (#440: the TB-D matrix builds five real
+#                                         git histories under mktemp -d and
+#                                         probes `git merge-tree --write-tree`;
+#                                         the shipped lib/base-identity.sh and
+#                                         the carrier pair themselves stay
+#                                         portable -- only this harness is
+#                                         Unix-verified, same class as
+#                                         status.test.sh)
 #   - dispatch-child-worktree-teardown.test.sh
 #                                         (#381 RULING 4: real `git worktree
 #                                         add` + nohup detachment + the POSIX

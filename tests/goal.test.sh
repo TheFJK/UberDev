@@ -467,8 +467,8 @@ assert_no_grep "$GOAL_LIB" '\bbash -c'                                   "G19.no
 assert_grep "$GOAL_CMD" '--i-know-what-im-doing'                         "G19.r12-mentioned-once"
 
 echo
-echo "== G20: version bump locked (0.45.10) =="
-assert_version_bump "$REPO_ROOT" "0.45.10"
+echo "== G20: version bump locked (0.45.11) =="
+assert_version_bump "$REPO_ROOT" "0.45.11"
 assert_no_grep "$REPO_ROOT/tests/solve-claim.test.sh"               '0\.30\.0'               "G20.solve-claim-no-old-version"
 
 assert_grep "$GOAL_P0" 'uberdev_dispatch_resolve_env'     "G20b.phase0-wires-resolve-env (#175 SSOT anchor)"
@@ -2260,7 +2260,7 @@ UBERDEV_GOAL_ID=test-bt52 uberdev_goal_pr_state_transition test-bt52 800 pushed-
   cd "$_bt52_scratch" || exit 1
   mkdir -p .uberdev/runs/20260201-100000-aaaaaaaa
   cat > .uberdev/runs/20260201-100000-aaaaaaaa/review-pr-verdict.json <<'EOF'
-{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
 EOF
 )
 _bt52_initial="$(cd "$_bt52_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 800)"
@@ -2272,7 +2272,7 @@ assert_eq "$(uberdev_goal_get_pr_state test-bt52 800)" "yellow-held" "BT52.initi
   cd "$_bt52_scratch" || exit 1
   mkdir -p .uberdev/runs/20260202-110000-bbbbbbbb
   cat > .uberdev/runs/20260202-110000-bbbbbbbb/review-pr-verdict.json <<'EOF'
-{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+{"pr":800,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
 EOF
 )
 # Step 3: poll detects new audit, signal green, transitions to green.
@@ -2445,7 +2445,7 @@ UBERDEV_GOAL_ID=test-bt58 uberdev_goal_pr_state_transition test-bt58 803 pushed-
   cd "$_bt58_scratch" || exit 1
   mkdir -p .uberdev/runs/20260205-140000-eeeeeeee
   cat > .uberdev/runs/20260205-140000-eeeeeeee/review-pr-verdict.json <<'EOF'
-{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
+{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":1},"halted":false}}}
 EOF
 )
 _bt58_baseline="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
@@ -2461,7 +2461,7 @@ _bt58_transitions_before=$(grep -c '"event":"goal_pr_transition".*"pr":803' "$_b
   cd "$_bt58_scratch" || exit 1
   mkdir -p .uberdev/runs/20260206-150000-ffffffff
   cat > .uberdev/runs/20260206-150000-ffffffff/review-pr-verdict.json <<'EOF'
-{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
+{"pr":803,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":2},"halted":false}}}
 EOF
 )
 _bt58_new_audit="$(cd "$_bt58_scratch" && uberdev_goal_locate_review_pr_audit_by_pr 803)"
@@ -3557,7 +3557,7 @@ echo "== BT61: an unreadable PR head can never yield a merge-authorising colour 
 BT61_TMP="$(mktemp -d)"
 mkdir -p "$BT61_TMP/.uberdev/runs/20260305-090000-abcdef01"
 cat > "$BT61_TMP/.uberdev/runs/20260305-090000-abcdef01/review-pr-verdict.json" <<'EOF'
-{"pr":900,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
+{"pr":900,"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":{"sha":"dddddddddddddddddddddddddddddddddddddddd","ref":"main"},"phases":{"phase2_5":{"by_severity":{"blocker":0,"critical":0},"halted":false}}}
 EOF
 BT61_RECEIPT="$(cd "$BT61_TMP" && uberdev_goal_locate_review_pr_audit_by_pr 900 2>/dev/null)"
 if [ -z "$BT61_RECEIPT" ]; then

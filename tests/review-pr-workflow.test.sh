@@ -567,6 +567,10 @@ run_stage_fence() {  # FILE TOKEN OUTDIR -> envelope on stdout
   local file="$1" token="$2" out="$3" body
   body="$(extract_fence "$file" "$token")" || return 1
   mkdir -p "$out/repo/.uberdev/research/RID" || return 1
+  ( . "$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh" \
+    && review_fleet_write_review_base \
+         "$out/repo/.uberdev/research/RID/review-base-identity.tsv" \
+         0000000000000000000000000000000000000000 main ) || return 1
   {
     echo 'set -u'
     echo "UBERDEV_REVIEW_PLUGIN_ROOT='$REPO_ROOT/plugins/uberdev'"
@@ -581,7 +585,12 @@ run_stage_fence() {  # FILE TOKEN OUTDIR -> envelope on stdout
     echo "FOCUS=''"
     echo "SEQUENTIAL=0"
     echo "ASPECT_LIST=(tests)"
-    echo "BASE_SHA=0000000000000000000000000000000000000000"
+    # #440 — BASE_SHA is NOT env-passed any more. The lens fence takes the
+    # reviewed-base identity off the run-dir carrier Phase 1 wrote, so seeding
+    # the env here would prove nothing about what the fence can actually see
+    # (that env-passing shortcut is precisely what masked #418/#419). Seed the
+    # carrier instead, exactly as Phase 1 does.
+    echo "audit() { :; }"
     # The lens fence refreshes the Phase-1 scope first; that is /review-pr's own
     # git-facing helper and is not what this fixture is proving. Stub it so the
     # mint/bind/emit half runs on its own.
