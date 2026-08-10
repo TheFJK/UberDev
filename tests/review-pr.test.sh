@@ -749,9 +749,14 @@ JSON
     dump_projection() {
       printf "    R9.17 diag: stub projection bytes (look for \\\\r):\n" >&2
       printf "0\n" >"$REAL_GH_STATE"
-      gh pr view 422 --repo TheFJK/UberDev \
+      # Capture, then herestring into od. NEVER `od -c | head -N`: piping into
+      # an early-exiting reader under `set -o pipefail` EPIPEs the writer, which
+      # tests/epipe-guard.test.sh reds on BOTH CI jobs. The projection is two
+      # short lines, so there was never anything for `head` to truncate.
+      diag_projection="$(gh pr view 422 --repo TheFJK/UberDev \
         --jq ".headRefOid, ((.headRepositoryOwner.login // \"\") + \"/\" + (.headRepository.name // \"\"))" \
-        2>/dev/null | od -c | head -4 >&2
+        2>/dev/null)"
+      od -c <<<"$diag_projection" >&2
     }
     python3() { printf "{\"status\":\"clean\"}\n"; }
     git() {
