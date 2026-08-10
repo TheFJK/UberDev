@@ -287,105 +287,27 @@ EOF_ZSH_BASH_ENV
   rm -rf "$zsh_mutex_tmp"
 fi
 
-echo
-echo "== zsh parameter modifiers: an unbraced \$var:<letter> silently eats the colon =="
-
-# THE CLASS. Every `bash` fence in a command/skill markdown is executed by the
-# harness through /bin/zsh on macOS, and zsh applies HISTORY-STYLE MODIFIERS to
-# a brace-less parameter expansion: `"$sha:refs/heads/x"` expands as
-# `${sha:r}` + `efs/heads/x`, i.e. `<sha>efs/heads/x`. The colon is gone, the
-# refspec is garbage, and `git push` dies with "src refspec ... does not match
-# any" — a failure whose message names neither zsh nor the modifier. bash
-# expands the identical string correctly, so a bash-only local run never sees
-# it. Found live on the trust-anchor publish in commands/review-pr.md, which had
-# shipped this shape and whose test pinned the broken literal.
-# `P` (realpath) is in the list because zsh has it and omitting it made the
-# guard blind to `"$dir:Pxyz"` — proven live: `zsh -c 'V=/tmp/x; print -r --
-# "$V:Prefs"'` prints `/private/tmp/xrefs`, the colon and the `P` both eaten.
-ZSH_MODIFIER_LETTERS='aAcefFghlpPqQrstuUwWxX'
-# The name class admits DIGITS and the punctuation parameters, because a
-# positional parameter is mangled exactly like a named one and the old
-# `\$[A-Za-z_]` anchor could never match it: `zsh -c 'f(){ print -r --
-# "$1:refs/heads/x"; }; f abc123'` prints `abc123efs/heads/x`. A helper doing
-# `git push origin "$1:refs/heads/$b"` was invisible to this guard.
-ZSH_MODIFIER_NAME_HEAD='A-Za-z_0-9@*#?-'
-# Comment-stripped, because the two braced call sites NAME the broken shape in
-# order to explain why the braces are load-bearing — and a guard that punished
-# its own explanation would be unfixable (the S13.11d/S21.9 precedent).
-ZSH_MODIFIER_HITS=""
-while IFS= read -r zsh_scan_file; do
-  zsh_scan_hit="$(grep -v '^[[:space:]]*#' "$zsh_scan_file" \
-    | grep -nE "\\\$[$ZSH_MODIFIER_NAME_HEAD][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" || true)"
-  [ -n "$zsh_scan_hit" ] || continue
-  ZSH_MODIFIER_HITS="$ZSH_MODIFIER_HITS${ZSH_MODIFIER_HITS:+
-}$zsh_scan_file: $zsh_scan_hit"
-done <<EOF_ZSH_SCAN
-$(find "$REPO_ROOT/plugins/uberdev/commands" "$REPO_ROOT/plugins/uberdev/skills" \
-       "$REPO_ROOT/plugins/uberdev/lib" "$REPO_ROOT/plugins/uberdev/agents" \
-       "$REPO_ROOT/plugins/uberdev/hooks" \
-       -type f \( -name '*.md' -o -name '*.sh' \) 2>/dev/null | sort)
-EOF_ZSH_SCAN
-if [ -z "$ZSH_MODIFIER_HITS" ]; then
-  echo "  PASS  no unbraced \$var:<modifier-letter> expansion in any plugin shell surface"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  an unbraced \$var:<modifier-letter> would be mangled by zsh — brace it as \${var}:"
-  printf '        %s\n' "$ZSH_MODIFIER_HITS"
-  FAIL=$((FAIL + 1))
-fi
-
-# Anti-vacuity: the grep above must actually fire on the shape, and zsh must
-# actually mangle it. Both proven here so a future edit cannot quietly relax
-# either half into a check that can never red.
-ZSH_MODIFIER_DETECTOR_GAPS=""
-while IFS= read -r zsh_modifier_shape; do
-  [ -n "$zsh_modifier_shape" ] || continue
-  printf '%s\n' "$zsh_modifier_shape" \
-    | grep -qE "\\\$[$ZSH_MODIFIER_NAME_HEAD][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]" \
-    || ZSH_MODIFIER_DETECTOR_GAPS="$ZSH_MODIFIER_DETECTOR_GAPS${ZSH_MODIFIER_DETECTOR_GAPS:+
-}$zsh_modifier_shape"
-done <<'EOF_ZSH_MODIFIER_SHAPES'
-git push origin "$publish_sha:refs/heads/$live_branch"
-git push origin "$1:refs/heads/$live_branch"
-printf '%s\n' "$dir:Pxyz"
-EOF_ZSH_MODIFIER_SHAPES
-if [ -z "$ZSH_MODIFIER_DETECTOR_GAPS" ]; then
-  echo "  PASS  the detector reds on every mangled shape, named and positional"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  the detector does not match shapes it exists to find (vacuous)"
-  printf '        %s\n' "$ZSH_MODIFIER_DETECTOR_GAPS"
-  FAIL=$((FAIL + 1))
-fi
-if ! command -v zsh >/dev/null 2>&1; then
-  echo "  SKIP  live zsh mangling proof (zsh not on PATH)"
-else
-  ZSH_UNBRACED="$(zsh -c 'V=abc123; print -r -- "$V:refs/heads/x"' 2>/dev/null)"
-  ZSH_BRACED="$(zsh -c 'V=abc123; print -r -- "${V}:refs/heads/x"' 2>/dev/null)"
-  # The two shapes the shipped detector could not see, proven mangled for real
-  # so neither half of the widening can be relaxed back into a vacuous check.
-  ZSH_POSITIONAL="$(zsh -c 'f(){ print -r -- "$1:refs/heads/x"; }; f abc123' 2>/dev/null)"
-  ZSH_REALPATH="$(zsh -c 'V=abc123; print -r -- "$V:Prefs"' 2>/dev/null)"
-  if [ "$ZSH_UNBRACED" = 'abc123efs/heads/x' ] && [ "$ZSH_BRACED" = 'abc123:refs/heads/x' ] \
-     && [ "$ZSH_POSITIONAL" = 'abc123efs/heads/x' ] && [ "$ZSH_REALPATH" != 'abc123:Prefs' ]; then
-    echo "  PASS  live zsh: unbraced loses the colon ('$ZSH_UNBRACED'), positional and :P too, braced survives"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL  zsh modifier behaviour drifted: unbraced='$ZSH_UNBRACED' braced='$ZSH_BRACED' positional='$ZSH_POSITIONAL' realpath='$ZSH_REALPATH'"
-    FAIL=$((FAIL + 1))
-  fi
-fi
-
 # ---------------------------------------------------------------------------
-# ONE corpus enumeration and ONE file predicate, shared by the two zsh
-# runtime-class guards below (tied parameters, and `trap … RETURN`). Extracted
-# when the second consumer arrived (#401): a hand-rolled second copy would be
-# the "one contract, N uncompared copies" drift (#370/#371) that this file's own
-# header is about, in the file that is about it.
+# ONE corpus enumeration and ONE file predicate, shared by the THREE zsh
+# runtime-class guards below (parameter modifiers, tied parameters, and
+# `trap … RETURN`). Extracted when the second consumer arrived (#401): a
+# hand-rolled second copy would be the "one contract, N uncompared copies" drift
+# (#370/#371) that this file's own header is about, in the file that is about it.
 #
-# DECLARED BOUNDARY: the zsh-MODIFIER guard above keeps its own, narrower `find`
-# (plugins only, extension-only). Folding it in here would silently widen an
-# unrelated guard's corpus — a behaviour change, and its own issue.
+# The third consumer arrived in #413, and it arrived because a DECLARED boundary
+# is still a second copy. #401 wrote one here in prose — "the zsh-MODIFIER guard
+# keeps its own, narrower `find`" — and that guard's own corpus was
+# `plugins/**` with `-name '*.md' -o -name '*.sh'`, so it read neither `tests/`
+# nor `tools/` nor a single extension-less shipped hook: the two gaps the tied
+# guard had already had to close, twice, each time finding live hits. Pointing
+# it at this pair found six more mangled shapes in `tests/`, exactly as the
+# distribution argument predicted — four refspec assertions in
+# tests/review-pr.test.sh (the same pins the modifier block's own prose already
+# named as having pinned the broken literal, still unbraced long after the
+# production side was fixed) and two `doc:name` pairing loops in
+# tests/review-child-handoff.test.sh, where `:r` quietly strips the `.md` off
+# the doc path and `:s` is a hard `bad substitution`. There is now no fourth
+# copy to declare a boundary against.
 #
 # The enumeration was widened five times (plugins/lib → +commands/skills/agents/
 # hooks → +tests/tools); each widening found live hits, so it is deliberately
@@ -428,6 +350,288 @@ _xshell_is_shell_surface() {
          | grep -qE '^#!.*[/ ](ba|z|k|a|da)?sh([[:space:]]|$)' ;;
   esac
 }
+
+echo
+echo "== zsh parameter modifiers: an unbraced \$var:<letter> silently eats the colon =="
+
+# THE CLASS. Every `bash` fence in a command/skill markdown is executed by the
+# harness through /bin/zsh on macOS, and zsh applies HISTORY-STYLE MODIFIERS to
+# a brace-less parameter expansion: `"$sha:refs/heads/x"` expands as
+# `${sha:r}` + `efs/heads/x`, i.e. `<sha>efs/heads/x`. The colon is gone, the
+# refspec is garbage, and `git push` dies with "src refspec ... does not match
+# any" — a failure whose message names neither zsh nor the modifier. bash
+# expands the identical string correctly, so a bash-only local run never sees
+# it. Found live on the trust-anchor publish in commands/review-pr.md, which had
+# shipped this shape and whose test pinned the broken literal.
+# `P` (realpath) is in the list because zsh has it and omitting it made the
+# guard blind to `"$dir:Pxyz"` — proven live: `zsh -c 'V=/tmp/x; print -r --
+# "$V:Prefs"'` prints `/private/tmp/xrefs`, the colon and the `P` both eaten.
+#
+# THE LETTER CLASS IS A CLAIM ABOUT ZSH, and it used to be wrong in the
+# permissive direction: `p`, `U`, `W`, `x` and `X` were listed as modifiers and
+# zsh applies none of them to a parameter expansion (`zsh -c 'V=/tmp/a.txt;
+# print -r -- "$V:Urest"'` prints `/tmp/a.txt:Urest`, colon intact — `p` is a
+# history-expansion-only modifier, and `W`/`x`/`X` need forms this shape never
+# reaches). Harmless while the corpus was five plugin directories and empty of
+# them; the moment #413 pointed the guard at `tests/` it started punishing
+# PowerShell, because `"-Path $env:UBERDEV_JUNCTION_PATH"` in
+# tests/review-child-handoff.test.sh is a namespace reference that no shell ever
+# expands and that zsh leaves alone. A guard that reds on a line zsh does not
+# mangle cannot be fixed by bracing anything, so it is not a guard. The class is
+# now exactly the set zsh really applies, pinned in BOTH directions by the live
+# rows at the end of this block: no letter in it is decoration, and no letter
+# outside it is a blind spot.
+ZSH_MODIFIER_LETTERS='aAcefFghlPqQrstuw'
+# The name class admits DIGITS and the punctuation parameters, because a
+# positional parameter is mangled exactly like a named one and the old
+# `\$[A-Za-z_]` anchor could never match it: `zsh -c 'f(){ print -r --
+# "$1:refs/heads/x"; }; f abc123'` prints `abc123efs/heads/x`. A helper doing
+# `git push origin "$1:refs/heads/$b"` was invisible to this guard.
+ZSH_MODIFIER_NAME_HEAD='A-Za-z_0-9@*#?-'
+# ONE detector, four consumers: the corpus scan, the dead-marker row, the
+# anti-vacuity row and the anti-false-positive row. A second copy of this regex
+# is exactly the "one contract, N uncompared copies" drift this file's own header
+# is about — every row below must fire on the same regex the scan uses, or it is
+# proving something about a detector that is not the one shipping.
+ZSH_MODIFIER_DETECT="\\\$[$ZSH_MODIFIER_NAME_HEAD][A-Za-z0-9_]*:[$ZSH_MODIFIER_LETTERS]"
+# Comment-stripped, because the two braced call sites NAME the broken shape in
+# order to explain why the braces are load-bearing — and a guard that punished
+# its own explanation would be unfixable (the S13.11d/S21.9 precedent).
+#
+# THE ALLOW MARKER, same mechanism and same reason as the tied guard's below:
+# the #413 widening sweeps in the rows that MUST keep the broken shape — this
+# block's own anti-vacuity heredoc and its three live `zsh -c` probes, which
+# prove the mangle by performing it. Excluding this FILE would go blind to real
+# drift across a thousand lines, so the exemption is keyed on a marker that has
+# to sit in a TRAILING COMMENT on the offending line, and the two rows after the
+# scan keep it honest: every marker must sit on a line the detector really would
+# have caught, and the marked-line inventory is pinned per file. Marker and
+# matcher are separate variables on purpose — the matcher needs a literal `#`,
+# so interpolating the marker keeps these two definitions from registering as
+# markers themselves.
+ZSH_MODIFIER_MARKER='zsh-modifier-fixture'
+ZSH_MODIFIER_ALLOW="#[^#]*$ZSH_MODIFIER_MARKER"
+ZSH_MODIFIER_HITS=""
+ZSH_MODIFIER_MARKED=""
+while IFS= read -r zsh_scan_file; do
+  _xshell_is_shell_surface "$zsh_scan_file" || continue
+  zsh_scan_rel="${zsh_scan_file#"$REPO_ROOT"/}"
+  # Numbered BEFORE either filter, so a reported number is the line's real one.
+  # The pre-#413 form stripped whole-line comments first and reported post-strip
+  # offsets; that was survivable across five plugin directories and is not
+  # across two hundred test files, where the reader has to find the hit by hand.
+  zsh_scan_hit="$(grep -nE "$ZSH_MODIFIER_DETECT" "$zsh_scan_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -vE "$ZSH_MODIFIER_ALLOW" \
+    || true)"
+  # EVERY line carries the path, not just the first — the rows below parse these
+  # entries back apart on `:`.
+  while IFS= read -r zsh_scan_line; do
+    [ -n "$zsh_scan_line" ] || continue
+    ZSH_MODIFIER_HITS="$ZSH_MODIFIER_HITS${ZSH_MODIFIER_HITS:+
+}$zsh_scan_rel:$zsh_scan_line"
+  done <<EOF_ZSH_SCAN_HIT
+$zsh_scan_hit
+EOF_ZSH_SCAN_HIT
+  zsh_scan_mark="$(grep -nE "$ZSH_MODIFIER_ALLOW" "$zsh_scan_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    || true)"
+  while IFS= read -r zsh_scan_line; do
+    [ -n "$zsh_scan_line" ] || continue
+    ZSH_MODIFIER_MARKED="$ZSH_MODIFIER_MARKED${ZSH_MODIFIER_MARKED:+
+}$zsh_scan_rel:$zsh_scan_line"
+  done <<EOF_ZSH_SCAN_MARK
+$zsh_scan_mark
+EOF_ZSH_SCAN_MARK
+done <<EOF_ZSH_SCAN
+$(_xshell_corpus)
+EOF_ZSH_SCAN
+if [ -z "$ZSH_MODIFIER_HITS" ]; then
+  echo "  PASS  no plugin, test or tool shell surface has an unbraced \$var:<modifier-letter>"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  an unbraced \$var:<modifier-letter> would be mangled by zsh — brace it as \${var}:"
+  printf '        %s\n' "$ZSH_MODIFIER_HITS"
+  FAIL=$((FAIL + 1))
+fi
+
+# The allow-list must not be able to hide anything. A marker on a line the
+# detector would NOT have caught is either decoration or a fishing attempt to
+# neutralise a whole region, and either way it makes the exemption unreviewable.
+ZSH_MODIFIER_DEAD_MARKERS=""
+while IFS= read -r zsh_modifier_entry; do
+  [ -n "$zsh_modifier_entry" ] || continue
+  # `rel:NNN:content` — two shortest-prefix strips leave the content, and the
+  # content is what the detector has to agree is a real mangled expansion.
+  zsh_modifier_body="${zsh_modifier_entry#*:}"
+  zsh_modifier_body="${zsh_modifier_body#*:}"
+  printf '%s\n' "$zsh_modifier_body" | grep -qE "$ZSH_MODIFIER_DETECT" && continue
+  ZSH_MODIFIER_DEAD_MARKERS="$ZSH_MODIFIER_DEAD_MARKERS${ZSH_MODIFIER_DEAD_MARKERS:+
+}$zsh_modifier_entry"
+done <<EOF_ZSH_MODIFIER_DEAD
+$ZSH_MODIFIER_MARKED
+EOF_ZSH_MODIFIER_DEAD
+if [ -z "$ZSH_MODIFIER_DEAD_MARKERS" ]; then
+  echo "  PASS  every $ZSH_MODIFIER_MARKER marker sits on an expansion the detector really catches"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a $ZSH_MODIFIER_MARKER marker exempts a line the detector would not have flagged"
+  printf '        %s\n' "$ZSH_MODIFIER_DEAD_MARKERS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must not grow silently. The inventory is pinned per file, so ADDING
+# an exemption is a diff a reviewer has to approve rather than a line that
+# quietly stops being scanned. Both directions matter: a count that DROPS means
+# a deliberately-broken fixture got "consistency-fixed" and the rows below
+# stopped proving anything.
+ZSH_MODIFIER_INVENTORY="$(printf '%s\n' "$ZSH_MODIFIER_MARKED" \
+  | grep -v '^$' \
+  | sed 's/:[0-9][0-9]*:.*$//' \
+  | sort | uniq -c \
+  | sed 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]][[:space:]]*\(.*\)$/\2 \1/')"
+ZSH_MODIFIER_INVENTORY_EXPECTED='tests/crossplatform-shell-wrappers.test.sh 6'
+if [ "$ZSH_MODIFIER_INVENTORY" = "$ZSH_MODIFIER_INVENTORY_EXPECTED" ]; then
+  echo "  PASS  the modifier allow-list is exactly the pinned fixture inventory"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the modifier allow-list drifted from its pinned inventory"
+  printf '        expected: %s\n' "$ZSH_MODIFIER_INVENTORY_EXPECTED"
+  printf '        actual:   %s\n' "$ZSH_MODIFIER_INVENTORY"
+  FAIL=$((FAIL + 1))
+fi
+
+# Anti-vacuity: the grep above must actually fire on the shape, and zsh must
+# actually mangle it. Both proven here so a future edit cannot quietly relax
+# either half into a check that can never red.
+#
+# All three rows carry the allow marker because the corpus scan above now reads
+# THIS file too, and they have to keep the broken shape or the row proves
+# nothing. The marker is load-bearing in both directions: the scan skips them,
+# and the dead-marker row re-checks that each one still matches the detector —
+# the same assertion this row makes, from the other side.
+ZSH_MODIFIER_DETECTOR_GAPS=""
+while IFS= read -r zsh_modifier_shape; do
+  [ -n "$zsh_modifier_shape" ] || continue
+  printf '%s\n' "$zsh_modifier_shape" \
+    | grep -qE "$ZSH_MODIFIER_DETECT" \
+    || ZSH_MODIFIER_DETECTOR_GAPS="$ZSH_MODIFIER_DETECTOR_GAPS${ZSH_MODIFIER_DETECTOR_GAPS:+
+}$zsh_modifier_shape"
+done <<'EOF_ZSH_MODIFIER_SHAPES'
+git push origin "$publish_sha:refs/heads/$live_branch"  # zsh-modifier-fixture: anti-vacuity row
+git push origin "$1:refs/heads/$live_branch"  # zsh-modifier-fixture: anti-vacuity row
+printf '%s\n' "$dir:Pxyz"  # zsh-modifier-fixture: anti-vacuity row
+EOF_ZSH_MODIFIER_SHAPES
+if [ -z "$ZSH_MODIFIER_DETECTOR_GAPS" ]; then
+  echo "  PASS  the detector reds on every mangled shape, named and positional"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector does not match shapes it exists to find (vacuous)"
+  printf '        %s\n' "$ZSH_MODIFIER_DETECTOR_GAPS"
+  FAIL=$((FAIL + 1))
+fi
+
+# ...and it must NOT punish anything zsh leaves alone, or the corpus could never
+# go green. The braced fix, a `$var:` followed by a letter that is NOT a
+# modifier, the PowerShell namespace reference that the pre-#413 letter class
+# reddened for no reason, and a colon that is not preceded by an expansion at
+# all: every one of these survives zsh byte-for-byte and must survive the guard.
+ZSH_MODIFIER_FALSE_POSITIVES=""
+while IFS= read -r zsh_modifier_clean; do
+  [ -n "$zsh_modifier_clean" ] || continue
+  ! printf '%s\n' "$zsh_modifier_clean" | grep -qE "$ZSH_MODIFIER_DETECT" \
+    || ZSH_MODIFIER_FALSE_POSITIVES="$ZSH_MODIFIER_FALSE_POSITIVES${ZSH_MODIFIER_FALSE_POSITIVES:+
+}$zsh_modifier_clean"
+done <<'EOF_ZSH_MODIFIER_CLEAN'
+git push origin "${publish_sha}:refs/heads/${live_branch}"
+git push origin "${1}:refs/heads/$live_branch"
+"-Path $env:UBERDEV_JUNCTION_PATH "
+"-Target $env:UBERDEV_JUNCTION_TARGET | Out-Null",
+new-item -path $env:X -target $env:Y
+printf '%s\n' "${dir}:Pxyz"
+case "$line" in *:done) ;; esac
+EOF_ZSH_MODIFIER_CLEAN
+if [ -z "$ZSH_MODIFIER_FALSE_POSITIVES" ]; then
+  echo "  PASS  the detector ignores the braced fix and every colon zsh leaves alone"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the detector reds on a line zsh does not mangle — the corpus could never go green"
+  printf '        %s\n' "$ZSH_MODIFIER_FALSE_POSITIVES"
+  FAIL=$((FAIL + 1))
+fi
+if ! command -v zsh >/dev/null 2>&1; then
+  echo "  SKIP  live zsh mangling proof (zsh not on PATH)"
+else
+  ZSH_UNBRACED="$(zsh -c 'V=abc123; print -r -- "$V:refs/heads/x"' 2>/dev/null)"  # zsh-modifier-fixture: live proof
+  ZSH_BRACED="$(zsh -c 'V=abc123; print -r -- "${V}:refs/heads/x"' 2>/dev/null)"
+  # The two shapes the shipped detector could not see, proven mangled for real
+  # so neither half of the widening can be relaxed back into a vacuous check.
+  ZSH_POSITIONAL="$(zsh -c 'f(){ print -r -- "$1:refs/heads/x"; }; f abc123' 2>/dev/null)"  # zsh-modifier-fixture: live proof
+  ZSH_REALPATH="$(zsh -c 'V=abc123; print -r -- "$V:Prefs"' 2>/dev/null)"  # zsh-modifier-fixture: live proof
+  if [ "$ZSH_UNBRACED" = 'abc123efs/heads/x' ] && [ "$ZSH_BRACED" = 'abc123:refs/heads/x' ] \
+     && [ "$ZSH_POSITIONAL" = 'abc123efs/heads/x' ] && [ "$ZSH_REALPATH" != 'abc123:Prefs' ]; then
+    echo "  PASS  live zsh: unbraced loses the colon ('$ZSH_UNBRACED'), positional and :P too, braced survives"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh modifier behaviour drifted: unbraced='$ZSH_UNBRACED' braced='$ZSH_BRACED' positional='$ZSH_POSITIONAL' realpath='$ZSH_REALPATH'"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # THE LETTER CLASS AGAINST REALITY, both directions, one letter at a time.
+  # A hand-maintained list of modifier letters is a claim, and the pre-#413 list
+  # was wrong in the direction that makes a guard unfixable: five letters that
+  # zsh does not apply were in it, so correct lines reddened. The inverse error
+  # is the blind spot the `P` widening had to fix by hand. Neither can recur
+  # silently while these two rows drive every ASCII letter through the real
+  # shell and compare the answer to the class the detector ships.
+  #
+  # The probe string is BUILT, never written literally, so the scan above finds
+  # no unbraced shape here to flag — the `$` arrives through printf.
+  ZSH_MODIFIER_ALPHABET='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  ZSH_MODIFIER_DECORATION=""
+  ZSH_MODIFIER_BLIND=""
+  zsh_modifier_i=0
+  while [ "$zsh_modifier_i" -lt "${#ZSH_MODIFIER_ALPHABET}" ]; do
+    zsh_modifier_letter="${ZSH_MODIFIER_ALPHABET:$zsh_modifier_i:1}"
+    zsh_modifier_i=$((zsh_modifier_i + 1))
+    zsh_modifier_src="$(printf 'V=/tmp/abc.txt; print -r -- "%sV:%srest"' '$' "$zsh_modifier_letter")"
+    zsh_modifier_out="$(zsh -c "$zsh_modifier_src" 2>&1)"
+    zsh_modifier_rc=$?
+    # "zsh mangled it" is colon-based on purpose: `:a`/`:A`/`:P` resolve against
+    # the real filesystem, so their OUTPUT differs between macOS and ubuntu while
+    # the thing under test — the eaten colon — does not. A non-zero rc counts too
+    # (`:s` is a hard `bad substitution`, which kills the fence outright).
+    if [ "$zsh_modifier_rc" = 0 ] && [ "$zsh_modifier_out" = "/tmp/abc.txt:${zsh_modifier_letter}rest" ]; then
+      zsh_modifier_real=0
+    else
+      zsh_modifier_real=1
+    fi
+    case "$ZSH_MODIFIER_LETTERS" in
+      *"$zsh_modifier_letter"*) zsh_modifier_listed=1 ;;
+      *)                        zsh_modifier_listed=0 ;;
+    esac
+    if [ "$zsh_modifier_listed" = 1 ] && [ "$zsh_modifier_real" = 0 ]; then
+      ZSH_MODIFIER_DECORATION="$ZSH_MODIFIER_DECORATION${ZSH_MODIFIER_DECORATION:+ }$zsh_modifier_letter"
+    fi
+    if [ "$zsh_modifier_listed" = 0 ] && [ "$zsh_modifier_real" = 1 ]; then
+      ZSH_MODIFIER_BLIND="$ZSH_MODIFIER_BLIND${ZSH_MODIFIER_BLIND:+ }$zsh_modifier_letter"
+    fi
+  done
+  if [ -z "$ZSH_MODIFIER_DECORATION" ]; then
+    echo "  PASS  live zsh: every letter in the detector's class is a modifier zsh really applies"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  the detector reds on letters zsh leaves alone — drop them: $ZSH_MODIFIER_DECORATION"
+    FAIL=$((FAIL + 1))
+  fi
+  if [ -z "$ZSH_MODIFIER_BLIND" ]; then
+    echo "  PASS  live zsh: every modifier zsh really applies is in the detector's class"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  zsh mangles letters the detector cannot see — add them: $ZSH_MODIFIER_BLIND"
+    FAIL=$((FAIL + 1))
+  fi
+fi
 
 echo
 echo "== zsh tied parameters: a \`local path\`/\`local … status\` breaks the fence =="
