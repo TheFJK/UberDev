@@ -504,5 +504,23 @@ else
 fi
 rm -rf "$dp"
 
+# V30 — the Codex tree stays RETIRED in the generated target (#381, and the
+# drift it hid, #410). The generator stopped emitting codex/ and no MANAGED_PATH
+# covers it, so a pre-#381 target keeps its stale tree forever while every gate
+# scoped to plugins/prkit stays green over it; the published prkit repo was
+# carrying 54 such files. The anti-false-positive side is V1 above — a freshly
+# generated tree has no codex/ and must keep passing — so no new clean row.
+CODEX_RETIRED_DIAGNOSTIC='codex-retired: generated target still carries a codex/ tree (UberDev #381)'
+expect_fail_diag "V30 codex directory fails" \
+  'mkdir -p "$d/codex" && printf "stale\n" > "$d/codex/AGENTS.md"' "$CODEX_RETIRED_DIAGNOSTIC"
+# V30b proves the check is `-e`, not `-d`: a stray regular file is still residue.
+expect_fail_diag "V30b codex regular file fails" \
+  'printf "stale\n" > "$d/codex"' "$CODEX_RETIRED_DIAGNOSTIC"
+# V30c proves it is `-e || -L`, not `-e` alone: `-e` FOLLOWS symlinks, so a
+# DANGLING link named codex — the plausible leftover of a hand-cleanup — would
+# slip straight through a bare `-e` test.
+expect_fail_diag "V30c dangling codex symlink fails" \
+  'ln -s "$dp/gone" "$d/codex"' "$CODEX_RETIRED_DIAGNOSTIC"
+
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

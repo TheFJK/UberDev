@@ -97,6 +97,7 @@ jobs:
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
           bash tests/prkit-generate.test.sh && \
+          bash tests/prkit-publish.test.sh && \
           bash tests/status.test.sh && \
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
@@ -315,6 +316,10 @@ jobs:
         #   - prkit-rewrite.test.sh
         #   - prkit-verify.test.sh
         #   - prkit-generate.test.sh
+        #   - prkit-publish.test.sh        (sha256 over exact source bytes; no
+        #                                   .gitattributes exists, so Windows
+        #                                   checks out with core.autocrlf=true
+        #                                   and every digest would differ)
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
 #   - status.test.sh                      (#310 fixtures drive python3 over

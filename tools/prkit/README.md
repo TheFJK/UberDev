@@ -32,12 +32,21 @@ git -C ../prkit add -A && git -C ../prkit commit -m "chore: initial prkit 0.1.0"
 
 | File | Role |
 |---|---|
-| `manifest.txt` | Claude copy set (count-locked at 37 by `tests/prkit-manifest.test.sh`) |
+| `manifest.txt` | Claude copy set (count-locked at 38 by `tests/prkit-manifest.test.sh`) |
 | `managed-path-guard.py` | Shared generator/verifier containment guard: component-wise `lstat`, Windows reparse/reserved-name checks, required postconditions, and sealed-tree scans |
 | `rewrite.sh` | `prkit_neutralize` (de-namespace out-of-set) + `prkit_apply_rewrites` (slug + blanket); sourced |
 | `templates/` | Standalone-only scaffold files (`{{VERSION}}`/`{{DATE}}`) |
-| `verify.sh` | Anti-drift gate: token guard, out-of-set resolution, referential integrity, syntax (sh/py/json), scaffold + placeholder checks. Runs at **generation time in UberDev** — it is NOT copied into the prkit repo. |
+| `verify.sh` | Anti-drift gate: token guard, out-of-set resolution, referential integrity, syntax (sh/py/json), scaffold + placeholder checks, `codex/`-retirement assertion. Runs at **generation time in UberDev** — it is NOT copied into the prkit repo. |
+| `published.json` | Publication currency register (#410): prkit version last published, per-file source sha256, and declared `pending` divergences |
+| `published-check.py` | Verifies `published.json` against the live tree; `--refresh --prkit-version X.Y.Z` rewrites it. Gated by `tests/prkit-publish.test.sh`. |
 | `generate.sh` | Orchestrator |
+
+Nothing here is copied downstream, and no guard is duplicated there either. The
+`trap … RETURN` class, for instance, is gated upstream by
+`tests/crossplatform-shell-wrappers.test.sh`, whose corpus already covers
+`plugins/uberdev/skills` (the copy source) and `tools/` (the generator,
+including `templates/*.tmpl`); a second detector inside prkit would be the
+"one contract, N uncompared copies" drift RFC 0016 is about.
 
 The generated prkit repo ships its own `.github/workflows/ci.yml`, which re-checks
 the committed tree with `bash -n` + `ast.parse` + `jq empty` + an inline
@@ -59,10 +68,38 @@ that adversarial race requires platform-specific handle-relative APIs
 Windows), which are outside this generator's portability contract. The code and
 documentation intentionally do not claim protection against that actor.
 
+## Publish ritual
+
+`generate.sh` never commits and never pushes (RFC 0014 §5.1) — publication is a
+deliberate, ordered sequence, run from a synced `main` **after** the UberDev
+change has landed, so the recorded digests are the ones that were shipped:
+
+```bash
+git -C ../prkit status --porcelain          # must be empty
+tools/prkit/generate.sh --target ../prkit --version X.Y.Z
+git -C ../prkit add -A
+git -C ../prkit commit -m "chore: regenerate prkit X.Y.Z"
+git -C ../prkit tag vX.Y.Z && git -C ../prkit push --follow-tags
+gh release create vX.Y.Z -R TheFJK/prkit --notes-file <notes>
+python3 tools/prkit/published-check.py --refresh --prkit-version X.Y.Z
+python3 tools/prkit/published-check.py      # must print `published: OK — …`
+```
+
+The refresh is the **last** step, and it belongs in the same sitting: it is what
+records that this exact source tree is what the published artifact was built
+from. `tests/prkit-publish.test.sh` reds in CI while a copy-set file is ahead of
+the record and not listed in `pending`.
+
+**Never hand-patch the prkit repo.** UberDev is the sole source of truth and
+`generate.sh` is the only legal producer; a downstream edit closes the symptom
+and is reverted by the next generation.
+
 ## Adding a file to prkit
 
 1. Add its path to `manifest.txt`, and bump the count assert in
-   `tests/prkit-manifest.test.sh` (37).
+   `tests/prkit-manifest.test.sh` (38). Then re-run
+   `python3 tools/prkit/published-check.py --refresh --prkit-version <current>`,
+   or `tests/prkit-publish.test.sh` P2 reds on the manifest/record mismatch.
 2. If it introduces a new `uberdev` pattern the blanket rule misses, or a new
    out-of-set `prkit:<name>` ref, the verify gate fails generation — extend
    `rewrite.sh` (never weaken the guard).

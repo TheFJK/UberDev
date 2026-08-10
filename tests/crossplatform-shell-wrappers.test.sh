@@ -344,7 +344,7 @@ _xshell_corpus() {
 # everything.
 _xshell_is_shell_surface() {
   case "${1##*/}" in
-    *.sh|*.md) return 0 ;;
+    *.sh|*.md|*.tmpl) return 0 ;;
     *.*)       return 1 ;;
     *) head -n 1 "$1" 2>/dev/null \
          | grep -qE '^#!.*[/ ](ba|z|k|a|da)?sh([[:space:]]|$)' ;;
@@ -631,6 +631,51 @@ else
     echo "  FAIL  zsh mangles letters the detector cannot see — add them: $ZSH_MODIFIER_BLIND"
     FAIL=$((FAIL + 1))
   fi
+fi
+
+echo
+echo "== shell-surface predicate: every shell-bearing file shape is in scope =="
+
+# THE SIXTH WIDENING, and the one that shipped downstream. `tools/prkit/` is in
+# the corpus, but every file under `tools/prkit/templates/` ends `.tmpl`, so the
+# `*.*` arm skipped ALL EIGHT of them — including `ci.yml.tmpl`, the one
+# template that emits shell (`run: |` blocks) into the generated prkit repo, and
+# `README.md.tmpl` / `CHANGELOG.md.tmpl`, whose basenames end `.tmpl` and so
+# never reached the `*.md` arm either. A `trap … RETURN` or a tied `local path`
+# authored into the generator's own OUTPUT was invisible to both guards below.
+#
+# Green on arrival: both consumers (ZSH_TRAP_RETURN_DETECT, ZSH_TIED_DECL) were
+# replayed against all eight templates before the widening landed — zero hits.
+# It is insurance for the surface that publishes a second repository (#410),
+# not a live-bug fix.
+#
+# The negative half keeps it a PREDICATE and not "everything": data files
+# (`.json`) and non-shell code (`.py`) must stay out, or the two detectors below
+# would start reading bytes they cannot reason about.
+XSHELL_PREDICATE_GAPS=""
+for xs_yes in "tools/prkit/templates/ci.yml.tmpl" \
+              "tools/prkit/templates/gitignore.tmpl" \
+              "tools/prkit/templates/README.md.tmpl" \
+              "plugins/uberdev/hooks/session-start" \
+              "tests/crossplatform-shell-wrappers.test.sh"; do
+  if [ ! -e "$REPO_ROOT/$xs_yes" ]; then
+    XSHELL_PREDICATE_GAPS="$XSHELL_PREDICATE_GAPS missing:$xs_yes"
+  elif ! _xshell_is_shell_surface "$REPO_ROOT/$xs_yes"; then
+    XSHELL_PREDICATE_GAPS="$XSHELL_PREDICATE_GAPS not-scanned:$xs_yes"
+  fi
+done
+for xs_no in "plugins/uberdev/policy/model-routing-v1.json" \
+             "plugins/uberdev/lib/model_routing.py"; do
+  if [ -e "$REPO_ROOT/$xs_no" ] && _xshell_is_shell_surface "$REPO_ROOT/$xs_no"; then
+    XSHELL_PREDICATE_GAPS="$XSHELL_PREDICATE_GAPS wrongly-scanned:$xs_no"
+  fi
+done
+if [ -z "$XSHELL_PREDICATE_GAPS" ]; then
+  echo "  PASS  the predicate admits every shell-bearing shape and no data file"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  shell-surface predicate scope drift:$XSHELL_PREDICATE_GAPS"
+  FAIL=$((FAIL + 1))
 fi
 
 echo
