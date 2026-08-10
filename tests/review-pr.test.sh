@@ -664,6 +664,22 @@ rm -f "$ANCHOR_PUSH_FIXTURE" "$ANCHOR_PUSH_LOG" "$ANCHOR_GH_STATE"
 # This block closes the class rather than the instance: it feeds gh's actual
 # response shape through the gate's OWN filter, so any projection that cannot
 # recover the head-repository slug from a real document fails here.
+# This block needs a REAL `jq` binary on PATH, because its whole point is to run
+# the gate's own filter rather than a re-implementation of it. gh's `--jq` is
+# internal to gh; the external binary is what the faithful stub shells out to.
+# `test.yml` installs jq nowhere, and windows-latest Git Bash does not carry it,
+# so guard exactly as eight other suites here already do (install.test.sh:51,
+# workflow-args.test.sh:48, merge.test.sh:2444/:2620, goal-verdict-receipt:43,
+# crossplatform-shell-wrappers:694/:1056).
+#
+# The skip is LOUD and it is NOT vacuous: the defect this covers is a gh JSON
+# field name, which is platform-independent, and ubuntu + macOS both ship jq and
+# both run this suite. Skipping on the one platform without jq loses no coverage
+# of the class. A silent skip, or one that fired everywhere, would be worse than
+# no test at all — so say so on stderr and count it separately from a pass.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP  R9.17 (#429) — jq not on PATH (covered on ubuntu + macOS; the defect is a gh field name, not a platform behaviour)" >&2
+else
 REAL_GH_FIXTURE="$(mktemp)"
 # Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
 # indented one: the gate body legitimately contains `  } <<<"$live_identity"`
@@ -745,10 +761,17 @@ then
   echo "  PASS  R9.17 (#429) — publish gate recovers the head-repository slug from gh's real response shape, still refuses forks and foreign head repos"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  R9.17 (#429) — publish gate cannot identify a same-repo PR from gh's real response shape"
+  # Name the inner exit code. The harness exits 31..36 for specific assertion
+  # failures and 90..93 for stub misuse, so a bare FAIL line cannot distinguish
+  # "the gate is wrong" from "this harness could not run here" — and a
+  # Windows-only failure is invisible to a macOS-local run, where the difference
+  # between those two costs a CI round-trip each time.
+  R917_RC=$?
+  echo "  FAIL  R9.17 (#429) — publish gate cannot identify a same-repo PR from gh's real response shape (inner rc=$R917_RC; 31/32=same-repo publish failed, 33/34=fork not refused, 35/36=foreign owner not refused, 90-93=stub misuse, 126/127=missing or non-executable binary)"
   FAIL=$((FAIL + 1))
 fi
 rm -f "$REAL_GH_FIXTURE" "$REAL_GH_PUSH_LOG" "$REAL_GH_STATE"
+fi
 
 # R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
 # `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
