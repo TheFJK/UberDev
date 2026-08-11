@@ -174,9 +174,25 @@ CI_MONITOR_ROOTS="$(mktemp -d)"
 # `pushed` (one recorded ci-code-fixer push), `zero` (0-byte) or `garbage`.
 make_ci_monitor_root() {
   local name="$1" kind="$2" run_id="${3:-$CI_MONITOR_RUN_ID_DEFAULT}"
-  local root="$CI_MONITOR_ROOTS/$name" rundir sha40
-  rundir="$root/.uberdev/research/$run_id"
-  mkdir -p "$rundir"
+  local root rundir sha40 fixture
+  # #427 — the MONITOR fence resolves its own run now: it opens with the
+  # rehydration prologue instead of reading RESEARCH_DIR_ABS out of a scalar an
+  # exited shell bound. So the fake root is a REAL run (real repository, real
+  # uberdev_command_workspace_prepare, real descriptor and reservation markers),
+  # not a bare `mkdir -p`. The driver still stubs `git` — the fence's toplevel
+  # lookup is faked so the path composition stays under test — but everything
+  # the prologue reads off disk is now genuinely there.
+  fixture="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+    "$CI_MONITOR_ROOTS/$name" "$REPO_ROOT/plugins/uberdev" 73 "$run_id" 2>/dev/null)" || {
+    echo "review-pr-phase3-ci: could not seed the CI monitor run fixture ($name)" >&2
+    exit 1
+  }
+  root="$(printf '%s\n' "$fixture" | sed -n 1p)"
+  rundir="$(printf '%s\n' "$fixture" | sed -n 3p)"
+  [ -n "$root" ] && [ -n "$rundir" ] || {
+    echo "review-pr-phase3-ci: CI monitor run fixture produced no paths ($name)" >&2
+    exit 1
+  }
   sha40="$(printf 'c%.0s' $(seq 40))"
   case "$kind" in
     none) : ;;
@@ -404,14 +420,27 @@ if [ -s "$CI_MONITOR_FIXTURE" ]; then
     "S2-RT.14 — a non-JSON ledger halts the green terminal instead of defaulting" \
     "40:0" 1 "ci_phase_outcome data.outcome=halted data.subreason=ci_loop_state_unreadable" \
     "$CI_MONITOR_ROOT_GARBAGE"
-  # S2-RT.15 — RUN_ID is the one documented cross-fence carry. Entered without
-  # it, the ledger resolves under a path that does not exist, and "does not
-  # exist" is the answer `green` — a wrong outcome indistinguishable from a
-  # right one. It must be a hard error before any watch runs, with no audit
-  # event claiming a verdict the fence never reached.
+  # S2-RT.15 — RUN_ID is the primary cross-fence carry. Entered without it AND
+  # without a recoverable active-run pointer, the ledger would resolve under a
+  # path that does not exist, and "does not exist" is the answer `green` — a
+  # wrong outcome indistinguishable from a right one. It must be a hard error
+  # before any watch runs, with no audit event claiming a verdict the fence
+  # never reached.
+  #
+  # #427 — the pointer is the SECOND channel, so the run root used here is one
+  # whose pointer has been removed. A root that still carries its pointer is
+  # covered by S2-RT.15b below: recovery is a feature, and this row must not
+  # accidentally assert that it fails.
+  CI_MONITOR_ROOT_NOPOINTER="$(make_ci_monitor_root nopointerledger pushed)"
+  rm -f "$CI_MONITOR_ROOT_NOPOINTER/.uberdev/runs/.review-active-run.json"
   run_ci_monitor_halt_case \
-    "S2-RT.15 — the fence refuses to run at all without RUN_ID (no silent green)" \
-    "40:0" 2 "" "$CI_MONITOR_ROOT_PUSHED" ""
+    "S2-RT.15 — the fence refuses to run without RUN_ID and without a pointer (no silent green)" \
+    "40:0" 2 "" "$CI_MONITOR_ROOT_NOPOINTER" ""
+  run_ci_monitor_case \
+    "S2-RT.15b — the fence recovers its run from the active-run pointer when RUN_ID is lost" \
+    "40:0" "green green_after_fix 1 40" \
+    "ci_monitor_green outcome=green_after_fix passes=1 elapsed_sec=40" \
+    "" "" "$CI_MONITOR_ROOT_PUSHED" ""
   # S2-RT.16 — probe-only (`--no-ci-fix`) never upgrades: 6c.4 skips the fixer
   # arms, so a ledger left by an earlier run is not evidence about this head.
   run_ci_monitor_case \
@@ -3398,6 +3427,22 @@ git() {
 }
 PR_NUMBER=73
 WORKTREE_ROOT=/repo
+# #427 — the fence opens with review_fleet_rehydrate, which fills EMPTY carriers
+# and leaves an established run alone. This row is about the cross-repository
+# gate, and it runs against a fully stubbed `git` whose toplevel is a path that
+# does not exist, so it establishes the run itself rather than leaving a partial
+# set that would send the fence down the recovery path.
+RUN_ID=20260809-000000-abc1234
+RESEARCH_DIR_ABS=/repo/.uberdev/research/$RUN_ID
+MARKER_DIR=/repo/.uberdev/runs/$RUN_ID
+CODE_FIXER_CONTRACT="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py"
+DIFF_ARTIFACT_PATH="$RESEARCH_DIR_ABS/pr-diff.md"
+CRITERIA_PATH="$RESEARCH_DIR_ABS/review-criteria.md"
+COMMIT_RANGE_PATH="$RESEARCH_DIR_ABS/commit-range.txt"
+PHASE1_DISPOSITION_PATH="$RESEARCH_DIR_ABS/phase1-disposition.json"
+PHASE2_DISPOSITION_PATH="$RESEARCH_DIR_ABS/phase2-disposition.json"
+AGG_PATH="$RESEARCH_DIR_ABS/post-impl-review-final.md"
+UBERDEV_COMMAND_WORKSPACE_JSON='{"schema_version":1,"caller":"review-pr"}'
 . "$FENCE_FIXTURE"
 printf 'bound %s %s\n' \
   "${pr_head_branch:-${CI_PR_HEAD_BRANCH:-}}" \
@@ -3666,6 +3711,22 @@ audit() { printf 'audit %s\n' "$*" >>"$S33F_LOG"; }
 OUTCOME=unset
 RESEARCH_DIR_ABS="$S33F_RUN"
 UBERDEV_REVIEW_PLUGIN_ROOT="$S33F_PLUGIN"
+# #427 -- the fence opens with review_fleet_rehydrate, which fills EMPTY carriers
+# and leaves an established run alone. This section establishes the run itself
+# (it is about the probe-verdict carrier round-trip, not run resolution, and it
+# runs outside any repository), so it binds the whole set rather than a partial
+# one that would send the fence down the recovery path.
+RUN_ID=20260809-000000-abc1234
+WORKTREE_ROOT="$S33F_RUN"
+MARKER_DIR="$S33F_RUN"
+CODE_FIXER_CONTRACT="$S33F_PLUGIN/lib/code_fixer_contract.py"
+DIFF_ARTIFACT_PATH="$S33F_RUN/pr-diff.md"
+CRITERIA_PATH="$S33F_RUN/review-criteria.md"
+COMMIT_RANGE_PATH="$S33F_RUN/commit-range.txt"
+PHASE1_DISPOSITION_PATH="$S33F_RUN/phase1-disposition.json"
+PHASE2_DISPOSITION_PATH="$S33F_RUN/phase2-disposition.json"
+AGG_PATH="$S33F_RUN/post-impl-review-final.md"
+UBERDEV_COMMAND_WORKSPACE_JSON='{"schema_version":1,"caller":"review-pr"}'
 . "$S33F_FENCE"
 printf 'OUTCOME=%s\n' "$OUTCOME"
 S33F_ROUTE_DRIVER
@@ -3677,6 +3738,22 @@ OUTCOME=unset
 PR_NUMBER=73
 RESEARCH_DIR_ABS="$S33F_RUN"
 UBERDEV_REVIEW_PLUGIN_ROOT="$S33F_PLUGIN"
+# #427 -- the fence opens with review_fleet_rehydrate, which fills EMPTY carriers
+# and leaves an established run alone. This section establishes the run itself
+# (it is about the probe-verdict carrier round-trip, not run resolution, and it
+# runs outside any repository), so it binds the whole set rather than a partial
+# one that would send the fence down the recovery path.
+RUN_ID=20260809-000000-abc1234
+WORKTREE_ROOT="$S33F_RUN"
+MARKER_DIR="$S33F_RUN"
+CODE_FIXER_CONTRACT="$S33F_PLUGIN/lib/code_fixer_contract.py"
+DIFF_ARTIFACT_PATH="$S33F_RUN/pr-diff.md"
+CRITERIA_PATH="$S33F_RUN/review-criteria.md"
+COMMIT_RANGE_PATH="$S33F_RUN/commit-range.txt"
+PHASE1_DISPOSITION_PATH="$S33F_RUN/phase1-disposition.json"
+PHASE2_DISPOSITION_PATH="$S33F_RUN/phase2-disposition.json"
+AGG_PATH="$S33F_RUN/post-impl-review-final.md"
+UBERDEV_COMMAND_WORKSPACE_JSON='{"schema_version":1,"caller":"review-pr"}'
 # The documented outage shape: gh exits non-zero and prints stderr text where
 # the JSON projection should be.
 gh() { printf 'gh: connection refused\n'; return 1; }
@@ -3829,6 +3906,9 @@ S33_CONTRACT="$S33_TMP/contract.py"
 S33_PRELUDE="$S33_TMP/prelude.sh"
 S33_PLUGIN="$S33_TMP/plugin"
 S33_SIDECAR="$S33_TMP/ci-fix-iter1-ci1.launch.json"
+# The run identity every S33 row carries. Shape-valid so review_fleet_rehydrate
+# accepts it as a carried RUN_ID rather than falling through to recovery.
+S33_RUN_ID=20260809-000000-abc1234
 mkdir -p "$S33_WORKTREE" "$S33_PLUGIN/lib" \
   || { echo "FATAL: S33-RT could not seed its scratch tree" >&2; exit 2; }
 : >"$S33_TRAIL" || { echo "FATAL: S33-RT could not seed its scratch tree" >&2; exit 2; }
@@ -4063,10 +4143,29 @@ s33_run() {
   : >"$S33_LOG"
   : >"$S33_OUT"
   : >"$S33_ERR"
+  # #427 — the fences open with `review_fleet_rehydrate`, which FILLS EMPTY
+  # carriers and leaves an already-established run alone. This section
+  # establishes the run explicitly (it is about Phase 3's on-disk carriers, not
+  # about run resolution: `git rev-parse --show-toplevel` is stubbed to a
+  # non-existent `/repo` on purpose so the path composition stays under test),
+  # so it supplies the whole carrier set rather than a partial one. A partial
+  # set would send the fence down the recovery path, which has no repository to
+  # recover from here. The fresh-shell, nothing-bound proof of the same fences
+  # lives in tests/review-pr.test.sh, where it belongs.
   env ${@+"$@"} \
     FENCE_FIXTURE="$fence" \
     FENCE_LOG="$S33_LOG" \
     RESEARCH_DIR_ABS="$run_dir" \
+    RUN_ID="$S33_RUN_ID" \
+    WORKTREE_ROOT="$S33_WORKTREE" \
+    MARKER_DIR="$S33_WORKTREE/.uberdev/runs/$S33_RUN_ID" \
+    DIFF_ARTIFACT_PATH="$run_dir/pr-diff.md" \
+    CRITERIA_PATH="$run_dir/review-criteria.md" \
+    COMMIT_RANGE_PATH="$run_dir/commit-range.txt" \
+    PHASE1_DISPOSITION_PATH="$run_dir/phase1-disposition.json" \
+    PHASE2_DISPOSITION_PATH="$run_dir/phase2-disposition.json" \
+    AGG_PATH="$run_dir/post-impl-review-final.md" \
+    UBERDEV_COMMAND_WORKSPACE_JSON='{"schema_version":1,"caller":"review-pr"}' \
     UBERDEV_REVIEW_PLUGIN_ROOT="$S33_PLUGIN" \
     CODE_FIXER_CONTRACT="$S33_CONTRACT" \
     S33_PRELUDE="$S33_PRELUDE" \
@@ -4396,6 +4495,20 @@ WORKTREE_ROOT="$S34_REPO"
 RESEARCH_DIR_ABS="$S34_RUN"
 CODE_FIXER_CONTRACT="$S34_CONTRACT_PY"
 UBERDEV_REVIEW_PLUGIN_ROOT="$S34_PLUGIN_ROOT"
+# #427 -- the fence opens with review_fleet_rehydrate, which fills EMPTY
+# carriers and leaves an established run alone. This section establishes the
+# run itself (it is about the guarded push, not run resolution), so it binds
+# the whole set rather than a partial one that would send the fence down the
+# recovery path.
+RUN_ID=20260809-000000-abc1234
+MARKER_DIR="$S34_RUN"
+DIFF_ARTIFACT_PATH="$S34_RUN/pr-diff.md"
+CRITERIA_PATH="$S34_RUN/review-criteria.md"
+COMMIT_RANGE_PATH="$S34_RUN/commit-range.txt"
+PHASE1_DISPOSITION_PATH="$S34_RUN/phase1-disposition.json"
+PHASE2_DISPOSITION_PATH="$S34_RUN/phase2-disposition.json"
+AGG_PATH="$S34_RUN/post-impl-review-final.md"
+UBERDEV_COMMAND_WORKSPACE_JSON='{"schema_version":1,"caller":"review-pr"}'
 . "$S34_FENCE"
 printf 'OUTCOME=%s\n' "$OUTCOME"
 S34DRIVER

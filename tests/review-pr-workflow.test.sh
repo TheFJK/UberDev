@@ -564,20 +564,31 @@ fi
 echo "== B: the extracted mint fences really mint, bind and emit =="
 
 run_stage_fence() {  # FILE TOKEN OUTDIR -> envelope on stdout
-  local file="$1" token="$2" out="$3" body
+  local file="$1" token="$2" out="$3" body fixture repo research
   body="$(extract_fence "$file" "$token")" || return 1
-  mkdir -p "$out/repo/.uberdev/research/RID" || return 1
+  # #427 — the review-pr fences no longer read their run paths out of seeded
+  # scalars: each one opens with the rehydration prologue and resolves them from
+  # a run on disk. So the fixture is now a REAL run (real git repository, real
+  # uberdev_command_workspace_prepare, real command-workspace.json descriptor
+  # and active-run pointer) and the fence executes from inside it. The seeded
+  # scalars below stay for the /simplify fences this same helper drives, which
+  # have no prologue; where both are present the values agree by construction.
+  fixture="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+    "$out" "$REPO_ROOT/plugins/uberdev" 41 20260101-000000-abc123 2>/dev/null)" || return 1
+  repo="$(printf '%s\n' "$fixture" | sed -n 1p)"
+  research="$(printf '%s\n' "$fixture" | sed -n 3p)"
+  [ -n "$repo" ] && [ -n "$research" ] || return 1
   ( . "$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh" \
     && review_fleet_write_review_base \
-         "$out/repo/.uberdev/research/RID/review-base-identity.tsv" \
+         "$research/review-base-identity.tsv" \
          0000000000000000000000000000000000000000 main ) || return 1
   {
     echo 'set -u'
     echo "UBERDEV_REVIEW_PLUGIN_ROOT='$REPO_ROOT/plugins/uberdev'"
     echo "CODE_FIXER_CONTRACT='$CONTRACT'"
-    echo "WORKTREE_ROOT='$out/repo'"
-    echo "RESEARCH_DIR_ABS='$out/repo/.uberdev/research/RID'"
-    echo "DIFF_ARTIFACT_PATH='$out/repo/.uberdev/research/RID/diff.md'"
+    echo "WORKTREE_ROOT='$repo'"
+    echo "RESEARCH_DIR_ABS='$research'"
+    echo "DIFF_ARTIFACT_PATH='$research/pr-diff.md'"
     echo "RUN_ID=20260101-000000-abc123"
     echo "REVIEW_ITERATION=1"
     echo "PR_NUMBER=41"
@@ -602,7 +613,9 @@ run_stage_fence() {  # FILE TOKEN OUTDIR -> envelope on stdout
     echo "}"
     echo "uberdev_review_fleet_stage_fence"
   } >"$out/fence.sh"
-  bash "$out/fence.sh" 2>"$out/fence.err"
+  # From INSIDE the fixture repository: the prologue resolves the run root with
+  # `git rev-parse --show-toplevel`, so the fence's cwd is load-bearing.
+  ( cd "$repo" && bash "$out/fence.sh" 2>"$out/fence.err" )
 }
 
 envelope_of() {  # captured fence output -> the JSON between the markers
@@ -646,14 +659,14 @@ assert_stage() {  # LABEL FILE TOKEN EXPECTED_MODE EXPECTED_STAGE EXPECTED_COUNT
     || fail "B[$label] the pool repeats a nonce"
 
   # The ledger was written BEFORE the emission, one binding row per child.
-  ledger_count="$(grep -c . "$out/repo/.uberdev/research/RID/$ledger" 2>/dev/null || echo 0)"
+  ledger_count="$(grep -c . "$out/repo/.uberdev/research/20260101-000000-abc123/$ledger" 2>/dev/null || echo 0)"
   [ "$ledger_count" = "$count" ] \
     && pass "B[$label] the launched ledger carries $count binding rows" \
     || fail "B[$label] the launched ledger carries $ledger_count rows, expected $count"
 
   # THE CROSS-CHECK: pool[i] must be the run_nonce of ledger row i+1, in roster
   # order. This is what a dropped or reordered nonce actually breaks.
-  matched="$(python3 - "$out/repo/.uberdev/research/RID/$ledger" "$(printf '%s' "$env_json" | jq -r '.config.runNonces')" <<'PY'
+  matched="$(python3 - "$out/repo/.uberdev/research/20260101-000000-abc123/$ledger" "$(printf '%s' "$env_json" | jq -r '.config.runNonces')" <<'PY'
 import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1],encoding="utf-8") if line.strip()]
 pool=[item for item in sys.argv[2].split(",") if item]
@@ -675,10 +688,10 @@ PY
 
   # Every child directory the script will derive exists, and it was made before
   # the binding (realpath stability).
-  for slug_dir in "$out/repo/.uberdev/research/RID/children/"*-iter01; do
+  for slug_dir in "$out/repo/.uberdev/research/20260101-000000-abc123/children/"*-iter01; do
     [ -d "$slug_dir" ] || { fail "B[$label] a derived child directory is missing"; return; }
   done
-  [ "$(find "$out/repo/.uberdev/research/RID/children" -maxdepth 1 -type d -name '*-iter01' | wc -l | tr -d ' ')" = "$count" ] \
+  [ "$(find "$out/repo/.uberdev/research/20260101-000000-abc123/children" -maxdepth 1 -type d -name '*-iter01' | wc -l | tr -d ' ')" = "$count" ] \
     && pass "B[$label] all $count per-child directories exist under children/" \
     || fail "B[$label] the per-child directory count does not match the roster"
 }

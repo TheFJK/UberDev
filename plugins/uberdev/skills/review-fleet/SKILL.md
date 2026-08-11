@@ -617,6 +617,13 @@ because it was never inside the Workflow to begin with — that is the whole poi
 of the seam, and it is why this fallback is a re-dispatch rather than a
 re-implementation.
 
+Those Bash blocks are each a **fresh shell** on every runtime, so every one of
+them opens by re-deriving its own run: `review_fleet_rehydrate`
+(`lib/review-fleet-args.sh`) resolves the plugin root, the repository root, the
+run identity and every artifact path from disk rather than from a shell that has
+already exited (#427). The fallback needs nothing extra for this — the same
+fences carry the same prologue.
+
 1. **`review`** — dispatch all six reviewers in ONE message
    (`uberdev:code-reviewer` twice for the correctness and general lenses, plus
    `uberdev:silent-failure-hunter`, `uberdev:type-design-analyzer`,
