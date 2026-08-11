@@ -1033,7 +1033,26 @@ review_fleet_write_active_run_pointer "$WORKTREE_ROOT" "$RUN_ID" "$PR_NUMBER" "$
 #    consumed by callers that source this fence and then capture the stdout of
 #    what they run next; a line on stdout would land in the middle of their
 #    payload.
-printf 'REVIEW_CARRY RUN_ID=%s\n' "$RUN_ID" >&2
+#
+#    BOTH values, not just RUN_ID. The reservation receipt is minted a few lines
+#    above and its ONLY consumer is the terminal verdict fence, nine Workflow
+#    relays downstream -- a different process every time. It was never written to
+#    disk, never printed, and never on this line, so that fence received the
+#    empty string and died with `review_reservation_receipt_invalid` AFTER the
+#    run had spent seven reviewer agents and three simplify lenses.
+#
+#    Putting it here is not the weakening that lib/review-fleet-args.sh refuses.
+#    That refusal is about PERSISTING the receipt inside the run directory it
+#    guards, where a swapped directory would carry its own forged proof. The
+#    carry line is outside that tree, and the token is verified against LIVE
+#    (st_dev, st_ino) identity at redemption, so carrying it grants no ability to
+#    authorise a directory the reservation did not already own.
+#
+#    One space-separated line, same `REVIEW_CARRY ` prefix: the receipt matches
+#    `v1:[A-Za-z0-9_-]+` and can never contain a space, so the pair stays
+#    unambiguously parseable by the same reader that handled RUN_ID alone.
+printf 'REVIEW_CARRY RUN_ID=%s REVIEW_RUN_RESERVATION_RECEIPT=%s\n' \
+  "$RUN_ID" "$REVIEW_RUN_RESERVATION_RECEIPT" >&2
 # END review-run-handoff-v1
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
@@ -1045,10 +1064,12 @@ CI_RUN_ID="${CI_RUN_ID:-}"
 CI_RUN_EVENT="${CI_RUN_EVENT:-}"
 CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
+# BEGIN review-fence-lib-v1
 review_json_string() {
   [ "$#" -ge 1 ] || return 2
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
+# END review-fence-lib-v1
 ```
 
 ### Carrying the run across fences (read this before running any later fence)
@@ -1060,27 +1081,56 @@ shell variable it bound is reachable from any later block.
 The setup fence therefore prints exactly one line, on **stderr**:
 
 ```
-REVIEW_CARRY RUN_ID=<run id>
+REVIEW_CARRY RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt>
 ```
 
-**The orchestrator MUST prefix every later `/review-pr` Bash call with
-`RUN_ID=<that value>`.** That is the primary channel and the only one that is
-unambiguous when more than one review is in flight against the same checkout.
+**The orchestrator MUST prefix every later `/review-pr` Bash call with BOTH
+values, exactly as printed:**
 
-When that context is lost — a compacted session, a resumed run, an operator
-re-entering mid-pipeline — every fence recovers on its own through
+```
+RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt> …
+```
+
+That is the primary channel and the only one that is unambiguous when more than
+one review is in flight against the same checkout.
+
+Carrying **both** is not belt-and-braces, and dropping the receipt is not a
+degraded-but-working mode:
+
+- `RUN_ID` names *which* run this fence belongs to. Every fence needs it, and it
+  has a recovery path (below) when the context is lost.
+- `REVIEW_RUN_RESERVATION_RECEIPT` is the **capability token** that authorises
+  retiring the run's `locked` and `pr-context.json` markers. Exactly one fence
+  redeems it — the terminal verdict fence — and it has **no recovery path by
+  design**. Deliberately so: the receipt pins `(st_dev, st_ino)` for the runs
+  root, the run directory and both markers, which is what proves the directory
+  about to be published into is the same one that was reserved. A copy kept
+  *inside* that directory would be swapped along with it and would prove
+  nothing, so the receipt is never persisted there — see the note on
+  `review_fleet_rehydrate` in `lib/review-fleet-args.sh`. This line is the only
+  channel it has.
+
+A run that carries `RUN_ID` alone will execute all three phases and then fail at
+the very last step, after spending the full reviewer fleet, with no verdict
+published and the run's markers still held.
+
+When the `RUN_ID` context is lost — a compacted session, a resumed run, an
+operator re-entering mid-pipeline — every fence recovers on its own through
 `<repo>/.uberdev/runs/.review-active-run.json`, the pointer the setup fence
 publishes alongside the reservation. Recovery is guarded, not best-effort: the
 named run must still hold its `locked` and `pr-context.json` markers, must not
 already have published a verdict, must be for the PR this fence is reviewing,
 and must be younger than `REVIEW_RESERVATION_REAP_SECS`. Any guard that fails is
-`rc 2` with its own message — never a silent fallback to some other run.
+`rc 2` with its own message — never a silent fallback to some other run. The
+receipt is **not** recoverable this way; if it was lost, re-run `/review-pr`
+from the setup fence rather than hunting for a substitute.
 
 Both paths land in `review_fleet_rehydrate` (`lib/review-fleet-args.sh`), which
 is the first call of every executed fence below.
 
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
+# BEGIN review-fence-lib-v1
 review_child_record() {
   local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" record_path="${@:5:1}"
   [ "$#" -ge 5 ] || return 2
@@ -1350,6 +1400,7 @@ PY
   uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
   return "$wait_rc"
 }
+# END review-fence-lib-v1
 # END review-fixer-child-bound-v2
 ```
 <!-- END review-child-builder-v1 -->
@@ -1443,6 +1494,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
    review_fleet_rehydrate || return 2
+   # BEGIN review-fence-lib-v1
    review_assert_selected_pr_head() {
      local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
      local live_head local_head
@@ -1544,6 +1596,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      residue_receipt="$(python3 -I -B "$contract_helper" validate-residue --working-dir "$worktree_root" --evidence-dir "$evidence_dir")" || return 79
      [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
    }
+   # END review-fence-lib-v1
    REVIEW_REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
    REVIEW_PR_METADATA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
      --json number,baseRefOid,baseRefName,headRefOid)"
@@ -1625,6 +1678,7 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    diff artifact, and commit range bound to the same post-fix HEAD:
 
    ```bash
+   # BEGIN review-fence-lib-v1
    review_resolve_phase1_base() {
      [ "$#" -ge 3 ] || return 2
      python3 -I -B - "${@:1:1}" "${@:2:1}" "${@:3:1}" <<'PY'
@@ -1742,6 +1796,9 @@ print(json.dumps(paths,separators=(',',':')),end='')
 PY
 )" || return 2
    }
+   # END review-fence-lib-v1
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT" "$REVIEW_REPO_SLUG")" || return 2
    BASE_REF_NAME="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json baseRefName --jq .baseRefName)" || return 2
    REENTRY_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json headRefOid --jq .headRefOid)" || return 2
@@ -1759,7 +1816,12 @@ PY
    # string. Same run-dir carrier idiom as ci-push-target.tsv / ci-fix-phase.txt,
    # through the typed lib pair so neither half can record or return a value the
    # other would refuse.
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   #
+   # No `. lib/review-fleet-args.sh` here any more: the fence prologue above
+   # sourced it before the first carrier read. This mid-fence re-source used the
+   # BARE `$UBERDEV_REVIEW_PLUGIN_ROOT`, which is never environment-provided --
+   # it is only ever derived, inside a fence -- so in a fresh shell it expanded
+   # to `/lib/review-fleet-args.sh` and sourced nothing.
    REVIEW_BASE_RUN_DIR=
    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
      REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || REVIEW_BASE_RUN_DIR=
@@ -2236,6 +2298,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
    review_fleet_rehydrate || return 2
+   # BEGIN review-fence-lib-v1
    review_track_validated_fixer_head() {
      local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
      [ "$#" -ge 3 ] || return 2
@@ -2282,6 +2345,7 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
      [ -z "${extra:-}" ] || return 74
      review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip"
    }
+   # END review-fence-lib-v1
    ```
 
    Promote the exact authenticated Phase 1 outcome immediately:
@@ -3404,6 +3468,7 @@ EOF_VERIFY_AUDIT
     cross-repository link.
 
     ```bash
+    # BEGIN review-fence-lib-v1
     review_clear_ci_run_selection() {
       CI_RUN_ID=
       CI_RUN_EVENT=
@@ -3479,6 +3544,7 @@ _,_,check_name,run_id,event,link=min(candidates)
 print(f'{run_id}\t{event}\t{link}\t{check_name}')
 PY
     }
+    # END review-fence-lib-v1
     review_clear_ci_run_selection
     ```
 
@@ -3974,6 +4040,7 @@ PY
     failure; it never relays `git`/`gh` diagnostics.
 
     ```bash
+    # BEGIN review-fence-lib-v1
     review_capture_ci_classification_head() {
       local expected_head="${@:1:1}" local_head live_identity live_head live_branch
       local target_head run_json run_failure
@@ -4090,6 +4157,7 @@ PY
       fi
       printf '%s' "$local_head"
     }
+    # END review-fence-lib-v1
     if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
       :
     else
@@ -6416,6 +6484,22 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    else
      TRUST_TRAIL_STATE=RED
    fi
+   # Make it durable HERE, in the one fence that computes it. Three later fences
+   # read this state -- the trailer suffix, the label selection, the label apply
+   # -- and every one of them is a different harness process, so the shell
+   # variable above is gone before any of them starts. The label fences turned
+   # that into `gh label create --force ""` and blamed gh auth; the trailer fence
+   # turned it into a `case` that matched no arm, left TRAILER_SUFFIX UNSET, and
+   # let a YELLOW run emit a GREEN-shaped `Reviewed-by:` trailer with no error at
+   # all. RED is recorded too, so a consumer can tell a RED run from a missing
+   # carrier.
+   review_fleet_write_trust_state \
+     "$RESEARCH_DIR_ABS/trust-state.tsv" \
+     "$TRUST_TRAIL_STATE" "${BY_SEVERITY_CRITICAL:-0}" || {
+       echo "error: could not record the trust state; refusing to emit a trust trail the later fences cannot read" >&2
+       OUTCOME=halted
+       exit 2
+     }
    ```
 
    Audit-trail invariant: `OVERRIDE_REASON` is set ONLY by the OVERRIDE_GREEN branch above; all other branches leave it as `null` (the audit JSON `phases.phase2_5.override_reason` field defaults to `null`). This makes the override discoverable downstream by `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6.
@@ -6423,18 +6507,31 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    **Trailer suffix selection (RFC 0002 §3.4):**
 
    ```bash
-   case "$TRUST_TRAIL_STATE" in
-     GREEN)
-       TRAILER_SUFFIX=""
-       ;;
-     YELLOW)
-       TRAILER_SUFFIX=" severity=critical-deferred count=${BY_SEVERITY_CRITICAL}"
-       ;;
-     # RED skips this entire emission section — handled by the predicate branch above
-   esac
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Read the state back rather than trusting `$TRUST_TRAIL_STATE` from the
+   # previous fence: that was a different process, so the name expanded EMPTY,
+   # the `case` below matched no arm, and TRAILER_SUFFIX was left UNSET — not
+   # empty, unset. zsh then interpolated it as "" into the anchor message with no
+   # error, so a YELLOW run emitted a byte-identical GREEN-shaped `Reviewed-by:`
+   # trailer. A wrong artifact, shipped silently, is the worst shape this class
+   # takes; `set -u` would not have caught it either, since these fences do not
+   # run under it.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   BY_SEVERITY_CRITICAL="${TRUST_STATE_RECORD#*$(printf '\t')}"
+   # RED reaches neither this step nor the anchor below (the predicate branch
+   # above exits first), so review_fleet_trailer_suffix returns rc 1 for RED
+   # rather than an empty string — a RED run must never be able to build a
+   # GREEN-shaped trailer out of a missing suffix.
+   TRAILER_SUFFIX="$(review_fleet_trailer_suffix "$TRUST_TRAIL_STATE" "$BY_SEVERITY_CRITICAL")" || {
+     echo "error: no trailer suffix is defined for trust state '$TRUST_TRAIL_STATE'; suppressing trust emission" >&2
+     exit 2
+   }
    ```
 
    ```bash
+   # BEGIN review-fence-lib-v1
    review_validate_trust_anchor() {
      [ "$#" -eq 4 ] || return 2
      local reviewed_head_sha="${@:1:1}" parent_sha="${@:2:1}" anchor_sha="${@:3:1}" expected_message_sha256="${@:4:1}"
@@ -6451,6 +6548,9 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
      residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || return 79
      [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
    }
+   # END review-fence-lib-v1
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
 
    TRUST_RESIDUE_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || {
      echo "error: MUTATED_BLOCKED — residual repository state suppresses trust emission" >&2
@@ -6477,7 +6577,11 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    # reviewed delta for an arbitrary one while every trust artifact stays
    # byte-identical. Read off the Phase 1 carrier — this fence is ~4000 lines and
    # 52 fences downstream of the bind, so `$BASE_SHA` here is the empty string.
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 2
+   #
+   # No `. lib/review-fleet-args.sh` here any more: the fence prologue above
+   # sourced it, with the full fallback chain, BEFORE the first carrier read.
+   # This line used the bare `$UBERDEV_REVIEW_PLUGIN_ROOT` and sat 25 lines
+   # after that first read, so it neither resolved nor arrived in time.
    REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || exit 2
    REVIEW_BASE_IDENTITY="$(review_fleet_read_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv")" || {
      echo "error: MUTATED_BLOCKED — the reviewed-base identity is unreadable at $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to emit a base-blind trust anchor." >&2
@@ -6488,6 +6592,17 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    }
    REVIEWED_BASE_SHA="${REVIEW_BASE_IDENTITY%%$(printf '\t')*}"
    REVIEWED_BASE_REF="${REVIEW_BASE_IDENTITY#*$(printf '\t')}"
+   # The trailer suffix is re-derived HERE, in the fence that actually builds the
+   # message, from the same durable state the previous fence read. `$TRAILER_SUFFIX`
+   # crossing a process boundary is the defect this whole section exists to close;
+   # deriving it twice from one recorded state costs nothing and cannot drift,
+   # because both callers go through the single lib implementation.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   TRAILER_SUFFIX="$(review_fleet_trailer_suffix "$TRUST_TRAIL_STATE" "${TRUST_STATE_RECORD#*$(printf '\t')}")" || {
+     echo "error: no trailer suffix is defined for trust state '$TRUST_TRAIL_STATE'; suppressing trust emission" >&2
+     exit 2
+   }
    ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s\nReviewed-base: uberdev/review-pr@%s ref=%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX" "$REVIEWED_BASE_SHA" "$REVIEWED_BASE_REF")" || exit 2
    ANCHOR_MESSAGE_SHA256="$(python3 -I -B -c 'import hashlib,sys
 print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_MESSAGE")" || exit 2
@@ -6531,14 +6646,20 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
 2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
    ```bash
-   case "$TRUST_TRAIL_STATE" in
-     GREEN)  TRUST_LABEL="uberdev-approved"
-             TRUST_LABEL_COLOR="0E8A16"
-             TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified GREEN. Auto-managed — set by /review-pr, read by /merge." ;;
-     YELLOW) TRUST_LABEL="uberdev-approved-with-concerns"
-             TRUST_LABEL_COLOR="FBCA04"
-             TRUST_LABEL_DESC="Trust trail: /review-pr YELLOW: deferred CRITICAL; /merge needs --accept-critical-deferred." ;;
-   esac
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Same durable state, same reason as the trailer suffix. The triple used to be
+   # selected in this fence and consumed in the NEXT one, so the apply fence ran
+   # `gh label create --force "" --color "" --description ""` and reported
+   # "Check gh auth and repo write/triage permission" — a diagnosis pointing at
+   # the operator's credentials for a defect that was entirely ours.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   TRUST_LABEL_RECORD="$(review_fleet_trust_label "$TRUST_TRAIL_STATE")" || {
+     echo "error: no trust label is defined for trust state '$TRUST_TRAIL_STATE'; suppressing label emission" >&2
+     exit 2
+   }
+   IFS=$'\t' read -r TRUST_LABEL TRUST_LABEL_COLOR TRUST_LABEL_DESC <<<"$TRUST_LABEL_RECORD"
    # Belt-and-braces: clear the OPPOSITE-tier label if present, so a re-run that
    # downgrades GREEN→YELLOW (or upgrades YELLOW→GREEN) doesn't leave a stale
    # contradictory label on the PR. Failures here are fail-soft (the new label
@@ -6560,6 +6681,17 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
    # guard below: the label is the load-bearing trust artifact /merge reads, so
    # emission cannot proceed without it. (Same assume-label-exists class as #168,
    # but fail-loud rather than swallowed.)
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Re-derived here, not inherited: this is a different process from the
+   # selection step above, so all three names arrived empty and the `gh label
+   # create` below ran with three empty arguments.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_LABEL_RECORD="$(review_fleet_trust_label "${TRUST_STATE_RECORD%%$(printf '\t')*}")" || {
+     echo "error: no trust label is defined for trust state '${TRUST_STATE_RECORD%%$(printf '\t')*}'; suppressing label emission" >&2
+     exit 2
+   }
+   IFS=$'\t' read -r TRUST_LABEL TRUST_LABEL_COLOR TRUST_LABEL_DESC <<<"$TRUST_LABEL_RECORD"
    if ! gh label create --force "$TRUST_LABEL" --color "$TRUST_LABEL_COLOR" --description "$TRUST_LABEL_DESC"; then
      echo "error: failed to provision the '$TRUST_LABEL' trust label (gh pr edit --add-label cannot auto-create it). Check gh auth and repo write/triage permission." >&2
      exit 2
@@ -6640,6 +6772,39 @@ fresh-shell receipt fence:
 
 ```bash
 # BEGIN review-verdict-final-fence-v1
+# This fence is deliberately NOT prologued: it has to run from a cwd that need
+# not be a git working tree, and review_fleet_rehydrate requires a toplevel. It
+# resolves the plugin root itself, through the SAME four-name chain every other
+# fence uses. It used to read a BARE $UBERDEV_REVIEW_PLUGIN_ROOT -- the only
+# fence in the file that did -- and that name is never environment-provided; it
+# is only ever derived, inside a fence. In a real run it expanded to the empty
+# string and the manifest import failed with
+# "No such file or directory: '/lib/run_manifest.py'", which hit BEFORE the
+# receipt was ever examined.
+UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+if [ ! -r "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" ]; then
+  echo "error: review verdict fence cannot locate lib/run_manifest.py; none of UBERDEV_REVIEW_PLUGIN_ROOT, PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, CURSOR_PLUGIN_ROOT names a plugin root" >&2
+  exit 2
+fi
+# The receipt gets its own refusal, ahead of the validator. Falling through to
+# the generic decoder made a MISSING token report `review_reservation_receipt_invalid`,
+# which reads as "the token is corrupt" when the truth is "no token arrived" --
+# two different operator actions behind one string. A run only reaches this fence
+# after the full reviewer fleet has been spent, so the diagnosis has to name the
+# channel and say what to do next.
+case "${REVIEW_RUN_RESERVATION_RECEIPT:-}" in
+  v1:*) ;;
+  "")
+    echo "error: review verdict fence received no reservation receipt: REVIEW_RUN_RESERVATION_RECEIPT is empty" >&2
+    echo "note: the setup fence prints it on stderr as 'REVIEW_CARRY RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt>'. Prefix this Bash call with BOTH values, exactly as printed." >&2
+    echo "note: the receipt is deliberately never written to disk (it certifies the run directory, so a copy stored inside that directory would prove nothing), and RUN_ID alone cannot stand in for it. If the carry line is gone, re-run /uberdev:review-pr from the setup fence." >&2
+    exit 2
+    ;;
+  *)
+    echo "error: review verdict fence received a malformed reservation receipt; expected the 'v1:' capability token printed on the setup fence REVIEW_CARRY line" >&2
+    exit 2
+    ;;
+esac
 REVIEW_FINAL_FENCE_RC=0
 python3 -I -B - \
   "$REVIEW_RUN_RESERVATION_RECEIPT" \
