@@ -683,7 +683,7 @@ PY
     || fail "B[$label] the per-child directory count does not match the roster"
 }
 
-assert_stage review-stage "$REVIEW_CMD" 'stage=review' review-pr review 6 review-fleet-review.launched
+assert_stage review-stage "$REVIEW_CMD" 'stage=review' review-pr review 7 review-fleet-review.launched
 
 # B[review-contract] — the review stage is the only stage that owns an output
 # contract, so this is a standalone block rather than a parameter on the shared
@@ -818,6 +818,10 @@ W_NONCE3="$(printf '0%.0s' $(seq 63))3"
 W_NONCE4="$(printf '0%.0s' $(seq 63))4"
 W_NONCE5="$(printf '0%.0s' $(seq 63))5"
 W_NONCE6="$(printf '0%.0s' $(seq 63))6"
+# #433: the review roster is seven. nonceGate(REVIEW_ROSTER.length) refuses a
+# pool whose length is not exactly the roster's, so a six-nonce pool aborts the
+# whole review stage before a single prompt is built.
+W_NONCE7="$(printf '0%.0s' $(seq 63))7"
 
 # stage_args STAGE NONCES EXTRA_JSON -> writes $TMP/w-args.json
 stage_args() {
@@ -837,6 +841,11 @@ stage_args() {
        # every existing assert_stage_runs row stays green once the review arm
        # fails closed on a missing one.
        phase1ContractPathAbs:"/p/shared/phase1-reviewer-output-v1.md",
+       # The rule-source allowlist for the convention lens, also BY PATH
+       # (#433). Same placement reasoning: base object, so every existing row
+       # keeps its envelope shape while the convention-only rows below can
+       # assert on it.
+       ruleSourcesPathAbs:"/r/run/post-review/rule-sources.txt",
        phase1PathAbs:"/r/run/p1.md", phase2PathAbs:"/r/run/p2.md",
        phase1DispositionPathAbs:"/r/run/d1.json",
        phase2DispositionPathAbs:"/r/run/d2.json",
@@ -881,7 +890,7 @@ W_CI_COMMON="$(jq -n --arg sha "$W_HEX64_A" '{
   ciPrBranch:"feat/x", ciBaseBranch:"main"}')"
 
 assert_stage_runs review review \
-  "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}' 6
+  "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}' 7
 assert_stage_runs simplify simplify "$W_NONCE1,$W_NONCE2,$W_NONCE3" '{}' 3
 assert_stage_runs fix fix "$W_NONCE1" \
   "$(jq -n --arg sha "$W_HEX64_A" '{fixerEdgeId:"review_pr.fix.phase1", commitType:"fix",
@@ -915,30 +924,56 @@ assert_stage_runs ci-defer ci-defer "$W_NONCE1" \
 # declared output contract" delegates it to five prose sections that regex can
 # never accept, so every Phase 1 wave comes back BLOCKED and the aggregate is
 # suppressed. These rows read the PROMPTS the script actually builds.
-stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}'
+stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}'
 W_CONTRACT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
-if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length')" = 6 ]; then
-  pass "W[review-contract-path] all six reviewer prompts carry the contract path"
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length')" = 7 ]; then
+  pass "W[review-contract-path] all seven reviewer prompts carry the contract path"
 else
-  fail "W[review-contract-path] the contract path reaches $(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length') of 6 reviewer prompts"
+  fail "W[review-contract-path] the contract path reaches $(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("phase1-reviewer-output-v1"))] | length') of 7 reviewer prompts"
 fi
-if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("entire contents of the result file"))] | length')" = 6 ] \
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("entire contents of the result file"))] | length')" = 7 ] \
    && [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("agent file.s declared output contract"))] | length')" = 0 ]; then
   pass "W[review-contract-wholefile] every reviewer prompt binds the WHOLE result file and delegates to no agent file"
 else
   fail "W[review-contract-wholefile] a reviewer prompt still delegates the serialization to its agent file"
 fi
-if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("blocker") and test("suggestion"))] | length')" = 6 ]; then
+if [ "$(printf '%s' "$W_CONTRACT_OUT" | jq -r '[.prompts[] | select(test("blocker") and test("suggestion"))] | length')" = 7 ]; then
   pass "W[review-contract-vocab] every reviewer prompt states the blocker/suggestion severity vocabulary"
 else
   fail "W[review-contract-vocab] the severity vocabulary the validator accepts is not in every prompt"
+fi
+
+# #433: the rule-source allowlist path, the citation grammar and the
+# empty-allowlist instruction reach the convention child and NOTHING else. A
+# second lens told where the rule documents are is a second lens able to make a
+# convention claim with no citation gate behind it -- the exact route this edge
+# exists to close.
+W_RULES_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+w_prompt_count() {  # NEEDLE -> how many reviewer prompts contain it
+  printf '%s' "$W_RULES_OUT" | jq -r --arg needle "$1" \
+    '[.prompts[] | select(contains($needle))] | length'
+}
+if [ "$(w_prompt_count '/r/run/post-review/rule-sources.txt')" = 1 ]; then
+  pass "W[review-rule-sources] the allowlist path reaches exactly one reviewer prompt"
+else
+  fail "W[review-rule-sources] the allowlist path reaches $(w_prompt_count '/r/run/post-review/rule-sources.txt') prompts (want exactly 1)"
+fi
+if [ "$(w_prompt_count 'quote: <the rule text, verbatim>')" = 1 ]; then
+  pass "W[review-citation-grammar] the citation grammar reaches exactly one reviewer prompt"
+else
+  fail "W[review-citation-grammar] the citation grammar reaches $(w_prompt_count 'quote: <the rule text, verbatim>') prompts (want exactly 1)"
+fi
+if [ "$(w_prompt_count 'this repository has written no conventions down')" = 1 ]; then
+  pass "W[review-empty-allowlist] the empty-allowlist instruction is a prompt string, not prose in a doc"
+else
+  fail "W[review-empty-allowlist] the empty-allowlist instruction reaches $(w_prompt_count 'this repository has written no conventions down') prompts (want exactly 1)"
 fi
 
 # The gate. A wiring regression must abort BEFORE the nonce gate, so no nonce is
 # burned and no child is dispatched into an unstated contract.
 w_contract_abort() {  # LABEL JQ_MUTATION
   local label="$1" mutation="$2" out abort prompts labels
-  stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6" '{}'
+  stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}'
   jq "$mutation" "$TMP/w-args.json" >"$TMP/w-args-contract.json"
   out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args-contract.json" 2>&1)"
   abort="$(printf '%s' "$out" | jq -r '.abortReason')"

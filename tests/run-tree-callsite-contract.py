@@ -123,8 +123,8 @@ def collect_sources(root: Path, overrides: dict[str, str] | None = None) -> list
             if edge in merged:
                 fail(f"duplicate source edge: {edge}")
             merged[edge] = row
-    if declared_count != 41 or len(merged) != 41:
-        fail(f"source contract count: expected 41, got {declared_count} declared/{len(merged)} unique")
+    if declared_count != 42 or len(merged) != 42:
+        fail(f"source contract count: expected 42, got {declared_count} declared/{len(merged)} unique")
     return [merged[edge] for edge in sorted(merged)]
 
 
@@ -140,7 +140,7 @@ def _typed_fixture(rows: list[dict[str, Any]], fixture_path: Path) -> list[dict[
     if not isinstance(fixture, dict) or fixture.get("schema_version") != 1 or fixture.get("pending_edges") != []:
         fail("invalid fixture envelope")
     contracts = fixture.get("contracts")
-    if not isinstance(contracts, list) or len(contracts) != 41:
+    if not isinstance(contracts, list) or len(contracts) != 42:
         fail("invalid fixture contracts")
     source_rows: list[dict[str, Any]] = []
     for item in contracts:

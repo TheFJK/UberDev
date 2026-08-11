@@ -1,4 +1,5 @@
 {
+  "prkit_version": "0.1.3",
   "copyset": [
     {
       "path": "agents/ci-code-fixer.md",
@@ -18,7 +19,7 @@
     },
     {
       "path": "agents/code-reviewer.md",
-      "sha256": "3d84c8db70e20bb764680d861608633b4302439b112bd710d5d0f141a12ef45e"
+      "sha256": "8bb3e97d41d250cefd3ce7412ad9b1a116145e699b7d43a1e19812224fd8cc9b"
     },
     {
       "path": "agents/code-simplifier.md",
@@ -30,11 +31,15 @@
     },
     {
       "path": "agents/conflict-resolver.md",
-      "sha256": "83b43c244cb7a83be0dfdd81fa1ec379891fd7cf5aec1a7470a4b4911bec20f6"
+      "sha256": "ec45a04bc5075ffead7b0f274b69196508a4d333ab17852f503d23d3754476e9"
+    },
+    {
+      "path": "agents/convention-compliance.md",
+      "sha256": "853cb99436cd4bd4a949be187e72f0417d38a534298305e6d91d2ad8ec47ae43"
     },
     {
       "path": "agents/findings-to-issues.md",
-      "sha256": "c804e598a01eeb0703a69e203b7598d6b6177f39e15142fd8e5d3ed8b8ac4a3d"
+      "sha256": "47e2b0f10dbd525bd7c0d49dbbb484beeb0f896f8801fd690560a28dcb349618"
     },
     {
       "path": "agents/merge-strategy-decider.md",
@@ -50,7 +55,7 @@
     },
     {
       "path": "agents/trust-trail-evaluator.md",
-      "sha256": "f641a60444acd6c8961a7e5a506e7e4a0fa3ddcb4891e259d12b0a37bf6b54d1"
+      "sha256": "665ff9024771f3dc5c3f430d682724d0ea382bfa01e249f618958d914dabec77"
     },
     {
       "path": "agents/type-design-analyzer.md",
@@ -58,11 +63,11 @@
     },
     {
       "path": "commands/merge.md",
-      "sha256": "54d242bfe59e490021d86d13ea6323fa4dd60fcd58a8925460d50ae26e1c137c"
+      "sha256": "06dadbe934a209ea1e8be9cd7c91d6cca4f252b5a1015d12ca8e67fba754aae2"
     },
     {
       "path": "commands/review-pr.md",
-      "sha256": "b28b1f0ae8dd2458e3e9eb282865b37c224bf69892924d9effffcff80935644e"
+      "sha256": "a1b4494d319a013479feef062411a07380aedf98a2fc5b10344b5be157cfd1f9"
     },
     {
       "path": "commands/simplify.md",
@@ -90,7 +95,7 @@
     },
     {
       "path": "lib/code_fixer_contract.py",
-      "sha256": "cf2ccafb1ca18ce452ef0b44ff1b54ade6169cba6c7e6ff5156a0818840c94e7"
+      "sha256": "84bb9b074a097cff345b6536dc0a0bbc858767cdf008cec66b2762a3b38648b7"
     },
     {
       "path": "lib/command-workspace.py",
@@ -114,7 +119,7 @@
     },
     {
       "path": "lib/review-aggregate.sh",
-      "sha256": "8517ea2a98a2a16537689ec2e3f0f997aa4433122ccd491ac090ff9d0e28e930"
+      "sha256": "43def1b712deed8b0a0b0fbddca7bf05dd23c2496b031e7e47a2502fd283135e"
     },
     {
       "path": "lib/review-push-target.sh",
@@ -130,37 +135,28 @@
     },
     {
       "path": "policy/model-routing-v1.json",
-      "sha256": "0fd9f718607a4abab137faab6d103213310cd6358e1018d18f738cb0b4bca9fc"
+      "sha256": "dc8fd40f4d1f8c859280078e7e21d022a6a4aaa098d2adca612bf82136f748d4"
     },
     {
       "path": "policy/solve-run-tree-v1.json",
-      "sha256": "6c7806cbba8e5c41a95a0bd2ceabae3b3fbdffcfd8dee9382c6d1867c5851dcb"
+      "sha256": "6cf4c197ebef29f12bfbed920da2275b6adb223e93740ad5f249d4de972968b1"
     },
     {
       "path": "shared/phase1-reviewer-output-v1.md",
-      "sha256": "33ef287be76843fe1d01a5000548781a4d20850240aed22db1d5a60c26dc359e"
+      "sha256": "537f263da0eb03681f09dd0b3c0a6d49e4f2b02efdc4457a4814c8afcec5ff08"
     },
     {
       "path": "skills/merge-pipeline/SKILL.md",
-      "sha256": "15db6d0420a87a38442d4ebd2bf33d1e1ba12109b44efabea66eb753be500516"
+      "sha256": "9d11c11ac9c7ff469718a5cc1d7abe74889827dc8c908114f06df26269167df1"
     },
     {
       "path": "skills/merge-pipeline/lib/discover.sh",
-      "sha256": "2824aa8a23b1d8f2a94a8d8993e091c0c4b5f9fff54546f9a8e9295728e6898d"
+      "sha256": "91314552bc0acf9254f8dd52ebdf763eb11f914425e4daaf2dbb7f9057e1a894"
     },
     {
       "path": "skills/post-impl-review/SKILL.md",
-      "sha256": "fa5331b3efe5e1a369392e2cec1a99328a1099bb55acf5e360bf88abbf1ac04f"
+      "sha256": "b7729d8e52ce3441f726161b05f7a582d58e1bb45e23aa54eb51b5788dba078b"
     }
   ],
-  "pending": [
-    "agents/conflict-resolver.md",
-    "agents/trust-trail-evaluator.md",
-    "commands/merge.md",
-    "commands/review-pr.md",
-    "lib/code_fixer_contract.py",
-    "skills/merge-pipeline/SKILL.md",
-    "skills/merge-pipeline/lib/discover.sh"
-  ],
-  "prkit_version": "0.1.3"
+  "pending": []
 }

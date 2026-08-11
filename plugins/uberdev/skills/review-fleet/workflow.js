@@ -241,9 +241,9 @@ const phase1ContractPathAbs = String(CFG.phase1ContractPathAbs || "");
 // The convention lens's rule-source ALLOWLIST, by PATH (#433). Discovered by the
 // controller before this call and persisted; this script has no filesystem, so
 // it forwards the path and never reads, re-derives or repairs the list. Only the
-// `review_pr.review.convention` child is told about it -- handing the same path
-// to the other six would invite them to make convention claims through a lens
-// with no citation gate behind it, which is the route this edge exists to close.
+// convention child is told about it (see reviewerPrompt below) -- handing the
+// same path to the other six would invite them to make convention claims through
+// a lens with no citation gate behind it, which is the route that edge closes.
 const ruleSourcesPathAbs = String(CFG.ruleSourcesPathAbs || "");
 
 // Phase-1 emphasis tokens and the /simplify free-text focus. Both are CSV /

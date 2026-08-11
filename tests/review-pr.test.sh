@@ -2542,6 +2542,25 @@ assert_grep "$CONVENTION_AGENT" 'rule-source allowlist' \
   "R31g — the convention agent reads only the controller-supplied allowlist"
 assert_grep "$CONVENTION_AGENT" 'does \*\*not\*\* govern `tools/x\.sh`' \
   "R31h — the convention agent honours nested rule scoping"
+
+echo
+echo "== R32 (#433): the correctness lens no longer claims the convention lens's subject =="
+# Adding a gated convention lens BESIDE a correctness lens that still claims
+# CLAUDE.md compliance would double the false-positive surface this issue exists
+# to shrink, and it would leave a route by which a convention claim reaches the
+# report with no quote attached. The claim moves; it is not duplicated.
+CODE_REVIEWER_AGENT="$AGENTS_DIR/code-reviewer.md"
+assert_no_grep "$CODE_REVIEWER_AGENT" '^\*\*Project Guidelines Compliance\*\*' \
+  "R32a — code-reviewer no longer owns a Project Guidelines Compliance responsibility"
+assert_no_grep "$CODE_REVIEWER_AGENT" 'explicit CLAUDE\.md violation' \
+  "R32b — the 91-100 rubric anchor is a correctness exemplar, not a CLAUDE.md one"
+assert_grep "$CODE_REVIEWER_AGENT" 'convention-compliance' \
+  "R32c — code-reviewer names the lens that took the convention subject over"
+REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+assert_no_grep "$REVIEW_FLEET_WORKFLOW" 'lens: "Correctness, design, and CLAUDE\.md compliance"' \
+  "R32d — the correctness roster lens text drops its CLAUDE.md claim"
+assert_grep "$REVIEW_FLEET_WORKFLOW" 'outside the other six lenses' \
+  "R32e — the general lens counts six siblings, not five"
 # R30h — pr-test-analyzer's specific repairs. Its old text claimed the other
 # reviewers use "this exact shape", which was false, and pointed the aggregation
 # story at a SKILL.md step that is not the aggregator on the Workflow path.

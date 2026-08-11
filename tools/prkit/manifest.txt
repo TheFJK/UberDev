@@ -1,18 +1,19 @@
 # tools/prkit/manifest.txt — prkit PR-phase copy set (RFC 0014 §5.3).
 # Paths are relative to plugins/uberdev/. Blank lines and #-comments ignored.
-# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 38).
+# Keep in sync with tests/prkit-manifest.test.sh (count-locked at 39).
 
 # --- commands (3) ---
 commands/review-pr.md
 commands/simplify.md
 commands/merge.md
 
-# --- agents (14) ---
+# --- agents (15) ---
 agents/code-reviewer.md
 agents/silent-failure-hunter.md
 agents/type-design-analyzer.md
 agents/comment-analyzer.md
 agents/pr-test-analyzer.md
+agents/convention-compliance.md
 agents/code-fixer.md
 agents/code-simplifier.md
 agents/ci-failure-classifier.md

@@ -111,6 +111,52 @@ assert_no_grep "$POST_IMPL" '^post_review_validated_evidence_complete\(\) \{' \
   "the skill keeps no second copy of the evidence builder"
 
 echo
+echo "== R-roster-complete (#433): every copy of the Phase-1 edge roster agrees =="
+# The Phase-1 roster is ONE contract with nine uncompared copies, and its ORDER
+# is a wire format: the controller mints nonces in roster order and the script
+# consumes them in roster order, so a half-moved roster re-binds every child to
+# another child's nonce. Adding a seventh edge is exactly the change that leaves
+# a copy behind, and the copies live in three languages plus JSON and markdown —
+# so the guard compares the ordered, de-duplicated edge list extracted from each
+# file against the SSOT in lib/review-fleet-args.sh.
+#
+# grep/sed/awk only: this fixture runs on windows-latest too, where the python3
+# fixtures are skipped. Delete the new edge from any one copy and this reds.
+ROSTER_SSOT="$(
+  . "$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+  review_fleet_roster review | cut -f2 | tr '\n' ' '
+)"
+ROSTER_COPIES=(
+  "plugins/uberdev/lib/review-fleet-args.sh"
+  "plugins/uberdev/skills/review-fleet/workflow.js"
+  "plugins/uberdev/lib/report_primitives.py"
+  "plugins/uberdev/lib/code_fixer_contract.py"
+  "plugins/uberdev/lib/review-aggregate.sh"
+  "plugins/uberdev/policy/solve-run-tree-v1.json"
+  "plugins/uberdev/skills/finish-branch/SKILL.md"
+  "tools/prkit/generate.sh"
+  "tools/prkit/verify.sh"
+)
+for roster_copy in "${ROSTER_COPIES[@]}"; do
+  if [ ! -r "$REPO_ROOT/$roster_copy" ]; then
+    echo "  FAIL  R-roster-complete — declared roster copy is missing: $roster_copy"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  ROSTER_OBSERVED="$(grep -oE 'review_pr\.review\.[a-z_]+' "$REPO_ROOT/$roster_copy" \
+    | awk '!seen[$0]++' | tr '\n' ' ')"
+  if [ "$ROSTER_OBSERVED" = "$ROSTER_SSOT" ]; then
+    echo "  PASS  R-roster-complete — $roster_copy carries the roster in SSOT order"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R-roster-complete — $roster_copy drifted from review_fleet_roster"
+    echo "        ssot:     $ROSTER_SSOT"
+    echo "        observed: $ROSTER_OBSERVED"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
 assert_grep "$POST_IMPL" '^- .aspect_emphasis. — optional list' \
   "Inputs section accepts aspect_emphasis (optional list)"
@@ -504,6 +550,7 @@ contributor_ids = [
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 ]
 opening = b'<external-untrusted-input source="post-impl-review-aggregate">\n'
 closing = b'\n</external-untrusted-input>\n'

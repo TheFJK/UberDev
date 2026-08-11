@@ -558,7 +558,7 @@ All seven receive the same brief path and return their own reviewer YAML. All se
 
 | Reviewer | Agent file | Lens |
 |---|---|---|
-| `code-reviewer` (correctness lens) | `agents/code-reviewer.md` (inherit) | Correctness, design, CLAUDE.md compliance |
+| `code-reviewer` (correctness lens) | `agents/code-reviewer.md` (inherit) | Correctness and design (project-convention claims belong to the convention lens, which gates them on a verbatim citation) |
 | `silent-failure-hunter` | `agents/silent-failure-hunter.md` | Swallowed errors, ignored returns, silent fallbacks |
 | `type-design-analyzer` | `agents/type-design-analyzer.md` | `any`/`unknown` misuse, type safety holes |
 | `comment-analyzer` | `agents/comment-analyzer.md` | Stale, redundant, or load-bearing comments |

@@ -1750,7 +1750,6 @@ PY
    REVIEW_RULE_SOURCES="$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt"
    printf '%s\n' "$REVIEW_FLEET_WORKTREE" >"$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt" || return 2
    uberdev_review_rule_sources "$REVIEW_FLEET_WORKTREE" >"$REVIEW_RULE_SOURCES" || return 2
-   printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
@@ -1830,6 +1829,11 @@ PY
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
    REVIEW_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+   # The changed-path set the citation gate keys its self-introduced-rule
+   # demotion on, persisted HERE rather than in 4w.1: this is the fence that
+   # already owns CHANGED_PATHS_JSON, and the writer below is a fresh shell away
+   # from wherever it was computed.
+   printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" || return 2
    POST_REVIEW_VALIDATED_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-review.validated"
    : >"$POST_REVIEW_VALIDATED_LEDGER" || return 2
    REVIEW_WAVE_BLOCKED=0
