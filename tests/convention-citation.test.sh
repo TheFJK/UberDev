@@ -15,11 +15,17 @@
 #           copy of every AGENTS.md, and a citation scoped to another branch's
 #           rule file would read as verified.
 #
-#   CC1–CC9, CC15
+#   CC1–CC9, CC15, CC17–CC31, CC34–CC36
 #           `classify_convention_citation` in plugins/uberdev/lib/
 #           code_fixer_contract.py — the pure predicate that decides whether one
 #           finding's citation is real. Driven through its CLI verb, which is
-#           also the proof the verb is reachable.
+#           also the proof the verb is reachable. CC17–CC31 and CC34–CC36 are
+#           the redaction guard specifically, one row per guard in BOTH
+#           directions plus the order the guard runs in, because that guard is
+#           the only part of the predicate whose failure mode is invisible: a
+#           refusal is logged and never surfaced, so an over-firing guard reads
+#           exactly like a clean review. CC32–CC33 run the same two directions
+#           through the shipped writer.
 #
 # Every fixture builds its own tree under `mktemp -d`. Running the discovery
 # rows against the live repo would make them VACUOUS — this checkout happens to
@@ -262,6 +268,108 @@ write("cc11.json", request(
     "confidence: 90 — rule %s:12 — cites a rule this very PR wrote — quote: %s"
     % (ROOT, verbatim), "tests/thing.test.sh", root_rules,
     changed_paths=[ROOT, "tests/thing.test.sh"]))
+
+# ---- CC17-CC31 + CC34-CC36: the redaction guard ------------------------
+#
+# Every credential below is assembled from fragments at runtime, exactly like
+# cc9 above: a contiguous secret-shaped literal in these source bytes would
+# hard-stop finish-branch's pre-push secret scan on the diff that adds them (the
+# scan reads the diff, so the token never has to reach a commit to abort one).
+# tests/finish-branch.test.sh carries the same idiom.
+#
+# Each token is also chosen so that exactly ONE guard can carry its row, which
+# is what makes the row a test of that guard rather than of the gate in general:
+#   - the Slack, Stripe and base32 values are the three concrete strings the
+#     statistical rule scores as identifiers, so only their NAMED tuple entry
+#     can refuse them;
+#   - the GitHub tail is deliberately blocky and the JWT segments are both under
+#     the statistical minimum of 32, for the same isolation;
+#   - the hex digest sits below the 4.0-bit base64 floor, so only the hex scan
+#     reaches it, and the base64 blob has no issuer prefix at all, so only the
+#     statistical rule does.
+SLACK_BOT = "xox" + "b-52601815908-3016613186091-8oOOL8dKLzdocJ2isAjIhKtJ"
+SLACK_USER = "xox" + "p-30460913671-2183094671553-4820163905-KpQ2vR7mTwXzB1nLcYsH"
+STRIPE_LIVE = "sk" + "_live_" + "Jr4i0B3JrTAwR4y9ojfljoQo"
+TOTP_SEED = "KHVDGAJGXBENYJQWX6HH" + "7566TFJGVQ6K"
+GITHUB_SERVER = "gh" + "s_" + "aaaaBBBBccccDDDDeeeeFFFFggggHHHHiiii"
+JWT = ("eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0"
+       + "." + "dBjftJeZ4CVPmB92K27uhbUJU1p1r")
+HEX_DIGEST = "da39a3ee5e6b4b0d" + "3255bfef95601890afd80709"
+B64_BLOB = "Q7wz9LmXr4Kv8Nb6" + "YcHa5Jd0PfSgT2Ui1Ao3Ep7Rq9Zx"
+
+
+def redaction_case(name, quote, line=12):
+    """One request whose cited line holds `quote` verbatim, and nothing else.
+
+    Every check before the redaction guard therefore PASSES, so the verdict the
+    row asserts can only have come from the guard itself.
+    """
+    body = list(root_rules)
+    body[line - 1] = quote
+    write(name, request(
+        "confidence: 80 — rule %s:%d — the rule text carries a live value — quote: %s"
+        % (ROOT, line, quote), "lib/thing.sh", body))
+
+
+for case_name, case_quote in (
+    ("cc17", "Rotate the workspace bot token " + SLACK_BOT + " before merging."),
+    ("cc18", "The user token " + SLACK_USER + " must never reach a diff."),
+    ("cc19", "Never hardcode the billing key " + STRIPE_LIVE + " in a fixture."),
+    ("cc20", "The shared seed " + TOTP_SEED + " lives in the vault only."),
+    ("cc21", "Server tokens such as " + GITHUB_SERVER + " expire but still leak."),
+    ("cc22", "Strip the session assertion " + JWT + " out of every log line."),
+    ("cc23", "The signing digest " + HEX_DIGEST + " is not a checksum to publish."),
+    ("cc24", "Our archived deploy key " + B64_BLOB + " was rotated in March."),
+):
+    redaction_case(case_name + ".json", case_quote)
+
+# The other half of the guard, and the half a statistical rule gets wrong: rule
+# documents are FULL of long identifiers, and every one of these quotes is
+# ordinary rule prose. A gate that refuses them deletes a true finding and says
+# so only in a log nobody reads. CC26 spells four fragments that occur in this
+# checkout today (see `git grep -hIoE "sk-[A-Za-z0-9]{8,}"`), which is what
+# makes the loose `sk-` bound a live defect rather than a hypothetical one.
+for case_name, case_quote in (
+    ("cc25", "Every helper name must start with a risk-mismatch guard."),
+    ("cc26", "A task-manifest, disk-recovery or kiosk-frontend change needs a "
+             "run-risk-mismatch note."),
+    ("cc27", "Call uberdev_command_workspace_prepare before "
+             "REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP applies."),
+    ("cc28", "Register monkeyJsonSerializerFactoryRegistry in the adapter table."),
+    ("cc29", "Read plugins/uberdev/lib/review-fleet-args.sh before editing it."),
+    # The issuer prefixes are word TAILS in English, so an entry that is not
+    # anchored reads a key out of the middle of an identifier. Measured, not
+    # hypothetical: without the boundary the Stripe entry refuses this quote,
+    # and the statistical rule does not (churn 0.171, far under the floor), so
+    # nothing else in the gate would notice.
+    ("cc34", "Name it task_live_DispatchConfigurationBuilder in the registry."),
+    # The base32 scan carries TWO floors, and each one alone is what keeps this
+    # row out of the cull: cc35 clears the entropy floor at 3.644 bits and is
+    # saved only by the class floor (glued uppercase words carry no digits,
+    # where a drawn seed does), cc36 carries both classes and is saved only by
+    # the entropy floor (every [A-Z2-7]{32,} run in this checkout is a padding
+    # fixture exactly like it). Neither floor is provable from the other.
+    ("cc35", "Replace REPLACEWITHYOURACTUALSECRETVALUE before shipping."),
+    ("cc36", "The fixture digest AAAAAAAAAAAAAAAA2222222222222222 is not a key."),
+):
+    redaction_case(case_name + ".json", case_quote)
+
+# CC30 — a quote that fails BOTH the length ceiling and the redaction guard must
+# report the LENGTH. The first failing check names the reason, and a reader of
+# the citation log has to be told the quote was never a citation at all; naming
+# the redaction guard there would report a leak that never existed.
+ordering_long = "Rotate " + SLACK_BOT + " because "
+ordering_long += "x" * (301 - len(ordering_long))     # one over the ceiling
+assert len(ordering_long) == 301, len(ordering_long)
+redaction_case("cc30.json", ordering_long)
+
+# CC31 — the same ordering one check earlier: a secret-shaped quote that is not
+# in the cited file at all is `citation-not-verbatim`. Line 12 still holds the
+# fixture rule, so the ONLY reason this quote can fail on is the window read.
+write("cc31.json", request(
+    "confidence: 80 — rule %s:12 — quotes a line that is not there — quote: %s"
+    % (ROOT, "Rotate " + SLACK_BOT + " immediately."),
+    "lib/thing.sh", root_rules))
 PY
 then
   echo "FATAL: could not build the citation request fixtures" >&2
@@ -312,6 +420,59 @@ expect_citation cc15-long.json 'cull citation-not-verbatim' \
   "CC15 — a quote above the 300-character carve-out ceiling is refused"
 expect_citation cc11.json 'demote citation-self-introduced' \
   "CC11 — a rule this PR itself wrote demotes the finding instead of culling it"
+
+echo
+echo "== CC17-CC31 + CC34-CC36: the redaction guard, and its order =="
+# CC9 above only ever reaches the AWS entry of the named tuple, so every other
+# guard in `_convention_quote_is_secret_shaped` is invisible to it. These rows
+# are one per guard, in both directions.
+#
+# The refuse half. Each token here is unreachable by every guard except the one
+# the row names (see the fixture comment), so deleting that guard reds THIS row
+# and not merely some row.
+expect_citation cc17.json 'cull citation-secret-shaped' \
+  "CC17 — a Slack bot token is refused, though its digit blocks read as an identifier"
+expect_citation cc18.json 'cull citation-secret-shaped' \
+  "CC18 — a Slack user token is refused for the same reason"
+expect_citation cc19.json 'cull citation-secret-shaped' \
+  "CC19 — a Stripe live key is refused, though its core is one character too short to score"
+expect_citation cc20.json 'cull citation-secret-shaped' \
+  "CC20 — a base32 TOTP seed is refused, though one letter case barely changes class"
+expect_citation cc21.json 'cull citation-secret-shaped' \
+  "CC21 — every GitHub token prefix is refused, not only ghp_"
+expect_citation cc22.json 'cull citation-secret-shaped' \
+  "CC22 — a JWT is refused although both its segments are under the statistical minimum"
+expect_citation cc23.json 'cull citation-secret-shaped' \
+  "CC23 — a hex digest is refused on the hex floor, which base64 entropy never reaches"
+expect_citation cc24.json 'cull citation-secret-shaped' \
+  "CC24 — a prefixless random blob is refused by the statistical rule alone"
+
+# The accept half — the direction that cost this gate real findings. Without
+# these rows every refuse row above still passes on a guard that refuses
+# everything, which is a silent no-op nobody can see: the cull is only logged,
+# and the lens then recomputes to APPROVE with nothing left in it.
+expect_citation cc25.json 'accept citation-verified' \
+  "CC25 — ordinary hyphenated English (risk-mismatch) is not a secret"
+expect_citation cc26.json 'accept citation-verified' \
+  "CC26 — four sk- fragments that occur in this checkout today all survive"
+expect_citation cc27.json 'accept citation-verified' \
+  "CC27 — long snake_case and SCREAMING_SNAKE identifiers survive"
+expect_citation cc28.json 'accept citation-verified' \
+  "CC28 — an identifier spelling eyJ mid-word is not a JWT"
+expect_citation cc29.json 'accept citation-verified' \
+  "CC29 — a repo-relative path is not a base64 blob"
+expect_citation cc34.json 'accept citation-verified' \
+  "CC34 — an issuer prefix buried mid-identifier (task_live_...) is not a key"
+expect_citation cc35.json 'accept citation-verified' \
+  "CC35 — a run of glued uppercase words is not a base32 seed (class floor)"
+expect_citation cc36.json 'accept citation-verified' \
+  "CC36 — a two-class padding fixture is not a base32 seed (entropy floor)"
+
+# The ordering half: the FIRST failing check names the reason.
+expect_citation cc30.json 'cull citation-not-verbatim' \
+  "CC30 — a quote failing both the length ceiling and the guard reports the LENGTH"
+expect_citation cc31.json 'cull citation-not-verbatim' \
+  "CC31 — a secret-shaped quote that is not in the file reports the WINDOW, not a leak"
 
 echo
 echo "== R: the cull-reason vocabulary is actually closed =="
@@ -599,6 +760,51 @@ if [ "$CC16_BEFORE" = "$CC16_AFTER" ]; then
   pass "CC16 — the captured reviewer bytes are unchanged by the gate"
 else
   note_fail "CC16 — the gate mutated its own input"
+fi
+
+# --- CC32/CC33: the redaction guard, end to end through the shipped writer
+# CC17-CC31 above drive the predicate. These two drive the ARTIFACT, in both
+# directions, because that is the surface the harm was measured on: a blocker
+# citing an ordinary hyphenated rule came out of the writer as APPROVE with zero
+# findings, and nothing but the citation log said why.
+#
+# The token is assembled at runtime for the same reason cc9 is: finish-branch's
+# pre-push scan reads the DIFF, so a contiguous Slack token on a new line here
+# would abort the push that adds it. tests/finish-branch.test.sh:78 does the
+# same with the AWS example key.
+W_IDENT_QUOTE='Every helper name must start with a risk-mismatch guard.'
+W_IDENT_RULES="# Fixture rules
+
+$W_IDENT_QUOTE
+"
+W_IDENT="confidence: 90 — rule AGENTS.md:3 — the new helper has no guard — quote: $W_IDENT_QUOTE"
+
+W_SLACK_TOKEN="xox""b-52601815908-3016613186091-8oOOL8dKLzdocJ2isAjIhKtJ"
+W_SECRET_QUOTE="Rotate the workspace bot token $W_SLACK_TOKEN before merging."
+W_SECRET_RULES="# Fixture rules
+
+$W_SECRET_QUOTE
+"
+W_SECRET="confidence: 90 — rule AGENTS.md:3 — the diff hardcodes it — quote: $W_SECRET_QUOTE"
+
+w_build cc32 "$W_IDENT" blocker '[]' "$W_IDENT_RULES"
+if [ "$(w_run cc32)" = 0 ] \
+   && [ "$(w_field cc32 convention-findings)" = 1 ] \
+   && [ "$(w_field cc32 convention-severity)" = blocker ] \
+   && [ "$(w_field cc32 convention-verdict)" = REVISIONS_REQUIRED ]; then
+  pass "CC32 — a blocker quoting a hyphenated rule reaches the aggregate intact"
+else
+  note_fail "CC32 — the redaction guard silently deleted a true finding end to end"
+fi
+
+w_build cc33 "$W_SECRET" blocker '[]' "$W_SECRET_RULES"
+if [ "$(w_run cc33)" = 0 ] \
+   && [ "$(w_field cc33 convention-findings)" = 0 ] \
+   && [ "$(w_field cc33 convention-verdict)" = APPROVE ] \
+   && grep -q 'citation-secret-shaped' "$TMP_ROOT/w/cc33/citations.md"; then
+  pass "CC33 — a live credential in a real rule line is culled and the cull is logged"
+else
+  note_fail "CC33 — a credential rode out of the writer inside a citation"
 fi
 
 echo

@@ -5,6 +5,11 @@
       "n": 0,
       "tp": 0
     },
+    "review_pr.review.convention": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
     "review_pr.review.correctness": {
       "fp": 0,
       "n": 0,
@@ -50,11 +55,19 @@
   "pending": [
     {
       "path": "agents/code-reviewer.md",
-      "reason": "#433 moved the 0-100 confidence anchors out of this agent into shared/finding-confidence-rubric-v1.md, so the prompt changed after these numbers were measured. The precision figures predate that edit and must not be read as measuring the current prompt; re-measure with --refresh once the convention lens has adjudicated findings to mine."
+      "reason": "#431 moved the 0-100 confidence anchors out of this agent into shared/finding-confidence-rubric-v1.md, so the prompt changed after these numbers were measured. The precision figures predate that edit and must not be read as measuring the current prompt; re-measure with --refresh once the convention lens has adjudicated findings to mine."
+    },
+    {
+      "path": "agents/convention-compliance.md",
+      "reason": "This prompt did not EXIST when the numbers were measured: #433 created it at 2026-08-11T01:53:48Z and measured_at is 2026-08-11T01:41:26Z. There are therefore no measured bytes to stamp, and it carries no prompt_digests entry: recording its current digest would assert that the published figures were measured against this prompt, which never happened. Declared here instead, and re-measured with --refresh once the convention lens has adjudicated findings to mine."
+    },
+    {
+      "path": "shared/finding-confidence-rubric-v1.md",
+      "reason": "Same shape as the convention lens: #431 created this shared body at 2026-08-11T03:18:57Z, after measured_at (2026-08-11T01:41:26Z), when the 0-100 confidence anchors left agents/code-reviewer.md. The numbers predate the file's existence, so no digest of it can be a MEASURED digest; it is declared here rather than stamped."
     },
     {
       "path": "shared/phase1-reviewer-output-v1.md",
-      "reason": "#431 extended the shared Phase 1 reviewer output contract for the finding-verifier gate. Same situation: the measured numbers predate the contract change, so the stamp is declared stale rather than re-stamped."
+      "reason": "#433 extended the shared Phase 1 reviewer output contract for the convention lens's citation block. Same situation: the measured numbers predate the contract change, so the stamp is declared stale rather than re-stamped."
     }
   ],
   "prompt_digests": {

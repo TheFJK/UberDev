@@ -2075,6 +2075,617 @@ else
   fail "E9k $E9_SIZE_BAD size boundary case(s) went the wrong way:$E9_SIZE_WHICH"
 fi
 
+# ---------------------------------------------------------------------------
+# L — the six cross-fence carriers the #427 follow-up added, LOCKED
+# ---------------------------------------------------------------------------
+# Six real defects of one shape were fixed in commands/review-pr.md and
+# lib/review-fleet-args.sh with ZERO regression coverage: a value produced in
+# one `bash` fence and read in the next, where the next fence is a different
+# process and the scalar is simply the empty string. Reverting both files to
+# their pre-fix state left SIXTEEN suites green, so none of them was watching.
+# These rows are that watch, and each one was written against a reverted copy of
+# its own fix and kept only once it reddened for its own reason.
+#
+# Shape follows R45/R46 in tests/review-pr.test.sh: the command file is scanned
+# STRUCTURALLY over an extracted fence body (bind-before-read, writer/reader
+# position), never with a bare grep a prose sentence could satisfy — every one
+# of these fences DOCUMENTS the carrier it hands forward, so a `grep -F` for the
+# carrier name passes on the broken tree too. The lib halves are EXECUTED under
+# `env -i`, for the same reason every E row is: an env-passing probe masks the
+# whole fence-scoped-state class it exists to catch.
+echo
+echo "== L: the six cross-fence carriers of the #427 follow-up =="
+
+L_TMP="$TMP/locks"
+mkdir -p "$L_TMP"
+
+# l_extract TOKEN OUT — the body of the ONE review-pr.md ```bash fence holding
+# TOKEN. EXACTLY one: a token matching two fences would silently scan the wrong
+# one and a token matching none would scan nothing at all, which is how a
+# structural lock decays into a row that cannot fail. Every anchor below is a
+# token that predates all six fixes, so a reverted tree still resolves it and
+# the mutation reds the LOCK rather than the anchor.
+l_extract() {
+  python3 -I -B - "$REVIEW_CMD" "$1" >"$2" 2>/dev/null <<'PY'
+import re
+import sys
+
+path, token = sys.argv[1], sys.argv[2]
+lines = open(path, encoding="utf-8").read().split("\n")
+bodies = []
+index = 0
+while index < len(lines):
+    match = re.match(r"^([ \t]*)```bash", lines[index])
+    if match:
+        indent = match.group(1)
+        close = index + 1
+        while close < len(lines) and not re.match(r"^" + re.escape(indent) + r"```\s*$", lines[close]):
+            close += 1
+        body = "\n".join(lines[index + 1:close])
+        if token in body:
+            bodies.append(body)
+        index = close + 1
+    else:
+        index += 1
+if len(bodies) != 1:
+    raise SystemExit(1)
+sys.stdout.write(bodies[0])
+PY
+}
+
+L_ANCHOR_MISS=""
+l_anchor() {  # NAME TOKEN
+  l_extract "$2" "$L_TMP/$1.fence" || { L_ANCHOR_MISS="$L_ANCHOR_MISS $1(no-unique-fence)"; return; }
+  [ "$(grep -c '' "$L_TMP/$1.fence")" -ge 20 ] \
+    || L_ANCHOR_MISS="$L_ANCHOR_MISS $1(body-too-short)"
+}
+l_anchor scope   'review_fleet_write_review_base'
+l_anchor capture 'post_review_validated_evidence_complete'
+l_anchor gate    'project-verification-claims'
+l_anchor publish 'review-fleet-verify-opinions-iter'
+
+# l_field REPORT KEY — one `key=value` line out of a scanner report.
+l_field() { sed -n "s/^$2=//p" "$1"; }
+
+# ---------------------------------------------------------------------------
+# L0 — the scan is non-vacuous. Every row below reads one of these four fence
+# bodies or the fixture run built under it; if an anchor stops resolving, the
+# locks scan an empty string and pass on anything.
+# ---------------------------------------------------------------------------
+if [ -z "$L_ANCHOR_MISS" ]; then
+  pass "L0 all four locked fences (scope / capture / verify-gate / verify-publish) resolve to exactly one fence each"
+else
+  fail "L0 a locked fence anchor no longer names exactly one real fence:$L_ANCHOR_MISS"
+fi
+
+# ---------------------------------------------------------------------------
+# L1 — the changed-path set crosses 4w.1 -> 4w.2 ON DISK.
+#
+# THE DEFECT: 4w.2 opened with `review_fleet_rehydrate`, which does not bind
+# CHANGED_PATHS_JSON, and then wrote `printf '%s' "$CHANGED_PATHS_JSON"` into
+# post-review/changed-paths.json. The binder is the Phase 1 scope fence, a dead
+# shell by then, so the write published 0 bytes and the aggregate refused
+# `changed-paths-unavailable` on a review that had run perfectly.
+#
+# Structural and not behavioural because the answer is a POSITION: the fence
+# that owns the value must be the writer, and the fence a process later must
+# read it back before it reads the name at all.
+# ---------------------------------------------------------------------------
+python3 -I -B - "$L_TMP/scope.fence" "$L_TMP/capture.fence" >"$L_TMP/l1.report" 2>"$L_TMP/l1.err" <<'PY'
+import re
+import sys
+
+WRITE = re.compile(r'>\s*"?[^"\s]*changed-paths\.json')
+BIND = re.compile(r"^\s*CHANGED_PATHS_JSON=")
+READ = re.compile(r"\$\{?CHANGED_PATHS_JSON\b")
+
+
+def lines_of(path):
+    return open(path, encoding="utf-8").read().split("\n")
+
+
+def is_comment(line):
+    # Full-line comments only. Both fences EXPLAIN the carrier they hand over,
+    # naming `$CHANGED_PATHS_JSON` in prose; counting that as a read would make
+    # every fence an offender and the row meaningless.
+    return line.lstrip().startswith("#")
+
+
+scope = lines_of(sys.argv[1])
+capture = lines_of(sys.argv[2])
+scope_writes = [i for i, l in enumerate(scope) if not is_comment(l) and WRITE.search(l)]
+capture_writes = [i for i, l in enumerate(capture) if not is_comment(l) and WRITE.search(l)]
+binds = [i for i, l in enumerate(capture) if BIND.match(l)]
+reads = [i for i, l in enumerate(capture) if not is_comment(l) and READ.search(l)]
+bind_at = binds[0] if binds else -1
+ambient = [i + 1 for i in reads if bind_at < 0 or i < bind_at]
+source = ""
+guarded = "no"
+if bind_at >= 0:
+    # The bind must come off DISK. `$(cat "<path>")` and not a re-derivation:
+    # a second `git diff --name-only` here would be a second answer to a
+    # question the diff artifact and the commit range are already frozen against.
+    match = re.search(r'CHANGED_PATHS_JSON="\$\(cat\s+"([^"]+)"\)"', capture[bind_at])
+    if match:
+        source = match.group(1)
+        pattern = re.compile(r'\[\s+-s\s+"?' + re.escape(source) + r'"?\s+\]')
+        for index in range(bind_at):
+            if pattern.search(capture[index]):
+                window = "\n".join(capture[index:index + 6])
+                if re.search(r"^\s*return\s+[0-9]+", window, re.M):
+                    guarded = "yes"
+                break
+print("scope_writes=%d" % len(scope_writes))
+print("capture_writes=%d" % len(capture_writes))
+print("capture_reads=%d" % len(reads))
+print("ambient=%s" % ",".join(str(i) for i in ambient))
+print("source=%s" % source)
+print("guarded=%s" % guarded)
+PY
+L1_RC=$?
+if [ "$L1_RC" = 0 ] \
+   && [ "$(l_field "$L_TMP/l1.report" scope_writes)" = 1 ] \
+   && [ "$(l_field "$L_TMP/l1.report" capture_writes)" = 0 ] \
+   && [ "$(l_field "$L_TMP/l1.report" capture_reads)" -gt 0 ] 2>/dev/null \
+   && [ -z "$(l_field "$L_TMP/l1.report" ambient)" ] \
+   && [ -n "$(l_field "$L_TMP/l1.report" source)" ] \
+   && [ "$(l_field "$L_TMP/l1.report" guarded)" = yes ]; then
+  pass "L1 the changed-path set is written by the scope fence and read back from disk by 4w.2, refused loudly when absent"
+else
+  fail "L1 4w.2 reads CHANGED_PATHS_JSON ambiently or is still its writer (rc=$L1_RC): $(tr '\n' ' ' <"$L_TMP/l1.report")"
+fi
+
+# ---------------------------------------------------------------------------
+# L2 — the verification sidecar is RE-created on re-entry, not created-if-absent.
+#
+# THE DEFECT: `[ -e "$VERIFY_SIDECAR_PATH" ] || ( umask 077 && : > ... )`.
+# phase1-verification.json is the one Step 6b.0 artifact that cannot be
+# iteration-keyed (findings-to-issues binds it by that exact basename), so a
+# Phase 3 CI-fix loop re-entered Phase 1 with iteration 1's PUBLISHED sidecar
+# still on disk; publish-verification captures its target with
+# `_capture_regular(path, 0, 0)` and refuses a non-empty file. Iteration 2 could
+# not publish at all.
+# ---------------------------------------------------------------------------
+python3 -I -B - "$L_TMP/gate.fence" >"$L_TMP/l2.report" 2>"$L_TMP/l2.err" <<'PY'
+import re
+import sys
+
+body = open(sys.argv[1], encoding="utf-8").read().split("\n")
+
+
+def is_comment(line):
+    return line.lstrip().startswith("#")
+
+
+bind_at = next((i for i, l in enumerate(body) if re.match(r"^\s*VERIFY_SIDECAR_PATH=", l)), -1)
+# An existence TEST on the sidecar is the defect itself wearing any spelling.
+exists_tests = [
+    i + 1 for i, l in enumerate(body)
+    if not is_comment(l) and re.search(r'\[\s+-[ef]\s+"\$VERIFY_SIDECAR_PATH"', l)
+]
+removes = [
+    i for i, l in enumerate(body)
+    if bind_at >= 0 and i > bind_at and l.strip().startswith("rm ") and "VERIFY_SIDECAR_PATH" in l
+]
+creates = [
+    i for i, l in enumerate(body)
+    if bind_at >= 0 and i > bind_at and re.search(r':\s*>"\$VERIFY_SIDECAR_PATH"', l)
+]
+# The create must be the whole statement, not the right arm of a guard: a line
+# that STARTS with `(` is the umask subshell; one that starts with `[` is the
+# create-if-absent this row exists to keep out.
+unconditional = "no"
+if creates and body[creates[0]].strip().startswith("("):
+    unconditional = "yes"
+print("bind=%d" % (bind_at + 1))
+print("exists_tests=%s" % ",".join(str(i) for i in exists_tests))
+print("removes=%d" % len(removes))
+print("creates=%d" % len(creates))
+print("rm_before_create=%s" % ("yes" if removes and creates and removes[0] < creates[0] else "no"))
+print("unconditional_create=%s" % unconditional)
+PY
+L2_RC=$?
+if [ "$L2_RC" = 0 ] \
+   && [ "$(l_field "$L_TMP/l2.report" bind)" -gt 0 ] 2>/dev/null \
+   && [ -z "$(l_field "$L_TMP/l2.report" exists_tests)" ] \
+   && [ "$(l_field "$L_TMP/l2.report" removes)" -ge 1 ] 2>/dev/null \
+   && [ "$(l_field "$L_TMP/l2.report" creates)" -ge 1 ] 2>/dev/null \
+   && [ "$(l_field "$L_TMP/l2.report" rm_before_create)" = yes ] \
+   && [ "$(l_field "$L_TMP/l2.report" unconditional_create)" = yes ]; then
+  pass "L2 the Step 6b.0 gate removes and re-creates phase1-verification.json, so re-entry cannot publish onto iteration 1's sidecar"
+else
+  fail "L2 the sidecar is created-if-absent again (rc=$L2_RC): $(tr '\n' ' ' <"$L_TMP/l2.report")"
+fi
+
+# L2p — THE PREMISE, executed against the shipped contract. `publish-verification`
+# captures its target with `_capture_regular(path, 0, 0)`; the `digest` verb is
+# the same helper reachable from a CLI, so this row proves that a NON-EMPTY
+# sidecar really is refused and that L2 is not guarding a hazard that no longer
+# exists. It is deliberately independent of the six mutations.
+: >"$L_TMP/sidecar-empty"
+printf '{"schema_version":1}\n' >"$L_TMP/sidecar-published"
+L2P_EMPTY_RC=0
+python3 -I -B "$CONTRACT" digest --path "$L_TMP/sidecar-empty" --minimum 0 --maximum 0 >/dev/null 2>&1 \
+  || L2P_EMPTY_RC=$?
+L2P_FULL_RC=0
+python3 -I -B "$CONTRACT" digest --path "$L_TMP/sidecar-published" --minimum 0 --maximum 0 \
+  >/dev/null 2>"$L_TMP/l2p.err" || L2P_FULL_RC=$?
+if [ "$L2P_EMPTY_RC" = 0 ] && [ "$L2P_FULL_RC" != 0 ] && grep -Fq artifact_size_invalid "$L_TMP/l2p.err"; then
+  pass "L2p an already-published sidecar really is refused artifact_size_invalid by the 0..0 capture (the hazard L2 locks is live)"
+else
+  fail "L2p the 0..0 capture no longer refuses a non-empty sidecar (empty rc=$L2P_EMPTY_RC, published rc=$L2P_FULL_RC)"
+fi
+
+# ---------------------------------------------------------------------------
+# L3 — the verify-dispatch decision crosses the Workflow mandate ON DISK.
+#
+# THE DEFECT: the gate fence set `VERIFY_DISPATCH=0|1` and the fence after the
+# mandate consumed it — a different process, where the scalar is gone. On a
+# short-circuit (empty roster, or threshold 0) the second fence would re-publish
+# a sidecar the first had already filled, and publish-verification refuses that
+# with `artifact_size_invalid`: a GREEN review turned into rc 74.
+#
+# Behavioural half under `env -i`, rc asserted EXACTLY 2 and not merely
+# non-zero: an absent function exits 127 with empty output, which satisfies
+# "non-zero and silent" perfectly and would pass on a tree with no
+# implementation at all (the E8d idiom).
+# ---------------------------------------------------------------------------
+L3_DIR="$L_TMP/verify-dispatch"
+mkdir -p "$L3_DIR"
+l3_write() {  # PATH VALUE -> rc
+  env -i PATH="$PATH" bash -c '. "$1"; review_fleet_write_verify_dispatch "$2" "$3"' \
+    _ "$ARGS_LIB" "$1" "$2" >/dev/null 2>&1
+}
+l3_read() {  # PATH -> "<rc>|<stdout>"
+  local out rc
+  out="$(env -i PATH="$PATH" bash -c '. "$1"; review_fleet_read_verify_dispatch "$2"' \
+    _ "$ARGS_LIB" "$1" 2>/dev/null)"
+  rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+L3_BAD=""
+for l3_value in 0 1; do
+  l3_write "$L3_DIR/decision-$l3_value.txt" "$l3_value" \
+    || L3_BAD="$L3_BAD write($l3_value)-refused"
+  l3_got="$(l3_read "$L3_DIR/decision-$l3_value.txt")"
+  [ "$l3_got" = "0|$l3_value" ] || L3_BAD="$L3_BAD roundtrip($l3_value)='$l3_got'"
+done
+# An absent, empty or malformed record is NOT read as `0`: "the gate cannot say
+# what it did" and "the gate dispatched nothing" are different answers, and only
+# one of them means the sidecar is already published.
+: >"$L3_DIR/zero-byte.txt"
+printf 'yes\n' >"$L3_DIR/word.txt"
+printf '2\n' >"$L3_DIR/out-of-domain.txt"
+for l3_case in absent.txt zero-byte.txt word.txt out-of-domain.txt; do
+  l3_got="$(l3_read "$L3_DIR/$l3_case")"
+  [ "$l3_got" = '2|' ] || L3_BAD="$L3_BAD read($l3_case)='$l3_got'"
+done
+# The writer's domain is closed on its own side, and a refused write leaves no
+# file for the reader to find.
+for l3_value in 2 '' true; do
+  if l3_write "$L3_DIR/rejected.txt" "$l3_value"; then
+    L3_BAD="$L3_BAD write('$l3_value')-accepted"
+  fi
+done
+[ -e "$L3_DIR/rejected.txt" ] && L3_BAD="$L3_BAD refused-write-left-a-file"
+python3 -I -B - "$L_TMP/gate.fence" "$L_TMP/publish.fence" >"$L_TMP/l3.report" 2>"$L_TMP/l3.err" <<'PY'
+import re
+import sys
+
+ASSIGN = re.compile(r"(^|[\s;&|(])VERIFY_DISPATCH=")
+READ = re.compile(r"\$\{?VERIFY_DISPATCH\b")
+
+
+def lines_of(path):
+    return open(path, encoding="utf-8").read().split("\n")
+
+
+def is_comment(line):
+    return line.lstrip().startswith("#")
+
+
+gate = lines_of(sys.argv[1])
+publish = lines_of(sys.argv[2])
+assigns = [i for i, l in enumerate(gate) if not is_comment(l) and ASSIGN.search(l)]
+writes = [i for i, l in enumerate(gate) if re.match(r"^\s*review_fleet_write_verify_dispatch\s", l)]
+# The stderr line the orchestrator keys the Workflow mandate on, in the same
+# place and for the same reason as setup's `REVIEW_CARRY RUN_ID=` line.
+emits = [i for i, l in enumerate(gate) if "REVIEW_VERIFY_DISPATCH=%s" in l and ">&2" in l]
+binds = [
+    i for i, l in enumerate(publish)
+    if re.match(r'^\s*VERIFY_DISPATCH="\$\(review_fleet_read_verify_dispatch\s', l)
+]
+reads = [i for i, l in enumerate(publish) if not is_comment(l) and READ.search(l)]
+defaults = [
+    i + 1 for i, l in enumerate(publish)
+    if not is_comment(l) and re.search(r"\$\{VERIFY_DISPATCH:[-=]", l)
+]
+print("gate_assigns=%d" % len(assigns))
+print("gate_writes=%d" % len(writes))
+# EVERY arm records: a write placed above one of the three assignments would
+# persist a decision two of them never made.
+print("write_after_every_assign=%s" % (
+    "yes" if writes and assigns and writes[0] > max(assigns) else "no"))
+print("gate_emits=%d" % len(emits))
+print("publish_binds=%d" % len(binds))
+print("publish_reads=%d" % len(reads))
+print("read_before_bind=%s" % (
+    "yes" if reads and (not binds or min(reads) < binds[0]) else "no"))
+print("defaults=%s" % ",".join(str(i) for i in defaults))
+PY
+L3_RC=$?
+[ "$L3_RC" = 0 ] || L3_BAD="$L3_BAD scanner-rc=$L3_RC"
+[ "$(l_field "$L_TMP/l3.report" gate_assigns)" -ge 3 ] 2>/dev/null || L3_BAD="$L3_BAD gate-assigns"
+[ "$(l_field "$L_TMP/l3.report" gate_writes)" -ge 1 ] 2>/dev/null || L3_BAD="$L3_BAD gate-write-missing"
+[ "$(l_field "$L_TMP/l3.report" write_after_every_assign)" = yes ] || L3_BAD="$L3_BAD write-before-an-assign"
+[ "$(l_field "$L_TMP/l3.report" gate_emits)" -ge 1 ] 2>/dev/null || L3_BAD="$L3_BAD mandate-key-missing"
+[ "$(l_field "$L_TMP/l3.report" publish_binds)" = 1 ] || L3_BAD="$L3_BAD publish-bind"
+[ "$(l_field "$L_TMP/l3.report" publish_reads)" -ge 1 ] 2>/dev/null || L3_BAD="$L3_BAD publish-never-reads"
+[ "$(l_field "$L_TMP/l3.report" read_before_bind)" = no ] || L3_BAD="$L3_BAD publish-reads-ambiently"
+[ -z "$(l_field "$L_TMP/l3.report" defaults)" ] || L3_BAD="$L3_BAD publish-defaults-the-decision"
+if [ -z "$L3_BAD" ]; then
+  pass "L3 the verify-dispatch decision is written and read through the typed lib pair, refusing absent/malformed rather than defaulting to 0"
+else
+  fail "L3 the dispatch decision still crosses the mandate as a scalar:$L3_BAD"
+fi
+
+# ---------------------------------------------------------------------------
+# The fixture every remaining row runs against: a REAL /review-pr run on disk
+# (real git repository, real uberdev_command_workspace_prepare, real descriptor
+# and reservation markers), built exactly as section B builds it.
+# ---------------------------------------------------------------------------
+L_FIXTURE="$L_TMP/run"
+mkdir -p "$L_FIXTURE"
+L_RUN_ID=20260101-000000-facade
+L_RUN_PR=4271
+L_FIXTURE_OUT="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+  "$L_FIXTURE" "$REPO_ROOT/plugins/uberdev" "$L_RUN_PR" "$L_RUN_ID" 2>"$L_TMP/fixture.err")" || L_FIXTURE_OUT=''
+L_REPO="$(printf '%s\n' "$L_FIXTURE_OUT" | sed -n 1p)"
+L_RUN_DIR="$(printf '%s\n' "$L_FIXTURE_OUT" | sed -n 4p)"
+
+# l_probe SEED_FILE CWD SNIPPET — rehydrate in a shell that inherited NOTHING
+# but SEED_FILE, then run SNIPPET. Output in $L_PROBE_OUT, rc in $L_PROBE_RC.
+# The seed is a FILE of `NAME=value` lines rather than `env -i NAME=value ...`
+# so a value carrying a space cannot be re-split on its way in.
+l_probe() {
+  L_PROBE_OUT="$(env -i PATH="$PATH" HOME="${HOME:-$TMP}" bash -c '
+    while IFS= read -r assignment; do
+      [ -n "$assignment" ] || continue
+      export "$assignment"
+    done <"$2"
+    cd "$3" || exit 9
+    . "$1" || exit 9
+    review_fleet_rehydrate || exit 9
+    eval "$4"' _ "$ARGS_LIB" "$1" "$2" "$3" 2>"$L_TMP/probe.err")"
+  L_PROBE_RC=$?
+}
+
+# The RESOLVED path: nothing but a run id and a plugin root, from inside the
+# repository, so every carrier comes off the descriptor.
+{
+  printf 'RUN_ID=%s\n' "$L_RUN_ID"
+  printf 'UBERDEV_REVIEW_PLUGIN_ROOT=%s\n' "$REPO_ROOT/plugins/uberdev"
+} >"$L_TMP/seed-resolved.env"
+l_probe "$L_TMP/seed-resolved.env" "$L_REPO" env
+L_RESOLVED_ENV="$L_PROBE_OUT"
+L_RESOLVED_RC="$L_PROBE_RC"
+printf '%s\n' "$L_RESOLVED_ENV" >"$L_TMP/resolved.env"
+
+# The FAST path needs the eleven carriers already bound. They are taken from
+# what the resolved path just produced — the second entry into this function
+# must see what the first one published — but BY NAME, never by replaying the
+# resolved environment wholesale: replaying it would carry the very
+# present-but-empty export L5 exists to detect straight into the comparison.
+L_FAST_SEED_NAMES='RUN_ID WORKTREE_ROOT RESEARCH_DIR_ABS MARKER_DIR DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH UBERDEV_COMMAND_WORKSPACE_JSON UBERDEV_CARRIER_RUN_DIR UBERDEV_REVIEW_PLUGIN_ROOT'
+awk -v names="$L_FAST_SEED_NAMES" '
+  BEGIN { count = split(names, wanted, " "); for (i = 1; i <= count; i++) keep[wanted[i]] = 1 }
+  { split($0, parts, "="); if (parts[1] in keep && length($0) > length(parts[1]) + 1) print }
+' "$L_TMP/resolved.env" >"$L_TMP/seed-fast.env"
+L_FAST_SEED_COUNT="$(grep -c '' "$L_TMP/seed-fast.env")"
+
+# cwd `/`, deliberately: the fast path returns before it ever asks git for a
+# toplevel, so a probe that silently fell through to the resolved path fails
+# here instead of proving the wrong half.
+l_probe "$L_TMP/seed-fast.env" / env
+L_FAST_ENV="$L_PROBE_OUT"
+L_FAST_RC="$L_PROBE_RC"
+printf '%s\n' "$L_FAST_ENV" >"$L_TMP/fast.env"
+
+if [ -n "$L_REPO" ] && [ -n "$L_RUN_DIR" ] && [ "$L_RESOLVED_RC" = 0 ] && [ "$L_FAST_RC" = 0 ] \
+   && [ "$L_FAST_SEED_COUNT" = 13 ]; then
+  pass "L0b the fixture run rehydrates on BOTH entry paths (resolved from the descriptor, fast from the 13 carriers it published)"
+else
+  fail "L0b the fixture run did not rehydrate: repo='$L_REPO' resolved_rc=$L_RESOLVED_RC fast_rc=$L_FAST_RC seeded=$L_FAST_SEED_COUNT/13"
+fi
+
+# ---------------------------------------------------------------------------
+# L4 — PR identity is RECOVERED from the run, never read ambiently.
+#
+# THE DEFECT: both Step 6b.0 fences read `$PR_NUMBER` — one into the args
+# envelope, one into the audit row that has to make a suppressed blocker
+# traceable — and neither fence binds it. `clampInt(CFG.prNumber, …, 0)` in
+# workflow.js turns the empty string into a verifier prompt that says "PR #0",
+# and the audit row records `pr:""`. REVIEW_REPO_SLUG had the same shape and is
+# NOT a carrier: it is a pure function of the checkout and is re-derived.
+# ---------------------------------------------------------------------------
+L4_BAD=""
+# Behavioural: the recovery source is the run's OWN reservation marker, and it
+# works on both entry paths.
+l_probe "$L_TMP/seed-fast.env" / 'printf "%s" "${PR_NUMBER:-}"'
+[ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L_RUN_PR" ] \
+  || L4_BAD="$L4_BAD fast-path-pr='$L_PROBE_OUT'(rc=$L_PROBE_RC)"
+l_probe "$L_TMP/seed-resolved.env" "$L_REPO" 'printf "%s" "${PR_NUMBER:-}"'
+[ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L_RUN_PR" ] \
+  || L4_BAD="$L4_BAD resolved-path-pr='$L_PROBE_OUT'(rc=$L_PROBE_RC)"
+# ...and it INVENTS nothing. A marker that is absent or cannot say which PR this
+# is leaves PR_NUMBER empty and rehydration still succeeds: this is a recovery
+# source, not a guard, and the two fences that put the number in a prompt or an
+# audit row refuse for themselves (asserted structurally below).
+mkdir -p "$L_TMP/marker-absent" "$L_TMP/marker-string" "$L_TMP/marker-zero"
+printf '{"pr":"%s"}\n' "$L_RUN_PR" >"$L_TMP/marker-string/pr-context.json"
+printf '{"pr":0}\n' >"$L_TMP/marker-zero/pr-context.json"
+for l4_marker in marker-absent marker-string marker-zero; do
+  grep -v '^MARKER_DIR=' "$L_TMP/seed-fast.env" >"$L_TMP/seed-$l4_marker.env"
+  printf 'MARKER_DIR=%s\n' "$L_TMP/$l4_marker" >>"$L_TMP/seed-$l4_marker.env"
+  l_probe "$L_TMP/seed-$l4_marker.env" / 'printf "%s" "${PR_NUMBER:-}"'
+  { [ "$L_PROBE_RC" = 0 ] && [ -z "$L_PROBE_OUT" ]; } \
+    || L4_BAD="$L4_BAD $l4_marker-invented='$L_PROBE_OUT'(rc=$L_PROBE_RC)"
+done
+python3 -I -B - "$L_TMP/gate.fence" "$L_TMP/publish.fence" >"$L_TMP/l4.report" 2>"$L_TMP/l4.err" <<'PY'
+import re
+import sys
+
+READ = re.compile(r"\$\{?PR_NUMBER\b")
+
+
+def lines_of(path):
+    return open(path, encoding="utf-8").read().split("\n")
+
+
+def is_comment(line):
+    return line.lstrip().startswith("#")
+
+
+def pr_guard(body, label):
+    case_at = next(
+        (i for i, l in enumerate(body) if re.match(r'^\s*case\s+"\$\{PR_NUMBER:-\}"\s+in', l)), -1)
+    esac_at = -1
+    typed = "no"
+    refuses = "no"
+    if case_at >= 0:
+        for index in range(case_at, len(body)):
+            if re.match(r"^\s*esac\s*$", body[index]):
+                esac_at = index
+                break
+        block = "\n".join(body[case_at:esac_at + 1 if esac_at >= 0 else len(body)])
+        # A non-numeric OR empty value, and a refusal -- not a default.
+        # Both arms are required: `*[!0-9]*` alone does NOT match the empty
+        # string, so narrowing the case to it lets an unbound PR_NUMBER through
+        # as "PR #0" in the verifier prompt and pr:"" in the audit row -- the
+        # exact defect this row locks. Asserting only the non-numeric arm let
+        # that narrowing pass 251/0.
+        if "*[!0-9]*" in block and re.search(r"(^|\|)\s*(''|\"\")\s*\|", block, re.M):
+            typed = "yes"
+        if re.search(r"^\s*return\s+[0-9]+", block, re.M):
+            refuses = "yes"
+    reads = [
+        i for i, l in enumerate(body)
+        if not is_comment(l) and READ.search(l) and not (case_at <= i <= max(esac_at, case_at))
+    ]
+    print("%s_case=%d" % (label, case_at + 1))
+    print("%s_typed=%s" % (label, typed))
+    print("%s_refuses=%s" % (label, refuses))
+    print("%s_uses=%d" % (label, len(reads)))
+    # The guard must come BEFORE the fence puts the number anywhere.
+    print("%s_guard_first=%s" % (
+        label, "yes" if case_at >= 0 and reads and min(reads) > case_at else "no"))
+
+
+gate = lines_of(sys.argv[1])
+publish = lines_of(sys.argv[2])
+pr_guard(gate, "gate")
+pr_guard(publish, "publish")
+# The slug: re-derived from the checkout, shape-checked, and only then emitted.
+derive_at = next(
+    (i for i, l in enumerate(gate)
+     if re.search(r'REVIEW_REPO_SLUG="\$\{REVIEW_REPO_SLUG:-\$\(gh repo view', l)), -1)
+shape_at = next(
+    (i for i, l in enumerate(gate)
+     if i > derive_at >= 0 and "REVIEW_REPO_SLUG" in l and "=~" in l and "/" in l), -1)
+emit_at = next(
+    (i for i, l in enumerate(gate) if re.search(r'repoSlug="\$REVIEW_REPO_SLUG"', l)), -1)
+print("slug_derive=%d" % (derive_at + 1))
+print("slug_shape=%d" % (shape_at + 1))
+print("slug_emit=%d" % (emit_at + 1))
+print("slug_ordered=%s" % (
+    "yes" if 0 <= derive_at < shape_at < emit_at else "no"))
+PY
+L4_RC=$?
+[ "$L4_RC" = 0 ] || L4_BAD="$L4_BAD scanner-rc=$L4_RC"
+for l4_fence in gate publish; do
+  [ "$(l_field "$L_TMP/l4.report" "${l4_fence}_typed")" = yes ] || L4_BAD="$L4_BAD $l4_fence-untyped"
+  [ "$(l_field "$L_TMP/l4.report" "${l4_fence}_refuses")" = yes ] || L4_BAD="$L4_BAD $l4_fence-no-refusal"
+  [ "$(l_field "$L_TMP/l4.report" "${l4_fence}_uses")" -ge 1 ] 2>/dev/null \
+    || L4_BAD="$L4_BAD $l4_fence-never-uses-pr"
+  [ "$(l_field "$L_TMP/l4.report" "${l4_fence}_guard_first")" = yes ] \
+    || L4_BAD="$L4_BAD $l4_fence-uses-pr-before-guard"
+done
+[ "$(l_field "$L_TMP/l4.report" slug_ordered)" = yes ] || L4_BAD="$L4_BAD slug-derive/shape/emit-order"
+if [ -z "$L4_BAD" ]; then
+  pass "L4 both Step 6b.0 fences recover the PR from the run and re-derive the slug, refusing loudly instead of emitting PR #0"
+else
+  fail "L4 the verification gate still reads its identity ambiently:$L4_BAD"
+fi
+
+# ---------------------------------------------------------------------------
+# L5 — the two rehydration entry paths hand children the SAME environment.
+#
+# THE DEFECT: the resolved path exported STANDALONE_SNAPSHOT_PATH and
+# UBERDEV_CARRIER_RUN_DIR unconditionally while the fast path exported them only
+# when non-empty. For a /review-pr run the descriptor's own standalone_snapshot
+# is deliberately the empty string, so which fence a child was dispatched from
+# decided whether it inherited an empty-but-present value it cannot distinguish
+# from a real one, or nothing at all.
+#
+# The comparison is over NAMES and emptiness, not values: the two paths resolve
+# the same run, so any name present on one side and absent on the other is the
+# defect, and any name present-but-empty is it wearing the other face.
+# ---------------------------------------------------------------------------
+L_CARRIER_UNIVERSE="UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH UBERDEV_CARRIER_RUN_DIR STANDALONE_SNAPSHOT_PATH PR_NUMBER"
+l_carrier_report() {  # ENV_FILE OUT
+  awk -v names="$L_CARRIER_UNIVERSE" '
+    BEGIN { count = split(names, wanted, " "); for (i = 1; i <= count; i++) keep[wanted[i]] = 1 }
+    { split($0, parts, "="); name = parts[1]
+      if (name in keep) print name ":" (length($0) > length(name) + 1 ? "set" : "EMPTY") }
+  ' "$1" | LC_ALL=C sort >"$2"
+}
+l_carrier_report "$L_TMP/resolved.env" "$L_TMP/resolved.carriers"
+l_carrier_report "$L_TMP/fast.env" "$L_TMP/fast.carriers"
+L5_DIFF="$(diff "$L_TMP/resolved.carriers" "$L_TMP/fast.carriers" 2>&1 || true)"
+L5_EMPTY="$(grep -h ':EMPTY$' "$L_TMP/resolved.carriers" "$L_TMP/fast.carriers" || true)"
+L5_COUNT="$(grep -c '' "$L_TMP/resolved.carriers")"
+if [ "$L_RESOLVED_RC" = 0 ] && [ "$L_FAST_RC" = 0 ] && [ "$L5_COUNT" -ge 15 ] 2>/dev/null \
+   && [ -z "$L5_DIFF" ] && [ -z "$L5_EMPTY" ]; then
+  pass "L5 both rehydration entry paths export the same $L5_COUNT carriers, none of them present-but-empty"
+else
+  fail "L5 the two entry paths hand children different environments (resolved carriers=$L5_COUNT) empty='$(printf '%s' "$L5_EMPTY" | tr '\n' ' ')' diff='$(printf '%s' "$L5_DIFF" | tr '\n' ' ')'"
+fi
+
+# ---------------------------------------------------------------------------
+# L6 — `.claude/worktrees` is pruned BY PATH; `.claude` itself is not.
+#
+# THE DEFECT: the prune list carried `-name .claude`, which reaches the sibling
+# worktree copies by deleting the whole tree. `.claude/` is a documented
+# location for project rule documents, and the citation lens is told that a rule
+# document not on the allowlist does not exist for this review — so it would
+# cull the citation of a real convention as `citation-not-in-allowlist`, and a
+# repo that keeps its rules there reads as a repo that wrote none down.
+#
+# The twin row in tests/convention-citation.test.sh (D4) has the sibling-worktree
+# half and NO rule document directly under `.claude/`, which is exactly why it
+# stayed green through the defect. This fixture carries both halves.
+# ---------------------------------------------------------------------------
+L6_ROOT="$L_TMP/rule-sources"
+mkdir -p "$L6_ROOT/.claude/worktrees/sibling" "$L6_ROOT/.worktrees/other"
+: >"$L6_ROOT/AGENTS.md"
+: >"$L6_ROOT/.claude/CLAUDE.md"
+: >"$L6_ROOT/.claude/worktrees/sibling/CLAUDE.md"
+: >"$L6_ROOT/.claude/worktrees/sibling/AGENTS.md"
+: >"$L6_ROOT/.worktrees/other/AGENTS.md"
+L6_OUT="$(env -i PATH="$PATH" bash -c '. "$1"; uberdev_review_rule_sources "$2"' \
+  _ "$ARGS_LIB" "$L6_ROOT" 2>"$L_TMP/l6.err")"
+L6_RC=$?
+# Exact stdout, in LC_ALL=C order. Not a substring check: "contains
+# .claude/CLAUDE.md" would pass on a prune regression that also emitted both
+# sibling-worktree copies of it.
+L6_WANT='.claude/CLAUDE.md
+AGENTS.md'
+if [ "$L6_RC" = 0 ] && [ "$L6_OUT" = "$L6_WANT" ]; then
+  pass "L6 a rule document under .claude/ stays on the allowlist while .claude/worktrees copies stay off it"
+else
+  fail "L6 the rule-source prune drops .claude/ wholesale or admits a sibling worktree (rc=$L6_RC): '$(printf '%s' "$L6_OUT" | tr '\n' '|')'"
+fi
+
 echo ""
 echo "== Summary =="
 echo "  passed: $PASS"

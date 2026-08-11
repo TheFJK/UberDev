@@ -177,6 +177,7 @@
     "lib/child-dispatch.sh",
     "lib/code_fixer_contract.py",
     "lib/config-read.sh",
+    "lib/review-aggregate.sh",
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json"
   ]

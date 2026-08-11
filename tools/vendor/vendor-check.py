@@ -16,7 +16,11 @@ against upstream is `tools/vendor/vendor-drift.py`'s job, and mixing the two
 would make a network outage look like a clean tree.
 
 Every failure prints its own check id so a test can assert *why* the guard went
-red. "Red for the wrong reason" is not coverage.
+red. "Red for the wrong reason" is not coverage. C-SCHEMA reports a malformed
+register but deliberately does NOT abort — the Failures collector exists so one
+run names every broken invariant — so every later check reads register fields
+defensively. A missing key must surface as a named `FAIL`, never as a KeyError
+traceback that suppresses the checks queued behind it.
 
     C-SCHEMA     register shape: schema literal, required keys, unique ids,
                  commits are 40-hex or the explicit literal "unknown", no
@@ -148,7 +152,13 @@ def disk_paths(plugin_dir):
 
 
 def component_files_on_disk(plugin_dir, component):
-    root = plugin_dir / component["path"]
+    path = component.get("path")
+    if not path:
+        # A pathless entry is C-SCHEMA's finding. Reporting it as "absent" here
+        # lets every caller keep its own named failure instead of dying on a key
+        # the register never proved was there.
+        return None
+    root = plugin_dir / path
     if root.is_file():
         return [root.name]
     if not root.is_dir():
@@ -163,7 +173,11 @@ def component_files_on_disk(plugin_dir, component):
 def declared_file_paths(component):
     out = []
     for entry in component.get("files", []):
-        out.append(entry["path"] if isinstance(entry, dict) else entry)
+        name = entry.get("path") if isinstance(entry, dict) else entry
+        # A files[] entry with no usable path is malformed. "" keeps the sort
+        # total and can never equal a disk name, so the comparison in C-FILES
+        # disagrees and reports it by check id instead of raising here.
+        out.append(name if isinstance(name, str) else "")
     return sorted(out)
 
 
@@ -182,8 +196,24 @@ def third_party(register):
             if c.get("origin") == "third-party"]
 
 
+def component_id(component):
+    """The name to report a component by, even when it declares no `id`.
+
+    Every check runs after C-SCHEMA has merely *reported* a malformed register,
+    so each one must be able to name a component it has not been proven
+    well-formed. Deliberately does NOT fall back to `path`: C-SCHEMA detects a
+    missing id by comparing this against `path`, and a path-shaped fallback
+    would make that comparison agree with itself.
+    """
+    return component.get("id") or "<no id>"
+
+
 def slug_of(component):
-    name = component["path"].rsplit("/", 1)[-1]
+    """The README slug for a component, or None when it declares no path."""
+    path = component.get("path")
+    if not path:
+        return None
+    name = path.rsplit("/", 1)[-1]
     return name[:-3] if name.endswith(".md") else name
 
 
@@ -202,14 +232,20 @@ def check_schema(register, failures):
     if not isinstance(components, list):
         failures.add("C-SCHEMA", "components is not a list")
         return
-    ids = [c.get("id") for c in components]
+    # Id-less entries are reported per-component below, and are excluded here so
+    # two of them cannot masquerade as a duplicate-id finding — and so the sort
+    # never compares None against a string, which raises TypeError.
+    ids = [c.get("id") for c in components if c.get("id")]
     if len(ids) != len(set(ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         failures.add("C-SCHEMA", "duplicate component ids: %s" % dupes)
     upstreams = register.get("upstreams", {})
     for component in components:
-        cid = component.get("id", "<no id>")
-        if component.get("path") != cid:
+        cid = component_id(component)
+        if not component.get("id"):
+            failures.add("C-SCHEMA", "a component declares no id (path %r)"
+                         % component.get("path"))
+        elif component.get("path") != cid:
             failures.add("C-SCHEMA", "%s: id and path disagree" % cid)
         origin = component.get("origin")
         if origin not in ("third-party", "uberdev"):
@@ -248,7 +284,9 @@ def check_cover(register, plugin_dir, failures):
                                 "misrooted, not the tree empty")
         return
     disk = skills | agents
-    declared = {c.get("path") for c in register.get("components", [])}
+    # A pathless entry contributes nothing here (C-SCHEMA reports it); keeping
+    # None out also keeps the two sorts below from comparing it against a str.
+    declared = {c.get("path") for c in register.get("components", []) if c.get("path")}
     if not declared:
         failures.add("C-COVER", "the register declares no components while %d "
                                 "exist on disk" % len(disk))
@@ -263,10 +301,11 @@ def check_cover(register, plugin_dir, failures):
 
 def check_files(register, plugin_dir, failures):
     for component in third_party(register):
-        cid = component["id"]
+        cid = component_id(component)
         on_disk = component_files_on_disk(plugin_dir, component)
         if on_disk is None:
-            # Absence is C-COVER's finding; do not double-report it here.
+            # Absence — a missing directory, or an entry with no `path` at all —
+            # is C-COVER's and C-SCHEMA's finding; do not double-report it here.
             continue
         declared = declared_file_paths(component)
         if declared != on_disk:
@@ -279,28 +318,30 @@ def check_files(register, plugin_dir, failures):
         if component.get("stance") != "track":
             continue
         excused = divergence_files(component)
-        root = plugin_dir / component["path"]
+        root = plugin_dir / component["path"]  # non-None: on_disk proved it
         for entry in component.get("files", []):
             if not isinstance(entry, dict):
                 failures.add("C-FILES", "%s: stance is track but files[] carries "
                                         "a bare path (%r) with no digest"
                              % (cid, entry))
                 continue
+            # Non-None: the equality against `on_disk` above already proved every
+            # declared path is a real disk name.
+            rel = entry.get("path")
             recorded = entry.get("sha256", "")
             if not SHA256_RE.match(recorded):
-                failures.add("C-FILES", "%s: %s has no valid sha256"
-                             % (cid, entry.get("path")))
+                failures.add("C-FILES", "%s: %s has no valid sha256" % (cid, rel))
                 continue
-            actual = sha256_of(root / entry["path"] if root.is_dir() else root)
-            if actual != recorded and entry["path"] not in excused:
+            actual = sha256_of(root / rel if root.is_dir() else root)
+            if actual != recorded and rel not in excused:
                 failures.add("C-FILES", "%s: %s changed on disk and the change "
                                         "is not declared in divergences[] "
                                         "(recorded %s, disk %s)"
-                             % (cid, entry["path"], recorded[:12], actual[:12]))
+                             % (cid, rel, recorded[:12], actual[:12]))
 
 
 def check_header(register, plugin_dir, failures):
-    by_path = {c["path"]: c for c in register.get("components", [])}
+    by_path = {c["path"]: c for c in register.get("components", []) if c.get("path")}
     upstreams = register.get("upstreams", {})
     found = 0
     for path in sorted(plugin_dir.rglob("*")):
@@ -336,7 +377,8 @@ def check_header(register, plugin_dir, failures):
         recorded = component.get("vendored_at_commit")
         if recorded != sha:
             failures.add("C-HEADER", "%s pins %s, register records %s for %s"
-                         % (rel, sha[:12], str(recorded)[:12], component["id"]))
+                         % (rel, sha[:12], str(recorded)[:12],
+                            component_id(component)))
     if found == 0:
         failures.add("C-HEADER", "no in-file provenance header found anywhere "
                                  "under %s — the scan is vacuous" % plugin_dir)
@@ -370,7 +412,7 @@ def readme_third_party_slugs(readme_path, failures):
 
 
 def check_readme(register, repo_root, failures):
-    declared = {slug_of(c) for c in third_party(register)}
+    declared = {s for s in (slug_of(c) for c in third_party(register)) if s}
     if not declared:
         failures.add("C-README", "the register declares no third-party component")
         return
@@ -415,7 +457,7 @@ def check_license(register, plugin_dir, failures):
 def check_stance(register, failures):
     seen = set()
     for component in register.get("components", []):
-        cid = component["id"]
+        cid = component_id(component)
         origin = component.get("origin")
         if origin == "uberdev":
             if "stance" in component:
@@ -438,7 +480,7 @@ def check_stance(register, failures):
 
 def check_watermark(register, failures):
     for component in third_party(register):
-        cid = component["id"]
+        cid = component_id(component)
         watermark = component.get("last_reviewed_upstream_commit")
         if not SHA40_RE.match(watermark or ""):
             failures.add("C-WATERMARK", "%s: last_reviewed_upstream_commit is "
@@ -459,8 +501,8 @@ def refresh(register, register_path, plugin_dir):
         on_disk = component_files_on_disk(plugin_dir, component)
         if on_disk is None:
             die_usage("%s: cannot refresh, path missing on disk"
-                      % component["id"])
-        root = plugin_dir / component["path"]
+                      % component_id(component))
+        root = plugin_dir / component["path"]  # non-None: on_disk proved it
         if component.get("stance") == "track":
             # A single-file component (an agent) IS `root`; a skill component's
             # recorded paths are relative to its directory.

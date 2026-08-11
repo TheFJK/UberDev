@@ -306,6 +306,67 @@ else
 fi
 
 echo
+echo "== D13: a malformed register is not an outage =="
+
+# D13 — every field the diff loop subscripts unconditionally. An uncaught
+# KeyError exits 1, which is precisely `fail()`'s documented "an upstream could
+# not be resolved" — so a register somebody broke used to be indistinguishable
+# from GitHub being down, and a weekly alarm that cries outage is one that gets
+# muted. Asserting rc != 0 would therefore pass against the buggy script and
+# prove nothing. This row asserts the DIAGNOSIS instead: rc 2 (unreadable
+# register), the offending field named, no traceback, and — because validation
+# runs before the first clone — zero git and zero gh invocations.
+BAD_ROOT="$WORK/bad-register"
+mkdir -p "$BAD_ROOT/plugins/uberdev"
+D13_FAILED=0
+D13_RC=0
+for field in id upstream upstream_path stance last_reviewed_upstream_commit; do
+  python3 - "$REGISTER" "$BAD_ROOT/plugins/uberdev/vendor.json" "$field" <<'PY'
+import json, sys
+src, dst, field = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(src, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("origin") == "third-party":
+        c.pop(field, None)
+        break
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+  : > "$WORK/d13.log"
+  D13_RC=0
+  D13_OUT="$(
+    PATH="$STUBS:$PATH" \
+    STUB_LOG="$WORK/d13.log" \
+    STUB_LSREMOTE_MODE=ok \
+    STUB_HEAD_SHA="$MOVED_HEAD" \
+    STUB_DIFF_FILES="" \
+    STUB_OPEN_ISSUES="[]" \
+    STUB_LSTREE_MODE=ok \
+    python3 "$DRIFT" --repo-root "$BAD_ROOT" 2>&1
+  )" || D13_RC=$?
+  calls="$(grep -cE '^(git|gh) ' "$WORK/d13.log" || true)"
+  if [ "$D13_RC" -eq 2 ] && grep -q "declares no $field" <<<"$D13_OUT" \
+     && ! grep -q 'Traceback' <<<"$D13_OUT" && [ "$calls" = "0" ]; then
+    continue
+  fi
+  D13_FAILED=1
+  no "D13 a component missing '$field' => rc=$D13_RC subprocess-calls=$calls (want rc 2, field named, no traceback, no subprocess)"
+  echo "        output: $(head -c 300 <<<"$D13_OUT")"
+done
+if [ "$D13_FAILED" -eq 0 ]; then
+  ok "D13 every register field the diff loop subscripts fails as rc 2, named, before any clone"
+fi
+
+# D13b — the two failure modes must stay on separate exit codes. If either ever
+# drifts onto the other's, the weekly job can no longer tell "GitHub is down"
+# from "somebody broke vendor.json", and D6-D8 stop meaning what they say.
+run_drift "$WORK/d13b.log" rc1 "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+if [ "$DRIFT_RC" -eq 1 ] && [ "$D13_RC" -eq 2 ]; then
+  ok "D13b unreachable upstream (rc 1) and malformed register (rc 2) stay distinguishable"
+else
+  no "D13b the two failure modes collide: unreachable=$DRIFT_RC malformed=$D13_RC"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

@@ -661,8 +661,15 @@ try:
                     % (len(citation_culls)-CITATION_LOG_ROW_LIMIT))
  log_payload=('\n'.join(log_lines)+'\n').encode('utf-8')
  log_target=os.path.abspath(citation_log_path); log_parent=os.path.dirname(log_target)
+ # The same no-follow shape check the aggregate destination gets above, because
+ # isdir() RESOLVES a symlinked parent and would let mkstemp+os.replace publish
+ # the log outside the run directory -- through content a PR can influence, since
+ # the culled rows quote the rule file. Both artifacts land in one run directory
+ # at one trust level, so neither may carry the weaker guard.
  if not os.path.isabs(citation_log_path) or not os.path.isdir(log_parent):
   fail('citation-log-unwritable')
+ log_parent_entry=os.stat(log_parent,follow_symlinks=False)
+ if not stat.S_ISDIR(log_parent_entry.st_mode): fail('citation-log-unwritable')
  log_descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-citations-',dir=log_parent)
  with os.fdopen(log_descriptor,'wb') as log_output:
   log_output.write(log_payload)

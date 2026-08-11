@@ -243,13 +243,22 @@ committed tree alone:
   clause is the noise floor: a drop that the interval cannot distinguish from
   sampling noise does not red CI.
 - **A prompt-digest re-affirmation stamp** — the baseline records the sha256 of
-  the six reviewer prompt surfaces (`agents/code-reviewer.md`,
-  `agents/silent-failure-hunter.md`, `agents/type-design-analyzer.md`,
-  `agents/comment-analyzer.md`, `agents/pr-test-analyzer.md`,
-  `shared/phase1-reviewer-output-v1.md`). Editing one without either
-  re-measuring or declaring it in `pending[]` fails the check. This is the
-  honest form of the requested gate: *you may change the prompt, but you must
-  say so where the number lives.*
+  every reviewer prompt surface. Editing one without either re-measuring or
+  declaring it in `pending[]` fails the check. This is the honest form of the
+  requested gate: *you may change the prompt, but you must say so where the
+  number lives.*
+
+  **The surface set is derived, never enumerated.** `prompt_surfaces()` walks
+  `PHASE1_CONTRIBUTORS` and maps each lens to the agent file it is dispatched
+  with, then appends the shared bodies those files include by reference. An
+  enumeration — here in prose, in a second tuple in the miner, or in a test
+  fixture — is a second roster that can lose an edge the lens tables still
+  publish, leaving the gate covering a different set from the one it guards. The
+  convention lens is what that looks like in practice: it reached the published
+  tables while its own prompt went unstamped, because the stamp read a
+  hand-written six-entry tuple. A lens with no mapped prompt file now fails
+  loudly instead of being skipped, and `tests/review-precision.test.sh` builds
+  its fixture plugin roots from the same derivation rather than a third copy.
 
 **Stated limitation of the ratchet.** `--refresh` re-baselines: it rewrites
 `precision-baseline.json` from the freshly mined corpus, clearing any recorded

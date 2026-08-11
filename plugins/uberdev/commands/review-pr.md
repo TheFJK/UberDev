@@ -1774,6 +1774,20 @@ PY
        audit review_base_uncarried data.reason=write_failed
        return 2
      }
+     # THE ONLY WRITER of the changed-path set, for the same reason and in the
+     # same breath: `review_refresh_phase1_scope` just bound CHANGED_PATHS_JSON
+     # from the one fixed base..head snapshot this review is scoped to, and both
+     # consumers -- the Phase 1 evidence boundary and the citation gate's
+     # self-introduced-rule demotion -- run in the 4w.2 fence, a fresh shell
+     # away, where `$CHANGED_PATHS_JSON` is the empty string. Written from the
+     # value this fence already holds rather than re-derived there: a second
+     # `git diff --name-only` is a second answer to a question the diff artifact
+     # and the commit range have already been frozen against.
+     mkdir -p "$REVIEW_BASE_RUN_DIR/post-review" || return 2
+     printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_BASE_RUN_DIR/post-review/changed-paths.json" || {
+       echo "error: /uberdev:review-pr — could not persist PR #$PR_NUMBER's changed-path set to $REVIEW_BASE_RUN_DIR/post-review/changed-paths.json; refusing to dispatch reviewers whose evidence no later fence can scope." >&2
+       return 2
+     }
    else
      # No run dir bound => this fence is running OUTSIDE a real review run. The
      # pair is still bound for a same-shell caller and the miss is TYPED rather
@@ -1923,11 +1937,20 @@ PY
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
    REVIEW_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
-   # The changed-path set the citation gate keys its self-introduced-rule
-   # demotion on, persisted HERE rather than in 4w.1: this is the fence that
-   # already owns CHANGED_PATHS_JSON, and the writer below is a fresh shell away
-   # from wherever it was computed.
-   printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" || return 2
+   # The changed-path set, READ back from the run. This fence opens with
+   # `review_fleet_rehydrate`, which binds the documented carrier set and does
+   # NOT bind CHANGED_PATHS_JSON -- that value is bound only in the Phase 1
+   # scope fence, which is a dead shell by now, so a write from `$CHANGED_PATHS_JSON`
+   # here would publish 0 bytes and the aggregate would refuse
+   # `changed-paths-unavailable` on a review that ran perfectly. The scope fence
+   # persists it (next to review-base-identity.tsv, same reason); an absent or
+   # empty file is infrastructure failure and halts before any child is judged.
+   REVIEW_CHANGED_PATHS_PATH="$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json"
+   [ -s "$REVIEW_CHANGED_PATHS_PATH" ] || {
+     echo "error: review-fleet Phase 1 has no changed-path set at $REVIEW_CHANGED_PATHS_PATH; the scope fence never ran or could not persist it" >&2
+     return 70
+   }
+   CHANGED_PATHS_JSON="$(cat "$REVIEW_CHANGED_PATHS_PATH")" || return 70
    POST_REVIEW_VALIDATED_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-review.validated"
    : >"$POST_REVIEW_VALIDATED_LEDGER" || return 2
    REVIEW_WAVE_BLOCKED=0
@@ -1961,7 +1984,7 @@ PY
        && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH" \
             "$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt" \
             "$(cat "$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt")" \
-            "$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" \
+            "$REVIEW_CHANGED_PATHS_PATH" \
             "$REVIEW_FLEET_RUN_DIR/post-review/convention-citations.md"; then
      POST_REVIEW_AGGREGATION_INPUT=
      unset POST_REVIEW_AGGREGATION_INPUT
@@ -2749,6 +2772,27 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
     mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+    # The PR identity, refused rather than defaulted. `review_fleet_rehydrate`
+    # recovers PR_NUMBER from the run's own reservation marker, but a run whose
+    # marker cannot say which PR this is must not reach the envelope below:
+    # `clampInt(CFG.prNumber, …, 0)` in workflow.js turns an empty value into a
+    # verifier prompt that says "PR #0", and the audit row that has to make a
+    # suppressed blocker traceable would record `pr:""`.
+    case "${PR_NUMBER:-}" in
+      '' | *[!0-9]*)
+        echo "error: /uberdev:review-pr — Phase 1 verification gate has no PR number; refusing to dispatch verifiers that cannot name the PR they are adjudicating." >&2
+        return 2
+        ;;
+    esac
+    # The repository slug is NOT a carrier: it is a pure function of the
+    # checkout, re-derived here exactly as Phase 1 and Phase 3 derive it, and
+    # shape-checked so an empty or malformed answer cannot reach the envelope as
+    # `repoSlug=""`.
+    REVIEW_REPO_SLUG="${REVIEW_REPO_SLUG:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+    [[ "$REVIEW_REPO_SLUG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+      echo "error: /uberdev:review-pr — Phase 1 verification gate could not resolve the repository slug (got '${REVIEW_REPO_SLUG:-<empty>}')." >&2
+      return 2
+    }
     # REVIEW_ITERATION off disk BEFORE anything is keyed on it — Phase 3's
     # re-entry fence advances and persists it, and this fresh shell's default
     # would otherwise re-key pass 2 onto pass 1's artifact names.
@@ -2772,8 +2816,19 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     # The sidecar is a SIBLING of the disposition under an exact basename;
     # publish-verification refuses any other location. Created empty HERE so the
     # publish is an identity-checked replace of a file this command made.
+    #
+    # RE-CREATED, not created-if-absent. It is the ONE Step 6b.0 artifact that
+    # cannot be iteration-keyed — `findings-to-issues` binds it by that exact
+    # basename — so on a Phase 3 CI-fix loop (REVIEW_ITERATION=2) Phase 1
+    # re-enters with iteration 1's PUBLISHED sidecar still on disk, and
+    # publish-verification captures its target with `_capture_regular(path,0,0)`
+    # and refuses a non-empty file (`artifact_size_invalid`). `rm -f` and not a
+    # `:` truncation: the published copy is the publisher's file, and its mode
+    # is the publisher's to change. What iteration 1 recorded is not lost — the
+    # per-iteration `verification-receipt-iter<N>.json` keeps it.
     VERIFY_SIDECAR_PATH="$(dirname "$PHASE1_DISPOSITION_PATH")/phase1-verification.json"
-    [ -e "$VERIFY_SIDECAR_PATH" ] || ( umask 077 && : >"$VERIFY_SIDECAR_PATH" ) || return 74
+    rm -f "$VERIFY_SIDECAR_PATH" || return 74
+    ( umask 077 && : >"$VERIFY_SIDECAR_PATH" ) || return 74
     # Rows past the cap are neither dispatched nor dropped — see
     # REVIEW_FLEET_VERIFY_TOTAL_CAP in lib/review-fleet-args.sh. A gate that
     # aborted on a large finding set would make a bad review un-reviewable; one
@@ -2783,15 +2838,21 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       || VERIFY_DISPATCH_COUNT="$REVIEW_FLEET_VERIFY_TOTAL_CAP"
     VERIFY_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.jsonl"
     VERIFY_CLAIM_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-claims-iter${REVIEW_ITERATION}.txt"
+    VERIFY_RECEIPT_PATH="$REVIEW_FLEET_RUN_DIR/verification-receipt-iter${REVIEW_ITERATION}.json"
+    VERIFY_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/verify-dispatch-iter${REVIEW_ITERATION}.txt"
     # TWO short-circuits skip the Workflow call entirely. Both still publish a
     # sidecar: a run that recorded nothing is indistinguishable downstream from
-    # a run that culled nothing.
+    # a run that culled nothing. Both also keep the publish RECEIPT rather than
+    # discarding it: the fence below is the usual writer of
+    # verification-receipt-iter<N>.json and it does not run on these paths, and
+    # step 7's `phases.phase2_5.verification` block reads that receipt to report
+    # what a GREEN run suppressed.
     if [ "$VERIFY_COUNT" -eq 0 ]; then
       # Nothing eligible: an empty roster, published as an empty array.
       printf '[]' | python3 -I -B "$CODE_FIXER_CONTRACT" publish-verification \
         --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
         --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
-        --verification-path "$VERIFY_SIDECAR_PATH" --threshold "$REVIEW_CONFIDENCE_THRESHOLD" >/dev/null || return 74
+        --verification-path "$VERIFY_SIDECAR_PATH" --threshold "$REVIEW_CONFIDENCE_THRESHOLD" >"$VERIFY_RECEIPT_PATH" || return 74
       VERIFY_DISPATCH=0
     elif [ "$REVIEW_CONFIDENCE_THRESHOLD" -eq 0 ]; then
       # KILL SWITCH. No claim is dispatched and no agent runs, but every
@@ -2801,7 +2862,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
         | python3 -I -B "$CODE_FIXER_CONTRACT" publish-verification \
           --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
           --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
-          --verification-path "$VERIFY_SIDECAR_PATH" --threshold 0 >/dev/null || return 74
+          --verification-path "$VERIFY_SIDECAR_PATH" --threshold 0 >"$VERIFY_RECEIPT_PATH" || return 74
       VERIFY_DISPATCH=0
     else
       VERIFY_DISPATCH=1
@@ -2842,6 +2903,15 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
         branchName= \
         runNonces="$REVIEW_FLEET_NONCE_POOL" || return 74
     fi
+    # The decision itself, persisted and announced. It is PRODUCED here and
+    # CONSUMED by the fence below, which is a different process, so the scalar
+    # that holds it dies at the closing fence marker (#427) — every other
+    # decision these fences hand forward (ci-loop-state.json, rule-sources.txt,
+    # changed-paths.json) is on disk for exactly this reason. The stderr line is
+    # what the orchestrator keys the Workflow mandate on, in the same place and
+    # for the same reason as setup's `REVIEW_CARRY RUN_ID=` line.
+    review_fleet_write_verify_dispatch "$VERIFY_DISPATCH_PATH" "$VERIFY_DISPATCH" || return 74
+    printf 'REVIEW_VERIFY_DISPATCH=%s\n' "$VERIFY_DISPATCH" >&2
     ```
 
     `branchName` is emitted EMPTY on purpose, for the same reason the Phase 1
@@ -2850,8 +2920,11 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     branch to equal the binding's — a non-empty value here would make every
     child's status refuse.
 
-    **Workflow mandate** (skip entirely when the fence set `VERIFY_DISPATCH=0`):
-    the fence above validated
+    **Workflow mandate** (skip entirely when the fence printed
+    `REVIEW_VERIFY_DISPATCH=0` on stderr — the same value it persisted to
+    `verify-dispatch-iter<N>.txt`, which the fence after the mandate re-reads;
+    the two short-circuits above have already published the sidecar and there is
+    nothing to dispatch): the fence above validated
     `[ -f "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js" ]`. Relay the JSON
     between `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** (DR-2 — no
     LLM-composed handoffs) into ONE `Workflow` call naming
@@ -2861,7 +2934,9 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     On return, re-read every child's frozen bytes, apply the threshold
     controller-side, and publish. This is a fresh shell, so it re-derives every
-    path from disk rather than from the fence above:
+    path from disk rather than from the fence above — including the fence
+    above's own decision, which is why running it after a short-circuit is a
+    typed no-op instead of a `return 74`:
 
     ```bash uberdev-executable origin=review-pr
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
@@ -2871,6 +2946,26 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
     review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+    # Did a verifier wave actually run? Off disk, because the fence that decided
+    # is a dead shell. On `0` the sidecar was already published by a
+    # short-circuit and republishing it would refuse `artifact_size_invalid`
+    # against a file that is no longer empty — so this fence stops, and stops
+    # SAYING SO. An absent or malformed record is NOT read as `0`: "the gate
+    # cannot say what it did" is not "the gate dispatched nothing".
+    VERIFY_DISPATCH="$(review_fleet_read_verify_dispatch "$REVIEW_FLEET_RUN_DIR/verify-dispatch-iter${REVIEW_ITERATION}.txt")" || return 74
+    if [ "$VERIFY_DISPATCH" = 0 ]; then
+      echo "notice: /uberdev:review-pr — Phase 1 verification gate dispatched no verifier this iteration; the sidecar was published by the short-circuit" >&2
+      return 0
+    fi
+    # The PR identity the audit rows below are keyed on — the one field that
+    # makes a suppressed blocker traceable back to its PR. Refused, never
+    # defaulted, for the same reason as in the fence above.
+    case "${PR_NUMBER:-}" in
+      '' | *[!0-9]*)
+        echo "error: /uberdev:review-pr — Phase 1 verification gate has no PR number; refusing to publish a verification record no audit row can attribute to a PR." >&2
+        return 2
+        ;;
+    esac
     REVIEW_CONFIDENCE_THRESHOLD="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)" || return 2
     VERIFY_PHASE1_PATH="$REVIEW_FLEET_RUN_DIR/post-impl-review-final.md"
     VERIFY_PHASE1_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$VERIFY_PHASE1_PATH" --minimum 1 --maximum 16777216)" || return 74

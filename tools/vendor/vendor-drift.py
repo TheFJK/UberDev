@@ -32,7 +32,8 @@ Usage:
 Exit codes:
     0  ran to completion (drift or not)
     1  an upstream could not be resolved, or a GitHub call failed
-    2  usage error, or an unreadable/unparseable register
+    2  usage error, or a register that is unreadable, unparseable, or missing a
+       field this script would otherwise subscript
 """
 
 import argparse
@@ -47,6 +48,13 @@ import tempfile
 from pathlib import Path
 
 REGISTER_REL = "plugins/uberdev/vendor.json"
+# Every field the diff loop subscripts unconditionally. Checked up front so a
+# malformed register exits 2 ("unreadable register") rather than dying on an
+# uncaught KeyError, whose rc 1 is indistinguishable from `fail()`'s documented
+# "an upstream could not be resolved" — i.e. a broken register would read as an
+# outage, and re-reading it as one every week is how a control gets ignored.
+REQUIRED_COMPONENT_KEYS = ("id", "upstream", "upstream_path", "stance",
+                           "last_reviewed_upstream_commit")
 # Default clone host. An upstream may override it with its own `url` field, so
 # no forge is baked into the code path — only into the default.
 UPSTREAM_HOST = "https://github.com/"
@@ -175,7 +183,8 @@ def under(prefix, path):
 
 def declared_files(register, component):
     """Component-relative file names whose divergence is explicitly declared."""
-    by_id = {p["id"]: p for p in register.get("permanent_divergences", [])}
+    by_id = {p["id"]: p for p in register.get("permanent_divergences", [])
+             if p.get("id")}
     names = set()
     for entry in component.get("divergences", []):
         name = entry.get("file")
@@ -273,6 +282,9 @@ def find_tracking_issue(limit):
         fail("gh issue list returned unparseable JSON: %s" % exc)
     for issue in issues:
         if MARKER in (issue.get("body") or ""):
+            if not issue.get("number"):
+                fail("gh issue list returned a marker-carrying issue with no "
+                     "number — refusing to guess which issue to edit")
             return issue
     return None
 
@@ -313,6 +325,15 @@ def main(argv=None):
     if not components:
         die_usage("the register declares no third-party components — nothing to "
                   "diff, which is a broken register rather than a clean tree")
+    # Before the first network call, so a malformed register can never be
+    # mistaken for — or spend the clone budget of — an unreachable upstream.
+    for component in components:
+        absent = [k for k in REQUIRED_COMPONENT_KEYS if not component.get(k)]
+        if absent:
+            die_usage("component %s declares no %s — the register is malformed, "
+                      "which is not the same as an unreachable upstream"
+                      % (component.get("id") or component.get("path") or "<no id>",
+                         ", ".join(absent)))
 
     used = sorted({c["upstream"] for c in components})
     heads = {}
@@ -321,7 +342,10 @@ def main(argv=None):
         upstream = upstreams.get(upstream_id)
         if not upstream:
             die_usage("component references undeclared upstream %r" % upstream_id)
-        slug = upstream["repo"]
+        slug = upstream.get("repo")
+        if not slug:
+            die_usage("upstream %r declares no repo — there is nothing to clone"
+                      % upstream_id)
         urls.setdefault(slug, upstream.get("url") or UPSTREAM_HOST + slug)
         if slug in heads:
             continue

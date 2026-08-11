@@ -106,6 +106,14 @@ UBERDEV_REVIEW_RULE_SOURCE_LIMIT=200
 # copy of every AGENTS.md; without the prune a citation could scope itself to
 # another branch's rule file and read as verified.
 #
+# `.claude/worktrees` is pruned BY PATH and `.claude` itself is not: `.claude/`
+# is a documented Claude Code location for project rule documents, so pruning
+# the whole tree to reach one nested directory drops real conventions from the
+# allowlist -- and the lens is told that a rule document not on the list does
+# not exist for this review, so it would cull the citation of one as
+# `citation-not-in-allowlist`. A repo that keeps its rules there would read as
+# a repo that wrote none down.
+#
 # No bashisms: this file is sourced by command/skill `bash` fences that run
 # under /bin/zsh on macOS. `awk`, not `head`, bounds the list -- an early-exiting
 # reader on the end of a pipe is the EPIPE class tests/epipe-guard.test.sh
@@ -129,8 +137,8 @@ uberdev_review_rule_sources() {
   # operator's terminal.
   rule_raw="$(find "$rule_root" \
       -maxdepth 4 \
-      \( -name .git -o -name .worktrees -o -name .claude -o -name node_modules \
-         -o -name vendor -o -name dist -o -name build \) -prune -o \
+      \( -name .git -o -name .worktrees -o -path '*/.claude/worktrees' \
+         -o -name node_modules -o -name vendor -o -name dist -o -name build \) -prune -o \
       -type f \
       \( -name AGENTS.md -o -name CLAUDE.md -o -name .editorconfig \
          -o -name '.eslintrc*' -o -name 'eslint.config.*' -o -name '.prettierrc*' \
@@ -711,6 +719,55 @@ review_fleet_bind_verify() {
 # the cap and at cap+1, against the maxAgents the call sites actually emit — by
 # tests/review-pr-workflow.test.sh.
 REVIEW_FLEET_VERIFY_TOTAL_CAP=40
+
+# review_fleet_write_verify_dispatch TARGET 0|1
+# review_fleet_read_verify_dispatch  TARGET -> `0` | `1`
+#
+# Did the Phase 1 verification gate dispatch a verifier wave, or did one of its
+# two no-dispatch short-circuits already publish the sidecar? That answer is
+# produced in the fence that projects the claims and consumed by the fence that
+# republishes the sidecar afterwards -- a different process, where the scalar it
+# used to live in is gone (#427). Every other decision those fences hand
+# forward is already on disk for exactly this reason: ci-loop-state.json,
+# rule-sources.txt, changed-paths.json.
+#
+# Keyed per iteration by the caller, because the decision is per iteration: a
+# Phase 3 CI-fix loop re-enters Phase 1, and iteration 1's answer must not be
+# able to speak for iteration 2.
+#
+# The domain is CLOSED to `0`/`1` on both sides, so neither half can record or
+# return a value the other would refuse; an absent or malformed record is rc 2
+# and NOT a default, because "the gate cannot say what it did" and "the gate
+# dispatched nothing" are different answers and only one of them means the
+# sidecar is already published.
+review_fleet_write_verify_dispatch() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" dispatched="$2"
+  case "$dispatched" in
+    0 | 1) ;;
+    *) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+}
+
+review_fleet_read_verify_dispatch() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet verification dispatch decision missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  case "$recorded" in
+    0 | 1) ;;
+    *)
+      echo "error: review-fleet verification dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
 
 # review_fleet_audit_append RUN_ROOT JSON_LINE
 #
@@ -1510,6 +1567,47 @@ print(run_id, end="")
 PY
 }
 
+# _review_fleet_run_dir_pr RUN_DIR -> the PR number the reservation recorded.
+#
+# `pr-context.json` is written by review_reserve_run_directory in the setup
+# fence and is one of the two markers the pointer guard above already requires,
+# so it is the run's OWN record of which PR is under review -- and the only
+# on-disk one that is present whether the fence carried a RUN_ID or recovered
+# through the pointer.
+#
+# rc 1 with no output when the marker is absent or carries no positive integer.
+# This is a recovery source, not a guard: rehydration must not start failing for
+# runs whose marker predates this reader, so the fences that actually put the
+# number in a prompt or an audit row refuse for themselves.
+_review_fleet_run_dir_pr() {
+  [ "$#" -eq 1 ] || return 1
+  [ -n "$1" ] || return 1
+  python3 -I -B -c 'import json,sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        record = json.loads(handle.read(65536))
+except (OSError, ValueError):
+    raise SystemExit(1)
+pr = record.get("pr") if isinstance(record, dict) else None
+if type(pr) is not int or pr <= 0:
+    raise SystemExit(1)
+print(pr, end="")' "$1/pr-context.json" 2>/dev/null
+}
+
+# _review_fleet_bind_pr RUN_DIR -- fill an EMPTY PR_NUMBER from that marker.
+#
+# Never overrides a carried value: a fence that already knows its PR is the run
+# talking, and the pointer guard refuses a carried PR that disagrees with the
+# run anyway. Assigns only on success, because binding it to the empty string is
+# the #427 defect itself -- `PR #` in a verifier prompt and `pr:""` in the audit
+# row that has to make a suppressed blocker traceable.
+_review_fleet_bind_pr() {
+  local recovered
+  [ -z "${PR_NUMBER:-}" ] || return 0
+  recovered="$(_review_fleet_run_dir_pr "${1:-}")" || return 0
+  PR_NUMBER="$recovered"
+}
+
 # review_fleet_rehydrate -- bind every run-invariant carrier in THIS shell.
 #
 # rc 0 with the carriers bound and exported, or rc 2 with a message on stderr
@@ -1562,6 +1660,9 @@ review_fleet_rehydrate() {
     carrier=complete
   done
   if [ "$carrier" = complete ]; then
+    # PR identity is a run invariant too, and the marker it comes off is inside
+    # the run directory MARKER_DIR already names.
+    _review_fleet_bind_pr "$MARKER_DIR"
     # Same export set as the resolved path below, minus the two names that are
     # legitimately absent for a /review-pr run: exporting an unset variable would
     # hand children an empty-but-present value they cannot distinguish from a
@@ -1572,6 +1673,7 @@ review_fleet_rehydrate() {
     export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
     [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
     [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
+    [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
     return 0
   fi
   toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=''
@@ -1742,14 +1844,26 @@ REVIEW_FLEET_REHYDRATE_EOF
   RESEARCH_DIR_ABS="${RESEARCH_DIR_ABS:-$_review_fleet_research}"
   UBERDEV_COMMAND_WORKSPACE_JSON="${UBERDEV_COMMAND_WORKSPACE_JSON:-$_review_fleet_descriptor}"
   MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
+  _review_fleet_bind_pr "$resolved_run_dir"
   unset _review_fleet_diff _review_fleet_criteria _review_fleet_range _review_fleet_snapshot \
     _review_fleet_phase1 _review_fleet_phase2 _review_fleet_agg _review_fleet_carrier_dir \
     _review_fleet_repo _review_fleet_research _review_fleet_descriptor 2>/dev/null || true
   # Exported for the CHILDREN this fence dispatches. It cannot help the NEXT
   # fence -- that is a different process -- which is precisely why the next
   # fence calls this function too.
+  #
+  # The three guarded names are guarded HERE for the same reason the fast path
+  # guards them: two entries into this function must not hand children two
+  # different environments. STANDALONE_SNAPSHOT_PATH is the live case -- for a
+  # /review-pr run the descriptor's own standalone_snapshot is deliberately the
+  # empty string, so an unconditional export would put an empty-but-present
+  # value in every dispatched child's environment on this path and nothing at
+  # all on the other one.
   export UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT
-  export RESEARCH_DIR_ABS UBERDEV_CARRIER_RUN_DIR UBERDEV_COMMAND_WORKSPACE_JSON
-  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH
+  export RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON
+  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
   export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
+  [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
+  [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
 }

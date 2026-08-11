@@ -77,17 +77,38 @@ SCHEMA_VERSION = 1
 DEFAULT_LABEL = "review-pr-finding"
 DEFAULT_LIMIT = 200
 
-# The reviewer prompt surfaces whose bytes the published numbers were measured
-# against. Editing one without re-measuring or declaring it in the baseline's
-# `pending[]` fails --check (RFC 0018 §5). Paths are relative to the plugin root
-# so tests can point the stamp at a fixture tree.
-PROMPT_SURFACES = (
-    "agents/code-reviewer.md",
-    "agents/silent-failure-hunter.md",
-    "agents/type-design-analyzer.md",
-    "agents/comment-analyzer.md",
-    "agents/pr-test-analyzer.md",
+# The agent prompt FILE each Phase 1 lens is dispatched with, keyed by the last
+# dot-separated segment of the lens id — never by the whole edge id, which would
+# be the roster copy the import above exists to prevent (the suite greps this
+# file for the roster's edge-id prefix).
+#
+# `correctness` and `general` share one file: code-reviewer is dispatched TWICE
+# and the PROMPT, not the agent file, differentiates them (RFC 0018 §7), so the
+# surface list below de-duplicates while the lens tables keep two rows.
+LENS_PROMPT_FILES = {
+    "correctness": "code-reviewer.md",
+    "silent_failures": "silent-failure-hunter.md",
+    "types": "type-design-analyzer.md",
+    "comments": "comment-analyzer.md",
+    "tests": "pr-test-analyzer.md",
+    "general": "code-reviewer.md",
+    "convention": "convention-compliance.md",
+}
+# Prompt bodies the lens files above pull in by reference. A lens's own file
+# names them, so the roster cannot yield them and they stay literal — which makes
+# each one a place drift can hide, hence a WHY per entry rather than a bare list:
+#   * phase1-reviewer-output-v1.md — the serialization contract every Phase 1
+#     reviewer emits through.
+#   * finding-confidence-rubric-v1.md — #431 moved the 0-100 confidence anchors
+#     OUT of agents/code-reviewer.md and into this file. The bytes that decide
+#     every confidence score left the stamped set in the same commit that created
+#     them; naming the file as a surface is what puts them back. It POSTDATES the
+#     current measurement, so the baseline declares it in pending[] rather than
+#     stamping a digest the numbers were never measured against — the next
+#     --refresh stamps it for real.
+SHARED_PROMPT_SURFACES = (
     "shared/phase1-reviewer-output-v1.md",
+    "shared/finding-confidence-rubric-v1.md",
 )
 
 ATTRIBUTION_SOURCES = ("trailer", "agent-line", "none")
@@ -510,9 +531,42 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def prompt_surfaces() -> tuple[str, ...]:
+    """The reviewer prompt surfaces the published numbers were measured against.
+
+    Editing one without re-measuring or declaring it in the baseline's
+    `pending[]` fails --check (RFC 0018 §5).
+
+    DERIVED from PHASE1_CONTRIBUTORS, never hand-listed. A second hand-written
+    tuple is a second roster: it can lose an edge the lens tables still publish,
+    and the re-affirmation gate then covers a different set from the one it
+    exists to guard — the disjoint-predicate shape RFC 0018 §5 is about. That is
+    exactly how the convention lens reached the published tables while its own
+    prompt file went unstamped.
+
+    A roster edge with no LENS_PROMPT_FILES entry raises rather than being
+    skipped: an unmapped lens is an unstamped prompt, and silence there is the
+    failure mode. Paths are relative to the plugin root so tests can point the
+    stamp at a fixture tree.
+    """
+    surfaces: list[str] = []
+    for edge in PHASE1_CONTRIBUTORS:
+        agent_file = LENS_PROMPT_FILES.get(edge.rpartition(".")[2])
+        if agent_file is None:
+            raise InputError(
+                f"Phase 1 lens {edge} has no entry in LENS_PROMPT_FILES — add "
+                "one, or its reviewer prompt ships unstamped"
+            )
+        rel = f"agents/{agent_file}"
+        if rel not in surfaces:
+            surfaces.append(rel)
+    surfaces.extend(SHARED_PROMPT_SURFACES)
+    return tuple(surfaces)
+
+
 def prompt_digests(plugin_root: Path) -> dict:
     digests = {}
-    for rel in PROMPT_SURFACES:
+    for rel in prompt_surfaces():
         target = plugin_root / rel
         if not target.is_file():
             raise InputError(f"reviewer prompt surface is missing: {target}")
@@ -785,9 +839,18 @@ def check_prompt_digests(baseline: dict, plugin_root: Path) -> list:
         declared[entry["path"]] = entry["reason"]
 
     live = prompt_digests(plugin_root)
-    for rel in PROMPT_SURFACES:
+    surfaces = prompt_surfaces()
+    for rel in surfaces:
         if rel not in recorded:
-            problems.append(f"baseline records no digest for reviewer prompt: {rel}")
+            # A surface with NO recorded digest is honest in exactly one case:
+            # the file postdates `measured_at`, so there are no measured bytes
+            # to stamp and stamping the current ones would assert a measurement
+            # that never happened. pending[] is where that gets SAID — the same
+            # place a drifted-but-not-re-measured surface is declared. Silence
+            # here is the unstamped-prompt hole the whole stamp exists to close,
+            # so an undeclared omission still reds.
+            if rel not in declared:
+                problems.append(f"baseline records no digest for reviewer prompt: {rel}")
             continue
         drifted = recorded[rel] != live[rel]
         if drifted and rel not in declared:
@@ -801,8 +864,22 @@ def check_prompt_digests(baseline: dict, plugin_root: Path) -> list:
                 "— a pending[] entry must name a real drift, or it becomes a "
                 "permanent exemption"
             )
+    # The stamp's OTHER direction, and it is not symmetry for its own sake. The
+    # loop above walks prompt_surfaces(), so a digest recorded under a key that
+    # is NO LONGER a surface is never examined by it: drop a lens from
+    # LENS_PROMPT_FILES and its prompt silently stops being watched while the
+    # orphaned key sits in the baseline looking like coverage. That is a
+    # predicate disjoint from the drift it has to find — the same shape RFC 0018
+    # §5 is about, one level up. Comparing the recorded key set back against the
+    # derived one is what closes it.
+    for path in sorted(set(recorded) - set(surfaces)):
+        problems.append(f"baseline records a digest for a non-surface: {path}")
+    # Membership is tested against the DERIVED surface set, not against
+    # `recorded`: a legitimately-unstamped surface (the postdates-measurement
+    # case above) is absent from `recorded` while still being a real surface, so
+    # `recorded` would reject exactly the declaration this check is meant to allow.
     for path in sorted(declared):
-        if path not in recorded:
+        if path not in surfaces:
             problems.append(f"pending names a path that is not a reviewer prompt surface: {path}")
     return problems
 

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import re
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, NoReturn
 
@@ -367,15 +369,185 @@ CONVENTION_REQUEST_KEYS = {
 # file plus two path lists, never a diff or a reviewer transcript.
 CONVENTION_REQUEST_LIMIT = 262144
 # Secret shapes that may never ride out in a citation even though the rule-text
-# carve-out permits quoting. Assembled at runtime rather than spelled
+# carve-out permits quoting. NAMED shapes first: each one is an issuer's own
+# prefix, so it needs no statistics. Assembled at runtime rather than spelled
 # contiguously: a literal AWS example key in these bytes hard-stops
 # finish-branch's pre-push secret scan on the diff that introduces it.
+#
+# The vocabulary AND every length bound below are the ones in
+# `lib/secret-scan.sh`, this repo's pre-push scanner. A shape named in one guard
+# and missing -- or bounded differently -- in the other is the "one contract, N
+# uncompared copies" defect: at `{8,}` the `sk-` rule here refused ordinary
+# hyphenated English, and `run-risk-mismatch`, `task-manifest`, `disk-recovery`
+# and `kiosk-frontend` all occur in this checkout today. The bound is what makes
+# a prefix a NAME rather than a substring, so it is never loosened "to be safe":
+# every one of these tuples deletes a true finding when it over-fires.
 _CONVENTION_SECRET_PATTERNS = (
-    re.compile("AKIA" + r"[0-9A-Z]{8,}"),
-    re.compile("ghp" + r"_[A-Za-z0-9]{8,}"),
-    re.compile("sk" + r"-[A-Za-z0-9]{8,}"),
-    re.compile(r"[A-Za-z0-9+/=_-]{32,}"),
+    # AWS access key id -- 16 characters after the prefix (secret-scan.sh:261).
+    re.compile("AKIA" + r"[0-9A-Z]{16,}"),
+    # Every GitHub token prefix, 36 characters (secret-scan.sh:265). The prefix
+    # set is the scanner's, not just `ghp_`: an installation or refresh token
+    # leaks exactly as hard as a personal one.
+    re.compile("gh" + r"[pousr]_[A-Za-z0-9]{36,}"),
+    # OpenAI-style (secret-scan.sh:266). See the bound argument above.
+    re.compile("sk" + r"-[A-Za-z0-9]{32,}"),
+    # Slack, all five issued prefixes (secret-scan.sh:267). Named rather than
+    # left to the statistical rule below because a Slack token opens with two
+    # blocks of digits, and a digit block holds ONE character class for its
+    # whole length: the prefix drags the run's class churn under the floor, and
+    # 99.8% of drawn bot tokens scored as identifiers and were let through.
+    re.compile("xox" + r"[abprs]-[A-Za-z0-9-]{10,}"),
+    # Stripe secret and restricted keys, at the issuer key length of 24.
+    # Unreachable by the statistical rule for a different reason than Slack:
+    # `sk_live_` plus a 24-character key is a 32-character run whose
+    # separator-stripped core is 30, one under the core minimum, so it is
+    # dropped before it is ever scored (0.0% of drawn keys culled). Publishable
+    # `pk_` keys are deliberately absent -- they are public by design, so
+    # refusing a citation over one would be a pure false positive.
+    #
+    # The only entry anchored on a word boundary, and the asymmetry is the
+    # point: this is the one prefix here that is also the TAIL of everyday
+    # words, so without `\b` the entry reads `sk_live_` out of the middle of
+    # `task_live_DispatchConfigurationBuilder` -- measured, not hypothetical --
+    # and refuses a rule quoting an ordinary identifier. `sk-` has the same
+    # shape (risk-, task-, disk-, kiosk-) but inherits secret-scan.sh {32,}
+    # bound, which already ends that class; there is no scanner rule to inherit
+    # here, so the boundary does the work instead. An issued key never begins
+    # mid-word, so the anchor costs no coverage.
+    re.compile(r"\b" + "[sr]k" + r"_(?:live|test)_[A-Za-z0-9]{24,}"),
+    # A JWT always opens `eyJ` (base64 of `{"`) and always carries at least two
+    # `.`-separated segments. It is named because those separators chop it into
+    # runs shorter than the statistical rule's minimum, and it is anchored on
+    # the SECOND segment because `eyJ` plus one run alone also spells
+    # `monkeyJsonSerializerFactory`.
+    re.compile("eyJ" + r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
 )
+# The UNNAMED half: a run long enough to be a credential. Length alone is NOT a
+# credential test, and treating it as one is how this gate silently deleted true
+# findings -- `uberdev_command_workspace_prepare` is 33 characters and
+# `REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP` is 34, a convention rule quotes its own
+# constants constantly, and a culled finding is only ever logged, never surfaced
+# (review-aggregate then recomputes the lens to APPROVE with nothing left in it).
+# What separates a credential from an identifier is that a credential is DRAWN AT
+# RANDOM: flat character frequencies and a character class that keeps changing.
+# An identifier is words -- it holds one class for a word at a time.
+#
+# Both statistics are measured on the run's alphanumeric CORE, with `_ - / + =`
+# stripped, because those separators are what an identifier is built out of and
+# what a secret only sprinkles: measured raw, every `/` in a path counts as a
+# class change and lifts a path over the same floor a base64 blob clears.
+#
+# The churn floor is set from the IDENTIFIER side, because the two errors here
+# are not symmetric -- a missed secret is still only a quote out of a rule file
+# the reviewer was already allowed to read, while a false positive deletes a true
+# finding and says so nowhere anybody looks. Over 20k word-built identifiers
+# (camelCase, embedded digits, 32-52 characters) the highest core churn observed
+# is 0.375, and a credential drawn at random sits near 0.64; the floor is the gap
+# between them. A hand-written example key out of a vendor's documentation can
+# fall inside the identifier range and pass -- that is the deliberate side to err
+# on, and issued credentials are random enough to clear the floor by a wide
+# margin. Entropy cannot carry this split at all (those same identifiers reach
+# 4.76 bits), so it serves only as a floor under repetitive runs.
+_CONVENTION_SECRET_RUN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+_CONVENTION_SECRET_SEPARATORS = re.compile(r"[^A-Za-z0-9]")
+# Stripping separators also shortens the run, and it shortens a path far more
+# than a blob: a candidate has to still be credential-length once it is only
+# alphanumerics, which is what keeps `CLAUDE_PLUGIN_ROOT/lib/goal-phase0` out.
+_CONVENTION_SECRET_CORE_MIN = 32
+_CONVENTION_SECRET_BITS = 4.0
+_CONVENTION_SECRET_CHURN = 0.45
+_CHAR_CLASS_LOWER, _CHAR_CLASS_UPPER, _CHAR_CLASS_DIGIT, _CHAR_CLASS_OTHER = range(4)
+# Two of the three alphanumeric classes: a random token mixes them, where
+# `snake_case`, `SCREAMING_SNAKE` and `camelCase` each stay inside one or two.
+# Read TWICE, and it is the weaker term here and the load-bearing one in the
+# base32 scan below -- raising it would silently stop that scan from reaching a
+# seed drawn without an uppercase letter.
+_CONVENTION_SECRET_CLASSES = 2
+# Hex keys are scanned separately, against the raw quote and on a lower floor: a
+# 16-symbol alphabet cannot reach the base64 floor, and no identifier this long
+# spells itself in `a-f` plus digits. Raw rather than cored so a dashed UUID --
+# an identifier, not a credential -- is not silently reassembled into a key, and
+# floored so a padding run (`0000...`, entropy 0) is not read as one either.
+_CONVENTION_SECRET_HEX = re.compile(r"[0-9a-fA-F]{32,}")
+_CONVENTION_SECRET_HEX_BITS = 3.0
+# base32 (RFC 4648) is how a TOTP seed is handed out, and it is the third shape
+# the statistical rule cannot reach: one letter case plus six digits changes
+# class rarely enough that only 10.0% of drawn 32-character seeds cleared the
+# churn floor. Scanned the way hex is -- restricted alphabet, entropy floor, and
+# NO churn term, which means nothing inside a single-case alphabet -- against
+# the raw quote, so a separator still ends the run.
+#
+# The class floor carries this one on its own, and entropy cannot: the only
+# thing that spells a 32-character unbroken `[A-Z2-7]` run other than a seed is
+# a row of glued-together uppercase words, and over 20k synthetic ones those
+# reach 4.22 bits while drawn seeds start at 3.51 -- overlapping ranges, no
+# floor splits them. Glued words carry no digits at all, so the two-class floor
+# does. A drawn seed misses all six digits with probability (26/32)**32 = 0.1%;
+# that 0.1% is the residual, and it is the identifier-safe side to leave open.
+# The entropy floor stays for the same reason hex has one: every one of the
+# seven `[A-Z2-7]{32,}` runs in this checkout is a zero-entropy padding fixture.
+_CONVENTION_SECRET_BASE32 = re.compile(r"[A-Z2-7]{32,}")
+_CONVENTION_SECRET_BASE32_BITS = 3.0
+
+
+def _character_class(char: str) -> int:
+    """Which of lower / upper / digit / separator `char` belongs to."""
+    if char.islower():
+        return _CHAR_CLASS_LOWER
+    if char.isupper():
+        return _CHAR_CLASS_UPPER
+    if char.isdigit():
+        return _CHAR_CLASS_DIGIT
+    return _CHAR_CLASS_OTHER
+
+
+def _shannon_bits(run: str) -> float:
+    """Shannon entropy of `run`, in bits per character. `run` must be non-empty."""
+    total = len(run)
+    return -sum(
+        (count / total) * math.log2(count / total) for count in Counter(run).values()
+    )
+
+
+def _class_churn(run: str) -> float:
+    """Share of `run`'s adjacent character pairs that change class.
+
+    `run` must be at least two characters. Every caller passes a run already
+    held to `_CONVENTION_SECRET_CORE_MIN`, so the pair list is never empty.
+    """
+    pairs = list(zip(run, run[1:]))
+    return sum(
+        1 for left, right in pairs if _character_class(left) != _character_class(right)
+    ) / len(pairs)
+
+
+def _convention_quote_is_secret_shaped(quote: str) -> bool:
+    """True when `quote` carries something that could be a live credential."""
+    for pattern in _CONVENTION_SECRET_PATTERNS:
+        if pattern.search(quote):
+            return True
+    for run in _CONVENTION_SECRET_HEX.findall(quote):
+        if _shannon_bits(run) >= _CONVENTION_SECRET_HEX_BITS:
+            return True
+    for run in _CONVENTION_SECRET_BASE32.findall(quote):
+        if (
+            len({_character_class(char) for char in run})
+            >= _CONVENTION_SECRET_CLASSES
+            and _shannon_bits(run) >= _CONVENTION_SECRET_BASE32_BITS
+        ):
+            return True
+    for run in _CONVENTION_SECRET_RUN.findall(quote):
+        core = _CONVENTION_SECRET_SEPARATORS.sub("", run)
+        if len(core) < _CONVENTION_SECRET_CORE_MIN:
+            continue
+        if (
+            len({_character_class(char) for char in core})
+            >= _CONVENTION_SECRET_CLASSES
+            and _shannon_bits(core) >= _CONVENTION_SECRET_BITS
+            and _class_churn(core) >= _CONVENTION_SECRET_CHURN
+        ):
+            return True
+    return False
 
 
 def normalise_rule_text(text: str) -> str:
@@ -459,9 +631,6 @@ def classify_convention_citation(request: dict[str, Any]) -> dict[str, Any]:
         return refuse("citation-not-in-allowlist")
     if not _convention_rule_governs(rule_path, location_path):
         return refuse("citation-out-of-scope")
-    for pattern in _CONVENTION_SECRET_PATTERNS:
-        if pattern.search(quote):
-            return refuse("citation-secret-shaped")
     if not CONVENTION_QUOTE_MIN <= len(quote) <= CONVENTION_QUOTE_MAX:
         return refuse("citation-not-verbatim")
     start = parsed["rule_line"] - 1
@@ -474,6 +643,14 @@ def classify_convention_citation(request: dict[str, Any]) -> dict[str, Any]:
     )
     if not window or quote not in window:
         return refuse("citation-not-verbatim")
+    # Last, and only against text already proven to be a real rule quote: the
+    # redaction guard. It is ordered here because the FIRST failing check names
+    # the reason, and running the narrowest check first made
+    # `citation-secret-shaped` the recorded cause of citations that were never in
+    # the file to begin with. Anything refused above is culled either way, so no
+    # secret survives the reordering -- only the reason gets truthful.
+    if _convention_quote_is_secret_shaped(quote):
+        return refuse("citation-secret-shaped")
     if rule_path in changed_paths:
         # The PR itself wrote the rule it is being judged against. That is not a
         # fabrication -- the quote IS in the file -- but it is circular, so the

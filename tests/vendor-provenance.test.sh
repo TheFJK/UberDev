@@ -372,6 +372,39 @@ json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 PY
 assert_red "$SB" "C-COVER" "V18 an empty components list is red, not vacuously green"
 
+# V19 — a register entry with no `id`. Asserting rc alone would be worthless
+# here: a checker that dies on a KeyError also exits 1. What separates broken
+# from fixed is the DIAGNOSIS. Every check that names a component used to
+# subscript `component["id"]` directly, so one malformed entry killed the run
+# with a traceback before C-FILES or C-STANCE could report anything — defeating
+# both the per-check-id contract and the collector's whole reason for existing.
+# The same entry is therefore given a real C-STANCE defect and a real C-FILES
+# defect: the row goes red if the checks queued behind C-SCHEMA are SUPPRESSED,
+# not merely quiet.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+IDLESS="$(python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("origin") == "third-party" and c["path"].startswith("skills/"):
+        c.pop("id", None)      # the KeyError trigger
+        c.pop("stance", None)  # a real C-STANCE defect on the same entry
+        print(c["path"])
+        break
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+)"
+[ -n "$IDLESS" ] || { echo "  ABORT — no third-party skill component found"; exit 99; }
+: > "$SB/plugins/uberdev/$IDLESS/UNDECLARED.md"
+assert_red "$SB" "C-STANCE" "V19 an id-less register entry is still reported by C-STANCE"
+if grep -q 'C-FILES' <<<"$CHECK_OUT" && ! grep -q 'Traceback' <<<"$CHECK_OUT"; then
+  ok "V19b the checks queued behind it still ran — C-FILES named, no traceback"
+else
+  no "V19b an id-less entry suppressed the checks behind it"
+  echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

@@ -19,6 +19,13 @@
 #     refuses a missing or 0-byte artifact instead of certifying it;
 #   * the ratchet arms only above the publication floor and respects a noise
 #     floor;
+#   * the prompt-provenance stamp holds in BOTH directions — a roster lens with
+#     no mapped prompt file raises instead of silently shipping unstamped, and a
+#     digest recorded under a key that is no longer a surface reds instead of
+#     sitting in the baseline looking like coverage;
+#   * a surface with no recorded digest reds unless `pending[]` says why, which
+#     is how a prompt file that POSTDATES `measured_at` is declared rather than
+#     stamped with bytes the numbers were never measured against;
 #   * the miner is repo-agnostic, does not copy the lens roster, and needs no
 #     network for anything except --refresh.
 #
@@ -129,31 +136,45 @@ with open(out, "w", encoding="utf-8") as fh:
 PYEOF
 }
 
-# mk_plugin_root <dir> — a synthetic plugin tree carrying the six reviewer
-# prompt surfaces the re-affirmation stamp digests. Synthetic so RP23 can mutate
-# one without touching the shipped tree.
+# surfaces_of -> the prompt surfaces the stamp digests, one per line, ASKED OF
+# THE MINER rather than retyped here. A hand-listed fixture is a second roster:
+# it keeps passing while the real surface set grows, which is exactly how the
+# convention lens shipped unstamped. Derived, a new lens turns up in every plugin
+# root this suite builds — and RP12/RP14/RP20-25 red until it is stamped.
+surfaces_of() {
+  "$PY" - "$MINER" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("review_precision", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print("\n".join(module.prompt_surfaces()))
+PYEOF
+}
+
+# mk_plugin_root <dir> — a synthetic plugin tree carrying every reviewer prompt
+# surface the re-affirmation stamp digests. Synthetic so RP23 can mutate one
+# without touching the shipped tree.
 mk_plugin_root() {
-  mkdir -p "$1/agents" "$1/shared"
-  for surface in code-reviewer silent-failure-hunter type-design-analyzer comment-analyzer pr-test-analyzer; do
-    printf 'fixture reviewer prompt: %s\n' "$surface" > "$1/agents/$surface.md"
-  done
-  printf 'fixture shared reviewer output contract v1\n' > "$1/shared/phase1-reviewer-output-v1.md"
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    mkdir -p "$1/$(dirname "$rel")"
+    printf 'fixture reviewer prompt: %s\n' "$rel" > "$1/$rel"
+  done <<<"$(surfaces_of)"
 }
 
 # mk_baseline <out.json> <plugin_root> <lenses-json> <pending-json>
+# The stamped surface set comes from the miner for the same reason mk_plugin_root
+# derives it: a fixture baseline missing a surface would exercise a stamp
+# narrower than the shipped one and report that as green.
 mk_baseline() {
-  "$PY" - "$1" "$2" "$3" "$4" <<'PYEOF'
-import hashlib, json, pathlib, sys
+  "$PY" - "$1" "$2" "$3" "$4" "$MINER" <<'PYEOF'
+import hashlib, importlib.util, json, pathlib, sys
 out, root, lenses, pending = sys.argv[1], pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
-surfaces = [
-    "agents/code-reviewer.md",
-    "agents/silent-failure-hunter.md",
-    "agents/type-design-analyzer.md",
-    "agents/comment-analyzer.md",
-    "agents/pr-test-analyzer.md",
-    "shared/phase1-reviewer-output-v1.md",
-]
-digests = {rel: hashlib.sha256((root / rel).read_bytes()).hexdigest() for rel in surfaces}
+spec = importlib.util.spec_from_file_location("review_precision", sys.argv[5])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+digests = {rel: hashlib.sha256((root / rel).read_bytes()).hexdigest() for rel in module.prompt_surfaces()}
 with open(out, "w", encoding="utf-8") as fh:
     json.dump({
         "schema_version": 1,
@@ -643,6 +664,143 @@ if [ "$RP26_ROWS" = "2" ] && [ "$RP26_MULTI" = "1" ] && [ "$RP26_OBS" = "3" ]; t
 else
   no "RP26 a k-edge row counts once per edge and is disclosed" \
      "rows=$RP26_ROWS multi_edge_rows=$RP26_MULTI edge_observations=$RP26_OBS (expected 2/1/3)"
+fi
+
+# --- RP27–RP29: the stamp's OTHER direction ----------------------------------
+#
+# WHY THESE EXIST. RP23–RP25 all walk prompt_surfaces() — and so does the code
+# they drive. A guard whose predicate is DERIVED from the same set it is meant to
+# police cannot see a defect that changes the set itself: unmap a lens and the
+# surface loop simply stops visiting its prompt, quietly. Worse, mk_plugin_root
+# and mk_baseline above BOTH derive from prompt_surfaces() (deliberately — see
+# their comments), so a fixture built that way moves both sides together and
+# stays green through exactly that mutation. Verified, not assumed: deleting the
+# unmapped-lens raise and dropping one LENS_PROMPT_FILES entry left `--check`
+# at rc=0 and this suite at PASS=27 FAIL=0. The three rows below are the ones
+# that red for it.
+
+echo
+echo "### Prompt-provenance stamp — the other direction"
+
+# unmapped_lens_probe — prompt_surfaces() with one roster edge that has no
+# LENS_PROMPT_FILES entry. PHASE1_CONTRIBUTORS is monkeypatched ON THE MODULE
+# (prompt_surfaces reads the global by name) so nothing under plugins/ is
+# touched, and the probe edge is BUILT from a real roster id's prefix rather
+# than typed here — a literal would be the roster copy the miner's import exists
+# to prevent. Prints RAISED/NO-RAISE/PRE-RAISE and exits 0 only on RAISED.
+unmapped_lens_probe() {
+  "$PY" - "$MINER" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("review_precision", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    module.prompt_surfaces()
+except module.InputError as exc:
+    print("PRE-RAISE the shipped roster already fails: " + str(exc))
+    sys.exit(2)
+probe = module.PHASE1_CONTRIBUTORS[0].rpartition(".")[0] + ".unmapped_probe"
+module.PHASE1_CONTRIBUTORS = tuple(module.PHASE1_CONTRIBUTORS) + (probe,)
+try:
+    surfaces = module.prompt_surfaces()
+except module.InputError as exc:
+    print("RAISED " + " ".join(str(exc).split()))
+    sys.exit(0)
+print("NO-RAISE " + " ".join(surfaces))
+sys.exit(1)
+PYEOF
+}
+RP27_OUT="$(unmapped_lens_probe 2>&1)"; RP27_RC=$?
+RP27_FAILS=''
+[ "$RP27_RC" -eq 0 ] || RP27_FAILS="rc=$RP27_RC out=$RP27_OUT"
+grep -qF 'unmapped_probe' <<<"$RP27_OUT" || \
+  RP27_FAILS="${RP27_FAILS}${RP27_FAILS:+; }diagnostic does not name the offending edge: $RP27_OUT"
+grep -qF 'LENS_PROMPT_FILES' <<<"$RP27_OUT" || \
+  RP27_FAILS="${RP27_FAILS}${RP27_FAILS:+; }diagnostic does not name the map to fix: $RP27_OUT"
+if [ -z "$RP27_FAILS" ]; then
+  ok "RP27 a Phase 1 lens with no mapped prompt file RAISES — it never ships unstamped by skipping"
+else
+  no "RP27 a Phase 1 lens with no mapped prompt file raises" "$RP27_FAILS"
+fi
+
+# add_orphan_digest <baseline> — record a digest under a key prompt_surfaces()
+# does not yield. This is precisely what a retired, renamed or unmapped lens
+# leaves behind, and the surface-side loop is blind to it by construction.
+add_orphan_digest() {
+  "$PY" - "$1" <<'PYEOF'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+record["prompt_digests"]["agents/retired-lens.md"] = "0" * 64
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+PYEOF
+}
+ORPHAN_PLUGIN="$TMP/orphan-plugin"
+mk_plugin_root "$ORPHAN_PLUGIN"
+mk_baseline "$TMP/orphan-baseline.json" "$ORPHAN_PLUGIN" '{}' '[]'
+render_to "$TMP/orphan.md" "$FIX/corpus-families.json" "$TMP/orphan-baseline.json"
+orphan_check() {
+  "$PY" "$MINER" --check --corpus "$FIX/corpus-families.json" \
+    --baseline "$TMP/orphan-baseline.json" --report "$TMP/orphan.md" \
+    --plugin-root "$ORPHAN_PLUGIN" --now "$NOW" 2>&1
+}
+RP28_CLEAN_OUT="$(orphan_check)"; RP28_CLEAN_RC=$?
+add_orphan_digest "$TMP/orphan-baseline.json"
+RP28_OUT="$(orphan_check)"; RP28_RC=$?
+RP28_FAILS=''
+# Both directions: a stamp that reds on the orphan but also on the pristine
+# baseline is a broken predicate, not a guard.
+[ "$RP28_CLEAN_RC" -eq 0 ] || RP28_FAILS="pristine baseline already reds: rc=$RP28_CLEAN_RC $RP28_CLEAN_OUT"
+if [ "$RP28_RC" -ne 1 ] || ! grep -qF 'agents/retired-lens.md' <<<"$RP28_OUT"; then
+  RP28_FAILS="${RP28_FAILS}${RP28_FAILS:+; }orphaned digest not caught: rc=$RP28_RC $RP28_OUT"
+fi
+if [ -z "$RP28_FAILS" ]; then
+  ok "RP28 a digest recorded for a path that is no longer a surface reds — the stamp is compared in both directions"
+else
+  no "RP28 a digest recorded for a non-surface reds" "$RP28_FAILS"
+fi
+
+# drop_digest <baseline> <rel> [reason] — unstamp one surface. With no reason
+# it is simply missing; with one, pending[] declares it. That declaration is the
+# committed baseline's own shape for `agents/convention-compliance.md` and
+# `shared/finding-confidence-rubric-v1.md`: both files were CREATED after
+# `measured_at`, so no digest of them can be a measured digest and stamping the
+# current bytes would assert a measurement that never happened.
+drop_digest() {
+  "$PY" - "$1" "$2" "${3:-}" <<'PYEOF'
+import json, sys
+path, rel, reason = sys.argv[1], sys.argv[2], sys.argv[3]
+record = json.load(open(path, encoding="utf-8"))
+record["prompt_digests"].pop(rel, None)
+record["pending"] = [{"path": rel, "reason": reason}] if reason else []
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+PYEOF
+}
+UNSTAMPED_PLUGIN="$TMP/unstamped-plugin"
+mk_plugin_root "$UNSTAMPED_PLUGIN"
+mk_baseline "$TMP/unstamped-baseline.json" "$UNSTAMPED_PLUGIN" '{}' '[]'
+render_to "$TMP/unstamped.md" "$FIX/corpus-families.json" "$TMP/unstamped-baseline.json"
+unstamped_check() {
+  "$PY" "$MINER" --check --corpus "$FIX/corpus-families.json" \
+    --baseline "$TMP/unstamped-baseline.json" --report "$TMP/unstamped.md" \
+    --plugin-root "$UNSTAMPED_PLUGIN" --now "$NOW" 2>&1
+}
+drop_digest "$TMP/unstamped-baseline.json" 'agents/comment-analyzer.md'
+RP29_BARE_OUT="$(unstamped_check)"; RP29_BARE_RC=$?
+drop_digest "$TMP/unstamped-baseline.json" 'agents/comment-analyzer.md' \
+  'the file postdates measured_at, so there are no measured bytes to stamp'
+RP29_DECL_OUT="$(unstamped_check)"; RP29_DECL_RC=$?
+RP29_FAILS=''
+if [ "$RP29_BARE_RC" -ne 1 ] || ! grep -qF 'agents/comment-analyzer.md' <<<"$RP29_BARE_OUT"; then
+  RP29_FAILS="undeclared unstamped surface not caught: rc=$RP29_BARE_RC $RP29_BARE_OUT"
+fi
+[ "$RP29_DECL_RC" -eq 0 ] || \
+  RP29_FAILS="${RP29_FAILS}${RP29_FAILS:+; }declared unstamped surface still reds: rc=$RP29_DECL_RC $RP29_DECL_OUT"
+if [ -z "$RP29_FAILS" ]; then
+  ok "RP29 an unstamped surface reds undeclared and clears only once pending[] states why the bytes were never measured"
+else
+  no "RP29 an unstamped surface reds unless pending[] declares it" "$RP29_FAILS"
 fi
 
 echo
