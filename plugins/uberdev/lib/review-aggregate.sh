@@ -276,6 +276,7 @@ try:
   'review_pr.review.correctness','review_pr.review.silent_failures',
   'review_pr.review.types','review_pr.review.comments',
   'review_pr.review.tests','review_pr.review.general',
+  'review_pr.review.convention',
  }
  if len(rows)!=expected: fail('roster-mismatch')
  ledger_parent=os.path.dirname(os.path.abspath(ledger))
@@ -325,15 +326,24 @@ except Exception:
 PY
 }
 
-# Convert the six authenticated reviewer snapshots into the one canonical
+# Convert the seven authenticated reviewer snapshots into the one canonical
 # Phase 1 document. The captured JSON arrives on stdin so the bounded reviewer
 # payloads never cross the platform argv/env-size boundary.
+#
+# THE CITATION GATE (#433) RUNS HERE, and it runs on the AGGREGATE only. Each
+# child's own `result.md` is sha256-pinned in the trusted ledger and read back
+# through `secure_capture_published`; rewriting one to drop a finding would break
+# the tamper-evidence chain that makes the whole wave provable. So the raw child
+# result stays intact and auditable, the aggregate is what gets filtered, and the
+# filtering itself is published as an artifact — a cull is never swallowed.
 post_review_write_aggregate_v2() {
-  local aggregation_input="$1" aggregate_path="$2" writer_code=
+  local aggregation_input="$1" aggregate_path="$2" rule_sources_path="$3" \
+        rule_root="$4" changed_paths_path="$5" citation_log_path="$6" writer_code=
   IFS= read -r -d '' writer_code <<'PY' || :
 import hashlib,importlib.util,json,os,posixpath,re,stat,sys,tempfile
 
-aggregate_path,plugin_root=sys.argv[1:]
+(aggregate_path,plugin_root,rule_sources_path,rule_root,changed_paths_path,
+ citation_log_path)=sys.argv[1:]
 temporary_path=None
 
 def fail(reason):
@@ -431,6 +441,35 @@ def scope(location):
   raise ValueError('invalid-location')
  return {'line':int(line_text),'operation':'modify_existing','path':path}
 
+# Bounds for the three gate inputs. The allowlist is a capped path list, the
+# changed-path set is one JSON array, and a cited rule document is read once and
+# cached. None of them is a diff, so none of them needs a diff-sized ceiling.
+RULE_SOURCES_LIMIT=65536
+CHANGED_PATHS_LIMIT=1048576
+RULE_FILE_LIMIT=1048576
+CITATION_LOG_ROW_LIMIT=500
+
+def cell(text):
+ # Repo-derived text -- and in a PR that edits a rule document, ATTACKER-derived
+ # text -- on its way into a markdown artifact other agents read. Collapse to one
+ # line, drop controls, neutralise the envelope/table metacharacters, and bound
+ # the length. Same treatment as any other untrusted string in this pipeline.
+ value=' '.join(str(text).split())
+ value=''.join(char for char in value if ord(char)>=32 and ord(char)!=127)
+ for source,replacement in (('&','&amp;'),('<','&lt;'),('>','&gt;'),('|','&#124;')):
+  value=value.replace(source,replacement)
+ return value[:200] if value else '(empty)'
+
+def read_bounded(path,limit,reason):
+ if not path or not os.path.isfile(path): fail(reason)
+ try:
+  with open(path,'rb') as handle:
+   payload=handle.read(limit+1)
+ except OSError: fail(reason)
+ if len(payload)>limit: fail(reason)
+ try: return payload.decode('utf-8')
+ except UnicodeError: fail(reason)
+
 try:
  spec=importlib.util.spec_from_file_location(
      'uberdev_code_fixer_contract',os.path.join(plugin_root,'lib','code_fixer_contract.py'))
@@ -438,6 +477,53 @@ try:
  contract=importlib.util.module_from_spec(spec); sys.modules[spec.name]=contract
  spec.loader.exec_module(contract)
  contributor_ids=list(contract.PHASE_CONTRIBUTORS['phase1'])
+ # ---- the convention lens's citation gate (#433) ----
+ # Both documents are REQUIRED. A missing allowlist is not "no rules to check" --
+ # it is a controller that did not run discovery, and the honest outcome of that
+ # is a refused aggregate, not a clean-looking one whose every convention finding
+ # was silently dropped. An allowlist that exists and is EMPTY is different, and
+ # legitimate: it means the repo wrote no conventions down.
+ rule_sources=[line.strip() for line in
+               read_bounded(rule_sources_path,RULE_SOURCES_LIMIT,'rule-sources-unavailable').splitlines()
+               if line.strip()]
+ changed_paths=json.loads(read_bounded(changed_paths_path,CHANGED_PATHS_LIMIT,'changed-paths-unavailable'))
+ if type(changed_paths) is not list or any(type(item) is not str for item in changed_paths):
+  fail('changed-paths-unavailable')
+ if not rule_root or not os.path.isdir(rule_root): fail('rule-root-unavailable')
+ rule_root_real=os.path.realpath(rule_root)
+ rule_cache={}
+ def rule_lines_for(rule_path):
+  # Only ever called for an allowlisted path, and still re-checked against the
+  # root: the cited string is reviewer-authored, so `..` and absolute spellings
+  # have to fail closed here even though the allowlist already excluded them.
+  if rule_path in rule_cache: return rule_cache[rule_path]
+  lines=[]
+  candidate=os.path.realpath(os.path.join(rule_root_real,rule_path))
+  if ((candidate==rule_root_real or candidate.startswith(rule_root_real+os.sep))
+      and os.path.isfile(candidate)):
+   try:
+    with open(candidate,'rb') as handle:
+     payload=handle.read(RULE_FILE_LIMIT+1)
+    if len(payload)<=RULE_FILE_LIMIT:
+     lines=payload.decode('utf-8',errors='replace').splitlines()
+   except OSError:
+    lines=[]
+  rule_cache[rule_path]=lines
+  return lines
+ def gate_citation(finding,location_path):
+  parsed=contract.parse_convention_detail(finding['detail'])
+  rule_path=parsed['rule_path'] if parsed else ''
+  # A path outside the allowlist is NEVER opened. The allowlist is what bounds
+  # this reader's reach into the checkout, so it gates the read, not just the
+  # verdict.
+  lines=rule_lines_for(rule_path) if rule_path in rule_sources else []
+  return contract.classify_convention_citation({
+      'detail':finding['detail'],
+      'location_path':location_path,
+      'allowlist':rule_sources,
+      'changed_paths':changed_paths,
+      'rule_lines':lines,
+  })
  captured=json.loads(sys.stdin.buffer.read().decode('utf-8'),object_pairs_hook=closed_object)
  if (type(captured) is not dict
      or set(captured)!={'ledger_sha256','rows','schema_version'}
@@ -446,7 +532,7 @@ try:
      or type(captured.get('rows')) is not list
      or len(captured['rows'])!=len(contributor_ids)):
   fail('malformed-input')
- contributors=[]; finding_groups={}; finding_order=[]
+ contributors=[]; finding_groups={}; finding_order=[]; citation_culls=[]
  for index,(row,edge) in enumerate(zip(captured['rows'],contributor_ids),1):
   if (type(row) is not dict
       or set(row)!={'content','edge','index','instance','sha256'}
@@ -457,12 +543,44 @@ try:
       or hashlib.sha256(row['content'].encode('utf-8')).hexdigest()!=row['sha256']):
    fail('roster-mismatch')
   reviewer=parse_reviewer(row['content'])
+  reviewer_findings=reviewer['findings']; reviewer_verdict=reviewer['verdict']
+  # Gate PER OBSERVATION and BEFORE scope grouping. Grouping merges findings from
+  # different edges that land on the same (path,line) into one aggregate finding;
+  # culling after that point would take another lens's finding with it.
+  if edge==contract.CONVENTION_EDGE:
+   survivors=[]
+   for finding in reviewer_findings:
+    location_path=scope(finding['location'])['path']
+    verdict=gate_citation(finding,location_path)
+    if verdict['outcome']=='cull':
+     citation_culls.append({
+         'reason':verdict['reason'],
+         'cited_path':verdict.get('rule_path',''),
+         'location':finding['location'],
+         'quote_prefix':verdict.get('quote_prefix',''),
+     })
+     continue
+    if verdict['outcome']=='demote':
+     finding=dict(finding,severity='suggestion')
+     citation_culls.append({
+         'reason':verdict['reason'],
+         'cited_path':verdict.get('rule_path',''),
+         'location':finding['location'],
+         'quote_prefix':verdict.get('quote_prefix',''),
+     })
+    survivors.append(finding)
+   reviewer_findings=survivors
+   # The two-way verdict/severity invariant holds on the AGGREGATE exactly as it
+   # holds on the child result: a reviewer whose every blocker was culled did not
+   # find a blocker, so its contributor row must say APPROVE.
+   if not any(item['severity']=='blocker' for item in reviewer_findings):
+    reviewer_verdict='APPROVE'
   contributors.append({
       'confidence':reviewer['confidence'],
       'id':edge,
-      'verdict':reviewer['verdict'],
+      'verdict':reviewer_verdict,
   })
-  for finding in reviewer['findings']:
+  for finding in reviewer_findings:
    finding_scope=scope(finding['location'])
    scope_key=(finding_scope['path'],finding_scope['line'])
    if scope_key not in finding_groups:
@@ -498,11 +616,47 @@ try:
      'schema_version':2,
  }
  encoded=contract.encode_aggregate(document,'phase1')
+ # Validate the aggregate DESTINATION before publishing anything. An unusable
+ # destination must refuse the whole write, not leave a cull log behind for an
+ # aggregate that never existed.
  target=os.path.abspath(aggregate_path); parent=os.path.dirname(target)
  if not os.path.isabs(aggregate_path) or not os.path.isdir(parent):
   fail('unsafe-output')
  parent_entry=os.stat(parent,follow_symlinks=False)
  if not stat.S_ISDIR(parent_entry.st_mode): fail('unsafe-output')
+ # ---- publish the cull log FIRST (#433) ----
+ # A cull is never swallowed: the filtered aggregate may not exist without the
+ # artifact that says what was filtered and why. Written even when nothing was
+ # culled, so its ABSENCE means the gate did not run rather than "nothing to
+ # report" -- and written before the aggregate, so a log that cannot be published
+ # refuses the whole write instead of leaving a silently-thinner review.
+ log_lines=['# Convention citation gate',
+            '',
+            'Rule sources: '+(', '.join(cell(item) for item in rule_sources)
+                              if rule_sources else 'none'),
+            'Culled or demoted citations: '+str(len(citation_culls)),
+            '']
+ if citation_culls:
+  log_lines += ['| reason | cited rule | finding location | normalised quote (prefix) |',
+                '|---|---|---|---|']
+  for record in citation_culls[:CITATION_LOG_ROW_LIMIT]:
+   log_lines.append('| %s | %s | %s | %s |' % (
+       cell(record['reason']), cell(record['cited_path']),
+       cell(record['location']), cell(record['quote_prefix'])))
+  if len(citation_culls)>CITATION_LOG_ROW_LIMIT:
+   log_lines.append('')
+   log_lines.append('%d further rows omitted.'
+                    % (len(citation_culls)-CITATION_LOG_ROW_LIMIT))
+ log_payload=('\n'.join(log_lines)+'\n').encode('utf-8')
+ log_target=os.path.abspath(citation_log_path); log_parent=os.path.dirname(log_target)
+ if not os.path.isabs(citation_log_path) or not os.path.isdir(log_parent):
+  fail('citation-log-unwritable')
+ log_descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-citations-',dir=log_parent)
+ with os.fdopen(log_descriptor,'wb') as log_output:
+  log_output.write(log_payload)
+  log_output.flush(); os.fsync(log_output.fileno())
+ if os.name!='nt': os.chmod(temporary_path,0o600)
+ os.replace(temporary_path,log_target); temporary_path=None
  descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-v2-',dir=parent)
  with os.fdopen(descriptor,'wb') as output:
   output.write(encoded)
@@ -521,5 +675,6 @@ finally:
   except OSError: pass
 PY
   printf '%s' "$aggregation_input" | python3 -I -B -c "$writer_code" \
-    "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT"
+    "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$rule_sources_path" \
+    "$rule_root" "$changed_paths_path" "$citation_log_path"
 }

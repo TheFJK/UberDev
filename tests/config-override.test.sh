@@ -410,14 +410,14 @@ assert_grep_in "$SKILL_DIR/orchestrator/SKILL.md" \
 echo
 echo "== I4: post-impl-review fanout cap + review_pr advisory (Task 4) =="
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
-  'uberdev_read_int_in_range fanout_concurrency.post_impl_review[[:space:]]+UBERDEV_FANOUT_POST_IMPL_REVIEW[[:space:]]+1[[:space:]]+50[[:space:]]+6' \
-  "I4a: post-impl-review reads fanout_concurrency.post_impl_review with bounds [1,50] default 6"
+  'uberdev_read_int_in_range fanout_concurrency.post_impl_review[[:space:]]+UBERDEV_FANOUT_POST_IMPL_REVIEW[[:space:]]+1[[:space:]]+50[[:space:]]+7' \
+  "I4a: post-impl-review reads fanout_concurrency.post_impl_review with bounds [1,50] default 7"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
   'POST_IMPL_REVIEW_CAP' \
   "I4b: post-impl-review binds POST_IMPL_REVIEW_CAP shell var"
 assert_grep_in "$CONFIG_REF" \
-  'post_impl_review:[[:space:]]+6[[:space:]]+# int \[1, 50\]; post-impl-review reviewer fanout cap; default 6;' \
-  "I4b2: config reference documents post_impl_review default 6"
+  'post_impl_review:[[:space:]]+7[[:space:]]+# int \[1, 50\]; post-impl-review reviewer fanout cap; default 7;' \
+  "I4b2: config reference documents post_impl_review default 7"
 assert_grep_in "$SKILL_DIR/post-impl-review/SKILL.md" \
   'uberdev_read_int_in_range command_timeouts.review_pr[[:space:]]+UBERDEV_REVIEW_PR_TIMEOUT[[:space:]]+60[[:space:]]+86400[[:space:]]+600' \
   "I4c: post-impl-review reads command_timeouts.review_pr with bounds [60,86400] default 600"

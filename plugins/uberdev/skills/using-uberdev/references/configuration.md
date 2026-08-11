@@ -40,7 +40,7 @@ solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   solve_bg: 6                    # int [1, 50]; /turbo parallel claude --bg fanout cap; default 6; env: UBERDEV_FANOUT_SOLVE_BG
-  post_impl_review: 6            # int [1, 50]; post-impl-review reviewer fanout cap; default 6; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
+  post_impl_review: 7            # int [1, 50]; post-impl-review reviewer fanout cap; default 7; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
   merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge-pipeline/SKILL.md Constants)
   conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
 
@@ -221,7 +221,7 @@ skill splits dispatch into `ceil(N / cap)` sequential single-message
 waves (the per-wave single-message Task() invariant is preserved).
 Useful for rate-limited tiers and laptop runs where 10 parallel Claude
 sessions overwhelm RAM. `solve_bg` caps the number of parallel `claude --bg` background sessions dispatched by `/turbo` (and `/solve` when multiple issue numbers are passed). Larger queues split into `ceil(N / cap)` sequential single-message waves with per-wave `solve_bg_fanout_wave_started` audit events. Mirrors `merge_strategy` (`merge-pipeline/SKILL.md:401`).
-Defaults: 6 / 6 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
+Defaults: 6 / 7 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
 introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
 fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural

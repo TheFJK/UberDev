@@ -206,8 +206,9 @@ Explicit forbidden patterns:
    integer `2`, and `phase` must match the slot. Phase 1 contributors are
    exactly `review_pr.review.correctness`,
    `review_pr.review.silent_failures`, `review_pr.review.types`,
-   `review_pr.review.comments`, `review_pr.review.tests`, and
-   `review_pr.review.general`, in that order. Phase 2 contributors are exactly
+   `review_pr.review.comments`, `review_pr.review.tests`,
+   `review_pr.review.general`, and `review_pr.review.convention`, in that
+   order. Phase 2 contributors are exactly
    `review_pr.simplify.reuse`, `review_pr.simplify.quality`, and
    `review_pr.simplify.efficiency`, in that order.
 

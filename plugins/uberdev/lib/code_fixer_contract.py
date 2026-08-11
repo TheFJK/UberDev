@@ -297,6 +297,7 @@ PHASE_CONTRIBUTORS = {
         "review_pr.review.comments",
         "review_pr.review.tests",
         "review_pr.review.general",
+        "review_pr.review.convention",
     ),
     "phase2": (
         "review_pr.simplify.reuse",
@@ -308,6 +309,175 @@ AGGREGATE_KEYS = {"contributors", "findings", "phase", "schema_version"}
 CONTRIBUTOR_KEYS = {"confidence", "id", "verdict"}
 FINDING_KEYS = {"detail", "scope", "severity", "source_edges", "summary"}
 SCOPE_KEYS = {"line", "operation", "path"}
+
+# ---------------------------------------------------------------------------
+# The convention lens's citation gate (#433).
+#
+# `review_pr.review.convention` is the one Phase 1 lens whose claim is a claim
+# ABOUT A DOCUMENT: "the project's rules say X". That shape is authoritative to
+# read and trivially hallucinable to write, which is why the lens is admissible
+# at all only because it arrives with this filter attached. The filter is
+# DETERMINISTIC on purpose: "does this byte string occur in that file, near that
+# line" and "does a rule in directory D govern a file under D" are both
+# decidable, so routing them through a second model would trade a decision for
+# an opinion.
+#
+# A finding whose quote cannot be located verbatim is not a low-confidence
+# finding, it is a FALSE one, and it is culled outright rather than downweighted.
+CONVENTION_EDGE = "review_pr.review.convention"
+# Every reason this gate can refuse a citation for. Closed on purpose: the
+# aggregate writer logs one of these per cull, and an unlisted reason means a
+# code path that can drop a finding without naming why.
+CONVENTION_CULL_REASONS = (
+    "citation-unparsable",
+    "citation-not-in-allowlist",
+    "citation-not-verbatim",
+    "citation-out-of-scope",
+    "citation-secret-shaped",
+    "rule-sources-unavailable",
+)
+CONVENTION_DEMOTE_REASON = "citation-self-introduced"
+# The `detail` grammar the convention reviewer must emit. `rsplit` on the quote
+# marker, so an explanation that itself contains the marker cannot truncate the
+# quote -- the LAST marker always wins.
+CONVENTION_QUOTE_MARKER = " — quote: "
+CONVENTION_DETAIL_GRAMMAR = re.compile(
+    r"confidence: (\d{1,3}) — rule ([^ :]+(?:/[^ :]+)*):([1-9]\d*) — (.+)"
+)
+# A quote shorter than this cites nothing (any file contains "the"); one longer
+# than this is a rule document being republished into a PR body, which the
+# shared contract's redaction carve-out caps at the same number.
+CONVENTION_QUOTE_MIN = 12
+CONVENTION_QUOTE_MAX = 300
+# How many physical lines after the cited one the quote may span. Markdown rules
+# wrap, so a one-line citation of a three-line bullet must still verify; a window
+# this size is generous for wrapping and far too small to make "somewhere in the
+# file" pass as "at this line".
+CONVENTION_RULE_WINDOW = 10
+CONVENTION_REQUEST_KEYS = {
+    "allowlist",
+    "changed_paths",
+    "detail",
+    "location_path",
+    "rule_lines",
+}
+# The CLI verb's stdin ceiling. The request carries a bounded window of one rule
+# file plus two path lists, never a diff or a reviewer transcript.
+CONVENTION_REQUEST_LIMIT = 262144
+# Secret shapes that may never ride out in a citation even though the rule-text
+# carve-out permits quoting. Assembled at runtime rather than spelled
+# contiguously: a literal AWS example key in these bytes hard-stops
+# finish-branch's pre-push secret scan on the diff that introduces it.
+_CONVENTION_SECRET_PATTERNS = (
+    re.compile("AKIA" + r"[0-9A-Z]{8,}"),
+    re.compile("ghp" + r"_[A-Za-z0-9]{8,}"),
+    re.compile("sk" + r"-[A-Za-z0-9]{8,}"),
+    re.compile(r"[A-Za-z0-9+/=_-]{32,}"),
+)
+
+
+def normalise_rule_text(text: str) -> str:
+    """Collapse every whitespace run to one space and strip the ends.
+
+    Both sides of the verbatim comparison go through this, so a rule that wraps
+    across markdown lines still matches the one-line form a reviewer quotes.
+    """
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_convention_detail(detail: str) -> dict[str, Any] | None:
+    """Split a convention `detail` into its declared parts, or None."""
+    if not isinstance(detail, str) or CONVENTION_QUOTE_MARKER not in detail:
+        return None
+    head, quote = detail.rsplit(CONVENTION_QUOTE_MARKER, 1)
+    match = CONVENTION_DETAIL_GRAMMAR.fullmatch(head)
+    if match is None:
+        return None
+    confidence = int(match.group(1))
+    if confidence > 100:
+        return None
+    return {
+        "confidence": confidence,
+        "rule_path": match.group(2),
+        "rule_line": int(match.group(3)),
+        "explanation": match.group(4),
+        "quote": quote,
+    }
+
+
+def _convention_rule_governs(rule_path: str, location_path: str) -> bool:
+    """Nested rule scoping: a rule in D governs exactly what lives under D."""
+    rule_dir = posixpath.dirname(rule_path)
+    if rule_dir in ("", "."):
+        return True
+    return location_path.startswith(rule_dir + "/")
+
+
+def classify_convention_citation(request: dict[str, Any]) -> dict[str, Any]:
+    """Decide one convention finding's fate. PURE: no file I/O, no clock.
+
+    The caller materialises everything -- the allowlist, the changed paths, and
+    the bounded read of the cited rule file -- so this predicate is decidable
+    from its argument alone and is therefore directly testable. It returns
+    `accept`, `demote` (the finding survives as a suggestion), or `cull`, and
+    the FIRST failing check names the reason.
+    """
+    if not isinstance(request, dict) or set(request) != CONVENTION_REQUEST_KEYS:
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    location_path = request["location_path"]
+    allowlist = request["allowlist"]
+    changed_paths = request["changed_paths"]
+    rule_lines = request["rule_lines"]
+    if (
+        not isinstance(location_path, str)
+        or not isinstance(allowlist, list)
+        or not isinstance(changed_paths, list)
+        or not isinstance(rule_lines, list)
+    ):
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    parsed = parse_convention_detail(request["detail"])
+    if parsed is None:
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    rule_path = parsed["rule_path"]
+    quote = normalise_rule_text(parsed["quote"])
+    verdict: dict[str, Any] = {
+        "outcome": "accept",
+        "reason": "citation-verified",
+        "rule_path": rule_path,
+        "rule_line": parsed["rule_line"],
+        "quote_prefix": quote[:80],
+    }
+
+    def refuse(reason: str) -> dict[str, Any]:
+        return {**verdict, "outcome": "cull", "reason": reason}
+
+    if rule_path not in allowlist:
+        return refuse("citation-not-in-allowlist")
+    if not _convention_rule_governs(rule_path, location_path):
+        return refuse("citation-out-of-scope")
+    for pattern in _CONVENTION_SECRET_PATTERNS:
+        if pattern.search(quote):
+            return refuse("citation-secret-shaped")
+    if not CONVENTION_QUOTE_MIN <= len(quote) <= CONVENTION_QUOTE_MAX:
+        return refuse("citation-not-verbatim")
+    start = parsed["rule_line"] - 1
+    window = normalise_rule_text(
+        " ".join(
+            line
+            for line in rule_lines[start : start + CONVENTION_RULE_WINDOW]
+            if isinstance(line, str)
+        )
+    )
+    if not window or quote not in window:
+        return refuse("citation-not-verbatim")
+    if rule_path in changed_paths:
+        # The PR itself wrote the rule it is being judged against. That is not a
+        # fabrication -- the quote IS in the file -- but it is circular, so the
+        # finding survives as advice rather than as a blocker.
+        return {**verdict, "outcome": "demote", "reason": CONVENTION_DEMOTE_REASON}
+    return verdict
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -9086,6 +9256,9 @@ def _parser() -> argparse.ArgumentParser:
     digest.add_argument("--maximum", type=int, required=True)
     encode = commands.add_parser("encode-aggregate", add_help=False)
     encode.add_argument("--phase", choices=("phase1", "phase2"), required=True)
+    # No arguments: the whole request is one JSON object on stdin, so a rule
+    # window never crosses the platform argv-size boundary.
+    commands.add_parser("classify-convention-citation", add_help=False)
     snapshot = commands.add_parser("snapshot-standalone", add_help=False)
     snapshot.add_argument("--working-dir", required=True)
     snapshot.add_argument("--evidence-dir", required=True)
@@ -9441,6 +9614,15 @@ def main() -> int:
             output = encode_aggregate(
                 _parse_json(candidate, "findings_schema_invalid"), arguments.phase
             ).decode("utf-8")
+        elif arguments.command == "classify-convention-citation":
+            candidate = sys.stdin.buffer.read(CONVENTION_REQUEST_LIMIT + 1)
+            if len(candidate) > CONVENTION_REQUEST_LIMIT:
+                fail("convention_request_size_invalid")
+            output = _compact(
+                classify_convention_citation(
+                    _parse_json(candidate, "convention_request_invalid")
+                )
+            )
         elif arguments.command == "snapshot-standalone":
             output = _compact(
                 capture_standalone_snapshot(

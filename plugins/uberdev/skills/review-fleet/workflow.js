@@ -238,6 +238,14 @@ const diffPathAbs = String(CFG.diffPathAbs || "");
 // "one contract, N uncompared copies" class #403 filed.
 const phase1ContractPathAbs = String(CFG.phase1ContractPathAbs || "");
 
+// The convention lens's rule-source ALLOWLIST, by PATH (#433). Discovered by the
+// controller before this call and persisted; this script has no filesystem, so
+// it forwards the path and never reads, re-derives or repairs the list. Only the
+// `review_pr.review.convention` child is told about it -- handing the same path
+// to the other six would invite them to make convention claims through a lens
+// with no citation gate behind it, which is the route this edge exists to close.
+const ruleSourcesPathAbs = String(CFG.ruleSourcesPathAbs || "");
+
 // Phase-1 emphasis tokens and the /simplify free-text focus. Both are CSV /
 // scalar because the envelope emitter has no array path. Emphasis NEVER gates
 // fanout membership — all six reviewers always run (review-pr.md:1324, :4507).
@@ -459,15 +467,22 @@ function envWrap(source, body) {
 // silently re-binds every child to the wrong nonce, which fails closed at
 // validation but wastes a whole run — treat these arrays as a wire format.
 
-// The six Phase 1 reviewers (skills/post-impl-review/SKILL.md:99-104 edge
-// contracts, :502-509 agent-file/lens table). All six always run; the aspect
+// The seven Phase 1 reviewers (skills/post-impl-review/SKILL.md edge
+// contracts and agent-file/lens table). All seven always run; the aspect
 // emphasis changes emphasis only, never fanout membership. code-reviewer is
 // dispatched TWICE — correctness lens and general lens — and the prompt, not
 // the agent file, differentiates them.
+//
+// `convention` is APPENDED LAST on both sides (#433) so the positional nonce
+// pool extends without re-binding any existing child. Its lens does not
+// overlap correctness: the CLAUDE.md-compliance claim moved OUT of the
+// correctness lens when this one arrived, because a convention claim that can
+// reach the aggregate through a lens with no citation gate is exactly the
+// false-positive route this edge exists to close.
 const REVIEW_ROSTER = [
   { edge: "review_pr.review.correctness", agentType: "uberdev:code-reviewer",
     agentFile: "code-reviewer.md", slug: "correctness",
-    lens: "Correctness, design, and CLAUDE.md compliance" },
+    lens: "Correctness and design" },
   { edge: "review_pr.review.silent_failures", agentType: "uberdev:silent-failure-hunter",
     agentFile: "silent-failure-hunter.md", slug: "silent-failures",
     lens: "Swallowed errors, ignored return values, silent fallbacks" },
@@ -482,7 +497,10 @@ const REVIEW_ROSTER = [
     lens: "Behavioral test coverage, critical gaps, test quality" },
   { edge: "review_pr.review.general", agentType: "uberdev:code-reviewer",
     agentFile: "code-reviewer.md", slug: "general",
-    lens: "Catch-all for issues that fall outside the other five lenses" },
+    lens: "Catch-all for issues that fall outside the other six lenses" },
+  { edge: "review_pr.review.convention", agentType: "uberdev:convention-compliance",
+    agentFile: "convention-compliance.md", slug: "convention",
+    lens: "Project-convention compliance, with a verbatim rule citation for every finding" },
 ];
 
 // The three Phase 2 lenses. /simplify keeps the `review_pr.` edge prefix
@@ -750,6 +768,32 @@ function phase1OutputContract() {
     + "completed review with zero findings is `findings: []` with `verdict: APPROVE`.";
 }
 
+// The convention edge's extra binding: the allowlist path, the `detail` grammar
+// its findings must use, and the instruction that covers the common case of a
+// repo that wrote no conventions down. All of it is code-chosen trusted text
+// plus one controller-supplied path, so it sits OUTSIDE any envelope.
+function conventionContract() {
+  return "## Rule sources (this lens only)\n"
+    + "The rule-source allowlist for this run is the file at " + ruleSourcesPathAbs + ". It "
+    + "lists repo-relative paths, one per line. Read ONLY those paths for rules. A rule "
+    + "document that is not on that list does not exist for this review, and a finding citing "
+    + "one is dropped before it reaches the report.\n"
+    + "If that file is EMPTY, this repository has written no conventions down. That is a "
+    + "normal outcome, not a failure: return `findings: []` with `verdict: APPROVE`. Do NOT "
+    + "substitute general best practice, another project's conventions, or your own "
+    + "preferences for a rule this project never wrote.\n"
+    + "A rule governs the directory it lives in and everything beneath it, and nothing else: "
+    + "a rule in `plugins/x/AGENTS.md` does not govern `tools/`.\n"
+    + "Every finding's `detail` must be exactly this one-line shape, emitted as a "
+    + "double-quoted scalar:\n"
+    + "  confidence: <0-100> — rule <allowlisted-path>:<line> — <why the change "
+    + "breaks it> — quote: <the rule text, verbatim>\n"
+    + "The quote is re-checked against the cited file's bytes before aggregation. A quote "
+    + "that cannot be located verbatim near the cited line is not a low-confidence finding: "
+    + "it is culled, because a fabricated citation is a false finding rather than an "
+    + "uncertain one. A rule you cannot quote verbatim is a rule you may not report.";
+}
+
 function reviewerPrompt(entry, nonce) {
   var lines = [];
   lines.push("Read the agent instructions at " + pluginRootAbs + "/agents/" + entry.agentFile
@@ -760,6 +804,10 @@ function reviewerPrompt(entry, nonce) {
   lines.push("## Lens emphasis: " + entry.lens);
   lines.push("");
   lines.push(diffContract());
+  if (entry.edge === "review_pr.review.convention") {
+    lines.push("");
+    lines.push(conventionContract());
+  }
   if (aspects.length > 0) {
     // Aspect tokens are preflight-parsed CLI words, not agent-derived text, so
     // they are trusted scalars — but they still only shift EMPHASIS. Reporting

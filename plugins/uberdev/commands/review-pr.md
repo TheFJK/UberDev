@@ -1272,7 +1272,7 @@ PY
 ```
 <!-- END review-child-builder-v1 -->
 
-- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
+- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 7 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
 - **Phase 2 — Simplify pass**: parallel fanout of the three simplify lenses (reuse / quality / efficiency) defined in `/uberdev:simplify`, with auto-applied edits committed separately. Single-message dispatch per the `uberdev:post-impl-review` contract.
 
 Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve the legacy single-pass behavior. Cost trade-off: Phase 2 adds three extra agent invocations per run; opt out for fast feedback loops on iterative review (e.g. when you've already run `/uberdev:simplify` separately).
@@ -1702,18 +1702,18 @@ PY
 
    > Invoke `uberdev:post-impl-review` via the `Skill` tool with `changed_paths`, `commit_range`, `tier`, `RUN_ID`, `aspect_emphasis=$ASPECT_LIST`, and — only when `SEQUENTIAL=1` — `fanout_cap=$POST_IMPL_FANOUT_CAP` (so the skill writes to the same `RUN_ID`-keyed directory `/review-pr` will read, the brief includes the emphasis section when aspects were requested, and the sequential override reaches the cap resolution that actually uses it).
 
-   The skill runs its 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
+   The skill runs its 7 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
 
-   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
+   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 7-agent fanout into `ceil(7/1) = 7` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
 
    **4w. Phase 1 on the Workflow-native transport** (run this INSTEAD of the
    `Skill(uberdev:post-impl-review)` invocation above, and only when
    `UBERDEV_CARRIER_BACKEND=workflow`)
 
    `lib/dispatch.sh` has no `workflow` provider arm by construction, so on that
-   backend the six reviewers are dispatched by the session's Workflow tool
+   backend the seven reviewers are dispatched by the session's Workflow tool
    through `skills/review-fleet/workflow.js` instead of by the routed child
-   adapter. Everything else is unchanged: the same six edges, the same enveloped
+   adapter. Everything else is unchanged: the same seven edges, the same enveloped
    diff artifact read BY PATH, the same `uberdev_child_validate_phase1_review_result`
    boundary, the same trusted ledger, and the same
    `post_review_write_aggregate_v2` writer. **Do not also invoke
@@ -1739,13 +1739,24 @@ PY
    # realpath rather than from a symlinked or relative spelling of it.
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
-   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" "$REVIEW_FLEET_RUN_DIR/post-review" || return 2
+   # The convention lens's rule-source ALLOWLIST (#433), discovered ONCE here and
+   # persisted next to the run. The children receive the PATH, never the bytes;
+   # 4w.2 re-reads THIS file rather than re-deriving the list, because two
+   # derivations can disagree and the gate has to judge citations against the
+   # same allowlist the reviewer was handed. The resolved root and the
+   # changed-path set travel the same way, and for the same reason: 4w.2 is a
+   # fresh shell.
+   REVIEW_RULE_SOURCES="$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt"
+   printf '%s\n' "$REVIEW_FLEET_WORKTREE" >"$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt" || return 2
+   uberdev_review_rule_sources "$REVIEW_FLEET_WORKTREE" >"$REVIEW_RULE_SOURCES" || return 2
+   printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
-   REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)" || return 2
+   REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 7)" || return 2
    [ "${SEQUENTIAL:-0}" != 1 ] || REVIEW_FLEET_CAP=1
    REVIEW_FLEET_ASPECTS="$(printf '%s' "${ASPECT_LIST[*]:-}" | tr ' ' ',')"
    # mkdir -p per child, one CSPRNG nonce per child in the roster order the
@@ -1780,6 +1791,7 @@ PY
      workspaceMode=caller \
      worktreeAbs="$REVIEW_FLEET_WORKTREE" \
      branchName= \
+     ruleSourcesPathAbs="$REVIEW_RULE_SOURCES" \
      runNonces="$REVIEW_FLEET_NONCE_POOL" || return 2
    ```
 
@@ -1813,6 +1825,7 @@ PY
      review_pr.review.correctness review_pr.review.silent_failures
      review_pr.review.types review_pr.review.comments
      review_pr.review.tests review_pr.review.general
+     review_pr.review.convention
    )
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
@@ -1847,7 +1860,11 @@ PY
             "$REVIEW_FLEET_LAUNCHED" '' "$REVIEW_FLEET_RUN_DIR")" \
        && POST_REVIEW_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
             "$POST_REVIEW_TRUSTED_LEDGER" "$REVIEW_EXPECTED_COUNT")" \
-       && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH"; then
+       && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH" \
+            "$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt" \
+            "$(cat "$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt")" \
+            "$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json" \
+            "$REVIEW_FLEET_RUN_DIR/post-review/convention-citations.md"; then
      POST_REVIEW_AGGREGATION_INPUT=
      unset POST_REVIEW_AGGREGATION_INPUT
    else
@@ -2160,7 +2177,7 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    publication, and re-enter Phase 1 against that SHA. Never emit trust or a
    terminal refusal for unreviewed mutated history.
 
-   **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all six reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
+   **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all seven reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
 
    If `code-fixer` returns `status: REFUSED` and the mutation gate confirms
    HEAD is unchanged, log the rationale and continue to Phase 2 with zero
@@ -6508,7 +6525,7 @@ contract and contradicted every one of those steps (#302). Use
 `finish-branch` chains into this command once the PR exists.
 
 - Aspect tokens (`code`, `errors`, `tests`, …) narrow *emphasis*, never the
-  fanout — all 6 Phase 1 reviewers always run
+  fanout — all 7 Phase 1 reviewers always run
 - Agents run autonomously and return detailed reports
 - Each agent focuses on its specialty for deep analysis
 - Results are actionable with specific file:line references

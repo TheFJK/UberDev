@@ -852,6 +852,35 @@
         "format_example_path": "path"
       }
     },
+    "review_pr.review.convention": {
+      "kind": "provider",
+      "source": "plugins/uberdev/skills/post-impl-review/SKILL.md",
+      "role": "convention-compliance",
+      "phase": "review",
+      "cardinality": "one_per_review_iteration",
+      "required": true,
+      "risk_scope": "subtask",
+      "output_contract": "phase1-reviewer-v1",
+      "retry": {
+        "format": 1
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "required_inputs": {
+        "changed_paths": "repo_path_array",
+        "diff_path": "path",
+        "criteria_path": "path",
+        "emphasis": "string_array",
+        "rule_sources_path": "path"
+      },
+      "optional_inputs": {
+        "format_retry": "boolean",
+        "format_example_path": "path"
+      }
+    },
     "review_pr.fix.phase1": {
       "kind": "provider",
       "workspace_mode": "caller",
