@@ -314,6 +314,41 @@ expect_citation cc11.json 'demote citation-self-introduced' \
   "CC11 — a rule this PR itself wrote demotes the finding instead of culling it"
 
 echo
+echo "== G: the citation grammar is spelled identically on every surface =="
+# ONE contract, FOUR copies: the predicate that parses it
+# (lib/code_fixer_contract.py), the prompt that asks for it
+# (skills/review-fleet/workflow.js), the agent file that documents it, and the
+# shared output contract carrying the redaction carve-out for it. The separator
+# is an EM DASH, and a surface that drifts to a hyphen -- or to different spacing
+# -- makes every finding from that dispatch `citation-unparsable` while every
+# other shape test still passes.
+GRAMMAR_MARKER=' — quote: '
+for grammar_surface in \
+  "plugins/uberdev/lib/code_fixer_contract.py" \
+  "plugins/uberdev/skills/review-fleet/workflow.js" \
+  "plugins/uberdev/agents/convention-compliance.md" \
+  "plugins/uberdev/shared/phase1-reviewer-output-v1.md"
+do
+  if grep -Fq -- "$GRAMMAR_MARKER" "$REPO_ROOT/$grammar_surface"; then
+    pass "G1 - $grammar_surface spells the quote separator identically"
+  else
+    note_fail "G1 - $grammar_surface has drifted from the quote separator"
+  fi
+done
+# The full skeleton reaches the two surfaces a reviewer actually reads.
+GRAMMAR_SKELETON='confidence: <0-100> — rule <allowlisted-path>:<line> — '
+for grammar_surface in \
+  "plugins/uberdev/skills/review-fleet/workflow.js" \
+  "plugins/uberdev/agents/convention-compliance.md"
+do
+  if grep -Fq -- "$GRAMMAR_SKELETON" "$REPO_ROOT/$grammar_surface"; then
+    pass "G2 - $grammar_surface states the full detail grammar the gate parses"
+  else
+    note_fail "G2 - $grammar_surface does not state the full detail grammar"
+  fi
+done
+
+echo
 echo "== CC10-CC16: the gate INSIDE the real aggregate writer =="
 # These rows drive post_review_write_aggregate_v2 as shipped, over a full
 # seven-row captured input. They are the difference between "the predicate is
