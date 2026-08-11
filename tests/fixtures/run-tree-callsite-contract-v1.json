@@ -691,8 +691,12 @@
         "pr_number": "integer",
         "working_dir": "directory"
       },
-      "optional_inputs": [],
-      "optional_input_types": {},
+      "optional_inputs": [
+        "verification_path"
+      ],
+      "optional_input_types": {
+        "verification_path": "optional_path"
+      },
       "allowed_workflows": [
         "review-pr",
         "simplify",
@@ -786,6 +790,39 @@
         "criteria_path": "path",
         "diff_path": "path",
         "emphasis": "string_array"
+      },
+      "optional_inputs": [
+        "format_example_path",
+        "format_retry"
+      ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "risk_scope": "subtask",
+      "risk_argument": "subtask"
+    },
+    {
+      "edge_id": "review_pr.review.convention",
+      "source": "plugins/uberdev/skills/post-impl-review/SKILL.md",
+      "required_inputs": [
+        "changed_paths",
+        "criteria_path",
+        "diff_path",
+        "emphasis",
+        "rule_sources_path"
+      ],
+      "required_input_types": {
+        "changed_paths": "repo_path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array",
+        "rule_sources_path": "path"
       },
       "optional_inputs": [
         "format_example_path",
@@ -1034,6 +1071,39 @@
         "simplify",
         "solve",
         "turbo"
+      ],
+      "risk_scope": "subtask",
+      "risk_argument": "subtask"
+    },
+    {
+      "edge_id": "review_pr.verify.finding",
+      "source": "plugins/uberdev/commands/review-pr.md",
+      "required_inputs": [
+        "claim_path",
+        "diff_path",
+        "pr_context_path",
+        "rubric_path",
+        "working_dir"
+      ],
+      "required_input_types": {
+        "claim_path": "path",
+        "diff_path": "path",
+        "pr_context_path": "path",
+        "rubric_path": "path",
+        "working_dir": "directory"
+      },
+      "optional_inputs": [
+        "claude_md_paths",
+        "format_example_path",
+        "format_retry"
+      ],
+      "optional_input_types": {
+        "claude_md_paths": "optional_path_array",
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
+      "allowed_workflows": [
+        "review-pr"
       ],
       "risk_scope": "subtask",
       "risk_argument": "subtask"

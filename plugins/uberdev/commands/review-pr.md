@@ -22,12 +22,13 @@ Run a comprehensive pull request review using multiple specialized agents, each 
   "review_pr.simplify.quality":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.simplify.efficiency":{"inputs":["diff_path","lens"],"optional_inputs":["focus"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.fix.phase2":{"inputs":["findings_path","findings_sha256","commit_range_path","commit_range_sha256","working_dir","pr_number","disposition_path","authority_path","authority_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
-  "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.defer.findings":{"inputs":["phase1_path","phase2_path","phase1_disposition_path","phase2_disposition_path","working_dir","pr_number"],"optional_inputs":["verification_path"],"allowed_workflows":["review-pr","simplify","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.classify":{"inputs":["pr_number","run_id","head_sha","log_content","log_sha256"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"subtask","risk_argument":"subtask"},
   "review_pr.ci.fix_code":{"inputs":["failure_class","signal_anchor","run_id","head_sha","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.rebase":{"inputs":["working_dir","pr_number","head_sha","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
   "review_pr.ci.defer_refusal":{"inputs":["phase1_path","working_dir","pr_number"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
-  "review_pr.ci.resolve_conflict":{"inputs":["file_path","working_dir","pr_branch","integration_branch","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null}
+  "review_pr.ci.resolve_conflict":{"inputs":["file_path","working_dir","pr_branch","integration_branch","base_sha"],"optional_inputs":[],"allowed_workflows":["review-pr","solve","turbo"],"risk_scope":"run","risk_argument":null},
+  "review_pr.verify.finding":{"inputs":["claim_path","diff_path","pr_context_path","rubric_path","working_dir"],"optional_inputs":["claude_md_paths","format_example_path","format_retry"],"allowed_workflows":["review-pr"],"risk_scope":"subtask","risk_argument":"subtask"}
 }
 ```
 <!-- END child-callsite-contracts-v1 -->
@@ -981,6 +982,59 @@ uberdev_dispatch_preflight_backend "$UBERDEV_CARRIER_BACKEND" review-pr || {
   review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || rc=2
   return "$rc" 2>/dev/null || exit "$rc"
 }
+# BEGIN review-run-handoff-v1
+# Everything below exists so that the NEXT fence -- a different process, with an
+# empty environment -- can find this run again (#427). Placed after the backend
+# preflight on purpose: a setup that abandons its reservation above must never
+# leave a pointer to a run that no longer exists.
+#
+# 1. The workspace descriptor. uberdev_command_workspace_prepare already
+#    computed every artifact pathname and this fence used to throw the JSON
+#    away, forcing 47 later fences to read scalars nobody re-bound. Persisting
+#    it makes lib/command-workspace.py the SINGLE implementation of that path
+#    algebra -- review_fleet_rehydrate reads these bytes instead of re-deriving
+#    "<run>/pr-diff.md" a second time.
+#
+#    Written from the shell variable, never by re-running the helper and never
+#    by capturing the call above in a command substitution: that call must stay
+#    a direct call, because the exported path globals are what the rest of this
+#    fence uses.
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || {
+  echo "error: review setup could not load the review fleet args library" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+}
+REVIEW_WORKSPACE_DESCRIPTOR="$RESEARCH_DIR_ABS/command-workspace.json"
+( umask 077 && printf '%s\n' "$UBERDEV_COMMAND_WORKSPACE_JSON" >"$REVIEW_WORKSPACE_DESCRIPTOR.tmp.$$" ) && \
+  mv -f "$REVIEW_WORKSPACE_DESCRIPTOR.tmp.$$" "$REVIEW_WORKSPACE_DESCRIPTOR" || {
+  rm -f "$REVIEW_WORKSPACE_DESCRIPTOR.tmp.$$" 2>/dev/null || true
+  echo "error: review setup could not persist the run workspace descriptor" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+}
+# 2. The active-run pointer -- the ONE value that is not derivable from the
+#    filesystem, written where the runs root's own `*` .gitignore already covers
+#    it so the reviewed working tree stays clean.
+REVIEW_HEAD_SHA_FOR_POINTER="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || {
+  echo "error: review setup could not resolve HEAD for the active-run pointer" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+}
+review_fleet_write_active_run_pointer "$WORKTREE_ROOT" "$RUN_ID" "$PR_NUMBER" "$REVIEW_HEAD_SHA_FOR_POINTER" || {
+  echo "error: review setup could not publish the active-run pointer" >&2
+  review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+  return 2 2>/dev/null || exit 2
+}
+# 3. The carry line. The orchestrator reads this and MUST prefix every later
+#    /review-pr Bash call with it; the pointer above is the recovery path for
+#    when that context is lost, not the primary channel.
+#
+#    On STDERR, with every other notice this command emits. Setup's stdout is
+#    consumed by callers that source this fence and then capture the stdout of
+#    what they run next; a line on stdout would land in the middle of their
+#    payload.
+printf 'REVIEW_CARRY RUN_ID=%s\n' "$RUN_ID" >&2
+# END review-run-handoff-v1
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
 CI_FIX_LOOP_ITER="${CI_FIX_LOOP_ITER:-1}"
@@ -996,6 +1050,34 @@ review_json_string() {
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
 }
 ```
+
+### Carrying the run across fences (read this before running any later fence)
+
+Every `bash` block below is a **fresh shell**. The setup fence above is the only
+one that reserves a run, and its shell exits before the next block starts, so no
+shell variable it bound is reachable from any later block.
+
+The setup fence therefore prints exactly one line, on **stderr**:
+
+```
+REVIEW_CARRY RUN_ID=<run id>
+```
+
+**The orchestrator MUST prefix every later `/review-pr` Bash call with
+`RUN_ID=<that value>`.** That is the primary channel and the only one that is
+unambiguous when more than one review is in flight against the same checkout.
+
+When that context is lost — a compacted session, a resumed run, an operator
+re-entering mid-pipeline — every fence recovers on its own through
+`<repo>/.uberdev/runs/.review-active-run.json`, the pointer the setup fence
+publishes alongside the reservation. Recovery is guarded, not best-effort: the
+named run must still hold its `locked` and `pr-context.json` markers, must not
+already have published a verdict, must be for the PR this fence is reviewing,
+and must be younger than `REVIEW_RESERVATION_REAP_SECS`. Any guard that fails is
+`rc 2` with its own message — never a silent fallback to some other run.
+
+Both paths land in `review_fleet_rehydrate` (`lib/review-fleet-args.sh`), which
+is the first call of every executed fence below.
 
 <!-- BEGIN review-child-builder-v1 -->
 ```bash
@@ -1272,7 +1354,7 @@ PY
 ```
 <!-- END review-child-builder-v1 -->
 
-- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
+- **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 7 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
 - **Phase 2 — Simplify pass**: parallel fanout of the three simplify lenses (reuse / quality / efficiency) defined in `/uberdev:simplify`, with auto-applied edits committed separately. Single-message dispatch per the `uberdev:post-impl-review` contract.
 
 Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve the legacy single-pass behavior. Cost trade-off: Phase 2 adds three extra agent invocations per run; opt out for fast feedback loops on iterative review (e.g. when you've already run `/uberdev:simplify` separately).
@@ -1296,6 +1378,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      Rationale: `merge-pipeline` invokes `Skill("uberdev:review-pr", args: "${PR} --turbo")` (out-of-scope for #97) — arg form must remain accepted. `finish-branch` chains via `Skill("uberdev:review-pr")` with no flag (env-var inheritance, #97) — env form must also be accepted. The hybrid OR detector closes both call sites.
    - Detect `--no-ci-fix` token in `$ARGUMENTS` and strip it from the aspect list — sets `CI_FIX_PHASE=0` (probe-only mode), otherwise `CI_FIX_PHASE=1` (default). Mirrors `--no-simplify` shape. When `CI_FIX_PHASE=0`, Phase 3 6c.1 PROBE + 6c.2 MONITOR + 6c.3 CLASSIFY still run for audit telemetry; 6c.4 ROUTE / 6c.5 POST-FIX / 6c.6 HALT are skipped. Outcome is forced to `green` if probe was green; otherwise `halted` (still gates trust signal). The decision is **persisted**, not merely bound:
      ```bash
+     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+     review_fleet_rehydrate || return 2
      CI_FIX_PHASE=1
      if [[ "${ARGUMENTS:-}" == *"--no-ci-fix"* ]]; then
        CI_FIX_PHASE=0
@@ -1357,6 +1441,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    - Identify file types and what reviews apply
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    review_assert_selected_pr_head() {
      local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
      local live_head local_head
@@ -1688,6 +1774,20 @@ PY
        audit review_base_uncarried data.reason=write_failed
        return 2
      }
+     # THE ONLY WRITER of the changed-path set, for the same reason and in the
+     # same breath: `review_refresh_phase1_scope` just bound CHANGED_PATHS_JSON
+     # from the one fixed base..head snapshot this review is scoped to, and both
+     # consumers -- the Phase 1 evidence boundary and the citation gate's
+     # self-introduced-rule demotion -- run in the 4w.2 fence, a fresh shell
+     # away, where `$CHANGED_PATHS_JSON` is the empty string. Written from the
+     # value this fence already holds rather than re-derived there: a second
+     # `git diff --name-only` is a second answer to a question the diff artifact
+     # and the commit range have already been frozen against.
+     mkdir -p "$REVIEW_BASE_RUN_DIR/post-review" || return 2
+     printf '%s' "$CHANGED_PATHS_JSON" >"$REVIEW_BASE_RUN_DIR/post-review/changed-paths.json" || {
+       echo "error: /uberdev:review-pr — could not persist PR #$PR_NUMBER's changed-path set to $REVIEW_BASE_RUN_DIR/post-review/changed-paths.json; refusing to dispatch reviewers whose evidence no later fence can scope." >&2
+       return 2
+     }
    else
      # No run dir bound => this fence is running OUTSIDE a real review run. The
      # pair is still bound for a same-shell caller and the miss is TYPED rather
@@ -1702,18 +1802,18 @@ PY
 
    > Invoke `uberdev:post-impl-review` via the `Skill` tool with `changed_paths`, `commit_range`, `tier`, `RUN_ID`, `aspect_emphasis=$ASPECT_LIST`, and — only when `SEQUENTIAL=1` — `fanout_cap=$POST_IMPL_FANOUT_CAP` (so the skill writes to the same `RUN_ID`-keyed directory `/review-pr` will read, the brief includes the emphasis section when aspects were requested, and the sequential override reaches the cap resolution that actually uses it).
 
-   The skill runs its 6 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
+   The skill runs its 7 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait — see `plugins/uberdev/skills/post-impl-review/SKILL.md` for the canonical agent list, cap, and YAML return contract. The skill is the single source of truth for which agents fan out; this prose deliberately does not enumerate them.
 
-   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 6-agent fanout into `ceil(6/1) = 6` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
+   **Sequential mode** (only when explicitly requested via the `sequential` argument): if `SEQUENTIAL=1` was set in Step 1, the user-visible stderr notice has already been emitted (`notice: running post-impl-review sequentially via fanout_cap=1`) and `POST_IMPL_FANOUT_CAP=1` is bound. Pass it through as the `fanout_cap` Skill input above; the skill's Step 2 cap resolution honours it over config/env/default and splits the 7-agent fanout into `ceil(7/1) = 7` sequential one-child waves. The warning surface is the user's terminal — never `/dev/null`, never an internal log file — so the override is visible. Omit the input entirely when `SEQUENTIAL=0`; there is nothing to unset afterwards, because the override never becomes ambient shell state. An `export` here would be dead on arrival: this command's `bash` blocks are separate shells, so the skill's own executable fence never sees a variable exported from `/review-pr`'s Step 1.
 
    **4w. Phase 1 on the Workflow-native transport** (run this INSTEAD of the
    `Skill(uberdev:post-impl-review)` invocation above, and only when
    `UBERDEV_CARRIER_BACKEND=workflow`)
 
    `lib/dispatch.sh` has no `workflow` provider arm by construction, so on that
-   backend the six reviewers are dispatched by the session's Workflow tool
+   backend the seven reviewers are dispatched by the session's Workflow tool
    through `skills/review-fleet/workflow.js` instead of by the routed child
-   adapter. Everything else is unchanged: the same six edges, the same enveloped
+   adapter. Everything else is unchanged: the same seven edges, the same enveloped
    diff artifact read BY PATH, the same `uberdev_child_validate_phase1_review_result`
    boundary, the same trusted ledger, and the same
    `post_review_write_aggregate_v2` writer. **Do not also invoke
@@ -1727,26 +1827,42 @@ PY
    **4w.1 — existence guard, per-child layout, nonce mint, bindings, envelope.**
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # RFC 0012 §4.1: validate the on-disk Workflow script BEFORE mandating the
    # call. A missing or misnamed workflow.js on a target install must refuse
    # here, not at the runtime layer after the RUN_ID is already reserved.
    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
    # The script derives every child path from runDirAbs and every capture verb
    # canonicalises the same paths afterwards, so both sides must start from the
    # realpath rather than from a symlinked or relative spelling of it.
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
-   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+   mkdir -p "$REVIEW_FLEET_RUN_DIR/children" "$REVIEW_FLEET_RUN_DIR/post-review" || return 2
+   # The convention lens's rule-source ALLOWLIST (#433), discovered ONCE here and
+   # persisted next to the run. The children receive the PATH, never the bytes;
+   # 4w.2 re-reads THIS file rather than re-deriving the list, because two
+   # derivations can disagree and the gate has to judge citations against the
+   # same allowlist the reviewer was handed. The resolved root and the
+   # changed-path set travel the same way, and for the same reason: 4w.2 is a
+   # fresh shell.
+   REVIEW_RULE_SOURCES="$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt"
+   printf '%s\n' "$REVIEW_FLEET_WORKTREE" >"$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt" || return 2
+   uberdev_review_rule_sources "$REVIEW_FLEET_WORKTREE" >"$REVIEW_RULE_SOURCES" || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
-   REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)" || return 2
+   REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 7)" || return 2
    [ "${SEQUENTIAL:-0}" != 1 ] || REVIEW_FLEET_CAP=1
+   # Resolved HERE so an invalid value warns once, at the top of the run, rather
+   # than mid-Phase-1. Step 6b.0 re-derives it from the same call because every
+   # bash block in this command is a FRESH shell (#427) -- this binding does not
+   # survive to the fence that actually applies it.
+   REVIEW_CONFIDENCE_THRESHOLD="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)" || return 2
    REVIEW_FLEET_ASPECTS="$(printf '%s' "${ASPECT_LIST[*]:-}" | tr ' ' ',')"
    # mkdir -p per child, one CSPRNG nonce per child in the roster order the
    # script consumes, one bind-workflow-launch per child — all BEFORE dispatch,
@@ -1780,6 +1896,7 @@ PY
      workspaceMode=caller \
      worktreeAbs="$REVIEW_FLEET_WORKTREE" \
      branchName= \
+     ruleSourcesPathAbs="$REVIEW_RULE_SOURCES" \
      runNonces="$REVIEW_FLEET_NONCE_POOL" || return 2
    ```
 
@@ -1803,6 +1920,8 @@ PY
    no valid artifacts, and the evidence builder fails closed on it.
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # child-dispatch.sh for uberdev_child_validate_phase1_review_result, and for
    # the backend-policy enum the evidence builder reads; review-aggregate.sh for
    # the three builders themselves. Both are sourced HERE because this fence is
@@ -1813,10 +1932,25 @@ PY
      review_pr.review.correctness review_pr.review.silent_failures
      review_pr.review.types review_pr.review.comments
      review_pr.review.tests review_pr.review.general
+     review_pr.review.convention
    )
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-review.launched"
    REVIEW_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+   # The changed-path set, READ back from the run. This fence opens with
+   # `review_fleet_rehydrate`, which binds the documented carrier set and does
+   # NOT bind CHANGED_PATHS_JSON -- that value is bound only in the Phase 1
+   # scope fence, which is a dead shell by now, so a write from `$CHANGED_PATHS_JSON`
+   # here would publish 0 bytes and the aggregate would refuse
+   # `changed-paths-unavailable` on a review that ran perfectly. The scope fence
+   # persists it (next to review-base-identity.tsv, same reason); an absent or
+   # empty file is infrastructure failure and halts before any child is judged.
+   REVIEW_CHANGED_PATHS_PATH="$REVIEW_FLEET_RUN_DIR/post-review/changed-paths.json"
+   [ -s "$REVIEW_CHANGED_PATHS_PATH" ] || {
+     echo "error: review-fleet Phase 1 has no changed-path set at $REVIEW_CHANGED_PATHS_PATH; the scope fence never ran or could not persist it" >&2
+     return 70
+   }
+   CHANGED_PATHS_JSON="$(cat "$REVIEW_CHANGED_PATHS_PATH")" || return 70
    POST_REVIEW_VALIDATED_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-review.validated"
    : >"$POST_REVIEW_VALIDATED_LEDGER" || return 2
    REVIEW_WAVE_BLOCKED=0
@@ -1847,7 +1981,11 @@ PY
             "$REVIEW_FLEET_LAUNCHED" '' "$REVIEW_FLEET_RUN_DIR")" \
        && POST_REVIEW_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
             "$POST_REVIEW_TRUSTED_LEDGER" "$REVIEW_EXPECTED_COUNT")" \
-       && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH"; then
+       && post_review_write_aggregate_v2 "$POST_REVIEW_AGGREGATION_INPUT" "$AGG_PATH" \
+            "$REVIEW_FLEET_RUN_DIR/post-review/rule-sources.txt" \
+            "$(cat "$REVIEW_FLEET_RUN_DIR/post-review/rule-root.txt")" \
+            "$REVIEW_CHANGED_PATHS_PATH" \
+            "$REVIEW_FLEET_RUN_DIR/post-review/convention-citations.md"; then
      POST_REVIEW_AGGREGATION_INPUT=
      unset POST_REVIEW_AGGREGATION_INPUT
    else
@@ -1879,7 +2017,8 @@ PY
    Dispatch a fresh routed `code-fixer` child (`subagent_type: uberdev:code-fixer`) to apply the findings. The edge and manifest phase are the only phase/type authority; the payload carries only immutable artifact authority:
 
    ```bash
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
@@ -1959,9 +2098,10 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    **5w.1 — authority, binding, envelope.**
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -2032,7 +2172,8 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    and the head movement are the truth.
 
    ```bash uberdev-executable origin=review-pr
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
@@ -2087,6 +2228,8 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    `commits[].sha` as `FIXER_DECLARED_TIP`. The controller applies:
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    review_track_validated_fixer_head() {
      local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
      [ "$#" -ge 3 ] || return 2
@@ -2160,7 +2303,7 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    publication, and re-enter Phase 1 against that SHA. Never emit trust or a
    terminal refusal for unreviewed mutated history.
 
-   **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all six reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
+   **Fail-closed boundary:** if the artifact file is missing or empty (e.g., a reviewer remained `BLOCKED`, supervision failed, or the skill crashed), record a supervisory failure and terminate `/review-pr` immediately. Do NOT dispatch the fixer, enter Phase 2, defer findings, or emit trust. The ordinary aggregate is produced only after all seven reviewer slots have valid evidence; a missing aggregate is therefore infrastructure failure, never a zero-finding review result.
 
    If `code-fixer` returns `status: REFUSED` and the mutation gate confirms
    HEAD is unchanged, log the rationale and continue to Phase 2 with zero
@@ -2179,7 +2322,8 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    **The post-Phase-1 diff is attacker-controllable** and MUST be persisted at `DIFF_ARTIFACT_PATH` with literal leading `<external-untrusted-input source="pr-diff">` and trailing `</external-untrusted-input>` bytes. Concrete dispatch uses three immutable instances and issues the whole wave before waiting:
 
    ```bash
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
@@ -2233,9 +2377,10 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    `UBERDEV_CARRIER_BACKEND=workflow`)
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
    # Phase 1 may have advanced HEAD. Rebuild the enveloped diff and the
    # commit-range artifact from that exact post-fix snapshot first, exactly as
@@ -2297,7 +2442,8 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    `status.json` and `result.md`, and computes both digests itself.
 
    ```bash uberdev-executable origin=review-pr
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_LENS_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
    REVIEW_FLEET_LENS_CAPTURED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.captured"
@@ -2339,7 +2485,8 @@ print(status+"\t"+tip,end="")' "$outcome")" || return 74
    **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer`; `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
 
    ```bash
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
    # otherwise re-key pass 2 onto pass 1's already-published artifact names.
@@ -2415,9 +2562,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    only when `UBERDEV_CARRIER_BACKEND=workflow`)
 
    ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -2484,7 +2632,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    ```
 
    ```bash uberdev-executable origin=review-pr
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
    # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
    # fence advances and persists it; this fresh shell's `:-1` default would
@@ -2551,6 +2700,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    After the LAST fixer returns — the Step 6b Phase-2 fixer, or the Step 5 Phase-1 fixer when `SIMPLIFY_PHASE=0` (`--no-simplify` skips Step 6 entirely, so Step 5's fixer is the last one) — push the accumulated Phase 1 + Phase 2 fix commits so the Phase 3 PROBE (6c.1) and MONITOR (6c.2) validate the **post-fix remote SHA**. Without this push the remote head stays pre-fix until the trust-trail anchor push at end-of-run, so Phase 3 probes CI that never ran on the fixed code and a GREEN trust signal can describe code CI never built. **Exactly ONE push per review cycle — after the last fixer, never one per fixer**: each push spawns a full duplicate CI check set while `test.yml` has no concurrency group (#309 — the CI-concurrency PR lands only after this one; see the 6c.1 benign-cancel dedupe it depends on).
 
    ```bash
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # Mirrors the trust-trail anchor push guard (Trust-Signal Emission artifact 1):
    # a silently-failed push here would let Phase 3 probe a stale remote SHA and
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
@@ -2579,6 +2730,301 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    This step is NOT gated by `SIMPLIFY_PHASE`, `CI_FIX_PHASE`, or
    `DEFER_ISSUES_PHASE` — it runs on every path that reaches Phase 2.5/Phase 3.
 
+6b.0. **Phase 1 verification gate** (RFC 0017 / #431)
+
+    Between the Phase 1 disposition publish and the Phase 2.5 filing gate, every
+    Phase 1 **blocker** finding the fixer did not APPLY is independently scored
+    by a fresh-context `finding-verifier` child. A finding that scores below
+    `review.confidence_threshold` is recorded `CULLED` in
+    `.uberdev/research/<RUN_ID>/phase1-verification.json` and is never filed as
+    a GitHub issue — which is also how it stops being a `/goal` recursion
+    target, with **no `/goal` code change**: `lib/goal-phase3.sh` selects on the
+    `review-pr-finding` label plus a `**Tier:** BLOCKER|CRITICAL` body line, and
+    a row that is never filed carries neither.
+
+    **What the verifier is not given.** The claim card
+    `project-verification-claims` writes carries `finding_index`, `location` and
+    `summary` and nothing else. The reviewer's `detail` — where the argument and
+    the reviewer's own `confidence: <n>` prefix live — is withheld *mechanically*
+    for the card: the bytes are simply not there. The threshold is withheld too,
+    and is applied entirely controller-side in `publish-verification`, so the
+    recorded score stays an opinion about the claim rather than a vote about the
+    gate (and can be re-thresholded offline without re-running anything).
+
+    **Fail toward keeping.** A blocked child, a malformed result, and a row past
+    the dispatch cap each land `SURVIVES` with reason `verifier-unavailable`,
+    `verifier-unavailable` and `over-cap-unverified` respectively. Only a
+    well-formed score strictly below the threshold ever culls. A threshold of
+    `0` disables the gate entirely: every eligible row is recorded `SURVIVES` /
+    `gate-disabled` and **no verifier agent is dispatched at all**.
+
+    Every scalar below is re-derived inside each fence because every `bash`
+    block in this command is a FRESH shell (#427) — no `export`, array or
+    counter from the Phase 1 fences survives to here, and none survives from
+    this fence to the next one.
+
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
+    REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
+    [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+    mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
+    # The PR identity, refused rather than defaulted. `review_fleet_rehydrate`
+    # recovers PR_NUMBER from the run's own reservation marker, but a run whose
+    # marker cannot say which PR this is must not reach the envelope below:
+    # `clampInt(CFG.prNumber, …, 0)` in workflow.js turns an empty value into a
+    # verifier prompt that says "PR #0", and the audit row that has to make a
+    # suppressed blocker traceable would record `pr:""`.
+    case "${PR_NUMBER:-}" in
+      '' | *[!0-9]*)
+        echo "error: /uberdev:review-pr — Phase 1 verification gate has no PR number; refusing to dispatch verifiers that cannot name the PR they are adjudicating." >&2
+        return 2
+        ;;
+    esac
+    # The repository slug is NOT a carrier: it is a pure function of the
+    # checkout, re-derived here exactly as Phase 1 and Phase 3 derive it, and
+    # shape-checked so an empty or malformed answer cannot reach the envelope as
+    # `repoSlug=""`.
+    REVIEW_REPO_SLUG="${REVIEW_REPO_SLUG:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
+    [[ "$REVIEW_REPO_SLUG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+      echo "error: /uberdev:review-pr — Phase 1 verification gate could not resolve the repository slug (got '${REVIEW_REPO_SLUG:-<empty>}')." >&2
+      return 2
+    }
+    # REVIEW_ITERATION off disk BEFORE anything is keyed on it — Phase 3's
+    # re-entry fence advances and persists it, and this fresh shell's default
+    # would otherwise re-key pass 2 onto pass 1's artifact names.
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+    # The gate's cutoff. Same call the Phase 1 preflight fence resolves, on
+    # purpose: fences are fresh shells, so this is a RE-DERIVATION and not a
+    # second declaration of the bounds.
+    REVIEW_CONFIDENCE_THRESHOLD="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)" || return 2
+    REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 7)" || return 2
+    VERIFY_PHASE1_PATH="$REVIEW_FLEET_RUN_DIR/post-impl-review-final.md"
+    VERIFY_PHASE1_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$VERIFY_PHASE1_PATH" --minimum 1 --maximum 16777216)" || return 74
+    VERIFY_DISPOSITION_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_DISPOSITION_PATH" --minimum 1 --maximum 16777216)" || return 74
+    VERIFY_CLAIMS_DIR="$REVIEW_FLEET_RUN_DIR/verification-claims-iter${REVIEW_ITERATION}"
+    VERIFY_CLAIMS_RECEIPT_PATH="$REVIEW_FLEET_RUN_DIR/verification-claims-iter${REVIEW_ITERATION}.json"
+    python3 -I -B "$CODE_FIXER_CONTRACT" project-verification-claims \
+      --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
+      --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
+      --claims-dir "$VERIFY_CLAIMS_DIR" >"$VERIFY_CLAIMS_RECEIPT_PATH" || return 74
+    VERIFY_COUNT="$(jq -r '.verify_count' "$VERIFY_CLAIMS_RECEIPT_PATH")" || return 74
+    case "$VERIFY_COUNT" in ''|*[!0-9]*) return 74 ;; esac
+    # The sidecar is a SIBLING of the disposition under an exact basename;
+    # publish-verification refuses any other location. Created empty HERE so the
+    # publish is an identity-checked replace of a file this command made.
+    #
+    # RE-CREATED, not created-if-absent. It is the ONE Step 6b.0 artifact that
+    # cannot be iteration-keyed — `findings-to-issues` binds it by that exact
+    # basename — so on a Phase 3 CI-fix loop (REVIEW_ITERATION=2) Phase 1
+    # re-enters with iteration 1's PUBLISHED sidecar still on disk, and
+    # publish-verification captures its target with `_capture_regular(path,0,0)`
+    # and refuses a non-empty file (`artifact_size_invalid`). `rm -f` and not a
+    # `:` truncation: the published copy is the publisher's file, and its mode
+    # is the publisher's to change. What iteration 1 recorded is not lost — the
+    # per-iteration `verification-receipt-iter<N>.json` keeps it.
+    VERIFY_SIDECAR_PATH="$(dirname "$PHASE1_DISPOSITION_PATH")/phase1-verification.json"
+    rm -f "$VERIFY_SIDECAR_PATH" || return 74
+    ( umask 077 && : >"$VERIFY_SIDECAR_PATH" ) || return 74
+    # Rows past the cap are neither dispatched nor dropped — see
+    # REVIEW_FLEET_VERIFY_TOTAL_CAP in lib/review-fleet-args.sh. A gate that
+    # aborted on a large finding set would make a bad review un-reviewable; one
+    # that silently dropped rows would cull without saying so.
+    VERIFY_DISPATCH_COUNT="$VERIFY_COUNT"
+    [ "$VERIFY_DISPATCH_COUNT" -le "$REVIEW_FLEET_VERIFY_TOTAL_CAP" ] \
+      || VERIFY_DISPATCH_COUNT="$REVIEW_FLEET_VERIFY_TOTAL_CAP"
+    VERIFY_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.jsonl"
+    VERIFY_CLAIM_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-claims-iter${REVIEW_ITERATION}.txt"
+    VERIFY_RECEIPT_PATH="$REVIEW_FLEET_RUN_DIR/verification-receipt-iter${REVIEW_ITERATION}.json"
+    VERIFY_DISPATCH_PATH="$REVIEW_FLEET_RUN_DIR/verify-dispatch-iter${REVIEW_ITERATION}.txt"
+    # TWO short-circuits skip the Workflow call entirely. Both still publish a
+    # sidecar: a run that recorded nothing is indistinguishable downstream from
+    # a run that culled nothing. Both also keep the publish RECEIPT rather than
+    # discarding it: the fence below is the usual writer of
+    # verification-receipt-iter<N>.json and it does not run on these paths, and
+    # step 7's `phases.phase2_5.verification` block reads that receipt to report
+    # what a GREEN run suppressed.
+    if [ "$VERIFY_COUNT" -eq 0 ]; then
+      # Nothing eligible: an empty roster, published as an empty array.
+      printf '[]' | python3 -I -B "$CODE_FIXER_CONTRACT" publish-verification \
+        --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
+        --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
+        --verification-path "$VERIFY_SIDECAR_PATH" --threshold "$REVIEW_CONFIDENCE_THRESHOLD" >"$VERIFY_RECEIPT_PATH" || return 74
+      VERIFY_DISPATCH=0
+    elif [ "$REVIEW_CONFIDENCE_THRESHOLD" -eq 0 ]; then
+      # KILL SWITCH. No claim is dispatched and no agent runs, but every
+      # eligible row is still recorded SURVIVES/gate-disabled so the artifact
+      # names what was NOT verified.
+      jq -c '[.claims[] | {finding_index: .finding_index, reason: "gate-disabled"}]' "$VERIFY_CLAIMS_RECEIPT_PATH" \
+        | python3 -I -B "$CODE_FIXER_CONTRACT" publish-verification \
+          --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
+          --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
+          --verification-path "$VERIFY_SIDECAR_PATH" --threshold 0 >"$VERIFY_RECEIPT_PATH" || return 74
+      VERIFY_DISPATCH=0
+    else
+      VERIFY_DISPATCH=1
+      jq -r --argjson n "$VERIFY_DISPATCH_COUNT" '.claims[0:$n][].claim_path' "$VERIFY_CLAIMS_RECEIPT_PATH" >"$VERIFY_CLAIM_LEDGER" || return 74
+      REVIEW_FLEET_VERIFY_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" finding-verifier-v1)" || return 2
+      REVIEW_FLEET_VERIFY_RUBRIC_PATH="$UBERDEV_REVIEW_PLUGIN_ROOT/shared/finding-confidence-rubric-v1.md"
+      [ -r "$REVIEW_FLEET_VERIFY_RUBRIC_PATH" ] || return 2
+      # mkdir -p per child, one CSPRNG nonce per child in the roster order the
+      # script consumes, one bind-workflow-launch per child — all BEFORE
+      # dispatch, the only moment a binding can be minted that the child could
+      # not influence.
+      review_fleet_bind_verify "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
+        "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
+        "$VERIFY_CLAIM_LEDGER" "$VERIFY_LEDGER" || return 74
+      uberdev_emit_workflow_args review-fleet \
+        mode=review-pr \
+        stage=verify \
+        run_id="$RUN_ID" \
+        runId="$RUN_ID" \
+        runDirAbs="$REVIEW_FLEET_RUN_DIR" \
+        pluginRootAbs="$UBERDEV_REVIEW_PLUGIN_ROOT" \
+        repoRootAbs="$REVIEW_FLEET_WORKTREE" \
+        workingDirAbs="$REVIEW_FLEET_WORKTREE" \
+        prNumber="$PR_NUMBER" \
+        repoSlug="$REVIEW_REPO_SLUG" \
+        reviewIteration="$REVIEW_ITERATION" \
+        diffPathAbs="$DIFF_ARTIFACT_PATH" \
+        verifyCount="$REVIEW_FLEET_VERIFY_COUNT" \
+        verifyCap="$REVIEW_FLEET_VERIFY_TOTAL_CAP" \
+        verifyClaimPrefixAbs="$VERIFY_CLAIMS_DIR/verify-" \
+        verifyContractPathAbs="$REVIEW_FLEET_VERIFY_CONTRACT_PATH" \
+        verifyRubricPathAbs="$REVIEW_FLEET_VERIFY_RUBRIC_PATH" \
+        verifyPrContextPathAbs="$REVIEW_FLEET_RUN_DIR/pr-context.md" \
+        fanoutCap="$REVIEW_FLEET_CAP" \
+        maxAgents=40 \
+        workspaceMode=caller \
+        worktreeAbs="$REVIEW_FLEET_WORKTREE" \
+        branchName= \
+        runNonces="$REVIEW_FLEET_NONCE_POOL" || return 74
+    fi
+    # The decision itself, persisted and announced. It is PRODUCED here and
+    # CONSUMED by the fence below, which is a different process, so the scalar
+    # that holds it dies at the closing fence marker (#427) — every other
+    # decision these fences hand forward (ci-loop-state.json, rule-sources.txt,
+    # changed-paths.json) is on disk for exactly this reason. The stderr line is
+    # what the orchestrator keys the Workflow mandate on, in the same place and
+    # for the same reason as setup's `REVIEW_CARRY RUN_ID=` line.
+    review_fleet_write_verify_dispatch "$VERIFY_DISPATCH_PATH" "$VERIFY_DISPATCH" || return 74
+    printf 'REVIEW_VERIFY_DISPATCH=%s\n' "$VERIFY_DISPATCH" >&2
+    ```
+
+    `branchName` is emitted EMPTY on purpose, for the same reason the Phase 1
+    fanout emits it empty: `bind-workflow-launch` records `branch: ""`, and
+    `_validate_bound_workflow_child_status` requires the child's `status.json`
+    branch to equal the binding's — a non-empty value here would make every
+    child's status refuse.
+
+    **Workflow mandate** (skip entirely when the fence printed
+    `REVIEW_VERIFY_DISPATCH=0` on stderr — the same value it persisted to
+    `verify-dispatch-iter<N>.txt`, which the fence after the mandate re-reads;
+    the two short-circuits above have already published the sidecar and there is
+    nothing to dispatch): the fence above validated
+    `[ -f "$CLAUDE_PLUGIN_ROOT/skills/review-fleet/workflow.js" ]`. Relay the JSON
+    between `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` **verbatim** (DR-2 — no
+    LLM-composed handoffs) into ONE `Workflow` call naming
+    `skills/review-fleet/workflow.js`. Do not summarise it, do not re-order it,
+    do not add a key. **The threshold is not in that envelope and must never be
+    added to it** — a verifier told the cutoff calibrates to it.
+
+    On return, re-read every child's frozen bytes, apply the threshold
+    controller-side, and publish. This is a fresh shell, so it re-derives every
+    path from disk rather than from the fence above — including the fence
+    above's own decision, which is why running it after a short-circuit is a
+    typed no-op instead of a `return 74`:
+
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+    REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
+    review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+    # Did a verifier wave actually run? Off disk, because the fence that decided
+    # is a dead shell. On `0` the sidecar was already published by a
+    # short-circuit and republishing it would refuse `artifact_size_invalid`
+    # against a file that is no longer empty — so this fence stops, and stops
+    # SAYING SO. An absent or malformed record is NOT read as `0`: "the gate
+    # cannot say what it did" is not "the gate dispatched nothing".
+    VERIFY_DISPATCH="$(review_fleet_read_verify_dispatch "$REVIEW_FLEET_RUN_DIR/verify-dispatch-iter${REVIEW_ITERATION}.txt")" || return 74
+    if [ "$VERIFY_DISPATCH" = 0 ]; then
+      echo "notice: /uberdev:review-pr — Phase 1 verification gate dispatched no verifier this iteration; the sidecar was published by the short-circuit" >&2
+      return 0
+    fi
+    # The PR identity the audit rows below are keyed on — the one field that
+    # makes a suppressed blocker traceable back to its PR. Refused, never
+    # defaulted, for the same reason as in the fence above.
+    case "${PR_NUMBER:-}" in
+      '' | *[!0-9]*)
+        echo "error: /uberdev:review-pr — Phase 1 verification gate has no PR number; refusing to publish a verification record no audit row can attribute to a PR." >&2
+        return 2
+        ;;
+    esac
+    REVIEW_CONFIDENCE_THRESHOLD="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)" || return 2
+    VERIFY_PHASE1_PATH="$REVIEW_FLEET_RUN_DIR/post-impl-review-final.md"
+    VERIFY_PHASE1_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$VERIFY_PHASE1_PATH" --minimum 1 --maximum 16777216)" || return 74
+    VERIFY_DISPOSITION_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_DISPOSITION_PATH" --minimum 1 --maximum 16777216)" || return 74
+    VERIFY_SIDECAR_PATH="$(dirname "$PHASE1_DISPOSITION_PATH")/phase1-verification.json"
+    VERIFY_CLAIMS_RECEIPT_PATH="$REVIEW_FLEET_RUN_DIR/verification-claims-iter${REVIEW_ITERATION}.json"
+    VERIFY_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.jsonl"
+    VERIFY_OPINIONS_PATH="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-opinions-iter${REVIEW_ITERATION}.json"
+    : >"$VERIFY_OPINIONS_PATH" || return 74
+    VERIFY_ROW_INDEX=0
+    while IFS= read -r VERIFY_ROW; do
+      [ -n "$VERIFY_ROW" ] || continue
+      VERIFY_ROW_INDEX=$((VERIFY_ROW_INDEX + 1))
+      VERIFY_FINDING_INDEX="$(jq -r --argjson i "$VERIFY_ROW_INDEX" '.claims[$i - 1].finding_index' "$VERIFY_CLAIMS_RECEIPT_PATH")" || return 74
+      VERIFY_RESULT_PATH="$(jq -r '.result' <<<"$VERIFY_ROW")" || return 74
+      # A child that returned nothing usable NEVER culls. The validator is the
+      # canonical boundary; its refusal is the honest answer, not a licence to
+      # invent a score.
+      if VERIFY_PAIR="$(uberdev_child_validate_finding_verifier_result "$VERIFY_RESULT_PATH")"; then
+        jq -cn --argjson i "$VERIFY_FINDING_INDEX" \
+          --argjson s "${VERIFY_PAIR%% *}" --arg r "${VERIFY_PAIR##* }" \
+          '{finding_index:$i, score:$s, reason:$r}' >>"$VERIFY_OPINIONS_PATH" || return 74
+      else
+        jq -cn --argjson i "$VERIFY_FINDING_INDEX" \
+          '{finding_index:$i, reason:"verifier-unavailable"}' >>"$VERIFY_OPINIONS_PATH" || return 74
+      fi
+    done <"$VERIFY_LEDGER"
+    # Rows past the dispatch cap were never sent to a verifier. Record them,
+    # never drop them.
+    jq -s -c --slurpfile receipt "$VERIFY_CLAIMS_RECEIPT_PATH" --argjson n "$VERIFY_ROW_INDEX" \
+      '. + [$receipt[0].claims[$n:][] | {finding_index: .finding_index, reason: "over-cap-unverified"}]' \
+      "$VERIFY_OPINIONS_PATH" \
+      | python3 -I -B "$CODE_FIXER_CONTRACT" publish-verification \
+        --findings-path "$VERIFY_PHASE1_PATH" --findings-sha256 "$VERIFY_PHASE1_SHA256" \
+        --disposition-path "$PHASE1_DISPOSITION_PATH" --disposition-sha256 "$VERIFY_DISPOSITION_SHA256" \
+        --verification-path "$VERIFY_SIDECAR_PATH" --threshold "$REVIEW_CONFIDENCE_THRESHOLD" \
+      >"$REVIEW_FLEET_RUN_DIR/verification-receipt-iter${REVIEW_ITERATION}.json" || return 74
+    # One audit row per verified finding, so a suppressed blocker is nameable
+    # from the repo-root audit stream and not only from the run directory.
+    # Fail-soft by construction — a missing audit row must never fail a review
+    # that otherwise passed.
+    while IFS= read -r VERIFY_AUDIT_ROW; do
+      [ -n "$VERIFY_AUDIT_ROW" ] || continue
+      review_fleet_audit_append "$REVIEW_FLEET_WORKTREE" "$VERIFY_AUDIT_ROW"
+    done <<EOF_VERIFY_AUDIT
+$(jq -r --arg pr "$PR_NUMBER" --arg run "$RUN_ID" --argjson t "$REVIEW_CONFIDENCE_THRESHOLD" \
+   '.findings_verification[] | {event:"review_finding_verified", pr:$pr, run_id:$run,
+     finding_index:.finding_index, location:.location, summary_sha256:.summary_sha256,
+     score:.score, verdict:.verdict, reason:.reason, threshold:$t} | tostring' \
+   "$VERIFY_SIDECAR_PATH")
+EOF_VERIFY_AUDIT
+    ```
+
+    `phase1-verification.json` is the artifact `findings-to-issues` binds as
+    `verification_path` in Phase 2.5 below, and the `verification` sub-block of
+    `phases.phase2_5` (step 7) reports `threshold`, `verified` and `culled` from
+    `verification-receipt-iter<N>.json` so a human and `trust-trail-evaluator`
+    can both see what a GREEN run suppressed.
+
 6b. **Phase 2.5 — Findings-to-Issues sub-phase** (skip iff `DEFER_ISSUES_PHASE=0` OR `defer_issues_enabled=false`)
 
     Reads the run aggregate artifacts produced by Phase 1 (`post-impl-review-final.md`) and Phase 2 (`simplify-final.md`), filters all issue-eligible deferred rows (`severity ∈ {blocker, critical, important, major} AND disposition != APPLIED`), maps them to BLOCKER / CRITICAL / MAJOR tiers, and persists them as durable GitHub issues with HTML-comment fingerprint dedupe. Default-on. The parent halts only when at least one BLOCKER is deferred or when the `MAX_NEW` cap truncates a BLOCKER/CRITICAL row; major/important filings and non-overflow critical filings remain non-halting.
@@ -2586,6 +3032,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     **Effective-enabled gate:** the sub-phase runs only when BOTH the CLI flag AND the config key are ON. Either knob disables (CLI flag `DEFER_ISSUES_PHASE=1` AND config `DEFER_ISSUES_CONFIG=true`).
 
     ```bash
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     # Read the config-level enum (default: "true" — always-on per Q3).
     source "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh"
     DEFER_ISSUES_CONFIG=$(uberdev_read_enum defer_issues_enabled UBERDEV_DEFER_ISSUES_ENABLED 'true|false' 'true')
@@ -2600,27 +3048,41 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
 
     **Dispatch variable bindings.** Before the routed dispatch, bind the
     command-owned worktree and run paths. The child derives and validates
-    repository identity itself:
+    repository identity itself. `review_fleet_rehydrate` is the binder — the
+    hand-rolled `WORKING_DIR_ABS`/`RESEARCH_DIR_ABS` pair that used to live here
+    was a second copy of the run-path algebra, and it did not survive to the
+    fence that read it anyway:
 
     ```bash
-    WORKING_DIR_ABS="$(git rev-parse --show-toplevel)"
-    RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     ```
 
     **Dispatch one routed findings child:**
 
     ```bash
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
     # fence advances and persists it; this fresh shell's `:-1` default would
     # otherwise re-key pass 2 onto pass 1's already-published artifact names.
     review_fleet_load_ci_counters "$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 74
+    # verification_path is OPTIONAL and is passed only when Step 6b.0 actually
+    # published a sidecar. Naming a path nothing wrote would make the child
+    # refuse `input-malformed` on every run that skipped the gate.
+    # `${ARR[@]+"${ARR[@]}"}` because an empty array under `set -u` on bash 3.2
+    # is an unbound-variable error, not an empty expansion.
+    DEFER_VERIFICATION_ARGS=()
+    if [ -s "$RESEARCH_DIR_ABS/phase1-verification.json" ]; then
+      DEFER_VERIFICATION_ARGS=(verification_path "$(review_json_string "$RESEARCH_DIR_ABS/phase1-verification.json")")
+    fi
     DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings \
       phase1_path "$(review_json_string "$RESEARCH_DIR_ABS/post-impl-review-final.md")" \
       phase2_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
       phase1_disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
       phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
-      working_dir "$(review_json_string "$WORKING_DIR_ABS")" \
+      working_dir "$(review_json_string "$WORKTREE_ROOT")" \
+      ${DEFER_VERIFICATION_ARGS[@]+"${DEFER_VERIFICATION_ARGS[@]}"} \
       pr_number "$PR_NUMBER")"
     review_child_single review_pr.defer.findings "$(uberdev_child_instance_id "review-pr-${RUN_ID}-defer-findings-iter${REVIEW_ITERATION}-attempt01")" "$DEFER_INPUTS" null "$RESEARCH_DIR_ABS/defer" "$REVIEW_PR_TIMEOUT"
     ```
@@ -2639,9 +3101,10 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     replaces, not less.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
     [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -2664,6 +3127,11 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     # declared scalar rather than left to the script default so the two cannot
     # drift apart silently.
     DEFER_MAX_NEW=10
+    # Empty when Step 6b.0 published nothing this iteration; the script omits
+    # the line from the child prompt entirely rather than naming a missing file.
+    DEFER_VERIFICATION_PATH=''
+    [ -s "$REVIEW_FLEET_RUN_DIR/phase1-verification.json" ] \
+      && DEFER_VERIFICATION_PATH="$REVIEW_FLEET_RUN_DIR/phase1-verification.json"
     REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
     review_fleet_bind_persistence "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
       "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
@@ -2686,6 +3154,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       phase2PathAbs="$DEFER_PHASE2_PATH" \
       phase1DispositionPathAbs="$PHASE1_DISPOSITION_PATH" \
       phase2DispositionPathAbs="$PHASE2_DISPOSITION_PATH" \
+      verificationPathAbs="$DEFER_VERIFICATION_PATH" \
       maxNew="$DEFER_MAX_NEW" \
       maxAgents=40 \
       workspaceMode=caller \
@@ -2702,7 +3171,8 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     ```
 
     ```bash uberdev-executable origin=review-pr
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     # REVIEW_ITERATION off disk BEFORE anything is keyed on it. Phase 3's re-entry
     # fence advances and persists it; this fresh shell's `:-1` default would
@@ -3038,6 +3508,8 @@ PY
     | `cancel` | `CANCELLED` | red |
 
     ```bash
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
     # Validate PROBE_JSON is parseable JSON BEFORE the terminal-mapping
     # branches below try to interpret it. On gh failure (non-zero exit),
@@ -3097,8 +3569,6 @@ PY
     # gate re-derives it: the setup fence's binding is a SHELL variable and this
     # is a different shell, so a fence that newly depends on a library must
     # resolve the root itself or it fails where nothing failed before.
-    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     # THE CARRY MUST NOT OUTRANK THE CARVE-OUT. The `gh`-unreachable and
     # rate-limit-low branches above do NOT exit this fence -- they audit
     # `ci_probe_unreachable` and the run proceeds to Step 7 with the phases.phase3
@@ -3142,6 +3612,8 @@ PY
     **Settle window for empty-checks (#302).** A JUST-pushed head (the Step 6a post-fixer push, or any fresh PR push) reports "no checks" for the first ~10–30 s while GitHub fans the workflow runs out — mapping that window straight to `skipped_no_checks` makes a GREEN-eligible outcome out of CI that was about to start. When the probe resolves `empty` (the jq `empty` verdict OR gh's `no checks reported on the` stderr signature) AND the head commit is younger than the settle threshold, re-probe before accepting `skipped_no_checks`. Literals: `CI_SETTLE_AGE_SEC = 120` and `CI_SETTLE_REPROBES = 3` (declared HERE — `/review-pr`-owned settle constants, kept numeric inline like the other 6c literals); re-probe interval 30 s (mirrors `CI_WATCH_INTERVAL_SEC`).
 
     ```bash
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     if [ "$PROBE_VERDICT" = "empty" ] || printf '%s' "$PROBE_JSON" | grep -q 'no checks reported on the'; then
       HEAD_AGE_SEC=$(( $(date +%s) - $(git show -s --format=%ct HEAD) ))
       SETTLE_REPROBES_USED=0
@@ -3176,8 +3648,6 @@ PY
       # Same vocabulary gate as the initial write, and for the same reason: a
       # re-probe can itself hit the `gh` outage the carve-out covers, and a
       # settle window is not a licence to turn that into a phase halt.
-      UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
-      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
       case "${PROBE_VERDICT:-}" in
         empty | green | pending | red)
           if [ -n "${RESEARCH_DIR_ABS:-}" ] && CI_SETTLE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)"; then
@@ -3220,6 +3690,8 @@ PY
 
     ```bash uberdev-executable origin=review-pr
     # BEGIN ci-probe-green-terminal-v1
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     # Everything this fence needs is established INSIDE the green arm, not at the
     # top: `pending` and `red` are non-terminal here (they proceed to MONITOR,
     # which establishes its own), so demanding RUN_ID and a resolvable run dir on
@@ -3227,17 +3699,18 @@ PY
     # answer. 6c.2 validates eagerly for the opposite reason -- it is about to
     # spend up to 480 s watching CI, and finding out afterwards is worse.
     if [ "${PROBE_VERDICT:-}" = green ]; then
-      # The same sanctioned recompute pair as 6c.2, for the same reason: nothing
-      # survives between fences, and the ledger that separates `green` from
-      # `green_after_fix` lives on disk under this run's research dir. NEVER a
-      # second uberdev_command_workspace_prepare -- see the note in 6c.2.
-      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
-      # RUN_ID absent is a HARD ERROR, not a default: it would resolve the ledger
-      # under a path that does not exist, and "does not exist" is the answer
-      # `green` -- silently wrong, and indistinguishable from correct.
-      [ -n "${RUN_ID:-}" ] || { echo "error: 6c.1 PROBE green terminal entered without RUN_ID" >&2; return 2; }
-      CI_PROBE_WORKING_DIR_ABS="$(git rev-parse --show-toplevel)" || return 2
-      CI_PROBE_RUN_DIR="$(cd "$CI_PROBE_WORKING_DIR_ABS/.uberdev/research/$RUN_ID" && pwd -P)" || return 2
+      # The ledger that separates `green` from `green_after_fix` lives on disk
+      # under this run's research dir, and the fence prologue above has already
+      # resolved that dir with `cd … && pwd -P` -- so this is a rename, not a
+      # second path algebra. NEVER a second uberdev_command_workspace_prepare:
+      # see the note in 6c.2.
+      #
+      # The RUN_ID guard that used to live here is now unreachable-by-construction:
+      # review_fleet_rehydrate refuses the fence outright when it can neither
+      # carry nor recover a run identity, so an empty RUN_ID can no longer
+      # resolve the ledger under a nonexistent path and have "does not exist"
+      # answered as `green`.
+      CI_PROBE_RUN_DIR="$RESEARCH_DIR_ABS"
       OUTCOME="$(review_fleet_ci_green_outcome "$CI_PROBE_RUN_DIR" "${CI_FIX_PHASE:-1}")" || {
         # An unreadable ledger is NOT "no fixes" -- defaulting here reports a
         # force-pushed autopilot head as a clean one. Halt instead.
@@ -3265,25 +3738,20 @@ PY
 
     ```bash
     # BEGIN ci-monitor-bounded-loop-v1
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     # Fence-scoped state, re-established HERE. Nothing survives from 6c.1, and
     # the ledger that separates `green` from `green_after_fix` lives on disk
-    # under this run's research dir. This is the SANCTIONED recompute pair (the
-    # same two lines as 6b, and the same `cd … && pwd -P` guard as every other
-    # site) -- never a second uberdev_command_workspace_prepare: without RUN_ID
-    # that re-mints a different ID off the post-fix HEAD and forks
+    # under this run's research dir -- which the prologue above resolved with
+    # `cd … && pwd -P` and cross-checked against the run's own workspace
+    # descriptor. Never a second uberdev_command_workspace_prepare: without
+    # RUN_ID that re-mints a different ID off the post-fix HEAD and forks
     # .uberdev/research/<RUN_ID>; with RUN_ID it hits the single-shot
-    # reservation and exits 2.
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
-    # RUN_ID is the one documented cross-fence carry. Absent, it is a HARD
-    # ERROR, not a default: an empty RUN_ID resolves the ledger under a path
-    # that does not exist, and "does not exist" is the answer `green` -- a
-    # silently wrong outcome indistinguishable from a correct one.
-    [ -n "${RUN_ID:-}" ] || { echo "error: 6c.2 MONITOR fence entered without RUN_ID" >&2; return 2; }
-    CI_MONITOR_WORKING_DIR_ABS="$(git rev-parse --show-toplevel)" || return 2
-    # `cd … && pwd -P`, not bare concatenation: it makes a GARBAGE RUN_ID a hard
-    # failure instead of a path that merely fails to exist -- whose answer would
-    # again be the silently-wrong `green`.
-    CI_MONITOR_RUN_DIR="$(cd "$CI_MONITOR_WORKING_DIR_ABS/.uberdev/research/$RUN_ID" && pwd -P)" || return 2
+    # reservation and exits 2. A garbage or absent RUN_ID is a HARD failure
+    # inside review_fleet_rehydrate, before this line runs, so it can no longer
+    # degrade into a path that merely fails to exist -- whose answer would be
+    # the silently-wrong `green`.
+    CI_MONITOR_RUN_DIR="$RESEARCH_DIR_ABS"
     CI_MONITOR_PASS_SEC=240          # one watch pass
     CI_MONITOR_FENCE_SEC=480         # this FENCE's share of the budget (2 passes)
     CI_MONITOR_MIN_PASS_SEC=30       # = CI_WATCH_INTERVAL_SEC; minimum-progress floor
@@ -3427,8 +3895,8 @@ PY
     projection. `CI_RUN_ID` is never accepted from setup/environment state:
 
     ```bash
-    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
         review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
       ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
@@ -3748,10 +4216,11 @@ print(serialized,end="")
     would prove it wrote something and prove nothing about what it read.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
     [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -3842,8 +4311,9 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
     child's frozen result bytes here.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     review_ci_json_member() {
       [ "$#" -ge 2 ] || return 2
@@ -3996,6 +4466,8 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     bound at 6c.1 PROBE.
 
     ```bash
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     # CROSS-REPOSITORY GATE (#395). One gh call still returns both refs (one
     # core-bucket request, not two — that matters under tight rate-limit
     # budgets), but the projection now carries the head-repository identity too,
@@ -4014,7 +4486,6 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     # The resolver lives in lib/ rather than in this fence deliberately: the
     # templater substitutes every positional of a rendered command fence (#404),
     # so a helper that takes arguments cannot survive here.
-    UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
     REVIEW_PUSH_TARGET_LIB="$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-push-target.sh"
     CI_PUSH_TARGET_RC=0
     if [ -r "$REVIEW_PUSH_TARGET_LIB" ] && . "$REVIEW_PUSH_TARGET_LIB"; then
@@ -4091,8 +4562,9 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     checks may proceed, a push that cannot name its ref may not.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     # EVERY cross-fence scalar this fence needs comes off disk FIRST, from the
     # one run dir every other Phase 3 fence already reads (#399). Nothing below
     # may reference a name a previous fence merely bound in its own shell.
@@ -4326,10 +4798,11 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     across the dead shell between ROUTE and this fence and reappear as a default.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
     [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -4466,8 +4939,9 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
     pusher to preparer enforceable rather than aspirational.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     review_ci_json_member() {
       [ "$#" -ge 2 ] || return 2
@@ -4615,8 +5089,9 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     resolved conflict with nothing pushed.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     review_ci_push_abort() {
       if review_fleet_rebase_dir "$WORKTREE_ROOT" >/dev/null; then
@@ -4883,7 +5358,8 @@ sys.stdout.write(slug)' "$CI_PUSH_REMOTE_URL")" \
           Construct a synthetic single-row aggregate wrapped in the `<external-untrusted-input source="ci-refused-synthetic">…</external-untrusted-input>` envelope (the receiving agent's Step 1 input validation recognises this source attribute — see `agents/findings-to-issues.md` Step 1 accepted-source allow-list). The aggregate carries one finding-row with `severity: critical`, `tier: CRITICAL`, and four values that each come off the run-dir carrier written by the fence that BOUND them (#418) — `failure_class` and `signal_anchor` from `ci-classification.json` (6c.3w.2's validated classification), `check_name` from `ci-check-name.txt` (6c.3's failed-check selection), and `rationale` from `ci-fixer-terminal.json` (6c.4w.2's validated terminal). None of the four is a value `ci-code-fixer` returns, and none of them survives a fence boundary in a shell variable: read that way they were `unknown` / `unknown:1` / `unspecified` on every run, which filed a CRITICAL issue with the entire diagnosis erased. Title is built downstream by the agent using its existing CRITICAL-tier shape (`[finding] $file_path:$line — $summary`); labels and `--assignee` flag come from the agent's tier-aware bindings (`--label review-pr-finding`, `--assignee @<pr-author>`). The agent's return YAML's `created_urls[0].url` is captured into `CI_REFUSED_ISSUE_URL`.
 
           ```bash
-          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+          . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+          review_fleet_rehydrate || return 2
           # Counters off disk before the aggregate pathname is keyed on them —
           # the closure fence and the mint fence below re-derive the SAME name
           # from the SAME two sources ($RESEARCH_DIR_ABS and ci-loop-state.json),
@@ -4990,7 +5466,8 @@ PY
           above has already ended.
 
           ```bash
-          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+          . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+          review_fleet_rehydrate || return 2
           # Counters off disk before the aggregate pathname is keyed on them, in
           # THIS fence — the aggregate-mint fence above and the launch-mint
           # fence below each read them for themselves, so all three land on the
@@ -5006,10 +5483,11 @@ PY
           **ci-defer stage — mint, bind, emit.**
 
           ```bash uberdev-executable origin=review-pr
+          . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+          review_fleet_rehydrate || return 2
           REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
           [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
           REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
           REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -5115,8 +5593,9 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
           envelope, which that recount cannot parse.
 
           ```bash uberdev-executable origin=review-pr
+          . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+          review_fleet_rehydrate || return 2
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-          . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
           REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
           review_ci_json_member() {
             [ "$#" -ge 2 ] || return 2
@@ -5252,8 +5731,9 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     1. **Enumerate the conflict set and write one input per resolver.**
 
        ```bash uberdev-executable origin=review-pr
+       . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+       review_fleet_rehydrate || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-       . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
        REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
        mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
@@ -5330,8 +5810,9 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     2. **Mint one authority + one binding per conflicted file, then emit.**
 
        ```bash uberdev-executable origin=review-pr
+       . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+       review_fleet_rehydrate || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-       . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/config-read.sh" || return 2
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
        REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
@@ -5463,8 +5944,9 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
        here: it is 6c.4w.3, the one site all three terminals share.
 
        ```bash uberdev-executable origin=review-pr
+       . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+       review_fleet_rehydrate || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-       . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
        review_ci_json_member() {
          [ "$#" -ge 2 ] || return 2
@@ -5649,8 +6131,9 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     before the cap is next checked.
 
     ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
-    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
     CI_LOOP_STATE="$RESEARCH_DIR_ABS/ci-loop-state.json"
     if [ -r "$CI_LOOP_STATE" ]; then
       CI_FIX_LOOP_ITER="$(review_fleet_read_ci_state "$CI_LOOP_STATE" ci_loop_iter)" || return 74
@@ -5880,6 +6363,8 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    **State assignment (RFC 0002 §3.4 — must run BEFORE the three case statements below).** Compute `TRUST_TRAIL_STATE` from the predicate; the three downstream case statements in artifacts 1 and 2 read this single source-of-truth variable:
 
    ```bash
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    # Final anti-race gate: the reviewed snapshot must still be both local HEAD
    # and the selected PR's live head before any anchor, label, or audit trust
    # artifact is emitted.
@@ -6120,7 +6605,12 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
       "halted_due_to_overflow": <bool>,
       "halted": <bool>,
       "filed_issue_urls": ["https://github.com/<owner>/<repo>/issues/<N>", ...],
-      "override_reason": null | "user-selected-emit-green-on-blocker-deferred"
+      "override_reason": null | "user-selected-emit-green-on-blocker-deferred",
+      "verification": {
+        "threshold": <int 0-100>,
+        "verified": <int>,
+        "culled": <int>
+      }
     },
     "phase3": {
       "status": "ran" | "skipped_no_checks" | "unreachable",
@@ -6336,6 +6826,18 @@ re-running would hit the no-clobber refusal; the stale markers are reclaimed by
 `/uberdev:goal`'s grace window or by the next run's
 `review_reap_stale_run_reservations` pass.
 
+The `verification` sub-block (RFC 0017 / #431) is ADDITIVE: no existing
+`phase2_5` field changes shape, because `trust-trail-evaluator.md` pins the
+current domains and `lib/goal-state.sh` parses them. It reports what Step 6b.0
+suppressed — `threshold` is the cutoff the run used, `verified` is the number of
+eligible Phase 1 blocker findings that got a verification row, and `culled` is
+how many of those were recorded `CULLED` and therefore never filed. Culling a
+blocker can flip a run RED -> GREEN; that is intended (a false-positive blocker
+that keeps a run RED hard-fails `/merge` forever), and this block is the price:
+every suppression is countable here, named in
+`.uberdev/research/<RUN_ID>/phase1-verification.json`, and carried as a
+`review_finding_verified` row in the repo-root audit stream.
+
 **`phases.phase2_5` block (RFC 0002 §3.4)** — present on every run where the Phase 2.5 sub-phase was reachable (i.e., Phase 1 + Phase 2 didn't crash before Step 6b). `status: "skipped"` when `DEFER_ISSUES_EFFECTIVE=0` (CLI flag or config disabled the sub-phase); `status: "blocked"` when the agent return YAML failed to parse; `status: "ran"` otherwise. The `halted`, `by_severity`, and `override_reason` fields are the load-bearing inputs for `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6. Legacy audit JSON (pre-v0.26.0) without this block → trust-trail-evaluator emits STALE, prompting `/review-pr` re-run.
 
 **`base` member (#440)** — top-level sibling of `sha`, and the audit-JSON mirror of the anchor commit's `Reviewed-base:` trailer. `base.sha` is the 40-hex merge-base the whole review was scoped to (`review_resolve_phase1_base`'s output, carried on `review-base-identity.tsv`); `base.ref` is the name of the branch that merge-base was taken against (`baseRefName` at Phase 1 entry). Base identity is a property of the *run*, not of any one phase, which is why it sits at the JSON root next to `sha` rather than inside `phases`. Legacy audit JSON without a `base` member cannot say what the review was scoped to, so `/merge`'s artifact parser maps it to the existing `legacy` audit state and trust-trail-evaluator emits STALE, prompting a `/review-pr` re-run — the identical additive-block migration the `phases.phase2_5` block used in v0.26.0, deliberately reusing that state token rather than inventing a second convention. A `base` member that is PRESENT but shape-invalid (non-object, non-40-hex `sha`, empty or control-character-bearing `ref`) is `malformed`, not `legacy`: "the field predates this schema" and "the field is corrupt" are different answers and only the first is recoverable by a re-run.
@@ -6429,7 +6931,7 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 
 ## Agent Descriptions:
 
-### Phase 1 reviewers (6 — fanned out by `Skill(uberdev:post-impl-review)`)
+### Phase 1 reviewers (7 — fanned out by `Skill(uberdev:post-impl-review)`)
 
 **uberdev:comment-analyzer**:
 - Verifies comment accuracy vs code
@@ -6452,12 +6954,17 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Rates type design quality
 
 **uberdev:code-reviewer**:
-- Checks CLAUDE.md compliance
 - Detects bugs and issues
-- Reviews general code quality
+- Reviews correctness and design
+- Written project conventions are NOT this lens (#433) — they belong to `convention-compliance`, which must quote the rule
+
+**uberdev:convention-compliance**:
+- Reviews the change against the project's own written rules (`AGENTS.md`, `CLAUDE.md`, lint configs) from a controller-supplied allowlist
+- Quotes the exact rule text in every finding, under a declared `detail` grammar
+- A finding whose quote is not verbatim in the cited file is culled by a deterministic gate before aggregation, and the cull is logged
 
 **uberdev:code-reviewer (general lens)**:
-- 6th fanout slot — re-dispatched against the same agent file with a "general code-quality" framing in the brief (see `skills/post-impl-review/SKILL.md` Step 2 dispatch table)
+- 7th fanout slot — re-dispatched against the same agent file with a "general code-quality" framing in the brief (see `skills/post-impl-review/SKILL.md` Step 2 dispatch table)
 
 ### Phase 2 lens dispatcher (3 lens-parameterised routed child calls calls)
 
@@ -6508,7 +7015,7 @@ contract and contradicted every one of those steps (#302). Use
 `finish-branch` chains into this command once the PR exists.
 
 - Aspect tokens (`code`, `errors`, `tests`, …) narrow *emphasis*, never the
-  fanout — all 6 Phase 1 reviewers always run
+  fanout — all 7 Phase 1 reviewers always run
 - Agents run autonomously and return detailed reports
 - Each agent focuses on its specialty for deep analysis
 - Results are actionable with specific file:line references

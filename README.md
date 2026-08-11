@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.45.12-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.45.13-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -25,7 +25,7 @@
 
 ## Heads up — this plugin burns tokens fast
 
-UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` runs six reviewers in one or more cap-controlled waves with every child in each wave dispatched before its first wait, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, and `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` runs seven reviewers in one or more cap-controlled waves with every child in each wave dispatched before its first wait, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, and `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
 
 **Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
 
@@ -56,8 +56,12 @@ Every command is **repo-agnostic** — they auto-detect via `gh repo view`. No p
 
 ## Install
 
+Two doors. The one-liner is the convenient one; the manual flow below is the one you can read before you run it. They do the same thing.
+
+### One-liner (`curl | bash`)
+
 ```bash
-# One-liner — installs the plugin and patches the missing enabledPlugins entry.
+# Installs the plugin and patches the missing enabledPlugins entry.
 curl -fsSL https://raw.githubusercontent.com/TheFJK/UberDev/main/install.sh | bash
 ```
 
@@ -69,10 +73,18 @@ Then in Claude Code:
 
 The thirteen short-form aliases (`/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster`) are auto-installed on first session and refreshed on plugin upgrade — `jq` is not required, and if a short name collides with an existing file the session context reports which alias was skipped. The first-run notice confirms "installs 13 aliases". Opt out with `auto_install_aliases: false` in `.claude/uberdev.local.md` or `UBERDEV_NO_AUTO_ALIAS=1`.
 
-> **Why a bootstrap script?** Upstream Claude Code has a bug ([anthropics/claude-code#20661](https://github.com/anthropics/claude-code/issues/20661)) where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
+> **Why a bootstrap script?** Upstream Claude Code has a bug where `/plugin install` populates the cache but does not write `enabledPlugins` in `~/.claude/settings.json` — so `/uberdev:*` commands silently 404. `install.sh` does the install **and** jq-patches `enabledPlugins`. Idempotent. Requires `jq`.
+>
+> **Upstream state — re-checked 2026-08-10.** The tracking issue this README used to cite is closed, but the bug is not fixed:
+>
+> - **Live:** [anthropics/claude-code#14815](https://github.com/anthropics/claude-code/issues/14815) — open. Unfixed, so the patch is still load-bearing.
+> - [#20661](https://github.com/anthropics/claude-code/issues/20661) — **closed** 2026-01-29 as a **duplicate**, by a bot; this is the reference this README used to cite.
+> - [#17832](https://github.com/anthropics/claude-code/issues/17832) — **closed** 2026-03-30, **not_planned**; the canonical issue #20661 was folded into, declined upstream.
+> - [#15524](https://github.com/anthropics/claude-code/issues/15524) — **closed** 2025-12-31 as a **duplicate**.
 
-<details>
-<summary><strong>Manual install (without curl|bash)</strong></summary>
+### Manual install (no `curl | bash`)
+
+Piping a remote script into your shell is a hard sell. You do not have to: `install.sh` is a convenience, and these are the exact steps it performs — it performs nothing else.
 
 ```bash
 # 1. Inside Claude Code:
@@ -89,7 +101,26 @@ jq '.enabledPlugins["uberdev@uberdev"] = true' \
 /reload-plugins
 ```
 
-</details>
+**If you skip step 2, nothing fails loudly.** The plugin lands in the cache and the marketplace lists it as installed — but the loader reads `enabledPlugins`, so every `/uberdev:*` command 404s with no error message. The commands simply do not load, and there is nothing in the UI to tell you why. That silent failure is the entire reason step 2 exists (and the entire reason `install.sh` exists).
+
+### What the script does to `~/.claude/settings.json`
+
+Audit only the part that touches your settings — everything else in the file is preflight, best-effort slash commands and error output:
+
+```bash
+sed -n '/# BEGIN settings-mutation/,/# END settings-mutation/p' install.sh
+```
+
+That fenced region, and nothing else in the script, writes your settings file. Inside it:
+
+- It sets `enabledPlugins["uberdev@uberdev"] = true`. That is the whole mutation.
+- It is **idempotent** — a re-run against already-enabled state is a byte-identical no-op.
+- It **preserves** unrelated keys (`theme`, `model`, `permissions`, …); sibling `enabledPlugins` entries for other plugins are preserved verbatim, because it mutates one key rather than replacing the object.
+- It refuses to patch a **malformed** settings file: on invalid JSON it prints jq's parse error, exits non-zero, and leaves your file byte-for-byte untouched instead of rewriting it.
+- It writes atomically — jq's output goes to a temp file in the same directory, then one `mv` renames it into place, so an interrupted run cannot leave a half-written settings file behind.
+- A manually-disabled entry (`"uberdev@uberdev": false`) is **flipped back** to `true`. So the *How do I disable the plugin without uninstalling?* route in the FAQ does not survive a re-run of `install.sh` — re-disable after updating.
+
+Every one of those claims is pinned by `tests/install.test.sh` (I2–I6, I9, I12) against a sandboxed `$HOME`.
 
 ---
 
@@ -139,7 +170,7 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 /solve 123 --trivial                  # force trivial tier
 /solve 123 --small                    # force small tier
 /solve 123 --full                     # force medium/large
-/solve 123 --auto                     # enable --dangerously-skip-permissions (bypass all permission gates)
+/solve 123 --auto                     # permission BYPASS pair: --dangerously-skip-permissions --permission-mode bypassPermissions (no tool prompts)
 /workflows                             # monitor active /solve and /turbo solver fleets
 ```
 
@@ -178,11 +209,13 @@ Identical to `/solve` for trivial / small. For medium / large, the brainstorm ph
 | `/solve 42` | interactive | manual per-tool |
 | `/solve 42 --auto` | interactive | skip-permissions bypass |
 | `/turbo 42` | auto-accept | manual per-tool |
-| `/turbo 42 --auto` | auto-accept | skip-permissions bypass — **max autonomy** |
+| `/turbo 42 --auto` | auto-accept | skip-permissions bypass |
 
-`/turbo` and `--auto` are orthogonal: `/turbo` governs brainstorm interactivity; `--auto` bypasses Claude Code's permission system entirely (post-#241 follow-up: `--permission-mode auto` was silently refusing some agent tools — notably Search — so the middle tier was dead weight; `--auto` now resolves to `--dangerously-skip-permissions`, the same strict bypass as `SKIP_PERMISSIONS=1`).
+⚠️ **`--auto` is a permission bypass, not a convenience flag.** It resolves to the flag **pair** `--dangerously-skip-permissions --permission-mode bypassPermissions` (both are needed — they target different mechanisms, #246). Wherever that pair lands, **no tool prompts** — including destructive ones. Post-#241 the middle `--permission-mode auto` tier was removed rather than kept, because it silently refused some agent tools (notably Search); `--auto` is now the same strict bypass as `SKIP_PERMISSIONS=1`, with no gentler option in between. `/turbo` and `--auto` remain orthogonal: `/turbo` governs brainstorm interactivity, `--auto` governs permissions.
 
-**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and runs three independent solvers — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, `--auto`) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
+**Where the bypass actually applies.** On the default `workflow` backend it does **not** reach the per-issue solvers: they run as agents inside your session and inherit **its** permission tier, because the Workflow API exposes no per-agent permission option (RFC 0015 §6 R-1b). The pair is passed to a child's argv only on `--backend=wezterm|background` and on the `/merge` + `/review-pr` dispatches. So on the default path `--auto` raises nothing per child — and if your session is already running bypassed, dropping `--auto` lowers nothing either.
+
+**Multi-issue dispatch.** `/turbo 5 6 7` validates all three issues up front (open + classifiable) and runs three independent solvers — each in its own `.claude/worktrees/solve-issue-N/` worktree, all running in parallel. Override flags (`--trivial|--small|--full`, and `--auto` — the permission **bypass**) apply batch-wide. Larger queues split into `ceil(N / cap)` sequential single-message waves (default cap 6 via `fanout_concurrency.solve_bg`). If any issue is closed, missing, or fails `gh` fetch, the run aborts before spawning anything (`no agents dispatched`). `/solve` accepts the same syntax.
 
 Spec & plan are still written to disk before implementation — audit them mid-flight to course-correct.
 
@@ -263,7 +296,7 @@ Per-repo settings live in `.claude/uberdev.local.md` (YAML frontmatter; ignored 
 
 ```yaml
 ---
-solve_auto: false             # auto-accept brainstorm recommendations (= /turbo)
+solve_auto: false             # permission bypass: resolves to --dangerously-skip-permissions --permission-mode bypassPermissions (/turbo governs Q&A, not this key)
 fanout_concurrency:
   solve_bg: 6                 # /turbo parallel solver fanout cap (default 6, range [1, 50])
 auto_install_aliases: true    # install short-form forwarders at SessionStart
@@ -276,7 +309,7 @@ goal:
 | Env var | File key | Purpose |
 |---|---|---|
 | `UBERDEV_FANOUT_SOLVE_BG` | `fanout_concurrency.solve_bg` | Cap on parallel solvers dispatched by `/turbo`; int [1, 50], default 6 |
-| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, spawned agent runs with `--dangerously-skip-permissions` (post-#241 follow-up: AUTO tier collapsed into bypass) |
+| `SOLVE_AUTO` | `solve_auto` | When `1`/`true`, resolves the permission bypass pair `--dangerously-skip-permissions --permission-mode bypassPermissions` (post-#241 the AUTO tier was collapsed into this bypass; on the default `workflow` backend the solvers inherit the session's permission tier instead — see above) |
 | `UBERDEV_NO_AUTO_ALIAS` | `auto_install_aliases` | When `1`/`true` (env) or `false` (file), suppresses session-start auto-install of `/issue`, `/solve`, `/turbo`, `/simplify`, `/review-pr`, `/merge`, `/dev`, `/testers`, `/ubergoal`, `/uberscan`, `/ubersimplify`, `/uberthink`, `/ubercluster` forwarders |
 | `UBERDEV_INTEGRATION_BRANCH` | `integration_branch` | `/merge` target branch |
 | `UBERDEV_PR_BASE_BRANCH` | `pr_base_branch` | Base branch new PRs target (`gh pr create --base`) and the pre-push secret-scan range base; default unset → the origin default branch. Set to a parent PR's branch to open a stacked PR |
@@ -323,14 +356,17 @@ UberDev ships these so all commands work standalone — **no `superpowers`, `pr-
 
 | Type | Slugs | Source |
 |---|---|---|
-| Skills | `brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`, `finish-branch`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills` | adapted from [`superpowers`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
-| Skills | `orchestrator`, `merge`, `solve-pipeline`, `post-impl-review`, `using-uberdev` | UberDev original |
-| Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-code) (Apache 2.0) |
-| Agents | `code-simplifier` | from [`code-simplifier`](https://github.com/anthropics/claude-code) (Apache 2.0) |
+| Skills | `brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`, `finish-branch`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills`, `using-uberdev` | adapted from [`superpowers`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
+| Skills | `orchestrator`, `merge-pipeline`, `solve-pipeline`, `post-impl-review` | UberDev original |
+| Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
+| Agents | `code-simplifier` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) — the same agent is also distributed as the `code-simplifier` plugin; our copy descends from the `pr-review-toolkit` one |
+| Shared contracts | `finding-confidence-rubric-v1` (the 0–100 finding-confidence scale + false-positive catalogue) | adapted from [`code-review`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
 | Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
 | Commands | `/uberdev:review-pr`, `/uberdev:simplify` | adapted; `review-pr` defaults to **parallel** fanout (divergence from upstream) |
 
 Bundled upstream license texts in `plugins/uberdev/licenses/`.
+
+Machine-readable provenance — upstream repo, pinned commit, vendoring date, upstream directory name, and a written **track**-vs-**fork** decision per component — lives in `plugins/uberdev/vendor.json`, enforced offline by `tools/vendor/vendor-check.py` and diffed weekly by `tools/vendor/vendor-drift.py`. The policy behind it is [RFC 0019](docs/rfc/0019-vendored-upstream-policy.md).
 
 ---
 
@@ -354,9 +390,33 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (six advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (seven advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, convention-compliance, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
 
 </details>
+
+---
+
+## Measured reviewer precision
+
+A confidence threshold is a guess until somebody measures the precision behind it. `/review-pr` files every deferred finding as a fingerprinted GitHub issue, so the precision of each reviewer lens is measurable — per lens, not globally, because a single number would average the two `code-reviewer` dispatches into something meaningless.
+
+| Lens | Measured precision |
+|---|---|
+| `review_pr.review.correctness` | insufficient-data (n=0) |
+| `review_pr.review.silent_failures` | insufficient-data (n=0) |
+| `review_pr.review.types` | insufficient-data (n=0) |
+| `review_pr.review.comments` | insufficient-data (n=0) |
+| `review_pr.review.tests` | insufficient-data (n=0) |
+| `review_pr.review.general` | insufficient-data (n=0) |
+
+**Every cell reads `insufficient-data` because instrumentation started with this release, and that is the correct output — not a placeholder.** Lens provenance is only now recorded machine-readably (a `uberdev-finding-meta` trailer written beside the fingerprint marker), and correctness ground truth only exists once a human applies `finding:true-positive` or `finding:false-positive` when closing a filed finding. The 38 historical findings have neither, so they are quarantined out of the table rather than mined for a flattering number: a closed issue means somebody closed it, which is issue hygiene, not reviewer quality.
+
+Full report with raw counts, intervals and the pre-instrumentation quarantine: [`docs/eval/review-precision.md`](./docs/eval/review-precision.md). Design and the floors it enforces: [RFC 0018](./docs/rfc/0018-review-precision-eval.md).
+
+```bash
+python3 tools/eval/review-precision.py --refresh   # re-mine + re-render
+python3 tools/eval/review-precision.py --check     # CI gate: freshness + ratchet + prompt digests
+```
 
 ---
 

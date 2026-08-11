@@ -438,6 +438,11 @@ QUOTED_LEADING_SPACE_REVIEW="$TMP/run/children/worker-0001/quoted-leading-space-
 PROSE_THEN_FENCE_REVIEW="$TMP/run/children/worker-0001/prose-then-fence-review.md"
 FENCE_THEN_PROSE_REVIEW="$TMP/run/children/worker-0001/fence-then-prose-review.md"
 SEVERITY_CRITICAL_REVIEW="$TMP/run/children/worker-0001/severity-critical-review.md"
+# #433: the convention lens emits a `detail` that carries `: `, an em dash and
+# backticks. That is a legal DOUBLE-QUOTED single-line scalar and nothing about
+# it widens the child schema -- which is exactly what these two rows pin.
+CONVENTION_DETAIL_REVIEW="$TMP/run/children/worker-0001/convention-detail-review.md"
+RULE_QUOTE_KEY_REVIEW="$TMP/run/children/worker-0001/rule-quote-key-review.md"
 printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: blocker' '    location: tests/example.test.sh:1' \
   '    summary: bounded summary' '    detail: bounded detail' \
@@ -501,6 +506,16 @@ printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
   '  - severity: CRITICAL' '    location: tests/example.test.sh:1' \
   '    summary: legacy severity vocabulary' '    detail: bounded detail' \
   'confidence: high' '```' >"$SEVERITY_CRITICAL_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: blocker' '    location: lib/thing.sh:4' \
+  '    summary: Breaks a written project rule' \
+  '    detail: "confidence: 90 \u2014 rule AGENTS.md:12 \u2014 the change deletes a failing `assert` \u2014 quote: Never commit with failing tests."' \
+  'confidence: high' '```' >"$CONVENTION_DETAIL_REVIEW"
+printf '%s\n' '```yaml' 'verdict: REVISIONS_REQUIRED' 'findings:' \
+  '  - severity: blocker' '    location: lib/thing.sh:4' \
+  '    summary: Breaks a written project rule' '    detail: bounded detail' \
+  '    rule_quote: Never commit with failing tests.' \
+  'confidence: high' '```' >"$RULE_QUOTE_KEY_REVIEW"
 # `! cmd` is EXEMPT from `set -e` (bash manual, the "return value is being
 # inverted with !" clause), so a bare `! uberdev_child_validate_… ` row can
 # never fail this script — the whole reject corpus below was vacuous, which a
@@ -522,6 +537,7 @@ accept_review "$REJECT_REVIEW"
 accept_review "$EMPTY_REVIEW"
 accept_review "$ADVISORY_ONE_REVIEW"
 accept_review "$ADVISORY_MULTI_REVIEW"
+accept_review "$CONVENTION_DETAIL_REVIEW"
 reject_review "$INVALID_REVIEW"
 reject_review "$NULL_FINDINGS_REVIEW"
 reject_review "$INVALID_SCALAR_REVIEW"
@@ -534,6 +550,10 @@ reject_review "$QUOTED_LEADING_SPACE_REVIEW"
 reject_review "$PROSE_THEN_FENCE_REVIEW"
 reject_review "$FENCE_THEN_PROSE_REVIEW"
 reject_review "$SEVERITY_CRITICAL_REVIEW"
+# The four-key child finding set stays CLOSED. #433 carries the citation inside
+# `detail` under a declared grammar precisely so no schema migration is needed;
+# a `rule_quote:` key would be that migration, arriving unannounced.
+reject_review "$RULE_QUOTE_KEY_REVIEW"
 
 # Workspace metadata is a closed union whenever a provider reports it. Caller
 # mode has one absolute execution directory and no branch; isolated mode has

@@ -1,0 +1,56 @@
+name: Vendored upstream drift
+
+# RFC 0019 §8 — the compensating control.
+#
+# RFC 0019 decides to KEEP VENDORING the superpowers-derived skills and the
+# pr-review-toolkit reviewer agents rather than peer-depend on the officially
+# distributed plugins. That decision forfeits upstream's fixes-for-free, and
+# #430 is the receipt: upstream fixed find-polluter.sh and this repo shipped the
+# broken copy for months because nothing compared the two.
+#
+# This job is what we trade those free updates for. Once a week it resolves each
+# upstream's HEAD, diffs it against every component's recorded watermark in
+# plugins/uberdev/vendor.json, and keeps ONE issue up to date with the result.
+#
+# NOTE ON PROVING IT BEFORE MERGE: `schedule:` only ever fires from the default
+# branch, so this job is inert until this change lands. `workflow_dispatch:` is
+# how it is exercised from a branch, and that is the pre-merge proof.
+#
+# Repo-agnostic by construction (RFC 0019, AC13): no organisation, repository or
+# project id appears anywhere below. Upstream coordinates come from the register;
+# the target repository comes from ${{ github.repository }} via GH_REPO.
+
+on:
+  schedule:
+    # Weekly, deliberately off the hour: the top of the hour is the busiest slot
+    # on the shared scheduler and is where GitHub delays cron runs the most.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+# Least privilege at the file level. The single write scope this job needs is
+# declared on the job itself, below, so nothing else in this workflow inherits it.
+permissions:
+  contents: read
+
+jobs:
+  vendor-drift:
+    name: vendor-drift
+    runs-on: ubuntu-latest
+    # The work is one `git ls-remote` per upstream plus one blobless fetch and
+    # diff. Ten minutes is a hang guard with generous headroom, not a budget.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The whole point of the job: keep exactly one tracking issue current.
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Report upstream drift
+        env:
+          # `gh` infers the target repo from these rather than from a hardcoded
+          # slug, which is what keeps the tool reusable in a fork.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # Fails loudly if any upstream is unreachable — an unresolved upstream
+        # must never render as "no drift".
+        run: python3 tools/vendor/vendor-drift.py

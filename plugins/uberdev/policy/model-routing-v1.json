@@ -141,10 +141,24 @@
       "delegation_mode": "leaf",
       "risk_judgment": false
     },
+    "convention-compliance": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
     "conflict-resolver": {
       "route": "deep",
       "risk_floor": "deep",
       "sandbox_ceiling": "workspace-write",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
+    "finding-verifier": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
       "delegation_mode": "leaf",
       "risk_judgment": true
     },

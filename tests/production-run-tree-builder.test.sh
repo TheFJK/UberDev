@@ -119,8 +119,8 @@ PY
 
 CONTRACT_COUNT="$(python3 -I -B -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
 EXPECTED_COUNT="$(python3 -I -B -c 'import json,sys; print(sum(len(row["allowed_workflows"]) for row in json.load(open(sys.argv[1]))["contracts"]))' "$CONTRACT")"
-[ "$CONTRACT_COUNT" -eq 41 ]
-[ "$EXPECTED_COUNT" -eq 102 ]
+[ "$CONTRACT_COUNT" -eq 43 ]
+[ "$EXPECTED_COUNT" -eq 106 ]
 
 RUNTIME="$TMP/runtime"
 apply_case_fixture "$CONTRACT" "$RUNTIME" >"$TMP/cases.tsv"

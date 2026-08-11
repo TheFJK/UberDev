@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import re
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, NoReturn
 
@@ -109,6 +111,8 @@ __all__ = (
     "publish_disposition",
     "publish_review_only_disposition",
     "count_deferred_blockers",
+    "project_verification_claims",
+    "publish_verification",
     "validate_persistence_result",
     "commit_review",
     "commit_standalone",
@@ -297,6 +301,7 @@ PHASE_CONTRIBUTORS = {
         "review_pr.review.comments",
         "review_pr.review.tests",
         "review_pr.review.general",
+        "review_pr.review.convention",
     ),
     "phase2": (
         "review_pr.simplify.reuse",
@@ -308,6 +313,350 @@ AGGREGATE_KEYS = {"contributors", "findings", "phase", "schema_version"}
 CONTRIBUTOR_KEYS = {"confidence", "id", "verdict"}
 FINDING_KEYS = {"detail", "scope", "severity", "source_edges", "summary"}
 SCOPE_KEYS = {"line", "operation", "path"}
+
+# ---------------------------------------------------------------------------
+# The convention lens's citation gate (#433).
+#
+# `review_pr.review.convention` is the one Phase 1 lens whose claim is a claim
+# ABOUT A DOCUMENT: "the project's rules say X". That shape is authoritative to
+# read and trivially hallucinable to write, which is why the lens is admissible
+# at all only because it arrives with this filter attached. The filter is
+# DETERMINISTIC on purpose: "does this byte string occur in that file, near that
+# line" and "does a rule in directory D govern a file under D" are both
+# decidable, so routing them through a second model would trade a decision for
+# an opinion.
+#
+# A finding whose quote cannot be located verbatim is not a low-confidence
+# finding, it is a FALSE one, and it is culled outright rather than downweighted.
+CONVENTION_EDGE = "review_pr.review.convention"
+# Every reason this gate can refuse a citation for. Closed on purpose: the
+# aggregate writer logs one of these per cull, and an unlisted reason means a
+# code path that can drop a finding without naming why.
+CONVENTION_CULL_REASONS = (
+    "citation-unparsable",
+    "citation-not-in-allowlist",
+    "citation-not-verbatim",
+    "citation-out-of-scope",
+    "citation-secret-shaped",
+    "rule-sources-unavailable",
+)
+CONVENTION_DEMOTE_REASON = "citation-self-introduced"
+# The `detail` grammar the convention reviewer must emit. `rsplit` on the quote
+# marker, so an explanation that itself contains the marker cannot truncate the
+# quote -- the LAST marker always wins.
+CONVENTION_QUOTE_MARKER = " — quote: "
+CONVENTION_DETAIL_GRAMMAR = re.compile(
+    r"confidence: (\d{1,3}) — rule ([^ :]+(?:/[^ :]+)*):([1-9]\d*) — (.+)"
+)
+# A quote shorter than this cites nothing (any file contains "the"); one longer
+# than this is a rule document being republished into a PR body, which the
+# shared contract's redaction carve-out caps at the same number.
+CONVENTION_QUOTE_MIN = 12
+CONVENTION_QUOTE_MAX = 300
+# How many physical lines after the cited one the quote may span. Markdown rules
+# wrap, so a one-line citation of a three-line bullet must still verify; a window
+# this size is generous for wrapping and far too small to make "somewhere in the
+# file" pass as "at this line".
+CONVENTION_RULE_WINDOW = 10
+CONVENTION_REQUEST_KEYS = {
+    "allowlist",
+    "changed_paths",
+    "detail",
+    "location_path",
+    "rule_lines",
+}
+# The CLI verb's stdin ceiling. The request carries a bounded window of one rule
+# file plus two path lists, never a diff or a reviewer transcript.
+CONVENTION_REQUEST_LIMIT = 262144
+# Secret shapes that may never ride out in a citation even though the rule-text
+# carve-out permits quoting. NAMED shapes first: each one is an issuer's own
+# prefix, so it needs no statistics. Assembled at runtime rather than spelled
+# contiguously: a literal AWS example key in these bytes hard-stops
+# finish-branch's pre-push secret scan on the diff that introduces it.
+#
+# The vocabulary AND every length bound below are the ones in
+# `lib/secret-scan.sh`, this repo's pre-push scanner. A shape named in one guard
+# and missing -- or bounded differently -- in the other is the "one contract, N
+# uncompared copies" defect: at `{8,}` the `sk-` rule here refused ordinary
+# hyphenated English, and `run-risk-mismatch`, `task-manifest`, `disk-recovery`
+# and `kiosk-frontend` all occur in this checkout today. The bound is what makes
+# a prefix a NAME rather than a substring, so it is never loosened "to be safe":
+# every one of these tuples deletes a true finding when it over-fires.
+_CONVENTION_SECRET_PATTERNS = (
+    # AWS access key id -- 16 characters after the prefix (secret-scan.sh:261).
+    re.compile("AKIA" + r"[0-9A-Z]{16,}"),
+    # Every GitHub token prefix, 36 characters (secret-scan.sh:265). The prefix
+    # set is the scanner's, not just `ghp_`: an installation or refresh token
+    # leaks exactly as hard as a personal one.
+    re.compile("gh" + r"[pousr]_[A-Za-z0-9]{36,}"),
+    # OpenAI-style (secret-scan.sh:266). See the bound argument above.
+    re.compile("sk" + r"-[A-Za-z0-9]{32,}"),
+    # Slack, all five issued prefixes (secret-scan.sh:267). Named rather than
+    # left to the statistical rule below because a Slack token opens with two
+    # blocks of digits, and a digit block holds ONE character class for its
+    # whole length: the prefix drags the run's class churn under the floor, and
+    # 99.8% of drawn bot tokens scored as identifiers and were let through.
+    re.compile("xox" + r"[abprs]-[A-Za-z0-9-]{10,}"),
+    # Stripe secret and restricted keys, at the issuer key length of 24.
+    # Unreachable by the statistical rule for a different reason than Slack:
+    # `sk_live_` plus a 24-character key is a 32-character run whose
+    # separator-stripped core is 30, one under the core minimum, so it is
+    # dropped before it is ever scored (0.0% of drawn keys culled). Publishable
+    # `pk_` keys are deliberately absent -- they are public by design, so
+    # refusing a citation over one would be a pure false positive.
+    #
+    # The only entry anchored on a word boundary, and the asymmetry is the
+    # point: this is the one prefix here that is also the TAIL of everyday
+    # words, so without `\b` the entry reads `sk_live_` out of the middle of
+    # `task_live_DispatchConfigurationBuilder` -- measured, not hypothetical --
+    # and refuses a rule quoting an ordinary identifier. `sk-` has the same
+    # shape (risk-, task-, disk-, kiosk-) but inherits secret-scan.sh {32,}
+    # bound, which already ends that class; there is no scanner rule to inherit
+    # here, so the boundary does the work instead. An issued key never begins
+    # mid-word, so the anchor costs no coverage.
+    re.compile(r"\b" + "[sr]k" + r"_(?:live|test)_[A-Za-z0-9]{24,}"),
+    # A JWT always opens `eyJ` (base64 of `{"`) and always carries at least two
+    # `.`-separated segments. It is named because those separators chop it into
+    # runs shorter than the statistical rule's minimum, and it is anchored on
+    # the SECOND segment because `eyJ` plus one run alone also spells
+    # `monkeyJsonSerializerFactory`.
+    re.compile("eyJ" + r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
+)
+# The UNNAMED half: a run long enough to be a credential. Length alone is NOT a
+# credential test, and treating it as one is how this gate silently deleted true
+# findings -- `uberdev_command_workspace_prepare` is 33 characters and
+# `REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP` is 34, a convention rule quotes its own
+# constants constantly, and a culled finding is only ever logged, never surfaced
+# (review-aggregate then recomputes the lens to APPROVE with nothing left in it).
+# What separates a credential from an identifier is that a credential is DRAWN AT
+# RANDOM: flat character frequencies and a character class that keeps changing.
+# An identifier is words -- it holds one class for a word at a time.
+#
+# Both statistics are measured on the run's alphanumeric CORE, with `_ - / + =`
+# stripped, because those separators are what an identifier is built out of and
+# what a secret only sprinkles: measured raw, every `/` in a path counts as a
+# class change and lifts a path over the same floor a base64 blob clears.
+#
+# The churn floor is set from the IDENTIFIER side, because the two errors here
+# are not symmetric -- a missed secret is still only a quote out of a rule file
+# the reviewer was already allowed to read, while a false positive deletes a true
+# finding and says so nowhere anybody looks. Over 20k word-built identifiers
+# (camelCase, embedded digits, 32-52 characters) the highest core churn observed
+# is 0.375, and a credential drawn at random sits near 0.64; the floor is the gap
+# between them. A hand-written example key out of a vendor's documentation can
+# fall inside the identifier range and pass -- that is the deliberate side to err
+# on, and issued credentials are random enough to clear the floor by a wide
+# margin. Entropy cannot carry this split at all (those same identifiers reach
+# 4.76 bits), so it serves only as a floor under repetitive runs.
+_CONVENTION_SECRET_RUN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+_CONVENTION_SECRET_SEPARATORS = re.compile(r"[^A-Za-z0-9]")
+# Stripping separators also shortens the run, and it shortens a path far more
+# than a blob: a candidate has to still be credential-length once it is only
+# alphanumerics, which is what keeps `CLAUDE_PLUGIN_ROOT/lib/goal-phase0` out.
+_CONVENTION_SECRET_CORE_MIN = 32
+_CONVENTION_SECRET_BITS = 4.0
+_CONVENTION_SECRET_CHURN = 0.45
+_CHAR_CLASS_LOWER, _CHAR_CLASS_UPPER, _CHAR_CLASS_DIGIT, _CHAR_CLASS_OTHER = range(4)
+# Two of the three alphanumeric classes: a random token mixes them, where
+# `snake_case`, `SCREAMING_SNAKE` and `camelCase` each stay inside one or two.
+# Read TWICE, and it is the weaker term here and the load-bearing one in the
+# base32 scan below -- raising it would silently stop that scan from reaching a
+# seed drawn without an uppercase letter.
+_CONVENTION_SECRET_CLASSES = 2
+# Hex keys are scanned separately, against the raw quote and on a lower floor: a
+# 16-symbol alphabet cannot reach the base64 floor, and no identifier this long
+# spells itself in `a-f` plus digits. Raw rather than cored so a dashed UUID --
+# an identifier, not a credential -- is not silently reassembled into a key, and
+# floored so a padding run (`0000...`, entropy 0) is not read as one either.
+_CONVENTION_SECRET_HEX = re.compile(r"[0-9a-fA-F]{32,}")
+_CONVENTION_SECRET_HEX_BITS = 3.0
+# base32 (RFC 4648) is how a TOTP seed is handed out, and it is the third shape
+# the statistical rule cannot reach: one letter case plus six digits changes
+# class rarely enough that only 10.0% of drawn 32-character seeds cleared the
+# churn floor. Scanned the way hex is -- restricted alphabet, entropy floor, and
+# NO churn term, which means nothing inside a single-case alphabet -- against
+# the raw quote, so a separator still ends the run.
+#
+# The class floor carries this one on its own, and entropy cannot: the only
+# thing that spells a 32-character unbroken `[A-Z2-7]` run other than a seed is
+# a row of glued-together uppercase words, and over 20k synthetic ones those
+# reach 4.22 bits while drawn seeds start at 3.51 -- overlapping ranges, no
+# floor splits them. Glued words carry no digits at all, so the two-class floor
+# does. A drawn seed misses all six digits with probability (26/32)**32 = 0.1%;
+# that 0.1% is the residual, and it is the identifier-safe side to leave open.
+# The entropy floor stays for the same reason hex has one: every one of the
+# seven `[A-Z2-7]{32,}` runs in this checkout is a zero-entropy padding fixture.
+_CONVENTION_SECRET_BASE32 = re.compile(r"[A-Z2-7]{32,}")
+_CONVENTION_SECRET_BASE32_BITS = 3.0
+
+
+def _character_class(char: str) -> int:
+    """Which of lower / upper / digit / separator `char` belongs to."""
+    if char.islower():
+        return _CHAR_CLASS_LOWER
+    if char.isupper():
+        return _CHAR_CLASS_UPPER
+    if char.isdigit():
+        return _CHAR_CLASS_DIGIT
+    return _CHAR_CLASS_OTHER
+
+
+def _shannon_bits(run: str) -> float:
+    """Shannon entropy of `run`, in bits per character. `run` must be non-empty."""
+    total = len(run)
+    return -sum(
+        (count / total) * math.log2(count / total) for count in Counter(run).values()
+    )
+
+
+def _class_churn(run: str) -> float:
+    """Share of `run`'s adjacent character pairs that change class.
+
+    `run` must be at least two characters. Every caller passes a run already
+    held to `_CONVENTION_SECRET_CORE_MIN`, so the pair list is never empty.
+    """
+    pairs = list(zip(run, run[1:]))
+    return sum(
+        1 for left, right in pairs if _character_class(left) != _character_class(right)
+    ) / len(pairs)
+
+
+def _convention_quote_is_secret_shaped(quote: str) -> bool:
+    """True when `quote` carries something that could be a live credential."""
+    for pattern in _CONVENTION_SECRET_PATTERNS:
+        if pattern.search(quote):
+            return True
+    for run in _CONVENTION_SECRET_HEX.findall(quote):
+        if _shannon_bits(run) >= _CONVENTION_SECRET_HEX_BITS:
+            return True
+    for run in _CONVENTION_SECRET_BASE32.findall(quote):
+        if (
+            len({_character_class(char) for char in run})
+            >= _CONVENTION_SECRET_CLASSES
+            and _shannon_bits(run) >= _CONVENTION_SECRET_BASE32_BITS
+        ):
+            return True
+    for run in _CONVENTION_SECRET_RUN.findall(quote):
+        core = _CONVENTION_SECRET_SEPARATORS.sub("", run)
+        if len(core) < _CONVENTION_SECRET_CORE_MIN:
+            continue
+        if (
+            len({_character_class(char) for char in core})
+            >= _CONVENTION_SECRET_CLASSES
+            and _shannon_bits(core) >= _CONVENTION_SECRET_BITS
+            and _class_churn(core) >= _CONVENTION_SECRET_CHURN
+        ):
+            return True
+    return False
+
+
+def normalise_rule_text(text: str) -> str:
+    """Collapse every whitespace run to one space and strip the ends.
+
+    Both sides of the verbatim comparison go through this, so a rule that wraps
+    across markdown lines still matches the one-line form a reviewer quotes.
+    """
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_convention_detail(detail: str) -> dict[str, Any] | None:
+    """Split a convention `detail` into its declared parts, or None."""
+    if not isinstance(detail, str) or CONVENTION_QUOTE_MARKER not in detail:
+        return None
+    head, quote = detail.rsplit(CONVENTION_QUOTE_MARKER, 1)
+    match = CONVENTION_DETAIL_GRAMMAR.fullmatch(head)
+    if match is None:
+        return None
+    confidence = int(match.group(1))
+    if confidence > 100:
+        return None
+    return {
+        "confidence": confidence,
+        "rule_path": match.group(2),
+        "rule_line": int(match.group(3)),
+        "explanation": match.group(4),
+        "quote": quote,
+    }
+
+
+def _convention_rule_governs(rule_path: str, location_path: str) -> bool:
+    """Nested rule scoping: a rule in D governs exactly what lives under D."""
+    rule_dir = posixpath.dirname(rule_path)
+    if rule_dir in ("", "."):
+        return True
+    return location_path.startswith(rule_dir + "/")
+
+
+def classify_convention_citation(request: dict[str, Any]) -> dict[str, Any]:
+    """Decide one convention finding's fate. PURE: no file I/O, no clock.
+
+    The caller materialises everything -- the allowlist, the changed paths, and
+    the bounded read of the cited rule file -- so this predicate is decidable
+    from its argument alone and is therefore directly testable. It returns
+    `accept`, `demote` (the finding survives as a suggestion), or `cull`, and
+    the FIRST failing check names the reason.
+    """
+    if not isinstance(request, dict) or set(request) != CONVENTION_REQUEST_KEYS:
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    location_path = request["location_path"]
+    allowlist = request["allowlist"]
+    changed_paths = request["changed_paths"]
+    rule_lines = request["rule_lines"]
+    if (
+        not isinstance(location_path, str)
+        or not isinstance(allowlist, list)
+        or not isinstance(changed_paths, list)
+        or not isinstance(rule_lines, list)
+    ):
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    parsed = parse_convention_detail(request["detail"])
+    if parsed is None:
+        return {"outcome": "cull", "reason": "citation-unparsable"}
+    rule_path = parsed["rule_path"]
+    quote = normalise_rule_text(parsed["quote"])
+    verdict: dict[str, Any] = {
+        "outcome": "accept",
+        "reason": "citation-verified",
+        "rule_path": rule_path,
+        "rule_line": parsed["rule_line"],
+        "quote_prefix": quote[:80],
+    }
+
+    def refuse(reason: str) -> dict[str, Any]:
+        return {**verdict, "outcome": "cull", "reason": reason}
+
+    if rule_path not in allowlist:
+        return refuse("citation-not-in-allowlist")
+    if not _convention_rule_governs(rule_path, location_path):
+        return refuse("citation-out-of-scope")
+    if not CONVENTION_QUOTE_MIN <= len(quote) <= CONVENTION_QUOTE_MAX:
+        return refuse("citation-not-verbatim")
+    start = parsed["rule_line"] - 1
+    window = normalise_rule_text(
+        " ".join(
+            line
+            for line in rule_lines[start : start + CONVENTION_RULE_WINDOW]
+            if isinstance(line, str)
+        )
+    )
+    if not window or quote not in window:
+        return refuse("citation-not-verbatim")
+    # Last, and only against text already proven to be a real rule quote: the
+    # redaction guard. It is ordered here because the FIRST failing check names
+    # the reason, and running the narrowest check first made
+    # `citation-secret-shaped` the recorded cause of citations that were never in
+    # the file to begin with. Anything refused above is culled either way, so no
+    # secret survives the reordering -- only the reason gets truthful.
+    if _convention_quote_is_secret_shaped(quote):
+        return refuse("citation-secret-shaped")
+    if rule_path in changed_paths:
+        # The PR itself wrote the rule it is being judged against. That is not a
+        # fabrication -- the quote IS in the file -- but it is circular, so the
+        # finding survives as advice rather than as a blocker.
+        return {**verdict, "outcome": "demote", "reason": CONVENTION_DEMOTE_REASON}
+    return verdict
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -3165,6 +3514,322 @@ def count_deferred_blockers(
         )
         if finding["severity"] == "blocker" and row["disposition"] != "APPLIED"
     )
+
+
+VERIFICATION_LIMIT = 1_048_576
+VERIFICATION_CLAIM_LIMIT = 65_536
+VERIFICATION_KEYS = {
+    "schema_version",
+    "phase",
+    "aggregate_sha256",
+    "threshold",
+    "findings_verification",
+}
+VERIFICATION_ROW_KEYS = {
+    "finding_index",
+    "location",
+    "summary_sha256",
+    "score",
+    "verdict",
+    "reason",
+}
+CLAIM_KEYS = {"finding_index", "location", "summary"}
+# The verdict vocabulary is the CONTROLLER's, never the child's: a verifier is
+# never shown the threshold, so it cannot know which side of it a score lands
+# on. See shared/finding-verifier-output-v1.md.
+# CONTRACT: finding-verification-verdict
+VERIFICATION_VERDICTS = {"SURVIVES", "CULLED"}
+# /CONTRACT: finding-verification-verdict
+# Emitted by a verifier child. A row carrying one of these MUST carry a score.
+VERIFICATION_CHILD_REASONS = {
+    "reproduced-from-diff",
+    "contradicted-by-diff",
+    "pre-existing",
+    "out-of-scope-line",
+    "linter-domain",
+}
+# Assigned by the controller when no child opinion exists. A row carrying one
+# of these MUST NOT carry a score, and always lands SURVIVES: the gate fails
+# toward keeping the finding, so "we could not verify" never culls.
+VERIFICATION_CONTROLLER_REASONS = {
+    "gate-disabled",
+    "over-cap-unverified",
+    "verifier-unavailable",
+}
+VERIFICATION_REASONS = VERIFICATION_CHILD_REASONS | VERIFICATION_CONTROLLER_REASONS
+VERIFICATION_OPINION_KEYS = {"finding_index", "score", "reason"}
+VERIFICATION_BASENAME = "phase1-verification.json"
+
+
+def _load_phase1_verification_pair(
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any], tuple[FindingKey, ...], str]:
+    """Re-derive the Phase 1 aggregate/disposition pair from pinned bytes.
+
+    Deliberately NOT count_deferred_blockers: that function hardcodes phase 2
+    on both axes (a `simplify-aggregate` envelope, validated as `phase2`), so
+    it cannot read a Phase 1 pair at all. Both verification verbs bind the same
+    pair here so "which findings are eligible" is decided exactly once.
+    """
+    canonical_findings = _absolute_input(findings_path, "findings_path_invalid")
+    canonical_disposition = _absolute_input(
+        disposition_path, "disposition_path_invalid"
+    )
+    findings_payload = capture_expected(
+        canonical_findings, findings_sha256, 1, FINDINGS_LIMIT
+    )
+    body = _enveloped_body(findings_payload, "post-impl-review-aggregate")
+    aggregate = _parse_json(body, "findings_schema_invalid")
+    finding_keys = _validate_aggregate(aggregate, "phase1")
+    if encode_aggregate(aggregate, "phase1") != findings_payload:
+        fail("findings_not_canonical")
+    disposition_payload = capture_expected(
+        canonical_disposition, disposition_sha256, 1, DISPOSITION_LIMIT
+    )
+    disposition = _parse_json(disposition_payload, "disposition_json_invalid")
+    authority = {
+        "phase": "phase1",
+        "findings_sha256": findings_sha256,
+        "finding_keys": [asdict(item) for item in finding_keys],
+    }
+    _validate_disposition(disposition, authority)
+    expected_disposition = (
+        json.dumps(
+            disposition, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if disposition_payload != expected_disposition:
+        fail("disposition_not_canonical")
+    return aggregate, disposition, finding_keys, canonical_disposition
+
+
+def _eligible_verification_rows(
+    aggregate: dict[str, Any],
+    disposition: dict[str, Any],
+    finding_keys: tuple[FindingKey, ...],
+) -> list[tuple[FindingKey, dict[str, Any]]]:
+    """The verification roster: Phase 1 blockers the fixer did not apply.
+
+    A suggestion never becomes a GitHub issue tier the /goal loop recurses on,
+    and an APPLIED blocker is already fixed in the branch -- neither is worth a
+    verifier. Declared once here so the claim projection and the sidecar
+    publication cannot disagree about the roster.
+    """
+    eligible: list[tuple[FindingKey, dict[str, Any]]] = []
+    for finding, row, key in zip(
+        aggregate["findings"],
+        disposition["findings_disposition"],
+        finding_keys,
+        strict=True,
+    ):
+        if finding["severity"] == "blocker" and row["disposition"] != "APPLIED":
+            eligible.append((key, finding))
+    return eligible
+
+
+def project_verification_claims(
+    *,
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+    claims_dir: str,
+) -> dict[str, Any]:
+    """Write one claim card per eligible Phase 1 blocker finding.
+
+    The card is the MECHANICAL half of the withholding the design turns on: it
+    carries `finding_index`, `location` and `summary` and nothing else, so the
+    reviewer's `detail` -- which is where the argument and the reviewer's own
+    `confidence: <n>` prefix live -- never reaches the verifier as bytes. A
+    prompt-level "do not look at the reasoning" would be a rule; this is an
+    absence.
+
+    The aggregate is READ, never rewritten, and FINDING_KEYS gains no member.
+    """
+    aggregate, disposition, finding_keys, _canonical_disposition = (
+        _load_phase1_verification_pair(
+            findings_path, findings_sha256, disposition_path, disposition_sha256
+        )
+    )
+    canonical_claims = _absolute_input(claims_dir, "claims_dir_invalid")
+    eligible = _eligible_verification_rows(aggregate, disposition, finding_keys)
+    claims: list[dict[str, Any]] = []
+    rollbacks: list[_ArtifactRollback] = []
+    completed = False
+    try:
+        if eligible:
+            try:
+                os.makedirs(canonical_claims, mode=0o700, exist_ok=True)
+            except OSError:
+                fail("claims_dir_invalid")
+            directory = os.lstat(canonical_claims)
+            if not stat.S_ISDIR(directory.st_mode):
+                fail("claims_dir_invalid")
+        for ordinal, (key, finding) in enumerate(eligible, start=1):
+            card = {
+                "finding_index": key.finding_index,
+                "location": key.location,
+                "summary": finding["summary"],
+            }
+            if set(card) != CLAIM_KEYS:
+                fail("claim_schema_invalid")
+            claim_path = os.path.join(canonical_claims, f"verify-{ordinal:02d}.json")
+            published_path, claim_digest, identity = _publish_new_exact_record(
+                claim_path, _canonical_json(card) + b"\n"
+            )
+            rollbacks.append(_ArtifactRollback(claim_path, identity, None))
+            claims.append(
+                {
+                    "finding_index": key.finding_index,
+                    "claim_path": published_path,
+                    "claim_sha256": claim_digest,
+                }
+            )
+        completed = True
+        return {
+            "schema_version": 1,
+            "phase": "phase1",
+            "aggregate_sha256": findings_sha256,
+            "verify_count": len(claims),
+            "claims": claims,
+        }
+    finally:
+        if not completed:
+            _rollback_publications(
+                rollbacks, reason="verification_claims_recovery_failed"
+            )
+
+
+def _validate_verification_opinions(
+    candidate: bytes,
+    eligible: list[tuple[FindingKey, dict[str, Any]]],
+    threshold: int,
+) -> list[dict[str, Any]]:
+    """Turn the controller's per-finding opinions into sidecar rows.
+
+    This is where the threshold is applied, and the ONLY place it is applied.
+    The child never receives it, so the same child bytes yield opposite
+    verdicts under different thresholds -- which is what makes recorded scores
+    re-thresholdable offline.
+    """
+    opinions = _parse_json(candidate, "verification_json_invalid")
+    if not isinstance(opinions, list) or len(opinions) != len(eligible):
+        fail("verification_finding_mismatch")
+    rows: list[dict[str, Any]] = []
+    for opinion, (key, _finding) in zip(opinions, eligible, strict=True):
+        if not isinstance(opinion, dict) or not set(opinion) <= VERIFICATION_OPINION_KEYS:
+            fail("verification_schema_invalid")
+        if opinion.get("finding_index") != key.finding_index:
+            fail("verification_finding_mismatch")
+        reason = opinion.get("reason")
+        if not isinstance(reason, str) or reason not in VERIFICATION_REASONS:
+            fail("verification_schema_invalid")
+        has_score = "score" in opinion
+        score = opinion.get("score")
+        if reason in VERIFICATION_CHILD_REASONS:
+            if not has_score or type(score) is not int or not 0 <= score <= 100:
+                fail("verification_schema_invalid")
+            # Fail toward keeping: only a well-formed score STRICTLY below the
+            # threshold ever culls. This is the ONLY expression in the tree that
+            # can produce a CULLED verdict.
+            verdict = "CULLED" if score < threshold else "SURVIVES"
+        else:
+            if has_score:
+                fail("verification_schema_invalid")
+            score = None
+            verdict = "SURVIVES"
+        # The kill switch is total: at threshold 0 no verifier is dispatched,
+        # so a scored row could only have come from somewhere else.
+        if threshold == 0 and reason != "gate-disabled":
+            fail("verification_gate_disabled_mismatch")
+        if verdict not in VERIFICATION_VERDICTS:
+            fail("verification_schema_invalid")
+        row = {
+            "finding_index": key.finding_index,
+            "location": key.location,
+            "summary_sha256": key.summary_sha256,
+            "score": score,
+            "verdict": verdict,
+            "reason": reason,
+        }
+        if set(row) != VERIFICATION_ROW_KEYS:
+            fail("verification_schema_invalid")
+        rows.append(row)
+    return rows
+
+
+def publish_verification(
+    *,
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+    verification_path: str,
+    threshold: int,
+    candidate: bytes,
+) -> dict[str, Any]:
+    """Publish phase1-verification.json beside the disposition it is bound to.
+
+    Same transaction shape as publish_disposition: the target must already
+    exist as an empty regular file the caller created, the write is an
+    identity-checked replace, and a mid-flight failure rolls it back to empty
+    rather than leaving a half-written verdict record on disk.
+    """
+    if type(threshold) is not int or not 0 <= threshold <= 100:
+        fail("verification_threshold_invalid")
+    aggregate, disposition, finding_keys, canonical_disposition = (
+        _load_phase1_verification_pair(
+            findings_path, findings_sha256, disposition_path, disposition_sha256
+        )
+    )
+    canonical_verification = _absolute_input(
+        verification_path, "verification_path_invalid"
+    )
+    # Sibling of the disposition, exact basename. The sidecar's whole value is
+    # that it is findable from the artifact it qualifies.
+    if (
+        os.path.dirname(canonical_verification)
+        != os.path.dirname(canonical_disposition)
+        or os.path.basename(canonical_verification) != VERIFICATION_BASENAME
+    ):
+        fail("verification_path_invalid")
+    _empty, empty_identity = _capture_regular(canonical_verification, 0, 0)
+    eligible = _eligible_verification_rows(aggregate, disposition, finding_keys)
+    rows = _validate_verification_opinions(candidate, eligible, threshold)
+    document = {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": findings_sha256,
+        "threshold": threshold,
+        "findings_verification": rows,
+    }
+    if set(document) != VERIFICATION_KEYS:
+        fail("verification_schema_invalid")
+    payload = _canonical_json(document) + b"\n"
+    rollbacks: list[_ArtifactRollback] = []
+    completed = False
+    try:
+        published_path, verification_digest, identity = _replace_empty_exact_record(
+            canonical_verification, empty_identity, payload
+        )
+        rollbacks.append(_ArtifactRollback(canonical_verification, identity, b""))
+        completed = True
+        return {
+            "verification_path": published_path,
+            "verification_sha256": verification_digest,
+            "threshold": threshold,
+            "verified": len(rows),
+            "culled": sum(1 for row in rows if row["verdict"] == "CULLED"),
+        }
+    finally:
+        if not completed:
+            _rollback_publications(
+                rollbacks, reason="verification_transaction_recovery_failed"
+            )
 
 
 def _persistence_scalar(
@@ -6379,7 +7044,18 @@ WORKFLOW_REVIEWER_EDGE_IDS = frozenset(
     PHASE_CONTRIBUTORS["phase1"] + PHASE_CONTRIBUTORS["phase2"]
 )
 
-WORKFLOW_BOUND_EDGE_IDS = WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS
+# Verifier-shaped children (#431): one result, one status, nothing else --
+# structurally identical to the reviewer shape, which is why capture_bound_child
+# accepts them. Its OWN frozenset rather than a member of
+# WORKFLOW_REVIEWER_EDGE_IDS, because that set is DERIVED from
+# PHASE_CONTRIBUTORS: it is the aggregate roster, and a verifier contributes to
+# no aggregate. Folding it in there would silently make the verifier a
+# contributor every _validate_aggregate call then demands a verdict from.
+WORKFLOW_VERIFIER_EDGE_IDS = frozenset(("review_pr.verify.finding",))
+
+WORKFLOW_BOUND_EDGE_IDS = (
+    WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS
+)
 
 # The defer stage's own edge. Kept out of WORKFLOW_BOUND_EDGE_IDS on purpose:
 # a persistence child carries an aggregate and a disposition pin, so it is never
@@ -7283,7 +7959,7 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
     # a pinned log/aggregate authority this verb has no slot for, so freezing a
     # CI child here would prove strictly less while looking complete. See
     # WORKFLOW_CI_EDGE_IDS and capture_ci_terminal (#383).
-    if edge_id not in WORKFLOW_REVIEWER_EDGE_IDS:
+    if edge_id not in (WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS):
         fail("bound_child_edge_unsupported")
     binding = _load_launch_binding(launch_binding, edge_id)
     if binding.get("backend") != "workflow":
@@ -9086,6 +9762,9 @@ def _parser() -> argparse.ArgumentParser:
     digest.add_argument("--maximum", type=int, required=True)
     encode = commands.add_parser("encode-aggregate", add_help=False)
     encode.add_argument("--phase", choices=("phase1", "phase2"), required=True)
+    # No arguments: the whole request is one JSON object on stdin, so a rule
+    # window never crosses the platform argv-size boundary.
+    commands.add_parser("classify-convention-citation", add_help=False)
     snapshot = commands.add_parser("snapshot-standalone", add_help=False)
     snapshot.add_argument("--working-dir", required=True)
     snapshot.add_argument("--evidence-dir", required=True)
@@ -9145,6 +9824,23 @@ def _parser() -> argparse.ArgumentParser:
     deferred_blockers.add_argument("--findings-sha256", required=True)
     deferred_blockers.add_argument("--disposition-path", required=True)
     deferred_blockers.add_argument("--disposition-sha256", required=True)
+    verification_claims = commands.add_parser(
+        "project-verification-claims", add_help=False
+    )
+    verification_claims.add_argument("--findings-path", required=True)
+    verification_claims.add_argument("--findings-sha256", required=True)
+    verification_claims.add_argument("--disposition-path", required=True)
+    verification_claims.add_argument("--disposition-sha256", required=True)
+    verification_claims.add_argument("--claims-dir", required=True)
+    publish_verification_parser = commands.add_parser(
+        "publish-verification", add_help=False
+    )
+    publish_verification_parser.add_argument("--findings-path", required=True)
+    publish_verification_parser.add_argument("--findings-sha256", required=True)
+    publish_verification_parser.add_argument("--disposition-path", required=True)
+    publish_verification_parser.add_argument("--disposition-sha256", required=True)
+    publish_verification_parser.add_argument("--verification-path", required=True)
+    publish_verification_parser.add_argument("--threshold", required=True)
     persistence = commands.add_parser(
         "validate-persistence-result", add_help=False
     )
@@ -9441,6 +10137,15 @@ def main() -> int:
             output = encode_aggregate(
                 _parse_json(candidate, "findings_schema_invalid"), arguments.phase
             ).decode("utf-8")
+        elif arguments.command == "classify-convention-citation":
+            candidate = sys.stdin.buffer.read(CONVENTION_REQUEST_LIMIT + 1)
+            if len(candidate) > CONVENTION_REQUEST_LIMIT:
+                fail("convention_request_size_invalid")
+            output = _compact(
+                classify_convention_citation(
+                    _parse_json(candidate, "convention_request_invalid")
+                )
+            )
         elif arguments.command == "snapshot-standalone":
             output = _compact(
                 capture_standalone_snapshot(
@@ -9524,6 +10229,33 @@ def main() -> int:
                     findings_sha256=arguments.findings_sha256,
                     disposition_path=arguments.disposition_path,
                     disposition_sha256=arguments.disposition_sha256,
+                )
+            )
+        elif arguments.command == "project-verification-claims":
+            output = _compact(
+                project_verification_claims(
+                    findings_path=arguments.findings_path,
+                    findings_sha256=arguments.findings_sha256,
+                    disposition_path=arguments.disposition_path,
+                    disposition_sha256=arguments.disposition_sha256,
+                    claims_dir=arguments.claims_dir,
+                )
+            )
+        elif arguments.command == "publish-verification":
+            if re.fullmatch(r"0|[1-9][0-9]{0,2}", arguments.threshold) is None:
+                fail("verification_threshold_invalid")
+            candidate = sys.stdin.buffer.read(VERIFICATION_LIMIT + 1)
+            if len(candidate) > VERIFICATION_LIMIT:
+                fail("verification_size_invalid")
+            output = _compact(
+                publish_verification(
+                    findings_path=arguments.findings_path,
+                    findings_sha256=arguments.findings_sha256,
+                    disposition_path=arguments.disposition_path,
+                    disposition_sha256=arguments.disposition_sha256,
+                    verification_path=arguments.verification_path,
+                    threshold=int(arguments.threshold),
+                    candidate=candidate,
                 )
             )
         elif arguments.command == "validate-persistence-result":

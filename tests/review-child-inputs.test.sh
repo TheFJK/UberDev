@@ -861,7 +861,7 @@ chmod 600 "$BASE_REVIEW_RECORDS"
 printf '%s\n' \
   '{"edge":"review_pr.review.types","index":3,"status":"fixture.status","result":"fixture.result"}' \
   >"$REVIEW_FAILED"
-# The baseline fanout produced six valid evidence rows. Model the declared
+# The baseline fanout produced seven valid evidence rows. Model the declared
 # reviewer-format failure completely: production would not persist that
 # reviewer's validated row before dispatching its format-repair attempt.
 python3 -I -B - "$POST_REVIEW_VALIDATED_LEDGER" <<'PY'
@@ -876,14 +876,14 @@ kept = [
     row for row in rows
     if (row.get("edge"), row.get("index")) != failed_pair
 ]
-if len(rows) != 6 or len(kept) != 5:
+if len(rows) != 7 or len(kept) != 6:
     raise SystemExit("format-failure fixture did not remove exactly one validated row")
 with open(path, "w", encoding="utf-8") as stream:
     for row in kept:
         stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-REVIEW_EXPECTED_COUNT=6
-REVIEW_INITIAL_VALID_COUNT=5
+REVIEW_EXPECTED_COUNT=7
+REVIEW_INITIAL_VALID_COUNT=6
 REVIEW_FORMAT_FAILURE_COUNT=1
 unset FAILED_REVIEW_EDGE FAILED_REVIEW_INDEX
 FORMAT_EXAMPLE_PATH="$FORMAT_EXAMPLE"
@@ -1172,6 +1172,7 @@ post_edges = (
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 )
 for index, edge in enumerate(post_edges, 1):
     expect(post_source, edge, f"post-review-{run_id}-r{index}-iter7-attempt01")
@@ -1211,7 +1212,7 @@ retired_edges = {
 build_only_pairs = {(review_source, edge) for edge in retired_edges}
 
 expected_pairs = set(expected.values()) | build_only_pairs
-if len(expected_pairs) != 17 or len(expected) != 17:
+if len(expected_pairs) != 18 or len(expected) != 18:
     raise SystemExit("invalid receipt expectation fixture")
 if any(edge in retired_edges for _, edge in expected.values()):
     raise SystemExit(
@@ -1304,7 +1305,7 @@ def validate_receipts(candidate_rows):
             f"{retired_terminals!r}"
         )
 
-    assert actual_pairs == expected_pairs and len(actual_pairs) == 17, (
+    assert actual_pairs == expected_pairs and len(actual_pairs) == 18, (
         f"unique source/edge closure mismatch: expected={expected_pairs!r} "
         f"actual={actual_pairs!r}"
     )
@@ -1674,6 +1675,7 @@ subtask_edges = {
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
     "review_pr.simplify.reuse",
     "review_pr.simplify.quality",
     "review_pr.simplify.efficiency",
@@ -1703,7 +1705,9 @@ source = source_path.read_text(encoding="utf-8")
 good_path.write_text(source, encoding="utf-8")
 old = 'diff_path "$(post_review_json_string "$DIFF_ARTIFACT_PATH")"'
 new = 'diff_path "$(post_review_json_string "$CRITERIA_PATH")"'
-if source.count(old) != 2:
+# Three branches build the reviewer inputs now: the general lens, the convention
+# lens (which also carries rule_sources_path), and the shared default.
+if source.count(old) != 3:
     raise SystemExit("mutation target count drifted")
 corrupted = source.replace(old, new)
 corrupted_path.write_text(corrupted, encoding="utf-8")
@@ -1758,7 +1762,7 @@ baseline_path, corrupted_path, expected_diff, criteria_path = sys.argv[1:]
 
 def validate_post_records(path):
     rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
-    if len(rows) != 6:
+    if len(rows) != 7:
         raise AssertionError(f"incomplete post-review roster: {len(rows)}")
     for row in rows:
         actual = row.get("inputs", {}).get("diff_path")
@@ -1889,4 +1893,4 @@ SH
   [ "$EARLY_PROBE_FAILURES" -eq 0 ] || exit 1
 fi
 
-printf 'review-child-inputs: PASS (17 unique source/edge pairs; 17 complete chains + 5 build-only review_pr.ci.* edges, dual simplify focus, lifecycle closed)\n'
+printf 'review-child-inputs: PASS (18 unique source/edge pairs; 18 complete chains + 5 build-only review_pr.ci.* edges, dual simplify focus, lifecycle closed)\n'

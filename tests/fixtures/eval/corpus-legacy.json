@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "repo": "fixture-owner/fixture-repo",
+  "label": "review-pr-finding",
+  "limit": 200,
+  "generated_at": "2026-08-10T00:00:00Z",
+  "corpus_path_hint": "tests/fixtures/eval/corpus-legacy.json",
+  "rows": [
+    {
+      "number": 21,
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "created_at": "2026-05-20T00:00:00Z",
+      "closed_at": "2026-05-21T00:00:00Z",
+      "labels": ["finding:true-positive", "review-pr-finding"],
+      "slug": "review-pr",
+      "edges": [],
+      "path": "legacy-a.sh",
+      "line": 1,
+      "severity": "blocker (Phase 1)",
+      "tier": "BLOCKER",
+      "attribution_source": "agent-line",
+      "fingerprint": "0000000000000021"
+    },
+    {
+      "number": 22,
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "created_at": "2026-05-20T00:00:00Z",
+      "closed_at": "2026-05-21T00:00:00Z",
+      "labels": ["finding:true-positive", "review-pr-finding"],
+      "slug": "review-pr",
+      "edges": [],
+      "path": "legacy-b.sh",
+      "line": 2,
+      "severity": "blocker (Phase 1)",
+      "tier": "BLOCKER",
+      "attribution_source": "agent-line",
+      "fingerprint": "0000000000000022"
+    },
+    {
+      "number": 23,
+      "state": "CLOSED",
+      "state_reason": "NOT_PLANNED",
+      "created_at": "2026-05-20T00:00:00Z",
+      "closed_at": "2026-05-21T00:00:00Z",
+      "labels": ["review-pr-finding"],
+      "slug": "review-pr",
+      "edges": [],
+      "path": "legacy-c.sh",
+      "line": 3,
+      "severity": "",
+      "tier": "",
+      "attribution_source": "none",
+      "fingerprint": "0000000000000023"
+    }
+  ]
+}

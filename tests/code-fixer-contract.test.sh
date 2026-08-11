@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 HELPER="$ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 
 python3 -I -B - "$ROOT" "$HELPER" <<'PY'
+import contextlib
 import dataclasses
 import hashlib
 import importlib.util
@@ -40,6 +41,55 @@ assert "    runs-on: windows-latest\n" in windows_job
 assert "python -I -B tests/code-fixer-contract-windows.test.py" in windows_job
 assert "continue-on-error: true" not in windows_job
 
+# Guard S1-S6 (#428) — the teardown decoupling must not drift back.
+#
+# EVERY needle is assembled at runtime. This block reads the file it lives in,
+# so a contiguous literal would count ITSELF: the ban would trip on the guard,
+# and the presence checks would pass vacuously after the thing they guard was
+# deleted. The program runs as `<stdin>` (piped to `python3 -I -B -`), so
+# `inspect.getsource` on anything defined here raises — the guard must read
+# file text from `root`.
+BANNED_CONSTRUCTOR = "tempfile.Temporary" + "Directory("
+NEEDLE_FACTORY = "tempfile." + "mkdtemp("
+NEEDLE_SUPPRESSION = "ignore_errors" + "=True"
+NEEDLE_CALL_SITE = "with scratch" + "_dir("
+NEEDLE_CRASH_SITE = 'scratch' + '_dir("code-fixer-ci-spaced-")'
+for relative, floor in (
+    ("tests/code-fixer-contract.test.sh", 30),   # 28 converted sites + S7 + S8
+    ("tests/code-fixer-contract-windows.test.py", 1),
+):
+    text = (root / relative).read_text(encoding="utf-8")
+    assert len(text) > 1000, f"S4 vacuity: {relative} unreadable or truncated"
+    assert BANNED_CONSTRUCTOR not in text, (
+        f"S1 (#428): raw tempdir constructor is back in {relative} — route it "
+        f"through the scratch factory; its teardown must not decide this "
+        f"suite's verdict"
+    )
+    assert text.count(NEEDLE_FACTORY) == 1, (
+        f"S2 (#428): {relative} must have exactly one scratch factory, "
+        f"found {text.count(NEEDLE_FACTORY)}"
+    )
+    assert text.count(NEEDLE_SUPPRESSION) == 1, (
+        f"S3 (#428): {relative} must suppress unlink errors in exactly one "
+        f"place, found {text.count(NEEDLE_SUPPRESSION)}"
+    )
+    assert text.count(NEEDLE_CALL_SITE) >= floor, (
+        f"S4 (#428): {relative} has {text.count(NEEDLE_CALL_SITE)} scratch "
+        f"call sites, floor is {floor} — sites were deleted or unrouted"
+    )
+guarded = (root / "tests/code-fixer-contract.test.sh").read_text(encoding="utf-8")
+assert NEEDLE_CRASH_SITE in guarded, (
+    "S5 (#428): the exact block from run 31369242976 is no longer routed "
+    "through the scratch factory"
+)
+NEEDLE_GC = "gc." + "auto=0"
+NEEDLE_MAINTENANCE = "maintenance." + "auto=false"
+assert NEEDLE_GC in guarded and NEEDLE_MAINTENANCE in guarded, (
+    "S6 (#428): the fixture git() no longer pins gc/maintenance — the repos "
+    "can start async work that outlives the `with` block and rewrites the "
+    "object set the git_object_files before/after rows snapshot"
+)
+
 assert dataclasses.is_dataclass(module.FindingKey)
 assert dataclasses.is_dataclass(module.RouteAuthority)
 assert module.FindingKey.__dataclass_params__.frozen
@@ -71,6 +121,8 @@ for name in (
     "publish_disposition",
     "publish_review_only_disposition",
     "count_deferred_blockers",
+    "project_verification_claims",
+    "publish_verification",
     "validate_persistence_result",
     "validate_commit",
     "validate_failed_return",
@@ -88,7 +140,8 @@ assert module.__all__ == (
     "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers", "validate_persistence_result",
+    "count_deferred_blockers", "project_verification_claims",
+    "publish_verification", "validate_persistence_result",
     "commit_review", "commit_standalone", "validate_commit", "validate_failed_return", "validate_residue", "validate_standalone_outcome", "validate_review_outcome",
     "validate_staged",
 )
@@ -266,9 +319,45 @@ def run_bytes(argv, *, expected=0):
     return result
 
 
+@contextlib.contextmanager
+def scratch_dir(prefix):
+    """A scratch tree whose TEARDOWN cannot decide this suite's verdict.
+
+    Scaffolding only. Nothing in this file reads the tree after its `with`
+    block ends — every `git_object_files` before/after pair is inside a body —
+    so a failed unlink here is a false signal, not a finding.
+    `TemporaryDirectory.__exit__` re-raises every OSError except
+    PermissionError and FileNotFoundError, which turned an ENOTEMPTY race on
+    `.git/objects` into a red `shape-checks` job on a PR whose diff never
+    touched this file (issue #428, run 31369242976). Suppressing the unlink
+    error is class-agnostic, so it holds whichever writer wins the race and the
+    fix does not depend on identifying that writer.
+
+    Tradeoff: a failed unlink leaves the tree behind. Harmless on ephemeral
+    runners; on a dev box repeated runs can accumulate `code-fixer-*` dirs
+    under $TMPDIR. mkdtemp plus rmtree is used instead of the stdlib context
+    manager's 3.10+ cleanup-suppression kwarg because no workflow pins an
+    interpreter (there is no `setup-python` step in .github/workflows), so the
+    kwarg could TypeError on the very job it protects.
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def git(repository, *args, check=True):
+    # Fixture repos must not start work that outlives the `with` block. A
+    # detached `gc --auto` / `maintenance run --auto` repack is the leading
+    # candidate for the #428 ENOTEMPTY teardown race, and it would also rewrite
+    # the object set the git_object_files before/after rows snapshot. Passed as
+    # `-c` rather than written to repo config so a later git(repo, "config", …)
+    # in a fixture cannot overwrite it — the same convention the shipped module
+    # uses for `-c core.fsmonitor=false`.
     return subprocess.run(
-        ["git", "-C", str(repository), *args],
+        ["git", "-C", str(repository),
+         "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
         capture_output=True,
         check=check,
     )
@@ -353,6 +442,7 @@ PHASE1_CONTRIBUTORS = (
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 )
 PHASE2_CONTRIBUTORS = (
     "review_pr.simplify.reuse",
@@ -420,6 +510,7 @@ def phase1_table(rows):
         "type-design-analyzer": "review_pr.review.types",
         "comment-analyzer": "review_pr.review.comments",
         "pr-test-analyzer": "review_pr.review.tests",
+        "convention-compliance": "review_pr.review.convention",
     }
     for agent, severity, path, line, _disposition, summary, detail in rows:
         converted.append(((edge_by_agent[agent],), severity, path, line, summary, detail))
@@ -594,7 +685,33 @@ def persistence_result(status, *, halted=False, blocker_count=0,
     )
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-persistence-result-") as temporary:
+# S7/S8 (#428) — the scratch factory's two load-bearing properties, asserted
+# behaviourally rather than by spelling. S7: drop-in for the stdlib context
+# manager (a str naming a live directory, gone after the block). S8: a teardown
+# that CANNOT unlink must not raise — that is the whole point of the change.
+with scratch_dir("code-fixer-scratch-probe-") as probe:
+    assert isinstance(probe, str), type(probe)
+    assert os.path.isdir(probe), probe
+    assert os.path.basename(probe).startswith("code-fixer-scratch-probe-"), probe
+assert not os.path.exists(probe), probe
+
+# `os.geteuid` does not exist on Windows, so the platform test must come first
+# and short-circuit. root ignores mode bits, so the row is meaningless there.
+if os.name != "nt" and os.geteuid() != 0:
+    with scratch_dir("code-fixer-scratch-undeletable-") as undeletable:
+        os.mkdir(os.path.join(undeletable, "sub"))
+        os.chmod(undeletable, 0o500)          # r-x: the child cannot be unlinked
+    # Exiting the block above must have raised NOTHING. PermissionError is the
+    # deterministic stand-in for the ENOTEMPTY of run 31369242976; the
+    # suppression is class-agnostic, so one covers the other by construction.
+    assert os.path.isdir(undeletable), undeletable
+    assert os.path.isdir(os.path.join(undeletable, "sub"))
+    os.chmod(undeletable, 0o700)
+    shutil.rmtree(undeletable)
+    assert not os.path.exists(undeletable), undeletable
+
+
+with scratch_dir("code-fixer-persistence-result-") as temporary:
     working = pathlib.Path(temporary).resolve()
     result_path = working / "result.md"
     status_path = working / "status.json"
@@ -856,7 +973,7 @@ expect_contract_failure(lambda: module.parse_finding_keys(phase1_oracle, "phase2
 expect_contract_failure(lambda: module.parse_finding_keys(phase2_oracle, "phase1"))
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
+with scratch_dir("code-fixer-contract-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1428,7 +1545,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
     )
     review_status_path.write_bytes(review_status_bytes)
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-rename-") as temporary:
+with scratch_dir("code-fixer-rename-") as temporary:
     # Rename/copy detection must not collapse an unapproved source path into an
     # approved destination. With detection disabled this is a D+A pair, both
     # of which are forbidden at the staged commit boundary.
@@ -1479,7 +1596,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-rename-") as temporary:
     assert rename_disposition.read_bytes() == b""
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == head
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-index-tree-") as temporary:
+with scratch_dir("code-fixer-index-tree-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1706,7 +1823,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-index-tree-") as temporary:
     assert quarantines[0].read_bytes() == attacker_index_payload
     quarantines[0].unlink()
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-index-refusal-") as temporary:
+with scratch_dir("code-fixer-index-refusal-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1828,7 +1945,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-index-refusal-") as temporar
     assert regular_snapshot(raw_index_path) == baseline
     assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-reuc-") as temporary:
+with scratch_dir("code-fixer-reuc-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1869,7 +1986,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-reuc-") as temporary:
     )
     assert regular_snapshot(reuc_index_path) == reuc_index
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-split-linked-") as temporary:
+with scratch_dir("code-fixer-split-linked-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1947,9 +2064,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-split-linked-") as temporary
 
 exercised_split_versions = set()
 for index_version in (2, 3, 4):
-    with tempfile.TemporaryDirectory(
-        prefix=f"code-fixer-split-v{index_version}-"
-    ) as temporary:
+    with scratch_dir(f"code-fixer-split-v{index_version}-") as temporary:
         repo = pathlib.Path(temporary) / "repo"
         repo.mkdir()
         git(repo, "init", "-q")
@@ -2031,7 +2146,7 @@ for index_version in (2, 3, 4):
         exercised_split_versions.add(index_version)
 assert exercised_split_versions == {2, 3, 4}
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-git-environment-") as temporary:
+with scratch_dir("code-fixer-git-environment-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -2142,7 +2257,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-git-environment-") as tempor
         check=False,
     ).returncode != 0
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-partial-clone-") as temporary:
+with scratch_dir("code-fixer-partial-clone-") as temporary:
     source = pathlib.Path(temporary) / "source"
     source.mkdir()
     git(source, "init", "-q")
@@ -2208,7 +2323,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-partial-clone-") as temporar
     assert regular_snapshot(partial_index_path) == partial_index
     assert git_object_files(partial) == partial_objects
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-sparse-") as temporary:
+with scratch_dir("code-fixer-sparse-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -2233,7 +2348,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-sparse-") as temporary:
         assert regular_snapshot(sparse_index) == sparse_before
         assert not tuple(sparse_index.parent.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-sha256-") as temporary:
+with scratch_dir("code-fixer-sha256-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     sha256_init = subprocess.run(
         ["git", "init", "-q", "--object-format=sha256", str(repo)],
@@ -2258,7 +2373,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-sha256-") as temporary:
         assert regular_snapshot(sha256_index) == sha256_before
         assert not tuple(sha256_index.parent.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
+with scratch_dir("code-fixer-standalone-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3074,7 +3189,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         working_dir=str(repo), head_before=parent, head_after=tip,
     ))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-review-only-") as temporary:
+with scratch_dir("code-fixer-review-only-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3268,7 +3383,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-review-only-") as temporary:
     assert (repo / ".git/index").read_bytes() == index_before
     assert git(repo, "status", "--porcelain", "--untracked-files=no").stdout == b""
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as temporary:
+with scratch_dir("code-fixer-standalone-empty-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3381,7 +3496,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as tempo
     assert git(repo, "diff", "--cached", "--binary").stdout == cached_before
     assert git(repo, "diff", "--binary").stdout == worktree_before
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-residue-") as temporary:
+with scratch_dir("code-fixer-residue-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3470,7 +3585,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-residue-") as temporary:
         )
     )
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-failed-return-guard-") as temporary:
+with scratch_dir("code-fixer-failed-return-guard-") as temporary:
     guard_root = pathlib.Path(temporary)
     review_repo = guard_root / "review"
     review_repo.mkdir()
@@ -3650,7 +3765,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-failed-return-guard-") as te
         )
     )
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-atomic-publication-") as temporary:
+with scratch_dir("code-fixer-atomic-publication-") as temporary:
     publication_dir = pathlib.Path(temporary)
     artifact = publication_dir / "snapshot.json"
     artifact.write_bytes(b"seed\n")
@@ -4293,7 +4408,7 @@ assert re.fullmatch(r"[0-9a-f]{64}", WORKFLOW_NONCE_OTHER)
 
 # 2. review_pr.fix.phase1 -- the authority-derived disposition and
 #    applied-content paths are still bound, and all four artifacts are frozen.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as temporary:
+with scratch_dir("code-fixer-workflow-review-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -4487,7 +4602,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as tempor
 # 3. review_pr.defer.findings -- capture AND outcome, end to end, on a workflow
 #    binding. The defer stage carries an aggregate and a disposition pin, and
 #    both survive the backend switch.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as temporary:
+with scratch_dir("code-fixer-workflow-defer-") as temporary:
     working = pathlib.Path(temporary).resolve()
     result_path = working / "result.md"
     status_path = working / "status.json"
@@ -4612,7 +4727,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as tempora
 
 # 4. simplify.fix.phase2 -- capture AND outcome, end to end, on a workflow
 #    binding, including the applied-content plan the fixer alone owes.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-simplify-") as temporary:
+with scratch_dir("code-fixer-workflow-simplify-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -4812,7 +4927,7 @@ def ci_status_document(binding, **overrides):
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
+with scratch_dir("code-fixer-ci-edges-") as temporary:
     ci_repo = pathlib.Path(temporary) / "repo"
     ci_repo.mkdir()
     git(ci_repo, "init", "-q")
@@ -5647,7 +5762,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
 # repository lists `.uberdev/` in its own .gitignore, so `ls-files --others`
 # returns nothing and every untracked-path check is vacuous against it. A
 # consumer repository has no such line, and that is the shape these rows model.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
+with scratch_dir("code-fixer-ci-conflict-") as temporary:
     cf_repo = pathlib.Path(temporary) / "repo"
     cf_repo.mkdir()
     git(cf_repo, "init", "-q", "-b", "main")
@@ -6098,7 +6213,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
 # both outcomes with the SAME authority. The base-tip assertion is what has to
 # discriminate; `base_sha` ancestry must still be checked ALONGSIDE it, never
 # replaced by it, so the row below asserts the old refusal still fires too.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-stack438-") as temporary:
+with scratch_dir("code-fixer-ci-stack438-") as temporary:
     st_repo = pathlib.Path(temporary) / "repo"
     st_repo.mkdir()
     git(st_repo, "init", "-q", "-b", "main")
@@ -6252,7 +6367,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-stack438-") as temporary:
 # arm needs. A fresh repository rather than a new branch in the fixture above:
 # the add/add conflict must be the ONLY unmerged entry, or a stray `UU` alongside
 # it makes the row pass for the wrong reason.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-addadd-") as temporary:
+with scratch_dir("code-fixer-ci-addadd-") as temporary:
     aa_repo = pathlib.Path(temporary) / "repo"
     aa_repo.mkdir()
     git(aa_repo, "init", "-q", "-b", "main")
@@ -6387,7 +6502,7 @@ def conflicting_repo(root, colliding_path):
 # line yields `"src/a`. The arm then handed a nonexistent pathspec to `git add`.
 # `-z` porcelain — what `_ci_porcelain_entries` reads — is unquoted and
 # unambiguous, which is why the answer has to come from there.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-spaced-") as temporary:
+with scratch_dir("code-fixer-ci-spaced-") as temporary:
     spaced_repo = conflicting_repo(temporary, "src/a b.py")
     assert b'AA "src/a b.py"\n' in git(spaced_repo, "status", "--porcelain").stdout
     assert b"AA src/a b.py\x00" in git(spaced_repo, "status", "--porcelain", "-z").stdout
@@ -6399,7 +6514,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-spaced-") as temporary:
 # P4 — the empty set is the EMPTY payload, at rc 0. Terminated rather than
 # joined precisely so this case has no representation of its own to confuse with
 # "one empty path".
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-clean-") as temporary:
+with scratch_dir("code-fixer-ci-clean-") as temporary:
     clean_repo = pathlib.Path(temporary) / "repo"
     clean_repo.mkdir()
     git(clean_repo, "init", "-q", "-b", "main")
@@ -6417,7 +6532,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-clean-") as temporary:
 # through the contract is that "git could not answer" must not arrive at the
 # shell wearing the same clothes as "no conflicts to resolve", so the one shape
 # this must never produce is `(0, b"")`.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-nonrepo-") as temporary:
+with scratch_dir("code-fixer-ci-nonrepo-") as temporary:
     unreadable = run_bytes(
         ["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
     assert unreadable.stdout == b"", unreadable.stdout
@@ -6425,6 +6540,424 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-nonrepo-") as temporary:
     # ...and through `run`, which owns the one-line/space-free/slash-free stderr
     # diagnostic shape every other rc-74 verb is held to.
     run(["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
+
+# ---------------------------------------------------------------------------
+# The Phase 1 finding-verification gate (#431)
+# ---------------------------------------------------------------------------
+assert tuple(inspect.signature(module.project_verification_claims).parameters) == (
+    "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
+    "claims_dir",
+)
+assert tuple(inspect.signature(module.publish_verification).parameters) == (
+    "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
+    "verification_path", "threshold", "candidate",
+)
+# The claim card MUST NOT be able to carry the reviewer's reasoning, and the
+# finding schema MUST NOT grow a sixth key to make room for a score.
+assert module.CLAIM_KEYS == {"finding_index", "location", "summary"}
+assert module.FINDING_KEYS == {
+    "detail", "scope", "severity", "source_edges", "summary"
+}
+assert module.VERIFICATION_VERDICTS == {"SURVIVES", "CULLED"}
+assert module.VERIFICATION_REASONS == {
+    "reproduced-from-diff", "contradicted-by-diff", "pre-existing",
+    "out-of-scope-line", "linter-domain", "gate-disabled",
+    "over-cap-unverified", "verifier-unavailable",
+}
+assert not (module.VERIFICATION_CHILD_REASONS & module.VERIFICATION_CONTROLLER_REASONS)
+
+
+def verification_fixture(temporary):
+    """A Phase 1 aggregate + paired disposition with a known eligible roster."""
+    evidence = pathlib.Path(temporary) / ".uberdev/research/20260810-101500-abcdef0"
+    evidence.mkdir(parents=True)
+    # Two eligible blockers (SKIPPED + REFUSED), one APPLIED blocker (not
+    # eligible: already fixed in the branch), one suggestion (never a /goal
+    # recursion target). Every detail carries the reviewer's own confidence
+    # prefix, which is exactly the string the card must not leak.
+    rows = [
+        ("code-reviewer (correctness lens)", "blocker", "src/a.py", "42",
+         "SKIPPED", "Unchecked index reads past the buffer",
+         "confidence: 93 - the loop bound is len(rows) but the index is i + 1"),
+        ("silent-failure-hunter", "blocker", "src/b.py", "7",
+         "APPLIED", "Swallowed OSError hides a missing config",
+         "confidence: 93 - the bare except returns None and the caller cannot tell"),
+        ("comment-analyzer", "suggestion", "src/c.py", "9",
+         "DEFERRED", "Comment describes the old signature",
+         "confidence: 93 - the parameter was renamed two commits ago"),
+        ("pr-test-analyzer", "blocker", "src/d.py", "13",
+         "REFUSED", "New branch has no test",
+         "confidence: 93 - the early-return path is unexercised"),
+    ]
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes(phase1_table(rows))
+    findings_sha = digest(findings)
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    dispositions = ["SKIPPED", "APPLIED", "SKIPPED", "REFUSED"]
+    document = {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": findings_sha,
+        "findings_disposition": [
+            {
+                "finding_index": key.finding_index,
+                "location": key.location,
+                "summary_sha256": key.summary_sha256,
+                "disposition": state,
+                "behavior_tag": "change" if state == "APPLIED" else "n/a",
+                "reason": "fixture",
+            }
+            for key, state in zip(keys, dispositions, strict=True)
+        ],
+    }
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return evidence, findings, findings_sha, disposition, digest(disposition)
+
+
+with scratch_dir("code-fixer-verify-claims-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    aggregate_before = findings.read_bytes()
+    claims_dir = evidence / "verification-claims"
+    receipt = module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(claims_dir),
+    )
+    # Roster scope: blocker AND not APPLIED. The APPLIED blocker and the
+    # suggestion are both absent.
+    assert receipt["verify_count"] == 2, receipt
+    assert [item["finding_index"] for item in receipt["claims"]] == [1, 4], receipt
+    assert receipt["aggregate_sha256"] == findings_sha
+    # AC 14: the aggregate is read, never rewritten.
+    assert findings.read_bytes() == aggregate_before
+    card_bytes = b""
+    for item in receipt["claims"]:
+        card_path = pathlib.Path(item["claim_path"])
+        # The receipt reports the CANONICAL path, so compare resolved parents:
+        # on macOS the temp root is a symlink and the two spellings differ.
+        assert card_path.parent.resolve() == claims_dir.resolve(), item
+        raw = card_path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == item["claim_sha256"]
+        card_bytes += raw
+        card = json.loads(raw)
+        assert set(card) == {"finding_index", "location", "summary"}, card
+        # Canonical compact-sorted JSON, so the bytes are re-derivable.
+        assert raw == module._canonical_json(card) + b"\n"
+    assert json.loads(pathlib.Path(receipt["claims"][0]["claim_path"]).read_bytes()) == {
+        "finding_index": 1,
+        "location": "src/a.py:42",
+        "summary": "Unchecked index reads past the buffer",
+    }
+    # THE withholding assertion: neither the reviewer's confidence prefix, the
+    # reasoning itself, nor the source_edges reach the verifier as bytes.
+    assert b"confidence: 93" not in card_bytes
+    assert b"the loop bound is len(rows)" not in card_bytes
+    assert b"review_pr.review" not in card_bytes
+    assert b"severity" not in card_bytes
+    # Republishing over an existing card is refused rather than silently
+    # overwriting somebody else's claim.
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(claims_dir),
+    ))
+    # A digest that does not match the bytes is a typed refusal, not a re-read.
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(findings), findings_sha256="0" * 64,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(evidence / "other-claims"),
+    ))
+    # A non-canonical aggregate is refused.
+    tampered = evidence / "tampered.md"
+    tampered.write_bytes(aggregate_before.replace(b"schema_version", b"schema_versioN"))
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(tampered), findings_sha256=digest(tampered),
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(evidence / "tampered-claims"),
+    ))
+
+with scratch_dir("code-fixer-verify-none-") as temporary:
+    # A suggestions-only aggregate produces zero cards and zero directories.
+    evidence = pathlib.Path(temporary) / ".uberdev/research/20260810-101500-abcdef1"
+    evidence.mkdir(parents=True)
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes(phase1_table([
+        ("comment-analyzer", "suggestion", "src/only.py", "3",
+         "DEFERRED", "Stale comment", "confidence: 84 - renamed parameter"),
+    ]))
+    findings_sha = digest(findings)
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_text(json.dumps({
+        "schema_version": 1, "phase": "phase1", "aggregate_sha256": findings_sha,
+        "findings_disposition": [{
+            "finding_index": keys[0].finding_index,
+            "location": keys[0].location,
+            "summary_sha256": keys[0].summary_sha256,
+            "disposition": "SKIPPED", "behavior_tag": "n/a", "reason": "fixture",
+        }],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    claims_dir = evidence / "verification-claims"
+    receipt = module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=digest(disposition),
+        claims_dir=str(claims_dir),
+    )
+    assert receipt["verify_count"] == 0 and receipt["claims"] == []
+    assert not claims_dir.exists()
+
+with scratch_dir("code-fixer-verify-publish-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def publish(opinions, threshold=80, target=None, expect_reason=None):
+        path = target if target is not None else evidence / "phase1-verification.json"
+        if not path.exists():
+            path.write_bytes(b"")
+        call = lambda: module.publish_verification(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition), disposition_sha256=disposition_sha,
+            verification_path=str(path), threshold=threshold,
+            candidate=json.dumps(opinions).encode("utf-8"),
+        )
+        if expect_reason is None:
+            return call()
+        expect_contract_reason(call, expect_reason)
+        # Fail closed: a refused publication leaves the target empty.
+        assert path.read_bytes() == b"", (expect_reason, path.read_bytes())
+        return None
+
+    survives = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    receipt = publish(survives)
+    sidecar = evidence / "phase1-verification.json"
+    document = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert set(document) == {
+        "schema_version", "phase", "aggregate_sha256", "threshold",
+        "findings_verification",
+    }
+    assert document["phase"] == "phase1"
+    assert document["aggregate_sha256"] == findings_sha
+    assert document["threshold"] == 80
+    # Canonical bytes, so the sidecar is re-derivable and diffable.
+    assert sidecar.read_bytes() == module._canonical_json(document) + b"\n"
+    assert hashlib.sha256(sidecar.read_bytes()).hexdigest() == (
+        receipt["verification_sha256"]
+    )
+    assert receipt["verified"] == 2 and receipt["culled"] == 1
+    assert [row["verdict"] for row in document["findings_verification"]] == [
+        "SURVIVES", "CULLED",
+    ]
+    # The row carries the same (finding_index, location, summary_sha256) triple
+    # the disposition binds, so the two artifacts describe the same findings.
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    by_index = {key.finding_index: key for key in keys}
+    for row in document["findings_verification"]:
+        key = by_index[row["finding_index"]]
+        assert row["location"] == key.location
+        assert row["summary_sha256"] == key.summary_sha256
+    # A non-empty pre-existing target is refused.
+    publish(survives, expect_reason="artifact_size_invalid") if False else None
+    try:
+        module.publish_verification(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition), disposition_sha256=disposition_sha,
+            verification_path=str(sidecar), threshold=80,
+            candidate=json.dumps(survives).encode("utf-8"),
+        )
+    except module.ContractFailure:
+        pass
+    else:
+        raise AssertionError("expected refusal on a non-empty verification target")
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == document
+
+with scratch_dir("code-fixer-verify-threshold-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def publish_at(threshold, opinions, name):
+        path = evidence / name
+        path.mkdir(parents=True, exist_ok=True)
+        target = path / "phase1-verification.json"
+        target.write_bytes(b"")
+        # The sidecar must be a sibling of the disposition; a different
+        # directory is a typed refusal, so the fixture copies both.
+        local_findings = path / findings.name
+        local_findings.write_bytes(findings.read_bytes())
+        local_disposition = path / disposition.name
+        local_disposition.write_bytes(disposition.read_bytes())
+        return module.publish_verification(
+            findings_path=str(local_findings), findings_sha256=findings_sha,
+            disposition_path=str(local_disposition),
+            disposition_sha256=disposition_sha,
+            verification_path=str(target), threshold=threshold,
+            candidate=json.dumps(opinions).encode("utf-8"),
+        ), target
+
+    borderline = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    # SAME child bytes, opposite verdicts: the threshold is applied entirely
+    # controller-side, which is what makes recorded scores re-thresholdable.
+    strict_receipt, strict_target = publish_at(80, borderline, "at-80")
+    loose_receipt, loose_target = publish_at(79, borderline, "at-79")
+    strict = json.loads(strict_target.read_text(encoding="utf-8"))
+    loose = json.loads(loose_target.read_text(encoding="utf-8"))
+    assert [row["verdict"] for row in strict["findings_verification"]] == [
+        "SURVIVES", "CULLED",
+    ]
+    assert [row["verdict"] for row in loose["findings_verification"]] == [
+        "SURVIVES", "SURVIVES",
+    ]
+    assert [row["score"] for row in strict["findings_verification"]] == [93, 79]
+    assert strict_receipt["culled"] == 1 and loose_receipt["culled"] == 0
+
+    # Fail toward keeping: no child opinion NEVER culls, whatever the reason.
+    for reason in ("verifier-unavailable", "over-cap-unverified"):
+        unavailable = [
+            {"finding_index": 1, "reason": reason},
+            {"finding_index": 4, "score": 12, "reason": "contradicted-by-diff"},
+        ]
+        _receipt, target = publish_at(80, unavailable, f"unavailable-{reason}")
+        rows = json.loads(target.read_text(encoding="utf-8"))["findings_verification"]
+        assert rows[0]["verdict"] == "SURVIVES" and rows[0]["score"] is None, rows
+        assert rows[0]["reason"] == reason
+        assert rows[1]["verdict"] == "CULLED", rows
+
+    # Kill switch: threshold 0 records every eligible row SURVIVES/gate-disabled.
+    disabled = [
+        {"finding_index": 1, "reason": "gate-disabled"},
+        {"finding_index": 4, "reason": "gate-disabled"},
+    ]
+    receipt, target = publish_at(0, disabled, "disabled")
+    rows = json.loads(target.read_text(encoding="utf-8"))["findings_verification"]
+    assert receipt["culled"] == 0 and receipt["verified"] == 2
+    assert all(row["verdict"] == "SURVIVES" and row["score"] is None for row in rows)
+    assert all(row["reason"] == "gate-disabled" for row in rows)
+
+with scratch_dir("code-fixer-verify-refuse-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def refuse(opinions, threshold=80, name="refuse", **overrides):
+        path = evidence / name
+        path.mkdir(parents=True, exist_ok=True)
+        target = path / "phase1-verification.json"
+        target.write_bytes(b"")
+        local_findings = path / findings.name
+        local_findings.write_bytes(findings.read_bytes())
+        local_disposition = path / disposition.name
+        local_disposition.write_bytes(disposition.read_bytes())
+        arguments = {
+            "findings_path": str(local_findings), "findings_sha256": findings_sha,
+            "disposition_path": str(local_disposition),
+            "disposition_sha256": disposition_sha,
+            "verification_path": str(target), "threshold": threshold,
+            "candidate": json.dumps(opinions).encode("utf-8"),
+        }
+        arguments.update(overrides)
+        expect_contract_failure(lambda: module.publish_verification(**arguments))
+        # Rollback: a refused transaction leaves the sidecar empty, never
+        # half-written.
+        assert target.read_bytes() == b"", (name, target.read_bytes())
+
+    good = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    # Roster mismatch: too few, too many, wrong index, wrong order.
+    refuse(good[:1], name="short")
+    refuse(good + [{"finding_index": 9, "score": 1, "reason": "pre-existing"}],
+           name="long")
+    refuse([{"finding_index": 2, "score": 93, "reason": "reproduced-from-diff"}, good[1]],
+           name="wrong-index")
+    refuse([good[1], good[0]], name="reversed")
+    # A controller reason may not carry a score, and a child reason must.
+    refuse([{"finding_index": 1, "score": 50, "reason": "verifier-unavailable"}, good[1]],
+           name="scored-controller-reason")
+    refuse([{"finding_index": 1, "reason": "reproduced-from-diff"}, good[1]],
+           name="unscored-child-reason")
+    # Closed vocabularies.
+    refuse([{"finding_index": 1, "score": 93, "reason": "looks-fine"}, good[1]],
+           name="unknown-reason")
+    refuse([{"finding_index": 1, "score": 101, "reason": "pre-existing"}, good[1]],
+           name="score-too-high")
+    refuse([{"finding_index": 1, "score": -1, "reason": "pre-existing"}, good[1]],
+           name="score-negative")
+    refuse([{"finding_index": 1, "score": True, "reason": "pre-existing"}, good[1]],
+           name="score-bool")
+    refuse([{"finding_index": 1, "score": "93", "reason": "pre-existing"}, good[1]],
+           name="score-string")
+    # A verdict is the controller's to assign; a caller may not smuggle one in.
+    refuse([dict(good[0], verdict="SURVIVES"), good[1]], name="caller-verdict")
+    # At threshold 0 no verifier runs, so a scored row cannot have come from one.
+    refuse(good, threshold=0, name="disabled-with-scores")
+    # The threshold itself is bounded.
+    refuse(good, threshold=101, name="threshold-high")
+    refuse(good, threshold=-1, name="threshold-low")
+    # The sidecar must be the disposition's sibling, under its exact basename.
+    stray = evidence / "stray"
+    stray.mkdir(parents=True, exist_ok=True)
+    (stray / "phase1-verification.json").write_bytes(b"")
+    expect_contract_failure(lambda: module.publish_verification(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        verification_path=str(stray / "phase1-verification.json"), threshold=80,
+        candidate=json.dumps(good).encode("utf-8"),
+    ))
+    misnamed = evidence / "verification.json"
+    misnamed.write_bytes(b"")
+    expect_contract_failure(lambda: module.publish_verification(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        verification_path=str(misnamed), threshold=80,
+        candidate=json.dumps(good).encode("utf-8"),
+    ))
+    # A digest that does not pin the bytes on disk is refused before any write.
+    refuse(good, name="bad-aggregate-digest", findings_sha256="0" * 64)
+    refuse(good, name="bad-disposition-digest", disposition_sha256="0" * 64)
+
+with scratch_dir("code-fixer-verify-cli-") as temporary:
+    # Both verbs are reachable through the shipped CLI, which is how
+    # /review-pr's Step 6b.0 fence calls them.
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    claims_dir = evidence / "verification-claims"
+    claims_receipt = json.loads(run([
+        "project-verification-claims",
+        "--findings-path", str(findings), "--findings-sha256", findings_sha,
+        "--disposition-path", str(disposition),
+        "--disposition-sha256", disposition_sha,
+        "--claims-dir", str(claims_dir),
+    ]))
+    assert claims_receipt["verify_count"] == 2, claims_receipt
+    target = evidence / "phase1-verification.json"
+    target.write_bytes(b"")
+    verification_receipt = json.loads(run([
+        "publish-verification",
+        "--findings-path", str(findings), "--findings-sha256", findings_sha,
+        "--disposition-path", str(disposition),
+        "--disposition-sha256", disposition_sha,
+        "--verification-path", str(target), "--threshold", "80",
+    ], stdin=json.dumps([
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 12, "reason": "contradicted-by-diff"},
+    ])))
+    assert verification_receipt["culled"] == 1, verification_receipt
+    assert verification_receipt["threshold"] == 80
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "repo": "fixture-owner/fixture-repo",
+  "label": "review-pr-finding",
+  "limit": 200,
+  "generated_at": "2026-08-10T00:00:00Z",
+  "corpus_path_hint": "tests/fixtures/eval/corpus-multi-edge.json",
+  "rows": [
+    {
+      "number": 31,
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "created_at": "2026-07-01T00:00:00Z",
+      "closed_at": "2026-07-02T00:00:00Z",
+      "labels": ["finding:true-positive", "review-pr-finding"],
+      "slug": "review-pr",
+      "edges": ["review_pr.review.correctness", "review_pr.review.general"],
+      "path": "merged.sh",
+      "line": 1,
+      "severity": "blocker",
+      "tier": "BLOCKER",
+      "attribution_source": "trailer",
+      "fingerprint": "0000000000000031"
+    },
+    {
+      "number": 32,
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "created_at": "2026-07-01T00:00:00Z",
+      "closed_at": "2026-07-02T00:00:00Z",
+      "labels": ["finding:true-positive", "review-pr-finding"],
+      "slug": "review-pr",
+      "edges": ["review_pr.review.correctness"],
+      "path": "single.sh",
+      "line": 2,
+      "severity": "blocker",
+      "tier": "BLOCKER",
+      "attribution_source": "trailer",
+      "fingerprint": "0000000000000032"
+    }
+  ]
+}

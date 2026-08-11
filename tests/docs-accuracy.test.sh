@@ -23,6 +23,12 @@
 #      than the reader. Section T9 below makes both halves enforceable: no
 #      `*.md:N` / `*.sh:N` literal inside §1 or the contract table, and every
 #      named symbol grep-resolves in plugins/uberdev/.
+#   7. (#435) `--auto` is a permission BYPASS, and since RFC 0015 §5 the default
+#      `workflow` backend does not scope it to the per-issue solvers at all.
+#      Section T11 below pins both halves: every line documenting the flag must
+#      carry a danger token, the flag PAIR must be named wherever the semantics
+#      are described, no doc may repeat the now-false "on the spawned agent"
+#      claim, and no doc may sell it as "max autonomy".
 #
 # These are structural greps over the shipped docs/shell files — they exercise
 # the source bytes, not a running session. Every assertion below FAILS on the
@@ -37,6 +43,9 @@ CONTRIBUTING_MD="$REPO_ROOT/CONTRIBUTING.md"
 RFC_DIR="$REPO_ROOT/docs/rfc"
 DISPATCH_RFC="$RFC_DIR/0004-cross-platform-dispatch-backends.md"
 ALIAS_RFC="$RFC_DIR/0011-alias-install-reliability.md"
+# #432: the reviewer-precision eval RFC. 0018 is reserved for it by the issue,
+# and T3.4 below locks the header so a renumber cannot drift from the filename.
+PRECISION_RFC="$RFC_DIR/0018-review-precision-eval.md"
 SESSION_START="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 ALIASES_SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
@@ -50,6 +59,10 @@ CONFIG_REF="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configura
 # acceptance table; RFC 0005 §9.5 defines the behaviours it locks).
 WORKFLOW_RFC="$RFC_DIR/0012-ultracode-workflow-orchestration.md"
 GOAL_RFC="$RFC_DIR/0005-uberdev-goal.md"
+# #434 vendored-provenance surface: RFC 0019 is the written policy behind
+# plugins/uberdev/vendor.json and tools/vendor/. It is listed here so a rename
+# or an accidental renumber is an explicit FATAL, not a silent skip.
+VENDOR_RFC="$RFC_DIR/0019-vendored-upstream-policy.md"
 PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
 HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
 HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
@@ -60,7 +73,8 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
-         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC"; do
+         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
+         "$PRECISION_RFC"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -222,6 +236,14 @@ fi
 assert_grep "$ALIAS_RFC" '^# RFC 0011 — Alias-Install Reliability' "T3.2 alias RFC header self-identifies as RFC 0011"
 # The dispatch RFC keeps 0004.
 assert_grep "$DISPATCH_RFC" '^# RFC 0004 — Cross-Platform Dispatch' "T3.3 dispatch RFC keeps RFC 0004 header"
+# The precision-eval RFC self-identifies as 0018 (#432 reserved the number).
+assert_grep "$PRECISION_RFC" '^# RFC 0018 — ' "T3.4 precision RFC header self-identifies as RFC 0018"
+# The vendored-upstream policy RFC (#434) self-identifies as RFC 0019. NOTE: the
+# H1 carries an em dash (U+2014), matched by `.` only in a UTF-8 locale, so the
+# pattern below spells it literally the same way T3.2/T3.3 do.
+# Numbered T3.5, not T3.4: #432 and #434 each appended their new RFC assertion as
+# "T3.4" independently, so the stacked merge would ship two rows under one label.
+assert_grep "$VENDOR_RFC" '^# RFC 0019 — Vendored Upstream Policy' "T3.5 vendor RFC header self-identifies as RFC 0019"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
@@ -662,51 +684,129 @@ DEAD_BACKEND_MARKER='enum error|deleted|removed|retired|no longer|#381|~~|RETRAC
 # else it contains, so this pattern is evaluated BEFORE the skip and a hit here
 # is unconditional.
 DEAD_BACKEND_NEGATION='not (deleted|removed|retired|gone)|still works|still passes|still (fully )?supported|remains? (fully )?supported|still (an? )?(available|selectable|valid)'
-dead_backend_hits=""
-while IFS= read -r shipped_doc; do
-  case "$shipped_doc" in
-    ./CHANGELOG.md|./.git/*|*/node_modules/*) continue ;;
-  esac
-  while IFS= read -r offending_line; do
-    [ -n "$offending_line" ] || continue
-    # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
-    # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
-    # Three tiers, in this order and no other:
-    #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
-    #      A ~~...~~ line is the amend-in-place form this repo already uses; its
-    #      text is quoted precisely to be contradicted.
-    #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
-    #      even alongside a tombstone word, because that is the shape where the
-    #      falsifying word is also the certifying word.
-    #   3. otherwise, an ordinary tombstone word excuses the line.
-    grep -qE -e '~~' <<<"$offending_line" && continue
-    if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"$offending_line"; then
-      grep -qE -e "$DEAD_BACKEND_MARKER" <<<"$offending_line" && continue
-    fi
-    dead_backend_hits="${dead_backend_hits}${shipped_doc}: ${offending_line}
+# _t10_corpus <root> -> repo-relative doc paths, one per line.
+#
+# The corpus is TRACKED content, not on-disk content (#445). T10 enforces an
+# invariant about SHIPPED docs, and "shipped" means "in the tree", not "in the
+# directory". A walk of the working directory also reads every scratch checkout
+# under it — and UberDev's own tooling (/solve, /turbo, the Workflow runtime's
+# isolation:"worktree", /merge's scratch worktree) creates those constantly. The
+# result was a guard that stayed green on a fresh CI checkout and reddened on
+# any working developer machine: the more the project's automation was used, the
+# more reliably its own suite failed, which trains people to ignore a red suite.
+#
+# `git ls-files` derives the exclusion set from .gitignore rather than restating
+# it, so it retires all four worktree prefixes (plugins/uberdev/lib/goal-state.sh
+# enumerates "", ".claude/worktrees/*/", ".worktrees/*/", "worktrees/*/") plus
+# .uberdev/ and every future scratch root in one move — a denylist of literal
+# directory names would have to be extended for each new one. Same enumerator,
+# same reasoning, as _epipe_sh_files in tests/epipe-guard.test.sh.
+#
+# STATED TRADEOFF: a doc that is written but not yet `git add`ed is no longer
+# scanned locally. CI scans the committed tree and still catches it before the
+# doc can ship, and epipe-guard.test.sh already accepted exactly this tradeoff.
+#
+# CONTRACT: writes diagnostics to stderr and RETURNS non-zero on an unusable
+# root. It must NOT `exit` — this helper is called inside $( … ), where `exit`
+# kills only the substitution subshell and leaves the caller holding an EMPTY
+# corpus, i.e. exactly the silent vacuous PASS this guard exists to prevent.
+# Every call site must therefore propagate the rc explicitly.
+_t10_corpus() {
+  local t10_root="$1"
+  local t10_out
+  git -C "$t10_root" rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "FATAL: docs-accuracy T10 corpus requires a git work tree: $t10_root" >&2
+    return 2
+  }
+  # core.quotePath=false keeps a non-ASCII tracked path from arriving as
+  # "caf\303\251.md", which the per-file existence guard would silently drop.
+  t10_out="$(git -c core.quotePath=false -C "$t10_root" ls-files -- '*.md' '*.json')" || return 2
+  # A residual quoted path (embedded newline or quote) must be LOUD, not
+  # dropped: a silent skip is the failure mode this whole guard is about.
+  # Herestring, not a pipe — this file sets pipefail and `grep -q` exits early.
+  if grep -qE -e '^"' <<<"${t10_out}"; then
+    echo "FATAL: docs-accuracy T10 corpus contains an unrepresentable path: $t10_root" >&2
+    return 3
+  fi
+  printf '%s\n' "${t10_out}"
+}
+
+# _t10_scan <root> -> "<path>: <lineno>:<line>" hits, one per line (empty = clean).
+# Root-parameterised so the fixture below can drive the REAL scanner over a
+# synthetic tree instead of asserting against a paraphrase of it.
+_t10_scan() {
+  local t10_root="$1"
+  # `local x="$(cmd)"` masks the substitution's rc (local's own rc wins), so the
+  # declaration and the assignment are deliberately on separate lines.
+  local t10_docs t10_doc t10_line
+  local t10_hits=""
+  t10_docs="$(_t10_corpus "$t10_root")" || return 2
+  while IFS= read -r t10_doc; do
+    [ -n "${t10_doc}" ] || continue
+    # Anchored at the corpus ROOT, with no `./` prefix — `git ls-files` emits
+    # repo-relative paths. NOT `*CHANGELOG.md`: that would excuse docs/CHANGELOG.md
+    # and every nested copy along with it. T10.5 pins both directions.
+    case "${t10_doc}" in
+      CHANGELOG.md|.git/*|*/node_modules/*) continue ;;
+    esac
+    # `ls-files` lists INDEX entries, which may be absent from the working tree
+    # (staged deletion, sparse checkout). The grep below swallows its own
+    # "no such file" via 2>/dev/null, so without this the file would be skipped
+    # silently — the same quiet-drop class the corpus swap exists to remove.
+    [ -f "${t10_root}/${t10_doc}" ] || continue
+    while IFS= read -r t10_line; do
+      [ -n "${t10_line}" ] || continue
+      # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
+      # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
+      # Three tiers, in this order and no other:
+      #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
+      #      A ~~...~~ line is the amend-in-place form this repo already uses; its
+      #      text is quoted precisely to be contradicted.
+      #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
+      #      even alongside a tombstone word, because that is the shape where the
+      #      falsifying word is also the certifying word.
+      #   3. otherwise, an ordinary tombstone word excuses the line.
+      grep -qE -e '~~' <<<"${t10_line}" && continue
+      if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"${t10_line}"; then
+        grep -qE -e "$DEAD_BACKEND_MARKER" <<<"${t10_line}" && continue
+      fi
+      t10_hits="${t10_hits}${t10_doc}: ${t10_line}
 "
-  done <<EOF
-$(grep -nE -e '--backend=(codex|claude-bg)' "$shipped_doc" 2>/dev/null || true)
+    done <<EOF
+$(grep -nE -e '--backend=(codex|claude-bg)' "${t10_root}/${t10_doc}" 2>/dev/null || true)
 EOF
-done <<EOF
-$(cd "$REPO_ROOT" && find . -type f \( -name '*.md' -o -name '*.json' \) \
-    -not -path './.git/*' -not -path '*/node_modules/*' | sort)
-EOF
+  done <<<"${t10_docs}"
+  printf '%s' "${t10_hits}"
+}
+
+dead_backend_hits=""
+dead_backend_hits="$(_t10_scan "$REPO_ROOT")" || {
+  echo "FATAL: docs-accuracy T10 scan could not run (see above): $REPO_ROOT" >&2; exit 2; }
 if [ -z "$dead_backend_hits" ]; then
   echo "  PASS  T10.1 no shipped .md/.json instructs a deleted dispatch backend"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  T10.1 a shipped doc names --backend=codex/claude-bg with nothing marking it dead"
-  printf '%s' "$dead_backend_hits" | sed 's/^/        /'
+  # `\n`, not bare `%s`: capturing _t10_scan through $( … ) strips the trailing
+  # newline its hit list carries, so the last hit would otherwise run into the
+  # next PASS line.
+  printf '%s\n' "$dead_backend_hits" | sed 's/^/        /'
   FAIL=$((FAIL + 1))
 fi
 # Anti-vacuity: the scan must actually have looked at the surfaces that shipped
-# the defect, or an empty/misrooted find would report a silent PASS.
-for dead_backend_witness in \
-  plugins/uberdev/skills/solve-fleet/SKILL.md \
-  plugins/uberdev/skills/review-fleet/SKILL.md \
-  plugins/uberdev/skills/goal-pipeline/SKILL.md \
-  README.md; do
+# the defect, or an empty/misrooted enumerator would report a silent PASS.
+#
+# ONE list, consumed by both T10.2 (the file still carries a tombstone) and
+# T10.3 (the enumerator actually reached the file). Two hand-maintained copies
+# of the same four paths would drift, and the halves would then be asserting
+# about different files while both looked green.
+T10_WITNESSES=(
+  plugins/uberdev/skills/solve-fleet/SKILL.md
+  plugins/uberdev/skills/review-fleet/SKILL.md
+  plugins/uberdev/skills/goal-pipeline/SKILL.md
+  README.md
+)
+for dead_backend_witness in "${T10_WITNESSES[@]}"; do
   if grep -qE -e '--backend=(codex|claude-bg)' "$REPO_ROOT/$dead_backend_witness"; then
     echo "  PASS  T10.2 $dead_backend_witness still carries a tombstone the scan reads"
     PASS=$((PASS + 1))
@@ -716,6 +816,505 @@ for dead_backend_witness in \
     FAIL=$((FAIL + 1))
   fi
 done
+
+# ── T10.3: the corpus the scan actually enumerated is non-empty and reaches
+# the witnesses ───────────────────────────────────────────────────────────────
+# T10.2 above asserts the four witness files CONTAIN a --backend= mention; it
+# never asserts the scan VISITED them. That gap is how a misrooted or empty
+# enumerator reports a silent PASS — the hole that let #445 live through a
+# release. T10.3 closes it by asserting membership in the enumerated corpus
+# itself, not in the hit list (the witnesses are tombstoned, so they correctly
+# produce no hits).
+T10_REPO_CORPUS=""
+T10_REPO_CORPUS="$(_t10_corpus "$REPO_ROOT")" || {
+  echo "FATAL: docs-accuracy T10 corpus is unusable: $REPO_ROOT" >&2; exit 2; }
+if [ -n "$T10_REPO_CORPUS" ]; then
+  echo "  PASS  T10.3 the T10 corpus is non-empty ($(printf '%s\n' "$T10_REPO_CORPUS" | wc -l | tr -d ' ') docs)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T10.3 the T10 corpus is EMPTY — T10.1 above is vacuous, not clean"
+  echo "        root: $REPO_ROOT"
+  FAIL=$((FAIL + 1))
+fi
+for dead_backend_witness in "${T10_WITNESSES[@]}"; do
+  # Herestring, not a pipe: `grep -q` exits on its first match and this file
+  # sets pipefail (tests/epipe-guard.test.sh).
+  if grep -qxF -- "$dead_backend_witness" <<<"$T10_REPO_CORPUS"; then
+    echo "  PASS  T10.3 $dead_backend_witness is inside the enumerated corpus"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T10.3 $dead_backend_witness is NOT in the enumerated corpus — the scan never read it"
+    echo "        root: $REPO_ROOT"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ── T10.4–T10.6: drive the REAL scanner over a synthetic corpus root ──────────
+# Built OUTSIDE $REPO_ROOT on purpose. A fixture tree inside the repo would be
+# punished by parallel worktrees, dirty-tree guards and .gitignore — and, worse,
+# would be swept up by the very enumerator under test, so the fixture could not
+# distinguish "excluded correctly" from "never looked".
+#
+# SELF-TRIP SAFETY: the rows below carry literal bare `--backend=codex` text.
+# Safe here because the T10 corpus is *.md/*.json only and this file is .sh;
+# safe under $SYN because $SYN is outside $REPO_ROOT. They must NEVER be written
+# into a tracked .md/.json in this repo — that reds T10.1 recursively.
+SYN="$(mktemp -d)" || { echo "FATAL: could not create the T10 fixture root" >&2; exit 2; }
+# Fail loud on an empty or non-directory result: every path below is built by
+# concatenating onto $SYN, so an empty $SYN would aim mkdir at the filesystem
+# root. Never let this one degrade quietly.
+[ -n "$SYN" ] && [ -d "$SYN" ] \
+  || { echo "FATAL: the T10 fixture root is not a directory: '$SYN'" >&2; exit 2; }
+# Top-level EXIT trap, never `trap … RETURN` (a zsh-incompatible construct the
+# cross-shell guard forbids). `|| true` absorbs MSYS read-only .git objects.
+trap 'rm -rf "$SYN" 2>/dev/null || true' EXIT
+# `-b main` keeps init.defaultBranch advice off stderr under Git Bash.
+git init -q -b main "$SYN" >/dev/null 2>&1 \
+  || { echo "FATAL: could not init the T10 fixture repo: $SYN" >&2; exit 2; }
+
+SYN_VIOLATION='Dispatch with `--backend=codex` for the fallback path.'
+mkdir -p "$SYN/classifier" "$SYN/docs" \
+  "$SYN/.worktrees/w" "$SYN/.claude/worktrees/w" "$SYN/worktrees/w" \
+  "$SYN/.uberdev/research"
+
+# Classifier rows — one file each, so a hit is trivially attributable.
+printf '%s\n' "$SYN_VIOLATION"                                                  > "$SYN/classifier/bare.md"
+printf '%s\n' '~~use `--backend=codex`~~'                                       > "$SYN/classifier/struck.md"
+printf '%s\n' '`--backend=codex` was removed in #381'                           > "$SYN/classifier/tombstone.md"
+printf '%s\n' '`--backend=claude-bg` is deprecated, not deleted: it still works' > "$SYN/classifier/negation.md"
+
+# Corpus-scope rows — identical violating text, differing only in WHERE they sit.
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/docs/x.md"                       # plain in-tree doc
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/CHANGELOG.md"                    # root: exempt
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/docs/CHANGELOG.md"               # nested: NOT exempt
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.worktrees/w/CHANGELOG.md"       # scratch checkout
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.claude/worktrees/w/README.md"   # scratch checkout
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/worktrees/w/README.md"           # 4th prefix (goal-state.sh)
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.uberdev/research/note.md"       # runtime scratch
+
+# Index only, no commit: `git ls-files` reads the index, and committing would
+# need a configured user.name/user.email that CI runners do not guarantee.
+git -C "$SYN" add \
+  classifier/bare.md classifier/struck.md classifier/tombstone.md classifier/negation.md \
+  docs/x.md CHANGELOG.md docs/CHANGELOG.md >/dev/null 2>&1 \
+  || { echo "FATAL: could not stage the T10 fixture corpus: $SYN" >&2; exit 2; }
+
+SYN_HITS=""
+SYN_HITS="$(_t10_scan "$SYN")" || {
+  echo "FATAL: docs-accuracy T10 scan could not run over the fixture: $SYN" >&2; exit 2; }
+# Path-only projection, sorted, one per line — the hit strings carry line
+# numbers and prose that would make an exact-set comparison brittle. No `./`
+# stripping: _t10_corpus emits repo-relative paths, so a `./` reaching here
+# would mean the enumerator regressed and T10.4 SHOULD say so.
+SYN_HIT_PATHS="$(printf '%s\n' "$SYN_HITS" | sed -n 's/^\(.*\): [0-9]*:.*$/\1/p' | sort -u)"
+
+_t10_expect_hit() {
+  local t10_id="$1" t10_want="$2" t10_why="$3"
+  if grep -qxF -- "${t10_want}" <<<"$SYN_HIT_PATHS"; then
+    echo "  PASS  ${t10_id} ${t10_want} is reported (${t10_why})"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  ${t10_id} ${t10_want} is NOT reported but must be (${t10_why})"
+    echo "        hit paths: $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+_t10_expect_clean() {
+  local t10_id="$1" t10_want="$2" t10_why="$3"
+  if grep -qxF -- "${t10_want}" <<<"$SYN_HIT_PATHS"; then
+    echo "  FAIL  ${t10_id} ${t10_want} is reported but must be excused (${t10_why})"
+    echo "        hit paths: $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  ${t10_id} ${t10_want} is excused (${t10_why})"
+    PASS=$((PASS + 1))
+  fi
+}
+
+# ── T10.4: the corpus is TRACKED content — scratch checkouts are not scanned ──
+# This is the regression under test (#445). The four scratch roots below are all
+# created by UberDev's own tooling (/solve, /turbo, the Workflow runtime,
+# /merge), so an on-disk enumerator reds the suite on any working dev machine
+# while staying green on a fresh CI checkout — the exact inverse of the signal
+# the guard is meant to give.
+#
+# Compared as an EXACT set, so a surplus hit (scratch leaked in) and a missing
+# hit (real doc dropped) both red.
+SYN_EXPECTED_HITS='classifier/bare.md
+classifier/negation.md
+docs/CHANGELOG.md
+docs/x.md'
+if [ "$SYN_HIT_PATHS" = "$SYN_EXPECTED_HITS" ]; then
+  echo "  PASS  T10.4 the T10 corpus is exactly the tracked docs — no scratch checkout leaks in"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T10.4 the T10 corpus is not the tracked-doc set (scratch checkouts leak in, or a real doc was dropped)"
+  echo "        expected: $(printf '%s' "$SYN_EXPECTED_HITS" | tr '\n' ' ')"
+  echo "        actual:   $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+  for t10_scratch in \
+    .worktrees/w/CHANGELOG.md \
+    .claude/worktrees/w/README.md \
+    worktrees/w/README.md \
+    .uberdev/research/note.md; do
+    if grep -qxF -- "$t10_scratch" <<<"$SYN_HIT_PATHS"; then
+      echo "        leaked scratch path: $t10_scratch"
+    fi
+  done
+  FAIL=$((FAIL + 1))
+fi
+
+# ── T10.5: the CHANGELOG exemption is anchored at the corpus ROOT ─────────────
+# Both directions are asserted separately so a regression says which way it
+# broke: widening the arm to *CHANGELOG.md would silently excuse every nested
+# copy, and forgetting to re-anchor it after the enumerator swap would start
+# reporting the root CHANGELOG's legitimately-historical entries.
+_t10_expect_clean T10.5 CHANGELOG.md      'root CHANGELOG is the append-only historical record'
+_t10_expect_hit   T10.5 docs/CHANGELOG.md 'a NESTED CHANGELOG is an ordinary shipped doc'
+
+# ── T10.6: the three-tier classifier, pinned row by row ──────────────────────
+# Green under BOTH enumerators by construction, so it certifies that the corpus
+# swap left the classifier alone.
+_t10_expect_hit   T10.6 classifier/bare.md      'bare instruction, no marker at all'
+_t10_expect_clean T10.6 classifier/struck.md    'tier 1 — struck through, retracted by construction'
+_t10_expect_clean T10.6 classifier/tombstone.md 'tier 3 — ordinary tombstone word'
+_t10_expect_hit   T10.6 classifier/negation.md  'tier 2 — negation beats the tombstone word'
+# ── T11: `--auto` is documented as a permission BYPASS, correctly scoped (#435) ─
+# Two drift classes on one flag, and they compound:
+#
+#   1. UNDER-LABELLED. `--auto` resolves to the bypass PAIR
+#      `--dangerously-skip-permissions --permission-mode bypassPermissions`
+#      (#241 collapsed the dead AUTO middle tier into the strict bypass; #246
+#      established that both flags are needed because they target different
+#      mechanisms). Several surfaces documented it as a mere convenience flag —
+#      `README.md` even called `/turbo … --auto` "max autonomy", which reads as
+#      an endorsement of the documented happy path rather than a warning.
+#   2. MIS-SCOPED. Since RFC 0015 §5 the DEFAULT `workflow` backend runs the
+#      per-issue solvers as agents in the calling session, so they inherit ITS
+#      permission tier — the flag pair reaches a child's argv only on
+#      `--backend=wezterm|background` and on the `/merge` + `/review-pr`
+#      dispatches. `commands/solve.md` still promised the bypass was applied
+#      "on the spawned agent", which is now false on the default path.
+#
+# The rule mirrors T10: a line is allowed to NAME the flag, but a line that
+# DOCUMENTS it must carry a danger token, and no line may make the unscoped
+# spawned-agent claim. Tokens are ASCII-only on purpose — both CI jobs are
+# ubuntu + Windows Git Bash, and this repo has no precedent for a multi-byte
+# emoji inside an ERE, so ⚠️ may decorate the prose but must never be the only
+# thing marking a line as dangerous.
+AUTO_DOC_SURFACES="README.md
+plugins/uberdev/commands/solve.md
+plugins/uberdev/commands/turbo.md
+plugins/uberdev/skills/solve-pipeline/SKILL.md
+plugins/uberdev/skills/solve-fleet/SKILL.md
+plugins/uberdev/skills/using-uberdev/references/configuration.md"
+# The flag PAIR is a claim about semantics, so it is pinned only where the
+# semantics are actually described — including goal.md, which documents the
+# same pair for its detached children but names no `--auto` flag of its own.
+AUTO_PAIR_SURFACES="README.md
+plugins/uberdev/commands/solve.md
+plugins/uberdev/commands/turbo.md
+plugins/uberdev/commands/goal.md
+plugins/uberdev/skills/solve-pipeline/SKILL.md"
+GOAL_MD="$REPO_ROOT/plugins/uberdev/commands/goal.md"
+# lib/solve-launcher.sh is deliberately NOT in AUTO_DOC_SURFACES: its nine
+# `--auto`/`SOLVE_AUTO` lines are argv-parser code, and a per-line danger-token
+# rule over source would red every one of them. It is covered by T11.7 (the
+# runtime note) and T11.9 (anti-vacuity) instead.
+SOLVE_LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+
+# T11.0 — preflight. A moved surface must be a hard failure, never a silent
+# zero-assertion PASS (suite convention).
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  [ -r "$REPO_ROOT/$auto_surface" ] || {
+    echo "FATAL: --auto documentation surface missing or unreadable: $REPO_ROOT/$auto_surface" >&2
+    exit 2
+  }
+done <<EOF
+$AUTO_DOC_SURFACES
+$AUTO_PAIR_SURFACES
+EOF
+for auto_extra in "$GOAL_MD" "$SOLVE_LAUNCHER"; do
+  [ -r "$auto_extra" ] || {
+    echo "FATAL: required file missing or unreadable: $auto_extra" >&2
+    exit 2
+  }
+done
+
+# Does any LINE of TEXT match all three (lowercased) EREs? awk rather than
+# `grep | grep`, so there is no pipeline exit status for pipefail to poison
+# (tests/epipe-guard.test.sh). Pass '.' for an unused slot.
+auto_line_has_all() {
+  awk -v p1="$1" -v p2="$2" -v p3="$3" '
+    { l = tolower($0) }
+    l ~ p1 && l ~ p2 && l ~ p3 { found = 1 }
+    END { exit !found }
+  ' <<<"$4"
+}
+
+# T11.1 — the bypass is a flag PAIR (#246): both flags target different
+# mechanisms and both are needed. Documenting one without the other invites a
+# future "simplification" that drops the half nobody wrote down. File-level,
+# not block-level: markdown has no reliable `--auto`-block delimiter, and a
+# heuristic one would be a worse lie than no assertion.
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  assert_grep "$REPO_ROOT/$auto_surface" 'dangerously-skip-permissions' \
+    "T11.1 $auto_surface names --dangerously-skip-permissions"
+  assert_grep "$REPO_ROOT/$auto_surface" 'permission-mode bypassPermissions' \
+    "T11.1 $auto_surface names the other half of the pair (--permission-mode bypassPermissions)"
+done <<EOF
+$AUTO_PAIR_SURFACES
+EOF
+
+# T11.2 — the backend scoping is stated. One line must carry all of
+# `inherit` + `session` + `permission|bypass`, so a line about inheriting the
+# session's MODEL (which configuration.md already had) cannot satisfy it.
+auto_scope_missing=""
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  if ! auto_line_has_all 'inherit' 'session' 'permission|bypass' \
+        "$(cat "$REPO_ROOT/$auto_surface")"; then
+    auto_scope_missing="${auto_scope_missing}${auto_surface}
+"
+  fi
+done <<EOF
+$AUTO_DOC_SURFACES
+plugins/uberdev/commands/goal.md
+EOF
+if [ -z "$auto_scope_missing" ]; then
+  echo "  PASS  T11.2 every --auto surface states that the default backend's solvers inherit the session's permission tier"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.2 surfaces with no 'solvers inherit the session's permission tier' line:"
+  printf '%s' "$auto_scope_missing" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.3 — every line that DOCUMENTS the flag carries an ASCII danger token.
+AUTO_DANGER_TOKEN='dangerous|bypass|no prompts|skip.*permission'
+# Two pure flag-GRAMMAR enumerations: they list `--auto` among the parser's
+# accepted tokens and make no claim about what it does, so a danger token
+# there would be noise. Fixed strings, and T11.3b fails if either rots away —
+# a stale exemption is a silent hole in the scan.
+AUTO_GRAMMAR_EXEMPT_1='`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service'
+AUTO_GRAMMAR_EXEMPT_2='`--trivial|--small|--full`, `--auto`, `--force`/`-f`, `--effort=<level>`,'
+AUTO_EXEMPT_FILE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+auto_danger_hits=""
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    # `--auto-mode` is a launcher argv selector (turbo-vs-interactive), not the
+    # permission flag. Delete the string and RE-MATCH rather than skipping the
+    # whole line: a line could legitimately carry both forms.
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto|SOLVE_AUTO|solve_auto' <<<"$auto_line_stripped" || continue
+    grep -qF -e "$AUTO_GRAMMAR_EXEMPT_1" <<<"$auto_line" && continue
+    grep -qF -e "$AUTO_GRAMMAR_EXEMPT_2" <<<"$auto_line" && continue
+    grep -qiE -e "$AUTO_DANGER_TOKEN" <<<"$auto_line" && continue
+    auto_danger_hits="${auto_danger_hits}${auto_surface}: ${auto_line}
+"
+  done <<EOF
+$(grep -nE -e '--auto' -e 'SOLVE_AUTO' -e 'solve_auto' "$REPO_ROOT/$auto_surface" 2>/dev/null || true)
+EOF
+done <<EOF
+$AUTO_DOC_SURFACES
+EOF
+if [ -z "$auto_danger_hits" ]; then
+  echo "  PASS  T11.3 every line documenting --auto carries an ASCII danger token"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.3 --auto is documented with nothing on the line marking it a permission bypass:"
+  printf '%s' "$auto_danger_hits" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.3b — the exemption list cannot rot into a silent hole.
+assert_grep_fixed_docs() {
+  local file="$1" needle="$2" desc="$3"
+  if grep -qF -e "$needle" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        needle: $needle"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_grep_fixed_docs "$AUTO_EXEMPT_FILE" "$AUTO_GRAMMAR_EXEMPT_1" \
+  "T11.3b grammar exemption 1 still resolves (else T11.3 has a stale hole)"
+assert_grep_fixed_docs "$AUTO_EXEMPT_FILE" "$AUTO_GRAMMAR_EXEMPT_2" \
+  "T11.3b grammar exemption 2 still resolves (else T11.3 has a stale hole)"
+
+# T11.4 — negative: no shipped doc may claim the bypass is applied "on the
+# spawned agent" without naming the scope that makes it true. On the default
+# `workflow` backend there is no per-child argv at all.
+# CHANGELOG.md and docs/ are exempt: append-only history and RFC prose describe
+# the world as it was when written.
+auto_unscoped_hits=""
+while IFS= read -r shipped_md; do
+  case "$shipped_md" in
+    ./CHANGELOG.md|./docs/*|./.git/*|*/node_modules/*) continue ;;
+  esac
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto' <<<"$auto_line_stripped" || continue
+    grep -qE -e 'on the spawned agent' <<<"$auto_line" || continue
+    grep -qiE -e 'inherit|session|--backend=' <<<"$auto_line" && continue
+    auto_unscoped_hits="${auto_unscoped_hits}${shipped_md}: ${auto_line}
+"
+  done <<EOF
+$(grep -nE -e '--auto' "$shipped_md" 2>/dev/null || true)
+EOF
+done <<EOF
+$(cd "$REPO_ROOT" && git -c core.quotePath=false ls-files -- '*.md' | sed 's|^|./|' | sort)
+EOF
+if [ -z "$auto_unscoped_hits" ]; then
+  echo "  PASS  T11.4 no shipped .md claims --auto applies the bypass 'on the spawned agent' unscoped"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.4 unscoped spawned-agent bypass claim (false on the default workflow backend):"
+  printf '%s' "$auto_unscoped_hits" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.5 — negative: a permission bypass is not a feature to endorse. Neither
+# surface may present `--auto` as the recommended maximum-autonomy setup.
+assert_absent_fixed "$REPO_ROOT/README.md" "max autonomy" \
+  "T11.5 README does not sell --auto as 'max autonomy'"
+assert_absent_fixed "$REPO_ROOT/plugins/uberdev/commands/turbo.md" "max-autonomy combo" \
+  "T11.5 turbo.md does not sell '/turbo <issue> --auto' as the max-autonomy combo"
+
+# T11.5b — goal.md already leads with the default-backend posture before the
+# bypass paragraph (RFC 0015 §6 R-1b). Regression pin on correct prose: reorder
+# it and the reader meets the bypass before learning it does not apply.
+goal_scope_line="$(awk 'tolower($0) ~ /inherit/ && tolower($0) ~ /session/ { print NR; exit }' "$GOAL_MD")"
+goal_bypass_line="$(awk '/dangerously-skip-permissions/ { print NR; exit }' "$GOAL_MD")"
+if [ -n "$goal_scope_line" ] && [ -n "$goal_bypass_line" ] \
+   && [ "$goal_scope_line" -lt "$goal_bypass_line" ]; then
+  echo "  PASS  T11.5b goal.md states the inherit-the-session posture (line $goal_scope_line) before the bypass (line $goal_bypass_line)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.5b goal.md's scoping statement must precede its bypass paragraph (scope='${goal_scope_line}' bypass='${goal_bypass_line}')"
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.6 — `--i-know-what-im-doing` is documented in goal.md exactly once, in a
+# negative call-out ("NEVER inherited"). A second mention is how a negative
+# call-out turns into an instruction.
+GOAL_OVERRIDE_COUNT="$(grep -c -e '--i-know-what-im-doing' "$GOAL_MD" || true)"
+if [ "${GOAL_OVERRIDE_COUNT:-0}" -eq 1 ]; then
+  echo "  PASS  T11.6 goal.md mentions --i-know-what-im-doing exactly once (the negative call-out)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.6 expected exactly 1 --i-know-what-im-doing mention in goal.md, found ${GOAL_OVERRIDE_COUNT:-0}"
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.7 — the launcher tells the OPERATOR at run time, not only the docs. The
+# `Permission mode:` line it prints is emitted before the backend is resolved
+# (UBERDEV_RESOLVED_BACKEND is exported later, by lib/dispatch.sh), so the
+# correction has to live in the workflow branch where the backend IS known.
+auto_note_line_no=""
+while IFS= read -r auto_note_cand; do
+  [ -n "$auto_note_cand" ] || continue
+  grep -qE -e 'backend=workflow' <<<"$auto_note_cand" || continue
+  grep -qE -e 'inherit' <<<"$auto_note_cand" || continue
+  grep -qE -e 'RFC 0015' <<<"$auto_note_cand" || continue
+  auto_note_line_no="${auto_note_cand%%:*}"
+  break
+done <<EOF
+$(grep -n -e 'backend=workflow' "$SOLVE_LAUNCHER" 2>/dev/null || true)
+EOF
+if [ -z "$auto_note_line_no" ]; then
+  echo "  FAIL  T11.7 lib/solve-launcher.sh emits no backend=workflow note naming the inherited tier + RFC 0015"
+  FAIL=$((FAIL + 1))
+else
+  auto_guard_start=$((auto_note_line_no - 3))
+  [ "$auto_guard_start" -lt 1 ] && auto_guard_start=1
+  auto_guard_slice="$(sed -n "${auto_guard_start},$((auto_note_line_no - 1))p" "$SOLVE_LAUNCHER")"
+  if auto_line_has_all 'auto_permissions' 'skip_permissions' '.' "$auto_guard_slice"; then
+    echo "  PASS  T11.7 the backend=workflow note exists (line $auto_note_line_no) and fires only under a resolved bypass tier"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T11.7 the backend=workflow note is not guarded by AUTO_PERMISSIONS/SKIP_PERMISSIONS within 3 lines above it"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# T11.8 — `solve_auto` means the permission bypass, NOT brainstorm auto-accept
+# (that is `/turbo`). README's config comment said the wrong one outright, and
+# the shipped config reference did not document the key at all.
+readme_solve_auto="$(grep -n -e '^solve_auto:' "$REPO_ROOT/README.md" || true)"
+if [ -n "$readme_solve_auto" ] \
+   && grep -qiE -e 'permission|bypass' <<<"$readme_solve_auto" \
+   && ! grep -qiE -e 'brainstorm' <<<"$readme_solve_auto"; then
+  echo "  PASS  T11.8 README's solve_auto key is described as a permission bypass, not brainstorm auto-accept"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.8 README's solve_auto key is missing, or still described as brainstorm auto-accept"
+  echo "        line: ${readme_solve_auto:-<absent>}"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$CONFIG_REF" '^solve_auto:' \
+  "T11.8 the shipped config reference documents the solve_auto key"
+
+# T11.9 — anti-vacuity. Every scan above is a loop over greps; a renamed flag,
+# a misrooted path or an emptied file would report a silent PASS (T10.2 shape).
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  auto_witness=""
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto|SOLVE_AUTO|solve_auto' <<<"$auto_line_stripped" || continue
+    auto_witness="$auto_line"
+    break
+  done <<EOF
+$(grep -nE -e '--auto' -e 'SOLVE_AUTO' -e 'solve_auto' "$REPO_ROOT/$auto_surface" 2>/dev/null || true)
+EOF
+  if [ -n "$auto_witness" ]; then
+    echo "  PASS  T11.9 $auto_surface still documents --auto for T11.3 to read"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T11.9 $auto_surface has no --auto mention at all — T11.3 is vacuous for it"
+    FAIL=$((FAIL + 1))
+  fi
+done <<EOF
+$AUTO_DOC_SURFACES
+EOF
+assert_grep "$GOAL_MD" 'bypassPermissions' \
+  "T11.9 goal.md still carries a bypassPermissions line for T11.1/T11.5b to read"
+assert_grep "$SOLVE_LAUNCHER" 'AUTO_PERMISSIONS' \
+  "T11.9 lib/solve-launcher.sh still carries AUTO_PERMISSIONS for T11.7 to read"
+
+echo
+echo "== T11: the vendored confidence rubric attributes its upstream (#431) =="
+# The 0-100 rubric is adapted from Anthropic's official `code-review` plugin
+# (Apache 2.0). The bundled licence text already ships as
+# licenses/pr-review-toolkit-Apache-2.0.txt; the rubric SSOT must NAME it, and
+# the README's Bundled table must list the rubric like every other vendored
+# surface. Attribution that lives only in a commit message is attribution
+# nobody reading the plugin can find.
+RUBRIC_SSOT="$REPO_ROOT/plugins/uberdev/shared/finding-confidence-rubric-v1.md"
+if [ -r "$RUBRIC_SSOT" ]; then
+  assert_grep "$RUBRIC_SSOT" 'licenses/pr-review-toolkit-Apache-2\.0\.txt' \
+    "T11.1 rubric SSOT names its bundled Apache-2.0 licence file"
+  assert_grep "$RUBRIC_SSOT" 'code-review' \
+    "T11.2 rubric SSOT names the upstream plugin it was adapted from"
+else
+  echo "  FAIL  T11: rubric SSOT missing or unreadable: $RUBRIC_SSOT"
+  FAIL=$((FAIL + 2))
+fi
+if [ -r "$REPO_ROOT/plugins/uberdev/licenses/pr-review-toolkit-Apache-2.0.txt" ]; then
+  echo "  PASS  T11.3 the licence file the rubric points at exists on disk"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.3 the licence file the rubric points at is missing"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REPO_ROOT/README.md" 'finding-confidence-rubric-v1' \
+  "T11.4 README Bundled table names the vendored rubric"
 
 echo
 echo "== Summary =="

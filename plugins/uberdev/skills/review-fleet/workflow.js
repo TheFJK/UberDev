@@ -1,5 +1,5 @@
 /* META-BEGIN */
-export const meta = { "name": "review-fleet", "description": "Shared Workflow-native child-dispatch engine for /uberdev:review-pr and /uberdev:simplify (RFC 0012 §3.1). ONE script, one `mode` branch, eight re-entrant `stage` values: review (the 6-reviewer Phase 1 fanout), fix (ONE code-fixer child against controller-supplied authority), simplify (the 3-lens code-simplifier fanout), defer (findings-to-issues), and the four Phase 3 CI stages ci-classify, ci-fix, ci-conflicts and ci-defer (#383). The script DISPATCHES AND WAITS ONLY — every digest, every artifact validation and every git/gh mutation stays in the calling session's Bash via lib/code_fixer_contract.py, which is why the stages are separate Workflow calls rather than one run.", "phases": ["Phase 1 — Review fanout","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI classify","Phase 3 — CI fix","Phase 3 — CI conflicts","Phase 3 — CI defer"], "whenToUse": "Invoked verbatim by skills/review-fleet/SKILL.md's stage recipes after the /uberdev:review-pr or /uberdev:simplify preflight emits an args envelope with pipeline=review-fleet." };
+export const meta = { "name": "review-fleet", "description": "Shared Workflow-native child-dispatch engine for /uberdev:review-pr and /uberdev:simplify (RFC 0012 §3.1). ONE script, one `mode` branch, nine re-entrant `stage` values: review (the 6-reviewer Phase 1 fanout), verify (one finding-verifier child per eligible Phase 1 blocker finding, #431), fix (ONE code-fixer child against controller-supplied authority), simplify (the 3-lens code-simplifier fanout), defer (findings-to-issues), and the four Phase 3 CI stages ci-classify, ci-fix, ci-conflicts and ci-defer (#383). The script DISPATCHES AND WAITS ONLY — every digest, every artifact validation and every git/gh mutation stays in the calling session's Bash via lib/code_fixer_contract.py, which is why the stages are separate Workflow calls rather than one run.", "phases": ["Phase 1 — Review fanout","Phase 1 — Verify","Phase 1 — Fix","Phase 2 — Simplify","Phase 2.5 — Defer issues","Phase 3 — CI classify","Phase 3 — CI fix","Phase 3 — CI conflicts","Phase 3 — CI defer"], "whenToUse": "Invoked verbatim by skills/review-fleet/SKILL.md's stage recipes after the /uberdev:review-pr or /uberdev:simplify preflight emits an args envelope with pipeline=review-fleet." };
 /* META-END */
 
 // skills/review-fleet/workflow.js — RFC 0012 §3.1, built to the P2 seam.
@@ -238,18 +238,58 @@ const diffPathAbs = String(CFG.diffPathAbs || "");
 // "one contract, N uncompared copies" class #403 filed.
 const phase1ContractPathAbs = String(CFG.phase1ContractPathAbs || "");
 
+// The convention lens's rule-source ALLOWLIST, by PATH (#433). Discovered by the
+// controller before this call and persisted; this script has no filesystem, so
+// it forwards the path and never reads, re-derives or repairs the list. Only the
+// convention child is told about it (see reviewerPrompt below) -- handing the
+// same path to the other six would invite them to make convention claims through
+// a lens with no citation gate behind it, which is the route that edge closes.
+const ruleSourcesPathAbs = String(CFG.ruleSourcesPathAbs || "");
+
 // Phase-1 emphasis tokens and the /simplify free-text focus. Both are CSV /
 // scalar because the envelope emitter has no array path. Emphasis NEVER gates
-// fanout membership — all six reviewers always run (review-pr.md:1324, :4507).
+// fanout membership — all seven reviewers always run (review-pr.md:1324, :4507).
 const aspects = String(CFG.aspects || "")
   .split(",").map(function (s) { return s.trim(); }).filter(Boolean);
 const focus = String(CFG.focus || "");
 
 // Numeric knobs re-clamped in-script: a script must never trust an
 // out-of-range value into the runtime's agent lifetime cap.
-const fanoutCap = clampInt(CFG.fanoutCap, 1, 50, 6);
+const fanoutCap = clampInt(CFG.fanoutCap, 1, 50, 7);
 const lensConcurrency = clampInt(CFG.lensConcurrency, 1, 3, 3);
 const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 40);
+
+// --- Phase 1 verification gate (#431) --------------------------------------
+// The eligible-finding COUNT, never the findings: the claims are bulk
+// untrusted bytes the controller projected from its OWN pinned aggregate, and
+// each verifier reads its own card at a controller-derived path.
+const verifyCount = clampInt(CFG.verifyCount, 0, 50, 0);
+// The same three-numbers distinction the ci-conflict block below spells out,
+// for the same reason: `verifyCap` is the TOTAL ceiling and is clamped by
+// `maxAgents`, because the verify roster is dispatched as ONE roster whose
+// length goes straight into ceilingGate(). A cap above maxAgents would accept
+// a set the ceiling gate then kills with zero verifiers dispatched.
+// `verifyWave` is the CONCURRENCY knob, which dispatchRoster batches with.
+const verifyCap = Math.min(clampInt(CFG.verifyCap, 1, 50, 50), maxAgents);
+const verifyWave = fanoutCap;
+// One claim card per verifier at `<prefix><NN>.json` -- ONE string crosses the
+// boundary and the per-child pathname is derived here, exactly as
+// ciConflictAuthorityPrefixAbs is. A single shared claim path would name every
+// other finding's claim to every verifier, which is the leak the card exists
+// to prevent.
+const verifyClaimPrefixAbs = String(CFG.verifyClaimPrefixAbs || "");
+// The verifier OUTPUT contract, by PATH. Manifest-resolved by the controller
+// from policy/solve-run-tree-v1.json output_contracts["finding-verifier-v1"],
+// never spelled in JS -- same #403 rule as phase1ContractPathAbs above.
+const verifyContractPathAbs = String(CFG.verifyContractPathAbs || "");
+// The rubric SSOT, by PATH.
+const verifyRubricPathAbs = String(CFG.verifyRubricPathAbs || "");
+// The PR title/description artifact, by PATH. Untrusted like the diff.
+const verifyPrContextPathAbs = String(CFG.verifyPrContextPathAbs || "");
+// NO threshold scalar, deliberately and permanently. A verifier told the
+// cutoff calibrates to it, and the comparison is the controller's
+// (lib/code_fixer_contract.py publish_verification). There is nothing to
+// interpolate here because nothing arrives here.
 const maxNew = clampInt(CFG.maxNew, 1, 200, 10);
 
 // ---- controller-supplied authority, forwarded VERBATIM, never derived ----
@@ -287,6 +327,11 @@ const noncePool = String(CFG.runNonces || "")
 const phase1PathAbs = String(CFG.phase1PathAbs || "");
 const phase2PathAbs = String(CFG.phase2PathAbs || "");
 const phase1DispositionPathAbs = String(CFG.phase1DispositionPathAbs || "");
+// The Phase 1 verification sidecar (#431), by PATH. OPTIONAL: an empty string
+// means the gate did not run for this iteration, and findings-to-issues then
+// behaves exactly as it did before the gate existed. Never a threshold and
+// never a verdict count -- the child reads the artifact.
+const verificationPathAbs = String(CFG.verificationPathAbs || "");
 const phase2DispositionPathAbs = String(CFG.phase2DispositionPathAbs || "");
 
 // ---- Phase 3 CI (#383), all controller-supplied, all forwarded VERBATIM ----
@@ -459,15 +504,22 @@ function envWrap(source, body) {
 // silently re-binds every child to the wrong nonce, which fails closed at
 // validation but wastes a whole run — treat these arrays as a wire format.
 
-// The six Phase 1 reviewers (skills/post-impl-review/SKILL.md:99-104 edge
-// contracts, :502-509 agent-file/lens table). All six always run; the aspect
+// The seven Phase 1 reviewers (skills/post-impl-review/SKILL.md edge
+// contracts and agent-file/lens table). All seven always run; the aspect
 // emphasis changes emphasis only, never fanout membership. code-reviewer is
 // dispatched TWICE — correctness lens and general lens — and the prompt, not
 // the agent file, differentiates them.
+//
+// `convention` is APPENDED LAST on both sides (#433) so the positional nonce
+// pool extends without re-binding any existing child. Its lens does not
+// overlap correctness: the CLAUDE.md-compliance claim moved OUT of the
+// correctness lens when this one arrived, because a convention claim that can
+// reach the aggregate through a lens with no citation gate is exactly the
+// false-positive route this edge exists to close.
 const REVIEW_ROSTER = [
   { edge: "review_pr.review.correctness", agentType: "uberdev:code-reviewer",
     agentFile: "code-reviewer.md", slug: "correctness",
-    lens: "Correctness, design, and CLAUDE.md compliance" },
+    lens: "Correctness and design" },
   { edge: "review_pr.review.silent_failures", agentType: "uberdev:silent-failure-hunter",
     agentFile: "silent-failure-hunter.md", slug: "silent-failures",
     lens: "Swallowed errors, ignored return values, silent fallbacks" },
@@ -482,7 +534,10 @@ const REVIEW_ROSTER = [
     lens: "Behavioral test coverage, critical gaps, test quality" },
   { edge: "review_pr.review.general", agentType: "uberdev:code-reviewer",
     agentFile: "code-reviewer.md", slug: "general",
-    lens: "Catch-all for issues that fall outside the other five lenses" },
+    lens: "Catch-all for issues that fall outside the other six lenses" },
+  { edge: "review_pr.review.convention", agentType: "uberdev:convention-compliance",
+    agentFile: "convention-compliance.md", slug: "convention",
+    lens: "Project-convention compliance, with a verbatim rule citation for every finding" },
 ];
 
 // The three Phase 2 lenses. /simplify keeps the `review_pr.` edge prefix
@@ -651,6 +706,21 @@ const S = {
       conflictCount: { type: "integer", minimum: 0 },
       note: { type: "string" },
     } },
+  verify: { type: "object", additionalProperties: false,
+    required: ["edgeId", "status", "resultPath", "statusPath"],
+    properties: {
+      edgeId: { type: "string" },
+      // No score and no verdict: the score lives in the RESULT FILE the
+      // controller re-reads through
+      // uberdev_child_validate_finding_verifier_result, and the verdict is
+      // assigned controller-side after the threshold comparison. A structured
+      // return a child composes is a score a child could report differently
+      // from the one it wrote.
+      status: { type: "string", enum: ["SCORED", "REFUSED", "BLOCKED"] },
+      resultPath: { type: "string" },
+      statusPath: { type: "string" },
+      note: { type: "string" },
+    } },
   ciConflict: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
@@ -750,6 +820,32 @@ function phase1OutputContract() {
     + "completed review with zero findings is `findings: []` with `verdict: APPROVE`.";
 }
 
+// The convention edge's extra binding: the allowlist path, the `detail` grammar
+// its findings must use, and the instruction that covers the common case of a
+// repo that wrote no conventions down. All of it is code-chosen trusted text
+// plus one controller-supplied path, so it sits OUTSIDE any envelope.
+function conventionContract() {
+  return "## Rule sources (this lens only)\n"
+    + "The rule-source allowlist for this run is the file at " + ruleSourcesPathAbs + ". It "
+    + "lists repo-relative paths, one per line. Read ONLY those paths for rules. A rule "
+    + "document that is not on that list does not exist for this review, and a finding citing "
+    + "one is dropped before it reaches the report.\n"
+    + "If that file is EMPTY, this repository has written no conventions down. That is a "
+    + "normal outcome, not a failure: return `findings: []` with `verdict: APPROVE`. Do NOT "
+    + "substitute general best practice, another project's conventions, or your own "
+    + "preferences for a rule this project never wrote.\n"
+    + "A rule governs the directory it lives in and everything beneath it, and nothing else: "
+    + "a rule in `plugins/x/AGENTS.md` does not govern `tools/`.\n"
+    + "Every finding's `detail` must be exactly this one-line shape, emitted as a "
+    + "double-quoted scalar:\n"
+    + "  confidence: <0-100> — rule <allowlisted-path>:<line> — <why the change "
+    + "breaks it> — quote: <the rule text, verbatim>\n"
+    + "The quote is re-checked against the cited file's bytes before aggregation. A quote "
+    + "that cannot be located verbatim near the cited line is not a low-confidence finding: "
+    + "it is culled, because a fabricated citation is a false finding rather than an "
+    + "uncertain one. A rule you cannot quote verbatim is a rule you may not report.";
+}
+
 function reviewerPrompt(entry, nonce) {
   var lines = [];
   lines.push("Read the agent instructions at " + pluginRootAbs + "/agents/" + entry.agentFile
@@ -760,6 +856,10 @@ function reviewerPrompt(entry, nonce) {
   lines.push("## Lens emphasis: " + entry.lens);
   lines.push("");
   lines.push(diffContract());
+  if (entry.edge === "review_pr.review.convention") {
+    lines.push("");
+    lines.push(conventionContract());
+  }
   if (aspects.length > 0) {
     // Aspect tokens are preflight-parsed CLI words, not agent-derived text, so
     // they are trusted scalars — but they still only shift EMPHASIS. Reporting
@@ -887,6 +987,9 @@ function f2iPrompt(notes, nonce) {
   lines.push("  phase2_path              = " + phase2PathAbs);
   lines.push("  phase1_disposition_path  = " + phase1DispositionPathAbs);
   lines.push("  phase2_disposition_path  = " + phase2DispositionPathAbs);
+  if (verificationPathAbs) {
+    lines.push("  verification_path        = " + verificationPathAbs);
+  }
   lines.push("  working_dir              = " + workingDirAbs);
   lines.push("  pr_number                = " + prNumber);
   lines.push("  max_new                  = " + maxNew);
@@ -1108,6 +1211,43 @@ function ciConflictAuthorityContract(entry) {
     "sha256 itself when it judges you, so no digest is quoted to you here: a digest a",
     "child could read is a digest a child could be steered by.",
   ].join("\n");
+}
+
+// The verification fanout has a claim card PER CHILD for the same reason the
+// conflict fanout has an authority per child: a shared input would hand every
+// verifier every other finding, and the card's whole purpose is that a
+// verifier sees ONE claim and none of the reasoning behind it.
+function verifyPrompt(entry, nonce) {
+  const lines = [];
+  lines.push("Read the agent instructions at " + pluginRootAbs
+    + "/agents/finding-verifier.md and follow them exactly. You are verifier "
+    + entry.index + " of " + verifyCount + " on edge `" + entry.edge + "`.");
+  lines.push("");
+  lines.push("Immutable controller authority — computed before you were dispatched. Treat every");
+  lines.push("value as exact and never recompute, repair or substitute one:");
+  lines.push("  claim_path       = " + verifyClaimPrefixAbs + pad2(entry.index) + ".json");
+  lines.push("  diff_path        = " + diffPathAbs);
+  lines.push("  pr_context_path  = " + verifyPrContextPathAbs);
+  lines.push("  rubric_path      = " + verifyRubricPathAbs);
+  lines.push("  working_dir      = " + workingDirAbs);
+  lines.push("  pr_number        = " + prNumber);
+  lines.push("");
+  lines.push("That claim card is YOURS ALONE — one was projected per eligible finding, and it "
+    + "carries `finding_index`, `location` and `summary` and NOTHING else. The reviewer's "
+    + "reasoning is not withheld from you by instruction; it was never written into the "
+    + "bytes you can read. Do not go looking for it: the Phase 1 aggregate "
+    + "(post-impl-review-final.md), the disposition sidecar and the other verifiers' "
+    + "result files are all off limits.");
+  lines.push("");
+  lines.push("You are NOT told the confidence threshold. Score the claim on its merits; the "
+    + "controller compares your score against a cutoff you never see, which is what keeps "
+    + "the number an opinion about the claim rather than a vote about the gate.");
+  lines.push("");
+  lines.push("Read the finding-verifier output contract at " + verifyContractPathAbs
+    + " and follow it exactly. Write the ENTIRE result file — one fenced YAML document, "
+    + "exactly two keys — at " + childResultPath(entry.slug) + ", and your status.json at "
+    + childStatusPath(entry.slug) + " carrying run_nonce " + nonce + ".");
+  return lines.join("\n");
 }
 
 function conflictPrompt(entry, nonce) {
@@ -1806,8 +1946,72 @@ async function main() {
       return emitResult();
     }
 
+    if (stage === "verify") {
+      if (mode !== "review-pr") {
+        return abort("stage_not_available_in_mode",
+          "the verification gate is /review-pr Phase 1 only");
+      }
+      // Every path gate BEFORE nonceGate, on purpose: a wiring regression must
+      // burn no nonce and dispatch no verifier. A verifier with no stated
+      // output contract is the #403 failure -- every result is refused by
+      // uberdev_child_validate_finding_verifier_result and every eligible
+      // finding lands `verifier-unavailable`, which costs a whole fanout to
+      // learn.
+      if (!isSafeAbsPath(verifyClaimPrefixAbs)) {
+        return abort("bad_verify_claim_path", verifyClaimPrefixAbs);
+      }
+      if (!isSafeAbsPath(verifyContractPathAbs)) {
+        return abort("bad_verify_contract_path", verifyContractPathAbs);
+      }
+      if (!isSafeAbsPath(verifyRubricPathAbs)) {
+        return abort("bad_verify_rubric_path", verifyRubricPathAbs);
+      }
+      if (!isSafeAbsPath(verifyPrContextPathAbs)) {
+        return abort("bad_verify_pr_context_path", verifyPrContextPathAbs);
+      }
+      if (!isSafeAbsPath(diffPathAbs)) return abort("bad_diff_path", diffPathAbs);
+      if (!isSafeAbsPath(workingDirAbs)) return abort("bad_working_dir", workingDirAbs);
+      // Refused BY NAME here, at exactly the number
+      // lib/review-fleet-args.sh's REVIEW_FLEET_VERIFY_TOTAL_CAP refuses at,
+      // rather than accepted and then killed by ceilingGate with zero
+      // verifiers dispatched. A zero count is a wiring bug too: the controller
+      // short-circuits a zero-eligible run without calling this script at all.
+      if (verifyCount < 1 || verifyCount > verifyCap) {
+        return abort("bad_verify_count", String(verifyCount));
+      }
+      // The roster is DYNAMIC: one child per eligible finding. The findings
+      // never enter this script -- they are bulk untrusted bytes, so each
+      // child's claim travels the diffPathAbs way, BY PATH, at a
+      // script-derived location the controller wrote and pinned before this
+      // call.
+      const verifyRoster = [];
+      for (let i = 1; i <= verifyCount; i++) {
+        verifyRoster.push({
+          edge: "review_pr.verify.finding",
+          slug: "verify-" + pad2(i),
+          index: i,
+        });
+      }
+      const verifyNonce = nonceGate(verifyRoster.length);
+      if (verifyNonce) return abort("nonce_gate_failed", verifyNonce);
+      const verifyCeiling = ceilingGate(verifyRoster.length);
+      if (verifyCeiling) return abort("agent_ceiling", verifyCeiling);
+
+      phase("Phase 1 — Verify");
+      await dispatchRoster(verifyRoster, "Phase 1 — Verify", verifyPrompt,
+        function () { return "uberdev:finding-verifier"; }, S.verify, verifyWave);
+      const blockedVerifiers = children.filter(
+        function (c) { return c.status === "BLOCKED"; }).length;
+      log("verify: " + (children.length - blockedVerifiers) + "/"
+        + verifyRoster.length + " verifier(s) returned, " + blockedVerifiers
+        + " blocked — the controller now re-reads each result file, applies the "
+        + "threshold and publishes the verification sidecar. A blocked or malformed "
+        + "verifier NEVER culls: the gate fails toward keeping the finding.");
+      return emitResult();
+    }
+
     return abort("unknown_stage",
-      "expected one of review | fix | simplify | defer | ci-classify | ci-fix | "
+      "expected one of review | verify | fix | simplify | defer | ci-classify | ci-fix | "
       + "ci-conflicts | ci-defer; the controller must name the stage explicitly because "
       + "guessing one would mean guessing which proofs already exist");
 

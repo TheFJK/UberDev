@@ -72,8 +72,11 @@ assert standalone['optional_inputs']=={}
 assert standalone['phase']=='simplify_fix'
 assert standalone['allowed_workflows']==['simplify']
 review_edges={edge for edge in providers if edge.startswith('review_pr.review.')}
-assert len(review_edges)==6
-assert tree.get('output_contracts')=={'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md'}
+assert len(review_edges)==7
+assert tree.get('output_contracts')=={
+ 'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
+ 'finding-verifier-v1':'shared/finding-verifier-output-v1.md'
+}
 for edge in review_edges:
     row=providers[edge]
     assert row['required_inputs']['changed_paths']=='repo_path_array', edge

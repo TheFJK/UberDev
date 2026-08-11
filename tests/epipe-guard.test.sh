@@ -237,8 +237,15 @@ _epipe_sh_files() {
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "$REPO_ROOT" ls-files -- '*.sh'
   else
+    # The non-git fallback must restate by hand what .gitignore states for the
+    # branch above, and it was missing the two bare worktree roots that
+    # plugins/uberdev/lib/goal-state.sh enumerates alongside .claude/worktrees —
+    # the same corpus-scope gap #445 fixed in tests/docs-accuracy.test.sh.
+    # Both globs are listed on purpose: '*/worktrees/*' alone would cover
+    # '.worktrees' nowhere, and naming each states the intent explicitly.
     find "$REPO_ROOT" -name '*.sh' -not -path '*/.git/*' \
       -not -path '*/tests/_fixtures/*' -not -path '*/.claude/*' \
+      -not -path '*/.worktrees/*' -not -path '*/worktrees/*' \
       | sed "s#^$REPO_ROOT/##"
   fi
 }

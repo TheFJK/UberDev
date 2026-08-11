@@ -1222,4 +1222,76 @@ PACKAGE_LIB="$TMP/installed-package/lib/child-dispatch.sh" PACKAGE_HANDOFF="$TMP
 AFTER="$(find "$TMP/installed-package" -type f -exec shasum -a 256 {} + | sort)"
 [ "$BEFORE" = "$AFTER" ]
 [ ! -d "$TMP/installed-package/lib/__pycache__" ]
-echo 'child-dispatch: 102 checks passed'
+# ---------------------------------------------------------------------------
+# uberdev_child_validate_finding_verifier_result (#431)
+# ---------------------------------------------------------------------------
+# The Phase 1 verification gate's result boundary. Same file-identity preamble
+# as its Phase 1 twin (that block is a security property, not boilerplate — a
+# symlinked or hard-linked result file is a path a child can point somewhere it
+# does not own), different document grammar: exactly two scalar keys.
+VERIFY_DIR="$TMP/verify"; mkdir -p "$VERIFY_DIR"
+verifier_result() { printf '```yaml\nscore: %s\nreason: %s\n```\n' "$1" "$2" >"$VERIFY_DIR/result.md"; }
+
+# Accepts a well-formed document and emits both fields.
+verifier_result 93 reproduced-from-diff
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+# The endpoints of the score range are legal.
+verifier_result 0 contradicted-by-diff
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "0 contradicted-by-diff" ]
+verifier_result 100 reproduced-from-diff
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "100 reproduced-from-diff" ]
+# Every controller-assigned reason token is accepted by the grammar too: the
+# controller writes the same document shape when no child opinion exists.
+for verifier_reason in pre-existing out-of-scope-line linter-domain gate-disabled over-cap-unverified verifier-unavailable; do
+  verifier_result 50 "$verifier_reason"
+  [ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "50 $verifier_reason" ]
+done
+
+# Out-of-range, non-integer, quoted, and leading-zero scores are refused.
+for bad_score in 101 -1 1000 abc '"80"' 007 80.0 ''; do
+  verifier_result "$bad_score" reproduced-from-diff
+  ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+done
+# An unknown reason token is refused — the vocabulary is closed.
+for bad_reason in probably-fine REPRODUCED-FROM-DIFF '"pre-existing"' 'reproduced from diff' ''; do
+  verifier_result 90 "$bad_reason"
+  ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+done
+# A verdict is the controller's to assign; a child that emits one is malformed.
+printf '```yaml\nscore: 93\nreason: reproduced-from-diff\nverdict: SURVIVES\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+# A missing key, a duplicate key, and a reversed key order are all malformed.
+printf '```yaml\nscore: 93\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+printf '```yaml\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+printf '```yaml\nscore: 93\nscore: 12\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+printf '```yaml\nreason: pre-existing\nscore: 93\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+# The boundary is a whole-file fullmatch, not a search for the last fence.
+printf 'Here is my answer:\n```yaml\nscore: 93\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+printf '```yaml\nscore: 93\nreason: pre-existing\n```\nHope that helps!\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+printf '```yaml\nscore: 1\nreason: pre-existing\n```\n```yaml\nscore: 99\nreason: pre-existing\n```\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+# An unfenced document is malformed.
+printf 'score: 93\nreason: pre-existing\n' >"$VERIFY_DIR/result.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md" >/dev/null 2>&1
+
+# File identity: a symlinked result and a hard-linked result are both refused
+# even when their CONTENT is perfectly well-formed.
+verifier_result 93 reproduced-from-diff
+ln -s "$VERIFY_DIR/result.md" "$VERIFY_DIR/symlinked.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/symlinked.md" >/dev/null 2>&1
+ln "$VERIFY_DIR/result.md" "$VERIFY_DIR/hardlinked.md"
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/hardlinked.md" >/dev/null 2>&1
+# Anti-vacuity: with the extra link gone the SAME bytes validate, so the two
+# refusals above are about identity and not about the content.
+rm -f "$VERIFY_DIR/hardlinked.md"
+[ "$(uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/result.md")" = "93 reproduced-from-diff" ]
+# A missing result is a refusal, never an empty success.
+! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/absent.md" >/dev/null 2>&1
+
+echo 'child-dispatch: 102 checks passed (+ the finding-verifier result boundary)'

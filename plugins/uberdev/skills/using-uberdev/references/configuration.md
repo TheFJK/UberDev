@@ -31,6 +31,9 @@ model_routing:
   workflows: {}                  # solve/turbo only; bounded route/effort/sandbox overrides
   roles: {}                      # canonical policy roles; bounded route/effort/sandbox overrides
 
+# --- /solve permission tier ---
+solve_auto: false                # PERMISSION BYPASS. true (or --auto, or SOLVE_AUTO=1) resolves the pair --dangerously-skip-permissions --permission-mode bypassPermissions, so no tool prompts at all — destructive ones included. On the default workflow backend the per-issue solvers inherit THIS session's permission tier instead of receiving the pair (RFC 0015 §6 R-1b); it reaches a child's argv only on --backend=wezterm|background. Default false; env: SOLVE_AUTO
+
 # --- /solve tier clamp ---
 solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
 solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
@@ -40,7 +43,7 @@ solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps
 fanout_concurrency:
   research: 6                    # int [1, 50]; orchestrator Phase 1 research-fanout cap; default 6; env: UBERDEV_FANOUT_RESEARCH
   solve_bg: 6                    # int [1, 50]; /turbo parallel claude --bg fanout cap; default 6; env: UBERDEV_FANOUT_SOLVE_BG
-  post_impl_review: 6            # int [1, 50]; post-impl-review reviewer fanout cap; default 6; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
+  post_impl_review: 7            # int [1, 50]; post-impl-review reviewer fanout cap; default 7; env: UBERDEV_FANOUT_POST_IMPL_REVIEW
   merge_strategy: 10             # int [1, 50]; /merge Phase 2.2 strategy-decider fanout cap; default 10; env: UBERDEV_FANOUT_MERGE_STRATEGY (alias for MAX_PARALLEL_AGENTS in merge-pipeline/SKILL.md Constants)
   conflict_resolver: 10          # int [1, 50]; /merge Phase 3.3 conflict-resolver fanout cap; default 10; env: UBERDEV_FANOUT_CONFLICT_RESOLVER (NEW — Phase 3.3 was uncapped previously)
 
@@ -50,12 +53,17 @@ command_timeouts:
   solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1)/gtimeout wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
   review_pr: 900                 # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 900 (15m); env: UBERDEV_REVIEW_PR_TIMEOUT
   merge: 600                     # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 600 (10m); env: UBERDEV_MERGE_TIMEOUT
+
+# --- /review-pr Phase 1 finding-verification gate (RFC 0017) ---
+# dot-path ref: review.confidence_threshold
+review:
+  confidence_threshold: 80       # int [0, 100]; Phase 1 blocker findings scoring below this are recorded CULLED and never filed as issues; 0 disables the gate entirely (no verifier agents dispatched); default 80; env: UBERDEV_REVIEW_THRESHOLD
 ---
 
 # Notes (optional, free-form markdown for human reference)
 ```
 
-Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow.
+Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow. Note that `SOLVE_AUTO` is a permission **bypass** and not a convenience toggle; see the `solve_auto` key above before exporting it.
 
 ## GPT-5.6 model routing (RFC 0013, v0.40)
 
@@ -221,7 +229,7 @@ skill splits dispatch into `ceil(N / cap)` sequential single-message
 waves (the per-wave single-message Task() invariant is preserved).
 Useful for rate-limited tiers and laptop runs where 10 parallel Claude
 sessions overwhelm RAM. `solve_bg` caps the number of parallel `claude --bg` background sessions dispatched by `/turbo` (and `/solve` when multiple issue numbers are passed). Larger queues split into `ceil(N / cap)` sequential single-message waves with per-wave `solve_bg_fanout_wave_started` audit events. Mirrors `merge_strategy` (`merge-pipeline/SKILL.md:401`).
-Defaults: 6 / 6 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
+Defaults: 6 / 7 / 10 / 10 / 6 respectively. Env overrides: `UBERDEV_FANOUT_{RESEARCH, POST_IMPL_REVIEW, MERGE_STRATEGY, CONFLICT_RESOLVER, SOLVE_BG}`. Note: `conflict_resolver`
 introduces a NEW default cap of 10 in Phase 3.3 of `/merge`, where the
 fanout was previously uncapped — queues of 11+ conflicted files in a
 single PR now chunk into multiple waves (intentional behavioural

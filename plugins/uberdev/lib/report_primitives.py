@@ -51,6 +51,7 @@ PHASE1_CONTRIBUTORS = (
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 )
 PHASE2_CONTRIBUTORS = (
     "review_pr.simplify.reuse",

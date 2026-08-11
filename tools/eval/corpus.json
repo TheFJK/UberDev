@@ -1,0 +1,701 @@
+{
+  "corpus_path_hint": "tools/eval/corpus.json",
+  "generated_at": "2026-08-11T01:41:26Z",
+  "label": "review-pr-finding",
+  "limit": 200,
+  "repo": "TheFJK/UberDev",
+  "rows": [
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T15:19:41Z",
+      "created_at": "2026-05-14T21:27:28Z",
+      "edges": [],
+      "fingerprint": "1adcd8b0b793d440",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 30,
+      "number": 119,
+      "path": "plugins/uberdev/skills/merge-pipeline/SKILL.md",
+      "severity": "major (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "none",
+      "closed_at": "2026-05-21T08:01:31Z",
+      "created_at": "2026-05-21T08:01:26Z",
+      "edges": [],
+      "fingerprint": "",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 131,
+      "path": "",
+      "severity": "",
+      "slug": "",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": ""
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T09:25:43Z",
+      "created_at": "2026-05-21T08:01:43Z",
+      "edges": [],
+      "fingerprint": "d673e479a2da49f3",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 132,
+      "path": "tests/testers-pipeline.test.sh",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T10:36:23Z",
+      "created_at": "2026-05-21T08:02:02Z",
+      "edges": [],
+      "fingerprint": "18632e2af8811860",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 97,
+      "number": 133,
+      "path": "plugins/uberdev/skills/testers-pipeline/SKILL.md",
+      "severity": "important (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T14:51:39Z",
+      "created_at": "2026-05-21T11:45:02Z",
+      "edges": [],
+      "fingerprint": "4d2fe2c132546a05",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 136,
+      "path": "plugins/uberdev/lib/goal-state.sh + skills/goal-pipeline/SKILL.md",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T16:00:45Z",
+      "created_at": "2026-05-21T11:45:18Z",
+      "edges": [],
+      "fingerprint": "d599c295ba4d2846",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 137,
+      "path": "plugins/uberdev/lib/goal-state.sh:280-295",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T16:00:48Z",
+      "created_at": "2026-05-21T11:45:32Z",
+      "edges": [],
+      "fingerprint": "e88d8b24c5c1476a",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 138,
+      "path": "plugins/uberdev/lib/goal-state.sh:264-278",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T16:00:58Z",
+      "created_at": "2026-05-21T11:45:49Z",
+      "edges": [],
+      "fingerprint": "1ebc3aad5a567b0d",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 139,
+      "path": "plugins/uberdev/lib/goal-state.sh:297-312",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T16:01:01Z",
+      "created_at": "2026-05-21T11:46:06Z",
+      "edges": [],
+      "fingerprint": "4309ba690cf1719b",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 140,
+      "path": "plugins/uberdev/lib/goal-state.sh:410-467",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T16:01:07Z",
+      "created_at": "2026-05-21T11:46:21Z",
+      "edges": [],
+      "fingerprint": "c5dde74682329d9a",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 141,
+      "path": "plugins/uberdev/lib/goal-state.sh:314-325",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:14:59Z",
+      "created_at": "2026-05-21T13:24:22Z",
+      "edges": [],
+      "fingerprint": "c57c5e4308c4fa6b",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 148,
+      "path": "tests/goal.test.sh:BT5",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:15:00Z",
+      "created_at": "2026-05-21T13:24:44Z",
+      "edges": [],
+      "fingerprint": "522d382f22c73eff",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 149,
+      "path": "tests/goal.test.sh:BT6",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:15:01Z",
+      "created_at": "2026-05-21T13:25:13Z",
+      "edges": [],
+      "fingerprint": "871d3e7d81a2d400",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 150,
+      "path": "tests/goal.test.sh:BT8+BT11",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:15:00Z",
+      "created_at": "2026-05-21T13:31:44Z",
+      "edges": [],
+      "fingerprint": "60af15d4f695bd3a",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 463,
+      "number": 152,
+      "path": "tests/goal.test.sh",
+      "severity": "critical (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "CRITICAL"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T17:21:34Z",
+      "created_at": "2026-05-21T14:33:16Z",
+      "edges": [],
+      "fingerprint": "bb5cfef8ea1c781e",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 154,
+      "path": "plugins/uberdev/lib/dispatch.sh:241-248",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:14:59Z",
+      "created_at": "2026-05-21T15:33:59Z",
+      "edges": [],
+      "fingerprint": "59dac49d07206f3d",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 236,
+      "number": 156,
+      "path": "plugins/uberdev/lib/goal-state.sh",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-22T04:14:59Z",
+      "created_at": "2026-05-21T15:34:16Z",
+      "edges": [],
+      "fingerprint": "5110edf40b0e22a0",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 157,
+      "path": "plugins/uberdev/lib/goal-state.sh:243-245",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T19:59:36Z",
+      "created_at": "2026-05-21T17:03:56Z",
+      "edges": [],
+      "fingerprint": "df95c606d2b50dd6",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 159,
+      "path": "plugins/uberdev/lib/goal-state.sh:543-551",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T19:59:38Z",
+      "created_at": "2026-05-21T17:04:23Z",
+      "edges": [],
+      "fingerprint": "1bed447f114ad47b",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 160,
+      "path": "plugins/uberdev/skills/goal-pipeline/SKILL.md:426,438",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-21T19:59:40Z",
+      "created_at": "2026-05-21T17:04:46Z",
+      "edges": [],
+      "fingerprint": "a891ee8698e54309",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 161,
+      "path": "plugins/uberdev/lib/goal-state.sh:353-373,377-381,386-392,410-438",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "none",
+      "closed_at": "2026-05-26T19:58:55Z",
+      "created_at": "2026-05-25T22:14:09Z",
+      "edges": [],
+      "fingerprint": "",
+      "labels": [
+        "review-pr-finding",
+        "uberdev:active"
+      ],
+      "line": null,
+      "number": 207,
+      "path": "",
+      "severity": "",
+      "slug": "",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": ""
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-26T17:51:52Z",
+      "created_at": "2026-05-26T13:49:43Z",
+      "edges": [],
+      "fingerprint": "0d85df2382a14137",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 214,
+      "path": "tests/goal-batch-barrier.test.sh:n/a",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T23:58:20Z",
+      "created_at": "2026-05-26T19:07:30Z",
+      "edges": [],
+      "fingerprint": "19e6e7af75f11374",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 439,
+      "number": 219,
+      "path": "plugins/uberdev/skills/goal-pipeline/SKILL.md",
+      "severity": "major (overridden from blocker) (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T10:27:04Z",
+      "created_at": "2026-05-27T00:59:31Z",
+      "edges": [],
+      "fingerprint": "54f69e5c8138cb34",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 225,
+      "path": "plugins/uberdev/skills/orchestrator/SKILL.md:91-93,197,219-227",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-27T20:46:40Z",
+      "created_at": "2026-05-27T00:59:44Z",
+      "edges": [],
+      "fingerprint": "6d0f365c5c6eb3ab",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 226,
+      "path": "tests/goal-pipeline-awk-positional.test.sh:55-74",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-27T20:48:39Z",
+      "created_at": "2026-05-27T00:59:58Z",
+      "edges": [],
+      "fingerprint": "8141797540bb4db5",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 227,
+      "path": "tests/goal-pipeline-awk-positional.test.sh:74-75",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "NOT_PLANNED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-29T00:04:21Z",
+      "created_at": "2026-05-27T01:00:11Z",
+      "edges": [],
+      "fingerprint": "9dd1718d098d4ce3",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 228,
+      "path": "tests/goal-pipeline-awk-positional.test.sh:55-73",
+      "severity": "major (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T23:58:19Z",
+      "created_at": "2026-05-27T01:00:28Z",
+      "edges": [],
+      "fingerprint": "0515f9bfd86be159",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 229,
+      "path": "plugins/uberdev/skills/goal-pipeline/SKILL.md:222,358,371,391,463,682,960,1063",
+      "severity": "major (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T23:58:19Z",
+      "created_at": "2026-05-27T01:00:41Z",
+      "edges": [],
+      "fingerprint": "8ffa2a5800651b74",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 230,
+      "path": "plugins/uberdev/skills/goal-pipeline/SKILL.md:222,358,371,391,463,682,960,1063",
+      "severity": "major (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-29T01:49:31Z",
+      "created_at": "2026-05-27T01:00:57Z",
+      "edges": [],
+      "fingerprint": "8fcf6b5d55a56269",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 292,
+      "number": 231,
+      "path": "tests/goal.test.sh",
+      "severity": "major (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T23:58:20Z",
+      "created_at": "2026-05-27T01:01:09Z",
+      "edges": [],
+      "fingerprint": "01b268428abc8eed",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 56,
+      "number": 232,
+      "path": "plugins/uberdev/skills/requesting-code-review/SKILL.md",
+      "severity": "important (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-29T00:04:19Z",
+      "created_at": "2026-05-27T01:01:22Z",
+      "edges": [],
+      "fingerprint": "717596e00911131a",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 65,
+      "number": 233,
+      "path": "tests/goal-pipeline-awk-positional.test.sh",
+      "severity": "important (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T23:58:19Z",
+      "created_at": "2026-05-27T01:01:36Z",
+      "edges": [],
+      "fingerprint": "464c84cc634334df",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 234,
+      "path": "plugins/uberdev/skills/goal-pipeline/SKILL.md:221-224",
+      "severity": "important (Phase 2)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "MAJOR"
+    },
+    {
+      "attribution_source": "none",
+      "closed_at": "2026-05-28T23:58:20Z",
+      "created_at": "2026-05-27T08:18:37Z",
+      "edges": [],
+      "fingerprint": "",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 237,
+      "path": "",
+      "severity": "",
+      "slug": "",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": ""
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T22:57:24Z",
+      "created_at": "2026-05-28T18:13:55Z",
+      "edges": [],
+      "fingerprint": "13d7feeb5e591414",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 257,
+      "path": "tests/cluster-pipeline.test.sh",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T22:57:24Z",
+      "created_at": "2026-05-28T18:14:16Z",
+      "edges": [],
+      "fingerprint": "8f34a412880f9332",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 258,
+      "path": "tests/cluster-pipeline.test.sh",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T22:57:24Z",
+      "created_at": "2026-05-28T18:14:36Z",
+      "edges": [],
+      "fingerprint": "d17927f77406f9a0",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": null,
+      "number": 259,
+      "path": "tests/cluster-pipeline.test.sh",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    },
+    {
+      "attribution_source": "agent-line",
+      "closed_at": "2026-05-28T22:57:24Z",
+      "created_at": "2026-05-28T19:35:27Z",
+      "edges": [],
+      "fingerprint": "4a7d981880604d9d",
+      "labels": [
+        "review-pr-finding"
+      ],
+      "line": 669,
+      "number": 263,
+      "path": "tests/cluster-pipeline.test.sh",
+      "severity": "blocker (Phase 1)",
+      "slug": "review-pr",
+      "state": "CLOSED",
+      "state_reason": "COMPLETED",
+      "tier": "BLOCKER"
+    }
+  ],
+  "schema_version": 1
+}

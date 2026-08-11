@@ -32,7 +32,7 @@ git -C ../prkit add -A && git -C ../prkit commit -m "chore: initial prkit 0.1.0"
 
 | File | Role |
 |---|---|
-| `manifest.txt` | Claude copy set (count-locked at 38 by `tests/prkit-manifest.test.sh`) |
+| `manifest.txt` | Claude copy set (count-locked at 42 by `tests/prkit-manifest.test.sh`) |
 | `managed-path-guard.py` | Shared generator/verifier containment guard: component-wise `lstat`, Windows reparse/reserved-name checks, required postconditions, and sealed-tree scans |
 | `rewrite.sh` | `prkit_neutralize` (de-namespace out-of-set) + `prkit_apply_rewrites` (slug + blanket); sourced |
 | `templates/` | Standalone-only scaffold files (`{{VERSION}}`/`{{DATE}}`) |
@@ -97,7 +97,7 @@ and is reverted by the next generation.
 ## Adding a file to prkit
 
 1. Add its path to `manifest.txt`, and bump the count assert in
-   `tests/prkit-manifest.test.sh` (38). Then re-run
+   `tests/prkit-manifest.test.sh` (43). Then re-run
    `python3 tools/prkit/published-check.py --refresh --prkit-version <current>`,
    or `tests/prkit-publish.test.sh` P2 reds on the manifest/record mismatch.
 2. If it introduces a new `uberdev` pattern the blanket rule misses, or a new

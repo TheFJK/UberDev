@@ -220,12 +220,14 @@ root=pathlib.Path(sys.argv[1])
 expected_roles={
     'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
     'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
-    'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+    'convention-compliance','finding-verifier','findings-to-issues','merge-strategy-decider',
+    'pr-test-analyzer',
     'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 allowed_workflows={'review-pr','simplify','solve','turbo'}
 contract_rel='shared/phase1-reviewer-output-v1.md'
 review_contract='phase1-reviewer-v1'
+verify_contract='finding-verifier-v1'
 edge_semantics={
     'review_pr.post_impl_review':('skill',None,None,None),
     'review_pr.review.correctness':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
@@ -234,12 +236,14 @@ edge_semantics={
     'review_pr.review.comments':('provider','comment-analyzer',('review-pr','solve','turbo'),review_contract),
     'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr','solve','turbo'),review_contract),
     'review_pr.review.general':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
+    'review_pr.review.convention':('provider','convention-compliance',('review-pr','solve','turbo'),review_contract),
     'review_pr.fix.phase1':('provider','code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
+    'review_pr.verify.finding':('provider','finding-verifier',('review-pr',),verify_contract),
     'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
     'review_pr.ci.fix_code':('provider','ci-code-fixer',('review-pr','solve','turbo'),None),
     'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
@@ -342,7 +346,8 @@ def validate(plugin):
         assert isinstance(contract_id,str) and contract_id
         assert isinstance(contract_path,str) and contract_path
         assert (plugin/contract_path).is_file(), contract_path
-    assert contracts=={'phase1-reviewer-v1':contract_rel}
+    assert contracts=={'phase1-reviewer-v1':contract_rel,
+                       'finding-verifier-v1':'shared/finding-verifier-output-v1.md'}
     for edge in (edge_id for edge_id,semantics in edge_semantics.items() if semantics[3]==review_contract):
         row=edges[edge]
         assert row.get('output_contract')=='phase1-reviewer-v1'

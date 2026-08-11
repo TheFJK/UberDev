@@ -676,6 +676,141 @@ for contract in "$AGENT_MD"; do
     "S20.3 — $(basename "$contract") contains no stale fail-open REFUSED rule"
 done
 
+### Suite 21: machine-readable lens provenance + verdict-label ritual (#432) ----------
+#
+# RFC 0018. Per-lens precision needs two facts the pipeline never recorded:
+# WHICH lens produced a finding (knowable only at dispatch) and WHETHER the
+# finding was real (knowable only at close). S21.1–S21.3 are the anti-regression
+# half — they must hold BEFORE and AFTER #432, proving the trailer was bolted on
+# beside the fingerprint machinery rather than through it. S21.4–S21.12 are the
+# new contract.
+#
+# Windows-safe by construction: structural greps only, and the one length
+# measurement strips CR before counting (Git Bash checks this file out with
+# core.autocrlf=true, so a trailing \r would inflate every count by one).
+echo
+echo "### Suite 21: finding provenance trailer + verdict labels (#432, RFC 0018)"
+
+# --- anti-regression: the pre-#432 body contract is untouched ---
+for field in 'Origin' 'Agent' 'File' 'Severity' 'Disposition' 'Tier'; do
+  assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+    "\\*\\*${field}:\\*\\*" \
+    "S21.1 — issue body template still renders **${field}:**"
+done
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '\*\*File:\*\* .[{]file_path[}]:[{]line[}].' \
+  'S21.2 — **File:** template is still `{file_path}:{line}`'
+# S21.3 is the operational form of "the fingerprint is unchanged": a test has no
+# copy of the pre-#432 bytes, so it locks the exact marker template AND the exact
+# recipe substring instead. Either one drifting is the regression.
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '<!-- uberdev:[{]finding_marker_slug[}]-finding fingerprint=[{]16-char-hex[}] -->' \
+  'S21.3 — fingerprint marker template is unchanged'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'sha256sum [|] awk .*substr[(][$]1,1,16[)]' \
+  'S21.3b — fingerprint recipe (sha256 -> 16-hex prefix) is unchanged'
+
+# --- the new meta trailer ---
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  '<!-- uberdev-finding-meta v=1 slug=[{]finding_marker_slug[}] edges=[{]comma-joined edges[}] severity=[{]severity[}] tier=[{]BLOCKER[|]CRITICAL[|]MAJOR[}] -->' \
+  'S21.4 — meta trailer template carries v=1, slug=, edges=, severity=, tier='
+
+# S21.5 — the trailer must be the line IMMEDIATELY AFTER the fingerprint marker.
+# The miner reads the pair positionally, so an intervening blank line or a
+# reordering silently strips provenance from every future issue. index()==1 is a
+# fixed-string anchor: the template contains regex metacharacters ({, }, -) that
+# an awk ERE would have to escape.
+TRAILER_LINE="$(awk 'index($0, "<!-- uberdev:{finding_marker_slug}-finding fingerprint=") == 1 { getline nxt; print nxt; exit }' "$AGENT_MD")"
+if grep -qE '^<!-- uberdev-finding-meta ' <<<"$TRAILER_LINE"; then
+  echo "  PASS  S21.5 — meta trailer is the line immediately after the fingerprint marker"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S21.5 — meta trailer is the line immediately after the fingerprint marker"
+  echo "        file: $AGENT_MD"
+  echo "        line following the fingerprint marker: ${TRAILER_LINE:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'contributor-ordered union of the kept row' \
+  'S21.6 — edges reproduces the contributor-ordered union incl. merged rows'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'NEVER derive .edges. from .summary. or .detail.' \
+  'S21.6b — edges is never derived from summary/detail prose'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'legacy fleet variants.*carry no .source_edges' \
+  'S21.7 — legacy variants fall back to their validated lens column'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'empty .edges=. is a recorded state' \
+  'S21.7b — the empty-edges case is defined, not left to inference'
+
+# --- forgery refusal covers BOTH literals ---
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'finding-contains-fingerprint-marker' \
+  'S21.8 — step 8e keeps the fingerprint-marker refusal reason string'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  '<!-- uberdev-finding-meta' \
+  'S21.8b — step 8e also refuses a forged meta trailer'
+assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
+  '<!-- uberdev:.*-finding fingerprint=' \
+  'S21.8c — sanitiser step 4 still names the fingerprint marker literal'
+assert_in_section "$AGENT_MD" '^## Sanitiser steps' '^## Comment body shape' \
+  '<!-- uberdev-finding-meta' \
+  'S21.8d — sanitiser step 4 also names the meta-trailer literal'
+
+# --- verdict labels (the ground-truth half) ---
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'gh label create --force finding:true-positive' \
+  'S21.9 — finding:true-positive is provisioned via gh label create --force'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'gh label create --force finding:false-positive' \
+  'S21.9b — finding:false-positive is provisioned via gh label create --force'
+
+# S21.10 — GitHub 422s a label description over 100 characters, on update as
+# well as create, so an over-long string silently breaks label provisioning for
+# the whole run. Measure every --description in the file, not just the new ones.
+DESC_OVERLONG=''
+DESC_COUNT=0
+while IFS= read -r desc_str; do
+  [ -n "$desc_str" ] || continue
+  DESC_COUNT=$((DESC_COUNT + 1))
+  desc_len="$(printf '%s' "$desc_str" | tr -d '\r' | wc -m | tr -d '[:space:]')"
+  if [ "$desc_len" -gt 100 ]; then
+    DESC_OVERLONG="${DESC_OVERLONG}${DESC_OVERLONG:+; }${desc_len}c: ${desc_str}"
+  fi
+done <<<"$(sed -n 's/.*--description "\([^"]*\)".*/\1/p' "$AGENT_MD")"
+if [ "$DESC_COUNT" -lt 3 ]; then
+  echo "  FAIL  S21.10 — expected >=3 --description strings (review-pr-finding + 2 verdict labels), found $DESC_COUNT"
+  echo "        file: $AGENT_MD"
+  FAIL=$((FAIL + 1))
+elif [ -z "$DESC_OVERLONG" ]; then
+  echo "  PASS  S21.10 — all $DESC_COUNT gh label descriptions are <=100 chars"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  S21.10 — gh label description exceeds GitHub's 100-char limit: $DESC_OVERLONG"
+  FAIL=$((FAIL + 1))
+fi
+
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'finding:true-positive' \
+  'S21.11 — the To-resolve footer names finding:true-positive'
+assert_in_section "$AGENT_MD" '^## Issue body shape' '^## Sanitiser steps' \
+  'finding:false-positive' \
+  'S21.11b — the To-resolve footer names finding:false-positive'
+
+# S21.12 — `conf=` stays OUT of the emitted trailer. A per-finding numeric
+# confidence is #431's surface; emitting one here would change the exact finding
+# key set that post-impl-review.test.sh and S18.8 above both lock. Scoped to the
+# trailer line itself, because the prose deliberately names `conf=` as reserved.
+if grep -qE 'conf=' <<<"$TRAILER_LINE"; then
+  echo "  FAIL  S21.12 — the meta trailer must not emit conf= (reserved for #431)"
+  echo "        trailer: $TRAILER_LINE"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S21.12 — the meta trailer does not emit conf= (reserved for #431)"
+  PASS=$((PASS + 1))
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

@@ -1,0 +1,895 @@
+{
+  "schema": "uberdev-vendor-v1",
+  "policy_rfc": "docs/rfc/0019-vendored-upstream-policy.md",
+  "root": "plugins/uberdev",
+  "readme_table": "README.md",
+  "upstreams": {
+    "superpowers": {
+      "repo": "obra/superpowers",
+      "distributed_as": "anthropics/claude-plugins-official#superpowers",
+      "license": "MIT",
+      "license_file": "licenses/superpowers-MIT.txt"
+    },
+    "pr-review-toolkit": {
+      "repo": "anthropics/claude-plugins-official",
+      "plugin": "pr-review-toolkit",
+      "license": "Apache-2.0",
+      "license_file": "licenses/pr-review-toolkit-Apache-2.0.txt"
+    },
+    "code-simplifier": {
+      "repo": "anthropics/claude-plugins-official",
+      "plugin": "code-simplifier",
+      "license": "Apache-2.0",
+      "license_file": "licenses/code-simplifier-Apache-2.0.txt",
+      "note": "Retained as a declared upstream because UberDev ships this plugin's licence text. The vendored code-simplifier agent measurably descends from the pr-review-toolkit copy of the same agent (115 differing diff lines against pr-review-toolkit vs 137 against this plugin; only the pr-review-toolkit copy carries the block `description:` with worked examples that our copy is built on), so its component points there."
+    }
+  },
+  "permanent_divergences": [
+    {
+      "id": "namespace-rebrand",
+      "kind": "namespace-rewrite",
+      "scope": "all third-party components",
+      "note": "Every vendored skill and agent rewrites the 'superpowers:' skill namespace to 'uberdev:'. UberDev ships standalone under its own plugin id, so this can never be reconciled with upstream.",
+      "permanent": true
+    },
+    {
+      "id": "parallel-hypothesis-testing",
+      "kind": "local-addition",
+      "scope": "skills/systematic-debugging",
+      "file": "SKILL.md",
+      "note": "The local 'Parallel hypothesis testing' section, already recorded in the file's own in-file provenance header. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "brainstorm-no-approval-gates",
+      "kind": "policy-divergence",
+      "scope": "skills/brainstorm",
+      "file": "SKILL.md",
+      "note": "UberDev deliberately rejects upstream's HARD-GATE / per-section / spec-review approval checkpoints. Quality comes from parallel research and always-on reviewer agents, not human gates.",
+      "permanent": true
+    },
+    {
+      "id": "review-pr-parallel-by-default",
+      "kind": "policy-divergence",
+      "scope": "skills/requesting-code-review",
+      "file": "SKILL.md",
+      "note": "/uberdev:review-pr fans out its review lenses in parallel by default; upstream's flow is sequential. Never reconciled.",
+      "permanent": true
+    },
+    {
+      "id": "no-co-authored-by",
+      "kind": "policy-divergence",
+      "scope": "skills/finish-branch",
+      "file": "SKILL.md",
+      "note": "UberDev never emits a Co-Authored-By or AI-attribution trailer in commits or PR bodies. Upstream's flow does. Never reconciled.",
+      "permanent": true
+    }
+  ],
+  "components": [
+    {
+      "id": "skills/_shared",
+      "path": "skills/_shared",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/brainstorm",
+      "path": "skills/brainstorm",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/brainstorming",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
+      "measured_diff_lines": 2255,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "brainstorm-no-approval-gates",
+          "file": "SKILL.md"
+        }
+      ],
+      "files": [
+        "SKILL.md",
+        "scripts/frame-template.html",
+        "scripts/helper.js",
+        "scripts/server.cjs",
+        "scripts/start-server.sh",
+        "scripts/stop-server.sh",
+        "spec-document-reviewer-prompt.md",
+        "visual-companion.md"
+      ]
+    },
+    {
+      "id": "skills/cluster-pipeline",
+      "path": "skills/cluster-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/dev-pipeline",
+      "path": "skills/dev-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/dispatching-parallel-agents",
+      "path": "skills/dispatching-parallel-agents",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/dispatching-parallel-agents",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "File set is 1:1 with upstream and the whole local delta is the 'superpowers:' -> 'uberdev:' namespace rebrand. Re-baseline from upstream.",
+      "measured_diff_lines": 33,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "76806091c7f923ba2596546b19cccd98a08e57a68745df77c3a7b998fe838e2b"
+        }
+      ]
+    },
+    {
+      "id": "skills/execute-plan",
+      "path": "skills/execute-plan",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/executing-plans",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 and the prose contract is upstream's. Re-baseline from upstream.",
+      "measured_diff_lines": 50,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "4d8f9f3a743cf09df9da4313315e7535ef6e2e5f869ff2cbcdf83cd5b55f61bd"
+        }
+      ]
+    },
+    {
+      "id": "skills/finish-branch",
+      "path": "skills/finish-branch",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/finishing-a-development-branch",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "measured_diff_lines": 734,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "no-co-authored-by",
+          "file": "SKILL.md"
+        }
+      ],
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "id": "skills/goal-pipeline",
+      "path": "skills/goal-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/merge-pipeline",
+      "path": "skills/merge-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/orchestrator",
+      "path": "skills/orchestrator",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/post-impl-review",
+      "path": "skills/post-impl-review",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/receiving-code-review",
+      "path": "skills/receiving-code-review",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/receiving-code-review",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "File set is 1:1 with upstream and the local delta is the namespace rebrand. Re-baseline from upstream.",
+      "measured_diff_lines": 41,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "81af370dde94cf6e3cf32d9a4cff28d464c83c5479a999115d57399b9854197f"
+        }
+      ]
+    },
+    {
+      "id": "skills/requesting-code-review",
+      "path": "skills/requesting-code-review",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/requesting-code-review",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
+      "measured_diff_lines": 228,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "review-pr-parallel-by-default",
+          "file": "SKILL.md"
+        }
+      ],
+      "files": [
+        "SKILL.md",
+        "code-reviewer.md"
+      ]
+    },
+    {
+      "id": "skills/review-fleet",
+      "path": "skills/review-fleet",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/scan-fleet",
+      "path": "skills/scan-fleet",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/solve-fleet",
+      "path": "skills/solve-fleet",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/solve-pipeline",
+      "path": "skills/solve-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/subagent-driven-dev",
+      "path": "skills/subagent-driven-dev",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/subagent-driven-development",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "File sets diverge: UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md; upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
+      "measured_diff_lines": 1064,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "SKILL.md",
+        "code-quality-reviewer-prompt.md",
+        "implementer-prompt.md",
+        "spec-reviewer-prompt.md"
+      ]
+    },
+    {
+      "id": "skills/systematic-debugging",
+      "path": "skills/systematic-debugging",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/systematic-debugging",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "Carries the permanent local 'Parallel hypothesis testing' section recorded in its own in-file provenance header, so upstream's SKILL.md is not drop-in. Upstream fixes to the sibling scripts are still adopted deliberately (see #430).",
+      "measured_diff_lines": 83,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "parallel-hypothesis-testing",
+          "file": "SKILL.md"
+        }
+      ],
+      "files": [
+        "CREATION-LOG.md",
+        "SKILL.md",
+        "condition-based-waiting-example.ts",
+        "condition-based-waiting.md",
+        "defense-in-depth.md",
+        "find-polluter.sh",
+        "root-cause-tracing.md",
+        "test-academic.md",
+        "test-pressure-1.md",
+        "test-pressure-2.md",
+        "test-pressure-3.md"
+      ]
+    },
+    {
+      "id": "skills/test-driven-development",
+      "path": "skills/test-driven-development",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/test-driven-development",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "File sets diverge: UberDev ships testing-anti-patterns.md, upstream 6.2.0 replaced it with writing-good-tests.md. Adopting that swap is a decision, not a merge.",
+      "measured_diff_lines": 72,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "SKILL.md",
+        "testing-anti-patterns.md"
+      ]
+    },
+    {
+      "id": "skills/testers-pipeline",
+      "path": "skills/testers-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/uberscan-pipeline",
+      "path": "skills/uberscan-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/ubersimplify-pipeline",
+      "path": "skills/ubersimplify-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/uberthink-pipeline",
+      "path": "skills/uberthink-pipeline",
+      "origin": "uberdev"
+    },
+    {
+      "id": "skills/using-git-worktrees",
+      "path": "skills/using-git-worktrees",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/using-git-worktrees",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand plus UberDev path examples. Re-baseline from upstream.",
+      "measured_diff_lines": 206,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ba5dc3433cb80442f6630539b685c93e89441e47f93a894016fc386c6b26e2ad"
+        }
+      ]
+    },
+    {
+      "id": "skills/using-uberdev",
+      "path": "skills/using-uberdev",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/using-superpowers",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "This is UberDev's own plugin primer (injected by the session-start hook) and its reference set diverges from upstream's: UberDev ships references/configuration.md and references/copilot-tools.md, upstream ships antigravity-tools.md, codex-tools.md and pi-tools.md.",
+      "measured_diff_lines": 174,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "SKILL.md",
+        "references/configuration.md",
+        "references/copilot-tools.md",
+        "references/gemini-tools.md"
+      ]
+    },
+    {
+      "id": "skills/verification-before-completion",
+      "path": "skills/verification-before-completion",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/verification-before-completion",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand. Re-baseline from upstream.",
+      "measured_diff_lines": 49,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "f083a7fb923f1df7327314395159e3abdffd6aa467f1d06e13c9feabbb0b0976"
+        }
+      ]
+    },
+    {
+      "id": "skills/write-plan",
+      "path": "skills/write-plan",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/writing-plans",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 with upstream. Re-baseline from upstream.",
+      "measured_diff_lines": 123,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c23e3c737fab01b539ba0dac20135a85f0c812753927dd4e9095cc88f242906f"
+        },
+        {
+          "path": "plan-document-reviewer-prompt.md",
+          "sha256": "88c75e36c2d451b7ded3a0506fba589d0767977a3eeee9d6e4b294f2be2e6227"
+        }
+      ]
+    },
+    {
+      "id": "skills/writing-skills",
+      "path": "skills/writing-skills",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/writing-skills",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "track",
+      "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream.",
+      "measured_diff_lines": 367,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "33c0aa6224cea38121f942e560c4814f0638670a38ec164e264732c209e47b45"
+        },
+        {
+          "path": "anthropic-best-practices.md",
+          "sha256": "688b61300253b9c4b87bef276919d01d92934df7fa00ef677ed025251898e7ea"
+        },
+        {
+          "path": "examples/CLAUDE_MD_TESTING.md",
+          "sha256": "f73adb0a993bd7cc01b65e4f84d1b8cb953a2109f9dede64c1af20dc9249264a"
+        },
+        {
+          "path": "graphviz-conventions.dot",
+          "sha256": "167992c1a9322f7d37bc5f35face16042f4b8c3a6445eb9ece6a58ade31c0078"
+        },
+        {
+          "path": "persuasion-principles.md",
+          "sha256": "d5c1736ba843fb377fddb08b81771fedae2f57831f1a6201d2043b60efd20e0a"
+        },
+        {
+          "path": "render-graphs.js",
+          "sha256": "9204d9a389f106dfae983b0c55a7ca509ef2e9087d11dd7722aa20afec8eccc0"
+        },
+        {
+          "path": "testing-skills-with-subagents.md",
+          "sha256": "ac9832765234bf61fe9d72c60b41770377acee36c81925f90b3f060dd6cf632d"
+        }
+      ]
+    },
+    {
+      "id": "agents/ci-code-fixer.md",
+      "path": "agents/ci-code-fixer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/ci-failure-classifier.md",
+      "path": "agents/ci-failure-classifier.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/ci-rebase-handler.md",
+      "path": "agents/ci-rebase-handler.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/code-fixer.md",
+      "path": "agents/code-fixer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/code-reviewer.md",
+      "path": "agents/code-reviewer.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/code-reviewer.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 57,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "code-reviewer.md"
+      ]
+    },
+    {
+      "id": "agents/code-simplifier.md",
+      "path": "agents/code-simplifier.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/code-simplifier.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 115,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "code-simplifier.md"
+      ]
+    },
+    {
+      "id": "agents/codebase-scout.md",
+      "path": "agents/codebase-scout.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/comment-analyzer.md",
+      "path": "agents/comment-analyzer.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/comment-analyzer.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 64,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "comment-analyzer.md"
+      ]
+    },
+    {
+      "id": "agents/conflict-resolver.md",
+      "path": "agents/conflict-resolver.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/convention-compliance.md",
+      "path": "agents/convention-compliance.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/finding-verifier.md",
+      "path": "agents/finding-verifier.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/findings-to-issues.md",
+      "path": "agents/findings-to-issues.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/implementation-worker.md",
+      "path": "agents/implementation-worker.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/issue-similarity-analyzer.md",
+      "path": "agents/issue-similarity-analyzer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/merge-strategy-decider.md",
+      "path": "agents/merge-strategy-decider.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/plan-reviewer.md",
+      "path": "agents/plan-reviewer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/plan-writer.md",
+      "path": "agents/plan-writer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/pr-test-analyzer.md",
+      "path": "agents/pr-test-analyzer.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/pr-test-analyzer.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 64,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "pr-test-analyzer.md"
+      ]
+    },
+    {
+      "id": "agents/research-codebase.md",
+      "path": "agents/research-codebase.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/research-constraints.md",
+      "path": "agents/research-constraints.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/research-patterns.md",
+      "path": "agents/research-patterns.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/research-prior-art.md",
+      "path": "agents/research-prior-art.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/research-security.md",
+      "path": "agents/research-security.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/research-test-coverage.md",
+      "path": "agents/research-test-coverage.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/silent-failure-hunter.md",
+      "path": "agents/silent-failure-hunter.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/silent-failure-hunter.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 56,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "silent-failure-hunter.md"
+      ]
+    },
+    {
+      "id": "agents/spec-compliance-reviewer.md",
+      "path": "agents/spec-compliance-reviewer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/spec-reviewer.md",
+      "path": "agents/spec-reviewer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/spec-reviser.md",
+      "path": "agents/spec-reviser.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/spec-writer.md",
+      "path": "agents/spec-writer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-a11y-critic.md",
+      "path": "agents/testers-a11y-critic.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-adversarial-security.md",
+      "path": "agents/testers-adversarial-security.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-chaos-engineer.md",
+      "path": "agents/testers-chaos-engineer.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-mobile-thumb.md",
+      "path": "agents/testers-mobile-thumb.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-monitor-devils-advocate.md",
+      "path": "agents/testers-monitor-devils-advocate.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-monitor-primary.md",
+      "path": "agents/testers-monitor-primary.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-panicked-grandma.md",
+      "path": "agents/testers-panicked-grandma.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/testers-power-user.md",
+      "path": "agents/testers-power-user.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/triage-scout.md",
+      "path": "agents/triage-scout.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/trust-trail-evaluator.md",
+      "path": "agents/trust-trail-evaluator.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/type-design-analyzer.md",
+      "path": "agents/type-design-analyzer.md",
+      "origin": "third-party",
+      "upstream": "pr-review-toolkit",
+      "upstream_path": "plugins/pr-review-toolkit/agents/type-design-analyzer.md",
+      "vendored_at_commit": "unknown",
+      "vendored_on": "2026-04-27",
+      "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "stance": "fork",
+      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
+      "measured_diff_lines": 69,
+      "divergences": [
+        {
+          "ref": "namespace-rebrand",
+          "file": null
+        }
+      ],
+      "files": [
+        "type-design-analyzer.md"
+      ]
+    },
+    {
+      "id": "agents/uberthink-arbiter.md",
+      "path": "agents/uberthink-arbiter.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/uberthink-falsifier.md",
+      "path": "agents/uberthink-falsifier.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/uberthink-frame.md",
+      "path": "agents/uberthink-frame.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/uberthink-generator.md",
+      "path": "agents/uberthink-generator.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/uberthink-moderator.md",
+      "path": "agents/uberthink-moderator.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/uberthink-synthesizer.md",
+      "path": "agents/uberthink-synthesizer.md",
+      "origin": "uberdev"
+    }
+  ]
+}

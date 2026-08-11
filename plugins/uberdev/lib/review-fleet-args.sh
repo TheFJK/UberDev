@@ -33,6 +33,12 @@
 # so a fence that binds it from its own `${REVIEW_ITERATION:-1}` default is
 # reading a counter that moved. Get it -- and CI_FIX_LOOP_ITER -- from
 # review_fleet_load_ci_counters below, in the same fence that keys on it.
+#
+# "Run-invariant, so a fresh fence re-deriving them lands on the same value" was
+# PROSE for two releases and nothing re-derived them (#427): 47 of the file's 60
+# bash fences read at least one carrier they never bind. Since #427 the prose is
+# a CALLABLE -- review_fleet_rehydrate, at the bottom of this file -- and every
+# executed fence opens with it.
 
 # review_fleet_roster STAGE -> one "<slug>\t<edge>" row per child, IN ORDER.
 #
@@ -52,7 +58,8 @@ review_fleet_roster() {
         types            review_pr.review.types \
         comments         review_pr.review.comments \
         tests            review_pr.review.tests \
-        general          review_pr.review.general
+        general          review_pr.review.general \
+        convention       review_pr.review.convention
       ;;
     simplify)
       printf '%s\t%s\n' \
@@ -72,6 +79,85 @@ review_fleet_expected() {
   local rows
   rows="$(review_fleet_roster "${1:-}")" || return 2
   printf '%s' "$rows" | grep -c . || return 2
+}
+
+# The upper bound on the rule-source allowlist. A convention reviewer that is
+# handed an unbounded file list stops reading rules and starts skimming, and the
+# citation gate downstream opens every cited path -- so the list is capped here,
+# once, rather than trusted to be small.
+UBERDEV_REVIEW_RULE_SOURCE_LIMIT=200
+
+# uberdev_review_rule_sources REPO_ROOT -> the convention lens's rule-source
+# ALLOWLIST: repo-relative POSIX paths, one per line, LC_ALL=C sorted, capped.
+#
+# WHY AN ALLOWLIST AND NOT A HINT. `review_pr.review.convention` is the one lens
+# whose claim ("the project says X") is authoritative-sounding and trivially
+# hallucinable, so every finding it emits is gated against the exact bytes of
+# the file it cites. That gate needs a closed set of files it is willing to
+# open; this is that set, and it is discovered ONCE per run by the controller
+# and persisted, never re-derived per reader (two derivations can disagree).
+#
+# `find`, not `git ls-files`: this repo's own root CLAUDE.md is gitignored, and
+# a rule document that governs the reviewed change governs it whether or not it
+# is tracked.
+#
+# The prune list is load-bearing, not cosmetic. A checkout with sibling
+# worktrees under `.worktrees/` or `.claude/worktrees/` carries a full second
+# copy of every AGENTS.md; without the prune a citation could scope itself to
+# another branch's rule file and read as verified.
+#
+# `.claude/worktrees` is pruned BY PATH and `.claude` itself is not: `.claude/`
+# is a documented Claude Code location for project rule documents, so pruning
+# the whole tree to reach one nested directory drops real conventions from the
+# allowlist -- and the lens is told that a rule document not on the list does
+# not exist for this review, so it would cull the citation of one as
+# `citation-not-in-allowlist`. A repo that keeps its rules there would read as
+# a repo that wrote none down.
+#
+# No bashisms: this file is sourced by command/skill `bash` fences that run
+# under /bin/zsh on macOS. `awk`, not `head`, bounds the list -- an early-exiting
+# reader on the end of a pipe is the EPIPE class tests/epipe-guard.test.sh
+# exists to keep out.
+uberdev_review_rule_sources() {
+  [ "$#" -eq 1 ] || {
+    echo "error: uberdev_review_rule_sources: usage: uberdev_review_rule_sources REPO_ROOT" >&2
+    return 2
+  }
+  local rule_root rule_hit rule_raw rule_rc
+  rule_root="$(cd "$1" 2>/dev/null && pwd -P)" || {
+    echo "error: uberdev_review_rule_sources: unreadable repository root: $1" >&2
+    return 2
+  }
+  # find's stderr is NOT discarded and its status IS inspected. An empty
+  # allowlist is a legitimate answer -- it means the repo wrote no conventions
+  # down -- but a BROKEN walk produces the byte-identical answer, and the
+  # difference is the whole lens: one is "nothing to enforce", the other is a
+  # review that silently enforced nothing. Errored AND empty is refused by name;
+  # errored but partial still reports what it read, with the errors on the
+  # operator's terminal.
+  rule_raw="$(find "$rule_root" \
+      -maxdepth 4 \
+      \( -name .git -o -name .worktrees -o -path '*/.claude/worktrees' \
+         -o -name node_modules -o -name vendor -o -name dist -o -name build \) -prune -o \
+      -type f \
+      \( -name AGENTS.md -o -name CLAUDE.md -o -name .editorconfig \
+         -o -name '.eslintrc*' -o -name 'eslint.config.*' -o -name '.prettierrc*' \
+         -o -name ruff.toml -o -name .ruff.toml -o -name pyproject.toml \
+         -o -name setup.cfg -o -name '.markdownlint*' -o -name .shellcheckrc \
+         -o -name '.commitlintrc*' \) -print)"
+  rule_rc=$?
+  if [ "$rule_rc" -ne 0 ] && [ -z "$rule_raw" ]; then
+    echo "error: uberdev_review_rule_sources: discovery under $rule_root failed (find rc=$rule_rc) and found nothing; refusing to report that as 'this repository has no written conventions'" >&2
+    return 2
+  fi
+  printf '%s\n' "$rule_raw" \
+    | while IFS= read -r rule_hit; do
+        case "$rule_hit" in
+          "$rule_root"/*) printf '%s\n' "${rule_hit#"$rule_root"/}" ;;
+        esac
+      done \
+    | LC_ALL=C sort \
+    | awk -v limit="$UBERDEV_REVIEW_RULE_SOURCE_LIMIT" 'NR<=limit'
 }
 
 # review_fleet_mint_nonce -> one single-use 64-hex run_nonce from a real CSPRNG.
@@ -569,6 +655,137 @@ review_fleet_bind_ci_conflicts() {
 # against the maxAgents the call sites actually emit — by
 # tests/review-pr-workflow.test.sh E6.
 REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP=40
+
+# review_fleet_bind_verify RUN_DIR ITER WORKTREE CONTRACT CLAIM_LEDGER LEDGER
+#
+# The Phase 1 verification fanout (#431). CLAIM_LEDGER carries one
+# `<claim_path>` row per eligible finding, in the order
+# `project-verification-claims` wrote them — which IS the nonce wire order for
+# this stage, exactly as review_fleet_roster's order is for the reviewers.
+#
+# One claim per child, not one shared claim card: each verifier's pinned input
+# names the single finding it adjudicates, and a shared card would make every
+# verifier's scope the union of all of them — which is also how the reviewer's
+# reasoning would leak back in.
+review_fleet_bind_verify() {
+  [ "$#" -eq 6 ] || return 2
+  local run_dir="$1" iter="$2" worktree="$3" contract="$4"
+  local claim_ledger="$5" ledger="$6"
+  local edge=review_pr.verify.finding
+  local claim_path slug dir instance nonce binding index=0 row
+  REVIEW_FLEET_NONCE_POOL=''
+  : >"$ledger" || return 2
+  while IFS= read -r claim_path; do
+    [ -n "$claim_path" ] || continue
+    index=$((index + 1))
+    slug="$(printf 'verify-%02d' "$index")" || return 2
+    dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
+    instance="${dir##*/}"
+    mkdir -p "$dir" || return 2
+    nonce="$(review_fleet_mint_nonce)" || return 2
+    binding="$(python3 -I -B "$contract" bind-workflow-launch \
+      --edge-id "$edge" --instance-id "$instance" --run-nonce "$nonce" \
+      --result-path "$dir/result.md" --status-path "$dir/status.json" \
+      --working-dir "$worktree")" || return 2
+    row="$(jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" \
+      --arg binding "$binding" --arg result "$dir/result.md" --arg status "$dir/status.json" \
+      --arg claim "$claim_path" \
+      '{edge:$edge,index:$index,instance:$instance,binding:$binding,result:$result,status:$status,claim:$claim}')" || return 2
+    printf '%s\n' "$row" >>"$ledger" || return 2
+    if [ -z "$REVIEW_FLEET_NONCE_POOL" ]; then
+      REVIEW_FLEET_NONCE_POOL="$nonce"
+    else
+      REVIEW_FLEET_NONCE_POOL="$REVIEW_FLEET_NONCE_POOL,$nonce"
+    fi
+  done <"$claim_ledger"
+  REVIEW_FLEET_VERIFY_COUNT="$index"
+  [ "$index" -gt 0 ] || return 2
+}
+
+# The TOTAL number of eligible Phase 1 findings one verification wave will
+# adjudicate. Carried across from REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP above for
+# the same reason and by the same arithmetic: `verifyCap`'s clamp in
+# skills/review-fleet/workflow.js is 50, but the verify roster is dispatched as
+# ONE roster whose length goes straight into that script's ceilingGate(), and
+# `maxAgents` — 40 at every review-fleet call site in commands/review-pr.md —
+# is a SECOND ceiling sitting under the first. So the effective total is the
+# LOWER of the two: a set THIS fence accepts is a set the script dispatches,
+# and a set above it is handled here, before any Workflow call.
+#
+# Above the cap the surplus rows are NOT refused and NOT silently dropped: they
+# are recorded `SURVIVES` / `over-cap-unverified` in the sidecar. A gate that
+# aborted on a large finding set would make a bad review un-reviewable, and one
+# that dropped rows would cull without saying so. Asserted behaviourally — at
+# the cap and at cap+1, against the maxAgents the call sites actually emit — by
+# tests/review-pr-workflow.test.sh.
+REVIEW_FLEET_VERIFY_TOTAL_CAP=40
+
+# review_fleet_write_verify_dispatch TARGET 0|1
+# review_fleet_read_verify_dispatch  TARGET -> `0` | `1`
+#
+# Did the Phase 1 verification gate dispatch a verifier wave, or did one of its
+# two no-dispatch short-circuits already publish the sidecar? That answer is
+# produced in the fence that projects the claims and consumed by the fence that
+# republishes the sidecar afterwards -- a different process, where the scalar it
+# used to live in is gone (#427). Every other decision those fences hand
+# forward is already on disk for exactly this reason: ci-loop-state.json,
+# rule-sources.txt, changed-paths.json.
+#
+# Keyed per iteration by the caller, because the decision is per iteration: a
+# Phase 3 CI-fix loop re-enters Phase 1, and iteration 1's answer must not be
+# able to speak for iteration 2.
+#
+# The domain is CLOSED to `0`/`1` on both sides, so neither half can record or
+# return a value the other would refuse; an absent or malformed record is rc 2
+# and NOT a default, because "the gate cannot say what it did" and "the gate
+# dispatched nothing" are different answers and only one of them means the
+# sidecar is already published.
+review_fleet_write_verify_dispatch() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
+  # lowercase `path` array to $PATH, and these fences run under /bin/zsh.
+  local target="$1" dispatched="$2"
+  case "$dispatched" in
+    0 | 1) ;;
+    *) return 2 ;;
+  esac
+  ( umask 077 && printf '%s\n' "$dispatched" >"$target" ) || return 2
+}
+
+review_fleet_read_verify_dispatch() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet verification dispatch decision missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  case "$recorded" in
+    0 | 1) ;;
+    *)
+      echo "error: review-fleet verification dispatch decision is not 0 or 1: ${recorded:-<empty>}" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
+
+# review_fleet_audit_append RUN_ROOT JSON_LINE
+#
+# Fail-soft append of one JSON line to the repo-root `.uberdev/audit.jsonl`
+# (merge-pipeline/SKILL.md D15 names that path as the audit stream). Modeled on
+# _uberdev_config_audit in lib/config-read.sh: write only when the directory
+# already exists (creating it would plant an audit trail in a repo that never
+# opted into one), warn on failure, and NEVER abort the run — a missing audit
+# row must not be able to fail a review that otherwise passed.
+review_fleet_audit_append() {
+  [ "$#" -eq 2 ] || return 0
+  local run_root="$1" line="$2"
+  [ -d "$run_root/.uberdev" ] || return 0
+  if ! printf '%s\n' "$line" >>"$run_root/.uberdev/audit.jsonl" 2>/dev/null; then
+    printf 'warning: could not append to %s/.uberdev/audit.jsonl\n' "$run_root" >&2
+  fi
+  return 0
+}
 
 # review_fleet_write_ci_state PATH CI_ITER REVIEW_ITER FIX_PUSHES_JSON CLASSES_JSON
 #
@@ -1153,4 +1370,500 @@ review_fleet_rebase_dir() {
     fi
   done
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# THE FRESH-SHELL ENTRY CONTRACT (#427)
+# ---------------------------------------------------------------------------
+#
+# Every `bash` block in commands/review-pr.md is a FRESH SHELL, and 47 of the
+# file's 60 blocks read at least one of UBERDEV_REVIEW_PLUGIN_ROOT /
+# CODE_FIXER_CONTRACT / WORKTREE_ROOT / RUN_ID / MARKER_DIR / RESEARCH_DIR_ABS /
+# the seven artifact paths without ever binding them. Only the setup fence
+# binds them, and it exits before the next fence starts.
+#
+# The failure is SILENT, not loud: `set -u` is in force in the setup fence only,
+# so in every other fence an unbound carrier expands to the EMPTY STRING. An
+# empty RESEARCH_DIR_ABS resolves the CI ledger under a path that does not
+# exist, and "does not exist" is the answer `green` -- a review that never ran
+# reports a clean CI probe. That is the hazard commands/review-pr.md names in
+# its own prose and never closed.
+#
+# review_fleet_rehydrate closes it. It is the FIRST call of every executed
+# review-pr fence, and it re-derives the run-invariant half from the filesystem
+# rather than from a dead shell:
+#
+#   plugin root   <- UBERDEV_REVIEW_PLUGIN_ROOT / PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT
+#                    / CURSOR_PLUGIN_ROOT, the same chain the setup fence uses
+#   repo root     <- `git rev-parse --show-toplevel`
+#   run identity  <- $RUN_ID when the orchestrator carried it (always the first
+#                    choice), else the guarded active-run pointer below
+#   everything    <- the run's own command-workspace.json descriptor, so
+#   else             lib/command-workspace.py stays the SINGLE implementation of
+#                    the artifact path algebra. Nothing here templates
+#                    "<run>/pr-diff.md"; a second copy of that table is exactly
+#                    the #370 "one contract, N uncompared copies" class.
+#
+# WHAT IT DELIBERATELY DOES NOT DO:
+#   * it never reserves, prepares or mutates a run -- rehydration is read-only,
+#     so a fence that runs twice cannot mint a second reservation;
+#   * it never binds REVIEW_ITERATION or CI_FIX_LOOP_ITER. Those are counters,
+#     not run invariants; they move mid-run and belong to
+#     review_fleet_load_ci_counters, which the fence calls right after;
+#   * it never reads REVIEW_RUN_RESERVATION_RECEIPT off disk. The receipt is the
+#     capability token that authorises marker retirement. Persisting it into a
+#     sidecar so a later fence could pick it up would be a downgrade from the
+#     current orchestrator-carried scalar for zero gain -- its only consumer is
+#     the terminal verdict fence, which already carries it explicitly. Integrity
+#     of a recovered run is established by the pointer guards instead.
+
+# review_fleet_active_run_pointer_path TOPLEVEL -> the active-run pointer path.
+#
+# ONE definition, shared by the writer (the setup fence, via
+# review_fleet_write_active_run_pointer) and the reader (review_fleet_rehydrate).
+#
+# It lives INSIDE .uberdev/runs/ and not next to it. `/review-pr` exists to run
+# against repositories that do not ignore `.uberdev/`, so setup publishes
+# `<runs_root>/.gitignore` containing `*`; a pointer one level up is outside
+# that ignore and becomes untracked residue in the reviewed working tree, which
+# the reservation's own cleanliness guard then fails. It is invisible to
+# review_reap_stale_run_reservations by construction: that loop skips every
+# entry whose name is not a full RUN_ID match.
+review_fleet_active_run_pointer_path() {
+  [ "$#" -eq 1 ] || return 2
+  [ -n "$1" ] || return 2
+  printf '%s' "$1/.uberdev/runs/.review-active-run.json"
+}
+
+# _review_fleet_run_id_ok VALUE -> 0 when VALUE is a well-formed RUN_ID.
+#
+# Deliberately `case` globs and not a regex: `[[ =~ ]]` populates BASH_REMATCH
+# in bash and `$match` in zsh, and these fences run under /bin/zsh. The shape is
+# the same one lib/command-workspace.py and the reservation triple-guard pin:
+# YYYYMMDD-HHMMSS-<lowercase hex>. It is also the path-traversal guard -- no
+# `..`, no `/`, no separator of any kind can satisfy it.
+_review_fleet_run_id_ok() {
+  local value="${1:-}" suffix
+  case "$value" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*) ;;
+    *) return 1 ;;
+  esac
+  suffix="${value#*-}"
+  suffix="${suffix#*-}"
+  [ -n "$suffix" ] || return 1
+  case "$suffix" in *[!0-9a-f]*) return 1 ;; esac
+  return 0
+}
+
+# review_fleet_write_active_run_pointer TOPLEVEL RUN_ID PR HEAD_SHA
+#
+# Called once, by the setup fence, after the reservation and the backend
+# preflight have both succeeded -- so a setup that abandons its reservation
+# never leaves a pointer behind.
+#
+# NOT secure_publish_exact_no_clobber: that publisher is no-clobber by design,
+# and this pointer must be REWRITTEN once per run. umask 077 + a pid-unique temp
+# + `mv -f` gives the same "a reader never sees a half-written file" property
+# for a file that is legitimately replaced.
+review_fleet_write_active_run_pointer() {
+  [ "$#" -eq 4 ] || return 2
+  local toplevel="$1" run_id="$2" pr="$3" head_sha="$4" pointer staging payload
+  _review_fleet_run_id_ok "$run_id" || {
+    echo "error: review-pr active-run pointer refused a malformed RUN_ID: $run_id" >&2
+    return 2
+  }
+  case "$pr" in
+    '' | *[!0-9]*)
+      echo "error: review-pr active-run pointer refused a non-numeric PR: $pr" >&2
+      return 2
+      ;;
+  esac
+  pointer="$(review_fleet_active_run_pointer_path "$toplevel")" || return 2
+  payload="$(python3 -I -B -c 'import json,sys,time; print(json.dumps({"schema_version":1,"run_id":sys.argv[1],"pr":int(sys.argv[2]),"head_sha":sys.argv[3],"started_at":int(time.time())},sort_keys=True,separators=(",",":")),end="")' "$run_id" "$pr" "$head_sha")" || return 2
+  staging="$pointer.tmp.$$"
+  ( umask 077 && printf '%s\n' "$payload" >"$staging" ) || return 2
+  mv -f "$staging" "$pointer" || {
+    rm -f "$staging" 2>/dev/null || true
+    return 2
+  }
+}
+
+# _review_fleet_pointer_run_id TOPLEVEL EXPECTED_PR REAP_SECS -> RUN_ID
+#
+# The recovery path, and the ONLY place a run identity is inferred rather than
+# carried. Five guards, each with its own message, and never a fallback to a
+# different run: the answer is this run or rc 2.
+_review_fleet_pointer_run_id() {
+  [ "$#" -eq 3 ] || return 2
+  local toplevel="$1" expected_pr="$2" reap_secs="$3" pointer
+  pointer="$(review_fleet_active_run_pointer_path "$toplevel")" || return 2
+  python3 -I -B - "$pointer" "$toplevel/.uberdev/runs" "$expected_pr" "$reap_secs" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+pointer, runs_root, expected_pr, reap_text = sys.argv[1:]
+RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+")
+
+
+def refuse(message):
+    print("error: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+if not os.path.isfile(pointer):
+    refuse(
+        "review-pr fence entered without RUN_ID and no recoverable active-run "
+        "pointer at " + pointer
+    )
+try:
+    with open(pointer, "r", encoding="utf-8") as handle:
+        record = json.loads(handle.read(65536))
+except Exception as error:
+    refuse("review-pr active-run pointer is unreadable or malformed: %s: %s" % (pointer, error))
+if not isinstance(record, dict) or record.get("schema_version") != 1:
+    refuse("review-pr active-run pointer carries an unknown schema: " + pointer)
+run_id = record.get("run_id")
+if not isinstance(run_id, str) or RUN_ID.fullmatch(run_id) is None:
+    refuse("review-pr active-run pointer carries a malformed run_id: " + pointer)
+run_dir = os.path.join(runs_root, run_id)
+if not os.path.isdir(run_dir):
+    refuse("review-pr active-run pointer names a run directory that is gone: " + run_dir)
+for marker in ("locked", "pr-context.json"):
+    if not os.path.isfile(os.path.join(run_dir, marker)):
+        refuse(
+            "review-pr active-run pointer names a run whose '%s' reservation marker is "
+            "gone (abandoned or reaped): %s" % (marker, run_dir)
+        )
+if os.path.exists(os.path.join(run_dir, "review-pr-verdict.json")):
+    refuse("review-pr active-run pointer names a run that already published its verdict: " + run_dir)
+recorded_pr = record.get("pr")
+if expected_pr:
+    try:
+        wanted = int(expected_pr)
+    except (TypeError, ValueError):
+        refuse("review-pr fence supplied a non-numeric PR_NUMBER: " + str(expected_pr))
+    if recorded_pr != wanted:
+        refuse(
+            "review-pr active-run pointer is for PR #%s but this fence is reviewing PR #%s"
+            % (recorded_pr, wanted)
+        )
+started_at = record.get("started_at")
+if type(started_at) is not int or isinstance(started_at, bool):
+    refuse("review-pr active-run pointer carries a malformed started_at: " + pointer)
+try:
+    reap_secs = int(reap_text)
+except (TypeError, ValueError):
+    reap_secs = 7200
+age = int(time.time()) - started_at
+if age > reap_secs:
+    refuse(
+        "review-pr active-run pointer is %ss old, past the %ss reservation policy: %s"
+        % (age, reap_secs, pointer)
+    )
+print(run_id, end="")
+PY
+}
+
+# _review_fleet_run_dir_pr RUN_DIR -> the PR number the reservation recorded.
+#
+# `pr-context.json` is written by review_reserve_run_directory in the setup
+# fence and is one of the two markers the pointer guard above already requires,
+# so it is the run's OWN record of which PR is under review -- and the only
+# on-disk one that is present whether the fence carried a RUN_ID or recovered
+# through the pointer.
+#
+# rc 1 with no output when the marker is absent or carries no positive integer.
+# This is a recovery source, not a guard: rehydration must not start failing for
+# runs whose marker predates this reader, so the fences that actually put the
+# number in a prompt or an audit row refuse for themselves.
+_review_fleet_run_dir_pr() {
+  [ "$#" -eq 1 ] || return 1
+  [ -n "$1" ] || return 1
+  python3 -I -B -c 'import json,sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        record = json.loads(handle.read(65536))
+except (OSError, ValueError):
+    raise SystemExit(1)
+pr = record.get("pr") if isinstance(record, dict) else None
+if type(pr) is not int or pr <= 0:
+    raise SystemExit(1)
+print(pr, end="")' "$1/pr-context.json" 2>/dev/null
+}
+
+# _review_fleet_bind_pr RUN_DIR -- fill an EMPTY PR_NUMBER from that marker.
+#
+# Never overrides a carried value: a fence that already knows its PR is the run
+# talking, and the pointer guard refuses a carried PR that disagrees with the
+# run anyway. Assigns only on success, because binding it to the empty string is
+# the #427 defect itself -- `PR #` in a verifier prompt and `pr:""` in the audit
+# row that has to make a suppressed blocker traceable.
+_review_fleet_bind_pr() {
+  local recovered
+  [ -z "${PR_NUMBER:-}" ] || return 0
+  recovered="$(_review_fleet_run_dir_pr "${1:-}")" || return 0
+  PR_NUMBER="$recovered"
+}
+
+# review_fleet_rehydrate -- bind every run-invariant carrier in THIS shell.
+#
+# rc 0 with the carriers bound and exported, or rc 2 with a message on stderr
+# and NOTHING half-bound. Fences call it as `review_fleet_rehydrate || return 2`
+# so a fence that cannot establish its run never proceeds to read an empty path.
+#
+# IT FILLS GAPS; IT DOES NOT OVERRIDE AN ESTABLISHED RUN. When every carrier is
+# already non-empty the run is already established in THIS process and the
+# function returns immediately. That is not a courtesy to callers, it is the
+# correct reading of the defect: #427 is that an unbound carrier expands to the
+# EMPTY STRING and an empty path answers "does not exist", which downstream
+# reads as `green`. Empty is the hazard, and empty is what this closes. A
+# non-empty value cannot have come from a dead shell -- there is no inheritance
+# across harness Bash calls -- so it came from the current process, which is the
+# setup fence itself or a caller that sourced it.
+#
+# The guarantee that this is not a loophole comes from the tests, not from
+# clobbering: the fresh-shell rows run each fence under `env -i` with nothing
+# bound at all, which is the only environment a real fence ever sees.
+review_fleet_rehydrate() {
+  [ "$#" -eq 0 ] || {
+    echo "error: review_fleet_rehydrate takes no arguments" >&2
+    return 2
+  }
+  local toplevel resolved_run_dir resolved_research_dir descriptor_fields reap_secs carrier
+  local _review_fleet_diff _review_fleet_criteria _review_fleet_range _review_fleet_snapshot
+  local _review_fleet_phase1 _review_fleet_phase2 _review_fleet_agg _review_fleet_carrier_dir
+  local _review_fleet_repo _review_fleet_research _review_fleet_descriptor
+  UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+  [ -n "$UBERDEV_REVIEW_PLUGIN_ROOT" ] || {
+    echo "error: review-pr fence entered with no plugin root: none of UBERDEV_REVIEW_PLUGIN_ROOT, PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, CURSOR_PLUGIN_ROOT is set" >&2
+    return 2
+  }
+  # #387: CODE_FIXER_CONTRACT was bound in the setup fence and never exported,
+  # so every later fence passed an EMPTY --contract. It is a pure function of
+  # the plugin root, so it is re-derived here rather than carried.
+  CODE_FIXER_CONTRACT="${CODE_FIXER_CONTRACT:-$UBERDEV_REVIEW_PLUGIN_ROOT/lib/code_fixer_contract.py}"
+  [ -f "$CODE_FIXER_CONTRACT" ] || {
+    echo "error: review-pr fence resolved a plugin root with no code fixer contract: $CODE_FIXER_CONTRACT" >&2
+    return 2
+  }
+  # STANDALONE_SNAPSHOT_PATH is deliberately absent from this list: it belongs to
+  # /simplify, and for a /review-pr run the descriptor's own value is the empty
+  # string. Requiring it would make every complete run look incomplete.
+  for carrier in "${RUN_ID:-}" "${WORKTREE_ROOT:-}" "${RESEARCH_DIR_ABS:-}" "${MARKER_DIR:-}" \
+    "${DIFF_ARTIFACT_PATH:-}" "${CRITERIA_PATH:-}" "${COMMIT_RANGE_PATH:-}" \
+    "${PHASE1_DISPOSITION_PATH:-}" "${PHASE2_DISPOSITION_PATH:-}" "${AGG_PATH:-}" \
+    "${UBERDEV_COMMAND_WORKSPACE_JSON:-}"; do
+    [ -n "$carrier" ] || { carrier=''; break; }
+    carrier=complete
+  done
+  if [ "$carrier" = complete ]; then
+    # PR identity is a run invariant too, and the marker it comes off is inside
+    # the run directory MARKER_DIR already names.
+    _review_fleet_bind_pr "$MARKER_DIR"
+    # Same export set as the resolved path below, minus the two names that are
+    # legitimately absent for a /review-pr run: exporting an unset variable would
+    # hand children an empty-but-present value they cannot distinguish from a
+    # real one.
+    export UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT
+    export RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON
+    export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
+    export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+    [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
+    [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
+    [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
+    return 0
+  fi
+  toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=''
+  [ -n "$toplevel" ] || {
+    echo "error: review-pr fence is not inside a git working tree; cannot resolve the review run root" >&2
+    return 2
+  }
+  toplevel="$(cd "$toplevel" && pwd -P)" || return 2
+  reap_secs="${REVIEW_RESERVATION_REAP_SECS:-7200}"
+  if [ -n "${RUN_ID:-}" ]; then
+    # An explicitly carried RUN_ID always wins over the pointer -- the pointer
+    # is a recovery path, never an override.
+    _review_fleet_run_id_ok "$RUN_ID" || {
+      echo "error: review-pr fence carried a malformed RUN_ID: $RUN_ID" >&2
+      return 2
+    }
+  else
+    RUN_ID="$(_review_fleet_pointer_run_id "$toplevel" "${PR_NUMBER:-}" "$reap_secs")" || {
+      unset RUN_ID 2>/dev/null || RUN_ID=''
+      return 2
+    }
+    [ -n "$RUN_ID" ] || {
+      unset RUN_ID 2>/dev/null || RUN_ID=''
+      echo "error: review-pr active-run pointer resolved to an empty run id" >&2
+      return 2
+    }
+  fi
+  resolved_run_dir="$(cd "$toplevel/.uberdev/runs/$RUN_ID" 2>/dev/null && pwd -P)" || resolved_run_dir=''
+  [ -n "$resolved_run_dir" ] || {
+    echo "error: review-pr run $RUN_ID has no reservation directory under $toplevel/.uberdev/runs" >&2
+    return 2
+  }
+  resolved_research_dir="$(cd "$toplevel/.uberdev/research/$RUN_ID" 2>/dev/null && pwd -P)" || resolved_research_dir=''
+  [ -n "$resolved_research_dir" ] || {
+    echo "error: review-pr run $RUN_ID has no research directory under $toplevel/.uberdev/research" >&2
+    return 2
+  }
+  # The descriptor is the ONLY source of the artifact pathnames. Cross-checking
+  # its repository_root and research_dir against the two paths resolved above is
+  # what makes reading it safe: a descriptor belonging to another checkout, or
+  # left over from a moved worktree, is refused rather than silently adopted.
+  descriptor_fields="$(python3 -I -B - "$resolved_research_dir/command-workspace.json" "$toplevel" "$resolved_research_dir" <<'PY'
+import json
+import os
+import sys
+
+descriptor_path, expected_repo, expected_research = sys.argv[1:]
+ORDER = (
+    "diff",
+    "criteria",
+    "commit_range",
+    "standalone_snapshot",
+    "phase1_disposition",
+    "phase2_disposition",
+    "aggregate",
+)
+# standalone_snapshot belongs to /simplify, not to /review-pr, so an EMPTY value
+# is correct here and only here -- exactly what uberdev_command_workspace_prepare
+# binds. Every other name must be a real path under the research dir of the run.
+# NOTE: no apostrophe may appear anywhere in this heredoc body -- it sits inside
+# a $( ) and bash 3.2 (macOS /bin/bash) scans the body for quotes, so an odd
+# apostrophe count makes the command substitution unterminated (#427/PR450).
+OPTIONAL = {"standalone_snapshot"}
+
+
+def refuse(message):
+    print("error: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+try:
+    with open(descriptor_path, "r", encoding="utf-8") as handle:
+        descriptor = json.loads(handle.read(1048576))
+except OSError as error:
+    refuse(
+        "review-pr run workspace descriptor is unreadable: %s: %s -- the run was reserved "
+        "by an older /review-pr, or its setup fence never completed" % (descriptor_path, error)
+    )
+except Exception as error:
+    refuse("review-pr run workspace descriptor is not valid JSON: %s: %s" % (descriptor_path, error))
+if not isinstance(descriptor, dict) or descriptor.get("schema_version") != 1:
+    refuse("review-pr run workspace descriptor carries an unknown schema: " + descriptor_path)
+if descriptor.get("caller") != "review-pr":
+    refuse(
+        "review-pr run workspace descriptor was written by caller %r, not review-pr: %s"
+        % (descriptor.get("caller"), descriptor_path)
+    )
+recorded_repo = descriptor.get("repository_root")
+recorded_research = descriptor.get("research_dir")
+if not isinstance(recorded_repo, str) or os.path.realpath(recorded_repo) != os.path.realpath(expected_repo):
+    refuse(
+        "review-pr run workspace descriptor names repository_root %r but this fence resolved %r"
+        % (recorded_repo, expected_repo)
+    )
+if not isinstance(recorded_research, str) or os.path.realpath(recorded_research) != os.path.realpath(expected_research):
+    refuse(
+        "review-pr run workspace descriptor names research_dir %r but this fence resolved %r"
+        % (recorded_research, expected_research)
+    )
+artifacts = descriptor.get("artifacts")
+if not isinstance(artifacts, dict):
+    refuse("review-pr run workspace descriptor carries no artifacts map: " + descriptor_path)
+values = []
+for key in ORDER:
+    value = artifacts.get(key, "")
+    if not isinstance(value, str):
+        refuse("review-pr run workspace descriptor artifact %r is not a string" % (key,))
+    if value == "":
+        if key not in OPTIONAL:
+            refuse("review-pr run workspace descriptor artifact %r is empty" % (key,))
+    elif os.path.dirname(value) != recorded_research:
+        refuse(
+            "review-pr run workspace descriptor artifact %r escapes the run research dir: %r"
+            % (key, value)
+        )
+    values.append(value)
+carrier_run_dir = descriptor.get("carrier_run_dir")
+if not isinstance(carrier_run_dir, str) or not carrier_run_dir:
+    refuse("review-pr run workspace descriptor carries no carrier_run_dir: " + descriptor_path)
+values.append(carrier_run_dir)
+values.append(recorded_repo)
+values.append(recorded_research)
+values.append(json.dumps(descriptor, sort_keys=True, separators=(",", ":")))
+for value in values:
+    if "\n" in value or "\r" in value:
+        refuse("review-pr run workspace descriptor carries an embedded newline; refusing to rehydrate")
+# Byte-level write: on Windows, text-mode stdout translates EVERY "\n" -- the
+# embedded separators too, not just a trailing one -- into "\r\n", and the
+# `IFS= read -r` reader below strips the "\n" but keeps the "\r", poisoning
+# every rehydrated carrier with a trailing CR. `end=""` does NOT fix that.
+sys.stdout.buffer.write(("\n".join(values) + "\n").encode("utf-8"))
+PY
+  )" || return 2
+  # Sequential `IFS= read -r` out of a HERESTRING, never a pipeline: a `... |
+  # while read` loop runs in a subshell and loses every assignment, and a pipe
+  # into an early-exiting reader is the EPIPE class this repo has been bitten by.
+  {
+    IFS= read -r _review_fleet_diff
+    IFS= read -r _review_fleet_criteria
+    IFS= read -r _review_fleet_range
+    IFS= read -r _review_fleet_snapshot
+    IFS= read -r _review_fleet_phase1
+    IFS= read -r _review_fleet_phase2
+    IFS= read -r _review_fleet_agg
+    IFS= read -r _review_fleet_carrier_dir
+    IFS= read -r _review_fleet_repo
+    IFS= read -r _review_fleet_research
+    IFS= read -r _review_fleet_descriptor
+  } <<REVIEW_FLEET_REHYDRATE_EOF
+$descriptor_fields
+REVIEW_FLEET_REHYDRATE_EOF
+  [ -n "$_review_fleet_repo" ] && [ -n "$_review_fleet_research" ] && [ -n "$_review_fleet_descriptor" ] || {
+    echo "error: review-pr run workspace descriptor did not yield a complete carrier set for $RUN_ID" >&2
+    return 2
+  }
+  # `${VAR:-<resolved>}` per carrier, not a blanket overwrite. An EMPTY carrier
+  # is the #427 defect and gets the run's own value; a carrier this process
+  # already bound is the run itself talking and is left alone.
+  DIFF_ARTIFACT_PATH="${DIFF_ARTIFACT_PATH:-$_review_fleet_diff}"
+  CRITERIA_PATH="${CRITERIA_PATH:-$_review_fleet_criteria}"
+  COMMIT_RANGE_PATH="${COMMIT_RANGE_PATH:-$_review_fleet_range}"
+  STANDALONE_SNAPSHOT_PATH="${STANDALONE_SNAPSHOT_PATH:-$_review_fleet_snapshot}"
+  PHASE1_DISPOSITION_PATH="${PHASE1_DISPOSITION_PATH:-$_review_fleet_phase1}"
+  PHASE2_DISPOSITION_PATH="${PHASE2_DISPOSITION_PATH:-$_review_fleet_phase2}"
+  AGG_PATH="${AGG_PATH:-$_review_fleet_agg}"
+  UBERDEV_CARRIER_RUN_DIR="${UBERDEV_CARRIER_RUN_DIR:-$_review_fleet_carrier_dir}"
+  WORKTREE_ROOT="${WORKTREE_ROOT:-$_review_fleet_repo}"
+  RESEARCH_DIR_ABS="${RESEARCH_DIR_ABS:-$_review_fleet_research}"
+  UBERDEV_COMMAND_WORKSPACE_JSON="${UBERDEV_COMMAND_WORKSPACE_JSON:-$_review_fleet_descriptor}"
+  MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
+  _review_fleet_bind_pr "$resolved_run_dir"
+  unset _review_fleet_diff _review_fleet_criteria _review_fleet_range _review_fleet_snapshot \
+    _review_fleet_phase1 _review_fleet_phase2 _review_fleet_agg _review_fleet_carrier_dir \
+    _review_fleet_repo _review_fleet_research _review_fleet_descriptor 2>/dev/null || true
+  # Exported for the CHILDREN this fence dispatches. It cannot help the NEXT
+  # fence -- that is a different process -- which is precisely why the next
+  # fence calls this function too.
+  #
+  # The three guarded names are guarded HERE for the same reason the fast path
+  # guards them: two entries into this function must not hand children two
+  # different environments. STANDALONE_SNAPSHOT_PATH is the live case -- for a
+  # /review-pr run the descriptor's own standalone_snapshot is deliberately the
+  # empty string, so an unconditional export would put an empty-but-present
+  # value in every dispatched child's environment on this path and nothing at
+  # all on the other one.
+  export UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT
+  export RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON
+  export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
+  export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
+  [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
+  [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
 }
