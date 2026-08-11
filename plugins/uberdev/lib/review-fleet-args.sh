@@ -901,6 +901,60 @@ review_fleet_read_ci_state() {
   jq -er --arg field "$2" '.[$field] | if type=="array" then tojson else . end' <"$1"
 }
 
+# review_fleet_write_ci_route TARGET EDGE_ID SLUG_BASE RUN_ID HEAD_SHA \
+#                             BASE_SHA BASE_TIP_SHA BASE_BRANCH PR_BRANCH LEASE_SHA
+# review_fleet_read_ci_route  PATH FIELD
+#
+# Phase 3 ROUTE's decision, made durable for the fence that acts on it.
+#
+# Same defect as the loop counters above, one step further along. ROUTE (the
+# "Phase 3 ROUTE" fence) selects the failing check and computes the fixer edge,
+# the lease SHA, the base identity and the branch pair; the fence that DISPATCHES
+# that fixer is a different harness shell and read all nine back as the empty
+# string. Its own comment says they are "re-checked by prepare-ci-authority
+# below", but prepare-ci-authority RECEIVES them as argv -- it cannot re-derive
+# what it was handed empty, so the receipt was minted over blanks.
+#
+# Field-addressed like review_fleet_read_ci_state rather than a positional TSV:
+# nine columns is where a positional record stops being readable, and a consumer
+# that wants one field should not have to know the order of the other eight.
+#
+# jq -er makes a missing or null field a non-zero exit, so a truncated record is
+# a refusal at the reader instead of an empty string in an authority receipt.
+review_fleet_write_ci_route() {
+  [ "$#" -eq 10 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" edge_id="$2" slug_base="$3" ci_run_id="$4" head_sha="$5" \
+        base_sha="$6" base_tip_sha="$7" base_branch="$8" pr_branch="$9" lease_sha="${10}" payload
+  # Every member is required. An empty one here is the defect this record
+  # exists to end, so it must not be writable in the first place.
+  for _review_ci_route_member in "$edge_id" "$slug_base" "$ci_run_id" "$head_sha" \
+      "$base_sha" "$base_tip_sha" "$base_branch" "$pr_branch" "$lease_sha"; do
+    [ -n "$_review_ci_route_member" ] || {
+      unset _review_ci_route_member 2>/dev/null || true
+      return 2
+    }
+  done
+  unset _review_ci_route_member 2>/dev/null || true
+  payload="$(jq -cn \
+    --arg edge_id "$edge_id" --arg slug_base "$slug_base" --arg ci_run_id "$ci_run_id" \
+    --arg head_sha "$head_sha" --arg base_sha "$base_sha" --arg base_tip_sha "$base_tip_sha" \
+    --arg base_branch "$base_branch" --arg pr_branch "$pr_branch" --arg lease_sha "$lease_sha" \
+    '{edge_id:$edge_id,slug_base:$slug_base,ci_run_id:$ci_run_id,head_sha:$head_sha,base_sha:$base_sha,base_tip_sha:$base_tip_sha,base_branch:$base_branch,pr_branch:$pr_branch,lease_sha:$lease_sha}')" || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_route() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI route decision missing: ${1:-}" >&2
+    return 2
+  }
+  jq -er --arg field "$2" '.[$field] | select(. != null and . != "")' <"$1" || {
+    echo "error: review-fleet CI route decision has no usable '${2:-}': ${1}" >&2
+    return 2
+  }
+}
+
 # review_fleet_write_ci_push PATH SHA BY_AGENT
 #
 # The SINGLE leased push (6c.4w.3) and the Phase 1 re-entry fence that records

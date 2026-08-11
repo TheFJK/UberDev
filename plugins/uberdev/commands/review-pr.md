@@ -3922,6 +3922,13 @@ print(serialized,end="")
     if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
       CI_ROUTE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_ROUTE_RUN_DIR=
     fi
+    # The route record's name keys on BOTH loop counters, so this fence reads
+    # them off disk through the one shared reader -- the rule S27.2 enforces.
+    # Naming a file after a counter this shell merely guessed would write the
+    # decision where the next fence does not look for it.
+    if [ -n "$CI_ROUTE_RUN_DIR" ]; then
+      review_fleet_load_ci_counters "$CI_ROUTE_RUN_DIR" || return 74
+    fi
     [ -n "$CI_ROUTE_RUN_DIR" ] || { echo "error: /uberdev:review-pr — Phase 3 ROUTE cannot resolve the run directory; refusing to run the mutating fix phase without its carriers." >&2; audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_run_dir_unreadable; OUTCOME=halted; exit 1; }
     # --no-ci-fix, ENFORCED IN SHELL. CI_FIX_PHASE had no reader anywhere in
     # this file: PROBE/MONITOR/CLASSIFY-run-but-ROUTE-is-skipped was
@@ -4123,6 +4130,31 @@ print(serialized,end="")
         exit 1
         ;;
     esac
+    # ROUTE's decision goes to DISK before this shell exits.
+    #
+    # The dispatch fence below is a different process and consumed all nine of
+    # these as the empty string. Its comment says they are "re-checked by
+    # prepare-ci-authority", but that tool RECEIVES them as argv -- it cannot
+    # re-derive what it was handed blank, so the authority receipt was minted
+    # over empties and every later `read-ci-authority-member` recovered those
+    # empties faithfully. The recovery path downstream is real; it just had
+    # nothing true to recover from.
+    #
+    # Only written when a fixer was actually selected. The flaky-rerun and
+    # billing/outage arms above deliberately clear CI_FIXER_EDGE_ID to mean "no
+    # agent this pass", and a record written there would assert a dispatch that
+    # is not going to happen -- so the absence of this file is itself the
+    # no-fixer signal the dispatch fence reads.
+    if [ -n "${CI_FIXER_EDGE_ID:-}" ]; then
+      review_fleet_write_ci_route "$CI_ROUTE_RUN_DIR/ci-route-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.json" \
+        "$CI_FIXER_EDGE_ID" "$CI_FIXER_SLUG_BASE" "$CI_RUN_ID" "$CI_CLASSIFICATION_HEAD_SHA" \
+        "$CI_BASE_SHA" "$CI_BASE_TIP_SHA" "$CI_BASE_BRANCH" "$CI_PR_HEAD_BRANCH" "$CI_LEASE_SHA" || {
+          echo "error: /uberdev:review-pr — could not record the Phase 3 route decision; refusing to dispatch a fixer whose authority would be minted over empty values." >&2
+          audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_record_unwritable
+          OUTCOME=halted
+          exit 1
+        }
+    fi
     ```
 
     When `CI_FIXER_EDGE_ID` is empty the routing is finished: `flaky` re-probes
@@ -4157,10 +4189,32 @@ print(serialized,end="")
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
     mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
-    # ROUTE ran in a DIFFERENT shell. Every scalar it produced that this fence
-    # consumes is either re-checked by prepare-ci-authority below (failure
-    # class, anchor, base sha, branches, lease -- all required members, all
-    # refused at mint when empty) or checked HERE, because these two are not.
+    # ROUTE ran in a DIFFERENT shell, so its decision is READ BACK off disk.
+    #
+    # The comment that used to sit here said these were "re-checked by
+    # prepare-ci-authority below". They were not: that tool receives them as
+    # argv and refuses an EMPTY member, but only after this fence has already
+    # handed it whatever it had -- which was nine empty strings, because ROUTE's
+    # shell had exited. The refusal fired on a value this fence invented, not on
+    # ROUTE's. Now the values are ROUTE's, and a missing record is a refusal.
+    CI_ROUTE_RECORD="$REVIEW_FLEET_RUN_DIR/ci-route-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.json"
+    [ -r "$CI_ROUTE_RECORD" ] || {
+      echo "error: /uberdev:review-pr — Phase 3 ROUTE left no decision record at $CI_ROUTE_RECORD; refusing to dispatch a fixer over empty authority." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_record_missing
+      OUTCOME=halted
+      exit 1
+    }
+    CI_FIXER_EDGE_ID="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" edge_id)" || return 74
+    CI_FIXER_SLUG_BASE="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" slug_base)" || return 74
+    CI_RUN_ID="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" ci_run_id)" || return 74
+    CI_CLASSIFICATION_HEAD_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" head_sha)" || return 74
+    CI_BASE_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_sha)" || return 74
+    CI_BASE_TIP_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_tip_sha)" || return 74
+    CI_BASE_BRANCH="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_branch)" || return 74
+    CI_PR_HEAD_BRANCH="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" pr_branch)" || return 74
+    CI_LEASE_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" lease_sha)" || return 74
+    # The two checks below predate the record and still hold: they guard the
+    # SHAPE of what was read, not merely its presence.
     #
     # The slug base keys the child DIRECTORY on this side, while
     # review_fleet_bind_ci re-derives it from the EDGE on its side. A lost value
