@@ -155,6 +155,7 @@
   ],
   "pending": [
     "agents/conflict-resolver.md",
+    "agents/findings-to-issues.md",
     "agents/trust-trail-evaluator.md",
     "commands/merge.md",
     "commands/review-pr.md",
