@@ -103,15 +103,15 @@ echo "## find-polluter.sh behavioural suite (#430)"
 #                        the depth-0 file the pre-fix enumeration skipped, so a
 #                        half-fix that finds only the nested file still fails F6
 mkdir -p "$TMP/bin" "$TMP/binp"
-{
-  echo '#!/usr/bin/env bash'
-  echo 'exit 0'
-} > "$TMP/bin/npm"
-{
-  echo '#!/usr/bin/env bash'
-  echo 'if [ "${2:-}" = "./src/top.test.ts" ]; then : > .pollute; fi'
-  echo 'exit 0'
-} > "$TMP/binp/npm"
+cat > "$TMP/bin/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+exit 0
+NPM_STUB
+cat > "$TMP/binp/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+if [ "${2:-}" = "./src/top.test.ts" ]; then : > .pollute; fi
+exit 0
+NPM_STUB
 chmod +x "$TMP/bin/npm" "$TMP/binp/npm"
 
 # Fixtures are re-created before every case, and the pollution marker removed —
@@ -167,7 +167,7 @@ run_fp() {
   # evidence this run never produced.
   : > "$TMP/err"
   OUT="$(cd "$fp_dir" && PATH="${fp_bin}:${PATH}" bash "$SCRIPT" .pollute "$fp_pat" 2>"$TMP/err")" || RC=$?
-  ERR="$(cat "$TMP/err")"
+  ERR="$(<"$TMP/err")"
 }
 
 # The enumeration block: the `Found N` line plus every visit line, in order.
@@ -193,7 +193,7 @@ F1_OUT="$OUT"
 F1_ENUM="$(enum_block "$OUT")"
 f1_bad=""
 [ "$RC" -eq 0 ] || f1_bad="${f1_bad} rc=${RC}(want 0)"
-grep -q '^Found 2 test files$' <<<"$OUT" || f1_bad="${f1_bad} missing-'Found 2 test files'"
+[ "$(found_n "$OUT")" = "2" ] || f1_bad="${f1_bad} missing-'Found 2 test files'"
 grep -qF '[1/2] Testing: ./src/a/x.test.ts' <<<"$OUT" || f1_bad="${f1_bad} missing-nested-visit"
 grep -qF '[2/2] Testing: ./src/top.test.ts' <<<"$OUT" || f1_bad="${f1_bad} missing-depth0-visit"
 if grep -qE 'notatest|other/' <<<"$OUT"; then f1_bad="${f1_bad} enumerated-a-non-match"; fi
@@ -231,7 +231,7 @@ make_fixture_b
 run_fp "$TMP/fixB" "$TMP/bin" 'src/**/*.test.ts'
 f3_bad=""
 [ "$RC" -eq 0 ] || f3_bad="${f3_bad} rc=${RC}(want 0)"
-grep -q '^Found 1 test files$' <<<"$OUT" || f3_bad="${f3_bad} missing-'Found 1 test files'"
+[ "$(found_n "$OUT")" = "1" ] || f3_bad="${f3_bad} missing-'Found 1 test files'"
 grep -qF '[1/1] Testing: ./src/top.test.ts' <<<"$OUT" || f3_bad="${f3_bad} depth-0-file-never-visited"
 if [ -z "$f3_bad" ]; then
   pass_case "F3 depth-0 match ./src/top.test.ts is counted AND visited"
@@ -257,7 +257,7 @@ fi
 make_fixture_a
 run_fp "$TMP/fixA" "$TMP/bin" 'nope/**/*.test.ts'
 f5_bad=""
-grep -q '^Found 0 test files$' <<<"$OUT" || f5_bad="${f5_bad} missing-'Found 0 test files'-on-stdout"
+[ "$(found_n "$OUT")" = "0" ] || f5_bad="${f5_bad} missing-'Found 0 test files'-on-stdout"
 grep -qF 'No test files matched' <<<"$ERR" || f5_bad="${f5_bad} missing-refusal-on-stderr"
 [ "$RC" -eq 2 ] || f5_bad="${f5_bad} rc=${RC}(want 2)"
 if grep -qF 'No polluter found' <<<"$OUT"; then f5_bad="${f5_bad} claimed-clean-after-running-zero-tests"; fi
@@ -364,9 +364,11 @@ elif [ "$(wc -l <<<"$f10_pat" | tr -d '[:space:]')" != "1" ]; then
 else
   make_fixture_a
   run_fp "$TMP/fixA" "$TMP/bin" "$f10_pat"
+  f10_found="$(found_n "$OUT")"
+  f10_visits="$(visit_count "$OUT")"
   [ "$RC" -eq 0 ] || f10_bad="${f10_bad} rc=${RC}(want 0)"
-  [ "$(found_n "$OUT")" = "2" ] || f10_bad="${f10_bad} Found=$(found_n "$OUT")(want 2)"
-  [ "$(visit_count "$OUT")" = "2" ] || f10_bad="${f10_bad} visited=$(visit_count "$OUT")(want 2)"
+  [ "$f10_found" = "2" ] || f10_bad="${f10_bad} Found=${f10_found}(want 2)"
+  [ "$f10_visits" = "2" ] || f10_bad="${f10_bad} visited=${f10_visits}(want 2)"
   grep -qF 'Testing: ./src/top.test.ts' <<<"$OUT" || f10_bad="${f10_bad} depth-0-file-not-visited"
 fi
 if [ -z "$f10_bad" ]; then
