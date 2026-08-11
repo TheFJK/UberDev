@@ -18,7 +18,7 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 - `writing-skills/SKILL.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `writing-skills/testing-skills-with-subagents.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `systematic-debugging/SKILL.md` — superpowers:→uberdev: namespace rebrand + local 'Parallel hypothesis testing' section enhancement
-- `systematic-debugging/find-polluter.sh` — re-pinned to upstream v6.2.0 (`3dcbd5c`) + local zero-match refusal (exit 2); upstream's own `tests/systematic-debugging/test-find-polluter.sh` asserts the opposite (`Found 0 test files` + `No polluter found` + green exit on a non-matching pattern), so this divergence is deliberate and a future re-sync will collide with it head-on, #430
+- `systematic-debugging/find-polluter.sh` — re-pinned to upstream v6.2.0 (`3dcbd5c`) + a local exit-2 refusal to render a verdict the run cannot back: no matching test files, an incomplete file search, or a pollution target already present (upstream returns a green 0 in all three). Upstream's own `tests/systematic-debugging/test-find-polluter.sh` asserts `No polluter found` on a non-matching pattern — precisely what UberDev no longer prints there — so this divergence is deliberate and a future re-sync will collide with it head-on, #430
 
 | # | File | Local bytes | Upstream bytes | Local sha256 | Upstream sha256 | Result |
 |---|------|-------------|----------------|--------------|-----------------|--------|
@@ -36,7 +36,7 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 | 12 | `systematic-debugging/defense-in-depth.md` | 3650 | 3650 | `1e175fb86fc3` | `1e175fb86fc3` | MATCH |
 | 13 | `systematic-debugging/condition-based-waiting.md` | 3516 | 3516 | `e89fec8400d6` | `e89fec8400d6` | MATCH |
 | 14 | `systematic-debugging/condition-based-waiting-example.ts` | 5054 | 5054 | `40ae5ebe497f` | `40ae5ebe497f` | MATCH |
-| 15 | `systematic-debugging/find-polluter.sh` | 2388 | 1986 | `28d3071f653c` | `dd7b8f13c4cc` | DIFFER (expected: re-pinned to v6.2.0 + local zero-match refusal — see #430) |
+| 15 | `systematic-debugging/find-polluter.sh` | recompute | 1986 | recompute | `dd7b8f13c4cc` | DIFFER (expected: re-pinned to v6.2.0 + local exit-2 refusal — see #430). The local columns are deliberately not frozen here: this file is locally maintained, so its size and hash move with every local fix and a stale pair reads as tampering at the next re-diff. Recompute both against the working tree instead. |
 | 16 | `systematic-debugging/test-pressure-1.md` | 1900 | 1900 | `0b6a915db005` | `0b6a915db005` | MATCH |
 | 17 | `systematic-debugging/test-pressure-2.md` | 2283 | 2283 | `b2030aeffba0` | `b2030aeffba0` | MATCH |
 | 18 | `systematic-debugging/test-pressure-3.md` | 2692 | 2692 | `96b50a52e2c7` | `96b50a52e2c7` | MATCH |
@@ -118,9 +118,10 @@ FILES=(
   "systematic-debugging/CREATION-LOG.md"
 )
 
-# Note when comparing: the 3 known-divergent files (writing-skills/SKILL.md,
-# writing-skills/testing-skills-with-subagents.md, systematic-debugging/SKILL.md)
-# and the remaining 17 sub-files now carry a provenance comment that is NOT in upstream.
+# Note when comparing: the 4 known-divergent files (writing-skills/SKILL.md,
+# writing-skills/testing-skills-with-subagents.md, systematic-debugging/SKILL.md,
+# systematic-debugging/find-polluter.sh — see the post-audit amendment)
+# and the remaining 16 sub-files now carry a provenance comment that is NOT in upstream.
 # Strip provenance lines before sha256-comparing if you want a content-only diff.
 # Or: diff against upstream at the SHA pinned in each file's header (extract it from the header line)
 # instead of HEAD when verifying integrity.
@@ -129,11 +130,13 @@ FILES=(
 #   writing-skills/SKILL.md — superpowers:->uberdev: rebrand (4 occurrences)
 #   writing-skills/testing-skills-with-subagents.md — superpowers:->uberdev: rebrand (4-byte delta)
 #   systematic-debugging/SKILL.md — superpowers:->uberdev: rebrand + local 'Parallel hypothesis testing' section
-#   systematic-debugging/find-polluter.sh — re-pinned to v6.2.0 + local zero-match refusal (#430); its header SHA is
-#     3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9, NOT the audit-wide FRESH_SHA/e7a2d16 — diff it at 3dcbd5c (or at the
-#     SHA in its own header) or the comparison is meaningless. Upstream's tests/systematic-debugging/test-find-polluter.sh
-#     asserts a GREEN exit on a zero-match pattern; UberDev deliberately exits 2 there, so that one assertion will not
-#     survive a straight re-sync.
+#   systematic-debugging/find-polluter.sh — re-pinned to v6.2.0 + a local exit-2 refusal to render a verdict the run
+#     cannot back (#430); its header SHA is 3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9, NOT the audit-wide
+#     FRESH_SHA/e7a2d16 — diff it at 3dcbd5c (or at the SHA in its own header) or the comparison is meaningless.
+#     The colliding assertion in upstream's tests/systematic-debugging/test-find-polluter.sh is the clean-verdict
+#     OUTPUT one (`No polluter found`) on a zero-match pattern: UberDev prints a refusal on stderr instead. Its
+#     `Found 0 test files` assertion still holds — that count line is printed before the refusal fires — so a
+#     re-sync will see one assertion break, not the whole case.
 
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
@@ -169,7 +172,7 @@ done
 
 ## Notes
 
-- The 3 known-divergent files and their per-file divergence patterns are recorded in two canonical places: the special-case allowlist (above) and the bash heredoc's `# Known-divergent files` block. Each divergence is also pinned in the affected file's provenance header.
+- The 4 known-divergent files (three from the original audit plus `systematic-debugging/find-polluter.sh` — see the post-audit amendment near the top) and their per-file divergence patterns are recorded in two canonical places: the special-case allowlist (above) and the bash heredoc's `# Known-divergent files` block. Each divergence is also pinned in the affected file's provenance header.
 - `find-polluter.sh` and `render-graphs.js` carry their provenance header on **line 2** to preserve the shebangs.
 - Re-diff whenever the upstream is bumped or a security audit requests a fresh trust trail.
 - Follow-up issue recommended: adopt `tests/skill-references.test.sh` per the test-coverage research, validating sub-file existence + parent SKILL.md reference pairs across ALL UberDev skills (not just the three vendored ones).

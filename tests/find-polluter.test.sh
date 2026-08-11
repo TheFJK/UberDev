@@ -34,17 +34,23 @@
 # EXIT CONTRACT under test:
 #   0  every matched test ran and none polluted
 #   1  polluter found, or bad usage (both pre-existing)
-#   2  the pattern matched no test files — verdict refused (local addition)
+#   2  verdict refused — nothing matched, the file search was incomplete, or the
+#      pollution target was already present so a test would not have run
+#      (local addition; upstream returns a green 0 in all three shapes)
 #
 # WHY THIS SUITE EXECUTES THE SCRIPT INSTEAD OF GREPPING IT. A structural test
 # that grepped find-polluter.sh for the new `-o -path` token would be a
 # counterfeit lock: it would pass against a "fix" that still enumerates nothing,
-# which is precisely the failure mode under repair (the #419 class). Every case
-# below runs `bash "$SCRIPT"` against a real on-disk fixture with a stubbed
-# `npm` first on PATH, and asserts on real stdout, real stderr and a real exit
-# code. The fixture's file list is written out LITERALLY and never derived from
-# the same `find -path` expression the script uses — deriving it would make the
-# test reproduce the bug it guards.
+# which is precisely the failure mode under repair (the #419 class). Every
+# BEHAVIOURAL case — F1-F3, F5-F7, F10-F12 — runs `bash "$SCRIPT"` against a
+# real on-disk fixture with a stubbed `npm` first on PATH, and asserts on real
+# stdout, real stderr and a real exit code. The fixture's file list is written
+# out LITERALLY and never derived from the same `find -path` expression the
+# script uses — deriving it would make the test reproduce the bug it guards.
+# The three cases that do NOT execute a fixture run are deliberate and named as
+# such: F4 is a derived lock (it reconciles counts from F1's already-captured
+# output), F8 is the usage arm (no fixture, no stub — the script exits before it
+# would need either), and F9 is a provenance/mode lock read off the repo file.
 #
 # FIND_POLLUTER_SCRIPT overrides which copy is executed. It exists for the
 # red-first run (point it at `git show HEAD:…` bytes and watch F1-F7, F10 fail);
@@ -52,8 +58,9 @@
 # override cannot make the provenance assertion pass against a temp copy.
 #
 # Assertions use ASCII substrings only (`FOUND POLLUTER!`, `No polluter found`,
-# `No test files matched`, `Usage:`) — never the script's emoji, because Git
-# Bash's locale on windows-latest is not ours to assume.
+# `No test files matched`, `Pollution already exists`, `Usage:`) — never the
+# script's emoji, because Git Bash's locale on windows-latest is not ours to
+# assume.
 set -u
 set -o pipefail
 
@@ -75,6 +82,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0
 FAIL=0
+# Green must mean "all EXPECTED_CASES ran and passed", never "the failure
+# counter happens to be zero" — the latter certifies a truncated or
+# short-circuited run, the same vacuous-green shape the script under test now
+# refuses. Bump this with every case added or removed.
+EXPECTED_CASES=12
 pass_case() { echo "  PASS  $1"; PASS=$((PASS+1)); }
 fail_case() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
@@ -102,9 +114,11 @@ mkdir -p "$TMP/bin" "$TMP/binp"
 } > "$TMP/binp/npm"
 chmod +x "$TMP/bin/npm" "$TMP/binp/npm"
 
-# Fixtures are re-created before every case (and the pollution marker removed):
-# the script's "Pollution already exists" branch prints `Skipping:` instead of
-# `[i/N] Testing:`, which would break F4's count-vs-work reconciliation.
+# Fixtures are re-created before every case, and the pollution marker removed —
+# a marker present when the loop starts now makes the script REFUSE a verdict
+# (rc 2) rather than skip every test under a green exit. F11 exercises that
+# branch deliberately; every other case must start clean or it would never
+# reach the enumeration it is there to assert on.
 #
 # Fixture A — the discriminating tree:
 #   src/a/x.test.ts     nested match      (the only file the pre-fix ./-form saw)
@@ -127,6 +141,16 @@ make_fixture_b() {
   rm -rf "$TMP/fixB"
   mkdir -p "$TMP/fixB/src"
   : > "$TMP/fixB/src/top.test.ts"
+}
+
+# Fixture C — the ONLY match sits behind a directory name containing a space.
+# The count was taken by line while the loop re-read the same string as
+# IFS-split words, so this path was torn into two bogus iterations, the real
+# file was never run, and the count line still said 1 under a green verdict.
+make_fixture_c() {
+  rm -rf "$TMP/fixC"
+  mkdir -p "$TMP/fixC/src/a b"
+  : > "$TMP/fixC/src/a b/x.test.ts"
 }
 
 # ---------------------------------------------------------------------------
@@ -351,7 +375,52 @@ else
   fail_case "F10 the documented example must be executable —${f10_bad}"
 fi
 
+# ---------------------------------------------------------------------------
+# F11 — a pollution target already present when the loop starts must refuse a
+# verdict. This is the sibling of F5's zero-match case and the last path that
+# could still reach the clean bill of health having run nothing: every match
+# took the `Skipping:` branch, the loop fell through, and the script printed
+# `No polluter found` with rc 0. Zero tests run, confident green.
+make_fixture_a
+: > "$TMP/fixA/.pollute"
+run_fp "$TMP/fixA" "$TMP/bin" 'src/**/*.test.ts'
+f11_bad=""
+[ "$RC" -eq 2 ] || f11_bad="${f11_bad} rc=${RC}(want 2)"
+grep -qF 'Pollution already exists' <<<"$ERR" || f11_bad="${f11_bad} missing-refusal-on-stderr"
+if grep -qF 'No polluter found' <<<"$OUT"; then f11_bad="${f11_bad} claimed-clean-after-a-dirty-start"; fi
+[ "$(visit_count "$OUT")" = "0" ] || f11_bad="${f11_bad} visited=$(visit_count "$OUT")(want 0)"
+if [ -z "$f11_bad" ]; then
+  pass_case "F11 pollution present before the first test -> refusal on stderr, rc=2, no clean verdict"
+else
+  fail_case "F11 a bisection that starts dirty must refuse a verdict —${f11_bad}"
+fi
+rm -f "$TMP/fixA/.pollute"
+
+# ---------------------------------------------------------------------------
+# F12 — count and iteration must agree for a matched path containing a space.
+# The general invariant is F4's; this pins the input that used to break it, and
+# it breaks it in the direction that matters: the reported total stayed at 1
+# while the real file was never handed to the runner at all.
+make_fixture_c
+run_fp "$TMP/fixC" "$TMP/bin" 'src/**/*.test.ts'
+f12_bad=""
+[ "$RC" -eq 0 ] || f12_bad="${f12_bad} rc=${RC}(want 0)"
+[ "$(found_n "$OUT")" = "1" ] || f12_bad="${f12_bad} Found=$(found_n "$OUT")(want 1)"
+[ "$(visit_count "$OUT")" = "1" ] || f12_bad="${f12_bad} visited=$(visit_count "$OUT")(want 1)"
+grep -qF 'Testing: ./src/a b/x.test.ts' <<<"$OUT" || f12_bad="${f12_bad} space-path-not-visited-intact"
+if [ -z "$f12_bad" ]; then
+  pass_case "F12 a matched path containing a space is counted once and visited intact"
+else
+  fail_case "F12 enumeration and iteration must agree for whitespace paths —${f12_bad}"
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"
+# Anti-vacuity: a run that ended early (or lost a case to an edit) must red,
+# not certify green off a zero failure count.
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+  echo "  FAIL  suite ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES - refusing to report green" >&2
+  exit 1
+fi
 if [ "$FAIL" -ne 0 ]; then exit 1; fi

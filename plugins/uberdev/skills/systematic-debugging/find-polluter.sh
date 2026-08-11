@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Vendored from obra/superpowers@3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 (v6.2.0, MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt; local addition: fail-loud exit 2 when the pattern matches zero test files (#430)
+# Vendored from obra/superpowers@3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 (v6.2.0, MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt; local addition: fail-loud exit 2 whenever the run cannot back a verdict — zero matched test files, an incomplete file search, or a pollution target already present (#430)
 # Bisection script to find which test creates unwanted files/state
 # Usage: ./find-polluter.sh <file_or_dir_to_check> <test_pattern>
 # Example: ./find-polluter.sh '.git' 'src/**/*.test.ts'
-# Exit: 0 = every matched test ran clean; 1 = polluter found (or bad usage); 2 = pattern matched no test files
+# Exit: 0 = every matched test ran and none polluted; 1 = polluter found (or bad usage);
+#       2 = verdict refused — nothing matched, the file search was incomplete, or the
+#           pollution target was already present so a test would not have run
 
 set -e
 
@@ -26,12 +28,35 @@ TEST_PATTERN="${TEST_PATTERN#./}"
 # find -path can't match '**/' against zero directory levels, so a pattern
 # like src/**/*.test.ts would skip src/top.test.ts; also try the pattern
 # with '**/' collapsed to cover files directly under the base directory.
-TEST_FILES=$(find . \( -path "./$TEST_PATTERN" -o -path "./${TEST_PATTERN//\*\*\//}" \) | sort -u)
-if [ -z "$TEST_FILES" ]; then
-  TOTAL=0
-else
-  TOTAL=$(printf '%s\n' "$TEST_FILES" | wc -l | tr -d ' ')
+# Both forms are kept in variables so a refusal can report exactly what was
+# searched, rather than a pattern the caller never typed.
+SEARCHED_NESTED="./$TEST_PATTERN"
+SEARCHED_FLAT="./${TEST_PATTERN//\*\*\//}"
+# pipefail is set inside the substitution only. Without it the assignment sees
+# sort's status, so a walk that could not read part of the tree (permissions,
+# I/O errors, symlink or depth limits, a missing find) would hand a TRUNCATED
+# list to a confident clean verdict — a false negative with no signal.
+FIND_RC=0
+TEST_LIST="$(set -o pipefail; find . \( -path "$SEARCHED_NESTED" -o -path "$SEARCHED_FLAT" \) | sort -u)" || FIND_RC=$?
+if [ "$FIND_RC" -ne 0 ]; then
+  echo "" >&2
+  echo "❌ The search for test files failed (exit $FIND_RC) - refusing to report a verdict." >&2
+  echo "   Searched: $SEARCHED_NESTED" >&2
+  echo "   Searched: $SEARCHED_FLAT" >&2
+  echo "   The enumeration is incomplete (see the search error above), so it proves nothing." >&2
+  exit 2
 fi
+
+# Read into an array. The count used to be taken from the line count while the
+# loop re-read the same string as IFS-split, glob-expanded words: a matched path
+# containing a space was torn into fragments and one containing a glob
+# metacharacter was replaced, both under an unchanged count and a green verdict.
+TEST_FILES=()
+while IFS= read -r TEST_FILE; do
+  [ -n "$TEST_FILE" ] || continue
+  TEST_FILES+=("$TEST_FILE")
+done <<< "$TEST_LIST"
+TOTAL=${#TEST_FILES[@]}
 
 echo "Found $TOTAL test files"
 echo ""
@@ -39,26 +64,36 @@ echo ""
 if [ "$TOTAL" -eq 0 ]; then
   echo "" >&2
   echo "❌ No test files matched the pattern - refusing to report a verdict." >&2
-  echo "   Pattern: $TEST_PATTERN (searched from $(pwd))" >&2
+  echo "   Searched: $SEARCHED_NESTED" >&2
+  echo "   Searched: $SEARCHED_FLAT" >&2
+  echo "   (both from $(pwd))" >&2
   echo "   A run that executed zero tests proves nothing. Fix the pattern and re-run." >&2
   exit 2
 fi
 
 COUNT=0
-for TEST_FILE in $TEST_FILES; do
+RAN=0
+for TEST_FILE in "${TEST_FILES[@]}"; do
   COUNT=$((COUNT + 1))
 
-  # Skip if pollution already exists
+  # Refuse if pollution is already there. Skipping the test instead (as upstream
+  # does) lets a run that executed nothing fall straight through to the clean
+  # verdict below, and a marker present before the bisection starts makes the
+  # whole run unattributable anyway.
   if [ -e "$POLLUTION_CHECK" ]; then
-    echo "⚠️  Pollution already exists before test $COUNT/$TOTAL"
-    echo "   Skipping: $TEST_FILE"
-    continue
+    echo "" >&2
+    echo "❌ Pollution already exists before test $COUNT/$TOTAL - refusing to report a verdict." >&2
+    echo "   Present: $POLLUTION_CHECK" >&2
+    echo "   Not run: $TEST_FILE" >&2
+    echo "   A bisection that starts dirty cannot attribute the pollution. Remove it and re-run." >&2
+    exit 2
   fi
 
   echo "[$COUNT/$TOTAL] Testing: $TEST_FILE"
 
   # Run the test
   npm test "$TEST_FILE" > /dev/null 2>&1 || true
+  RAN=$((RAN + 1))
 
   # Check if pollution appeared
   if [ -e "$POLLUTION_CHECK" ]; then
@@ -76,6 +111,14 @@ for TEST_FILE in $TEST_FILES; do
     exit 1
   fi
 done
+
+# The clean verdict is only worth the tests behind it. Every refusal above keeps
+# this true, so a mismatch here means a new path started skipping work again.
+if [ "$RAN" -ne "$TOTAL" ]; then
+  echo "" >&2
+  echo "❌ Only $RAN of $TOTAL matched tests ran - refusing to report a verdict." >&2
+  exit 2
+fi
 
 echo ""
 echo "✅ No polluter found - all tests clean!"
