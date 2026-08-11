@@ -360,6 +360,30 @@ UberDev rejects all of those. User gates trade quality for ceremony — every pa
 
 ---
 
+## Measured reviewer precision
+
+A confidence threshold is a guess until somebody measures the precision behind it. `/review-pr` files every deferred finding as a fingerprinted GitHub issue, so the precision of each reviewer lens is measurable — per lens, not globally, because a single number would average the two `code-reviewer` dispatches into something meaningless.
+
+| Lens | Measured precision |
+|---|---|
+| `review_pr.review.correctness` | insufficient-data (n=0) |
+| `review_pr.review.silent_failures` | insufficient-data (n=0) |
+| `review_pr.review.types` | insufficient-data (n=0) |
+| `review_pr.review.comments` | insufficient-data (n=0) |
+| `review_pr.review.tests` | insufficient-data (n=0) |
+| `review_pr.review.general` | insufficient-data (n=0) |
+
+**Every cell reads `insufficient-data` because instrumentation started with this release, and that is the correct output — not a placeholder.** Lens provenance is only now recorded machine-readably (a `uberdev-finding-meta` trailer written beside the fingerprint marker), and correctness ground truth only exists once a human applies `finding:true-positive` or `finding:false-positive` when closing a filed finding. The 38 historical findings have neither, so they are quarantined out of the table rather than mined for a flattering number: a closed issue means somebody closed it, which is issue hygiene, not reviewer quality.
+
+Full report with raw counts, intervals and the pre-instrumentation quarantine: [`docs/eval/review-precision.md`](./docs/eval/review-precision.md). Design and the floors it enforces: [RFC 0018](./docs/rfc/0018-review-precision-eval.md).
+
+```bash
+python3 tools/eval/review-precision.py --refresh   # re-mine + re-render
+python3 tools/eval/review-precision.py --check     # CI gate: freshness + ratchet + prompt digests
+```
+
+---
+
 ## Changelog
 
 Release notes live in [`CHANGELOG.md`](./CHANGELOG.md) (Keep-a-Changelog 1.1.0 / SemVer). The GitHub releases tab is intentionally kept lean — `CHANGELOG.md` is authoritative.

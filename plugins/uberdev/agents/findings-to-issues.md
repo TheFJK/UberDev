@@ -311,6 +311,31 @@ Explicit forbidden patterns:
 
    Mirrors `finish-branch/SKILL.md` `review-pr:pending` pattern verbatim. `gh label create --force` is documented idempotent.
 
+   Then provision the two eval verdict labels (RFC 0018 §3), in the same
+   fail-soft shape — they are the ground-truth vocabulary a human applies when
+   closing a filed finding, and their absence must never block issue creation:
+
+   ```bash
+   if ! gh label create --force finding:true-positive \
+       --color 0e8a16 \
+       --description "Review finding confirmed real and fixed in code (eval ground truth, RFC 0018)" 2>&1; then
+     echo "WARNING: gh label create --force finding:true-positive failed; continuing fail-soft" >&2
+     LABEL_PROVISIONED="fail-soft-skipped"
+   fi
+   if ! gh label create --force finding:false-positive \
+       --color b60205 \
+       --description "Review finding was wrong or not a real defect (eval ground truth, RFC 0018)" 2>&1; then
+     echo "WARNING: gh label create --force finding:false-positive failed; continuing fail-soft" >&2
+     LABEL_PROVISIONED="fail-soft-skipped"
+   fi
+   ```
+
+   Both descriptions are under GitHub's 100-character limit (77 and 75; `gh`
+   422s above it on update as well as create). Three `gh label create` calls
+   still fit the Step-2 core-bucket floor of `2 * max_new + 50` with headroom —
+   at `max_new=10` that floor is 70 calls' worth of budget against three label
+   writes plus at most twenty issue writes.
+
 8. **Per-finding loop (write phase).** For each row in the capped list, in deterministic order. Sleep 1 second between iterations to stay polite to the API:
 
    a. Compute fingerprint: `FP=$(printf '%s:%s:%s' "$file_path" "$line" "$normalised_summary" | sha256sum | awk '{print substr($1,1,16)}')`.
@@ -394,7 +419,7 @@ Explicit forbidden patterns:
       - `state == "closed"`: skip (user resolved). Append `{url, file, fingerprint}` to `skipped_closed[]`.
       - No match: build issue body (see Issue body shape below — tier-aware via `mention_line` / `backref_line` from c.5); secret-scan; `CREATE_OUTPUT=$(gh issue create --label "${finding_label:-review-pr-finding}" "${assignee_args[@]}" --title "$AUTO_TITLE" --body-file - 2>&1); rc=$?` from the sanitised tempfile (title format: `[finding] $file_path:$line — $summary_first_60_chars`). Append `{url, file, fingerprint, tier: $row_tier}` to `created_urls[]`.
 
-   e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains the literal string `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — prevents attacker-controlled finding text from collapsing into a fake existing-issue match.
+   e. Refusal carve-out: if the finding's `summary` (post-normalisation) contains EITHER the literal string `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=` OR the literal string `<!-- uberdev-finding-meta`, append `{file: $file_path:$line, reason: "finding-contains-fingerprint-marker"}` to `blocked_by_dedupe[]` and skip — the first literal prevents attacker-controlled finding text from collapsing into a fake existing-issue match; the second prevents it from forging a lens attribution into the precision corpus (RFC 0018 §2.1). One reason string covers both: the class is marker forgery.
 
    f. Write-failure handling with transient/permanent classifier (O4 — design decision D9): if `gh issue create` or `gh issue comment` returns non-zero, capture combined stderr+stdout into `CREATE_OUTPUT`, truncate to 200 chars BEFORE the regex classifier (security Note B — bounds attacker-influenced stderr substring), then classify the failure (see bash block below for the literal trigger regex). Append the typed entry to `blocked_by_dedupe[]`, set `status: DONE_WITH_CONCERNS`, and continue to next row — NEVER retry within the same run.
 
@@ -447,19 +472,45 @@ Explicit forbidden patterns:
 **Also flagged by:** lens-1, lens-2     ← only present on cross-lens merge (Q2 dedupe)
 
 ---
-*To resolve: address the finding in code and close this issue. Future `/uberdev:review-pr` runs see `state==closed` for this fingerprint and skip.*
+*To resolve: address the finding in code and close this issue. Future `/uberdev:review-pr` runs see `state==closed` for this fingerprint and skip. Before closing, apply `finding:true-positive` if it was a real defect or `finding:false-positive` if it was not — that label is the eval ground truth (RFC 0018).*
 
 <!-- uberdev:{finding_marker_slug}-finding fingerprint={16-char-hex} -->
+<!-- uberdev-finding-meta v=1 slug={finding_marker_slug} edges={comma-joined edges} severity={severity} tier={BLOCKER|CRITICAL|MAJOR} -->
 ```
 
 The `{mention_line}` (when present) and `{backref_line}` placeholders are tier-driven from the per-row bindings in process Step 8c.5. BLOCKER/CRITICAL tier rows render a top-of-body `@author` notification + `Blocks:` backref so the PR author is paged on the filed issue; MAJOR tier rows omit the `@mention` line (silent file) and render `Related:` instead of `Blocks:` (cross-reference without implying a hard gate).
+
+**The `<!-- uberdev-finding-meta -->` trailer (RFC 0018 §2).** It is the
+machine-readable sibling of the fingerprint marker and MUST be emitted as the
+line **immediately after** it — the precision miner reads the pair positionally,
+so an intervening blank line or a reordering silently strips provenance from
+every issue this agent ever files. It changes nothing about the fingerprint
+itself: same marker template, same `sha256(path:line:normalised_summary)`
+recipe, same 16-hex truncation, same fail-CLOSED dedupe.
+
+- `edges` is the **contributor-ordered union of the kept row's `source_edges`
+  and the `source_edges` of every row merged into it by the Step-5
+  cross-contributor dedupe** — exactly the set rendered above as `**Agent:**`
+  plus `**Also flagged by:**`. Comma-joined, no spaces.
+- The explicitly discriminated **legacy fleet variants carry no `source_edges`**;
+  they use the variant's own validated `lens` / `agent_name` column instead
+  (Step 5's equivalent merge).
+- When neither exists, emit `edges=` with an empty value. An
+  **empty `edges=` is a recorded state**, never a licence to guess.
+- **NEVER derive `edges` from `summary` or `detail`** prose — the same
+  prohibition Step 3 places on contributor identity. The trailer is the machine
+  authority for lens attribution; `**Agent:**` stays display-only. The two are
+  allowed to disagree, and neither is derived from the other.
+- `conf=` is RESERVED for the per-finding confidence surface of issue #431 and
+  is deliberately NOT emitted here: adding it would change the exact finding key
+  set that `post-impl-review` and Step 3 both lock, for no measurement benefit.
 
 ## Sanitiser steps (applied to {sanitised finding prose})
 
 1. Replace `@` immediately before a username-like word (`[A-Za-z][A-Za-z0-9_-]{0,38}`) with `ⓐ` (U+24B6 — Unicode lookalike). Prevents notification spam.
 2. Replace `#` immediately before a digit-only token (`[0-9]+`) with `＃` (U+FF03 — fullwidth). Prevents cross-reference back-links.
 3. The wrapper around the finding prose uses **four** backticks (` ```` `). The literal three-backtick sequence inside the prose is left as-is — the four-backtick wrapper neutralises it without escaping. No further escape needed.
-4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=`, the finding is REFUSED for that row only (process step 8e). Prevents marker forgery.
+4. If the (normalised) finding contains the literal `<!-- uberdev:${finding_marker_slug:-review-pr}-finding fingerprint=` OR the literal `<!-- uberdev-finding-meta`, the finding is REFUSED for that row only (process step 8e). Prevents forgery of either marker — the fingerprint marker forges a dedupe hit, the meta trailer forges a lens attribution (RFC 0018 §2.1).
 
 ## Comment body shape (state==open branch)
 

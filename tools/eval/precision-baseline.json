@@ -1,0 +1,60 @@
+{
+  "lenses": {
+    "review_pr.review.comments": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.review.correctness": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.review.general": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.review.silent_failures": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.review.tests": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.review.types": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.simplify.efficiency": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.simplify.quality": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    },
+    "review_pr.simplify.reuse": {
+      "fp": 0,
+      "n": 0,
+      "tp": 0
+    }
+  },
+  "measured_at": "2026-08-11T01:41:26Z",
+  "pending": [],
+  "prompt_digests": {
+    "agents/code-reviewer.md": "3d84c8db70e20bb764680d861608633b4302439b112bd710d5d0f141a12ef45e",
+    "agents/comment-analyzer.md": "9b01e5fc01b7e5aeb549d5638acdd7a63d9b4b6bc5c917f723ccf2134ba1cc0f",
+    "agents/pr-test-analyzer.md": "16f7bb61d876f379ec5f34f984fbcc0bbb8413f7678db6232bdfe4644a595f23",
+    "agents/silent-failure-hunter.md": "df2d2c2c367bc183d87906a4754c316731b2b284ab9dc3d2a56c3f9bf0a24c16",
+    "agents/type-design-analyzer.md": "52cafe31c0b39ee225b3b88b4f57bcef59d2054e4af1819c5a51063600c38c99",
+    "shared/phase1-reviewer-output-v1.md": "33ef287be76843fe1d01a5000548781a4d20850240aed22db1d5a60c26dc359e"
+  },
+  "schema_version": 1
+}

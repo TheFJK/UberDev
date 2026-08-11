@@ -37,6 +37,9 @@ CONTRIBUTING_MD="$REPO_ROOT/CONTRIBUTING.md"
 RFC_DIR="$REPO_ROOT/docs/rfc"
 DISPATCH_RFC="$RFC_DIR/0004-cross-platform-dispatch-backends.md"
 ALIAS_RFC="$RFC_DIR/0011-alias-install-reliability.md"
+# #432: the reviewer-precision eval RFC. 0018 is reserved for it by the issue,
+# and T3.4 below locks the header so a renumber cannot drift from the filename.
+PRECISION_RFC="$RFC_DIR/0018-review-precision-eval.md"
 SESSION_START="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 ALIASES_SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
@@ -60,7 +63,7 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
-         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC"; do
+         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$PRECISION_RFC"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -222,6 +225,8 @@ fi
 assert_grep "$ALIAS_RFC" '^# RFC 0011 — Alias-Install Reliability' "T3.2 alias RFC header self-identifies as RFC 0011"
 # The dispatch RFC keeps 0004.
 assert_grep "$DISPATCH_RFC" '^# RFC 0004 — Cross-Platform Dispatch' "T3.3 dispatch RFC keeps RFC 0004 header"
+# The precision-eval RFC self-identifies as 0018 (#432 reserved the number).
+assert_grep "$PRECISION_RFC" '^# RFC 0018 — ' "T3.4 precision RFC header self-identifies as RFC 0018"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
