@@ -248,14 +248,14 @@ const ruleSourcesPathAbs = String(CFG.ruleSourcesPathAbs || "");
 
 // Phase-1 emphasis tokens and the /simplify free-text focus. Both are CSV /
 // scalar because the envelope emitter has no array path. Emphasis NEVER gates
-// fanout membership — all six reviewers always run (review-pr.md:1324, :4507).
+// fanout membership — all seven reviewers always run (review-pr.md:1324, :4507).
 const aspects = String(CFG.aspects || "")
   .split(",").map(function (s) { return s.trim(); }).filter(Boolean);
 const focus = String(CFG.focus || "");
 
 // Numeric knobs re-clamped in-script: a script must never trust an
 // out-of-range value into the runtime's agent lifetime cap.
-const fanoutCap = clampInt(CFG.fanoutCap, 1, 50, 6);
+const fanoutCap = clampInt(CFG.fanoutCap, 1, 50, 7);
 const lensConcurrency = clampInt(CFG.lensConcurrency, 1, 3, 3);
 const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 40);
 
