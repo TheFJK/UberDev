@@ -814,9 +814,9 @@ fi
 TRANSPORT_SENTINEL='{"transport":"stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
 TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/transport.capture"
 TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/transport-output.md"
-TRANSPORT_WRITER_SHA256='df3d8449532cf3c4349cb51f644052a1a42434a6d43d06f4c6b9e050e9d5c15f'
+TRANSPORT_WRITER_SHA256='298993c092901c6b428962d72bd4eb7eceb022ecfc5d4f8a2c814b376f33738b'
 REAL_PYTHON3="$(command -v python3)"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -846,10 +846,12 @@ if (
   post_review_write_aggregate_v2 "$TRANSPORT_SENTINEL" "$TRANSPORT_OUTPUT" "${V2_GATE_ARGS[@]}"
   [ "$(<"$TRANSPORT_CAPTURE")" = 'verified' ]
   [ ! -e "$TRANSPORT_OUTPUT" ]
-); then
+)
+V2_7E_RC=$?
+if [ "$V2_7E_RC" -eq 0 ]; then
   echo "  PASS  V2.7e — digest-pinned in-memory code is argv while attacker-controlled aggregate bytes travel only on stdin"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  V2.7e — aggregate writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only"; FAIL=$((FAIL + 1))
+  echo "  FAIL  V2.7e — aggregate writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only (rc=$V2_7E_RC; 94=writer digest drifted, 95=argv shape, 96/97=sentinel leaked to argv/env, 98=stdin mismatch)"; FAIL=$((FAIL + 1))
 fi
 if (
   set -euo pipefail
