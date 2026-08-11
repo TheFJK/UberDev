@@ -808,6 +808,39 @@
       "risk_argument": "subtask"
     },
     {
+      "edge_id": "review_pr.review.convention",
+      "source": "plugins/uberdev/skills/post-impl-review/SKILL.md",
+      "required_inputs": [
+        "changed_paths",
+        "criteria_path",
+        "diff_path",
+        "emphasis",
+        "rule_sources_path"
+      ],
+      "required_input_types": {
+        "changed_paths": "repo_path_array",
+        "criteria_path": "path",
+        "diff_path": "path",
+        "emphasis": "string_array",
+        "rule_sources_path": "path"
+      },
+      "optional_inputs": [
+        "format_example_path",
+        "format_retry"
+      ],
+      "optional_input_types": {
+        "format_example_path": "path",
+        "format_retry": "boolean"
+      },
+      "allowed_workflows": [
+        "review-pr",
+        "solve",
+        "turbo"
+      ],
+      "risk_scope": "subtask",
+      "risk_argument": "subtask"
+    },
+    {
       "edge_id": "review_pr.review.correctness",
       "source": "plugins/uberdev/skills/post-impl-review/SKILL.md",
       "required_inputs": [

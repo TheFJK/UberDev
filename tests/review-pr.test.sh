@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Asserts that /uberdev:review-pr names all 6 Phase 1 reviewer dispatch slots
-# (5 distinct agent files; code-reviewer is dispatched twice — general lens +
+# Asserts that /uberdev:review-pr names all 7 Phase 1 reviewer dispatch slots
+# (6 distinct agent files; code-reviewer is dispatched twice — general lens +
 # correctness lens), dispatches them in capped parallel waves, exposes the
 # documented aspect arguments, plumbs aspect_emphasis + sequential env-var,
 # dispatches code-fixer for fix application in both Phase 1 + Phase 2, and
-# that each of the 5 distinct agent files contains the no-quoting output rule
+# that each of the 6 distinct agent files contains the no-quoting output rule
 # (primary defense against secret leakage into PR bodies).
 
 set -u
@@ -22,6 +22,11 @@ AGENT_FILES=(
   "$AGENTS_DIR/comment-analyzer.md"
   "$AGENTS_DIR/silent-failure-hunter.md"
   "$AGENTS_DIR/type-design-analyzer.md"
+  # #433: the convention lens. It joins this list rather than getting its own
+  # block so the no-quoting loop and the whole R30a–R30g contract-pointer loop
+  # cover it for free — a new Phase 1 agent that is not in AGENT_FILES is a new
+  # agent nothing checks.
+  "$AGENTS_DIR/convention-compliance.md"
 )
 
 for f in "$REVIEW_PR" "${AGENT_FILES[@]}"; do
@@ -65,9 +70,10 @@ assert_grep "$REVIEW_PR" '^description:' "frontmatter has description"
 assert_grep "$REVIEW_PR" '^allowed-tools:' "frontmatter has allowed-tools"
 
 echo
-# Note: post-#73 the 6 Phase 1 dispatch slots use 5 distinct agent files
+# Note: post-#433 the 7 Phase 1 dispatch slots use 6 distinct agent files
 # (code-reviewer x2 + pr-test-analyzer + silent-failure-hunter +
-# type-design-analyzer + comment-analyzer). code-simplifier is in the
+# type-design-analyzer + comment-analyzer + convention-compliance).
+# code-simplifier is in the
 # Phase 2 lens dispatcher block, NOT Phase 1. Anchor on the canonical
 # Agent Descriptions section so a bare prose mention elsewhere doesn't
 # false-positive.
@@ -214,7 +220,7 @@ assert_grep "$REVIEW_PR" '\*\*simplify\*\*[[:space:]]+-' "aspect: simplify liste
 assert_grep "$REVIEW_PR" '\*\*all\*\*[[:space:]]+-'      "aspect: all listed in Available Review Aspects"
 
 echo
-echo "== No-quoting output rule present in each of the 5 Phase 1 reviewer agents =="
+echo "== No-quoting output rule present in each of the 6 Phase 1 reviewer agents =="
 for f in "${AGENT_FILES[@]}"; do
   assert_grep "$f" '[Dd]o not quote|[Nn]ever quote|no[ -]quoting' \
     "$(basename "$f"): no-quoting output rule present"
@@ -2458,7 +2464,7 @@ assert_grep "$REVIEW_PR" '\*\*post-push\*\* command' \
 rm -rf "$R33_TMP"
 
 echo
-echo "== R30 (#403): the 5 Phase-1 agent files POINT AT the reviewer output contract =="
+echo "== R30 (#403): the 6 Phase-1 agent files POINT AT the reviewer output contract =="
 # lib/child-dispatch.sh validates a reviewer result with re.fullmatch over the
 # WHOLE file and lib/review-aggregate.sh re-parses with the byte-identical
 # regex, so an agent file that declares prose — or YAML "as the last fenced
@@ -2524,6 +2530,51 @@ else
   echo "  FAIL  R30g — an agent file copies the contract instead of pointing at it"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== R31 (#433): the rule-citation carve-out lives in the CONTRACT, scoped to one edge =="
+# The convention lens is the only Phase 1 reviewer permitted to put text from
+# another file into `detail`. That permission is an EXCEPTION to the redaction
+# rule, so it has to sit next to the rule it excepts — in the one contract every
+# reviewer reads. Put it in an agent file instead and it contradicts "this rule
+# outlives every override" from a second location, and the model resolves the
+# contradiction at random with no shape test able to see it.
+assert_grep "$PHASE1_CONTRACT" 'Rule-citation exception \(`review_pr\.review\.convention` only\)' \
+  "R31a — the contract declares the carve-out and scopes it to the convention edge"
+assert_grep "$PHASE1_CONTRACT" 'up to 300 normalised' \
+  "R31b — the carve-out is bounded at 300 normalised characters"
+assert_grep "$PHASE1_CONTRACT" 'never covers the reviewed diff' \
+  "R31c — the carve-out explicitly does not reach the reviewed diff"
+assert_grep "$PHASE1_CONTRACT" 'outlives every override' \
+  "R31d — the contract still states that redaction outlives every override"
+CONVENTION_AGENT="$AGENTS_DIR/convention-compliance.md"
+assert_grep "$CONVENTION_AGENT" 'quote: <the rule text, verbatim>' \
+  "R31e — the convention agent declares the citation grammar its detail must use"
+assert_grep "$CONVENTION_AGENT" 'never licenses quoting the' \
+  "R31f — the convention agent still forbids quoting the reviewed diff"
+assert_grep "$CONVENTION_AGENT" 'rule-source allowlist' \
+  "R31g — the convention agent reads only the controller-supplied allowlist"
+assert_grep "$CONVENTION_AGENT" 'does \*\*not\*\* govern `tools/x\.sh`' \
+  "R31h — the convention agent honours nested rule scoping"
+
+echo
+echo "== R32 (#433): the correctness lens no longer claims the convention lens's subject =="
+# Adding a gated convention lens BESIDE a correctness lens that still claims
+# CLAUDE.md compliance would double the false-positive surface this issue exists
+# to shrink, and it would leave a route by which a convention claim reaches the
+# report with no quote attached. The claim moves; it is not duplicated.
+CODE_REVIEWER_AGENT="$AGENTS_DIR/code-reviewer.md"
+assert_no_grep "$CODE_REVIEWER_AGENT" '^\*\*Project Guidelines Compliance\*\*' \
+  "R32a — code-reviewer no longer owns a Project Guidelines Compliance responsibility"
+assert_no_grep "$CODE_REVIEWER_AGENT" 'explicit CLAUDE\.md violation' \
+  "R32b — the 91-100 rubric anchor is a correctness exemplar, not a CLAUDE.md one"
+assert_grep "$CODE_REVIEWER_AGENT" 'convention-compliance' \
+  "R32c — code-reviewer names the lens that took the convention subject over"
+REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+assert_no_grep "$REVIEW_FLEET_WORKFLOW" 'lens: "Correctness, design, and CLAUDE\.md compliance"' \
+  "R32d — the correctness roster lens text drops its CLAUDE.md claim"
+assert_grep "$REVIEW_FLEET_WORKFLOW" 'outside the other six lenses' \
+  "R32e — the general lens counts six siblings, not five"
 # R30h — pr-test-analyzer's specific repairs. Its old text claimed the other
 # reviewers use "this exact shape", which was false, and pointed the aggregation
 # story at a SKILL.md step that is not the aggregator on the Workflow path.

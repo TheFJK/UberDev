@@ -442,6 +442,7 @@ PHASE1_CONTRIBUTORS = (
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 )
 PHASE2_CONTRIBUTORS = (
     "review_pr.simplify.reuse",
@@ -509,6 +510,7 @@ def phase1_table(rows):
         "type-design-analyzer": "review_pr.review.types",
         "comment-analyzer": "review_pr.review.comments",
         "pr-test-analyzer": "review_pr.review.tests",
+        "convention-compliance": "review_pr.review.convention",
     }
     for agent, severity, path, line, _disposition, summary, detail in rows:
         converted.append(((edge_by_agent[agent],), severity, path, line, summary, detail))

@@ -79,9 +79,9 @@ fi
 # "| `<name>`" optionally followed by " (qualifier)" before the next pipe —
 # the second `code-reviewer` row uses " (general lens)" so we tolerate any
 # non-pipe trailing chars between the closing backtick and the next "|".
-assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\|' \
-  6 \
-  "Step 2 dispatch table has exactly 6 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
+assert_count "$POST_IMPL" '^### Step 2: ' '^### Step 3: ' '^\| .code-[a-z-]+.[^|]*\||^\| .pr-test-analyzer.[^|]*\||^\| .silent-failure-hunter.[^|]*\||^\| .type-design-analyzer.[^|]*\||^\| .comment-analyzer.[^|]*\||^\| .convention-compliance.[^|]*\|' \
+  7 \
+  "Step 2 dispatch table has exactly 7 reviewer rows (one per dispatch slot, including 2 code-reviewer rows)"
 assert_grep "$POST_IMPL" 'dispatch-all-before-wait|dispatch.*before waiting' \
   "dispatch-before-wait invariant documented"
 assert_grep "$POST_IMPL" 'configured wave|each wave|within.*wave' \
@@ -111,6 +111,52 @@ assert_no_grep "$POST_IMPL" '^post_review_validated_evidence_complete\(\) \{' \
   "the skill keeps no second copy of the evidence builder"
 
 echo
+echo "== R-roster-complete (#433): every copy of the Phase-1 edge roster agrees =="
+# The Phase-1 roster is ONE contract with nine uncompared copies, and its ORDER
+# is a wire format: the controller mints nonces in roster order and the script
+# consumes them in roster order, so a half-moved roster re-binds every child to
+# another child's nonce. Adding a seventh edge is exactly the change that leaves
+# a copy behind, and the copies live in three languages plus JSON and markdown —
+# so the guard compares the ordered, de-duplicated edge list extracted from each
+# file against the SSOT in lib/review-fleet-args.sh.
+#
+# grep/sed/awk only: this fixture runs on windows-latest too, where the python3
+# fixtures are skipped. Delete the new edge from any one copy and this reds.
+ROSTER_SSOT="$(
+  . "$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+  review_fleet_roster review | cut -f2 | tr '\n' ' '
+)"
+ROSTER_COPIES=(
+  "plugins/uberdev/lib/review-fleet-args.sh"
+  "plugins/uberdev/skills/review-fleet/workflow.js"
+  "plugins/uberdev/lib/report_primitives.py"
+  "plugins/uberdev/lib/code_fixer_contract.py"
+  "plugins/uberdev/lib/review-aggregate.sh"
+  "plugins/uberdev/policy/solve-run-tree-v1.json"
+  "plugins/uberdev/skills/finish-branch/SKILL.md"
+  "tools/prkit/generate.sh"
+  "tools/prkit/verify.sh"
+)
+for roster_copy in "${ROSTER_COPIES[@]}"; do
+  if [ ! -r "$REPO_ROOT/$roster_copy" ]; then
+    echo "  FAIL  R-roster-complete — declared roster copy is missing: $roster_copy"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  ROSTER_OBSERVED="$(grep -oE 'review_pr\.review\.[a-z_]+' "$REPO_ROOT/$roster_copy" \
+    | awk '!seen[$0]++' | tr '\n' ' ')"
+  if [ "$ROSTER_OBSERVED" = "$ROSTER_SSOT" ]; then
+    echo "  PASS  R-roster-complete — $roster_copy carries the roster in SSOT order"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R-roster-complete — $roster_copy drifted from review_fleet_roster"
+    echo "        ssot:     $ROSTER_SSOT"
+    echo "        observed: $ROSTER_OBSERVED"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
 assert_grep "$POST_IMPL" '^- .aspect_emphasis. — optional list' \
   "Inputs section accepts aspect_emphasis (optional list)"
@@ -119,11 +165,15 @@ assert_in_section "$POST_IMPL" '^### Step 1: Build' '^### Step 2:' \
   "Step 1 brief assembly mentions ## Emphasis section appended when aspect_emphasis non-empty"
 
 echo
-echo "== Fanout cap default updated 5 → 6 (#73) =="
-assert_grep "$POST_IMPL" 'uberdev_read_int_in_range fanout_concurrency\.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6' \
-  "fanout cap default in uberdev_read_int_in_range bumped to 6 (was 5)"
-assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP=6' \
-  "fanout cap fallback assignment is 6 (was 5)"
+echo "== Fanout cap default updated 6 → 7 (#433) =="
+# The cap is the WAVE size, not a ceiling (maxAgents is), so seven lenses at
+# cap 6 would still run -- as two waves, each bounded by command_timeouts.review_pr,
+# roughly doubling worst-case Phase-1 latency for zero safety gain. The default
+# tracks the roster.
+assert_grep "$POST_IMPL" 'uberdev_read_int_in_range fanout_concurrency\.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 7' \
+  "fanout cap default in uberdev_read_int_in_range bumped to 7 (was 6)"
+assert_grep "$POST_IMPL" 'POST_IMPL_REVIEW_CAP=7' \
+  "fanout cap fallback assignment is 7 (was 6)"
 
 echo
 echo "== fanout_cap Skill input overrides config/env/default (#302) =="
@@ -352,6 +402,7 @@ DIFF_REVIEWER_AGENTS=(
   "$REPO_ROOT/plugins/uberdev/agents/type-design-analyzer.md"
   "$REPO_ROOT/plugins/uberdev/agents/comment-analyzer.md"
   "$REPO_ROOT/plugins/uberdev/agents/pr-test-analyzer.md"
+  "$REPO_ROOT/plugins/uberdev/agents/convention-compliance.md"
   "$REPO_ROOT/plugins/uberdev/agents/code-simplifier.md"
 )
 for agent in "${DIFF_REVIEWER_AGENTS[@]}"; do
@@ -584,6 +635,7 @@ contributor_ids = [
     "review_pr.review.comments",
     "review_pr.review.tests",
     "review_pr.review.general",
+    "review_pr.review.convention",
 ]
 opening = b'<external-untrusted-input source="post-impl-review-aggregate">\n'
 closing = b'\n</external-untrusted-input>\n'
@@ -627,6 +679,17 @@ POST_REVIEW_V2_TMP="$(mktemp -d)"
 # instead of defining it, so the runtime probes below source the shipped file --
 # the same bytes /review-pr would run.
 POST_REVIEW_V2_FUNCTION="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
+# #433: the writer now gates every `review_pr.review.convention` finding against
+# the run's rule-source allowlist, so it takes four more REQUIRED inputs. These
+# fixtures carry an allowlist that exists and is empty plus an empty changed-path
+# set — the shape that must leave every other lens's findings untouched, which is
+# exactly what the byte oracles below re-prove.
+V2_RULE_SOURCES="$POST_REVIEW_V2_TMP/rule-sources.txt"
+V2_CHANGED_PATHS="$POST_REVIEW_V2_TMP/changed-paths.json"
+V2_CITATION_LOG="$POST_REVIEW_V2_TMP/convention-citations.md"
+: >"$V2_RULE_SOURCES"
+printf '%s' '[]' >"$V2_CHANGED_PATHS"
+V2_GATE_ARGS=("$V2_RULE_SOURCES" "$POST_REVIEW_V2_TMP" "$V2_CHANGED_PATHS" "$V2_CITATION_LOG")
 python3 -I -B - "$POST_REVIEW_V2_TMP/nonempty-input.json" "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/structural-input.json" "$POST_REVIEW_V2_TMP/structural-document.json" "$POST_REVIEW_V2_TMP/duplicate-input.json" "$POST_REVIEW_V2_TMP/duplicate-document.json" <<'PY'
 import hashlib,json,pathlib,sys
 
@@ -637,6 +700,7 @@ edges=[
  "review_pr.review.comments",
  "review_pr.review.tests",
  "review_pr.review.general",
+ "review_pr.review.convention",
 ]
 findings=[
  [
@@ -646,6 +710,7 @@ findings=[
  [("suggestion","src/log.ts:17","Consider structured logger","A structured logger would improve diagnostics.")],
  [("blocker","src/api.ts:130","Handler return has an unconstrained type","The handler return leaks an unconstrained type.")],
  [("suggestion","src/util.ts:5","Outdated comment","The comment no longer matches the implementation.")],
+ [],
  [],
  [],
 ]
@@ -674,7 +739,7 @@ def write_utf8(path,payload):
 
 write_utf8(sys.argv[1],json.dumps(captured(findings),sort_keys=True,separators=(",",":")))
 write_utf8(sys.argv[2],json.dumps(captured([[] for _ in edges]),sort_keys=True,separators=(",",":")))
-structural=[[('suggestion','src/generic.ts:9','Preserve T<U> & café','Keep λ < > & bytes canonical')],[],[],[],[],[]]
+structural=[[('suggestion','src/generic.ts:9','Preserve T<U> & café','Keep λ < > & bytes canonical')],[],[],[],[],[],[]]
 write_utf8(sys.argv[3],json.dumps(captured(structural),sort_keys=True,separators=(",",":")))
 write_utf8(sys.argv[4],json.dumps({
  "contributors":[{"confidence":"high","id":edge,"verdict":"APPROVE"} for edge in edges],
@@ -691,7 +756,7 @@ write_utf8(sys.argv[4],json.dumps({
 duplicates=[
  [('blocker','src/shared.ts:23','Null guard is missing','The handler dereferences a nullable session.')],
  [('suggestion','src/shared.ts:23','Reuse the session assertion','The shared assertion already narrows this session.')],
- [],[],[],[],
+ [],[],[],[],[],
 ]
 write_utf8(sys.argv[5],json.dumps(captured(duplicates),sort_keys=True,separators=(",",":")))
 write_utf8(sys.argv[6],json.dumps({
@@ -749,7 +814,7 @@ fi
 TRANSPORT_SENTINEL='{"transport":"stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
 TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/transport.capture"
 TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/transport-output.md"
-TRANSPORT_WRITER_SHA256='c11f011225451c3e1492d153fbfbaeac196569ace86b3f162ea384390dedcebe'
+TRANSPORT_WRITER_SHA256='df3d8449532cf3c4349cb51f644052a1a42434a6d43d06f4c6b9e050e9d5c15f'
 REAL_PYTHON3="$(command -v python3)"
 if (
   set -euo pipefail
@@ -757,12 +822,17 @@ if (
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   python3() {
     local observed= arg actual_writer_sha
-    [ "$#" -eq 6 ] || return 91
+    [ "$#" -eq 10 ] || return 91
     [ "$1" = '-I' ] && [ "$2" = '-B' ] && [ "$3" = '-c' ] || return 92
     actual_writer_sha="$(printf '%s' "$4" | "$REAL_PYTHON3" -I -B -c \
       'import hashlib,sys; body=sys.stdin.buffer.read().replace(b"\r\n",b"\n"); print(hashlib.sha256(body).hexdigest(),end="")')" || return 93
     [ "$actual_writer_sha" = "$TRANSPORT_WRITER_SHA256" ] || return 94
     [ "$5" = "$TRANSPORT_OUTPUT" ] && [ "$6" = "$UBERDEV_REVIEW_PLUGIN_ROOT" ] || return 95
+    # The four gate inputs are PATHS, in declaration order. They are argv, not
+    # stdin, for the same reason the aggregate destination is: they are
+    # controller-derived scalars, never attacker-controlled bytes.
+    [ "$7" = "$V2_RULE_SOURCES" ] && [ "$8" = "$POST_REVIEW_V2_TMP" ] || return 95
+    [ "$9" = "$V2_CHANGED_PATHS" ] && [ "${10}" = "$V2_CITATION_LOG" ] || return 95
     for arg in "$@"; do
       [[ "$arg" != *"$TRANSPORT_SENTINEL"* ]] || return 96
     done
@@ -773,7 +843,7 @@ if (
     [ "$observed" = "$TRANSPORT_SENTINEL" ] || return 98
     printf 'verified\n' >"$TRANSPORT_CAPTURE"
   }
-  post_review_write_aggregate_v2 "$TRANSPORT_SENTINEL" "$TRANSPORT_OUTPUT"
+  post_review_write_aggregate_v2 "$TRANSPORT_SENTINEL" "$TRANSPORT_OUTPUT" "${V2_GATE_ARGS[@]}"
   [ "$(<"$TRANSPORT_CAPTURE")" = 'verified' ]
   [ ! -e "$TRANSPORT_OUTPUT" ]
 ); then
@@ -785,10 +855,10 @@ if (
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" "${V2_GATE_ARGS[@]}" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" "${V2_GATE_ARGS[@]}" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" "${V2_GATE_ARGS[@]}" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" "${V2_GATE_ARGS[@]}" || exit 1
   git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
   git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
   PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
@@ -805,7 +875,7 @@ value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 value["rows"].pop()
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")),encoding="utf-8",newline="\n")
 PY
-  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" 2>/dev/null
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" "${V2_GATE_ARGS[@]}" 2>/dev/null
   [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ]
 ); then
   echo "  PASS  V2.8 — writer emits exact oracles, merges duplicate scopes in roster order, and refuses an incomplete roster"; PASS=$((PASS + 1))
@@ -824,7 +894,7 @@ if (
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
-  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "" \
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "" "${V2_GATE_ARGS[@]}" \
       2>"$POST_REVIEW_V2_TMP/empty-path.err"
   grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err"
 ); then

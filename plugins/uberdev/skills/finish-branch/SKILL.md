@@ -263,6 +263,7 @@ contributor_ids=[
  "review_pr.review.comments",
  "review_pr.review.tests",
  "review_pr.review.general",
+ "review_pr.review.convention",
 ]
 payload=pathlib.Path(sys.argv[1]).read_bytes()
 opening=b'<external-untrusted-input source="post-impl-review-aggregate">\n'

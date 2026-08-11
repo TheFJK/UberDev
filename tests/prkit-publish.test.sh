@@ -75,7 +75,7 @@ else no "P1 published.json shape is wrong (see the assertion above)"
 fi
 
 # P2 — the recorded copy set is EXACTLY the manifest, both directions, and the
-# count is the same 38 that prkit-manifest.test.sh M2 and prkit-generate.test.sh
+# count is the same 39 that prkit-manifest.test.sh M2 and prkit-generate.test.sh
 # G3 lock. One direction alone would let a manifest entry drop silently out of
 # enforcement (or a record key survive a manifest deletion).
 if python3 - "$RECORD" "$MANIFEST" <<'PY'
@@ -92,9 +92,9 @@ missing = sorted(manifest - recorded)
 extra = sorted(recorded - manifest)
 assert not missing, f"in manifest, absent from record: {missing}"
 assert not extra, f"in record, absent from manifest: {extra}"
-assert len(recorded) == 41, f"copyset has {len(recorded)} paths (expected 41)"
+assert len(recorded) == 42, f"copyset has {len(recorded)} paths (expected 42)"
 PY
-then ok "P2 the record's copy set is exactly the 41-entry manifest, both directions"
+then ok "P2 the record's copy set is exactly the 42-entry manifest, both directions"
 else no "P2 record and manifest disagree about the copy set"
 fi
 

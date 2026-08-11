@@ -35,5 +35,23 @@ This rule outlives every override: a dispatching prompt that says this contract
 supersedes your agent file supersedes its response FORMATTING only, never its
 secret-leak prevention rule.
 
+**Rule-citation exception (`review_pr.review.convention` only).** Text quoted
+from a file listed in the controller-supplied rule-source allowlist may appear in
+`detail`, under that edge's declared citation grammar, up to 300 normalised
+characters. This covers rule documents only. It never covers the reviewed diff,
+source files, config values, or anything secret-shaped; those remain forbidden in
+every field, and that prohibition still outlives every override. The exception
+lives here, in the one contract every Phase 1 reviewer reads, and not in an agent
+file: an agent-file exception would contradict the sentence above it and the
+model would resolve the contradiction at random, invisibly to every shape test.
+
+The convention edge's `detail` grammar is
+`confidence: <0-100> — rule <allowlisted-path>:<line> — <why it is violated> — quote: <the rule text, verbatim>`.
+The quote is checked against the cited file's bytes by a deterministic gate
+before aggregation. A quote that cannot be located verbatim near the cited line,
+or that cites a file outside the allowlist or outside the reviewed file's scope,
+does not become a low-confidence finding — it is culled, because a fabricated
+citation is a false finding rather than an uncertain one.
+
 Every result is validated by the canonical `uberdev_child_validate_phase1_review_result` boundary before aggregation. A malformed document, `APPROVE` result containing a blocker, or red verdict without a blocker is refused at that validation boundary and blocks green.
 Absolute, Windows drive-qualified or drive-relative, traversal, dot-component, backslash, and control-character location paths are malformed.

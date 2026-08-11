@@ -327,7 +327,7 @@ role_suffix = sys.argv[4]
 expected_roles = {
     'ci-code-fixer', 'ci-failure-classifier', 'ci-rebase-handler',
     'code-fixer', 'code-reviewer', 'code-simplifier', 'comment-analyzer',
-    'conflict-resolver', 'finding-verifier', 'findings-to-issues',
+    'conflict-resolver', 'convention-compliance', 'finding-verifier', 'findings-to-issues',
     'merge-strategy-decider',
     'pr-test-analyzer', 'silent-failure-hunter', 'trust-trail-evaluator',
     'type-design-analyzer',
@@ -343,6 +343,7 @@ edge_semantics = {
     'review_pr.review.comments': ('provider', 'comment-analyzer', ('review-pr', 'solve', 'turbo'), review_contract),
     'review_pr.review.tests': ('provider', 'pr-test-analyzer', ('review-pr', 'solve', 'turbo'), review_contract),
     'review_pr.review.general': ('provider', 'code-reviewer', ('review-pr', 'solve', 'turbo'), review_contract),
+    'review_pr.review.convention': ('provider', 'convention-compliance', ('review-pr', 'solve', 'turbo'), review_contract),
     'review_pr.fix.phase1': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),

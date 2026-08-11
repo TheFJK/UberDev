@@ -241,7 +241,7 @@ optimisation — it is the deletion of a proof.**
 
 | Stage | Script dispatches | Calling-session Bash then proves |
 |---|---|---|
-| `review` | the 6 Phase-1 reviewers | per-child `capture` verbs → trusted ledger → `post_review_capture_aggregation_inputs` → `post_review_write_aggregate_v2` → `digest` → `prepare-authority` |
+| `review` | the 7 Phase-1 reviewers | per-child `capture` verbs → trusted ledger → `post_review_capture_aggregation_inputs` → `post_review_write_aggregate_v2` → `digest` → `prepare-authority` |
 | `fix` | ONE `code-fixer` child | `capture-review-terminal` → `validate-review-outcome` → `validate-residue` → `review_track_validated_fixer_head` → `review_refresh_phase1_scope` |
 | `simplify` | the 3 `code-simplifier` lenses | canonical aggregate → `code_fixer_contract.py encode-aggregate --phase phase2` (the byte-shape oracle, `commands/simplify.md:341-348`) → `digest` → `prepare-authority` |
 | `defer` | ONE `findings-to-issues` child | halt handling (`AskUserQuestion`), then the GREEN/YELLOW/RED predicate |
@@ -257,7 +257,7 @@ both look harmless:
 
 - **line 153, "haiku writer emits post-impl-review-final.md".** Rejected. The
   aggregate is published by `post_review_write_aggregate_v2`, a deterministic
-  writer that re-validates the closed six-edge roster and "does not use any
+  writer that re-validates the closed seven-edge roster and "does not use any
   pathname as aggregation authority"
   (`skills/post-impl-review/SKILL.md:693-697`). Since #381 it IS on disk, at
   `lib/review-aggregate.sh:330` — so "no on-disk executable to invoke" no longer
@@ -452,7 +452,7 @@ child.
 
 | Stage | Nonce index → edge |
 |---|---|
-| `review` | 0 `review_pr.review.correctness` · 1 `review_pr.review.silent_failures` · 2 `review_pr.review.types` · 3 `review_pr.review.comments` · 4 `review_pr.review.tests` · 5 `review_pr.review.general` |
+| `review` | 0 `review_pr.review.correctness` · 1 `review_pr.review.silent_failures` · 2 `review_pr.review.types` · 3 `review_pr.review.comments` · 4 `review_pr.review.tests` · 5 `review_pr.review.general` · 6 `review_pr.review.convention` |
 | `simplify` | 0 `review_pr.simplify.reuse` · 1 `review_pr.simplify.quality` · 2 `review_pr.simplify.efficiency` |
 | `fix` | 0 — the single fixer child |
 | `verify` | 0..N-1 — one `review_pr.verify.finding` child per ELIGIBLE Phase 1 finding (`severity: blocker` AND disposition != `APPLIED`), in the order `project-verification-claims` wrote the claim cards |
@@ -535,7 +535,7 @@ agent-chosen location.
    verb accepts no caller-supplied digest and computes both itself. **Any
    `BLOCKED` reviewer blocks green
    trust** — missing reviewer evidence is not advisory, and the ordinary
-   aggregate exists only after all six slots have valid evidence. A missing or
+   aggregate exists only after all seven slots have valid evidence. A missing or
    empty aggregate terminates `/review-pr` immediately without dispatching the
    fixer, Phase 2, deferred findings or trust; it is infrastructure failure,
    never a zero-finding review. Exact `findings: []` is the valid zero form.
@@ -592,7 +592,7 @@ and the runtime forbids the nondeterministic clock global (DR-7).
 
 Both fanouts are **genuine barriers**, and each carries a comment saying so. The
 controller's aggregate writers consume the **full** roster —
-`post_review_write_aggregate_v2` re-validates the closed six-edge roster, and
+`post_review_write_aggregate_v2` re-validates the closed seven-edge roster, and
 `encode-aggregate` does the same for the three lenses — so there is no
 partial-consumption step a barrier-free `pipeline()` could overlap with. It
 would buy nothing here while making this the first shipped `pipeline()` call
@@ -641,13 +641,17 @@ run identity and every artifact path from disk rather than from a shell that has
 already exited (#427). The fallback needs nothing extra for this — the same
 fences carry the same prologue.
 
-1. **`review`** — dispatch all six reviewers in ONE message
+1. **`review`** — dispatch all seven reviewers in ONE message
    (`uberdev:code-reviewer` twice for the correctness and general lenses, plus
    `uberdev:silent-failure-hunter`, `uberdev:type-design-analyzer`,
-   `uberdev:comment-analyzer`, `uberdev:pr-test-analyzer`), each reading
+   `uberdev:comment-analyzer`, `uberdev:pr-test-analyzer`,
+   `uberdev:convention-compliance`), each reading
    `diffPathAbs` by path, each writing `result.md.partial` → `mv -f` →
-   `result.md` and its nonce-bearing `status.json` at the layout above. When
-   `fanoutCap < 6`, split into `ceil(6 / fanoutCap)` sequential waves, still
+   `result.md` and its nonce-bearing `status.json` at the layout above. The
+   convention child — and only it — also receives the absolute
+   `rule-sources.txt` path, the citation grammar its `detail` must use, and the
+   empty-allowlist instruction. When
+   `fanoutCap < 7`, split into `ceil(7 / fanoutCap)` sequential waves, still
    dispatching every child in a wave before the first wait.
 2. **`fix`** — dispatch ONE `uberdev:code-fixer` on the controller-supplied
    edge, with the authority scalars verbatim. Never in parallel with anything,

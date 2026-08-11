@@ -103,6 +103,7 @@ jobs:
           bash tests/cluster.test.sh && \
           bash tests/cluster-pipeline.test.sh && \
           bash tests/code-fixer-contract.test.sh && \
+          bash tests/convention-citation.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/review-child-handoff.test.sh && \
           bash tests/find-polluter.test.sh && \
@@ -273,6 +274,10 @@ jobs:
         # here AND its `bash tests/...` line in the ubuntu job above.
         #   - cluster-pipeline.test.sh
         #   - code-fixer-contract.test.sh
+        #   - convention-citation.test.sh  (python3 -c over mktemp -d trees plus
+        #                                   the code_fixer_contract CLI verb,
+        #                                   same reason as
+        #                                   code-fixer-contract.test.sh)
         #   - finish-branch-zsh.test.sh
         #   - goal-pipeline-zsh.test.sh
         #   - goal-state-zsh.test.sh

@@ -58,7 +58,8 @@ review_fleet_roster() {
         types            review_pr.review.types \
         comments         review_pr.review.comments \
         tests            review_pr.review.tests \
-        general          review_pr.review.general
+        general          review_pr.review.general \
+        convention       review_pr.review.convention
       ;;
     simplify)
       printf '%s\t%s\n' \
@@ -78,6 +79,77 @@ review_fleet_expected() {
   local rows
   rows="$(review_fleet_roster "${1:-}")" || return 2
   printf '%s' "$rows" | grep -c . || return 2
+}
+
+# The upper bound on the rule-source allowlist. A convention reviewer that is
+# handed an unbounded file list stops reading rules and starts skimming, and the
+# citation gate downstream opens every cited path -- so the list is capped here,
+# once, rather than trusted to be small.
+UBERDEV_REVIEW_RULE_SOURCE_LIMIT=200
+
+# uberdev_review_rule_sources REPO_ROOT -> the convention lens's rule-source
+# ALLOWLIST: repo-relative POSIX paths, one per line, LC_ALL=C sorted, capped.
+#
+# WHY AN ALLOWLIST AND NOT A HINT. `review_pr.review.convention` is the one lens
+# whose claim ("the project says X") is authoritative-sounding and trivially
+# hallucinable, so every finding it emits is gated against the exact bytes of
+# the file it cites. That gate needs a closed set of files it is willing to
+# open; this is that set, and it is discovered ONCE per run by the controller
+# and persisted, never re-derived per reader (two derivations can disagree).
+#
+# `find`, not `git ls-files`: this repo's own root CLAUDE.md is gitignored, and
+# a rule document that governs the reviewed change governs it whether or not it
+# is tracked.
+#
+# The prune list is load-bearing, not cosmetic. A checkout with sibling
+# worktrees under `.worktrees/` or `.claude/worktrees/` carries a full second
+# copy of every AGENTS.md; without the prune a citation could scope itself to
+# another branch's rule file and read as verified.
+#
+# No bashisms: this file is sourced by command/skill `bash` fences that run
+# under /bin/zsh on macOS. `awk`, not `head`, bounds the list -- an early-exiting
+# reader on the end of a pipe is the EPIPE class tests/epipe-guard.test.sh
+# exists to keep out.
+uberdev_review_rule_sources() {
+  [ "$#" -eq 1 ] || {
+    echo "error: uberdev_review_rule_sources: usage: uberdev_review_rule_sources REPO_ROOT" >&2
+    return 2
+  }
+  local rule_root rule_hit rule_raw rule_rc
+  rule_root="$(cd "$1" 2>/dev/null && pwd -P)" || {
+    echo "error: uberdev_review_rule_sources: unreadable repository root: $1" >&2
+    return 2
+  }
+  # find's stderr is NOT discarded and its status IS inspected. An empty
+  # allowlist is a legitimate answer -- it means the repo wrote no conventions
+  # down -- but a BROKEN walk produces the byte-identical answer, and the
+  # difference is the whole lens: one is "nothing to enforce", the other is a
+  # review that silently enforced nothing. Errored AND empty is refused by name;
+  # errored but partial still reports what it read, with the errors on the
+  # operator's terminal.
+  rule_raw="$(find "$rule_root" \
+      -maxdepth 4 \
+      \( -name .git -o -name .worktrees -o -name .claude -o -name node_modules \
+         -o -name vendor -o -name dist -o -name build \) -prune -o \
+      -type f \
+      \( -name AGENTS.md -o -name CLAUDE.md -o -name .editorconfig \
+         -o -name '.eslintrc*' -o -name 'eslint.config.*' -o -name '.prettierrc*' \
+         -o -name ruff.toml -o -name .ruff.toml -o -name pyproject.toml \
+         -o -name setup.cfg -o -name '.markdownlint*' -o -name .shellcheckrc \
+         -o -name '.commitlintrc*' \) -print)"
+  rule_rc=$?
+  if [ "$rule_rc" -ne 0 ] && [ -z "$rule_raw" ]; then
+    echo "error: uberdev_review_rule_sources: discovery under $rule_root failed (find rc=$rule_rc) and found nothing; refusing to report that as 'this repository has no written conventions'" >&2
+    return 2
+  fi
+  printf '%s\n' "$rule_raw" \
+    | while IFS= read -r rule_hit; do
+        case "$rule_hit" in
+          "$rule_root"/*) printf '%s\n' "${rule_hit#"$rule_root"/}" ;;
+        esac
+      done \
+    | LC_ALL=C sort \
+    | awk -v limit="$UBERDEV_REVIEW_RULE_SOURCE_LIMIT" 'NR<=limit'
 }
 
 # review_fleet_mint_nonce -> one single-use 64-hex run_nonce from a real CSPRNG.

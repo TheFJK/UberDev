@@ -97,7 +97,7 @@ and is reverted by the next generation.
 ## Adding a file to prkit
 
 1. Add its path to `manifest.txt`, and bump the count assert in
-   `tests/prkit-manifest.test.sh` (38). Then re-run
+   `tests/prkit-manifest.test.sh` (39). Then re-run
    `python3 tools/prkit/published-check.py --refresh --prkit-version <current>`,
    or `tests/prkit-publish.test.sh` P2 reds on the manifest/record mismatch.
 2. If it introduces a new `uberdev` pattern the blanket rule misses, or a new
