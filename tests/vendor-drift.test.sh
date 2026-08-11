@@ -65,6 +65,7 @@ mkdir -p "$STUBS"
 #   STUB_LSREMOTE_MODE : ok | rc1 | empty | garbage
 #   STUB_HEAD_SHA      : the 40-hex HEAD ls-remote reports (mode=ok)
 #   STUB_DIFF_FILES    : newline-separated paths `git diff --name-only` returns
+#   STUB_LSTREE_MODE   : ok | missing  (does the declared upstream_path exist?)
 # Every invocation is appended to $STUB_LOG so mutations can be counted.
 cat > "$STUBS/git" <<'GITSTUB'
 #!/usr/bin/env bash
@@ -77,6 +78,14 @@ case "$*" in
       garbage) printf 'not-a-sha\tHEAD\n'; exit 0 ;;
       *)       printf '%s\tHEAD\n' "${STUB_HEAD_SHA:?STUB_HEAD_SHA unset}"; exit 0 ;;
     esac
+    ;;
+  *ls-tree*)
+    # `missing` models a declared upstream_path that upstream renamed away:
+    # an empty tree listing, exactly what git prints for an absent path.
+    [ "${STUB_LSTREE_MODE:-ok}" = "missing" ] && exit 0
+    for last in "$@"; do :; done
+    printf '%s\n' "$last"
+    exit 0
     ;;
   *" diff "*|diff*)
     [ -n "${STUB_DIFF_FILES:-}" ] && printf '%s\n' "$STUB_DIFF_FILES"
@@ -137,9 +146,11 @@ run_drift() {
     STUB_HEAD_SHA="$head" \
     STUB_DIFF_FILES="$files" \
     STUB_OPEN_ISSUES="$issues" \
+    STUB_LSTREE_MODE="${LSTREE_MODE:-ok}" \
     python3 "$DRIFT" --repo-root "$REPO_ROOT" "$@" 2>&1
   )" || DRIFT_RC=$?
 }
+LSTREE_MODE=ok
 
 # gh_mutations <log> -> count of create/edit/comment invocations
 gh_mutations() {
@@ -276,6 +287,22 @@ if grep -q 'Changed only inside declared divergences' <<<"$DRIFT_OUT" \
   ok "D11 a file covered by a declared divergence is labelled declared, not raw drift"
 else
   no "D11 a declared divergence was reported as undifferentiated drift"
+fi
+
+# D12 — the register declares an upstream_path that no longer exists upstream.
+# This row exists because a REAL dry-run against upstream exposed the hole: a
+# prefix that matches nothing produces an empty changed-file list, which renders
+# as a confident "no drift" forever. A typo'd or upstream-renamed path is NEWS,
+# not silence, so it must fail loudly like an unreachable remote does.
+LSTREE_MODE=missing
+run_drift "$WORK/d12.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+LSTREE_MODE=ok
+muts="$(gh_mutations "$WORK/d12.log")"
+if [ "$DRIFT_RC" -ne 0 ] && [ "$muts" = "0" ] \
+   && grep -q 'upstream_path' <<<"$DRIFT_OUT"; then
+  ok "D12 an upstream_path missing from the upstream tree fails loudly, not silently clean"
+else
+  no "D12 a vanished upstream_path was reported as 'no drift' (rc=$DRIFT_RC mutations=$muts)"
 fi
 
 echo

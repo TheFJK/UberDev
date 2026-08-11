@@ -105,16 +105,13 @@ def resolve_head(repo_url, repo_slug):
     return sha
 
 
-def changed_paths(work_root, repo_url, repo_slug, base, head, fetched):
-    """Changed paths between two upstream commits, via a blobless fetch.
+def ensure_mirror(work_root, repo_url, repo_slug, refs, fetched):
+    """A blobless scratch clone with `refs` fetched into it.
 
-    `fetched` is the set of (repo, base, head) triples already pulled into the
-    scratch clone. Components sharing one upstream can carry DIFFERENT
-    watermarks, so re-using the clone without re-fetching would ask `git diff`
-    for an object that was never downloaded.
+    `fetched` is the set of (repo, *refs) keys already pulled. Components sharing
+    one upstream can carry DIFFERENT watermarks, so re-using the clone without
+    re-fetching would ask `git` for an object that was never downloaded.
     """
-    if base == head:
-        return []
     mirror = work_root / repo_slug.replace("/", "__")
     if not (mirror / ".git").is_dir():
         mirror.mkdir(parents=True, exist_ok=True)
@@ -122,9 +119,10 @@ def changed_paths(work_root, repo_url, repo_slug, base, head, fetched):
         if rc != 0:
             fail("could not init a scratch clone for %s: %s" % (repo_slug, err.strip()))
         run(["git", "remote", "add", "origin", repo_url], cwd=str(mirror))
-    if (repo_slug, base, head) not in fetched:
+    key = (repo_slug,) + tuple(refs)
+    if key not in fetched:
         rc, _, err = run(["git", "fetch", "--quiet", "--no-tags",
-                          "--filter=blob:none", "origin", base, head],
+                          "--filter=blob:none", "origin"] + list(refs),
                          cwd=str(mirror))
         if rc != 0:
             # Some servers refuse arbitrary-SHA wants; fall back to a full
@@ -132,9 +130,37 @@ def changed_paths(work_root, repo_url, repo_slug, base, head, fetched):
             rc, _, err2 = run(["git", "fetch", "--quiet", "--no-tags",
                                "--filter=blob:none", "origin"], cwd=str(mirror))
             if rc != 0:
-                fail("could not fetch %s..%s from upstream %s: %s"
-                     % (base[:12], head[:12], repo_slug, (err2 or err).strip()))
-        fetched.add((repo_slug, base, head))
+                fail("could not fetch %s from upstream %s: %s"
+                     % (", ".join(r[:12] for r in refs), repo_slug,
+                        (err2 or err).strip()))
+        fetched.add(key)
+    return mirror
+
+
+def assert_upstream_path_exists(mirror, repo_slug, head, path):
+    """A declared upstream_path that resolves to nothing upstream is NEWS.
+
+    Without this, a typo'd or upstream-renamed path yields an empty changed-file
+    list, which renders as a confident "no drift" every week forever — the exact
+    silent-green failure this whole feature exists to detect. Caught by a real
+    dry-run against upstream, not by a stub.
+    """
+    rc, out, err = run(["git", "ls-tree", "--name-only", head, "--", path],
+                       cwd=str(mirror))
+    if rc != 0:
+        fail("git ls-tree failed for %s@%s -- %s: %s"
+             % (repo_slug, head[:12], path, err.strip()))
+    if not out.strip():
+        fail("upstream_path %r does not exist in %s@%s — the register describes "
+             "a path upstream has renamed or deleted. That is a finding, not "
+             "'no drift'; fix the register before trusting this report."
+             % (path, repo_slug, head[:12]))
+
+
+def changed_paths(mirror, repo_slug, base, head):
+    """Changed paths between two upstream commits inside a prepared mirror."""
+    if base == head:
+        return []
     rc, out, err = run(["git", "diff", "--name-only", "%s..%s" % (base, head)],
                        cwd=str(mirror))
     if rc != 0:
@@ -304,17 +330,22 @@ def main(argv=None):
     work_root = Path(tempfile.mkdtemp(prefix="vendor-drift."))
     try:
         cache = {}
+        checked_paths = set()
         fetched = set()
         changes = []
         for component in components:
             slug = upstreams[component["upstream"]]["repo"]
             head = heads[slug]
             base = component["last_reviewed_upstream_commit"]
+            refs = (head,) if base == head else (base, head)
+            mirror = ensure_mirror(work_root, urls[slug], slug, refs, fetched)
+            prefix = component["upstream_path"]
+            if (slug, head, prefix) not in checked_paths:
+                assert_upstream_path_exists(mirror, slug, head, prefix)
+                checked_paths.add((slug, head, prefix))
             key = (slug, base, head)
             if key not in cache:
-                cache[key] = changed_paths(
-                    work_root, urls[slug], slug, base, head, fetched)
-            prefix = component["upstream_path"]
+                cache[key] = changed_paths(mirror, slug, base, head)
             touched = [p for p in cache[key] if under(prefix, p)]
             declared = declared_files(register, component)
             raw, dec = [], []

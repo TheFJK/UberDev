@@ -298,12 +298,17 @@ Contract:
    non-40-hex ref. "Upstream unreachable" must never render as "no drift" — that
    is the same silent-green class this RFC exists to kill, and it would be
    especially corrosive inside the very tool meant to detect it.
-3. Per component, diff `last_reviewed_upstream_commit..HEAD` restricted to the
+3. **Assert every declared `upstream_path` still resolves in the upstream tree**
+   before diffing it. A prefix that matches nothing yields an empty changed-file
+   list, which renders as a confident "no drift" every week forever; a path
+   upstream has renamed or deleted is a finding, not silence. This one was found
+   by running the reporter against the real upstreams, not by any stub.
+4. Per component, diff `last_reviewed_upstream_commit..HEAD` restricted to the
    component's `upstream_path`.
-4. Render **one** markdown report: component, stance, watermark → HEAD, changed
+5. Render **one** markdown report: component, stance, watermark → HEAD, changed
    files (capped, with a residual count), and declared divergences listed
    separately from raw drift.
-5. Embed `<!-- uberdev-vendor-drift-v1 -->` plus a `drift-fingerprint:` line.
+6. Embed `<!-- uberdev-vendor-drift-v1 -->` plus a `drift-fingerprint:` line.
    Find the open tracking issue by that marker and **edit** it. Call
    `gh issue create` only when no such issue is open. Comment only when the
    fingerprint changed. No drift and no open issue ⇒ do nothing.
