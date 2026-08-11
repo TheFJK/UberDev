@@ -2345,6 +2345,19 @@ REVIEW_FLEET_REHYDRATE_EOF
   MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
   _review_fleet_bind_pr "$resolved_run_dir"
   _review_fleet_bind_repo_slug "$resolved_research_dir"
+  # The child timeout, re-derived rather than carried.
+  #
+  # The setup fence writes `REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"` and
+  # five LATER fences pass it to review_fixer_child_bound / review_child_fanout
+  # / review_child_wait_all without establishing it. In those fences it expanded
+  # empty and the timeout argument went to the dispatcher blank.
+  #
+  # Re-derivation is exact here, not a default standing in for lost state: the
+  # expression is the setup fence's own, so an operator override in the
+  # environment still wins and 600 is reached only when nobody set one. That is
+  # the whole difference between this and the Phase 2.5 counters, which are
+  # measurements of a run and can only be read back, never recomputed.
+  REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
   unset _review_fleet_diff _review_fleet_criteria _review_fleet_range _review_fleet_snapshot \
     _review_fleet_phase1 _review_fleet_phase2 _review_fleet_agg _review_fleet_carrier_dir \
     _review_fleet_repo _review_fleet_research _review_fleet_descriptor 2>/dev/null || true
@@ -2363,6 +2376,7 @@ REVIEW_FLEET_REHYDRATE_EOF
   export RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON
   export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
   export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  export REVIEW_PR_TIMEOUT
   [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
   [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
   [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER

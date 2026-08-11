@@ -1648,6 +1648,18 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
+   # Promoted HERE, in the shell that computed all three values.
+   #
+   # The prose above says the controller promotes the authenticated outcome
+   # "immediately", and the Workflow-native sibling below does exactly that at
+   # the end of its own fence. This path had the same call hoisted into a fence
+   # of its own, where PHASE1_FIXER_OUTCOME, FIXER_HEAD_BEFORE and
+   # FIXER_HEAD_AFTER were all three empty -- so the promotion validated a
+   # nonexistent outcome against a nonexistent head pair. Immediately means in
+   # this shell.
+   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    **5w. The Phase 1 fixer on the Workflow-native transport** (run this INSTEAD
@@ -1799,13 +1811,12 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    `commits[].sha` as `FIXER_DECLARED_TIP`. The controller then promotes the
    exact authenticated Phase 1 outcome immediately:
 
-   ```bash uberdev-executable origin=review-pr
-   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
-   review_fleet_rehydrate || return 2
-   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   ```
+   Both transports promote inside the fence that computed the outcome — the
+   detached path at the end of step 5, the Workflow-native path at the end of
+   step 5w. There is deliberately no separate promotion fence here: it would be
+   a fresh shell, and `PHASE1_FIXER_OUTCOME`, `FIXER_HEAD_BEFORE` and
+   `FIXER_HEAD_AFTER` are all produced by the dispatch fence and reach no other
+   process.
 
    Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
    entry, including mandatory CI-fix re-entry. Call
