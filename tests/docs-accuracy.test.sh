@@ -662,51 +662,129 @@ DEAD_BACKEND_MARKER='enum error|deleted|removed|retired|no longer|#381|~~|RETRAC
 # else it contains, so this pattern is evaluated BEFORE the skip and a hit here
 # is unconditional.
 DEAD_BACKEND_NEGATION='not (deleted|removed|retired|gone)|still works|still passes|still (fully )?supported|remains? (fully )?supported|still (an? )?(available|selectable|valid)'
-dead_backend_hits=""
-while IFS= read -r shipped_doc; do
-  case "$shipped_doc" in
-    ./CHANGELOG.md|./.git/*|*/node_modules/*) continue ;;
-  esac
-  while IFS= read -r offending_line; do
-    [ -n "$offending_line" ] || continue
-    # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
-    # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
-    # Three tiers, in this order and no other:
-    #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
-    #      A ~~...~~ line is the amend-in-place form this repo already uses; its
-    #      text is quoted precisely to be contradicted.
-    #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
-    #      even alongside a tombstone word, because that is the shape where the
-    #      falsifying word is also the certifying word.
-    #   3. otherwise, an ordinary tombstone word excuses the line.
-    grep -qE -e '~~' <<<"$offending_line" && continue
-    if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"$offending_line"; then
-      grep -qE -e "$DEAD_BACKEND_MARKER" <<<"$offending_line" && continue
-    fi
-    dead_backend_hits="${dead_backend_hits}${shipped_doc}: ${offending_line}
+# _t10_corpus <root> -> repo-relative doc paths, one per line.
+#
+# The corpus is TRACKED content, not on-disk content (#445). T10 enforces an
+# invariant about SHIPPED docs, and "shipped" means "in the tree", not "in the
+# directory". A walk of the working directory also reads every scratch checkout
+# under it — and UberDev's own tooling (/solve, /turbo, the Workflow runtime's
+# isolation:"worktree", /merge's scratch worktree) creates those constantly. The
+# result was a guard that stayed green on a fresh CI checkout and reddened on
+# any working developer machine: the more the project's automation was used, the
+# more reliably its own suite failed, which trains people to ignore a red suite.
+#
+# `git ls-files` derives the exclusion set from .gitignore rather than restating
+# it, so it retires all four worktree prefixes (plugins/uberdev/lib/goal-state.sh
+# enumerates "", ".claude/worktrees/*/", ".worktrees/*/", "worktrees/*/") plus
+# .uberdev/ and every future scratch root in one move — a denylist of literal
+# directory names would have to be extended for each new one. Same enumerator,
+# same reasoning, as _epipe_sh_files in tests/epipe-guard.test.sh.
+#
+# STATED TRADEOFF: a doc that is written but not yet `git add`ed is no longer
+# scanned locally. CI scans the committed tree and still catches it before the
+# doc can ship, and epipe-guard.test.sh already accepted exactly this tradeoff.
+#
+# CONTRACT: writes diagnostics to stderr and RETURNS non-zero on an unusable
+# root. It must NOT `exit` — this helper is called inside $( … ), where `exit`
+# kills only the substitution subshell and leaves the caller holding an EMPTY
+# corpus, i.e. exactly the silent vacuous PASS this guard exists to prevent.
+# Every call site must therefore propagate the rc explicitly.
+_t10_corpus() {
+  local t10_root="$1"
+  local t10_out
+  git -C "$t10_root" rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "FATAL: docs-accuracy T10 corpus requires a git work tree: $t10_root" >&2
+    return 2
+  }
+  # core.quotePath=false keeps a non-ASCII tracked path from arriving as
+  # "caf\303\251.md", which the per-file existence guard would silently drop.
+  t10_out="$(git -c core.quotePath=false -C "$t10_root" ls-files -- '*.md' '*.json')" || return 2
+  # A residual quoted path (embedded newline or quote) must be LOUD, not
+  # dropped: a silent skip is the failure mode this whole guard is about.
+  # Herestring, not a pipe — this file sets pipefail and `grep -q` exits early.
+  if grep -qE -e '^"' <<<"${t10_out}"; then
+    echo "FATAL: docs-accuracy T10 corpus contains an unrepresentable path: $t10_root" >&2
+    return 3
+  fi
+  printf '%s\n' "${t10_out}"
+}
+
+# _t10_scan <root> -> "<path>: <lineno>:<line>" hits, one per line (empty = clean).
+# Root-parameterised so the fixture below can drive the REAL scanner over a
+# synthetic tree instead of asserting against a paraphrase of it.
+_t10_scan() {
+  local t10_root="$1"
+  # `local x="$(cmd)"` masks the substitution's rc (local's own rc wins), so the
+  # declaration and the assignment are deliberately on separate lines.
+  local t10_docs t10_doc t10_line
+  local t10_hits=""
+  t10_docs="$(_t10_corpus "$t10_root")" || return 2
+  while IFS= read -r t10_doc; do
+    [ -n "${t10_doc}" ] || continue
+    # Anchored at the corpus ROOT, with no `./` prefix — `git ls-files` emits
+    # repo-relative paths. NOT `*CHANGELOG.md`: that would excuse docs/CHANGELOG.md
+    # and every nested copy along with it. T10.5 pins both directions.
+    case "${t10_doc}" in
+      CHANGELOG.md|.git/*|*/node_modules/*) continue ;;
+    esac
+    # `ls-files` lists INDEX entries, which may be absent from the working tree
+    # (staged deletion, sparse checkout). The grep below swallows its own
+    # "no such file" via 2>/dev/null, so without this the file would be skipped
+    # silently — the same quiet-drop class the corpus swap exists to remove.
+    [ -f "${t10_root}/${t10_doc}" ] || continue
+    while IFS= read -r t10_line; do
+      [ -n "${t10_line}" ] || continue
+      # Herestring, not a pipe: this file sets pipefail, and `grep -q` exits on
+      # its first match, so a piped writer would take EPIPE (tests/epipe-guard.test.sh).
+      # Three tiers, in this order and no other:
+      #   1. struck through -> retracted BY CONSTRUCTION, excused whatever it says.
+      #      A ~~...~~ line is the amend-in-place form this repo already uses; its
+      #      text is quoted precisely to be contradicted.
+      #   2. otherwise, a negation ("not deleted", "still works") -> ALWAYS a hit,
+      #      even alongside a tombstone word, because that is the shape where the
+      #      falsifying word is also the certifying word.
+      #   3. otherwise, an ordinary tombstone word excuses the line.
+      grep -qE -e '~~' <<<"${t10_line}" && continue
+      if ! grep -qE -e "$DEAD_BACKEND_NEGATION" <<<"${t10_line}"; then
+        grep -qE -e "$DEAD_BACKEND_MARKER" <<<"${t10_line}" && continue
+      fi
+      t10_hits="${t10_hits}${t10_doc}: ${t10_line}
 "
-  done <<EOF
-$(grep -nE -e '--backend=(codex|claude-bg)' "$shipped_doc" 2>/dev/null || true)
+    done <<EOF
+$(grep -nE -e '--backend=(codex|claude-bg)' "${t10_root}/${t10_doc}" 2>/dev/null || true)
 EOF
-done <<EOF
-$(cd "$REPO_ROOT" && find . -type f \( -name '*.md' -o -name '*.json' \) \
-    -not -path './.git/*' -not -path '*/node_modules/*' | sort)
-EOF
+  done <<<"${t10_docs}"
+  printf '%s' "${t10_hits}"
+}
+
+dead_backend_hits=""
+dead_backend_hits="$(_t10_scan "$REPO_ROOT")" || {
+  echo "FATAL: docs-accuracy T10 scan could not run (see above): $REPO_ROOT" >&2; exit 2; }
 if [ -z "$dead_backend_hits" ]; then
   echo "  PASS  T10.1 no shipped .md/.json instructs a deleted dispatch backend"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  T10.1 a shipped doc names --backend=codex/claude-bg with nothing marking it dead"
-  printf '%s' "$dead_backend_hits" | sed 's/^/        /'
+  # `\n`, not bare `%s`: capturing _t10_scan through $( … ) strips the trailing
+  # newline its hit list carries, so the last hit would otherwise run into the
+  # next PASS line.
+  printf '%s\n' "$dead_backend_hits" | sed 's/^/        /'
   FAIL=$((FAIL + 1))
 fi
 # Anti-vacuity: the scan must actually have looked at the surfaces that shipped
-# the defect, or an empty/misrooted find would report a silent PASS.
-for dead_backend_witness in \
-  plugins/uberdev/skills/solve-fleet/SKILL.md \
-  plugins/uberdev/skills/review-fleet/SKILL.md \
-  plugins/uberdev/skills/goal-pipeline/SKILL.md \
-  README.md; do
+# the defect, or an empty/misrooted enumerator would report a silent PASS.
+#
+# ONE list, consumed by both T10.2 (the file still carries a tombstone) and
+# T10.3 (the enumerator actually reached the file). Two hand-maintained copies
+# of the same four paths would drift, and the halves would then be asserting
+# about different files while both looked green.
+T10_WITNESSES=(
+  plugins/uberdev/skills/solve-fleet/SKILL.md
+  plugins/uberdev/skills/review-fleet/SKILL.md
+  plugins/uberdev/skills/goal-pipeline/SKILL.md
+  README.md
+)
+for dead_backend_witness in "${T10_WITNESSES[@]}"; do
   if grep -qE -e '--backend=(codex|claude-bg)' "$REPO_ROOT/$dead_backend_witness"; then
     echo "  PASS  T10.2 $dead_backend_witness still carries a tombstone the scan reads"
     PASS=$((PASS + 1))
@@ -716,6 +794,168 @@ for dead_backend_witness in \
     FAIL=$((FAIL + 1))
   fi
 done
+
+# ── T10.3: the corpus the scan actually enumerated is non-empty and reaches
+# the witnesses ───────────────────────────────────────────────────────────────
+# T10.2 above asserts the four witness files CONTAIN a --backend= mention; it
+# never asserts the scan VISITED them. That gap is how a misrooted or empty
+# enumerator reports a silent PASS — the hole that let #445 live through a
+# release. T10.3 closes it by asserting membership in the enumerated corpus
+# itself, not in the hit list (the witnesses are tombstoned, so they correctly
+# produce no hits).
+T10_REPO_CORPUS=""
+T10_REPO_CORPUS="$(_t10_corpus "$REPO_ROOT")" || {
+  echo "FATAL: docs-accuracy T10 corpus is unusable: $REPO_ROOT" >&2; exit 2; }
+if [ -n "$T10_REPO_CORPUS" ]; then
+  echo "  PASS  T10.3 the T10 corpus is non-empty ($(printf '%s\n' "$T10_REPO_CORPUS" | wc -l | tr -d ' ') docs)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T10.3 the T10 corpus is EMPTY — T10.1 above is vacuous, not clean"
+  echo "        root: $REPO_ROOT"
+  FAIL=$((FAIL + 1))
+fi
+for dead_backend_witness in "${T10_WITNESSES[@]}"; do
+  # Herestring, not a pipe: `grep -q` exits on its first match and this file
+  # sets pipefail (tests/epipe-guard.test.sh).
+  if grep -qxF -- "$dead_backend_witness" <<<"$T10_REPO_CORPUS"; then
+    echo "  PASS  T10.3 $dead_backend_witness is inside the enumerated corpus"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T10.3 $dead_backend_witness is NOT in the enumerated corpus — the scan never read it"
+    echo "        root: $REPO_ROOT"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ── T10.4–T10.6: drive the REAL scanner over a synthetic corpus root ──────────
+# Built OUTSIDE $REPO_ROOT on purpose. A fixture tree inside the repo would be
+# punished by parallel worktrees, dirty-tree guards and .gitignore — and, worse,
+# would be swept up by the very enumerator under test, so the fixture could not
+# distinguish "excluded correctly" from "never looked".
+#
+# SELF-TRIP SAFETY: the rows below carry literal bare `--backend=codex` text.
+# Safe here because the T10 corpus is *.md/*.json only and this file is .sh;
+# safe under $SYN because $SYN is outside $REPO_ROOT. They must NEVER be written
+# into a tracked .md/.json in this repo — that reds T10.1 recursively.
+SYN="$(mktemp -d)" || { echo "FATAL: could not create the T10 fixture root" >&2; exit 2; }
+# Fail loud on an empty or non-directory result: every path below is built by
+# concatenating onto $SYN, so an empty $SYN would aim mkdir at the filesystem
+# root. Never let this one degrade quietly.
+[ -n "$SYN" ] && [ -d "$SYN" ] \
+  || { echo "FATAL: the T10 fixture root is not a directory: '$SYN'" >&2; exit 2; }
+# Top-level EXIT trap, never `trap … RETURN` (a zsh-incompatible construct the
+# cross-shell guard forbids). `|| true` absorbs MSYS read-only .git objects.
+trap 'rm -rf "$SYN" 2>/dev/null || true' EXIT
+# `-b main` keeps init.defaultBranch advice off stderr under Git Bash.
+git init -q -b main "$SYN" >/dev/null 2>&1 \
+  || { echo "FATAL: could not init the T10 fixture repo: $SYN" >&2; exit 2; }
+
+SYN_VIOLATION='Dispatch with `--backend=codex` for the fallback path.'
+mkdir -p "$SYN/classifier" "$SYN/docs" \
+  "$SYN/.worktrees/w" "$SYN/.claude/worktrees/w" "$SYN/worktrees/w" \
+  "$SYN/.uberdev/research"
+
+# Classifier rows — one file each, so a hit is trivially attributable.
+printf '%s\n' "$SYN_VIOLATION"                                                  > "$SYN/classifier/bare.md"
+printf '%s\n' '~~use `--backend=codex`~~'                                       > "$SYN/classifier/struck.md"
+printf '%s\n' '`--backend=codex` was removed in #381'                           > "$SYN/classifier/tombstone.md"
+printf '%s\n' '`--backend=claude-bg` is deprecated, not deleted: it still works' > "$SYN/classifier/negation.md"
+
+# Corpus-scope rows — identical violating text, differing only in WHERE they sit.
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/docs/x.md"                       # plain in-tree doc
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/CHANGELOG.md"                    # root: exempt
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/docs/CHANGELOG.md"               # nested: NOT exempt
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.worktrees/w/CHANGELOG.md"       # scratch checkout
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.claude/worktrees/w/README.md"   # scratch checkout
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/worktrees/w/README.md"           # 4th prefix (goal-state.sh)
+printf '%s\n' "$SYN_VIOLATION" > "$SYN/.uberdev/research/note.md"       # runtime scratch
+
+# Index only, no commit: `git ls-files` reads the index, and committing would
+# need a configured user.name/user.email that CI runners do not guarantee.
+git -C "$SYN" add \
+  classifier/bare.md classifier/struck.md classifier/tombstone.md classifier/negation.md \
+  docs/x.md CHANGELOG.md docs/CHANGELOG.md >/dev/null 2>&1 \
+  || { echo "FATAL: could not stage the T10 fixture corpus: $SYN" >&2; exit 2; }
+
+SYN_HITS=""
+SYN_HITS="$(_t10_scan "$SYN")" || {
+  echo "FATAL: docs-accuracy T10 scan could not run over the fixture: $SYN" >&2; exit 2; }
+# Path-only projection, sorted, one per line — the hit strings carry line
+# numbers and prose that would make an exact-set comparison brittle. No `./`
+# stripping: _t10_corpus emits repo-relative paths, so a `./` reaching here
+# would mean the enumerator regressed and T10.4 SHOULD say so.
+SYN_HIT_PATHS="$(printf '%s\n' "$SYN_HITS" | sed -n 's/^\(.*\): [0-9]*:.*$/\1/p' | sort -u)"
+
+_t10_expect_hit() {
+  local t10_id="$1" t10_want="$2" t10_why="$3"
+  if grep -qxF -- "${t10_want}" <<<"$SYN_HIT_PATHS"; then
+    echo "  PASS  ${t10_id} ${t10_want} is reported (${t10_why})"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  ${t10_id} ${t10_want} is NOT reported but must be (${t10_why})"
+    echo "        hit paths: $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+_t10_expect_clean() {
+  local t10_id="$1" t10_want="$2" t10_why="$3"
+  if grep -qxF -- "${t10_want}" <<<"$SYN_HIT_PATHS"; then
+    echo "  FAIL  ${t10_id} ${t10_want} is reported but must be excused (${t10_why})"
+    echo "        hit paths: $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  ${t10_id} ${t10_want} is excused (${t10_why})"
+    PASS=$((PASS + 1))
+  fi
+}
+
+# ── T10.4: the corpus is TRACKED content — scratch checkouts are not scanned ──
+# This is the regression under test (#445). The four scratch roots below are all
+# created by UberDev's own tooling (/solve, /turbo, the Workflow runtime,
+# /merge), so an on-disk enumerator reds the suite on any working dev machine
+# while staying green on a fresh CI checkout — the exact inverse of the signal
+# the guard is meant to give.
+#
+# Compared as an EXACT set, so a surplus hit (scratch leaked in) and a missing
+# hit (real doc dropped) both red.
+SYN_EXPECTED_HITS='classifier/bare.md
+classifier/negation.md
+docs/CHANGELOG.md
+docs/x.md'
+if [ "$SYN_HIT_PATHS" = "$SYN_EXPECTED_HITS" ]; then
+  echo "  PASS  T10.4 the T10 corpus is exactly the tracked docs — no scratch checkout leaks in"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T10.4 the T10 corpus is not the tracked-doc set (scratch checkouts leak in, or a real doc was dropped)"
+  echo "        expected: $(printf '%s' "$SYN_EXPECTED_HITS" | tr '\n' ' ')"
+  echo "        actual:   $(printf '%s' "$SYN_HIT_PATHS" | tr '\n' ' ')"
+  for t10_scratch in \
+    .worktrees/w/CHANGELOG.md \
+    .claude/worktrees/w/README.md \
+    worktrees/w/README.md \
+    .uberdev/research/note.md; do
+    if grep -qxF -- "$t10_scratch" <<<"$SYN_HIT_PATHS"; then
+      echo "        leaked scratch path: $t10_scratch"
+    fi
+  done
+  FAIL=$((FAIL + 1))
+fi
+
+# ── T10.5: the CHANGELOG exemption is anchored at the corpus ROOT ─────────────
+# Both directions are asserted separately so a regression says which way it
+# broke: widening the arm to *CHANGELOG.md would silently excuse every nested
+# copy, and forgetting to re-anchor it after the enumerator swap would start
+# reporting the root CHANGELOG's legitimately-historical entries.
+_t10_expect_clean T10.5 CHANGELOG.md      'root CHANGELOG is the append-only historical record'
+_t10_expect_hit   T10.5 docs/CHANGELOG.md 'a NESTED CHANGELOG is an ordinary shipped doc'
+
+# ── T10.6: the three-tier classifier, pinned row by row ──────────────────────
+# Green under BOTH enumerators by construction, so it certifies that the corpus
+# swap left the classifier alone.
+_t10_expect_hit   T10.6 classifier/bare.md      'bare instruction, no marker at all'
+_t10_expect_clean T10.6 classifier/struck.md    'tier 1 — struck through, retracted by construction'
+_t10_expect_clean T10.6 classifier/tombstone.md 'tier 3 — ordinary tombstone word'
+_t10_expect_hit   T10.6 classifier/negation.md  'tier 2 — negation beats the tombstone word'
 
 echo
 echo "== Summary =="

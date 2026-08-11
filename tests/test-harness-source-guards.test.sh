@@ -111,6 +111,100 @@ else
 fi
 
 echo
+echo "== A3: no tests/*.test.sh walks the repository root without excluding worktree checkouts =="
+# Issue #445: tests/docs-accuracy.test.sh built its corpus by walking the
+# working directory, so it read the CHANGELOG and RFC copies inside every
+# scratch checkout below the repo root and reported them as shipped-doc
+# violations. The sting is that UberDev's own tooling creates those checkouts
+# (/solve, /turbo, the Workflow runtime's isolation:"worktree", /merge's
+# scratch worktree), so the guard was green on a fresh CI checkout and red on
+# any working developer machine — the inverse of the signal it should give, and
+# a fast way to train people to ignore a red suite.
+#
+# The general rule: a walk rooted at the repository root must exclude the
+# scratch checkout roots, which plugins/uberdev/lib/goal-state.sh enumerates as
+# "", ".claude/worktrees/*/", ".worktrees/*/" and "worktrees/*/". Preferring
+# `git ls-files` satisfies this by construction (it derives the exclusion set
+# from .gitignore instead of restating it) and is what docs-accuracy and
+# epipe-guard both now do; a hand-written exclusion list satisfies it too, as
+# long as it actually names the scratch roots.
+#
+# BOUNDARY NOTE: this is a real predicate over real bytes, not a CONTRACT:
+# marker. tests/contract_markers.py scans only plugins/uberdev/** (SCAN_ROOTS),
+# so a marker placed on a tests/-side exclusion list would never be compared
+# against goal-state.sh's list — it would be documentation, not enforcement.
+#
+# SELF-TRIP WARNING: this block is itself a tests/*.test.sh and is scanned by
+# its own predicate. Never write the literal walk-command token followed by
+# whitespace and `.`/`$REPO_ROOT` in a comment or message here — phrase it as
+# "walks the repository root". The definition below is safe because the token
+# is followed by `[`, not by whitespace.
+
+# Joins backslash continuations into logical lines. The live site spans three
+# physical lines, and a physical-line scan would judge the root argument and
+# the exclusion list separately — each half innocent, the whole non-compliant.
+# Comment-only logical lines are dropped so prose about the rule is not a site.
+# A trailing space is appended so the predicate can require a delimiter after
+# the root argument without an end-of-line anchor.
+# Uses $0 only — no positional column refs.
+A3_JOIN_AWK='
+FNR == 1 { if (buf != "") { print fname "\t" start "\t" buf " " } buf = ""; start = 0 }
+{ fname = FILENAME; if (start == 0) start = FNR; buf = buf $0 }
+/\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " ", buf); next }
+{ if (buf !~ /^[[:space:]]*#/) print fname "\t" start "\t" buf " "; buf = ""; start = 0 }
+END { if (buf != "" && buf !~ /^[[:space:]]*#/) print fname "\t" start "\t" buf " " }
+'
+
+# Site predicate: the root argument must TERMINATE at `.` or `$REPO_ROOT`. A
+# walk rooted at a subdirectory ("$REPO_ROOT/plugins/uberdev", "$ROOT_CASE",
+# "$ROOT/tests/_fixtures") is correctly scoped by construction and is NOT a
+# site — without the termination requirement those four correctly-scoped walks
+# would be flagged and this guard would red on the day it shipped.
+#
+# Single-quoted so $REPO_ROOT stays literal. Deliberately carries no `^`/`$`
+# anchors: every logical line reaches this pattern with a TAB in front and a
+# space appended, so a plain delimiter class works, and anchor-inside-
+# alternation is the ERE construct most likely to differ across the BSD, GNU
+# and MSYS greps this suite runs under.
+A3_ROOT_WALK='[^[:alnum:]_.-]find[[:space:]]+("\$REPO_ROOT"|\$REPO_ROOT|\.)[[:space:]]'
+
+# One awk over the whole glob and one grep over its output — NOT a process per
+# line. Per-line spawns are disproportionately expensive on shape-checks-windows,
+# already the CI critical path.
+A3_SCANNED=0
+while IFS=$'\t' read -r a3_file a3_lineno a3_logical; do
+  [ -n "$a3_logical" ] || continue
+  A3_SCANNED=$((A3_SCANNED + 1))
+  # Herestrings, not pipes: this file sets pipefail and `grep -q` exits on its
+  # first match (tests/epipe-guard.test.sh).
+  a3_missing=""
+  grep -qF -- '.worktrees' <<<"$a3_logical" || a3_missing="${a3_missing} .worktrees"
+  grep -qF -- '.claude'    <<<"$a3_logical" || a3_missing="${a3_missing} .claude"
+  if [ -z "$a3_missing" ]; then
+    echo "  PASS  $(basename "$a3_file"):$a3_lineno excludes the scratch checkout roots"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $(basename "$a3_file"):$a3_lineno walks the repository root without excluding scratch checkouts"
+    echo "        file:    $a3_file"
+    echo "        line:    $(printf '%s' "$a3_logical" | sed 's/^[[:space:]]*//')"
+    echo "        missing:${a3_missing}"
+    echo "        fix:     prefer \`git ls-files\`, or name the scratch roots in the exclusion list"
+    FAIL=$((FAIL + 1))
+  fi
+done < <(awk "$A3_JOIN_AWK" "$TESTS_DIR"/*.test.sh | grep -E -e "$A3_ROOT_WALK")
+
+# Vacuity arm: a guard that matches nothing cannot red. This is the #430 defect
+# class (a vendored scanner whose predicate matched zero test files), and it is
+# the same silent-vacuous-PASS shape #445 itself was about, so it must not be
+# reproduced here.
+if [ "$A3_SCANNED" -eq 0 ]; then
+  echo "  FAIL  A3 matched no repository-root walkers — the guard cannot red (vacuous)"
+  echo "        Either the predicate drifted from the code it must police, or the"
+  echo "        last such walker was removed. If the latter, delete this block."
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="
