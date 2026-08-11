@@ -4,6 +4,56 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.13] — 2026-08-11
+
+Eight issues landed as one integration branch (#427 #428 #431 #432 #433 #434 #435
+#445). Stacking them surfaced defects that no individual PR could see, because
+each one is a disagreement *between* branches that git merged without complaint.
+
+### Added
+
+- **A fresh-context finding-verifier gates every Phase 1 finding** (#431), a
+  **per-lens precision eval harness** mined from closed `review-pr-finding`
+  issues (#432), and a **convention-compliance lens** that may only report a rule
+  it can quote verbatim (#433).
+- **A vendored-provenance register** (#434): `plugins/uberdev/vendor.json` plus
+  `tools/vendor/vendor-check.py`, eight offline checks over 75 components.
+
+### Fixed
+
+- **Every `/review-pr` fence rehydrates its own run** (#427) instead of reading a
+  shell that has already exited.
+- **`working_dir` would have expanded empty.** #427 deleted the `WORKING_DIR_ABS`
+  assignment; #431's new defer callsite still named it, and `findings-to-issues`
+  hard-refuses on an empty `working_dir`.
+- **Seven counters that two branches each bumped identically.** #431 and #433 made
+  byte-identical edits (41→42, 44→45, `agents (14)`→`(15)`), so git merged them at
+  +1 where the truth is +2. Every corrected value is derived from its source of
+  truth — the fixture, the roster glob, the manifest — not from arithmetic.
+- **`review_fleet_rehydrate` broke two CI jobs** (#450): a lone apostrophe inside a
+  heredoc nested in `$( )` makes bash 3.2 (macOS `/bin/bash`) scan past the closing
+  paren, and `print()` through Windows text-mode stdout translated every `\n`,
+  embedded separators included, into `\r\n` — so each rehydrated carrier returned
+  with a trailing CR. Gate the first with `/bin/bash -n`; ubuntu's bash 5 cannot
+  catch it.
+- **Scratch worktrees no longer red the docs-accuracy suite** (#445): the T10
+  corpus reads tracked content via `git ls-files` instead of walking the tree.
+- **`code-fixer-contract` teardown no longer races `.git/objects`** (#428).
+- **The install trust posture is honest again** (#435): the cited upstream issue
+  was closed as a duplicate, not fixed; the live one is anthropics/claude-code#14815.
+
+### Notes
+
+- **#430 is deliberately not in this release.** It re-syncs `find-polluter.sh` to
+  upstream superpowers v6.2.0 while #434's register still pins that component at
+  `e7a2d16`, and the register cannot express a per-file re-vendoring. A per-file
+  override was prototyped and rejected: it converts a real red into green while
+  two sibling files still carry unadopted upstream fixes, and nothing ties the
+  pinned SHA to any evidence. #430 lands separately, rebased onto the register.
+- **`/review-pr` is still not runnable end-to-end.** #427 fixes the carrier
+  rehydration, but `REVIEW_RUN_RESERVATION_RECEIPT` is minted in the setup fence
+  and consumed nine Workflow relays later with no channel to carry it.
+
 ## [0.45.12] — 2026-08-10
 
 ### Added
