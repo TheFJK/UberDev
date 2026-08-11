@@ -323,14 +323,16 @@ UberDev ships these so all commands work standalone — **no `superpowers`, `pr-
 
 | Type | Slugs | Source |
 |---|---|---|
-| Skills | `brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`, `finish-branch`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills` | adapted from [`superpowers`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
-| Skills | `orchestrator`, `merge`, `solve-pipeline`, `post-impl-review`, `using-uberdev` | UberDev original |
-| Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-code) (Apache 2.0) |
-| Agents | `code-simplifier` | from [`code-simplifier`](https://github.com/anthropics/claude-code) (Apache 2.0) |
+| Skills | `brainstorm`, `write-plan`, `execute-plan`, `subagent-driven-dev`, `finish-branch`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `dispatching-parallel-agents`, `verification-before-completion`, `requesting-code-review`, `receiving-code-review`, `writing-skills`, `using-uberdev` | adapted from [`superpowers`](https://github.com/obra/superpowers) (MIT, Jesse Vincent) |
+| Skills | `orchestrator`, `merge-pipeline`, `solve-pipeline`, `post-impl-review` | UberDev original |
+| Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
+| Agents | `code-simplifier` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) — the same agent is also distributed as the `code-simplifier` plugin; our copy descends from the `pr-review-toolkit` one |
 | Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
 | Commands | `/uberdev:review-pr`, `/uberdev:simplify` | adapted; `review-pr` defaults to **parallel** fanout (divergence from upstream) |
 
 Bundled upstream license texts in `plugins/uberdev/licenses/`.
+
+Machine-readable provenance — upstream repo, pinned commit, vendoring date, upstream directory name, and a written **track**-vs-**fork** decision per component — lives in `plugins/uberdev/vendor.json`, enforced offline by `tools/vendor/vendor-check.py` and diffed weekly by `tools/vendor/vendor-drift.py`. The policy behind it is [RFC 0019](docs/rfc/0019-vendored-upstream-policy.md).
 
 ---
 

@@ -50,6 +50,10 @@ CONFIG_REF="$REPO_ROOT/plugins/uberdev/skills/using-uberdev/references/configura
 # acceptance table; RFC 0005 §9.5 defines the behaviours it locks).
 WORKFLOW_RFC="$RFC_DIR/0012-ultracode-workflow-orchestration.md"
 GOAL_RFC="$RFC_DIR/0005-uberdev-goal.md"
+# #434 vendored-provenance surface: RFC 0019 is the written policy behind
+# plugins/uberdev/vendor.json and tools/vendor/. It is listed here so a rename
+# or an accidental renumber is an explicit FATAL, not a silent skip.
+VENDOR_RFC="$RFC_DIR/0019-vendored-upstream-policy.md"
 PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
 HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
 HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
@@ -60,7 +64,7 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
-         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC"; do
+         "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -222,6 +226,10 @@ fi
 assert_grep "$ALIAS_RFC" '^# RFC 0011 — Alias-Install Reliability' "T3.2 alias RFC header self-identifies as RFC 0011"
 # The dispatch RFC keeps 0004.
 assert_grep "$DISPATCH_RFC" '^# RFC 0004 — Cross-Platform Dispatch' "T3.3 dispatch RFC keeps RFC 0004 header"
+# The vendored-upstream policy RFC (#434) self-identifies as RFC 0019. NOTE: the
+# H1 carries an em dash (U+2014), matched by `.` only in a UTF-8 locale, so the
+# pattern below spells it literally the same way T3.2/T3.3 do.
+assert_grep "$VENDOR_RFC" '^# RFC 0019 — Vendored Upstream Policy' "T3.4 vendor RFC header self-identifies as RFC 0019"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="

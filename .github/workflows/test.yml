@@ -194,7 +194,9 @@ jobs:
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh
+          bash tests/contract-markers.test.sh && \
+          bash tests/vendor-provenance.test.sh && \
+          bash tests/vendor-drift.test.sh
 
   supervision-smoke-macos:
     name: supervision-smoke-macos
@@ -320,6 +322,14 @@ jobs:
         #                                   .gitattributes exists, so Windows
         #                                   checks out with core.autocrlf=true
         #                                   and every digest would differ)
+        #   - vendor-provenance.test.sh    (#434: C-FILES digests sha256 over
+        #                                   exact source bytes, same
+        #                                   core.autocrlf reason as
+        #                                   prkit-publish.test.sh)
+        #   - vendor-drift.test.sh         (#434: PATH-stubbed `git`/`gh`
+        #                                   executables over mktemp -d paths,
+        #                                   same class as
+        #                                   merge-discovery-resilience.test.sh)
 #   - review-pr-phase3-ci.test.sh
 #   - lib-assert-count.test.sh
 #   - status.test.sh                      (#310 fixtures drive python3 over
