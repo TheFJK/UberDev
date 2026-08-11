@@ -1167,8 +1167,7 @@ while IFS= read -r shipped_md; do
 $(grep -nE -e '--auto' "$shipped_md" 2>/dev/null || true)
 EOF
 done <<EOF
-$(cd "$REPO_ROOT" && find . -type f -name '*.md' \
-    -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+$(cd "$REPO_ROOT" && git -c core.quotePath=false ls-files -- '*.md' | sed 's|^|./|' | sort)
 EOF
 if [ -z "$auto_unscoped_hits" ]; then
   echo "  PASS  T11.4 no shipped .md claims --auto applies the bypass 'on the spawned agent' unscoped"

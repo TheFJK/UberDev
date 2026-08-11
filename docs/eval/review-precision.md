@@ -25,6 +25,7 @@ Baseline: measured 2026-08-11T01:41:26Z. Ladder, quarantine rule and every floor
 | `review_pr.review.comments` | insufficient-data (n=0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `review_pr.review.tests` | insufficient-data (n=0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `review_pr.review.general` | insufficient-data (n=0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `review_pr.review.convention` | insufficient-data (n=0) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
 ## Phase 2 — simplify lenses
 
@@ -62,6 +63,7 @@ These rows predate the `uberdev-finding-meta` trailer, so their lens is either a
 | `review_pr.review.comments` | insufficient-data (n=0) |
 | `review_pr.review.tests` | insufficient-data (n=0) |
 | `review_pr.review.general` | insufficient-data (n=0) |
+| `review_pr.review.convention` | insufficient-data (n=0) |
 
 A threshold, once derivable, rides the dispatcher input keyed by edge id — never the agent prompt file, which one reviewer agent shares across two dispatches (RFC 0018 §7).
 

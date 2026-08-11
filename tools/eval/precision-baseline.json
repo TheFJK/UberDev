@@ -47,7 +47,16 @@
     }
   },
   "measured_at": "2026-08-11T01:41:26Z",
-  "pending": [],
+  "pending": [
+    {
+      "path": "agents/code-reviewer.md",
+      "reason": "#433 moved the 0-100 confidence anchors out of this agent into shared/finding-confidence-rubric-v1.md, so the prompt changed after these numbers were measured. The precision figures predate that edit and must not be read as measuring the current prompt; re-measure with --refresh once the convention lens has adjudicated findings to mine."
+    },
+    {
+      "path": "shared/phase1-reviewer-output-v1.md",
+      "reason": "#431 extended the shared Phase 1 reviewer output contract for the finding-verifier gate. Same situation: the measured numbers predate the contract change, so the stamp is declared stale rather than re-stamped."
+    }
+  ],
   "prompt_digests": {
     "agents/code-reviewer.md": "3d84c8db70e20bb764680d861608633b4302439b112bd710d5d0f141a12ef45e",
     "agents/comment-analyzer.md": "9b01e5fc01b7e5aeb549d5638acdd7a63d9b4b6bc5c917f723ccf2134ba1cc0f",
