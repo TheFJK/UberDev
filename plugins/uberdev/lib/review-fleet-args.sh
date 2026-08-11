@@ -1094,6 +1094,61 @@ _review_fleet_base_ref_ok() {
   return 0
 }
 
+# review_fleet_write_reviewed_head TARGET SHA
+# review_fleet_read_reviewed_head  PATH -> "<40-hex>"
+#
+# The head the review currently stands on, updated as fixers commit.
+#
+# `REVIEWED_HEAD_SHA` and `VALIDATED_FIXER_HEAD_SHA` are the same fact at
+# different moments: the head Phase 1 reviewed, then that head advanced by each
+# validated fixer commit. Both lived only in shell variables, and both are read
+# by fences that are separate processes -- the post-fixer publication gate and
+# the two trust fences.
+#
+# THIS ONE CANNOT BE RE-DERIVED, and the distinction matters more here than
+# anywhere else in this file. `git rev-parse HEAD` at the consuming fence would
+# always agree with itself, which is precisely the comparison the anti-race gate
+# exists to fail: its whole job is to notice that HEAD moved since the review.
+# Recomputing it does not restore the check, it deletes it while leaving the
+# code that looks like a check in place. So the value is written down at each
+# point it legitimately changes, and read back -- never recomputed.
+#
+# Absent is therefore distinguishable from changed, which the callers rely on to
+# stop reporting "HEAD changed outside the validated review fixers" at a run
+# whose head never moved and whose record simply had not travelled.
+review_fleet_write_reviewed_head() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" sha="$2"
+  case "$sha" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) return 2 ;;
+  esac
+  [ "${#sha}" -eq 40 ] || return 2
+  case "$sha" in *[!0-9a-f]*) return 2 ;; esac
+  ( umask 077 && printf '%s\n' "$sha" >"$target" ) || return 2
+}
+
+review_fleet_read_reviewed_head() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet reviewed head missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  [ "${#recorded}" -eq 40 ] || {
+    echo "error: review-fleet reviewed head is not a 40-hex SHA: ${recorded:-<empty>}" >&2
+    return 2
+  }
+  case "$recorded" in
+    *[!0-9a-f]*)
+      echo "error: review-fleet reviewed head is not a 40-hex SHA: $recorded" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
+
 review_fleet_write_review_base() {
   [ "$#" -eq 3 ] || return 2
   # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
@@ -2345,6 +2400,16 @@ REVIEW_FLEET_REHYDRATE_EOF
   MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
   _review_fleet_bind_pr "$resolved_run_dir"
   _review_fleet_bind_repo_slug "$resolved_research_dir"
+  # The reviewed head, READ BACK -- see review_fleet_write_reviewed_head for why
+  # this one is never recomputed. Gap-filling like every other binder here: a
+  # value already established in THIS process wins, so the fence that advances
+  # the head is not overwritten by the record it is about to update.
+  if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] && [ -n "$resolved_research_dir" ] \
+     && [ -r "$resolved_research_dir/reviewed-head.txt" ]; then
+    VALIDATED_FIXER_HEAD_SHA="$(review_fleet_read_reviewed_head \
+      "$resolved_research_dir/reviewed-head.txt" 2>/dev/null)" || VALIDATED_FIXER_HEAD_SHA=
+    REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
+  fi
   # The child timeout, re-derived rather than carried.
   #
   # The setup fence writes `REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"` and
@@ -2377,6 +2442,8 @@ REVIEW_FLEET_REHYDRATE_EOF
   export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
   export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
   export REVIEW_PR_TIMEOUT
+  [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] || export VALIDATED_FIXER_HEAD_SHA
+  [ -z "${REVIEWED_HEAD_SHA:-}" ] || export REVIEWED_HEAD_SHA
   [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
   [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
   [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER

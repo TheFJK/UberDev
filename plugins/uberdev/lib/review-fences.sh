@@ -559,6 +559,14 @@ review_track_validated_fixer_head() {
       commit_count="$(git -C "$WORKTREE_ROOT" rev-list --count "$before..$after")" || return 78
       [ "$commit_count" = 1 ] || return 77
       VALIDATED_FIXER_HEAD_SHA="$after"
+      # Persisted at the ONE point it legitimately advances. The trust fences
+      # and the post-fixer publication gate are separate processes and read this
+      # back; without the record they saw the empty string and reported "HEAD
+      # changed outside the validated review fixers" at a run whose head had not
+      # moved. Recording it is not optional -- a fixer commit this file cannot
+      # prove it authorised is exactly what the gate downstream must refuse.
+      review_fleet_write_reviewed_head \
+        "$RESEARCH_DIR_ABS/reviewed-head.txt" "$after" || return 74
       ;;
     NO_FIXES_NEEDED|REFUSED)
       [ -z "$declared_tip" ] && [ "$before" = "$after" ] || return 75
