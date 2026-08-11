@@ -2735,6 +2735,31 @@ EOF_VERIFY_AUDIT
 
     **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML before treating absent arrays as zero issues.
 
+    **Then write them down, in this same fence.** The Trust-Signal Emission
+    fence that consumes them is a different process, and it now REFUSES rather
+    than defaulting, because every default it used to apply (`blocker:-0`,
+    `halted:-false`) means "clean" and would turn a run that filed BLOCKER
+    issues into a GREEN trust trail. Record `skipped` explicitly when Phase 2.5
+    did not run at all (`--no-defer-issues`, or no deferred findings) — the
+    verdict fence cannot tell an absent file from a lost one, so "no record" is
+    always an error:
+
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
+    review_fleet_write_phase2_5_outcome \
+      "$RESEARCH_DIR_ABS/phase2_5-outcome.tsv" \
+      "${PHASE2_5_STATUS:-ran}" "${PHASE2_5_HALTED:-false}" \
+      "${BY_SEVERITY_BLOCKER:-0}" "${BY_SEVERITY_CRITICAL:-0}" || {
+        echo "error: could not record the Phase 2.5 outcome; the trust verdict would be computed from defaults that all mean 'clean'" >&2
+        return 2
+      }
+    ```
+
+    The defaults ARE applied here, in the fence that actually holds the values —
+    that is the difference. A default applied where the value is known is a
+    convenience; the same default applied three fences later is a fabrication.
+
     Publication/origin/parse failures are infrastructure failures, not a
     zero-finding result. The controller applies this executable status gate:
 
@@ -5643,6 +5668,27 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
        exit 2
      }
 
+   # The Phase 2.5 conjuncts come off DISK, not out of the controller's memory.
+   #
+   # They used to be read as `${BY_SEVERITY_BLOCKER:-0}` and
+   # `${PHASE2_5_HALTED:-false}`, which are the values a LOST carrier produces,
+   # and both of those defaults mean "clean". Losing everything fails closed --
+   # an empty PHASE1_VERDICT never equals APPROVE, so the run goes RED -- but
+   # losing ONLY these three, which is what happens when the controller re-emits
+   # the phase verdicts it holds and not the counts that arrived inside a child's
+   # YAML, turns a run that filed BLOCKER issues into GREEN. GREEN is the
+   # `uberdev-approved` label and the `Reviewed-by:` trailer /merge Phase 1.4
+   # accepts as authorisation to land, so the absence of this record is a
+   # refusal and never a default.
+   PHASE2_5_OUTCOME_RECORD="$(review_fleet_read_phase2_5_outcome \
+     "$RESEARCH_DIR_ABS/phase2_5-outcome.tsv")" || {
+       echo "error: the Phase 2.5 outcome record is missing or malformed; refusing to compute a trust verdict from defaults that all mean 'clean'" >&2
+       OUTCOME=halted
+       exit 2
+     }
+   IFS=$'\t' read -r PHASE2_5_STATUS_RECORDED PHASE2_5_HALTED \
+     BY_SEVERITY_BLOCKER BY_SEVERITY_CRITICAL <<<"$PHASE2_5_OUTCOME_RECORD"
+
    # Evaluate the GREEN predicate first; YELLOW is a strict sub-case
    # ("all GREEN preconditions met AND critical>0"); RED is everything else.
    # OVERRIDE_GREEN flips RED→GREEN when PHASE2_5_HALT_CHOICE == "override"
@@ -5655,14 +5701,14 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    fi
 
    if   $would_be_green_without_phase2_5 \
-        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
-        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
-        && [ "${BY_SEVERITY_CRITICAL:-0}" = "0" ]; then
+        && [ "$PHASE2_5_HALTED" = "false" ] \
+        && [ "$BY_SEVERITY_BLOCKER" = "0" ] \
+        && [ "$BY_SEVERITY_CRITICAL" = "0" ]; then
      TRUST_TRAIL_STATE=GREEN
    elif $would_be_green_without_phase2_5 \
-        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
-        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
-        && [ "${BY_SEVERITY_CRITICAL:-0}" -gt 0 ]; then
+        && [ "$PHASE2_5_HALTED" = "false" ] \
+        && [ "$BY_SEVERITY_BLOCKER" = "0" ] \
+        && [ "$BY_SEVERITY_CRITICAL" -gt 0 ]; then
      TRUST_TRAIL_STATE=YELLOW
    elif $would_be_green_without_phase2_5 \
         && [ "${PHASE2_5_HALT_CHOICE:-}" = "override" ]; then

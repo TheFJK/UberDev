@@ -1098,6 +1098,77 @@ review_fleet_read_review_base() {
 # RED is a legal recorded value even though RED emits no anchor and no label:
 # the consumers must be able to tell "the run was RED" from "the carrier was
 # never written", and only an explicit record does that.
+
+# review_fleet_write_phase2_5_outcome TARGET STATUS HALTED BLOCKER CRITICAL
+# review_fleet_read_phase2_5_outcome  PATH -> "<STATUS>TAB<halted>TAB<blocker>TAB<critical>"
+#
+# The INPUTS to the trust verdict, made durable at the fence that learns them.
+#
+# review_fleet_write_trust_state above makes the trust verdict durable. That is
+# the OUTPUT. Its inputs were still crossing the same gap the wrong way: Phase
+# 2.5's counts are captured by the CONTROLLER out of the findings-to-issues
+# child's return YAML (see commands/review-pr.md, "Capture the return YAML into
+# shell variables"), and the verdict fence that consumes them is a different
+# process. Nothing in the file wrote them down.
+#
+# The failure is not symmetric, and that asymmetry is why it survived:
+#
+#   * lose EVERYTHING and the predicate fails closed. `PHASE1_VERDICT` empty
+#     never equals APPROVE, so `would_be_green_without_phase2_5` stays false and
+#     the run goes RED. Safe, and the case anyone would test.
+#   * lose ONLY the Phase 2.5 counts -- exactly what happens when the controller
+#     re-emits the three phase verdicts it holds in its own context but not the
+#     counts that came back inside a child's YAML -- and `${BY_SEVERITY_BLOCKER:-0}`
+#     reads 0, `${PHASE2_5_HALTED:-false}` reads false, and a run that filed
+#     BLOCKER issues emits GREEN. Measured: APPROVE + ran/APPROVE + green with
+#     three blockers carried is NOT-GREEN; the same run with the carry lost is
+#     GREEN.
+#
+# GREEN is the `uberdev-approved` label and the `Reviewed-by:` trailer that
+# /merge Phase 1.4 accepts as authorisation to land. A defaulted absence must
+# therefore never be readable as "clean" -- so every one of these defaults is
+# gone from the predicate and its absence is a refusal instead.
+#
+# `skipped` is a first-class recorded STATUS, not an absent file, for the same
+# reason RED is a legal trust state above: a run that never dispatched Phase 2.5
+# (--no-defer-issues) and a run whose record was lost must not look alike.
+review_fleet_write_phase2_5_outcome() {
+  [ "$#" -eq 5 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" recorded_status="$2" halted="$3" blocker="$4" critical="$5"
+  case "$recorded_status" in
+    ran | skipped | blocked) ;;
+    *) return 2 ;;
+  esac
+  case "$halted" in true | false) ;; *) return 2 ;; esac
+  case "$blocker" in '' | *[!0-9]*) return 2 ;; esac
+  case "$critical" in '' | *[!0-9]*) return 2 ;; esac
+  ( umask 077 && printf '%s\t%s\t%s\t%s\n' \
+      "$recorded_status" "$halted" "$blocker" "$critical" >"$target" ) || return 2
+}
+
+review_fleet_read_phase2_5_outcome() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet phase 2.5 outcome missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded recorded_status halted blocker critical extra
+  IFS= read -r recorded <"$1" || return 2
+  recorded_status=""; halted=""; blocker=""; critical=""; extra=""
+  # Herestring, never an unquoted heredoc -- same reason as
+  # review_fleet_read_review_base above.
+  IFS=$'\t' read -r recorded_status halted blocker critical extra <<<"$recorded"
+  case "$recorded_status" in ran | skipped | blocked) ;; *) recorded_status='' ;; esac
+  case "$halted" in true | false) ;; *) recorded_status='' ;; esac
+  case "$blocker" in '' | *[!0-9]*) recorded_status='' ;; esac
+  case "$critical" in '' | *[!0-9]*) recorded_status='' ;; esac
+  if [ -z "$recorded_status" ] || [ -n "$extra" ]; then
+    echo "error: review-fleet phase 2.5 outcome is not <ran|skipped|blocked>TAB<true|false>TAB<blocker>TAB<critical>: ${recorded:-<empty>}" >&2
+    return 2
+  fi
+  printf '%s\t%s\t%s\t%s' "$recorded_status" "$halted" "$blocker" "$critical"
+}
+
 review_fleet_write_trust_state() {
   [ "$#" -eq 3 ] || return 2
   # `target`, never `path` -- see review_fleet_write_ci_state.
