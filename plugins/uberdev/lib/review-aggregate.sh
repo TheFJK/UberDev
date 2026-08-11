@@ -486,7 +486,13 @@ try:
  rule_sources=[line.strip() for line in
                read_bounded(rule_sources_path,RULE_SOURCES_LIMIT,'rule-sources-unavailable').splitlines()
                if line.strip()]
- changed_paths=json.loads(read_bounded(changed_paths_path,CHANGED_PATHS_LIMIT,'changed-paths-unavailable'))
+ try:
+  changed_paths=json.loads(read_bounded(changed_paths_path,CHANGED_PATHS_LIMIT,'changed-paths-unavailable'))
+ except (ValueError,TypeError):
+  # Classed HERE, not by the outer handler: a damaged changed-path document and a
+  # damaged reviewer payload demand different investigations, and the outer
+  # handler would report both as `malformed-input`.
+  fail('changed-paths-unavailable')
  if type(changed_paths) is not list or any(type(item) is not str for item in changed_paths):
   fail('changed-paths-unavailable')
  if not rule_root or not os.path.isdir(rule_root): fail('rule-root-unavailable')
@@ -496,6 +502,12 @@ try:
   # Only ever called for an allowlisted path, and still re-checked against the
   # root: the cited string is reviewer-authored, so `..` and absolute spellings
   # have to fail closed here even though the allowlist already excluded them.
+  #
+  # EVERY failure here yields an EMPTY window on purpose, and that is a decision,
+  # not a swallow: a rule file that is absent, unreadable, or absurdly large is a
+  # file whose bytes this gate CANNOT use to confirm a quote, and an unconfirmable
+  # quote is culled `citation-not-verbatim` by the predicate below. The finding is
+  # dropped and the drop is logged; nothing passes because a read failed.
   if rule_path in rule_cache: return rule_cache[rule_path]
   lines=[]
   candidate=os.path.realpath(os.path.join(rule_root_real,rule_path))

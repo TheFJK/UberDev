@@ -109,12 +109,19 @@ uberdev_review_rule_sources() {
     echo "error: uberdev_review_rule_sources: usage: uberdev_review_rule_sources REPO_ROOT" >&2
     return 2
   }
-  local rule_root rule_hit
+  local rule_root rule_hit rule_raw rule_rc
   rule_root="$(cd "$1" 2>/dev/null && pwd -P)" || {
     echo "error: uberdev_review_rule_sources: unreadable repository root: $1" >&2
     return 2
   }
-  find "$rule_root" \
+  # find's stderr is NOT discarded and its status IS inspected. An empty
+  # allowlist is a legitimate answer -- it means the repo wrote no conventions
+  # down -- but a BROKEN walk produces the byte-identical answer, and the
+  # difference is the whole lens: one is "nothing to enforce", the other is a
+  # review that silently enforced nothing. Errored AND empty is refused by name;
+  # errored but partial still reports what it read, with the errors on the
+  # operator's terminal.
+  rule_raw="$(find "$rule_root" \
       -maxdepth 4 \
       \( -name .git -o -name .worktrees -o -name .claude -o -name node_modules \
          -o -name vendor -o -name dist -o -name build \) -prune -o \
@@ -123,7 +130,13 @@ uberdev_review_rule_sources() {
          -o -name '.eslintrc*' -o -name 'eslint.config.*' -o -name '.prettierrc*' \
          -o -name ruff.toml -o -name .ruff.toml -o -name pyproject.toml \
          -o -name setup.cfg -o -name '.markdownlint*' -o -name .shellcheckrc \
-         -o -name '.commitlintrc*' \) -print 2>/dev/null \
+         -o -name '.commitlintrc*' \) -print)"
+  rule_rc=$?
+  if [ "$rule_rc" -ne 0 ] && [ -z "$rule_raw" ]; then
+    echo "error: uberdev_review_rule_sources: discovery under $rule_root failed (find rc=$rule_rc) and found nothing; refusing to report that as 'this repository has no written conventions'" >&2
+    return 2
+  fi
+  printf '%s\n' "$rule_raw" \
     | while IFS= read -r rule_hit; do
         case "$rule_hit" in
           "$rule_root"/*) printf '%s\n' "${rule_hit#"$rule_root"/}" ;;

@@ -6450,7 +6450,7 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 
 ## Agent Descriptions:
 
-### Phase 1 reviewers (6 — fanned out by `Skill(uberdev:post-impl-review)`)
+### Phase 1 reviewers (7 — fanned out by `Skill(uberdev:post-impl-review)`)
 
 **uberdev:comment-analyzer**:
 - Verifies comment accuracy vs code
@@ -6473,12 +6473,17 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 - Rates type design quality
 
 **uberdev:code-reviewer**:
-- Checks CLAUDE.md compliance
 - Detects bugs and issues
-- Reviews general code quality
+- Reviews correctness and design
+- Written project conventions are NOT this lens (#433) — they belong to `convention-compliance`, which must quote the rule
+
+**uberdev:convention-compliance**:
+- Reviews the change against the project's own written rules (`AGENTS.md`, `CLAUDE.md`, lint configs) from a controller-supplied allowlist
+- Quotes the exact rule text in every finding, under a declared `detail` grammar
+- A finding whose quote is not verbatim in the cited file is culled by a deterministic gate before aggregation, and the cull is logged
 
 **uberdev:code-reviewer (general lens)**:
-- 6th fanout slot — re-dispatched against the same agent file with a "general code-quality" framing in the brief (see `skills/post-impl-review/SKILL.md` Step 2 dispatch table)
+- 7th fanout slot — re-dispatched against the same agent file with a "general code-quality" framing in the brief (see `skills/post-impl-review/SKILL.md` Step 2 dispatch table)
 
 ### Phase 2 lens dispatcher (3 lens-parameterised routed child calls calls)
 

@@ -35,7 +35,7 @@
     },
     {
       "path": "agents/convention-compliance.md",
-      "sha256": "853cb99436cd4bd4a949be187e72f0417d38a534298305e6d91d2ad8ec47ae43"
+      "sha256": "08d6375803e6798aeeecfdd1dc1aac78a3335eb8f3ae38a867a5043f7106a433"
     },
     {
       "path": "agents/findings-to-issues.md",
@@ -67,7 +67,7 @@
     },
     {
       "path": "commands/review-pr.md",
-      "sha256": "a1b4494d319a013479feef062411a07380aedf98a2fc5b10344b5be157cfd1f9"
+      "sha256": "21298eef7a145571108165524e688f10d0840896a01b02395718b90ad706e3b0"
     },
     {
       "path": "commands/simplify.md",
@@ -119,7 +119,7 @@
     },
     {
       "path": "lib/review-aggregate.sh",
-      "sha256": "43def1b712deed8b0a0b0fbddca7bf05dd23c2496b031e7e47a2502fd283135e"
+      "sha256": "fb85f0d8641e948040c15e67a5a3e9a29e8c6d47a4f8e578418cb349b2a04b40"
     },
     {
       "path": "lib/review-push-target.sh",
@@ -155,7 +155,7 @@
     },
     {
       "path": "skills/post-impl-review/SKILL.md",
-      "sha256": "b7729d8e52ce3441f726161b05f7a582d58e1bb45e23aa54eb51b5788dba078b"
+      "sha256": "b6a12bafb9d9a39be890a06c6e49f7274b63ae9e7977d5549afae0fed5c12858"
     }
   ],
   "pending": []

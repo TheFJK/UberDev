@@ -116,6 +116,16 @@ else
   note_fail "D7 — expected $UBERDEV_REVIEW_RULE_SOURCE_LIMIT capped rows, got $D7_COUNT"
 fi
 
+# D8 — an unreadable root is a REFUSAL, never an empty allowlist. The two answers
+# are byte-identical downstream ("no rules found"), and only one of them means
+# "this repo wrote no conventions down"; reporting a broken walk as the other is
+# how this lens would silently enforce nothing.
+if uberdev_review_rule_sources "$TMP_ROOT/does-not-exist" >/dev/null 2>&1; then
+  note_fail "D8 — an unreadable repository root was reported as an empty allowlist"
+else
+  pass "D8 — an unreadable repository root refuses instead of reporting no rules"
+fi
+
 echo
 echo "== CC: the citation gate (classify_convention_citation, via its CLI verb) =="
 
