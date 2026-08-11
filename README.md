@@ -25,7 +25,7 @@
 
 ## Heads up — this plugin burns tokens fast
 
-UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` runs six reviewers in one or more cap-controlled waves with every child in each wave dispatched before its first wait, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, and `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
+UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scout fanout, `/uberdev:review-pr` runs seven reviewers in one or more cap-controlled waves with every child in each wave dispatched before its first wait, `/uberdev:simplify` runs three simplification lenses concurrently, `/solve` waves dispatch every task in parallel, and `/merge` spawns one conflict-resolver per conflicted file. That's where the speed and quality come from — and that's where the cost comes from.
 
 **Recommended setup: 2× Claude Max ×20 subscriptions.** A single Pro or single Max usage window genuinely is not enough headroom for a normal day of `/turbo` + `/review-pr` + `/merge` cycles. Expect to hit the limit mid-task on a single seat.
 
@@ -354,7 +354,7 @@ Bundled upstream license texts in `plugins/uberdev/licenses/`.
 
 Upstream `obra/superpowers` gates implementation behind a user-approval HARD-GATE: brainstorm halts, asks "does this look right so far?", and waits for sign-off before any subagent runs. Per-section approval prompts and a 3-iteration review-loop cap follow the same pattern.
 
-UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (six advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
+UberDev rejects all of those. User gates trade quality for ceremony — every pause shifts review burden onto a non-expert reader (you) and adds wall-clock cost. Quality wins from **parallel research fanout** (six research agents in one shot), **always-on reviewers** (`spec-reviewer` runs on medium/large tier per orchestrator Phase 3.5; `plan-reviewer` runs on every plan per Phase 4.5), and a **post-push `/review-pr` Phase 1 `post-impl-review` fanout** (seven advisory reviewers — correctness, silent-failure, type-design, comment/doc, PR-test, convention-compliance, and general quality lenses — run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; simplification is `/review-pr` Phase 2).
 
 </details>
 

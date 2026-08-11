@@ -794,6 +794,54 @@ zero findings is valid and is emitted as exact `findings: []`.
 </external-untrusted-input>
 ```
 
+### The convention lens's citation gate (#433)
+
+`review_pr.review.convention` is the one Phase 1 lens whose finding is a claim
+ABOUT A DOCUMENT — "the project's rules say X". That claim reads as
+authoritative and is trivially fabricated, so the lens is admissible in this
+fleet only because it arrives with its own filter, and the filter is
+DETERMINISTIC: "does this byte string occur in that file, near that line" and
+"does a rule in directory D govern a file under D" are both decidable, so
+routing them through a second model would trade a decision for an opinion.
+
+The writer takes three more REQUIRED inputs — the run's `rule-sources.txt`
+allowlist, the root those paths are relative to, and the run's
+`changed-paths.json` — and gates every convention observation **before** scope
+grouping (grouping merges same-`(path,line)` findings across edges, so a later
+cull would take another lens's finding with it):
+
+- the quote is verified verbatim against the cited file's own bytes, within a
+  bounded window of the cited line, after whitespace normalisation;
+- a cited path outside the allowlist is never opened at all;
+- a rule is scoped to its own directory subtree — `plugins/x/AGENTS.md` does not
+  govern `tools/`;
+- a quote that is secret-shaped, too short to cite anything, or longer than the
+  contract's 300-character carve-out is refused;
+- a rule **this PR itself wrote** is circular rather than false, so the finding
+  survives demoted to `suggestion`.
+
+A finding whose quote cannot be located is **culled**, not downweighted — a
+fabricated citation is a false finding, not an uncertain one — and the
+contributor's `verdict` is then recomputed from its surviving blockers so the
+two-way verdict/severity invariant still holds on the aggregate.
+
+Every cull and demotion is written to
+`.uberdev/research/$RUN_ID/post-review/convention-citations.md` (reason, cited
+rule, finding location, normalised quote prefix — each field neutralised the same
+way any other repo-derived text is, because in a PR that edits a rule file the
+quote is attacker-controlled). The log is published BEFORE the aggregate and is
+written even when nothing was culled, so its absence means the gate did not run
+rather than "nothing to report": **a cull is never swallowed.** Child
+`result.md` snapshots are never rewritten — they are sha256-pinned in the trusted
+ledger, so only the aggregate is filtered and the filtering is itself an
+artifact.
+
+The writer adds four fail-closed classes for these inputs:
+`rule-sources-unavailable`, `rule-root-unavailable`, `changed-paths-unavailable`,
+and `citation-log-unwritable`. A MISSING allowlist is a controller that never ran
+discovery and refuses the whole write; an allowlist that exists and is EMPTY is
+legitimate and means this repository wrote no conventions down.
+
 Markdown tables, YAML bodies, verdict-only rows, and lossy "top finding"
 summaries are not aggregate fallbacks. The downstream fixer receives every
 finding in the canonical document. This skill remains audit-only; the caller's

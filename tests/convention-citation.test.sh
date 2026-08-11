@@ -304,6 +304,214 @@ expect_citation cc11.json 'demote citation-self-introduced' \
   "CC11 — a rule this PR itself wrote demotes the finding instead of culling it"
 
 echo
+echo "== CC10-CC16: the gate INSIDE the real aggregate writer =="
+# These rows drive post_review_write_aggregate_v2 as shipped, over a full
+# seven-row captured input. They are the difference between "the predicate is
+# correct" and "the predicate is wired into the artifact anybody reads".
+
+AGG_LIB="$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh"
+# shellcheck disable=SC1090
+. "$AGG_LIB" || { echo "FATAL: could not source $AGG_LIB" >&2; exit 2; }
+UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+
+# w_case NAME CONVENTION_DETAIL CONVENTION_SEVERITY -> builds a fixture tree in
+# $TMP_ROOT/w/<name> and prints its directory. The tree carries its own
+# AGENTS.md (and nothing else), so CC14's "a real citation survives" row is not
+# vacuous the way it would be against this checkout, which happens to have both
+# AGENTS.md and CLAUDE.md.
+w_build() {
+  local name="$1" detail="$2" severity="$3" changed="$4" rules="$5"
+  python3 -I -B - "$TMP_ROOT/w/$name" "$detail" "$severity" "$changed" "$rules" <<'PY'
+import hashlib, json, os, sys
+
+case_dir, detail, severity, changed_paths_json, rules = sys.argv[1:]
+os.makedirs(os.path.join(case_dir, "root"), exist_ok=True)
+
+edges = [
+    "review_pr.review.correctness",
+    "review_pr.review.silent_failures",
+    "review_pr.review.types",
+    "review_pr.review.comments",
+    "review_pr.review.tests",
+    "review_pr.review.general",
+    "review_pr.review.convention",
+]
+
+# The rule document the convention finding cites. Line 3 is the rule.
+with open(os.path.join(case_dir, "root", "AGENTS.md"), "w", encoding="utf-8") as handle:
+    handle.write(rules)
+
+with open(os.path.join(case_dir, "rule-sources.txt"), "w", encoding="utf-8") as handle:
+    handle.write("AGENTS.md\n")
+with open(os.path.join(case_dir, "changed-paths.json"), "w", encoding="utf-8") as handle:
+    handle.write(changed_paths_json)
+
+
+def content(rows):
+    verdict = "REVISIONS_REQUIRED" if any(r[0] == "blocker" for r in rows) else "APPROVE"
+    lines = ["```yaml", "verdict: " + verdict]
+    if rows:
+        lines.append("findings:")
+        for sev, location, summary, det in rows:
+            lines.extend([
+                "  - severity: " + sev,
+                "    location: " + location,
+                "    summary: " + summary,
+                "    detail: " + json.dumps(det),
+            ])
+    else:
+        lines.append("findings: []")
+    lines.extend(["confidence: high", "```"])
+    return "\n".join(lines)
+
+
+# One non-convention finding, so every row also proves the gate leaves other
+# lenses alone.
+rows_by_edge = [
+    [("suggestion", "src/log.ts:17", "Consider structured logger",
+      "A structured logger would improve diagnostics.")],
+    [], [], [], [], [],
+    [(severity, "lib/thing.sh:4", "Breaks a written project rule", detail)],
+]
+captured = {"ledger_sha256": "a" * 64, "rows": [], "schema_version": 1}
+for index, (edge, rows) in enumerate(zip(edges, rows_by_edge), 1):
+    body = content(rows)
+    captured["rows"].append({
+        "content": body, "edge": edge, "index": index,
+        "instance": "fixture-%d" % index,
+        "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    })
+with open(os.path.join(case_dir, "input.json"), "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(captured, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+W_RULES='# Fixture rules
+
+Never commit with failing tests.
+'
+W_QUOTE='Never commit with failing tests.'
+W_GOOD="confidence: 90 — rule AGENTS.md:3 — the change deletes a failing assert — quote: $W_QUOTE"
+W_FAKE='confidence: 90 — rule AGENTS.md:3 — the project forbids this — quote: All handlers must be idempotent.'
+
+mkdir -p "$TMP_ROOT/w"
+
+# w_run NAME -> runs the shipped writer over case NAME; echoes rc.
+w_run() {
+  local case_dir="$TMP_ROOT/w/$1" rc
+  post_review_write_aggregate_v2 "$(cat "$case_dir/input.json")" "$case_dir/aggregate.md" \
+    "$case_dir/rule-sources.txt" "$case_dir/root" "$case_dir/changed-paths.json" \
+    "$case_dir/citations.md" 2>"$case_dir/stderr.txt"
+  rc=$?
+  printf '%s' "$rc"
+}
+
+# w_field CASE JQ_PATH -> a value out of the published aggregate's JSON body.
+w_field() {
+  python3 -I -B - "$TMP_ROOT/w/$1/aggregate.md" "$2" <<'PY'
+import json, sys
+payload = open(sys.argv[1], encoding="utf-8").read()
+body = payload.split("\n", 1)[1].rsplit("\n</external-untrusted-input>", 1)[0]
+value = json.loads(body)
+kind = sys.argv[2]
+if kind == "convention-verdict":
+    print(next(c["verdict"] for c in value["contributors"]
+               if c["id"] == "review_pr.review.convention"))
+elif kind == "finding-count":
+    print(len(value["findings"]))
+elif kind == "convention-findings":
+    print(len([f for f in value["findings"]
+               if "review_pr.review.convention" in f["source_edges"]]))
+elif kind == "convention-severity":
+    print(next(f["severity"] for f in value["findings"]
+               if "review_pr.review.convention" in f["source_edges"]))
+else:
+    raise SystemExit("unknown field " + kind)
+PY
+}
+
+# --- CC10: a culled blocker leaves the contributor APPROVE and the finding gone
+w_build cc10 "$W_FAKE" blocker '[]' "$W_RULES"
+if [ "$(w_run cc10)" = 0 ] \
+   && [ "$(w_field cc10 convention-verdict)" = APPROVE ] \
+   && [ "$(w_field cc10 convention-findings)" = 0 ] \
+   && [ "$(w_field cc10 finding-count)" = 1 ]; then
+  pass "CC10 — a fabricated blocker is culled, its contributor recomputes to APPROVE, other lenses survive"
+else
+  note_fail "CC10 — the writer did not cull the fabricated blocker or corrupted the other lens"
+fi
+if grep -q 'citation-not-verbatim' "$TMP_ROOT/w/cc10/citations.md"; then
+  pass "CC10 — the cull is recorded in the citation log, never swallowed"
+else
+  note_fail "CC10 — the cull log does not name the reason"
+fi
+
+# --- CC11 (writer half): a rule this PR wrote demotes rather than culls
+w_build cc11w "$W_GOOD" blocker '["AGENTS.md"]' "$W_RULES"
+if [ "$(w_run cc11w)" = 0 ] \
+   && [ "$(w_field cc11w convention-findings)" = 1 ] \
+   && [ "$(w_field cc11w convention-severity)" = suggestion ] \
+   && [ "$(w_field cc11w convention-verdict)" = APPROVE ]; then
+  pass "CC11 — a self-introduced rule survives as a suggestion, not a blocker"
+else
+  note_fail "CC11 — the self-introduced demotion did not reach the aggregate"
+fi
+if grep -q 'citation-self-introduced' "$TMP_ROOT/w/cc11w/citations.md"; then
+  pass "CC11 — the demotion is recorded alongside the culls"
+else
+  note_fail "CC11 — the demotion is not in the citation log"
+fi
+
+# --- CC12: no allowlist is a REFUSED write, not a clean zero-finding aggregate
+w_build cc12 "$W_GOOD" blocker '[]' "$W_RULES"
+rm -f "$TMP_ROOT/w/cc12/rule-sources.txt"
+CC12_RC="$(w_run cc12)"
+if [ "$CC12_RC" != 0 ] && [ ! -e "$TMP_ROOT/w/cc12/aggregate.md" ] \
+   && grep -q 'rule-sources-unavailable' "$TMP_ROOT/w/cc12/stderr.txt"; then
+  pass "CC12 — a missing allowlist fails the writer closed and names rule-sources-unavailable"
+else
+  note_fail "CC12 — a missing allowlist did not fail closed (rc=$CC12_RC)"
+fi
+
+# --- CC13: an allowlist that EXISTS and is empty is legitimate
+w_build cc13 "$W_GOOD" blocker '[]' "$W_RULES"
+: >"$TMP_ROOT/w/cc13/rule-sources.txt"
+if [ "$(w_run cc13)" = 0 ] \
+   && [ "$(w_field cc13 convention-findings)" = 0 ] \
+   && [ "$(w_field cc13 finding-count)" = 1 ] \
+   && grep -q 'Rule sources: none' "$TMP_ROOT/w/cc13/citations.md"; then
+  pass "CC13 — an empty allowlist publishes, records 'none', and leaves other lenses untouched"
+else
+  note_fail "CC13 — the empty-allowlist case did not publish cleanly"
+fi
+
+# --- CC14: THE regression guard. A true citation must SURVIVE.
+# Without this row every other row above still passes on a gate that culls
+# everything — a 100 % silent no-op in every worktree and in CI.
+w_build cc14 "$W_GOOD" blocker '[]' "$W_RULES"
+if [ "$(w_run cc14)" = 0 ] \
+   && [ "$(w_field cc14 convention-findings)" = 1 ] \
+   && [ "$(w_field cc14 convention-severity)" = blocker ] \
+   && [ "$(w_field cc14 convention-verdict)" = REVISIONS_REQUIRED ]; then
+  pass "CC14 — a verifiable citation survives the gate with its severity intact"
+else
+  note_fail "CC14 — the gate culled a TRUE citation; the lens is a silent no-op"
+fi
+
+# --- CC16: the gate never rewrites what it read
+# Child result.md snapshots are sha256-pinned in the trusted ledger and read back
+# through secure_capture_published. Filtering the AGGREGATE is the whole design;
+# mutating a child's bytes would break the tamper-evidence chain.
+CC16_BEFORE="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TMP_ROOT/w/cc14/input.json")"
+w_run cc14 >/dev/null
+CC16_AFTER="$(python3 -I -B -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TMP_ROOT/w/cc14/input.json")"
+if [ "$CC16_BEFORE" = "$CC16_AFTER" ]; then
+  pass "CC16 — the captured reviewer bytes are unchanged by the gate"
+else
+  note_fail "CC16 — the gate mutated its own input"
+fi
+
+echo
 echo "== Summary =="
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"
