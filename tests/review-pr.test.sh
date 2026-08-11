@@ -69,6 +69,27 @@ review_reserved_run_fixture() {
     WORKTREE_ROOT="$repo" PR_NUMBER=73 \
     bash -c '. "$1"' _ "$base/setup.sh" ) >/dev/null 2>"$base/setup.stderr"
 }
+
+# review_reserved_run_reason BASE -> why the reservation produced no run dir.
+#
+# The fixture captures the setup fence's stderr and then nothing ever printed
+# it, so a row that depends on a reservation could only report "no reserved run
+# directory to inspect" -- true, useless, and identical whether the cause was a
+# missing python3, a platform rename semantic, or a real product regression.
+# Three rows failed exactly that way on the Windows job while passing on macOS,
+# and the log gave no way to tell which. A failure that cannot name its cause
+# costs a full CI cycle to diagnose; this makes the next one self-diagnosing.
+review_reserved_run_reason() {
+  local base="${1:-}" tail_out=''
+  [ -n "$base" ] || { printf 'no fixture base'; return 0; }
+  if [ -s "$base/setup.stderr" ]; then
+    # Last line only: the fence's own refusal, not the whole trace.
+    tail_out="$(tail -n 3 "$base/setup.stderr" | tr '\n' ' ' | tr -s ' ')"
+    printf 'setup fence stderr: %s' "${tail_out}"
+  else
+    printf 'setup fence wrote no stderr (exit before any diagnostic)'
+  fi
+}
 AGENTS_DIR="$REPO_ROOT/plugins/uberdev/agents"
 # Phase 1 reviewer files — code-simplifier moved to Phase 2 (named lens
 # dispatcher per #73), so AGENT_FILES drops it. The simplify.md no-quoting
@@ -1981,6 +2002,9 @@ if [ -n "$R33_CARRY_LINE" ] \
 else
   echo "  FAIL  R33.9 — the setup carry line does not carry a usable receipt beside the run id"
   echo "        carry line: ${R33_CARRY_LINE:-<none>}"
+  # An EMPTY carry line means the fence never reserved, not that it published a
+  # bad one. Those are different bugs and the row must say which it saw.
+  [ -n "$R33_CARRY_LINE" ] || echo "        no carry line at all — $(review_reserved_run_reason "$R33_TMP")"
   FAIL=$((FAIL + 1))
 fi
 
@@ -3576,7 +3600,7 @@ if [ -d "$R47_REPO/.uberdev/runs" ]; then
     FAIL=$((FAIL + 1))
   fi
 else
-  echo "  FAIL  R47.5 — no reserved run fixture available to exercise the prologue"
+  echo "  FAIL  R47.5 — no reserved run fixture available to exercise the prologue ($(review_reserved_run_reason "$R47_TMP"))"
   FAIL=$((FAIL + 1))
 fi
 
@@ -3627,7 +3651,7 @@ if [ -n "$R47_RUN_DIR" ]; then
     FAIL=$((FAIL + 1))
   fi
 else
-  echo "  FAIL  R47.6 — no reserved run directory to inspect"
+  echo "  FAIL  R47.6 — no reserved run directory to inspect ($(review_reserved_run_reason "$R47_RUN_DIR_TMP"))"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$R47_RUN_DIR_TMP"
