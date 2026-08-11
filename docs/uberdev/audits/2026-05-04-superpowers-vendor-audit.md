@@ -10,12 +10,15 @@
 
 Audit of all files in `plugins/uberdev/skills/{test-driven-development,writing-skills,systematic-debugging}/` that were originally vendored from `obra/superpowers` in commit `41d072b` (v0.3.0). Verified byte-equivalence against upstream HEAD `e7a2d16476bf042e9add4699c9d018a90f86e4a6` and pinned in-file provenance headers on all 20 vendored files. 3 files carry expected-DIFFER status due to intentional local changes (namespace rebrand and one local enhancement section); the remaining 17 are byte-equivalent to upstream.
 
+**Post-audit amendment (#430, 2026-08-10):** `systematic-debugging/find-polluter.sh` has since been re-pinned to upstream **v6.2.0** (`3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9`) plus a local zero-match refusal, so **4** files now carry expected-DIFFER status and **16** remain byte-equivalent to the SHA pinned in their own provenance header. Row 15 and the allowlist below are updated accordingly; the audit-wide `FRESH_SHA`/`e7a2d16` no longer applies to that one file.
+
 ## Inventory + diff results
 
 Special-case allowlist (intentional local divergence — recorded in per-file provenance header suffix):
 - `writing-skills/SKILL.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `writing-skills/testing-skills-with-subagents.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `systematic-debugging/SKILL.md` — superpowers:→uberdev: namespace rebrand + local 'Parallel hypothesis testing' section enhancement
+- `systematic-debugging/find-polluter.sh` — re-pinned to upstream v6.2.0 (`3dcbd5c`) + local zero-match refusal (exit 2); upstream's own `tests/systematic-debugging/test-find-polluter.sh` asserts the opposite (`Found 0 test files` + `No polluter found` + green exit on a non-matching pattern), so this divergence is deliberate and a future re-sync will collide with it head-on, #430
 
 | # | File | Local bytes | Upstream bytes | Local sha256 | Upstream sha256 | Result |
 |---|------|-------------|----------------|--------------|-----------------|--------|
@@ -33,7 +36,7 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 | 12 | `systematic-debugging/defense-in-depth.md` | 3650 | 3650 | `1e175fb86fc3` | `1e175fb86fc3` | MATCH |
 | 13 | `systematic-debugging/condition-based-waiting.md` | 3516 | 3516 | `e89fec8400d6` | `e89fec8400d6` | MATCH |
 | 14 | `systematic-debugging/condition-based-waiting-example.ts` | 5054 | 5054 | `40ae5ebe497f` | `40ae5ebe497f` | MATCH |
-| 15 | `systematic-debugging/find-polluter.sh` | 1528 | 1528 | `6462747eae9b` | `6462747eae9b` | MATCH |
+| 15 | `systematic-debugging/find-polluter.sh` | 2388 | 1986 | `28d3071f653c` | `dd7b8f13c4cc` | DIFFER (expected: re-pinned to v6.2.0 + local zero-match refusal — see #430) |
 | 16 | `systematic-debugging/test-pressure-1.md` | 1900 | 1900 | `0b6a915db005` | `0b6a915db005` | MATCH |
 | 17 | `systematic-debugging/test-pressure-2.md` | 2283 | 2283 | `b2030aeffba0` | `b2030aeffba0` | MATCH |
 | 18 | `systematic-debugging/test-pressure-3.md` | 2692 | 2692 | `96b50a52e2c7` | `96b50a52e2c7` | MATCH |
@@ -126,6 +129,11 @@ FILES=(
 #   writing-skills/SKILL.md — superpowers:->uberdev: rebrand (4 occurrences)
 #   writing-skills/testing-skills-with-subagents.md — superpowers:->uberdev: rebrand (4-byte delta)
 #   systematic-debugging/SKILL.md — superpowers:->uberdev: rebrand + local 'Parallel hypothesis testing' section
+#   systematic-debugging/find-polluter.sh — re-pinned to v6.2.0 + local zero-match refusal (#430); its header SHA is
+#     3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9, NOT the audit-wide FRESH_SHA/e7a2d16 — diff it at 3dcbd5c (or at the
+#     SHA in its own header) or the comparison is meaningless. Upstream's tests/systematic-debugging/test-find-polluter.sh
+#     asserts a GREEN exit on a zero-match pattern; UberDev deliberately exits 2 there, so that one assertion will not
+#     survive a straight re-sync.
 
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
