@@ -2756,7 +2756,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     # purpose: fences are fresh shells, so this is a RE-DERIVATION and not a
     # second declaration of the bounds.
     REVIEW_CONFIDENCE_THRESHOLD="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)" || return 2
-    REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 6)" || return 2
+    REVIEW_FLEET_CAP="$(uberdev_read_int_in_range fanout_concurrency.post_impl_review UBERDEV_FANOUT_POST_IMPL_REVIEW 1 50 7)" || return 2
     VERIFY_PHASE1_PATH="$REVIEW_FLEET_RUN_DIR/post-impl-review-final.md"
     VERIFY_PHASE1_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$VERIFY_PHASE1_PATH" --minimum 1 --maximum 16777216)" || return 74
     VERIFY_DISPOSITION_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE1_DISPOSITION_PATH" --minimum 1 --maximum 16777216)" || return 74

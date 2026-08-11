@@ -7,7 +7,7 @@ commands/review-pr.md
 commands/simplify.md
 commands/merge.md
 
-# --- agents (15) ---
+# --- agents (16) ---
 agents/code-reviewer.md
 agents/silent-failure-hunter.md
 agents/type-design-analyzer.md

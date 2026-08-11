@@ -140,7 +140,7 @@ for agent_path in sorted((ROOT / "plugins/uberdev/agents").glob("*.md")):
             role = line.split(": ", 1)[1].strip()
             break
     source_roles.add(role or agent_path.stem)
-check(len(source_roles) == 45, f"expected 45 canonical roles, got {len(source_roles)}")
+check(len(source_roles) == 46, f"expected 46 canonical roles, got {len(source_roles)}")
 check(set(policy["roles"]) == source_roles, "policy/source role inventory mismatch")
 expected_route_groups = {
     "economy": {"triage-scout", "ci-failure-classifier", "merge-strategy-decider", "testers-monitor-primary", "testers-monitor-devils-advocate"},

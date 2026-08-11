@@ -1630,7 +1630,10 @@ ORDER = (
 )
 # standalone_snapshot belongs to /simplify, not to /review-pr, so an EMPTY value
 # is correct here and only here -- exactly what uberdev_command_workspace_prepare
-# binds. Every other name must be a real path under the run's research dir.
+# binds. Every other name must be a real path under the research dir of the run.
+# NOTE: no apostrophe may appear anywhere in this heredoc body -- it sits inside
+# a $( ) and bash 3.2 (macOS /bin/bash) scans the body for quotes, so an odd
+# apostrophe count makes the command substitution unterminated (#427/PR450).
 OPTIONAL = {"standalone_snapshot"}
 
 
@@ -1695,7 +1698,11 @@ values.append(json.dumps(descriptor, sort_keys=True, separators=(",", ":")))
 for value in values:
     if "\n" in value or "\r" in value:
         refuse("review-pr run workspace descriptor carries an embedded newline; refusing to rehydrate")
-print("\n".join(values))
+# Byte-level write: on Windows, text-mode stdout translates EVERY "\n" -- the
+# embedded separators too, not just a trailing one -- into "\r\n", and the
+# `IFS= read -r` reader below strips the "\n" but keeps the "\r", poisoning
+# every rehydrated carrier with a trailing CR. `end=""` does NOT fix that.
+sys.stdout.buffer.write(("\n".join(values) + "\n").encode("utf-8"))
 PY
   )" || return 2
   # Sequential `IFS= read -r` out of a HERESTRING, never a pipeline: a `... |

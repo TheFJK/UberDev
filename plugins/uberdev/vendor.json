@@ -653,6 +653,16 @@
       "origin": "uberdev"
     },
     {
+      "id": "agents/convention-compliance.md",
+      "path": "agents/convention-compliance.md",
+      "origin": "uberdev"
+    },
+    {
+      "id": "agents/finding-verifier.md",
+      "path": "agents/finding-verifier.md",
+      "origin": "uberdev"
+    },
+    {
       "id": "agents/findings-to-issues.md",
       "path": "agents/findings-to-issues.md",
       "origin": "uberdev"
