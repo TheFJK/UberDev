@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,25 @@ assert SPEC is not None and SPEC.loader is not None
 module = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = module
 SPEC.loader.exec_module(module)
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix: str):
+    """Scratch tree whose teardown cannot decide this file's exit status.
+
+    Deliberate copy of the factory in tests/code-fixer-contract.test.sh: this
+    is a standalone program and cannot import from that file's heredoc. Both
+    copies are locked by the S1-S4 guard in the .sh, which scans this file's
+    text. Rationale, tradeoff and the 3.10+/no-`setup-python` constraint are
+    documented there (issue #428, run 31369242976). Teardown-on-open-handles
+    fails far more readily on native Windows, which is the only platform this
+    file runs on.
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def git(repository: pathlib.Path, *arguments: str, check: bool = True):
@@ -41,7 +62,7 @@ def expect_reason(callback, expected: str) -> None:
         raise AssertionError(f"expected ContractFailure({expected})")
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-contract-windows-") as temporary:
+with scratch_dir("code-fixer-contract-windows-") as temporary:
     repository = pathlib.Path(temporary) / "repo with spaces ü"
     repository.mkdir()
     git(repository, "init", "-q")

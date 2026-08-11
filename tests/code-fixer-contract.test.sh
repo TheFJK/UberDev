@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 HELPER="$ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 
 python3 -I -B - "$ROOT" "$HELPER" <<'PY'
+import contextlib
 import dataclasses
 import hashlib
 import importlib.util
@@ -39,6 +40,55 @@ windows_job = windows_job_match.group(0)
 assert "    runs-on: windows-latest\n" in windows_job
 assert "python -I -B tests/code-fixer-contract-windows.test.py" in windows_job
 assert "continue-on-error: true" not in windows_job
+
+# Guard S1-S6 (#428) — the teardown decoupling must not drift back.
+#
+# EVERY needle is assembled at runtime. This block reads the file it lives in,
+# so a contiguous literal would count ITSELF: the ban would trip on the guard,
+# and the presence checks would pass vacuously after the thing they guard was
+# deleted. The program runs as `<stdin>` (piped to `python3 -I -B -`), so
+# `inspect.getsource` on anything defined here raises — the guard must read
+# file text from `root`.
+BANNED_CONSTRUCTOR = "tempfile.Temporary" + "Directory("
+NEEDLE_FACTORY = "tempfile." + "mkdtemp("
+NEEDLE_SUPPRESSION = "ignore_errors" + "=True"
+NEEDLE_CALL_SITE = "with scratch" + "_dir("
+NEEDLE_CRASH_SITE = 'scratch' + '_dir("code-fixer-ci-spaced-")'
+for relative, floor in (
+    ("tests/code-fixer-contract.test.sh", 30),   # 28 converted sites + S7 + S8
+    ("tests/code-fixer-contract-windows.test.py", 1),
+):
+    text = (root / relative).read_text(encoding="utf-8")
+    assert len(text) > 1000, f"S4 vacuity: {relative} unreadable or truncated"
+    assert BANNED_CONSTRUCTOR not in text, (
+        f"S1 (#428): raw tempdir constructor is back in {relative} — route it "
+        f"through the scratch factory; its teardown must not decide this "
+        f"suite's verdict"
+    )
+    assert text.count(NEEDLE_FACTORY) == 1, (
+        f"S2 (#428): {relative} must have exactly one scratch factory, "
+        f"found {text.count(NEEDLE_FACTORY)}"
+    )
+    assert text.count(NEEDLE_SUPPRESSION) == 1, (
+        f"S3 (#428): {relative} must suppress unlink errors in exactly one "
+        f"place, found {text.count(NEEDLE_SUPPRESSION)}"
+    )
+    assert text.count(NEEDLE_CALL_SITE) >= floor, (
+        f"S4 (#428): {relative} has {text.count(NEEDLE_CALL_SITE)} scratch "
+        f"call sites, floor is {floor} — sites were deleted or unrouted"
+    )
+guarded = (root / "tests/code-fixer-contract.test.sh").read_text(encoding="utf-8")
+assert NEEDLE_CRASH_SITE in guarded, (
+    "S5 (#428): the exact block from run 31369242976 is no longer routed "
+    "through the scratch factory"
+)
+NEEDLE_GC = "gc." + "auto=0"
+NEEDLE_MAINTENANCE = "maintenance." + "auto=false"
+assert NEEDLE_GC in guarded and NEEDLE_MAINTENANCE in guarded, (
+    "S6 (#428): the fixture git() no longer pins gc/maintenance — the repos "
+    "can start async work that outlives the `with` block and rewrites the "
+    "object set the git_object_files before/after rows snapshot"
+)
 
 assert dataclasses.is_dataclass(module.FindingKey)
 assert dataclasses.is_dataclass(module.RouteAuthority)
@@ -266,9 +316,45 @@ def run_bytes(argv, *, expected=0):
     return result
 
 
+@contextlib.contextmanager
+def scratch_dir(prefix):
+    """A scratch tree whose TEARDOWN cannot decide this suite's verdict.
+
+    Scaffolding only. Nothing in this file reads the tree after its `with`
+    block ends — every `git_object_files` before/after pair is inside a body —
+    so a failed unlink here is a false signal, not a finding.
+    `TemporaryDirectory.__exit__` re-raises every OSError except
+    PermissionError and FileNotFoundError, which turned an ENOTEMPTY race on
+    `.git/objects` into a red `shape-checks` job on a PR whose diff never
+    touched this file (issue #428, run 31369242976). Suppressing the unlink
+    error is class-agnostic, so it holds whichever writer wins the race and the
+    fix does not depend on identifying that writer.
+
+    Tradeoff: a failed unlink leaves the tree behind. Harmless on ephemeral
+    runners; on a dev box repeated runs can accumulate `code-fixer-*` dirs
+    under $TMPDIR. mkdtemp plus rmtree is used instead of the stdlib context
+    manager's 3.10+ cleanup-suppression kwarg because no workflow pins an
+    interpreter (there is no `setup-python` step in .github/workflows), so the
+    kwarg could TypeError on the very job it protects.
+    """
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def git(repository, *args, check=True):
+    # Fixture repos must not start work that outlives the `with` block. A
+    # detached `gc --auto` / `maintenance run --auto` repack is the leading
+    # candidate for the #428 ENOTEMPTY teardown race, and it would also rewrite
+    # the object set the git_object_files before/after rows snapshot. Passed as
+    # `-c` rather than written to repo config so a later git(repo, "config", …)
+    # in a fixture cannot overwrite it — the same convention the shipped module
+    # uses for `-c core.fsmonitor=false`.
     return subprocess.run(
-        ["git", "-C", str(repository), *args],
+        ["git", "-C", str(repository),
+         "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
         capture_output=True,
         check=check,
     )
@@ -594,7 +680,33 @@ def persistence_result(status, *, halted=False, blocker_count=0,
     )
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-persistence-result-") as temporary:
+# S7/S8 (#428) — the scratch factory's two load-bearing properties, asserted
+# behaviourally rather than by spelling. S7: drop-in for the stdlib context
+# manager (a str naming a live directory, gone after the block). S8: a teardown
+# that CANNOT unlink must not raise — that is the whole point of the change.
+with scratch_dir("code-fixer-scratch-probe-") as probe:
+    assert isinstance(probe, str), type(probe)
+    assert os.path.isdir(probe), probe
+    assert os.path.basename(probe).startswith("code-fixer-scratch-probe-"), probe
+assert not os.path.exists(probe), probe
+
+# `os.geteuid` does not exist on Windows, so the platform test must come first
+# and short-circuit. root ignores mode bits, so the row is meaningless there.
+if os.name != "nt" and os.geteuid() != 0:
+    with scratch_dir("code-fixer-scratch-undeletable-") as undeletable:
+        os.mkdir(os.path.join(undeletable, "sub"))
+        os.chmod(undeletable, 0o500)          # r-x: the child cannot be unlinked
+    # Exiting the block above must have raised NOTHING. PermissionError is the
+    # deterministic stand-in for the ENOTEMPTY of run 31369242976; the
+    # suppression is class-agnostic, so one covers the other by construction.
+    assert os.path.isdir(undeletable), undeletable
+    assert os.path.isdir(os.path.join(undeletable, "sub"))
+    os.chmod(undeletable, 0o700)
+    shutil.rmtree(undeletable)
+    assert not os.path.exists(undeletable), undeletable
+
+
+with scratch_dir("code-fixer-persistence-result-") as temporary:
     working = pathlib.Path(temporary).resolve()
     result_path = working / "result.md"
     status_path = working / "status.json"
@@ -856,7 +968,7 @@ expect_contract_failure(lambda: module.parse_finding_keys(phase1_oracle, "phase2
 expect_contract_failure(lambda: module.parse_finding_keys(phase2_oracle, "phase1"))
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
+with scratch_dir("code-fixer-contract-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1428,7 +1540,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-contract-") as temporary:
     )
     review_status_path.write_bytes(review_status_bytes)
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-rename-") as temporary:
+with scratch_dir("code-fixer-rename-") as temporary:
     # Rename/copy detection must not collapse an unapproved source path into an
     # approved destination. With detection disabled this is a D+A pair, both
     # of which are forbidden at the staged commit boundary.
@@ -1479,7 +1591,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-rename-") as temporary:
     assert rename_disposition.read_bytes() == b""
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == head
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-index-tree-") as temporary:
+with scratch_dir("code-fixer-index-tree-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1706,7 +1818,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-index-tree-") as temporary:
     assert quarantines[0].read_bytes() == attacker_index_payload
     quarantines[0].unlink()
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-index-refusal-") as temporary:
+with scratch_dir("code-fixer-index-refusal-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1828,7 +1940,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-index-refusal-") as temporar
     assert regular_snapshot(raw_index_path) == baseline
     assert not tuple(git_dir.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-reuc-") as temporary:
+with scratch_dir("code-fixer-reuc-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1869,7 +1981,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-reuc-") as temporary:
     )
     assert regular_snapshot(reuc_index_path) == reuc_index
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-split-linked-") as temporary:
+with scratch_dir("code-fixer-split-linked-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -1947,9 +2059,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-split-linked-") as temporary
 
 exercised_split_versions = set()
 for index_version in (2, 3, 4):
-    with tempfile.TemporaryDirectory(
-        prefix=f"code-fixer-split-v{index_version}-"
-    ) as temporary:
+    with scratch_dir(f"code-fixer-split-v{index_version}-") as temporary:
         repo = pathlib.Path(temporary) / "repo"
         repo.mkdir()
         git(repo, "init", "-q")
@@ -2031,7 +2141,7 @@ for index_version in (2, 3, 4):
         exercised_split_versions.add(index_version)
 assert exercised_split_versions == {2, 3, 4}
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-git-environment-") as temporary:
+with scratch_dir("code-fixer-git-environment-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -2142,7 +2252,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-git-environment-") as tempor
         check=False,
     ).returncode != 0
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-partial-clone-") as temporary:
+with scratch_dir("code-fixer-partial-clone-") as temporary:
     source = pathlib.Path(temporary) / "source"
     source.mkdir()
     git(source, "init", "-q")
@@ -2208,7 +2318,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-partial-clone-") as temporar
     assert regular_snapshot(partial_index_path) == partial_index
     assert git_object_files(partial) == partial_objects
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-sparse-") as temporary:
+with scratch_dir("code-fixer-sparse-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -2233,7 +2343,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-sparse-") as temporary:
         assert regular_snapshot(sparse_index) == sparse_before
         assert not tuple(sparse_index.parent.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-sha256-") as temporary:
+with scratch_dir("code-fixer-sha256-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     sha256_init = subprocess.run(
         ["git", "init", "-q", "--object-format=sha256", str(repo)],
@@ -2258,7 +2368,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-sha256-") as temporary:
         assert regular_snapshot(sha256_index) == sha256_before
         assert not tuple(sha256_index.parent.glob(".code-fixer-private-git-*"))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
+with scratch_dir("code-fixer-standalone-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3074,7 +3184,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-") as temporary:
         working_dir=str(repo), head_before=parent, head_after=tip,
     ))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-review-only-") as temporary:
+with scratch_dir("code-fixer-review-only-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3268,7 +3378,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-review-only-") as temporary:
     assert (repo / ".git/index").read_bytes() == index_before
     assert git(repo, "status", "--porcelain", "--untracked-files=no").stdout == b""
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as temporary:
+with scratch_dir("code-fixer-standalone-empty-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3381,7 +3491,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-standalone-empty-") as tempo
     assert git(repo, "diff", "--cached", "--binary").stdout == cached_before
     assert git(repo, "diff", "--binary").stdout == worktree_before
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-residue-") as temporary:
+with scratch_dir("code-fixer-residue-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -3470,7 +3580,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-residue-") as temporary:
         )
     )
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-failed-return-guard-") as temporary:
+with scratch_dir("code-fixer-failed-return-guard-") as temporary:
     guard_root = pathlib.Path(temporary)
     review_repo = guard_root / "review"
     review_repo.mkdir()
@@ -3650,7 +3760,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-failed-return-guard-") as te
         )
     )
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-atomic-publication-") as temporary:
+with scratch_dir("code-fixer-atomic-publication-") as temporary:
     publication_dir = pathlib.Path(temporary)
     artifact = publication_dir / "snapshot.json"
     artifact.write_bytes(b"seed\n")
@@ -4293,7 +4403,7 @@ assert re.fullmatch(r"[0-9a-f]{64}", WORKFLOW_NONCE_OTHER)
 
 # 2. review_pr.fix.phase1 -- the authority-derived disposition and
 #    applied-content paths are still bound, and all four artifacts are frozen.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as temporary:
+with scratch_dir("code-fixer-workflow-review-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -4487,7 +4597,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-review-") as tempor
 # 3. review_pr.defer.findings -- capture AND outcome, end to end, on a workflow
 #    binding. The defer stage carries an aggregate and a disposition pin, and
 #    both survive the backend switch.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as temporary:
+with scratch_dir("code-fixer-workflow-defer-") as temporary:
     working = pathlib.Path(temporary).resolve()
     result_path = working / "result.md"
     status_path = working / "status.json"
@@ -4612,7 +4722,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-defer-") as tempora
 
 # 4. simplify.fix.phase2 -- capture AND outcome, end to end, on a workflow
 #    binding, including the applied-content plan the fixer alone owes.
-with tempfile.TemporaryDirectory(prefix="code-fixer-workflow-simplify-") as temporary:
+with scratch_dir("code-fixer-workflow-simplify-") as temporary:
     repo = pathlib.Path(temporary) / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -4812,7 +4922,7 @@ def ci_status_document(binding, **overrides):
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
+with scratch_dir("code-fixer-ci-edges-") as temporary:
     ci_repo = pathlib.Path(temporary) / "repo"
     ci_repo.mkdir()
     git(ci_repo, "init", "-q")
@@ -5647,7 +5757,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-edges-") as temporary:
 # repository lists `.uberdev/` in its own .gitignore, so `ls-files --others`
 # returns nothing and every untracked-path check is vacuous against it. A
 # consumer repository has no such line, and that is the shape these rows model.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
+with scratch_dir("code-fixer-ci-conflict-") as temporary:
     cf_repo = pathlib.Path(temporary) / "repo"
     cf_repo.mkdir()
     git(cf_repo, "init", "-q", "-b", "main")
@@ -6098,7 +6208,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-conflict-") as temporary:
 # both outcomes with the SAME authority. The base-tip assertion is what has to
 # discriminate; `base_sha` ancestry must still be checked ALONGSIDE it, never
 # replaced by it, so the row below asserts the old refusal still fires too.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-stack438-") as temporary:
+with scratch_dir("code-fixer-ci-stack438-") as temporary:
     st_repo = pathlib.Path(temporary) / "repo"
     st_repo.mkdir()
     git(st_repo, "init", "-q", "-b", "main")
@@ -6252,7 +6362,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-stack438-") as temporary:
 # arm needs. A fresh repository rather than a new branch in the fixture above:
 # the add/add conflict must be the ONLY unmerged entry, or a stray `UU` alongside
 # it makes the row pass for the wrong reason.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-addadd-") as temporary:
+with scratch_dir("code-fixer-ci-addadd-") as temporary:
     aa_repo = pathlib.Path(temporary) / "repo"
     aa_repo.mkdir()
     git(aa_repo, "init", "-q", "-b", "main")
@@ -6387,7 +6497,7 @@ def conflicting_repo(root, colliding_path):
 # line yields `"src/a`. The arm then handed a nonexistent pathspec to `git add`.
 # `-z` porcelain — what `_ci_porcelain_entries` reads — is unquoted and
 # unambiguous, which is why the answer has to come from there.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-spaced-") as temporary:
+with scratch_dir("code-fixer-ci-spaced-") as temporary:
     spaced_repo = conflicting_repo(temporary, "src/a b.py")
     assert b'AA "src/a b.py"\n' in git(spaced_repo, "status", "--porcelain").stdout
     assert b"AA src/a b.py\x00" in git(spaced_repo, "status", "--porcelain", "-z").stdout
@@ -6399,7 +6509,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-spaced-") as temporary:
 # P4 — the empty set is the EMPTY payload, at rc 0. Terminated rather than
 # joined precisely so this case has no representation of its own to confuse with
 # "one empty path".
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-clean-") as temporary:
+with scratch_dir("code-fixer-ci-clean-") as temporary:
     clean_repo = pathlib.Path(temporary) / "repo"
     clean_repo.mkdir()
     git(clean_repo, "init", "-q", "-b", "main")
@@ -6417,7 +6527,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-clean-") as temporary:
 # through the contract is that "git could not answer" must not arrive at the
 # shell wearing the same clothes as "no conflicts to resolve", so the one shape
 # this must never produce is `(0, b"")`.
-with tempfile.TemporaryDirectory(prefix="code-fixer-ci-nonrepo-") as temporary:
+with scratch_dir("code-fixer-ci-nonrepo-") as temporary:
     unreadable = run_bytes(
         ["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
     assert unreadable.stdout == b"", unreadable.stdout
