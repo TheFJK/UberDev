@@ -208,6 +208,68 @@ warn_count=$(printf "%s\n" "$_LAST_STDERR" | grep -cE "fanout_concurrency.resear
 [ "$warn_count" = "1" ] && pass "U2h: sentinel emits exactly one warning across two reads" \
   || fail "U2h: expected 1 warning, got $warn_count"
 
+# U2i-U2k (#431): three shipped keys declare min=0 (goal.watch_passes,
+# goal.watch_budget, uberthink.loop_back_cap). The integer regex used to be
+# `^[1-9][0-9]*$`, which rejected a literal `0` as `non_integer` BEFORE the
+# range check ever ran — so a user who configured the documented `0` silently
+# got the default back, and the warning blamed the wrong thing. The regex is
+# now `^(0|[1-9][0-9]*)$`: `0` is a well-formed integer, and whether it is
+# *allowed* is the range check's job (U2k), not the grammar's.
+
+# NOTE on the assertion style below: `_isolate` ends in `rm -rf`, so `$?`
+# after it is that `rm`'s status, never the snippet's — the `[ $? -eq 0 ]`
+# idiom used by U2a-U2h can therefore never fail. These cases echo the
+# resolved value onto the captured stderr stream instead, which is the only
+# channel `_isolate` actually hands back, so they are falsifiable.
+
+# U2i: a min=0 key configured to 0 returns 0, not the default
+_isolate '
+  cat > .claude/uberdev.local.md <<EOF
+---
+uberthink:
+  loop_back_cap: 0
+---
+EOF
+  out="$(uberdev_read_int_in_range uberthink.loop_back_cap UBERDEV_UBERTHINK_LOOP_BACK_CAP 0 10 3)"
+  echo "U2I_RESULT=[$out]" >&2
+'
+grep -qF "U2I_RESULT=[0]" <<<"$_LAST_STDERR" \
+  && pass "U2i: min=0 key configured 0 -> 0 (not the default 3)" \
+  || fail "U2i: configured 0 was swallowed and the default returned (stderr: $_LAST_STDERR)"
+
+# U2j: a min=0 key configured to 0 emits no warning at all
+_isolate '
+  cat > .claude/uberdev.local.md <<EOF
+---
+goal:
+  watch_passes: 0
+---
+EOF
+  out="$(uberdev_read_int_in_range goal.watch_passes UBERDEV_GOAL_WATCH_PASSES 0 100000 0)"
+  echo "U2J_RESULT=[$out]" >&2
+'
+grep -qF "U2J_RESULT=[0]" <<<"$_LAST_STDERR" \
+  && pass "U2j: goal.watch_passes 0 -> 0" \
+  || fail "U2j: goal.watch_passes 0 not returned (stderr: $_LAST_STDERR)"
+grep -q non_integer <<<"$_LAST_STDERR" \
+  && fail "U2j: a valid 0 still warns non_integer" \
+  || pass "U2j: a valid 0 emits no non_integer warning"
+
+# U2k: 0 against a min=1 key is out_of_range, not non_integer — the reason
+# token must name the real cause so the warning is actionable.
+_isolate '
+  cat > .claude/uberdev.local.md <<EOF
+---
+fanout_concurrency:
+  research: 0
+---
+EOF
+  uberdev_read_int_in_range fanout_concurrency.research UBERDEV_FANOUT_RESEARCH 1 50 6 >/dev/null
+'
+grep -qE "fanout_concurrency.research = .0. is invalid \(out_of_range\)" <<<"$_LAST_STDERR" \
+  && pass "U2k: 0 against min=1 reports out_of_range" \
+  || fail "U2k: 0 against min=1 did not report out_of_range"
+
 echo
 echo "== U3: uberdev_read_enum =="
 _isolate '
@@ -630,6 +692,113 @@ case $rc in
   1) fail "U9.5: invalid env value MUST fall back to default 'false'" ;;
   2) fail "U9.5: uberdev_config_invalid audit event MUST emit for invalid env UBERDEV_AUTO_REVIEW_ON_MERGE" ;;
 esac
+
+echo
+echo "== U10: review.confidence_threshold config key (#431) =="
+# The Phase 1 finding-verification gate's cutoff. Range is [0, 100] and 0 is a
+# meaningful, documented value (it disables the gate), which is exactly the
+# min=0 case U2i/U2j pin in the reader. Assertions read the resolved value off
+# the captured stderr stream — see the U2i note on why `[ $? -eq 0 ]` after
+# `_isolate` cannot fail.
+_u10_read() {
+  _isolate "$1"'
+    out="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)"
+    echo "U10_RESULT=[$out]" >&2
+  '
+}
+_u10_expect() {
+  local want="$1" desc="$2"
+  grep -qF "U10_RESULT=[$want]" <<<"$_LAST_STDERR" \
+    && pass "$desc" \
+    || fail "$desc (stderr: $_LAST_STDERR)"
+}
+
+# U10.1: absent -> default 80
+_u10_read ''
+_u10_expect 80 "U10.1: absent key -> default 80"
+
+# U10.2: config file value wins over default
+_u10_read '
+  cat > .claude/uberdev.local.md <<EOF
+---
+review:
+  confidence_threshold: 50
+---
+EOF
+'
+_u10_expect 50 "U10.2: config file 50 -> 50"
+
+# U10.3: env wins over config file
+_u10_read '
+  cat > .claude/uberdev.local.md <<EOF
+---
+review:
+  confidence_threshold: 50
+---
+EOF
+  export UBERDEV_REVIEW_THRESHOLD=90
+'
+_u10_expect 90 "U10.3: env 90 overrides config file 50"
+
+# U10.4: non-integer -> default + non_integer reason + audit row
+_isolate '
+  mkdir -p .uberdev
+  : > .uberdev/audit.jsonl
+  cat > .claude/uberdev.local.md <<EOF
+---
+review:
+  confidence_threshold: abc
+---
+EOF
+  out="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)"
+  echo "U10_RESULT=[$out]" >&2
+  echo "U10_AUDIT=[$(cat .uberdev/audit.jsonl)]" >&2
+'
+_u10_expect 80 "U10.4: non-integer abc -> default 80"
+grep -qE "review.confidence_threshold = .abc. is invalid \(non_integer\)" <<<"$_LAST_STDERR" \
+  && pass "U10.4: stderr reason is non_integer" \
+  || fail "U10.4: non_integer reason missing"
+grep -qF '"event":"uberdev_config_invalid"' <<<"$_LAST_STDERR" \
+  && grep -qF '"key":"review.confidence_threshold"' <<<"$_LAST_STDERR" \
+  && pass "U10.4: uberdev_config_invalid audit row carries the key" \
+  || fail "U10.4: audit row missing or wrong key (stderr: $_LAST_STDERR)"
+
+# U10.5: above the ceiling -> default + out_of_range
+_u10_read '
+  cat > .claude/uberdev.local.md <<EOF
+---
+review:
+  confidence_threshold: 101
+---
+EOF
+'
+_u10_expect 80 "U10.5: 101 -> default 80"
+grep -qE "review.confidence_threshold = .101. is invalid \(out_of_range\)" <<<"$_LAST_STDERR" \
+  && pass "U10.5: stderr reason is out_of_range" \
+  || fail "U10.5: out_of_range reason missing"
+
+# U10.6: 0 is a legal value (the documented kill switch), not a rejected one
+_u10_read '
+  cat > .claude/uberdev.local.md <<EOF
+---
+review:
+  confidence_threshold: 0
+---
+EOF
+'
+_u10_expect 0 "U10.6: 0 -> 0 (gate disabled), not the default 80"
+
+echo
+echo "== I9: /review-pr confidence-threshold wiring (#431) =="
+assert_grep_in "$REPO_ROOT/plugins/uberdev/commands/review-pr.md" \
+  'uberdev_read_int_in_range review\.confidence_threshold[[:space:]]+UBERDEV_REVIEW_THRESHOLD[[:space:]]+0[[:space:]]+100[[:space:]]+80' \
+  "I9a: review-pr reads review.confidence_threshold with bounds [0,100] default 80"
+assert_grep_in "$CONFIG_REF" \
+  'confidence_threshold:[[:space:]]+80' \
+  "I9b: config reference documents review.confidence_threshold default 80"
+assert_grep_in "$CONFIG_REF" \
+  'UBERDEV_REVIEW_THRESHOLD' \
+  "I9c: config reference names the env override"
 
 echo
 echo "== Summary =="

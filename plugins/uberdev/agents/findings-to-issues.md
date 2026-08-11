@@ -23,7 +23,8 @@ the immutable `carrier.workflow`, `carrier.issue_num`, and `edge_id` from the
 validated `<uberdev-handoff-json>`; these fields, not `pr_number`, select
 standalone versus PR mode.
 
-`review_pr.defer.findings` has this exact six-field input contract:
+`review_pr.defer.findings` has this exact six-field input contract, plus one
+OPTIONAL seventh field:
 
 - `phase1_path` — post-impl-review aggregate path, or an empty string.
 - `phase2_path` — simplify aggregate path, or an empty string.
@@ -31,6 +32,9 @@ standalone versus PR mode.
 - `phase2_disposition_path` — Phase 2 fixer disposition path, or an empty string.
 - `working_dir` — absolute worktree root.
 - `pr_number` — non-negative integer PR number (`0` outside PR context).
+- `verification_path` *(optional)* — the Phase 1 verification sidecar
+  (`phase1-verification.json`, RFC 0017 / #431), or absent. When absent,
+  behave exactly as before: no row is excluded on verification grounds.
 
 `review_pr.ci.defer_refusal` has this exact three-field input contract:
 
@@ -235,9 +239,46 @@ Explicit forbidden patterns:
      `(finding_index, location, summary_sha256)` triple exactly matches the
      corresponding parsed aggregate row.
 
-   Snapshot `(device,inode,size,mtime_ns)` for aggregate and disposition files
-   before parsing, then re-check those identities immediately before the first
-   GitHub write. Replacement, hard-linking, schema drift, duplicate/foreign
+   A supplied `verification_path` is accepted only when all of these hold —
+   the same binding protocol as the disposition above, for the same reason: a
+   sidecar that can be swapped between validation and use is a sidecar that can
+   silence any finding:
+
+   - its canonical parent is the same canonical run directory as the Phase 1
+     aggregate, its basename is exactly `phase1-verification.json`, and `lstat`
+     proves a non-symlink regular file with link count one;
+   - its bounded bytes parse as one JSON object with exact top-level keys
+     `schema_version`, `phase`, `aggregate_sha256`, `threshold`, and
+     `findings_verification`; `schema_version` is `1`, `phase` is `phase1`,
+     `threshold` is an integer in `[0, 100]`, and `aggregate_sha256` equals the
+     digest of the already-read Phase 1 aggregate bytes;
+   - each verification row has exactly `finding_index`, `location`,
+     `summary_sha256`, `score`, `verdict`, and `reason`; `verdict` is one of
+     the closed pair below, `reason` is one of the closed eight below, `score`
+     is either an integer in `[0, 100]` or `null`, and every
+     `(finding_index, location, summary_sha256)` triple exactly matches the
+     corresponding parsed Phase 1 aggregate row.
+
+   The verdict is exactly one of:
+   <!-- CONTRACT: finding-verification-verdict -->
+   `SURVIVES|CULLED`
+   <!-- /CONTRACT: finding-verification-verdict -->
+   `reason` is exactly one of
+   `reproduced-from-diff`, `contradicted-by-diff`, `pre-existing`,
+   `out-of-scope-line`, `linter-domain`, `gate-disabled`,
+   `over-cap-unverified`, or `verifier-unavailable`.
+
+   The sidecar covers only the eligible subset (Phase 1 rows with
+   `severity: blocker` whose disposition is not `APPLIED`); a Phase 1 row with
+   no verification row is treated as `SURVIVES`, and a Phase 2 row is never
+   covered at all. A malformed, mis-parented, mis-named, digest-mismatched or
+   triple-mismatched `verification_path` is `status: REFUSED`,
+   `rationale: "input-malformed"` — never "file everything anyway", because a
+   gate that fails open under tampering is not a gate.
+
+   Snapshot `(device,inode,size,mtime_ns)` for aggregate, disposition and
+   verification files before parsing, then re-check those identities
+   immediately before the first GitHub write. Replacement, hard-linking, schema drift, duplicate/foreign
    triples, filename/parent mismatch, or digest mismatch is
    `status: REFUSED`, `rationale: "input-malformed"`. Keep using the already
    validated in-memory bytes; never re-read either file. An empty disposition
@@ -257,6 +298,23 @@ Explicit forbidden patterns:
    no GitHub writes: do not create the label, issue, or comment. This differs
    from both path inputs being absent, which remains `input-malformed`. Validate
    any supplied empty disposition document before taking this successful no-op.
+
+   **Verification eligibility (RFC 0017 / #431).** A Phase 1 row whose bound
+   verification row carries `verdict: CULLED` is excluded from filing
+   **before** `route_by_severity` runs in Step 4. It is not filed as an issue,
+   not commented onto an existing issue, and not counted in `by_severity`. It
+   is not a `blocked_by_dedupe` row either — nothing was attempted for it. The
+   score and reason already live in the sidecar and in the `review_finding_verified`
+   audit rows the controller emitted, so a suppressed blocker stays nameable
+   after the fact; this agent adds no second record of it.
+
+   If EVERY otherwise-eligible row is `CULLED`, the run returns `status: DONE`
+   with empty output arrays/counts and `halted: false`, and performs **zero**
+   GitHub writes — no label create, no issue, no comment — exactly as a
+   `findings: []` input does. That is what makes the `/goal` interaction
+   automatic: `lib/goal-phase3.sh` selects recursion targets by the
+   `review-pr-finding` label plus a `**Tier:** BLOCKER|CRITICAL` body line, and
+   a row that was never filed carries neither, so no `/goal` code changes.
 
 4. **Route by severity (RFC 0002 §3.1).** Apply the helper:
 

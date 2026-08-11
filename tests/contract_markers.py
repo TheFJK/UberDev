@@ -177,6 +177,20 @@ from pathlib import Path
 # #370 rank in the comment.
 # --------------------------------------------------------------------------
 CONTRACTS: dict[str, list[str]] = {
+    # rank n/a — the Phase 1 finding-verification verdict pair (#431 / RFC 0017).
+    # Two members that always co-occur, declared at four sites: the child-facing
+    # output contract, the Python constant, the one expression that can produce
+    # CULLED, and the findings-to-issues eligibility rule that reads it. The
+    # eight `reason` tokens are deliberately NOT marked: they split into a child
+    # set and a controller set at their Python declaration, which the extractor
+    # reads as two competing vocabularies in one region and refuses to guess
+    # about. They are held instead by executable equality asserts in
+    # tests/code-fixer-contract.test.sh and tests/child-dispatch.test.sh.
+    "finding-verification-verdict": [
+        "agents/findings-to-issues.md",
+        "lib/code_fixer_contract.py",
+        "shared/finding-verifier-output-v1.md",
+    ],
     # rank 6 — lib/dispatch.sh enum, the goal run-state allowlist (enum - auto),
     # the supervision-capable subset, the launcher's three copies and the triage
     # parser.  #360 shipped stale at the TRIAGE parser specifically; the launcher
@@ -320,6 +334,18 @@ _COMMAND_PROSE = (
     "path-multiset ratchet, and the line is prose anyway. " + _PROSE
 )
 TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
+    "finding-verification-verdict": [
+        (
+            "plugins/uberdev/lib/code_fixer_contract.py",
+            'verdict = "CULLED" if score < threshold else "SURVIVES"',
+            "the one expression that APPLIES the vocabulary, not a declaration "
+            "of its membership: it decides which side of the threshold a score "
+            "lands on, and it reads VERIFICATION_VERDICTS' members rather than "
+            "restating the set. A marker here would also fail the path-multiset "
+            "ratchet, since the registry lists code_fixer_contract.py once (the "
+            "VERIFICATION_VERDICTS constant) and this is the same file.",
+        ),
+    ],
     "dispatch-backend": [
         ("plugins/uberdev/commands/goal.md", "pin a dispatch backend", _COMMAND_PROSE),
         ("plugins/uberdev/commands/solve.md", "Spawn an autonomous solver per GitHub issue, with auto-triage", _COMMAND_PROSE),

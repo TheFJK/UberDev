@@ -510,7 +510,7 @@ if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated 
 # tools/prkit/manifest.txt -- the two MUST stay equal, since generate copies
 # exactly what the manifest lists.
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 38 ] && ok "G3 exactly 38 copied files present" || no "G3 copied $n files (expected 38)"
+[ "$n" -eq 41 ] && ok "G3 exactly 41 copied files present" || no "G3 copied $n files (expected 41)"
 
 # G4 — scaffold files exist with interpolated version.
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"
@@ -614,7 +614,8 @@ snippet=generator.split(marker,1)[1].split('\nPY\n',1)[0]
 roles={
  'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
  'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
- 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'finding-verifier','findings-to-issues','merge-strategy-decider',
+ 'pr-test-analyzer',
  'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 def fixture():
@@ -684,7 +685,8 @@ edges=tree['edges']; assert edges
 expected_roles={
  'ci-code-fixer','ci-failure-classifier','ci-rebase-handler','code-fixer',
  'code-reviewer','code-simplifier','comment-analyzer','conflict-resolver',
- 'findings-to-issues','merge-strategy-decider','pr-test-analyzer',
+ 'finding-verifier','findings-to-issues','merge-strategy-decider',
+ 'pr-test-analyzer',
  'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 claude_roles={path.stem for path in (root/'plugins/prkit/agents').glob('*.md')}
@@ -698,6 +700,7 @@ provider_edges={
  'review_pr.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
  'review_pr.ci.resolve_conflict','simplify.fix.phase2',
+ 'review_pr.verify.finding',
 }
 assert set(edges)==structural_edges|provider_edges
 assert all(edges[edge_id].get('kind')=='skill' for edge_id in structural_edges)

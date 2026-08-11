@@ -327,12 +327,14 @@ role_suffix = sys.argv[4]
 expected_roles = {
     'ci-code-fixer', 'ci-failure-classifier', 'ci-rebase-handler',
     'code-fixer', 'code-reviewer', 'code-simplifier', 'comment-analyzer',
-    'conflict-resolver', 'findings-to-issues', 'merge-strategy-decider',
+    'conflict-resolver', 'finding-verifier', 'findings-to-issues',
+    'merge-strategy-decider',
     'pr-test-analyzer', 'silent-failure-hunter', 'trust-trail-evaluator',
     'type-design-analyzer',
 }
 allowed_workflows = ('review-pr', 'simplify', 'solve', 'turbo')
 review_contract = 'phase1-reviewer-v1'
+verify_contract = 'finding-verifier-v1'
 edge_semantics = {
     'review_pr.post_impl_review': ('skill', None, None, None),
     'review_pr.review.correctness': ('provider', 'code-reviewer', ('review-pr', 'solve', 'turbo'), review_contract),
@@ -347,6 +349,7 @@ edge_semantics = {
     'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify', 'solve', 'turbo'), None),
+    'review_pr.verify.finding': ('provider', 'finding-verifier', ('review-pr',), verify_contract),
     'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.fix_code': ('provider', 'ci-code-fixer', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr', 'solve', 'turbo'), None),

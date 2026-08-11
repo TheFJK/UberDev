@@ -148,6 +148,13 @@
       "delegation_mode": "leaf",
       "risk_judgment": true
     },
+    "finding-verifier": {
+      "route": "deep",
+      "risk_floor": "deep",
+      "sandbox_ceiling": "read-only",
+      "delegation_mode": "leaf",
+      "risk_judgment": true
+    },
     "findings-to-issues": {
       "route": "deep",
       "risk_floor": "deep",

@@ -109,6 +109,8 @@ __all__ = (
     "publish_disposition",
     "publish_review_only_disposition",
     "count_deferred_blockers",
+    "project_verification_claims",
+    "publish_verification",
     "validate_persistence_result",
     "commit_review",
     "commit_standalone",
@@ -3165,6 +3167,322 @@ def count_deferred_blockers(
         )
         if finding["severity"] == "blocker" and row["disposition"] != "APPLIED"
     )
+
+
+VERIFICATION_LIMIT = 1_048_576
+VERIFICATION_CLAIM_LIMIT = 65_536
+VERIFICATION_KEYS = {
+    "schema_version",
+    "phase",
+    "aggregate_sha256",
+    "threshold",
+    "findings_verification",
+}
+VERIFICATION_ROW_KEYS = {
+    "finding_index",
+    "location",
+    "summary_sha256",
+    "score",
+    "verdict",
+    "reason",
+}
+CLAIM_KEYS = {"finding_index", "location", "summary"}
+# The verdict vocabulary is the CONTROLLER's, never the child's: a verifier is
+# never shown the threshold, so it cannot know which side of it a score lands
+# on. See shared/finding-verifier-output-v1.md.
+# CONTRACT: finding-verification-verdict
+VERIFICATION_VERDICTS = {"SURVIVES", "CULLED"}
+# /CONTRACT: finding-verification-verdict
+# Emitted by a verifier child. A row carrying one of these MUST carry a score.
+VERIFICATION_CHILD_REASONS = {
+    "reproduced-from-diff",
+    "contradicted-by-diff",
+    "pre-existing",
+    "out-of-scope-line",
+    "linter-domain",
+}
+# Assigned by the controller when no child opinion exists. A row carrying one
+# of these MUST NOT carry a score, and always lands SURVIVES: the gate fails
+# toward keeping the finding, so "we could not verify" never culls.
+VERIFICATION_CONTROLLER_REASONS = {
+    "gate-disabled",
+    "over-cap-unverified",
+    "verifier-unavailable",
+}
+VERIFICATION_REASONS = VERIFICATION_CHILD_REASONS | VERIFICATION_CONTROLLER_REASONS
+VERIFICATION_OPINION_KEYS = {"finding_index", "score", "reason"}
+VERIFICATION_BASENAME = "phase1-verification.json"
+
+
+def _load_phase1_verification_pair(
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any], tuple[FindingKey, ...], str]:
+    """Re-derive the Phase 1 aggregate/disposition pair from pinned bytes.
+
+    Deliberately NOT count_deferred_blockers: that function hardcodes phase 2
+    on both axes (a `simplify-aggregate` envelope, validated as `phase2`), so
+    it cannot read a Phase 1 pair at all. Both verification verbs bind the same
+    pair here so "which findings are eligible" is decided exactly once.
+    """
+    canonical_findings = _absolute_input(findings_path, "findings_path_invalid")
+    canonical_disposition = _absolute_input(
+        disposition_path, "disposition_path_invalid"
+    )
+    findings_payload = capture_expected(
+        canonical_findings, findings_sha256, 1, FINDINGS_LIMIT
+    )
+    body = _enveloped_body(findings_payload, "post-impl-review-aggregate")
+    aggregate = _parse_json(body, "findings_schema_invalid")
+    finding_keys = _validate_aggregate(aggregate, "phase1")
+    if encode_aggregate(aggregate, "phase1") != findings_payload:
+        fail("findings_not_canonical")
+    disposition_payload = capture_expected(
+        canonical_disposition, disposition_sha256, 1, DISPOSITION_LIMIT
+    )
+    disposition = _parse_json(disposition_payload, "disposition_json_invalid")
+    authority = {
+        "phase": "phase1",
+        "findings_sha256": findings_sha256,
+        "finding_keys": [asdict(item) for item in finding_keys],
+    }
+    _validate_disposition(disposition, authority)
+    expected_disposition = (
+        json.dumps(
+            disposition, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if disposition_payload != expected_disposition:
+        fail("disposition_not_canonical")
+    return aggregate, disposition, finding_keys, canonical_disposition
+
+
+def _eligible_verification_rows(
+    aggregate: dict[str, Any],
+    disposition: dict[str, Any],
+    finding_keys: tuple[FindingKey, ...],
+) -> list[tuple[FindingKey, dict[str, Any]]]:
+    """The verification roster: Phase 1 blockers the fixer did not apply.
+
+    A suggestion never becomes a GitHub issue tier the /goal loop recurses on,
+    and an APPLIED blocker is already fixed in the branch -- neither is worth a
+    verifier. Declared once here so the claim projection and the sidecar
+    publication cannot disagree about the roster.
+    """
+    eligible: list[tuple[FindingKey, dict[str, Any]]] = []
+    for finding, row, key in zip(
+        aggregate["findings"],
+        disposition["findings_disposition"],
+        finding_keys,
+        strict=True,
+    ):
+        if finding["severity"] == "blocker" and row["disposition"] != "APPLIED":
+            eligible.append((key, finding))
+    return eligible
+
+
+def project_verification_claims(
+    *,
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+    claims_dir: str,
+) -> dict[str, Any]:
+    """Write one claim card per eligible Phase 1 blocker finding.
+
+    The card is the MECHANICAL half of the withholding the design turns on: it
+    carries `finding_index`, `location` and `summary` and nothing else, so the
+    reviewer's `detail` -- which is where the argument and the reviewer's own
+    `confidence: <n>` prefix live -- never reaches the verifier as bytes. A
+    prompt-level "do not look at the reasoning" would be a rule; this is an
+    absence.
+
+    The aggregate is READ, never rewritten, and FINDING_KEYS gains no member.
+    """
+    aggregate, disposition, finding_keys, _canonical_disposition = (
+        _load_phase1_verification_pair(
+            findings_path, findings_sha256, disposition_path, disposition_sha256
+        )
+    )
+    canonical_claims = _absolute_input(claims_dir, "claims_dir_invalid")
+    eligible = _eligible_verification_rows(aggregate, disposition, finding_keys)
+    claims: list[dict[str, Any]] = []
+    rollbacks: list[_ArtifactRollback] = []
+    completed = False
+    try:
+        if eligible:
+            try:
+                os.makedirs(canonical_claims, mode=0o700, exist_ok=True)
+            except OSError:
+                fail("claims_dir_invalid")
+            directory = os.lstat(canonical_claims)
+            if not stat.S_ISDIR(directory.st_mode):
+                fail("claims_dir_invalid")
+        for ordinal, (key, finding) in enumerate(eligible, start=1):
+            card = {
+                "finding_index": key.finding_index,
+                "location": key.location,
+                "summary": finding["summary"],
+            }
+            if set(card) != CLAIM_KEYS:
+                fail("claim_schema_invalid")
+            claim_path = os.path.join(canonical_claims, f"verify-{ordinal:02d}.json")
+            published_path, claim_digest, identity = _publish_new_exact_record(
+                claim_path, _canonical_json(card) + b"\n"
+            )
+            rollbacks.append(_ArtifactRollback(claim_path, identity, None))
+            claims.append(
+                {
+                    "finding_index": key.finding_index,
+                    "claim_path": published_path,
+                    "claim_sha256": claim_digest,
+                }
+            )
+        completed = True
+        return {
+            "schema_version": 1,
+            "phase": "phase1",
+            "aggregate_sha256": findings_sha256,
+            "verify_count": len(claims),
+            "claims": claims,
+        }
+    finally:
+        if not completed:
+            _rollback_publications(
+                rollbacks, reason="verification_claims_recovery_failed"
+            )
+
+
+def _validate_verification_opinions(
+    candidate: bytes,
+    eligible: list[tuple[FindingKey, dict[str, Any]]],
+    threshold: int,
+) -> list[dict[str, Any]]:
+    """Turn the controller's per-finding opinions into sidecar rows.
+
+    This is where the threshold is applied, and the ONLY place it is applied.
+    The child never receives it, so the same child bytes yield opposite
+    verdicts under different thresholds -- which is what makes recorded scores
+    re-thresholdable offline.
+    """
+    opinions = _parse_json(candidate, "verification_json_invalid")
+    if not isinstance(opinions, list) or len(opinions) != len(eligible):
+        fail("verification_finding_mismatch")
+    rows: list[dict[str, Any]] = []
+    for opinion, (key, _finding) in zip(opinions, eligible, strict=True):
+        if not isinstance(opinion, dict) or not set(opinion) <= VERIFICATION_OPINION_KEYS:
+            fail("verification_schema_invalid")
+        if opinion.get("finding_index") != key.finding_index:
+            fail("verification_finding_mismatch")
+        reason = opinion.get("reason")
+        if not isinstance(reason, str) or reason not in VERIFICATION_REASONS:
+            fail("verification_schema_invalid")
+        has_score = "score" in opinion
+        score = opinion.get("score")
+        if reason in VERIFICATION_CHILD_REASONS:
+            if not has_score or type(score) is not int or not 0 <= score <= 100:
+                fail("verification_schema_invalid")
+            # Fail toward keeping: only a well-formed score STRICTLY below the
+            # threshold ever culls. This is the ONLY expression in the tree that
+            # can produce a CULLED verdict.
+            verdict = "CULLED" if score < threshold else "SURVIVES"
+        else:
+            if has_score:
+                fail("verification_schema_invalid")
+            score = None
+            verdict = "SURVIVES"
+        # The kill switch is total: at threshold 0 no verifier is dispatched,
+        # so a scored row could only have come from somewhere else.
+        if threshold == 0 and reason != "gate-disabled":
+            fail("verification_gate_disabled_mismatch")
+        if verdict not in VERIFICATION_VERDICTS:
+            fail("verification_schema_invalid")
+        row = {
+            "finding_index": key.finding_index,
+            "location": key.location,
+            "summary_sha256": key.summary_sha256,
+            "score": score,
+            "verdict": verdict,
+            "reason": reason,
+        }
+        if set(row) != VERIFICATION_ROW_KEYS:
+            fail("verification_schema_invalid")
+        rows.append(row)
+    return rows
+
+
+def publish_verification(
+    *,
+    findings_path: str,
+    findings_sha256: str,
+    disposition_path: str,
+    disposition_sha256: str,
+    verification_path: str,
+    threshold: int,
+    candidate: bytes,
+) -> dict[str, Any]:
+    """Publish phase1-verification.json beside the disposition it is bound to.
+
+    Same transaction shape as publish_disposition: the target must already
+    exist as an empty regular file the caller created, the write is an
+    identity-checked replace, and a mid-flight failure rolls it back to empty
+    rather than leaving a half-written verdict record on disk.
+    """
+    if type(threshold) is not int or not 0 <= threshold <= 100:
+        fail("verification_threshold_invalid")
+    aggregate, disposition, finding_keys, canonical_disposition = (
+        _load_phase1_verification_pair(
+            findings_path, findings_sha256, disposition_path, disposition_sha256
+        )
+    )
+    canonical_verification = _absolute_input(
+        verification_path, "verification_path_invalid"
+    )
+    # Sibling of the disposition, exact basename. The sidecar's whole value is
+    # that it is findable from the artifact it qualifies.
+    if (
+        os.path.dirname(canonical_verification)
+        != os.path.dirname(canonical_disposition)
+        or os.path.basename(canonical_verification) != VERIFICATION_BASENAME
+    ):
+        fail("verification_path_invalid")
+    _empty, empty_identity = _capture_regular(canonical_verification, 0, 0)
+    eligible = _eligible_verification_rows(aggregate, disposition, finding_keys)
+    rows = _validate_verification_opinions(candidate, eligible, threshold)
+    document = {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": findings_sha256,
+        "threshold": threshold,
+        "findings_verification": rows,
+    }
+    if set(document) != VERIFICATION_KEYS:
+        fail("verification_schema_invalid")
+    payload = _canonical_json(document) + b"\n"
+    rollbacks: list[_ArtifactRollback] = []
+    completed = False
+    try:
+        published_path, verification_digest, identity = _replace_empty_exact_record(
+            canonical_verification, empty_identity, payload
+        )
+        rollbacks.append(_ArtifactRollback(canonical_verification, identity, b""))
+        completed = True
+        return {
+            "verification_path": published_path,
+            "verification_sha256": verification_digest,
+            "threshold": threshold,
+            "verified": len(rows),
+            "culled": sum(1 for row in rows if row["verdict"] == "CULLED"),
+        }
+    finally:
+        if not completed:
+            _rollback_publications(
+                rollbacks, reason="verification_transaction_recovery_failed"
+            )
 
 
 def _persistence_scalar(
@@ -6379,7 +6697,18 @@ WORKFLOW_REVIEWER_EDGE_IDS = frozenset(
     PHASE_CONTRIBUTORS["phase1"] + PHASE_CONTRIBUTORS["phase2"]
 )
 
-WORKFLOW_BOUND_EDGE_IDS = WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS
+# Verifier-shaped children (#431): one result, one status, nothing else --
+# structurally identical to the reviewer shape, which is why capture_bound_child
+# accepts them. Its OWN frozenset rather than a member of
+# WORKFLOW_REVIEWER_EDGE_IDS, because that set is DERIVED from
+# PHASE_CONTRIBUTORS: it is the aggregate roster, and a verifier contributes to
+# no aggregate. Folding it in there would silently make the verifier a
+# contributor every _validate_aggregate call then demands a verdict from.
+WORKFLOW_VERIFIER_EDGE_IDS = frozenset(("review_pr.verify.finding",))
+
+WORKFLOW_BOUND_EDGE_IDS = (
+    WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_FIXER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS
+)
 
 # The defer stage's own edge. Kept out of WORKFLOW_BOUND_EDGE_IDS on purpose:
 # a persistence child carries an aggregate and a disposition pin, so it is never
@@ -7283,7 +7612,7 @@ def capture_bound_child(*, launch_binding: bytes, edge_id: str) -> dict[str, Any
     # a pinned log/aggregate authority this verb has no slot for, so freezing a
     # CI child here would prove strictly less while looking complete. See
     # WORKFLOW_CI_EDGE_IDS and capture_ci_terminal (#383).
-    if edge_id not in WORKFLOW_REVIEWER_EDGE_IDS:
+    if edge_id not in (WORKFLOW_REVIEWER_EDGE_IDS | WORKFLOW_VERIFIER_EDGE_IDS):
         fail("bound_child_edge_unsupported")
     binding = _load_launch_binding(launch_binding, edge_id)
     if binding.get("backend") != "workflow":
@@ -9145,6 +9474,23 @@ def _parser() -> argparse.ArgumentParser:
     deferred_blockers.add_argument("--findings-sha256", required=True)
     deferred_blockers.add_argument("--disposition-path", required=True)
     deferred_blockers.add_argument("--disposition-sha256", required=True)
+    verification_claims = commands.add_parser(
+        "project-verification-claims", add_help=False
+    )
+    verification_claims.add_argument("--findings-path", required=True)
+    verification_claims.add_argument("--findings-sha256", required=True)
+    verification_claims.add_argument("--disposition-path", required=True)
+    verification_claims.add_argument("--disposition-sha256", required=True)
+    verification_claims.add_argument("--claims-dir", required=True)
+    publish_verification_parser = commands.add_parser(
+        "publish-verification", add_help=False
+    )
+    publish_verification_parser.add_argument("--findings-path", required=True)
+    publish_verification_parser.add_argument("--findings-sha256", required=True)
+    publish_verification_parser.add_argument("--disposition-path", required=True)
+    publish_verification_parser.add_argument("--disposition-sha256", required=True)
+    publish_verification_parser.add_argument("--verification-path", required=True)
+    publish_verification_parser.add_argument("--threshold", required=True)
     persistence = commands.add_parser(
         "validate-persistence-result", add_help=False
     )
@@ -9524,6 +9870,33 @@ def main() -> int:
                     findings_sha256=arguments.findings_sha256,
                     disposition_path=arguments.disposition_path,
                     disposition_sha256=arguments.disposition_sha256,
+                )
+            )
+        elif arguments.command == "project-verification-claims":
+            output = _compact(
+                project_verification_claims(
+                    findings_path=arguments.findings_path,
+                    findings_sha256=arguments.findings_sha256,
+                    disposition_path=arguments.disposition_path,
+                    disposition_sha256=arguments.disposition_sha256,
+                    claims_dir=arguments.claims_dir,
+                )
+            )
+        elif arguments.command == "publish-verification":
+            if re.fullmatch(r"0|[1-9][0-9]{0,2}", arguments.threshold) is None:
+                fail("verification_threshold_invalid")
+            candidate = sys.stdin.buffer.read(VERIFICATION_LIMIT + 1)
+            if len(candidate) > VERIFICATION_LIMIT:
+                fail("verification_size_invalid")
+            output = _compact(
+                publish_verification(
+                    findings_path=arguments.findings_path,
+                    findings_sha256=arguments.findings_sha256,
+                    disposition_path=arguments.disposition_path,
+                    disposition_sha256=arguments.disposition_sha256,
+                    verification_path=arguments.verification_path,
+                    threshold=int(arguments.threshold),
+                    candidate=candidate,
                 )
             )
         elif arguments.command == "validate-persistence-result":

@@ -322,12 +322,28 @@ are re-split and re-validated in-script.
 | Key | Meaning |
 |---|---|
 | `mode` | `review-pr` \| `simplify`. Unrecognised values default-close to `simplify`, the smaller authority surface. |
-| `stage` | `review` \| `fix` \| `simplify` \| `defer` \| `ci-classify` \| `ci-fix` \| `ci-conflicts` \| `ci-defer`. **No default** — an unrecognised stage aborts, because guessing one means guessing which proofs already exist. |
+| `stage` | `review` \| `verify` \| `fix` \| `simplify` \| `defer` \| `ci-classify` \| `ci-fix` \| `ci-conflicts` \| `ci-defer`. **No default** — an unrecognised stage aborts, because guessing one means guessing which proofs already exist. |
 | `runId`, `runDirAbs` | the reserved run id and `.uberdev/research/<RUN_ID>` |
 | `pluginRootAbs`, `repoRootAbs`, `workingDirAbs` | script-derived prompt inputs |
 | `prNumber`, `repoSlug` | bound once by the preflight's single multi-field `gh pr view` |
 | `reviewIteration` | integer; keys per-iteration child artifacts so a Phase-3 re-entry never collides |
 | `maxAgents` | projected-agent ceiling (default 40) |
+
+### `verify` stage (RFC 0017 / #431)
+
+| Key | Meaning |
+|---|---|
+| `verifyCount` | integer 1..50 — one child per eligible Phase 1 finding. `0` aborts `bad_verify_count`: the controller short-circuits a zero roster without calling the script. |
+| `verifyCap` | TOTAL ceiling, clamped by `maxAgents`. Above it the stage refuses BY NAME up-front, never `agent_ceiling` after acceptance. Mirrors `REVIEW_FLEET_VERIFY_TOTAL_CAP` on the controller's side. |
+| `verifyClaimPrefixAbs` | per-child claim card at `<prefix><NN>.json`. ONE string crosses the boundary; the per-child pathname is derived here, so no verifier can be pointed at a sibling's claim. |
+| `verifyContractPathAbs` | the `finding-verifier-v1` output contract, manifest-resolved by the controller |
+| `verifyRubricPathAbs` | `shared/finding-confidence-rubric-v1.md` |
+| `verifyPrContextPathAbs` | the PR title/description artifact |
+
+**There is no threshold key, and adding one is a defect.** The cutoff is applied
+controller-side in `publish-verification`; a verifier told the cutoff calibrates
+to it. `tests/review-pr-workflow.test.sh` V1 asserts the script mentions no
+threshold scalar at all.
 
 ### `review` and `simplify` stages
 
@@ -439,6 +455,7 @@ child.
 | `review` | 0 `review_pr.review.correctness` · 1 `review_pr.review.silent_failures` · 2 `review_pr.review.types` · 3 `review_pr.review.comments` · 4 `review_pr.review.tests` · 5 `review_pr.review.general` |
 | `simplify` | 0 `review_pr.simplify.reuse` · 1 `review_pr.simplify.quality` · 2 `review_pr.simplify.efficiency` |
 | `fix` | 0 — the single fixer child |
+| `verify` | 0..N-1 — one `review_pr.verify.finding` child per ELIGIBLE Phase 1 finding (`severity: blocker` AND disposition != `APPLIED`), in the order `project-verification-claims` wrote the claim cards |
 | `defer` | 0 — the single `review_pr.defer.findings` child |
 | `ci-classify` | 0 — the single `review_pr.ci.classify` child |
 | `ci-fix` | 0 — the single `review_pr.ci.fix_code` **or** `review_pr.ci.rebase` child |

@@ -360,6 +360,7 @@ UberDev ships these so all commands work standalone — **no `superpowers`, `pr-
 | Skills | `orchestrator`, `merge-pipeline`, `solve-pipeline`, `post-impl-review` | UberDev original |
 | Agents | `code-reviewer`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
 | Agents | `code-simplifier` | from [`pr-review-toolkit`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) — the same agent is also distributed as the `code-simplifier` plugin; our copy descends from the `pr-review-toolkit` one |
+| Shared contracts | `finding-confidence-rubric-v1` (the 0–100 finding-confidence scale + false-positive catalogue) | adapted from [`code-review`](https://github.com/anthropics/claude-plugins-official) (Apache 2.0) |
 | Agents | `plan-reviewer`, `spec-writer`, `spec-reviewer`, `spec-reviser`, `plan-writer`, `research-codebase`, `research-patterns`, `research-prior-art`, `research-constraints`, `research-security`, `research-test-coverage`, `codebase-scout`, `triage-scout`, `conflict-resolver` | UberDev original |
 | Commands | `/uberdev:review-pr`, `/uberdev:simplify` | adapted; `review-pr` defaults to **parallel** fanout (divergence from upstream) |
 

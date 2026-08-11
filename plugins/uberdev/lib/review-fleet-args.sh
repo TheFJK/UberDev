@@ -576,6 +576,88 @@ review_fleet_bind_ci_conflicts() {
 # tests/review-pr-workflow.test.sh E6.
 REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP=40
 
+# review_fleet_bind_verify RUN_DIR ITER WORKTREE CONTRACT CLAIM_LEDGER LEDGER
+#
+# The Phase 1 verification fanout (#431). CLAIM_LEDGER carries one
+# `<claim_path>` row per eligible finding, in the order
+# `project-verification-claims` wrote them — which IS the nonce wire order for
+# this stage, exactly as review_fleet_roster's order is for the reviewers.
+#
+# One claim per child, not one shared claim card: each verifier's pinned input
+# names the single finding it adjudicates, and a shared card would make every
+# verifier's scope the union of all of them — which is also how the reviewer's
+# reasoning would leak back in.
+review_fleet_bind_verify() {
+  [ "$#" -eq 6 ] || return 2
+  local run_dir="$1" iter="$2" worktree="$3" contract="$4"
+  local claim_ledger="$5" ledger="$6"
+  local edge=review_pr.verify.finding
+  local claim_path slug dir instance nonce binding index=0 row
+  REVIEW_FLEET_NONCE_POOL=''
+  : >"$ledger" || return 2
+  while IFS= read -r claim_path; do
+    [ -n "$claim_path" ] || continue
+    index=$((index + 1))
+    slug="$(printf 'verify-%02d' "$index")" || return 2
+    dir="$(review_fleet_child_dir "$run_dir" "$iter" "$slug")" || return 2
+    instance="${dir##*/}"
+    mkdir -p "$dir" || return 2
+    nonce="$(review_fleet_mint_nonce)" || return 2
+    binding="$(python3 -I -B "$contract" bind-workflow-launch \
+      --edge-id "$edge" --instance-id "$instance" --run-nonce "$nonce" \
+      --result-path "$dir/result.md" --status-path "$dir/status.json" \
+      --working-dir "$worktree")" || return 2
+    row="$(jq -cn --arg edge "$edge" --argjson index "$index" --arg instance "$instance" \
+      --arg binding "$binding" --arg result "$dir/result.md" --arg status "$dir/status.json" \
+      --arg claim "$claim_path" \
+      '{edge:$edge,index:$index,instance:$instance,binding:$binding,result:$result,status:$status,claim:$claim}')" || return 2
+    printf '%s\n' "$row" >>"$ledger" || return 2
+    if [ -z "$REVIEW_FLEET_NONCE_POOL" ]; then
+      REVIEW_FLEET_NONCE_POOL="$nonce"
+    else
+      REVIEW_FLEET_NONCE_POOL="$REVIEW_FLEET_NONCE_POOL,$nonce"
+    fi
+  done <"$claim_ledger"
+  REVIEW_FLEET_VERIFY_COUNT="$index"
+  [ "$index" -gt 0 ] || return 2
+}
+
+# The TOTAL number of eligible Phase 1 findings one verification wave will
+# adjudicate. Carried across from REVIEW_FLEET_CI_CONFLICT_TOTAL_CAP above for
+# the same reason and by the same arithmetic: `verifyCap`'s clamp in
+# skills/review-fleet/workflow.js is 50, but the verify roster is dispatched as
+# ONE roster whose length goes straight into that script's ceilingGate(), and
+# `maxAgents` — 40 at every review-fleet call site in commands/review-pr.md —
+# is a SECOND ceiling sitting under the first. So the effective total is the
+# LOWER of the two: a set THIS fence accepts is a set the script dispatches,
+# and a set above it is handled here, before any Workflow call.
+#
+# Above the cap the surplus rows are NOT refused and NOT silently dropped: they
+# are recorded `SURVIVES` / `over-cap-unverified` in the sidecar. A gate that
+# aborted on a large finding set would make a bad review un-reviewable, and one
+# that dropped rows would cull without saying so. Asserted behaviourally — at
+# the cap and at cap+1, against the maxAgents the call sites actually emit — by
+# tests/review-pr-workflow.test.sh.
+REVIEW_FLEET_VERIFY_TOTAL_CAP=40
+
+# review_fleet_audit_append RUN_ROOT JSON_LINE
+#
+# Fail-soft append of one JSON line to the repo-root `.uberdev/audit.jsonl`
+# (merge-pipeline/SKILL.md D15 names that path as the audit stream). Modeled on
+# _uberdev_config_audit in lib/config-read.sh: write only when the directory
+# already exists (creating it would plant an audit trail in a repo that never
+# opted into one), warn on failure, and NEVER abort the run — a missing audit
+# row must not be able to fail a review that otherwise passed.
+review_fleet_audit_append() {
+  [ "$#" -eq 2 ] || return 0
+  local run_root="$1" line="$2"
+  [ -d "$run_root/.uberdev" ] || return 0
+  if ! printf '%s\n' "$line" >>"$run_root/.uberdev/audit.jsonl" 2>/dev/null; then
+    printf 'warning: could not append to %s/.uberdev/audit.jsonl\n' "$run_root" >&2
+  fi
+  return 0
+}
+
 # review_fleet_write_ci_state PATH CI_ITER REVIEW_ITER FIX_PUSHES_JSON CLASSES_JSON
 #
 # Phase 3's loop counters CANNOT live in shell variables: every bash block in

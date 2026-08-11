@@ -25,15 +25,16 @@ By default, review unstaged changes from `git diff`. The user may specify differ
 
 ## Issue Confidence Scoring
 
-Rate each issue from 0-100:
+The 0–100 scale, its anchors, and the false-positive catalogue are declared
+**once**, in `shared/finding-confidence-rubric-v1.md`. Read that file and score
+each issue against it. This section deliberately restates none of the anchors —
+a second copy would drift from the other consumer of the same scale
+(`finding-verifier`) without anybody noticing.
 
-- **0-25**: Likely false positive or pre-existing issue
-- **26-50**: Minor nitpick not explicitly in CLAUDE.md
-- **51-75**: Valid but low-impact issue
-- **76-90**: Important issue requiring attention
-- **91-100**: Critical bug or explicit CLAUDE.md violation
+What is specific to *this* role is how the score is used:
 
-**Only report issues with confidence ≥ 80**
+**Only report issues with confidence ≥ 80.** Below that floor, do not report at
+all — the score is a filter here, not a field.
 
 ## Result file output contract
 
@@ -58,8 +59,10 @@ Two rules decide whether the whole wave counts, so they are repeated here:
 Map your confidence score into that pair. The `≥ 80` threshold above stays a
 **reporting** filter — below it, do not report at all:
 
-- **91-100** (critical bug or explicit CLAUDE.md violation) → `severity: blocker`
-- **80-90** (important issue requiring attention) → `severity: suggestion`
+- a score of 91 or above (the rubric's top band — critical bug or explicit
+  project-guideline violation) → `severity: blocker`
+- a score from 80 up to 90 (important issue requiring attention) →
+  `severity: suggestion`
 
 The numeric score is not lost: inline it into each finding's `detail:` field as
 the prefix `confidence: <n> — `, e.g.

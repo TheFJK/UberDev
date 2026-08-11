@@ -2980,6 +2980,31 @@ assert_grep "$REVIEW_PR" 'command-workspace\.json' \
   "R46.5 — setup persists the workspace descriptor rehydration reads its artifact paths from"
 
 echo
+echo "== R32: Step 6b.0 — the Phase 1 verification gate (#431) =="
+assert_grep "$REVIEW_PR" '^6b\.0\. \*\*Phase 1 verification gate\*\*' \
+  "R32a — the gate has its own numbered step between the Phase 1 disposition publish and Phase 2.5"
+assert_grep "$REVIEW_PR" 'project-verification-claims' \
+  "R32b — the step projects one claim card per eligible finding"
+assert_grep "$REVIEW_PR" 'publish-verification' \
+  "R32c — the step publishes the verification sidecar"
+assert_grep "$REVIEW_PR" 'uberdev_child_validate_finding_verifier_result' \
+  "R32d — child results go through the canonical validation boundary, never a hand-rolled parse"
+assert_grep "$REVIEW_PR" 'review_fleet_audit_append' \
+  "R32e — one audit row per verified finding reaches the repo-root audit stream"
+# The threshold is applied controller-side ONLY. The gate's whole design rests
+# on the child never learning the cutoff, so the command must hand the value to
+# publish-verification and to nothing that becomes a prompt.
+assert_grep "$REVIEW_PR" '--threshold "\$REVIEW_CONFIDENCE_THRESHOLD"' \
+  "R32f — the threshold reaches publish-verification, where the comparison happens"
+assert_no_grep "$REVIEW_PR" 'threshold[A-Za-z]*=\"\$REVIEW_CONFIDENCE_THRESHOLD\"' \
+  "R32g — the threshold is never emitted as a review-fleet envelope key (the child must not see it)"
+# The audit JSON's phase2_5 block reports what a GREEN run suppressed.
+assert_grep "$REVIEW_PR" '"verification": \{' \
+  "R32h — phases.phase2_5 documents the verification sub-block"
+assert_grep "$REVIEW_PR" '"culled": <int>' \
+  "R32i — the sub-block reports how many blockers were suppressed"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
