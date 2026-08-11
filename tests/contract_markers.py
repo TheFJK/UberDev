@@ -207,6 +207,14 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/dispatch.sh",
         "lib/dispatch.sh",
         "lib/goal-state.sh",
+        # review_fleet_bind_carrier_backend: /review-pr's rehydration re-derives
+        # the backend the run's children were launched on, and shape-checks it
+        # against this vocabulary before binding. Same `-auto !case-arm` shape as
+        # goal-state.sh's resolved-backend arm, and registered for the same
+        # reason: the Phase 1 evidence builder refuses any value outside the enum
+        # minus auto, so a copy that drifts from it turns a healthy fanout into a
+        # roster-mismatch refusal.
+        "lib/review-fleet-args.sh",
         "lib/solve-launcher.sh",
         "lib/solve-launcher.sh",
         "lib/solve-launcher.sh",

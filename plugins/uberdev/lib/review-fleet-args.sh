@@ -2044,10 +2044,7 @@ print(decision.get("backend") or "",end="")' "$context_file" 2>/dev/null)" || re
   # goal-state.sh's resolved-backend arm is: `auto` is a REQUEST, never a
   # resolution, so a run can never have been dispatched on it.
   # CONTRACT: dispatch-backend -auto !case-arm
-  case "$backend" in
-    workflow | wezterm | background) UBERDEV_CARRIER_BACKEND="$backend" ;;
-    *) return 0 ;;
-  esac
+  case "$backend" in workflow|wezterm|background) UBERDEV_CARRIER_BACKEND="$backend" ;; esac
 }
 
 _review_fleet_bind_repo_slug() {
