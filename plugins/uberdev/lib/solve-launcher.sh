@@ -288,8 +288,10 @@ fi
 # Unknown tokens are rejected by solve_triage.py; no warn-and-ignore path is
 # permitted because a typo could silently change the requested route.
 
-# AUTO_PERMISSIONS precedence (controls the bypass pair on the spawned agent —
-# see lib/dispatch.sh:uberdev_dispatch_resolve_env): CLI flag > env var >
+# AUTO_PERMISSIONS precedence (controls the bypass pair on a DETACHED child's
+# argv — see lib/dispatch.sh:uberdev_dispatch_resolve_env; on the default
+# `workflow` backend there is no per-child argv and the solvers inherit this
+# session's tier instead, RFC 0015 §6 R-1b): CLI flag > env var >
 # per-repo config > default off. AUTO_PERMISSIONS is distinct from AUTO_MODE:
 # AUTO_MODE (set from --auto-mode above) gates turbo-vs-interactive behaviour;
 # AUTO_PERMISSIONS gates the permission tier. Naming kept disjoint to prevent
@@ -1155,6 +1157,15 @@ print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
   echo "prepared ${#ISSUE_NUMS[@]} issue(s) for the Workflow-native solver fleet (backend=workflow)" >&2
   echo "Relay the JSON between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END verbatim into Workflow({scriptPath: \"$SOLVE_FLEET_WORKFLOW_JS\"}, <args>)." >&2
   echo "Progress is visible with /workflows — no separate agent surface to poll." >&2
+  # The `Permission mode:` line printed in Phase A is a statement about the
+  # RESOLVED TIER, not about the children: it is emitted before any backend is
+  # known (UBERDEV_RESOLVED_BACKEND is exported later, by lib/dispatch.sh's
+  # preflight), so it cannot be made backend-aware where it stands. Correct it
+  # here, where the backend IS known, rather than letting the operator read a
+  # bypass tier as a per-solver guarantee.
+  if [[ "${AUTO_PERMISSIONS:-0}" == "1" || "${SKIP_PERMISSIONS:-0}" == "1" ]]; then
+    echo "note: backend=workflow — the resolved bypass tier is NOT applied to the per-issue solvers (RFC 0015 §6 R-1b); they inherit THIS session's permission tier. Use --backend=wezterm|background to pin a tier per child." >&2
+  fi
   exit 0
 fi
 

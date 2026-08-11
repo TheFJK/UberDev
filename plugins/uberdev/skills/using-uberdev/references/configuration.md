@@ -31,6 +31,9 @@ model_routing:
   workflows: {}                  # solve/turbo only; bounded route/effort/sandbox overrides
   roles: {}                      # canonical policy roles; bounded route/effort/sandbox overrides
 
+# --- /solve permission tier ---
+solve_auto: false                # PERMISSION BYPASS. true (or --auto, or SOLVE_AUTO=1) resolves the pair --dangerously-skip-permissions --permission-mode bypassPermissions, so no tool prompts at all — destructive ones included. On the default workflow backend the per-issue solvers inherit THIS session's permission tier instead of receiving the pair (RFC 0015 §6 R-1b); it reaches a child's argv only on --backend=wezterm|background. Default false; env: SOLVE_AUTO
+
 # --- /solve tier clamp ---
 solve_tier_floor: small          # one of: trivial, small, medium, large; clamps auto-triage UP to floor; default unset (no lower clamp); env: SOLVE_TIER_FLOOR
 solve_tier_ceiling: medium       # one of: trivial, small, medium, large; clamps auto-triage DOWN to ceiling; default unset (no upper clamp); env: SOLVE_TIER_CEILING
@@ -55,7 +58,7 @@ command_timeouts:
 # Notes (optional, free-form markdown for human reference)
 ```
 
-Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow.
+Settings take effect on next SessionStart. Environment variables (`UBERDEV_FANOUT_SOLVE_BG`, `SOLVE_AUTO`, etc.) override file settings — use whichever is more convenient for your workflow. Note that `SOLVE_AUTO` is a permission **bypass** and not a convenience toggle; see the `solve_auto` key above before exporting it.
 
 ## GPT-5.6 model routing (RFC 0013, v0.40)
 

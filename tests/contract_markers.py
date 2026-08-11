@@ -347,6 +347,19 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
         # transports to explain WHY per-rank routing cannot be honoured; it is
         # not the set anything validates against.
         ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "longer owns the provider invocation", _PROSE),
+        # #435's `--auto` scoping prose. Each of these sentences names the two
+        # DETACHED transports to say where the permission-bypass pair does and
+        # does not reach a child's argv (RFC 0015 §6 R-1b), and crosses the
+        # discovery threshold only because the flag `--auto` also contains the
+        # member token `auto`. None of them is a set anything validates against.
+        ("plugins/uberdev/commands/solve.md", "Scope of that bypass.", _COMMAND_PROSE),
+        ("plugins/uberdev/commands/turbo.md", "not an autonomy dial", _COMMAND_PROSE),
+        ("plugins/uberdev/skills/solve-pipeline/SKILL.md", "Step 5w therefore emits a stderr note", _PROSE),
+        ("plugins/uberdev/skills/using-uberdev/references/configuration.md", "PERMISSION BYPASS.", _PROSE),
+        # An operator-facing stderr note, not a producer: it corrects the
+        # `Permission mode:` line for the workflow backend. Same kind as the
+        # lib/dispatch.sh host-capability message above.
+        ("plugins/uberdev/lib/solve-launcher.sh", "the resolved bypass tier is NOT applied", _PROSE),
     ],
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
