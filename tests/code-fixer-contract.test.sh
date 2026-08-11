@@ -6618,7 +6618,7 @@ def verification_fixture(temporary):
     return evidence, findings, findings_sha, disposition, digest(disposition)
 
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-claims-") as temporary:
+with scratch_dir("code-fixer-verify-claims-") as temporary:
     evidence, findings, findings_sha, disposition, disposition_sha = (
         verification_fixture(temporary)
     )
@@ -6682,7 +6682,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-verify-claims-") as temporar
         claims_dir=str(evidence / "tampered-claims"),
     ))
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-none-") as temporary:
+with scratch_dir("code-fixer-verify-none-") as temporary:
     # A suggestions-only aggregate produces zero cards and zero directories.
     evidence = pathlib.Path(temporary) / ".uberdev/research/20260810-101500-abcdef1"
     evidence.mkdir(parents=True)
@@ -6712,7 +6712,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-verify-none-") as temporary:
     assert receipt["verify_count"] == 0 and receipt["claims"] == []
     assert not claims_dir.exists()
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-publish-") as temporary:
+with scratch_dir("code-fixer-verify-publish-") as temporary:
     evidence, findings, findings_sha, disposition, disposition_sha = (
         verification_fixture(temporary)
     )
@@ -6780,7 +6780,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-verify-publish-") as tempora
         raise AssertionError("expected refusal on a non-empty verification target")
     assert json.loads(sidecar.read_text(encoding="utf-8")) == document
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-threshold-") as temporary:
+with scratch_dir("code-fixer-verify-threshold-") as temporary:
     evidence, findings, findings_sha, disposition, disposition_sha = (
         verification_fixture(temporary)
     )
@@ -6846,7 +6846,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-verify-threshold-") as tempo
     assert all(row["verdict"] == "SURVIVES" and row["score"] is None for row in rows)
     assert all(row["reason"] == "gate-disabled" for row in rows)
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-refuse-") as temporary:
+with scratch_dir("code-fixer-verify-refuse-") as temporary:
     evidence, findings, findings_sha, disposition, disposition_sha = (
         verification_fixture(temporary)
     )
@@ -6929,7 +6929,7 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-verify-refuse-") as temporar
     refuse(good, name="bad-aggregate-digest", findings_sha256="0" * 64)
     refuse(good, name="bad-disposition-digest", disposition_sha256="0" * 64)
 
-with tempfile.TemporaryDirectory(prefix="code-fixer-verify-cli-") as temporary:
+with scratch_dir("code-fixer-verify-cli-") as temporary:
     # Both verbs are reachable through the shipped CLI, which is how
     # /review-pr's Step 6b.0 fence calls them.
     evidence, findings, findings_sha, disposition, disposition_sha = (
