@@ -3085,6 +3085,17 @@ EOF_VERIFY_AUDIT
             OUTCOME=halted
             exit 1
           fi
+          # The PAYLOAD the verdict was distilled from, for the same reason and
+          # in the same breath. CLASSIFY selects the failing check out of these
+          # rows; re-running `gh pr checks` there would select from DIFFERENT
+          # bytes, so the verdict and the chosen check could disagree about what
+          # CI said.
+          if ! review_fleet_write_ci_probe_json "$CI_PROBE_VERDICT_RUN_DIR/ci-probe.json" "$PROBE_JSON"; then
+            echo "error: /uberdev:review-pr — Phase 3 could not persist the probe payload to $CI_PROBE_VERDICT_RUN_DIR/ci-probe.json; refusing to hand CLASSIFY a check list it cannot read." >&2
+            audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+            OUTCOME=halted
+            exit 1
+          fi
         else
           # No run dir bound => this fence is running OUTSIDE a Phase 3 run. The
           # verdict is still bound for a same-shell caller and the miss is TYPED
@@ -3389,6 +3400,23 @@ EOF_VERIFY_AUDIT
     ```bash
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
     review_fleet_rehydrate || return 2
+    # The probe payload comes off disk. PROBE ran in another process, so
+    # `$PROBE_JSON` here was the empty string and the selector below had no rows
+    # to choose from -- which then halted `classification_run_selection_invalid`,
+    # a message about a malformed selection on a probe that was never handed
+    # anything to select.
+    CI_CLASSIFY_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || {
+      echo "error: /uberdev:review-pr — Phase 3 CLASSIFY cannot resolve the run directory to read the probe payload." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_JSON="$(review_fleet_read_ci_probe_json "$CI_CLASSIFY_RUN_DIR/ci-probe.json")" || {
+      echo "error: /uberdev:review-pr — Phase 3 CLASSIFY has no probe payload to select a failing check from; refusing to report a selection failure for a probe it never saw." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
         review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
       ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \

@@ -1116,6 +1116,45 @@ _review_fleet_base_ref_ok() {
 # Absent is therefore distinguishable from changed, which the callers rely on to
 # stop reporting "HEAD changed outside the validated review fixers" at a run
 # whose head never moved and whose record simply had not travelled.
+# review_fleet_write_ci_probe_json TARGET JSON
+# review_fleet_read_ci_probe_json  PATH -> the recorded probe payload
+#
+# The `gh pr checks` payload PROBE selected from, kept for the fences that read
+# it back.
+#
+# The VERDICT distilled from this payload already had a record
+# (ci-probe-verdict.txt, added for #418 when `${PROBE_VERDICT:-unknown}` answered
+# "unknown" on every probe-only run). The payload it was distilled FROM did not,
+# and two later fences still need it: the settle/re-probe arm, and CLASSIFY,
+# which passes it to review_select_failed_ci_run to choose the failing check.
+# With it empty the selector had no rows to choose from and the run halted
+# `classification_run_selection_invalid` -- a message about a malformed
+# selection, on a probe that was never handed anything to select.
+#
+# Re-running `gh pr checks` at the consuming fence is NOT a fix: checks move.
+# The selection has to be made from the same bytes the verdict was distilled
+# from, or the verdict and the chosen check can disagree about what CI said.
+review_fleet_write_ci_probe_json() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" payload="$2"
+  [ -n "$payload" ] || return 2
+  printf '%s' "$payload" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_probe_json() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI probe payload missing: ${1:-}" >&2
+    return 2
+  }
+  jq -e 'type == "array"' <"$1" >/dev/null 2>&1 || {
+    echo "error: review-fleet CI probe payload is not a checks array: ${1}" >&2
+    return 2
+  }
+  cat -- "$1"
+}
+
 review_fleet_write_reviewed_head() {
   [ "$#" -eq 2 ] || return 2
   # `target`, never `path` -- see review_fleet_write_ci_state.
