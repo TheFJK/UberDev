@@ -2039,6 +2039,11 @@ if not isinstance(decision,dict):
 print(decision.get("backend") or "",end="")' "$context_file" 2>/dev/null)" || return 0
   # Shape-checked against the same enum the evidence builder allows. Binding an
   # unrecognised token here would trade one misleading refusal for another.
+  #
+  # Byte-aligned with the dispatch enum minus `auto`, for the same reason
+  # goal-state.sh's resolved-backend arm is: `auto` is a REQUEST, never a
+  # resolution, so a run can never have been dispatched on it.
+  # CONTRACT: dispatch-backend -auto !case-arm
   case "$backend" in
     workflow | wezterm | background) UBERDEV_CARRIER_BACKEND="$backend" ;;
     *) return 0 ;;
