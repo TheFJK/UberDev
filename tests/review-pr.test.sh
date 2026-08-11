@@ -116,52 +116,66 @@ if len(selected) != 1:
     raise SystemExit(2)
 print(selected[0])
 PY
-PHASE1_FIXTURE_RESEARCH="$(mktemp -d)"
-# The fence sources lib/review-fleet-args.sh and reads both loop counters back
-# out of $RESEARCH_DIR_ABS, so both have to be REAL here: a stub plugin root
-# fails `set -u` at the source line and a non-existent research dir fails the
-# `cd`, and neither is what this row is testing.
+PHASE1_FIXTURE_ROOT="$(mktemp -d)"
+# #427 — this row used to hand-bind UBERDEV_REVIEW_PLUGIN_ROOT, RESEARCH_DIR_ABS,
+# CODE_FIXER_CONTRACT, COMMIT_RANGE_PATH, PHASE1_DISPOSITION_PATH, WORKTREE_ROOT
+# and RUN_ID before sourcing the fence. Every one of those was a MASK: no real
+# harness supplies them, because each `bash` block in review-pr.md is a fresh
+# shell. The row therefore proved the fence worked in a world that does not
+# exist — which is exactly how the whole command shipped unrunnable.
 #
+# It now seeds a REAL run (real repository, real uberdev_command_workspace_prepare,
+# real persisted descriptor and active-run pointer) and hands the fence only what
+# the orchestrator can carry: CLAUDE_PLUGIN_ROOT, PR_NUMBER, RUN_ID. Everything
+# else the fence must rehydrate for itself, or fail.
+PHASE1_FIXTURE_OUT="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+  "$PHASE1_FIXTURE_ROOT" "$REPO_ROOT/plugins/uberdev" 73 20260728-010203-abcdef0 2>/dev/null)" || PHASE1_FIXTURE_OUT=''
+PHASE1_FIXTURE_REPO="$(printf '%s\n' "$PHASE1_FIXTURE_OUT" | sed -n '1p')"
+PHASE1_FIXTURE_RESEARCH="$(printf '%s\n' "$PHASE1_FIXTURE_OUT" | sed -n '3p')"
 # The state file says review_iteration=4 while the inherited shell scalar below
 # says 1 — the exact disagreement Phase 3's re-entry fence creates when it
 # advances the counter and Phase 1 re-runs in a fresh shell. Disk must win: on
 # the losing side the fence re-keys pass 4's authority onto pass 1's name, which
 # `prepare-authority` publishes NO-CLOBBER and refuses.
-printf '%s\n' \
-  '{"ci_loop_iter":3,"review_iteration":4,"fix_pushes":[],"failure_classes_seen":[]}' \
-  >"$PHASE1_FIXTURE_RESEARCH/ci-loop-state.json"
-if bash -c '
+if [ -n "$PHASE1_FIXTURE_RESEARCH" ]; then
+  printf '%s\n' \
+    '{"ci_loop_iter":3,"review_iteration":4,"fix_pushes":[],"failure_classes_seen":[]}' \
+    >"$PHASE1_FIXTURE_RESEARCH/ci-loop-state.json"
+  # Real digests over real bytes: the fence runs code_fixer_contract.py digest
+  # with --minimum 1, so both inputs must actually carry content.
+  printf 'findings\n' >"$PHASE1_FIXTURE_RESEARCH/post-impl-review-final.md"
+  printf 'aaaaaaa..bbbbbbb\n' >"$PHASE1_FIXTURE_RESEARCH/commit-range.txt"
+fi
+if [ -n "$PHASE1_FIXTURE_RESEARCH" ] && env -i \
+  PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
+  CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  PR_NUMBER=73 RUN_ID=20260728-010203-abcdef0 REVIEW_ITERATION=1 REVIEW_PR_TIMEOUT=600 \
+  bash -c '
   set -u
+  cd "$2" || exit 9
   unset findings_path
-  UBERDEV_REVIEW_PLUGIN_ROOT="$2"
-  RESEARCH_DIR_ABS="$3"
-  CODE_FIXER_CONTRACT=/contract.py
-  COMMIT_RANGE_PATH="$RESEARCH_DIR_ABS/commit-range.txt"
-  PHASE1_DISPOSITION_PATH="$RESEARCH_DIR_ABS/phase1-disposition.json"
-  WORKTREE_ROOT=/repo
-  PR_NUMBER=73
-  RUN_ID=20260728-010203-abcdef0
-  REVIEW_ITERATION=1
-  REVIEW_PR_TIMEOUT=600
-  python3() { printf "%064d" 0; }
   review_json_string() { printf "\"%s\"" "$1"; }
   uberdev_child_inputs_build() { printf "{}"; }
   uberdev_child_instance_id() { printf "%s" "$1"; }
   review_child_single() { :; }
+  # Top-level `return` is legal in a sourced file; the fence uses it as its
+  # error exit, and the row asserts on the state it reached before returning.
   . "$1"
   [ "$PHASE1_FINDINGS_PATH" = "$RESEARCH_DIR_ABS/post-impl-review-final.md" ]
   [ "$REVIEW_ITERATION" = 4 ]
   [ "$PHASE1_AUTHORITY_PATH" = "$RESEARCH_DIR_ABS/code-fixer-authority-phase1-iter4.json" ]
-' _ "$PHASE1_FIXTURE" "$REPO_ROOT/plugins/uberdev" "$PHASE1_FIXTURE_RESEARCH"
+  [ "$WORKTREE_ROOT" = "$2" ]
+  [ "$CODE_FIXER_CONTRACT" = "$CLAUDE_PLUGIN_ROOT/lib/code_fixer_contract.py" ]
+' _ "$PHASE1_FIXTURE" "$PHASE1_FIXTURE_REPO"
 then
-  echo "  PASS  Phase 1 fixer callsite runs under set -u and keys on the ON-DISK iteration"
+  echo "  PASS  Phase 1 fixer callsite rehydrates from a fresh shell and keys on the ON-DISK iteration"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  Phase 1 fixer callsite is not set-u safe, or keyed on a stale inherited iteration"
+  echo "  FAIL  Phase 1 fixer callsite did not rehydrate, or keyed on a stale inherited iteration"
   FAIL=$((FAIL + 1))
 fi
 rm -f "$PHASE1_FIXTURE"
-rm -rf "$PHASE1_FIXTURE_RESEARCH"
+rm -rf "$PHASE1_FIXTURE_ROOT"
 assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*findings_sha256.*commit_range_sha256' \
   "Phase 2 fixer callsite declares both immutable source digests"
 assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \
@@ -2536,6 +2550,434 @@ assert_grep "$AGENTS_DIR/type-design-analyzer.md" 'detail' \
   "R30j — type-design-analyzer routes its axis ratings into the contract's detail: field"
 assert_no_grep "$AGENTS_DIR/type-design-analyzer.md" '^### Ratings$' \
   "R30j — type-design-analyzer no longer emits a competing '### Ratings' report block"
+
+
+# ---------------------------------------------------------------------------
+# R44 — the fresh-shell rehydration contract (#427)
+#
+# EVERY row here runs the fence body under `env -i` with NOTHING bound but the
+# handful of names an orchestrator can actually carry. That is the whole point:
+# each `bash` block in review-pr.md is a fresh shell, and the rows that seed
+# WORKTREE_ROOT / RESEARCH_DIR_ABS / CODE_FIXER_CONTRACT by hand elsewhere in
+# this suite prove nothing about that shell. These do.
+# ---------------------------------------------------------------------------
+# R44 is a BEHAVIOURAL section: it builds a real run through
+# uberdev_command_workspace_prepare and re-enters it under `env -i`. Both
+# primitives are Unix-bound -- the workspace allocator's ownership predicates and
+# a wiped environment are exactly the pair the ci-wiring windows-skip-list exists
+# for -- so on a native Windows shell this section announces a SKIP rather than
+# pretending to run. R45/R46 below are pure text scans and DO run on both jobs,
+# so the Windows leg still guards the structural half of #427.
+R44_HOST="$(uname -s 2>/dev/null || echo unknown)"
+case "$R44_HOST" in
+  MINGW* | MSYS* | CYGWIN*) R44_NATIVE_WINDOWS=1 ;;
+  *) R44_NATIVE_WINDOWS=0 ;;
+esac
+R44_TMP="$(mktemp -d)"
+if [ "$R44_NATIVE_WINDOWS" = 1 ]; then
+  R44_OUT=''
+else
+  R44_OUT="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
+    "$R44_TMP" "$REPO_ROOT/plugins/uberdev" 73 20260810-000000-abcdef01 2>/dev/null)" || R44_OUT=''
+fi
+R44_REPO="$(printf '%s\n' "$R44_OUT" | sed -n 1p)"
+R44_RESEARCH="$(printf '%s\n' "$R44_OUT" | sed -n 3p)"
+R44_DESCRIPTOR="$R44_RESEARCH/command-workspace.json"
+
+# r44_fence RUN_ID_VALUE PR_VALUE EXTRA_ENV… -> runs the two prologue lines plus
+# a carrier dump, from inside the fixture repository, in a shell whose entire
+# environment is PATH/HOME/TMPDIR/CLAUDE_PLUGIN_ROOT/PR_NUMBER[/RUN_ID].
+#
+# The body is wrapped in a function because the prologue ends in `|| return 2`:
+# top-level `return` is legal under /bin/zsh (the shell the fences really run
+# in) but not under bash, and both existing behavioural harnesses wrap for the
+# same reason.
+r44_fence() {
+  local run_id="$1" pr="$2"
+  shift 2
+  local -a extra
+  extra=("$@")
+  env -i PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
+    ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} ${COMSPEC:+COMSPEC="$COMSPEC"} \
+    CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" PR_NUMBER="$pr" \
+    ${run_id:+RUN_ID="$run_id"} ${extra+"${extra[@]}"} \
+    bash -c '
+      set -u
+      cd "$1" || exit 9
+      uberdev_review_fence() {
+        . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+        review_fleet_rehydrate || return 2
+      }
+      uberdev_review_fence || exit $?
+      printf "RUN_ID=%s\n" "$RUN_ID"
+      printf "WORKTREE_ROOT=%s\n" "$WORKTREE_ROOT"
+      printf "RESEARCH_DIR_ABS=%s\n" "$RESEARCH_DIR_ABS"
+      printf "MARKER_DIR=%s\n" "$MARKER_DIR"
+      printf "CODE_FIXER_CONTRACT=%s\n" "$CODE_FIXER_CONTRACT"
+      printf "DIFF_ARTIFACT_PATH=%s\n" "$DIFF_ARTIFACT_PATH"
+      printf "CRITERIA_PATH=%s\n" "$CRITERIA_PATH"
+      printf "COMMIT_RANGE_PATH=%s\n" "$COMMIT_RANGE_PATH"
+      printf "PHASE1_DISPOSITION_PATH=%s\n" "$PHASE1_DISPOSITION_PATH"
+      printf "PHASE2_DISPOSITION_PATH=%s\n" "$PHASE2_DISPOSITION_PATH"
+      printf "AGG_PATH=%s\n" "$AGG_PATH"
+      printf "WORKSPACE_JSON_LEN=%s\n" "${#UBERDEV_COMMAND_WORKSPACE_JSON}"
+      printf "REVIEW_ITERATION_SET=%s\n" "${REVIEW_ITERATION+yes}"
+      printf "CI_FIX_LOOP_ITER_SET=%s\n" "${CI_FIX_LOOP_ITER+yes}"
+      printf "RECEIPT_SET=%s\n" "${REVIEW_RUN_RESERVATION_RECEIPT+yes}"
+      printf "RECEIPT=%s\n" "${REVIEW_RUN_RESERVATION_RECEIPT:-}"
+    ' _ "$R44_REPO"
+}
+
+# r44_refuses RUN_ID_VALUE PR_VALUE -> "<rc>|<research-dir-still-unset?>"
+# Asserts on `${RESEARCH_DIR_ABS+x}` and NOT on emptiness: an empty string is
+# exactly the value #427 is about, so "it is empty" would pass on the bug.
+r44_refuses() {
+  local run_id="$1" pr="$2" rc=0 out
+  out="$(
+    env -i PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
+      ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} ${COMSPEC:+COMSPEC="$COMSPEC"} \
+      CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" PR_NUMBER="$pr" \
+      ${run_id:+RUN_ID="$run_id"} \
+      bash -c '
+        set -u
+        cd "$1" || exit 9
+        uberdev_review_fence() {
+          . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+          review_fleet_rehydrate || return 2
+        }
+        uberdev_review_fence
+        rc=$?
+        printf "unset=%s\n" "${RESEARCH_DIR_ABS+bound}"
+        exit "$rc"
+      ' _ "$R44_REPO" 2>/dev/null
+  )" || rc=$?
+  printf '%s|%s' "$rc" "$out"
+}
+
+r44_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
+
+if [ "$R44_NATIVE_WINDOWS" = 1 ]; then
+  echo "  SKIP  R44 — the run fixture and its env -i re-entry are Unix-bound (see the ci-wiring windows-skip-list rationale)"
+elif [ -z "$R44_REPO" ] || [ ! -s "$R44_DESCRIPTOR" ]; then
+  echo "  FAIL  R44.0 — could not seed a real review run fixture"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  R44.0 — a real review run (descriptor + reservation markers + pointer) was seeded"
+  PASS=$((PASS + 1))
+
+  R44_CARRIED="$(r44_fence 20260810-000000-abcdef01 73)" || R44_CARRIED=''
+  R44_MISSING=0
+  for r44_name in RUN_ID WORKTREE_ROOT RESEARCH_DIR_ABS MARKER_DIR CODE_FIXER_CONTRACT \
+    DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH \
+    PHASE2_DISPOSITION_PATH AGG_PATH; do
+    r44_value="$(r44_field "$R44_CARRIED" "$r44_name")"
+    case "$r44_value" in
+      /* | [A-Za-z]:/* | 2026*) ;;
+      *) R44_MISSING=1 ;;
+    esac
+  done
+  [ "$(r44_field "$R44_CARRIED" WORKSPACE_JSON_LEN)" -gt 0 ] 2>/dev/null || R44_MISSING=1
+  if [ "$R44_MISSING" = 0 ]; then
+    echo "  PASS  R44.1 — a fresh shell carrying only RUN_ID binds every run-invariant carrier"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.1 — a fresh shell carrying only RUN_ID left a carrier unbound"
+    echo "        got: $R44_CARRIED"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.2 — the artifact paths are the DESCRIPTOR's bytes, not a second copy of
+  # lib/command-workspace.py's path algebra re-derived in shell.
+  R44_BYTE_EQUAL=1
+  for r44_pair in 'diff:DIFF_ARTIFACT_PATH' 'criteria:CRITERIA_PATH' \
+    'commit_range:COMMIT_RANGE_PATH' 'phase1_disposition:PHASE1_DISPOSITION_PATH' \
+    'phase2_disposition:PHASE2_DISPOSITION_PATH' 'aggregate:AGG_PATH'; do
+    r44_key="${r44_pair%%:*}"
+    r44_name="${r44_pair##*:}"
+    r44_want="$(python3 -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifacts"][sys.argv[2]],end="")' "$R44_DESCRIPTOR" "$r44_key")"
+    [ "$(r44_field "$R44_CARRIED" "$r44_name")" = "$r44_want" ] || R44_BYTE_EQUAL=0
+  done
+  if [ "$R44_BYTE_EQUAL" = 1 ]; then
+    echo "  PASS  R44.2 — every artifact path is byte-equal to the run's own workspace descriptor"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.2 — a rehydrated artifact path diverged from the workspace descriptor"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.3 — the iteration counters are NOT run-invariant. They move mid-run and
+  # belong to review_fleet_load_ci_counters; a rehydrator that bound them would
+  # re-key pass 2 onto pass 1's already-published artifact names.
+  if [ "$(r44_field "$R44_CARRIED" REVIEW_ITERATION_SET)" = '' ] \
+     && [ "$(r44_field "$R44_CARRIED" CI_FIX_LOOP_ITER_SET)" = '' ]; then
+    echo "  PASS  R44.3 — rehydration binds neither REVIEW_ITERATION nor CI_FIX_LOOP_ITER"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.3 — rehydration bound a mid-run counter as if it were run-invariant"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.4 — the reservation receipt is a capability token, not a path. It is
+  # never read off disk: unset stays unset, and a carried one is passed through
+  # byte-identically.
+  R44_WITH_RECEIPT="$(r44_fence 20260810-000000-abcdef01 73 REVIEW_RUN_RESERVATION_RECEIPT='v1:carried-token')" || R44_WITH_RECEIPT=''
+  if [ "$(r44_field "$R44_CARRIED" RECEIPT_SET)" = '' ] \
+     && [ "$(r44_field "$R44_WITH_RECEIPT" RECEIPT)" = 'v1:carried-token' ]; then
+    echo "  PASS  R44.4 — the reservation receipt is never rehydrated from disk, only passed through"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.4 — the reservation receipt was materialised or mangled by rehydration"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.5 — no RUN_ID, but the run's own active-run pointer is on disk: recover.
+  R44_RECOVERED="$(r44_fence '' 73)" || R44_RECOVERED=''
+  if [ "$(r44_field "$R44_RECOVERED" RUN_ID)" = 20260810-000000-abcdef01 ] \
+     && [ "$(r44_field "$R44_RECOVERED" RESEARCH_DIR_ABS)" = "$R44_RESEARCH" ]; then
+    echo "  PASS  R44.5 — a fence entered with no RUN_ID recovers through the active-run pointer"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.5 — pointer recovery did not reproduce the run the setup fence reserved"
+    echo "        got: $R44_RECOVERED"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.6 — the pointer is for THIS PR. Never a fallback to some other run.
+  R44_WRONG_PR="$(r44_refuses '' 99)"
+  if [ "${R44_WRONG_PR%%|*}" = 2 ]; then
+    echo "  PASS  R44.6 — a pointer for another PR is refused, not adopted"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.6 — a pointer for another PR was adopted (rc ${R44_WRONG_PR%%|*})"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.7 — pointer gone and no RUN_ID: rc 2, and RESEARCH_DIR_ABS still UNSET.
+  # `${VAR+x}` and not emptiness: empty is the #427 defect itself.
+  mv "$R44_REPO/.uberdev/runs/.review-active-run.json" "$R44_TMP/pointer.json"
+  R44_NO_POINTER="$(r44_refuses '' 73)"
+  mv "$R44_TMP/pointer.json" "$R44_REPO/.uberdev/runs/.review-active-run.json"
+  if [ "${R44_NO_POINTER%%|*}" = 2 ] && [ "${R44_NO_POINTER#*|}" = 'unset=' ]; then
+    echo "  PASS  R44.7 — no RUN_ID and no pointer is rc 2 with RESEARCH_DIR_ABS left unset"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.7 — a fence with no run identity did not fail closed: $R44_NO_POINTER"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.8 — a traversal-shaped or merely nonexistent RUN_ID is a hard error, not
+  # a path that "does not exist" and answers green.
+  R44_TRAVERSAL="$(r44_refuses '../../etc' 73)"
+  R44_ABSENT="$(r44_refuses '20260101-000000-deadbee' 73)"
+  if [ "${R44_TRAVERSAL%%|*}" = 2 ] && [ "${R44_TRAVERSAL#*|}" = 'unset=' ] \
+     && [ "${R44_ABSENT%%|*}" = 2 ] && [ "${R44_ABSENT#*|}" = 'unset=' ]; then
+    echo "  PASS  R44.8 — a malformed or unknown RUN_ID is refused with nothing half-bound"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.8 — a malformed or unknown RUN_ID was not refused cleanly"
+    echo "        traversal: $R44_TRAVERSAL   absent: $R44_ABSENT"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.9 — the run must still hold its reservation markers. An abandoned run
+  # (review_abandon_run_reservation removes them) is unrecoverable by design.
+  mv "$R44_REPO/.uberdev/runs/20260810-000000-abcdef01/locked" "$R44_TMP/locked"
+  R44_UNLOCKED="$(r44_refuses '' 73)"
+  mv "$R44_TMP/locked" "$R44_REPO/.uberdev/runs/20260810-000000-abcdef01/locked"
+  if [ "${R44_UNLOCKED%%|*}" = 2 ]; then
+    echo "  PASS  R44.9 — a run whose reservation markers are gone is not recovered"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.9 — an abandoned reservation was recovered through the pointer"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.10 — a run that already published its verdict is finished; recovering
+  # into it would re-open a closed review.
+  printf '{}\n' >"$R44_REPO/.uberdev/runs/20260810-000000-abcdef01/review-pr-verdict.json"
+  R44_VERDICT="$(r44_refuses '' 73)"
+  rm -f "$R44_REPO/.uberdev/runs/20260810-000000-abcdef01/review-pr-verdict.json"
+  if [ "${R44_VERDICT%%|*}" = 2 ]; then
+    echo "  PASS  R44.10 — a run that already published a verdict is not recovered"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.10 — a completed run was recovered through the pointer"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # R40.11 — the pointer lives under the runs root, which setup already covers
+  # with a `*` .gitignore. Anywhere else it is untracked residue in the tree the
+  # command is reviewing.
+  if [ -z "$(git -C "$R44_REPO" status --porcelain --untracked-files=all -- .uberdev/runs 2>/dev/null)" ]; then
+    echo "  PASS  R44.11 — the active-run pointer leaves no untracked residue in the reviewed tree"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R44.11 — the active-run pointer shows up as untracked working-tree residue"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+rm -rf "$R44_TMP"
+
+# ---------------------------------------------------------------------------
+# R45 — the structural guard: every executed fence opens with the prologue.
+#
+# This is the regression detector for #427 itself. It enumerates every ```bash
+# fence in review-pr.md, computes the carriers each one READS minus the ones it
+# BINDS minus `${VAR:-}`-defaulted reads, and requires the two prologue lines on
+# any fence with a non-empty remainder.
+#
+# The allowlist is keyed on a CODE TOKEN inside the fence, never on a line
+# number and never on prose (#418's exact regression), and every entry carries
+# its reason inline. R41.0 refuses to pass vacuously: it asserts the scan saw
+# fences, saw carrier reads, and that every allowlist entry still resolves.
+# ---------------------------------------------------------------------------
+R45_REPORT="$(python3 -I -B - "$REVIEW_PR" <<'PY'
+import re
+import sys
+
+CARRIERS = ("UBERDEV_REVIEW_PLUGIN_ROOT", "WORKTREE_ROOT", "RESEARCH_DIR_ABS", "RUN_ID",
+            "MARKER_DIR", "DIFF_ARTIFACT_PATH", "CRITERIA_PATH", "COMMIT_RANGE_PATH",
+            "STANDALONE_SNAPSHOT_PATH", "PHASE1_DISPOSITION_PATH", "PHASE2_DISPOSITION_PATH",
+            "AGG_PATH", "CODE_FIXER_CONTRACT", "UBERDEV_COMMAND_WORKSPACE_JSON")
+
+# Keyed on a code token inside the fence. One reason per entry, and R41.0 fails
+# if any entry stops matching a real fence.
+ALLOWLIST = (
+    # The setup fence IS the binder: it reserves the run and writes the
+    # descriptor and pointer every other fence rehydrates from.
+    ("setup=review-pr", "the binder"),
+    # Function-definition/library fences. Their bodies are extracted and SOURCED
+    # by the behavioural harnesses; a prologue at the top would run at
+    # definition time, in whatever shell sourced them.
+    ("review_child_record() {", "library fence, sourced by tests"),
+    ("review_resolve_phase1_base() {", "library fence, sourced by tests"),
+    ("review_capture_ci_classification_head() {", "library fence, sourced by tests"),
+    ("review_validate_trust_anchor() {", "library fence, sourced by tests"),
+    # The terminal verdict fence is already correctly self-contained: it carries
+    # the reservation receipt and nothing else, runs from a cwd that need not be
+    # a repository, and R33.4-R33.6 prove that two-process handoff. Adding the
+    # prologue would make it demand a git toplevel it does not have.
+    ("# BEGIN review-verdict-final-fence-v1", "receipt-carried, proven by R33.4-R33.6"),
+)
+
+PROLOGUE_SOURCE = 'lib/review-fleet-args.sh" || return 2'
+PROLOGUE_CALL = "review_fleet_rehydrate || return 2"
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+fences = []
+index = 0
+while index < len(lines):
+    match = re.match(r"^([ \t]*)```bash(.*)$", lines[index])
+    if match:
+        indent, info = match.group(1), match.group(2).strip()
+        close = index + 1
+        while close < len(lines) and not re.match(r"^" + re.escape(indent) + r"```\s*$", lines[close]):
+            close += 1
+        fences.append((index + 1, info, lines[index + 1:close]))
+        index = close + 1
+    else:
+        index += 1
+
+examined = 0
+reads_found = 0
+matched = set()
+offenders = []
+for line_no, info, body in fences:
+    examined += 1
+    text = "\n".join(body)
+    reads = set()
+    for name in CARRIERS:
+        for hit in re.finditer(r"\$\{?" + name + r"(:-|:\+|\+|:=|\}|[^A-Za-z0-9_}]|$)", text):
+            if hit.group(1) in (":-", ":+", "+", ":="):
+                continue
+            reads.add(name)
+            break
+    binds = set()
+    for name in CARRIERS:
+        if re.search(r"(^|[;&|\s(])(export[ \t]+)?(local[ \t]+)?" + name + r"=", text, re.M):
+            binds.add(name)
+        if re.search(r"read[ \t].*\b" + name + r"\b", text):
+            binds.add(name)
+    unbound = reads - binds
+    if not unbound:
+        continue
+    reads_found += len(unbound)
+    token = next((tok for tok, _reason in ALLOWLIST if tok in info or tok in text), None)
+    if token is not None:
+        matched.add(token)
+        continue
+    # "Before the first carrier read", not "on lines 1-2": two fences open with
+    # a `# BEGIN <slice>-v1` marker that the behavioural harnesses extract on,
+    # so the prologue sits just inside the marker rather than above it.
+    first_read = None
+    source_at = None
+    call_at = None
+    for offset, line in enumerate(body):
+        if source_at is None and PROLOGUE_SOURCE in line:
+            source_at = offset
+            continue
+        if call_at is None and PROLOGUE_CALL in line:
+            call_at = offset
+            continue
+        if first_read is None and any(
+            re.search(r"\$\{?" + name + r"(\}|[^A-Za-z0-9_}:+-]|$)", line) for name in unbound
+        ):
+            first_read = offset
+    if source_at is None or call_at is None or (
+        first_read is not None and (source_at > first_read or call_at > first_read)
+    ):
+        offenders.append("%d:%s" % (line_no, ",".join(sorted(unbound))))
+
+stale = [token for token, _reason in ALLOWLIST if token not in matched]
+print("examined=%d" % examined)
+print("reads=%d" % reads_found)
+print("allowlist=%d" % len(ALLOWLIST))
+print("matched=%d" % len(matched))
+print("stale=%s" % ",".join(stale))
+print("offenders=%s" % ";".join(offenders))
+PY
+)" || R45_REPORT=''
+
+r45_field() { printf '%s\n' "$R45_REPORT" | sed -n "s/^$1=//p"; }
+
+if [ -n "$R45_REPORT" ] \
+   && [ "$(r45_field examined)" -gt 0 ] 2>/dev/null \
+   && [ "$(r45_field reads)" -gt 0 ] 2>/dev/null \
+   && [ "$(r45_field matched)" = "$(r45_field allowlist)" ] \
+   && [ -z "$(r45_field stale)" ]; then
+  echo "  PASS  R45.0 — the fence scan is non-vacuous and every allowlist entry still names a real fence"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R45.0 — the fence scan examined nothing, found no carrier reads, or carries a stale allowlist entry"
+  echo "        report: $(printf '%s' "$R45_REPORT" | tr '\n' ' ')"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ -n "$R45_REPORT" ] && [ -z "$(r45_field offenders)" ]; then
+  echo "  PASS  R45.1 — every fence that reads a cross-fence carrier opens with the rehydration prologue"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R45.1 — a fence reads a carrier no shell in its own process ever binds (#427)"
+  echo "        offenders (line:carriers): $(r45_field offenders)"
+  FAIL=$((FAIL + 1))
+fi
+
+# R46 — the hand-rolled duplicates the prologue replaced must not grow back.
+# Both patterns had live occurrences before #427 (four self-defaulting plugin
+# roots at the Phase 3 fences, and one bare RESEARCH_DIR_ABS concatenation at
+# the Phase 2.5 dispatch), so a zero count here is a real assertion and not a
+# moved anchor. The setup fence's own `${PLUGIN_ROOT:-…}` chain stays: it is the
+# one fence that has no prologue to inherit from.
+assert_no_grep "$REVIEW_PR" 'UBERDEV_REVIEW_PLUGIN_ROOT="\$\{UBERDEV_REVIEW_PLUGIN_ROOT:-' \
+  "R46.1 — no fence re-implements the plugin-root default chain the prologue owns"
+assert_no_grep "$REVIEW_PR" 'RESEARCH_DIR_ABS="\$[A-Za-z_]*/\.uberdev/research/\$RUN_ID"' \
+  "R46.2 — no fence rebuilds the run research path by string concatenation"
+assert_grep "$REVIEW_PR" 'review_fleet_write_active_run_pointer "\$WORKTREE_ROOT"' \
+  "R46.3 — setup publishes the active-run pointer every later fence recovers through"
+assert_grep "$REVIEW_PR" "printf 'REVIEW_CARRY RUN_ID=%s" \
+  "R46.4 — setup emits the RUN_ID carry line the orchestrator forwards"
+assert_grep "$REVIEW_PR" 'command-workspace\.json' \
+  "R46.5 — setup persists the workspace descriptor rehydration reads its artifact paths from"
 
 echo
 echo "== Summary =="
