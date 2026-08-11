@@ -314,6 +314,51 @@ expect_citation cc11.json 'demote citation-self-introduced' \
   "CC11 — a rule this PR itself wrote demotes the finding instead of culling it"
 
 echo
+echo "== R: the cull-reason vocabulary is actually closed =="
+# CONVENTION_CULL_REASONS calls itself closed. A comment that says "closed" while
+# nothing compares it to the code is the completeness-guard-with-a-disjoint-
+# predicate class: a new refusal path could drop a finding under a reason no
+# caller knows about, and the cull log would name something the register never
+# declared. This row makes the claim testable in BOTH directions.
+if python3 -I -B - "$CONTRACT" "$REPO_ROOT/plugins/uberdev/lib/review-aggregate.sh" <<'PY'
+import importlib.util, inspect, pathlib, re, sys
+
+contract_path, aggregate_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("uberdev_contract_closure", contract_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+declared = set(module.CONVENTION_CULL_REASONS)
+source = inspect.getsource(module.classify_convention_citation)
+emitted = set(re.findall(r'refuse\("([a-z-]+)"\)', source))
+emitted |= set(re.findall(r'"reason": "([a-z-]+)"', source))
+emitted.discard("citation-verified")
+emitted.discard(module.CONVENTION_DEMOTE_REASON)
+
+problems = []
+for reason in sorted(emitted - declared):
+    problems.append("predicate refuses with an UNDECLARED reason: " + reason)
+
+# The writer-level classes are the other half of the register: they never come
+# out of the predicate, so nothing else would notice them going missing.
+writer = pathlib.Path(aggregate_path).read_text(encoding="utf-8")
+for reason in sorted(declared - emitted):
+    if ("'" + reason + "'") not in writer:
+        problems.append(
+            "declared reason is emitted by neither the predicate nor the writer: " + reason)
+
+if problems:
+    print("\n".join(problems))
+    raise SystemExit(1)
+PY
+then
+  pass "R1 - every cull reason the gate can emit is declared, and every declared reason is emitted"
+else
+  note_fail "R1 - CONVENTION_CULL_REASONS and the code that refuses have drifted"
+fi
+
+echo
 echo "== G: the citation grammar is spelled identically on every surface =="
 # ONE contract, FOUR copies: the predicate that parses it
 # (lib/code_fixer_contract.py), the prompt that asks for it
