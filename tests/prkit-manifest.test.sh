@@ -30,8 +30,8 @@ done < "$MANIFEST"
 # moved out of the command markdown).
 #
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 38 ] && ok "M2 manifest lists exactly 38 files" \
-  || no "M2 manifest lists $count files (expected 38)"
+[ "$count" -eq 41 ] && ok "M2 manifest lists exactly 41 files" \
+  || no "M2 manifest lists $count files (expected 41)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \

@@ -33,6 +33,10 @@
       "sha256": "83b43c244cb7a83be0dfdd81fa1ec379891fd7cf5aec1a7470a4b4911bec20f6"
     },
     {
+      "path": "agents/finding-verifier.md",
+      "sha256": "9d2de58cf4fb541fe792e231816012c1eddb6bac3af5dbae0c151aba80386d22"
+    },
+    {
       "path": "agents/findings-to-issues.md",
       "sha256": "c804e598a01eeb0703a69e203b7598d6b6177f39e15142fd8e5d3ed8b8ac4a3d"
     },
@@ -137,6 +141,14 @@
       "sha256": "6c7806cbba8e5c41a95a0bd2ceabae3b3fbdffcfd8dee9382c6d1867c5851dcb"
     },
     {
+      "path": "shared/finding-confidence-rubric-v1.md",
+      "sha256": "3e35f1646384bf446b4670ff7b9eef81f311c23e2e0189ec062c975d101f6192"
+    },
+    {
+      "path": "shared/finding-verifier-output-v1.md",
+      "sha256": "08de655981c91d487cb61994463853268ea386819b2e47f445b103ae7f36446d"
+    },
+    {
       "path": "shared/phase1-reviewer-output-v1.md",
       "sha256": "33ef287be76843fe1d01a5000548781a4d20850240aed22db1d5a60c26dc359e"
     },
@@ -154,11 +166,17 @@
     }
   ],
   "pending": [
+    "agents/code-reviewer.md",
     "agents/conflict-resolver.md",
+    "agents/findings-to-issues.md",
     "agents/trust-trail-evaluator.md",
     "commands/merge.md",
     "commands/review-pr.md",
+    "lib/child-dispatch.sh",
     "lib/code_fixer_contract.py",
+    "lib/config-read.sh",
+    "policy/model-routing-v1.json",
+    "policy/solve-run-tree-v1.json",
     "skills/merge-pipeline/SKILL.md",
     "skills/merge-pipeline/lib/discover.sh"
   ],

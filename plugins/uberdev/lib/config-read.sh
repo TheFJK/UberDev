@@ -273,11 +273,17 @@ uberdev_read_int_in_range() {
     return 0
   fi
 
-  # Anchored regex: positive integer, no leading zero (defensive against octal).
+  # Anchored regex: non-negative integer, no leading zero (defensive against
+  # octal). A bare `0` is well-formed and MUST reach the range check below --
+  # three shipped keys declare min=0 (goal.watch_passes, goal.watch_budget,
+  # uberthink.loop_back_cap), and the older `^[1-9][0-9]*$` form rejected their
+  # documented `0` as non_integer, silently substituting the default. Whether
+  # `0` is *allowed* is the range check's decision; the grammar only decides
+  # whether it is an integer. The alternation still rejects `007`.
   # Native bash `[[ =~ ]]` (POSIX ERE; supported by bash 3.2 and zsh 5.x) avoids
   # the printf+pipe+grep fork triple, ~2ms saved per call. Pattern is a literal,
   # so unquoted right-hand side is safe under bash 3.2's compat31-default.
-  if [[ ! "$val" =~ ^[1-9][0-9]*$ ]]; then
+  if [[ ! "$val" =~ ^(0|[1-9][0-9]*)$ ]]; then
     _uberdev_warn_invalid "$key" "$val" non_integer "$default"
     _uberdev_set_validated "$key"
     printf '%s' "$default"

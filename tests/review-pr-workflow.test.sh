@@ -269,7 +269,7 @@ fence_has() {  # FILE TOKEN NEEDLE LABEL
 
 # review-pr.md: four stages (fix runs twice, on two different edges) plus the
 # four Phase 3 CI stages (#383).
-for stage_token in 'stage=review' 'fixerEdgeId=review_pr.fix.phase1' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer' 'stage=ci-classify' 'stage=ci-fix' 'stage=ci-conflicts' 'stage=ci-defer'; do
+for stage_token in 'stage=review' 'stage=verify' 'fixerEdgeId=review_pr.fix.phase1' 'stage=simplify' 'fixerEdgeId=review_pr.fix.phase2' 'stage=defer' 'stage=ci-classify' 'stage=ci-fix' 'stage=ci-conflicts' 'stage=ci-defer'; do
   label="review-pr.md [$stage_token]"
   fence_has "$REVIEW_CMD" "$stage_token" "$GUARD" "G1 $label carries the RFC 0012 §4.1 existence guard"
   fence_has "$REVIEW_CMD" "$stage_token" 'mkdir -p "$REVIEW_FLEET_RUN_DIR/children"' "G2 $label makes the per-child layout root"
@@ -907,6 +907,47 @@ assert_stage_runs ci-defer ci-defer "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq --arg sha "$W_HEX64_A" \
      '. + {ciAggregatePathAbs:"/r/run/agg.md", ciAggregateSha256:$sha}')" 1
 
+# --- V: the ninth stage — the Phase 1 verification gate (#431) -------------
+W_VERIFY_COMMON="$(jq -n '{
+  verifyClaimPrefixAbs:"/r/run/verification-claims-iter1/verify-",
+  verifyContractPathAbs:"/p/shared/finding-verifier-output-v1.md",
+  verifyRubricPathAbs:"/p/shared/finding-confidence-rubric-v1.md",
+  verifyPrContextPathAbs:"/r/run/pr-context.md"}')"
+assert_stage_runs verify verify "$W_NONCE1,$W_NONCE2" \
+  "$(printf '%s' "$W_VERIFY_COMMON" | jq '. + {verifyCount:2, verifyCap:50}')" 2
+
+# V1 — THE withholding invariant, asserted on the SHIPPED script rather than on
+# a prompt sample: no verifier prompt builder can interpolate a threshold it
+# never receives. A `confidenceThreshold` scalar appearing here at all would
+# mean the cutoff crossed the boundary.
+V_THRESHOLD_HITS="$(grep -c -E 'confidenceThreshold|CONFIDENCE_THRESHOLD|REVIEW_THRESHOLD' "$WORKFLOW" || true)"
+[ "$V_THRESHOLD_HITS" = "0" ] \
+  && pass "V1 workflow.js interpolates no confidence threshold anywhere (the child is never told the cutoff)" \
+  || fail "V1 workflow.js carries $V_THRESHOLD_HITS threshold reference(s); the cutoff must stay controller-side"
+# Anti-vacuity: the grep must be looking at a file that DOES mention the gate,
+# or V1 would pass against an empty or misrooted path.
+grep -Fq 'verifyCount' "$WORKFLOW" \
+  && pass "V1b the scanned script really is the one carrying the verify stage" \
+  || fail "V1b $WORKFLOW has no verify stage at all — V1 is vacuous"
+
+# V2 — the roster length is DERIVED from verifyCount on both sides. G11a proves
+# JS/shell equality for the FIXED reviewer roster; this is the variable twin.
+V_JS_ROSTER="$(grep -c 'for (let i = 1; i <= verifyCount; i++)' "$WORKFLOW")"
+[ "$V_JS_ROSTER" = "1" ] \
+  && pass "V2a the JS verify roster length derives from verifyCount" \
+  || fail "V2a the JS verify roster is not derived from verifyCount"
+V_SH_NONCES="$(bash -c '
+  . "$1"
+  d="$(mktemp -d)"; : >"$d/claims.txt"
+  for i in 1 2 3; do printf "%s/verify-0%s.json\n" "$d" "$i" >>"$d/claims.txt"; done
+  review_fleet_bind_verify "$d" 1 "$d" "$2" "$d/claims.txt" "$d/ledger.jsonl" >/dev/null 2>&1
+  printf "%s|%s" "$REVIEW_FLEET_VERIFY_COUNT" "$(printf "%s" "$REVIEW_FLEET_NONCE_POOL" | tr -cd , | wc -c | tr -d " ")"
+  rm -rf "$d"
+' _ "$ARGS_LIB" "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py")"
+[ "$V_SH_NONCES" = "3|2" ] \
+  && pass "V2b review_fleet_bind_verify mints exactly one nonce per claim (3 claims -> 3 nonces)" \
+  || fail "V2b bind_verify minted '$V_SH_NONCES', want '3|2' (count|comma-count)"
+
 # --- W-CONTRACT: the Phase 1 reviewers must be TOLD the output contract (#403)
 #
 # lib/child-dispatch.sh validates a reviewer result with re.fullmatch over the
@@ -1425,6 +1466,52 @@ if [ "$E_OVER_CAP" = "bad_ci_conflict_count|0" ]; then
 else
   fail "E6b at cap+1 the engine returned '$E_OVER_CAP' (want 'bad_ci_conflict_count|0')"
 fi
+
+# V3 — the cap is ONE number on both sides, and above it the refusal is the
+# NAMED up-front one, never `agent_ceiling` after acceptance. Same shape and
+# same reason as E6a/E6b for the conflict fanout.
+V_CAP_SHELL="$(bash -c '. "$1"; printf "%s" "$REVIEW_FLEET_VERIFY_TOTAL_CAP"' _ "$ARGS_LIB" 2>/dev/null)"
+if [ -n "$V_CAP_SHELL" ] && [ -n "$E_MAX_AGENTS_MIN" ] && [ "$V_CAP_SHELL" -le "$E_MAX_AGENTS_MIN" ]; then
+  pass "V3 the verify ceiling ($V_CAP_SHELL) is at or under the lowest emitted maxAgents ($E_MAX_AGENTS_MIN)"
+else
+  fail "V3 verify ceiling drift: shell cap='$V_CAP_SHELL' lowest emitted maxAgents='$E_MAX_AGENTS_MIN'"
+fi
+v_drive() {  # v_drive N -> "<abortReason>|<dispatched>"
+  local n="$1" out
+  stage_args verify "$(e6_nonces "$n")" \
+    "$(printf '%s' "$W_VERIFY_COMMON" | jq --argjson n "$n" --argjson m "$E_MAX_AGENTS_MIN" \
+       '. + {maxAgents:$m, verifyCount:$n, verifyCap:50}')"
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+  printf '%s|%s' "$(printf '%s' "$out" | jq -r '.abortReason')" \
+                 "$(printf '%s' "$out" | jq -r '.labels | length')"
+}
+V_AT_CAP="$(v_drive "$V_CAP_SHELL")"
+[ "$V_AT_CAP" = "|$V_CAP_SHELL" ] \
+  && pass "V3a a roster AT the verify ceiling ($V_CAP_SHELL) dispatches every verifier" \
+  || fail "V3a at the cap the engine returned '$V_AT_CAP' (want '|$V_CAP_SHELL')"
+V_OVER_CAP="$(v_drive "$((V_CAP_SHELL + 1))")"
+[ "$V_OVER_CAP" = "bad_verify_count|0" ] \
+  && pass "V3b a roster ABOVE it refuses by name up-front, not agent_ceiling after acceptance" \
+  || fail "V3b at cap+1 the engine returned '$V_OVER_CAP' (want 'bad_verify_count|0')"
+V_ZERO="$(v_drive 0 2>/dev/null || true)"
+stage_args verify "$W_NONCE1" \
+  "$(printf '%s' "$W_VERIFY_COMMON" | jq '. + {verifyCount:0, verifyCap:50}')"
+V_ZERO_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+[ "$(printf '%s' "$V_ZERO_OUT" | jq -r '.abortReason')" = "bad_verify_count" ] \
+  && pass "V3c verifyCount=0 refuses by name (the controller short-circuits a zero roster without calling the script)" \
+  || fail "V3c verifyCount=0 did not refuse: $(printf '%s' "$V_ZERO_OUT" | jq -r '.abortReason')"
+
+# V4 — the controller's two no-dispatch short-circuits exist in the command.
+grep -Fq 'REVIEW_CONFIDENCE_THRESHOLD" -eq 0' "$REVIEW_CMD" \
+  && grep -Fq 'gate-disabled' "$REVIEW_CMD" \
+  && pass "V4a review-pr short-circuits threshold=0 to a gate-disabled sidecar with no Workflow call" \
+  || fail "V4a the threshold=0 kill switch is missing from review-pr.md"
+grep -Fq 'over-cap-unverified' "$REVIEW_CMD" \
+  && pass "V4b review-pr records rows past the dispatch cap instead of dropping them" \
+  || fail "V4b review-pr does not record over-cap rows"
+grep -Fq 'verifier-unavailable' "$REVIEW_CMD" \
+  && pass "V4c review-pr records an unusable child result as verifier-unavailable (fail toward keeping)" \
+  || fail "V4c review-pr has no fail-toward-keeping arm for an unusable verifier result"
 
 # ---------------------------------------------------------------------------
 # E7 — the CI BINDERS are EXECUTED, against the real contract

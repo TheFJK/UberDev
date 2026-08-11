@@ -46,7 +46,7 @@ required={
  'review_pr.simplify.quality','review_pr.simplify.efficiency',
  'review_pr.fix.phase2','simplify.fix.phase2','review_pr.defer.findings','review_pr.ci.classify',
  'review_pr.ci.fix_code','review_pr.ci.rebase','review_pr.ci.defer_refusal',
- 'review_pr.ci.resolve_conflict'
+ 'review_pr.ci.resolve_conflict','review_pr.verify.finding'
 }
 assert required <= edges.keys(), sorted(required-edges.keys())
 for stale in {
@@ -67,13 +67,42 @@ review_edges={
  'review_pr.review.tests','review_pr.review.general'
 }
 assert tree['output_contracts']=={
-    'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md'
+    'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
+    'finding-verifier-v1':'shared/finding-verifier-output-v1.md'
 }
+for contract_id,relative in tree['output_contracts'].items():
+    assert (tree_path.parent.parent/relative).is_file(), contract_id
 for edge_id in review_edges:
     assert edges[edge_id]['required'] is True, edge_id
     assert edges[edge_id]['retry']=={'format':1}, edge_id
     assert edges[edge_id]['required_inputs']['changed_paths']=='repo_path_array', edge_id
     assert edges[edge_id]['output_contract']=='phase1-reviewer-v1', edge_id
+# The Phase 1 verification gate (#431). One child per eligible finding, so the
+# cardinality is per-finding and not per-iteration; read-only, so it stays in
+# the default `isolated` workspace and out of `caller_edges` below.
+verify=edges['review_pr.verify.finding']
+assert verify['required'] is True
+assert verify['retry']=={'format':1}
+assert verify['output_contract']=='finding-verifier-v1'
+assert verify['role']=='finding-verifier'
+assert verify['risk_scope']=='subtask'
+assert verify['phase']=='verify_finding'
+assert verify['cardinality']=='one_per_eligible_finding_per_review_iteration'
+assert verify['allowed_workflows']==['review-pr']
+assert verify.get('workspace_mode','isolated')=='isolated'
+assert verify['required_inputs']=={
+ 'claim_path':'path','diff_path':'path','pr_context_path':'path',
+ 'rubric_path':'path','working_dir':'directory'
+}
+assert verify['optional_inputs']=={
+ 'claude_md_paths':'optional_path_array',
+ 'format_retry':'boolean','format_example_path':'path'
+}
+# The claim card is the mechanical half of the withholding: the verifier edge
+# must not be able to ask for the aggregate, the disposition, or the reviewer's
+# own reasoning by name.
+assert not ({'findings_path','phase1_path','aggregate_path','detail','authority_path'}
+            & (set(verify['required_inputs'])|set(verify['optional_inputs'])))
 fixer_inputs={
  'authority_path':'path','authority_sha256':'string',
  'findings_path':'path','findings_sha256':'string',

@@ -50,6 +50,11 @@ command_timeouts:
   solve: 3600                    # int seconds [60, 86400]; ENFORCED via /solve launcher timeout(1)/gtimeout wrap; default 3600 (1h); env: UBERDEV_SOLVE_TIMEOUT
   review_pr: 900                 # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 900 (15m); env: UBERDEV_REVIEW_PR_TIMEOUT
   merge: 600                     # int seconds [60, 86400]; ADVISORY-ONLY in v1 (parsed + audit-logged; no kill); default 600 (10m); env: UBERDEV_MERGE_TIMEOUT
+
+# --- /review-pr Phase 1 finding-verification gate (RFC 0017) ---
+# dot-path ref: review.confidence_threshold
+review:
+  confidence_threshold: 80       # int [0, 100]; Phase 1 blocker findings scoring below this are recorded CULLED and never filed as issues; 0 disables the gate entirely (no verifier agents dispatched); default 80; env: UBERDEV_REVIEW_THRESHOLD
 ---
 
 # Notes (optional, free-form markdown for human reference)

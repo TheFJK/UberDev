@@ -1389,6 +1389,86 @@ except OSError:
 PY
 }
 
+# Canonical boundary for the two-key finding-verifier YAML schema (#431).
+# Emits "<score> <reason>" on stdout; refuses (rc 2) anything else. The file
+# identity preamble is deliberately the same one the Phase 1 twin above uses --
+# lstat before open, O_NOFOLLOW, owner, single link, size cap, and an fstat
+# re-check against the pre-open lstat so a swap between the two cannot go
+# unnoticed. That block is a security property of every child result path, not
+# boilerplate; only the document grammar below differs.
+#
+# It never emits or accepts a `verdict`. SURVIVES/CULLED is assigned by the
+# controller after comparing this score against a threshold the child is never
+# shown -- see shared/finding-verifier-output-v1.md.
+uberdev_child_validate_finding_verifier_result() {
+  python3 -I -B - "$1" <<'PY'
+import json,os,re,stat,sys
+path=sys.argv[1]
+uid_fn=getattr(os,'geteuid',None)
+uid=uid_fn() if callable(uid_fn) else None
+reparse_point=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
+def linked(entry):
+ return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&reparse_point)
+def owned(entry):
+ return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
+native_windows=os.name=='nt' or sys.platform=='win32'
+def raw_descriptor_state(entry):
+ return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
+def artifact_identity(entry):
+ raw=raw_descriptor_state(entry)
+ if not native_windows: return raw
+ birthtime_ns=getattr(entry,'st_birthtime_ns',None)
+ if birthtime_ns is None:
+  birthtime=getattr(entry,'st_birthtime',None)
+  birthtime_ns=int(birthtime*1_000_000_000) if birthtime is not None else raw[-1]
+ return (*raw[:4],int(birthtime_ns))
+def descriptor_link_count_valid(entry):
+ return entry.st_nlink==1 or (entry.st_nlink==0 and native_windows)
+try:
+ entry=os.lstat(path)
+ if (linked(entry) or not stat.S_ISREG(entry.st_mode) or not owned(entry)
+     or entry.st_nlink!=1 or entry.st_size>65536): raise ValueError()
+ descriptor=None
+ try:
+  descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+  opened=os.fstat(descriptor); chunks=[]; remaining=65537
+  while remaining:
+   chunk=os.read(descriptor,remaining)
+   if not chunk: break
+   chunks.append(chunk); remaining-=len(chunk)
+  raw_bytes=b''.join(chunks)
+  final=os.fstat(descriptor); current=os.lstat(path)
+ except OSError as error:
+  raise ValueError() from error
+ finally:
+  if descriptor is not None: os.close(descriptor)
+ if (len(raw_bytes)>65536 or any(linked(item) or not stat.S_ISREG(item.st_mode)
+      or not owned(item) for item in (opened,final,current))
+     or not descriptor_link_count_valid(opened) or not descriptor_link_count_valid(final)
+     or current.st_nlink!=1
+     or artifact_identity(opened)!=artifact_identity(entry)
+     or raw_descriptor_state(final)!=raw_descriptor_state(opened)
+     or artifact_identity(current)!=artifact_identity(final)): raise ValueError()
+ raw=raw_bytes.decode('utf-8')
+ # Whole-file fullmatch: no preamble, no trailer, exactly one fence.
+ match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
+ if not match: raise ValueError()
+ # Exactly two lines, in this order. `score` is a bare non-negative integer
+ # with no leading zero (a quoted "80" is a string, not a score).
+ body=re.fullmatch(
+  r'score:[ \t]*(0|[1-9][0-9]*)\r?\n'
+  r'reason:[ \t]*(reproduced-from-diff|contradicted-by-diff|pre-existing|out-of-scope-line'
+  r'|linter-domain|gate-disabled|over-cap-unverified|verifier-unavailable)',
+  match.group(1))
+ if not body: raise ValueError()
+ score=int(body.group(1)); reason=body.group(2)
+ if not 0<=score<=100: raise ValueError()
+ print('%d %s'%(score,reason),end='')
+except (UnicodeError,ValueError,OSError):
+ raise SystemExit(2)
+PY
+}
+
 _uberdev_child_find_lease() {
   python3 -I -B - "$1" "$2" "$3" <<'PY'
 import os,stat,sys

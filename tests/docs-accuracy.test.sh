@@ -718,6 +718,34 @@ for dead_backend_witness in \
 done
 
 echo
+echo "== T11: the vendored confidence rubric attributes its upstream (#431) =="
+# The 0-100 rubric is adapted from Anthropic's official `code-review` plugin
+# (Apache 2.0). The bundled licence text already ships as
+# licenses/pr-review-toolkit-Apache-2.0.txt; the rubric SSOT must NAME it, and
+# the README's Bundled table must list the rubric like every other vendored
+# surface. Attribution that lives only in a commit message is attribution
+# nobody reading the plugin can find.
+RUBRIC_SSOT="$REPO_ROOT/plugins/uberdev/shared/finding-confidence-rubric-v1.md"
+if [ -r "$RUBRIC_SSOT" ]; then
+  assert_grep "$RUBRIC_SSOT" 'licenses/pr-review-toolkit-Apache-2\.0\.txt' \
+    "T11.1 rubric SSOT names its bundled Apache-2.0 licence file"
+  assert_grep "$RUBRIC_SSOT" 'code-review' \
+    "T11.2 rubric SSOT names the upstream plugin it was adapted from"
+else
+  echo "  FAIL  T11: rubric SSOT missing or unreadable: $RUBRIC_SSOT"
+  FAIL=$((FAIL + 2))
+fi
+if [ -r "$REPO_ROOT/plugins/uberdev/licenses/pr-review-toolkit-Apache-2.0.txt" ]; then
+  echo "  PASS  T11.3 the licence file the rubric points at exists on disk"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.3 the licence file the rubric points at is missing"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$REPO_ROOT/README.md" 'finding-confidence-rubric-v1' \
+  "T11.4 README Bundled table names the vendored rubric"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

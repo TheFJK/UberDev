@@ -71,6 +71,8 @@ for name in (
     "publish_disposition",
     "publish_review_only_disposition",
     "count_deferred_blockers",
+    "project_verification_claims",
+    "publish_verification",
     "validate_persistence_result",
     "validate_commit",
     "validate_failed_return",
@@ -88,7 +90,8 @@ assert module.__all__ == (
     "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers", "validate_persistence_result",
+    "count_deferred_blockers", "project_verification_claims",
+    "publish_verification", "validate_persistence_result",
     "commit_review", "commit_standalone", "validate_commit", "validate_failed_return", "validate_residue", "validate_standalone_outcome", "validate_review_outcome",
     "validate_staged",
 )
@@ -6425,6 +6428,424 @@ with tempfile.TemporaryDirectory(prefix="code-fixer-ci-nonrepo-") as temporary:
     # ...and through `run`, which owns the one-line/space-free/slash-free stderr
     # diagnostic shape every other rc-74 verb is held to.
     run(["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
+
+# ---------------------------------------------------------------------------
+# The Phase 1 finding-verification gate (#431)
+# ---------------------------------------------------------------------------
+assert tuple(inspect.signature(module.project_verification_claims).parameters) == (
+    "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
+    "claims_dir",
+)
+assert tuple(inspect.signature(module.publish_verification).parameters) == (
+    "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
+    "verification_path", "threshold", "candidate",
+)
+# The claim card MUST NOT be able to carry the reviewer's reasoning, and the
+# finding schema MUST NOT grow a sixth key to make room for a score.
+assert module.CLAIM_KEYS == {"finding_index", "location", "summary"}
+assert module.FINDING_KEYS == {
+    "detail", "scope", "severity", "source_edges", "summary"
+}
+assert module.VERIFICATION_VERDICTS == {"SURVIVES", "CULLED"}
+assert module.VERIFICATION_REASONS == {
+    "reproduced-from-diff", "contradicted-by-diff", "pre-existing",
+    "out-of-scope-line", "linter-domain", "gate-disabled",
+    "over-cap-unverified", "verifier-unavailable",
+}
+assert not (module.VERIFICATION_CHILD_REASONS & module.VERIFICATION_CONTROLLER_REASONS)
+
+
+def verification_fixture(temporary):
+    """A Phase 1 aggregate + paired disposition with a known eligible roster."""
+    evidence = pathlib.Path(temporary) / ".uberdev/research/20260810-101500-abcdef0"
+    evidence.mkdir(parents=True)
+    # Two eligible blockers (SKIPPED + REFUSED), one APPLIED blocker (not
+    # eligible: already fixed in the branch), one suggestion (never a /goal
+    # recursion target). Every detail carries the reviewer's own confidence
+    # prefix, which is exactly the string the card must not leak.
+    rows = [
+        ("code-reviewer (correctness lens)", "blocker", "src/a.py", "42",
+         "SKIPPED", "Unchecked index reads past the buffer",
+         "confidence: 93 - the loop bound is len(rows) but the index is i + 1"),
+        ("silent-failure-hunter", "blocker", "src/b.py", "7",
+         "APPLIED", "Swallowed OSError hides a missing config",
+         "confidence: 93 - the bare except returns None and the caller cannot tell"),
+        ("comment-analyzer", "suggestion", "src/c.py", "9",
+         "DEFERRED", "Comment describes the old signature",
+         "confidence: 93 - the parameter was renamed two commits ago"),
+        ("pr-test-analyzer", "blocker", "src/d.py", "13",
+         "REFUSED", "New branch has no test",
+         "confidence: 93 - the early-return path is unexercised"),
+    ]
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes(phase1_table(rows))
+    findings_sha = digest(findings)
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    dispositions = ["SKIPPED", "APPLIED", "SKIPPED", "REFUSED"]
+    document = {
+        "schema_version": 1,
+        "phase": "phase1",
+        "aggregate_sha256": findings_sha,
+        "findings_disposition": [
+            {
+                "finding_index": key.finding_index,
+                "location": key.location,
+                "summary_sha256": key.summary_sha256,
+                "disposition": state,
+                "behavior_tag": "change" if state == "APPLIED" else "n/a",
+                "reason": "fixture",
+            }
+            for key, state in zip(keys, dispositions, strict=True)
+        ],
+    }
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return evidence, findings, findings_sha, disposition, digest(disposition)
+
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-claims-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    aggregate_before = findings.read_bytes()
+    claims_dir = evidence / "verification-claims"
+    receipt = module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(claims_dir),
+    )
+    # Roster scope: blocker AND not APPLIED. The APPLIED blocker and the
+    # suggestion are both absent.
+    assert receipt["verify_count"] == 2, receipt
+    assert [item["finding_index"] for item in receipt["claims"]] == [1, 4], receipt
+    assert receipt["aggregate_sha256"] == findings_sha
+    # AC 14: the aggregate is read, never rewritten.
+    assert findings.read_bytes() == aggregate_before
+    card_bytes = b""
+    for item in receipt["claims"]:
+        card_path = pathlib.Path(item["claim_path"])
+        # The receipt reports the CANONICAL path, so compare resolved parents:
+        # on macOS the temp root is a symlink and the two spellings differ.
+        assert card_path.parent.resolve() == claims_dir.resolve(), item
+        raw = card_path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == item["claim_sha256"]
+        card_bytes += raw
+        card = json.loads(raw)
+        assert set(card) == {"finding_index", "location", "summary"}, card
+        # Canonical compact-sorted JSON, so the bytes are re-derivable.
+        assert raw == module._canonical_json(card) + b"\n"
+    assert json.loads(pathlib.Path(receipt["claims"][0]["claim_path"]).read_bytes()) == {
+        "finding_index": 1,
+        "location": "src/a.py:42",
+        "summary": "Unchecked index reads past the buffer",
+    }
+    # THE withholding assertion: neither the reviewer's confidence prefix, the
+    # reasoning itself, nor the source_edges reach the verifier as bytes.
+    assert b"confidence: 93" not in card_bytes
+    assert b"the loop bound is len(rows)" not in card_bytes
+    assert b"review_pr.review" not in card_bytes
+    assert b"severity" not in card_bytes
+    # Republishing over an existing card is refused rather than silently
+    # overwriting somebody else's claim.
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(claims_dir),
+    ))
+    # A digest that does not match the bytes is a typed refusal, not a re-read.
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(findings), findings_sha256="0" * 64,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(evidence / "other-claims"),
+    ))
+    # A non-canonical aggregate is refused.
+    tampered = evidence / "tampered.md"
+    tampered.write_bytes(aggregate_before.replace(b"schema_version", b"schema_versioN"))
+    expect_contract_failure(lambda: module.project_verification_claims(
+        findings_path=str(tampered), findings_sha256=digest(tampered),
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        claims_dir=str(evidence / "tampered-claims"),
+    ))
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-none-") as temporary:
+    # A suggestions-only aggregate produces zero cards and zero directories.
+    evidence = pathlib.Path(temporary) / ".uberdev/research/20260810-101500-abcdef1"
+    evidence.mkdir(parents=True)
+    findings = evidence / "post-impl-review-final.md"
+    findings.write_bytes(phase1_table([
+        ("comment-analyzer", "suggestion", "src/only.py", "3",
+         "DEFERRED", "Stale comment", "confidence: 84 - renamed parameter"),
+    ]))
+    findings_sha = digest(findings)
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    disposition = evidence / "phase1-disposition.json"
+    disposition.write_text(json.dumps({
+        "schema_version": 1, "phase": "phase1", "aggregate_sha256": findings_sha,
+        "findings_disposition": [{
+            "finding_index": keys[0].finding_index,
+            "location": keys[0].location,
+            "summary_sha256": keys[0].summary_sha256,
+            "disposition": "SKIPPED", "behavior_tag": "n/a", "reason": "fixture",
+        }],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    claims_dir = evidence / "verification-claims"
+    receipt = module.project_verification_claims(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=digest(disposition),
+        claims_dir=str(claims_dir),
+    )
+    assert receipt["verify_count"] == 0 and receipt["claims"] == []
+    assert not claims_dir.exists()
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-publish-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def publish(opinions, threshold=80, target=None, expect_reason=None):
+        path = target if target is not None else evidence / "phase1-verification.json"
+        if not path.exists():
+            path.write_bytes(b"")
+        call = lambda: module.publish_verification(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition), disposition_sha256=disposition_sha,
+            verification_path=str(path), threshold=threshold,
+            candidate=json.dumps(opinions).encode("utf-8"),
+        )
+        if expect_reason is None:
+            return call()
+        expect_contract_reason(call, expect_reason)
+        # Fail closed: a refused publication leaves the target empty.
+        assert path.read_bytes() == b"", (expect_reason, path.read_bytes())
+        return None
+
+    survives = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    receipt = publish(survives)
+    sidecar = evidence / "phase1-verification.json"
+    document = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert set(document) == {
+        "schema_version", "phase", "aggregate_sha256", "threshold",
+        "findings_verification",
+    }
+    assert document["phase"] == "phase1"
+    assert document["aggregate_sha256"] == findings_sha
+    assert document["threshold"] == 80
+    # Canonical bytes, so the sidecar is re-derivable and diffable.
+    assert sidecar.read_bytes() == module._canonical_json(document) + b"\n"
+    assert hashlib.sha256(sidecar.read_bytes()).hexdigest() == (
+        receipt["verification_sha256"]
+    )
+    assert receipt["verified"] == 2 and receipt["culled"] == 1
+    assert [row["verdict"] for row in document["findings_verification"]] == [
+        "SURVIVES", "CULLED",
+    ]
+    # The row carries the same (finding_index, location, summary_sha256) triple
+    # the disposition binds, so the two artifacts describe the same findings.
+    keys = module.parse_finding_keys(findings.read_bytes(), "phase1")
+    by_index = {key.finding_index: key for key in keys}
+    for row in document["findings_verification"]:
+        key = by_index[row["finding_index"]]
+        assert row["location"] == key.location
+        assert row["summary_sha256"] == key.summary_sha256
+    # A non-empty pre-existing target is refused.
+    publish(survives, expect_reason="artifact_size_invalid") if False else None
+    try:
+        module.publish_verification(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition), disposition_sha256=disposition_sha,
+            verification_path=str(sidecar), threshold=80,
+            candidate=json.dumps(survives).encode("utf-8"),
+        )
+    except module.ContractFailure:
+        pass
+    else:
+        raise AssertionError("expected refusal on a non-empty verification target")
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == document
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-threshold-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def publish_at(threshold, opinions, name):
+        path = evidence / name
+        path.mkdir(parents=True, exist_ok=True)
+        target = path / "phase1-verification.json"
+        target.write_bytes(b"")
+        # The sidecar must be a sibling of the disposition; a different
+        # directory is a typed refusal, so the fixture copies both.
+        local_findings = path / findings.name
+        local_findings.write_bytes(findings.read_bytes())
+        local_disposition = path / disposition.name
+        local_disposition.write_bytes(disposition.read_bytes())
+        return module.publish_verification(
+            findings_path=str(local_findings), findings_sha256=findings_sha,
+            disposition_path=str(local_disposition),
+            disposition_sha256=disposition_sha,
+            verification_path=str(target), threshold=threshold,
+            candidate=json.dumps(opinions).encode("utf-8"),
+        ), target
+
+    borderline = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    # SAME child bytes, opposite verdicts: the threshold is applied entirely
+    # controller-side, which is what makes recorded scores re-thresholdable.
+    strict_receipt, strict_target = publish_at(80, borderline, "at-80")
+    loose_receipt, loose_target = publish_at(79, borderline, "at-79")
+    strict = json.loads(strict_target.read_text(encoding="utf-8"))
+    loose = json.loads(loose_target.read_text(encoding="utf-8"))
+    assert [row["verdict"] for row in strict["findings_verification"]] == [
+        "SURVIVES", "CULLED",
+    ]
+    assert [row["verdict"] for row in loose["findings_verification"]] == [
+        "SURVIVES", "SURVIVES",
+    ]
+    assert [row["score"] for row in strict["findings_verification"]] == [93, 79]
+    assert strict_receipt["culled"] == 1 and loose_receipt["culled"] == 0
+
+    # Fail toward keeping: no child opinion NEVER culls, whatever the reason.
+    for reason in ("verifier-unavailable", "over-cap-unverified"):
+        unavailable = [
+            {"finding_index": 1, "reason": reason},
+            {"finding_index": 4, "score": 12, "reason": "contradicted-by-diff"},
+        ]
+        _receipt, target = publish_at(80, unavailable, f"unavailable-{reason}")
+        rows = json.loads(target.read_text(encoding="utf-8"))["findings_verification"]
+        assert rows[0]["verdict"] == "SURVIVES" and rows[0]["score"] is None, rows
+        assert rows[0]["reason"] == reason
+        assert rows[1]["verdict"] == "CULLED", rows
+
+    # Kill switch: threshold 0 records every eligible row SURVIVES/gate-disabled.
+    disabled = [
+        {"finding_index": 1, "reason": "gate-disabled"},
+        {"finding_index": 4, "reason": "gate-disabled"},
+    ]
+    receipt, target = publish_at(0, disabled, "disabled")
+    rows = json.loads(target.read_text(encoding="utf-8"))["findings_verification"]
+    assert receipt["culled"] == 0 and receipt["verified"] == 2
+    assert all(row["verdict"] == "SURVIVES" and row["score"] is None for row in rows)
+    assert all(row["reason"] == "gate-disabled" for row in rows)
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-refuse-") as temporary:
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+
+    def refuse(opinions, threshold=80, name="refuse", **overrides):
+        path = evidence / name
+        path.mkdir(parents=True, exist_ok=True)
+        target = path / "phase1-verification.json"
+        target.write_bytes(b"")
+        local_findings = path / findings.name
+        local_findings.write_bytes(findings.read_bytes())
+        local_disposition = path / disposition.name
+        local_disposition.write_bytes(disposition.read_bytes())
+        arguments = {
+            "findings_path": str(local_findings), "findings_sha256": findings_sha,
+            "disposition_path": str(local_disposition),
+            "disposition_sha256": disposition_sha,
+            "verification_path": str(target), "threshold": threshold,
+            "candidate": json.dumps(opinions).encode("utf-8"),
+        }
+        arguments.update(overrides)
+        expect_contract_failure(lambda: module.publish_verification(**arguments))
+        # Rollback: a refused transaction leaves the sidecar empty, never
+        # half-written.
+        assert target.read_bytes() == b"", (name, target.read_bytes())
+
+    good = [
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 79, "reason": "pre-existing"},
+    ]
+    # Roster mismatch: too few, too many, wrong index, wrong order.
+    refuse(good[:1], name="short")
+    refuse(good + [{"finding_index": 9, "score": 1, "reason": "pre-existing"}],
+           name="long")
+    refuse([{"finding_index": 2, "score": 93, "reason": "reproduced-from-diff"}, good[1]],
+           name="wrong-index")
+    refuse([good[1], good[0]], name="reversed")
+    # A controller reason may not carry a score, and a child reason must.
+    refuse([{"finding_index": 1, "score": 50, "reason": "verifier-unavailable"}, good[1]],
+           name="scored-controller-reason")
+    refuse([{"finding_index": 1, "reason": "reproduced-from-diff"}, good[1]],
+           name="unscored-child-reason")
+    # Closed vocabularies.
+    refuse([{"finding_index": 1, "score": 93, "reason": "looks-fine"}, good[1]],
+           name="unknown-reason")
+    refuse([{"finding_index": 1, "score": 101, "reason": "pre-existing"}, good[1]],
+           name="score-too-high")
+    refuse([{"finding_index": 1, "score": -1, "reason": "pre-existing"}, good[1]],
+           name="score-negative")
+    refuse([{"finding_index": 1, "score": True, "reason": "pre-existing"}, good[1]],
+           name="score-bool")
+    refuse([{"finding_index": 1, "score": "93", "reason": "pre-existing"}, good[1]],
+           name="score-string")
+    # A verdict is the controller's to assign; a caller may not smuggle one in.
+    refuse([dict(good[0], verdict="SURVIVES"), good[1]], name="caller-verdict")
+    # At threshold 0 no verifier runs, so a scored row cannot have come from one.
+    refuse(good, threshold=0, name="disabled-with-scores")
+    # The threshold itself is bounded.
+    refuse(good, threshold=101, name="threshold-high")
+    refuse(good, threshold=-1, name="threshold-low")
+    # The sidecar must be the disposition's sibling, under its exact basename.
+    stray = evidence / "stray"
+    stray.mkdir(parents=True, exist_ok=True)
+    (stray / "phase1-verification.json").write_bytes(b"")
+    expect_contract_failure(lambda: module.publish_verification(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        verification_path=str(stray / "phase1-verification.json"), threshold=80,
+        candidate=json.dumps(good).encode("utf-8"),
+    ))
+    misnamed = evidence / "verification.json"
+    misnamed.write_bytes(b"")
+    expect_contract_failure(lambda: module.publish_verification(
+        findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+        verification_path=str(misnamed), threshold=80,
+        candidate=json.dumps(good).encode("utf-8"),
+    ))
+    # A digest that does not pin the bytes on disk is refused before any write.
+    refuse(good, name="bad-aggregate-digest", findings_sha256="0" * 64)
+    refuse(good, name="bad-disposition-digest", disposition_sha256="0" * 64)
+
+with tempfile.TemporaryDirectory(prefix="code-fixer-verify-cli-") as temporary:
+    # Both verbs are reachable through the shipped CLI, which is how
+    # /review-pr's Step 6b.0 fence calls them.
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    claims_dir = evidence / "verification-claims"
+    claims_receipt = json.loads(run([
+        "project-verification-claims",
+        "--findings-path", str(findings), "--findings-sha256", findings_sha,
+        "--disposition-path", str(disposition),
+        "--disposition-sha256", disposition_sha,
+        "--claims-dir", str(claims_dir),
+    ]))
+    assert claims_receipt["verify_count"] == 2, claims_receipt
+    target = evidence / "phase1-verification.json"
+    target.write_bytes(b"")
+    verification_receipt = json.loads(run([
+        "publish-verification",
+        "--findings-path", str(findings), "--findings-sha256", findings_sha,
+        "--disposition-path", str(disposition),
+        "--disposition-sha256", disposition_sha,
+        "--verification-path", str(target), "--threshold", "80",
+    ], stdin=json.dumps([
+        {"finding_index": 1, "score": 93, "reason": "reproduced-from-diff"},
+        {"finding_index": 4, "score": 12, "reason": "contradicted-by-diff"},
+    ])))
+    assert verification_receipt["culled"] == 1, verification_receipt
+    assert verification_receipt["threshold"] == 80
 
 print("code-fixer-contract: authority, disposition, and staged-set closure passed")
 PY
