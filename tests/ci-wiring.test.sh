@@ -230,5 +230,142 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# ---------------------------------------------------------------------------
+# W8 — every OTHER workflow in .github/workflows/ (#434).
+#
+# W1–W7 above are hardcoded to test.yml because that file is the test-set SSOT.
+# But `.github/workflows/` grew a second file, and nothing checked it at all:
+# a workflow with no trigger, no timeout, a floating action tag, or a
+# workflow-level write token would have shipped unnoticed. The scope of this
+# suite is therefore generalised from ONE file to a SET.
+#
+# W8.0 is written first and is not decoration. A `for f in .github/workflows/*.yml`
+# loop that excludes test.yml iterates zero times when test.yml is the only
+# workflow, and every row below it then passes vacuously — the exact
+# silent-green class this repo keeps rediscovering. Non-emptiness is asserted
+# before anything is asserted about the contents.
+# ---------------------------------------------------------------------------
+# NEWLINE-delimited, never space-delimited: a checkout path containing a space
+# (a real local case here) would otherwise word-split into nonexistent paths and
+# every row below would fail for the wrong reason.
+WORKFLOW_DIR="$REPO_ROOT/.github/workflows"
+OTHER_WORKFLOWS=''
+OTHER_COUNT=0
+for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
+  [ -f "$wf" ] || continue
+  case "$(basename "$wf")" in
+    test.yml) continue ;;
+  esac
+  OTHER_WORKFLOWS="${OTHER_WORKFLOWS}${wf}
+"
+  OTHER_COUNT=$((OTHER_COUNT+1))
+done
+
+if [ "$OTHER_COUNT" -gt 0 ]; then
+  echo "  PASS  W8.0 .github/workflows/ carries $OTHER_COUNT workflow(s) besides test.yml"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W8.0 no workflow besides test.yml — W8.1-W8.5 would be vacuous"
+  echo "         dir: $WORKFLOW_DIR"
+  FAIL=$((FAIL+1))
+fi
+
+USES_SEEN=0
+while IFS= read -r wf; do
+  [ -n "$wf" ] || continue
+  wf_name="$(basename "$wf")"
+  wf_body="$(cat "$wf")"
+
+  # W8.1 — a workflow with no trigger never runs, and looks identical to one
+  # that runs and finds nothing.
+  if grep -qE '^on:' <<<"$wf_body" \
+     && grep -qE '^[[:space:]]+(schedule|workflow_dispatch|push|pull_request|workflow_call):' <<<"$wf_body"; then
+    echo "  PASS  W8.1 $wf_name declares a trigger"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W8.1 $wf_name has no 'on:' block with at least one event"
+    FAIL=$((FAIL+1))
+  fi
+
+  # W8.2 — an un-capped job inherits the 360-minute default and can burn the
+  # public-repo Actions allowance on a hang.
+  if grep -qE '^[[:space:]]+timeout-minutes:[[:space:]]*[0-9]+' <<<"$wf_body"; then
+    echo "  PASS  W8.2 $wf_name caps its job runtime"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W8.2 $wf_name declares no timeout-minutes"
+    FAIL=$((FAIL+1))
+  fi
+
+  # W8.3 — every third-party action is SHA-pinned with a readable version
+  # trailer. A floating tag is a supply-chain hole that moves under you.
+  # `uses_seen` feeds the anti-vacuity row below: a pattern that stops matching
+  # `uses:` lines at all would otherwise report a clean pin sweep over nothing.
+  unpinned=''
+  while IFS= read -r uses_line; do
+    [ -n "$uses_line" ] || continue
+    USES_SEEN=$((USES_SEEN+1))
+    grep -qE 'uses:[[:space:]]*\./' <<<"$uses_line" && continue
+    grep -qE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}[[:space:]]*#[[:space:]]*v[0-9]' <<<"$uses_line" \
+      || unpinned="${unpinned}${unpinned:+; }$(printf '%s' "$uses_line" | sed 's/^[[:space:]]*//')"
+  done <<EOF
+$(grep -E '^[[:space:]]*-?[[:space:]]*uses:' <<<"$wf_body")
+EOF
+  if [ -z "$unpinned" ]; then
+    echo "  PASS  W8.3 $wf_name SHA-pins every action with a version trailer"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W8.3 $wf_name has unpinned action(s): $unpinned"
+    FAIL=$((FAIL+1))
+  fi
+
+  # W8.4 — least privilege at the workflow level. Any write scope a job needs
+  # must be declared on that job, not handed to the whole file.
+  wf_level_perms="$(awk '/^permissions:/{f=1;next} f&&/^[^[:space:]]/{exit} f{print}' <<<"$wf_body")"
+  if grep -qE ':[[:space:]]*write' <<<"$wf_level_perms"; then
+    echo "  FAIL  W8.4 $wf_name grants a write scope at the workflow level"
+    FAIL=$((FAIL+1))
+  else
+    echo "  PASS  W8.4 $wf_name keeps workflow-level permissions read-only"
+    PASS=$((PASS+1))
+  fi
+done <<EOF
+$OTHER_WORKFLOWS
+EOF
+
+# W8.3b — anti-vacuity for W8.3. Every non-test workflow on disk today checks out
+# the repo, so the pin sweep must have inspected at least one `uses:` line. Zero
+# means the extractor stopped matching, not that the workflows stopped using
+# actions — and a silent zero would certify an unpinned action as pinned.
+if [ "$USES_SEEN" -gt 0 ]; then
+  echo "  PASS  W8.3b the pin sweep inspected $USES_SEEN uses: line(s)"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W8.3b the pin sweep found no uses: line at all — W8.3 is vacuous"
+  FAIL=$((FAIL+1))
+fi
+
+# W8.5 — the vendored-drift reporter specifically. It is the compensating
+# control RFC 0019 trades "free upstream updates" for, so its schedule and its
+# single write scope are contract, not configuration.
+DRIFT_WORKFLOW="$WORKFLOW_DIR/vendor-drift.yml"
+if [ -r "$DRIFT_WORKFLOW" ]; then
+  drift_body="$(cat "$DRIFT_WORKFLOW")"
+  drift_missing=''
+  grep -qE '^[[:space:]]+schedule:' <<<"$drift_body" || drift_missing="${drift_missing} schedule:"
+  grep -qE '^[[:space:]]+workflow_dispatch:' <<<"$drift_body" || drift_missing="${drift_missing} workflow_dispatch:"
+  grep -qE '^[[:space:]]{4,}issues:[[:space:]]*write' <<<"$drift_body" || drift_missing="${drift_missing} job-level-issues:write"
+  if [ -z "$drift_missing" ]; then
+    echo "  PASS  W8.5 vendor-drift.yml is scheduled, dispatchable, and takes issues: write at job level"
+    PASS=$((PASS+1))
+  else
+    echo "  FAIL  W8.5 vendor-drift.yml is missing:$drift_missing"
+    FAIL=$((FAIL+1))
+  fi
+else
+  echo "  FAIL  W8.5 the vendored-drift reporter workflow is missing: $DRIFT_WORKFLOW"
+  FAIL=$((FAIL+1))
+fi
+
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

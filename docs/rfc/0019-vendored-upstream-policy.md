@@ -1,0 +1,341 @@
+# RFC 0019 — Vendored Upstream Policy
+
+| Field | Value |
+| --- | --- |
+| **Status** | Accepted |
+| **Author** | TheFJK |
+| **Created** | 2026-08-10 |
+| **Tier** | Large (new shipped data file, two new tools, a scheduled workflow, and a per-component policy decision across 20 vendored components) |
+| **Target ver** | next minor release (`vendor.json` ships inside the plugin tree, so the surface is user-visible) |
+| **Targets** | new `plugins/uberdev/vendor.json`; new `tools/vendor/vendor-check.py` + `tools/vendor/vendor-drift.py`; new `.github/workflows/vendor-drift.yml`; new `tests/vendor-provenance.test.sh` + `tests/vendor-drift.test.sh`; `tests/ci-wiring.test.sh` (generalised from one workflow file to a workflow set); `tests/docs-accuracy.test.sh` (T3.4); `README.md` Bundled table; `.github/workflows/test.yml` (both wiring surfaces) |
+| **Supersedes** | `docs/uberdev/audits/2026-05-04-superpowers-vendor-audit.md` — as the *live* record of what is vendored and from where. The audit stays on disk as the historical snapshot it is; it is not deleted, and #448 is concurrently editing it. |
+
+---
+
+## 1. Problem
+
+UberDev vendors 20 third-party components: 14 skill directories derived from
+`obra/superpowers`, and 6 reviewer/simplifier agents derived from
+`anthropics/claude-plugins-official`. Until this RFC, the provenance of those
+components was recorded in three places that could not be reconciled with each
+other:
+
+- **In-file headers** — a `Vendored from <owner>/<repo>@<sha>` comment. Only
+  **20 files across 3 skill directories** carry one (`systematic-debugging`,
+  `test-driven-development`, `writing-skills`). The other 11 skill directories
+  and all 6 agents carry no pin at all.
+- **The README Bundled table** — names upstreams, never commits, and had drifted:
+  it listed `using-uberdev` as an UberDev original when it is a rename of
+  upstream's `using-superpowers`; it listed a skill slug `merge` that does not
+  exist on disk (the directory is `merge-pipeline`); and both agent rows cited
+  `https://github.com/anthropics/claude-code`, which is not where those agents
+  are distributed.
+- **`plugins/uberdev/licenses/`** — three licence texts, no versions.
+
+Three spellings of one fact, none of them checked against the others or against
+disk. The result is the class this RFC exists to kill: **undeclared drift**.
+
+The cost is not theoretical. Upstream v6.2.0 fixed a real bug in
+`find-polluter.sh`; UberDev shipped the broken copy for months because nothing
+compared the two. That specific repair is owned by #430 and its PR, not by this
+RFC — what this RFC owns is making the *next* one visible within a week instead
+of within a year.
+
+A second, quieter cost: because no per-component decision existed, every
+divergence looked accidental. Some of them are deliberate and permanent (§6).
+Without a written stance, a future "sync from upstream" would silently revert
+them.
+
+**Reference convention.** This RFC cites symbols, file paths and section names.
+It never cites `file:line` literals — line anchors rot inside a single release
+(the failure documented by #349).
+
+---
+
+## 2. The register: `uberdev-vendor-v1`
+
+`plugins/uberdev/vendor.json` is the single source of truth. It is shipped
+inside the plugin tree, alongside the code it describes, so a user who installs
+UberDev standalone gets the attribution record with it.
+
+### 2.1 Shape
+
+```jsonc
+{
+  "schema": "uberdev-vendor-v1",
+  "policy_rfc": "docs/rfc/0019-vendored-upstream-policy.md",
+  "root": "plugins/uberdev",
+  "upstreams": { "<id>": { "repo": "owner/name", "license": "...",
+                           "license_file": "licenses/..." } },
+  "permanent_divergences": [ { "id": "...", "permanent": true, "...": "..." } ],
+  "components": [ { "id": "skills/<name>", "path": "skills/<name>", "...": "..." } ]
+}
+```
+
+Every directory under `plugins/uberdev/skills/` and every file under
+`plugins/uberdev/agents/` is a component. There are **73** of them: 20
+third-party and 53 carrying `"origin": "uberdev"`. The originals are two-field
+stubs; their only job is to make coverage two-way, so that a *new* undeclared
+vendored file cannot hide among them.
+
+### 2.2 Two commits per component, not one
+
+| Field | Meaning |
+| --- | --- |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 11 unpinned skill directories and all 6 agents. |
+| `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
+
+The split is load-bearing. `"unknown"` is the honest value for 17 of the 20
+components — `git log` recovers the *vendoring* commit in this repo, never the
+upstream base — and inventing a SHA would make every future diff silently wrong.
+The watermark makes those components diffable anyway, from the day this lands,
+and it means week 1's report contains post-landing changes instead of a wall of
+pre-existing noise. Advancing a watermark is the recorded act of *having looked*.
+
+### 2.3 `stance` is enforced, not annotated
+
+- `stance: "track"` ⇒ `files[]` is a list of `{path, sha256}`. A local edit to a
+  tracked file reds `tools/vendor/vendor-check.py` until the digest is refreshed
+  or the change is declared in `divergences[]`.
+- `stance: "fork"` ⇒ `files[]` is a plain path list. We own the bytes; edits are
+  expected; only *coverage* is ratcheted.
+
+Be precise about what the digest lock buys: it guards **our bytes against local
+tampering and undeclared local edits**. It says nothing about upstream. Comparing
+against upstream is `tools/vendor/vendor-drift.py`'s job, and that comparison is
+a network operation that must never run inside the offline guard.
+
+### 2.4 Divergences are structured so the drift report can subtract them
+
+Each component carries `divergences[]` — references into
+`permanent_divergences[]` plus any component-local entries. `permanent: true`
+marks a never-reconcile divergence (§6), so no future sync silently reintroduces
+upstream's version of a thing we deliberately changed, and so the weekly report
+can label a changed file *declared* instead of raw drift.
+
+---
+
+## 3. Vendor or peer-depend?
+
+Upstream superpowers is now officially distributed as
+`superpowers@claude-plugins-official`. That makes a peer dependency technically
+available for the first time, so the question has to be answered rather than
+assumed.
+
+**Decision: keep-vendoring.**
+
+What the alternative would buy and cost:
+
+| Factor | Weight |
+| --- | --- |
+| **The standalone promise** | The README Bundled section, both plugin-manifest `description` fields, the shipped `LICENSE`, and `install.sh` all promise that UberDev works with **no** `superpowers`, `pr-review-toolkit` or `code-simplifier` install. Peer-depending breaks a published contract, not an implementation detail. |
+| **The `enabledPlugins` failure class** | UberDev already ships `install.sh` because an upstream Claude Code bug silently disabled the plugin through `enabledPlugins`. Adding a *second* plugin whose activation we do not control multiplies a failure mode that is silent by construction. |
+| **Permanent divergences** | Five divergences (§6) are never-reconcile. Upstream's files are therefore not drop-in for at least 13 of the 20 components; a peer dependency would have to be shimmed per skill, which is strictly more machinery than vendoring. |
+| **Namespace** | Peer-depending re-exposes the `superpowers:` skill namespace that every vendored file deliberately rewrites to `uberdev:`. |
+| **Free updates (the cost of this decision)** | Vendoring forfeits upstream's fixes-for-free. This is a real loss, and #430 is the receipt. |
+
+The compensating control for that last row is the whole point of this RFC:
+`.github/workflows/vendor-drift.yml` turns "free updates" into "a weekly, deduped
+list of exactly what changed, per component, with declared divergences already
+subtracted". That is a smaller benefit than automatic updates and a much larger
+one than the status quo of nothing.
+
+---
+
+## 4. Per-component stance
+
+### 4.1 The rule
+
+A component is **`fork`** if *either*:
+
+1. its file set differs from upstream's for that component, **or**
+2. it carries a permanent local divergence beyond attribution and the namespace
+   rebrand, or its dispatch/behavioural contract has been rewritten so upstream's
+   copy is not drop-in.
+
+Otherwise it is **`track`**: the delta is attribution plus the
+`superpowers:` → `uberdev:` rebrand plus bounded local examples, and we
+re-baseline from upstream.
+
+The rule is mechanical on purpose. `diff` line count alone is *not* the
+criterion — it was measured for every component and is recorded below as
+evidence, but two components with 206 and 228 differing lines are `track`
+(1:1 file sets, prose-only deltas) while one with 72 is `fork` (upstream deleted
+a file and added a different one).
+
+### 4.2 Skills — measured against `superpowers` v6.2.0
+
+Measured with `diff -r` against the on-disk upstream tree at the `v6.2.0` tag;
+"diff lines" counts both `<` and `>` lines and includes the provenance-header
+lines UberDev adds.
+
+| Component | Upstream path | Diff lines | Stance | Reason |
+| --- | --- | ---: | --- | --- |
+| `skills/dispatching-parallel-agents` | `skills/dispatching-parallel-agents` | 33 | track | 1:1 file set; delta is the namespace rebrand. |
+| `skills/receiving-code-review` | `skills/receiving-code-review` | 41 | track | 1:1 file set; delta is the namespace rebrand. |
+| `skills/verification-before-completion` | `skills/verification-before-completion` | 49 | track | 1:1 file set; delta is the namespace rebrand. |
+| `skills/execute-plan` | `skills/executing-plans` | 50 | track | Directory rename + namespace rebrand; 1:1 file set. |
+| `skills/test-driven-development` | `skills/test-driven-development` | 72 | **fork** | File sets diverge — we ship `testing-anti-patterns.md`, upstream replaced it with `writing-good-tests.md`. Adopting that swap is a decision (#457), not a merge. |
+| `skills/systematic-debugging` | `skills/systematic-debugging` | 83 | **fork** | Permanent local *Parallel hypothesis testing* section, already recorded in the file's own header. |
+| `skills/write-plan` | `skills/writing-plans` | 123 | track | Directory rename + namespace rebrand; 1:1 file set. |
+| `skills/using-uberdev` | `skills/using-superpowers` | 174 | **fork** | This is UberDev's own plugin primer; reference sets diverge in both directions. |
+| `skills/using-git-worktrees` | `skills/using-git-worktrees` | 206 | track | Single file, 1:1; delta is the namespace rebrand and UberDev path examples. |
+| `skills/requesting-code-review` | `skills/requesting-code-review` | 228 | **fork** | Carries the permanent parallel-by-default review fanout (§6). |
+| `skills/writing-skills` | `skills/writing-skills` | 367 | track | 1:1 file set; the 6.2.0 delta is upstream's own prose compression, which we want. |
+| `skills/finish-branch` | `skills/finishing-a-development-branch` | 734 | **fork** | Owns the pre-push secret-scan gate, the auto-chain into `/uberdev:review-pr`, and the no-`Co-Authored-By` rule. |
+| `skills/subagent-driven-dev` | `skills/subagent-driven-development` | 1064 | **fork** | File sets diverge in both directions; the routed SDD lifecycle is UberDev-owned. |
+| `skills/brainstorm` | `skills/brainstorming` | 2255 | **fork** | Deliberately gate-free (§6); driven by `/uberdev:orchestrator` Phase 1, not an interactive human loop. |
+
+Seven `track`, seven `fork`.
+
+### 4.3 Agents — measured against `claude-plugins-official`
+
+| Component | Upstream path | Diff lines | Stance |
+| --- | --- | ---: | --- |
+| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | 56 | fork |
+| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | 57 | fork |
+| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | 64 | fork |
+| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | 64 | fork |
+| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | 69 | fork |
+| `agents/code-simplifier.md` | `plugins/pr-review-toolkit/agents/code-simplifier.md` | 115 | fork |
+
+All six are `fork` for one shared reason: an agent's `description` frontmatter
+**is** its dispatch contract, and UberDev rewrote all six into the named-lens
+contract driven by `/uberdev:review-pr` Phase 2 and `/uberdev:simplify`.
+Upstream's copies would re-enable conversational auto-triggering. They are not
+drop-in.
+
+**A correction the measurement forced.** The README attributed
+`code-simplifier` to the `code-simplifier` plugin. `claude-plugins-official`
+ships that agent **twice** — once in `plugins/code-simplifier/` and once in
+`plugins/pr-review-toolkit/` — and the two upstream copies themselves differ by
+38 lines. Diffed against both, the UberDev copy is 115 lines from the
+`pr-review-toolkit` copy and 137 from the `code-simplifier` copy, and only the
+`pr-review-toolkit` copy carries the block-scalar `description` with worked
+examples that our copy is built on. The register therefore points the component
+at `plugins/pr-review-toolkit/agents/code-simplifier.md`. The `code-simplifier`
+plugin is kept as a declared upstream because UberDev ships its licence text.
+
+### 4.4 What `track` obliges
+
+`track` is a promise to re-baseline, and it has a price: the seven tracked skill
+directories are digest-locked, so **any** local edit to one of them reds
+`vendor-check.py` until the register is refreshed. That is the ratchet working.
+It is also why `systematic-debugging` is `fork` rather than `track` despite a
+thin delta — its permanent local section means upstream is not a merge base, and
+forking it keeps the #430 repair free of a digest conflict.
+
+---
+
+## 5. Rename map — and why the renames stay
+
+| Upstream | UberDev |
+| --- | --- |
+| `brainstorming` | `brainstorm` |
+| `writing-plans` | `write-plan` |
+| `executing-plans` | `execute-plan` |
+| `subagent-driven-development` | `subagent-driven-dev` |
+| `finishing-a-development-branch` | `finish-branch` |
+| `using-superpowers` | `using-uberdev` |
+
+**The renames are explicitly declined for reversal.** They are the invocation
+surface: `/uberdev:brainstorm`, `/uberdev:write-plan`, `/uberdev:finish-branch`
+are referenced from commands, agent prompts, tests and user muscle memory.
+Reverting them to upstream's spellings to make `diff` tidier would trade a live
+interface for a cosmetic gain. The map lives in `vendor.json` as each
+component's `upstream_path`, which is what makes the diff tooling work without
+the rename.
+
+---
+
+## 6. Permanent divergences — never reconcile
+
+Recorded in `vendor.json` under `permanent_divergences[]`, each with
+`"permanent": true`, and referenced from the components they apply to.
+
+| Id | Scope | Divergence |
+| --- | --- | --- |
+| `namespace-rebrand` | all third-party components | `superpowers:` → `uberdev:`. UberDev ships standalone under its own plugin id. |
+| `parallel-hypothesis-testing` | `skills/systematic-debugging` | The local *Parallel hypothesis testing* section, already declared in the file's own provenance header. |
+| `brainstorm-no-approval-gates` | `skills/brainstorm` | UberDev rejects upstream's HARD-GATE / per-section / spec-review approval checkpoints. Quality comes from parallel research and always-on reviewer agents, not human gates. |
+| `review-pr-parallel-by-default` | `skills/requesting-code-review` | `/uberdev:review-pr` fans its review lenses out in parallel by default; upstream's flow is sequential. |
+| `no-co-authored-by` | `skills/finish-branch` | UberDev never emits a `Co-Authored-By` or AI-attribution trailer in commits or PR bodies. |
+
+---
+
+## 7. The 6.1.0 → 6.2.0 delta: adjudicated, not inherited
+
+**No behavioural upstream content is imported by this RFC's PR.** Each item below
+gets a verdict; every ADOPT names a filed issue.
+
+| Upstream item | Verdict | Reasoning |
+| --- | --- | --- |
+| `writing-good-tests.md` replaces `testing-anti-patterns.md` | **ADOPT — #457** | It names the string-presence trap by name: grep-style tests over scripts, skills and prompts counterfeit falsifiability, because the observable is behaviour, never text. That is a precise diagnosis of a defect class this repo keeps rediscovering (#419). Highest-value item in the delta. |
+| SDD workspace is now plan-scoped | **ADOPT — #458** | Fixes a real cross-plan contamination: a follow-up plan in the same tree could read the prior plan's ledger as its own. `subagent-driven-dev` is a fork, so the fix is not inherited. |
+| Review-fix loop resumes the implementer, with a five-round breaker | **ADOPT — #459** | A fresh implementer re-derives context the reviewer already priced in, and an unbounded fix loop is the class `/goal`'s circuit breakers exist to stop. |
+| `finishing-a-development-branch`: no discard prompt, forge-agnostic PR creation, worktree-cleanup no-op fixed | **ADOPT — #460** | The cleanup bug is the dangerous half: the worktree path was recomputed *after* cleanup had changed directory, so provenance never matched and cleanup silently no-oped. Our `finish-branch` is a heavily-modified descendant; whether it inherited that shape has to be answered by an executed probe, not a reading. |
+| Windows SessionStart hook declares `shell: "bash"` | **ADOPT — #461** | The upstream failure mode was silent: PowerShell parsed the quoted path as an expression, cmd.exe truncated on a metacharacter, and the bootstrap never loaded with no error. UberDev ships its own hooks, so this must be verified independently on the Windows CI job. |
+| Library-wide prose compression across 11 skills | **SKIP** | Not skipped as unwanted — skipped as *already covered*. Seven components are `track`, so the compression arrives mechanically at their next re-baseline. The two surfaces where the token budget actually bites are the session-hook-injected `using-uberdev` files, which are `fork` and are governed by UberDev's own hook-diet work rather than by upstream's edits. Filing an issue for it would duplicate the re-baseline. |
+
+One more follow-up falls out of the register itself rather than the upstream
+delta: **#462** — backfill real `vendored_at_commit` values and in-file
+provenance headers as each component is genuinely re-baselined. `"unknown"` is
+honest today; it should not be permanent.
+
+---
+
+## 8. The weekly drift job
+
+`.github/workflows/vendor-drift.yml` runs `tools/vendor/vendor-drift.py` on a
+weekly `schedule:` and on `workflow_dispatch:`. Workflow-level permission is
+`contents: read`; the job additionally takes `issues: write`. Nothing else.
+
+Contract:
+
+1. Group components by upstream repo; resolve each repo's HEAD with
+   `git ls-remote`.
+2. **Fail loudly** if `ls-remote` exits non-zero, prints nothing, or prints a
+   non-40-hex ref. "Upstream unreachable" must never render as "no drift" — that
+   is the same silent-green class this RFC exists to kill, and it would be
+   especially corrosive inside the very tool meant to detect it.
+3. **Assert every declared `upstream_path` still resolves in the upstream tree**
+   before diffing it. A prefix that matches nothing yields an empty changed-file
+   list, which renders as a confident "no drift" every week forever; a path
+   upstream has renamed or deleted is a finding, not silence. This one was found
+   by running the reporter against the real upstreams, not by any stub.
+4. Per component, diff `last_reviewed_upstream_commit..HEAD` restricted to the
+   component's `upstream_path`.
+5. Render **one** markdown report: component, stance, watermark → HEAD, changed
+   files (capped, with a residual count), and declared divergences listed
+   separately from raw drift.
+6. Embed `<!-- uberdev-vendor-drift-v1 -->` plus a `drift-fingerprint:` line.
+   Find the open tracking issue by that marker and **edit** it. Call
+   `gh issue create` only when no such issue is open. Comment only when the
+   fingerprint changed. No drift and no open issue ⇒ do nothing.
+
+Failure modes, stated so they are not rediscovered:
+
+- **`schedule:` only fires from the default branch.** The job is inert until this
+  merges; `workflow_dispatch` from the branch is the pre-merge proof.
+- **A new skill directory or agent file reds `C-COVER` by design.** Any PR that
+  adds one must add its register entry in the same change. Sibling PRs adding
+  agents will therefore red on rebase — that is the ratchet, not a regression.
+- **A `track` component's digest lock reds on any local edit.** Intentional: the
+  fix is to refresh the register in the same PR, or to move the component to
+  `fork` with a written reason.
+- **The register is never its own oracle.** No test may run the checker's
+  `--refresh` path; the producer cannot validate itself.
+
+---
+
+## 9. Supersession
+
+This RFC supersedes
+`docs/uberdev/audits/2026-05-04-superpowers-vendor-audit.md` as the **live**
+record of what UberDev vendors, from where, and under which stance. The audit
+remains on disk as a dated snapshot and is not deleted; it is a pointer, not a
+replacement, and another change is editing it concurrently.
+
+From here on, the live record is `plugins/uberdev/vendor.json`, enforced by
+`tools/vendor/vendor-check.py` in CI and refreshed by
+`tools/vendor/vendor-drift.py` weekly.
