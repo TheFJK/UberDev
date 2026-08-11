@@ -15,6 +15,26 @@ REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
 # The caller half of the fleet: the rehydration entry point, the fence-library
 # loader, and the typed run-dir carriers the fences read each other through.
 REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+# The cross-fence helpers themselves. They used to be defined inside markdown
+# fence bodies and carved back out here by six near-identical awk one-liners;
+# they now ship as code, so the carve-out is one recipe against one file.
+REVIEW_FENCES="$REPO_ROOT/plugins/uberdev/lib/review-fences.sh"
+
+# review_fence_fn NAME -> that helper's definition, on stdout.
+#
+# The terminator is `^\}$`, anchored at column 0, NOT `^[[:space:]]*\}`: the
+# helpers nest `if`/`case` blocks whose closers are indented, and the loose
+# pattern silently truncated `review_publish_same_repo_pr_head` at its first
+# inner brace -- an extractor that returns half a function makes every assertion
+# built on it vacuous rather than red. Exactly one column-0 `}` exists per
+# helper, which is what makes the tight anchor total.
+review_fence_fn() {
+  awk -v name="$1" '
+    $0 == name "() {" { active = 1 }
+    active            { print }
+    active && $0 == "}" { exit }
+  ' "$REVIEW_FENCES"
+}
 
 # review_reserved_run_fixture DIR -> a repo at DIR/repository holding one real
 # reservation, with the setup fence's stderr at DIR/setup.stderr.
@@ -223,7 +243,7 @@ assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*findings_sha256.*commit_range_
   "Phase 2 fixer callsite declares both immutable source digests"
 assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \
   "fixer callsites carry no prompt-only phase/type claim"
-assert_grep "$REVIEW_PR" 'rev-list --count.*before.*after|rev-list --count.*FIXER' \
+assert_grep "$REVIEW_FENCES" 'rev-list --count.*before.*after|rev-list --count.*FIXER' \
   "fixer controller requires exactly one APPLIED commit"
 
 echo
@@ -459,13 +479,12 @@ assert_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   'commit-message-digest|ANCHOR_MESSAGE_SHA256' \
   "R9.2d — anchor subject, body, and trailer are authenticated after hooks"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'rev-list --parents -n 1.*anchor_sha|rev-list.*--parents.*-n.*1.*anchor_sha' \
   "R9.2e — anchor validator requires the complete one-parent commit shape"
 
 ANCHOR_GATE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_validate_trust_anchor\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$ANCHOR_GATE_FIXTURE"
+review_fence_fn review_validate_trust_anchor >"$ANCHOR_GATE_FIXTURE"
 ANCHOR_PARENT="$(printf 'a%.0s' {1..40})"
 ANCHOR_COMMIT="$(printf 'b%.0s' {1..40})"
 ANCHOR_MESSAGE_SHA256="$(printf 'd%.0s' {1..64})"
@@ -587,13 +606,13 @@ assert_grep "$REVIEW_PR" \
 # pin is a zsh `:r` parameter modifier — the fences run under /bin/zsh, so the
 # refspec silently became `<sha>efs/heads/<branch>` and every anchor push died
 # with "src refspec ... does not match any".
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   '"\$\{publish_sha\}:refs/heads/\$\{live_branch\}"' \
   "R9.12b — push refspec uses immutable anchor SHA and explicit validated PR branch (brace-safe under zsh)"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'ls-remote.*refs/heads/\$live_branch|review_assert_selected_pr_head.*anchor_sha' \
   "R9.12c — remote branch and live/local PR head are authenticated after push"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'isCrossRepository.*headRepository|headRepository.*isCrossRepository' \
   "R9.12d — same-repository head identity is authenticated before publication"
 assert_grep "$REVIEW_PR" \
@@ -603,13 +622,9 @@ assert_grep "$REVIEW_PR" \
 # R9.13 — execute the production push gate with adversarial local movement
 # immediately after anchor validation and during the push hook window.
 ANCHOR_PUSH_FIXTURE="$(mktemp)"
-# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
-# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
-# since #429, and `^[[:space:]]*\}` would truncate the function there — an
-# extractor that silently returns half a function makes every assertion below
-# it vacuous rather than red.
-awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
-  "$REVIEW_PR" >"$ANCHOR_PUSH_FIXTURE"
+# The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
+# the column-0 terminator review_fence_fn uses is load-bearing here.
+review_fence_fn review_publish_same_repo_pr_head >"$ANCHOR_PUSH_FIXTURE"
 ANCHOR_PUSH_LOG="$(mktemp)"
 ANCHOR_GH_STATE="$(mktemp)"
 if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
@@ -741,13 +756,9 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "  SKIP  R9.17 (#429) — jq not on PATH (covered on ubuntu + macOS; the defect is a gh field name, not a platform behaviour)" >&2
 else
 REAL_GH_FIXTURE="$(mktemp)"
-# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
-# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
-# since #429, and `^[[:space:]]*\}` would truncate the function there — an
-# extractor that silently returns half a function makes every assertion below
-# it vacuous rather than red.
-awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
-  "$REVIEW_PR" >"$REAL_GH_FIXTURE"
+# The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
+# the column-0 terminator review_fence_fn uses is load-bearing here.
+review_fence_fn review_publish_same_repo_pr_head >"$REAL_GH_FIXTURE"
 REAL_GH_PUSH_LOG="$(mktemp)"
 REAL_GH_STATE="$(mktemp)"
 if [ -s "$REAL_GH_FIXTURE" ] && \
@@ -1388,7 +1399,7 @@ assert_no_grep "$REVIEW_PR" 'wraps simplify-final\.md under' \
 
 echo
 echo "== R27: hostile PR diff delimiters cannot escape the trust envelope =="
-if python3 -I -B - "$REVIEW_PR" <<'PY'
+if python3 -I -B - "$REVIEW_FENCES" <<'PY'
 import ast,pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 escape_match=re.search(r'^def escape_untrusted_diff_payload\(payload\):\n(?:    .*\n)+',source,re.M)
@@ -1416,7 +1427,7 @@ fi
 
 echo
 echo "== R27.1: post-escape expansion falls back below the child artifact ceiling =="
-if python3 -I -B - "$REVIEW_PR" <<'PY'
+if python3 -I -B - "$REVIEW_FENCES" <<'PY'
 import ast,pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 limit_match=re.search(r'^MAX_WRAPPED_DIFF_BYTES=(\d+)\*1024\*1024$',source,re.M)
@@ -1459,8 +1470,7 @@ done
 echo
 echo "== R28: selected PR head is bound before dispatch and trust =="
 HEAD_GATE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_assert_selected_pr_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$HEAD_GATE_FIXTURE"
+review_fence_fn review_assert_selected_pr_head >"$HEAD_GATE_FIXTURE"
 HEAD_GATE_LOG="$(mktemp)"
 EXPECTED_HEAD="$(printf 'a%.0s' {1..40})"
 REMOTE_OTHER="$(printf 'b%.0s' {1..40})"
@@ -1529,8 +1539,7 @@ rm -f "$PHASE25_FIXTURE"
 echo
 echo "== R30: validated fixer heads become the reviewed trust target only after publication =="
 FIXER_HEAD_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_track_validated_fixer_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$FIXER_HEAD_FIXTURE"
+review_fence_fn review_track_validated_fixer_head >"$FIXER_HEAD_FIXTURE"
 FIXER_HEAD_LOG="$(mktemp)"
 PRE_FIX_HEAD="$(printf 'd%.0s' {1..40})"
 PHASE1_FIX_HEAD="$(printf 'e%.0s' {1..40})"
@@ -1586,8 +1595,7 @@ fi
 grep -qF 'validate-residue' "$FIXER_HEAD_FIXTURE" || FIXER_CHAIN_OK=0
 
 FIXER_PROMOTE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_promote_validated_fixer_outcome\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$FIXER_PROMOTE_FIXTURE"
+review_fence_fn review_promote_validated_fixer_outcome >"$FIXER_PROMOTE_FIXTURE"
 FIXER_PROMOTE_LOG="$(mktemp)"
 VALID_OUTCOME="$(printf '{"applied_content_sha256":"%s","commit":{},"declared_tip":"%s","disposition_sha256":"%s","receipt_sha256":"%s","result_sha256":"%s","status":"APPLIED","status_sha256":"%s"}' \
   "$(printf 'a%.0s' {1..64})" "$PHASE1_FIX_HEAD" "$(printf 'b%.0s' {1..64})" \
@@ -1614,7 +1622,7 @@ fi
 
 FIXER_FAILURE_GUARD_FIXTURE="$(mktemp)"
 awk '/# BEGIN review-failed-return-guard-v1/{active=1;next} /# END review-failed-return-guard-v1/{exit} active{print}' \
-  "$REVIEW_PR" >"$FIXER_FAILURE_GUARD_FIXTURE"
+  "$REVIEW_FENCES" >"$FIXER_FAILURE_GUARD_FIXTURE"
 FIXER_FAILURE_REPO="$(mktemp -d)"
 git -C "$FIXER_FAILURE_REPO" init -q
 git -C "$FIXER_FAILURE_REPO" config user.email fixture@example.invalid
@@ -3115,46 +3123,54 @@ CARRIERS = ("UBERDEV_REVIEW_PLUGIN_ROOT", "WORKTREE_ROOT", "RESEARCH_DIR_ABS", "
 # THE ALLOWLIST USED TO EXEMPT FENCES THAT EXECUTE. Four entries named a
 # function-definition token and called the fence a "library fence, sourced by
 # tests" — but `review_resolve_phase1_base() {` and `review_validate_trust_anchor() {`
-# sit in fences that go on to RUN, and exempting them is what hid the Step 3
+# sat in fences that went on to RUN, and exempting them is what hid the Step 3
 # scope recompute and the trust-trail anchor being prologue-less. Both fences
 # died on empty carriers in every real run while this guard reported PASS.
 #
-# The fix is structural, not another entry: definition regions are now delimited
-# by `# BEGIN review-fence-lib-v1` markers and stripped below, so a fence is
-# judged on the statements it EXECUTES. A fence that is nothing but definitions
-# has no executable carrier read left and drops out on its own; a fence that
-# executes must carry the prologue, with no exemption available.
+# The fix is structural, not another entry: function DEFINITIONS are stripped
+# below, so a fence is judged on the statements it EXECUTES. A fence that is
+# nothing but definitions has no executable carrier read left and drops out on
+# its own; a fence that executes must carry the prologue, with no exemption
+# available.
 ALLOWLIST = (
     # The setup fence IS the binder: it reserves the run and writes the
     # descriptor and pointer every other fence rehydrates from.
     ("setup=review-pr", "the binder"),
 )
 
-LIB_BEGIN = "# BEGIN review-fence-lib-v1"
-LIB_END = "# END review-fence-lib-v1"
+DEFINITION = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]*$")
 
 
 def strip_lib_regions(body):
-    """Blank out marked definition regions, PRESERVING line offsets.
+    """Blank out function definitions, PRESERVING line offsets.
 
     Blanked rather than deleted so `first_read` stays comparable with the
     prologue offsets computed over the same list. A carrier read inside a
     function BODY happens at CALL time, in whatever shell calls it -- it is not
     one of this fence's own executable statements, and requiring the prologue
     above it would force the prologue above the definitions.
+
+    Keyed on the definition's own indentation, NOT on a marker comment: the
+    twenty cross-fence helpers moved to lib/review-fences.sh and took the
+    `# BEGIN review-fence-lib-v1` markers with them, and a marker-keyed stripper
+    that matches nothing degrades this row to the weaker text scan it replaced
+    while still reporting PASS. The half-dozen same-fence helpers that remain
+    (review_json_member, review_ci_push_abort, ...) are what it now finds.
     """
     out = []
-    active = False
+    closer = None
     for line in body:
-        if LIB_BEGIN in line:
-            active = True
+        if closer is not None:
+            out.append("")
+            if line == closer:
+                closer = None
+            continue
+        found = DEFINITION.match(line)
+        if found is not None:
+            closer = found.group(1) + "}"
             out.append("")
             continue
-        if LIB_END in line:
-            active = False
-            out.append("")
-            continue
-        out.append("" if active else line)
+        out.append(line)
     return out
 
 PROLOGUE_SOURCE = 'lib/review-fleet-args.sh" || return 2'
@@ -3182,8 +3198,7 @@ offenders = []
 lib_regions = 0
 for line_no, info, raw_body in fences:
     examined += 1
-    if any(LIB_BEGIN in line for line in raw_body):
-        lib_regions += 1
+    lib_regions += sum(1 for line in raw_body if DEFINITION.match(line))
     # Judge the fence on what it EXECUTES.
     body = strip_lib_regions(raw_body)
     text = "\n".join(body)
@@ -3243,10 +3258,10 @@ PY
 
 r45_field() { printf '%s\n' "$R45_REPORT" | sed -n "s/^$1=//p"; }
 
-# `libregions` joins the non-vacuity conjuncts: the scan now BLANKS marked
-# definition regions before judging a fence, and a stripper that matched nothing
-# would silently turn R45.1 back into the weaker text scan it used to be while
-# still reporting PASS.
+# `libregions` joins the non-vacuity conjuncts: the scan BLANKS every function
+# definition before judging a fence, and a stripper that matched nothing would
+# silently turn R45.1 back into the weaker text scan it used to be while still
+# reporting PASS.
 if [ -n "$R45_REPORT" ] \
    && [ "$(r45_field examined)" -gt 0 ] 2>/dev/null \
    && [ "$(r45_field reads)" -gt 0 ] 2>/dev/null \
@@ -3351,10 +3366,11 @@ echo "== R47: functions cross fences too — the fence library =="
 # library ends up with every cross-fence helper defined. Runs under `env -i` with
 # only the plugin root, which is the only environment a real fence ever sees.
 R47_HELPERS="review_json_string review_child_record review_child_fanout review_child_wait_all
-review_child_single review_guard_failed_fixer_return review_fixer_child_bound
-review_assert_selected_pr_head review_publish_same_repo_pr_head review_resolve_phase1_base
-review_refresh_phase1_scope review_track_validated_fixer_head review_promote_validated_fixer_outcome
-review_clear_ci_run_selection review_select_failed_ci_run review_capture_ci_classification_head
+review_child_result_path review_child_single review_guard_failed_fixer_return
+review_fixer_child_bound review_assert_selected_pr_head review_publish_same_repo_pr_head
+review_resolve_phase1_base review_refresh_phase1_scope review_track_validated_fixer_head
+review_promote_validated_fixer_outcome review_clear_ci_run_selection review_select_failed_ci_run
+review_capture_ci_classification_head review_ci_authority_digest review_ci_json_member
 review_validate_trust_anchor"
 R47_MISSING="$(env -i PATH="$PATH" HOME="$HOME" \
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
@@ -3367,7 +3383,7 @@ R47_MISSING="$(env -i PATH="$PATH" HOME="$HOME" \
     done
   ' 2>/dev/null)" || R47_MISSING="LOAD_FAILED"
 R47_EXPECTED_COUNT="$(printf '%s' "$R47_HELPERS" | tr -s ' \n' '\n\n' | grep -c .)"
-if [ -z "$R47_MISSING" ] && [ "$R47_EXPECTED_COUNT" -ge 15 ]; then
+if [ -z "$R47_MISSING" ] && [ "$R47_EXPECTED_COUNT" -ge 20 ]; then
   echo "  PASS  R47.1 — the fence library defines all $R47_EXPECTED_COUNT cross-fence helpers in a fresh shell"
   PASS=$((PASS + 1))
 else
@@ -3376,10 +3392,22 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# R47.2 — structural: no fence may CALL a `review_*` helper that neither its own
-# body nor the fence library defines. This is R45.1 for functions, and it is the
-# row that would have caught the original defect: the helpers existed, in the
-# wrong process.
+# R47.2 — structural: no fence may CALL a `review_*` helper that nothing IN ITS
+# OWN PROCESS defines. This is R45.1 for functions, and it is the row that would
+# have caught the original defect: the helpers existed, in the wrong process.
+#
+# AVAILABILITY IS PER FENCE, NOT GLOBAL. The first cut of this row built
+# `available = sourceable | library` once and reused it for every fence, which
+# made a helper that only a prologued fence can reach count as reachable from a
+# fence that loads nothing — it passed over two live command-not-found calls
+# (review_promote_validated_fixer_outcome / review_guard_failed_fixer_return,
+# in a three-line fence with no prologue) while reporting PASS. What a fence
+# actually holds is decided by two lines it either has or does not:
+#
+#   . …/lib/review-fleet-args.sh   -> that file's own helpers
+#   review_fleet_rehydrate         -> lib/review-fences.sh + the `audit` shim,
+#                                     because review_fleet_load_fence_library is
+#                                     reached only through rehydration
 R47_REPORT="$(python3 -I -B - "$REVIEW_PR" "$REPO_ROOT/plugins/uberdev" <<'PY'
 import glob
 import os
@@ -3388,33 +3416,32 @@ import sys
 
 command_file, plugin_root = sys.argv[1:]
 DEF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
-LIB_BEGIN = "# BEGIN review-fence-lib-v1"
-LIB_END = "# END review-fence-lib-v1"
+FENCE_LIBRARY = plugin_root + "/lib/review-fences.sh"
 
 lines = open(command_file, encoding="utf-8").read().split("\n")
 
-# Everything the shipped, SOURCEABLE libraries define.
+
+def definitions(path):
+    found = set()
+    for line in open(path, encoding="utf-8", errors="replace"):
+        match = DEF.match(line)
+        if match:
+            found.add(match.group(1))
+    return found
+
+
+# Everything the shipped libraries define, minus the fence library: sourcing
+# review-fleet-args.sh does NOT source review-fences.sh, only rehydrating does.
 sourceable = set()
 for path in glob.glob(plugin_root + "/lib/*.sh"):
-    for line in open(path, encoding="utf-8", errors="replace"):
-        found = DEF.match(line)
-        if found:
-            sourceable.add(found.group(1))
+    if os.path.abspath(path) == os.path.abspath(FENCE_LIBRARY):
+        continue
+    sourceable |= definitions(path)
 
-# Everything the fence library publishes to every fence.
-library = set()
-active = False
-for line in lines:
-    if LIB_BEGIN in line:
-        active = True
-        continue
-    if LIB_END in line:
-        active = False
-        continue
-    if active:
-        found = DEF.match(line)
-        if found:
-            library.add(found.group(1))
+# Everything rehydration publishes: the fence library, plus `audit`, which
+# review_fleet_load_fence_library installs and which is a shell function in no
+# file (on macOS the bare word otherwise resolves to /usr/sbin/audit).
+library = definitions(FENCE_LIBRARY) | {"audit"}
 
 fences = []
 index = 0
@@ -3430,11 +3457,18 @@ while index < len(lines):
     else:
         index += 1
 
-available = sourceable | library
+SOURCE_LINE = "lib/review-fleet-args.sh"
+REHYDRATE = "review_fleet_rehydrate"
+
 offenders = []
 calls_checked = 0
 for line_no, body in fences:
     own = {DEF.match(l).group(1) for l in body if DEF.match(l)}
+    available = set(own)
+    if any(SOURCE_LINE in l and l.lstrip().startswith(". ") for l in body):
+        available |= sourceable
+    if any(l.strip().startswith(REHYDRATE) for l in body):
+        available |= library
     for offset, line in enumerate(body):
         if DEF.match(line):
             continue
@@ -3590,16 +3624,57 @@ fi
 rm -rf "$R47_RUN_DIR_TMP"
 rm -rf "$R47_TMP"
 
-# R47.4 — the fence library must keep the markdown as its SINGLE definition. A
-# second copy under lib/ would satisfy R47.1 and R47.2 while re-creating the #370
-# "one contract, N uncompared copies" class the loader exists to avoid.
-R47_DUPES="$(grep -lE '^[[:space:]]*(review_refresh_phase1_scope|review_assert_selected_pr_head|review_select_failed_ci_run)\(\)[[:space:]]*\{' \
-  "$REPO_ROOT"/plugins/uberdev/lib/*.sh 2>/dev/null | tr '\n' ' ')"
-if [ -z "$R47_DUPES" ]; then
-  echo "  PASS  R47.4 — the fence helpers have no second definition under lib/"
+# R47.4 — lib/review-fences.sh must be each helper's ONLY definition. A copy in
+# the markdown (or a second one under lib/) would satisfy R47.1 and R47.2 while
+# re-creating the #370 "one contract, N uncompared copies" class this move
+# exists to end. Both directions are checked from the library's own roster, so
+# adding a helper there extends the guard with no edit here — the completeness
+# trap in #371 was a guard whose subject list was written by hand.
+R47_COPIES="$(python3 -I -B - "$REVIEW_FENCES" "$REVIEW_PR" "$REPO_ROOT/plugins/uberdev" <<'PY'
+import glob
+import os
+import re
+import sys
+
+fence_library, command_file, plugin_root = sys.argv[1:]
+DEF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+
+roster = set()
+for line in open(fence_library, encoding="utf-8"):
+    match = DEF.match(line)
+    if match:
+        roster.add(match.group(1))
+
+offenders = []
+if not roster:
+    offenders.append("library-defines-nothing")
+
+for line_no, line in enumerate(open(command_file, encoding="utf-8"), 1):
+    match = DEF.match(line)
+    if match and match.group(1) in roster:
+        offenders.append("review-pr.md:%d:%s" % (line_no, match.group(1)))
+
+for path in glob.glob(plugin_root + "/lib/*.sh"):
+    if os.path.abspath(path) == os.path.abspath(fence_library):
+        continue
+    for line_no, line in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
+        match = DEF.match(line)
+        if match and match.group(1) in roster:
+            offenders.append("%s:%d:%s" % (os.path.basename(path), line_no, match.group(1)))
+
+print("roster=%d" % len(roster))
+print("offenders=%s" % " ".join(sorted(offenders)))
+PY
+)" || R47_COPIES=''
+R47_COPY_ROSTER="$(printf '%s\n' "$R47_COPIES" | sed -n 's/^roster=//p')"
+R47_COPY_OFFENDERS="$(printf '%s\n' "$R47_COPIES" | sed -n 's/^offenders=//p')"
+if [ -n "$R47_COPIES" ] && [ "${R47_COPY_ROSTER:-0}" -ge 20 ] 2>/dev/null \
+   && [ -z "$R47_COPY_OFFENDERS" ]; then
+  echo "  PASS  R47.4 — lib/review-fences.sh is the single definition of all $R47_COPY_ROSTER cross-fence helpers"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  R47.4 — a fence helper is defined a second time under lib/: $R47_DUPES"
+  echo "  FAIL  R47.4 — a fence helper has a second definition outside lib/review-fences.sh"
+  echo "        roster: ${R47_COPY_ROSTER:-<none>}; copies: ${R47_COPY_OFFENDERS:-<none>}"
   FAIL=$((FAIL + 1))
 fi
 

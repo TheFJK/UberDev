@@ -1803,8 +1803,8 @@ _review_fleet_bind_repo_slug() {
 #
 # Rehydration closed the VARIABLE half -- a scalar minted in the setup fence and
 # read nine Workflow relays later expanded empty. It did nothing for the
-# FUNCTION half. commands/review-pr.md defines fourteen `review_*` helpers
-# inside markdown fences and calls them from OTHER fences:
+# FUNCTION half. commands/review-pr.md DEFINED twenty `review_*` helpers
+# inside markdown fences and called them from OTHER fences:
 # review_refresh_phase1_scope (Phase 2), review_assert_selected_pr_head and
 # review_publish_same_repo_pr_head (the trust trail), review_json_string and the
 # review_child_* builders (Phase 2.5), review_promote_validated_fixer_outcome,
@@ -1819,74 +1819,48 @@ _review_fleet_bind_repo_slug() {
 # not just fail, it accuses the repository of something that never happened --
 # which is why this went unchased for so long.
 #
-# WHY THE DEFINITIONS STAY IN THE MARKDOWN. Moving them into this file is the
-# obvious fix and the wrong one here. Four suites carve the definitions back out
-# of review-pr.md with literal, indentation-anchored greps and source the slice
-# (review-pr-phase3-ci, review-child-handoff, review-child-inputs,
-# trust-trail-base-identity). Shipping a second copy under lib/ to satisfy them
-# is exactly the #370 "one contract, N uncompared copies" class. So the markdown
-# stays the SINGLE definition and this loader is its ONE reader: extract the
-# marked slices, source them, keep no copy anywhere.
+# WHERE THE DEFINITIONS LIVE. lib/review-fences.sh, and nowhere else --
+# commands/review-pr.md keeps no copy, and tests/review-pr.test.sh R47.4 refuses
+# one, because two copies of one contract is the #370 "one contract, N
+# uncompared copies" class. The first cut of this loader kept the markdown as
+# the definition and awk-carved the slices back out at run time; that held the
+# single-copy property but shipped helpers that could not be syntax-checked or
+# read as code, and re-read a 7,000-line markdown file on every fence. They are
+# code, so they live in a file that is code, and this loader just sources it.
 
-# review_fleet_fence_library_marker -> the slice marker, named once.
+# review_fleet_fence_library_path -> the library, named once.
 #
-# A function rather than a constant so the extractor, the guard below and
+# A function rather than a constant so this loader, the guard below and
 # tests/review-pr.test.sh all read the same bytes instead of three string
 # literals that can drift apart.
-review_fleet_fence_library_marker() {
-  printf 'review-fence-lib-v1'
+review_fleet_fence_library_path() {
+  printf '%s/lib/review-fences.sh' "$UBERDEV_REVIEW_PLUGIN_ROOT"
 }
 
-# review_fleet_load_fence_library -- define the command file's own helpers here.
+# review_fleet_load_fence_library -- define commands/review-pr.md's helpers here.
 #
-# rc 0 with every marked slice sourced into THIS shell, or rc 2 with a message
-# on stderr. Called from review_fleet_rehydrate, so the 43 fences that already
-# carry the prologue gain the functions with no further edit.
+# rc 0 with every cross-fence helper defined in THIS shell, or rc 2 with a
+# message on stderr. Called from review_fleet_rehydrate, so every fence that
+# carries the prologue gains the functions with no call-site edit.
 review_fleet_load_fence_library() {
   [ "$#" -eq 0 ] || {
     echo "error: review_fleet_load_fence_library takes no arguments" >&2
     return 2
   }
-  local command_file marker library
-  marker="$(review_fleet_fence_library_marker)"
-  command_file="$UBERDEV_REVIEW_PLUGIN_ROOT/commands/review-pr.md"
+  local library_file defined_names preserved fence_fn
+  library_file="$(review_fleet_fence_library_path)"
   # A plugin root with no commands/ directory at all is a SYNTHETIC root: the
-  # behavioural harnesses build one that holds a lib/ and nothing else purely to
-  # exercise identity handling. Those callers never reach a fence helper, so
-  # loading nothing is correct for them. A root that HAS commands/ but is
-  # missing review-pr.md is a broken install and gets rc 2 -- the distinction
+  # behavioural harnesses build one that holds a shim lib/ and nothing else,
+  # purely to exercise identity handling. Those callers never reach a fence
+  # helper, so loading nothing is correct for them. A root that HAS commands/ but
+  # is missing the library is a broken install and gets rc 2 -- the distinction
   # keeps the fail-soft arm from swallowing the real defect it would otherwise
   # look identical to.
-  if [ ! -d "$UBERDEV_REVIEW_PLUGIN_ROOT/commands" ]; then
+  if [ ! -d "$UBERDEV_REVIEW_PLUGIN_ROOT/commands" ] && [ ! -r "$library_file" ]; then
     return 0
   fi
-  [ -r "$command_file" ] || {
-    echo "error: review-pr fence library is unreadable: $command_file" >&2
-    return 2
-  }
-  # VERBATIM -- deliberately no dedent. The marked slices sit in fences nested
-  # three to ten spaces deep inside list items, so re-indenting them to column 0
-  # looks tidier and would break them: every one of these helpers wraps a
-  # `python3 -I -B - <<'PY'` whose redirect line is indented but whose BODY and
-  # terminator are at column 0, because a quoted heredoc only closes on a
-  # terminator at column 0. Shifting the shell lines left would drag the Python
-  # bodies with them. Copying the fence bytes exactly is also the property that
-  # makes this loader honest: what gets sourced here is character-for-character
-  # what the fence that defines it would have run.
-  library="$(awk -v marker="$marker" '
-    index($0, "# BEGIN " marker) { active = 1; next }
-    index($0, "# END " marker)   { active = 0; next }
-    active { print }
-  ' "$command_file")" || {
-    echo "error: could not extract the review-pr fence library from $command_file" >&2
-    return 2
-  }
-  # Non-emptiness is a real assertion, not a formality: `eval ""` succeeds, so
-  # without this a renamed or deleted marker would leave every helper undefined
-  # and this function would still report success -- the same silent-empty shape
-  # #427 was.
-  [ -n "$library" ] || {
-    echo "error: review-pr fence library is empty: no '# BEGIN $marker' slice in $command_file" >&2
+  [ -r "$library_file" ] || {
+    echo "error: review-pr fence library is unreadable: $library_file" >&2
     return 2
   }
   # GAP-FILLING, the same doctrine review_fleet_rehydrate applies to scalars: a
@@ -1903,9 +1877,24 @@ review_fleet_load_fence_library() {
   #
   # `typeset -f` both asks "is this a shell function" and prints it back in
   # re-evaluable form, in zsh and in bash 3.2 alike. Capture, source, restore.
-  local defined_names preserved fence_fn
-  defined_names="$(printf '%s\n' "$library" |
-    sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)()[[:space:]]*{.*$/\1/p')"
+  #
+  # Read the names off the LIBRARY FILE, never off a hardcoded roster: a helper
+  # added there but forgotten here would be silently un-preservable, which is
+  # the same completeness-guard-disjoint-from-the-drift trap as #371.
+  #
+  # `^[[:space:]]*`, not `^`: tests/review-pr.test.sh R47.4 builds its roster
+  # with the same leading-space-tolerant pattern, and a stricter one here would
+  # let an indented definition be a helper R47.4 polices but this loader cannot
+  # preserve -- two readers of one roster that can disagree.
+  defined_names="$(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)()[[:space:]]*{.*$/\1/p' "$library_file")"
+  # Non-emptiness is a real assertion, not a formality: sourcing an empty file
+  # succeeds, so without this a truncated or renamed library would leave every
+  # helper undefined and this function would still report success -- the same
+  # silent-empty shape #427 was.
+  [ -n "$defined_names" ] || {
+    echo "error: review-pr fence library defines no helpers: $library_file" >&2
+    return 2
+  }
   preserved=''
   # Herestring, never `printf | while read`: a pipeline puts the loop body in a
   # SUBSHELL under bash, so every name appended to `preserved` would be
@@ -1916,8 +1905,8 @@ review_fleet_load_fence_library() {
     preserved="$preserved
 $(typeset -f "$fence_fn")"
   done <<<"$defined_names"
-  eval "$library" || {
-    echo "error: review-pr fence library failed to load from $command_file" >&2
+  . "$library_file" || {
+    echo "error: review-pr fence library failed to load from $library_file" >&2
     return 2
   }
   [ -z "$preserved" ] || eval "$preserved" || {
