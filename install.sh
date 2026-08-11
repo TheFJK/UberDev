@@ -4,7 +4,16 @@
 # Works around an upstream Claude Code bug where `/plugin install` populates
 # the cache + installed_plugins.json but does NOT write enabledPlugins in
 # ~/.claude/settings.json — so commands silently 404 until that key is
-# patched in by hand. Refs: anthropics/claude-code#20661, #15524.
+# patched in by hand.
+#
+# Upstream state, re-checked 2026-08-10:
+#   LIVE  anthropics/claude-code#14815 — open; the bug this script works around.
+#   DEAD  anthropics/claude-code#20661 — closed 2026-01-29, duplicate (folded into #17832).
+#   DEAD  anthropics/claude-code#17832 — closed 2026-03-30, not_planned (declined upstream).
+#   DEAD  anthropics/claude-code#15524 — closed 2025-12-31, duplicate.
+# The bug is unfixed, so this script is still load-bearing. Do not read the
+# closed issues above as evidence it was fixed — they were folded or declined,
+# never resolved.
 #
 # What this script does:
 #   1. Best-effort runs the marketplace-add + install slash commands via
@@ -69,6 +78,16 @@ else
   echo "     /plugin install ${PLUGIN_KEY}" >&2
 fi
 
+# BEGIN settings-mutation — the ONLY region of this script that writes
+# ~/.claude/settings.json. Everything outside these two markers is preflight,
+# best-effort slash commands, or error output. README.md's "What the script
+# does to ~/.claude/settings.json" section quotes the one-line sed command
+# that prints exactly this region, so a reader can audit the dangerous part
+# without reading the whole file. The marker strings are deliberately not
+# repeated anywhere else in this script — a second copy would truncate that
+# sed range. tests/install.test.sh I12 pins the pair and ratchets against a
+# future settings write escaping the fence.
+#
 # ── Step 2: jq-patch enabledPlugins (the actual bug workaround) ───────────────
 mkdir -p "${SETTINGS_DIR}" || {
   echo "ERROR: failed to create ${SETTINGS_DIR}." >&2
@@ -120,6 +139,7 @@ if ! mv "${TMP}" "${SETTINGS}"; then
   echo "       Check permissions on ${SETTINGS_DIR}, then re-run." >&2
   exit 1
 fi
+# END settings-mutation
 
 echo "✓ uberdev installed and enabled in ${SETTINGS}."
 echo "  Restart Claude Code (or run /reload-plugins) to load the plugin."

@@ -23,6 +23,12 @@
 #      than the reader. Section T9 below makes both halves enforceable: no
 #      `*.md:N` / `*.sh:N` literal inside §1 or the contract table, and every
 #      named symbol grep-resolves in plugins/uberdev/.
+#   7. (#435) `--auto` is a permission BYPASS, and since RFC 0015 §5 the default
+#      `workflow` backend does not scope it to the per-issue solvers at all.
+#      Section T11 below pins both halves: every line documenting the flag must
+#      carry a danger token, the flag PAIR must be named wherever the semantics
+#      are described, no doc may repeat the now-false "on the spawned agent"
+#      claim, and no doc may sell it as "max autonomy".
 #
 # These are structural greps over the shipped docs/shell files — they exercise
 # the source bytes, not a running session. Every assertion below FAILS on the
@@ -716,6 +722,317 @@ for dead_backend_witness in \
     FAIL=$((FAIL + 1))
   fi
 done
+
+# ── T11: `--auto` is documented as a permission BYPASS, correctly scoped (#435) ─
+# Two drift classes on one flag, and they compound:
+#
+#   1. UNDER-LABELLED. `--auto` resolves to the bypass PAIR
+#      `--dangerously-skip-permissions --permission-mode bypassPermissions`
+#      (#241 collapsed the dead AUTO middle tier into the strict bypass; #246
+#      established that both flags are needed because they target different
+#      mechanisms). Several surfaces documented it as a mere convenience flag —
+#      `README.md` even called `/turbo … --auto` "max autonomy", which reads as
+#      an endorsement of the documented happy path rather than a warning.
+#   2. MIS-SCOPED. Since RFC 0015 §5 the DEFAULT `workflow` backend runs the
+#      per-issue solvers as agents in the calling session, so they inherit ITS
+#      permission tier — the flag pair reaches a child's argv only on
+#      `--backend=wezterm|background` and on the `/merge` + `/review-pr`
+#      dispatches. `commands/solve.md` still promised the bypass was applied
+#      "on the spawned agent", which is now false on the default path.
+#
+# The rule mirrors T10: a line is allowed to NAME the flag, but a line that
+# DOCUMENTS it must carry a danger token, and no line may make the unscoped
+# spawned-agent claim. Tokens are ASCII-only on purpose — both CI jobs are
+# ubuntu + Windows Git Bash, and this repo has no precedent for a multi-byte
+# emoji inside an ERE, so ⚠️ may decorate the prose but must never be the only
+# thing marking a line as dangerous.
+AUTO_DOC_SURFACES="README.md
+plugins/uberdev/commands/solve.md
+plugins/uberdev/commands/turbo.md
+plugins/uberdev/skills/solve-pipeline/SKILL.md
+plugins/uberdev/skills/solve-fleet/SKILL.md
+plugins/uberdev/skills/using-uberdev/references/configuration.md"
+# The flag PAIR is a claim about semantics, so it is pinned only where the
+# semantics are actually described — including goal.md, which documents the
+# same pair for its detached children but names no `--auto` flag of its own.
+AUTO_PAIR_SURFACES="README.md
+plugins/uberdev/commands/solve.md
+plugins/uberdev/commands/turbo.md
+plugins/uberdev/commands/goal.md
+plugins/uberdev/skills/solve-pipeline/SKILL.md"
+GOAL_MD="$REPO_ROOT/plugins/uberdev/commands/goal.md"
+# lib/solve-launcher.sh is deliberately NOT in AUTO_DOC_SURFACES: its nine
+# `--auto`/`SOLVE_AUTO` lines are argv-parser code, and a per-line danger-token
+# rule over source would red every one of them. It is covered by T11.7 (the
+# runtime note) and T11.9 (anti-vacuity) instead.
+SOLVE_LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+
+# T11.0 — preflight. A moved surface must be a hard failure, never a silent
+# zero-assertion PASS (suite convention).
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  [ -r "$REPO_ROOT/$auto_surface" ] || {
+    echo "FATAL: --auto documentation surface missing or unreadable: $REPO_ROOT/$auto_surface" >&2
+    exit 2
+  }
+done <<EOF
+$AUTO_DOC_SURFACES
+$AUTO_PAIR_SURFACES
+EOF
+for auto_extra in "$GOAL_MD" "$SOLVE_LAUNCHER"; do
+  [ -r "$auto_extra" ] || {
+    echo "FATAL: required file missing or unreadable: $auto_extra" >&2
+    exit 2
+  }
+done
+
+# Does any LINE of TEXT match all three (lowercased) EREs? awk rather than
+# `grep | grep`, so there is no pipeline exit status for pipefail to poison
+# (tests/epipe-guard.test.sh). Pass '.' for an unused slot.
+auto_line_has_all() {
+  awk -v p1="$1" -v p2="$2" -v p3="$3" '
+    { l = tolower($0) }
+    l ~ p1 && l ~ p2 && l ~ p3 { found = 1 }
+    END { exit !found }
+  ' <<<"$4"
+}
+
+# T11.1 — the bypass is a flag PAIR (#246): both flags target different
+# mechanisms and both are needed. Documenting one without the other invites a
+# future "simplification" that drops the half nobody wrote down. File-level,
+# not block-level: markdown has no reliable `--auto`-block delimiter, and a
+# heuristic one would be a worse lie than no assertion.
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  assert_grep "$REPO_ROOT/$auto_surface" 'dangerously-skip-permissions' \
+    "T11.1 $auto_surface names --dangerously-skip-permissions"
+  assert_grep "$REPO_ROOT/$auto_surface" 'permission-mode bypassPermissions' \
+    "T11.1 $auto_surface names the other half of the pair (--permission-mode bypassPermissions)"
+done <<EOF
+$AUTO_PAIR_SURFACES
+EOF
+
+# T11.2 — the backend scoping is stated. One line must carry all of
+# `inherit` + `session` + `permission|bypass`, so a line about inheriting the
+# session's MODEL (which configuration.md already had) cannot satisfy it.
+auto_scope_missing=""
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  if ! auto_line_has_all 'inherit' 'session' 'permission|bypass' \
+        "$(cat "$REPO_ROOT/$auto_surface")"; then
+    auto_scope_missing="${auto_scope_missing}${auto_surface}
+"
+  fi
+done <<EOF
+$AUTO_DOC_SURFACES
+plugins/uberdev/commands/goal.md
+EOF
+if [ -z "$auto_scope_missing" ]; then
+  echo "  PASS  T11.2 every --auto surface states that the default backend's solvers inherit the session's permission tier"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.2 surfaces with no 'solvers inherit the session's permission tier' line:"
+  printf '%s' "$auto_scope_missing" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.3 — every line that DOCUMENTS the flag carries an ASCII danger token.
+AUTO_DANGER_TOKEN='dangerous|bypass|no prompts|skip.*permission'
+# Two pure flag-GRAMMAR enumerations: they list `--auto` among the parser's
+# accepted tokens and make no claim about what it does, so a danger token
+# there would be noise. Fixed strings, and T11.3b fails if either rots away —
+# a stale exemption is a silent hole in the scan.
+AUTO_GRAMMAR_EXEMPT_1='`--trivial|--small|--full`, `--auto`, `--force`, routing/model/effort/service'
+AUTO_GRAMMAR_EXEMPT_2='`--trivial|--small|--full`, `--auto`, `--force`/`-f`, `--effort=<level>`,'
+AUTO_EXEMPT_FILE="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
+auto_danger_hits=""
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    # `--auto-mode` is a launcher argv selector (turbo-vs-interactive), not the
+    # permission flag. Delete the string and RE-MATCH rather than skipping the
+    # whole line: a line could legitimately carry both forms.
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto|SOLVE_AUTO|solve_auto' <<<"$auto_line_stripped" || continue
+    grep -qF -e "$AUTO_GRAMMAR_EXEMPT_1" <<<"$auto_line" && continue
+    grep -qF -e "$AUTO_GRAMMAR_EXEMPT_2" <<<"$auto_line" && continue
+    grep -qiE -e "$AUTO_DANGER_TOKEN" <<<"$auto_line" && continue
+    auto_danger_hits="${auto_danger_hits}${auto_surface}: ${auto_line}
+"
+  done <<EOF
+$(grep -nE -e '--auto' -e 'SOLVE_AUTO' -e 'solve_auto' "$REPO_ROOT/$auto_surface" 2>/dev/null || true)
+EOF
+done <<EOF
+$AUTO_DOC_SURFACES
+EOF
+if [ -z "$auto_danger_hits" ]; then
+  echo "  PASS  T11.3 every line documenting --auto carries an ASCII danger token"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.3 --auto is documented with nothing on the line marking it a permission bypass:"
+  printf '%s' "$auto_danger_hits" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.3b — the exemption list cannot rot into a silent hole.
+assert_grep_fixed_docs() {
+  local file="$1" needle="$2" desc="$3"
+  if grep -qF -e "$needle" "$file"; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        file: $file"; echo "        needle: $needle"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_grep_fixed_docs "$AUTO_EXEMPT_FILE" "$AUTO_GRAMMAR_EXEMPT_1" \
+  "T11.3b grammar exemption 1 still resolves (else T11.3 has a stale hole)"
+assert_grep_fixed_docs "$AUTO_EXEMPT_FILE" "$AUTO_GRAMMAR_EXEMPT_2" \
+  "T11.3b grammar exemption 2 still resolves (else T11.3 has a stale hole)"
+
+# T11.4 — negative: no shipped doc may claim the bypass is applied "on the
+# spawned agent" without naming the scope that makes it true. On the default
+# `workflow` backend there is no per-child argv at all.
+# CHANGELOG.md and docs/ are exempt: append-only history and RFC prose describe
+# the world as it was when written.
+auto_unscoped_hits=""
+while IFS= read -r shipped_md; do
+  case "$shipped_md" in
+    ./CHANGELOG.md|./docs/*|./.git/*|*/node_modules/*) continue ;;
+  esac
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto' <<<"$auto_line_stripped" || continue
+    grep -qE -e 'on the spawned agent' <<<"$auto_line" || continue
+    grep -qiE -e 'inherit|session|--backend=' <<<"$auto_line" && continue
+    auto_unscoped_hits="${auto_unscoped_hits}${shipped_md}: ${auto_line}
+"
+  done <<EOF
+$(grep -nE -e '--auto' "$shipped_md" 2>/dev/null || true)
+EOF
+done <<EOF
+$(cd "$REPO_ROOT" && find . -type f -name '*.md' \
+    -not -path './.git/*' -not -path '*/node_modules/*' | sort)
+EOF
+if [ -z "$auto_unscoped_hits" ]; then
+  echo "  PASS  T11.4 no shipped .md claims --auto applies the bypass 'on the spawned agent' unscoped"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.4 unscoped spawned-agent bypass claim (false on the default workflow backend):"
+  printf '%s' "$auto_unscoped_hits" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.5 — negative: a permission bypass is not a feature to endorse. Neither
+# surface may present `--auto` as the recommended maximum-autonomy setup.
+assert_absent_fixed "$REPO_ROOT/README.md" "max autonomy" \
+  "T11.5 README does not sell --auto as 'max autonomy'"
+assert_absent_fixed "$REPO_ROOT/plugins/uberdev/commands/turbo.md" "max-autonomy combo" \
+  "T11.5 turbo.md does not sell '/turbo <issue> --auto' as the max-autonomy combo"
+
+# T11.5b — goal.md already leads with the default-backend posture before the
+# bypass paragraph (RFC 0015 §6 R-1b). Regression pin on correct prose: reorder
+# it and the reader meets the bypass before learning it does not apply.
+goal_scope_line="$(awk 'tolower($0) ~ /inherit/ && tolower($0) ~ /session/ { print NR; exit }' "$GOAL_MD")"
+goal_bypass_line="$(awk '/dangerously-skip-permissions/ { print NR; exit }' "$GOAL_MD")"
+if [ -n "$goal_scope_line" ] && [ -n "$goal_bypass_line" ] \
+   && [ "$goal_scope_line" -lt "$goal_bypass_line" ]; then
+  echo "  PASS  T11.5b goal.md states the inherit-the-session posture (line $goal_scope_line) before the bypass (line $goal_bypass_line)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.5b goal.md's scoping statement must precede its bypass paragraph (scope='${goal_scope_line}' bypass='${goal_bypass_line}')"
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.6 — `--i-know-what-im-doing` is documented in goal.md exactly once, in a
+# negative call-out ("NEVER inherited"). A second mention is how a negative
+# call-out turns into an instruction.
+GOAL_OVERRIDE_COUNT="$(grep -c -e '--i-know-what-im-doing' "$GOAL_MD" || true)"
+if [ "${GOAL_OVERRIDE_COUNT:-0}" -eq 1 ]; then
+  echo "  PASS  T11.6 goal.md mentions --i-know-what-im-doing exactly once (the negative call-out)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.6 expected exactly 1 --i-know-what-im-doing mention in goal.md, found ${GOAL_OVERRIDE_COUNT:-0}"
+  FAIL=$((FAIL + 1))
+fi
+
+# T11.7 — the launcher tells the OPERATOR at run time, not only the docs. The
+# `Permission mode:` line it prints is emitted before the backend is resolved
+# (UBERDEV_RESOLVED_BACKEND is exported later, by lib/dispatch.sh), so the
+# correction has to live in the workflow branch where the backend IS known.
+auto_note_line_no=""
+while IFS= read -r auto_note_cand; do
+  [ -n "$auto_note_cand" ] || continue
+  grep -qE -e 'backend=workflow' <<<"$auto_note_cand" || continue
+  grep -qE -e 'inherit' <<<"$auto_note_cand" || continue
+  grep -qE -e 'RFC 0015' <<<"$auto_note_cand" || continue
+  auto_note_line_no="${auto_note_cand%%:*}"
+  break
+done <<EOF
+$(grep -n -e 'backend=workflow' "$SOLVE_LAUNCHER" 2>/dev/null || true)
+EOF
+if [ -z "$auto_note_line_no" ]; then
+  echo "  FAIL  T11.7 lib/solve-launcher.sh emits no backend=workflow note naming the inherited tier + RFC 0015"
+  FAIL=$((FAIL + 1))
+else
+  auto_guard_start=$((auto_note_line_no - 3))
+  [ "$auto_guard_start" -lt 1 ] && auto_guard_start=1
+  auto_guard_slice="$(sed -n "${auto_guard_start},$((auto_note_line_no - 1))p" "$SOLVE_LAUNCHER")"
+  if auto_line_has_all 'auto_permissions' 'skip_permissions' '.' "$auto_guard_slice"; then
+    echo "  PASS  T11.7 the backend=workflow note exists (line $auto_note_line_no) and fires only under a resolved bypass tier"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T11.7 the backend=workflow note is not guarded by AUTO_PERMISSIONS/SKIP_PERMISSIONS within 3 lines above it"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# T11.8 — `solve_auto` means the permission bypass, NOT brainstorm auto-accept
+# (that is `/turbo`). README's config comment said the wrong one outright, and
+# the shipped config reference did not document the key at all.
+readme_solve_auto="$(grep -n -e '^solve_auto:' "$REPO_ROOT/README.md" || true)"
+if [ -n "$readme_solve_auto" ] \
+   && grep -qiE -e 'permission|bypass' <<<"$readme_solve_auto" \
+   && ! grep -qiE -e 'brainstorm' <<<"$readme_solve_auto"; then
+  echo "  PASS  T11.8 README's solve_auto key is described as a permission bypass, not brainstorm auto-accept"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T11.8 README's solve_auto key is missing, or still described as brainstorm auto-accept"
+  echo "        line: ${readme_solve_auto:-<absent>}"
+  FAIL=$((FAIL + 1))
+fi
+assert_grep "$CONFIG_REF" '^solve_auto:' \
+  "T11.8 the shipped config reference documents the solve_auto key"
+
+# T11.9 — anti-vacuity. Every scan above is a loop over greps; a renamed flag,
+# a misrooted path or an emptied file would report a silent PASS (T10.2 shape).
+while IFS= read -r auto_surface; do
+  [ -n "$auto_surface" ] || continue
+  auto_witness=""
+  while IFS= read -r auto_line; do
+    [ -n "$auto_line" ] || continue
+    auto_line_stripped="$(sed 's/--auto-mode//g' <<<"$auto_line")"
+    grep -qE -e '--auto|SOLVE_AUTO|solve_auto' <<<"$auto_line_stripped" || continue
+    auto_witness="$auto_line"
+    break
+  done <<EOF
+$(grep -nE -e '--auto' -e 'SOLVE_AUTO' -e 'solve_auto' "$REPO_ROOT/$auto_surface" 2>/dev/null || true)
+EOF
+  if [ -n "$auto_witness" ]; then
+    echo "  PASS  T11.9 $auto_surface still documents --auto for T11.3 to read"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T11.9 $auto_surface has no --auto mention at all — T11.3 is vacuous for it"
+    FAIL=$((FAIL + 1))
+  fi
+done <<EOF
+$AUTO_DOC_SURFACES
+EOF
+assert_grep "$GOAL_MD" 'bypassPermissions' \
+  "T11.9 goal.md still carries a bypassPermissions line for T11.1/T11.5b to read"
+assert_grep "$SOLVE_LAUNCHER" 'AUTO_PERMISSIONS' \
+  "T11.9 lib/solve-launcher.sh still carries AUTO_PERMISSIONS for T11.7 to read"
 
 echo
 echo "== Summary =="

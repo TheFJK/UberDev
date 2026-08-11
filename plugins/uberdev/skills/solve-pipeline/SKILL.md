@@ -117,13 +117,22 @@ without `--force`) prints **all** errors and aborts with `no claims written;
 no agents dispatched`. Root routes and immutable contexts for the complete
 batch are resolved before Step 4.5; partial claims or dispatches are forbidden.
 
-Permission tiers: `--auto` (or `SOLVE_AUTO=1`, or `solve_auto: true` in
-`.claude/uberdev.local.md`) sets `AUTO_PERMISSIONS=1`, which resolves to the
-same bypass pair as `SKIP_PERMISSIONS=1` (`--dangerously-skip-permissions
---permission-mode bypassPermissions`, #241/#246). `AUTO_PERMISSIONS` is
-distinct from `AUTO_MODE` (turbo-vs-interactive); the launcher prints the
-resolved `Permission mode:` line for operator attribution, and
-`AUTO_PERMISSIONS` reaches `lib/dispatch.sh` in-process.
+Permission tiers: `--auto` is a permission **bypass**; so is the `SOLVE_AUTO=1`
+env var, and so is the `solve_auto: true` bypass key in `.claude/uberdev.local.md`.
+Each sets `AUTO_PERMISSIONS=1`, which resolves to the same pair as `SKIP_PERMISSIONS=1`
+(`--dangerously-skip-permissions --permission-mode bypassPermissions`,
+#241/#246; both flags are required, they target different mechanisms).
+`AUTO_PERMISSIONS` is distinct from `AUTO_MODE` (turbo-vs-interactive); the
+launcher prints the resolved `Permission mode:` line for operator attribution,
+and `AUTO_PERMISSIONS` reaches `lib/dispatch.sh` in-process.
+
+Scope: on the default `workflow` backend that pair is never applied per child —
+solver agents run in the calling **session** and inherit **its** permission
+tier, because the Workflow API exposes no per-agent permission option
+(RFC 0015 §6 R-1b). It reaches a child's argv only on
+`--backend=wezterm|background`. Step 5w therefore emits a stderr note whenever
+a bypass tier was resolved but the resolved backend is `workflow`, so the
+`Permission mode:` line above cannot be read as a per-solver guarantee.
 
 ### 4.5. Claim protocol — mark issue ACTIVE (v0.28.0; verification v0.37)
 
