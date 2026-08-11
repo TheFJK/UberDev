@@ -3115,6 +3115,30 @@ EOF_VERIFY_AUDIT
     ```bash
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
     review_fleet_rehydrate || return 2
+    # The verdict AND the payload it was distilled from, both off disk. PROBE is
+    # a different process, so this fence read two empty strings and its entry
+    # test `[ "$PROBE_VERDICT" = "empty" ]` was false for a probe that really
+    # was empty -- the settle loop never ran, and a just-pushed PR whose checks
+    # had not registered yet fell straight through to skipped_no_checks. That is
+    # the "premature GREEN on a PR whose CI had not started" shape.
+    CI_SETTLE_READ_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle cannot resolve the run directory to read the probe." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_VERDICT="$(review_fleet_read_ci_probe_verdict "$CI_SETTLE_READ_DIR/ci-probe-verdict.txt")" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle has no recorded probe verdict; refusing to decide whether CI has settled from a value it never read." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_unreadable
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_JSON="$(review_fleet_read_ci_probe_json "$CI_SETTLE_READ_DIR/ci-probe.json")" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle has no recorded probe payload." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     if [ "$PROBE_VERDICT" = "empty" ] || printf '%s' "$PROBE_JSON" | grep -q 'no checks reported on the'; then
       HEAD_AGE_SEC=$(( $(date +%s) - $(git show -s --format=%ct HEAD) ))
       SETTLE_REPROBES_USED=0
@@ -6120,7 +6144,8 @@ REVIEW_FINAL_FENCE_RC=0
 python3 -I -B - \
   "$REVIEW_RUN_RESERVATION_RECEIPT" \
   "$AUDIT_JSON_PAYLOAD" \
-  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY' || REVIEW_FINAL_FENCE_RC=$?
+  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" \
+  "$RUN_ID" <<'PY' || REVIEW_FINAL_FENCE_RC=$?
 import base64
 import importlib.util
 import json
@@ -6129,7 +6154,7 @@ import re
 import stat
 import sys
 
-receipt_text, payload_text, module_path = sys.argv[1:]
+receipt_text, payload_text, module_path, expected_run_id = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("uberdev_review_final_manifest", module_path)
 if spec is None or spec.loader is None:
     print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
@@ -6161,6 +6186,16 @@ def decode_receipt(value):
         or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
     ):
         raise module.ManifestRejected("review_reservation_receipt_invalid")
+    # The receipt must belong to THIS run, not merely to some run.
+    #
+    # Every check above is internal: the token is well-formed, canonical, and
+    # agrees with its own run_dir. None of them ask whether it is the receipt
+    # for the verdict being published. Two concurrent reviews in one checkout
+    # each mint a valid receipt, and the carry line is copied by hand between
+    # fences -- so pasting review A receipt onto review B verdict published
+    # B audit JSON and retired B markers under A authority, rc 0, silently.
+    if expected_run_id and receipt["run_id"] != expected_run_id:
+        raise module.ManifestRejected("review_reservation_receipt_foreign_run")
     for key in ("runs_root_identity", "run_dir_identity"):
         identity = receipt[key]
         if (
