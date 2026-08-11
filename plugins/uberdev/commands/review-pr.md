@@ -2243,7 +2243,18 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
    # per the artifact-emission-failure prose (trust-signal contract broken).
    POST_FIXER_HEAD_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
-   if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+   # ABSENT is not CHANGED. rehydrate reads the validated head back off
+   # reviewed-head.txt; if there is no record, this fence knows nothing about
+   # what the fixers authorised and must say so. It used to fall into the
+   # comparison below with the empty string, where any real HEAD differs from
+   # "" -- so a run whose head never moved was told its head had moved outside
+   # the fixers, and the operator went looking for a commit that did not exist.
+   if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+     echo "error: no validated fixer head on record for this run; refusing publication because this fence cannot tell an unmoved HEAD from an unauthorised one" >&2
+     OUTCOME=halted
+     exit 2
+   fi
+   if [ "$POST_FIXER_HEAD_SHA" != "$VALIDATED_FIXER_HEAD_SHA" ]; then
      echo "error: HEAD changed outside the validated review fixers; refusing publication" >&2
      exit 2
    fi

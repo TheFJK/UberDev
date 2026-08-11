@@ -1659,7 +1659,16 @@ grep -qF 'review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER
   || FIXER_CHAIN_OK=0
 
 PROMOTION_REGION="$(awk '/^[[:space:]]*6a\. \*\*Post-fixer push/{active=1} active{print} /^[[:space:]]*6b\. \*\*Phase 2\.5/{exit}' "$REVIEW_PR")"
-grep -qF 'if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then' <<<"$PROMOTION_REGION" \
+# ABSENT is refused BEFORE the inequality, and the inequality no longer carries
+# a `:-` default. The old shape compared against `${VALIDATED_FIXER_HEAD_SHA:-}`,
+# so a run with no record on file took the "changed" branch -- any real HEAD
+# differs from the empty string -- and reported a head that moved outside the
+# fixers at a run whose head had not moved at all. Both rows are pinned: drop
+# the emptiness guard and the first fails, reintroduce the `:-` default and the
+# second fails.
+grep -qF 'if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then' <<<"$PROMOTION_REGION" \
+  || FIXER_CHAIN_OK=0
+grep -qF 'if [ "$POST_FIXER_HEAD_SHA" != "$VALIDATED_FIXER_HEAD_SHA" ]; then' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
 grep -qF 'review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0

@@ -1989,6 +1989,62 @@ _review_fleet_bind_pr() {
 # itself hard-fail here would turn "no network" into "every fence is broken",
 # and would put a gh round-trip in the path of harnesses that never touch a
 # remote.
+# _review_fleet_bind_carrier_backend DESCRIPTOR
+#
+# The dispatch backend this run's children were launched on.
+#
+# `uberdev_prepare_run_carrier` derives it once, in the SETUP fence, from the
+# validated route context's `root_decision.backend`. Every later fence is a
+# separate process, so `UBERDEV_CARRIER_BACKEND` was the empty string there --
+# and the Phase 1 evidence builder passes it straight into
+# `post_review_validated_evidence_complete` as `expected_backend`, which refuses
+# anything outside {workflow, wezterm, background}.
+#
+# The empty string is outside that set, so a complete, healthy 7-reviewer fanout
+# died `roster-mismatch` with `edge=unknown index=unknown` and the aggregate was
+# suppressed -- a message about the ROSTER, on a run whose roster was perfect and
+# whose backend simply had not travelled. Found by running /review-pr for real:
+# no static scan sees it, because the name is bound in lib/child-dispatch.sh
+# rather than in any fence, so a "assigned in fence X, read in fence Y" search
+# never pairs them.
+#
+# Re-derived, not carried: the descriptor already names the context file, the
+# context file is identity-checked when it is written, and the backend is a
+# property of the launch decision that cannot change mid-run.
+_review_fleet_bind_carrier_backend() {
+  # The argument is the descriptor's CONTENTS, not its path -- the same bytes
+  # UBERDEV_COMMAND_WORKSPACE_JSON carries. Reading it as a filename is the
+  # mistake that made the first cut of this binder a silent no-op.
+  local descriptor="${1:-}" context_file backend
+  [ -z "${UBERDEV_CARRIER_BACKEND:-}" ] || return 0
+  [ -n "$descriptor" ] || return 0
+  context_file="$(python3 -I -B -c 'import json,sys
+try:
+    value=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+if not isinstance(value,dict):
+    raise SystemExit(0)
+print(value.get("context_file") or "",end="")' "$descriptor" 2>/dev/null)" || return 0
+  [ -n "$context_file" ] || return 0
+  [ -r "$context_file" ] || return 0
+  backend="$(python3 -I -B -c 'import json,sys
+try:
+    value=json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+decision=value.get("root_decision")
+if not isinstance(decision,dict):
+    raise SystemExit(0)
+print(decision.get("backend") or "",end="")' "$context_file" 2>/dev/null)" || return 0
+  # Shape-checked against the same enum the evidence builder allows. Binding an
+  # unrecognised token here would trade one misleading refusal for another.
+  case "$backend" in
+    workflow | wezterm | background) UBERDEV_CARRIER_BACKEND="$backend" ;;
+    *) return 0 ;;
+  esac
+}
+
 _review_fleet_bind_repo_slug() {
   local research_dir="${1:-}" cache slug=''
   [ -z "${REVIEW_REPO_SLUG:-}" ] || return 0
@@ -2439,6 +2495,7 @@ REVIEW_FLEET_REHYDRATE_EOF
   MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
   _review_fleet_bind_pr "$resolved_run_dir"
   _review_fleet_bind_repo_slug "$resolved_research_dir"
+  _review_fleet_bind_carrier_backend "$_review_fleet_descriptor"
   # The reviewed head, READ BACK -- see review_fleet_write_reviewed_head for why
   # this one is never recomputed. Gap-filling like every other binder here: a
   # value already established in THIS process wins, so the fence that advances
@@ -2481,6 +2538,7 @@ REVIEW_FLEET_REHYDRATE_EOF
   export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
   export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
   export REVIEW_PR_TIMEOUT
+  [ -z "${UBERDEV_CARRIER_BACKEND:-}" ] || export UBERDEV_CARRIER_BACKEND
   [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] || export VALIDATED_FIXER_HEAD_SHA
   [ -z "${REVIEWED_HEAD_SHA:-}" ] || export REVIEWED_HEAD_SHA
   [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR

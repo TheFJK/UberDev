@@ -4,6 +4,69 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.17] — 2026-08-12
+
+`/review-pr` could not run end-to-end. #427 (v0.45.13) fixed the VARIABLE half of
+its fence-scoped-state defect and nobody asked whether the same shape applied to
+functions. It did, sixteen times over, and to nine more values besides.
+
+Every fix below was verified by executing the thing, not by reading it or by the
+suite going green — the suite was green throughout, which is the point.
+
+### Fixed
+
+- **Sixteen helpers were defined inside markdown fence bodies and called from
+  other fences.** Every fence is a fresh shell, so those calls were
+  `command not found` in any real run. They now live in `lib/review-fences.sh`,
+  loaded by the prologue every fence already carries.
+- **`audit` had 65 call sites and no definition in any shipped file.** A bare
+  `audit` resolved to `/usr/sbin/audit` on macOS (rc 255) and command-not-found
+  on Linux CI (rc 127). Thirteen calls sit in tail position and two fences END
+  with one, so a fully successful path exited non-zero.
+- **A trust trail could report GREEN on a PR with BLOCKER findings.** The verdict
+  read `${BY_SEVERITY_BLOCKER:-0}` and `${PHASE2_5_HALTED:-false}` — the values a
+  lost carrier produces, both meaning "clean". Losing everything failed closed;
+  losing only the Phase 2.5 counts, which is what happens when the controller
+  re-emits the phase verdicts it holds but not the counts that came back inside
+  a child's YAML, emitted GREEN. GREEN is the `uberdev-approved` label and the
+  `Reviewed-by:` trailer `/merge` accepts as authorisation to land.
+- **Phase 3 minted its fixer authority over nine empty values.** ROUTE computed
+  the edge, lease, base identity and branch pair; the dispatch fence read them
+  all back blank. The comment claiming `prepare-ci-authority` "re-checks" them
+  was wrong — that tool receives them as argv and cannot re-derive what it is
+  handed empty, so every downstream `read-ci-authority-member` recovered the
+  empties faithfully.
+- **CLASSIFY selected the failing check from an empty probe payload**, then
+  halted `classification_run_selection_invalid` — a message about a malformed
+  selection, on a probe never handed anything to select from.
+- **The settle loop never ran.** It tests `[ "$PROBE_VERDICT" = "empty" ]` to
+  decide whether CI has registered yet; that read the empty string, so the test
+  was false for a probe that really was empty and a just-pushed PR fell straight
+  through to `skipped_no_checks`.
+- **The reservation receipt was not bound to the run it published.** Two
+  concurrent reviews each mint a valid receipt, so pasting one onto the other's
+  verdict published the wrong audit JSON and retired the wrong markers, rc 0.
+- **The reviewed head is now recorded, never recomputed.** `git rev-parse HEAD`
+  at the consuming fence always agrees with itself, which is exactly the
+  comparison the anti-race gate exists to fail — recomputing it deletes the check
+  while leaving code that looks like a check in place.
+- **Absent is no longer reported as changed.** A run whose head never moved was
+  told its head moved outside the validated fixers, because the guard compared
+  against `${VALIDATED_FIXER_HEAD_SHA:-}` and any real SHA differs from "".
+- **The child timeout reached the dispatcher blank** at five call sites.
+
+### Notes
+
+Some values can be re-derived and some can only be read back. A configured
+constant recomputed from the same expression is exact; a measurement of what a
+run did can only be persisted. Recomputing a measurement is how the false-GREEN
+trail happened, and the two are deliberately handled differently here.
+
+Three names that LOOK unestablished are not — `REVIEW_REPO_SLUG`,
+`CHANGED_PATHS_JSON` and `REVIEW_FIXER_LAUNCH_BINDING` are bound non-locally by
+helpers in the same shell. A static "assigned in this fence?" scan reports all
+three as defects. They are recorded here so they do not get "fixed".
+
 ## [0.45.16] — 2026-08-12
 
 ### Fixed
