@@ -177,6 +177,41 @@ builder_names = ("review_json_string", "review_child_record", "review_child_fano
                  "review_guard_failed_fixer_return", "review_fixer_child_bound")
 write("review-builder.sh", "\n".join(library_definition(name) for name in builder_names))
 
+# The production review_fixer_child_bound under a second name, renamed in the
+# SOURCE BYTES. #471. The shell below stubs review_fixer_child_bound (it owns a
+# repository transaction this payload suite has no business driving) and still
+# needs the real one for the bind-failure case, so it needs a copy under another
+# name. It used to make that copy with
+#   eval "$(declare -f review_fixer_child_bound | sed 1s/<name>/<name>_production/)"
+# which is the exact mechanism #471 removed from the fence-library loader:
+# `declare -f` re-prints a function from the shell's PARSE TREE, not from the
+# bytes it was defined from, and stock macOS /bin/bash (3.2) re-emits THIS
+# helper's `cmd <<'PY' || {` with the `|| {` orphaned after the PY terminator --
+# "syntax error near `||'".
+#
+# And `set -e` does NOT catch that. A syntax error inside `eval` terminates a
+# bash 3.2 shell where it stands and leaves the exit status at 0, so the suite
+# stopped ~700 lines short of its last assertion and reported success. Measured:
+# `/bin/bash tests/review-child-inputs.test.sh` printed that syntax error and
+# exited 0; with this rename it runs on past the eval (and then hits the
+# separate, pre-existing bash-3.2 wall at the first `$BASHPID`, loudly, rc 1).
+#
+# CI never saw any of it. review_fixer_child_bound is the helper bash 3.2
+# mangles; ubuntu-latest's bash re-emits THIS one cleanly (verified on 5.2.37 --
+# it mangles review_child_fanout instead), and Windows skips this fixture
+# entirely. Latent, not dead.
+#
+# The bytes are already in hand, and renaming them here re-parses by
+# construction -- the same reason the loader carves instead of round-tripping.
+fixer_bound = library_definition("review_fixer_child_bound")
+FIXER_BOUND_HEADER = "review_fixer_child_bound()"
+if not fixer_bound.startswith(FIXER_BOUND_HEADER):
+    raise SystemExit("review_fixer_child_bound definition does not open with its own name")
+write(
+    "review-fixer-bound-production.sh",
+    "review_fixer_child_bound_production()" + fixer_bound[len(FIXER_BOUND_HEADER):],
+)
+
 def assignment(block, variable):
     lines = block.splitlines()
     starts = [
@@ -337,7 +372,10 @@ export FOCUS=$'focus "quoted" \\glob*?[x]\t'
   || { echo "review-child-inputs: review setup bound AGG_PATH=$AGG_PATH, expected $RESEARCH_DIR_ABS/post-impl-review-final.md" >&2; exit 1; }
 . "$TMP/review-builder.sh"
 REVIEW_WORKSPACE_JSON="$UBERDEV_COMMAND_WORKSPACE_JSON"
-eval "$(declare -f review_fixer_child_bound | sed '1s/^review_fixer_child_bound/review_fixer_child_bound_production/')"
+# review_fixer_child_bound_production -- the production helper's own bytes under
+# a second name, renamed by the fixture builder above rather than round-tripped
+# through `declare -f` (#471; the rename rationale is at that write() call).
+. "$TMP/review-fixer-bound-production.sh"
 
 # This test closes the production child-input/build/handoff/dispatch graph, not
 # the code-fixer repository transaction. The source worktree is intentionally

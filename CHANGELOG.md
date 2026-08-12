@@ -19,6 +19,21 @@ suite going green — the suite was green throughout, which is the point.
   other fences.** Every fence is a fresh shell, so those calls were
   `command not found` in any real run. They now live in `lib/review-fences.sh`,
   loaded by the prologue every fence already carries.
+- **That loader then aborted the SECOND time a process ran the prologue.** It
+  sourced the library over the caller and restored the caller's definitions from
+  `typeset -f` output — a re-print of the shell's parse tree, not the bytes a
+  function was defined from. Two helpers re-emit unparseably, on disjoint shells:
+  `review_fixer_child_bound` on bash 3.2 (stock macOS), `review_child_fanout` on
+  bash 5.0–5.2 (the CI runner); bash 4.x, 5.3 and zsh 5.9 round-trip both
+  cleanly, which is why it shipped. The prologue opens 53 of the 60 fences, so
+  "called twice in one process" is the normal case. `typeset -f` is now used only
+  as a predicate, whose exit status is sound everywhere; the helpers a shell is
+  actually missing are carved out of the library's own source bytes, which
+  re-parse by construction, and a postcondition now names any helper the load
+  left undefined. `tests/review-child-inputs.test.sh` carried the same
+  `declare -f`-and-`eval` round-trip to copy one helper under a second name — on
+  bash 3.2 that aborted the suite on an unparseable `||` and still exited 0, a
+  silent vacuous green. It now renames the source bytes instead.
 - **`audit` had 65 call sites and no definition in any shipped file.** A bare
   `audit` resolved to `/usr/sbin/audit` on macOS (rc 255) and command-not-found
   on Linux CI (rc 127). Thirteen calls sit in tail position and two fences END

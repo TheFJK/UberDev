@@ -2103,7 +2103,9 @@ _review_fleet_bind_repo_slug() {
 # the definition and awk-carved the slices back out at run time; that held the
 # single-copy property but shipped helpers that could not be syntax-checked or
 # read as code, and re-read a 7,000-line markdown file on every fence. They are
-# code, so they live in a file that is code, and this loader just sources it.
+# code, so they live in a file that is code. This loader still carves (#471, see
+# below) -- but out of a real shell file that shellcheck and `bash -n` can read,
+# and only for the names the calling shell is actually missing.
 
 # review_fleet_fence_library_path -> the library, named once.
 #

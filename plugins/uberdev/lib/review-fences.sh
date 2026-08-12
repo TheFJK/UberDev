@@ -35,10 +35,21 @@
 #     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-...}/lib/review-fleet-args.sh" || return 2
 #     review_fleet_rehydrate || return 2
 #
-# and review_fleet_rehydrate calls review_fleet_load_fence_library, which sources
-# this file with gap-filling semantics (a definition the process already holds
-# wins, so a harness that installed a stub keeps it). Adding a helper here needs
-# no call-site edit anywhere.
+# and review_fleet_rehydrate calls review_fleet_load_fence_library, with
+# gap-filling semantics (a definition the process already holds wins, so a
+# harness that installed a stub keeps it). Adding a helper here needs no
+# call-site edit anywhere.
+#
+# The loader does NOT source this file (#471). It reads the roster off these
+# bytes, asks `typeset -f` which of those names this shell is already missing,
+# CARVES just those definitions out of this file with awk, and evals the carved
+# bytes. It used to source the whole file over the caller and put the caller's
+# definitions back from `typeset -f` output; that output is a re-print of the
+# shell's parse tree rather than the bytes a function was defined from, and two
+# helpers below re-emit unparseably (review_fixer_child_bound on bash 3.2,
+# review_child_fanout on bash 5.0-5.2), so the second prologue in one process
+# aborted. Carved source bytes re-parse by construction; nothing is overwritten,
+# so nothing needs restoring.
 #
 # These helpers read the same carriers lib/review-fleet-args.sh names --
 # UBERDEV_REVIEW_PLUGIN_ROOT, WORKTREE_ROOT, RESEARCH_DIR_ABS, REVIEW_ITERATION,
@@ -51,7 +62,26 @@
 # author left it. Re-indenting those lines re-indents Python. When these were
 # lifted out of the markdown the dedent was proven by comparing `typeset -f` for
 # all twenty helpers, in bash AND zsh, before and after -- do the same for any
-# reflow.
+# reflow. (Comparing typeset -f output against ITSELF on one shell is sound and
+# is not the #471 defect: what broke there was feeding that output back to
+# `eval`. Same command, different contract.)
+#
+# THE STRUCTURE HERE IS LOAD-BEARING TOO, and this half is newer (#471). Because
+# the loader carves rather than sources, anything it cannot carve does not fail
+# -- it silently stops existing. So:
+#
+#   1. NOTHING OUTSIDE A FUNCTION BLOCK. A top-level statement here would run on
+#      the old source-the-file loader and simply never run under the carve.
+#   2. Every definition opens as `name() {` ALONE on its line -- no `f() { :; }`
+#      one-liner, no trailing code after the brace.
+#   3. Every definition closes on a `}` at the DEFINITION's own indent, and no
+#      interior line may put a `}` at that column. A JSON/dict heredoc or a
+#      python payload whose closing brace lands at column 0 truncates the helper
+#      there and spills the remainder as uncarved (i.e. dropped) text.
+#
+# tests/review-pr.test.sh R47.8 enforces all three by applying the loader's own
+# carve rule to this file, so the failure arrives in CI rather than as a
+# command-not-found forty fences into a live review.
 review_json_string() {
   [ "$#" -ge 1 ] || return 2
   python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"

@@ -3732,18 +3732,51 @@ fi
 # on a 5.3 laptop while ubuntu-latest (5.2) and stock macOS /bin/bash (3.2) --
 # the two interpreters CI and this repo's contributors actually use -- red.
 #
-# No `for fn in $ROSTER` word-splitting anywhere below: zsh does not split
-# unquoted scalars, so that loop silently degenerates to one iteration over the
-# whole string and the row would assert nothing on zsh.
+# That also bounds what this row can promise: its detection RIDES on a bash
+# whose `typeset -f` mangles, so a runner-image bump to 5.3 would leave it
+# passing while asserting nothing about the defect. R47.9 below carries the
+# interpreter-independent half; this row is deliberately not the only guard.
+#
+# r47_real_interpreter PATH -> the same interpreter, named canonically.
+#
+# Dedupe on the RESOLVED path, not the spelling. On ubuntu-latest /bin is a
+# symlink to /usr/bin, so `command -v bash` (/usr/bin/bash) and /bin/bash are
+# ONE interpreter that a string-compare dedupe counts as two -- and that count
+# is printed in the PASS line, so an unresolved dedupe advertises coverage this
+# row does not have.
+r47_real_interpreter() {
+  local candidate="$1" resolved
+  resolved="$(readlink -f "$candidate" 2>/dev/null)" || resolved=''
+  # `readlink -f` exists on GNU coreutils, macOS 12+ and Git Bash; where it is
+  # absent or errors, resolve the DIRECTORY instead -- which is the /bin ->
+  # /usr/bin collision that actually occurs -- and keep the basename.
+  [ -n "$resolved" ] \
+    || resolved="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")"
+  printf '%s\n' "$resolved"
+}
+
+# NEWLINE-separated, consumed by `while IFS= read -r` off a herestring, never
+# `for sh in $SCALAR`: zsh does not word-split an unquoted scalar, so that loop
+# degenerates to ONE iteration over the whole string. This file runs under bash
+# today, but that trap already cost this repo a release once, and either half of
+# the pair -- an array-shaped comment over a word-splitting loop, or the reverse
+# -- is worse than picking one and meaning it. Same reason the herestring is not
+# a pipe: a pipeline puts the loop body in a subshell under bash and every
+# accumulator below would be discarded at the end of the pipe.
+R47_NL='
+'
 R47_RELOAD_SHELLS=''
 for R47_CANDIDATE in "$(command -v bash 2>/dev/null)" /bin/bash "$(command -v zsh 2>/dev/null)" /bin/zsh; do
   [ -n "$R47_CANDIDATE" ] && [ -x "$R47_CANDIDATE" ] || continue
-  case " $R47_RELOAD_SHELLS " in *" $R47_CANDIDATE "*) continue ;; esac
-  R47_RELOAD_SHELLS="$R47_RELOAD_SHELLS $R47_CANDIDATE"
+  R47_CANDIDATE="$(r47_real_interpreter "$R47_CANDIDATE")"
+  [ -n "$R47_CANDIDATE" ] && [ -x "$R47_CANDIDATE" ] || continue
+  case "$R47_NL$R47_RELOAD_SHELLS" in *"$R47_NL$R47_CANDIDATE$R47_NL"*) continue ;; esac
+  R47_RELOAD_SHELLS="$R47_RELOAD_SHELLS$R47_CANDIDATE$R47_NL"
 done
 R47_RELOAD_BAD=''
 R47_RELOAD_RAN=0
-for R47_SH in $R47_RELOAD_SHELLS; do
+while IFS= read -r R47_SH; do
+  [ -n "$R47_SH" ] || continue
   R47_RELOAD_RAN=$((R47_RELOAD_RAN + 1))
   # 2>&1: the failure mode being locked out prints its diagnosis to stderr and
   # THEN returns 2, so stderr is evidence, not noise.
@@ -3777,7 +3810,7 @@ for R47_SH in $R47_RELOAD_SHELLS; do
     ' 2>&1)"
   [ "$R47_RELOAD_OUT" = "OK" ] || R47_RELOAD_BAD="$R47_RELOAD_BAD
         $R47_SH: $(printf '%s' "$R47_RELOAD_OUT" | tr '\n' ';')"
-done
+done <<<"$R47_RELOAD_SHELLS"
 if [ "$R47_RELOAD_RAN" -ge 1 ] && [ -z "$R47_RELOAD_BAD" ]; then
   echo "  PASS  R47.7 — the fence library loader is re-entrant and preserves caller stubs on all $R47_RELOAD_RAN interpreter(s)"
   PASS=$((PASS + 1))
@@ -3844,6 +3877,118 @@ if [ -n "$R47_UNCARVED" ] && [ "${R47_CARVED_COUNT:-0}" -ge 20 ] 2>/dev/null \
 else
   echo "  FAIL  R47.8 — lib/review-fences.sh holds a line the loader's carve would drop"
   echo "        carved: ${R47_CARVED_COUNT:-<none>}; offenders: ${R47_CARVE_OFFENDERS:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.9 — structural, and deliberately INTERPRETER-INDEPENDENT. #471.
+#
+# R47.7 can only see the defect on a bash whose `typeset -f` re-emits one of the
+# two helpers unparseably. bash 4.x, 5.3 and zsh 5.9 already round-trip both
+# cleanly, so the day ubuntu-latest ships bash 5.3 that row keeps printing PASS
+# with nothing left to catch: its oracle is a symptom, and the symptom is a
+# property of the runner image, not of this repo.
+#
+# So assert the INVARIANT instead. Inside review_fleet_load_fence_library,
+# `typeset -f` / `declare -f` may be used ONLY as a predicate: its exit status is
+# trustworthy on every shell, its stdout is not. Concretely -- its stdout is
+# never captured (no `$(...)`, no backticks) and always goes to /dev/null. What
+# is never captured can never be eval'd, on any shell, at any version.
+#
+# Read off the SOURCE BYTES of lib/review-fleet-args.sh, never off
+# `typeset -f review_fleet_load_fence_library` -- that is the very serializer
+# under indictment, and a row that used it to police itself would be assuming
+# the property it exists to prove.
+R47_PREDICATE="$(python3 -I -B - "$REVIEW_FLEET_ARGS" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+opener = re.search(r"^review_fleet_load_fence_library\(\)[ \t]*\{[ \t]*$", text, re.MULTILINE)
+if opener is None:
+    print("probes=0")
+    print("offenders=no-definition")
+    raise SystemExit(0)
+closer = re.search(r"^\}$", text[opener.end():], re.MULTILINE)
+if closer is None:
+    print("probes=0")
+    print("offenders=unterminated")
+    raise SystemExit(0)
+body = text[opener.end():opener.end() + closer.start()]
+
+probes, offenders = 0, []
+for match in re.finditer(r"(?:typeset|declare)[ \t]+-f\b", body):
+    line_start = body.rfind("\n", 0, match.start()) + 1
+    line_end = body.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(body)
+    line = body[line_start:line_end]
+    # The rationale comments in that function quote `typeset -f` repeatedly.
+    # Prose is not a call site.
+    if line.lstrip().startswith("#"):
+        continue
+    probes += 1
+    before, after = body[line_start:match.start()], body[match.end():line_end]
+    if "$(" in before or "`" in before:
+        offenders.append("captured:" + line.strip()[:60])
+    elif not re.search(r">[ \t]*/dev/null", after):
+        offenders.append("unredirected:" + line.strip()[:60])
+
+print("probes=%d" % probes)
+print("offenders=%s" % " ".join(offenders))
+PY
+)" || R47_PREDICATE=''
+R47_PREDICATE_PROBES="$(printf '%s\n' "$R47_PREDICATE" | sed -n 's/^probes=//p')"
+R47_PREDICATE_BAD="$(printf '%s\n' "$R47_PREDICATE" | sed -n 's/^offenders=//p')"
+# `>= 2` and not `>= 0`: the loader probes twice (the gap-filling loop and the
+# postcondition), and a refactor that removed both would otherwise satisfy "no
+# captured typeset -f" vacuously -- the same vacuous-green shape this row exists
+# to close in R47.7.
+if [ -n "$R47_PREDICATE" ] && [ "${R47_PREDICATE_PROBES:-0}" -ge 2 ] 2>/dev/null \
+   && [ -z "$R47_PREDICATE_BAD" ]; then
+  echo "  PASS  R47.9 — the loader uses typeset -f only as a predicate ($R47_PREDICATE_PROBES probes, none captured)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.9 — the fence-library loader captures typeset -f / declare -f output"
+  echo "        probes: ${R47_PREDICATE_PROBES:-<none>}; offenders: ${R47_PREDICATE_BAD:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.10 — behavioural: the loader's POSTCONDITION must actually fire, against
+# the file the loader itself reads. #471.
+#
+# The loader closes by asserting every helper the library DECLARES is callable
+# in this shell, so a roster/carve disagreement fails there, naming the helper,
+# instead of surfacing as a command-not-found forty fences downstream. R47.8
+# proves the shipped library has no such disagreement -- which is exactly why no
+# row above can ever enter that arm. Hand the loader a library it cannot carve
+# and demand the diagnosis.
+#
+# `f() { :; }` is the minimal disagreement: the roster reader is a leading-space
+# tolerant sed with `.*$` after the brace and sees `f`, while the carve opens
+# only on a `{` at END of line and sees nothing. commands/ must exist, or the
+# synthetic-root arm returns 0 without ever reading the library.
+R47_POST_TMP="$(mktemp -d)"
+mkdir -p "$R47_POST_TMP/root/commands" "$R47_POST_TMP/root/lib"
+printf 'f() { :; }\n' >"$R47_POST_TMP/root/lib/review-fences.sh"
+# stderr to a FILE, not `2>&1` into the capture: the diagnosis and the rc are two
+# separate assertions here, and interleaving them would make the row depend on
+# flush ordering between a builtin and a redirect.
+env -i PATH="$PATH" HOME="$HOME" \
+  UBERDEV_REVIEW_PLUGIN_ROOT="$R47_POST_TMP/root" \
+  R47_ARGS_LIB="$REVIEW_FLEET_ARGS" \
+  bash -c '. "$R47_ARGS_LIB" || exit 9; review_fleet_load_fence_library' \
+  >/dev/null 2>"$R47_POST_TMP/stderr.txt"
+R47_POST_RC=$?
+R47_POST_ERR="$(tr '\n' ';' <"$R47_POST_TMP/stderr.txt" 2>/dev/null)"
+rm -rf "$R47_POST_TMP"
+R47_POST_NAMED=''
+case "$R47_POST_ERR" in *"left f undefined"*) R47_POST_NAMED=yes ;; esac
+if [ "$R47_POST_RC" = 2 ] && [ "$R47_POST_NAMED" = yes ]; then
+  echo "  PASS  R47.10 — an uncarvable library fails the loader's postcondition, naming the helper"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.10 — the loader accepted a library whose declared helper it never defined"
+  echo "        rc: $R47_POST_RC; stderr: ${R47_POST_ERR:-<empty>}"
   FAIL=$((FAIL + 1))
 fi
 
