@@ -90,11 +90,26 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
-# Shared structural-assertion helpers (assert_in_section for T12 — the version
-# rule must be anchored to its own section so a stray prose match elsewhere in
-# AGENTS.md cannot false-positive it). Fail-loud guard per #209: a missing or
-# unreadable helper aborts rc=2, never vacuous-green.
+# Shared structural-assertion helpers (assert_in_section + assert_count for T12
+# — the version rule is sliced to its own section so a stray prose match
+# elsewhere in AGENTS.md cannot false-positive it; see the T12 block for what
+# that scoping does and does NOT buy while AGENTS.md carries a single level-2
+# section). Fail-loud guard per #209: a missing or unreadable helper aborts
+# rc=2, never vacuous-green.
 source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
+# The guard above only catches a helper file that is MISSING or unparseable:
+# `source` reports the status of the last command in the sourced file, so a
+# helper that was renamed, moved or split out still sources rc=0. Every call to
+# it would then fail with command-not-found (rc 127), which increments neither
+# counter — and with no errexit and no assertion floor this file would print
+# `failed: 0` and exit 0 with its structural half never executed. Assert the
+# names actually called here, and extend this list when a new one is used.
+for structural_fn in assert_in_section assert_count; do
+  command -v "$structural_fn" >/dev/null 2>&1 || {
+    echo "FATAL: _lib_assert_structural.sh sourced but $structural_fn is not defined (renamed helper?)" >&2
+    exit 2
+  }
+done
 
 PASS=0
 FAIL=0
@@ -1354,13 +1369,23 @@ echo "== T12: the version-bump contract — rule doc and machinery, locked in bo
 # agree with each other at a hardcoded literal, not that the number went up —
 # and the shape-check jobs have no base ref and no `gh` to compare against.
 # Tracked as open issue #386.
-AGENTS_SECTION_START='^## Bump version'
-# End anchor is `^## [^B]`, NOT `^## `: awk closes a range on the START record
-# when that record also matches the end pattern, which would collapse the slice
-# to the heading line and make every in-section assertion below fail vacuously.
-# `## Bump version …` cannot match `^## [^B]` (char 4 is `B`), and a `### …`
-# sub-heading cannot either (char 3 is `#`, not a space).
-AGENTS_SECTION_END='^## [^B]'
+#
+# THE SECTION SLICE. The range OPENS on the section's first BODY line, not on
+# its heading. awk closes a `/start/,/end/` range on the START record when that
+# record also matches the end pattern, so a `^## Bump version` start forces an
+# end pattern that cannot match the heading itself — the previous `^## [^B]` —
+# and that pattern is blind to any future sibling heading whose title begins
+# with B. Opening one line lower lets the end anchor be a plain `^## `, which
+# closes on EVERY sibling section.
+#
+# STATED PLAINLY, because the scoping is weaker than it looks: AGENTS.md carries
+# exactly ONE level-2 heading today, so this range still runs to end-of-file and
+# the anchoring buys nothing until a sibling section is added — it is insurance,
+# not a property of the file as it stands. The start anchor is the invariant
+# sentence T12.2a/T12.2b already pin; reword it and all eleven in-section
+# assertions go red together, loudly, rather than passing over an empty slice.
+AGENTS_SECTION_START='^\*\*Every user-facing change'
+AGENTS_SECTION_END='^## '
 
 # --- the rule half: what AGENTS.md must say -------------------------------
 assert_grep "$AGENTS_MD" '^## Bump version EVERYWHERE before merge \(MANDATORY\)$' \
@@ -1389,33 +1414,38 @@ assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
 assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
   'plugins/uberdev/lib/bump-version\.sh' \
   "T12.5 the bump mechanism is named by path"
+# Anchored to the numbered-list-item FORM, not a bare path substring: both test
+# paths also appear in the local-verification bullet further down the section,
+# so a substring match kept passing after the two surface entries themselves
+# were deleted — a label ("listed as a surface") wider than its predicate.
 assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
-  'tests/goal\.test\.sh' \
-  "T12.5b the CI release-ratchet lock tests/goal.test.sh is still listed as a surface"
+  '^[0-9]+\. \*\*`tests/goal\.test\.sh`\*\*' \
+  "T12.5b the CI release-ratchet lock tests/goal.test.sh is still a numbered surface-list entry"
 assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
-  'tests/solve-claim\.test\.sh' \
-  "T12.5c the CI release-ratchet lock tests/solve-claim.test.sh is still listed as a surface"
+  '^[0-9]+\. \*\*`tests/solve-claim\.test\.sh`\*\*' \
+  "T12.5c the CI release-ratchet lock tests/solve-claim.test.sh is still a numbered surface-list entry"
 assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
   'No exception' \
   "T12.5d the no-exception clause survives the rewrite"
 
 # --- the machinery half: what the shipped tree must still do --------------
-# These three are GREEN from the first run by design — they are the half the
+# BOTH of these are GREEN from the first run by design — they are the half the
 # rule now describes, so a red here means the DOC is now lying, not that the
-# rewrite is incomplete. Their non-vacuity is proven separately: repoint any of
-# the three paths at a nonexistent file and the preflight above exits 2; repoint
-# them at an empty file and T12.6/T12.7 FAIL.
+# rewrite is incomplete. Non-vacuity is proven separately: repoint either path
+# at a nonexistent file and the preflight above exits 2; repoint it at an empty
+# file and the assertion FAILS.
+#
+# There is deliberately NO third "the bump script exists at the path the rule
+# names" assertion. $BUMP_VERSION_SH is in the hard-fail preflight loop at the
+# top of this file, which exits 2 when it is unreadable, so such a check could
+# only ever take its PASS arm — an unreachable FAIL branch that inflates the
+# assertion count while locking nothing, and that count is the only signal a
+# reader has that this section inspected anything. The preflight owns the
+# existence guarantee; T12.12 below is what actually reads the script.
 assert_grep "$SOLVE_FLEET_JS" 'Do NOT bump the project version' \
   "T12.6 solve-fleet still forbids the solver from bumping (the collision class stays closed)"
 assert_grep "$GOAL_WATCH_SH" '_uberdev_goal_ensure_version_bump' \
   "T12.7 the /goal watch lane still calls the version-bump guarantor"
-if [ -r "$BUMP_VERSION_SH" ]; then
-  echo "  PASS  T12.8 the bump script exists at the path the rule names"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL  T12.8 the bump script is missing from the path the rule names: $BUMP_VERSION_SH"
-  FAIL=$((FAIL + 1))
-fi
 
 # --- negatives: the retired claims must not come back ---------------------
 assert_absent_fixed "$AGENTS_MD" 'MUST bump the version in every location below' \
@@ -1435,14 +1465,44 @@ assert_absent_fixed "$AGENTS_MD" "Codex's auto-update" \
 # $PLUGIN_DIR — a `grep -r` over a SUBDIRECTORY, never a walk rooted at the
 # repository root (tests/test-harness-source-guards.test.sh A3), and the dated
 # RFC records under docs/rfc/ keep their historical copies untouched.
-if grep -rF -e 'project `CLAUDE.md`' "$PLUGIN_DIR" >/dev/null 2>&1; then
-  echo "  FAIL  T12.11 a shipped file under plugins/uberdev/ still points at the gitignored project CLAUDE.md for the bump ritual"
-  echo "        offenders:"
-  grep -rlF -e 'project `CLAUDE.md`' "$PLUGIN_DIR" | sed 's/^/          /'
+#
+# SCOPE OF THE CLAIM. This is a FIXED-STRING check for one exact phrasing, and
+# the PASS line says exactly that and nothing wider. A pointer worded any other
+# way is NOT caught: plugins/uberdev/lib/goal-state.sh still attributes the
+# release rule to CLAUDE.md in prose above its SemVer step resolver. Widening
+# the needle without sweeping that file in the same change would red the suite
+# on an offender no rule-document edit can fix — so widen and sweep together,
+# never one without the other.
+#
+# FAIL-LOUD. grep's status is CAPTURED rather than consumed as a boolean, and
+# stderr stays attached so the cause reaches the CI log. This is an ABSENCE
+# assertion, so the unsafe polarity is the one that had to be handled: rc>=2 (an
+# unreadable file, a vanished search root, an I/O fault, a future argument-shape
+# mistake) is a FAILED SEARCH, not a clean no-match, and must never land in the
+# arm that prints PASS and increments the counter (#275 / #347 house rule: a
+# check that could not run is an explicit FAIL, never a silent zero-assertion
+# PASS).
+CLAUDE_MD_POINTER='project `CLAUDE.md`'
+if [ ! -d "$PLUGIN_DIR" ] || [ ! -r "$PLUGIN_DIR" ]; then
+  echo "  FAIL  T12.11 the search root is missing or unreadable — refusing a vacuous PASS"
+  echo "        root: $PLUGIN_DIR"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  T12.11 no shipped file under plugins/uberdev/ points at the gitignored project CLAUDE.md"
-  PASS=$((PASS + 1))
+  CLAUDE_MD_HITS="$(grep -rlF -e "$CLAUDE_MD_POINTER" "$PLUGIN_DIR")"
+  CLAUDE_MD_RC=$?
+  if [ "$CLAUDE_MD_RC" -ge 2 ]; then
+    echo "  FAIL  T12.11 the search errored (grep rc=$CLAUDE_MD_RC) — plugins/uberdev/ was NOT checked"
+    echo "        root: $PLUGIN_DIR"
+    FAIL=$((FAIL + 1))
+  elif [ "$CLAUDE_MD_RC" -eq 0 ]; then
+    echo "  FAIL  T12.11 a shipped file under plugins/uberdev/ carries the literal '$CLAUDE_MD_POINTER' pointer at the gitignored twin"
+    echo "        offenders:"
+    printf '%s\n' "$CLAUDE_MD_HITS" | sed 's/^/          /'
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  T12.11 no shipped file under plugins/uberdev/ carries the literal '$CLAUDE_MD_POINTER' pointer"
+    PASS=$((PASS + 1))
+  fi
 fi
 
 assert_grep "$BUMP_VERSION_SH" 'AGENTS\.md' \
@@ -1451,6 +1511,17 @@ assert_absent_fixed "$STRUCTURAL_LIB" 'Codex plugin.json' \
   "T12.13 assert_version_bump's doc comment no longer claims a retired Codex manifest surface"
 assert_absent_fixed "$STRUCTURAL_LIB" 'all five manifest surfaces' \
   "T12.13b assert_version_bump's doc comment no longer claims five surfaces (the body asserts four)"
+# T12.13/T12.13b are absence-only — they forbid two exact stale literals, a
+# predicate disjoint from the drift they exist to stop: a surface added to or
+# dropped from the body while the comment stands still (exactly what #382 did),
+# or the same stale claim reworded past a fixed-string check. T12.14 closes that
+# with the positive pair — the body's own call count, and the comment stating
+# the same number.
+assert_count "$STRUCTURAL_LIB" '^assert_version_bump' '^}' \
+  '_assert_version_bump_one' 4 \
+  "T12.14 assert_version_bump's body still asserts exactly four manifest surfaces"
+assert_grep "$STRUCTURAL_LIB" 'all four manifest surfaces' \
+  "T12.14b the doc comment states the same four-surface count its body asserts"
 
 echo
 echo "== Summary =="
