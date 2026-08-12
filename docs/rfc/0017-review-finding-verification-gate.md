@@ -232,8 +232,10 @@ changes shape.
   `strict=True` zips in `_validate_disposition`.
 - **Phase 2 findings**, **new reviewer lenses** (a seventh lens has lower
   marginal value than a verifier and negative value without one), the dead
-  `REJECTED` arm in `route_by_severity` (#454), and reconciling the three
-  pre-existing confidence vocabularies.
+  `REJECTED` arm in `route_by_severity` (#454 — shipped; the arm is deleted and
+  the helper's inbound domain is pinned against the producer enum, see RFC
+  0002's #454 amendment), and reconciling the three pre-existing confidence
+  vocabularies.
 - **`tests/config-override.test.sh`'s vacuous `[ $? -eq 0 ]` assertions** (#455).
   `_isolate` ends in `rm -rf`, so the exit-status half of ~20 existing
   assertions cannot fail. The cases this RFC's work added use a falsifiable
