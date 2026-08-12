@@ -557,6 +557,16 @@ if grep -Fq 'shared/phase1-reviewer-output-v1' "$REVIEW_CMD" \
 else
   pass "G20d neither review-pr.md nor workflow.js re-declares the contract's relative path"
 fi
+# G20e — the SAME documentation duty for the fixer's contract key (#474). The
+# `fix` arm is a REQUIRED-key arm now: an envelope missing `fixerContractPathAbs`
+# aborts `bad_contract_path` with zero dispatches, exactly like the review arm's
+# `phase1ContractPathAbs`. The SKILL.md table is the envelope contract every
+# caller is written against, so a required key absent from it is a key the third
+# emitter can be written without — which is precisely how simplify.fix.phase2
+# shipped the guard without the key.
+grep -Fq 'fixerContractPathAbs' "$SKILL" \
+  && pass "G20e the review-fleet SKILL.md documents the fixerContractPathAbs key" \
+  || fail "G20e fixerContractPathAbs is undocumented — the envelope contract is the SKILL.md table"
 
 # ---------------------------------------------------------------------------
 # B — behavioral: run the mint fences the command files actually carry
@@ -698,11 +708,11 @@ PY
 
 assert_stage review-stage "$REVIEW_CMD" 'stage=review' review-pr review 7 review-fleet-review.launched
 
-# B[review-contract] — the review stage is the only stage that owns an output
-# contract, so this is a standalone block rather than a parameter on the shared
-# assert_stage helper (which also drives stage=simplify and stage=defer). It
-# runs the REAL fence against the REAL plugin root, so it proves the value the
-# envelope carries is the file the plugin ships — not merely that a key exists.
+# B[review-contract] — the review and fix stages own output contracts (the
+# simplify and defer stages do not), so these are standalone blocks rather than a
+# parameter on the shared assert_stage helper. Each runs the REAL fence against
+# the REAL plugin root, so it proves the value the envelope carries is the file
+# the plugin ships — not merely that a key exists.
 B_CONTRACT_OUT="$TMP/b-review-contract"
 mkdir -p "$B_CONTRACT_OUT"
 if B_CONTRACT_RAW="$(run_stage_fence "$REVIEW_CMD" 'stage=review' "$B_CONTRACT_OUT")"; then
@@ -719,6 +729,66 @@ if B_CONTRACT_RAW="$(run_stage_fence "$REVIEW_CMD" 'stage=review' "$B_CONTRACT_O
 else
   fail "B[review-contract] the extracted fence did not run: $(head -3 "$B_CONTRACT_OUT/fence.err" 2>/dev/null)"
 fi
+# B[fixer-contract] — #474. The fixer edges carry a format contract for a
+# STRICTER reason than the reviewers: a reviewer whose result is refused has
+# produced nothing and the run fails closed with the tree untouched, but a fixer
+# has ALREADY COMMITTED by the time its result is parsed, so an unbound format
+# strands unattributed history and halts the run MUTATED_BLOCKED.
+#
+# ALL THREE COMMITTING FENCES, ACROSS BOTH COMMAND FILES. The `stage=fix` arm in
+# workflow.js is shared and is NOT mode-scoped the way the review arm is, so its
+# `bad_contract_path` guard governs `mode=simplify` too. Checking only the two
+# `review_pr.fix.*` fences in $REVIEW_CMD is what let `simplify.fix.phase2` ship
+# the guard without the key: measured, that envelope aborted `bad_contract_path`
+# with zero dispatches, i.e. /simplify lost its Phase 2 fixer outright on the
+# RFC 0015 default transport. The loop therefore iterates FILE + EDGE pairs.
+#
+# WHAT THIS BLOCK PROVES, precisely. Unlike B[review-contract] above it does NOT
+# execute the fence: a fixer fence reaches its emit only after prepare-authority
+# validates a REAL commit range against a REAL repository, so executing it would
+# mean seeding a fixture with live SHAs and a clean-worktree gate — machinery
+# that belongs to the authority path, not to this wiring. So the assertions are
+# made against the EXTRACTED FENCE BODY, not the whole file: a `code-fixer-v1`
+# mention anywhere else in this 7000-line command cannot satisfy them. The
+# runtime half is covered where it can be executed — the manifest resolution by
+# tests/solve-run-tree.test.sh, and the script's consumption of the key by the
+# W section below, which runs workflow.js for real.
+B_FIXER_CONTRACT_FILE="$(jq -r '.output_contracts["code-fixer-v1"] // empty' \
+  "$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json")"
+[ -n "$B_FIXER_CONTRACT_FILE" ] && [ -f "$REPO_ROOT/plugins/uberdev/$B_FIXER_CONTRACT_FILE" ] \
+  && pass "B[fixer-contract] the manifest resolves code-fixer-v1 to a file the plugin ships" \
+  || fail "B[fixer-contract] code-fixer-v1 resolves to '$B_FIXER_CONTRACT_FILE', which is not a shipped file"
+for B_FIXER_PAIR in "$REVIEW_CMD|review_pr.fix.phase1" \
+                    "$REVIEW_CMD|review_pr.fix.phase2" \
+                    "$SIMPLIFY_CMD|simplify.fix.phase2"; do
+  B_FIXER_FILE="${B_FIXER_PAIR%%|*}"
+  B_FIXER_EDGE="${B_FIXER_PAIR##*|}"
+  if B_FIXER_BODY="$(extract_fence "$B_FIXER_FILE" "fixerEdgeId=$B_FIXER_EDGE")"; then
+    # Herestrings, not `printf | grep -q`: this file sets pipefail, and an
+    # early-exiting reader closes the pipe under the writer, which tests/
+    # epipe-guard.test.sh flags (and which would make these rows fail for a
+    # reason that has nothing to do with the fence).
+    grep -q 'review_fleet_contract_path "\$UBERDEV_REVIEW_PLUGIN_ROOT" code-fixer-v1' <<<"$B_FIXER_BODY" \
+      && pass "B[fixer-contract] $B_FIXER_EDGE resolves the contract through the manifest helper" \
+      || fail "B[fixer-contract] $B_FIXER_EDGE does not resolve code-fixer-v1 via review_fleet_contract_path"
+    grep -q 'fixerContractPathAbs="\$REVIEW_FLEET_FIXER_CONTRACT_PATH"' <<<"$B_FIXER_BODY" \
+      && pass "B[fixer-contract] $B_FIXER_EDGE emits the resolved path into the envelope" \
+      || fail "B[fixer-contract] $B_FIXER_EDGE does not emit fixerContractPathAbs (in $(basename "$B_FIXER_FILE"))"
+  else
+    fail "B[fixer-contract] no fence found for $B_FIXER_EDGE in $(basename "$B_FIXER_FILE")"
+  fi
+done
+# The script half: the contract path must reach the child's prompt, and the
+# stage must refuse a mis-wired envelope BEFORE it dispatches a child that would
+# commit against no format binding.
+grep -q 'function fixerOutputContract()' "$WORKFLOW" \
+  && grep -q 'lines.push(fixerOutputContract());' "$WORKFLOW" \
+  && pass "B[fixer-contract] workflow.js binds the fixer prompt to the contract" \
+  || fail "B[fixer-contract] workflow.js does not push a fixer output contract into the prompt"
+grep -q 'isSafeAbsPath(fixerContractPathAbs)' "$WORKFLOW" \
+  && pass "B[fixer-contract] the fix stage refuses an unusable contract path before dispatch" \
+  || fail "B[fixer-contract] the fix stage does not guard fixerContractPathAbs"
+
 assert_stage lens-stage-simplify-cmd "$SIMPLIFY_CMD" 'stage=simplify' simplify simplify 3 review-fleet-simplify.launched
 assert_stage lens-stage-review-cmd "$REVIEW_CMD" 'stage=simplify' review-pr simplify 3 review-fleet-simplify.launched
 
@@ -854,6 +924,10 @@ stage_args() {
        # every existing assert_stage_runs row stays green once the review arm
        # fails closed on a missing one.
        phase1ContractPathAbs:"/p/shared/phase1-reviewer-output-v1.md",
+       # The code-fixer output contract (#474), same placement and same reason:
+       # the fix arm now fails closed on a missing one, so it belongs in the base
+       # object where every existing fix-stage row picks it up.
+       fixerContractPathAbs:"/p/shared/code-fixer-output-v1.md",
        # The rule-source allowlist for the convention lens, also BY PATH
        # (#433). Same placement reasoning: base object, so every existing row
        # keeps its envelope shape while the convention-only rows below can
@@ -905,12 +979,31 @@ W_CI_COMMON="$(jq -n --arg sha "$W_HEX64_A" '{
 assert_stage_runs review review \
   "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}' 7
 assert_stage_runs simplify simplify "$W_NONCE1,$W_NONCE2,$W_NONCE3" '{}' 3
-assert_stage_runs fix fix "$W_NONCE1" \
-  "$(jq -n --arg sha "$W_HEX64_A" '{fixerEdgeId:"review_pr.fix.phase1", commitType:"fix",
-     findingsPathAbs:"/r/run/f.md", findingsSha256:$sha,
-     commitRangePathAbs:"/r/run/cr.json", commitRangeSha256:$sha,
-     authorityPathAbs:"/r/run/a.json", authoritySha256:$sha,
-     dispositionPathAbs:"/r/run/disp.json", appliedContentPathAbs:"/r/run/ac.json"}')" 1
+# The two fix envelopes, hoisted to variables because the W-CONTRACT block below
+# drives the SAME two through the `bad_contract_path` mutations (#474). One
+# spelling per envelope: a fix arm proved reachable on one shape and gated on a
+# differently-spelled twin would be proving nothing about the shape it gates.
+W_FIX_COMMON="$(jq -n --arg sha "$W_HEX64_A" '{fixerEdgeId:"review_pr.fix.phase1", commitType:"fix",
+   findingsPathAbs:"/r/run/f.md", findingsSha256:$sha,
+   commitRangePathAbs:"/r/run/cr.json", commitRangeSha256:$sha,
+   authorityPathAbs:"/r/run/a.json", authoritySha256:$sha,
+   dispositionPathAbs:"/r/run/disp.json", appliedContentPathAbs:"/r/run/ac.json"}')"
+# THE THIRD COMMITTING EDGE, and the only one reached under mode=simplify
+# (commands/simplify.md's Workflow-native Phase 2 fence). It carries the
+# standalone-snapshot family instead of the commit-range family, and it is the
+# envelope the shared `stage=fix` arm refused outright when its emitter omitted
+# `fixerContractPathAbs`: measured on the pre-fix tree, abort=bad_contract_path
+# with dispatched=0 where the base script dispatched 1.
+W_FIX_SIMPLIFY="$(jq -n --arg sha "$W_HEX64_A" '{mode:"simplify",
+   fixerEdgeId:"simplify.fix.phase2", commitType:"refactor",
+   findingsPathAbs:"/r/run/agg.md", findingsSha256:$sha,
+   standaloneSnapshotPathAbs:"/r/run/snap.json", standaloneSnapshotSha256:$sha,
+   authorityPathAbs:"/r/run/a.json", authoritySha256:$sha,
+   dispositionPathAbs:"/r/run/d2.json",
+   appliedContentPathAbs:"/r/run/standalone-applied-content.json"}')"
+
+assert_stage_runs fix fix "$W_NONCE1" "$W_FIX_COMMON" 1
+assert_stage_runs fix-simplify fix "$W_NONCE1" "$W_FIX_SIMPLIFY" 1
 # THE #383 REGRESSION: the shipped Phase 2.5 stage. It is reached by BOTH
 # /review-pr and /simplify and it is the one stage no other test executes.
 assert_stage_runs defer defer "$W_NONCE1" '{}' 1
@@ -1025,11 +1118,14 @@ fi
 
 # The gate. A wiring regression must abort BEFORE the nonce gate, so no nonce is
 # burned and no child is dispatched into an unstated contract.
-w_contract_abort() {  # LABEL JQ_MUTATION
-  local label="$1" mutation="$2" out abort prompts labels
-  stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}'
-  jq "$mutation" "$TMP/w-args.json" >"$TMP/w-args-contract.json"
-  out="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args-contract.json" 2>&1)"
+#
+# w_expect_contract_abort is shared by the review arm and the fix arm below
+# because the two arms owe the SAME three-part verdict — reason, zero prompts,
+# zero dispatches — and a second copy of it is a second place for one of the
+# three to be quietly dropped.
+w_expect_contract_abort() {  # LABEL ARGS_FILE
+  local label="$1" args_file="$2" out abort prompts labels
+  out="$(node "$W_HARNESS" "$WORKFLOW" "$args_file" 2>&1)"
   abort="$(printf '%s' "$out" | jq -r '.abortReason')"
   prompts="$(printf '%s' "$out" | jq -r '.prompts | length')"
   labels="$(printf '%s' "$out" | jq -r '.labels | length')"
@@ -1039,10 +1135,53 @@ w_contract_abort() {  # LABEL JQ_MUTATION
     fail "W[$label] abort='$abort' prompts=$prompts labels=$labels (want bad_contract_path/0/0)"
   fi
 }
+w_contract_abort() {  # LABEL JQ_MUTATION
+  stage_args review "$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7" '{}'
+  jq "$2" "$TMP/w-args.json" >"$TMP/w-args-contract.json"
+  w_expect_contract_abort "$1" "$TMP/w-args-contract.json"
+}
 w_contract_abort review-contract-missing 'del(.config.phase1ContractPathAbs)'
 w_contract_abort review-contract-empty '.config.phase1ContractPathAbs = ""'
 w_contract_abort review-contract-relative '.config.phase1ContractPathAbs = "shared/x.md"'
 w_contract_abort review-contract-traversal '.config.phase1ContractPathAbs = "/p/../etc/x"'
+
+# The FIX arm's runtime twin (#474). Until these rows existed, deleting the
+# guard body from workflow.js redded exactly ONE row — a grep for the source
+# line — while the four rows above kept the review arm honest. A guard whose
+# only proof is that its text is present is a guard that can be rewritten into a
+# no-op with the string intact.
+#
+# Driven under BOTH modes, because `stage=fix` is shared and deliberately not
+# mode-scoped: the mode=simplify half is what says the third emitter owes the
+# key, and it is the half that reds if someone "fixes" this by mode-scoping the
+# guard instead of wiring the emitter.
+w_fix_contract_abort() {  # LABEL EXTRA_JSON JQ_MUTATION
+  stage_args fix "$W_NONCE1" "$2"
+  jq "$3" "$TMP/w-args.json" >"$TMP/w-args-fix-contract.json"
+  w_expect_contract_abort "$1" "$TMP/w-args-fix-contract.json"
+}
+for W_FIX_ARM in "review:$W_FIX_COMMON" "simplify:$W_FIX_SIMPLIFY"; do
+  W_FIX_ARM_NAME="${W_FIX_ARM%%:*}"
+  W_FIX_ARM_EXTRA="${W_FIX_ARM#*:}"
+  w_fix_contract_abort "fix-$W_FIX_ARM_NAME-contract-missing" "$W_FIX_ARM_EXTRA" \
+    'del(.config.fixerContractPathAbs)'
+  w_fix_contract_abort "fix-$W_FIX_ARM_NAME-contract-empty" "$W_FIX_ARM_EXTRA" \
+    '.config.fixerContractPathAbs = ""'
+  w_fix_contract_abort "fix-$W_FIX_ARM_NAME-contract-relative" "$W_FIX_ARM_EXTRA" \
+    '.config.fixerContractPathAbs = "shared/x.md"'
+  w_fix_contract_abort "fix-$W_FIX_ARM_NAME-contract-traversal" "$W_FIX_ARM_EXTRA" \
+    '.config.fixerContractPathAbs = "/p/../etc/x"'
+done
+# ...and the contract path must actually REACH the committing child, not merely
+# survive the gate. The prompt half of the same key.
+stage_args fix "$W_NONCE1" "$W_FIX_SIMPLIFY"
+W_FIX_PROMPT_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+if [ "$(printf '%s' "$W_FIX_PROMPT_OUT" | jq -r '[.prompts[] | select(test("code-fixer-output-v1"))] | length')" = 1 ] \
+   && [ "$(printf '%s' "$W_FIX_PROMPT_OUT" | jq -r '[.prompts[] | select(test("entire contents of the result file"))] | length')" = 1 ]; then
+  pass "W[fix-simplify-contract-path] the simplify fixer prompt carries the contract path and the whole-file rule"
+else
+  fail "W[fix-simplify-contract-path] the simplify fixer prompt is unbound: $W_FIX_PROMPT_OUT"
+fi
 
 # The gate is REVIEW-SCOPED. Hoisting it into commonPreflight() would break
 # /simplify entirely and no other row in this file would notice.

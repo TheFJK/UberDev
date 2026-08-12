@@ -4,6 +4,63 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.16] — 2026-08-12
+
+### Fixed
+
+- **The code-fixer had no output-format contract, and found out too late**
+  (#474). All seven Phase 1 reviewers are bound to a whole-file-fence rule by
+  `shared/phase1-reviewer-output-v1.md`; the fixer was bound to nothing. Two
+  consecutive children wrote a titled report around their YAML — one with a
+  trailing `## Residual risk` section, one with a `# code-fixer — …` heading
+  before the opening fence — and `_parse_fixer_result` matches with
+  `re.fullmatch`, so both were refused.
+
+  The asymmetry was invisible because a fixer's format is checked *after* it
+  commits. A reviewer that misformats has produced nothing and the run fails
+  closed with the tree untouched; a fixer that misformats has already made a
+  correct, tested commit that nothing can now attribute, so the residue guard
+  escalates the whole run to `MUTATED_BLOCKED`. That halts the review before
+  Phase 2, before Phase 3, and before any trust signal — and because auto-apply
+  convergence is the only route to an all-`APPROVE` Phase 1, `/review-pr` could
+  not converge on an affected PR at all, at a cost of one full seven-reviewer
+  fleet per attempt.
+
+  New `shared/code-fixer-output-v1.md`, registered as `code-fixer-v1` and
+  attached to all three fixer edges (`review_pr.fix.phase1`,
+  `review_pr.fix.phase2`, `simplify.fix.phase2`), so the routed transport
+  delivers it from the same manifest declaration the Workflow transport now
+  resolves and forwards as `fixerContractPathAbs`. The fix stage refuses an
+  unusable contract path *before* dispatch rather than after a commit, and the
+  contract explicitly overrides the shared bound-child protocol's "write your
+  full report" wording — the phrasing both violations followed.
+
+  All **three** committing emitters forward the key. The `stage=fix` arm in
+  `skills/review-fleet/workflow.js` is shared by both modes and is deliberately
+  not mode-scoped the way the `review` arm is, so `commands/simplify.md`'s
+  `simplify.fix.phase2` fence owes `fixerContractPathAbs` exactly as the two
+  `commands/review-pr.md` fences do. Measured against that fence's own emitted
+  key set: without it the stage aborted `bad_contract_path` with **zero**
+  dispatches where the pre-guard script dispatched one — `/simplify` losing its
+  Phase 2 fixer outright on the RFC 0015 default transport.
+
+- **The contract printed its own document in a fence the parser refuses.**
+  `shared/code-fixer-output-v1.md` showed the shape inside a bare ```` ``` ````
+  fence while `_parse_fixer_result` matches ```` ```yaml ```` literally. It bites
+  hardest on the routed transport, where `lib/child-dispatch.sh` appends the
+  contract's bytes with no inline reinforcement and the contract claims to
+  override the agent file's (correct) sample.
+
+- **The #474 boundary is now ratcheted, and the new guard's *behaviour* is
+  tested.** Relaxing `_parse_fixer_result`'s `re.fullmatch` to `re.search` would
+  have reopened #474 with CI green — the suite's only `fixer_result_invalid`
+  assertion covered CRLF. `tests/code-fixer-contract.test.sh` now instantiates
+  the shipped contract's own document and requires trailing prose, leading
+  prose and a bare opening fence to be refused. `tests/review-pr-workflow.test.sh`
+  gains the four runtime `bad_contract_path` rows the fix arm lacked (driven
+  under **both** modes, where deleting the guard body previously redded only a
+  string grep) and covers all three fixer fences across both command files.
+
 ## [0.45.15] — 2026-08-12
 
 A debugging tool was ending investigations with a false negative: `find-polluter.sh`

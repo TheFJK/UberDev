@@ -510,7 +510,7 @@ if bash "$VERIFY" "$T1" >/dev/null 2>&1; then ok "G2 verify passes on generated 
 # tools/prkit/manifest.txt -- the two MUST stay equal, since generate copies
 # exactly what the manifest lists.
 n=$(find "$T1/plugins/prkit/commands" "$T1/plugins/prkit/agents" "$T1/plugins/prkit/skills" "$T1/plugins/prkit/lib" "$T1/plugins/prkit/policy" "$T1/plugins/prkit/shared" -type f 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" -eq 42 ] && ok "G3 exactly 42 copied files present" || no "G3 copied $n files (expected 42)"
+[ "$n" -eq 43 ] && ok "G3 exactly 43 copied files present" || no "G3 copied $n files (expected 43)"
 
 # G4 — scaffold files exist with interpolated version.
 grep -q '0.1.0' "$T1/plugins/prkit/.claude-plugin/plugin.json" && ok "G4 plugin.json version interpolated" || no "G4 plugin.json version missing"

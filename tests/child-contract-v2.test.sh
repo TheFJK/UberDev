@@ -75,12 +75,21 @@ review_edges={edge for edge in providers if edge.startswith('review_pr.review.')
 assert len(review_edges)==7
 assert tree.get('output_contracts')=={
  'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
- 'finding-verifier-v1':'shared/finding-verifier-output-v1.md'
+ 'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
+ 'code-fixer-v1':'shared/code-fixer-output-v1.md'
 }
 for edge in review_edges:
     row=providers[edge]
     assert row['required_inputs']['changed_paths']=='repo_path_array', edge
     assert row.get('output_contract')=='phase1-reviewer-v1', edge
+# #474: the three fixer edges carry a format contract for the SAME reason the
+# reviewer edges do. The reviewers were bound to a whole-file-fence rule and
+# never broke it; the fixer was bound to none, wrote a titled report around its
+# YAML twice in a row, and each violation was caught only AFTER it had already
+# committed -- turning a formatting slip into MUTATED_BLOCKED.
+fixer_edges={'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}
+for edge in fixer_edges:
+    assert providers[edge].get('output_contract')=='code-fixer-v1', edge
 caller_edges={
  'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2','review_pr.ci.fix_code',
  'review_pr.ci.rebase','review_pr.ci.resolve_conflict'

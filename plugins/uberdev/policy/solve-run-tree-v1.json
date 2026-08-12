@@ -17,7 +17,8 @@
   ],
   "output_contracts": {
     "phase1-reviewer-v1": "shared/phase1-reviewer-output-v1.md",
-    "finding-verifier-v1": "shared/finding-verifier-output-v1.md"
+    "finding-verifier-v1": "shared/finding-verifier-output-v1.md",
+    "code-fixer-v1": "shared/code-fixer-output-v1.md"
   },
   "edges": {
     "solve.issue.lead": {
@@ -886,6 +887,7 @@
       "kind": "provider",
       "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
+      "output_contract": "code-fixer-v1",
       "role": "code-fixer",
       "phase": "review_fix",
       "cardinality": "one_per_review_iteration",
@@ -979,6 +981,7 @@
       "kind": "provider",
       "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/review-pr.md",
+      "output_contract": "code-fixer-v1",
       "role": "code-fixer",
       "phase": "simplify_fix",
       "cardinality": "zero_or_one_per_review_iteration",
@@ -1006,6 +1009,7 @@
       "kind": "provider",
       "workspace_mode": "caller",
       "source": "plugins/uberdev/commands/simplify.md",
+      "output_contract": "code-fixer-v1",
       "role": "code-fixer",
       "phase": "simplify_fix",
       "cardinality": "zero_or_one_per_review_iteration",

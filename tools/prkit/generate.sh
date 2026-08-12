@@ -335,6 +335,10 @@ expected_roles = {
 allowed_workflows = ('review-pr', 'simplify', 'solve', 'turbo')
 review_contract = 'phase1-reviewer-v1'
 verify_contract = 'finding-verifier-v1'
+# #474 — the three committing fixer edges carry a format contract too, and
+# the projection must carry it across or a standalone prkit ships fixers as
+# unbound as the ones that stranded two commits upstream.
+fixer_contract = 'code-fixer-v1'
 edge_semantics = {
     'review_pr.post_impl_review': ('skill', None, None, None),
     'review_pr.review.correctness': ('provider', 'code-reviewer', ('review-pr', 'solve', 'turbo'), review_contract),
@@ -344,11 +348,11 @@ edge_semantics = {
     'review_pr.review.tests': ('provider', 'pr-test-analyzer', ('review-pr', 'solve', 'turbo'), review_contract),
     'review_pr.review.general': ('provider', 'code-reviewer', ('review-pr', 'solve', 'turbo'), review_contract),
     'review_pr.review.convention': ('provider', 'convention-compliance', ('review-pr', 'solve', 'turbo'), review_contract),
-    'review_pr.fix.phase1': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
+    'review_pr.fix.phase1': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), fixer_contract),
     'review_pr.simplify.reuse': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.quality': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.simplify.efficiency': ('provider', 'code-simplifier', ('review-pr', 'simplify', 'solve', 'turbo'), None),
-    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), None),
+    'review_pr.fix.phase2': ('provider', 'code-fixer', ('review-pr', 'solve', 'turbo'), fixer_contract),
     'review_pr.defer.findings': ('provider', 'findings-to-issues', ('review-pr', 'simplify', 'solve', 'turbo'), None),
     'review_pr.verify.finding': ('provider', 'finding-verifier', ('review-pr',), verify_contract),
     'review_pr.ci.classify': ('provider', 'ci-failure-classifier', ('review-pr', 'solve', 'turbo'), None),
@@ -356,7 +360,7 @@ edge_semantics = {
     'review_pr.ci.rebase': ('provider', 'ci-rebase-handler', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.defer_refusal': ('provider', 'findings-to-issues', ('review-pr', 'solve', 'turbo'), None),
     'review_pr.ci.resolve_conflict': ('provider', 'conflict-resolver', ('review-pr', 'solve', 'turbo'), None),
-    'simplify.fix.phase2': ('provider', 'code-fixer', ('simplify',), None),
+    'simplify.fix.phase2': ('provider', 'code-fixer', ('simplify',), fixer_contract),
 }
 expected_edges = set(edge_semantics)
 review_fixer_inputs = {

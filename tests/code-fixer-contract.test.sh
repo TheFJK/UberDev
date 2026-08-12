@@ -6542,6 +6542,103 @@ with scratch_dir("code-fixer-ci-nonrepo-") as temporary:
     run(["list-ci-unmerged-paths", "--working-dir", temporary], expected=74)
 
 # ---------------------------------------------------------------------------
+# The fixer-result full-file boundary (#474)
+# ---------------------------------------------------------------------------
+#
+# THE ACCEPTANCE CRITERION OF #474 ITSELF, which nothing pinned. `re.fullmatch`
+# over the whole file is the ONLY thing between a fixer's titled report and a
+# MUTATED_BLOCKED run: the child commits BEFORE its result is parsed, so a
+# refusal here is not a retry, it is unattributable history plus an operator
+# repair. The one pre-existing `fixer_result_invalid` row in the suite
+# (tests/simplify-standalone-flow.test.sh) covers CRLF, so relaxing this
+# `re.fullmatch` to `re.search` reopened #474 exactly, with CI fully green.
+#
+# THE DOCUMENT IS INSTANTIATED FROM THE SHIPPED CONTRACT, never retyped.
+# shared/code-fixer-output-v1.md is what the child is told to obey, and on the
+# ROUTED transport lib/child-dispatch.sh appends its bytes with no inline
+# reinforcement while the contract claims it overrides the agent file's own
+# sample. So a hand-written sample that agreed with the parser while the doc
+# disagreed would be a green row sitting on top of the live defect — which is
+# what shipped: the doc printed its document in a BARE fence the parser can
+# never accept.
+FIXER_CONTRACT_DOC = (root / "plugins/uberdev/shared/code-fixer-output-v1.md").read_text(
+    encoding="utf-8"
+)
+fixer_fences = re.findall(r"(?m)^```(.*)$", FIXER_CONTRACT_DOC)
+assert len(fixer_fences) == 2, f"expected one fenced block, saw {fixer_fences!r}"
+assert fixer_fences[0] == "yaml", (
+    "#474: the contract prints its own document in a ```"
+    f"{fixer_fences[0]} fence, which _parse_fixer_result can never accept"
+)
+assert fixer_fences[1] == "", f"the closing fence carries an info string: {fixer_fences[1]!r}"
+fixer_template = re.search(
+    r"(?ms)^```yaml\n(.*?)\n```$", FIXER_CONTRACT_DOC
+).group(1).split("\n")
+# Exact line -> the concrete line that stands in for it. A template line that is
+# neither literal nor listed here is a FAILURE, not a skip: that is what keeps
+# this row honest when the contract's document grows a field.
+FIXER_CONCRETE = {
+    "status: APPLIED | NO_FIXES_NEEDED | REFUSED": "status: APPLIED",
+    "phase: phase1 | phase2": "phase: phase2",
+    "  - sha: <40-hex>": "  - sha: " + "a" * 40,
+    "    type: fix | refactor": "    type: refactor",
+    "    summary: <one-line>": "    summary: bounded authenticated refactor",
+    "  - finding_index: <positive integer, 1-based, contiguous, in aggregate order>":
+        "  - finding_index: 1",
+    "    location: <path>:<line>": "    location: src/app.py:1",
+    "    summary_sha256: <64-hex>": "    summary_sha256: " + "b" * 64,
+    "    disposition: APPLIED | SKIPPED | REFUSED": "    disposition: APPLIED",
+    "    behavior_tag: preserve | change | n/a": "    behavior_tag: preserve",
+    "    reason: <short single-line prose, non-empty, no leading or trailing space>":
+        "    reason: applied as scoped",
+}
+fixer_body_lines = []
+for template_line in fixer_template:
+    if template_line in FIXER_CONCRETE:
+        fixer_body_lines.append(FIXER_CONCRETE[template_line])
+        continue
+    assert "<" not in template_line and " | " not in template_line, (
+        f"#474: the contract's document grew an uninstantiated line: {template_line!r}"
+    )
+    fixer_body_lines.append(template_line)
+assert len(FIXER_CONCRETE) == len(set(fixer_template) & set(FIXER_CONCRETE)), (
+    "#474: a placeholder in FIXER_CONCRETE no longer appears in the contract — "
+    "the substitution table has drifted from the document it instantiates"
+)
+FIXER_GOOD = "```yaml\n" + "\n".join(fixer_body_lines) + "\n```\n"
+fixer_parsed = module._parse_fixer_result(
+    FIXER_GOOD.encode("utf-8"), "phase2", "refactor"
+)
+assert fixer_parsed["status"] == "APPLIED", fixer_parsed
+assert fixer_parsed["commits"][0]["sha"] == "a" * 40, fixer_parsed
+assert fixer_parsed["rows"] == [
+    {
+        "finding_index": 1, "location": "src/app.py:1",
+        "summary_sha256": "b" * 64, "disposition": "APPLIED",
+        "behavior_tag": "preserve", "reason": "applied as scoped",
+    }
+], fixer_parsed
+# THE RATCHET. Every one of these is accepted by `re.search` and refused by
+# `re.fullmatch`, so each is a row that reds the instant the boundary is
+# loosened. Trailing prose is the shape both observed #474 violations took;
+# leading prose is the symmetric case the contract's own wording forbids
+# ("nothing before the opening fence"); the bare opener is the shape the
+# contract itself was printing.
+for fixer_case, fixer_payload in (
+    ("trailing-prose", FIXER_GOOD + "\nThat is the full set of changes.\n"),
+    ("trailing-heading", FIXER_GOOD + "## Notes\n"),
+    ("leading-prose", "# Refactor report\n\n" + FIXER_GOOD),
+    ("leading-blank", "\n" + FIXER_GOOD),
+    ("bare-opening-fence", FIXER_GOOD.replace("```yaml\n", "```\n", 1)),
+):
+    expect_contract_reason(
+        lambda payload=fixer_payload: module._parse_fixer_result(
+            payload.encode("utf-8"), "phase2", "refactor"
+        ),
+        "fixer_result_invalid",
+    )
+
+# ---------------------------------------------------------------------------
 # The Phase 1 finding-verification gate (#431)
 # ---------------------------------------------------------------------------
 assert tuple(inspect.signature(module.project_verification_claims).parameters) == (

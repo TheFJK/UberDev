@@ -228,6 +228,11 @@ allowed_workflows={'review-pr','simplify','solve','turbo'}
 contract_rel='shared/phase1-reviewer-output-v1.md'
 review_contract='phase1-reviewer-v1'
 verify_contract='finding-verifier-v1'
+# #474 — the three committing fixer edges are format-bound too. Projected
+# here rather than left None so a standalone prkit that drops the contract,
+# or ships it unattached to an edge, fails this gate instead of reproducing
+# the MUTATED_BLOCKED class downstream.
+fixer_contract='code-fixer-v1'
 edge_semantics={
     'review_pr.post_impl_review':('skill',None,None,None),
     'review_pr.review.correctness':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
@@ -237,11 +242,11 @@ edge_semantics={
     'review_pr.review.tests':('provider','pr-test-analyzer',('review-pr','solve','turbo'),review_contract),
     'review_pr.review.general':('provider','code-reviewer',('review-pr','solve','turbo'),review_contract),
     'review_pr.review.convention':('provider','convention-compliance',('review-pr','solve','turbo'),review_contract),
-    'review_pr.fix.phase1':('provider','code-fixer',('review-pr','solve','turbo'),None),
+    'review_pr.fix.phase1':('provider','code-fixer',('review-pr','solve','turbo'),fixer_contract),
     'review_pr.simplify.reuse':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.quality':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
     'review_pr.simplify.efficiency':('provider','code-simplifier',('review-pr','simplify','solve','turbo'),None),
-    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),None),
+    'review_pr.fix.phase2':('provider','code-fixer',('review-pr','solve','turbo'),fixer_contract),
     'review_pr.defer.findings':('provider','findings-to-issues',('review-pr','simplify','solve','turbo'),None),
     'review_pr.verify.finding':('provider','finding-verifier',('review-pr',),verify_contract),
     'review_pr.ci.classify':('provider','ci-failure-classifier',('review-pr','solve','turbo'),None),
@@ -249,7 +254,7 @@ edge_semantics={
     'review_pr.ci.rebase':('provider','ci-rebase-handler',('review-pr','solve','turbo'),None),
     'review_pr.ci.defer_refusal':('provider','findings-to-issues',('review-pr','solve','turbo'),None),
     'review_pr.ci.resolve_conflict':('provider','conflict-resolver',('review-pr','solve','turbo'),None),
-    'simplify.fix.phase2':('provider','code-fixer',('simplify',),None),
+    'simplify.fix.phase2':('provider','code-fixer',('simplify',),fixer_contract),
 }
 expected_edges=set(edge_semantics)
 review_fixer_inputs={
@@ -347,7 +352,8 @@ def validate(plugin):
         assert isinstance(contract_path,str) and contract_path
         assert (plugin/contract_path).is_file(), contract_path
     assert contracts=={'phase1-reviewer-v1':contract_rel,
-                       'finding-verifier-v1':'shared/finding-verifier-output-v1.md'}
+                       'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
+                       'code-fixer-v1':'shared/code-fixer-output-v1.md'}
     for edge in (edge_id for edge_id,semantics in edge_semantics.items() if semantics[3]==review_contract):
         row=edges[edge]
         assert row.get('output_contract')=='phase1-reviewer-v1'

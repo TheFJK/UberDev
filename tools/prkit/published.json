@@ -146,6 +146,10 @@
       "sha256": "6cf4c197ebef29f12bfbed920da2275b6adb223e93740ad5f249d4de972968b1"
     },
     {
+      "path": "shared/code-fixer-output-v1.md",
+      "sha256": "ff79a0ef527854cf545c9f774d0bc2dbff307763e77285d4ad81ef80a09d67a5"
+    },
+    {
       "path": "shared/finding-confidence-rubric-v1.md",
       "sha256": "3e35f1646384bf446b4670ff7b9eef81f311c23e2e0189ec062c975d101f6192"
     },
@@ -171,14 +175,17 @@
     }
   ],
   "pending": [
+    "agents/code-fixer.md",
     "agents/code-reviewer.md",
     "agents/findings-to-issues.md",
     "commands/review-pr.md",
+    "commands/simplify.md",
     "lib/child-dispatch.sh",
     "lib/code_fixer_contract.py",
     "lib/config-read.sh",
     "lib/review-aggregate.sh",
     "policy/model-routing-v1.json",
-    "policy/solve-run-tree-v1.json"
+    "policy/solve-run-tree-v1.json",
+    "shared/code-fixer-output-v1.md"
   ]
 }

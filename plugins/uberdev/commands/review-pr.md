@@ -2125,6 +2125,11 @@ value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","ph
 if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase1" or value["commit_type"]!="fix" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
 print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AUTHORITY_PATH")" || return 74
    PHASE1_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase1-iter${REVIEW_ITERATION}.json"
+   # The fixer's output-FORMAT contract, resolved from the SAME
+   # policy/solve-run-tree-v1.json declaration the routed composer reads off the
+   # edge's `output_contract` (#474). Resolved here rather than restated as prose
+   # in workflow.js for the #403 reason: two transports, one declaration.
+   REVIEW_FLEET_FIXER_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" code-fixer-v1)" || return 74
    REVIEW_FLEET_FIX_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase1-iter${REVIEW_ITERATION}.launch.json"
    FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
    review_fleet_bind_fixer review_pr.fix.phase1 "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
@@ -2145,6 +2150,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      reviewIteration="$REVIEW_ITERATION" \
      fixerEdgeId=review_pr.fix.phase1 \
      commitType=fix \
+     fixerContractPathAbs="$REVIEW_FLEET_FIXER_CONTRACT_PATH" \
      findingsPathAbs="$PHASE1_FINDINGS_PATH" \
      findingsSha256="$PHASE1_FINDINGS_SHA256" \
      commitRangePathAbs="$COMMIT_RANGE_PATH" \
@@ -2589,6 +2595,9 @@ value=json.loads(sys.argv[1]); expected={"authority_path","authority_sha256","ph
 if set(value)!=expected or value["authority_path"]!=sys.argv[2] or value["phase"]!="phase2" or value["commit_type"]!="refactor" or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None: raise SystemExit(74)
 print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AUTHORITY_PATH")" || return 74
    PHASE2_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/review-applied-content-phase2-iter${REVIEW_ITERATION}.json"
+   # Same single declaration the Phase 1 fixer resolves (#474). The phase2 fixer
+   # commits too, so an unbound format costs exactly as much here.
+   REVIEW_FLEET_FIXER_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" code-fixer-v1)" || return 74
    REVIEW_FLEET_FIX2_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-phase2-iter${REVIEW_ITERATION}.launch.json"
    FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
    review_fleet_bind_fixer review_pr.fix.phase2 "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
@@ -2609,6 +2618,7 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
      reviewIteration="$REVIEW_ITERATION" \
      fixerEdgeId=review_pr.fix.phase2 \
      commitType=refactor \
+     fixerContractPathAbs="$REVIEW_FLEET_FIXER_CONTRACT_PATH" \
      findingsPathAbs="$PHASE2_FINDINGS_PATH" \
      findingsSha256="$PHASE2_FINDINGS_SHA256" \
      commitRangePathAbs="$COMMIT_RANGE_PATH" \

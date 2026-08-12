@@ -373,6 +373,10 @@ the pairing is checked, and a mismatch aborts before dispatch),
 `standaloneSnapshotPathAbs`/`standaloneSnapshotSha256` for
 `simplify.fix.phase2` (`commands/simplify.md:18`).
 
+| Key | Meaning |
+|---|---|
+| `fixerContractPathAbs` | absolute path to the code-fixer output contract, resolved by the controller from `policy/solve-run-tree-v1.json` `output_contracts["code-fixer-v1"]` (`lib/review-fleet-args.sh review_fleet_contract_path`), same one-declaration rule as `phase1ContractPathAbs`. Absent, relative or traversal-bearing ⇒ `abort("bad_contract_path")` with **zero** dispatches. **Required by ALL THREE emitters** — this arm is shared by both modes and is deliberately *not* mode-scoped the way the `review` arm is, so `commands/simplify.md`'s `simplify.fix.phase2` fence owes the key exactly as the two `commands/review-pr.md` fences do (#474). |
+
 ### `defer` stage
 
 `phase1PathAbs`, `phase2PathAbs`, `phase1DispositionPathAbs`,
@@ -582,6 +586,7 @@ the point of the seam.
 | projected-agent ceiling | computed before any dispatch; **aborts** rather than degrading, because a half-run fanout produces a partial aggregate and a partial aggregate is indistinguishable from a clean zero-finding review |
 | nonce-pool gate | size or grammar mismatch aborts the stage before dispatch |
 | Phase 1 output contract | `review` only. An absent, relative or traversal-bearing `phase1ContractPathAbs` aborts `bad_contract_path` **before** the nonce gate, so no nonce is burned. Six reviewers dispatched without a stated serialization all fail `uberdev_child_validate_phase1_review_result` and the whole aggregate is suppressed — a full fanout spent to learn a wiring bug (#403) |
+| fixer output contract | `fix`, in **both** modes — the arm is shared, so this governs `simplify.fix.phase2` too. An absent, relative or traversal-bearing `fixerContractPathAbs` aborts `bad_contract_path` **before** the nonce gate. Stricter than the reviewer twin in consequence, not in mechanism: a fixer has already COMMITTED by the time its result is parsed, so an unbound format strands unattributable history and escalates the run to `MUTATED_BLOCKED` (#474) |
 | commit-type / edge pairing | `phase1`⇒`fix:`, `phase2`⇒`refactor:`; a mismatch aborts |
 | runtime `budget` | checked between waves with `budget && budget.total && budget.remaining() <= 0` — `parallel()` never rejects, so a budget throw would otherwise arrive as a silent `null` |
 

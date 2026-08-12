@@ -238,6 +238,15 @@ const diffPathAbs = String(CFG.diffPathAbs || "");
 // "one contract, N uncompared copies" class #403 filed.
 const phase1ContractPathAbs = String(CFG.phase1ContractPathAbs || "");
 
+// The code-fixer OUTPUT contract, by PATH, resolved the same manifest way from
+// output_contracts["code-fixer-v1"] (#474). The fixer used to receive no format
+// binding at all while all seven reviewers received one, and the asymmetry was
+// invisible because a fixer's format is only checked AFTER it has committed: two
+// consecutive children wrote a titled report around their YAML, and each one
+// turned a green fix into MUTATED_BLOCKED with unattributed history on the
+// branch. Same #403 rule as above -- forwarded, never spelled here.
+const fixerContractPathAbs = String(CFG.fixerContractPathAbs || "");
+
 // The convention lens's rule-source ALLOWLIST, by PATH (#433). Discovered by the
 // controller before this call and persisted; this script has no filesystem, so
 // it forwards the path and never reads, re-derives or repairs the list. Only the
@@ -820,6 +829,36 @@ function phase1OutputContract() {
     + "completed review with zero findings is `findings: []` with `verdict: APPROVE`.";
 }
 
+// The fixer's output contract, framed exactly the way phase1OutputContract()
+// frames the reviewers' (#474). Two things here are load-bearing and neither is
+// decoration:
+//
+//  (1) The whole-file-fence rule is stated INLINE as well as by path. The
+//      reviewers get the same belt-and-braces treatment for the same reason: a
+//      child that skips the read still has the one rule whose breach costs the
+//      whole dispatch. For a fixer that cost is higher than for a reviewer,
+//      because the commit is already made when the parse runs.
+//  (2) It explicitly overrides `boundChildProtocol`'s "Write your full report"
+//      wording, which is shared with the reviewer edges and reads, to a fixer
+//      with no format binding, as an invitation to write a titled report. That
+//      is the exact shape both observed violations took.
+function fixerOutputContract() {
+  return "## Output contract (overrides your agent file's output FORMAT)\n"
+    + "Read the code-fixer output contract at " + fixerContractPathAbs + " and follow it exactly. "
+    + "It OVERRIDES every response-formatting instruction in your agent file. It does NOT override "
+    + "your agent file's secret-leak prevention rule: that rule governs what a field may CONTAIN, "
+    + "not how the result is serialized, and it still binds.\n"
+    + "The entire contents of the result file must be exactly one bare ```yaml fence: no heading, "
+    + "title, prose or blank-line preamble before the opening fence, and nothing whatsoever after "
+    + "the closing fence. Where the protocol below says to write your full REPORT, it means this "
+    + "document and only this document — the parser matches the whole file, so one byte outside the "
+    + "fence refuses everything.\n"
+    + "This refusal is not a retry for you. You commit BEFORE the controller parses this file, so a "
+    + "report written around the YAML strands a commit nobody can attribute and halts the run. Your "
+    + "reasoning belongs in each row's `reason:` field, which is carried through to the aggregation "
+    + "table; there is no other place in this file for it.";
+}
+
 // The convention edge's extra binding: the allowlist path, the `detail` grammar
 // its findings must use, and the instruction that covers the common case of a
 // repo that wrote no conventions down. All of it is code-chosen trusted text
@@ -967,6 +1006,7 @@ function fixerPrompt(nonce) {
     + ", and the applied-content artifact to " + appliedContentPathAbs + ". The controller validates "
     + "both after you return — a plausible-looking artifact that does not match is a hard failure, so "
     + "do not guess at a shape you are unsure of; refuse instead.");
+  lines.push(fixerOutputContract());
   lines.push(boundChildProtocol(slug, nonce));
   lines.push("Also return: edgeId (\"" + fixerEdgeId + "\"), status (APPLIED | NO_FIXES_NEEDED | "
     + "REFUSED), dispositionPath (\"" + dispositionPathAbs + "\"), and note (one short sentence).");
@@ -1632,6 +1672,15 @@ async function main() {
       }
       if (!isSha256(findingsSha256)) return abort("bad_findings_sha256", "");
       if (!isSha256(authoritySha256)) return abort("bad_authority_sha256", "");
+      // BEFORE nonceGate and before any dispatch, for a sharper version of the
+      // reason the review stage checks its own contract path (#474): an unbound
+      // fixer does not merely waste a child, it lets one COMMIT and then fails
+      // the parse afterwards, which is MUTATED_BLOCKED and an operator repair.
+      // Refusing a mis-wired envelope here costs nothing; discovering it after
+      // the commit costs the whole run.
+      if (!isSafeAbsPath(fixerContractPathAbs)) {
+        return abort("bad_contract_path", fixerContractPathAbs);
+      }
       // Two populated families always means the controller and this script
       // disagree about which edge is running. Refuse rather than pick one.
       if (snapshotPathAbs && commitRangePathAbs) {
