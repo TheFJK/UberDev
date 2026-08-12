@@ -182,6 +182,7 @@
     "commands/simplify.md",
     "lib/child-dispatch.sh",
     "lib/code_fixer_contract.py",
+    "lib/command-workspace.py",
     "lib/config-read.sh",
     "lib/review-aggregate.sh",
     "policy/model-routing-v1.json",

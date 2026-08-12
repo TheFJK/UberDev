@@ -1033,7 +1033,26 @@ review_fleet_write_active_run_pointer "$WORKTREE_ROOT" "$RUN_ID" "$PR_NUMBER" "$
 #    consumed by callers that source this fence and then capture the stdout of
 #    what they run next; a line on stdout would land in the middle of their
 #    payload.
-printf 'REVIEW_CARRY RUN_ID=%s\n' "$RUN_ID" >&2
+#
+#    BOTH values, not just RUN_ID. The reservation receipt is minted a few lines
+#    above and its ONLY consumer is the terminal verdict fence, nine Workflow
+#    relays downstream -- a different process every time. It was never written to
+#    disk, never printed, and never on this line, so that fence received the
+#    empty string and died with `review_reservation_receipt_invalid` AFTER the
+#    run had spent seven reviewer agents and three simplify lenses.
+#
+#    Putting it here is not the weakening that lib/review-fleet-args.sh refuses.
+#    That refusal is about PERSISTING the receipt inside the run directory it
+#    guards, where a swapped directory would carry its own forged proof. The
+#    carry line is outside that tree, and the token is verified against LIVE
+#    (st_dev, st_ino) identity at redemption, so carrying it grants no ability to
+#    authorise a directory the reservation did not already own.
+#
+#    One space-separated line, same `REVIEW_CARRY ` prefix: the receipt matches
+#    `v1:[A-Za-z0-9_-]+` and can never contain a space, so the pair stays
+#    unambiguously parseable by the same reader that handled RUN_ID alone.
+printf 'REVIEW_CARRY RUN_ID=%s REVIEW_RUN_RESERVATION_RECEIPT=%s\n' \
+  "$RUN_ID" "$REVIEW_RUN_RESERVATION_RECEIPT" >&2
 # END review-run-handoff-v1
 REVIEW_ITERATION="${REVIEW_ITERATION:-1}"
 REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
@@ -1045,10 +1064,6 @@ CI_RUN_ID="${CI_RUN_ID:-}"
 CI_RUN_EVENT="${CI_RUN_EVENT:-}"
 CI_RUN_CHECK_LINK="${CI_RUN_CHECK_LINK:-}"
 FOCUS="${FOCUS:-${ARGUMENTS:-}}"
-review_json_string() {
-  [ "$#" -ge 1 ] || return 2
-  python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1],separators=(",",":")),end="")' "${@:1:1}"
-}
 ```
 
 ### Carrying the run across fences (read this before running any later fence)
@@ -1060,299 +1075,60 @@ shell variable it bound is reachable from any later block.
 The setup fence therefore prints exactly one line, on **stderr**:
 
 ```
-REVIEW_CARRY RUN_ID=<run id>
+REVIEW_CARRY RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt>
 ```
 
-**The orchestrator MUST prefix every later `/review-pr` Bash call with
-`RUN_ID=<that value>`.** That is the primary channel and the only one that is
-unambiguous when more than one review is in flight against the same checkout.
+**The orchestrator MUST prefix every later `/review-pr` Bash call with BOTH
+values, exactly as printed:**
 
-When that context is lost — a compacted session, a resumed run, an operator
-re-entering mid-pipeline — every fence recovers on its own through
+```
+RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt> …
+```
+
+That is the primary channel and the only one that is unambiguous when more than
+one review is in flight against the same checkout.
+
+Carrying **both** is not belt-and-braces, and dropping the receipt is not a
+degraded-but-working mode:
+
+- `RUN_ID` names *which* run this fence belongs to. Every fence needs it, and it
+  has a recovery path (below) when the context is lost.
+- `REVIEW_RUN_RESERVATION_RECEIPT` is the **capability token** that authorises
+  retiring the run's `locked` and `pr-context.json` markers. Exactly one fence
+  redeems it — the terminal verdict fence — and it has **no recovery path by
+  design**. Deliberately so: the receipt pins `(st_dev, st_ino)` for the runs
+  root, the run directory and both markers, which is what proves the directory
+  about to be published into is the same one that was reserved. A copy kept
+  *inside* that directory would be swapped along with it and would prove
+  nothing, so the receipt is never persisted there — see the note on
+  `review_fleet_rehydrate` in `lib/review-fleet-args.sh`. This line is the only
+  channel it has.
+
+A run that carries `RUN_ID` alone will execute all three phases and then fail at
+the very last step, after spending the full reviewer fleet, with no verdict
+published and the run's markers still held.
+
+When the `RUN_ID` context is lost — a compacted session, a resumed run, an
+operator re-entering mid-pipeline — every fence recovers on its own through
 `<repo>/.uberdev/runs/.review-active-run.json`, the pointer the setup fence
 publishes alongside the reservation. Recovery is guarded, not best-effort: the
 named run must still hold its `locked` and `pr-context.json` markers, must not
 already have published a verdict, must be for the PR this fence is reviewing,
 and must be younger than `REVIEW_RESERVATION_REAP_SECS`. Any guard that fails is
-`rc 2` with its own message — never a silent fallback to some other run.
+`rc 2` with its own message — never a silent fallback to some other run. The
+receipt is **not** recoverable this way; if it was lost, re-run `/review-pr`
+from the setup fence rather than hunting for a substitute.
 
 Both paths land in `review_fleet_rehydrate` (`lib/review-fleet-args.sh`), which
 is the first call of every executed fence below.
 
-<!-- BEGIN review-child-builder-v1 -->
-```bash
-review_child_record() {
-  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" record_path="${@:5:1}"
-  [ "$#" -ge 5 ] || return 2
-  if command -v uberdev_child_inputs_validate >/dev/null 2>&1; then
-    inputs="$(uberdev_child_inputs_validate "$edge" "$inputs")" || return 2
-  fi
-  python3 -I -B - "$edge" "$instance" "$inputs" "$risks" "$record_path" <<'PY'
-import json,sys
-edge,instance,inputs,risks,path=sys.argv[1:]
-with open(path,'a') as f: f.write(json.dumps({'edge':edge,'instance':instance,'inputs':json.loads(inputs),'risks':json.loads(risks)},sort_keys=True,separators=(',',':'))+'\n')
-PY
-}
-review_child_fanout() {
-  local records="${@:1:1}" descriptors="${@:2:1}" launched="${@:3:1}" timeout_s="${@:4:1}" row edge instance inputs risks handoff handoff_sha256 result child_status receipt dispatch_rc ledger_rc cleanup_rc index
-  [ "$#" -ge 4 ] || return 2
-  local preflight_refs=()
-  local launch_edges=() launch_instances=() launch_handoffs=()
-  local launch_handoff_sha256s=() launch_results=() launch_statuses=()
-  : >"$descriptors"; : >"$launched"
-  while IFS= read -r row; do
-    edge="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["edge"])' "$row")"
-    instance="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["instance"])' "$row")"
-    inputs="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["inputs"],separators=(",",":")))' "$row")"
-    risks="$(python3 -I -B -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["risks"],separators=(",",":")))' "$row")"
-    uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-    python3 -I -B - "$edge" "$instance" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$UBERDEV_CHILD_RESULT" "$UBERDEV_CHILD_STATUS" "$descriptors" <<'PY'
-import json,sys
-edge,instance,handoff,handoff_sha256,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'handoff':handoff,'handoff_sha256':handoff_sha256,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
-PY
-    preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")
-    launch_edges+=("$edge"); launch_instances+=("$instance")
-    launch_handoffs+=("$UBERDEV_CHILD_HANDOFF")
-    launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")
-    launch_results+=("$UBERDEV_CHILD_RESULT"); launch_statuses+=("$UBERDEV_CHILD_STATUS")
-  done <"$records"
-  uberdev_preflight_child_batch "${preflight_refs[@]}" || return $?
-  for ((index=0; index<${#launch_handoffs[@]}; index++)); do
-    edge="${launch_edges[$index]}"; instance="${launch_instances[$index]}"
-    handoff="${launch_handoffs[$index]}"
-    handoff_sha256="${launch_handoff_sha256s[$index]}"
-    result="${launch_results[$index]}"; child_status="${launch_statuses[$index]}"
-    if uberdev_dispatch_child_capture "$edge" "$handoff" "$handoff_sha256" "$result" "$child_status"; then
-      receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
-    else
-      dispatch_rc=$?; cleanup_rc=0
-      while IFS= read -r row; do
-        result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
-      done <"$launched"
-      [ "$cleanup_rc" -eq 0 ] || echo "error: prior child cleanup failed after dispatch edge=$edge" >&2
-      return "$dispatch_rc"
-    fi
-    if python3 -I -B - "$edge" "$instance" "$receipt" "$result" "$child_status" "$launched" <<'PY'
-import json,sys
-edge,instance,receipt,result,status,path=sys.argv[1:]
-with open(path,'a') as f:f.write(json.dumps({'edge':edge,'instance':instance,'receipt':receipt,'result':result,'status':status},sort_keys=True,separators=(',',':'))+'\n')
-PY
-    then
-      :
-    else
-      ledger_rc=$?; cleanup_rc=0
-      uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
-      while IFS= read -r row; do
-        result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-        child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-        uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
-      done <"$launched"
-      [ "$cleanup_rc" -eq 0 ] || echo "error: current child cleanup failed after receipt ledger write edge=$edge" >&2
-      return "$ledger_rc"
-    fi
-  done
-}
-review_child_wait_all() {
-  local launched="${@:1:1}" timeout_s="${@:2:1}" row result child_status wait_rc first_rc=0 cleanup_rc=0
-  [ "$#" -ge 2 ] || return 2
-  while IFS= read -r row; do
-    result="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["result"])' "$row")"
-    child_status="$(python3 -I -B -c 'import json,sys;print(json.loads(sys.argv[1])["status"])' "$row")"
-    if uberdev_wait_child "$child_status" "$result" "$timeout_s"; then
-      continue
-    else
-      wait_rc=$?
-    fi
-    [ "$first_rc" -ne 0 ] || first_rc="$wait_rc"
-    uberdev_unwind_child "$child_status" "$result" "$timeout_s" || cleanup_rc=1
-  done <"$launched"
-  if [ "$first_rc" -ne 0 ]; then
-    [ "$cleanup_rc" -eq 0 ] || echo "error: cleanup failed after child wait" >&2
-    return "$first_rc"
-  fi
-  return 0
-}
-review_child_result_path() {
-  local launched="${@:1:1}" edge="${@:2:1}"
-  [ "$#" -ge 2 ] || return 2
-  python3 -I -B - "$launched" "$edge" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$UBERDEV_CARRIER_RUN_DIR" \
-    "$_UBERDEV_DISPATCH_BACKEND_ENUM" "$UBERDEV_CARRIER_BACKEND" <<'PY'
-import hashlib,importlib.util,json,os,stat,sys
-ledger,edge,plugin_root,carrier_run_dir,backend_policy,expected_backend=sys.argv[1:]
-def fail(reason):
-    print(reason,end='')
-    raise SystemExit(2)
-policy_backends=backend_policy.split('|')
-if (not policy_backends or any(not item for item in policy_backends)
-        or len(policy_backends)!=len(set(policy_backends)) or 'auto' not in policy_backends):
-    fail('classification_carrier_mismatch')
-allowed_backends=set(policy_backends); allowed_backends.remove('auto')
-if expected_backend not in allowed_backends:
-    fail('classification_carrier_mismatch')
-spec=importlib.util.spec_from_file_location('uberdev_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
-if spec is None or spec.loader is None: fail('classification_ledger_unreadable')
-artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
-try: spec.loader.exec_module(artifacts)
-except Exception: fail('classification_ledger_unreadable')
-if not os.path.lexists(ledger): fail('classification_ledger_missing')
-try:
-    ledger_bytes,_=artifacts.secure_capture_regular(ledger,1,1048576)
-    rows=[json.loads(line) for line in ledger_bytes.decode('utf-8').splitlines() if line.strip()]
-except Exception:
-    fail('classification_ledger_malformed')
-if any(not isinstance(row,dict) for row in rows):
-    fail('classification_ledger_malformed')
-matches=[row for row in rows if row.get('edge')==edge]
-if not matches:
-    fail('classification_ledger_edge_missing')
-if len(matches)>1:
-    fail('classification_ledger_duplicate')
-row=matches[0]
-if set(row)!={'edge','instance','receipt','result','status'}:
-    fail('classification_ledger_malformed')
-path=row.get('result'); status=row.get('status'); instance=row.get('instance')
-expected_child=os.path.join(os.path.realpath(carrier_run_dir),'children',instance) if isinstance(instance,str) else ''
-if (not os.path.isabs(carrier_run_dir) or os.path.realpath(carrier_run_dir)!=carrier_run_dir
-        or not isinstance(path,str) or not os.path.isabs(path)
-        or os.path.basename(path)!='result.md'
-        or not isinstance(instance,str) or os.path.basename(os.path.dirname(path))!=instance
-        or os.path.dirname(path)!=expected_child):
-    fail('classification_result_path_invalid')
-if (not isinstance(status,str) or not os.path.isabs(status)
-        or os.path.basename(status)!='status.json'
-        or os.path.dirname(status)!=os.path.dirname(path)):
-    fail('classification_status_path_invalid')
-try:
-    receipt=json.loads(row['receipt'])
-except (TypeError,json.JSONDecodeError):
-    fail('classification_receipt_malformed')
-receipt_keys={'schema_version','edge_id','instance_id','backend','handle','state','result_file','status_file'}
-if (not isinstance(receipt,dict) or set(receipt)!=receipt_keys or receipt.get('schema_version')!=1
-        or receipt.get('edge_id')!=edge or receipt.get('instance_id')!=instance
-        or receipt.get('result_file')!=path or receipt.get('status_file')!=status
-        or receipt.get('backend')!=expected_backend
-        or not isinstance(receipt.get('handle'),str) or not receipt['handle']
-        or receipt.get('state') not in {'running','completed'}):
-    fail('classification_receipt_mismatch')
-try:
-    status_bytes,_=artifacts.secure_capture_regular(status,1,65536)
-    status_value=json.loads(status_bytes.decode('utf-8'))
-except Exception:
-    fail('classification_status_unreadable')
-if (not isinstance(status_value,dict) or status_value.get('state')!='completed'
-        or type(status_value.get('exit_code')) is not int or status_value['exit_code']!=0
-        or status_value.get('backend')!=receipt['backend']):
-    fail('classification_child_not_completed_zero')
-status_handle=status_value.get('pid')
-if (status_handle is None or receipt['handle'] not in {str(status_handle),'pane:'+str(status_handle)}):
-    fail('classification_receipt_mismatch')
-if not os.path.lexists(path): fail('classification_artifact_missing')
-try:
-    payload,_=artifacts.secure_capture_regular(path,1,16777216)
-except artifacts.ManifestRejected:
-    fail('classification_artifact_unsafe')
-except Exception:
-    fail('classification_artifact_unreadable')
-digest=hashlib.sha256(payload).hexdigest()
-instance_digest=hashlib.sha256(instance.encode()).hexdigest()[:16]
-snapshot=os.path.join(os.path.dirname(os.path.abspath(ledger)),f'ci-classification-{instance_digest}-{digest}.trusted.md')
-try:
-    parent=os.lstat(os.path.dirname(snapshot))
-    uid_fn=getattr(os,'geteuid',None); uid=uid_fn() if uid_fn else None
-    if (stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode)
-            or (uid is not None and parent.st_uid!=uid)):
-        fail('classification_snapshot_failed')
-    published,_,published_digest=artifacts.secure_publish_captured(snapshot,payload)
-    captured,_=artifacts.secure_capture_published(published,published_digest,1,16777216)
-    if captured!=payload or published_digest!=digest:
-        fail('classification_snapshot_failed')
-except SystemExit:
-    raise
-except Exception:
-    fail('classification_snapshot_failed')
-print(published,end='')
-PY
-}
-review_child_single() {
-  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
-  [ "$#" -ge 6 ] || return 2
-  : >"$prefix.records"
-  review_child_record "$edge" "$instance" "$inputs" "$risks" "$prefix.records"
-  review_child_fanout "$prefix.records" "$prefix.descriptors" "$prefix.launched" "$timeout_s" || return $?
-  review_child_wait_all "$prefix.launched" "$timeout_s"
-}
-# BEGIN review-fixer-child-bound-v2
-# BEGIN review-failed-return-guard-v1
-review_guard_failed_fixer_return() {
-  [ "$#" -eq 2 ] || return 2
-  local head_before="${@:1:1}" original_rc="${@:2:1}" guard_receipt
-  case "$original_rc" in ''|*[!0-9]*|0) return 2 ;; esac
-  guard_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-failed-return \
-    --working-dir "$WORKTREE_ROOT" \
-    --evidence-dir "$RESEARCH_DIR_ABS" \
-    --head-before "$head_before")" || {
-    echo "error: MUTATED_BLOCKED — fixer failure left unvalidated repository mutation" >&2
-    return 79
-  }
-  [ "$guard_receipt" = '{"status":"clean"}' ] || {
-    echo "error: MUTATED_BLOCKED — fixer failure residue receipt is malformed" >&2
-    return 79
-  }
-  return "$original_rc"
-}
-# END review-failed-return-guard-v1
-review_fixer_child_bound() {
-  [ "$#" -eq 10 ] || return 2
-  local edge="${@:1:1}" instance="${@:2:1}" inputs="${@:3:1}" risks="${@:4:1}" prefix="${@:5:1}" timeout_s="${@:6:1}"
-  local authority_path="${@:7:1}" authority_sha256="${@:8:1}" disposition_path="${@:9:1}" applied_content_path="${@:10:1}"
-  local receipt wait_rc
-  uberdev_create_child_handoff "$edge" "$instance" "$inputs" "$risks" >/dev/null || return $?
-  uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" || return $?
-  REVIEW_FIXER_RESULT_PATH="$UBERDEV_CHILD_RESULT"
-  REVIEW_FIXER_STATUS_PATH="$UBERDEV_CHILD_STATUS"
-  uberdev_dispatch_child_capture "$edge" "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256" "$REVIEW_FIXER_RESULT_PATH" "$REVIEW_FIXER_STATUS_PATH" || return $?
-  receipt="$UBERDEV_CHILD_DISPATCH_RECEIPT"
-  REVIEW_FIXER_LAUNCH_BINDING="$(printf '%s' "$receipt" | python3 -I -B "$CODE_FIXER_CONTRACT" bind-fixer-launch-receipt \
-    --edge-id "$edge" --instance-id "$instance" \
-    --result-path "$REVIEW_FIXER_RESULT_PATH" \
-    --status-path "$REVIEW_FIXER_STATUS_PATH" \
-    --working-dir "$WORKTREE_ROOT" \
-    --authority-path "$authority_path" \
-    --authority-sha256 "$authority_sha256")" || {
-    wait_rc=$?
-    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
-    return "$wait_rc"
-  }
-  # Diagnostics only; authorization retains the exact in-memory binding above.
-  python3 -I -B - "$edge" "$instance" "$REVIEW_FIXER_LAUNCH_BINDING" "$prefix.launched" <<'PY' || {
-import json,sys
-edge,instance,binding,path=sys.argv[1:]
-value=json.loads(binding)
-with open(path,"w",encoding="utf-8") as stream:
-    json.dump({"edge":edge,"instance":instance,"receipt_sha256":value["receipt_sha256"]},stream,sort_keys=True,separators=(",",":"))
-    stream.write("\n")
-PY
-    wait_rc=$?
-    uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
-    return "$wait_rc"
-  }
-  if uberdev_wait_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s"; then
-    REVIEW_FIXER_TERMINAL="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
-      --launch-binding-json "$REVIEW_FIXER_LAUNCH_BINDING" \
-      --disposition-path "$disposition_path" \
-      --applied-content-path "$applied_content_path")" || return 74
-    return 0
-  fi
-  wait_rc=$?
-  uberdev_unwind_child "$REVIEW_FIXER_STATUS_PATH" "$REVIEW_FIXER_RESULT_PATH" "$timeout_s" || return 74
-  return "$wait_rc"
-}
-# END review-fixer-child-bound-v2
-```
-<!-- END review-child-builder-v1 -->
+**Functions do not survive a fence boundary either.** The routed child builders
+(`review_child_record`, `review_child_fanout`, `review_child_wait_all`,
+`review_child_single`, `review_fixer_child_bound`), the scope and head helpers,
+and the Phase 3 authority helpers all ship in `lib/review-fences.sh`, which
+`review_fleet_rehydrate` loads. There is no builder fence to run: a fence that
+carries the prologue already has them, and one that does not would have had them
+`command not found` no matter where the definition text sat.
 
 - **Phase 1 — Review + Fix loop**: invoke `Skill(uberdev:post-impl-review)` to run the 7 reviewer agents in one or more cap-controlled waves, with every child in each wave dispatched before its first wait; read the resulting findings aggregate from `.uberdev/research/<RUN_ID>/post-impl-review-final.md`, then dispatch a fresh `code-fixer` subagent to auto-apply fixes from the findings.
 - **Phase 2 — Simplify pass**: parallel fanout of the three simplify lenses (reuse / quality / efficiency) defined in `/uberdev:simplify`, with auto-applied edits committed separately. Single-message dispatch per the `uberdev:post-impl-review` contract.
@@ -1443,107 +1219,6 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    ```bash uberdev-executable origin=review-pr
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
    review_fleet_rehydrate || return 2
-   review_assert_selected_pr_head() {
-     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
-     local live_head local_head
-     [ "$#" -ge 4 ] || return 2
-     [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
-     [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
-     [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || return 2
-     live_head="$(gh pr view "$pr_number" --repo "$repo_slug" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 2
-     local_head="$(git -C "$worktree_root" rev-parse HEAD 2>/dev/null)" || return 2
-     [ "$live_head" = "$expected_head" ] && [ "$local_head" = "$expected_head" ]
-   }
-
-   review_publish_same_repo_pr_head() {
-     [ "$#" -eq 7 ] || return 2
-     local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_remote_head_sha="${@:3:1}" publish_sha="${@:4:1}"
-     local worktree_root="${@:5:1}" contract_helper="${@:6:1}" evidence_dir="${@:7:1}"
-     local live_identity live_head live_branch live_cross_repository live_head_repo extra
-     local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
-     [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
-     [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
-     [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
-     [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
-     # The head-repository identity is `headRepositoryOwner.login` +
-     # `headRepository.name`, NEVER `headRepository.nameWithOwner` (#429).
-     # gh DECLARES that last field and never populates it -- gh 2.83.1:
-     #
-     #     gh pr view 422 --repo TheFJK/UberDev --json headRepository
-     #     {"headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""}}
-     #
-     # A gate keyed on the empty string can never pass, which turned "refuse
-     # forks" into "refuse everything": every /review-pr run exited 2 here and
-     # at the trust-trail anchor push below, so no PR could ever obtain a trail
-     # and /merge gated all of them out. The owner/name composite is populated
-     # for every PR, fork and same-repo alike. Same resolution as
-     # `lib/review-push-target.sh`, which had this fix from the start and was
-     # wired into ONE call site only -- keep the two in step.
-     #
-     # One field per LINE, not one tab-separated line. Tab is IFS whitespace, so
-     # a tab-joined projection with an empty field COLLAPSES under `read`: the
-     # fields shift left and a malformed identity parses as a well-formed
-     # DIFFERENT one. Line-per-field cannot shift -- git refuses a ref name
-     # containing a newline, so a stray newline can only make the projection
-     # over-long, which the trailing read refuses.
-     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
-       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
-       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
-             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
-       2>/dev/null)" || return 79
-     {
-       IFS= read -r live_head || return 79
-       IFS= read -r live_branch || return 79
-       IFS= read -r live_cross_repository || return 79
-       IFS= read -r live_head_repo || return 79
-       if IFS= read -r extra; then return 79; fi
-     } <<<"$live_identity"
-     [ "$live_head" = "$expected_remote_head_sha" ] || return 79
-     # No `[ -z "$extra" ]` here, and its absence is not an oversight: with
-     # line-per-field, over-length is refused INSIDE the read block above, which
-     # returns 79 the moment a fifth line exists. A trailing emptiness test on
-     # `extra` is therefore unreachable-false -- it can only ever be reached
-     # when `extra` is already empty. The tab-joined form it replaced DID need
-     # it, because there a fifth field arrived on the same single line and the
-     # read could not refuse it.
-     [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
-     git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
-     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
-     [ "$observed_head" = "$publish_sha" ] || return 79
-     # BRACES ARE LOAD-BEARING. These fences run under /bin/zsh, where an
-     # unbraced `$publish_sha:refs/...` parses `:r` as the remove-extension
-     # MODIFIER: the refspec silently becomes `<sha>efs/heads/<branch>` and the
-     # push dies with "src refspec ... does not match any". Proven with
-     # `zsh -c 'V=abc; print "$V:refs/x"'` -> `abcefs/x`.
-     git -C "$worktree_root" push origin "${publish_sha}:refs/heads/${live_branch}" || return 79
-     remote_identity="$(git -C "$worktree_root" ls-remote --exit-code --heads origin "refs/heads/$live_branch")" || return 79
-     [[ "$remote_identity" != *$'\n'* ]] || return 79
-     IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
-     [ "$remote_head" = "$publish_sha" ] && [ "$remote_ref" = "refs/heads/$live_branch" ] && [ -z "$remote_extra" ] || return 79
-     # Post-push re-projection. Same owner/name composite and same
-     # line-per-field read as the pre-push probe above (#429) -- the two must
-     # never drift, since this one is what proves the ref we just wrote is still
-     # the PR's head in the repository we think it is.
-     live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
-       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
-       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
-             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
-       2>/dev/null)" || return 79
-     {
-       IFS= read -r live_head || return 79
-       IFS= read -r live_branch || return 79
-       IFS= read -r live_cross_repository || return 79
-       IFS= read -r live_head_repo || return 79
-       if IFS= read -r extra; then return 79; fi
-     } <<<"$live_identity"
-     [ "$live_head" = "$publish_sha" ] || return 79
-     # See the pre-push probe: `extra` is intentionally unassigned on success.
-     [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
-     observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
-     [ "$observed_head" = "$publish_sha" ] || return 79
-     residue_receipt="$(python3 -I -B "$contract_helper" validate-residue --working-dir "$worktree_root" --evidence-dir "$evidence_dir")" || return 79
-     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
-   }
    REVIEW_REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
    REVIEW_PR_METADATA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
      --json number,baseRefOid,baseRefName,headRefOid)"
@@ -1625,123 +1300,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    diff artifact, and commit range bound to the same post-fix HEAD:
 
    ```bash
-   review_resolve_phase1_base() {
-     [ "$#" -ge 3 ] || return 2
-     python3 -I -B - "${@:1:1}" "${@:2:1}" "${@:3:1}" <<'PY'
-import json,re,subprocess,sys
-pr,root,repo=sys.argv[1:]
-if re.fullmatch(r'[1-9][0-9]*',pr) is None: raise SystemExit(2)
-metadata=json.loads(subprocess.check_output(
-    ['gh','pr','view',pr,'--repo',repo,'--json','baseRefOid,baseRefName'],text=True))
-base_oid=metadata.get('baseRefOid'); base_name=metadata.get('baseRefName')
-if re.fullmatch(r'[0-9a-f]{40}',base_oid or '') is None or not isinstance(base_name,str) or not base_name:
-    raise SystemExit(2)
-try:
-    subprocess.run(['git','-C',root,'cat-file','-e',base_oid+'^{commit}'],check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-except subprocess.CalledProcessError:
-    subprocess.run(['git','-C',root,'fetch','--no-tags','origin',base_name],check=True)
-    subprocess.run(['git','-C',root,'cat-file','-e',base_oid+'^{commit}'],check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
-base=subprocess.check_output(['git','-C',root,'merge-base',head,base_oid],text=True).strip()
-if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
-print(base,end='')
-PY
-   }
-   review_refresh_phase1_scope() {
-     local base="${@:1:1}"
-     [ "$#" -ge 1 ] || return 2
-     CHANGED_PATHS_JSON="$(python3 -I -B - "$WORKTREE_ROOT" "$base" "$DIFF_ARTIFACT_PATH" "$COMMIT_RANGE_PATH" <<'PY'
-import json,os,re,stat,subprocess,sys,tempfile
-root,base,diff_path,range_path=sys.argv[1:]
-MAX_DIFF_LINES=2000
-MAX_DIFF_BYTES=8*1024*1024
-MAX_WRAPPED_DIFF_BYTES=16*1024*1024
-if re.fullmatch(r'[0-9a-f]{40}',base) is None: raise SystemExit(2)
-head=subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
-if re.fullmatch(r'[0-9a-f]{40}',head) is None: raise SystemExit(2)
-subprocess.run(['git','-C',root,'merge-base','--is-ancestor',base,head],check=True)
-raw_paths=subprocess.check_output(['git','-C',root,'diff','--name-only','-z',f'{base}..{head}'])
-paths=[item.decode('utf-8','strict') for item in raw_paths.split(b'\0') if item]
-if not paths: raise SystemExit(2)
-for path in paths:
-    parts=path.split('/')
-    if (path.startswith('/') or '\\' in path or any(part in ('','.','..') for part in parts)
-            or any(ord(char)<32 or ord(char)==127 for char in path)):
-        raise SystemExit(2)
-def escape_untrusted_diff_payload(payload):
-    return payload.replace(b'&',b'&amp;').replace(b'<',b'&lt;')
-def wrap_untrusted_diff(payload):
-    escaped=escape_untrusted_diff_payload(payload)
-    opening=b'<external-untrusted-input source="pr-diff">'
-    closing=b'</external-untrusted-input>'
-    wrapped=opening+b'\n'+escaped+closing+b'\n'
-    if wrapped.count(opening)!=1 or wrapped.count(closing)!=1: raise ValueError()
-    return wrapped
-def build_diff_summary():
-    summary=['[diff summarized: full binary diff exceeded the 2000-line, 8-MiB raw, or 16-MiB wrapped review artifact limit]']
-    summary_bytes=len((summary[0]+'\n').encode())
-    summary_wrapped_bytes=len(wrap_untrusted_diff((summary[0]+'\n').encode()))
-    omission_reserve=128
-    stats=subprocess.Popen(['git','-C',root,'diff','--numstat','--no-renames',f'{base}..{head}'],
-                           stdout=subprocess.PIPE,text=True,encoding='utf-8',errors='strict')
-    omitted=0
-    for line in stats.stdout:
-        fields=line.rstrip('\n').split('\t',2)
-        if len(fields)!=3: raise SystemExit(2)
-        added,deleted,path=fields
-        detail='binary change' if added==deleted=='-' else f'{added} additions, {deleted} deletions'
-        row=f'{path} — {detail}'
-        encoded=(row+'\n').encode()
-        escaped_size=len(escape_untrusted_diff_payload(encoded))
-        if (summary_bytes+len(encoded)>MAX_DIFF_BYTES
-                or summary_wrapped_bytes+escaped_size+omission_reserve>MAX_WRAPPED_DIFF_BYTES):
-            omitted+=1
-            continue
-        summary.append(row)
-        summary_bytes+=len(encoded)
-        summary_wrapped_bytes+=escaped_size
-    if stats.wait()!=0: raise SystemExit(2)
-    if omitted: summary.append(f'[{omitted} additional file summaries omitted to preserve the artifact limit]')
-    return ('\n'.join(summary)+'\n').encode()
-def select_bounded_wrapped_diff(payload, summary_factory):
-    wrapped=wrap_untrusted_diff(payload)
-    if len(wrapped)<=MAX_WRAPPED_DIFF_BYTES: return wrapped
-    wrapped=wrap_untrusted_diff(summary_factory())
-    if len(wrapped)>MAX_WRAPPED_DIFF_BYTES: raise ValueError()
-    return wrapped
-process=subprocess.Popen(['git','-C',root,'diff','--binary','--no-ext-diff',f'{base}..{head}'],stdout=subprocess.PIPE)
-diff_buffer=bytearray(); diff_lines=0; summarized=False
-while True:
-    chunk=process.stdout.read(65536)
-    if not chunk: break
-    diff_buffer.extend(chunk); diff_lines+=chunk.count(b'\n')
-    if len(diff_buffer)>MAX_DIFF_BYTES or diff_lines>MAX_DIFF_LINES:
-        summarized=True; process.kill(); break
-process.stdout.close(); process.wait()
-if not summarized and process.returncode!=0: raise SystemExit(2)
-diff=build_diff_summary() if summarized else bytes(diff_buffer)
-wrapped_diff=select_bounded_wrapped_diff(diff,(lambda: diff) if summarized else build_diff_summary)
-def replace_private(path,payload):
-    parent=os.path.dirname(path) or '.'
-    fd,tmp=tempfile.mkstemp(prefix='.review-scope.',dir=parent)
-    try:
-        if os.name!='nt': os.fchmod(fd,0o600)
-        with os.fdopen(fd,'wb') as stream:
-            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
-        os.replace(tmp,path)
-    finally:
-        try: os.unlink(tmp)
-        except FileNotFoundError: pass
-replace_private(diff_path,wrapped_diff)
-expected_range=f'{base}..{head}\n'.encode()
-replace_private(range_path,expected_range)
-if open(range_path,'rb').read()!=expected_range: raise SystemExit(2)
-print(json.dumps(paths,separators=(',',':')),end='')
-PY
-)" || return 2
-   }
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
    BASE_SHA="$(review_resolve_phase1_base "$PR_NUMBER" "$WORKTREE_ROOT" "$REVIEW_REPO_SLUG")" || return 2
    BASE_REF_NAME="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json baseRefName --jq .baseRefName)" || return 2
    REENTRY_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" --json headRefOid --jq .headRefOid)" || return 2
@@ -1759,7 +1319,12 @@ PY
    # string. Same run-dir carrier idiom as ci-push-target.tsv / ci-fix-phase.txt,
    # through the typed lib pair so neither half can record or return a value the
    # other would refuse.
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || return 2
+   #
+   # No `. lib/review-fleet-args.sh` here any more: the fence prologue above
+   # sourced it before the first carrier read. This mid-fence re-source used the
+   # BARE `$UBERDEV_REVIEW_PLUGIN_ROOT`, which is never environment-provided --
+   # it is only ever derived, inside a fence -- so in a fresh shell it expanded
+   # to `/lib/review-fleet-args.sh` and sourced nothing.
    REVIEW_BASE_RUN_DIR=
    if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
      REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || REVIEW_BASE_RUN_DIR=
@@ -2083,6 +1648,18 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      --working-dir "$WORKTREE_ROOT" --head-before "$FIXER_HEAD_BEFORE" --head-after "$FIXER_HEAD_AFTER")" || {
      REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
    }
+   # Promoted HERE, in the shell that computed all three values.
+   #
+   # The prose above says the controller promotes the authenticated outcome
+   # "immediately", and the Workflow-native sibling below does exactly that at
+   # the end of its own fence. This path had the same call hoisted into a fence
+   # of its own, where PHASE1_FIXER_OUTCOME, FIXER_HEAD_BEFORE and
+   # FIXER_HEAD_AFTER were all three empty -- so the promotion validated a
+   # nonexistent outcome against a nonexistent head pair. Immediately means in
+   # this shell.
+   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
+     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
+   }
    ```
 
    **5w. The Phase 1 fixer on the Workflow-native transport** (run this INSTEAD
@@ -2231,66 +1808,15 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    Capture `FIXER_HEAD_BEFORE` immediately before dispatch,
    `FIXER_HEAD_AFTER` immediately after return, and the final declared
-   `commits[].sha` as `FIXER_DECLARED_TIP`. The controller applies:
+   `commits[].sha` as `FIXER_DECLARED_TIP`. The controller then promotes the
+   exact authenticated Phase 1 outcome immediately:
 
-   ```bash uberdev-executable origin=review-pr
-   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
-   review_fleet_rehydrate || return 2
-   review_track_validated_fixer_head() {
-     local child_status="${@:1:1}" before="${@:2:1}" after="${@:3:1}" declared_tip="${@:4:1}" commit_count residue_receipt
-     [ "$#" -ge 3 ] || return 2
-     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
-     [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
-     [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
-     [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
-     case "$child_status" in
-       APPLIED)
-         [ "$before" != "$after" ] || return 77
-         [ "$declared_tip" = "$after" ] || return 77
-         git -C "$WORKTREE_ROOT" merge-base --is-ancestor "$before" "$after" || return 78
-         commit_count="$(git -C "$WORKTREE_ROOT" rev-list --count "$before..$after")" || return 78
-         [ "$commit_count" = 1 ] || return 77
-         VALIDATED_FIXER_HEAD_SHA="$after"
-         ;;
-       NO_FIXES_NEEDED|REFUSED)
-         [ -z "$declared_tip" ] && [ "$before" = "$after" ] || return 75
-         ;;
-       *) return 2 ;;
-     esac
-   }
-   review_promote_validated_fixer_outcome() {
-     [ "$#" -eq 3 ] || return 2
-     local outcome="${@:1:1}" before="${@:2:1}" after="${@:3:1}" parsed child_status declared_tip extra
-     parsed="$(python3 -I -B -c 'import json,re,sys
-value=json.loads(sys.argv[1])
-base={"status","declared_tip","status_sha256","result_sha256","disposition_sha256","applied_content_sha256","commit"}
-if not isinstance(value,dict): raise SystemExit(74)
-# EXACTLY ONE launch-identity key, chosen by the backend, never by the child:
-# a detached outcome is tied to its dispatch receipt, a workflow outcome to the
-# nonce the controller minted before the call (code_fixer_contract.py
-# _launch_identity). Accepting both is not a relaxation -- the set equality is
-# still exact for each shape, both keys are still required 64-hex below, and a
-# document carrying BOTH, NEITHER, or any extra key is still refused.
-launch=set(value)-base
-if launch not in ({"receipt_sha256"},{"run_nonce"}) or set(value)-launch!=base: raise SystemExit(74)
-status=value["status"]; tip=value["declared_tip"]
-if status not in {"APPLIED","NO_FIXES_NEEDED","REFUSED"} or not isinstance(tip,str): raise SystemExit(74)
-if any(not isinstance(value[key],str) or re.fullmatch(r"[0-9a-f]{64}",value[key]) is None for key in (*launch,"status_sha256","result_sha256","disposition_sha256","applied_content_sha256")): raise SystemExit(74)
-if (status=="APPLIED") != (re.fullmatch(r"[0-9a-f]{40}",tip) is not None) or (status=="APPLIED") != isinstance(value["commit"],dict): raise SystemExit(74)
-print(status+"\t"+tip,end="")' "$outcome")" || return 74
-     IFS=$'\t' read -r child_status declared_tip extra <<<"$parsed"
-     [ -z "${extra:-}" ] || return 74
-     review_track_validated_fixer_head "$child_status" "$before" "$after" "$declared_tip"
-   }
-   ```
-
-   Promote the exact authenticated Phase 1 outcome immediately:
-
-   ```bash
-   review_promote_validated_fixer_outcome "$PHASE1_FIXER_OUTCOME" "$FIXER_HEAD_BEFORE" "$FIXER_HEAD_AFTER" || {
-     REVIEW_FIXER_RC=$?; review_guard_failed_fixer_return "$FIXER_HEAD_BEFORE" "$REVIEW_FIXER_RC"; return $?
-   }
-   ```
+   Both transports promote inside the fence that computed the outcome — the
+   detached path at the end of step 5, the Workflow-native path at the end of
+   step 5w. There is deliberately no separate promotion fence here: it would be
+   a fresh shell, and `PHASE1_FIXER_OUTCOME`, `FIXER_HEAD_BEFORE` and
+   `FIXER_HEAD_AFTER` are all produced by the dispatch fence and reach no other
+   process.
 
    Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
    entry, including mandatory CI-fix re-entry. Call
@@ -2717,7 +2243,18 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    # emit a trust signal for code CI never ran on. exit 2 = blocked-equivalent
    # per the artifact-emission-failure prose (trust-signal contract broken).
    POST_FIXER_HEAD_SHA="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || exit 2
-   if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+   # ABSENT is not CHANGED. rehydrate reads the validated head back off
+   # reviewed-head.txt; if there is no record, this fence knows nothing about
+   # what the fixers authorised and must say so. It used to fall into the
+   # comparison below with the empty string, where any real HEAD differs from
+   # "" -- so a run whose head never moved was told its head had moved outside
+   # the fixers, and the operator went looking for a commit that did not exist.
+   if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+     echo "error: no validated fixer head on record for this run; refusing publication because this fence cannot tell an unmoved HEAD from an unauthorised one" >&2
+     OUTCOME=halted
+     exit 2
+   fi
+   if [ "$POST_FIXER_HEAD_SHA" != "$VALIDATED_FIXER_HEAD_SHA" ]; then
      echo "error: HEAD changed outside the validated review fixers; refusing publication" >&2
      exit 2
    fi
@@ -3220,6 +2757,31 @@ EOF_VERIFY_AUDIT
 
     **Capture the return YAML** into shell variables `CREATED_URLS_JSON`, `COMMENTED_URLS_JSON`, `SKIPPED_CLOSED_JSON`, `BLOCKED_BY_DEDUPE_JSON`, `OVERFLOW_COUNT`, `BY_SEVERITY_BLOCKER`, `BY_SEVERITY_CRITICAL`, `BY_SEVERITY_MAJOR`, `HALTED_DUE_TO_OVERFLOW`, `PHASE2_5_HALTED` for the Step 7 Final Aggregation table AND the new GREEN/YELLOW/RED predicate (Trust-Signal Emission section). Validate the YAML before treating absent arrays as zero issues.
 
+    **Then write them down, in this same fence.** The Trust-Signal Emission
+    fence that consumes them is a different process, and it now REFUSES rather
+    than defaulting, because every default it used to apply (`blocker:-0`,
+    `halted:-false`) means "clean" and would turn a run that filed BLOCKER
+    issues into a GREEN trust trail. Record `skipped` explicitly when Phase 2.5
+    did not run at all (`--no-defer-issues`, or no deferred findings) — the
+    verdict fence cannot tell an absent file from a lost one, so "no record" is
+    always an error:
+
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
+    review_fleet_write_phase2_5_outcome \
+      "$RESEARCH_DIR_ABS/phase2_5-outcome.tsv" \
+      "${PHASE2_5_STATUS:-ran}" "${PHASE2_5_HALTED:-false}" \
+      "${BY_SEVERITY_BLOCKER:-0}" "${BY_SEVERITY_CRITICAL:-0}" || {
+        echo "error: could not record the Phase 2.5 outcome; the trust verdict would be computed from defaults that all mean 'clean'" >&2
+        return 2
+      }
+    ```
+
+    The defaults ARE applied here, in the fence that actually holds the values —
+    that is the difference. A default applied where the value is known is a
+    convenience; the same default applied three fences later is a fabrication.
+
     Publication/origin/parse failures are infrastructure failures, not a
     zero-finding result. The controller applies this executable status gate:
 
@@ -3403,88 +2965,17 @@ EOF_VERIFY_AUDIT
     `push` sibling, and fails closed on an unknown event, external check, or
     cross-repository link.
 
-    ```bash
-    review_clear_ci_run_selection() {
-      CI_RUN_ID=
-      CI_RUN_EVENT=
-      CI_RUN_CHECK_LINK=
-      CI_RUN_CHECK_NAME=
-      unset CI_CLASSIFICATION_HEAD_SHA CI_ROUTE_HEAD_SHA
-    }
-    review_select_failed_ci_run() {
-      local probe_json="${@:1:1}" repo_slug="${@:2:1}"
-      python3 -I -B - "$repo_slug" 3<<<"$probe_json" <<'PY'
-import json,os,re,sys
-from urllib.parse import urlsplit
-
-repo_slug=sys.argv[1]
-try:
-    rows=json.load(os.fdopen(3))
-except (json.JSONDecodeError,UnicodeDecodeError):
-    raise SystemExit(2)
-if not isinstance(rows,list) or not rows or not re.fullmatch(r'[^/\s]+/[^/\s]+',repo_slug):
-    raise SystemExit(2)
-known_buckets={'pass','skipping','pending','fail','cancel'}
-groups={}
-for row in rows:
-    if not isinstance(row,dict):
-        raise SystemExit(2)
-    name=row.get('name')
-    bucket=row.get('bucket')
-    if not isinstance(name,str) or not name or not isinstance(bucket,str) or bucket not in known_buckets:
-        raise SystemExit(2)
-    groups.setdefault(name,[]).append(row)
-kept=[]
-for group in groups.values():
-    kept.extend(
-        [row for row in group if row['bucket']!='cancel']
-        if any(row['bucket']!='cancel' for row in group)
-        else group
-    )
-failed=[row for row in kept if row['bucket'] in {'fail','cancel'}]
-if not failed:
-    raise SystemExit(2)
-candidates=[]
-link_pattern=re.compile(r'^/([^/]+)/([^/]+)/actions/runs/([1-9][0-9]*)(?:/job/[1-9][0-9]*)?/?$')
-for row in failed:
-    event=row.get('event')
-    link=row.get('link')
-    workflow=row.get('workflow')
-    if event not in {'pull_request','push'} or not isinstance(link,str) or not link:
-        raise SystemExit(2)
-    # `name` joins the control-character test because it LEAVES this function
-    # now (#418): it is the fourth output column and then a single-line run-dir
-    # carrier, so a TAB in it would split the column and a newline would
-    # truncate the record -- both spelled as success.
-    if not isinstance(workflow,str) or any(ord(char)<32 or ord(char)==127 for char in event+link+workflow+row['name']):
-        raise SystemExit(2)
-    parsed=urlsplit(link)
-    match=link_pattern.fullmatch(parsed.path)
-    if parsed.scheme!='https' or parsed.netloc.lower()!='github.com' or match is None:
-        raise SystemExit(2)
-    linked_slug=f'{match.group(1)}/{match.group(2)}'
-    if linked_slug.lower()!=repo_slug.lower():
-        raise SystemExit(2)
-    run_id=match.group(3)
-    candidates.append((0 if event=='pull_request' else 1,workflow,row['name'],int(run_id),event,link))
-if not candidates:
-    raise SystemExit(2)
-# FOUR columns. The selected row's NAME is the only producer of `check_name`
-# anywhere in this file: the REFUSED arm files it into a CRITICAL issue so a
-# human can see WHICH check refused, and it consumed `${check_name:-unknown}`
-# against a name nothing had ever bound (#418). It is already this function's
-# tie-break key, so emitting it invents no second answer about which check
-# failed.
-_,_,check_name,run_id,event,link=min(candidates)
-print(f'{run_id}\t{event}\t{link}\t{check_name}')
-PY
-    }
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     review_clear_ci_run_selection
     ```
 
     **Pre-flight rate-limit check:** the floor `200` below is `CI_PROBE_RATE_LIMIT_FLOOR` (declared in `merge-pipeline/SKILL.md` Constants — kept numeric inline because bash does not dereference markdown constants).
 
-    ```bash
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     RATE_REMAINING="$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null)"
     # Validate gh succeeded AND returned a non-empty integer before comparison —
     # a depleted/adversarial GH API budget MUST NOT silently downgrade to a
@@ -3605,6 +3096,17 @@ PY
             OUTCOME=halted
             exit 1
           fi
+          # The PAYLOAD the verdict was distilled from, for the same reason and
+          # in the same breath. CLASSIFY selects the failing check out of these
+          # rows; re-running `gh pr checks` there would select from DIFFERENT
+          # bytes, so the verdict and the chosen check could disagree about what
+          # CI said.
+          if ! review_fleet_write_ci_probe_json "$CI_PROBE_VERDICT_RUN_DIR/ci-probe.json" "$PROBE_JSON"; then
+            echo "error: /uberdev:review-pr — Phase 3 could not persist the probe payload to $CI_PROBE_VERDICT_RUN_DIR/ci-probe.json; refusing to hand CLASSIFY a check list it cannot read." >&2
+            audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+            OUTCOME=halted
+            exit 1
+          fi
         else
           # No run dir bound => this fence is running OUTSIDE a Phase 3 run. The
           # verdict is still bound for a same-shell caller and the miss is TYPED
@@ -3624,6 +3126,30 @@ PY
     ```bash
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
     review_fleet_rehydrate || return 2
+    # The verdict AND the payload it was distilled from, both off disk. PROBE is
+    # a different process, so this fence read two empty strings and its entry
+    # test `[ "$PROBE_VERDICT" = "empty" ]` was false for a probe that really
+    # was empty -- the settle loop never ran, and a just-pushed PR whose checks
+    # had not registered yet fell straight through to skipped_no_checks. That is
+    # the "premature GREEN on a PR whose CI had not started" shape.
+    CI_SETTLE_READ_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle cannot resolve the run directory to read the probe." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_VERDICT="$(review_fleet_read_ci_probe_verdict "$CI_SETTLE_READ_DIR/ci-probe-verdict.txt")" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle has no recorded probe verdict; refusing to decide whether CI has settled from a value it never read." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_verdict_unreadable
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_JSON="$(review_fleet_read_ci_probe_json "$CI_SETTLE_READ_DIR/ci-probe.json")" || {
+      echo "error: /uberdev:review-pr — Phase 3 settle has no recorded probe payload." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     if [ "$PROBE_VERDICT" = "empty" ] || printf '%s' "$PROBE_JSON" | grep -q 'no checks reported on the'; then
       HEAD_AGE_SEC=$(( $(date +%s) - $(git show -s --format=%ct HEAD) ))
       SETTLE_REPROBES_USED=0
@@ -3886,7 +3412,9 @@ PY
     to derive the authoritative run. The refreshed projection uses the exact
     6c.1 field set and replaces (never appends to) `PROBE_JSON`:
 
-    ```bash
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     unset PROBE_RC
     PROBE_JSON="$(gh pr checks "$PR_NUMBER" --json name,state,bucket,link,event,workflow 2>&1)" || PROBE_RC=$?
     if [ "${PROBE_RC:-0}" -ne 0 ] && ! jq empty <<<"$PROBE_JSON" 2>/dev/null; then
@@ -3907,6 +3435,23 @@ PY
     ```bash
     . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
     review_fleet_rehydrate || return 2
+    # The probe payload comes off disk. PROBE ran in another process, so
+    # `$PROBE_JSON` here was the empty string and the selector below had no rows
+    # to choose from -- which then halted `classification_run_selection_invalid`,
+    # a message about a malformed selection on a probe that was never handed
+    # anything to select.
+    CI_CLASSIFY_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || {
+      echo "error: /uberdev:review-pr — Phase 3 CLASSIFY cannot resolve the run directory to read the probe payload." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
+    PROBE_JSON="$(review_fleet_read_ci_probe_json "$CI_CLASSIFY_RUN_DIR/ci-probe.json")" || {
+      echo "error: /uberdev:review-pr — Phase 3 CLASSIFY has no probe payload to select a failing check from; refusing to report a selection failure for a probe it never saw." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_probe_json_uncarried
+      OUTCOME=halted
+      exit 1
+    }
     if IFS=$'\t' read -r CI_RUN_ID CI_RUN_EVENT CI_RUN_CHECK_LINK CI_RUN_CHECK_NAME < <(
         review_select_failed_ci_run "$PROBE_JSON" "$REVIEW_REPO_SLUG"
       ) && [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] \
@@ -3973,123 +3518,9 @@ PY
     only the branch-head SHA on success or one stable bounded failure class on
     failure; it never relays `git`/`gh` diagnostics.
 
-    ```bash
-    review_capture_ci_classification_head() {
-      local expected_head="${@:1:1}" local_head live_identity live_head live_branch
-      local target_head run_json run_failure
-      local_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)" || {
-        printf 'classification_local_head_query_failed'
-        return 1
-      }
-      live_identity="$(gh pr view "$PR_NUMBER" --repo "$REVIEW_REPO_SLUG" \
-        --json headRefOid,headRefName \
-        --jq '"\(.headRefOid)\t\(.headRefName)"' 2>/dev/null)" || {
-        printf 'classification_live_head_query_failed'
-        return 1
-      }
-      IFS=$'\t' read -r live_head live_branch <<<"$live_identity"
-      if [[ ! "$local_head" =~ ^[0-9a-f]{40}$ ]]; then
-        printf 'classification_local_head_malformed'
-        return 1
-      fi
-      if [[ ! "$live_head" =~ ^[0-9a-f]{40}$ ]]; then
-        printf 'classification_live_head_malformed'
-        return 1
-      fi
-      if [ -z "$live_branch" ]; then
-        printf 'classification_live_branch_malformed'
-        return 1
-      fi
-      if [[ ! "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
-        printf 'classification_run_id_malformed'
-        return 1
-      fi
-      if [[ ! "$CI_RUN_EVENT" =~ ^(pull_request|push)$ ]]; then
-        printf 'classification_run_event_malformed'
-        return 1
-      fi
-      if [ -n "$expected_head" ]; then
-        if [[ ! "$expected_head" =~ ^[0-9a-f]{40}$ ]]; then
-          printf 'classification_expected_head_malformed'
-          return 1
-        fi
-        if [ "$local_head" != "$expected_head" ]; then
-          printf 'classification_local_head_moved'
-          return 1
-        fi
-        if [ "$live_head" != "$expected_head" ]; then
-          printf 'classification_live_head_moved'
-          return 1
-        fi
-        target_head="$expected_head"
-      else
-        if [ "$live_head" != "$local_head" ]; then
-          printf 'classification_live_head_mismatch'
-          return 1
-        fi
-        target_head="$local_head"
-      fi
-      run_json="$(gh api "repos/$REVIEW_REPO_SLUG/actions/runs/$CI_RUN_ID" 2>/dev/null)" || {
-        printf 'classification_run_metadata_query_failed'
-        return 1
-      }
-      if run_failure="$(
-        python3 -I -B - "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$CI_RUN_ID" \
-          "$CI_RUN_EVENT" "$target_head" "$live_branch" \
-          "$([ -n "$expected_head" ] && printf moved || printf mismatch)" \
-          3<<<"$run_json" 2>/dev/null <<'PY'
-import json,os,re,sys
-repo_slug,pr_number,run_id,selected_event,target_head,live_branch,phase=sys.argv[1:]
-def fail(reason):
-    print(reason,end='')
-    raise SystemExit(2)
-try:
-    value=json.load(os.fdopen(3))
-except (json.JSONDecodeError,UnicodeDecodeError,OSError):
-    fail('classification_run_metadata_malformed')
-if not isinstance(value,dict):
-    fail('classification_run_metadata_malformed')
-if value.get('id')!=int(run_id):
-    fail('classification_run_id_mismatch')
-repository=value.get('repository')
-if not isinstance(repository,dict) or str(repository.get('full_name','')).lower()!=repo_slug.lower():
-    fail('classification_run_repository_mismatch')
-if value.get('event')!=selected_event:
-    fail('classification_run_event_mismatch')
-run_head=value.get('head_sha')
-run_branch=value.get('head_branch')
-if not isinstance(run_head,str) or re.fullmatch(r'[0-9a-f]{40}',run_head) is None:
-    fail('classification_run_head_malformed')
-suffix='moved' if phase=='moved' else 'mismatch'
-if selected_event=='push':
-    if run_branch!=live_branch or run_head!=target_head:
-        fail(f'classification_run_head_{suffix}')
-elif selected_event=='pull_request':
-    # pull_requests must contain PR_NUMBER at the exact live branch-head.
-    associations=value.get('pull_requests')
-    if not isinstance(associations,list):
-        fail('classification_run_metadata_malformed')
-    matched=False
-    for association in associations:
-        if not isinstance(association,dict) or association.get('number')!=int(pr_number):
-            continue
-        head=association.get('head')
-        if isinstance(head,dict) and head.get('sha')==target_head and head.get('ref')==live_branch:
-            matched=True
-            break
-    if run_branch!=live_branch or not matched:
-        fail(f'classification_run_pr_{suffix}')
-else:
-    fail('classification_run_event_mismatch')
-PY
-      )"; then
-        :
-      else
-        printf '%s' "${run_failure:-classification_run_metadata_malformed}"
-        return 1
-      fi
-      printf '%s' "$local_head"
-    }
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     if CI_CLASSIFICATION_HEAD_SHA="$(review_capture_ci_classification_head)"; then
       :
     else
@@ -4127,7 +3558,9 @@ PY
 
     Capture and dispatch the classifier:
 
-    ```bash
+    ```bash uberdev-executable origin=review-pr
+    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+    review_fleet_rehydrate || return 2
     review_json_member() {
       [ "$#" -eq 2 ] || return 2
       python3 -I -B -c '
@@ -4238,17 +3671,6 @@ print(serialized,end="")
     # Shape-check the mint receipt before anything is allowed to depend on it:
     # exactly four members, the path we asked for, the edge we asked for, and a
     # 64-hex digest. Same guard shape as the Phase 1 authority receipt.
-    review_ci_authority_digest() {
-      [ "$#" -ge 3 ] || return 2
-      python3 -I -B -c 'import json,re,sys
-value=json.loads(sys.argv[1])
-if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
-        or value["authority_path"]!=sys.argv[2]
-        or value["edge_id"]!=sys.argv[3]
-        or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None):
-    raise SystemExit(74)
-print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
-    }
     # BOTH counters off disk, before ANY artifact pathname is derived from
     # them. Iteration 2 of the CI loop re-enters this fence in a fresh shell,
     # where `${CI_FIX_LOOP_ITER:-1}` is 1 again -- so it recomputed iteration
@@ -4325,14 +3747,6 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
     review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
-    review_ci_json_member() {
-      [ "$#" -ge 2 ] || return 2
-      python3 -I -B -c 'import json,sys
-value=json.loads(sys.argv[1])
-if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
-member=value[sys.argv[2]]
-print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "${@:1:1}" "${@:2:1}"
-    }
     review_apply_ci_classification_status() {
       # NOT `local status=` — under /bin/zsh, which is how the harness runs a
       # command `bash` fence on macOS, `status` is the read-only alias for `$?`
@@ -4582,6 +3996,13 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     if [ -n "${RESEARCH_DIR_ABS:-}" ]; then
       CI_ROUTE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || CI_ROUTE_RUN_DIR=
     fi
+    # The route record's name keys on BOTH loop counters, so this fence reads
+    # them off disk through the one shared reader -- the rule S27.2 enforces.
+    # Naming a file after a counter this shell merely guessed would write the
+    # decision where the next fence does not look for it.
+    if [ -n "$CI_ROUTE_RUN_DIR" ]; then
+      review_fleet_load_ci_counters "$CI_ROUTE_RUN_DIR" || return 74
+    fi
     [ -n "$CI_ROUTE_RUN_DIR" ] || { echo "error: /uberdev:review-pr — Phase 3 ROUTE cannot resolve the run directory; refusing to run the mutating fix phase without its carriers." >&2; audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_run_dir_unreadable; OUTCOME=halted; exit 1; }
     # --no-ci-fix, ENFORCED IN SHELL. CI_FIX_PHASE had no reader anywhere in
     # this file: PROBE/MONITOR/CLASSIFY-run-but-ROUTE-is-skipped was
@@ -4783,6 +4204,31 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
         exit 1
         ;;
     esac
+    # ROUTE's decision goes to DISK before this shell exits.
+    #
+    # The dispatch fence below is a different process and consumed all nine of
+    # these as the empty string. Its comment says they are "re-checked by
+    # prepare-ci-authority", but that tool RECEIVES them as argv -- it cannot
+    # re-derive what it was handed blank, so the authority receipt was minted
+    # over empties and every later `read-ci-authority-member` recovered those
+    # empties faithfully. The recovery path downstream is real; it just had
+    # nothing true to recover from.
+    #
+    # Only written when a fixer was actually selected. The flaky-rerun and
+    # billing/outage arms above deliberately clear CI_FIXER_EDGE_ID to mean "no
+    # agent this pass", and a record written there would assert a dispatch that
+    # is not going to happen -- so the absence of this file is itself the
+    # no-fixer signal the dispatch fence reads.
+    if [ -n "${CI_FIXER_EDGE_ID:-}" ]; then
+      review_fleet_write_ci_route "$CI_ROUTE_RUN_DIR/ci-route-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.json" \
+        "$CI_FIXER_EDGE_ID" "$CI_FIXER_SLUG_BASE" "$CI_RUN_ID" "$CI_CLASSIFICATION_HEAD_SHA" \
+        "$CI_BASE_SHA" "$CI_BASE_TIP_SHA" "$CI_BASE_BRANCH" "$CI_PR_HEAD_BRANCH" "$CI_LEASE_SHA" || {
+          echo "error: /uberdev:review-pr — could not record the Phase 3 route decision; refusing to dispatch a fixer whose authority would be minted over empty values." >&2
+          audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_record_unwritable
+          OUTCOME=halted
+          exit 1
+        }
+    fi
     ```
 
     When `CI_FIXER_EDGE_ID` is empty the routing is finished: `flaky` re-probes
@@ -4817,21 +4263,32 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
     REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
     mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
-    review_ci_authority_digest() {
-      [ "$#" -ge 3 ] || return 2
-      python3 -I -B -c 'import json,re,sys
-value=json.loads(sys.argv[1])
-if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
-        or value["authority_path"]!=sys.argv[2]
-        or value["edge_id"]!=sys.argv[3]
-        or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None):
-    raise SystemExit(74)
-print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
+    # ROUTE ran in a DIFFERENT shell, so its decision is READ BACK off disk.
+    #
+    # The comment that used to sit here said these were "re-checked by
+    # prepare-ci-authority below". They were not: that tool receives them as
+    # argv and refuses an EMPTY member, but only after this fence has already
+    # handed it whatever it had -- which was nine empty strings, because ROUTE's
+    # shell had exited. The refusal fired on a value this fence invented, not on
+    # ROUTE's. Now the values are ROUTE's, and a missing record is a refusal.
+    CI_ROUTE_RECORD="$REVIEW_FLEET_RUN_DIR/ci-route-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.json"
+    [ -r "$CI_ROUTE_RECORD" ] || {
+      echo "error: /uberdev:review-pr — Phase 3 ROUTE left no decision record at $CI_ROUTE_RECORD; refusing to dispatch a fixer over empty authority." >&2
+      audit ci_phase_outcome data.outcome=halted data.subreason=ci_route_record_missing
+      OUTCOME=halted
+      exit 1
     }
-    # ROUTE ran in a DIFFERENT shell. Every scalar it produced that this fence
-    # consumes is either re-checked by prepare-ci-authority below (failure
-    # class, anchor, base sha, branches, lease -- all required members, all
-    # refused at mint when empty) or checked HERE, because these two are not.
+    CI_FIXER_EDGE_ID="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" edge_id)" || return 74
+    CI_FIXER_SLUG_BASE="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" slug_base)" || return 74
+    CI_RUN_ID="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" ci_run_id)" || return 74
+    CI_CLASSIFICATION_HEAD_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" head_sha)" || return 74
+    CI_BASE_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_sha)" || return 74
+    CI_BASE_TIP_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_tip_sha)" || return 74
+    CI_BASE_BRANCH="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" base_branch)" || return 74
+    CI_PR_HEAD_BRANCH="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" pr_branch)" || return 74
+    CI_LEASE_SHA="$(review_fleet_read_ci_route "$CI_ROUTE_RECORD" lease_sha)" || return 74
+    # The two checks below predate the record and still hold: they guard the
+    # SHAPE of what was read, not merely its presence.
     #
     # The slug base keys the child DIRECTORY on this side, while
     # review_fleet_bind_ci re-derives it from the EDGE on its side. A lost value
@@ -4953,14 +4410,6 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
     review_fleet_rehydrate || return 2
     . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
     REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
-    review_ci_json_member() {
-      [ "$#" -ge 2 ] || return 2
-      python3 -I -B -c 'import json,sys
-value=json.loads(sys.argv[1])
-if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
-member=value[sys.argv[2]]
-print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "${@:1:1}" "${@:2:1}"
-    }
     review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
     # The sidecar is found through the pointer 6c.4w.1 published, never
     # recomputed from the counters -- see the pointer comment in 6c.4w.1.
@@ -5502,17 +4951,6 @@ PY
           REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
           REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
           mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
-          review_ci_authority_digest() {
-            [ "$#" -ge 3 ] || return 2
-            python3 -I -B -c 'import json,re,sys
-value=json.loads(sys.argv[1])
-if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
-        or value["authority_path"]!=sys.argv[2]
-        or value["edge_id"]!=sys.argv[3]
-        or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None):
-    raise SystemExit(74)
-print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
-          }
           # Self-contained, exactly like the classify/fix mint fences: counters
           # off disk, the aggregate pathname re-derived from them, and the run
           # identity read back out of the digest-pinned ci-fix authority.
@@ -5607,14 +5045,6 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
           review_fleet_rehydrate || return 2
           . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
           REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
-          review_ci_json_member() {
-            [ "$#" -ge 2 ] || return 2
-            python3 -I -B -c 'import json,sys
-value=json.loads(sys.argv[1])
-if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
-member=value[sys.argv[2]]
-print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "${@:1:1}" "${@:2:1}"
-          }
           review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
           REVIEW_FLEET_CI_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-ci-defer-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.launch.json"
           CI_DEFER_BINDING="$(review_fleet_read_sidecar "$REVIEW_FLEET_CI_SIDECAR" binding)" || { CI_REFUSED_ISSUE_URL=""; CI_DEFER_STATUS=MALFORMED; }
@@ -5867,17 +5297,6 @@ print(member if isinstance(member,str) else json.dumps(member,separators=(",",":
        REVIEW_FLEET_WORKFLOW_JS="$UBERDEV_REVIEW_PLUGIN_ROOT/skills/review-fleet/workflow.js"
        [ -f "$REVIEW_FLEET_WORKFLOW_JS" ] || { echo "error: $REVIEW_FLEET_WORKFLOW_JS missing (RFC 0012 §4.1); reinstall the plugin or use the No-Workflow fallback" >&2; return 2; }
        mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
-       review_ci_authority_digest() {
-         [ "$#" -ge 3 ] || return 2
-         python3 -I -B -c 'import json,re,sys
-value=json.loads(sys.argv[1])
-if (set(value)!={"authority_path","authority_sha256","edge_id","phase"}
-        or value["authority_path"]!=sys.argv[2]
-        or value["edge_id"]!=sys.argv[3]
-        or re.fullmatch(r"[0-9a-f]{64}",value["authority_sha256"]) is None):
-    raise SystemExit(74)
-print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
-       }
        CONFLICT_AUTHORITY_LEDGER="$REVIEW_FLEET_RUN_DIR/ci-conflict-authorities-iter${REVIEW_ITERATION}-ci${CI_FIX_LOOP_ITER:-1}.tsv"
        ( umask 077 && : >"$CONFLICT_AUTHORITY_LEDGER" ) || return 74
        # ONE spelling of the per-resolver authority pathname crosses into the
@@ -5958,14 +5377,6 @@ print(value["authority_sha256"],end="")' "${@:1:1}" "${@:2:1}" "${@:3:1}"
        review_fleet_rehydrate || return 2
        . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
        REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
-       review_ci_json_member() {
-         [ "$#" -ge 2 ] || return 2
-         python3 -I -B -c 'import json,sys
-value=json.loads(sys.argv[1])
-if not isinstance(value,dict) or sys.argv[2] not in value: raise SystemExit(2)
-member=value[sys.argv[2]]
-print(member if isinstance(member,str) else json.dumps(member,separators=(",",":")),end="")' "${@:1:1}" "${@:2:1}"
-       }
        review_ci_conflict_abort() {
          # review_fleet_rebase_dir, never a bare `-d "$(git … --git-path …)"`:
          # that spelling resolves `.git/rebase-merge` against the FENCE's cwd,
@@ -6385,6 +5796,27 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
        exit 2
      }
 
+   # The Phase 2.5 conjuncts come off DISK, not out of the controller's memory.
+   #
+   # They used to be read as `${BY_SEVERITY_BLOCKER:-0}` and
+   # `${PHASE2_5_HALTED:-false}`, which are the values a LOST carrier produces,
+   # and both of those defaults mean "clean". Losing everything fails closed --
+   # an empty PHASE1_VERDICT never equals APPROVE, so the run goes RED -- but
+   # losing ONLY these three, which is what happens when the controller re-emits
+   # the phase verdicts it holds and not the counts that arrived inside a child's
+   # YAML, turns a run that filed BLOCKER issues into GREEN. GREEN is the
+   # `uberdev-approved` label and the `Reviewed-by:` trailer /merge Phase 1.4
+   # accepts as authorisation to land, so the absence of this record is a
+   # refusal and never a default.
+   PHASE2_5_OUTCOME_RECORD="$(review_fleet_read_phase2_5_outcome \
+     "$RESEARCH_DIR_ABS/phase2_5-outcome.tsv")" || {
+       echo "error: the Phase 2.5 outcome record is missing or malformed; refusing to compute a trust verdict from defaults that all mean 'clean'" >&2
+       OUTCOME=halted
+       exit 2
+     }
+   IFS=$'\t' read -r PHASE2_5_STATUS_RECORDED PHASE2_5_HALTED \
+     BY_SEVERITY_BLOCKER BY_SEVERITY_CRITICAL <<<"$PHASE2_5_OUTCOME_RECORD"
+
    # Evaluate the GREEN predicate first; YELLOW is a strict sub-case
    # ("all GREEN preconditions met AND critical>0"); RED is everything else.
    # OVERRIDE_GREEN flips RED→GREEN when PHASE2_5_HALT_CHOICE == "override"
@@ -6397,14 +5829,14 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    fi
 
    if   $would_be_green_without_phase2_5 \
-        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
-        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
-        && [ "${BY_SEVERITY_CRITICAL:-0}" = "0" ]; then
+        && [ "$PHASE2_5_HALTED" = "false" ] \
+        && [ "$BY_SEVERITY_BLOCKER" = "0" ] \
+        && [ "$BY_SEVERITY_CRITICAL" = "0" ]; then
      TRUST_TRAIL_STATE=GREEN
    elif $would_be_green_without_phase2_5 \
-        && [ "${PHASE2_5_HALTED:-false}" = "false" ] \
-        && [ "${BY_SEVERITY_BLOCKER:-0}" = "0" ] \
-        && [ "${BY_SEVERITY_CRITICAL:-0}" -gt 0 ]; then
+        && [ "$PHASE2_5_HALTED" = "false" ] \
+        && [ "$BY_SEVERITY_BLOCKER" = "0" ] \
+        && [ "$BY_SEVERITY_CRITICAL" -gt 0 ]; then
      TRUST_TRAIL_STATE=YELLOW
    elif $would_be_green_without_phase2_5 \
         && [ "${PHASE2_5_HALT_CHOICE:-}" = "override" ]; then
@@ -6416,6 +5848,22 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    else
      TRUST_TRAIL_STATE=RED
    fi
+   # Make it durable HERE, in the one fence that computes it. Three later fences
+   # read this state -- the trailer suffix, the label selection, the label apply
+   # -- and every one of them is a different harness process, so the shell
+   # variable above is gone before any of them starts. The label fences turned
+   # that into `gh label create --force ""` and blamed gh auth; the trailer fence
+   # turned it into a `case` that matched no arm, left TRAILER_SUFFIX UNSET, and
+   # let a YELLOW run emit a GREEN-shaped `Reviewed-by:` trailer with no error at
+   # all. RED is recorded too, so a consumer can tell a RED run from a missing
+   # carrier.
+   review_fleet_write_trust_state \
+     "$RESEARCH_DIR_ABS/trust-state.tsv" \
+     "$TRUST_TRAIL_STATE" "${BY_SEVERITY_CRITICAL:-0}" || {
+       echo "error: could not record the trust state; refusing to emit a trust trail the later fences cannot read" >&2
+       OUTCOME=halted
+       exit 2
+     }
    ```
 
    Audit-trail invariant: `OVERRIDE_REASON` is set ONLY by the OVERRIDE_GREEN branch above; all other branches leave it as `null` (the audit JSON `phases.phase2_5.override_reason` field defaults to `null`). This makes the override discoverable downstream by `/merge`'s `trust-trail-evaluator` per RFC 0002 §3.6.
@@ -6423,34 +5871,32 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    **Trailer suffix selection (RFC 0002 §3.4):**
 
    ```bash
-   case "$TRUST_TRAIL_STATE" in
-     GREEN)
-       TRAILER_SUFFIX=""
-       ;;
-     YELLOW)
-       TRAILER_SUFFIX=" severity=critical-deferred count=${BY_SEVERITY_CRITICAL}"
-       ;;
-     # RED skips this entire emission section — handled by the predicate branch above
-   esac
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Read the state back rather than trusting `$TRUST_TRAIL_STATE` from the
+   # previous fence: that was a different process, so the name expanded EMPTY,
+   # the `case` below matched no arm, and TRAILER_SUFFIX was left UNSET — not
+   # empty, unset. zsh then interpolated it as "" into the anchor message with no
+   # error, so a YELLOW run emitted a byte-identical GREEN-shaped `Reviewed-by:`
+   # trailer. A wrong artifact, shipped silently, is the worst shape this class
+   # takes; `set -u` would not have caught it either, since these fences do not
+   # run under it.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   BY_SEVERITY_CRITICAL="${TRUST_STATE_RECORD#*$(printf '\t')}"
+   # RED reaches neither this step nor the anchor below (the predicate branch
+   # above exits first), so review_fleet_trailer_suffix returns rc 1 for RED
+   # rather than an empty string — a RED run must never be able to build a
+   # GREEN-shaped trailer out of a missing suffix.
+   TRAILER_SUFFIX="$(review_fleet_trailer_suffix "$TRUST_TRAIL_STATE" "$BY_SEVERITY_CRITICAL")" || {
+     echo "error: no trailer suffix is defined for trust state '$TRUST_TRAIL_STATE'; suppressing trust emission" >&2
+     exit 2
+   }
    ```
 
    ```bash
-   review_validate_trust_anchor() {
-     [ "$#" -eq 4 ] || return 2
-     local reviewed_head_sha="${@:1:1}" parent_sha="${@:2:1}" anchor_sha="${@:3:1}" expected_message_sha256="${@:4:1}"
-     local observed_head observed_parents observed_message_sha256 residue_receipt
-     [[ "$reviewed_head_sha" =~ ^[0-9a-f]{40}$ && "$parent_sha" =~ ^[0-9a-f]{40}$ && "$anchor_sha" =~ ^[0-9a-f]{40}$ && "$expected_message_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
-     [ "$parent_sha" = "$reviewed_head_sha" ] || return 79
-     observed_head="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 79
-     [ "$observed_head" = "$anchor_sha" ] || return 79
-     observed_parents="$(git -C "$WORKTREE_ROOT" rev-list --parents -n 1 "$anchor_sha")" || return 79
-     [ "$observed_parents" = "$anchor_sha $parent_sha" ] || return 79
-     git -C "$WORKTREE_ROOT" diff --quiet "$parent_sha" "$anchor_sha" -- || return 79
-     observed_message_sha256="$(python3 -I -B "$CODE_FIXER_CONTRACT" commit-message-digest --working-dir "$WORKTREE_ROOT" --commit-sha "$anchor_sha")" || return 79
-     [ "$observed_message_sha256" = "$expected_message_sha256" ] || return 79
-     residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || return 79
-     [ "$residue_receipt" = '{"status":"clean"}' ] || return 79
-   }
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
 
    TRUST_RESIDUE_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || {
      echo "error: MUTATED_BLOCKED — residual repository state suppresses trust emission" >&2
@@ -6477,7 +5923,11 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    # reviewed delta for an arbitrary one while every trust artifact stays
    # byte-identical. Read off the Phase 1 carrier — this fence is ~4000 lines and
    # 52 fences downstream of the bind, so `$BASE_SHA` here is the empty string.
-   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 2
+   #
+   # No `. lib/review-fleet-args.sh` here any more: the fence prologue above
+   # sourced it, with the full fallback chain, BEFORE the first carrier read.
+   # This line used the bare `$UBERDEV_REVIEW_PLUGIN_ROOT` and sat 25 lines
+   # after that first read, so it neither resolved nor arrived in time.
    REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || exit 2
    REVIEW_BASE_IDENTITY="$(review_fleet_read_review_base "$REVIEW_BASE_RUN_DIR/review-base-identity.tsv")" || {
      echo "error: MUTATED_BLOCKED — the reviewed-base identity is unreadable at $REVIEW_BASE_RUN_DIR/review-base-identity.tsv; refusing to emit a base-blind trust anchor." >&2
@@ -6488,6 +5938,17 @@ The remainder of this section describes the GREEN/YELLOW emission shape (RED ski
    }
    REVIEWED_BASE_SHA="${REVIEW_BASE_IDENTITY%%$(printf '\t')*}"
    REVIEWED_BASE_REF="${REVIEW_BASE_IDENTITY#*$(printf '\t')}"
+   # The trailer suffix is re-derived HERE, in the fence that actually builds the
+   # message, from the same durable state the previous fence read. `$TRAILER_SUFFIX`
+   # crossing a process boundary is the defect this whole section exists to close;
+   # deriving it twice from one recorded state costs nothing and cannot drift,
+   # because both callers go through the single lib implementation.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   TRAILER_SUFFIX="$(review_fleet_trailer_suffix "$TRUST_TRAIL_STATE" "${TRUST_STATE_RECORD#*$(printf '\t')}")" || {
+     echo "error: no trailer suffix is defined for trust state '$TRUST_TRAIL_STATE'; suppressing trust emission" >&2
+     exit 2
+   }
    ANCHOR_MESSAGE="$(printf 'chore(review-pr): trust trail anchor for #%s\n\nReviewed-by: uberdev/review-pr@%s%s\nReviewed-base: uberdev/review-pr@%s ref=%s' "$PR_NUMBER" "$PARENT_SHA" "$TRAILER_SUFFIX" "$REVIEWED_BASE_SHA" "$REVIEWED_BASE_REF")" || exit 2
    ANCHOR_MESSAGE_SHA256="$(python3 -I -B -c 'import hashlib,sys
 print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_MESSAGE")" || exit 2
@@ -6531,14 +5992,20 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
 2. **Label** — tier-aware. GREEN runs add `uberdev-approved` (canonical literal — see `skills/merge-pipeline/SKILL.md` Constants `UBERDEV_APPROVED_LABEL`). YELLOW runs add `uberdev-approved-with-concerns` (RFC 0002 §3.4). Each label is **provisioned fail-loud via `gh label create --force` immediately before the add** (issue #170 — `gh pr edit --add-label` CANNOT auto-create a repo label and exits non-zero when the label is missing, which on a fresh repo aborts the whole trust-signal emission; same assume-label-exists class as #168). `--force` is idempotent: it updates an existing label's colour/description and never errors on "already exists", so a non-zero `gh label create` exit is always a genuine failure (auth / repo write-or-triage scope / API). Adding the label to the PR is itself idempotent — `gh` no-ops if the label is already on the PR.
 
    ```bash
-   case "$TRUST_TRAIL_STATE" in
-     GREEN)  TRUST_LABEL="uberdev-approved"
-             TRUST_LABEL_COLOR="0E8A16"
-             TRUST_LABEL_DESC="Trust trail: /uberdev:review-pr verified GREEN. Auto-managed — set by /review-pr, read by /merge." ;;
-     YELLOW) TRUST_LABEL="uberdev-approved-with-concerns"
-             TRUST_LABEL_COLOR="FBCA04"
-             TRUST_LABEL_DESC="Trust trail: /review-pr YELLOW: deferred CRITICAL; /merge needs --accept-critical-deferred." ;;
-   esac
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Same durable state, same reason as the trailer suffix. The triple used to be
+   # selected in this fence and consumed in the NEXT one, so the apply fence ran
+   # `gh label create --force "" --color "" --description ""` and reported
+   # "Check gh auth and repo write/triage permission" — a diagnosis pointing at
+   # the operator's credentials for a defect that was entirely ours.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_TRAIL_STATE="${TRUST_STATE_RECORD%%$(printf '\t')*}"
+   TRUST_LABEL_RECORD="$(review_fleet_trust_label "$TRUST_TRAIL_STATE")" || {
+     echo "error: no trust label is defined for trust state '$TRUST_TRAIL_STATE'; suppressing label emission" >&2
+     exit 2
+   }
+   IFS=$'\t' read -r TRUST_LABEL TRUST_LABEL_COLOR TRUST_LABEL_DESC <<<"$TRUST_LABEL_RECORD"
    # Belt-and-braces: clear the OPPOSITE-tier label if present, so a re-run that
    # downgrades GREEN→YELLOW (or upgrades YELLOW→GREEN) doesn't leave a stale
    # contradictory label on the PR. Failures here are fail-soft (the new label
@@ -6560,6 +6027,17 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest(),end="")' "$ANCHOR_
    # guard below: the label is the load-bearing trust artifact /merge reads, so
    # emission cannot proceed without it. (Same assume-label-exists class as #168,
    # but fail-loud rather than swallowed.)
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # Re-derived here, not inherited: this is a different process from the
+   # selection step above, so all three names arrived empty and the `gh label
+   # create` below ran with three empty arguments.
+   TRUST_STATE_RECORD="$(review_fleet_read_trust_state "$RESEARCH_DIR_ABS/trust-state.tsv")" || exit 2
+   TRUST_LABEL_RECORD="$(review_fleet_trust_label "${TRUST_STATE_RECORD%%$(printf '\t')*}")" || {
+     echo "error: no trust label is defined for trust state '${TRUST_STATE_RECORD%%$(printf '\t')*}'; suppressing label emission" >&2
+     exit 2
+   }
+   IFS=$'\t' read -r TRUST_LABEL TRUST_LABEL_COLOR TRUST_LABEL_DESC <<<"$TRUST_LABEL_RECORD"
    if ! gh label create --force "$TRUST_LABEL" --color "$TRUST_LABEL_COLOR" --description "$TRUST_LABEL_DESC"; then
      echo "error: failed to provision the '$TRUST_LABEL' trust label (gh pr edit --add-label cannot auto-create it). Check gh auth and repo write/triage permission." >&2
      exit 2
@@ -6640,11 +6118,45 @@ fresh-shell receipt fence:
 
 ```bash
 # BEGIN review-verdict-final-fence-v1
+# This fence is deliberately NOT prologued: it has to run from a cwd that need
+# not be a git working tree, and review_fleet_rehydrate requires a toplevel. It
+# resolves the plugin root itself, through the SAME four-name chain every other
+# fence uses. It used to read a BARE $UBERDEV_REVIEW_PLUGIN_ROOT -- the only
+# fence in the file that did -- and that name is never environment-provided; it
+# is only ever derived, inside a fence. In a real run it expanded to the empty
+# string and the manifest import failed with
+# "No such file or directory: '/lib/run_manifest.py'", which hit BEFORE the
+# receipt was ever examined.
+UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}"
+if [ ! -r "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" ]; then
+  echo "error: review verdict fence cannot locate lib/run_manifest.py; none of UBERDEV_REVIEW_PLUGIN_ROOT, PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, CURSOR_PLUGIN_ROOT names a plugin root" >&2
+  exit 2
+fi
+# The receipt gets its own refusal, ahead of the validator. Falling through to
+# the generic decoder made a MISSING token report `review_reservation_receipt_invalid`,
+# which reads as "the token is corrupt" when the truth is "no token arrived" --
+# two different operator actions behind one string. A run only reaches this fence
+# after the full reviewer fleet has been spent, so the diagnosis has to name the
+# channel and say what to do next.
+case "${REVIEW_RUN_RESERVATION_RECEIPT:-}" in
+  v1:*) ;;
+  "")
+    echo "error: review verdict fence received no reservation receipt: REVIEW_RUN_RESERVATION_RECEIPT is empty" >&2
+    echo "note: the setup fence prints it on stderr as 'REVIEW_CARRY RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt>'. Prefix this Bash call with BOTH values, exactly as printed." >&2
+    echo "note: the receipt is deliberately never written to disk (it certifies the run directory, so a copy stored inside that directory would prove nothing), and RUN_ID alone cannot stand in for it. If the carry line is gone, re-run /uberdev:review-pr from the setup fence." >&2
+    exit 2
+    ;;
+  *)
+    echo "error: review verdict fence received a malformed reservation receipt; expected the 'v1:' capability token printed on the setup fence REVIEW_CARRY line" >&2
+    exit 2
+    ;;
+esac
 REVIEW_FINAL_FENCE_RC=0
 python3 -I -B - \
   "$REVIEW_RUN_RESERVATION_RECEIPT" \
   "$AUDIT_JSON_PAYLOAD" \
-  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" <<'PY' || REVIEW_FINAL_FENCE_RC=$?
+  "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/run_manifest.py" \
+  "$RUN_ID" <<'PY' || REVIEW_FINAL_FENCE_RC=$?
 import base64
 import importlib.util
 import json
@@ -6653,7 +6165,7 @@ import re
 import stat
 import sys
 
-receipt_text, payload_text, module_path = sys.argv[1:]
+receipt_text, payload_text, module_path, expected_run_id = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("uberdev_review_final_manifest", module_path)
 if spec is None or spec.loader is None:
     print(f"error: review run manifest is not loadable: {module_path}", file=sys.stderr)
@@ -6685,6 +6197,16 @@ def decode_receipt(value):
         or re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]+", receipt["run_id"] or "") is None
     ):
         raise module.ManifestRejected("review_reservation_receipt_invalid")
+    # The receipt must belong to THIS run, not merely to some run.
+    #
+    # Every check above is internal: the token is well-formed, canonical, and
+    # agrees with its own run_dir. None of them ask whether it is the receipt
+    # for the verdict being published. Two concurrent reviews in one checkout
+    # each mint a valid receipt, and the carry line is copied by hand between
+    # fences -- so pasting review A receipt onto review B verdict published
+    # B audit JSON and retired B markers under A authority, rc 0, silently.
+    if expected_run_id and receipt["run_id"] != expected_run_id:
+        raise module.ManifestRejected("review_reservation_receipt_foreign_run")
     for key in ("runs_root_identity", "run_dir_identity"):
         identity = receipt[key]
         if (

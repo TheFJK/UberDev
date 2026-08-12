@@ -275,7 +275,7 @@ both look harmless:
 
 There is also **no brief relay** (RFC §3.1 line 148). The controller already
 writes the enveloped diff artifact atomically in Bash
-(`review_refresh_phase1_scope`, `commands/review-pr.md:1481-1571`), so the
+(`review_refresh_phase1_scope`, `lib/review-fences.sh`), so the
 reviewers read *that* path. This deletes an agent and removes an LLM from the
 trust path.
 

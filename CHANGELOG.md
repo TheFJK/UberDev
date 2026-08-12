@@ -4,6 +4,108 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.17] — 2026-08-12
+
+`/review-pr` could not run end-to-end. #427 (v0.45.13) fixed the VARIABLE half of
+its fence-scoped-state defect and nobody asked whether the same shape applied to
+functions. It did, sixteen times over, and to nine more values besides.
+
+Every fix below was verified by executing the thing, not by reading it or by the
+suite going green — the suite was green throughout, which is the point.
+
+### Fixed
+
+- **Sixteen helpers were defined inside markdown fence bodies and called from
+  other fences.** Every fence is a fresh shell, so those calls were
+  `command not found` in any real run. They now live in `lib/review-fences.sh`,
+  loaded by the prologue every fence already carries.
+- **That loader then aborted the SECOND time a process ran the prologue.** It
+  sourced the library over the caller and restored the caller's definitions from
+  `typeset -f` output — a re-print of the shell's parse tree, not the bytes a
+  function was defined from. Two helpers re-emit unparseably, on disjoint shells:
+  `review_fixer_child_bound` on bash 3.2 (stock macOS), `review_child_fanout` on
+  bash 5.0–5.2 (the CI runner); bash 4.x, 5.3 and zsh 5.9 round-trip both
+  cleanly, which is why it shipped. The prologue opens 53 of the 60 fences, so
+  "called twice in one process" is the normal case. `typeset -f` is now used only
+  as a predicate, whose exit status is sound everywhere; the helpers a shell is
+  actually missing are carved out of the library's own source bytes, which
+  re-parse by construction, and a postcondition now names any helper the load
+  left undefined. `tests/review-child-inputs.test.sh` carried the same
+  `declare -f`-and-`eval` round-trip to copy one helper under a second name — on
+  bash 3.2 that aborted the suite on an unparseable `||` and still exited 0, a
+  silent vacuous green. It now renames the source bytes instead.
+- **`audit` had 65 call sites and no definition in any shipped file.** A bare
+  `audit` resolved to `/usr/sbin/audit` on macOS (rc 255) and command-not-found
+  on Linux CI (rc 127). Thirteen calls sit in tail position and two fences END
+  with one, so a fully successful path exited non-zero.
+- **A trust trail could report GREEN on a PR with BLOCKER findings.** The verdict
+  read `${BY_SEVERITY_BLOCKER:-0}` and `${PHASE2_5_HALTED:-false}` — the values a
+  lost carrier produces, both meaning "clean". Losing everything failed closed;
+  losing only the Phase 2.5 counts, which is what happens when the controller
+  re-emits the phase verdicts it holds but not the counts that came back inside
+  a child's YAML, emitted GREEN. GREEN is the `uberdev-approved` label and the
+  `Reviewed-by:` trailer `/merge` accepts as authorisation to land.
+- **Phase 3 minted its fixer authority over nine empty values.** ROUTE computed
+  the edge, lease, base identity and branch pair; the dispatch fence read them
+  all back blank. The comment claiming `prepare-ci-authority` "re-checks" them
+  was wrong — that tool receives them as argv and cannot re-derive what it is
+  handed empty, so every downstream `read-ci-authority-member` recovered the
+  empties faithfully.
+- **CLASSIFY selected the failing check from an empty probe payload**, then
+  halted `classification_run_selection_invalid` — a message about a malformed
+  selection, on a probe never handed anything to select from.
+- **The settle loop never ran.** It tests `[ "$PROBE_VERDICT" = "empty" ]` to
+  decide whether CI has registered yet; that read the empty string, so the test
+  was false for a probe that really was empty and a just-pushed PR fell straight
+  through to `skipped_no_checks`.
+- **The reservation receipt was not bound to the run it published.** Two
+  concurrent reviews each mint a valid receipt, so pasting one onto the other's
+  verdict published the wrong audit JSON and retired the wrong markers, rc 0.
+- **The reviewed head is now recorded, never recomputed.** `git rev-parse HEAD`
+  at the consuming fence always agrees with itself, which is exactly the
+  comparison the anti-race gate exists to fail — recomputing it deletes the check
+  while leaving code that looks like a check in place.
+- **Absent is no longer reported as changed.** A run whose head never moved was
+  told its head moved outside the validated fixers, because the guard compared
+  against `${VALIDATED_FIXER_HEAD_SHA:-}` and any real SHA differs from "".
+- **The child timeout reached the dispatcher blank** at five call sites.
+- **The workspace setup fence refused its own inherited `$WORKTREE_ROOT`** on
+  native Windows, so `/review-pr`, `/simplify` and post-impl-review all died
+  `preset_mismatch` before allocating anything (#471). `validate_presets`
+  byte-compared caller-supplied path scalars against the helper's own resolved
+  spelling, while `validate_requested_root` — running one step earlier on the
+  very same string — compared them with a normalising comparator: one invariant,
+  two expressions, opposite verdicts on the same pair. Git for Windows spells the
+  repository root with forward slashes and `os.path.abspath` hands back
+  backslashes, and `!=` cannot see past that; on macOS the same refusal hit any
+  logical `$TMPDIR` spelling under the `/var` → `/private/var` symlink. Both call
+  sites now route through one `same_validated_path`, absoluteness included, so a
+  relative spelling is never resolved against the process CWD. The refusal also
+  names the disagreeing scalar (`preset_mismatch:WORKTREE_ROOT`) instead of
+  saying one anonymous word for all nine, and an ill-shaped `--presets-json`
+  value — a non-string, a string carrying an embedded NUL, or one carrying a
+  lone surrogate that no filesystem encoder accepts — is now the typed refusal
+  `invalid_presets:<KEY>` rather than a Python traceback on rc 1. The
+  encodability half is asked with `os.fsencode`, the encoder the path API itself
+  calls, so it is total over every string instead of enumerating the ways one
+  can be un-encodable; surrogates from PEP 383 `surrogateescape` still pass,
+  which is what keeps a repository path holding a raw non-UTF-8 byte usable. A
+  structural guard in `tests/command-workspace.test.sh` registers every path
+  comparison in the module with the reason it is not that one comparator, so a
+  third hand-rolled copy reds CI.
+
+### Notes
+
+Some values can be re-derived and some can only be read back. A configured
+constant recomputed from the same expression is exact; a measurement of what a
+run did can only be persisted. Recomputing a measurement is how the false-GREEN
+trail happened, and the two are deliberately handled differently here.
+
+Three names that LOOK unestablished are not — `REVIEW_REPO_SLUG`,
+`CHANGED_PATHS_JSON` and `REVIEW_FIXER_LAUNCH_BINDING` are bound non-locally by
+helpers in the same shell. A static "assigned in this fence?" scan reports all
+three as defects. They are recorded here so they do not get "fixed".
+
 ## [0.45.16] — 2026-08-12
 
 ### Fixed

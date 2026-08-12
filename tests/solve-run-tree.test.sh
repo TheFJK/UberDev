@@ -148,12 +148,21 @@ PY
 # byte-equality, and the two ported-SKILL greps) went with the Codex tree in
 # issue #381. Their Claude-tree counterparts are asserted below.
 
-for file in \
-  plugins/uberdev/commands/review-pr.md \
-  plugins/uberdev/commands/simplify.md \
-  plugins/uberdev/skills/post-impl-review/SKILL.md; do
-  grep -q 'uberdev_dispatch_child' "$ROOT/$file"
-  grep -q 'uberdev_wait_child' "$ROOT/$file"
+# One entry per routed-child LIFECYCLE, not per file. /review-pr's is split
+# across two files: the command dispatches, and lib/review-fences.sh holds the
+# builders it calls -- they had to leave the markdown because a function defined
+# in a ```bash fence is unreachable from the next fence (#427). Grepping the
+# command alone would have found no `uberdev_wait_child` at all and reported the
+# routed adapter missing; grepping the pair keeps the assertion about the
+# lifecycle it was written for.
+for files in \
+  'plugins/uberdev/commands/review-pr.md plugins/uberdev/lib/review-fences.sh' \
+  'plugins/uberdev/commands/simplify.md' \
+  'plugins/uberdev/skills/post-impl-review/SKILL.md'; do
+  lifecycle=''
+  for file in $files; do lifecycle="$lifecycle$(cat "$ROOT/$file")"; done
+  grep -q 'uberdev_dispatch_child' <<<"$lifecycle"
+  grep -q 'uberdev_wait_child' <<<"$lifecycle"
 done
 
 grep -q 'solve.issue.lead' "$ROOT/plugins/uberdev/lib/solve-launcher.sh"

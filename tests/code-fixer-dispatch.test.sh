@@ -13,6 +13,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CODE_FIXER="$REPO_ROOT/plugins/uberdev/agents/code-fixer.md"
 CONTRACT_HELPER="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
+# The cross-fence helpers review-pr.md calls but no longer defines (#427): a
+# fence body is reachable only from the shell that runs it, so they ship as code.
+REVIEW_FENCES="$REPO_ROOT/plugins/uberdev/lib/review-fences.sh"
 SIMPLIFY="$REPO_ROOT/plugins/uberdev/commands/simplify.md"
 
 for f in "$CODE_FIXER" "$CONTRACT_HELPER" "$REVIEW_PR" "$SIMPLIFY"; do
@@ -218,7 +221,7 @@ assert_grep "$CONTRACT_HELPER" '^def commit_review\(' \
   "executable helper owns the review commit transaction"
 assert_grep "$CONTRACT_HELPER" '"commit-review"' \
   "helper CLI exposes the authenticated review commit boundary"
-assert_grep "$REVIEW_PR" 'git -C .*rev-list --count.*before.*after|rev-list --count.*FIXER' \
+assert_grep "$REVIEW_FENCES" 'git -C .*rev-list --count.*before.*after|rev-list --count.*FIXER' \
   "controller proves APPLIED is exactly one commit"
 
 echo

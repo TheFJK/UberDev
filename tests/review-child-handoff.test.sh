@@ -4,6 +4,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 TREE="$ROOT/plugins/uberdev/policy/solve-run-tree-v1.json"
 REVIEW="$ROOT/plugins/uberdev/commands/review-pr.md"
+# review-pr.md's routed child builders ship as code (#427, the function half),
+# so the invariants that used to be asserted against its fence text are now
+# asserted against the file that defines them.
+FENCES="$ROOT/plugins/uberdev/lib/review-fences.sh"
 SIMPLIFY="$ROOT/plugins/uberdev/commands/simplify.md"
 POST="$ROOT/plugins/uberdev/skills/post-impl-review/SKILL.md"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -1783,11 +1787,20 @@ for lens in reuse quality efficiency; do
 done
 
 # Source/init precedes the builders, and all executable snippets are nounset-safe.
-for doc in "$REVIEW" "$SIMPLIFY"; do
-  setup_line="$(head -1 <<<"$(grep -n 'uberdev-executable setup=' "$doc")" | cut -d: -f1)"
-  builder_line="$(head -1 <<<"$(grep -n 'review_child_record()' "$doc")" | cut -d: -f1)"
-  [ "$setup_line" -lt "$builder_line" ]
-done
+#
+# review-pr.md is deliberately NOT in this loop and must define no builder at
+# all: its builders moved to lib/review-fences.sh, which every fence loads
+# through the rehydration prologue (#427, the function half). A definition
+# ordered after the setup fence was only ever reachable from the one shell that
+# ran that fence, which is the defect this ordering check used to approximate.
+grep -q 'review_child_record()' "$SIMPLIFY"
+if grep -q 'review_child_record()' "$REVIEW"; then
+  echo "review-child-handoff: review-pr.md re-defines a routed child builder; lib/review-fences.sh owns them" >&2
+  exit 1
+fi
+SIMPLIFY_SETUP_LINE="$(head -1 <<<"$(grep -n 'uberdev-executable setup=' "$SIMPLIFY")" | cut -d: -f1)"
+SIMPLIFY_BUILDER_LINE="$(head -1 <<<"$(grep -n 'review_child_record()' "$SIMPLIFY")" | cut -d: -f1)"
+[ "$SIMPLIFY_SETUP_LINE" -lt "$SIMPLIFY_BUILDER_LINE" ]
 # Extract each production setup fence. The braces are load-bearing: zsh reads an
 # unbraced parameter followed by a colon and a letter as a history-style
 # modifier, eats the colon, and hands back a garbage pair — `:r` would silently
@@ -2346,8 +2359,11 @@ done
 
 # The executable builder preflights the complete immutable batch before the
 # first launch and boundedly unwinds an earlier child when a later launch fails.
-sed -n '/BEGIN review-child-builder-v1/,/END review-child-builder-v1/p' "$REVIEW" \
-  | sed '/BEGIN review-child-builder-v1/d;/END review-child-builder-v1/d;/^```/d' >"$TMP/builder.sh"
+# The shipped builders, sourced from the file that defines them. This used to
+# carve them out of a review-pr.md fence; a fence body is reachable only from
+# the shell that runs it, so the definitions moved to lib/ and the carve-out
+# became a copy.
+cp "$ROOT/plugins/uberdev/lib/review-fences.sh" "$TMP/builder.sh"
 cat >"$TMP/lifecycle.sh" <<'SH'
 set -euo pipefail
 . "$1"
@@ -2670,7 +2686,7 @@ set -e
 SH
 bash "$TMP/validated-publication-failure.sh" "$TMP/post-runtime.sh" "$TMP/validated-publication-post"
 
-for doc in "$REVIEW" "$SIMPLIFY" "$POST"; do
+for doc in "$FENCES" "$SIMPLIFY" "$POST"; do
   grep -Fq 'preflight_refs+=("$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
   grep -Fq 'uberdev_preflight_child_batch "${preflight_refs[@]}"' "$doc"
   grep -Fq 'launch_handoff_sha256s+=("$UBERDEV_CHILD_HANDOFF_SHA256")' "$doc"
@@ -2684,13 +2700,13 @@ for doc in "$REVIEW" "$SIMPLIFY" "$POST"; do
   # the digest argument is pinned either way.
   grep -Eq 'uberdev_dispatch_child_capture "\$edge" "\$handoff" "\$handoff_sha256" "\$result" "\$(child_)?status"' "$doc"
 done
-grep -Fq "'handoff_sha256':handoff_sha256" "$REVIEW"
+grep -Fq "'handoff_sha256':handoff_sha256" "$FENCES"
 grep -Fq "'handoff_sha256':handoff_sha256" "$SIMPLIFY"
 grep -Fq 'handoff_sha256:$handoff_sha256' "$POST"
 grep -q 'REVIEW_WAIT_RC.*-ne 1' "$POST"
 [ "$(grep -c 'post_review_run_capped "' "$POST")" -eq 2 ]
 grep -q 'post_review_roster_complete "$REVIEW_LAUNCHED" "$REVIEW_EXPECTED_COUNT"' "$POST"
-! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$SIMPLIFY" "$POST"
+! grep -En "wait_child .* 0|IFS='\\|'|additional_focus|brief_path|lens_index" "$REVIEW" "$FENCES" "$SIMPLIFY" "$POST"
 ! grep -En 'format_repair' "$POST"
 grep -Eq 'format_retry' "$POST"
 

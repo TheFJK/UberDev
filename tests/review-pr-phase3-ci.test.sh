@@ -36,6 +36,10 @@ CONTRACT_PY="$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py"
 REVIEW_FLEET_SKILL="$REPO_ROOT/plugins/uberdev/skills/review-fleet/SKILL.md"
 REVIEW_FLEET_WORKFLOW="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+# The cross-fence helpers. review-pr.md calls them but defines none of them:
+# a fence body is reachable only from the shell that ran it (#427), so they
+# ship as code and every prologued fence loads them through rehydration.
+REVIEW_FENCES="$REPO_ROOT/plugins/uberdev/lib/review-fences.sh"
 # The Phase 3 wiring rows (S21-S31) address those same two files under their own
 # names. Alias, never re-derive: one relocation must not leave half the suite
 # pointing at a stale path while the other half still resolves.
@@ -1336,7 +1340,7 @@ awk '
   /^review_child_result_path\(\) \{/ { capture=1 }
   capture { print }
   capture && /^\}$/ { exit }
-' "$REVIEW_PR" > "$RESULT_PATH_HELPER"
+' "$REVIEW_FENCES" > "$RESULT_PATH_HELPER"
 mkdir -p "$RESULT_PATH_TMP/run/children/classifier"
 RESULT_PATH="$RESULT_PATH_TMP/run/children/classifier/result.md"
 RESULT_STATUS="$RESULT_PATH_TMP/run/children/classifier/status.json"
@@ -2008,7 +2012,7 @@ assert_grep "$REVIEW_PR" 'review_select_failed_ci_run' \
   "S18.2 — failed Actions run is selected from check metadata"
 assert_grep "$REVIEW_PR" 'review_clear_ci_run_selection' \
   "S18.3 — run selection has an explicit clear operation"
-assert_grep "$REVIEW_PR" 'actions/runs/\$CI_RUN_ID|actions/runs/\$\{CI_RUN_ID\}' \
+assert_grep "$REVIEW_FENCES" 'actions/runs/\$CI_RUN_ID|actions/runs/\$\{CI_RUN_ID\}' \
   "S18.4 — controller reads immutable Actions run metadata"
 assert_grep "$REVIEW_PR" 'pull_requests.*PR_NUMBER|PR_NUMBER.*pull_requests' \
   "S18.5 — pull_request authority is bound through PR association"
@@ -2024,19 +2028,19 @@ echo "== S18-RUNTIME: synthetic merge SHA, unset id, unrelated run, and reselect
 CI_AUTHORITY_FIXTURE="$(mktemp)"
 for function_name in review_clear_ci_run_selection review_select_failed_ci_run review_capture_ci_classification_head; do
   awk -v wanted="$function_name" '
-    $0 ~ "^[[:space:]]*" wanted "\\(\\) \\{" { active=1 }
+    $0 == wanted "() {" { active=1 }
     active { print }
-    active && /^    \}$/ { exit }
-  ' "$REVIEW_PR" >>"$CI_AUTHORITY_FIXTURE"
+    active && $0 == "}" { exit }
+  ' "$REVIEW_FENCES" >>"$CI_AUTHORITY_FIXTURE"
 done
 
-if ! grep -q '^    review_clear_ci_run_selection() {' "$CI_AUTHORITY_FIXTURE" \
-    || ! grep -q '^    review_select_failed_ci_run() {' "$CI_AUTHORITY_FIXTURE" \
-    || ! grep -q '^    review_capture_ci_classification_head() {' "$CI_AUTHORITY_FIXTURE"; then
-  echo "  FAIL  S18-RT.0 — could not extract all CI authority helpers from review-pr.md"
+if ! grep -q '^review_clear_ci_run_selection() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^review_select_failed_ci_run() {' "$CI_AUTHORITY_FIXTURE" \
+    || ! grep -q '^review_capture_ci_classification_head() {' "$CI_AUTHORITY_FIXTURE"; then
+  echo "  FAIL  S18-RT.0 — could not extract all CI authority helpers from lib/review-fences.sh"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  S18-RT.0 — extracted CI authority helpers from review-pr.md"
+  echo "  PASS  S18-RT.0 — extracted CI authority helpers from lib/review-fences.sh"
   PASS=$((PASS + 1))
 
   # Default/unset CI_RUN_ID is non-authoritative: the failed check's exact
@@ -2203,8 +2207,14 @@ echo "== S19-RUNTIME: post-MONITOR refresh failure cannot downgrade observed red
 POST_MONITOR_REFRESH_FIXTURE="$(mktemp)"
 awk '
   /^    On a `red` MONITOR verdict, refresh the check projection before$/ { section=1 }
-  section && /^    ```bash$/ { code=1; next }
+  section && /^    ```bash([[:space:]]|$)/ { code=1; next }
   code && /^    ```$/ { exit }
+  # The rehydration prologue is a DEPENDENCY of this fence, not part of the
+  # behaviour under test: the row installs its own `audit` sink and gh stub, and
+  # a real review_fleet_rehydrate here would `return 2` out of the sourced
+  # fixture before the refresh it exists to exercise ever ran.
+  code && /lib\/review-fleet-args\.sh" \|\| return 2$/ { next }
+  code && /^[[:space:]]*review_fleet_rehydrate \|\| return 2$/ { next }
   code {
     sub(/^    /, "")
     print
@@ -3938,9 +3948,12 @@ s33_extract() {
 }
 
 # The shared driver prelude. Everything here is a DEPENDENCY of the fences, not
-# a paraphrase of one: `audit` is the orchestrator's sink, `git`/`gh` are the
-# CLIs, `review_json_string` is defined by the setup fence at the top of
-# review-pr.md (a fence no carrier row is about). Calls are logged one
+# a paraphrase of one: `audit` is the orchestrator's sink and `git`/`gh` are the
+# CLIs. The fence helpers (`review_json_string`, `review_ci_json_member`,
+# `review_ci_authority_digest`, ...) are appended REAL, from the same
+# lib/review-fences.sh a prologued fence loads — stubbing them would let a
+# carrier row pass over a helper that production cannot reach. Calls are logged
+# one
 # <angle-bracketed> argv element per token so an assertion on `git add -- a "b c"`
 # cannot be satisfied by a differently-split argument list.
 cat >"$S33_PRELUDE" <<'S33PRELUDE'
@@ -3952,7 +3965,6 @@ s33_log_call() {
   for s33_arg in "$@"; do printf ' <%s>' "$s33_arg" >>"$FENCE_LOG"; done
   printf '\n' >>"$FENCE_LOG"
 }
-review_json_string() { printf '"%s"' "${1:-}"; }
 git() {
   local s33_verb=
   s33_log_call git "$@"
@@ -3987,6 +3999,7 @@ gh() {
   esac
 }
 S33PRELUDE
+printf '. "%s" || return 1\n' "$REVIEW_FENCES" >>"$S33_PRELUDE"
 
 # The child-dispatch adapter, reduced to the one helper the ROUTE fence calls.
 # The real file loads the entire provider boundary; a carrier row must not be

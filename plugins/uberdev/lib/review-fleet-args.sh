@@ -901,6 +901,60 @@ review_fleet_read_ci_state() {
   jq -er --arg field "$2" '.[$field] | if type=="array" then tojson else . end' <"$1"
 }
 
+# review_fleet_write_ci_route TARGET EDGE_ID SLUG_BASE RUN_ID HEAD_SHA \
+#                             BASE_SHA BASE_TIP_SHA BASE_BRANCH PR_BRANCH LEASE_SHA
+# review_fleet_read_ci_route  PATH FIELD
+#
+# Phase 3 ROUTE's decision, made durable for the fence that acts on it.
+#
+# Same defect as the loop counters above, one step further along. ROUTE (the
+# "Phase 3 ROUTE" fence) selects the failing check and computes the fixer edge,
+# the lease SHA, the base identity and the branch pair; the fence that DISPATCHES
+# that fixer is a different harness shell and read all nine back as the empty
+# string. Its own comment says they are "re-checked by prepare-ci-authority
+# below", but prepare-ci-authority RECEIVES them as argv -- it cannot re-derive
+# what it was handed empty, so the receipt was minted over blanks.
+#
+# Field-addressed like review_fleet_read_ci_state rather than a positional TSV:
+# nine columns is where a positional record stops being readable, and a consumer
+# that wants one field should not have to know the order of the other eight.
+#
+# jq -er makes a missing or null field a non-zero exit, so a truncated record is
+# a refusal at the reader instead of an empty string in an authority receipt.
+review_fleet_write_ci_route() {
+  [ "$#" -eq 10 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" edge_id="$2" slug_base="$3" ci_run_id="$4" head_sha="$5" \
+        base_sha="$6" base_tip_sha="$7" base_branch="$8" pr_branch="$9" lease_sha="${10}" payload
+  # Every member is required. An empty one here is the defect this record
+  # exists to end, so it must not be writable in the first place.
+  for _review_ci_route_member in "$edge_id" "$slug_base" "$ci_run_id" "$head_sha" \
+      "$base_sha" "$base_tip_sha" "$base_branch" "$pr_branch" "$lease_sha"; do
+    [ -n "$_review_ci_route_member" ] || {
+      unset _review_ci_route_member 2>/dev/null || true
+      return 2
+    }
+  done
+  unset _review_ci_route_member 2>/dev/null || true
+  payload="$(jq -cn \
+    --arg edge_id "$edge_id" --arg slug_base "$slug_base" --arg ci_run_id "$ci_run_id" \
+    --arg head_sha "$head_sha" --arg base_sha "$base_sha" --arg base_tip_sha "$base_tip_sha" \
+    --arg base_branch "$base_branch" --arg pr_branch "$pr_branch" --arg lease_sha "$lease_sha" \
+    '{edge_id:$edge_id,slug_base:$slug_base,ci_run_id:$ci_run_id,head_sha:$head_sha,base_sha:$base_sha,base_tip_sha:$base_tip_sha,base_branch:$base_branch,pr_branch:$pr_branch,lease_sha:$lease_sha}')" || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_route() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI route decision missing: ${1:-}" >&2
+    return 2
+  }
+  jq -er --arg field "$2" '.[$field] | select(. != null and . != "")' <"$1" || {
+    echo "error: review-fleet CI route decision has no usable '${2:-}': ${1}" >&2
+    return 2
+  }
+}
+
 # review_fleet_write_ci_push PATH SHA BY_AGENT
 #
 # The SINGLE leased push (6c.4w.3) and the Phase 1 re-entry fence that records
@@ -1040,6 +1094,100 @@ _review_fleet_base_ref_ok() {
   return 0
 }
 
+# review_fleet_write_reviewed_head TARGET SHA
+# review_fleet_read_reviewed_head  PATH -> "<40-hex>"
+#
+# The head the review currently stands on, updated as fixers commit.
+#
+# `REVIEWED_HEAD_SHA` and `VALIDATED_FIXER_HEAD_SHA` are the same fact at
+# different moments: the head Phase 1 reviewed, then that head advanced by each
+# validated fixer commit. Both lived only in shell variables, and both are read
+# by fences that are separate processes -- the post-fixer publication gate and
+# the two trust fences.
+#
+# THIS ONE CANNOT BE RE-DERIVED, and the distinction matters more here than
+# anywhere else in this file. `git rev-parse HEAD` at the consuming fence would
+# always agree with itself, which is precisely the comparison the anti-race gate
+# exists to fail: its whole job is to notice that HEAD moved since the review.
+# Recomputing it does not restore the check, it deletes it while leaving the
+# code that looks like a check in place. So the value is written down at each
+# point it legitimately changes, and read back -- never recomputed.
+#
+# Absent is therefore distinguishable from changed, which the callers rely on to
+# stop reporting "HEAD changed outside the validated review fixers" at a run
+# whose head never moved and whose record simply had not travelled.
+# review_fleet_write_ci_probe_json TARGET JSON
+# review_fleet_read_ci_probe_json  PATH -> the recorded probe payload
+#
+# The `gh pr checks` payload PROBE selected from, kept for the fences that read
+# it back.
+#
+# The VERDICT distilled from this payload already had a record
+# (ci-probe-verdict.txt, added for #418 when `${PROBE_VERDICT:-unknown}` answered
+# "unknown" on every probe-only run). The payload it was distilled FROM did not,
+# and two later fences still need it: the settle/re-probe arm, and CLASSIFY,
+# which passes it to review_select_failed_ci_run to choose the failing check.
+# With it empty the selector had no rows to choose from and the run halted
+# `classification_run_selection_invalid` -- a message about a malformed
+# selection, on a probe that was never handed anything to select.
+#
+# Re-running `gh pr checks` at the consuming fence is NOT a fix: checks move.
+# The selection has to be made from the same bytes the verdict was distilled
+# from, or the verdict and the chosen check can disagree about what CI said.
+review_fleet_write_ci_probe_json() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" payload="$2"
+  [ -n "$payload" ] || return 2
+  printf '%s' "$payload" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+  ( umask 077 && printf '%s\n' "$payload" >"$target" ) || return 2
+}
+
+review_fleet_read_ci_probe_json() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet CI probe payload missing: ${1:-}" >&2
+    return 2
+  }
+  jq -e 'type == "array"' <"$1" >/dev/null 2>&1 || {
+    echo "error: review-fleet CI probe payload is not a checks array: ${1}" >&2
+    return 2
+  }
+  cat -- "$1"
+}
+
+review_fleet_write_reviewed_head() {
+  [ "$#" -eq 2 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" sha="$2"
+  case "$sha" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) return 2 ;;
+  esac
+  [ "${#sha}" -eq 40 ] || return 2
+  case "$sha" in *[!0-9a-f]*) return 2 ;; esac
+  ( umask 077 && printf '%s\n' "$sha" >"$target" ) || return 2
+}
+
+review_fleet_read_reviewed_head() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet reviewed head missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded
+  IFS= read -r recorded <"$1" || return 2
+  [ "${#recorded}" -eq 40 ] || {
+    echo "error: review-fleet reviewed head is not a 40-hex SHA: ${recorded:-<empty>}" >&2
+    return 2
+  }
+  case "$recorded" in
+    *[!0-9a-f]*)
+      echo "error: review-fleet reviewed head is not a 40-hex SHA: $recorded" >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$recorded"
+}
+
 review_fleet_write_review_base() {
   [ "$#" -eq 3 ] || return 2
   # `target`, never `path` -- see review_fleet_write_ci_state: zsh ties the
@@ -1069,6 +1217,188 @@ review_fleet_read_review_base() {
     return 2
   fi
   printf '%s\t%s' "$base_sha" "$base_ref"
+}
+
+# review_fleet_write_trust_state PATH STATE CRITICAL_COUNT
+# review_fleet_read_trust_state  PATH -> "<STATE>TAB<critical count>"
+#
+# The trust verdict, made durable at the ONE fence that computes it.
+#
+# `TRUST_TRAIL_STATE` was assigned in the state-assignment fence and then read by
+# three LATER fences -- the trailer-suffix case, the label-selection case, and
+# the label-apply case -- each a separate harness process. It expanded empty in
+# all three, and the failures were not symmetrical:
+#
+#   * the label fences ran `gh label create --force "" --color ""` and exited 2
+#     blaming `gh` auth, which is a loud lie but at least a stop;
+#   * the trailer-suffix `case` matched NO arm, so TRAILER_SUFFIX was never
+#     assigned at all -- not set to the empty string, unset. The anchor message
+#     then interpolated it as "" under zsh with no error, and a YELLOW run
+#     emitted a byte-identical GREEN-shaped `Reviewed-by:` trailer. That one
+#     fails silently and ships a WRONG artifact, which is worse than the stop.
+#
+# So the state travels, and the two values DERIVED from it -- the trailer suffix
+# and the label triple -- are recomputed by each consumer from the state it just
+# read, rather than making three more scalars cross the same gap. The critical
+# count rides along because the YELLOW suffix embeds it and it is meaningless
+# apart from the state it qualifies.
+#
+# RED is a legal recorded value even though RED emits no anchor and no label:
+# the consumers must be able to tell "the run was RED" from "the carrier was
+# never written", and only an explicit record does that.
+
+# review_fleet_write_phase2_5_outcome TARGET STATUS HALTED BLOCKER CRITICAL
+# review_fleet_read_phase2_5_outcome  PATH -> "<STATUS>TAB<halted>TAB<blocker>TAB<critical>"
+#
+# The INPUTS to the trust verdict, made durable at the fence that learns them.
+#
+# review_fleet_write_trust_state above makes the trust verdict durable. That is
+# the OUTPUT. Its inputs were still crossing the same gap the wrong way: Phase
+# 2.5's counts are captured by the CONTROLLER out of the findings-to-issues
+# child's return YAML (see commands/review-pr.md, "Capture the return YAML into
+# shell variables"), and the verdict fence that consumes them is a different
+# process. Nothing in the file wrote them down.
+#
+# The failure is not symmetric, and that asymmetry is why it survived:
+#
+#   * lose EVERYTHING and the predicate fails closed. `PHASE1_VERDICT` empty
+#     never equals APPROVE, so `would_be_green_without_phase2_5` stays false and
+#     the run goes RED. Safe, and the case anyone would test.
+#   * lose ONLY the Phase 2.5 counts -- exactly what happens when the controller
+#     re-emits the three phase verdicts it holds in its own context but not the
+#     counts that came back inside a child's YAML -- and `${BY_SEVERITY_BLOCKER:-0}`
+#     reads 0, `${PHASE2_5_HALTED:-false}` reads false, and a run that filed
+#     BLOCKER issues emits GREEN. Measured: APPROVE + ran/APPROVE + green with
+#     three blockers carried is NOT-GREEN; the same run with the carry lost is
+#     GREEN.
+#
+# GREEN is the `uberdev-approved` label and the `Reviewed-by:` trailer that
+# /merge Phase 1.4 accepts as authorisation to land. A defaulted absence must
+# therefore never be readable as "clean" -- so every one of these defaults is
+# gone from the predicate and its absence is a refusal instead.
+#
+# `skipped` is a first-class recorded STATUS, not an absent file, for the same
+# reason RED is a legal trust state above: a run that never dispatched Phase 2.5
+# (--no-defer-issues) and a run whose record was lost must not look alike.
+review_fleet_write_phase2_5_outcome() {
+  [ "$#" -eq 5 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" recorded_status="$2" halted="$3" blocker="$4" critical="$5"
+  case "$recorded_status" in
+    ran | skipped | blocked) ;;
+    *) return 2 ;;
+  esac
+  case "$halted" in true | false) ;; *) return 2 ;; esac
+  case "$blocker" in '' | *[!0-9]*) return 2 ;; esac
+  case "$critical" in '' | *[!0-9]*) return 2 ;; esac
+  ( umask 077 && printf '%s\t%s\t%s\t%s\n' \
+      "$recorded_status" "$halted" "$blocker" "$critical" >"$target" ) || return 2
+}
+
+review_fleet_read_phase2_5_outcome() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet phase 2.5 outcome missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded recorded_status halted blocker critical extra
+  IFS= read -r recorded <"$1" || return 2
+  recorded_status=""; halted=""; blocker=""; critical=""; extra=""
+  # Herestring, never an unquoted heredoc -- same reason as
+  # review_fleet_read_review_base above.
+  IFS=$'\t' read -r recorded_status halted blocker critical extra <<<"$recorded"
+  case "$recorded_status" in ran | skipped | blocked) ;; *) recorded_status='' ;; esac
+  case "$halted" in true | false) ;; *) recorded_status='' ;; esac
+  case "$blocker" in '' | *[!0-9]*) recorded_status='' ;; esac
+  case "$critical" in '' | *[!0-9]*) recorded_status='' ;; esac
+  if [ -z "$recorded_status" ] || [ -n "$extra" ]; then
+    echo "error: review-fleet phase 2.5 outcome is not <ran|skipped|blocked>TAB<true|false>TAB<blocker>TAB<critical>: ${recorded:-<empty>}" >&2
+    return 2
+  fi
+  printf '%s\t%s\t%s\t%s' "$recorded_status" "$halted" "$blocker" "$critical"
+}
+
+review_fleet_write_trust_state() {
+  [ "$#" -eq 3 ] || return 2
+  # `target`, never `path` -- see review_fleet_write_ci_state.
+  local target="$1" state="$2" critical="$3"
+  case "$state" in
+    GREEN | YELLOW | RED) ;;
+    *) return 2 ;;
+  esac
+  case "$critical" in '' | *[!0-9]*) return 2 ;; esac
+  ( umask 077 && printf '%s\t%s\n' "$state" "$critical" >"$target" ) || return 2
+}
+
+review_fleet_read_trust_state() {
+  [ -r "${1:-}" ] || {
+    echo "error: review-fleet trust state missing: ${1:-}" >&2
+    return 2
+  }
+  local recorded state critical extra
+  IFS= read -r recorded <"$1" || return 2
+  state=""; critical=""; extra=""
+  # Herestring, never an unquoted heredoc -- same reason as
+  # review_fleet_read_review_base above.
+  IFS=$'\t' read -r state critical extra <<<"$recorded"
+  case "$state" in
+    GREEN | YELLOW | RED) ;;
+    *) state='' ;;
+  esac
+  case "$critical" in '' | *[!0-9]*) state='' ;; esac
+  if [ -z "$state" ] || [ -n "$extra" ]; then
+    echo "error: review-fleet trust state is not <GREEN|YELLOW|RED>TAB<critical count>: ${recorded:-<empty>}" >&2
+    return 2
+  fi
+  printf '%s\t%s' "$state" "$critical"
+}
+
+# review_fleet_trailer_suffix STATE CRITICAL -> the `Reviewed-by:` suffix.
+#
+# GREEN adds nothing; YELLOW appends the deferred-critical count that /merge
+# reads to decide whether --accept-critical-deferred is required. Defined ONCE,
+# here, because two fences need it (the trailer-suffix step and the anchor
+# message that interpolates it) and the second one previously trusted the first
+# one's shell variable to survive a process boundary. Deriving it twice from the
+# same durable state is safe; carrying it once was not.
+#
+# RED returns rc 1 with no output: RED emits no anchor at all, so asking for its
+# trailer is a caller bug, and answering "" would let a RED run build a
+# GREEN-shaped message.
+review_fleet_trailer_suffix() {
+  [ "$#" -eq 2 ] || return 2
+  case "$2" in '' | *[!0-9]*) return 2 ;; esac
+  case "$1" in
+    GREEN) printf '' ;;
+    YELLOW) printf ' severity=critical-deferred count=%s' "$2" ;;
+    RED) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# review_fleet_trust_label STATE -> "<name>TAB<color>TAB<description>"
+#
+# The label triple, single-sourced for the same reason as the suffix above: the
+# fence that selected it and the fence that applied it were different processes,
+# so the apply fence ran `gh label create --force "" --color "" --description ""`
+# and reported a permissions problem.
+#
+# Descriptions stay under GitHub's 100-character ceiling -- `gh label create`
+# 422s above it, on update as well as create, and that limit has already broken
+# three labels in this repo.
+review_fleet_trust_label() {
+  [ "$#" -eq 1 ] || return 2
+  case "$1" in
+    GREEN)
+      printf '%s\t%s\t%s' uberdev-approved 0E8A16 \
+        'Trust trail: /review-pr verified GREEN. Set by /review-pr, read by /merge.'
+      ;;
+    YELLOW)
+      printf '%s\t%s\t%s' uberdev-approved-with-concerns FBCA04 \
+        'Trust trail: /review-pr YELLOW: deferred CRITICAL; /merge needs --accept-critical-deferred.'
+      ;;
+    RED) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # review_fleet_write_ci_check_name PATH NAME
@@ -1410,12 +1740,35 @@ review_fleet_rebase_dir() {
 #   * it never binds REVIEW_ITERATION or CI_FIX_LOOP_ITER. Those are counters,
 #     not run invariants; they move mid-run and belong to
 #     review_fleet_load_ci_counters, which the fence calls right after;
-#   * it never reads REVIEW_RUN_RESERVATION_RECEIPT off disk. The receipt is the
-#     capability token that authorises marker retirement. Persisting it into a
-#     sidecar so a later fence could pick it up would be a downgrade from the
-#     current orchestrator-carried scalar for zero gain -- its only consumer is
-#     the terminal verdict fence, which already carries it explicitly. Integrity
-#     of a recovered run is established by the pointer guards instead.
+#   * it never reads REVIEW_RUN_RESERVATION_RECEIPT off disk, and no sidecar
+#     ever holds one. The receipt is the capability token that authorises
+#     retiring the run markers, and what it actually asserts is that the runs
+#     root, the run directory and both markers still have the SAME
+#     (st_dev, st_ino) and sha256 they had at reservation. A copy stored inside
+#     the run directory would be swapped along with the directory it is meant to
+#     vouch for, so the token would faithfully certify the attacker's tree. That
+#     is the downgrade this refuses, and it is the whole of the refusal.
+#
+#     It is NOT a claim that the receipt needs no channel. It has exactly one:
+#     the setup fence prints it on the `REVIEW_CARRY` line beside RUN_ID, and
+#     commands/review-pr.md requires the orchestrator to carry both onto every
+#     later fence. That channel lives OUTSIDE the tree the token guards, which
+#     is precisely what a sidecar cannot do. Disclosure on it costs nothing --
+#     redemption re-stats the live filesystem, so a carried receipt can only ever
+#     authorise the one directory it already described.
+#
+#     An earlier version of this comment ended "its only consumer is the terminal
+#     verdict fence, which already carries it explicitly." Nothing carried it.
+#     The receipt was minted in the setup fence and read nine Workflow relays
+#     later, so the terminal fence got the empty string and every real run died
+#     on `review_reservation_receipt_invalid` after the full reviewer fleet had
+#     already been spent. A true premise (do not persist it) reached a false
+#     conclusion (therefore nothing more is owed).
+#
+#     Integrity of a RECOVERED run -- one whose RUN_ID came from the pointer
+#     rather than the carry line -- is established by the pointer guards. Those
+#     guards do not mint a receipt and are not a substitute for one; a run that
+#     lost the receipt cannot publish its verdict and must be re-run.
 
 # review_fleet_active_run_pointer_path TOPLEVEL -> the active-run pointer path.
 #
@@ -1608,6 +1961,373 @@ _review_fleet_bind_pr() {
   PR_NUMBER="$recovered"
 }
 
+# _review_fleet_bind_repo_slug RESEARCH_DIR -- recover REVIEW_REPO_SLUG for this fence.
+#
+# The slug is minted ONCE, in the Phase 0 metadata fence, and then read by about
+# twenty later fences: every child envelope's `repoSlug`, both
+# review_assert_selected_pr_head gates, both review_publish_same_repo_pr_head
+# calls, and every Phase 3 `gh run`/`gh api` call. All of them are separate
+# processes, so all of them read the empty string.
+#
+# Two sites had already noticed and grown their own
+# `${REVIEW_REPO_SLUG:-$(gh repo view ...)}`. Copying that to the other eighteen
+# is the #370 "one contract, N uncompared copies" shape, and it also means up to
+# twenty `gh` round-trips per run. This binds it once, next to PR_NUMBER, which
+# is the same kind of value recovered the same way.
+#
+# CACHED IN THE RESEARCH DIRECTORY, so `gh` is consulted at most once per run --
+# and NOT in the run/marker directory, which is where it does not belong. The
+# reservation reaper refuses to reap any run directory holding an entry outside
+# `{locked, pr-context.json, review-pr-verdict.json}`, so a cache file dropped
+# there would make every abandoned reservation permanently un-reapable and stall
+# `/uberdev:goal` on exactly the runs #344 added the reaper to rescue. The
+# research dir is where every other run-scoped carrier already lives
+# (review-base-identity.tsv, trust-state.tsv, ci-fix-phase.txt).
+#
+# FAIL-SOFT: if gh is absent or offline the slug stays empty and the fence that
+# needs it fails at its OWN shape guard with its own message. Making rehydrate
+# itself hard-fail here would turn "no network" into "every fence is broken",
+# and would put a gh round-trip in the path of harnesses that never touch a
+# remote.
+# _review_fleet_bind_carrier_backend DESCRIPTOR
+#
+# The dispatch backend this run's children were launched on.
+#
+# `uberdev_prepare_run_carrier` derives it once, in the SETUP fence, from the
+# validated route context's `root_decision.backend`. Every later fence is a
+# separate process, so `UBERDEV_CARRIER_BACKEND` was the empty string there --
+# and the Phase 1 evidence builder passes it straight into
+# `post_review_validated_evidence_complete` as `expected_backend`, which refuses
+# anything outside {workflow, wezterm, background}.
+#
+# The empty string is outside that set, so a complete, healthy 7-reviewer fanout
+# died `roster-mismatch` with `edge=unknown index=unknown` and the aggregate was
+# suppressed -- a message about the ROSTER, on a run whose roster was perfect and
+# whose backend simply had not travelled. Found by running /review-pr for real:
+# no static scan sees it, because the name is bound in lib/child-dispatch.sh
+# rather than in any fence, so a "assigned in fence X, read in fence Y" search
+# never pairs them.
+#
+# Re-derived, not carried: the descriptor already names the context file, the
+# context file is identity-checked when it is written, and the backend is a
+# property of the launch decision that cannot change mid-run.
+_review_fleet_bind_carrier_backend() {
+  # The argument is the descriptor's CONTENTS, not its path -- the same bytes
+  # UBERDEV_COMMAND_WORKSPACE_JSON carries. Reading it as a filename is the
+  # mistake that made the first cut of this binder a silent no-op.
+  local descriptor="${1:-}" context_file backend
+  [ -z "${UBERDEV_CARRIER_BACKEND:-}" ] || return 0
+  [ -n "$descriptor" ] || return 0
+  context_file="$(python3 -I -B -c 'import json,sys
+try:
+    value=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+if not isinstance(value,dict):
+    raise SystemExit(0)
+print(value.get("context_file") or "",end="")' "$descriptor" 2>/dev/null)" || return 0
+  [ -n "$context_file" ] || return 0
+  [ -r "$context_file" ] || return 0
+  backend="$(python3 -I -B -c 'import json,sys
+try:
+    value=json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+decision=value.get("root_decision")
+if not isinstance(decision,dict):
+    raise SystemExit(0)
+print(decision.get("backend") or "",end="")' "$context_file" 2>/dev/null)" || return 0
+  # Shape-checked against the same enum the evidence builder allows. Binding an
+  # unrecognised token here would trade one misleading refusal for another.
+  #
+  # Byte-aligned with the dispatch enum minus `auto`, for the same reason
+  # goal-state.sh's resolved-backend arm is: `auto` is a REQUEST, never a
+  # resolution, so a run can never have been dispatched on it.
+  # CONTRACT: dispatch-backend -auto !case-arm
+  case "$backend" in workflow|wezterm|background) UBERDEV_CARRIER_BACKEND="$backend" ;; esac
+}
+
+_review_fleet_bind_repo_slug() {
+  local research_dir="${1:-}" cache slug=''
+  [ -z "${REVIEW_REPO_SLUG:-}" ] || return 0
+  [ -n "$research_dir" ] || return 0
+  [ -d "$research_dir" ] || return 0
+  cache="$research_dir/repo-slug.txt"
+  if [ -r "$cache" ]; then
+    IFS= read -r slug <"$cache" || slug=''
+  fi
+  if [ -z "$slug" ]; then
+    command -v gh >/dev/null 2>&1 || return 0
+    slug="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || slug=''
+    case "$slug" in
+      [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*)
+        ( umask 077 && printf '%s\n' "$slug" >"$cache" ) 2>/dev/null || true
+        ;;
+    esac
+  fi
+  # Shape-checked before it is bound: a partial or error value assigned here
+  # would be handed straight to `gh --repo`, and an empty-but-present binding is
+  # the #427 defect itself.
+  case "$slug" in
+    *' '* | *'/'*'/'*) return 0 ;;
+    [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) REVIEW_REPO_SLUG="$slug" ;;
+    *) return 0 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# THE SECOND HALF OF #427: functions do not survive a process boundary either.
+#
+# Rehydration closed the VARIABLE half -- a scalar minted in the setup fence and
+# read nine Workflow relays later expanded empty. It did nothing for the
+# FUNCTION half. commands/review-pr.md DEFINED twenty `review_*` helpers
+# inside markdown fences and called them from OTHER fences:
+# review_refresh_phase1_scope (Phase 2), review_assert_selected_pr_head and
+# review_publish_same_repo_pr_head (the trust trail), review_json_string and the
+# review_child_* builders (Phase 2.5), review_promote_validated_fixer_outcome,
+# review_select_failed_ci_run (Phase 3). Every one of those call sites was
+# `command not found` in a real run.
+#
+# That is worse than a crash at three of them, because the call sits in front of
+# a `||` arm written for a DIFFERENT failure. A missing
+# review_assert_selected_pr_head prints "PR head changed after review;
+# suppressing trust emission"; a missing review_promote_validated_fixer_outcome
+# path prints "HEAD changed outside the validated review fixers". The run does
+# not just fail, it accuses the repository of something that never happened --
+# which is why this went unchased for so long.
+#
+# WHERE THE DEFINITIONS LIVE. lib/review-fences.sh, and nowhere else --
+# commands/review-pr.md keeps no copy, and tests/review-pr.test.sh R47.4 refuses
+# one, because two copies of one contract is the #370 "one contract, N
+# uncompared copies" class. The first cut of this loader kept the markdown as
+# the definition and awk-carved the slices back out at run time; that held the
+# single-copy property but shipped helpers that could not be syntax-checked or
+# read as code, and re-read a 7,000-line markdown file on every fence. They are
+# code, so they live in a file that is code. This loader still carves (#471, see
+# below) -- but out of a real shell file that shellcheck and `bash -n` can read,
+# and only for the names the calling shell is actually missing.
+
+# review_fleet_fence_library_path -> the library, named once.
+#
+# A function rather than a constant so this loader, the guard below and
+# tests/review-pr.test.sh all read the same bytes instead of three string
+# literals that can drift apart.
+review_fleet_fence_library_path() {
+  printf '%s/lib/review-fences.sh' "$UBERDEV_REVIEW_PLUGIN_ROOT"
+}
+
+# review_fleet_load_fence_library -- define commands/review-pr.md's helpers here.
+#
+# rc 0 with every cross-fence helper defined in THIS shell, or rc 2 with a
+# message on stderr. Called from review_fleet_rehydrate, so every fence that
+# carries the prologue gains the functions with no call-site edit.
+review_fleet_load_fence_library() {
+  [ "$#" -eq 0 ] || {
+    echo "error: review_fleet_load_fence_library takes no arguments" >&2
+    return 2
+  }
+  local library_file defined_names wanted fence_fn slice
+  library_file="$(review_fleet_fence_library_path)"
+  # A plugin root with no commands/ directory at all is a SYNTHETIC root: the
+  # behavioural harnesses build one that holds a shim lib/ and nothing else,
+  # purely to exercise identity handling. Those callers never reach a fence
+  # helper, so loading nothing is correct for them. A root that HAS commands/ but
+  # is missing the library is a broken install and gets rc 2 -- the distinction
+  # keeps the fail-soft arm from swallowing the real defect it would otherwise
+  # look identical to.
+  if [ ! -d "$UBERDEV_REVIEW_PLUGIN_ROOT/commands" ] && [ ! -r "$library_file" ]; then
+    return 0
+  fi
+  [ -r "$library_file" ] || {
+    echo "error: review-pr fence library is unreadable: $library_file" >&2
+    return 2
+  }
+  # GAP-FILLING, the same doctrine review_fleet_rehydrate applies to scalars: a
+  # definition this process already holds is the caller talking, and it wins.
+  #
+  # This is not defensive politeness, it is required. The behavioural harnesses
+  # install their own `review_refresh_phase1_scope`, `review_child_single` and
+  # friends before entering a fence, precisely so the fence exercises a
+  # controlled stub instead of reaching for git and gh. A loader that sourced
+  # over them would silently re-point those tests at the real implementation --
+  # which is exactly what happened on the first cut here: two suites started
+  # running `git merge-base --is-ancestor` against fixture SHAs that do not
+  # exist and failed with `MUTATED_BLOCKED`.
+  #
+  # HOW that gap-filling is done is #471. The previous cut sourced the library
+  # OVER the caller and then put the caller's definitions back, by capturing
+  # `typeset -f` output and `eval`ing it -- on the stated premise that typeset -f
+  # "prints it back in re-evaluable form, in zsh and in bash 3.2 alike".
+  #
+  # That premise is FALSE, in both directions and non-monotonically. `typeset -f`
+  # reconstructs a function from the shell's parse tree rather than echoing the
+  # bytes it was defined from, and every bash reflows heredocs differently. Two
+  # helpers in THIS library are re-emitted unparseably, on disjoint shells:
+  #
+  #   bash 3.2.57 (stock macOS)  review_fixer_child_bound -- `cmd <<'PY' || {`
+  #     comes back with the `|| {` on its own line AFTER the PY terminator, i.e.
+  #     a list operator with no left operand: "syntax error near `||'".
+  #   bash 5.0-5.2 (ubuntu-latest, the CI runner)  review_child_fanout -- the
+  #     `if cmd <<'PY' ... PY then :` shape comes back as `if cmd <<'PY'; then`
+  #     with the then-body hoisted ABOVE the heredoc body, so it is swallowed as
+  #     heredoc text and the then-clause is left empty: "syntax error near `else'".
+  #
+  # bash 4.x, bash 5.3 and zsh 5.9 happen to re-emit both cleanly, which is
+  # exactly why this shipped: the two shells the comment named are the two the
+  # bug does not reach on the same helper. There is no version predicate to
+  # test and no "safe heredoc" rule to enforce -- 4.x and 5.3 accept both shapes,
+  # so a lint for them would be un-writable on the shells that pass. The defect
+  # is not the two helpers; it is that a lossy serializer sits on the restore
+  # path at all.
+  #
+  # So do not clobber, and there is nothing to restore. `typeset -f` is used
+  # ONLY as a predicate ("is this a shell function"), which is sound everywhere
+  # and is already how review_fleet_define_audit probes below; the names the
+  # caller does not already hold are carved out of the library's OWN BYTES and
+  # eval'd. Original source bytes re-parse by construction -- that is the one
+  # property typeset -f output lacks.
+  #
+  # Read the names off the LIBRARY FILE, never off a hardcoded roster: a helper
+  # added there but forgotten here would be silently un-loadable, which is
+  # the same completeness-guard-disjoint-from-the-drift trap as #371.
+  #
+  # `^[[:space:]]*`, not `^`: tests/review-pr.test.sh R47.4 builds its roster
+  # with the same leading-space-tolerant pattern, and a stricter one here would
+  # let an indented definition be a helper R47.4 polices but this loader cannot
+  # carve -- two readers of one roster that can disagree. The awk below keys off
+  # the same tolerance and closes each block on a `}` at the DEFINITION's own
+  # indent, so the two readers stay in agreement by construction.
+  defined_names="$(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)()[[:space:]]*{.*$/\1/p' "$library_file")"
+  # Non-emptiness is a real assertion, not a formality: sourcing an empty file
+  # succeeds, so without this a truncated or renamed library would leave every
+  # helper undefined and this function would still report success -- the same
+  # silent-empty shape #427 was.
+  [ -n "$defined_names" ] || {
+    echo "error: review-pr fence library defines no helpers: $library_file" >&2
+    return 2
+  }
+  wanted=''
+  # Herestring, never `printf | while read`: a pipeline puts the loop body in a
+  # SUBSHELL under bash, so every name appended to `wanted` would be discarded
+  # at the end of the pipe.
+  #
+  # `typeset -f` as a PREDICATE only -- its rc is trustworthy on every shell,
+  # its stdout is not (see #471 above). A name the caller already holds is
+  # simply never carved, so it is never overwritten and never needs restoring.
+  while IFS= read -r fence_fn; do
+    [ -n "$fence_fn" ] || continue
+    typeset -f "$fence_fn" >/dev/null 2>&1 && continue
+    wanted="$wanted $fence_fn"
+  done <<<"$defined_names"
+  # ENVIRON, not `-v`: BSD awk (stock macOS) applies backslash-escape processing
+  # to a `-v` value and hard-errors on a newline inside one ("awk: newline in
+  # string"). Reading the list out of the environment sidesteps both. Space
+  # separated is safe -- a shell function name cannot contain a space.
+  #
+  # The carve rule is the file's own convention and is not new machinery:
+  # tests/review-pr.test.sh:31 (`review_fence_fn`) and
+  # tests/review-child-inputs.test.sh:120 (`library_definition`) already slice
+  # this same library the same way. Loss-free because review-fences.sh holds no
+  # top-level executable statements -- policed by R47.8 so it stays that way.
+  slice="$(UBERDEV_REVIEW_FENCE_WANTED="$wanted" awk '
+    BEGIN {
+      n = split(ENVIRON["UBERDEV_REVIEW_FENCE_WANTED"], names, " ")
+      for (i = 1; i <= n; i++) if (names[i] != "") want[names[i]] = 1
+    }
+    active { print; if ($0 == closer) active = 0; next }
+    /^[ \t]*[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{[ \t]*$/ {
+      indent = $0; sub(/[^ \t].*$/, "", indent)
+      name = $0; sub(/^[ \t]*/, "", name); sub(/\(\)[ \t]*\{.*$/, "", name)
+      if (name in want) { closer = indent "}"; active = 1; print }
+    }
+  ' "$library_file")" || {
+    echo "error: review-pr fence library could not carve its load slice: $library_file" >&2
+    return 2
+  }
+  # `eval`, not a temp file: the bytes are already in hand, and a scratch file
+  # here would need a TMPDIR that is writable in every fence and would have to
+  # be cleaned on all four return paths -- R47.6 pins the run directory to
+  # exactly three entries, so the cheapest scratch file is the one never made.
+  # Unlike the typeset -f output this replaces, these bytes parsed once already.
+  [ -z "$slice" ] || eval "$slice" || {
+    echo "error: review-pr fence library failed to load from $library_file" >&2
+    return 2
+  }
+  # POSTCONDITION, not paranoia. Everything above is a gap-filling contract, and
+  # a carve that silently dropped a helper would look exactly like a successful
+  # load until a fence called the missing name and got command-not-found 40
+  # fences later. Assert the property the caller actually depends on -- every
+  # helper the library declares is callable in THIS shell, whoever defined it --
+  # so a roster/carve disagreement fails here, loudly, naming the helper.
+  while IFS= read -r fence_fn; do
+    [ -n "$fence_fn" ] || continue
+    typeset -f "$fence_fn" >/dev/null 2>&1 || {
+      echo "error: review-pr fence library left $fence_fn undefined: $library_file" >&2
+      return 2
+    }
+  done <<<"$defined_names"
+  # uberdev_child_inputs_build / uberdev_child_instance_id live in
+  # lib/child-dispatch.sh, which ONLY the setup fence sourced. Phase 2.5's
+  # findings-to-issues dispatch calls both and sourced neither. The file carries
+  # its own `_UBERDEV_CHILD_DISPATCH_LOADED` guard, so this is idempotent.
+  . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || {
+    echo "error: review-pr fence library could not load lib/child-dispatch.sh" >&2
+    return 2
+  }
+  review_fleet_define_audit
+}
+
+# review_fleet_define_audit -- give the `audit` call sites a real implementation.
+#
+# `audit <event> [key=value ...]` is called 65 times across commands/review-pr.md
+# and was defined NOWHERE in the shipped plugin -- only the test harnesses ever
+# stubbed it. In a real fence the bare word resolved to /usr/sbin/audit on macOS
+# (rc 255, "Usage: audit -e | -i | ...") and to command-not-found on the Linux CI
+# runners (rc 127). All 65 rows were lost, and because thirteen of the calls sit
+# in TAIL position their status became the enclosing block's: two fences END with
+# an `audit` call, so a fully successful path still exited non-zero.
+#
+# `command -v audit` is NOT the availability probe here -- it finds
+# /usr/sbin/audit and would conclude the helper already exists. `typeset -f` asks
+# the only question that matters, "is this a shell function", and answers it the
+# same way in zsh and in bash 3.2.
+#
+# GAP-FILLING, exactly like review_fleet_rehydrate: a harness that installed its
+# own `audit` stub before sourcing a fence slice keeps it. Rows are fail-soft by
+# contract (review_fleet_audit_append's own comment: a missing audit row must not
+# fail a review that otherwise passed), so this always returns 0 -- which is also
+# what makes the thirteen tail-position call sites safe.
+review_fleet_define_audit() {
+  typeset -f audit >/dev/null 2>&1 && return 0
+  audit() {
+    local event="${1:-}" run_root row
+    [ -n "$event" ] || return 0
+    shift 2>/dev/null || true
+    run_root="${WORKTREE_ROOT:-}"
+    [ -n "$run_root" ] || return 0
+    row="$(python3 -I -B - "$event" "$@" <<'PY' 2>/dev/null
+import json, sys
+event = sys.argv[1]
+row = {"event": event}
+for pair in sys.argv[2:]:
+    key, sep, value = pair.partition("=")
+    if not sep:
+        continue
+    # `data.outcome=halted` and `outcome=halted` are both live spellings at the
+    # call sites; flatten the prefix so one event never lands under two keys.
+    if key.startswith("data."):
+        key = key[len("data."):]
+    row[key] = value
+print(json.dumps(row, sort_keys=True, separators=(",", ":")), end="")
+PY
+)" || return 0
+    [ -n "$row" ] || return 0
+    review_fleet_audit_append "$run_root" "$row"
+    return 0
+  }
+  return 0
+}
+
 # review_fleet_rehydrate -- bind every run-invariant carrier in THIS shell.
 #
 # rc 0 with the carriers bound and exported, or rc 2 with a message on stderr
@@ -1649,6 +2369,11 @@ review_fleet_rehydrate() {
     echo "error: review-pr fence resolved a plugin root with no code fixer contract: $CODE_FIXER_CONTRACT" >&2
     return 2
   }
+  # Above the carrier fast path, not below it. The fast path returns as soon as
+  # every scalar is already bound -- which is exactly the state a fence that
+  # exported its carriers to a child is in -- and a loader placed after it would
+  # be skipped in precisely the runs that still need the functions.
+  review_fleet_load_fence_library || return 2
   # STANDALONE_SNAPSHOT_PATH is deliberately absent from this list: it belongs to
   # /simplify, and for a /review-pr run the descriptor's own value is the empty
   # string. Requiring it would make every complete run look incomplete.
@@ -1663,6 +2388,7 @@ review_fleet_rehydrate() {
     # PR identity is a run invariant too, and the marker it comes off is inside
     # the run directory MARKER_DIR already names.
     _review_fleet_bind_pr "$MARKER_DIR"
+    _review_fleet_bind_repo_slug "${RESEARCH_DIR_ABS:-}"
     # Same export set as the resolved path below, minus the two names that are
     # legitimately absent for a /review-pr run: exporting an unset variable would
     # hand children an empty-but-present value they cannot distinguish from a
@@ -1674,6 +2400,7 @@ review_fleet_rehydrate() {
     [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
     [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
     [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
+    [ -z "${REVIEW_REPO_SLUG:-}" ] || export REVIEW_REPO_SLUG
     return 0
   fi
   toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=''
@@ -1845,6 +2572,31 @@ REVIEW_FLEET_REHYDRATE_EOF
   UBERDEV_COMMAND_WORKSPACE_JSON="${UBERDEV_COMMAND_WORKSPACE_JSON:-$_review_fleet_descriptor}"
   MARKER_DIR="${MARKER_DIR:-$resolved_run_dir}"
   _review_fleet_bind_pr "$resolved_run_dir"
+  _review_fleet_bind_repo_slug "$resolved_research_dir"
+  _review_fleet_bind_carrier_backend "$_review_fleet_descriptor"
+  # The reviewed head, READ BACK -- see review_fleet_write_reviewed_head for why
+  # this one is never recomputed. Gap-filling like every other binder here: a
+  # value already established in THIS process wins, so the fence that advances
+  # the head is not overwritten by the record it is about to update.
+  if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] && [ -n "$resolved_research_dir" ] \
+     && [ -r "$resolved_research_dir/reviewed-head.txt" ]; then
+    VALIDATED_FIXER_HEAD_SHA="$(review_fleet_read_reviewed_head \
+      "$resolved_research_dir/reviewed-head.txt" 2>/dev/null)" || VALIDATED_FIXER_HEAD_SHA=
+    REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
+  fi
+  # The child timeout, re-derived rather than carried.
+  #
+  # The setup fence writes `REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"` and
+  # five LATER fences pass it to review_fixer_child_bound / review_child_fanout
+  # / review_child_wait_all without establishing it. In those fences it expanded
+  # empty and the timeout argument went to the dispatcher blank.
+  #
+  # Re-derivation is exact here, not a default standing in for lost state: the
+  # expression is the setup fence's own, so an operator override in the
+  # environment still wins and 600 is reached only when nobody set one. That is
+  # the whole difference between this and the Phase 2.5 counters, which are
+  # measurements of a run and can only be read back, never recomputed.
+  REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"
   unset _review_fleet_diff _review_fleet_criteria _review_fleet_range _review_fleet_snapshot \
     _review_fleet_phase1 _review_fleet_phase2 _review_fleet_agg _review_fleet_carrier_dir \
     _review_fleet_repo _review_fleet_research _review_fleet_descriptor 2>/dev/null || true
@@ -1863,7 +2615,12 @@ REVIEW_FLEET_REHYDRATE_EOF
   export RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON
   export DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH
   export PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH
+  export REVIEW_PR_TIMEOUT
+  [ -z "${UBERDEV_CARRIER_BACKEND:-}" ] || export UBERDEV_CARRIER_BACKEND
+  [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] || export VALIDATED_FIXER_HEAD_SHA
+  [ -z "${REVIEWED_HEAD_SHA:-}" ] || export REVIEWED_HEAD_SHA
   [ -z "${UBERDEV_CARRIER_RUN_DIR:-}" ] || export UBERDEV_CARRIER_RUN_DIR
   [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
   [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
+  [ -z "${REVIEW_REPO_SLUG:-}" ] || export REVIEW_REPO_SLUG
 }

@@ -12,6 +12,103 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
+# The caller half of the fleet: the rehydration entry point, the fence-library
+# loader, and the typed run-dir carriers the fences read each other through.
+REVIEW_FLEET_ARGS="$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+# The cross-fence helpers themselves. They used to be defined inside markdown
+# fence bodies and carved back out here by six near-identical awk one-liners;
+# they now ship as code, so the carve-out is one recipe against one file.
+REVIEW_FENCES="$REPO_ROOT/plugins/uberdev/lib/review-fences.sh"
+
+# review_fence_fn NAME -> that helper's definition, on stdout.
+#
+# The terminator is `^\}$`, anchored at column 0, NOT `^[[:space:]]*\}`: the
+# helpers nest `if`/`case` blocks whose closers are indented, and the loose
+# pattern silently truncated `review_publish_same_repo_pr_head` at its first
+# inner brace -- an extractor that returns half a function makes every assertion
+# built on it vacuous rather than red. Exactly one column-0 `}` exists per
+# helper, which is what makes the tight anchor total.
+review_fence_fn() {
+  awk -v name="$1" '
+    $0 == name "() {" { active = 1 }
+    active            { print }
+    active && $0 == "}" { exit }
+  ' "$REVIEW_FENCES"
+}
+
+# review_reserved_run_fixture DIR [ROOT_SUFFIX] -> a repo at DIR/repository
+# holding one real reservation, with the setup fence's stderr at DIR/setup.stderr.
+#
+# Runs the WHOLE `uberdev-executable setup=review-pr` fence, not a carved slice,
+# because the two things callers need from it -- the carry line and the reserved
+# run directory -- are both produced after the point every existing slice stops.
+# Defined once: two rows need it, and a second copy of a fixture recipe drifts
+# exactly as fast as a second copy of anything else.
+#
+# ROOT_SUFFIX (default empty) is appended to the physical repo path before it is
+# exported as $WORKTREE_ROOT, so a row can hand the fence a DIFFERENT SPELLING of
+# the same directory. #471: that is the whole shape of the blocker -- the fence
+# never assigns WORKTREE_ROOT, it forwards whatever the caller inherited, and the
+# helper used to demand byte equality against its own resolved spelling.
+review_reserved_run_fixture() {
+  local base="$1" root_suffix="${2:-}" repo
+  mkdir -p "$base/repository"
+  # PHYSICAL path -- the SPELLING this fixture asserts is the ordinary one, not a
+  # workaround. Until #471 it WAS a workaround: uberdev_command_workspace_prepare
+  # byte-compared its presets against the resolved git toplevel, so on macOS,
+  # where $TMPDIR sits under the /var -> /private/var symlink, the logical
+  # spelling failed `preset_mismatch` on a perfectly good tree. That refusal is
+  # gone (command-workspace.py:same_validated_path), and R33.13 below locks the
+  # non-canonical spelling; this one stays physical so the run-id and receipt
+  # assertions compare against a single deterministic path.
+  repo="$(cd "$base/repository" && pwd -P)" || return 2
+  git -C "$repo" init -q || return 2
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name Test
+  printf 'fixture\n' >"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" commit -qm init || return 2
+  awk -v marker="uberdev-executable setup=review-pr" '
+    index($0, marker) { active = 1; next }
+    active && /^```[[:space:]]*$/ { exit }
+    active { print }
+  ' "$REVIEW_PR" >"$base/setup.sh"
+  [ -s "$base/setup.sh" ] || return 2
+  ( cd "$repo" && \
+    CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    WORKTREE_ROOT="$repo$root_suffix" PR_NUMBER=73 \
+    bash -c '. "$1"' _ "$base/setup.sh" ) >/dev/null 2>"$base/setup.stderr"
+}
+
+# review_reserved_run_reason BASE -> why the reservation produced no run dir.
+#
+# The fixture captures the setup fence's stderr and then nothing ever printed
+# it, so a row that depends on a reservation could only report "no reserved run
+# directory to inspect" -- true, useless, and identical whether the cause was a
+# missing python3, a platform rename semantic, or a real product regression.
+# Three rows failed exactly that way on the Windows job while passing on macOS,
+# and the log gave no way to tell which. A failure that cannot name its cause
+# costs a full CI cycle to diagnose; this makes the next one self-diagnosing.
+#
+# Three states, three messages. `[ -s ]` alone collapsed "the file is not there"
+# into "the fence exited before any diagnostic", which ASSERTS something the row
+# never observed: an absent setup.stderr means the fixture bailed before it ever
+# ran the fence (git init, or the awk carve coming back empty), and the fence is
+# not the thing to go looking at. #471 -- a diagnostic that misattributes is
+# worse than none, because it sends the next reader to the wrong file.
+review_reserved_run_reason() {
+  local base="${1:-}" tail_out=''
+  [ -n "$base" ] || { printf 'no fixture base'; return 0; }
+  if [ ! -e "$base/setup.stderr" ]; then
+    printf 'fixture never ran the setup fence (no %s/setup.stderr)' "$base"
+  elif [ -s "$base/setup.stderr" ]; then
+    # Last line only: the fence's own refusal, not the whole trace.
+    tail_out="$(tail -n 3 "$base/setup.stderr" | tr '\n' ' ' | tr -s ' ')"
+    printf 'setup fence stderr: %s' "${tail_out}"
+  else
+    printf 'setup fence wrote no stderr (exit before any diagnostic)'
+  fi
+}
 AGENTS_DIR="$REPO_ROOT/plugins/uberdev/agents"
 # Phase 1 reviewer files — code-simplifier moved to Phase 2 (named lens
 # dispatcher per #73), so AGENT_FILES drops it. The simplify.md no-quoting
@@ -186,7 +283,7 @@ assert_grep "$REVIEW_PR" 'review_pr\.fix\.phase2.*findings_sha256.*commit_range_
   "Phase 2 fixer callsite declares both immutable source digests"
 assert_no_grep "$REVIEW_PR" 'phase=phase[12] commit_type_prefix=' \
   "fixer callsites carry no prompt-only phase/type claim"
-assert_grep "$REVIEW_PR" 'rev-list --count.*before.*after|rev-list --count.*FIXER' \
+assert_grep "$REVIEW_FENCES" 'rev-list --count.*before.*after|rev-list --count.*FIXER' \
   "fixer controller requires exactly one APPLIED commit"
 
 echo
@@ -422,13 +519,12 @@ assert_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   'commit-message-digest|ANCHOR_MESSAGE_SHA256' \
   "R9.2d — anchor subject, body, and trailer are authenticated after hooks"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'rev-list --parents -n 1.*anchor_sha|rev-list.*--parents.*-n.*1.*anchor_sha' \
   "R9.2e — anchor validator requires the complete one-parent commit shape"
 
 ANCHOR_GATE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_validate_trust_anchor\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$ANCHOR_GATE_FIXTURE"
+review_fence_fn review_validate_trust_anchor >"$ANCHOR_GATE_FIXTURE"
 ANCHOR_PARENT="$(printf 'a%.0s' {1..40})"
 ANCHOR_COMMIT="$(printf 'b%.0s' {1..40})"
 ANCHOR_MESSAGE_SHA256="$(printf 'd%.0s' {1..64})"
@@ -550,13 +646,13 @@ assert_grep "$REVIEW_PR" \
 # pin is a zsh `:r` parameter modifier — the fences run under /bin/zsh, so the
 # refspec silently became `<sha>efs/heads/<branch>` and every anchor push died
 # with "src refspec ... does not match any".
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   '"\$\{publish_sha\}:refs/heads/\$\{live_branch\}"' \
   "R9.12b — push refspec uses immutable anchor SHA and explicit validated PR branch (brace-safe under zsh)"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'ls-remote.*refs/heads/\$live_branch|review_assert_selected_pr_head.*anchor_sha' \
   "R9.12c — remote branch and live/local PR head are authenticated after push"
-assert_grep "$REVIEW_PR" \
+assert_grep "$REVIEW_FENCES" \
   'isCrossRepository.*headRepository|headRepository.*isCrossRepository' \
   "R9.12d — same-repository head identity is authenticated before publication"
 assert_grep "$REVIEW_PR" \
@@ -566,13 +662,9 @@ assert_grep "$REVIEW_PR" \
 # R9.13 — execute the production push gate with adversarial local movement
 # immediately after anchor validation and during the push hook window.
 ANCHOR_PUSH_FIXTURE="$(mktemp)"
-# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
-# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
-# since #429, and `^[[:space:]]*\}` would truncate the function there — an
-# extractor that silently returns half a function makes every assertion below
-# it vacuous rather than red.
-awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
-  "$REVIEW_PR" >"$ANCHOR_PUSH_FIXTURE"
+# The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
+# the column-0 terminator review_fence_fn uses is load-bearing here.
+review_fence_fn review_publish_same_repo_pr_head >"$ANCHOR_PUSH_FIXTURE"
 ANCHOR_PUSH_LOG="$(mktemp)"
 ANCHOR_GH_STATE="$(mktemp)"
 if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
@@ -704,13 +796,9 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "  SKIP  R9.17 (#429) — jq not on PATH (covered on ubuntu + macOS; the defect is a gh field name, not a platform behaviour)" >&2
 else
 REAL_GH_FIXTURE="$(mktemp)"
-# Bound on a COLUMN-0 `}` (after the 3-space de-indent above), not on any
-# indented one: the gate body legitimately contains `  } <<<"$live_identity"`
-# since #429, and `^[[:space:]]*\}` would truncate the function there — an
-# extractor that silently returns half a function makes every assertion below
-# it vacuous rather than red.
-awk '/^[[:space:]]*review_publish_same_repo_pr_head\(\) \{/{active=1} active{sub(/^   /,""); print} active && /^\}/{exit}' \
-  "$REVIEW_PR" >"$REAL_GH_FIXTURE"
+# The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
+# the column-0 terminator review_fence_fn uses is load-bearing here.
+review_fence_fn review_publish_same_repo_pr_head >"$REAL_GH_FIXTURE"
 REAL_GH_PUSH_LOG="$(mktemp)"
 REAL_GH_STATE="$(mktemp)"
 if [ -s "$REAL_GH_FIXTURE" ] && \
@@ -870,9 +958,18 @@ assert_no_grep "$REVIEW_PR" \
 assert_grep "$REVIEW_PR" \
   'if ! gh label create --force "\$TRUST_LABEL" --color "\$TRUST_LABEL_COLOR"' \
   "R9.16 (#170) — trust label provisioned fail-loud via gh label create --force before --add-label"
+# The triple moved into lib/review-fleet-args.sh. It had to: it was SELECTED in
+# one fence and CONSUMED in the next, which is a different process, so all three
+# names arrived empty and `gh label create --force "" --color ""` failed while
+# blaming the operator's gh permissions. Both fences now derive it from
+# review_fleet_trust_label, so the colour is asserted where it now lives -- in
+# the single implementation, not in one of the two former copies.
+assert_grep "$REVIEW_FLEET_ARGS" \
+  'uberdev-approved 0E8A16' \
+  "R9.16b (#170) — per-tier trust label colour lives in review_fleet_trust_label (GREEN=0E8A16)"
 assert_grep "$REVIEW_PR" \
-  'TRUST_LABEL_COLOR="0E8A16"' \
-  "R9.16b (#170) — per-tier TRUST_LABEL_COLOR set in the TRUST_LABEL case (GREEN=0E8A16)"
+  'review_fleet_trust_label "\$TRUST_TRAIL_STATE"' \
+  "R9.16c — the label-selection fence derives the triple from the shared implementation"
 
 echo
 echo "== R10 (#73/#302): Sequential argument honored — fanout_cap Skill input + stderr notice =="
@@ -1342,7 +1439,7 @@ assert_no_grep "$REVIEW_PR" 'wraps simplify-final\.md under' \
 
 echo
 echo "== R27: hostile PR diff delimiters cannot escape the trust envelope =="
-if python3 -I -B - "$REVIEW_PR" <<'PY'
+if python3 -I -B - "$REVIEW_FENCES" <<'PY'
 import ast,pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 escape_match=re.search(r'^def escape_untrusted_diff_payload\(payload\):\n(?:    .*\n)+',source,re.M)
@@ -1370,7 +1467,7 @@ fi
 
 echo
 echo "== R27.1: post-escape expansion falls back below the child artifact ceiling =="
-if python3 -I -B - "$REVIEW_PR" <<'PY'
+if python3 -I -B - "$REVIEW_FENCES" <<'PY'
 import ast,pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 limit_match=re.search(r'^MAX_WRAPPED_DIFF_BYTES=(\d+)\*1024\*1024$',source,re.M)
@@ -1413,8 +1510,7 @@ done
 echo
 echo "== R28: selected PR head is bound before dispatch and trust =="
 HEAD_GATE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_assert_selected_pr_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$HEAD_GATE_FIXTURE"
+review_fence_fn review_assert_selected_pr_head >"$HEAD_GATE_FIXTURE"
 HEAD_GATE_LOG="$(mktemp)"
 EXPECTED_HEAD="$(printf 'a%.0s' {1..40})"
 REMOTE_OTHER="$(printf 'b%.0s' {1..40})"
@@ -1483,8 +1579,7 @@ rm -f "$PHASE25_FIXTURE"
 echo
 echo "== R30: validated fixer heads become the reviewed trust target only after publication =="
 FIXER_HEAD_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_track_validated_fixer_head\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$FIXER_HEAD_FIXTURE"
+review_fence_fn review_track_validated_fixer_head >"$FIXER_HEAD_FIXTURE"
 FIXER_HEAD_LOG="$(mktemp)"
 PRE_FIX_HEAD="$(printf 'd%.0s' {1..40})"
 PHASE1_FIX_HEAD="$(printf 'e%.0s' {1..40})"
@@ -1540,8 +1635,7 @@ fi
 grep -qF 'validate-residue' "$FIXER_HEAD_FIXTURE" || FIXER_CHAIN_OK=0
 
 FIXER_PROMOTE_FIXTURE="$(mktemp)"
-awk '/^[[:space:]]*review_promote_validated_fixer_outcome\(\) \{/{active=1} active{print} active && /^[[:space:]]*\}/{exit}' \
-  "$REVIEW_PR" >"$FIXER_PROMOTE_FIXTURE"
+review_fence_fn review_promote_validated_fixer_outcome >"$FIXER_PROMOTE_FIXTURE"
 FIXER_PROMOTE_LOG="$(mktemp)"
 VALID_OUTCOME="$(printf '{"applied_content_sha256":"%s","commit":{},"declared_tip":"%s","disposition_sha256":"%s","receipt_sha256":"%s","result_sha256":"%s","status":"APPLIED","status_sha256":"%s"}' \
   "$(printf 'a%.0s' {1..64})" "$PHASE1_FIX_HEAD" "$(printf 'b%.0s' {1..64})" \
@@ -1568,7 +1662,7 @@ fi
 
 FIXER_FAILURE_GUARD_FIXTURE="$(mktemp)"
 awk '/# BEGIN review-failed-return-guard-v1/{active=1;next} /# END review-failed-return-guard-v1/{exit} active{print}' \
-  "$REVIEW_PR" >"$FIXER_FAILURE_GUARD_FIXTURE"
+  "$REVIEW_FENCES" >"$FIXER_FAILURE_GUARD_FIXTURE"
 FIXER_FAILURE_REPO="$(mktemp -d)"
 git -C "$FIXER_FAILURE_REPO" init -q
 git -C "$FIXER_FAILURE_REPO" config user.email fixture@example.invalid
@@ -1605,7 +1699,16 @@ grep -qF 'review_promote_validated_fixer_outcome "$PHASE2_FIXER_OUTCOME" "$FIXER
   || FIXER_CHAIN_OK=0
 
 PROMOTION_REGION="$(awk '/^[[:space:]]*6a\. \*\*Post-fixer push/{active=1} active{print} /^[[:space:]]*6b\. \*\*Phase 2\.5/{exit}' "$REVIEW_PR")"
-grep -qF 'if [ "$POST_FIXER_HEAD_SHA" != "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then' <<<"$PROMOTION_REGION" \
+# ABSENT is refused BEFORE the inequality, and the inequality no longer carries
+# a `:-` default. The old shape compared against `${VALIDATED_FIXER_HEAD_SHA:-}`,
+# so a run with no record on file took the "changed" branch -- any real HEAD
+# differs from the empty string -- and reported a head that moved outside the
+# fixers at a run whose head had not moved at all. Both rows are pinned: drop
+# the emptiness guard and the first fails, reintroduce the `:-` default and the
+# second fails.
+grep -qF 'if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then' <<<"$PROMOTION_REGION" \
+  || FIXER_CHAIN_OK=0
+grep -qF 'if [ "$POST_FIXER_HEAD_SHA" != "$VALIDATED_FIXER_HEAD_SHA" ]; then' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
 grep -qF 'review_publish_same_repo_pr_head "$REVIEW_REPO_SLUG" "$PR_NUMBER" "$REVIEWED_HEAD_SHA" "$POST_FIXER_HEAD_SHA" "$WORKTREE_ROOT" "$CODE_FIXER_CONTRACT" "$RESEARCH_DIR_ABS"' <<<"$PROMOTION_REGION" \
   || FIXER_CHAIN_OK=0
@@ -1796,7 +1899,7 @@ if [ -s "$R33_TMP/setup-reservation.sh" ]; then
       . "$1"
       [ "$(trap -p EXIT)" = "$caller_trap_before" ] || exit 81
       printf "%s\n%s\n" "$REVIEW_RUN_RESERVATION_RECEIPT" "$MARKER_DIR" >"$R33_STATE"
-    ' _ "$R33_TMP/setup-reservation.sh" || R33_SETUP_RC=$?
+    ' _ "$R33_TMP/setup-reservation.sh" 2>"$R33_TMP/setup.stderr" || R33_SETUP_RC=$?
 else
   R33_SETUP_RC=99
 fi
@@ -1868,6 +1971,286 @@ assert_grep "$REVIEW_PR" \
 assert_no_grep_nonempty "$R33_TMP/setup-reservation.sh" \
   'trap[[:space:]].*EXIT' \
   "R33.8 — review setup installs no review-owned EXIT trap"
+
+# ---------------------------------------------------------------------------
+# R33.9-R33.12 — the receipt actually reaches the fence that redeems it.
+#
+# R33.4-R33.6 above prove the two-process handoff WORKS, but they hand-feed
+# REVIEW_RUN_RESERVATION_RECEIPT and UBERDEV_REVIEW_PLUGIN_ROOT on the command
+# line. That made the handoff's real defect structurally invisible: nothing
+# published the receipt anywhere, so in a live run the terminal fence received
+# the empty string and died with `review_reservation_receipt_invalid` after the
+# entire reviewer fleet had been spent. A test that supplies the missing carrier
+# itself cannot detect a missing carrier.
+#
+# These four rows close that gap from the other side: the receipt must be
+# PUBLISHED on the carry channel, the contract must SAY to carry it, no fence may
+# read it without carrying or refusing it, and its absence must produce a
+# diagnosis that names the recovery.
+# ---------------------------------------------------------------------------
+
+# R33.9 — behavioural: the real setup fence prints the receipt on the carry line.
+#
+# The WHOLE setup fence, not the R33.4 reservation slice: that slice is carved
+# from `RUN_ID_WAS_EXPLICIT=0` to `uberdev_command_workspace_prepare` and stops
+# short of the carry line, so it can say nothing about what gets published.
+# Reading the receipt off captured STDERR rather than off the source text is the
+# point of the row -- a `printf` edited to interpolate an unbound name still
+# prints a well-formed-looking line, and only running it catches that.
+R33_FULL_TMP="$R33_TMP/full-setup"
+mkdir -p "$R33_FULL_TMP"
+review_reserved_run_fixture "$R33_FULL_TMP" || true
+R33_CARRY_LINE="$(sed -n 's/^REVIEW_CARRY //p' "$R33_FULL_TMP/setup.stderr" 2>/dev/null | head -1)"
+R33_CARRIED_RECEIPT="$(printf '%s' "$R33_CARRY_LINE" | sed -n 's/.*REVIEW_RUN_RESERVATION_RECEIPT=\([^ ]*\).*/\1/p')"
+R33_CARRIED_RUN_ID="$(printf '%s' "$R33_CARRY_LINE" | sed -n 's/.*RUN_ID=\([^ ]*\).*/\1/p')"
+# The receipt must be a real `v1:` capability token and the run id must be the
+# reserved run's own, so an empty or literal-placeholder publication fails here.
+case "$R33_CARRIED_RECEIPT" in
+  v1:?*) R33_RECEIPT_SHAPE_OK=1 ;;
+  *) R33_RECEIPT_SHAPE_OK=0 ;;
+esac
+case "$R33_CARRIED_RUN_ID" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*) R33_RUN_ID_SHAPE_OK=1 ;;
+  *) R33_RUN_ID_SHAPE_OK=0 ;;
+esac
+if [ -n "$R33_CARRY_LINE" ] \
+   && [ "$R33_RUN_ID_SHAPE_OK" -eq 1 ] \
+   && [ "$R33_RECEIPT_SHAPE_OK" -eq 1 ]; then
+  echo "  PASS  R33.9 — the setup fence publishes the reservation receipt on the REVIEW_CARRY line"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R33.9 — the setup carry line does not carry a usable receipt beside the run id"
+  echo "        carry line: ${R33_CARRY_LINE:-<none>}"
+  # An EMPTY carry line means the fence never reserved, not that it published a
+  # bad one. Those are different bugs and the row must say which it saw.
+  # $R33_FULL_TMP, not $R33_TMP: the fixture above ran in the full-setup SUBDIR,
+  # and $R33_TMP/setup.stderr belongs to the unrelated R33.4 reservation SLICE,
+  # which is awk-carved to stop BEFORE uberdev_command_workspace_prepare and so
+  # passes even when the full fence dies there. Reading it made this row report
+  # "setup fence wrote no stderr" -- 0-byte slice log -- for a full fence that
+  # had in fact printed `preset_mismatch`, and that misattribution cost a Windows
+  # CI cycle (#471).
+  [ -n "$R33_CARRY_LINE" ] || echo "        no carry line at all — $(review_reserved_run_reason "$R33_FULL_TMP")"
+  FAIL=$((FAIL + 1))
+fi
+
+# R33.13 — the fence must survive a caller whose $WORKTREE_ROOT is a DIFFERENT
+# SPELLING of the repository it is standing in.
+#
+# review-pr.md forwards `${WORKTREE_ROOT:-}` verbatim; it never canonicalises it,
+# and neither do simplify.md or post-impl-review/SKILL.md. So the spelling the
+# helper receives is whatever the invoking session happened to export. Before
+# #471, validate_presets demanded byte equality against its own resolved
+# spelling, so an equivalent-but-differently-spelled root killed the setup fence
+# with `preset_mismatch` before it allocated anything -- and the SAME pair of
+# values had already been ACCEPTED one call earlier by validate_requested_root,
+# which normalises. Two comparators, one invariant, opposite verdicts (#370
+# class). The row hands the fence `$repo/.` and demands a reservation anyway.
+#
+# Trailing `/.` is the POSIX spelling of the divergence. It is deliberately NOT
+# the Windows one: portable_canonical refuses a lexically non-normal path
+# outright, so on Git Bash `$repo/.` would be rejected by validate_requested_root
+# for an unrelated and correct reason. The native-Windows divergence is
+# separator spelling (`git rev-parse --show-toplevel` emits `C:/...`,
+# os.path.abspath returns `C:\...`) and the baseline fixture already carries it,
+# which is exactly why R33.9/R47.5/R47.6 were the rows that went red on the
+# Windows job; the path algebra itself is unit-locked in
+# tests/command-workspace.test.sh. So this row SKIPs on a native Windows shell
+# rather than asserting a spelling that arm is right to refuse.
+R33_SPELL_HOST="$(uname -s 2>/dev/null || echo unknown)"
+case "$R33_SPELL_HOST" in
+  MINGW* | MSYS* | CYGWIN*)
+    echo "  SKIP  R33.13 — non-canonical \$WORKTREE_ROOT spelling (POSIX-only spelling; Windows arm covered by the baseline fixture)"
+    ;;
+  *)
+    R33_SPELL_TMP="$R33_TMP/spelled-setup"
+    mkdir -p "$R33_SPELL_TMP"
+    review_reserved_run_fixture "$R33_SPELL_TMP" '/.' || true
+    R33_SPELL_CARRY="$(sed -n 's/^REVIEW_CARRY //p' "$R33_SPELL_TMP/setup.stderr" 2>/dev/null | head -1)"
+    R33_SPELL_RUN_ID="$(printf '%s' "$R33_SPELL_CARRY" | sed -n 's/.*RUN_ID=\([^ ]*\).*/\1/p')"
+    R33_SPELL_REPO="$(cd "$R33_SPELL_TMP/repository" 2>/dev/null && pwd -P)" || R33_SPELL_REPO=''
+    # Reserved for real, not merely "did not crash": the run directory the fence
+    # claims on the carry line has to exist under the repository.
+    if [ -n "$R33_SPELL_RUN_ID" ] \
+       && [ -n "$R33_SPELL_REPO" ] \
+       && [ -d "$R33_SPELL_REPO/.uberdev/runs/$R33_SPELL_RUN_ID" ]; then
+      echo "  PASS  R33.13 — a non-canonical \$WORKTREE_ROOT spelling still reserves a run"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  R33.13 — a non-canonical but equivalent \$WORKTREE_ROOT spelling kills the setup fence"
+      echo "        carry line: ${R33_SPELL_CARRY:-<none>} — $(review_reserved_run_reason "$R33_SPELL_TMP")"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+esac
+
+# R33.14 — the reason helper must not misreport, and every caller must read the
+# base its own fixture wrote to.
+#
+# Two separate defects fixed in #471 live here. (1) `[ -s ]` alone answered
+# "fence exited before any diagnostic" for a setup.stderr that does not exist,
+# which is a claim about a fence that never ran. (2) The R33.9 call site read
+# $R33_TMP while its fixture wrote $R33_FULL_TMP -- a base MISMATCH no unit test
+# of the helper could ever catch, so the second half of this row is a structural
+# guard: every `review_reserved_run_reason "$X"` argument must be a variable some
+# `review_reserved_run_fixture "$X"` call also names.
+R33_REASON_TMP="$R33_TMP/reason-probe"
+mkdir -p "$R33_REASON_TMP"
+R33_REASON_ABSENT="$(review_reserved_run_reason "$R33_REASON_TMP")"
+: >"$R33_REASON_TMP/setup.stderr"
+R33_REASON_EMPTY="$(review_reserved_run_reason "$R33_REASON_TMP")"
+printf 'uberdev command workspace: preset_mismatch:WORKTREE_ROOT\n' >"$R33_REASON_TMP/setup.stderr"
+R33_REASON_FULL="$(review_reserved_run_reason "$R33_REASON_TMP")"
+# Argument variables, deduped, from every call site that is not the definition
+# and not this guard's own grep.
+R33_REASON_BASES="$(grep -o 'review_reserved_run_reason "\$[A-Za-z_][A-Za-z0-9_]*"' "$0" \
+  | sed 's/.*"\$\([A-Za-z0-9_]*\)"/\1/' | sort -u)"
+R33_FIXTURE_BASES="$(grep -o 'review_reserved_run_fixture "\$[A-Za-z_][A-Za-z0-9_]*"' "$0" \
+  | sed 's/.*"\$\([A-Za-z0-9_]*\)"/\1/' | sort -u)"
+R33_REASON_UNPAIRED=''
+# `while read` over a HERESTRING, not `for base in $SCALAR` piped into grep -q.
+# Two live classes in one line otherwise: `for … in $SCALAR` does not word-split
+# under zsh (SH_WORD_SPLIT is off), and `printf | grep -q` pipes into an
+# early-exiting reader, which is precisely what tests/epipe-guard.test.sh (#313)
+# reds a pipefail-setting file for.
+while IFS= read -r R33_REASON_BASE; do
+  [ -n "$R33_REASON_BASE" ] || continue
+  # The three probe calls just above are the one documented exemption: their
+  # base is synthetic ON PURPOSE, so the helper's absent/empty/populated states
+  # can be exercised without paying for a fence run.
+  [ "$R33_REASON_BASE" != R33_REASON_TMP ] || continue
+  grep -qx "$R33_REASON_BASE" <<<"$R33_FIXTURE_BASES" \
+    || R33_REASON_UNPAIRED="$R33_REASON_UNPAIRED $R33_REASON_BASE"
+done <<<"$R33_REASON_BASES"
+if [ -n "$R33_REASON_BASES" ] \
+   && [ -z "$R33_REASON_UNPAIRED" ] \
+   && [ "${R33_REASON_ABSENT#*never ran}" != "$R33_REASON_ABSENT" ] \
+   && [ "${R33_REASON_EMPTY#*before any diagnostic}" != "$R33_REASON_EMPTY" ] \
+   && [ "${R33_REASON_FULL#*preset_mismatch:WORKTREE_ROOT}" != "$R33_REASON_FULL" ]; then
+  echo "  PASS  R33.14 — the reservation-failure reason names the state it saw, and every caller reads its own fixture's base"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R33.14 — the reservation-failure reason misreports, or a caller reads a base no fixture wrote"
+  echo "        absent: $R33_REASON_ABSENT"
+  echo "        empty:  $R33_REASON_EMPTY"
+  echo "        full:   $R33_REASON_FULL"
+  [ -z "$R33_REASON_UNPAIRED" ] || echo "        unpaired reason bases:$R33_REASON_UNPAIRED"
+  FAIL=$((FAIL + 1))
+fi
+
+# R33.10 — the prose contract IS the instruction the orchestrator follows. If it
+# does not name both values, they do not get carried, however correct the fence
+# is. Anchored on the imperative, not on the sample line, so re-wording the
+# example alone cannot satisfy it.
+# Scoped to the contract SECTION, not the whole file. A plain file-wide grep
+# passed with the section fully reverted, because the terminal fence's own
+# recovery note quotes the same two phrases -- the guard was reading the error
+# message it prints when the contract is DISOBEYED as proof the contract exists.
+R33_CONTRACT="$(python3 -I -B - "$REVIEW_PR" <<'PY'
+import sys
+
+HEADING = "### Carrying the run across fences"
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+start = next((i for i, line in enumerate(lines) if line.startswith(HEADING)), None)
+if start is None:
+    print("section=0")
+    raise SystemExit(0)
+end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("### ") or lines[i].startswith("## ")), len(lines))
+section = "\n".join(lines[start:end])
+print("section=1")
+print("sample=%d" % ("REVIEW_CARRY RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt>" in section))
+print("both=%d" % ("Bash call with BOTH" in section))
+print("prefix=%d" % ("RUN_ID=<run id> REVIEW_RUN_RESERVATION_RECEIPT=<receipt> …" in section))
+PY
+)" || R33_CONTRACT=''
+r33c_field() { printf '%s\n' "$R33_CONTRACT" | sed -n "s/^$1=//p"; }
+if [ "$(r33c_field section)" = 1 ] \
+   && [ "$(r33c_field sample)" = 1 ] \
+   && [ "$(r33c_field both)" = 1 ] \
+   && [ "$(r33c_field prefix)" = 1 ]; then
+  echo "  PASS  R33.10 — the carry contract section names BOTH values as the thing to prefix"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R33.10 — the carry contract section does not instruct the orchestrator to carry the receipt"
+  echo "        report: $(printf '%s' "$R33_CONTRACT" | tr '\n' ' ')"
+  FAIL=$((FAIL + 1))
+fi
+
+# R33.11 — structural: every fence that READS the receipt must either bind it
+# (the setup fence, which mints it) or refuse when it is empty (the terminal
+# fence). A third reader that just interpolates it is the #427 shape returning.
+R33_RECEIPT_READERS="$(python3 -I -B - "$REVIEW_PR" <<'PY'
+import re
+import sys
+
+NAME = "REVIEW_RUN_RESERVATION_RECEIPT"
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+readers = 0
+guarded = 0
+index = 0
+while index < len(lines):
+    match = re.match(r"^([ \t]*)```bash(.*)$", lines[index])
+    if not match:
+        index += 1
+        continue
+    indent = match.group(1)
+    close = index + 1
+    while close < len(lines) and not re.match(r"^" + re.escape(indent) + r"```\s*$", lines[close]):
+        close += 1
+    text = "\n".join(lines[index + 1:close])
+    if re.search(r"\$\{?" + NAME + r"\b", text):
+        readers += 1
+        binds = re.search(r"(^|[;&|\s(])" + NAME + r"=", text, re.M) is not None
+        # The refusal arm: an explicit empty-value case that exits, naming the
+        # carry line as the recovery.
+        refuses = "REVIEW_CARRY" in text and re.search(r"received no reservation receipt", text) is not None
+        if binds or refuses:
+            guarded += 1
+    index = close + 1
+print("readers=%d" % readers)
+print("guarded=%d" % guarded)
+PY
+)" || R33_RECEIPT_READERS=''
+R33_RR_READ="$(printf '%s\n' "$R33_RECEIPT_READERS" | sed -n 's/^readers=//p')"
+R33_RR_GUARD="$(printf '%s\n' "$R33_RECEIPT_READERS" | sed -n 's/^guarded=//p')"
+if [ -n "$R33_RECEIPT_READERS" ] && [ "${R33_RR_READ:-0}" -gt 0 ] 2>/dev/null \
+   && [ "$R33_RR_READ" = "$R33_RR_GUARD" ]; then
+  echo "  PASS  R33.11 — every fence reading the receipt either mints it or refuses when it is absent ($R33_RR_READ/$R33_RR_GUARD)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R33.11 — a fence reads the reservation receipt without carrying or refusing it"
+  echo "        report: $(printf '%s' "$R33_RECEIPT_READERS" | tr '\n' ' ')"
+  FAIL=$((FAIL + 1))
+fi
+
+# R33.12 — behavioural: the absent-receipt path must diagnose ITSELF. Runs the
+# real terminal fence against the real reserved run with the receipt withheld --
+# exactly what a RUN_ID-only orchestrator produced -- and requires rc 2, a
+# message naming the carry line, and the ABSENCE of the generic
+# `review_reservation_receipt_invalid`, which describes a corrupt token rather
+# than a missing one and sends an operator hunting for the wrong fault.
+if [ "${R33_SETUP_RC:-99}" -eq 0 ] && [ -s "$R33_TMP/final-verdict.sh" ]; then
+  R33_NORECEIPT_OUT="$R33_TMP/no-receipt.stderr"
+  R33_NORECEIPT_RC=0
+  env -u REVIEW_RUN_RESERVATION_RECEIPT \
+      AUDIT_JSON_PAYLOAD='{"pr":73}' \
+      UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+      bash "$R33_TMP/final-verdict.sh" >/dev/null 2>"$R33_NORECEIPT_OUT" || R33_NORECEIPT_RC=$?
+  if [ "$R33_NORECEIPT_RC" -eq 2 ] \
+     && grep -q 'received no reservation receipt' "$R33_NORECEIPT_OUT" \
+     && grep -q 'REVIEW_CARRY' "$R33_NORECEIPT_OUT" \
+     && ! grep -q 'review_reservation_receipt_invalid' "$R33_NORECEIPT_OUT"; then
+    echo "  PASS  R33.12 — an absent receipt is diagnosed specifically and names the carry line as the recovery"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R33.12 — an absent receipt does not produce the specific carry-line diagnosis (rc=$R33_NORECEIPT_RC)"
+    echo "        stderr: $(tr '\n' ' ' <"$R33_NORECEIPT_OUT" 2>/dev/null)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  R33.12 — the absent-receipt path could not be exercised"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== R34: review ignore policy is tri-state, exact, and no-clobber =="
@@ -2889,27 +3272,69 @@ import sys
 CARRIERS = ("UBERDEV_REVIEW_PLUGIN_ROOT", "WORKTREE_ROOT", "RESEARCH_DIR_ABS", "RUN_ID",
             "MARKER_DIR", "DIFF_ARTIFACT_PATH", "CRITERIA_PATH", "COMMIT_RANGE_PATH",
             "STANDALONE_SNAPSHOT_PATH", "PHASE1_DISPOSITION_PATH", "PHASE2_DISPOSITION_PATH",
-            "AGG_PATH", "CODE_FIXER_CONTRACT", "UBERDEV_COMMAND_WORKSPACE_JSON")
+            "AGG_PATH", "CODE_FIXER_CONTRACT", "UBERDEV_COMMAND_WORKSPACE_JSON",
+            # The trust-trail scalars. Every one of these was minted in one fence
+            # and read in another with nothing carrying it, and the tuple omitted
+            # them, so R45 reported GREEN over a trust trail that could not be
+            # emitted at all. They now travel through trust-state.tsv.
+            "TRUST_TRAIL_STATE", "TRAILER_SUFFIX", "TRUST_LABEL", "TRUST_LABEL_COLOR",
+            "TRUST_LABEL_DESC")
 
 # Keyed on a code token inside the fence. One reason per entry, and R41.0 fails
 # if any entry stops matching a real fence.
+#
+# THE ALLOWLIST USED TO EXEMPT FENCES THAT EXECUTE. Four entries named a
+# function-definition token and called the fence a "library fence, sourced by
+# tests" — but `review_resolve_phase1_base() {` and `review_validate_trust_anchor() {`
+# sat in fences that went on to RUN, and exempting them is what hid the Step 3
+# scope recompute and the trust-trail anchor being prologue-less. Both fences
+# died on empty carriers in every real run while this guard reported PASS.
+#
+# The fix is structural, not another entry: function DEFINITIONS are stripped
+# below, so a fence is judged on the statements it EXECUTES. A fence that is
+# nothing but definitions has no executable carrier read left and drops out on
+# its own; a fence that executes must carry the prologue, with no exemption
+# available.
 ALLOWLIST = (
     # The setup fence IS the binder: it reserves the run and writes the
     # descriptor and pointer every other fence rehydrates from.
     ("setup=review-pr", "the binder"),
-    # Function-definition/library fences. Their bodies are extracted and SOURCED
-    # by the behavioural harnesses; a prologue at the top would run at
-    # definition time, in whatever shell sourced them.
-    ("review_child_record() {", "library fence, sourced by tests"),
-    ("review_resolve_phase1_base() {", "library fence, sourced by tests"),
-    ("review_capture_ci_classification_head() {", "library fence, sourced by tests"),
-    ("review_validate_trust_anchor() {", "library fence, sourced by tests"),
-    # The terminal verdict fence is already correctly self-contained: it carries
-    # the reservation receipt and nothing else, runs from a cwd that need not be
-    # a repository, and R33.4-R33.6 prove that two-process handoff. Adding the
-    # prologue would make it demand a git toplevel it does not have.
-    ("# BEGIN review-verdict-final-fence-v1", "receipt-carried, proven by R33.4-R33.6"),
 )
+
+DEFINITION = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]*$")
+
+
+def strip_lib_regions(body):
+    """Blank out function definitions, PRESERVING line offsets.
+
+    Blanked rather than deleted so `first_read` stays comparable with the
+    prologue offsets computed over the same list. A carrier read inside a
+    function BODY happens at CALL time, in whatever shell calls it -- it is not
+    one of this fence's own executable statements, and requiring the prologue
+    above it would force the prologue above the definitions.
+
+    Keyed on the definition's own indentation, NOT on a marker comment: the
+    twenty cross-fence helpers moved to lib/review-fences.sh and took the
+    `# BEGIN review-fence-lib-v1` markers with them, and a marker-keyed stripper
+    that matches nothing degrades this row to the weaker text scan it replaced
+    while still reporting PASS. The half-dozen same-fence helpers that remain
+    (review_json_member, review_ci_push_abort, ...) are what it now finds.
+    """
+    out = []
+    closer = None
+    for line in body:
+        if closer is not None:
+            out.append("")
+            if line == closer:
+                closer = None
+            continue
+        found = DEFINITION.match(line)
+        if found is not None:
+            closer = found.group(1) + "}"
+            out.append("")
+            continue
+        out.append(line)
+    return out
 
 PROLOGUE_SOURCE = 'lib/review-fleet-args.sh" || return 2'
 PROLOGUE_CALL = "review_fleet_rehydrate || return 2"
@@ -2933,8 +3358,12 @@ examined = 0
 reads_found = 0
 matched = set()
 offenders = []
-for line_no, info, body in fences:
+lib_regions = 0
+for line_no, info, raw_body in fences:
     examined += 1
+    lib_regions += sum(1 for line in raw_body if DEFINITION.match(line))
+    # Judge the fence on what it EXECUTES.
+    body = strip_lib_regions(raw_body)
     text = "\n".join(body)
     reads = set()
     for name in CARRIERS:
@@ -2985,21 +3414,27 @@ print("reads=%d" % reads_found)
 print("allowlist=%d" % len(ALLOWLIST))
 print("matched=%d" % len(matched))
 print("stale=%s" % ",".join(stale))
+print("libregions=%d" % lib_regions)
 print("offenders=%s" % ";".join(offenders))
 PY
 )" || R45_REPORT=''
 
 r45_field() { printf '%s\n' "$R45_REPORT" | sed -n "s/^$1=//p"; }
 
+# `libregions` joins the non-vacuity conjuncts: the scan BLANKS every function
+# definition before judging a fence, and a stripper that matched nothing would
+# silently turn R45.1 back into the weaker text scan it used to be while still
+# reporting PASS.
 if [ -n "$R45_REPORT" ] \
    && [ "$(r45_field examined)" -gt 0 ] 2>/dev/null \
    && [ "$(r45_field reads)" -gt 0 ] 2>/dev/null \
+   && [ "$(r45_field libregions)" -gt 0 ] 2>/dev/null \
    && [ "$(r45_field matched)" = "$(r45_field allowlist)" ] \
    && [ -z "$(r45_field stale)" ]; then
-  echo "  PASS  R45.0 — the fence scan is non-vacuous and every allowlist entry still names a real fence"
+  echo "  PASS  R45.0 — the fence scan is non-vacuous, strips real definition regions, and carries no stale allowlist entry"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  R45.0 — the fence scan examined nothing, found no carrier reads, or carries a stale allowlist entry"
+  echo "  FAIL  R45.0 — the fence scan examined nothing, found no carrier reads or definition regions, or carries a stale allowlist entry"
   echo "        report: $(printf '%s' "$R45_REPORT" | tr '\n' ' ')"
   FAIL=$((FAIL + 1))
 fi
@@ -3019,8 +3454,58 @@ fi
 # the Phase 2.5 dispatch), so a zero count here is a real assertion and not a
 # moved anchor. The setup fence's own `${PLUGIN_ROOT:-…}` chain stays: it is the
 # one fence that has no prologue to inherit from.
-assert_no_grep "$REVIEW_PR" 'UBERDEV_REVIEW_PLUGIN_ROOT="\$\{UBERDEV_REVIEW_PLUGIN_ROOT:-' \
-  "R46.1 — no fence re-implements the plugin-root default chain the prologue owns"
+# R46.1 is fence-scoped, not a file grep. The rule is "a fence that HAS the
+# prologue must not also hand-roll the chain the prologue owns" -- the original
+# blanket refusal also outlawed it in the two fences that legitimately cannot
+# run the prologue. The setup fence has no run to rehydrate yet, and the terminal
+# verdict fence must work from a cwd that is not a git working tree (
+# review_fleet_rehydrate requires a toplevel). That second fence read a BARE
+# $UBERDEV_REVIEW_PLUGIN_ROOT -- a name nothing ever puts in the environment --
+# so it resolved '/lib/run_manifest.py' and died before it looked at the receipt.
+# Forbidding the fix everywhere is what left it with no correct option.
+R46_SELF_DEFAULT="$(python3 -I -B - "$REVIEW_PR" <<'PY'
+import re
+import sys
+
+CHAIN = 'UBERDEV_REVIEW_PLUGIN_ROOT="${UBERDEV_REVIEW_PLUGIN_ROOT:-'
+PROLOGUE_CALL = "review_fleet_rehydrate || "
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+offenders = []
+chain_seen = 0
+index = 0
+while index < len(lines):
+    match = re.match(r"^([ \t]*)```bash(.*)$", lines[index])
+    if not match:
+        index += 1
+        continue
+    indent = match.group(1)
+    close = index + 1
+    while close < len(lines) and not re.match(r"^" + re.escape(indent) + r"```\s*$", lines[close]):
+        close += 1
+    body = lines[index + 1:close]
+    text = "\n".join(body)
+    if CHAIN in text:
+        chain_seen += 1
+        if PROLOGUE_CALL in text:
+            offenders.append(str(index + 1))
+    index = close + 1
+print("chain=%d" % chain_seen)
+print("offenders=%s" % ",".join(offenders))
+PY
+)" || R46_SELF_DEFAULT=''
+# `chain` is the non-vacuity conjunct: the terminal verdict fence carries the
+# self-defaulting chain, so a scan that finds zero has stopped parsing fences.
+if [ -n "$R46_SELF_DEFAULT" ] \
+   && [ "$(printf '%s\n' "$R46_SELF_DEFAULT" | sed -n 's/^chain=//p')" -gt 0 ] 2>/dev/null \
+   && [ -z "$(printf '%s\n' "$R46_SELF_DEFAULT" | sed -n 's/^offenders=//p')" ]; then
+  echo "  PASS  R46.1 — no prologued fence re-implements the plugin-root default chain the prologue owns"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R46.1 — a fence runs the prologue AND hand-rolls the plugin-root chain, or the scan found nothing"
+  echo "        report: $(printf '%s' "$R46_SELF_DEFAULT" | tr '\n' ' ')"
+  FAIL=$((FAIL + 1))
+fi
 assert_no_grep "$REVIEW_PR" 'RESEARCH_DIR_ABS="\$[A-Za-z_]*/\.uberdev/research/\$RUN_ID"' \
   "R46.2 — no fence rebuilds the run research path by string concatenation"
 assert_grep "$REVIEW_PR" 'review_fleet_write_active_run_pointer "\$WORKTREE_ROOT"' \
@@ -3029,6 +3514,613 @@ assert_grep "$REVIEW_PR" "printf 'REVIEW_CARRY RUN_ID=%s" \
   "R46.4 — setup emits the RUN_ID carry line the orchestrator forwards"
 assert_grep "$REVIEW_PR" 'command-workspace\.json' \
   "R46.5 — setup persists the workspace descriptor rehydration reads its artifact paths from"
+
+echo
+echo "== R47: functions cross fences too — the fence library =="
+# R45/R46 guard the VARIABLE half of #427. This is the FUNCTION half, and it was
+# the larger one: fourteen `review_*` helpers were defined inside markdown fences
+# and called from OTHER fences, up to nine Workflow relays downstream, where a
+# shell function is exactly as absent as a shell variable. Three of those call
+# sites sat in front of a `||` arm written for a different failure, so the run
+# reported "PR head changed after review" and "HEAD changed outside the validated
+# review fixers" about a repository that had not moved.
+
+# R47.1 — behavioural: a clean shell that sources the lib and loads the fence
+# library ends up with every cross-fence helper defined. Runs under `env -i` with
+# only the plugin root, which is the only environment a real fence ever sees.
+R47_HELPERS="review_json_string review_child_record review_child_fanout review_child_wait_all
+review_child_result_path review_child_single review_guard_failed_fixer_return
+review_fixer_child_bound review_assert_selected_pr_head review_publish_same_repo_pr_head
+review_resolve_phase1_base review_refresh_phase1_scope review_track_validated_fixer_head
+review_promote_validated_fixer_outcome review_clear_ci_run_selection review_select_failed_ci_run
+review_capture_ci_classification_head review_ci_authority_digest review_ci_json_member
+review_validate_trust_anchor"
+R47_MISSING="$(env -i PATH="$PATH" HOME="$HOME" \
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  R47_HELPERS="$R47_HELPERS" \
+  bash -c '
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 9
+    review_fleet_load_fence_library || exit 9
+    for fn in $R47_HELPERS; do
+      typeset -f "$fn" >/dev/null 2>&1 || printf "%s " "$fn"
+    done
+  ' 2>/dev/null)" || R47_MISSING="LOAD_FAILED"
+R47_EXPECTED_COUNT="$(printf '%s' "$R47_HELPERS" | tr -s ' \n' '\n\n' | grep -c .)"
+if [ -z "$R47_MISSING" ] && [ "$R47_EXPECTED_COUNT" -ge 20 ]; then
+  echo "  PASS  R47.1 — the fence library defines all $R47_EXPECTED_COUNT cross-fence helpers in a fresh shell"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.1 — a cross-fence helper is not defined after loading the fence library"
+  echo "        missing: ${R47_MISSING:-<none>} (expected $R47_EXPECTED_COUNT helpers)"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.2 — structural: no fence may CALL a `review_*` helper that nothing IN ITS
+# OWN PROCESS defines. This is R45.1 for functions, and it is the row that would
+# have caught the original defect: the helpers existed, in the wrong process.
+#
+# AVAILABILITY IS PER FENCE, NOT GLOBAL. The first cut of this row built
+# `available = sourceable | library` once and reused it for every fence, which
+# made a helper that only a prologued fence can reach count as reachable from a
+# fence that loads nothing — it passed over two live command-not-found calls
+# (review_promote_validated_fixer_outcome / review_guard_failed_fixer_return,
+# in a three-line fence with no prologue) while reporting PASS. What a fence
+# actually holds is decided by two lines it either has or does not:
+#
+#   . …/lib/review-fleet-args.sh   -> that file's own helpers
+#   review_fleet_rehydrate         -> lib/review-fences.sh + the `audit` shim,
+#                                     because review_fleet_load_fence_library is
+#                                     reached only through rehydration
+R47_REPORT="$(python3 -I -B - "$REVIEW_PR" "$REPO_ROOT/plugins/uberdev" <<'PY'
+import glob
+import os
+import re
+import sys
+
+command_file, plugin_root = sys.argv[1:]
+DEF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+FENCE_LIBRARY = plugin_root + "/lib/review-fences.sh"
+
+lines = open(command_file, encoding="utf-8").read().split("\n")
+
+
+def definitions(path):
+    found = set()
+    for line in open(path, encoding="utf-8", errors="replace"):
+        match = DEF.match(line)
+        if match:
+            found.add(match.group(1))
+    return found
+
+
+# Everything the shipped libraries define, minus the fence library: sourcing
+# review-fleet-args.sh does NOT source review-fences.sh, only rehydrating does.
+sourceable = set()
+for path in glob.glob(plugin_root + "/lib/*.sh"):
+    if os.path.abspath(path) == os.path.abspath(FENCE_LIBRARY):
+        continue
+    sourceable |= definitions(path)
+
+# Everything rehydration publishes: the fence library, plus `audit`, which
+# review_fleet_load_fence_library installs and which is a shell function in no
+# file (on macOS the bare word otherwise resolves to /usr/sbin/audit).
+library = definitions(FENCE_LIBRARY) | {"audit"}
+
+fences = []
+index = 0
+while index < len(lines):
+    match = re.match(r"^([ \t]*)```bash(.*)$", lines[index])
+    if match:
+        indent = match.group(1)
+        close = index + 1
+        while close < len(lines) and not re.match(r"^" + re.escape(indent) + r"```\s*$", lines[close]):
+            close += 1
+        fences.append((index + 1, lines[index + 1:close]))
+        index = close + 1
+    else:
+        index += 1
+
+SOURCE_LINE = "lib/review-fleet-args.sh"
+REHYDRATE = "review_fleet_rehydrate"
+
+offenders = []
+calls_checked = 0
+for line_no, body in fences:
+    own = {DEF.match(l).group(1) for l in body if DEF.match(l)}
+    available = set(own)
+    if any(SOURCE_LINE in l and l.lstrip().startswith(". ") for l in body):
+        available |= sourceable
+    if any(l.strip().startswith(REHYDRATE) for l in body):
+        available |= library
+    for offset, line in enumerate(body):
+        if DEF.match(line):
+            continue
+        stripped = re.sub(r"#.*$", "", line)
+        # COMMAND POSITION only. A bare token match also caught the event NAMES
+        # passed to `audit` -- `audit review_base_uncarried data.reason=...` is
+        # one call plus an argument that happens to start with review_, not two
+        # calls -- so the row reported eight offenders that do not exist. Split
+        # the line on command separators and look only at each segment head.
+        for segment in re.split(
+            r"\|\||&&|\$\(|[;&|(){}`]|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|!",
+            stripped,
+        ):
+            # `(?![\w.])`, not `\b`: the REVIEW_EDGES array literal holds dotted
+            # edge identifiers (`review_pr.review.correctness`) whose first
+            # component is a valid `review_*` word, and `\b` treats the dot as a
+            # boundary. Those are data, not commands.
+            head = re.match(r"^\s*(review_[a-z0-9_]+|audit)(?![\w.])", segment)
+            if not head:
+                continue
+            name = head.group(1)
+            calls_checked += 1
+            if name in own or name in available:
+                continue
+            offenders.append("%d:%s" % (line_no + offset + 1, name))
+
+print("library=%d" % len(library))
+print("calls=%d" % calls_checked)
+print("offenders=%s" % ";".join(sorted(set(offenders))))
+PY
+)" || R47_REPORT=''
+r47_field() { printf '%s\n' "$R47_REPORT" | sed -n "s/^$1=//p"; }
+if [ -n "$R47_REPORT" ] \
+   && [ "$(r47_field library)" -gt 0 ] 2>/dev/null \
+   && [ "$(r47_field calls)" -gt 0 ] 2>/dev/null \
+   && [ -z "$(r47_field offenders)" ]; then
+  echo "  PASS  R47.2 — every review_* / audit call resolves to a definition its own shell holds ($(r47_field calls) calls, $(r47_field library) library helpers)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.2 — a fence calls a helper no shell in its own process defines"
+  echo "        report: $(printf '%s' "$R47_REPORT" | tr '\n' ' ')"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.3 — `audit` must be a SHELL FUNCTION. It is called 65 times and was defined
+# nowhere in the shipped plugin: on macOS the bare word resolved to /usr/sbin/audit
+# (rc 255) and on the Linux CI runners to command-not-found (rc 127), so all 65
+# rows were lost. Thirteen of the calls are in tail position, where that status
+# became the enclosing block's -- two fences END with an `audit` call, so a fully
+# successful path still exited non-zero.
+#
+# `command -v` is the WRONG probe here and asserting on it would re-admit the
+# bug: it finds /usr/sbin/audit. `typeset -f` asks "is this a shell function".
+R47_AUDIT="$(env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$HOME" \
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+  bash -c '
+    . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 9
+    review_fleet_load_fence_library || exit 9
+    typeset -f audit >/dev/null 2>&1 || { printf not-a-function; exit 0; }
+    WORKTREE_ROOT=""
+    audit ci_fix_pushed data.commit_sha=abc || { printf audit-returned-nonzero; exit 0; }
+    printf ok
+  ' 2>/dev/null)" || R47_AUDIT="probe-failed"
+if [ "$R47_AUDIT" = ok ]; then
+  echo "  PASS  R47.3 — audit is a shell function that returns 0, so tail-position calls cannot fail a green run"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.3 — audit does not resolve to a fail-soft shell function ($R47_AUDIT)"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.5 — the WIRING, not just the loader. R47.1 calls
+# review_fleet_load_fence_library by hand, so it stays green even if nothing
+# invokes it: deleting the call from review_fleet_rehydrate redded no row at all.
+# What a fence actually runs is the two prologue lines, and the second one is
+# `review_fleet_rehydrate`, so that is what this row runs -- against the real
+# reserved run R33.9 left behind, from a fresh shell with only the plugin root.
+R47_TMP="$(mktemp -d)"
+review_reserved_run_fixture "$R47_TMP" || true
+R47_REPO="$R47_TMP/repository"
+if [ -d "$R47_REPO/.uberdev/runs" ]; then
+  R47_VIA_REHYDRATE="$(cd "$R47_REPO" && env -i PATH="$PATH" HOME="$HOME" \
+    CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c '
+      . "$CLAUDE_PLUGIN_ROOT/lib/review-fleet-args.sh" || exit 9
+      review_fleet_rehydrate >/dev/null 2>&1 || exit 8
+      typeset -f review_refresh_phase1_scope >/dev/null 2>&1 || { printf helper-missing; exit 0; }
+      typeset -f audit >/dev/null 2>&1 || { printf audit-missing; exit 0; }
+      printf ok
+    ' 2>/dev/null)" || R47_VIA_REHYDRATE="rehydrate-failed"
+  if [ "$R47_VIA_REHYDRATE" = ok ]; then
+    echo "  PASS  R47.5 — review_fleet_rehydrate, the prologue call every fence makes, loads the fence library"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R47.5 — a fence that runs the prologue does not end up with the fence helpers ($R47_VIA_REHYDRATE)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  R47.5 — no reserved run fixture available to exercise the prologue ($(review_reserved_run_reason "$R47_TMP"))"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.6 — rehydration must leave the RUN directory alone.
+#
+# The reservation reaper (#344) refuses to reap any run directory holding an
+# entry outside {locked, pr-context.json, review-pr-verdict.json}, so ONE cache
+# file written next to the markers makes every abandoned reservation permanently
+# un-reapable and stalls /uberdev:goal on exactly the runs the reaper exists to
+# rescue. The repo-slug cache was written there in a first cut of this change.
+# Run-scoped carriers belong in the research dir, with trust-state.tsv and
+# review-base-identity.tsv; this row is what keeps the next one out.
+R47_RUN_DIR_TMP="$(mktemp -d)"
+review_reserved_run_fixture "$R47_RUN_DIR_TMP" || true
+R47_RUN_DIR_REPO="$R47_RUN_DIR_TMP/repository"
+R47_RUN_DIR="$(find "$R47_RUN_DIR_REPO/.uberdev/runs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+# A STUB gh, first on PATH. Without it this row is vacuous: the fixture repo has
+# no remote, so the real `gh repo view` fails, no slug is ever resolved, and
+# nothing is written anywhere -- the run directory stays clean for the wrong
+# reason and the row passes even with the cache pointed straight at it. The stub
+# also makes the row deterministic on runners that have no gh at all.
+R47_STUB_BIN="$R47_RUN_DIR_TMP/bin"
+mkdir -p "$R47_STUB_BIN"
+cat >"$R47_STUB_BIN/gh" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *nameWithOwner*) printf 'acme/fixture\n' ;;
+  *) printf '\n' ;;
+esac
+STUB
+chmod +x "$R47_STUB_BIN/gh"
+if [ -n "$R47_RUN_DIR" ]; then
+  ( cd "$R47_RUN_DIR_REPO" && env -i PATH="$R47_STUB_BIN:$PATH" HOME="$HOME" \
+    CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    bash -c '. "$CLAUDE_PLUGIN_ROOT/lib/review-fleet-args.sh" && review_fleet_rehydrate' ) >/dev/null 2>&1
+  R47_UNEXPECTED="$(ls -1 "$R47_RUN_DIR" 2>/dev/null \
+    | grep -vxE 'locked|pr-context\.json|review-pr-verdict\.json' | tr '\n' ' ')"
+  # The cache must actually have been WRITTEN somewhere, or this row proves only
+  # that a code path nobody took wrote nothing. Its correct home is the research
+  # dir, beside trust-state.tsv.
+  R47_SLUG_CACHE="$(find "$R47_RUN_DIR_REPO/.uberdev/research" -name repo-slug.txt 2>/dev/null | head -1)"
+  if [ -z "$R47_UNEXPECTED" ] && [ -s "$R47_SLUG_CACHE" ]; then
+    echo "  PASS  R47.6 — the repo-slug cache lands in the research dir, never in the run dir the reaper polices"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R47.6 — rehydration left un-reapable entries in the run directory, or never wrote the cache at all"
+    echo "        unexpected run-dir entries: ${R47_UNEXPECTED:-<none>}; research-dir cache: ${R47_SLUG_CACHE:-<none>}"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  R47.6 — no reserved run directory to inspect ($(review_reserved_run_reason "$R47_RUN_DIR_TMP"))"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$R47_RUN_DIR_TMP"
+rm -rf "$R47_TMP"
+
+# R47.4 — lib/review-fences.sh must be each helper's ONLY definition. A copy in
+# the markdown (or a second one under lib/) would satisfy R47.1 and R47.2 while
+# re-creating the #370 "one contract, N uncompared copies" class this move
+# exists to end. Both directions are checked from the library's own roster, so
+# adding a helper there extends the guard with no edit here — the completeness
+# trap in #371 was a guard whose subject list was written by hand.
+R47_COPIES="$(python3 -I -B - "$REVIEW_FENCES" "$REVIEW_PR" "$REPO_ROOT/plugins/uberdev" <<'PY'
+import glob
+import os
+import re
+import sys
+
+fence_library, command_file, plugin_root = sys.argv[1:]
+DEF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+
+roster = set()
+for line in open(fence_library, encoding="utf-8"):
+    match = DEF.match(line)
+    if match:
+        roster.add(match.group(1))
+
+offenders = []
+if not roster:
+    offenders.append("library-defines-nothing")
+
+for line_no, line in enumerate(open(command_file, encoding="utf-8"), 1):
+    match = DEF.match(line)
+    if match and match.group(1) in roster:
+        offenders.append("review-pr.md:%d:%s" % (line_no, match.group(1)))
+
+for path in glob.glob(plugin_root + "/lib/*.sh"):
+    if os.path.abspath(path) == os.path.abspath(fence_library):
+        continue
+    for line_no, line in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
+        match = DEF.match(line)
+        if match and match.group(1) in roster:
+            offenders.append("%s:%d:%s" % (os.path.basename(path), line_no, match.group(1)))
+
+print("roster=%d" % len(roster))
+print("offenders=%s" % " ".join(sorted(offenders)))
+PY
+)" || R47_COPIES=''
+R47_COPY_ROSTER="$(printf '%s\n' "$R47_COPIES" | sed -n 's/^roster=//p')"
+R47_COPY_OFFENDERS="$(printf '%s\n' "$R47_COPIES" | sed -n 's/^offenders=//p')"
+if [ -n "$R47_COPIES" ] && [ "${R47_COPY_ROSTER:-0}" -ge 20 ] 2>/dev/null \
+   && [ -z "$R47_COPY_OFFENDERS" ]; then
+  echo "  PASS  R47.4 — lib/review-fences.sh is the single definition of all $R47_COPY_ROSTER cross-fence helpers"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.4 — a fence helper has a second definition outside lib/review-fences.sh"
+  echo "        roster: ${R47_COPY_ROSTER:-<none>}; copies: ${R47_COPY_OFFENDERS:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.7 — behavioural: the loader must be RE-ENTRANT, and a caller-installed
+# helper must survive it. #471. review_fleet_load_fence_library runs from
+# review_fleet_rehydrate, i.e. the mandated prologue of 53 of the 60 bash fences
+# in review-pr.md, so "called twice in one process" is the normal case, not an
+# edge case. R47.1-R47.6 all call it exactly ONCE, which is precisely why a
+# loader that aborted on the second call shipped green.
+#
+# The first cut sourced the library over the caller and restored the caller's
+# definitions from `typeset -f` output. That output is a re-print of the shell's
+# PARSE TREE, not the bytes the function was defined from, and every bash
+# reflows heredocs its own way: bash 3.2 re-emits review_fixer_child_bound's
+# `cmd <<'PY' || {` with the `|| {` orphaned after the terminator, and bash
+# 5.0-5.2 re-emits review_child_fanout's `if cmd <<'PY' ... then` with the
+# then-body hoisted into the heredoc text. Both are syntax errors on eval.
+#
+# Run it on EVERY bash and zsh on the box, not just $SHELL: the two broken
+# re-emissions land on different helpers on different versions, and bash 4.x,
+# bash 5.3 and zsh 5.9 re-emit both cleanly. A single-interpreter row would pass
+# on a 5.3 laptop while ubuntu-latest (5.2) and stock macOS /bin/bash (3.2) --
+# the two interpreters CI and this repo's contributors actually use -- red.
+#
+# That also bounds what this row can promise: its detection RIDES on a bash
+# whose `typeset -f` mangles, so a runner-image bump to 5.3 would leave it
+# passing while asserting nothing about the defect. R47.9 below carries the
+# interpreter-independent half; this row is deliberately not the only guard.
+#
+# r47_real_interpreter PATH -> the same interpreter, named canonically.
+#
+# Dedupe on the RESOLVED path, not the spelling. On ubuntu-latest /bin is a
+# symlink to /usr/bin, so `command -v bash` (/usr/bin/bash) and /bin/bash are
+# ONE interpreter that a string-compare dedupe counts as two -- and that count
+# is printed in the PASS line, so an unresolved dedupe advertises coverage this
+# row does not have.
+r47_real_interpreter() {
+  local candidate="$1" resolved
+  resolved="$(readlink -f "$candidate" 2>/dev/null)" || resolved=''
+  # `readlink -f` exists on GNU coreutils, macOS 12+ and Git Bash; where it is
+  # absent or errors, resolve the DIRECTORY instead -- which is the /bin ->
+  # /usr/bin collision that actually occurs -- and keep the basename.
+  [ -n "$resolved" ] \
+    || resolved="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")"
+  printf '%s\n' "$resolved"
+}
+
+# NEWLINE-separated, consumed by `while IFS= read -r` off a herestring, never
+# `for sh in $SCALAR`: zsh does not word-split an unquoted scalar, so that loop
+# degenerates to ONE iteration over the whole string. This file runs under bash
+# today, but that trap already cost this repo a release once, and either half of
+# the pair -- an array-shaped comment over a word-splitting loop, or the reverse
+# -- is worse than picking one and meaning it. Same reason the herestring is not
+# a pipe: a pipeline puts the loop body in a subshell under bash and every
+# accumulator below would be discarded at the end of the pipe.
+R47_NL='
+'
+R47_RELOAD_SHELLS=''
+for R47_CANDIDATE in "$(command -v bash 2>/dev/null)" /bin/bash "$(command -v zsh 2>/dev/null)" /bin/zsh; do
+  [ -n "$R47_CANDIDATE" ] && [ -x "$R47_CANDIDATE" ] || continue
+  R47_CANDIDATE="$(r47_real_interpreter "$R47_CANDIDATE")"
+  [ -n "$R47_CANDIDATE" ] && [ -x "$R47_CANDIDATE" ] || continue
+  case "$R47_NL$R47_RELOAD_SHELLS" in *"$R47_NL$R47_CANDIDATE$R47_NL"*) continue ;; esac
+  R47_RELOAD_SHELLS="$R47_RELOAD_SHELLS$R47_CANDIDATE$R47_NL"
+done
+R47_RELOAD_BAD=''
+R47_RELOAD_RAN=0
+while IFS= read -r R47_SH; do
+  [ -n "$R47_SH" ] || continue
+  R47_RELOAD_RAN=$((R47_RELOAD_RAN + 1))
+  # 2>&1: the failure mode being locked out prints its diagnosis to stderr and
+  # THEN returns 2, so stderr is evidence, not noise.
+  R47_RELOAD_OUT="$(env -i PATH="$PATH" HOME="$HOME" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    "$R47_SH" -c '
+      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || { echo SOURCE_FAILED; exit 0; }
+      # Installed BEFORE the first load: this is the real harness pattern
+      # (tests/review-pr-workflow.test.sh and tests/review-child-inputs.test.sh
+      # both stub helpers above the fence that carries the prologue), and it is
+      # the case a plain load-once guard cannot serve.
+      review_refresh_phase1_scope() { echo PRE_STUB; }
+      review_fleet_load_fence_library || { echo "LOAD1_RC_$?"; exit 0; }
+      [ "$(review_refresh_phase1_scope)" = PRE_STUB ] || echo PRE_STUB_CLOBBERED_BY_LOAD1
+      # Installed BETWEEN loads: the gap-filling contract says the caller wins,
+      # not "the caller wins only until the next prologue".
+      review_child_single() { echo MID_STUB; }
+      review_fleet_load_fence_library || { echo "LOAD2_RC_$?"; exit 0; }
+      [ "$(review_refresh_phase1_scope)" = PRE_STUB ] || echo PRE_STUB_CLOBBERED_BY_LOAD2
+      [ "$(review_child_single)" = MID_STUB ] || echo MID_STUB_CLOBBERED_BY_LOAD2
+      review_fleet_load_fence_library || { echo "LOAD3_RC_$?"; exit 0; }
+      # The two helpers whose typeset -f round-trip is unparseable somewhere in
+      # the supported range must be defined, and must be the LIBRARY bodies --
+      # a carve that truncated one would still leave it "defined".
+      typeset -f review_child_fanout      >/dev/null 2>&1 || echo FANOUT_UNDEFINED
+      typeset -f review_fixer_child_bound >/dev/null 2>&1 || echo FIXER_BOUND_UNDEFINED
+      typeset -f audit                    >/dev/null 2>&1 || echo AUDIT_UNDEFINED
+      case "$(typeset -f review_child_fanout)"      in *uberdev_unwind_child*) : ;; *) echo FANOUT_TRUNCATED ;; esac
+      case "$(typeset -f review_fixer_child_bound)" in *REVIEW_FIXER_LAUNCH_BINDING*) : ;; *) echo FIXER_BOUND_TRUNCATED ;; esac
+      echo OK
+    ' 2>&1)"
+  [ "$R47_RELOAD_OUT" = "OK" ] || R47_RELOAD_BAD="$R47_RELOAD_BAD
+        $R47_SH: $(printf '%s' "$R47_RELOAD_OUT" | tr '\n' ';')"
+done <<<"$R47_RELOAD_SHELLS"
+if [ "$R47_RELOAD_RAN" -ge 1 ] && [ -z "$R47_RELOAD_BAD" ]; then
+  echo "  PASS  R47.7 — the fence library loader is re-entrant and preserves caller stubs on all $R47_RELOAD_RAN interpreter(s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.7 — reloading the fence library failed or clobbered a caller-installed helper"
+  echo "        interpreters tried: ${R47_RELOAD_RAN}${R47_RELOAD_BAD}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.8 — structural: lib/review-fences.sh must hold NOTHING outside a function
+# block. #471. The loader no longer sources the whole file; it carves out just
+# the helpers this shell is missing and evals those bytes. That carve is
+# loss-free ONLY while every executable line lives inside a `name() {` ... `}`
+# block, so a top-level statement added later would not fail, it would silently
+# stop running. This row makes that a test failure instead.
+#
+# It applies the loader's own carve rule (open on `name() {` at end of line,
+# close on a `}` at the DEFINITION's indent) so the two cannot drift, and thereby
+# also catches the shapes the carve cannot express: a one-line `f() { :; }`, and
+# a body containing a `}` at the definition's own indent, which would truncate
+# the function and spill the remainder as top-level code.
+R47_UNCARVED="$(python3 -I -B - "$REVIEW_FENCES" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+OPEN = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]*$")
+DEF = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{")
+
+carved, offenders, closer, name = set(), [], None, None
+for line_no, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    if closer is not None:
+        if line == closer:
+            carved.add(name)
+            closer = None
+        continue
+    match = OPEN.match(line)
+    if match:
+        closer, name = match.group(1) + "}", match.group(2)
+        continue
+    if line.strip() == "" or line.lstrip().startswith("#"):
+        continue
+    offenders.append("%d:%s" % (line_no, line.strip()[:60]))
+
+if closer is not None:
+    offenders.append("unterminated:%s" % name)
+# Every name the LOADER will look for must be one the carve can actually
+# produce -- the roster reader is deliberately more permissive than the carve.
+declared = {m.group(1) for m in (DEF.match(l) for l in open(path, encoding="utf-8")) if m}
+for missing in sorted(declared - carved):
+    offenders.append("uncarvable:%s" % missing)
+
+print("carved=%d" % len(carved))
+print("offenders=%s" % " ".join(offenders))
+PY
+)" || R47_UNCARVED=''
+R47_CARVED_COUNT="$(printf '%s\n' "$R47_UNCARVED" | sed -n 's/^carved=//p')"
+R47_CARVE_OFFENDERS="$(printf '%s\n' "$R47_UNCARVED" | sed -n 's/^offenders=//p')"
+if [ -n "$R47_UNCARVED" ] && [ "${R47_CARVED_COUNT:-0}" -ge 20 ] 2>/dev/null \
+   && [ -z "$R47_CARVE_OFFENDERS" ]; then
+  echo "  PASS  R47.8 — all $R47_CARVED_COUNT fence helpers are carvable and lib/review-fences.sh has no top-level code"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.8 — lib/review-fences.sh holds a line the loader's carve would drop"
+  echo "        carved: ${R47_CARVED_COUNT:-<none>}; offenders: ${R47_CARVE_OFFENDERS:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.9 — structural, and deliberately INTERPRETER-INDEPENDENT. #471.
+#
+# R47.7 can only see the defect on a bash whose `typeset -f` re-emits one of the
+# two helpers unparseably. bash 4.x, 5.3 and zsh 5.9 already round-trip both
+# cleanly, so the day ubuntu-latest ships bash 5.3 that row keeps printing PASS
+# with nothing left to catch: its oracle is a symptom, and the symptom is a
+# property of the runner image, not of this repo.
+#
+# So assert the INVARIANT instead. Inside review_fleet_load_fence_library,
+# `typeset -f` / `declare -f` may be used ONLY as a predicate: its exit status is
+# trustworthy on every shell, its stdout is not. Concretely -- its stdout is
+# never captured (no `$(...)`, no backticks) and always goes to /dev/null. What
+# is never captured can never be eval'd, on any shell, at any version.
+#
+# Read off the SOURCE BYTES of lib/review-fleet-args.sh, never off
+# `typeset -f review_fleet_load_fence_library` -- that is the very serializer
+# under indictment, and a row that used it to police itself would be assuming
+# the property it exists to prove.
+R47_PREDICATE="$(python3 -I -B - "$REVIEW_FLEET_ARGS" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+opener = re.search(r"^review_fleet_load_fence_library\(\)[ \t]*\{[ \t]*$", text, re.MULTILINE)
+if opener is None:
+    print("probes=0")
+    print("offenders=no-definition")
+    raise SystemExit(0)
+closer = re.search(r"^\}$", text[opener.end():], re.MULTILINE)
+if closer is None:
+    print("probes=0")
+    print("offenders=unterminated")
+    raise SystemExit(0)
+body = text[opener.end():opener.end() + closer.start()]
+
+probes, offenders = 0, []
+for match in re.finditer(r"(?:typeset|declare)[ \t]+-f\b", body):
+    line_start = body.rfind("\n", 0, match.start()) + 1
+    line_end = body.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(body)
+    line = body[line_start:line_end]
+    # The rationale comments in that function quote `typeset -f` repeatedly.
+    # Prose is not a call site.
+    if line.lstrip().startswith("#"):
+        continue
+    probes += 1
+    before, after = body[line_start:match.start()], body[match.end():line_end]
+    if "$(" in before or "`" in before:
+        offenders.append("captured:" + line.strip()[:60])
+    elif not re.search(r">[ \t]*/dev/null", after):
+        offenders.append("unredirected:" + line.strip()[:60])
+
+print("probes=%d" % probes)
+print("offenders=%s" % " ".join(offenders))
+PY
+)" || R47_PREDICATE=''
+R47_PREDICATE_PROBES="$(printf '%s\n' "$R47_PREDICATE" | sed -n 's/^probes=//p')"
+R47_PREDICATE_BAD="$(printf '%s\n' "$R47_PREDICATE" | sed -n 's/^offenders=//p')"
+# `>= 2` and not `>= 0`: the loader probes twice (the gap-filling loop and the
+# postcondition), and a refactor that removed both would otherwise satisfy "no
+# captured typeset -f" vacuously -- the same vacuous-green shape this row exists
+# to close in R47.7.
+if [ -n "$R47_PREDICATE" ] && [ "${R47_PREDICATE_PROBES:-0}" -ge 2 ] 2>/dev/null \
+   && [ -z "$R47_PREDICATE_BAD" ]; then
+  echo "  PASS  R47.9 — the loader uses typeset -f only as a predicate ($R47_PREDICATE_PROBES probes, none captured)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.9 — the fence-library loader captures typeset -f / declare -f output"
+  echo "        probes: ${R47_PREDICATE_PROBES:-<none>}; offenders: ${R47_PREDICATE_BAD:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.10 — behavioural: the loader's POSTCONDITION must actually fire, against
+# the file the loader itself reads. #471.
+#
+# The loader closes by asserting every helper the library DECLARES is callable
+# in this shell, so a roster/carve disagreement fails there, naming the helper,
+# instead of surfacing as a command-not-found forty fences downstream. R47.8
+# proves the shipped library has no such disagreement -- which is exactly why no
+# row above can ever enter that arm. Hand the loader a library it cannot carve
+# and demand the diagnosis.
+#
+# `f() { :; }` is the minimal disagreement: the roster reader is a leading-space
+# tolerant sed with `.*$` after the brace and sees `f`, while the carve opens
+# only on a `{` at END of line and sees nothing. commands/ must exist, or the
+# synthetic-root arm returns 0 without ever reading the library.
+R47_POST_TMP="$(mktemp -d)"
+mkdir -p "$R47_POST_TMP/root/commands" "$R47_POST_TMP/root/lib"
+printf 'f() { :; }\n' >"$R47_POST_TMP/root/lib/review-fences.sh"
+# stderr to a FILE, not `2>&1` into the capture: the diagnosis and the rc are two
+# separate assertions here, and interleaving them would make the row depend on
+# flush ordering between a builtin and a redirect.
+env -i PATH="$PATH" HOME="$HOME" \
+  UBERDEV_REVIEW_PLUGIN_ROOT="$R47_POST_TMP/root" \
+  R47_ARGS_LIB="$REVIEW_FLEET_ARGS" \
+  bash -c '. "$R47_ARGS_LIB" || exit 9; review_fleet_load_fence_library' \
+  >/dev/null 2>"$R47_POST_TMP/stderr.txt"
+R47_POST_RC=$?
+R47_POST_ERR="$(tr '\n' ';' <"$R47_POST_TMP/stderr.txt" 2>/dev/null)"
+rm -rf "$R47_POST_TMP"
+R47_POST_NAMED=''
+case "$R47_POST_ERR" in *"left f undefined"*) R47_POST_NAMED=yes ;; esac
+if [ "$R47_POST_RC" = 2 ] && [ "$R47_POST_NAMED" = yes ]; then
+  echo "  PASS  R47.10 — an uncarvable library fails the loader's postcondition, naming the helper"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.10 — the loader accepted a library whose declared helper it never defined"
+  echo "        rc: $R47_POST_RC; stderr: ${R47_POST_ERR:-<empty>}"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== R32: Step 6b.0 — the Phase 1 verification gate (#431) =="

@@ -92,7 +92,7 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 //  5. NO BRIEF RELAY. RFC §3.1 line 148 has a brief agent shell out to
 //     `gh pr diff` and write the enveloped brief. Not here: the controller
 //     already writes the enveloped diff artifact atomically in Bash
-//     (review_refresh_phase1_scope, commands/review-pr.md:1481-1571), so the
+//     (review_refresh_phase1_scope, lib/review-fences.sh), so the
 //     reviewers read THAT path. This deletes an agent and removes an LLM from
 //     the trust path — strictly better than the pseudocode.
 //

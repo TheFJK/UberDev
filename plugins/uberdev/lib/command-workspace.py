@@ -1310,11 +1310,86 @@ def allocate_workspace(
                 pass
 
 
-def validate_presets(presets: dict[str, Any], expected: dict[str, str], repo: str, workspace: str) -> None:
+# same_validated_path CANDIDATE RESOLVED MODE -> do both name one location?
+#
+# The ONE comparator for "a caller-supplied path scalar names the same place the
+# helper just resolved from the carrier". Both preset validation and requested-root
+# validation ask that question, and before #471 each answered it with its own
+# expression: validate_requested_root normalised (realpath / normcase), while
+# validate_presets used raw `!=`. One invariant, two spellings -- the #370
+# contract-drift class -- and they returned OPPOSITE verdicts on the same pair.
+#
+# The falsified premise was "a path scalar that survived the shell round trip is
+# byte-identical to the one Python resolved". It is not, on either arm:
+#   * portable_windows -- `repository_id` reaches us from `git rev-parse
+#     --show-toplevel` (lib/dispatch.sh), which Git for Windows spells with
+#     FORWARD slashes; portable_canonical then hands back os.path.abspath's
+#     BACKSLASH spelling. The inherited $WORKTREE_ROOT still carries the shell's
+#     forward-slash spelling. normcase() erases that difference (which is exactly
+#     why load_carrier's own git-toplevel check is normcase-based) but `!=` does
+#     not, so every native-Windows /review-pr, /simplify and post-impl-review
+#     setup fence died on preset_mismatch before allocating anything.
+#   * descriptor_relative -- `repo` is realpath'd, so any caller exporting a
+#     logical spelling ($TMPDIR under the macOS /var -> /private/var symlink,
+#     a trailing `/.`, a doubled `//`) hit the same refusal on a perfectly good
+#     tree. tests/review-pr.test.sh worked around it with `pwd -P` in its fixture
+#     rather than fixing it here.
+#
+# Routing both call sites through this one function is what makes the two
+# spellings unable to drift apart again. It is not a weakening: preset values
+# carry no authority -- lib/child-dispatch.sh rebinds all nine scalars from this
+# helper's own JSON the moment the helper returns -- so the check is a
+# disagreement detector, and it still runs BEFORE allocate_workspace.
+#
+# ABSOLUTENESS IS PART OF THE QUESTION, not a caller's private precondition.
+# The first edition of this function left `os.path.isabs` behind in
+# validate_requested_root, so the two sites still did not ask the same thing: on
+# the descriptor_relative arm a RELATIVE preset was realpath'd against the
+# PROCESS CWD, and `{"WORKTREE_ROOT": "."}` -- refused before #471 -- was
+# accepted whenever the helper happened to be spawned inside the repository.
+# Harmless in the shipped path (the value is discarded), but the answer depended
+# on state this helper neither controls nor validates, and "same place relative
+# to somewhere I did not check" is a WEAKER question, not the same one. A
+# relative spelling is therefore never "the same location" here.
+#
+# The residual difference between the two call sites is deliberate and is NOT
+# spelling: validate_requested_root additionally proves filesystem IDENTITY
+# (portable_directory + file_identity against the carrier's repo inode). This
+# function answers the spelling half only and touches no inode, which is why
+# presets -- values that carry no authority -- may use it alone.
+def same_validated_path(candidate: str, resolved: str, mode: str) -> bool:
+    if not os.path.isabs(candidate):
+        return False
+    if mode == "portable_windows":
+        return same_portable_path(candidate, resolved)
+    return os.path.realpath(candidate) == resolved
+
+
+# Values are `str` by contract, established by main()'s shape gate before the
+# first one reaches a path API. That is not a decorative annotation: this
+# function hands every value it is given to os.path, which raises TypeError on a
+# non-str and ValueError on an embedded NUL -- neither of which is a Failure, so
+# either would escape cli() as a traceback on rc 1 instead of a typed refusal.
+def validate_presets(
+    presets: dict[str, str],
+    expected: dict[str, str],
+    repo: str,
+    workspace: str,
+    mode: str,
+) -> None:
     mapping = {"WORKTREE_ROOT": repo, "RESEARCH_DIR_ABS": workspace, **expected}
     for key, value in presets.items():
-        if value and mapping.get(key) != value:
-            fail("preset_mismatch")
+        if not value:
+            continue
+        target = mapping.get(key)
+        # `target is None` keeps today's refusal of a preset key this caller does
+        # not declare -- an unknown name can never be "the same location".
+        if target is None or not same_validated_path(value, target, mode):
+            # Named, not anonymous. One word for nine scalars cost a full Windows
+            # CI cycle to attribute: the fence printed `preset_mismatch` and the
+            # log could not say WHICH inherited scalar disagreed. The key is one
+            # of nine fixed global names, never a path, so this leaks nothing.
+            fail(f"preset_mismatch:{key}")
 
 
 def validate_requested_root(
@@ -1323,19 +1398,27 @@ def validate_requested_root(
     repo_identity: tuple[int, int],
     mode: str,
 ) -> None:
+    # The SAME predicate same_validated_path applies, evaluated earlier so a
+    # relative spelling is refused before portable_directory lstats a CWD-relative
+    # path. Literally `os.path.isabs` on the same value in both places, so the two
+    # cannot disagree -- unlike the realpath-vs-`!=` pair this function and
+    # validate_presets used to be.
     if not os.path.isabs(requested):
         fail("repository_mismatch")
     if mode == "portable_windows":
+        # portable_directory ALSO proves the path is a real, unlinked directory
+        # whose identity is the carrier's repository; same_validated_path answers
+        # only the spelling half, so the identity check stays here.
         requested, entry = portable_directory(
             requested, "repository_mismatch"
         )
         if (
-            not same_portable_path(requested, repo)
+            not same_validated_path(requested, repo, mode)
             or file_identity(entry, "repository_mismatch") != repo_identity
         ):
             fail("repository_mismatch")
         return
-    if os.path.realpath(requested) != repo:
+    if not same_validated_path(requested, repo, mode):
         fail("repository_mismatch")
 
 
@@ -1351,10 +1434,13 @@ def main() -> int:
     if not RUN_ID.fullmatch(args.run_id):
         fail("invalid_run_id")
     carrier, _context, repo, carrier_run_dir, repo_identity = load_carrier(args.carrier_json, args.caller)
+    # Resolved once, AFTER load_carrier: filesystem_mode() can fail
+    # unsupported_platform, and load_carrier already reaches it, so hoisting the
+    # call above the carrier validation would change which refusal a malformed
+    # carrier on an unsupported platform reports.
+    mode = filesystem_mode()
     if args.requested_root:
-        validate_requested_root(
-            args.requested_root, repo, repo_identity, filesystem_mode()
-        )
+        validate_requested_root(args.requested_root, repo, repo_identity, mode)
     expected_workspace = os.path.join(repo, ".uberdev", "research", args.run_id)
     if args.caller == "post-impl-review":
         if not args.parent_workspace_json:
@@ -1390,7 +1476,68 @@ def main() -> int:
         fail("invalid_presets")
     if not isinstance(presets, dict):
         fail("invalid_presets")
-    validate_presets(presets, expected_globals, repo, expected_workspace)
+    # The shape gate reaches the VALUES, not just the envelope. `--presets-json`
+    # is untrusted argv on a security boundary, and until this loop existed only
+    # the top level was checked: a non-str value or a str carrying an embedded
+    # NUL reached os.path.realpath, which raises TypeError / ValueError. Neither
+    # is a Failure, so cli() -- which catches Failure only -- let it out as a
+    # Python traceback on rc 1, printing this install's absolute paths, where
+    # every other refusal on this surface is rc 2 and one reason word.
+    #
+    # This is `invalid_presets`, NOT `preset_mismatch`, and the distinction is
+    # the point rather than a naming preference. `preset_mismatch:<KEY>` asserts
+    # something specific and actionable -- "you named a location and it is not
+    # the one I resolved", so go look at where that scalar points. A value of 5
+    # names no location at all, so there is nothing for it to disagree with, and
+    # reporting it as a mismatch sends the reader to the wrong place. It is the
+    # same defect class as the top-level `isinstance(presets, dict)` check
+    # directly above, and it belongs beside it: that keeps ONE shape gate at the
+    # boundary that parses the JSON instead of a second one inside the
+    # comparator's caller, and lets validate_presets be honestly typed
+    # `dict[str, str]` rather than `dict[str, Any]`.
+    #
+    # Keyed for the same reason preset_mismatch is: the payload-level refusals
+    # above cannot name a key, this one can, and nine anonymous scalars are what
+    # cost a Windows CI cycle to attribute.
+    #
+    # Unreachable from any shipped caller -- lib/child-dispatch.sh builds this
+    # JSON from nine shell scalars, which are str by construction and cannot
+    # carry NUL (execve forbids it in argv). That is exactly why it had no test:
+    # the reachable path is the hand-built one, which is the untrusted one.
+    for preset_key, preset_value in presets.items():
+        if not isinstance(preset_value, str) or "\x00" in preset_value:
+            fail(f"invalid_presets:{preset_key}")
+        # `isinstance(str)` plus the NUL test is still not the whole shape
+        # question, and the gap is the SAME untyped escape on the SAME
+        # untrusted-argv surface those two exist to close. A JSON `\ud800`
+        # escape decodes to a LONE SURROGATE: a str, no NUL, passes both tests
+        # above, and then raises UnicodeEncodeError inside os.path.realpath.
+        # Eight ill-shaped values were refused and the ninth still produced the
+        # traceback -- an incomplete gate reads exactly like a complete one.
+        #
+        # `os.fsencode` is not a third approximation of the question; it is the
+        # encoder the path API itself calls, so asking it directly is total over
+        # every str rather than enumerating the ways one can be un-encodable.
+        #
+        # It deliberately does NOT refuse every surrogate. A raw invalid UTF-8
+        # byte in a real POSIX pathname arrives as \udc80-\udcff through PEP 383
+        # surrogateescape and round-trips back to that byte, so os.fsencode
+        # accepts it -- which is what keeps a legal-but-odd repository path
+        # reviewable instead of unusable. Verified: fsencode('/tmp/\udcff') ->
+        # b'/tmp/\xff'; fsencode('/tmp/\ud800') raises.
+        #
+        # Assigned, not raised from inside the `except`: `fail` would then chain
+        # onto the UnicodeEncodeError and any traceback would print the very
+        # encoder noise this refusal exists to replace.
+        try:
+            os.fsencode(preset_value)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            preset_encodable = False
+        else:
+            preset_encodable = True
+        if not preset_encodable:
+            fail(f"invalid_presets:{preset_key}")
+    validate_presets(presets, expected_globals, repo, expected_workspace, mode)
     workspace, paths = allocate_workspace(repo, args.run_id, artifacts, repo_identity)
     descriptor = {
         "schema_version": 1, "caller": args.caller, "carrier_workflow": carrier["workflow"],

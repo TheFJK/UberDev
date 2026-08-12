@@ -88,6 +88,10 @@ from pathlib import Path
 post_path, review_path, out_dir = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 post = post_path.read_text(encoding="utf-8")
 review = review_path.read_text(encoding="utf-8")
+# The cross-fence helpers ship as code now (#427, the function half). They used
+# to be carved back out of the markdown here; the fixtures below take them from
+# the one file that defines them.
+fences_lib = (review_path.parent.parent / "lib" / "review-fences.sh").read_text(encoding="utf-8")
 fence = re.escape(chr(96) * 3)
 
 def bash_fences(text):
@@ -113,20 +117,21 @@ def containing(text, token):
         raise SystemExit(f"expected one bash fence containing {token!r}, found {len(found)}")
     return found[0]
 
-def function_definition(text, name):
-    block = containing(text, f"{name}()")
+def library_definition(name):
+    """One helper, taken from lib/review-fences.sh.
+
+    Anchored on the column-0 `}` that closes it: the helpers nest indented
+    blocks, and a loose closer silently truncates the definition, which turns
+    every assertion built on the fixture vacuous instead of red.
+    """
     pattern = re.compile(
-        rf"^(?P<indent>[ \t]*){re.escape(name)}\(\)[ \t]*\{{[ \t]*\n"
-        rf"(?:(?P=indent)(?:[ \t]+.*)?\n)*"
-        rf"(?P=indent)\}}[ \t]*$",
+        rf"^{re.escape(name)}\(\)[ \t]*\{{[ \t]*\n(?:.*?\n)*?\}}[ \t]*$",
         re.MULTILINE,
     )
-    found = [match.group(0) for match in pattern.finditer(block)]
-    if len(found) != 1:
-        raise SystemExit(
-            f"expected one executable function definition {name!r}, found {len(found)}"
-        )
-    return found[0]
+    match = pattern.search(fences_lib)
+    if match is None:
+        raise SystemExit(f"fence library has no definition of {name!r}")
+    return match.group(0)
 
 def write(name, body):
     path = out_dir / name
@@ -141,11 +146,11 @@ write("post-prefix.sh", prefix)
 write("post-roster.sh", marker + roster)
 write("post-retry.sh", executable(post, ""))
 write("review-setup.sh", executable(review, "setup=review-pr"))
-write(
-    "review-head-assert.sh",
-    function_definition(review, "review_assert_selected_pr_head"),
-)
-write("review-scope.sh", containing(review, "review_refresh_phase1_scope() {"))
+write("review-head-assert.sh", library_definition("review_assert_selected_pr_head"))
+# The Phase 1 scope fence, anchored on the ONE call site that is unique to it:
+# `review_refresh_phase1_scope "$BASE_SHA"` appears in three fences (Phase 1
+# entry plus both Phase 2 refreshes), and `review_resolve_phase1_base` in one.
+write("review-scope.sh", containing(review, 'review_resolve_phase1_base "$PR_NUMBER"'))
 
 review_instance_lines = [
     line for line in review.splitlines()
@@ -164,17 +169,48 @@ if not post_instance_lines or any(
 ):
     raise SystemExit("every post-review child instance must use the shared bounded helper")
 
-builder_region = re.search(
-    r"<!-- BEGIN review-child-builder-v1 -->\s*(.*?)\s*<!-- END review-child-builder-v1 -->",
-    review,
-    re.DOTALL,
+# The routed child builders. There is no builder FENCE any more: a fence that
+# defined them could only ever serve the one shell that ran it, which is the
+# defect (#427). Take them from the library every prologued fence loads.
+builder_names = ("review_json_string", "review_child_record", "review_child_fanout",
+                 "review_child_wait_all", "review_child_result_path", "review_child_single",
+                 "review_guard_failed_fixer_return", "review_fixer_child_bound")
+write("review-builder.sh", "\n".join(library_definition(name) for name in builder_names))
+
+# The production review_fixer_child_bound under a second name, renamed in the
+# SOURCE BYTES. #471. The shell below stubs review_fixer_child_bound (it owns a
+# repository transaction this payload suite has no business driving) and still
+# needs the real one for the bind-failure case, so it needs a copy under another
+# name. It used to make that copy with
+#   eval "$(declare -f review_fixer_child_bound | sed 1s/<name>/<name>_production/)"
+# which is the exact mechanism #471 removed from the fence-library loader:
+# `declare -f` re-prints a function from the shell's PARSE TREE, not from the
+# bytes it was defined from, and stock macOS /bin/bash (3.2) re-emits THIS
+# helper's `cmd <<'PY' || {` with the `|| {` orphaned after the PY terminator --
+# "syntax error near `||'".
+#
+# And `set -e` does NOT catch that. A syntax error inside `eval` terminates a
+# bash 3.2 shell where it stands and leaves the exit status at 0, so the suite
+# stopped ~700 lines short of its last assertion and reported success. Measured:
+# `/bin/bash tests/review-child-inputs.test.sh` printed that syntax error and
+# exited 0; with this rename it runs on past the eval (and then hits the
+# separate, pre-existing bash-3.2 wall at the first `$BASHPID`, loudly, rc 1).
+#
+# CI never saw any of it. review_fixer_child_bound is the helper bash 3.2
+# mangles; ubuntu-latest's bash re-emits THIS one cleanly (verified on 5.2.37 --
+# it mangles review_child_fanout instead), and Windows skips this fixture
+# entirely. Latent, not dead.
+#
+# The bytes are already in hand, and renaming them here re-parses by
+# construction -- the same reason the loader carves instead of round-tripping.
+fixer_bound = library_definition("review_fixer_child_bound")
+FIXER_BOUND_HEADER = "review_fixer_child_bound()"
+if not fixer_bound.startswith(FIXER_BOUND_HEADER):
+    raise SystemExit("review_fixer_child_bound definition does not open with its own name")
+write(
+    "review-fixer-bound-production.sh",
+    "review_fixer_child_bound_production()" + fixer_bound[len(FIXER_BOUND_HEADER):],
 )
-if builder_region is None:
-    raise SystemExit("review child builder marker block missing")
-builder_fences = bash_fences(builder_region.group(1))
-if len(builder_fences) != 1:
-    raise SystemExit("review child builder must contain one canonical bash fence")
-write("review-builder.sh", builder_fences[0][1])
 
 def assignment(block, variable):
     lines = block.splitlines()
@@ -336,7 +372,10 @@ export FOCUS=$'focus "quoted" \\glob*?[x]\t'
   || { echo "review-child-inputs: review setup bound AGG_PATH=$AGG_PATH, expected $RESEARCH_DIR_ABS/post-impl-review-final.md" >&2; exit 1; }
 . "$TMP/review-builder.sh"
 REVIEW_WORKSPACE_JSON="$UBERDEV_COMMAND_WORKSPACE_JSON"
-eval "$(declare -f review_fixer_child_bound | sed '1s/^review_fixer_child_bound/review_fixer_child_bound_production/')"
+# review_fixer_child_bound_production -- the production helper's own bytes under
+# a second name, renamed by the fixture builder above rather than round-tripped
+# through `declare -f` (#471; the rename rationale is at that write() call).
+. "$TMP/review-fixer-bound-production.sh"
 
 # This test closes the production child-input/build/handoff/dispatch graph, not
 # the code-fixer repository transaction. The source worktree is intentionally
@@ -738,7 +777,7 @@ assert os.path.getsize(sys.argv[1]) < 16*1024*1024
 PY
   # Deliberately hostile fixture: point the commit-range artifact at a
   # DIRECTORY. review_refresh_phase1_scope's replace_private
-  # (plugins/uberdev/commands/review-pr.md:1554) does os.replace(tmp, path),
+  # (plugins/uberdev/lib/review-fences.sh) does os.replace(tmp, path),
   # which cannot clobber a directory, so the refresh must refuse rather than
   # leave the stale range in place. The refusal surfaces as a Python traceback
   # on stderr -- that IS the diagnostic, and it is expected here. Capture it so
