@@ -4,6 +4,50 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.15] — 2026-08-12
+
+A debugging tool was ending investigations with a false negative: `find-polluter.sh`
+enumerated **zero** test files for its own documented pattern and still reported a
+clean bill of health (#430).
+
+### Fixed
+
+- **`find-polluter.sh` refuses to render a verdict it did not earn.** Two defects
+  stacked. *Enumeration:* `find .` emits `./`-prefixed paths, so `find . -path
+  'src/**/*.test.ts'` — the form the script's own usage line and
+  `root-cause-tracing.md:105` both document — matched nothing; and even with the
+  prefix corrected, `find -path` cannot match `**/` against *zero* directory levels,
+  so `src/top.test.ts` was skipped. *The verdict:* `TOTAL=$(echo "$TEST_FILES" | wc -l)`
+  counts the empty string as `1`, so a zero-match run printed `Found 1 test files`,
+  visited nothing, and exited `0` with `✅ No polluter found - all tests clean!`.
+  Every invocation was a vacuous green.
+
+### Changed
+
+- **New exit code 2 — a behaviour change for downstream callers.** The script now
+  exits `2` when the pattern matches no test files, printing the refusal on stderr
+  while `Found 0 test files` stays on stdout (upstream's observable, preserved
+  byte-for-byte up to the refusal). `0` (clean) and `1` (polluter found, or bad
+  usage) are unchanged.
+
+### Notes
+
+- **The enumeration fix is adopted as one hunk, not a re-baseline.** It comes from
+  upstream superpowers v6.2.0 (`3dcbd5c`), verified against the network rather than a
+  local cache. `plugins/uberdev/vendor.json` still pins the whole
+  `skills/systematic-debugging` component at `e7a2d16`, and that pin is deliberately
+  unchanged: the other ten files were never re-copied, and at least `CREATION-LOG.md`
+  and `root-cause-tracing.md` provably differ between the two upstream commits. A
+  component-wide re-pin would stamp two files with a SHA their bytes are not — and
+  because the component's stance is `fork`, `C-FILES` skips digests, so **nothing
+  would have caught it**. Re-baselining is #462's job. `HEADER_RE` takes the *first*
+  attribution, so line 2 now carries both SHAs by role: `e7a2d16` as the base the
+  register records, `3dcbd5c` as the origin of the adopted hunk. `C-HEADER` agrees
+  with the register; no register pin changes. `measured_diff_lines` moves 83 → 195,
+  remeasured per RFC 0019 §4.2.
+- Residual scope is tracked as **#476** (the same vacuous-verdict class on a
+  project-definition path).
+
 ## [0.45.14] — 2026-08-12
 
 The version-bump mandate was unsatisfiable in two of the three lanes that
