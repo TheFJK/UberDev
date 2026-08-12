@@ -2124,7 +2124,7 @@ review_fleet_load_fence_library() {
     echo "error: review_fleet_load_fence_library takes no arguments" >&2
     return 2
   }
-  local library_file defined_names preserved fence_fn
+  local library_file defined_names wanted fence_fn slice
   library_file="$(review_fleet_fence_library_path)"
   # A plugin root with no commands/ directory at all is a SYNTHETIC root: the
   # behavioural harnesses build one that holds a shim lib/ and nothing else,
@@ -2152,17 +2152,49 @@ review_fleet_load_fence_library() {
   # running `git merge-base --is-ancestor` against fixture SHAs that do not
   # exist and failed with `MUTATED_BLOCKED`.
   #
-  # `typeset -f` both asks "is this a shell function" and prints it back in
-  # re-evaluable form, in zsh and in bash 3.2 alike. Capture, source, restore.
+  # HOW that gap-filling is done is #471. The previous cut sourced the library
+  # OVER the caller and then put the caller's definitions back, by capturing
+  # `typeset -f` output and `eval`ing it -- on the stated premise that typeset -f
+  # "prints it back in re-evaluable form, in zsh and in bash 3.2 alike".
+  #
+  # That premise is FALSE, in both directions and non-monotonically. `typeset -f`
+  # reconstructs a function from the shell's parse tree rather than echoing the
+  # bytes it was defined from, and every bash reflows heredocs differently. Two
+  # helpers in THIS library are re-emitted unparseably, on disjoint shells:
+  #
+  #   bash 3.2.57 (stock macOS)  review_fixer_child_bound -- `cmd <<'PY' || {`
+  #     comes back with the `|| {` on its own line AFTER the PY terminator, i.e.
+  #     a list operator with no left operand: "syntax error near `||'".
+  #   bash 5.0-5.2 (ubuntu-latest, the CI runner)  review_child_fanout -- the
+  #     `if cmd <<'PY' ... PY then :` shape comes back as `if cmd <<'PY'; then`
+  #     with the then-body hoisted ABOVE the heredoc body, so it is swallowed as
+  #     heredoc text and the then-clause is left empty: "syntax error near `else'".
+  #
+  # bash 4.x, bash 5.3 and zsh 5.9 happen to re-emit both cleanly, which is
+  # exactly why this shipped: the two shells the comment named are the two the
+  # bug does not reach on the same helper. There is no version predicate to
+  # test and no "safe heredoc" rule to enforce -- 4.x and 5.3 accept both shapes,
+  # so a lint for them would be un-writable on the shells that pass. The defect
+  # is not the two helpers; it is that a lossy serializer sits on the restore
+  # path at all.
+  #
+  # So do not clobber, and there is nothing to restore. `typeset -f` is used
+  # ONLY as a predicate ("is this a shell function"), which is sound everywhere
+  # and is already how review_fleet_define_audit probes below; the names the
+  # caller does not already hold are carved out of the library's OWN BYTES and
+  # eval'd. Original source bytes re-parse by construction -- that is the one
+  # property typeset -f output lacks.
   #
   # Read the names off the LIBRARY FILE, never off a hardcoded roster: a helper
-  # added there but forgotten here would be silently un-preservable, which is
+  # added there but forgotten here would be silently un-loadable, which is
   # the same completeness-guard-disjoint-from-the-drift trap as #371.
   #
   # `^[[:space:]]*`, not `^`: tests/review-pr.test.sh R47.4 builds its roster
   # with the same leading-space-tolerant pattern, and a stricter one here would
   # let an indented definition be a helper R47.4 polices but this loader cannot
-  # preserve -- two readers of one roster that can disagree.
+  # carve -- two readers of one roster that can disagree. The awk below keys off
+  # the same tolerance and closes each block on a `}` at the DEFINITION's own
+  # indent, so the two readers stay in agreement by construction.
   defined_names="$(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)()[[:space:]]*{.*$/\1/p' "$library_file")"
   # Non-emptiness is a real assertion, not a formality: sourcing an empty file
   # succeeds, so without this a truncated or renamed library would leave every
@@ -2172,24 +2204,66 @@ review_fleet_load_fence_library() {
     echo "error: review-pr fence library defines no helpers: $library_file" >&2
     return 2
   }
-  preserved=''
+  wanted=''
   # Herestring, never `printf | while read`: a pipeline puts the loop body in a
-  # SUBSHELL under bash, so every name appended to `preserved` would be
-  # discarded at the end of the pipe.
+  # SUBSHELL under bash, so every name appended to `wanted` would be discarded
+  # at the end of the pipe.
+  #
+  # `typeset -f` as a PREDICATE only -- its rc is trustworthy on every shell,
+  # its stdout is not (see #471 above). A name the caller already holds is
+  # simply never carved, so it is never overwritten and never needs restoring.
   while IFS= read -r fence_fn; do
     [ -n "$fence_fn" ] || continue
-    typeset -f "$fence_fn" >/dev/null 2>&1 || continue
-    preserved="$preserved
-$(typeset -f "$fence_fn")"
+    typeset -f "$fence_fn" >/dev/null 2>&1 && continue
+    wanted="$wanted $fence_fn"
   done <<<"$defined_names"
-  . "$library_file" || {
+  # ENVIRON, not `-v`: BSD awk (stock macOS) applies backslash-escape processing
+  # to a `-v` value and hard-errors on a newline inside one ("awk: newline in
+  # string"). Reading the list out of the environment sidesteps both. Space
+  # separated is safe -- a shell function name cannot contain a space.
+  #
+  # The carve rule is the file's own convention and is not new machinery:
+  # tests/review-pr.test.sh:31 (`review_fence_fn`) and
+  # tests/review-child-inputs.test.sh:120 (`library_definition`) already slice
+  # this same library the same way. Loss-free because review-fences.sh holds no
+  # top-level executable statements -- policed by R47.8 so it stays that way.
+  slice="$(UBERDEV_REVIEW_FENCE_WANTED="$wanted" awk '
+    BEGIN {
+      n = split(ENVIRON["UBERDEV_REVIEW_FENCE_WANTED"], names, " ")
+      for (i = 1; i <= n; i++) if (names[i] != "") want[names[i]] = 1
+    }
+    active { print; if ($0 == closer) active = 0; next }
+    /^[ \t]*[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{[ \t]*$/ {
+      indent = $0; sub(/[^ \t].*$/, "", indent)
+      name = $0; sub(/^[ \t]*/, "", name); sub(/\(\)[ \t]*\{.*$/, "", name)
+      if (name in want) { closer = indent "}"; active = 1; print }
+    }
+  ' "$library_file")" || {
+    echo "error: review-pr fence library could not carve its load slice: $library_file" >&2
+    return 2
+  }
+  # `eval`, not a temp file: the bytes are already in hand, and a scratch file
+  # here would need a TMPDIR that is writable in every fence and would have to
+  # be cleaned on all four return paths -- R47.6 pins the run directory to
+  # exactly three entries, so the cheapest scratch file is the one never made.
+  # Unlike the typeset -f output this replaces, these bytes parsed once already.
+  [ -z "$slice" ] || eval "$slice" || {
     echo "error: review-pr fence library failed to load from $library_file" >&2
     return 2
   }
-  [ -z "$preserved" ] || eval "$preserved" || {
-    echo "error: review-pr fence library could not restore a caller-installed helper" >&2
-    return 2
-  }
+  # POSTCONDITION, not paranoia. Everything above is a gap-filling contract, and
+  # a carve that silently dropped a helper would look exactly like a successful
+  # load until a fence called the missing name and got command-not-found 40
+  # fences later. Assert the property the caller actually depends on -- every
+  # helper the library declares is callable in THIS shell, whoever defined it --
+  # so a roster/carve disagreement fails here, loudly, naming the helper.
+  while IFS= read -r fence_fn; do
+    [ -n "$fence_fn" ] || continue
+    typeset -f "$fence_fn" >/dev/null 2>&1 || {
+      echo "error: review-pr fence library left $fence_fn undefined: $library_file" >&2
+      return 2
+    }
+  done <<<"$defined_names"
   # uberdev_child_inputs_build / uberdev_child_instance_id live in
   # lib/child-dispatch.sh, which ONLY the setup fence sourced. Phase 2.5's
   # findings-to-issues dispatch calls both and sourced neither. The file carries

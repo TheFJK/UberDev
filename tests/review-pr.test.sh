@@ -3711,6 +3711,142 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# R47.7 — behavioural: the loader must be RE-ENTRANT, and a caller-installed
+# helper must survive it. #471. review_fleet_load_fence_library runs from
+# review_fleet_rehydrate, i.e. the mandated prologue of 53 of the 60 bash fences
+# in review-pr.md, so "called twice in one process" is the normal case, not an
+# edge case. R47.1-R47.6 all call it exactly ONCE, which is precisely why a
+# loader that aborted on the second call shipped green.
+#
+# The first cut sourced the library over the caller and restored the caller's
+# definitions from `typeset -f` output. That output is a re-print of the shell's
+# PARSE TREE, not the bytes the function was defined from, and every bash
+# reflows heredocs its own way: bash 3.2 re-emits review_fixer_child_bound's
+# `cmd <<'PY' || {` with the `|| {` orphaned after the terminator, and bash
+# 5.0-5.2 re-emits review_child_fanout's `if cmd <<'PY' ... then` with the
+# then-body hoisted into the heredoc text. Both are syntax errors on eval.
+#
+# Run it on EVERY bash and zsh on the box, not just $SHELL: the two broken
+# re-emissions land on different helpers on different versions, and bash 4.x,
+# bash 5.3 and zsh 5.9 re-emit both cleanly. A single-interpreter row would pass
+# on a 5.3 laptop while ubuntu-latest (5.2) and stock macOS /bin/bash (3.2) --
+# the two interpreters CI and this repo's contributors actually use -- red.
+#
+# No `for fn in $ROSTER` word-splitting anywhere below: zsh does not split
+# unquoted scalars, so that loop silently degenerates to one iteration over the
+# whole string and the row would assert nothing on zsh.
+R47_RELOAD_SHELLS=''
+for R47_CANDIDATE in "$(command -v bash 2>/dev/null)" /bin/bash "$(command -v zsh 2>/dev/null)" /bin/zsh; do
+  [ -n "$R47_CANDIDATE" ] && [ -x "$R47_CANDIDATE" ] || continue
+  case " $R47_RELOAD_SHELLS " in *" $R47_CANDIDATE "*) continue ;; esac
+  R47_RELOAD_SHELLS="$R47_RELOAD_SHELLS $R47_CANDIDATE"
+done
+R47_RELOAD_BAD=''
+R47_RELOAD_RAN=0
+for R47_SH in $R47_RELOAD_SHELLS; do
+  R47_RELOAD_RAN=$((R47_RELOAD_RAN + 1))
+  # 2>&1: the failure mode being locked out prints its diagnosis to stderr and
+  # THEN returns 2, so stderr is evidence, not noise.
+  R47_RELOAD_OUT="$(env -i PATH="$PATH" HOME="$HOME" \
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
+    "$R47_SH" -c '
+      . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-fleet-args.sh" || { echo SOURCE_FAILED; exit 0; }
+      # Installed BEFORE the first load: this is the real harness pattern
+      # (tests/review-pr-workflow.test.sh and tests/review-child-inputs.test.sh
+      # both stub helpers above the fence that carries the prologue), and it is
+      # the case a plain load-once guard cannot serve.
+      review_refresh_phase1_scope() { echo PRE_STUB; }
+      review_fleet_load_fence_library || { echo "LOAD1_RC_$?"; exit 0; }
+      [ "$(review_refresh_phase1_scope)" = PRE_STUB ] || echo PRE_STUB_CLOBBERED_BY_LOAD1
+      # Installed BETWEEN loads: the gap-filling contract says the caller wins,
+      # not "the caller wins only until the next prologue".
+      review_child_single() { echo MID_STUB; }
+      review_fleet_load_fence_library || { echo "LOAD2_RC_$?"; exit 0; }
+      [ "$(review_refresh_phase1_scope)" = PRE_STUB ] || echo PRE_STUB_CLOBBERED_BY_LOAD2
+      [ "$(review_child_single)" = MID_STUB ] || echo MID_STUB_CLOBBERED_BY_LOAD2
+      review_fleet_load_fence_library || { echo "LOAD3_RC_$?"; exit 0; }
+      # The two helpers whose typeset -f round-trip is unparseable somewhere in
+      # the supported range must be defined, and must be the LIBRARY bodies --
+      # a carve that truncated one would still leave it "defined".
+      typeset -f review_child_fanout      >/dev/null 2>&1 || echo FANOUT_UNDEFINED
+      typeset -f review_fixer_child_bound >/dev/null 2>&1 || echo FIXER_BOUND_UNDEFINED
+      typeset -f audit                    >/dev/null 2>&1 || echo AUDIT_UNDEFINED
+      case "$(typeset -f review_child_fanout)"      in *uberdev_unwind_child*) : ;; *) echo FANOUT_TRUNCATED ;; esac
+      case "$(typeset -f review_fixer_child_bound)" in *REVIEW_FIXER_LAUNCH_BINDING*) : ;; *) echo FIXER_BOUND_TRUNCATED ;; esac
+      echo OK
+    ' 2>&1)"
+  [ "$R47_RELOAD_OUT" = "OK" ] || R47_RELOAD_BAD="$R47_RELOAD_BAD
+        $R47_SH: $(printf '%s' "$R47_RELOAD_OUT" | tr '\n' ';')"
+done
+if [ "$R47_RELOAD_RAN" -ge 1 ] && [ -z "$R47_RELOAD_BAD" ]; then
+  echo "  PASS  R47.7 — the fence library loader is re-entrant and preserves caller stubs on all $R47_RELOAD_RAN interpreter(s)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.7 — reloading the fence library failed or clobbered a caller-installed helper"
+  echo "        interpreters tried: ${R47_RELOAD_RAN}${R47_RELOAD_BAD}"
+  FAIL=$((FAIL + 1))
+fi
+
+# R47.8 — structural: lib/review-fences.sh must hold NOTHING outside a function
+# block. #471. The loader no longer sources the whole file; it carves out just
+# the helpers this shell is missing and evals those bytes. That carve is
+# loss-free ONLY while every executable line lives inside a `name() {` ... `}`
+# block, so a top-level statement added later would not fail, it would silently
+# stop running. This row makes that a test failure instead.
+#
+# It applies the loader's own carve rule (open on `name() {` at end of line,
+# close on a `}` at the DEFINITION's indent) so the two cannot drift, and thereby
+# also catches the shapes the carve cannot express: a one-line `f() { :; }`, and
+# a body containing a `}` at the definition's own indent, which would truncate
+# the function and spill the remainder as top-level code.
+R47_UNCARVED="$(python3 -I -B - "$REVIEW_FENCES" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+OPEN = re.compile(r"^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\(\)[ \t]*\{[ \t]*$")
+DEF = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{")
+
+carved, offenders, closer, name = set(), [], None, None
+for line_no, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    if closer is not None:
+        if line == closer:
+            carved.add(name)
+            closer = None
+        continue
+    match = OPEN.match(line)
+    if match:
+        closer, name = match.group(1) + "}", match.group(2)
+        continue
+    if line.strip() == "" or line.lstrip().startswith("#"):
+        continue
+    offenders.append("%d:%s" % (line_no, line.strip()[:60]))
+
+if closer is not None:
+    offenders.append("unterminated:%s" % name)
+# Every name the LOADER will look for must be one the carve can actually
+# produce -- the roster reader is deliberately more permissive than the carve.
+declared = {m.group(1) for m in (DEF.match(l) for l in open(path, encoding="utf-8")) if m}
+for missing in sorted(declared - carved):
+    offenders.append("uncarvable:%s" % missing)
+
+print("carved=%d" % len(carved))
+print("offenders=%s" % " ".join(offenders))
+PY
+)" || R47_UNCARVED=''
+R47_CARVED_COUNT="$(printf '%s\n' "$R47_UNCARVED" | sed -n 's/^carved=//p')"
+R47_CARVE_OFFENDERS="$(printf '%s\n' "$R47_UNCARVED" | sed -n 's/^offenders=//p')"
+if [ -n "$R47_UNCARVED" ] && [ "${R47_CARVED_COUNT:-0}" -ge 20 ] 2>/dev/null \
+   && [ -z "$R47_CARVE_OFFENDERS" ]; then
+  echo "  PASS  R47.8 — all $R47_CARVED_COUNT fence helpers are carvable and lib/review-fences.sh has no top-level code"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R47.8 — lib/review-fences.sh holds a line the loader's carve would drop"
+  echo "        carved: ${R47_CARVED_COUNT:-<none>}; offenders: ${R47_CARVE_OFFENDERS:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "== R32: Step 6b.0 — the Phase 1 verification gate (#431) =="
 assert_grep "$REVIEW_PR" '^6b\.0\. \*\*Phase 1 verification gate\*\*' \
