@@ -29,9 +29,8 @@
 #     vacuously and keeps passing after the anchors it slices on are renamed.
 #
 #   assert_version_bump <repo_root> <version>
-#     Asserts <version> is propagated to all five manifest surfaces
-#     (plugin.json, marketplace.json, Codex plugin.json, README badge,
-#     CHANGELOG header). DRYs the
+#     Asserts <version> is propagated to all four manifest surfaces
+#     (plugin.json, marketplace.json, README badge, CHANGELOG header). DRYs the
 #     version-lock block previously duplicated across goal.test.sh (G20) and
 #     solve-claim.test.sh. A release bump is now one <version>-arg change per
 #     call site instead of lockstep multi-form-regex edits (#231).
@@ -118,11 +117,19 @@ assert_no_grep_nonempty() {
 # assert_version_bump <repo_root> <version>
 # DRY the version-lock assertion block that was duplicated across
 # tests/goal.test.sh (G20) and tests/solve-claim.test.sh — asserts <version> is
-# propagated to all five manifest surfaces (plugin.json, marketplace.json,
-# Codex plugin.json, README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
+# propagated to all four manifest surfaces (plugin.json, marketplace.json,
+# README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
 # same caller-counter contract as assert_count). A release bump is now ONE
 # <version>-arg change per call site instead of lockstep multi-line regex edits
 # across two files (#231).
+#
+# The Codex plugin manifest was a fifth surface until the Codex distribution
+# was retired and the file stopped existing (#382). The body dropped to four in
+# that commit; both copies of this comment kept claiming five until #472. The
+# two CI test-lock files (tests/goal.test.sh, tests/solve-claim.test.sh) are NOT
+# asserted here — they are this helper's own call sites, and
+# plugins/uberdev/lib/bump-version.sh is what moves them. Six file surfaces in
+# total; the repo-root AGENTS.md is the SSOT for the list.
 _assert_version_bump_one() {  # <abs_file> <grep_pattern> <desc>
   local file="$1" pattern="$2" desc="$3"
   if grep -qE -e "$pattern" "$file"; then

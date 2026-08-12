@@ -59,7 +59,7 @@ These are **structural / contract** checks, not end-to-end behavioural tests of 
 
 - **Prompt-file contracts** — that a command or agent file still names every dispatch slot, every required flag, every documented argument, and every guard rail it is supposed to (e.g. `review-pr.test.sh` asserts the seven Phase-1 reviewers run in one or more cap-controlled waves, with every child in each wave dispatched before its first wait).
 - **Runtime behavioural fixtures** — a subset `source` a real `lib/` helper and assert its output. Examples: `solve-pipeline-zsh.test.sh` (zsh word-splitting), `goal.test.sh` BT84 / BT85 (goal-pipeline behaviour), `config-override.test.sh` (config precedence), `secret-scan.test.sh` (the pre-push scanner). So the suite is **not** purely static — the claim "no behavioural tests" is false.
-- **Release-ratchet version locks** — `goal.test.sh` (the `G20: version bump locked` block) and `solve-claim.test.sh` (the `Version bump A.B.C -> X.Y.Z propagated` block) hardcode the current version and **turn CI red on a missed bump**. They are part of the mandatory bump-everywhere ritual (see the project `CLAUDE.md`). A contributor who skips the full suite skips exactly the tests that catch a forgotten version bump.
+- **Release-ratchet version locks** — `goal.test.sh` (the `G20: version bump locked` block) and `solve-claim.test.sh` (the `Version bump A.B.C -> X.Y.Z propagated` block) hardcode the current version and **turn CI red on a missed bump**. They are part of the mandatory bump-everywhere ritual (see the root `AGENTS.md`, "Bump version EVERYWHERE before merge"). A contributor who skips the full suite skips exactly the tests that catch a forgotten version bump.
 - **CI-wiring invariant** — `tests/ci-wiring.test.sh` asserts that *every* `tests/*.test.sh` on disk is wired into the workflow, so a new test that is forgotten in `test.yml` fails CI rather than silently never running.
 
 They deliberately do **not** launch real `claude` sessions, parse session transcripts, or measure token usage. UberDev ships no headless-integration runner and no token-analysis script — the suite is the `tests/*.test.sh` shape-checks (plus the helper files they drive: `tests/_lib_assert_structural.sh`, `tests/_workflow_harness.js`) and nothing else.
@@ -129,4 +129,4 @@ Conventions worth honouring:
 - `tests/_lib_assert_structural.sh` — shared section-scoped assertion helpers.
 - `tests/_workflow_harness.js` — the T1–T4 workflow-script harness (self-tests: `node tests/_workflow_harness.js self-test`).
 - RFC 0012 (ultracode workflow migration, `docs/rfc/`) — defines the workflow-script conventions the T1–T4 tier enforces.
-- The project `CLAUDE.md` — the bump-version-everywhere ritual the version-lock tests enforce.
+- The root `AGENTS.md` — the bump-version-everywhere ritual the version-lock tests enforce, and which commit in each lane carries the bump.
