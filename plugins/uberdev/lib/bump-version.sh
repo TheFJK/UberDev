@@ -42,8 +42,11 @@
 #     script edits files and prints the remaining ritual checklist —
 #     foreground control over the destructive tag/release steps stays with
 #     the operator, serialized against /merge landings (RFC 0012 §7.7). The
-#     checklist is printed here because CLAUDE.md (where the ritual is
-#     documented) is gitignored and invisible to worktree agents (R-15).
+#     ritual itself — including which commit carries the bump in each of the
+#     three lanes — is documented in the repo-root AGENTS.md ("Bump version
+#     EVERYWHERE before merge"). The checklist is ALSO printed here because
+#     the operator's local CLAUDE.md twin is gitignored, so it exists in no
+#     fresh checkout and in no worktree an agent runs in (R-15).
 #
 # Exit codes:
 #   0  bumped (or already at target — idempotent no-op)

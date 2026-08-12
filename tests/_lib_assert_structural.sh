@@ -29,12 +29,12 @@
 #     vacuously and keeps passing after the anchors it slices on are renamed.
 #
 #   assert_version_bump <repo_root> <version>
-#     Asserts <version> is propagated to all five manifest surfaces
-#     (plugin.json, marketplace.json, Codex plugin.json, README badge,
-#     CHANGELOG header). DRYs the
-#     version-lock block previously duplicated across goal.test.sh (G20) and
-#     solve-claim.test.sh. A release bump is now one <version>-arg change per
-#     call site instead of lockstep multi-form-regex edits (#231).
+#     Asserts <version> is propagated to the manifest surfaces. Deliberately a
+#     POINTER, not a second copy: the surface list, its count and the history
+#     behind it live in one place, the contract block directly above
+#     `assert_version_bump` at the bottom of this file. Two hand-maintained
+#     copies of that paragraph are what let a retired surface leave the count
+#     stale for a release (#382/#472).
 
 assert_count() {
   local file="$1" section_start="$2" section_end="$3" pattern="$4" expected="$5" desc="$6"
@@ -115,14 +115,6 @@ assert_no_grep_nonempty() {
   fi
 }
 
-# assert_version_bump <repo_root> <version>
-# DRY the version-lock assertion block that was duplicated across
-# tests/goal.test.sh (G20) and tests/solve-claim.test.sh — asserts <version> is
-# propagated to all five manifest surfaces (plugin.json, marketplace.json,
-# Codex plugin.json, README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
-# same caller-counter contract as assert_count). A release bump is now ONE
-# <version>-arg change per call site instead of lockstep multi-line regex edits
-# across two files (#231).
 _assert_version_bump_one() {  # <abs_file> <grep_pattern> <desc>
   local file="$1" pattern="$2" desc="$3"
   if grep -qE -e "$pattern" "$file"; then
@@ -131,6 +123,32 @@ _assert_version_bump_one() {  # <abs_file> <grep_pattern> <desc>
     echo "  FAIL  $desc"; echo "        file: $file"; echo "        pattern: $pattern"; FAIL=$((FAIL + 1))
   fi
 }
+
+# assert_version_bump <repo_root> <version>
+# THE one copy of this contract — the header index above points here rather than
+# restating it, because the two hand-maintained copies this block used to have
+# are the mechanism that kept a stale surface count alive (see the Codex note
+# below). Kept directly above the function it documents, not above the private
+# single-surface helper.
+#
+# DRY the version-lock assertion block that was duplicated across
+# tests/goal.test.sh (G20) and tests/solve-claim.test.sh — asserts <version> is
+# propagated to all four manifest surfaces (plugin.json, marketplace.json,
+# README badge, CHANGELOG header). Self-contained (own grep + $PASS/$FAIL bump,
+# same caller-counter contract as assert_count). A release bump is now ONE
+# <version>-arg change per call site instead of lockstep multi-line regex edits
+# across two files (#231).
+#
+# The Codex plugin manifest was a fifth surface until the Codex distribution
+# was retired and the file stopped existing (#382). The body dropped to four in
+# that commit; both copies of this comment kept claiming five until #472, which
+# collapsed them into this single block. tests/docs-accuracy.test.sh T12.14 now
+# pins the count in both directions — the body's call count and this comment's
+# stated number — so the pair cannot drift apart again in silence. The two CI
+# test-lock files (tests/goal.test.sh, tests/solve-claim.test.sh) are NOT
+# asserted here — they are this helper's own call sites, and
+# plugins/uberdev/lib/bump-version.sh is what moves them. Six file surfaces in
+# total; the repo-root AGENTS.md is the SSOT for the list.
 assert_version_bump() {
   local root="$1" ver="$2"
   local v="${ver//./\\.}"   # escape dots so grep -E matches them literally

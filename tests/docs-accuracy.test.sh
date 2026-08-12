@@ -67,6 +67,17 @@ PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
 HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
 HOOKS_CURSOR_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks-cursor.json"
 PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
+# #472 version-bump-contract surfaces. AGENTS.md is the rule document the
+# convention lens quotes verbatim AND the only one a worktree solver can read
+# (the project CLAUDE.md twin is gitignored — .gitignore). The other three are
+# the machinery that decides which commit actually carries the bump, so T12
+# below locks the doc and the machinery against EACH OTHER rather than pinning
+# either alone.
+AGENTS_MD="$REPO_ROOT/AGENTS.md"
+SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
+GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
+BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
+STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
 
 # Hard-fail (exit 2) on a missing input — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
@@ -74,8 +85,30 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
-         "$PRECISION_RFC"; do
+         "$PRECISION_RFC" "$AGENTS_MD" "$SOLVE_FLEET_JS" "$GOAL_WATCH_SH" \
+         "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
+done
+
+# Shared structural-assertion helpers (assert_in_section + assert_count for T12
+# — the version rule is sliced to its own section so a stray prose match
+# elsewhere in AGENTS.md cannot false-positive it; see the T12 block for what
+# that scoping does and does NOT buy while AGENTS.md carries a single level-2
+# section). Fail-loud guard per #209: a missing or unreadable helper aborts
+# rc=2, never vacuous-green.
+source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
+# The guard above only catches a helper file that is MISSING or unparseable:
+# `source` reports the status of the last command in the sourced file, so a
+# helper that was renamed, moved or split out still sources rc=0. Every call to
+# it would then fail with command-not-found (rc 127), which increments neither
+# counter — and with no errexit and no assertion floor this file would print
+# `failed: 0` and exit 0 with its structural half never executed. Assert the
+# names actually called here, and extend this list when a new one is used.
+for structural_fn in assert_in_section assert_count; do
+  command -v "$structural_fn" >/dev/null 2>&1 || {
+    echo "FATAL: _lib_assert_structural.sh sourced but $structural_fn is not defined (renamed helper?)" >&2
+    exit 2
+  }
 done
 
 PASS=0
@@ -1315,6 +1348,180 @@ else
 fi
 assert_grep "$REPO_ROOT/README.md" 'finding-confidence-rubric-v1' \
   "T11.4 README Bundled table names the vendored rubric"
+
+echo
+echo "== T12: the version-bump contract — rule doc and machinery, locked in both directions (#472) =="
+# THE DRIFT THIS LOCKS. AGENTS.md's version section said, unqualified, that
+# every user-facing merge must bump the version "in the same PR". The shipped
+# machinery says the opposite for one whole lane: skills/solve-fleet/workflow.js
+# FORBIDS every fleet solver from bumping, because N solvers cut off one base
+# all resolve the SAME next version and that duplicate edit auto-merges without
+# a conflict, silently losing a release. So the rule document convicted the
+# fleet PRs that the tooling had just told to stay unbumped — and the review
+# convention lens, which cites AGENTS.md verbatim, filed that contradiction as a
+# blocker on a compliant PR (#472). Fixing the prose alone would re-rot: this
+# section pins the rule and the machinery to each other, so a future edit to
+# either half that leaves the other behind is a red test, not a stale sentence.
+#
+# NOT LOCKED HERE, deliberately: that the version actually ADVANCED relative to
+# the base. The two CI release-ratchet locks (tests/goal.test.sh G20,
+# tests/solve-claim.test.sh) are an EQUALITY ratchet — they assert the surfaces
+# agree with each other at a hardcoded literal, not that the number went up —
+# and the shape-check jobs have no base ref and no `gh` to compare against.
+# Tracked as open issue #386.
+#
+# THE SECTION SLICE. The range OPENS on the section's first BODY line, not on
+# its heading. awk closes a `/start/,/end/` range on the START record when that
+# record also matches the end pattern, so a `^## Bump version` start forces an
+# end pattern that cannot match the heading itself — the previous `^## [^B]` —
+# and that pattern is blind to any future sibling heading whose title begins
+# with B. Opening one line lower lets the end anchor be a plain `^## `, which
+# closes on EVERY sibling section.
+#
+# STATED PLAINLY, because the scoping is weaker than it looks: AGENTS.md carries
+# exactly ONE level-2 heading today, so this range still runs to end-of-file and
+# the anchoring buys nothing until a sibling section is added — it is insurance,
+# not a property of the file as it stands. The start anchor is the invariant
+# sentence T12.2a/T12.2b already pin; reword it and all eleven in-section
+# assertions go red together, loudly, rather than passing over an empty slice.
+AGENTS_SECTION_START='^\*\*Every user-facing change'
+AGENTS_SECTION_END='^## '
+
+# --- the rule half: what AGENTS.md must say -------------------------------
+assert_grep "$AGENTS_MD" '^## Bump version EVERYWHERE before merge \(MANDATORY\)$' \
+  "T12.1 AGENTS.md still carries the version-bump section heading"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  'landing commit' \
+  "T12.2a the invariant is scoped to the LANDING commit, not to every PR"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '(project )?version advanced|advance the (project )?version' \
+  "T12.2b the invariant is that the version ADVANCED on main"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '`/goal`' \
+  "T12.3a the /goal lane is named"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '`/solve`.*`/turbo`.*fleet' \
+  "T12.3b the /solve + /turbo fleet lane is named"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '[Hh]and-authored' \
+  "T12.3c the hand-authored lane is named"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  'fleet PR whose diff carries no version surface is compliant' \
+  "T12.4 the fleet carve-out is explicit — an unbumped fleet PR is COMPLIANT"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  'skills/solve-fleet/workflow\.js' \
+  "T12.4b the carve-out names the file that forbids the solver from bumping"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  'plugins/uberdev/lib/bump-version\.sh' \
+  "T12.5 the bump mechanism is named by path"
+# Anchored to the numbered-list-item FORM, not a bare path substring: both test
+# paths also appear in the local-verification bullet further down the section,
+# so a substring match kept passing after the two surface entries themselves
+# were deleted — a label ("listed as a surface") wider than its predicate.
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '^[0-9]+\. \*\*`tests/goal\.test\.sh`\*\*' \
+  "T12.5b the CI release-ratchet lock tests/goal.test.sh is still a numbered surface-list entry"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  '^[0-9]+\. \*\*`tests/solve-claim\.test\.sh`\*\*' \
+  "T12.5c the CI release-ratchet lock tests/solve-claim.test.sh is still a numbered surface-list entry"
+assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
+  'No exception' \
+  "T12.5d the no-exception clause survives the rewrite"
+
+# --- the machinery half: what the shipped tree must still do --------------
+# BOTH of these are GREEN from the first run by design — they are the half the
+# rule now describes, so a red here means the DOC is now lying, not that the
+# rewrite is incomplete. Non-vacuity is proven separately: repoint either path
+# at a nonexistent file and the preflight above exits 2; repoint it at an empty
+# file and the assertion FAILS.
+#
+# There is deliberately NO third "the bump script exists at the path the rule
+# names" assertion. $BUMP_VERSION_SH is in the hard-fail preflight loop at the
+# top of this file, which exits 2 when it is unreadable, so such a check could
+# only ever take its PASS arm — an unreachable FAIL branch that inflates the
+# assertion count while locking nothing, and that count is the only signal a
+# reader has that this section inspected anything. The preflight owns the
+# existence guarantee; T12.12 below is what actually reads the script.
+assert_grep "$SOLVE_FLEET_JS" 'Do NOT bump the project version' \
+  "T12.6 solve-fleet still forbids the solver from bumping (the collision class stays closed)"
+assert_grep "$GOAL_WATCH_SH" '_uberdev_goal_ensure_version_bump' \
+  "T12.7 the /goal watch lane still calls the version-bump guarantor"
+
+# --- negatives: the retired claims must not come back ---------------------
+assert_absent_fixed "$AGENTS_MD" 'MUST bump the version in every location below' \
+  "T12.9 the unqualified every-PR mandate (the sentence #472 was filed against) is gone"
+assert_absent_fixed "$AGENTS_MD" 'single-escaped' \
+  "T12.10a the stale single-escaped regex-form description is gone (post-#231 the locks are one assert_version_bump arg)"
+assert_absent_fixed "$AGENTS_MD" 'double-escaped' \
+  "T12.10b the stale double-escaped regex-form description is gone"
+assert_absent_fixed "$AGENTS_MD" 'Update all seven locations above' \
+  "T12.10c the 'seven locations in one commit' claim is gone (only six are files)"
+assert_absent_fixed "$AGENTS_MD" "Codex's auto-update" \
+  "T12.10d the retired Codex auto-update rationale is gone (#381)"
+
+# Shipped-plugin pointers must not send a reader to the gitignored CLAUDE.md
+# twin: it exists in no fresh checkout and in no worktree a solver runs in, so
+# the ritual it points at is unreadable exactly when it is needed. Scoped to
+# $PLUGIN_DIR — a `grep -r` over a SUBDIRECTORY, never a walk rooted at the
+# repository root (tests/test-harness-source-guards.test.sh A3), and the dated
+# RFC records under docs/rfc/ keep their historical copies untouched.
+#
+# SCOPE OF THE CLAIM. This is a FIXED-STRING check for one exact phrasing, and
+# the PASS line says exactly that and nothing wider. A pointer worded any other
+# way is NOT caught: plugins/uberdev/lib/goal-state.sh still attributes the
+# release rule to CLAUDE.md in prose above its SemVer step resolver. Widening
+# the needle without sweeping that file in the same change would red the suite
+# on an offender no rule-document edit can fix — so widen and sweep together,
+# never one without the other.
+#
+# FAIL-LOUD. grep's status is CAPTURED rather than consumed as a boolean, and
+# stderr stays attached so the cause reaches the CI log. This is an ABSENCE
+# assertion, so the unsafe polarity is the one that had to be handled: rc>=2 (an
+# unreadable file, a vanished search root, an I/O fault, a future argument-shape
+# mistake) is a FAILED SEARCH, not a clean no-match, and must never land in the
+# arm that prints PASS and increments the counter (#275 / #347 house rule: a
+# check that could not run is an explicit FAIL, never a silent zero-assertion
+# PASS).
+CLAUDE_MD_POINTER='project `CLAUDE.md`'
+if [ ! -d "$PLUGIN_DIR" ] || [ ! -r "$PLUGIN_DIR" ]; then
+  echo "  FAIL  T12.11 the search root is missing or unreadable — refusing a vacuous PASS"
+  echo "        root: $PLUGIN_DIR"
+  FAIL=$((FAIL + 1))
+else
+  CLAUDE_MD_HITS="$(grep -rlF -e "$CLAUDE_MD_POINTER" "$PLUGIN_DIR")"
+  CLAUDE_MD_RC=$?
+  if [ "$CLAUDE_MD_RC" -ge 2 ]; then
+    echo "  FAIL  T12.11 the search errored (grep rc=$CLAUDE_MD_RC) — plugins/uberdev/ was NOT checked"
+    echo "        root: $PLUGIN_DIR"
+    FAIL=$((FAIL + 1))
+  elif [ "$CLAUDE_MD_RC" -eq 0 ]; then
+    echo "  FAIL  T12.11 a shipped file under plugins/uberdev/ carries the literal '$CLAUDE_MD_POINTER' pointer at the gitignored twin"
+    echo "        offenders:"
+    printf '%s\n' "$CLAUDE_MD_HITS" | sed 's/^/          /'
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  T12.11 no shipped file under plugins/uberdev/ carries the literal '$CLAUDE_MD_POINTER' pointer"
+    PASS=$((PASS + 1))
+  fi
+fi
+
+assert_grep "$BUMP_VERSION_SH" 'AGENTS\.md' \
+  "T12.12 bump-version.sh's checklist comment names AGENTS.md as the documented ritual"
+assert_absent_fixed "$STRUCTURAL_LIB" 'Codex plugin.json' \
+  "T12.13 assert_version_bump's doc comment no longer claims a retired Codex manifest surface"
+assert_absent_fixed "$STRUCTURAL_LIB" 'all five manifest surfaces' \
+  "T12.13b assert_version_bump's doc comment no longer claims five surfaces (the body asserts four)"
+# T12.13/T12.13b are absence-only — they forbid two exact stale literals, a
+# predicate disjoint from the drift they exist to stop: a surface added to or
+# dropped from the body while the comment stands still (exactly what #382 did),
+# or the same stale claim reworded past a fixed-string check. T12.14 closes that
+# with the positive pair — the body's own call count, and the comment stating
+# the same number.
+assert_count "$STRUCTURAL_LIB" '^assert_version_bump' '^}' \
+  '_assert_version_bump_one' 4 \
+  "T12.14 assert_version_bump's body still asserts exactly four manifest surfaces"
+assert_grep "$STRUCTURAL_LIB" 'all four manifest surfaces' \
+  "T12.14b the doc comment states the same four-surface count its body asserts"
 
 echo
 echo "== Summary =="
