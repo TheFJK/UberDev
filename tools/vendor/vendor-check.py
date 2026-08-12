@@ -42,6 +42,9 @@ traceback that suppresses the checks queued behind it.
                  origin == "uberdev" and no stance; never "undecided"
     C-WATERMARK  40-hex last_reviewed_upstream_commit + ISO last_reviewed_on on
                  every third-party component
+    C-REFS       every relative sibling file a declared markdown document points
+                 at (`@ref` or `](link)`, outside code) resolves on disk;
+                 aborts rather than passing if it found no reference at all
 
 Repo-agnostic: no organisation, project id or repository name is hardcoded. All
 upstream coordinates come from the register.
@@ -83,12 +86,29 @@ UNKNOWN = "unknown"
 # exact "the guard cannot see half its corpus" failure this repo keeps hitting.
 HEADER_RE = re.compile(r"Vendored from ([^@\s]+)@([0-9a-f]{40})")
 
+# C-REFS. A shipped document that tells an agent to read a sibling file is a
+# claim about disk that no register field carries, so nothing else here can
+# check it. Fenced blocks AND inline code spans are stripped before scanning:
+# skills/writing-skills documents the `@`-ref convention by quoting a BAD
+# example inside backticks, and a scan that read it would report a dangling
+# reference against a file that is deliberately describing what not to write.
+FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+CODESPAN_RE = re.compile(r"`[^`]*`")
+# The lookbehind is what separates a REFERENCE from an ADDRESS. An `@`-ref is a
+# standalone token (`See @graphviz-conventions.dot`); an email, a package pin
+# (`pkg@1.2.3`) and a tag pin (`obra/superpowers@v6.2.0`) all carry a local part
+# immediately before the `@`. Without it every one of those parses as a sibling
+# file — `x@y.com` yields `y.com` — and reds this check against a document that
+# references nothing at all.
+AT_REF_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9]+)")
+MD_LINK_RE = re.compile(r"\]\(([^)\s]+)")
+
 # Files whose bytes are never text we can scan for a provenance header.
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                    ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".webp"}
 
 ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-README",
-              "C-LICENSE", "C-STANCE", "C-WATERMARK")
+              "C-LICENSE", "C-STANCE", "C-WATERMARK", "C-REFS")
 
 
 class Failures:
@@ -384,6 +404,65 @@ def check_header(register, plugin_dir, failures):
                                  "under %s — the scan is vacuous" % plugin_dir)
 
 
+def sibling_refs(text):
+    """Relative sibling references in a markdown body, deduped and sorted.
+
+    Fenced blocks and inline code spans are removed first — see CODESPAN_RE's
+    note. Absolute paths, bare anchors, `mailto:` and anything carrying a URL
+    scheme are not claims about this repository's disk, so they are dropped.
+    """
+    body, in_fence = [], False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            body.append(CODESPAN_RE.sub(" ", line))
+    joined = "\n".join(body)
+    out = set()
+    for target in set(AT_REF_RE.findall(joined)) | set(MD_LINK_RE.findall(joined)):
+        if "://" in target or target.startswith(("/", "#", "mailto:")):
+            continue
+        out.add(target)
+    return sorted(out)
+
+
+def check_refs(register, plugin_dir, failures):
+    seen = 0
+    for component in third_party(register):
+        cid = component_id(component)
+        path = component.get("path")
+        if not path:
+            # A pathless entry is C-SCHEMA's finding; do not double-report it.
+            continue
+        root = plugin_dir / path
+        for rel in declared_file_paths(component):
+            if not rel.endswith(".md"):
+                continue
+            # A single-file component (an agent) IS `root`; a skill component's
+            # recorded paths are relative to its directory — same idiom as
+            # check_files/refresh.
+            source = root / rel if root.is_dir() else root
+            try:
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # A declared file that is missing or unreadable is C-FILES'
+                # finding, reported there with the register-vs-disk delta.
+                continue
+            for ref in sibling_refs(text):
+                seen += 1
+                if not (source.parent / ref).exists():
+                    failures.add("C-REFS", "%s: %s references %s, which is not "
+                                           "on disk" % (cid, rel, ref))
+    # Counts references SEEN, not references RESOLVED — mirroring check_header's
+    # `found`. A tree whose references all dangle already produces N named
+    # failures above; the arm that has to exist is the one for regexes that
+    # stopped matching at all, which would otherwise report agreement.
+    if seen == 0:
+        failures.add("C-REFS", "no sibling reference found across the register "
+                               "— the scan is vacuous")
+
+
 def readme_third_party_slugs(readme_path, failures):
     """Slugs on Skills/Agents rows of the Bundled table that cite an upstream."""
     try:
@@ -574,6 +653,8 @@ def main(argv=None):
         check_stance(register, failures)
     if "C-WATERMARK" in selected:
         check_watermark(register, failures)
+    if "C-REFS" in selected:
+        check_refs(register, plugin_dir, failures)
 
     if failures:
         print("vendor-check: %d failure(s) across %s"

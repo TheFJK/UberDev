@@ -372,10 +372,10 @@
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_on": "2026-08-12",
       "stance": "fork",
-      "stance_reason": "File sets diverge: UberDev ships testing-anti-patterns.md, upstream 6.2.0 replaced it with writing-good-tests.md. Adopting that swap is a decision, not a merge.",
-      "measured_diff_lines": 72,
+      "stance_reason": "File sets are now 1:1 with upstream v6.2.0, but the tree is a composite of two upstream revisions: SKILL.md is still at e7a2d16 (upstream's own v6.2.0 prose compression of \"Why Order Matters\" and the rationalisations table is un-adopted), while writing-good-tests.md was adopted whole from 3dcbd5c (v6.2.0) under #457. No single upstream commit is drop-in, so track — which promises a digest-locked re-baseline — would be a false claim. Reclassify to track when #462 genuinely re-baselines the component.",
+      "measured_diff_lines": 64,
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -384,7 +384,7 @@
       ],
       "files": [
         "SKILL.md",
-        "testing-anti-patterns.md"
+        "writing-good-tests.md"
       ]
     },
     {
