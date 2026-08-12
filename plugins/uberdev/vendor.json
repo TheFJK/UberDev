@@ -326,7 +326,7 @@
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
       "stance_reason": "Carries the permanent local 'Parallel hypothesis testing' section recorded in its own in-file provenance header, so upstream's SKILL.md is not drop-in. Upstream fixes to the sibling scripts are still adopted deliberately (see #430).",
-      "measured_diff_lines": 83,
+      "measured_diff_lines": 195,
       "divergences": [
         {
           "ref": "namespace-rebrand",
