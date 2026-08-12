@@ -17,7 +17,7 @@
 # A debugging tool that reports "clean" without having looked is worse than no
 # tool: it terminates the investigation with a false negative.
 #
-# Two independent defects are involved and BOTH are locked here:
+# Three independent defects are involved and ALL are locked here:
 #   1. Enumeration. The `./` prefix mismatch, plus `find -path`'s inability to
 #      match `**/` against zero directory levels (so `src/**/*.test.ts` skips
 #      `src/top.test.ts` even once the prefix is right). Fixed by re-syncing to
@@ -30,6 +30,13 @@
 #      docs/uberdev/audits/2026-05-04-superpowers-vendor-audit.md). A run that
 #      executed zero tests proves nothing, so it now refuses on stderr and
 #      exits 2 — F5, and F4 as the general count-vs-work reconciliation.
+#   3. Lossy iteration. Upstream iterates the unquoted match string, so a
+#      matched path containing a space is torn into fragments and one
+#      containing a glob metacharacter is substituted — both while the
+#      reported count stays unchanged and the verdict stays green. This copy
+#      reads the matches into an array and counts the array. Purely local:
+#      upstream still does not carry it (see the vendor audit), which is why
+#      F12 asserts a correct green run rather than a refusal — F12.
 #
 # EXIT CONTRACT under test:
 #   0  every matched test ran and none polluted
@@ -62,7 +69,7 @@
 # that grepped find-polluter.sh for the new `-o -path` token would be a
 # counterfeit lock: it would pass against a "fix" that still enumerates nothing,
 # which is precisely the failure mode under repair (the #419 class). Every
-# BEHAVIOURAL case — F1-F3, F5-F7, F10-F13 — runs `bash "$SCRIPT"` against a
+# BEHAVIOURAL case — F1-F3, F5-F7, F10-F15 — runs `bash "$SCRIPT"` against a
 # real on-disk fixture with a stubbed `npm` first on PATH, and asserts on real
 # stdout, real stderr and a real exit code. The fixture's file list is written
 # out LITERALLY and never derived from the same `find -path` expression the
@@ -73,7 +80,7 @@
 # would need either), and F9 is a provenance/mode lock read off the repo file.
 #
 # FIND_POLLUTER_SCRIPT overrides which copy is executed. It exists for the
-# red-first run: point it at the pre-fix `git show` bytes and F1-F7 and F10-F13
+# red-first run: point it at the pre-fix `git show` bytes and F1-F7 and F10-F15
 # all go red — only F8 (the usage arm, which the fix does not touch) and F9
 # (which reads the repo file) stay green. Keep that list honest when a case is
 # added, or the documented red-first check sends the reader chasing phantom
@@ -111,7 +118,7 @@ FAIL=0
 # counter happens to be zero" — the latter certifies a truncated or
 # short-circuited run, the same vacuous-green shape the script under test now
 # refuses. Bump this with every case added or removed.
-EXPECTED_CASES=14
+EXPECTED_CASES=15
 pass_case() { echo "  PASS  $1"; PASS=$((PASS+1)); }
 fail_case() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
@@ -132,7 +139,7 @@ echo "## find-polluter.sh behavioural suite (#430)"
 #                        the walker is portable; a chmod-based unreadable
 #                        directory is not on the windows-latest job. Used by F13
 #                        prepended in front of bin, so npm still resolves.
-mkdir -p "$TMP/bin" "$TMP/binp" "$TMP/binf"
+mkdir -p "$TMP/bin" "$TMP/binp" "$TMP/binf" "$TMP/binm"
 cat > "$TMP/bin/npm" <<'NPM_STUB'
 #!/usr/bin/env bash
 exit 0
@@ -142,6 +149,22 @@ cat > "$TMP/binp/npm" <<'NPM_STUB'
 if [ "${2:-}" = "./src/top.test.ts" ]; then : > .pollute; fi
 exit 0
 NPM_STUB
+cat > "$TMP/binm/find" <<'FIND_STUB'
+#!/usr/bin/env bash
+# A SUCCESSFUL walk that names a path which is not there: one real match and one
+# phantom, exit 0. This is the shape F13's stub cannot produce — F13 is the
+# search FAILING, this is the search succeeding and the list being wrong — and
+# it is what an earlier test deleting a file mid-bisection, or a newline-bearing
+# filename torn by the newline-delimited list, looks like by the time the loop
+# reaches it. Used by F15.
+#
+# The phantom is named to sort AFTER the real match: the script runs the list
+# through `sort -u`, so a name like `gone.test.ts` would sort FIRST and the
+# refusal would land before anything was visited — which is a weaker assertion
+# and not the one F15 makes.
+printf './src/a/x.test.ts\n./src/a/zgone.test.ts\n'
+exit 0
+FIND_STUB
 cat > "$TMP/binf/find" <<'FIND_STUB'
 #!/usr/bin/env bash
 # A truncated walk: one real match on stdout, a diagnostic on stderr, non-zero
@@ -151,7 +174,7 @@ printf './src/a/x.test.ts\n'
 echo "find: ./src/a: Permission denied" >&2
 exit 1
 FIND_STUB
-chmod +x "$TMP/bin/npm" "$TMP/binp/npm" "$TMP/binf/find"
+chmod +x "$TMP/bin/npm" "$TMP/binp/npm" "$TMP/binf/find" "$TMP/binm/find"
 
 # Fixtures are re-created before every case, and the pollution marker removed —
 # a marker present when the loop starts now makes the script REFUSE a verdict
@@ -497,10 +520,13 @@ fi
 # ---------------------------------------------------------------------------
 # F14 — a runner that cannot be executed refuses a verdict, BEFORE any test is
 # attributed to it. This is the fourth exit-2 shape of the contract above, and
-# until this case existed it was the only refusal with no behavioural lock:
-# deleting the runner guard outright left the suite fully green (verified by
-# mutation), so a regression there would silently restore the exact vacuous
-# green #430 exists to abolish.
+# until this case existed it had no behavioural lock: deleting the runner guard
+# outright left the suite fully green (verified by mutation), so a regression
+# there would silently restore the exact vacuous green #430 exists to abolish.
+# F15 covers the path-missing shape for the same reason; between them every
+# REACHABLE exit-2 branch is now driven by a fixture. The ran-vs-matched
+# tripwire is the sole exception and is unreachable by construction — see the
+# contract note at the top.
 #
 # The fixture is the stale-shim shape — an npm that is present and carries the
 # execute bit but cannot start. That is what a stale nvm/volta/asdf shim looks
@@ -532,6 +558,40 @@ if [ -z "$f14_bad" ]; then
   pass_case "F14 an unusable runner -> refusal on stderr, rc=2, no clean verdict, nothing visited"
 else
   fail_case "F14 a runner that cannot execute must refuse a verdict —${f14_bad}"
+fi
+
+# ---------------------------------------------------------------------------
+# F15 — a matched path that is not there refuses a verdict. Fifth of the six
+# exit-2 shapes, and the last REACHABLE one to gain a lock: deleting the guard
+# outright left the suite at PASS=14 FAIL=0 (verified by mutation), so the
+# branch was deletable while the suite stayed green.
+#
+# The fixture is a SUCCESSFUL walk that names a phantom — one real match, one
+# path that does not exist, exit 0. That is deliberately not F13's shape: F13 is
+# the search FAILING (non-zero, partial list), this is the search SUCCEEDING and
+# the list being wrong. Both reach exit 2, and only the reason token and the
+# visit count tell them apart.
+#
+# It is the shape a real run produces two ways: an earlier test in the same
+# bisection deleting a file, and a newline-bearing filename torn in half by the
+# newline-delimited list (the residual the array fix cannot close, since command
+# substitution cannot carry NUL). The second is why the guard exists at all.
+#
+# The assertions pin WHERE the refusal happens, not just that it does: the real
+# match is visited first, so visited=1 — a build that refused earlier or later
+# would still exit 2 and only this discriminates.
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binm:$TMP/bin" 'src/**/*.test.ts'
+f15_bad=""
+[ "$RC" -eq 2 ] || f15_bad="${f15_bad} rc=${RC}(want 2)"
+grep -qF 'path-missing' <<<"$ERR" || f15_bad="${f15_bad} missing-reason-token-on-stderr"
+grep -qF 'zgone.test.ts' <<<"$ERR" || f15_bad="${f15_bad} refusal-does-not-name-the-absent-path"
+if grep -qF 'No polluter found' <<<"$OUT"; then f15_bad="${f15_bad} claimed-clean-on-a-phantom-path"; fi
+[ "$(visit_count "$OUT")" = "1" ] || f15_bad="${f15_bad} visited=$(visit_count "$OUT")(want 1 — refuse AT the phantom, after the real match)"
+if [ -z "$f15_bad" ]; then
+  pass_case "F15 a matched path that no longer exists -> refusal on stderr, rc=2, no clean verdict"
+else
+  fail_case "F15 a phantom entry in the file list must refuse a verdict —${f15_bad}"
 fi
 
 echo
