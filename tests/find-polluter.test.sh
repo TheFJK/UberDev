@@ -34,15 +34,20 @@
 # EXIT CONTRACT under test:
 #   0  every matched test ran and none polluted
 #   1  polluter found, or bad usage (both pre-existing)
-#   2  verdict refused — nothing matched, the file search was incomplete, or the
-#      pollution target was already present so a test would not have run
-#      (local addition; upstream returns a green 0 in all three shapes)
+#   2  verdict refused — nothing matched, the file search was incomplete, the
+#      test runner could not be executed, a matched path did not survive the
+#      file list intact, the pollution target was already present so a test
+#      would not have run, or fewer tests ran than were matched (local
+#      addition; upstream returns a green 0 in every one of these shapes).
+#      That last shape is a deliberate tripwire for a future skip path, not a
+#      reachable branch: every skip refuses before the loop ends, so no case
+#      here drives it and none should be written pretending to.
 #
 # WHY THIS SUITE EXECUTES THE SCRIPT INSTEAD OF GREPPING IT. A structural test
 # that grepped find-polluter.sh for the new `-o -path` token would be a
 # counterfeit lock: it would pass against a "fix" that still enumerates nothing,
 # which is precisely the failure mode under repair (the #419 class). Every
-# BEHAVIOURAL case — F1-F3, F5-F7, F10-F12 — runs `bash "$SCRIPT"` against a
+# BEHAVIOURAL case — F1-F3, F5-F7, F10-F13 — runs `bash "$SCRIPT"` against a
 # real on-disk fixture with a stubbed `npm` first on PATH, and asserts on real
 # stdout, real stderr and a real exit code. The fixture's file list is written
 # out LITERALLY and never derived from the same `find -path` expression the
@@ -53,9 +58,14 @@
 # would need either), and F9 is a provenance/mode lock read off the repo file.
 #
 # FIND_POLLUTER_SCRIPT overrides which copy is executed. It exists for the
-# red-first run (point it at `git show HEAD:…` bytes and watch F1-F7, F10 fail);
-# CI never sets it. F9 deliberately ignores it and reads the repo file, so the
-# override cannot make the provenance assertion pass against a temp copy.
+# red-first run: point it at the pre-fix `git show` bytes and F1-F7 and F10-F13
+# all go red — only F8 (the usage arm, which the fix does not touch) and F9
+# (which reads the repo file) stay green. Keep that list honest when a case is
+# added, or the documented red-first check sends the reader chasing phantom
+# regressions in a suite whose whole point is that a green must be earned.
+# CI never sets the override. F9 deliberately ignores it and reads the repo
+# file, so the override cannot make the provenance assertion pass against a
+# temp copy.
 #
 # Assertions use ASCII substrings only (`FOUND POLLUTER!`, `No polluter found`,
 # `No test files matched`, `Pollution already exists`, `Usage:`) — never the
@@ -86,7 +96,7 @@ FAIL=0
 # counter happens to be zero" — the latter certifies a truncated or
 # short-circuited run, the same vacuous-green shape the script under test now
 # refuses. Bump this with every case added or removed.
-EXPECTED_CASES=12
+EXPECTED_CASES=13
 pass_case() { echo "  PASS  $1"; PASS=$((PASS+1)); }
 fail_case() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
@@ -102,7 +112,12 @@ echo "## find-polluter.sh behavioural suite (#430)"
 #   binp/npm  polluting: creates the marker only for ./src/top.test.ts, i.e.
 #                        the depth-0 file the pre-fix enumeration skipped, so a
 #                        half-fix that finds only the nested file still fails F6
-mkdir -p "$TMP/bin" "$TMP/binp"
+#   binf/find truncated: emits a partial list and exits non-zero, the shape of a
+#                        walk that could not read part of the tree. Shadowing
+#                        the walker is portable; a chmod-based unreadable
+#                        directory is not on the windows-latest job. Used by F13
+#                        prepended in front of bin, so npm still resolves.
+mkdir -p "$TMP/bin" "$TMP/binp" "$TMP/binf"
 cat > "$TMP/bin/npm" <<'NPM_STUB'
 #!/usr/bin/env bash
 exit 0
@@ -112,7 +127,16 @@ cat > "$TMP/binp/npm" <<'NPM_STUB'
 if [ "${2:-}" = "./src/top.test.ts" ]; then : > .pollute; fi
 exit 0
 NPM_STUB
-chmod +x "$TMP/bin/npm" "$TMP/binp/npm"
+cat > "$TMP/binf/find" <<'FIND_STUB'
+#!/usr/bin/env bash
+# A truncated walk: one real match on stdout, a diagnostic on stderr, non-zero
+# exit — exactly what an unreadable subtree, an I/O error or a depth limit
+# produces. The partial list is the point: it looks like a usable enumeration.
+printf './src/a/x.test.ts\n'
+echo "find: ./src/a: Permission denied" >&2
+exit 1
+FIND_STUB
+chmod +x "$TMP/bin/npm" "$TMP/binp/npm" "$TMP/binf/find"
 
 # Fixtures are re-created before every case, and the pollution marker removed —
 # a marker present when the loop starts now makes the script REFUSE a verdict
@@ -242,6 +266,10 @@ fi
 # ---------------------------------------------------------------------------
 # F4 — the reported count reconciles with the work actually done. This is the
 # general form of the bug: `Found N` must equal the number of tests visited.
+# Scope note: it is a derived lock over F1's already-captured stdout, NOT a
+# lock on the script's end-of-loop RAN-vs-TOTAL guard. That guard is the
+# unreachable tripwire described in the EXIT CONTRACT above; nothing here
+# drives it, so do not read a green F4 as coverage of it.
 f4_found="$(found_n "$F1_OUT")"
 f4_visits="$(visit_count "$F1_OUT")"
 if [ "$f4_found" = "2" ] && [ "$f4_visits" = "2" ]; then
@@ -414,6 +442,30 @@ if [ -z "$f12_bad" ]; then
   pass_case "F12 a matched path containing a space is counted once and visited intact"
 else
   fail_case "F12 enumeration and iteration must agree for whitespace paths —${f12_bad}"
+fi
+
+# ---------------------------------------------------------------------------
+# F13 — a file search that could not complete refuses a verdict. This is the
+# third exit-2 shape of the contract above and the one whose regression costs a
+# single token: drop the `set -o pipefail` wrapper from the enumeration command
+# substitution and the assignment observes the sorter's status instead of the
+# walker's, so a truncated walk hands a partial file list to a confident clean
+# verdict — a false negative in a debugging tool, the #430 class itself.
+# `find` is shadowed by a stub first on PATH (the mechanism the npm stub
+# already uses), with the npm stub directory behind it so the runner still
+# resolves; no chmod-unreadable-directory trick, which would not behave on the
+# windows-latest job.
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binf:$TMP/bin" 'src/**/*.test.ts'
+f13_bad=""
+[ "$RC" -eq 2 ] || f13_bad="${f13_bad} rc=${RC}(want 2)"
+grep -qF 'search for test files failed' <<<"$ERR" || f13_bad="${f13_bad} missing-refusal-on-stderr"
+if grep -qF 'No polluter found' <<<"$OUT"; then f13_bad="${f13_bad} claimed-clean-after-a-truncated-search"; fi
+[ "$(visit_count "$OUT")" = "0" ] || f13_bad="${f13_bad} visited=$(visit_count "$OUT")(want 0)"
+if [ -z "$f13_bad" ]; then
+  pass_case "F13 an incomplete file search -> refusal on stderr, rc=2, no clean verdict, nothing visited"
+else
+  fail_case "F13 a truncated walk must refuse a verdict —${f13_bad}"
 fi
 
 echo
