@@ -83,8 +83,13 @@ suite going green — the suite was green throughout, which is the point.
   relative spelling is never resolved against the process CWD. The refusal also
   names the disagreeing scalar (`preset_mismatch:WORKTREE_ROOT`) instead of
   saying one anonymous word for all nine, and an ill-shaped `--presets-json`
-  value — a non-string, or a string carrying an embedded NUL — is now the typed
-  refusal `invalid_presets:<KEY>` rather than a Python traceback on rc 1. A
+  value — a non-string, a string carrying an embedded NUL, or one carrying a
+  lone surrogate that no filesystem encoder accepts — is now the typed refusal
+  `invalid_presets:<KEY>` rather than a Python traceback on rc 1. The
+  encodability half is asked with `os.fsencode`, the encoder the path API itself
+  calls, so it is total over every string instead of enumerating the ways one
+  can be un-encodable; surrogates from PEP 383 `surrogateescape` still pass,
+  which is what keeps a repository path holding a raw non-UTF-8 byte usable. A
   structural guard in `tests/command-workspace.test.sh` registers every path
   comparison in the module with the reason it is not that one comparator, so a
   third hand-rolled copy reds CI.

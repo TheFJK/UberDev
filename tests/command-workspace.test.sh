@@ -1449,13 +1449,26 @@ esac
 # The NUL is written as the JSON escape \u0000. A literal NUL byte in a shell
 # script is not portable and does not survive most editors; json.loads decodes
 # the escape into the real character, which is what reaches Python.
+#
+# The LONE SURROGATE \ud800 is the ninth shape, and the reason this list is not
+# just "non-str plus NUL". It IS a str and carries no NUL, so it passes both of
+# those tests and still raises UnicodeEncodeError inside os.path.realpath -- the
+# identical untyped escape on the identical surface. A gate that refuses eight
+# of nine shapes reads exactly like a complete one, so the ninth is pinned here
+# rather than left for the type check to imply.
+#
+# Its counterpart \udcff is deliberately NOT in this list, because it must be
+# ACCEPTED: a raw invalid UTF-8 byte in a real pathname arrives that way through
+# PEP 383 surrogateescape and round-trips back through os.fsencode. Refusing
+# every surrogate would make a legal POSIX repository path unusable.
 SHAPE_RUN_ID=20260710-010209-abcdef0
 for BAD_PRESET in \
   '{"WORKTREE_ROOT": 5}' \
   '{"WORKTREE_ROOT": ["a"]}' \
   '{"WORKTREE_ROOT": {"a": 1}}' \
   '{"WORKTREE_ROOT": true}' \
-  '{"WORKTREE_ROOT": "\u0000/tmp"}'; do
+  '{"WORKTREE_ROOT": "\u0000/tmp"}' \
+  '{"WORKTREE_ROOT": "/tmp/\ud800"}'; do
   SHAPE_ERR="$TMP/preset-shape.stderr"
   SHAPE_RC=0
   python3 -I -B "$HELPER" --caller review-pr --carrier-json "$SOLVE_CARRIER" \

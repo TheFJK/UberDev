@@ -1507,6 +1507,36 @@ def main() -> int:
     for preset_key, preset_value in presets.items():
         if not isinstance(preset_value, str) or "\x00" in preset_value:
             fail(f"invalid_presets:{preset_key}")
+        # `isinstance(str)` plus the NUL test is still not the whole shape
+        # question, and the gap is the SAME untyped escape on the SAME
+        # untrusted-argv surface those two exist to close. A JSON `\ud800`
+        # escape decodes to a LONE SURROGATE: a str, no NUL, passes both tests
+        # above, and then raises UnicodeEncodeError inside os.path.realpath.
+        # Eight ill-shaped values were refused and the ninth still produced the
+        # traceback -- an incomplete gate reads exactly like a complete one.
+        #
+        # `os.fsencode` is not a third approximation of the question; it is the
+        # encoder the path API itself calls, so asking it directly is total over
+        # every str rather than enumerating the ways one can be un-encodable.
+        #
+        # It deliberately does NOT refuse every surrogate. A raw invalid UTF-8
+        # byte in a real POSIX pathname arrives as \udc80-\udcff through PEP 383
+        # surrogateescape and round-trips back to that byte, so os.fsencode
+        # accepts it -- which is what keeps a legal-but-odd repository path
+        # reviewable instead of unusable. Verified: fsencode('/tmp/\udcff') ->
+        # b'/tmp/\xff'; fsencode('/tmp/\ud800') raises.
+        #
+        # Assigned, not raised from inside the `except`: `fail` would then chain
+        # onto the UnicodeEncodeError and any traceback would print the very
+        # encoder noise this refusal exists to replace.
+        try:
+            os.fsencode(preset_value)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            preset_encodable = False
+        else:
+            preset_encodable = True
+        if not preset_encodable:
+            fail(f"invalid_presets:{preset_key}")
     validate_presets(presets, expected_globals, repo, expected_workspace, mode)
     workspace, paths = allocate_workspace(repo, args.run_id, artifacts, repo_identity)
     descriptor = {
