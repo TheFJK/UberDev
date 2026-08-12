@@ -111,7 +111,7 @@ FAIL=0
 # counter happens to be zero" — the latter certifies a truncated or
 # short-circuited run, the same vacuous-green shape the script under test now
 # refuses. Bump this with every case added or removed.
-EXPECTED_CASES=13
+EXPECTED_CASES=14
 pass_case() { echo "  PASS  $1"; PASS=$((PASS+1)); }
 fail_case() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
@@ -492,6 +492,46 @@ if [ -z "$f13_bad" ]; then
   pass_case "F13 an incomplete file search -> refusal on stderr, rc=2, no clean verdict, nothing visited"
 else
   fail_case "F13 a truncated walk must refuse a verdict —${f13_bad}"
+fi
+
+# ---------------------------------------------------------------------------
+# F14 — a runner that cannot be executed refuses a verdict, BEFORE any test is
+# attributed to it. This is the fourth exit-2 shape of the contract above, and
+# until this case existed it was the only refusal with no behavioural lock:
+# deleting the runner guard outright left the suite fully green (verified by
+# mutation), so a regression there would silently restore the exact vacuous
+# green #430 exists to abolish.
+#
+# The fixture is the stale-shim shape — an npm that is present and carries the
+# execute bit but cannot start. That is what a stale nvm/volta/asdf shim looks
+# like once its runtime is uninstalled, and it is precisely the case a PATH
+# lookup cannot see: `command -v` finds the file, so only EXECUTING the runner
+# refuses it. The stub exits non-zero for `--version` rather than relying on a
+# missing interpreter, because the kernel's "bad interpreter" status is not
+# portable (bash and sh report 126, zsh reports 127) and this suite also runs
+# on the windows-latest job.
+#
+# `visited=0` is the load-bearing assertion, not rc=2 alone: it is what pins the
+# refusal to the WHOLE-RUN preflight rather than to the mid-run backstop. A
+# build that lost the preflight but kept the in-loop guard would still exit 2 —
+# after visiting a file — and only this assertion tells the two apart.
+mkdir -p "$TMP/binx"
+cat > "$TMP/binx/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+exit 127
+NPM_STUB
+chmod +x "$TMP/binx/npm"
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binx" 'src/**/*.test.ts'
+f14_bad=""
+[ "$RC" -eq 2 ] || f14_bad="${f14_bad} rc=${RC}(want 2)"
+grep -qF 'runner-unusable' <<<"$ERR" || f14_bad="${f14_bad} missing-refusal-on-stderr"
+if grep -qF 'No polluter found' <<<"$OUT"; then f14_bad="${f14_bad} claimed-clean-with-an-unusable-runner"; fi
+[ "$(visit_count "$OUT")" = "0" ] || f14_bad="${f14_bad} visited=$(visit_count "$OUT")(want 0 — refusal must precede any test)"
+if [ -z "$f14_bad" ]; then
+  pass_case "F14 an unusable runner -> refusal on stderr, rc=2, no clean verdict, nothing visited"
+else
+  fail_case "F14 a runner that cannot execute must refuse a verdict —${f14_bad}"
 fi
 
 echo
