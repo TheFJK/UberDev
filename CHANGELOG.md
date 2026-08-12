@@ -69,6 +69,25 @@ suite going green — the suite was green throughout, which is the point.
   told its head moved outside the validated fixers, because the guard compared
   against `${VALIDATED_FIXER_HEAD_SHA:-}` and any real SHA differs from "".
 - **The child timeout reached the dispatcher blank** at five call sites.
+- **The workspace setup fence refused its own inherited `$WORKTREE_ROOT`** on
+  native Windows, so `/review-pr`, `/simplify` and post-impl-review all died
+  `preset_mismatch` before allocating anything (#471). `validate_presets`
+  byte-compared caller-supplied path scalars against the helper's own resolved
+  spelling, while `validate_requested_root` — running one step earlier on the
+  very same string — compared them with a normalising comparator: one invariant,
+  two expressions, opposite verdicts on the same pair. Git for Windows spells the
+  repository root with forward slashes and `os.path.abspath` hands back
+  backslashes, and `!=` cannot see past that; on macOS the same refusal hit any
+  logical `$TMPDIR` spelling under the `/var` → `/private/var` symlink. Both call
+  sites now route through one `same_validated_path`, absoluteness included, so a
+  relative spelling is never resolved against the process CWD. The refusal also
+  names the disagreeing scalar (`preset_mismatch:WORKTREE_ROOT`) instead of
+  saying one anonymous word for all nine, and an ill-shaped `--presets-json`
+  value — a non-string, or a string carrying an embedded NUL — is now the typed
+  refusal `invalid_presets:<KEY>` rather than a Python traceback on rc 1. A
+  structural guard in `tests/command-workspace.test.sh` registers every path
+  comparison in the module with the reason it is not that one comparator, so a
+  third hand-rolled copy reds CI.
 
 ### Notes
 

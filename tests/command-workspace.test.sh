@@ -87,6 +87,220 @@ for caller, doc_path in (
     )
 PY
 
+# #471 — "one comparator for 'same location'", made enforceable.
+#
+# The fix that introduced same_validated_path claimed the two call sites "cannot
+# drift again". Nothing in CI held that claim: the only mentions of the name
+# under tests/ were PROSE COMMENTS, which is precisely the state #370 exists to
+# call out -- auditable by a human, enforced by nothing. This block is the
+# producer that comment was not.
+#
+# WHY NOT A `CONTRACT:` MARKER. The #371 mechanism (tests/contract_markers.py)
+# compares closed TOKEN VOCABULARIES: it extracts a member SET from a marked
+# region and requires every marked site to yield the same set, with MIN_MEMBERS
+# = 2. "Both call sites route through one function" is not a token set -- there
+# is no vocabulary to extract, the extractor would find zero members and fail
+# loudly, and a marker parked next to it would be decorative. A guard that sits
+# in CI and covers nothing is `tests/component-token-schema.py`, the register's
+# own cautionary tale. So this is the other option the convention allows: a real
+# structural guard, in the test file that already owns this module.
+#
+# WHAT IT ASSERTS. Every comparison in command-workspace.py that asks "do two
+# path spellings name one place" is registered here with the reason it is not
+# same_validated_path. Detection is AST, in two rules, because one is not
+# enough:
+#   (a) a Compare that CALLS a canonicaliser -- realpath / abspath / normcase /
+#       commonpath / samefile / portable_canonical / portable_directory /
+#       same_portable_path / same_validated_path, local aliases resolved
+#       (portable_canonical binds `normalize = os.path.normcase`);
+#   (b) a Compare over a NAME BOUND from one earlier in the same function. Rule
+#       (a) alone misses the third copy this guard was written for --
+#       `git_toplevel == repo` in load_carrier, where the realpath is on the
+#       assignment line, not in the comparison.
+#
+# LIMITS, stated rather than implied. The key is (function, canonicalisers,
+# derived operands, operators), so an expression REPLACED by a different one
+# with the same signature in the same function is invisible; behaviour is held
+# by the executable rows below, not by this. Rule (b) is function-local, so a
+# canonical spelling that crosses a function boundary is not tracked -- main()'s
+# `repo` comes back from load_carrier and its descriptor comparison is byte
+# equality between two values this helper itself produced, which is correct
+# there and is why main() is legitimately absent from the registry.
+python3 -I -B - "$HELPER" <<'PY'
+import ast
+import sys
+from collections import Counter
+
+# Functions that PRODUCE a canonical path spelling, or that ARE a spelling
+# comparison. A Compare touching any of these is asking the guarded question.
+CANONICALISERS = frozenset({
+    "realpath", "abspath", "normcase", "commonpath", "samefile",
+    "portable_canonical", "portable_directory",
+    "same_portable_path", "same_validated_path",
+})
+
+# key: (function, canonicalisers, derived operands, operators) -> (count, reason)
+# Every entry is a comparison that is NOT routed through same_validated_path,
+# with the reason it asks a different question. Adding a hand-rolled copy adds a
+# key (or bumps a count) and reds; deleting one drops a key and reds.
+REGISTRY: dict[tuple, tuple[int, str]] = {
+    ("same_validated_path", ("realpath",), (), ("Eq",)): (
+        1,
+        "THE comparator. descriptor_relative arm.",
+    ),
+    ("same_portable_path", ("abspath", "normcase"), (), ("Eq",)): (
+        1,
+        "THE comparator's portable_windows arm, called only by same_validated_path.",
+    ),
+    ("portable_canonical", ("normcase",), (), ("NotEq",)): (
+        2,
+        "A DIFFERENT question: 'is this spelling ALREADY canonical', asked of one "
+        "path against its own abspath/realpath. Never compares two caller values.",
+    ),
+    ("load_carrier", ("normcase",), (), ("NotEq",)): (
+        1,
+        "A DIFFERENT question: is the state directory's BASENAME the per-uid name. "
+        "Filename equality, not a location comparison.",
+    ),
+    ("load_carrier", (), ("repo",), ("NotEq",)): (
+        1,
+        "A DIFFERENT question: 'is repository_id ALREADY canonical', the "
+        "descriptor_relative twin of portable_canonical's check (`repo = "
+        "realpath(repo_raw)` then `repo != repo_raw`). Deliberately strict: the "
+        "carrier's repository_id is AUTHORITY-BEARING, so an alias spelling is "
+        "REFUSED here rather than normalised -- the opposite of what a preset, "
+        "which carries no authority, needs.",
+    ),
+    ("load_carrier", ("abspath", "normcase"), (), ("Eq",)): (
+        1,
+        "UNENFORCED-INVARIANT RESIDUE (#471), registered rather than rewritten. "
+        "This is the portable_windows arm of the same_toplevel check, and it is "
+        "character-for-character what same_portable_path computes -- the same "
+        "algebra written out a third time. It is CORRECT today, and load-bearing: "
+        "Git for Windows spells --show-toplevel with forward slashes while "
+        "portable_directory returned the abspath backslash spelling, so the "
+        "normalisation is doing real work. It is also the copy that would drift, "
+        "which is why it is pinned here. Not rewritten in this commit: it compares "
+        "the helper's OWN probe of the repository, not a caller-supplied scalar, "
+        "and same_validated_path now carries an isabs precondition and a mode "
+        "dispatch neither operand needs. Rewriting a security check with no test "
+        "that can tell the two versions apart is how the #471 traceback happened.",
+    ),
+    ("load_carrier", (), ("repo",), ("Eq",)): (
+        1,
+        "The descriptor_relative arm of that same same_toplevel expression, and "
+        "the raw `git_toplevel == repo` a reviewer named as the third copy of the "
+        "guarded question. No live defect is provable: the canonicality check "
+        "above has already refused any repository_id that is not its own realpath, "
+        "and git is invoked with `-C repo`, so both operands are canonical by the "
+        "time this runs. The INVARIANT was still unenforced, which is what this "
+        "registry fixes.",
+    ),
+    ("beneath", ("commonpath",), (), ("Eq",)): (
+        1,
+        "A DIFFERENT question: CONTAINMENT ('is path under root'), not identity.",
+    ),
+    ("portable_beneath", ("normcase",), (), ("Eq",)): (
+        1,
+        "The portable_windows twin of beneath. Containment, not identity.",
+    ),
+}
+
+# The one comparator must be REACHED from both call sites; a registry of
+# non-copies proves nothing if the comparator itself is dead code.
+EXPECTED_CALLERS = {"validate_presets", "validate_requested_root"}
+
+source = open(sys.argv[1], encoding="utf-8").read()
+tree = ast.parse(source)
+lines = source.splitlines()
+
+
+def called(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            func = sub.func
+            if isinstance(func, ast.Attribute):
+                names.add(func.attr)
+            elif isinstance(func, ast.Name):
+                names.add(func.id)
+    return names
+
+
+found: Counter = Counter()
+where: dict[tuple, list[str]] = {}
+callers_of_comparator: set[str] = set()
+
+for fn in ast.walk(tree):
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        continue
+    if "same_validated_path" in called(fn) and fn.name != "same_validated_path":
+        callers_of_comparator.add(fn.name)
+    alias: dict[str, str] = {}
+    derived: set[str] = set()
+    for sub in ast.walk(fn):
+        if not isinstance(sub, ast.Assign) or len(sub.targets) != 1:
+            continue
+        target, value = sub.targets[0], sub.value
+        if (isinstance(target, ast.Name) and isinstance(value, ast.Attribute)
+                and value.attr in CANONICALISERS):
+            alias[target.id] = value.attr
+        if isinstance(value, ast.Call) and called(value) & CANONICALISERS:
+            if isinstance(target, ast.Name):
+                derived.add(target.id)
+            elif isinstance(target, ast.Tuple) and target.elts and isinstance(target.elts[0], ast.Name):
+                # portable_directory returns (canonical_path, stat_result); only
+                # element 0 is a spelling.
+                derived.add(target.elts[0].id)
+    for sub in ast.walk(fn):
+        if not isinstance(sub, ast.Compare):
+            continue
+        via = tuple(sorted({alias.get(n, n) for n in called(sub)} & CANONICALISERS))
+        operands = [sub.left, *sub.comparators]
+        touched = tuple(sorted({
+            node.id for node in operands
+            if isinstance(node, ast.Name) and node.id in derived
+        }))
+        if not via and not touched:
+            continue
+        key = (fn.name, via, touched, tuple(type(op).__name__ for op in sub.ops))
+        found[key] += 1
+        where.setdefault(key, []).append(
+            f"{fn.name}:{sub.lineno}: {lines[sub.lineno - 1].strip()}"
+        )
+
+expected = Counter({key: count for key, (count, _reason) in REGISTRY.items()})
+if found != expected:
+    report = ["command-workspace.py path-comparison registry is out of date.", ""]
+    for key in sorted(set(found) | set(expected), key=repr):
+        got, want = found.get(key, 0), expected.get(key, 0)
+        if got == want:
+            continue
+        report.append(f"  {key}: registered {want}, found {got}")
+        report.extend(f"      {site}" for site in where.get(key, ()))
+    report += [
+        "",
+        "Every comparison asking 'do two path spellings name one place' must",
+        "either route through same_validated_path or be registered above with",
+        "the reason it asks a DIFFERENT question. A new unregistered copy is the",
+        "#370 drift class -- one invariant, N uncompared expressions -- which is",
+        "what produced the preset_mismatch blocker #471 fixed.",
+    ]
+    raise SystemExit("\n".join(report))
+
+# Neither validator may hold a comparison of its own: that is the whole claim.
+for owner in EXPECTED_CALLERS:
+    assert not [key for key in found if key[0] == owner], (
+        f"{owner} hand-rolls a path comparison instead of calling same_validated_path"
+    )
+assert callers_of_comparator == EXPECTED_CALLERS, (
+    "same_validated_path is called by "
+    f"{sorted(callers_of_comparator)}, expected {sorted(EXPECTED_CALLERS)} -- a "
+    "registry of non-copies proves nothing if the one comparator is unreached."
+)
+print("command-workspace-path-comparison-registry-ok")
+PY
+
 . "$LIB"
 
 file_mode() {
@@ -410,8 +624,16 @@ for index, module_path in enumerate(module_paths):
     )
     real_normcase = module.os.path.normcase
     real_abspath = module.os.path.abspath
+    # isabs BELONGS to the simulated arm: same_validated_path refuses a relative
+    # candidate, and posixpath.isabs("C:/Users/...") is False, so leaving the real
+    # one in place would refuse a perfectly good Windows spelling and make this
+    # row assert the opposite of what it claims. On a native Windows runner
+    # os.path IS ntpath, so patching all three is what "simulate that runner"
+    # means -- patching two of them simulates a machine that does not exist.
+    real_isabs = module.os.path.isabs
     module.os.path.normcase = ntpath.normcase
     module.os.path.abspath = ntpath.abspath
+    module.os.path.isabs = ntpath.isabs
     try:
         module.validate_presets(
             {"WORKTREE_ROOT": forward_spelled},
@@ -420,6 +642,37 @@ for index, module_path in enumerate(module_paths):
             windows_workspace,
             "portable_windows",
         )
+        # #471 follow-up: absoluteness is part of the question on BOTH arms.
+        #
+        # The CWD is rigged to the repository's PARENT, which is what makes this
+        # row non-vacuous rather than a restatement of the row above. ntpath's
+        # POSIX abspath is `normpath(join(os.getcwd(), path))`, so with getcwd
+        # pointing there the relative spelling `repository` resolves to exactly
+        # windows_repo and same_portable_path would say YES. Left unrigged, a
+        # POSIX cwd can never join to a `C:\` path, the comparison fails for the
+        # wrong reason, and the row passes with the defect fully restored --
+        # the same vacuity trap the forward/backslash pair above documents.
+        # A setup fence whose CWD sits in the repository tree is the ordinary
+        # case, not a contrived one.
+        real_getcwd = module.os.getcwd
+        module.os.getcwd = lambda: ntpath.dirname(windows_repo)
+        try:
+            assert ntpath.normcase(ntpath.abspath("repository")) == ntpath.normcase(
+                windows_repo
+            ), "cwd rig failed -- the relative spelling no longer resolves to the repo"
+            expect_failure(
+                module,
+                "preset_mismatch:WORKTREE_ROOT",
+                lambda: module.validate_presets(
+                    {"WORKTREE_ROOT": "repository"},
+                    {},
+                    windows_repo,
+                    windows_workspace,
+                    "portable_windows",
+                ),
+            )
+        finally:
+            module.os.getcwd = real_getcwd
         # Non-vacuous: a genuinely different location is still refused, and the
         # refusal now NAMES the disagreeing scalar. One anonymous word for nine
         # values is what made the Windows log unattributable in the first place.
@@ -450,6 +703,7 @@ for index, module_path in enumerate(module_paths):
     finally:
         module.os.path.normcase = real_normcase
         module.os.path.abspath = real_abspath
+        module.os.path.isabs = real_isabs
 
     workspace, artifacts = module.allocate_workspace(
         str(repo),
@@ -1152,6 +1406,80 @@ case "$PRESET_REFUSAL" in
 esac
 unset WORKTREE_ROOT || true
 uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" >/dev/null
+
+# #471 follow-up — a RELATIVE preset spelling is refused even when the process
+# CWD makes it name the right directory.
+#
+# The first edition of same_validated_path left os.path.isabs() behind in
+# validate_requested_root, so the two call sites STILL did not ask the same
+# question: requested-root refused a relative spelling, presets realpath'd it
+# against the process CWD and accepted it. Run from inside the repository,
+# WORKTREE_ROOT="." resolved to $REPO and returned rc 0 -- accepted where the
+# pre-#471 byte comparison had refused it. The value is discarded either way, so
+# nothing was exploitable; the defect is that the answer depended on state this
+# helper neither controls nor validates, which is a WEAKER question, not the
+# same one. This row runs the fence FROM $REPO so a comparator that resolves
+# against CWD gets every chance to say yes.
+RELATIVE_REFUSAL="$(
+  cd "$REPO" || exit 3
+  unset UBERDEV_COMMAND_WORKSPACE_JSON RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+  WORKTREE_ROOT=.
+  uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" 2>&1 >/dev/null
+)" && { echo 'a relative WORKTREE_ROOT was resolved against the process CWD and accepted' >&2; exit 1; }
+case "$RELATIVE_REFUSAL" in
+  *preset_mismatch:WORKTREE_ROOT*) ;;
+  *) echo "relative preset refusal did not name the scalar: $RELATIVE_REFUSAL" >&2; exit 1 ;;
+esac
+
+# #471 follow-up — every ILL-SHAPED preset value is a typed refusal, never a
+# traceback.
+#
+# validate_presets hands each value straight to os.path, which raises TypeError
+# on a non-str and ValueError on an embedded NUL. Neither is a Failure, and
+# cli() catches Failure only, so both escaped as a Python traceback on rc 1 --
+# printing this install's absolute paths -- where every other refusal on this
+# untrusted-argv surface is rc 2 plus one reason word.
+#
+# Driven through the HELPER, not through uberdev_command_workspace_prepare: that
+# wrapper builds the JSON from nine shell scalars, which are str by construction
+# and cannot carry a NUL (execve forbids it in argv), so it cannot express these
+# inputs at all. The hand-built payload is the reachable one and therefore the
+# one that matters -- `--presets-json` is argv on a security boundary.
+#
+# The NUL is written as the JSON escape \u0000. A literal NUL byte in a shell
+# script is not portable and does not survive most editors; json.loads decodes
+# the escape into the real character, which is what reaches Python.
+SHAPE_RUN_ID=20260710-010209-abcdef0
+for BAD_PRESET in \
+  '{"WORKTREE_ROOT": 5}' \
+  '{"WORKTREE_ROOT": ["a"]}' \
+  '{"WORKTREE_ROOT": {"a": 1}}' \
+  '{"WORKTREE_ROOT": true}' \
+  '{"WORKTREE_ROOT": "\u0000/tmp"}'; do
+  SHAPE_ERR="$TMP/preset-shape.stderr"
+  SHAPE_RC=0
+  python3 -I -B "$HELPER" --caller review-pr --carrier-json "$SOLVE_CARRIER" \
+    --run-id "$SHAPE_RUN_ID" --presets-json "$BAD_PRESET" >/dev/null 2>"$SHAPE_ERR" \
+    || SHAPE_RC=$?
+  # rc 2 is the typed-refusal contract; an uncaught Python exception exits 1.
+  [ "$SHAPE_RC" = 2 ] || {
+    echo "ill-shaped preset $BAD_PRESET exited $SHAPE_RC, not 2:" >&2; cat "$SHAPE_ERR" >&2; exit 1; }
+  grep -q '^uberdev command workspace: invalid_presets:WORKTREE_ROOT$' "$SHAPE_ERR" || {
+    echo "ill-shaped preset $BAD_PRESET did not name the scalar:" >&2; cat "$SHAPE_ERR" >&2; exit 1; }
+  # Asserted separately from the rc: a future refactor could keep rc 2 while
+  # printing a traceback alongside the reason, and that still leaks paths.
+  ! grep -q 'Traceback (most recent call last)' "$SHAPE_ERR" || {
+    echo "ill-shaped preset $BAD_PRESET printed a traceback:" >&2; cat "$SHAPE_ERR" >&2; exit 1; }
+  # Fails CLOSED: the shape gate runs before allocate_workspace, so a refused
+  # payload leaves no workspace behind for the next caller to re-enter.
+  [ ! -e "$REPO/.uberdev/research/$SHAPE_RUN_ID" ] || {
+    echo "ill-shaped preset $BAD_PRESET allocated a workspace" >&2; exit 1; }
+done
+# Non-vacuous: the SAME run id, same carrier, well-shaped values -> rc 0. Without
+# this the loop above would still pass if the helper refused every payload.
+python3 -I -B "$HELPER" --caller review-pr --carrier-json "$SOLVE_CARRIER" \
+  --run-id "$SHAPE_RUN_ID" --presets-json "$(jq -cn --arg r "$REPO" '{WORKTREE_ROOT:$r}')" >/dev/null
+[ -d "$REPO/.uberdev/research/$SHAPE_RUN_ID" ]
 
 # Review rejects an inherited simplify carrier before allocating its workspace.
 BAD_RUN_ID=20260710-010204-abcdef0
