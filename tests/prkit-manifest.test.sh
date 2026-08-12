@@ -31,8 +31,8 @@ done < "$MANIFEST"
 # the seventh Phase 1 reviewer #433 added).
 #
 count=$(grep -cvE '^\s*(#|$)' "$MANIFEST")
-[ "$count" -eq 42 ] && ok "M2 manifest lists exactly 42 files" \
-  || no "M2 manifest lists $count files (expected 42)"
+[ "$count" -eq 43 ] && ok "M2 manifest lists exactly 43 files" \
+  || no "M2 manifest lists $count files (expected 43)"
 
 # M3 — excluded files are NOT listed (goal-state, hooks, aliases)
 for bad in lib/goal-state.sh lib/aliases-sync.sh \

@@ -625,6 +625,14 @@ print(value["authority_path"],end="")' "$SIMPLIFY_FIXER_AUTHORITY_RECEIPT")" || 
 SIMPLIFY_FIXER_AUTHORITY_SHA256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["authority_sha256"],end="")' "$SIMPLIFY_FIXER_AUTHORITY_RECEIPT")" || return 74
 [ -n "$SIMPLIFY_FIXER_AUTHORITY_PATH" ] && [ -n "$SIMPLIFY_FIXER_AUTHORITY_SHA256" ] || return 74
 SIMPLIFY_FIXER_APPLIED_CONTENT_PATH="$RESEARCH_DIR_ABS/standalone-applied-content.json"
+# The fixer's output-FORMAT contract (#474), resolved from the SAME
+# policy/solve-run-tree-v1.json declaration the routed composer reads off this
+# edge's `output_contract`, exactly as the two review_pr.fix.* fences do. This
+# is the THIRD emitter of a `stage=fix` envelope, and the script's arm is shared
+# by both modes rather than mode-scoped like the review arm: without this key
+# the stage aborts `bad_contract_path` before the nonce gate and /simplify has
+# no Phase 2 fixer at all on the RFC 0015 default transport.
+REVIEW_FLEET_FIXER_CONTRACT_PATH="$(review_fleet_contract_path "$UBERDEV_REVIEW_PLUGIN_ROOT" code-fixer-v1)" || return 74
 REVIEW_FLEET_FIX_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-fix-standalone-iter${REVIEW_ITERATION}.launch.json"
 SIMPLIFY_FIXER_HEAD_BEFORE="$(git -C "$WORKTREE_ROOT" rev-parse HEAD)" || return 74
 review_fleet_bind_fixer simplify.fix.phase2 "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
@@ -644,6 +652,7 @@ uberdev_emit_workflow_args review-fleet \
   reviewIteration="$REVIEW_ITERATION" \
   fixerEdgeId=simplify.fix.phase2 \
   commitType=refactor \
+  fixerContractPathAbs="$REVIEW_FLEET_FIXER_CONTRACT_PATH" \
   findingsPathAbs="$AGG_PATH" \
   findingsSha256="$FIX_FINDINGS_SHA256" \
   standaloneSnapshotPathAbs="$STANDALONE_SNAPSHOT_PATH" \

@@ -60,3 +60,4 @@ policy/solve-run-tree-v1.json
 shared/phase1-reviewer-output-v1.md
 shared/finding-verifier-output-v1.md
 shared/finding-confidence-rubric-v1.md
+shared/code-fixer-output-v1.md

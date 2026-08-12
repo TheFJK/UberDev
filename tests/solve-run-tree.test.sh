@@ -68,10 +68,18 @@ review_edges={
 }
 assert tree['output_contracts']=={
     'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
-    'finding-verifier-v1':'shared/finding-verifier-output-v1.md'
+    'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
+    'code-fixer-v1':'shared/code-fixer-output-v1.md'
 }
 for contract_id,relative in tree['output_contracts'].items():
     assert (tree_path.parent.parent/relative).is_file(), contract_id
+# #474 -- the fixer edges are format-bound the same way the reviewer edges are.
+# A fixer COMMITS before its result is parsed, so an unbound format is not a
+# retryable refusal like a reviewer's: it strands unattributed history and halts
+# the run MUTATED_BLOCKED. Pinned as a set so a fourth fixer edge added later
+# cannot quietly ship unbound.
+fixer_edges={'review_pr.fix.phase1','review_pr.fix.phase2','simplify.fix.phase2'}
+assert {e for e,row in edges.items() if row.get('output_contract')=='code-fixer-v1'}==fixer_edges
 for edge_id in review_edges:
     assert edges[edge_id]['required'] is True, edge_id
     assert edges[edge_id]['retry']=={'format':1}, edge_id

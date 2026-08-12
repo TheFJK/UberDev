@@ -263,6 +263,15 @@ aggregate with exact `findings:[]` is valid and is not a refusal.
 
 ## Return contract
 
+**The result file is this document and nothing else** — no title, no preamble,
+no rationale after the closing fence. The canonical statement of that rule, and
+of every shape rule below, is `shared/code-fixer-output-v1.md` (contract id
+`code-fixer-v1`), which every dispatch on a fixer edge binds you to by path.
+Unlike a reviewer, you commit *before* the controller parses this file, so a
+report written around the YAML does not cost you a retry: it strands a commit
+nobody can attribute and halts the run `MUTATED_BLOCKED` (#474). Put your
+reasoning in each row's `reason:` field.
+
 ```yaml
 status: APPLIED | NO_FIXES_NEEDED | REFUSED
 phase: phase1 | phase2
