@@ -662,13 +662,24 @@ assert provisional_process.waited
 
 
 def persistence_result(status, *, halted=False, blocker_count=0,
-                       halted_due_to_overflow=False):
+                       halted_due_to_overflow=False, skipped_tiers=()):
+    # `skipped_closed` rows carry the agent's own return shape (findings-to-issues
+    # "Return contract"), so the tier token the parser counts is the token the
+    # child actually emits -- not a shape invented here.
+    skipped = "skipped_closed: []\n"
+    if skipped_tiers:
+        skipped = "skipped_closed:\n" + "".join(
+            f'  - {{ url: "https://github.com/o/r/issues/{90 + index}", '
+            f'file: "src/s{index}.py:{index + 1}", '
+            f'fingerprint: "0123456789abcde{index}", tier: "{tier}" }}\n'
+            for index, tier in enumerate(skipped_tiers)
+        )
     return (
         "Persistence summary.\n\n```yaml\n"
         f"status: {status}\n"
         "created_urls: []\n"
         "commented_urls: []\n"
-        "skipped_closed: []\n"
+        f"{skipped}"
         "blocked_by_dedupe: []\n"
         "by_severity:\n"
         f"  blocker: {blocker_count}\n"
@@ -872,6 +883,51 @@ with scratch_dir("code-fixer-persistence-result-") as temporary:
         status_sha256=halted_terminal["status_sha256"],
         result_sha256=halted_terminal["result_sha256"],
     ))
+
+    # #453 -- the blocker accounting spans MORE than the pinned population.
+    # `expected_deferred_blockers` is recounted from the Phase 2 pair the
+    # binding pins; `by_severity.blocker` and `skipped_closed` count rows the
+    # filer wrote for Phase 1 AND Phase 2. The contract may therefore only
+    # assert the direction the mismatch cannot forge: every pinned Phase 2
+    # blocker is accounted for. Phase 1 rows raise the observed count and must
+    # not fail the run.
+    result_path.write_text(
+        persistence_result("DONE", halted=True, blocker_count=1), encoding="utf-8"
+    )
+    phase1_only = validate_persistence(binding0)
+    assert phase1_only["halted"] is True, phase1_only
+    assert phase1_only["by_severity_blocker"] == 1, phase1_only
+    assert phase1_only["expected_deferred_blockers"] == 0, phase1_only
+    result_path.write_text(
+        persistence_result("DONE", halted=True, blocker_count=2), encoding="utf-8"
+    )
+    both_phases = validate_persistence(binding1)
+    assert both_phases["by_severity_blocker"] == 2, both_phases
+    assert both_phases["expected_deferred_blockers"] == 1, both_phases
+
+    # Under-accounting stays fatal: a child that files nothing for a deferred
+    # Phase 2 blocker is exactly the run that would otherwise report
+    # `halted: false` and emit a GREEN trust trail over an unfiled blocker.
+    result_path.write_text(persistence_result("DONE"), encoding="utf-8")
+    expect_contract_reason(
+        lambda: validate_persistence(binding1),
+        "persistence_result_authority_mismatch",
+    )
+    # A BLOCKER row the filer skipped because its issue is already closed is
+    # accounting, not silence...
+    result_path.write_text(
+        persistence_result("DONE", skipped_tiers=("BLOCKER",)), encoding="utf-8"
+    )
+    skipped_blocker = validate_persistence(binding1)
+    assert skipped_blocker["by_severity_blocker"] == 0, skipped_blocker
+    # ...but a lower-tier skip accounts for nothing.
+    result_path.write_text(
+        persistence_result("DONE", skipped_tiers=("MAJOR",)), encoding="utf-8"
+    )
+    expect_contract_reason(
+        lambda: validate_persistence(binding1),
+        "persistence_result_authority_mismatch",
+    )
 
     result_path.write_text(persistence_result("DONE"), encoding="utf-8")
     source_before = aggregate0.read_bytes()

@@ -198,15 +198,22 @@ changes shape.
    file tools and could in principle read `post-impl-review-final.md`. The card
    guarantees the reasoning is not *handed* to it; the rest is a prompt rule,
    and both the agent file and the dispatch prompt say so.
-2. **`validate_persistence_result` compares across phases.** It enforces
-   `expected_deferred_blockers == by_severity_blocker + skipped_blockers`, where
-   the left side is Phase-2-derived (`count_deferred_blockers` hardcodes a
+2. **`validate_persistence_result` compares across phases** — *the equality is
+   FIXED in #453; the population mismatch it papered over is not.* It used to
+   enforce `expected_deferred_blockers == by_severity_blocker + skipped_blockers`,
+   where the left side is Phase-2-derived (`count_deferred_blockers` hardcodes a
    `simplify-aggregate` envelope and `phase2` validation on both axes) and
-   `by_severity.blocker` counts rows written across both phases. The equality is
+   `by_severity.blocker` counts rows written across both phases. The equality was
    therefore already unsound for any run that files a Phase 1 blocker; #427
-   (`/review-pr` unrunnable end-to-end) is why nobody has observed it. This gate
-   moves the right-hand side. **Pre-existing, out of scope here, followed up in
-   #453** (and the Phase-2-only `count_deferred_blockers` in #452).
+   (`/review-pr` unrunnable end-to-end) is why nobody observed it. This gate
+   moves the right-hand side. #453 replaced the equality with the relation the
+   binding can prove — `by_severity_blocker + skipped_blockers >=
+   expected_deferred_blockers`, "the filer accounted for at least the N blockers
+   the Phase 2 fixer deferred" — since Phase 1 rows only ever raise the observed
+   count, and cross-phase collapse by `(file, line, normalised summary)` makes
+   equality unreachable in principle, not just unpinned. The **upper** bound
+   still needs a Phase 1 recount this binding does not pin, and
+   `count_deferred_blockers` remains Phase-2-only (#452).
    The spec's proposal to bind the verification sidecar into
    `count_deferred_blockers` was CUT for the same reason: that function cannot
    parse a Phase 1 pair at all.
