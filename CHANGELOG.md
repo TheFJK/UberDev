@@ -4,6 +4,55 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.14] — 2026-08-12
+
+The version-bump mandate was unsatisfiable in two of the three lanes that
+actually put code on `main`, so it was being read as a blocker against PRs that
+were behaving correctly. It now binds the commit that lands the change (#472).
+
+### Changed
+
+- **The invariant binds the landing commit, not every pull request.** `AGENTS.md`
+  now names all three lanes and which commit carries the bump in each: `/goal`
+  pushes a `chore(release):` commit on an earlier pass and withholds `/merge`
+  until the checks settle; the `/solve` + `/turbo` fleet bumps once per stack in
+  the `chore(stack): land …` integration commit; a hand-authored PR carries its
+  own. The fleet lane forbids the solver from bumping at all — N solvers cut from
+  one base resolve the *same* next version, git auto-merges that identical edit
+  without a conflict, and one of two intended releases vanishes silently. So **a
+  fleet PR whose diff has no version surface is compliant**, and reviewing it as
+  an unbumped user-facing change is a false positive.
+- **The lane carve-out governs _which_ commit carries the bump, never _whether_
+  a user-facing change may ship unbumped.** One-line patches still get a patch
+  version on the commit that lands them.
+- **The ritual is one command.** `bash plugins/uberdev/lib/bump-version.sh <X.Y.Z>`
+  is the documented path and moves all six locked surfaces; the hand-rolled
+  `grep`/`sed` drift checks are gone from the docs.
+- **The surface list is counted honestly** — six files, plus two post-merge
+  operator steps (tag, release), replacing a "seven locations" list that mixed
+  files with rituals. `plugins/uberdev/docs/testing.md` and `bump-version.sh`'s
+  own header now point at the root `AGENTS.md` rather than the operator's local
+  `CLAUDE.md` twin, which is gitignored and therefore invisible in every fresh
+  checkout and every worktree an agent runs in.
+
+### Added
+
+- **`tests/docs-accuracy.test.sh` T12 locks the contract in both directions**
+  (#472): the rule text cannot drift from the machinery that guarantees it, and
+  the machinery cannot drift from the rule. The block asserts the landing-commit
+  scoping, all three lane names, the fleet carve-out *and* the file that enforces
+  it (`skills/solve-fleet/workflow.js`), the `/goal` guarantor in
+  `lib/goal-watch.sh`, and the `bump-version.sh` entry point — with a fail-closed
+  preflight that aborts if a shared structural helper has been renamed out from
+  under it.
+
+### Notes
+
+- The CI ratchet asserts *equality* across version surfaces at a hardcoded
+  literal, not *advancement*: a landing that bumps nothing is consistently stale
+  and stays green. Closing that hole is tracked as **#386**; until then the rule
+  and the `/goal` guarantor stand in for it.
+
 ## [0.45.13] — 2026-08-11
 
 Eight issues landed as one integration branch (#427 #428 #431 #432 #433 #434 #435
