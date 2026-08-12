@@ -41,6 +41,14 @@
       "permanent": true
     },
     {
+      "id": "find-polluter-fail-loud",
+      "kind": "local-addition",
+      "scope": "skills/systematic-debugging",
+      "file": "find-polluter.sh",
+      "note": "Two local additions to find-polluter.sh (#430), both recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, and (2) local array-based enumeration that is whitespace- and glob-safe. Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply BOTH; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals). Kept forever.",
+      "permanent": true
+    },
+    {
       "id": "brainstorm-no-approval-gates",
       "kind": "policy-divergence",
       "scope": "skills/brainstorm",
@@ -335,6 +343,10 @@
         {
           "ref": "parallel-hypothesis-testing",
           "file": "SKILL.md"
+        },
+        {
+          "ref": "find-polluter-fail-loud",
+          "file": "find-polluter.sh"
         }
       ],
       "files": [

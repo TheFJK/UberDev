@@ -33,15 +33,30 @@
 #
 # EXIT CONTRACT under test:
 #   0  every matched test ran and none polluted
-#   1  polluter found, or bad usage (both pre-existing)
+#   1  polluter found, or bad usage (both pre-existing). This code deliberately
+#      FUSES two structurally unrelated outcomes — "the tool worked and has an
+#      answer" and "the tool was never told what to do" — so a wrapper cannot
+#      tell a real finding from its own bad invocation. That fusion is a
+#      CARRY-OVER kept on purpose, not a refined part of the contract #430
+#      codifies: splitting usage onto its own code is a compatibility break for
+#      every existing caller of the vendored script, and #430 scoped itself to
+#      the refusal codes. Recorded here as a known wart so the next reader does
+#      not mistake it for a considered design alongside the exit-2 tokens below.
+#      F8 asserts the fused behaviour as it stands.
 #   2  verdict refused — nothing matched, the file search was incomplete, the
 #      test runner could not be executed, a matched path did not survive the
 #      file list intact, the pollution target was already present so a test
 #      would not have run, or fewer tests ran than were matched (local
 #      addition; upstream returns a green 0 in every one of these shapes).
-#      That last shape is a deliberate tripwire for a future skip path, not a
-#      reachable branch: every skip refuses before the loop ends, so no case
-#      here drives it and none should be written pretending to.
+#      Six causes share one integer, so every exit-2 message carries a
+#      machine-readable reason token as the first bracketed field of its first
+#      line — [search-failed], [no-matches], [runner-unusable], [dirty-start],
+#      [path-missing], [ran-lt-matched]. Prefer the token over the prose when
+#      adding a case: the substring assertions below predate it and weld the
+#      contract to English.
+#      The ran-vs-matched shape is a deliberate tripwire for a future skip path,
+#      not a reachable branch: every skip refuses before the loop ends, so no
+#      case here drives it and none should be written pretending to.
 #
 # WHY THIS SUITE EXECUTES THE SCRIPT INSTEAD OF GREPPING IT. A structural test
 # that grepped find-polluter.sh for the new `-o -path` token would be a
@@ -349,14 +364,25 @@ fi
 # F9 — provenance and mode lock, read from the REPO file unconditionally (never
 # $SCRIPT), so FIND_POLLUTER_SCRIPT cannot satisfy it with a temp copy.
 #
-# The header must name the upstream SHA the bytes actually came from — the
-# v6.2.0 tag peels to 3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 — and must
-# declare the local divergence, or the next vendor re-diff compares against a
-# SHA these bytes never matched. `git ls-files -s` reads the INDEX, so the mode
+# The header must name BOTH upstream SHAs BY ROLE, and must declare the local
+# divergence, or the next vendor re-diff compares against a SHA these bytes never
+# matched. The two roles are NOT interchangeable:
+#   * BASE — e7a2d16476bf042e9add4699c9d018a90f86e4a6. The audit-wide SHA this
+#     file and its 10 siblings were copied from, and the one vendor.json records
+#     for the whole component. This is the SHA to re-diff against: every local
+#     change shows up, the adopted v6.2.0 hunk among them.
+#   * ADOPTED HUNK — 3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9, which the v6.2.0
+#     tag peels to. The commit the search-expression fix ALONE was taken from.
+#     Explicitly NOT a component re-baseline (that is #462's job), so re-diffing
+#     this file at that SHA renders every local change as upstream drift.
+# Asserting only the adopted-hunk SHA would let the base be dropped from the
+# header without reddening this case — the same misread stated the other way —
+# so both are needles below. `git ls-files -s` reads the INDEX, so the mode
 # assertion is meaningful on a Windows checkout too.
 f9_line="$(sed -n '2p' "$REPO_SCRIPT")"
 f9_bad=""
 for f9_needle in \
+  'obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6' \
   'obra/superpowers@3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9' \
   '(v6.2.0, MIT)' \
   'superpowers-MIT.txt' \
@@ -371,7 +397,7 @@ case "$f9_mode" in
   *) f9_bad="${f9_bad} mode=${f9_mode%% *}(want 100755)" ;;
 esac
 if [ -z "$f9_bad" ]; then
-  pass_case "F9 header pins upstream v6.2.0 + declares the local addition, and the file stays executable"
+  pass_case "F9 header pins BOTH upstream SHAs by role + declares the local addition, and the file stays executable"
 else
   fail_case "F9 provenance/mode lock —${f9_bad}"
 fi
