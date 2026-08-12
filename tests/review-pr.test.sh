@@ -36,21 +36,31 @@ review_fence_fn() {
   ' "$REVIEW_FENCES"
 }
 
-# review_reserved_run_fixture DIR -> a repo at DIR/repository holding one real
-# reservation, with the setup fence's stderr at DIR/setup.stderr.
+# review_reserved_run_fixture DIR [ROOT_SUFFIX] -> a repo at DIR/repository
+# holding one real reservation, with the setup fence's stderr at DIR/setup.stderr.
 #
 # Runs the WHOLE `uberdev-executable setup=review-pr` fence, not a carved slice,
 # because the two things callers need from it -- the carry line and the reserved
 # run directory -- are both produced after the point every existing slice stops.
 # Defined once: two rows need it, and a second copy of a fixture recipe drifts
 # exactly as fast as a second copy of anything else.
+#
+# ROOT_SUFFIX (default empty) is appended to the physical repo path before it is
+# exported as $WORKTREE_ROOT, so a row can hand the fence a DIFFERENT SPELLING of
+# the same directory. #471: that is the whole shape of the blocker -- the fence
+# never assigns WORKTREE_ROOT, it forwards whatever the caller inherited, and the
+# helper used to demand byte equality against its own resolved spelling.
 review_reserved_run_fixture() {
-  local base="$1" repo
+  local base="$1" root_suffix="${2:-}" repo
   mkdir -p "$base/repository"
-  # PHYSICAL path. uberdev_command_workspace_prepare compares its presets against
-  # the resolved git toplevel, and on macOS $TMPDIR sits under the /var ->
-  # /private/var symlink, so the logical path fails `preset_mismatch` on a
-  # perfectly good tree.
+  # PHYSICAL path -- the SPELLING this fixture asserts is the ordinary one, not a
+  # workaround. Until #471 it WAS a workaround: uberdev_command_workspace_prepare
+  # byte-compared its presets against the resolved git toplevel, so on macOS,
+  # where $TMPDIR sits under the /var -> /private/var symlink, the logical
+  # spelling failed `preset_mismatch` on a perfectly good tree. That refusal is
+  # gone (command-workspace.py:same_validated_path), and R33.13 below locks the
+  # non-canonical spelling; this one stays physical so the run-id and receipt
+  # assertions compare against a single deterministic path.
   repo="$(cd "$base/repository" && pwd -P)" || return 2
   git -C "$repo" init -q || return 2
   git -C "$repo" config user.email test@example.com
@@ -66,7 +76,7 @@ review_reserved_run_fixture() {
   [ -s "$base/setup.sh" ] || return 2
   ( cd "$repo" && \
     CLAUDE_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev" \
-    WORKTREE_ROOT="$repo" PR_NUMBER=73 \
+    WORKTREE_ROOT="$repo$root_suffix" PR_NUMBER=73 \
     bash -c '. "$1"' _ "$base/setup.sh" ) >/dev/null 2>"$base/setup.stderr"
 }
 
@@ -79,10 +89,19 @@ review_reserved_run_fixture() {
 # Three rows failed exactly that way on the Windows job while passing on macOS,
 # and the log gave no way to tell which. A failure that cannot name its cause
 # costs a full CI cycle to diagnose; this makes the next one self-diagnosing.
+#
+# Three states, three messages. `[ -s ]` alone collapsed "the file is not there"
+# into "the fence exited before any diagnostic", which ASSERTS something the row
+# never observed: an absent setup.stderr means the fixture bailed before it ever
+# ran the fence (git init, or the awk carve coming back empty), and the fence is
+# not the thing to go looking at. #471 -- a diagnostic that misattributes is
+# worse than none, because it sends the next reader to the wrong file.
 review_reserved_run_reason() {
   local base="${1:-}" tail_out=''
   [ -n "$base" ] || { printf 'no fixture base'; return 0; }
-  if [ -s "$base/setup.stderr" ]; then
+  if [ ! -e "$base/setup.stderr" ]; then
+    printf 'fixture never ran the setup fence (no %s/setup.stderr)' "$base"
+  elif [ -s "$base/setup.stderr" ]; then
     # Last line only: the fence's own refusal, not the whole trace.
     tail_out="$(tail -n 3 "$base/setup.stderr" | tr '\n' ' ' | tr -s ' ')"
     printf 'setup fence stderr: %s' "${tail_out}"
@@ -2004,7 +2023,118 @@ else
   echo "        carry line: ${R33_CARRY_LINE:-<none>}"
   # An EMPTY carry line means the fence never reserved, not that it published a
   # bad one. Those are different bugs and the row must say which it saw.
-  [ -n "$R33_CARRY_LINE" ] || echo "        no carry line at all — $(review_reserved_run_reason "$R33_TMP")"
+  # $R33_FULL_TMP, not $R33_TMP: the fixture above ran in the full-setup SUBDIR,
+  # and $R33_TMP/setup.stderr belongs to the unrelated R33.4 reservation SLICE,
+  # which is awk-carved to stop BEFORE uberdev_command_workspace_prepare and so
+  # passes even when the full fence dies there. Reading it made this row report
+  # "setup fence wrote no stderr" -- 0-byte slice log -- for a full fence that
+  # had in fact printed `preset_mismatch`, and that misattribution cost a Windows
+  # CI cycle (#471).
+  [ -n "$R33_CARRY_LINE" ] || echo "        no carry line at all — $(review_reserved_run_reason "$R33_FULL_TMP")"
+  FAIL=$((FAIL + 1))
+fi
+
+# R33.13 — the fence must survive a caller whose $WORKTREE_ROOT is a DIFFERENT
+# SPELLING of the repository it is standing in.
+#
+# review-pr.md forwards `${WORKTREE_ROOT:-}` verbatim; it never canonicalises it,
+# and neither do simplify.md or post-impl-review/SKILL.md. So the spelling the
+# helper receives is whatever the invoking session happened to export. Before
+# #471, validate_presets demanded byte equality against its own resolved
+# spelling, so an equivalent-but-differently-spelled root killed the setup fence
+# with `preset_mismatch` before it allocated anything -- and the SAME pair of
+# values had already been ACCEPTED one call earlier by validate_requested_root,
+# which normalises. Two comparators, one invariant, opposite verdicts (#370
+# class). The row hands the fence `$repo/.` and demands a reservation anyway.
+#
+# Trailing `/.` is the POSIX spelling of the divergence. It is deliberately NOT
+# the Windows one: portable_canonical refuses a lexically non-normal path
+# outright, so on Git Bash `$repo/.` would be rejected by validate_requested_root
+# for an unrelated and correct reason. The native-Windows divergence is
+# separator spelling (`git rev-parse --show-toplevel` emits `C:/...`,
+# os.path.abspath returns `C:\...`) and the baseline fixture already carries it,
+# which is exactly why R33.9/R47.5/R47.6 were the rows that went red on the
+# Windows job; the path algebra itself is unit-locked in
+# tests/command-workspace.test.sh. So this row SKIPs on a native Windows shell
+# rather than asserting a spelling that arm is right to refuse.
+R33_SPELL_HOST="$(uname -s 2>/dev/null || echo unknown)"
+case "$R33_SPELL_HOST" in
+  MINGW* | MSYS* | CYGWIN*)
+    echo "  SKIP  R33.13 — non-canonical \$WORKTREE_ROOT spelling (POSIX-only spelling; Windows arm covered by the baseline fixture)"
+    ;;
+  *)
+    R33_SPELL_TMP="$R33_TMP/spelled-setup"
+    mkdir -p "$R33_SPELL_TMP"
+    review_reserved_run_fixture "$R33_SPELL_TMP" '/.' || true
+    R33_SPELL_CARRY="$(sed -n 's/^REVIEW_CARRY //p' "$R33_SPELL_TMP/setup.stderr" 2>/dev/null | head -1)"
+    R33_SPELL_RUN_ID="$(printf '%s' "$R33_SPELL_CARRY" | sed -n 's/.*RUN_ID=\([^ ]*\).*/\1/p')"
+    R33_SPELL_REPO="$(cd "$R33_SPELL_TMP/repository" 2>/dev/null && pwd -P)" || R33_SPELL_REPO=''
+    # Reserved for real, not merely "did not crash": the run directory the fence
+    # claims on the carry line has to exist under the repository.
+    if [ -n "$R33_SPELL_RUN_ID" ] \
+       && [ -n "$R33_SPELL_REPO" ] \
+       && [ -d "$R33_SPELL_REPO/.uberdev/runs/$R33_SPELL_RUN_ID" ]; then
+      echo "  PASS  R33.13 — a non-canonical \$WORKTREE_ROOT spelling still reserves a run"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  R33.13 — a non-canonical but equivalent \$WORKTREE_ROOT spelling kills the setup fence"
+      echo "        carry line: ${R33_SPELL_CARRY:-<none>} — $(review_reserved_run_reason "$R33_SPELL_TMP")"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+esac
+
+# R33.14 — the reason helper must not misreport, and every caller must read the
+# base its own fixture wrote to.
+#
+# Two separate defects fixed in #471 live here. (1) `[ -s ]` alone answered
+# "fence exited before any diagnostic" for a setup.stderr that does not exist,
+# which is a claim about a fence that never ran. (2) The R33.9 call site read
+# $R33_TMP while its fixture wrote $R33_FULL_TMP -- a base MISMATCH no unit test
+# of the helper could ever catch, so the second half of this row is a structural
+# guard: every `review_reserved_run_reason "$X"` argument must be a variable some
+# `review_reserved_run_fixture "$X"` call also names.
+R33_REASON_TMP="$R33_TMP/reason-probe"
+mkdir -p "$R33_REASON_TMP"
+R33_REASON_ABSENT="$(review_reserved_run_reason "$R33_REASON_TMP")"
+: >"$R33_REASON_TMP/setup.stderr"
+R33_REASON_EMPTY="$(review_reserved_run_reason "$R33_REASON_TMP")"
+printf 'uberdev command workspace: preset_mismatch:WORKTREE_ROOT\n' >"$R33_REASON_TMP/setup.stderr"
+R33_REASON_FULL="$(review_reserved_run_reason "$R33_REASON_TMP")"
+# Argument variables, deduped, from every call site that is not the definition
+# and not this guard's own grep.
+R33_REASON_BASES="$(grep -o 'review_reserved_run_reason "\$[A-Za-z_][A-Za-z0-9_]*"' "$0" \
+  | sed 's/.*"\$\([A-Za-z0-9_]*\)"/\1/' | sort -u)"
+R33_FIXTURE_BASES="$(grep -o 'review_reserved_run_fixture "\$[A-Za-z_][A-Za-z0-9_]*"' "$0" \
+  | sed 's/.*"\$\([A-Za-z0-9_]*\)"/\1/' | sort -u)"
+R33_REASON_UNPAIRED=''
+# `while read` over a HERESTRING, not `for base in $SCALAR` piped into grep -q.
+# Two live classes in one line otherwise: `for … in $SCALAR` does not word-split
+# under zsh (SH_WORD_SPLIT is off), and `printf | grep -q` pipes into an
+# early-exiting reader, which is precisely what tests/epipe-guard.test.sh (#313)
+# reds a pipefail-setting file for.
+while IFS= read -r R33_REASON_BASE; do
+  [ -n "$R33_REASON_BASE" ] || continue
+  # The three probe calls just above are the one documented exemption: their
+  # base is synthetic ON PURPOSE, so the helper's absent/empty/populated states
+  # can be exercised without paying for a fence run.
+  [ "$R33_REASON_BASE" != R33_REASON_TMP ] || continue
+  grep -qx "$R33_REASON_BASE" <<<"$R33_FIXTURE_BASES" \
+    || R33_REASON_UNPAIRED="$R33_REASON_UNPAIRED $R33_REASON_BASE"
+done <<<"$R33_REASON_BASES"
+if [ -n "$R33_REASON_BASES" ] \
+   && [ -z "$R33_REASON_UNPAIRED" ] \
+   && [ "${R33_REASON_ABSENT#*never ran}" != "$R33_REASON_ABSENT" ] \
+   && [ "${R33_REASON_EMPTY#*before any diagnostic}" != "$R33_REASON_EMPTY" ] \
+   && [ "${R33_REASON_FULL#*preset_mismatch:WORKTREE_ROOT}" != "$R33_REASON_FULL" ]; then
+  echo "  PASS  R33.14 — the reservation-failure reason names the state it saw, and every caller reads its own fixture's base"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R33.14 — the reservation-failure reason misreports, or a caller reads a base no fixture wrote"
+  echo "        absent: $R33_REASON_ABSENT"
+  echo "        empty:  $R33_REASON_EMPTY"
+  echo "        full:   $R33_REASON_FULL"
+  [ -z "$R33_REASON_UNPAIRED" ] || echo "        unpaired reason bases:$R33_REASON_UNPAIRED"
   FAIL=$((FAIL + 1))
 fi
 

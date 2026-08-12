@@ -378,6 +378,79 @@ for index, module_path in enumerate(module_paths):
             "portable_windows",
         ),
     )
+
+    # #471 — the preset check and the requested-root check must answer the SAME
+    # question the same way. They did not: validate_requested_root normalised,
+    # validate_presets byte-compared, so on a native Windows runner the one
+    # inherited scalar the review-pr fence forwards ($WORKTREE_ROOT) passed the
+    # first and was refused by the second, and /review-pr, /simplify and
+    # post-impl-review all died on `preset_mismatch` before allocating anything.
+    #
+    # The divergence is SEPARATOR SPELLING, and it is structural, not incidental:
+    # `repository_id` arrives from `git rev-parse --show-toplevel`, which Git for
+    # Windows spells with forward slashes, while portable_canonical hands back
+    # ntpath.abspath's backslash spelling. load_carrier already normcase-compares
+    # those two for exactly this reason -- validate_presets was the one place
+    # that did not. Simulated with ntpath here because the module is exercised on
+    # a POSIX runner; ntpath.normcase is `s.replace("/", "\\").lower()`, which is
+    # the whole of the algebra under test.
+    #
+    # The two spellings are written out LITERALLY rather than derived from the
+    # fixture path. Deriving them (`str(repo).replace(os.sep, "/")`) is vacuous
+    # on a POSIX runner -- os.sep is already "/" there, so both sides come out
+    # byte-identical and the row passes with the defect fully restored.
+    # validate_presets compares strings and touches no filesystem, so a synthetic
+    # drive-letter pair is the honest input; `RUNNER~1` is the real 8.3 %TEMP%
+    # spelling windows-latest hands the job.
+    forward_spelled = "C:/Users/RUNNER~1/AppData/Local/Temp/uberdev/repository"
+    windows_repo = ntpath.abspath(forward_spelled)
+    assert "\\" in windows_repo and windows_repo != forward_spelled, windows_repo
+    windows_workspace = ntpath.join(
+        windows_repo, ".uberdev", "research", f"20260727-01020{index}-abcdef0"
+    )
+    real_normcase = module.os.path.normcase
+    real_abspath = module.os.path.abspath
+    module.os.path.normcase = ntpath.normcase
+    module.os.path.abspath = ntpath.abspath
+    try:
+        module.validate_presets(
+            {"WORKTREE_ROOT": forward_spelled},
+            {},
+            windows_repo,
+            windows_workspace,
+            "portable_windows",
+        )
+        # Non-vacuous: a genuinely different location is still refused, and the
+        # refusal now NAMES the disagreeing scalar. One anonymous word for nine
+        # values is what made the Windows log unattributable in the first place.
+        expect_failure(
+            module,
+            "preset_mismatch:WORKTREE_ROOT",
+            lambda: module.validate_presets(
+                {"WORKTREE_ROOT": ntpath.join(windows_repo, "elsewhere")},
+                {},
+                windows_repo,
+                windows_workspace,
+                "portable_windows",
+            ),
+        )
+        # A preset key this caller never declared can never name "the same
+        # location", so it stays refused rather than being skipped as unknown.
+        expect_failure(
+            module,
+            "preset_mismatch:UNDECLARED_PATH",
+            lambda: module.validate_presets(
+                {"UNDECLARED_PATH": windows_repo},
+                {},
+                windows_repo,
+                windows_workspace,
+                "portable_windows",
+            ),
+        )
+    finally:
+        module.os.path.normcase = real_normcase
+        module.os.path.abspath = real_abspath
+
     workspace, artifacts = module.allocate_workspace(
         str(repo),
         f"20260727-01020{index}-abcdef0",
@@ -1044,6 +1117,41 @@ if uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" 
 fi
 grep -qx sentinel "$OUTSIDE"
 DIFF_ARTIFACT_PATH="$EXPECTED/pr-diff.md"
+
+# #471 — the descriptor_relative half of same_validated_path, on the real arm
+# this runner executes.
+#
+# Callers forward whatever $WORKTREE_ROOT the invoking session exported;
+# review-pr.md, simplify.md and post-impl-review/SKILL.md all pass it through
+# untouched. `$REPO/.` and `$REPO//` name the repository as surely as `$REPO`
+# does, and validate_requested_root -- which runs one step EARLIER on the very
+# same string -- accepts them, because it realpath()s. validate_presets used raw
+# `!=`, so it refused them: the same pair of values, two comparators, opposite
+# verdicts (#370 class). On macOS that made every logical $TMPDIR spelling fail
+# under the /var -> /private/var symlink, and tests/review-pr.test.sh papered
+# over it with `pwd -P` instead of fixing it here.
+for SPELLING in "$REPO/." "$REPO//" "$REPO/./"; do
+  unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+  WORKTREE_ROOT="$SPELLING"
+  uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$SPELLING" >/dev/null \
+    || { echo "equivalent WORKTREE_ROOT spelling refused: $SPELLING" >&2; exit 1; }
+  # The descriptor still publishes the ONE canonical spelling, so accepting an
+  # alias grants it no authority -- child-dispatch.sh rebinds every scalar from
+  # this output. That is what makes the normalising comparator safe here.
+  [ "$WORKTREE_ROOT" = "$REPO" ] || { echo "alias spelling leaked into the descriptor: $WORKTREE_ROOT" >&2; exit 1; }
+done
+# Non-vacuous: a scalar naming a DIFFERENT directory is still refused, and the
+# refusal names the scalar rather than saying `preset_mismatch` for all nine.
+unset UBERDEV_COMMAND_WORKSPACE_JSON WORKTREE_ROOT RESEARCH_DIR_ABS DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH STANDALONE_SNAPSHOT_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH || true
+WORKTREE_ROOT="$REPO/.uberdev"
+PRESET_REFUSAL="$(uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" 2>&1 >/dev/null)" && {
+  echo 'a WORKTREE_ROOT naming a different directory was accepted' >&2; exit 1; }
+case "$PRESET_REFUSAL" in
+  *preset_mismatch:WORKTREE_ROOT*) ;;
+  *) echo "preset refusal did not name the disagreeing scalar: $PRESET_REFUSAL" >&2; exit 1 ;;
+esac
+unset WORKTREE_ROOT || true
+uberdev_command_workspace_prepare review-pr 77 medium '[]' "$RUN_ID" "$REPO" >/dev/null
 
 # Review rejects an inherited simplify carrier before allocating its workspace.
 BAD_RUN_ID=20260710-010204-abcdef0

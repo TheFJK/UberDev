@@ -1310,11 +1310,62 @@ def allocate_workspace(
                 pass
 
 
-def validate_presets(presets: dict[str, Any], expected: dict[str, str], repo: str, workspace: str) -> None:
+# same_validated_path CANDIDATE RESOLVED MODE -> do both name one location?
+#
+# The ONE comparator for "a caller-supplied path scalar names the same place the
+# helper just resolved from the carrier". Both preset validation and requested-root
+# validation ask that question, and before #471 each answered it with its own
+# expression: validate_requested_root normalised (realpath / normcase), while
+# validate_presets used raw `!=`. One invariant, two spellings -- the #370
+# contract-drift class -- and they returned OPPOSITE verdicts on the same pair.
+#
+# The falsified premise was "a path scalar that survived the shell round trip is
+# byte-identical to the one Python resolved". It is not, on either arm:
+#   * portable_windows -- `repository_id` reaches us from `git rev-parse
+#     --show-toplevel` (lib/dispatch.sh), which Git for Windows spells with
+#     FORWARD slashes; portable_canonical then hands back os.path.abspath's
+#     BACKSLASH spelling. The inherited $WORKTREE_ROOT still carries the shell's
+#     forward-slash spelling. normcase() erases that difference (which is exactly
+#     why load_carrier's own git-toplevel check is normcase-based) but `!=` does
+#     not, so every native-Windows /review-pr, /simplify and post-impl-review
+#     setup fence died on preset_mismatch before allocating anything.
+#   * descriptor_relative -- `repo` is realpath'd, so any caller exporting a
+#     logical spelling ($TMPDIR under the macOS /var -> /private/var symlink,
+#     a trailing `/.`, a doubled `//`) hit the same refusal on a perfectly good
+#     tree. tests/review-pr.test.sh worked around it with `pwd -P` in its fixture
+#     rather than fixing it here.
+#
+# Routing both call sites through this one function is what makes the two
+# spellings unable to drift apart again. It is not a weakening: preset values
+# carry no authority -- lib/child-dispatch.sh rebinds all nine scalars from this
+# helper's own JSON the moment the helper returns -- so the check is a
+# disagreement detector, and it still runs BEFORE allocate_workspace.
+def same_validated_path(candidate: str, resolved: str, mode: str) -> bool:
+    if mode == "portable_windows":
+        return same_portable_path(candidate, resolved)
+    return os.path.realpath(candidate) == resolved
+
+
+def validate_presets(
+    presets: dict[str, Any],
+    expected: dict[str, str],
+    repo: str,
+    workspace: str,
+    mode: str,
+) -> None:
     mapping = {"WORKTREE_ROOT": repo, "RESEARCH_DIR_ABS": workspace, **expected}
     for key, value in presets.items():
-        if value and mapping.get(key) != value:
-            fail("preset_mismatch")
+        if not value:
+            continue
+        target = mapping.get(key)
+        # `target is None` keeps today's refusal of a preset key this caller does
+        # not declare -- an unknown name can never be "the same location".
+        if target is None or not same_validated_path(value, target, mode):
+            # Named, not anonymous. One word for nine scalars cost a full Windows
+            # CI cycle to attribute: the fence printed `preset_mismatch` and the
+            # log could not say WHICH inherited scalar disagreed. The key is one
+            # of nine fixed global names, never a path, so this leaks nothing.
+            fail(f"preset_mismatch:{key}")
 
 
 def validate_requested_root(
@@ -1326,16 +1377,19 @@ def validate_requested_root(
     if not os.path.isabs(requested):
         fail("repository_mismatch")
     if mode == "portable_windows":
+        # portable_directory ALSO proves the path is a real, unlinked directory
+        # whose identity is the carrier's repository; same_validated_path answers
+        # only the spelling half, so the identity check stays here.
         requested, entry = portable_directory(
             requested, "repository_mismatch"
         )
         if (
-            not same_portable_path(requested, repo)
+            not same_validated_path(requested, repo, mode)
             or file_identity(entry, "repository_mismatch") != repo_identity
         ):
             fail("repository_mismatch")
         return
-    if os.path.realpath(requested) != repo:
+    if not same_validated_path(requested, repo, mode):
         fail("repository_mismatch")
 
 
@@ -1351,10 +1405,13 @@ def main() -> int:
     if not RUN_ID.fullmatch(args.run_id):
         fail("invalid_run_id")
     carrier, _context, repo, carrier_run_dir, repo_identity = load_carrier(args.carrier_json, args.caller)
+    # Resolved once, AFTER load_carrier: filesystem_mode() can fail
+    # unsupported_platform, and load_carrier already reaches it, so hoisting the
+    # call above the carrier validation would change which refusal a malformed
+    # carrier on an unsupported platform reports.
+    mode = filesystem_mode()
     if args.requested_root:
-        validate_requested_root(
-            args.requested_root, repo, repo_identity, filesystem_mode()
-        )
+        validate_requested_root(args.requested_root, repo, repo_identity, mode)
     expected_workspace = os.path.join(repo, ".uberdev", "research", args.run_id)
     if args.caller == "post-impl-review":
         if not args.parent_workspace_json:
@@ -1390,7 +1447,7 @@ def main() -> int:
         fail("invalid_presets")
     if not isinstance(presets, dict):
         fail("invalid_presets")
-    validate_presets(presets, expected_globals, repo, expected_workspace)
+    validate_presets(presets, expected_globals, repo, expected_workspace, mode)
     workspace, paths = allocate_workspace(repo, args.run_id, artifacts, repo_identity)
     descriptor = {
         "schema_version": 1, "caller": args.caller, "carrier_workflow": carrier["workflow"],
