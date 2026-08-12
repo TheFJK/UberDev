@@ -106,6 +106,7 @@ jobs:
           bash tests/convention-citation.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           bash tests/review-child-handoff.test.sh && \
+          bash tests/find-polluter.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
           bash tests/trust-trail-base-identity.test.sh && \
@@ -387,6 +388,7 @@ jobs:
           bash tests/cluster.test.sh && \
           bash tests/code-fixer-dispatch.test.sh && \
           python -I -B tests/code-fixer-contract-windows.test.py && \
+          bash tests/find-polluter.test.sh && \
           bash tests/findings-to-issues.test.sh && \
           bash tests/trust-trail-evaluator.test.sh && \
           bash tests/finish-branch-auto-chain.test.sh && \

@@ -10,12 +10,19 @@
 
 Audit of all files in `plugins/uberdev/skills/{test-driven-development,writing-skills,systematic-debugging}/` that were originally vendored from `obra/superpowers` in commit `41d072b` (v0.3.0). Verified byte-equivalence against upstream HEAD `e7a2d16476bf042e9add4699c9d018a90f86e4a6` and pinned in-file provenance headers on all 20 vendored files. 3 files carry expected-DIFFER status due to intentional local changes (namespace rebrand and one local enhancement section); the remaining 17 are byte-equivalent to upstream.
 
+**Post-audit amendment (#430, 2026-08-10):** `systematic-debugging/find-polluter.sh` keeps the audit-wide base `e7a2d16` — the SHA `plugins/uberdev/vendor.json` records for the whole `skills/systematic-debugging` component — and has since **adopted the upstream search-expression fix from v6.2.0** (`3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9`) — accepting a leading-dot-prefixed pattern and OR-ing in the `**/`-collapsed alternative — that hunk only, plus **two** local additions — (1) the fail-loud exit-2 refusals to render a verdict the run cannot back, and (2) **local array-based enumeration**, which is whitespace- and glob-safe (upstream iterates the unquoted match string and takes the count from its line count; this copy reads the matches into an array and counts the array) — so **4** files now carry expected-DIFFER status and **16** remain byte-equivalent to the SHA pinned in their own provenance header. The upstream search-expression fix and the local array-based enumeration are two different changes and are named distinctly throughout this amendment; do not read either as "the enumeration fix". Both local additions must be re-applied on a re-sync: taking upstream at the pinned SHA and re-applying only the refusals silently drops the **local array-based enumeration** that `tests/find-polluter.test.sh` F12 exists to lock (the upstream search-expression hunk is covered by F1, F3 and F10 instead, so checking F12 for it would check the wrong case). Row 15 and the allowlist below are updated accordingly. The audit-wide `FRESH_SHA`/`e7a2d16` **still applies** to this file as its base — it is deliberately *not* re-baselined to `3dcbd5c`, because the other 10 files in the component were never re-copied and at least `CREATION-LOG.md` and `root-cause-tracing.md` provably differ between the two upstream commits. Re-baselining the component is issue #462's job, not #430's.
+
 ## Inventory + diff results
 
 Special-case allowlist (intentional local divergence — recorded in per-file provenance header suffix):
 - `writing-skills/SKILL.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `writing-skills/testing-skills-with-subagents.md` — superpowers:→uberdev: namespace rebrand from v0.3.0 port
 - `systematic-debugging/SKILL.md` — superpowers:→uberdev: namespace rebrand + local 'Parallel hypothesis testing' section enhancement
+- `systematic-debugging/find-polluter.sh` — base `e7a2d16` (unchanged, as recorded in `vendor.json`) + the upstream search-expression fix adopted from v6.2.0 (`3dcbd5c`) + **two** local additions: (1) an exit-2 refusal to render a verdict the run cannot back — no matching test files, an incomplete file search, a runner that cannot execute, a matched path the file list could not carry intact, a pollution target already present, or fewer tests ran than were matched (upstream returns a green 0 in every one of these; the script's own exit contract is authoritative for this list, and each refusal carries a bracketed reason token); and (2) local array-based enumeration, which is whitespace- and glob-safe — upstream iterates the unquoted match string and counts its lines, this copy reads the matches into an array and counts the array, so a path containing a space or a glob metacharacter is no longer torn apart or substituted under an unchanged count. Upstream's own `tests/systematic-debugging/test-find-polluter.sh` asserts `No polluter found` on a non-matching pattern — precisely what UberDev no longer prints there — so this divergence is deliberate and a future re-sync will collide with it head-on, #430
+
+Local-column sentinel: **`RECOMPUTE`** — declared here so the table's byte-count and sha256 columns keep a single domain. It marks a locally maintained file whose local size and hash move with every local fix; freezing a pair for one would read as tampering at the next re-diff, so recompute both against the working tree. Used by row 15 only.
+
+Upstream-column reference commit: every row's **Upstream bytes** and **Upstream sha256** are measured at the audit-wide base `e7a2d16` **except row 15**, whose pair is measured at `3dcbd5c` (v6.2.0) — the commit its adopted search-expression hunk came from. Row 15's pair at the audit-wide base was `1528` / `6462747eae9b`; that measurement was deliberately replaced, not lost. The sentinel above keeps the *local* columns in one domain, but the upstream columns of this table therefore span two commits, so re-running the verification heredoc below (which fetches all 20 files at the audit-wide `FRESH_SHA`) reports a difference on row 15 that is **not drift**. Nothing else about the base is re-baselined — see the post-audit amendment and #462.
 
 | # | File | Local bytes | Upstream bytes | Local sha256 | Upstream sha256 | Result |
 |---|------|-------------|----------------|--------------|-----------------|--------|
@@ -33,7 +40,7 @@ Special-case allowlist (intentional local divergence — recorded in per-file pr
 | 12 | `systematic-debugging/defense-in-depth.md` | 3650 | 3650 | `1e175fb86fc3` | `1e175fb86fc3` | MATCH |
 | 13 | `systematic-debugging/condition-based-waiting.md` | 3516 | 3516 | `e89fec8400d6` | `e89fec8400d6` | MATCH |
 | 14 | `systematic-debugging/condition-based-waiting-example.ts` | 5054 | 5054 | `40ae5ebe497f` | `40ae5ebe497f` | MATCH |
-| 15 | `systematic-debugging/find-polluter.sh` | 1528 | 1528 | `6462747eae9b` | `6462747eae9b` | MATCH |
+| 15 | `systematic-debugging/find-polluter.sh` | `RECOMPUTE` | 1986 (@`3dcbd5c`) | `RECOMPUTE` | `dd7b8f13c4cc` (@`3dcbd5c`) | DIFFER (expected: base `e7a2d16` + v6.2.0 search-expression fix adopted + local exit-2 refusals + local array-based enumeration — see #430). Local columns carry the `RECOMPUTE` sentinel declared above the table; the upstream columns are measured at `3dcbd5c`, not at the audit-wide base — see the upstream-column note above the table. |
 | 16 | `systematic-debugging/test-pressure-1.md` | 1900 | 1900 | `0b6a915db005` | `0b6a915db005` | MATCH |
 | 17 | `systematic-debugging/test-pressure-2.md` | 2283 | 2283 | `b2030aeffba0` | `b2030aeffba0` | MATCH |
 | 18 | `systematic-debugging/test-pressure-3.md` | 2692 | 2692 | `96b50a52e2c7` | `96b50a52e2c7` | MATCH |
@@ -115,9 +122,10 @@ FILES=(
   "systematic-debugging/CREATION-LOG.md"
 )
 
-# Note when comparing: the 3 known-divergent files (writing-skills/SKILL.md,
-# writing-skills/testing-skills-with-subagents.md, systematic-debugging/SKILL.md)
-# and the remaining 17 sub-files now carry a provenance comment that is NOT in upstream.
+# Note when comparing: the 4 known-divergent files (writing-skills/SKILL.md,
+# writing-skills/testing-skills-with-subagents.md, systematic-debugging/SKILL.md,
+# systematic-debugging/find-polluter.sh — see the post-audit amendment)
+# and the remaining 16 sub-files now carry a provenance comment that is NOT in upstream.
 # Strip provenance lines before sha256-comparing if you want a content-only diff.
 # Or: diff against upstream at the SHA pinned in each file's header (extract it from the header line)
 # instead of HEAD when verifying integrity.
@@ -126,6 +134,22 @@ FILES=(
 #   writing-skills/SKILL.md — superpowers:->uberdev: rebrand (4 occurrences)
 #   writing-skills/testing-skills-with-subagents.md — superpowers:->uberdev: rebrand (4-byte delta)
 #   systematic-debugging/SKILL.md — superpowers:->uberdev: rebrand + local 'Parallel hypothesis testing' section
+#   systematic-debugging/find-polluter.sh — base e7a2d16 + v6.2.0 UPSTREAM SEARCH-EXPRESSION fix adopted + TWO local
+#     additions (#430): (1) an exit-2 refusal to render a verdict the run cannot back, and (2) LOCAL ARRAY-BASED
+#     enumeration, which is whitespace/glob-safe (upstream iterates the unquoted match string and counts its lines;
+#     this copy reads an array and counts the array). The upstream search-expression fix and the local array-based
+#     enumeration are different changes — never call either one "the enumeration fix". Re-apply BOTH local additions
+#     on a re-sync — re-applying only the refusal drops the local array-based enumeration F12 locks (F1, F3 and F10
+#     cover the upstream search-expression hunk instead).
+#     Its header names BOTH SHAs by role: the base is the audit-wide FRESH_SHA/e7a2d16 (what vendor.json records
+#     for the component), and 3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 is the commit the search-expression hunk
+#     alone was taken from. Diff it at e7a2d16 to see every local change; the v6.2.0 hunk will be among them.
+#     NOTE the row-15 upstream columns in the table above are measured at 3dcbd5c, not at FRESH_SHA, so this
+#     heredoc reports a row-15 difference that is not drift — see the upstream-column note above the table.
+#     The colliding assertion in upstream's tests/systematic-debugging/test-find-polluter.sh is the clean-verdict
+#     OUTPUT one (`No polluter found`) on a zero-match pattern: UberDev prints a refusal on stderr instead. Its
+#     `Found 0 test files` assertion still holds — that count line is printed before the refusal fires — so a
+#     re-sync will see one assertion break, not the whole case.
 
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
@@ -161,7 +185,7 @@ done
 
 ## Notes
 
-- The 3 known-divergent files and their per-file divergence patterns are recorded in two canonical places: the special-case allowlist (above) and the bash heredoc's `# Known-divergent files` block. Each divergence is also pinned in the affected file's provenance header.
+- The 4 known-divergent files (three from the original audit plus `systematic-debugging/find-polluter.sh` — see the post-audit amendment near the top) and their per-file divergence patterns are recorded in two canonical places: the special-case allowlist (above) and the bash heredoc's `# Known-divergent files` block. Each divergence is also pinned in the affected file's provenance header.
 - `find-polluter.sh` and `render-graphs.js` carry their provenance header on **line 2** to preserve the shebangs.
 - Re-diff whenever the upstream is bumped or a security audit requests a fresh trust trail.
 - Follow-up issue recommended: adopt `tests/skill-references.test.sh` per the test-coverage research, validating sub-file existence + parent SKILL.md reference pairs across ALL UberDev skills (not just the three vendored ones).
