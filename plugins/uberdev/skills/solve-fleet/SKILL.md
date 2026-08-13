@@ -43,12 +43,33 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class) → plan writer → ONE solver agent (`isolation:"worktree"`) executing the plan. |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class) → plan writer → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
+| any tier with **no usable plan** | falls back to the single solver above — no plan means no tasks, so there is no boundary a **review gate** could sit on. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
 read-only and write their artifacts to absolute paths under the run dir — an
 isolated researcher would write into its own throwaway worktree and the artifact
 would vanish (the artifact path-leak class this project has hit before).
+
+**Why the per-task path uses no runtime isolation.** `isolation:"worktree"` hands
+out an *anonymous* checkout: the script never learns its path, and a second
+isolated agent gets a different one. A single agent needs no name, so it keeps
+runtime isolation. A *chain* of agents must address one shared checkout by path,
+which runtime isolation structurally cannot provide — hence the script-derived
+`<runDirAbs>/worktrees/issue-<N>`, cut by task 1 with `git worktree add` and
+reported back as `workspaceReady`. If task 1 cannot open it the chain stops with
+`workspace_not_ready` and **no delivery agent runs**; a task agent is told
+explicitly never to fall back to the repository root.
+
+**Why sequential and not wave-parallel.** The win is fresh context per task plus
+a gate per task, and both are available one task at a time — with no git mutex,
+no disjoint-ownership validation and no two agents writing one checkout. Each
+task is left as exactly ONE commit; each fix round `--amend`s it, so the
+reviewer's target is always `git show HEAD` and no commit SHA is ever threaded
+through a prompt. Reviewer findings travel **on disk only**
+(`<runDirAbs>/issue-<N>/task-<k>/review-<r>.md`); the fixer is given those paths,
+never the text, which is what keeps this script free of the `SHARED:envelope`
+block.
 
 ## What you give up (RFC 0015 §6 — say these out loud, never silently)
 
@@ -101,18 +122,26 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 | `runDirAbs` | where prompts, contexts and per-issue design artifacts live |
 | `repoRootAbs`, `pluginRootAbs`, `repoSlug`, `branchPrefix` | script-derived prompt inputs |
 | `solveTimeoutS` | **advisory** per-issue budget, reported not policed (the runtime forbids clocks — DR-7) |
-| `maxAgents` | CB1 projected-agent ceiling |
+| `maxAgents` | CB1 projected-agent ceiling (launcher default 600) |
+| `implementBudget` | CB3 per-issue implement-phase agent cap; default 24, clamped 4..96, `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` overrides |
 
 ## Circuit breakers
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`1 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
+| CB1 | projected agents (`1 + issues + (6 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
+| CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
 
 Wall-clock breakers are impossible in-script (the runtime forbids
-`Date.now()`); the `budget` cap plus CB1/CB2 cover the live failure modes.
+`Date.now()`); the `budget` cap plus CB1/CB2/CB3 cover the live failure modes.
+
+Degradation inside the task chain is recorded, never silent:
+`task_implementer_null`, `task_implementer_blocked`, `task_review_null` (the
+task is marked UNREVIEWED and the loop **continues** — a skipped agent must not
+strand committed work), `task_review_rejected`, `task_fix_rounds_exhausted`,
+`task_fixer_null`, `task_count_clamped`, `workspace_not_ready`.
 
 ## Return value
 
@@ -121,14 +150,21 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
 ```
 { runId, repoSlug, issueCount, concurrency, autoMode, designedIssues,
   researchArtifacts, results: [ {issue, status, branch, prNumber, prUrl,
-  commitCount, testsRun, summary, blocker} ], prsOpened: [<int>],
+  commitCount, testsRun, summary, blocker,
+  tasks: [{id, status, reviewVerdict, fixRounds, commitCount}]} ],
+  prsOpened: [<int>],
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
+  tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
   cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
 ```
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
-| REFUSED | FAILED`. The solver never merges and never chains into a review
-command — opening the PR is where it stops.
+| REFUSED | FAILED`. Per-task `status` ∈ `DONE | NO_CHANGES | BLOCKED | SKIPPED`
+and `reviewVerdict` ∈ `APPROVE | REVISIONS_REQUIRED | REJECT | UNREVIEWED | ""`
+(empty when the task committed nothing, which skips the gate and burns no fix
+round). `tasks` is absent on the single-solver path, which has no tasks. The
+fleet never merges and never chains into a review command — opening the PR is
+where it stops.
 
 ## No-Workflow fallback
 

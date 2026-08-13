@@ -479,6 +479,21 @@ The child-session design pipeline (6-agent research fanout → Q&A → spec writ
 
 ### 3.6 subagent-driven-dev — hybrid (`sdd-waves.js`); finish-branch stays main-loop
 
+> **AMENDED by #508 (solve-fleet, 2026-08).** The fleet's inlined implementation
+> is **sequential per task** — implementer → reviewer → bounded fix ladder, one
+> task at a time in one script-named worktree at `<runDir>/worktrees/issue-<N>`
+> — **not** `parallel(wave.map(implementer))`. Upstream `superpowers` 6.3.0
+> forbids parallel implementation subagents outright ("Never dispatch multiple
+> implementation subagents in parallel (conflicts)"), and the win this section
+> was reaching for — fresh context per task plus a gate per task — is available
+> sequentially with no `gitOp` mutex, no disjoint-`owns[]` validation and no
+> plan-parser agent. Intra-issue parallelism also buys little in the fleet: the
+> runtime caps concurrent agents well below what six issues × a 3-lens research
+> fan-out already requests, so extra intra-issue agents queue rather than
+> accelerate. §3.6's wave shape therefore stands only for a future
+> `sdd-waves.js`; the fleet does not implement it, and the caps it inherits
+> (`fix_rounds` = 3) come from `sdd_loop_cap` exactly as :519 required.
+
 The child session's largest fanout (≥3T+1 agents; 15–25 dispatches for a 5-task plan, ~120–250 KB through controller context) with the plugin's worst breaker gap: four **unbounded** loops (SKILL.md:71/:78/:348, plus the NEEDS_CONTEXT answer-and-re-dispatch ping-pong at :149-152/:187) and the 4f→4h wave-wide barrier holding ALL quality reviews until EVERY sibling's spec review approves.
 
 Meta `{name:'sdd-waves', description:'Wave-by-wave plan execution with two-stage per-task review', phases:['Parse plan','Execute waves','Pre-merge test analysis']}`. Args (preflight, absolute paths — the #308 contract): `{plan_path, spec_path|null, summary_dir|null, tier, worktree_root, test_command, baseline_sha, run_id, ts, caps:{fix_rounds:3, retest_rounds:2, context_rounds:2}}`.

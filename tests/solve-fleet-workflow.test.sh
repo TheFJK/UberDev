@@ -183,6 +183,25 @@ grep -qE '^[^#]*\bcodex\b' "$LAUNCHER" \
   && fail "S11b the launcher still names the retired codex backend outside a comment" \
   || pass "S11b the launcher names codex nowhere outside a comment"
 
+# S22 (#508) — the per-task implement chain multiplies the per-issue agent cost
+# by ~5x, so CB1 refusing an ordinary batch has to be PREVENTED at the defaults,
+# not papered over inside the script. Both ceilings stay env-overridable and
+# both stay under the runtime's 1000-agent lifetime cap.
+grep -q 'maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-600}"' "$LAUNCHER" \
+  && pass "S22a the fleet's default agent ceiling covers a full 6-issue medium batch" \
+  || fail "S22a UBERDEV_SOLVE_FLEET_MAX_AGENTS does not default to 600 — CB1 would refuse ordinary batches"
+grep -q 'implementBudget="${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-24}"' "$LAUNCHER" \
+  && pass "S22b the launcher emits the per-issue implement budget (env-overridable)" \
+  || fail "S22b no implementBudget key in the solve-fleet args envelope"
+GOAL_PHASE0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
+if [ ! -r "$GOAL_PHASE0" ]; then
+  fail "S22c lib/goal-phase0.sh is missing or unreadable: $GOAL_PHASE0"
+elif grep -q 'maxAgents="${UBERDEV_GOAL_MAX_AGENTS:-900}"' "$GOAL_PHASE0"; then
+  pass "S22c /goal's default agent ceiling covers the fleet's new per-issue cost"
+else
+  fail "S22c UBERDEV_GOAL_MAX_AGENTS does not default to 900 — /goal CB1 would halt on cycle 1"
+fi
+
 echo "== S: command files mandate the Workflow call =="
 for f in "$SOLVE_CMD" "$TURBO_CMD"; do
   base="$(basename "$f")"
@@ -270,6 +289,82 @@ grep -q 'UNTRUSTED INPUT' "$WORKFLOW" \
   && pass "G7 agents are told to treat issue text as untrusted input" \
   || fail "G7 no untrusted-input framing"
 
+# ---------------------------------------------------------------------------
+# G11-G16 (#508) — the per-task boundary and the review gate inside implement.
+# ---------------------------------------------------------------------------
+
+# G11 — the plan contract must be MACHINE-COUNTABLE. Nothing downstream can be
+# scoped to "task k" while the plan is asked for as prose, so this grep is the
+# prerequisite for every other assertion in this block.
+G11_OK=1
+grep -q '## Task <n>: ' "$WORKFLOW" || G11_OK=0
+grep -q 'increases by 1 with no gaps' "$WORKFLOW" || G11_OK=0
+grep -q 'independently committable' "$WORKFLOW" || G11_OK=0
+grep -q 'never more than " + MAX_TASKS' "$WORKFLOW" || G11_OK=0
+[ "$G11_OK" = "1" ] \
+  && pass "G11 planPrompt mandates numbered, gapless, independently-committable tasks under the MAX_TASKS ceiling" \
+  || fail "G11 the plan contract is not machine-countable (heading form / no-gaps / committable / ceiling)"
+
+# G12 — the prose contract it replaced must be GONE, not merely supplemented:
+# two contradictory instructions in one prompt are worse than either alone.
+grep -q 'one engineer in one sitting' "$WORKFLOW" \
+  && fail "G12 the superseded prose plan contract survives alongside the numbered-task contract" \
+  || pass "G12 the 'one engineer in one sitting' prose contract is gone"
+
+# G13 — the shared per-task workspace is SCRIPT-DERIVED. Threading an
+# agent-returned worktree path instead would be the first agent-derived string
+# this script ever put in a prompt, which by its own header mandates carrying
+# the SHARED:envelope block (workflow-scripts T4 drift guard).
+grep -q 'runDirAbs + "/worktrees/issue-"' "$WORKFLOW" \
+  && pass "G13 the shared per-issue worktree path is derived from runDirAbs, never from an agent return" \
+  || fail "G13 no script-derived shared-worktree path"
+
+# G14 — the fix-ladder cap is INHERITED from subagent-driven-dev's cap
+# vocabulary (sdd_loop_cap fix_rounds), not re-minted with a fresh number.
+G14_OK=1
+grep -qE '^const FIX_ROUNDS = 3;' "$WORKFLOW" || G14_OK=0
+grep -q 'sdd_loop_cap' "$WORKFLOW" || G14_OK=0
+grep -q 'fix_rounds' "$WORKFLOW" || G14_OK=0
+[ "$G14_OK" = "1" ] \
+  && pass "G14 FIX_ROUNDS = 3, named as inherited from sdd_loop_cap's fix_rounds" \
+  || fail "G14 FIX_ROUNDS is missing, not 3, or does not cite the cap vocabulary it inherits"
+
+grep -qE 'IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, 24\)' "$WORKFLOW" \
+  && pass "G14b the per-issue implement budget is ONE clamped, config-overridable constant" \
+  || fail "G14b IMPLEMENT_AGENT_BUDGET is not a clamped CFG.implementBudget constant"
+
+# G15a — the house rules are one helper, reused by every prompt on the write
+# path. A copy per prompt is how one of them silently loses the version-bump
+# prohibition. (That the rules actually REACH each agent is proven at runtime by
+# B65/B66, which a source grep through a function call cannot do.)
+HOUSE_SITES="$(grep -c 'houseRules()' "$WORKFLOW" || true)"
+[ "${HOUSE_SITES:-0}" -ge 4 ] \
+  && pass "G15a the house rules are ONE helper reused across the write-path prompts ($HOUSE_SITES sites)" \
+  || fail "G15a the house rules are not shared across the write-path prompts (found ${HOUSE_SITES:-0} houseRules() sites, want >= 4)"
+
+# G16 — the #370 "one contract, N uncompared copies" guard. /goal carries two
+# copies of the per-design-issue agent cost; both must move with the fleet's own
+# constant, and both must be findable by the marker.
+GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
+if [ ! -r "$GOAL_WF" ]; then
+  fail "G16 the goal-pipeline workflow script is missing or unreadable: $GOAL_WF"
+else
+  FLEET_BUDGET="$(sed -n 's/.*IMPLEMENT_AGENT_BUDGET = clampInt(CFG\.implementBudget, 4, 96, \([0-9][0-9]*\)).*/\1/p' "$WORKFLOW")"
+  if [ -z "$FLEET_BUDGET" ]; then
+    fail "G16 could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the cross-file cost check is vacuous"
+  else
+    EXPECTED_COST=$(( 6 + FLEET_BUDGET ))
+    GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
+    G16_OK=1
+    grep -q "issueCount \* $EXPECTED_COST" "$GOAL_WF" || G16_OK=0
+    grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" || G16_OK=0
+    [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
+    [ "$G16_OK" = "1" ] \
+      && pass "G16 /goal's two per-issue cost copies both equal the fleet's 6 + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST) and both carry the contract marker" \
+      || fail "G16 /goal's cost copies drifted from the fleet constant (want $EXPECTED_COST per issue at both sites, 2 markers, found ${GOAL_MARKERS:-0} markers)"
+  fi
+fi
+
 echo "== G: SKILL.md seam =="
 grep -q 'skills/solve-fleet/workflow.js' "$SKILL" \
   && pass "G8 SKILL.md names its workflow script" || fail "G8 SKILL.md does not name workflow.js"
@@ -278,6 +373,19 @@ grep -q '## No-Workflow fallback' "$SKILL" \
 grep -q 'RFC 0015' "$SKILL" && ! grep -Fq 'claude-bg' "$SKILL" \
   && pass "G10 SKILL.md cites RFC 0015 and no longer offers the retired backend" \
   || fail "G10 SKILL.md still names the retired backend (or lost its RFC 0015 citation)"
+
+# G17 (#508) — docs move with the code. The tier table, the breaker table and
+# the return-value block are the three places an operator reads to predict what
+# a run costs and returns; a per-task review gate that none of them mention is
+# an undocumented change of both.
+G17_OK=1
+grep -q 'review gate' "$SKILL" || G17_OK=0
+grep -q 'FIX_ROUNDS' "$SKILL" || G17_OK=0
+grep -q 'tasksApproved' "$SKILL" || G17_OK=0
+grep -q 'implementBudget' "$SKILL" || G17_OK=0
+[ "$G17_OK" = "1" ] \
+  && pass "G17 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap, the implementBudget key and the tasks* return keys" \
+  || fail "G17 SKILL.md does not document the per-task review gate / cap / envelope key / return keys"
 
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
@@ -318,6 +426,11 @@ function trivialReturns() {
     "solve:#12 (small)": solved(12, 902),
   };
 }
+function task(id, o) {
+  return Object.assign({ taskId: id, status: "DONE", commitCount: 1, workspaceReady: true,
+    summary: "s", blocker: "" }, o || {});
+}
+function approve() { return { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] }; }
 function mediumReturns() {
   return {
     "manifest-intake": intake([rec(11, "medium"), rec(12, "trivial")]),
@@ -327,16 +440,41 @@ function mediumReturns() {
     "spec:#11": { path: RD + "/issue-11/spec.md", rc: 0, headline: "h" },
     "spec-review:#11": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
     "plan:#11": { path: RD + "/issue-11/plan.md", rc: 0, headline: "h" },
+    // The per-task implement chain (#508): a clean 2-task plan.
+    "impl:#11:t1": task(1, { taskCount: 2 }),
+    "review:#11:t1:r1": approve(),
+    "impl:#11:t2": task(2),
+    "review:#11:t2:r1": approve(),
+    "deliver:#11": solved(11, 901),
+    // KEPT: the single-solver fallback is still reached whenever the design
+    // phase produces no usable plan (Runs J and T).
     "solve:#11 (medium)": solved(11, 901),
     "solve:#12 (trivial)": solved(12, 902),
   };
 }
-function run(args, fixture) {
+// A t1 whose reviewer never approves, with FIX_ROUNDS(3) fixers standing by.
+// `sentinel` (when given) is agent-returned text that must never reach a prompt.
+function ladderReturns(sentinel) {
+  const o = Object.assign({}, mediumReturns());
+  for (let i = 1; i <= 4; i++) {
+    o["review:#11:t1:r" + i] = { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: (i === 1 && sentinel) ? [sentinel] : ["f"] };
+  }
+  for (let i = 1; i <= 3; i++) o["fix:#11:t1:r" + i] = task(1);
+  return o;
+}
+function runOpen(args, fixture) {
   const pre = h.preprocess(src);
   const record = h.makeRecord();
   const sb = h.makeSandbox(Object.assign({ args }, fixture), meta, record).sandbox;
   const pending = vm.runInNewContext(pre.wrapped, sb, { filename: "solve-fleet", timeout: 8000 });
-  return Promise.resolve(pending).then(function () { return record; });
+  // The harness pushes each call entry into record.agentCalls BEFORE awaiting
+  // agentGate, so a held gate is observable mid-flight.
+  return { record: record, done: Promise.resolve(pending) };
+}
+function run(args, fixture) {
+  const open = runOpen(args, fixture);
+  return open.done.then(function () { return open.record; });
 }
 function resultOf(record) {
   const line = record.logs.find(function (l) { return l.indexOf("WORKFLOW_RESULT ") === 0; });
@@ -374,11 +512,33 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.bImplement = cB.implement || 0;
   out.bDesigned = resB ? resB.designedIssues : null;
   out.bResearchArtifacts = resB ? resB.researchArtifacts : null;
-  // the medium solver prompt must carry the plan path
-  const solverB = recB.agentCalls.find(function (c) { return c.label === "solve:#11 (medium)"; });
-  out.bPlanInPrompt = !!(solverB && solverB.prompt.indexOf("/issue-11/plan.md") >= 0);
+  // the task implementer prompt must carry BOTH the plan path it implements
+  // one task of AND the script-named shared worktree it must work in
+  const implB1 = recB.agentCalls.find(function (c) { return c.label === "impl:#11:t1"; });
+  out.bPlanInPrompt = !!(implB1 && implB1.prompt.indexOf("/issue-11/plan.md") >= 0);
+  out.bWorktreeInPrompt = !!(implB1 && implB1.prompt.indexOf(RD + "/worktrees/issue-11") >= 0);
   const solverB12 = recB.agentCalls.find(function (c) { return c.label === "solve:#12 (trivial)"; });
   out.bTrivialNoPlan = !!(solverB12 && solverB12.prompt.indexOf("plan.md") < 0);
+  out.bTasksTotal = resB ? resB.tasksTotal : null;
+  out.bTasksApproved = resB ? resB.tasksApproved : null;
+  out.bTasksBlocked = resB ? resB.tasksBlocked : null;
+  out.bTasksUnreviewed = resB ? resB.tasksUnreviewed : null;
+  // The house rules must reach the agents that actually commit and push. A
+  // source grep cannot see through the shared houseRules() helper; the rendered
+  // prompt can, which is what the agent will actually read.
+  const implRules = implB1 ? implB1.prompt : "";
+  out.bImplHouseRules = implRules.indexOf("Do NOT bump the project version") >= 0
+    && implRules.indexOf("Co-Authored-By") >= 0
+    && implRules.indexOf("leaf agent with no ability to dispatch subagents") >= 0
+    && implRules.indexOf("UNTRUSTED INPUT") >= 0
+    && implRules.indexOf("never fall back to the repository root") >= 0;
+  const deliverB = recB.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  const deliverText = deliverB ? deliverB.prompt : "";
+  out.bDeliverRules = deliverText.indexOf("Closes #11") >= 0
+    && deliverText.indexOf("body-file") >= 0
+    && deliverText.indexOf("do NOT chain into a review command") >= 0
+    && deliverText.indexOf("Do NOT bump the project version") >= 0
+    && deliverText.indexOf(RD + "/worktrees/issue-11") >= 0;
 
   // Run C — the spec review loop is BOUNDED: REVISIONS_REQUIRED does not re-run
   // the writer (the #308 unbounded-loop class).
@@ -462,6 +622,146 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const solverA = recA.agentCalls.find(function (c) { return c.label === "solve:#11 (trivial)"; });
   out.kNoBaseWhenUnknown = !!(solverA && solverA.prompt.indexOf("--base") < 0);
 
+  // ------------------- #508: the per-task chain and its gate -------------------
+
+  // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
+  // approves must not loop forever, and the work already committed must still
+  // reach a PR.
+  const recL = await run(buildArgs(), { agentReturns: ladderReturns(null) });
+  const resL = resultOf(recL);
+  out.lFixCalls = labels(recL).filter(function (l) { return /^fix:#11:t1:r/.test(l || ""); }).length;
+  out.lReviewCalls = labels(recL).filter(function (l) { return /^review:#11:t1:r/.test(l || ""); }).length;
+  out.lExhaustedAudit = !!(resL && resL.auditEvents.some(function (e) { return e.event === "task_fix_rounds_exhausted"; }));
+  out.lNoT2 = labels(recL).indexOf("impl:#11:t2") < 0;
+  out.lDelivered = labels(recL).indexOf("deliver:#11") >= 0;
+  out.lBlocked = resL ? resL.tasksBlocked : null;
+
+  // Run M — REJECT means "wrong at the root": the ladder stops immediately
+  // instead of burning three fix rounds on a task that cannot be saved.
+  const mReturns = Object.assign({}, mediumReturns(),
+    { "review:#11:t1:r1": { verdict: "REJECT", rc: 0, headline: "h", blockingFindings: ["f"] } });
+  const recM = await run(buildArgs(), { agentReturns: mReturns });
+  const resM = resultOf(recM);
+  out.mNoFixers = !labels(recM).some(function (l) { return /^fix:#11/.test(l || ""); });
+  out.mRejectAudit = !!(resM && resM.auditEvents.some(function (e) { return e.event === "task_review_rejected"; }));
+  out.mNoT2 = labels(recM).indexOf("impl:#11:t2") < 0;
+
+  // Run N — SEQUENTIALITY, proven by interleaving rather than by label order
+  // (label order cannot distinguish sequential from parallel). While task 1s
+  // implementer promise is held open, no agent for task 2 may exist.
+  let releaseN;
+  const gateN = new Promise(function (resolve) { releaseN = resolve; });
+  const openN = runOpen(buildArgs(), {
+    agentReturns: mediumReturns(),
+    agentGate: function (e) { return e.label === "impl:#11:t1" ? gateN : null; },
+  });
+  {
+    const deadline = Date.now() + 5000;
+    while (!openN.record.agentCalls.some(function (c) { return c.label === "impl:#11:t1"; })
+      && Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, 10); });
+    }
+  }
+  await new Promise(function (r) { setTimeout(r, 120); });
+  out.nSawT1 = openN.record.agentCalls.some(function (c) { return c.label === "impl:#11:t1"; });
+  out.nNoT2WhileGated = !openN.record.agentCalls.some(function (c) { return (c.label || "").indexOf(":t2") >= 0; });
+  out.nNoReviewWhileGated = !openN.record.agentCalls.some(function (c) { return /^review:#11/.test(c.label || ""); });
+  releaseN();
+  await openN.done;
+  out.nCompleted = !!resultOf(openN.record);
+
+  // Run O — a null reviewer must not strand committed work: the task is
+  // recorded UNREVIEWED, the loop continues, and the PR still opens.
+  const oReturns = Object.assign({}, mediumReturns()); oReturns["review:#11:t1:r1"] = null;
+  const recO = await run(buildArgs(), { agentReturns: oReturns });
+  const resO = resultOf(recO);
+  out.oNullCounted = !!(resO && resO.nullsByPhase && resO.nullsByPhase.implement >= 1);
+  out.oAudit = !!(resO && resO.auditEvents.some(function (e) { return e.event === "task_review_null"; }));
+  out.oUnreviewed = resO ? resO.tasksUnreviewed : null;
+  out.oOpened = resO ? resO.counts.prOpened : null;
+  out.oContinued = labels(recO).indexOf("impl:#11:t2") >= 0;
+
+  // Run P — the workspace gate. If task 1 never opened the shared checkout,
+  // every later rung would work somewhere else, so the chain stops dead and
+  // dispatches NO delivery agent.
+  const pReturns = Object.assign({}, mediumReturns(),
+    { "impl:#11:t1": task(1, { commitCount: 0, workspaceReady: false, taskCount: 2 }) });
+  const recP = await run(buildArgs(), { agentReturns: pReturns });
+  const resP = resultOf(recP);
+  out.pFailed = resP ? resP.counts.failed : null;
+  out.pAudit = !!(resP && resP.auditEvents.some(function (e) { return e.event === "workspace_not_ready"; }));
+  out.pNoDeliver = labels(recP).indexOf("deliver:#11") < 0;
+  out.pSiblingPr = resP ? resP.counts.prOpened : null;
+
+  // Run Q — ENVELOPE DISCIPLINE: reviewer findings travel on disk only. The
+  // fixer prompt must name the review file and must never carry the text.
+  const recQ = await run(buildArgs(), { agentReturns: ladderReturns("SENTINEL-FINDING-TEXT") });
+  const fixQ = recQ.agentCalls.find(function (c) { return c.label === "fix:#11:t1:r1"; });
+  out.qFixerDispatched = !!fixQ;
+  out.qNoFindingText = !!(fixQ && fixQ.prompt.indexOf("SENTINEL-FINDING-TEXT") < 0);
+  out.qReviewPathInPrompt = !!(fixQ && fixQ.prompt.indexOf("/issue-11/task-1/review-1.md") >= 0);
+  const resQ = resultOf(recQ);
+  out.qNoFindingInLogs = !recQ.logs.some(function (l) { return l.indexOf("SENTINEL-FINDING-TEXT") >= 0; })
+    && !!resQ && JSON.stringify(resQ).indexOf("SENTINEL-FINDING-TEXT") < 0;
+
+  // Run R — CB3, the LIVE per-issue implement budget. A 3-task plan under a
+  // budget of 4 stops after task 2, records the rest SKIPPED, and still
+  // delivers the two tasks that are committed and reviewed.
+  const rReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 3 }),
+    "impl:#11:t3": task(3),
+    "review:#11:t3:r1": approve(),
+  });
+  const recR = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: rReturns });
+  const resR = resultOf(recR);
+  out.rChainAgents = labels(recR).filter(function (l) { return /^(impl|review|fix):#11/.test(l || ""); }).length;
+  out.rAudit = !!(resR && resR.auditEvents.some(function (e) { return e.event === "implement_budget_exhausted"; }));
+  const r11 = resR ? resR.results.filter(function (x) { return x.issue === 11; })[0] : null;
+  out.rSkipped = r11 && Array.isArray(r11.tasks)
+    ? r11.tasks.filter(function (t) { return t.status === "SKIPPED"; }).length : null;
+  out.rDelivered = labels(recR).indexOf("deliver:#11") >= 0;
+
+  // Run U — CB3 cutting a task off BEFORE its review ever ran. The task is
+  // committed but unreviewed, and must say so rather than look like a task that
+  // had nothing to review. 3 tasks, budget 5: impl+review t1, impl+review t2,
+  // impl t3 = 5, and t3s review is the dispatch the budget refuses.
+  const recU = await run(buildArgs(null, { implementBudget: 5 }), { agentReturns: rReturns });
+  const resU = resultOf(recU);
+  out.uChainAgents = labels(recU).filter(function (l) { return /^(impl|review|fix):#11/.test(l || ""); }).length;
+  out.uUnreviewed = resU ? resU.tasksUnreviewed : null;
+  out.uTotal = resU ? resU.tasksTotal : null;
+  out.uDelivered = labels(recU).indexOf("deliver:#11") >= 0;
+
+  // Run V — CB3 cutting a task off between a REVISIONS_REQUIRED verdict and its
+  // fixer. The findings are known and were never addressed: that is BLOCKED,
+  // not "done and unreviewed". Budget 4: impl, review r1, fix r1, review r2,
+  // then the r2 fixer is refused.
+  const recV = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: ladderReturns(null) });
+  const resV = resultOf(recV);
+  out.vFixCalls = labels(recV).filter(function (l) { return /^fix:#11:t1:r/.test(l || ""); }).length;
+  out.vBlocked = resV ? resV.tasksBlocked : null;
+  out.vUnreviewed = resV ? resV.tasksUnreviewed : null;
+  out.vDelivered = labels(recV).indexOf("deliver:#11") >= 0;
+
+  // Run S — CB1 arithmetic is PINNED, not merely "it trips at 2". One design
+  // issue now projects 1 intake + 2 solvers + (6 design + 24 implement - 1).
+  const PROJ = 1 + 2 + 1 * (6 + 24 - 1);   // 32
+  const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
+  out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
+  const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
+  out.sBelowCeiling = !!(resultOf(recS2) && resultOf(recS2).cb1Tripped);
+
+  // Run T — no plan, no tasks, no gate: the single-solver path is unchanged.
+  const tReturns = Object.assign({}, mediumReturns(), { "plan:#11": { path: "", rc: 1, headline: "h" } });
+  const recT = await run(buildArgs(), { agentReturns: tReturns });
+  out.tFallback = labels(recT).indexOf("solve:#11 (medium)") >= 0;
+  out.tNoImpl = !labels(recT).some(function (l) { return /^impl:/.test(l || ""); });
+
+  // Every new run must also be harness-clean — an undeclared opts.phase on any
+  // of the four new agent kinds shows up here and nowhere else.
+  out.zViolations = [recB, recL, recM, openN.record, recO, recP, recQ, recR, recU, recV, recS1, recS2, recT]
+    .reduce(function (n, r) { return n + r.violations.length; }, 0);
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -496,11 +796,21 @@ else
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
   check bDesign 3            "B13 medium tier runs spec + review + plan"
-  check bImplement 2         "B14 still one solver per issue"
+  # RE-CUT (#508): the medium issue's implement phase is no longer one agent.
+  # A 2-task plan spends impl t1 + review t1r1 + impl t2 + review t2r1 + deliver
+  # = 5, and the trivial issue still spends its single solver.
+  check bImplement 6         "B14 (re-cut) the medium issue runs impl+review per task then one delivery agent; the trivial issue keeps its single solver"
   check bDesigned 1          "B15 only the medium issue is counted as designed"
   check bResearchArtifacts 3 "B16 all three research artifacts accepted"
-  check bPlanInPrompt true   "B17 the medium solver receives its plan path"
+  check bPlanInPrompt true   "B17 (re-pointed) the TASK IMPLEMENTER receives its plan path"
   check bTrivialNoPlan true  "B18 the trivial solver receives no plan"
+  check bWorktreeInPrompt true "B47 the task implementer is given the script-named shared worktree"
+  check bTasksTotal 2        "B48a every task of the plan is recorded"
+  check bTasksBlocked 0      "B48b a clean run blocks no task"
+  check bTasksApproved 2     "B48c every task passed its review gate"
+  check bTasksUnreviewed 0   "B48d no task shipped unreviewed on the clean path"
+  check bImplHouseRules true "B65 the house rules, the leaf constraint, the untrusted-input framing and the never-fall-back rule all REACH the agent that commits"
+  check bDeliverRules true   "B66 Closes #N, --body-file, stop-at-PR, the version-bump ban and the shared worktree all reach the agent that pushes"
 
   check cSpecCalls 1         "B19 REVISIONS_REQUIRED does NOT re-run the spec writer (bounded loop)"
   check cReviewCalls 1       "B20 the review runs exactly once"
@@ -538,6 +848,61 @@ else
 
   check kBaseInPrompt true      "B45 a known base branch reaches the solver as --base \"<branch>\" (#439)"
   check kNoBaseWhenUnknown true "B46 an unknown base emits NO --base flag (detached HEAD safety)"
+
+  check lFixCalls 3          "B49 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
+  check lReviewCalls 4       "B50 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"
+  check lExhaustedAudit true "B51 ladder exhaustion is audited (task_fix_rounds_exhausted), never silent"
+  check lNoT2 true           "B52a an exhausted task stops the task loop"
+  check lDelivered true      "B52b delivery still runs on the work already committed"
+  check lBlocked 1           "B52c the exhausted task is reported BLOCKED"
+
+  check mNoFixers true       "B53a a REJECT dispatches ZERO fixers (another round cannot save it)"
+  check mRejectAudit true    "B53b task_review_rejected is audited"
+  check mNoT2 true           "B53c a REJECT stops the task loop"
+
+  check nSawT1 true          "B54a the gated task-1 implementer was actually dispatched"
+  check nNoT2WhileGated true "B54b SEQUENTIAL: no task-2 agent exists while task 1 is still in flight"
+  check nNoReviewWhileGated true "B54c task 1's reviewer waits for its implementer too"
+  check nCompleted true      "B54d the run completes once the gate is released"
+
+  check oNullCounted true    "B55a a null reviewer is counted in nullsByPhase.implement"
+  check oAudit true          "B55b task_review_null is audited"
+  check oUnreviewed 1        "B55c the unreviewed task is surfaced in the result, not hidden"
+  check oContinued true      "B56a a skipped reviewer does not stop the task loop"
+  check oOpened 2            "B56b a skipped reviewer does not strand committed work — the PR still opens"
+
+  check pFailed 1            "B57a a chain that never opened its shared worktree is FAILED"
+  check pAudit true          "B57b workspace_not_ready is audited"
+  check pNoDeliver true      "B58a NO delivery agent is dispatched for a chain with no workspace"
+  check pSiblingPr 1         "B58b the sibling issue still lands its PR"
+
+  check qFixerDispatched true   "B59a REVISIONS_REQUIRED dispatches a fixer"
+  check qNoFindingText true     "B59b reviewer-returned text NEVER reaches the fixer prompt"
+  check qReviewPathInPrompt true "B59c the fixer is given the review file BY PATH"
+  check qNoFindingInLogs true   "B59d reviewer-returned text is never logged or returned either"
+
+  check rChainAgents 4       "B60a CB3 stops the task chain at the live per-issue implement budget"
+  check rAudit true          "B60b implement_budget_exhausted is audited"
+  check rSkipped 1           "B61a the tasks the budget cut off are recorded SKIPPED, not dropped"
+  check rDelivered true      "B61b delivery still runs on committed work when CB3 trips"
+
+  check uChainAgents 5       "B67a CB3 can cut a task off before its review is dispatched"
+  check uUnreviewed 1        "B67b that task is reported UNREVIEWED, not silently indistinguishable from one with nothing to review"
+  check uTotal 3             "B67c every task of the plan is still accounted for"
+  check uDelivered true      "B67d delivery still runs on the reviewed work"
+
+  check vFixCalls 1          "B68a CB3 can cut a task off between its verdict and its fixer"
+  check vBlocked 1           "B68b known-but-unaddressed findings are BLOCKED, not done-and-unreviewed"
+  check vUnreviewed 0        "B68c ...and not miscounted as unreviewed either"
+  check vDelivered true      "B68d delivery still runs on what is committed"
+
+  check sAtCeiling false     "B62 CB1 does NOT trip at exactly the projected agent count"
+  check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
+
+  check tFallback true       "B64a a design tier with no usable plan falls back to the single solver"
+  check tNoImpl true         "B64b no task agent is dispatched without a plan (no plan, no tasks, no gate)"
+
+  check zViolations 0        "B1 (extended) zero harness violations across every new run (catches an undeclared opts.phase)"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="
