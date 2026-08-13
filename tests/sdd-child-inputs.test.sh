@@ -205,6 +205,14 @@ for artifact in \
   chmod 600 "$artifact"
 done
 
+# #458: the allocation grammar is plan-scoped, so every expected instance ID in
+# this file is derived from the fixture plan rather than hardcoded. The fixture
+# plan lives under `mktemp -d`, so its realpath — and therefore its scope —
+# differs on every run; a literal `sdd-p<hex>-…` would red permanently. The
+# scope-value-free oracle for the fix is the two-plan disjointness block at the
+# end of this file, which never mentions a scope value at all.
+FIXTURE_SCOPE="$(sdd_plan_scope "$plan_path")"
+
 PROVIDER_LOG="$TMP/provider.log"
 PROVIDER_ARGS_LOG="$TMP/provider-args.jsonl"
 : >"$PROVIDER_LOG"
@@ -337,7 +345,7 @@ EXPECTED_EDGES="$(printf '%s\n' \
 
 python3 -I -B - \
   "$RECEIPT_FILE" "$UBERDEV_CHILD_TEST_SOURCE" \
-  "$BUILDER_INPUTS_LOG" "$VALIDATED_INPUTS_LOG" <<'PY'
+  "$BUILDER_INPUTS_LOG" "$VALIDATED_INPUTS_LOG" "$FIXTURE_SCOPE" <<'PY'
 import copy
 import hashlib
 import json
@@ -347,16 +355,17 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-path, source, builder_inputs_path, validated_inputs_path = sys.argv[1:]
+path, source, builder_inputs_path, validated_inputs_path, scope = sys.argv[1:]
+assert re.fullmatch(r"[0-9a-f]{12}", scope), scope
 rows = [json.loads(line) for line in Path(path).read_text().splitlines()]
 built_raw = Path(builder_inputs_path).read_text().splitlines()
 validated_raw = Path(validated_inputs_path).read_text().splitlines()
 cases = [
-    ("sdd.implement.41", "sdd.task.implement", "sdd-w1-t41-implement-a7"),
-    ("sdd.implement.42", "sdd.task.implement", "sdd-w1-t42-implement-a7"),
-    ("sdd.spec_review", "sdd.task.spec_review", "sdd-w1-t43-spec-review-a1"),
-    ("sdd.quality_review", "sdd.task.quality_review", "sdd-w1-t44-quality-review-a1"),
-    ("sdd.pre_merge_test_analysis", "sdd.premerge.test_review", "sdd-w1-t45-test-review-a1"),
+    ("sdd.implement.41", "sdd.task.implement", f"sdd-p{scope}-w1-t41-implement-a7"),
+    ("sdd.implement.42", "sdd.task.implement", f"sdd-p{scope}-w1-t42-implement-a7"),
+    ("sdd.spec_review", "sdd.task.spec_review", f"sdd-p{scope}-w1-t43-spec-review-a1"),
+    ("sdd.quality_review", "sdd.task.quality_review", f"sdd-p{scope}-w1-t44-quality-review-a1"),
+    ("sdd.pre_merge_test_analysis", "sdd.premerge.test_review", f"sdd-p{scope}-w1-t45-test-review-a1"),
 ]
 assert len(built_raw) == len(cases), built_raw
 assert len(validated_raw) == len(cases), validated_raw
@@ -498,8 +507,8 @@ def validate_receipts(candidate_rows):
     return chains
 
 chains = validate_receipts(rows)
-first_implement = chains["sdd-w1-t41-implement-a7"]
-second_implement = chains["sdd-w1-t42-implement-a7"]
+first_implement = chains[f"sdd-p{scope}-w1-t41-implement-a7"]
+second_implement = chains[f"sdd-p{scope}-w1-t42-implement-a7"]
 assert (
     first_implement["handoff_index"]
     < second_implement["handoff_index"]
@@ -535,7 +544,7 @@ assert_rejected(swapped, "final build snapshot is not canonical")
 late = copy.deepcopy(rows)
 first_handoff = next(
     index for index, row in enumerate(late)
-    if row.get("instance_id") == "sdd-w1-t41-implement-a7" and row["event"] == "handoff"
+    if row.get("instance_id") == f"sdd-p{scope}-w1-t41-implement-a7" and row["event"] == "handoff"
 )
 late_snapshot = late.pop(first_handoff - 1)
 late.insert(first_handoff, late_snapshot)
@@ -570,32 +579,35 @@ assert implement_inputs["failure_path"] == ""
 PY
 
 [ "$(<"$PROVIDER_LOG")" = "$(printf '%s\n' \
-  sdd-w1-t41-implement-a7 \
-  sdd-w1-t42-implement-a7 \
-  sdd-w1-t43-spec-review-a1 \
-  sdd-w1-t44-quality-review-a1 \
-  sdd-w1-t45-test-review-a1)" ] || {
+  "sdd-p${FIXTURE_SCOPE}-w1-t41-implement-a7" \
+  "sdd-p${FIXTURE_SCOPE}-w1-t42-implement-a7" \
+  "sdd-p${FIXTURE_SCOPE}-w1-t43-spec-review-a1" \
+  "sdd-p${FIXTURE_SCOPE}-w1-t44-quality-review-a1" \
+  "sdd-p${FIXTURE_SCOPE}-w1-t45-test-review-a1")" ] || {
   printf 'SDD runtime provider seam was not crossed exactly once per constructor\n' >&2
   exit 1
 }
 
 STATE_DIR="$RUN_DIR/.agent-state-$(id -u)"
 python3 -I -B - \
-  "$PROVIDER_ARGS_LOG" "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR/semaphore-v1" <<'PY'
+  "$PROVIDER_ARGS_LOG" "$STATE_DIR/agent-lifecycle.jsonl" "$STATE_DIR/semaphore-v1" \
+  "$FIXTURE_SCOPE" <<'PY'
 import json
 import re
 import sys
 from pathlib import Path
 
-provider_path, lifecycle_path, semaphore_path = map(Path, sys.argv[1:])
+provider_path, lifecycle_path, semaphore_path = map(Path, sys.argv[1:4])
+scope = sys.argv[4]
+assert re.fullmatch(r"[0-9a-f]{12}", scope), scope
 provider_rows = [json.loads(line) for line in provider_path.read_text().splitlines()]
 lifecycle_rows = [json.loads(line) for line in lifecycle_path.read_text().splitlines()]
 expectations = {
-    "sdd-w1-t41-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
-    "sdd-w1-t42-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
-    "sdd-w1-t43-spec-review-a1": ("deep", "deep", "high", "read-only", "spec-compliance-reviewer", "implementation_review"),
-    "sdd-w1-t44-quality-review-a1": ("deep", "deep", "high", "read-only", "code-reviewer", "implementation_review"),
-    "sdd-w1-t45-test-review-a1": ("deep", "deep", "high", "read-only", "pr-test-analyzer", "implementation_review"),
+    f"sdd-p{scope}-w1-t41-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
+    f"sdd-p{scope}-w1-t42-implement-a7": ("quality", "standard", "medium", "workspace-write", "implementation-worker", "implementation"),
+    f"sdd-p{scope}-w1-t43-spec-review-a1": ("deep", "deep", "high", "read-only", "spec-compliance-reviewer", "implementation_review"),
+    f"sdd-p{scope}-w1-t44-quality-review-a1": ("deep", "deep", "high", "read-only", "code-reviewer", "implementation_review"),
+    f"sdd-p{scope}-w1-t45-test-review-a1": ("deep", "deep", "high", "read-only", "pr-test-analyzer", "implementation_review"),
 }
 assert [row["instance_id"] for row in provider_rows] == list(expectations), provider_rows
 decision_keys = {
@@ -702,7 +714,7 @@ sdd_dispatch_case sdd.task.implement 51 implement 1 snapshot_json
     "${#SDD_BATCH_RESULT_INSTANCES[@]}" "${#SDD_BATCH_RESULT_PATHS[@]}" >&2
   exit 1
 }
-[ "${SDD_BATCH_RESULT_INSTANCES[0]}" = 'sdd-w1-t51-implement-a1' ] || {
+[ "${SDD_BATCH_RESULT_INSTANCES[0]}" = "sdd-p${FIXTURE_SCOPE}-w1-t51-implement-a1" ] || {
   printf 'snapshot instance mismatch: %s\n' "${SDD_BATCH_RESULT_INSTANCES[0]}" >&2
   exit 1
 }
@@ -781,9 +793,136 @@ failure_path="$saved_failure_path"
 unset UBERDEV_CHILD_TEST_SOURCE UBERDEV_CHILD_TEST_RECEIPT_FILE
 failure_path="$failure_fixture_path"
 
+# ===========================================================================
+# #458 — the plan-scope mint's contract.
+#
+# `sdd_plan_scope` is the identity function the whole fix rests on: it turns a
+# plan file into a 12-hex allocation scope that is deterministic per plan and
+# disjoint across plans. Identity is realpath(plan) + NUL + plan bytes, so
+# neither a shared basename (this repo's plans land at
+# docs/uberdev/plans/YYYY-MM-DD-<slug>.md, and two same-day runs on one slug
+# share one) nor a byte-identical copy at another path can collapse two plans
+# into one scope.
+# ===========================================================================
+SCOPE_DIR="$TMP/scope"
+mkdir -p "$SCOPE_DIR/twin"
+chmod 700 "$SCOPE_DIR" "$SCOPE_DIR/twin"
+PLAN_A="$SCOPE_DIR/plan-a.md"
+PLAN_B="$SCOPE_DIR/plan-b.md"
+PLAN_TWIN="$SCOPE_DIR/twin/plan-a.md"
+PLAN_MUTABLE="$SCOPE_DIR/plan-mutable.md"
+printf 'plan a: wave 1 / task 41 / implement\n' >"$PLAN_A"
+printf 'plan b: wave 1 / task 41 / implement (different body)\n' >"$PLAN_B"
+printf 'plan a: wave 1 / task 41 / implement\n' >"$PLAN_TWIN"
+printf 'plan mutable: first body\n' >"$PLAN_MUTABLE"
+chmod 600 "$PLAN_A" "$PLAN_B" "$PLAN_TWIN" "$PLAN_MUTABLE"
+
+SCOPE_PLAN_A="$(sdd_plan_scope "$PLAN_A")"
+SCOPE_PLAN_A_AGAIN="$(sdd_plan_scope "$PLAN_A")"
+[ "$SCOPE_PLAN_A" = "$SCOPE_PLAN_A_AGAIN" ] || {
+  printf 'plan scope is not deterministic: %s vs %s\n' "$SCOPE_PLAN_A" "$SCOPE_PLAN_A_AGAIN" >&2
+  exit 1
+}
+
+SCOPE_PLAN_B="$(sdd_plan_scope "$PLAN_B")"
+[ "$SCOPE_PLAN_A" != "$SCOPE_PLAN_B" ] || {
+  printf 'two distinct plans collapsed into one scope: %s\n' "$SCOPE_PLAN_A" >&2
+  exit 1
+}
+
+# Same basename AND identical bytes, different directory: a basename-keyed
+# scheme (upstream superpowers keys the workspace on the plan basename) would
+# collapse these two; the realpath term is what keeps them apart.
+SCOPE_PLAN_TWIN="$(sdd_plan_scope "$PLAN_TWIN")"
+[ "$SCOPE_PLAN_A" != "$SCOPE_PLAN_TWIN" ] || {
+  printf 'byte-identical plans at different paths shared one scope: %s\n' "$SCOPE_PLAN_A" >&2
+  exit 1
+}
+
+# Same path, different bytes: the bytes term is what keeps two same-day plans
+# that reuse one filename apart.
+SCOPE_MUTABLE_FIRST="$(sdd_plan_scope "$PLAN_MUTABLE")"
+printf 'plan mutable: second body\n' >"$PLAN_MUTABLE"
+SCOPE_MUTABLE_SECOND="$(sdd_plan_scope "$PLAN_MUTABLE")"
+[ "$SCOPE_MUTABLE_FIRST" != "$SCOPE_MUTABLE_SECOND" ] || {
+  printf 'rewritten plan bytes reused the previous scope: %s\n' "$SCOPE_MUTABLE_FIRST" >&2
+  exit 1
+}
+
+# IDENT-legal shape: exactly 12 lowercase hex characters, so the composed
+# instance ID stays inside the handoff schema's identifier grammar.
+case "$SCOPE_PLAN_A" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *)
+    printf 'plan scope is not 12 lowercase hex characters: %s\n' "$SCOPE_PLAN_A" >&2
+    exit 1
+    ;;
+esac
+
+assert_plan_scope_refused() {
+  local label="$1" diagnostic="$2" refusal_err refusal_rc=0
+  shift 2
+  refusal_err="$(sdd_plan_scope "$@" 2>&1 >/dev/null)" || refusal_rc=$?
+  [ "$refusal_rc" -ne 0 ] || {
+    printf 'plan scope accepted a refused input: %s\n' "$label" >&2
+    exit 1
+  }
+  [ -z "$diagnostic" ] || grep -q "$diagnostic" <<<"$refusal_err" || {
+    printf 'plan scope refusal %s lacked diagnostic %s; stderr=[%s]\n' \
+      "$label" "$diagnostic" "$refusal_err" >&2
+    exit 1
+  }
+}
+
+assert_plan_scope_refused relative-path plan_scope_path_not_absolute plan-a.md
+assert_plan_scope_refused empty-path plan_scope_path_not_absolute ''
+assert_plan_scope_refused missing-file plan_scope_unreadable "$SCOPE_DIR/missing.md"
+assert_plan_scope_refused no-argument ''
+
+# root reads a 0000 file, so this arm only proves anything for a non-root uid.
+if [ "$(id -u)" -ne 0 ]; then
+  PLAN_UNREADABLE="$SCOPE_DIR/plan-unreadable.md"
+  printf 'plan unreadable\n' >"$PLAN_UNREADABLE"
+  chmod 000 "$PLAN_UNREADABLE"
+  assert_plan_scope_refused unreadable-file plan_scope_unreadable "$PLAN_UNREADABLE"
+  chmod 600 "$PLAN_UNREADABLE"
+fi
+
+# ===========================================================================
+# #458 — the plan scope is a MANDATORY fifth instance dimension.
+#
+# The positive control below is what keeps the all-zero loop that follows
+# honest: without it, that loop would start passing on arity (four arguments
+# against a five-argument validator) rather than on the zero it exists to
+# reject.
+# ===========================================================================
+VALID_SCOPE="$SCOPE_PLAN_A"
+sdd_validate_instance_dimensions 1 1 implement 7 "$VALID_SCOPE" || {
+  printf 'a fully valid five-dimension instance was rejected\n' >&2
+  exit 1
+}
+
+if sdd_validate_instance_dimensions 1 1 implement 7; then
+  printf 'four-argument instance dimensions were accepted without a plan scope\n' >&2
+  exit 1
+fi
+
+for malformed_scope in '' ABCDEF012345 0123456789ab0 xyz012345678 0123456789a; do
+  builder_calls_before="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+  if sdd_validate_instance_dimensions 1 1 implement 7 "$malformed_scope"; then
+    printf 'malformed plan scope was accepted: [%s]\n' "$malformed_scope" >&2
+    exit 1
+  fi
+  builder_calls_after="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+  [ "$builder_calls_after" -eq "$builder_calls_before" ] || {
+    printf 'malformed plan scope reached input construction: [%s]\n' "$malformed_scope" >&2
+    exit 1
+  }
+done
+
 for zero_spelling in 00 000 000000; do
   builder_calls_before="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
-  if sdd_validate_instance_dimensions 1 1 implement "$zero_spelling"; then
+  if sdd_validate_instance_dimensions 1 1 implement "$zero_spelling" "$VALID_SCOPE"; then
     printf 'all-zero attempt spelling was accepted: %s\n' "$zero_spelling" >&2
     exit 1
   fi
@@ -797,7 +936,7 @@ done
 for numeric_case in '007|7' '01|1' '00042|42' '10|10'; do
   attempt="${numeric_case%%|*}"
   expected_attempt="${numeric_case#*|}"
-  sdd_validate_instance_dimensions 1 1 implement "$attempt"
+  sdd_validate_instance_dimensions 1 1 implement "$attempt" "$VALID_SCOPE"
   normalized_json="$(sdd_inputs_for_task sdd.task.implement 45)"
   python3 -I -B - "$normalized_json" "$expected_attempt" "$failure_path" <<'PY'
 import json
@@ -1261,5 +1400,193 @@ PROBE
     exit 1
   }
 fi
+
+# ===========================================================================
+# #458 ORACLE — two plans, one run carrier, disjoint child allocations.
+#
+# This is the acceptance oracle for the whole issue and it is deliberately
+# written WITHOUT ever naming a scope value: it asserts only that two plans
+# executed at IDENTICAL plan-internal coordinates (w1 / t41 / implement / a7)
+# both allocate, and that the three paths the runtime exports for them are
+# pairwise different. It runs against the live carrier and the real
+# lib/child-dispatch.sh — nothing is stubbed. Before the fix the second call
+# here refused with `instance_exists`.
+# ===========================================================================
+edge_id=sdd.task.implement
+SCOPE_INPUTS_JSON="$(sdd_inputs_for_task sdd.task.implement 41)"
+SCOPE_INPUTS_JSON="$(sdd_canonicalize_owned_paths "$SCOPE_INPUTS_JSON")"
+SCOPE_INPUTS_JSON="$(uberdev_child_inputs_validate sdd.task.implement "$SCOPE_INPUTS_JSON")"
+
+ID_A="$(uberdev_child_instance_id "sdd-p${SCOPE_PLAN_A}-w1-t41-implement-a7")"
+ID_B="$(uberdev_child_instance_id "sdd-p${SCOPE_PLAN_B}-w1-t41-implement-a7")"
+
+uberdev_create_child_handoff sdd.task.implement "$ID_A" "$SCOPE_INPUTS_JSON" '[]' >/dev/null || {
+  printf 'plan A was refused its allocation at w1/t41/implement/a7\n' >&2
+  exit 1
+}
+A_HANDOFF="$UBERDEV_CHILD_HANDOFF"
+A_RESULT="$UBERDEV_CHILD_RESULT"
+A_STATUS="$UBERDEV_CHILD_STATUS"
+
+uberdev_create_child_handoff sdd.task.implement "$ID_B" "$SCOPE_INPUTS_JSON" '[]' >/dev/null || {
+  printf 'plan B was refused at the SAME coordinates plan A already used (#458)\n' >&2
+  exit 1
+}
+B_HANDOFF="$UBERDEV_CHILD_HANDOFF"
+B_RESULT="$UBERDEV_CHILD_RESULT"
+B_STATUS="$UBERDEV_CHILD_STATUS"
+
+[ "$A_HANDOFF" != "$B_HANDOFF" ] || {
+  printf 'two plans shared one handoff path: %s\n' "$A_HANDOFF" >&2
+  exit 1
+}
+[ "$A_RESULT" != "$B_RESULT" ] || {
+  printf 'two plans shared one result path: %s\n' "$A_RESULT" >&2
+  exit 1
+}
+[ "$A_STATUS" != "$B_STATUS" ] || {
+  printf 'two plans shared one status path: %s\n' "$A_STATUS" >&2
+  exit 1
+}
+
+# Concrete read-across proof: plan B can never open plan A's result artifact.
+mkdir -p "$(dirname "$A_RESULT")"
+printf 'plan a result sentinel\n' >"$A_RESULT"
+chmod 600 "$A_RESULT"
+[ ! -e "$B_RESULT" ] || {
+  printf 'plan B resolved onto an artifact plan A already wrote: %s\n' "$B_RESULT" >&2
+  exit 1
+}
+rm -f "$A_RESULT"
+
+# The never-reuse contract is PRESERVED, not softened: the same plan at the
+# same coordinates is still a hard refusal.
+REUSE_RC=0
+REUSE_ERR="$(uberdev_create_child_handoff sdd.task.implement "$ID_A" "$SCOPE_INPUTS_JSON" '[]' 2>&1 >/dev/null)" \
+  || REUSE_RC=$?
+[ "$REUSE_RC" -eq 2 ] || {
+  printf 'reusing one plan-scoped instance was accepted (rc=%s)\n' "$REUSE_RC" >&2
+  exit 1
+}
+grep -q 'instance_exists' <<<"$REUSE_ERR" || {
+  printf 'instance reuse was refused without the instance_exists diagnostic: [%s]\n' "$REUSE_ERR" >&2
+  exit 1
+}
+
+# Grammar shape. Not tautological: the regex is written here by hand, never
+# derived from the code under test.
+case "$ID_A" in
+  sdd-p[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-w1-t41-implement-a7) ;;
+  *)
+    printf 'composed instance ID does not match sdd-p<12hex>-w<W>-t<T>-<STAGE>-a<A>: %s\n' "$ID_A" >&2
+    exit 1
+    ;;
+esac
+
+# Routing the composed ID through uberdev_child_instance_id bounds it to the
+# handoff schema's IDENT grammar. This is a DEGRADATION improvement, not a
+# security fix: an over-long task id already failed loudly as invalid_identity
+# inside the handoff validator; it now degrades to prefix-plus-digest instead.
+LONG_TASK_ID="$(python3 -I -B -c 'print("9"*200,end="")')"
+BOUNDED_ID="$(uberdev_child_instance_id "sdd-p${SCOPE_PLAN_A}-w1-t${LONG_TASK_ID}-implement-a7")"
+python3 -I -B -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",sys.argv[1]) else 1)' \
+  "$BOUNDED_ID" || {
+  printf 'bounded instance ID breaches IDENT: %s\n' "$BOUNDED_ID" >&2
+  exit 1
+}
+
+# ===========================================================================
+# #458 — Step 4.5's pre-created pr-test-analyzer artifact is plan-scoped too.
+#
+# First executable coverage of that fence. It is extracted with its own
+# anchored regex (SDD_TEST_REVIEW_SCOPE=) so it can never silently match the
+# routed runtime fence above.
+# ===========================================================================
+python3 -I -B - "$SKILL" "$TMP/step45.sh" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+pattern = re.compile(r"```bash\n(SDD_TEST_REVIEW_SCOPE=.*?\n)```", re.DOTALL)
+matches = pattern.findall(text)
+if len(matches) != 1:
+    raise SystemExit(f"SDD step 4.5 fence count must be exactly one, found {len(matches)}")
+Path(sys.argv[2]).write_text(matches[0], encoding="utf-8")
+PY
+
+STEP45_DIR="$TMP/step45-summary"
+mkdir -p "$STEP45_DIR"
+chmod 700 "$STEP45_DIR"
+
+STEP45_A_RC=0
+( set +e; plan_path="$PLAN_A"; summary_dir="$STEP45_DIR/"; . "$TMP/step45.sh" ) \
+  2>"$TMP/step45-a.err" || STEP45_A_RC=$?
+[ "$STEP45_A_RC" -eq 0 ] || {
+  printf 'step 4.5 artifact creation failed for plan A (rc=%s): [%s]\n' \
+    "$STEP45_A_RC" "$(<"$TMP/step45-a.err")" >&2
+  exit 1
+}
+
+STEP45_B_RC=0
+( set +e; plan_path="$PLAN_B"; summary_dir="$STEP45_DIR/"; . "$TMP/step45.sh" ) \
+  2>"$TMP/step45-b.err" || STEP45_B_RC=$?
+[ "$STEP45_B_RC" -eq 0 ] || {
+  printf 'step 4.5 artifact creation failed for plan B at the shared summary_dir (rc=%s): [%s]\n' \
+    "$STEP45_B_RC" "$(<"$TMP/step45-b.err")" >&2
+  exit 1
+}
+
+python3 -I -B - "$STEP45_DIR" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+entries = sorted(directory.iterdir())
+assert len(entries) == 2, f"two plans did not produce two artifacts: {entries!r}"
+assert len({entry.name for entry in entries}) == 2, entries
+for entry in entries:
+    info = entry.lstat()
+    assert stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode), (entry, info.st_mode)
+    if callable(getattr(os, "geteuid", None)):
+        assert stat.S_IMODE(info.st_mode) == 0o600, (entry, oct(stat.S_IMODE(info.st_mode)))
+    entry.write_bytes(f"sentinel for {entry.name}\n".encode())
+PY
+
+# Re-running the SAME plan is a NAMED refusal, not an unhandled traceback, and
+# it must not overwrite or truncate the artifact already on disk — O_EXCL is
+# what keeps a loud collision from degrading into the stale-read bug #458 is
+# about.
+STEP45_REPEAT_RC=0
+( set +e; plan_path="$PLAN_A"; summary_dir="$STEP45_DIR/"; . "$TMP/step45.sh" ) \
+  2>"$TMP/step45-repeat.err" || STEP45_REPEAT_RC=$?
+STEP45_REPEAT_ERR="$(<"$TMP/step45-repeat.err")"
+[ "$STEP45_REPEAT_RC" -eq 2 ] || {
+  printf 'repeated step 4.5 creation did not refuse with rc 2 (rc=%s)\n' "$STEP45_REPEAT_RC" >&2
+  exit 1
+}
+grep -q 'test_review_artifact_exists' <<<"$STEP45_REPEAT_ERR" || {
+  printf 'repeated step 4.5 creation lacked the test_review_artifact_exists diagnostic: [%s]\n' \
+    "$STEP45_REPEAT_ERR" >&2
+  exit 1
+}
+if grep -q 'Traceback (most recent call last)' <<<"$STEP45_REPEAT_ERR"; then
+  printf 'repeated step 4.5 creation raised an unhandled traceback: [%s]\n' "$STEP45_REPEAT_ERR" >&2
+  exit 1
+fi
+
+python3 -I -B - "$STEP45_DIR" <<'PY'
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+entries = sorted(directory.iterdir())
+assert len(entries) == 2, f"the refused re-run changed the artifact set: {entries!r}"
+for entry in entries:
+    expected = f"sentinel for {entry.name}\n".encode()
+    assert entry.read_bytes() == expected, f"refused re-run mutated {entry.name}"
+PY
 
 echo 'sdd-child-inputs: PASS'

@@ -88,11 +88,22 @@ handoff and exports `UBERDEV_CHILD_HANDOFF`, `UBERDEV_CHILD_RESULT`, and
 
 Instance IDs are allocation identities and are never reused:
 
-`sdd-w<WAVE>-t<TASK>-<STAGE>-a<ATTEMPT>`
+`sdd-p<PLANSCOPE>-w<WAVE>-t<TASK>-<STAGE>-a<ATTEMPT>`
 
 where stage is one of `implement`, `spec-review`, `spec-fix`, `quality-review`,
-`quality-fix`, or `test-review`. Wave, task, stage, and attempt are explicit
-dynamic dimensions. The four stable routing edges are:
+`quality-fix`, or `test-review`. Plan scope, wave, task, stage, and attempt are
+explicit dynamic dimensions. Plan scope is the **execution-scope** dimension:
+the run tree is derived from the carrier, so one carrier owns one instance-ID
+namespace for every plan it executes, while the plan-internal coordinates
+(wave, task, stage, attempt) restart at `w1-t1-…-a1` for each plan. Without it,
+a second plan executed under the same carrier — `write_plan.sdd` followed by
+`orchestrator.sdd`, both registered entry edges — collides on the first
+coordinate it reuses and is refused as `instance_exists`. The scope is minted
+by `sdd_plan_scope` as the first 12 hex characters of
+`sha256(realpath(plan) ⊕ NUL ⊕ plan bytes)`: the realpath keeps two distinct
+but byte-identical plans apart, the bytes keep two same-day plans that share a
+basename apart, and 12 hex characters carry no plan-derived free text into a
+path. The four stable routing edges are:
 
 | Edge | Role | Gate |
 |---|---|---|
@@ -109,12 +120,13 @@ empty paths, escapes, and allow/deny overlap are rejected.
 
 ```bash
 sdd_validate_instance_dimensions() {
-  local wave="${@:1:1}" task="${@:2:1}" stage="${@:3:1}" attempt="${@:4:1}"
-  [ "$#" -ge 4 ] || return 2
+  local wave="${@:1:1}" task="${@:2:1}" stage="${@:3:1}" attempt="${@:4:1}" plan_scope="${@:5:1}"
+  [ "$#" -ge 5 ] || return 2
   sdd_validate_positive_decimal "$wave" || return 2
   sdd_validate_positive_decimal "$task" || return 2
   sdd_validate_positive_decimal "$attempt" || return 2
   case "$stage" in implement|spec-review|spec-fix|quality-review|quality-fix|test-review) ;; *) return 2 ;; esac
+  sdd_validate_plan_scope "$plan_scope" || return 2
 }
 
 sdd_validate_positive_decimal() {
@@ -135,6 +147,14 @@ sdd_loop_cap() {
     fix_rounds) printf '%s' 3 ;;
     retest_rounds) printf '%s' 2 ;;
     context_rounds) printf '%s' 2 ;;
+    *) return 2 ;;
+  esac
+}
+
+sdd_validate_plan_scope() {
+  [ "$#" -ge 1 ] || return 2
+  case "${@:1:1}" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
     *) return 2 ;;
   esac
 }
@@ -207,6 +227,22 @@ ledger,loop,round_no,cap=sys.argv[1:]
 entry=("## cap exhausted | loop %s | round %s | cap %s\n" % (loop,round_no,cap)).encode("utf-8")
 fd=os.open(ledger,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
 with os.fdopen(fd,"ab") as stream: stream.write(entry)
+PY
+}
+
+sdd_plan_scope() {
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B - "${@:1:1}" <<'PY'
+import hashlib,os,sys
+plan=sys.argv[1]
+if not plan or not os.path.isabs(plan):
+    print('uberdev sdd: plan_scope_path_not_absolute',file=sys.stderr); raise SystemExit(2)
+real=os.path.realpath(plan)
+try:
+    with open(real,'rb') as stream: body=stream.read()
+except OSError as error:
+    print(f'uberdev sdd: plan_scope_unreadable errno={error.errno}',file=sys.stderr); raise SystemExit(2)
+print(hashlib.sha256(real.encode()+b'\0'+body).hexdigest()[:12],end='')
 PY
 }
 
@@ -428,9 +464,10 @@ Executable batch shape (substitute the edge/role/stage from the table):
 ```bash
 # Dispatch the complete batch first.
 sdd_begin_batch || return $?
+plan_scope="$(sdd_plan_scope "$plan_path")" || return 2
 for task_id in $SDD_BATCH_TASK_IDS; do
-  sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" || return 2
-  instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
+  sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" "$plan_scope" || return 2
+  instance_id="$(uberdev_child_instance_id "sdd-p${plan_scope}-w${wave}-t${task_id}-${stage}-a${attempt}")" || return 2
   task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")" || return 2
   task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
   task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2
@@ -508,10 +545,16 @@ digraph when_to_use {
    **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
 
 ```bash
-SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer.md"
+SDD_TEST_REVIEW_SCOPE="$(sdd_plan_scope "$plan_path")" || return 2
+SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer-${SDD_TEST_REVIEW_SCOPE}.md"
 python3 -I -B - "$SDD_TEST_REVIEW_OUTPUT" <<'PY'
 import os,sys
-fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+try:
+    fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+except FileExistsError:
+    print('uberdev sdd: test_review_artifact_exists',file=sys.stderr); raise SystemExit(2)
+except OSError as error:
+    print(f'uberdev sdd: test_review_artifact_create_failed errno={error.errno}',file=sys.stderr); raise SystemExit(2)
 os.close(fd)
 PY
 ```
@@ -535,7 +578,7 @@ edge_id: sdd.finish_branch
 model_invocation: false
 ```
 
-5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
+5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
 ### Parallel Dispatch Pattern
 

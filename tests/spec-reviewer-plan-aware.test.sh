@@ -101,6 +101,20 @@ assert_grep "$SUBAGENT_DRIVEN" \
 assert_grep "$SUBAGENT_DRIVEN" \
   'uberdev_unwind_child "\$child_status" "\$result" "\$SDD_CHILD_TIMEOUT"' \
   "SDD unwind is bounded by the configured positive timeout"
+# #458 structural locks. These are the WEAKEST evidence for the plan-scope fix
+# and are never its primary oracle — the behavioural oracle is the two-plan
+# disjointness block in tests/sdd-child-inputs.test.sh, which executes the real
+# handoff allocator. These three rows exist only to catch a future edit that
+# deletes the helpers from the file those tests execute.
+assert_grep "$SUBAGENT_DRIVEN" \
+  'sdd_plan_scope' \
+  "SDD mints a per-plan allocation scope (#458)"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'sdd_validate_plan_scope' \
+  "SDD validates the plan scope as a mandatory instance dimension (#458)"
+assert_grep "$SUBAGENT_DRIVEN" \
+  'uberdev_child_instance_id "sdd-p\$\{plan_scope\}' \
+  "SDD bounds the composed instance ID through the shared helper, not by hand (#458)"
 if grep -qF 'model_invocation: false' <<<"$(grep -A1 -F 'edge_id: sdd.finish_branch' "$SUBAGENT_DRIVEN")"; then
   echo "  PASS  SDD finish-branch transition has stable non-model lineage"
   PASS=$((PASS + 1))
@@ -121,6 +135,12 @@ for edge,row in json.loads(match.group(1)).items():
     if row["inputs"] != list(declared["required_inputs"]) or row["risk_scope"] != declared["risk_scope"]:
         raise SystemExit(f"{edge}: manifest divergence")
     if row["risk_argument"] != "subtask": raise SystemExit(f"{edge}: risk argument")
+# #458: the declared instance-ID vocabulary must name the plan scope, so the
+# manifest stops describing a grammar SDD no longer composes. Nothing reads
+# instance_dimensions today; this keeps the declaration truthful, it does not
+# enforce the fix.
+if "plan_scope" not in manifest["instance_dimensions"]:
+    raise SystemExit("manifest instance_dimensions omits plan_scope")
 PY
 then
   echo "  PASS  SDD callsite fixtures exactly match the production manifest"
