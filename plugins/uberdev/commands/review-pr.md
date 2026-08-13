@@ -2664,7 +2664,10 @@ EOF_VERIFY_AUDIT
     DEFER_PHASE2_PATH="$RESEARCH_DIR_ABS/simplify-final.md"
     DEFER_PHASE2_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$DEFER_PHASE2_PATH" --minimum 1 --maximum 16777216)" || return 74
     DEFER_PHASE2_DISPOSITION_SHA256="$(python3 -I -B "$CODE_FIXER_CONTRACT" digest --path "$PHASE2_DISPOSITION_PATH" --minimum 1 --maximum 16777216)" || return 74
-    DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+    # The PHASE 2 pair: this iteration's simplify aggregate and the fixer's
+    # disposition. The verb names the phase it counts, so a Phase 1 aggregate
+    # handed here is refused on its envelope rather than counted as if it fit.
+    DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-phase2-deferred-blockers \
       --findings-path "$DEFER_PHASE2_PATH" --findings-sha256 "$DEFER_PHASE2_SHA256" \
       --disposition-path "$PHASE2_DISPOSITION_PATH" --disposition-sha256 "$DEFER_PHASE2_DISPOSITION_SHA256")" || return 74
     case "$DEFERRED_BLOCKER_COUNT" in ''|*[!0-9]*) return 74 ;; esac

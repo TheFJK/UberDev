@@ -200,16 +200,16 @@ changes shape.
    and both the agent file and the dispatch prompt say so.
 2. **`validate_persistence_result` compares across phases.** It enforces
    `expected_deferred_blockers == by_severity_blocker + skipped_blockers`, where
-   the left side is Phase-2-derived (`count_deferred_blockers` hardcodes a
-   `simplify-aggregate` envelope and `phase2` validation on both axes) and
-   `by_severity.blocker` counts rows written across both phases. The equality is
-   therefore already unsound for any run that files a Phase 1 blocker; #427
-   (`/review-pr` unrunnable end-to-end) is why nobody has observed it. This gate
-   moves the right-hand side. **Pre-existing, out of scope here, followed up in
-   #453** (and the Phase-2-only `count_deferred_blockers` in #452).
-   The spec's proposal to bind the verification sidecar into
-   `count_deferred_blockers` was CUT for the same reason: that function cannot
-   parse a Phase 1 pair at all.
+   the left side is Phase-2-derived — by name and by design since #452,
+   `count_phase2_deferred_blockers` counts the Phase 2 pair and refuses any
+   other on its envelope — and `by_severity.blocker` counts rows written across
+   both phases. The equality is therefore still unsound for any run that files a
+   Phase 1 blocker; #427 (`/review-pr` unrunnable end-to-end) is why nobody has
+   observed it. This gate moves the right-hand side. **Pre-existing, out of
+   scope here, followed up in #453.** The spec's proposal to bind the
+   verification sidecar into `count_phase2_deferred_blockers` was CUT for the
+   same reason: that verb is the Phase 2 recount, and Phase 1 reaches the shared
+   pair loader directly instead.
 3. **Green CI proves the wiring, not the filtering.** The suite proves the stage
    dispatches, the sidecar binds, the threshold reads, the cap refuses by name,
    and a culled row is never filed. It does **not** prove the gate filters a real
