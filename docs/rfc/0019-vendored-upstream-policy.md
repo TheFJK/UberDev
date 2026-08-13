@@ -82,15 +82,24 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 11 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 17 of the 20
+The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
 components — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
 and it means week 1's report contains post-landing changes instead of a wall of
 pre-existing noise. Advancing a watermark is the recorded act of *having looked*.
+
+`tools/vendor/vendor-check.py`'s `C-BASE` is what makes that last clause a rule
+rather than a warning: a 40-hex value in `vendored_at_commit` must be restated
+by an in-file `Vendored from <owner>/<repo>@<sha>` header on one of the
+component's own files, so writing one is a visible, reviewable edit to the
+shipped bytes rather than a single silent field change. It is the converse of
+`C-HEADER`, which validates only the headers that already exist. It does not —
+and offline cannot — prove a copy really happened at that SHA; it makes the
+claim cost two coordinated lies instead of one.
 
 ### 2.3 `stance` is enforced, not annotated
 
@@ -277,10 +286,31 @@ gets a verdict; every ADOPT names a filed issue.
 | Windows SessionStart hook declares `shell: "bash"` | **ADOPT — #461** | The upstream failure mode was silent: PowerShell parsed the quoted path as an expression, cmd.exe truncated on a metacharacter, and the bootstrap never loaded with no error. UberDev ships its own hooks, so this must be verified independently on the Windows CI job. |
 | Library-wide prose compression across 11 skills | **SKIP** | Not skipped as unwanted — skipped as *already covered*. Seven components are `track`, so the compression arrives mechanically at their next re-baseline. The two surfaces where the token budget actually bites are the session-hook-injected `using-uberdev` files, which are `fork` and are governed by UberDev's own hook-diet work rather than by upstream's edits. Filing an issue for it would duplicate the re-baseline. |
 
-One more follow-up falls out of the register itself rather than the upstream
+One more follow-up fell out of the register itself rather than the upstream
 delta: **#462** — backfill real `vendored_at_commit` values and in-file
 provenance headers as each component is genuinely re-baselined. `"unknown"` is
-honest today; it should not be permanent.
+honest; it should not be permanent.
+
+#462 landed the mechanism and the first pin that could be proved from bytes:
+
+- **`C-BASE`**, the converse of `C-HEADER` (§2.2). Before it, a `"unknown"`
+  could be replaced by any 40-hex literal and all eight checks stayed green —
+  measured on the pre-#462 tree, all 17 fabricated at once, exit 0. Provenance
+  was assertable, not evidenced.
+- **`skills/dispatching-parallel-agents` pinned at `e7a2d16`**, because its
+  shipped `SKILL.md` is byte-identical to upstream at that commit — the pin
+  needed a header, not a reconciliation. Its `stance_reason` was corrected in
+  the same change: it had claimed a `'superpowers:' → 'uberdev:'` delta for a
+  file that contains neither token, and its 33 measured lines are entirely
+  upstream's own v6.2.0 prose compression, un-adopted here.
+
+The remaining 16 are owned by three successors, split by what each one costs
+rather than by component type: **#503** the five unpinned `track` skills (each
+carries a real residual, and declaring it engages §4.1's `fork` trigger, so a
+stance re-adjudication comes with it), **#504** the five unpinned `fork` skills,
+and **#505** the six agents (no local clone of `claude-plugins-official` exists,
+so their base needs a network content match — the watermark is a review point,
+not a proven base).
 
 ---
 

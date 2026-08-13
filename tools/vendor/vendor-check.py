@@ -34,6 +34,10 @@ traceback that suppresses the checks queued behind it.
     C-HEADER     every in-file provenance header agrees with its component's
                  upstream repo and vendored_at_commit; asserts >= 1 header was
                  found before reporting agreement
+    C-BASE       the converse of C-HEADER: every recorded vendored_at_commit is
+                 witnessed by a matching in-file provenance header on one of the
+                 component's own files; fails rather than passing over an empty
+                 pinned set
     C-README     README Bundled-table third-party slugs == third-party
                  component slugs, both directions
     C-LICENSE    every declared licence file exists, and every file under
@@ -87,8 +91,8 @@ HEADER_RE = re.compile(r"Vendored from ([^@\s]+)@([0-9a-f]{40})")
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                    ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".webp"}
 
-ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-README",
-              "C-LICENSE", "C-STANCE", "C-WATERMARK")
+ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-BASE",
+              "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK")
 
 
 class Failures:
@@ -384,6 +388,75 @@ def check_header(register, plugin_dir, failures):
                                  "under %s — the scan is vacuous" % plugin_dir)
 
 
+def check_base(register, plugin_dir, failures):
+    """Every recorded base commit must be witnessed in the shipped bytes (#462).
+
+    C-HEADER validates the headers that EXIST — it walks the tree, finds a
+    header, and demands the register agree. Nothing validated the other
+    direction: a component that CLAIMS a base while shipping no header at all
+    was invisible to all eight checks that existed before this one. Measured on
+    the tree that motivated it (62afcc5, 17 components reading "unknown"):
+    setting all 17 to a 40-hex literal left the checker at exit 0 with every
+    check green, so fabricating provenance for the whole register was one
+    unreviewable field edit per component.
+
+    C-BASE closes that direction. It cannot prove a copy really happened at that
+    SHA — this guard is offline by policy, and comparing against upstream is
+    `vendor-drift.py`'s job. What it buys is that the claim must be restated in
+    the shipped bytes, where a reader and a reviewer both see it, and (for
+    `track` components) locked by the C-FILES sha256 as well.
+
+    First match wins, exactly as in `check_header`: `skills/systematic-debugging`
+    deliberately cites two SHAs on one header line — the base first, then the
+    single upstream hunk adopted later — and `find-polluter.sh:2` depends on that
+    ordering. Reading the first match keeps the base authoritative.
+    """
+    upstreams = register.get("upstreams", {})
+    pinned = 0
+    for component in third_party(register):
+        cid = component_id(component)
+        recorded = component.get("vendored_at_commit")
+        if not recorded or recorded == UNKNOWN:
+            continue
+        pinned += 1
+        on_disk = component_files_on_disk(plugin_dir, component)
+        if on_disk is None:
+            # Absence — a missing directory, or an entry with no `path` at all —
+            # is C-COVER's and C-SCHEMA's finding; do not double-report it here.
+            continue
+        root = plugin_dir / component["path"]  # non-None: on_disk proved it
+        want_repo = upstreams.get(component.get("upstream"), {}).get("repo")
+        if not want_repo:
+            # An unresolvable upstream is C-SCHEMA's finding, and it names it
+            # precisely ("upstream %r has no upstreams entry"). Reporting the
+            # same entry here as "unwitnessed" would be a second, vaguer
+            # diagnosis of one defect — and the tree is red either way.
+            continue
+        witnessed = False
+        for rel in on_disk:
+            path = root / rel if root.is_dir() else root
+            if path.suffix.lower() in BINARY_SUFFIXES:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            match = HEADER_RE.search(text)
+            if match and match.group(1) == want_repo and match.group(2) == recorded:
+                witnessed = True
+                break
+        if not witnessed:
+            failures.add("C-BASE", "%s records base %s but no file under it "
+                                   "carries a matching provenance header — the "
+                                   "pin is unwitnessed"
+                         % (cid, str(recorded)[:12]))
+    if pinned == 0:
+        failures.add("C-BASE", "no third-party component records a base commit — "
+                               "the register has lost all its provenance, or the "
+                               "scan is misrooted. Refusing to pass over an empty "
+                               "set.")
+
+
 def readme_third_party_slugs(readme_path, failures):
     """Slugs on Skills/Agents rows of the Bundled table that cite an upstream."""
     try:
@@ -566,6 +639,8 @@ def main(argv=None):
         check_files(register, plugin_dir, failures)
     if "C-HEADER" in selected:
         check_header(register, plugin_dir, failures)
+    if "C-BASE" in selected:
+        check_base(register, plugin_dir, failures)
     if "C-README" in selected:
         check_readme(register, repo_root, failures)
     if "C-LICENSE" in selected:

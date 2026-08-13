@@ -184,10 +184,10 @@ fi
 # V5 — C-HEADER: the count of header-carrying files is knowable TODAY, so it is
 # asserted exactly. A `>= 1` bound decays into a tautology as files are added.
 HEADER_COUNT="$(grep -rlE 'Vendored from [^@[:space:]]+@[0-9a-f]{40}' "$REPO_ROOT/plugins/uberdev" | wc -l | tr -d '[:space:]')"
-if [ "$HEADER_COUNT" = "20" ]; then
-  ok "V5 C-HEADER: exactly 20 files carry an in-file provenance header"
+if [ "$HEADER_COUNT" = "21" ]; then
+  ok "V5 C-HEADER: exactly 21 files carry an in-file provenance header"
 else
-  no "V5 C-HEADER: expected 20 header-carrying files, found $HEADER_COUNT"
+  no "V5 C-HEADER: expected 21 header-carrying files, found $HEADER_COUNT"
 fi
 if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-HEADER >/dev/null 2>&1; then
   ok "V5b C-HEADER: every on-disk header agrees with its component's register entry"
@@ -259,7 +259,7 @@ else no "V9 a never-reconcile divergence is missing or undocumented"
 fi
 
 echo
-echo "== V10-V18: falsifiability — mutate one site, demand the NAMED check id =="
+echo "== V10-V23: falsifiability — mutate one site, demand the NAMED check id =="
 
 # V10 — an undeclared new file inside a declared component.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
@@ -403,6 +403,192 @@ if grep -q 'C-FILES' <<<"$CHECK_OUT" && ! grep -q 'Traceback' <<<"$CHECK_OUT"; t
 else
   no "V19b an id-less entry suppressed the checks behind it"
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+# V20-V23 — C-BASE: a recorded base commit must be WITNESSED in the shipped
+# bytes (#462).
+#
+# THE DEFECT. C-HEADER validates the headers that exist; nothing validated a
+# component that CLAIMS a base. Measured on the pre-#462 tree (62afcc5), where
+# 17 components read "unknown": setting all 17 to a 40-hex literal (`deadbeef`
+# x5) left the checker at rc 0 with every one of the eight checks then defined
+# green. A fabricated provenance claim was therefore a single, invisible,
+# one-field edit per component. C-BASE is the converse of
+# C-HEADER: for every component that records a base, at least one of the
+# component's own files must restate that exact `owner/repo@sha` in a
+# provenance header.
+#
+# Every mutation row below is applied through an `if python3 …; then assert_red`
+# gate. A mutation that silently no-ops would leave the sandbox pristine, the
+# checker green, and the row red for a reason that has nothing to do with
+# C-BASE; the gate makes "the probe could not break anything" say so in its own
+# words instead of dressing it up as a checker verdict.
+# ---------------------------------------------------------------------------
+
+# V20 — C-BASE exists and is dispatched, and is green on the shipped tree.
+#
+# NOT the `--only` vacuity trap: `--only` with an id that is not in ALL_CHECKS
+# goes through `die_usage` and exits 2, so a row demanding exit 0 goes red when
+# the check is missing. It also goes red if the check is registered but red on
+# the shipped tree. What it can NOT see on its own is a check registered but
+# never wired into the `main()` dispatch — an arm that is never called leaves
+# `failures` empty exactly like a passing one — which is why V21/V22/V23 below
+# carry the behavioural weight.
+if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-BASE >/dev/null 2>&1; then
+  ok "V20 C-BASE is a registered, dispatched check and is green on the shipped tree"
+else
+  no "V20 C-BASE is missing, unregistered, or red on the shipped tree"
+fi
+
+# V21 — a fabricated pin on a component that carries no header anywhere.
+# `skills/brainstorm` records "unknown" today and no file under it carries a
+# provenance header, so a 40-hex literal here is a pure fabrication. THIS EXACT
+# PROBE IS GREEN ON main — that is the defect. C-SCHEMA accepts any 40-hex and
+# C-HEADER has no header to disagree with, so C-BASE is the only check that can
+# see it.
+#
+# Every mutation below is applied through an `if python3 …; then assert_red`
+# gate. A mutation that silently no-ops would leave the sandbox pristine, the
+# checker green, and the row red for a reason that has nothing to do with
+# C-BASE; the gate makes "the probe could not break anything" say so in its own
+# words instead.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("path") == "skills/brainstorm":
+        if c.get("vendored_at_commit") != "unknown":
+            raise SystemExit("skills/brainstorm is already pinned — pick another "
+                             "headerless component for this row")
+        c["vendored_at_commit"] = "deadbeef" * 5
+        break
+else:
+    raise SystemExit("skills/brainstorm is no longer in the register")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-BASE" "V21 a fabricated 40-hex base on a component with no in-file header"
+else
+  no "V21 could not fabricate a base on skills/brainstorm — the probe mutated nothing"
+fi
+
+# V22 — the witness removed while the register stays pinned. The inverse of
+# V15: V15 mutates the header and keeps the register, this mutates the file so
+# the header is GONE and the register's claim is left unwitnessed. C-FILES also
+# reds here (the tracked digest moves) — which does not weaken the row, because
+# `assert_red` demands C-BASE *by name*.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/skills/dispatching-parallel-agents/SKILL.md" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().splitlines(True)
+kept = [ln for ln in lines if "Vendored from" not in ln]
+if len(kept) == len(lines):
+    raise SystemExit("nothing to delete: %s carries no provenance header" % p)
+open(p, "w", encoding="utf-8").write("".join(kept))
+PY
+then
+  assert_red "$SB" "C-BASE" "V22 a pinned component whose only in-file witness was deleted"
+else
+  no "V22 skills/dispatching-parallel-agents carries no provenance header to delete"
+fi
+
+# V23 — anti-vacuity. If every third-party component drops back to "unknown",
+# C-BASE's loop body never runs and a naive implementation would report success
+# over an empty set — the same "the scan is vacuous" trap C-HEADER, C-COVER,
+# C-README and C-STANCE each carry their own guard for. C-HEADER also reds here,
+# once per header-carrying file (V5 is what pins that count — restating it in
+# this comment would just be a second copy of it, free to drift); the row demands
+# C-BASE by name, so C-HEADER's noise cannot satisfy it.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+pinned = 0
+for c in d["components"]:
+    if c.get("origin") == "third-party":
+        if c.get("vendored_at_commit") != "unknown":
+            pinned += 1
+        c["vendored_at_commit"] = "unknown"
+if not pinned:
+    raise SystemExit("no third-party component was pinned — unpinning them all "
+                     "changes nothing and the row would prove nothing")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-BASE" "V23 every base dropped to 'unknown' is red, not vacuously green"
+else
+  no "V23 could not unpin the register — no component recorded a base to remove"
+fi
+
+echo
+echo "== V24-V25: derived-count and escape-hatch ratchets =="
+
+# V24 — RFC 0019 §2.2's counts are DERIVED from the register, not typed once and
+# left to rot.
+#
+# THE CLASS: policy prose that lies while CI stays green. §2.2 states how many
+# components are unpinned; the register is the only thing that knows. Nothing
+# compared them, so the first real backfill (#462) would have left the RFC
+# asserting a number that is now false — and the RFC is what a reviewer reads to
+# decide whether a `vendored_at_commit` is trustworthy.
+#
+# Pure Python over the committed register and the committed RFC: no checker in
+# the loop, so a mis-parsing checker cannot make this row lie (the V1/V4/V8/V9
+# idiom). §1's counts at :24-26 are deliberately OUT of reach — that paragraph
+# opens "Until this RFC, the provenance ... was recorded in three places", so it
+# describes the state before the register existed and must not track it.
+if python3 - "$REGISTER" "$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md" <<'PY'
+import json, sys
+reg, rfc_path = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+third = [c for c in d["components"] if c.get("origin") == "third-party"]
+assert third, "no third-party components declared"
+n_skills_unknown = len([c for c in third
+                        if c["path"].startswith("skills/")
+                        and c.get("vendored_at_commit") == "unknown"])
+n_unknown_total = len([c for c in third
+                       if c.get("vendored_at_commit") == "unknown"])
+rfc = open(rfc_path, encoding="utf-8").read()
+for want in ("the %d unpinned skill directories" % n_skills_unknown,
+             "honest value for %d of the 20" % n_unknown_total):
+    assert want in rfc, "RFC 0019 does not say %r — the register has moved on" % want
+PY
+then ok "V24 RFC 0019 §2.2's unpinned counts still match the register"
+else no "V24 RFC 0019 §2.2 states an unpinned count the register contradicts"
+fi
+
+# V25 — no `track` component excuses a file from the digest lock.
+#
+# `divergences[]` entries with a non-null `file` are C-FILES' declared-change
+# escape hatch (vendor-check.py check_files: `excused` is consulted before the
+# sha256 mismatch is reported). On a `fork` component that is the whole point.
+# On a `track` component it silently disarms the digest for that file — and
+# V13's own mutation target is chosen as the first `track` component carrying
+# files[], which is exactly the component this change pins, so one such entry
+# would make V13 pass on a mutated tracked file: the ratchet would go quiet
+# rather than red.
+#
+# RFC 0019 §2.3 names the escape hatch deliberately, so deleting it from the
+# checker would be an RFC amendment. Pinning it here instead makes it costly to
+# adopt on purpose and impossible to adopt by accident. Green today for all
+# seven `track` components.
+if python3 - "$REGISTER" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+track = [c for c in d["components"] if c.get("stance") == "track"]
+assert track, "no track components — the row would be vacuous"
+offenders = [(c["id"], v["file"]) for c in track
+             for v in c.get("divergences", []) if v.get("file")]
+assert not offenders, \
+    "track components carrying a file-scoped digest excuse: %s" % offenders
+PY
+then ok "V25 no track component excuses a file from the C-FILES digest lock"
+else no "V25 a track component carries a file-scoped divergence — the digest lock is disarmed"
 fi
 
 echo
