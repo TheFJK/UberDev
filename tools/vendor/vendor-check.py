@@ -38,6 +38,10 @@ traceback that suppresses the checks queued behind it.
                  witnessed by a matching in-file provenance header on one of the
                  component's own files; fails rather than passing over an empty
                  pinned set
+    C-EVIDENCE   every declared base_evidence object is well-formed: a known
+                 method, a 40-hex vendored_ref, a blobs map keyed exactly by the
+                 component's own files[] with 40-hex values, and a pinned
+                 component behind it; fails rather than passing over an empty set
     C-README     README Bundled-table third-party slugs == third-party
                  component slugs, both directions
     C-LICENSE    every declared licence file exists, and every file under
@@ -112,7 +116,14 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                    ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".webp"}
 
 ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-BASE",
-              "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK", "C-REFS")
+              "C-EVIDENCE", "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK",
+              "C-REFS")
+
+# The only recovery method this register knows how to state. A second method
+# would need its own required fields, so an unrecognised literal is refused
+# rather than waved through: "evidenced by something we cannot check" is exactly
+# the unfalsifiable claim `base_evidence` exists to replace.
+EVIDENCE_METHODS = ("blob-identity",)
 
 
 class Failures:
@@ -476,6 +487,103 @@ def check_base(register, plugin_dir, failures):
                                "scan is misrooted. Refusing to pass over an empty "
                                "set.")
 
+def check_evidence(register, failures):
+    """Every declared `base_evidence` object must be checkable (#505).
+
+    C-BASE makes a recorded base cost two coordinated lies instead of one: the
+    register's claim has to be restated in an in-file header. Both halves are
+    still writable by hand, and §2.2 says so in its own words — offline, nothing
+    could prove a copy really happened at that SHA. For the six
+    `claude-plugins-official` agents that was not survivable: no clone of that
+    upstream exists anywhere in this repo, so no reviewer could have compared
+    the bytes even by hand.
+
+    `base_evidence` replaces the assertion with a MEASUREMENT: per component,
+    the blob oid each declared file had at `vendored_ref`, a commit of THIS
+    repository. Recovery proved that oid equal to upstream's blob at
+    `vendored_at_commit`, so the pin is re-derivable from two independent trees.
+
+    This check owns the SHAPE of that record and nothing else. Re-deriving the
+    oids is deliberately elsewhere, split by what it costs: the offline half in
+    `tests/vendor-provenance.test.sh` V30 (git, no network), the upstream half
+    in `vendor-drift.py --verify-bases` (network). This file stays a pure file
+    reader — no `git`, no `subprocess`, no socket — because that is what makes
+    RFC 0019 §2.3's offline guarantee structural instead of a convention, and
+    because a network outage inside the offline guard would render as fabricated
+    provenance.
+
+    SCOPE. It validates every object that is DECLARED and refuses over an empty
+    set. It does NOT demand universal coverage: the four superpowers components
+    pinned at `e7a2d16` carry no evidence yet, and their backfill is #503/#504's
+    to make (RFC 0019 §7). A check that reds on somebody else's unstarted work
+    gets suppressed, and a suppressed check is not a check. Coverage of what
+    #505 itself pinned is ratcheted in the test suite, beside the other
+    register-derived assertions.
+    """
+    declared = 0
+    for component in register.get("components", []):
+        cid = component_id(component)
+        evidence = component.get("base_evidence")
+        if evidence is None:
+            continue
+        if component.get("origin") != "third-party":
+            failures.add("C-EVIDENCE", "%s carries base_evidence but is not a "
+                                       "third-party component — there is no "
+                                       "upstream it could have been copied from"
+                         % cid)
+            continue
+        if not isinstance(evidence, dict):
+            failures.add("C-EVIDENCE", "%s: base_evidence is %s, expected an "
+                                       "object" % (cid, type(evidence).__name__))
+            continue
+        declared += 1
+        method = evidence.get("method")
+        if method not in EVIDENCE_METHODS:
+            failures.add("C-EVIDENCE", "%s: base_evidence method is %r, expected "
+                                       "one of %s" % (cid, method,
+                                                      list(EVIDENCE_METHODS)))
+        ref = evidence.get("vendored_ref")
+        if not SHA40_RE.match(ref or ""):
+            failures.add("C-EVIDENCE", "%s: base_evidence vendored_ref is not "
+                                       "40-hex (%r) — nothing can resolve the "
+                                       "blobs it records" % (cid, ref))
+        recorded = component.get("vendored_at_commit")
+        if not SHA40_RE.match(recorded or ""):
+            failures.add("C-EVIDENCE", "%s: carries base_evidence but its "
+                                       "vendored_at_commit is %r — evidence for "
+                                       "a base it does not claim"
+                         % (cid, recorded))
+        blobs = evidence.get("blobs")
+        if not isinstance(blobs, dict):
+            failures.add("C-EVIDENCE", "%s: base_evidence blobs is %s, expected "
+                                       "an object keyed by the component's "
+                                       "files[]"
+                         % (cid, type(blobs).__name__))
+            continue
+        # Key set EQUALITY, not containment. A subset silently narrows what the
+        # re-derivation covers while still looking like evidence, and a superset
+        # records an oid for a file the component does not declare — which
+        # nothing else would ever visit.
+        want = declared_file_paths(component)
+        got = sorted(blobs)
+        if got != want:
+            failures.add("C-EVIDENCE", "%s: base_evidence blobs keys %s do not "
+                                       "match the component's files[] %s"
+                         % (cid, got, want))
+        for name in got:
+            if not SHA40_RE.match(blobs[name] if isinstance(blobs[name], str)
+                                  else ""):
+                failures.add("C-EVIDENCE", "%s: base_evidence blob for %s is not "
+                                           "a 40-hex object id (%r)"
+                             % (cid, name, blobs[name]))
+    if declared == 0:
+        failures.add("C-EVIDENCE", "no component declares base_evidence — every "
+                                   "recorded base is back to an assertion "
+                                   "nothing can re-derive, or the register was "
+                                   "misread. Refusing to pass over an empty "
+                                   "set.")
+
+
 def sibling_refs(text):
     """Relative sibling references in a markdown body, deduped and sorted.
 
@@ -719,6 +827,8 @@ def main(argv=None):
         check_header(register, plugin_dir, failures)
     if "C-BASE" in selected:
         check_base(register, plugin_dir, failures)
+    if "C-EVIDENCE" in selected:
+        check_evidence(register, failures)
     if "C-README" in selected:
         check_readme(register, repo_root, failures)
     if "C-LICENSE" in selected:

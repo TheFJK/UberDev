@@ -73,8 +73,8 @@ UberDev standalone gets the attribution record with it.
 ```
 
 Every directory under `plugins/uberdev/skills/` and every file under
-`plugins/uberdev/agents/` is a component. There are **73** of them: 20
-third-party and 53 carrying `"origin": "uberdev"`. The originals are two-field
+`plugins/uberdev/agents/` is a component. There are **75** of them: 20
+third-party and 55 carrying `"origin": "uberdev"`. The originals are two-field
 stubs; their only job is to make coverage two-way, so that a *new* undeclared
 vendored file cannot hide among them.
 
@@ -82,10 +82,10 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
+The split is load-bearing. `"unknown"` is the honest value for 10 of the 20
 components — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
@@ -199,31 +199,51 @@ Seven `track`, seven `fork`.
 
 ### 4.3 Agents — measured against `claude-plugins-official`
 
-| Component | Upstream path | Diff lines | Stance |
-| --- | --- | ---: | --- |
-| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | 56 | fork |
-| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | 57 | fork |
-| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | 64 | fork |
-| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | 64 | fork |
-| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | 69 | fork |
-| `agents/code-simplifier.md` | `plugins/pr-review-toolkit/agents/code-simplifier.md` | 115 | fork |
+Re-measured against each component's **recovered base** (§ Amendment 2026-08-13),
+counting both `<` and `>` lines and including the provenance-header line each
+file now carries.
 
-All six are `fork` for one shared reason: an agent's `description` frontmatter
-**is** its dispatch contract, and UberDev rewrote all six into the named-lens
-contract driven by `/uberdev:review-pr` Phase 2 and `/uberdev:simplify`.
-Upstream's copies would re-enable conversational auto-triggering. They are not
-drop-in.
+| Component | Upstream path | Base | Diff lines | Stance |
+| --- | --- | --- | ---: | --- |
+| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | `4ca561f` | 56 | fork |
+| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | `4ca561f` | 57 | fork |
+| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | `4ca561f` | 58 | fork |
+| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | `4ca561f` | 64 | fork |
+| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | `4ca561f` | 81 | fork |
+| `agents/code-simplifier.md` | `plugins/code-simplifier/agents/code-simplifier.md` | `ceb9b72` | 154 | fork |
 
-**A correction the measurement forced.** The README attributed
-`code-simplifier` to the `code-simplifier` plugin. `claude-plugins-official`
-ships that agent **twice** — once in `plugins/code-simplifier/` and once in
-`plugins/pr-review-toolkit/` — and the two upstream copies themselves differ by
-38 lines. Diffed against both, the UberDev copy is 115 lines from the
-`pr-review-toolkit` copy and 137 from the `code-simplifier` copy, and only the
-`pr-review-toolkit` copy carries the block-scalar `description` with worked
-examples that our copy is built on. The register therefore points the component
-at `plugins/pr-review-toolkit/agents/code-simplifier.md`. The `code-simplifier`
-plugin is kept as a declared upstream because UberDev ships its licence text.
+All six stay `fork`, and the verdict is unchanged — but the **reason recorded
+here was measurably wrong for five of them**, and stating a true reason is the
+point of writing one down. The claim was that UberDev had rewritten every
+`description` frontmatter into the named-lens contract. Measured against the
+recovered bases, the frontmatter of `comment-analyzer`, `pr-test-analyzer`,
+`silent-failure-hunter` and `type-design-analyzer` is **byte-identical to
+upstream** — upstream's auto-trigger examples still ship verbatim — and
+`code-reviewer`'s frontmatter differs by exactly two lines, both of them
+`model: opus` → `model: inherit`. Only `code-simplifier` was rewritten as
+described (42 frontmatter lines).
+
+What actually makes all six not drop-in is the **body**: upstream's own
+output-format section is replaced by the `phase1-reviewer-v1` result-file
+contract that `/uberdev:review-pr` Phase 1 validates, and the untrusted-input
+and secret-leak reporting sections are added. Upstream's copy would emit a
+serialization the aggregator rejects. That is a stronger reason than the one it
+replaces, which is why the stances are re-stated rather than re-adjudicated.
+
+**A correction the measurement forced — now reversed by a better measurement.**
+This RFC previously moved `code-simplifier`'s upstream from the standalone
+`code-simplifier` plugin (where the README had it) to `pr-review-toolkit`, on
+the grounds that the shipped bytes were 115 diff lines from the
+`pr-review-toolkit` copy and 137 from the standalone one. That inference was
+wrong, and it was wrong in an instructive way: **similarity was measured against
+bytes that had already accumulated a 42-line local frontmatter rewrite**, so the
+smaller number was tracking our own edit rather than the ancestry. Blob identity
+settles what similarity could not — the vendored file's blob at `bae840a` is
+`05e361b4…`, which is `plugins/code-simplifier/agents/code-simplifier.md` at
+upstream `ceb9b72b…`, the only commit that has ever touched that path, and is
+*not* any blob of the `pr-review-toolkit` copy. The component points back at the
+standalone plugin. `pr-review-toolkit` remains a declared upstream for the other
+five agents, and both licence texts stay shipped and referenced.
 
 ### 4.4 What `track` obliges
 
@@ -307,13 +327,18 @@ honest; it should not be permanent.
   file that contains neither token, and its 33 measured lines are entirely
   upstream's own v6.2.0 prose compression, un-adopted here.
 
-The remaining 16 are owned by three successors, split by what each one costs
+The remaining 16 were owned by three successors, split by what each one costs
 rather than by component type: **#503** the five unpinned `track` skills (each
 carries a real residual, and declaring it engages §4.1's `fork` trigger, so a
 stance re-adjudication comes with it), **#504** the five unpinned `fork` skills,
 and **#505** the six agents (no local clone of `claude-plugins-official` exists,
 so their base needs a network content match — the watermark is a review point,
 not a proven base).
+
+**#505 is resolved** (see the amendment below): all six agents are pinned, each
+by blob identity against upstream rather than by inference. `"unknown"` now
+stands on **10 of the 20** components, every one of them a skill directory, and
+#503 and #504 are the only remaining successors.
 
 ---
 
@@ -446,3 +471,112 @@ assumed:
 deleted target with the register kept consistent, a misspelled target, the
 resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 **and nothing else**.
+
+---
+
+## Amendment (2026-08-13, #505) — the six agents pinned, by evidence
+
+> **Amends §2.1's component counts, §2.2's unpinned counts, §4.3 in full, and
+> §7's successor list. Adds `base_evidence` to the register schema, `C-EVIDENCE`
+> to `vendor-check.py`, and `--verify-bases` to `vendor-drift.py`.**
+> Status of this amendment: **Accepted, implemented.**
+
+### The ceiling this hits, and how it gets past it
+
+§2.2 is candid about `C-BASE`: it "does not — and offline cannot — prove a copy
+really happened at that SHA; it makes the claim cost two coordinated lies
+instead of one." For the ten unpinned skill directories that ceiling is
+tolerable, because `obra/superpowers` is on disk and a reviewer can diff. For
+the six `claude-plugins-official` agents it was not: **no clone of that upstream
+exists anywhere in this repository**, so no reviewer could have compared the
+bytes even by hand. Both lies were free.
+
+The recovery is a measurement rather than a stronger assertion. For each
+component, `git rev-parse <vendored_ref>:<path>` in **this** repository yields
+the blob oid the file had when it was vendored; `git rev-parse
+<candidate>:<upstream_path>` in a blobless scratch clone of upstream yields the
+blob oid upstream holds at a candidate commit. **The two object ids are equal
+for all six.** Git object ids are content addresses, so equality is byte
+identity — not similarity, not a date match, not a plausible ancestor.
+
+| Component | Base | Blob (both sides) |
+| --- | --- | --- |
+| `agents/code-reviewer.md` | `4ca561fb…` | `462f2e01b89e6339994c071c765dcb4dd380c869` |
+| `agents/comment-analyzer.md` | `4ca561fb…` | `e214620a3fa348c550bfca1f8d23ceaec39bfe57` |
+| `agents/pr-test-analyzer.md` | `4ca561fb…` | `9b2de05b90e74f828e58a8874ed17f6eb9372db3` |
+| `agents/silent-failure-hunter.md` | `4ca561fb…` | `b8a8dfa41e18ef6ac801ae64be38b2508aa04f44` |
+| `agents/type-design-analyzer.md` | `4ca561fb…` | `f720f0fcec856560cdddb6b030ac7e64af159438` |
+| `agents/code-simplifier.md` | `ceb9b72b…` | `05e361b4ef1b688203251989707f8a924a9ed266` |
+
+`vendored_ref` is shared (`bae840ae…`, the vendoring commit in this repo). The
+five `pr-review-toolkit` paths have 1–2 commits of upstream history each, and
+`4ca561f` is the revision current at `vendored_on: 2026-04-27`; `ceb9b72` is the
+**only** commit that has ever touched the standalone `code-simplifier` path.
+
+### `base_evidence` — the record, and why it is a field rather than prose
+
+```jsonc
+"base_evidence": {
+  "method": "blob-identity",
+  "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+  "blobs": { "code-reviewer.md": "462f2e01b89e6339994c071c765dcb4dd380c869" }
+}
+```
+
+`blobs` is keyed by the component's own `files[]`, which is what makes it
+generalise to the multi-file skill components #503 and #504 will pin. Recorded
+in the register rather than written up here because a paragraph rots silently
+and a field can be re-derived. Three things now re-derive it, split by cost:
+
+- **`C-EVIDENCE`** (`vendor-check.py`) — offline SHAPE. A known `method`, a
+  40-hex `vendored_ref`, a `blobs` map whose key set **equals** the component's
+  `files[]` with 40-hex values, and a 40-hex `vendored_at_commit` behind it.
+  It validates what is *declared* and refuses over an empty set; it deliberately
+  does **not** demand universal coverage, because that would red the four
+  superpowers components whose backfill #503/#504 own, and a check that reds on
+  somebody else's unstarted work gets suppressed. No `git`, no `subprocess`, no
+  socket — that is what keeps §2.3's offline guarantee structural.
+- **`tests/vendor-provenance.test.sh` V30/V31/V31b** — the offline HALF of the
+  identity, re-derived with `git rev-parse` against this repo's own history. It
+  **fails rather than skips** in a shallow clone (the ubuntu shape-check job
+  therefore checks out with `fetch-depth: 0`): a proof that quietly stands down
+  in CI is the vacuous green this whole ratchet exists to refuse.
+- **`vendor-drift.py --verify-bases`** — the UPSTREAM half. A blobless scratch
+  clone per upstream, `git rev-parse <base>:<upstream_path>`, compared against
+  the recorded oid. It is a network operation, so it runs in
+  `vendor-drift.yml` (before the reporting step) and never in the test suite.
+  An unreachable remote exits 1, a malformed record exits 2, and an empty
+  evidence set exits 2 rather than certifying nothing.
+
+### A deliberate departure: the six new headers cite no repository path
+
+The 21 existing provenance headers are free to reference sibling files. These
+six are not, and the constraint is external: all six agents are in
+`tools/prkit/manifest.txt`, `tools/prkit/rewrite.sh` applies a blanket
+`uberdev` → `prkit` rewrite to every byte it copies, and the generated tree
+ships no `licenses/` directory. A repo-relative path in one of these headers
+would therefore be rewritten into a path that does not exist downstream, and the
+token guard in `tools/prkit/verify.sh` fails the generation gate on the word
+`uberdev` outright. The headers name the **SPDX identifier** instead of pointing
+at the licence file, and `tests/prkit-verify.test.sh` carries a row that keeps
+the decision guarded rather than remembered.
+
+That leaves a **pre-existing** compliance gap this change deliberately does not
+widen: `TheFJK/prkit` publishes six Apache-2.0 agents with no licence text of
+its own. Closing it means adding the two licence files to
+`tools/prkit/manifest.txt`, which moves the count-lock 42 → 44 and — because
+`published-check.py` requires manifest ≡ copyset — demands a real prkit
+republication. That is its own change, and it is filed separately.
+
+### What is deliberately NOT done here
+
+- **Watermarks are untouched.** `last_reviewed_upstream_commit` still reads
+  `920824c3…` on all six. §2.2's split between "what we copied from" and "what a
+  human has triaged against" is the whole point, and advancing a watermark is
+  the recorded act of having looked.
+- **No stance is re-adjudicated.** All six stay `fork`; §4.3's *reason* is
+  corrected because it was measurably false, not its verdict.
+- **Upstream `ce721c1` (2026-04-28) is not adopted.** It adds a
+  `## When to invoke` section to four of the five `pr-review-toolkit` agents
+  that this repo has never carried. A genuine finding for the weekly drift job,
+  recorded here so it is visibly deferred rather than missed.

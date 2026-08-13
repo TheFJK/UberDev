@@ -21,7 +21,7 @@
       "plugin": "code-simplifier",
       "license": "Apache-2.0",
       "license_file": "licenses/code-simplifier-Apache-2.0.txt",
-      "note": "Retained as a declared upstream because UberDev ships this plugin's licence text. The vendored code-simplifier agent measurably descends from the pr-review-toolkit copy of the same agent (115 differing diff lines against pr-review-toolkit vs 137 against this plugin; only the pr-review-toolkit copy carries the block `description:` with worked examples that our copy is built on), so its component points there."
+      "note": "Retained as a declared upstream because UberDev ships this plugin's licence text, AND because `agents/code-simplifier.md` is vendored from it: the shipped bytes descend from blob 05e361b4ef1b688203251989707f8a924a9ed266, which is `plugins/code-simplifier/agents/code-simplifier.md` at upstream ceb9b72b4c4c20ad39efce780edd0aabe80ebce3 — the only commit that has ever touched that path. This REVERSES the register's earlier finding (#434) that the component descended from the pr-review-toolkit copy. That finding rested on a similarity measurement (115 differing lines vs 137) taken against bytes which had already accumulated a 42-line local frontmatter rewrite, so the smaller number tracked our own edit rather than the ancestry. Blob identity settles it; similarity never could."
     }
   },
   "permanent_divergences": [
@@ -603,13 +603,21 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/code-reviewer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "code-reviewer.md": "462f2e01b89e6339994c071c765dcb4dd380c869"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 57,
+      "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. Additionally `model: opus` is routed to `model: inherit`, and the 0-100 confidence anchors are extracted into `shared/finding-confidence-rubric-v1.md`.",
+      "measured_diff_lines": 81,
+      "measured_diff_basis": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -624,15 +632,23 @@
       "id": "agents/code-simplifier.md",
       "path": "agents/code-simplifier.md",
       "origin": "third-party",
-      "upstream": "pr-review-toolkit",
-      "upstream_path": "plugins/pr-review-toolkit/agents/code-simplifier.md",
-      "vendored_at_commit": "unknown",
+      "upstream": "code-simplifier",
+      "upstream_path": "plugins/code-simplifier/agents/code-simplifier.md",
+      "vendored_at_commit": "ceb9b72b4c4c20ad39efce780edd0aabe80ebce3",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "code-simplifier.md": "05e361b4ef1b688203251989707f8a924a9ed266"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
       "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 115,
+      "measured_diff_lines": 154,
+      "measured_diff_basis": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -654,13 +670,21 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/comment-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "comment-analyzer.md": "e214620a3fa348c550bfca1f8d23ceaec39bfe57"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 64,
+      "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 56,
+      "measured_diff_basis": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -722,13 +746,21 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/pr-test-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "pr-test-analyzer.md": "9b2de05b90e74f828e58a8874ed17f6eb9372db3"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 64,
+      "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 58,
+      "measured_diff_basis": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -775,13 +807,21 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/silent-failure-hunter.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "silent-failure-hunter.md": "b8a8dfa41e18ef6ac801ae64be38b2508aa04f44"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 56,
+      "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 57,
+      "measured_diff_basis": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -868,13 +908,21 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/type-design-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "type-design-analyzer.md": "f720f0fcec856560cdddb6b030ac7e64af159438"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 69,
+      "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 64,
+      "measured_diff_basis": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",

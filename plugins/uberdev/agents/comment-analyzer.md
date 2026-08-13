@@ -4,6 +4,7 @@ description: Use this agent when you need to analyze code comments for accuracy,
 model: inherit
 color: green
 ---
+<!-- Vendored from anthropics/claude-plugins-official@4ca561fb8532594e7a5faef945e85096fcec0616 (Apache-2.0). Base evidenced by blob identity, not asserted: the bytes copied at that commit are upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57, the same object id this file carried when it was vendored here. Local deltas since: upstream's own output-format section replaced by the phase1-reviewer-v1 result-file contract, plus added untrusted-input handling and secret-leak reporting rules. -->
 
 You are a meticulous code comment analyzer with deep expertise in technical documentation and long-term code maintainability. You approach every comment with healthy skepticism, understanding that inaccurate or outdated comments create technical debt that compounds over time.
 

@@ -186,10 +186,10 @@ fi
 # V5 — C-HEADER: the count of header-carrying files is knowable TODAY, so it is
 # asserted exactly. A `>= 1` bound decays into a tautology as files are added.
 HEADER_COUNT="$(grep -rlE 'Vendored from [^@[:space:]]+@[0-9a-f]{40}' "$REPO_ROOT/plugins/uberdev" | wc -l | tr -d '[:space:]')"
-if [ "$HEADER_COUNT" = "21" ]; then
-  ok "V5 C-HEADER: exactly 21 files carry an in-file provenance header"
+if [ "$HEADER_COUNT" = "27" ]; then
+  ok "V5 C-HEADER: exactly 27 files carry an in-file provenance header"
 else
-  no "V5 C-HEADER: expected 21 header-carrying files, found $HEADER_COUNT"
+  no "V5 C-HEADER: expected 27 header-carrying files, found $HEADER_COUNT"
 fi
 if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-HEADER >/dev/null 2>&1; then
   ok "V5b C-HEADER: every on-disk header agrees with its component's register entry"
@@ -564,6 +564,63 @@ then ok "V24 RFC 0019 §2.2's unpinned counts still match the register"
 else no "V24 RFC 0019 §2.2 states an unpinned count the register contradicts"
 fi
 
+# V24b — the SAME class one section up. §2.1 states how many components exist and
+# how they split by origin. V24 covers only §2.2's unpinned counts, so §2.1 was
+# free to rot beside it and did: it said 73 / 20 / 53 while the register held
+# 75 / 20 / 55, and every check stayed green. Two numbers wrong out of three, in
+# the paragraph a reader reaches FIRST when deciding whether the register is
+# maintained.
+#
+# Whitespace is collapsed before the search because the RFC hard-wraps its
+# prose: an assertion that only matched the current line breaks would red on a
+# reflow that changed no fact, and a row that reds for cosmetic reasons gets
+# relaxed until it means nothing.
+RFC_COUNTS_PY="$SANDBOX_ROOT/rfc-origin-counts.py"
+cat > "$RFC_COUNTS_PY" <<'PY'
+import json, re, sys
+
+register = json.load(open(sys.argv[1], encoding="utf-8"))
+rfc = open(sys.argv[2], encoding="utf-8").read()
+components = register["components"]
+total = len(components)
+third = len([c for c in components if c.get("origin") == "third-party"])
+own = len([c for c in components if c.get("origin") == "uberdev"])
+assert total, "the register declares no components — the row would be vacuous"
+assert third and own, "one origin is empty; the three-way split would be trivial"
+want = "There are **%d** of them: %d third-party and %d" % (total, third, own)
+flat = re.sub(r"\s+", " ", rfc)
+assert want in flat, "RFC 0019 §2.1 does not say %r — the register has moved on" % want
+PY
+if python3 "$RFC_COUNTS_PY" "$REGISTER" "$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md"; then
+  V24B_WHY=""
+  MUTATED_COUNTS="$SANDBOX_ROOT/mutated-counts.json"
+  if python3 - "$REGISTER" "$MUTATED_COUNTS" <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+d = json.load(open(src, encoding="utf-8"))
+before = len(d["components"])
+d["components"].append({"id": "agents/v24b-probe.md",
+                        "path": "agents/v24b-probe.md",
+                        "origin": "uberdev"})
+assert len(d["components"]) == before + 1, "the probe component was not appended"
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+  then
+    if python3 "$RFC_COUNTS_PY" "$MUTATED_COUNTS" "$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md" >/dev/null 2>&1; then
+      V24B_WHY="the assertion stayed green after a component was added"
+    fi
+  else
+    V24B_WHY="could not append a probe component — the mutation changed nothing"
+  fi
+  if [ -z "$V24B_WHY" ]; then
+    ok "V24b RFC 0019 §2.1's component counts are derived from the register, and move with it"
+  else
+    no "V24b $V24B_WHY"
+  fi
+else
+  no "V24b RFC 0019 §2.1 states a component count the register contradicts"
+fi
+
 # V25 — no `track` component excuses a file from the digest lock.
 #
 # `divergences[]` entries with a non-null `file` are C-FILES' declared-change
@@ -791,6 +848,303 @@ else
   no "V29 an address-shaped @-token was read as a sibling file — C-REFS false-positives"
   run_check "$SB" || true
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+echo
+echo "== V30-V31b: a recorded base is EVIDENCED, not merely restated (#505) =="
+
+# ---------------------------------------------------------------------------
+# THE GAP C-BASE LEAVES OPEN. C-BASE (V20-V23) makes a `vendored_at_commit` cost
+# two coordinated lies instead of one: the register's claim must be restated in
+# an in-file header. Both halves are still writable by hand, and the RFC says so
+# in its own words — "it does not, and offline cannot, prove a copy really
+# happened at that SHA". For the ten unpinned skill directories that was
+# tolerable; for the six agents it is not, because there is no local clone of
+# `anthropics/claude-plugins-official` at all, so nothing in the tree could even
+# be compared against upstream by hand.
+#
+# `base_evidence` closes it with a MEASUREMENT rather than a stronger assertion:
+# per component, the blob oid each declared file had at `vendored_ref` — a
+# commit in THIS repository. Recovery proved that oid equal to upstream's blob
+# at `vendored_at_commit`, so the recorded pin is re-derivable from two
+# independent trees instead of asserted in two places in one tree.
+#
+# The two halves are split by what they cost. THIS suite owns the offline half
+# (does the oid match what git says here?) and never touches the network;
+# `vendor-drift.py --verify-bases` owns the upstream half. Merging them would
+# make a network outage look like fabricated provenance, which is the same
+# category error `vendor-check.py` stays offline to avoid.
+# ---------------------------------------------------------------------------
+
+# Both oracles are written to disk ONCE and driven twice — over the shipped
+# register (V30/V31) and over a deliberately-broken copy (V31b). A second inline
+# copy of either would be free to drift from the one the shipped tree is
+# actually checked against, which is the "one contract, N uncompared copies"
+# class this whole register exists to kill.
+BASE_ROWS_PY="$SANDBOX_ROOT/base-evidence-rows.py"
+cat > "$BASE_ROWS_PY" <<'PY'
+"""Emit one `component-id \t vendored_ref \t git-path \t blob-oid` row per
+declared file of every component carrying base_evidence.
+
+The git-path join mirrors vendor-check.py's `component_files_on_disk`: a
+component whose path is a FILE (an agent) *is* that file, so its `files[]` entry
+is a basename rather than a sub-path; a directory component owns paths relative
+to its own root. Deciding it from disk rather than from the id shape is what
+makes this generalise to the multi-file skill components #503/#504 will pin.
+"""
+import json, os, sys
+
+register_path, repo_root = sys.argv[1], sys.argv[2]
+register = json.load(open(register_path, encoding="utf-8"))
+plugin_rel = register.get("root") or "plugins/uberdev"
+for component in register.get("components", []):
+    evidence = component.get("base_evidence")
+    if not isinstance(evidence, dict):
+        continue
+    ref = evidence.get("vendored_ref") or ""
+    blobs = evidence.get("blobs")
+    if not isinstance(blobs, dict):
+        continue
+    path = component.get("path") or ""
+    on_disk = os.path.join(repo_root, plugin_rel, path)
+    for rel, oid in sorted(blobs.items()):
+        git_path = ("%s/%s" % (plugin_rel, path) if os.path.isfile(on_disk)
+                    else "%s/%s/%s" % (plugin_rel, path, rel))
+        print("\t".join((component.get("id") or "<no id>", ref, git_path,
+                         oid if isinstance(oid, str) else repr(oid))))
+PY
+
+BASE_RATCHET_PY="$SANDBOX_ROOT/base-evidence-ratchet.py"
+cat > "$BASE_RATCHET_PY" <<'PY'
+"""The coverage ratchet: what #505 pinned must stay pinned and stay evidenced.
+
+Deliberately NOT inside vendor-check.py's `C-EVIDENCE`. That check validates
+every `base_evidence` object that is DECLARED and refuses over an empty set;
+demanding universal coverage there would instantly red the four superpowers
+components pinned at e7a2d16 whose evidence backfill is a separate change
+(RFC 0019 §7 / #503 / #504). Register-derived coverage assertions live here,
+where V1/V4/V8/V9/V24 already put them.
+"""
+import json, re, sys
+
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+register = json.load(open(sys.argv[1], encoding="utf-8"))
+third = [c for c in register.get("components", [])
+         if c.get("origin") == "third-party"]
+assert third, "no third-party components declared"
+
+carriers = [c for c in third if isinstance(c.get("base_evidence"), dict)]
+assert carriers, ("no component carries base_evidence — V30 would re-derive "
+                  "nothing and report agreement over an empty set")
+
+agents = [c for c in third if (c.get("path") or "").startswith("agents/")]
+assert agents, "no third-party agent component — the ratchet would be vacuous"
+
+unpinned = sorted(c.get("id") or "<no id>" for c in agents
+                  if c.get("vendored_at_commit") == "unknown")
+assert not unpinned, ("agent components record an unknown base after #505: %s"
+                      % unpinned)
+
+unevidenced = sorted(
+    c.get("id") or "<no id>" for c in agents
+    if HEX40.match(c.get("vendored_at_commit") or "")
+    and not isinstance(c.get("base_evidence"), dict))
+assert not unevidenced, ("pinned agent components carry no base_evidence — the "
+                         "pin is an assertion again: %s" % unevidenced)
+PY
+
+# blob_identity <register-path> — prints a diagnosis and returns 1 on failure.
+#
+# NEVER SKIPS on a shallow clone. `vendored_ref` is a real commit of this
+# repository, so a `--depth=1` checkout cannot resolve it; a row that quietly
+# skipped there would leave CI carrying a vacuous copy of this proof, which is
+# exactly the string-presence class this suite exists to kill. It fails and says
+# `fetch-depth: 0` instead.
+blob_identity() {
+  local register="$1" rows ref cid git_path want got checked=0
+  rows="$(python3 "$BASE_ROWS_PY" "$register" "$REPO_ROOT")" || {
+    echo "could not derive base_evidence rows from $register"; return 1; }
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    if ! git -C "$REPO_ROOT" cat-file -e "$ref^{commit}" 2>/dev/null; then
+      echo "vendoring commit $ref is not in this clone — CI needs fetch-depth: 0"
+      return 1
+    fi
+  done <<<"$(cut -f2 <<<"$rows" | sort -u)"
+  # Split on TAB explicitly. `for x in $rows` would run once over the whole
+  # string under zsh (the recurring EFFORT_FLAG class) and would split on spaces
+  # under bash.
+  while IFS=$'\t' read -r cid ref git_path want; do
+    [ -n "$cid" ] || continue
+    checked=$((checked + 1))
+    got="$(git -C "$REPO_ROOT" rev-parse "$ref:$git_path" 2>/dev/null || true)"
+    if [ "$got" != "$want" ]; then
+      echo "$cid: $ref:$git_path resolves to ${got:-<unresolvable>}, base_evidence records $want"
+      return 1
+    fi
+  done <<<"$rows"
+  if [ "$checked" -eq 0 ]; then
+    echo "no component carries base_evidence — the blob-identity proof asserted nothing"
+    return 1
+  fi
+  echo "$checked"
+  return 0
+}
+
+# V30 — every recorded blob oid re-derives from git at its vendored_ref.
+V30_OUT=""
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  no "V30 $REPO_ROOT is not a git checkout — the blob-identity proof cannot run here"
+elif V30_OUT="$(blob_identity "$REGISTER")"; then
+  ok "V30 every recorded base blob re-derives from git at its vendored_ref ($V30_OUT file(s))"
+else
+  no "V30 a recorded base blob does not re-derive: $V30_OUT"
+fi
+
+# V31 — the coverage ratchet (see the docstring in $BASE_RATCHET_PY).
+if python3 "$BASE_RATCHET_PY" "$REGISTER"; then
+  ok "V31 every agent component is pinned, and every pin carries base_evidence"
+else
+  no "V31 an agent component is unpinned, or a pin has no base_evidence behind it"
+fi
+
+# V31b — falsifiability for BOTH rows above, through the `if python3 …; then`
+# gate V21/V22/V23 use: a mutation that silently no-ops would leave the copy
+# pristine, both oracles green, and the row red for a reason that has nothing to
+# do with provenance. Two independent defects are injected into one copy so
+# neither oracle can be satisfied by the other's noise.
+MUTATED_REGISTER="$SANDBOX_ROOT/mutated-vendor.json"
+if python3 - "$REGISTER" "$MUTATED_REGISTER" <<'PY'
+import json, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+d = json.load(open(src, encoding="utf-8"))
+agents = [c for c in d.get("components", [])
+          if c.get("origin") == "third-party"
+          and (c.get("path") or "").startswith("agents/")]
+pinned = [c for c in agents if c.get("vendored_at_commit") not in (None, "unknown")]
+if not pinned:
+    raise SystemExit("no agent component is pinned — unpinning one changes "
+                     "nothing and the row would prove nothing")
+pinned[0]["vendored_at_commit"] = "unknown"
+
+carriers = [c for c in agents if isinstance(c.get("base_evidence"), dict)
+            and isinstance(c["base_evidence"].get("blobs"), dict)
+            and c["base_evidence"]["blobs"]]
+# Deliberately the LAST carrier, so the flipped oid cannot land on the same
+# component as the unpin above and let one defect stand in for two.
+if len(carriers) < 2:
+    raise SystemExit("fewer than two agent components carry base_evidence blobs "
+                     "— the two defects would collide on one entry")
+blobs = carriers[-1]["base_evidence"]["blobs"]
+key = sorted(blobs)[0]
+oid = blobs[key]
+if not isinstance(oid, str) or len(oid) != 40:
+    raise SystemExit("recorded blob %r for %s is not a 40-hex oid" % (oid, key))
+blobs[key] = oid[:-1] + ("0" if oid[-1] != "0" else "1")
+
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  V31B_WHY=""
+  if blob_identity "$MUTATED_REGISTER" >/dev/null 2>&1; then
+    V31B_WHY="the blob-identity proof stayed green over a flipped blob oid"
+  fi
+  if python3 "$BASE_RATCHET_PY" "$MUTATED_REGISTER" >/dev/null 2>&1; then
+    V31B_WHY="${V31B_WHY}${V31B_WHY:+; }the coverage ratchet stayed green over an unpinned agent"
+  fi
+  if [ -z "$V31B_WHY" ]; then
+    ok "V31b a flipped blob oid and an unpinned agent are each refused by name"
+  else
+    no "V31b $V31B_WHY"
+  fi
+else
+  no "V31b could not mutate the register copy — the probe changed nothing"
+fi
+
+echo
+echo "== V32-V34: C-EVIDENCE — a declared base_evidence object is well-formed =="
+
+# ---------------------------------------------------------------------------
+# WHAT C-EVIDENCE IS FOR, and what it deliberately is NOT.
+#
+# V30 above re-derives the recorded oids from git. It can only do that for
+# evidence that is SHAPED right: a `blobs` map keyed by something other than the
+# component's own `files[]`, a `vendored_ref` that is not a commit-ish, or a
+# truncated oid all make the row assert less than it appears to while staying
+# green — the emitter simply produces fewer rows, or none. `C-EVIDENCE` is the
+# offline shape guard that stops that, and it is the checker's job rather than
+# this suite's because the checker is what CI runs on every push.
+#
+# SCOPE, stated because getting it wrong is the obvious mistake: it validates
+# every `base_evidence` object that is DECLARED, and refuses over an empty set.
+# It does NOT demand that every pinned component carry one. Demanding that would
+# instantly red the four superpowers components pinned at `e7a2d16`, whose
+# evidence backfill RFC 0019 §7 assigns to #503/#504 — a check that reds on work
+# somebody else owns gets suppressed, and a suppressed check is not a check. The
+# coverage ratchet for what #505 itself pinned lives in V31.
+#
+# It stays PURELY OFFLINE: no `git`, no subprocess, no network. That is what
+# makes RFC 0019 §2.3's offline guarantee structural rather than a convention,
+# and it is why re-deriving the oids is split out into V30 and into
+# `vendor-drift.py --verify-bases`.
+# ---------------------------------------------------------------------------
+
+# V32 — C-EVIDENCE exists, is dispatched, and is green on the shipped tree.
+# NOT the `--only` vacuity trap (see the V26-V29 header): an id outside
+# ALL_CHECKS goes through `die_usage` and exits 2, so a row demanding exit 0 goes
+# red while the check does not exist. V33/V34 carry the behavioural weight.
+if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-EVIDENCE >/dev/null 2>&1; then
+  ok "V32 C-EVIDENCE is a registered, dispatched check and is green on the shipped tree"
+else
+  no "V32 C-EVIDENCE is missing, unregistered, or red on the shipped tree"
+fi
+
+# V33 — evidence that records no blobs at all. The register still SAYS the base
+# was measured; nothing is left to measure it against, so V30 would iterate an
+# empty map and report agreement.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    ev = c.get("base_evidence")
+    if isinstance(ev, dict) and ev.pop("blobs", None) is not None:
+        break
+else:
+    raise SystemExit("no component carries a base_evidence.blobs map to remove")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-EVIDENCE" "V33 base_evidence with its blobs map removed"
+else
+  no "V33 could not remove a blobs map — the probe mutated nothing"
+fi
+
+# V34 — anti-vacuity. With no `base_evidence` anywhere the loop body never runs,
+# and a naive implementation reports success over an empty set — the same trap
+# C-BASE, C-HEADER, C-COVER, C-README, C-STANCE and C-REFS each carry a guard
+# for. C-BASE stays GREEN here (the pins and their headers are untouched), which
+# is what makes this row specific to C-EVIDENCE rather than a second copy of V23.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+stripped = 0
+for c in d["components"]:
+    if c.pop("base_evidence", None) is not None:
+        stripped += 1
+if not stripped:
+    raise SystemExit("no component carried base_evidence — stripping them all "
+                     "changes nothing and the row would prove nothing")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-EVIDENCE" "V34 every base_evidence stripped is red, not vacuously green"
+else
+  no "V34 could not strip base_evidence — the register declares none"
 fi
 
 echo
