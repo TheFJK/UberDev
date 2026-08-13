@@ -628,6 +628,17 @@ try:
      'schema_version':2,
  }
  encoded=contract.encode_aggregate(document,'phase1')
+ # The ancestor walks below live in run_manifest.py and are loaded the same way
+ # the contract is, from the same plugin root. `exec_module` gets its OWN try:
+ # the outer handler would reclassify an import failure as `malformed-input`,
+ # which points the reader at the reviewer payload instead of at the install.
+ manifest_spec=importlib.util.spec_from_file_location(
+     'uberdev_post_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+ if manifest_spec is None or manifest_spec.loader is None: fail('writer-unavailable')
+ artifacts=importlib.util.module_from_spec(manifest_spec)
+ sys.modules[manifest_spec.name]=artifacts
+ try: manifest_spec.loader.exec_module(artifacts)
+ except Exception: fail('writer-unavailable')
  # Validate the aggregate DESTINATION before publishing anything. An unusable
  # destination must refuse the whole write, not leave a cull log behind for an
  # aggregate that never existed.
@@ -636,6 +647,23 @@ try:
   fail('unsafe-output')
  parent_entry=os.stat(parent,follow_symlinks=False)
  if not stat.S_ISDIR(parent_entry.st_mode): fail('unsafe-output')
+ # ... and containment is a property of the WHOLE chain from the filesystem root
+ # down, not of one edge. The no-follow lstat above sees exactly one node, so a
+ # symlink ONE LEVEL higher -- <run>/link -> /elsewhere with <run>/link/sub a
+ # genuine directory -- satisfied every check and published outside the run
+ # directory (#468). The walks below are the whole path; the reparse walk is
+ # what catches a Windows directory junction, which is not S_ISLNK.
+ #
+ # The broad `except Exception` is the polarity, not laziness: the walks raise
+ # ManifestRejected (a ValueError) and ManifestRuntimeError (a RuntimeError),
+ # which the outer handler would report as `malformed-input` and
+ # `writer-failed` -- both naming the wrong investigation. Fail closed with
+ # THIS artifact's own class. fail() raises SystemExit, a BaseException, so it
+ # is never caught here.
+ try:
+  artifacts._reject_symlinked_ancestors(parent)
+  artifacts._reject_windows_reparse_ancestors(parent)
+ except Exception: fail('unsafe-output')
  # ---- publish the cull log FIRST (#433) ----
  # A cull is never swallowed: the filtered aggregate may not exist without the
  # artifact that says what was filtered and why. Written even when nothing was
@@ -661,15 +689,22 @@ try:
                     % (len(citation_culls)-CITATION_LOG_ROW_LIMIT))
  log_payload=('\n'.join(log_lines)+'\n').encode('utf-8')
  log_target=os.path.abspath(citation_log_path); log_parent=os.path.dirname(log_target)
- # The same no-follow shape check the aggregate destination gets above, because
- # isdir() RESOLVES a symlinked parent and would let mkstemp+os.replace publish
- # the log outside the run directory -- through content a PR can influence, since
- # the culled rows quote the rule file. Both artifacts land in one run directory
- # at one trust level, so neither may carry the weaker guard.
+ # The same no-follow shape check AND the same path-wide walks the aggregate
+ # destination gets above, because isdir() RESOLVES a symlinked parent and would
+ # let mkstemp+os.replace publish the log outside the run directory -- through
+ # content a PR can influence, since the culled rows quote the rule file. Both
+ # artifacts land in one run directory at one trust level, so neither may carry
+ # the weaker guard, and "weaker" includes seeing fewer path components: a
+ # one-node check can only ever prove the last edge of the chain, and the
+ # containment being enforced is a statement about every edge above it.
  if not os.path.isabs(citation_log_path) or not os.path.isdir(log_parent):
   fail('citation-log-unwritable')
  log_parent_entry=os.stat(log_parent,follow_symlinks=False)
  if not stat.S_ISDIR(log_parent_entry.st_mode): fail('citation-log-unwritable')
+ try:
+  artifacts._reject_symlinked_ancestors(log_parent)
+  artifacts._reject_windows_reparse_ancestors(log_parent)
+ except Exception: fail('citation-log-unwritable')
  log_descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-citations-',dir=log_parent)
  with os.fdopen(log_descriptor,'wb') as log_output:
   log_output.write(log_payload)

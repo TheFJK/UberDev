@@ -916,10 +916,27 @@ if grep -qE 'python3 -I -B -c' <<<"$V2_RUNTIME_WRITER_REGION"; then
 else
   echo "  FAIL  V2.7d — aggregate writer must use a fixed Python -c program while keeping JSON on stdin"; FAIL=$((FAIL + 1))
 fi
+# V2.7f (#468) — BOTH output guards must carry the path-wide ancestor walk, not
+# just the one-node lstat of the immediate parent. Counting TWO is the point:
+# deleting either guard's walk drops the count to 1 and reds this row on BOTH CI
+# jobs, which is the only non-vacuity signal available cross-platform because
+# the behavioural rows (tests/convention-citation.test.sh) are ubuntu-only.
+assert_count "$POST_REVIEW_V2_FUNCTION" \
+  '^post_review_write_aggregate_v2\(\) \{' '^}$' \
+  '_reject_symlinked_ancestors\(' 2 \
+  "V2.7f — both the aggregate and the citation-log parent get the symlinked-ancestor walk"
+assert_count "$POST_REVIEW_V2_FUNCTION" \
+  '^post_review_write_aggregate_v2\(\) \{' '^}$' \
+  '_reject_windows_reparse_ancestors\(' 2 \
+  "V2.7f — both parents get the Windows reparse walk, so a junction cannot escape either"
+assert_grep "$POST_REVIEW_V2_FUNCTION" "fail\('unsafe-output'\)" \
+  "V2.7f — the aggregate containment refusal keeps its existing unsafe-output class"
+assert_grep "$POST_REVIEW_V2_FUNCTION" "fail\('citation-log-unwritable'\)" \
+  "V2.7f — the citation-log containment refusal keeps its existing citation-log-unwritable class"
 TRANSPORT_SENTINEL='{"transport":"stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
 TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/transport.capture"
 TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/transport-output.md"
-TRANSPORT_WRITER_SHA256='298993c092901c6b428962d72bd4eb7eceb022ecfc5d4f8a2c814b376f33738b'
+TRANSPORT_WRITER_SHA256='2a0dc10035f65f84b6c805ade53e50253863540e2bba2e56d8fb55cbc90b7138'
 REAL_PYTHON3="$(command -v python3)"
 (
   set -euo pipefail
