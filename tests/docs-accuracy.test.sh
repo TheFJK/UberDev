@@ -433,6 +433,113 @@ assert_grep "$PRE_COMPACT" 'Contract status \(live-verified' \
 assert_grep "$PRE_COMPACT" 'DOCUMENTED user/tooling-facing contract' \
   "T8.6 pre-compact states the keep-as-documented-contract decision"
 
+# (#461) Nothing in this repo PARSED either hook manifest before this row: T8.1
+# above is `grep -c` over the raw bytes, so a hand-edited trailing comma or an
+# unbalanced brace shipped green and Claude Code silently loaded zero handlers.
+# Read from stdin — never a path argument — because the windows-latest job runs
+# NATIVE Windows Python, which cannot translate the MSYS `/…` paths Git Bash
+# hands it (same corollary that governs the XH rows in
+# tests/crossplatform-shell-wrappers.test.sh).
+if python3 -I -B -c 'import json,sys; json.load(sys.stdin)' < "$HOOKS_JSON" 2>/dev/null; then
+  echo "  PASS  T8.7 hooks.json parses as JSON"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.7 hooks.json is not valid JSON — Claude Code would load NO handlers"
+  echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
+fi
+if python3 -I -B -c 'import json,sys; json.load(sys.stdin)' < "$HOOKS_CURSOR_JSON" 2>/dev/null; then
+  echo "  PASS  T8.8 hooks-cursor.json parses as JSON"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.8 hooks-cursor.json is not valid JSON"
+  echo "        file: $HOOKS_CURSOR_JSON"; FAIL=$((FAIL + 1))
+fi
+# (#461) Every Claude Code handler must DECLARE its interpreter. Without
+# `"shell": "bash"` the runtime picks the shell per host, and on a Windows host
+# without Git Bash it picks PowerShell — which parses the quoted
+# `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"` literal as an expression and the
+# hook never loads, with nothing surfaced. The declared form makes that host
+# throw a named error instead (verified in the shipped runtime: `… requires bash
+# but Git Bash was not found. Install Git for Windows …, or add "shell":
+# "powershell" to this hook's config`).
+#
+# THIS ROW IS A COMPLETENESS RATCHET, NOT THE PROOF. A string count over JSON
+# bytes cannot show that the declared command actually runs — that is XH3 (POSIX)
+# and XH5 (native Windows) in tests/crossplatform-shell-wrappers.test.sh, which
+# EXECUTE the extracted literal and assert the emitted SessionStart contract.
+# See RFC 0019 §7 / #461 on why a string-presence check alone is a counterfeit
+# here: the failure mode this issue is about is silent.
+HOOK_SHELL_DECLS="$(grep -c '"shell": "bash"' "$HOOKS_JSON")"
+if [ "$HOOK_CMD_KEYS" -ge 1 ] && [ "$HOOK_SHELL_DECLS" -eq "$HOOK_CMD_KEYS" ]; then
+  echo "  PASS  T8.9 all ${HOOK_CMD_KEYS} hooks.json handlers declare \"shell\": \"bash\""; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.9 hooks.json has ${HOOK_CMD_KEYS} command entries but ${HOOK_SHELL_DECLS} \"shell\": \"bash\" declarations"
+  echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
+fi
+# (#461) The hook sources must check out LF on EVERY platform, because
+# `"shell": "bash"` means bash parses run-hook.cmd — and a CRLF copy dies at
+# rc=127 with `$'\r': command not found` before it ever reaches session-start.
+# Git for Windows installs with `core.autocrlf=true` by default, so without a
+# rule a real user's clone rewrites these files. The rule must stay NARROW:
+# prkit-publish, vendor-provenance and review-precision are windows-skipped on a
+# byte-exactness rationale, and a repo-wide `* text=auto` would change what those
+# paths check out as. Deliberately NOT in the FATAL `[ -r ]` loop above — a
+# missing file has to be a readable FAIL row here, not an exit-2 that stops the
+# suite before the rest of T8 runs.
+GITATTRIBUTES="$REPO_ROOT/.gitattributes"
+if [ -r "$GITATTRIBUTES" ]; then
+  GA_BAD_SCOPE="$(grep -vE '^[[:space:]]*(#|$)' "$GITATTRIBUTES" | grep -vE '^plugins/uberdev/hooks/' || true)"
+  GA_HOOK_RULE="$(grep -c '^plugins/uberdev/hooks/\*\* text eol=lf$' "$GITATTRIBUTES")"
+  if [ -z "$GA_BAD_SCOPE" ] && [ "$GA_HOOK_RULE" -eq 1 ]; then
+    echo "  PASS  T8.10 /.gitattributes pins the hook sources to LF and nothing wider"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T8.10 /.gitattributes drifted from the narrow hooks-only eol=lf rule"
+    echo "        hooks rule lines: $GA_HOOK_RULE (want 1)"
+    [ -z "$GA_BAD_SCOPE" ] || printf '        out-of-scope rule: %s\n' "$GA_BAD_SCOPE"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  T8.10 /.gitattributes is missing — a Git-for-Windows clone (core.autocrlf=true) rewrites plugins/uberdev/hooks/ to CRLF and the declared bash shell cannot parse run-hook.cmd"
+  FAIL=$((FAIL + 1))
+fi
+# (#461) The hooks bullet is the only prose that tells a contributor how the
+# Claude Code wiring reaches the scripts. It named the run-hook.cmd polyglot but
+# not the declared interpreter, so a reader had no way to know the resolution is
+# no longer host-conditional. T8.4 above pins the Cursor half of the SAME bullet;
+# keep both truthful together.
+assert_grep "$CONTRIBUTING_MD" '"shell": "bash"' \
+  "T8.11 CONTRIBUTING names the declared bash interpreter on the Claude Code hooks wiring"
+# (#461) Five sites justified a windows-skip with the literal claim that NO
+# .gitattributes exists. That claim is now false in the letter while the
+# rationale survives — the rule is scoped to plugins/uberdev/hooks/ and covers
+# none of those digest paths — so each was reworded to the property it actually
+# depends on. CHANGELOG.md was deliberately left alone: a shipped entry is a
+# historical record, and rewriting it to match a later change is worse drift than
+# leaving it.
+# The claim is WRAPPED prose in three of the four files (a `# ` comment column
+# splits `no` from `.gitattributes exists`), so a line-anchored grep would read
+# clean while the stale sentence is still there. Normalise first: drop newlines
+# and backticks, then squeeze the comment column and runs of blanks to one
+# space, and match the joined sentence.
+GITATTR_STALE_SITES=""
+for gitattr_site in "$TEST_YML" \
+                    "$REPO_ROOT/tests/prkit-publish.test.sh" \
+                    "$REPO_ROOT/tests/vendor-provenance.test.sh" \
+                    "$RFC_DIR/0014-prkit-standalone-plugin.md"; do
+  if [ ! -r "$gitattr_site" ]; then
+    GITATTR_STALE_SITES="$GITATTR_STALE_SITES${GITATTR_STALE_SITES:+ }MISSING/${gitattr_site##*/}"
+    continue
+  fi
+  gitattr_norm="$(tr -d '\n`' < "$gitattr_site" | tr -s $' \t#' ' ')"
+  if grep -qE 'no \.gitattributes (file )?exists' <<<"$gitattr_norm"; then
+    GITATTR_STALE_SITES="$GITATTR_STALE_SITES${GITATTR_STALE_SITES:+ }${gitattr_site##*/}"
+  fi
+done
+if [ -z "$GITATTR_STALE_SITES" ]; then
+  echo "  PASS  T8.12 no windows-skip rationale still claims the repo has no .gitattributes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.12 a windows-skip rationale still claims no .gitattributes exists (one now does, scoped to the hooks dir)"
+  printf '        %s\n' "$GITATTR_STALE_SITES"; FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "== T9: RFC anchors are SYMBOLS that resolve, not file:line literals (#349) =="
 # Why this section exists: RFC 0012 §3.3's contract table is the acceptance

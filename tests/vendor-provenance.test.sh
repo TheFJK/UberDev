@@ -28,10 +28,12 @@
 # its own oracle (the P1–P4 discipline of tests/prkit-publish.test.sh).
 #
 # Unix-only, declared in the test.yml windows-skip marker block: C-FILES digests
-# sha256 over exact source bytes and no `.gitattributes` exists, so a Windows
-# checkout with the default `core.autocrlf=true` rewrites LF->CRLF and every
-# digest would differ. That is a property of the checkout, not of the register —
-# same reason as tests/prkit-publish.test.sh.
+# sha256 over exact source bytes and no `.gitattributes` rule covers the vendored
+# component paths — the repo's only rule (#461) is scoped to
+# `plugins/uberdev/hooks/**` — so a Windows checkout with the default
+# `core.autocrlf=true` rewrites LF->CRLF and every digest would differ. That is a
+# property of the checkout, not of the register — same reason as
+# tests/prkit-publish.test.sh.
 #
 # Deliberately does NOT source tests/_lib_assert_structural.sh (so
 # tests/test-harness-source-guards.test.sh needs no fail-loud guard here), and
