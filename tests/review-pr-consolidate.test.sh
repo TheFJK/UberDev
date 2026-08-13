@@ -295,8 +295,12 @@ else
   fail "RCX5d: the rendered block collapsed the bases — an operator cannot decline what is not shown" \
        "distinct bases rendered: ${RCX5_BASES:-0}" "stderr: $_SCAN_ERR"
 fi
-RCX5_ID="$(sed -n 's/.*SCAN_ID=\([0-9a-f-]*\).*/\1/p' <<<"$_SCAN_ERR" | head -n 1)"
-if printf '%s' "${RCX5_ID:-}" | grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$'; then
+# `sed … ;q` rather than `… | head -n 1`, and a herestring rather than
+# `printf | grep -q`: both pipe into a reader that exits on its first hit, and
+# this file sets `pipefail`, so the producer's SIGPIPE would become the
+# pipeline's status (tests/epipe-guard.test.sh scans every tracked *.sh for it).
+RCX5_ID="$(sed -n '/SCAN_ID=/{s/.*SCAN_ID=\([0-9a-f-]*\).*/\1/p;q;}' <<<"$_SCAN_ERR")"
+if grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"${RCX5_ID:-}"; then
   pass "RCX5e: SCAN_ID matches RUN_ID_REGEX (it becomes a path segment, so its shape forecloses traversal)"
 else
   fail "RCX5e: SCAN_ID does not match ^[0-9]{8}-[0-9]{6}-[a-f0-9]+\$" "got: ${RCX5_ID:-<none>}"
