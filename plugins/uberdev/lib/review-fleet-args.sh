@@ -1116,6 +1116,17 @@ _review_fleet_base_ref_ok() {
 # Absent is therefore distinguishable from changed, which the callers rely on to
 # stop reporting "HEAD changed outside the validated review fixers" at a run
 # whose head never moved and whose record simply had not travelled.
+#
+# TWO WRITERS, and the pair is deliberate (#479). The SEED is written by the
+# Phase 1 scope fence, at the one moment the reviewed head is established from
+# the live PR; the ADVANCE is written by review_track_validated_fixer_head, at
+# the one point a validated fixer commit legitimately moves it. Only the second
+# existed at first, so a FIRST Phase 1 entry -- the common case -- reached the
+# promote fence with nothing to recover, and `[ "$before" =
+# "${VALIDATED_FIXER_HEAD_SHA:-}" ]` compared a real head against the empty
+# string and returned 76 (MUTATED_BLOCKED) on a fixer that had done everything
+# right. A seed that is not written down is not a seed: the fence that binds it
+# is dead by the time anything reads it.
 # review_fleet_write_ci_probe_json TARGET JSON
 # review_fleet_read_ci_probe_json  PATH -> the recorded probe payload
 #
@@ -2075,6 +2086,35 @@ _review_fleet_bind_repo_slug() {
   esac
 }
 
+# _review_fleet_bind_reviewed_head RESEARCH_DIR -- recover the head this review
+# stands on, READ BACK and never recomputed (see review_fleet_write_reviewed_head
+# for why recomputing deletes the anti-race check it looks like).
+#
+# A FUNCTION, and called from BOTH rehydration entry paths, because the recovery
+# used to be written inline at the bottom of the resolved path only. The fast
+# path returns as soon as the eleven scalars are bound -- which is exactly the
+# state a child dispatched with its parent's exported environment is in -- so it
+# never reached the recovery and never exported either head name. That made
+# WHICH fence a child came from decide whether it inherited the head of the
+# review, the same divergence L5 in tests/review-pr-workflow.test.sh exists to
+# refuse for STANDALONE_SNAPSHOT_PATH (#479).
+#
+# Gap-filling like every other binder here: a value already established in THIS
+# process wins, so the fence that ADVANCES the head is not overwritten by the
+# record it is about to update.
+_review_fleet_bind_reviewed_head() {
+  local research_dir="${1:-}"
+  [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 0
+  [ -n "$research_dir" ] || return 0
+  [ -r "$research_dir/reviewed-head.txt" ] || return 0
+  # A malformed record leaves BOTH names empty rather than half-bound: absent is
+  # a state the promote gate is written for, a 39-hex head is not.
+  VALIDATED_FIXER_HEAD_SHA="$(review_fleet_read_reviewed_head \
+    "$research_dir/reviewed-head.txt" 2>/dev/null)" || VALIDATED_FIXER_HEAD_SHA=
+  REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # THE SECOND HALF OF #427: functions do not survive a process boundary either.
 #
@@ -2389,6 +2429,7 @@ review_fleet_rehydrate() {
     # the run directory MARKER_DIR already names.
     _review_fleet_bind_pr "$MARKER_DIR"
     _review_fleet_bind_repo_slug "${RESEARCH_DIR_ABS:-}"
+    _review_fleet_bind_reviewed_head "${RESEARCH_DIR_ABS:-}"
     # Same export set as the resolved path below, minus the two names that are
     # legitimately absent for a /review-pr run: exporting an unset variable would
     # hand children an empty-but-present value they cannot distinguish from a
@@ -2401,6 +2442,8 @@ review_fleet_rehydrate() {
     [ -z "${STANDALONE_SNAPSHOT_PATH:-}" ] || export STANDALONE_SNAPSHOT_PATH
     [ -z "${PR_NUMBER:-}" ] || export PR_NUMBER
     [ -z "${REVIEW_REPO_SLUG:-}" ] || export REVIEW_REPO_SLUG
+    [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] || export VALIDATED_FIXER_HEAD_SHA
+    [ -z "${REVIEWED_HEAD_SHA:-}" ] || export REVIEWED_HEAD_SHA
     return 0
   fi
   toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=''
@@ -2574,16 +2617,9 @@ REVIEW_FLEET_REHYDRATE_EOF
   _review_fleet_bind_pr "$resolved_run_dir"
   _review_fleet_bind_repo_slug "$resolved_research_dir"
   _review_fleet_bind_carrier_backend "$_review_fleet_descriptor"
-  # The reviewed head, READ BACK -- see review_fleet_write_reviewed_head for why
-  # this one is never recomputed. Gap-filling like every other binder here: a
-  # value already established in THIS process wins, so the fence that advances
-  # the head is not overwritten by the record it is about to update.
-  if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ] && [ -n "$resolved_research_dir" ] \
-     && [ -r "$resolved_research_dir/reviewed-head.txt" ]; then
-    VALIDATED_FIXER_HEAD_SHA="$(review_fleet_read_reviewed_head \
-      "$resolved_research_dir/reviewed-head.txt" 2>/dev/null)" || VALIDATED_FIXER_HEAD_SHA=
-    REVIEWED_HEAD_SHA="${REVIEWED_HEAD_SHA:-$VALIDATED_FIXER_HEAD_SHA}"
-  fi
+  # The reviewed head, READ BACK -- see _review_fleet_bind_reviewed_head, which
+  # both entry paths call so neither can hand a child a head the other would not.
+  _review_fleet_bind_reviewed_head "$resolved_research_dir"
   # The child timeout, re-derived rather than carried.
   #
   # The setup fence writes `REVIEW_PR_TIMEOUT="${REVIEW_PR_TIMEOUT:-600}"` and
