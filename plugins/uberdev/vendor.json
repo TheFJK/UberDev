@@ -29,7 +29,7 @@
       "id": "namespace-rebrand",
       "kind": "namespace-rewrite",
       "scope": "all third-party components",
-      "note": "Every vendored skill and agent rewrites the 'superpowers:' skill namespace to 'uberdev:'. UberDev ships standalone under its own plugin id, so this can never be reconciled with upstream.",
+      "note": "Every vendored skill and agent rewrites the 'superpowers:' skill namespace to 'uberdev:'. The same rewrite covers the brand token wherever it names a location UberDev owns rather than a namespace — measured instance (#503): the global worktree location in skills/using-git-worktrees, '~/.config/superpowers/worktrees' -> '~/.config/uberdev/worktrees'. UberDev ships standalone under its own plugin id, so this can never be reconciled with upstream. A component whose bytes carry no brand token does not reference this divergence: the reference is a claim about the bytes, and an unwitnessed one is drift wearing a declaration's clothes (#462 found the first, #503 the next two).",
       "permanent": true
     },
     {
@@ -78,6 +78,38 @@
       "scope": "skills/finish-branch",
       "file": "SKILL.md",
       "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' — the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
+      "permanent": true
+    },
+    {
+      "id": "receiving-review-parallel-triage",
+      "kind": "local-addition",
+      "scope": "skills/receiving-code-review",
+      "file": "SKILL.md",
+      "note": "The local 'Multi-Reviewer Parallel Triage' section, appended after upstream's GitHub-thread-reply paragraph. It is the same parallel-by-default policy review-pr-parallel-by-default records for skills/requesting-code-review, applied to feedback triage: one Task triage agent per reviewer dispatched in a single message, a fixed Critical/Important/Minor/Refute/Need-clarification output shape, de-duplication across reviewers, and three named skip conditions. It names UberDev's own reviewer agents (code-reviewer, silent-failure-hunter), so upstream has no equivalent to reconcile with. Measured against the base at #503: this section is the component's ENTIRE residual — the file carries no 'superpowers:' token, so no namespace rebrand applies to it. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "verification-parallel-dispatch",
+      "kind": "local-addition",
+      "scope": "skills/verification-before-completion",
+      "file": "SKILL.md",
+      "note": "The local 'Parallel Verification Dispatch' section, appended before 'The Bottom Line'. It applies UberDev's parallel-by-default policy to verification — two patterns chosen by tool budget (parallel Bash calls in one message; Task fanout when the output is large) — and restates the Iron Law so every parallel arm still needs fresh evidence in the current turn. Measured against the base at #503: this section is the component's ENTIRE residual — the file carries no 'superpowers:' token, so no namespace rebrand applies to it. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "plan-execution-wave-contract",
+      "kind": "policy-divergence",
+      "scope": "skills/write-plan and skills/execute-plan",
+      "file": "SKILL.md",
+      "note": "The wave-parallel plan contract UberDev owns on both sides. write-plan emits it: a MANDATORY '## Wave Decomposition' pass with the four wave-assignment rules, the per-task 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' headers, a required '## Execution Waves' plan-level summary, a wave-correctness review pass, and a non-interactive Execution Handoff that defaults to uberdev:subagent-driven-dev and forwards --turbo. execute-plan consumes it: Step 2 walks the waves in order and gates the next wave on the project's full test command. uberdev:subagent-driven-dev parses that same format to decide its dispatch pattern, so upstream's copies of skills/writing-plans and skills/executing-plans are not drop-in in either direction — re-baselining either one alone would break the interlock. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "plan-reviewer-inline-no-dispatch",
+      "kind": "policy-divergence",
+      "scope": "skills/write-plan",
+      "file": "plan-document-reviewer-prompt.md",
+      "note": "Upstream's plan-document-reviewer-prompt.md is a dispatch template — 'Task tool (general-purpose): description / prompt'. UberDev's copy is an INLINE self-review checklist that states it is not a provider edge and must not create a child, because the plan writer runs as a leaf under uberdev:orchestrator, where a nested dispatch has no runtime. It also carries the shared-skeleton header that keeps it in sync by hand with skills/brainstorm/spec-document-reviewer-prompt.md. Adopting upstream's version would re-introduce a spawn from a leaf. Kept forever.",
       "permanent": true
     }
   ],
@@ -144,12 +176,7 @@
       "stance": "track",
       "stance_reason": "File set is 1:1 with upstream and SKILL.md is byte-identical to the recorded base e7a2d16 apart from the provenance header line this repo adds; there is no other local delta, and the file carries no 'superpowers:' token to rebrand. The 33 measured lines are upstream's own v6.2.0 prose compression (dispatch example rewritten, 'Key Benefits' and 'Real-World Impact' sections dropped), un-adopted here. Re-baseline from upstream.",
       "measured_diff_lines": 33,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
         {
           "path": "SKILL.md",
@@ -163,23 +190,27 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/executing-plans",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 and the prose contract is upstream's. Re-baseline from upstream.",
-      "measured_diff_lines": 50,
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/executing-plans, and the residual against that blob is 42 lines: the directory rename, the namespace rebrand (superpowers:subagent-driven-development -> uberdev:subagent-driven-dev, superpowers:finishing-a-development-branch -> uberdev:finish-branch), and one behavioural rewrite — Step 2 replaces upstream's flat task list with wave-ordered execution driven by the plan's '## Execution Waves' summary, gated on the project's full test command between waves, plus an inline TDD-discipline paragraph and an Integration section that names the worktree setup instead of deferring to superpowers:using-git-worktrees. Re-adjudicated track -> fork: that wave contract is the half of a two-sided interlock skills/write-plan emits and uberdev:subagent-driven-dev parses, so upstream's copy is not drop-in (RFC 0019 §4.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (§2.3 as amended).",
+      "measured_diff_lines": 51,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "plan-execution-wave-contract",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "4d8f9f3a743cf09df9da4313315e7535ef6e2e5f869ff2cbcdf83cd5b55f61bd"
+          "sha256": "710bb05acbcb350298c08b80b73438a75912b163ed1ed45eb5f55cf6a4436fc1"
         }
       ]
     },
@@ -240,23 +271,23 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/receiving-code-review",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream and the local delta is the namespace rebrand. Re-baseline from upstream.",
-      "measured_diff_lines": 41,
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/receiving-code-review, and the residual against that blob is 29 lines in a single hunk: the appended local 'Multi-Reviewer Parallel Triage' section. Re-adjudicated track -> fork. The previous reason claimed 'the local delta is the namespace rebrand'; measured, the file contains no 'superpowers:' token and no rebrand at all, so that sentence was false in the same way #462 found it false for skills/dispatching-parallel-agents. What it does carry is a permanent local policy section (RFC 0019 §4.1 trigger 2), so upstream's copy is not drop-in and 'track' — which promises a digest-locked re-baseline — would be a claim with nothing behind it. The digest lock is NOT lost by the flip: #503 ties it to the recorded base rather than to the stance (§2.3 as amended).",
+      "measured_diff_lines": 42,
       "divergences": [
         {
-          "ref": "namespace-rebrand",
+          "ref": "receiving-review-parallel-triage",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "81af370dde94cf6e3cf32d9a4cff28d464c83c5479a999115d57399b9854197f"
+          "sha256": "132e47b87fccee8e0bb69aca00b7411c01ab9d3dec33420b0d961f749789d1da"
         }
       ]
     },
@@ -354,25 +385,58 @@
         },
         {
           "ref": "parallel-hypothesis-testing",
-          "file": "SKILL.md"
+          "file": null
         },
         {
           "ref": "find-polluter-fail-loud",
-          "file": "find-polluter.sh"
+          "file": null
         }
       ],
       "files": [
-        "CREATION-LOG.md",
-        "SKILL.md",
-        "condition-based-waiting-example.ts",
-        "condition-based-waiting.md",
-        "defense-in-depth.md",
-        "find-polluter.sh",
-        "root-cause-tracing.md",
-        "test-academic.md",
-        "test-pressure-1.md",
-        "test-pressure-2.md",
-        "test-pressure-3.md"
+        {
+          "path": "CREATION-LOG.md",
+          "sha256": "223e7f9c301b6957b268588c3189d2ba66a7a93617b82922884906fd23aa0f83"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "69e848543a1fe5282488c897835f69a501ddceb0fe839014320a920c8c442783"
+        },
+        {
+          "path": "condition-based-waiting-example.ts",
+          "sha256": "4f1294dfc452147ad2403cb344cbfeb46bd17532460849a91823ef9569c25f81"
+        },
+        {
+          "path": "condition-based-waiting.md",
+          "sha256": "75af4e1bdefafe8b2e050265b193d9b242ddf2540c69ed0e1164ad6e92e54a93"
+        },
+        {
+          "path": "defense-in-depth.md",
+          "sha256": "2196056e167b9328db9af37d22ce16f5faae2e41003efb7e3a4ed486f721b6d3"
+        },
+        {
+          "path": "find-polluter.sh",
+          "sha256": "3e7da92624e7400ab498c8807bd0c6fa21f7e6f8b69f6abd20d0c9e9da0ce785"
+        },
+        {
+          "path": "root-cause-tracing.md",
+          "sha256": "3d43eefe8bb346e536e0905a5949b7f0613fa17bd2ae96582465814bdeae2159"
+        },
+        {
+          "path": "test-academic.md",
+          "sha256": "c201d5baf4779fa5738587ddf554fd42613b6b92c02122ce19850ae5b484c56f"
+        },
+        {
+          "path": "test-pressure-1.md",
+          "sha256": "ebf18c85651df597ec34825230cb1d090e3d796b11f053d16601c797b2dc0e02"
+        },
+        {
+          "path": "test-pressure-2.md",
+          "sha256": "f55748273ea4e24927246ec280e50a25300aeac4f1b40221ab25b9add432a610"
+        },
+        {
+          "path": "test-pressure-3.md",
+          "sha256": "e2596cde3005d0991363d408c3fc591cb8abaca4dc1929db6c7bfa0da16351d1"
+        }
       ]
     },
     {
@@ -395,8 +459,14 @@
         }
       ],
       "files": [
-        "SKILL.md",
-        "writing-good-tests.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "9f350777619d8f189c257bdf932afc3505e6e554d37ac4277389e57ef12f29fb"
+        },
+        {
+          "path": "writing-good-tests.md",
+          "sha256": "9cd5a5428209f3554f2a666120839964f00714d35208fe09aa0e3d9849871a3a"
+        }
       ]
     },
     {
@@ -425,23 +495,30 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/using-git-worktrees",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_on": "2026-08-13",
       "stance": "track",
-      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand plus UberDev path examples. Re-baseline from upstream.",
-      "measured_diff_lines": 206,
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/using-git-worktrees, and the residual against that blob is 17 lines in exactly two hunks: the brand rewrite of the global worktree location ('~/.config/superpowers/worktrees' -> '~/.config/uberdev/worktrees'), and a local fix to the path-resolution 'case' in the creation snippet — quoted patterns built from ${HOME}, because a tilde expands in neither a case pattern nor a quoted RHS, plus a fail-loud '*)' arm so an unrecognised LOCATION exits 1 instead of reaching 'git worktree add' with $path unset. Nothing else differs. Stays track after re-adjudication: RFC 0019 §4.1's fork trigger needs a PERMANENT local divergence or a rewritten behavioural contract, and this is neither — the snippet fix is a bounded correction inside a code example that upstream adopting an equivalent guard would retire, so re-baselining stays the plan and the digest lock stays armed. Recorded as divergences[].worktree-location-failloud with permanent: false.",
+      "measured_diff_lines": 207,
       "divergences": [
         {
           "ref": "namespace-rebrand",
           "file": null
+        },
+        {
+          "id": "worktree-location-failloud",
+          "kind": "local-fix",
+          "file": null,
+          "permanent": false,
+          "note": "Local correction to upstream's worktree-path 'case': upstream's pattern is the bare '~/.config/superpowers/worktrees/*' and its body assigns a literal '~/...' string, but a tilde expands in neither a case pattern nor a quoted RHS (verified under bash and zsh), and upstream has no default arm — an unmatched LOCATION falls through with $path unset straight into 'git worktree add \"$path\"'. This copy quotes both accepted spellings, builds the path from ${HOME}, and exits 1 with a named error otherwise. NOT permanent: it is a bug fix, not a policy, so an equivalent upstream guard retires this entry instead of being reconciled against it. Component-scoped (file: null) so the C-FILES digest lock stays armed."
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ba5dc3433cb80442f6630539b685c93e89441e47f93a894016fc386c6b26e2ad"
+          "sha256": "9f7465ef852dc617efe599de2bbcf24cbb07a9a40b5c8dca40de5f804ac2f960"
         }
       ]
     },
@@ -477,23 +554,23 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/verification-before-completion",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand. Re-baseline from upstream.",
-      "measured_diff_lines": 49,
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/verification-before-completion, and the residual against that blob is 30 lines in a single hunk: the appended local 'Parallel Verification Dispatch' section. Re-adjudicated track -> fork, for the same measured reason as skills/receiving-code-review — the old 'the delta is the namespace rebrand' sentence is false (the file carries no 'superpowers:' token), and what it actually carries is a permanent local policy section (RFC 0019 §4.1 trigger 2) that upstream cannot supply. The digest lock survives the flip: #503 ties it to the recorded base rather than to the stance (§2.3 as amended).",
+      "measured_diff_lines": 50,
       "divergences": [
         {
-          "ref": "namespace-rebrand",
+          "ref": "verification-parallel-dispatch",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "f083a7fb923f1df7327314395159e3abdffd6aa467f1d06e13c9feabbb0b0976"
+          "sha256": "fe492b6bb536cf70460b7625118c84200468e396482c126292c447815549bc76"
         }
       ]
     },
@@ -503,27 +580,35 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/writing-plans",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 with upstream. Re-baseline from upstream.",
-      "measured_diff_lines": 123,
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans, and the residual against that blob is 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns — a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 §4.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (§2.3 as amended).",
+      "measured_diff_lines": 125,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "plan-execution-wave-contract",
+          "file": null
+        },
+        {
+          "ref": "plan-reviewer-inline-no-dispatch",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c23e3c737fab01b539ba0dac20135a85f0c812753927dd4e9095cc88f242906f"
+          "sha256": "656ab28e75c1242bfab6e1931a38a7e95d265e53ed739b5f3a4b0abe5731b80d"
         },
         {
           "path": "plan-document-reviewer-prompt.md",
-          "sha256": "88c75e36c2d451b7ded3a0506fba589d0767977a3eeee9d6e4b294f2be2e6227"
+          "sha256": "b73b5d9993953cc9291798b2ad49a4899a6c8688027b48d07435ee2d6bdcfbb9"
         }
       ]
     },

@@ -2,6 +2,7 @@
 name: using-git-worktrees
 description: Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees with smart directory selection and safety verification
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the whole residual is two hunks and nothing else. (1) The brand rewrite of the global worktree location, '~/.config/superpowers/worktrees' → '~/.config/uberdev/worktrees', in the menu, the gitignore heading and the case pattern. (2) A local fix to the path-resolution 'case' in the creation snippet: the patterns are quoted and built from ${HOME} because a tilde does not expand inside a case pattern or a quoted RHS, and an unmatched LOCATION now exits 1 instead of falling through with $path unset. That fix is reconcilable, not permanent — vendor.json divergences[].worktree-location-failloud records it, and upstream adopting an equivalent guard retires it. -->
 
 # Using Git Worktrees
 

@@ -2,6 +2,7 @@
 name: verification-before-completion
 description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the ENTIRE residual is one appended local section, 'Parallel Verification Dispatch', which applies UberDev's parallel-by-default policy to verification and keeps the Iron Law (fresh evidence in this message) binding on every parallel arm. Upstream's copy is therefore not drop-in, which is why the component is stance 'fork'. The file carries no 'superpowers:' token, so the namespace rebrand does not appear in it at all. Permanent local divergence: vendor.json permanent_divergences[].verification-parallel-dispatch. -->
 
 # Verification Before Completion
 

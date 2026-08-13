@@ -186,10 +186,10 @@ fi
 # V5 — C-HEADER: the count of header-carrying files is knowable TODAY, so it is
 # asserted exactly. A `>= 1` bound decays into a tautology as files are added.
 HEADER_COUNT="$(grep -rlE 'Vendored from [^@[:space:]]+@[0-9a-f]{40}' "$REPO_ROOT/plugins/uberdev" | wc -l | tr -d '[:space:]')"
-if [ "$HEADER_COUNT" = "21" ]; then
-  ok "V5 C-HEADER: exactly 21 files carry an in-file provenance header"
+if [ "$HEADER_COUNT" = "27" ]; then
+  ok "V5 C-HEADER: exactly 27 files carry an in-file provenance header"
 else
-  no "V5 C-HEADER: expected 21 header-carrying files, found $HEADER_COUNT"
+  no "V5 C-HEADER: expected 27 header-carrying files, found $HEADER_COUNT"
 fi
 if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-HEADER >/dev/null 2>&1; then
   ok "V5b C-HEADER: every on-disk header agrees with its component's register entry"
@@ -261,7 +261,7 @@ else no "V9 a never-reconcile divergence is missing or undocumented"
 fi
 
 echo
-echo "== V10-V29: falsifiability — mutate one site, demand the NAMED check id =="
+echo "== V10-V32: falsifiability — mutate one site, demand the NAMED check id =="
 
 # V10 — an undeclared new file inside a declared component.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
@@ -300,25 +300,35 @@ PY
 echo "" >> "$SB/plugins/uberdev/$TRACK_FILE"
 assert_red "$SB" "C-FILES" "V13 one byte changed in a track-stance file ($TRACK_FILE)"
 
-# V14 — the same edit inside a `fork` component must stay GREEN. This is the row
-# that proves the stance distinction is real and not decorative: without it,
-# `stance` could be a comment and every other row would still pass.
+# V14 — the same edit inside an UNPINNED `fork` component must stay GREEN. This
+# is the row that proves the stance distinction is real and not decorative:
+# without it, `stance` could be a comment and every other row would still pass.
+#
+# The selector demands `vendored_at_commit == "unknown"` because #503 widened the
+# digest lock from "stance is track" to "stance is track OR the component records
+# a base" (RFC 0019 §2.3, as amended). A PINNED fork is digest-locked on purpose —
+# that is V30's row — so picking one here would red this row for the widening
+# rather than for a broken stance. Choosing by stance alone was ambiguous the
+# moment any fork got pinned; naming the second condition is what keeps V14 and
+# V30 disjoint.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
 FORK_FILE="$(python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 for c in d["components"]:
-    if c.get("stance") == "fork" and c.get("files") and c["path"].startswith("skills/"):
+    if (c.get("stance") == "fork" and c.get("files")
+            and c["path"].startswith("skills/")
+            and c.get("vendored_at_commit") == "unknown"):
         print("%s/%s" % (c["path"], c["files"][0]))
         break
 PY
 )"
-[ -n "$FORK_FILE" ] || { echo "  ABORT — no fork component with files[] found"; exit 99; }
+[ -n "$FORK_FILE" ] || { echo "  ABORT — no unpinned fork component with files[] found"; exit 99; }
 echo "" >> "$SB/plugins/uberdev/$FORK_FILE"
 if python3 "$CHECK" --repo-root "$SB" >/dev/null 2>&1; then
-  ok "V14 one byte changed in a fork-stance file stays green ($FORK_FILE)"
+  ok "V14 one byte changed in an unpinned fork-stance file stays green ($FORK_FILE)"
 else
-  no "V14 a fork-stance edit redded the checker — stance is not operational"
+  no "V14 an unpinned fork-stance edit redded the checker — stance is not operational"
 fi
 
 # V15 — an on-disk provenance header whose SHA disagrees with the register.
@@ -528,7 +538,7 @@ else
 fi
 
 echo
-echo "== V24-V25: derived-count and escape-hatch ratchets =="
+echo "== V24-V25 and V30-V32: derived-count, digest-lock and declared-claim ratchets =="
 
 # V24 — RFC 0019 §2.2's counts are DERIVED from the register, not typed once and
 # left to rot.
@@ -564,33 +574,178 @@ then ok "V24 RFC 0019 §2.2's unpinned counts still match the register"
 else no "V24 RFC 0019 §2.2 states an unpinned count the register contradicts"
 fi
 
-# V25 — no `track` component excuses a file from the digest lock.
+# V25 — no DIGEST-LOCKED component excuses a file from the digest lock.
 #
 # `divergences[]` entries with a non-null `file` are C-FILES' declared-change
 # escape hatch (vendor-check.py check_files: `excused` is consulted before the
-# sha256 mismatch is reported). On a `fork` component that is the whole point.
-# On a `track` component it silently disarms the digest for that file — and
-# V13's own mutation target is chosen as the first `track` component carrying
-# files[], which is exactly the component this change pins, so one such entry
-# would make V13 pass on a mutated tracked file: the ratchet would go quiet
-# rather than red.
+# sha256 mismatch is reported). On an unlocked component that is the whole point.
+# On a locked one it silently disarms the digest for that file — and V13's own
+# mutation target is chosen as the first `track` component carrying files[], so
+# one such entry would make V13 pass on a mutated tracked file: the ratchet would
+# go quiet rather than red.
+#
+# The locked set is `stance == track` OR `vendored_at_commit` is a real base
+# (#503 / RFC 0019 §2.3 as amended) — the same predicate the checker uses, so
+# widening the lock cannot leave a class of components outside this row. A
+# component-scoped ref (`"file": null`) is still allowed and is the shape every
+# locked component uses: `tools/vendor/vendor-drift.py`'s `declared_files`
+# resolves the ref back to `permanent_divergences[].file`, so upstream drift is
+# still labelled DECLARED while the local digest stays armed.
 #
 # RFC 0019 §2.3 names the escape hatch deliberately, so deleting it from the
 # checker would be an RFC amendment. Pinning it here instead makes it costly to
-# adopt on purpose and impossible to adopt by accident. Green today for all
-# seven `track` components.
+# adopt on purpose and impossible to adopt by accident.
 if python3 - "$REGISTER" <<'PY'
-import json, sys
+import json, re, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-track = [c for c in d["components"] if c.get("stance") == "track"]
-assert track, "no track components — the row would be vacuous"
-offenders = [(c["id"], v["file"]) for c in track
+hex40 = re.compile(r"^[0-9a-f]{40}$")
+locked = [c for c in d["components"]
+          if c.get("stance") == "track"
+          or hex40.match(c.get("vendored_at_commit") or "")]
+assert locked, "no digest-locked components — the row would be vacuous"
+assert any(c.get("stance") == "fork" for c in locked), \
+    "no PINNED FORK is digest-locked — the widened arm of this row is vacuous"
+offenders = [(c["id"], v["file"]) for c in locked
              for v in c.get("divergences", []) if v.get("file")]
 assert not offenders, \
-    "track components carrying a file-scoped digest excuse: %s" % offenders
+    "digest-locked components carrying a file-scoped digest excuse: %s" % offenders
 PY
-then ok "V25 no track component excuses a file from the C-FILES digest lock"
-else no "V25 a track component carries a file-scoped divergence — the digest lock is disarmed"
+then ok "V25 no digest-locked component excuses a file from the C-FILES digest lock"
+else no "V25 a digest-locked component carries a file-scoped divergence — the lock is disarmed"
+fi
+
+# V30 — the widened digest lock, proved falsifiable on a PINNED FORK.
+#
+# THE DEFECT #503 FOUND. C-FILES enforced sha256 only when `stance == "track"`.
+# So the moment a component was honestly re-adjudicated to `fork` — which is what
+# declaring a real local divergence obliges under RFC 0019 §4.1 — its digest lock
+# vanished. Provenance got *better* (a real `vendored_at_commit` plus an in-file
+# header) and byte evidence got *worse* at the same instant, and the pin was then
+# a claim nothing held to the bytes: edit the file, the header still names the
+# base, every check stays green. Measured on the pre-#503 tree, appending a byte
+# to any fork-stance file left the checker at exit 0.
+#
+# The fix ties the lock to the PIN rather than to the stance: a component that
+# records a base must carry `{path, sha256}` entries whatever its stance. This
+# row is that rule's falsifiability proof, and V14 above is its counter-case —
+# an UNPINNED fork edit must still stay green, so the widening cannot creep into
+# "every fork is locked".
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+PINNED_FORK_FILE="$(python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+hex40 = re.compile(r"^[0-9a-f]{40}$")
+# The target must be a file the lock actually holds: a file named by a
+# divergences[].file entry is EXCUSED from the sha256 comparison, so mutating
+# one would leave the checker green for a legitimate reason and read as a
+# missing lock.
+target = None
+for c in d["components"]:
+    if (c.get("stance") == "fork" and c.get("files")
+            and c["path"].startswith("skills/")
+            and hex40.match(c.get("vendored_at_commit") or "")):
+        excused = {v["file"] for v in c.get("divergences", []) if v.get("file")}
+        for entry in c["files"]:
+            rel = entry.get("path") if isinstance(entry, dict) else entry
+            if rel not in excused:
+                target = "%s/%s" % (c["path"], rel)
+                break
+    if target:
+        break
+print(target or "")
+PY
+)"
+[ -n "$PINNED_FORK_FILE" ] || { echo "  ABORT — no pinned fork component with an unexcused file"; exit 99; }
+echo "" >> "$SB/plugins/uberdev/$PINNED_FORK_FILE"
+assert_red "$SB" "C-FILES" "V30 one byte changed in a PINNED fork-stance file ($PINNED_FORK_FILE)"
+
+# V31 — the register actually carries digests everywhere the widened rule
+# demands them, asserted in Python against the committed file (the V1/V4/V8/V9
+# idiom) so a checker that stopped enforcing the rule cannot make the row lie.
+# Without it, "pinned components are digest-locked" would be a property of the
+# checker's source with no statement about the shipped register: a `files[]` that
+# quietly reverted to bare paths would red only V30's sandbox, and only for as
+# long as V30's selector happened to pick that component.
+if python3 - "$REGISTER" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+hex40 = re.compile(r"^[0-9a-f]{40}$")
+sha256 = re.compile(r"^[0-9a-f]{64}$")
+locked = [c for c in d["components"]
+          if c.get("origin") == "third-party"
+          and (c.get("stance") == "track"
+               or hex40.match(c.get("vendored_at_commit") or ""))]
+assert locked, "no digest-locked components — the row would be vacuous"
+assert any(c.get("stance") == "fork" for c in locked), \
+    "no PINNED FORK in the locked set — the widened arm of this row is vacuous"
+bare = [(c["id"], e) for c in locked for e in c.get("files", [])
+        if not isinstance(e, dict) or not sha256.match(e.get("sha256") or "")]
+assert not bare, "digest-locked components carrying a file with no sha256: %s" % bare
+PY
+then ok "V31 every digest-locked component records a sha256 for every declared file"
+else no "V31 a digest-locked component declares a file with no sha256"
+fi
+
+# V32 — a `namespace-rebrand` reference on a PINNED component must be witnessed
+# in that component's own bytes.
+#
+# THE CLASS, twice now. `skills/dispatching-parallel-agents` claimed its delta
+# was "the namespace rebrand" for a file containing neither `superpowers:` nor
+# `uberdev:` — #462 corrected the prose but left the machine-readable ref behind.
+# Measuring the five #503 components against their base found the identical lie
+# in two more: `receiving-code-review` and `verification-before-completion` each
+# carry ONE appended local section and no rebrand token at all. A divergence ref
+# is the register's structured claim about why bytes differ; an unwitnessed one
+# is drift wearing a declaration's clothes, and it is what
+# `tools/vendor/vendor-drift.py` subtracts from the weekly report.
+#
+# Scoped to PINNED components deliberately. An unpinned component has no proven
+# base, so "these bytes differ from upstream because of the rebrand" is not yet a
+# checkable statement — the six agents are #505's, not this row's. Pinning a
+# component brings it into scope, which is the ratchet.
+if python3 - "$REGISTER" "$REPO_ROOT" <<'PY'
+import json, os, re, sys
+reg, root = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+plugin = os.path.join(root, "plugins", "uberdev")
+hex40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def rebrand_tokens(component):
+    """Occurrences of the UberDev brand outside provenance-header lines.
+
+    Header lines are excluded because every one of them cites
+    `plugins/uberdev/licenses/...`, which would witness the claim on every
+    pinned file and make this row vacuous.
+    """
+    cdir = os.path.join(plugin, component["path"])
+    n = 0
+    for entry in component.get("files", []):
+        rel = entry.get("path") if isinstance(entry, dict) else entry
+        src = os.path.join(cdir, rel) if os.path.isdir(cdir) else cdir
+        try:
+            text = open(src, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        n += sum(ln.count("uberdev") for ln in text.splitlines()
+                 if "Vendored from" not in ln)
+    return n
+
+
+pinned = [c for c in d["components"]
+          if c.get("origin") == "third-party"
+          and hex40.match(c.get("vendored_at_commit") or "")]
+assert pinned, "no pinned third-party component — the row would be vacuous"
+claimed = [c for c in pinned
+           if any(v.get("ref") == "namespace-rebrand" for v in c.get("divergences", []))]
+assert claimed, "no pinned component references namespace-rebrand — the row is vacuous"
+unwitnessed = [c["id"] for c in claimed if rebrand_tokens(c) == 0]
+assert not unwitnessed, (
+    "pinned components claim the namespace rebrand with no rebrand token in their "
+    "bytes: %s" % unwitnessed)
+PY
+then ok "V32 every pinned component claiming the namespace rebrand is witnessed by its own bytes"
+else no "V32 a pinned component claims the namespace rebrand its bytes do not carry"
 fi
 
 # ---------------------------------------------------------------------------
@@ -773,17 +928,36 @@ assert_red "$SB" "C-REFS" "V28b a tree with no sibling reference at all is red, 
 # local part is an address or a version pin, never a sibling file: an email, an
 # npm-style `pkg@1.2.3`, and a `repo@v6.2.0` tag all contain a dotted token that
 # a naive `@`-scan reads as a filename (`x@y.com` -> `y.com`), reporting a
-# dangling reference against a document that references nothing at all. Appended
-# to a fork-stance file so no digest moves and C-REFS is the only check in play;
-# drop the lookbehind from AT_REF_RE and this row goes red.
+# dangling reference against a document that references nothing at all. Drop the
+# lookbehind from AT_REF_RE and this row goes red.
+#
+# The append re-records the file's digest in the sandbox register, the same way
+# V28b does. Its target is a PINNED component, so since #503 widened the digest
+# lock from `stance: track` to "track or pinned" the edit moves a locked sha256 —
+# and a C-FILES failure would red this row for a reason that has nothing to do
+# with address parsing. Re-recording keeps C-REFS the only check in play, and it
+# keeps that true for any component this row's target may be swapped to later,
+# which choosing an unlocked file today would not.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
 ADDR_FILE="$SB/plugins/uberdev/skills/test-driven-development/SKILL.md"
-python3 - "$ADDR_FILE" <<'PY' || { echo "  ABORT — V29 mutation failed"; exit 99; }
-import sys
-p = sys.argv[1]
+python3 - "$ADDR_FILE" "$SB/plugins/uberdev/vendor.json" <<'PY' || { echo "  ABORT — V29 mutation failed"; exit 99; }
+import hashlib, json, sys
+p, regp = sys.argv[1], sys.argv[2]
 with open(p, "a", encoding="utf-8") as fh:
     fh.write("\nReport problems to maintainer.person@example.com, pin deps as "
              "left-pad@1.2.3, and cite upstream as obra/superpowers@v6.2.0.\n")
+digest = hashlib.sha256(open(p, "rb").read()).hexdigest()
+d = json.load(open(regp, encoding="utf-8"))
+rerecorded = 0
+for c in d["components"]:
+    if c.get("path") != "skills/test-driven-development":
+        continue
+    for entry in c.get("files", []):
+        if isinstance(entry, dict) and entry.get("path") == "SKILL.md":
+            entry["sha256"] = digest
+            rerecorded += 1
+assert rerecorded == 1, "expected exactly one recorded digest for the target, found %d" % rerecorded
+json.dump(d, open(regp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 PY
 if python3 "$CHECK" --repo-root "$SB" >/dev/null 2>&1; then
   ok "V29 an email, a package pin and a tag pin are not read as sibling references"

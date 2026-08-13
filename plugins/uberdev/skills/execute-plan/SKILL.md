@@ -2,6 +2,7 @@
 name: execute-plan
 description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file (upstream skills/executing-plans/SKILL.md) was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the residual is the directory rename plus the namespace rebrand plus one behavioural rewrite — Step 2 now executes the plan's '## Execution Waves' summary in wave order with a full-test gate between waves, and the sub-skill handoffs point at uberdev:subagent-driven-dev and uberdev:finish-branch. That wave contract is the interlock uberdev:write-plan emits and uberdev:subagent-driven-dev consumes, so upstream's copy is not drop-in; the component is stance 'fork'. Permanent local divergence: vendor.json permanent_divergences[].plan-execution-wave-contract. -->
 
 # Executing Plans
 

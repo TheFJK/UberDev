@@ -1,3 +1,4 @@
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file (upstream skills/writing-plans/plan-document-reviewer-prompt.md) was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the residual is the shared-skeleton comment below plus one behavioural rewrite — upstream dispatches this template to a general-purpose Task subagent, this copy is an INLINE self-review checklist that must not create a child. Permanent local divergence: vendor.json permanent_divergences[].plan-reviewer-inline-no-dispatch. -->
 <!--
   Shared skeleton: ../_shared/document-reviewer-template.md
   Substitute: [DOCUMENT_TYPE] = plan, [DOCUMENT_TYPE_TITLE] = Plan.

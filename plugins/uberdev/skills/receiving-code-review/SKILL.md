@@ -2,6 +2,7 @@
 name: receiving-code-review
 description: Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the ENTIRE residual is one appended local section, 'Multi-Reviewer Parallel Triage', which applies UberDev's parallel-by-default review policy to feedback triage and names UberDev's own reviewer agents. Upstream's copy is therefore not drop-in, which is why the component is stance 'fork'. The file carries no 'superpowers:' token, so the namespace rebrand does not appear in it at all. Permanent local divergence: vendor.json permanent_divergences[].receiving-review-parallel-triage. -->
 
 # Code Review Reception
 
