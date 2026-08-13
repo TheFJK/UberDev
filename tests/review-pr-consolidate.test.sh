@@ -815,6 +815,72 @@ else
   fail "RCX110: review_consolidate_comment_originals is not defined"
 fi
 
+# ---- RCXZ: the library answers the same question under BOTH shells ----------
+# These fences run under /bin/zsh in production (the library's own header says
+# so), and zsh does NOT word-split an unquoted scalar -- SH_WORD_SPLIT is off by
+# default. `for known in $SCALAR` therefore iterates ONCE, over the whole string.
+#
+# This is not a hypothetical: v0.22.1 shipped exactly this bug
+# (`EFFORT_FLAG="--effort max"`), v0.22.2 fixed it, and `.github/workflows/test.yml`
+# still installs zsh on the ubuntu job to keep that regression locked. The
+# exclusion-reason validator reintroduced the class -- under zsh it rejected all
+# seven valid reasons, so no PR could ever be reported as excluded, which is the
+# one guarantee the vocabulary exists to provide.
+#
+# Executed under both shells rather than grepped, because the defect is a
+# RUNTIME difference between two interpreters and is invisible in the source.
+echo
+echo "== RCXZ: cross-shell parity of the exclusion vocabulary =="
+if ! command -v zsh >/dev/null 2>&1; then
+  # A skip here would be indistinguishable from a pass, and this row exists
+  # precisely because the production shell is the one that breaks.
+  fail "RCXZ0: zsh is not on PATH — the cross-shell parity row cannot run, and the production shell is zsh"
+else
+  RCXZ_PROBE="$TMP/rcxz-probe.sh"
+  cat >"$RCXZ_PROBE" <<'RCXZ_EOF'
+. "$1"
+ok=0
+for reason in cross_repo closed_mid_run base_deleted fetch_failed \
+              conflict_unresolved ancestry_lost push_refused; do
+  _uberdev_consolidate_reason_valid "$reason" && ok=$((ok + 1))
+done
+bogus=0
+_uberdev_consolidate_reason_valid definitely_not_a_reason && bogus=1
+printf 'valid=%s bogus=%s\n' "$ok" "$bogus"
+RCXZ_EOF
+  RCXZ_BASH="$(bash "$RCXZ_PROBE" "$CONSOLIDATE_LIB" 2>/dev/null)"
+  RCXZ_ZSH="$(zsh "$RCXZ_PROBE" "$CONSOLIDATE_LIB" 2>/dev/null)"
+  assert_eq "$RCXZ_BASH" "valid=7 bogus=0" \
+    "RCXZa: bash accepts all seven reasons and rejects an unknown one"
+  assert_eq "$RCXZ_ZSH" "valid=7 bogus=0" \
+    "RCXZb: zsh does too — an unquoted-scalar loop here rejects all seven"
+  assert_eq "$RCXZ_ZSH" "$RCXZ_BASH" \
+    "RCXZc: both shells return the SAME answer (the parity the production shell depends on)"
+  # Anti-vacuity: the probe must be able to FAIL. Re-run it against a copy whose
+  # validator is the bashism this row exists to forbid, and require zsh to
+  # disagree with bash on those bytes — otherwise RCXZb could pass against a
+  # probe that never exercised the validator at all.
+  RCXZ_BROKEN="$TMP/rcxz-broken.sh"
+  {
+    printf '_UBERDEV_CONSOLIDATE_EXCLUSION_REASONS=%s\n' \
+      '"cross_repo closed_mid_run base_deleted fetch_failed conflict_unresolved ancestry_lost push_refused"'
+    printf '%s\n' '_uberdev_consolidate_reason_valid() {'
+    printf '%s\n' '  local candidate="$1" known'
+    printf '%s\n' '  for known in $_UBERDEV_CONSOLIDATE_EXCLUSION_REASONS; do'
+    printf '%s\n' '    [ "$known" = "$candidate" ] && return 0'
+    printf '%s\n' '  done'
+    printf '%s\n' '  return 1'
+    printf '%s\n' '}'
+  } >"$RCXZ_BROKEN"
+  RCXZ_BROKEN_BASH="$(bash "$RCXZ_PROBE" "$RCXZ_BROKEN" 2>/dev/null)"
+  RCXZ_BROKEN_ZSH="$(zsh "$RCXZ_PROBE" "$RCXZ_BROKEN" 2>/dev/null)"
+  if [ "$RCXZ_BROKEN_BASH" = "valid=7 bogus=0" ] && [ "$RCXZ_BROKEN_ZSH" = "valid=0 bogus=0" ]; then
+    pass "RCXZd: the probe DOES catch the bashism — bash 7/7, zsh 0/7 on the unquoted-scalar form"
+  else
+    fail "RCXZd: the anti-vacuity control did not reproduce the split (bash='$RCXZ_BROKEN_BASH' zsh='$RCXZ_BROKEN_ZSH'); RCXZb proves nothing"
+  fi
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

@@ -92,11 +92,18 @@ _uberdev_consolidate_error() {
 # _uberdev_consolidate_reason_valid REASON -> 0 when REASON is in the enum.
 # A typo'd reason would render as an exclusion nobody can route, so it is a
 # hard refusal rather than a passthrough.
+# Membership WITHOUT word-splitting an unquoted scalar. `for known in $VAR` is a
+# bashism: bash splits the scalar on IFS, zsh does not (SH_WORD_SPLIT is off by
+# default), so under zsh the loop ran ONCE with the whole reason list as a single
+# word and rejected every valid reason -- and these fences run under zsh. The
+# padded-haystack `case` behaves identically in both shells and keeps ONE copy of
+# the vocabulary, which a hand-written alternation would not.
 _uberdev_consolidate_reason_valid() {
-  local candidate="$1" known
-  for known in $_UBERDEV_CONSOLIDATE_EXCLUSION_REASONS; do
-    [ "$known" = "$candidate" ] && return 0
-  done
+  local candidate="$1"
+  [ -n "$candidate" ] || return 1
+  case " $_UBERDEV_CONSOLIDATE_EXCLUSION_REASONS " in
+    *" $candidate "*) return 0 ;;
+  esac
   return 1
 }
 
@@ -298,7 +305,11 @@ review_consolidate_refresh() {
   local refreshed="$scan_dir/candidates.refreshed.json"
   printf '[]\n' >"$refreshed" || return 2
 
-  for number in $numbers; do
+  # `while IFS= read -r` and not `for n in $numbers`: the producer emits one
+  # number per LINE, and splitting an unquoted scalar on IFS is a bashism --
+  # zsh leaves it as a single word, so the loop ran once over the whole list.
+  while IFS= read -r number; do
+    [ -n "$number" ] || continue
     live="$(gh pr view "$number" \
       --json number,title,headRefOid,headRefName,baseRefName,state,body,headRepositoryOwner \
       --jq '.' 2>/dev/null)" || live=""
@@ -328,7 +339,9 @@ review_consolidate_refresh() {
     local merged
     merged="$(jq -sc --argjson live "$live" '.[0] + [$live]' "$refreshed" 2>/dev/null)" || return 2
     printf '%s\n' "$merged" >"$refreshed" || return 2
-  done
+  done <<EOF_CONSOLIDATE_NUMBERS
+$numbers
+EOF_CONSOLIDATE_NUMBERS
 
   mv "$refreshed" "$scan_dir/candidates.json" || return 2
   return 0
@@ -459,7 +472,11 @@ review_consolidate_fetch() {
   local survivors numbers number head oid
   survivors="$(review_consolidate_survivors "$scan_dir")" || return 2
   numbers="$(jq -r '.[].number' <<<"$survivors" 2>/dev/null)" || return 2
-  for number in $numbers; do
+  # `while IFS= read -r` and not `for n in $numbers`: the producer emits one
+  # number per LINE, and splitting an unquoted scalar on IFS is a bashism --
+  # zsh leaves it as a single word, so the loop ran once over the whole list.
+  while IFS= read -r number; do
+    [ -n "$number" ] || continue
     head="$(_uberdev_consolidate_field "$scan_dir" "$number" headRefName)"
     oid="$(_uberdev_consolidate_field "$scan_dir" "$number" headRefOid)"
     if [ -z "$head" ]; then
@@ -476,7 +493,9 @@ review_consolidate_fetch() {
       review_consolidate_exclude "$scan_dir" "$number" "fetch_failed"
       continue
     fi
-  done
+  done <<EOF_CONSOLIDATE_NUMBERS
+$numbers
+EOF_CONSOLIDATE_NUMBERS
   return 0
 }
 
@@ -814,7 +833,11 @@ review_consolidate_assert_ancestry() {
     _uberdev_consolidate_error "the combine included no candidates; there is nothing to review as a consolidation"
     return 2
   fi
-  for number in $numbers; do
+  # `while IFS= read -r` and not `for n in $numbers`: the producer emits one
+  # number per LINE, and splitting an unquoted scalar on IFS is a bashism --
+  # zsh leaves it as a single word, so the loop ran once over the whole list.
+  while IFS= read -r number; do
+    [ -n "$number" ] || continue
     oid="$(_uberdev_consolidate_field "$scan_dir" "$number" headRefOid)"
     if [ -z "$oid" ]; then
       _uberdev_consolidate_error "#$number has no recorded head OID; its presence in the combine cannot be proven"
@@ -827,7 +850,9 @@ review_consolidate_assert_ancestry() {
       review_consolidate_exclude "$scan_dir" "$number" "ancestry_lost"
       lost=1
     fi
-  done
+  done <<EOF_CONSOLIDATE_NUMBERS
+$numbers
+EOF_CONSOLIDATE_NUMBERS
   [ "$lost" -eq 0 ] || return 2
   return 0
 }
@@ -937,13 +962,17 @@ review_consolidate_closes() {
   local scan_dir="$1"
   local numbers number body
   numbers="$(review_consolidate_included "$scan_dir")"
-  for number in $numbers; do
+  # `while IFS= read -r` and not `for n in $numbers`: the producer emits one
+  # number per LINE, and splitting an unquoted scalar on IFS is a bashism --
+  # zsh leaves it as a single word, so the loop ran once over the whole list.
+  while IFS= read -r number; do
+    [ -n "$number" ] || continue
     body="$(_uberdev_consolidate_field "$scan_dir" "$number" body)"
     [ -n "$body" ] || continue
     grep -oiE "$UBERDEV_CONSOLIDATE_CLOSING_KEYWORD_ERE" <<<"$body" 2>/dev/null \
       | grep -oE '#[0-9]+' \
       | tr -d '#'
-  done | sort -un
+  done <<<"$numbers" | sort -un
 }
 
 # review_consolidate_body SCAN_DIR COMBINE_BRANCH -> the combined PR body.
@@ -966,9 +995,12 @@ review_consolidate_body() {
   closes="$(review_consolidate_closes "$scan_dir")"
   if [ -n "$closes" ]; then
     printf '\n'
-    for issue in $closes; do
+    while IFS= read -r issue; do
+      [ -n "$issue" ] || continue
       printf 'Closes #%s\n' "$issue"
-    done
+    done <<EOF_CONSOLIDATE_CLOSES
+$closes
+EOF_CONSOLIDATE_CLOSES
   fi
 }
 
