@@ -1244,14 +1244,17 @@ skill_stage_count="$(grep -c '^[a-z-]*$' <<<"$SKILL_STAGE_TOKENS" || true)"
 }
 while read -r prose_stage; do
   [ -n "$prose_stage" ] || continue
-  prose_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 "$prose_stage" 1)"
+  prose_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 "$prose_stage" 1 "$VALID_SCOPE")"
   [ "$prose_stage_rc" -eq 0 ] || {
     printf 'documented stage %s is rejected by sdd_validate_instance_dimensions (rc %s)\n' \
       "$prose_stage" "$prose_stage_rc" >&2
     exit 1
   }
 done <<<"$SKILL_STAGE_TOKENS"
-unregistered_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 resume-fix 1)"
+# The 5th argument is what keeps this row non-vacuous: with four arguments the
+# validator refuses on ARITY and returns 2 no matter what the stage is, so the
+# assertion below would pass without ever testing the stage set (#458).
+unregistered_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 resume-fix 1 "$VALID_SCOPE")"
 [ "$unregistered_stage_rc" -eq 2 ] || {
   printf 'unregistered stage resume-fix was accepted (rc %s)\n' "$unregistered_stage_rc" >&2
   exit 1
@@ -1373,8 +1376,8 @@ emit sdd_round_permitted fix_rounds 010
 emit sdd_round_permitted fix_rounds abc
 emit sdd_round_permitted fix_rounds
 emit sdd_round_permitted bogus 1
-emit sdd_validate_instance_dimensions 1 1 spec-fix 1
-emit sdd_validate_instance_dimensions 1 1 resume-fix 1
+emit sdd_validate_instance_dimensions 1 1 spec-fix 1 000000000000
+emit sdd_validate_instance_dimensions 1 1 resume-fix 1 000000000000
 emit_quiet append-relative sdd_append_fix_ledger relative.md 1 fix_rounds spec-fix inst /a /b /c
 emit_quiet exhaust-relative sdd_note_cap_exhausted relative.md fix_rounds 4
 emit_quiet append-round-1 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 1 fix_rounds spec-fix \

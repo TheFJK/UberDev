@@ -190,7 +190,14 @@ sdd_append_fix_ledger() {
   # Stage is checked against the ONE accepted-stage set, never a second copy of
   # it; the wave/task/attempt arguments here are placeholders the validator
   # already accepts.
-  sdd_validate_instance_dimensions 1 1 "$stage" 1 || return 2
+  #
+  # The plan scope is a placeholder for the same reason (#458 gave the
+  # validator a fifth dimension). A ledger entry is scoped to a TASK, not to a
+  # plan, so this call has no real scope to pass — and passing four arguments
+  # to a five-argument validator makes it refuse on ARITY, which reads exactly
+  # like "the stage is unregistered" and rejected every legitimate stage.
+  local placeholder_scope=000000000000
+  sdd_validate_instance_dimensions 1 1 "$stage" 1 "$placeholder_scope" || return 2
   [ -n "$source_instance" ] || return 2
   case "$ledger" in /*) ;; *) return 2 ;; esac
   case "$task_brief" in /*) ;; *) return 2 ;; esac

@@ -1231,7 +1231,11 @@ write_utf8(sys.argv[7],duplicated)
 permuted=captured([lenses[2],lenses[1],lenses[0]],edge_ids=list(reversed(edges)))
 write_utf8(sys.argv[8],permuted)
 PY
-if (
+# Run OUTSIDE the condition and test the captured status: in condition position
+# bash suppresses errexit for the whole subshell, so `set -e` there is inert and
+# claims a protection it does not provide (#469).
+S6_RC=0
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -1242,12 +1246,14 @@ if (
     >"$POST_REVIEW_V2_TMP/simplify-nonempty.oracle.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/simplify-nonempty.md" \
     "$POST_REVIEW_V2_TMP/simplify-nonempty.oracle.md"
-); then
+) || S6_RC=$?
+if [ "$S6_RC" -eq 0 ]; then
   echo "  PASS  S6 — Phase 2 writer emits the committed non-empty byte oracle exactly"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S6 — Phase 2 writer output diverges from tests/fixtures/findings-to-issues/simplify-final.sample.md"; FAIL=$((FAIL + 1))
 fi
-if (
+S7_RC=0
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -1258,7 +1264,8 @@ if (
     >"$POST_REVIEW_V2_TMP/simplify-empty.oracle.md" || exit 1
   cmp -s "$POST_REVIEW_V2_TMP/simplify-empty.md" \
     "$POST_REVIEW_V2_TMP/simplify-empty.oracle.md"
-); then
+) || S7_RC=$?
+if [ "$S7_RC" -eq 0 ]; then
   echo "  PASS  S7 — three zero-finding lenses produce the committed empty byte oracle"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S7 — Phase 2 writer output diverges from tests/fixtures/findings-to-issues/simplify-empty.sample.md"; FAIL=$((FAIL + 1))
@@ -1272,11 +1279,11 @@ for S9_CASE in short:malformed-input unknown-edge:roster-mismatch index:roster-m
                digest:roster-mismatch duplicate:malformed-input permuted:roster-mismatch; do
   S9_NAME="${S9_CASE%%:*}"
   S9_CLASS="${S9_CASE##*:}"
-  # `&&`-chained on purpose: bash suppresses errexit for the whole `if`
-  # condition, subshell `set -e` included, so only the LAST command's status
-  # would otherwise be read -- and a vacuously-passing fail-closed matrix is
-  # worse than none.
-  if (
+  # `&&`-chained AND run outside the condition. The chain is what makes every
+  # link load-bearing; running it outside condition position is what lets the
+  # subshell's own `set -e` mean anything at all (#469).
+  S9_CASE_RC=0
+  (
     set -euo pipefail
     . "$POST_REVIEW_V2_FUNCTION"
     UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -1287,7 +1294,8 @@ for S9_CASE in short:malformed-input unknown-edge:roster-mismatch index:roster-m
       && grep -Fq "post_review_simplify_aggregate_failure class=$S9_CLASS" \
         "$POST_REVIEW_V2_TMP/simplify-$S9_NAME.err" \
       && [ ! -e "$POST_REVIEW_V2_TMP/simplify-$S9_NAME.md" ]
-  ); then :; else
+  ) || S9_CASE_RC=$?
+  if [ "$S9_CASE_RC" -eq 0 ]; then :; else
     echo "  ....  S9 case $S9_NAME did not refuse as class=$S9_CLASS with no artifact"
     S9_RC=1
   fi
@@ -1297,7 +1305,8 @@ if [ "$S9_RC" -eq 0 ]; then
 else
   echo "  FAIL  S9 — Phase 2 writer accepted a wave it must refuse, or left an aggregate behind"; FAIL=$((FAIL + 1))
 fi
-if (
+S10_RC=0
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -1306,7 +1315,8 @@ if (
       2>"$POST_REVIEW_V2_TMP/simplify-empty-path.err" \
     && grep -Fq 'post_review_simplify_aggregate_failure class=unsafe-output' \
       "$POST_REVIEW_V2_TMP/simplify-empty-path.err"
-); then
+) || S10_RC=$?
+if [ "$S10_RC" -eq 0 ]; then
   echo "  PASS  S10 — an empty Phase 2 aggregate destination is refused as unsafe-output"; PASS=$((PASS + 1))
 else
   echo "  FAIL  S10 — Phase 2 writer must refuse an empty aggregate destination with class=unsafe-output"; FAIL=$((FAIL + 1))
