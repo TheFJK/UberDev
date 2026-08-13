@@ -187,8 +187,8 @@ const S = {
     required: ["persona", "scratchPath", "findingCount"],
     properties: {
       persona: { type: "string" },
-      scratchPath: { type: "string" },
-      findingCount: { type: "integer", minimum: 0 },
+      scratchPath: { type: "string" }, // schema-prop-unread: the script composed this scratch path and reads its own copy, never the echo
+      findingCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a claim only; the aggregate relay counts findings from the YAML on disk
       findings: {
         type: "array",
         items: {
@@ -212,7 +212,7 @@ const S = {
       rc: { type: "integer" },
       findings: { type: "integer", minimum: 0 },
       verified: { type: "integer", minimum: 0 },
-      stderrTail: { type: "string" },
+      stderrTail: { type: "string" }, // schema-prop-unread: a diagnostic tail for the transcript; nothing in the script routes on it
     },
   },
   monitorPrimary: {
@@ -220,9 +220,9 @@ const S = {
     additionalProperties: false,
     required: ["scratchPath"],
     properties: {
-      scratchPath: { type: "string" },
+      scratchPath: { type: "string" }, // schema-prop-unread: the script composed this scratch path and reads its own copy, never the echo
       followUps: { type: "object", additionalProperties: true },
-      verifiedAdded: { type: "integer", minimum: 0 },
+      verifiedAdded: { type: "integer", minimum: 0 }, // schema-prop-unread: a claim only; verified tallies come from the report runner reading disk
     },
   },
   monitorDA: {
@@ -230,8 +230,8 @@ const S = {
     additionalProperties: false,
     required: ["scratchPath"],
     properties: {
-      scratchPath: { type: "string" },
-      rejected: { type: "integer", minimum: 0 },
+      scratchPath: { type: "string" }, // schema-prop-unread: the script composed this scratch path and reads its own copy, never the echo
+      rejected: { type: "integer", minimum: 0 }, // schema-prop-unread: a claim only; dispositions are re-read from the monitor YAML on disk
     },
   },
   report: {
@@ -240,7 +240,7 @@ const S = {
     required: ["reportPath"],
     properties: {
       reportPath: { type: "string" },
-      aggregatePath: { type: "string" },
+      aggregatePath: { type: "string" }, // schema-prop-unread: the script tracks the report path; the aggregate artifact is found by layout
       totalFindings: { type: "integer", minimum: 0 },
       verifiedFindings: { type: "integer", minimum: 0 },
     },

@@ -152,7 +152,7 @@ const S = {
   area: { type: "object", additionalProperties: false,
     required: ["areaId", "outPath", "findingCount"],
     properties: {
-      areaId: { type: "string" },
+      areaId: { type: "string" }, // schema-prop-unread: the script dispatched this area id and never reads the child's echo of it
       outPath: { type: "string" },
       findingCount: { type: "integer", minimum: 0 },
       blockerCount: { type: "integer", minimum: 0 },
@@ -162,8 +162,8 @@ const S = {
   global: { type: "object", additionalProperties: false,
     required: ["rc"],
     properties: {
-      semgrepPath: { type: "string" },
-      coveragePath: { type: "string" },
+      semgrepPath: { type: "string" }, // schema-prop-unread: the aggregate relay locates the global artifacts by run-dir layout, not from this echo
+      coveragePath: { type: "string" }, // schema-prop-unread: the aggregate relay locates the global artifacts by run-dir layout, not from this echo
       semgrepFindingCount: { type: "integer", minimum: 0 },
       coverageGapCount: { type: "integer", minimum: 0 },
       rc: { type: "integer" },
@@ -182,7 +182,7 @@ const S = {
     required: ["outPath", "rc"],
     properties: {
       outPath: { type: "string" },
-      mergedCount: { type: "integer", minimum: 0 },
+      mergedCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a progress claim the script does not route on; outPath and rc carry the decision
       rc: { type: "integer" },
     } },
   // branch-setup relay (simplify apply).
@@ -193,19 +193,19 @@ const S = {
   fixer: { type: "object", additionalProperties: false,
     required: ["areaId", "status"],
     properties: {
-      areaId: { type: "string" },
+      areaId: { type: "string" }, // schema-prop-unread: the script dispatched this area id and never reads the child's echo of it
       status: { type: "string", enum: ["APPLIED", "NO_FIXES_NEEDED", "REFUSED"] },
-      commitSha: { type: "string" },
-      dispositionPath: { type: "string" },
+      commitSha: { type: "string" }, // schema-prop-unread: a claim only; this script routes on status and never reads the sha
+      dispositionPath: { type: "string" }, // schema-prop-unread: the disposition file is located by the script's own run-dir layout, not from this claim
     } },
   // pr-open relay (simplify).
   pr: { type: "object", additionalProperties: false,
     required: ["rc"],
     properties: {
       prNumber: { type: "integer", minimum: 0 },
-      prUrl: { type: "string" },
+      prUrl: { type: "string" }, // schema-prop-unread: the run log names the PR by number only; the URL is not consumed by this script
       branch: { type: "string" },
-      commitCount: { type: "integer", minimum: 0 },
+      commitCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a claim only; this script routes on rc and prNumber, never on the tally
       rc: { type: "integer" },
     } },
   // simplify leftover-issues aggregate (aggregate.py issues) relay.

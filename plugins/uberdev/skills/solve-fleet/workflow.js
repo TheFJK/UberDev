@@ -172,7 +172,7 @@ const S = {
             issue: { type: "integer" },
             tier: { type: "string", enum: ["trivial", "small", "medium", "large"] },
             promptFile: { type: "string" },
-            contextFile: { type: "string" },
+            contextFile: { type: "string" }, // schema-prop-unread: an optional manifest field copied verbatim; the solver prompt is built from promptFile
           },
         },
       },
@@ -184,7 +184,7 @@ const S = {
     properties: {
       artifactPath: { type: "string", description: "absolute path written, or empty on failure" },
       rc: { type: "integer" },
-      headline: { type: "string", description: "one line, <=200 chars, for the progress log" },
+      headline: { type: "string", description: "one line, <=200 chars, for the progress log" }, // schema-prop-unread: a one-line progress string for the log; the script logs its own artifact tally
     },
   },
   written: {
@@ -193,7 +193,7 @@ const S = {
     properties: {
       path: { type: "string" },
       rc: { type: "integer" },
-      headline: { type: "string" },
+      headline: { type: "string" }, // schema-prop-unread: a one-line progress string for the log; the script logs its own artifact tally
     },
   },
   reviewed: {
@@ -202,8 +202,8 @@ const S = {
     properties: {
       verdict: { type: "string", enum: ["APPROVE", "REVISIONS_REQUIRED", "REJECT"] },
       rc: { type: "integer" },
-      headline: { type: "string" },
-      blockingFindings: { type: "array", maxItems: 20, items: { type: "string" } },
+      headline: { type: "string" }, // schema-prop-unread: a one-line progress string for the log; the script logs its own artifact tally
+      blockingFindings: { type: "array", maxItems: 20, items: { type: "string" } }, // schema-prop-unread: #507 owns wiring these into the plan prompt; unread until that lands
     },
   },
   solve: {
