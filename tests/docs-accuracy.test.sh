@@ -46,6 +46,11 @@ ALIAS_RFC="$RFC_DIR/0011-alias-install-reliability.md"
 # #432: the reviewer-precision eval RFC. 0018 is reserved for it by the issue,
 # and T3.4 below locks the header so a renumber cannot drift from the filename.
 PRECISION_RFC="$RFC_DIR/0018-review-precision-eval.md"
+# #467: the miner the precision RFC describes. T13 below pairs every absence row
+# with a positive one, and the last of them resolves an RFC symbol against this
+# file — an RFC that names a field the shipped tool does not have is the same
+# drift class as one that describes a rule the tool never implemented.
+PRECISION_MINER="$REPO_ROOT/tools/eval/review-precision.py"
 SESSION_START="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 ALIASES_SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
@@ -85,8 +90,8 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
-         "$PRECISION_RFC" "$AGENTS_MD" "$SOLVE_FLEET_JS" "$GOAL_WATCH_SH" \
-         "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
+         "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
+         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -1522,6 +1527,40 @@ assert_count "$STRUCTURAL_LIB" '^assert_version_bump' '^}' \
   "T12.14 assert_version_bump's body still asserts exactly four manifest surfaces"
 assert_grep "$STRUCTURAL_LIB" 'all four manifest surfaces' \
   "T12.14b the doc comment states the same four-surface count its body asserts"
+
+echo
+echo "== T13: precision RFC 0018 §4/§5 describe the stamp the miner implements (#467) =="
+# RFC 0018 §5 described the model the code was INTENDED to have, and v0.45.13
+# moved the code without moving the prose: three sentences became false and
+# nothing noticed, because §5's body carried no positive assertion at all.
+#
+# Absence and positive rows come in PAIRS here, deliberately. An absence-only
+# predicate is disjoint from the drift it must catch — a false claim reworded
+# past a fixed-string forbid sails through — which is the same shape as the
+# stamp hole this section documents. Each forbid below therefore has a positive
+# twin asserting what the prose must now say instead.
+#
+# Every positive needle is a SINGLE-LINE substring of the authored prose: the
+# sentences it targets span line breaks, and a needle that crosses a wrap can
+# never match.
+assert_grep "$PRECISION_RFC" 'unmeasured_digests' \
+  "T13.1 the precision RFC names the unmeasured_digests field the miner reads"
+assert_grep "$PRECISION_RFC" 'carries a sha256 in one of two fields' \
+  "T13.2 §5 states every surface carries a digest in one of two fields"
+assert_grep "$PRECISION_RFC" 'a post-declaration edit of a declared-unmeasured surface reds' \
+  "T13.3 §5 states a declared-unmeasured surface still reds on a post-declaration edit"
+assert_grep "$PRECISION_RFC" 'tethered by the anti-parking rule' \
+  "T13.4 §5 states what the MEASURED declaration branch is tethered to"
+assert_absent_fixed "$PRECISION_RFC" 'records the sha256 of' \
+  "T13.5 the false 'records the sha256 of every reviewer prompt surface' claim is gone (two of eight carry no measured digest by design)"
+assert_absent_fixed "$PRECISION_RFC" 'also fails the check, so the list cannot accumulate' \
+  "T13.5b the unqualified anti-parking claim is gone (it never fired for an unstamped-declared path)"
+assert_absent_fixed "$PRECISION_RFC" 'in a second tuple in the miner' \
+  "T13.6 the 'a second tuple in the miner is a second roster' claim is gone (SHARED_PROMPT_SURFACES is exactly that, by design)"
+assert_grep "$PRECISION_RFC" 'SHARED_PROMPT_SURFACES.* is the one irreducible enumeration' \
+  "T13.6b §5 names SHARED_PROMPT_SURFACES and says why it is the one irreducible enumeration"
+assert_grep "$PRECISION_MINER" 'unmeasured_digests' \
+  "T13.7 the RFC's unmeasured_digests symbol resolves in the shipped miner"
 
 echo
 echo "== Summary =="

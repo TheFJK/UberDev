@@ -78,5 +78,9 @@
     "agents/type-design-analyzer.md": "52cafe31c0b39ee225b3b88b4f57bcef59d2054e4af1819c5a51063600c38c99",
     "shared/phase1-reviewer-output-v1.md": "33ef287be76843fe1d01a5000548781a4d20850240aed22db1d5a60c26dc359e"
   },
-  "schema_version": 1
+  "schema_version": 1,
+  "unmeasured_digests": {
+    "agents/convention-compliance.md": "08d6375803e6798aeeecfdd1dc1aac78a3335eb8f3ae38a867a5043f7106a433",
+    "shared/finding-confidence-rubric-v1.md": "3e35f1646384bf446b4670ff7b9eef81f311c23e2e0189ec062c975d101f6192"
+  }
 }
