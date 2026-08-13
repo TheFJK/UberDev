@@ -83,6 +83,14 @@ SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
+# #518 schema-drift surfaces. run_manifest.py's ALLOWED_FIELDS says of itself
+# that it is "RFC 0013 section 13 fields plus the minimal process metadata" —
+# and nothing compared the two lists, which is how `cache_hit` sat in the schema
+# with zero producers for a full release cycle. T14 below compares them in BOTH
+# directions, so neither a field the RFC promises nor a field only the code
+# knows about can appear without showing up as a diff.
+ADAPTIVE_RFC="$RFC_DIR/0013-gpt-5-6-adaptive-execution.md"
+RUN_MANIFEST_PY="$PLUGIN_DIR/lib/run_manifest.py"
 
 # Hard-fail (exit 2) on a missing input — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
@@ -91,7 +99,8 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
-         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
+         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
+         "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -1674,6 +1683,145 @@ assert_grep "$PRECISION_RFC" 'SHARED_PROMPT_SURFACES.* is the one irreducible en
   "T13.6b §5 names SHARED_PROMPT_SURFACES and says why it is the one irreducible enumeration"
 assert_grep "$PRECISION_MINER" 'unmeasured_digests' \
   "T13.7 the RFC's unmeasured_digests symbol resolves in the shipped miner"
+
+echo
+echo "== T14: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
+# Extraction. The RFC's field list lives in a ```text fence that does NOT
+# immediately follow its anchor line — there is a blank line between them — so
+# an extractor that reads anchor+1 as the fence collects ZERO names and every
+# case below goes vacuously green. Scan forward to the first fence line instead,
+# and let T14.1 hard-fail on a short list rather than trusting the scan.
+#
+# awk does all the splitting and all the iteration: no `for n in $var` (zsh runs
+# that once over the whole string), and comparison is per-name `grep -qxF`
+# against a herestring rather than a whole-variable equality check — herestrings
+# because this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
+# set, and per-name because a `$( )` capture can retain embedded CRs on Git Bash.
+RFC_FIELDS="$(awk '
+  /^Append-only JSONL events MUST support:$/ { seek = 1; next }
+  seek && /^```/                             { seek = 0; inf = 1; next }
+  inf  && /^```/                             { inf = 0; next }
+  inf {
+    gsub(/[,\r]/, " ")
+    n = split($0, parts, /[ \t]+/)
+    for (i = 1; i <= n; i++) if (parts[i] != "") print parts[i]
+  }
+' "$ADAPTIVE_RFC")"
+CODE_FIELDS="$(awk '
+  /^ALLOWED_FIELDS = frozenset\(/ { inf = 1; next }
+  inf && /^\)/                    { inf = 0; next }
+  inf {
+    line = $0
+    while (match(line, /"[a-z_][a-z0-9_]*"/)) {
+      print substr(line, RSTART + 1, RLENGTH - 2)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "$RUN_MANIFEST_PY")"
+
+RFC_FIELD_N=0
+while IFS= read -r _f; do [ -n "$_f" ] && RFC_FIELD_N=$((RFC_FIELD_N + 1)); done <<<"$RFC_FIELDS"
+CODE_FIELD_N=0
+while IFS= read -r _f; do [ -n "$_f" ] && CODE_FIELD_N=$((CODE_FIELD_N + 1)); done <<<"$CODE_FIELDS"
+
+# T14.1 — anti-vacuity. This case exists because a silent zero-name extraction
+# would make T14.2 and T14.3 pass while comparing nothing at all.
+if [ "$RFC_FIELD_N" -ge 30 ] && [ "$CODE_FIELD_N" -ge 30 ]; then
+  echo "  PASS  T14.1 both field lists extracted (RFC §13: $RFC_FIELD_N, ALLOWED_FIELDS: $CODE_FIELD_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T14.1 setup error: RFC 0013 §13 fence not found — anchor moved?"
+  echo "        RFC §13 names extracted:     $RFC_FIELD_N (expected >= 30)"
+  echo "        ALLOWED_FIELDS names parsed: $CODE_FIELD_N (expected >= 30)"
+  echo "        rfc: $ADAPTIVE_RFC"
+  echo "        code: $RUN_MANIFEST_PY"
+  FAIL=$((FAIL + 1))
+fi
+
+# T14.2 — forward. Every field the RFC promises must be accepted by the code.
+# A missing one means the manifest writer hard-rejects an event the RFC says
+# MUST be supported.
+T14_MISSING=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T14_MISSING="$T14_MISSING $_f"
+done <<<"$RFC_FIELDS"
+if [ -z "$T14_MISSING" ]; then
+  echo "  PASS  T14.2 every RFC 0013 §13 field is a member of ALLOWED_FIELDS ($RFC_FIELD_N/$RFC_FIELD_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T14.2 RFC 0013 §13 declares fields ALLOWED_FIELDS would reject as unknown_field"
+  echo "        missing from run_manifest.py:$T14_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T14.3 — reverse. Every ALLOWED_FIELDS member is either in the RFC or in the
+# exemption roster below. The roster is a literal fenced list, not a regex, for
+# two reasons: adding an exemption becomes a reviewable diff, and a member
+# silently DELETED from ALLOWED_FIELDS also reds here.
+# === BEGIN run-manifest process-metadata exemptions ===
+# These six are the "plus the minimal process metadata required to reconcile an
+# interrupted agent_started event" half of run_manifest.py's own comment. They
+# are intentionally absent from RFC 0013 §13, which specifies the event schema,
+# not the reconciliation bookkeeping.
+T14_EXEMPT="agent_id
+backend_handle
+owner_pid
+owner_process_identity
+status_path
+timeout_s"
+# === END run-manifest process-metadata exemptions ===
+T14_EXTRA=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$RFC_FIELDS" && continue
+  grep -qxF -- "$_f" <<<"$T14_EXEMPT" || T14_EXTRA="$T14_EXTRA $_f"
+done <<<"$CODE_FIELDS"
+T14_STALE_EXEMPT=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T14_STALE_EXEMPT="$T14_STALE_EXEMPT $_f"
+done <<<"$T14_EXEMPT"
+if [ -z "$T14_EXTRA" ] && [ -z "$T14_STALE_EXEMPT" ]; then
+  echo "  PASS  T14.3 every ALLOWED_FIELDS member is in RFC 0013 §13 or the pinned process-metadata roster"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T14.3 ALLOWED_FIELDS and RFC 0013 §13 have drifted"
+  [ -n "$T14_EXTRA" ] && echo "        in the code, in neither the RFC nor the exemption roster:$T14_EXTRA"
+  [ -n "$T14_STALE_EXEMPT" ] && echo "        exempted here but no longer in ALLOWED_FIELDS:$T14_STALE_EXEMPT"
+  FAIL=$((FAIL + 1))
+fi
+
+# T14.4 — the `cache_hit` tombstone. The field is normatively declared by RFC
+# 0013 §13 and bool-validated by run_manifest.py, but has zero producers: the
+# artifact-reuse short-circuit that would have set it was deleted in #308.
+# Keeping it is the right call (an Accepted RFC promises it, and removing it is
+# a schema NARROWING that turns an out-of-tree producer's event into a hard
+# rc=2 unknown_field) — but keeping it SILENTLY is what let it rot. Require the
+# entry AND a RESERVED marker inside the frozenset literal, so the next reader
+# learns why a validated field never appears in any manifest.
+FROZEN_BODY="$(awk '
+  /^ALLOWED_FIELDS = frozenset\(/ { inf = 1; next }
+  inf && /^\)/                    { inf = 0; next }
+  inf                             { print }
+' "$RUN_MANIFEST_PY")"
+if [ -z "$FROZEN_BODY" ]; then
+  echo "  FAIL  T14.4 setup error: ALLOWED_FIELDS frozenset literal not found in run_manifest.py"
+  echo "        file: $RUN_MANIFEST_PY"
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -- '"cache_hit",' <<<"$FROZEN_BODY"; then
+  echo "  FAIL  T14.4 cache_hit was dropped from ALLOWED_FIELDS — that is a schema narrowing"
+  echo "        RFC 0013 §13 still lists it; removing it here rejects a field the RFC promises"
+  FAIL=$((FAIL + 1))
+elif ! grep -qE 'RESERVED' <<<"$FROZEN_BODY"; then
+  echo "  FAIL  T14.4 cache_hit carries no RESERVED marker inside the ALLOWED_FIELDS literal"
+  echo "        file: $RUN_MANIFEST_PY"
+  echo "        a validated field with zero producers must say so where it is declared (#518)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T14.4 cache_hit is retained in ALLOWED_FIELDS and marked RESERVED at the declaration"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "== Summary =="
