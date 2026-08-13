@@ -289,8 +289,9 @@ PY
 # calls them disjoint. `under()` mirrors tools/vendor/vendor-drift.py's.
 #
 # Everything arrives on argv and the heredoc is quoted, so the Skill renderer's
-# positional-argument substitution has no `$1`-shaped token to corrupt. Paths
-# are already canonical absolute realpaths confined to $SDD_WORKTREE
+# positional-argument substitution has no bare positional token to corrupt (the
+# class tests/skill-renderer-awk-collision.test.sh guards). Paths are already
+# canonical absolute realpaths confined to $SDD_WORKTREE
 # (sdd_canonicalize_owned_paths runs earlier at the batch callsite), so this
 # resolves nothing itself.
 sdd_assert_wave_disjoint() {
