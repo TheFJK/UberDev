@@ -601,7 +601,9 @@ A review-pr failure (e.g., reviewer agent crash, `gh pr view` error) is loud-log
 
 Use the `Skill` tool for this dispatch — never the agent-spawning tool.
 
-Then: Cleanup worktree (Step 5)
+Then: Step 5 — and Option 2 **keeps** the worktree. Do NOT run the Step 5
+teardown block: the branch has to stay alive for PR-feedback fixups. Step 5 has
+no `FB_MODE` for "keep", so there is nothing to run here.
 
 #### Option 3: Keep As-Is
 
@@ -637,9 +639,10 @@ Then: run the teardown block (Step 5)
 
 ### Step 5: Cleanup Worktree
 
-**For Options 1 and 4:** run the block below. It is the one place that switches
-to the base branch, merges or discards, verifies, removes the worktree and
-deletes the branch.
+**For Options 1 and 4 ONLY:** run the block below. It is the one place that
+switches to the base branch, merges or discards, verifies, removes the worktree
+and deletes the branch. Options 2 and 3 must not run it — it deletes branches
+for real, and `FB_MODE` has no value that means "keep".
 
 Options 1 and 4 used to carry their own prose git sequences. Both were wrong in
 the same four ways, and every one of the four was reproduced by an executed
