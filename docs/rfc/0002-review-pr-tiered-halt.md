@@ -132,6 +132,54 @@
 
 ---
 
+> **AMENDED 2026-08-12 (issue #454) — `REJECTED` is not a disposition, and its
+> suppressor arm is DELETED from the agent.**
+>
+> `REJECTED` was never a member of a published disposition enum. The shipped
+> closed set is `{APPLIED, SKIPPED, REFUSED}`, enforced at both validation
+> boundaries in `lib/code_fixer_contract.py` — `_validate_disposition`
+> (`:2986-2989`, the structured path) and `_parse_fixer_result` (`:9487`, the
+> serialised path) — and published to the fixer as
+> `disposition: APPLIED | SKIPPED | REFUSED` in
+> `shared/code-fixer-output-v1.md:40`. `agents/findings-to-issues.md` adds one
+> more value on its own side, `DEFERRED`, as the Step-3 default when the
+> disposition path is empty (the normal case for the uberscan / uberthink /
+> testers variants). Four values reach the helper; `REJECTED` is none of them,
+> and a disposition document carrying it is refused before the helper ever runs.
+>
+> - **§3.1's `any | REJECTED | NO (review decided wrong)` row (the last row of
+>   the table below) and §3.3.1's `[ "$disposition" = "REJECTED" ] && return 1`
+>   arm describe policy that never had a writer.** The arm is deleted from
+>   `agents/findings-to-issues.md` as of **#454**. `APPLIED` is the single live
+>   suppressor — which is what the agent's own frontmatter `description` has
+>   said all along (`disposition != APPLIED`), independent evidence that
+>   deletion, not re-pointing the arm at some other label, is the correct read.
+> - **The consumer's branch labels are now PINNED against the producer's enum**,
+>   not merely asserted present. `tests/findings-to-issues.test.sh` Suite 1
+>   P7–P12b extracts every `[ "$disposition" = "…" ]` label out of the shipped
+>   helper and checks each one against the enum parsed out of
+>   `shared/code-fixer-output-v1.md` (∪ `{DEFERRED}`, anchored by P11 to the
+>   Step-3 default it exists for). A presence grep passes just as happily on an
+>   unreachable branch; that is how this arm survived from §3.1 into shipped
+>   policy from v0.26.0 until now.
+> - **§3.3.1's code block has drifted in a second, harmless way**: it writes
+>   `tier=` where the shipped helper writes `row_tier=`. Named here so a future
+>   reader does not "restore" the RFC's spelling into the agent and red P4–P6.
+> - **RFC 0017 / #431's `CULLED` exclusion is unaffected.** It deliberately
+>   filters verification-culled rows *before* `route_by_severity` rather than
+>   adding a third arm; the fix here shrinks the helper, and P9 pins it at
+>   exactly one disposition guard so it cannot grow back.
+>
+> §3.1's table and §3.3.1's block are left as written rather than rewritten:
+> this RFC is `Accepted`, and the repo's ritual for a clause that stopped being
+> real is an appended note. (The *reasoning* the #381 amendment above gives for
+> that ritual — "removing a member from a closed vocabulary would break every
+> consumer that validates historical audit JSON" — does not transfer, since
+> `REJECTED` was never published and so no historical audit JSON can contain it.
+> The ritual does.) Nothing else in RFC 0002 is superseded.
+
+---
+
 ## 1. Summary
 
 Promote `/uberdev:review-pr`'s findings-to-issues sub-phase (added in PR #112) from purely-advisory to **severity-tiered gating**. Wire deferred-blocker filings into the trust-trail JSON so `/merge`'s trust-trail-evaluator can see them. Surface CI fixer refusals as user-visible halts instead of silent 3-iteration loop exhaustion. Net effect: a green `/review-pr` trail can no longer co-exist with unresolved blocker findings on the same HEAD.
