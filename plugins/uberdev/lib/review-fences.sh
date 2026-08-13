@@ -580,7 +580,20 @@ review_track_validated_fixer_head() {
   residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
   [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
   [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
-  [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
+  # ABSENT and CHANGED are the same rc and must not be the same sentence. Both
+  # are refusals -- a fixer whose starting point this process cannot vouch for is
+  # never promoted -- but one is a repository that moved under the review and the
+  # other is a record that never travelled, and the second spent a live run
+  # looking like the first (#479). The seed is written by the Phase 1 scope
+  # fence; if it is missing, that fence is where to look, not the history.
+  if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+    echo "error: MUTATED_BLOCKED — no reviewed-head record reached this fence (${RESEARCH_DIR_ABS:-<no research dir>}/reviewed-head.txt); the Phase 1 scope fence must seed it before any fixer is dispatched" >&2
+    return 76
+  fi
+  [ "$before" = "$VALIDATED_FIXER_HEAD_SHA" ] || {
+    echo "error: MUTATED_BLOCKED — fixer started from $before but the review stands on $VALIDATED_FIXER_HEAD_SHA" >&2
+    return 76
+  }
   case "$child_status" in
     APPLIED)
       [ "$before" != "$after" ] || return 77

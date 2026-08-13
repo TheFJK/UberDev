@@ -1330,6 +1330,22 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
      REVIEW_BASE_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || REVIEW_BASE_RUN_DIR=
    fi
    if [ -n "$REVIEW_BASE_RUN_DIR" ]; then
+     # THE SEED WRITER of the reviewed head (#479), in the fence that just bound
+     # it from the live PR. `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"`
+     # above is the initialization the whole fixer-promotion gate compares
+     # against -- and it was a shell variable in a fence that is dead by the time
+     # `review_promote_validated_fixer_outcome` runs, five fences and one
+     # Workflow relay later. `review_fleet_rehydrate` recovers the head from this
+     # record, but the ONLY other writer is the APPLIED arm of
+     # review_track_validated_fixer_head, so on a FIRST Phase 1 entry there was
+     # nothing to recover: the gate compared a real 40-hex head against the empty
+     # string, returned 76, and the controller reported MUTATED_BLOCKED on a
+     # fixer whose commit was exactly what it declared.
+     review_fleet_write_reviewed_head "$REVIEW_BASE_RUN_DIR/reviewed-head.txt" "$REVIEWED_HEAD_SHA" || {
+       echo "error: /uberdev:review-pr — bound PR #$PR_NUMBER's reviewed head ($REVIEWED_HEAD_SHA) but could not persist it to $REVIEW_BASE_RUN_DIR/reviewed-head.txt; refusing to dispatch fixers whose commits the promote fence would then refuse as unreviewed history." >&2
+       audit reviewed_head_uncarried data.reason=write_failed
+       return 2
+     }
      # A run dir that IS bound and still cannot take the carrier halts HERE, not
      # at the anchor: the base has already been resolved and the whole review is
      # about to be scoped to it, so a silent non-write would produce a trust
@@ -1819,11 +1835,18 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    process.
 
    Initialize `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` on every Phase 1
-   entry, including mandatory CI-fix re-entry. Call
+   entry, including mandatory CI-fix re-entry — and **record it** through
+   `review_fleet_write_reviewed_head` in that same scope fence, which is where
+   the initialization above happens. The variable alone reaches no other
+   process: this promotion runs in a fresh shell that recovers the head from
+   `reviewed-head.txt` via `review_fleet_rehydrate`, and a first Phase 1 entry
+   with no record on file makes the gate below compare a real head against the
+   empty string and refuse `MUTATED_BLOCKED` (#479). Call
    `review_track_validated_fixer_head` after each Phase 1 and Phase 2 fixer
-   return. Run the residue check even when result parsing fails; malformed
-   result plus residual state is still `MUTATED_BLOCKED`, never an ordinary
-   parser refusal. Any status/head/declaration/ancestry/residue mismatch is
+   return; its APPLIED arm re-records the head it advances to, so the seed and
+   every advance travel the same way. Run the residue check even when result
+   parsing fails; malformed result plus residual state is still
+   `MUTATED_BLOCKED`, never an ordinary parser refusal. Any status/head/declaration/ancestry/residue mismatch is
    `MUTATED_BLOCKED`: stop before publication and re-enter Phase 1 only after
    the unexpected history is resolved. A CI fixer never advances this variable
    directly; its successful push must take the mandatory Phase 1 re-entry path,
