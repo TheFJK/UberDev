@@ -376,6 +376,41 @@ _a4_parse() {
   A4_ERROR=""
   local _line
   while IFS= read -r _line; do
+    # STRIP THE TRAILING CR AT THE READER, which is the single choke point.
+    #
+    # TWO facts compose into this bug, and only the pair explains it.
+    #
+    #   1. NATIVE-WINDOWS python writes CRLF to stdout. Its TextIOWrapper
+    #      translates every "\n" to os.linesep, so `print("\n".join(out))` puts a
+    #      CR before EVERY newline. Neither `-u` nor PYTHONIOENCODING turns that
+    #      off — both are about buffering and codec, not newline translation;
+    #      only `sys.stdout.buffer` or newline="" bypasses it.
+    #   2. MSYS2 bash's `$(...)` strips the trailing CR along with the trailing
+    #      newline. So the LAST line of a captured report comes back CLEAN and
+    #      every line before it keeps its CR.
+    #
+    # Fact 2 is why this looked impossible to pin down. A single-line capture is
+    # unaffected (its only line is the last one), which is why sibling tests that
+    # capture one line of python output — finish-branch F14, review-pr's R45/R47
+    # field reports, dispatch-background's resolver rows — all pass on Windows.
+    # Only a MULTI-line report loses, and only on the fields that are not last.
+    #
+    # The measured proof, from the first Windows run of this file: `out.insert(3,
+    # "FACTORIES …")` puts FACTORIES last for a corpus with no BAN/UNPAIRED row,
+    # so A4.4d/e/g reported ONLY `FILES=…` as differing, while A4.4a/b/c/f — whose
+    # reports carry a trailing BAN/UNPAIRED line — reported FACTORIES *and* FILES.
+    # A uniform-CR story cannot produce that split; this one predicts it exactly.
+    #
+    # The failure is also invisible in the log: the runner splits its output on
+    # the embedded CR, so "(want 0)" lands on its own line and the row reads
+    # `FACTORIES=0` — a value identical to the one it was compared against.
+    #
+    # Fixed HERE and not at each comparison, nor in the detector's `print`: every
+    # A4_* global flows through this one loop, so a field added to the `case`
+    # below is clean automatically, and the fix holds for whatever interpreter
+    # UBERDEV_A4_PY_OVERRIDE is pointed at rather than only for this detector.
+    # A no-op on LF input.
+    _line="${_line%$'\r'}"
     [ -n "$_line" ] || continue
     case "$_line" in
       "$_A4_ERR_MARK"*) A4_ERROR="${_line#"$_A4_ERR_MARK"}" ;;
