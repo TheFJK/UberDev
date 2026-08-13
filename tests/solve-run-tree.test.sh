@@ -81,7 +81,7 @@ for contract_id,relative in tree['output_contracts'].items():
 # prompt and makes DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
 # `context_rounds` bounded a state that could not occur. Pinned by id so the
 # binding cannot be dropped silently.
-assert edges['sdd.task.implement']['output_contract']=='sdd-implementer-v1'
+assert edges['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 # #474 -- the fixer edges are format-bound the same way the reviewer edges are.
 # A fixer COMMITS before its result is parsed, so an unbound format is not a
 # retryable refusal like a reviewer's: it strands unattributed history and halts

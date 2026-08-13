@@ -414,6 +414,7 @@ Codex-side markers sit in those files and are bookkeeping, not new coupling.**
 | `trust-signal` | 13 | 5 | 4 | producer uses `!emit-literal` |
 | `risk-signal` | 4 | 11 | 4 | includes the JSON-declared policy site |
 | `goal-circuit-breaker-reason` | — | 9 | 2 | **not in the register** — found by applying this convention; the run-state allowlist carries `-solver_failed` |
+| `sdd-implementer-status` | — | 5 | 4 | **not in the register** (#517) — the SDD implementer's terminal status, declared at the child-facing output contract, the role card, the controller's branch block and the prompt template. Set equality here cannot see a member with **no handler**, nor the prompt-assembly defect that was #517's root cause — a contract-less edge whose assembled prompt ended with `lib/child-dispatch.sh`'s fallback directive. Both are held by `tests/sdd-child-inputs.test.sh` (`AC-14`, `AC-14a`) |
 
 The last row is the point of the exercise: the mechanism found a tenth member of
 the family on its first application. `GOAL_CIRCUIT_BREAKER_REASONS` declares nine

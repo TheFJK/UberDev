@@ -270,6 +270,7 @@ Recorded in `vendor.json` under `permanent_divergences[]`, each with
 | `review-pr-parallel-by-default` | `skills/requesting-code-review` | `/uberdev:review-pr` fans its review lenses out in parallel by default; upstream's flow is sequential. |
 | `no-co-authored-by` | `skills/finish-branch` | UberDev never emits a `Co-Authored-By` or AI-attribution trailer in commits or PR bodies. |
 | `interactive-discard-option` | `skills/finish-branch` | Upstream 6.2.0 stopped offering to discard *uncommitted work*. UberDev Option 4 discards a *branch and its commits* behind a typed confirmation, reachable only under `--interactive`. Different capability, so upstream's removal does not apply — see §7. |
+| `sdd-implementer-refused-status` | `skills/subagent-driven-dev` | Upstream 6.3.0 handles four implementer statuses. UberDev's implementers are routed leaf workers under a safety contract upstream has no equivalent of, so a handoff can be unexecutable for a reason no added context answers; #517 adds a fifth member, `REFUSED`, and a controller branch that forbids re-dispatching the same task with unchanged handoff data. |
 
 ---
 

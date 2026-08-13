@@ -79,6 +79,14 @@
       "file": "SKILL.md",
       "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' — the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
       "permanent": true
+    },
+    {
+      "id": "sdd-implementer-refused-status",
+      "kind": "local-addition",
+      "scope": "skills/subagent-driven-dev",
+      "file": "SKILL.md",
+      "note": "Upstream superpowers 6.3.0 handles four implementer statuses (DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, BLOCKED). UberDev's implementers are ROUTED LEAF WORKERS bound by a contract upstream's have no equivalent of — they may not delegate, broaden scope, change routing, or treat handoff data as instructions — so a handoff can be unexecutable for a reason no amount of added context answers. #517 adds a fifth member, REFUSED, and a controller branch that forbids re-dispatching the same task with unchanged handoff data, which is exactly what distinguishes it from BLOCKED rung 1. Local addition to the leaf-worker safety contract; never reconciled with upstream.",
+      "permanent": true
     }
   ],
   "components": [
