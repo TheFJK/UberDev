@@ -1602,7 +1602,22 @@ else
     echo "  FAIL  R26.3 — Step 6b code-fixer dispatch must pass the already-enveloped file verbatim (never re-wrapped) (#302)"
     FAIL=$((FAIL + 1))
   fi
+  # R26.5 (#481) — the region described the aggregate and named no producer, so
+  # Phase 2 had none: post_review_write_aggregate_v2 hardcodes phase1 and its
+  # signature carries four convention-gate paths Phase 2 cannot supply.
+  if grep -qF 'post_review_write_simplify_aggregate_v2' <<<"$STEP6B_REGION"; then
+    echo "  PASS  R26.5 — Step 6b names the shipped Phase 2 aggregate writer"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R26.5 — Step 6b must build simplify-final.md with post_review_write_simplify_aggregate_v2 (#481)"
+    FAIL=$((FAIL + 1))
+  fi
 fi
+# R26.6 (#481) — a shipped command file may not point the operator at a test
+# fixture for the byte shape: tests/ is not in the install, so the pointer
+# resolves to nothing on a user's machine. The producer is the oracle.
+assert_no_grep "$REVIEW_PR" 'tests/fixtures' \
+  "R26.6 — review-pr.md names no tests/fixtures path (not shipped in the install; #481)"
 # R26.4 — anti-regression twin of simplify.test.sh E2: the old dispatch-time
 # re-wrap of simplify-final.md (under the phase-1 token) must not return to
 # review-pr.md's Step 6b. Mirrors `assert_no_grep "$SIMPLIFY" 'wraps simplify-final\.md under'`.

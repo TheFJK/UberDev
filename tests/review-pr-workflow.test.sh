@@ -335,6 +335,7 @@ grep -Fq 'capture-bound-child' "$REVIEW_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$REVIEW_CMD" \
   && grep -Fq 'post_review_validated_evidence_complete' "$REVIEW_CMD" \
   && grep -Fq 'post_review_write_aggregate_v2' "$REVIEW_CMD" \
+  && grep -Fq 'post_review_write_simplify_aggregate_v2' "$REVIEW_CMD" \
   && pass "G10a review-pr runs the capture verbs for all four stages after the call" \
   || fail "G10a review-pr is missing a post-return capture verb"
 grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
@@ -342,6 +343,12 @@ grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$SIMPLIFY_CMD" \
   && pass "G10b simplify runs the capture verbs for all three stages after the call" \
   || fail "G10b simplify is missing a post-return capture verb"
+# G10d (#481) — capturing the three lens children proved they ran; nothing then
+# turned them into `simplify-final.md`, and Phase 2 stopped there. Both producer
+# sites must name the writer.
+grep -Fq 'post_review_write_simplify_aggregate_v2' "$SIMPLIFY_CMD" \
+  && pass "G10d simplify aggregates the captured lens wave into the phase2 document" \
+  || fail "G10d simplify captures three lenses and never builds the phase2 aggregate"
 grep -Fq 'validate-review-outcome' "$REVIEW_CMD" \
   && grep -Fq 'validate-persistence-result' "$REVIEW_CMD" \
   && grep -Fq 'validate-standalone-outcome' "$SIMPLIFY_CMD" \
@@ -794,6 +801,25 @@ grep -q 'function fixerOutputContract()' "$WORKFLOW" \
 grep -q 'isSafeAbsPath(fixerContractPathAbs)' "$WORKFLOW" \
   && pass "B[fixer-contract] the fix stage refuses an unusable contract path before dispatch" \
   || fail "B[fixer-contract] the fix stage does not guard fixerContractPathAbs"
+# B[lens-contract] (#481) — lensPrompt used to say only "follow the agent
+# instructions", while boundChildProtocol goes on to say "write your full
+# report". A whole-file grammar pinned ONLY in the agent file is contradicted by
+# the prompt the lens actually reads, which is how the three lenses drifted into
+# three document shapes. Phase 1 resolves that contradiction with an explicit
+# FORMAT-scoped override; Phase 2 must too.
+B_LENS_BODY="$(awk '/^function lensPrompt\(/{a=1} a{print} a&&/^}$/{exit}' "$WORKFLOW")"
+grep -q 'lines.push(phase2OutputContract(' <<<"$B_LENS_BODY" \
+  && pass "B[lens-contract] lensPrompt pushes an explicit output contract" \
+  || fail "B[lens-contract] lensPrompt does not push a Phase 2 output contract"
+B_LENS_CONTRACT="$(awk '/^function phase2OutputContract\(lens\) \{/{a=1} a{print} a&&/^}$/{exit}' "$WORKFLOW")"
+for B_LENS_RULE in 'entire contents of the result file' 'findings:' 'blocker' 'suggestion' 'findings: \[\]'; do
+  grep -q "$B_LENS_RULE" <<<"$B_LENS_CONTRACT" \
+    && pass "B[lens-contract] the Phase 2 contract states '$B_LENS_RULE'" \
+    || fail "B[lens-contract] the Phase 2 contract omits '$B_LENS_RULE'"
+done
+grep -q 'output FORMAT' <<<"$B_LENS_CONTRACT" \
+  && pass "B[lens-contract] the Phase 2 override is scoped to FORMAT, not to the secret-leak rule" \
+  || fail "B[lens-contract] the Phase 2 override must scope itself to FORMAT explicitly"
 
 assert_stage lens-stage-simplify-cmd "$SIMPLIFY_CMD" 'stage=simplify' simplify simplify 3 review-fleet-simplify.launched
 assert_stage lens-stage-review-cmd "$REVIEW_CMD" 'stage=simplify' review-pr simplify 3 review-fleet-simplify.launched
@@ -2285,7 +2311,12 @@ l_anchor() {  # NAME TOKEN
     || L_ANCHOR_MISS="$L_ANCHOR_MISS $1(body-too-short)"
 }
 l_anchor scope   'review_fleet_write_review_base'
-l_anchor capture 'post_review_validated_evidence_complete'
+# Re-anchored off `post_review_validated_evidence_complete` (#481): Phase 2 now
+# calls the same builder from its OWN fence, so that token names two fences and
+# `l_extract` would refuse both. This token names the Phase 1 validated-ledger
+# path, sits inside the same 4w.2 fence, and predates the change — so every
+# L-row below still reads byte-identical bytes.
+l_anchor capture 'review-fleet-review.validated'
 l_anchor gate    'project-verification-claims'
 l_anchor publish 'review-fleet-verify-opinions-iter'
 

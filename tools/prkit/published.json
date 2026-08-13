@@ -179,6 +179,7 @@
     "agents/ci-failure-classifier.md",
     "agents/code-fixer.md",
     "agents/code-reviewer.md",
+    "agents/code-simplifier.md",
     "agents/findings-to-issues.md",
     "commands/review-pr.md",
     "commands/simplify.md",

@@ -1664,6 +1664,315 @@ assert "premature publication readback EOF" in validator
 assert "publication readback overflow" in validator
 PY
 
+# == Phase 2 lens result validation (#481) ==
+# The three simplify lenses drift in shape -- ```yaml versus an untagged fence,
+# a `findings:` mapping versus a bare sequence -- and the aggregate writer must
+# never see that drift. It dies HERE, at one boundary, and what gets published
+# is the DERIVED document, not the child's file. The printed digest therefore
+# names the published bytes: post_review_validated_evidence_complete re-reads
+# validated-result.md and requires sha256(on-disk) == the ledger digest, so a
+# normalising validator that printed sha256(input) would fail every wave.
+PHASE2_LENS_DIR="$TMP/phase2-lens"
+mkdir -p "$PHASE2_LENS_DIR"
+PHASE2_LENS_EDGE=review_pr.simplify.reuse
+
+phase2_lens_accept() {
+  local label="$1" source="$2" published="$3" digest=
+  digest="$(uberdev_child_validate_phase2_lens_result "$source" "$PHASE2_LENS_EDGE" "$published")" || {
+    echo "phase2 lens validator refused an accepted shape: $label" >&2; exit 1
+  }
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "phase2 lens validator emitted a non-sha256 digest: $label" >&2; exit 1
+  }
+  [ -f "$published" ] || {
+    echo "phase2 lens validator published nothing: $label" >&2; exit 1
+  }
+  [ "$digest" = "$(file_sha256 "$published")" ] || {
+    echo "phase2 lens digest names bytes other than the published ones: $label" >&2; exit 1
+  }
+  [ "$(stat -c '%a' "$published" 2>/dev/null || stat -f '%Lp' "$published")" = 400 ] || {
+    echo "phase2 lens validator left the published artifact writable: $label" >&2; exit 1
+  }
+}
+
+phase2_lens_refuse() {
+  local label="$1" source="$2" expected="$3" edge="${4:-$PHASE2_LENS_EDGE}"
+  local published="$PHASE2_LENS_DIR/refused-$label.md" rc=0
+  rm -f "$published"
+  set +e
+  uberdev_child_validate_phase2_lens_result "$source" "$edge" "$published" \
+    >"$PHASE2_LENS_DIR/refused-$label.stdout" 2>"$PHASE2_LENS_DIR/refused-$label.stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || {
+    echo "phase2 lens validator accepted $label" >&2; exit 1
+  }
+  grep -qxF "uberdev_child_phase2_lens_failure class=$expected" \
+    "$PHASE2_LENS_DIR/refused-$label.stderr" || {
+    echo "phase2 lens refusal of $label is not classed $expected" >&2
+    cat "$PHASE2_LENS_DIR/refused-$label.stderr" >&2
+    exit 1
+  }
+  [ ! -s "$PHASE2_LENS_DIR/refused-$label.stdout" ] || {
+    echo "phase2 lens refusal of $label still printed a digest" >&2; exit 1
+  }
+  [ ! -e "$published" ] || {
+    echo "phase2 lens refusal of $label left an artifact behind" >&2; exit 1
+  }
+}
+
+# L1 — the documented shape: ```yaml fence around a `findings:` mapping.
+cat >"$PHASE2_LENS_DIR/tagged-mapping.md" <<'EOF_LENS'
+```yaml
+findings:
+  - location: src/api.ts:130
+    severity: blocker
+    lens: Reuse
+    summary: narrow the handler return
+    detail: narrow through the existing response abstraction
+  - location: src/dup.ts:3
+    severity: suggestion
+    lens: Reuse
+    summary: extract the duplicate implementation
+    detail: use the existing shared helper
+```
+EOF_LENS
+phase2_lens_accept L1 "$PHASE2_LENS_DIR/tagged-mapping.md" "$PHASE2_LENS_DIR/L1.md"
+
+# The published document is the ONE normalised shape the writer parses. Pinned
+# byte-for-byte here so a later "harmless" reformat cannot quietly reintroduce
+# the drift this boundary exists to kill. `lens` is deliberately absent: it has
+# been checked against the controller's edge, and keeping it would invite a
+# later reader to trust the child's claim over the controller's knowledge.
+cat >"$PHASE2_LENS_DIR/L1.expected" <<'EOF_LENS'
+```yaml
+findings:
+  - severity: blocker
+    location: "src/api.ts:130"
+    summary: "narrow the handler return"
+    detail: "narrow through the existing response abstraction"
+  - severity: suggestion
+    location: "src/dup.ts:3"
+    summary: "extract the duplicate implementation"
+    detail: "use the existing shared helper"
+```
+EOF_LENS
+cmp -s "$PHASE2_LENS_DIR/L1.md" "$PHASE2_LENS_DIR/L1.expected" || {
+  echo 'phase2 lens normalisation drifted from the pinned published shape' >&2
+  diff -u "$PHASE2_LENS_DIR/L1.expected" "$PHASE2_LENS_DIR/L1.md" >&2 || :
+  exit 1
+}
+
+# L2 — untagged fence, same mapping.
+cat >"$PHASE2_LENS_DIR/untagged-mapping.md" <<'EOF_LENS'
+```
+findings:
+  - location: src/api.ts:130
+    severity: blocker
+    lens: Reuse
+    summary: narrow the handler return
+    detail: narrow through the existing response abstraction
+  - location: src/dup.ts:3
+    severity: suggestion
+    lens: Reuse
+    summary: extract the duplicate implementation
+    detail: use the existing shared helper
+```
+EOF_LENS
+phase2_lens_accept L2 "$PHASE2_LENS_DIR/untagged-mapping.md" "$PHASE2_LENS_DIR/L2.md"
+
+# L3 — untagged fence around a BARE top-level sequence: the efficiency lens's
+# observed shape on WAGYAI PR #657.
+cat >"$PHASE2_LENS_DIR/untagged-sequence.md" <<'EOF_LENS'
+```
+- location: src/api.ts:130
+  severity: blocker
+  lens: Reuse
+  summary: narrow the handler return
+  detail: narrow through the existing response abstraction
+- location: src/dup.ts:3
+  severity: suggestion
+  lens: Reuse
+  summary: extract the duplicate implementation
+  detail: use the existing shared helper
+```
+EOF_LENS
+phase2_lens_accept L3 "$PHASE2_LENS_DIR/untagged-sequence.md" "$PHASE2_LENS_DIR/L3.md"
+
+# L4 — both empty spellings.
+printf '%s\n' '```yaml' 'findings: []' '```' >"$PHASE2_LENS_DIR/empty-mapping.md"
+printf '%s\n' '```' '[]' '```' >"$PHASE2_LENS_DIR/empty-sequence.md"
+phase2_lens_accept L4a "$PHASE2_LENS_DIR/empty-mapping.md" "$PHASE2_LENS_DIR/L4a.md"
+phase2_lens_accept L4b "$PHASE2_LENS_DIR/empty-sequence.md" "$PHASE2_LENS_DIR/L4b.md"
+printf '%s\n' '```yaml' 'findings: []' '```' >"$PHASE2_LENS_DIR/L4.expected"
+cmp -s "$PHASE2_LENS_DIR/L4a.md" "$PHASE2_LENS_DIR/L4.expected"
+cmp -s "$PHASE2_LENS_DIR/L4b.md" "$PHASE2_LENS_DIR/L4.expected"
+
+# L5 — the whole point: three drifted inputs, one byte-identical document.
+cmp -s "$PHASE2_LENS_DIR/L1.md" "$PHASE2_LENS_DIR/L2.md" || {
+  echo 'phase2 lens normalisation is fence-tag dependent' >&2; exit 1
+}
+cmp -s "$PHASE2_LENS_DIR/L1.md" "$PHASE2_LENS_DIR/L3.md" || {
+  echo 'phase2 lens normalisation is mapping/sequence dependent' >&2; exit 1
+}
+
+# L6..L14 — every refusal is classed, non-zero, and leaves nothing on disk.
+{ printf '%s\n' 'Here is my review:'; cat "$PHASE2_LENS_DIR/tagged-mapping.md"; } \
+  >"$PHASE2_LENS_DIR/prose-before.md"
+phase2_lens_refuse L6 "$PHASE2_LENS_DIR/prose-before.md" invalid-document
+{ cat "$PHASE2_LENS_DIR/tagged-mapping.md"; printf '%s\n' 'Let me know if you want more.'; } \
+  >"$PHASE2_LENS_DIR/prose-after.md"
+phase2_lens_refuse L7 "$PHASE2_LENS_DIR/prose-after.md" invalid-document
+{ cat "$PHASE2_LENS_DIR/tagged-mapping.md"; cat "$PHASE2_LENS_DIR/empty-mapping.md"; } \
+  >"$PHASE2_LENS_DIR/two-fences.md"
+phase2_lens_refuse L8 "$PHASE2_LENS_DIR/two-fences.md" invalid-document
+grep -v '^    lens:' "$PHASE2_LENS_DIR/tagged-mapping.md" >"$PHASE2_LENS_DIR/missing-lens.md"
+phase2_lens_refuse L9 "$PHASE2_LENS_DIR/missing-lens.md" invalid-document
+grep -v '^    detail:' "$PHASE2_LENS_DIR/tagged-mapping.md" >"$PHASE2_LENS_DIR/missing-detail.md"
+phase2_lens_refuse L10 "$PHASE2_LENS_DIR/missing-detail.md" invalid-document
+# The edge is the controller's knowledge; the `lens` field is the child's claim.
+# A disagreement is reported, never silently re-mapped onto the edge.
+sed 's/^    lens: Reuse$/    lens: Quality/' "$PHASE2_LENS_DIR/tagged-mapping.md" \
+  >"$PHASE2_LENS_DIR/wrong-lens.md"
+phase2_lens_refuse L11 "$PHASE2_LENS_DIR/wrong-lens.md" lens-mismatch
+sed 's/^    severity: blocker$/    severity: critical/' "$PHASE2_LENS_DIR/tagged-mapping.md" \
+  >"$PHASE2_LENS_DIR/wrong-severity.md"
+phase2_lens_refuse L12 "$PHASE2_LENS_DIR/wrong-severity.md" invalid-severity
+phase2_lens_location_case() {
+  local label="$1" location="$2"
+  {
+    printf '%s\n' '```yaml' 'findings:'
+    printf '  - location: %s\n' "$location"
+    printf '%s\n' '    severity: blocker' '    lens: Reuse' \
+      '    summary: bounded summary' '    detail: bounded detail' '```'
+  } >"$PHASE2_LENS_DIR/location-$label.md"
+  phase2_lens_refuse "$label" "$PHASE2_LENS_DIR/location-$label.md" invalid-location
+}
+phase2_lens_location_case L13a '/etc/passwd:1'
+phase2_lens_location_case L13b '../x.ts:1'
+phase2_lens_location_case L13c 'C:\x.ts:1'
+phase2_lens_location_case L13d '.git/config:1'
+# L14 — ragged indentation. The indent is derived once from the first marker and
+# is exact from then on, so a second record that drifts a column is refused
+# rather than silently re-anchored.
+cat >"$PHASE2_LENS_DIR/ragged.md" <<'EOF_LENS'
+```yaml
+findings:
+  - location: src/api.ts:130
+    severity: blocker
+    lens: Reuse
+    summary: narrow the handler return
+    detail: narrow through the existing response abstraction
+    - location: src/dup.ts:3
+      severity: suggestion
+      lens: Reuse
+      summary: extract the duplicate implementation
+      detail: use the existing shared helper
+```
+EOF_LENS
+phase2_lens_refuse L14 "$PHASE2_LENS_DIR/ragged.md" invalid-document
+
+# L15 — one lens, one observation per location. Merging ACROSS lenses is the
+# writer's job; a location repeated WITHIN one lens is a malformed contribution.
+cat >"$PHASE2_LENS_DIR/duplicate-location.md" <<'EOF_LENS'
+```yaml
+findings:
+  - location: src/api.ts:130
+    severity: blocker
+    lens: Reuse
+    summary: first claim
+    detail: first rationale
+  - location: src/api.ts:130
+    severity: suggestion
+    lens: Reuse
+    summary: second claim on one location
+    detail: second rationale
+```
+EOF_LENS
+phase2_lens_refuse L15 "$PHASE2_LENS_DIR/duplicate-location.md" duplicate-location
+
+# L16 — the whole chain: three drifted lens waves, normalised at this boundary
+# and aggregated by post_review_write_simplify_aggregate_v2, must produce ONE
+# document -- and it must be the committed byte oracle. This is the composition
+# tests/post-impl-review.test.sh cannot run, because the validator's publication
+# block has never been proven on Git Bash and that fixture runs on Windows too.
+. "$ROOT/plugins/uberdev/lib/review-aggregate.sh"
+PHASE2_WAVE_DIR="$TMP/phase2-wave"
+mkdir -p "$PHASE2_WAVE_DIR"
+UBERDEV_REVIEW_PLUGIN_ROOT="$ROOT/plugins/uberdev"
+# (a) every lens tagged + mapping; (b) every lens untagged + mapping;
+# (c) the observed WAGYAI PR #657 mix: two tagged mappings and one untagged
+#     bare sequence.
+python3 -I -B - "$PHASE2_WAVE_DIR" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+lenses=[
+ ("reuse","Reuse",[("blocker","src/api.ts:130","narrow the handler return",
+                    "narrow through the existing response abstraction"),
+                   ("suggestion","src/dup.ts:3",
+                    "Extract the duplicate implementation to the existing helper",
+                    "Use the existing shared helper without changing behavior.")]),
+ ("quality","Quality",[("blocker","src/api.ts:130","replace the unconstrained return",
+                        "make the return contract explicit")]),
+ ("efficiency","Efficiency",[("blocker","src/loop.ts:12",
+                              "Convert the quadratic inner lookup to a map",
+                              "Build the lookup once before entering the loop.")]),
+]
+def document(fence,shape,lens,rows):
+ lines=[fence]
+ if shape=="mapping": lines.append("findings:"); pad="  "
+ else: pad=""
+ for severity,location,summary,detail in rows:
+  lines.append(f"{pad}- location: {json.dumps(location)}")
+  lines.append(f"{pad}  severity: {severity}")
+  lines.append(f"{pad}  lens: {lens}")
+  lines.append(f"{pad}  summary: {json.dumps(summary)}")
+  lines.append(f"{pad}  detail: {json.dumps(detail)}")
+ lines.append("```")
+ return "\n".join(lines)+"\n"
+waves={
+ "a":[("```yaml","mapping")]*3,
+ "b":[("```","mapping")]*3,
+ "c":[("```yaml","mapping"),("```yaml","mapping"),("```","sequence")],
+}
+for wave,shapes in waves.items():
+ for (fence,shape),(name,lens,rows) in zip(shapes,lenses):
+  (root/f"{wave}-{name}.md").write_text(document(fence,shape,lens,rows),encoding="utf-8",newline="\n")
+PY
+for PHASE2_WAVE in a b c; do
+  PHASE2_ROW_INDEX=0
+  : >"$PHASE2_WAVE_DIR/$PHASE2_WAVE.rows"
+  for PHASE2_LENS in reuse quality efficiency; do
+    PHASE2_ROW_INDEX=$((PHASE2_ROW_INDEX + 1))
+    PHASE2_ROW_DIGEST="$(uberdev_child_validate_phase2_lens_result \
+      "$PHASE2_WAVE_DIR/$PHASE2_WAVE-$PHASE2_LENS.md" \
+      "review_pr.simplify.$PHASE2_LENS" \
+      "$PHASE2_WAVE_DIR/$PHASE2_WAVE-$PHASE2_LENS.validated.md")"
+    jq -cn --arg edge "review_pr.simplify.$PHASE2_LENS" \
+      --argjson index "$PHASE2_ROW_INDEX" \
+      --arg instance "wave-$PHASE2_WAVE-$PHASE2_ROW_INDEX" \
+      --arg sha256 "$PHASE2_ROW_DIGEST" \
+      --rawfile content "$PHASE2_WAVE_DIR/$PHASE2_WAVE-$PHASE2_LENS.validated.md" \
+      '{content:$content,edge:$edge,index:$index,instance:$instance,sha256:$sha256}' \
+      >>"$PHASE2_WAVE_DIR/$PHASE2_WAVE.rows"
+  done
+  jq -cs '{ledger_sha256:"'"$(printf 'c%.0s' $(seq 64))"'",rows:.,schema_version:1}' \
+    <"$PHASE2_WAVE_DIR/$PHASE2_WAVE.rows" >"$PHASE2_WAVE_DIR/$PHASE2_WAVE.input.json"
+  post_review_write_simplify_aggregate_v2 \
+    "$(cat "$PHASE2_WAVE_DIR/$PHASE2_WAVE.input.json")" \
+    "$PHASE2_WAVE_DIR/$PHASE2_WAVE.aggregate.md"
+done
+git -C "$ROOT" cat-file blob \
+  'HEAD:tests/fixtures/findings-to-issues/simplify-final.sample.md' \
+  >"$PHASE2_WAVE_DIR/oracle.md"
+for PHASE2_WAVE in a b c; do
+  cmp -s "$PHASE2_WAVE_DIR/$PHASE2_WAVE.aggregate.md" "$PHASE2_WAVE_DIR/oracle.md" || {
+    echo "phase2 wave $PHASE2_WAVE did not normalise to the committed simplify byte oracle" >&2
+    diff -u "$PHASE2_WAVE_DIR/oracle.md" "$PHASE2_WAVE_DIR/$PHASE2_WAVE.aggregate.md" >&2 || :
+    exit 1
+  }
+done
+
 # Mutating review edges execute against the carrier-selected caller repository
 # identity and workspace binding. Reviewers remain isolated, and a different
 # working_dir is rejected before dispatch.
@@ -1882,7 +2191,8 @@ roster_must_block_aggregation "$TMP/roster-truncated-repair.records" 2
 for EVIDENCE_FUNCTION in \
   post_review_validated_evidence_complete \
   post_review_capture_aggregation_inputs \
-  post_review_write_aggregate_v2; do
+  post_review_write_aggregate_v2 \
+  post_review_write_simplify_aggregate_v2; do
   if ! declare -F "$EVIDENCE_FUNCTION" >/dev/null; then
     echo "review-child-handoff: lib/review-aggregate.sh did not define $EVIDENCE_FUNCTION" >&2
     exit 1

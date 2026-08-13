@@ -129,28 +129,44 @@ Review the same changes for efficiency:
 
 ## Return contract
 
-Emit findings as a structured block. Each finding is one record with these fields, in this order:
+The **entire contents of your result file** are exactly one fenced YAML
+document under a `findings:` key. Nothing before the opening fence, nothing
+after the closing one, no second fence, no preamble and no sign-off — the
+controller reads the whole file, not the first fence it can find in it, and a
+sentence of framing prose is the difference between a validated lens and a
+blocked Phase 2.
 
+Each finding is one record with these fields, in this order:
+
+````
+```yaml
+findings:
+  - location: <file>:<line>
+    severity: blocker | suggestion
+    lens: Reuse | Quality | Efficiency
+    summary: <one-line problem statement, no source quoting>
+    detail: <prose rationale + suggested direction, your own words>
 ```
-- location: <file>:<line>
-  severity: blocker | suggestion
-  lens: Reuse | Quality | Efficiency
-  summary: <one-line problem statement, no source quoting>
-  detail: <prose rationale + suggested direction, your own words>
-```
+````
 
 `severity` uses the canonical two-member aggregate enum: `blocker` = must-fix
-before merge, `suggestion` = nice-to-have. The `lens` field is mandatory so the
-trusted aggregator can dedup by `file:line` and map it to the exact Phase 2
-source edge (`review_pr.simplify.reuse`, `.quality`, or `.efficiency`).
+before merge, `suggestion` = nice-to-have. The `lens` field is mandatory and
+must name THIS invocation's lens: the controller already knows which edge
+dispatched you, so a `lens` that disagrees is refused as `lens-mismatch`
+rather than quietly re-mapped onto the edge.
 
 This YAML is an upstream contributor result, not code-fixer input. The
 aggregator converts it to the one canonical compact sorted JSON schema v2:
 `location` becomes `scope: {operation: modify_existing, path, line}`, the lens
 becomes `source_edges`, and summary/detail remain context-only prose. Markdown
 tables and direct YAML fallbacks are not emitted to code-fixer. If you have zero
-findings, return an empty list — `findings: []` is valid and you must not invent
-findings to fill the report.
+findings, the whole document is exactly `findings: []` inside the same fence —
+that is a valid, complete lens result, and you must not invent findings to fill
+the report.
+
+One record per `<file>:<line>`. Two lenses may land on the same location and
+the aggregator merges them; the same lens claiming one location twice is a
+malformed result and is refused.
 
 ## Output Rules — secret-leak prevention
 
