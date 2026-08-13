@@ -2594,6 +2594,25 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
    This step is NOT gated by `SIMPLIFY_PHASE`, `CI_FIX_PHASE`, or
    `DEFER_ISSUES_PHASE` — it runs on every path that reaches Phase 2.5/Phase 3.
 
+   **Post-push propagation settle (#482).** `git push` exiting 0 and `ls-remote`
+   agreeing prove the object is on the remote ref; GitHub's API view of that same
+   ref is a separate, eventually-consistent projection that keeps serving the
+   pre-push oid for seconds afterwards. The gate therefore re-probes the live PR
+   head — `PUBLISH_SETTLE_ATTEMPTS = 5` at `PUBLISH_SETTLE_INTERVAL_SEC = 4`, the
+   same class of window as 6c.1's `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` —
+   and it re-probes only: the push is never repeated, because a second push
+   spawns a duplicate CI check set (#302/#309). A head that is neither the
+   published sha nor the pre-push sha is a concurrent writer, not a delay, and is
+   refused on the first answer. The identity projection itself retries a gh call
+   that never answered (`PR_IDENTITY_ATTEMPTS = 3` at
+   `PR_IDENTITY_INTERVAL_SEC = 3`) and returns **rc 80** when GitHub stayed
+   unreachable — a claim about reachability, distinct from the **rc 79** a
+   disagreeing head earns. Both still halt this step (an unproven publication is
+   never promoted), but when the post-push proof is the one that failed the gate
+   says on stderr that the push itself landed and that re-running `/review-pr`
+   republishes idempotently, so the run is never told to reset or force-push a
+   branch the remote has already moved.
+
 6b.0. **Phase 1 verification gate** (RFC 0017 / #431)
 
     Between the Phase 1 disposition publish and the Phase 2.5 filing gate, every

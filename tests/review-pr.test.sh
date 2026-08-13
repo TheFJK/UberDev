@@ -664,7 +664,14 @@ assert_grep "$REVIEW_PR" \
 ANCHOR_PUSH_FIXTURE="$(mktemp)"
 # The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
 # the column-0 terminator review_fence_fn uses is load-bearing here.
-review_fence_fn review_publish_same_repo_pr_head >"$ANCHOR_PUSH_FIXTURE"
+# Three definitions since #482: the projection and the post-push settle loop are
+# the gate's own helpers, and a fixture holding only the gate would fail with
+# command-not-found rather than with the verdict this row is about.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$ANCHOR_PUSH_FIXTURE"
 ANCHOR_PUSH_LOG="$(mktemp)"
 ANCHOR_GH_STATE="$(mktemp)"
 if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
@@ -798,7 +805,14 @@ else
 REAL_GH_FIXTURE="$(mktemp)"
 # The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
 # the column-0 terminator review_fence_fn uses is load-bearing here.
-review_fence_fn review_publish_same_repo_pr_head >"$REAL_GH_FIXTURE"
+# The projection this row exists to exercise moved into `review_pr_head_identity`
+# with #482 — same filter, same call, one definition instead of two — so the
+# fixture takes the helper as well. The gh stub below still intercepts the call.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$REAL_GH_FIXTURE"
 REAL_GH_PUSH_LOG="$(mktemp)"
 REAL_GH_STATE="$(mktemp)"
 if [ -s "$REAL_GH_FIXTURE" ] && \
@@ -916,6 +930,164 @@ else
 fi
 rm -f "$REAL_GH_FIXTURE" "$REAL_GH_PUSH_LOG" "$REAL_GH_STATE"
 fi
+
+# R9.18 (#482) — the post-push proofs settle through GitHub's propagation
+# window, and a gh that never answered is not reported as a head that disagrees.
+#
+# Found on TheFJK/WAGYAI PR #657 (uberdev 0.45.13): a
+# `net/http: TLS handshake timeout` forced a retry, the push then LANDED, and
+# the gate's post-push re-projection read the PRE-push oid out of GitHub's
+# eventually-consistent view of the ref and refused. Remote ref, live PR head
+# and local HEAD were all the published sha minutes later, and an idempotent
+# re-run reported `Everything up-to-date` — every proof the gate makes was
+# satisfiable. The operator, meanwhile, was told publication had failed about a
+# branch the remote had already moved, which invites a reset or a force-push:
+# the two recoveries that would actually destroy the work.
+#
+# `git push` returning 0 and `ls-remote` agreeing prove the object is ON the
+# ref. GitHub's API view of that same ref is a SEPARATE projection with its own
+# lag, so reading it once, immediately, is a race — the same class the 6c.1
+# PROBE arm already settles with CI_SETTLE_AGE_SEC / CI_SETTLE_REPROBES.
+#
+# Four properties, each with an anti-vacuity partner so none can be satisfied by
+# deleting a conjunct:
+#   (1) a live head still serving the PRE-PUSH sha is re-probed, not refused;
+#   (2) but the settle window is BOUNDED — a head that never catches up is still
+#       a refusal, and the run is told the push itself landed;
+#   (3) a THIRD object on the branch is refused IMMEDIATELY, with no settle at
+#       all: a concurrent writer owns the ref and waiting cannot make that agree;
+#   (4) a gh that never answered returns 80, NOT 79 — "the identity is unknown"
+#       is not "the identity disagrees" — and a transport blip on the pre-push
+#       probe is ridden out instead of ending the run.
+SETTLE_FIXTURE="$(mktemp)"
+# Three definitions, not one: the projection and the settle loop are helpers of
+# the gate, and a fixture missing either would fail with command-not-found —
+# which is a real failure, but not the one this row is about.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$SETTLE_FIXTURE"
+SETTLE_PUSH_LOG="$(mktemp)"
+SETTLE_SLEEP_LOG="$(mktemp)"
+SETTLE_STATE="$(mktemp)"
+SETTLE_POST_STATE="$(mktemp)"
+SETTLE_STDERR="$(mktemp)"
+if [ -s "$SETTLE_FIXTURE" ] && \
+  SETTLE_PUSH_LOG="$SETTLE_PUSH_LOG" SETTLE_SLEEP_LOG="$SETTLE_SLEEP_LOG" \
+  SETTLE_STATE="$SETTLE_STATE" SETTLE_POST_STATE="$SETTLE_POST_STATE" \
+  SETTLE_STDERR="$SETTLE_STDERR" bash -c '
+    # `set -u` for the same reason R9.17 carries it: `local x` leaves x UNSET in
+    # bash and EMPTY in zsh, and these helpers run under zsh at runtime while
+    # the suites drive them under bash.
+    set -u
+    . "$1"
+    PRE_SHA="$(printf a%.0s {1..40})"
+    PUB_SHA="$(printf b%.0s {1..40})"
+    OTHER_SHA="$(printf c%.0s {1..40})"
+    reset_fixture() {
+      printf "0\n" >"$SETTLE_STATE"
+      printf "0\n" >"$SETTLE_POST_STATE"
+      : >"$SETTLE_PUSH_LOG"
+      : >"$SETTLE_SLEEP_LOG"
+      : >"$SETTLE_STDERR"
+      unset GH_FAIL_CALLS POST_STALE_CALLS POST_STALE_SHA
+    }
+    # The waits ARE the fix, so they are observed rather than endured: every
+    # settle sleep is recorded and counted, which is also what proves the loop
+    # is bounded rather than merely slow.
+    sleep() { printf "%s\n" "${1:-}" >>"$SETTLE_SLEEP_LOG"; }
+    gh() {
+      [ "$1" = pr ] && [ "$2" = view ] || return 90
+      total="$(cat "$SETTLE_STATE")"; total=$((total + 1)); printf "%s\n" "$total" >"$SETTLE_STATE"
+      # A gh that NEVER ANSWERED: non-zero rc and no stdout. That is what a TLS
+      # handshake timeout looks like at the only seam the gate can observe.
+      [ "$total" -gt "${GH_FAIL_CALLS:-0}" ] || return 1
+      if [ ! -s "$SETTLE_PUSH_LOG" ]; then
+        oid="$PRE_SHA"
+      else
+        post="$(cat "$SETTLE_POST_STATE")"; post=$((post + 1)); printf "%s\n" "$post" >"$SETTLE_POST_STATE"
+        if [ "$post" -le "${POST_STALE_CALLS:-0}" ]; then oid="${POST_STALE_SHA:-$PRE_SHA}"; else oid="$PUB_SHA"; fi
+      fi
+      printf "%s\n%s\n%s\n%s\n" "$oid" feature/settle false owner/repo
+    }
+    python3() { printf "{\"status\":\"clean\"}\n"; }
+    git() {
+      [ "$1" = -C ] && [ "$2" = /repo ] || return 91
+      case "$3" in
+        rev-parse)        printf "%s\n" "$PUB_SHA" ;;
+        check-ref-format) [ "$4" = --branch ] && [ "$5" = feature/settle ] ;;
+        push)             printf "%s\n" "$5" >>"$SETTLE_PUSH_LOG" ;;
+        ls-remote)        printf "%s\trefs/heads/feature/settle\n" "$PUB_SHA" ;;
+        *) return 93 ;;
+      esac
+    }
+    # (1) Two stale post-push answers, then the propagated one: the gate
+    #     PUBLISHES. Pre-fix this returned 79 on the very first stale answer.
+    reset_fixture
+    POST_STALE_CALLS=2
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 41
+    # ONE push. The settle re-probes the API; it never re-pushes, because a
+    # second push would spawn a duplicate CI check set (#302/#309).
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 42
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 2 ] || exit 43
+    # (2) ANTI-VACUITY: the window is bounded. A head that never catches up is
+    #     still a refusal — with the honest rc (79, a disagreement) and a note
+    #     that the push itself landed, so nobody resets the branch.
+    reset_fixture
+    POST_STALE_CALLS=99
+    SETTLE_RC=0
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>"$SETTLE_STDERR" || SETTLE_RC=$?
+    [ "$SETTLE_RC" -eq 79 ] || exit 44
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 45
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 4 ] || exit 46
+    grep -qF "the push itself landed" "$SETTLE_STDERR" || exit 47
+    # (3) ANTI-VACUITY: a third object is a DISAGREEMENT, not a delay. Refused
+    #     on the first answer, with no settle sleep at all.
+    reset_fixture
+    POST_STALE_CALLS=99
+    POST_STALE_SHA="$OTHER_SHA"
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>/dev/null && exit 48
+    [ ! -s "$SETTLE_SLEEP_LOG" ] || exit 49
+    # (4) A transport blip on the PRE-push probe is ridden out: two gh calls
+    #     that never answered, then a real one, and the gate publishes.
+    reset_fixture
+    GH_FAIL_CALLS=2
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 50
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 51
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 2 ] || exit 52
+    # (5) ANTI-VACUITY: the retry is BOUNDED too, and an unreachable GitHub is
+    #     reported as rc 80 — a distinct code from the 79 a disagreeing head
+    #     earns — with nothing pushed, because the pre-push identity is unknown.
+    reset_fixture
+    GH_FAIL_CALLS=99
+    SETTLE_RC=0
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>/dev/null || SETTLE_RC=$?
+    [ "$SETTLE_RC" -eq 80 ] || exit 53
+    [ ! -s "$SETTLE_PUSH_LOG" ] || exit 54
+    exit 0
+  ' _ "$SETTLE_FIXTURE"
+then
+  echo "  PASS  R9.18 (#482) — post-push proofs settle through the propagation window; unreachable gh is rc 80, not a disagreeing head"
+  PASS=$((PASS + 1))
+else
+  R918_RC=$?
+  echo "  FAIL  R9.18 (#482) — publication gate races GitHub's propagation window or conflates an unreachable gh with a disagreeing head (inner rc=$R918_RC; 41-43=stale head not settled, 44-47=settle window unbounded or the landed push not surfaced, 48/49=third object not refused immediately, 50-52=transport blip not retried, 53/54=unreachable gh not rc 80 / pushed anyway, 90-93=stub misuse, 127=helper missing from the fixture)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$SETTLE_FIXTURE" "$SETTLE_PUSH_LOG" "$SETTLE_SLEEP_LOG" "$SETTLE_STATE" "$SETTLE_POST_STATE" "$SETTLE_STDERR"
+
+# R9.18b (#482) — the two refusals are documented as DIFFERENT verdicts. rc 79
+# is a claim about the repository; rc 80 is a claim about reachability, and a
+# caller that cannot tell them apart tells the operator the wrong thing.
+assert_grep "$REVIEW_FENCES" \
+  'rc 80' \
+  "R9.18b — the fence library documents rc 80 (gh never answered) as distinct from rc 79"
+# NOT a bare `settle window` grep: the 6c.1 CI arm has carried that phrase since
+# #302, so the loose pattern would have passed before this fix existed.
+assert_grep "$REVIEW_PR" \
+  '[Pp]ost-push propagation settle' \
+  "R9.18c — /review-pr prose names the post-push propagation settle"
 
 # R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
 # `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
