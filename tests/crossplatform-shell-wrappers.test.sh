@@ -2311,46 +2311,176 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# --- XH2b/XH2c: the CRLF mechanism proof ------------------------------------
-# CREATE the CRLF form and prove it kills the declared bash arm. This is the
-# opposite of stripping CR before executing, which would prove a counterfactual:
-# here the defect is reproduced, so the /.gitattributes rule is load-bearing on
-# every host — including the ones whose checkout is already LF.
+# --- XH2b/XH2c/XH2d: the CRLF mechanism proof -------------------------------
+# CREATE the CRLF form and measure what the declared bash arm does with it. This
+# is the opposite of stripping CR before executing, which would prove a
+# counterfactual: here the defect is reproduced.
 #
 # `bash <file>` rather than executing the file, deliberately: `"shell": "bash"`
-# is a claim about which interpreter parses run-hook.cmd, and forcing bash makes
-# the row deterministic on POSIX and on Git Bash alike (whether MSYS re-dispatches
-# a `.cmd` through %COMSPEC% is a SEPARATE question, answered by XH6c below).
+# is a claim about which interpreter parses run-hook.cmd, and forcing bash keeps
+# the row about that claim (whether MSYS re-dispatches a `.cmd` through
+# %COMSPEC% is a SEPARATE question, answered by XH6c below).
+#
+# WHY THE OUTCOME IS MEASURED AND NOT HARDCODED. The death this row used to
+# assert unconditionally is a property of STOCK GNU bash, not of bash-on-Windows.
+# The bash Git for Windows ships (C:\Program Files\Git\bin\bash.exe; `uname -s` =
+# MINGW64_NT-…, see XH1c) is built from MSYS2's bash package, which applies
+# MSYS2-packages/bash/0005-bash-4.3-msys2-fix-lineendings.patch. That patch adds
+#
+#     #ifdef __MSYS__
+#           if (c == '\r')
+#             continue;
+#     #endif
+#
+# to shell_getc() in y.tab.c — the shell's own input reader — so every CR byte is
+# discarded before the lexer ever sees it. That is a COMPILE-TIME property of the
+# interpreter: not Cygwin's opt-in `set -o igncr`, not a text-mode mount, and
+# nothing in the environment turns it off. On that host a CRLF run-hook.cmd
+# parses byte-for-byte like the LF one and runs to completion — windows-latest
+# measured rc=0 with EMPTY stderr, which is exactly what redded the hardcoded
+# form of this row.
+#
+# So the interpreter's CR handling is MEASURED first (XH2b1) and the asserted
+# outcome is the one that FOLLOWS from the measurement. Neither arm is a skip:
+# the CR-blind arm asserts the CRLF copy is byte-for-byte indistinguishable from
+# an LF control run through the same harness, which reds if the MSYS2 patch is
+# ever dropped or the fixture stops being built.
+#
+# The pair XH2b + XH2d is what makes the rule load-bearing, and each half is
+# needed. XH2b measures the HARM, and can only measure it on a CR-preserving
+# bash — i.e. on ubuntu and macOS here, and on every POSIX interpreter that can
+# still read a Git-for-Windows clone (WSL, a Linux container over the same
+# checkout, this repo's own CI). XH2d measures whether the rule is EFFECTIVE at
+# stopping CR from reaching the checkout at all, and does that identically on
+# every host. Neither row claims the pin benefits every Windows consumer: XH6a
+# and XH6c record that an EXECUTED run-hook.cmd is re-dispatched to cmd.exe on
+# Windows, and cmd.exe is the CR-*preferring* side of the polyglot. That
+# adjudication belongs to the evidence rows, not to an assertion here.
 XH_CRLF_DIR="$(mktemp -d)"
-cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_CRLF_DIR/source.lf"
+cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_CRLF_DIR/run-hook.lf.cmd"
 cp "$XH_HOOKS_DIR/session-start" "$XH_CRLF_DIR/session-start"
 python3 -I -B -c 'import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))' \
-  < "$XH_CRLF_DIR/source.lf" > "$XH_CRLF_DIR/run-hook.cmd"
-rm -f "$XH_CRLF_DIR/source.lf"
-chmod 755 "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/session-start"
-XH_CRLF_HOME="$(mktemp -d)"
-# LC_ALL=C so bash's diagnostic is the C-locale English this row matches on.
-env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
-    HOME="$XH_CRLF_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
-    bash "$XH_CRLF_DIR/run-hook.cmd" session-start \
-    >"$XH_CRLF_DIR/stdout" 2>"$XH_CRLF_DIR/stderr" </dev/null
-XH_CRLF_RC=$?
-XH_CRLF_ERR_HEAD="$(head -n 1 "$XH_CRLF_DIR/stderr" 2>/dev/null)"
-if [ "$XH_CRLF_RC" -ne 0 ] \
-   && grep -q 'command not found' "$XH_CRLF_DIR/stderr" \
-   && ! grep -q 'SessionStart' "$XH_CRLF_DIR/stdout"; then
-  echo "  PASS  XH2b a CRLF run-hook.cmd dies under the declared bash shell (rc=${XH_CRLF_RC}) and emits no SessionStart contract"
+  < "$XH_CRLF_DIR/run-hook.lf.cmd" > "$XH_CRLF_DIR/run-hook.cmd"
+chmod 755 "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/run-hook.lf.cmd" "$XH_CRLF_DIR/session-start"
+
+# XH2b0 — FIXTURE INTEGRITY. Both silent-vacuity modes are asserted rather than
+# assumed: an empty or CR-less "CRLF" copy runs clean under ANY bash and `bash -n`
+# returns 0 on it, so XH2b and XH2c would both go green over a fixture that never
+# reproduced anything.
+XH_CRLF_SIZE="$(wc -c < "$XH_CRLF_DIR/run-hook.cmd" | tr -d '[:space:]')"
+LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/run-hook.cmd"
+XH_CRLF_HAS_CR=$?
+LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/run-hook.lf.cmd"
+XH_LF_HAS_CR=$?
+if [ "${XH_CRLF_SIZE:-0}" -gt 0 ] && [ "$XH_CRLF_HAS_CR" -eq 0 ] && [ "$XH_LF_HAS_CR" -eq 1 ]; then
+  echo "  PASS  XH2b0 the fixture pair is real — the ${XH_CRLF_SIZE}-byte CRLF copy carries CR bytes, the LF control does not"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  XH2b a CRLF run-hook.cmd did NOT fail the way this rule assumes (rc=${XH_CRLF_RC})"
-  printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+  echo "  FAIL  XH2b0 the CRLF fixture pair was not produced (crlf bytes=${XH_CRLF_SIZE}, crlf cr-grep rc=${XH_CRLF_HAS_CR} want 0, lf cr-grep rc=${XH_LF_HAS_CR} want 1) — XH2b/XH2c would be vacuous"
   FAIL=$((FAIL + 1))
 fi
+
+# XH2b1 — MEASURE this bash's CR handling, on a fixture whose answer is a byte
+# count rather than a platform guess. `printf X<CR>` is ONE word: a CR-blind bash
+# parses it as `X` and writes 1 byte; a CR-preserving bash keeps the CR inside
+# the word and writes 2, the second being the CR. Both halves are checked — a
+# 2-byte write whose second byte is NOT a CR is a broken probe, not a
+# classification — and an unclassifiable probe is a FAIL, never a default.
+#
+# Deliberately `wc`/`grep` and not `od`: every tool this row leans on is already
+# exercised on windows-latest by rows above it (XH2 runs the same
+# `LC_ALL=C grep -q $'\r'`), so the measurement cannot itself become the reason
+# the Windows job goes red.
+printf 'printf X\r\n' > "$XH_CRLF_DIR/cr-probe"
+bash "$XH_CRLF_DIR/cr-probe" >"$XH_CRLF_DIR/cr-probe.out" 2>"$XH_CRLF_DIR/cr-probe.err"
+XH_CR_PROBE_SIZE="$(wc -c < "$XH_CRLF_DIR/cr-probe.out" | tr -d '[:space:]')"
+LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/cr-probe.out"
+XH_CR_PROBE_HAS_CR=$?
+if [ "${XH_CR_PROBE_SIZE:-0}" -eq 1 ] && [ "$XH_CR_PROBE_HAS_CR" -eq 1 ]; then
+  XH_BASH_CR_BLIND=yes
+elif [ "${XH_CR_PROBE_SIZE:-0}" -eq 2 ] && [ "$XH_CR_PROBE_HAS_CR" -eq 0 ]; then
+  XH_BASH_CR_BLIND=no
+else
+  XH_BASH_CR_BLIND=unknown
+fi
+if [ "$XH_BASH_CR_BLIND" = unknown ]; then
+  echo "  FAIL  XH2b1 this bash's CR handling could not be classified (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-grep rc=${XH_CR_PROBE_HAS_CR}; want 1+rc1 = CR-blind, 2+rc0 = CR-preserving)"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_CRLF_DIR/cr-probe.err")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  XH2b1 this bash's CR handling measured: cr-blind=${XH_BASH_CR_BLIND} (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-grep rc=${XH_CR_PROBE_HAS_CR})"
+  PASS=$((PASS + 1))
+fi
+
+# ONE runner for both halves of the comparison. Two hand-rolled copies of the
+# hermetic env would be the same uncompared-copies drift the manifest extraction
+# above avoids, and the CRLF half is precisely the copy nobody can eyeball on a
+# CR-blind host. Each run gets its own throwaway HOME so neither can influence
+# the other's output. $1 = wrapper to run, $2 = stdout sink, $3 = stderr sink.
+xh_run_crlf_fixture() {
+  local xh_fixture_home
+  xh_fixture_home="$(mktemp -d)"
+  # LC_ALL=C so bash's diagnostic is the C-locale English this row matches on.
+  env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
+      HOME="$xh_fixture_home" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
+      bash "$1" session-start >"$2" 2>"$3" </dev/null
+  XH_CRLF_RUN_RC=$?
+  rm -rf "$xh_fixture_home"
+}
+xh_run_crlf_fixture "$XH_CRLF_DIR/run-hook.lf.cmd" "$XH_CRLF_DIR/lf.stdout" "$XH_CRLF_DIR/lf.stderr"
+XH_LF_RC=$XH_CRLF_RUN_RC
+xh_run_crlf_fixture "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/stdout" "$XH_CRLF_DIR/stderr"
+XH_CRLF_RC=$XH_CRLF_RUN_RC
+XH_CRLF_ERR_HEAD="$(head -n 1 "$XH_CRLF_DIR/stderr" 2>/dev/null)"
+
+# XH2b2 — the LF CONTROL, asserted on every platform. Without it the CR-blind arm
+# would be comparing two outputs that could both be empty, and the fixture dir (a
+# copy of the wrapper next to a copy of session-start) would itself be an
+# unverified harness.
+if [ "$XH_LF_RC" -eq 0 ] && grep -q 'SessionStart' "$XH_CRLF_DIR/lf.stdout"; then
+  echo "  PASS  XH2b2 the LF control in the same fixture dir emits the SessionStart contract (rc=${XH_LF_RC})"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2b2 the LF control emitted no SessionStart contract (rc=${XH_LF_RC}) — the fixture harness is broken, so XH2b proves nothing"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_CRLF_DIR/lf.stderr")"
+  FAIL=$((FAIL + 1))
+fi
+
+case "$XH_BASH_CR_BLIND" in
+  no)
+    if [ "$XH_CRLF_RC" -ne 0 ] \
+       && grep -q 'command not found' "$XH_CRLF_DIR/stderr" \
+       && ! grep -q 'SessionStart' "$XH_CRLF_DIR/stdout"; then
+      echo "  PASS  XH2b under this CR-preserving bash a CRLF run-hook.cmd dies (rc=${XH_CRLF_RC}) and emits no SessionStart contract"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  XH2b a CR-preserving bash did NOT kill the CRLF run-hook.cmd (rc=${XH_CRLF_RC})"
+      printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+  yes)
+    if [ "$XH_CRLF_RC" -eq "$XH_LF_RC" ] && cmp -s "$XH_CRLF_DIR/stdout" "$XH_CRLF_DIR/lf.stdout"; then
+      echo "  PASS  XH2b this bash is CR-BLIND (MSYS2 shell_getc drops \\r), so the CRLF copy is indistinguishable from the LF control (rc=${XH_CRLF_RC}, stdout byte-identical) — the harm channel is NOT reproducible on this host by any means, and XH2d proves the rule's effect here instead"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  XH2b this bash measured CR-BLIND but the CRLF copy did not match the LF control (crlf rc=${XH_CRLF_RC} vs lf rc=${XH_LF_RC}; stdout differs)"
+      printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+  *)
+    echo "  FAIL  XH2b not asserted — XH2b1 could not classify this bash, and a row that asserts nothing must never read as a pass (crlf rc=${XH_CRLF_RC})"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
 bash -n "$XH_CRLF_DIR/run-hook.cmd" 2>/dev/null
 XH_CRLF_SYNTAX_RC=$?
 # The `run-hook.cmd parses under bash -n` guard at the top of this file returns
-# 0 on the very copy that dies at runtime. Pinning that here is what stops a
-# future reader from deleting XH2b as redundant with a syntax check.
+# 0 on the very copy that dies at runtime under a CR-preserving bash. Pinning
+# that here is what stops a future reader from deleting XH2b as redundant with a
+# syntax check.
 if [ "$XH_CRLF_SYNTAX_RC" -eq 0 ]; then
   echo "  PASS  XH2c bash -n returns 0 on that same CRLF copy — the syntax guard is structurally blind to this class"
   PASS=$((PASS + 1))
@@ -2358,7 +2488,83 @@ else
   echo "  FAIL  XH2c bash -n rejected the CRLF copy (rc=${XH_CRLF_SYNTAX_RC}); re-check whether XH2b still proves anything the syntax guard misses"
   FAIL=$((FAIL + 1))
 fi
-rm -rf "$XH_CRLF_DIR" "$XH_CRLF_HOME"
+rm -rf "$XH_CRLF_DIR"
+
+# --- XH2d: the /.gitattributes rule, proved against git itself --------------
+# XH2b proves the HARM of a CR byte, and can only do so on a bash that preserves
+# CR. This row proves the rule is EFFECTIVE, which is a different claim and one
+# layer earlier: stop `core.autocrlf=true` — the Git-for-Windows INSTALLER
+# DEFAULT — from ever writing a CR into the checkout. That job belongs to git,
+# not to the host: `core.autocrlf` is config, not platform behaviour, so `true`
+# rewrites LF→CRLF on checkout on ubuntu and macOS exactly as it does on
+# Windows. The row therefore runs identically on every host in the matrix,
+# including the CR-blind one where XH2b's harm channel is unreproducible.
+#
+# BOTH directions are measured in the same scratch repo, because only the pair
+# is evidence: an unprotected checkout must come back WITH CR (else autocrlf is
+# not a live threat here and the row proves nothing), and the same checkout under
+# the rule must come back WITHOUT.
+#
+# The rule text is READ OUT of the real /.gitattributes and never retyped — a
+# retyped literal is the "one contract, N uncompared copies" drift this file's
+# header is about, and it would hold this row green over a rule the repo has
+# since narrowed, widened or deleted.
+# "Active line" is defined exactly as tests/docs-accuracy.test.sh T8.10 defines
+# it — drop comments and blanks first, then select the hooks-scoped rules — so
+# the two guards cannot disagree about what counts as a rule.
+XH_GA_RULES="$(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/.gitattributes" 2>/dev/null | grep -E 'plugins/uberdev/hooks')"
+if [ -z "$XH_GA_RULES" ]; then
+  echo "  FAIL  XH2d /.gitattributes carries no active rule scoped to plugins/uberdev/hooks — nothing pins the hook sources to LF on a core.autocrlf=true clone"
+  FAIL=$((FAIL + 1))
+else
+  XH_GA_TMP="$(mktemp -d)"
+  mkdir -p "$XH_GA_TMP/home" "$XH_GA_TMP/repo/plugins/uberdev/hooks"
+  cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
+  # HOME/XDG redirected and system config off: the invoking user's ~/.gitconfig
+  # (or a global core.attributesFile) must not decide this row's answer.
+  xh_git() {
+    env HOME="$XH_GA_TMP/home" XDG_CONFIG_HOME="$XH_GA_TMP/home/.config" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        git -C "$XH_GA_TMP/repo" \
+            -c init.defaultBranch=main -c core.autocrlf=true \
+            -c user.name=uberdev-xh2d -c user.email=xh2d@example.invalid \
+            -c commit.gpgsign=false "$@"
+  }
+  # Deletes the worktree copy and restores it through git's checkout filters, so
+  # the CR (or its absence) is written by the same code path a clone uses.
+  # Returns grep's rc: 0 = CR present, 1 = clean, anything else = unreadable.
+  xh_ga_checkout_has_cr() {
+    rm -f "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
+    xh_git checkout -q -- plugins/uberdev/hooks/run-hook.cmd >/dev/null 2>&1
+    LC_ALL=C grep -q $'\r' "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd" 2>/dev/null
+  }
+  XH_GA_SETUP_RC=0
+  xh_git init -q >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git add plugins/uberdev/hooks/run-hook.cmd >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git commit -q -m 'seed hook source (LF)' >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_ga_checkout_has_cr
+  XH_GA_UNPROTECTED=$?
+  printf '%s\n' "$XH_GA_RULES" > "$XH_GA_TMP/repo/.gitattributes"
+  xh_git add .gitattributes >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git commit -q -m 'add the repo hooks rule' >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_ga_checkout_has_cr
+  XH_GA_PROTECTED=$?
+  if [ "$XH_GA_SETUP_RC" -ne 0 ]; then
+    echo "  FAIL  XH2d the scratch git repo could not be built, so the rule was never exercised"
+    FAIL=$((FAIL + 1))
+  elif [ "$XH_GA_UNPROTECTED" -ne 0 ]; then
+    echo "  FAIL  XH2d core.autocrlf=true left an UNPROTECTED checkout free of CR (grep rc=${XH_GA_UNPROTECTED}) — with no threat reproduced, this row cannot show the rule matters"
+    FAIL=$((FAIL + 1))
+  elif [ "$XH_GA_PROTECTED" -eq 1 ]; then
+    echo "  PASS  XH2d the /.gitattributes hooks rule beats core.autocrlf=true — the unprotected checkout comes back with CR, the same checkout under the rule comes back LF"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  XH2d the /.gitattributes hooks rule did not keep the checkout LF under core.autocrlf=true (grep rc=${XH_GA_PROTECTED})"
+    printf '        rule(s) exercised: %s\n' "$XH_GA_RULES"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$XH_GA_TMP"
+fi
 
 # --- XH3/XH4: the executed positive oracle, and its hermeticity -------------
 # CLAUDE_PLUGIN_ROOT goes in the ENVIRONMENT and the shell expands it, exactly

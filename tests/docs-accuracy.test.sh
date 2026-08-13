@@ -480,10 +480,16 @@ else
   echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
 fi
 # (#461) The hook sources must check out LF on EVERY platform, because
-# `"shell": "bash"` means bash parses run-hook.cmd — and a CRLF copy dies at
-# rc=127 with `$'\r': command not found` before it ever reaches session-start.
-# Git for Windows installs with `core.autocrlf=true` by default, so without a
-# rule a real user's clone rewrites these files. The rule must stay NARROW:
+# `"shell": "bash"` means bash parses run-hook.cmd — and under a CR-PRESERVING
+# bash a CRLF copy dies at rc=127 with `$'\r': command not found` before it ever
+# reaches session-start. That covers stock GNU bash (ubuntu, macOS, WSL, this
+# repo's CI) but NOT the MSYS2 bash Git for Windows ships, which is patched to
+# drop CR in shell_getc() and so runs a CRLF copy clean — see /.gitattributes
+# for the citation and tests/crossplatform-shell-wrappers.test.sh XH2b/XH2d for
+# the measured proof. Git for Windows installs with `core.autocrlf=true` by
+# default, so without a rule a real user's clone rewrites these files and the
+# checkout's behaviour starts depending on which bash resolves. The rule must
+# stay NARROW:
 # prkit-publish, vendor-provenance and review-precision are windows-skipped on a
 # byte-exactness rationale, and a repo-wide `* text=auto` would change what those
 # paths check out as. Deliberately NOT in the FATAL `[ -r ]` loop above — a
