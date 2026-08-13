@@ -406,6 +406,379 @@ else
   printf '        out=[%s]\n' "$(printf '%s' "${FBZ3_OUT:-}" | tr '\n' '|')"
 fi
 
+# --------------------------------------------------------------------------
+# FBT-* (#460) — the Step 5 worktree-teardown block against REAL git
+# repositories, under the real fence shell.
+#
+# The companion tier in tests/finish-branch.test.sh (F13) drives the same block
+# through a recording `git` shim and asserts CONTROL FLOW: which verbs ran, in
+# which order, which ones did not. It runs on ubuntu AND windows. This tier
+# asserts GIT STATE — did the merge actually land, is the worktree really gone
+# from the registry and the disk, does the branch still exist — which is the
+# only way to catch a block that issues all the right commands against the wrong
+# repository. Ubuntu-only, same boundary as
+# tests/dispatch-child-worktree-teardown.test.sh.
+#
+# The four defects this block replaces (each reproduced by an executed probe,
+# not inferred): an unchecked `git checkout <base>` that left HEAD on the
+# feature branch so the next merge merged the branch into itself and reported
+# "Already up to date"; a `git worktree list | grep <current-branch>` probe that
+# matched the main checkout's own row in an ordinary clone; the same probe going
+# vacuous on a detached HEAD, where `git branch --show-current` prints nothing
+# and the pattern becomes the empty string; and a branch delete ordered before
+# the worktree removal, which git refuses.
+#
+# FBT-N1 and FBT-N2 are the negative controls that keep the positives honest.
+# --------------------------------------------------------------------------
+echo
+echo "== FBT: the Step 5 worktree-teardown block against real git repositories (#460) =="
+
+FBT_FAILURES=''
+fbt_bad() { FBT_FAILURES="$FBT_FAILURES $1"; }
+
+# Physical work root. git answers --absolute-git-dir, --show-toplevel and the
+# worktree listing with symlink-resolved paths, so a fixture rooted at an
+# unresolved /var/... would compare unequal to git's /private/var/... on macOS
+# and every path assertion below would be testing the symlink, not the block.
+FBT_WORK="$(cd "$WORK" && pwd -P)"
+FBT_HOME="$FBT_WORK/home"
+mkdir -p "$FBT_HOME"
+
+TEARDOWN="$WORK/teardown.zsh"
+if ! slice_fence '# --- BEGIN worktree teardown (#460) ---' '# --- END worktree teardown (#460) ---' > "$TEARDOWN"; then
+  fail "FBT-0: could not slice the worktree-teardown block from finish-branch/SKILL.md"
+  echo "        (anchors: '# --- BEGIN worktree teardown (#460) ---' .. '# --- END worktree teardown (#460) ---')"
+  FBT_FAILURES="$FBT_FAILURES block-not-sliceable"
+else
+  pass "FBT-0: the worktree-teardown block slices cleanly out of a bash fence"
+fi
+
+fbt_repo() {  # fbt_repo <name> -> prints the physical repo root
+  local nm="$1"
+  local rt="$FBT_WORK/$nm"
+  mkdir -p "$rt" || return 1
+  (
+    cd "$rt" || exit 2
+    git init -q . || exit 2
+    git config user.email fixture@example.invalid
+    git config user.name Fixture
+    git config commit.gpgsign false
+    printf 'base\n' > base.txt
+    git add base.txt
+    git commit -qm base || exit 2
+    git branch -M main || exit 2
+  ) >/dev/null 2>&1 || return 1
+  printf '%s\n' "$rt"
+}
+
+fbt_feature_worktree() {  # fbt_feature_worktree <root> <worktree-path> <branch>
+  (
+    cd "$1" || exit 2
+    git worktree add -q "$2" -b "$3" main || exit 2
+    cd "$2" || exit 2
+    printf 'feature\n' > feature.txt
+    git add feature.txt
+    git commit -qm feature || exit 2
+  ) >/dev/null 2>&1
+}
+
+FBT_OUT=''; FBT_RC=0; FBT_ERR=''
+fbt_run() {  # fbt_run <cwd> <env assignments...>
+  local rundir="$1"
+  shift
+  : > "$WORK/fbt.err"
+  FBT_OUT="$( cd "$rundir" && env "FB_TEST_COMMAND=" "HOME=$FBT_HOME" "$@" "$ZSH_BIN" -f "$TEARDOWN" 2>"$WORK/fbt.err" )"
+  FBT_RC=$?
+  FBT_ERR="$(cat "$WORK/fbt.err")"
+}
+
+fbt_registered() {  # fbt_registered <root> <worktree-path>  -> rc 0 when listed
+  local listing
+  listing="$( cd "$1" && git worktree list --porcelain 2>/dev/null )"
+  grep -qF "worktree $2" <<<"$listing"
+}
+
+fbt_has_branch() {  # fbt_has_branch <root> <branch>
+  ( cd "$1" && git rev-parse --verify --quiet "refs/heads/$2" >/dev/null 2>&1 )
+}
+
+fbt_file_on_main() {  # fbt_file_on_main <root> <path-in-tree>
+  local listing
+  listing="$( cd "$1" && git ls-tree --name-only main 2>/dev/null )"
+  grep -qxF "$2" <<<"$listing"
+}
+
+if [ -z "$FBT_FAILURES" ]; then
+  # ------------------------------------------------------------------
+  # FBT-1 — THE HEADLINE REGRESSION. Main checkout sitting on the base
+  # branch, feature work in a linked worktree, teardown launched from that
+  # worktree. The shipped prose did `git checkout main` from the worktree
+  # (rc 128, HEAD unchanged), then `git merge feat/x` from the feature
+  # branch itself: rc 0, "Already up to date." — a merge reported and never
+  # performed. The fixed block resolves the main root first and does the
+  # work there, so the merge must actually land.
+  # ------------------------------------------------------------------
+  FBT1_ROOT="$(fbt_repo fbt1)" || fbt_bad 1-fixture
+  fbt_feature_worktree "$FBT1_ROOT" "$FBT1_ROOT/.worktrees/feat-x" feat/x || fbt_bad 1-worktree
+  fbt_run "$FBT1_ROOT/.worktrees/feat-x" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT1_ROOT/tests-ran"
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "1-rc=$FBT_RC"
+  fbt_file_on_main "$FBT1_ROOT" feature.txt || fbt_bad 1-merge-never-landed
+  [ -f "$FBT1_ROOT/tests-ran" ] || fbt_bad 1-tests-never-ran
+  fbt_registered "$FBT1_ROOT" "$FBT1_ROOT/.worktrees/feat-x" && fbt_bad 1-worktree-still-registered
+  [ -d "$FBT1_ROOT/.worktrees/feat-x" ] && fbt_bad 1-worktree-dir-survived
+  fbt_has_branch "$FBT1_ROOT" feat/x && fbt_bad 1-branch-not-deleted
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-1: from a linked worktree the merge actually LANDS on the base, the worktree is removed and the branch deleted (the old prose reported this merge without performing it)"
+  else
+    fail "FBT-1: linked-worktree merge path broken:$FBT_FAILURES"
+    printf '        stdout=[%s]\n' "$(printf '%s' "$FBT_OUT" | tr '\n' '|')"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT1_FAILURES="$FBT_FAILURES"; FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-2 (P2) — an ORDINARY clone with no linked worktrees must not try to
+  # remove anything. The shipped probe matched the main checkout's own row
+  # here and the flow went on to `git worktree remove`, which answers
+  # "fatal: ... is a main working tree".
+  # ------------------------------------------------------------------
+  FBT2_ROOT="$(fbt_repo fbt2)" || fbt_bad 2-fixture
+  (
+    cd "$FBT2_ROOT" || exit 2
+    git checkout -q -b feat/plain
+    printf 'plain\n' > plain.txt
+    git add plain.txt
+    git commit -qm plain
+  ) >/dev/null 2>&1 || fbt_bad 2-branch
+  fbt_run "$FBT2_ROOT" FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT2_ROOT/tests-ran"
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "2-rc=$FBT_RC"
+  grep -qF 'this is the main checkout' <<<"$FBT_OUT" || fbt_bad 2-main-checkout-not-recognised
+  grep -qF 'is a main working tree' <<<"$FBT_ERR" && fbt_bad 2-attempted-to-remove-the-main-worktree
+  grep -qF 'Left worktree in place' <<<"$FBT_OUT" && fbt_bad 2-main-checkout-classified-as-a-worktree
+  fbt_file_on_main "$FBT2_ROOT" plain.txt || fbt_bad 2-merge-never-landed
+  fbt_has_branch "$FBT2_ROOT" feat/plain && fbt_bad 2-branch-not-deleted
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-2: an ordinary clone is recognised as the main checkout — no worktree removal is attempted and the merge still completes"
+  else
+    fail "FBT-2: plain-clone path broken:$FBT_FAILURES"
+    printf '        stdout=[%s]\n' "$(printf '%s' "$FBT_OUT" | tr '\n' '|')"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-3 (P3) — a detached HEAD must refuse. `git branch --show-current`
+  # prints nothing there, which turned the shipped probe into a grep for the
+  # empty string that matched every row at rc 0.
+  # ------------------------------------------------------------------
+  FBT3_ROOT="$(fbt_repo fbt3)" || fbt_bad 3-fixture
+  fbt_feature_worktree "$FBT3_ROOT" "$FBT3_ROOT/.worktrees/feat-d" feat/d || fbt_bad 3-worktree
+  ( cd "$FBT3_ROOT/.worktrees/feat-d" && git checkout -q --detach HEAD ) >/dev/null 2>&1 || fbt_bad 3-detach
+  FBT3_MAIN_SHA="$( cd "$FBT3_ROOT" && git rev-parse main )"
+  fbt_run "$FBT3_ROOT/.worktrees/feat-d" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT3_ROOT/tests-ran"
+  [ "$FBT_RC" -ne 0 ] || fbt_bad 3-detached-head-not-refused
+  grep -qF 'detached' <<<"$FBT_ERR" || fbt_bad 3-refusal-does-not-name-the-reason
+  [ "$( cd "$FBT3_ROOT" && git rev-parse main )" = "$FBT3_MAIN_SHA" ] || fbt_bad 3-base-was-mutated
+  [ -f "$FBT3_ROOT/tests-ran" ] && fbt_bad 3-tests-ran-anyway
+  fbt_has_branch "$FBT3_ROOT" feat/d || fbt_bad 3-branch-deleted
+  fbt_registered "$FBT3_ROOT" "$FBT3_ROOT/.worktrees/feat-d" || fbt_bad 3-worktree-removed
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-3: a detached HEAD refuses outright — nothing merged, nothing deleted, nothing removed"
+  else
+    fail "FBT-3: detached-HEAD path broken:$FBT_FAILURES"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-4 — the base branch is checked out by ANOTHER worktree. Refuse before
+  # any mutation, and name the holder: this is the state in which the shipped
+  # `git checkout main` exited 128 and the next merge silently self-merged.
+  # ------------------------------------------------------------------
+  FBT4_ROOT="$(fbt_repo fbt4)" || fbt_bad 4-fixture
+  ( cd "$FBT4_ROOT" && git checkout -q -b idle ) >/dev/null 2>&1 || fbt_bad 4-idle
+  ( cd "$FBT4_ROOT" && git worktree add -q "$FBT4_ROOT/.worktrees/base-holder" main ) >/dev/null 2>&1 || fbt_bad 4-holder
+  fbt_feature_worktree "$FBT4_ROOT" "$FBT4_ROOT/.worktrees/feat-b" feat/b || fbt_bad 4-worktree
+  FBT4_MAIN_SHA="$( cd "$FBT4_ROOT" && git rev-parse main )"
+  fbt_run "$FBT4_ROOT/.worktrees/feat-b" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT4_ROOT/tests-ran"
+  [ "$FBT_RC" -ne 0 ] || fbt_bad 4-busy-base-not-refused
+  grep -qF "$FBT4_ROOT/.worktrees/base-holder" <<<"$FBT_ERR" || fbt_bad 4-holder-not-named
+  [ "$( cd "$FBT4_ROOT" && git rev-parse main )" = "$FBT4_MAIN_SHA" ] || fbt_bad 4-base-was-mutated
+  [ -f "$FBT4_ROOT/tests-ran" ] && fbt_bad 4-tests-ran-anyway
+  fbt_has_branch "$FBT4_ROOT" feat/b || fbt_bad 4-branch-deleted
+  fbt_registered "$FBT4_ROOT" "$FBT4_ROOT/.worktrees/feat-b" || fbt_bad 4-worktree-removed
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-4: a base branch held by another worktree refuses BEFORE any mutation and names the holding path"
+  else
+    fail "FBT-4: busy-base refusal broken:$FBT_FAILURES"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-5 — a worktree outside every location this project creates is left
+  # alone, and the skip says so out loud. Silence here is what the whole
+  # issue is about.
+  # ------------------------------------------------------------------
+  FBT5_ROOT="$(fbt_repo fbt5)" || fbt_bad 5-fixture
+  mkdir -p "$FBT_WORK/outside"
+  fbt_feature_worktree "$FBT5_ROOT" "$FBT_WORK/outside/feat-y" feat/y || fbt_bad 5-worktree
+  fbt_run "$FBT_WORK/outside/feat-y" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT5_ROOT/tests-ran"
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "5-rc=$FBT_RC"
+  fbt_file_on_main "$FBT5_ROOT" feature.txt || fbt_bad 5-merge-never-landed
+  fbt_registered "$FBT5_ROOT" "$FBT_WORK/outside/feat-y" || fbt_bad 5-foreign-worktree-was-removed
+  [ -d "$FBT_WORK/outside/feat-y" ] || fbt_bad 5-foreign-worktree-dir-deleted
+  grep -qF "$FBT_WORK/outside/feat-y" <<<"$FBT_OUT" || fbt_bad 5-skip-does-not-name-the-path
+  grep -qF 'foreign' <<<"$FBT_OUT" || fbt_bad 5-skip-does-not-name-the-reason
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-5: a foreign worktree survives, the merge still lands, and the skip names both the path and the reason"
+  else
+    fail "FBT-5: foreign-worktree path broken:$FBT_FAILURES"
+    printf '        stdout=[%s]\n' "$(printf '%s' "$FBT_OUT" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-6 — .claude/worktrees is the dispatcher lane (lib/dispatch.sh creates
+  # it and tears it down). Removing it here would race the dispatcher, so the
+  # block must skip it and say why.
+  # ------------------------------------------------------------------
+  FBT6_ROOT="$(fbt_repo fbt6)" || fbt_bad 6-fixture
+  fbt_feature_worktree "$FBT6_ROOT" "$FBT6_ROOT/.claude/worktrees/solve-issue-9" feat/i9 || fbt_bad 6-worktree
+  fbt_run "$FBT6_ROOT/.claude/worktrees/solve-issue-9" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT6_ROOT/tests-ran"
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "6-rc=$FBT_RC"
+  fbt_registered "$FBT6_ROOT" "$FBT6_ROOT/.claude/worktrees/solve-issue-9" || fbt_bad 6-dispatcher-worktree-was-removed
+  [ -d "$FBT6_ROOT/.claude/worktrees/solve-issue-9" ] || fbt_bad 6-dispatcher-worktree-dir-deleted
+  grep -qF 'dispatcher-owned' <<<"$FBT_OUT" || fbt_bad 6-skip-does-not-name-dispatcher-ownership
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-6: a dispatcher-owned worktree is left for lib/dispatch.sh and the skip names the ownership"
+  else
+    fail "FBT-6: dispatcher-lane path broken:$FBT_FAILURES"
+    printf '        stdout=[%s]\n' "$(printf '%s' "$FBT_OUT" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-7 — merge mode must never destroy uncommitted work. A commit-based
+  # merge never carried an untracked file across, so `git worktree remove`
+  # runs WITHOUT --force here: the removal fails, the retry behind
+  # `git worktree prune` fails too, and the block warns and leaves the tree
+  # standing instead of forcing it away. Only Option 4, behind its typed
+  # confirmation, gets --force (FBT-8).
+  # ------------------------------------------------------------------
+  FBT7_ROOT="$(fbt_repo fbt7)" || fbt_bad 7-fixture
+  fbt_feature_worktree "$FBT7_ROOT" "$FBT7_ROOT/.worktrees/feat-dirty" feat/dirty || fbt_bad 7-worktree
+  printf 'uncommitted\n' > "$FBT7_ROOT/.worktrees/feat-dirty/scratch.txt"
+  fbt_run "$FBT7_ROOT/.worktrees/feat-dirty" \
+    FB_MODE=merge FB_BASE_BRANCH=main "FB_TEST_COMMAND=touch $FBT7_ROOT/tests-ran"
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "7-rc=$FBT_RC"
+  fbt_file_on_main "$FBT7_ROOT" feature.txt || fbt_bad 7-merge-never-landed
+  [ -f "$FBT7_ROOT/.worktrees/feat-dirty/scratch.txt" ] || fbt_bad 7-uncommitted-work-destroyed
+  fbt_registered "$FBT7_ROOT" "$FBT7_ROOT/.worktrees/feat-dirty" || fbt_bad 7-dirty-worktree-removed
+  grep -qF 'WARNING' <<<"$FBT_ERR" || fbt_bad 7-failure-not-reported
+  grep -qF "$FBT7_ROOT/.worktrees/feat-dirty" <<<"$FBT_ERR" || fbt_bad 7-warning-does-not-name-the-path
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-7: merge mode leaves a dirty worktree standing, keeps the uncommitted file, and warns with the path"
+  else
+    fail "FBT-7: dirty-worktree handling broken:$FBT_FAILURES"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-8 — discard mode: no pull, no merge, no test run; the worktree goes
+  # first (with --force, authorised by the typed confirmation in Option 4)
+  # and only then the branch, because git refuses to delete a branch a live
+  # worktree still holds.
+  # ------------------------------------------------------------------
+  FBT8_ROOT="$(fbt_repo fbt8)" || fbt_bad 8-fixture
+  fbt_feature_worktree "$FBT8_ROOT" "$FBT8_ROOT/.worktrees/feat-z" feat/z || fbt_bad 8-worktree
+  FBT8_MAIN_SHA="$( cd "$FBT8_ROOT" && git rev-parse main )"
+  fbt_run "$FBT8_ROOT/.worktrees/feat-z" FB_MODE=discard FB_BASE_BRANCH=main
+  [ "$FBT_RC" -eq 0 ] || fbt_bad "8-rc=$FBT_RC"
+  [ "$( cd "$FBT8_ROOT" && git rev-parse main )" = "$FBT8_MAIN_SHA" ] || fbt_bad 8-discard-merged-anyway
+  fbt_registered "$FBT8_ROOT" "$FBT8_ROOT/.worktrees/feat-z" && fbt_bad 8-worktree-still-registered
+  [ -d "$FBT8_ROOT/.worktrees/feat-z" ] && fbt_bad 8-worktree-dir-survived
+  fbt_has_branch "$FBT8_ROOT" feat/z && fbt_bad 8-branch-not-force-deleted
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-8: discard mode force-removes the worktree and force-deletes an unmerged branch without touching the base"
+  else
+    fail "FBT-8: discard path broken:$FBT_FAILURES"
+    printf '        stderr=[%s]\n' "$(printf '%s' "$FBT_ERR" | tr '\n' '|')"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-N1 — NEGATIVE CONTROL for FBT-2 and FBT-3. Run the RETIRED probe
+  # (`git worktree list | grep <current-branch>`) against the very same two
+  # fixtures and prove it answers "yes, you are in a removable worktree" in
+  # both. Without this, FBT-2 and FBT-3 could be passing because git changed,
+  # not because the block did.
+  # ------------------------------------------------------------------
+  FBTN1_PLAIN="$( cd "$FBT2_ROOT" && git worktree list 2>/dev/null | grep -c "$( git branch --show-current 2>/dev/null )" )"
+  FBTN1_DETACHED="$( cd "$FBT3_ROOT/.worktrees/feat-d" && git worktree list 2>/dev/null | grep -c "$( git branch --show-current 2>/dev/null )" )"
+  [ "${FBTN1_PLAIN:-0}" -ge 1 ] || fbt_bad n1-plain-clone-no-longer-false-positives
+  [ "${FBTN1_DETACHED:-0}" -ge 2 ] || fbt_bad n1-detached-head-no-longer-matches-every-row
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-N1: the retired grep probe still false-positives in the FBT-2 and FBT-3 fixtures (so FBT-2/FBT-3 assert the fix, not shell luck)"
+  else
+    fail "FBT-N1: negative control did not reproduce the old defect:$FBT_FAILURES (plain=$FBTN1_PLAIN detached=$FBTN1_DETACHED)"
+  fi
+  FBT_FAILURES=''
+
+  # ------------------------------------------------------------------
+  # FBT-N2 — NEGATIVE CONTROL for the `cd … && pwd -P` normalization of
+  # --git-common-dir. The reason that normalization exists is NOT symlinks:
+  # git already answers --absolute-git-dir, --show-toplevel and the worktree
+  # listing with physical paths (verified). It is that in an ORDINARY clone
+  # --git-common-dir answers the RELATIVE string `.git`, so comparing it
+  # unnormalized against the absolute --absolute-git-dir makes every ordinary
+  # clone report itself a linked worktree.
+  #
+  # This control runs a copy of the block with the normalization dropped
+  # against the FBT-2 plain-clone fixture and proves the verdict flips: the
+  # main checkout is reported as a foreign worktree that was deliberately left
+  # in place. A wrong provenance verdict printed at the operator is precisely
+  # the defect class this issue is about.
+  #
+  # The shim tier in finish-branch.test.sh CANNOT catch this — it always hands
+  # the block an absolute common dir — which is why the control lives here.
+  # ------------------------------------------------------------------
+  # Line-wise rewrite rather than a sed s|||, whose delimiter would collide with
+  # the `||` in the production line. The mutation is verified to have applied
+  # before the control runs, so this can never silently degrade into a rerun of
+  # the correct block. awk field refs are parameterised (-v c0=0) to match the
+  # repo-wide renderer-collision convention.
+  FBTN2_BLOCK="$WORK/teardown-unnormalized.zsh"
+  awk -v c0=0 'index($c0, "fb_common=\"$(cd \"$fb_common_raw\"") > 0 { print "  fb_common=\"$fb_common_raw\""; next } { print }' \
+    "$TEARDOWN" > "$FBTN2_BLOCK"
+  grep -qF 'fb_common="$fb_common_raw"' "$FBTN2_BLOCK" || fbt_bad n2-mutation-not-applied
+  grep -qF 'pwd -P)" || fb_common=""' "$FBTN2_BLOCK" && fbt_bad n2-original-line-survived-the-mutation
+  FBTN2_ROOT="$(fbt_repo fbtn2)" || fbt_bad n2-fixture
+  (
+    cd "$FBTN2_ROOT" || exit 2
+    git checkout -q -b feat/n2
+    printf 'n2\n' > n2.txt
+    git add n2.txt
+    git commit -qm n2
+  ) >/dev/null 2>&1 || fbt_bad n2-branch
+  FBTN2_OUT="$( cd "$FBTN2_ROOT" && env "HOME=$FBT_HOME" FB_MODE=merge FB_BASE_BRANCH=main \
+      "FB_TEST_COMMAND=touch $FBTN2_ROOT/tests-ran" "$ZSH_BIN" -f "$FBTN2_BLOCK" 2>/dev/null )"
+  grep -qF 'Left worktree in place' <<<"$FBTN2_OUT" || fbt_bad n2-unnormalized-copy-did-not-misclassify
+  grep -qF 'this is the main checkout' <<<"$FBTN2_OUT" && fbt_bad n2-unnormalized-copy-behaved-correctly
+  if [ -z "$FBT_FAILURES" ]; then
+    pass "FBT-N2: dropping the common-dir normalization makes an ordinary clone report itself a linked worktree (so the normalization is load-bearing, not decoration)"
+  else
+    fail "FBT-N2: normalization control broken:$FBT_FAILURES"
+    printf '        out=[%s]\n' "$(printf '%s' "$FBTN2_OUT" | tr '\n' '|')"
+  fi
+fi
+
 echo
 echo "== Summary =="
 echo "  launcher: $LAUNCH_SHELL  (composer ran under: $ZSH_BIN)"

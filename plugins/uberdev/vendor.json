@@ -71,6 +71,14 @@
       "file": "SKILL.md",
       "note": "UberDev never emits a Co-Authored-By or AI-attribution trailer in commits or PR bodies. Upstream's flow does. Never reconciled.",
       "permanent": true
+    },
+    {
+      "id": "interactive-discard-option",
+      "kind": "policy-divergence",
+      "scope": "skills/finish-branch",
+      "file": "SKILL.md",
+      "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' — the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
+      "permanent": true
     }
   ],
   "components": [
@@ -195,6 +203,10 @@
         },
         {
           "ref": "no-co-authored-by",
+          "file": "SKILL.md"
+        },
+        {
+          "ref": "interactive-discard-option",
           "file": "SKILL.md"
         }
       ],
