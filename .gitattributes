@@ -33,10 +33,13 @@
 # before narrowing this rule to exclude run-hook.cmd.
 #
 # `eol=lf` beats core.autocrlf on checkout. The mechanism proofs live in
-# tests/crossplatform-shell-wrappers.test.sh: XH2 (no CR in the checkout),
-# XH2b0/XH2b1/XH2b2 (fixture integrity + the interpreter's measured CR
-# handling), XH2b (the harm, on a CR-preserving bash), XH2c (a syntax check is
-# blind to it) and XH2d (this rule beats core.autocrlf=true, on every host).
+# tests/crossplatform-shell-wrappers.test.sh: XH2a (the CR detector is byte-exact
+# on this host — `grep` is NOT, it reads text-mode under MSYS2 and cannot see a
+# CR at all, which made the XH2 census vacuously green on windows-latest until it
+# was measured), XH2 (no CR in the checkout), XH2b0/XH2b1/XH2b2 (fixture
+# integrity + the interpreter's measured CR handling), XH2b (the harm, on a
+# CR-preserving bash), XH2c (a syntax check is blind to it) and XH2d (this rule
+# beats core.autocrlf=true, on every host).
 #
 # WHY NOT `* text=auto`. Three suites are windows-skipped on a byte-exactness
 # rationale — prkit-publish (sha256 over copy-set sources), vendor-provenance

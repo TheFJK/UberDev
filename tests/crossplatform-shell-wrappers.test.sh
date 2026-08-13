@@ -2269,23 +2269,105 @@ if command -v jq >/dev/null 2>&1; then XH_JQ=present; else XH_JQ=absent; fi
 # stated, and "no XH5 line" reads the same as "XH5 quietly did nothing".
 echo "  INFO  XH1c host uname=$(uname -s) native-windows-gate=${XH_NATIVE_WINDOWS} jq=${XH_JQ}"
 
+# --- THE CR DETECTOR, and why it is not `grep` ------------------------------
+# `grep` is DISQUALIFIED for this question on this repo's own Windows job.
+# MSYS2's grep reads in TEXT mode and strips CR before matching, so
+# `LC_ALL=C grep -q $'\r' <file>` reports "no CR" on a file that demonstrably
+# has CRs. Measured on shape-checks-windows, not inferred: the CRLF fixture
+# below reported `wc -c` = 2189 — exactly run-hook.cmd's 2126 LF bytes plus one
+# CR for each of its 63 lines, so every CR byte was written — and the cr-grep on
+# that same file returned rc=1. The same translation is visible from the other
+# side, where a `$`-anchored grep matches a CRLF-checked-out file.
+#
+# That blindness silently inverted TWO rows before it was caught: XH2 below
+# passed on windows-latest for the whole life of #494 while scanning with a
+# detector that cannot see what it scans for, and XH2d called a CR-bearing
+# checkout clean. A vacuous green is worse than a red.
+#
+# EVERY CR question in this file goes through this ONE helper. A second spelling
+# of "does this file contain CR" is how the two answers drift apart.
+#
+# python3 with BINARY stdin, because byte-exactness on that host is already
+# PROVEN by the very failure above: the producer read LF bytes through
+# `sys.stdin.buffer` and wrote CRLF through `sys.stdout.buffer` and landed on
+# 2189 exactly. CPython puts the standard streams in O_BINARY on Windows, so the
+# buffer layer does no newline translation in either direction.
+#
+# Fed by REDIRECT, never as a path argument: windows-latest runs NATIVE Windows
+# Python, which cannot resolve the MSYS `/…` paths Git Bash hands it — the same
+# reason XH1a reads hooks.json from stdin.
+#
+# rc 0 = at least one CR byte, 1 = none, 2 = not a readable file, anything else
+# = the detector itself failed. Callers MUST treat "neither 0 nor 1" as UNKNOWN
+# and fail loudly; folding it into "clean" is exactly how a census goes vacuous.
+xh_file_has_cr() {
+  [ -f "$1" ] && [ -r "$1" ] || return 2
+  python3 -I -B -c 'import sys
+raise SystemExit(0 if b"\r" in sys.stdin.buffer.read() else 1)' < "$1"
+}
+
+# XH2a — THE DETECTOR'S OWN SELF-TEST, and the row this file was missing. Every
+# CR claim below inherits this helper's correctness, so the helper is checked
+# against two fixtures whose bytes are known by construction before anything
+# uses it.
+#
+# THIS ROW FAILS ON windows-latest IF THE DETECTOR IS `grep`. That is the whole
+# point: it turns a silent, platform-specific blindness into a red row on the
+# host that has it, instead of letting it masquerade as a clean census. XH2
+# alone could never catch this — a blind detector and a genuinely clean tree
+# produce the identical "no CR found" answer, so the census agrees with its own
+# blindness. Only a fixture with a KNOWN CR can tell those two apart.
+XH_DET_TMP="$(mktemp -d)"
+# The fixtures are written through the SAME python binary-stdout path that
+# measurably produced a byte-perfect 2189-byte CRLF file on windows-latest — NOT
+# through `printf`. Whether bash's builtin emits a raw CR to a redirected fd
+# under MSYS is precisely the sort of unproven platform assumption that put the
+# grep detector here to begin with, and a fixture this row cannot vouch for is a
+# fixture that can red the job for the wrong reason.
+#
+# Sizes are then confirmed with `wc -c`, byte-exact on that host by the same
+# measurement. A `dirty` file of exactly 2 bytes therefore HAS a CR as its second
+# byte by construction, established without consulting the detector under test.
+python3 -I -B -c 'import sys; sys.stdout.buffer.write(b"A\r")' > "$XH_DET_TMP/dirty"
+python3 -I -B -c 'import sys; sys.stdout.buffer.write(b"A")'   > "$XH_DET_TMP/clean"
+XH_DET_DIRTY_SIZE="$(wc -c < "$XH_DET_TMP/dirty" | tr -d '[:space:]')"
+XH_DET_CLEAN_SIZE="$(wc -c < "$XH_DET_TMP/clean" | tr -d '[:space:]')"
+xh_file_has_cr "$XH_DET_TMP/dirty"
+XH_DET_DIRTY_RC=$?
+xh_file_has_cr "$XH_DET_TMP/clean"
+XH_DET_CLEAN_RC=$?
+xh_file_has_cr "$XH_DET_TMP/does-not-exist"
+XH_DET_MISSING_RC=$?
+if [ "$XH_DET_DIRTY_SIZE" = 2 ] && [ "$XH_DET_CLEAN_SIZE" = 1 ] \
+   && [ "$XH_DET_DIRTY_RC" -eq 0 ] && [ "$XH_DET_CLEAN_RC" -eq 1 ] \
+   && [ "$XH_DET_MISSING_RC" -eq 2 ]; then
+  echo "  PASS  XH2a the CR detector is byte-exact — it sees the CR in a 2-byte A+CR file, none in a 1-byte A file, and reports an unreadable path as unknown"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2a the CR detector is not byte-exact on this host"
+  echo "        fixtures: dirty=${XH_DET_DIRTY_SIZE} bytes (want 2), clean=${XH_DET_CLEAN_SIZE} bytes (want 1)"
+  echo "        detector: dirty rc=${XH_DET_DIRTY_RC} (want 0), clean rc=${XH_DET_CLEAN_RC} (want 1), missing rc=${XH_DET_MISSING_RC} (want 2)"
+  echo "        a wrong SIZE means the fixture writer is not byte-exact; a wrong RC means the detector is not."
+  echo "        every CR claim below this row would be unsound — do NOT 'fix' those rows individually"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$XH_DET_TMP"
+
 # --- XH2: the hook sources must be LF in the working tree -------------------
-# On ubuntu this is trivially true, and on windows-latest it is most likely
-# already true as well — the `$`-anchored run-hook.cmd greps at the top of this
-# file pass on shape-checks-windows, and GNU grep is not CR-tolerant, so a CRLF
-# checkout would have redded them. The host this rule actually protects is a
-# real user's Git-for-Windows clone, where `core.autocrlf=true` is the INSTALLER
-# DEFAULT. The row that proves the rule is load-bearing rather than decorative
-# is XH2b below, which is deterministic on every platform.
+# The host this rule actually protects is a real user's Git-for-Windows clone,
+# where `core.autocrlf=true` is the INSTALLER DEFAULT. Read with the byte-exact
+# detector above: the previous `grep` form could not see a CR on windows-latest,
+# so this census asserted nothing there. The row that proves the rule is
+# load-bearing rather than decorative is XH2b below.
 XH_CR_FILES=""
 XH_CR_UNREADABLE=""
 XH_CR_SCANNED=0
 while IFS= read -r xh_hook_file; do
   [ -n "$xh_hook_file" ] || continue
   XH_CR_SCANNED=$((XH_CR_SCANNED + 1))
-  LC_ALL=C grep -q $'\r' "$xh_hook_file"
+  xh_file_has_cr "$xh_hook_file"
   xh_cr_rc=$?
-  # rc 0 = CR found, 1 = clean, anything else = grep could not read the file.
+  # rc 0 = CR found, 1 = clean, anything else = the file's CR state is UNKNOWN.
   # Folding that third case into "clean" is how a census goes quietly vacuous.
   if [ "$xh_cr_rc" -eq 0 ]; then
     XH_CR_FILES="$XH_CR_FILES${XH_CR_FILES:+ }${xh_hook_file#"$REPO_ROOT"/}"
@@ -2368,15 +2450,15 @@ chmod 755 "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/run-hook.lf.cmd" "$XH_CRLF_D
 # returns 0 on it, so XH2b and XH2c would both go green over a fixture that never
 # reproduced anything.
 XH_CRLF_SIZE="$(wc -c < "$XH_CRLF_DIR/run-hook.cmd" | tr -d '[:space:]')"
-LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/run-hook.cmd"
+xh_file_has_cr "$XH_CRLF_DIR/run-hook.cmd"
 XH_CRLF_HAS_CR=$?
-LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/run-hook.lf.cmd"
+xh_file_has_cr "$XH_CRLF_DIR/run-hook.lf.cmd"
 XH_LF_HAS_CR=$?
 if [ "${XH_CRLF_SIZE:-0}" -gt 0 ] && [ "$XH_CRLF_HAS_CR" -eq 0 ] && [ "$XH_LF_HAS_CR" -eq 1 ]; then
   echo "  PASS  XH2b0 the fixture pair is real — the ${XH_CRLF_SIZE}-byte CRLF copy carries CR bytes, the LF control does not"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  XH2b0 the CRLF fixture pair was not produced (crlf bytes=${XH_CRLF_SIZE}, crlf cr-grep rc=${XH_CRLF_HAS_CR} want 0, lf cr-grep rc=${XH_LF_HAS_CR} want 1) — XH2b/XH2c would be vacuous"
+  echo "  FAIL  XH2b0 the CRLF fixture pair was not produced (crlf bytes=${XH_CRLF_SIZE}, crlf cr-detect rc=${XH_CRLF_HAS_CR} want 0, lf cr-detect rc=${XH_LF_HAS_CR} want 1) — XH2b/XH2c would be vacuous"
   FAIL=$((FAIL + 1))
 fi
 
@@ -2387,14 +2469,14 @@ fi
 # 2-byte write whose second byte is NOT a CR is a broken probe, not a
 # classification — and an unclassifiable probe is a FAIL, never a default.
 #
-# Deliberately `wc`/`grep` and not `od`: every tool this row leans on is already
-# exercised on windows-latest by rows above it (XH2 runs the same
-# `LC_ALL=C grep -q $'\r'`), so the measurement cannot itself become the reason
-# the Windows job goes red.
+# `wc -c` plus the byte-exact detector above, never `grep`: on windows-latest a
+# CR-blind grep would have answered "no CR" for BOTH outcomes, which happens to
+# agree with the 1-byte case and so would have hidden a mis-measurement behind a
+# correct-looking classification.
 printf 'printf X\r\n' > "$XH_CRLF_DIR/cr-probe"
 bash "$XH_CRLF_DIR/cr-probe" >"$XH_CRLF_DIR/cr-probe.out" 2>"$XH_CRLF_DIR/cr-probe.err"
 XH_CR_PROBE_SIZE="$(wc -c < "$XH_CRLF_DIR/cr-probe.out" | tr -d '[:space:]')"
-LC_ALL=C grep -q $'\r' "$XH_CRLF_DIR/cr-probe.out"
+xh_file_has_cr "$XH_CRLF_DIR/cr-probe.out"
 XH_CR_PROBE_HAS_CR=$?
 if [ "${XH_CR_PROBE_SIZE:-0}" -eq 1 ] && [ "$XH_CR_PROBE_HAS_CR" -eq 1 ]; then
   XH_BASH_CR_BLIND=yes
@@ -2404,11 +2486,11 @@ else
   XH_BASH_CR_BLIND=unknown
 fi
 if [ "$XH_BASH_CR_BLIND" = unknown ]; then
-  echo "  FAIL  XH2b1 this bash's CR handling could not be classified (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-grep rc=${XH_CR_PROBE_HAS_CR}; want 1+rc1 = CR-blind, 2+rc0 = CR-preserving)"
+  echo "  FAIL  XH2b1 this bash's CR handling could not be classified (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-detect rc=${XH_CR_PROBE_HAS_CR}; want 1+rc1 = CR-blind, 2+rc0 = CR-preserving)"
   printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_CRLF_DIR/cr-probe.err")"
   FAIL=$((FAIL + 1))
 else
-  echo "  PASS  XH2b1 this bash's CR handling measured: cr-blind=${XH_BASH_CR_BLIND} (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-grep rc=${XH_CR_PROBE_HAS_CR})"
+  echo "  PASS  XH2b1 this bash's CR handling measured: cr-blind=${XH_BASH_CR_BLIND} (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-detect rc=${XH_CR_PROBE_HAS_CR})"
   PASS=$((PASS + 1))
 fi
 
@@ -2532,11 +2614,11 @@ else
   }
   # Deletes the worktree copy and restores it through git's checkout filters, so
   # the CR (or its absence) is written by the same code path a clone uses.
-  # Returns grep's rc: 0 = CR present, 1 = clean, anything else = unreadable.
+  # Returns the detector's rc: 0 = CR present, 1 = clean, else unknown.
   xh_ga_checkout_has_cr() {
     rm -f "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
     xh_git checkout -q -- plugins/uberdev/hooks/run-hook.cmd >/dev/null 2>&1
-    LC_ALL=C grep -q $'\r' "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd" 2>/dev/null
+    xh_file_has_cr "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
   }
   XH_GA_SETUP_RC=0
   xh_git init -q >/dev/null 2>&1 || XH_GA_SETUP_RC=1
@@ -2553,13 +2635,13 @@ else
     echo "  FAIL  XH2d the scratch git repo could not be built, so the rule was never exercised"
     FAIL=$((FAIL + 1))
   elif [ "$XH_GA_UNPROTECTED" -ne 0 ]; then
-    echo "  FAIL  XH2d core.autocrlf=true left an UNPROTECTED checkout free of CR (grep rc=${XH_GA_UNPROTECTED}) — with no threat reproduced, this row cannot show the rule matters"
+    echo "  FAIL  XH2d core.autocrlf=true left an UNPROTECTED checkout free of CR (cr-detect rc=${XH_GA_UNPROTECTED}) — with no threat reproduced, this row cannot show the rule matters"
     FAIL=$((FAIL + 1))
   elif [ "$XH_GA_PROTECTED" -eq 1 ]; then
     echo "  PASS  XH2d the /.gitattributes hooks rule beats core.autocrlf=true — the unprotected checkout comes back with CR, the same checkout under the rule comes back LF"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  XH2d the /.gitattributes hooks rule did not keep the checkout LF under core.autocrlf=true (grep rc=${XH_GA_PROTECTED})"
+    echo "  FAIL  XH2d the /.gitattributes hooks rule did not keep the checkout LF under core.autocrlf=true (cr-detect rc=${XH_GA_PROTECTED}; 0=CR present, 2=unknown)"
     printf '        rule(s) exercised: %s\n' "$XH_GA_RULES"
     FAIL=$((FAIL + 1))
   fi
