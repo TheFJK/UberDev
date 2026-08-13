@@ -2030,6 +2030,64 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+printf '%s\n' '== P-A the wave ownership label is ONE vocabulary across its consumers =='
+# #509. SDD dispatches a wave's implementers in parallel into one shared
+# worktree; what makes that safe is a strictly disjoint per-task file partition.
+# The partition has a real producer — plan-writer's per-task ownership field —
+# and a real reviewer (plan-reviewer Check 2). But `subagent-driven-dev` cited it
+# under a DIFFERENT name, `Worktree-safe:`, which NO planner in this repo has
+# ever emitted: the safety precondition was attributed to a declaration that does
+# not exist. This row reconciles the producer's label against its consumers by
+# EXTRACTING it, so the case is data agreement rather than a wording pin, and
+# separately proves the dead citation is gone.
+if python3 - "$PLAN_WRITER" \
+  "$ROOT/plugins/uberdev/skills/subagent-driven-dev" \
+  "$ROOT/plugins/uberdev/agents" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+writer, sdd_dir, agents_dir = (Path(a) for a in sys.argv[1:4])
+
+labels = sorted(set(re.findall(
+    r"^\*\*(Owns \([^)\n]*\)):\*\*",
+    writer.read_text(encoding="utf-8"), re.MULTILINE)))
+if len(labels) != 1:
+    raise SystemExit(
+        "plan-writer.md emits %d ownership label(s), expected exactly 1: %r"
+        % (len(labels), labels))
+label = labels[0]
+
+for consumer in (sdd_dir / "SKILL.md", sdd_dir / "spec-reviewer-prompt.md"):
+    if not consumer.is_file():
+        raise SystemExit("missing SDD consumer: %s" % consumer)
+    if label not in consumer.read_text(encoding="utf-8"):
+        raise SystemExit("%s does not name the producer's label %r"
+                         % (consumer.name, label))
+
+dangling = []
+for root in (sdd_dir, agents_dir):
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "Worktree-safe" in text:
+            dangling.append(str(path))
+if dangling:
+    raise SystemExit("`Worktree-safe` has no producer but is still cited by: %s"
+                     % dangling)
+PY
+then
+  printf '%s\n' '  PASS P-A plan-writer, subagent-driven-dev and spec-reviewer-prompt name one ownership label, and no producerless Worktree-safe citation survives'
+  PASS=$((PASS + 1))
+else
+  printf '%s\n' '  FAIL P-A the wave ownership contract is spelled inconsistently, or a producerless Worktree-safe citation survives'
+  FAIL=$((FAIL + 1))
+fi
+
 printf '\n[orchestrator-plan-flatten] PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
   exit 1

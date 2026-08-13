@@ -97,6 +97,23 @@ uberdev_child_inputs_validate() {
   printf '%s' "$output"
 }
 
+# #509 — give the two-task implement wave DISJOINT ownership, using this file's
+# own rename-and-wrap idiom. The production body reads `allowed_paths_json` from
+# the caller's scope, so a `local` here is what it sees (bash is dynamically
+# scoped); when the branch is not taken no local is created and the global is
+# used unchanged.
+#
+# Task 41 varies, never task 42: `sdd_dispatch_case` writes back the LAST loop
+# iteration's `task_inputs_json`, so `implement_json` is task 42's, and leaving
+# 42 on the original fixture keeps the equality assertion below byte-identical.
+eval "$(declare -f sdd_inputs_for_task | sed '1s/sdd_inputs_for_task/sdd_inputs_for_task_production/')"
+sdd_inputs_for_task() {
+  if [ "$1" = "sdd.task.implement" ] && [ "$2" = "41" ]; then
+    local allowed_paths_json="$allowed_paths_wave_json"
+  fi
+  sdd_inputs_for_task_production "$@"
+}
+
 make_context() {
   local run="$1" run_id="$2" request decision metadata
   mkdir -p "$run"
@@ -170,6 +187,14 @@ mkdir -p "$INPUT_DIR"
 task_path="$INPUT_DIR/task \"quoted\" \\ path.md"
 allowed_paths_json="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:]),end="")' \
   'inputs/allowed "one".ts' 'inputs/allowed \ two.ts')"
+# #509. The two-task implement batch below dispatches BOTH handoffs in one wave,
+# and `sdd_launch_prepared_batch` now refuses a wave whose implementers claim
+# overlapping ownership. One shared `allowed_paths_json` across two implementers
+# is exactly that overlap, so task 41 gets its own disjoint fixture. It must not
+# equal, contain, or be contained by any path above, and must not intersect
+# `denied_paths_json` (`sdd_canonicalize_owned_paths` exits 2 on allowed∩denied).
+allowed_paths_wave_json="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:]),end="")' \
+  'inputs/allowed "t41".ts')"
 denied_paths_json="$(python3 -I -B -c 'import json,sys; print(json.dumps(sys.argv[1:]),end="")' \
   'inputs/denied "sibling".ts')"
 failure_fixture_path="$INPUT_DIR/failures/attempt \\ \"one\".md"
@@ -192,6 +217,7 @@ for artifact in \
   "$task_path" \
   "$INPUT_DIR/allowed \"one\".ts" \
   "$INPUT_DIR/allowed \\ two.ts" \
+  "$INPUT_DIR/allowed \"t41\".ts" \
   "$INPUT_DIR/denied \"sibling\".ts" \
   "$failure_fixture_path" \
   "$spec_path" \
