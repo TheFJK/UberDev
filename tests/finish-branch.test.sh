@@ -377,6 +377,329 @@ else
   echo "  FAIL  F12 base resolution broken:$F12_FAILURES"; FAIL=$((FAIL+1))
 fi
 
+# ---------------------------------------------------------------------------
+# F13 — the Step 5 worktree-teardown block (#460), EXTRACTED from SKILL.md and
+# EXECUTED against a recording `git` shim.
+#
+# Four defects lived in the prose this block replaces, all four reproduced by an
+# executed probe rather than inferred from a reading:
+#
+#   1. `git checkout <base>` was never rc-checked. From a linked worktree it
+#      exits 128 ("fatal: 'main' is already used by worktree at ..."), HEAD stays
+#      on the feature branch, and the next `git merge <feature>` merges the
+#      branch into itself: rc=0, "Already up to date." Option 1 reported a merge
+#      that never happened — worse than the silent no-op the issue hypothesised.
+#   2. The worktree probe `git worktree list | grep $(git branch --show-current)`
+#      matched the main checkout's own row in an ordinary clone (rc=0), so the
+#      flow went on to `git worktree remove` and got "is a main working tree".
+#   3. On a detached HEAD `git branch --show-current` prints nothing, so the same
+#      probe degraded to `grep ""` and matched every row.
+#   4. The branch delete ran BEFORE the worktree removal, and git refuses to
+#      delete a branch a live worktree still has checked out.
+#
+# WHY A SHIM AND NOT A REAL REPO: this file runs on ubuntu AND windows CI, and
+# the real-worktree fixtures live in the ubuntu-only finish-branch-zsh.test.sh
+# (FBT-*). The shim tier asserts CONTROL FLOW — which git verbs ran, in which
+# order, and which ones did NOT run — on every platform. The two tiers assert
+# different things on purpose; neither replaces the other.
+#
+# F13a is the vacuity backstop for the whole group: without it, every other case
+# would pass on a block that never executed a single git call.
+# ---------------------------------------------------------------------------
+F13_FAILURES=''
+F13_BLOCK="$(sed -n '/^# --- BEGIN worktree teardown (#460) ---$/,/^# --- END worktree teardown (#460) ---$/p' "$SKILL")"
+if [[ -z "$F13_BLOCK" ]]; then
+  F13_FAILURES="$F13_FAILURES worktree-teardown-block-not-extractable"
+else
+  # Physical (symlink-resolved) fixture root. git itself returns physical paths
+  # from --absolute-git-dir / --show-toplevel / worktree list, so a fixture that
+  # handed the block a /var/... path while `pwd -P` produced /private/var/...
+  # would make the linked-worktree comparison pass for the wrong reason on macOS.
+  F13_DIR="$(mktemp -d)" || { echo "FATAL: mktemp -d failed" >&2; exit 2; }
+  F13_DIR="$(cd "$F13_DIR" && pwd -P)" || { echo "FATAL: cannot resolve fixture dir" >&2; exit 2; }
+  F13_ROOT="$F13_DIR/root"
+  mkdir -p "$F13_ROOT/.git" "$F13_DIR/home" || { echo "FATAL: fixture mkdir failed" >&2; exit 2; }
+  F13_LOG="$F13_DIR/git-calls.log"
+  F13_ERR="$F13_DIR/stderr.txt"
+  F13_DRIVER="$F13_DIR/driver.sh"
+  F13_BLOCK_FILE="$F13_DIR/block.sh"
+  printf '%s\n' "$F13_BLOCK" > "$F13_BLOCK_FILE"
+
+  # Default porcelain: main checkout on the base branch, one linked worktree on
+  # the feature branch. `git worktree list --porcelain` always emits the MAIN
+  # worktree first (verified), which is how the block resolves the main root.
+  F13_PORCELAIN="$F13_DIR/porcelain.txt"
+  {
+    printf 'worktree %s\n' "$F13_ROOT"
+    printf 'HEAD 1111111111111111111111111111111111111111\n'
+    printf 'branch refs/heads/main\n'
+    printf '\n'
+    printf 'worktree %s\n' "$F13_ROOT/.worktrees/feat-x"
+    printf 'HEAD 2222222222222222222222222222222222222222\n'
+    printf 'branch refs/heads/feat/x\n'
+    printf '\n'
+  } > "$F13_PORCELAIN"
+
+  # Base-busy porcelain: the base branch is checked out by a DIFFERENT worktree.
+  # This is the exact state that made the shipped `git checkout <base>` exit 128.
+  F13_PORCELAIN_BUSY="$F13_DIR/porcelain-busy.txt"
+  {
+    printf 'worktree %s\n' "$F13_ROOT"
+    printf 'HEAD 1111111111111111111111111111111111111111\n'
+    printf 'branch refs/heads/idle\n'
+    printf '\n'
+    printf 'worktree %s\n' "$F13_ROOT/.worktrees/other"
+    printf 'HEAD 3333333333333333333333333333333333333333\n'
+    printf 'branch refs/heads/main\n'
+    printf '\n'
+    printf 'worktree %s\n' "$F13_ROOT/.worktrees/feat-x"
+    printf 'HEAD 2222222222222222222222222222222222222222\n'
+    printf 'branch refs/heads/feat/x\n'
+    printf '\n'
+  } > "$F13_PORCELAIN_BUSY"
+
+  # The recording shim. `git` is a SHELL FUNCTION, which is why the block must
+  # call git unqualified — a `command git` anywhere in it vacates this entire
+  # tier, and F13a is the assertion that notices.
+  F13_SHIM="$F13_DIR/shim.sh"
+  cat > "$F13_SHIM" <<'F13_SHIM_EOF'
+git() {
+  printf '%s\n' "$*" >> "$FB_LOG"
+  case "$*" in
+    "branch --show-current")        printf '%s\n' "$FB_SHIM_CURRENT" ;;
+    "rev-parse --absolute-git-dir") printf '%s\n' "$FB_SHIM_GITDIR" ;;
+    "rev-parse --git-common-dir")   printf '%s\n' "$FB_SHIM_COMMON" ;;
+    "rev-parse --show-toplevel")    printf '%s\n' "$FB_SHIM_TOPLEVEL" ;;
+    "worktree list --porcelain")    cat "$FB_SHIM_PORCELAIN" ;;
+    rev-parse*)                     return "$FB_SHIM_RC_UPSTREAM" ;;
+    checkout*)                      return "$FB_SHIM_RC_CHECKOUT" ;;
+    pull*)                          return "$FB_SHIM_RC_PULL" ;;
+    merge*)                         return "$FB_SHIM_RC_MERGE" ;;
+    "worktree remove"*)             return "$FB_SHIM_RC_REMOVE" ;;
+    "worktree prune")               return 0 ;;
+    branch\ -*)                     return "$FB_SHIM_RC_BRANCHDEL" ;;
+    *)                              return 0 ;;
+  esac
+  return 0
+}
+fbtest() {
+  printf 'TESTCOMMAND\n' >> "$FB_LOG"
+  return "$FB_SHIM_RC_TEST"
+}
+F13_SHIM_EOF
+  cat "$F13_SHIM" "$F13_BLOCK_FILE" > "$F13_DRIVER"
+
+  F13_ENV_DEFAULTS=(
+    "FB_MODE=merge"
+    "FB_BASE_BRANCH=main"
+    "FB_TEST_COMMAND=fbtest"
+    "FB_LOG=$F13_LOG"
+    "FB_SHIM_CURRENT=feat/x"
+    "FB_SHIM_GITDIR=$F13_ROOT/.git/worktrees/feat-x"
+    "FB_SHIM_COMMON=$F13_ROOT/.git"
+    "FB_SHIM_TOPLEVEL=$F13_ROOT/.worktrees/feat-x"
+    "FB_SHIM_PORCELAIN=$F13_PORCELAIN"
+    "FB_SHIM_RC_UPSTREAM=0"
+    "FB_SHIM_RC_CHECKOUT=0"
+    "FB_SHIM_RC_PULL=0"
+    "FB_SHIM_RC_MERGE=0"
+    "FB_SHIM_RC_REMOVE=0"
+    "FB_SHIM_RC_BRANCHDEL=0"
+    "FB_SHIM_RC_TEST=0"
+    "HOME=$F13_DIR/home"
+  )
+
+  F13_OUT=''; F13_RC=0; F13_CALLS=''; F13_STDERR=''
+  f13_run() {  # f13_run <extra env assignments...>  -> sets F13_OUT/RC/CALLS/STDERR
+    : > "$F13_LOG"
+    : > "$F13_ERR"
+    F13_OUT="$( cd "$F13_ROOT" && env "${F13_ENV_DEFAULTS[@]}" "$@" bash "$F13_DRIVER" 2>"$F13_ERR" )"
+    F13_RC=$?
+    F13_CALLS="$(cat "$F13_LOG")"
+    F13_STDERR="$(cat "$F13_ERR")"
+  }
+  f13_saw()   { grep -qE "$1" <<<"$F13_CALLS"; }
+  f13_index() { grep -nE "$1" <<<"$F13_CALLS" | head -1 | cut -d: -f1; }
+  f13_bad()   { F13_FAILURES="$F13_FAILURES $1"; }
+
+  # F13a — vacuity backstop. Mutation guard: change `git` to `command git`
+  # anywhere in the block and the shim stops recording => this goes RED, which
+  # is the signal that F13b..F13j have stopped asserting anything.
+  f13_run
+  [[ -n "$F13_CALLS" ]] || f13_bad a-shim-recorded-nothing
+  f13_saw '^rev-parse ' || f13_bad a-no-rev-parse-call
+  [[ "$F13_RC" -eq 0 ]] || f13_bad "a-happy-path-rc=$F13_RC"
+
+  # F13b — an unchecked checkout is the root cause of the reported-but-absent
+  # merge. Mutation guard: drop the rc check after `git checkout` => `merge`
+  # appears in the log => RED.
+  f13_run "FB_SHIM_RC_CHECKOUT=1"
+  [[ "$F13_RC" -ne 0 ]]          || f13_bad b-checkout-failure-not-fatal
+  f13_saw '^checkout '           || f13_bad b-checkout-never-attempted
+  f13_saw '^merge '              && f13_bad b-merged-after-failed-checkout
+  f13_saw '^branch -[dD] '       && f13_bad b-deleted-branch-after-failed-checkout
+  f13_saw '^worktree remove'     && f13_bad b-removed-worktree-after-failed-checkout
+
+  # F13c — refuse BEFORE any mutation when the base branch is held elsewhere.
+  # Mutation guard: delete the availability probe => `checkout` appears => RED.
+  f13_run "FB_SHIM_PORCELAIN=$F13_PORCELAIN_BUSY"
+  [[ "$F13_RC" -ne 0 ]] || f13_bad c-busy-base-not-refused
+  f13_saw '^checkout '  && f13_bad c-checkout-attempted-on-busy-base
+  f13_saw '^merge '     && f13_bad c-merged-on-busy-base
+  grep -qF "$F13_ROOT/.worktrees/other" <<<"$F13_STDERR" || f13_bad c-holder-path-not-named
+
+  # F13d — a detached HEAD must refuse, not degrade. Mutation guard: accept an
+  # empty current branch => RED.
+  f13_run "FB_SHIM_CURRENT="
+  [[ "$F13_RC" -ne 0 ]]      || f13_bad d-detached-head-not-refused
+  f13_saw '^merge '          && f13_bad d-merged-on-detached-head
+  f13_saw '^branch -[dD] '   && f13_bad d-deleted-branch-on-detached-head
+  f13_saw '^worktree remove' && f13_bad d-removed-worktree-on-detached-head
+
+  # F13e — removal before delete. Mutation guard: swap the two steps => RED.
+  f13_run
+  F13_I_REMOVE="$(f13_index '^worktree remove')"
+  F13_I_DELETE="$(f13_index '^branch -d')"
+  [[ -n "$F13_I_REMOVE" ]] || f13_bad e-worktree-never-removed
+  [[ -n "$F13_I_DELETE" ]] || f13_bad e-branch-never-deleted
+  if [[ -n "$F13_I_REMOVE" && -n "$F13_I_DELETE" && "$F13_I_REMOVE" -lt "$F13_I_DELETE" ]]; then :; else
+    f13_bad "e-remove-not-before-delete($F13_I_REMOVE/$F13_I_DELETE)"
+  fi
+
+  # F13f — the test gate. A failing test command must stop the branch delete,
+  # and an EMPTY test command must refuse outright rather than degrade to "skip"
+  # (a defaulted value is the silent-no-op class this whole change removes).
+  # Mutation guard: default FB_TEST_COMMAND to `true` => the empty case goes RED.
+  f13_run "FB_SHIM_RC_TEST=1"
+  [[ "$F13_RC" -ne 0 ]] || f13_bad f-failing-tests-not-fatal
+  f13_saw 'TESTCOMMAND'  || f13_bad f-test-command-never-ran
+  f13_saw '^branch -d'   && f13_bad f-branch-deleted-after-failing-tests
+  f13_run "FB_TEST_COMMAND="
+  [[ "$F13_RC" -ne 0 ]] || f13_bad f-empty-test-command-not-refused
+  f13_saw '^checkout '   && f13_bad f-empty-test-command-mutated-anyway
+
+  # F13g — the provenance table. The block is SOURCED with FB_MODE unset so the
+  # top-level entry point refuses immediately (no git call, no mutation); the
+  # function definitions survive that refusal, which is what makes the classifier
+  # callable standalone. Do NOT "fix" this into a direct invocation of the block.
+  # Mutation guard: replace the anchored case with a substring or grep test =>
+  # the `notworktrees` and metacharacter rows go RED.
+  F13G_DRIVER="$F13_DIR/f13g-driver.sh"
+  {
+    printf '%s\n' "$F13_BLOCK"
+    printf '%s\n' 'for probe_path in "$F13G_ROOT/.worktrees/a" "$F13G_ROOT/worktrees/a" "$F13G_HOME/.config/uberdev/worktrees/proj/b" "$F13G_ROOT/.claude/worktrees/solve-issue-9" "$F13G_ROOT/notworktrees/a" "/elsewhere/w" "$F13G_ROOT/.worktrees/v1.0|x"; do'
+    printf '%s\n' '  printf "%s => %s\n" "$probe_path" "$(uberdev_fb_worktree_class "$probe_path" "$F13G_ROOT" "$F13G_HOME")"'
+    printf '%s\n' 'done'
+  } > "$F13G_DRIVER"
+  F13G_OUT="$( cd "$F13_ROOT" && env -u FB_MODE -u FB_BASE_BRANCH -u FB_TEST_COMMAND \
+      "F13G_ROOT=$F13_ROOT" "F13G_HOME=$F13_DIR/home" bash "$F13G_DRIVER" 2>/dev/null )"
+  f13g_expect() {  # f13g_expect <path> <class> <tag>
+    grep -qF "$1 => $2" <<<"$F13G_OUT" || f13_bad "$3"
+  }
+  f13g_expect "$F13_ROOT/.worktrees/a"                        owned            g-dot-worktrees
+  f13g_expect "$F13_ROOT/worktrees/a"                         owned            g-worktrees
+  f13g_expect "$F13_DIR/home/.config/uberdev/worktrees/proj/b" owned           g-global-worktrees
+  f13g_expect "$F13_ROOT/.claude/worktrees/solve-issue-9"     dispatcher-owned g-dispatcher
+  f13g_expect "$F13_ROOT/notworktrees/a"                      foreign          g-substring-collision
+  f13g_expect "/elsewhere/w"                                  foreign          g-outside
+  f13g_expect "$F13_ROOT/.worktrees/v1.0|x"                   owned            g-metacharacter
+
+  # F13h — a skip is never silent. Mutation guard: make either arm a bare `:`
+  # and the reason line disappears => RED.
+  f13_run "FB_SHIM_TOPLEVEL=$F13_ROOT/.claude/worktrees/solve-issue-9"
+  f13_saw '^worktree remove' && f13_bad h-removed-a-dispatcher-owned-worktree
+  grep -qF "$F13_ROOT/.claude/worktrees/solve-issue-9" <<<"$F13_OUT" || f13_bad h-dispatcher-skip-unnamed
+  grep -qF 'dispatcher-owned' <<<"$F13_OUT" || f13_bad h-dispatcher-skip-reasonless
+  f13_run "FB_SHIM_TOPLEVEL=$F13_DIR/elsewhere/feat-y"
+  f13_saw '^worktree remove' && f13_bad h-removed-a-foreign-worktree
+  grep -qF "$F13_DIR/elsewhere/feat-y" <<<"$F13_OUT" || f13_bad h-foreign-skip-unnamed
+  grep -qF 'foreign' <<<"$F13_OUT" || f13_bad h-foreign-skip-reasonless
+
+  # F13i — safety canary, NOT a behavioural proof: the teardown must never reach
+  # for `rm -rf`. Removal goes through git so a still-registered worktree cannot
+  # be orphaned (same protocol as merge-pipeline/SKILL.md teardown).
+  grep -qF 'rm -rf' <<<"$F13_BLOCK" && f13_bad i-block-contains-rm-rf
+
+  # F13j — discard mode. No pull, no merge, no test run; worktree removed with
+  # --force (the typed confirmation in Option 4 is what authorises that) BEFORE
+  # the force-delete of the branch.
+  f13_run "FB_MODE=discard" "FB_TEST_COMMAND="
+  [[ "$F13_RC" -eq 0 ]] || f13_bad "j-discard-rc=$F13_RC"
+  f13_saw '^merge '      && f13_bad j-discard-merged
+  f13_saw '^pull '       && f13_bad j-discard-pulled
+  f13_saw 'TESTCOMMAND'  && f13_bad j-discard-ran-tests
+  f13_saw '^worktree remove --force ' || f13_bad j-discard-remove-not-forced
+  f13_saw '^branch -D '  || f13_bad j-discard-branch-not-force-deleted
+  F13_J_REMOVE="$(f13_index '^worktree remove')"
+  F13_J_DELETE="$(f13_index '^branch -D')"
+  if [[ -n "$F13_J_REMOVE" && -n "$F13_J_DELETE" && "$F13_J_REMOVE" -lt "$F13_J_DELETE" ]]; then :; else
+    f13_bad "j-remove-not-before-delete($F13_J_REMOVE/$F13_J_DELETE)"
+  fi
+
+  rm -rf "$F13_DIR"
+fi
+if [[ -z "$F13_FAILURES" ]]; then
+  echo "  PASS  F13 the Step 5 teardown block resolves before it mutates, refuses on a busy base or a detached HEAD, and removes the worktree before deleting the branch"; PASS=$((PASS+1))
+else
+  echo "  FAIL  F13 worktree teardown broken:$F13_FAILURES"; FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------------------
+# F14 — the Q2 adjudication record in plugins/uberdev/vendor.json is LOCKED here
+# because the vendor checker cannot lock it: check_files() short-circuits on any
+# component whose stance is not `track` (tools/vendor/vendor-check.py), and
+# skills/finish-branch is `fork` — so its divergences[] is never read, and no
+# check anywhere resolves a divergences[].ref against permanent_divergences[].id.
+# A dangling ref would therefore pass every existing gate. This case is the
+# missing resolution check, scoped to the component it belongs to.
+#
+# Mutation guard: delete the `interactive-discard-option` entry, or the ref that
+# points at it, and F14 goes RED while vendor-check.py stays green.
+# ---------------------------------------------------------------------------
+F14_VENDOR="$REPO_ROOT/plugins/uberdev/vendor.json"
+if [[ ! -r "$F14_VENDOR" ]]; then
+  echo "  FAIL  F14 vendor.json missing/unreadable: $F14_VENDOR"; FAIL=$((FAIL+1))
+else
+  F14_OUT="$(python3 -I -B - "$F14_VENDOR" <<'F14_PY' 2>&1
+import json, sys
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+divergence_ids = {entry.get("id") for entry in document.get("permanent_divergences", [])}
+problems = []
+
+target = "interactive-discard-option"
+entry = next((e for e in document.get("permanent_divergences", []) if e.get("id") == target), None)
+if entry is None:
+    problems.append("no-permanent-divergence-entry")
+else:
+    if entry.get("permanent") is not True:
+        problems.append("entry-not-permanent")
+    if entry.get("scope") != "skills/finish-branch":
+        problems.append("entry-scope-wrong")
+    if not str(entry.get("note", "")).strip():
+        problems.append("entry-note-empty")
+
+component = next((c for c in document.get("components", []) if c.get("id") == "skills/finish-branch"), None)
+if component is None:
+    problems.append("no-finish-branch-component")
+else:
+    refs = [d.get("ref") for d in component.get("divergences", [])]
+    if target not in refs:
+        problems.append("component-does-not-reference-entry")
+    for ref in refs:
+        if ref not in divergence_ids:
+            problems.append("dangling-ref:%s" % ref)
+
+print(" ".join(problems) if problems else "OK")
+F14_PY
+)"
+  if [[ "$F14_OUT" == "OK" ]]; then
+    echo "  PASS  F14 the declined-discard-prompt divergence is recorded in vendor.json and every finish-branch divergence ref resolves"; PASS=$((PASS+1))
+  else
+    echo "  FAIL  F14 vendor.json divergence record broken: $F14_OUT"; FAIL=$((FAIL+1))
+  fi
+fi
+
 echo
 echo "## Summary"
 echo "  PASS=$PASS  FAIL=$FAIL"

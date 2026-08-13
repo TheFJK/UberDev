@@ -109,24 +109,20 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by the 
 
 #### Option 1: Merge Locally
 
-```bash
-# Switch to base branch
-git checkout <base-branch>
+Option 1 carries no git sequence of its own. It supplies three inputs and runs
+the single executable teardown block in Step 5, which switches to the base
+branch, merges, verifies and cleans up in the one order that actually works.
 
-# Pull latest
-git pull
+Set the inputs in the same Bash call that runs the Step 5 block:
 
-# Merge feature branch
-git merge <feature-branch>
+- `FB_MODE=merge`
+- `FB_BASE_BRANCH=<the base branch resolved in Step 2>`
+- `FB_TEST_COMMAND=<the project test command from Step 1>`
 
-# Verify tests on merged result
-<test command>
+`FB_TEST_COMMAND` is mandatory in merge mode and has no default: the block
+refuses rather than deleting a branch on an unverified merge.
 
-# If tests pass
-git branch -d <feature-branch>
-```
-
-Then: Cleanup worktree (Step 5)
+Then: run the teardown block (Step 5)
 
 #### Option 2: Push and Create PR
 
@@ -627,27 +623,338 @@ Type 'discard' to confirm.
 
 Wait for exact confirmation.
 
-If confirmed:
-```bash
-git checkout <base-branch>
-git branch -D <feature-branch>
-```
+If confirmed, supply the inputs and run the same Step 5 teardown block:
 
-Then: Cleanup worktree (Step 5)
+- `FB_MODE=discard`
+- `FB_BASE_BRANCH=<the base branch resolved in Step 2>`
+- `FB_TEST_COMMAND` is not used in discard mode; leave it unset.
+
+`discard` mode skips the pull, the merge and the test run, removes the worktree
+with `--force` (the typed confirmation above is what authorises destroying
+uncommitted work), and force-deletes the branch.
+
+Then: run the teardown block (Step 5)
 
 ### Step 5: Cleanup Worktree
 
-**For Options 1 and 4:**
+**For Options 1 and 4:** run the block below. It is the one place that switches
+to the base branch, merges or discards, verifies, removes the worktree and
+deletes the branch.
 
-Check if in worktree:
+Options 1 and 4 used to carry their own prose git sequences. Both were wrong in
+the same four ways, and every one of the four was reproduced by an executed
+probe against a real repository rather than inferred from a reading:
+
+1. **`git checkout <base-branch>` was never rc-checked.** Run from a linked
+   worktree it exits 128, because the base branch is already checked out by the
+   main checkout. HEAD stays on the feature branch, and the next
+   `git merge <feature-branch>` merges the branch into itself: rc 0,
+   `Already up to date.` Option 1 reported a merge that never happened.
+2. **The worktree probe was a substring grep** over `git worktree list`. In an
+   ordinary clone it matched the row of the main checkout itself, so the flow
+   went on to `git worktree remove` and hit `is a main working tree`.
+3. **On a detached HEAD the same probe was vacuous.** `git branch
+   --show-current` prints nothing there, so the grep pattern was the empty
+   string and matched every row.
+4. **The branch delete ran before the worktree removal.** git refuses to delete
+   a branch that a live worktree still has checked out, so the delete failed and
+   the worktree survived.
+
 ```bash
-git worktree list | grep $(git branch --show-current)
+# Assign the three inputs in THIS Bash call, immediately above the block: skill
+# fences do not share shell state, so an assignment made in another fence would
+# never reach the code below.
+FB_MODE=<merge for Option 1, discard for Option 4>
+FB_BASE_BRANCH=<the base branch resolved in Step 2>
+FB_TEST_COMMAND=<the project test command; required for merge, unused for discard>
+
+# --- BEGIN worktree teardown (#460) ---
+# Inputs, all mandatory and none defaulted. A defaulted value here IS the silent
+# degradation this block exists to remove: an empty test command must refuse,
+# never quietly become a skipped verification.
+#   FB_MODE          merge | discard
+#   FB_BASE_BRANCH   the base branch resolved in Step 2
+#   FB_TEST_COMMAND  the project test command (merge mode only)
+#
+# Positional access uses the array-slice form throughout. The Claude Skill
+# renderer substitutes positional slash-args into bash function bodies, so a
+# bare positional in a shipped SKILL.md is not a positional at runtime — see
+# abort_if_secret in Option 2 for the same idiom.
+uberdev_fb_error() {
+  printf 'ERROR: %s\n' "${@:1:1}" >&2
+  return 1
+}
+
+uberdev_fb_warn() {
+  printf 'WARNING: %s\n' "${@:1:1}" >&2
+  return 0
+}
+
+# Classify a worktree by PROVENANCE: an anchored pattern match over absolute,
+# physical paths. No grep and no regex, which is what retires defects 2 and 3
+# above — a substring match is what let the main checkout row, a notworktrees
+# sibling and a branch name carrying a regex metacharacter all read as a hit.
+#   arg 1  the worktree path to classify
+#   arg 2  the main checkout root
+#   arg 3  the physical home directory
+# The owned locations mirror using-git-worktrees/SKILL.md step 2; the
+# dispatcher lane mirrors lib/dispatch.sh.
+uberdev_fb_worktree_class() {
+  local fb_wt="${@:1:1}"
+  local fb_root="${@:2:1}"
+  local fb_home="${@:3:1}"
+  if [ "$#" -lt 3 ] || [ -z "$fb_wt" ] || [ -z "$fb_root" ] || [ -z "$fb_home" ]; then
+    uberdev_fb_error "uberdev_fb_worktree_class needs <worktree-path> <main-root> <home-root>"
+    return 2
+  fi
+  case "$fb_wt" in
+    "$fb_root"/.claude/worktrees/*)
+      printf '%s\n' dispatcher-owned ;;
+    "$fb_root"/.worktrees/*|"$fb_root"/worktrees/*|"$fb_home"/.config/uberdev/worktrees/*)
+      printf '%s\n' owned ;;
+    *)
+      printf '%s\n' foreign ;;
+  esac
+}
+
+# The porcelain listing is one block per worktree — a worktree line, a HEAD
+# line, then either a branch line or the bare word detached — and the MAIN
+# worktree is always emitted first. awk field refs are parameterised via
+# -v c0=0 for the same renderer reason as the positional slices above.
+uberdev_fb_main_root() {
+  git worktree list --porcelain 2>/dev/null \
+    | awk -v c0=0 'index($c0, "worktree ") == 1 { print substr($c0, 10); exit }'
+}
+
+# Which worktree currently holds a branch. Prints the holding path, or nothing
+# when the branch is checked out nowhere.
+uberdev_fb_branch_holder() {
+  local fb_branch="${@:1:1}"
+  local fb_want="branch refs/heads/$fb_branch"
+  git worktree list --porcelain 2>/dev/null \
+    | awk -v c0=0 -v want="$fb_want" '
+        index($c0, "worktree ") == 1 { holder = substr($c0, 10) }
+        $c0 == want { print holder; exit }
+      '
+}
+
+# Remove an owned worktree, retry once behind a prune, then give up LOUDLY and
+# leave it in place. The teardown never deletes a worktree directory behind git:
+# a directory removed that way leaves a registered worktree pointing at nothing
+# (merge-pipeline/SKILL.md keeps the same protocol). --force is used in discard
+# mode only, where Option 4 has already taken a typed confirmation for
+# destroying the branch and the worktree; merge mode must not silently destroy
+# uncommitted work, which a commit-based merge never carried across.
+uberdev_fb_remove_worktree() {
+  local fb_wt="${@:1:1}"
+  local fb_how="${@:2:1}"
+  local fb_args
+  fb_args=()
+  if [ "$fb_how" = discard ]; then fb_args=(--force); fi
+  if git worktree remove ${fb_args[@]+"${fb_args[@]}"} "$fb_wt"; then
+    printf 'Removed worktree: %s\n' "$fb_wt"
+    return 0
+  fi
+  if ! git worktree prune; then
+    uberdev_fb_warn "git worktree prune failed while retrying the removal of $fb_wt"
+  fi
+  if git worktree remove ${fb_args[@]+"${fb_args[@]}"} "$fb_wt"; then
+    printf 'Removed worktree after prune: %s\n' "$fb_wt"
+    return 0
+  fi
+  uberdev_fb_warn "could not remove the worktree at $fb_wt; it is left in place. Remove it by hand once you know it is safe: git worktree remove --force $fb_wt"
+  return 0
+}
+
+uberdev_fb_teardown() {
+  local fb_mode="${FB_MODE:-}"
+  local fb_base="${FB_BASE_BRANCH:-}"
+  local fb_tests="${FB_TEST_COMMAND:-}"
+  local fb_feature fb_git_dir fb_common_raw fb_common fb_worktree_root
+  local fb_main_root fb_home_root fb_holder fb_linked fb_class
+
+  # 1. Inputs.
+  case "$fb_mode" in
+    merge|discard) ;;
+    *)
+      uberdev_fb_error "FB_MODE must be merge or discard (got: $fb_mode)"
+      return 1 ;;
+  esac
+  if [ -z "$fb_base" ]; then
+    uberdev_fb_error "FB_BASE_BRANCH is empty — Step 2 resolves the base branch and this block will not guess it"
+    return 1
+  fi
+  if [ "$fb_mode" = merge ] && [ -z "$fb_tests" ]; then
+    uberdev_fb_error "FB_TEST_COMMAND is empty — merge mode never deletes a branch without a green test run on the merged result"
+    return 1
+  fi
+
+  # 2. The feature branch. A detached HEAD prints nothing here, which is where
+  #    defect 3 came from: refuse rather than proceed on an empty name.
+  fb_feature="$(git branch --show-current 2>/dev/null)" || fb_feature=""
+  if [ -z "$fb_feature" ]; then
+    uberdev_fb_error "HEAD is detached — refusing to merge, delete a branch or remove a worktree with no named feature branch"
+    return 1
+  fi
+  if [ "$fb_feature" = "$fb_base" ]; then
+    uberdev_fb_error "already standing on the base branch $fb_base — refusing; this is the self-merge shape that reported Already up to date"
+    return 1
+  fi
+
+  # 3. Resolve every root BEFORE any cd, checkout, merge or delete. Capture
+  #    first, mutate second is a property of this code now, not an instruction
+  #    somebody has to remember.
+  fb_git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || fb_git_dir=""
+  if [ -z "$fb_git_dir" ]; then
+    uberdev_fb_error "git rev-parse --absolute-git-dir produced nothing — not inside a work tree"
+    return 1
+  fi
+  fb_common_raw="$(git rev-parse --git-common-dir 2>/dev/null)" || fb_common_raw=""
+  if [ -z "$fb_common_raw" ]; then
+    uberdev_fb_error "git rev-parse --git-common-dir produced nothing"
+    return 1
+  fi
+  # Normalizing the common dir is mandatory, and the reason is NOT symlinks: git
+  # already answers --absolute-git-dir, --show-toplevel and the worktree listing
+  # with physical paths. It is that in an ORDINARY clone --git-common-dir
+  # answers the relative string .git while --absolute-git-dir answers an
+  # absolute path, so comparing the two unnormalized reports every ordinary
+  # clone as a linked worktree.
+  fb_common="$(cd "$fb_common_raw" 2>/dev/null && pwd -P)" || fb_common=""
+  if [ -z "$fb_common" ]; then
+    uberdev_fb_error "cannot resolve the git common directory: $fb_common_raw"
+    return 1
+  fi
+  fb_worktree_root="$(git rev-parse --show-toplevel 2>/dev/null)" || fb_worktree_root=""
+  if [ -z "$fb_worktree_root" ]; then
+    uberdev_fb_error "git rev-parse --show-toplevel produced nothing"
+    return 1
+  fi
+  # HOME is shell-supplied rather than git-derived, so it is the one prefix in
+  # the classifier that can genuinely be non-physical. When it does not resolve,
+  # say so and use a sentinel that cannot prefix any real path — never an empty
+  # string, which would turn the global-worktree arm into a wildcard.
+  fb_home_root="$(cd "${HOME:-}" 2>/dev/null && pwd -P)" || fb_home_root=""
+  if [ -z "$fb_home_root" ]; then
+    uberdev_fb_warn "HOME does not resolve to a directory; a worktree under the global location will be reported as foreign"
+    fb_home_root="/dev/null/unresolved-home"
+  fi
+  # The linked-worktree test that replaces the grep outright, and the same guard
+  # lib/status.sh and lib/dispatch.sh already use: in a linked worktree the git
+  # dir is <common>/worktrees/<name>; in the main checkout the two are equal.
+  if [ "$fb_git_dir" = "$fb_common" ]; then fb_linked=0; else fb_linked=1; fi
+  fb_main_root="$(uberdev_fb_main_root)" || fb_main_root=""
+  if [ -z "$fb_main_root" ]; then
+    uberdev_fb_error "cannot resolve the main checkout root from git worktree list --porcelain"
+    return 1
+  fi
+
+  # 4. Everything below runs in the MAIN checkout. This is the structural half
+  #    of the fix: the base branch cannot be checked out from a linked worktree
+  #    at all, so a flow that stayed put could only ever fail its checkout and
+  #    then merge the feature branch into itself.
+  if ! cd "$fb_main_root"; then
+    uberdev_fb_error "cannot enter the main checkout root $fb_main_root"
+    return 1
+  fi
+
+  # 5. Refuse BEFORE any mutation when another worktree holds the base branch,
+  #    then rc-check the checkout itself.
+  fb_holder="$(uberdev_fb_branch_holder "$fb_base")" || fb_holder=""
+  if [ -n "$fb_holder" ] && [ "$fb_holder" != "$fb_main_root" ]; then
+    uberdev_fb_error "base branch $fb_base is checked out by the worktree at $fb_holder — refusing before any merge, delete or removal. Finish from that checkout, or free the branch there first."
+    return 1
+  fi
+  if ! git checkout "$fb_base"; then
+    uberdev_fb_error "git checkout $fb_base failed — aborting BEFORE the merge. An unchecked checkout here is exactly what turned the following merge into a self-merge that reported success."
+    return 1
+  fi
+
+  # 6. merge mode only. The test command runs in a subshell so a stray cd or
+  #    variable assignment inside it cannot repoint the git calls below.
+  if [ "$fb_mode" = merge ]; then
+    if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+      if ! git pull --ff-only; then
+        uberdev_fb_error "git pull --ff-only failed on $fb_base — the local base has diverged from its upstream. Reconcile it, then rerun."
+        return 1
+      fi
+    else
+      uberdev_fb_warn "$fb_base has no upstream branch; merging into the local base without pulling"
+    fi
+    if ! git merge "$fb_feature"; then
+      uberdev_fb_error "git merge $fb_feature failed. The repository is left mid-merge on $fb_base: resolve and commit, or run git merge --abort, then rerun."
+      return 1
+    fi
+    if ! ( eval "$fb_tests" ); then
+      uberdev_fb_error "the test command failed on the merged result. $fb_feature is NOT deleted and the worktree is NOT removed; fix the failures, or undo the merge, then rerun."
+      return 1
+    fi
+  fi
+
+  # 7. Worktree removal comes BEFORE the branch delete (defect 4): git refuses
+  #    to delete a branch a live worktree still has checked out. A skip is never
+  #    silent — every arm names the path and the reason.
+  fb_class=not-linked
+  if [ "$fb_linked" = 1 ]; then
+    fb_class="$(uberdev_fb_worktree_class "$fb_worktree_root" "$fb_main_root" "$fb_home_root")" || fb_class=foreign
+    case "$fb_class" in
+      owned)
+        uberdev_fb_remove_worktree "$fb_worktree_root" "$fb_mode" ;;
+      dispatcher-owned)
+        printf 'Left worktree in place: %s (dispatcher-owned: .claude/worktrees is created and torn down by lib/dispatch.sh, so removing it here would race the dispatcher).\n' "$fb_worktree_root" ;;
+      *)
+        printf 'Left worktree in place: %s (foreign: not a location this project creates, so only whoever made it knows whether it is still needed).\n' "$fb_worktree_root" ;;
+    esac
+  else
+    printf 'No linked worktree to remove: this is the main checkout.\n'
+  fi
+
+  # 8. Branch delete last, and rc-checked. A failure here is a WARNING rather
+  #    than an abort: the merge already landed, so the run must not report a
+  #    failure it can no longer undo.
+  if [ "$fb_mode" = merge ]; then
+    if git branch -d "$fb_feature"; then
+      printf 'Deleted branch: %s\n' "$fb_feature"
+    else
+      uberdev_fb_warn "could not delete $fb_feature (not fully merged, or still checked out somewhere). The merge itself succeeded — delete it by hand once you are sure."
+    fi
+  else
+    if git branch -D "$fb_feature"; then
+      printf 'Force-deleted branch: %s\n' "$fb_feature"
+    else
+      uberdev_fb_warn "could not force-delete $fb_feature; delete it by hand."
+    fi
+  fi
+
+  # 9. Self-heal the registry, then say exactly what happened.
+  if ! git worktree prune; then
+    uberdev_fb_warn "git worktree prune failed; the worktree registry may still list a removed path"
+  fi
+  printf 'finish-branch teardown complete: mode=%s base=%s feature=%s worktree=%s\n' \
+    "$fb_mode" "$fb_base" "$fb_feature" "$fb_class"
+  return 0
+}
+
+uberdev_fb_teardown
+# --- END worktree teardown (#460) ---
 ```
 
-If yes:
-```bash
-git worktree remove <worktree-path>
-```
+**What the block will and will not destroy.** Repairing Option 1 makes a
+previously inert path start executing for real, so the destruction boundary is
+explicit:
+
+- It refuses before touching anything when the base branch is held by another
+  worktree, when HEAD is detached, or when the test command is missing.
+- Every git call is rc-checked and the first failure aborts.
+- No branch is deleted in `merge` mode without a green test run on the merged
+  result.
+- `merge` mode removes the worktree **without** `--force`, so a worktree holding
+  uncommitted work is left standing with a `WARNING` naming it — a commit-based
+  merge never carried that work across, and losing it silently would be the same
+  class of defect this block fixes. Only `discard` mode uses `--force`, and only
+  behind the typed confirmation in Option 4.
+- A worktree that is not in a location this project creates is never removed,
+  and the skip always says which path and why.
 
 **For Options 2 and 3:** Keep worktree. Option 2 leaves the branch alive for PR-feedback fixups; Option 3 is explicit "keep as-is". The Quick Reference table and Red Flags below codify this.
 
