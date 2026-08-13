@@ -3978,6 +3978,42 @@ def validate_persistence_result(
     status_sha256: str,
     result_sha256: str,
 ) -> dict[str, Any]:
+    """Judge the review_pr.defer.findings child's terminal.
+
+    The blocker accounting below is a LOWER BOUND, not an equality, because the
+    two sides count different populations and always did (#453):
+
+    * `expected_deferred_blockers` is Phase-2-scoped. It is recounted here from
+      the pinned aggregate/disposition bytes by `count_deferred_blockers`, which
+      hardcodes a `simplify-aggregate` envelope and `phase2` validation, so it
+      can see no Phase 1 row at all.
+    * `by_severity.blocker` and `skipped_closed` are what the FILER wrote, and
+      `agents/findings-to-issues.md` reads both phase aggregates: they count
+      Phase 1 and Phase 2 rows together.
+
+    An equality therefore failed every run that filed a Phase 1 blocker, and the
+    RFC 0017 verification gate — which culls Phase 1 rows before they are filed
+    — made that easier to hit. The relation the binding can actually prove is
+    the one this asserts: the filer accounted for AT LEAST the N blockers the
+    Phase 2 fixer deferred. Phase 1 rows only ever raise the observed count.
+
+    Equality is not merely unpinned here, it is unreachable: the filer collapses
+    rows across phases by `(file, line, normalised summary)`, so a Phase 1 and a
+    Phase 2 blocker at one location legitimately produce a single filed row.
+
+    The bound is not weakened by the filer's own drop paths. `require_clean` is
+    true exactly when a Phase 2 blocker was deferred, and it demands `DONE` —
+    which the child returns only when `blocked_by_dedupe` is empty and
+    `overflow_count` is 0. So on every run this bound can fail, each deferred
+    Phase 2 blocker was either filed/commented (`by_severity.blocker`) or
+    matched an already-closed issue (`skipped_closed`), and an under-reporting
+    child — the one that would emit a GREEN trail over an unfiled blocker — is
+    still refused.
+
+    What this does NOT assert: that the filer wrote no MORE blockers than were
+    deferred. The upper bound needs a recount of the Phase 1 pair, which this
+    binding does not pin (it travels as a prompt input only).
+    """
     binding = _load_persistence_binding(launch_binding)
     observed_deferred_blockers = count_deferred_blockers(
         findings_path=binding["aggregate_path"],
@@ -4001,10 +4037,8 @@ def validate_persistence_result(
     if binding["require_clean"] and status != "DONE":
         fail("persistence_result_concerns")
     blocker_count = parsed["by_severity_blocker"]
-    if (
-        binding["expected_deferred_blockers"]
-        != blocker_count + parsed["skipped_blockers"]
-    ):
+    accounted_blockers = blocker_count + parsed["skipped_blockers"]
+    if accounted_blockers < binding["expected_deferred_blockers"]:
         fail("persistence_result_authority_mismatch")
     capture_expected(
         binding["status_path"], status_sha256, 1, 65_536
