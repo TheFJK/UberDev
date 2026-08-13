@@ -175,6 +175,8 @@
     }
   ],
   "pending": [
+    "agents/ci-code-fixer.md",
+    "agents/ci-failure-classifier.md",
     "agents/code-fixer.md",
     "agents/code-reviewer.md",
     "agents/findings-to-issues.md",
