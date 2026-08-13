@@ -1728,7 +1728,13 @@ else
 fi
 
 owner_bridge_contract_tmp="$(mktemp -d)"
-if (
+# #469: the subshell runs OUTSIDE the `if` condition and its captured status is
+# tested, so the `set -e` it re-arms on line "set -e" below is live. A subshell
+# used AS an if-condition has errexit suppressed for its whole body (POSIX: the
+# -e setting is ignored for a command whose status is being tested), and bash
+# keeps that suppression even across an explicit `set -e` inside the subshell —
+# so every assertion above the last would be a no-op.
+(
   trap 'rm -rf "$owner_bridge_contract_tmp"' EXIT
   . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
   bridge_writer_case=closed
@@ -1755,18 +1761,20 @@ if (
       "$owner_bridge_contract_tmp"/.owner-process-output.*; do
     [ ! -e "$candidate" ] || remaining_probe="$candidate"
   done
-  [ "$closed_rc" -eq 1 ] \
-    && [ "$closed_output" = '{"error":"process_identity_parent_absent","status":"error"}' ] \
-    && [ "$extra_rc" -eq 1 ] \
-    && [ "$extra_output" = '{"error":"owner_process_identity_writer_failed","status":"error"}' ] \
-    && [ "$crlf_rc" -eq 2 ] \
-    && [ "$crlf_output" = '{"error":"owner_process_record_malformed","status":"error"}' ] \
-    && [ -z "$remaining_probe" ]
-); then
+  [ "$closed_rc" -eq 1 ] || exit 61
+  [ "$closed_output" = '{"error":"process_identity_parent_absent","status":"error"}' ] || exit 62
+  [ "$extra_rc" -eq 1 ] || exit 63
+  [ "$extra_output" = '{"error":"owner_process_identity_writer_failed","status":"error"}' ] || exit 64
+  [ "$crlf_rc" -eq 2 ] || exit 65
+  [ "$crlf_output" = '{"error":"owner_process_record_malformed","status":"error"}' ] || exit 66
+  [ -z "$remaining_probe" ] || exit 67
+)
+OWNER_BRIDGE_CONTRACT_RC=$?
+if [ "$OWNER_BRIDGE_CONTRACT_RC" -eq 0 ]; then
   echo "  PASS  owner bridge preserves safe writer failures and rejects CRLF or untrusted records"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  owner bridge leaked, rewrote status, or retained an unsafe probe"
+  echo "  FAIL  owner bridge leaked, rewrote status, or retained an unsafe probe (rc=$OWNER_BRIDGE_CONTRACT_RC; 61/63/65=closed|extra|crlf status, 62/64/66=closed|extra|crlf rendered record, 67=an unsafe probe file survived)"
   FAIL=$((FAIL + 1))
   rm -rf "$owner_bridge_contract_tmp"
 fi
