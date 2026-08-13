@@ -137,12 +137,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/dispatching-parallel-agents",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream and the whole local delta is the 'superpowers:' -> 'uberdev:' namespace rebrand. Re-baseline from upstream.",
+      "stance_reason": "File set is 1:1 with upstream and SKILL.md is byte-identical to the recorded base e7a2d16 apart from the provenance header line this repo adds; there is no other local delta, and the file carries no 'superpowers:' token to rebrand. The 33 measured lines are upstream's own v6.2.0 prose compression (dispatch example rewritten, 'Key Benefits' and 'Real-World Impact' sections dropped), un-adopted here. Re-baseline from upstream.",
       "measured_diff_lines": 33,
       "divergences": [
         {
@@ -153,7 +153,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "76806091c7f923ba2596546b19cccd98a08e57a68745df77c3a7b998fe838e2b"
+          "sha256": "af768f9ba33cb030d04d0ff7f5447545f4acf6243a5738579410965ab5824919"
         }
       ]
     },
