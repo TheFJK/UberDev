@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — which is the base this file and its 10 sibling files in skills/systematic-debugging were copied from, and the SHA vendor.json records for the component; upstream search-expression fix adopted from obra/superpowers@3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 (v6.2.0, MIT) — that hunk only, not a component re-baseline; local addition: (1) fail-loud exit 2 whenever the run cannot back a verdict — no matched test files, an incomplete file search, a runner that cannot execute, a matched path the file list could not carry intact, a pollution target already present, or fewer tests ran than were matched (the exit contract below is authoritative for this list — do not restate it partially); (2) whitespace- and glob-safe enumeration — upstream iterates the unquoted match string and counts its lines, this copy reads the matches into an array and counts the array (#430)
+# Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — which is the base this file and its 10 sibling files in skills/systematic-debugging were copied from, and the SHA vendor.json records for the component; upstream search-expression fix adopted from obra/superpowers@3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9 (v6.2.0, MIT) — that hunk only, not a component re-baseline; local addition: (1) fail-loud exit 2 whenever the run cannot back a verdict — no matched test files, an incomplete file search, a runner that cannot execute, a matched path the file list could not carry intact, a pollution target already present, or fewer tests ran than were matched (the exit contract below is authoritative for this list — do not restate it partially); (2) whitespace- and glob-safe enumeration — upstream iterates the unquoted match string and counts its lines, this copy reads the matches into an array and counts the array (#430); (3) a pre-loop runner-capability probe (npm pkg get scripts.test) that refuses with [runner-incapable] when the project defines no test script npm could run, because such a project fails every 'npm test <file>' identically and upstream would count each one as a test that ran and failed (#476)
 # Bisection script to find which test creates unwanted files/state
 # Usage: ./find-polluter.sh <file_or_dir_to_check> <test_pattern>
 # Example: ./find-polluter.sh '.git' 'src/**/*.test.ts'
 # Exit: 0 = every matched test ran and none polluted; 1 = polluter found, or bad usage —
 #           a deliberate carry-over fusion, see the note in tests/find-polluter.test.sh;
-#       2 = verdict refused. Six structurally different causes share this code, so every
+#       2 = verdict refused. Seven structurally different causes share this code, so every
 #           exit-2 message carries a machine-readable reason token as the first bracketed
 #           field of its first line. Branch on the token, never on the English prose:
 #             [search-failed]    the file search was incomplete
 #             [no-matches]       nothing matched the pattern
 #             [runner-unusable]  the test runner could not be executed
+#             [runner-incapable] the runner starts but the project defines no test script
+#                                it could run
 #             [dirty-start]      the pollution target was already present, so a test
 #                                would not have run
 #             [path-missing]     a matched path was gone when its turn came
@@ -94,20 +96,82 @@ fi
 # and every subsequent invocation then fails with 126, which the loop below would
 # have to catch instead. Running it here refuses on the whole class at once.
 #
-# What this still CANNOT establish is that the project defines a test script. A
-# runner that starts and exits non-zero for every file is indistinguishable from
-# a test that ran and failed, because the invocation below deliberately swallows
-# a non-zero status (a failing test is a legitimate outcome — the pollution check
-# is the verdict, not the runner's status). A suite wired under a differently
-# named script therefore still reaches the clean verdict having executed nothing.
-# That gap is real and unclosed: proving capability needs a manifest- or
-# runner-specific probe this vendored, runner-agnostic helper does not have (#430).
+# Starting is not the same as being able to run a test, and the probe below is
+# what covers the difference (#476).
 if ! npm --version > /dev/null 2>&1; then
   echo "" >&2
   echo "❌ [runner-unusable] The test runner 'npm' could not be executed - refusing to report a verdict." >&2
   echo "   Matched: $TOTAL test files, none of which could be run." >&2
   echo "   Neither missing from PATH nor startable: check the runner and its interpreter." >&2
   echo "   A bisection that cannot run a single test proves nothing. Fix the runner and re-run." >&2
+  exit 2
+fi
+
+# Then probe CAPABILITY, because a runner that starts is not yet a runner that
+# can run a test. A project defining no `test` script makes `npm test <file>`
+# exit 1 for every file, and the loop below deliberately reads a non-zero status
+# as "the test ran and failed" (a failing test is a legitimate outcome — the
+# pollution check is the verdict, not the runner's status). So every match was
+# counted as run, the reconciliation was satisfied, and the run reached the clean
+# verdict having executed nothing: the same vacuous green one layer down (#476).
+#
+# What the probe establishes is narrow and worth stating exactly: the runner can
+# answer that THIS project defines the script it would run. Asking through npm
+# rather than reading ./package.json is what makes probe and runner agree on
+# WHICH manifest — npm resolves it the same way for `pkg` as for `test`, so a
+# bisection driven from a nested subdirectory or a workspace package is judged
+# against the manifest that will actually serve it, which a cwd-local
+# `[ -f package.json ]` check would get wrong in both directions.
+#
+# Three things it deliberately does NOT do:
+#   * A `test` script that exists but runs no tests ("test": "echo skipped") is
+#     indistinguishable from a suite that passes without executing it, and is NOT
+#     closed here — deciding it needs running the thing under test. ("test": ""
+#     IS caught, as a free consequence of the predicate below.)
+#   * An npm too old to answer `pkg` (npm < 7) and a project with no readable
+#     manifest are both REFUSED, not assumed working. A script whose entire
+#     subject is confident wrong answers must not carry an "assume it works"
+#     branch; the refusal names what was asked so the reader can act on it.
+#   * The probe does not run the suite to test capability. Executing a test here
+#     would attribute nothing and could create the very pollution marker the
+#     bisection is about to look for, turning the check into its own [dirty-start].
+#
+# stderr is DISCARDED here, deliberately, and NOT merged the way the runner
+# invocation below merges it. The predicate is anchored to the answer's first and
+# last byte, so any bytes npm wrote to stderr — a warning, a notice, anything a
+# future version adds — would land inside the captured string, the answer would
+# no longer START with a quote, and a perfectly capable project would be refused.
+# The runner call wants everything npm said because it is building a diagnostic;
+# this one wants only the VALUE npm returned, because it is making a decision.
+# Nothing is lost: CAP_RC carries the failure and the answer itself is echoed in
+# the refusal below.
+CAP_RC=0
+CAP_ANSWER="$(npm pkg get scripts.test 2>/dev/null)" || CAP_RC=$?
+CAP_OK=no
+if [ "$CAP_RC" -eq 0 ]; then
+  # A non-empty JSON string on a zero exit is the only capable answer. Measured
+  # against npm 10.8.2: a defined script answers `"vitest run"` (CAPABLE); no
+  # `scripts.test`, no `scripts` key at all, and a `test:unit`-only project each
+  # answer `{}`; an empty `"test": ""` answers with nothing; and a missing
+  # manifest exits 254 with a multi-line JSON error envelope. Every one of those
+  # fails this pattern, which needs at least three characters bounded by quotes —
+  # and a JSON string value can never carry a raw newline, so the envelope cannot
+  # sneak past it either.
+  case "$CAP_ANSWER" in '"'?*'"') CAP_OK=yes ;; esac
+fi
+if [ "$CAP_OK" != "yes" ]; then
+  echo "" >&2
+  echo "❌ [runner-incapable] The test runner 'npm' starts but this project defines no test script it could run - refusing to report a verdict." >&2
+  echo "   Matched: $TOTAL test files, none of which could have been run." >&2
+  echo "   Asked: npm pkg get scripts.test (exit $CAP_RC)" >&2
+  if [ -n "$CAP_ANSWER" ]; then
+    echo "   Answered:" >&2
+    head -n 5 <<< "$CAP_ANSWER" >&2 || true
+  else
+    echo "   Answered: nothing at all." >&2
+  fi
+  echo "   Without a runnable 'test' script every 'npm test <file>' fails identically, which is indistinguishable from a test that ran and failed - so every file would be counted as run and the verdict would be backed by nothing." >&2
+  echo "   Wire the suite under 'test', run the bisection from the package directory that defines it, or drive your runner directly. A verdict needs tests that actually ran." >&2
   exit 2
 fi
 
