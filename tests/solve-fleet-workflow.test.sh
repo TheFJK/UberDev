@@ -270,6 +270,15 @@ grep -q 'UNTRUSTED INPUT' "$WORKFLOW" \
   && pass "G7 agents are told to treat issue text as untrusted input" \
   || fail "G7 no untrusted-input framing"
 
+# G7b (#516) — the fleet's own baseline must not be attributed to a file this repo
+# does not ship. Absence idiom matches S2b/S3/S4a-d/G10 in this file; readability is
+# owned by the preflight at :33-35, which exits 2 when $WORKFLOW is unreadable, so a
+# bespoke rc-capture arm here would be unreachable. The same absence is asserted
+# independently by docs-accuracy.test.sh T12.6b under its own hard-fail preflight.
+grep -qF 'from CLAUDE.md' "$WORKFLOW" \
+  && fail "G7b the solver prompt still cites a rule document this repo does not ship" \
+  || pass "G7b no prompt in workflow.js attributes its rules to an unshipped CLAUDE.md"
+
 echo "== G: SKILL.md seam =="
 grep -q 'skills/solve-fleet/workflow.js' "$SKILL" \
   && pass "G8 SKILL.md names its workflow script" || fail "G8 SKILL.md does not name workflow.js"
@@ -379,6 +388,32 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.bPlanInPrompt = !!(solverB && solverB.prompt.indexOf("/issue-11/plan.md") >= 0);
   const solverB12 = recB.agentCalls.find(function (c) { return c.label === "solve:#12 (trivial)"; });
   out.bTrivialNoPlan = !!(solverB12 && solverB12.prompt.indexOf("plan.md") < 0);
+
+  // #516 — the constraints lens must DISCOVER which rule documents exist rather
+  // than assert a fixed path list. Read from the RENDERED prompt, not the source:
+  // this survives a later refactor of lensBrief into a derived value.
+  const consB = recB.agentCalls.find(function (c) { return c.label === "research:#11:constraints"; });
+  out.bLensNoDeadPaths  = !!(consB && consB.prompt.indexOf("Read CLAUDE.md and AGENTS.md (repo root)") < 0);
+  out.bLensSkipClause   = !!(consB && consB.prompt.indexOf("skipping any that do not exist") >= 0);
+  out.bLensAntiSilence  = !!(consB && consB.prompt.indexOf("silence is not the same as absence") >= 0);
+
+  // #516 — this is the GATE site: its verdict is APPROVE|REVISIONS_REQUIRED|REJECT,
+  // so a reviewer substituting a nearby file turns an invented rule into a blocker.
+  const srevB = recB.agentCalls.find(function (c) { return c.label === "spec-review:#11"; });
+  out.bReviewNoAssert  = !!(srevB && srevB.prompt.indexOf("contradicts CLAUDE.md/AGENTS.md") < 0);
+  out.bReviewNoBlindNo = !!(srevB && srevB.prompt.indexOf("do not fail the spec against a rule document you did not open") >= 0);
+
+  // #516 — the HOUSE RULES block is a verbatim slice of the USER-GLOBAL
+  // ~/.claude/CLAUDE.md. Those rules exist in NO file this repo ships, so the
+  // citation is unrepairable by re-pointing: it must stop claiming a source.
+  out.bSolverNoCite     = !!(solverB && solverB.prompt.indexOf("from CLAUDE.md") < 0);
+  out.bSolverHonest     = !!(solverB && solverB.prompt.indexOf("not a quotation of any file") >= 0);
+  out.bSolverReadsRepo  = !!(solverB && solverB.prompt.indexOf("the root of YOUR worktree") >= 0);
+
+  // #516 — the source-level greps (docs-accuracy T12.6, goal-version-bump V9.invariant,
+  // G5b here) all read the FILE. This is the only row proving the bullet still reaches
+  // the agent — the parallel-batch version-collision class depends on it doing so.
+  out.bSolverVersionLock = !!(solverB && solverB.prompt.indexOf("Do NOT bump the project version") >= 0);
 
   // Run C — the spec review loop is BOUNDED: REVISIONS_REQUIRED does not re-run
   // the writer (the #308 unbounded-loop class).
@@ -501,6 +536,16 @@ else
   check bResearchArtifacts 3 "B16 all three research artifacts accepted"
   check bPlanInPrompt true   "B17 the medium solver receives its plan path"
   check bTrivialNoPlan true  "B18 the trivial solver receives no plan"
+
+  check bLensNoDeadPaths true "B47 the constraints lens no longer asserts CLAUDE.md/docs/adr exist (#516)"
+  check bLensSkipClause  true "B48 the conditional skip-if-absent clause reaches the constraints agent"
+  check bLensAntiSilence true "B49 the anti-silent-substitution clause reaches the constraints agent"
+  check bReviewNoAssert  true "B50 the spec-review gate no longer asserts CLAUDE.md/AGENTS.md exist (#516)"
+  check bReviewNoBlindNo true "B51 the reviewer may not fail a spec against a rule doc it did not open"
+  check bSolverNoCite    true "B52 the solver prompt no longer attributes its baseline to CLAUDE.md (#516)"
+  check bSolverHonest    true "B53 the baseline is labelled truthfully as the fleet's own"
+  check bSolverReadsRepo true "B54 the solver is told to read the rule docs that exist in ITS worktree"
+  check bSolverVersionLock true "B55 the version-bump prohibition still reaches the rendered solver prompt"
 
   check cSpecCalls 1         "B19 REVISIONS_REQUIRED does NOT re-run the spec writer (bounded loop)"
   check cReviewCalls 1       "B20 the review runs exactly once"
