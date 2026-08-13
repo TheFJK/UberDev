@@ -235,8 +235,10 @@ PY
 
 Capture the review diff and exact standalone baseline through the executable
 contract before any lens launches. The snapshot records HEAD (`H0`), the real
-index (`I0`), raw tracked worktree bytes (`W0`), and non-evidence untracked
-bytes (`U0`).
+index (`I0`), raw tracked worktree bytes (`W0`), and non-evidence, non-ignored
+untracked bytes (`U0`). Gitignored paths are outside `U0` deliberately: a lens
+or a fixer that runs the suite writes into ignored build and cache trees, and
+an ignored path cannot enter the commit under review.
 
 ```bash uberdev-executable
 STANDALONE_SNAPSHOT_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" snapshot-standalone --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS" --diff-path "$DIFF_ARTIFACT_PATH" --snapshot-path "$STANDALONE_SNAPSHOT_PATH")" || return 74

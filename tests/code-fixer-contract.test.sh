@@ -1059,7 +1059,9 @@ with scratch_dir("code-fixer-contract-") as temporary:
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
     (repo / "src").mkdir()
-    (repo / ".gitignore").write_text("ignored.cfg\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "ignored.cfg\nnode_modules/\n", encoding="utf-8"
+    )
     (repo / "ignored.cfg").write_text("LOCAL = 1\n", encoding="utf-8")
     (repo / "src/outside.py").write_text("OUTSIDE = 1\n", encoding="utf-8")
     (repo / "src/new.py").write_text("NEW = 0\n", encoding="utf-8")
@@ -1248,6 +1250,19 @@ with scratch_dir("code-fixer-contract-") as temporary:
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == head
     (repo / "src/new.py").unlink()
 
+    # A gitignored dependency tree, in place BEFORE the mint (#478). npm and
+    # pnpm hardlink package files out of the global cache, so `st_nlink > 1` is
+    # the ORDINARY shape under `node_modules` — and the owned-regular capture
+    # that the untracked scan runs over every path it enumerates rejects
+    # exactly that (`artifact_not_owned_regular`), as does any file past
+    # `WORKTREE_FILE_LIMIT`. Enumerating ignored paths therefore made the mint
+    # itself abort on a normal JavaScript checkout, before hashing ~62k paths
+    # could even become the cost complaint.
+    dependency_tree = repo / "node_modules/.cache"
+    dependency_tree.mkdir(parents=True)
+    (dependency_tree / "package.bin").write_bytes(b"cached-package\n")
+    os.link(dependency_tree / "package.bin", dependency_tree / "linked.bin")
+
     # A clean preparation publishes one closed, deterministic authority snapshot.
     authority_receipt = prepare(
         repo, findings, findings_sha, commit_range, range_sha, dirty_disposition
@@ -1267,6 +1282,11 @@ with scratch_dir("code-fixer-contract-") as temporary:
         "index_mode", "untracked",
     }
     assert authority["schema_version"] == 1
+    # U0 is the NON-ignored untracked set. `ignored.cfg` and the dependency
+    # tree above cannot enter the commit under review — the diff, the
+    # target-path allowlist and `commit-review` all operate on tracked content
+    # — so they are not baseline state and their churn is not drift.
+    assert authority["untracked"] == [], authority["untracked"]
     assert authority["findings_sha256"] == findings_sha
     assert authority["commit_range_sha256"] == range_sha
     assert [row["finding_index"] for row in authority["finding_keys"]] == [1, 2]
@@ -1360,11 +1380,10 @@ with scratch_dir("code-fixer-contract-") as temporary:
             "--disposition-path", str(dirty_disposition),
         ], stdin=raw, expected=expected)
 
-    ignored_before = (repo / "ignored.cfg").read_bytes()
-    (repo / "ignored.cfg").write_text("LOCAL = attacker\n", encoding="utf-8")
-    publish(json.dumps(valid_candidate))
-    assert dirty_disposition.exists() and dirty_disposition.stat().st_size == 0
-    (repo / "ignored.cfg").write_bytes(ignored_before)
+    # Ignored-path churn between mint and publication is judged at the one
+    # publication below that SUCCEEDS, not here: with every APPLIED target
+    # still clean, `review_applied_path_mismatch` refuses first, so an arm
+    # placed here reports exit 74 whichever way the baseline is scanned.
 
     authority_swap = evidence / "authority-replacement.json"
     authority_swap.write_bytes(authority_before + b" ")
@@ -1399,6 +1418,16 @@ with scratch_dir("code-fixer-contract-") as temporary:
         assert dirty_disposition.exists() and dirty_disposition.stat().st_size == 0
 
     (repo / "src/a.py").write_text("A = 2\n", encoding="utf-8")
+    # The fixer is REQUIRED to run the suite between the authority mint and
+    # `publish-disposition`, and a test run writes into ignored cache trees —
+    # vitest drops `node_modules/.vite/vitest/<hash>/results.json` on every
+    # run. A baseline that enumerated ignored paths counted those writes as
+    # new untracked state, so publication refused `review_baseline_mismatch`:
+    # a fixer that tested its own work invalidated its own authority. (#478)
+    (repo / "ignored.cfg").write_text("LOCAL = attacker\n", encoding="utf-8")
+    vitest_cache = repo / "node_modules/.vite/vitest/da39a3ee5e6b4b0d"
+    vitest_cache.mkdir(parents=True)
+    (vitest_cache / "results.json").write_text('{"version":1}\n', encoding="utf-8")
     published = json.loads(publish(json.dumps(valid_candidate), expected=0))
     assert set(published) == {
         "disposition_path", "disposition_sha256", "applied_paths",
@@ -3275,7 +3304,9 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
     (repo / "clean.txt").write_text("H0\n", encoding="utf-8")
-    (repo / ".gitignore").write_text("ignored.cfg\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "ignored.cfg\nnode_modules/\n", encoding="utf-8"
+    )
     git(repo, "add", "--", "clean.txt", ".gitignore")
     git(repo, "commit", "-qm", "test: review-only base")
     head = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
@@ -3283,6 +3314,13 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     (repo / "untracked.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (repo / "untracked.sh").chmod(0o644)
     (repo / "ignored.cfg").write_text("secret-local-state\n", encoding="utf-8")
+    # The same hardlinked dependency tree the review-mode fixture models: the
+    # standalone snapshot mints U0 through the identical scan, so it aborted
+    # on the identical `artifact_not_owned_regular` before #478.
+    review_only_tree = repo / "node_modules/.cache"
+    review_only_tree.mkdir(parents=True)
+    (review_only_tree / "package.bin").write_bytes(b"cached-package\n")
+    os.link(review_only_tree / "package.bin", review_only_tree / "linked.bin")
     objects_before = git_object_files(repo)
     evidence = repo / ".uberdev/research/20260728-010206-abcdef1"
     evidence.mkdir(parents=True)
@@ -3306,13 +3344,6 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         {
             "git_mode": "100644",
             "kind": "regular",
-            "path": "ignored.cfg",
-            "sha256": hashlib.sha256(b"secret-local-state\n").hexdigest(),
-            "size": len(b"secret-local-state\n"),
-        },
-        {
-            "git_mode": "100644",
-            "kind": "regular",
             "path": "untracked.sh",
             "sha256": hashlib.sha256(b"#!/bin/sh\nexit 0\n").hexdigest(),
             "size": len(b"#!/bin/sh\nexit 0\n"),
@@ -3325,21 +3356,28 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     )]))
     disposition = evidence / "phase2-disposition.json"
     disposition.write_bytes(b"")
+    # Ignored churn is not drift, and it is deliberately NOT restored: every
+    # remaining arm of this block — including the publication at the end that
+    # must SUCCEED — runs with a mutated ignored file and a vitest result cache
+    # written after the mint, exactly as a fixer that ran the suite leaves
+    # them. (#478)
     (repo / "ignored.cfg").write_text("mutated-secret-state\n", encoding="utf-8")
-    expect_contract_failure(lambda: module.publish_review_only_disposition(
-        findings_path=str(findings), findings_sha256=digest(findings),
-        snapshot_path=str(snapshot_path),
-        snapshot_sha256=snapshot_receipt["snapshot_sha256"],
-        working_dir=str(repo), disposition_path=str(disposition),
-    ))
-    (repo / "ignored.cfg").write_text("secret-local-state\n", encoding="utf-8")
+    vitest_cache = repo / "node_modules/.vite/vitest/da39a3ee5e6b4b0d"
+    vitest_cache.mkdir(parents=True)
+    (vitest_cache / "results.json").write_text('{"version":1}\n', encoding="utf-8")
+    assert module._capture_repo_state(str(repo), str(evidence))["untracked"] == (
+        snapshot_document["untracked"]
+    )
+    # A non-ignored untracked path is still baseline state: a mode flip on it
+    # is drift, and it names the drift rather than any of the other closed
+    # refusals this verb can reach.
     (repo / "untracked.sh").chmod(0o755)
-    expect_contract_failure(lambda: module.publish_review_only_disposition(
+    expect_contract_reason(lambda: module.publish_review_only_disposition(
         findings_path=str(findings), findings_sha256=digest(findings),
         snapshot_path=str(snapshot_path),
         snapshot_sha256=snapshot_receipt["snapshot_sha256"],
         working_dir=str(repo), disposition_path=str(disposition),
-    ))
+    ), "standalone_baseline_mismatch")
     (repo / "untracked.sh").chmod(0o644)
     mutated_index = bytearray(index_before)
     mutated_index[12] ^= 1
