@@ -41,17 +41,29 @@ assert "    runs-on: windows-latest\n" in windows_job
 assert "python -I -B tests/code-fixer-contract-windows.test.py" in windows_job
 assert "continue-on-error: true" not in windows_job
 
-# Guard S1-S6 (#428) — the teardown decoupling must not drift back.
+# Guard S4-S6 (#428) — the teardown decoupling must not drift back.
 #
-# EVERY needle is assembled at runtime. This block reads the file it lives in,
-# so a contiguous literal would count ITSELF: the ban would trip on the guard,
-# and the presence checks would pass vacuously after the thing they guard was
-# deleted. The program runs as `<stdin>` (piped to `python3 -I -B -`), so
-# `inspect.getsource` on anything defined here raises — the guard must read
-# file text from `root`.
-BANNED_CONSTRUCTOR = "tempfile.Temporary" + "Directory("
-NEEDLE_FACTORY = "tempfile." + "mkdtemp("
-NEEDLE_SUPPRESSION = "ignore_errors" + "=True"
+# NARROWED BY #447. S1 (ban the raw constructor), S2 (exactly one factory) and
+# S3 (exactly one suppression) moved to row A4 in
+# tests/test-harness-source-guards.test.sh, which enforces them across all 124
+# `tests/*.sh` ∪ `tests/*.py` files and on BOTH shape-check jobs — this block
+# never reached `windows-latest`, because code-fixer-contract.test.sh is on the
+# windows-skip-list. A4 also enforces the half S1-S3 never covered: that every
+# factory is PAIRED with a suppressed teardown, not merely that one exists.
+#
+# What A4 deliberately does NOT carry, and is why this block survives:
+#   S4  the per-file scratch CALL-SITE floors (30 / 1). A4's corpus-level
+#       factory floor is a weaker ratchet — it counts factories, not the sites
+#       routed through them, and S4 is the arm that caught the six scratch trees
+#       #431 added to this suite.
+#   S5  the exact crash-site literal from run 31369242976.
+#   S6  the fixture-git gc/maintenance pins.
+#
+# The surviving needles are still assembled at runtime. This block reads the file
+# it lives in, so a contiguous literal would count ITSELF and the presence checks
+# would pass vacuously after the thing they guard was deleted. The program runs
+# as `<stdin>` (piped to `python3 -I -B -`), so `inspect.getsource` on anything
+# defined here raises — the guard must read file text from `root`.
 NEEDLE_CALL_SITE = "with scratch" + "_dir("
 NEEDLE_CRASH_SITE = 'scratch' + '_dir("code-fixer-ci-spaced-")'
 for relative, floor in (
@@ -60,19 +72,6 @@ for relative, floor in (
 ):
     text = (root / relative).read_text(encoding="utf-8")
     assert len(text) > 1000, f"S4 vacuity: {relative} unreadable or truncated"
-    assert BANNED_CONSTRUCTOR not in text, (
-        f"S1 (#428): raw tempdir constructor is back in {relative} — route it "
-        f"through the scratch factory; its teardown must not decide this "
-        f"suite's verdict"
-    )
-    assert text.count(NEEDLE_FACTORY) == 1, (
-        f"S2 (#428): {relative} must have exactly one scratch factory, "
-        f"found {text.count(NEEDLE_FACTORY)}"
-    )
-    assert text.count(NEEDLE_SUPPRESSION) == 1, (
-        f"S3 (#428): {relative} must suppress unlink errors in exactly one "
-        f"place, found {text.count(NEEDLE_SUPPRESSION)}"
-    )
     assert text.count(NEEDLE_CALL_SITE) >= floor, (
         f"S4 (#428): {relative} has {text.count(NEEDLE_CALL_SITE)} scratch "
         f"call sites, floor is {floor} — sites were deleted or unrouted"
@@ -320,7 +319,7 @@ def run_bytes(argv, *, expected=0):
 
 
 @contextlib.contextmanager
-def scratch_dir(prefix):
+def scratch_dir(prefix, parent=None):
     """A scratch tree whose TEARDOWN cannot decide this suite's verdict.
 
     Scaffolding only. Nothing in this file reads the tree after its `with`
@@ -339,8 +338,13 @@ def scratch_dir(prefix):
     manager's 3.10+ cleanup-suppression kwarg because no workflow pins an
     interpreter (there is no `setup-python` step in .github/workflows), so the
     kwarg could TypeError on the very job it protects.
+
+    This docstring is the canonical rationale for all 12 copies of the factory
+    under tests/ (#447 spread it to the six sibling suites). `parent` carries
+    the stdlib `dir=` kwarg one of those call sites needs; omitted, mkdtemp's
+    `dir=None` is exactly the default, so one signature covers every site.
     """
-    path = tempfile.mkdtemp(prefix=prefix)
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
     try:
         yield path
     finally:

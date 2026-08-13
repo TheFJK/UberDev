@@ -109,8 +109,26 @@ import errno
 import io
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+    FileNotFoundError, so an unlink race reds a job whose diff never touched
+    this file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 lib_path,contract_path,*agent_paths=sys.argv[1:]
 lib=pathlib.Path(lib_path).read_text()
@@ -149,7 +167,7 @@ snippet_start=lib.index("<<'PY'\n",function_start)+len("<<'PY'\n")
 snippet_end=lib.index("\nPY\n}",snippet_start)
 snippet=lib[snippet_start:snippet_end]
 
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("child-contract-v2-") as temporary:
     result=pathlib.Path(temporary)/"result.md"
     result.write_text(
         "```yaml\nverdict: APPROVE\nfindings: []\nconfidence: high\n```\n",

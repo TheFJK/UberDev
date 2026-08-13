@@ -463,11 +463,33 @@ else
 fi
 
 WINDOWS_PARENT_GENERATION_BINDING="$(python3 -I -B - "$MANIFEST" <<'PY'
+import contextlib
 import hashlib
 import importlib.util
 import pathlib
+import shutil
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+    FileNotFoundError, so an unlink race reds a job whose diff never touched
+    this file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+
+    `parent` carries the `dir=` the call site below needs: this fence pins the
+    tree under a RESOLVED tempdir so the owner-depth probe never sees a
+    symlinked ancestor.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class Function:
@@ -555,7 +577,7 @@ for index, module_path in enumerate(sys.argv[1:]):
     original_windll = getattr(module.ctypes, "WinDLL", None)
     try:
         temporary_parent = pathlib.Path(tempfile.gettempdir()).resolve()
-        with tempfile.TemporaryDirectory(dir=temporary_parent) as temporary:
+        with scratch_dir("run-manifest-parent-generation-", parent=temporary_parent) as temporary:
             root = pathlib.Path(temporary)
             direct = root / "direct"
             parent = root / "parent"
@@ -678,10 +700,27 @@ else
 fi
 
 PROCESS_IDENTITY_CANDIDATE_SECURITY="$(python3 -I -B - "$MANIFEST" <<'PY'
+import contextlib
 import importlib.util
 import pathlib
+import shutil
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 for index, module_path in enumerate(sys.argv[1:]):
     spec = importlib.util.spec_from_file_location(f"run_manifest_identity_candidate_{index}", module_path)
@@ -694,7 +733,7 @@ for index, module_path in enumerate(sys.argv[1:]):
         "captured", f"{pid}|{pid}|{pid}|" + ("a" * 64)
     )
 
-    with tempfile.TemporaryDirectory() as temporary:
+    with scratch_dir("run-manifest-identity-candidate-") as temporary:
         root = pathlib.Path(temporary)
         candidate = root / "owner-candidate"
         victim = root / "victim"
