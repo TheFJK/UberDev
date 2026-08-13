@@ -38,6 +38,24 @@
 #      upstream still does not carry it (see the vendor audit), which is why
 #      F12 asserts a correct green run rather than a refusal — F12.
 #
+# A FOURTH defect, of the same class one layer down, is locked here too (#476).
+# Everything above is about the runner being EXECUTABLE; none of it establishes
+# that it is CAPABLE of running a test, and presence is not capability. A project
+# defining no `test` script makes `npm test <file>` exit 1 for every file: the
+# `npm --version` preflight passes, the in-loop 126/127 backstop never fires, and
+# the loop deliberately reads a non-zero status as "the test ran and failed" — so
+# RAN increments for every match, the ran-vs-matched reconciliation is satisfied,
+# and the run reaches the clean verdict having executed nothing. A suite wired
+# under `test:unit`, `vitest`, or a monorepo package filter is the ordinary case,
+# not an exotic one. Closed by a pre-loop capability probe that refuses
+# [runner-incapable]. Four cases lock it, and three of them exist to stop a
+# plausible wrong repair rather than to assert the fix: F16 is the defect itself;
+# F17 is the counter-case that reds an over-broad "refuse on any non-zero runner
+# status" (a genuinely failing test is a legitimate outcome and must still
+# complete the bisection); F18 pins that the pre-loop probe did not make the
+# mid-run backstop redundant; and F19 pins the probe's cost and ordering through
+# a runner ledger — once, before the loop, and never by running a test.
+#
 # EXIT CONTRACT under test:
 #   0  every matched test ran and none polluted
 #   1  polluter found, or bad usage (both pre-existing). This code deliberately
@@ -51,16 +69,17 @@
 #      not mistake it for a considered design alongside the exit-2 tokens below.
 #      F8 asserts the fused behaviour as it stands.
 #   2  verdict refused — nothing matched, the file search was incomplete, the
-#      test runner could not be executed, a matched path did not survive the
+#      test runner could not be executed, the runner starts but the project
+#      defines no test script it could run, a matched path did not survive the
 #      file list intact, the pollution target was already present so a test
 #      would not have run, or fewer tests ran than were matched (local
 #      addition; upstream returns a green 0 in every one of these shapes).
-#      Six causes share one integer, so every exit-2 message carries a
+#      Seven causes share one integer, so every exit-2 message carries a
 #      machine-readable reason token as the first bracketed field of its first
-#      line — [search-failed], [no-matches], [runner-unusable], [dirty-start],
-#      [path-missing], [ran-lt-matched]. Prefer the token over the prose when
-#      adding a case: the substring assertions below predate it and weld the
-#      contract to English.
+#      line — [search-failed], [no-matches], [runner-unusable],
+#      [runner-incapable], [dirty-start], [path-missing], [ran-lt-matched].
+#      Prefer the token over the prose when adding a case: the substring
+#      assertions below predate it and weld the contract to English.
 #      The ran-vs-matched shape is a deliberate tripwire for a future skip path,
 #      not a reachable branch: every skip refuses before the loop ends, so no
 #      case here drives it and none should be written pretending to.
@@ -69,7 +88,7 @@
 # that grepped find-polluter.sh for the new `-o -path` token would be a
 # counterfeit lock: it would pass against a "fix" that still enumerates nothing,
 # which is precisely the failure mode under repair (the #419 class). Every
-# BEHAVIOURAL case — F1-F3, F5-F7, F10-F15 — runs `bash "$SCRIPT"` against a
+# BEHAVIOURAL case — F1-F3, F5-F7, F10-F19 — runs `bash "$SCRIPT"` against a
 # real on-disk fixture with a stubbed `npm` first on PATH, and asserts on real
 # stdout, real stderr and a real exit code. The fixture's file list is written
 # out LITERALLY and never derived from the same `find -path` expression the
@@ -80,7 +99,7 @@
 # would need either), and F9 is a provenance/mode lock read off the repo file.
 #
 # FIND_POLLUTER_SCRIPT overrides which copy is executed. It exists for the
-# red-first run: point it at the pre-fix `git show` bytes and F1-F7 and F10-F15
+# red-first run: point it at the pre-fix `git show` bytes and F1-F7 and F10-F19
 # all go red — only F8 (the usage arm, which the fix does not touch) and F9
 # (which reads the repo file) stay green. Keep that list honest when a case is
 # added, or the documented red-first check sends the reader chasing phantom
@@ -118,7 +137,7 @@ FAIL=0
 # counter happens to be zero" — the latter certifies a truncated or
 # short-circuited run, the same vacuous-green shape the script under test now
 # refuses. Bump this with every case added or removed.
-EXPECTED_CASES=15
+EXPECTED_CASES=19
 pass_case() { echo "  PASS  $1"; PASS=$((PASS+1)); }
 fail_case() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
@@ -139,14 +158,95 @@ echo "## find-polluter.sh behavioural suite (#430)"
 #                        the walker is portable; a chmod-based unreadable
 #                        directory is not on the windows-latest job. Used by F13
 #                        prepended in front of bin, so npm still resolves.
-mkdir -p "$TMP/bin" "$TMP/binp" "$TMP/binf" "$TMP/binm"
+#   binc/npm  incapable: starts fine (`--version` succeeds) but the project
+#                        defines no test script, so `npm pkg get scripts.test`
+#                        answers `{}` and every `npm test <file>` exits 1 — the
+#                        #476 shape. Used by F16.
+#   binr/npm  failing:   fully capable, and its FIRST test genuinely fails
+#                        (exit 1, distinct output per file). The counter-case
+#                        that reds an over-broad "refuse on any non-zero runner
+#                        status" fix. Used by F17.
+#   binb/npm  breaking:  capable at the probe, then unexecutable mid-run — the
+#                        second `test` invocation exits 127. Used by F18.
+#   binl/npm  ledger:    records every invocation's argv to $FP_NPM_LOG, then
+#                        behaves like bin/npm. Used by F19 to pin what the
+#                        script asks the runner, and in what order.
+#
+# Every npm stub that models a real project answers `npm pkg get scripts.test`
+# with a JSON string, because the script now PROBES capability before the loop:
+# a stub that stayed silent there would refuse every fixture and F1-F15 would
+# red for a reason none of them is about.
+mkdir -p "$TMP/bin" "$TMP/binp" "$TMP/binf" "$TMP/binm" "$TMP/binc" "$TMP/binr" "$TMP/binb" "$TMP/binl"
 cat > "$TMP/bin/npm" <<'NPM_STUB'
 #!/usr/bin/env bash
+case "${1:-}" in pkg) printf '"vitest run"\n'; exit 0 ;; esac
 exit 0
 NPM_STUB
 cat > "$TMP/binp/npm" <<'NPM_STUB'
 #!/usr/bin/env bash
+case "${1:-}" in pkg) printf '"vitest run"\n'; exit 0 ;; esac
 if [ "${2:-}" = "./src/top.test.ts" ]; then : > .pollute; fi
+exit 0
+NPM_STUB
+# The #476 fixture: a runner that STARTS but cannot run a test. `--version` must
+# succeed, or the whole-run preflight refuses first — for the wrong reason — and
+# the case reads as fixed when it is not (the issue body records making exactly
+# that mistake). `pkg get scripts.test` answers `{}`, which is what npm returns
+# for a manifest with no `scripts.test` key, and every `test` invocation fails
+# with npm's real missing-script envelope on stderr and exit 1 — indistinguishable
+# from a test that ran and failed, which is the whole defect.
+cat > "$TMP/binc/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "10.0.0"; exit 0 ;;
+  pkg) printf '{}\n'; exit 0 ;;
+esac
+echo 'npm error Missing script: "test"' >&2
+exit 1
+NPM_STUB
+# A fully capable runner whose first test genuinely FAILS. Nothing here is
+# broken: a failing test is a legitimate outcome and the pollution check is the
+# verdict, not the runner's status. This is the counter-case that stops the fix
+# from being "refuse whenever npm exits non-zero", which would refuse every real
+# red suite the bisection exists to investigate.
+cat > "$TMP/binr/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "10.0.0"; exit 0 ;;
+  pkg) printf '"vitest run"\n'; exit 0 ;;
+esac
+if [ "${2:-}" = "./src/a/x.test.ts" ]; then
+  echo "FAIL ${2:-} 1 failed"
+  exit 1
+fi
+echo "PASS ${2:-}"
+exit 0
+NPM_STUB
+# Capable at the probe, then broken mid-run: the SECOND `test` invocation exits
+# 127. Counts only `test` invocations, in a file outside every fixture (a
+# counter written into the fixture would be enumerated as tree state). The `:?`
+# form makes a forgotten export fail loud instead of silently writing to "".
+cat > "$TMP/binb/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo "10.0.0"; exit 0 ;;
+  pkg) printf '"vitest run"\n'; exit 0 ;;
+esac
+NPM_COUNT_FILE="${FP_NPM_COUNT:?FP_NPM_COUNT unset}"
+printf 'x' >> "$NPM_COUNT_FILE"
+if [ "$(wc -c < "$NPM_COUNT_FILE" | tr -d '[:space:]')" -ge 2 ]; then
+  echo "npm: command not found" >&2
+  exit 127
+fi
+exit 0
+NPM_STUB
+# The ledger. Records the full argv of every invocation, then behaves exactly
+# like bin/npm, so what F19 asserts is only the sequence of asks — one probe,
+# before the loop, and never a test run twice.
+cat > "$TMP/binl/npm" <<'NPM_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FP_NPM_LOG:?FP_NPM_LOG unset}"
+case "${1:-}" in pkg) printf '"vitest run"\n'; exit 0 ;; esac
 exit 0
 NPM_STUB
 cat > "$TMP/binm/find" <<'FIND_STUB'
@@ -174,7 +274,8 @@ printf './src/a/x.test.ts\n'
 echo "find: ./src/a: Permission denied" >&2
 exit 1
 FIND_STUB
-chmod +x "$TMP/bin/npm" "$TMP/binp/npm" "$TMP/binf/find" "$TMP/binm/find"
+chmod +x "$TMP/bin/npm" "$TMP/binp/npm" "$TMP/binf/find" "$TMP/binm/find" \
+         "$TMP/binc/npm" "$TMP/binr/npm" "$TMP/binb/npm" "$TMP/binl/npm"
 
 # Fixtures are re-created before every case, and the pollution marker removed —
 # a marker present when the loop starts now makes the script REFUSE a verdict
@@ -523,10 +624,10 @@ fi
 # until this case existed it had no behavioural lock: deleting the runner guard
 # outright left the suite fully green (verified by mutation), so a regression
 # there would silently restore the exact vacuous green #430 exists to abolish.
-# F15 covers the path-missing shape for the same reason; between them every
-# REACHABLE exit-2 branch is now driven by a fixture. The ran-vs-matched
-# tripwire is the sole exception and is unreachable by construction — see the
-# contract note at the top.
+# F15 covers the path-missing shape for the same reason, and F16 the
+# runner-incapable one; between them every REACHABLE exit-2 branch is now driven
+# by a fixture. The ran-vs-matched tripwire is the sole exception and is
+# unreachable by construction — see the contract note at the top.
 #
 # The fixture is the stale-shim shape — an npm that is present and carries the
 # execute bit but cannot start. That is what a stale nvm/volta/asdf shim looks
@@ -561,10 +662,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# F15 — a matched path that is not there refuses a verdict. Fifth of the six
-# exit-2 shapes, and the last REACHABLE one to gain a lock: deleting the guard
-# outright left the suite at PASS=14 FAIL=0 (verified by mutation), so the
-# branch was deletable while the suite stayed green.
+# F15 — a matched path that is not there refuses a verdict. Sixth of the seven
+# exit-2 shapes (the count and this ordinal both moved when [runner-incapable]
+# was inserted after [runner-unusable] for #476), and the last of #430's
+# REACHABLE shapes to gain a lock: deleting the guard outright left the suite at
+# PASS=14 FAIL=0 (verified by mutation), so the branch was deletable while the
+# suite stayed green.
 #
 # The fixture is a SUCCESSFUL walk that names a phantom — one real match, one
 # path that does not exist, exit 0. That is deliberately not F13's shape: F13 is
@@ -593,6 +696,129 @@ if [ -z "$f15_bad" ]; then
 else
   fail_case "F15 a phantom entry in the file list must refuse a verdict —${f15_bad}"
 fi
+
+# ---------------------------------------------------------------------------
+# F16 — a runner that STARTS but can never run a test refuses a verdict, before
+# any test. Sixth exit-2 shape, and the #476 defect: every guard above is about
+# the runner being EXECUTABLE, and presence is not capability. `npm --version`
+# passes (the runner is fine), the 126/127 backstop never fires (npm exits 1,
+# not 126/127), and RAN increments for every file because a non-zero status is
+# deliberately read as "the test ran and failed" — so the reconciliation is
+# satisfied and the run reaches the clean verdict having executed nothing.
+#
+# Two assertions carry the case beyond rc=2. `visited=0` pins the refusal to a
+# PRE-LOOP probe: a build that noticed only inside the loop would still exit 2,
+# after attributing a file to a runner that never ran it. And `Found 2` must
+# still be on stdout, so the refusal is the capability probe and not an
+# enumeration that quietly failed upstream of it.
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binc" 'src/**/*.test.ts'
+f16_bad=""
+[ "$RC" -eq 2 ] || f16_bad="${f16_bad} rc=${RC}(want 2)"
+grep -qF '[runner-incapable]' <<<"$ERR" || f16_bad="${f16_bad} missing-[runner-incapable]-on-stderr"
+# The two refusal shapes must stay distinguishable: a runner that cannot start
+# is a different repair from a project that defines no test script, and a
+# wrapper branching on the token must not be handed both under one name.
+if grep -qF 'runner-unusable' <<<"$ERR"; then f16_bad="${f16_bad} conflated-with-[runner-unusable]"; fi
+if grep -qF 'No polluter found' <<<"$OUT"; then f16_bad="${f16_bad} claimed-clean-having-run-zero-tests"; fi
+[ "$(visit_count "$OUT")" = "0" ] || f16_bad="${f16_bad} visited=$(visit_count "$OUT")(want 0 — refusal must precede any test)"
+[ "$(found_n "$OUT")" = "2" ] || f16_bad="${f16_bad} Found=$(found_n "$OUT")(want 2 — refusal must not hide an enumeration failure)"
+if [ -z "$f16_bad" ]; then
+  pass_case "F16 a runner that starts but has no test script -> [runner-incapable] on stderr, rc=2, nothing visited"
+else
+  fail_case "F16 a runner that cannot run a test must refuse a verdict —${f16_bad}"
+fi
+
+# ---------------------------------------------------------------------------
+# F17 — a genuinely FAILING test is still a legitimate outcome. The counter-case
+# to F16: the runner is capable, the first test really fails, and the bisection
+# must run to completion and report the pollution verdict, because the pollution
+# check is the verdict and the runner's status is not.
+#
+# This is the case that reds an over-broad repair of #476 — "refuse whenever npm
+# exits non-zero" passes F16 and breaks every red suite the tool exists to
+# investigate, which is the population it is most often pointed at.
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binr" 'src/**/*.test.ts'
+f17_bad=""
+[ "$RC" -eq 0 ] || f17_bad="${f17_bad} rc=${RC}(want 0)"
+grep -qF 'No polluter found' <<<"$OUT" || f17_bad="${f17_bad} missing-'No polluter found'"
+if grep -qF 'runner-incapable' <<<"$ERR"; then f17_bad="${f17_bad} refused-a-capable-runner-over-a-failing-test"; fi
+[ "$(visit_count "$OUT")" = "2" ] || f17_bad="${f17_bad} visited=$(visit_count "$OUT")(want 2 — a failing test must not stop the bisection)"
+if [ -z "$f17_bad" ]; then
+  pass_case "F17 a capable runner whose first test fails still completes the bisection, rc=0"
+else
+  fail_case "F17 a failing test is a legitimate outcome, not an incapable runner —${f17_bad}"
+fi
+
+# ---------------------------------------------------------------------------
+# F18 — a runner that is capable at the probe and breaks mid-run still refuses.
+# The capability probe runs once, up front, so it cannot see a runner that is
+# replaced afterwards; the in-loop 126/127 backstop is what covers that, and
+# adding a pre-loop probe must not be read as making the backstop redundant.
+# Before this case that backstop was deletable while the suite stayed green.
+#
+# `visited=2` is the load-bearing assertion, the mirror of F16's `visited=0`: it
+# pins the refusal to the in-loop guard rather than the preflight or the probe.
+export FP_NPM_COUNT="$TMP/npm-runs"
+rm -f "$FP_NPM_COUNT"
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binb" 'src/**/*.test.ts'
+f18_bad=""
+[ "$RC" -eq 2 ] || f18_bad="${f18_bad} rc=${RC}(want 2)"
+grep -qF 'runner-unusable' <<<"$ERR" || f18_bad="${f18_bad} missing-[runner-unusable]-on-stderr"
+if grep -qF 'No polluter found' <<<"$OUT"; then f18_bad="${f18_bad} claimed-clean-after-the-runner-broke"; fi
+[ "$(visit_count "$OUT")" = "2" ] || f18_bad="${f18_bad} visited=$(visit_count "$OUT")(want 2 — refusal must come from the in-loop backstop)"
+if [ -z "$f18_bad" ]; then
+  pass_case "F18 a runner that breaks mid-run -> [runner-unusable] on stderr, rc=2, after the tests it did run"
+else
+  fail_case "F18 the mid-run backstop must survive the pre-loop capability probe —${f18_bad}"
+fi
+unset FP_NPM_COUNT
+
+# ---------------------------------------------------------------------------
+# F19 — the capability probe costs exactly one invocation, runs BEFORE the loop,
+# and is not a test run. The ledger is the only thing that can assert ordering
+# and cost; rc and stdout cannot tell a pre-loop probe from a per-file one.
+#
+# Both properties are load-bearing. A probe inside the loop would multiply its
+# cost by the file count and, worse, could be misread as a per-file outcome. A
+# probe that ran the SUITE to test capability (the issue's candidate direction 1)
+# would execute tests before the pollution check had established a clean start —
+# it could create the very marker the bisection is about to look for.
+export FP_NPM_LOG="$TMP/npm-ledger"
+: > "$FP_NPM_LOG"
+make_fixture_a
+run_fp "$TMP/fixA" "$TMP/binl" 'src/**/*.test.ts'
+f19_bad=""
+[ "$RC" -eq 0 ] || f19_bad="${f19_bad} rc=${RC}(want 0)"
+f19_lines="$(wc -l < "$FP_NPM_LOG" | tr -d '[:space:]')"
+if [ "$f19_lines" != "4" ]; then
+  f19_bad="${f19_bad} invocations=${f19_lines}(want 4: one --version, one probe, two tests)"
+else
+  case "$(sed -n '1p' "$FP_NPM_LOG")" in
+    '--version'*) : ;;
+    *) f19_bad="${f19_bad} first-invocation-is-not---version" ;;
+  esac
+  case "$(sed -n '2p' "$FP_NPM_LOG")" in
+    'pkg get scripts.test'*) : ;;
+    *) f19_bad="${f19_bad} second-invocation-is-not-the-capability-probe" ;;
+  esac
+  case "$(sed -n '3p' "$FP_NPM_LOG")" in
+    'test '*) : ;;
+    *) f19_bad="${f19_bad} third-invocation-is-not-a-test-run(probe-ran-inside-the-loop?)" ;;
+  esac
+  case "$(sed -n '4p' "$FP_NPM_LOG")" in
+    'test '*) : ;;
+    *) f19_bad="${f19_bad} fourth-invocation-is-not-a-test-run(probe-ran-inside-the-loop?)" ;;
+  esac
+fi
+if [ -z "$f19_bad" ]; then
+  pass_case "F19 the capability probe runs once, before the loop, and runs no test"
+else
+  fail_case "F19 probe cost and ordering must be pinned —${f19_bad}"
+fi
+unset FP_NPM_LOG
 
 echo
 echo "## Summary"

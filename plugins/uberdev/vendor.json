@@ -45,7 +45,7 @@
       "kind": "local-addition",
       "scope": "skills/systematic-debugging",
       "file": "find-polluter.sh",
-      "note": "Two local additions to find-polluter.sh (#430), both recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, and (2) local array-based enumeration that is whitespace- and glob-safe. Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply BOTH; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals). Kept forever.",
+      "note": "Three local additions to find-polluter.sh (#430, #476), all recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, (2) local array-based enumeration that is whitespace- and glob-safe, and (3) a pre-loop runner-capability probe (npm pkg get scripts.test) that refuses with [runner-incapable] (exit 2) when the project defines no test script npm could run — without it every 'npm test <file>' fails identically, which upstream counts as a test that ran and failed, and the run reaches a clean verdict having executed nothing (#476). Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply ALL THREE; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals, F16 the capability probe — with F17 as the counter-case that stops an over-broad re-application that refuses on any non-zero runner status). Kept forever.",
       "permanent": true
     },
     {
