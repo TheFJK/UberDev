@@ -213,6 +213,44 @@ else
   echo "  PASS  G2 — orphaned issue-*/post-impl-review.md glob removed from live REVIEW_FILES= ls line (#308 cache deletion)"
   PASS=$((PASS + 1))
 fi
+# Glob #3 (#458) — widened from `pr-test-analyzer.md` to `pr-test-analyzer*.md`.
+# SDD Step 4.5 now writes a PLAN-SCOPED artifact (pr-test-analyzer-<12hex>.md)
+# so two plans executed under one run carrier cannot collide on it. Without
+# this widening the read site silently matches nothing and finish-branch
+# composes a "no findings" PR body — a loud collision traded for a silent one,
+# which is precisely the class this work exists to kill.
+assert_grep "$FINISH_BRANCH" \
+  'pr-test-analyzer\*\.md' \
+  "G3 — glob #3 widened to pr-test-analyzer*.md (plan-scoped Step 4.5 artifact, #458)"
+# Anti-regression: no LIVE REVIEW_FILES= line may still end in the unglobbed
+# spelling. The ^\s*REVIEW_FILES= anchor is what keeps the prose paragraph
+# (which names both filenames on purpose) out of this assertion.
+if grep -E '^\s*REVIEW_FILES=.*pr-test-analyzer\.md' "$FINISH_BRANCH" >/dev/null; then
+  echo "  FAIL  G3.regression — unglobbed 'pr-test-analyzer.md' must not appear in any live REVIEW_FILES= ls line (#458)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  G3.regression — unglobbed 'pr-test-analyzer.md' removed from every live REVIEW_FILES= ls line (#458)"
+  PASS=$((PASS + 1))
+fi
+# Zero-migration (AC 9): `pr-test-analyzer*.md` matches the EMPTY infix too, so
+# a legacy unscoped artifact from a pre-#458 run is still discovered alongside
+# the new plan-scoped one. Same rationale already documented for the sibling
+# post-impl-review-*.md glob. Executed, not asserted from the file text.
+GLOB_FIXTURE_DIR="$(mktemp -d)"
+trap 'rm -rf "$GLOB_FIXTURE_DIR"' EXIT
+printf 'legacy\n' >"$GLOB_FIXTURE_DIR/pr-test-analyzer.md"
+printf 'scoped\n' >"$GLOB_FIXTURE_DIR/pr-test-analyzer-0123456789ab.md"
+printf 'aggregate\n' >"$GLOB_FIXTURE_DIR/post-impl-review-final.md"
+GLOB_DISCOVERED=$(ls -t "$GLOB_FIXTURE_DIR"/post-impl-review-*.md "$GLOB_FIXTURE_DIR"/pr-test-analyzer*.md 2>/dev/null)
+if grep -qF 'pr-test-analyzer.md' <<<"$GLOB_DISCOVERED" \
+   && grep -qF 'pr-test-analyzer-0123456789ab.md' <<<"$GLOB_DISCOVERED" \
+   && grep -qF 'post-impl-review-final.md' <<<"$GLOB_DISCOVERED"; then
+  echo "  PASS  G3.legacy — widened glob discovers BOTH the plan-scoped and the legacy unscoped analyzer report (#458 zero-migration)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  G3.legacy — widened glob lost an analyzer report; discovered=[$(tr '\n' '|' <<<"$GLOB_DISCOVERED")]"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Issue #67: Options 1/3/4 bypass caveat documented in interactive-mode docs =="

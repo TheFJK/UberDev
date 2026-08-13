@@ -136,14 +136,14 @@ task,working,failure=sys.argv[1:]
 print(json.dumps({'task_path':task,'working_dir':working,'allowed_paths':[task],'denied_paths':[],'failure_path':failure,'attempt':1},separators=(',',':')))
 PY
 )"
-uberdev_create_child_handoff sdd.task.implement sdd-w1-t1-implement-a1 "$BUILDER_INPUTS" '[]' >"$TMP/builder-receipt.json"
+uberdev_create_child_handoff sdd.task.implement sdd-p0123456789ab-w1-t1-implement-a1 "$BUILDER_INPUTS" '[]' >"$TMP/builder-receipt.json"
 BUILDER_OUT="$(cat "$TMP/builder-receipt.json")"
 PREFLIGHT_HANDOFF="$UBERDEV_CHILD_HANDOFF"
 PREFLIGHT_HANDOFF_SHA256="$UBERDEV_CHILD_HANDOFF_SHA256"
 CANON_RUN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$TMP/run")"
-[ "$UBERDEV_CHILD_HANDOFF" = "$CANON_RUN/handoffs/sdd-w1-t1-implement-a1.json" ]
-[ "$UBERDEV_CHILD_RESULT" = "$CANON_RUN/children/sdd-w1-t1-implement-a1/result.md" ]
-[ "$UBERDEV_CHILD_STATUS" = "$CANON_RUN/children/sdd-w1-t1-implement-a1/status.json" ]
+[ "$UBERDEV_CHILD_HANDOFF" = "$CANON_RUN/handoffs/sdd-p0123456789ab-w1-t1-implement-a1.json" ]
+[ "$UBERDEV_CHILD_RESULT" = "$CANON_RUN/children/sdd-p0123456789ab-w1-t1-implement-a1/result.md" ]
+[ "$UBERDEV_CHILD_STATUS" = "$CANON_RUN/children/sdd-p0123456789ab-w1-t1-implement-a1/status.json" ]
 python3 - "$BUILDER_OUT" "$UBERDEV_CHILD_HANDOFF_SHA256" <<'PY'
 import hashlib,json,os,re,stat,sys
 v=json.loads(sys.argv[1]); exported=sys.argv[2]
@@ -160,7 +160,7 @@ PY
 ! uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" \
   0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1
 uberdev_preflight_child_batch "$UBERDEV_CHILD_HANDOFF" "$UBERDEV_CHILD_HANDOFF_SHA256"
-[ ! -e "$TMP/run/children/sdd-w1-t1-implement-a1" ]
+[ ! -e "$TMP/run/children/sdd-p0123456789ab-w1-t1-implement-a1" ]
 
 # Preflight must authenticate a bounded, stable regular-file capture before it
 # decodes even the edge/run-directory fields used to call the full validator.

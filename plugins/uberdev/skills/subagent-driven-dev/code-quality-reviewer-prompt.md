@@ -18,7 +18,7 @@ Use this template when dispatching a code quality reviewer subagent.
 edge_id: sdd.task.quality_review
 role: code-reviewer
 phase: quality-review
-instance_id: sdd-w[wave]-t[task]-quality-review-a[attempt]
+instance_id: sdd-p[plan-scope]-w[wave]-t[task]-quality-review-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:

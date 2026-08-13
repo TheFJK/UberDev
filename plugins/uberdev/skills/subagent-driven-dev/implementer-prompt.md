@@ -6,7 +6,7 @@ Use this template when dispatching an implementer subagent.
 edge_id: sdd.task.implement
 role: implementation-worker
 phase: implementation
-instance_id: sdd-w[wave]-t[task]-[stage]-a[attempt]
+instance_id: sdd-p[plan-scope]-w[wave]-t[task]-[stage]-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:

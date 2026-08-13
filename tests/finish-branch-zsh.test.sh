@@ -135,12 +135,17 @@ mkdir -p "$SEED_DIR"
   printf '%s\n' '<external-untrusted-input source="test-analysis">'
   printf '%s\n' 'FINDING-PTA: missing coverage on the new branch'
   printf '%s\n' '</external-untrusted-input>'
-} > "$SEED_DIR/pr-test-analyzer.md"
+} > "$SEED_DIR/pr-test-analyzer-0123456789ab.md"
 
 # Build the NEWLINE-delimited list exactly as the live SKILL.md does (raw `ls -t`,
 # no `tr` join). Pass it to the sliced composer via env and run that composer
 # under a real `zsh -f`. The slice references $REVIEW_FILES + standard utils only.
-REVIEW_FILES_VAL="$(ls -t "$SEED_DIR"/post-impl-review-*.md "$SEED_DIR"/pr-test-analyzer.md 2>/dev/null)"
+# The analyzer seed carries a literal 12-hex plan scope (#458): SDD Step 4.5
+# writes pr-test-analyzer-<plan-scope>.md, and this file HAND-COPIES the SKILL.md
+# glob rather than reading it, so widening the production glob does not red it —
+# left stale it would stay green while exercising a filename production no longer
+# writes. A literal scope is correct here: this file is a fixture, it never mints.
+REVIEW_FILES_VAL="$(ls -t "$SEED_DIR"/post-impl-review-*.md "$SEED_DIR"/pr-test-analyzer*.md 2>/dev/null)"
 
 echo
 echo "== F1/F2/F3: the live composer renders the section under zsh and strips envelopes =="
@@ -160,7 +165,7 @@ fi
 # bug defeated (the body never ran, so nothing past the heading appeared).
 if grep -qF '## Reviewer findings summary' <<<"$RENDERED" \
    && grep -qF '### post-impl-review-final.md' <<<"$RENDERED" \
-   && grep -qF '### pr-test-analyzer.md' <<<"$RENDERED"; then
+   && grep -qF '### pr-test-analyzer-0123456789ab.md' <<<"$RENDERED"; then
   pass "F1: composer renders the section + both ### file headers under zsh (the read-loop word-splits the list)"
 else
   fail "F1: composer section/file-headers MISSING under zsh — the loop skipped the body (for-loop word-split regression?)"
@@ -310,8 +315,8 @@ echo "== FBZ-1: a zero-byte Phase 1 aggregate is skipped, not fatal =="
 SEED_DIR_EMPTY="$WORK/seed-empty"
 mkdir -p "$SEED_DIR_EMPTY"
 : > "$SEED_DIR_EMPTY/post-impl-review-final.md"
-cp "$SEED_DIR/pr-test-analyzer.md" "$SEED_DIR_EMPTY/pr-test-analyzer.md"
-REVIEW_FILES_EMPTY="$(ls -t "$SEED_DIR_EMPTY"/post-impl-review-*.md "$SEED_DIR_EMPTY"/pr-test-analyzer.md 2>/dev/null)"
+cp "$SEED_DIR/pr-test-analyzer-0123456789ab.md" "$SEED_DIR_EMPTY/pr-test-analyzer-0123456789ab.md"
+REVIEW_FILES_EMPTY="$(ls -t "$SEED_DIR_EMPTY"/post-impl-review-*.md "$SEED_DIR_EMPTY"/pr-test-analyzer*.md 2>/dev/null)"
 EMPTY_RENDERED="$("$ZSH_BIN" -f -c '
   set -u
   REVIEW_FILES="'"$REVIEW_FILES_EMPTY"'"
@@ -320,7 +325,7 @@ EMPTY_RENDERED="$("$ZSH_BIN" -f -c '
 EMPTY_RC=$?
 FBZ1_FAILURES=''
 [ "$EMPTY_RC" -eq 0 ] || FBZ1_FAILURES="$FBZ1_FAILURES rc=$EMPTY_RC(want-0)"
-grep -qF '### pr-test-analyzer.md' <<<"$EMPTY_RENDERED" \
+grep -qF '### pr-test-analyzer-0123456789ab.md' <<<"$EMPTY_RENDERED" \
   || FBZ1_FAILURES="$FBZ1_FAILURES legacy-report-not-rendered"
 grep -qF '### post-impl-review-final.md' <<<"$EMPTY_RENDERED" \
   && FBZ1_FAILURES="$FBZ1_FAILURES zero-byte-aggregate-rendered-a-header"

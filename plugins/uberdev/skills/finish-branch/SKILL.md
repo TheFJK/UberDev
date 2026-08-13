@@ -133,7 +133,7 @@ Then: Cleanup worktree (Step 5)
 Option 2 PR-body composition: in addition to the standard Summary + Test Plan, two conditional sections are appended when their source artifacts exist:
 
 - **`## Open questions answered by /turbo`** — table rendered from the active-run `questions.md` (written by orchestrator Phase 2 under `--turbo`; run identity resolved via the per-worktree `active-run-id` sidecar below, written by orchestrator Phase 0). Columns: Question | Choice | Confidence. Reviewers can scan for `medium`/`low` confidence rows quickly.
-- **`## Reviewer findings summary`** — the post-impl-review aggregate (`post-impl-review-final.md`, written by `uberdev:post-impl-review` from `/uberdev:review-pr` Phase 1 after PR push) and any `pr-test-analyzer` output (large tier only, written by SDD Step 4.5 before this handoff). The read-site glob below (`post-impl-review-*.md`) matches both the new `-final.md` filename and any legacy `-wave-final.md` artifacts left over from pre-refactor runs (zero-migration).
+- **`## Reviewer findings summary`** — the post-impl-review aggregate (`post-impl-review-final.md`, written by `uberdev:post-impl-review` from `/uberdev:review-pr` Phase 1 after PR push) and any `pr-test-analyzer` output (large tier only, written by SDD Step 4.5 before this handoff). The read-site globs below are deliberately wider than the current filename of either producer: `post-impl-review-*.md` matches both the new `-final.md` filename and any legacy `-wave-final.md` artifacts left over from pre-refactor runs, and `pr-test-analyzer*.md` matches both the plan-scoped `pr-test-analyzer-<plan-scope>.md` that SDD Step 4.5 writes today (#458) and the legacy unscoped `pr-test-analyzer.md` from pre-#458 runs (the `*` matches the empty infix). Both are zero-migration by construction — a narrower glob would compose a silent "no findings" PR body rather than fail loudly.
 
 Both sections are read-only dumps; finish-branch does not block on confidence threshold or reviewer verdict (per #11 Q1: advisory only, auto-fix deferred).
 
@@ -192,9 +192,9 @@ fi
 # strip) would be silently skipped. Newline-delimited + read-loop is word-split-
 # independent and behaves identically under bash and zsh.
 if [ -n "$ACTIVE_RUN_ID" ]; then
-  REVIEW_FILES=$(ls -t "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/post-impl-review-*.md "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/pr-test-analyzer.md 2>/dev/null)
+  REVIEW_FILES=$(ls -t "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/post-impl-review-*.md "$RESEARCH_ROOT/$ACTIVE_RUN_ID"/pr-test-analyzer*.md 2>/dev/null)
 else
-  REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/*/pr-test-analyzer.md 2>/dev/null)
+  REVIEW_FILES=$(ls -t .uberdev/research/*/post-impl-review-*.md .uberdev/research/*/pr-test-analyzer*.md 2>/dev/null)
 fi
 
 # Compose PR body. Heredoc delimiter is unquoted (`<<EOF`, not the single-

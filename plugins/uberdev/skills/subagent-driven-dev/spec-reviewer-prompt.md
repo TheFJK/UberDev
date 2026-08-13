@@ -8,7 +8,7 @@ Use this template when dispatching a spec compliance reviewer subagent.
 edge_id: sdd.task.spec_review
 role: spec-compliance-reviewer
 phase: spec-review
-instance_id: sdd-w[wave]-t[task]-spec-review-a[attempt]
+instance_id: sdd-p[plan-scope]-w[wave]-t[task]-spec-review-a[attempt]
 risk_scope: subtask
 risk_signals: [copy from the immutable root decision]
 inputs:
