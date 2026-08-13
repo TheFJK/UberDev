@@ -2005,6 +2005,86 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
    `blocked` (step 8 exit-code 2) rather than silently aggregating two lenses
    into a three-lens document.
 
+   **Then build the Phase 2 aggregate (#481).** Capturing the lenses proved they
+   ran; it produced no `simplify-final.md`, and Phase 2 stopped there. This
+   fence validates each lens result at the canonical boundary, binds the wave
+   through the same evidence builder Phase 1 uses, and writes the one canonical
+   phase2 document.
+
+   ```bash uberdev-executable origin=review-pr
+   . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+   review_fleet_rehydrate || return 2
+   # child-dispatch.sh for the Phase 2 lens validator, and for the backend-policy
+   # enum the evidence builder reads (it sources lib/dispatch.sh);
+   # review-aggregate.sh for the three builders. Both are sourced HERE because
+   # this fence is a fresh shell and neither survives from the capture fence.
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+   . "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh" || return 2
+   REVIEW_EDGES=(
+     review_pr.simplify.reuse review_pr.simplify.quality
+     review_pr.simplify.efficiency
+   )
+   REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+   PHASE2_AGG_PATH="$REVIEW_FLEET_RUN_DIR/simplify-final.md"
+   PHASE2_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
+   PHASE2_VALIDATED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.validated"
+   PHASE2_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+   # Transport read off the carrier, never sniffed from a file on disk. Only the
+   # Workflow dispatcher records a roster `index` on its simplify launch rows;
+   # the detached dispatcher's rows carry none, so `post_review_validated_evidence_complete`
+   # cannot bind a routed simplify wave at all. That is a REFUSAL with a class,
+   # not silence — a routed Phase 2 could not produce this artifact before this
+   # change either, and the missing `index` is tracked as the follow-up to #481.
+   [ "${UBERDEV_CARRIER_BACKEND:-}" = workflow ] || {
+     rm -f -- "$PHASE2_AGG_PATH"
+     echo "error: review-fleet Phase 2 aggregate class=routed-transport-unsupported backend=${UBERDEV_CARRIER_BACKEND:-unset}; review-fleet-simplify.launched carries no roster index on this transport, so the wave cannot be bound" >&2
+     return 70
+   }
+   : >"$PHASE2_VALIDATED" || return 2
+   REVIEW_WAVE_BLOCKED=0
+   while IFS= read -r REVIEW_FLEET_ROW; do
+     [ -n "$REVIEW_FLEET_ROW" ] || continue
+     REVIEW_FLEET_EDGE="$(jq -er .edge <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_INDEX="$(jq -er .index <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_INSTANCE="$(jq -er .instance <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_RESULT="$(jq -er .result <<<"$REVIEW_FLEET_ROW")" || { REVIEW_WAVE_BLOCKED=1; break; }
+     REVIEW_FLEET_VALIDATED="$(dirname "$REVIEW_FLEET_RESULT")/validated-result.md"
+     # No lens of ANY backend writes validated-result.md. The controller does,
+     # through the boundary that also normalises the three lenses' drifted
+     # document shapes into one, and it publishes the artifact 0o400. The digest
+     # names the PUBLISHED bytes, which is what the evidence builder re-reads.
+     if REVIEW_FLEET_DIGEST="$(uberdev_child_validate_phase2_lens_result "$REVIEW_FLEET_RESULT" "$REVIEW_FLEET_EDGE" "$REVIEW_FLEET_VALIDATED")" \
+        && [[ "$REVIEW_FLEET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+       jq -cn --arg edge "$REVIEW_FLEET_EDGE" --argjson index "$REVIEW_FLEET_INDEX" \
+         --arg instance "$REVIEW_FLEET_INSTANCE" --arg result "$REVIEW_FLEET_VALIDATED" \
+         --arg sha256 "$REVIEW_FLEET_DIGEST" \
+         '{edge:$edge,index:$index,instance:$instance,result:$result,sha256:$sha256}' \
+         >>"$PHASE2_VALIDATED" || REVIEW_WAVE_BLOCKED=1
+     else
+       REVIEW_WAVE_BLOCKED=1
+     fi
+   done <"$PHASE2_LAUNCHED"
+   if [ "$REVIEW_WAVE_BLOCKED" -eq 0 ] \
+       && PHASE2_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
+            "$PHASE2_VALIDATED" "$PHASE2_EXPECTED_COUNT" \
+            "$PHASE2_LAUNCHED" '' "$REVIEW_FLEET_RUN_DIR")" \
+       && PHASE2_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
+            "$PHASE2_TRUSTED_LEDGER" "$PHASE2_EXPECTED_COUNT" phase2)" \
+       && post_review_write_simplify_aggregate_v2 "$PHASE2_AGGREGATION_INPUT" "$PHASE2_AGG_PATH"; then
+     PHASE2_AGGREGATION_INPUT=
+     unset PHASE2_AGGREGATION_INPUT
+   else
+     # Same fail-closed boundary as Phase 1's: a missing or empty aggregate is
+     # infrastructure failure, never a zero-finding simplify pass. A thinner
+     # `simplify-final.md` is indistinguishable downstream from an honest
+     # zero-finding result, so no aggregate is left behind.
+     rm -f -- "$PHASE2_AGG_PATH"
+     echo "error: review-fleet Phase 2 evidence incomplete; aggregate suppressed" >&2
+     return 70
+   fi
+   ```
+
    The lens-by-lens checklist (what each lens looks for) is the canonical definition in `/uberdev:simplify` Phase 2 — refer there rather than restate.
 
    **Brief preparation** (mirrors `uberdev:post-impl-review` Step 1):
@@ -2014,7 +2094,7 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
 
    Each lens preserves the iron rule from `/uberdev:simplify`: **behavior preservation is non-negotiable.**
 
-   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** After the three lenses return their advisory findings, aggregate them to `.uberdev/research/<RUN_ID>/simplify-final.md` — **written with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3 — byte-shape oracle `tests/fixtures/findings-to-issues/simplify-final.sample.md`). Then dispatch the `code-fixer`; `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
+   **Auto-apply simplify edits — Step 6b: dispatch `code-fixer` subagent.** The aggregate fence above has already written `.uberdev/research/<RUN_ID>/simplify-final.md` — **with `<external-untrusted-input source="simplify-aggregate">` as the file's LEADING bytes and `</external-untrusted-input>` as its TRAILING bytes** (envelope-as-file-bytes, #302 / RFC 0012 §3.1 do-first; first-128-bytes contract per `agents/findings-to-issues.md` Step 1; dedup + write recipe per `commands/simplify.md` Phase 3). `post_review_write_simplify_aggregate_v2` in `lib/review-aggregate.sh` is the byte-shape oracle — the producer IS the specification, so never hand-roll those bytes here. Then dispatch the `code-fixer` against that path; the already-enveloped file is passed verbatim and is never re-wrapped. `review_pr.fix.phase2` plus manifest phase `simplify_fix` derives the `phase2/refactor` authority:
 
    ```bash
    . "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2

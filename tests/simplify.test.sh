@@ -376,7 +376,23 @@ else
     echo "  FAIL  E1.3 — Phase 3 code-fixer dispatch must pass the already-enveloped file verbatim (#302)"
     FAIL=$((FAIL + 1))
   fi
+  # E1.4 (#481) — Phase 3 described the aggregate in prose and named
+  # `encode-aggregate --phase phase2` as the byte-shape oracle, which is an
+  # ENCODER, not a producer: nothing merged the three captured lens results into
+  # the document it encodes. A described artifact with no producer is an
+  # artifact that does not exist.
+  if grep -qF 'post_review_write_simplify_aggregate_v2' <<<"$PHASE3_REGION"; then
+    echo "  PASS  E1.4 — Phase 3 builds the aggregate with the shipped Phase 2 writer"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  E1.4 — Phase 3 must build \$AGG_PATH with post_review_write_simplify_aggregate_v2 (#481)"
+    FAIL=$((FAIL + 1))
+  fi
 fi
+# E1.5 (#481) — a shipped command file may not point the operator at a test
+# fixture for the byte shape: tests/ is not in the install.
+assert_no_grep "$SIMPLIFY" 'tests/fixtures' \
+  "E1.5 — simplify.md names no tests/fixtures path (not shipped in the install; #481)"
 # E2 — anti-regression: the dispatch no longer re-wraps the simplify aggregate
 # under the phase-1 token (the bug that fed code-fixer a mislabeled envelope).
 assert_no_grep "$SIMPLIFY" 'wraps simplify-final\.md under' \

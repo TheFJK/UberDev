@@ -329,6 +329,7 @@ grep -Fq 'capture-bound-child' "$REVIEW_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$REVIEW_CMD" \
   && grep -Fq 'post_review_validated_evidence_complete' "$REVIEW_CMD" \
   && grep -Fq 'post_review_write_aggregate_v2' "$REVIEW_CMD" \
+  && grep -Fq 'post_review_write_simplify_aggregate_v2' "$REVIEW_CMD" \
   && pass "G10a review-pr runs the capture verbs for all four stages after the call" \
   || fail "G10a review-pr is missing a post-return capture verb"
 grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
@@ -336,6 +337,12 @@ grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$SIMPLIFY_CMD" \
   && pass "G10b simplify runs the capture verbs for all three stages after the call" \
   || fail "G10b simplify is missing a post-return capture verb"
+# G10d (#481) — capturing the three lens children proved they ran; nothing then
+# turned them into `simplify-final.md`, and Phase 2 stopped there. Both producer
+# sites must name the writer.
+grep -Fq 'post_review_write_simplify_aggregate_v2' "$SIMPLIFY_CMD" \
+  && pass "G10d simplify aggregates the captured lens wave into the phase2 document" \
+  || fail "G10d simplify captures three lenses and never builds the phase2 aggregate"
 grep -Fq 'validate-review-outcome' "$REVIEW_CMD" \
   && grep -Fq 'validate-persistence-result' "$REVIEW_CMD" \
   && grep -Fq 'validate-standalone-outcome' "$SIMPLIFY_CMD" \
@@ -2298,7 +2305,12 @@ l_anchor() {  # NAME TOKEN
     || L_ANCHOR_MISS="$L_ANCHOR_MISS $1(body-too-short)"
 }
 l_anchor scope   'review_fleet_write_review_base'
-l_anchor capture 'post_review_validated_evidence_complete'
+# Re-anchored off `post_review_validated_evidence_complete` (#481): Phase 2 now
+# calls the same builder from its OWN fence, so that token names two fences and
+# `l_extract` would refuse both. This token names the Phase 1 validated-ledger
+# path, sits inside the same 4w.2 fence, and predates the change — so every
+# L-row below still reads byte-identical bytes.
+l_anchor capture 'review-fleet-review.validated'
 l_anchor gate    'project-verification-claims'
 l_anchor publish 'review-fleet-verify-opinions-iter'
 
