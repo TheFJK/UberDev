@@ -582,8 +582,14 @@ F13_SHIM_EOF
   # top-level entry point refuses immediately (no git call, no mutation); the
   # function definitions survive that refusal, which is what makes the classifier
   # callable standalone. Do NOT "fix" this into a direct invocation of the block.
-  # Mutation guard: replace the anchored case with a substring or grep test =>
-  # the `notworktrees` and metacharacter rows go RED.
+  # Mutation guards, both measured rather than assumed: rewriting the anchored
+  # case as a substring match (`*worktrees*`) reds g-substring-collision, and
+  # rewriting it as a grep over the path reds g-worktrees and g-global-worktrees.
+  # The metacharacter row is a VALUE-SIDE lock rather than a mutation guard: it
+  # pins that the classifier never treats the path it is handed as a pattern,
+  # which is precisely what the retired `grep $(git branch --show-current)` did.
+  # Stated plainly because a mutation guard that does not actually flip is the
+  # counterfeit-falsifiability class this repo keeps rediscovering.
   F13G_DRIVER="$F13_DIR/f13g-driver.sh"
   {
     printf '%s\n' "$F13_BLOCK"
