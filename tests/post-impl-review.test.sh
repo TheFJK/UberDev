@@ -3,6 +3,26 @@
 # reviewer fanout, dispatches each configured wave before waiting
 # (5 distinct files; code-reviewer dispatched twice — general lens + correctness
 # lens), and that deprecated pre-push call sites have been removed per #67.
+#
+# SHAPE RULE for every multi-assertion subshell row below (#469). Write
+#
+#   (
+#     set -euo pipefail
+#     …assertions, each `|| exit <distinct code>`…
+#   )
+#   ROW_RC=$?
+#   if [ "$ROW_RC" -eq 0 ]; then …PASS… else …FAIL (rc=$ROW_RC)… fi
+#
+# and NEVER `if ( set -euo pipefail; … ); then`. POSIX suppresses the -e setting
+# for a command whose exit status is being tested, and bash keeps that
+# suppression for the WHOLE subshell body — an explicit `set -e` on its first
+# line does not re-arm it. In the condition form every assertion above the last
+# is a no-op and the row's verdict is just the last command's status, so a row
+# can (and did) report PASS *because* its subject failed: V2.7e pinned the
+# aggregate writer's sha256, the writer grew two lines, the digest check made
+# the stub abort before the writer ran, and the trailing `[ ! -e "$out" ]` went
+# TRUE. A `deadbeef` pin passed 142/0 on macOS. tests/test-harness-source-guards.test.sh
+# A4 is the repo-wide drift guard for this shape.
 
 set -u
 set -o pipefail
@@ -853,36 +873,38 @@ if [ "$V2_7E_RC" -eq 0 ]; then
 else
   echo "  FAIL  V2.7e — aggregate writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only (rc=$V2_7E_RC; 94=writer digest drifted, 95=argv shape, 96/97=sentinel leaked to argv/env, 98=stdin mismatch)"; FAIL=$((FAIL + 1))
 fi
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" "${V2_GATE_ARGS[@]}" || exit 1
-  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
-  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" "${V2_GATE_ARGS[@]}" || exit 11
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" "${V2_GATE_ARGS[@]}" || exit 12
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" "${V2_GATE_ARGS[@]}" || exit 13
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" "${V2_GATE_ARGS[@]}" || exit 14
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 15
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 16
   PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
-    <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
+    <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 17
   PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
-    <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
-  python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY'
+    <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 18
+  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 21
+  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 22
+  cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 23
+  cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 24
+  python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY' || exit 25
 import json,pathlib,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 value["rows"].pop()
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")),encoding="utf-8",newline="\n")
 PY
-  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" "${V2_GATE_ARGS[@]}" 2>/dev/null
-  [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ]
-); then
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" "${V2_GATE_ARGS[@]}" 2>/dev/null || exit 26
+  [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ] || exit 27
+)
+V2_8_RC=$?
+if [ "$V2_8_RC" -eq 0 ]; then
   echo "  PASS  V2.8 — writer emits exact oracles, merges duplicate scopes in roster order, and refuses an incomplete roster"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract"; FAIL=$((FAIL + 1))
+  echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract (rc=$V2_8_RC; 11-14=writer call, 15-16=oracle blob read, 17-18=encode-aggregate, 21-24=byte compare, 25=malformed fixture build, 26=incomplete roster accepted, 27=refused write left an artifact)"; FAIL=$((FAIL + 1))
 fi
 # V2.8b (#402) — MECHANISM PIN, not a red-first test: this passes on the buggy
 # tree too. It locks WHY an undeclared workspace artifact was fatal rather than
@@ -892,17 +914,19 @@ fi
 # is False) and exits 1 — so the fence returned 70 and Phase 2 / Phase 2.5 never
 # ran. The declaration fix must not be allowed to rot back into a writer that
 # accepts an empty destination and writes somewhere relative to the cwd.
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "" "${V2_GATE_ARGS[@]}" \
-      2>"$POST_REVIEW_V2_TMP/empty-path.err"
-  grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err"
-); then
+      2>"$POST_REVIEW_V2_TMP/empty-path.err" || exit 31
+  grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err" || exit 32
+)
+V2_8B_RC=$?
+if [ "$V2_8B_RC" -eq 0 ]; then
   echo "  PASS  V2.8b — an empty aggregate destination is refused as unsafe-output (the #402 failure mechanism stays fail-closed)"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  V2.8b — writer must refuse an empty aggregate destination with class=unsafe-output"; FAIL=$((FAIL + 1))
+  echo "  FAIL  V2.8b — writer must refuse an empty aggregate destination with class=unsafe-output (rc=$V2_8B_RC; 31=empty destination accepted, 32=refusal carried no class=unsafe-output diagnostic)"; FAIL=$((FAIL + 1))
 fi
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" <<'PY'
 import hashlib,importlib.util,os,pathlib,subprocess,sys
@@ -1016,12 +1040,20 @@ awk '
   active && /^REVIEW_EDGES=\(/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_FUNCTIONS"
   REVIEW_EDGES=(review.edge)
   run_failure_case() {
-    local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc
+    local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc base
+    # Per-mode exit-code base, so the row names WHICH of the three post-launch
+    # bookkeeping failures regressed instead of collapsing all three into rc=1.
+    case "$mode" in
+      roster) base=40 ;;
+      descriptors) base=50 ;;
+      launched) base=60 ;;
+      *) return 39 ;;
+    esac
     mkdir -p "$root"
     printf '%s\n' '{"edge":"review.edge","index":1}' >"$root/records"
     : >"$root/unwind.log"
@@ -1042,17 +1074,19 @@ if (
     post_review_run_capped "$root/records" 1 1 "$root/descriptors" "$root/launched" "$root/failed" 9 "$root/wave"
     rc=$?
     set -e
-    [ "$rc" -ne 0 ]
-    grep -Fq $'s\tr\t9' "$root/unwind.log"
+    [ "$rc" -ne 0 ] || return $((base + 1))
+    grep -Fq $'s\tr\t9' "$root/unwind.log" || return $((base + 2))
   }
   run_failure_case roster
   run_failure_case descriptors
   run_failure_case launched
-); then
+)
+POST_LAUNCH_RC=$?
+if [ "$POST_LAUNCH_RC" -eq 0 ]; then
   echo "  PASS  roster and aggregate-ledger failures boundedly unwind launched children"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  post-launch bookkeeping failure left an active wave without bounded unwind"
+  echo "  FAIL  post-launch bookkeeping failure left an active wave without bounded unwind (rc=$POST_LAUNCH_RC; 41/51/61=roster|descriptors|launched failure was not surfaced, 42/52/62=that failure skipped the bounded unwind)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_RUNTIME_TMP"
@@ -1066,7 +1100,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_CLEANUP_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_CLEANUP_FUNCTIONS"
   root="$POST_REVIEW_CLEANUP_TMP/runtime"
@@ -1094,16 +1128,18 @@ if (
   post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 9 2>"$root/error.log"
   rc=$?
   set -e
-  [ "$rc" -eq 70 ]
-  grep -Fq 'edge=review.one' "$root/error.log"
-  grep -Fq 'status=review.one.status' "$root/error.log"
-  grep -Fq 'origin_rc=17' "$root/error.log"
-  grep -Fq 'cleanup_rc=23' "$root/error.log"
-); then
+  [ "$rc" -eq 70 ] || exit 71
+  grep -Fq 'edge=review.one' "$root/error.log" || exit 72
+  grep -Fq 'status=review.one.status' "$root/error.log" || exit 73
+  grep -Fq 'origin_rc=17' "$root/error.log" || exit 74
+  grep -Fq 'cleanup_rc=23' "$root/error.log" || exit 75
+)
+CLEANUP_RC=$?
+if [ "$CLEANUP_RC" -eq 0 ]; then
   echo "  PASS  cleanup failure preserves per-child evidence and returns supervisory rc=70"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  cleanup failure was collapsed into the original dispatch result"
+  echo "  FAIL  cleanup failure was collapsed into the original dispatch result (rc=$CLEANUP_RC; 71=fanout did not return the supervisory 70, 72-75=the edge/status/origin_rc/cleanup_rc evidence line is missing)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_CLEANUP_TMP"
@@ -1117,7 +1153,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_LEDGER_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_LEDGER_FUNCTIONS"
   root="$POST_REVIEW_LEDGER_TMP/runtime"
@@ -1133,13 +1169,15 @@ if (
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
   uberdev_dispatch_child_capture() { : >"$dispatched"; }
-  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
-  [ ! -e "$dispatched" ]
-); then
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10 || exit 81
+  [ ! -e "$dispatched" ] || exit 82
+)
+LEDGER_INIT_RC=$?
+if [ "$LEDGER_INIT_RC" -eq 0 ]; then
   echo "  PASS  failed atomic ledger initialization blocks preflight and dispatch"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  stale ledger state reached preflight or dispatch after initialization failure"
+  echo "  FAIL  stale ledger state reached preflight or dispatch after initialization failure (rc=$LEDGER_INIT_RC; 81=fanout returned success despite a failed ledger init, 82=preflight or dispatch ran anyway)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_LEDGER_TMP"
@@ -1153,7 +1191,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_APPEND_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_APPEND_FUNCTIONS"
   root="$POST_REVIEW_APPEND_TMP/runtime"
@@ -1169,13 +1207,15 @@ if (
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
   uberdev_dispatch_child_capture() { : >"$dispatched"; }
-  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
-  [ ! -e "$dispatched" ]
-); then
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10 || exit 91
+  [ ! -e "$dispatched" ] || exit 92
+)
+DESCRIPTOR_APPEND_RC=$?
+if [ "$DESCRIPTOR_APPEND_RC" -eq 0 ]; then
   echo "  PASS  failed descriptor append blocks preflight and dispatch"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  descriptor append failure reached preflight or dispatch"
+  echo "  FAIL  descriptor append failure reached preflight or dispatch (rc=$DESCRIPTOR_APPEND_RC; 91=fanout returned success despite a failed descriptor append, 92=preflight or dispatch ran anyway)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_APPEND_TMP"

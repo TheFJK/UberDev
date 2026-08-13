@@ -205,6 +205,130 @@ if [ "$A3_SCANNED" -eq 0 ]; then
 fi
 
 echo
+echo "== A4: no tests/*.test.sh arms set -e inside a subshell used as a condition =="
+# Issue #469. POSIX: "the -e setting shall be ignored when executing … any
+# command of an AND-OR list other than the last" and, likewise, the compound
+# list a construct tests for its exit status. So in
+#
+#   if (
+#     set -euo pipefail
+#     …assertions…
+#     <last command>
+#   ); then
+#
+# the subshell IS the `if` condition, and bash suppresses errexit for its ENTIRE
+# body — re-executing `set -e` on the first line does not re-arm it. Every
+# assertion above the last becomes a no-op and the row's verdict collapses to
+# the exit status of the LAST command alone. That is not a style nit: V2.7e in
+# post-impl-review.test.sh reported PASS *because* its subject failed (a stale
+# sha256 pin aborted the stub before the writer ran, which made the trailing
+# `[ ! -e "$out" ]` true), and a deliberately wrong `deadbeef` pin scored 142/0
+# on macOS. Only ubuntu CI caught the drift, and only incidentally.
+#
+# The fix shape — the one this guard leaves alone — runs the subshell OUTSIDE
+# the condition and tests its captured status:
+#
+#   (
+#     set -euo pipefail
+#     …assertions, each `|| exit <distinct code>`…
+#   )
+#   ROW_RC=$?
+#   if [ "$ROW_RC" -eq 0 ]; then …
+#
+# DETECTOR BOUNDARY: only shell subshells are sites. `if (` inside an embedded
+# python/awk heredoc (`if (not swapped and …`, `if (index(buf, …) > 0) {`) is
+# not one, and neither is `if ( VAR=x bash -c '… set -e …' )` — the inner
+# `bash -c` is a fresh process whose errexit context starts clean. The opener is
+# therefore required to be a bare `(` closing the line, or a one-line `( set -`,
+# which is exactly how a multi-assertion shell subshell is written.
+A4_VERDICT="$(python3 -I - "$TESTS_DIR" <<'PY'
+import pathlib, re, sys
+
+# `(` alone at end of line (the multi-line shell form), or `( set -…` inline.
+OPENER = re.compile(r"^[ \t]*(?:if|elif|while|until)[ \t]+(?:!\s*)?\([ \t]*(?:$|set[ \t]+-)")
+# Closer for the multi-line form: `)` (optionally `; then` / `; do`) at line start.
+CLOSER = re.compile(r"^[ \t]*\)[ \t]*(?:;[ \t]*(?:then|do)[ \t]*)?$")
+ERREXIT = re.compile(r"^[ \t]*set[ \t]+(?:-[A-Za-z]*e[A-Za-z]*\b|-o[ \t]+errexit\b)")
+
+offenders, scanned = [], 0
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.test.sh")):
+    lines = path.read_text(encoding="utf-8").split("\n")
+    for number, line in enumerate(lines, 1):
+        if not OPENER.search(line):
+            continue
+        scanned += 1
+        if ERREXIT.search(line.split("(", 1)[1]):
+            offenders.append("%s:%d" % (path.name, number))
+            continue
+        for body in lines[number:]:
+            if CLOSER.match(body):
+                break
+            if ERREXIT.match(body):
+                offenders.append("%s:%d" % (path.name, number))
+                break
+
+# Self-test, so a detector that has stopped matching anything cannot go green on
+# an empty corpus. The steady state for the real corpus is ZERO offenders, so
+# vacuity cannot be measured against it the way A3 measures its own scan count.
+FIXTURE = [
+    "if (",                     # 1  offender: multi-line condition subshell
+    "  set -euo pipefail",
+    "  true",
+    "); then",
+    "  :",
+    "fi",
+    "while ( set -e; false ); do",   # 7  offender: one-line condition subshell
+    "  :",
+    "done",
+    "(",                        # 10 clean: subshell OUTSIDE the condition
+    "  set -euo pipefail",
+    "  true",
+    ")",
+    "RC=$?",
+    "if ( VAR=1 bash -c 'set -e; true' ); then",  # 15 clean: fresh child shell
+    "  :",
+    "fi",
+]
+found = []
+for number, line in enumerate(FIXTURE, 1):
+    if not OPENER.search(line):
+        continue
+    if ERREXIT.search(line.split("(", 1)[1]):
+        found.append(number)
+        continue
+    for body in FIXTURE[number:]:
+        if CLOSER.match(body):
+            break
+        if ERREXIT.match(body):
+            found.append(number)
+            break
+
+if found != [1, 7]:
+    print("SELFTEST:detector flagged %r, wanted [1, 7]" % (found,))
+elif offenders:
+    print("OFFENDERS:" + " ".join(offenders))
+else:
+    print("OK:%d" % scanned)
+PY
+)"
+case "$A4_VERDICT" in
+  OK:*)
+    echo "  PASS  A4 — no condition-position subshell arms set -e (${A4_VERDICT#OK:} subshell opener(s) scanned)"
+    PASS=$((PASS + 1))
+    ;;
+  SELFTEST:*)
+    echo "  FAIL  A4 — the detector no longer detects its own fixture: ${A4_VERDICT#SELFTEST:}"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo "  FAIL  A4 — set -e is inert in these condition-position subshells; every assertion above the last is a no-op"
+    printf '        %s\n' "${A4_VERDICT#OFFENDERS:}"
+    echo "        fix:  run the subshell outside the condition, capture \$?, then test the captured status"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
+echo
 echo "==================================================================="
 echo "  PASS=$PASS  FAIL=$FAIL"
 echo "==================================================================="
