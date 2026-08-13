@@ -43,7 +43,7 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class) → plan writer → ONE solver agent (`isolation:"worktree"`) executing the plan. |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class; its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507) → plan writer → ONE solver agent (`isolation:"worktree"`) executing the plan. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
 read-only and write their artifacts to absolute paths under the run dir — an
