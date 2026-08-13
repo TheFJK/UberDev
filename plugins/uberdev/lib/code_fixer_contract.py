@@ -1643,10 +1643,35 @@ def _entry_relation(left: dict[str, Any] | None, right: dict[str, Any] | None) -
 
 
 def _untracked_state(working_dir: str, evidence_dir: str) -> list[dict[str, Any]]:
+    """U0: the untracked state a verb must find unchanged when it returns.
+
+    `--exclude-standard` is load-bearing, and it is the SAME exclusion
+    `_require_untracked_confined_to_evidence` applies — the two spellings of
+    "which untracked path is state" must agree or the baseline judges paths
+    the residue check has already ruled irrelevant.
+
+    Without it the baseline is self-invalidating. A fixer is REQUIRED to run
+    the test suite between the authority mint and `publish-disposition`, and
+    running it writes into ignored build and cache trees — vitest drops
+    `node_modules/.vite/vitest/<hash>/results.json` on every run. The
+    unfiltered scan counted that write as new untracked state and refused the
+    fixer's own disposition with `review_baseline_mismatch`, leaving the edits
+    unstaged. It also had to hash every ignored path through the owned-regular
+    capture, so an ordinary `node_modules` — hardlinked out of the package
+    manager's global cache, and holding files past `WORKTREE_FILE_LIMIT` —
+    aborted the mint outright, and a clean one still cost a full walk of tens
+    of thousands of paths per capture.
+
+    Excluding them costs no guarantee: an ignored path cannot enter the commit
+    under review. The diff, the target-path allowlist, and `commit-review` all
+    operate on tracked content, and force-adding an ignored path to the index
+    surfaces it as tracked state, which `_capture_repo_state` still judges.
+    """
     result = _git(
         working_dir,
         "ls-files",
         "--others",
+        "--exclude-standard",
         "-z",
         "--",
     )
