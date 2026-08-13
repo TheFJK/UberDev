@@ -103,8 +103,9 @@ LENS_PROMPT_FILES = {
 #     OUT of agents/code-reviewer.md and into this file. The bytes that decide
 #     every confidence score left the stamped set in the same commit that created
 #     them; naming the file as a surface is what puts them back. It POSTDATES the
-#     current measurement, so the baseline declares it in pending[] rather than
-#     stamping a digest the numbers were never measured against — the next
+#     current measurement, so the baseline declares it in pending[] and records
+#     its current bytes under `unmeasured_digests` rather than stamping a
+#     prompt_digests entry the numbers were never measured against — the next
 #     --refresh stamps it for real.
 SHARED_PROMPT_SURFACES = (
     "shared/phase1-reviewer-output-v1.md",
@@ -532,10 +533,13 @@ def sha256_file(path: Path) -> str:
 
 
 def prompt_surfaces() -> tuple[str, ...]:
-    """The reviewer prompt surfaces the published numbers were measured against.
+    """The reviewer prompt surfaces the precision stamp watches.
 
     Editing one without re-measuring or declaring it in the baseline's
-    `pending[]` fails --check (RFC 0018 §5).
+    `pending[]` fails --check (RFC 0018 §5). A declaration is not an exemption:
+    a MEASURED surface keeps its `prompt_digests` entry and reds again the moment
+    it stops diverging from it, and an UNMEASURED one must carry an
+    `unmeasured_digests` entry that reds on any post-declaration edit.
 
     DERIVED from PHASE1_CONTRIBUTORS, never hand-listed. A second hand-written
     tuple is a second roster: it can lose an edge the lens tables still publish,
@@ -762,6 +766,10 @@ def seed_baseline(corpus: dict, plugin_root: Path, now: datetime) -> dict:
         "lenses": lenses,
         "prompt_digests": prompt_digests(plugin_root),
         "pending": [],
+        # After a refresh EVERY surface is stamped, so this map is correctly
+        # empty — but it is emitted as an empty map rather than left absent, so
+        # the shape --refresh writes is one check_prompt_digests fully describes.
+        "unmeasured_digests": {},
     }
 
 
@@ -838,6 +846,24 @@ def check_prompt_digests(baseline: dict, plugin_root: Path) -> list:
             raise InputError(f"baseline `pending` entry has an empty reason: {entry['path']}")
         declared[entry["path"]] = entry["reason"]
 
+    # ABSENT means {} — an empty watchlist, never "nothing to check". A baseline
+    # written before this field existed and carrying no declared-unmeasured
+    # surface stays valid; one that DOES carry such a surface fails closed
+    # through the per-surface arm below, with the field named in the message.
+    # PRESENT-but-malformed is an InputError (rc=2), matching how `prompt_digests`
+    # and `pending` are already validated: "your baseline is unreadable" and
+    # "your tree drifted" are different answers, and a malformed map that fell
+    # through to the drift compare would send the reader hunting a drift that
+    # does not exist.
+    unmeasured = baseline.get("unmeasured_digests", {})
+    if not isinstance(unmeasured, dict):
+        raise InputError("baseline `unmeasured_digests` is not an object")
+    for key, value in unmeasured.items():
+        if not isinstance(value, str):
+            raise InputError(
+                f"baseline `unmeasured_digests` value for {key} is not a string"
+            )
+
     live = prompt_digests(plugin_root)
     surfaces = prompt_surfaces()
     for rel in surfaces:
@@ -851,6 +877,32 @@ def check_prompt_digests(baseline: dict, plugin_root: Path) -> list:
             # so an undeclared omission still reds.
             if rel not in declared:
                 problems.append(f"baseline records no digest for reviewer prompt: {rel}")
+                continue
+            # DELIBERATE ASYMMETRY (#467). A *measured* declaration needs no
+            # second field: `prompt_digests[rel]` still holds the measured bytes,
+            # so the anti-parking rule below reds the moment the path stops
+            # diverging from them. An *unmeasured* declaration has no measured
+            # bytes to return to, so anti-parking can never fire for it — which
+            # is exactly why it needs a tether of its own. Before this arm
+            # existed the branch simply `continue`d, and a declared-unmeasured
+            # prompt was unwatched permanently: editing
+            # agents/convention-compliance.md left --check at rc=0.
+            # `unmeasured_digests[rel]` asserts nothing about what the published
+            # numbers were measured against — only which bytes were current when
+            # the declaration was written — so recording it is honest where
+            # stamping a measured digest would not be.
+            if rel not in unmeasured:
+                problems.append(
+                    f"declared-unmeasured reviewer prompt has no recorded bytes: {rel} "
+                    "— record its current sha256 under `unmeasured_digests` so the "
+                    "pending[] declaration is bounded"
+                )
+            elif unmeasured[rel] != live[rel]:
+                problems.append(
+                    f"declared-unmeasured reviewer prompt changed since it was "
+                    f"declared: {rel} — re-record its `unmeasured_digests` entry and "
+                    "restate the pending[] reason, or re-measure (--refresh)"
+                )
             continue
         drifted = recorded[rel] != live[rel]
         if drifted and rel not in declared:
@@ -874,6 +926,22 @@ def check_prompt_digests(baseline: dict, plugin_root: Path) -> list:
     # derived one is what closes it.
     for path in sorted(set(recorded) - set(surfaces)):
         problems.append(f"baseline records a digest for a non-surface: {path}")
+    # The same orphan rule for the second map, for the same reason: the surface
+    # loop above walks prompt_surfaces(), so a key that is no longer a surface is
+    # never visited by it and sits in the baseline looking like coverage.
+    for path in sorted(set(unmeasured) - set(surfaces)):
+        problems.append(f"baseline records an unmeasured digest for a non-surface: {path}")
+    # A path in BOTH maps is ambiguous about which digest the check compares
+    # against, and whichever answer the code picked would let the other field
+    # mask it. That is a smaller copy of the one-field-two-jobs conflation this
+    # second map exists to remove, so it is refused rather than resolved: a
+    # surface is either measured or declared-unmeasured, never both.
+    for path in sorted(set(recorded) & set(unmeasured)):
+        problems.append(
+            f"{path} is recorded in BOTH prompt_digests and unmeasured_digests — one "
+            "field would mask the other; a surface is either measured or "
+            "declared-unmeasured, never both"
+        )
     # Membership is tested against the DERIVED surface set, not against
     # `recorded`: a legitimately-unstamped surface (the postdates-measurement
     # case above) is absent from `recorded` while still being a real surface, so

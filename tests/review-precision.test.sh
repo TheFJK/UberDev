@@ -26,6 +26,13 @@
 #   * a surface with no recorded digest reds unless `pending[]` says why, which
 #     is how a prompt file that POSTDATES `measured_at` is declared rather than
 #     stamped with bytes the numbers were never measured against;
+#   * (#467) that declaration is BOUNDED rather than exempt — a declared-unmeasured
+#     surface carries its current bytes in `unmeasured_digests`, so a
+#     post-declaration edit still reds, a declaration with no recorded bytes at
+#     all fails closed, and a path in both digest maps is refused as ambiguous;
+#   * (#467) the lens->FILE map the stamp digests agrees, in both directions,
+#     with `REVIEW_ROSTER[].agentFile` in the review fleet — and the comparator
+#     FAILS rather than passes when it extracts nothing;
 #   * the miner is repo-agnostic, does not copy the lens roster, and needs no
 #     network for anything except --refresh.
 #
@@ -163,14 +170,31 @@ mk_plugin_root() {
   done <<<"$(surfaces_of)"
 }
 
-# mk_baseline <out.json> <plugin_root> <lenses-json> <pending-json>
+# mk_baseline <out.json> <plugin_root> <lenses-json> <pending-json> [unmeasured-json]
 # The stamped surface set comes from the miner for the same reason mk_plugin_root
 # derives it: a fixture baseline missing a surface would exercise a stamp
 # narrower than the shipped one and report that as green.
+#
+# `unmeasured_digests` is emitted ALWAYS, empty by default (#467). The shipped
+# baseline carries the key, so a fixture that omitted it would exercise a
+# baseline shape narrower than the one the checker describes — the same
+# "fixture derived from a subset of the contract" defect this row set is about.
+# The 5th argument seeds it for the rows that need a pre-populated map; every
+# existing call site is unchanged.
+#
+# The default is bound to a NAMED local, not written inline as `${5:-{}}`: that
+# idiom silently corrupts every supplied value, because the shell closes the
+# parameter expansion at the first `}` and leaves the second as a literal
+# suffix. It reads as correct precisely because the UNSET branch is accidentally
+# right — the stray `}` completes the `{` into `{}` — while `mk_baseline … '[]'`
+# hands python `[]}` and dies in json.loads.
 mk_baseline() {
-  "$PY" - "$1" "$2" "$3" "$4" "$MINER" <<'PYEOF'
+  local unmeasured_json="${5-}"
+  [ -n "$unmeasured_json" ] || unmeasured_json='{}'
+  "$PY" - "$1" "$2" "$3" "$4" "$MINER" "$unmeasured_json" <<'PYEOF'
 import hashlib, importlib.util, json, pathlib, sys
 out, root, lenses, pending = sys.argv[1], pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
+unmeasured = json.loads(sys.argv[6])
 spec = importlib.util.spec_from_file_location("review_precision", sys.argv[5])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -182,6 +206,7 @@ with open(out, "w", encoding="utf-8") as fh:
         "lenses": lenses,
         "prompt_digests": digests,
         "pending": pending,
+        "unmeasured_digests": unmeasured,
     }, fh, indent=2, sort_keys=True)
 PYEOF
 }
@@ -777,6 +802,24 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=2, sort_keys=True)
 PYEOF
 }
+# set_unmeasured <baseline> <rel> <plugin_root> — record the LIVE sha256 of
+# <rel> under `unmeasured_digests` (#467). This is the TETHER for a surface that
+# has no measured bytes to stamp: unlike prompt_digests[rel] it says nothing
+# about what the published numbers were measured against, only "these are the
+# bytes that were current when the declaration was written" — so a later edit of
+# a declared-unmeasured prompt still reds. drop_digest above keeps its own
+# semantics unchanged (pop the digest, replace pending[]) precisely so it stays
+# the producer of the FAILS-CLOSED fixture RP32 needs.
+set_unmeasured() {
+  "$PY" - "$1" "$2" "$3" <<'PYEOF'
+import hashlib, json, pathlib, sys
+path, rel, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+record = json.load(open(path, encoding="utf-8"))
+record.setdefault("unmeasured_digests", {})[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+PYEOF
+}
 UNSTAMPED_PLUGIN="$TMP/unstamped-plugin"
 mk_plugin_root "$UNSTAMPED_PLUGIN"
 mk_baseline "$TMP/unstamped-baseline.json" "$UNSTAMPED_PLUGIN" '{}' '[]'
@@ -790,6 +833,11 @@ drop_digest "$TMP/unstamped-baseline.json" 'agents/comment-analyzer.md'
 RP29_BARE_OUT="$(unstamped_check)"; RP29_BARE_RC=$?
 drop_digest "$TMP/unstamped-baseline.json" 'agents/comment-analyzer.md' \
   'the file postdates measured_at, so there are no measured bytes to stamp'
+# #467: a declaration alone no longer clears the surface — it must also be
+# BOUNDED by an unmeasured_digests entry, or nothing would ever notice the
+# declared file changing again. RP32 below is the row that pins the bare
+# (unbounded) declaration as a red.
+set_unmeasured "$TMP/unstamped-baseline.json" 'agents/comment-analyzer.md' "$UNSTAMPED_PLUGIN"
 RP29_DECL_OUT="$(unstamped_check)"; RP29_DECL_RC=$?
 RP29_FAILS=''
 if [ "$RP29_BARE_RC" -ne 1 ] || ! grep -qF 'agents/comment-analyzer.md' <<<"$RP29_BARE_OUT"; then
@@ -801,6 +849,359 @@ if [ -z "$RP29_FAILS" ]; then
   ok "RP29 an unstamped surface reds undeclared and clears only once pending[] states why the bytes were never measured"
 else
   no "RP29 an unstamped surface reds unless pending[] declares it" "$RP29_FAILS"
+fi
+
+# --- RP30/RP30b: the lens->file mapping is COMPARED, not merely copied -------
+#
+# WHY THIS EXISTS (#467). v0.45.13 made the lens SET derived — prompt_surfaces()
+# walks PHASE1_CONTRIBUTORS — but the derivation stops one step short of the
+# bytes actually digested: the lens->FILE map (LENS_PROMPT_FILES) is a
+# hand-maintained copy of REVIEW_ROSTER[].agentFile in the review fleet, and
+# nothing compared them. Proven on the shipped tree: repoint one roster
+# `agentFile:` to another existing agent file, leave the miner alone, then drift
+# the newly-dispatched file — `--check` stays rc=0. The stamp watches a file the
+# fleet no longer dispatches and never watches the one it does. (A repoint to a
+# NON-existent file already fails closed through `reviewer prompt surface is
+# missing`; only repoint-to-an-existing-file was silent.)
+#
+# The comparison lives here rather than inside the miner deliberately: parsing
+# workflow.js from review-precision.py would make `--check` fail with a JS
+# PARSING diagnostic on a brace reflow, and would make prompt_surfaces()
+# plugin-root-dependent — every fixture tree mk_plugin_root builds would then
+# need a synthetic workflow.js. R-roster-complete in tests/post-impl-review.test.sh
+# set the precedent of comparing copies test-side for exactly this reason.
+
+echo
+echo "### The lens->file mapping is compared, not just copied (#467)"
+
+REVIEW_FLEET_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
+
+# roster_pairs <workflow.js> — extract {edge-last-segment: agentFile} from the
+# REVIEW_ROSTER block and compare it BOTH WAYS with the miner's
+# LENS_PROMPT_FILES. Takes the JS path as an ARGUMENT so RP30b can drive it
+# against a scratch copy without ever mutating the shipped file.
+#
+# Four mechanics carry the anti-vacuity weight:
+#   * the roster is sliced to its own BLOCK, so LENS_ROSTER can gain an
+#     `agentFile` field later without silently re-pairing anything;
+#   * records are split on `{ ... }` rather than paired positionally, so a
+#     reflow to one line per record cannot mis-pair an edge with another
+#     record's file;
+#   * the key is the last dot segment of `edge:` (`silent_failures`), NEVER
+#     `slug:` — the slug is hyphenated (`silent-failures`) and joining on it
+#     would yield a permanently-empty intersection that passes forever;
+#   * the miner side is IMPORTED, never regexed out of the .py, which would
+#     itself be a new uncompared copy of the map's syntax.
+# Pairs are compared as SETS OF PAIRS, not as file lists: code-reviewer.md is
+# mapped by two edges, so a value-set compare sees 6 files for 7 edges and a
+# repoint between two mapped files would slip through.
+roster_pairs() {
+  "$PY" - "$MINER" "$1" <<'PYEOF'
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location("review_precision", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    source = open(sys.argv[2], encoding="utf-8").read()
+except OSError as exc:
+    print(f"UNREADABLE roster: {exc}")
+    sys.exit(2)
+start = source.find("const REVIEW_ROSTER = [")
+end = source.find("\n];", start) if start >= 0 else -1
+if start < 0 or end < 0:
+    # A renamed or reshaped constant must FAIL this row, never vacuously pass
+    # it: a guard that silently extracts nothing is the vacuous-scan defect,
+    # not a guard.
+    print("NO-BLOCK the REVIEW_ROSTER block was not found or has no `\\n];` terminator")
+    sys.exit(1)
+block = source[start:end]
+records = re.findall(r"\{([^{}]*)\}", block, re.S)
+problems, pairs = [], {}
+for record in records:
+    edge = re.search(r'edge:\s*"([^"]*)"', record)
+    agent_file = re.search(r'agentFile:\s*"([^"]*)"', record)
+    if edge is None or agent_file is None:
+        problems.append("roster record lacks edge or agentFile: " + " ".join(record.split()))
+        continue
+    pairs[edge.group(1).rpartition(".")[2]] = agent_file.group(1)
+if not pairs:
+    problems.append(f"extracted ZERO roster pairs from {len(records)} record(s) — refusing a vacuous pass")
+declared_files = block.count("agentFile:")
+if len(pairs) != declared_files:
+    problems.append(
+        f"extracted {len(pairs)} pair(s) but the block contains {declared_files} "
+        "`agentFile:` occurrence(s) — a record was skipped or double-counted"
+    )
+mined = dict(module.LENS_PROMPT_FILES)
+only_roster = sorted(set(pairs.items()) - set(mined.items()))
+only_miner = sorted(set(mined.items()) - set(pairs.items()))
+if only_roster or only_miner:
+    problems.append(
+        "REVIEW_ROSTER[].agentFile and LENS_PROMPT_FILES disagree; "
+        f"in the roster only: {only_roster}; in the miner only: {only_miner}"
+    )
+if problems:
+    print("PAIRS-FAIL " + " | ".join(problems))
+    sys.exit(1)
+print(f"PAIRS-OK {len(pairs)} lens->file pair(s) agree in both directions")
+sys.exit(0)
+PYEOF
+}
+
+RP30_FAILS=''
+if [ ! -r "$REVIEW_FLEET_JS" ]; then
+  # An unreadable roster is a FAIL, not a skip: the comparison did not run.
+  RP30_FAILS="the review fleet roster is missing or unreadable: $REVIEW_FLEET_JS"
+else
+  RP30_OUT="$(roster_pairs "$REVIEW_FLEET_JS" 2>&1)"; RP30_RC=$?
+  [ "$RP30_RC" -eq 0 ] || RP30_FAILS="rc=$RP30_RC $RP30_OUT"
+fi
+if [ -z "$RP30_FAILS" ]; then
+  ok "RP30 every REVIEW_ROSTER edge->agentFile pair agrees with the miner's LENS_PROMPT_FILES, in both directions"
+else
+  no "RP30 the roster and the miner agree on which file each lens is dispatched with" "$RP30_FAILS"
+fi
+
+# RP30b — the anti-vacuity half, as a permanent row rather than a one-off manual
+# proof. Rename the constant in a SCRATCH COPY (the shipped file is never
+# touched) and require the comparator to FAIL: a scan that extracts nothing must
+# not report agreement.
+RP30B_JS="$TMP/renamed-roster-workflow.js"
+sed 's/const REVIEW_ROSTER = \[/const REVIEW_ROSTER_RENAMED = [/' "$REVIEW_FLEET_JS" > "$RP30B_JS"
+RP30B_OUT="$(roster_pairs "$RP30B_JS" 2>&1)"; RP30B_RC=$?
+RP30B_FAILS=''
+[ "$RP30B_RC" -ne 0 ] || \
+  RP30B_FAILS="a renamed REVIEW_ROSTER constant still reported agreement (rc=0): $RP30B_OUT"
+grep -qF 'NO-BLOCK' <<<"$RP30B_OUT" || \
+  RP30B_FAILS="${RP30B_FAILS}${RP30B_FAILS:+; }the diagnostic does not say the block was not found: $RP30B_OUT"
+if [ -z "$RP30B_FAILS" ]; then
+  ok "RP30b the comparator FAILS when the roster constant is renamed — it cannot pass by extracting nothing"
+else
+  no "RP30b the comparator fails rather than passing vacuously" "$RP30B_FAILS"
+fi
+
+# --- RP31–RP35: the declared-unmeasured tether (#467) ------------------------
+#
+# WHY THESE EXIST. Until #467 the missing-digest arm `continue`d the moment
+# pending[] named the path, so a surface with no measured bytes was exempt from
+# BOTH comparisons — permanently, and silently. Proven on the shipped tree:
+# appending one line to plugins/uberdev/agents/convention-compliance.md left
+# `--check` at rc=0 with this suite green. The root cause is that
+# `prompt_digests` carried two meanings in one field — "the bytes the published
+# numbers were measured against" AND "the bytes we notice changing" — so a
+# surface that could not honestly carry the first lost the second as well.
+# `unmeasured_digests` gives the second meaning its own field, and the rows below
+# drive every arm of it: bounded (clears), edited-after-declaration (reds),
+# declared-but-unbounded (reds), both-fields (reds), orphan key (reds), and the
+# schema arms (rc=2).
+
+echo
+echo "### Declared-unmeasured surfaces stay watched (#467)"
+
+# check_with <baseline> <report> <plugin_root> — one --check against a
+# caller-owned fixture triple. Every row below builds its OWN plugin root and
+# baseline rather than sharing one: these rows MUTATE their fixture files, and a
+# leaked mutation turns a later row's control arm into a false red.
+check_with() {
+  "$PY" "$MINER" --check --corpus "$FIX/corpus-families.json" --baseline "$1" \
+    --report "$2" --plugin-root "$3" --now "$NOW" 2>&1
+}
+
+UNMEASURED_PLUGIN="$TMP/unmeasured-plugin"
+mk_plugin_root "$UNMEASURED_PLUGIN"
+mk_baseline "$TMP/unmeasured-baseline.json" "$UNMEASURED_PLUGIN" '{}' '[]'
+render_to "$TMP/unmeasured.md" "$FIX/corpus-families.json" "$TMP/unmeasured-baseline.json"
+drop_digest "$TMP/unmeasured-baseline.json" 'agents/comment-analyzer.md' \
+  'the file postdates measured_at, so there are no measured bytes to stamp'
+set_unmeasured "$TMP/unmeasured-baseline.json" 'agents/comment-analyzer.md' "$UNMEASURED_PLUGIN"
+RP31_CTRL_OUT="$(check_with "$TMP/unmeasured-baseline.json" "$TMP/unmeasured.md" "$UNMEASURED_PLUGIN")"
+RP31_CTRL_RC=$?
+printf 'post-declaration edit\n' >> "$UNMEASURED_PLUGIN/agents/comment-analyzer.md"
+RP31_OUT="$(check_with "$TMP/unmeasured-baseline.json" "$TMP/unmeasured.md" "$UNMEASURED_PLUGIN")"
+RP31_RC=$?
+RP31_FAILS=''
+# Both directions: a rule that reds on the edited tree but ALSO on the bounded
+# control is a broken predicate, not a guard.
+[ "$RP31_CTRL_RC" -eq 0 ] || \
+  RP31_FAILS="bounded declaration already reds: rc=$RP31_CTRL_RC $RP31_CTRL_OUT"
+if [ "$RP31_RC" -ne 1 ]; then
+  RP31_FAILS="${RP31_FAILS}${RP31_FAILS:+; }post-declaration edit not caught: rc=$RP31_RC $RP31_OUT"
+fi
+grep -qF 'agents/comment-analyzer.md' <<<"$RP31_OUT" || \
+  RP31_FAILS="${RP31_FAILS}${RP31_FAILS:+; }diagnostic does not name the drifted path: $RP31_OUT"
+grep -qF 'unmeasured_digests' <<<"$RP31_OUT" || \
+  RP31_FAILS="${RP31_FAILS}${RP31_FAILS:+; }diagnostic does not name the field to re-record: $RP31_OUT"
+if [ -z "$RP31_FAILS" ]; then
+  ok "RP31 a declared-unmeasured surface edited after its declaration reds — the declaration is bounded, not an exemption"
+else
+  no "RP31 a declared-unmeasured surface edited after its declaration reds" "$RP31_FAILS"
+fi
+
+# RP32 — fails CLOSED. `drop_digest` with a reason and no set_unmeasured is
+# exactly the pre-#467 baseline shape, and it must now red with a message that
+# names the field the reader has to add. An absent `unmeasured_digests` key is
+# read as {} — never as "nothing to check".
+UNBOUNDED_PLUGIN="$TMP/unbounded-plugin"
+mk_plugin_root "$UNBOUNDED_PLUGIN"
+mk_baseline "$TMP/unbounded-baseline.json" "$UNBOUNDED_PLUGIN" '{}' '[]'
+render_to "$TMP/unbounded.md" "$FIX/corpus-families.json" "$TMP/unbounded-baseline.json"
+drop_digest "$TMP/unbounded-baseline.json" 'agents/comment-analyzer.md' \
+  'declared, but with no recorded bytes of any kind'
+RP32_OUT="$(check_with "$TMP/unbounded-baseline.json" "$TMP/unbounded.md" "$UNBOUNDED_PLUGIN")"
+RP32_RC=$?
+RP32_FAILS=''
+[ "$RP32_RC" -eq 1 ] || RP32_FAILS="unbounded declaration did not red: rc=$RP32_RC $RP32_OUT"
+grep -qF 'agents/comment-analyzer.md' <<<"$RP32_OUT" || \
+  RP32_FAILS="${RP32_FAILS}${RP32_FAILS:+; }diagnostic does not name the path: $RP32_OUT"
+grep -qF 'unmeasured_digests' <<<"$RP32_OUT" || \
+  RP32_FAILS="${RP32_FAILS}${RP32_FAILS:+; }diagnostic does not name the field to add: $RP32_OUT"
+if [ -z "$RP32_FAILS" ]; then
+  ok "RP32 a pending[] declaration with no recorded bytes at all fails CLOSED and names the field to add"
+else
+  no "RP32 a declaration with no recorded bytes fails closed" "$RP32_FAILS"
+fi
+
+# RP33 — a path in BOTH maps. The ambiguity is the whole point: one field would
+# mask the other (which digest is the check comparing against?), and that is a
+# smaller copy of the one-field-two-jobs conflation `unmeasured_digests` exists
+# to remove. A surface is either measured or declared-unmeasured, never both.
+BOTH_PLUGIN="$TMP/both-maps-plugin"
+mk_plugin_root "$BOTH_PLUGIN"
+mk_baseline "$TMP/both-maps-baseline.json" "$BOTH_PLUGIN" '{}' '[]' \
+  '{"agents/comment-analyzer.md":"0000000000000000000000000000000000000000000000000000000000000000"}'
+render_to "$TMP/both-maps.md" "$FIX/corpus-families.json" "$TMP/both-maps-baseline.json"
+RP33_OUT="$(check_with "$TMP/both-maps-baseline.json" "$TMP/both-maps.md" "$BOTH_PLUGIN")"
+RP33_RC=$?
+RP33_FAILS=''
+[ "$RP33_RC" -eq 1 ] || RP33_FAILS="a path in both maps did not red: rc=$RP33_RC $RP33_OUT"
+grep -qF 'agents/comment-analyzer.md' <<<"$RP33_OUT" || \
+  RP33_FAILS="${RP33_FAILS}${RP33_FAILS:+; }diagnostic does not name the ambiguous path: $RP33_OUT"
+if [ -z "$RP33_FAILS" ]; then
+  ok "RP33 a path recorded in BOTH prompt_digests and unmeasured_digests reds — one field would mask the other"
+else
+  no "RP33 a path recorded in both maps reds" "$RP33_FAILS"
+fi
+
+# add_orphan_unmeasured <baseline> — the mirror of add_orphan_digest. A retired,
+# renamed or unmapped lens leaves its key behind in whichever map held it, and
+# the surface-side loop is blind to both by construction: it walks
+# prompt_surfaces(), so a key that is no longer a surface is simply never
+# visited while it sits in the baseline looking like coverage.
+add_orphan_unmeasured() {
+  "$PY" - "$1" <<'PYEOF'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+record.setdefault("unmeasured_digests", {})["agents/retired-lens.md"] = "0" * 64
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+PYEOF
+}
+ORPHAN_UNM_PLUGIN="$TMP/orphan-unmeasured-plugin"
+mk_plugin_root "$ORPHAN_UNM_PLUGIN"
+mk_baseline "$TMP/orphan-unmeasured-baseline.json" "$ORPHAN_UNM_PLUGIN" '{}' '[]'
+render_to "$TMP/orphan-unmeasured.md" "$FIX/corpus-families.json" "$TMP/orphan-unmeasured-baseline.json"
+RP34_CTRL_OUT="$(check_with "$TMP/orphan-unmeasured-baseline.json" "$TMP/orphan-unmeasured.md" "$ORPHAN_UNM_PLUGIN")"
+RP34_CTRL_RC=$?
+add_orphan_unmeasured "$TMP/orphan-unmeasured-baseline.json"
+RP34_OUT="$(check_with "$TMP/orphan-unmeasured-baseline.json" "$TMP/orphan-unmeasured.md" "$ORPHAN_UNM_PLUGIN")"
+RP34_RC=$?
+RP34_FAILS=''
+[ "$RP34_CTRL_RC" -eq 0 ] || \
+  RP34_FAILS="pristine baseline already reds: rc=$RP34_CTRL_RC $RP34_CTRL_OUT"
+if [ "$RP34_RC" -ne 1 ] || ! grep -qF 'agents/retired-lens.md' <<<"$RP34_OUT"; then
+  RP34_FAILS="${RP34_FAILS}${RP34_FAILS:+; }orphaned unmeasured key not caught: rc=$RP34_RC $RP34_OUT"
+fi
+if [ -z "$RP34_FAILS" ]; then
+  ok "RP34 an unmeasured digest recorded for a path that is no longer a surface reds — both maps are compared in both directions"
+else
+  no "RP34 an unmeasured digest recorded for a non-surface reds" "$RP34_FAILS"
+fi
+
+# RP35 — schema, all three arms. A malformed field is an INPUT error (rc=2), not
+# a check failure (rc=1): the difference is "your baseline is unreadable" versus
+# "your tree drifted", and collapsing them would send the reader hunting a drift
+# that does not exist. Sub-case (c) is the anti-regression half — every legacy
+# baseline predates this key.
+drop_unmeasured_key() {
+  "$PY" - "$1" <<'PYEOF'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+record.pop("unmeasured_digests", None)
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+PYEOF
+}
+SCHEMA_PLUGIN="$TMP/schema-plugin"
+mk_plugin_root "$SCHEMA_PLUGIN"
+RP35_FAILS=''
+
+mk_baseline "$TMP/schema-list-baseline.json" "$SCHEMA_PLUGIN" '{}' '[]' '[]'
+render_to "$TMP/schema-list.md" "$FIX/corpus-families.json" "$TMP/schema-list-baseline.json"
+RP35A_OUT="$(check_with "$TMP/schema-list-baseline.json" "$TMP/schema-list.md" "$SCHEMA_PLUGIN")"
+RP35A_RC=$?
+if [ "$RP35A_RC" -ne 2 ] || ! grep -qF 'unmeasured_digests' <<<"$RP35A_OUT"; then
+  RP35_FAILS="(a) a list-valued unmeasured_digests did not raise InputError naming the field: rc=$RP35A_RC $RP35A_OUT"
+fi
+
+mk_baseline "$TMP/schema-int-baseline.json" "$SCHEMA_PLUGIN" '{}' '[]' \
+  '{"agents/comment-analyzer.md":123}'
+render_to "$TMP/schema-int.md" "$FIX/corpus-families.json" "$TMP/schema-int-baseline.json"
+RP35B_OUT="$(check_with "$TMP/schema-int-baseline.json" "$TMP/schema-int.md" "$SCHEMA_PLUGIN")"
+RP35B_RC=$?
+if [ "$RP35B_RC" -ne 2 ] || ! grep -qF 'unmeasured_digests' <<<"$RP35B_OUT"; then
+  RP35_FAILS="${RP35_FAILS}${RP35_FAILS:+; }(b) a non-string digest value did not raise InputError naming the field: rc=$RP35B_RC $RP35B_OUT"
+fi
+
+mk_baseline "$TMP/schema-absent-baseline.json" "$SCHEMA_PLUGIN" '{}' '[]'
+render_to "$TMP/schema-absent.md" "$FIX/corpus-families.json" "$TMP/schema-absent-baseline.json"
+drop_unmeasured_key "$TMP/schema-absent-baseline.json"
+RP35C_OUT="$(check_with "$TMP/schema-absent-baseline.json" "$TMP/schema-absent.md" "$SCHEMA_PLUGIN")"
+RP35C_RC=$?
+if [ "$RP35C_RC" -ne 0 ]; then
+  RP35_FAILS="${RP35_FAILS}${RP35_FAILS:+; }(c) a legacy baseline with the key absent and no declared-unmeasured surface did not pass: rc=$RP35C_RC $RP35C_OUT"
+fi
+
+if [ -z "$RP35_FAILS" ]; then
+  ok "RP35 unmeasured_digests is schema-validated — a list or a non-string value is rc=2, and an absent key stays backward compatible"
+else
+  no "RP35 unmeasured_digests is schema-validated" "$RP35_FAILS"
+fi
+
+# RP36 — the WRITER and the READER must describe the same shape. `--refresh` is
+# the only mode that writes a baseline and it is unrunnable here (it mines live
+# GitHub), but the seam that decides the emitted shape is a pure function, so it
+# is driven in-process instead. Without this row the two halves could diverge
+# silently: a --refresh months from now would write a baseline whose shape the
+# checker no longer fully describes, and nobody would find out until the next
+# declared-unmeasured surface appeared.
+seed_probe() { # seed_probe <corpus> <plugin_root>
+  "$PY" - "$MINER" "$1" "$2" <<'PYEOF'
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("review_precision", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+corpus = json.load(open(sys.argv[2], encoding="utf-8"))
+root = pathlib.Path(sys.argv[3])
+seeded = module.seed_baseline(corpus, root, module.parse_iso8601("2026-08-10T00:00:00Z"))
+problems = []
+if "unmeasured_digests" not in seeded:
+    problems.append("seed_baseline() emits no `unmeasured_digests` key")
+elif seeded["unmeasured_digests"] != {}:
+    problems.append(f"seed_baseline()'s unmeasured_digests is not empty: {seeded['unmeasured_digests']!r}")
+residual = module.check_prompt_digests(seeded, root)
+if residual:
+    problems.append("a freshly seeded baseline does not pass check_prompt_digests: " + "; ".join(residual))
+print("SEED-OK" if not problems else "SEED-FAIL " + " | ".join(problems))
+sys.exit(0 if not problems else 1)
+PYEOF
+}
+SEED_PLUGIN="$TMP/seed-plugin"
+mk_plugin_root "$SEED_PLUGIN"
+RP36_OUT="$(seed_probe "$FIX/corpus-families.json" "$SEED_PLUGIN" 2>&1)"; RP36_RC=$?
+if [ "$RP36_RC" -eq 0 ]; then
+  ok "RP36 the baseline a --refresh writes is one --check accepts — seed_baseline() emits an empty unmeasured_digests"
+else
+  no "RP36 the baseline a --refresh writes is one --check accepts" "rc=$RP36_RC" "$RP36_OUT"
 fi
 
 echo

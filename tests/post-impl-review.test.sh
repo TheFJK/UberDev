@@ -18,8 +18,13 @@ SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 # #304 / RFC 0012 §3.4: the tier-prompt heredocs (AUTO_MODE branches) live in
 # lib/solve-launcher.sh (hoisted out of solve-pipeline/SKILL.md).
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+# #467: the review fleet's REVIEW_ROSTER is the AUTHORITY for which agent file
+# each Phase-1 lens is dispatched with. R-roster-files below compares it against
+# this skill's two prose copies. Listed in the preflight so a rename is an
+# explicit rc=2, never a silently-zero-assertion PASS.
+REVIEW_FLEET_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 
-for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE"; do
+for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -155,6 +160,86 @@ for roster_copy in "${ROSTER_COPIES[@]}"; do
     FAIL=$((FAIL + 1))
   fi
 done
+
+echo
+echo "== R-roster-files (#467): every copy of the lens->agent-file mapping agrees =="
+# R-roster-complete above compares the EDGE ids across nine copies. The other
+# half of each roster record — which agent FILE the lens is dispatched with —
+# was compared nowhere in the repo (`grep -rn agentFile tests/` returned zero
+# before this block). That gap is what let a repointed `agentFile:` go unseen
+# while the precision stamp kept watching the file the fleet no longer
+# dispatches. This block compares the two prose copies in THIS skill against
+# REVIEW_ROSTER; tests/review-precision.test.sh RP30 compares the miner's copy.
+#
+# grep/sed/awk only, like R-roster-complete: this fixture runs on
+# windows-latest, where core.autocrlf=true rules out byte digests and the
+# python3 fixtures are skipped.
+ROSTER_FILES="$(sed -n '/^const REVIEW_ROSTER = \[/,/^];/p' "$REVIEW_FLEET_JS" \
+  | grep -o 'agentFile: "[^"]*"' | sed 's/agentFile: "//; s/"$//')"
+# The table's second column, block-scoped from its header row to the next blank
+# line. `agents/` and the ` (inherit)` adornment are stripped so both sides
+# speak the roster's bare-filename vocabulary.
+TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+  | grep -v '^|[- |]*|$' | awk -F'|' '{print $3}' \
+  | sed 's/`//g; s/ (inherit)//; s#agents/##; s/^ *//; s/ *$//')"
+# The "Pairs with:" prose is explicitly the SIX DISTINCT files, so it is
+# compared de-duplicated. Its block is the last one in the file, so the
+# terminator must be "blank line OR EOF" — which is what a bare `f` action does.
+PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+  | grep -o 'agents/[a-z0-9-]*\.md' | sed 's#agents/##' | sort -u)"
+ROSTER_FILES_UNIQ="$(sort -u <<<"$ROSTER_FILES")"
+ROSTER_COUNT="$(grep -c . <<<"$ROSTER_FILES")"
+TABLE_COUNT="$(grep -c . <<<"$TABLE_FILES")"
+PAIRS_COUNT="$(grep -c . <<<"$PAIRS_FILES")"
+ROSTER_UNIQ_COUNT="$(grep -c . <<<"$ROSTER_FILES_UNIQ")"
+
+# Anti-vacuity first: a table that loses a row, or a roster whose block shape
+# changed, must FAIL rather than pass on two empty lists comparing equal.
+if [ "$ROSTER_COUNT" -gt 0 ]; then
+  echo "  PASS  R-roster-files — extracted $ROSTER_COUNT agentFile value(s) from REVIEW_ROSTER"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — extracted ZERO agentFile values from REVIEW_ROSTER (block renamed or reshaped?)"
+  echo "        file: $REVIEW_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$TABLE_COUNT" -eq "$ROSTER_COUNT" ]; then
+  echo "  PASS  R-roster-files — the reviewer table has one row per roster record ($TABLE_COUNT)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the reviewer table has $TABLE_COUNT row(s) for $ROSTER_COUNT roster record(s)"
+  echo "        file: $POST_IMPL"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$PAIRS_COUNT" -eq "$ROSTER_UNIQ_COUNT" ]; then
+  echo "  PASS  R-roster-files — the 'Pairs with:' prose names one entry per distinct roster file ($PAIRS_COUNT)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the 'Pairs with:' prose names $PAIRS_COUNT file(s) for $ROSTER_UNIQ_COUNT distinct roster file(s)"
+  echo "        file: $POST_IMPL"
+  FAIL=$((FAIL + 1))
+fi
+# ORDERED, not set-equal: a set compare passes straight through a swap of two
+# table rows, which is exactly the drift that would mis-document which lens gets
+# which prompt.
+if [ "$TABLE_FILES" = "$ROSTER_FILES" ]; then
+  echo "  PASS  R-roster-files — the reviewer table's agent-file column matches REVIEW_ROSTER in roster order"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the reviewer table's agent-file column drifted from REVIEW_ROSTER"
+  echo "        roster: $(tr '\n' ' ' <<<"$ROSTER_FILES")"
+  echo "        table:  $(tr '\n' ' ' <<<"$TABLE_FILES")"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$PAIRS_FILES" = "$ROSTER_FILES_UNIQ" ]; then
+  echo "  PASS  R-roster-files — the 'Pairs with:' file set matches the de-duplicated roster file set"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the 'Pairs with:' file set drifted from the de-duplicated roster file set"
+  echo "        roster (uniq): $(tr '\n' ' ' <<<"$ROSTER_FILES_UNIQ")"
+  echo "        prose  (uniq): $(tr '\n' ' ' <<<"$PAIRS_FILES")"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
