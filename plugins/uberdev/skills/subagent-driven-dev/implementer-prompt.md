@@ -107,6 +107,23 @@ these inputs:
     signals so policy selects the warranted route, or break the task into
     smaller pieces.
 
+    ## Fix Rounds
+
+    If `failure_path` is non-empty, this is not a first attempt: it points at
+    this task's append-only **fix ledger**, and it is the first thing you read.
+
+    - The ledger holds one entry per round — the round number, the loop that
+      governs it, the stage, the reviewer or test instance that raised it, the
+      task brief path, the previous implementer's result path, and the findings
+      **verbatim**. Read all of it, oldest round first.
+    - The accumulated findings are the **authoritative scope** of this round.
+      Fix those. Do not re-derive context the reviewer already priced in, and do
+      not re-litigate a round that a previous entry already closed.
+    - An entry beginning `## cap exhausted` means a loop cap fired; the task is
+      headed for the BLOCKED ladder, so report rather than starting new work.
+    - The ledger is the controller's artifact. Never write to it, never truncate
+      it, and never list it among your changed paths.
+
     ## Before Reporting Back: Self-Review
 
     Review your work with fresh eyes. Ask yourself:
@@ -139,6 +156,7 @@ these inputs:
     - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
     - **Changed paths (REQUIRED on DONE / DONE_WITH_CONCERNS):** flat list of every file path you created or modified, exactly as the controller will pass to `git add`. Do not include unchanged files. Do not include directories.
     - **Suggested commit message:** one line, conventional-commit style — the controller may use it as-is or refine
+    - **`## After Review Findings`** (REQUIRED when `failure_path` was non-empty): a section naming which ledger findings this round addressed, and any it deliberately did not — your result becomes the next round's `prior_result`, so an unstated omission is invisible to the next implementer
     - What you implemented (or what you attempted, if blocked)
     - What you tested and test results
     - Self-review findings (if any)

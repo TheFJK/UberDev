@@ -677,6 +677,107 @@ leases = list(Path(semaphore_path).rglob("*.lease")) if Path(semaphore_path).exi
 assert leases == [], leases
 PY
 
+# ── #459 — reviewer result paths survive the wait (AC-7) ──────────────────────
+# `sdd_wait_prepared_batch` calls `sdd_reset_batch` on every exit path, so by the
+# time the controller reads a reviewer verdict the per-instance result paths are
+# gone. `sdd_snapshot_batch_results` is the only thing standing between the fix
+# ledger's "verbatim findings" and being unimplementable. Drive it through the
+# real batch callsite, with a task id that cannot collide with 41/42/43/44/45 —
+# instance ids are never reused, and a repeat fires the receipt chain's
+# `duplicate dispatch event` assertion above.
+snapshot_json=
+sdd_dispatch_case sdd.task.implement 51 implement 1 snapshot_json
+[ "${#SDD_PREPARED_INSTANCES[@]}" -eq 0 ] || {
+  printf 'wait did not reset SDD_PREPARED_INSTANCES (%s left)\n' \
+    "${#SDD_PREPARED_INSTANCES[@]}" >&2
+  exit 1
+}
+[ "${#SDD_BATCH_RESULT_INSTANCES[@]}" -eq 1 ] || {
+  printf 'snapshot did not retain exactly one instance (got %s)\n' \
+    "${#SDD_BATCH_RESULT_INSTANCES[@]}" >&2
+  exit 1
+}
+[ "${#SDD_BATCH_RESULT_PATHS[@]}" -eq "${#SDD_BATCH_RESULT_INSTANCES[@]}" ] || {
+  printf 'snapshot arrays are not pairwise aligned (%s instances, %s results)\n' \
+    "${#SDD_BATCH_RESULT_INSTANCES[@]}" "${#SDD_BATCH_RESULT_PATHS[@]}" >&2
+  exit 1
+}
+[ "${SDD_BATCH_RESULT_INSTANCES[0]}" = 'sdd-w1-t51-implement-a1' ] || {
+  printf 'snapshot instance mismatch: %s\n' "${SDD_BATCH_RESULT_INSTANCES[0]}" >&2
+  exit 1
+}
+[ -f "${SDD_BATCH_RESULT_PATHS[0]}" ] || {
+  printf 'snapshot result path is not a regular file: %s\n' \
+    "${SDD_BATCH_RESULT_PATHS[0]}" >&2
+  exit 1
+}
+
+# ── #459 — exhaustion stops dispatch, ledger rides as failure_path (AC-3/AC-5) ─
+# The composition lock. Drive rounds 1..cap+1 through the production batch
+# callsite: exactly `cap` builder calls may happen, the cap+1 round must add
+# zero, and every fix dispatch must carry the ledger as `failure_path`. The
+# ledger lives in the private run directory that already holds `task_path` —
+# `uberdev_child_inputs_validate` rejects anything outside that scope, and the
+# append must precede the dispatch because a non-empty path input has to exist.
+LEDGER_T52="$INPUT_DIR/fix-ledger-t52.md"
+FINDINGS_T52="$INPUT_DIR/findings-t52.md"
+printf 'spec reviewer: missing edge case for empty input\n' >"$FINDINGS_T52"
+chmod 600 "$FINDINGS_T52"
+
+saved_failure_path="$failure_path"
+failure_path="$LEDGER_T52"
+builder_before_fix_loop="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+builder_at_cap=''
+fix_json=
+fix_round=1
+while [ "$fix_round" -le 4 ]; do
+  fix_round_rc=0
+  sdd_round_permitted fix_rounds "$fix_round" || fix_round_rc=$?
+  if [ "$fix_round_rc" -eq 0 ]; then
+    sdd_append_fix_ledger "$LEDGER_T52" "$fix_round" fix_rounds spec-fix \
+      "sdd-w1-t52-spec-review-a$fix_round" "$task_path" "$report_path" "$FINDINGS_T52"
+    sdd_dispatch_case sdd.task.implement "5$((2 + fix_round))" spec-fix "$fix_round" fix_json
+  else
+    [ "$fix_round_rc" -eq 3 ] || {
+      printf 'round breaker returned %s at round %s, expected 3\n' \
+        "$fix_round_rc" "$fix_round" >&2
+      exit 1
+    }
+    builder_at_cap="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+    sdd_note_cap_exhausted "$LEDGER_T52" fix_rounds "$fix_round"
+  fi
+  fix_round=$((fix_round + 1))
+done
+builder_after_fix_loop="$(wc -l <"$BUILDER_LOG" | tr -d ' ')"
+[ -n "$builder_at_cap" ] || {
+  printf 'round breaker never fired across rounds 1..4\n' >&2
+  exit 1
+}
+[ "$((builder_after_fix_loop - builder_before_fix_loop))" -eq 3 ] || {
+  printf 'fix loop built %s dispatches, expected exactly the fix_rounds cap (3)\n' \
+    "$((builder_after_fix_loop - builder_before_fix_loop))" >&2
+  exit 1
+}
+[ "$builder_after_fix_loop" -eq "$builder_at_cap" ] || {
+  printf 'the cap+1 round still reached input construction (%s -> %s)\n' \
+    "$builder_at_cap" "$builder_after_fix_loop" >&2
+  exit 1
+}
+python3 -I -B - "$fix_json" "$LEDGER_T52" <<'PY'
+import json
+import sys
+
+inputs = json.loads(sys.argv[1])
+assert inputs["failure_path"] == sys.argv[2], inputs
+PY
+ledger_exhaustion_line="$(tail -n 1 "$LEDGER_T52")"
+[ "$ledger_exhaustion_line" = '## cap exhausted | loop fix_rounds | round 4 | cap 3' ] || {
+  printf 'cap exhaustion is not the last thing on the ledger: %s\n' \
+    "$ledger_exhaustion_line" >&2
+  exit 1
+}
+failure_path="$saved_failure_path"
+
 unset UBERDEV_CHILD_TEST_SOURCE UBERDEV_CHILD_TEST_RECEIPT_FILE
 failure_path="$failure_fixture_path"
 
@@ -713,5 +814,452 @@ done
 
 grep -Fq 'task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2' "$SKILL"
 ! grep -Eq 'json\.dumps\(\{.*(task_path|spec_path|base_sha|commit_range_path)' "$TMP/runtime.sh"
+
+# ══ #459 — the loop caps become code, the fix loop gains a continuity carrier ══
+# Everything below is pure-helper: no dispatch, so it is safe after the
+# `UBERDEV_CHILD_TEST_SOURCE` unset above (the backend stub dereferences it).
+
+sdd_rc() {
+  local rc=0
+  "$@" >/dev/null 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+
+# ── AC-1: the caps are readable by code ──────────────────────────────────────
+for cap_case in 'fix_rounds|3' 'retest_rounds|2' 'context_rounds|2'; do
+  cap_name="${cap_case%%|*}"
+  cap_expected="${cap_case#*|}"
+  cap_actual="$(sdd_loop_cap "$cap_name")"
+  [ "$cap_actual" = "$cap_expected" ] || {
+    printf 'sdd_loop_cap %s printed %s, expected %s\n' \
+      "$cap_name" "$cap_actual" "$cap_expected" >&2
+    exit 1
+  }
+done
+
+for cap_reject in bogus '' spec_rounds fix_round; do
+  cap_reject_rc=0
+  cap_reject_out="$(sdd_loop_cap "$cap_reject")" || cap_reject_rc=$?
+  [ "$cap_reject_rc" -eq 2 ] || {
+    printf 'sdd_loop_cap accepted %s (rc %s)\n' "$cap_reject" "$cap_reject_rc" >&2
+    exit 1
+  }
+  [ -z "$cap_reject_out" ] || {
+    printf 'sdd_loop_cap printed %s for rejected token %s\n' \
+      "$cap_reject_out" "$cap_reject" >&2
+    exit 1
+  }
+done
+cap_reject_rc=0
+cap_reject_out="$(sdd_loop_cap)" || cap_reject_rc=$?
+[ "$cap_reject_rc" -eq 2 ] && [ -z "$cap_reject_out" ] || {
+  printf 'sdd_loop_cap with no argument returned rc %s / output %s\n' \
+    "$cap_reject_rc" "$cap_reject_out" >&2
+  exit 1
+}
+
+# ── AC-9a: the `## Loop caps` prose and sdd_loop_cap are the same vocabulary ──
+# Extraction, not presence: a name-only guard would silently miss a value drift,
+# so every extracted value is compared too. The count row is the anti-vacuity
+# half — a regex that matched nothing would otherwise satisfy every claim here.
+SKILL_CAP_PAIRS="$(python3 -I -B - "$SKILL" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+section = re.search(r"^## Loop caps\n(.*?)(?=^## )", text, re.DOTALL | re.MULTILINE)
+if section is None:
+    raise SystemExit("SKILL.md has no '## Loop caps' section")
+for name, value in re.findall(
+    r"^- \*\*`([a-z_]+)` = ([0-9]+)\*\*", section.group(1), re.MULTILINE
+):
+    print(name, value)
+PY
+)"
+skill_cap_count="$(grep -c '^[a-z_][a-z_]* [0-9][0-9]*$' <<<"$SKILL_CAP_PAIRS" || true)"
+[ "$skill_cap_count" -eq 3 ] || {
+  printf 'extracted %s cap bullets from ## Loop caps, expected 3\n' "$skill_cap_count" >&2
+  exit 1
+}
+while read -r prose_cap_name prose_cap_value; do
+  [ -n "$prose_cap_name" ] || continue
+  prose_cap_actual="$(sdd_loop_cap "$prose_cap_name")" || {
+    printf 'sdd_loop_cap rejects documented cap %s\n' "$prose_cap_name" >&2
+    exit 1
+  }
+  [ "$prose_cap_actual" = "$prose_cap_value" ] || {
+    printf 'cap drift: ## Loop caps says %s = %s, sdd_loop_cap says %s\n' \
+      "$prose_cap_name" "$prose_cap_value" "$prose_cap_actual" >&2
+    exit 1
+  }
+done <<<"$SKILL_CAP_PAIRS"
+
+# ── AC-2: the breaker is a call, not a sentence ──────────────────────────────
+for permitted_case in 'fix_rounds 1' 'fix_rounds 2' 'fix_rounds 3' \
+  'retest_rounds 1' 'retest_rounds 2' 'context_rounds 1' 'context_rounds 2'; do
+  permitted_loop="${permitted_case%% *}"
+  permitted_round="${permitted_case#* }"
+  permitted_rc="$(sdd_rc sdd_round_permitted "$permitted_loop" "$permitted_round")"
+  [ "$permitted_rc" -eq 0 ] || {
+    printf 'sdd_round_permitted %s returned %s, expected 0\n' \
+      "$permitted_case" "$permitted_rc" >&2
+    exit 1
+  }
+done
+
+# rc 3 is deliberately distinct from the repo-wide validation rc 2 so a caller
+# can tell "cap fired, route BLOCKED" from "you called me wrong". `010` is the
+# case where a raw `[ ]` compare (octal 8) would disagree with the fence's own
+# base-10 normaliser — the fence must have exactly one arithmetic.
+for exhausted_case in 'fix_rounds 4' 'fix_rounds 007' 'fix_rounds 010' \
+  'retest_rounds 3' 'context_rounds 3'; do
+  exhausted_loop="${exhausted_case%% *}"
+  exhausted_round="${exhausted_case#* }"
+  exhausted_rc="$(sdd_rc sdd_round_permitted "$exhausted_loop" "$exhausted_round")"
+  [ "$exhausted_rc" -eq 3 ] || {
+    printf 'sdd_round_permitted %s returned %s, expected 3\n' \
+      "$exhausted_case" "$exhausted_rc" >&2
+    exit 1
+  }
+done
+
+for round_reject_case in 'fix_rounds 0' 'fix_rounds ' 'fix_rounds abc' \
+  'fix_rounds -1' 'bogus 1'; do
+  round_reject_loop="${round_reject_case%% *}"
+  round_reject_round="${round_reject_case#* }"
+  round_reject_rc="$(sdd_rc sdd_round_permitted "$round_reject_loop" "$round_reject_round")"
+  [ "$round_reject_rc" -eq 2 ] || {
+    printf 'sdd_round_permitted %s returned %s, expected 2\n' \
+      "$round_reject_case" "$round_reject_rc" >&2
+    exit 1
+  }
+done
+round_reject_rc="$(sdd_rc sdd_round_permitted fix_rounds)"
+[ "$round_reject_rc" -eq 2 ] || {
+  printf 'sdd_round_permitted with one argument returned %s, expected 2\n' \
+    "$round_reject_rc" >&2
+  exit 1
+}
+
+# ── AC-5/AC-6: the fix ledger is a real file with a fixed byte shape ─────────
+LEDGER_DIR="$INPUT_DIR/ledger"
+mkdir -p "$LEDGER_DIR"
+LEDGER="$LEDGER_DIR/task-9-fix-ledger.md"
+FINDINGS="$LEDGER_DIR/findings-round-1.md"
+printf 'reviewer: "quoted" \\ backslash — non-ASCII, no trailing newline' >"$FINDINGS"
+chmod 600 "$FINDINGS"
+
+sdd_append_fix_ledger "$LEDGER" 1 fix_rounds spec-fix sdd-w1-t9-spec-review-a1 \
+  "$task_path" "$report_path" "$FINDINGS"
+
+ledger_stat="$(python3 -I -B -c 'import os,stat,sys; entry=os.lstat(sys.argv[1]); print("%s %s %s" % (oct(stat.S_IMODE(entry.st_mode)), stat.S_ISREG(entry.st_mode), entry.st_nlink), end="")' "$LEDGER")"
+[ "$ledger_stat" = '0o600 True 1' ] || {
+  printf 'fix ledger is not a mode-0600 regular file with one link: %s\n' \
+    "$ledger_stat" >&2
+  exit 1
+}
+
+python3 -I -B - "$LEDGER" "$task_path" "$report_path" "$FINDINGS" <<'PY'
+import sys
+from pathlib import Path
+
+ledger, task_brief, prior_result, findings = sys.argv[1:]
+body = Path(findings).read_bytes()
+if not body.endswith(b"\n"):
+    body += b"\n"
+expected = (
+    "## round 1 | loop fix_rounds | stage spec-fix\n"
+    "source_instance: sdd-w1-t9-spec-review-a1\n"
+    "task_brief: %s\n"
+    "prior_result: %s\n"
+    "findings:\n" % (task_brief, prior_result)
+).encode("utf-8") + body
+actual = Path(ledger).read_bytes()
+assert actual == expected, (actual, expected)
+PY
+
+ledger_bytes_round_one="$(wc -c <"$LEDGER" | tr -d ' ')"
+sdd_append_fix_ledger "$LEDGER" 2 fix_rounds quality-fix sdd-w1-t9-quality-review-a1 \
+  "$task_path" "$report_path" "$FINDINGS"
+ledger_bytes_round_two="$(wc -c <"$LEDGER" | tr -d ' ')"
+[ "$ledger_bytes_round_two" -gt "$ledger_bytes_round_one" ] || {
+  printf 'second append did not grow the ledger (%s -> %s)\n' \
+    "$ledger_bytes_round_one" "$ledger_bytes_round_two" >&2
+  exit 1
+}
+ledger_round_one_entries="$(grep -c '^## round 1 | loop fix_rounds | stage spec-fix$' <<<"$(cat "$LEDGER")" || true)"
+[ "$ledger_round_one_entries" -eq 1 ] || {
+  printf 'round-1 entry count after the second append is %s, expected 1\n' \
+    "$ledger_round_one_entries" >&2
+  exit 1
+}
+
+LEDGER_SYMLINK="$LEDGER_DIR/ledger-symlink.md"
+ln -s "$LEDGER" "$LEDGER_SYMLINK"
+LEDGER_DIRECTORY="$LEDGER_DIR/ledger-directory"
+mkdir -p "$LEDGER_DIRECTORY"
+ledger_bytes_guard="$ledger_bytes_round_two"
+
+assert_ledger_rejected() {
+  local label="$1"
+  shift
+  local rc=0
+  sdd_append_fix_ledger "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || {
+    printf 'sdd_append_fix_ledger accepted %s (rc %s)\n' "$label" "$rc" >&2
+    exit 1
+  }
+  local observed
+  observed="$(wc -c <"$LEDGER" | tr -d ' ')"
+  [ "$observed" -eq "$ledger_bytes_guard" ] || {
+    printf 'sdd_append_fix_ledger wrote while rejecting %s (%s -> %s)\n' \
+      "$label" "$ledger_bytes_guard" "$observed" >&2
+    exit 1
+  }
+}
+
+assert_ledger_rejected 'symlink ledger' "$LEDGER_SYMLINK" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'directory ledger' "$LEDGER_DIRECTORY" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'relative ledger' 'relative-ledger.md' 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'relative findings' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" 'relative-findings.md'
+assert_ledger_rejected 'relative task brief' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 'relative-task.md' "$report_path" "$FINDINGS"
+assert_ledger_rejected 'relative prior result' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" 'relative-result.md' "$FINDINGS"
+assert_ledger_rejected 'unknown loop' "$LEDGER" 1 bogus_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'unknown stage' "$LEDGER" 1 fix_rounds resume-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'zero round' "$LEDGER" 0 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'non-decimal round' "$LEDGER" two fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'empty source instance' "$LEDGER" 1 fix_rounds spec-fix \
+  '' "$task_path" "$report_path" "$FINDINGS"
+assert_ledger_rejected 'seven arguments' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path"
+assert_ledger_rejected 'nine arguments' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$FINDINGS" surplus
+assert_ledger_rejected 'absent findings file' "$LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t9-spec-review-a3 "$task_path" "$report_path" "$LEDGER_DIR/absent.md"
+
+# ── AC-4: cap exhaustion is bytes on disk, not a promise ─────────────────────
+sdd_note_cap_exhausted "$LEDGER" fix_rounds 4
+ledger_last_line="$(tail -n 1 "$LEDGER")"
+[ "$ledger_last_line" = '## cap exhausted | loop fix_rounds | round 4 | cap 3' ] || {
+  printf 'cap-exhaustion entry has the wrong shape: %s\n' "$ledger_last_line" >&2
+  exit 1
+}
+ledger_bytes_guard="$(wc -c <"$LEDGER" | tr -d ' ')"
+
+assert_exhaustion_rejected() {
+  local label="$1"
+  shift
+  local rc=0
+  sdd_note_cap_exhausted "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || {
+    printf 'sdd_note_cap_exhausted accepted %s (rc %s)\n' "$label" "$rc" >&2
+    exit 1
+  }
+  local observed
+  observed="$(wc -c <"$LEDGER" | tr -d ' ')"
+  [ "$observed" -eq "$ledger_bytes_guard" ] || {
+    printf 'sdd_note_cap_exhausted wrote while rejecting %s (%s -> %s)\n' \
+      "$label" "$ledger_bytes_guard" "$observed" >&2
+    exit 1
+  }
+}
+
+assert_exhaustion_rejected 'unknown loop' "$LEDGER" bogus_rounds 4
+assert_exhaustion_rejected 'zero round' "$LEDGER" fix_rounds 0
+assert_exhaustion_rejected 'non-decimal round' "$LEDGER" fix_rounds four
+assert_exhaustion_rejected 'relative ledger' 'relative-ledger.md' fix_rounds 4
+assert_exhaustion_rejected 'symlink ledger' "$LEDGER_SYMLINK" fix_rounds 4
+assert_exhaustion_rejected 'two arguments' "$LEDGER" fix_rounds
+assert_exhaustion_rejected 'four arguments' "$LEDGER" fix_rounds 4 surplus
+
+# ── AC-9b: the accepted stage set is closed, and matches the prose ───────────
+SKILL_STAGE_TOKENS="$(python3 -I -B - "$SKILL" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+joined = " ".join(text.split("\n"))
+sentence = re.search(r"where stage is one of (.*?)\.\s", joined)
+if sentence is None:
+    raise SystemExit("SKILL.md has no 'where stage is one of ...' sentence")
+for token in re.findall(r"`([a-z][a-z-]*)`", sentence.group(1)):
+    print(token)
+PY
+)"
+skill_stage_count="$(grep -c '^[a-z-]*$' <<<"$SKILL_STAGE_TOKENS" || true)"
+[ "$skill_stage_count" -eq 6 ] || {
+  printf 'extracted %s stage tokens from the prose, expected 6\n' "$skill_stage_count" >&2
+  exit 1
+}
+while read -r prose_stage; do
+  [ -n "$prose_stage" ] || continue
+  prose_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 "$prose_stage" 1)"
+  [ "$prose_stage_rc" -eq 0 ] || {
+    printf 'documented stage %s is rejected by sdd_validate_instance_dimensions (rc %s)\n' \
+      "$prose_stage" "$prose_stage_rc" >&2
+    exit 1
+  }
+done <<<"$SKILL_STAGE_TOKENS"
+unregistered_stage_rc="$(sdd_rc sdd_validate_instance_dimensions 1 1 resume-fix 1)"
+[ "$unregistered_stage_rc" -eq 2 ] || {
+  printf 'unregistered stage resume-fix was accepted (rc %s)\n' "$unregistered_stage_rc" >&2
+  exit 1
+}
+
+# ── AC-8: the prose names the mechanism it depends on ───────────────────────
+IMPLEMENTER_PROMPT="$ROOT/plugins/uberdev/skills/subagent-driven-dev/implementer-prompt.md"
+
+! grep -Fq 'A fresh `implementation-worker` child on the implementation edge fixes them' "$SKILL" || {
+  printf 'SKILL.md still claims a fresh child fixes reviewer findings\n' >&2
+  exit 1
+}
+REVIEWER_FINDINGS_BLOCK="$(awk '/^\*\*If reviewer finds issues:\*\*/,/^\*\*If subagent fails task:\*\*/' "$SKILL")"
+[ -n "$REVIEWER_FINDINGS_BLOCK" ] || {
+  printf 'could not extract the "If reviewer finds issues" block from SKILL.md\n' >&2
+  exit 1
+}
+for reviewer_block_token in 'fix ledger' 'sdd_round_permitted'; do
+  grep -Fq "$reviewer_block_token" <<<"$REVIEWER_FINDINGS_BLOCK" || {
+    printf 'the "If reviewer finds issues" block does not name %s\n' \
+      "$reviewer_block_token" >&2
+    exit 1
+  }
+done
+
+for guarded_step in e g h; do
+  guarded_step_text="$(grep -E "^   $guarded_step\. " "$SKILL" || true)"
+  [ -n "$guarded_step_text" ] || {
+    printf 'step 4%s is missing from SKILL.md\n' "$guarded_step" >&2
+    exit 1
+  }
+  grep -Fq 'sdd_round_permitted' <<<"$guarded_step_text" || {
+    printf 'step 4%s does not call the round breaker before minting the next instance\n' \
+      "$guarded_step" >&2
+    exit 1
+  }
+done
+NEEDS_CONTEXT_RUNG="$(grep -E '^\*\*NEEDS_CONTEXT:\*\*' "$SKILL" || true)"
+[ -n "$NEEDS_CONTEXT_RUNG" ] || {
+  printf 'the NEEDS_CONTEXT rung is missing from SKILL.md\n' >&2
+  exit 1
+}
+grep -Fq 'sdd_round_permitted' <<<"$NEEDS_CONTEXT_RUNG" || {
+  printf 'the NEEDS_CONTEXT rung does not call the round breaker\n' >&2
+  exit 1
+}
+
+FIX_LEDGER_SECTION="$(awk '/^## Fix ledger$/,/^## Isolation: Pattern B is the opt-out$/' "$SKILL")"
+[ -n "$FIX_LEDGER_SECTION" ] || {
+  printf 'SKILL.md has no "## Fix ledger" section\n' >&2
+  exit 1
+}
+for fix_ledger_token in 'sdd_append_fix_ledger' 'sdd_note_cap_exhausted' \
+  'failure_path' '0600' 'run directory'; do
+  grep -Fq "$fix_ledger_token" <<<"$FIX_LEDGER_SECTION" || {
+    printf 'the "## Fix ledger" section does not name %s\n' "$fix_ledger_token" >&2
+    exit 1
+  }
+done
+
+IMPLEMENTER_FIX_ROUND_BLOCK="$(awk '/^    ## Fix Rounds/,/^    ## Before Reporting Back/' "$IMPLEMENTER_PROMPT")"
+[ -n "$IMPLEMENTER_FIX_ROUND_BLOCK" ] || {
+  printf 'implementer-prompt.md has no fix-round section\n' >&2
+  exit 1
+}
+for implementer_fix_token in 'failure_path' 'ledger'; do
+  grep -Fq "$implementer_fix_token" <<<"$IMPLEMENTER_FIX_ROUND_BLOCK" || {
+    printf 'the implementer fix-round section does not name %s\n' \
+      "$implementer_fix_token" >&2
+    exit 1
+  }
+done
+IMPLEMENTER_REPORT_BLOCK="$(awk '/^    ## Report Format$/,/^```$/' "$IMPLEMENTER_PROMPT")"
+[ -n "$IMPLEMENTER_REPORT_BLOCK" ] || {
+  printf 'implementer-prompt.md has no Report Format block\n' >&2
+  exit 1
+}
+grep -Fq '## After Review Findings' <<<"$IMPLEMENTER_REPORT_BLOCK" || {
+  printf 'the Report Format block has no "## After Review Findings" line\n' >&2
+  exit 1
+}
+
+# ── AC-13: the fence stays zsh-clean, and the new helpers agree across shells ─
+! grep -Eq 'type -t|BASH_REMATCH|declare -A|local -n' "$TMP/runtime.sh" || {
+  printf 'the routed runtime fence grew a bashism\n' >&2
+  exit 1
+}
+! grep -Eq '^[[:space:]]*(local|typeset|declare)[[:space:]]+([^#]*[^_[:alnum:]])?(path|status|argv|fpath|cdpath)([=[:space:]]|$)' "$TMP/runtime.sh" || {
+  printf 'the routed runtime fence declares a zsh-tied name\n' >&2
+  exit 1
+}
+
+if command -v zsh >/dev/null 2>&1; then
+  SDD_PARITY_PROBE="$TMP/sdd-parity-probe.sh"
+  cat >"$SDD_PARITY_PROBE" <<'PROBE'
+. "$SDD_RUNTIME_FENCE"
+
+emit() {
+  local emit_rc=0 emit_out
+  emit_out="$("$@" 2>/dev/null)" || emit_rc=$?
+  printf '%s rc=%s out=%s\n' "$*" "$emit_rc" "$emit_out"
+}
+
+emit_quiet() {
+  local quiet_label="$1" quiet_rc=0
+  shift
+  "$@" >/dev/null 2>&1 || quiet_rc=$?
+  printf '%s rc=%s\n' "$quiet_label" "$quiet_rc"
+}
+
+emit sdd_loop_cap fix_rounds
+emit sdd_loop_cap retest_rounds
+emit sdd_loop_cap context_rounds
+emit sdd_loop_cap bogus
+emit sdd_round_permitted fix_rounds 3
+emit sdd_round_permitted fix_rounds 4
+emit sdd_round_permitted fix_rounds 007
+emit sdd_round_permitted fix_rounds 010
+emit sdd_round_permitted fix_rounds abc
+emit sdd_round_permitted fix_rounds
+emit sdd_round_permitted bogus 1
+emit sdd_validate_instance_dimensions 1 1 spec-fix 1
+emit sdd_validate_instance_dimensions 1 1 resume-fix 1
+emit_quiet append-relative sdd_append_fix_ledger relative.md 1 fix_rounds spec-fix inst /a /b /c
+emit_quiet exhaust-relative sdd_note_cap_exhausted relative.md fix_rounds 4
+emit_quiet append-round-1 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 1 fix_rounds spec-fix \
+  sdd-w1-t1-spec-review-a1 "$SDD_PARITY_TASK" "$SDD_PARITY_PRIOR" "$SDD_PARITY_FINDINGS"
+emit_quiet append-round-2 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 2 fix_rounds quality-fix \
+  sdd-w1-t1-quality-review-a1 "$SDD_PARITY_TASK" "$SDD_PARITY_PRIOR" "$SDD_PARITY_FINDINGS"
+emit_quiet exhausted sdd_note_cap_exhausted "$SDD_PARITY_LEDGER" fix_rounds 4
+cat "$SDD_PARITY_LEDGER"
+PROBE
+  export SDD_RUNTIME_FENCE="$TMP/runtime.sh"
+  export SDD_PARITY_TASK="$task_path"
+  export SDD_PARITY_PRIOR="$report_path"
+  export SDD_PARITY_FINDINGS="$FINDINGS"
+  bash_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-bash.md" bash "$SDD_PARITY_PROBE")"
+  zsh_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-zsh.md" zsh -f "$SDD_PARITY_PROBE")"
+  [ "$bash_parity_output" = "$zsh_parity_output" ] || {
+    printf 'bash/zsh parity broke for the new SDD helpers\nbash:\n%s\nzsh:\n%s\n' \
+      "$bash_parity_output" "$zsh_parity_output" >&2
+    exit 1
+  }
+  [ -n "$bash_parity_output" ] || {
+    printf 'the bash/zsh parity probe produced no output\n' >&2
+    exit 1
+  }
+fi
 
 echo 'sdd-child-inputs: PASS'
