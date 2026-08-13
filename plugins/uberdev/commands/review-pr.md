@@ -201,7 +201,11 @@ UBERDEV_CONSOLIDATE_SCAN_DIR="$UBERDEV_CONSOLIDATE_ROOT/.uberdev/consolidate/$UB
 UBERDEV_CONSOLIDATE_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 UBERDEV_CONSOLIDATE_OWNER="${UBERDEV_CONSOLIDATE_SLUG%%/*}"
 UBERDEV_CONSOLIDATE_DEFAULT="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
-UBERDEV_CONSOLIDATE_CURRENT_PR="$(gh pr view --json number -q .number)"
+# Resolved through the library, NOT a bare `gh pr view`: this fence is
+# re-entered after every resolved conflict, and by then HEAD is the combine
+# branch, which has no PR. The helper records the number on first entry and
+# replays it afterwards, and refuses rather than yielding the empty string.
+UBERDEV_CONSOLIDATE_CURRENT_PR="$(review_consolidate_current_pr "$UBERDEV_CONSOLIDATE_SCAN_DIR")" || exit 2
 
 review_consolidate_preflight "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" || exit 2
 review_consolidate_refresh "$UBERDEV_CONSOLIDATE_SCAN_DIR" "$UBERDEV_CONSOLIDATE_OWNER" || exit 2

@@ -657,6 +657,96 @@ else
   fail "RCXD0: review_consolidate_drive / review_consolidate_start_branch are not defined"
 fi
 
+# ---- RCXR: re-entry through the WHOLE 0c fence, not just drive() ----------
+# RCXD above proves review_consolidate_drive is resumable by calling it
+# directly. That is not the path the command documents. `## 0c — COMBINE` tells
+# the orchestrator to resolve the conflict, run the CONTINUE fence, and then
+# RE-ENTER 0c -- which re-runs preflight and start_branch first. Every row below
+# is a step that is correct exactly once and wrong on the second entry, so a
+# library-level re-entry test cannot see any of them.
+RCXR_ROOT="$TMP/rcxr"; _mk_fixture "$RCXR_ROOT"
+RCXR_WORK="$RCXR_ROOT/work"
+RCXR_SCAN="$TMP/rcxr-scan"
+_write_candidates "$RCXR_SCAN" \
+  "{\"number\":801,\"title\":\"one\",\"headRefName\":\"feat/one\",\"headRefOid\":\"$(_oid "$RCXR_WORK" feat/one)\",\"baseRefName\":\"main\",\"body\":\"\",\"state\":\"OPEN\",\"createdAt\":\"2026-08-01T00:00:00Z\"}" \
+  "{\"number\":802,\"title\":\"two\",\"headRefName\":\"feat/two\",\"headRefOid\":\"$(_oid "$RCXR_WORK" feat/two)\",\"baseRefName\":\"main\",\"body\":\"\",\"state\":\"OPEN\",\"createdAt\":\"2026-08-02T00:00:00Z\"}"
+if command -v review_consolidate_drive >/dev/null 2>&1 \
+   && command -v review_consolidate_start_branch >/dev/null 2>&1; then
+  # --- first entry: exactly what 0c does, in fence order ---
+  review_consolidate_preflight "$RCXR_WORK" "$RCXR_SCAN" >/dev/null 2>&1
+  review_consolidate_fetch "$RCXR_WORK" "$RCXR_SCAN" >/dev/null 2>&1
+  review_consolidate_start_branch "$RCXR_WORK" "$RCXR_SCAN" main "chore/stack-rcxr" >/dev/null 2>&1
+  review_consolidate_order "$RCXR_SCAN" >/dev/null 2>&1
+  review_consolidate_drive "$RCXR_WORK" "$RCXR_SCAN" >/dev/null 2>&1
+  assert_eq "$?" "75" "RCXRa: first entry stops at the conflict (fixture precondition)"
+
+  # --- the CONTINUE fence ---
+  printf 'resolved\n' >"$RCXR_WORK/shared.txt"
+  review_consolidate_continue "$RCXR_WORK" "$RCXR_SCAN" 802 "shared.txt" >/dev/null 2>&1
+  RCXR_HEAD_AFTER_RESOLVE="$(git -C "$RCXR_WORK" rev-parse HEAD)"
+
+  # --- SECOND entry: 0c again, from the top, exactly as documented ---
+  review_consolidate_preflight "$RCXR_WORK" "$RCXR_SCAN" >/dev/null 2>&1
+  assert_eq "$?" "0" "RCXRb: preflight accepts the re-entry (HEAD is legitimately the combine branch now)"
+  assert_eq "$(cat "$RCXR_SCAN/origin-branch.txt" 2>/dev/null)" "main" \
+    "RCXRc: re-entry does NOT overwrite the recorded ORIGINAL branch with the combine branch — abort restores where the operator actually was"
+
+  review_consolidate_start_branch "$RCXR_WORK" "$RCXR_SCAN" main "chore/stack-rcxr" >/dev/null 2>&1
+  assert_eq "$?" "0" "RCXRd: start_branch RESUMES a combine branch this scan already created instead of failing 'already exists'"
+  assert_eq "$(git -C "$RCXR_WORK" rev-parse --abbrev-ref HEAD)" "chore/stack-rcxr" \
+    "RCXRe: the resume leaves HEAD on the combine branch"
+  assert_eq "$(git -C "$RCXR_WORK" rev-parse HEAD)" "$RCXR_HEAD_AFTER_RESOLVE" \
+    "RCXRf: the resume did NOT reset the branch back to the base — the resolved merge survives"
+
+  review_consolidate_drive "$RCXR_WORK" "$RCXR_SCAN" >/dev/null 2>&1
+  assert_eq "$?" "0" "RCXRg: the re-entered loop completes"
+  assert_eq "$(sort -un "$RCXR_SCAN/included.txt" | tr '\n' ' ' | sed 's/ $//')" "801 802" \
+    "RCXRh: both candidates are in after a full-fence re-entry"
+
+  # Anti-vacuity for RCXRd: the resume arm must be keyed to THIS scan's own
+  # record, not to "a branch by that name exists". A collision with somebody
+  # else's branch has to keep failing, or the guard is just a suppressed error.
+  RCXR2_ROOT="$TMP/rcxr2"; _mk_fixture "$RCXR2_ROOT"
+  RCXR2_WORK="$RCXR2_ROOT/work"
+  RCXR2_SCAN="$TMP/rcxr2-scan"; mkdir -p "$RCXR2_SCAN"
+  git -C "$RCXR2_WORK" branch chore/stack-rcxr2 main >/dev/null 2>&1
+  review_consolidate_preflight "$RCXR2_WORK" "$RCXR2_SCAN" >/dev/null 2>&1
+  review_consolidate_start_branch "$RCXR2_WORK" "$RCXR2_SCAN" main "chore/stack-rcxr2" >/dev/null 2>&1
+  assert_eq "$?" "2" "RCXRi: a pre-existing branch this scan did NOT create is still refused with rc 2"
+else
+  fail "RCXR0: review_consolidate_drive / review_consolidate_start_branch are not defined"
+fi
+
+# ---- RCXC: the invoking PR survives the branch moving ----------------------
+# 0c resolves "which PR am I reviewing" with `gh pr view` on the CURRENT branch.
+# By re-entry the current branch is the combine branch, which has no PR, so the
+# probe comes back empty -- and review_consolidate_assert_current rejects an
+# empty number, aborting a perfectly good combine with `current_pr_excluded`.
+# The number must be resolved once and carried on disk, like every other value
+# that has to cross a fence boundary.
+if command -v review_consolidate_current_pr >/dev/null 2>&1; then
+  pass "RCXC0: review_consolidate_current_pr is defined"
+  RCXC_SCAN="$TMP/rcxc-scan"; mkdir -p "$RCXC_SCAN"
+  printf '500\n' >"$RCXC_SCAN/current-pr.txt"
+  assert_eq "$(review_consolidate_current_pr "$RCXC_SCAN" 2>/dev/null)" "500" \
+    "RCXCa: a recorded invoking PR is returned without asking gh — so it survives HEAD moving to the combine branch"
+
+  # Fail CLOSED when there is nothing recorded and nothing resolvable: the old
+  # shape let an empty value flow into assert_current, which then blamed the
+  # wrong thing (`current_pr_excluded`) for a probe failure.
+  RCXC2_SCAN="$TMP/rcxc2-scan"; mkdir -p "$RCXC2_SCAN"
+  ( PATH=/nonexistent-for-gh-probe; export PATH
+    review_consolidate_current_pr "$RCXC2_SCAN" >/dev/null 2>&1 )
+  assert_eq "$?" "2" "RCXCb: an unresolvable invoking PR is refused with rc 2, never returned as the empty string"
+
+  printf 'not-a-number\n' >"$RCXC2_SCAN/current-pr.txt"
+  ( PATH=/nonexistent-for-gh-probe; export PATH
+    review_consolidate_current_pr "$RCXC2_SCAN" >/dev/null 2>&1 )
+  assert_eq "$?" "2" "RCXCc: a non-numeric recorded value is not trusted"
+else
+  fail "RCXC0: review_consolidate_current_pr is not defined — the invoking PR cannot survive the branch move"
+fi
+
 # ---- RCX12: the Closes #N union -------------------------------------------
 # The originals are superseded, not merged individually, so their `Closes #N`
 # references have to travel to the combined PR or the underlying issues never

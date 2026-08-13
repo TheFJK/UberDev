@@ -226,7 +226,56 @@ review_consolidate_preflight() {
     return 2
   fi
 
-  printf '%s\n' "$branch" >"$scan_dir/origin-branch.txt" || return 2
+  # FIRST entry only. `## 0c — COMBINE` is re-entered after every resolved
+  # conflict, and by then HEAD is legitimately the combine branch — recording it
+  # again would overwrite the operator's real branch with the branch the abort
+  # path is about to delete, leaving nothing to restore to. The first recorded
+  # value is the true one; a later entry must not be able to move it.
+  if [ ! -s "$scan_dir/origin-branch.txt" ]; then
+    printf '%s\n' "$branch" >"$scan_dir/origin-branch.txt" || return 2
+  fi
+  return 0
+}
+
+# --------------------------------------------------------------------------
+# review_consolidate_current_pr SCAN_DIR
+#
+# The number of the PR whose branch the operator invoked /review-pr on, which
+# `review_consolidate_assert_current` needs to prove the combine contains it.
+#
+# It cannot be re-derived from HEAD on re-entry: 0c is re-entered after every
+# resolved conflict and HEAD is the combine branch by then, which has no PR. A
+# bare `gh pr view` there returns empty, and an empty number reaches
+# assert_current as "not in the combine" — aborting a sound combine and blaming
+# `current_pr_excluded` for what was really a failed probe. So it is resolved
+# once, while HEAD is still the invoking branch, and carried on disk like every
+# other value that has to cross a fence boundary.
+#
+# Fails CLOSED: rc 2 and no output rather than an empty string, because the
+# empty string is exactly the value that produced the misleading abort.
+# --------------------------------------------------------------------------
+review_consolidate_current_pr() {
+  [ "$#" -eq 1 ] || return 2
+  local scan_dir="$1" recorded="" number=""
+  if [ -s "$scan_dir/current-pr.txt" ]; then
+    recorded="$(cat "$scan_dir/current-pr.txt" 2>/dev/null)" || recorded=""
+    case "$recorded" in
+      ''|*[!0-9]*)
+        _uberdev_consolidate_error "the recorded invoking PR '$recorded' is not a number; refusing to guess which PR is being reviewed"
+        return 2
+        ;;
+      *) printf '%s\n' "$recorded"; return 0 ;;
+    esac
+  fi
+  number="$(gh pr view --json number -q .number 2>/dev/null)" || number=""
+  case "$number" in
+    ''|*[!0-9]*)
+      _uberdev_consolidate_error "could not resolve the pull request for the current branch; the combine cannot prove it contains the PR being reviewed"
+      return 2
+      ;;
+  esac
+  printf '%s\n' "$number" >"$scan_dir/current-pr.txt" || return 2
+  printf '%s\n' "$number"
   return 0
 }
 
@@ -630,6 +679,22 @@ review_consolidate_start_branch() {
     _uberdev_consolidate_error "refusing to create a branch with an unusable name: $branch"
     return 2
   }
+  # RESUME, not re-create. 0c is re-entered after every resolved conflict, so on
+  # the second and later entries the combine branch already exists and carries
+  # the merges made so far — `checkout -b` would fail 'already exists' and take
+  # the whole combine down with it. The arm is keyed to combine-branch.txt, this
+  # scan's OWN record that it created this branch, so a collision with a branch
+  # somebody else owns still hits the refusal below. Checkout only: re-cutting
+  # it from the base here would silently discard every resolved merge.
+  if [ -s "$scan_dir/combine-branch.txt" ] \
+     && [ "$(cat "$scan_dir/combine-branch.txt" 2>/dev/null)" = "$branch" ] \
+     && git -C "$worktree" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$worktree" checkout -q "$branch" || {
+      _uberdev_consolidate_error "could not resume the combine branch $branch"
+      return 2
+    }
+    return 0
+  fi
   git -C "$worktree" fetch --no-tags --quiet origin "$base" 2>/dev/null || {
     _uberdev_consolidate_error "could not fetch the combine base '$base' from origin"
     return 2
