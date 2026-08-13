@@ -201,22 +201,23 @@ changes shape.
 2. **`validate_persistence_result` compares across phases** — *the equality is
    FIXED in #453; the population mismatch it papered over is not.* It used to
    enforce `expected_deferred_blockers == by_severity_blocker + skipped_blockers`,
-   where the left side is Phase-2-derived (`count_deferred_blockers` hardcodes a
-   `simplify-aggregate` envelope and `phase2` validation on both axes) and
-   `by_severity.blocker` counts rows written across both phases. The equality was
-   therefore already unsound for any run that files a Phase 1 blocker; #427
-   (`/review-pr` unrunnable end-to-end) is why nobody observed it. This gate
-   moves the right-hand side. #453 replaced the equality with the relation the
-   binding can prove — `by_severity_blocker + skipped_blockers >=
-   expected_deferred_blockers`, "the filer accounted for at least the N blockers
-   the Phase 2 fixer deferred" — since Phase 1 rows only ever raise the observed
-   count, and cross-phase collapse by `(file, line, normalised summary)` makes
-   equality unreachable in principle, not just unpinned. The **upper** bound
-   still needs a Phase 1 recount this binding does not pin, and
-   `count_deferred_blockers` remains Phase-2-only (#452).
+   where the left side is Phase-2-derived — by name and by design since #452,
+   `count_phase2_deferred_blockers` counts the Phase 2 pair and refuses any other
+   on its envelope — and `by_severity.blocker` counts rows written across both
+   phases. The equality was therefore already unsound for any run that files a
+   Phase 1 blocker; #427 (`/review-pr` unrunnable end-to-end) is why nobody
+   observed it. This gate moves the right-hand side. #453 replaced the equality
+   with the relation the binding can prove — `by_severity_blocker +
+   skipped_blockers >= expected_deferred_blockers`, "the filer accounted for at
+   least the N blockers the Phase 2 fixer deferred" — since Phase 1 rows only
+   ever raise the observed count, and cross-phase collapse by `(file, line,
+   normalised summary)` makes equality unreachable in principle, not just
+   unpinned. The **upper** bound still needs a Phase 1 recount this binding does
+   not pin, and the recount stays Phase-2-only (#452).
    The spec's proposal to bind the verification sidecar into
-   `count_deferred_blockers` was CUT for the same reason: that function cannot
-   parse a Phase 1 pair at all.
+   `count_phase2_deferred_blockers` was CUT for the same reason: that verb is the
+   Phase 2 recount and cannot parse a Phase 1 pair at all — Phase 1 reaches the
+   shared pair loader directly instead.
 3. **Green CI proves the wiring, not the filtering.** The suite proves the stage
    dispatches, the sidecar binds, the threshold reads, the cap refuses by name,
    and a culled row is never filed. It does **not** prove the gate filters a real

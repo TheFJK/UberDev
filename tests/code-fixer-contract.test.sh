@@ -119,7 +119,7 @@ for name in (
     "prepare_standalone_authority",
     "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers",
+    "count_phase2_deferred_blockers",
     "project_verification_claims",
     "publish_verification",
     "validate_persistence_result",
@@ -139,7 +139,7 @@ assert module.__all__ == (
     "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers", "project_verification_claims",
+    "count_phase2_deferred_blockers", "project_verification_claims",
     "publish_verification", "validate_persistence_result",
     "commit_review", "commit_standalone", "validate_commit", "validate_failed_return", "validate_residue", "validate_standalone_outcome", "validate_review_outcome",
     "validate_staged",
@@ -182,7 +182,7 @@ assert tuple(inspect.signature(module.publish_review_only_disposition).parameter
     "findings_path", "findings_sha256", "snapshot_path", "snapshot_sha256",
     "working_dir", "disposition_path",
 )
-assert tuple(inspect.signature(module.count_deferred_blockers).parameters) == (
+assert tuple(inspect.signature(module.count_phase2_deferred_blockers).parameters) == (
     "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
 )
 assert tuple(inspect.signature(module.validate_persistence_result).parameters) == (
@@ -984,6 +984,25 @@ phase1_empty = aggregate("phase1")
 phase2_empty = aggregate("phase2")
 assert module.parse_finding_keys(phase1_empty, "phase1") == ()
 assert module.parse_finding_keys(phase2_empty, "phase2") == ()
+# #452 -- the phase->envelope derivation is ONE function, not a ternary copied
+# into every procedure that needs it.
+assert module._aggregate_source("phase1") == "post-impl-review-aggregate"
+assert module._aggregate_source("phase2") == "simplify-aggregate"
+expect_contract_reason(
+    lambda: module._aggregate_source("phase3"), "findings_schema_invalid"
+)
+expect_contract_reason(
+    lambda: module._aggregate_source(None), "findings_schema_invalid"
+)
+# Source-text ratchet: the two envelope literals must not re-multiply. Without
+# it the single derivation can rot back into copies behind a green suite.
+helper_text = helper_path.read_text(encoding="utf-8")
+assert helper_text.count('"simplify-aggregate"') == 1, helper_text.count(
+    '"simplify-aggregate"'
+)
+assert helper_text.count('"post-impl-review-aggregate"') == 1, helper_text.count(
+    '"post-impl-review-aggregate"'
+)
 assert module.encode_aggregate(
     json.loads(phase1_empty.split(b"\n", 2)[1]), "phase1"
 ) == phase1_empty
@@ -3412,13 +3431,13 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         "reason": "no-eligible-baseline-path",
     }]
     findings_sha = digest(findings)
-    assert module.count_deferred_blockers(
+    assert module.count_phase2_deferred_blockers(
         findings_path=str(findings), findings_sha256=findings_sha,
         disposition_path=str(disposition),
         disposition_sha256=published["disposition_sha256"],
     ) == 1
     assert run([
-        "count-deferred-blockers", "--findings-path", str(findings),
+        "count-phase2-deferred-blockers", "--findings-path", str(findings),
         "--findings-sha256", findings_sha,
         "--disposition-path", str(disposition),
         "--disposition-sha256", published["disposition_sha256"],
@@ -3434,7 +3453,7 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         encoding="utf-8",
     )
     applied_sha = hashlib.sha256(applied_disposition.read_bytes()).hexdigest()
-    assert module.count_deferred_blockers(
+    assert module.count_phase2_deferred_blockers(
         findings_path=str(findings), findings_sha256=findings_sha,
         disposition_path=str(applied_disposition),
         disposition_sha256=applied_sha,
@@ -6838,6 +6857,179 @@ with scratch_dir("code-fixer-verify-claims-") as temporary:
         disposition_path=str(disposition), disposition_sha256=disposition_sha,
         claims_dir=str(evidence / "tampered-claims"),
     ))
+
+# #452 -- the phase axis, pinned at every layer it is decided on. Before this
+# block there was ONE pair-loading procedure per phase (two divergent copies of
+# the same twelve steps), and the Phase-2-only verb carried an all-phase name
+# that no assert contradicted.
+with scratch_dir("code-fixer-phase-axis-") as temporary:
+    working = pathlib.Path(temporary).resolve()
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    # The Phase 2 half of the axis: empty aggregate + empty canonical
+    # disposition, the same shape the workflow-defer block binds.
+    p2_aggregate = working / "simplify-final.md"
+    p2_aggregate.write_bytes(aggregate("phase2"))
+    p2_sha = digest(p2_aggregate)
+    p2_disposition = working / "phase2-disposition.json"
+    p2_disposition.write_text(json.dumps({
+        "schema_version": 1, "phase": "phase2",
+        "aggregate_sha256": p2_sha, "findings_disposition": [],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    p2_disposition_sha = digest(p2_disposition)
+
+    # ONE procedure, parameterised by phase -- both phases reach it.
+    p1_pair = module._load_verification_pair(
+        phase="phase1", findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+    )
+    assert len(p1_pair) == 4, p1_pair
+    assert p1_pair[0]["phase"] == "phase1", p1_pair[0]
+    assert p1_pair[1]["phase"] == "phase1", p1_pair[1]
+    assert len(p1_pair[2]) == 4, p1_pair[2]
+    p2_pair = module._load_verification_pair(
+        phase="phase2", findings_path=str(p2_aggregate), findings_sha256=p2_sha,
+        disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+    )
+    assert p2_pair[0]["phase"] == "phase2", p2_pair[0]
+    assert p2_pair[1]["phase"] == "phase2", p2_pair[1]
+    assert p2_pair[2] == (), p2_pair[2]
+
+    # A pair from the OTHER phase is refused on its envelope, both directions,
+    # and an unknown phase is refused on the derivation itself.
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase2", findings_path=str(findings),
+            findings_sha256=findings_sha, disposition_path=str(disposition),
+            disposition_sha256=disposition_sha),
+        "findings_envelope_invalid",
+    )
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase1", findings_path=str(p2_aggregate),
+            findings_sha256=p2_sha, disposition_path=str(p2_disposition),
+            disposition_sha256=p2_disposition_sha),
+        "findings_envelope_invalid",
+    )
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase3", findings_path=str(p2_aggregate),
+            findings_sha256=p2_sha, disposition_path=str(p2_disposition),
+            disposition_sha256=p2_disposition_sha),
+        "findings_schema_invalid",
+    )
+
+    # The Phase 2 verb refuses a Phase 1 pair BY NAME, at the Python layer and
+    # through the CLI. Asserted nowhere before #452.
+    expect_contract_reason(
+        lambda: module.count_phase2_deferred_blockers(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition),
+            disposition_sha256=disposition_sha),
+        "findings_envelope_invalid",
+    )
+    # `run` only shape-checks the reason token; this row pins the exact string.
+    phase1_through_phase2 = subprocess.run(
+        [sys.executable, "-I", "-B", str(helper_path),
+         "count-phase2-deferred-blockers",
+         "--findings-path", str(findings), "--findings-sha256", findings_sha,
+         "--disposition-path", str(disposition),
+         "--disposition-sha256", disposition_sha],
+        text=True, capture_output=True, check=False,
+    )
+    assert phase1_through_phase2.returncode == 74, (
+        phase1_through_phase2.returncode, phase1_through_phase2.stdout,
+        phase1_through_phase2.stderr,
+    )
+    assert phase1_through_phase2.stderr.strip() == "findings_envelope_invalid", (
+        phase1_through_phase2.stderr
+    )
+    assert phase1_through_phase2.stdout == "", phase1_through_phase2.stdout
+    # ...and the retired all-phase spelling is gone from the CLI vocabulary.
+    # The name is ASSEMBLED here so this file never carries it contiguously:
+    # the retirement is pinned repo-wide by a grep that would otherwise count
+    # this very row.
+    retired_verb = "count-" + "deferred-blockers"
+    retired = subprocess.run(
+        [sys.executable, "-I", "-B", str(helper_path), retired_verb,
+         "--findings-path", str(p2_aggregate), "--findings-sha256", p2_sha,
+         "--disposition-path", str(p2_disposition),
+         "--disposition-sha256", p2_disposition_sha],
+        text=True, capture_output=True, check=False,
+    )
+    assert retired.returncode == 74, (
+        retired.returncode, retired.stdout, retired.stderr
+    )
+    # argparse's own error is mapped into the module's closed vocabulary, so an
+    # unknown verb is refused by NAME rather than by an unmapped exit 2.
+    assert retired.stderr.strip() == "arguments_invalid", retired.stderr
+    assert retired.stdout == "", retired.stdout
+
+    # Neither persistence producer is widened by the rename: a Phase 1 pair is
+    # refused even when expected_deferred_blockers matches its TRUE Phase 1
+    # count, and the token is the envelope refusal (the scalar pre-checks all
+    # pass, then the recount refuses).
+    axis_result = working / "result.md"
+    axis_status = working / "status.json"
+    axis_result.write_text(persistence_result("DONE"), encoding="utf-8")
+    axis_status.write_text(json.dumps({
+        "backend": "background", "branch": "", "exit_code": 0,
+        "lease_generation": "0123456789abcdef0123456789abcdef", "pid": "34567",
+        "process_identity": "34567|34567|34567|" + "0123456789abcdef" * 4,
+        "result": str(axis_result), "state": "completed",
+        "workspace_mode": "caller", "worktree": str(working),
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    axis_receipt = json.dumps({
+        "schema_version": 1, "edge_id": "review_pr.defer.findings",
+        "instance_id": "review-pr-defer-findings-iter01-attempt01",
+        "backend": "background", "handle": "34567", "state": "completed",
+        "result_file": str(axis_result), "status_file": str(axis_status),
+    }, sort_keys=True, separators=(",", ":")).encode()
+    # Positive control: the SAME producer arguments with the Phase 2 pair bind.
+    axis_detached = module.bind_persistence_launch_receipt(
+        receipt=axis_receipt, edge_id="review_pr.defer.findings",
+        instance_id="review-pr-defer-findings-iter01-attempt01",
+        result_path=str(axis_result), status_path=str(axis_status),
+        working_dir=str(working), aggregate_path=str(p2_aggregate),
+        aggregate_sha256=p2_sha, disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+        expected_deferred_blockers=0, require_clean=False,
+    )
+    assert axis_detached["edge_id"] == "review_pr.defer.findings", axis_detached
+    expect_contract_reason(
+        lambda: module.bind_persistence_launch_receipt(
+            receipt=axis_receipt, edge_id="review_pr.defer.findings",
+            instance_id="review-pr-defer-findings-iter01-attempt01",
+            result_path=str(axis_result), status_path=str(axis_status),
+            working_dir=str(working), aggregate_path=str(findings),
+            aggregate_sha256=findings_sha, disposition_path=str(disposition),
+            disposition_sha256=disposition_sha,
+            expected_deferred_blockers=1, require_clean=True),
+        "findings_envelope_invalid",
+    )
+    axis_workflow = module.bind_workflow_persistence_launch(
+        instance_id="review-pr-defer-findings-iter01-attempt01",
+        run_nonce=WORKFLOW_NONCE, result_path=str(axis_result),
+        status_path=str(axis_status), working_dir=str(working),
+        aggregate_path=str(p2_aggregate), aggregate_sha256=p2_sha,
+        disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+        expected_deferred_blockers=0, require_clean=False,
+    )
+    assert axis_workflow["edge_id"] == "review_pr.defer.findings", axis_workflow
+    expect_contract_reason(
+        lambda: module.bind_workflow_persistence_launch(
+            instance_id="review-pr-defer-findings-iter01-attempt01",
+            run_nonce=WORKFLOW_NONCE, result_path=str(axis_result),
+            status_path=str(axis_status), working_dir=str(working),
+            aggregate_path=str(findings), aggregate_sha256=findings_sha,
+            disposition_path=str(disposition),
+            disposition_sha256=disposition_sha,
+            expected_deferred_blockers=1, require_clean=True),
+        "findings_envelope_invalid",
+    )
 
 with scratch_dir("code-fixer-verify-none-") as temporary:
     # A suggestions-only aggregate produces zero cards and zero directories.

@@ -301,6 +301,12 @@ grep -Fq 'review_fleet_bind_fixer review_pr.fix.phase1 ' "$REVIEW_CMD" \
 grep -Fq 'review_fleet_bind_persistence ' "$REVIEW_CMD" \
   && pass "G6c review-pr binds the defer child with the PERSISTENCE producer" \
   || fail "G6c review-pr does not bind the defer child"
+# G6e — the recount the defer binding is gated on names the phase it counts.
+# Nothing grepped review-pr.md for this verb before #452, so a missed fence
+# passed the whole suite and failed only at runtime behind `|| return 74`.
+grep -Fq 'count-phase2-deferred-blockers' "$REVIEW_CMD" \
+  && pass "G6e review-pr recounts the PHASE 2 deferred blockers before binding the defer child" \
+  || fail "G6e review-pr does not name the phase2 deferred-blocker verb"
 grep -Fq 'review_fleet_bind_roster simplify ' "$SIMPLIFY_CMD" \
   && grep -Fq 'review_fleet_bind_fixer simplify.fix.phase2 ' "$SIMPLIFY_CMD" \
   && grep -Fq 'review_fleet_bind_persistence ' "$SIMPLIFY_CMD" \

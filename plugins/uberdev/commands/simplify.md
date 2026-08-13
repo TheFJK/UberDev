@@ -786,7 +786,8 @@ RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
 
 ```bash uberdev-executable
 # BEGIN simplify-defer-controller-v2
-DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+# The PHASE 2 pair: /simplify's own aggregate and the fixer's disposition.
+DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-phase2-deferred-blockers \
   --findings-path "$AGG_PATH" \
   --findings-sha256 "$FIX_FINDINGS_SHA256" \
   --disposition-path "$PHASE2_DISPOSITION_PATH" \
@@ -858,10 +859,11 @@ REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
 mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
 # Repeated here for the same reason as the fixer arm: the routed fence computes
 # this count and dispatches in one block. The count is deterministic from the
-# pinned aggregate/disposition bytes, and bind-workflow-persistence-launch
-# re-counts it from those same bytes, so a drift between the two arms is
-# refused rather than believed.
-DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+# pinned PHASE 2 aggregate/disposition bytes -- /simplify's own aggregate and
+# the fixer's disposition -- and bind-workflow-persistence-launch re-counts it
+# from those same bytes, so a drift between the two arms is refused rather than
+# believed.
+DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-phase2-deferred-blockers \
   --findings-path "$AGG_PATH" \
   --findings-sha256 "$FIX_FINDINGS_SHA256" \
   --disposition-path "$PHASE2_DISPOSITION_PATH" \

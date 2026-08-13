@@ -398,8 +398,8 @@ assert_in_section "$CODE_FIXER" '^## Process' '^## Refusal triggers' \
 
 echo
 echo "== E4.4-E4.8: authenticated standalone persistence result gate =="
-assert_grep "$SIMPLIFY" 'count-deferred-blockers' \
-  "E4.4 — Phase 3.5 authenticates the deferred blocker count"
+assert_grep "$SIMPLIFY" 'count-phase2-deferred-blockers' \
+  "E4.4 — Phase 3.5 authenticates the PHASE 2 deferred blocker count"
 assert_grep "$SIMPLIFY" 'validate-persistence-result' \
   "E4.5 — Phase 3.5 authenticates and validates the child result"
 assert_grep "$SIMPLIFY" 'if simplify_defer_child_bound review_pr\.defer\.findings' \
