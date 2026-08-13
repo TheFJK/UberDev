@@ -446,3 +446,129 @@ assumed:
 deleted target with the register kept consistent, a misspelled target, the
 resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 **and nothing else**.
+
+---
+
+## Amendment (2026-08-13, #511) — the 6.3.0 delta adjudicated
+
+> **Amends §7 of this RFC: §7's table is the dated adjudication at the `v6.2.0`
+> tag and stays frozen; this block adjudicates the 6.2.0 → 6.3.0 delta and
+> advances the review point on the 14 `superpowers` components.**
+> Status of this amendment: **Accepted, implemented.**
+
+**No behavioural upstream content is imported by this amendment's PR.** Each item
+below gets a verdict; every ADOPT names a filed issue, and the port is that
+issue's PR.
+
+### The review point
+
+The 14 `superpowers` components now record
+`b36e0829c6d0140e93cfef2ca599b1b07d4a7797` as their
+`last_reviewed_upstream_commit`, reviewed on `2026-08-13`. That commit is the
+peeled `v6.3.0` tag of `obra/superpowers`, and the same value is recorded once
+more at `upstreams.superpowers` as `last_reviewed_commit` /
+`last_reviewed_release` / `last_reviewed_on`, so the upstream carries its review
+point in one place and the components are checked against it.
+
+Reproducible without a tag lookup: at adjudication time upstream's default-branch
+HEAD resolved to that same commit.
+
+```
+git ls-remote https://github.com/obra/superpowers 'refs/tags/v6.3.0*'
+  86babb696875227929e85420f287d6309374b93f  refs/tags/v6.3.0
+  b36e0829c6d0140e93cfef2ca599b1b07d4a7797  refs/tags/v6.3.0^{}
+git ls-remote https://github.com/obra/superpowers HEAD
+  b36e0829c6d0140e93cfef2ca599b1b07d4a7797  HEAD
+```
+
+`upstreams.pr-review-toolkit` gains `last_reviewed_commit` and
+`last_reviewed_on` at its components' existing values, and deliberately **no**
+`last_reviewed_release`: it is a plugin inside a monorepo with no release
+vocabulary, and inventing a label would be exactly the fabrication this register
+exists to prevent. The six agent components are byte-unchanged — that upstream
+contributed zero paths to this delta.
+
+### What was measured
+
+`diff -rq` between the two plugin-cache trees,
+`claude-plugins-official/superpowers/6.2.0` and `.../6.3.0`. Thirty-seven
+differing entries; **thirteen** of them fall under a declared `upstream_path` and
+are the corpus of the table below. The remaining twenty-four are the aggregate
+`SKIP` row.
+
+The cache is `claude-plugins-official`'s repackaging of upstream, not upstream
+itself, so it is corroborated rather than trusted. Five files were fetched from
+`raw.githubusercontent.com` at the peeled tag and compared by sha256 against the
+cache copy — `writing-skills/render-graphs.js`, `writing-plans/SKILL.md`,
+`subagent-driven-development/SKILL.md`, `brainstorming/SKILL.md` and
+`using-superpowers/SKILL.md` — and all five matched. Every "we already have
+this" claim in a reasoning cell below is backed by a probe against UberDev's own
+bytes under `plugins/uberdev/skills/`, never against the cache.
+
+Two upstream files bundle two separable decisions each, so they take two rows:
+`brainstorming/SKILL.md` and `writing-skills/render-graphs.js`. Splitting them is
+the point of adjudicating rather than importing — in both cases one half is
+adoptable and the other is not.
+
+### The verdicts
+
+| Upstream item | Verdict | Reasoning |
+| --- | --- | --- |
+| `brainstorming/SKILL.md`: ceremony tiering (Spike / Bounded / Architectural) and the one-way ratchet | **ADOPT by PORT — #532** | The tiering itself is already here: `solve-pipeline` classifies every issue `trivial` / `small` / `medium` / `large` through `lib/solve_triage.py`, and `/dev` is the shipped spike lane. The **ratchet** is not — a grep of `solve-pipeline/SKILL.md` and `solve_triage.py` for re-classification or tier escalation returns nothing. Tier is computed once, at dispatch, from issue-body signals and never revisited, so a solver that discovers mid-run that its issue is cross-cutting finishes on the lighter workflow and nothing records that it was mis-triaged. |
+| `brainstorming/SKILL.md`: approval gate restated as universal ("Too Simple To Need A Design" becomes "Too Simple To Need Approval") | **DECLINED** | Standing decision, not an open question. `permanent_divergences[].brainstorm-no-approval-gates` (§6) records that UberDev rejects upstream's HARD-GATE and per-section approval checkpoints; quality comes from parallel research and always-on reviewer agents. §6 divergences are never reconciled, so a new upstream phrasing of the same gate changes nothing. |
+| `brainstorming/visual-companion.md`: launcher invoked through `bash` | **ADOPT by PORT — #533** | The changed block is Copilot CLI's, which UberDev does not ship. The defect it fixes is shipped: every UberDev launch block, including **Claude Code (Windows)**, invokes `scripts/start-server.sh` bare and depends on the shebang plus a surviving exec bit. CI runs a `windows-latest` job. Port the `bash` prefix and upstream's stated reason, not the block. |
+| `finishing-a-development-branch/SKILL.md`: worktree removal refused, ask the human | **DECLINED** | Already held, and held more strongly. `finish-branch` removes without `--force` in merge mode and leaves a worktree holding uncommitted work standing with a `WARNING` naming it. Upstream's remedy is a three-option question to a human; UberDev's `--turbo` contract is unattended, so asking would stall a run that has no one to answer. The safety invariant upstream is protecting — never `--force` on your own initiative — is already the shipped behaviour. |
+| `requesting-code-review/code-reviewer.md`: "You Do Not Dispatch Subagents" | **ADOPT by PORT — #530** | This file **is** shipped, and a grep of the component for any never-spawn contract returns nothing. |
+| `subagent-driven-development/SKILL.md`: the no-subagents contract (dispatch bullet and red-flag row) | **ADOPT by PORT — #530** | Contract drift, not absence: `agents/implementation-worker.md` and `lib/child-dispatch.sh` both already state the leaf-worker rule, while the vendored prompt templates that SDD actually pastes into dispatches carry no trace of it. One contract, several uncompared copies. |
+| `subagent-driven-development/SKILL.md`: "Rulings, not stalls" plus four named stop conditions | **ADOPT by PORT — #530** | Split verdict inside one item. The **autonomy** half is already UberDev policy — `--turbo` is unattended by contract and `/goal` carries its own circuit breakers — so there is nothing to adopt there. The **ledger** half is absent: no `Ruling:` convention exists anywhere in the component, so an unattended solver that overrides its plan reports that in prose, if at all. Adopt the structured `Ruling: <what> — <why> — <cost if wrong>` line and its exhaustive end-of-run roll-up. |
+| `subagent-driven-development/SKILL.md`: batched same-shape dispatch, bounded waits, preflight scan-table | **DEFERRED** | Real and wanted, but written against Codex's `wait_agent` event subscription and its V1/V2 lifecycle. UberDev's solvers run in the Workflow runtime (RFC 0015), whose wait surface differs. Re-adjudicate against that surface rather than porting guidance whose cost model does not hold here. |
+| `subagent-driven-development/implementer-prompt.md`: "You Do Not Dispatch Subagents" | **ADOPT by PORT — #530** | Shipped file, same zero-hit grep as the row above. Upstream's stated reason is empirical: every reviewer a worker spawned duplicated the task review the controller dispatched anyway. |
+| `subagent-driven-development/re-review-prompt.md`: no-subagents contract | **SKIP** | Not shipped. The component's files are `SKILL.md`, `implementer-prompt.md`, `code-quality-reviewer-prompt.md` and `spec-reviewer-prompt.md`; there is no local file to review. The contract itself is adopted where UberDev does have a surface for it, under #530. |
+| `subagent-driven-development/task-reviewer-prompt.md`: no-subagents, evidence-legibility and batched-dispatch checks | **SKIP** | Not shipped, per the same file list. |
+| `using-superpowers/SKILL.md`: pointer to `references/hermes-tools.md` | **SKIP** | Adopting the pointer would red `C-REFS`, which requires every relative sibling reference in a declared markdown document to resolve on disk. UberDev ships no `hermes-tools.md`, so the adoption would be a dangling reference by construction. |
+| `using-superpowers/references/codex-tools.md`: multi-agent V1/V2 tools, waiting, model routing | **SKIP** | Not shipped — UberDev's reference set is `configuration.md`, `copilot-tools.md` and `gemini-tools.md`. The transferable half is the waiting guidance, adjudicated as `DEFERRED` two rows above rather than twice. |
+| `using-superpowers/references/hermes-tools.md` (new file) | **SKIP** | Not shipped; UberDev does not target the Hermes harness. |
+| `writing-plans/SKILL.md`: the plan template gains a `Spec:` pointer | **ADOPT by PORT — #531** | Absent locally. It matters more here than upstream: UberDev's medium and large pipeline writes spec and plan as separate artifacts and hands the plan to a solver in a fresh worktree, where nothing today names the spec the plan argues from. `skills/write-plan` is `track`, so adoption reds `C-FILES` until the recorded sha256 is refreshed in the same PR. |
+| `writing-skills/render-graphs.js`: `execSync('which dot')` becomes `execFileSync('dot', ['-V'])` | **ADOPT by PORT — #531** | A genuine portability fix that applies verbatim: the shipped copy still shells out to `which`, which is not a command on Windows, and CI runs a Windows job. `skills/writing-skills` is `track`, so the same `C-FILES` refresh obligation applies. |
+| `writing-skills/render-graphs.js`: CommonJS becomes ESM | **DECLINED** | The worked example of why §7 adjudicates instead of importing — and of checking the hypothesis before recording it. The expected finding was a hard `SyntaxError`, since no `package.json` governs `plugins/uberdev/`. **Measured, it is not:** Node 20.19.2 ships module-syntax detection unflagged, and upstream's 6.3.0 bytes ran unmodified at the UberDev path. The real cost is narrower and still disqualifying — an **undeclared runtime floor**. The identical canary run as `node --no-experimental-detect-module` exits 1 with *"To load an ES module, set `type: module`"*, and this repo declares no `engines` field and pins no CI `node-version`. Adopting the module system would raise the floor to Node 20.19 / 22.7 for a tree that is otherwise CommonJS throughout, buying nothing. Take the `execFileSync` half, leave the `import` half. |
+| Everything outside every declared `upstream_path` | **SKIP** | Measured, not omitted: `.devin-plugin/` and `.hermes-plugin/` (new harnesses), six harness manifests, `.gitignore`, `.version-bump.json`, `README.md`, `RELEASE-NOTES.md`, `package.json`, `scripts/bump-version.sh`, `scripts/sync-to-codex-plugin.sh`, new `docs/superpowers/plans/` and `docs/superpowers/specs/` material, and new `tests/devin/`, `tests/hermes/`, `tests/version-bump/` and `tests/writing-skills/` trees. `.orphaned_at` exists only in the 6.2.0 cache — a cache artifact rather than an upstream path, so it is not adjudicated. |
+
+One question the issue asked explicitly, answered by measurement: **the fix-round
+ladder did not move.** #459 adopted the resume-plus-breaker half at 6.2.0, and
+6.3.0 leaves rounds, cap and escalation identical — the ladder text appears only
+on unchanged context lines in the diff. There is nothing to adopt.
+
+### The seven untouched components
+
+Seven of the 14 `superpowers` components have **no path in this delta at all**.
+Their watermark advance records "reviewed, empty delta" rather than an
+unevidenced claim, and naming them is what makes that difference checkable:
+
+`skills/dispatching-parallel-agents`, `skills/execute-plan`,
+`skills/receiving-code-review`, `skills/systematic-debugging`,
+`skills/test-driven-development`, `skills/using-git-worktrees`,
+`skills/verification-before-completion`.
+
+### What the advance does and does not claim
+
+It is a **review point**, not a proven base.
+
+- `vendored_at_commit` does **not** move. §2.2's two-commits-per-component split
+  is exactly this distinction: `C-BASE` requires an in-file
+  `Vendored from …@<sha>` witness before a base may be pinned, and no such
+  header was written here. Base-pinning stays owned by #503, #504 and #505.
+- `measured_diff_lines` and the §4.2 / §4.3 stance tables stay at their `v6.2.0`
+  measurement. They are deliberately untouched, and #534 owns labelling each
+  measurement with the revision it was taken at — the register and §4.2 already
+  disagree on two components, which is the defect that issue exists to close.
+- Nothing under `plugins/uberdev/skills/` changes in this PR. Every ADOPT row
+  above is a filed issue, and the port is that issue's PR.
+
+`tests/vendor-provenance.test.sh` gains the matching rows: **V30** (every
+component's watermark equals its own upstream's review point), **V31** (every
+labelled review point is named by this RFC, with a vacuity arm so deleting the
+labels reds instead of passing), **V32** (every verdict row above carries exactly
+one token and every ADOPT cites an issue) and **V33** (a component sitting at its
+upstream's review point may be reviewed later than it, never earlier).
+`tests/docs-accuracy.test.sh` gains T3.6, which is what stops a future watermark
+advance from landing with no verdict table behind it.

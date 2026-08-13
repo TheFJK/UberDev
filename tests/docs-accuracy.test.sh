@@ -282,6 +282,32 @@ assert_grep "$PRECISION_RFC" '^# RFC 0018 — ' "T3.4 precision RFC header self-
 # Numbered T3.5, not T3.4: #432 and #434 each appended their new RFC assertion as
 # "T3.4" independently, so the stacked merge would ship two rows under one label.
 assert_grep "$VENDOR_RFC" '^# RFC 0019 — Vendored Upstream Policy' "T3.5 vendor RFC header self-identifies as RFC 0019"
+# §7 adjudicates 6.1.0 -> 6.2.0 and is frozen at that measurement, so every later
+# upstream release is adjudicated by its own dated amendment (#511 = the 6.3.0
+# delta). T3.6 is what stops a watermark advance from landing with no verdict
+# table behind it.
+# NOTE two traps this pattern is written around:
+#   - assert_grep is `grep -qE`, so the heading's parentheses are ERE grouping
+#     metacharacters and MUST be escaped. An unescaped '(2026-08-13, #511)'
+#     matches a heading that was never written.
+#   - the heading deliberately carries no U+2192; the arrow lives in the body
+#     prose instead. docs-accuracy runs on ubuntu AND windows-latest, and in a
+#     C/POSIX locale `.` is one byte while the arrow is three (see T4.2).
+assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\) — ' "T3.6 vendor RFC carries the dated #511 amendment heading"
+# Anchored to the amendment's OWN section, not the file: the 2026-08-12 (#457)
+# amendment already carries an identical status line, so a whole-file assert_grep
+# here would PASS against the pre-existing block and never notice that the #511
+# amendment was missing its status.
+# The section end is '^### ', NOT '^## '. assert_in_section builds an awk range
+# /start/,/end/, and awk tests the END pattern against the START line itself — so
+# a '^## ' end pattern matches the '## Amendment …' heading that opened the range
+# and collapses it to that one line (measured: 1 line vs 123 open-ended), which
+# reds this row for the wrong reason. '^### ' cannot match a two-hash heading and
+# bounds the blockquote exactly, while still terminating correctly if a later
+# amendment is appended below.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\)' '^### ' \
+  'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
+  "T3.6b the #511 amendment declares its own status inside its own block"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
