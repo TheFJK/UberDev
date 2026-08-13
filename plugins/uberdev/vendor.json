@@ -93,12 +93,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/brainstorming",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD from 2026-04-27 21:55 PDT to 2026-05-04 15:05 PDT, the window this component's vendored_on (2026-04-27) falls in. Measured at that base on 2026-08-13: the file set is 1:1 (8/8, symmetric difference 0) and the copy diverges by 1515 changed lines (GNU diff, '<' plus '>' lines). Method, the full 83-candidate scan and the per-file residual table are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md; no candidate in upstream history scores better on that key. Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
       "measured_diff_lines": 2255,
       "divergences": [
         {
@@ -189,12 +189,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/finishing-a-development-branch",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
       "measured_diff_lines": 734,
       "divergences": [
         {
@@ -266,12 +266,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/requesting-code-review",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (2/2, symmetric difference 0) and the copy diverges by only 18 changed lines (GNU diff, '<' plus '>' lines); method and the 14-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
       "measured_diff_lines": 228,
       "divergences": [
         {
@@ -314,12 +314,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/subagent-driven-development",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "File sets diverge: UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md; upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 — upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
       "measured_diff_lines": 1064,
       "divergences": [
         {
@@ -451,12 +451,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/using-superpowers",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "This is UberDev's own plugin primer (injected by the session-start hook) and its reference set diverges from upstream's: UberDev ships references/configuration.md and references/copilot-tools.md, upstream ships antigravity-tools.md, codex-tools.md and pi-tools.md.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: upstream ships references/codex-tools.md, references/copilot-tools.md and references/gemini-tools.md, so the BASE-relative divergence is exactly two files (ours-only references/configuration.md, upstream-only references/codex-tools.md) over 16 changed lines across the three shared files (GNU diff, '<' plus '>' lines); the 35-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. references/copilot-tools.md exists at the base and was deleted upstream by the watermark, so the local copy is a base-era file rather than a local invention; references/configuration.md is absent upstream at the base, which is why the in-file witness for this pin sits on SKILL.md and never there. Measured against the WATERMARK 3dcbd5c4 (v6.2.0) instead, upstream's reference set is antigravity-tools.md, codex-tools.md, gemini-tools.md and pi-tools.md. This is UberDev's own plugin primer, injected by the session-start hook.",
       "measured_diff_lines": 174,
       "divergences": [
         {

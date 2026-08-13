@@ -186,10 +186,10 @@ fi
 # V5 — C-HEADER: the count of header-carrying files is knowable TODAY, so it is
 # asserted exactly. A `>= 1` bound decays into a tautology as files are added.
 HEADER_COUNT="$(grep -rlE 'Vendored from [^@[:space:]]+@[0-9a-f]{40}' "$REPO_ROOT/plugins/uberdev" | wc -l | tr -d '[:space:]')"
-if [ "$HEADER_COUNT" = "21" ]; then
-  ok "V5 C-HEADER: exactly 21 files carry an in-file provenance header"
+if [ "$HEADER_COUNT" = "26" ]; then
+  ok "V5 C-HEADER: exactly 26 files carry an in-file provenance header"
 else
-  no "V5 C-HEADER: expected 21 header-carrying files, found $HEADER_COUNT"
+  no "V5 C-HEADER: expected 26 header-carrying files, found $HEADER_COUNT"
 fi
 if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-HEADER >/dev/null 2>&1; then
   ok "V5b C-HEADER: every on-disk header agrees with its component's register entry"
@@ -443,38 +443,62 @@ else
   no "V20 C-BASE is missing, unregistered, or red on the shipped tree"
 fi
 
-# V21 — a fabricated pin on a component that carries no header anywhere.
-# `skills/brainstorm` records "unknown" today and no file under it carries a
-# provenance header, so a 40-hex literal here is a pure fabrication. THIS EXACT
-# PROBE IS GREEN ON main — that is the defect. C-SCHEMA accepts any 40-hex and
-# C-HEADER has no header to disagree with, so C-BASE is the only check that can
-# see it.
+# V21 — a fabricated pin on a component that carries no header anywhere. This is
+# the exact defect C-BASE was built for: C-SCHEMA accepts any 40-hex and C-HEADER
+# has no header to disagree with, so C-BASE is the only check that can see it.
+#
+# THE PRECONDITION IS MANUFACTURED, NOT FOUND. This row used to *find* an unpinned,
+# headerless component (`skills/brainstorm`) and fabricate a base on it. That shape
+# dies the moment the component is pinned (#504) and dies permanently once the
+# remaining unpinned components are pinned too (#503, #505) — the headerless pool
+# empties and the row can only `SystemExit`. So the sandbox is instead put INTO the
+# headerless-and-pinned state on purpose: fabricate the base AND strip every
+# provenance header under the component. `skills/brainstorm` stays the subject
+# because it is `stance: fork` — no C-FILES digest lock fires on its bytes, so the
+# mutation reds C-BASE ALONE, which is the whole meaning of the row.
 #
 # Every mutation below is applied through an `if python3 …; then assert_red`
 # gate. A mutation that silently no-ops would leave the sandbox pristine, the
 # checker green, and the row red for a reason that has nothing to do with
 # C-BASE; the gate makes "the probe could not break anything" say so in its own
-# words instead.
+# words instead. Both refusal arms below report through that gate.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
 if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
-import json, sys
+import json, os, sys
 p = sys.argv[1]
+plugin = os.path.dirname(p)
 d = json.load(open(p, encoding="utf-8"))
 for c in d["components"]:
     if c.get("path") == "skills/brainstorm":
-        if c.get("vendored_at_commit") != "unknown":
-            raise SystemExit("skills/brainstorm is already pinned — pick another "
-                             "headerless component for this row")
+        if c.get("stance") != "fork":
+            raise SystemExit("skills/brainstorm is no longer `fork` — a digest lock would "
+                             "red C-FILES too and this row would stop isolating C-BASE")
         c["vendored_at_commit"] = "deadbeef" * 5
         break
 else:
     raise SystemExit("skills/brainstorm is no longer in the register")
 json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+stripped = 0
+for dirpath, _dirs, files in os.walk(os.path.join(plugin, "skills", "brainstorm")):
+    for name in files:
+        f = os.path.join(dirpath, name)
+        try:
+            text = open(f, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = text.splitlines(True)
+        kept = [ln for ln in lines if "Vendored from" not in ln]
+        if len(kept) != len(lines):
+            stripped += len(lines) - len(kept)
+            open(f, "w", encoding="utf-8").write("".join(kept))
+if stripped == 0:
+    raise SystemExit("no provenance header under skills/brainstorm to strip — the fabricated "
+                     "base would be unwitnessed for the wrong reason and the row proves nothing")
 PY
 then
   assert_red "$SB" "C-BASE" "V21 a fabricated 40-hex base on a component with no in-file header"
 else
-  no "V21 could not fabricate a base on skills/brainstorm — the probe mutated nothing"
+  no "V21 could not manufacture the headerless-and-pinned state on skills/brainstorm — the probe mutated nothing"
 fi
 
 # V22 — the witness removed while the register stays pinned. The inverse of
@@ -791,6 +815,101 @@ else
   no "V29 an address-shaped @-token was read as a sibling file — C-REFS false-positives"
   run_check "$SB" || true
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+echo
+echo "== V30: the witness-file convention =="
+
+# V30 — a pinned `skills/*` component must be witnessed on its OWN SKILL.md.
+#
+# THE BLIND SPOT. C-BASE accepts a witness on ANY file of the component, so a pin
+# restated only on a locally-added file — one that does not exist upstream at the
+# recorded base — passes every check while being uncheckable against upstream by
+# anyone. #504 hit this concretely: `skills/using-uberdev/references/configuration.md`
+# returns 404 at `e7a2d16`, so a header placed there would pin a base against a
+# file upstream never had. Measured on this tree: moving `skills/brainstorm`'s
+# header from SKILL.md onto `visual-companion.md` leaves vendor-check.py at rc 0
+# with all ten checks green.
+#
+# SKILL.md is the one file every vendored skill provably shares with upstream, so
+# "the witness is on SKILL.md" is the only OFFLINE-checkable proxy for "the
+# witness is on a file upstream actually had" — and offline is this guard's whole
+# policy (comparing against upstream is vendor-drift.py's job).
+#
+# Scoped to `skills/*` on purpose. An `agents/*.md` component IS a single file, so
+# there is no placement choice to constrain and no SKILL.md to demand — the six
+# agents (#505) are covered by C-BASE alone, correctly.
+#
+# Pure Python over the committed tree, no checker in the loop (the V1/V4/V8/V9
+# idiom): a checker that mis-parses the register cannot make this row lie. Written
+# to a file once so V30 and V30b run the SAME code — a second transcription is a
+# second thing to drift.
+V30_PY="$SANDBOX_ROOT/v30.py"
+cat > "$V30_PY" <<'PY'
+import json, os, re, sys
+HEADER = re.compile(r"Vendored from ([^@\s]+)@([0-9a-f]{40})")
+plugin = os.path.join(sys.argv[1], "plugins", "uberdev")
+d = json.load(open(os.path.join(plugin, "vendor.json"), encoding="utf-8"))
+ups = d.get("upstreams", {})
+checked, offenders = 0, []
+for c in d["components"]:
+    if c.get("origin") != "third-party":
+        continue
+    base = c.get("vendored_at_commit")
+    if not base or base == "unknown" or not c["path"].startswith("skills/"):
+        continue
+    checked += 1
+    repo = ups.get(c.get("upstream"), {}).get("repo")
+    skill = os.path.join(plugin, c["path"], "SKILL.md")
+    try:
+        text = open(skill, encoding="utf-8").read()
+    except OSError:
+        offenders.append("%s: no SKILL.md on disk" % c["id"])
+        continue
+    m = HEADER.search(text)
+    if not (m and m.group(1) == repo and m.group(2) == base):
+        offenders.append("%s: SKILL.md does not restate %s@%s"
+                         % (c["id"], repo, str(base)[:12]))
+assert checked >= 1, "no pinned skills/* component — the row would be vacuous"
+assert not offenders, \
+    "pinned skill components not witnessed on their own SKILL.md: %s" % offenders
+PY
+V30_OUT="$(python3 "$V30_PY" "$REPO_ROOT" 2>&1)" && V30_RC=0 || V30_RC=$?
+if [ "$V30_RC" -eq 0 ]; then
+  ok "V30 every pinned skills/* component is witnessed on its own SKILL.md"
+else
+  no "V30 a pinned skill component's base is witnessed only off its SKILL.md"
+  echo "        output: $(tail -n 1 <<<"$V30_OUT")"
+fi
+
+# V30b — the falsifiability arm. Without it V30 is a row that has never been seen
+# to fail: `checked >= 1` stops it going vacuously green on a tree with no pinned
+# skills, but nothing would show the PLACEMENT half can fail at all. The header is
+# MOVED, not deleted, so the component keeps a witness and C-BASE stays green —
+# the row must go red on placement alone.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/skills/brainstorm" <<'PY'
+import os, sys
+comp = sys.argv[1]
+skill = os.path.join(comp, "SKILL.md")
+lines = open(skill, encoding="utf-8").read().splitlines(True)
+moved = [ln for ln in lines if "Vendored from" in ln]
+if len(moved) != 1:
+    raise SystemExit("expected exactly one header on skills/brainstorm/SKILL.md, "
+                     "found %d — the probe would prove nothing" % len(moved))
+open(skill, "w", encoding="utf-8").write(
+    "".join(ln for ln in lines if "Vendored from" not in ln))
+with open(os.path.join(comp, "visual-companion.md"), "a", encoding="utf-8") as fh:
+    fh.write(moved[0])
+PY
+then
+  if python3 "$V30_PY" "$SB" >/dev/null 2>&1; then
+    no "V30b a witness moved off SKILL.md was accepted — the convention is not enforced"
+  else
+    ok "V30b a pinned skill witnessed only on a sibling file is rejected"
+  fi
+else
+  no "V30b could not move skills/brainstorm's header — the probe mutated nothing"
 fi
 
 echo

@@ -82,10 +82,10 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 5 unpinned skill directories and all 6 agents. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
+The split is load-bearing. `"unknown"` is the honest value for 11 of the 20
 components — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
