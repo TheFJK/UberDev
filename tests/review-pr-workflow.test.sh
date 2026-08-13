@@ -301,6 +301,12 @@ grep -Fq 'review_fleet_bind_fixer review_pr.fix.phase1 ' "$REVIEW_CMD" \
 grep -Fq 'review_fleet_bind_persistence ' "$REVIEW_CMD" \
   && pass "G6c review-pr binds the defer child with the PERSISTENCE producer" \
   || fail "G6c review-pr does not bind the defer child"
+# G6e — the recount the defer binding is gated on names the phase it counts.
+# Nothing grepped review-pr.md for this verb before #452, so a missed fence
+# passed the whole suite and failed only at runtime behind `|| return 74`.
+grep -Fq 'count-phase2-deferred-blockers' "$REVIEW_CMD" \
+  && pass "G6e review-pr recounts the PHASE 2 deferred blockers before binding the defer child" \
+  || fail "G6e review-pr does not name the phase2 deferred-blocker verb"
 grep -Fq 'review_fleet_bind_roster simplify ' "$SIMPLIFY_CMD" \
   && grep -Fq 'review_fleet_bind_fixer simplify.fix.phase2 ' "$SIMPLIFY_CMD" \
   && grep -Fq 'review_fleet_bind_persistence ' "$SIMPLIFY_CMD" \
@@ -329,6 +335,7 @@ grep -Fq 'capture-bound-child' "$REVIEW_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$REVIEW_CMD" \
   && grep -Fq 'post_review_validated_evidence_complete' "$REVIEW_CMD" \
   && grep -Fq 'post_review_write_aggregate_v2' "$REVIEW_CMD" \
+  && grep -Fq 'post_review_write_simplify_aggregate_v2' "$REVIEW_CMD" \
   && pass "G10a review-pr runs the capture verbs for all four stages after the call" \
   || fail "G10a review-pr is missing a post-return capture verb"
 grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
@@ -336,6 +343,12 @@ grep -Fq 'capture-bound-child' "$SIMPLIFY_CMD" \
   && grep -Fq 'capture-persistence-terminal' "$SIMPLIFY_CMD" \
   && pass "G10b simplify runs the capture verbs for all three stages after the call" \
   || fail "G10b simplify is missing a post-return capture verb"
+# G10d (#481) — capturing the three lens children proved they ran; nothing then
+# turned them into `simplify-final.md`, and Phase 2 stopped there. Both producer
+# sites must name the writer.
+grep -Fq 'post_review_write_simplify_aggregate_v2' "$SIMPLIFY_CMD" \
+  && pass "G10d simplify aggregates the captured lens wave into the phase2 document" \
+  || fail "G10d simplify captures three lenses and never builds the phase2 aggregate"
 grep -Fq 'validate-review-outcome' "$REVIEW_CMD" \
   && grep -Fq 'validate-persistence-result' "$REVIEW_CMD" \
   && grep -Fq 'validate-standalone-outcome' "$SIMPLIFY_CMD" \
@@ -788,6 +801,25 @@ grep -q 'function fixerOutputContract()' "$WORKFLOW" \
 grep -q 'isSafeAbsPath(fixerContractPathAbs)' "$WORKFLOW" \
   && pass "B[fixer-contract] the fix stage refuses an unusable contract path before dispatch" \
   || fail "B[fixer-contract] the fix stage does not guard fixerContractPathAbs"
+# B[lens-contract] (#481) — lensPrompt used to say only "follow the agent
+# instructions", while boundChildProtocol goes on to say "write your full
+# report". A whole-file grammar pinned ONLY in the agent file is contradicted by
+# the prompt the lens actually reads, which is how the three lenses drifted into
+# three document shapes. Phase 1 resolves that contradiction with an explicit
+# FORMAT-scoped override; Phase 2 must too.
+B_LENS_BODY="$(awk '/^function lensPrompt\(/{a=1} a{print} a&&/^}$/{exit}' "$WORKFLOW")"
+grep -q 'lines.push(phase2OutputContract(' <<<"$B_LENS_BODY" \
+  && pass "B[lens-contract] lensPrompt pushes an explicit output contract" \
+  || fail "B[lens-contract] lensPrompt does not push a Phase 2 output contract"
+B_LENS_CONTRACT="$(awk '/^function phase2OutputContract\(lens\) \{/{a=1} a{print} a&&/^}$/{exit}' "$WORKFLOW")"
+for B_LENS_RULE in 'entire contents of the result file' 'findings:' 'blocker' 'suggestion' 'findings: \[\]'; do
+  grep -q "$B_LENS_RULE" <<<"$B_LENS_CONTRACT" \
+    && pass "B[lens-contract] the Phase 2 contract states '$B_LENS_RULE'" \
+    || fail "B[lens-contract] the Phase 2 contract omits '$B_LENS_RULE'"
+done
+grep -q 'output FORMAT' <<<"$B_LENS_CONTRACT" \
+  && pass "B[lens-contract] the Phase 2 override is scoped to FORMAT, not to the secret-leak rule" \
+  || fail "B[lens-contract] the Phase 2 override must scope itself to FORMAT explicitly"
 
 assert_stage lens-stage-simplify-cmd "$SIMPLIFY_CMD" 'stage=simplify' simplify simplify 3 review-fleet-simplify.launched
 assert_stage lens-stage-review-cmd "$REVIEW_CMD" 'stage=simplify' review-pr simplify 3 review-fleet-simplify.launched
@@ -2233,7 +2265,7 @@ fi
 # `env -i`, for the same reason every E row is: an env-passing probe masks the
 # whole fence-scoped-state class it exists to catch.
 echo
-echo "== L: the six cross-fence carriers of the #427 follow-up =="
+echo "== L: the cross-fence carriers of the #427 follow-up (six, plus #479's seventh) =="
 
 L_TMP="$TMP/locks"
 mkdir -p "$L_TMP"
@@ -2279,7 +2311,12 @@ l_anchor() {  # NAME TOKEN
     || L_ANCHOR_MISS="$L_ANCHOR_MISS $1(body-too-short)"
 }
 l_anchor scope   'review_fleet_write_review_base'
-l_anchor capture 'post_review_validated_evidence_complete'
+# Re-anchored off `post_review_validated_evidence_complete` (#481): Phase 2 now
+# calls the same builder from its OWN fence, so that token names two fences and
+# `l_extract` would refuse both. This token names the Phase 1 validated-ledger
+# path, sits inside the same 4w.2 fence, and predates the change — so every
+# L-row below still reads byte-identical bytes.
+l_anchor capture 'review-fleet-review.validated'
 l_anchor gate    'project-verification-claims'
 l_anchor publish 'review-fleet-verify-opinions-iter'
 
@@ -2580,7 +2617,21 @@ L_RUN_PR=4271
 L_FIXTURE_OUT="$(bash "$REPO_ROOT/tests/_lib_review_run_fixture.sh" --make-run \
   "$L_FIXTURE" "$REPO_ROOT/plugins/uberdev" "$L_RUN_PR" "$L_RUN_ID" 2>"$L_TMP/fixture.err")" || L_FIXTURE_OUT=''
 L_REPO="$(printf '%s\n' "$L_FIXTURE_OUT" | sed -n 1p)"
+L_RESEARCH_DIR="$(printf '%s\n' "$L_FIXTURE_OUT" | sed -n 3p)"
 L_RUN_DIR="$(printf '%s\n' "$L_FIXTURE_OUT" | sed -n 4p)"
+
+# The head this fixture run stands on, recorded exactly the way the Phase 1
+# scope fence records it (#479) — through the typed writer, before EITHER entry
+# path is probed. Position is deliberate: L5 compares the two environments as
+# they are captured below, so a carrier absent from the fixture is a carrier L5
+# cannot see, and L7 needs a record that predates the shells it probes from.
+L7_SEED=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+L7_FIXED=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+if [ -z "$L_RESEARCH_DIR" ] || ! env -i PATH="$PATH" HOME="${HOME:-$TMP}" bash -c \
+     '. "$1"; review_fleet_write_reviewed_head "$2" "$3"' \
+     _ "$ARGS_LIB" "$L_RESEARCH_DIR/reviewed-head.txt" "$L7_SEED" 2>"$L_TMP/l7.write.err"; then
+  L7_SEED=''
+fi
 
 # l_probe SEED_FILE CWD SNIPPET — rehydrate in a shell that inherited NOTHING
 # but SEED_FILE, then run SNIPPET. Output in $L_PROBE_OUT, rc in $L_PROBE_RC.
@@ -2769,8 +2820,13 @@ fi
 # The comparison is over NAMES and emptiness, not values: the two paths resolve
 # the same run, so any name present on one side and absent on the other is the
 # defect, and any name present-but-empty is it wearing the other face.
+#
+# The two head carriers (#479) joined the universe with their record: the fast
+# path returned before the reviewed-head recovery ran, so once the scope fence
+# started recording the seed, WHICH fence a child was dispatched from decided
+# whether it inherited the head of the review at all.
 # ---------------------------------------------------------------------------
-L_CARRIER_UNIVERSE="UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH UBERDEV_CARRIER_RUN_DIR STANDALONE_SNAPSHOT_PATH PR_NUMBER"
+L_CARRIER_UNIVERSE="UBERDEV_REVIEW_PLUGIN_ROOT CODE_FIXER_CONTRACT RUN_ID MARKER_DIR WORKTREE_ROOT RESEARCH_DIR_ABS UBERDEV_COMMAND_WORKSPACE_JSON DIFF_ARTIFACT_PATH CRITERIA_PATH COMMIT_RANGE_PATH PHASE1_DISPOSITION_PATH PHASE2_DISPOSITION_PATH AGG_PATH UBERDEV_CARRIER_RUN_DIR STANDALONE_SNAPSHOT_PATH PR_NUMBER VALIDATED_FIXER_HEAD_SHA REVIEWED_HEAD_SHA"
 l_carrier_report() {  # ENV_FILE OUT
   awk -v names="$L_CARRIER_UNIVERSE" '
     BEGIN { count = split(names, wanted, " "); for (i = 1; i <= count; i++) keep[wanted[i]] = 1 }
@@ -2823,6 +2879,139 @@ if [ "$L6_RC" = 0 ] && [ "$L6_OUT" = "$L6_WANT" ]; then
   pass "L6 a rule document under .claude/ stays on the allowlist while .claude/worktrees copies stay off it"
 else
   fail "L6 the rule-source prune drops .claude/ wholesale or admits a sibling worktree (rc=$L6_RC): '$(printf '%s' "$L6_OUT" | tr '\n' '|')'"
+fi
+
+# ---------------------------------------------------------------------------
+# L7 — the reviewed head is SEEDED on disk by the Phase 1 scope fence (#479).
+#
+# THE DEFECT: `review_track_validated_fixer_head` opens with
+# `[ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76`, and the only
+# thing that ever bound the left-hand side of that comparison was
+# `VALIDATED_FIXER_HEAD_SHA="$REVIEWED_HEAD_SHA"` in the Phase 1 scope fence — a
+# dead shell by the time the promote fence runs. `review_fleet_rehydrate`
+# recovers the value from reviewed-head.txt, but the ONLY writer of that file was
+# the APPLIED arm of the tracker itself, so on a FIRST Phase 1 entry there was
+# nothing to recover: the guard compared a real 40-hex head against the empty
+# string, returned 76, and the controller normalised that to MUTATED_BLOCKED on a
+# run whose fixer had done everything right. Same class as L1/L3 — this one just
+# had no carrier at all, and its failure accuses the repository of unreviewed
+# history instead of naming the missing record.
+#
+# Structural half: the fence that BINDS the head must also be the fence that
+# writes it down, through the typed lib writer, inside the run-dir-bound branch,
+# with the failure refused rather than shrugged off. Behavioural half: the record
+# really is what carries the seed across a process boundary — a fresh `env -i`
+# rehydrate recovers it, the tracker accepts a validated fixer commit once it is
+# there, and reproduces the exact rc 76 once it is not.
+# ---------------------------------------------------------------------------
+L7_BAD=""
+python3 -I -B - "$L_TMP/scope.fence" >"$L_TMP/l7.report" 2>"$L_TMP/l7.err" <<'PY'
+import re
+import sys
+
+BIND = re.compile(r'^\s*VALIDATED_FIXER_HEAD_SHA="\$REVIEWED_HEAD_SHA"\s*$')
+GUARD = re.compile(r'^\s*if\s+\[\s+-n\s+"\$REVIEW_BASE_RUN_DIR"\s+\]')
+WRITE = re.compile(r'review_fleet_write_reviewed_head\s+"([^"]+)"\s+"([^"]+)"')
+
+
+def is_comment(line):
+    # Full-line comments only: this fence EXPLAINS every carrier it hands
+    # forward, so counting prose that names the writer would let a fence that
+    # only documents the seed pass for one that records it.
+    return line.lstrip().startswith("#")
+
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+bind_at = next((i for i, l in enumerate(lines) if BIND.match(l)), -1)
+guard_at = next((i for i, l in enumerate(lines) if GUARD.match(l)), -1)
+writes = [i for i, l in enumerate(lines) if not is_comment(l) and WRITE.search(l)]
+write_at = writes[0] if len(writes) == 1 else -1
+target = value = ""
+refuses = "no"
+if write_at >= 0:
+    match = WRITE.search(lines[write_at])
+    target, value = match.group(1), match.group(2)
+    # The STATEMENT, not a fixed window: a `|| { ... }` arm runs to the closing
+    # brace at the write's own indent, and a window that overran it would find
+    # the NEXT carrier's refusal and call this one guarded.
+    statement = [lines[write_at]]
+    if lines[write_at].rstrip().endswith("{"):
+        indent = re.match(r"\s*", lines[write_at]).group(0)
+        close = re.compile(r"^" + re.escape(indent) + r"\}")
+        for index in range(write_at + 1, len(lines)):
+            statement.append(lines[index])
+            if close.match(lines[index]):
+                break
+    blob = "\n".join(statement)
+    if "||" in blob and re.search(r"^\s*return\s+[0-9]+", blob, re.M):
+        refuses = "yes"
+print("bind=%d" % (bind_at + 1))
+print("guard=%d" % (guard_at + 1))
+print("writes=%d" % len(writes))
+print("write=%d" % (write_at + 1))
+print("target=%s" % target)
+print("value=%s" % value)
+print("refuses=%s" % refuses)
+# Bound, then guarded by the run dir, then written: a write above the bind
+# records the PREVIOUS entry's head, and a write outside the branch aims at
+# `/reviewed-head.txt` whenever the fence runs without a run dir.
+print("ordered=%s" % ("yes" if 0 <= bind_at < guard_at < write_at else "no"))
+PY
+L7_RC=$?
+[ "$L7_RC" = 0 ] || L7_BAD="$L7_BAD scanner-rc=$L7_RC"
+[ "$(l_field "$L_TMP/l7.report" writes)" = 1 ] \
+  || L7_BAD="$L7_BAD scope-fence-writers=$(l_field "$L_TMP/l7.report" writes)"
+[ "$(l_field "$L_TMP/l7.report" ordered)" = yes ] \
+  || L7_BAD="$L7_BAD bind/rundir-guard/write-order(bind=$(l_field "$L_TMP/l7.report" bind),guard=$(l_field "$L_TMP/l7.report" guard),write=$(l_field "$L_TMP/l7.report" write))"
+case "$(l_field "$L_TMP/l7.report" target)" in
+  '$REVIEW_BASE_RUN_DIR/reviewed-head.txt'|'$RESEARCH_DIR_ABS/reviewed-head.txt') ;;
+  *) L7_BAD="$L7_BAD target='$(l_field "$L_TMP/l7.report" target)'" ;;
+esac
+[ "$(l_field "$L_TMP/l7.report" value)" = '$REVIEWED_HEAD_SHA' ] \
+  || L7_BAD="$L7_BAD value='$(l_field "$L_TMP/l7.report" value)'"
+[ "$(l_field "$L_TMP/l7.report" refuses)" = yes ] || L7_BAD="$L7_BAD silent-write-failure"
+
+# Behavioural, under `env -i`: the record is what crosses the process boundary.
+# The tracker's own stubs: the residue receipt and the ancestry/commit-count
+# probes are separate contracts with their own rows, and a real repository here
+# would make this row fail for their reasons instead of for the seed's.
+L7_TRACK='python3(){ printf "{\"status\":\"clean\"}\n"; }
+git(){
+  [ "$3" = merge-base ] && [ "$4" = --is-ancestor ] && return 0
+  [ "$3" = rev-list ] && [ "$4" = --count ] && printf "1\n" && return 0
+  return 2
+}
+review_track_validated_fixer_head APPLIED '"$L7_SEED"' '"$L7_FIXED"' '"$L7_FIXED"' >/dev/null 2>&1
+printf "%s" "$?"'
+if [ -n "$L7_SEED" ]; then
+  for l7_seed_env in seed-fast seed-resolved; do
+    if [ "$l7_seed_env" = seed-fast ]; then l7_cwd=/; else l7_cwd="$L_REPO"; fi
+    l_probe "$L_TMP/$l7_seed_env.env" "$l7_cwd" \
+      'printf "%s|%s" "${VALIDATED_FIXER_HEAD_SHA:-}" "${REVIEWED_HEAD_SHA:-}"'
+    [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = "$L7_SEED|$L7_SEED" ] \
+      || L7_BAD="$L7_BAD $l7_seed_env-recovered='$L_PROBE_OUT'(rc=$L_PROBE_RC)"
+  done
+  # With the seed on file the promote path accepts the validated commit...
+  l_probe "$L_TMP/seed-fast.env" / "$L7_TRACK"
+  [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = 0 ] \
+    || L7_BAD="$L7_BAD seeded-track-rc='$L_PROBE_OUT'(probe=$L_PROBE_RC)"
+  # ...and advancing it is itself recorded, so the NEXT fence starts where this
+  # one finished rather than back at the seed.
+  [ "$(cat "$L_RESEARCH_DIR/reviewed-head.txt" 2>/dev/null)" = "$L7_FIXED" ] \
+    || L7_BAD="$L7_BAD advance-not-recorded='$(cat "$L_RESEARCH_DIR/reviewed-head.txt" 2>/dev/null)'"
+  # Absent, it is exactly the 76 the live run hit — never a silent pass.
+  rm -f "$L_RESEARCH_DIR/reviewed-head.txt"
+  l_probe "$L_TMP/seed-fast.env" / "$L7_TRACK"
+  [ "$L_PROBE_RC" = 0 ] && [ "$L_PROBE_OUT" = 76 ] \
+    || L7_BAD="$L7_BAD unseeded-track-rc='$L_PROBE_OUT'(probe=$L_PROBE_RC)"
+  rm -f "$L_RESEARCH_DIR/reviewed-head.txt"
+else
+  L7_BAD="$L7_BAD seed-write-failed"
+fi
+if [ -z "$L7_BAD" ]; then
+  pass "L7 the Phase 1 scope fence records the reviewed head it binds, so the promote fence recovers the seed instead of refusing 76"
+else
+  fail "L7 the reviewed-head seed never reaches the promote fence:$L7_BAD"
 fi
 
 echo ""

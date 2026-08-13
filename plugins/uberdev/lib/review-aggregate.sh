@@ -237,10 +237,16 @@ except Exception:
  fail('unsafe-artifact')
 PY
 }
+# The third argument is the aggregate PHASE and defaults to `phase1`, so every
+# existing two-argument call site is byte-identical in behaviour. It exists
+# because the roster this function enforces used to be seven string literals
+# spelled out below -- an uncompared copy of lib/code_fixer_contract.py's
+# PHASE_CONTRIBUTORS, and the #370 class exactly. It is now DERIVED from that
+# module, which is why the Phase 2 roster needed no second copy here.
 post_review_capture_aggregation_inputs() {
-  python3 -I -B - "$1" "$2" "$UBERDEV_REVIEW_PLUGIN_ROOT" <<'PY'
+  python3 -I -B - "$1" "$2" "${3:-phase1}" "$UBERDEV_REVIEW_PLUGIN_ROOT" <<'PY'
 import hashlib,importlib.util,json,os,re,sys
-ledger,expected_text,plugin_root=sys.argv[1:]
+ledger,expected_text,phase,plugin_root=sys.argv[1:]
 def fail(reason):
  print(f'post_review_aggregation_failure class={reason}',file=sys.stderr)
  raise SystemExit(1)
@@ -259,6 +265,12 @@ try:
  if spec is None or spec.loader is None: fail('unsafe-artifact')
  artifacts=importlib.util.module_from_spec(spec); sys.modules[spec.name]=artifacts
  spec.loader.exec_module(artifacts)
+ contract_spec=importlib.util.spec_from_file_location(
+     'uberdev_review_aggregation_contract',os.path.join(plugin_root,'lib','code_fixer_contract.py'))
+ if contract_spec is None or contract_spec.loader is None: fail('unsafe-artifact')
+ contract=importlib.util.module_from_spec(contract_spec); sys.modules[contract_spec.name]=contract
+ contract_spec.loader.exec_module(contract)
+ if phase not in contract.PHASE_CONTRIBUTORS: fail('malformed-ledger')
  if expected<1 or expected>64 or not os.path.isabs(ledger): fail('malformed-ledger')
  ledger_name=re.fullmatch(
      r'trusted-ledger\.jsonl\.attempt-[0-9a-f]{32}-([0-9a-f]{64})',
@@ -272,12 +284,7 @@ try:
  if not ledger_text.endswith('\n') or not lines or any(not line for line in lines):
   fail('malformed-ledger')
  rows=[json.loads(line,object_pairs_hook=closed_object) for line in lines]
- allowed={
-  'review_pr.review.correctness','review_pr.review.silent_failures',
-  'review_pr.review.types','review_pr.review.comments',
-  'review_pr.review.tests','review_pr.review.general',
-  'review_pr.review.convention',
- }
+ allowed=set(contract.PHASE_CONTRIBUTORS[phase])
  if len(rows)!=expected: fail('roster-mismatch')
  ledger_parent=os.path.dirname(os.path.abspath(ledger))
  seen_edges=set(); seen_indexes=set(); captured_rows=[]
@@ -628,6 +635,17 @@ try:
      'schema_version':2,
  }
  encoded=contract.encode_aggregate(document,'phase1')
+ # The ancestor walks below live in run_manifest.py and are loaded the same way
+ # the contract is, from the same plugin root. `exec_module` gets its OWN try:
+ # the outer handler would reclassify an import failure as `malformed-input`,
+ # which points the reader at the reviewer payload instead of at the install.
+ manifest_spec=importlib.util.spec_from_file_location(
+     'uberdev_post_review_artifacts',os.path.join(plugin_root,'lib','run_manifest.py'))
+ if manifest_spec is None or manifest_spec.loader is None: fail('writer-unavailable')
+ artifacts=importlib.util.module_from_spec(manifest_spec)
+ sys.modules[manifest_spec.name]=artifacts
+ try: manifest_spec.loader.exec_module(artifacts)
+ except Exception: fail('writer-unavailable')
  # Validate the aggregate DESTINATION before publishing anything. An unusable
  # destination must refuse the whole write, not leave a cull log behind for an
  # aggregate that never existed.
@@ -636,6 +654,23 @@ try:
   fail('unsafe-output')
  parent_entry=os.stat(parent,follow_symlinks=False)
  if not stat.S_ISDIR(parent_entry.st_mode): fail('unsafe-output')
+ # ... and containment is a property of the WHOLE chain from the filesystem root
+ # down, not of one edge. The no-follow lstat above sees exactly one node, so a
+ # symlink ONE LEVEL higher -- <run>/link -> /elsewhere with <run>/link/sub a
+ # genuine directory -- satisfied every check and published outside the run
+ # directory (#468). The walks below are the whole path; the reparse walk is
+ # what catches a Windows directory junction, which is not S_ISLNK.
+ #
+ # The broad `except Exception` is the polarity, not laziness: the walks raise
+ # ManifestRejected (a ValueError) and ManifestRuntimeError (a RuntimeError),
+ # which the outer handler would report as `malformed-input` and
+ # `writer-failed` -- both naming the wrong investigation. Fail closed with
+ # THIS artifact's own class. fail() raises SystemExit, a BaseException, so it
+ # is never caught here.
+ try:
+  artifacts._reject_symlinked_ancestors(parent)
+  artifacts._reject_windows_reparse_ancestors(parent)
+ except Exception: fail('unsafe-output')
  # ---- publish the cull log FIRST (#433) ----
  # A cull is never swallowed: the filtered aggregate may not exist without the
  # artifact that says what was filtered and why. Written even when nothing was
@@ -661,15 +696,22 @@ try:
                     % (len(citation_culls)-CITATION_LOG_ROW_LIMIT))
  log_payload=('\n'.join(log_lines)+'\n').encode('utf-8')
  log_target=os.path.abspath(citation_log_path); log_parent=os.path.dirname(log_target)
- # The same no-follow shape check the aggregate destination gets above, because
- # isdir() RESOLVES a symlinked parent and would let mkstemp+os.replace publish
- # the log outside the run directory -- through content a PR can influence, since
- # the culled rows quote the rule file. Both artifacts land in one run directory
- # at one trust level, so neither may carry the weaker guard.
+ # The same no-follow shape check AND the same path-wide walks the aggregate
+ # destination gets above, because isdir() RESOLVES a symlinked parent and would
+ # let mkstemp+os.replace publish the log outside the run directory -- through
+ # content a PR can influence, since the culled rows quote the rule file. Both
+ # artifacts land in one run directory at one trust level, so neither may carry
+ # the weaker guard, and "weaker" includes seeing fewer path components: a
+ # one-node check can only ever prove the last edge of the chain, and the
+ # containment being enforced is a statement about every edge above it.
  if not os.path.isabs(citation_log_path) or not os.path.isdir(log_parent):
   fail('citation-log-unwritable')
  log_parent_entry=os.stat(log_parent,follow_symlinks=False)
  if not stat.S_ISDIR(log_parent_entry.st_mode): fail('citation-log-unwritable')
+ try:
+  artifacts._reject_symlinked_ancestors(log_parent)
+  artifacts._reject_windows_reparse_ancestors(log_parent)
+ except Exception: fail('citation-log-unwritable')
  log_descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-citations-',dir=log_parent)
  with os.fdopen(log_descriptor,'wb') as log_output:
   log_output.write(log_payload)
@@ -696,4 +738,219 @@ PY
   printf '%s' "$aggregation_input" | python3 -I -B -c "$writer_code" \
     "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT" "$rule_sources_path" \
     "$rule_root" "$changed_paths_path" "$citation_log_path"
+}
+
+# Convert the three authenticated simplify-lens snapshots into the one canonical
+# Phase 2 document (#481). Phase 2 had no writer at all: the sibling above
+# hardcodes `phase1` in three places, and its signature carries four convention-
+# gate paths Phase 2 has no convention lens for -- so a `phase2` caller could
+# neither pass the phase through nor satisfy the arguments, and `simplify-final.md`
+# (the artifact the Phase 2 fixer's authority consumes) had no producer.
+#
+# There is deliberately NO citation gate and NO cull log here. Those exist for
+# the Phase 1 convention lens, whose claim is a claim ABOUT A WRITTEN RULE and
+# therefore has a document to check it against. A simplify lens makes no such
+# claim, so a gate here would be ceremony -- and a cull log nothing ever culls
+# into would be an artifact whose presence means nothing.
+#
+# The rows arrive already normalised by uberdev_child_validate_phase2_lens_result:
+# the lens output drift (```yaml versus untagged, `findings:` mapping versus bare
+# sequence) died at that boundary, so the grammar below is deliberately small and
+# refuses everything else rather than sniffing for shape a second time.
+post_review_write_simplify_aggregate_v2() {
+  local aggregation_input="$1" aggregate_path="$2" writer_code=
+  IFS= read -r -d '' writer_code <<'PY' || :
+import hashlib,importlib.util,json,os,posixpath,re,stat,sys,tempfile
+
+(aggregate_path,plugin_root)=sys.argv[1:]
+temporary_path=None
+
+def fail(reason):
+ print(f'post_review_simplify_aggregate_failure class={reason}',file=sys.stderr)
+ raise SystemExit(1)
+
+def closed_object(pairs):
+ value={}
+ for key,item in pairs:
+  if key in value: raise ValueError('duplicate-key')
+  value[key]=item
+ return value
+
+def scalar(raw):
+ if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw):
+  raise ValueError('invalid-scalar')
+ def checked(value):
+  if (not isinstance(value,str) or not value or value.strip()!=value
+      or any(ord(char)<32 or ord(char)==127 for char in value)):
+   raise ValueError('invalid-scalar')
+  return value
+ if raw.startswith('"'):
+  return checked(json.loads(raw))
+ if raw.startswith("'"):
+  if len(raw)<2 or not raw.endswith("'"): raise ValueError('invalid-scalar')
+  inner=raw[1:-1]; value=''; index=0
+  while index<len(inner):
+   if inner[index]=="'":
+    if index+1>=len(inner) or inner[index+1]!="'": raise ValueError('invalid-scalar')
+    value+="'"; index+=2
+   else:
+    value+=inner[index]; index+=1
+  return checked(value)
+ if raw[0] in '-?:,[]{}#&*!|>@`' or ': ' in raw or ' #' in raw:
+  raise ValueError('invalid-scalar')
+ if re.fullmatch(r'(?i:null|true|false|~|[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]+)?(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan))',raw):
+  raise ValueError('invalid-scalar')
+ return checked(raw)
+
+def parse_lens(content):
+ match=re.fullmatch(r'\s*```yaml[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',content,re.S)
+ if match is None: raise ValueError('invalid-lens')
+ findings_mode=None; findings=[]; current=None
+ for line in match.group(1).splitlines():
+  if not line.strip(): continue
+  found=re.fullmatch(r'findings:[ \t]*(\[\])?',line)
+  if found:
+   if findings_mode is not None: raise ValueError('invalid-lens')
+   findings_mode='empty' if found.group(1) else 'rows'
+   continue
+  severity=re.fullmatch(r'  - severity:[ \t]*(blocker|suggestion)',line)
+  if severity and findings_mode=='rows':
+   if current is not None: findings.append(current)
+   current={'severity':severity.group(1)}
+   continue
+  field=re.fullmatch(r'    (location|summary|detail):[ \t]*(\S(?:.*\S)?)',line)
+  if field and findings_mode=='rows' and current is not None:
+   key,value=field.groups(); value=scalar(value)
+   if key in current: raise ValueError('invalid-lens')
+   current[key]=value
+   continue
+  raise ValueError('invalid-lens')
+ if current is not None: findings.append(current)
+ if findings_mode is None: raise ValueError('invalid-lens')
+ if findings_mode=='empty' and findings: raise ValueError('invalid-lens')
+ if findings_mode=='rows' and not findings: raise ValueError('invalid-lens')
+ for finding in findings:
+  if set(finding)!={'severity','location','summary','detail'}:
+   raise ValueError('invalid-lens')
+ return findings
+
+def scope(location):
+ if not isinstance(location,str) or re.fullmatch(r'.+:[1-9][0-9]*',location) is None:
+  raise ValueError('invalid-location')
+ path,line_text=location.rsplit(':',1)
+ parts=path.split('/')
+ if (path.startswith('/') or re.match(r'^[A-Za-z]:',path) or '\\' in path
+     or any(part in {'','.','..'} for part in parts) or parts[0]=='.git'
+     or posixpath.normpath(path)!=path):
+  raise ValueError('invalid-location')
+ return {'line':int(line_text),'operation':'modify_existing','path':path}
+
+def display(edge):
+ # The lens DISPLAY name, not the edge id. `/simplify` Phase 3 specifies
+ # lens-prefixed ` | ` segments, and the byte oracle encodes
+ # "Reuse: ... | Quality: ...". The Phase 1 writer prefixes with the full edge
+ # id instead; that divergence is in the two documents, not an oversight.
+ return edge.rsplit('.',1)[1].capitalize()
+
+try:
+ spec=importlib.util.spec_from_file_location(
+     'uberdev_code_fixer_contract',os.path.join(plugin_root,'lib','code_fixer_contract.py'))
+ if spec is None or spec.loader is None: fail('writer-unavailable')
+ contract=importlib.util.module_from_spec(spec); sys.modules[spec.name]=contract
+ spec.loader.exec_module(contract)
+ contributor_ids=list(contract.PHASE_CONTRIBUTORS['phase2'])
+ captured=json.loads(sys.stdin.buffer.read().decode('utf-8'),object_pairs_hook=closed_object)
+ if (type(captured) is not dict
+     or set(captured)!={'ledger_sha256','rows','schema_version'}
+     or captured.get('schema_version')!=1
+     or re.fullmatch(r'[0-9a-f]{64}',captured.get('ledger_sha256','')) is None
+     or type(captured.get('rows')) is not list
+     or len(captured['rows'])!=len(contributor_ids)):
+  fail('malformed-input')
+ finding_groups={}; finding_order=[]
+ for index,(row,edge) in enumerate(zip(captured['rows'],contributor_ids),1):
+  if (type(row) is not dict
+      or set(row)!={'content','edge','index','instance','sha256'}
+      or row.get('edge')!=edge or row.get('index')!=index
+      or not isinstance(row.get('content'),str)
+      or not isinstance(row.get('instance'),str)
+      or re.fullmatch(r'[0-9a-f]{64}',row.get('sha256','')) is None
+      or hashlib.sha256(row['content'].encode('utf-8')).hexdigest()!=row['sha256']):
+   fail('roster-mismatch')
+  try: lens_findings=parse_lens(row['content'])
+  except ValueError: fail('invalid-lens')
+  # One lens, one observation per location. Grouping below merges ACROSS
+  # lenses on purpose; a location repeated WITHIN one lens is a malformed
+  # contribution, and silently folding it would double that lens's prefix in
+  # the joined summary while `source_edges` still named it once.
+  seen_in_lens=set()
+  for finding in lens_findings:
+   try: finding_scope=scope(finding['location'])
+   except ValueError: fail('invalid-location')
+   scope_key=(finding_scope['path'],finding_scope['line'])
+   if scope_key in seen_in_lens: fail('malformed-input')
+   seen_in_lens.add(scope_key)
+   if scope_key not in finding_groups:
+    finding_groups[scope_key]={'observations':[],'scope':finding_scope}
+    finding_order.append(scope_key)
+   finding_groups[scope_key]['observations'].append({
+       'detail':finding['detail'],
+       'edge':edge,
+       'severity':finding['severity'],
+       'summary':finding['summary'],
+   })
+ findings=[]
+ for scope_key in finding_order:
+  group=finding_groups[scope_key]; observations=group['observations']
+  # First-seen while walking rows in ROSTER order, so this list already
+  # satisfies _validate_aggregate's `sorted(source_edges, key=roster_order)`
+  # requirement without a second sort that could disagree with the merge order.
+  source_edges=[]
+  for observation in observations:
+   if observation['edge'] not in source_edges:
+    source_edges.append(observation['edge'])
+  findings.append({
+      'detail':(observations[0]['detail'] if len(observations)==1 else
+                ' | '.join(f"{display(item['edge'])}: {item['detail']}" for item in observations)),
+      'scope':group['scope'],
+      'severity':('blocker' if any(item['severity']=='blocker' for item in observations)
+                  else 'suggestion'),
+      'source_edges':source_edges,
+      'summary':(observations[0]['summary'] if len(observations)==1 else
+                 ' | '.join(f"{display(item['edge'])}: {item['summary']}" for item in observations)),
+  })
+ document={
+     'contributors':[{'confidence':'n/a','id':edge,'verdict':'COMPLETE'}
+                     for edge in contributor_ids],
+     'findings':findings,
+     'phase':'phase2',
+     'schema_version':2,
+ }
+ encoded=contract.encode_aggregate(document,'phase2')
+ target=os.path.abspath(aggregate_path); parent=os.path.dirname(target)
+ if not os.path.isabs(aggregate_path) or not os.path.isdir(parent):
+  fail('unsafe-output')
+ # No-follow on purpose: isdir() RESOLVES a symlinked parent, which would let
+ # mkstemp+os.replace publish this aggregate outside the run directory.
+ parent_entry=os.stat(parent,follow_symlinks=False)
+ if not stat.S_ISDIR(parent_entry.st_mode): fail('unsafe-output')
+ descriptor,temporary_path=tempfile.mkstemp(prefix='.post-review-simplify-v2-',dir=parent)
+ with os.fdopen(descriptor,'wb') as output:
+  output.write(encoded)
+  output.flush(); os.fsync(output.fileno())
+ if os.name!='nt': os.chmod(temporary_path,0o600)
+ os.replace(temporary_path,target); temporary_path=None
+except SystemExit:
+ raise
+except (OSError,UnicodeError,ValueError,TypeError,json.JSONDecodeError):
+ fail('malformed-input')
+except Exception:
+ fail('writer-failed')
+finally:
+ if temporary_path is not None:
+  try: os.unlink(temporary_path)
+  except OSError: pass
+PY
+  printf '%s' "$aggregation_input" | python3 -I -B -c "$writer_code" \
+    "$aggregate_path" "$UBERDEV_REVIEW_PLUGIN_ROOT"
 }

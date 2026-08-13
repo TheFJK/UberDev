@@ -9,6 +9,7 @@
     "issue_num",
     "run_id",
     "iteration",
+    "plan_scope",
     "wave_id",
     "task_id",
     "lens",

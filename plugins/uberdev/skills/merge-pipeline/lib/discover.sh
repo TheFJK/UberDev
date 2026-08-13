@@ -261,19 +261,38 @@ case "$UBERDEV_DISCOVERY_WIRE_LIMIT" in
   ''|*[!0-9]*|0) UBERDEV_DISCOVERY_WIRE_LIMIT=200 ;;
 esac
 
-# discover_multi INTEGRATION_BRANCH
-# Stdout: JSON array of candidate PRs (or '[]' on failure — Step 1.7's
-#         clean-exit-0 contract still applies).
-# Exit:   0 always (gh-or-jq failure → '[]' + audit event).
+# discover_open_prs [AUDIT_STEP]
+# Stdout: JSON array of EVERY open non-draft PR in the repository, un-rooted
+#         (or '[]' on failure).
+# Exit:   0 always (gh failure → '[]' + audit event).
 # Stderr: warning on failure; a saturation breadcrumb when the wire window fills.
-# Audit:  discovery_gh_failed with step="1.2.5" on failure.
-# Implementation: gh's in-process --jq filter does the isDraft==false
-# belt-and-suspenders filter; no external jq pipe. The base-branch filter is
-# then applied in process by _uberdev_discover_stack_filter (#437) — see that
-# function for why it cannot stay on the wire, and DISCOVERY_WIRE_LIMIT for why
-# the explicit --limit is load-bearing once the filter moves off the wire.
-discover_multi() {
-  local integration_branch="$1"
+# Audit:  discovery_gh_failed with step=AUDIT_STEP (default "1.2.5") on failure.
+#
+# WHY THIS IS SEPARATE FROM discover_multi (#470). /uberdev:review-pr's Phase 0
+# consolidation offer has to show the operator every open PR in the repo,
+# INCLUDING ones on a base the current branch's PR has no relationship to —
+# that visibility is the whole point of the prompt, because a set spanning
+# `main` and `release/2.0` is exactly the set a user should be able to decline
+# before anything is combined. `discover_multi` cannot answer that question: its
+# job is to ROOT the candidate set on an integration branch (#437's transitive
+# stack closure), so an off-root PR is dropped by construction and the offer
+# would silently hide it.
+#
+# So the fetch and the rooting are two functions rather than one, and
+# `discover_multi` is DEFINED as this function plus the rooting step. Copying
+# the `gh pr list` invocation into a second site instead would have re-created
+# the drift class this library exists to kill: the wire window
+# (DISCOVERY_WIRE_LIMIT), the 12-field projection and the `--search draft:false`
+# / `--jq select(.isDraft==false)` belt-and-suspenders pair would each have had
+# two uncompared copies, and #437's whole lesson is that a wire-level narrowing
+# nobody re-checks is unfixable downstream.
+#
+# AUDIT_STEP is a parameter, not a constant, because the step number names the
+# CALLER's position in its own pipeline: /merge's discovery is Step 1.2.5, and a
+# Phase 0 review-pr caller is not in /merge's pipeline at all. It defaults to
+# "1.2.5" so /merge's existing audit shape is unchanged.
+discover_open_prs() {
+  local audit_step="${1:-1.2.5}"
   local gh_err
   gh_err="$(mktemp)"
   # No trap — see the release note in discover_bare_fast_path (#401): `RETURN` is
@@ -292,7 +311,17 @@ discover_multi() {
 
   if [ "$gh_exit" -ne 0 ]; then
     _uberdev_discover_warn "multi-discover failed" "$gh_exit" "$gh_err"
-    _uberdev_discover_emit_audit "gh_failed" "1.2.5" "$gh_exit" "$gh_err"
+    _uberdev_discover_emit_audit "gh_failed" "$audit_step" "$gh_exit" "$gh_err"
+    printf '[]\n'
+    rm -f "$gh_err"
+    return 0
+  fi
+
+  # Empty stdout on a 0-exit gh is unexpected (gh's own --jq would have errored
+  # rather than printing nothing). Treat it as jq_failed and fall back to '[]'.
+  if [ -z "$result" ]; then
+    _uberdev_discover_warn "multi-discover returned empty stdout" "$gh_exit" "$gh_err"
+    _uberdev_discover_emit_audit "jq_failed" "$audit_step" "$gh_exit" "$gh_err"
     printf '[]\n'
     rm -f "$gh_err"
     return 0
@@ -315,6 +344,38 @@ discover_multi() {
       ;;
   esac
 
+  printf '%s\n' "$result"
+  rm -f "$gh_err"
+  return 0
+}
+
+# discover_multi INTEGRATION_BRANCH
+# Stdout: JSON array of candidate PRs (or '[]' on failure — Step 1.7's
+#         clean-exit-0 contract still applies).
+# Exit:   0 always (gh-or-jq failure → '[]' + audit event).
+# Stderr: warning on failure; a saturation breadcrumb when the wire window fills.
+# Audit:  discovery_gh_failed with step="1.2.5" on failure.
+# Implementation: the fetch is discover_open_prs (one wire query, one window,
+# one projection — see that function for why it is not inlined here); gh's
+# in-process --jq filter does the isDraft==false belt-and-suspenders filter, so
+# no external jq pipe. The base-branch filter is then applied in process by
+# _uberdev_discover_stack_filter (#437) — see that function for why it cannot
+# stay on the wire, and DISCOVERY_WIRE_LIMIT for why the explicit --limit is
+# load-bearing once the filter moves off the wire.
+# NO mktemp here, deliberately. This function no longer talks to `gh`, so it
+# has no gh stderr to capture and nothing to release on a return path — the
+# capture (and its explicit #401 release discipline) lives one level down, in
+# discover_open_prs. The only failure this function can still originate is a
+# stack-filter jq failure, which produces no gh stderr at all; `/dev/null` says
+# that honestly instead of an always-empty temp file pretending otherwise.
+discover_multi() {
+  local integration_branch="$1"
+
+  local result
+  # Failure inside the fetch has already been warned about and audited under
+  # step 1.2.5, and arrives here as the two-character string '[]'.
+  result="$(discover_open_prs "1.2.5")"
+
   # Apply the base filter in process (#437). Runs on bytes gh already produced
   # through its own in-process --jq, so this is a herestring read of a clean
   # string, not a pipe off gh's stdout — the R1 FD-pollution surface is not
@@ -323,19 +384,17 @@ discover_multi() {
   # went wrong" and never "no candidates".
   result="$(_uberdev_discover_stack_filter "$integration_branch" "$result")"
 
-  # Empty stdout on a 0-exit gh is unexpected (jq identity on empty would
-  # have errored); a stack-filter failure lands here too (jq exits non-zero
-  # and prints nothing). Treat both as jq_failed and fall back to '[]'.
+  # A stack-filter failure lands here (jq exits non-zero and prints nothing).
+  # Treat it as jq_failed and fall back to '[]'. The gh-side empty-stdout case
+  # is caught one level down, inside discover_open_prs, under the same reason.
   if [ -z "$result" ]; then
-    _uberdev_discover_warn "multi-discover returned empty stdout" "$gh_exit" "$gh_err"
-    _uberdev_discover_emit_audit "jq_failed" "1.2.5" "$gh_exit" "$gh_err"
+    _uberdev_discover_warn "multi-discover stack filter returned empty stdout" "0" "/dev/null"
+    _uberdev_discover_emit_audit "jq_failed" "1.2.5" "0" "/dev/null"
     printf '[]\n'
-    rm -f "$gh_err"
     return 0
   fi
 
   printf '%s\n' "$result"
-  rm -f "$gh_err"
   return 0
 }
 

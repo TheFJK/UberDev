@@ -368,57 +368,168 @@ review_assert_selected_pr_head() {
   [ "$live_head" = "$expected_head" ] && [ "$local_head" = "$expected_head" ]
 }
 
-review_publish_same_repo_pr_head() {
-  [ "$#" -eq 7 ] || return 2
-  local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_remote_head_sha="${@:3:1}" publish_sha="${@:4:1}"
-  local worktree_root="${@:5:1}" contract_helper="${@:6:1}" evidence_dir="${@:7:1}"
-  local live_identity live_head live_branch live_cross_repository live_head_repo extra
-  local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
+# BEGIN review-pr-head-identity-v1
+# review_pr_head_identity REPO_SLUG PR_NUMBER
+#
+# Prints the PR's head identity on stdout, ONE FIELD PER LINE:
+#
+#     <headRefOid>
+#     <headRefName>
+#     <isCrossRepository>
+#     <headRepositoryOwner.login>/<headRepository.name>
+#
+#   rc 0   gh answered and the projection is well-formed
+#   rc 80  gh NEVER ANSWERED -- every attempt died at the transport
+#          (`net/http: TLS handshake timeout`, an auth expiry, a rate limit).
+#          The identity is UNKNOWN, and "unknown" is a claim about GitHub's
+#          reachability, not about this repository. rc 79 is the second claim;
+#          a caller that cannot tell them apart tells the operator the wrong
+#          thing about which recovery to attempt (#482).
+#   rc 79  gh ANSWERED, but with a projection this gate will not route: short,
+#          over-long, an empty field, or a head that is not a 40-hex object.
+#   rc 2   malformed argument; gh is never invoked
+#
+# WHY A RETRY (#482). One TLS handshake timeout on one of the several gh calls
+# a publication makes used to end the run. The same flakiness hit three further
+# gh calls in the session this was found in, so the blip is not rare enough to
+# spend a whole review cycle on. `PR_IDENTITY_ATTEMPTS = 3` and
+# `PR_IDENTITY_INTERVAL_SEC = 3` are declared HERE as numeric literals, exactly
+# like the 6c.1 `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` constants -- bash does
+# not dereference prose.
+#
+# WHY ONE HELPER. The pre-push and post-push probes each used to carry a byte
+# identical copy of this projection, with a comment asking the next editor to
+# keep the two in step by hand. One definition cannot drift from itself.
+#
+# The head-repository identity is `headRepositoryOwner.login` +
+# `headRepository.name`, NEVER `headRepository.nameWithOwner` (#429). gh
+# DECLARES that last field and never populates it -- gh 2.83.1:
+#
+#     gh pr view 422 --repo TheFJK/UberDev --json headRepository
+#     {"headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""}}
+#
+# A gate keyed on the empty string can never pass, which turned "refuse forks"
+# into "refuse everything": every /review-pr run exited 2 at publication, so no
+# PR could ever obtain a trust trail and /merge gated all of them out. The
+# owner/name composite is populated for every PR, fork and same-repo alike.
+# Same resolution as `lib/review-push-target.sh` -- keep the two in step.
+review_pr_head_identity() {
+  [ "$#" -eq 2 ] || return 2
+  local repo_slug="${@:1:1}" pr_number="${@:2:1}"
+  local attempt=0 identity head_oid head_branch cross_repository head_repo extra
   [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
   [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
-  [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
-  [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
-  # The head-repository identity is `headRepositoryOwner.login` +
-  # `headRepository.name`, NEVER `headRepository.nameWithOwner` (#429).
-  # gh DECLARES that last field and never populates it -- gh 2.83.1:
-  #
-  #     gh pr view 422 --repo TheFJK/UberDev --json headRepository
-  #     {"headRepository":{"id":"R_kgDOSOF5tw","name":"UberDev","nameWithOwner":""}}
-  #
-  # A gate keyed on the empty string can never pass, which turned "refuse
-  # forks" into "refuse everything": every /review-pr run exited 2 here and
-  # at the trust-trail anchor push below, so no PR could ever obtain a trail
-  # and /merge gated all of them out. The owner/name composite is populated
-  # for every PR, fork and same-repo alike. Same resolution as
-  # `lib/review-push-target.sh`, which had this fix from the start and was
-  # wired into ONE call site only -- keep the two in step.
-  #
+  while :; do
+    attempt=$((attempt + 1))
+    identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
+         --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
+         --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
+               ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
+         2>/dev/null)" && break
+    if [ "$attempt" -ge 3 ]; then
+      echo "error: gh did not answer for $repo_slug#$pr_number in 3 attempts; the live PR head is UNKNOWN, which is not the same finding as a head that disagrees" >&2
+      return 80
+    fi
+    sleep 3
+  done
   # One field per LINE, not one tab-separated line. Tab is IFS whitespace, so
   # a tab-joined projection with an empty field COLLAPSES under `read`: the
   # fields shift left and a malformed identity parses as a well-formed
   # DIFFERENT one. Line-per-field cannot shift -- git refuses a ref name
   # containing a newline, so a stray newline can only make the projection
   # over-long, which the trailing read refuses.
-  live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
-       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
-       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
-             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
-       2>/dev/null)" || return 79
+  {
+    IFS= read -r head_oid || return 79
+    IFS= read -r head_branch || return 79
+    IFS= read -r cross_repository || return 79
+    IFS= read -r head_repo || return 79
+    if IFS= read -r extra; then return 79; fi
+  } <<<"$identity"
+  [[ "$head_oid" =~ ^[0-9a-f]{40}$ ]] || return 79
+  [ -n "$head_branch" ] && [ -n "$cross_repository" ] && [ -n "$head_repo" ] || return 79
+  printf '%s\n%s\n%s\n%s\n' "$head_oid" "$head_branch" "$cross_repository" "$head_repo"
+}
+# END review-pr-head-identity-v1
+# BEGIN review-publish-settle-v1
+# review_settle_live_pr_head REPO_SLUG PR_NUMBER PUBLISHED_SHA PRE_PUSH_SHA
+#
+# Re-projects the live PR head until GitHub reports PUBLISHED_SHA, then prints
+# the settled identity -- the same four lines `review_pr_head_identity` prints.
+#
+#   rc 0   the live PR head is PUBLISHED_SHA
+#   rc 79  a REAL refusal, one of two shapes:
+#          - the live head is a THIRD object, neither the sha just pushed nor
+#            the sha that was there before it. Some other writer owns the
+#            branch; no amount of waiting makes that agree, so it is refused on
+#            the FIRST answer rather than after the window.
+#          - the settle budget expired with GitHub still serving the pre-push
+#            head.
+#   rc 80  gh never answered (propagated verbatim from review_pr_head_identity)
+#   rc 2   malformed argument
+#
+# WHY (#482). `git push` exiting 0 and `ls-remote` agreeing prove the object is
+# ON the remote ref. GitHub's API view of that same ref is a SEPARATE, eventually
+# consistent projection: for the first seconds after a push, `gh pr view --json
+# headRefOid` still serves the pre-push oid. Reading it once, immediately after
+# the push, is a race -- and on TheFJK/WAGYAI PR #657 the gate lost it and
+# refused a publication that had in fact landed, telling the operator publication
+# had failed about a branch the remote had already moved. That is the reading
+# that invites a reset or a force-push. Same class as the 6c.1 PROBE arm's
+# `CI_SETTLE_AGE_SEC` / `CI_SETTLE_REPROBES` window, same remedy.
+# `PUBLISH_SETTLE_ATTEMPTS = 5`, `PUBLISH_SETTLE_INTERVAL_SEC = 4`.
+#
+# The loop re-probes the API and NEVER re-pushes: a second push would spawn a
+# duplicate CI check set while `test.yml` has no concurrency group (#302/#309).
+review_settle_live_pr_head() {
+  [ "$#" -eq 4 ] || return 2
+  local repo_slug="${@:1:1}" pr_number="${@:2:1}" published_sha="${@:3:1}" pre_push_sha="${@:4:1}"
+  local attempt=0 identity live_head
+  [[ "$published_sha" =~ ^[0-9a-f]{40}$ && "$pre_push_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+  while :; do
+    attempt=$((attempt + 1))
+    identity="$(review_pr_head_identity "$repo_slug" "$pr_number")" || return $?
+    live_head="${identity%%$'\n'*}"
+    if [ "$live_head" = "$published_sha" ]; then
+      printf '%s\n' "$identity"
+      return 0
+    fi
+    if [ "$live_head" != "$pre_push_sha" ]; then
+      echo "error: $repo_slug#$pr_number reports head $live_head -- neither the published $published_sha nor the pre-push $pre_push_sha. A concurrent writer owns the branch, so this is a disagreement and not a propagation delay; waiting cannot resolve it" >&2
+      return 79
+    fi
+    if [ "$attempt" -ge 5 ]; then
+      echo "error: $repo_slug#$pr_number still reports the pre-push head $pre_push_sha after 5 probes across the settle window" >&2
+      return 79
+    fi
+    sleep 4
+  done
+}
+# END review-publish-settle-v1
+review_publish_same_repo_pr_head() {
+  [ "$#" -eq 7 ] || return 2
+  local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_remote_head_sha="${@:3:1}" publish_sha="${@:4:1}"
+  local worktree_root="${@:5:1}" contract_helper="${@:6:1}" evidence_dir="${@:7:1}"
+  local live_identity live_head live_branch live_cross_repository live_head_repo settle_rc
+  local remote_identity remote_head remote_ref remote_extra observed_head residue_receipt
+  [[ "$repo_slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 2
+  [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "$expected_remote_head_sha" =~ ^[0-9a-f]{40}$ && "$publish_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
+  [[ "$worktree_root" = /* && "$contract_helper" = /* && "$evidence_dir" = /* ]] || return 2
+  # Pre-push probe. rc is propagated rather than flattened to 79: `$?` here is
+  # 80 when gh never answered, and the caller's operator-facing message depends
+  # on being able to tell that from a head that disagrees (#482).
+  live_identity="$(review_pr_head_identity "$repo_slug" "$pr_number")" || return $?
+  # FOUR reads, not five. The helper prints exactly four lines and refuses a
+  # projection of any other arity itself, so the over-length read that used to
+  # sit here has moved rather than gone: it now guards both probes from one
+  # place instead of being re-stated at each.
   {
     IFS= read -r live_head || return 79
     IFS= read -r live_branch || return 79
     IFS= read -r live_cross_repository || return 79
     IFS= read -r live_head_repo || return 79
-    if IFS= read -r extra; then return 79; fi
   } <<<"$live_identity"
   [ "$live_head" = "$expected_remote_head_sha" ] || return 79
-  # No `[ -z "$extra" ]` here, and its absence is not an oversight: with
-  # line-per-field, over-length is refused INSIDE the read block above, which
-  # returns 79 the moment a fifth line exists. A trailing emptiness test on
-  # `extra` is therefore unreachable-false -- it can only ever be reached
-  # when `extra` is already empty. The tab-joined form it replaced DID need
-  # it, because there a fifth field arrived on the same single line and the
-  # read could not refuse it.
   [ -n "$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
   git -C "$worktree_root" check-ref-format --branch "$live_branch" >/dev/null 2>&1 || return 79
   observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
@@ -433,24 +544,32 @@ review_publish_same_repo_pr_head() {
   [[ "$remote_identity" != *$'\n'* ]] || return 79
   IFS=$'\t' read -r remote_head remote_ref remote_extra <<<"$remote_identity" || return 79
   [ "$remote_head" = "$publish_sha" ] && [ "$remote_ref" = "refs/heads/$live_branch" ] && [ -z "$remote_extra" ] || return 79
-  # Post-push re-projection. Same owner/name composite and same
-  # line-per-field read as the pre-push probe above (#429) -- the two must
-  # never drift, since this one is what proves the ref we just wrote is still
-  # the PR's head in the repository we think it is.
-  live_identity="$(gh pr view "$pr_number" --repo "$repo_slug" \
-       --json headRefOid,headRefName,isCrossRepository,headRepository,headRepositoryOwner \
-       --jq '.headRefOid, .headRefName, (.isCrossRepository | tostring),
-             ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // ""))' \
-       2>/dev/null)" || return 79
+  # Post-push re-projection, THROUGH THE SETTLE WINDOW (#482). This is the proof
+  # that the ref we just wrote is still the PR's head in the repository we think
+  # it is -- but GitHub's view of the ref lags the ref itself by seconds, so a
+  # single immediate read races a projection that is merely late. The settle
+  # helper waits out exactly that lag and nothing else: a third object is still
+  # refused on the first answer.
+  live_identity="$(review_settle_live_pr_head "$repo_slug" "$pr_number" "$publish_sha" "$expected_remote_head_sha")" || {
+    settle_rc=$?
+    # The operator must not be told the push failed when it did not. `git push`
+    # returned 0 and the ls-remote above proved the object is on the ref; what
+    # failed is the API-side proof. Without this line the reported failure reads
+    # as "publication failed", and the recoveries that invites -- reset, force
+    # push -- are the two that would actually lose the work.
+    echo "note: the push itself landed -- origin refs/heads/$live_branch carries $publish_sha, proved by ls-remote above. What failed is the post-push proof of GitHub's own view of that ref. Re-run /review-pr: publication is idempotent and republishes the same object. Do NOT reset or force-push this branch." >&2
+    return "$settle_rc"
+  }
   {
     IFS= read -r live_head || return 79
     IFS= read -r live_branch || return 79
     IFS= read -r live_cross_repository || return 79
     IFS= read -r live_head_repo || return 79
-    if IFS= read -r extra; then return 79; fi
   } <<<"$live_identity"
+  # Restated, not redundant: the settle helper guarantees this equality, and the
+  # gate asserting its own conjunct keeps the proof readable in one place even
+  # if the helper is ever re-pointed.
   [ "$live_head" = "$publish_sha" ] || return 79
-  # See the pre-push probe: `extra` is intentionally unassigned on success.
   [ "$remote_ref" = "refs/heads/$live_branch" ] && [ "$live_cross_repository" = false ] && [ "$live_head_repo" = "$repo_slug" ] || return 79
   observed_head="$(git -C "$worktree_root" rev-parse HEAD)" || return 79
   [ "$observed_head" = "$publish_sha" ] || return 79
@@ -580,7 +699,20 @@ review_track_validated_fixer_head() {
   residue_receipt="$(python3 -I -B "$CODE_FIXER_CONTRACT" validate-residue --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS")" || { echo "error: MUTATED_BLOCKED — fixer returned residual repository state" >&2; return 79; }
   [ "$residue_receipt" = '{"status":"clean"}' ] || { echo "error: MUTATED_BLOCKED — fixer residue receipt is malformed" >&2; return 79; }
   [[ "$before" =~ ^[0-9a-f]{40}$ && "$after" =~ ^[0-9a-f]{40}$ ]] || return 2
-  [ "$before" = "${VALIDATED_FIXER_HEAD_SHA:-}" ] || return 76
+  # ABSENT and CHANGED are the same rc and must not be the same sentence. Both
+  # are refusals -- a fixer whose starting point this process cannot vouch for is
+  # never promoted -- but one is a repository that moved under the review and the
+  # other is a record that never travelled, and the second spent a live run
+  # looking like the first (#479). The seed is written by the Phase 1 scope
+  # fence; if it is missing, that fence is where to look, not the history.
+  if [ -z "${VALIDATED_FIXER_HEAD_SHA:-}" ]; then
+    echo "error: MUTATED_BLOCKED — no reviewed-head record reached this fence (${RESEARCH_DIR_ABS:-<no research dir>}/reviewed-head.txt); the Phase 1 scope fence must seed it before any fixer is dispatched" >&2
+    return 76
+  fi
+  [ "$before" = "$VALIDATED_FIXER_HEAD_SHA" ] || {
+    echo "error: MUTATED_BLOCKED — fixer started from $before but the review stands on $VALIDATED_FIXER_HEAD_SHA" >&2
+    return 76
+  }
   case "$child_status" in
     APPLIED)
       [ "$before" != "$after" ] || return 77

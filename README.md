@@ -4,7 +4,7 @@
 
 **Personal Claude Code marketplace — opinionated GitHub-workflow slash commands.**
 
-[![Version](https://img.shields.io/badge/version-0.45.17-blue)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.46.0-blue)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8B5CF6)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Repo Agnostic](https://img.shields.io/badge/repo--agnostic-yes-success)](#configuration)
@@ -40,7 +40,7 @@ UberDev's whole personality is **parallel agent fanout**: `/issue` runs a 2-scou
 | **`/solve <issue#>`** | Runs an autonomous solver per issue as a worktree-isolated agent in the session's Workflow runtime (watch with `/workflows`). Tier-aware: trivial issues skip design; medium/large get a parallel research fan-out → spec → plan → implement chain. Detached transports remain available via `--backend=`. |
 | **`/turbo <issue#>`** | Unattended `/solve`. Same pipeline, but the brainstorm phase auto-accepts the lead agent's recommendation and Q&A is resolved against the research bundle. Use when you trust the recommendation and want issue → PR with no babysitting. |
 | **`/issue <description>`** | Creates a well-investigated, deduped, label-validated GitHub issue from a one-line ask. 2-scout fanout (codebase + triage) runs in <30 s, with conventional-commit titling and template-by-type. |
-| **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. |
+| **`/review-pr [<PR#>]`** | Comprehensive PR review using specialized agents in cap-controlled dispatch-before-wait waves — code review, simplifier, silent-failure hunter, type-design analyzer, comment analyzer, test analyzer. With more than one PR open it first offers (interactively, once) to combine them all onto a single review branch and run the pipeline once over the combined result — cheaper by a factor of N, at the cost of per-PR revert granularity and per-PR finding attribution. `--consolidate` accepts without asking; `--no-consolidate` declines permanently and wins over `--consolidate`. Never offered under `--turbo`, without a TTY, or on a chained `finish-branch` run. |
 | **`/merge [<PR#> \| --all]`** | Lands an approved PR into the integration branch — autopilot. Bare invocation auto-discovers scope: single PR for the current branch, or all eligible open PRs against `integration_branch`. Ordering, per-PR strategy, conflict resolution (one parallel agent per conflicted file), and local sync, all unattended. |
 | **`/dev <idea>`** | Prototype fast lane. Decomposes a free-text idea, builds it via parallel `Task()` subagents in-session, runs one light review, opens a PR labelled `prototype`, and auto-files a harden issue. Deliberately skips spec/plan and full `/review-pr`. Honors `--no-pr` / `--no-issue`. |
 | **`/testers`** | Read-only adversarial QA audit squad — 6 personas + 2 monitors over 3 waves; auto-detects web/api/native target; files verified findings as GitHub issues. |

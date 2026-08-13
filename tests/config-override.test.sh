@@ -2,6 +2,7 @@
 # Tests for uberdev.local.md knobs expansion.
 #
 # Sections:
+#   U0  — _isolate itself: the sandbox harness propagates the snippet's status
 #   U1  — config-read.sh exports the documented public surface
 #   U2  — uberdev_read_int_in_range: env-precedence, file fallback, default,
 #         non-integer warn, out-of-range warn, sentinel cache (one-warn-per-run)
@@ -66,23 +67,73 @@ assert_grep_in() {
 # _isolate runs a snippet in a clean PWD with a fresh HOME and an empty
 # config file (caller may overwrite). Sentinels reset by running each
 # snippet in a sub-shell.
+#
+# CONTRACT (#455): _isolate RETURNS THE SNIPPET'S EXIT STATUS, and leaves the
+# snippet's stderr in $_LAST_STDERR. Both are captured before the cleanup runs,
+# because the caller's `$?` is read immediately after the call — letting the
+# `rm -rf` be the last command makes every `[ $? -eq 0 ]` assertion in this file
+# vacuous. The U0 block below pins that contract.
 _isolate() {
   local body="$1"
-  local sandbox stderr
-  sandbox="$(mktemp -d)"
-  stderr="$(mktemp)"
+  local sandbox stderr rc
+  sandbox="$(mktemp -d)" || { echo "_isolate: mktemp -d failed" >&2; return 125; }
+  stderr="$(mktemp)"     || { rm -rf "$sandbox"; echo "_isolate: mktemp failed" >&2; return 125; }
   mkdir -p "$sandbox/.claude"
   : > "$sandbox/.claude/uberdev.local.md"
   (
-    cd "$sandbox"
+    # A failed cd would run the snippet against the real repo (and its real
+    # .claude/uberdev.local.md), so it must abort rather than mislead.
+    cd "$sandbox" || exit 124
     # shellcheck source=/dev/null
     . "$HELPER"
     eval "$body"
   ) 2>"$stderr"
+  rc=$?
   _LAST_STDERR="$(cat "$stderr")"
   rm -rf "$sandbox" "$stderr"
+  return "$rc"
 }
 
+echo "== U0: _isolate propagates the snippet's exit status =="
+# #455. Most of this file asserts through the idiom
+#
+#     _isolate '... || exit 1'
+#     [ $? -eq 0 ] && pass ... || fail ...
+#
+# which is only falsifiable if `_isolate` hands back the SNIPPET's status. When
+# the helper ends on its `rm -rf` cleanup, `$?` is that rm's status — always 0 —
+# and every such assertion silently passes no matter what the snippet did. U0 is
+# the guard on the harness itself, so the class cannot come back.
+_isolate 'exit 0'
+[ $? -eq 0 ] && pass "U0a: a succeeding snippet returns 0" \
+  || fail "U0a: a succeeding snippet did not return 0"
+
+_isolate 'exit 7'
+_u0_rc=$?
+[ "$_u0_rc" -eq 7 ] && pass "U0b: a snippet's non-zero status (7) reaches the caller" \
+  || fail "U0b: expected 7 from the snippet, got $_u0_rc — the cleanup's status is masking it"
+
+# The exact shape used by U2a-U2h, U3-U6, U9.x and I7: a failed assertion inside
+# the subshell must red its case rather than be swallowed.
+_isolate '[ "1" = "2" ] || exit 1'
+_u0_rc=$?
+[ "$_u0_rc" -eq 1 ] && pass "U0c: the '[ ... ] || exit 1' assertion idiom is falsifiable" \
+  || fail "U0c: a failing in-snippet assertion reported success (rc=$_u0_rc)"
+
+# Cleanup and stderr capture must both still happen on the non-zero path: a fix
+# that returns early would leak the sandbox and blank the only channel the
+# stderr-marker assertions (U2i-U2k, U10.x) read.
+_isolate 'echo "U0_SANDBOX=$PWD" >&2; exit 5'
+_u0_rc=$?
+_u0_sandbox="$(sed -n 's/^U0_SANDBOX=//p' <<<"$_LAST_STDERR")"
+{ [ "$_u0_rc" -eq 5 ] && [ -n "$_u0_sandbox" ]; } \
+  && pass "U0d: stderr is still captured on the failing path" \
+  || fail "U0d: stderr lost or status wrong on the failing path (rc=$_u0_rc stderr: $_LAST_STDERR)"
+{ [ -n "$_u0_sandbox" ] && [ ! -e "$_u0_sandbox" ]; } \
+  && pass "U0e: the sandbox is removed even when the snippet fails" \
+  || fail "U0e: sandbox '$_u0_sandbox' survived the failing snippet"
+
+echo
 echo "== U1: config-read.sh exports documented public surface =="
 for fn in uberdev_read_int_in_range uberdev_read_enum uberdev_read_string uberdev_read_model_routing \
           uberdev_tier_rank uberdev_tier_name uberdev_clamp_tier; do
@@ -216,11 +267,12 @@ warn_count=$(printf "%s\n" "$_LAST_STDERR" | grep -cE "fanout_concurrency.resear
 # now `^(0|[1-9][0-9]*)$`: `0` is a well-formed integer, and whether it is
 # *allowed* is the range check's job (U2k), not the grammar's.
 
-# NOTE on the assertion style below: `_isolate` ends in `rm -rf`, so `$?`
-# after it is that `rm`'s status, never the snippet's — the `[ $? -eq 0 ]`
-# idiom used by U2a-U2h can therefore never fail. These cases echo the
-# resolved value onto the captured stderr stream instead, which is the only
-# channel `_isolate` actually hands back, so they are falsifiable.
+# NOTE on the assertion style below: these cases echo the resolved value onto
+# the captured stderr stream rather than testing it inside the snippet, so a
+# red prints WHAT came back instead of only that something did not match.
+# (Historically this was the only falsifiable form at all: `_isolate` used to
+# end on its `rm -rf`, so the `[ $? -eq 0 ]` idiom of U2a-U2h could never fail.
+# #455 fixed that in the helper — both forms are live now, and U0 pins it.)
 
 # U2i: a min=0 key configured to 0 returns 0, not the default
 _isolate '
@@ -698,8 +750,8 @@ echo "== U10: review.confidence_threshold config key (#431) =="
 # The Phase 1 finding-verification gate's cutoff. Range is [0, 100] and 0 is a
 # meaningful, documented value (it disables the gate), which is exactly the
 # min=0 case U2i/U2j pin in the reader. Assertions read the resolved value off
-# the captured stderr stream — see the U2i note on why `[ $? -eq 0 ]` after
-# `_isolate` cannot fail.
+# the captured stderr stream so a red names the value that came back — see the
+# U2i note.
 _u10_read() {
   _isolate "$1"'
     out="$(uberdev_read_int_in_range review.confidence_threshold UBERDEV_REVIEW_THRESHOLD 0 100 80)"

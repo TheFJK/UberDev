@@ -1349,8 +1349,22 @@ echo "== run manifest: Windows reconciliation uses a non-signaling native probe 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import hashlib,importlib.util,pathlib,sys,tempfile
+import contextlib,hashlib,importlib.util,pathlib,shutil,sys,tempfile
 from unittest import mock
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+ FileNotFoundError, so an unlink race reds a job whose diff never touched this
+ file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 tool,semaphore,agent=sys.argv[1:]
 source=pathlib.Path(tool).read_text(encoding='utf-8')
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
@@ -1401,7 +1415,7 @@ original_parent_pid=module._native_parent_pid
 original_guarded_parent=module._windows_guarded_parent_record
 original_process_identity=module._process_identity
 try:
- with tempfile.TemporaryDirectory() as temporary:
+ with scratch_dir("crossplatform-parent-identity-") as temporary:
   root=pathlib.Path(temporary)
   for name in ('posix-direct','posix-parent','windows-direct','windows-parent'):
    (root/name).touch(mode=0o600)
@@ -1493,14 +1507,27 @@ echo
 echo "== run manifest: native Windows filesystem routing ignores mutable owner-depth models =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
-import importlib.util,pathlib,sys,tempfile
+import contextlib,importlib.util,pathlib,shutil,sys,tempfile
 from unittest import mock
+
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 
 for index,module_path in enumerate(sys.argv[1:]):
  spec=importlib.util.spec_from_file_location(f'run_manifest_windows_filesystem_{index}',module_path)
  module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
  assert spec.loader is not None; spec.loader.exec_module(module)
- with tempfile.TemporaryDirectory() as temporary:
+ with scratch_dir("crossplatform-windows-fs-") as temporary:
   candidate=pathlib.Path(temporary).resolve()/'owner-candidate'
   candidate.touch(mode=0o600)
   original_platform=module.sys.platform
@@ -1549,8 +1576,20 @@ echo "== run manifest: lease capabilities use one native-Python identity namespa
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import importlib.util,ntpath,os,pathlib,stat,sys,tempfile,types
+import contextlib,importlib.util,ntpath,os,pathlib,shutil,stat,sys,tempfile,types
 from unittest import mock
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 tool,semaphore,agent=sys.argv[1:]
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
 agent_source=pathlib.Path(agent).read_text(encoding='utf-8')
@@ -1589,7 +1628,7 @@ with mock.patch.object(module.os,'path',ntpath), \
    assert str(error)=='lease_path_traversal_rejected'
   else:
    raise AssertionError('lease traversal component was accepted')
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("crossplatform-lease-contract-") as temporary:
  root=pathlib.Path(temporary)
  lease=root/(generation+'b'*32+'.lease')
  payload=f'generation={generation}\nrun_id=windows-contract\n'.encode('ascii')
@@ -1689,7 +1728,13 @@ else
 fi
 
 owner_bridge_contract_tmp="$(mktemp -d)"
-if (
+# #469: the subshell runs OUTSIDE the `if` condition and its captured status is
+# tested, so the `set -e` it re-arms on line "set -e" below is live. A subshell
+# used AS an if-condition has errexit suppressed for its whole body (POSIX: the
+# -e setting is ignored for a command whose status is being tested), and bash
+# keeps that suppression even across an explicit `set -e` inside the subshell —
+# so every assertion above the last would be a no-op.
+(
   trap 'rm -rf "$owner_bridge_contract_tmp"' EXIT
   . "$REPO_ROOT/plugins/uberdev/lib/child-dispatch.sh"
   bridge_writer_case=closed
@@ -1716,18 +1761,20 @@ if (
       "$owner_bridge_contract_tmp"/.owner-process-output.*; do
     [ ! -e "$candidate" ] || remaining_probe="$candidate"
   done
-  [ "$closed_rc" -eq 1 ] \
-    && [ "$closed_output" = '{"error":"process_identity_parent_absent","status":"error"}' ] \
-    && [ "$extra_rc" -eq 1 ] \
-    && [ "$extra_output" = '{"error":"owner_process_identity_writer_failed","status":"error"}' ] \
-    && [ "$crlf_rc" -eq 2 ] \
-    && [ "$crlf_output" = '{"error":"owner_process_record_malformed","status":"error"}' ] \
-    && [ -z "$remaining_probe" ]
-); then
+  [ "$closed_rc" -eq 1 ] || exit 61
+  [ "$closed_output" = '{"error":"process_identity_parent_absent","status":"error"}' ] || exit 62
+  [ "$extra_rc" -eq 1 ] || exit 63
+  [ "$extra_output" = '{"error":"owner_process_identity_writer_failed","status":"error"}' ] || exit 64
+  [ "$crlf_rc" -eq 2 ] || exit 65
+  [ "$crlf_output" = '{"error":"owner_process_record_malformed","status":"error"}' ] || exit 66
+  [ -z "$remaining_probe" ] || exit 67
+)
+OWNER_BRIDGE_CONTRACT_RC=$?
+if [ "$OWNER_BRIDGE_CONTRACT_RC" -eq 0 ]; then
   echo "  PASS  owner bridge preserves safe writer failures and rejects CRLF or untrusted records"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  owner bridge leaked, rewrote status, or retained an unsafe probe"
+  echo "  FAIL  owner bridge leaked, rewrote status, or retained an unsafe probe (rc=$OWNER_BRIDGE_CONTRACT_RC; 61/63/65=closed|extra|crlf status, 62/64/66=closed|extra|crlf rendered record, 67=an unsafe probe file survived)"
   FAIL=$((FAIL + 1))
   rm -rf "$owner_bridge_contract_tmp"
 fi
@@ -2163,6 +2210,572 @@ PY
   rm -rf "$WINDOWS_PROBE_TMP"
 else
   echo "  SKIP  native Windows reconciliation runtime (non-Windows host)"
+fi
+
+echo
+echo "== hooks.json SessionStart: EXECUTE the declared command, assert the emitted contract (#461) =="
+# WHY THIS SECTION EXISTS, and why it sits at the END of the file.
+#
+# Nothing in this repo ever RAN a hook declaration. tests/docs-accuracy.test.sh
+# T8.1/T8.9 count strings inside hooks.json; the rows at the top of this file
+# grep run-hook.cmd's bytes. Both are structurally blind to the failure #461 is
+# about, which is silent by construction: the runtime picks an interpreter, the
+# interpreter cannot parse the command, and the session starts with no context
+# and no error. Upstream superpowers hit exactly that on Windows — PowerShell
+# read the quoted hook path as an expression, cmd.exe truncated on a
+# metacharacter, and the bootstrap simply never loaded. The only evidence that
+# settles it is executing the literal the runtime executes and asserting the
+# JSON contract the hook is supposed to emit.
+#
+# PLACEMENT. The `native Windows assertion block reports its own failing status`
+# row above parses THIS FILE'S SOURCE, slicing it between the first occurrence of
+# the `os.name=="nt"` gate literal and the `run_manifest.py` heredoc marker. A
+# second gate placed earlier in the file would silently redefine that slice and
+# make its assertions describe the wrong block. Everything below therefore lives
+# downstream of both split points.
+XH_HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
+XH_PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
+XH_HOOKS_DIR="$XH_PLUGIN_DIR/hooks"
+
+# ONE contract, ONE copy: the command string is READ OUT of the manifest, never
+# retyped here. A retyped literal is the "one contract, N uncompared copies"
+# drift (#370/#371) this file's own header is about — the test would keep
+# passing over a string the runtime no longer runs. Read from STDIN, never as a
+# path argument: windows-latest runs NATIVE Windows Python, which cannot resolve
+# the MSYS `/…` paths Git Bash hands it.
+# stderr is deliberately NOT silenced: if the manifest stops parsing, the
+# traceback is the diagnosis and it belongs in the CI log next to the red row.
+XH_CMD="$(python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["hooks"]["SessionStart"][0]["hooks"][0]["command"], end="")' < "$XH_HOOKS_JSON")"
+# An empty extraction would make every row below vacuously green, so it fails
+# loudly on its own rather than being inferred from a later PASS.
+assert_nonempty "$XH_CMD" \
+  "XH1a SessionStart command literal extracted from hooks.json (empty => every row below is vacuous)"
+if grep -q 'run-hook\.cmd' <<<"$XH_CMD"; then
+  echo "  PASS  XH1b the extracted literal is the run-hook.cmd polyglot invocation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH1b the extracted literal does not route through run-hook.cmd"
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; then
+  XH_NATIVE_WINDOWS=yes
+else
+  XH_NATIVE_WINDOWS=no
+fi
+if command -v jq >/dev/null 2>&1; then XH_JQ=present; else XH_JQ=absent; fi
+# Non-fatal host row, printed on EVERY platform. Without it, the skip/run
+# decision of the native-Windows arm below is inferable from the log but never
+# stated, and "no XH5 line" reads the same as "XH5 quietly did nothing".
+echo "  INFO  XH1c host uname=$(uname -s) native-windows-gate=${XH_NATIVE_WINDOWS} jq=${XH_JQ}"
+
+# --- THE CR DETECTOR, and why it is not `grep` ------------------------------
+# `grep` is DISQUALIFIED for this question on this repo's own Windows job.
+# MSYS2's grep reads in TEXT mode and strips CR before matching, so
+# `LC_ALL=C grep -q $'\r' <file>` reports "no CR" on a file that demonstrably
+# has CRs. Measured on shape-checks-windows, not inferred: the CRLF fixture
+# below reported `wc -c` = 2189 — exactly run-hook.cmd's 2126 LF bytes plus one
+# CR for each of its 63 lines, so every CR byte was written — and the cr-grep on
+# that same file returned rc=1. The same translation is visible from the other
+# side, where a `$`-anchored grep matches a CRLF-checked-out file.
+#
+# That blindness silently inverted TWO rows before it was caught: XH2 below
+# passed on windows-latest for the whole life of #494 while scanning with a
+# detector that cannot see what it scans for, and XH2d called a CR-bearing
+# checkout clean. A vacuous green is worse than a red.
+#
+# EVERY CR question in this file goes through this ONE helper. A second spelling
+# of "does this file contain CR" is how the two answers drift apart.
+#
+# python3 with BINARY stdin, because byte-exactness on that host is already
+# PROVEN by the very failure above: the producer read LF bytes through
+# `sys.stdin.buffer` and wrote CRLF through `sys.stdout.buffer` and landed on
+# 2189 exactly. CPython puts the standard streams in O_BINARY on Windows, so the
+# buffer layer does no newline translation in either direction.
+#
+# Fed by REDIRECT, never as a path argument: windows-latest runs NATIVE Windows
+# Python, which cannot resolve the MSYS `/…` paths Git Bash hands it — the same
+# reason XH1a reads hooks.json from stdin.
+#
+# rc 0 = at least one CR byte, 1 = none, 2 = not a readable file, anything else
+# = the detector itself failed. Callers MUST treat "neither 0 nor 1" as UNKNOWN
+# and fail loudly; folding it into "clean" is exactly how a census goes vacuous.
+xh_file_has_cr() {
+  [ -f "$1" ] && [ -r "$1" ] || return 2
+  python3 -I -B -c 'import sys
+raise SystemExit(0 if b"\r" in sys.stdin.buffer.read() else 1)' < "$1"
+}
+
+# XH2a — THE DETECTOR'S OWN SELF-TEST, and the row this file was missing. Every
+# CR claim below inherits this helper's correctness, so the helper is checked
+# against two fixtures whose bytes are known by construction before anything
+# uses it.
+#
+# THIS ROW FAILS ON windows-latest IF THE DETECTOR IS `grep`. That is the whole
+# point: it turns a silent, platform-specific blindness into a red row on the
+# host that has it, instead of letting it masquerade as a clean census. XH2
+# alone could never catch this — a blind detector and a genuinely clean tree
+# produce the identical "no CR found" answer, so the census agrees with its own
+# blindness. Only a fixture with a KNOWN CR can tell those two apart.
+XH_DET_TMP="$(mktemp -d)"
+# The fixtures are written through the SAME python binary-stdout path that
+# measurably produced a byte-perfect 2189-byte CRLF file on windows-latest — NOT
+# through `printf`. Whether bash's builtin emits a raw CR to a redirected fd
+# under MSYS is precisely the sort of unproven platform assumption that put the
+# grep detector here to begin with, and a fixture this row cannot vouch for is a
+# fixture that can red the job for the wrong reason.
+#
+# Sizes are then confirmed with `wc -c`, byte-exact on that host by the same
+# measurement. A `dirty` file of exactly 2 bytes therefore HAS a CR as its second
+# byte by construction, established without consulting the detector under test.
+python3 -I -B -c 'import sys; sys.stdout.buffer.write(b"A\r")' > "$XH_DET_TMP/dirty"
+python3 -I -B -c 'import sys; sys.stdout.buffer.write(b"A")'   > "$XH_DET_TMP/clean"
+XH_DET_DIRTY_SIZE="$(wc -c < "$XH_DET_TMP/dirty" | tr -d '[:space:]')"
+XH_DET_CLEAN_SIZE="$(wc -c < "$XH_DET_TMP/clean" | tr -d '[:space:]')"
+xh_file_has_cr "$XH_DET_TMP/dirty"
+XH_DET_DIRTY_RC=$?
+xh_file_has_cr "$XH_DET_TMP/clean"
+XH_DET_CLEAN_RC=$?
+xh_file_has_cr "$XH_DET_TMP/does-not-exist"
+XH_DET_MISSING_RC=$?
+if [ "$XH_DET_DIRTY_SIZE" = 2 ] && [ "$XH_DET_CLEAN_SIZE" = 1 ] \
+   && [ "$XH_DET_DIRTY_RC" -eq 0 ] && [ "$XH_DET_CLEAN_RC" -eq 1 ] \
+   && [ "$XH_DET_MISSING_RC" -eq 2 ]; then
+  echo "  PASS  XH2a the CR detector is byte-exact — it sees the CR in a 2-byte A+CR file, none in a 1-byte A file, and reports an unreadable path as unknown"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2a the CR detector is not byte-exact on this host"
+  echo "        fixtures: dirty=${XH_DET_DIRTY_SIZE} bytes (want 2), clean=${XH_DET_CLEAN_SIZE} bytes (want 1)"
+  echo "        detector: dirty rc=${XH_DET_DIRTY_RC} (want 0), clean rc=${XH_DET_CLEAN_RC} (want 1), missing rc=${XH_DET_MISSING_RC} (want 2)"
+  echo "        a wrong SIZE means the fixture writer is not byte-exact; a wrong RC means the detector is not."
+  echo "        every CR claim below this row would be unsound — do NOT 'fix' those rows individually"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$XH_DET_TMP"
+
+# --- XH2: the hook sources must be LF in the working tree -------------------
+# The host this rule actually protects is a real user's Git-for-Windows clone,
+# where `core.autocrlf=true` is the INSTALLER DEFAULT. Read with the byte-exact
+# detector above: the previous `grep` form could not see a CR on windows-latest,
+# so this census asserted nothing there. The row that proves the rule is
+# load-bearing rather than decorative is XH2b below.
+XH_CR_FILES=""
+XH_CR_UNREADABLE=""
+XH_CR_SCANNED=0
+while IFS= read -r xh_hook_file; do
+  [ -n "$xh_hook_file" ] || continue
+  XH_CR_SCANNED=$((XH_CR_SCANNED + 1))
+  xh_file_has_cr "$xh_hook_file"
+  xh_cr_rc=$?
+  # rc 0 = CR found, 1 = clean, anything else = the file's CR state is UNKNOWN.
+  # Folding that third case into "clean" is how a census goes quietly vacuous.
+  if [ "$xh_cr_rc" -eq 0 ]; then
+    XH_CR_FILES="$XH_CR_FILES${XH_CR_FILES:+ }${xh_hook_file#"$REPO_ROOT"/}"
+  elif [ "$xh_cr_rc" -ne 1 ]; then
+    XH_CR_UNREADABLE="$XH_CR_UNREADABLE${XH_CR_UNREADABLE:+ }${xh_hook_file#"$REPO_ROOT"/}"
+  fi
+done <<EOF_XH_HOOK_FILES
+$(find "$XH_HOOKS_DIR" -type f | sort)
+EOF_XH_HOOK_FILES
+if [ "$XH_CR_SCANNED" -lt 1 ]; then
+  echo "  FAIL  XH2 scanned ZERO files under plugins/uberdev/hooks/ — the census is vacuous, not clean"
+  FAIL=$((FAIL + 1))
+elif [ -n "$XH_CR_UNREADABLE" ]; then
+  echo "  FAIL  XH2 a hook source could not be read, so its CR state is unknown"
+  printf '        %s\n' "$XH_CR_UNREADABLE"
+  FAIL=$((FAIL + 1))
+elif [ -z "$XH_CR_FILES" ]; then
+  echo "  PASS  XH2 none of the ${XH_CR_SCANNED} files under plugins/uberdev/hooks/ carries a CR byte in the working tree"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2 a hook source checked out with CR bytes — core.autocrlf rewrote it, and /.gitattributes should have pinned 'plugins/uberdev/hooks/** text eol=lf'"
+  printf '        %s\n' "$XH_CR_FILES"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- XH2b/XH2c/XH2d: the CRLF mechanism proof -------------------------------
+# CREATE the CRLF form and measure what the declared bash arm does with it. This
+# is the opposite of stripping CR before executing, which would prove a
+# counterfactual: here the defect is reproduced.
+#
+# `bash <file>` rather than executing the file, deliberately: `"shell": "bash"`
+# is a claim about which interpreter parses run-hook.cmd, and forcing bash keeps
+# the row about that claim (whether MSYS re-dispatches a `.cmd` through
+# %COMSPEC% is a SEPARATE question, answered by XH6c below).
+#
+# WHY THE OUTCOME IS MEASURED AND NOT HARDCODED. The death this row used to
+# assert unconditionally is a property of STOCK GNU bash, not of bash-on-Windows.
+# The bash Git for Windows ships (C:\Program Files\Git\bin\bash.exe; `uname -s` =
+# MINGW64_NT-…, see XH1c) is built from MSYS2's bash package, which applies
+# MSYS2-packages/bash/0005-bash-4.3-msys2-fix-lineendings.patch. That patch adds
+#
+#     #ifdef __MSYS__
+#           if (c == '\r')
+#             continue;
+#     #endif
+#
+# to shell_getc() in y.tab.c — the shell's own input reader — so every CR byte is
+# discarded before the lexer ever sees it. That is a COMPILE-TIME property of the
+# interpreter: not Cygwin's opt-in `set -o igncr`, not a text-mode mount, and
+# nothing in the environment turns it off. On that host a CRLF run-hook.cmd
+# parses byte-for-byte like the LF one and runs to completion — windows-latest
+# measured rc=0 with EMPTY stderr, which is exactly what redded the hardcoded
+# form of this row.
+#
+# So the interpreter's CR handling is MEASURED first (XH2b1) and the asserted
+# outcome is the one that FOLLOWS from the measurement. Neither arm is a skip:
+# the CR-blind arm asserts the CRLF copy is byte-for-byte indistinguishable from
+# an LF control run through the same harness, which reds if the MSYS2 patch is
+# ever dropped or the fixture stops being built.
+#
+# The pair XH2b + XH2d is what makes the rule load-bearing, and each half is
+# needed. XH2b measures the HARM, and can only measure it on a CR-preserving
+# bash — i.e. on ubuntu and macOS here, and on every POSIX interpreter that can
+# still read a Git-for-Windows clone (WSL, a Linux container over the same
+# checkout, this repo's own CI). XH2d measures whether the rule is EFFECTIVE at
+# stopping CR from reaching the checkout at all, and does that identically on
+# every host. Neither row claims the pin benefits every Windows consumer: XH6a
+# and XH6c record that an EXECUTED run-hook.cmd is re-dispatched to cmd.exe on
+# Windows, and cmd.exe is the CR-*preferring* side of the polyglot. That
+# adjudication belongs to the evidence rows, not to an assertion here.
+XH_CRLF_DIR="$(mktemp -d)"
+cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_CRLF_DIR/run-hook.lf.cmd"
+cp "$XH_HOOKS_DIR/session-start" "$XH_CRLF_DIR/session-start"
+python3 -I -B -c 'import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))' \
+  < "$XH_CRLF_DIR/run-hook.lf.cmd" > "$XH_CRLF_DIR/run-hook.cmd"
+chmod 755 "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/run-hook.lf.cmd" "$XH_CRLF_DIR/session-start"
+
+# XH2b0 — FIXTURE INTEGRITY. Both silent-vacuity modes are asserted rather than
+# assumed: an empty or CR-less "CRLF" copy runs clean under ANY bash and `bash -n`
+# returns 0 on it, so XH2b and XH2c would both go green over a fixture that never
+# reproduced anything.
+XH_CRLF_SIZE="$(wc -c < "$XH_CRLF_DIR/run-hook.cmd" | tr -d '[:space:]')"
+xh_file_has_cr "$XH_CRLF_DIR/run-hook.cmd"
+XH_CRLF_HAS_CR=$?
+xh_file_has_cr "$XH_CRLF_DIR/run-hook.lf.cmd"
+XH_LF_HAS_CR=$?
+if [ "${XH_CRLF_SIZE:-0}" -gt 0 ] && [ "$XH_CRLF_HAS_CR" -eq 0 ] && [ "$XH_LF_HAS_CR" -eq 1 ]; then
+  echo "  PASS  XH2b0 the fixture pair is real — the ${XH_CRLF_SIZE}-byte CRLF copy carries CR bytes, the LF control does not"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2b0 the CRLF fixture pair was not produced (crlf bytes=${XH_CRLF_SIZE}, crlf cr-detect rc=${XH_CRLF_HAS_CR} want 0, lf cr-detect rc=${XH_LF_HAS_CR} want 1) — XH2b/XH2c would be vacuous"
+  FAIL=$((FAIL + 1))
+fi
+
+# XH2b1 — MEASURE this bash's CR handling, on a fixture whose answer is a byte
+# count rather than a platform guess. `printf X<CR>` is ONE word: a CR-blind bash
+# parses it as `X` and writes 1 byte; a CR-preserving bash keeps the CR inside
+# the word and writes 2, the second being the CR. Both halves are checked — a
+# 2-byte write whose second byte is NOT a CR is a broken probe, not a
+# classification — and an unclassifiable probe is a FAIL, never a default.
+#
+# `wc -c` plus the byte-exact detector above, never `grep`: on windows-latest a
+# CR-blind grep would have answered "no CR" for BOTH outcomes, which happens to
+# agree with the 1-byte case and so would have hidden a mis-measurement behind a
+# correct-looking classification.
+printf 'printf X\r\n' > "$XH_CRLF_DIR/cr-probe"
+bash "$XH_CRLF_DIR/cr-probe" >"$XH_CRLF_DIR/cr-probe.out" 2>"$XH_CRLF_DIR/cr-probe.err"
+XH_CR_PROBE_SIZE="$(wc -c < "$XH_CRLF_DIR/cr-probe.out" | tr -d '[:space:]')"
+xh_file_has_cr "$XH_CRLF_DIR/cr-probe.out"
+XH_CR_PROBE_HAS_CR=$?
+if [ "${XH_CR_PROBE_SIZE:-0}" -eq 1 ] && [ "$XH_CR_PROBE_HAS_CR" -eq 1 ]; then
+  XH_BASH_CR_BLIND=yes
+elif [ "${XH_CR_PROBE_SIZE:-0}" -eq 2 ] && [ "$XH_CR_PROBE_HAS_CR" -eq 0 ]; then
+  XH_BASH_CR_BLIND=no
+else
+  XH_BASH_CR_BLIND=unknown
+fi
+if [ "$XH_BASH_CR_BLIND" = unknown ]; then
+  echo "  FAIL  XH2b1 this bash's CR handling could not be classified (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-detect rc=${XH_CR_PROBE_HAS_CR}; want 1+rc1 = CR-blind, 2+rc0 = CR-preserving)"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_CRLF_DIR/cr-probe.err")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  XH2b1 this bash's CR handling measured: cr-blind=${XH_BASH_CR_BLIND} (probe wrote ${XH_CR_PROBE_SIZE} bytes, cr-detect rc=${XH_CR_PROBE_HAS_CR})"
+  PASS=$((PASS + 1))
+fi
+
+# ONE runner for both halves of the comparison. Two hand-rolled copies of the
+# hermetic env would be the same uncompared-copies drift the manifest extraction
+# above avoids, and the CRLF half is precisely the copy nobody can eyeball on a
+# CR-blind host. Each run gets its own throwaway HOME so neither can influence
+# the other's output. $1 = wrapper to run, $2 = stdout sink, $3 = stderr sink.
+xh_run_crlf_fixture() {
+  local xh_fixture_home
+  xh_fixture_home="$(mktemp -d)"
+  # LC_ALL=C so bash's diagnostic is the C-locale English this row matches on.
+  env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
+      HOME="$xh_fixture_home" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
+      bash "$1" session-start >"$2" 2>"$3" </dev/null
+  XH_CRLF_RUN_RC=$?
+  rm -rf "$xh_fixture_home"
+}
+xh_run_crlf_fixture "$XH_CRLF_DIR/run-hook.lf.cmd" "$XH_CRLF_DIR/lf.stdout" "$XH_CRLF_DIR/lf.stderr"
+XH_LF_RC=$XH_CRLF_RUN_RC
+xh_run_crlf_fixture "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/stdout" "$XH_CRLF_DIR/stderr"
+XH_CRLF_RC=$XH_CRLF_RUN_RC
+XH_CRLF_ERR_HEAD="$(head -n 1 "$XH_CRLF_DIR/stderr" 2>/dev/null)"
+
+# XH2b2 — the LF CONTROL, asserted on every platform. Without it the CR-blind arm
+# would be comparing two outputs that could both be empty, and the fixture dir (a
+# copy of the wrapper next to a copy of session-start) would itself be an
+# unverified harness.
+if [ "$XH_LF_RC" -eq 0 ] && grep -q 'SessionStart' "$XH_CRLF_DIR/lf.stdout"; then
+  echo "  PASS  XH2b2 the LF control in the same fixture dir emits the SessionStart contract (rc=${XH_LF_RC})"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2b2 the LF control emitted no SessionStart contract (rc=${XH_LF_RC}) — the fixture harness is broken, so XH2b proves nothing"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_CRLF_DIR/lf.stderr")"
+  FAIL=$((FAIL + 1))
+fi
+
+case "$XH_BASH_CR_BLIND" in
+  no)
+    if [ "$XH_CRLF_RC" -ne 0 ] \
+       && grep -q 'command not found' "$XH_CRLF_DIR/stderr" \
+       && ! grep -q 'SessionStart' "$XH_CRLF_DIR/stdout"; then
+      echo "  PASS  XH2b under this CR-preserving bash a CRLF run-hook.cmd dies (rc=${XH_CRLF_RC}) and emits no SessionStart contract"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  XH2b a CR-preserving bash did NOT kill the CRLF run-hook.cmd (rc=${XH_CRLF_RC})"
+      printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+  yes)
+    if [ "$XH_CRLF_RC" -eq "$XH_LF_RC" ] && cmp -s "$XH_CRLF_DIR/stdout" "$XH_CRLF_DIR/lf.stdout"; then
+      echo "  PASS  XH2b this bash is CR-BLIND (MSYS2 shell_getc drops \\r), so the CRLF copy is indistinguishable from the LF control (rc=${XH_CRLF_RC}, stdout byte-identical) — the harm channel is NOT reproducible on this host by any means, and XH2d proves the rule's effect here instead"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  XH2b this bash measured CR-BLIND but the CRLF copy did not match the LF control (crlf rc=${XH_CRLF_RC} vs lf rc=${XH_LF_RC}; stdout differs)"
+      printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+  *)
+    echo "  FAIL  XH2b not asserted — XH2b1 could not classify this bash, and a row that asserts nothing must never read as a pass (crlf rc=${XH_CRLF_RC})"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
+bash -n "$XH_CRLF_DIR/run-hook.cmd" 2>/dev/null
+XH_CRLF_SYNTAX_RC=$?
+# The `run-hook.cmd parses under bash -n` guard at the top of this file returns
+# 0 on the very copy that dies at runtime under a CR-preserving bash. Pinning
+# that here is what stops a future reader from deleting XH2b as redundant with a
+# syntax check.
+if [ "$XH_CRLF_SYNTAX_RC" -eq 0 ]; then
+  echo "  PASS  XH2c bash -n returns 0 on that same CRLF copy — the syntax guard is structurally blind to this class"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2c bash -n rejected the CRLF copy (rc=${XH_CRLF_SYNTAX_RC}); re-check whether XH2b still proves anything the syntax guard misses"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$XH_CRLF_DIR"
+
+# --- XH2d: the /.gitattributes rule, proved against git itself --------------
+# XH2b proves the HARM of a CR byte, and can only do so on a bash that preserves
+# CR. This row proves the rule is EFFECTIVE, which is a different claim and one
+# layer earlier: stop `core.autocrlf=true` — the Git-for-Windows INSTALLER
+# DEFAULT — from ever writing a CR into the checkout. That job belongs to git,
+# not to the host: `core.autocrlf` is config, not platform behaviour, so `true`
+# rewrites LF→CRLF on checkout on ubuntu and macOS exactly as it does on
+# Windows. The row therefore runs identically on every host in the matrix,
+# including the CR-blind one where XH2b's harm channel is unreproducible.
+#
+# BOTH directions are measured in the same scratch repo, because only the pair
+# is evidence: an unprotected checkout must come back WITH CR (else autocrlf is
+# not a live threat here and the row proves nothing), and the same checkout under
+# the rule must come back WITHOUT.
+#
+# The rule text is READ OUT of the real /.gitattributes and never retyped — a
+# retyped literal is the "one contract, N uncompared copies" drift this file's
+# header is about, and it would hold this row green over a rule the repo has
+# since narrowed, widened or deleted.
+# "Active line" is defined exactly as tests/docs-accuracy.test.sh T8.10 defines
+# it — drop comments and blanks first, then select the hooks-scoped rules — so
+# the two guards cannot disagree about what counts as a rule.
+XH_GA_RULES="$(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/.gitattributes" 2>/dev/null | grep -E 'plugins/uberdev/hooks')"
+if [ -z "$XH_GA_RULES" ]; then
+  echo "  FAIL  XH2d /.gitattributes carries no active rule scoped to plugins/uberdev/hooks — nothing pins the hook sources to LF on a core.autocrlf=true clone"
+  FAIL=$((FAIL + 1))
+else
+  XH_GA_TMP="$(mktemp -d)"
+  mkdir -p "$XH_GA_TMP/home" "$XH_GA_TMP/repo/plugins/uberdev/hooks"
+  cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
+  # HOME/XDG redirected and system config off: the invoking user's ~/.gitconfig
+  # (or a global core.attributesFile) must not decide this row's answer.
+  xh_git() {
+    env HOME="$XH_GA_TMP/home" XDG_CONFIG_HOME="$XH_GA_TMP/home/.config" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        git -C "$XH_GA_TMP/repo" \
+            -c init.defaultBranch=main -c core.autocrlf=true \
+            -c user.name=uberdev-xh2d -c user.email=xh2d@example.invalid \
+            -c commit.gpgsign=false "$@"
+  }
+  # Deletes the worktree copy and restores it through git's checkout filters, so
+  # the CR (or its absence) is written by the same code path a clone uses.
+  # Returns the detector's rc: 0 = CR present, 1 = clean, else unknown.
+  xh_ga_checkout_has_cr() {
+    rm -f "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
+    xh_git checkout -q -- plugins/uberdev/hooks/run-hook.cmd >/dev/null 2>&1
+    xh_file_has_cr "$XH_GA_TMP/repo/plugins/uberdev/hooks/run-hook.cmd"
+  }
+  XH_GA_SETUP_RC=0
+  xh_git init -q >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git add plugins/uberdev/hooks/run-hook.cmd >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git commit -q -m 'seed hook source (LF)' >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_ga_checkout_has_cr
+  XH_GA_UNPROTECTED=$?
+  printf '%s\n' "$XH_GA_RULES" > "$XH_GA_TMP/repo/.gitattributes"
+  xh_git add .gitattributes >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_git commit -q -m 'add the repo hooks rule' >/dev/null 2>&1 || XH_GA_SETUP_RC=1
+  xh_ga_checkout_has_cr
+  XH_GA_PROTECTED=$?
+  if [ "$XH_GA_SETUP_RC" -ne 0 ]; then
+    echo "  FAIL  XH2d the scratch git repo could not be built, so the rule was never exercised"
+    FAIL=$((FAIL + 1))
+  elif [ "$XH_GA_UNPROTECTED" -ne 0 ]; then
+    echo "  FAIL  XH2d core.autocrlf=true left an UNPROTECTED checkout free of CR (cr-detect rc=${XH_GA_UNPROTECTED}) — with no threat reproduced, this row cannot show the rule matters"
+    FAIL=$((FAIL + 1))
+  elif [ "$XH_GA_PROTECTED" -eq 1 ]; then
+    echo "  PASS  XH2d the /.gitattributes hooks rule beats core.autocrlf=true — the unprotected checkout comes back with CR, the same checkout under the rule comes back LF"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  XH2d the /.gitattributes hooks rule did not keep the checkout LF under core.autocrlf=true (cr-detect rc=${XH_GA_PROTECTED}; 0=CR present, 2=unknown)"
+    printf '        rule(s) exercised: %s\n' "$XH_GA_RULES"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$XH_GA_TMP"
+fi
+
+# --- XH3/XH4: the executed positive oracle, and its hermeticity -------------
+# CLAUDE_PLUGIN_ROOT goes in the ENVIRONMENT and the shell expands it, exactly
+# as the runtime's spawn(command, [], {shell}) does — string-substituting it
+# here would test a literal the runtime never sees.
+#
+# THE ORACLE IS THE EMITTED JSON FIELD, NEVER THE EXIT CODE: a hook that never
+# loaded also exits 0 on several paths (run-hook.cmd's no-bash arm is a
+# deliberate `exit /b 0`), which is the whole shape of the silent failure. The
+# oracle also holds on a jq-less host — session-start's degraded arm emits the
+# same hookSpecificOutput.hookEventName.
+#
+# ONE runner and ONE parser, shared by the POSIX row and the native-Windows row
+# below. Two hand-rolled copies of the hermetic env would be the same
+# uncompared-copies drift the extraction above avoids, and the Windows copy is
+# precisely the one nobody can run locally to notice the divergence.
+#
+# $1 = CLAUDE_PLUGIN_ROOT to run under, $2 = stdout sink, $3 = stderr sink.
+# Sets XH_RUN_RC and XH_RUN_HOME_ENTRIES; the throwaway HOME is always removed.
+xh_run_declared_command() {
+  XH_RUN_HOME="$(mktemp -d)"
+  env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT \
+      HOME="$XH_RUN_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$1" \
+      bash -c "$XH_CMD" >"$2" 2>"$3" </dev/null
+  XH_RUN_RC=$?
+  XH_RUN_HOME_ENTRIES="$(find "$XH_RUN_HOME" -mindepth 1 | wc -l | tr -d '[:space:]')"
+  rm -rf "$XH_RUN_HOME"
+}
+# Prints the EVENT NAME only. The real body is ~16 KB of injected context and
+# has no place in a CI log.
+xh_event_name() {
+  python3 -I -B -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except (ValueError, UnicodeDecodeError):
+    doc = {}
+out = doc.get("hookSpecificOutput", {}) if isinstance(doc, dict) else {}
+print(out.get("hookEventName", "") if isinstance(out, dict) else "", end="")' < "$1"
+}
+
+XH_OUT_FILE="$(mktemp)"
+XH_ERR_FILE="$(mktemp)"
+xh_run_declared_command "$XH_PLUGIN_DIR" "$XH_OUT_FILE" "$XH_ERR_FILE"
+XH_EVENT="$(xh_event_name "$XH_OUT_FILE")"
+if [ "$XH_EVENT" = "SessionStart" ]; then
+  echo "  PASS  XH3 the declared SessionStart command runs and emits hookSpecificOutput.hookEventName (rc=${XH_RUN_RC})"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH3 the declared SessionStart command emitted no SessionStart contract (rc=${XH_RUN_RC}, event='${XH_EVENT}')"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_ERR_FILE")"
+  FAIL=$((FAIL + 1))
+fi
+# A hook that writes into the invoking user's home during a test is a test that
+# mutates the runner. The alias forwarders are the concrete risk here, hence
+# UBERDEV_NO_AUTO_ALIAS=1 in the runner and this row to prove it held.
+assert_eq "$XH_RUN_HOME_ENTRIES" "0" \
+  "XH4 the oracle is hermetic — it wrote nothing into its throwaway HOME"
+rm -f "$XH_OUT_FILE" "$XH_ERR_FILE"
+
+# --- XH5/XH6/XH7: the native-Windows arm ------------------------------------
+# This is the issue's actual question and the RFC 0019 §7 verification
+# obligation: a green macOS or ubuntu run leaves every branch below UNEXECUTED
+# and is not evidence for any of it.
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  XH_WIN_ROOT="$(cygpath -m "$XH_PLUGIN_DIR")"
+  assert_nonempty "$XH_WIN_ROOT" \
+    "XH5a cygpath -m normalised the plugin root for the native-Windows arm"
+  XH_WIN_OUT="$(mktemp)"
+  XH_WIN_ERR="$(mktemp)"
+  xh_run_declared_command "$XH_WIN_ROOT" "$XH_WIN_OUT" "$XH_WIN_ERR"
+  XH_WIN_EVENT="$(xh_event_name "$XH_WIN_OUT")"
+  if [ "$XH_WIN_EVENT" = "SessionStart" ]; then
+    echo "  PASS  XH5 the declared SessionStart command runs on NATIVE Windows with a cygpath-normalised plugin root (rc=${XH_RUN_RC})"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  XH5 the declared SessionStart command emitted no SessionStart contract on NATIVE Windows (rc=${XH_RUN_RC}, event='${XH_WIN_EVENT}')"
+    printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_WIN_ERR")"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_eq "$XH_RUN_HOME_ENTRIES" "0" \
+    "XH5b the native-Windows oracle is hermetic — it wrote nothing into its throwaway HOME"
+  rm -f "$XH_WIN_OUT" "$XH_WIN_ERR"
+
+  # XH6a/XH6b are RECORDED, not asserted. Ossifying an assumption about someone
+  # else's parser is how the stale claims this issue also had to repair got
+  # written; what the log needs is the observed rc from each interpreter.
+  XH_CMD_CMDEXE="${XH_CMD//\$\{CLAUDE_PLUGIN_ROOT\}/%CLAUDE_PLUGIN_ROOT%}"
+  XH_PROBE_OUT="$(CLAUDE_PLUGIN_ROOT="$XH_WIN_ROOT" cmd.exe //c "$XH_CMD_CMDEXE" 2>&1 </dev/null)"
+  XH_PROBE_RC=$?
+  echo "  INFO  XH6a cmd.exe rc=${XH_PROBE_RC} first-line=$(printf '%s' "$XH_PROBE_OUT" | head -n 1)"
+  XH_CMD_PWSH="${XH_CMD//\$\{CLAUDE_PLUGIN_ROOT\}/\$\{env:CLAUDE_PLUGIN_ROOT\}}"
+  XH_PROBE_OUT="$(CLAUDE_PLUGIN_ROOT="$XH_WIN_ROOT" powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$XH_CMD_PWSH" 2>&1 </dev/null)"
+  XH_PROBE_RC=$?
+  echo "  INFO  XH6b powershell.exe rc=${XH_PROBE_RC} first-line=$(printf '%s' "$XH_PROBE_OUT" | head -n 1)"
+else
+  # A skip must never read as a pass, so each suppressed row is named with its
+  # reason rather than simply not printed (same discipline as the `zsh -n` skip
+  # near the top of this file).
+  echo "  SKIP  XH5a/XH5 declared-command execution on native Windows (not a native Windows host)"
+  echo "  SKIP  XH5b native-Windows hermeticity (not a native Windows host)"
+  echo "  SKIP  XH6a cmd.exe interpreter evidence (not a native Windows host)"
+  echo "  SKIP  XH6b powershell.exe interpreter evidence (not a native Windows host)"
+fi
+
+# XH6c — INTERPRETER IDENTITY, printed on every platform because POSIX is the
+# control. run-hook.cmd is invoked through the shell with NO argument, which
+# makes each arm name itself:
+#   * `missing script name` + rc=1  => cmd.exe ran it (MSYS re-dispatched the
+#     `.cmd` through %COMSPEC%), so the batch arm is NOT vestigial under a
+#     declared bash shell and `eol=lf` needs re-examining against its goto loop;
+#   * anything else (measured on POSIX: rc=126, `…/hooks/: Is a directory`)
+#     => bash ran it, which is what `"shell": "bash"` assumes.
+# The assertion half is POSIX-only, because POSIX is where the expected answer
+# was measured; on Windows the row is evidence for the adjudication, not a gate.
+XH_ID_HOME="$(mktemp -d)"
+XH_ID_OUT="$(env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
+    HOME="$XH_ID_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
+    bash -c "\"$XH_HOOKS_DIR/run-hook.cmd\"" 2>&1 </dev/null)"
+XH_ID_RC=$?
+rm -rf "$XH_ID_HOME"
+echo "  INFO  XH6c run-hook.cmd with no argument: rc=${XH_ID_RC} first-line=$(printf '%s' "$XH_ID_OUT" | head -n 1)"
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  echo "  SKIP  XH6c assertion (native Windows — the rc above is evidence for adjudication, not a gate)"
+elif grep -q 'missing script name' <<<"$XH_ID_OUT"; then
+  echo "  FAIL  XH6c the cmd.exe arm answered on a POSIX host — run-hook.cmd is not being parsed by bash"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  XH6c the bash arm answers on POSIX, as \"shell\": \"bash\" assumes"
+  PASS=$((PASS + 1))
 fi
 
 echo

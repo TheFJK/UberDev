@@ -45,7 +45,7 @@
       "kind": "local-addition",
       "scope": "skills/systematic-debugging",
       "file": "find-polluter.sh",
-      "note": "Two local additions to find-polluter.sh (#430), both recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, and (2) local array-based enumeration that is whitespace- and glob-safe. Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply BOTH; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals). Kept forever.",
+      "note": "Three local additions to find-polluter.sh (#430, #476), all recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, (2) local array-based enumeration that is whitespace- and glob-safe, and (3) a pre-loop runner-capability probe (npm pkg get scripts.test) that refuses with [runner-incapable] (exit 2) when the project defines no test script npm could run — without it every 'npm test <file>' fails identically, which upstream counts as a test that ran and failed, and the run reaches a clean verdict having executed nothing (#476). Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply ALL THREE; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals, F16 the capability probe — with F17 as the counter-case that stops an over-broad re-application that refuses on any non-zero runner status). Kept forever.",
       "permanent": true
     },
     {
@@ -70,6 +70,14 @@
       "scope": "skills/finish-branch",
       "file": "SKILL.md",
       "note": "UberDev never emits a Co-Authored-By or AI-attribution trailer in commits or PR bodies. Upstream's flow does. Never reconciled.",
+      "permanent": true
+    },
+    {
+      "id": "interactive-discard-option",
+      "kind": "policy-divergence",
+      "scope": "skills/finish-branch",
+      "file": "SKILL.md",
+      "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' — the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
       "permanent": true
     }
   ],
@@ -129,12 +137,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/dispatching-parallel-agents",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream and the whole local delta is the 'superpowers:' -> 'uberdev:' namespace rebrand. Re-baseline from upstream.",
+      "stance_reason": "File set is 1:1 with upstream and SKILL.md is byte-identical to the recorded base e7a2d16 apart from the provenance header line this repo adds; there is no other local delta, and the file carries no 'superpowers:' token to rebrand. The 33 measured lines are upstream's own v6.2.0 prose compression (dispatch example rewritten, 'Key Benefits' and 'Real-World Impact' sections dropped), un-adopted here. Re-baseline from upstream.",
       "measured_diff_lines": 33,
       "divergences": [
         {
@@ -145,7 +153,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "76806091c7f923ba2596546b19cccd98a08e57a68745df77c3a7b998fe838e2b"
+          "sha256": "af768f9ba33cb030d04d0ff7f5447545f4acf6243a5738579410965ab5824919"
         }
       ]
     },
@@ -195,6 +203,10 @@
         },
         {
           "ref": "no-co-authored-by",
+          "file": "SKILL.md"
+        },
+        {
+          "ref": "interactive-discard-option",
           "file": "SKILL.md"
         }
       ],
@@ -372,10 +384,10 @@
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_on": "2026-08-12",
       "stance": "fork",
-      "stance_reason": "File sets diverge: UberDev ships testing-anti-patterns.md, upstream 6.2.0 replaced it with writing-good-tests.md. Adopting that swap is a decision, not a merge.",
-      "measured_diff_lines": 72,
+      "stance_reason": "File sets are now 1:1 with upstream v6.2.0, but the tree is a composite of two upstream revisions: SKILL.md is still at e7a2d16 (upstream's own v6.2.0 prose compression of \"Why Order Matters\" and the rationalisations table is un-adopted), while writing-good-tests.md was adopted whole from 3dcbd5c (v6.2.0) under #457. No single upstream commit is drop-in, so track — which promises a digest-locked re-baseline — would be a false claim. Reclassify to track when #462 genuinely re-baselines the component.",
+      "measured_diff_lines": 64,
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -384,7 +396,7 @@
       ],
       "files": [
         "SKILL.md",
-        "testing-anti-patterns.md"
+        "writing-good-tests.md"
       ]
     },
     {

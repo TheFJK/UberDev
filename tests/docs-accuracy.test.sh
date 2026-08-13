@@ -46,6 +46,11 @@ ALIAS_RFC="$RFC_DIR/0011-alias-install-reliability.md"
 # #432: the reviewer-precision eval RFC. 0018 is reserved for it by the issue,
 # and T3.4 below locks the header so a renumber cannot drift from the filename.
 PRECISION_RFC="$RFC_DIR/0018-review-precision-eval.md"
+# #467: the miner the precision RFC describes. T13 below pairs every absence row
+# with a positive one, and the last of them resolves an RFC symbol against this
+# file — an RFC that names a field the shipped tool does not have is the same
+# drift class as one that describes a rule the tool never implemented.
+PRECISION_MINER="$REPO_ROOT/tools/eval/review-precision.py"
 SESSION_START="$REPO_ROOT/plugins/uberdev/hooks/session-start"
 ALIASES_SYNC="$REPO_ROOT/plugins/uberdev/lib/aliases-sync.sh"
 TEST_YML="$REPO_ROOT/.github/workflows/test.yml"
@@ -85,8 +90,8 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$SESSION_START" "$ALIASES_SYNC" "$TEST_YML" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
-         "$PRECISION_RFC" "$AGENTS_MD" "$SOLVE_FLEET_JS" "$GOAL_WATCH_SH" \
-         "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
+         "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
+         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -432,6 +437,119 @@ assert_grep "$PRE_COMPACT" 'Contract status \(live-verified' \
   "T8.5 pre-compact documents the verified auto-memory.md contract status"
 assert_grep "$PRE_COMPACT" 'DOCUMENTED user/tooling-facing contract' \
   "T8.6 pre-compact states the keep-as-documented-contract decision"
+
+# (#461) Nothing in this repo PARSED either hook manifest before this row: T8.1
+# above is `grep -c` over the raw bytes, so a hand-edited trailing comma or an
+# unbalanced brace shipped green and Claude Code silently loaded zero handlers.
+# Read from stdin — never a path argument — because the windows-latest job runs
+# NATIVE Windows Python, which cannot translate the MSYS `/…` paths Git Bash
+# hands it (same corollary that governs the XH rows in
+# tests/crossplatform-shell-wrappers.test.sh).
+if python3 -I -B -c 'import json,sys; json.load(sys.stdin)' < "$HOOKS_JSON" 2>/dev/null; then
+  echo "  PASS  T8.7 hooks.json parses as JSON"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.7 hooks.json is not valid JSON — Claude Code would load NO handlers"
+  echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
+fi
+if python3 -I -B -c 'import json,sys; json.load(sys.stdin)' < "$HOOKS_CURSOR_JSON" 2>/dev/null; then
+  echo "  PASS  T8.8 hooks-cursor.json parses as JSON"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.8 hooks-cursor.json is not valid JSON"
+  echo "        file: $HOOKS_CURSOR_JSON"; FAIL=$((FAIL + 1))
+fi
+# (#461) Every Claude Code handler must DECLARE its interpreter. Without
+# `"shell": "bash"` the runtime picks the shell per host, and on a Windows host
+# without Git Bash it picks PowerShell — which parses the quoted
+# `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"` literal as an expression and the
+# hook never loads, with nothing surfaced. The declared form makes that host
+# throw a named error instead (verified in the shipped runtime: `… requires bash
+# but Git Bash was not found. Install Git for Windows …, or add "shell":
+# "powershell" to this hook's config`).
+#
+# THIS ROW IS A COMPLETENESS RATCHET, NOT THE PROOF. A string count over JSON
+# bytes cannot show that the declared command actually runs — that is XH3 (POSIX)
+# and XH5 (native Windows) in tests/crossplatform-shell-wrappers.test.sh, which
+# EXECUTE the extracted literal and assert the emitted SessionStart contract.
+# See RFC 0019 §7 / #461 on why a string-presence check alone is a counterfeit
+# here: the failure mode this issue is about is silent.
+HOOK_SHELL_DECLS="$(grep -c '"shell": "bash"' "$HOOKS_JSON")"
+if [ "$HOOK_CMD_KEYS" -ge 1 ] && [ "$HOOK_SHELL_DECLS" -eq "$HOOK_CMD_KEYS" ]; then
+  echo "  PASS  T8.9 all ${HOOK_CMD_KEYS} hooks.json handlers declare \"shell\": \"bash\""; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.9 hooks.json has ${HOOK_CMD_KEYS} command entries but ${HOOK_SHELL_DECLS} \"shell\": \"bash\" declarations"
+  echo "        file: $HOOKS_JSON"; FAIL=$((FAIL + 1))
+fi
+# (#461) The hook sources must check out LF on EVERY platform, because
+# `"shell": "bash"` means bash parses run-hook.cmd — and under a CR-PRESERVING
+# bash a CRLF copy dies at rc=127 with `$'\r': command not found` before it ever
+# reaches session-start. That covers stock GNU bash (ubuntu, macOS, WSL, this
+# repo's CI) but NOT the MSYS2 bash Git for Windows ships, which is patched to
+# drop CR in shell_getc() and so runs a CRLF copy clean — see /.gitattributes
+# for the citation and tests/crossplatform-shell-wrappers.test.sh XH2b/XH2d for
+# the measured proof. Git for Windows installs with `core.autocrlf=true` by
+# default, so without a rule a real user's clone rewrites these files and the
+# checkout's behaviour starts depending on which bash resolves. The rule must
+# stay NARROW:
+# prkit-publish, vendor-provenance and review-precision are windows-skipped on a
+# byte-exactness rationale, and a repo-wide `* text=auto` would change what those
+# paths check out as. Deliberately NOT in the FATAL `[ -r ]` loop above — a
+# missing file has to be a readable FAIL row here, not an exit-2 that stops the
+# suite before the rest of T8 runs.
+GITATTRIBUTES="$REPO_ROOT/.gitattributes"
+if [ -r "$GITATTRIBUTES" ]; then
+  GA_BAD_SCOPE="$(grep -vE '^[[:space:]]*(#|$)' "$GITATTRIBUTES" | grep -vE '^plugins/uberdev/hooks/' || true)"
+  GA_HOOK_RULE="$(grep -c '^plugins/uberdev/hooks/\*\* text eol=lf$' "$GITATTRIBUTES")"
+  if [ -z "$GA_BAD_SCOPE" ] && [ "$GA_HOOK_RULE" -eq 1 ]; then
+    echo "  PASS  T8.10 /.gitattributes pins the hook sources to LF and nothing wider"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  T8.10 /.gitattributes drifted from the narrow hooks-only eol=lf rule"
+    echo "        hooks rule lines: $GA_HOOK_RULE (want 1)"
+    [ -z "$GA_BAD_SCOPE" ] || printf '        out-of-scope rule: %s\n' "$GA_BAD_SCOPE"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  FAIL  T8.10 /.gitattributes is missing — a Git-for-Windows clone (core.autocrlf=true) rewrites plugins/uberdev/hooks/ to CRLF and the declared bash shell cannot parse run-hook.cmd"
+  FAIL=$((FAIL + 1))
+fi
+# (#461) The hooks bullet is the only prose that tells a contributor how the
+# Claude Code wiring reaches the scripts. It named the run-hook.cmd polyglot but
+# not the declared interpreter, so a reader had no way to know the resolution is
+# no longer host-conditional. T8.4 above pins the Cursor half of the SAME bullet;
+# keep both truthful together.
+assert_grep "$CONTRIBUTING_MD" '"shell": "bash"' \
+  "T8.11 CONTRIBUTING names the declared bash interpreter on the Claude Code hooks wiring"
+# (#461) Five sites justified a windows-skip with the literal claim that NO
+# .gitattributes exists. That claim is now false in the letter while the
+# rationale survives — the rule is scoped to plugins/uberdev/hooks/ and covers
+# none of those digest paths — so each was reworded to the property it actually
+# depends on. CHANGELOG.md was deliberately left alone: a shipped entry is a
+# historical record, and rewriting it to match a later change is worse drift than
+# leaving it.
+# The claim is WRAPPED prose in three of the four files (a `# ` comment column
+# splits `no` from `.gitattributes exists`), so a line-anchored grep would read
+# clean while the stale sentence is still there. Normalise first: drop newlines
+# and backticks, then squeeze the comment column and runs of blanks to one
+# space, and match the joined sentence.
+GITATTR_STALE_SITES=""
+for gitattr_site in "$TEST_YML" \
+                    "$REPO_ROOT/tests/prkit-publish.test.sh" \
+                    "$REPO_ROOT/tests/vendor-provenance.test.sh" \
+                    "$RFC_DIR/0014-prkit-standalone-plugin.md"; do
+  if [ ! -r "$gitattr_site" ]; then
+    GITATTR_STALE_SITES="$GITATTR_STALE_SITES${GITATTR_STALE_SITES:+ }MISSING/${gitattr_site##*/}"
+    continue
+  fi
+  gitattr_norm="$(tr -d '\n`' < "$gitattr_site" | tr -s $' \t#' ' ')"
+  if grep -qE 'no \.gitattributes (file )?exists' <<<"$gitattr_norm"; then
+    GITATTR_STALE_SITES="$GITATTR_STALE_SITES${GITATTR_STALE_SITES:+ }${gitattr_site##*/}"
+  fi
+done
+if [ -z "$GITATTR_STALE_SITES" ]; then
+  echo "  PASS  T8.12 no windows-skip rationale still claims the repo has no .gitattributes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  T8.12 a windows-skip rationale still claims no .gitattributes exists (one now does, scoped to the hooks dir)"
+  printf '        %s\n' "$GITATTR_STALE_SITES"; FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== T9: RFC anchors are SYMBOLS that resolve, not file:line literals (#349) =="
@@ -1522,6 +1640,40 @@ assert_count "$STRUCTURAL_LIB" '^assert_version_bump' '^}' \
   "T12.14 assert_version_bump's body still asserts exactly four manifest surfaces"
 assert_grep "$STRUCTURAL_LIB" 'all four manifest surfaces' \
   "T12.14b the doc comment states the same four-surface count its body asserts"
+
+echo
+echo "== T13: precision RFC 0018 §4/§5 describe the stamp the miner implements (#467) =="
+# RFC 0018 §5 described the model the code was INTENDED to have, and v0.45.13
+# moved the code without moving the prose: three sentences became false and
+# nothing noticed, because §5's body carried no positive assertion at all.
+#
+# Absence and positive rows come in PAIRS here, deliberately. An absence-only
+# predicate is disjoint from the drift it must catch — a false claim reworded
+# past a fixed-string forbid sails through — which is the same shape as the
+# stamp hole this section documents. Each forbid below therefore has a positive
+# twin asserting what the prose must now say instead.
+#
+# Every positive needle is a SINGLE-LINE substring of the authored prose: the
+# sentences it targets span line breaks, and a needle that crosses a wrap can
+# never match.
+assert_grep "$PRECISION_RFC" 'unmeasured_digests' \
+  "T13.1 the precision RFC names the unmeasured_digests field the miner reads"
+assert_grep "$PRECISION_RFC" 'carries a sha256 in one of two fields' \
+  "T13.2 §5 states every surface carries a digest in one of two fields"
+assert_grep "$PRECISION_RFC" 'a post-declaration edit of a declared-unmeasured surface reds' \
+  "T13.3 §5 states a declared-unmeasured surface still reds on a post-declaration edit"
+assert_grep "$PRECISION_RFC" 'tethered by the anti-parking rule' \
+  "T13.4 §5 states what the MEASURED declaration branch is tethered to"
+assert_absent_fixed "$PRECISION_RFC" 'records the sha256 of' \
+  "T13.5 the false 'records the sha256 of every reviewer prompt surface' claim is gone (two of eight carry no measured digest by design)"
+assert_absent_fixed "$PRECISION_RFC" 'also fails the check, so the list cannot accumulate' \
+  "T13.5b the unqualified anti-parking claim is gone (it never fired for an unstamped-declared path)"
+assert_absent_fixed "$PRECISION_RFC" 'in a second tuple in the miner' \
+  "T13.6 the 'a second tuple in the miner is a second roster' claim is gone (SHARED_PROMPT_SURFACES is exactly that, by design)"
+assert_grep "$PRECISION_RFC" 'SHARED_PROMPT_SURFACES.* is the one irreducible enumeration' \
+  "T13.6b §5 names SHARED_PROMPT_SURFACES and says why it is the one irreducible enumeration"
+assert_grep "$PRECISION_MINER" 'unmeasured_digests' \
+  "T13.7 the RFC's unmeasured_digests symbol resolves in the shipped miner"
 
 echo
 echo "== Summary =="

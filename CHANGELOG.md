@@ -4,6 +4,81 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.0] — 2026-08-13
+
+Consolidated landing of 21 pull requests (#483–#502, #506, #512), combined onto one review
+branch by the `/uberdev:review-pr` Phase 0 affordance this release introduces, and reviewed
+once as a unit. Closes #447, #452, #453, #454, #455, #457, #458, #459, #460, #461, #462,
+#467, #468, #469, #470, #476, #478, #479, #480, #481, #482.
+
+### Added
+
+- **`/uberdev:review-pr` Phase 0 — consolidate N open PRs into one review (#470).** When more
+  than one PR is open, the command offers, once and interactively, to combine them onto a
+  single review branch and run the pipeline once over the combined result. Never automatic and
+  never silent: consolidating N PRs costs per-PR revert granularity and per-PR finding
+  attribution, so it is a prompt. `--consolidate` accepts without asking; `--no-consolidate`
+  declines and wins over `--consolidate`. Not offered under `--turbo`, without a TTY, or on a
+  chained `finish-branch` run. The combined PR is the sole carrier of the trust trail; the
+  originals are superseded, keep their `Closes #N` references, and land through it.
+- **`review-pr` Phase 2 aggregate writer (#481)** and the lens boundary that refuses a
+  document-shape mismatch.
+- **Vendor register `C-BASE` (#462)** — a recorded `vendored_at_commit` must be witnessed by a
+  matching in-file provenance header, closing the direction `C-HEADER` never covered: 17
+  components could carry fabricated 40-hex SHAs and pass all eight prior checks.
+- **Vendor register `C-REFS` (#457)** — every relative sibling file a declared markdown
+  document points at must resolve on disk; adopted upstream `writing-good-tests.md`.
+- **SDD fix-loop continuity ledger and an executable round breaker (#459).**
+
+### Fixed
+
+- **`review-pr` Phase 0 could not survive its own re-entry.** `## 0c — COMBINE` is re-entered
+  after every resolved conflict, and three steps were correct exactly once: `start_branch` ran
+  `checkout -b` unconditionally (`already exists`, taking the whole combine down), `preflight`
+  overwrote the recorded original branch with the combine branch (leaving the abort path
+  nothing to restore to), and the invoking PR was re-derived from a HEAD that had moved (empty,
+  which `assert_current` then blamed on the PR being excluded).
+- **The Phase 0 library did not work under the shell it runs in.** Six loops used
+  `for x in $SCALAR`; bash word-splits an unquoted scalar, zsh does not, and these fences run
+  under `/bin/zsh`. The exclusion vocabulary rejected all seven valid reasons, so no PR could
+  be reported as excluded — the one guarantee it exists to provide.
+- **Windows CR handling, three distinct defects (#461 follow-ups).** `XH2b` asserted a failure
+  that cannot occur: Git for Windows builds bash with an ungated `shell_getc` patch that drops
+  every CR, so a CRLF script runs fine there. The CR *detector* was `grep`, which reads
+  text-mode on MSYS2 and can never match `\r` — so the `XH2` census had been passing on Windows
+  for the wrong reason since it was written. And native-Windows python writes CRLF to stdout
+  while `$( )` strips only the trailing one, so a multi-line report parsed field-wise compared
+  `1<CR>` against `1`. All three are now measured rather than assumed, and `XH2a` self-tests the
+  detector — a blind detector and a clean corpus otherwise give the identical answer.
+- `find-polluter.sh` reported a clean verdict when the project defines no test script (#476).
+- `review-aggregate` containment guards walked one path edge, so a mid-level symlink published
+  both artifacts outside the run directory (#468).
+- `review-pr` code-fixer U0 baseline inventoried gitignored churn (#478); the reviewed head is
+  now seeded on disk so the promote fence stops refusing rc 76 (#479).
+- `review-pr` publication gate raced GitHub's propagation window (#482); formatter/linter CI
+  gates are classified `code_bug` rather than falling through to unfixable (#480).
+- `finish-branch` Options 1 and 4 reported a merge that never happened (#460).
+- The eval precision stamp conflated "measured against" with "watched for drift", so an
+  honestly-unstamped surface lost its watch (#467).
+- SDD allocation is plan-scoped, so a second plan under one carrier cannot collide (#458).
+- The UberDev hooks declare `"shell": "bash"` and are pinned to LF, with the mechanism proved
+  rather than assumed (#461).
+
+### Changed
+
+- `code-fixer-contract`: the deferred-blocker recount is named for the phase it counts, and
+  `validate_persistence_result` no longer compares a Phase-2 count against an all-phase one
+  (#452, #453).
+- `findings-to-issues`: `route_by_severity`'s writerless `REJECTED` arm is deleted and the
+  disposition domain pinned (#454).
+
+### Tests
+
+- `_isolate` returns the snippet's status, so ~20 previously-vacuous assertions now assert
+  (#455); seven rows that tested a subshell in condition position, where `set -e` is inert,
+  were converted (#469); one scanner now enforces the scratch-teardown convention across
+  `tests/` on both CI jobs (#447).
+
 ## [0.45.17] — 2026-08-12
 
 `/review-pr` could not run end-to-end. #427 (v0.45.13) fixed the VARIABLE half of

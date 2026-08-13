@@ -36,6 +36,20 @@ Every retry loop in this skill is bounded. The caps are named constants — the 
 
 Cap exhaustion is never silent: report which cap fired and route through the BLOCKED ladder rather than accepting unreviewed work or looping unboundedly.
 
+The caps are not prose the controller is asked to remember. `sdd_loop_cap <name>` is the single numeric source, and `sdd_round_permitted <loop> <round>` is the guard every fix-shaped loop calls before minting the next instance id: rc `0` proceed, rc `3` cap exhausted (route BLOCKED), rc `2` you called it wrong.
+
+## Fix ledger
+
+Every fix-shaped re-dispatch has to carry what the previous round learned. This skill cannot resume a child — instance IDs are allocation identities and are never reused, and results are immutable — so continuity travels on disk, in one append-only **fix ledger per task**.
+
+- **Where.** In the controller's private run directory, the same directory that already holds that task's `task_path`. Never inside the feature worktree: an untracked file there is exactly what `git add -A` (already a Red Flag) would sweep into a task commit, and it perturbs the post-wave full-test-suite run. The handoff validator only accepts an absolute artifact path confined to the run directory or the repository, so a ledger anywhere else is rejected as out of scope.
+- **How it is written.** Created on the first append at mode `0600` by `sdd_append_fix_ledger <ledger> <round> <loop> <stage> <source_instance> <task_brief> <prior_result> <findings_path>`, appended by every later round, never truncated and never rewritten. `sdd_note_cap_exhausted <ledger> <loop> <round>` writes the final entry when a cap fires.
+- **Who may read it.** The ledger is **not** in `allowed_paths` and **not** in `denied_paths`, so the implementer may read it and must not write it — see `./implementer-prompt.md`, "Files outside both lists: read-only".
+- **How it travels.** It rides as `failure_path` on **every** non-first `sdd.task.implement` dispatch for that task: the step-4e regression retest, the `spec-fix` rounds, the `quality-fix` rounds, and every NEEDS_CONTEXT re-dispatch. The first `implement` attempt still passes `""`.
+- **What an entry holds.** The round, the loop that governs it, the stage, the source reviewer/test instance id, the absolute task brief path, the absolute prior implementer result path, and the reviewer findings verbatim. The implementer of round N therefore opens one file and sees rounds 1..N instead of re-deriving context the reviewer already priced in.
+
+The append happens **before** the dispatch, because the handoff validator requires a non-empty absolute artifact path to already exist as a regular file.
+
 ## Isolation: Pattern B is the opt-out
 
 This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
@@ -74,11 +88,22 @@ handoff and exports `UBERDEV_CHILD_HANDOFF`, `UBERDEV_CHILD_RESULT`, and
 
 Instance IDs are allocation identities and are never reused:
 
-`sdd-w<WAVE>-t<TASK>-<STAGE>-a<ATTEMPT>`
+`sdd-p<PLANSCOPE>-w<WAVE>-t<TASK>-<STAGE>-a<ATTEMPT>`
 
 where stage is one of `implement`, `spec-review`, `spec-fix`, `quality-review`,
-`quality-fix`, or `test-review`. Wave, task, stage, and attempt are explicit
-dynamic dimensions. The four stable routing edges are:
+`quality-fix`, or `test-review`. Plan scope, wave, task, stage, and attempt are
+explicit dynamic dimensions. Plan scope is the **execution-scope** dimension:
+the run tree is derived from the carrier, so one carrier owns one instance-ID
+namespace for every plan it executes, while the plan-internal coordinates
+(wave, task, stage, attempt) restart at `w1-t1-…-a1` for each plan. Without it,
+a second plan executed under the same carrier — `write_plan.sdd` followed by
+`orchestrator.sdd`, both registered entry edges — collides on the first
+coordinate it reuses and is refused as `instance_exists`. The scope is minted
+by `sdd_plan_scope` as the first 12 hex characters of
+`sha256(realpath(plan) ⊕ NUL ⊕ plan bytes)`: the realpath keeps two distinct
+but byte-identical plans apart, the bytes keep two same-day plans that share a
+basename apart, and 12 hex characters carry no plan-derived free text into a
+path. The four stable routing edges are:
 
 | Edge | Role | Gate |
 |---|---|---|
@@ -95,12 +120,13 @@ empty paths, escapes, and allow/deny overlap are rejected.
 
 ```bash
 sdd_validate_instance_dimensions() {
-  local wave="${@:1:1}" task="${@:2:1}" stage="${@:3:1}" attempt="${@:4:1}"
-  [ "$#" -ge 4 ] || return 2
+  local wave="${@:1:1}" task="${@:2:1}" stage="${@:3:1}" attempt="${@:4:1}" plan_scope="${@:5:1}"
+  [ "$#" -ge 5 ] || return 2
   sdd_validate_positive_decimal "$wave" || return 2
   sdd_validate_positive_decimal "$task" || return 2
   sdd_validate_positive_decimal "$attempt" || return 2
   case "$stage" in implement|spec-review|spec-fix|quality-review|quality-fix|test-review) ;; *) return 2 ;; esac
+  sdd_validate_plan_scope "$plan_scope" || return 2
 }
 
 sdd_validate_positive_decimal() {
@@ -110,6 +136,121 @@ sdd_validate_positive_decimal() {
     *[1-9]*) return 0 ;;
     *) return 2 ;;
   esac
+}
+
+# The single numeric source for the "## Loop caps" section. The cap NAMES are
+# this function's argument vocabulary, so the future sdd-waves script inherits
+# them verbatim instead of re-inventing them.
+sdd_loop_cap() {
+  [ "$#" -ge 1 ] || return 2
+  case "${@:1:1}" in
+    fix_rounds) printf '%s' 3 ;;
+    retest_rounds) printf '%s' 2 ;;
+    context_rounds) printf '%s' 2 ;;
+    *) return 2 ;;
+  esac
+}
+
+sdd_validate_plan_scope() {
+  [ "$#" -ge 1 ] || return 2
+  case "${@:1:1}" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# The breaker. rc 3 (exhausted) is deliberately distinct from the repo-wide
+# validation rc 2, so a caller can tell "cap fired, route BLOCKED" from "you
+# called me wrong". The round is normalized base 10 through this fence's own
+# sdd_json_decimal_integer, the same normalizer `attempt` goes through: a raw
+# `[ 010 -le <cap> ]` reads 010 as octal 8 in both shells, so the fence would
+# carry two disagreeing arithmetics for the same round number.
+sdd_round_permitted() {
+  [ "$#" -ge 2 ] || return 2
+  local loop="${@:1:1}" round="${@:2:1}"
+  local cap normalized
+  cap="$(sdd_loop_cap "$loop")" || return 2
+  sdd_validate_positive_decimal "$round" || return 2
+  normalized="$(sdd_json_decimal_integer "$round")" || return 2
+  [ "$normalized" -le "$cap" ] || return 3
+}
+
+# The continuity carrier. One append-only ledger per task, in the private run
+# directory that already holds that task's task_path; O_APPEND creates it at
+# 0600 on the first round and appends thereafter, O_NOFOLLOW refuses a symlink,
+# and O_WRONLY on a directory is EISDIR. It is never truncated and never
+# rewritten.
+sdd_append_fix_ledger() {
+  [ "$#" -eq 8 ] || return 2
+  local ledger="${@:1:1}" round="${@:2:1}" loop="${@:3:1}" stage="${@:4:1}"
+  local source_instance="${@:5:1}" task_brief="${@:6:1}" prior_result="${@:7:1}"
+  local findings_file="${@:8:1}"
+  sdd_validate_positive_decimal "$round" || return 2
+  sdd_loop_cap "$loop" >/dev/null || return 2
+  # Stage is checked against the ONE accepted-stage set, never a second copy of
+  # it; the wave/task/attempt arguments here are placeholders the validator
+  # already accepts.
+  #
+  # The plan scope is a placeholder for the same reason (#458 gave the
+  # validator a fifth dimension). A ledger entry is scoped to a TASK, not to a
+  # plan, so this call has no real scope to pass — and passing four arguments
+  # to a five-argument validator makes it refuse on ARITY, which reads exactly
+  # like "the stage is unregistered" and rejected every legitimate stage.
+  local placeholder_scope=000000000000
+  sdd_validate_instance_dimensions 1 1 "$stage" 1 "$placeholder_scope" || return 2
+  [ -n "$source_instance" ] || return 2
+  case "$ledger" in /*) ;; *) return 2 ;; esac
+  case "$task_brief" in /*) ;; *) return 2 ;; esac
+  case "$prior_result" in /*) ;; *) return 2 ;; esac
+  case "$findings_file" in /*) ;; *) return 2 ;; esac
+  python3 -I -B - "$ledger" "$round" "$loop" "$stage" "$source_instance" \
+    "$task_brief" "$prior_result" "$findings_file" <<'PY' || return 2
+import os,sys
+ledger,round_no,loop,stage,source_instance,task_brief,prior_result,findings=sys.argv[1:]
+with open(findings,'rb') as handle: body=handle.read()
+if not body.endswith(b"\n"): body+=b"\n"
+head=("## round %s | loop %s | stage %s\n"
+      "source_instance: %s\n"
+      "task_brief: %s\n"
+      "prior_result: %s\n"
+      "findings:\n" % (round_no,loop,stage,source_instance,task_brief,prior_result)).encode("utf-8")
+fd=os.open(ledger,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,"ab") as stream: stream.write(head+body)
+PY
+}
+
+# "Cap exhaustion is never silent" becomes bytes on disk: the last entry the
+# ledger carries before the task enters the BLOCKED ladder.
+sdd_note_cap_exhausted() {
+  [ "$#" -eq 3 ] || return 2
+  local ledger="${@:1:1}" loop="${@:2:1}" round="${@:3:1}"
+  local cap
+  cap="$(sdd_loop_cap "$loop")" || return 2
+  sdd_validate_positive_decimal "$round" || return 2
+  case "$ledger" in /*) ;; *) return 2 ;; esac
+  python3 -I -B - "$ledger" "$loop" "$round" "$cap" <<'PY' || return 2
+import os,sys
+ledger,loop,round_no,cap=sys.argv[1:]
+entry=("## cap exhausted | loop %s | round %s | cap %s\n" % (loop,round_no,cap)).encode("utf-8")
+fd=os.open(ledger,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,"ab") as stream: stream.write(entry)
+PY
+}
+
+sdd_plan_scope() {
+  [ "$#" -ge 1 ] || return 2
+  python3 -I -B - "${@:1:1}" <<'PY'
+import hashlib,os,sys
+plan=sys.argv[1]
+if not plan or not os.path.isabs(plan):
+    print('uberdev sdd: plan_scope_path_not_absolute',file=sys.stderr); raise SystemExit(2)
+real=os.path.realpath(plan)
+try:
+    with open(real,'rb') as stream: body=stream.read()
+except OSError as error:
+    print(f'uberdev sdd: plan_scope_unreadable errno={error.errno}',file=sys.stderr); raise SystemExit(2)
+print(hashlib.sha256(real.encode()+b'\0'+body).hexdigest()[:12],end='')
+PY
 }
 
 sdd_canonicalize_owned_paths() {
@@ -140,6 +281,7 @@ SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
 SDD_PREPARED_HANDOFF_SHA256S=()
 SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
 SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
+SDD_BATCH_RESULT_INSTANCES=(); SDD_BATCH_RESULT_PATHS=()
 sdd_reset_batch() {
   SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
   SDD_PREPARED_HANDOFF_SHA256S=()
@@ -182,6 +324,21 @@ sdd_dispatch_prepared() {
   SDD_PREPARED_HANDOFFS+=("$handoff"); SDD_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   SDD_PREPARED_RESULTS+=("$result")
   SDD_PREPARED_STATUSES+=("$child_status")
+}
+
+# sdd_wait_prepared_batch resets the prepared arrays on every exit path, so the
+# per-instance result paths are gone by the time the controller reads a verdict.
+# Snapshot them between launch and wait. Deliberately NOT reset by
+# sdd_reset_batch and deliberately not part of sdd_begin_batch's emptiness
+# preconditions: surviving the reset is the whole point, and the copy is
+# wholesale. Whole-array copy rather than an indexed loop, because the fence's
+# bash-0-indexed ${ARR[$index]} idiom reads empty under zsh.
+sdd_snapshot_batch_results() {
+  SDD_BATCH_RESULT_INSTANCES=(); SDD_BATCH_RESULT_PATHS=()
+  [ "${#SDD_PREPARED_INSTANCES[@]}" -gt 0 ] || return 2
+  [ "${#SDD_PREPARED_INSTANCES[@]}" -eq "${#SDD_PREPARED_RESULTS[@]}" ] || return 2
+  SDD_BATCH_RESULT_INSTANCES=("${SDD_PREPARED_INSTANCES[@]}")
+  SDD_BATCH_RESULT_PATHS=("${SDD_PREPARED_RESULTS[@]}")
 }
 
 sdd_launch_prepared_batch() {
@@ -314,15 +471,18 @@ Executable batch shape (substitute the edge/role/stage from the table):
 ```bash
 # Dispatch the complete batch first.
 sdd_begin_batch || return $?
+plan_scope="$(sdd_plan_scope "$plan_path")" || return 2
 for task_id in $SDD_BATCH_TASK_IDS; do
-  sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" || return 2
-  instance_id="sdd-w${wave}-t${task_id}-${stage}-a${attempt}"
+  sdd_validate_instance_dimensions "$wave" "$task_id" "$stage" "$attempt" "$plan_scope" || return 2
+  instance_id="$(uberdev_child_instance_id "sdd-p${plan_scope}-w${wave}-t${task_id}-${stage}-a${attempt}")" || return 2
   task_inputs_json="$(sdd_inputs_for_task "$edge_id" "$task_id")" || return 2
   task_inputs_json="$(sdd_canonicalize_owned_paths "$task_inputs_json")" || return 2
   task_inputs_json="$(uberdev_child_inputs_validate "$edge_id" "$task_inputs_json")" || return 2
   sdd_dispatch_prepared "$edge_id" "$instance_id" "$task_inputs_json" "$SDD_RISK_JSON" || return $?
 done
 sdd_launch_prepared_batch || return $?
+# Keep the per-instance result paths; the wait below resets the prepared arrays.
+sdd_snapshot_batch_results || return $?
 # Only after every dispatch receipt, wait for the complete batch.
 sdd_wait_prepared_batch "$SDD_CHILD_TIMEOUT" || return $?
 ```
@@ -377,25 +537,31 @@ digraph when_to_use {
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
-   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
+   e. Run the project's full test command in the worktree once after all wave commits land. If it fails, identify which task regressed and re-dispatch edge `sdd.task.implement` to that task's `implementation-worker`, with stage `implement` and the next attempt plus the failure context. Order every such re-dispatch: wait → `sdd_snapshot_batch_results` → read the failure from the snapshotted result → `sdd_round_permitted retest_rounds <next round>` → on rc `0` append the round with `sdd_append_fix_ledger` and build the inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted` and stop. Re-test after each fix, capped at `retest_rounds` (2) suspected-implementer re-dispatches for the wave — still red after the cap means halt the wave with committed work intact and escalate (BLOCKED ladder); never loop further.
    f. For each committed task, build a `sdd.task.spec_review` handoff for role `spec-compliance-reviewer` from `./spec-reviewer-prompt.md`. Prepare all wave-eligible reviewers, preflight the batch, then dispatch before waiting. Pass each reviewer these context inputs:
       - `spec_path`: absolute design spec
       - `plan_path`: absolute implementation plan
       - `commit_sha`: controller-created task commit
       - `allowed_paths`: canonical absolute ownership paths
       - `report_path`: immutable implementer result
-   g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Exhaustion routes the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
-   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Prepare all handoffs, preflight the batch, then dispatch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task.
+   g. Loop spec fix-up per task until that task's reviewer approves, capped at `fix_rounds` (3) iterations per task. Fixes use `sdd.task.implement`/`implementation-worker`, stage `spec-fix`, and the next attempt; re-reviews use `sdd.task.spec_review` with the next attempt. Order each iteration: wait → `sdd_snapshot_batch_results` → read the reviewer verdict from the snapshotted result → `sdd_round_permitted fix_rounds <next round>` → on rc `0` append the reviewer's findings with `sdd_append_fix_ledger` and build the fix inputs with `failure_path=<that task's ledger>` before dispatching; on rc `3` call `sdd_note_cap_exhausted` and route the task into the BLOCKED ladder. Fix dispatches still don't run git — controller amends the task's commit (or creates a fix-up commit) using the implementer's reported new paths.
+   h. As soon as a task's spec review approves, add its `sdd.task.quality_review`/`code-reviewer` handoff to the next eligible quality batch. Prepare all handoffs, preflight the batch, then dispatch before waiting. Do NOT hold all quality reviews hostage to the slowest sibling's spec fix-loop. Quality fixes use `sdd.task.implement`, stage `quality-fix`; quality re-reviews use the quality edge with the next attempt. Same `fix_rounds` (3) cap per task, guarded the same way: wait → `sdd_snapshot_batch_results` → verdict → `sdd_round_permitted fix_rounds <next round>` → rc `0` appends with `sdd_append_fix_ledger` and dispatches with `failure_path=<that task's ledger>`; rc `3` calls `sdd_note_cap_exhausted` and routes into the BLOCKED ladder.
    i. Mark every task in the wave complete in TodoWrite.
    j. **Mark wave complete.** No additional accumulation required at the SDD layer — `/uberdev:review-pr` Phase 1, chained post-push from `finish-branch`, computes its own `changed_paths` and `commit_range` against the pushed PR.
 
    **Step 4.5 — Pre-merge `pr-test-analyzer` dispatch (large-tier only, requires `spec_path` and `summary_dir`).** Runs once after all waves complete and before the Step 5 handoff. If `tier == "large"` AND `spec_path` is non-empty AND `summary_dir` is non-empty, securely pre-create the regular artifact file (the handoff validator rejects directory-valued context and requires absolute artifact paths to exist), then dispatch edge `sdd.premerge.test_review` to role `pr-test-analyzer`, stage `test-review`, attempt 1:
 
 ```bash
-SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer.md"
+SDD_TEST_REVIEW_SCOPE="$(sdd_plan_scope "$plan_path")" || return 2
+SDD_TEST_REVIEW_OUTPUT="${summary_dir%/}/pr-test-analyzer-${SDD_TEST_REVIEW_SCOPE}.md"
 python3 -I -B - "$SDD_TEST_REVIEW_OUTPUT" <<'PY'
 import os,sys
-fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+try:
+    fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+except FileExistsError:
+    print('uberdev sdd: test_review_artifact_exists',file=sys.stderr); raise SystemExit(2)
+except OSError as error:
+    print(f'uberdev sdd: test_review_artifact_create_failed errno={error.errno}',file=sys.stderr); raise SystemExit(2)
 os.close(fd)
 PY
 ```
@@ -419,7 +585,7 @@ edge_id: sdd.finish_branch
 model_invocation: false
 ```
 
-5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
+5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
 
 ### Parallel Dispatch Pattern
 
@@ -501,7 +667,7 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 
 **DONE_WITH_CONCERNS:** The implementer completed the work but flagged doubts. Read the concerns before proceeding. If the concerns are about correctness or scope, address them before review. If they're observations (e.g., "this file is getting large"), note them and proceed to review.
 
-**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task; overflow routes into the BLOCKED ladder below.
+**NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch — at most `context_rounds` (2) answer-and-re-dispatch cycles per task. Call `sdd_round_permitted context_rounds <next round>` before minting the next instance id: on rc `0` append the supplied context to that task's fix ledger with `sdd_append_fix_ledger` and re-dispatch with `failure_path=<that task's ledger>`; on rc `3` call `sdd_note_cap_exhausted` and route into the BLOCKED ladder below.
 
 **BLOCKED:** The implementer cannot complete the task. Assess the blocker:
 1. If it's a context problem, provide more context and re-dispatch the same stable edge
@@ -660,7 +826,7 @@ Ownership map:
 - Don't rush them into implementation
 
 **If reviewer finds issues:**
-- A fresh `implementation-worker` child on the implementation edge fixes them
+- The controller calls `sdd_round_permitted fix_rounds <next round>` first. On rc `0` it appends the round's findings to that task's fix ledger with `sdd_append_fix_ledger` and dispatches a new `implementation-worker` allocation on the implementation edge with `failure_path` pointing at that ledger — so the fixer opens one file and sees rounds 1..N instead of re-deriving what the reviewer already priced in. On rc `3` it calls `sdd_note_cap_exhausted` and routes the task into the BLOCKED ladder.
 - Reviewer reviews again
 - Repeat until approved or the task's `fix_rounds` cap (3) is exhausted — then route through the BLOCKED ladder, never an unbounded loop
 - Don't skip the re-review

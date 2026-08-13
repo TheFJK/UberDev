@@ -6,12 +6,35 @@ LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 HELPER="$ROOT/plugins/uberdev/lib/child-receipts.py"
 
 python3 -I -B - "$HELPER" <<'PY'
+import contextlib
 import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+    FileNotFoundError, so an unlink race reds a job whose diff never touched
+    this file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+
+    Both call sites below monkeypatch `module.os` — which is the real `os` —
+    and restore it in a `finally` INSIDE the `with` body, so the rmtree here
+    always runs through the unpatched module. Keep it that way.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 helper_path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("child_receipts_portable_contract", helper_path)
@@ -24,7 +47,7 @@ failures = []
 
 # A successful os.open followed by a failed fstat still transfers descriptor
 # ownership to secure_windows_open; the failure path must close it.
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("child-dispatch-receipts-fstat-") as temporary:
     target = pathlib.Path(temporary) / "receipt.jsonl"
     target.touch()
     opened_descriptors = []
@@ -69,7 +92,7 @@ with tempfile.TemporaryDirectory() as temporary:
 
 # A regular-file read is allowed to return short chunks. The Windows boundary
 # must accumulate until EOF instead of parsing the first partial chunk.
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("child-dispatch-receipts-shortread-") as temporary:
     target = pathlib.Path(temporary) / "handoff.json"
     payload = (
         json.dumps(
@@ -113,12 +136,30 @@ PY
 if [ "${OS:-}" = Windows_NT ]; then
   HELPER_NATIVE="$(cygpath -w "$HELPER")"
   python3 -I -B - "$HELPER_NATIVE" <<'PY'
+import contextlib
 import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    Native Windows is exactly where teardown-on-open-handles fails most
+    readily, and this fence builds symlinks and hard links inside the tree.
+    Full rationale: tests/code-fixer-contract.test.sh.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 helper_path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("child_receipts", helper_path)
@@ -134,7 +175,7 @@ def rejected(callable_):
         return
     raise AssertionError("unsafe Windows receipt path was accepted")
 
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("child-dispatch-receipts-windows-") as temporary:
     root = pathlib.Path(temporary)
     receipt = root / "receipts.jsonl"
     receipt.touch()

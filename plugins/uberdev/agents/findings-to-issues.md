@@ -325,10 +325,18 @@ Explicit forbidden patterns:
    # consumed by Step 8d to pick @author-mention vs silent-file shape.
    # Review schema v2 uses {blocker,suggestion}; explicit legacy variants may
    # additionally normalize {critical,important,major} (RFC 0002 §3.1).
+   #
+   # `disposition` reaching this helper is one of FOUR values: the validated
+   # fixer set {APPLIED, SKIPPED, REFUSED} (shared/code-fixer-output-v1.md),
+   # plus DEFERRED — the Step-3 default when the disposition path is empty,
+   # which is the normal case for the uberscan / uberthink / testers variants.
+   # APPLIED is the only value that suppresses filing.
+   # SKIPPED, REFUSED and DEFERRED are all issue-eligible subject to severity.
+   # RFC 0002 §3.1's second suppressor row never had a writer; the arm that
+   # implemented it is deleted as of #454 — see that RFC's #454 amendment.
    route_by_severity() {
      local severity="$1" disposition="$2"
      [ "$disposition" = "APPLIED" ]  && return 1   # already fixed inline
-     [ "$disposition" = "REJECTED" ] && return 1   # review decided wrong
      case "$severity" in
        blocker)         row_tier="BLOCKER"  ; return 0 ;;
        critical)        row_tier="CRITICAL" ; return 0 ;;

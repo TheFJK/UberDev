@@ -28,10 +28,12 @@
 # its own oracle (the P1–P4 discipline of tests/prkit-publish.test.sh).
 #
 # Unix-only, declared in the test.yml windows-skip marker block: C-FILES digests
-# sha256 over exact source bytes and no `.gitattributes` exists, so a Windows
-# checkout with the default `core.autocrlf=true` rewrites LF->CRLF and every
-# digest would differ. That is a property of the checkout, not of the register —
-# same reason as tests/prkit-publish.test.sh.
+# sha256 over exact source bytes and no `.gitattributes` rule covers the vendored
+# component paths — the repo's only rule (#461) is scoped to
+# `plugins/uberdev/hooks/**` — so a Windows checkout with the default
+# `core.autocrlf=true` rewrites LF->CRLF and every digest would differ. That is a
+# property of the checkout, not of the register — same reason as
+# tests/prkit-publish.test.sh.
 #
 # Deliberately does NOT source tests/_lib_assert_structural.sh (so
 # tests/test-harness-source-guards.test.sh needs no fail-loud guard here), and
@@ -184,10 +186,10 @@ fi
 # V5 — C-HEADER: the count of header-carrying files is knowable TODAY, so it is
 # asserted exactly. A `>= 1` bound decays into a tautology as files are added.
 HEADER_COUNT="$(grep -rlE 'Vendored from [^@[:space:]]+@[0-9a-f]{40}' "$REPO_ROOT/plugins/uberdev" | wc -l | tr -d '[:space:]')"
-if [ "$HEADER_COUNT" = "20" ]; then
-  ok "V5 C-HEADER: exactly 20 files carry an in-file provenance header"
+if [ "$HEADER_COUNT" = "21" ]; then
+  ok "V5 C-HEADER: exactly 21 files carry an in-file provenance header"
 else
-  no "V5 C-HEADER: expected 20 header-carrying files, found $HEADER_COUNT"
+  no "V5 C-HEADER: expected 21 header-carrying files, found $HEADER_COUNT"
 fi
 if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-HEADER >/dev/null 2>&1; then
   ok "V5b C-HEADER: every on-disk header agrees with its component's register entry"
@@ -259,7 +261,7 @@ else no "V9 a never-reconcile divergence is missing or undocumented"
 fi
 
 echo
-echo "== V10-V18: falsifiability — mutate one site, demand the NAMED check id =="
+echo "== V10-V29: falsifiability — mutate one site, demand the NAMED check id =="
 
 # V10 — an undeclared new file inside a declared component.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
@@ -402,6 +404,392 @@ if grep -q 'C-FILES' <<<"$CHECK_OUT" && ! grep -q 'Traceback' <<<"$CHECK_OUT"; t
   ok "V19b the checks queued behind it still ran — C-FILES named, no traceback"
 else
   no "V19b an id-less entry suppressed the checks behind it"
+  echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+# V20-V23 — C-BASE: a recorded base commit must be WITNESSED in the shipped
+# bytes (#462).
+#
+# THE DEFECT. C-HEADER validates the headers that exist; nothing validated a
+# component that CLAIMS a base. Measured on the pre-#462 tree (62afcc5), where
+# 17 components read "unknown": setting all 17 to a 40-hex literal (`deadbeef`
+# x5) left the checker at rc 0 with every one of the eight checks then defined
+# green. A fabricated provenance claim was therefore a single, invisible,
+# one-field edit per component. C-BASE is the converse of
+# C-HEADER: for every component that records a base, at least one of the
+# component's own files must restate that exact `owner/repo@sha` in a
+# provenance header.
+#
+# Every mutation row below is applied through an `if python3 …; then assert_red`
+# gate. A mutation that silently no-ops would leave the sandbox pristine, the
+# checker green, and the row red for a reason that has nothing to do with
+# C-BASE; the gate makes "the probe could not break anything" say so in its own
+# words instead of dressing it up as a checker verdict.
+# ---------------------------------------------------------------------------
+
+# V20 — C-BASE exists and is dispatched, and is green on the shipped tree.
+#
+# NOT the `--only` vacuity trap: `--only` with an id that is not in ALL_CHECKS
+# goes through `die_usage` and exits 2, so a row demanding exit 0 goes red when
+# the check is missing. It also goes red if the check is registered but red on
+# the shipped tree. What it can NOT see on its own is a check registered but
+# never wired into the `main()` dispatch — an arm that is never called leaves
+# `failures` empty exactly like a passing one — which is why V21/V22/V23 below
+# carry the behavioural weight.
+if python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-BASE >/dev/null 2>&1; then
+  ok "V20 C-BASE is a registered, dispatched check and is green on the shipped tree"
+else
+  no "V20 C-BASE is missing, unregistered, or red on the shipped tree"
+fi
+
+# V21 — a fabricated pin on a component that carries no header anywhere.
+# `skills/brainstorm` records "unknown" today and no file under it carries a
+# provenance header, so a 40-hex literal here is a pure fabrication. THIS EXACT
+# PROBE IS GREEN ON main — that is the defect. C-SCHEMA accepts any 40-hex and
+# C-HEADER has no header to disagree with, so C-BASE is the only check that can
+# see it.
+#
+# Every mutation below is applied through an `if python3 …; then assert_red`
+# gate. A mutation that silently no-ops would leave the sandbox pristine, the
+# checker green, and the row red for a reason that has nothing to do with
+# C-BASE; the gate makes "the probe could not break anything" say so in its own
+# words instead.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("path") == "skills/brainstorm":
+        if c.get("vendored_at_commit") != "unknown":
+            raise SystemExit("skills/brainstorm is already pinned — pick another "
+                             "headerless component for this row")
+        c["vendored_at_commit"] = "deadbeef" * 5
+        break
+else:
+    raise SystemExit("skills/brainstorm is no longer in the register")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-BASE" "V21 a fabricated 40-hex base on a component with no in-file header"
+else
+  no "V21 could not fabricate a base on skills/brainstorm — the probe mutated nothing"
+fi
+
+# V22 — the witness removed while the register stays pinned. The inverse of
+# V15: V15 mutates the header and keeps the register, this mutates the file so
+# the header is GONE and the register's claim is left unwitnessed. C-FILES also
+# reds here (the tracked digest moves) — which does not weaken the row, because
+# `assert_red` demands C-BASE *by name*.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/skills/dispatching-parallel-agents/SKILL.md" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().splitlines(True)
+kept = [ln for ln in lines if "Vendored from" not in ln]
+if len(kept) == len(lines):
+    raise SystemExit("nothing to delete: %s carries no provenance header" % p)
+open(p, "w", encoding="utf-8").write("".join(kept))
+PY
+then
+  assert_red "$SB" "C-BASE" "V22 a pinned component whose only in-file witness was deleted"
+else
+  no "V22 skills/dispatching-parallel-agents carries no provenance header to delete"
+fi
+
+# V23 — anti-vacuity. If every third-party component drops back to "unknown",
+# C-BASE's loop body never runs and a naive implementation would report success
+# over an empty set — the same "the scan is vacuous" trap C-HEADER, C-COVER,
+# C-README and C-STANCE each carry their own guard for. C-HEADER also reds here,
+# once per header-carrying file (V5 is what pins that count — restating it in
+# this comment would just be a second copy of it, free to drift); the row demands
+# C-BASE by name, so C-HEADER's noise cannot satisfy it.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+pinned = 0
+for c in d["components"]:
+    if c.get("origin") == "third-party":
+        if c.get("vendored_at_commit") != "unknown":
+            pinned += 1
+        c["vendored_at_commit"] = "unknown"
+if not pinned:
+    raise SystemExit("no third-party component was pinned — unpinning them all "
+                     "changes nothing and the row would prove nothing")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-BASE" "V23 every base dropped to 'unknown' is red, not vacuously green"
+else
+  no "V23 could not unpin the register — no component recorded a base to remove"
+fi
+
+echo
+echo "== V24-V25: derived-count and escape-hatch ratchets =="
+
+# V24 — RFC 0019 §2.2's counts are DERIVED from the register, not typed once and
+# left to rot.
+#
+# THE CLASS: policy prose that lies while CI stays green. §2.2 states how many
+# components are unpinned; the register is the only thing that knows. Nothing
+# compared them, so the first real backfill (#462) would have left the RFC
+# asserting a number that is now false — and the RFC is what a reviewer reads to
+# decide whether a `vendored_at_commit` is trustworthy.
+#
+# Pure Python over the committed register and the committed RFC: no checker in
+# the loop, so a mis-parsing checker cannot make this row lie (the V1/V4/V8/V9
+# idiom). §1's counts at :24-26 are deliberately OUT of reach — that paragraph
+# opens "Until this RFC, the provenance ... was recorded in three places", so it
+# describes the state before the register existed and must not track it.
+if python3 - "$REGISTER" "$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md" <<'PY'
+import json, sys
+reg, rfc_path = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+third = [c for c in d["components"] if c.get("origin") == "third-party"]
+assert third, "no third-party components declared"
+n_skills_unknown = len([c for c in third
+                        if c["path"].startswith("skills/")
+                        and c.get("vendored_at_commit") == "unknown"])
+n_unknown_total = len([c for c in third
+                       if c.get("vendored_at_commit") == "unknown"])
+rfc = open(rfc_path, encoding="utf-8").read()
+for want in ("the %d unpinned skill directories" % n_skills_unknown,
+             "honest value for %d of the 20" % n_unknown_total):
+    assert want in rfc, "RFC 0019 does not say %r — the register has moved on" % want
+PY
+then ok "V24 RFC 0019 §2.2's unpinned counts still match the register"
+else no "V24 RFC 0019 §2.2 states an unpinned count the register contradicts"
+fi
+
+# V25 — no `track` component excuses a file from the digest lock.
+#
+# `divergences[]` entries with a non-null `file` are C-FILES' declared-change
+# escape hatch (vendor-check.py check_files: `excused` is consulted before the
+# sha256 mismatch is reported). On a `fork` component that is the whole point.
+# On a `track` component it silently disarms the digest for that file — and
+# V13's own mutation target is chosen as the first `track` component carrying
+# files[], which is exactly the component this change pins, so one such entry
+# would make V13 pass on a mutated tracked file: the ratchet would go quiet
+# rather than red.
+#
+# RFC 0019 §2.3 names the escape hatch deliberately, so deleting it from the
+# checker would be an RFC amendment. Pinning it here instead makes it costly to
+# adopt on purpose and impossible to adopt by accident. Green today for all
+# seven `track` components.
+if python3 - "$REGISTER" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+track = [c for c in d["components"] if c.get("stance") == "track"]
+assert track, "no track components — the row would be vacuous"
+offenders = [(c["id"], v["file"]) for c in track
+             for v in c.get("divergences", []) if v.get("file")]
+assert not offenders, \
+    "track components carrying a file-scoped digest excuse: %s" % offenders
+PY
+then ok "V25 no track component excuses a file from the C-FILES digest lock"
+else no "V25 a track component carries a file-scoped divergence — the digest lock is disarmed"
+fi
+
+# ---------------------------------------------------------------------------
+# V26-V29: C-REFS — a skill that points at a sibling file which is not there.
+#
+# THE CHANNEL (#457). Every check above reconciles the register against disk, or
+# a header against the register. None of them reads what a shipped document
+# SAYS. So a SKILL.md could keep instructing agents to read a reference that a
+# vendor swap deleted, and all eight checks stayed green — the reference is not
+# a register field, and `stance: fork` means C-FILES never digests the file that
+# carries it. That is exactly the surface this component's own swap moved.
+#
+# Each row below breaks the reference and NOTHING else: the register is kept
+# consistent with disk by hand, so C-FILES, C-COVER and C-HEADER have nothing to
+# say and C-REFS is the only check that CAN go red.
+#
+# Deliberately driven through `assert_red`, which calls the FULL checker. Using
+# `--only C-REFS` here would be a vacuity trap: before the check existed,
+# `die_usage` printed `unknown check id(s): ['C-REFS'] (known: …)` — a non-zero
+# rc whose text CONTAINS the wanted id, so the row would report PASS against a
+# checker that has no such check.
+# ---------------------------------------------------------------------------
+
+# V26 — the reference target is deleted and the register is updated to match, so
+# register and disk still agree. This is #457's own failure mode: a vendor swap
+# that retires a file and leaves the referring document behind.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+REF_TARGET="$SB/plugins/uberdev/skills/test-driven-development/writing-good-tests.md"
+[ -e "$REF_TARGET" ] || { echo "  ABORT — V26's target is already absent; the mutation would be a no-op"; exit 99; }
+rm -f "$REF_TARGET"
+python3 - "$SB/plugins/uberdev/vendor.json" <<'PY' || { echo "  ABORT — V26 register edit failed"; exit 99; }
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("path") != "skills/test-driven-development":
+        continue
+    before = len(c["files"])
+    c["files"] = [f for f in c["files"]
+                  if (f.get("path") if isinstance(f, dict) else f) != "writing-good-tests.md"]
+    assert len(c["files"]) == before - 1, "writing-good-tests.md was not declared; V26 proves nothing"
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+assert_red "$SB" "C-REFS" "V26 a skill reference whose target was removed with the register kept consistent"
+
+# V27 — the target file stays; the reference is misspelled. File set, register,
+# headers and counts are all untouched, so C-REFS is the only check that can
+# possibly notice.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+python3 - "$SB/plugins/uberdev/skills/test-driven-development/SKILL.md" <<'PY' || { echo "  ABORT — V27 mutation failed"; exit 99; }
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n = s.count("](writing-good-tests.md)")
+assert n == 1, "expected exactly one markdown link to writing-good-tests.md, found %d" % n
+open(p, "w", encoding="utf-8").write(
+    s.replace("](writing-good-tests.md)", "](writing-good-tests-typo.md)"))
+PY
+assert_red "$SB" "C-REFS" "V27 a sibling reference pointing at a name that is not on disk"
+
+# V28 — anti-vacuity, asserted in Python rather than through the checker (same
+# design as V1/V3/V4): a checker whose regexes silently match nothing would make
+# every row above pass while protecting nothing. The independent scan states the
+# corpus is non-empty and fully resolving; the two checker calls then state that
+# `C-REFS` is a REGISTERED id, not an `if` arm nobody reaches.
+V28_WHY=""
+if ! python3 - "$REGISTER" "$REPO_ROOT" <<'PY'
+import json, os, re, sys
+
+FENCE = re.compile(r"^\s*(?:```|~~~)")
+CODESPAN = re.compile(r"`[^`]*`")
+AT_REF = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9]+)")
+MD_LINK = re.compile(r"\]\(([^)\s]+)")
+
+
+def refs(text):
+    body, in_fence = [], False
+    for line in text.splitlines():
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            # skills/writing-skills teaches the `@`-ref convention by quoting a
+            # BAD example in backticks; a scan that read it would report a
+            # dangling reference against a file describing what NOT to write.
+            body.append(CODESPAN.sub(" ", line))
+    joined = "\n".join(body)
+    out = set()
+    for t in set(AT_REF.findall(joined)) | set(MD_LINK.findall(joined)):
+        if "://" in t or t.startswith(("/", "#", "mailto:")):
+            continue
+        out.add(t)
+    return sorted(out)
+
+
+reg, root = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+plugin = os.path.join(root, "plugins", "uberdev")
+seen, dangling = 0, []
+for c in d["components"]:
+    if c.get("origin") != "third-party":
+        continue
+    cdir = os.path.join(plugin, c["path"])
+    for entry in c.get("files", []):
+        rel = entry.get("path") if isinstance(entry, dict) else entry
+        if not isinstance(rel, str) or not rel.endswith(".md"):
+            continue
+        src = os.path.join(cdir, rel) if os.path.isdir(cdir) else cdir
+        text = open(src, encoding="utf-8").read()
+        for ref in refs(text):
+            seen += 1
+            if not os.path.exists(os.path.join(os.path.dirname(src), ref)):
+                dangling.append("%s/%s -> %s" % (c["path"], rel, ref))
+assert seen >= 3, "only %d sibling reference(s) found — the C-REFS corpus is too thin to protect anything" % seen
+assert not dangling, "shipped tree carries dangling references: %s" % dangling
+PY
+then V28_WHY="V28 the independent scan found fewer than 3 sibling references, or an unresolved one"
+elif ! python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-REFS >/dev/null 2>&1; then
+  V28_WHY="V28 vendor-check.py --only C-REFS is not green on the shipped tree"
+else
+  BOGUS_RC=0
+  BOGUS_OUT="$(python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-BOGUS 2>&1)" || BOGUS_RC=$?
+  if [ "$BOGUS_RC" -eq 0 ]; then
+    V28_WHY="V28 --only C-BOGUS was accepted; the known-id list is not enforced"
+  elif ! grep -q 'C-REFS' <<<"$BOGUS_OUT"; then
+    V28_WHY="V28 C-REFS is not in ALL_CHECKS — --only C-BOGUS never listed it among the known ids"
+  fi
+fi
+if [ -z "$V28_WHY" ]; then
+  ok "V28 C-REFS: >= 3 resolving sibling references on the shipped tree, and the id is registered"
+else
+  no "$V28_WHY"
+fi
+
+# V28b — the vacuity arm actually fires. Without this row, "a checker that finds
+# zero references must fail loud" is prose with no test: the same class as
+# check_header's `found == 0` guard, which exists precisely because a scan that
+# sees nothing otherwise reports agreement. Every declared third-party markdown
+# file is rewritten so no reference SHAPE survives; provenance headers are left
+# byte-exact and `track` digests are re-recorded against the mutated bytes, so
+# C-HEADER and C-FILES have nothing to say and C-REFS is again the only check
+# that can go red.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+python3 - "$SB" <<'PY' || { echo "  ABORT — V28b mutation failed"; exit 99; }
+import hashlib, json, os, re, sys
+
+AT_LEADER = re.compile(r"@(?=[A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9])")
+root = sys.argv[1]
+plugin = os.path.join(root, "plugins", "uberdev")
+regp = os.path.join(plugin, "vendor.json")
+d = json.load(open(regp, encoding="utf-8"))
+touched = 0
+for c in d["components"]:
+    if c.get("origin") != "third-party":
+        continue
+    cdir = os.path.join(plugin, c["path"])
+    for entry in c.get("files", []):
+        rel = entry.get("path") if isinstance(entry, dict) else entry
+        if not isinstance(rel, str) or not rel.endswith(".md"):
+            continue
+        src = os.path.join(cdir, rel) if os.path.isdir(cdir) else cdir
+        text = open(src, encoding="utf-8").read()
+        out = []
+        for ln in text.splitlines(True):
+            if "Vendored from" not in ln:
+                ln = AT_LEADER.sub("at ", ln.replace("](", "] ("))
+            out.append(ln)
+        new = "".join(out)
+        if new != text:
+            open(src, "w", encoding="utf-8").write(new)
+            touched += 1
+        if isinstance(entry, dict):
+            entry["sha256"] = hashlib.sha256(open(src, "rb").read()).hexdigest()
+json.dump(d, open(regp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+assert touched > 0, "no declared markdown file changed — the mutation is a no-op"
+PY
+assert_red "$SB" "C-REFS" "V28b a tree with no sibling reference at all is red, not vacuously green"
+
+# V29 — the must-STAY-GREEN row, in the same spirit as V14. An `@` that carries a
+# local part is an address or a version pin, never a sibling file: an email, an
+# npm-style `pkg@1.2.3`, and a `repo@v6.2.0` tag all contain a dotted token that
+# a naive `@`-scan reads as a filename (`x@y.com` -> `y.com`), reporting a
+# dangling reference against a document that references nothing at all. Appended
+# to a fork-stance file so no digest moves and C-REFS is the only check in play;
+# drop the lookbehind from AT_REF_RE and this row goes red.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+ADDR_FILE="$SB/plugins/uberdev/skills/test-driven-development/SKILL.md"
+python3 - "$ADDR_FILE" <<'PY' || { echo "  ABORT — V29 mutation failed"; exit 99; }
+import sys
+p = sys.argv[1]
+with open(p, "a", encoding="utf-8") as fh:
+    fh.write("\nReport problems to maintainer.person@example.com, pin deps as "
+             "left-pad@1.2.3, and cite upstream as obra/superpowers@v6.2.0.\n")
+PY
+if python3 "$CHECK" --repo-root "$SB" >/dev/null 2>&1; then
+  ok "V29 an email, a package pin and a tag pin are not read as sibling references"
+else
+  no "V29 an address-shaped @-token was read as a sibling file — C-REFS false-positives"
+  run_check "$SB" || true
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
 fi
 

@@ -175,8 +175,11 @@
     }
   ],
   "pending": [
+    "agents/ci-code-fixer.md",
+    "agents/ci-failure-classifier.md",
     "agents/code-fixer.md",
     "agents/code-reviewer.md",
+    "agents/code-simplifier.md",
     "agents/findings-to-issues.md",
     "commands/review-pr.md",
     "commands/simplify.md",
@@ -187,6 +190,7 @@
     "lib/review-aggregate.sh",
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json",
-    "shared/code-fixer-output-v1.md"
+    "shared/code-fixer-output-v1.md",
+    "skills/merge-pipeline/lib/discover.sh"
   ]
 }

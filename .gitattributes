@@ -1,0 +1,51 @@
+# Line endings for the shipped hook sources (#461).
+#
+# WHY THE HOOKS DIR MUST BE LF. plugins/uberdev/hooks/hooks.json declares
+# "shell": "bash" on all four handlers, so BASH parses run-hook.cmd — its
+# cmd.exe half is a `: << 'CMDBLOCK'` heredoc, not a batch file, on that path.
+# Under a CR-PRESERVING bash a CRLF copy dies before it ever reaches
+# session-start: measured rc=127 with
+#   run-hook.cmd: line 58: $'\r': command not found
+#   bash: .../hooks/session-start: No such file or directory
+# and `bash -n` on the same copy still returns 0, so a syntax check cannot see
+# it. Git for Windows installs with core.autocrlf=true by DEFAULT, so without
+# this rule a real user's clone rewrites these files and the SessionStart hook
+# stops loading — silently, which is the failure mode #461 is about.
+#
+# WHICH INTERPRETERS THAT MEASUREMENT COVERS — it is NOT every host. The
+# measurement above is stock GNU bash: ubuntu, macOS, WSL, a Linux container
+# over the same checkout, this repo's own CI. It is NOT the bash Git for Windows
+# ships. That one is built from MSYS2's bash package, which applies
+# MSYS2-packages/bash/0005-bash-4.3-msys2-fix-lineendings.patch; the patch adds
+# `#ifdef __MSYS__ if (c == '\r') continue; #endif` to shell_getc() in y.tab.c,
+# so CR is discarded from the shell's input stream before the lexer sees it.
+# That is compile-time and ungated — not Cygwin's opt-in `set -o igncr`, not a
+# text-mode mount — so on Git Bash a CRLF script CANNOT be made to fail, and no
+# test can honestly assert that it does. The rule is still load-bearing: it
+# removes the clone's dependence on WHICH interpreter happens to resolve, and
+# every CR-preserving one above can still read a Git-for-Windows checkout.
+#
+# OPEN, DELIBERATELY NOT ACTED ON. An EXECUTED run-hook.cmd is re-dispatched
+# through %COMSPEC% on Windows (evidence rows XH6a/XH6c), and cmd.exe is the
+# CR-PREFERRING side of the polyglot — LF-only batch files are the historically
+# fragile case for label/goto seeking, which this file's `:collect_hook_args`
+# loop uses. Windows CI is green on the LF form today; revisit with measurement
+# before narrowing this rule to exclude run-hook.cmd.
+#
+# `eol=lf` beats core.autocrlf on checkout. The mechanism proofs live in
+# tests/crossplatform-shell-wrappers.test.sh: XH2a (the CR detector is byte-exact
+# on this host — `grep` is NOT, it reads text-mode under MSYS2 and cannot see a
+# CR at all, which made the XH2 census vacuously green on windows-latest until it
+# was measured), XH2 (no CR in the checkout), XH2b0/XH2b1/XH2b2 (fixture
+# integrity + the interpreter's measured CR handling), XH2b (the harm, on a
+# CR-preserving bash), XH2c (a syntax check is blind to it) and XH2d (this rule
+# beats core.autocrlf=true, on every host).
+#
+# WHY NOT `* text=auto`. Three suites are windows-skipped on a byte-exactness
+# rationale — prkit-publish (sha256 over copy-set sources), vendor-provenance
+# (C-FILES digests) and review-precision (RP17 byte-compares a committed .md
+# against a fresh render). Widening this file would change what those paths
+# check out as on Windows, converting a documented skip into an untested claim.
+# Keep every rule below scoped to plugins/uberdev/hooks/; tests/docs-accuracy.test.sh
+# row T8.10 enforces that narrowness.
+plugins/uberdev/hooks/** text eol=lf

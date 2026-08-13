@@ -3,6 +3,26 @@
 # reviewer fanout, dispatches each configured wave before waiting
 # (5 distinct files; code-reviewer dispatched twice — general lens + correctness
 # lens), and that deprecated pre-push call sites have been removed per #67.
+#
+# SHAPE RULE for every multi-assertion subshell row below (#469). Write
+#
+#   (
+#     set -euo pipefail
+#     …assertions, each `|| exit <distinct code>`…
+#   )
+#   ROW_RC=$?
+#   if [ "$ROW_RC" -eq 0 ]; then …PASS… else …FAIL (rc=$ROW_RC)… fi
+#
+# and NEVER `if ( set -euo pipefail; … ); then`. POSIX suppresses the -e setting
+# for a command whose exit status is being tested, and bash keeps that
+# suppression for the WHOLE subshell body — an explicit `set -e` on its first
+# line does not re-arm it. In the condition form every assertion above the last
+# is a no-op and the row's verdict is just the last command's status, so a row
+# can (and did) report PASS *because* its subject failed: V2.7e pinned the
+# aggregate writer's sha256, the writer grew two lines, the digest check made
+# the stub abort before the writer ran, and the trailing `[ ! -e "$out" ]` went
+# TRUE. A `deadbeef` pin passed 142/0 on macOS. tests/test-harness-source-guards.test.sh
+# A4 is the repo-wide drift guard for this shape.
 
 set -u
 set -o pipefail
@@ -18,8 +38,13 @@ SUBAGENT_DRIVEN="$REPO_ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 # #304 / RFC 0012 §3.4: the tier-prompt heredocs (AUTO_MODE branches) live in
 # lib/solve-launcher.sh (hoisted out of solve-pipeline/SKILL.md).
 SOLVE_PIPELINE="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+# #467: the review fleet's REVIEW_ROSTER is the AUTHORITY for which agent file
+# each Phase-1 lens is dispatched with. R-roster-files below compares it against
+# this skill's two prose copies. Listed in the preflight so a rename is an
+# explicit rc=2, never a silently-zero-assertion PASS.
+REVIEW_FLEET_JS="$REPO_ROOT/plugins/uberdev/skills/review-fleet/workflow.js"
 
-for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE"; do
+for f in "$POST_IMPL" "$SOLVE_CMD" "$SUBAGENT_DRIVEN" "$SOLVE_PIPELINE" "$REVIEW_FLEET_JS"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -131,7 +156,6 @@ ROSTER_COPIES=(
   "plugins/uberdev/skills/review-fleet/workflow.js"
   "plugins/uberdev/lib/report_primitives.py"
   "plugins/uberdev/lib/code_fixer_contract.py"
-  "plugins/uberdev/lib/review-aggregate.sh"
   "plugins/uberdev/policy/solve-run-tree-v1.json"
   "plugins/uberdev/skills/finish-branch/SKILL.md"
   "tools/prkit/generate.sh"
@@ -155,6 +179,140 @@ for roster_copy in "${ROSTER_COPIES[@]}"; do
     FAIL=$((FAIL + 1))
   fi
 done
+# lib/review-aggregate.sh used to be the tenth copy. #481 replaced its seven
+# hardcoded literals with `contract.PHASE_CONTRIBUTORS[phase]`, so the honest
+# guard is no longer "this copy still matches" -- it is "this file holds NO
+# copy". Deleting the array entry alone would have been the #370 class: a
+# completeness guard quietly shrunk to stop covering the drift it exists to
+# find. This assertion is STRICTER than the one it replaces.
+ROSTER_DERIVED="plugins/uberdev/lib/review-aggregate.sh"
+if grep -Fq 'PHASE_CONTRIBUTORS[' "$REPO_ROOT/$ROSTER_DERIVED" \
+   && ! grep -qE 'review_pr\.review\.[a-z_]+' "$REPO_ROOT/$ROSTER_DERIVED"; then
+  echo "  PASS  R-roster-derived — $ROSTER_DERIVED derives the roster and keeps no copy of it"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-derived — $ROSTER_DERIVED must read PHASE_CONTRIBUTORS and spell no review_pr.review.* edge"
+  FAIL=$((FAIL + 1))
+fi
+# The Phase 2 roster has copies of its own. Kept as a SEPARATE loop because the
+# array above is compared against the REVIEW roster; widening it would compare
+# simplify edges against review edges and pass only by accident.
+SIMPLIFY_ROSTER_SSOT="$(
+  . "$REPO_ROOT/plugins/uberdev/lib/review-fleet-args.sh"
+  review_fleet_roster simplify | cut -f2 | tr '\n' ' '
+)"
+SIMPLIFY_ROSTER_COPIES=(
+  "plugins/uberdev/lib/review-fleet-args.sh"
+  "plugins/uberdev/lib/code_fixer_contract.py"
+  "plugins/uberdev/lib/report_primitives.py"
+  "plugins/uberdev/commands/simplify.md"
+  "plugins/uberdev/commands/review-pr.md"
+  "plugins/uberdev/policy/solve-run-tree-v1.json"
+  "plugins/uberdev/skills/review-fleet/workflow.js"
+  "plugins/uberdev/skills/review-fleet/SKILL.md"
+  "plugins/uberdev/skills/ubersimplify-pipeline/aggregate.py"
+  "plugins/uberdev/agents/findings-to-issues.md"
+  "tools/prkit/generate.sh"
+  "tools/prkit/verify.sh"
+)
+for roster_copy in "${SIMPLIFY_ROSTER_COPIES[@]}"; do
+  if [ ! -r "$REPO_ROOT/$roster_copy" ]; then
+    echo "  FAIL  R-simplify-roster — declared roster copy is missing: $roster_copy"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  ROSTER_OBSERVED="$(grep -oE 'review_pr\.simplify\.[a-z_]+' "$REPO_ROOT/$roster_copy" \
+    | awk '!seen[$0]++' | tr '\n' ' ')"
+  if [ "$ROSTER_OBSERVED" = "$SIMPLIFY_ROSTER_SSOT" ]; then
+    echo "  PASS  R-simplify-roster — $roster_copy carries the simplify roster in SSOT order"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R-simplify-roster — $roster_copy drifted from review_fleet_roster simplify"
+    echo "        ssot:     $SIMPLIFY_ROSTER_SSOT"
+    echo "        observed: $ROSTER_OBSERVED"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "== R-roster-files (#467): every copy of the lens->agent-file mapping agrees =="
+# R-roster-complete above compares the EDGE ids across nine copies. The other
+# half of each roster record — which agent FILE the lens is dispatched with —
+# was compared nowhere in the repo (`grep -rn agentFile tests/` returned zero
+# before this block). That gap is what let a repointed `agentFile:` go unseen
+# while the precision stamp kept watching the file the fleet no longer
+# dispatches. This block compares the two prose copies in THIS skill against
+# REVIEW_ROSTER; tests/review-precision.test.sh RP30 compares the miner's copy.
+#
+# grep/sed/awk only, like R-roster-complete: this fixture runs on
+# windows-latest, where core.autocrlf=true rules out byte digests and the
+# python3 fixtures are skipped.
+ROSTER_FILES="$(sed -n '/^const REVIEW_ROSTER = \[/,/^];/p' "$REVIEW_FLEET_JS" \
+  | grep -o 'agentFile: "[^"]*"' | sed 's/agentFile: "//; s/"$//')"
+# The table's second column, block-scoped from its header row to the next blank
+# line. `agents/` and the ` (inherit)` adornment are stripped so both sides
+# speak the roster's bare-filename vocabulary.
+TABLE_FILES="$(awk '/^\| Reviewer \| Agent file \| Lens \|/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+  | grep -v '^|[- |]*|$' | awk -F'|' '{print $3}' \
+  | sed 's/`//g; s/ (inherit)//; s#agents/##; s/^ *//; s/ *$//')"
+# The "Pairs with:" prose is explicitly the SIX DISTINCT files, so it is
+# compared de-duplicated. Its block is the last one in the file, so the
+# terminator must be "blank line OR EOF" — which is what a bare `f` action does.
+PAIRS_FILES="$(awk '/^\*\*Pairs with:\*\*/{f=1;next} f&&/^$/{exit} f' "$POST_IMPL" \
+  | grep -o 'agents/[a-z0-9-]*\.md' | sed 's#agents/##' | sort -u)"
+ROSTER_FILES_UNIQ="$(sort -u <<<"$ROSTER_FILES")"
+ROSTER_COUNT="$(grep -c . <<<"$ROSTER_FILES")"
+TABLE_COUNT="$(grep -c . <<<"$TABLE_FILES")"
+PAIRS_COUNT="$(grep -c . <<<"$PAIRS_FILES")"
+ROSTER_UNIQ_COUNT="$(grep -c . <<<"$ROSTER_FILES_UNIQ")"
+
+# Anti-vacuity first: a table that loses a row, or a roster whose block shape
+# changed, must FAIL rather than pass on two empty lists comparing equal.
+if [ "$ROSTER_COUNT" -gt 0 ]; then
+  echo "  PASS  R-roster-files — extracted $ROSTER_COUNT agentFile value(s) from REVIEW_ROSTER"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — extracted ZERO agentFile values from REVIEW_ROSTER (block renamed or reshaped?)"
+  echo "        file: $REVIEW_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$TABLE_COUNT" -eq "$ROSTER_COUNT" ]; then
+  echo "  PASS  R-roster-files — the reviewer table has one row per roster record ($TABLE_COUNT)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the reviewer table has $TABLE_COUNT row(s) for $ROSTER_COUNT roster record(s)"
+  echo "        file: $POST_IMPL"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$PAIRS_COUNT" -eq "$ROSTER_UNIQ_COUNT" ]; then
+  echo "  PASS  R-roster-files — the 'Pairs with:' prose names one entry per distinct roster file ($PAIRS_COUNT)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the 'Pairs with:' prose names $PAIRS_COUNT file(s) for $ROSTER_UNIQ_COUNT distinct roster file(s)"
+  echo "        file: $POST_IMPL"
+  FAIL=$((FAIL + 1))
+fi
+# ORDERED, not set-equal: a set compare passes straight through a swap of two
+# table rows, which is exactly the drift that would mis-document which lens gets
+# which prompt.
+if [ "$TABLE_FILES" = "$ROSTER_FILES" ]; then
+  echo "  PASS  R-roster-files — the reviewer table's agent-file column matches REVIEW_ROSTER in roster order"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the reviewer table's agent-file column drifted from REVIEW_ROSTER"
+  echo "        roster: $(tr '\n' ' ' <<<"$ROSTER_FILES")"
+  echo "        table:  $(tr '\n' ' ' <<<"$TABLE_FILES")"
+  FAIL=$((FAIL + 1))
+fi
+if [ "$PAIRS_FILES" = "$ROSTER_FILES_UNIQ" ]; then
+  echo "  PASS  R-roster-files — the 'Pairs with:' file set matches the de-duplicated roster file set"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  R-roster-files — the 'Pairs with:' file set drifted from the de-duplicated roster file set"
+  echo "        roster (uniq): $(tr '\n' ' ' <<<"$ROSTER_FILES_UNIQ")"
+  echo "        prose  (uniq): $(tr '\n' ' ' <<<"$PAIRS_FILES")"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== Aspect emphasis input + Step 1 brief assembly (#73) =="
@@ -811,10 +969,27 @@ if grep -qE 'python3 -I -B -c' <<<"$V2_RUNTIME_WRITER_REGION"; then
 else
   echo "  FAIL  V2.7d — aggregate writer must use a fixed Python -c program while keeping JSON on stdin"; FAIL=$((FAIL + 1))
 fi
+# V2.7f (#468) — BOTH output guards must carry the path-wide ancestor walk, not
+# just the one-node lstat of the immediate parent. Counting TWO is the point:
+# deleting either guard's walk drops the count to 1 and reds this row on BOTH CI
+# jobs, which is the only non-vacuity signal available cross-platform because
+# the behavioural rows (tests/convention-citation.test.sh) are ubuntu-only.
+assert_count "$POST_REVIEW_V2_FUNCTION" \
+  '^post_review_write_aggregate_v2\(\) \{' '^}$' \
+  '_reject_symlinked_ancestors\(' 2 \
+  "V2.7f — both the aggregate and the citation-log parent get the symlinked-ancestor walk"
+assert_count "$POST_REVIEW_V2_FUNCTION" \
+  '^post_review_write_aggregate_v2\(\) \{' '^}$' \
+  '_reject_windows_reparse_ancestors\(' 2 \
+  "V2.7f — both parents get the Windows reparse walk, so a junction cannot escape either"
+assert_grep "$POST_REVIEW_V2_FUNCTION" "fail\('unsafe-output'\)" \
+  "V2.7f — the aggregate containment refusal keeps its existing unsafe-output class"
+assert_grep "$POST_REVIEW_V2_FUNCTION" "fail\('citation-log-unwritable'\)" \
+  "V2.7f — the citation-log containment refusal keeps its existing citation-log-unwritable class"
 TRANSPORT_SENTINEL='{"transport":"stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
 TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/transport.capture"
 TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/transport-output.md"
-TRANSPORT_WRITER_SHA256='298993c092901c6b428962d72bd4eb7eceb022ecfc5d4f8a2c814b376f33738b'
+TRANSPORT_WRITER_SHA256='2a0dc10035f65f84b6c805ade53e50253863540e2bba2e56d8fb55cbc90b7138'
 REAL_PYTHON3="$(command -v python3)"
 (
   set -euo pipefail
@@ -853,36 +1028,38 @@ if [ "$V2_7E_RC" -eq 0 ]; then
 else
   echo "  FAIL  V2.7e — aggregate writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only (rc=$V2_7E_RC; 94=writer digest drifted, 95=argv shape, 96/97=sentinel leaked to argv/env, 98=stdin mismatch)"; FAIL=$((FAIL + 1))
 fi
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" "${V2_GATE_ARGS[@]}" || exit 1
-  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" "${V2_GATE_ARGS[@]}" || exit 1
-  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
-  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "$POST_REVIEW_V2_TMP/nonempty.md" "${V2_GATE_ARGS[@]}" || exit 11
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/empty-input.json")" "$POST_REVIEW_V2_TMP/empty.md" "${V2_GATE_ARGS[@]}" || exit 12
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/structural-input.json")" "$POST_REVIEW_V2_TMP/structural.md" "${V2_GATE_ARGS[@]}" || exit 13
+  post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/duplicate-input.json")" "$POST_REVIEW_V2_TMP/duplicate.md" "${V2_GATE_ARGS[@]}" || exit 14
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 15
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE1_EMPTY_ORACLE_RELPATH" >"$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 16
   PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
-    <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
+    <"$POST_REVIEW_V2_TMP/structural-document.json" >"$POST_REVIEW_V2_TMP/structural.expected.md" || exit 17
   PYTHONIOENCODING=cp1252 python3 -B "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" encode-aggregate --phase phase1 \
-    <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 1
-  cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 1
-  python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY'
+    <"$POST_REVIEW_V2_TMP/duplicate-document.json" >"$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 18
+  cmp -s "$POST_REVIEW_V2_TMP/nonempty.md" "$POST_REVIEW_V2_TMP/nonempty.oracle.md" || exit 21
+  cmp -s "$POST_REVIEW_V2_TMP/empty.md" "$POST_REVIEW_V2_TMP/empty.oracle.md" || exit 22
+  cmp -s "$POST_REVIEW_V2_TMP/structural.md" "$POST_REVIEW_V2_TMP/structural.expected.md" || exit 23
+  cmp -s "$POST_REVIEW_V2_TMP/duplicate.md" "$POST_REVIEW_V2_TMP/duplicate.expected.md" || exit 24
+  python3 -I -B - "$POST_REVIEW_V2_TMP/empty-input.json" "$POST_REVIEW_V2_TMP/malformed-input.json" <<'PY' || exit 25
 import json,pathlib,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 value["rows"].pop()
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value,sort_keys=True,separators=(",",":")),encoding="utf-8",newline="\n")
 PY
-  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" "${V2_GATE_ARGS[@]}" 2>/dev/null
-  [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ]
-); then
+  ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/malformed-input.json")" "$POST_REVIEW_V2_TMP/malformed.md" "${V2_GATE_ARGS[@]}" 2>/dev/null || exit 26
+  [ ! -e "$POST_REVIEW_V2_TMP/malformed.md" ] || exit 27
+)
+V2_8_RC=$?
+if [ "$V2_8_RC" -eq 0 ]; then
   echo "  PASS  V2.8 — writer emits exact oracles, merges duplicate scopes in roster order, and refuses an incomplete roster"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract"; FAIL=$((FAIL + 1))
+  echo "  FAIL  V2.8 — writer runtime diverges from the byte or fail-closed contract (rc=$V2_8_RC; 11-14=writer call, 15-16=oracle blob read, 17-18=encode-aggregate, 21-24=byte compare, 25=malformed fixture build, 26=incomplete roster accepted, 27=refused write left an artifact)"; FAIL=$((FAIL + 1))
 fi
 # V2.8b (#402) — MECHANISM PIN, not a red-first test: this passes on the buggy
 # tree too. It locks WHY an undeclared workspace artifact was fatal rather than
@@ -892,18 +1069,279 @@ fi
 # is False) and exits 1 — so the fence returned 70 and Phase 2 / Phase 2.5 never
 # ran. The declaration fix must not be allowed to rot back into a writer that
 # accepts an empty destination and writes somewhere relative to the cwd.
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_V2_FUNCTION"
   UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
   ! post_review_write_aggregate_v2 "$(<"$POST_REVIEW_V2_TMP/nonempty-input.json")" "" "${V2_GATE_ARGS[@]}" \
-      2>"$POST_REVIEW_V2_TMP/empty-path.err"
-  grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err"
-); then
+      2>"$POST_REVIEW_V2_TMP/empty-path.err" || exit 31
+  grep -Fq 'post_review_aggregate_failure class=unsafe-output' "$POST_REVIEW_V2_TMP/empty-path.err" || exit 32
+)
+V2_8B_RC=$?
+if [ "$V2_8B_RC" -eq 0 ]; then
   echo "  PASS  V2.8b — an empty aggregate destination is refused as unsafe-output (the #402 failure mechanism stays fail-closed)"; PASS=$((PASS + 1))
 else
-  echo "  FAIL  V2.8b — writer must refuse an empty aggregate destination with class=unsafe-output"; FAIL=$((FAIL + 1))
+  echo "  FAIL  V2.8b — writer must refuse an empty aggregate destination with class=unsafe-output (rc=$V2_8B_RC; 31=empty destination accepted, 32=refusal carried no class=unsafe-output diagnostic)"; FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== Phase 2 simplify aggregate writer runtime (#481) =="
+# Phase 2 finished its three lenses and then had nowhere to go:
+# post_review_write_aggregate_v2 hardcodes `phase1` in three places and takes
+# four convention-gate arguments Phase 2 has no lens for, so `simplify-final.md`
+# -- the artifact the Phase 2 fixer's authority consumes -- could not be
+# produced by any shipped code. These rows are the twins of V2.7b0..V2.8b over
+# the Phase 2 writer.
+PHASE2_ORACLE_RELPATH="tests/fixtures/findings-to-issues/simplify-final.sample.md"
+PHASE2_EMPTY_ORACLE_RELPATH="tests/fixtures/findings-to-issues/simplify-empty.sample.md"
+SIMPLIFY_V2_WRITER_REGION="$(awk '
+  /^post_review_write_simplify_aggregate_v2\(\) \{/ { active=1 }
+  active { print }
+  active && /^}$/ { exit }
+' "$POST_REVIEW_V2_FUNCTION")"
+if [ -z "$SIMPLIFY_V2_WRITER_REGION" ]; then
+  echo "  FAIL  S1 — Phase 2 aggregate writer not found in lib/review-aggregate.sh"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S1 — Phase 2 aggregate writer ships on disk, not as fence text"; PASS=$((PASS + 1))
+fi
+if grep -qE '/dev/fd|/proc' <<<"$SIMPLIFY_V2_WRITER_REGION"; then
+  echo "  FAIL  S2 — Phase 2 writer must not depend on POSIX pseudo-files"; FAIL=$((FAIL + 1))
+else
+  echo "  PASS  S2 — Phase 2 writer has no /dev/fd or /proc dependency"; PASS=$((PASS + 1))
+fi
+if grep -qE 'sys\.stdin\.buffer\.read\(\)\.decode\(.utf-8.\)' <<<"$SIMPLIFY_V2_WRITER_REGION"; then
+  echo "  PASS  S3 — Phase 2 writer decodes untrusted stdin as UTF-8 explicitly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S3 — Phase 2 writer must decode untrusted stdin as UTF-8 explicitly"; FAIL=$((FAIL + 1))
+fi
+if grep -qE 'python3 -I -B -c' <<<"$SIMPLIFY_V2_WRITER_REGION"; then
+  echo "  PASS  S4 — Phase 2 writer uses a fixed Python -c program with JSON on stdin"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S4 — Phase 2 writer must use a fixed Python -c program while keeping JSON on stdin"; FAIL=$((FAIL + 1))
+fi
+# S5 — twin of V2.7e over the Phase 2 writer. Its OWN digest: copying the Phase
+# 1 constant would give either a permanently-red row or, worse, a stub that
+# pins somebody else's bytes while looking green.
+SIMPLIFY_TRANSPORT_SENTINEL='{"transport":"simplify-stdin-only-DO-NOT-PLACE-IN-ARGV-OR-ENV"}'
+SIMPLIFY_TRANSPORT_CAPTURE="$POST_REVIEW_V2_TMP/simplify-transport.capture"
+SIMPLIFY_TRANSPORT_OUTPUT="$POST_REVIEW_V2_TMP/simplify-transport-output.md"
+SIMPLIFY_TRANSPORT_WRITER_SHA256='2913b739ace45496063385a006447a1c35bf5bfe214f55351033371f49f6d41a'
+(
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  python3() {
+    local observed= arg actual_writer_sha
+    [ "$#" -eq 6 ] || return 91
+    [ "$1" = '-I' ] && [ "$2" = '-B' ] && [ "$3" = '-c' ] || return 92
+    actual_writer_sha="$(printf '%s' "$4" | "$REAL_PYTHON3" -I -B -c \
+      'import hashlib,sys; body=sys.stdin.buffer.read().replace(b"\r\n",b"\n"); print(hashlib.sha256(body).hexdigest(),end="")')" || return 93
+    [ "$actual_writer_sha" = "$SIMPLIFY_TRANSPORT_WRITER_SHA256" ] || return 94
+    # Two controller-derived scalars and nothing else: Phase 2 has no
+    # convention lens, so none of Phase 1's four gate paths appear here.
+    [ "$5" = "$SIMPLIFY_TRANSPORT_OUTPUT" ] && [ "$6" = "$UBERDEV_REVIEW_PLUGIN_ROOT" ] || return 95
+    for arg in "$@"; do
+      [[ "$arg" != *"$SIMPLIFY_TRANSPORT_SENTINEL"* ]] || return 96
+    done
+    "$REAL_PYTHON3" -I -B -c \
+      'import os,sys; raise SystemExit(any(sys.argv[1] in value for value in os.environ.values()))' \
+      "$SIMPLIFY_TRANSPORT_SENTINEL" || return 97
+    IFS= read -r -d '' observed || true
+    [ "$observed" = "$SIMPLIFY_TRANSPORT_SENTINEL" ] || return 98
+    printf 'verified\n' >"$SIMPLIFY_TRANSPORT_CAPTURE"
+  }
+  post_review_write_simplify_aggregate_v2 "$SIMPLIFY_TRANSPORT_SENTINEL" "$SIMPLIFY_TRANSPORT_OUTPUT"
+  [ "$(<"$SIMPLIFY_TRANSPORT_CAPTURE")" = 'verified' ]
+  [ ! -e "$SIMPLIFY_TRANSPORT_OUTPUT" ]
+)
+S5_RC=$?
+if [ "$S5_RC" -eq 0 ]; then
+  echo "  PASS  S5 — Phase 2 digest-pinned in-memory code is argv while attacker-controlled lens bytes travel only on stdin"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S5 — Phase 2 writer transport must keep digest-pinned code in-memory and attacker-controlled bytes stdin-only (rc=$S5_RC; 94=writer digest drifted, 95=argv shape, 96/97=sentinel leaked to argv/env, 98=stdin mismatch)"; FAIL=$((FAIL + 1))
+fi
+# The lens rows carry the NORMALISED document
+# uberdev_child_validate_phase2_lens_result publishes -- shape drift dies at
+# that boundary, so this writer never sees an untagged fence or a bare sequence.
+# The three lenses below merge into exactly the committed byte oracle.
+python3 -I -B - \
+  "$POST_REVIEW_V2_TMP/simplify-nonempty-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-empty-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-short-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-unknown-edge-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-index-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-digest-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-duplicate-input.json" \
+  "$POST_REVIEW_V2_TMP/simplify-permuted-input.json" <<'PY'
+import hashlib,json,pathlib,sys
+
+edges=[
+ "review_pr.simplify.reuse",
+ "review_pr.simplify.quality",
+ "review_pr.simplify.efficiency",
+]
+lenses=[
+ [("blocker","src/api.ts:130","narrow the handler return",
+   "narrow through the existing response abstraction"),
+  ("suggestion","src/dup.ts:3","Extract the duplicate implementation to the existing helper",
+   "Use the existing shared helper without changing behavior.")],
+ [("blocker","src/api.ts:130","replace the unconstrained return",
+   "make the return contract explicit")],
+ [("blocker","src/loop.ts:12","Convert the quadratic inner lookup to a map",
+   "Build the lookup once before entering the loop.")],
+]
+
+def content(rows):
+ if not rows: return "```yaml\nfindings: []\n```\n"
+ lines=["```yaml","findings:"]
+ for severity,location,summary,detail in rows:
+  lines.append("  - severity: "+severity)
+  lines.append("    location: "+json.dumps(location))
+  lines.append("    summary: "+json.dumps(summary))
+  lines.append("    detail: "+json.dumps(detail))
+ lines.append("```")
+ return "\n".join(lines)+"\n"
+
+def captured(rows_by_edge,edge_ids=None):
+ rows=[]
+ for index,(edge,rows_for_edge) in enumerate(zip(edge_ids or edges,rows_by_edge),1):
+  body=content(rows_for_edge)
+  rows.append({"content":body,"edge":edge,"index":index,"instance":f"fixture-{index}",
+               "sha256":hashlib.sha256(body.encode("utf-8")).hexdigest()})
+ return {"ledger_sha256":"b"*64,"rows":rows,"schema_version":1}
+
+def write_utf8(path,value):
+ pathlib.Path(path).write_text(
+     json.dumps(value,sort_keys=True,separators=(",",":")),encoding="utf-8",newline="\n")
+
+write_utf8(sys.argv[1],captured(lenses))
+write_utf8(sys.argv[2],captured([[],[],[]]))
+short=captured(lenses); short["rows"].pop()
+write_utf8(sys.argv[3],short)
+unknown=captured(lenses); unknown["rows"][1]["edge"]="review_pr.review.types"
+write_utf8(sys.argv[4],unknown)
+misindexed=captured(lenses); misindexed["rows"][2]["index"]=1
+write_utf8(sys.argv[5],misindexed)
+tampered=captured(lenses); tampered["rows"][0]["content"]=content(lenses[1])
+write_utf8(sys.argv[6],tampered)
+duplicated=captured([lenses[0]+[("blocker","src/api.ts:130","second claim on one location",
+                                 "a lens may not report one location twice")],
+                     lenses[1],lenses[2]])
+write_utf8(sys.argv[7],duplicated)
+permuted=captured([lenses[2],lenses[1],lenses[0]],edge_ids=list(reversed(edges)))
+write_utf8(sys.argv[8],permuted)
+PY
+# Run OUTSIDE the condition and test the captured status: in condition position
+# bash suppresses errexit for the whole subshell, so `set -e` there is inert and
+# claims a protection it does not provide (#469).
+S6_RC=0
+(
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  post_review_write_simplify_aggregate_v2 \
+    "$(<"$POST_REVIEW_V2_TMP/simplify-nonempty-input.json")" \
+    "$POST_REVIEW_V2_TMP/simplify-nonempty.md" || exit 1
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE2_ORACLE_RELPATH" \
+    >"$POST_REVIEW_V2_TMP/simplify-nonempty.oracle.md" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/simplify-nonempty.md" \
+    "$POST_REVIEW_V2_TMP/simplify-nonempty.oracle.md"
+) || S6_RC=$?
+if [ "$S6_RC" -eq 0 ]; then
+  echo "  PASS  S6 — Phase 2 writer emits the committed non-empty byte oracle exactly"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S6 — Phase 2 writer output diverges from tests/fixtures/findings-to-issues/simplify-final.sample.md"; FAIL=$((FAIL + 1))
+fi
+S7_RC=0
+(
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  post_review_write_simplify_aggregate_v2 \
+    "$(<"$POST_REVIEW_V2_TMP/simplify-empty-input.json")" \
+    "$POST_REVIEW_V2_TMP/simplify-empty.md" || exit 1
+  git -C "$REPO_ROOT" cat-file blob "HEAD:$PHASE2_EMPTY_ORACLE_RELPATH" \
+    >"$POST_REVIEW_V2_TMP/simplify-empty.oracle.md" || exit 1
+  cmp -s "$POST_REVIEW_V2_TMP/simplify-empty.md" \
+    "$POST_REVIEW_V2_TMP/simplify-empty.oracle.md"
+) || S7_RC=$?
+if [ "$S7_RC" -eq 0 ]; then
+  echo "  PASS  S7 — three zero-finding lenses produce the committed empty byte oracle"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S7 — Phase 2 writer output diverges from tests/fixtures/findings-to-issues/simplify-empty.sample.md"; FAIL=$((FAIL + 1))
+fi
+# S9 — every way the wave can be short, re-ordered, impersonated or tampered
+# with must refuse, name a class, and leave NO aggregate behind. A thinner
+# `simplify-final.md` is indistinguishable downstream from an honest
+# zero-finding review, so a partial roster may never produce one.
+S9_RC=0
+for S9_CASE in short:malformed-input unknown-edge:roster-mismatch index:roster-mismatch \
+               digest:roster-mismatch duplicate:malformed-input permuted:roster-mismatch; do
+  S9_NAME="${S9_CASE%%:*}"
+  S9_CLASS="${S9_CASE##*:}"
+  # `&&`-chained AND run outside the condition. The chain is what makes every
+  # link load-bearing; running it outside condition position is what lets the
+  # subshell's own `set -e` mean anything at all (#469).
+  S9_CASE_RC=0
+  (
+    set -euo pipefail
+    . "$POST_REVIEW_V2_FUNCTION"
+    UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+    ! post_review_write_simplify_aggregate_v2 \
+        "$(<"$POST_REVIEW_V2_TMP/simplify-$S9_NAME-input.json")" \
+        "$POST_REVIEW_V2_TMP/simplify-$S9_NAME.md" \
+        2>"$POST_REVIEW_V2_TMP/simplify-$S9_NAME.err" \
+      && grep -Fq "post_review_simplify_aggregate_failure class=$S9_CLASS" \
+        "$POST_REVIEW_V2_TMP/simplify-$S9_NAME.err" \
+      && [ ! -e "$POST_REVIEW_V2_TMP/simplify-$S9_NAME.md" ]
+  ) || S9_CASE_RC=$?
+  if [ "$S9_CASE_RC" -eq 0 ]; then :; else
+    echo "  ....  S9 case $S9_NAME did not refuse as class=$S9_CLASS with no artifact"
+    S9_RC=1
+  fi
+done
+if [ "$S9_RC" -eq 0 ]; then
+  echo "  PASS  S9 — short, mis-indexed, impersonated, tampered, duplicated and permuted waves all refuse fail-closed"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S9 — Phase 2 writer accepted a wave it must refuse, or left an aggregate behind"; FAIL=$((FAIL + 1))
+fi
+S10_RC=0
+(
+  set -euo pipefail
+  . "$POST_REVIEW_V2_FUNCTION"
+  UBERDEV_REVIEW_PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
+  ! post_review_write_simplify_aggregate_v2 \
+      "$(<"$POST_REVIEW_V2_TMP/simplify-nonempty-input.json")" "" \
+      2>"$POST_REVIEW_V2_TMP/simplify-empty-path.err" \
+    && grep -Fq 'post_review_simplify_aggregate_failure class=unsafe-output' \
+      "$POST_REVIEW_V2_TMP/simplify-empty-path.err"
+) || S10_RC=$?
+if [ "$S10_RC" -eq 0 ]; then
+  echo "  PASS  S10 — an empty Phase 2 aggregate destination is refused as unsafe-output"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10 — Phase 2 writer must refuse an empty aggregate destination with class=unsafe-output"; FAIL=$((FAIL + 1))
+fi
+if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" \
+    "$POST_REVIEW_V2_TMP/simplify-nonempty.md" "$POST_REVIEW_V2_TMP/simplify-empty.md" <<'PY'
+import importlib.util,pathlib,sys
+
+spec=importlib.util.spec_from_file_location("uberdev_phase2_round_trip",sys.argv[1])
+assert spec is not None and spec.loader is not None
+module=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=module
+spec.loader.exec_module(module)
+nonempty=module.parse_finding_keys(pathlib.Path(sys.argv[2]).read_bytes(),"phase2")
+assert [item.location for item in nonempty]==[
+ "src/api.ts:130","src/dup.ts:3","src/loop.ts:12",
+],nonempty
+assert module.parse_finding_keys(pathlib.Path(sys.argv[3]).read_bytes(),"phase2")==()
+PY
+then
+  echo "  PASS  S11 — both writer outputs round-trip through parse_finding_keys(..., phase2)"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S11 — Phase 2 writer output is not accepted by the phase2 findings parser"; FAIL=$((FAIL + 1))
+fi
+
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/code_fixer_contract.py" <<'PY'
 import hashlib,importlib.util,os,pathlib,subprocess,sys
 
@@ -1016,12 +1454,20 @@ awk '
   active && /^REVIEW_EDGES=\(/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_FUNCTIONS"
   REVIEW_EDGES=(review.edge)
   run_failure_case() {
-    local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc
+    local mode="$1" root="$POST_REVIEW_RUNTIME_TMP/$1" rc base
+    # Per-mode exit-code base, so the row names WHICH of the three post-launch
+    # bookkeeping failures regressed instead of collapsing all three into rc=1.
+    case "$mode" in
+      roster) base=40 ;;
+      descriptors) base=50 ;;
+      launched) base=60 ;;
+      *) return 39 ;;
+    esac
     mkdir -p "$root"
     printf '%s\n' '{"edge":"review.edge","index":1}' >"$root/records"
     : >"$root/unwind.log"
@@ -1042,17 +1488,19 @@ if (
     post_review_run_capped "$root/records" 1 1 "$root/descriptors" "$root/launched" "$root/failed" 9 "$root/wave"
     rc=$?
     set -e
-    [ "$rc" -ne 0 ]
-    grep -Fq $'s\tr\t9' "$root/unwind.log"
+    [ "$rc" -ne 0 ] || return $((base + 1))
+    grep -Fq $'s\tr\t9' "$root/unwind.log" || return $((base + 2))
   }
   run_failure_case roster
   run_failure_case descriptors
   run_failure_case launched
-); then
+)
+POST_LAUNCH_RC=$?
+if [ "$POST_LAUNCH_RC" -eq 0 ]; then
   echo "  PASS  roster and aggregate-ledger failures boundedly unwind launched children"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  post-launch bookkeeping failure left an active wave without bounded unwind"
+  echo "  FAIL  post-launch bookkeeping failure left an active wave without bounded unwind (rc=$POST_LAUNCH_RC; 41/51/61=roster|descriptors|launched failure was not surfaced, 42/52/62=that failure skipped the bounded unwind)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_RUNTIME_TMP"
@@ -1066,7 +1514,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_CLEANUP_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_CLEANUP_FUNCTIONS"
   root="$POST_REVIEW_CLEANUP_TMP/runtime"
@@ -1094,16 +1542,18 @@ if (
   post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 9 2>"$root/error.log"
   rc=$?
   set -e
-  [ "$rc" -eq 70 ]
-  grep -Fq 'edge=review.one' "$root/error.log"
-  grep -Fq 'status=review.one.status' "$root/error.log"
-  grep -Fq 'origin_rc=17' "$root/error.log"
-  grep -Fq 'cleanup_rc=23' "$root/error.log"
-); then
+  [ "$rc" -eq 70 ] || exit 71
+  grep -Fq 'edge=review.one' "$root/error.log" || exit 72
+  grep -Fq 'status=review.one.status' "$root/error.log" || exit 73
+  grep -Fq 'origin_rc=17' "$root/error.log" || exit 74
+  grep -Fq 'cleanup_rc=23' "$root/error.log" || exit 75
+)
+CLEANUP_RC=$?
+if [ "$CLEANUP_RC" -eq 0 ]; then
   echo "  PASS  cleanup failure preserves per-child evidence and returns supervisory rc=70"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  cleanup failure was collapsed into the original dispatch result"
+  echo "  FAIL  cleanup failure was collapsed into the original dispatch result (rc=$CLEANUP_RC; 71=fanout did not return the supervisory 70, 72-75=the edge/status/origin_rc/cleanup_rc evidence line is missing)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_CLEANUP_TMP"
@@ -1117,7 +1567,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_LEDGER_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_LEDGER_FUNCTIONS"
   root="$POST_REVIEW_LEDGER_TMP/runtime"
@@ -1133,13 +1583,15 @@ if (
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
   uberdev_dispatch_child_capture() { : >"$dispatched"; }
-  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
-  [ ! -e "$dispatched" ]
-); then
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10 || exit 81
+  [ ! -e "$dispatched" ] || exit 82
+)
+LEDGER_INIT_RC=$?
+if [ "$LEDGER_INIT_RC" -eq 0 ]; then
   echo "  PASS  failed atomic ledger initialization blocks preflight and dispatch"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  stale ledger state reached preflight or dispatch after initialization failure"
+  echo "  FAIL  stale ledger state reached preflight or dispatch after initialization failure (rc=$LEDGER_INIT_RC; 81=fanout returned success despite a failed ledger init, 82=preflight or dispatch ran anyway)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_LEDGER_TMP"
@@ -1153,7 +1605,7 @@ awk '
   active && /^post_review_wait_all\(\)/ { exit }
   active { print }
 ' "$POST_IMPL" >"$POST_REVIEW_APPEND_FUNCTIONS"
-if (
+(
   set -euo pipefail
   . "$POST_REVIEW_APPEND_FUNCTIONS"
   root="$POST_REVIEW_APPEND_TMP/runtime"
@@ -1169,13 +1621,15 @@ if (
   }
   uberdev_preflight_child_batch() { : >"$dispatched"; }
   uberdev_dispatch_child_capture() { : >"$dispatched"; }
-  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10
-  [ ! -e "$dispatched" ]
-); then
+  ! post_review_fanout "$root/records" "$root/descriptors" "$root/launched" 10 || exit 91
+  [ ! -e "$dispatched" ] || exit 92
+)
+DESCRIPTOR_APPEND_RC=$?
+if [ "$DESCRIPTOR_APPEND_RC" -eq 0 ]; then
   echo "  PASS  failed descriptor append blocks preflight and dispatch"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  descriptor append failure reached preflight or dispatch"
+  echo "  FAIL  descriptor append failure reached preflight or dispatch (rc=$DESCRIPTOR_APPEND_RC; 91=fanout returned success despite a failed descriptor append, 92=preflight or dispatch ran anyway)"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$POST_REVIEW_APPEND_TMP"

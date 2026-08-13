@@ -664,7 +664,14 @@ assert_grep "$REVIEW_PR" \
 ANCHOR_PUSH_FIXTURE="$(mktemp)"
 # The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
 # the column-0 terminator review_fence_fn uses is load-bearing here.
-review_fence_fn review_publish_same_repo_pr_head >"$ANCHOR_PUSH_FIXTURE"
+# Three definitions since #482: the projection and the post-push settle loop are
+# the gate's own helpers, and a fixture holding only the gate would fail with
+# command-not-found rather than with the verdict this row is about.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$ANCHOR_PUSH_FIXTURE"
 ANCHOR_PUSH_LOG="$(mktemp)"
 ANCHOR_GH_STATE="$(mktemp)"
 if [ -s "$ANCHOR_PUSH_FIXTURE" ] && \
@@ -798,7 +805,14 @@ else
 REAL_GH_FIXTURE="$(mktemp)"
 # The gate body legitimately contains `  } <<<"$live_identity"` since #429, so
 # the column-0 terminator review_fence_fn uses is load-bearing here.
-review_fence_fn review_publish_same_repo_pr_head >"$REAL_GH_FIXTURE"
+# The projection this row exists to exercise moved into `review_pr_head_identity`
+# with #482 — same filter, same call, one definition instead of two — so the
+# fixture takes the helper as well. The gh stub below still intercepts the call.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$REAL_GH_FIXTURE"
 REAL_GH_PUSH_LOG="$(mktemp)"
 REAL_GH_STATE="$(mktemp)"
 if [ -s "$REAL_GH_FIXTURE" ] && \
@@ -916,6 +930,164 @@ else
 fi
 rm -f "$REAL_GH_FIXTURE" "$REAL_GH_PUSH_LOG" "$REAL_GH_STATE"
 fi
+
+# R9.18 (#482) — the post-push proofs settle through GitHub's propagation
+# window, and a gh that never answered is not reported as a head that disagrees.
+#
+# Found on TheFJK/WAGYAI PR #657 (uberdev 0.45.13): a
+# `net/http: TLS handshake timeout` forced a retry, the push then LANDED, and
+# the gate's post-push re-projection read the PRE-push oid out of GitHub's
+# eventually-consistent view of the ref and refused. Remote ref, live PR head
+# and local HEAD were all the published sha minutes later, and an idempotent
+# re-run reported `Everything up-to-date` — every proof the gate makes was
+# satisfiable. The operator, meanwhile, was told publication had failed about a
+# branch the remote had already moved, which invites a reset or a force-push:
+# the two recoveries that would actually destroy the work.
+#
+# `git push` returning 0 and `ls-remote` agreeing prove the object is ON the
+# ref. GitHub's API view of that same ref is a SEPARATE projection with its own
+# lag, so reading it once, immediately, is a race — the same class the 6c.1
+# PROBE arm already settles with CI_SETTLE_AGE_SEC / CI_SETTLE_REPROBES.
+#
+# Four properties, each with an anti-vacuity partner so none can be satisfied by
+# deleting a conjunct:
+#   (1) a live head still serving the PRE-PUSH sha is re-probed, not refused;
+#   (2) but the settle window is BOUNDED — a head that never catches up is still
+#       a refusal, and the run is told the push itself landed;
+#   (3) a THIRD object on the branch is refused IMMEDIATELY, with no settle at
+#       all: a concurrent writer owns the ref and waiting cannot make that agree;
+#   (4) a gh that never answered returns 80, NOT 79 — "the identity is unknown"
+#       is not "the identity disagrees" — and a transport blip on the pre-push
+#       probe is ridden out instead of ending the run.
+SETTLE_FIXTURE="$(mktemp)"
+# Three definitions, not one: the projection and the settle loop are helpers of
+# the gate, and a fixture missing either would fail with command-not-found —
+# which is a real failure, but not the one this row is about.
+{
+  review_fence_fn review_pr_head_identity
+  review_fence_fn review_settle_live_pr_head
+  review_fence_fn review_publish_same_repo_pr_head
+} >"$SETTLE_FIXTURE"
+SETTLE_PUSH_LOG="$(mktemp)"
+SETTLE_SLEEP_LOG="$(mktemp)"
+SETTLE_STATE="$(mktemp)"
+SETTLE_POST_STATE="$(mktemp)"
+SETTLE_STDERR="$(mktemp)"
+if [ -s "$SETTLE_FIXTURE" ] && \
+  SETTLE_PUSH_LOG="$SETTLE_PUSH_LOG" SETTLE_SLEEP_LOG="$SETTLE_SLEEP_LOG" \
+  SETTLE_STATE="$SETTLE_STATE" SETTLE_POST_STATE="$SETTLE_POST_STATE" \
+  SETTLE_STDERR="$SETTLE_STDERR" bash -c '
+    # `set -u` for the same reason R9.17 carries it: `local x` leaves x UNSET in
+    # bash and EMPTY in zsh, and these helpers run under zsh at runtime while
+    # the suites drive them under bash.
+    set -u
+    . "$1"
+    PRE_SHA="$(printf a%.0s {1..40})"
+    PUB_SHA="$(printf b%.0s {1..40})"
+    OTHER_SHA="$(printf c%.0s {1..40})"
+    reset_fixture() {
+      printf "0\n" >"$SETTLE_STATE"
+      printf "0\n" >"$SETTLE_POST_STATE"
+      : >"$SETTLE_PUSH_LOG"
+      : >"$SETTLE_SLEEP_LOG"
+      : >"$SETTLE_STDERR"
+      unset GH_FAIL_CALLS POST_STALE_CALLS POST_STALE_SHA
+    }
+    # The waits ARE the fix, so they are observed rather than endured: every
+    # settle sleep is recorded and counted, which is also what proves the loop
+    # is bounded rather than merely slow.
+    sleep() { printf "%s\n" "${1:-}" >>"$SETTLE_SLEEP_LOG"; }
+    gh() {
+      [ "$1" = pr ] && [ "$2" = view ] || return 90
+      total="$(cat "$SETTLE_STATE")"; total=$((total + 1)); printf "%s\n" "$total" >"$SETTLE_STATE"
+      # A gh that NEVER ANSWERED: non-zero rc and no stdout. That is what a TLS
+      # handshake timeout looks like at the only seam the gate can observe.
+      [ "$total" -gt "${GH_FAIL_CALLS:-0}" ] || return 1
+      if [ ! -s "$SETTLE_PUSH_LOG" ]; then
+        oid="$PRE_SHA"
+      else
+        post="$(cat "$SETTLE_POST_STATE")"; post=$((post + 1)); printf "%s\n" "$post" >"$SETTLE_POST_STATE"
+        if [ "$post" -le "${POST_STALE_CALLS:-0}" ]; then oid="${POST_STALE_SHA:-$PRE_SHA}"; else oid="$PUB_SHA"; fi
+      fi
+      printf "%s\n%s\n%s\n%s\n" "$oid" feature/settle false owner/repo
+    }
+    python3() { printf "{\"status\":\"clean\"}\n"; }
+    git() {
+      [ "$1" = -C ] && [ "$2" = /repo ] || return 91
+      case "$3" in
+        rev-parse)        printf "%s\n" "$PUB_SHA" ;;
+        check-ref-format) [ "$4" = --branch ] && [ "$5" = feature/settle ] ;;
+        push)             printf "%s\n" "$5" >>"$SETTLE_PUSH_LOG" ;;
+        ls-remote)        printf "%s\trefs/heads/feature/settle\n" "$PUB_SHA" ;;
+        *) return 93 ;;
+      esac
+    }
+    # (1) Two stale post-push answers, then the propagated one: the gate
+    #     PUBLISHES. Pre-fix this returned 79 on the very first stale answer.
+    reset_fixture
+    POST_STALE_CALLS=2
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 41
+    # ONE push. The settle re-probes the API; it never re-pushes, because a
+    # second push would spawn a duplicate CI check set (#302/#309).
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 42
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 2 ] || exit 43
+    # (2) ANTI-VACUITY: the window is bounded. A head that never catches up is
+    #     still a refusal — with the honest rc (79, a disagreement) and a note
+    #     that the push itself landed, so nobody resets the branch.
+    reset_fixture
+    POST_STALE_CALLS=99
+    SETTLE_RC=0
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>"$SETTLE_STDERR" || SETTLE_RC=$?
+    [ "$SETTLE_RC" -eq 79 ] || exit 44
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 45
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 4 ] || exit 46
+    grep -qF "the push itself landed" "$SETTLE_STDERR" || exit 47
+    # (3) ANTI-VACUITY: a third object is a DISAGREEMENT, not a delay. Refused
+    #     on the first answer, with no settle sleep at all.
+    reset_fixture
+    POST_STALE_CALLS=99
+    POST_STALE_SHA="$OTHER_SHA"
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>/dev/null && exit 48
+    [ ! -s "$SETTLE_SLEEP_LOG" ] || exit 49
+    # (4) A transport blip on the PRE-push probe is ridden out: two gh calls
+    #     that never answered, then a real one, and the gate publishes.
+    reset_fixture
+    GH_FAIL_CALLS=2
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence || exit 50
+    [ "$(grep -c . "$SETTLE_PUSH_LOG")" -eq 1 ] || exit 51
+    [ "$(grep -c . "$SETTLE_SLEEP_LOG")" -eq 2 ] || exit 52
+    # (5) ANTI-VACUITY: the retry is BOUNDED too, and an unreachable GitHub is
+    #     reported as rc 80 — a distinct code from the 79 a disagreeing head
+    #     earns — with nothing pushed, because the pre-push identity is unknown.
+    reset_fixture
+    GH_FAIL_CALLS=99
+    SETTLE_RC=0
+    review_publish_same_repo_pr_head owner/repo 73 "$PRE_SHA" "$PUB_SHA" /repo /contract.py /evidence 2>/dev/null || SETTLE_RC=$?
+    [ "$SETTLE_RC" -eq 80 ] || exit 53
+    [ ! -s "$SETTLE_PUSH_LOG" ] || exit 54
+    exit 0
+  ' _ "$SETTLE_FIXTURE"
+then
+  echo "  PASS  R9.18 (#482) — post-push proofs settle through the propagation window; unreachable gh is rc 80, not a disagreeing head"
+  PASS=$((PASS + 1))
+else
+  R918_RC=$?
+  echo "  FAIL  R9.18 (#482) — publication gate races GitHub's propagation window or conflates an unreachable gh with a disagreeing head (inner rc=$R918_RC; 41-43=stale head not settled, 44-47=settle window unbounded or the landed push not surfaced, 48/49=third object not refused immediately, 50-52=transport blip not retried, 53/54=unreachable gh not rc 80 / pushed anyway, 90-93=stub misuse, 127=helper missing from the fixture)"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$SETTLE_FIXTURE" "$SETTLE_PUSH_LOG" "$SETTLE_SLEEP_LOG" "$SETTLE_STATE" "$SETTLE_POST_STATE" "$SETTLE_STDERR"
+
+# R9.18b (#482) — the two refusals are documented as DIFFERENT verdicts. rc 79
+# is a claim about the repository; rc 80 is a claim about reachability, and a
+# caller that cannot tell them apart tells the operator the wrong thing.
+assert_grep "$REVIEW_FENCES" \
+  'rc 80' \
+  "R9.18b — the fence library documents rc 80 (gh never answered) as distinct from rc 79"
+# NOT a bare `settle window` grep: the 6c.1 CI arm has carried that phrase since
+# #302, so the loose pattern would have passed before this fix existed.
+assert_grep "$REVIEW_PR" \
+  '[Pp]ost-push propagation settle' \
+  "R9.18c — /review-pr prose names the post-push propagation settle"
 
 # R9.14 (#79 simplify-pass follow-on) — label-add guard symmetry: artifact 2's
 # `gh pr edit <N> --add-label uberdev-approved` MUST be guarded with the same
@@ -1430,7 +1602,22 @@ else
     echo "  FAIL  R26.3 — Step 6b code-fixer dispatch must pass the already-enveloped file verbatim (never re-wrapped) (#302)"
     FAIL=$((FAIL + 1))
   fi
+  # R26.5 (#481) — the region described the aggregate and named no producer, so
+  # Phase 2 had none: post_review_write_aggregate_v2 hardcodes phase1 and its
+  # signature carries four convention-gate paths Phase 2 cannot supply.
+  if grep -qF 'post_review_write_simplify_aggregate_v2' <<<"$STEP6B_REGION"; then
+    echo "  PASS  R26.5 — Step 6b names the shipped Phase 2 aggregate writer"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  R26.5 — Step 6b must build simplify-final.md with post_review_write_simplify_aggregate_v2 (#481)"
+    FAIL=$((FAIL + 1))
+  fi
 fi
+# R26.6 (#481) — a shipped command file may not point the operator at a test
+# fixture for the byte shape: tests/ is not in the install, so the pointer
+# resolves to nothing on a user's machine. The producer is the oracle.
+assert_no_grep "$REVIEW_PR" 'tests/fixtures' \
+  "R26.6 — review-pr.md names no tests/fixtures path (not shipped in the install; #481)"
 # R26.4 — anti-regression twin of simplify.test.sh E2: the old dispatch-time
 # re-wrap of simplify-final.md (under the phase-1 token) must not return to
 # review-pr.md's Step 6b. Mirrors `assert_no_grep "$SIMPLIFY" 'wraps simplify-final\.md under'`.
@@ -3593,13 +3780,20 @@ def definitions(path):
     return found
 
 
-# Everything the shipped libraries define, minus the fence library: sourcing
+# Per-LIBRARY definitions, minus the fence library: sourcing
 # review-fleet-args.sh does NOT source review-fences.sh, only rehydrating does.
-sourceable = set()
+#
+# Keyed by basename rather than unioned into one bag (#470). A fence sources a
+# NAMED file, and only that file's helpers arrive with it; the old single
+# `sourceable` union let a fence that sources review-fleet-args.sh call a helper
+# that lives in some other lib entirely and still count as covered. Phase 0's
+# fences source lib/review-consolidate.sh and nothing else, which the union
+# model could not express at all -- it recognised exactly one source line.
+sourceable_by_lib = {}
 for path in glob.glob(plugin_root + "/lib/*.sh"):
     if os.path.abspath(path) == os.path.abspath(FENCE_LIBRARY):
         continue
-    sourceable |= definitions(path)
+    sourceable_by_lib["lib/" + os.path.basename(path)] = definitions(path)
 
 # Everything rehydration publishes: the fence library, plus `audit`, which
 # review_fleet_load_fence_library installs and which is a shell function in no
@@ -3620,16 +3814,25 @@ while index < len(lines):
     else:
         index += 1
 
-SOURCE_LINE = "lib/review-fleet-args.sh"
 REHYDRATE = "review_fleet_rehydrate"
+SOURCE_STMT = re.compile(r"(?:^|[;&|(]|&&|\|\|)[ \t]*\.[ \t]+\S", re.M)
 
 offenders = []
 calls_checked = 0
 for line_no, body in fences:
     own = {DEF.match(l).group(1) for l in body if DEF.match(l)}
     available = set(own)
-    if any(SOURCE_LINE in l and l.lstrip().startswith(". ") for l in body):
-        available |= sourceable
+    # A fence holds a library's helpers when it BOTH names that library's path
+    # and executes a `.` source. Naming and sourcing are checked separately
+    # because the source target is not always a literal: Phase 3's cross-repo
+    # gate binds `REVIEW_PUSH_TARGET_LIB=".../lib/review-push-target.sh"` on one
+    # line and sources `. "$REVIEW_PUSH_TARGET_LIB"` on the next, which no
+    # per-line literal match can see.
+    fence_text = "\n".join(body)
+    if SOURCE_STMT.search(fence_text):
+        for lib_key, lib_defs in sourceable_by_lib.items():
+            if lib_key in fence_text:
+                available |= lib_defs
     if any(l.strip().startswith(REHYDRATE) for l in body):
         available |= library
     for offset, line in enumerate(body):
@@ -4146,6 +4349,90 @@ assert_grep "$REVIEW_PR" '"verification": \{' \
   "R32h — phases.phase2_5 documents the verification sub-block"
 assert_grep "$REVIEW_PR" '"culled": <int>' \
   "R32i — the sub-block reports how many blockers were suppressed"
+
+echo
+echo "== RC: Phase 0 — the multi-PR consolidation offer (#470) =="
+# Portable greps only: this file runs on ubuntu AND windows-latest. The
+# EXECUTABLE half of Phase 0 lives in tests/review-pr-consolidate.test.sh
+# (ubuntu-only — it needs a pty and real `git merge` conflict states); these
+# rows hold the documented CONTRACT, which is what a windows job can check.
+
+# RC1 — the enumeration is un-rooted and renders all three fields. `discover_multi`
+# would silently drop every PR off the integration branch, which is exactly the
+# cross-base set the operator is meant to see and be able to decline.
+assert_grep "$REVIEW_PR" 'discover_open_prs' \
+  "RC1a — Phase 0 enumerates open PRs through discover_open_prs"
+assert_grep "$REVIEW_PR" 'number, title and base branch|number, title, base|#\\\(\.number\) — \\\(\.title\) \(base: ' \
+  "RC1b — each candidate is rendered with its number, title AND base branch"
+assert_grep "$REVIEW_PR" 'not[^.]*`discover_multi`|\*\*not\*\* `discover_multi`' \
+  "RC1c — the command says WHY discover_multi is not the enumerator (it roots on an integration branch)"
+
+# RC2 — the gate. All three suppressors must be documented, not just turbo.
+assert_grep "$REVIEW_PR" '\[ ! -t 0 \]' \
+  "RC2a — the offer is gated on stdin being a TTY"
+assert_grep "$REVIEW_PR" 'UBERDEV_RUN_CARRIER_JSON.*CONSOLIDATE=never|CONSOLIDATE=never; CONSOLIDATE_REASON=chained' \
+  "RC2b — an inherited run carrier (a chained finish-branch run) suppresses the offer"
+assert_grep "$REVIEW_PR" 'REASON=turbo' \
+  "RC2c — --turbo / UBERDEV_TURBO takes the no-offer path with a typed reason"
+assert_grep "$REVIEW_PR" '(default|DEFAULT)[^ ]* mode as well as under' \
+  "RC2d — the prose states WHY the carrier gate exists: finish-branch chains in default mode too"
+
+# RC3 — the deferred-tool load and the never-auto-pick rule, same shape as the
+# two existing AskUserQuestion sites.
+assert_grep "$REVIEW_PR" 'ToolSearch\(\{ query: "select:AskUserQuestion" \}\)' \
+  "RC3a — the ASK turn loads AskUserQuestion through ToolSearch first"
+assert_in_section "$REVIEW_PR" '0b — ASK' 'Executable setup \(run before any builder' \
+  'NEVER silently auto-pick' \
+  "RC3b — the ToolSearch fail-fast rule is restated inside the Phase 0 ASK section"
+
+# RC4 — negative, in the M73 mould: the Notes block must not still claim one PR
+# per invocation, or the tail of the file contradicts the head.
+RC4_SLICE="$(mktemp)"
+awk '/^## Notes:/{active=1} active{print} active && /^## /&&!/^## Notes:/{exit}' "$REVIEW_PR" >"$RC4_SLICE"
+assert_no_grep_nonempty "$RC4_SLICE" 'reviews exactly one PR per invocation|one PR per invocation, always|single-PR by construction' \
+  "RC4 — the Notes block no longer asserts an unconditional one-PR-per-invocation contract"
+rm -f "$RC4_SLICE"
+
+# RC5 — the trust trail binds to the combined PR only. The falsifiable half of
+# this is RCX11 in review-pr-consolidate.test.sh; this row holds the prose so a
+# future edit cannot quietly authorise labelling an original.
+assert_grep "$REVIEW_PR" 'sole carrier of the trust trail|no label, no close, no merge|receive no trail' \
+  "RC5a — the command states that only the combined PR carries the trust trail"
+assert_grep "$REVIEW_PR" 'originals keep `review-pr:pending`|The originals receive no trail|superseded' \
+  "RC5b — the originals' disposition is stated, not left to inference"
+
+# RC6 — the combined PR body renderer.
+assert_grep "$REVIEW_PR" '## Consolidated PRs' \
+  "RC6a — the body names every superseded original under '## Consolidated PRs'"
+assert_grep "$REVIEW_PR" '## Excluded' \
+  "RC6b — the body reports excluded candidates under '## Excluded'"
+assert_grep "$REVIEW_PR" 'reported by number|by number rather than dropped' \
+  "RC6c — an uncombinable PR is reported BY NUMBER, never dropped silently"
+assert_grep "$REVIEW_PR" 'Closes #N|`Closes #N` references' \
+  "RC6d — the originals' Closes references are carried onto the combined PR"
+
+# RC7 — the argument surfaces. A flag that works but is undocumented in
+# argument-hint is a flag nobody discovers.
+assert_grep "$REVIEW_PR" 'argument-hint:.*--consolidate' \
+  "RC7a — --consolidate is declared in argument-hint"
+assert_grep "$REVIEW_PR" 'argument-hint:.*--no-consolidate' \
+  "RC7b — --no-consolidate is declared in argument-hint"
+assert_grep "$REVIEW_PR" '\| `CONSOLIDATE` \|' \
+  "RC7c — the Argument Parsing Summary has a CONSOLIDATE row"
+assert_grep "$REVIEW_PR" '`--no-consolidate` > `--consolidate`|--no-consolidate. WINS over|--no-consolidate` wins over' \
+  "RC7d — --no-consolidate is documented as winning over --consolidate"
+assert_in_section "$REVIEW_PR" '## Usage Examples:' '## Agent Descriptions:' \
+  '/uberdev:review-pr --consolidate' \
+  "RC7e — Usage Examples shows --consolidate"
+assert_in_section "$REVIEW_PR" '## Usage Examples:' '## Agent Descriptions:' \
+  '/uberdev:review-pr --no-consolidate' \
+  "RC7f — Usage Examples shows --no-consolidate"
+
+# RC8 — the exit-2 no-downgrade contract. Accepting consolidation and then
+# quietly reviewing one PR instead would report a trust signal about a change
+# set the operator did not ask for.
+assert_grep "$REVIEW_PR" 'never downgraded to a single-PR review' \
+  "RC8 — a combine that cannot contain the current PR exits 2 rather than downgrading"
 
 echo
 echo "== Summary =="

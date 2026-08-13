@@ -230,8 +230,10 @@ Do not create files; a finding that requires a new file is refused.
      `disposition_sha256`, and `staged_tree_sha`, with values matching authority
      and the published digest; then return `REFUSED` if any disposition row is
      `REFUSED`, otherwise `NO_FIXES_NEEDED`. For standalone, this validation
-     proves the complete original index, worktree, and untracked state remains
-     unchanged.
+     proves the complete original index, worktree, and non-ignored untracked
+     state remains unchanged. Gitignored paths are outside the baseline by
+     design — you are expected to run the test suite, and running it writes
+     into ignored build and cache trees.
 
    Any missing, extra, malformed, stale, replaced, foreign, or state-mismatched
    receipt fails closed with exit 74 and the helper's stable reason token.

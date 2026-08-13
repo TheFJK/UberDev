@@ -41,17 +41,29 @@ assert "    runs-on: windows-latest\n" in windows_job
 assert "python -I -B tests/code-fixer-contract-windows.test.py" in windows_job
 assert "continue-on-error: true" not in windows_job
 
-# Guard S1-S6 (#428) — the teardown decoupling must not drift back.
+# Guard S4-S6 (#428) — the teardown decoupling must not drift back.
 #
-# EVERY needle is assembled at runtime. This block reads the file it lives in,
-# so a contiguous literal would count ITSELF: the ban would trip on the guard,
-# and the presence checks would pass vacuously after the thing they guard was
-# deleted. The program runs as `<stdin>` (piped to `python3 -I -B -`), so
-# `inspect.getsource` on anything defined here raises — the guard must read
-# file text from `root`.
-BANNED_CONSTRUCTOR = "tempfile.Temporary" + "Directory("
-NEEDLE_FACTORY = "tempfile." + "mkdtemp("
-NEEDLE_SUPPRESSION = "ignore_errors" + "=True"
+# NARROWED BY #447. S1 (ban the raw constructor), S2 (exactly one factory) and
+# S3 (exactly one suppression) moved to row A4 in
+# tests/test-harness-source-guards.test.sh, which enforces them across all 124
+# `tests/*.sh` ∪ `tests/*.py` files and on BOTH shape-check jobs — this block
+# never reached `windows-latest`, because code-fixer-contract.test.sh is on the
+# windows-skip-list. A4 also enforces the half S1-S3 never covered: that every
+# factory is PAIRED with a suppressed teardown, not merely that one exists.
+#
+# What A4 deliberately does NOT carry, and is why this block survives:
+#   S4  the per-file scratch CALL-SITE floors (30 / 1). A4's corpus-level
+#       factory floor is a weaker ratchet — it counts factories, not the sites
+#       routed through them, and S4 is the arm that caught the six scratch trees
+#       #431 added to this suite.
+#   S5  the exact crash-site literal from run 31369242976.
+#   S6  the fixture-git gc/maintenance pins.
+#
+# The surviving needles are still assembled at runtime. This block reads the file
+# it lives in, so a contiguous literal would count ITSELF and the presence checks
+# would pass vacuously after the thing they guard was deleted. The program runs
+# as `<stdin>` (piped to `python3 -I -B -`), so `inspect.getsource` on anything
+# defined here raises — the guard must read file text from `root`.
 NEEDLE_CALL_SITE = "with scratch" + "_dir("
 NEEDLE_CRASH_SITE = 'scratch' + '_dir("code-fixer-ci-spaced-")'
 for relative, floor in (
@@ -60,19 +72,6 @@ for relative, floor in (
 ):
     text = (root / relative).read_text(encoding="utf-8")
     assert len(text) > 1000, f"S4 vacuity: {relative} unreadable or truncated"
-    assert BANNED_CONSTRUCTOR not in text, (
-        f"S1 (#428): raw tempdir constructor is back in {relative} — route it "
-        f"through the scratch factory; its teardown must not decide this "
-        f"suite's verdict"
-    )
-    assert text.count(NEEDLE_FACTORY) == 1, (
-        f"S2 (#428): {relative} must have exactly one scratch factory, "
-        f"found {text.count(NEEDLE_FACTORY)}"
-    )
-    assert text.count(NEEDLE_SUPPRESSION) == 1, (
-        f"S3 (#428): {relative} must suppress unlink errors in exactly one "
-        f"place, found {text.count(NEEDLE_SUPPRESSION)}"
-    )
     assert text.count(NEEDLE_CALL_SITE) >= floor, (
         f"S4 (#428): {relative} has {text.count(NEEDLE_CALL_SITE)} scratch "
         f"call sites, floor is {floor} — sites were deleted or unrouted"
@@ -120,7 +119,7 @@ for name in (
     "prepare_standalone_authority",
     "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers",
+    "count_phase2_deferred_blockers",
     "project_verification_claims",
     "publish_verification",
     "validate_persistence_result",
@@ -140,7 +139,7 @@ assert module.__all__ == (
     "capture_standalone_terminal", "capture_review_terminal", "capture_persistence_terminal", "capture_bound_child", "capture_expected", "consume_authority", "encode_aggregate", "parse_finding_keys",
     "prepare_authority", "prepare_standalone_authority", "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers", "project_verification_claims",
+    "count_phase2_deferred_blockers", "project_verification_claims",
     "publish_verification", "validate_persistence_result",
     "commit_review", "commit_standalone", "validate_commit", "validate_failed_return", "validate_residue", "validate_standalone_outcome", "validate_review_outcome",
     "validate_staged",
@@ -183,7 +182,7 @@ assert tuple(inspect.signature(module.publish_review_only_disposition).parameter
     "findings_path", "findings_sha256", "snapshot_path", "snapshot_sha256",
     "working_dir", "disposition_path",
 )
-assert tuple(inspect.signature(module.count_deferred_blockers).parameters) == (
+assert tuple(inspect.signature(module.count_phase2_deferred_blockers).parameters) == (
     "findings_path", "findings_sha256", "disposition_path", "disposition_sha256",
 )
 assert tuple(inspect.signature(module.validate_persistence_result).parameters) == (
@@ -320,7 +319,7 @@ def run_bytes(argv, *, expected=0):
 
 
 @contextlib.contextmanager
-def scratch_dir(prefix):
+def scratch_dir(prefix, parent=None):
     """A scratch tree whose TEARDOWN cannot decide this suite's verdict.
 
     Scaffolding only. Nothing in this file reads the tree after its `with`
@@ -339,8 +338,13 @@ def scratch_dir(prefix):
     manager's 3.10+ cleanup-suppression kwarg because no workflow pins an
     interpreter (there is no `setup-python` step in .github/workflows), so the
     kwarg could TypeError on the very job it protects.
+
+    This docstring is the canonical rationale for all 12 copies of the factory
+    under tests/ (#447 spread it to the six sibling suites). `parent` carries
+    the stdlib `dir=` kwarg one of those call sites needs; omitted, mkdtemp's
+    `dir=None` is exactly the default, so one signature covers every site.
     """
-    path = tempfile.mkdtemp(prefix=prefix)
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
     try:
         yield path
     finally:
@@ -662,13 +666,24 @@ assert provisional_process.waited
 
 
 def persistence_result(status, *, halted=False, blocker_count=0,
-                       halted_due_to_overflow=False):
+                       halted_due_to_overflow=False, skipped_tiers=()):
+    # `skipped_closed` rows carry the agent's own return shape (findings-to-issues
+    # "Return contract"), so the tier token the parser counts is the token the
+    # child actually emits -- not a shape invented here.
+    skipped = "skipped_closed: []\n"
+    if skipped_tiers:
+        skipped = "skipped_closed:\n" + "".join(
+            f'  - {{ url: "https://github.com/o/r/issues/{90 + index}", '
+            f'file: "src/s{index}.py:{index + 1}", '
+            f'fingerprint: "0123456789abcde{index}", tier: "{tier}" }}\n'
+            for index, tier in enumerate(skipped_tiers)
+        )
     return (
         "Persistence summary.\n\n```yaml\n"
         f"status: {status}\n"
         "created_urls: []\n"
         "commented_urls: []\n"
-        "skipped_closed: []\n"
+        f"{skipped}"
         "blocked_by_dedupe: []\n"
         "by_severity:\n"
         f"  blocker: {blocker_count}\n"
@@ -873,6 +888,51 @@ with scratch_dir("code-fixer-persistence-result-") as temporary:
         result_sha256=halted_terminal["result_sha256"],
     ))
 
+    # #453 -- the blocker accounting spans MORE than the pinned population.
+    # `expected_deferred_blockers` is recounted from the Phase 2 pair the
+    # binding pins; `by_severity.blocker` and `skipped_closed` count rows the
+    # filer wrote for Phase 1 AND Phase 2. The contract may therefore only
+    # assert the direction the mismatch cannot forge: every pinned Phase 2
+    # blocker is accounted for. Phase 1 rows raise the observed count and must
+    # not fail the run.
+    result_path.write_text(
+        persistence_result("DONE", halted=True, blocker_count=1), encoding="utf-8"
+    )
+    phase1_only = validate_persistence(binding0)
+    assert phase1_only["halted"] is True, phase1_only
+    assert phase1_only["by_severity_blocker"] == 1, phase1_only
+    assert phase1_only["expected_deferred_blockers"] == 0, phase1_only
+    result_path.write_text(
+        persistence_result("DONE", halted=True, blocker_count=2), encoding="utf-8"
+    )
+    both_phases = validate_persistence(binding1)
+    assert both_phases["by_severity_blocker"] == 2, both_phases
+    assert both_phases["expected_deferred_blockers"] == 1, both_phases
+
+    # Under-accounting stays fatal: a child that files nothing for a deferred
+    # Phase 2 blocker is exactly the run that would otherwise report
+    # `halted: false` and emit a GREEN trust trail over an unfiled blocker.
+    result_path.write_text(persistence_result("DONE"), encoding="utf-8")
+    expect_contract_reason(
+        lambda: validate_persistence(binding1),
+        "persistence_result_authority_mismatch",
+    )
+    # A BLOCKER row the filer skipped because its issue is already closed is
+    # accounting, not silence...
+    result_path.write_text(
+        persistence_result("DONE", skipped_tiers=("BLOCKER",)), encoding="utf-8"
+    )
+    skipped_blocker = validate_persistence(binding1)
+    assert skipped_blocker["by_severity_blocker"] == 0, skipped_blocker
+    # ...but a lower-tier skip accounts for nothing.
+    result_path.write_text(
+        persistence_result("DONE", skipped_tiers=("MAJOR",)), encoding="utf-8"
+    )
+    expect_contract_reason(
+        lambda: validate_persistence(binding1),
+        "persistence_result_authority_mismatch",
+    )
+
     result_path.write_text(persistence_result("DONE"), encoding="utf-8")
     source_before = aggregate0.read_bytes()
     aggregate0.write_bytes(source_before + b"replacement\n")
@@ -914,16 +974,41 @@ assert module.parse_finding_keys(phase1_lens_row, "phase1")[0].location == (
     "src/general.ts:4"
 )
 phase2_keys = module.parse_finding_keys(phase2_oracle, "phase2")
+# The order is the Phase 2 writer's merge order -- first-seen (path,line) walked
+# in roster order (reuse, quality, efficiency) -- so this oracle is a PRODUCER
+# oracle, not only a parse oracle. `src/dup.ts:3` is second because the reuse
+# lens is the first roster member and it reports both `src/api.ts:130` and
+# `src/dup.ts:3`; `src/loop.ts:12` is first seen by the efficiency lens, last in
+# the roster. Any writer that emits a different order fails byte comparison.
 assert [item.location for item in phase2_keys] == [
-    "src/api.ts:130", "src/loop.ts:12", "src/dup.ts:3",
+    "src/api.ts:130", "src/dup.ts:3", "src/loop.ts:12",
 ]
-assert phase2_keys[-1].summary_sha256 == hashlib.sha256(
+assert phase2_keys[1].summary_sha256 == hashlib.sha256(
     b"Extract the duplicate implementation to the existing helper"
 ).hexdigest()
 phase1_empty = aggregate("phase1")
 phase2_empty = aggregate("phase2")
 assert module.parse_finding_keys(phase1_empty, "phase1") == ()
 assert module.parse_finding_keys(phase2_empty, "phase2") == ()
+# #452 -- the phase->envelope derivation is ONE function, not a ternary copied
+# into every procedure that needs it.
+assert module._aggregate_source("phase1") == "post-impl-review-aggregate"
+assert module._aggregate_source("phase2") == "simplify-aggregate"
+expect_contract_reason(
+    lambda: module._aggregate_source("phase3"), "findings_schema_invalid"
+)
+expect_contract_reason(
+    lambda: module._aggregate_source(None), "findings_schema_invalid"
+)
+# Source-text ratchet: the two envelope literals must not re-multiply. Without
+# it the single derivation can rot back into copies behind a green suite.
+helper_text = helper_path.read_text(encoding="utf-8")
+assert helper_text.count('"simplify-aggregate"') == 1, helper_text.count(
+    '"simplify-aggregate"'
+)
+assert helper_text.count('"post-impl-review-aggregate"') == 1, helper_text.count(
+    '"post-impl-review-aggregate"'
+)
 assert module.encode_aggregate(
     json.loads(phase1_empty.split(b"\n", 2)[1]), "phase1"
 ) == phase1_empty
@@ -980,7 +1065,9 @@ with scratch_dir("code-fixer-contract-") as temporary:
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
     (repo / "src").mkdir()
-    (repo / ".gitignore").write_text("ignored.cfg\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "ignored.cfg\nnode_modules/\n", encoding="utf-8"
+    )
     (repo / "ignored.cfg").write_text("LOCAL = 1\n", encoding="utf-8")
     (repo / "src/outside.py").write_text("OUTSIDE = 1\n", encoding="utf-8")
     (repo / "src/new.py").write_text("NEW = 0\n", encoding="utf-8")
@@ -1169,6 +1256,19 @@ with scratch_dir("code-fixer-contract-") as temporary:
     assert git(repo, "rev-parse", "HEAD").stdout.decode().strip() == head
     (repo / "src/new.py").unlink()
 
+    # A gitignored dependency tree, in place BEFORE the mint (#478). npm and
+    # pnpm hardlink package files out of the global cache, so `st_nlink > 1` is
+    # the ORDINARY shape under `node_modules` — and the owned-regular capture
+    # that the untracked scan runs over every path it enumerates rejects
+    # exactly that (`artifact_not_owned_regular`), as does any file past
+    # `WORKTREE_FILE_LIMIT`. Enumerating ignored paths therefore made the mint
+    # itself abort on a normal JavaScript checkout, before hashing ~62k paths
+    # could even become the cost complaint.
+    dependency_tree = repo / "node_modules/.cache"
+    dependency_tree.mkdir(parents=True)
+    (dependency_tree / "package.bin").write_bytes(b"cached-package\n")
+    os.link(dependency_tree / "package.bin", dependency_tree / "linked.bin")
+
     # A clean preparation publishes one closed, deterministic authority snapshot.
     authority_receipt = prepare(
         repo, findings, findings_sha, commit_range, range_sha, dirty_disposition
@@ -1188,6 +1288,11 @@ with scratch_dir("code-fixer-contract-") as temporary:
         "index_mode", "untracked",
     }
     assert authority["schema_version"] == 1
+    # U0 is the NON-ignored untracked set. `ignored.cfg` and the dependency
+    # tree above cannot enter the commit under review — the diff, the
+    # target-path allowlist and `commit-review` all operate on tracked content
+    # — so they are not baseline state and their churn is not drift.
+    assert authority["untracked"] == [], authority["untracked"]
     assert authority["findings_sha256"] == findings_sha
     assert authority["commit_range_sha256"] == range_sha
     assert [row["finding_index"] for row in authority["finding_keys"]] == [1, 2]
@@ -1281,11 +1386,10 @@ with scratch_dir("code-fixer-contract-") as temporary:
             "--disposition-path", str(dirty_disposition),
         ], stdin=raw, expected=expected)
 
-    ignored_before = (repo / "ignored.cfg").read_bytes()
-    (repo / "ignored.cfg").write_text("LOCAL = attacker\n", encoding="utf-8")
-    publish(json.dumps(valid_candidate))
-    assert dirty_disposition.exists() and dirty_disposition.stat().st_size == 0
-    (repo / "ignored.cfg").write_bytes(ignored_before)
+    # Ignored-path churn between mint and publication is judged at the one
+    # publication below that SUCCEEDS, not here: with every APPLIED target
+    # still clean, `review_applied_path_mismatch` refuses first, so an arm
+    # placed here reports exit 74 whichever way the baseline is scanned.
 
     authority_swap = evidence / "authority-replacement.json"
     authority_swap.write_bytes(authority_before + b" ")
@@ -1320,6 +1424,16 @@ with scratch_dir("code-fixer-contract-") as temporary:
         assert dirty_disposition.exists() and dirty_disposition.stat().st_size == 0
 
     (repo / "src/a.py").write_text("A = 2\n", encoding="utf-8")
+    # The fixer is REQUIRED to run the suite between the authority mint and
+    # `publish-disposition`, and a test run writes into ignored cache trees —
+    # vitest drops `node_modules/.vite/vitest/<hash>/results.json` on every
+    # run. A baseline that enumerated ignored paths counted those writes as
+    # new untracked state, so publication refused `review_baseline_mismatch`:
+    # a fixer that tested its own work invalidated its own authority. (#478)
+    (repo / "ignored.cfg").write_text("LOCAL = attacker\n", encoding="utf-8")
+    vitest_cache = repo / "node_modules/.vite/vitest/da39a3ee5e6b4b0d"
+    vitest_cache.mkdir(parents=True)
+    (vitest_cache / "results.json").write_text('{"version":1}\n', encoding="utf-8")
     published = json.loads(publish(json.dumps(valid_candidate), expected=0))
     assert set(published) == {
         "disposition_path", "disposition_sha256", "applied_paths",
@@ -3196,7 +3310,9 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
     (repo / "clean.txt").write_text("H0\n", encoding="utf-8")
-    (repo / ".gitignore").write_text("ignored.cfg\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "ignored.cfg\nnode_modules/\n", encoding="utf-8"
+    )
     git(repo, "add", "--", "clean.txt", ".gitignore")
     git(repo, "commit", "-qm", "test: review-only base")
     head = git(repo, "rev-parse", "HEAD").stdout.decode().strip()
@@ -3204,6 +3320,13 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     (repo / "untracked.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (repo / "untracked.sh").chmod(0o644)
     (repo / "ignored.cfg").write_text("secret-local-state\n", encoding="utf-8")
+    # The same hardlinked dependency tree the review-mode fixture models: the
+    # standalone snapshot mints U0 through the identical scan, so it aborted
+    # on the identical `artifact_not_owned_regular` before #478.
+    review_only_tree = repo / "node_modules/.cache"
+    review_only_tree.mkdir(parents=True)
+    (review_only_tree / "package.bin").write_bytes(b"cached-package\n")
+    os.link(review_only_tree / "package.bin", review_only_tree / "linked.bin")
     objects_before = git_object_files(repo)
     evidence = repo / ".uberdev/research/20260728-010206-abcdef1"
     evidence.mkdir(parents=True)
@@ -3227,13 +3350,6 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         {
             "git_mode": "100644",
             "kind": "regular",
-            "path": "ignored.cfg",
-            "sha256": hashlib.sha256(b"secret-local-state\n").hexdigest(),
-            "size": len(b"secret-local-state\n"),
-        },
-        {
-            "git_mode": "100644",
-            "kind": "regular",
             "path": "untracked.sh",
             "sha256": hashlib.sha256(b"#!/bin/sh\nexit 0\n").hexdigest(),
             "size": len(b"#!/bin/sh\nexit 0\n"),
@@ -3246,21 +3362,28 @@ with scratch_dir("code-fixer-review-only-") as temporary:
     )]))
     disposition = evidence / "phase2-disposition.json"
     disposition.write_bytes(b"")
+    # Ignored churn is not drift, and it is deliberately NOT restored: every
+    # remaining arm of this block — including the publication at the end that
+    # must SUCCEED — runs with a mutated ignored file and a vitest result cache
+    # written after the mint, exactly as a fixer that ran the suite leaves
+    # them. (#478)
     (repo / "ignored.cfg").write_text("mutated-secret-state\n", encoding="utf-8")
-    expect_contract_failure(lambda: module.publish_review_only_disposition(
-        findings_path=str(findings), findings_sha256=digest(findings),
-        snapshot_path=str(snapshot_path),
-        snapshot_sha256=snapshot_receipt["snapshot_sha256"],
-        working_dir=str(repo), disposition_path=str(disposition),
-    ))
-    (repo / "ignored.cfg").write_text("secret-local-state\n", encoding="utf-8")
+    vitest_cache = repo / "node_modules/.vite/vitest/da39a3ee5e6b4b0d"
+    vitest_cache.mkdir(parents=True)
+    (vitest_cache / "results.json").write_text('{"version":1}\n', encoding="utf-8")
+    assert module._capture_repo_state(str(repo), str(evidence))["untracked"] == (
+        snapshot_document["untracked"]
+    )
+    # A non-ignored untracked path is still baseline state: a mode flip on it
+    # is drift, and it names the drift rather than any of the other closed
+    # refusals this verb can reach.
     (repo / "untracked.sh").chmod(0o755)
-    expect_contract_failure(lambda: module.publish_review_only_disposition(
+    expect_contract_reason(lambda: module.publish_review_only_disposition(
         findings_path=str(findings), findings_sha256=digest(findings),
         snapshot_path=str(snapshot_path),
         snapshot_sha256=snapshot_receipt["snapshot_sha256"],
         working_dir=str(repo), disposition_path=str(disposition),
-    ))
+    ), "standalone_baseline_mismatch")
     (repo / "untracked.sh").chmod(0o644)
     mutated_index = bytearray(index_before)
     mutated_index[12] ^= 1
@@ -3352,13 +3475,13 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         "reason": "no-eligible-baseline-path",
     }]
     findings_sha = digest(findings)
-    assert module.count_deferred_blockers(
+    assert module.count_phase2_deferred_blockers(
         findings_path=str(findings), findings_sha256=findings_sha,
         disposition_path=str(disposition),
         disposition_sha256=published["disposition_sha256"],
     ) == 1
     assert run([
-        "count-deferred-blockers", "--findings-path", str(findings),
+        "count-phase2-deferred-blockers", "--findings-path", str(findings),
         "--findings-sha256", findings_sha,
         "--disposition-path", str(disposition),
         "--disposition-sha256", published["disposition_sha256"],
@@ -3374,7 +3497,7 @@ with scratch_dir("code-fixer-review-only-") as temporary:
         encoding="utf-8",
     )
     applied_sha = hashlib.sha256(applied_disposition.read_bytes()).hexdigest()
-    assert module.count_deferred_blockers(
+    assert module.count_phase2_deferred_blockers(
         findings_path=str(findings), findings_sha256=findings_sha,
         disposition_path=str(applied_disposition),
         disposition_sha256=applied_sha,
@@ -6778,6 +6901,179 @@ with scratch_dir("code-fixer-verify-claims-") as temporary:
         disposition_path=str(disposition), disposition_sha256=disposition_sha,
         claims_dir=str(evidence / "tampered-claims"),
     ))
+
+# #452 -- the phase axis, pinned at every layer it is decided on. Before this
+# block there was ONE pair-loading procedure per phase (two divergent copies of
+# the same twelve steps), and the Phase-2-only verb carried an all-phase name
+# that no assert contradicted.
+with scratch_dir("code-fixer-phase-axis-") as temporary:
+    working = pathlib.Path(temporary).resolve()
+    evidence, findings, findings_sha, disposition, disposition_sha = (
+        verification_fixture(temporary)
+    )
+    # The Phase 2 half of the axis: empty aggregate + empty canonical
+    # disposition, the same shape the workflow-defer block binds.
+    p2_aggregate = working / "simplify-final.md"
+    p2_aggregate.write_bytes(aggregate("phase2"))
+    p2_sha = digest(p2_aggregate)
+    p2_disposition = working / "phase2-disposition.json"
+    p2_disposition.write_text(json.dumps({
+        "schema_version": 1, "phase": "phase2",
+        "aggregate_sha256": p2_sha, "findings_disposition": [],
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    p2_disposition_sha = digest(p2_disposition)
+
+    # ONE procedure, parameterised by phase -- both phases reach it.
+    p1_pair = module._load_verification_pair(
+        phase="phase1", findings_path=str(findings), findings_sha256=findings_sha,
+        disposition_path=str(disposition), disposition_sha256=disposition_sha,
+    )
+    assert len(p1_pair) == 4, p1_pair
+    assert p1_pair[0]["phase"] == "phase1", p1_pair[0]
+    assert p1_pair[1]["phase"] == "phase1", p1_pair[1]
+    assert len(p1_pair[2]) == 4, p1_pair[2]
+    p2_pair = module._load_verification_pair(
+        phase="phase2", findings_path=str(p2_aggregate), findings_sha256=p2_sha,
+        disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+    )
+    assert p2_pair[0]["phase"] == "phase2", p2_pair[0]
+    assert p2_pair[1]["phase"] == "phase2", p2_pair[1]
+    assert p2_pair[2] == (), p2_pair[2]
+
+    # A pair from the OTHER phase is refused on its envelope, both directions,
+    # and an unknown phase is refused on the derivation itself.
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase2", findings_path=str(findings),
+            findings_sha256=findings_sha, disposition_path=str(disposition),
+            disposition_sha256=disposition_sha),
+        "findings_envelope_invalid",
+    )
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase1", findings_path=str(p2_aggregate),
+            findings_sha256=p2_sha, disposition_path=str(p2_disposition),
+            disposition_sha256=p2_disposition_sha),
+        "findings_envelope_invalid",
+    )
+    expect_contract_reason(
+        lambda: module._load_verification_pair(
+            phase="phase3", findings_path=str(p2_aggregate),
+            findings_sha256=p2_sha, disposition_path=str(p2_disposition),
+            disposition_sha256=p2_disposition_sha),
+        "findings_schema_invalid",
+    )
+
+    # The Phase 2 verb refuses a Phase 1 pair BY NAME, at the Python layer and
+    # through the CLI. Asserted nowhere before #452.
+    expect_contract_reason(
+        lambda: module.count_phase2_deferred_blockers(
+            findings_path=str(findings), findings_sha256=findings_sha,
+            disposition_path=str(disposition),
+            disposition_sha256=disposition_sha),
+        "findings_envelope_invalid",
+    )
+    # `run` only shape-checks the reason token; this row pins the exact string.
+    phase1_through_phase2 = subprocess.run(
+        [sys.executable, "-I", "-B", str(helper_path),
+         "count-phase2-deferred-blockers",
+         "--findings-path", str(findings), "--findings-sha256", findings_sha,
+         "--disposition-path", str(disposition),
+         "--disposition-sha256", disposition_sha],
+        text=True, capture_output=True, check=False,
+    )
+    assert phase1_through_phase2.returncode == 74, (
+        phase1_through_phase2.returncode, phase1_through_phase2.stdout,
+        phase1_through_phase2.stderr,
+    )
+    assert phase1_through_phase2.stderr.strip() == "findings_envelope_invalid", (
+        phase1_through_phase2.stderr
+    )
+    assert phase1_through_phase2.stdout == "", phase1_through_phase2.stdout
+    # ...and the retired all-phase spelling is gone from the CLI vocabulary.
+    # The name is ASSEMBLED here so this file never carries it contiguously:
+    # the retirement is pinned repo-wide by a grep that would otherwise count
+    # this very row.
+    retired_verb = "count-" + "deferred-blockers"
+    retired = subprocess.run(
+        [sys.executable, "-I", "-B", str(helper_path), retired_verb,
+         "--findings-path", str(p2_aggregate), "--findings-sha256", p2_sha,
+         "--disposition-path", str(p2_disposition),
+         "--disposition-sha256", p2_disposition_sha],
+        text=True, capture_output=True, check=False,
+    )
+    assert retired.returncode == 74, (
+        retired.returncode, retired.stdout, retired.stderr
+    )
+    # argparse's own error is mapped into the module's closed vocabulary, so an
+    # unknown verb is refused by NAME rather than by an unmapped exit 2.
+    assert retired.stderr.strip() == "arguments_invalid", retired.stderr
+    assert retired.stdout == "", retired.stdout
+
+    # Neither persistence producer is widened by the rename: a Phase 1 pair is
+    # refused even when expected_deferred_blockers matches its TRUE Phase 1
+    # count, and the token is the envelope refusal (the scalar pre-checks all
+    # pass, then the recount refuses).
+    axis_result = working / "result.md"
+    axis_status = working / "status.json"
+    axis_result.write_text(persistence_result("DONE"), encoding="utf-8")
+    axis_status.write_text(json.dumps({
+        "backend": "background", "branch": "", "exit_code": 0,
+        "lease_generation": "0123456789abcdef0123456789abcdef", "pid": "34567",
+        "process_identity": "34567|34567|34567|" + "0123456789abcdef" * 4,
+        "result": str(axis_result), "state": "completed",
+        "workspace_mode": "caller", "worktree": str(working),
+    }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    axis_receipt = json.dumps({
+        "schema_version": 1, "edge_id": "review_pr.defer.findings",
+        "instance_id": "review-pr-defer-findings-iter01-attempt01",
+        "backend": "background", "handle": "34567", "state": "completed",
+        "result_file": str(axis_result), "status_file": str(axis_status),
+    }, sort_keys=True, separators=(",", ":")).encode()
+    # Positive control: the SAME producer arguments with the Phase 2 pair bind.
+    axis_detached = module.bind_persistence_launch_receipt(
+        receipt=axis_receipt, edge_id="review_pr.defer.findings",
+        instance_id="review-pr-defer-findings-iter01-attempt01",
+        result_path=str(axis_result), status_path=str(axis_status),
+        working_dir=str(working), aggregate_path=str(p2_aggregate),
+        aggregate_sha256=p2_sha, disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+        expected_deferred_blockers=0, require_clean=False,
+    )
+    assert axis_detached["edge_id"] == "review_pr.defer.findings", axis_detached
+    expect_contract_reason(
+        lambda: module.bind_persistence_launch_receipt(
+            receipt=axis_receipt, edge_id="review_pr.defer.findings",
+            instance_id="review-pr-defer-findings-iter01-attempt01",
+            result_path=str(axis_result), status_path=str(axis_status),
+            working_dir=str(working), aggregate_path=str(findings),
+            aggregate_sha256=findings_sha, disposition_path=str(disposition),
+            disposition_sha256=disposition_sha,
+            expected_deferred_blockers=1, require_clean=True),
+        "findings_envelope_invalid",
+    )
+    axis_workflow = module.bind_workflow_persistence_launch(
+        instance_id="review-pr-defer-findings-iter01-attempt01",
+        run_nonce=WORKFLOW_NONCE, result_path=str(axis_result),
+        status_path=str(axis_status), working_dir=str(working),
+        aggregate_path=str(p2_aggregate), aggregate_sha256=p2_sha,
+        disposition_path=str(p2_disposition),
+        disposition_sha256=p2_disposition_sha,
+        expected_deferred_blockers=0, require_clean=False,
+    )
+    assert axis_workflow["edge_id"] == "review_pr.defer.findings", axis_workflow
+    expect_contract_reason(
+        lambda: module.bind_workflow_persistence_launch(
+            instance_id="review-pr-defer-findings-iter01-attempt01",
+            run_nonce=WORKFLOW_NONCE, result_path=str(axis_result),
+            status_path=str(axis_status), working_dir=str(working),
+            aggregate_path=str(findings), aggregate_sha256=findings_sha,
+            disposition_path=str(disposition),
+            disposition_sha256=disposition_sha,
+            expected_deferred_blockers=1, require_clean=True),
+        "findings_envelope_invalid",
+    )
 
 with scratch_dir("code-fixer-verify-none-") as temporary:
     # A suggestions-only aggregate produces zero cards and zero directories.

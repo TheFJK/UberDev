@@ -110,7 +110,7 @@ __all__ = (
     "prepare_standalone_authority",
     "publish_disposition",
     "publish_review_only_disposition",
-    "count_deferred_blockers",
+    "count_phase2_deferred_blockers",
     "project_verification_claims",
     "publish_verification",
     "validate_persistence_result",
@@ -789,13 +789,23 @@ def _validate_aggregate(value: Any, phase: Phase) -> tuple[FindingKey, ...]:
     return tuple(findings)
 
 
+def _aggregate_source(phase: Phase) -> str:
+    """The untrusted-input envelope source a phase's aggregate is wrapped in.
+
+    ONE derivation (#452). This ternary used to be copied inline into every
+    procedure that needed it, which is how a Phase-2-only body could sit behind
+    an all-phase name: the axis was invisible at the call site.
+    """
+    if not isinstance(phase, str) or phase not in PHASE_CONTRIBUTORS:
+        fail("findings_schema_invalid")
+    return "post-impl-review-aggregate" if phase == "phase1" else "simplify-aggregate"
+
+
 def encode_aggregate(value: Any, phase: Phase) -> bytes:
     if not isinstance(phase, str) or phase not in PHASE_CONTRIBUTORS:
         fail("findings_schema_invalid")
     _validate_aggregate(value, phase)
-    source = (
-        "post-impl-review-aggregate" if phase == "phase1" else "simplify-aggregate"
-    )
+    source = _aggregate_source(phase)
     return (
         f'<external-untrusted-input source="{source}">\n'.encode("ascii")
         + _canonical_json(value)
@@ -810,9 +820,7 @@ def parse_finding_keys(payload: bytes, phase: Phase) -> tuple[FindingKey, ...]:
         or not isinstance(payload, bytes)
     ):
         fail("findings_schema_invalid")
-    source = (
-        "post-impl-review-aggregate" if phase == "phase1" else "simplify-aggregate"
-    )
+    source = _aggregate_source(phase)
     body = _enveloped_body(payload, source)
     value = _parse_json(body, "findings_schema_invalid")
     findings = _validate_aggregate(value, phase)
@@ -1643,10 +1651,35 @@ def _entry_relation(left: dict[str, Any] | None, right: dict[str, Any] | None) -
 
 
 def _untracked_state(working_dir: str, evidence_dir: str) -> list[dict[str, Any]]:
+    """U0: the untracked state a verb must find unchanged when it returns.
+
+    `--exclude-standard` is load-bearing, and it is the SAME exclusion
+    `_require_untracked_confined_to_evidence` applies — the two spellings of
+    "which untracked path is state" must agree or the baseline judges paths
+    the residue check has already ruled irrelevant.
+
+    Without it the baseline is self-invalidating. A fixer is REQUIRED to run
+    the test suite between the authority mint and `publish-disposition`, and
+    running it writes into ignored build and cache trees — vitest drops
+    `node_modules/.vite/vitest/<hash>/results.json` on every run. The
+    unfiltered scan counted that write as new untracked state and refused the
+    fixer's own disposition with `review_baseline_mismatch`, leaving the edits
+    unstaged. It also had to hash every ignored path through the owned-regular
+    capture, so an ordinary `node_modules` — hardlinked out of the package
+    manager's global cache, and holding files past `WORKTREE_FILE_LIMIT` —
+    aborted the mint outright, and a clean one still cost a full walk of tens
+    of thousands of paths per capture.
+
+    Excluding them costs no guarantee: an ignored path cannot enter the commit
+    under review. The diff, the target-path allowlist, and `commit-review` all
+    operate on tracked content, and force-adding an ignored path to the index
+    surfaces it as tracked state, which `_capture_repo_state` still judges.
+    """
     result = _git(
         working_dir,
         "ls-files",
         "--others",
+        "--exclude-standard",
         "-z",
         "--",
     )
@@ -3465,46 +3498,30 @@ def publish_review_only_disposition(
             )
 
 
-def count_deferred_blockers(
+def count_phase2_deferred_blockers(
     *,
     findings_path: str,
     findings_sha256: str,
     disposition_path: str,
     disposition_sha256: str,
 ) -> int:
-    canonical_findings = _absolute_input(findings_path, "findings_path_invalid")
-    canonical_disposition = _absolute_input(
-        disposition_path, "disposition_path_invalid"
+    """Deferred blockers in the PHASE 2 pair -- the /simplify defer edge's count.
+
+    The phase is a literal here, not a parameter: this verb's recount is the
+    proof `review_pr.defer.findings` binds on, and a caller-declared phase would
+    let an agent-authored fence bind a Phase 1 aggregate to a Phase 2 edge.
+    Phase 1 reaches the same procedure through
+    `_load_verification_pair(phase="phase1", ...)`, never through here.
+    """
+    aggregate, disposition, _finding_keys, _canonical_disposition = (
+        _load_verification_pair(
+            phase="phase2",
+            findings_path=findings_path,
+            findings_sha256=findings_sha256,
+            disposition_path=disposition_path,
+            disposition_sha256=disposition_sha256,
+        )
     )
-    findings_payload = capture_expected(
-        canonical_findings, findings_sha256, 1, FINDINGS_LIMIT
-    )
-    body = _enveloped_body(findings_payload, "simplify-aggregate")
-    aggregate = _parse_json(body, "findings_schema_invalid")
-    finding_keys = _validate_aggregate(aggregate, "phase2")
-    if encode_aggregate(aggregate, "phase2") != findings_payload:
-        fail("findings_not_canonical")
-    disposition_payload = capture_expected(
-        canonical_disposition, disposition_sha256, 1, DISPOSITION_LIMIT
-    )
-    disposition = _parse_json(disposition_payload, "disposition_json_invalid")
-    authority = {
-        "phase": "phase2",
-        "findings_sha256": findings_sha256,
-        "finding_keys": [asdict(item) for item in finding_keys],
-    }
-    _validate_disposition(disposition, authority)
-    expected_disposition = (
-        json.dumps(
-            disposition,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        + b"\n"
-    )
-    if disposition_payload != expected_disposition:
-        fail("disposition_not_canonical")
     return sum(
         1
         for finding, row in zip(
@@ -3561,18 +3578,21 @@ VERIFICATION_OPINION_KEYS = {"finding_index", "score", "reason"}
 VERIFICATION_BASENAME = "phase1-verification.json"
 
 
-def _load_phase1_verification_pair(
+def _load_verification_pair(
+    *,
+    phase: Phase,
     findings_path: str,
     findings_sha256: str,
     disposition_path: str,
     disposition_sha256: str,
 ) -> tuple[dict[str, Any], dict[str, Any], tuple[FindingKey, ...], str]:
-    """Re-derive the Phase 1 aggregate/disposition pair from pinned bytes.
+    """Re-derive a phase's aggregate/disposition pair from pinned bytes.
 
-    Deliberately NOT count_deferred_blockers: that function hardcodes phase 2
-    on both axes (a `simplify-aggregate` envelope, validated as `phase2`), so
-    it cannot read a Phase 1 pair at all. Both verification verbs bind the same
-    pair here so "which findings are eligible" is decided exactly once.
+    ONE procedure for both phases (#452). The phase is a parameter HERE and a
+    literal at every call site, so no caller-supplied value ever selects which
+    phase a persistence binding proves -- and both verification verbs plus the
+    Phase 2 deferred-blocker recount bind the same pair here, so "which findings
+    are eligible" is decided exactly once.
     """
     canonical_findings = _absolute_input(findings_path, "findings_path_invalid")
     canonical_disposition = _absolute_input(
@@ -3581,17 +3601,17 @@ def _load_phase1_verification_pair(
     findings_payload = capture_expected(
         canonical_findings, findings_sha256, 1, FINDINGS_LIMIT
     )
-    body = _enveloped_body(findings_payload, "post-impl-review-aggregate")
+    body = _enveloped_body(findings_payload, _aggregate_source(phase))
     aggregate = _parse_json(body, "findings_schema_invalid")
-    finding_keys = _validate_aggregate(aggregate, "phase1")
-    if encode_aggregate(aggregate, "phase1") != findings_payload:
+    finding_keys = _validate_aggregate(aggregate, phase)
+    if encode_aggregate(aggregate, phase) != findings_payload:
         fail("findings_not_canonical")
     disposition_payload = capture_expected(
         canonical_disposition, disposition_sha256, 1, DISPOSITION_LIMIT
     )
     disposition = _parse_json(disposition_payload, "disposition_json_invalid")
     authority = {
-        "phase": "phase1",
+        "phase": phase,
         "findings_sha256": findings_sha256,
         "finding_keys": [asdict(item) for item in finding_keys],
     }
@@ -3651,8 +3671,12 @@ def project_verification_claims(
     The aggregate is READ, never rewritten, and FINDING_KEYS gains no member.
     """
     aggregate, disposition, finding_keys, _canonical_disposition = (
-        _load_phase1_verification_pair(
-            findings_path, findings_sha256, disposition_path, disposition_sha256
+        _load_verification_pair(
+            phase="phase1",
+            findings_path=findings_path,
+            findings_sha256=findings_sha256,
+            disposition_path=disposition_path,
+            disposition_sha256=disposition_sha256,
         )
     )
     canonical_claims = _absolute_input(claims_dir, "claims_dir_invalid")
@@ -3782,8 +3806,12 @@ def publish_verification(
     if type(threshold) is not int or not 0 <= threshold <= 100:
         fail("verification_threshold_invalid")
     aggregate, disposition, finding_keys, canonical_disposition = (
-        _load_phase1_verification_pair(
-            findings_path, findings_sha256, disposition_path, disposition_sha256
+        _load_verification_pair(
+            phase="phase1",
+            findings_path=findings_path,
+            findings_sha256=findings_sha256,
+            disposition_path=disposition_path,
+            disposition_sha256=disposition_sha256,
         )
     )
     canonical_verification = _absolute_input(
@@ -3849,7 +3877,8 @@ def _parse_persistence_result_document(payload: bytes) -> dict[str, Any]:
     and review_pr.ci.defer_refusal share ONE parser. They deliberately do NOT
     share the blocker recount that follows it: the defer stage recounts against
     a schema-v2 aggregate, and the CI refusal stage's aggregate is the one-row
-    ci-refused-synthetic envelope, which count_deferred_blockers cannot parse.
+    ci-refused-synthetic envelope, which count_phase2_deferred_blockers cannot
+    parse.
     """
     if b"\x00" in payload or b"\r" in payload or not payload.endswith(b"\n```\n"):
         fail("persistence_result_malformed")
@@ -3978,8 +4007,44 @@ def validate_persistence_result(
     status_sha256: str,
     result_sha256: str,
 ) -> dict[str, Any]:
+    """Judge the review_pr.defer.findings child's terminal.
+
+    The blocker accounting below is a LOWER BOUND, not an equality, because the
+    two sides count different populations and always did (#453):
+
+    * `expected_deferred_blockers` is Phase-2-scoped. It is recounted here from
+      the pinned aggregate/disposition bytes by `count_deferred_blockers`, which
+      hardcodes a `simplify-aggregate` envelope and `phase2` validation, so it
+      can see no Phase 1 row at all.
+    * `by_severity.blocker` and `skipped_closed` are what the FILER wrote, and
+      `agents/findings-to-issues.md` reads both phase aggregates: they count
+      Phase 1 and Phase 2 rows together.
+
+    An equality therefore failed every run that filed a Phase 1 blocker, and the
+    RFC 0017 verification gate — which culls Phase 1 rows before they are filed
+    — made that easier to hit. The relation the binding can actually prove is
+    the one this asserts: the filer accounted for AT LEAST the N blockers the
+    Phase 2 fixer deferred. Phase 1 rows only ever raise the observed count.
+
+    Equality is not merely unpinned here, it is unreachable: the filer collapses
+    rows across phases by `(file, line, normalised summary)`, so a Phase 1 and a
+    Phase 2 blocker at one location legitimately produce a single filed row.
+
+    The bound is not weakened by the filer's own drop paths. `require_clean` is
+    true exactly when a Phase 2 blocker was deferred, and it demands `DONE` —
+    which the child returns only when `blocked_by_dedupe` is empty and
+    `overflow_count` is 0. So on every run this bound can fail, each deferred
+    Phase 2 blocker was either filed/commented (`by_severity.blocker`) or
+    matched an already-closed issue (`skipped_closed`), and an under-reporting
+    child — the one that would emit a GREEN trail over an unfiled blocker — is
+    still refused.
+
+    What this does NOT assert: that the filer wrote no MORE blockers than were
+    deferred. The upper bound needs a recount of the Phase 1 pair, which this
+    binding does not pin (it travels as a prompt input only).
+    """
     binding = _load_persistence_binding(launch_binding)
-    observed_deferred_blockers = count_deferred_blockers(
+    observed_deferred_blockers = count_phase2_deferred_blockers(
         findings_path=binding["aggregate_path"],
         findings_sha256=binding["aggregate_sha256"],
         disposition_path=binding["disposition_path"],
@@ -4001,10 +4066,8 @@ def validate_persistence_result(
     if binding["require_clean"] and status != "DONE":
         fail("persistence_result_concerns")
     blocker_count = parsed["by_severity_blocker"]
-    if (
-        binding["expected_deferred_blockers"]
-        != blocker_count + parsed["skipped_blockers"]
-    ):
+    accounted_blockers = blocker_count + parsed["skipped_blockers"]
+    if accounted_blockers < binding["expected_deferred_blockers"]:
         fail("persistence_result_authority_mismatch")
     capture_expected(
         binding["status_path"], status_sha256, 1, 65_536
@@ -4012,7 +4075,7 @@ def validate_persistence_result(
     capture_expected(
         binding["result_path"], result_sha256, 1, PERSISTENCE_RESULT_LIMIT
     )
-    observed_deferred_blockers = count_deferred_blockers(
+    observed_deferred_blockers = count_phase2_deferred_blockers(
         findings_path=binding["aggregate_path"],
         findings_sha256=binding["aggregate_sha256"],
         disposition_path=binding["disposition_path"],
@@ -7127,9 +7190,9 @@ WORKFLOW_FIXER_LAUNCH_BINDING_KEYS = (
 #   fabricated finding_keys and target_paths -- a lie in the shape of a proof.
 #
 #   capture_persistence_terminal recounts deferred blockers from a schema-v2
-#   aggregate. review_pr.ci.defer_refusal's aggregate is the one-row
+#   Phase 2 aggregate. review_pr.ci.defer_refusal's aggregate is the one-row
 #   ci-refused-synthetic envelope (commands/review-pr.md), which
-#   count_deferred_blockers cannot parse -- so that verb refuses it
+#   count_phase2_deferred_blockers cannot parse -- so that verb refuses it
 #   structurally, and correctly.
 #
 # What a CI child actually owes is: its two bound outputs, PLUS the exact bytes
@@ -7670,7 +7733,9 @@ def _validate_persistence_authority(
     Named once so the detached and workflow persistence bindings cannot drift
     into pinning different things: same edge, same containment rule, same digest
     shapes, and the same recount of deferred blockers against the pinned
-    aggregate and disposition bytes.
+    **Phase 2** aggregate and disposition bytes. The phase is this stage's, not
+    the caller's: `count_phase2_deferred_blockers` refuses a Phase 1 pair on its
+    envelope, so a fence cannot bind Phase 1 findings to the Phase 2 defer edge.
     """
     if (
         edge_id != "review_pr.defer.findings"
@@ -7687,7 +7752,7 @@ def _validate_persistence_authority(
         or require_clean != (expected_deferred_blockers > 0)
     ):
         fail("persistence_binding_invalid")
-    observed_deferred_blockers = count_deferred_blockers(
+    observed_deferred_blockers = count_phase2_deferred_blockers(
         findings_path=canonical_aggregate,
         findings_sha256=aggregate_sha256,
         disposition_path=canonical_disposition,
@@ -7715,8 +7780,9 @@ def bind_workflow_persistence_launch(
 
     The workflow twin of `bind_persistence_launch_receipt`. It takes no edge id
     because there is exactly one defer edge, and it re-counts the deferred
-    blockers from the pinned bytes here rather than trusting the caller's
-    number -- the same obligation the detached producer carries.
+    blockers from the pinned **Phase 2** aggregate/disposition bytes here rather
+    than trusting the caller's number -- the same obligation the detached
+    producer carries.
     """
     canonical_working = _absolute_input(working_dir, "working_dir_invalid")
     canonical_aggregate = _absolute_input(aggregate_path, "findings_path_invalid")
@@ -9269,8 +9335,8 @@ def validate_ci_persistence_result(
     """Judge the review_pr.ci.defer_refusal child's terminal.
 
     It reuses `validate_persistence_result`'s fence parser and NOT its
-    `count_deferred_blockers` recount: this stage's aggregate is the one-row
-    `ci-refused-synthetic` envelope, which that recount cannot parse, and
+    `count_phase2_deferred_blockers` recount: this stage's aggregate is the
+    one-row `ci-refused-synthetic` envelope, which that recount cannot parse, and
     forcing it to would mean minting a schema-v2 document with fabricated
     findings just so a number could be compared to itself.
     """
@@ -9818,7 +9884,7 @@ def _parser() -> argparse.ArgumentParser:
     review_only.add_argument("--working-dir", required=True)
     review_only.add_argument("--disposition-path", required=True)
     deferred_blockers = commands.add_parser(
-        "count-deferred-blockers", add_help=False
+        "count-phase2-deferred-blockers", add_help=False
     )
     deferred_blockers.add_argument("--findings-path", required=True)
     deferred_blockers.add_argument("--findings-sha256", required=True)
@@ -10222,9 +10288,9 @@ def main() -> int:
                     disposition_path=arguments.disposition_path,
                 )
             )
-        elif arguments.command == "count-deferred-blockers":
+        elif arguments.command == "count-phase2-deferred-blockers":
             output = str(
-                count_deferred_blockers(
+                count_phase2_deferred_blockers(
                     findings_path=arguments.findings_path,
                     findings_sha256=arguments.findings_sha256,
                     disposition_path=arguments.disposition_path,

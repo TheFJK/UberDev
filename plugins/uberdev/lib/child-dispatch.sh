@@ -1389,6 +1389,270 @@ except OSError:
 PY
 }
 
+# Canonical boundary for the Phase 2 simplify lens result (#481).
+#
+# The three lenses drift in shape -- ```yaml versus an untagged fence, a
+# `findings:` mapping versus a bare top-level sequence -- and that drift must
+# never reach the aggregate writer, because a writer that sniffs for shape is a
+# writer that will one day accept prose. So the drift dies HERE, at one
+# boundary, and what is published is the DERIVED document, not the child's file.
+#
+# THE PRINTED DIGEST NAMES THE PUBLISHED BYTES, not the input. That is the one
+# deliberate divergence from the Phase 1 twin above, which republishes its input
+# verbatim: post_review_validated_evidence_complete re-reads validated-result.md
+# and requires sha256(on-disk) == the ledger digest, so a normalising validator
+# that printed sha256(input) would fail every wave it validated.
+#
+# `lens` is checked against the caller's edge and then DROPPED. The edge is the
+# controller's knowledge and the field is the child's claim; a disagreement is
+# reported as `lens-mismatch` and never silently re-mapped, and retaining the
+# field downstream would invite a later reader to trust the claim over the
+# knowledge.
+#
+# The file-identity preamble and the scalar grammar are deliberately the same
+# ones the Phase 1 twin uses -- lstat before open, O_NOFOLLOW, owner, single
+# link, size cap, and an fstat re-check against the pre-open lstat. That block
+# is a security property of every child result path, not boilerplate.
+uberdev_child_validate_phase2_lens_result() {
+  python3 -I -B - "${1:-}" "${2:-}" "${3:-}" <<'PY'
+import hashlib,json,os,posixpath,re,stat,sys
+path,edge_id,validated_path=sys.argv[1:]
+class Refused(Exception):
+ def __init__(self,reason):
+  super().__init__(reason); self.reason=reason
+def refuse(reason): raise Refused(reason)
+uid_fn=getattr(os,'geteuid',None)
+uid=uid_fn() if callable(uid_fn) else None
+reparse_point=getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0x400)
+def linked(entry):
+ return stat.S_ISLNK(entry.st_mode) or bool(getattr(entry,'st_file_attributes',0)&reparse_point)
+def owned(entry):
+ return uid is None or not hasattr(entry,'st_uid') or entry.st_uid==uid
+native_windows=os.name=='nt' or sys.platform=='win32'
+def raw_descriptor_state(entry):
+ return (entry.st_dev,entry.st_ino,entry.st_size,entry.st_mtime_ns,entry.st_ctime_ns)
+def artifact_identity(entry):
+ raw=raw_descriptor_state(entry)
+ if not native_windows: return raw
+ birthtime_ns=getattr(entry,'st_birthtime_ns',None)
+ if birthtime_ns is None:
+  birthtime=getattr(entry,'st_birthtime',None)
+  birthtime_ns=int(birthtime*1_000_000_000) if birthtime is not None else raw[-1]
+ return (*raw[:4],int(birthtime_ns))
+def descriptor_link_count_valid(entry):
+ return entry.st_nlink==1 or (entry.st_nlink==0 and native_windows)
+def parse_scalar(raw):
+ if not raw or raw.strip()!=raw or any(ord(char)<32 or ord(char)==127 for char in raw): raise ValueError()
+ def validated(value):
+  if not isinstance(value,str) or not value or value.strip()!=value or any(ord(char)<32 or ord(char)==127 for char in value): raise ValueError()
+  return value
+ if raw.startswith('"'):
+  return validated(json.loads(raw))
+ if raw.startswith("'"):
+  if len(raw)<2 or not raw.endswith("'"): raise ValueError()
+  inner=raw[1:-1]; value=''; index=0
+  while index<len(inner):
+   if inner[index]=="'":
+    if index+1>=len(inner) or inner[index+1]!="'": raise ValueError()
+    value+="'"; index+=2
+   else:
+    value+=inner[index]; index+=1
+  return validated(value)
+ if raw[0] in '-?:,[]{}#&*!|>@`' or ': ' in raw or ' #' in raw: raise ValueError()
+ if re.fullmatch(r'(?i:null|true|false|~|[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]+)?(?:e[-+]?[0-9]+)?|[-+]?\.(?:inf|nan))',raw): raise ValueError()
+ return validated(raw)
+def location_scope(location):
+ if re.fullmatch(r'.+:[1-9][0-9]*',location) is None: return None
+ file_name,line_text=location.rsplit(':',1)
+ parts=file_name.split('/')
+ if (file_name.startswith('/') or re.match(r'^[A-Za-z]:',file_name) or '\\' in file_name
+     or any(ord(char)<32 or ord(char)==127 for char in file_name)
+     or any(part in {'','.','..'} for part in parts) or parts[0]=='.git'
+     or posixpath.normpath(file_name)!=file_name): return None
+ return (file_name,int(line_text))
+RECORD_KEYS={'location','severity','lens','summary','detail'}
+try:
+ if not path or not validated_path or not os.path.isabs(validated_path): refuse('invalid-arguments')
+ edge_match=re.fullmatch(r'[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+',edge_id or '')
+ if edge_match is None: refuse('invalid-arguments')
+ # Derived from the caller's edge, never re-spelled: this boundary must not
+ # carry its own copy of the Phase 2 roster (#370 class).
+ expected_lens=edge_id.rsplit('.',1)[1].capitalize()
+ entry=os.lstat(path)
+ if (linked(entry) or not stat.S_ISREG(entry.st_mode) or not owned(entry)
+     or entry.st_nlink!=1 or entry.st_size>1048576): refuse('unsafe-artifact')
+ descriptor=None
+ try:
+  descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+  opened=os.fstat(descriptor); chunks=[]; remaining=1048577
+  while remaining:
+   chunk=os.read(descriptor,remaining)
+   if not chunk: break
+   chunks.append(chunk); remaining-=len(chunk)
+  raw_bytes=b''.join(chunks)
+  final=os.fstat(descriptor); current=os.lstat(path)
+ except OSError as error:
+  raise Refused('unsafe-artifact') from error
+ finally:
+  if descriptor is not None: os.close(descriptor)
+ if (len(raw_bytes)>1048576 or any(linked(item) or not stat.S_ISREG(item.st_mode)
+      or not owned(item) for item in (opened,final,current))
+     or not descriptor_link_count_valid(opened) or not descriptor_link_count_valid(final)
+     or current.st_nlink!=1
+     or artifact_identity(opened)!=artifact_identity(entry)
+     or raw_descriptor_state(final)!=raw_descriptor_state(opened)
+     or artifact_identity(current)!=artifact_identity(final)): refuse('unsafe-artifact')
+ try: raw=raw_bytes.decode('utf-8')
+ except UnicodeError: refuse('invalid-document')
+ # Whole-file, not a search: nothing before the opening fence, nothing after the
+ # closing one, and no second fence anywhere.
+ match=re.fullmatch(r'\s*```(?:yaml)?[ \t]*\r?\n(.*?)\r?\n```[ \t]*\s*',raw,re.S)
+ if not match: refuse('invalid-document')
+ body=match.group(1)
+ if '```' in body: refuse('invalid-document')
+ def parse_field(key,raw_value):
+  try: value=parse_scalar(raw_value)
+  except ValueError: refuse('invalid-scalar')
+  if key=='severity' and value not in {'blocker','suggestion'}: refuse('invalid-severity')
+  if key=='lens' and value!=expected_lens: refuse('lens-mismatch')
+  if key=='location' and location_scope(value) is None: refuse('invalid-location')
+  return value
+ records=[]; mode=None; indent=None; record=None
+ for line in body.splitlines():
+  if not line.strip(): continue
+  if mode=='empty': refuse('invalid-document')
+  if mode is None:
+   found=re.fullmatch(r'findings:[ \t]*(\[\])?',line)
+   if found:
+    mode='empty' if found.group(1) else 'mapping'
+    continue
+   if re.fullmatch(r'\[\][ \t]*',line):
+    mode='empty'; continue
+   mode='sequence'
+  marker=re.fullmatch(r'([ \t]*)- location:[ \t]*(\S(?:.*\S)?)',line)
+  if marker:
+   observed=marker.group(1)
+   if indent is None:
+    if '\t' in observed: refuse('invalid-document')
+    if mode=='mapping' and len(observed)<2: refuse('invalid-document')
+    if mode=='sequence' and observed: refuse('invalid-document')
+    indent=observed
+   elif observed!=indent: refuse('invalid-document')
+   if record is not None: records.append(record)
+   record={'location':parse_field('location',marker.group(2))}
+   continue
+  if record is None or indent is None: refuse('invalid-document')
+  field=re.fullmatch(re.escape(indent)+r'  (severity|lens|summary|detail):[ \t]*(\S(?:.*\S)?)',line)
+  if not field: refuse('invalid-document')
+  key,raw_value=field.groups()
+  if key in record: refuse('invalid-document')
+  record[key]=parse_field(key,raw_value)
+ if record is not None: records.append(record)
+ if mode is None: refuse('invalid-document')
+ if mode=='empty' and records: refuse('invalid-document')
+ if mode in {'mapping','sequence'} and not records: refuse('invalid-document')
+ seen_scopes=set()
+ for item in records:
+  if set(item)!=RECORD_KEYS: refuse('invalid-document')
+  scope=location_scope(item['location'])
+  if scope in seen_scopes: refuse('duplicate-location')
+  seen_scopes.add(scope)
+ # The ONE normalised shape the aggregate writer parses. Every scalar is
+ # re-emitted JSON-quoted so the published document round-trips through the
+ # writer's scalar grammar whatever the child wrote -- an unquoted value the
+ # child spelled legally can still be a value that grammar refuses.
+ if records:
+  published_lines=['```yaml','findings:']
+  for item in records:
+   published_lines.append('  - severity: '+item['severity'])
+   for key in ('location','summary','detail'):
+    published_lines.append('    '+key+': '+json.dumps(item[key]))
+  published_lines.append('```')
+ else:
+  published_lines=['```yaml','findings: []','```']
+ payload=('\n'.join(published_lines)+'\n').encode('utf-8')
+ if os.path.lexists(validated_path): refuse('unsafe-output')
+ descriptor=None; published_identity=None
+ try:
+  injected=os.environ.get('UBERDEV_TEST_VALIDATED_PUBLICATION_FAILURE','') if os.environ.get('UBERDEV_CHILD_TEST_MODE')=='1' else ''
+  test_binary_flag=(1<<29) if injected=='native-mode' else 0
+  def publication_open(target,flags,*args):
+   if test_binary_flag and not flags&test_binary_flag: raise OSError(5,'publication binary mode')
+   return os.open(target,flags&~test_binary_flag,*args)
+  if injected=='create': raise OSError(28,'injected')
+  descriptor=publication_open(
+   validated_path,
+   os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)
+   |getattr(os,'O_BINARY',0)|test_binary_flag,
+   0o600,
+  )
+  opened=os.fstat(descriptor); current=os.lstat(validated_path)
+  if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(opened.st_mode)
+      or not descriptor_link_count_valid(opened) or current.st_nlink!=1
+      or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)): raise OSError(5,'publication identity')
+  published_identity=(opened.st_dev,opened.st_ino)
+  view=memoryview(payload)
+  while view:
+   if injected=='write': raise OSError(28,'injected')
+   written=os.write(descriptor,view)
+   if written<=0: raise OSError(5,'short publication write')
+   view=view[written:]
+  if injected=='sync': raise OSError(5,'injected')
+  os.fsync(descriptor)
+  if injected=='harden': raise OSError(30,'injected')
+  if os.name!='nt': os.fchmod(descriptor,0o400)
+  final_opened=os.fstat(descriptor); final_current=os.lstat(validated_path)
+  if ((final_opened.st_dev,final_opened.st_ino)!=(final_current.st_dev,final_current.st_ino)
+      or final_opened.st_size!=len(payload) or final_current.st_size!=len(payload)
+      or not descriptor_link_count_valid(final_opened) or final_current.st_nlink!=1
+      or (os.name!='nt' and (stat.S_IMODE(final_opened.st_mode)!=0o400 or stat.S_IMODE(final_current.st_mode)!=0o400))):
+   raise OSError(5,'publication verification')
+  os.close(descriptor); descriptor=None
+  if injected=='readback': raise OSError(5,'injected')
+  read_descriptor=publication_open(
+   validated_path,
+   os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0)|test_binary_flag,
+  )
+  try:
+   read_opened=os.fstat(read_descriptor); chunks=[]; remaining=len(payload)
+   while remaining:
+    request=min(remaining,7) if injected=='short-read' else remaining
+    chunk=os.read(read_descriptor,request)
+    if not chunk: raise OSError(5,'premature publication readback EOF')
+    chunks.append(chunk); remaining-=len(chunk)
+   if os.read(read_descriptor,1): raise OSError(5,'publication readback overflow')
+   readback=b''.join(chunks); read_final=os.fstat(read_descriptor)
+  finally: os.close(read_descriptor)
+  read_current=os.lstat(validated_path)
+  if ((read_opened.st_dev,read_opened.st_ino)!=(read_final.st_dev,read_final.st_ino)
+      or (read_final.st_dev,read_final.st_ino)!=(read_current.st_dev,read_current.st_ino)
+      or not descriptor_link_count_valid(read_opened) or not descriptor_link_count_valid(read_final)
+      or read_current.st_nlink!=1
+      or len(readback)>1048576 or readback!=payload):
+   raise OSError(5,'publication readback')
+ except BaseException:
+  if descriptor is not None:
+   try: os.close(descriptor)
+   except OSError: pass
+  try:
+   candidate=os.lstat(validated_path)
+   if (published_identity is not None and not stat.S_ISLNK(candidate.st_mode)
+       and (candidate.st_dev,candidate.st_ino)==published_identity): os.unlink(validated_path)
+  except OSError: pass
+  raise
+ print(hashlib.sha256(payload).hexdigest(),end='')
+except Refused as refusal:
+ print(f'uberdev_child_phase2_lens_failure class={refusal.reason}',file=sys.stderr)
+ raise SystemExit(2)
+except (UnicodeError,ValueError):
+ print('uberdev_child_phase2_lens_failure class=invalid-document',file=sys.stderr)
+ raise SystemExit(2)
+except OSError:
+ print('uberdev_child_phase2_lens_failure class=publication-failed',file=sys.stderr)
+ raise SystemExit(74)
+PY
+}
+
 # Canonical boundary for the two-key finding-verifier YAML schema (#431).
 # Emits "<score> <reason>" on stdout; refuses (rc 2) anything else. The file
 # identity preamble is deliberately the same one the Phase 1 twin above uses --

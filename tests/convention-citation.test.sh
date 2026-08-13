@@ -27,6 +27,18 @@
 #           exactly like a clean review. CC32–CC33 run the same two directions
 #           through the shipped writer.
 #
+#   CC37–CC41
+#           `post_review_write_aggregate_v2` in plugins/uberdev/lib/
+#           review-aggregate.sh — the CONTAINMENT of the two published
+#           artifacts, driven through the shipped writer rather than through a
+#           predicate. These rows are about the destination path, not about any
+#           citation: a symlink anywhere in the chain above an artifact
+#           publishes it outside the run directory, and both the aggregate and
+#           the attacker-influenced cull log must refuse it with their own
+#           failure class (#468). CC39–CC41 are the non-vacuity half — the
+#           fixture really links mid-chain, a contained run still publishes, and
+#           the immediate-parent refusal v0.45.13 shipped uncovered stays put.
+#
 # Every fixture builds its own tree under `mktemp -d`. Running the discovery
 # rows against the live repo would make them VACUOUS — this checkout happens to
 # carry both AGENTS.md and CLAUDE.md at its root, so "the allowlist is
@@ -681,6 +693,33 @@ else:
 PY
 }
 
+# w_run_at NAME AGG_PATH LOG_PATH -> runs the shipped writer over case NAME with
+# the two published artifacts pointed anywhere; echoes rc. `w_run` above keeps
+# the contained shape CC10–CC33 rely on and is deliberately untouched: it
+# hardcodes both destinations inside the case directory, so it cannot express a
+# destination that escapes.
+w_run_at() {
+  local case_dir="$TMP_ROOT/w/$1" agg="$2" log="$3" rc
+  post_review_write_aggregate_v2 "$(cat "$case_dir/input.json")" "$agg" \
+    "$case_dir/rule-sources.txt" "$case_dir/root" "$case_dir/changed-paths.json" \
+    "$log" 2>"$case_dir/stderr.txt"
+  rc=$?
+  printf '%s' "$rc"
+}
+
+# w_escape_tree NAME -> builds the mid-level-symlink fixture inside case NAME:
+#   <case>/outside/sub   a real directory OUTSIDE the "run directory"
+#   <case>/linkmid       a SYMLINK to <case>/outside
+#   <case>/contained     a genuine, contained directory for the other artifact
+# The escaping destination is <case>/linkmid/sub/<file>, whose IMMEDIATE parent
+# is a genuine directory — which is exactly why a one-node no-follow lstat of
+# that parent passes it.
+w_escape_tree() {
+  local case_dir="$TMP_ROOT/w/$1"
+  mkdir -p "$case_dir/outside/sub" "$case_dir/contained"
+  ln -s "$case_dir/outside" "$case_dir/linkmid"
+}
+
 # --- CC10: a culled blocker leaves the contributor APPROVE and the finding gone
 w_build cc10 "$W_FAKE" blocker '[]' "$W_RULES"
 if [ "$(w_run cc10)" = 0 ] \
@@ -805,6 +844,91 @@ if [ "$(w_run cc33)" = 0 ] \
   pass "CC33 — a live credential in a real rule line is culled and the cull is logged"
 else
   note_fail "CC33 — a credential rode out of the writer inside a citation"
+fi
+
+# --- CC37: containment is a property of the CHAIN, not of the immediate parent.
+# <case>/linkmid is a symlink; <case>/linkmid/sub is a genuine directory, so a
+# no-follow lstat of the IMMEDIATE parent passes and the write lands under the
+# symlink target. Measured before the fix: rc=0, aggregate published outside.
+w_build cc37 "$W_GOOD" blocker '[]' "$W_RULES"
+w_escape_tree cc37
+CC37_RC="$(w_run_at cc37 "$TMP_ROOT/w/cc37/linkmid/sub/aggregate.md" \
+                        "$TMP_ROOT/w/cc37/contained/citations.md")"
+if [ "$CC37_RC" != 0 ] \
+   && [ ! -e "$TMP_ROOT/w/cc37/outside/sub/aggregate.md" ] \
+   && [ ! -e "$TMP_ROOT/w/cc37/contained/citations.md" ] \
+   && grep -q 'class=unsafe-output' "$TMP_ROOT/w/cc37/stderr.txt"; then
+  pass "CC37 — an aggregate destination behind a mid-level symlink is refused unsafe-output, and no cull log is orphaned"
+else
+  note_fail "CC37 — a symlinked ANCESTOR above the immediate parent published the aggregate outside the run directory (rc=$CC37_RC)"
+fi
+
+# --- CC38: the same hole on the OTHER artifact, independently exploitable.
+# The cull rows quote the rule file, and a PR can edit the rule file, so the
+# log's content is attacker-influenced — redirecting where it lands is a
+# write-outside-the-run-directory primitive reachable from PR content.
+w_build cc38 "$W_GOOD" blocker '[]' "$W_RULES"
+w_escape_tree cc38
+CC38_RC="$(w_run_at cc38 "$TMP_ROOT/w/cc38/contained/aggregate.md" \
+                        "$TMP_ROOT/w/cc38/linkmid/sub/citations.md")"
+if [ "$CC38_RC" != 0 ] \
+   && [ ! -e "$TMP_ROOT/w/cc38/outside/sub/citations.md" ] \
+   && [ ! -e "$TMP_ROOT/w/cc38/contained/aggregate.md" ] \
+   && grep -q 'class=citation-log-unwritable' "$TMP_ROOT/w/cc38/stderr.txt"; then
+  pass "CC38 — a citation log behind a mid-level symlink is refused citation-log-unwritable, and no aggregate is published"
+else
+  note_fail "CC38 — a symlinked ANCESTOR published the attacker-influenced cull log outside the run directory (rc=$CC38_RC)"
+fi
+
+# --- CC39: the escaping fixture is what it claims to be.
+# linkmid MUST be a symlink, and the escaping artifact's IMMEDIATE parent MUST
+# be a genuine directory — otherwise CC37/CC38 would be satisfied by the
+# one-node guard alone and would prove nothing about the chain.
+if [ -L "$TMP_ROOT/w/cc37/linkmid" ] \
+   && [ -d "$TMP_ROOT/w/cc37/linkmid/sub" ] \
+   && [ ! -L "$TMP_ROOT/w/cc37/linkmid/sub" ]; then
+  pass "CC39 — the escape fixture links mid-chain while the immediate parent stays a genuine directory"
+else
+  note_fail "CC39 — the escape fixture is degenerate; CC37/CC38 cannot prove the chain property"
+fi
+
+# --- CC40: a legitimate contained run still publishes BOTH artifacts.
+# Production shape: the aggregate at the run-dir root, the cull log one
+# directory deeper (<run>/post-review/...), which is what both callers use.
+# Without this row a guard that refuses every write passes CC37 and CC38.
+w_build cc40 "$W_GOOD" blocker '[]' "$W_RULES"
+mkdir -p "$TMP_ROOT/w/cc40/run/post-review"
+if [ "$(w_run_at cc40 "$TMP_ROOT/w/cc40/run/aggregate.md" \
+                      "$TMP_ROOT/w/cc40/run/post-review/citations.md")" = 0 ] \
+   && [ -e "$TMP_ROOT/w/cc40/run/aggregate.md" ] \
+   && [ -e "$TMP_ROOT/w/cc40/run/post-review/citations.md" ]; then
+  pass "CC40 — a fully contained run in the production two-level shape still publishes both artifacts"
+else
+  note_fail "CC40 — the containment guard refuses a legitimate contained run"
+fi
+
+# --- CC41: v0.45.13's property, regression-locked. A symlink at the IMMEDIATE
+# parent is refused on BOTH artifacts with BOTH classes. This is the first test
+# of either refusal: `grep -rn citation-log-unwritable tests/` returned nothing.
+w_build cc41a "$W_GOOD" blocker '[]' "$W_RULES"
+mkdir -p "$TMP_ROOT/w/cc41a/outside" "$TMP_ROOT/w/cc41a/contained"
+ln -s "$TMP_ROOT/w/cc41a/outside" "$TMP_ROOT/w/cc41a/linkdirect"
+CC41A_RC="$(w_run_at cc41a "$TMP_ROOT/w/cc41a/linkdirect/aggregate.md" \
+                           "$TMP_ROOT/w/cc41a/contained/citations.md")"
+w_build cc41b "$W_GOOD" blocker '[]' "$W_RULES"
+mkdir -p "$TMP_ROOT/w/cc41b/outside" "$TMP_ROOT/w/cc41b/contained"
+ln -s "$TMP_ROOT/w/cc41b/outside" "$TMP_ROOT/w/cc41b/linkdirect"
+CC41B_RC="$(w_run_at cc41b "$TMP_ROOT/w/cc41b/contained/aggregate.md" \
+                           "$TMP_ROOT/w/cc41b/linkdirect/citations.md")"
+if [ "$CC41A_RC" != 0 ] && [ "$CC41B_RC" != 0 ] \
+   && [ ! -e "$TMP_ROOT/w/cc41a/outside/aggregate.md" ] \
+   && [ ! -e "$TMP_ROOT/w/cc41b/outside/citations.md" ] \
+   && [ ! -e "$TMP_ROOT/w/cc41b/contained/aggregate.md" ] \
+   && grep -q 'class=unsafe-output' "$TMP_ROOT/w/cc41a/stderr.txt" \
+   && grep -q 'class=citation-log-unwritable' "$TMP_ROOT/w/cc41b/stderr.txt"; then
+  pass "CC41 — an IMMEDIATE-parent symlink is refused on both artifacts with both classes (v0.45.13 locked)"
+else
+  note_fail "CC41 — the immediate-parent refusal regressed (agg rc=$CC41A_RC, log rc=$CC41B_RC)"
 fi
 
 echo

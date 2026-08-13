@@ -19,6 +19,11 @@
 #                        relied on a server-side `--base` filter would keep
 #                        the unrelated PR and the client-side transitive
 #                        closure has something real to prove.
+#   success-mixed-base : #470 — five rows spanning FOUR distinct baseRefName
+#                        values plus one `isDraft: true` row. The ONLY mode
+#                        that honours a `--jq` filter (real gh filters
+#                        in-process, so the draft never leaves gh); this is
+#                        what makes "the draft was excluded" falsifiable.
 #   success-pr-view    : emits a JSON object with all 15 fields
 #                        (state, isDraft, reviewDecision, ...).
 #   fail-net           : simulates a network-unreachable failure. exit 1,
@@ -171,6 +176,122 @@ JSON
     exit 0
     ;;
 
+  success-mixed-base)
+    # #470: the UN-ROOTED enumeration `discover_open_prs` answers. Five rows,
+    # four of them open non-draft across FOUR distinct baseRefName values
+    # (main, feat/consolidate-p — another candidate's head — release/2.0 and
+    # hotfix/1.0), plus one `isDraft: true` row that must never reach a caller.
+    #
+    # Unlike every other mode above, this one HONOURS a `--jq` filter when the
+    # caller passes one. Real `gh --jq` filters in-process, so the draft row is
+    # dropped before the bytes ever leave gh; a stub that ignored the filter
+    # would make "the draft was excluded" unprovable — the row would simply
+    # never have been offered. This is the only mode whose payload carries a
+    # draft row, so the honouring is scoped here rather than made global.
+    #
+    # Bodies carry the three closing-keyword shapes #470's `Closes #N` union
+    # has to get right: a plain `Closes #12`, a multi-reference
+    # `Fixes #12 and resolves #19` (duplicate 12 + a second number), and
+    # `preclose #99` — the LEFT-ANCHOR negative that must NOT be harvested.
+    _mb_payload='[
+  {
+    "number": 201,
+    "title": "feat(alpha): the rooted candidate",
+    "headRefName": "feat/consolidate-p",
+    "headRefOid": "1111111111111111111111111111111111111111",
+    "baseRefName": "main",
+    "isDraft": false,
+    "state": "OPEN",
+    "body": "Closes #12",
+    "reviewDecision": null,
+    "labels": [],
+    "author": {"login": "alice"},
+    "headRepositoryOwner": {"login": "TheFJK"},
+    "createdAt": "2026-08-01T00:00:00Z"
+  },
+  {
+    "number": 202,
+    "title": "feat(beta): stacked on 201",
+    "headRefName": "feat/consolidate-q",
+    "headRefOid": "2222222222222222222222222222222222222222",
+    "baseRefName": "feat/consolidate-p",
+    "isDraft": false,
+    "state": "OPEN",
+    "body": "Fixes #12 and resolves #19",
+    "reviewDecision": null,
+    "labels": [],
+    "author": {"login": "bob"},
+    "headRepositoryOwner": {"login": "TheFJK"},
+    "createdAt": "2026-08-02T00:00:00Z"
+  },
+  {
+    "number": 203,
+    "title": "fix(gamma): on the release base",
+    "headRefName": "feat/consolidate-r",
+    "headRefOid": "3333333333333333333333333333333333333333",
+    "baseRefName": "release/2.0",
+    "isDraft": false,
+    "state": "OPEN",
+    "body": "preclose #99",
+    "reviewDecision": null,
+    "labels": [],
+    "author": {"login": "carol"},
+    "headRepositoryOwner": {"login": "TheFJK"},
+    "createdAt": "2026-08-03T00:00:00Z"
+  },
+  {
+    "number": 204,
+    "title": "chore(delta): on a hotfix base",
+    "headRefName": "feat/consolidate-s",
+    "headRefOid": "4444444444444444444444444444444444444444",
+    "baseRefName": "hotfix/1.0",
+    "isDraft": false,
+    "state": "OPEN",
+    "body": "no closing keyword here",
+    "reviewDecision": null,
+    "labels": [],
+    "author": {"login": "dan"},
+    "headRepositoryOwner": {"login": "TheFJK"},
+    "createdAt": "2026-08-04T00:00:00Z"
+  },
+  {
+    "number": 205,
+    "title": "wip(epsilon): a draft that must be filtered",
+    "headRefName": "feat/consolidate-t",
+    "headRefOid": "5555555555555555555555555555555555555555",
+    "baseRefName": "main",
+    "isDraft": true,
+    "state": "OPEN",
+    "body": "Closes #77",
+    "reviewDecision": null,
+    "labels": [],
+    "author": {"login": "erin"},
+    "headRepositoryOwner": {"login": "TheFJK"},
+    "createdAt": "2026-08-05T00:00:00Z"
+  }
+]'
+    _mb_filter=""
+    _mb_want=0
+    for _mb_arg in "$@"; do
+      if [ "$_mb_want" = "1" ]; then
+        _mb_filter="$_mb_arg"
+        _mb_want=0
+        continue
+      fi
+      if [ "$_mb_arg" = "--jq" ]; then
+        _mb_want=1
+      fi
+    done
+    if [ -n "$_mb_filter" ]; then
+      # Herestring, never `printf | jq`: the repo's EPIPE guard forbids feeding
+      # a filter through a pipe whose reader may exit early.
+      jq -c "$_mb_filter" <<<"$_mb_payload"
+    else
+      printf '%s\n' "$_mb_payload"
+    fi
+    exit 0
+    ;;
+
   success-pr-view)
     # The 15 fields documented in the contract for pr_view_projection.
     cat <<'JSON'
@@ -315,7 +436,7 @@ JSON
 
   *)
     printf 'fake-gh: unknown FAKE_GH_MODE=%s\n' "${mode}" >&2
-    printf 'fake-gh: known modes: success-bare, success-multi, success-stacked, success-pr-view, fail-net, fail-malformed, spinner-leak, fail-pr-view, ci-checks-no-checks, ci-checks-pending, ci-checks-green, ci-checks-red, ci-checks-mixed, gh-unreachable, ci-rate-limit-low\n' >&2
+    printf 'fake-gh: known modes: success-bare, success-multi, success-stacked, success-mixed-base, success-pr-view, fail-net, fail-malformed, spinner-leak, fail-pr-view, ci-checks-no-checks, ci-checks-pending, ci-checks-green, ci-checks-red, ci-checks-mixed, gh-unreachable, ci-rate-limit-low\n' >&2
     exit 99
     ;;
 esac

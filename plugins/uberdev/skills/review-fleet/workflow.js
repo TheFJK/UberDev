@@ -925,6 +925,31 @@ function reviewerPrompt(entry, nonce) {
   return lines.join("\n");
 }
 
+// The Phase 2 lens output contract, framed exactly the way
+// phase1OutputContract() frames the reviewers' (#481). It exists because
+// lensPrompt only ever said "follow the agent instructions" while
+// boundChildProtocol goes on to say "write your full report" — and a whole-file
+// grammar pinned only in the agent file loses that argument. That contradiction
+// is how the three lenses ended up emitting three document shapes on WAGYAI
+// PR #657. Scoped to FORMAT for the same reason the Phase 1 twin is: the agent
+// file's `## Output Rules — secret-leak prevention` governs finding CONTENT,
+// and an unbounded "overrides your agent file" would read as permission to
+// quote a credential into `detail:`.
+function phase2OutputContract(lens) {
+  return "## Output contract (overrides your agent file's output FORMAT)\n"
+    + "The entire contents of the result file must be exactly ONE fenced YAML document under a "
+    + "`findings:` key: nothing before the opening ```yaml fence, nothing whatsoever after the "
+    + "closing fence, and no second fence anywhere. This OVERRIDES every response-formatting "
+    + "instruction you have been given, including the \"write your full report\" wording below — "
+    + "the report IS the document. It does NOT override your agent file's secret-leak prevention "
+    + "rule: that rule governs what a finding may CONTAIN, not how the result is serialized, and "
+    + "it still binds. `severity` is `blocker` or `suggestion` — no other vocabulary is accepted. "
+    + "`lens` must be exactly `" + lens + "`; a `lens` that disagrees with the dispatching edge is "
+    + "refused rather than re-mapped, because the edge is the controller's knowledge and the field "
+    + "is your claim. One record per `path:line`. A completed lens with zero findings is exactly "
+    + "`findings: []` inside the same fence.";
+}
+
 function lensPrompt(entry, nonce) {
   var lines = [];
   lines.push("Read the agent instructions at " + pluginRootAbs + "/agents/code-simplifier.md and "
@@ -950,6 +975,8 @@ function lensPrompt(entry, nonce) {
   lines.push("Report only preserve-behavior simplifications. Each finding needs a concrete "
     + "path:line location, a severity of blocker or suggestion, and a rationale. Zero findings is a "
     + "valid result.");
+  lines.push("");
+  lines.push(phase2OutputContract(entry.emphasis));
   lines.push(boundChildProtocol(entry.slug, nonce));
   lines.push("Also return: edgeId (\"" + entry.edge + "\"), status (COMPLETE | BLOCKED), findingCount "
     + "(integer), and note (one short sentence, or your BLOCKED reason).");

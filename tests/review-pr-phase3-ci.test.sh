@@ -1518,6 +1518,160 @@ rm -f "$RESULT_PATH_HELPER"
 rm -f "$CLASSIFY_HELPER" "$CLASSIFY_CASE"
 
 echo
+echo "== S10F: formatter / linter gates classify as code_bug (#480) =="
+# A `format:check` / `lint` gate is a DETERMINISTIC failure with a mechanical
+# repair, and the classifier used to match none of its shapes: the run came back
+# AMBIGUOUS, `validate-ci-classification` normalised that to `flaky`, and flaky
+# routes to a bare `gh run rerun` that reproduces the same red.
+#
+# The classifier's regex table IS the runtime (an LLM reads that prose and
+# matches it against the log), so these rows extract the prose's OWN regexes and
+# run them against real gate output — the same technique S15 uses to run
+# review-pr.md's own jq verdict expression instead of restating it. A grep for a
+# literal token would pass on prose that cannot actually match a Prettier log.
+CODE_BUG_SIGNAL_RES="$(
+  sed -n 's/^.*`code_bug`[^`]*lines matching `\(.*\)`.*$/\1/p' "$CLASSIFIER"
+)"
+FORMATTER_SIGNAL_RE="$(
+  sed -n 's/^.*formatter \/ linter gate[^`]*lines matching `\(.*\)`.*$/\1/p' "$CLASSIFIER"
+)"
+
+# Fixtures are verbatim gate output shapes. The Prettier one is the log from
+# TheFJK/WAGYAI PR #657 that opened #480.
+PRETTIER_FAIL_LOG='> app@0.1.0 format:check
+> prettier --check .
+
+Checking formatting...
+[warn] src/ci-smoke/api-v1-auth.ci-smoke.test.ts
+[warn] Code style issues found in the above file. Run Prettier with --write to fix.
+##[error]Process completed with exit code 1.'
+ESLINT_FAIL_LOG='> app@0.1.0 lint
+> eslint .
+
+/home/runner/work/app/app/src/index.ts
+  12:7  error  Unexpected console statement  no-console
+
+1 problem (1 error, 0 warnings)
+##[error]Process completed with exit code 1.'
+BLACK_FAIL_LOG='would reformat /home/runner/work/app/app/svc/main.py
+Oh no! 1 file would be reformatted, 41 files would be left unchanged.
+##[error]Process completed with exit code 1.'
+RUSTFMT_FAIL_LOG='Diff in /home/runner/work/app/app/src/lib.rs at line 41:
+ fn main() {
+-    let x = 1;
++  let x = 1;
+##[error]Process completed with exit code 1.'
+# Negative controls. An over-broad signal row that matched these would classify
+# a GREEN formatter gate (or an unrelated green suite) as a code bug and hand a
+# mutating fixer a file with nothing wrong in it.
+PRETTIER_GREEN_LOG='> app@0.1.0 format:check
+> prettier --check .
+
+Checking formatting...
+All matched files use Prettier code style!'
+GREEN_SUITE_LOG='Test Suites: 12 passed, 12 total
+Tests:       248 passed, 248 total
+Snapshots:   0 total
+Time:        31.884 s'
+# The `flaky` row is "AND no code_bug signal": a formatter row that also matched
+# transient noise would take flake away from the one class that may re-run.
+FLAKY_LOG='Error: connect ECONNRESET 140.82.121.4:443
+The operation was canceled after a timeout of 360 seconds.
+##[error]Process completed with exit code 1.'
+
+# Union over every documented `code_bug` signal row: the invariant is "a
+# formatter gate matches at least one code_bug signal", not "it matches the row
+# added by #480". Merging the rows later must not red this.
+code_bug_signal_matches() {
+  local text="$1" re="" hit=1
+  while IFS= read -r re; do
+    [ -n "$re" ] || continue
+    if grep -qE -e "$re" <<<"$text"; then hit=0; fi
+  done <<<"$CODE_BUG_SIGNAL_RES"
+  return "$hit"
+}
+
+assert_code_bug_signal() {
+  local desc="$1" text="$2" want="$3" got=no
+  if code_bug_signal_matches "$text"; then got=yes; fi
+  if [ "$got" = "$want" ]; then
+    echo "  PASS  $desc"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $desc"; echo "        expected code_bug match: $want, got: $got"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+if [ -n "$CODE_BUG_SIGNAL_RES" ]; then
+  echo "  PASS  S10F.1 — classifier states its code_bug signal rows as extractable regexes"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10F.1 — no extractable code_bug signal regex in $CLASSIFIER"; FAIL=$((FAIL + 1))
+fi
+if [ -n "$FORMATTER_SIGNAL_RE" ]; then
+  echo "  PASS  S10F.2 — a formatter / linter gate signal row exists"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10F.2 — no formatter / linter gate signal row in $CLASSIFIER"; FAIL=$((FAIL + 1))
+fi
+assert_code_bug_signal "S10F.3 — a Prettier --check failure matches a code_bug signal" \
+  "$PRETTIER_FAIL_LOG" yes
+assert_code_bug_signal "S10F.4 — an ESLint failure matches a code_bug signal" \
+  "$ESLINT_FAIL_LOG" yes
+assert_code_bug_signal "S10F.5 — a black --check failure matches a code_bug signal" \
+  "$BLACK_FAIL_LOG" yes
+assert_code_bug_signal "S10F.5b — a rustfmt --check failure matches a code_bug signal" \
+  "$RUSTFMT_FAIL_LOG" yes
+assert_code_bug_signal "S10F.6 — a GREEN Prettier gate matches no code_bug signal" \
+  "$PRETTIER_GREEN_LOG" no
+assert_code_bug_signal "S10F.7 — a green test suite matches no code_bug signal" \
+  "$GREEN_SUITE_LOG" no
+assert_code_bug_signal "S10F.7b — a transient connection failure matches no code_bug signal" \
+  "$FLAKY_LOG" no
+# The `flaky` row is defined as "AND no code_bug signal", so the formatter row
+# has to count as one there too or the precedence table re-opens the same hole.
+assert_grep "$CLASSIFIER" 'counts as a `code_bug` signal' \
+  "S10F.8 — the formatter row counts as a code_bug signal wherever the table says so"
+# Anchor derivation. code_bug REQUIRES <file>:<line> naming a real repository
+# file; Prettier prints the path and no line, so the rule that turns
+# `[warn] <path>` into `<path>:1` is what keeps the class routable.
+assert_grep "$CLASSIFIER" '\[warn\] <path>' \
+  "S10F.9 — Prettier's [warn] <path> line is named as an anchor source"
+assert_grep "$CLASSIFIER" 'line component is `1`' \
+  "S10F.10 — a formatter violation with no line number anchors at line 1 (whole-file repair)"
+# The old rule made `(test_path):<line>` the ONLY anchor source, which forced
+# every formatter failure back to AMBIGUOUS even once its class was matched.
+# The claim is restated in ci-code-fixer.md, so BOTH copies are swept (#371).
+assert_no_grep "$CLASSIFIER" 'If no `\(test_path\):<line>` pattern is detectable in the log, downgrade' \
+  "S10F.11 — the classifier no longer treats a test-path stack frame as the only anchor source"
+assert_no_grep "$CODE_FIXER_CI" 'if no `\(test_path\):<line>` pattern is detectable in the log, the classifier downgrades' \
+  "S10F.12 — the fixer's restatement of the anchor rule tracks the classifier's"
+assert_grep "$CODE_FIXER_CI" 'formatter' \
+  "S10F.13 — the fixer contract knows the formatter / linter anchor source"
+# Repair authority. Hand-formatting cannot reproduce a formatter's exact output,
+# so the fixer needs the tool itself — scoped to the anchored path, because the
+# controller refuses any commit that touches another file.
+assert_grep "$CODE_FIXER_CI" 'ci_fix_scope_escape' \
+  "S10F.14 — the fixer states why an unscoped formatter run is fatal"
+assert_grep "$CODE_FIXER_CI" 'anchored path only' \
+  "S10F.15 — formatter/linter repair is scoped to the anchored path only"
+assert_no_grep "$CODE_FIXER_CI" '\-\-write \.|npm run format|--fix \.' \
+  "S10F.16 — no whole-tree formatter invocation is documented as allowed"
+assert_grep "$CODE_FIXER_CI" '\-\-no-install' \
+  "S10F.17 — the formatter must already be installed in the repo (no network fetch)"
+assert_grep "$CODE_FIXER_CI" 'formatter-unavailable' \
+  "S10F.18 — a missing formatter is a documented refusal, not a hand-format"
+# ...and that refusal token has to survive the controller's rationale predicate,
+# which is what turns a REFUSED fixer into a diagnosis instead of `unspecified`.
+FIXER_RATIONALE_RE="$(
+  sed -n 's/^CI_FIXER_RATIONALE = re\.compile(r"\(.*\)")$/\1/p' "$CONTRACT_PY"
+)"
+if [ -n "$FIXER_RATIONALE_RE" ] \
+  && grep -qE -e "^(${FIXER_RATIONALE_RE})\$" <<<"formatter-unavailable"; then
+  echo "  PASS  S10F.19 — formatter-unavailable is a valid CI_FIXER_RATIONALE token"; PASS=$((PASS + 1))
+else
+  echo "  FAIL  S10F.19 — formatter-unavailable is rejected by CI_FIXER_RATIONALE"; FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== S11: ci-code-fixer agent shape =="
 assert_grep "$CODE_FIXER_CI" '^name: ci-code-fixer$' \
   "S11.1 — frontmatter name"

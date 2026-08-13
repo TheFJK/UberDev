@@ -2,6 +2,7 @@
 name: dispatching-parallel-agents
 description: Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file was copied from and the SHA vendor.json records for the component; byte-identical to upstream at that commit apart from this line. -->
 
 # Dispatching Parallel Agents
 

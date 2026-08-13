@@ -235,8 +235,10 @@ PY
 
 Capture the review diff and exact standalone baseline through the executable
 contract before any lens launches. The snapshot records HEAD (`H0`), the real
-index (`I0`), raw tracked worktree bytes (`W0`), and non-evidence untracked
-bytes (`U0`).
+index (`I0`), raw tracked worktree bytes (`W0`), and non-evidence, non-ignored
+untracked bytes (`U0`). Gitignored paths are outside `U0` deliberately: a lens
+or a fixer that runs the suite writes into ignored build and cache trees, and
+an ignored path cannot enter the commit under review.
 
 ```bash uberdev-executable
 STANDALONE_SNAPSHOT_RECEIPT="$(python3 -I -B "$CODE_FIXER_CONTRACT" snapshot-standalone --working-dir "$WORKTREE_ROOT" --evidence-dir "$RESEARCH_DIR_ABS" --diff-path "$DIFF_ARTIFACT_PATH" --snapshot-path "$STANDALONE_SNAPSHOT_PATH")" || return 74
@@ -434,15 +436,90 @@ severity (`blocker` > `suggestion`). The trusted writer constructs exactly:
 
 Every non-empty `findings` element has exactly `detail`, `scope`, `severity`,
 `source_edges`, and `summary`; `scope` has exactly `line`, `operation`, and
-`path`, with integer `line` and `operation: "modify_existing"`. Pipe the
-candidate JSON through `code_fixer_contract.py encode-aggregate --phase phase2`
-and publish those returned bytes at `$AGG_PATH`. That helper is the byte-shape
-oracle: compact sorted JSON, escaped structural angle brackets, one JSON line,
-and `<external-untrusted-input source="simplify-aggregate">` as the file's own
-LEADING bytes with `</external-untrusted-input>` as its TRAILING bytes.
-Downstream consumers receive the path or exact enveloped bytes; the artifact is
-never re-wrapped. Markdown tables and YAML are not downstream fallbacks. Exact
-`findings: []` is a successful zero-finding aggregate.
+`path`, with integer `line` and `operation: "modify_existing"`. The PRODUCER of
+those bytes is `post_review_write_simplify_aggregate_v2` in
+`lib/review-aggregate.sh`; it pipes the document it constructs through
+`code_fixer_contract.py encode-aggregate --phase phase2`, which is the
+byte-shape oracle: compact sorted JSON, escaped structural angle brackets, one
+JSON line, and `<external-untrusted-input source="simplify-aggregate">` as
+the file's own LEADING bytes with `</external-untrusted-input>` as its
+TRAILING bytes. Never hand-roll them here — the encoder validates a document it is
+handed, so a hand-rolled document that merges the lenses wrongly encodes
+cleanly. Downstream consumers receive the path or exact enveloped bytes; the
+artifact is never re-wrapped. Markdown tables and YAML are not downstream
+fallbacks. Exact `findings: []` is a successful zero-finding aggregate.
+
+```bash uberdev-executable
+. "${UBERDEV_REVIEW_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}}/lib/review-fleet-args.sh" || return 2
+# This fence binds its OWN carriers. Every `bash` block in a command file is a
+# fresh shell, and no name set in the capture fence above survives into it
+# (#427); reading `$AGG_PATH` from a dead shell would expand to the empty string
+# and the writer would refuse `unsafe-output` on a run that went perfectly.
+review_fleet_rehydrate || return 2
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/child-dispatch.sh" || return 2
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-aggregate.sh" || return 2
+REVIEW_EDGES=(
+  review_pr.simplify.reuse review_pr.simplify.quality
+  review_pr.simplify.efficiency
+)
+REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+# Re-made here rather than trusted from the fence above: that fence does not
+# rehydrate, so its `$AGG_PATH` may have been the empty string and its mkdir a
+# no-op on `.`. This one has the carrier bound.
+mkdir -p "$(dirname "$AGG_PATH")" || return 2
+PHASE2_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
+PHASE2_VALIDATED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.validated"
+PHASE2_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"
+# Transport read off the carrier, never sniffed from a file on disk. Only the
+# Workflow dispatcher records a roster `index` on its simplify launch rows, and
+# `post_review_validated_evidence_complete` binds the wave on `(edge,index)`, so
+# a routed wave cannot be bound at all. A classed refusal, not silence.
+[ "${UBERDEV_CARRIER_BACKEND:-}" = workflow ] || {
+  rm -f -- "$AGG_PATH"
+  echo "error: simplify Phase 3 aggregate class=routed-transport-unsupported backend=${UBERDEV_CARRIER_BACKEND:-unset}; review-fleet-simplify.launched carries no roster index on this transport" >&2
+  return 70
+}
+: >"$PHASE2_VALIDATED" || return 2
+SIMPLIFY_WAVE_BLOCKED=0
+while IFS= read -r REVIEW_FLEET_ROW; do
+  [ -n "$REVIEW_FLEET_ROW" ] || continue
+  REVIEW_FLEET_EDGE="$(jq -er .edge <<<"$REVIEW_FLEET_ROW")" || { SIMPLIFY_WAVE_BLOCKED=1; break; }
+  REVIEW_FLEET_INDEX="$(jq -er .index <<<"$REVIEW_FLEET_ROW")" || { SIMPLIFY_WAVE_BLOCKED=1; break; }
+  REVIEW_FLEET_INSTANCE="$(jq -er .instance <<<"$REVIEW_FLEET_ROW")" || { SIMPLIFY_WAVE_BLOCKED=1; break; }
+  REVIEW_FLEET_RESULT="$(jq -er .result <<<"$REVIEW_FLEET_ROW")" || { SIMPLIFY_WAVE_BLOCKED=1; break; }
+  REVIEW_FLEET_VALIDATED="$(dirname "$REVIEW_FLEET_RESULT")/validated-result.md"
+  # No lens of ANY backend writes validated-result.md. The controller does,
+  # through the boundary that normalises the three lenses' drifted document
+  # shapes into one, and it publishes the artifact 0o400.
+  if REVIEW_FLEET_DIGEST="$(uberdev_child_validate_phase2_lens_result "$REVIEW_FLEET_RESULT" "$REVIEW_FLEET_EDGE" "$REVIEW_FLEET_VALIDATED")" \
+     && [[ "$REVIEW_FLEET_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+    jq -cn --arg edge "$REVIEW_FLEET_EDGE" --argjson index "$REVIEW_FLEET_INDEX" \
+      --arg instance "$REVIEW_FLEET_INSTANCE" --arg result "$REVIEW_FLEET_VALIDATED" \
+      --arg sha256 "$REVIEW_FLEET_DIGEST" \
+      '{edge:$edge,index:$index,instance:$instance,result:$result,sha256:$sha256}' \
+      >>"$PHASE2_VALIDATED" || SIMPLIFY_WAVE_BLOCKED=1
+  else
+    SIMPLIFY_WAVE_BLOCKED=1
+  fi
+done <"$PHASE2_LAUNCHED"
+if [ "$SIMPLIFY_WAVE_BLOCKED" -eq 0 ] \
+    && PHASE2_TRUSTED_LEDGER="$(post_review_validated_evidence_complete \
+         "$PHASE2_VALIDATED" "$PHASE2_EXPECTED_COUNT" \
+         "$PHASE2_LAUNCHED" '' "$REVIEW_FLEET_RUN_DIR")" \
+    && PHASE2_AGGREGATION_INPUT="$(post_review_capture_aggregation_inputs \
+         "$PHASE2_TRUSTED_LEDGER" "$PHASE2_EXPECTED_COUNT" phase2)" \
+    && post_review_write_simplify_aggregate_v2 "$PHASE2_AGGREGATION_INPUT" "$AGG_PATH"; then
+  PHASE2_AGGREGATION_INPUT=
+  unset PHASE2_AGGREGATION_INPUT
+else
+  # A missing or empty aggregate is infrastructure failure, never a
+  # zero-finding simplify pass: downstream cannot tell the two apart, so no
+  # aggregate is left behind and the fixer never runs.
+  rm -f -- "$AGG_PATH"
+  echo "error: simplify Phase 3 evidence incomplete; aggregate suppressed" >&2
+  return 70
+fi
+```
 
 Dispatch a fresh `code-fixer` child (`subagent_type: uberdev:code-fixer`) for a
 single behavior-preserving `refactor:` commit. The main turn no longer holds apply-loop edits in-context.
@@ -786,7 +863,8 @@ RESEARCH_DIR_ABS="$WORKING_DIR_ABS/.uberdev/research/$RUN_ID"
 
 ```bash uberdev-executable
 # BEGIN simplify-defer-controller-v2
-DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+# The PHASE 2 pair: /simplify's own aggregate and the fixer's disposition.
+DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-phase2-deferred-blockers \
   --findings-path "$AGG_PATH" \
   --findings-sha256 "$FIX_FINDINGS_SHA256" \
   --disposition-path "$PHASE2_DISPOSITION_PATH" \
@@ -858,10 +936,11 @@ REVIEW_FLEET_WORKTREE="$(cd "$WORKTREE_ROOT" && pwd -P)" || return 2
 mkdir -p "$REVIEW_FLEET_RUN_DIR/children" || return 2
 # Repeated here for the same reason as the fixer arm: the routed fence computes
 # this count and dispatches in one block. The count is deterministic from the
-# pinned aggregate/disposition bytes, and bind-workflow-persistence-launch
-# re-counts it from those same bytes, so a drift between the two arms is
-# refused rather than believed.
-DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-deferred-blockers \
+# pinned PHASE 2 aggregate/disposition bytes -- /simplify's own aggregate and
+# the fixer's disposition -- and bind-workflow-persistence-launch re-counts it
+# from those same bytes, so a drift between the two arms is refused rather than
+# believed.
+DEFERRED_BLOCKER_COUNT="$(python3 -I -B "$CODE_FIXER_CONTRACT" count-phase2-deferred-blockers \
   --findings-path "$AGG_PATH" \
   --findings-sha256 "$FIX_FINDINGS_SHA256" \
   --disposition-path "$PHASE2_DISPOSITION_PATH" \

@@ -71,6 +71,112 @@ assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
 assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
   'tier="MAJOR"' 'P6 route_by_severity emits MAJOR tier on severity=important|major'
 
+# --- #454: route_by_severity's disposition domain -------------------------
+#
+# P1-P6 above prove the helper is PRESENT. They cannot prove its branch labels
+# are REACHABLE — a presence grep passes just as happily on a branch no writer
+# can ever satisfy, which is exactly how `[ "$disposition" = "REJECTED" ]`
+# survived from RFC 0002 §3.1 into shipped policy. P7-P12b pin the helper's
+# inbound domain against the producer's published enum instead.
+#
+# The slice is built here, not grepped file-wide, because REJECTED and REFUSED
+# differ by one letter and REFUSED is legitimately all over this agent as its
+# own return status. `tr -d '\r'` + the [[:space:]]* closer anchor keep the
+# slice at 11 lines on the windows job too (Git Bash checks this tree out with
+# core.autocrlf=true; a bare `$` after `}` never matches there and the slice
+# would silently run to EOF).
+FENCE_SLICE="$(mktemp)"
+awk '/route_by_severity\(\)/{inside=1} inside{print} inside && /^   [}][[:space:]]*$/{exit}' \
+  "$AGENT_MD" | tr -d '\r' > "$FENCE_SLICE"
+
+# P7 — tombstone over the helper BODY. assert_no_grep_nonempty (not the
+# file-local assert_no_grep) because it FAILs on an empty slice instead of
+# passing while inspecting nothing (#347) — the anchors above are exactly the
+# kind of thing a future rename moves.
+assert_no_grep_nonempty "$FENCE_SLICE" 'REJECTED' \
+  'P7 route_by_severity body carries no REJECTED guard (#454)'
+
+# P8 — tombstone over the whole Step-4 SECTION, which also covers the comment
+# block above the fence (P7's slice starts at the `route_by_severity() {` line).
+# assert_count cannot detect an empty-but-valid range; that hazard is
+# neutralised by construction here, because P1-P6 are positive asserts over the
+# SAME range and would all FAIL if it emptied. Do not "harden" this into
+# something else on that account.
+assert_count "$AGENT_MD" '^## Process' '^## Issue body shape' 'REJECTED' 0 \
+  'P8 Step 4 names no REJECTED disposition (#454)'
+
+# P9 — exactly ONE disposition guard. Shrinking the helper is the fix; growing
+# it back (a CULLED arm, a re-pointed REJECTED) is what this row forbids.
+if [ ! -s "$FENCE_SLICE" ]; then
+  echo "  FAIL  P9 route_by_severity slice is empty — anchors moved, refusing vacuous PASS"
+  echo "        file: $AGENT_MD"
+  FAIL=$((FAIL + 1))
+else
+  DISP_GUARDS="$(grep -cE '\[ "\$disposition" =' "$FENCE_SLICE")"
+  if [ "$DISP_GUARDS" -eq 1 ]; then
+    echo "  PASS  P9 route_by_severity has exactly one disposition guard (got $DISP_GUARDS)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  P9 route_by_severity must have exactly one disposition guard (got $DISP_GUARDS)"
+    echo "        file: $FENCE_SLICE"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# P10 — the class-level pin: every branch label the consumer compares against
+# must be a real disposition. The producer's enum is READ from the shipped
+# contract document rather than retyped, so this row inherits that document's
+# own drift-lock (tests/code-fixer-contract.test.sh) instead of duplicating it.
+# `∪ {DEFERRED}` is the Step-3 empty-path default — the helper's inbound domain
+# is FOUR values, not the producer's three; P11 below is what stops that +1
+# decaying into an unexplained fudge constant.
+FIXER_DOC="$REPO_ROOT/plugins/uberdev/shared/code-fixer-output-v1.md"
+CONSUMER_LABELS="$(sed -n 's/.*\[ "\$disposition" = "\([A-Z_]*\)".*/\1/p' "$FENCE_SLICE")"
+PRODUCER_LINES="$(sed -n 's/^ *disposition: \(.*\)$/\1/p' "$FIXER_DOC" | tr -d '\r')"
+PRODUCER_LINE_COUNT="$(printf '%s\n' "$PRODUCER_LINES" | grep -c .)"
+PRODUCER_ENUM="$(printf '%s\n' "$PRODUCER_LINES" | tr '|' '\n' | sed 's/[[:space:]]//g' | grep -E '^[A-Z_]+$')"
+if [ -z "$CONSUMER_LABELS" ] || [ -z "$PRODUCER_ENUM" ] || [ "$PRODUCER_LINE_COUNT" -ne 1 ]; then
+  echo "  FAIL  P10 disposition-vocabulary extraction is vacuous — refusing to compare nothing"
+  echo "        consumer labels: [$CONSUMER_LABELS]"
+  echo "        producer lines:  $PRODUCER_LINE_COUNT  enum: [$PRODUCER_ENUM]"
+  FAIL=$((FAIL + 1))
+else
+  ALLOWED_DISPOSITIONS="$(printf '%s\nDEFERRED\n' "$PRODUCER_ENUM")"
+  BAD_LABELS=''
+  while IFS= read -r disp_label; do
+    [ -n "$disp_label" ] || continue
+    grep -qxF -- "$disp_label" <<<"$ALLOWED_DISPOSITIONS" \
+      || BAD_LABELS="${BAD_LABELS}${BAD_LABELS:+ }$disp_label"
+  done <<<"$CONSUMER_LABELS"
+  if [ -z "$BAD_LABELS" ]; then
+    echo "  PASS  P10 every route_by_severity branch label is a published disposition (#454)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  P10 route_by_severity branches on non-disposition label(s): $BAD_LABELS"
+    echo "        allowed: $(printf '%s ' $ALLOWED_DISPOSITIONS)"
+    echo "        oracle:  $FIXER_DOC"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# P11 — anchors P10's `∪ {DEFERRED}` term to the behaviour it exists for.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'default to .DEFERRED' \
+  'P11 empty disposition path still defaults to DEFERRED (why P10 allows a fourth value)'
+
+# P12a/P12b — the domain is STATED, not left to be re-derived from the silence
+# the deletion leaves behind. Both phrases must sit on ONE line each in the
+# helper's comment block; grep is line-based.
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'only value that suppresses filing' \
+  'P12a helper comment names APPLIED as the sole suppressor (#454)'
+assert_in_section "$AGENT_MD" '^## Process' '^## Issue body shape' \
+  'SKIPPED, REFUSED and DEFERRED' \
+  'P12b helper comment names the three issue-eligible dispositions (#454)'
+
+rm -f "$FENCE_SLICE"
+# --- end #454 ------------------------------------------------------------
+
 ### Suite 2: Dedupe-fingerprint ----------
 echo
 echo "### Suite 2: Dedupe-fingerprint (cross-lens collapse to single issue)"

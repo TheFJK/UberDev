@@ -82,15 +82,24 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 11 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 17 of the 20
+The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
 components — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
 and it means week 1's report contains post-landing changes instead of a wall of
 pre-existing noise. Advancing a watermark is the recorded act of *having looked*.
+
+`tools/vendor/vendor-check.py`'s `C-BASE` is what makes that last clause a rule
+rather than a warning: a 40-hex value in `vendored_at_commit` must be restated
+by an in-file `Vendored from <owner>/<repo>@<sha>` header on one of the
+component's own files, so writing one is a visible, reviewable edit to the
+shipped bytes rather than a single silent field change. It is the converse of
+`C-HEADER`, which validates only the headers that already exist. It does not —
+and offline cannot — prove a copy really happened at that SHA; it makes the
+claim cost two coordinated lies instead of one.
 
 ### 2.3 `stance` is enforced, not annotated
 
@@ -260,6 +269,7 @@ Recorded in `vendor.json` under `permanent_divergences[]`, each with
 | `brainstorm-no-approval-gates` | `skills/brainstorm` | UberDev rejects upstream's HARD-GATE / per-section / spec-review approval checkpoints. Quality comes from parallel research and always-on reviewer agents, not human gates. |
 | `review-pr-parallel-by-default` | `skills/requesting-code-review` | `/uberdev:review-pr` fans its review lenses out in parallel by default; upstream's flow is sequential. |
 | `no-co-authored-by` | `skills/finish-branch` | UberDev never emits a `Co-Authored-By` or AI-attribution trailer in commits or PR bodies. |
+| `interactive-discard-option` | `skills/finish-branch` | Upstream 6.2.0 stopped offering to discard *uncommitted work*. UberDev Option 4 discards a *branch and its commits* behind a typed confirmation, reachable only under `--interactive`. Different capability, so upstream's removal does not apply — see §7. |
 
 ---
 
@@ -273,14 +283,37 @@ gets a verdict; every ADOPT names a filed issue.
 | `writing-good-tests.md` replaces `testing-anti-patterns.md` | **ADOPT — #457** | It names the string-presence trap by name: grep-style tests over scripts, skills and prompts counterfeit falsifiability, because the observable is behaviour, never text. That is a precise diagnosis of a defect class this repo keeps rediscovering (#419). Highest-value item in the delta. |
 | SDD workspace is now plan-scoped | **ADOPT — #458** | Fixes a real cross-plan contamination: a follow-up plan in the same tree could read the prior plan's ledger as its own. `subagent-driven-dev` is a fork, so the fix is not inherited. |
 | Review-fix loop resumes the implementer, with a five-round breaker | **ADOPT — #459** | A fresh implementer re-derives context the reviewer already priced in, and an unbounded fix loop is the class `/goal`'s circuit breakers exist to stop. |
-| `finishing-a-development-branch`: no discard prompt, forge-agnostic PR creation, worktree-cleanup no-op fixed | **ADOPT — #460** | The cleanup bug is the dangerous half: the worktree path was recomputed *after* cleanup had changed directory, so provenance never matched and cleanup silently no-oped. Our `finish-branch` is a heavily-modified descendant; whether it inherited that shape has to be answered by an executed probe, not a reading. |
+| `finishing-a-development-branch`: worktree-cleanup no-op fixed | **ADOPT by PORT — #460, shipped** | Answered by executed probe, and the honest answer is worse than the hypothesis. UberDev did **not** inherit upstream's exact defect: upstream captured `WORKTREE_PATH`, then `cd`d, then recomputed it; UberDev never `cd`d and never captured a path. It had four *adjacent* live defects instead, each reproduced against a real repository: (1) an unchecked `git checkout <base>` — from a linked worktree it exits 128, HEAD stays on the feature branch, and the next `git merge <feature>` self-merges at rc 0 with `Already up to date`, so **Option 1 reported a merge that never happened**; (2) `git worktree list \| grep <current-branch>` matched the main checkout's own row in an ordinary clone; (3) the same probe went vacuous on a detached HEAD, where `git branch --show-current` prints nothing and the pattern becomes the empty string; (4) the branch delete was ordered before the worktree removal, which git refuses. Fixed by replacing both prose sequences with one executable, extractable block in Step 5 that resolves every root before it mutates anything. |
+| `finishing-a-development-branch`: no discard prompt | **DECLINED — #460** | Category error. Upstream stopped offering to discard *uncommitted work*; UberDev Option 4 deletes a *branch and its commits* behind a typed `discard` confirmation, reachable only under `--interactive`. Verified by grep: `finish-branch/SKILL.md` has no `git status --porcelain` and no `stash`, so the flow never inspects uncommitted work at all. Recorded permanently as `permanent_divergences[].interactive-discard-option` (§6). |
+| `finishing-a-development-branch`: forge-agnostic PR creation | **DEFERRED — #460** | Not declined, blocked on a contract that does not exist yet. `gh` is not an implementation detail here: the `finish-branch → /review-pr → /merge` handshake runs on the `review-pr:pending` label (`REVIEW_PR_PENDING_LABEL` in `merge-pipeline/SKILL.md` Constants, read by `/merge`, cleared by `/review-pr`), and four literal `gh` invocations are shape-locked in `tests/finish-branch-auto-chain.test.sh`. Forge abstraction is RFC-tier work with no existing seam; a follow-up issue should own it. This row is the durable, grep-checkable record that it was adjudicated rather than missed. |
 | Windows SessionStart hook declares `shell: "bash"` | **ADOPT — #461** | The upstream failure mode was silent: PowerShell parsed the quoted path as an expression, cmd.exe truncated on a metacharacter, and the bootstrap never loaded with no error. UberDev ships its own hooks, so this must be verified independently on the Windows CI job. |
 | Library-wide prose compression across 11 skills | **SKIP** | Not skipped as unwanted — skipped as *already covered*. Seven components are `track`, so the compression arrives mechanically at their next re-baseline. The two surfaces where the token budget actually bites are the session-hook-injected `using-uberdev` files, which are `fork` and are governed by UberDev's own hook-diet work rather than by upstream's edits. Filing an issue for it would duplicate the re-baseline. |
 
-One more follow-up falls out of the register itself rather than the upstream
+One more follow-up fell out of the register itself rather than the upstream
 delta: **#462** — backfill real `vendored_at_commit` values and in-file
 provenance headers as each component is genuinely re-baselined. `"unknown"` is
-honest today; it should not be permanent.
+honest; it should not be permanent.
+
+#462 landed the mechanism and the first pin that could be proved from bytes:
+
+- **`C-BASE`**, the converse of `C-HEADER` (§2.2). Before it, a `"unknown"`
+  could be replaced by any 40-hex literal and all eight checks stayed green —
+  measured on the pre-#462 tree, all 17 fabricated at once, exit 0. Provenance
+  was assertable, not evidenced.
+- **`skills/dispatching-parallel-agents` pinned at `e7a2d16`**, because its
+  shipped `SKILL.md` is byte-identical to upstream at that commit — the pin
+  needed a header, not a reconciliation. Its `stance_reason` was corrected in
+  the same change: it had claimed a `'superpowers:' → 'uberdev:'` delta for a
+  file that contains neither token, and its 33 measured lines are entirely
+  upstream's own v6.2.0 prose compression, un-adopted here.
+
+The remaining 16 are owned by three successors, split by what each one costs
+rather than by component type: **#503** the five unpinned `track` skills (each
+carries a real residual, and declaring it engages §4.1's `fork` trigger, so a
+stance re-adjudication comes with it), **#504** the five unpinned `fork` skills,
+and **#505** the six agents (no local clone of `claude-plugins-official` exists,
+so their base needs a network content match — the watermark is a review point,
+not a proven base).
 
 ---
 
@@ -339,3 +372,77 @@ replacement, and another change is editing it concurrently.
 From here on, the live record is `plugins/uberdev/vendor.json`, enforced by
 `tools/vendor/vendor-check.py` in CI and refreshed by
 `tools/vendor/vendor-drift.py` weekly.
+
+---
+
+## Amendment (2026-08-12, #457) — `writing-good-tests.md` adopted
+
+> **Amends the `skills/test-driven-development` row of §4.2 and the
+> `writing-good-tests.md` verdict in §7. Adds `C-REFS` to the check list in §8.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What changed
+
+`skills/test-driven-development` now ships upstream's `writing-good-tests.md` and
+no longer ships `testing-anti-patterns.md`. `SKILL.md` points at it with
+upstream's own markdown link, in upstream's position — replacing the local
+`@`-ref, which force-loaded a 300-line reference on every TDD invocation against
+the convention `skills/writing-skills` states in its own "Why no @ links" note.
+The file set for the component is therefore **1:1 with upstream v6.2.0**.
+
+### The stance stays `fork`, for a different reason
+
+§4.2 recorded this component as `fork` because the **file sets diverged**. That
+reason is now spent, and it is deliberately **not** replaced by `track`:
+
+- `SKILL.md` is still at `e7a2d16` — upstream's own v6.2.0 prose compression
+  (which folds "Why Order Matters" and the rationalisations table together) is
+  un-adopted.
+- `writing-good-tests.md` is at `3dcbd5c` (v6.2.0), adopted whole.
+
+No single upstream commit is drop-in, so the tree is a **composite of two
+upstream revisions**. `track` *promises* a digest-locked re-baseline (§4.4), so
+claiming it here would be a false statement with no CI signal behind it —
+`stance: fork` is exactly what makes `C-FILES` skip digests for this component.
+`measured_diff_lines` moves **72 → 64**. **#462 still owns** the component
+re-baseline and the eventual flip to `track`; adopting one file is not one.
+
+The `Seven track, seven fork` tally in §4.2 is unchanged, as is §4.2's dated
+`diff -r` measurement table and §7's adjudication record: both are historical
+snapshots of what was measured and decided at the v6.2.0 tag, not live state.
+
+### `C-REFS` — the channel this swap ran through
+
+Every check in §8 reconciles the register against disk, or an in-file header
+against the register. **None of them read what a shipped document says.** So a
+`SKILL.md` could go on instructing agents to read a reference a vendor swap had
+deleted, and the guard stayed green: the reference is not a register field, and
+`fork` means its bytes are never digested. That is not hypothetical — it is the
+exact surface this issue moved.
+
+`vendor-check.py` therefore gains a ninth check:
+
+> **`C-REFS`** — for every declared markdown file of every third-party
+> component, every *relative* sibling reference (`@ref` or `](link)`, outside
+> fenced blocks and inline code spans) must resolve on disk. Finding **zero**
+> references anywhere is itself a failure, mirroring `C-HEADER`'s
+> "the scan is vacuous" arm.
+
+Two boundaries in that rule are load-bearing, and each is measured rather than
+assumed:
+
+- **Code spans are stripped, not just fences.** `skills/writing-skills` teaches
+  the `@`-ref convention by quoting a **bad** example in backticks, and a scan
+  that read it would report a dangling reference against a file that is
+  deliberately describing what not to write. Without the strip the check is red
+  on the shipped tree (4 references / 1 unresolved, against 3 / 0 with it).
+- **An `@` carrying a local part is an address, not a reference.** An email, an
+  npm-style `pkg@1.2.3` and a tag pin such as `repo@v6.2.0` all end in a dotted
+  token that a naive `@`-scan reads as a filename — `x@y.com` yields `y.com`.
+  A check that reds on a document referencing nothing is worse than no check, so
+  a reference must be a standalone token.
+
+`tests/vendor-provenance.test.sh` gains the matching falsifiability rows — a
+deleted target with the register kept consistent, a misspelled target, the
+resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
+**and nothing else**.
