@@ -735,6 +735,21 @@ function probedNums(record) {
   out.tNoSolvers = !recT.agentCalls.some(function (c) { return /^solve:#/.test(c.label || ""); });
   out.tAudit = !!(resT && resT.auditEvents.some(function (e) { return e.event === "agent_ceiling_cb1"; }));
 
+  // Run V — an unusable repoSlug. The slug is the only non-numeric value that
+  // reaches the proof prompt, so it is shape-gated; a malformed one must SKIP
+  // the relay rather than emit a broken `gh api` path for an agent to "fix"
+  // (which is how a mechanical relay turns into an improvising one). Without
+  // this run the gate could be deleted and nothing would red.
+  const recV = await run(buildArgs(null, { repoSlug: "not a slug" }),
+    { agentReturns: trivialReturns() });
+  const resV = resultOf(recV);
+  out.vNoRelay = probedNums(recV) === null;
+  out.vProofs = resV ? resV.results.map(function (r) { return r.prProof; }).join(",") : null;
+  out.vPrNums = resV ? resV.prsOpened.join(",") : null;
+  out.vAudit = !!(resV && resV.auditEvents.some(function (e) {
+    return e.event === "pr_proof_skipped" && e.reason === "no_repo_slug";
+  }));
+
   // The verification block must be READ by something, or it is the dead
   // contract this repo has been filing issues about all week.
   out.aProbed = resA ? resA.verification.probed : null;
@@ -867,6 +882,11 @@ else
   check tTripped true             "B79 CB1 counts the proof relay (2 trivial issues at maxAgents=3 now trips)"
   check tNoSolvers true           "B80 the raised projection still aborts BEFORE any solver is dispatched"
   check tAudit true               "B81 agent_ceiling_cb1 fires on the new projection"
+
+  check vNoRelay true             "B85 a malformed repoSlug skips the relay (no broken gh api path is ever emitted)"
+  check vProofs '"UNVERIFIED,UNVERIFIED"' "B86 a skipped probe classifies UNVERIFIED, never DISPROVEN"
+  check vPrNums '"901,902"'       "B87 and the claims are retained in prsOpened"
+  check vAudit true               "B88 pr_proof_skipped fires with reason no_repo_slug"
 
   check aProbed 2                 "B82 verification.probed reports what was actually sent to the relay"
   check aConfirmed 2              "B83 verification.confirmed is computed from the record classifications"
