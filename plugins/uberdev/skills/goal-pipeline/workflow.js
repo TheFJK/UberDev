@@ -423,10 +423,12 @@ function budgetExhausted() {
 
 // Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
 // relays, the collect relay, the verdict relay — plus what the nested fleet
-// will spend (its own intake relay, one solver per issue, and at most the six
-// research/design agents a medium-tier issue costs).
+// will spend (its own intake relay, its PR-claim verification relay (#515),
+// one solver per issue, and at most the six research/design agents a
+// medium-tier issue costs). Both fleet relays are BATCHED — one each per fleet
+// run, not per issue — so they are a flat +2, not part of the per-issue term.
 function projectedAgentsForCycle(issueCount) {
-  return 3 + maxWatchTicks + 1 + (issueCount * 7);
+  return 3 + maxWatchTicks + 2 + (issueCount * 7);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
@@ -579,7 +581,10 @@ async function runCycle() {
       try {
         const out = await workflow({ scriptPath: solveFleetJs }, fleetArgs);
         fleetRuns += 1;
-        agentsSpent += 1 + (rec.claimed.length * 7);
+        // The fleet two batched relays (intake + PR-claim verification, #515)
+        // plus its per-issue solver/design agents. Mirrors
+        // projectedAgentsForCycle above — they must not drift apart.
+        agentsSpent += 2 + (rec.claimed.length * 7);
         rec.fleet = "ran";
         if (out && typeof out === "object" && Array.isArray(out.prsOpened)) {
           rec.prsOpened = digitsOnly(out.prsOpened).map(Number);

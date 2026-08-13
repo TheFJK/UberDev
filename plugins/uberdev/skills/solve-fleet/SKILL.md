@@ -107,7 +107,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`1 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
+| CB1 | projected agents (`2 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
 
@@ -121,14 +121,49 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
 ```
 { runId, repoSlug, issueCount, concurrency, autoMode, designedIssues,
   researchArtifacts, results: [ {issue, status, branch, prNumber, prUrl,
-  commitCount, testsRun, summary, blocker} ], prsOpened: [<int>],
+  commitCount, testsRunClaimed, summary, blocker,
+  prProof, provenCommitCount, claimedStatus, claimedPrNumber, claimedPrUrl} ],
+  prsOpened: [<int>],
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
+  verification: {probed, confirmed, disproven, unverified, notApplicable, relayRc},
   cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
 ```
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
 | REFUSED | FAILED`. The solver never merges and never chains into a review
 command — opening the PR is where it stops.
+
+## Claim verification (#515)
+
+A solver's structured return is a **self-report**. `status` drives every count
+above *and* the PR set `/goal` ingests, so the fleet no longer takes it on
+trust: in the `deliver` phase a single read-only **haiku relay** queries GitHub
+for every claimed PR (`gh api -i .../pulls/<N>`, one call per number, bounded
+in-agent retry) and returns **raw observations only** — HTTP status, `number`,
+`head.ref`, `state`, `commits`. It reaches no verdict. The **script**
+adjudicates, downgrades and audits.
+
+| Field | Meaning |
+|---|---|
+| `prProof` | `CONFIRMED` · `DISPROVEN` · `UNVERIFIED` · `NOT_APPLICABLE` |
+| `provenCommitCount` | commits GitHub reports on the PR (`null` when not observed) |
+| `claimedStatus` / `claimedPrNumber` / `claimedPrUrl` | present only on a downgraded record — the original claim, preserved |
+| `verification` | run totals; `relayRc` is `null` when the relay never ran |
+
+The rule: **the proof wins in the field that drives behaviour, the claim is
+never erased, and the disagreement is an audit event.** `status` is overwritten
+on disproof (with the claim moved into `claimed*`); `commitCount` drives nothing
+so the claim stays and the proof lands beside it in `provenCommitCount`.
+
+Only two observations disprove a claim — an authoritative **404**, and a **200
+naming a different head branch**. Everything else (no relay, a null relay, a
+non-zero rc, a missing row, 0/401/403/429/5xx) classifies `UNVERIFIED` and
+**retains** the claim: a probe that cannot speak must never drop a real PR out
+of `/goal`'s queue. A status is never *upgraded* — a non-`PR_OPENED` record
+carrying a PR number is audited, never promoted.
+
+`testsRunClaimed` is deliberately **honest, not verifiable**: nothing here can
+falsify it, so nothing reads it.
 
 ## No-Workflow fallback
 

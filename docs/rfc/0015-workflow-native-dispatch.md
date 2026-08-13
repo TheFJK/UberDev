@@ -144,7 +144,7 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`1 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
+| CB1 | projected agents (`2 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue alone |
