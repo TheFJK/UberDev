@@ -863,8 +863,17 @@ echo "== W: every review-fleet stage EXECUTES (prompt builders included) =="
 W_HARNESS="$TMP/stage_harness.mjs"
 cat >"$W_HARNESS" <<'WHARNESS'
 // Executes skills/review-fleet/workflow.js for ONE stage under runtime stubs.
-// argv: <workflow.js> <args-json-file>. Prints one JSON line:
-//   {"threw":<string|null>,"abortReason":...,"dispatched":N,"labels":[...]}
+// argv: <workflow.js> <args-json-file> [<agent-return-json-file>]. Prints one
+// JSON line:
+//   {"threw":<string|null>,"abortReason":...,"dispatched":N,"labels":[...],
+//    "prompts":[...],"result":<the parsed WORKFLOW_RESULT|null>,"logs":[...]}
+//
+// The optional THIRD argv REPLACES the canned agent() return with the parsed
+// contents of that file. It is opt-in on purpose: editing the canned return in
+// place would feed extra keys into all ten existing assert_stage_runs rows and
+// change recordChild's behaviour for every stage at once. Rows that assert on
+// what the script does with a child's RETURN pass an override; rows that assert
+// on prompts or roster size pass nothing and see byte-identical behaviour.
 import fs from 'node:fs';
 import vm from 'node:vm';
 
@@ -874,6 +883,12 @@ const source = fs.readFileSync(scriptPath, 'utf8');
 // `export`, which vm cannot evaluate, and the file's top level is `await`ed.
 const body = source.replace(/\/\* META-BEGIN \*\/[\s\S]*?\/\* META-END \*\//, '');
 const wrapped = '(async () => {\n' + body + '\n})()';
+
+const RETURN_DEFAULT = { status: 'COMPLETE', issuesCreated: [], commentedUrls: [],
+                         skipped: 0, halted: false, resultPath: '', statusPath: '' };
+const agentReturn = process.argv[4]
+  ? JSON.parse(fs.readFileSync(process.argv[4], 'utf8'))
+  : RETURN_DEFAULT;
 
 const logs = [];
 const labels = [];
@@ -891,8 +906,7 @@ const sandbox = {
     }
     labels.push(opts && opts.label);
     prompts.push(prompt);
-    return { status: 'COMPLETE', issuesCreated: [], commentedUrls: [], skipped: 0,
-             halted: false, resultPath: '', statusPath: '' };
+    return agentReturn;
   },
   parallel: async (thunks) => Promise.all(thunks.map(async (t) => {
     try { return await t(); } catch { return null; }
@@ -923,6 +937,13 @@ process.stdout.write(JSON.stringify({
   dispatched: result ? result.dispatched : -1,
   labels: labels,
   prompts: prompts,
+  // The WHOLE structured return and the WHOLE log tape, so a row can assert on
+  // what the script REPORTED about a child rather than only on what it asked
+  // one for. Without these two channels a return-carried field can be requested
+  // by every prompt, validated by the schema, and dropped on the floor with
+  // every fixture still green — the defect class #514 names.
+  result: result,
+  logs: logs,
 }) + '\n');
 WHARNESS
 
@@ -1000,6 +1021,43 @@ assert_stage_runs() {
   fi
   pass "W[$label] stage=$stage executes end-to-end and dispatches $expected child(ren)"
 }
+
+# stage_run_with_return STAGE NONCES EXTRA_JSON RETURN_JSON -> echoes the
+# harness JSON line for the caller to `jq`.
+#
+# The sibling of assert_stage_runs for rows that assert on `.result` / `.logs`
+# rather than on the roster: it deliberately asserts NOTHING itself, because a
+# row driving a hostile child return (a 5000-character note, an unrecognised
+# failure class) is asking what the script REPORTS, not how many children it
+# dispatched — that half is already locked by the assert_stage_runs row above.
+stage_run_with_return() {
+  local stage="$1" nonces="$2" extra="$3" ret="$4"
+  printf '%s' "$ret" >"$TMP/w-ret.json"
+  stage_args "$stage" "$nonces" "$extra"
+  node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" "$TMP/w-ret.json" 2>&1
+}
+
+# --- W-H: the harness extension itself, proved before anything depends on it -
+# A test-infrastructure change that silently no-ops turns every row built on it
+# into a vacuous pass, so the two channels the X5/X6 sections read (`.result`,
+# `.logs`) and the return-override seam are asserted here, first.
+W_REVIEW_NONCES="$W_NONCE1,$W_NONCE2,$W_NONCE3,$W_NONCE4,$W_NONCE5,$W_NONCE6,$W_NONCE7"
+W_H1_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n '{status:"COMPLETE",
+  issuesCreated:[], commentedUrls:[], skipped:0, halted:false, resultPath:"", statusPath:""}')")"
+if [ "$(jq -r '.result.children[0].note // ""' <<<"$W_H1_OUT")" = "" ] \
+   && [ "$(jq -r '.logs | length' <<<"$W_H1_OUT")" -gt 0 ] 2>/dev/null \
+   && [ "$(jq -r '.result.children | length' <<<"$W_H1_OUT")" = 7 ]; then
+  pass "W-H1 the harness surfaces .result and .logs, and the DEFAULT agent return is unchanged"
+else
+  fail "W-H1 the harness's new .result/.logs channels are missing or the default return moved: $(jq -c '{n:(.result.children|length),logs:(.logs|length)}' <<<"$W_H1_OUT")"
+fi
+W_H2_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n '{status:"COMPLETE",
+  resultPath:"", statusPath:"", verdict:"HARNESS-OVERRIDE-PROBE"}')")"
+if [ "$(jq -r '.result.children[0].verdict' <<<"$W_H2_OUT")" = "HARNESS-OVERRIDE-PROBE" ]; then
+  pass "W-H2 the optional agent-return override really reaches recordChild"
+else
+  fail "W-H2 the agent-return override never reached the script: $(jq -c '.result.children[0]' <<<"$W_H2_OUT")"
+fi
 
 W_CI_COMMON="$(jq -n --arg sha "$W_HEX64_A" '{
   ciLoopIter:1, ciAuthorityPathAbs:"/r/run/ci-auth.json",
@@ -1094,6 +1152,142 @@ V_SH_NONCES="$(bash -c '
 [ "$V_SH_NONCES" = "3|2" ] \
   && pass "V2b review_fleet_bind_verify mints exactly one nonce per claim (3 claims -> 3 nonces)" \
   || fail "V2b bind_verify minted '$V_SH_NONCES', want '3|2' (count|comma-count)"
+
+# ---------------------------------------------------------------------------
+# X1 — the verify child is a BOUND child (#514 item 2)
+# ---------------------------------------------------------------------------
+# THE DEFECT: verifyPrompt was the only one of the ten prompt builders that never
+# called boundChildProtocol. Its ad-hoc substitute named the two files and the
+# nonce but omitted the partial-then-rename atomic-publish rule every sibling
+# supplies, so a verifier could be captured mid-write; the strict validator then
+# refuses the torn bytes and the finding degrades to `verifier-unavailable`,
+# which reads as "the child failed" rather than "the child mis-published". It
+# also carried no "Return via StructuredOutput" line at all while `S.verify`
+# REQUIRES four fields, so the child had to invent them or trip the retry.
+#
+# SKILL.md:437 asserts "Every child that produces a result file is a bound
+# child" and lists `verify` in the nonce table — these rows are what makes that
+# sentence true rather than aspirational.
+#
+# Herestrings, never `printf | grep -q`: tests/epipe-guard.test.sh reds on a new
+# pipe probe (the guard fires on the WRITER side of a short-reading pipeline).
+echo
+echo "== X1: the verify stage's children are bound like every other child =="
+
+X1_ARGS="$(printf '%s' "$W_VERIFY_COMMON" | jq '. + {verifyCount:2, verifyCap:50}')"
+stage_args verify "$W_NONCE1,$W_NONCE2" "$X1_ARGS"
+X1_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+stage_args review "$W_REVIEW_NONCES" '{}'
+X1_REVIEW_OUT="$(node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1)"
+
+# x1_count OUT JQ_TEST -> how many prompts satisfy the jq test
+x1_count() { jq -r --arg n "$2" '[.prompts[] | select(contains($n))] | length' <<<"$1"; }
+
+[ "$(x1_count "$X1_OUT" 'Bound-child protocol')" = 2 ] \
+  && pass "X1a both verify prompts carry the bound-child protocol block" \
+  || fail "X1a $(x1_count "$X1_OUT" 'Bound-child protocol') of 2 verify prompts carry the bound-child protocol"
+[ "$(x1_count "$X1_REVIEW_OUT" 'Bound-child protocol')" = 7 ] \
+  && pass "X1b anti-vacuity: the same needle finds all seven reviewer prompts" \
+  || fail "X1b the 'Bound-child protocol' needle is wrong — it matches $(x1_count "$X1_REVIEW_OUT" 'Bound-child protocol') of 7 reviewer prompts"
+X1C="$(jq -r '[.prompts[] | select(contains(".partial") and contains("mv -f"))] | length' <<<"$X1_OUT")"
+[ "$X1C" = 2 ] \
+  && pass "X1c both verify prompts state the partial-then-rename publish rule" \
+  || fail "X1c $X1C of 2 verify prompts state partial-then-rename; a torn read stays possible"
+X1D="$(jq -r '[.prompts[] | select(contains("Also return") and contains("SCORED"))] | length' <<<"$X1_OUT")"
+[ "$X1D" = 2 ] \
+  && pass "X1d both verify prompts request the S.verify fields the schema requires" \
+  || fail "X1d $X1D of 2 verify prompts request edgeId/status; the child must invent them or trip the retry"
+[ "$(x1_count "$X1_OUT" 'and your status.json at')" = 0 ] \
+  && pass "X1e the ad-hoc publication block was REPLACED, not duplicated" \
+  || fail "X1e $(x1_count "$X1_OUT" 'and your status.json at') verify prompt(s) still carry the ad-hoc publication block beside the protocol"
+[ "$(x1_count "$X1_OUT" 'means this document and only this document')" = 2 ] \
+  && pass "X1f both verify prompts override the protocol's 'write your full report' wording" \
+  || fail "X1f the verify output contract does not override 'write your full report'; a titled report around the YAML refuses the whole result"
+# The withholding invariant, on the NEW line specifically: the score belongs in
+# the result file the controller re-reads, so the structured return must not
+# name one — and the child must never be handed the cutoff. Word-bounded, so the
+# `SCORED` status enum member X1d requires is not mistaken for a score field;
+# and un-anchored to a single line only because jq's `.` does not cross a
+# newline without the "m" flag, which is exactly the scoping wanted here.
+X1G="$(jq -r '[.prompts[] | select(test("Also return.*\\b(score|confidence|verdict|threshold)\\b"; "i"))] | length' <<<"$X1_OUT")"
+[ "$X1G" = 0 ] \
+  && pass "X1g no verify prompt asks for a score, a verdict or a threshold in its structured return" \
+  || fail "X1g $X1G verify prompt(s) ask for a score/verdict/threshold in the return; the score must stay in the result file"
+
+# ---------------------------------------------------------------------------
+# X2 — the status-document TEMPLATE and the minted BINDING agree (#514 item 2)
+# ---------------------------------------------------------------------------
+# CHARACTERIZATION, not red-first: these two rows pass on the pre-fix tree by
+# design and are the only defence against the sequencing trap that binding the
+# verify child (X1) and consuming its binding (X3) create together. The prompt
+# tells the child to write `workspace_mode`/`worktree`/`branch` from the
+# ENVELOPE; `bind-workflow-launch` mints `workspace_mode:"caller"`,
+# `worktree:<canonical working dir>` and `branch:""` from its own arguments. If
+# those two ever disagree, EVERY verifier's status document refuses, every
+# eligible blocker degrades to `verifier-unavailable`, and the precision gate
+# silently stops filtering with CI still green — no test executes a real
+# verifier, so nothing else would notice.
+echo
+echo "== X2: the bound-child status template round-trips through the real binder =="
+
+X2_DIR="$TMP/x2"
+mkdir -p "$X2_DIR"
+bash -c '
+  . "$1"
+  d="$2"
+  : >"$d/claims.txt"
+  for i in 1 2; do printf "%s/claim-0%s.json\n" "$d" "$i" >>"$d/claims.txt"; done
+  review_fleet_bind_verify "$d" 1 "$d" "$3" "$d/claims.txt" "$d/ledger.jsonl"
+' _ "$ARGS_LIB" "$X2_DIR" "$CONTRACT" >/dev/null 2>&1
+X2_BAD=""
+[ -s "$X2_DIR/ledger.jsonl" ] || X2_BAD="$X2_BAD no-ledger"
+X2_ROWS=0
+while IFS= read -r X2_ROW; do
+  [ -n "$X2_ROW" ] || continue
+  X2_ROWS=$((X2_ROWS + 1))
+  X2_RESULT="$(jq -er .result <<<"$X2_ROW")" || { X2_BAD="$X2_BAD row$X2_ROWS-no-result"; continue; }
+  X2_STATUS="$(jq -er .status <<<"$X2_ROW")" || { X2_BAD="$X2_BAD row$X2_ROWS-no-status"; continue; }
+  X2_BINDING="$(jq -er .binding <<<"$X2_ROW")" || { X2_BAD="$X2_BAD row$X2_ROWS-no-binding"; continue; }
+  X2_NONCE="$(jq -er .run_nonce <<<"$X2_BINDING")" || { X2_BAD="$X2_BAD row$X2_ROWS-no-nonce"; continue; }
+  printf 'a verifier opinion\n' >"$X2_RESULT"
+  # BYTE-SHAPED exactly as boundChildProtocol templates it — including the
+  # ABSENCE of pid / process_identity / lease_generation, which the contract
+  # refuses outright rather than ignoring.
+  printf '{"backend":"workflow","state":"completed","exit_code":0,\n "run_nonce":"%s",\n "workspace_mode":"%s",\n "worktree":"%s",\n "branch":"%s",\n "result":"%s"}\n' \
+    "$X2_NONCE" caller "$X2_DIR" "" "$X2_RESULT" >"$X2_STATUS"
+  python3 -I -B "$CONTRACT" capture-bound-child \
+    --edge-id "$(jq -er .edge <<<"$X2_ROW")" \
+    --launch-binding-json "$X2_BINDING" >/dev/null 2>&1 \
+    || X2_BAD="$X2_BAD row$X2_ROWS-capture-refused"
+done <"$X2_DIR/ledger.jsonl"
+[ "$X2_ROWS" = 2 ] || X2_BAD="$X2_BAD rows=$X2_ROWS"
+if [ -z "$X2_BAD" ]; then
+  pass "X2a a status document written from the prompt's template captures cleanly against the minted binding"
+else
+  fail "X2a the prompt template and bind-workflow-launch disagree:$X2_BAD"
+fi
+
+# Negative twin. Without it the pair proves only that SOMETHING captured, not
+# that the nonce is what bound it — a validator that ignored the nonce would
+# pass X2a exactly as loudly.
+X2_ROW1="$(sed -n 1p "$X2_DIR/ledger.jsonl")"
+X2_B1="$(jq -er .binding <<<"$X2_ROW1")"
+X2_N1="$(jq -er .run_nonce <<<"$X2_B1")"
+# Flip ONE character; the grammar (64 lowercase hex) stays valid, so only the
+# equality can refuse it.
+case "$X2_N1" in
+  a*) X2_N_BAD="b${X2_N1#?}" ;;
+  *)  X2_N_BAD="a${X2_N1#?}" ;;
+esac
+printf '{"backend":"workflow","state":"completed","exit_code":0,\n "run_nonce":"%s",\n "workspace_mode":"%s",\n "worktree":"%s",\n "branch":"%s",\n "result":"%s"}\n' \
+  "$X2_N_BAD" caller "$X2_DIR" "" "$(jq -er .result <<<"$X2_ROW1")" >"$(jq -er .status <<<"$X2_ROW1")"
+if python3 -I -B "$CONTRACT" capture-bound-child \
+     --edge-id "$(jq -er .edge <<<"$X2_ROW1")" \
+     --launch-binding-json "$X2_B1" >/dev/null 2>&1; then
+  fail "X2b a status document echoing a nonce this run never minted was captured as bound evidence"
+else
+  pass "X2b a one-character nonce mismatch refuses the capture (X2a is not vacuous)"
+fi
 
 # --- W-CONTRACT: the Phase 1 reviewers must be TOLD the output contract (#403)
 #
@@ -1319,7 +1513,7 @@ fi
 # W-neg — the harness must be able to SEE a swallowed throw, or every row above
 # is vacuous. Inject one into a copy of the script and require a red.
 W_SABOTAGE="$TMP/sabotaged-workflow.js"
-sed 's|^function f2iPrompt(notes, nonce) {|function f2iPrompt(notes, nonce) {\n  lines_that_do_not_exist.push(childInputPath(undeclared_slug));|' \
+sed 's|^function f2iPrompt(nonce) {|function f2iPrompt(nonce) {\n  lines_that_do_not_exist.push(childInputPath(undeclared_slug));|' \
   "$WORKFLOW" >"$W_SABOTAGE"
 stage_args defer "$W_NONCE1" '{}'
 W_SAB_OUT="$(node "$W_HARNESS" "$W_SABOTAGE" "$TMP/w-args.json" 2>&1)"
@@ -2604,6 +2798,414 @@ if [ -z "$L3_BAD" ]; then
 else
   fail "L3 the dispatch decision still crosses the mandate as a scalar:$L3_BAD"
 fi
+
+# ---------------------------------------------------------------------------
+# X3 — the verify publish fence CONSUMES the binding it mints (#514 item 2)
+# ---------------------------------------------------------------------------
+# THE DEFECT: review_fleet_bind_verify mints a `binding` per verifier into every
+# ledger row and NOTHING ever read it. The publish fence took `.result` straight
+# off the row and handed the path to the strict validator, so a verifier that
+# echoed a nonce this run never minted, wrote outside the derived layout, or
+# published a torn file was indistinguishable from one whose opinion simply did
+# not parse — every one of them landed `verifier-unavailable`.
+#
+# Structural, over the extracted fence, for the same reason every L row is: the
+# fence DOCUMENTS its own carriers in prose, so a bare `grep -F` for the verb
+# passes on the broken tree too. What is asserted here is ORDER (capture before
+# the opinion is read) and the SHAPE OF THE FAILURE BRANCH (degrade, never
+# abort) — neither of which a comment can satisfy.
+echo
+echo "== X3: the verification gate proves each verifier before reading its opinion =="
+
+python3 -I -B - "$L_TMP/publish.fence" >"$L_TMP/x3.report" 2>"$L_TMP/x3.err" <<'PY'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+
+
+def is_comment(line):
+    return line.lstrip().startswith("#")
+
+
+code = [(i, l) for i, l in enumerate(lines) if not is_comment(l)]
+capture = [i for i, l in code if "capture-bound-child" in l]
+binding = [i for i, l in code if re.search(r"jq -er \.binding", l)]
+edge = [i for i, l in code if re.search(r"jq -er \.edge", l)]
+validate = [
+    i for i, l in code
+    if "uberdev_child_validate_finding_verifier_result" in l
+]
+print("capture=%d" % len(capture))
+print("binding=%d" % len(binding))
+print("edge=%d" % len(edge))
+print("validate=%d" % len(validate))
+print("capture_before_validate=%s" % (
+    "yes" if capture and validate and min(capture) < min(validate) else "no"))
+
+# The failure branch attached to the capture. Its shape is the whole point: a
+# malformed CHILD must be recorded and stepped over, while a malformed LEDGER
+# ROW (a controller bug) keeps the surrounding `|| return 74` idiom. So the
+# branch must END in `continue` — a branch whose terminal statement returns
+# would abort a whole review because one verifier mis-published.
+branch = []
+if capture:
+    start = min(capture)
+    depth_end = None
+    for j in range(start, len(lines)):
+        stripped = lines[j].strip()
+        if j > start and stripped in ("fi", "}", "};"):
+            depth_end = j
+            break
+    if depth_end is not None:
+        branch = [l for l in lines[start + 1:depth_end]
+                  if l.strip() and not is_comment(l)]
+tail = branch[-1].strip() if branch else ""
+print("branch_lines=%d" % len(branch))
+print("branch_records_unavailable=%s" % (
+    "yes" if any("verifier-unavailable" in l for l in branch) else "no"))
+print("branch_tail=%s" % tail)
+# The fence must still be able to SAY a verifier was unusable at all.
+print("fence_has_unavailable=%d" % sum(
+    1 for _, l in code if "verifier-unavailable" in l))
+PY
+X3_RC=$?
+X3_BAD=""
+[ "$X3_RC" = 0 ] || X3_BAD="$X3_BAD scanner-rc=$X3_RC"
+[ "$(l_field "$L_TMP/x3.report" capture)" -ge 1 ] 2>/dev/null || X3_BAD="$X3_BAD never-captures"
+[ "$(l_field "$L_TMP/x3.report" binding)" -ge 1 ] 2>/dev/null || X3_BAD="$X3_BAD never-reads-binding"
+[ "$(l_field "$L_TMP/x3.report" edge)" -ge 1 ] 2>/dev/null || X3_BAD="$X3_BAD hardcodes-the-edge-id"
+[ "$(l_field "$L_TMP/x3.report" capture_before_validate)" = yes ] \
+  || X3_BAD="$X3_BAD reads-the-opinion-before-proving-the-child"
+if [ -z "$X3_BAD" ]; then
+  pass "X3a the publish fence captures each verifier against its minted binding BEFORE validating the opinion"
+else
+  fail "X3a the minted verify binding is still never consumed:$X3_BAD"
+fi
+
+X3B_BAD=""
+[ "$(l_field "$L_TMP/x3.report" fence_has_unavailable)" -ge 1 ] 2>/dev/null \
+  || X3B_BAD="$X3B_BAD no-unavailable-reason"
+[ "$(l_field "$L_TMP/x3.report" branch_records_unavailable)" = yes ] \
+  || X3B_BAD="$X3B_BAD capture-failure-records-nothing"
+[ "$(l_field "$L_TMP/x3.report" branch_tail)" = continue ] \
+  || X3B_BAD="$X3B_BAD branch-tail='$(l_field "$L_TMP/x3.report" branch_tail)'"
+if [ -z "$X3B_BAD" ]; then
+  pass "X3b an unprovable verifier is recorded verifier-unavailable and stepped over, never aborting the review"
+else
+  fail "X3b the capture-failure branch does not degrade:$X3B_BAD"
+fi
+
+# Lock: the fix must reuse `verifier-unavailable`, which already means "no
+# usable child opinion exists" and already lands SURVIVES. A new reason string
+# would be a new vocabulary member the sidecar's schema refuses.
+python3 -I -B - "$CONTRACT" >"$L_TMP/x3c.report" 2>/dev/null <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+for name in ("VERIFICATION_CHILD_REASONS", "VERIFICATION_CONTROLLER_REASONS"):
+    match = re.search(name + r"\s*=\s*\{(.*?)\}", text, re.S)
+    members = re.findall(r'"([a-z-]+)"', match.group(1)) if match else []
+    print("%s=%d" % (name, len(members)))
+    print("%s_has_unavailable=%s" % (
+        name, "yes" if "verifier-unavailable" in members else "no"))
+PY
+if [ "$(l_field "$L_TMP/x3c.report" VERIFICATION_CHILD_REASONS)" = 5 ] \
+   && [ "$(l_field "$L_TMP/x3c.report" VERIFICATION_CONTROLLER_REASONS)" = 3 ] \
+   && [ "$(l_field "$L_TMP/x3c.report" VERIFICATION_CONTROLLER_REASONS_has_unavailable)" = yes ]; then
+  pass "X3c the verification reason vocabulary is unchanged (5 child + 3 controller), and verifier-unavailable is still a controller reason"
+else
+  fail "X3c the verification reason vocabulary moved: $(tr '\n' ' ' <"$L_TMP/x3c.report")"
+fi
+
+# ---------------------------------------------------------------------------
+# X4 — the impossible cross-stage note carrier is GONE (#514 item 1)
+# ---------------------------------------------------------------------------
+# THE DEFECT: an envelope key was read into a scalar that no producer anywhere
+# in the repo ever emitted, an in-call array collected notes that `finalize()`
+# never returned, and the branch that would have embedded either one was
+# therefore unreachable. The whole injection-hardening path around it — an
+# envelope wrapper, a close-tag neutraliser, a per-note cell() — looked live and
+# never executed once.
+#
+# It is DELETED rather than wired because no compliant producer can exist: a
+# Workflow script has no filesystem verb, every fence is a fresh shell (#427),
+# and no controller fence parses a Workflow return at all. The only remaining
+# carrier would be an orchestrator copying untrusted agent text out of a return
+# into a later fence's shell word — an LLM-composed handoff, which DR-2 forbids.
+#
+# Each literal is ASSEMBLED AT RUNTIME (the G14c idiom) so the fixture cannot
+# match itself and the lock cannot decay into a row that always passes.
+echo
+echo "== X4: the severed cross-stage note carrier leaves no phantom names =="
+
+# An ARRAY, not a space-joined scalar: this repository is routinely checked out
+# under a path containing a space, and an unquoted scalar would split it into
+# nonexistent roots — `grep -r` would then find nothing and every X4 row would
+# pass on any tree at all. X4d is what catches that, but the array is what
+# prevents it.
+X4_ROOTS=("$REPO_ROOT/plugins" "$REPO_ROOT/docs" "$REPO_ROOT/tools" "$REPO_ROOT/tests")
+x4_absent() {  # TOKEN LABEL
+  if grep -rq -- "$1" "${X4_ROOTS[@]}" 2>/dev/null; then
+    fail "X4 $2: the name '$1' is still spelled somewhere under plugins/ docs/ tools/ tests/"
+  else
+    pass "X4 $2"
+  fi
+}
+X4_CN_TOKEN="child""Notes"
+x4_absent "$X4_CN_TOKEN" "a the envelope key with no producer is gone from the script, the skill doc and the command files"
+X4_ENV_TOKEN="review-fleet-""child-notes"
+x4_absent "$X4_ENV_TOKEN" "b the envelope source tag that no prompt could ever emit is gone"
+# Scoped to review-fleet ONLY: both names are live and correct in
+# skills/uberthink-pipeline/workflow.js and skills/testers-pipeline/workflow.js,
+# and the SHARED block is documented in skills/writing-skills/SKILL.md. What is
+# wrong is carrying a copy in a script whose prompts embed no agent-returned
+# content — that is the "looks hardened, never executes" shape itself.
+X4_FLEET="$REPO_ROOT/plugins/uberdev/skills/review-fleet"
+X4_WRAP_TOKEN="env""Wrap"
+X4_CELL_TOKEN="env""Cell"
+if grep -rq -e "$X4_WRAP_TOKEN" -e "$X4_CELL_TOKEN" "$X4_FLEET" 2>/dev/null; then
+  fail "X4c review-fleet still carries an untrusted-input envelope helper that nothing in its prompts uses"
+else
+  pass "X4c review-fleet carries no envelope helper, because no prompt of its embeds agent-returned content"
+fi
+# Anti-vacuity: the SAME grep over the SAME roots must find a token that is
+# certainly present, or X4a/X4b prove only that the roots or the tool moved.
+if grep -rq -- "boundChildProtocol" "${X4_ROOTS[@]}" 2>/dev/null; then
+  pass "X4d anti-vacuity: the same recursive grep over the same roots does find a known-present name"
+else
+  fail "X4d the X4 greps find nothing at all — the roots or the tool moved and X4a/X4b are vacuous"
+fi
+
+# ---------------------------------------------------------------------------
+# X5 — `note` finally has a reader (#514 item 1)
+# ---------------------------------------------------------------------------
+# All seven reviewers, all three lenses and the fixer are asked for a `note`,
+# eight schemas declare it, and the one thing that consumed it was the dead
+# carrier above. Deleting the carrier without giving `note` a reader would leave
+# nine prompts asking for a field nothing anywhere reads — the same defect with
+# the hardening removed. The reader is the observability channel that already
+# exists: the single structured `WORKFLOW_RESULT` line.
+#
+# It is CLAMPED, not passed through: the note is untrusted agent text derived
+# from PR-author-controlled diff bytes. It cannot split the log line —
+# JSON.stringify escapes every control character — but an unbounded or
+# control-char-bearing note can corrupt a terminal and bloat the one structured
+# line every fixture in this file asserts on.
+echo
+echo "== X5: the note a child returns is reported, bounded and control-char-free =="
+
+X5A_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n '{status:"COMPLETE",
+  resultPath:"", statusPath:"", note:"SENTINELNOTE-514"}')")"
+[ "$(jq -r '[.result.children[] | select(.note == "SENTINELNOTE-514")] | length' <<<"$X5A_OUT")" = 7 ] \
+  && pass "X5a a child's note reaches the structured return" \
+  || fail "X5a the note a child returned is discarded: $(jq -c '.result.children[0]' <<<"$X5A_OUT")"
+
+X5_LONG="$(printf 'x%.0s' $(seq 5000))"
+X5B_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n --arg n "$X5_LONG" '{status:"COMPLETE",
+  resultPath:"", statusPath:"", note:$n}')")"
+[ "$(jq -r '.result.children[0].note | length' <<<"$X5B_OUT")" = 200 ] \
+  && pass "X5b a 5000-character note is clamped to 200 before it reaches the log line" \
+  || fail "X5b the note is unbounded (length $(jq -r '.result.children[0].note | length' <<<"$X5B_OUT")); one child can bloat the structured line every fixture reads"
+
+# Built in the fixture rather than written as a literal byte, so the file stays
+# grep-able and editor-safe. C0 includes \n and \r, which is exactly why the
+# removal makes a newline-collapsing envelope unnecessary.
+X5C_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n --arg n "CTRL$(printf '\001')PROBE" '{status:"COMPLETE",
+  resultPath:"", statusPath:"", note:$n}')")"
+X5C_NOTE="$(jq -r '.result.children[0].note' <<<"$X5C_OUT")"
+X5C_ESCAPED="$(jq -r '.result | tostring | contains("\\u0001")' <<<"$X5C_OUT")"
+if [ "$X5C_NOTE" = CTRLPROBE ] && [ "$X5C_ESCAPED" = false ]; then
+  pass "X5c control characters are REMOVED from the note (and removal happens before truncation)"
+else
+  fail "X5c a control character survived into the structured return (note='$X5C_NOTE', escaped-in-result=$X5C_ESCAPED)"
+fi
+
+# Anti-vacuity: with the DEFAULT return the key must be PRESENT and empty, not
+# absent — `has()` and not `// ""`, because a missing key defaults to "" too and
+# would make X5a look like it matched prose.
+X5D_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n '{status:"COMPLETE",
+  resultPath:"", statusPath:""}')")"
+if [ "$(jq -r '.result.children[0] | has("note")' <<<"$X5D_OUT")" = true ] \
+   && [ "$(jq -r '.result.children[0].note' <<<"$X5D_OUT")" = "" ]; then
+  pass "X5d the note key is uniformly present, and empty when the child returned none"
+else
+  fail "X5d children[] has no note key at all — X5a would match nothing rather than assert something"
+fi
+# The fix removes the CARRIER, never the field: `note` is the only channel a
+# BLOCKED child has for saying why, and dropping it from schemas that declare
+# additionalProperties:false while nine prompts still ask for it would trip the
+# structured-output retry instead of failing loudly.
+X5E="$(grep -c 'note: { type: "string" }' "$WORKFLOW" || true)"
+[ "$X5E" = 8 ] \
+  && pass "X5e all eight schemas still declare note (the carrier went, the field stayed)" \
+  || fail "X5e $X5E of 8 schemas declare note; a prompt still asking for one would trip the structured-output retry"
+
+# ---------------------------------------------------------------------------
+# X6 — the CI classifier's CLAIM is reported beside the proof (#514 item 3)
+# ---------------------------------------------------------------------------
+# THE DEFECT: `S.ciClassify.failureClass` had exactly three sites repo-wide —
+# the comment justifying it, the schema property and the prompt request — and
+# zero reads. The comment stated its whole purpose: the claim is carried "so the
+# log line and the audit trail can say what the child claimed, and so a
+# disagreement between the claim and the proof is visible." No log line printed
+# it, no audit event recorded it, recordChild did not copy it. The routing
+# scalar comes from `validate-ci-classification` controller-side, so this was
+# never a routing bug — but the disagreement-detection mechanism the comment
+# promised did not exist, on the one Phase 3 path that routes a mutating arm.
+#
+# X6e is the row that keeps the fix honest: reporting the claim must change the
+# REPORT and change no control flow.
+echo
+echo "== X6: the CI classifier's claim is reported, membership-tested, and routes nothing =="
+
+x6_run() {  # FAILURE_CLASS_JSON -> harness output
+  stage_run_with_return ci-classify "$W_NONCE1" "$W_CI_COMMON" \
+    "$(jq -n --argjson fc "$1" '{status:"CLASSIFIED", resultPath:"", statusPath:"",
+       failureClass:$fc}')"
+}
+x6_claim() {  # HARNESS_OUT -> the claimed class the audit event recorded
+  jq -r '[.result.auditEvents[] | select(.event == "ci_classify_child_claim")]
+         | if length == 1 then .[0].claimedFailureClass else "EVENTS=\(length)" end' <<<"$1"
+}
+
+X6A_OUT="$(x6_run '"code_bug"')"
+[ "$(x6_claim "$X6A_OUT")" = code_bug ] \
+  && pass "X6a a recognised claim lands in exactly one ci_classify_child_claim audit event" \
+  || fail "X6a the child's claimed failure class is discarded: $(x6_claim "$X6A_OUT")"
+[ "$(jq -r '[.logs[] | select(contains("code_bug"))] | length' <<<"$X6A_OUT")" -ge 1 ] 2>/dev/null \
+  && pass "X6b the claim is named on the run's log line, where a claim-vs-proof disagreement is readable" \
+  || fail "X6b no log line names the claim; the disagreement the schema comment promises stays invisible"
+
+X6C_OUT="$(x6_run '"nope_not_a_class"')"
+if [ "$(x6_claim "$X6C_OUT")" = "(unrecognised)" ] \
+   && [ "$(jq -r '(.result | tostring) + (.logs | tostring) | contains("nope_not_a_class")' <<<"$X6C_OUT")" = false ]; then
+  pass "X6c an off-enum claim is reported as (unrecognised) and its raw bytes are never echoed"
+else
+  fail "X6c an arbitrary child-chosen string reached the audit row or the log: $(x6_claim "$X6C_OUT")"
+fi
+
+# `""` is a LEGITIMATE value, not a malformed one: the schema enum admits it and
+# the prompt literally offers it as "the class you chose, or \"\"". Stamping a
+# declined classification `(unrecognised)` would put a lie in the audit row.
+X6D_OUT="$(x6_run '""')"
+[ "$(x6_claim "$X6D_OUT")" = "(none)" ] \
+  && pass "X6d a declined classification is reported as (none), not as (unrecognised)" \
+  || fail "X6d an empty failureClass is mislabelled '$(x6_claim "$X6D_OUT")'; the enum admits \"\" on purpose"
+
+X6_NOROUTE=""
+for x6_out in "$X6A_OUT" "$X6C_OUT" "$X6D_OUT"; do
+  [ "$(jq -r '.result.abortReason' <<<"$x6_out")" = "" ] || X6_NOROUTE="$X6_NOROUTE aborted"
+  [ "$(jq -r '.result.dispatched' <<<"$x6_out")" = 1 ] || X6_NOROUTE="$X6_NOROUTE dispatch-changed"
+done
+if [ -z "$X6_NOROUTE" ]; then
+  pass "X6e the claim changed the report and changed no control flow (no abort, no dispatch change)"
+else
+  fail "X6e the child's claim now steers the run:$X6_NOROUTE"
+fi
+
+# The read is SINGLE and it is an ASSIGNMENT, never a condition.
+# commands/review-pr.md names ci-classify -> ci-fix a PROOF POINT: reading the
+# class off the child's structured return "would delete all four checks and
+# route the mutating arm on an LLM's word." Three code sites — the schema
+# property, the prompt request, and the one read — plus comment prose.
+python3 -I -B - "$WORKFLOW" >"$L_TMP/x6f.report" 2>/dev/null <<'PY'
+import re
+import sys
+
+# Statement-level CONTROL FLOW. A ternary that picks between two STRINGS is
+# not control flow — the membership test is exactly that, and it is the point.
+# What must not exist is a statement whose execution depends on the claim.
+FLOW = re.compile(r"(^\s*(if|while|switch|for)\s*\()|(\breturn\b)")
+CLAIM_IDENT = re.compile(r"\b(failureClass|claim|claimedRaw|claimed)\b")
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+hits = [l for l in lines if "failureClass" in l]
+comments = [l for l in hits if l.lstrip().startswith("//")]
+code = [l for l in hits if not l.lstrip().startswith("//")]
+# A read is a property access on the child's return; the schema property and
+# the prompt request are neither.
+reads = [l for l in code if re.search(r"\.failureClass\b", l)]
+flow = [l for l in lines
+        if not l.lstrip().startswith("//")
+        and CLAIM_IDENT.search(l) and FLOW.search(l)]
+print("code=%d" % len(code))
+print("comment=%d" % len(comments))
+print("reads=%d" % len(reads))
+print("claim_controls_flow=%d" % len(flow))
+PY
+X6F_BAD=""
+[ "$(l_field "$L_TMP/x6f.report" code)" = 3 ] 2>/dev/null \
+  || X6F_BAD="$X6F_BAD code-sites=$(l_field "$L_TMP/x6f.report" code)"
+[ "$(l_field "$L_TMP/x6f.report" reads)" = 1 ] 2>/dev/null \
+  || X6F_BAD="$X6F_BAD reads=$(l_field "$L_TMP/x6f.report" reads)"
+[ "$(l_field "$L_TMP/x6f.report" claim_controls_flow)" = 0 ] 2>/dev/null \
+  || X6F_BAD="$X6F_BAD flow=$(l_field "$L_TMP/x6f.report" claim_controls_flow)"
+[ "$(l_field "$L_TMP/x6f.report" comment)" -ge 1 ] 2>/dev/null \
+  || X6F_BAD="$X6F_BAD unjustified"
+if [ -z "$X6F_BAD" ]; then
+  pass "X6f failureClass has one read, it is an assignment, and no statement's execution depends on the claim"
+else
+  fail "X6f the mutating arm may now route on the child's word:$X6F_BAD"
+fi
+
+# ---------------------------------------------------------------------------
+# X7 — SKILL.md and the script agree about what a run RETURNS and RUNS (#514)
+# ---------------------------------------------------------------------------
+# The half of #514 that no test could previously see: three code contracts drifted
+# from the doc that describes them, and the doc kept describing the mechanism as
+# working. X7a is the comparator that stops the return shape drifting again —
+# not a grep for a word, but the two key lists placed side by side.
+echo
+echo "== X7: the skill doc and the script agree (return shape, fallback roster) =="
+
+python3 -I -B - "$SKILL" "$WORKFLOW" >"$L_TMP/x7.report" 2>"$L_TMP/x7.err" <<'PY'
+import re
+import sys
+
+skill = open(sys.argv[1], encoding="utf-8").read()
+script = open(sys.argv[2], encoding="utf-8").read()
+
+# The documented children[] element, out of the fenced return-shape block.
+doc = re.search(r"children:\s*\[\s*\{(.*?)\}\s*\]", skill, re.S)
+doc_keys = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", doc.group(1)))) if doc else []
+
+# The canonical children.push({...}) object literal: the LARGEST of them, which
+# is the full-shape push. The null-return push is a deliberate subset.
+best = []
+for match in re.finditer(r"children\.push\(\{", script):
+    start = match.end()
+    depth, index = 1, start
+    while index < len(script) and depth:
+        if script[index] == "{":
+            depth += 1
+        elif script[index] == "}":
+            depth -= 1
+        index += 1
+    keys = re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", script[start:index - 1])
+    if len(keys) > len(best):
+        best = keys
+print("doc_keys=%s" % ",".join(doc_keys))
+print("code_keys=%s" % ",".join(sorted(set(best))))
+
+# The No-Workflow fallback must enumerate every stage the script can run, or a
+# runtime without the Workflow tool silently skips one. `verify` is the gate
+# that decides whether a blocker survives.
+section = re.search(r"## No-Workflow fallback(.*?)(?=\n## |\Z)", skill, re.S)
+body = section.group(1) if section else ""
+print("fallback_names_verify=%s" % ("yes" if re.search(r"\bverify\b", body) else "no"))
+PY
+X7_RC=$?
+X7_DOC="$(l_field "$L_TMP/x7.report" doc_keys)"
+X7_CODE="$(l_field "$L_TMP/x7.report" code_keys)"
+if [ "$X7_RC" = 0 ] && [ -n "$X7_DOC" ] && [ "$X7_DOC" = "$X7_CODE" ]; then
+  pass "X7a SKILL.md's documented children[] shape equals the one recordChild actually pushes"
+else
+  fail "X7a the documented return shape drifted from the code: doc=[$X7_DOC] code=[$X7_CODE]"
+fi
+[ "$(l_field "$L_TMP/x7.report" fallback_names_verify)" = yes ] \
+  && pass "X7b the No-Workflow fallback accounts for the verify stage" \
+  || fail "X7b the No-Workflow fallback omits verify entirely; a non-Workflow runtime skips the precision gate in silence"
 
 # ---------------------------------------------------------------------------
 # The fixture every remaining row runs against: a REAL /review-pr run on disk

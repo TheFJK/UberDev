@@ -2941,12 +2941,37 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     VERIFY_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.jsonl"
     VERIFY_OPINIONS_PATH="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-opinions-iter${REVIEW_ITERATION}.json"
     : >"$VERIFY_OPINIONS_PATH" || return 74
+    VERIFY_CAPTURED_PATH="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.captured"
+    : >"$VERIFY_CAPTURED_PATH" || return 74
     VERIFY_ROW_INDEX=0
     while IFS= read -r VERIFY_ROW; do
       [ -n "$VERIFY_ROW" ] || continue
       VERIFY_ROW_INDEX=$((VERIFY_ROW_INDEX + 1))
       VERIFY_FINDING_INDEX="$(jq -r --argjson i "$VERIFY_ROW_INDEX" '.claims[$i - 1].finding_index' "$VERIFY_CLAIMS_RECEIPT_PATH")" || return 74
       VERIFY_RESULT_PATH="$(jq -r '.result' <<<"$VERIFY_ROW")" || return 74
+      # The edge and the binding come OFF THE ROW, never re-spelled here: the
+      # binder already wrote both into it, and a second copy of either string
+      # is the "one contract, N uncompared copies" class.
+      VERIFY_EDGE="$(jq -er .edge <<<"$VERIFY_ROW")" || return 74
+      VERIFY_BINDING="$(jq -er .binding <<<"$VERIFY_ROW")" || return 74
+      # Prove the child BEFORE reading its opinion. `capture-bound-child` binds
+      # on the nonce, freezes status.json and result.md and computes both
+      # digests itself, so a verifier that echoed a nonce this run never minted
+      # or published a torn half-written file is refused HERE rather than
+      # arriving as an unparseable opinion the validator blames on the child's
+      # formatting. Fail SOFT, unlike the Phase 2 lens loop above: a controller
+      # reason "MUST NOT carry a score, and always lands SURVIVES — the gate
+      # fails toward keeping the finding, so 'we could not verify' never culls"
+      # (lib/code_fixer_contract.py VERIFICATION_CONTROLLER_REASONS). One
+      # mis-published verifier must never abort a whole review.
+      if ! python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
+           --edge-id "$VERIFY_EDGE" \
+           --launch-binding-json "$VERIFY_BINDING" >>"$VERIFY_CAPTURED_PATH"; then
+        jq -cn --argjson i "$VERIFY_FINDING_INDEX" \
+          '{finding_index:$i, reason:"verifier-unavailable"}' >>"$VERIFY_OPINIONS_PATH" || return 74
+        continue
+      fi
+      printf '\n' >>"$VERIFY_CAPTURED_PATH" || return 74
       # A child that returned nothing usable NEVER culls. The validator is the
       # canonical boundary; its refusal is the honest answer, not a licence to
       # invent a score.
@@ -2984,6 +3009,14 @@ $(jq -r --arg pr "$PR_NUMBER" --arg run "$RUN_ID" --argjson t "$REVIEW_CONFIDENC
    "$VERIFY_SIDECAR_PATH")
 EOF_VERIFY_AUDIT
     ```
+
+    The per-verifier `binding` that `review_fleet_bind_verify`
+    (`lib/review-fleet-args.sh`) mints into every ledger row is consumed by the
+    loop above — it was minted and then ignored, so a verifier that echoed a
+    nonce this run never minted read exactly like one whose opinion did not
+    parse. That closes the loop the `branchName` paragraph above already
+    declared: the binding is what `_validate_bound_workflow_child_status`
+    compares the child's `status.json` against.
 
     `phase1-verification.json` is the artifact `findings-to-issues` binds as
     `verification_path` in Phase 2.5 below, and the `verification` sub-block of
