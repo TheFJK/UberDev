@@ -1698,7 +1698,12 @@ echo "== T14: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both di
 # because this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
 # set, and per-name because a `$( )` capture can retain embedded CRs on Git Bash.
 RFC_FIELDS="$(awk '
-  /^Append-only JSONL events MUST support:$/ { seek = 1; next }
+  # `[[:space:]]*$` not a bare `$`: .gitattributes pins eol=lf only under
+  # plugins/uberdev/hooks/, and the windows job checks out core.autocrlf=true,
+  # so this RFC can arrive CRLF. POSIX [[:space:]] includes CR, so this anchor
+  # holds whether or not the resolved awk shows us the CR. Same idiom as the
+  # `^jobs:[[:space:]]*$` anchor earlier in this file.
+  /^Append-only JSONL events MUST support:[[:space:]]*$/ { seek = 1; next }
   seek && /^```/                             { seek = 0; inf = 1; next }
   inf  && /^```/                             { inf = 0; next }
   inf {
