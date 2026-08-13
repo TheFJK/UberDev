@@ -83,6 +83,9 @@ SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
+# This file, read as data: row T6.5b slices its own size-ratchet region to keep
+# the measurement platform-invariant (#522).
+DOCS_ACCURACY_SELF="$REPO_ROOT/tests/docs-accuracy.test.sh"
 
 # Hard-fail (exit 2) on a missing input — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
@@ -91,7 +94,8 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
-         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
+         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
+         "$DOCS_ACCURACY_SELF"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -109,7 +113,7 @@ source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_asser
 # counter — and with no errexit and no assertion floor this file would print
 # `failed: 0` and exit 0 with its structural half never executed. Assert the
 # names actually called here, and extend this list when a new one is used.
-for structural_fn in assert_in_section assert_count; do
+for structural_fn in assert_in_section assert_count checkout_worst_case_bytes; do
   command -v "$structural_fn" >/dev/null 2>&1 || {
     echo "FATAL: _lib_assert_structural.sh sourced but $structural_fn is not defined (renamed helper?)" >&2
     exit 2
@@ -330,14 +334,84 @@ assert_absent_fixed "$USING_SKILL" "bot_authors_allow_list" \
 assert_grep "$CONFIG_REF" 'solve_tier_floor' \
   "T6.4 references/configuration.md carries the moved schema (solve_tier_floor)"
 # Size ratchet: the per-session-event injection payload stays dieted. 7168 B
-# (7 KiB) leaves headroom over the ~6.5 KB post-diet primer without allowing
-# the schema back in (pre-diet was 16,511 B).
-USING_SKILL_BYTES="$(wc -c < "$USING_SKILL" | tr -d '[:space:]')"
-if [ "$USING_SKILL_BYTES" -le 7168 ] 2>/dev/null; then
+# (7 KiB) leaves headroom over the post-diet primer without allowing the schema
+# back in (pre-diet was 16,511 B).
+#
+# THE UNIT IS THE WORST-CASE CRLF CHECKOUT of the committed blob — its bytes
+# plus its newline count — currently 6454 + 125 = 6579 B against the 7168 B
+# budget.
+#
+# WHY NOT THE WORKTREE FILE (#522). core.autocrlf=true is live on
+# windows-latest, so a worktree byte count is a checkout-TRANSLATED size and
+# this one literal budget was silently a 7043 B budget there. Measured on the
+# same commit, same file: 6454 B on the ubuntu job, 6579 B on the windows job.
+# The number written here has to be the number CI enforces, on both jobs.
+#
+# WHY NOT PLAIN BLOB BYTES. hooks/session-start reads this primer FROM THE
+# WORKTREE and injects it on every session event, so blob-only bytes would
+# LOOSEN the guard by one byte per line on the platform with the biggest
+# payload. Worst-case keeps today's Windows strictness and raises ubuntu to
+# match; nothing has to shrink.
+#
+# WHY NOT WIDEN /.gitattributes. Row T8.10 below forbids it: the rule is scoped
+# to plugins/uberdev/hooks/** because three byte-exactness suites are
+# windows-skipped on that scoping, and /.gitattributes records the rationale.
+# === BEGIN T6.5 size-ratchet measurement (#522) ===
+# USING_SKILL is an ABSOLUTE path (set near the top of this file), and
+# `git cat-file blob "HEAD:/Volumes/…"` fails with "exists on disk, but not in
+# 'HEAD'". Derive the repo-relative form rather than retyping the path (#370:
+# one contract, N uncompared copies).
+USING_SKILL_REL="${USING_SKILL#"$REPO_ROOT"/}"
+USING_SKILL_BYTES="$(checkout_worst_case_bytes "$REPO_ROOT" "$USING_SKILL_REL")"
+USING_SKILL_RC=$?        # captured BEFORE any other command runs
+if [ "$USING_SKILL_RC" -ne 0 ]; then
+  echo "  FAIL  T6.5 could not measure using-uberdev/SKILL.md (checkout_worst_case_bytes rc=$USING_SKILL_RC)"
+  echo "        path: $USING_SKILL_REL — rc 3 means it is not in HEAD (renamed? untracked?),"
+  echo "        which is exactly the state that would have made this ratchet silently green. See #522."
+  FAIL=$((FAIL + 1))
+elif [ "$USING_SKILL_BYTES" -le 7168 ]; then
   echo "  PASS  T6.5 using-uberdev/SKILL.md stays dieted (${USING_SKILL_BYTES} B <= 7168 B)"; PASS=$((PASS + 1))
 else
   echo "  FAIL  T6.5 using-uberdev/SKILL.md regressed past the diet ratchet (${USING_SKILL_BYTES} B > 7168 B)"
   echo "        file: $USING_SKILL"; FAIL=$((FAIL + 1))
+fi
+# === END T6.5 size-ratchet measurement (#522) ===
+# T6.5a — anti-vacuity floor. A budget met by an unmeasured value is the #522
+# failure mode wearing a fix's clothes. `case`, not `[ "$X" -gt 0 ]`: on an
+# empty value the arithmetic test errors with "integer expression expected" and
+# the row would fail for the wrong reason, printing a diagnostic that sends the
+# next reader after the wrong bug. It is also the zsh-clean form.
+case "$USING_SKILL_BYTES" in
+  ''|0|*[!0-9]*)
+    echo "  FAIL  T6.5a the ratchet was satisfied by an unmeasured value ('$USING_SKILL_BYTES') — a budget met by 0 bytes is not a budget"
+    FAIL=$((FAIL + 1)) ;;
+  *)
+    echo "  PASS  T6.5a T6.5 measured a positive byte count (${USING_SKILL_BYTES} B), not a masked failure"
+    PASS=$((PASS + 1)) ;;
+esac
+# T6.5b — the ratchet above must keep measuring a size that does NOT vary with
+# core.autocrlf. Placement below the region is load-bearing: awk exits at the
+# first END match, so this row's own marker literals are unreachable and the
+# slice can never extract itself. The anchors are pinned to a whole-line comment
+# (`^# === `) rather than the bare phrase, because a backtick-quoted MENTION of
+# a marker elsewhere in a file silently moves where the slice starts — measured
+# while writing the sibling guard in tests/workflow-scripts.test.sh, where it
+# made both rows pass with the region absent entirely.
+T65_REGION="$(awk '/^# === BEGIN T6\.5 size-ratchet measurement/{a=1} a{print} a && /^# === END T6\.5 size-ratchet measurement/{exit}' "$DOCS_ACCURACY_SELF")"
+# Assembled at runtime so this row cannot trip over its own source bytes.
+T65_WORKTREE_TOKEN="$(printf 'wc'; printf ' -c <')"
+if [ -z "$T65_REGION" ]; then
+  echo "  FAIL  T6.5b the T6.5 size-ratchet region is EMPTY — its BEGIN/END markers are gone, and an empty region satisfies every check below vacuously (#347)"
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -- 'checkout_worst_case_bytes' <<<"$T65_REGION"; then
+  echo "  FAIL  T6.5b T6.5 no longer measures via checkout_worst_case_bytes — a 7168 B budget compared against checkout-translated bytes is a 7043 B budget on windows-latest, silently (#522)"
+  FAIL=$((FAIL + 1))
+elif grep -qF -- "$T65_WORKTREE_TOKEN" <<<"$T65_REGION"; then
+  echo "  FAIL  T6.5b T6.5 measures the worktree file again — that size varies with core.autocrlf, so the number in this file stops being the number CI enforces (#522)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T6.5b T6.5 budgets a checkout-independent size (git blob bytes + newline count, not the translated worktree file)"
+  PASS=$((PASS + 1))
 fi
 # Workflow sanction lines (RFC 0012 §4.1): the primer must sanction
 # skill-mandated Workflow calls so migrated pipelines are covered from day one.
