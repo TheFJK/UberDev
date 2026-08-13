@@ -339,3 +339,77 @@ replacement, and another change is editing it concurrently.
 From here on, the live record is `plugins/uberdev/vendor.json`, enforced by
 `tools/vendor/vendor-check.py` in CI and refreshed by
 `tools/vendor/vendor-drift.py` weekly.
+
+---
+
+## Amendment (2026-08-12, #457) — `writing-good-tests.md` adopted
+
+> **Amends the `skills/test-driven-development` row of §4.2 and the
+> `writing-good-tests.md` verdict in §7. Adds `C-REFS` to the check list in §8.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What changed
+
+`skills/test-driven-development` now ships upstream's `writing-good-tests.md` and
+no longer ships `testing-anti-patterns.md`. `SKILL.md` points at it with
+upstream's own markdown link, in upstream's position — replacing the local
+`@`-ref, which force-loaded a 300-line reference on every TDD invocation against
+the convention `skills/writing-skills` states in its own "Why no @ links" note.
+The file set for the component is therefore **1:1 with upstream v6.2.0**.
+
+### The stance stays `fork`, for a different reason
+
+§4.2 recorded this component as `fork` because the **file sets diverged**. That
+reason is now spent, and it is deliberately **not** replaced by `track`:
+
+- `SKILL.md` is still at `e7a2d16` — upstream's own v6.2.0 prose compression
+  (which folds "Why Order Matters" and the rationalisations table together) is
+  un-adopted.
+- `writing-good-tests.md` is at `3dcbd5c` (v6.2.0), adopted whole.
+
+No single upstream commit is drop-in, so the tree is a **composite of two
+upstream revisions**. `track` *promises* a digest-locked re-baseline (§4.4), so
+claiming it here would be a false statement with no CI signal behind it —
+`stance: fork` is exactly what makes `C-FILES` skip digests for this component.
+`measured_diff_lines` moves **72 → 64**. **#462 still owns** the component
+re-baseline and the eventual flip to `track`; adopting one file is not one.
+
+The `Seven track, seven fork` tally in §4.2 is unchanged, as is §4.2's dated
+`diff -r` measurement table and §7's adjudication record: both are historical
+snapshots of what was measured and decided at the v6.2.0 tag, not live state.
+
+### `C-REFS` — the channel this swap ran through
+
+Every check in §8 reconciles the register against disk, or an in-file header
+against the register. **None of them read what a shipped document says.** So a
+`SKILL.md` could go on instructing agents to read a reference a vendor swap had
+deleted, and the guard stayed green: the reference is not a register field, and
+`fork` means its bytes are never digested. That is not hypothetical — it is the
+exact surface this issue moved.
+
+`vendor-check.py` therefore gains a ninth check:
+
+> **`C-REFS`** — for every declared markdown file of every third-party
+> component, every *relative* sibling reference (`@ref` or `](link)`, outside
+> fenced blocks and inline code spans) must resolve on disk. Finding **zero**
+> references anywhere is itself a failure, mirroring `C-HEADER`'s
+> "the scan is vacuous" arm.
+
+Two boundaries in that rule are load-bearing, and each is measured rather than
+assumed:
+
+- **Code spans are stripped, not just fences.** `skills/writing-skills` teaches
+  the `@`-ref convention by quoting a **bad** example in backticks, and a scan
+  that read it would report a dangling reference against a file that is
+  deliberately describing what not to write. Without the strip the check is red
+  on the shipped tree (4 references / 1 unresolved, against 3 / 0 with it).
+- **An `@` carrying a local part is an address, not a reference.** An email, an
+  npm-style `pkg@1.2.3` and a tag pin such as `repo@v6.2.0` all end in a dotted
+  token that a naive `@`-scan reads as a filename — `x@y.com` yields `y.com`.
+  A check that reds on a document referencing nothing is worse than no check, so
+  a reference must be a standalone token.
+
+`tests/vendor-provenance.test.sh` gains the matching falsifiability rows — a
+deleted target with the register kept consistent, a misspelled target, the
+resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
+**and nothing else**.

@@ -259,7 +259,7 @@ else no "V9 a never-reconcile divergence is missing or undocumented"
 fi
 
 echo
-echo "== V10-V18: falsifiability — mutate one site, demand the NAMED check id =="
+echo "== V10-V22: falsifiability — mutate one site, demand the NAMED check id =="
 
 # V10 — an undeclared new file inside a declared component.
 SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
@@ -402,6 +402,206 @@ if grep -q 'C-FILES' <<<"$CHECK_OUT" && ! grep -q 'Traceback' <<<"$CHECK_OUT"; t
   ok "V19b the checks queued behind it still ran — C-FILES named, no traceback"
 else
   no "V19b an id-less entry suppressed the checks behind it"
+  echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+# V20-V22: C-REFS — a skill that points at a sibling file which is not there.
+#
+# THE CHANNEL (#457). Every check above reconciles the register against disk, or
+# a header against the register. None of them reads what a shipped document
+# SAYS. So a SKILL.md could keep instructing agents to read a reference that a
+# vendor swap deleted, and all eight checks stayed green — the reference is not
+# a register field, and `stance: fork` means C-FILES never digests the file that
+# carries it. That is exactly the surface this component's own swap moved.
+#
+# Each row below breaks the reference and NOTHING else: the register is kept
+# consistent with disk by hand, so C-FILES, C-COVER and C-HEADER have nothing to
+# say and C-REFS is the only check that CAN go red.
+#
+# Deliberately driven through `assert_red`, which calls the FULL checker. Using
+# `--only C-REFS` here would be a vacuity trap: before the check existed,
+# `die_usage` printed `unknown check id(s): ['C-REFS'] (known: …)` — a non-zero
+# rc whose text CONTAINS the wanted id, so the row would report PASS against a
+# checker that has no such check.
+# ---------------------------------------------------------------------------
+
+# V20 — the reference target is deleted and the register is updated to match, so
+# register and disk still agree. This is #457's own failure mode: a vendor swap
+# that retires a file and leaves the referring document behind.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+REF_TARGET="$SB/plugins/uberdev/skills/test-driven-development/writing-good-tests.md"
+[ -e "$REF_TARGET" ] || { echo "  ABORT — V20's target is already absent; the mutation would be a no-op"; exit 99; }
+rm -f "$REF_TARGET"
+python3 - "$SB/plugins/uberdev/vendor.json" <<'PY' || { echo "  ABORT — V20 register edit failed"; exit 99; }
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("path") != "skills/test-driven-development":
+        continue
+    before = len(c["files"])
+    c["files"] = [f for f in c["files"]
+                  if (f.get("path") if isinstance(f, dict) else f) != "writing-good-tests.md"]
+    assert len(c["files"]) == before - 1, "writing-good-tests.md was not declared; V20 proves nothing"
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+assert_red "$SB" "C-REFS" "V20 a skill reference whose target was removed with the register kept consistent"
+
+# V21 — the target file stays; the reference is misspelled. File set, register,
+# headers and counts are all untouched, so C-REFS is the only check that can
+# possibly notice.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+python3 - "$SB/plugins/uberdev/skills/test-driven-development/SKILL.md" <<'PY' || { echo "  ABORT — V21 mutation failed"; exit 99; }
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n = s.count("](writing-good-tests.md)")
+assert n == 1, "expected exactly one markdown link to writing-good-tests.md, found %d" % n
+open(p, "w", encoding="utf-8").write(
+    s.replace("](writing-good-tests.md)", "](writing-good-tests-typo.md)"))
+PY
+assert_red "$SB" "C-REFS" "V21 a sibling reference pointing at a name that is not on disk"
+
+# V22 — anti-vacuity, asserted in Python rather than through the checker (same
+# design as V1/V3/V4): a checker whose regexes silently match nothing would make
+# every row above pass while protecting nothing. The independent scan states the
+# corpus is non-empty and fully resolving; the two checker calls then state that
+# `C-REFS` is a REGISTERED id, not an `if` arm nobody reaches.
+V22_WHY=""
+if ! python3 - "$REGISTER" "$REPO_ROOT" <<'PY'
+import json, os, re, sys
+
+FENCE = re.compile(r"^\s*(?:```|~~~)")
+CODESPAN = re.compile(r"`[^`]*`")
+AT_REF = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9]+)")
+MD_LINK = re.compile(r"\]\(([^)\s]+)")
+
+
+def refs(text):
+    body, in_fence = [], False
+    for line in text.splitlines():
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            # skills/writing-skills teaches the `@`-ref convention by quoting a
+            # BAD example in backticks; a scan that read it would report a
+            # dangling reference against a file describing what NOT to write.
+            body.append(CODESPAN.sub(" ", line))
+    joined = "\n".join(body)
+    out = set()
+    for t in set(AT_REF.findall(joined)) | set(MD_LINK.findall(joined)):
+        if "://" in t or t.startswith(("/", "#", "mailto:")):
+            continue
+        out.add(t)
+    return sorted(out)
+
+
+reg, root = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+plugin = os.path.join(root, "plugins", "uberdev")
+seen, dangling = 0, []
+for c in d["components"]:
+    if c.get("origin") != "third-party":
+        continue
+    cdir = os.path.join(plugin, c["path"])
+    for entry in c.get("files", []):
+        rel = entry.get("path") if isinstance(entry, dict) else entry
+        if not isinstance(rel, str) or not rel.endswith(".md"):
+            continue
+        src = os.path.join(cdir, rel) if os.path.isdir(cdir) else cdir
+        text = open(src, encoding="utf-8").read()
+        for ref in refs(text):
+            seen += 1
+            if not os.path.exists(os.path.join(os.path.dirname(src), ref)):
+                dangling.append("%s/%s -> %s" % (c["path"], rel, ref))
+assert seen >= 3, "only %d sibling reference(s) found — the C-REFS corpus is too thin to protect anything" % seen
+assert not dangling, "shipped tree carries dangling references: %s" % dangling
+PY
+then V22_WHY="V22 the independent scan found fewer than 3 sibling references, or an unresolved one"
+elif ! python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-REFS >/dev/null 2>&1; then
+  V22_WHY="V22 vendor-check.py --only C-REFS is not green on the shipped tree"
+else
+  BOGUS_RC=0
+  BOGUS_OUT="$(python3 "$CHECK" --repo-root "$REPO_ROOT" --only C-BOGUS 2>&1)" || BOGUS_RC=$?
+  if [ "$BOGUS_RC" -eq 0 ]; then
+    V22_WHY="V22 --only C-BOGUS was accepted; the known-id list is not enforced"
+  elif ! grep -q 'C-REFS' <<<"$BOGUS_OUT"; then
+    V22_WHY="V22 C-REFS is not in ALL_CHECKS — --only C-BOGUS never listed it among the known ids"
+  fi
+fi
+if [ -z "$V22_WHY" ]; then
+  ok "V22 C-REFS: >= 3 resolving sibling references on the shipped tree, and the id is registered"
+else
+  no "$V22_WHY"
+fi
+
+# V22b — the vacuity arm actually fires. Without this row, "a checker that finds
+# zero references must fail loud" is prose with no test: the same class as
+# check_header's `found == 0` guard, which exists precisely because a scan that
+# sees nothing otherwise reports agreement. Every declared third-party markdown
+# file is rewritten so no reference SHAPE survives; provenance headers are left
+# byte-exact and `track` digests are re-recorded against the mutated bytes, so
+# C-HEADER and C-FILES have nothing to say and C-REFS is again the only check
+# that can go red.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+python3 - "$SB" <<'PY' || { echo "  ABORT — V22b mutation failed"; exit 99; }
+import hashlib, json, os, re, sys
+
+AT_LEADER = re.compile(r"@(?=[A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9])")
+root = sys.argv[1]
+plugin = os.path.join(root, "plugins", "uberdev")
+regp = os.path.join(plugin, "vendor.json")
+d = json.load(open(regp, encoding="utf-8"))
+touched = 0
+for c in d["components"]:
+    if c.get("origin") != "third-party":
+        continue
+    cdir = os.path.join(plugin, c["path"])
+    for entry in c.get("files", []):
+        rel = entry.get("path") if isinstance(entry, dict) else entry
+        if not isinstance(rel, str) or not rel.endswith(".md"):
+            continue
+        src = os.path.join(cdir, rel) if os.path.isdir(cdir) else cdir
+        text = open(src, encoding="utf-8").read()
+        out = []
+        for ln in text.splitlines(True):
+            if "Vendored from" not in ln:
+                ln = AT_LEADER.sub("at ", ln.replace("](", "] ("))
+            out.append(ln)
+        new = "".join(out)
+        if new != text:
+            open(src, "w", encoding="utf-8").write(new)
+            touched += 1
+        if isinstance(entry, dict):
+            entry["sha256"] = hashlib.sha256(open(src, "rb").read()).hexdigest()
+json.dump(d, open(regp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+assert touched > 0, "no declared markdown file changed — the mutation is a no-op"
+PY
+assert_red "$SB" "C-REFS" "V22b a tree with no sibling reference at all is red, not vacuously green"
+
+# V23 — the must-STAY-GREEN row, in the same spirit as V14. An `@` that carries a
+# local part is an address or a version pin, never a sibling file: an email, an
+# npm-style `pkg@1.2.3`, and a `repo@v6.2.0` tag all contain a dotted token that
+# a naive `@`-scan reads as a filename (`x@y.com` -> `y.com`), reporting a
+# dangling reference against a document that references nothing at all. Appended
+# to a fork-stance file so no digest moves and C-REFS is the only check in play;
+# drop the lookbehind from AT_REF_RE and this row goes red.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+ADDR_FILE="$SB/plugins/uberdev/skills/test-driven-development/SKILL.md"
+python3 - "$ADDR_FILE" <<'PY' || { echo "  ABORT — V23 mutation failed"; exit 99; }
+import sys
+p = sys.argv[1]
+with open(p, "a", encoding="utf-8") as fh:
+    fh.write("\nReport problems to maintainer.person@example.com, pin deps as "
+             "left-pad@1.2.3, and cite upstream as obra/superpowers@v6.2.0.\n")
+PY
+if python3 "$CHECK" --repo-root "$SB" >/dev/null 2>&1; then
+  ok "V23 an email, a package pin and a tag pin are not read as sibling references"
+else
+  no "V23 an address-shaped @-token was read as a sibling file — C-REFS false-positives"
+  run_check "$SB" || true
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
 fi
 
