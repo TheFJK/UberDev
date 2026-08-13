@@ -103,6 +103,13 @@ Detect mode from the inherited environment variable `UBERDEV_TURBO` (set by the 
 
 **Conflict resolution:** if `--interactive` is in `$ARGUMENTS` AND `UBERDEV_TURBO=1` is also set, env var wins (turbo's contract is unattended end-to-end; interactive prompts are mutually exclusive). The `UBERDEV_TURBO` env var is the canonical signal on the chain hot path; finish-branch no longer accepts a `--turbo` argument (#97 — env-var-only since the orchestrator → SDD → finish-branch chain is fully internal). This Step 3 is the authoritative owner of the chain mode-signal contract — upstream docs (orchestrator Phase 6, SDD Step 5) defer to it and must not restate flag-forwarding behaviour.
 
+**The chain never gains a blocking prompt (#470).** `/uberdev:review-pr` Phase 0 offers to consolidate every open PR into one review when more than one is open — but the chain from here must reach the pipeline, not a question. Both chain modes are covered, by two different gates:
+
+- **Turbo mode** forwards `UBERDEV_TURBO=1`, which Phase 0 reads through its hybrid OR detector → `REVIEW_CONSOLIDATE OFFER=no REASON=turbo`.
+- **Default mode forwards no flag at all**, so the turbo gate does nothing for it. What covers it is the run carrier: a chained run inherits `UBERDEV_RUN_CARRIER_JSON` from the `/solve` (or `/turbo`) run that produced this branch, and Phase 0 treats an inherited carrier as `REASON=chained`. A standalone `/review-pr` the operator typed themselves has no inherited carrier and is therefore still offered the choice.
+
+Both arms reach their verdict from the environment alone, before any `gh` round-trip. Do not "simplify" this to the turbo gate alone: the default always-PR path is the one that actually regresses, because it is the path a plain `/solve` takes.
+
 **Discoverability:** the `--interactive` flag restores the legacy 4-option menu (Merge back to base / Push and create a Pull Request / Keep the branch as-is / Discard) for users who want it. The default is now always-PR; this fulfills the `~/.claude/CLAUDE.md` mandate "MANDATORY: run `/uberdev:review-pr` after pushing the PR. No exceptions, hotfixes included."
 
 ### Step 4: Execute Choice

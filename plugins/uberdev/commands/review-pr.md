@@ -1,6 +1,6 @@
 ---
 description: "Comprehensive PR review using specialized agents"
-argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--no-defer-issues] [--turbo]"
+argument-hint: "[review-aspects] [--no-simplify] [--no-ci-fix] [--no-defer-issues] [--turbo] [--consolidate] [--no-consolidate]"
 allowed-tools: ["Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read", "Workflow", "Write"]
 ---
 
@@ -34,6 +34,271 @@ Run a comprehensive pull request review using multiple specialized agents, each 
 <!-- END child-callsite-contracts-v1 -->
 
 All provider calls in this command use the runtime-owned carrier and handoff builder; native agent-dispatch shortcuts are forbidden. A chained solve run inherits `UBERDEV_RUN_CARRIER_JSON`; when it is absent, a standalone run calls `uberdev_prepare_run_carrier review-pr "$PR_NUMBER" medium "$RISK_JSON"`, which validates repository/PR identity and exports the prepared request plus the same carrier without pretending to be `/solve`.
+
+## Phase 0 — Consolidation offer (pre-binding)
+
+`/uberdev:review-pr` reviews exactly ONE PR per invocation, and that is the right default. With N open PRs it is also N full pipeline runs — N × (Phase 1 seven-reviewer fanout + Phase 2 three-lens simplify + Phase 3 CI health) — even when the PRs are small and land together anyway. Phase 0 offers, once, to combine every open PR onto a single review branch and run the pipeline once over the combined result.
+
+**The offer is a prompt and never a default.** Consolidating N PRs into one loses per-PR revert granularity and makes findings harder to attribute back to an individual PR. The economy is real; so is the cost. That is the whole reason this is asked rather than assumed, and why the recorded trade-off travels with the question.
+
+**Scope of the offer is every open PR in the repository** — not only those sharing a base. Each candidate is listed with its number, title and base branch, so a set that spans different bases, or sweeps in something unrelated, is visible and can be declined before anything is combined. Enumeration therefore goes through `discover_open_prs` (`skills/merge-pipeline/lib/discover.sh`) and **not** `discover_multi`: `discover_multi` roots its result on an integration branch by construction, so an off-root PR would be dropped before the operator ever saw it.
+
+**`PR_NUMBER` is the combined PR from the very first binding, and is never re-pointed mid-run.** Phase 0 runs BEFORE the executable setup fence, so when the offer is accepted the setup fence binds `PR_NUMBER` to the combined PR and everything downstream — the run-id reservation, the run carrier, the workspace allocation, the `.review-active-run.json` guard, both `review_assert_selected_pr_head` gates and the Step 7 trust triplet — is already talking about the combined PR. That ordering is what makes this feature a *pre-binding* phase rather than a rewrite of the review pipeline: none of those mechanisms needs to change.
+
+### 0a — SCAN (decide whether to offer; enumerate if so)
+
+```bash uberdev-executable origin=review-pr-consolidate-scan
+set -u
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+
+# Fresh shell: Step 1's hybrid turbo detector has not run and its scalar did not
+# survive. Re-derive it here in the same OR form (#97) rather than reading a
+# variable that is guaranteed to be unset.
+TURBO=0
+if [[ "${ARGUMENTS:-}" == *"--turbo"* ]] || [[ "${UBERDEV_TURBO:-0}" == "1" ]]; then
+  TURBO=1
+fi
+
+# CONSOLIDATE is resolved from ${ARGUMENTS:-} and the environment ONLY, and the
+# no-offer verdict is reached BEFORE any gh round-trip. An unattended run that
+# queried the open-PR list only to discover it must not prompt would be paying a
+# rate-limit cost with no consumer, and the "made zero gh calls" claim is what
+# makes that checkable.
+#
+# Precedence: --no-consolidate > --consolidate > turbo | chained | no_tty.
+# The explicit opt-out wins over the explicit opt-in regardless of argv order —
+# a pair that resolved by position would make --no-consolidate a coin flip in
+# any wrapper that appends flags.
+CONSOLIDATE=offer
+CONSOLIDATE_REASON=""
+case "${ARGUMENTS:-}" in
+  *--no-consolidate*) CONSOLIDATE=never; CONSOLIDATE_REASON=opt_out ;;
+  *--consolidate*)    CONSOLIDATE=force ;;
+esac
+if [ "$CONSOLIDATE" = "offer" ]; then
+  if [ "$TURBO" = "1" ]; then
+    CONSOLIDATE=never; CONSOLIDATE_REASON=turbo
+  elif [ -n "${UBERDEV_RUN_CARRIER_JSON:-}" ]; then
+    # A CHAINED run. `finish-branch` auto-selects Option 2 and chains into this
+    # command in its DEFAULT mode as well as under --turbo, forwarding no flag,
+    # so gating on turbo alone would put a blocking question immediately after a
+    # /solve run pushed one PR. A chained solve run inherits the run carrier; a
+    # standalone run does not, which is exactly the discriminator.
+    CONSOLIDATE=never; CONSOLIDATE_REASON=chained
+  elif [ ! -t 0 ]; then
+    CONSOLIDATE=never; CONSOLIDATE_REASON=no_tty
+  fi
+fi
+if [ "$CONSOLIDATE" = "never" ]; then
+  printf 'REVIEW_CONSOLIDATE OFFER=no REASON=%s\n' "$CONSOLIDATE_REASON" >&2
+  exit 0
+fi
+
+UBERDEV_CONSOLIDATE_REPO_ROOT="$(git rev-parse --show-toplevel)" || {
+  printf 'REVIEW_CONSOLIDATE OFFER=no REASON=discovery_failed\n' >&2
+  exit 0
+}
+# Same shape as the run-id the review run itself mints, and validated against
+# RUN_ID_REGEX before it is used: this value becomes a path segment, and the
+# shape constraint is what forecloses traversal if it ever stops being an
+# internally-generated value.
+# The random tail is load-bearing, not decoration. `date -u +%H%M%S` plus the
+# short HEAD is CONSTANT for two scans a second apart on the same commit, so
+# without it two runs would share a scan directory and the second would read the
+# first's discovery telemetry and candidate set as its own.
+UBERDEV_CONSOLIDATE_SCAN_NONCE="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+UBERDEV_CONSOLIDATE_SCAN_ID="$(date -u +%Y%m%d-%H%M%S)-$(git -C "$UBERDEV_CONSOLIDATE_REPO_ROOT" rev-parse --short HEAD)$UBERDEV_CONSOLIDATE_SCAN_NONCE"
+if ! grep -qE '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' <<<"$UBERDEV_CONSOLIDATE_SCAN_ID"; then
+  printf 'BUG: consolidation scan-id %s does not match ^[0-9]{8}-[0-9]{6}-[a-f0-9]+$ — file an issue\n' \
+    "$UBERDEV_CONSOLIDATE_SCAN_ID" >&2
+  exit 2
+fi
+# DELIBERATELY NOT under .uberdev/runs/. That tree carries review-RUN
+# invariants — the reservation reaper, the `locked` and `pr-context.json`
+# markers, the (st_dev, st_ino) receipt pinning — and a pre-binding scan that
+# has not reserved a run must not look like one to any of them.
+UBERDEV_CONSOLIDATE_SCAN_DIR="$UBERDEV_CONSOLIDATE_REPO_ROOT/.uberdev/consolidate/$UBERDEV_CONSOLIDATE_SCAN_ID"
+mkdir -p "$UBERDEV_CONSOLIDATE_SCAN_DIR" || exit 2
+
+# Route discovery telemetry into the scan directory so a gh failure is
+# DISTINGUISHABLE from "there are no other open PRs" — both answer '[]', and
+# reporting a transient outage as "nothing to consolidate" is the kind of silent
+# degradation this command exists to eliminate. The events are appended to the
+# canonical audit log immediately afterwards, so nothing is lost from the trail.
+UBERDEV_CONSOLIDATE_AUDIT="$UBERDEV_CONSOLIDATE_SCAN_DIR/discovery-audit.jsonl"
+# Truncate first: the emptiness of this file is the discovery-failure SIGNAL, so
+# a leftover byte from any earlier writer would report a failure that did not
+# happen on this scan.
+: >"$UBERDEV_CONSOLIDATE_AUDIT" || exit 2
+UBERDEV_AUDIT_LOG_PATH="$UBERDEV_CONSOLIDATE_AUDIT"
+export UBERDEV_AUDIT_LOG_PATH
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/skills/merge-pipeline/lib/discover.sh"
+UBERDEV_CONSOLIDATE_CANDIDATES="$(discover_open_prs 'review-pr.0a')"
+unset UBERDEV_AUDIT_LOG_PATH
+if [ -s "$UBERDEV_CONSOLIDATE_AUDIT" ]; then
+  mkdir -p "$UBERDEV_CONSOLIDATE_REPO_ROOT/.uberdev" 2>/dev/null || :
+  cat "$UBERDEV_CONSOLIDATE_AUDIT" >>"$UBERDEV_CONSOLIDATE_REPO_ROOT/.uberdev/audit.jsonl" 2>/dev/null || :
+  printf 'REVIEW_CONSOLIDATE OFFER=no SCAN_ID=%s COUNT=0 REASON=discovery_failed\n' \
+    "$UBERDEV_CONSOLIDATE_SCAN_ID" >&2
+  exit 0
+fi
+
+printf '%s\n' "$UBERDEV_CONSOLIDATE_CANDIDATES" >"$UBERDEV_CONSOLIDATE_SCAN_DIR/candidates.json"
+UBERDEV_CONSOLIDATE_COUNT="$(jq 'length' <<<"$UBERDEV_CONSOLIDATE_CANDIDATES" 2>/dev/null)"
+case "$UBERDEV_CONSOLIDATE_COUNT" in ''|*[!0-9]*) UBERDEV_CONSOLIDATE_COUNT=0 ;; esac
+if [ "$UBERDEV_CONSOLIDATE_COUNT" -lt 2 ]; then
+  printf 'REVIEW_CONSOLIDATE OFFER=no SCAN_ID=%s COUNT=%s REASON=too_few\n' \
+    "$UBERDEV_CONSOLIDATE_SCAN_ID" "$UBERDEV_CONSOLIDATE_COUNT" >&2
+  exit 0
+fi
+
+printf 'REVIEW_CONSOLIDATE OFFER=yes SCAN_ID=%s COUNT=%s REASON=candidates\n' \
+  "$UBERDEV_CONSOLIDATE_SCAN_ID" "$UBERDEV_CONSOLIDATE_COUNT" >&2
+jq -r '.[] | "#\(.number) — \(.title) (base: \(.baseRefName // "unknown"))"' \
+  <<<"$UBERDEV_CONSOLIDATE_CANDIDATES" >&2
+exit 0
+```
+
+Read the fence's stderr. `OFFER=no` on any reason → skip 0b and 0c entirely and continue at **Executable setup** exactly as before; there is no extra prompt and no behavioural change. `OFFER=yes` → carry `SCAN_ID` and the rendered candidate lines into 0b.
+
+### 0b — ASK (interactive only)
+
+Skipped entirely when 0a reported `OFFER=no`, and skipped when `CONSOLIDATE=force` (the operator typed `--consolidate`; asking again is noise). Otherwise this is an orchestrator turn:
+
+```
+ToolSearch({ query: "select:AskUserQuestion" })   // mandatory deferred-tool load (same gate as Phase 2.5 and 6c.6)
+AskUserQuestion({
+  question: "<N> pull requests are open:\n<the '#N — <title> (base: <base>)' lines from 0a>\n\nReview only this branch's PR, or combine all <N> onto one review branch and review them together?",
+  options: [
+    { label: "Review this PR only",   description: "Today's behaviour, unchanged. Each PR keeps its own review, its own trust trail, and its own revert granularity." },
+    { label: "Consolidate all <N>",   description: "One branch, one review, one trust trail on the combined PR. You lose per-PR revert granularity and per-PR finding attribution; the originals are superseded and land through the combined PR." }
+  ],
+  multiSelect: false
+})
+```
+
+**ToolSearch fail-fast.** When `ToolSearch` fails to load `AskUserQuestion`, this command aborts with a stderr error — **NEVER silently auto-pick**. Auto-picking either option is wrong here: "review only" silently discards an offer the operator may have wanted, and "consolidate" silently rewrites what is being reviewed. Same rule, same shape as Phase 2.5 and 6c.6:
+
+```
+if ! ToolSearch("select:AskUserQuestion") >/dev/null 2>&1; then
+  echo "error: AskUserQuestion tool unavailable — the consolidation offer cannot be presented; aborting" >&2
+  exit 1
+fi
+```
+
+"Review this PR only" → continue at **Executable setup** unchanged. "Consolidate all \<N\>" → run 0c.
+
+### 0c — COMBINE
+
+```bash uberdev-executable origin=review-pr-consolidate
+set -u
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-consolidate.sh"
+UBERDEV_CONSOLIDATE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
+UBERDEV_CONSOLIDATE_SCAN_ID="${CONSOLIDATE_SCAN_ID:?CONSOLIDATE_SCAN_ID must be prefixed onto this fence by the orchestrator}"
+UBERDEV_CONSOLIDATE_ROOT="$(git -C "$UBERDEV_CONSOLIDATE_WORKTREE" rev-parse --show-toplevel)"
+UBERDEV_CONSOLIDATE_SCAN_DIR="$UBERDEV_CONSOLIDATE_ROOT/.uberdev/consolidate/$UBERDEV_CONSOLIDATE_SCAN_ID"
+UBERDEV_CONSOLIDATE_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+UBERDEV_CONSOLIDATE_OWNER="${UBERDEV_CONSOLIDATE_SLUG%%/*}"
+UBERDEV_CONSOLIDATE_DEFAULT="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
+UBERDEV_CONSOLIDATE_CURRENT_PR="$(gh pr view --json number -q .number)"
+
+review_consolidate_preflight "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" || exit 2
+review_consolidate_refresh "$UBERDEV_CONSOLIDATE_SCAN_DIR" "$UBERDEV_CONSOLIDATE_OWNER" || exit 2
+UBERDEV_CONSOLIDATE_BASE="$(review_consolidate_base "$UBERDEV_CONSOLIDATE_SCAN_DIR" "$UBERDEV_CONSOLIDATE_DEFAULT")" || exit 2
+review_consolidate_order "$UBERDEV_CONSOLIDATE_SCAN_DIR" >/dev/null || exit 2
+review_consolidate_fetch "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" || exit 2
+
+UBERDEV_CONSOLIDATE_BRANCH="chore/stack-$UBERDEV_CONSOLIDATE_SCAN_ID"
+review_consolidate_start_branch "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" \
+  "$UBERDEV_CONSOLIDATE_BASE" "$UBERDEV_CONSOLIDATE_BRANCH" || exit 2
+
+review_consolidate_drive "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR"
+UBERDEV_CONSOLIDATE_DRIVE_RC=$?
+if [ "$UBERDEV_CONSOLIDATE_DRIVE_RC" -eq 75 ]; then
+  printf 'REVIEW_CONSOLIDATE CONFLICT=%s SCAN_ID=%s PATHS=%s\n' \
+    "$(cat "$UBERDEV_CONSOLIDATE_SCAN_DIR/pending-conflict.txt")" \
+    "$UBERDEV_CONSOLIDATE_SCAN_ID" \
+    "$UBERDEV_CONSOLIDATE_SCAN_DIR/conflicts-$(cat "$UBERDEV_CONSOLIDATE_SCAN_DIR/pending-conflict.txt").txt" >&2
+  exit 75
+fi
+[ "$UBERDEV_CONSOLIDATE_DRIVE_RC" -eq 0 ] || {
+  review_consolidate_abort "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" || :
+  exit 2
+}
+
+UBERDEV_CONSOLIDATE_PR="$(review_consolidate_finish \
+  "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" \
+  "$UBERDEV_CONSOLIDATE_SLUG" "$UBERDEV_CONSOLIDATE_CURRENT_PR" \
+  "$UBERDEV_CONSOLIDATE_BRANCH" "$UBERDEV_CONSOLIDATE_BASE" \
+  "$UBERDEV_CONSOLIDATE_SCAN_ID")" || exit 2
+printf 'REVIEW_CONSOLIDATE PR_NUMBER=%s SCAN_ID=%s\n' \
+  "$UBERDEV_CONSOLIDATE_PR" "$UBERDEV_CONSOLIDATE_SCAN_ID" >&2
+```
+
+**On `exit 75` — resolve, then re-enter.** The stderr line names the candidate and the file holding its NUL-delimited conflicted paths. Read each conflicted file, resolve it with `Read` / `Edit` / `MultiEdit` / `Write` (all already in `allowed-tools`), and then run the CONTINUE fence below with the resolved paths. Do **not** `git add` by hand: `review_consolidate_continue` is the safety boundary, and it refuses any path outside the enumerated set, any file that still carries conflict markers, and any `merge --continue` while the enumerator still reports unmerged paths. If a conflict cannot be honestly resolved, call `review_consolidate_abandon` instead — the candidate is excluded as `conflict_unresolved` **by number** and the combine continues without it.
+
+```bash uberdev-executable origin=review-pr-consolidate-continue
+set -u
+UBERDEV_REVIEW_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-}}}"
+. "$UBERDEV_REVIEW_PLUGIN_ROOT/lib/review-consolidate.sh"
+UBERDEV_CONSOLIDATE_WORKTREE="${WORKTREE_ROOT:-$(git rev-parse --show-toplevel)}"
+UBERDEV_CONSOLIDATE_SCAN_ID="${CONSOLIDATE_SCAN_ID:?CONSOLIDATE_SCAN_ID must be prefixed onto this fence by the orchestrator}"
+UBERDEV_CONSOLIDATE_ROOT="$(git -C "$UBERDEV_CONSOLIDATE_WORKTREE" rev-parse --show-toplevel)"
+UBERDEV_CONSOLIDATE_SCAN_DIR="$UBERDEV_CONSOLIDATE_ROOT/.uberdev/consolidate/$UBERDEV_CONSOLIDATE_SCAN_ID"
+UBERDEV_CONSOLIDATE_NUMBER="$(cat "$UBERDEV_CONSOLIDATE_SCAN_DIR/pending-conflict.txt")"
+# CONSOLIDATE_RESOLVED_PATHS is a newline-separated list the orchestrator
+# prefixes onto this fence, holding exactly the paths it resolved.
+printf '%s\n' "${CONSOLIDATE_RESOLVED_PATHS:?CONSOLIDATE_RESOLVED_PATHS must be prefixed onto this fence}" \
+  >"$UBERDEV_CONSOLIDATE_SCAN_DIR/resolved-paths.txt"
+UBERDEV_CONSOLIDATE_ARGS=()
+while IFS= read -r UBERDEV_CONSOLIDATE_ONE; do
+  [ -n "$UBERDEV_CONSOLIDATE_ONE" ] || continue
+  UBERDEV_CONSOLIDATE_ARGS+=("$UBERDEV_CONSOLIDATE_ONE")
+done <"$UBERDEV_CONSOLIDATE_SCAN_DIR/resolved-paths.txt"
+review_consolidate_continue "$UBERDEV_CONSOLIDATE_WORKTREE" "$UBERDEV_CONSOLIDATE_SCAN_DIR" \
+  "$UBERDEV_CONSOLIDATE_NUMBER" "${UBERDEV_CONSOLIDATE_ARGS[@]}" || exit 2
+printf 'REVIEW_CONSOLIDATE RESOLVED=%s SCAN_ID=%s\n' \
+  "$UBERDEV_CONSOLIDATE_NUMBER" "$UBERDEV_CONSOLIDATE_SCAN_ID" >&2
+```
+
+After a successful CONTINUE, re-run the **0c COMBINE** fence. `review_consolidate_drive` skips every candidate already recorded as included or excluded, which is what makes re-entry safe and what makes `review_consolidate_preflight` re-run harmlessly on an already-clean tree.
+
+### What the combined PR carries
+
+`review_consolidate_body` renders the combined PR's body, and its shape is a
+contract rather than cosmetics:
+
+- **`## Consolidated PRs`** — every superseded original, by number and title,
+  each marked *superseded by this PR*. Their disposition is stated rather than
+  inferred: they are NOT merged individually and they land through the combined
+  PR.
+- **`## Excluded`** — every candidate that could not be combined, by number,
+  with its typed reason (`cross_repo`, `closed_mid_run`, `base_deleted`,
+  `fetch_failed`, `conflict_unresolved`, `ancestry_lost`, `push_refused` — the
+  single declaration lives in `lib/review-consolidate.sh`, and the enum is not
+  restated anywhere else so it cannot drift). A PR that cannot be combined is
+  reported by number and excluded — **never dropped silently**.
+- **The union of the originals' `Closes #N` references**, deduped. Because the
+  originals are superseded rather than merged, those references have to travel
+  onto the combined PR or the underlying issues would never close on merge. The
+  harvesting ERE is byte-identical to `/merge`'s own closing-keyword regex, held
+  so by an assertion rather than by convention.
+
+**The combined PR is the sole carrier of the trust trail.** The label, the
+`Reviewed-by:` trailer and the audit JSON that `/merge` reads are emitted
+against it and against nothing else: `review_consolidate_comment_originals`
+posts exactly one supersession comment per original and does **no label, no
+close, no merge, no assignee change**. An original that also carried a trail
+could be landed on its own, outside the review that actually covered it — and
+the originals keeping `review-pr:pending` is precisely what stops `/merge` from
+doing that.
+
+### Carrying the result into the run
+
+When 0c publishes a combined PR, the orchestrator MUST prefix `PR_NUMBER=<combined> CONSOLIDATE_SCAN_ID=<scan-id>` onto the **Executable setup** fence below — exactly the way `RUN_ID` and `REVIEW_RUN_RESERVATION_RECEIPT` are already mandated to be prefixed onto later fences. That single prefix is the entire integration: `PR_NUMBER` is bound once, to the combined PR, before the reservation, the carrier, the workspace and the `.review-active-run.json` guard ever read it, so no downstream gate needs to know consolidation happened.
+
+The manifest is an **on-disk** carrier for the same reason `ci-fix-phase.txt` and `review-base-identity.tsv` are: Step 7's Final Aggregation is a different shell many fences later, and a shell variable set here would already be gone by then.
 
 ### Executable setup (run before any builder or child edge)
 
@@ -1012,6 +1277,30 @@ REVIEW_WORKSPACE_DESCRIPTOR="$RESEARCH_DIR_ABS/command-workspace.json"
   review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
   return 2 2>/dev/null || exit 2
 }
+# 1b. The Phase 0 consolidation manifest, if this run is reviewing a combined
+#    PR. Copied INTO the run directory rather than read from
+#    `.uberdev/consolidate/<scan-id>/` later: Step 7's Final Aggregation is a
+#    different shell many fences downstream, and the scan-id it would need to
+#    find the original is held in a variable that died with this fence -- the
+#    repo's own lost-carrier class (#399 / #418). Absent variable => this is an
+#    ordinary single-PR run and nothing is copied.
+if [ -n "${CONSOLIDATE_SCAN_ID:-}" ]; then
+  REVIEW_CONSOLIDATE_MANIFEST_SRC="$WORKTREE_ROOT/.uberdev/consolidate/$CONSOLIDATE_SCAN_ID/manifest.json"
+  if [ -r "$REVIEW_CONSOLIDATE_MANIFEST_SRC" ]; then
+    cp "$REVIEW_CONSOLIDATE_MANIFEST_SRC" "$RESEARCH_DIR_ABS/consolidate-manifest.json" || {
+      echo "error: review setup could not carry the consolidation manifest into the run directory" >&2
+      review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+      return 2 2>/dev/null || exit 2
+    }
+  else
+    # A scan-id with no manifest means Phase 0 was told a combine happened and
+    # cannot corroborate it. Reviewing on regardless would report a trust signal
+    # for a change set nothing describes.
+    echo "error: review setup was given CONSOLIDATE_SCAN_ID=$CONSOLIDATE_SCAN_ID but found no manifest at $REVIEW_CONSOLIDATE_MANIFEST_SRC" >&2
+    review_abandon_run_reservation "$REVIEW_RUN_RESERVATION_RECEIPT" || true
+    return 2 2>/dev/null || exit 2
+  fi
+fi
 # 2. The active-run pointer -- the ONE value that is not derivable from the
 #    filesystem, written where the runs root's own `*` .gitignore already covers
 #    it so the reviewed working tree stays clean.
@@ -1135,7 +1424,7 @@ carries the prologue already has them, and one that does not would have had them
 
 Pass `--no-simplify` (anywhere in the arguments) to skip Phase 2 and preserve the legacy single-pass behavior. Cost trade-off: Phase 2 adds three extra agent invocations per run; opt out for fast feedback loops on iterative review (e.g. when you've already run `/uberdev:simplify` separately).
 
-Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finish-branch`'s turbo-mode auto-chain. `/review-pr` accepts `--turbo` for forwarder-compatibility and parses it without error, but its presence does NOT alter Phase 1 or Phase 2. **Phase 3 halt classes (`billing_quota`, `platform_outage`) suppress the AskUserQuestion prompt under `--turbo` and exit 1 without emitting a trust signal** — under `--turbo`, neither halt class can prompt because the queue would block silently. Phases 1 and 2 still produce an identical Phase 2 simplify commit, identical trailer payload, identical artifact triplet (label + trailer + JSON). Single code path → deterministic SHA binding for the `Reviewed-by:` trailer. The flag is documented here so the producer-defines-its-API contract is explicit (no LLM interpretation latitude).
+Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finish-branch`'s turbo-mode auto-chain. `/review-pr` accepts `--turbo` for forwarder-compatibility and parses it without error, but its presence does NOT alter Phase 1 or Phase 2. **Phase 3 halt classes (`billing_quota`, `platform_outage`) suppress the AskUserQuestion prompt under `--turbo` and exit 1 without emitting a trust signal** — under `--turbo`, neither halt class can prompt because the queue would block silently. **The Phase 0 consolidation offer is suppressed the same way**: under `--turbo` it resolves `CONSOLIDATE=never` and reports `OFFER=no REASON=turbo` without a `gh` round-trip, so an unattended run gains no blocking prompt. Both are prompt-suppression gates, not phase mutations. Phases 1 and 2 still produce an identical Phase 2 simplify commit, identical trailer payload, identical artifact triplet (label + trailer + JSON). Single code path → deterministic SHA binding for the `Reviewed-by:` trailer. The flag is documented here so the producer-defines-its-API contract is explicit (no LLM interpretation latitude).
 
 ## Review Workflow:
 
@@ -1194,7 +1483,8 @@ Pass `--turbo` (anywhere in the arguments) to acknowledge invocation from `finis
    | `SIMPLIFY_PHASE` | `--no-simplify` token | `1` | `0` skips Phase 2 |
    | `SEQUENTIAL` | `sequential` token | `0` | `1` binds `POST_IMPL_FANOUT_CAP=1`, forwarded to `Skill(uberdev:post-impl-review)` as the `fanout_cap` input (stderr notice emitted) |
    | `CI_FIX_PHASE` | `--no-ci-fix` token, recorded to `$RESEARCH_DIR_ABS/ci-fix-phase.txt` | `1` | `0` runs PROBE+MONITOR+CLASSIFY (audit-only) but skips ROUTE+POST-FIX+HALT — outcome forced to `green` if probe was green, otherwise `halted` (still gates trust signal). ROUTE reads the recorded value, not the variable; an unreadable record halts `ci_fix_phase_unreadable` rather than defaulting the mutating phase on. "Probe was green" is read the same way — off `ci-probe-verdict.txt`, written by 6c.1 — because `${PROBE_VERDICT:-unknown}` was bound in another shell and answered `unknown` on every probe-only run (#418); an unreadable verdict halts `ci_probe_verdict_unreadable` rather than reporting a halt for CI it never saw. |
-   | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal). Phases 1+2 unchanged in either mode. |
+   | `TURBO` | `--turbo` token OR `UBERDEV_TURBO=1` env (hybrid OR, #97) | `0` | `1` activates the Phase 3 halt-class carve-out (6c.6 HALT — no AskUserQuestion, exit 1, no trust signal), **and forces `CONSOLIDATE=never` unless `--consolidate` is explicit** (the Phase 0 gate below — same shape as this carve-out: a suppressed prompt, not a changed phase). Phases 1+2 unchanged in either mode. |
+   | `CONSOLIDATE` | `--no-consolidate` / `--consolidate` tokens, else `TURBO` / an inherited `UBERDEV_RUN_CARRIER_JSON` / stdin-is-not-a-TTY | `offer` | `never` skips Phase 0 entirely (today's single-PR behaviour, no extra prompt); `offer` asks once when ≥2 PRs are open; `force` combines without asking. Precedence: `--no-consolidate` > `--consolidate` > `turbo` \| `chained` \| `no_tty`. The reason is reported on stderr as `REVIEW_CONSOLIDATE OFFER=no REASON=<opt_out\|turbo\|chained\|no_tty\|too_few\|discovery_failed>`. `chained` exists because `finish-branch` auto-selects Option 2 and chains into this command in its **default** mode as well as under `--turbo`, forwarding no flag — a chained run inherits the run carrier and is therefore never prompted. |
    | `ASPECT_LIST` | remaining tokens | `()` | passed as `aspect_emphasis` input to `Skill(uberdev:post-impl-review)` Step 4 |
    | `DEFER_ISSUES_PHASE` | `--no-defer-issues` token | `1` | `0` skips Phase 2.5 (findings-to-issues sub-phase); the effective enable is AND-of-flag-and-config — `defer_issues_enabled=false` in `.claude/uberdev.local.md` short-circuits identically. |
 
@@ -5705,6 +5995,8 @@ PY
    | Phase 2 — Simplify     | ran / blocked / skipped | APPROVE / REVISIONS_REQUIRED / REJECT (omit if status≠ran) | <commit sha or ∅> | <count> |
    | Issues filed (Phase 2.5) | Rendered from the agent's return YAML, broken down by tier per RFC 0002 §3.4: `BLOCKER: <n>` / `CRITICAL: <n>` / `MAJOR: <n>` (each line omitted when count is 0). Sum line: `<total> created + <total> commented` followed by the trust-trail state implication — `(halt: trust trail RED)` when `halted=true`, `(critical-deferred: trust trail YELLOW)` when only `by_severity.critical > 0`, `(silent file: trust trail GREEN)` otherwise. `overflow_count` additional findings exceeded `MAX_NEW=10` cap; suffix `(BROKEN-FEATURE HALT)` when `halted_due_to_overflow=true`. `len(blocked_by_dedupe)` blocked by dedupe-lookup failure or fail-CLOSED branch. Full URL list with `(tier)` annotation in the "Issues filed (links)" block below. Skip path: `(skipped: --no-defer-issues)` when `DEFER_ISSUES_PHASE=0`, OR `(skipped: defer_issues_enabled=false)` when the config disables, OR both joined by " and " when both knobs are off. |
 
+   | Consolidated (Phase 0) | Rendered ONLY when `$RESEARCH_DIR_ABS/consolidate-manifest.json` exists — its presence is what says this run reviewed a combined PR. Read `included[]`, `excluded[]` and `closes[]` from it and render `combined <N> PRs: #A #B …` followed by `excluded: #E (<reason>) …` when `excluded[]` is non-empty, and `closes: #I …`. Omit the row entirely on an ordinary single-PR run. The manifest is read from the RUN directory, not from `.uberdev/consolidate/<scan-id>/`: the scan-id lives in a variable that died with the Phase 0 fence, and the setup fence copied the file here for exactly this reader. |
+
    **Issues filed (links):**
 
    Rendered from `created_urls[]` + `commented_urls[]` of the findings-to-issues agent return. Each line: `- [` + `file:line` + `](`URL`)` — e.g., `- [src/auth.ts:42](https://github.com/owner/repo/issues/123)`.
@@ -6405,7 +6697,7 @@ See `skills/merge-pipeline/SKILL.md` Constants `RUN_ID_REGEX`. If the regex matc
 |-----------|-----------|
 | `0` | GREEN OR YELLOW OR OVERRIDE_GREEN — Phase 1 verdict == `APPROVE` AND Phase 2 status ∈ {`ran/APPROVE`, `skipped`} AND Phase 3 outcome ∈ {`green`, `green_after_fix`, `skipped_no_checks`} AND (Phase 2.5 halted == false OR Phase 2.5 halt was overridden) |
 | `1` | Phase 1 verdict ∈ {`REJECT`, `REVISIONS_REQUIRED`} (regardless of Phase 2) OR **Phase 3 outcome ∈ {`halted`, `loop_cap_exhausted`}** OR **Phase 2.5 halted == true AND PHASE2_5_HALT_CHOICE ∈ {solve_suggestion, skip}** (RFC 0002 §3.4 — `override` takes the OVERRIDE_GREEN path and exits 0) |
-| `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) OR Phase 2.5 status == `blocked` (agent return YAML parse failure) OR Step 6a post-fixer push failure (blocked-equivalent — Phase 3 would probe a stale remote SHA) |
+| `2` | Phase 2 status == `blocked` (fanout crash, agent error, aggregator failure, artifact-emission failure) OR Phase 2.5 status == `blocked` (agent return YAML parse failure) OR Step 6a post-fixer push failure (blocked-equivalent — Phase 3 would probe a stale remote SHA) OR **Phase 0 consolidation was accepted and could not produce a combined PR containing the current branch's PR** (`ancestry_lost`, `push_refused`, or the current PR excluded) — reported by number, never downgraded to a single-PR review |
 | `3` | `verdict_published_marker_retire_failed` — the verdict artifact WAS published durably, but the two reservation markers could not be retired afterwards. Distinct from `2` on purpose: `2` means "no verdict exists, re-run me", `3` means "the verdict exists, do NOT re-run me" (the exact-name publisher would refuse). Callers treat the run's verdict as authoritative and let `/uberdev:goal`'s grace window or the next run's reservation reaper clear the markers. |
 
 Exit code `2` is a **behavioral break** from the previous always-exit-0 contract. Callers that scripted `/review-pr` against the old "always exits successfully" prose must either ignore the exit code (preserve old behavior) or branch on it (use new behavior). The new contract surfaces silent reviewer-crash failures that the trust signal exists to eliminate. Documented in CHANGELOG.
@@ -6460,6 +6752,22 @@ Phase 3 reuses exit `1` (no new exit code introduced — Q2 decision). The audit
 **Skip Phase 2.5 findings-to-issues sub-phase** (suppress deferred-critical issue filing):
 - `/uberdev:review-pr --no-defer-issues` — runs the full review chain (Phase 1 + Phase 2 + Phase 3) but skips the Phase 2.5 findings-to-issues sub-phase. Final summary table shows `(skipped: --no-defer-issues)`.
 - `/uberdev:review-pr tests errors --no-defer-issues` — same as above with additional review aspects.
+
+**Phase 0 consolidation** (multiple open PRs, one review):
+```
+/uberdev:review-pr --consolidate
+# Combine every open PR onto one review branch and review the combined result
+# WITHOUT asking first. Use when you already know the answer — it is the same
+# path the prompt takes, minus the question.
+
+/uberdev:review-pr --no-consolidate
+# Never offer, never ask. Today's single-PR behaviour, guaranteed.
+# --no-consolidate WINS over --consolidate regardless of the order they appear
+# in, so a wrapper that appends flags cannot turn the opt-out into a coin flip.
+```
+With no flag, the offer is made only when it can be answered: more than one PR
+is open, stdin is a TTY, `--turbo` was not passed and no run carrier was
+inherited (i.e. this is not a chained `finish-branch` → `/review-pr` run).
 
 ## Agent Descriptions:
 
@@ -6545,6 +6853,17 @@ walked through `Before committing` / `Before creating PR` flows predated the PR
 contract and contradicted every one of those steps (#302). Use
 `/uberdev:solve`, `/uberdev:turbo`, or `/uberdev:simplify` for pre-push work;
 `finish-branch` chains into this command once the PR exists.
+
+**One pipeline run per invocation — but not necessarily one PR.** Every phase
+above operates on whatever `PR_NUMBER` resolves to, and Phase 0 is what decides
+what that is: by default it is the current branch's PR, and when the operator
+accepts the consolidation offer it is the combined PR instead. That binding
+happens once, before the run-id reservation and the run carrier exist, and is
+never re-pointed mid-run — which is precisely why every gate downstream of it
+(the workspace, the `.review-active-run.json` guard, both
+`review_assert_selected_pr_head` checks, the Step 7 trust triplet) needs no
+knowledge of consolidation at all. Consolidation is never automatic and never
+silent: it is offered, once, only when the answer could differ.
 
 - Aspect tokens (`code`, `errors`, `tests`, …) narrow *emphasis*, never the
   fanout — all 7 Phase 1 reviewers always run

@@ -370,7 +370,14 @@ _a5_verdict() {
 assert_count_eq "$LIB" 'gh_err="\$\(mktemp\)"' 3 \
   "A5a: three gh_err mktemp stderr-capture sites"
 
-for a5_fn in discover_bare_fast_path discover_multi pr_view_projection; do
+# #470 re-pointed this loop from `discover_multi` to `discover_open_prs` and it
+# is a RE-POINT, not a relaxation: `discover_multi` no longer talks to gh at all
+# (it is now discover_open_prs + the rooting filter), so it captures no gh
+# stderr and has nothing to release. The gh-stderr capture — and therefore the
+# #401 release discipline this loop enforces — moved WITH the fetch into
+# discover_open_prs, which is exactly the body now under the same 3/3/0 pin.
+# A5e below holds the other half: discover_multi must not grow a capture back.
+for a5_fn in discover_bare_fast_path discover_open_prs pr_view_projection; do
   A5_BODY="$(_a5_body "$a5_fn")"
   if [ -n "$A5_BODY" ]; then
     echo "  PASS  A5b.$a5_fn.extracted: function body extracted from lib/discover.sh"
@@ -395,6 +402,22 @@ done
 # which sources this library, already owns the single process-wide EXIT slot.
 assert_no_grep "$LIB" '^[[:space:]]*trap[[:space:]]' \
   "A5c: no trap statement of any signal survives in lib/discover.sh"
+
+# A5e (#470) — the other half of the re-point above. `discover_multi` delegates
+# its fetch, so it must hold NO stderr capture of its own: a reintroduced
+# `mktemp` there would be a second capture site that A5b's loop no longer
+# watches, i.e. exactly the unwatched leak #401 was about.
+A5E_BODY="$(_a5_body discover_multi)"
+if [ -z "$A5E_BODY" ]; then
+  echo "  FAIL  A5e.extracted: discover_multi's body did not extract — the probe is blind"
+  FAIL=$((FAIL + 1))
+elif grep -q 'mktemp' <<<"$A5E_BODY"; then
+  echo "  FAIL  A5e: discover_multi holds its own mktemp capture again — it delegates the fetch and must not re-open one"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  A5e: discover_multi holds no mktemp of its own (the capture lives with the fetch)"
+  PASS=$((PASS + 1))
+fi
 
 # Anti-vacuity, both arms through the SAME verdict A5b uses.
 A5_SYNTH="$(cat <<'EOF_A5_SYNTH'
@@ -2723,6 +2746,106 @@ assert_eq "$B28_BAD" "not json" \
 assert_eq "$([ -s "$B28_AUDIT" ] && echo nonempty || echo empty)" "empty" \
   "B28g: the fail-open path emits no gate_fail (it dropped nobody, so it must accuse nobody)"
 rm -f "$B28_AUDIT" "$B28_ERRF"
+
+echo
+echo "== BC: discover_open_prs — the UN-ROOTED enumeration (#470) =="
+# /uberdev:review-pr's Phase 0 consolidation offer has to list EVERY open PR in
+# the repo, including ones on a base the current branch's PR knows nothing
+# about. `discover_multi` cannot answer that: its whole job is to root the set
+# on an integration branch (#437's transitive closure), so anything off that
+# root is dropped by construction and the offer would silently hide it.
+# `discover_open_prs` is that same fetch WITHOUT the rooting step, and
+# `discover_multi` is now defined as `discover_open_prs` + the stack filter, so
+# the wire query cannot drift between the two.
+BC_AUDIT="$(mktemp)"; rm -f "$BC_AUDIT"
+BC_CALLLOG="$(mktemp)"; : > "$BC_CALLLOG"
+
+# BC1 — anti-vacuity floor. Every later row is a claim about which of the
+# fixture's rows survived, which is worth nothing unless the fixture really
+# offered a mixed-base set with a draft in it.
+BC_RAW="$(FAKE_GH_MODE=success-mixed-base "$FAKE_GH_DIR/gh" pr list 2>/dev/null)"
+assert_eq "$(jq 'length' <<<"${BC_RAW:-[]}" 2>/dev/null)" "5" \
+  "BC1a: the fixture offers 5 rows (4 open non-draft + 1 draft)"
+assert_eq "$(jq '[.[] | select(.isDraft==false) | .baseRefName] | unique | length' <<<"${BC_RAW:-[]}" 2>/dev/null)" "4" \
+  "BC1b: the 4 non-draft rows span 4 DISTINCT base branches (a single-base fixture proves nothing about rooting)"
+
+# BC2 — the headline: no argument, no rooting, every open non-draft PR.
+_run_lib_call "success-mixed-base" \
+  'discover_open_prs' \
+  "export UBERDEV_AUDIT_LOG_PATH='$BC_AUDIT'; export FAKE_GH_CALL_LOG='$BC_CALLLOG'"
+assert_eq "$_LB_EXIT" "0" "BC2a: exit 0 (discover_open_prs never aborts the caller)"
+BC_NUMS="$(jq -c '[.[].number]' <<<"${_LB_STDOUT:-[]}" 2>/dev/null)"
+assert_eq "${BC_NUMS:-PARSE_FAILED}" "[201,202,203,204]" \
+  "BC2b: all 4 open non-draft PRs come back regardless of base; the draft (205) does not"
+# Paired anti-vacuity: prove the rooted filter WOULD have dropped rows from
+# this very input, so BC2b is a real "un-rooted" result and not a fixture that
+# happens to be rooted already.
+BC_ROOTED="$(
+  PATH="$FAKE_GH_DIR:$PATH" bash -c ". '$LIB' && _uberdev_discover_stack_filter main '$(FAKE_GH_MODE=success-mixed-base "$FAKE_GH_DIR/gh" pr list --jq '[.[] | select(.isDraft==false)]' 2>/dev/null)'" 2>/dev/null
+)"
+assert_eq "$(jq -c '[.[].number]' <<<"${BC_ROOTED:-[]}" 2>/dev/null)" "[201,202]" \
+  "BC2c: the ROOTED filter over the same input keeps only 2 of the 4 — so BC2b measured the missing rooting, not an empty difference"
+
+# BC3 — the wire query is the SAME one discover_multi issues: explicitly
+# windowed, and never narrowed server-side by base.
+if grep -q -e '--limit 200' "$BC_CALLLOG" 2>/dev/null; then
+  echo "  PASS  BC3a: the wire query carries the explicit --limit 200 window (recorded argv)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  BC3a: no --limit 200 in the wire query — gh's default 30-row window would truncate the offer silently (#437 class)"
+  echo "        call log: $(cat "$BC_CALLLOG")"
+  FAIL=$((FAIL + 1))
+fi
+if grep -q -e '--base' "$BC_CALLLOG" 2>/dev/null; then
+  echo "  FAIL  BC3b: the wire query carries --base — a server-side base filter makes an un-rooted enumeration impossible"
+  echo "        call log: $(cat "$BC_CALLLOG")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  BC3b: the wire query carries no --base (recorded argv)"
+  PASS=$((PASS + 1))
+fi
+if [ -s "$BC_CALLLOG" ]; then
+  echo "  PASS  BC3c: the fake-gh call log is non-empty (BC3b is a real argv assertion)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  BC3c: the fake-gh call log is empty — BC3b would pass vacuously"
+  FAIL=$((FAIL + 1))
+fi
+
+# BC4 — fail-soft, typed. A gh failure must not abort /review-pr before it has
+# even bound a PR: the offer degrades to "no candidates", loudly.
+: > "$BC_AUDIT"
+_run_lib_call "fail-net" 'discover_open_prs' "export UBERDEV_AUDIT_LOG_PATH='$BC_AUDIT'"
+assert_eq "$_LB_EXIT" "0" "BC4a: a gh failure still exits 0 (fail-soft)"
+assert_eq "$(jq -c '.' <<<"${_LB_STDOUT:-null}" 2>/dev/null)" "[]" \
+  "BC4b: stdout is '[]' on failure — a typed empty set, never garbage"
+assert_grep "$BC_AUDIT" '"event":"discovery_gh_failed"' \
+  "BC4c: the failure is recorded as a discovery_gh_failed audit event"
+assert_grep "$BC_AUDIT" '"reason":"gh_failed"' \
+  "BC4d: the audit event carries the typed gh_failed reason"
+# Saturation breadcrumb: a full window means the set may be truncated, and a
+# missing PR is then NOT evidence that it does not exist.
+_run_lib_call "success-mixed-base" 'discover_open_prs' \
+  "export UBERDEV_DISCOVERY_WIRE_LIMIT=4"
+case "${_LB_STDERR:-}" in
+  *"filled its --limit 4 wire window"*)
+    echo "  PASS  BC4e: a full wire window leaves a truncation breadcrumb on stderr"
+    PASS=$((PASS + 1))
+    ;;
+  *)
+    echo "  FAIL  BC4e: no saturation breadcrumb at a full window — a truncated offer would look like a complete one"
+    echo "        stderr: ${_LB_STDERR:-<empty>}"
+    FAIL=$((FAIL + 1))
+    ;;
+esac
+
+# BC5 — regression. discover_multi is now DEFINED as discover_open_prs plus the
+# rooting step, so B24b's exact answer has to survive the refactor byte for
+# byte. A drift here means the extraction changed what /merge discovers.
+_run_lib_call "success-stacked" 'discover_multi main'
+assert_eq "$(jq -c '[.[].number]' <<<"${_LB_STDOUT:-[]}" 2>/dev/null)" "[101,103,102]" \
+  "BC5: discover_multi's rooted answer is unchanged by the extraction (B24b restated against the new call path)"
+rm -f "$BC_AUDIT" "$BC_CALLLOG"
 
 echo
 echo "== Summary =="

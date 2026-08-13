@@ -348,6 +348,29 @@ else
 fi
 
 echo
+echo "== #470: the auto-chain reaches /review-pr WITHOUT a blocking consolidation prompt =="
+# /review-pr Phase 0 asks, interactively, whether to consolidate several open
+# PRs into one review. The chain out of finish-branch must land in the pipeline,
+# not in a question — and the TWO chain modes are covered by TWO DIFFERENT
+# gates, which is exactly the trap: turbo mode forwards UBERDEV_TURBO=1, but the
+# DEFAULT always-PR mode forwards no flag at all, so a turbo-only gate would
+# leave the path a plain /solve takes wide open.
+assert_grep "$FINISH_BRANCH" 'REASON=turbo' \
+  "#470.1 — the turbo chain is documented as reaching Phase 0's no-offer path (REASON=turbo)"
+assert_grep "$FINISH_BRANCH" 'REASON=chained' \
+  "#470.2 — the DEFAULT (non-turbo) chain is documented as reaching it too (REASON=chained)"
+assert_grep "$FINISH_BRANCH" 'UBERDEV_RUN_CARRIER_JSON' \
+  "#470.3 — the default-mode gate names the discriminator it actually uses (the inherited run carrier)"
+# Anti-vacuity for the pair: the reason the second row exists must be stated, or
+# a later edit collapses both arms into the turbo gate and #470.2 goes with it.
+assert_grep "$FINISH_BRANCH" 'forwards no flag at all|no `--turbo` forwarded' \
+  "#470.4 — the prose states that default mode forwards no flag, which is why a turbo-only gate is insufficient"
+# A standalone run MUST still be offered the choice — a gate that suppressed
+# every invocation would pass rows 1-3 while deleting the feature.
+assert_grep "$FINISH_BRANCH" 'standalone .*no inherited carrier|still offered the choice' \
+  "#470.5 — a standalone /review-pr is still offered the consolidation choice"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
