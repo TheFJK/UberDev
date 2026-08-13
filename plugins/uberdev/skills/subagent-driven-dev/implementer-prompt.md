@@ -153,7 +153,10 @@ these inputs:
     ## Report Format
 
     When done, report:
-    - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
+    - **Status:** exactly one member of this closed vocabulary:
+    <!-- CONTRACT: sdd-implementer-status -->
+    `DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT|REFUSED`
+    <!-- /CONTRACT: sdd-implementer-status -->
     - **Changed paths (REQUIRED on DONE / DONE_WITH_CONCERNS):** flat list of every file path you created or modified, exactly as the controller will pass to `git add`. Do not include unchanged files. Do not include directories.
     - **Suggested commit message:** one line, conventional-commit style — the controller may use it as-is or refine
     - **`## After Review Findings`** (REQUIRED when `failure_path` was non-empty): a section naming which ledger findings this round addressed, and any it deliberately did not — your result becomes the next round's `prior_result`, so an unstated omission is invisible to the next implementer
@@ -162,7 +165,9 @@ these inputs:
     - Self-review findings (if any)
     - Any issues or concerns
 
-    Use DONE_WITH_CONCERNS if you completed the work but have doubts about correctness.
-    Use BLOCKED if you cannot complete the task. Use NEEDS_CONTEXT if you need
-    information that wasn't provided. Never silently produce work you're unsure about.
+    The status vocabulary above is closed, and the output contract carried in
+    this dispatch states when each member applies — read the meanings there
+    rather than inferring them from this template. Never silently produce work
+    you're unsure about, and never report a status outside the vocabulary: the
+    controller has no default arm, so an invented status routes nowhere.
 ```

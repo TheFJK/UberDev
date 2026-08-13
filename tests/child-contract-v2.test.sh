@@ -76,8 +76,15 @@ assert len(review_edges)==7
 assert tree.get('output_contracts')=={
  'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
  'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
- 'code-fixer-v1':'shared/code-fixer-output-v1.md'
+ 'code-fixer-v1':'shared/code-fixer-output-v1.md',
+ 'sdd-implementer-v1':'shared/sdd-implementer-output-v1.md'
 }
+# #517: the SDD implementer edge. Its role card declared a three-member terminal
+# vocabulary, the controller branched on a different four-member one, and the
+# assembled prompt ended with the contract-less fallback directive that agreed
+# with neither -- so the controller's cheap NEEDS_CONTEXT path was unreachable
+# and `context_rounds` bounded nothing.
+assert providers['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 for edge in review_edges:
     row=providers[edge]
     assert row['required_inputs']['changed_paths']=='repo_path_array', edge

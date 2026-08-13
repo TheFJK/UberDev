@@ -661,7 +661,15 @@ digraph per_task {
 
 ## Handling Implementer Status
 
-Implementer subagents report one of four statuses. Handle each appropriately:
+Implementer subagents report exactly one terminal status from the closed
+vocabulary declared here — the same one `shared/sdd-implementer-output-v1.md`
+declares to the child. Every member below has a branch; there is no default arm.
+
+<!-- CONTRACT: sdd-implementer-status -->
+`DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT|REFUSED`
+<!-- /CONTRACT: sdd-implementer-status -->
+
+Handle each appropriately:
 
 **DONE:** Proceed to spec compliance review.
 
@@ -674,6 +682,8 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 2. If the task exposes additional risk, update the root risk evidence and let policy select the warranted route; never put a model override in the handoff
 3. If the task is too large, break it into smaller pieces
 4. If the plan itself is wrong, escalate to the human
+
+**REFUSED:** The implementer judged the handoff itself unexecutable — it conflicts with repository instructions, demands delegation or a scope change a leaf worker may not make, or asks for something unsafe. This is a verdict on the instruction, not on the difficulty, so the same task is **never re-dispatched with unchanged handoff data**: fix the plan, re-scope the task so the instruction is one a leaf worker may carry out, or escalate to the human. Adding context does not answer a refusal.
 
 **Never** ignore an escalation or retry unchanged context and risk evidence. If the implementer said it's stuck, something needs to change.
 

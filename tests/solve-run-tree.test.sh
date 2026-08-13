@@ -69,10 +69,19 @@ review_edges={
 assert tree['output_contracts']=={
     'phase1-reviewer-v1':'shared/phase1-reviewer-output-v1.md',
     'finding-verifier-v1':'shared/finding-verifier-output-v1.md',
-    'code-fixer-v1':'shared/code-fixer-output-v1.md'
+    'code-fixer-v1':'shared/code-fixer-output-v1.md',
+    'sdd-implementer-v1':'shared/sdd-implementer-output-v1.md'
 }
 for contract_id,relative in tree['output_contracts'].items():
     assert (tree_path.parent.parent/relative).is_file(), contract_id
+# #517 -- the SDD implementer edge is the one PROVIDER edge whose card declared a
+# terminal vocabulary the controller never agreed to. Unbound, lib/child-dispatch.sh
+# appends its contract-less fallback directive ("Return completed, blocked, or
+# refused."), which overrides the card's own wording at the END of the assembled
+# prompt and makes DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
+# `context_rounds` bounded a state that could not occur. Pinned by id so the
+# binding cannot be dropped silently.
+assert edges['sdd.task.implement']['output_contract']=='sdd-implementer-v1'
 # #474 -- the fixer edges are format-bound the same way the reviewer edges are.
 # A fixer COMMITS before its result is parsed, so an unbound format is not a
 # retryable refusal like a reviewer's: it strands unattributed history and halts
