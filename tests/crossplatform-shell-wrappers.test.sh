@@ -1349,8 +1349,22 @@ echo "== run manifest: Windows reconciliation uses a non-signaling native probe 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import hashlib,importlib.util,pathlib,sys,tempfile
+import contextlib,hashlib,importlib.util,pathlib,shutil,sys,tempfile
 from unittest import mock
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+ FileNotFoundError, so an unlink race reds a job whose diff never touched this
+ file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 tool,semaphore,agent=sys.argv[1:]
 source=pathlib.Path(tool).read_text(encoding='utf-8')
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
@@ -1401,7 +1415,7 @@ original_parent_pid=module._native_parent_pid
 original_guarded_parent=module._windows_guarded_parent_record
 original_process_identity=module._process_identity
 try:
- with tempfile.TemporaryDirectory() as temporary:
+ with scratch_dir("crossplatform-parent-identity-") as temporary:
   root=pathlib.Path(temporary)
   for name in ('posix-direct','posix-parent','windows-direct','windows-parent'):
    (root/name).touch(mode=0o600)
@@ -1493,14 +1507,27 @@ echo
 echo "== run manifest: native Windows filesystem routing ignores mutable owner-depth models =="
 
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" <<'PY'
-import importlib.util,pathlib,sys,tempfile
+import contextlib,importlib.util,pathlib,shutil,sys,tempfile
 from unittest import mock
+
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 
 for index,module_path in enumerate(sys.argv[1:]):
  spec=importlib.util.spec_from_file_location(f'run_manifest_windows_filesystem_{index}',module_path)
  module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
  assert spec.loader is not None; spec.loader.exec_module(module)
- with tempfile.TemporaryDirectory() as temporary:
+ with scratch_dir("crossplatform-windows-fs-") as temporary:
   candidate=pathlib.Path(temporary).resolve()/'owner-candidate'
   candidate.touch(mode=0o600)
   original_platform=module.sys.platform
@@ -1549,8 +1576,20 @@ echo "== run manifest: lease capabilities use one native-Python identity namespa
 if python3 -I -B - "$REPO_ROOT/plugins/uberdev/lib/run_manifest.py" \
     "$REPO_ROOT/plugins/uberdev/lib/live-semaphore.sh" \
     "$REPO_ROOT/plugins/uberdev/lib/agent-dispatch.sh" <<'PY'
-import importlib.util,ntpath,os,pathlib,stat,sys,tempfile,types
+import contextlib,importlib.util,ntpath,os,pathlib,shutil,stat,sys,tempfile,types
 from unittest import mock
+@contextlib.contextmanager
+def scratch_dir(prefix,parent=None):
+ """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+ Full rationale, tradeoff and the "no setup-python => no 3.10+
+ ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+ """
+ path=tempfile.mkdtemp(prefix=prefix,dir=parent)
+ try:
+  yield path
+ finally:
+  shutil.rmtree(path,ignore_errors=True)
 tool,semaphore,agent=sys.argv[1:]
 semaphore_source=pathlib.Path(semaphore).read_text(encoding='utf-8')
 agent_source=pathlib.Path(agent).read_text(encoding='utf-8')
@@ -1589,7 +1628,7 @@ with mock.patch.object(module.os,'path',ntpath), \
    assert str(error)=='lease_path_traversal_rejected'
   else:
    raise AssertionError('lease traversal component was accepted')
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("crossplatform-lease-contract-") as temporary:
  root=pathlib.Path(temporary)
  lease=root/(generation+'b'*32+'.lease')
  payload=f'generation={generation}\nrun_id=windows-contract\n'.encode('ascii')

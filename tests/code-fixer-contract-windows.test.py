@@ -27,18 +27,20 @@ SPEC.loader.exec_module(module)
 
 
 @contextlib.contextmanager
-def scratch_dir(prefix: str):
+def scratch_dir(prefix: str, parent: str | None = None):
     """Scratch tree whose teardown cannot decide this file's exit status.
 
     Deliberate copy of the factory in tests/code-fixer-contract.test.sh: this
-    is a standalone program and cannot import from that file's heredoc. Both
-    copies are locked by the S1-S4 guard in the .sh, which scans this file's
-    text. Rationale, tradeoff and the 3.10+/no-`setup-python` constraint are
-    documented there (issue #428, run 31369242976). Teardown-on-open-handles
-    fails far more readily on native Windows, which is the only platform this
-    file runs on.
+    is a standalone program and cannot import from that file's heredoc. The
+    per-file call-site floor (S4) in that .sh still scans this file's text, and
+    row A4 of tests/test-harness-source-guards.test.sh enforces the ban and the
+    create/teardown pairing across every tests/*.sh and tests/*.py on both
+    shape-check jobs (#447). Rationale, tradeoff and the 3.10+/no-`setup-python`
+    constraint are documented there (issue #428, run 31369242976).
+    Teardown-on-open-handles fails far more readily on native Windows, which is
+    the only platform this file runs on.
     """
-    path = tempfile.mkdtemp(prefix=prefix)
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
     try:
         yield path
     finally:

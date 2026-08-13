@@ -35,14 +35,37 @@ export PYTHONDONTWRITEBYTECODE=1
 # `classify_minimum_route` -- which is live, reached from lib/config-read.sh.
 
 python3 - <<'PY'
+import contextlib
 import copy
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+    FileNotFoundError, so an unlink race reds a job whose diff never touched
+    this file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+
+    This fence binds `Path`, not `pathlib`, so the factory must stay
+    pathlib-free — it deals in the `str` mkdtemp returns, exactly as
+    TemporaryDirectory did.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 ROOT = Path(os.environ["MODEL_ROUTING_TEST_ROOT"])
 RESOLVER = ROOT / "plugins/uberdev/lib/model_routing.py"
@@ -167,7 +190,7 @@ def reject(mutate, code="invalid_policy"):
     bad = copy.deepcopy(policy)
     mutate(bad)
     expect_error(code, lambda: module._validate_policy(bad))
-    with tempfile.TemporaryDirectory() as temporary_directory:
+    with scratch_dir("model-routing-") as temporary_directory:
         path = Path(temporary_directory) / "policy.json"
         path.write_text(json.dumps(bad), encoding="utf-8")
         expect_error(code, lambda: module.load_policy(path))

@@ -341,13 +341,32 @@ fi
 # path grammar must fail, required files must exist, and a synthetic Windows
 # junction/reparse-point attribute must be rejected even on this Unix runner.
 if python3 -I -B - "$PATH_GUARD" <<'PY'
+import contextlib
 import importlib.util
 import os
 import pathlib
+import shutil
 import stat
 import sys
 import tempfile
 import types
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix, parent=None):
+    """Scratch tree whose TEARDOWN cannot decide this suite's verdict (#428).
+
+    TemporaryDirectory.__exit__ re-raises every OSError but PermissionError and
+    FileNotFoundError, so an unlink race reds a job whose diff never touched
+    this file. Full rationale, tradeoff and the "no setup-python => no 3.10+
+    ignore_cleanup_errors=" constraint: tests/code-fixer-contract.test.sh.
+    """
+    path = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 guard_path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("prkit_managed_path_guard", guard_path)
@@ -356,7 +375,7 @@ if spec is None or spec.loader is None:
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
-with tempfile.TemporaryDirectory() as temporary:
+with scratch_dir("prkit-generate-path-guard-") as temporary:
     root = pathlib.Path(temporary)
     (root / "real").mkdir()
     guard.validate_managed_path(root, "real/output.txt", "file")
@@ -606,7 +625,7 @@ if diff -r -x .git "$T1" "$T2" >/dev/null 2>&1; then ok "G5b complete generated 
 # atomically. Relationship drift must fail before mutation; an injected replace
 # failure must preserve the copied policy and remove its temporary artifact.
 if python3 -I -B - "$GEN" "$REPO_ROOT/plugins/uberdev/policy/solve-run-tree-v1.json" <<'PY'
-import json,os,pathlib,subprocess,sys,tempfile
+import atexit,json,os,pathlib,shutil,subprocess,sys,tempfile
 generator=pathlib.Path(sys.argv[1]).read_text()
 canonical=pathlib.Path(sys.argv[2]).read_bytes()
 marker='  python3 -I -B - "$policy" "$roles_dir" "$role_prefix" "$role_suffix" <<\'PY\' || return 1\n'
@@ -619,7 +638,11 @@ roles={
  'silent-failure-hunter','trust-trail-evaluator','type-design-analyzer',
 }
 def fixture():
- root=pathlib.Path(tempfile.mkdtemp())
+ # The tree outlives this function — fixture() RETURNS root — so the teardown
+ # cannot be a `with`. atexit keeps it off the verdict path all the same, and
+ # `ignore_errors` is what stops a cleanup race deciding the suite (#428/#447).
+ root=pathlib.Path(tempfile.mkdtemp(prefix='prkit-generate-policy-'))
+ atexit.register(shutil.rmtree,root,ignore_errors=True)
  policy=root/'solve-run-tree-v1.json'; policy.write_bytes(canonical)
  agents=root/'agents'; agents.mkdir()
  for role in roles: (agents/f'{role}.md').write_text('fixture\n')
