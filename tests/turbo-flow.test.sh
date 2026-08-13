@@ -560,6 +560,37 @@ else
   echo "        actual count:   $TURBO_FORWARD_COUNT"
   FAIL=$((FAIL + 1))
 fi
+# Negative lock — the retired `.uberdev/research/issue-<N>/` cache (zero writers
+# since #14; short-circuit deleted in #308 / RFC 0012 §3.5) must not be read back
+# by any prompt the launcher renders. Both interactive heredocs carried a
+# "Read pre-collected research (legacy cache)" step that could only ever no-op,
+# and it shipped as step 2 of every trivial/small /solve prompt (#518).
+# NOTE — this guard deliberately does NOT use the `|| echo "0"` idiom that
+# DIRECTIVE_COUNT / INVOKE_COUNT / TURBO_FORWARD_COUNT above use. That idiom is
+# only safe when the PASSING count is non-zero: `grep -c` already prints `0` on
+# no-match AND exits 1, so on the passing path the fallback fires and appends a
+# SECOND line, making the variable the two-line string "0\n0" — which is not
+# `-eq 0`, so the guard fails while reporting "actual count: 0". (Observed live
+# while writing this case.) Capture the rc explicitly instead, so a real grep
+# error (rc>1: unreadable file, malformed regex) is reported as a broken probe
+# rather than being laundered into a passing zero.
+LEGACY_CACHE_COUNT="$(grep -cE 'Read pre-collected research' "$SOLVE_PIPELINE" 2>/dev/null)"
+LEGACY_CACHE_RC=$?
+if [[ "$LEGACY_CACHE_RC" -gt 1 ]] || ! [[ "$LEGACY_CACHE_COUNT" =~ ^[0-9]+$ ]]; then
+  echo "  FAIL  the #518 legacy-cache probe could not run — treating this as broken, not as a zero"
+  echo "        file:  $SOLVE_PIPELINE"
+  echo "        grep rc: $LEGACY_CACHE_RC   captured count: '$LEGACY_CACHE_COUNT'"
+  FAIL=$((FAIL + 1))
+elif [[ "$LEGACY_CACHE_COUNT" -eq 0 ]]; then
+  echo "  PASS  no heredoc reads the retired legacy research cache (count=0, #518)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  the retired legacy research-cache read step must not appear in any heredoc (#518)"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "        expected count: 0"
+  echo "        actual count:   $LEGACY_CACHE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
 # Negative lock — no inline `gh pr create` may appear inside the trivial/small
 # slice. After this design (#91) all four heredocs commit and hand off to
 # finish-branch; finish-branch owns the only `gh pr create` call. The awk
@@ -586,6 +617,47 @@ fi
 assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \
   'canonical place.*/simplify.*runs.*Phase 2|Phase 2 of .*review-pr' \
   "simplify.md names /review-pr Phase 2 as the canonical simplify run site"
+
+echo
+echo "== Numbered steps in the trivial/small heredocs are gapless =="
+# Deleting a step from a rendered prompt means renumbering every step after it.
+# Nothing else in the repo covers that: the /simplify guard above is
+# deliberately number-agnostic, and no test ever renders these heredocs — a
+# `1. 3. 4.` run ships a visibly broken prompt with a fully green suite.
+#
+# Anchors: `<< EOF$` (with the space) and `^EOF$` are the exact pair
+# tests/post-impl-review.test.sh already drives against this same file on the
+# green windows job, so they are proven CR-safe here. The launcher's four
+# trivial/small prompt heredocs open with `<< EOF`; its other heredocs use
+# `<<EOF` / `<<EOF2` (no space) and are correctly not matched.
+#
+# `hn != 4` is reported as a setup error rather than silently passing: without
+# it, a heredoc reshape empties the scan and this case goes vacuously green —
+# which is the exact defect class #518 closes. `steps < 5` catches the
+# "renumbered by deleting the rest" failure mode (current minimum is 5, the
+# small-turbo heredoc). All iteration happens inside awk — no `for n in $var`,
+# which zsh would run once over the whole string.
+NUMBERING_REPORT="$(awk '
+  /<< EOF$/            { in_h=1; hn++; expected=1; steps=0; bad=""; next }
+  in_h && /^EOF$/      { in_h=0
+                         if (steps < 5) bad = bad " only " steps " numbered steps"
+                         if (bad != "") printf "heredoc#%d:%s\n", hn, bad
+                         next }
+  in_h && /^[0-9]+\./  { n = $0; sub(/\..*$/, "", n); n = n + 0
+                         steps++
+                         if (n != expected) bad = bad " expected " expected " got " n
+                         expected = n + 1 }
+  END                  { if (hn != 4) printf "setup error: expected 4 heredocs, saw %d\n", hn }
+' "$SOLVE_PIPELINE")"
+if [[ -z "$NUMBERING_REPORT" ]]; then
+  echo "  PASS  all 4 trivial/small heredocs number their steps 1..N with no gap, restart or duplicate"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  a trivial/small heredoc has broken step numbering (#518)"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "$NUMBERING_REPORT"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== #470: the unattended forward gains no consolidation prompt =="
