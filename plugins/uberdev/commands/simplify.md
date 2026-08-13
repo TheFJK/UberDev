@@ -461,6 +461,10 @@ REVIEW_EDGES=(
   review_pr.simplify.efficiency
 )
 REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
+# Re-made here rather than trusted from the fence above: that fence does not
+# rehydrate, so its `$AGG_PATH` may have been the empty string and its mkdir a
+# no-op on `.`. This one has the carrier bound.
+mkdir -p "$(dirname "$AGG_PATH")" || return 2
 PHASE2_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
 PHASE2_VALIDATED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.validated"
 PHASE2_EXPECTED_COUNT="${#REVIEW_EDGES[@]}"

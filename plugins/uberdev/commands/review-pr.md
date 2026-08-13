@@ -2025,7 +2025,10 @@ print(value["authority_sha256"],end="")' "$PHASE1_AUTHORITY_RECEIPT" "$PHASE1_AU
      review_pr.simplify.efficiency
    )
    REVIEW_FLEET_RUN_DIR="$(cd "$RESEARCH_DIR_ABS" && pwd -P)" || return 2
-   review_fleet_load_ci_counters "$REVIEW_FLEET_RUN_DIR" || return 74
+   # No `review_fleet_load_ci_counters` here on purpose: nothing this fence
+   # names is iteration-keyed (`review-fleet-simplify.launched` and
+   # `simplify-final.md` are both per-run), so loading REVIEW_ITERATION would
+   # be a call whose only possible effect is a spurious rc 74.
    PHASE2_AGG_PATH="$REVIEW_FLEET_RUN_DIR/simplify-final.md"
    PHASE2_LAUNCHED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.launched"
    PHASE2_VALIDATED="$REVIEW_FLEET_RUN_DIR/review-fleet-simplify.validated"
