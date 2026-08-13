@@ -593,6 +593,110 @@ then ok "V25 no track component excuses a file from the C-FILES digest lock"
 else no "V25 a track component carries a file-scoped divergence — the digest lock is disarmed"
 fi
 
+echo
+echo "== V31-V32: the RFC/register reconciliation and the SDD adjudication record =="
+
+# V31 — RFC 0019 §6 and `permanent_divergences[]` are ONE list spelled twice.
+#
+# THE CLASS, again (#509). §6 is what a reviewer reads to decide whether a local
+# divergence was DECIDED or merely happened; the register is what the tooling
+# reads. Nothing compared them, so a divergence could be registered and never
+# adjudicated in the RFC, or adjudicated and never registered — and the second
+# shape is exactly how #509's SDD parallel-implementer inversion stayed
+# invisible. Measured on the tree that motivated this row: 7 register ids
+# against 6 RFC rows, with `find-polluter-fail-loud` present only in the
+# register.
+#
+# Pure Python over the two COMMITTED files, no checker in the loop (the
+# V1/V4/V8/V9/V24 idiom), and deliberately NOT through `make_sandbox`: that
+# harness copies only `plugins/uberdev/` and `README.md`, so the RFC is not in a
+# sandbox at all.
+if python3 - "$REGISTER" "$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md" <<'PY'
+import json, re, sys
+reg, rfc_path = sys.argv[1], sys.argv[2]
+text = open(rfc_path, encoding="utf-8").read()
+section = re.search(r"^## 6\..*?$(.*?)^## ", text, re.S | re.M)
+assert section, "RFC 0019 has no '## 6.' section — the parse is broken, not the tree clean"
+rows = []
+for line in section.group(1).splitlines():
+    if not line.startswith("|"):
+        continue
+    cell = line.split("|")[1].strip()
+    # Only a backticked id is a row: this skips the `| Id | Scope | ... |`
+    # header and the `| --- |` separator without pinning either one's wording.
+    match = re.fullmatch(r"`([^`]+)`", cell)
+    if match:
+        rows.append(match.group(1))
+# ANTI-VACUITY FIRST. A parse that stopped matching would compare empty against
+# empty and report agreement forever — the permanent false green V28's
+# `seen >= 3` guard exists for. Assert the corpus BEFORE comparing it.
+assert len(rows) >= 5, \
+    "only %d id row(s) parsed out of RFC 0019 §6 — the parse is broken" % len(rows)
+perm = {p["id"] for p in json.load(open(reg, encoding="utf-8"))["permanent_divergences"]}
+only_rfc = sorted(set(rows) - perm)
+only_register = sorted(perm - set(rows))
+assert not only_rfc and not only_register, \
+    "only-in-rfc: %s only-in-register: %s" % (only_rfc, only_register)
+PY
+then ok "V31 RFC 0019 §6's table and permanent_divergences[] name the same ids, both ways"
+else no "V31 RFC 0019 §6 and the register disagree about which divergences exist"
+fi
+
+# V32 — the #509 adjudication record: SDD's parallel-implementer inversion is
+# REGISTERED, not merely lived with.
+#
+# Upstream `subagent-driven-development/SKILL.md` forbids dispatching multiple
+# implementation subagents in parallel; UberDev's fork makes exactly that its
+# stated core principle. That is a deliberate policy divergence of the same
+# shape as `review-pr-parallel-by-default`, and until #509 the register declared
+# only `namespace-rebrand` for the component.
+#
+# Shaped on tests/finish-branch.test.sh F14 but scoped to this component. It
+# deliberately does NOT grep the note's wording: pinning the policy paragraph's
+# text is the string-presence counterfeit RFC 0019 §7 adopted
+# `writing-good-tests.md` to kill (#457). What is asserted is that the record
+# EXISTS, is structured, and is wired to the component from both directions.
+if python3 - "$REGISTER" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+target = "sdd-parallel-implementer-waves"
+problems = []
+entry = next((e for e in d.get("permanent_divergences", [])
+              if e.get("id") == target), None)
+if entry is None:
+    problems.append("no-permanent-divergence-entry")
+else:
+    if entry.get("permanent") is not True:
+        problems.append("entry-not-permanent")
+    if entry.get("kind") != "policy-divergence":
+        problems.append("entry-kind-wrong:%r" % entry.get("kind"))
+    if entry.get("scope") != "skills/subagent-driven-dev":
+        problems.append("entry-scope-wrong:%r" % entry.get("scope"))
+    if entry.get("file") != "SKILL.md":
+        problems.append("entry-file-wrong:%r" % entry.get("file"))
+    if not str(entry.get("note", "")).strip():
+        problems.append("entry-note-empty")
+component = next((c for c in d.get("components", [])
+                  if c.get("id") == "skills/subagent-driven-dev"), None)
+if component is None:
+    problems.append("no-sdd-component")
+else:
+    refs = [x.get("ref") for x in component.get("divergences", [])]
+    if target not in refs:
+        problems.append("component-does-not-reference-entry")
+    # The pre-existing declaration must SURVIVE the addition: an entry that
+    # replaced `namespace-rebrand` rather than joining it would satisfy every
+    # other assertion here while quietly dropping a declared divergence.
+    if "namespace-rebrand" not in refs:
+        problems.append("namespace-rebrand-ref-lost")
+    if component.get("stance") != "fork":
+        problems.append("stance-not-fork:%r" % component.get("stance"))
+assert not problems, " ".join(problems)
+PY
+then ok "V32 the SDD parallel-implementer divergence is a registered, component-linked record"
+else no "V32 the SDD parallel-implementer divergence is unregistered or unlinked"
+fi
+
 # ---------------------------------------------------------------------------
 # V26-V29: C-REFS — a skill that points at a sibling file which is not there.
 #
@@ -791,6 +895,81 @@ else
   no "V29 an address-shaped @-token was read as a sibling file — C-REFS false-positives"
   run_check "$SB" || true
   echo "        output: $(head -c 400 <<<"$CHECK_OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+# V30a-V30b: C-DIVREF — a `divergences[].ref` that resolves to nothing.
+#
+# THE CHANNEL (#509). `check_files()` short-circuits every component whose
+# stance is not `track`, so a `fork`'s `divergences[]` is never read at all; and
+# before this change NO check anywhere resolved a `divergences[].ref` against a
+# `permanent_divergences[].id`. The only such resolution in the repo was
+# `tests/finish-branch.test.sh` F14, scoped to one component. So a component
+# could reference a divergence record that does not exist — or a record could be
+# deleted out from under a live reference — and all ten checks stayed green.
+# Measured on the tree before this row: zero dangling refs across 26 refs / 75
+# components, and a checker that exits 0 on a tree where one is fabricated.
+#
+# Each mutation touches the REGISTER ONLY, leaving disk untouched, so no other
+# check has anything to say and C-DIVREF is the only one that CAN go red. Each
+# is applied through the V21/V26 `if python3 …; then assert_red` gate so a
+# mutation that silently no-ops says so in its own words instead of dressing
+# itself up as a checker verdict.
+#
+# Deliberately driven through `assert_red`, which runs the FULL checker.
+# `--only C-DIVREF` would be the vacuity trap V28 documents: before the check
+# exists, `die_usage` prints `unknown check id(s): ['C-DIVREF'] (known: …)` — a
+# non-zero rc whose text CONTAINS the wanted id, so the row would report PASS
+# against a checker that has no such check.
+# ---------------------------------------------------------------------------
+
+# V30a — a live reference misspelled. The record still exists; nothing resolves
+# the pointer at it.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+target = "sdd-parallel-implementer-waves"
+component = next((c for c in d["components"]
+                  if c.get("id") == "skills/subagent-driven-dev"), None)
+if component is None:
+    raise SystemExit("skills/subagent-driven-dev is no longer in the register")
+hit = next((x for x in component.get("divergences", []) if x.get("ref") == target), None)
+if hit is None:
+    raise SystemExit("the component does not reference %s; the typo would be a no-op" % target)
+hit["ref"] = target + "-typo"
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-DIVREF" "V30a a divergences[].ref misspelled while the record stays"
+else
+  no "V30a could not misspell the SDD divergence ref — the probe mutated nothing"
+fi
+
+# V30b — the converse: the record deleted while a live reference still points at
+# it. This is the shape a future "tidy up the register" edit produces.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+target = "sdd-parallel-implementer-waves"
+before = len(d["permanent_divergences"])
+d["permanent_divergences"] = [e for e in d["permanent_divergences"]
+                              if e.get("id") != target]
+if len(d["permanent_divergences"]) != before - 1:
+    raise SystemExit("%s was not a permanent divergence; V30b proves nothing" % target)
+referring = [c.get("id") for c in d["components"]
+             for x in c.get("divergences", []) if x.get("ref") == target]
+if not referring:
+    raise SystemExit("no component references %s; the deletion dangles nothing" % target)
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-DIVREF" "V30b a permanent_divergences[] record deleted under a live reference"
+else
+  no "V30b could not delete the SDD divergence record — the probe mutated nothing"
 fi
 
 echo

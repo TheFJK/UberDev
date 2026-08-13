@@ -192,7 +192,7 @@ lines UberDev adds.
 | `skills/requesting-code-review` | `skills/requesting-code-review` | 228 | **fork** | Carries the permanent parallel-by-default review fanout (§6). |
 | `skills/writing-skills` | `skills/writing-skills` | 367 | track | 1:1 file set; the 6.2.0 delta is upstream's own prose compression, which we want. |
 | `skills/finish-branch` | `skills/finishing-a-development-branch` | 734 | **fork** | Owns the pre-push secret-scan gate, the auto-chain into `/uberdev:review-pr`, and the no-`Co-Authored-By` rule. |
-| `skills/subagent-driven-dev` | `skills/subagent-driven-development` | 1064 | **fork** | File sets diverge in both directions; the routed SDD lifecycle is UberDev-owned. |
+| `skills/subagent-driven-dev` | `skills/subagent-driven-development` | 1064 | **fork** | File sets diverge in both directions; the routed SDD lifecycle is UberDev-owned. Also carries the permanent wave-parallel implementer divergence, which inverts an explicit upstream prohibition (§6). |
 | `skills/brainstorm` | `skills/brainstorming` | 2255 | **fork** | Deliberately gate-free (§6); driven by `/uberdev:orchestrator` Phase 1, not an interactive human loop. |
 
 Seven `track`, seven `fork`.
@@ -266,10 +266,12 @@ Recorded in `vendor.json` under `permanent_divergences[]`, each with
 | --- | --- | --- |
 | `namespace-rebrand` | all third-party components | `superpowers:` → `uberdev:`. UberDev ships standalone under its own plugin id. |
 | `parallel-hypothesis-testing` | `skills/systematic-debugging` | The local *Parallel hypothesis testing* section, already declared in the file's own provenance header. |
+| `find-polluter-fail-loud` | `skills/systematic-debugging` | Three local additions to `find-polluter.sh` (#430, #476), declared in the file's own provenance header: fail-loud exit-2 refusals wherever the run cannot back a verdict, glob- and whitespace-safe array enumeration, and a pre-loop runner-capability probe. Upstream returns a green 0 in every refusal shape and its own test asserts that green, so a re-sync collides head-on. |
 | `brainstorm-no-approval-gates` | `skills/brainstorm` | UberDev rejects upstream's HARD-GATE / per-section / spec-review approval checkpoints. Quality comes from parallel research and always-on reviewer agents, not human gates. |
 | `review-pr-parallel-by-default` | `skills/requesting-code-review` | `/uberdev:review-pr` fans its review lenses out in parallel by default; upstream's flow is sequential. |
 | `no-co-authored-by` | `skills/finish-branch` | UberDev never emits a `Co-Authored-By` or AI-attribution trailer in commits or PR bodies. |
 | `interactive-discard-option` | `skills/finish-branch` | Upstream 6.2.0 stopped offering to discard *uncommitted work*. UberDev Option 4 discards a *branch and its commits* behind a typed confirmation, reachable only under `--interactive`. Different capability, so upstream's removal does not apply — see §7. |
+| `sdd-parallel-implementer-waves` | `skills/subagent-driven-dev` | Upstream forbids dispatching multiple implementation subagents in parallel. UberDev's fork inverts that: wave-parallel implementers over a strictly disjoint per-task file partition is its stated core principle. The partition is declared by the plan's `Owns (file allowlist)` field and its `## Execution Waves` summary, reviewed by `plan-reviewer` Check 2, and refused at dispatch by `sdd_assert_wave_disjoint`. Never reconciled — see the #509 amendment. |
 
 ---
 
@@ -446,3 +448,106 @@ assumed:
 deleted target with the register kept consistent, a misspelled target, the
 resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 **and nothing else**.
+
+---
+
+## Amendment (2026-08-13, #509) — the SDD parallel-implementer divergence, adjudicated
+
+> **Amends the `skills/subagent-driven-dev` row of §4.2 and the table in §6.
+> Adds `C-DIVREF` to the check list in §8.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What changed
+
+Upstream's `subagent-driven-development/SKILL.md` carries an explicit
+prohibition — never dispatch multiple implementation subagents in parallel,
+because they conflict. UberDev's `skills/subagent-driven-dev` inverts it, and
+does so as its **stated core principle**: implementers within one wave dispatch
+in parallel into a single shared feature-branch worktree, over a strictly
+disjoint per-task file partition, with the controller as the only process that
+runs git.
+
+The verdict is **deliberate, not drift** — the same call §6 already records for
+`review-pr-parallel-by-default`, and for the same reason: throughput the
+sequential shape cannot buy, bounded by a precondition rather than by hope. It
+is therefore registered rather than reverted, and §6 gains the
+`sdd-parallel-implementer-waves` row.
+
+§6 also gains the row it was already missing. `find-polluter-fail-loud` has been
+in `permanent_divergences[]` since #430/#476 and was never written into the
+table — the §6 list held **six** rows against the register's **seven**. That
+asymmetry is what made the SDD omission survivable: a reviewer reading §6 to
+decide "was this adjudicated?" was reading a list nothing kept honest.
+`tests/vendor-provenance.test.sh` V31 now reconciles the two by id, in both
+directions, over an anti-vacuity floor so a broken parse cannot report
+agreement.
+
+The `Seven track, seven fork` tally in §4.2 is unchanged; so is its dated
+`diff -r` measurement table, `measured_diff_lines`, and every watermark. This
+amendment records a decision about bytes that were already shipping — it moves
+no component's provenance.
+
+### The precondition now has a producer and a refusal
+
+§4.2's stance reason and the old Pattern-B paragraph both leaned on a plan
+declaration that no planner emits. The partition is real, but it was spelled
+under a name nothing produced, so the "zero races" claim rested on prose.
+
+It now rests on three things, each of which exists:
+
+1. **Produced** — `agents/plan-writer.md` emits each task's
+   `Owns (file allowlist)` field plus the plan's `## Execution Waves` summary.
+2. **Reviewed** — `agents/plan-reviewer.md` Check 2 requires same-wave `Owns`
+   lists to be strictly disjoint and treats any file appearing in two of them as
+   a critical finding.
+3. **Refused at dispatch** — `sdd_assert_wave_disjoint` compares the wave's
+   prepared implementer `allowed_paths` for equality *and directory
+   containment*, and `sdd_launch_prepared_batch` calls it **before** it launches
+   anything. An overlapping wave exits `3`, a wave whose implementers declare no
+   ownership exits `2`, and in both cases **zero** children are dispatched. An
+   overlap is a plan defect and routes into the BLOCKED ladder — never "dispatch
+   anyway".
+
+Directory containment is the boundary that is easy to get wrong and is therefore
+stated: a task owning a directory and a sibling owning a file inside it is a
+collision that a plain set intersection reports as disjoint.
+
+Today's `solve-fleet` route dispatches exactly **one** worktree-isolated
+implementer per issue, so it never reaches a parallel wave at all; the wave shape
+is exercised by the in-session SDD controller. That is a description of current
+behaviour, recorded so the next reader does not have to re-derive it — not a
+promise about it.
+
+### `C-DIVREF` — the channel this omission ran through
+
+`check_files()` short-circuits every component whose stance is not `track`, so a
+`fork`'s `divergences[]` is never read. And before this change **no check
+anywhere** resolved a `components[].divergences[].ref` against a
+`permanent_divergences[].id`. The single resolution in the repo lived in
+`tests/finish-branch.test.sh` F14 and was scoped to one component; the other
+seventy-four could reference a record that does not exist, or lose the record
+under a live reference, with every check green.
+
+`vendor-check.py` therefore gains an eleventh check:
+
+> **`C-DIVREF`** — every `components[].divergences[].ref` resolves to a declared
+> `permanent_divergences[].id`, for every component regardless of origin or
+> stance.
+
+Two boundaries are deliberate:
+
+- **No vacuity arm.** `C-HEADER`, `C-BASE` and `C-REFS` each fail on an empty
+  corpus, because for them zero findings means the scan broke. Here an empty
+  `divergences[]` corpus is a legal register state, and a `found == 0` failure
+  would red a tree that has simply declared nothing.
+- **F14 stays.** Its scope is now covered by `C-DIVREF`, but its
+  `interactive-discard-option` *record* assertion — that the entry exists, is
+  permanent, and is scoped to `skills/finish-branch` — is still the only thing
+  pinning that entry, and `C-DIVREF` does not pin records, only pointers.
+
+`tests/vendor-provenance.test.sh` gains the matching falsifiability rows: a live
+reference misspelled while the record stays, and the record deleted under a live
+reference — each proved red for `C-DIVREF` **and nothing else**, and each driven
+through the full checker rather than `--only`, because an unknown `--only` id
+prints the wanted id inside its own `known:` list and would report PASS against a
+checker that has no such check.
