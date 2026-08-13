@@ -914,10 +914,16 @@ assert module.parse_finding_keys(phase1_lens_row, "phase1")[0].location == (
     "src/general.ts:4"
 )
 phase2_keys = module.parse_finding_keys(phase2_oracle, "phase2")
+# The order is the Phase 2 writer's merge order -- first-seen (path,line) walked
+# in roster order (reuse, quality, efficiency) -- so this oracle is a PRODUCER
+# oracle, not only a parse oracle. `src/dup.ts:3` is second because the reuse
+# lens is the first roster member and it reports both `src/api.ts:130` and
+# `src/dup.ts:3`; `src/loop.ts:12` is first seen by the efficiency lens, last in
+# the roster. Any writer that emits a different order fails byte comparison.
 assert [item.location for item in phase2_keys] == [
-    "src/api.ts:130", "src/loop.ts:12", "src/dup.ts:3",
+    "src/api.ts:130", "src/dup.ts:3", "src/loop.ts:12",
 ]
-assert phase2_keys[-1].summary_sha256 == hashlib.sha256(
+assert phase2_keys[1].summary_sha256 == hashlib.sha256(
     b"Extract the duplicate implementation to the existing helper"
 ).hexdigest()
 phase1_empty = aggregate("phase1")
