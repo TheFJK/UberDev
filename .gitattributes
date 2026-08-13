@@ -1,0 +1,23 @@
+# Line endings for the shipped hook sources (#461).
+#
+# WHY THE HOOKS DIR MUST BE LF. plugins/uberdev/hooks/hooks.json declares
+# "shell": "bash" on all four handlers, so BASH parses run-hook.cmd — its
+# cmd.exe half is a `: << 'CMDBLOCK'` heredoc, not a batch file, on that path.
+# A CRLF copy dies before it ever reaches session-start: measured rc=127 with
+#   run-hook.cmd: line 58: $'\r': command not found
+#   bash: .../hooks/session-start: No such file or directory
+# and `bash -n` on the same copy still returns 0, so a syntax check cannot see
+# it. Git for Windows installs with core.autocrlf=true by DEFAULT, so without
+# this rule a real user's clone rewrites these files and the SessionStart hook
+# stops loading — silently, which is the failure mode #461 is about.
+# `eol=lf` beats core.autocrlf on checkout; the mechanism proof lives in
+# tests/crossplatform-shell-wrappers.test.sh (rows XH2/XH2b/XH2c).
+#
+# WHY NOT `* text=auto`. Three suites are windows-skipped on a byte-exactness
+# rationale — prkit-publish (sha256 over copy-set sources), vendor-provenance
+# (C-FILES digests) and review-precision (RP17 byte-compares a committed .md
+# against a fresh render). Widening this file would change what those paths
+# check out as on Windows, converting a documented skip into an untested claim.
+# Keep every rule below scoped to plugins/uberdev/hooks/; tests/docs-accuracy.test.sh
+# row T8.10 enforces that narrowness.
+plugins/uberdev/hooks/** text eol=lf

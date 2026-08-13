@@ -171,7 +171,7 @@ Two invariants worth stating, because both were measured rather than assumed:
 - `copyset` is a **list of `{path, sha256}` objects**, never a map. In map form the path and its 64-hex digest share a line, which gitleaks scores `generic-api-key`; `finish-branch`'s pre-push scan then hard-stops the push with no override. `published-check.py` enforces the layout, and `--refresh` re-checks its own output before writing.
 - It is **not** wired into `generate.sh`. Regenerating from a stale record is how staleness gets fixed, so a build-time gate would block the cure.
 
-Unix-only in CI: no `.gitattributes` exists, so a Windows checkout (`core.autocrlf=true`) rewrites LF→CRLF and every digest would differ.
+Unix-only in CI: no `.gitattributes` rule covers these paths — the repo's only rule (#461) is scoped to `plugins/uberdev/hooks/**` — so a Windows checkout (`core.autocrlf=true`) rewrites LF→CRLF and every digest would differ.
 
 ---
 

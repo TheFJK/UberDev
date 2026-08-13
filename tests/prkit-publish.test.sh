@@ -20,9 +20,11 @@
 # P4 below is the row that would have redded #401 the moment the fix landed.
 #
 # Unix-only, declared in the test.yml windows-skip marker: no `.gitattributes`
-# exists in this repo, so the Windows runner's default `core.autocrlf=true`
-# rewrites LF→CRLF on checkout and EVERY digest would differ. That is a property
-# of the checkout, not of the register.
+# rule covers the copy-set paths — the repo's only rule (#461) is scoped to
+# `plugins/uberdev/hooks/**`, deliberately narrow for exactly this reason — so
+# the Windows runner's default `core.autocrlf=true` rewrites LF→CRLF on checkout
+# and EVERY digest would differ. That is a property of the checkout, not of the
+# register.
 #
 # Deliberately does NOT source tests/_lib_assert_structural.sh — the three
 # sibling prkit suites do not either, and tests/test-harness-source-guards.test.sh

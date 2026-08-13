@@ -2205,6 +2205,284 @@ else
 fi
 
 echo
+echo "== hooks.json SessionStart: EXECUTE the declared command, assert the emitted contract (#461) =="
+# WHY THIS SECTION EXISTS, and why it sits at the END of the file.
+#
+# Nothing in this repo ever RAN a hook declaration. tests/docs-accuracy.test.sh
+# T8.1/T8.9 count strings inside hooks.json; the rows at the top of this file
+# grep run-hook.cmd's bytes. Both are structurally blind to the failure #461 is
+# about, which is silent by construction: the runtime picks an interpreter, the
+# interpreter cannot parse the command, and the session starts with no context
+# and no error. Upstream superpowers hit exactly that on Windows — PowerShell
+# read the quoted hook path as an expression, cmd.exe truncated on a
+# metacharacter, and the bootstrap simply never loaded. The only evidence that
+# settles it is executing the literal the runtime executes and asserting the
+# JSON contract the hook is supposed to emit.
+#
+# PLACEMENT. The `native Windows assertion block reports its own failing status`
+# row above parses THIS FILE'S SOURCE, slicing it between the first occurrence of
+# the `os.name=="nt"` gate literal and the `run_manifest.py` heredoc marker. A
+# second gate placed earlier in the file would silently redefine that slice and
+# make its assertions describe the wrong block. Everything below therefore lives
+# downstream of both split points.
+XH_HOOKS_JSON="$REPO_ROOT/plugins/uberdev/hooks/hooks.json"
+XH_PLUGIN_DIR="$REPO_ROOT/plugins/uberdev"
+XH_HOOKS_DIR="$XH_PLUGIN_DIR/hooks"
+
+# ONE contract, ONE copy: the command string is READ OUT of the manifest, never
+# retyped here. A retyped literal is the "one contract, N uncompared copies"
+# drift (#370/#371) this file's own header is about — the test would keep
+# passing over a string the runtime no longer runs. Read from STDIN, never as a
+# path argument: windows-latest runs NATIVE Windows Python, which cannot resolve
+# the MSYS `/…` paths Git Bash hands it.
+# stderr is deliberately NOT silenced: if the manifest stops parsing, the
+# traceback is the diagnosis and it belongs in the CI log next to the red row.
+XH_CMD="$(python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["hooks"]["SessionStart"][0]["hooks"][0]["command"], end="")' < "$XH_HOOKS_JSON")"
+# An empty extraction would make every row below vacuously green, so it fails
+# loudly on its own rather than being inferred from a later PASS.
+assert_nonempty "$XH_CMD" \
+  "XH1a SessionStart command literal extracted from hooks.json (empty => every row below is vacuous)"
+if grep -q 'run-hook\.cmd' <<<"$XH_CMD"; then
+  echo "  PASS  XH1b the extracted literal is the run-hook.cmd polyglot invocation"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH1b the extracted literal does not route through run-hook.cmd"
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 -I -B -c 'import os; raise SystemExit(0 if os.name=="nt" else 1)'; then
+  XH_NATIVE_WINDOWS=yes
+else
+  XH_NATIVE_WINDOWS=no
+fi
+if command -v jq >/dev/null 2>&1; then XH_JQ=present; else XH_JQ=absent; fi
+# Non-fatal host row, printed on EVERY platform. Without it, the skip/run
+# decision of the native-Windows arm below is inferable from the log but never
+# stated, and "no XH5 line" reads the same as "XH5 quietly did nothing".
+echo "  INFO  XH1c host uname=$(uname -s) native-windows-gate=${XH_NATIVE_WINDOWS} jq=${XH_JQ}"
+
+# --- XH2: the hook sources must be LF in the working tree -------------------
+# On ubuntu this is trivially true, and on windows-latest it is most likely
+# already true as well — the `$`-anchored run-hook.cmd greps at the top of this
+# file pass on shape-checks-windows, and GNU grep is not CR-tolerant, so a CRLF
+# checkout would have redded them. The host this rule actually protects is a
+# real user's Git-for-Windows clone, where `core.autocrlf=true` is the INSTALLER
+# DEFAULT. The row that proves the rule is load-bearing rather than decorative
+# is XH2b below, which is deterministic on every platform.
+XH_CR_FILES=""
+XH_CR_UNREADABLE=""
+XH_CR_SCANNED=0
+while IFS= read -r xh_hook_file; do
+  [ -n "$xh_hook_file" ] || continue
+  XH_CR_SCANNED=$((XH_CR_SCANNED + 1))
+  LC_ALL=C grep -q $'\r' "$xh_hook_file"
+  xh_cr_rc=$?
+  # rc 0 = CR found, 1 = clean, anything else = grep could not read the file.
+  # Folding that third case into "clean" is how a census goes quietly vacuous.
+  if [ "$xh_cr_rc" -eq 0 ]; then
+    XH_CR_FILES="$XH_CR_FILES${XH_CR_FILES:+ }${xh_hook_file#"$REPO_ROOT"/}"
+  elif [ "$xh_cr_rc" -ne 1 ]; then
+    XH_CR_UNREADABLE="$XH_CR_UNREADABLE${XH_CR_UNREADABLE:+ }${xh_hook_file#"$REPO_ROOT"/}"
+  fi
+done <<EOF_XH_HOOK_FILES
+$(find "$XH_HOOKS_DIR" -type f | sort)
+EOF_XH_HOOK_FILES
+if [ "$XH_CR_SCANNED" -lt 1 ]; then
+  echo "  FAIL  XH2 scanned ZERO files under plugins/uberdev/hooks/ — the census is vacuous, not clean"
+  FAIL=$((FAIL + 1))
+elif [ -n "$XH_CR_UNREADABLE" ]; then
+  echo "  FAIL  XH2 a hook source could not be read, so its CR state is unknown"
+  printf '        %s\n' "$XH_CR_UNREADABLE"
+  FAIL=$((FAIL + 1))
+elif [ -z "$XH_CR_FILES" ]; then
+  echo "  PASS  XH2 none of the ${XH_CR_SCANNED} files under plugins/uberdev/hooks/ carries a CR byte in the working tree"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2 a hook source checked out with CR bytes — core.autocrlf rewrote it, and /.gitattributes should have pinned 'plugins/uberdev/hooks/** text eol=lf'"
+  printf '        %s\n' "$XH_CR_FILES"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- XH2b/XH2c: the CRLF mechanism proof ------------------------------------
+# CREATE the CRLF form and prove it kills the declared bash arm. This is the
+# opposite of stripping CR before executing, which would prove a counterfactual:
+# here the defect is reproduced, so the /.gitattributes rule is load-bearing on
+# every host — including the ones whose checkout is already LF.
+#
+# `bash <file>` rather than executing the file, deliberately: `"shell": "bash"`
+# is a claim about which interpreter parses run-hook.cmd, and forcing bash makes
+# the row deterministic on POSIX and on Git Bash alike (whether MSYS re-dispatches
+# a `.cmd` through %COMSPEC% is a SEPARATE question, answered by XH6c below).
+XH_CRLF_DIR="$(mktemp -d)"
+cp "$XH_HOOKS_DIR/run-hook.cmd" "$XH_CRLF_DIR/source.lf"
+cp "$XH_HOOKS_DIR/session-start" "$XH_CRLF_DIR/session-start"
+python3 -I -B -c 'import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))' \
+  < "$XH_CRLF_DIR/source.lf" > "$XH_CRLF_DIR/run-hook.cmd"
+rm -f "$XH_CRLF_DIR/source.lf"
+chmod 755 "$XH_CRLF_DIR/run-hook.cmd" "$XH_CRLF_DIR/session-start"
+XH_CRLF_HOME="$(mktemp -d)"
+# LC_ALL=C so bash's diagnostic is the C-locale English this row matches on.
+env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
+    HOME="$XH_CRLF_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
+    bash "$XH_CRLF_DIR/run-hook.cmd" session-start \
+    >"$XH_CRLF_DIR/stdout" 2>"$XH_CRLF_DIR/stderr" </dev/null
+XH_CRLF_RC=$?
+XH_CRLF_ERR_HEAD="$(head -n 1 "$XH_CRLF_DIR/stderr" 2>/dev/null)"
+if [ "$XH_CRLF_RC" -ne 0 ] \
+   && grep -q 'command not found' "$XH_CRLF_DIR/stderr" \
+   && ! grep -q 'SessionStart' "$XH_CRLF_DIR/stdout"; then
+  echo "  PASS  XH2b a CRLF run-hook.cmd dies under the declared bash shell (rc=${XH_CRLF_RC}) and emits no SessionStart contract"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2b a CRLF run-hook.cmd did NOT fail the way this rule assumes (rc=${XH_CRLF_RC})"
+  printf '        stderr[0]: %s\n' "$XH_CRLF_ERR_HEAD"
+  FAIL=$((FAIL + 1))
+fi
+bash -n "$XH_CRLF_DIR/run-hook.cmd" 2>/dev/null
+XH_CRLF_SYNTAX_RC=$?
+# The `run-hook.cmd parses under bash -n` guard at the top of this file returns
+# 0 on the very copy that dies at runtime. Pinning that here is what stops a
+# future reader from deleting XH2b as redundant with a syntax check.
+if [ "$XH_CRLF_SYNTAX_RC" -eq 0 ]; then
+  echo "  PASS  XH2c bash -n returns 0 on that same CRLF copy — the syntax guard is structurally blind to this class"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH2c bash -n rejected the CRLF copy (rc=${XH_CRLF_SYNTAX_RC}); re-check whether XH2b still proves anything the syntax guard misses"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$XH_CRLF_DIR" "$XH_CRLF_HOME"
+
+# --- XH3/XH4: the executed positive oracle, and its hermeticity -------------
+# CLAUDE_PLUGIN_ROOT goes in the ENVIRONMENT and the shell expands it, exactly
+# as the runtime's spawn(command, [], {shell}) does — string-substituting it
+# here would test a literal the runtime never sees.
+#
+# THE ORACLE IS THE EMITTED JSON FIELD, NEVER THE EXIT CODE: a hook that never
+# loaded also exits 0 on several paths (run-hook.cmd's no-bash arm is a
+# deliberate `exit /b 0`), which is the whole shape of the silent failure. The
+# oracle also holds on a jq-less host — session-start's degraded arm emits the
+# same hookSpecificOutput.hookEventName.
+#
+# ONE runner and ONE parser, shared by the POSIX row and the native-Windows row
+# below. Two hand-rolled copies of the hermetic env would be the same
+# uncompared-copies drift the extraction above avoids, and the Windows copy is
+# precisely the one nobody can run locally to notice the divergence.
+#
+# $1 = CLAUDE_PLUGIN_ROOT to run under, $2 = stdout sink, $3 = stderr sink.
+# Sets XH_RUN_RC and XH_RUN_HOME_ENTRIES; the throwaway HOME is always removed.
+xh_run_declared_command() {
+  XH_RUN_HOME="$(mktemp -d)"
+  env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT \
+      HOME="$XH_RUN_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$1" \
+      bash -c "$XH_CMD" >"$2" 2>"$3" </dev/null
+  XH_RUN_RC=$?
+  XH_RUN_HOME_ENTRIES="$(find "$XH_RUN_HOME" -mindepth 1 | wc -l | tr -d '[:space:]')"
+  rm -rf "$XH_RUN_HOME"
+}
+# Prints the EVENT NAME only. The real body is ~16 KB of injected context and
+# has no place in a CI log.
+xh_event_name() {
+  python3 -I -B -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except (ValueError, UnicodeDecodeError):
+    doc = {}
+out = doc.get("hookSpecificOutput", {}) if isinstance(doc, dict) else {}
+print(out.get("hookEventName", "") if isinstance(out, dict) else "", end="")' < "$1"
+}
+
+XH_OUT_FILE="$(mktemp)"
+XH_ERR_FILE="$(mktemp)"
+xh_run_declared_command "$XH_PLUGIN_DIR" "$XH_OUT_FILE" "$XH_ERR_FILE"
+XH_EVENT="$(xh_event_name "$XH_OUT_FILE")"
+if [ "$XH_EVENT" = "SessionStart" ]; then
+  echo "  PASS  XH3 the declared SessionStart command runs and emits hookSpecificOutput.hookEventName (rc=${XH_RUN_RC})"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  XH3 the declared SessionStart command emitted no SessionStart contract (rc=${XH_RUN_RC}, event='${XH_EVENT}')"
+  printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_ERR_FILE")"
+  FAIL=$((FAIL + 1))
+fi
+# A hook that writes into the invoking user's home during a test is a test that
+# mutates the runner. The alias forwarders are the concrete risk here, hence
+# UBERDEV_NO_AUTO_ALIAS=1 in the runner and this row to prove it held.
+assert_eq "$XH_RUN_HOME_ENTRIES" "0" \
+  "XH4 the oracle is hermetic — it wrote nothing into its throwaway HOME"
+rm -f "$XH_OUT_FILE" "$XH_ERR_FILE"
+
+# --- XH5/XH6/XH7: the native-Windows arm ------------------------------------
+# This is the issue's actual question and the RFC 0019 §7 verification
+# obligation: a green macOS or ubuntu run leaves every branch below UNEXECUTED
+# and is not evidence for any of it.
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  XH_WIN_ROOT="$(cygpath -m "$XH_PLUGIN_DIR")"
+  assert_nonempty "$XH_WIN_ROOT" \
+    "XH5a cygpath -m normalised the plugin root for the native-Windows arm"
+  XH_WIN_OUT="$(mktemp)"
+  XH_WIN_ERR="$(mktemp)"
+  xh_run_declared_command "$XH_WIN_ROOT" "$XH_WIN_OUT" "$XH_WIN_ERR"
+  XH_WIN_EVENT="$(xh_event_name "$XH_WIN_OUT")"
+  if [ "$XH_WIN_EVENT" = "SessionStart" ]; then
+    echo "  PASS  XH5 the declared SessionStart command runs on NATIVE Windows with a cygpath-normalised plugin root (rc=${XH_RUN_RC})"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  XH5 the declared SessionStart command emitted no SessionStart contract on NATIVE Windows (rc=${XH_RUN_RC}, event='${XH_WIN_EVENT}')"
+    printf '        stderr[0]: %s\n' "$(head -n 1 "$XH_WIN_ERR")"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_eq "$XH_RUN_HOME_ENTRIES" "0" \
+    "XH5b the native-Windows oracle is hermetic — it wrote nothing into its throwaway HOME"
+  rm -f "$XH_WIN_OUT" "$XH_WIN_ERR"
+
+  # XH6a/XH6b are RECORDED, not asserted. Ossifying an assumption about someone
+  # else's parser is how the stale claims this issue also had to repair got
+  # written; what the log needs is the observed rc from each interpreter.
+  XH_CMD_CMDEXE="${XH_CMD//\$\{CLAUDE_PLUGIN_ROOT\}/%CLAUDE_PLUGIN_ROOT%}"
+  XH_PROBE_OUT="$(CLAUDE_PLUGIN_ROOT="$XH_WIN_ROOT" cmd.exe //c "$XH_CMD_CMDEXE" 2>&1 </dev/null)"
+  XH_PROBE_RC=$?
+  echo "  INFO  XH6a cmd.exe rc=${XH_PROBE_RC} first-line=$(printf '%s' "$XH_PROBE_OUT" | head -n 1)"
+  XH_CMD_PWSH="${XH_CMD//\$\{CLAUDE_PLUGIN_ROOT\}/\$\{env:CLAUDE_PLUGIN_ROOT\}}"
+  XH_PROBE_OUT="$(CLAUDE_PLUGIN_ROOT="$XH_WIN_ROOT" powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$XH_CMD_PWSH" 2>&1 </dev/null)"
+  XH_PROBE_RC=$?
+  echo "  INFO  XH6b powershell.exe rc=${XH_PROBE_RC} first-line=$(printf '%s' "$XH_PROBE_OUT" | head -n 1)"
+else
+  # A skip must never read as a pass, so each suppressed row is named with its
+  # reason rather than simply not printed (same discipline as the `zsh -n` skip
+  # near the top of this file).
+  echo "  SKIP  XH5a/XH5 declared-command execution on native Windows (not a native Windows host)"
+  echo "  SKIP  XH5b native-Windows hermeticity (not a native Windows host)"
+  echo "  SKIP  XH6a cmd.exe interpreter evidence (not a native Windows host)"
+  echo "  SKIP  XH6b powershell.exe interpreter evidence (not a native Windows host)"
+fi
+
+# XH6c — INTERPRETER IDENTITY, printed on every platform because POSIX is the
+# control. run-hook.cmd is invoked through the shell with NO argument, which
+# makes each arm name itself:
+#   * `missing script name` + rc=1  => cmd.exe ran it (MSYS re-dispatched the
+#     `.cmd` through %COMSPEC%), so the batch arm is NOT vestigial under a
+#     declared bash shell and `eol=lf` needs re-examining against its goto loop;
+#   * anything else (measured on POSIX: rc=126, `…/hooks/: Is a directory`)
+#     => bash ran it, which is what `"shell": "bash"` assumes.
+# The assertion half is POSIX-only, because POSIX is where the expected answer
+# was measured; on Windows the row is evidence for the adjudication, not a gate.
+XH_ID_HOME="$(mktemp -d)"
+XH_ID_OUT="$(env -u COPILOT_CLI -u CODEX_HOME -u CURSOR_PLUGIN_ROOT LC_ALL=C \
+    HOME="$XH_ID_HOME" UBERDEV_NO_AUTO_ALIAS=1 CLAUDE_PLUGIN_ROOT="$XH_PLUGIN_DIR" \
+    bash -c "\"$XH_HOOKS_DIR/run-hook.cmd\"" 2>&1 </dev/null)"
+XH_ID_RC=$?
+rm -rf "$XH_ID_HOME"
+echo "  INFO  XH6c run-hook.cmd with no argument: rc=${XH_ID_RC} first-line=$(printf '%s' "$XH_ID_OUT" | head -n 1)"
+if [ "$XH_NATIVE_WINDOWS" = yes ]; then
+  echo "  SKIP  XH6c assertion (native Windows — the rc above is evidence for adjudication, not a gate)"
+elif grep -q 'missing script name' <<<"$XH_ID_OUT"; then
+  echo "  FAIL  XH6c the cmd.exe arm answered on a POSIX host — run-hook.cmd is not being parsed by bash"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  XH6c the bash arm answers on POSIX, as \"shell\": \"bash\" assumes"
+  PASS=$((PASS + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
