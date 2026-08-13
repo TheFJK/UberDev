@@ -93,6 +93,7 @@ jobs:
           bash tests/review-pr.test.sh && \
           bash tests/review-pr-entry.test.sh && \
           bash tests/review-pr-phase3-ci.test.sh && \
+          bash tests/review-pr-consolidate.test.sh && \
           bash tests/prkit-manifest.test.sh && \
           bash tests/prkit-rewrite.test.sh && \
           bash tests/prkit-verify.test.sh && \
@@ -309,6 +310,10 @@ jobs:
         #   - orchestrator-child-inputs.test.sh
         #   - sdd-child-inputs.test.sh
         #   - review-child-inputs.test.sh
+        #   - review-pr-consolidate.test.sh  (pty allocation for the [ -t 0 ]
+        #                                    gate + real `git merge` conflict
+        #                                    states, same reason as
+        #                                    merge-discovery-resilience.test.sh)
         #   - review-pr-entry.test.sh
         #   - review-pr-workflow.test.sh    (python3 -c + the code_fixer_contract
         #                                    round-trip over mktemp -d paths, same

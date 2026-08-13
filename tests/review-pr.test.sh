@@ -3593,13 +3593,20 @@ def definitions(path):
     return found
 
 
-# Everything the shipped libraries define, minus the fence library: sourcing
+# Per-LIBRARY definitions, minus the fence library: sourcing
 # review-fleet-args.sh does NOT source review-fences.sh, only rehydrating does.
-sourceable = set()
+#
+# Keyed by basename rather than unioned into one bag (#470). A fence sources a
+# NAMED file, and only that file's helpers arrive with it; the old single
+# `sourceable` union let a fence that sources review-fleet-args.sh call a helper
+# that lives in some other lib entirely and still count as covered. Phase 0's
+# fences source lib/review-consolidate.sh and nothing else, which the union
+# model could not express at all -- it recognised exactly one source line.
+sourceable_by_lib = {}
 for path in glob.glob(plugin_root + "/lib/*.sh"):
     if os.path.abspath(path) == os.path.abspath(FENCE_LIBRARY):
         continue
-    sourceable |= definitions(path)
+    sourceable_by_lib["lib/" + os.path.basename(path)] = definitions(path)
 
 # Everything rehydration publishes: the fence library, plus `audit`, which
 # review_fleet_load_fence_library installs and which is a shell function in no
@@ -3620,16 +3627,25 @@ while index < len(lines):
     else:
         index += 1
 
-SOURCE_LINE = "lib/review-fleet-args.sh"
 REHYDRATE = "review_fleet_rehydrate"
+SOURCE_STMT = re.compile(r"(?:^|[;&|(]|&&|\|\|)[ \t]*\.[ \t]+\S", re.M)
 
 offenders = []
 calls_checked = 0
 for line_no, body in fences:
     own = {DEF.match(l).group(1) for l in body if DEF.match(l)}
     available = set(own)
-    if any(SOURCE_LINE in l and l.lstrip().startswith(". ") for l in body):
-        available |= sourceable
+    # A fence holds a library's helpers when it BOTH names that library's path
+    # and executes a `.` source. Naming and sourcing are checked separately
+    # because the source target is not always a literal: Phase 3's cross-repo
+    # gate binds `REVIEW_PUSH_TARGET_LIB=".../lib/review-push-target.sh"` on one
+    # line and sources `. "$REVIEW_PUSH_TARGET_LIB"` on the next, which no
+    # per-line literal match can see.
+    fence_text = "\n".join(body)
+    if SOURCE_STMT.search(fence_text):
+        for lib_key, lib_defs in sourceable_by_lib.items():
+            if lib_key in fence_text:
+                available |= lib_defs
     if any(l.strip().startswith(REHYDRATE) for l in body):
         available |= library
     for offset, line in enumerate(body):
@@ -4146,6 +4162,90 @@ assert_grep "$REVIEW_PR" '"verification": \{' \
   "R32h — phases.phase2_5 documents the verification sub-block"
 assert_grep "$REVIEW_PR" '"culled": <int>' \
   "R32i — the sub-block reports how many blockers were suppressed"
+
+echo
+echo "== RC: Phase 0 — the multi-PR consolidation offer (#470) =="
+# Portable greps only: this file runs on ubuntu AND windows-latest. The
+# EXECUTABLE half of Phase 0 lives in tests/review-pr-consolidate.test.sh
+# (ubuntu-only — it needs a pty and real `git merge` conflict states); these
+# rows hold the documented CONTRACT, which is what a windows job can check.
+
+# RC1 — the enumeration is un-rooted and renders all three fields. `discover_multi`
+# would silently drop every PR off the integration branch, which is exactly the
+# cross-base set the operator is meant to see and be able to decline.
+assert_grep "$REVIEW_PR" 'discover_open_prs' \
+  "RC1a — Phase 0 enumerates open PRs through discover_open_prs"
+assert_grep "$REVIEW_PR" 'number, title and base branch|number, title, base|#\\\(\.number\) — \\\(\.title\) \(base: ' \
+  "RC1b — each candidate is rendered with its number, title AND base branch"
+assert_grep "$REVIEW_PR" 'not[^.]*`discover_multi`|\*\*not\*\* `discover_multi`' \
+  "RC1c — the command says WHY discover_multi is not the enumerator (it roots on an integration branch)"
+
+# RC2 — the gate. All three suppressors must be documented, not just turbo.
+assert_grep "$REVIEW_PR" '\[ ! -t 0 \]' \
+  "RC2a — the offer is gated on stdin being a TTY"
+assert_grep "$REVIEW_PR" 'UBERDEV_RUN_CARRIER_JSON.*CONSOLIDATE=never|CONSOLIDATE=never; CONSOLIDATE_REASON=chained' \
+  "RC2b — an inherited run carrier (a chained finish-branch run) suppresses the offer"
+assert_grep "$REVIEW_PR" 'REASON=turbo' \
+  "RC2c — --turbo / UBERDEV_TURBO takes the no-offer path with a typed reason"
+assert_grep "$REVIEW_PR" '(default|DEFAULT)[^ ]* mode as well as under' \
+  "RC2d — the prose states WHY the carrier gate exists: finish-branch chains in default mode too"
+
+# RC3 — the deferred-tool load and the never-auto-pick rule, same shape as the
+# two existing AskUserQuestion sites.
+assert_grep "$REVIEW_PR" 'ToolSearch\(\{ query: "select:AskUserQuestion" \}\)' \
+  "RC3a — the ASK turn loads AskUserQuestion through ToolSearch first"
+assert_in_section "$REVIEW_PR" '0b — ASK' 'Executable setup \(run before any builder' \
+  'NEVER silently auto-pick' \
+  "RC3b — the ToolSearch fail-fast rule is restated inside the Phase 0 ASK section"
+
+# RC4 — negative, in the M73 mould: the Notes block must not still claim one PR
+# per invocation, or the tail of the file contradicts the head.
+RC4_SLICE="$(mktemp)"
+awk '/^## Notes:/{active=1} active{print} active && /^## /&&!/^## Notes:/{exit}' "$REVIEW_PR" >"$RC4_SLICE"
+assert_no_grep_nonempty "$RC4_SLICE" 'reviews exactly one PR per invocation|one PR per invocation, always|single-PR by construction' \
+  "RC4 — the Notes block no longer asserts an unconditional one-PR-per-invocation contract"
+rm -f "$RC4_SLICE"
+
+# RC5 — the trust trail binds to the combined PR only. The falsifiable half of
+# this is RCX11 in review-pr-consolidate.test.sh; this row holds the prose so a
+# future edit cannot quietly authorise labelling an original.
+assert_grep "$REVIEW_PR" 'sole carrier of the trust trail|no label, no close, no merge|receive no trail' \
+  "RC5a — the command states that only the combined PR carries the trust trail"
+assert_grep "$REVIEW_PR" 'originals keep `review-pr:pending`|The originals receive no trail|superseded' \
+  "RC5b — the originals' disposition is stated, not left to inference"
+
+# RC6 — the combined PR body renderer.
+assert_grep "$REVIEW_PR" '## Consolidated PRs' \
+  "RC6a — the body names every superseded original under '## Consolidated PRs'"
+assert_grep "$REVIEW_PR" '## Excluded' \
+  "RC6b — the body reports excluded candidates under '## Excluded'"
+assert_grep "$REVIEW_PR" 'reported by number|by number rather than dropped' \
+  "RC6c — an uncombinable PR is reported BY NUMBER, never dropped silently"
+assert_grep "$REVIEW_PR" 'Closes #N|`Closes #N` references' \
+  "RC6d — the originals' Closes references are carried onto the combined PR"
+
+# RC7 — the argument surfaces. A flag that works but is undocumented in
+# argument-hint is a flag nobody discovers.
+assert_grep "$REVIEW_PR" 'argument-hint:.*--consolidate' \
+  "RC7a — --consolidate is declared in argument-hint"
+assert_grep "$REVIEW_PR" 'argument-hint:.*--no-consolidate' \
+  "RC7b — --no-consolidate is declared in argument-hint"
+assert_grep "$REVIEW_PR" '\| `CONSOLIDATE` \|' \
+  "RC7c — the Argument Parsing Summary has a CONSOLIDATE row"
+assert_grep "$REVIEW_PR" '`--no-consolidate` > `--consolidate`|--no-consolidate. WINS over|--no-consolidate` wins over' \
+  "RC7d — --no-consolidate is documented as winning over --consolidate"
+assert_in_section "$REVIEW_PR" '## Usage Examples:' '## Agent Descriptions:' \
+  '/uberdev:review-pr --consolidate' \
+  "RC7e — Usage Examples shows --consolidate"
+assert_in_section "$REVIEW_PR" '## Usage Examples:' '## Agent Descriptions:' \
+  '/uberdev:review-pr --no-consolidate' \
+  "RC7f — Usage Examples shows --no-consolidate"
+
+# RC8 — the exit-2 no-downgrade contract. Accepting consolidation and then
+# quietly reviewing one PR instead would report a trust signal about a change
+# set the operator did not ask for.
+assert_grep "$REVIEW_PR" 'never downgraded to a single-PR review' \
+  "RC8 — a combine that cannot contain the current PR exits 2 rather than downgrading"
 
 echo
 echo "== Summary =="

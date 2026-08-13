@@ -588,6 +588,33 @@ assert_grep "$REPO_ROOT/plugins/uberdev/commands/simplify.md" \
   "simplify.md names /review-pr Phase 2 as the canonical simplify run site"
 
 echo
+echo "== #470: the unattended forward gains no consolidation prompt =="
+# /review-pr Phase 0 asks whether to consolidate several open PRs into one
+# review. /turbo's whole contract is unattended end-to-end, and it dispatches N
+# solvers that each push a PR — precisely the >1-open-PR state that makes the
+# offer fire. Phase 0 must therefore resolve `never` on this path, from the
+# environment alone, BEFORE any gh round-trip.
+TURBO_REVIEW_PR="$REPO_ROOT/plugins/uberdev/commands/review-pr.md"
+assert_grep "$TURBO_REVIEW_PR" 'REVIEW_CONSOLIDATE OFFER=no REASON=%s' \
+  "#470.turbo1 — Phase 0 has a no-offer arm that reports a typed reason on stderr"
+assert_grep "$TURBO_REVIEW_PR" 'CONSOLIDATE=never; CONSOLIDATE_REASON=turbo' \
+  "#470.turbo2 — UBERDEV_TURBO / --turbo resolves CONSOLIDATE=never before anything is asked"
+# ORDERING is the load-bearing half: the decision must be reachable without gh.
+# A gate that ran after discovery would still not prompt, but every unattended
+# run would pay a rate-limited round-trip for an answer nobody consumes.
+TURBO_GATE_LINE="$(awk '/CONSOLIDATE=never; CONSOLIDATE_REASON=turbo/ {print NR; exit}' "$TURBO_REVIEW_PR")"
+TURBO_DISCOVER_LINE="$(awk '/discover_open_prs .review-pr\.0a./ {print NR; exit}' "$TURBO_REVIEW_PR")"
+if [ -n "$TURBO_GATE_LINE" ] && [ -n "$TURBO_DISCOVER_LINE" ] \
+   && [ "$TURBO_GATE_LINE" -lt "$TURBO_DISCOVER_LINE" ]; then
+  echo "  PASS  #470.turbo3 — the turbo gate resolves BEFORE the open-PR discovery call (no gh round-trip on the unattended path)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  #470.turbo3 — the turbo gate does not precede discovery; an unattended run would pay a gh call for an answer it discards"
+  echo "        gate: ${TURBO_GATE_LINE:-<none>}  discovery: ${TURBO_DISCOVER_LINE:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
