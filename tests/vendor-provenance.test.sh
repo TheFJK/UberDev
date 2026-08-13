@@ -972,6 +972,35 @@ else
   no "V30b could not delete the SDD divergence record — the probe mutated nothing"
 fi
 
+# V30c — the third arm: an entry that declares a `file` and no pointer at all.
+# RFC 0019 §2.4's "plus any component-local entries" could be read as licensing
+# this, and `vendor-drift.py` `declared_files()` would happily subtract it from
+# raw drift — an undeclared divergence excusing itself. C-DIVREF requires the
+# pointer, so the amendment's tightening is falsifiable rather than prose.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+component = next((c for c in d["components"]
+                  if c.get("id") == "skills/subagent-driven-dev"), None)
+if component is None:
+    raise SystemExit("skills/subagent-driven-dev is no longer in the register")
+hit = next((x for x in component.get("divergences", [])
+            if x.get("ref") == "sdd-parallel-implementer-waves"), None)
+if hit is None:
+    raise SystemExit("the component does not carry the entry this row strips")
+hit.pop("ref")
+if not hit.get("file"):
+    raise SystemExit("the stripped entry declares nothing at all; use one with a file")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-DIVREF" "V30c a divergences[] entry with a file and no ref at all"
+else
+  no "V30c could not strip the SDD divergence ref — the probe mutated nothing"
+fi
+
 echo
 echo "== Summary =="
 echo "  passed: $PASS"

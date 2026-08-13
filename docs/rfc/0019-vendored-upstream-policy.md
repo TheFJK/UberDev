@@ -453,8 +453,9 @@ resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 
 ## Amendment (2026-08-13, #509) — the SDD parallel-implementer divergence, adjudicated
 
-> **Amends the `skills/subagent-driven-dev` row of §4.2 and the table in §6.
-> Adds `C-DIVREF` to the check list in §8.**
+> **Amends the `skills/subagent-driven-dev` row of §4.2 and the table in §6, and
+> tightens §2.4's `divergences[]` shape. Adds `C-DIVREF` to
+> `vendor-check.py`'s check catalogue.**
 > Status of this amendment: **Accepted, implemented.**
 
 ### What changed
@@ -534,12 +535,21 @@ under a live reference, with every check green.
 > `permanent_divergences[].id`, for every component regardless of origin or
 > stance.
 
-Two boundaries are deliberate:
+Three boundaries are deliberate:
 
 - **No vacuity arm.** `C-HEADER`, `C-BASE` and `C-REFS` each fail on an empty
   corpus, because for them zero findings means the scan broke. Here an empty
   `divergences[]` corpus is a legal register state, and a `found == 0` failure
   would red a tree that has simply declared nothing.
+- **A `ref` is mandatory, which tightens §2.4.** That section's phrase "plus any
+  component-local entries" could be read as licensing an entry with only a
+  `file` and no pointer. `C-DIVREF` closes that reading: every entry must name an
+  adjudicated record. Measured on the tree at adoption, all 27 entries across the
+  register already carry a `ref` and the only keys in use are `ref` and `file`,
+  so this costs nothing today and buys the thing this issue is about — a
+  divergence cannot be declared to the tooling without first being written down
+  as a decision. A component-local `file` stays welcome; it just rides on a
+  `ref`, exactly as `skills/subagent-driven-dev`'s new entry does.
 - **F14 stays.** Its scope is now covered by `C-DIVREF`, but its
   `interactive-discard-option` *record* assertion — that the entry exists, is
   permanent, and is scoped to `skills/finish-branch` — is still the only thing

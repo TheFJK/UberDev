@@ -649,6 +649,13 @@ def check_divref(register, failures):
     pointer is a register-internal invariant and does not depend on origin or
     stance.
 
+    A `ref` is MANDATORY on every entry, which tightens RFC 0019 §2.4's "plus
+    any component-local entries" — that phrase could be read as licensing an
+    entry carrying only a `file`, which `declared_files()` would still subtract
+    from raw drift while pointing at no adjudicated record. A component-local
+    `file` is still welcome; it rides on a `ref`. Measured at adoption: all 27
+    entries in the register already carry one.
+
     Deliberately carries NO vacuity arm, unlike C-HEADER / C-BASE / C-REFS. For
     those, finding zero means the scan broke. Here an empty `divergences[]`
     corpus is a legal register state — a repo that has declared no permanent
