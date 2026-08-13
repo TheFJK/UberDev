@@ -2,6 +2,34 @@
   "schema_version": 1,
   "tree_id": "solve-run-tree-v1",
   "root_edge_id": "solve.issue.lead",
+  "scope": {
+    "governs": {
+      "substrate": "routed-child-dispatch",
+      "adapter": "plugins/uberdev/lib/child-dispatch.sh",
+      "note": "Every edge in `edges` is a child dispatched through the routed adapter and validated at runtime by lib/child-inputs.py against its required_inputs/optional_inputs. This manifest governs that substrate and no other. The `orchestrator.*` and `sdd.*` edges are reachable ONLY on the non-default --backend=wezterm|background transports; since RFC 0015 the default /solve and /turbo route is the Workflow fleet declared under does_not_govern."
+    },
+    "agent_kind_rule": "An agent kind is a Workflow agent's opts.label with `:#<issue>` and any trailing ` (<tier>)` removed, then `:` mapped to `.` and `-` mapped to `_`. Derived by execution in tests/solve-run-tree-scope.test.sh, never by grep.",
+    "does_not_govern": [
+      {
+        "substrate": "workflow-native-solve-fleet",
+        "source": "plugins/uberdev/skills/solve-fleet/workflow.js",
+        "reason": "RFC 0015 made this the DEFAULT /solve + /turbo route. A Workflow script has no filesystem (tests/workflow-scripts.test.sh T1 forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. The gap is real and tracked; it is recorded here so it is visible and machine-checked rather than inferred from a name.",
+        "reserved_edge_prefix": "solve_fleet.",
+        "dispatch_sites": 6,
+        "agent_kinds": [
+          "manifest_intake",
+          "plan",
+          "research.codebase",
+          "research.constraints",
+          "research.test_coverage",
+          "solve",
+          "spec",
+          "spec_review"
+        ],
+        "tracking_issues": [507, 508, 524]
+      }
+    ]
+  },
   "input_limits": {
     "max_serialized_bytes": 49152
   },
