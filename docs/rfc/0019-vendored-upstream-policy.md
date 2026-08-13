@@ -484,9 +484,11 @@ directions, over an anti-vacuity floor so a broken parse cannot report
 agreement.
 
 The `Seven track, seven fork` tally in §4.2 is unchanged; so is its dated
-`diff -r` measurement table, `measured_diff_lines`, and every watermark. This
-amendment records a decision about bytes that were already shipping — it moves
-no component's provenance.
+`diff -r` measurement table, `measured_diff_lines`, both commit fields and the
+review date. The parallel-wave behaviour being adjudicated was already shipping,
+and nothing here re-baselines the component: `stance: fork` is exactly what makes
+the local `SKILL.md` edits below move no digest, and the component's file **set**
+is untouched.
 
 ### The precondition now has a producer and a refusal
 
@@ -556,8 +558,15 @@ Three boundaries are deliberate:
   pinning that entry, and `C-DIVREF` does not pin records, only pointers.
 
 `tests/vendor-provenance.test.sh` gains the matching falsifiability rows: a live
-reference misspelled while the record stays, and the record deleted under a live
-reference — each proved red for `C-DIVREF` **and nothing else**, and each driven
-through the full checker rather than `--only`, because an unknown `--only` id
-prints the wanted id inside its own `known:` list and would report PASS against a
-checker that has no such check.
+reference misspelled while the record stays, the record deleted under a live
+reference, and an entry carrying a `file` with no pointer at all — each proved
+red for `C-DIVREF` **and nothing else**, and each driven through the full checker
+rather than `--only`, because an unknown `--only` id prints the wanted id inside
+its own `known:` list and would report PASS against a checker that has no such
+check.
+
+The dispatch-time refusal gains its own falsifiability fixture in
+`tests/sdd-routed-lifecycle.test.sh`, launched under both shells: measured with
+the guard call removed, the identical-ownership case returns rc `0` with two
+children dispatched under bash and rc `1` with no diagnostic under zsh, so the
+rows assert a refusal that only the guard can produce.
