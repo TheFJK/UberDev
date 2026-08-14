@@ -43,8 +43,10 @@ written down rather than left implied.
   * COVERAGE OF THE ISSUE'S TABLE. Issue #513 cites seven instances. This guard
     covers **2 of the 7**: `solve-fleet` `S.reviewed.blockingFindings` and
     `review-fleet` `S.ciClassify.failureClass`. The other five are out of
-    reach — `review-fleet`'s `childNotes` round-trip is a config key outside
-    `const S = {` (and `.childNotes` is itself a read shape), the `S.verify`
+    reach — `review-fleet`'s severed note round-trip was a config key outside
+    `const S = {` and has since been DELETED outright by #514 rather than
+    wired up (its name is now banned tree-wide by that change's own guard, so
+    it is deliberately not spelled here), the `S.verify`
     defect is a required-list-versus-prompt inversion rather than an unread
     property, and `lib/run_manifest.py`, `subagent-driven-dev/SKILL.md` and
     `agents/spec-writer.md` are outside the corpus. The class is not killed;
