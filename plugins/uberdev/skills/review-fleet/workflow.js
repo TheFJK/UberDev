@@ -637,7 +637,7 @@ const S = {
   reviewer: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["COMPLETE", "BLOCKED"] },
       verdict: { type: "string", enum: ["APPROVE", "REVISIONS_REQUIRED", "REJECT", "BLOCKED"] },
       resultPath: { type: "string" },
@@ -649,7 +649,7 @@ const S = {
   lens: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["COMPLETE", "BLOCKED"] },
       resultPath: { type: "string" },
       statusPath: { type: "string" },
@@ -659,11 +659,11 @@ const S = {
   fixer: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["APPLIED", "NO_FIXES_NEEDED", "REFUSED"] },
       resultPath: { type: "string" },
       statusPath: { type: "string" },
-      dispositionPath: { type: "string" },
+      dispositionPath: { type: "string" }, // schema-prop-unread: the disposition file is located by the script's own run-dir layout, not from this claim
       note: { type: "string" },
     } },
   // findings-to-issues (JUDGMENT — model omitted). The agent OWNS max_new,
@@ -694,9 +694,9 @@ const S = {
   ciClassify: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["CLASSIFIED", "AMBIGUOUS", "REFUSED", "BLOCKED"] },
-      failureClass: { type: "string", enum: ["code_bug", "env_drift", "stale_base",
+      failureClass: { type: "string", enum: ["code_bug", "env_drift", "stale_base", // schema-prop-unread: report only (#514) — validate-ci-classification derives the routing class from the frozen result bytes
         "flaky", "billing_quota", "platform_outage", ""] },
       resultPath: { type: "string" },
       statusPath: { type: "string" },
@@ -705,7 +705,7 @@ const S = {
   ciFix: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["APPLIED", "REBASED", "CONFLICT",
         "NO_FIXES_NEEDED", "REFUSED", "BLOCKED"] },
       resultPath: { type: "string" },
@@ -714,13 +714,13 @@ const S = {
       // controller from its own unmerged-path enumeration in its own checkout;
       // taking them from here would let the child choose the set its own
       // successors are allowed to touch.
-      conflictCount: { type: "integer", minimum: 0 },
+      conflictCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a claim only — the controller enumerates unmerged paths in its own checkout
       note: { type: "string" },
     } },
   verify: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       // No score and no verdict: the score lives in the RESULT FILE the
       // controller re-reads through
       // uberdev_child_validate_finding_verifier_result, and the verdict is
@@ -735,7 +735,7 @@ const S = {
   ciConflict: { type: "object", additionalProperties: false,
     required: ["edgeId", "status", "resultPath", "statusPath"],
     properties: {
-      edgeId: { type: "string" },
+      edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["RESOLVED", "AMBIGUOUS", "REFUSED", "BLOCKED"] },
       resultPath: { type: "string" },
       statusPath: { type: "string" },

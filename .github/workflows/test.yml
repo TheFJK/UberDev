@@ -208,6 +208,7 @@ jobs:
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
           bash tests/contract-markers.test.sh && \
+          bash tests/schema-property-reads.test.sh && \
           bash tests/vendor-provenance.test.sh && \
           bash tests/vendor-drift.test.sh
 
@@ -453,4 +454,5 @@ jobs:
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh
+          bash tests/contract-markers.test.sh && \
+          bash tests/schema-property-reads.test.sh
