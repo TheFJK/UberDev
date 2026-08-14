@@ -447,7 +447,15 @@ for c in d.get("components", []):
     if not isinstance(ev, dict) or not isinstance(ev.get("blobs"), dict):
         continue
     upath = c.get("upstream_path") or ""
-    single = len(ev["blobs"]) == 1 and list(ev["blobs"]) == (c.get("files") or [])
+    # `files[]` is a bare path list on an unpinned component and a list of
+    # {path, sha256} on a digest-locked one (#503 tied the lock to the pin, not
+    # to the stance). Read the paths out of BOTH shapes: comparing raw entries
+    # silently stopped matching the moment these components were pinned, and the
+    # stub then answered a path the mode never asks for — a rc=1 that looks like
+    # a mode bug and is really a shape assumption.
+    declared = [e.get("path") if isinstance(e, dict) else e
+                for e in (c.get("files") or [])]
+    single = len(ev["blobs"]) == 1 and list(ev["blobs"]) == declared
     for name, oid in sorted(ev["blobs"].items()):
         rows.append("%s\t%s" % (upath if single else "%s/%s" % (upath, name), oid))
 if not rows:
