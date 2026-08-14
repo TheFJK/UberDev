@@ -1511,9 +1511,71 @@ function probedNums(record) {
     && deliverCFText.indexOf("BLOCKED task(s): 2.") >= 0
     && deliverCFText.indexOf("The implementation is DONE and reviewed") < 0;
 
+  // --- Run DS: the FOURTH ledger state — committed nothing while claiming DONE
+  // A rung that commits nothing is rewritten to NO_CHANGES and skips the review
+  // gate. That is RIGHT when the implementer agreed there was nothing to do,
+  // and a DISAGREEMENT when it claimed DONE. Such a record is not blocked, not
+  // skipped and not unreviewed, so the ledger's three original buckets could not
+  // see it: a chain carrying one satisfied the completeness predicate, the
+  // delivery agent was told in words that every planned task was committed AND
+  // passed its review gate, and the PR number reached /goal's queue as a
+  // complete chain. The zero-commit derivation in the totalCommits===0 arm
+  // already applied the stricter test (status AND the agent's own claim); this
+  // is the same invariant at the other derivation site.
+  //
+  // Budget 4: task 1 costs its implementer alone and skips the gate (1); task 2
+  // spends its implementer (2) and one approving review (3).
+  const dsReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2, status: "DONE", commitCount: 0 }),
+    "impl:#11:t2": task(2),
+    "review:#11:t2:r1": approve(),
+  });
+  const recDS = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: dsReturns });
+  const resDS = resultOf(recDS);
+  const ds11 = resDS ? resDS.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  // The PREMISE: task 2 really did commit, so this is a chain with delivered
+  // work and NOT the totalCommits===0 arm, which refuses for its own reasons.
+  out.dsDelivered = labels(recDS).indexOf("deliver:#11") >= 0;
+  out.dsTasks = ds11 && Array.isArray(ds11.tasks)
+    ? ds11.tasks.map(function (t) { return t.id + ":" + t.status + ":" + t.claimedStatus; }).join(",")
+    : null;
+  out.dsChainComplete = ds11 ? ds11.chainComplete : null;
+  // PRESENCE is the signal (SKILL.md: "its presence IS the signal"), and the
+  // member list is a contract joined to that file in both directions — so the
+  // disputed ids deliberately ride in the audit event and the delivery prompt
+  // instead of being added here. Assert the published shape, not a wished-for
+  // one: a row demanding a fifth member would fail against a contract that is
+  // correct.
+  out.dsPartialPresent = !!(ds11 && ds11.partialDelivery);
+  out.dsPartialMembers = ds11 && ds11.partialDelivery
+    ? Object.keys(ds11.partialDelivery).join(",") : null;
+  out.dsAudit = !!(resDS && resDS.auditEvents.some(function (e) {
+    return e.event === "partial_delivery" && e.issue === 11
+      && Array.isArray(e.disputed) && e.disputed.length === 1 && e.disputed[0] === 1; }));
+  const deliverDS = recDS.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  const deliverDSText = deliverDS ? deliverDS.prompt : "";
+  out.dsToldWhich = deliverDSText.indexOf("Committed NOTHING while reporting otherwise (task(s)): 1.") >= 0
+    && deliverDSText.indexOf("The implementation is DONE and reviewed") < 0;
+
+  // --- Run DA: the AGREED no-change, which must NOT be disputed -------------
+  // The anti-vacuity half of Run DS. Identical shape except task 1 SAYS
+  // NO_CHANGES, which is agreement, not a disagreement — a predicate keyed on
+  // the rewritten status alone would fail this row, and one that disputed every
+  // zero-commit rung would make the skip-the-gate path unreachable.
+  const daReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2, status: "NO_CHANGES", commitCount: 0 }),
+    "impl:#11:t2": task(2),
+    "review:#11:t2:r1": approve(),
+  });
+  const recDA = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: daReturns });
+  const resDA = resultOf(recDA);
+  const da11 = resDA ? resDA.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.daChainComplete = da11 ? da11.chainComplete : null;
+  out.daNoPartial = !!(da11 && !da11.partialDelivery);
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF]
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -1804,6 +1866,18 @@ else
   check cfChainComplete false     "B176 the chain reports itself UNFINISHED — the field /goal reads before it merges"
   check cfDelivered true          "B177 delivery still runs on what is already committed"
   check cfPartialTold true        "B178 delivery is told this is PARTIAL and which task is blocked — never that every task passed its review gate"
+
+  check dsDelivered true          "B179 the disputed-task chain still delivers — task 2's commit is real work"
+  check dsTasks '"1:NO_CHANGES:DONE,2:DONE:DONE"' \
+                                  "B180 a zero-commit rung is rewritten NO_CHANGES with the implementer's own DONE claim kept beside it"
+  check dsChainComplete false     "B181 chainComplete is FALSE: a task that committed nothing and said otherwise is not a finished chain"
+  check dsPartialPresent true     "B182 partialDelivery is published for it — its presence is the incompleteness signal"
+  check dsPartialMembers '"tasksTotal,blocked,skipped,unreviewed"' \
+                                  "B182b ...with the member list SKILL.md declares, unchanged: the disputed ids ride in the audit event and the prompt"
+  check dsAudit true              "B183 partial_delivery audits the disputed ids rather than only the three original buckets"
+  check dsToldWhich true          "B184 delivery is told which task disputed — never that the implementation is DONE and reviewed"
+  check daChainComplete true      "B185 an AGREED no-change is not disputed, so the chain is still complete"
+  check daNoPartial true          "B186 ...and no partialDelivery object is published for it"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
 fi

@@ -1182,6 +1182,84 @@ if grep -qF 'no Phase 1 fixer ran, so no disposition exists' <<<"$W_DISP_PROMPT_
 else
   pass "W-DISP7 a supplied disposition path carries no declared-empty marker"
 fi
+
+# --- W-DISPC: the CONTROLLER half of the same fix, on BOTH defer fences -----
+# W-DISP1–7 above hold the script-side gate. The other half — the guard in each
+# defer fence that turns an absent or zero-byte disposition file into the empty
+# value BEFORE it is passed — was held by nothing: no test names the DEFER_
+# variables, the Workflow-native fence is executed by no test at all (this
+# file's harness synthesises the envelope directly), and the routed fence is
+# driven only by the review-child-inputs defer fixture, whose two disposition
+# files are both NON-EMPTY, so the guard's branch never ran there and that
+# fixture's exact-payload assertion passes identically with the guard deleted.
+# Reverting the controller half therefore left every suite green while Phase 2.5
+# broke again on the next clean review.
+#
+# The guard is EXECUTED here, not grepped: the region is lifted verbatim out of
+# commands/review-pr.md and run against the three states the file can be in.
+# FIXED STRINGS, never regexes: both markers are shell, so they are made almost
+# entirely of regex metacharacters ([ ] $ { } | *), and awk rejects `\|` outright.
+W_DISPC_BEGIN='if [ -z "${PHASE1_DISPOSITION_PATH:-}" ]'
+W_DISPC_END='[ -s "$PHASE2_DISPOSITION_PATH" ] || DEFER_PHASE2_DISPOSITION_PATH='"''"
+W_DISPC_COUNT="$(grep -cF "$W_DISPC_END" "$REVIEW_CMD")"
+if [ "$W_DISPC_COUNT" = 2 ]; then
+  pass "W-DISPC0 both defer fences (routed and Workflow-native) carry the disposition guard"
+else
+  fail "W-DISPC0 expected the disposition guard in 2 defer fences, found $W_DISPC_COUNT"
+fi
+
+# Lift each occurrence into its own file, so a guard present in one fence and
+# missing from the other cannot pass on its sibling's behalf.
+awk -v b="$W_DISPC_BEGIN" -v e="$W_DISPC_END" -v out="$TMP/w-dispc-" '
+  index($0, b) { n += 1; grab = 1 }
+  grab { sub(/^[[:space:]]+/, ""); print > (out n ".sh") }
+  grab && index($0, e) { grab = 0 }
+' "$REVIEW_CMD"
+
+w_dispc_drive() {  # w_dispc_drive FENCE_FILE P1_VALUE P2_VALUE -> "<p1>|<p2>|<warned>"
+  local fence="$1" p1="$2" p2="$3" warned out
+  out="$(PHASE1_DISPOSITION_PATH="$p1" PHASE2_DISPOSITION_PATH="$p2" bash -c '
+    set -u
+    . "$1" 2>"$2"
+    printf "%s|%s" "$DEFER_PHASE1_DISPOSITION_PATH" "$DEFER_PHASE2_DISPOSITION_PATH"
+  ' _ "$fence" "$TMP/w-dispc-warn.txt")" || { printf 'DRIVE-FAILED||'; return; }
+  warned=no
+  grep -qF 'is LOST' "$TMP/w-dispc-warn.txt" && warned=yes
+  printf '%s|%s' "$out" "$warned"
+}
+
+W_DISPC_REAL="$TMP/w-dispc-real.json"
+printf '{"findings_disposition":[]}' >"$W_DISPC_REAL"
+W_DISPC_ZERO="$TMP/w-dispc-zero.json"
+: >"$W_DISPC_ZERO"
+W_DISPC_GONE="$TMP/w-dispc-absent.json"
+rm -f "$W_DISPC_GONE"
+
+for w_dispc_n in 1 2; do
+  w_dispc_fence="$TMP/w-dispc-$w_dispc_n.sh"
+  # A real disposition is passed THROUGH untouched — the anti-vacuity half: a
+  # guard that blanked everything would satisfy the two rows below.
+  if [ "$(w_dispc_drive "$w_dispc_fence" "$W_DISPC_REAL" "$W_DISPC_REAL")" \
+       = "$W_DISPC_REAL|$W_DISPC_REAL|no" ]; then
+    pass "W-DISPC${w_dispc_n}a fence $w_dispc_n passes a real disposition through unchanged"
+  else
+    fail "W-DISPC${w_dispc_n}a fence $w_dispc_n mangled a real disposition: $(w_dispc_drive "$w_dispc_fence" "$W_DISPC_REAL" "$W_DISPC_REAL")"
+  fi
+  # The zero-byte file the workspace pre-creates: emptiness travels as the empty
+  # string, and it is NOT a lost record, so it is not warned about.
+  if [ "$(w_dispc_drive "$w_dispc_fence" "$W_DISPC_ZERO" "$W_DISPC_ZERO")" = "||no" ]; then
+    pass "W-DISPC${w_dispc_n}b fence $w_dispc_n turns a zero-byte disposition into the declared-empty value"
+  else
+    fail "W-DISPC${w_dispc_n}b fence $w_dispc_n did not empty a zero-byte disposition: $(w_dispc_drive "$w_dispc_fence" "$W_DISPC_ZERO" "$W_DISPC_ZERO")"
+  fi
+  # A path naming no file is a LOST record wearing the same clothes: it still
+  # travels empty (the child's contract has no third form) but it is named.
+  if [ "$(w_dispc_drive "$w_dispc_fence" "$W_DISPC_GONE" "$W_DISPC_GONE")" = "||yes" ]; then
+    pass "W-DISPC${w_dispc_n}c fence $w_dispc_n empties an absent disposition AND reports the loss"
+  else
+    fail "W-DISPC${w_dispc_n}c fence $w_dispc_n mishandled an absent disposition: $(w_dispc_drive "$w_dispc_fence" "$W_DISPC_GONE" "$W_DISPC_GONE")"
+  fi
+done
 assert_stage_runs ci-classify ci-classify "$W_NONCE1" "$W_CI_COMMON" 1
 assert_stage_runs ci-fix-code ci-fix "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.fix_code",

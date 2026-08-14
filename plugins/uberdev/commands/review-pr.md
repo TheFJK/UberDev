@@ -3092,6 +3092,21 @@ EOF_VERIFY_AUDIT
     # (policy/solve-run-tree-v1.json) and its callsite fixture give these two,
     # `commands/simplify.md` already passes them empty on this very transport,
     # and a zero-byte file behind a non-empty path is what the child refuses.
+    #
+    # EXISTENCE IS TESTED SEPARATELY FROM SIZE. `-s` alone collapses three states
+    # into one: a path variable that did not survive its fence, a file the
+    # controller never managed to create, and the legitimate zero-byte "no fixer
+    # ran" signal. Only the third is a record; the first two are a LOST record,
+    # and a lost record renders to the defer child as "that phase deferred
+    # everything", which re-files as fresh issues findings a fixer may in fact
+    # have applied. The emptiness still travels (the child's contract needs it),
+    # but the two situations are no longer indistinguishable.
+    if [ -z "${PHASE1_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE1_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 1 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    if [ -z "${PHASE2_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE2_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 2 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
     DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
     [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
     DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"
@@ -3166,6 +3181,18 @@ EOF_VERIFY_AUDIT
     # between a phase that deferred everything and a run that lost its record.
     # This is reached on every clean review: Phase 1 APPROVE with no blocker
     # dispatches no fixer at all.
+    #
+    # EXISTENCE IS TESTED SEPARATELY FROM SIZE, exactly as on the routed
+    # transport above: a zero-byte file is the no-fixer-ran signal, while an
+    # empty path variable or a file that is not there at all is a LOST record
+    # wearing the same clothes. Both still travel as the empty string, and the
+    # loss is named rather than passing silently.
+    if [ -z "${PHASE1_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE1_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 1 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    if [ -z "${PHASE2_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE2_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 2 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
     DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
     [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
     DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"

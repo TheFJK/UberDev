@@ -1608,8 +1608,8 @@ function recordChild(entry, ret, phaseName) {
     statusPath: pathsOk ? expectedStatus : "",
     findingCount: (typeof ret.findingCount === "number") ? ret.findingCount : null,
     blockerCount: (typeof ret.blockerCount === "number") ? ret.blockerCount : null,
-    // The note's ONE live reader. Nine prompts ask every child for it and eight
-    // schemas declare it; before #514 the only thing that consumed it was a
+    // The note's ONE live reader. Ten prompt builders ask a child for it and
+    // eight schemas declare it; before #514 the only thing that consumed it was a
     // cross-stage carrier that could never be filled, so a BLOCKED child's
     // stated reason was collected and then dropped on the floor. Clamped, not
     // trusted — see clampNote().
@@ -1664,6 +1664,11 @@ async function dispatchRoster(roster, phaseName, buildPrompt, agentTypeOf, schem
         children.push({
           edgeId: roster[k].edge, slug: roster[k].slug, status: "BLOCKED",
           resultPath: "", statusPath: "",
+          // Carried EMPTY, exactly as the null-return row carries it: a
+          // consumer of this list must not have to tell an absent note from an
+          // empty one, and this entry never dispatched so no child ever wrote
+          // one.
+          note: "",
           reason: "never dispatched — token budget exhausted mid-fanout",
         });
       }
@@ -1830,9 +1835,12 @@ async function main() {
         // means the controller skipped a proof, not that the phase was absent.
         return abort("bad_phase1_path", phase1PathAbs);
       }
-      // Both disposition paths are REQUIRED KEYS of review_pr.defer.findings
-      // (commands/review-pr.md:25), and a NON-EMPTY value must be a safe
-      // absolute path: the fix stage gates every authority path it interpolates,
+      // Both disposition paths are REQUIRED KEYS of review_pr.defer.findings —
+      // grep that edge id in commands/review-pr.md, which is byte-stable where
+      // a line number into a 3200-line file this PR itself grows is not (the
+      // carrier-contract note above cites by marker text for the same reason).
+      // A NON-EMPTY value must be a safe absolute
+      // path: the fix stage gates every authority path it interpolates,
       // and leaving these two ungated let a relative value render into the
       // prompt and left the agent to improvise a location.
       //

@@ -626,12 +626,20 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // pass), so the goal-side projection has to grow with it or CB1 under-counts
   // by one per cycle and the "halt before claiming" guarantee stops being exact.
   //
-  // MUTATION-SENSITIVE by construction. Default fixture: 2 queued issues,
-  // maxParallel 3, maxWatchTicks 40. Old projection 3 + 40 + 1 + 14 = 58, and
-  // 58 > 58 is false, so it does NOT trip. New projection 3 + 40 + 2 + 14 = 59,
-  // which does. Run M above (maxAgents 3) trips under both and can never catch
-  // a stale formula.
-  const recS = await run(buildArgs({ maxAgents: 58 }), { agentReturns: {
+  // MUTATION-SENSITIVE by construction — and RE-DERIVED from the live per-issue
+  // cost instead of from arithmetic frozen when this row was written. The
+  // hand-written ceiling of 58 charged 7 agents per issue; the shared constant
+  // BOTH sides of the comparison read is 30, so the real projection sat far
+  // above 58 and the breaker tripped whether the added relay term was 2 or 1.
+  // A row advertising a sensitivity it no longer has is worse than no row: the
+  // next reader trusts the message instead of re-deriving it.
+  //
+  // Default fixture: 2 queued issues, maxParallel 3, maxWatchTicks 40, so the
+  // projection is CYCLE_PROJECTION (105) and the pre-#515 one is 104. At a
+  // ceiling of 104, the current formula trips (105 > 104) and a formula whose
+  // flat term is reverted to 1 does not (104 > 104 is false), which is exactly
+  // the term this row exists to protect.
+  const recS = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
   } });

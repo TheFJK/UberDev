@@ -669,11 +669,16 @@ function worktreeBaseArg() {
 }
 
 function solvePrompt(rec, planPath) {
-  // The implementer is the ONLY worktree-isolated agent in a per-issue chain
-  // (the research/design agents are read-only). It owns the whole write path:
-  // branch, edits, tests, commit, push, PR. This is the tier-trivial/small path
-  // and the no-plan fallback — with no plan there are no tasks, so there is no
-  // per-task boundary a reviewer could sit on (see the task chain in solveOne).
+  // The implementer is the ONLY worktree-isolated agent ON THIS PATH — the
+  // single-solver route (the research/design agents are read-only). It owns the
+  // whole write path: branch, edits, tests, commit, push, PR. This is the
+  // tier-trivial/small path and the no-plan fallback — with no plan there are no
+  // tasks, so there is no per-task boundary a reviewer could sit on.
+  //
+  // "Chain" is NOT this: the per-task implement chain in runTaskChain runs its
+  // rungs with NO runtime worktree isolation, which is precisely why both of its
+  // writing rungs carry the workspace gate. Reading that gate as redundant
+  // belt-and-braces is the misreading this paragraph exists to prevent.
   var tier = rec.tier;
   var designed = planPath
     ? ('\n3. Read the implementation plan at "' + planPath + '" and execute it in order. It was written '
@@ -881,6 +886,8 @@ function deliverPrompt(rec, ledger) {
         + idList(ledger.skipped) + ". " : "")
       + (ledger.unreviewed.length ? "Committed but NEVER REVIEWED (task(s)): "
         + idList(ledger.unreviewed) + ". " : "")
+      + (ledger.disputed.length ? "Committed NOTHING while reporting otherwise (task(s)): "
+        + idList(ledger.disputed) + ". " : "")
       + "Your job is to deliver EXACTLY what is already committed in the shared checkout — no "
       + "more — and to state plainly in the PR body which tasks are missing or unreviewed. Do NOT "
       + "implement the missing tasks, and do NOT describe the branch as a complete fix.";
@@ -1020,7 +1027,7 @@ function budgetExhausted() {
   return budget && budget.total && budget.remaining() <= 0;
 }
 
-// ---- the two records the script SYNTHESIZES when no agent produced one ----
+// ---------------- the two record shapes, ONE builder each ----------------
 // Both used to be hand-copied object literals at four sites each. The ledger
 // below classifies a task by three fields of the first shape, and the second is
 // what every published count and /goal's queue read, so a field added to one
@@ -1028,8 +1035,18 @@ function budgetExhausted() {
 // record was missed. One builder each makes the shapes identical by
 // construction, and both keep their key ORDER so the emitted JSON is unchanged.
 
-// A task that never produced reviewable work: BLOCKED when a rung stopped the
-// chain, SKIPPED when the chain never reached that rung at all.
+// EVERY task record, live or synthesized. The chain's own record is built here
+// too and then filled in, so "the placeholder and the real thing agree" is a
+// property of the code rather than of two literals kept in step by hand.
+//
+// `status` is a CLOSED vocabulary, spelled once here because every consumer
+// (the ledger buckets below and the published counts) compares it by literal,
+// so a typo in one arm reclassifies silently instead of failing:
+//
+//   DONE       the rung committed reviewable work
+//   NO_CHANGES the rung committed nothing
+//   BLOCKED    a rung stopped the chain
+//   SKIPPED    the chain never reached that rung at all
 function placeholderTask(id, status) {
   return { id: id, status: status, reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
     commitCount: 0, claimedStatus: "" };
@@ -1160,16 +1177,17 @@ async function runTaskChain(rec, planPath) {
       }
     }
 
-    const taskRec = {
-      id: k, status: "DONE", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
-      commitCount: clampInt(impl.commitCount, 0, 4096, 0),
-      // The implementer's OWN terminal word, kept beside the observation the
-      // script derives from commitCount. Same rule as the PR-claim pass below:
-      // the proof wins in the field that drives behaviour, and the claim is
-      // never erased.
-      claimedStatus: (impl.status === "DONE" || impl.status === "NO_CHANGES"
-        || impl.status === "BLOCKED") ? impl.status : "",
-    };
+    // The SAME builder the placeholders use, then filled in: key set and key
+    // order come from one place, so the live record and the synthesized one
+    // cannot drift apart.
+    const taskRec = placeholderTask(k, "DONE");
+    taskRec.commitCount = clampInt(impl.commitCount, 0, 4096, 0);
+    // The implementer's OWN terminal word, kept beside the observation the
+    // script derives from commitCount. Same rule as the PR-claim pass below:
+    // the proof wins in the field that drives behaviour, and the claim is
+    // never erased.
+    taskRec.claimedStatus = (impl.status === "DONE" || impl.status === "NO_CHANGES"
+      || impl.status === "BLOCKED") ? impl.status : "";
     if (impl.status === "BLOCKED") {
       taskRec.status = "BLOCKED";
       stopLoop = true;
@@ -1399,16 +1417,29 @@ async function runTaskChain(rec, planPath) {
       .map(function (t) { return t.id; }),
     unreviewed: tasks.filter(function (t) { return t.reviewVerdict === "UNREVIEWED"; })
       .map(function (t) { return t.id; }),
+    // The FOURTH state the three lists above cannot see. A rung that committed
+    // nothing is rewritten to NO_CHANGES and skips the review gate — which is
+    // right when the implementer AGREED there was nothing to do, and a
+    // disagreement when it claimed DONE. That record is not blocked, not
+    // skipped and not unreviewed, so a chain carrying one used to satisfy the
+    // completeness predicate: the delivery agent was told in words that every
+    // planned task was committed and passed its review gate, and the resulting
+    // PR number reached /goal. The zero-commit derivation above already applies
+    // the stricter test (the status AND the agent's own claim); so does this.
+    disputed: tasks.filter(function (t) {
+      return t.status === "NO_CHANGES" && t.claimedStatus !== "NO_CHANGES";
+    }).map(function (t) { return t.id; }),
   };
   ledger.complete = ledger.blocked.length === 0 && ledger.skipped.length === 0
-    && ledger.unreviewed.length === 0;
+    && ledger.unreviewed.length === 0 && ledger.disputed.length === 0;
   if (!ledger.complete) {
     auditEvents.push({ event: "partial_delivery", issue: rec.issue, tasksTotal: ledger.total,
       blocked: ledger.blocked, skipped: ledger.skipped, unreviewed: ledger.unreviewed,
-      ts: nowIso });
+      disputed: ledger.disputed, ts: nowIso });
     log("#" + rec.issue + ": the task chain did NOT finish — delivering what is committed and "
       + "telling the delivery agent to say so (blocked: " + ledger.blocked.length + ", never "
-      + "attempted: " + ledger.skipped.length + ", unreviewed: " + ledger.unreviewed.length + ")");
+      + "attempted: " + ledger.skipped.length + ", unreviewed: " + ledger.unreviewed.length
+      + ", committed nothing while claiming otherwise: " + ledger.disputed.length + ")");
   }
 
   // Delivery is the ONE implement-phase dispatch deliberately exempt from CB3.
@@ -1434,8 +1465,21 @@ async function runTaskChain(rec, planPath) {
   // opened over an unfinished chain must be distinguishable from one opened
   // over a finished chain BEFORE goal-pipeline ingests the number and merges
   // on it. The claim is not touched — only this fact is added beside it.
+  //
+  // DECLARED UNREAD BY PRODUCTION CODE. Both fields below are attached AFTER
+  // schema validation, so the unread-property guard cannot see them, and the
+  // only readers today are this file's suites and the sibling SKILL.md:
+  // goal-pipeline ingests prsOpened through a shape-only digit filter and
+  // consults neither. That is the OPEN half — the ingesting side ought to skip
+  // or flag a number whose chain was incomplete — and it is written down here
+  // rather than left to look enforced.
   out.chainComplete = ledger.complete;
   if (!ledger.complete) {
+    // The MEMBER LIST here is a published contract, joined against SKILL.md's
+    // declaration in both directions, so the disputed ids ride in the
+    // partial_delivery audit event and in the delivery prompt rather than being
+    // added silently: presence of this object is the signal, and the flag above
+    // is what /goal's ingestion has to grow a reader for.
     out.partialDelivery = {
       tasksTotal: ledger.total, blocked: ledger.blocked, skipped: ledger.skipped,
       unreviewed: ledger.unreviewed,
@@ -1563,9 +1607,16 @@ function prNumbersToVerify() {
 
 // Every live PR claim retained, but flagged as unproven. The path taken
 // whenever the probe could not speak — never a downgrade.
+//
+// A claim that ALREADY carries a class keeps it. Every early-exit arm runs
+// before adjudication, so nothing is classified yet and the guard is a no-op
+// there; the throw arm can fire mid-pass, and erasing a proof that was already
+// drawn from a real 200 would be a fresh lie in the other direction.
 function markAllClaimsUnverified() {
   solved.forEach(function (r) {
-    if (r && r.status === "PR_OPENED" && isPosInt(r.prNumber)) r.prProof = "UNVERIFIED";
+    if (r && r.status === "PR_OPENED" && isPosInt(r.prNumber) && !r.prProof) {
+      r.prProof = "UNVERIFIED";
+    }
   });
 }
 
@@ -1711,10 +1762,20 @@ async function verifyClaims() {
       + " confirmed, " + countProof("DISPROVEN") + " disproven, " + countProof("UNVERIFIED")
       + " unverified");
   } catch (e) {
+    // The ONLY failure path that used to leave live claims with no proof class
+    // at all: finalize then published a verification block whose `probed` was
+    // the number this pass was about to prove while confirmed, disproven and
+    // unverified all read zero — indistinguishable from a run that had nothing
+    // to prove, on exactly the records /goal ingests. Every other early exit
+    // classifies; so does this one, and how far the pass had got rides in the
+    // event rather than being inferred from the counts.
     auditEvents.push({ event: "pr_proof_threw",
-      reason: (e && e.message) ? e.message : String(e), ts: nowIso });
+      reason: (e && e.message) ? e.message : String(e),
+      probed: prProbed, relayRc: prRelayRc, ts: nowIso });
+    markAllClaimsUnverified();
     log("verify: the claim-verification pass threw (" + ((e && e.message) ? e.message : String(e))
-      + ") — every claim stands as reported; read auditEvents before trusting the PR counts.");
+      + ") — every claim stands as reported and any claim left unadjudicated is UNVERIFIED; "
+      + "read auditEvents before trusting the PR counts.");
   }
 }
 
