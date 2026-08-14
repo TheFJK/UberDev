@@ -125,12 +125,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/brainstorming",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD from 2026-04-27 21:55 PDT to 2026-05-04 15:05 PDT, the window this component's vendored_on (2026-04-27) falls in. Measured at that base on 2026-08-13: the file set is 1:1 (8/8, symmetric difference 0) and the copy diverges by 1515 changed lines (GNU diff, '<' plus '>' lines). Method, the full 83-candidate scan and the per-file residual table are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md; no candidate in upstream history scores better on that key. Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
       "measured_diff_lines": 2255,
       "divergences": [
         {
@@ -139,18 +139,42 @@
         },
         {
           "ref": "brainstorm-no-approval-gates",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md",
-        "scripts/frame-template.html",
-        "scripts/helper.js",
-        "scripts/server.cjs",
-        "scripts/start-server.sh",
-        "scripts/stop-server.sh",
-        "spec-document-reviewer-prompt.md",
-        "visual-companion.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "b703109bb44930566ee92efb259cdf4437160e5e8b352893b28551804782d7a4"
+        },
+        {
+          "path": "scripts/frame-template.html",
+          "sha256": "a611506a65e704449769ed07cd75fdb24196f08070ee76d179cac8c25a5a36c0"
+        },
+        {
+          "path": "scripts/helper.js",
+          "sha256": "990aa492b42fdbe9217e882cdf46a365f4dcd63c0d200357e4398de458176ce7"
+        },
+        {
+          "path": "scripts/server.cjs",
+          "sha256": "c8c5ea7abf9732c90a4595dfd99c9f10bb4a868ab1d1c4928ed635ca2d0eb480"
+        },
+        {
+          "path": "scripts/start-server.sh",
+          "sha256": "b12b9ddc5c915c5c0ba621fc158de8348cc374a1b7e7b7c0c98fb2ac203ccd0f"
+        },
+        {
+          "path": "scripts/stop-server.sh",
+          "sha256": "5ca419ce37194e3ec91a5e9f020a12c3ac120028b412e39be616a49ca937d34d"
+        },
+        {
+          "path": "spec-document-reviewer-prompt.md",
+          "sha256": "396268c6c8bff383b2a97d1df8d0dab34647c34f6908c59155c73bf378bfa5c4"
+        },
+        {
+          "path": "visual-companion.md",
+          "sha256": "0cf263c2a72a922d69ccfb633d3947f6a09d6612c8b5b4648639c21ca90a98c7"
+        }
       ]
     },
     {
@@ -220,12 +244,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/finishing-a-development-branch",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
       "measured_diff_lines": 734,
       "divergences": [
         {
@@ -234,15 +258,18 @@
         },
         {
           "ref": "no-co-authored-by",
-          "file": "SKILL.md"
+          "file": null
         },
         {
           "ref": "interactive-discard-option",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "a903693b245f818bf169eb2bd6c6ea8102beb8dc75a0925ee5c7516ea2b2e964"
+        }
       ]
     },
     {
@@ -297,12 +324,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/requesting-code-review",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (2/2, symmetric difference 0) and the copy diverges by only 18 changed lines (GNU diff, '<' plus '>' lines); method and the 14-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
       "measured_diff_lines": 228,
       "divergences": [
         {
@@ -311,12 +338,18 @@
         },
         {
           "ref": "review-pr-parallel-by-default",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md",
-        "code-reviewer.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "3a19c51592c76015c32fdfb9427087471790451a57a70e3b0c6167deb6da9689"
+        },
+        {
+          "path": "code-reviewer.md",
+          "sha256": "1ceab0340aa30391f9d1da87cb7aadc760ac9161c17fcffef6819f4f878d469c"
+        }
       ]
     },
     {
@@ -345,12 +378,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/subagent-driven-development",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "File sets diverge: UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md; upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 — upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
       "measured_diff_lines": 1064,
       "divergences": [
         {
@@ -359,10 +392,22 @@
         }
       ],
       "files": [
-        "SKILL.md",
-        "code-quality-reviewer-prompt.md",
-        "implementer-prompt.md",
-        "spec-reviewer-prompt.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "d9368bddb9edf9cc9ec2420ae1cdb31454a5c28e7a54798bac87978eb4c6eac1"
+        },
+        {
+          "path": "code-quality-reviewer-prompt.md",
+          "sha256": "b7d9d7c27febecd5f128604b8899965e83888eeab10669c1de689454f61243bf"
+        },
+        {
+          "path": "implementer-prompt.md",
+          "sha256": "c907c268f6d05a48785cc436c46d48425da8e7816642eed2f93b54dfbacae574"
+        },
+        {
+          "path": "spec-reviewer-prompt.md",
+          "sha256": "d83d4b59b3ad9b41928fae6d23f39fd1105c09355a745ace80ec376511eb8270"
+        }
       ]
     },
     {
@@ -528,12 +573,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/using-superpowers",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "This is UberDev's own plugin primer (injected by the session-start hook) and its reference set diverges from upstream's: UberDev ships references/configuration.md and references/copilot-tools.md, upstream ships antigravity-tools.md, codex-tools.md and pi-tools.md.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: upstream ships references/codex-tools.md, references/copilot-tools.md and references/gemini-tools.md, so the BASE-relative divergence is exactly two files (ours-only references/configuration.md, upstream-only references/codex-tools.md) over 16 changed lines across the three shared files (GNU diff, '<' plus '>' lines); the 35-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. references/copilot-tools.md exists at the base and was deleted upstream by the watermark, so the local copy is a base-era file rather than a local invention; references/configuration.md is absent upstream at the base, which is why the in-file witness for this pin sits on SKILL.md and never there. Measured against the WATERMARK 3dcbd5c4 (v6.2.0) instead, upstream's reference set is antigravity-tools.md, codex-tools.md, gemini-tools.md and pi-tools.md. This is UberDev's own plugin primer, injected by the session-start hook.",
       "measured_diff_lines": 174,
       "divergences": [
         {
@@ -542,10 +587,22 @@
         }
       ],
       "files": [
-        "SKILL.md",
-        "references/configuration.md",
-        "references/copilot-tools.md",
-        "references/gemini-tools.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "b08c3f7d2d4b0e5e94315007b33fbf2088f018ef9beb5763f0ec5eb610730e52"
+        },
+        {
+          "path": "references/configuration.md",
+          "sha256": "5bb94642fe63553f066d365684516562e90d9000838ef2baf4afc461fd6448f4"
+        },
+        {
+          "path": "references/copilot-tools.md",
+          "sha256": "a863e486e855bc43507fafa71fb275036f15c8a5c9a99ed0dda0e8c0275b9980"
+        },
+        {
+          "path": "references/gemini-tools.md",
+          "sha256": "88901469456f4137374ac468b65482b6fccbdd54ae54710bbb82e21ecfa01e7e"
+        }
       ]
     },
     {
@@ -703,14 +760,12 @@
       "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. Additionally `model: opus` is routed to `model: inherit`, and the 0-100 confidence anchors are extracted into `shared/finding-confidence-rubric-v1.md`.",
       "measured_diff_lines": 81,
       "measured_diff_basis": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
-        "code-reviewer.md"
+        {
+          "path": "code-reviewer.md",
+          "sha256": "ad1fe6f0b90dff13041f423ca154fffbfeeb08c172444f954d32ccbd55dbb09d"
+        }
       ]
     },
     {
@@ -741,7 +796,10 @@
         }
       ],
       "files": [
-        "code-simplifier.md"
+        {
+          "path": "code-simplifier.md",
+          "sha256": "5789b72bdac2f9c078a8d5ac67e48c648319e5346524e466ac9a1acd11e52769"
+        }
       ]
     },
     {
@@ -770,14 +828,12 @@
       "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 56,
       "measured_diff_basis": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
-        "comment-analyzer.md"
+        {
+          "path": "comment-analyzer.md",
+          "sha256": "09e09a3d2e0f467f2095b9236455f849fffccae22c00ddfec4ad6dc4391125f9"
+        }
       ]
     },
     {
@@ -846,14 +902,12 @@
       "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 58,
       "measured_diff_basis": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
-        "pr-test-analyzer.md"
+        {
+          "path": "pr-test-analyzer.md",
+          "sha256": "c5492af0f98c69072e374df1b9833902220534a28b820e93fd226bb89af2b53d"
+        }
       ]
     },
     {
@@ -907,14 +961,12 @@
       "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 57,
       "measured_diff_basis": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
-        "silent-failure-hunter.md"
+        {
+          "path": "silent-failure-hunter.md",
+          "sha256": "35b434ec4512aa88a00d93f8d09ab4c6e813b8cacf8d8b045554fa0b66d40ed0"
+        }
       ]
     },
     {
@@ -1008,14 +1060,12 @@
       "stance_reason": "The frontmatter — including the `description` dispatch contract — is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
       "measured_diff_lines": 64,
       "measured_diff_basis": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
-        "type-design-analyzer.md"
+        {
+          "path": "type-design-analyzer.md",
+          "sha256": "fe64f4309cc962fc1fb499063dd4af6cd840fa701be78a2e15595d5b9b133d40"
+        }
       ]
     },
     {

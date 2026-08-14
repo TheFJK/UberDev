@@ -82,11 +82,11 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 5 unpinned skill directories. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` where no base has been recovered. With #503, #504 and #505 landed together, **no component reads `"unknown"`**. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 5 of the 20
-components — `git log` recovers the *vendoring* commit in this repo, never the
+The split is load-bearing. `"unknown"` was the honest value wherever a base was
+unrecoverable — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
 and it means week 1's report contains post-landing changes instead of a wall of
@@ -346,10 +346,10 @@ and **#505** the six agents (no local clone of `claude-plugins-official` exists,
 so their base needs a network content match — the watermark is a review point,
 not a proven base).
 
-**#505 is resolved** (see the amendment below): all six agents are pinned, each
-by blob identity against upstream rather than by inference. `"unknown"` now
-stands on **10 of the 20** components, every one of them a skill directory, and
-#503 and #504 are the only remaining successors.
+**All three successors are resolved** (see the amendments below): #503 pinned the
+five `track` skills, #504 the five `fork` skills, and #505 the six agents — the
+last of those by blob identity against upstream rather than by inference.
+`"unknown"` now stands on **none** of the 20 components.
 
 ---
 
@@ -587,7 +587,8 @@ Two smaller repairs fall out of the same rule:
   checkable — the six agents are **#505**'s.
 - **V25**, widened from `track` to the digest-locked set, so the escape hatch
   cannot be reopened on a pinned fork.
-- **V5**'s exact header count moves 21 → 27.
+- **V5**'s exact header count moves 21 → 27 — and on to **38** with #504's five
+  and #505's six landing alongside it in the same stack.
 
 ### What is left
 
@@ -660,7 +661,7 @@ and a field can be re-derived. Three things now re-derive it, split by cost:
   superpowers components whose backfill #503/#504 own, and a check that reds on
   somebody else's unstarted work gets suppressed. No `git`, no `subprocess`, no
   socket — that is what keeps §2.3's offline guarantee structural.
-- **`tests/vendor-provenance.test.sh` V30/V31/V31b** — the offline HALF of the
+- **`tests/vendor-provenance.test.sh` V35/V36/V36b** — the offline HALF of the
   identity, re-derived with `git rev-parse` against this repo's own history. It
   **fails rather than skips** in a shallow clone (the ubuntu shape-check job
   therefore checks out with `fetch-depth: 0`): a proof that quietly stands down
@@ -707,5 +708,8 @@ republication. That is its own change, and it is filed separately.
 
 ### What is left
 
-With #503's five and these six pinned, **five** components still read
-`"unknown"` — the unpinned `fork` skills, owned by **#504**.
+Nothing. #503's five `track` skills, #504's five `fork` skills and these six
+agents land in one stack, so **no component reads `"unknown"`** and §7's
+successor list is closed. `C-EVIDENCE` still covers only what declares
+`base_evidence`; extending that record to the ten skill components is the
+next piece of work, not a residual of this one.
