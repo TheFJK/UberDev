@@ -814,7 +814,6 @@ FILE_FLOORS = {
 # reused for something it was never argued for.
 EXEMPT_LEDGER = [
     "plugins/uberdev/skills/review-fleet/workflow.js:ciClassify.edgeId",
-    "plugins/uberdev/skills/review-fleet/workflow.js:ciClassify.failureClass",
     "plugins/uberdev/skills/review-fleet/workflow.js:ciConflict.edgeId",
     "plugins/uberdev/skills/review-fleet/workflow.js:ciFix.conflictCount",
     "plugins/uberdev/skills/review-fleet/workflow.js:ciFix.edgeId",
@@ -834,9 +833,13 @@ EXEMPT_LEDGER = [
     "plugins/uberdev/skills/scan-fleet/workflow.js:pr.prUrl",
     "plugins/uberdev/skills/solve-fleet/workflow.js:intake.issues.items.contextFile",
     "plugins/uberdev/skills/solve-fleet/workflow.js:research.headline",
-    "plugins/uberdev/skills/solve-fleet/workflow.js:reviewed.blockingFindings",
     "plugins/uberdev/skills/solve-fleet/workflow.js:reviewed.headline",
     "plugins/uberdev/skills/solve-fleet/workflow.js:written.headline",
+    "plugins/uberdev/skills/solve-fleet/workflow.js:prProof.rows.items.attempts",
+    "plugins/uberdev/skills/solve-fleet/workflow.js:prProof.rows.items.state",
+    "plugins/uberdev/skills/solve-fleet/workflow.js:prProof.rows.items.url",
+    "plugins/uberdev/skills/solve-fleet/workflow.js:task.summary",
+    "plugins/uberdev/skills/solve-fleet/workflow.js:task.taskId",
     "plugins/uberdev/skills/testers-pipeline/workflow.js:aggregate.stderrTail",
     "plugins/uberdev/skills/testers-pipeline/workflow.js:monitorDA.rejected",
     "plugins/uberdev/skills/testers-pipeline/workflow.js:monitorDA.scratchPath",
@@ -868,7 +871,9 @@ SHADOWED_NAMES = {
     "plugins/uberdev/skills/scan-fleet/workflow.js": [
         "aggregatePath", "areaId", "branch", "outPath", "rc",
     ],
-    "plugins/uberdev/skills/solve-fleet/workflow.js": ["headline", "issue", "rc"],
+    "plugins/uberdev/skills/solve-fleet/workflow.js": [
+        "blocker", "commitCount", "headline", "issue", "rc", "status", "summary",
+    ],
     "plugins/uberdev/skills/testers-pipeline/workflow.js": ["findings", "scratchPath"],
     "plugins/uberdev/skills/uberthink-pipeline/workflow.js": [
         "donors", "islandIndex", "lens", "outPath", "rc", "verdict",

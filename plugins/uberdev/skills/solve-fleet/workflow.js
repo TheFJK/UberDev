@@ -326,7 +326,7 @@ const S = {
       verdict: { type: "string", enum: ["APPROVE", "REVISIONS_REQUIRED", "REJECT"] },
       rc: { type: "integer" },
       headline: { type: "string" }, // schema-prop-unread: a one-line progress string for the log; the script logs its own artifact tally
-      blockingFindings: { type: "array", maxItems: 20, items: { type: "string" } }, // schema-prop-unread: #507 owns wiring these into the plan prompt; unread until that lands
+      blockingFindings: { type: "array", maxItems: 20, items: { type: "string" } },
     },
   },
   // One task of a plan, as reported by its implementer or by a fix-round agent.
@@ -337,12 +337,12 @@ const S = {
     type: "object", additionalProperties: false,
     required: ["taskId", "status", "commitCount", "workspaceReady"],
     properties: {
-      taskId: { type: "integer" },
+      taskId: { type: "integer" }, // schema-prop-unread: the child echoes the task it answered for so the transcript is legible; the loop addresses tasks by its own index k and never trusts this echo
       status: { type: "string", enum: ["DONE", "NO_CHANGES", "BLOCKED"] },
       commitCount: { type: "integer" },
       workspaceReady: { type: "boolean", description: "true only after cd into the shared worktree succeeded" },
       taskCount: { type: "integer", description: "task-1 only: how many `## Task <n>:` headings the plan has" },
-      summary: { type: "string" },
+      summary: { type: "string" }, // schema-prop-unread: a per-task human summary for the transcript; the run summary is built from the script's own counters
       blocker: { type: "string" },
     },
   },
@@ -395,11 +395,11 @@ const S = {
             pr: { type: "integer", minimum: 0, description: "the PR number this row was asked about" },
             httpStatus: { type: "integer", minimum: 0, description: "the integer from the HTTP status line; 0 when the command could not run" },
             number: { type: "integer", minimum: 0 },
-            url: { type: "string" },
+            url: { type: "string" }, // schema-prop-unread: recorded for the operator reading the proof rows; the classification branches on httpStatus, number, headRefName and commitCount only
             headRefName: { type: "string" },
-            state: { type: "string" },
+            state: { type: "string" }, // schema-prop-unread: recorded for the operator; open/closed does not disprove existence, so no branch reads it
             commitCount: { type: "integer", minimum: 0 },
-            attempts: { type: "integer", minimum: 0 },
+            attempts: { type: "integer", minimum: 0 }, // schema-prop-unread: the relay reports how many times it retried, for the audit trail; no branch reads it
           },
         },
       },

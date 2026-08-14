@@ -15,7 +15,7 @@
 #   S5  — ANTI-VACUITY. A new unread property seeded into a real workflow.js
 #         must red and must name it. Without this the whole suite could go
 #         green by finding nothing at all.
-#   S6  — the exemption for solve-fleet's `reviewed.blockingFindings` is
+#   S6  — the exemption for solve-fleet's `intake.issues.items.contextFile` is
 #         LOAD-BEARING: delete the marker and the scan reds. This is the anchor
 #         row — it proves the carry rule does not already exempt the property,
 #         so a future widening of that rule cannot silently make issue #513's
@@ -35,7 +35,9 @@
 # living in SKILL.md prose or in a calling session are invisible; and the corpus
 # is plugins/uberdev/skills/*/workflow.js only. Issue #513 cites seven
 # instances — **this guard covers 2 of the 7** (solve-fleet
-# `reviewed.blockingFindings` and review-fleet `ciClassify.failureClass`). The
+# `intake.issues.items.contextFile`; #507 and #514 made the two properties this
+# file originally anchored on — `reviewed.blockingFindings` and review-fleet's
+# `ciClassify.failureClass` — live, so the anchors moved rather than vanished). The
 # other five sit outside `const S = {`, outside the corpus, or are a
 # required-list-versus-prompt inversion rather than an unread property.
 #
@@ -262,22 +264,22 @@ fi
 # ---------------------------------------------------------------------------
 # S6 — the anchor row. #513's flagship instance must stay visible.
 # ---------------------------------------------------------------------------
-echo "== S6: the exemption on solve-fleet reviewed.blockingFindings is load-bearing =="
-if grep -qF -- "plugins/uberdev/skills/solve-fleet/workflow.js:reviewed.blockingFindings" \
+echo "== S6: the exemption on solve-fleet intake contextFile is load-bearing =="
+if grep -qF -- "plugins/uberdev/skills/solve-fleet/workflow.js:intake.issues.items.contextFile" \
     "$TMP/dump.out"; then
-  echo "  PASS  S6a reviewed.blockingFindings is in the exempt inventory"
+  echo "  PASS  S6a intake contextFile is in the exempt inventory"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL  S6a reviewed.blockingFindings is NOT in the exempt inventory — either it "
+  echo "  FAIL  S6a intake contextFile is NOT in the exempt inventory — either it "
   echo "         became live (drop the exemption and this row) or the harvest lost it"
   cat "$TMP/dump.out"
   FAIL=$((FAIL + 1))
 fi
 S6_ROOT="$(seed_mutant s6)"
 if substitute "$S6_ROOT/plugins/uberdev/skills/solve-fleet/workflow.js" \
-    ' // schema-prop-unread: #507 owns wiring these into the plan prompt; unread until that lands' \
+    ' // schema-prop-unread: an optional manifest field copied verbatim; the solver prompt is built from promptFile' \
     '' > "$TMP/s6-seed.out" 2>&1; then
-  assert_mutant_reds S6b "$S6_ROOT" --scan "reviewed.blockingFindings" "declared and never read"
+  assert_mutant_reds S6b "$S6_ROOT" --scan "contextFile" "declared and never read"
 else
   echo "  FAIL  S6b could not remove the marker (anchor moved — update this test)"
   cat "$TMP/s6-seed.out"
@@ -322,9 +324,9 @@ fi
 echo "== S9: the exempt-ledger pin reds in BOTH directions =="
 S9A_ROOT="$(seed_mutant s9a)"
 if substitute "$S9A_ROOT/tests/schema_property_reads.py" \
-    '    "plugins/uberdev/skills/solve-fleet/workflow.js:reviewed.blockingFindings",
+    '    "plugins/uberdev/skills/solve-fleet/workflow.js:intake.issues.items.contextFile",
 ' '' > "$TMP/s9a-seed.out" 2>&1; then
-  assert_mutant_reds S9a "$S9A_ROOT" --check-pins "GREW" "reviewed.blockingFindings"
+  assert_mutant_reds S9a "$S9A_ROOT" --check-pins "GREW" "contextFile"
 else
   echo "  FAIL  S9a could not remove a pin row (anchor moved — update this test)"
   cat "$TMP/s9a-seed.out"

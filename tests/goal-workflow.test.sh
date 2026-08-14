@@ -463,11 +463,15 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // per-issue cost and so could not tell the arithmetic from the breaker. The
   // ceiling is pinned to the exact projection instead:
   //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
-  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 1 + 2 * 30
-  //     = 104,   where 30 = the fleet 6 design agents + IMPLEMENT_AGENT_BUDGET(24)
-  // so 103 must trip and 104 must not. Change the per-issue cost without
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 30
+  //     = 105,   where 30 = the fleet 6 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 104 must trip and 105 must not. Change the per-issue cost without
   // changing this number and B52/B52b go red, which is the point.
-  const CYCLE_PROJECTION = 3 + 40 + 1 + (2 * 30);   // 104
+  //
+  // The flat term is 2, not 1 (#515): the fleet spends a batched PR-claim
+  // verification relay alongside its intake relay, once per fleet run rather
+  // than per issue.
+  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 30);   // 105
   const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },

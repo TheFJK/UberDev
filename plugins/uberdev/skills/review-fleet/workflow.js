@@ -680,7 +680,7 @@ const S = {
     properties: {
       edgeId: { type: "string" }, // schema-prop-unread: the controller pairs children by its own roster edge; a child-echoed id is never routed on
       status: { type: "string", enum: ["CLASSIFIED", "AMBIGUOUS", "REFUSED", "BLOCKED"] },
-      failureClass: { type: "string", enum: ["code_bug", "env_drift", "stale_base", // schema-prop-unread: report only (#514) — validate-ci-classification derives the routing class from the frozen result bytes
+      failureClass: { type: "string", enum: ["code_bug", "env_drift", "stale_base",
         "flaky", "billing_quota", "platform_outage", ""] },
       resultPath: { type: "string" },
       statusPath: { type: "string" },
