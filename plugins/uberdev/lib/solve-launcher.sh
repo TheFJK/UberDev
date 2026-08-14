@@ -1151,7 +1151,8 @@ print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
     baseBranch="$SOLVE_FLEET_BASE_BRANCH" \
     branchPrefix="worktree-solve-issue-" \
     solveTimeoutS="${SOLVE_TIMEOUT:-3600}" \
-    maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-250}"
+    implementBudget="${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-24}" \
+    maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-600}"
 
   echo "repo: $REPO_SLUG" >&2
   echo "prepared ${#ISSUE_NUMS[@]} issue(s) for the Workflow-native solver fleet (backend=workflow)" >&2

@@ -180,10 +180,20 @@ Auto-classifies a GitHub issue into a tier, then spawns an agent with a tier-app
 /solve 5 6 7
   └── lib/solve-launcher.sh   validate -> triage -> claim -> emit args   (one Bash call, seconds)
   └── Workflow(skills/solve-fleet/workflow.js)
-        ├── #5  medium  research x3 -> spec -> review -> plan -> solve (worktree) -> PR
+        ├── #5  medium  research x3 -> spec -> review -> plan
+        │               -> [impl -> review -> fix* ]xT -> deliver -> PR   (one shared worktree)
         ├── #6  trivial                                    solve (worktree) -> PR
         └── #7  small                                      solve (worktree) -> PR
 ```
+
+For a medium/large issue the plan is written as numbered tasks (`## Task <n>:`),
+and the implement phase walks them **one at a time** in a single shared
+worktree: an implementer commits the task, a reviewer reads `git show HEAD`
+against that task, and up to three fix rounds amend the same commit. Only when
+every task has settled does one delivery agent run the suite, push and open the
+PR. Trivial/small issues, and any issue whose design phase produced no usable
+plan, keep the single-solver path — no plan means no tasks, so there is no
+boundary a review gate could sit on.
 
 Monitor with **`/workflows`** — the progress tree lives in the session you started, and the run returns a structured per-issue result (`status`, `branch`, `prNumber`, `blocker`). There is no separate agent surface to poll.
 
@@ -196,7 +206,9 @@ claude -p "<prompt>" --model 'claude-opus-4-8[1m]'   # detached, PID-tracked
 
 and are monitored through visible WezTerm panes or the printed PID / log / result files. `auto` never selects them. The `claude --bg` transport that used to head this list was removed in RFC 0015 §7 as amended, and `--backend=codex` was deleted the same way in #381 — both are now enum errors, not deprecations.
 
-**Wave-based parallel execution** — multi-task plans declare `Depends on:` / `Wave:` / `Owns:` per task. Tasks share a wave only if their `Owns` allowlists are pairwise disjoint. Implementers never run git (controller serializes commits) — eliminates `.git/index.lock` races without per-task worktree ceremony. Maximum parallelism on edits, deterministic commit history, zero merge ceremony between waves.
+**Sequential per-task execution with a gate on every task** — this is what `/solve` and `/turbo` actually run. Tasks are walked in plan order, never in parallel: two implementation agents in one checkout collide, and the payoff being chased (fresh context per task, a review before the next task starts) needs no parallelism. There is no `Owns:` allowlist to validate, no git mutex and no controller serializing commits — each task agent commits its own single commit in the shared worktree, and each fix round amends it, so the history is one clean commit per task and nothing is pushed until delivery.
+
+> The wave-parallel shape (`Depends on:` / `Wave:` / `Owns:` per task, pairwise-disjoint allowlists, a controller that owns git) belongs to the directive `subagent-driven-dev` skill, which `/uberdev:orchestrator` still drives in a normal session. The Workflow-native fleet does not implement it.
 
 ---
 

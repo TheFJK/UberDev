@@ -423,10 +423,18 @@ function budgetExhausted() {
 
 // Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
 // relays, the collect relay, the verdict relay — plus what the nested fleet
-// will spend (its own intake relay, one solver per issue, and at most the six
-// research/design agents a medium-tier issue costs).
+// will spend per issue: its own intake relay, the six research/design agents a
+// medium-tier issue costs, and up to IMPLEMENT_AGENT_BUDGET (24) implement-phase
+// agents for the fleet's per-task implementer -> reviewer -> fix chain.
+//
+// Consequence, stated out loud rather than buried in the arithmetic: at 30
+// agents per design-tier issue the runtime's own 1000-agent lifetime cap
+// becomes the binding constraint for a /goal run (~33 design-tier issues),
+// well before maxAgents does. That is the honest price of a review gate per
+// task; intra-issue agents queue rather than accelerate on a busy host.
 function projectedAgentsForCycle(issueCount) {
-  return 3 + maxWatchTicks + 1 + (issueCount * 7);
+  // SHARED COST: solve-fleet-per-issue-agent-cost
+  return 3 + maxWatchTicks + 1 + (issueCount * 30);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
@@ -579,7 +587,8 @@ async function runCycle() {
       try {
         const out = await workflow({ scriptPath: solveFleetJs }, fleetArgs);
         fleetRuns += 1;
-        agentsSpent += 1 + (rec.claimed.length * 7);
+        // SHARED COST: solve-fleet-per-issue-agent-cost
+        agentsSpent += 1 + (rec.claimed.length * 30);
         rec.fleet = "ran";
         if (out && typeof out === "object" && Array.isArray(out.prsOpened)) {
           rec.prsOpened = digitsOnly(out.prsOpened).map(Number);

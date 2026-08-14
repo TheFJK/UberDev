@@ -458,7 +458,17 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
 
   // Run M — the projected-agent ceiling aborts BEFORE the claim relay, so no
   // issue is claimed and left unsolved.
-  const recM = await run(buildArgs({ maxAgents: 3 }), { agentReturns: {
+  //
+  // RE-DERIVED (#508). The old fixture used maxAgents:3, which trips under any
+  // per-issue cost and so could not tell the arithmetic from the breaker. The
+  // ceiling is pinned to the exact projection instead:
+  //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 1 + 2 * 30
+  //     = 104,   where 30 = the fleet 6 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 103 must trip and 104 must not. Change the per-issue cost without
+  // changing this number and B52/B52b go red, which is the point.
+  const CYCLE_PROJECTION = 3 + 40 + 1 + (2 * 30);   // 104
+  const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
   } });
@@ -466,6 +476,18 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.mTripped = resM ? resM.cb1Tripped : null;
   out.mNoClaim = !labels(recM).some(function (l) { return /^goal-claim/.test(l || ""); });
   out.mAudit = !!(resM && resM.auditEvents.some(function (e) { return e.event === "agent_ceiling_cb1"; }));
+
+  // ...and the companion no-trip probe at exactly the projection: the breaker
+  // must not fire one agent early, and the claim relay must actually run.
+  const recM2 = await run(buildArgs({ maxAgents: CYCLE_PROJECTION }), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resM2 = resultOf(recM2);
+  out.m2Tripped = !!(resM2 && resM2.cb1Tripped);
+  out.m2Claimed = labels(recM2).some(function (l) { return /^goal-claim/.test(l || ""); });
 
   // Run N — the claim prompt must carry the exact arming chain (the runtime
   // complement to tests/goal.test.sh BT83s source-shape greps).
@@ -680,9 +702,11 @@ else
   check lHalted true                      "B50 a thrown run is reported as halted, not as converged"
   check lBudgetThrows 1                   "B51 exactly one budget throw escaped to the driver"
 
-  check mTripped true                     "B52 CB1 trips when the projection exceeds maxAgents"
+  check mTripped true                     "B52 CB1 trips one agent below the projected per-cycle cost (the formula is pinned, not just the breaker)"
   check mNoClaim true                     "B53 CB1 aborts BEFORE the claim pass — no issue is claimed and stranded"
   check mAudit true                       "B54 agent_ceiling_cb1 is audited"
+  check m2Tripped false                   "B52b CB1 does NOT trip at exactly the projected per-cycle cost"
+  check m2Claimed true                    "B52c ...and the claim relay actually runs at that ceiling"
 
   check nPhase1 true                      "B55 the claim prompt names lib/goal-phase1.sh"
   check nLauncher true                    "B56 the claim prompt names lib/solve-launcher.sh"

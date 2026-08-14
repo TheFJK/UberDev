@@ -144,8 +144,9 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`1 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
+| CB1 | projected agents (`1 + issues + (6 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. Amended by #508: a design-tier issue's implement phase is a per-task chain bounded by CB3's `implementBudget` (default 24), not the single solver it used to be. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
+| CB3 | (#508) live per-issue implement-phase agent counter over `implementBudget` → stop the task loop, record the remaining tasks `SKIPPED`, audit `implement_budget_exhausted`, and still deliver what is committed |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue alone |
 | — | `underRunDir()` on every agent-returned artifact path before it reaches a downstream prompt |

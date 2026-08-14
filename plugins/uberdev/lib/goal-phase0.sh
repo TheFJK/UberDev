@@ -440,7 +440,7 @@ uberdev_emit_workflow_args goal \
   onlyMine="$([ "$only_mine" = "1" ] && echo true || echo false)" \
   resumed="$([ "$resume" = "1" ] && echo true || echo false)" \
   backend="$UBERDEV_RESOLVED_BACKEND" \
-  maxAgents="${UBERDEV_GOAL_MAX_AGENTS:-250}"
+  maxAgents="${UBERDEV_GOAL_MAX_AGENTS:-900}"
 
 echo "goal: run $GOAL_ID prepared (issues=${queue[*]:-none} max_cycles=$MAX_CYCLES max_parallel=$MAX_PARALLEL backend=$UBERDEV_RESOLVED_BACKEND)" >&2
 echo "Relay the JSON between WORKFLOW_ARGS_BEGIN/WORKFLOW_ARGS_END verbatim into Workflow({scriptPath: \"$GOAL_WORKFLOW_JS\"}, <args>)." >&2
