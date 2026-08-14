@@ -3306,13 +3306,42 @@ assert_grep "$GOAL_P0" "head -c2 \"\\\$0\""                                  "G4
 # was a spurious exit 2 on the very first fence under the zsh Bash tool). We run
 # the guard up to the point it would reach the rest of Phase-0, then echo a
 # sentinel; a clean run prints the sentinel and resolves UBERDEV_GOAL_BASH.
-if command -v zsh >/dev/null 2>&1 && { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }; then
+#
+# #521 — the two capabilities this row needs are PROBED, never inferred from one
+# host's filesystem layout. The old gate was
+#   command -v zsh && { [ -x /opt/homebrew/bin/bash ] || [ -x /usr/local/bin/bash ]; }
+# whose `-x` arms never consult PATH. ubuntu-latest has bash 5 at /usr/bin/bash
+# and the job apt-get installs zsh, yet BOTH brew paths are absent there — so the
+# only BEHAVIOURAL proof of #294 skipped on every CI platform (verified in the
+# job logs: `SKIP G41.zsh-guard-behavioural` on shape-checks AND on
+# shape-checks-windows), and the skip text blamed the wrong thing.
+#
+# The candidate list below is the production resolver's own list in its own
+# order (lib/goal-phase0.sh's `bash4-resolver` region; the same loop already
+# runs at tests/goal-pipeline-zsh.test.sh P0d), written LITERALLY rather than
+# through a scalar — `for x in $SCALAR` is this repo's recurring zsh-breaking
+# bashism. Each candidate's MAJOR version is verified >= 4, so a stock-macOS
+# 3.2 `bash` on PATH can never satisfy the gate.
+_g41_zsh="$(command -v zsh 2>/dev/null || true)"
+_g41_bash=""
+for _g41_cand in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
+  [ -n "$_g41_cand" ] && [ -x "$_g41_cand" ] || continue
+  _g41_major="$("$_g41_cand" -c 'echo "${BASH_VERSINFO[0]:-0}"' 2>/dev/null)"
+  case "$_g41_major" in ''|*[!0-9]*) continue ;; esac
+  if [ "$_g41_major" -ge 4 ]; then _g41_bash="$_g41_cand"; break; fi
+done
+if [ -n "$_g41_zsh" ] && [ -n "$_g41_bash" ]; then
+  # Uncounted INFO, deliberately not a PASS row: naming the two resolved binaries
+  # makes the job log say WHICH host arm ran, but a counted row that merely
+  # restates the gate that just succeeded could never fail, and this file's whole
+  # subject right now is rows that cannot fail.
+  echo "  INFO  G41 capabilities resolved: zsh=$_g41_zsh bash>=4=$_g41_bash"
   _g41_guard="$(extract_region bash4-resolver "$GOAL_P0")"
   # Stop the extracted guard before the (undefined-in-isolation) Phase-0 body by
   # appending a sentinel echo; the guard arms either exit 2 (bug), exec away, or
   # fall through to here.
   _g41_script="$_g41_guard"$'\n''echo "__G41_REACHED__:UBERDEV_GOAL_BASH=${UBERDEV_GOAL_BASH:-unset}"'
-  _g41_out="$(/bin/zsh -c "$_g41_script" 2>&1)"; _g41_rc=$?
+  _g41_out="$("$_g41_zsh" -c "$_g41_script" 2>&1)"; _g41_rc=$?
   if [ "$_g41_rc" != "2" ] && grep -q '__G41_REACHED__' <<<"$_g41_out"; then
     PASS=$((PASS+1)); echo "  PASS  G41.zsh-guard-no-spurious-exit2 (rc=$_g41_rc, reached body)"
   else
@@ -3325,7 +3354,25 @@ if command -v zsh >/dev/null 2>&1 && { [ -x /opt/homebrew/bin/bash ] || [ -x /us
     FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-resolved-bash-path (out: $_g41_out)" >&2
   fi
 else
-  echo "  SKIP  G41.zsh-guard-behavioural (zsh or bash>=4 not available on this host)"
+  # A missing capability is now reported as the specific thing that was missing,
+  # and it only DOWNGRADES to a skip where the capability genuinely cannot exist.
+  _g41_zsh_diag="${_g41_zsh:-NOT FOUND via \`command -v zsh\`}"
+  _g41_bash_diag="${_g41_bash:-NOT FOUND; probed /opt/homebrew/bin/bash, /usr/local/bin/bash, and $(command -v bash 2>/dev/null || echo '<no bash on PATH>')}"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Git Bash / MSYS ships no zsh and there is no supported way to install one
+      # in this job, so the #294 resolver's zsh arm cannot be hosted here at all.
+      # Announced, not silent: the row names the capability AND where it looked,
+      # and names what still covers the region on this platform.
+      echo "  SKIP  G41.zsh-guard-behavioural — this Windows host cannot host the zsh arm of the #294 resolver: zsh=[$_g41_zsh_diag] bash>=4=[$_g41_bash_diag]. The region is still asserted here by the G41.* structural rows above, and executed under bash by G52."
+      ;;
+    *)
+      # Every POSIX platform in the matrix CAN host both, so a missing one is a
+      # broken environment, not a legitimate exemption — fail loudly instead of
+      # skipping into a green (issue #521).
+      FAIL=$((FAIL+1)); echo "  FAIL  G41.zsh-guard-behavioural — missing capability on $(uname -s): zsh=[$_g41_zsh_diag] bash>=4=[$_g41_bash_diag]" >&2
+      ;;
+  esac
 fi
 
 echo

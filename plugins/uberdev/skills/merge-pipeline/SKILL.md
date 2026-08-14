@@ -691,7 +691,7 @@ c. The extracted `<trailer-sha>` is delegated to the `trust-trail-evaluator` age
    DISCOVERY_STATE=indeterminate; DISCOVERY_STDERR=""
    # A temporary-allocation failure is indeterminate. It can never collapse
    # into the exhaustive-absence branch.
-   if DISCOVERY_STDERR="$(mktemp)"; then
+   if DISCOVERY_STDERR="$(mktemp "${TMPDIR:-/tmp}/uberdev-discovery-stderr-XXXXXX")"; then
      if AUDIT_VERDICT_RECEIPT="$(discover_review_verdict_json "$PR_NUMBER" 2>"$DISCOVERY_STDERR")"; then
        DISCOVERY_RC=0
      else

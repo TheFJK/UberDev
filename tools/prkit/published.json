@@ -191,6 +191,7 @@
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json",
     "shared/code-fixer-output-v1.md",
+    "skills/merge-pipeline/SKILL.md",
     "skills/merge-pipeline/lib/discover.sh"
   ]
 }
