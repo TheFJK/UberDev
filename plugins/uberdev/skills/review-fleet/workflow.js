@@ -460,9 +460,13 @@ function iterSuffix() {
 }
 
 // --------------------- untrusted-input envelope (DR-5) ---------------------
-// NO JS-side SHARED:envelope block here, the scan-fleet/solve-fleet way
-// (scan-fleet/workflow.js:102-111; solve-fleet/workflow.js:48-56): nothing in
-// this script's prompts embeds agent-returned content. The canonical artifacts
+// NO JS-side SHARED:envelope block here, the scan-fleet way
+// (scan-fleet/workflow.js, its own DR-5 note): nothing in this script's prompts
+// embeds agent-returned content. solve-fleet is deliberately NOT cited as a
+// precedent any more — it CARRIES an envelope block since #507 began forwarding
+// the spec reviewer's blockingFindings into the plan prompt, which is the very
+// trigger this note describes, so naming it here would point a reader at a
+// counter-example. The canonical artifacts
 // are enveloped by their PRODUCERS — post_review_write_aggregate_v2 and
 // encode-aggregate write it as the file's own leading/trailing bytes — and
 // every prompt passes them BY PATH, with an explicit "do NOT re-wrap" clause.

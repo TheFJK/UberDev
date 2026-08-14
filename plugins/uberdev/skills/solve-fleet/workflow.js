@@ -819,8 +819,10 @@ function deliverPrompt(rec) {
     + "Return via StructuredOutput: issue (" + rec.issue + "), status (PR_OPENED | PUSHED_NO_PR | "
     + "COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED | REFUSED | FAILED), branch (the branch name you "
     + 'pushed, or ""), prNumber (the integer PR number parsed from the gh URL, or 0), prUrl (or ""), '
-    + "commitCount (integer commits on the branch), testsRun (true only if you actually executed "
-    + "tests), summary (<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\").";
+    + "commitCount (integer commits on the branch), testsRunClaimed (true only if you actually "
+    + "executed tests — this is recorded as YOUR CLAIM and is not verified; do not report it true "
+    + "unless you ran them), summary (<=400 chars), blocker (why you stopped, when REFUSED or "
+    + "FAILED; else \"\").";
 }
 
 // ----------------------------- run state -----------------------------

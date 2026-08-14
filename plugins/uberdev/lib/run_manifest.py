@@ -122,8 +122,10 @@ ALLOWED_FIELDS = frozenset(
         #   3. The successor reuse mechanism (run-dir artifact reuse, per
         #      RFC 0012 §3.5's "thin preflight probe") inherits an already
         #      validated field instead of re-opening three sites plus the RFC.
-        # tests/docs-accuracy.test.sh T14 keeps this entry and RFC 0013 §13
-        # compared in both directions, so it cannot rot unnoticed again.
+        # tests/docs-accuracy.test.sh T15.1-T15.4 keeps this entry and RFC 0013
+        # §13 compared in both directions (T15.4 is the retention assert for this
+        # reserved field specifically), so it cannot rot unnoticed again. T14 is
+        # the unrelated solve-fleet CB1 row and asserts nothing about this schema.
         "cache_hit",
         "terminal_status",
         "error_class",
