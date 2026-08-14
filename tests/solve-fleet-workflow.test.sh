@@ -1573,9 +1573,47 @@ function probedNums(record) {
   out.daChainComplete = da11 ? da11.chainComplete : null;
   out.daNoPartial = !!(da11 && !da11.partialDelivery);
 
+  // --- Runs ZC / ZD: the arm where the WHOLE chain committed nothing --------
+  // Every chain run above gives at least one task a non-zero commit count, so
+  // the totalCommits===0 arm never executed and neither of the two things it
+  // decides was pinned: the no-change predicate (which demands the rewritten
+  // status AND the implementer's own preserved claim — the twin of the ledger
+  // predicate runs DS/DA cover, and getting THAT one wrong was a real defect),
+  // and the decision to synthesize the record rather than dispatch a delivery
+  // agent that would only be invited to invent work.
+  //
+  // The pair differs in ONE thing: what the agents CLAIMED. A predicate keyed on
+  // the rewritten status alone gives both the same answer, so ZD is what makes
+  // ZC mean something — a chain whose tasks all claimed DONE while committing
+  // nothing would otherwise publish "no change was needed" with no PR, and the
+  // unattended /goal loop would converge on the issue as needing no work.
+  const zcReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2, status: "NO_CHANGES", commitCount: 0 }),
+    "impl:#11:t2": task(2, { status: "NO_CHANGES", commitCount: 0 }),
+  });
+  const recZC = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: zcReturns });
+  const resZC = resultOf(recZC);
+  const zc11 = resZC ? resZC.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.zcStatus = zc11 ? zc11.status : null;
+  out.zcNoDeliver = labels(recZC).indexOf("deliver:#11") < 0;
+  out.zcBlocker = zc11 ? zc11.blocker : null;
+  out.zcCommits = zc11 ? zc11.commitCount : null;
+
+  const zdReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2, status: "DONE", commitCount: 0 }),
+    "impl:#11:t2": task(2, { status: "DONE", commitCount: 0 }),
+  });
+  const recZD = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: zdReturns });
+  const resZD = resultOf(recZD);
+  const zd11 = resZD ? resZD.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.zdStatus = zd11 ? zd11.status : null;
+  out.zdNoDeliver = labels(recZD).indexOf("deliver:#11") < 0;
+  out.zdBlockerNames = !!(zd11 && typeof zd11.blocker === "string"
+    && zd11.blocker.indexOf("the task chain committed nothing for issue #11") >= 0);
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA]
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -1878,6 +1916,14 @@ else
   check dsToldWhich true          "B184 delivery is told which task disputed — never that the implementation is DONE and reviewed"
   check daChainComplete true      "B185 an AGREED no-change is not disputed, so the chain is still complete"
   check daNoPartial true          "B186 ...and no partialDelivery object is published for it"
+
+  check zcStatus '"NO_CHANGES_NEEDED"' "B187 a chain whose tasks ALL agreed there was nothing to do publishes NO_CHANGES_NEEDED"
+  check zcNoDeliver true          "B188 ...and dispatches no delivery agent, which would only be invited to invent work"
+  check zcBlocker '""'            "B189 ...with no blocker: agreement is not a failure"
+  check zcCommits 0               "B190 ...and zero commits are reported, not inferred"
+  check zdStatus '"FAILED"'       "B191 the SAME chain whose tasks claimed DONE while committing nothing is FAILED, never no-change-needed"
+  check zdNoDeliver true          "B192 ...and still dispatches no delivery agent — there is nothing committed to deliver"
+  check zdBlockerNames true       "B193 ...and the blocker names the issue and points at the worktree, so /goal cannot read it as solved"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
 fi
