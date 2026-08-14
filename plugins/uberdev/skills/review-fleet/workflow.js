@@ -964,7 +964,14 @@ function phase2OutputContract(lens) {
     + "`lens` must be exactly `" + lens + "`; a `lens` that disagrees with the dispatching edge is "
     + "refused rather than re-mapped, because the edge is the controller's knowledge and the field "
     + "is your claim. One record per `path:line`. A completed lens with zero findings is exactly "
-    + "`findings: []` inside the same fence.";
+    + "`findings: []` inside the same fence.\n"
+    + "Every value is a SINGLE-LINE scalar. Block scalars (`>`, `>-`, `|`, `|-`) and multi-line "
+    + "values are refused by the controller's parser, which accepts only a plain, single-quoted or "
+    + "double-quoted one-line scalar. A plain scalar may not begin with `-?:,[]{}#&*!|>@\\`` and may "
+    + "not contain `: ` or ` #` — if your text needs any of those, double-quote the whole value. "
+    + "This is stated because it is ENFORCED: a folded `detail: >-` is a well-formed YAML document "
+    + "that this edge rejects, and a lens refused for its serialization loses findings that were "
+    + "never wrong.";
 }
 
 function lensPrompt(entry, nonce) {
