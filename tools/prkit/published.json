@@ -192,6 +192,7 @@
     "lib/command-workspace.py",
     "lib/config-read.sh",
     "lib/review-aggregate.sh",
+    "lib/run_manifest.py",
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json",
     "shared/code-fixer-output-v1.md",

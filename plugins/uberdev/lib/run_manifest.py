@@ -110,6 +110,20 @@ ALLOWED_FIELDS = frozenset(
         "retry_count",
         "fallback_from",
         "fallback_reason",
+        # RESERVED — declared normatively by RFC 0013 §13 and bool-validated
+        # below, but with no in-tree emitter: the artifact-reuse short-circuit
+        # that would have set it was deleted in #308 / RFC 0012 §3.5.
+        # Kept rather than dropped for three reasons (#518):
+        #   1. RFC 0013 is Accepted and lists this field in its MUST-support
+        #      set; removing it here without an amendment ships code that
+        #      rejects a field the RFC promises.
+        #   2. Removal is a schema NARROWING: an out-of-tree producer's event
+        #      flips from accepted to a hard rc=2 `unknown_field: cache_hit`.
+        #   3. The successor reuse mechanism (run-dir artifact reuse, per
+        #      RFC 0012 §3.5's "thin preflight probe") inherits an already
+        #      validated field instead of re-opening three sites plus the RFC.
+        # tests/docs-accuracy.test.sh T14 keeps this entry and RFC 0013 §13
+        # compared in both directions, so it cannot rot unnoticed again.
         "cache_hit",
         "terminal_status",
         "error_class",

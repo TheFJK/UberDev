@@ -14,11 +14,17 @@ ISSUE_CMD="$REPO_ROOT/plugins/uberdev/commands/issue.md"
 BRAINSTORM="$REPO_ROOT/plugins/uberdev/skills/brainstorm/SKILL.md"
 CODEBASE_SCOUT="$REPO_ROOT/plugins/uberdev/agents/codebase-scout.md"
 TRIAGE_SCOUT="$REPO_ROOT/plugins/uberdev/agents/triage-scout.md"
+SOLVE_LAUNCHER="$REPO_ROOT/plugins/uberdev/lib/solve-launcher.sh"
+SPEC_WRITER="$REPO_ROOT/plugins/uberdev/agents/spec-writer.md"
+SOLVE_SKILL="$REPO_ROOT/plugins/uberdev/skills/solve-pipeline/SKILL.md"
 
 # Pre-flight: refuse to run if the files we're asserting against are missing
 # or unreadable — without this, every assertion fails with a confusing
-# "pattern not found" instead of the real cause.
-for f in "$ISSUE_CMD" "$BRAINSTORM" "$CODEBASE_SCOUT" "$TRIAGE_SCOUT"; do
+# "pattern not found" instead of the real cause. Every path an assert_no_grep
+# below names MUST be in this loop: assert_no_grep passes trivially against a
+# missing or emptied file, so a moved path would go vacuously green.
+for f in "$ISSUE_CMD" "$BRAINSTORM" "$CODEBASE_SCOUT" "$TRIAGE_SCOUT" \
+         "$SOLVE_LAUNCHER" "$SPEC_WRITER" "$SOLVE_SKILL"; do
   if [ ! -r "$f" ]; then
     echo "FATAL: required file missing or unreadable: $f" >&2
     exit 2
@@ -247,6 +253,53 @@ assert_no_grep "$ISSUE_CMD" \
 assert_no_grep "$ISSUE_CMD" \
   '## Constraints' \
   "## Constraints heading removed from feat template"
+
+echo
+echo "== Legacy research-cache readers retired (#518) =="
+# This roster is DELIBERATELY not repo-wide. The `.uberdev/research/issue-`
+# literal legitimately survives in four places, and a repo-wide sweep would
+# red on all of them:
+#   1. skills/orchestrator/SKILL.md:16   — the retained trust rule (kept
+#      verbatim for any future reintroduction of artifact reuse).
+#   2. skills/orchestrator/SKILL.md:373  — the deletion decision record.
+#   3. skills/finish-branch/SKILL.md:185 — the deleted-glob comment, itself
+#      positively pinned by finish-branch-auto-chain.test.sh G2.
+#   4. CHANGELOG.md                      — append-only release history; six
+#      hits that describe the cache as it was, and must never be rewritten.
+# What must NOT survive is a live *reader*: an instruction that tells an agent
+# or a solver to go read that path today.
+assert_no_grep "$SOLVE_LAUNCHER" \
+  '\.uberdev/research/issue-' \
+  "solve-launcher heredocs no longer read .uberdev/research/issue- (#518)"
+assert_no_grep "$SOLVE_LAUNCHER" \
+  'Read pre-collected research' \
+  "solve-launcher has no 'Read pre-collected research' prompt step (#518)"
+assert_no_grep "$SOLVE_LAUNCHER" \
+  'pre-collected-research' \
+  "solve-launcher branch comments drop the pre-collected-research claim (#518)"
+assert_no_grep "$SOLVE_SKILL" \
+  'Read pre-collected research' \
+  "solve-pipeline triage table drops the retired research-read step (#518)"
+assert_no_grep "$SPEC_WRITER" \
+  '\.uberdev/research/issue-' \
+  "spec-writer trust rule no longer names the retired cache path (#518)"
+assert_no_grep "$SPEC_WRITER" \
+  'cached short-circuit' \
+  "spec-writer no longer cites the deleted Phase-1 cached short-circuit (#518)"
+# Positive locks. Each negative above is paired with one of these on the same
+# file, so "reworded" is distinguishable from "deleted" or "emptied".
+assert_grep "$SPEC_WRITER" \
+  'cached-research-issue-' \
+  "spec-writer keeps the untrusted-input envelope source tag"
+assert_grep "$SPEC_WRITER" \
+  'research_paths' \
+  "spec-writer trust rule keeps its live subject (research_paths entries)"
+assert_grep "$SOLVE_LAUNCHER" \
+  'gh issue view' \
+  "solve-launcher trivial/small prompt heredocs still exist"
+assert_grep "$SOLVE_SKILL" \
+  'lightweight TodoWrite plan' \
+  "solve-pipeline small row still describes a workflow"
 
 echo
 echo "== Summary =="

@@ -935,6 +935,18 @@ fi
 # machines over `^if \[\[ "\$AUTO_MODE" ... \]\]; then$` / `^else$` / `^fi$`
 # anchors. Do not indent these blocks; do not add a third column-0
 # `if [[ "$AUTO_MODE" == "1" ]]; then` line (anchor count is locked at 2).
+#
+# The deletion half of the same contract: after #518 the interactive and turbo
+# heredocs in each tier differ only by the `--turbo` suffix and one sentence, so
+# collapsing the if/else/fi pair looks like free deduplication. Do NOT.
+# tests/post-impl-review.test.sh drives an awk state machine over
+# `^if \[\[ "\$AUTO_MODE" != "1" \]\]; then$` / `^else$` / `^fi$` / `<< EOF` /
+# `^EOF$` and hard-fails `setup error` if either extracted body comes back
+# empty; tests/turbo-flow.test.sh locks DIRECTIVE_COUNT and INVOKE_COUNT at
+# exactly 4, and both fall to 2 on a collapse. (The `== "1"` anchor count at
+# turbo-flow.test.sh does NOT cover this pair — it counts the `== "1"` form,
+# which these branches do not use.) Removing a line from *inside* a heredoc is
+# safe; reshaping the block around one is not.
 SPAWNED=()
 DISPATCH_FAILED=()
 _pidx=0
@@ -949,18 +961,19 @@ TITLE="${TITLES[$_pidx]}"
 case "$TIER" in
 trivial)
 if [[ "$AUTO_MODE" != "1" ]]; then
-# trivial heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+# trivial heredoc — interactive (/solve): no research read (the legacy per-issue
+# research cache was retired in #308 / RFC 0012 §3.5; its last readers went in
+# #518); post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM directly. Triaged as TRIVIAL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your working context. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues whose research was persisted under the previous fanout.
-3. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
-4. Add/update a test ONLY if the touched code is already tested.
-5. Run the relevant test file + lint for that package.
-6. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-7. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+2. Make the minimal edit. No redesign, no surrounding refactor, no "while I'm here" cleanup.
+3. Add/update a test ONLY if the touched code is already tested.
+4. Run the relevant test file + lint for that package.
+5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+6. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
@@ -987,17 +1000,18 @@ fi
 ;;
 small)
 if [[ "$AUTO_MODE" != "1" ]]; then
-# small heredoc — interactive (/solve): pre-collected-research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
+# small heredoc — interactive (/solve): no research read (the legacy per-issue
+# research cache was retired in #308 / RFC 0012 §3.5; its last readers went in
+# #518); post-push reviewer fanout runs in /uberdev:review-pr Phase 1
 cat > "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" << EOF
 Solve GH issue #$ISSUE_NUM with a lightweight plan. Triaged as SMALL.
 
 Steps:
 1. \`gh issue view $ISSUE_NUM\` — read the ask.
-2. **Read pre-collected research (legacy cache)** — for each file in \`.uberdev/research/issue-$ISSUE_NUM/{constraints,prior-art,security}.md\` that exists, read the \`summary:\` block and inline its key findings into your TodoWrite plan as constraints/considerations. After issue #14 the cache is no longer written by \`/issue\`, so this step typically no-ops; left in place for legacy issues.
-3. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
-4. TDD: write the failing test first, then implement, then green.
-5. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
-6. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
+2. Write 3–6 TodoWrite tasks. Skip /uberdev:brainstorm — scope is clear.
+3. TDD: write the failing test first, then implement, then green.
+4. Commit with conventional message. Include \`Closes #$ISSUE_NUM\` in the eventual PR body.
+5. **Hand off to \`uberdev:finish-branch\`.** finish-branch owns push, PR creation with URL validation, and the canonical \`Skill("uberdev:review-pr")\` chain hand-off (Phase 2 runs the 3-lens simplify ceremony — reuse / quality / efficiency — on the strictly larger diff). Findings are advisory — do NOT block on REVISIONS_REQUIRED (the auto-fix loop is deferred).
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
