@@ -1685,6 +1685,191 @@ else
 fi
 
 echo
+echo "== V30-V33: the review point, reconciled against RFC 0019 =="
+# Emitted as its own section header because the V10-V29 header above announces
+# "falsifiability — mutate one site, demand the NAMED check id" and is never
+# closed. These four rows are register/RFC assertions, not checker mutations, so
+# without this line the suite's own section labelling would misdescribe them.
+#
+# All four are pure Python over the committed register and the committed RFC —
+# no checker in the loop, no make_sandbox (each sandbox copies the whole plugin
+# tree, and nothing here needs one).
+
+VENDOR_RFC_DOC="$REPO_ROOT/docs/rfc/0019-vendored-upstream-policy.md"
+[ -r "$VENDOR_RFC_DOC" ] || { echo "FATAL: RFC 0019 missing: $VENDOR_RFC_DOC" >&2; exit 2; }
+
+# V30 — watermark cohesion per upstream.
+#
+# THE CLASS: a partial re-baseline. A walk advances some of an upstream's
+# components and misses others, leaving one upstream described by two different
+# review points. Nothing else notices: C-WATERMARK only proves each value is
+# 40 hex and an ISO date, and vendor-drift.test.sh's git stub returns a single
+# SHA for every repo, so its D1 row never compares components to each other.
+if python3 - "$REGISTER" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+ups = d["upstreams"]
+by_up = {}
+for c in d["components"]:
+    u = c.get("upstream")
+    if u:
+        by_up.setdefault(u, []).append(c)
+# Anti-vacuity: an emptied or renamed register must red here, not sail through.
+declared = {u: cs for u, cs in by_up.items() if "last_reviewed_commit" in ups.get(u, {})}
+assert len(declared) >= 2, (
+    "expected >= 2 upstreams carrying last_reviewed_commit, found %d" % len(declared))
+for u, cs in sorted(declared.items()):
+    assert cs, "upstream %s is declared by no component" % u
+    want = ups[u]["last_reviewed_commit"]
+    for c in cs:
+        got = c.get("last_reviewed_upstream_commit")
+        assert got == want, (
+            "component %s carries watermark %s but upstream %s was reviewed at %s"
+            % (c["id"], got, u, want))
+PY
+then ok "V30 every component's watermark equals its own upstream's review point"
+else no "V30 a component's watermark disagrees with its upstream's review point"
+fi
+
+# V31 — the review point is reconciled against RFC 0019 (the V24 idiom).
+#
+# THE CLASS: the register advances and the policy prose does not, so the RFC a
+# reviewer reads to decide whether a watermark is trustworthy describes a review
+# that no longer exists. This row is what makes the next delta cheap to catch:
+# at v6.4.0 the register moves and the RFC must move with it or this reds.
+if python3 - "$REGISTER" "$VENDOR_RFC_DOC" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+rfc = open(sys.argv[2], encoding="utf-8").read()
+labelled = {u: m for u, m in d["upstreams"].items() if m.get("last_reviewed_release")}
+# Anti-vacuity: zero release labels is a failure, not a pass. Without this arm,
+# deleting every last_reviewed_release would make the loop below iterate over
+# nothing and report success.
+assert labelled, "no upstream carries last_reviewed_release — nothing to reconcile"
+for u, meta in sorted(labelled.items()):
+    rel = meta["last_reviewed_release"]
+    assert rel in rfc, (
+        "RFC 0019 never names %s, the release %s was reviewed at" % (rel, u))
+    sha = meta.get("last_reviewed_commit", "")
+    assert len(sha) == 40, "upstream %s: last_reviewed_commit is not 40 hex" % u
+    assert sha[:12] in rfc, (
+        "RFC 0019 never names %s, the commit %s was reviewed at" % (sha[:12], u))
+PY
+then ok "V31 every labelled upstream review point is named by RFC 0019"
+else no "V31 an upstream review point is not reconciled against RFC 0019"
+fi
+
+# V32 — every verdict row in an RFC adjudication table carries exactly one
+# verdict token, and every ADOPT cites an issue.
+#
+# THE CLASS: a walk that advances the watermark while quietly dropping a path
+# out of its own table, or an ADOPT with no filed issue behind it — the two ways
+# "adjudicated, not inherited" degrades into "inherited, with a table".
+if python3 - "$VENDOR_RFC_DOC" <<'PY'
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+TOKENS = ("ADOPT", "SKIP", "DECLINED", "DEFERRED")
+
+def cells(line):
+    # Split on UNESCAPED pipes only. RFC 0019 legitimately carries `\|` inside
+    # backticked commands in a reasoning cell (the `git worktree list \| grep`
+    # row in the 6.1.0->6.2.0 table). A naive line.split("|") sees an extra
+    # field there, so any parser that gates a row on "cell count == header cell
+    # count" would silently drop that row — and it is the single most
+    # consequential row in that table.
+    parts = re.split(r'(?<!\\)\|', line)
+    if parts and not parts[0].strip():
+        parts = parts[1:]
+    if parts and not parts[-1].strip():
+        parts = parts[:-1]
+    return [p.strip() for p in parts]
+
+runs, cur = [], []
+for line in lines:
+    if line.lstrip().startswith("|"):
+        cur.append(line)
+    else:
+        if cur:
+            runs.append(cur)
+        cur = []
+if cur:
+    runs.append(cur)
+
+checked_tables = 0
+checked_rows = 0
+for run in runs:
+    header = cells(run[0])
+    if "Verdict" not in header:
+        continue
+    idx = header.index("Verdict")
+    checked_tables += 1
+    for line in run[1:]:
+        row = cells(line)
+        if all(re.fullmatch(r':?-{3,}:?', c or '-') for c in row):
+            continue  # delimiter row
+        assert idx < len(row), "row has no Verdict cell: %s" % line[:90]
+        # Scan the VERDICT CELL ONLY. Reasoning cells legitimately contain
+        # lowercase prose like "skipped as already covered" and "not declined".
+        cell = row[idx]
+        hits = [t for t in TOKENS if re.search(r'\b%s\b' % t, cell)]
+        assert len(hits) == 1, (
+            "expected exactly one verdict token, found %s in cell %r" % (hits, cell))
+        if hits[0] == "ADOPT":
+            assert re.search(r'#\d+', cell), (
+                "ADOPT with no filed issue cited: %r" % cell)
+        checked_rows += 1
+
+# Anti-vacuity, mirroring C-REFS' own vacuity arm: finding no qualifying table,
+# or a qualifying table with no data rows, is a failure. Otherwise renaming the
+# "Verdict" header would turn this row into a permanent green that checks
+# nothing.
+assert checked_tables >= 1, "no RFC table has a Verdict column — nothing adjudicated"
+assert checked_rows >= 1, "a Verdict table was found but it has no data rows"
+print("V32 corpus: %d table(s), %d verdict row(s)" % (checked_tables, checked_rows))
+PY
+then ok "V32 every RFC verdict row carries one token, and every ADOPT cites an issue"
+else no "V32 an RFC verdict row is missing a token, is ambiguous, or is an uncited ADOPT"
+fi
+
+# V33 — review-date floor.
+#
+# THE CLASS: "advanced the SHA, forgot the date". A component sitting at its
+# upstream's current review point must have been reviewed no earlier than that
+# point. A component reviewed AHEAD of it is legal and stays legal — a single
+# component can be re-reviewed early, out of band, before the next whole-upstream
+# walk moves everything else — so this is a floor, not an equality.
+if python3 - "$REGISTER" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+ups = d["upstreams"]
+ISO = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+compared = 0
+for c in d["components"]:
+    u = c.get("upstream")
+    if not u or "last_reviewed_commit" not in ups.get(u, {}):
+        continue
+    if c.get("last_reviewed_upstream_commit") != ups[u]["last_reviewed_commit"]:
+        continue
+    floor = ups[u].get("last_reviewed_on", "")
+    got = c.get("last_reviewed_on", "")
+    # Validate the shape before comparing: ISO strings compare lexicographically
+    # ONLY while they are well-formed, and a malformed date would otherwise
+    # compare as "greater" and pass.
+    assert ISO.match(floor), "upstream %s: last_reviewed_on %r is not ISO" % (u, floor)
+    assert ISO.match(got), "component %s: last_reviewed_on %r is not ISO" % (c["id"], got)
+    assert got >= floor, (
+        "component %s was reviewed %s but sits at %s's %s review point"
+        % (c["id"], got, u, floor))
+    compared += 1
+# Anti-vacuity: if no component sits at its upstream's review point, this row
+# asserted nothing.
+assert compared >= 1, "no component sits at its upstream's review point — nothing compared"
+PY
+then ok "V33 no component sits at its upstream's review point with an older review date"
+else no "V33 a component carries a review date older than the review point it sits at"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
