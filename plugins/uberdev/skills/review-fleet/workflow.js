@@ -616,6 +616,19 @@ const CI_FIX_ARMS = {
   },
 };
 
+// The audit label for what the classify child SAID, as a named three-way
+// membership test rather than a chained ternary at the call site: `null` (no
+// string came back at all), the empty declination the enum admits on purpose,
+// an in-enum class echoed as itself, and anything else placeheld. Every arm
+// returns a STRING and nothing downstream branches on the result — the routing
+// scalar is derived controller-side, never here. Kept beside the enum it tests
+// so the four outcomes and the list they are tested against stay together.
+function ciClaimLabel(raw) {
+  if (raw === null) return "(unrecognised)";
+  if (raw === "") return "(none)";
+  return (CI_FAILURE_CLASSES.indexOf(raw) >= 0) ? raw : "(unrecognised)";
+}
+
 // ---- schemas (DR-4: structured returns, enums closed, counts integers) ----
 // Returns stay THIN. Disk is the evidence channel and the controller re-reads
 // it; the structured return carries paths, counts and a bounded note only.
@@ -1910,17 +1923,17 @@ async function main() {
       // the audit row. A string outside CI_FAILURE_CLASSES is reported as
       // `(unrecognised)` and never echoed: the enum is enforced by the runtime,
       // but an audit row must not repeat an arbitrary child-chosen string, and
-      // the placeholder is a LOUDER signal than a passthrough would be.
+      // the placeholder is a LOUDER signal than a passthrough would be. The
+      // four outcomes live in ciClaimLabel(), beside the enum they are tested
+      // against.
       //
       // The `&&` below guards a NULL RETURN, not the class. This is the only
       // read of the property in the file and it is an assignment; nothing
-      // downstream branches on the value, because the test produces a STRING
-      // and no control flow at all.
+      // downstream branches on the value, because the label is a STRING and no
+      // control flow at all keys off it.
       const claim = classifyRet && classifyRet.failureClass;
       const claimedRaw = (typeof claim === "string") ? claim : null;
-      const claimed = (claimedRaw === null) ? "(unrecognised)"
-        : (claimedRaw === "" ? "(none)"
-          : (CI_FAILURE_CLASSES.indexOf(claimedRaw) >= 0 ? claimedRaw : "(unrecognised)"));
+      const claimed = ciClaimLabel(claimedRaw);
       auditEvents.push({ event: "ci_classify_child_claim", edge: "review_pr.ci.classify",
         claimedFailureClass: claimed, ts: nowIso });
       log("ci-classify: child CLAIMED " + claimed + " — the controller now re-reads the "

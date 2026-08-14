@@ -738,6 +738,28 @@ function reviewPath(issue, k, r) {
   return issueDir(issue) + "/task-" + String(k) + "/review-" + String(r) + ".md";
 }
 
+// The "never work outside the shared checkout" clause, for the two rungs that
+// address an ALREADY-EXISTING one: taskImplPrompt's later tasks and
+// taskFixPrompt. Both are told the same thing because runTaskChain applies the
+// SAME workspaceReady gate to both — they are the only rungs that write — so a
+// wording that drifted on one would tell that agent something the gate does not
+// enforce. One builder makes that impossible rather than merely unlikely.
+function existingCheckoutGate() {
+  return '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout is not '
+    + "there, report BLOCKED — never fall back to the repository root.\n";
+}
+
+// The S.task return line. Both writing rungs answer that one schema, so the
+// FIELD LIST is stated once; only the commitCount parenthetical and task 1's
+// extra taskCount clause differ, and those arrive as arguments. `extraFields`
+// is spliced verbatim and must end with its own separator when non-empty.
+function taskReturnLine(k, wt, commitCountNote, extraFields) {
+  return "Return via StructuredOutput: taskId (" + k + "), status (DONE | NO_CHANGES | BLOCKED), "
+    + "commitCount (" + commitCountNote + "), workspaceReady (true only if you are working "
+    + 'inside "' + wt + '"), ' + extraFields
+    + "summary (<=400 chars), blocker (why you stopped, when BLOCKED; else \"\").";
+}
+
 function taskImplPrompt(rec, planPath, k, isFirst) {
   var wt = issueWorktree(rec.issue);
   var workspace = isFirst
@@ -755,8 +777,7 @@ function taskImplPrompt(rec, planPath, k, isFirst) {
     : ('1. `cd "' + wt + '"` — the shared checkout for this issue, created by task 1, already on its '
       + "branch with the earlier tasks committed. Do ALL of your work there and report "
       + "`workspaceReady: true` only after that `cd` succeeded.\n"
-      + '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout is not '
-      + "there, report BLOCKED — never fall back to the repository root.\n");
+      + existingCheckoutGate());
   return "You are the implementer for Task " + k + " of GitHub issue #" + rec.issue + " of "
     + (repoSlug || "this repository") + ".\n\n"
     + workspace
@@ -774,14 +795,11 @@ function taskImplPrompt(rec, planPath, k, isFirst) {
     + "\nIf task " + k + " turns out to need no change at all, make none and report NO_CHANGES with "
     + "evidence. If you cannot complete it, report BLOCKED with the reason — do not guess and do not "
     + "half-commit.\n\n"
-    + "Return via StructuredOutput: taskId (" + k + "), status (DONE | NO_CHANGES | BLOCKED), "
-    + "commitCount (integer commits you made — 0 or 1), workspaceReady (true only if you are working "
-    + 'inside "' + wt + '"), '
-    + (isFirst
-      ? "taskCount (how many `## Task <n>:` headings the plan file contains, counted by you — the "
-        + "whole chain is driven by this number, so count them, do not estimate), "
-      : "")
-    + "summary (<=400 chars), blocker (why you stopped, when BLOCKED; else \"\").";
+    + taskReturnLine(k, wt, "integer commits you made — 0 or 1",
+      isFirst
+        ? "taskCount (how many `## Task <n>:` headings the plan file contains, counted by you — the "
+          + "whole chain is driven by this number, so count them, do not estimate), "
+        : "");
 }
 
 function taskReviewPrompt(rec, planPath, k, r) {
@@ -824,8 +842,7 @@ function taskFixPrompt(rec, planPath, k, r) {
     + '1. `cd "' + wt + '"` — the shared checkout for this issue, created by task 1 and already on its '
     + "branch. Do ALL of your work there and report `workspaceReady: true` only after that `cd` "
     + "succeeded. The task is the HEAD commit — read it with `git show HEAD`.\n"
-    + '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout is not '
-    + "there, report BLOCKED — never fall back to the repository root.\n"
+    + existingCheckoutGate()
     + "2. Read the review findings, by path, ALL of them in order:\n" + listed
     + "   If any of those files is missing, report BLOCKED rather than guessing what it said.\n"
     + '3. Read the implementation plan at "' + planPath + '" for the `## Task ' + k + ':` section, so '
@@ -837,9 +854,7 @@ function taskFixPrompt(rec, planPath, k, r) {
     + "else commits in this checkout and nothing is pushed until delivery, so amending is safe and no "
     + "force-push is ever involved. Do NOT push, and do NOT open a PR.\n\n"
     + houseRules() + leafNote()
-    + "\nReturn via StructuredOutput: taskId (" + k + "), status (DONE | NO_CHANGES | BLOCKED), "
-    + "commitCount (1 if the amended commit exists), workspaceReady (true only if you are working "
-    + 'inside "' + wt + '"), summary (<=400 chars), blocker (why you stopped, when BLOCKED; else "").';
+    + "\n" + taskReturnLine(k, wt, "1 if the amended commit exists", "");
 }
 
 // `ledger` is the chain's OWN account of what it finished, built by
@@ -941,21 +956,13 @@ function finalize() {
   // credits a second issue with a pull request that belongs to the first, and
   // nothing downstream can tell. The first record keeps the number; the
   // collision is audited rather than silently deduped.
-  const prsOpened = [];
-  const prSeenNums = {};
-  opened.forEach(function (r) {
-    const n = r.prNumber;
-    // isPosInt (hoisted, declared with the claim-verification helpers below) is
-    // the ONE definition of a usable PR number; the claim-side dedupe in
-    // prNumbersToVerify decides the same question about the same field.
-    if (!isPosInt(n)) return;
-    const key = String(n);
-    if (prSeenNums[key] === 1) {
-      auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });
-      return;
-    }
-    prSeenNums[key] = 1;
-    prsOpened.push(n);
+  // distinctClaimedPrNumbers (hoisted, declared with the claim-verification
+  // helpers below) is the ONE pass that answers this question about this field;
+  // the claim-side call in prNumbersToVerify asks it with a ceiling and no
+  // audit. No ceiling here: a number this pass dropped would be one /goal never
+  // sees at all.
+  const prsOpened = distinctClaimedPrNumbers(0, function (r, n) {
+    auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });
   });
   return {
     runId: runId,
@@ -1013,6 +1020,32 @@ function budgetExhausted() {
   return budget && budget.total && budget.remaining() <= 0;
 }
 
+// ---- the two records the script SYNTHESIZES when no agent produced one ----
+// Both used to be hand-copied object literals at four sites each. The ledger
+// below classifies a task by three fields of the first shape, and the second is
+// what every published count and /goal's queue read, so a field added to one
+// copy and missed on another does not fail — it silently reclassifies whichever
+// record was missed. One builder each makes the shapes identical by
+// construction, and both keep their key ORDER so the emitted JSON is unchanged.
+
+// A task that never produced reviewable work: BLOCKED when a rung stopped the
+// chain, SKIPPED when the chain never reached that rung at all.
+function placeholderTask(id, status) {
+  return { id: id, status: status, reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
+    commitCount: 0, claimedStatus: "" };
+}
+
+// The per-issue FAILED result. `tasks` is attached only where there was a task
+// chain to account for; the single-solver paths pass null and carry none.
+function failedIssue(issue, blocker, commitCount, tasks) {
+  const out = {
+    issue: issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
+    commitCount: commitCount, testsRunClaimed: false, summary: "", blocker: blocker,
+  };
+  if (tasks) out.tasks = tasks;
+  return out;
+}
+
 // The sequential per-task implement chain (issue #508).
 //
 // This is a HELPER OF solveOne, not a separate script: /goal spends the single
@@ -1049,8 +1082,7 @@ async function runTaskChain(rec, planPath) {
     if (impl === null) {
       noteNull("implement");
       auditEvents.push({ event: "task_implementer_null", issue: rec.issue, task: k, ts: nowIso });
-      tasks.push({ id: k, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
-        commitCount: 0, claimedStatus: "" });
+      tasks.push(placeholderTask(k, "BLOCKED"));
       break;
     }
 
@@ -1069,16 +1101,11 @@ async function runTaskChain(rec, planPath) {
         + " — stopping the chain");
       if (k === 1) {
         log("#" + rec.issue + ": nothing is committed here, so NO delivery agent is dispatched");
-        return {
-          issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-          commitCount: 0, testsRunClaimed: false, summary: "",
-          blocker: "the task-1 implementer did not report a usable shared worktree at " + wt,
-          tasks: [{ id: 1, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
-            commitCount: 0, claimedStatus: "" }],
-        };
+        return failedIssue(rec.issue,
+          "the task-1 implementer did not report a usable shared worktree at " + wt,
+          0, [placeholderTask(1, "BLOCKED")]);
       }
-      tasks.push({ id: k, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
-        commitCount: 0, claimedStatus: "" });
+      tasks.push(placeholderTask(k, "BLOCKED"));
       break;
     }
 
@@ -1315,8 +1342,7 @@ async function runTaskChain(rec, planPath) {
   // attempted either, and bounding this loop by taskCount is exactly what let
   // those tasks vanish out of the ledger.
   for (let s = tasks.length + 1; s <= plannedTaskCount; s++) {
-    tasks.push({ id: s, status: "SKIPPED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
-      commitCount: 0, claimedStatus: "" });
+    tasks.push(placeholderTask(s, "SKIPPED"));
   }
 
   if (budgetTripped) {
@@ -1395,13 +1421,10 @@ async function runTaskChain(rec, planPath) {
   if (out === null) {
     noteNull("implement");
     auditEvents.push({ event: "delivery_null", issue: rec.issue, ts: nowIso });
-    return {
-      issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-      commitCount: totalCommits, testsRunClaimed: false, summary: "",
-      blocker: "the delivery agent returned no result; " + totalCommits + " reviewed commit(s) sit in "
+    return failedIssue(rec.issue,
+      "the delivery agent returned no result; " + totalCommits + " reviewed commit(s) sit in "
         + "the shared worktree at " + wt + " and were never pushed",
-      tasks: tasks,
-    };
+      totalCommits, tasks);
   }
   // The agent reports its own issue number; pin it to the manifest record so a
   // confused return can never be attributed to the wrong issue.
@@ -1454,6 +1477,33 @@ async function runTaskChain(rec, planPath) {
 
 function isPosInt(n) { return Number.isInteger(n) && n > 0; }
 
+// The distinct, usable PR numbers the PR_OPENED records claim, in record order.
+// Both callers ask exactly that of exactly that field — finalize() to publish
+// prsOpened, prNumbersToVerify() to build the proof request — so the pass is
+// written once and the two things that genuinely differ are arguments:
+//   `ceiling`     0 = none; otherwise a claim above it is dropped.
+//   `onCollision` called with (record, number) for a repeat claim, or null to
+//                 skip it silently. The FIRST record keeps the number either
+//                 way; a repeat is never emitted twice.
+function distinctClaimedPrNumbers(ceiling, onCollision) {
+  const seen = {};
+  const nums = [];
+  solved.forEach(function (r) {
+    if (!r || r.status !== "PR_OPENED") return;
+    const n = r.prNumber;
+    if (!isPosInt(n)) return;
+    if (ceiling > 0 && n > ceiling) return;
+    const key = String(n);
+    if (seen[key] === 1) {
+      if (onCollision) onCollision(r, n);
+      return;
+    }
+    seen[key] = 1;
+    nums.push(n);
+  });
+  return nums;
+}
+
 // Downgrade = the proof won on `status`. The claim moves into claimed* fields
 // rather than disappearing, so the run summary can still show what the solver
 // said it did next to what GitHub actually has.
@@ -1503,19 +1553,12 @@ function classifyClaimCoherence() {
 // the records that STILL claim PR_OPENED after Step A. Distinct because two
 // solvers reporting the same number is a claim collision, not two probes; and
 // the relay is asked once, so the second record is adjudicated on the same row.
+// A collision is SILENT here and audited in finalize() instead: the relay is
+// asked about each number once, and both records are adjudicated on that one
+// row, so a second request would prove nothing and a second audit event would
+// double-count the one collision.
 function prNumbersToVerify() {
-  const seen = {};
-  const nums = [];
-  solved.forEach(function (r) {
-    if (!r || r.status !== "PR_OPENED") return;
-    const n = r.prNumber;
-    if (!isPosInt(n) || n > 9999999) return;
-    const key = String(n);
-    if (seen[key] === 1) return;
-    seen[key] = 1;
-    nums.push(n);
-  });
-  return nums;
+  return distinctClaimedPrNumbers(9999999, null);
 }
 
 // Every live PR claim retained, but flagged as unproven. The path taken
@@ -1785,11 +1828,8 @@ async function solveOne(rec) {
     if (out === null) {
       noteNull("implement");
       auditEvents.push({ event: "solver_null", issue: rec.issue, ts: nowIso });
-      return {
-        issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-        commitCount: 0, testsRunClaimed: false, summary: "",
-        blocker: "the solver agent returned no result (skipped, or a terminal error after retries)",
-      };
+      return failedIssue(rec.issue,
+        "the solver agent returned no result (skipped, or a terminal error after retries)", 0, null);
     }
     // The agent reports its own issue number; pin it to the manifest record so
     // a confused return can never be attributed to the wrong issue.
@@ -1800,11 +1840,8 @@ async function solveOne(rec) {
       event: "solve_chain_threw", issue: rec.issue,
       reason: (e && e.message) ? e.message : String(e), ts: nowIso,
     });
-    return {
-      issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-      commitCount: 0, testsRunClaimed: false, summary: "",
-      blocker: "the per-issue chain threw: " + ((e && e.message) ? e.message : String(e)),
-    };
+    return failedIssue(rec.issue,
+      "the per-issue chain threw: " + ((e && e.message) ? e.message : String(e)), 0, null);
   }
 }
 
