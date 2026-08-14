@@ -2013,6 +2013,222 @@ else
 fi
 
 echo
+echo "== T16: solve-fleet SKILL.md <-> workflow.js per-task record, compared both directions (#558) =="
+# SKILL.md is the ONLY declaration of the per-task record the fleet publishes,
+# and it was minted already wrong: it declared an EMPTY STRING for the no-gate
+# verdict where every construction and every mutation site in the script writes
+# the named sentinel NOT_APPLICABLE, and it omitted the preserved-claim field,
+# the completeness flag and the partial-delivery object outright. A consumer
+# written against the documented union matched nothing on the no-gate path and
+# read the real value as an unknown member.
+#
+# Nothing compared the two spellings — the uncompared-copies class (#370) — so
+# this section joins them the way T15 joins RFC 0013 §13 to ALLOWED_FIELDS: in
+# BOTH directions, so a member gained on either side reds the other instead of
+# drifting silently. Every row below is red on the pre-#558 doc (measured: it
+# yielded `""` and no NOT_APPLICABLE, no claimedStatus, and no partial-delivery
+# members at all).
+
+# --- extraction ------------------------------------------------------------
+# Doc side. The return-value fence and the verdict sentence are hand-wrapped
+# prose, so this BUFFERS across the authored line wrap instead of reading one
+# line: a one-line reader goes silently empty on a re-wrap, which is the
+# vacuous-green shape T15.1 exists to stop. Members are whatever sits between
+# the anchor and the first CLOSER after it (optionally skipping to an OPENER
+# first, for the backtick-quoted verdict union), split on commas, pipes and
+# whitespace. `sort -u` on the way out: these are SET comparisons, and a member
+# spelled twice is not a second member.
+sf_doc_members() {   # <file> <anchor> <closer> [<opener>]
+  tr -d '\r' < "$1" | awk -v anchor="$2" -v closer="$3" -v opener="${4:-}" '
+    {
+      if (fin) next
+      if (!cap) {
+        p = index($0, anchor)
+        if (p == 0) next
+        cap = 1
+        buf = substr($0, p + length(anchor))
+      } else {
+        buf = buf " " $0
+      }
+      seg = buf
+      if (opener != "") {
+        o = index(seg, opener)
+        if (o == 0) next
+        seg = substr(seg, o + length(opener))
+      }
+      e = index(seg, closer)
+      if (e == 0) next
+      seg = substr(seg, 1, e - 1)
+      gsub(/[,|]/, " ", seg)
+      m = split(seg, parts, /[ \t]+/)
+      for (i = 1; i <= m; i++) if (parts[i] != "") print parts[i]
+      fin = 1
+    }
+  ' | sort -u
+}
+# Script side. `//` comments are stripped BEFORE the newlines collapse — the
+# taskRec literal carries four comment lines, and prose ending in a colon
+# ("… as the PR-claim pass below:") otherwise reads as a key. Collapsing to one
+# line is what lets one ERE span an authored wrap; `[^{}]*` keeps each match
+# inside a single brace-free literal, and these records nest nothing. Braces are
+# spelled `[{]`/`[}]` and never `\{`/`\}`: an escaped brace in an ERE is
+# undefined by POSIX and GNU grep 3.8+ warns on stray escapes, so the bracket
+# expression is the form that means the same thing to every grep CI resolves.
+sf_js_keys() {       # <ERE matching the whole object literal>
+  sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
+    | grep -oE "$1" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+}
+# Count and set-difference, factored: six of each below, and six copies of the
+# same loop is the very class this section exists to police. Herestrings, not
+# pipes — this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
+# set, where a `printf | grep -q` writer takes EPIPE and poisons the rc.
+sf_member_count() {  # <newline-separated list>
+  local _n=0 _line
+  while IFS= read -r _line; do [ -n "$_line" ] && _n=$((_n + 1)); done <<<"$1"
+  printf '%s' "$_n"
+}
+sf_members_absent() {  # <needles> <haystack> -> space-prefixed missing members
+  local _out="" _m
+  while IFS= read -r _m; do
+    [ -n "$_m" ] || continue
+    grep -qxF -- "$_m" <<<"$2" || _out="$_out $_m"
+  done <<<"$1"
+  printf '%s' "$_out"
+}
+
+# The per-task record. On the script side that is every literal built with an
+# `id:` key and a `reviewVerdict:` key, PLUS every field assigned onto `taskRec`
+# afterwards — a field introduced only by mutation is still a published field,
+# and `=[^=]` keeps the `===` comparisons out.
+SF_DOC_TASK_FIELDS="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'tasks: [{' '}')"
+SF_JS_TASK_FIELDS="$({ sf_js_keys '[{] *id: [^{}]*reviewVerdict:[^{}]*[}]'
+  grep -oE 'taskRec\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]' "$SOLVE_FLEET_JS" \
+    | tr -d '\r' | sed 's/^taskRec\.//; s/[[:space:]]*=.*$//'; } | sort -u)"
+SF_DOC_TASK_N="$(sf_member_count "$SF_DOC_TASK_FIELDS")"
+SF_JS_TASK_N="$(sf_member_count "$SF_JS_TASK_FIELDS")"
+
+# T16.1 — anti-vacuity. A silent zero-name extraction on either side would make
+# T16.2 and T16.3 pass while comparing nothing at all.
+if [ "$SF_DOC_TASK_N" -ge 5 ] && [ "$SF_JS_TASK_N" -ge 5 ]; then
+  echo "  PASS  T16.1 both per-task field lists extracted (SKILL.md: $SF_DOC_TASK_N, workflow.js: $SF_JS_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.1 setup error: the per-task record did not extract from both sides"
+  echo "        SKILL.md 'tasks: [{...}]' members: $SF_DOC_TASK_N (expected >= 5) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js record fields:        $SF_JS_TASK_N (expected >= 5) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.2 — forward. A documented field the script never writes is a field a
+# consumer will read as undefined on every record.
+T16_TASK_MISSING="$(sf_members_absent "$SF_DOC_TASK_FIELDS" "$SF_JS_TASK_FIELDS")"
+if [ -z "$T16_TASK_MISSING" ]; then
+  echo "  PASS  T16.2 every per-task field SKILL.md documents is one workflow.js writes ($SF_DOC_TASK_N/$SF_DOC_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.2 SKILL.md documents per-task field(s) no task record carries"
+  echo "        absent from workflow.js:$T16_TASK_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.3 — reverse. This is the half that caught #558: `claimedStatus` was minted
+# on every record and named in no doc.
+T16_TASK_EXTRA="$(sf_members_absent "$SF_JS_TASK_FIELDS" "$SF_DOC_TASK_FIELDS")"
+if [ -z "$T16_TASK_EXTRA" ]; then
+  echo "  PASS  T16.3 every per-task field workflow.js writes is documented in SKILL.md ($SF_JS_TASK_N/$SF_JS_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.3 workflow.js publishes per-task field(s) SKILL.md never declares"
+  echo "        undocumented:$T16_TASK_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# The reviewVerdict union. What can land in the field is either a literal
+# assigned at a `reviewVerdict` site, or the reviewer's verdict — and that one
+# is closed by the ternary right above the assignment, whose arms are the
+# `rev.verdict ===` comparisons (anything outside them is coerced to
+# REVISIONS_REQUIRED). Both sources, one set.
+SF_DOC_VERDICTS="$(sf_doc_members "$SOLVE_FLEET_SKILL" '`reviewVerdict`' '`' '`')"
+SF_JS_VERDICTS="$(grep -oE '(reviewVerdict|rev\.verdict)[^"]*"[A-Z][A-Z0-9_]*"' "$SOLVE_FLEET_JS" \
+  | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"\r' | sort -u)"
+SF_DOC_VERDICT_N="$(sf_member_count "$SF_DOC_VERDICTS")"
+SF_JS_VERDICT_N="$(sf_member_count "$SF_JS_VERDICTS")"
+
+# T16.4 — anti-vacuity for the union. The doc-side anchor is the first
+# backticked `reviewVerdict` mention; if it ever stops being the union
+# declaration, the extraction shrinks and this row says so rather than letting
+# T16.5/T16.6 compare a fragment.
+if [ "$SF_DOC_VERDICT_N" -ge 4 ] && [ "$SF_JS_VERDICT_N" -ge 4 ]; then
+  echo "  PASS  T16.4 both reviewVerdict unions extracted (SKILL.md: $SF_DOC_VERDICT_N, workflow.js: $SF_JS_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.4 setup error: the reviewVerdict union did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_VERDICT_N (expected >= 4) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_VERDICT_N (expected >= 4) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.5 — forward. The #558 defect itself: the doc declared `""` for the no-gate
+# case, which the script never writes, so a consumer matching it matched nothing.
+T16_VERDICT_MISSING="$(sf_members_absent "$SF_DOC_VERDICTS" "$SF_JS_VERDICTS")"
+if [ -z "$T16_VERDICT_MISSING" ]; then
+  echo "  PASS  T16.5 every documented reviewVerdict member is one workflow.js can write ($SF_DOC_VERDICT_N/$SF_DOC_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.5 SKILL.md declares reviewVerdict member(s) workflow.js never writes"
+  echo "        absent from workflow.js:$T16_VERDICT_MISSING"
+  echo "        (the no-gate case is the named sentinel NOT_APPLICABLE, never an empty string)"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.6 — reverse. A verdict the script can write and the doc omits is a value
+# a consumer's switch has no arm for.
+T16_VERDICT_EXTRA="$(sf_members_absent "$SF_JS_VERDICTS" "$SF_DOC_VERDICTS")"
+if [ -z "$T16_VERDICT_EXTRA" ]; then
+  echo "  PASS  T16.6 every reviewVerdict workflow.js can write is documented in SKILL.md ($SF_JS_VERDICT_N/$SF_JS_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.6 workflow.js can write reviewVerdict value(s) SKILL.md never declares"
+  echo "        undocumented:$T16_VERDICT_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# The partial-delivery object, same join. It is the only machine-readable record
+# of a PR opened over an UNFINISHED chain, so an undocumented member is a fact
+# /goal's reader cannot know to look for.
+SF_DOC_PARTIAL="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'partialDelivery: {' '}')"
+SF_JS_PARTIAL="$(sf_js_keys 'partialDelivery = [{][^{}]*[}]')"
+SF_DOC_PARTIAL_N="$(sf_member_count "$SF_DOC_PARTIAL")"
+SF_JS_PARTIAL_N="$(sf_member_count "$SF_JS_PARTIAL")"
+if [ "$SF_DOC_PARTIAL_N" -ge 3 ] && [ "$SF_JS_PARTIAL_N" -ge 3 ]; then
+  echo "  PASS  T16.7 both partialDelivery member lists extracted (SKILL.md: $SF_DOC_PARTIAL_N, workflow.js: $SF_JS_PARTIAL_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.7 setup error: partialDelivery did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_PARTIAL_N (expected >= 3) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_PARTIAL_N (expected >= 3) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+T16_PARTIAL_MISSING="$(sf_members_absent "$SF_DOC_PARTIAL" "$SF_JS_PARTIAL")"
+T16_PARTIAL_EXTRA="$(sf_members_absent "$SF_JS_PARTIAL" "$SF_DOC_PARTIAL")"
+if [ -z "$T16_PARTIAL_MISSING" ] && [ -z "$T16_PARTIAL_EXTRA" ]; then
+  echo "  PASS  T16.8 SKILL.md and workflow.js agree on the partialDelivery members, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.8 the documented partialDelivery object and the one workflow.js builds have drifted"
+  [ -n "$T16_PARTIAL_MISSING" ] && echo "        documented but never built:$T16_PARTIAL_MISSING"
+  [ -n "$T16_PARTIAL_EXTRA" ] && echo "        built but never documented:$T16_PARTIAL_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.9 — the completeness flag has no members to join, so it gets the symbol
+# pair instead: named in the doc, and resolving in the script it describes.
+assert_grep "$SOLVE_FLEET_SKILL" 'chainComplete' \
+  "T16.9 SKILL.md's return value declares the chainComplete flag"
+assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
+  "T16.9b the chainComplete symbol resolves in the fleet script"
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"

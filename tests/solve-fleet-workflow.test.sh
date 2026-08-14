@@ -537,6 +537,28 @@ else
   fail "G19 the verification contract is undocumented or unrendered (a key nothing reads)"
 fi
 
+# G20 (#562) — rung ONE answers a stricter contract than every later rung, and
+# that obligation lives in a schema rather than in prompt prose: taskCount is
+# the single field bounding the whole implement loop, and only task 1 can
+# supply it, so an omission must be a schema refusal routed to BLOCKED rather
+# than a value the clamp floor quietly turns into a one-task plan.
+#
+# This assertion is STRUCTURAL because no behavioural row can be: the harness
+# records only THAT a schema was passed (`hasSchema`), never WHICH one, so the
+# dispatch could fall back to the permissive S.task with every B row in this
+# file still green. Both halves are pinned — the k===1 selection, and S_TASK1
+# actually BEING stricter (a refinement that dropped the extra required key
+# would be no refinement at all).
+TASKCHAIN_BLOCK="$(sed -n '/^async function runTaskChain(/,/^}/p' "$WORKFLOW")"
+if [ -z "$TASKCHAIN_BLOCK" ]; then
+  fail "G20 could not locate runTaskChain() in workflow.js — the schema assertion cannot be evaluated"
+elif grep -Fq 'schema: (k === 1) ? S_TASK1 : S.task,' <<<"$TASKCHAIN_BLOCK" \
+  && grep -Fq 'required: S.task.required.concat(["taskCount"]),' "$WORKFLOW"; then
+  pass "G20 rung one is dispatched against S_TASK1 (S.task plus a REQUIRED taskCount); every later rung gets the base schema"
+else
+  fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -1262,6 +1284,144 @@ function probedNums(record) {
   out.aConfirmed = resA ? resA.verification.confirmed : null;
   out.aRelayRc = resA ? resA.verification.relayRc : null;
 
+  // ------------------------------------------------------------------ #561
+  // ONE pull request, TWO claimants. This is not a hypothetical shape: the only
+  // way applyPrProof can DISPROVE a PR claim is by comparing branches, and a
+  // record reporting an EMPTY branch gives it nothing to compare — so both
+  // records classify CONFIRMED off the SAME proof row and both survive into
+  // finalize. Nothing downstream can tell them apart either: goal-pipeline
+  // reads prsOpened through a shape-only digit filter, so a number listed twice
+  // credits a second issue with a pull request that belongs to the first and
+  // /goal merges on it. Before this run, reverting finalize to mapping `opened`
+  // straight into prsOpened left the entire suite green.
+  const wReturns = Object.assign({}, trivialReturns(), {
+    "solve:#12 (small)": claimed(12, 901, { branch: "" }),
+    "verify-prs": proof([proofRow(901, "fix/11-x")]),
+  });
+  const recW = await run(buildArgs(), { agentReturns: wReturns });
+  const resW = resultOf(recW);
+  out.dupPrNums = resW ? resW.prsOpened.join(",") : null;
+  // The premise the guard exists for: BOTH records survive verification as
+  // CONFIRMED, so no earlier pass can be relied on to have removed one.
+  out.dupConfirmed = resW ? resW.verification.confirmed : null;
+  out.dupProbed = probedNums(recW);
+  // counts.prOpened counts RECORDS that claim a PR; prsOpened lists DISTINCT
+  // pull requests. Two records, one pull request, and the audit event below is
+  // what reconciles the two numbers — the guard drops the duplicate NUMBER and
+  // never rewrites the second record status behind its back (a downgrade would
+  // be the script inventing a verdict no probe reached).
+  out.dupOpened = resW ? resW.counts.prOpened : null;
+  const dupEvent = resW ? resW.auditEvents.filter(function (e) {
+    return e.event === "pr_number_collision"; })[0] : null;
+  out.dupAudit = !!dupEvent;
+  out.dupAuditFields = !!(dupEvent && dupEvent.issue === 12 && dupEvent.pr === 901);
+
+  // ------------------------------------------------------------------ #562
+  // taskCount is the ONE structural fact an agent supplies to the implement
+  // loop: the `while (k <= taskCount)` ceiling AND the SKIPPED backfill are
+  // both derived from it. An ABSENT or non-integer count is therefore not a
+  // value to correct — the clamp floor of 1 would collapse an N-task plan into
+  // a one-task plan, record no SKIPPED rows, and still open a PR whose body
+  // says `Closes #N`. Every other fixture in this file supplies a valid,
+  // in-range count, so the stop, its audit event, the blocked record it
+  // produces and the clamp arm beside it were all unexercised, and a revert to
+  // clamp-to-floor stayed green.
+
+  // Run X2 — ABSENT. task() omits taskCount unless it is asked for.
+  const x2Returns = Object.assign({}, mediumReturns(), { "impl:#11:t1": task(1) });
+  const recX = await run(buildArgs(), { agentReturns: x2Returns });
+  const resX = resultOf(recX);
+  const xEvent = resX ? resX.auditEvents.filter(function (e) {
+    return e.event === "task_count_missing"; })[0] : null;
+  out.tcAbsentAudit = !!xEvent;
+  // raw separates "the field never arrived" (null) from "a value arrived and
+  // was unusable" (Run Y2). The sentinel keeps a MISSING event from reading as
+  // a null raw — otherwise deleting the audit push would pass this row.
+  out.tcAbsentRaw = xEvent ? xEvent.raw : "NO-EVENT";
+  out.tcAbsentBlocked = resX ? resX.tasksBlocked : null;
+  out.tcAbsentUnreviewed = resX ? resX.tasksUnreviewed : null;
+  out.tcAbsentNoLaterRung = labels(recX).indexOf("impl:#11:t2") < 0
+    && !labels(recX).some(function (l) { return /^review:#11/.test(l || ""); });
+  const x11 = resX ? resX.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  // THE BLOCKED RECORD itself, rendered in full: the rung is BLOCKED with its
+  // commit UNREVIEWED, and the terminal word the implementer itself returned
+  // (DONE) is kept beside the correction rather than erased. Under a
+  // clamp-to-floor revert this same row reads 1:DONE:APPROVE:DONE.
+  out.tcAbsentTasks = x11 && Array.isArray(x11.tasks)
+    ? x11.tasks.map(function (t) {
+      return t.id + ":" + t.status + ":" + t.reviewVerdict + ":" + t.claimedStatus; }).join(",")
+    : null;
+  const deliverX = recX.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  const deliverXText = deliverX ? deliverX.prompt : "";
+  // WHAT THE DELIVERY STEP IS TOLD ABOUT TOTALS. The stop leaves the
+  // provisional total at 1, so a rung that committed BEFORE declaring no usable
+  // size is delivered as a partial against a total the chain does not actually
+  // know. That is the shipped behaviour and it is pinned here so any change to
+  // it is deliberate; what must never happen is the delivery agent being told
+  // the work is whole, because that PR body carries `Closes #11`.
+  out.tcAbsentPartialTold = deliverXText.indexOf("PARTIAL implementation of 1 planned task(s)") >= 0
+    && deliverXText.indexOf("The implementation is DONE and reviewed") < 0;
+  out.tcAbsentBlockedTold = deliverXText.indexOf("BLOCKED task(s): 1.") >= 0
+    && deliverXText.indexOf("Committed but NEVER REVIEWED (task(s)): 1.") >= 0;
+  out.tcAbsentChainComplete = x11 ? x11.chainComplete : null;
+
+  // Run Y2 — NON-INTEGER. A stringified count is what a return that evaded
+  // schema enforcement actually looks like. It takes the SAME stop, and the raw
+  // value rides in the audit event rather than being silently floored to 1.
+  const y2Returns = Object.assign({}, mediumReturns(),
+    { "impl:#11:t1": task(1, { taskCount: "2" }) });
+  const recY = await run(buildArgs(), { agentReturns: y2Returns });
+  const resY = resultOf(recY);
+  const yEvent = resY ? resY.auditEvents.filter(function (e) {
+    return e.event === "task_count_missing"; })[0] : null;
+  out.tcBadAudit = !!yEvent;
+  out.tcBadRaw = yEvent ? yEvent.raw : "NO-EVENT";
+  out.tcBadBlocked = resY ? resY.tasksBlocked : null;
+  out.tcBadNoClamp = !!(resY && !resY.auditEvents.some(function (e) {
+    return e.event === "task_count_clamped"; }));
+  const deliverY = recY.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  out.tcBadPartialTold = !!(deliverY
+    && deliverY.prompt.indexOf("PARTIAL implementation of 1 planned task(s)") >= 0);
+
+  // Run Z2 — OUT OF RANGE, the clamp arm beside the stop. A count ABOVE
+  // MAX_TASKS is a correctable value rather than an unknown one: it is clamped,
+  // the correction is audited, and the loop runs the clamped number of rungs.
+  // Canned returns are supplied for all 12 so the run exercises the ceiling
+  // itself instead of colliding with the workspace gate on an uncanned rung 13.
+  //
+  // The implement budget is RAISED so CB3 cannot be what stops this loop. At
+  // the default of 24 a 12-task plan spends its budget exactly (2 agents per
+  // clean task), so deleting the clamp entirely would still stop at rung 12 —
+  // on the budget, not on MAX_TASKS — and the ceiling row below would be a
+  // vacuous green. With headroom, an unclamped 99 reaches rung 13 and reds it.
+  const z2Returns = Object.assign({}, mediumReturns(),
+    { "impl:#11:t1": task(1, { taskCount: 99 }) });
+  for (let zi = 2; zi <= 12; zi += 1) {
+    z2Returns["impl:#11:t" + zi] = task(zi);
+    z2Returns["review:#11:t" + zi + ":r1"] = approve();
+  }
+  const recZ = await run(buildArgs(null, { implementBudget: 96 }), { agentReturns: z2Returns });
+  const resZ = resultOf(recZ);
+  const zEvent = resZ ? resZ.auditEvents.filter(function (e) {
+    return e.event === "task_count_clamped"; })[0] : null;
+  out.tcClampAudit = !!zEvent;
+  out.tcClampRaw = zEvent ? zEvent.raw : null;
+  out.tcClampTo = zEvent ? zEvent.clamped : null;
+  out.tcClampImplRungs = labels(recZ).filter(function (l) { return /^impl:#11:t/.test(l || ""); }).length;
+  out.tcClampTotal = resZ ? resZ.tasksTotal : null;
+  out.tcClampNotStopped = !!(resZ && !resZ.auditEvents.some(function (e) {
+    return e.event === "task_count_missing"; }));
+  // chainComplete only exists on the DELIVERED record, so this row proves both
+  // that delivery ran and that a clamped-but-usable count leaves the chain
+  // whole — the arm the absent-count stop must not swallow.
+  const z11 = resZ ? resZ.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.tcClampComplete = z11 ? z11.chainComplete : null;
+
+  // Every run added above must also be harness-clean — an undeclared opts.phase
+  // on a rung these runs are the first to reach shows up here and nowhere else.
+  out.newViolations = [recW, recX, recY, recZ]
+    .reduce(function (n, r) { return n + r.violations.length; }, 0);
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -1495,6 +1655,41 @@ else
   check aProbed 2                 "B135 verification.probed reports what was actually sent to the relay"
   check aConfirmed 2              "B136 verification.confirmed is computed from the record classifications"
   check aRelayRc 0                "B137 verification.relayRc surfaces the relay rc"
+
+  # --- #561: one pull request, two claimants --------------------------------
+  check dupPrNums '"901"'         "B142 two records claiming ONE PR number emit that number exactly ONCE in prsOpened"
+  check dupConfirmed 2            "B143 both claimants classify CONFIRMED (an empty branch cannot be disproven) — which is precisely why the emitted list must dedupe"
+  check dupProbed '"901"'         "B144 the collided number is probed once, not twice"
+  check dupOpened 2               "B145 the guard drops the duplicate NUMBER without rewriting the second record's status"
+  check dupAudit true             "B146 pr_number_collision fires — the duplicate is audited, never silently deduped"
+  check dupAuditFields true       "B147 the collision event names the losing issue and the PR number it claimed"
+
+  # --- #562: an absent or unusable plan size stops the chain ----------------
+  check tcAbsentAudit true        "B148 an ABSENT taskCount fires task_count_missing"
+  check tcAbsentRaw null          "B149 the event records raw:null — the field never arrived at all"
+  check tcAbsentBlocked 1         "B150 the rung that declared no plan size is recorded BLOCKED, not DONE"
+  check tcAbsentUnreviewed 1      "B151 its commit rides to delivery unreviewed, and the result says so"
+  check tcAbsentTasks '"1:BLOCKED:UNREVIEWED:DONE"' "B152 the blocked record keeps the implementer's own DONE claim beside the correction"
+  check tcAbsentNoLaterRung true  "B153 no task-2 implementer and no reviewer are dispatched after the stop"
+  check tcAbsentPartialTold true  "B154 delivery is told this is a PARTIAL implementation against the provisional total of 1 — never that the work is whole"
+  check tcAbsentBlockedTold true  "B155 delivery is told WHICH task is blocked and which one is unreviewed"
+  check tcAbsentChainComplete false "B156 chainComplete is false, so /goal can tell the PR covers an unfinished chain"
+
+  check tcBadAudit true           "B157 a NON-INTEGER taskCount takes the same stop"
+  check tcBadRaw '"2"'            "B158 the unusable value rides in the audit event instead of being floored to 1"
+  check tcBadBlocked 1            "B159 a non-integer count blocks its rung too"
+  check tcBadNoClamp true         "B160 the stop and the clamp are exclusive — no task_count_clamped fires on this path"
+  check tcBadPartialTold true     "B161 delivery is told the same partial truth"
+
+  check tcClampAudit true         "B162 an OUT-OF-RANGE count is clamped, and the correction is audited"
+  check tcClampRaw 99             "B163 the clamp event carries the raw count"
+  check tcClampTo 12              "B164 ...and the MAX_TASKS value it was clamped to"
+  check tcClampImplRungs 12       "B165 the loop honours the clamped ceiling, never the raw 99"
+  check tcClampTotal 12           "B166 every clamped task is accounted for in the result"
+  check tcClampNotStopped true    "B167 a correctable count does NOT take the absent-count stop"
+  check tcClampComplete true      "B168 the clamped chain delivers, and delivers as a COMPLETE one"
+
+  check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="

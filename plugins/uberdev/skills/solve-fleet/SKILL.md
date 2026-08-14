@@ -61,6 +61,13 @@ reported back as `workspaceReady`. If task 1 cannot open it the chain stops with
 `workspace_not_ready` and **no delivery agent runs**; a task agent is told
 explicitly never to fall back to the repository root.
 
+**Every rung that writes is gated on that flag, not just task 1.** The fix rung
+reads `workspaceReady` exactly as the implementer rung does, and its
+`workspace_not_ready` event carries a `round` to tell the two apart. Without it
+a fixer that never entered the shared checkout would `--amend` in whatever
+directory it did land in — and since chain agents carry no runtime isolation,
+that directory is the caller's own repository (#557).
+
 **Why sequential and not wave-parallel.** The win is fresh context per task plus
 a gate per task, and both are available one task at a time — with no git mutex,
 no disjoint-ownership validation and no two agents writing one checkout. Each
@@ -148,11 +155,13 @@ strand committed work), `task_review_rejected`, `task_fix_rounds_exhausted`,
 The script logs `WORKFLOW_RESULT <json>` and returns:
 
 ```
-{ runId, repoSlug, issueCount, concurrency, autoMode, designedIssues,
-  researchArtifacts, results: [ {issue, status, branch, prNumber, prUrl,
+{ runId, repoSlug, requestedIssues, issueCount, concurrency, autoMode,
+  designedIssues, researchArtifacts,
+  results: [ {issue, status, branch, prNumber, prUrl,
   commitCount, testsRunClaimed, summary, blocker,
   prProof, provenCommitCount, claimedStatus, claimedPrNumber, claimedPrUrl,
-  tasks: [{id, status, reviewVerdict, fixRounds, commitCount}]} ],
+  chainComplete, partialDelivery: {tasksTotal, blocked, skipped, unreviewed},
+  tasks: [{id, status, reviewVerdict, fixRounds, commitCount, claimedStatus}]} ],
   prsOpened: [<int>],
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
   tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
@@ -162,11 +171,37 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
 | REFUSED | FAILED`. Per-task `status` ∈ `DONE | NO_CHANGES | BLOCKED | SKIPPED`
-and `reviewVerdict` ∈ `APPROVE | REVISIONS_REQUIRED | REJECT | UNREVIEWED | ""`
-(empty when the task committed nothing, which skips the gate and burns no fix
-round). `tasks` is absent on the single-solver path, which has no tasks. The
-fleet never merges and never chains into a review command — opening the PR is
-where it stops.
+and `reviewVerdict` ∈
+`APPROVE | REVISIONS_REQUIRED | REJECT | UNREVIEWED | NOT_APPLICABLE`.
+`tasks` is absent on the single-solver path, which has no tasks. The fleet never
+merges and never chains into a review command — opening the PR is where it
+stops.
+
+The two non-review verdicts are opposites and must not be read as one:
+
+- `NOT_APPLICABLE` — the task committed nothing, so there was nothing to review:
+  the gate was skipped and no fix round was burned. It is a **named sentinel**,
+  never an empty string; a consumer matching `""` matches nothing on that path.
+- `UNREVIEWED` — commits exist that no reviewer saw: a null reviewer, a task
+  recorded BLOCKED that committed anyway, or CB3 cutting the chain off before
+  the first review ran. `tasksUnreviewed` counts exactly these.
+
+Per-task `claimedStatus` is the implementer's own terminal word — `DONE`,
+`NO_CHANGES`, `BLOCKED`, or `""` when it answered with none of those or never
+answered at all (a skipped rung has no implementer) — kept beside the `status`
+the script derives from `commitCount`. Same rule as the PR claim below: the
+derivation wins in the field that drives behaviour, the claim is never erased,
+and the disagreement is an audit event rather than a silent rewrite. It is a
+different field from the per-issue `claimedStatus`, which holds the solver's own
+status after the PR proof disproved it.
+
+`chainComplete` is script-derived, so no delivery agent can report its way out
+of it: `false` means the per-task chain did not finish — some task is BLOCKED,
+SKIPPED or UNREVIEWED — and `partialDelivery` then carries the ids, in the shape
+declared above. Both appear only on a record the per-task chain delivered, and
+`partialDelivery` only when the chain fell short: its presence IS the signal.
+`/goal` ingests `prsOpened` — bare numbers, carrying neither field — so a PR
+opened over an unfinished chain is distinguishable only here.
 
 ## Claim verification (#515)
 

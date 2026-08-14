@@ -46,7 +46,8 @@ export const meta = { "name": "solve-fleet", "description": "Workflow-native per
 // Model policy (RFC 0012 §5): every solver, researcher, writer and reviewer is
 // a JUDGMENT path — opts.model is OMITTED so the user's session flagship flows
 // through (this is the work the user asked for; it must not silently
-// downgrade). The manifest intake is the one mechanical relay and pins haiku.
+// downgrade). The MECHANICAL relays are the only dispatches that pin haiku, and
+// there are exactly two: the manifest intake, and the #515 PR-existence proof.
 //
 // ENVELOPE DISCIPLINE (DR-5): issue titles and bodies are NEVER interpolated
 // here — each agent reads them itself through `gh` and applies its own
@@ -133,8 +134,13 @@ const MAX_TASKS = 12;
 // The CB3 LIVE per-issue cap and the CB1 PROJECTION term — one constant, so the
 // guard the loop actually enforces and the number the ceiling is computed from
 // can never disagree. Worst case per task is 1 implementer + FIX_ROUNDS fixers
-// + (FIX_ROUNDS + 1) reviewers = 8 agents, so 24 covers a 10-task plan at the
-// clean rate (10 impl + 10 review + delivery = 21) or 3 fully-contested tasks.
+// + (FIX_ROUNDS + 1) reviewers = 8 agents, so 24 covers 3 fully-contested tasks,
+// or a clean plan at the MAX_TASKS ceiling (2 agents per task — one implementer,
+// one approving reviewer — is 24 exactly). A full-size plan therefore has ZERO
+// headroom: one fix round anywhere in it trips CB3 and the task(s) the chain
+// never reaches are recorded SKIPPED. Delivery is NOT part of that sum — it is
+// dispatched outside this cap and never increments the live counter (see the
+// CB3 exemption at the delivery dispatch).
 const IMPLEMENT_AGENT_BUDGET = clampInt(CFG.implementBudget, 4, 96, 24);
 
 // Issue numbers arrive as a comma-joined scalar (the envelope emits scalars
@@ -801,7 +807,11 @@ function taskFixPrompt(rec, planPath, k, r) {
   for (var i = 1; i <= r; i++) listed += '     - "' + reviewPath(rec.issue, k, i) + '"\n';
   return "You are the fix agent for Task " + k + " of GitHub issue #" + rec.issue + ", fix round "
     + r + ".\n\n"
-    + '1. `cd "' + wt + '"`. The task is the HEAD commit — read it with `git show HEAD`.\n'
+    + '1. `cd "' + wt + '"` — the shared checkout for this issue, created by task 1 and already on its '
+    + "branch. Do ALL of your work there and report `workspaceReady: true` only after that `cd` "
+    + "succeeded. The task is the HEAD commit — read it with `git show HEAD`.\n"
+    + '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout is not '
+    + "there, report BLOCKED — never fall back to the repository root.\n"
     + "2. Read the review findings, by path, ALL of them in order:\n" + listed
     + "   If any of those files is missing, report BLOCKED rather than guessing what it said.\n"
     + '3. Read the implementation plan at "' + planPath + '" for the `## Task ' + k + ':` section, so '
@@ -1035,7 +1045,9 @@ async function runTaskChain(rec, planPath) {
     // be attributed to this branch. Task 1 stops the chain dead (nothing is
     // committed yet, so there is nothing to deliver); a later rung is recorded
     // BLOCKED and stops the chain, so its unattributable work is never
-    // delivered as though it had been reviewed here.
+    // delivered as though it had been reviewed here. The OTHER writing rung —
+    // the fix agent inside the review gate below — carries the identical gate;
+    // both are the only rungs that write, and neither may pass ungated.
     if (impl.workspaceReady !== true) {
       auditEvents.push({ event: "workspace_not_ready", issue: rec.issue, task: k, ts: nowIso });
       log("#" + rec.issue + ": task " + k + " did not report a usable shared worktree at " + wt
@@ -1204,6 +1216,25 @@ async function runTaskChain(rec, planPath) {
         if (fixed === null) {
           noteNull("implement");
           auditEvents.push({ event: "task_fixer_null", issue: rec.issue, task: k, round: r, ts: nowIso });
+          taskRec.status = "BLOCKED";
+          stopLoop = true;
+          break;
+        }
+        // The same workspace gate as the implementer rung, on the one rung that
+        // WRITES to an existing commit. Chain agents run without runtime
+        // worktree isolation, so a fixer that never entered the shared checkout
+        // ran `git commit --amend` in whatever directory it was handed — the
+        // caller's own checkout, in the worst case. Nothing it did can be
+        // attributed to this branch, so the task is BLOCKED and the chain stops
+        // BEFORE the fix-round counter moves: a counted round would read as a
+        // fix that landed, and the next reviewer would re-read an unchanged HEAD
+        // until the rounds ran out with the real cause nowhere in the record.
+        if (fixed.workspaceReady !== true) {
+          auditEvents.push({ event: "workspace_not_ready", issue: rec.issue, task: k, round: r,
+            ts: nowIso });
+          log("#" + rec.issue + ": the fix agent for task " + k + " round " + r + " did not report a "
+            + "usable shared worktree at " + wt + " — its work is unattributable to this branch, so "
+            + "the chain stops here");
           taskRec.status = "BLOCKED";
           stopLoop = true;
           break;
