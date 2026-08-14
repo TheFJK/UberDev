@@ -1594,6 +1594,20 @@ assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
 # existence guarantee; T12.12 below is what actually reads the script.
 assert_grep "$SOLVE_FLEET_JS" 'Do NOT bump the project version' \
   "T12.6 solve-fleet still forbids the solver from bumping (the collision class stays closed)"
+# #516 — the fleet's prompts must not name rule documents this repo does not ship.
+# Scoped to $SOLVE_FLEET_JS by PATH: a `grep -r` over plugins/uberdev/ would red on
+# five sibling agent files whose `from CLAUDE.md` prose is out of this issue's scope.
+# $SOLVE_FLEET_JS is in the hard-fail preflight above (:93), which owns readability.
+assert_absent_fixed "$SOLVE_FLEET_JS" 'from CLAUDE.md' \
+  "T12.6b the solver no longer attributes its baseline to a file this repo does not ship"
+assert_absent_fixed "$SOLVE_FLEET_JS" 'Read CLAUDE.md and AGENTS.md' \
+  "T12.6c the constraints lens no longer asserts CLAUDE.md/AGENTS.md exist at the repo root"
+assert_absent_fixed "$SOLVE_FLEET_JS" 'contradicts CLAUDE.md/AGENTS.md' \
+  "T12.6d the spec-review gate no longer asserts those rule documents exist"
+# Positive partner for the absence rows: three forbids alone are satisfied by an
+# empty prompt. This is the in-repo convention token (agents/research-constraints.md:95).
+assert_grep "$SOLVE_FLEET_JS" 'skipping any that do not exist' \
+  "T12.6e the constraints lens instructs conditional discovery instead"
 assert_grep "$GOAL_WATCH_SH" '_uberdev_goal_ensure_version_bump' \
   "T12.7 the /goal watch lane still calls the version-bump guarantor"
 
