@@ -431,9 +431,15 @@ function budgetExhausted() {
 // the per-issue term.
 //
 // Consequence, stated out loud rather than buried in the arithmetic: at 30
-// agents per design-tier issue the runtime's own 1000-agent lifetime cap
-// becomes the binding constraint for a /goal run (~33 design-tier issues),
-// well before maxAgents does. That is the honest price of a review gate per
+// agents per design-tier issue it is maxAgents that binds first, not the
+// runtime's own 1000-agent lifetime cap. CB1 halts once agentsSpent plus this
+// projection exceeds maxAgents, whose launcher default is 900
+// (lib/goal-phase0.sh), so a /goal run stops at roughly 29 design-tier issues
+// — sooner once the per-cycle relay overhead above is counted. That default
+// sits just under the runtime cap deliberately, so a long run ends on a named
+// CB1 audit event instead of dying against the runtime limit; only an operator
+// who raises maxAgents above 1000 (the clamp permits up to 2000) makes the
+// runtime cap the binding one. That is the honest price of a review gate per
 // task; intra-issue agents queue rather than accelerate on a busy host.
 function projectedAgentsForCycle(issueCount) {
   // SHARED COST: solve-fleet-per-issue-agent-cost

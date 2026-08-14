@@ -3018,14 +3018,25 @@ X5B_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n --arg n
 # Built in the fixture rather than written as a literal byte, so the file stays
 # grep-able and editor-safe. C0 includes \n and \r, which is exactly why the
 # removal makes a newline-collapsing envelope unnecessary.
-X5C_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n --arg n "CTRL$(printf '\001')PROBE" '{status:"COMPLETE",
+#
+# The note is deliberately LONGER than the 200-character bound and front-loaded
+# with control characters, because that is the only shape that can tell the two
+# orderings apart. 150 control characters followed by 120 real ones survive as
+# 120 real characters when removal runs FIRST, and as only 50 when truncation
+# runs first and the padding has already spent the budget. A ten-character note
+# is a no-op for truncation and passes identically either way — it cannot prove
+# the ordering this row's message names, which is the case the source comment
+# beside clampNote calls out.
+X5C_CTRL="$(printf '\001%.0s' $(seq 150))"
+X5C_REAL="$(printf 'p%.0s' $(seq 120))"
+X5C_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' "$(jq -n --arg n "${X5C_CTRL}${X5C_REAL}" '{status:"COMPLETE",
   resultPath:"", statusPath:"", note:$n}')")"
 X5C_NOTE="$(jq -r '.result.children[0].note' <<<"$X5C_OUT")"
 X5C_ESCAPED="$(jq -r '.result | tostring | contains("\\u0001")' <<<"$X5C_OUT")"
-if [ "$X5C_NOTE" = CTRLPROBE ] && [ "$X5C_ESCAPED" = false ]; then
-  pass "X5c control characters are REMOVED from the note (and removal happens before truncation)"
+if [ "$X5C_NOTE" = "$X5C_REAL" ] && [ "$X5C_ESCAPED" = false ]; then
+  pass "X5c control characters are REMOVED from the note, and removal happens BEFORE truncation (150 control + 120 real characters leave 120 real ones, not the 50 the other order would leave)"
 else
-  fail "X5c a control character survived into the structured return (note='$X5C_NOTE', escaped-in-result=$X5C_ESCAPED)"
+  fail "X5c control-character removal or its ordering is wrong (surviving note is ${#X5C_NOTE} chars, want ${#X5C_REAL}; escaped-in-result=$X5C_ESCAPED)"
 fi
 
 # Anti-vacuity: with the DEFAULT return the key must be PRESENT and empty, not

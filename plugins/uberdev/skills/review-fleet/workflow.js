@@ -143,8 +143,12 @@ export const meta = { "name": "review-fleet", "description": "Shared Workflow-na
 //        FIRST statement of main(), outside the try, so the args-consumption
 //        oracle (tests/_workflow_harness.js:1012-1042) sees it on every path.
 //   T4 — the SHARED:args-envelope v1 block is BYTE-IDENTICAL to every other
-//        instance repo-wide (copied with sed from solve-fleet/workflow.js:69-89,
-//        then diffed back). This file carries NO SHARED:envelope v1 block, for
+//        instance repo-wide (copied with sed from the marker-delimited
+//        `SHARED:args-envelope v1` block in solve-fleet/workflow.js, then
+//        diffed back). Cited by its BEGIN/END marker text and not by line
+//        number: the markers are byte-stable and are what the drift guard keys
+//        on, whereas a line range into an actively-edited script rots on the
+//        first insertion above it. This file carries NO SHARED:envelope v1 block, for
 //        the reason recorded where one would otherwise sit: nothing in these
 //        prompts embeds agent-returned content (#514).
 //   §4.2 — the sibling SKILL.md carries the Workflow invocation block, a literal

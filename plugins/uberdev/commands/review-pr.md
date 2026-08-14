@@ -2967,6 +2967,18 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
       if ! python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
            --edge-id "$VERIFY_EDGE" \
            --launch-binding-json "$VERIFY_BINDING" >>"$VERIFY_CAPTURED_PATH"; then
+        # The opinion vocabulary is CLOSED, so "verifier-unavailable" is the
+        # only reason this arm may record — and it is the same string the
+        # validator failure below records. That conflates an INTEGRITY refusal
+        # (a nonce this run never minted, a torn result file) with a verifier
+        # whose opinion merely would not parse. The distinguishing signal
+        # therefore has to live in the log stream, naming the finding and the
+        # edge, exactly as the Phase 2 lens loop above does before it stops.
+        echo "warn: /uberdev:review-pr — finding ${VERIFY_FINDING_INDEX}: bound-evidence capture REFUSED for edge ${VERIFY_EDGE} (nonce or launch-binding rejected, or the child published a torn result); recording verifier-unavailable, which keeps the finding." >&2
+        # The separator is written on BOTH paths. capture-bound-child may have
+        # already appended a partial record before it failed, and skipping the
+        # separator here glues the next successful capture onto that fragment.
+        printf '\n' >>"$VERIFY_CAPTURED_PATH" || return 74
         jq -cn --argjson i "$VERIFY_FINDING_INDEX" \
           '{finding_index:$i, reason:"verifier-unavailable"}' >>"$VERIFY_OPINIONS_PATH" || return 74
         continue

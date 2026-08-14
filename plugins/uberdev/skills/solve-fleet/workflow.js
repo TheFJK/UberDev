@@ -119,9 +119,11 @@ const issueCount = clampInt(CFG.issueCount, 0, 4096, 0);
 const maxAgents = clampInt(CFG.maxAgents, 1, 2000, 250);
 const solveTimeoutS = clampInt(CFG.solveTimeoutS, 1, 86400, 3600);
 
-// Inherited VERBATIM from skills/subagent-driven-dev/SKILL.md's `sdd_loop_cap
-// fix_rounds` (:143-151) — the cap NAMES are that function's argument
-// vocabulary, and this script inherits them rather than re-minting them.
+// Inherited VERBATIM from the `sdd_loop_cap` helper in
+// skills/subagent-driven-dev/SKILL.md, its `fix_rounds` arm — the cap NAMES are
+// that function's argument vocabulary, and this script inherits them rather
+// than re-minting them. The helper name is greppable and byte-stable; a line
+// range into a file this PR class keeps growing is not.
 const FIX_ROUNDS = 3;
 // The plan-contract ceiling (planPrompt) AND the S.task.taskCount clamp: one
 // number, two consumers. A plan the planner split into more parts than this
@@ -405,6 +407,29 @@ const S = {
       },
     },
   },
+};
+
+// Task 1 answers a STRICTER contract than every later rung, so it gets its own
+// schema rather than a prose instruction. `taskCount` is the single field that
+// bounds the whole implement loop — the `while (k <= taskCount)` ceiling AND the
+// SKIPPED backfill are both derived from it — so an omission does not degrade,
+// it MINIMISES: the clamp floor of 1 turns an N-task plan into a one-task plan
+// that still delivers a PR. S.task itself cannot demand it (the fix agents share
+// that schema and have no count to give), so the obligation is expressed here as
+// a task-1-only refinement. An omission is then a schema refusal — a null return
+// routed through task_implementer_null to BLOCKED — instead of an invariant
+// carried by prompt prose and a comment.
+//
+// Written field-by-field off S.task, never merged: the schema-property guard
+// (tests/schema_property_reads.py) refuses a spread or an Object.assign here,
+// because its read detector is name-shaped and cannot see through either. The
+// property table and the base obligation list are REFERENCED rather than
+// re-spelled, so this cannot drift from S.task.
+const S_TASK1 = {
+  type: S.task.type,
+  additionalProperties: S.task.additionalProperties,
+  properties: S.task.properties,
+  required: S.task.required.concat(["taskCount"]),
 };
 
 // The one repo-slug gate (#515). `repoSlug` is script-derived (it comes from
@@ -793,12 +818,36 @@ function taskFixPrompt(rec, planPath, k, r) {
     + 'inside "' + wt + '"), summary (<=400 chars), blocker (why you stopped, when BLOCKED; else "").';
 }
 
-function deliverPrompt(rec) {
+// `ledger` is the chain's OWN account of what it finished, built by
+// runTaskChain from the task records and never from an agent's prose. Delivery
+// is reached whenever ANY task committed — including every stopLoop path
+// (implementer null/blocked, review REJECT, fix rounds exhausted, fixer
+// null/blocked, CB3 truncation) — so the opening assertion has to be earned
+// rather than stated. A prompt that tells the agent the work is complete when
+// it is not produces a PR whose body says so, carrying a `Closes` line for a
+// partial implementation, and /goal ingests that PR number through prsOpened.
+function deliverPrompt(rec, ledger) {
   var wt = issueWorktree(rec.issue);
+  var idList = function (ids) { return ids.join(", "); };
+  var head;
+  if (ledger.complete) {
+    head = "The implementation is DONE and reviewed — all " + ledger.total + " task(s) of the plan "
+      + "are committed in the shared checkout and every one of them passed its review gate. Your "
+      + "job is to verify it as a whole, push it, and open the PR. Do not implement anything new.";
+  } else {
+    head = "The task chain STOPPED EARLY: this is a PARTIAL implementation of "
+      + ledger.total + " planned task(s), and you must not present it as a whole one. "
+      + (ledger.blocked.length ? "BLOCKED task(s): " + idList(ledger.blocked) + ". " : "")
+      + (ledger.skipped.length ? "Never attempted (task(s) after the chain stopped): "
+        + idList(ledger.skipped) + ". " : "")
+      + (ledger.unreviewed.length ? "Committed but NEVER REVIEWED (task(s)): "
+        + idList(ledger.unreviewed) + ". " : "")
+      + "Your job is to deliver EXACTLY what is already committed in the shared checkout — no "
+      + "more — and to state plainly in the PR body which tasks are missing or unreviewed. Do NOT "
+      + "implement the missing tasks, and do NOT describe the branch as a complete fix.";
+  }
   return "You are the delivery agent for GitHub issue #" + rec.issue + " of "
-    + (repoSlug || "this repository") + ". The implementation is DONE and reviewed — every task of "
-    + "the plan is already committed in the shared checkout. Your job is to verify it as a whole, "
-    + "push it, and open the PR. Do not implement anything new.\n\n"
+    + (repoSlug || "this repository") + ". " + head + "\n\n"
     + '1. `cd "' + wt + '"`. Confirm the branch with `git status` and `git log --oneline`; if that '
     + "directory is not a git checkout with commits ahead of its base, report FAILED with that fact "
     + "— never fall back to the repository root and never re-create the work.\n"
@@ -809,7 +858,15 @@ function deliverPrompt(rec) {
     + "4. Open a PR with `gh pr create`. Build the PR body in a FILE and pass `--body-file` (never "
     + "inline `--body`). The body MUST contain the line `Closes #" + rec.issue + "` so the merge "
     + "auto-closes the issue, and it must summarise what each task changed and name anything a task "
-    + "review left unresolved.\n"
+    + "review left unresolved. The per-task review findings are ON DISK, one directory per task, at "
+    + '"' + issueDir(rec.issue) + '/task-<n>/review-<round>.md" for tasks 1.."' + ledger.total
+    + '" — read them rather than guessing what they said; a file that is absent means that task '
+    + "never reached its review gate, which is itself worth stating in the body.\n"
+    + (ledger.complete ? ""
+      : "4b. Because this chain stopped early, the body MUST carry an explicit section naming the "
+        + "task(s) listed above as blocked, never attempted, or unreviewed. A PR that reads as a "
+        + "complete fix for this issue while those tasks are missing is a false report, and the "
+        + "reviewer who lands it cannot see this prompt.\n")
     + baseInstruction()
     + "5. Do NOT merge, do NOT run /merge, and do NOT chain into a review command. Opening the PR is "
     + "where your job ends.\n\n"
@@ -852,6 +909,27 @@ function finalize() {
       r.tasks.forEach(function (t) { if (t) taskRecs.push(t); });
     }
   });
+  // prsOpened is the list /goal ingests (goal-pipeline reads it through a
+  // shape-only digit filter), so one PR number must appear exactly ONCE. Two
+  // records claiming the same number is a claim COLLISION, and the branch
+  // comparison in applyPrProof cannot settle it when either record reports an
+  // empty branch — both then classify CONFIRMED. Emitting the number twice
+  // credits a second issue with a pull request that belongs to the first, and
+  // nothing downstream can tell. The first record keeps the number; the
+  // collision is audited rather than silently deduped.
+  const prsOpened = [];
+  const prSeenNums = {};
+  opened.forEach(function (r) {
+    const n = r.prNumber;
+    if (!Number.isInteger(n) || n <= 0) return;
+    const key = String(n);
+    if (prSeenNums[key] === 1) {
+      auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });
+      return;
+    }
+    prSeenNums[key] = 1;
+    prsOpened.push(n);
+  });
   return {
     runId: runId,
     repoSlug: repoSlug,
@@ -862,7 +940,7 @@ function finalize() {
     designedIssues: designedIssues,
     researchArtifacts: researchArtifacts,
     results: solved,
-    prsOpened: opened.map(function (r) { return r.prNumber; }).filter(function (n) { return n > 0; }),
+    prsOpened: prsOpened,
     counts: {
       prOpened: opened.length,
       pushedNoPr: solved.filter(function (r) { return r && r.status === "PUSHED_NO_PR"; }).length,
@@ -928,61 +1006,123 @@ async function runTaskChain(rec, planPath) {
   let implSpent = 0;        // CB3: a LIVE counter of implement-phase agents for THIS issue
   let budgetTripped = false;
   let stopLoop = false;
+  let taskCountUnknown = false;   // task 1 declared no usable plan size
   let k = 1;
 
   while (k <= taskCount && !stopLoop) {
     if (implSpent >= IMPLEMENT_AGENT_BUDGET) { budgetTripped = true; break; }
     implSpent += 1;
     const impl = await agent(taskImplPrompt(rec, planPath, k, k === 1), {
-      label: "impl:#" + rec.issue + ":t" + k, phase: "implement", schema: S.task,
+      label: "impl:#" + rec.issue + ":t" + k, phase: "implement",
+      // Task 1 alone must declare the plan size; see S_TASK1.
+      schema: (k === 1) ? S_TASK1 : S.task,
     });
 
     if (impl === null) {
       noteNull("implement");
       auditEvents.push({ event: "task_implementer_null", issue: rec.issue, task: k, ts: nowIso });
-      tasks.push({ id: k, status: "BLOCKED", reviewVerdict: "", fixRounds: 0, commitCount: 0 });
+      tasks.push({ id: k, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
+        commitCount: 0, claimedStatus: "" });
       break;
     }
 
-    if (k === 1) {
-      // The workspace gate. Every later rung addresses the checkout BY PATH, so
-      // a chain that never opened it would go on to work somewhere else — the
-      // caller's own checkout, in the worst case. Stop before delivery.
-      if (impl.workspaceReady !== true) {
-        auditEvents.push({ event: "workspace_not_ready", issue: rec.issue, ts: nowIso });
-        log("#" + rec.issue + ": task 1 did not report a usable shared worktree at " + wt
-          + " — stopping the chain and dispatching NO delivery agent");
+    // The workspace gate, applied to EVERY rung. Each rung addresses the
+    // checkout BY PATH, so a rung that never opened it worked somewhere else —
+    // the caller's own checkout, in the worst case — and nothing it reports can
+    // be attributed to this branch. Task 1 stops the chain dead (nothing is
+    // committed yet, so there is nothing to deliver); a later rung is recorded
+    // BLOCKED and stops the chain, so its unattributable work is never
+    // delivered as though it had been reviewed here.
+    if (impl.workspaceReady !== true) {
+      auditEvents.push({ event: "workspace_not_ready", issue: rec.issue, task: k, ts: nowIso });
+      log("#" + rec.issue + ": task " + k + " did not report a usable shared worktree at " + wt
+        + " — stopping the chain");
+      if (k === 1) {
+        log("#" + rec.issue + ": nothing is committed here, so NO delivery agent is dispatched");
         return {
           issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
           commitCount: 0, testsRunClaimed: false, summary: "",
           blocker: "the task-1 implementer did not report a usable shared worktree at " + wt,
-          tasks: [{ id: 1, status: "BLOCKED", reviewVerdict: "", fixRounds: 0, commitCount: 0 }],
+          tasks: [{ id: 1, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
+            commitCount: 0, claimedStatus: "" }],
         };
       }
+      tasks.push({ id: k, status: "BLOCKED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
+        commitCount: 0, claimedStatus: "" });
+      break;
+    }
+
+    if (k === 1) {
       // taskCount is the one structural fact an agent supplies here, so the
       // script re-clamps it and records the correction instead of trusting it.
-      const clamped = clampInt(impl.taskCount, 1, MAX_TASKS, 1);
-      if (typeof impl.taskCount !== "number" || Math.floor(impl.taskCount) !== clamped) {
+      // ABSENT or non-integer is not a correctable value: the clamp floor is 1,
+      // so accepting it would collapse an N-task plan into a one-task plan,
+      // record no SKIPPED rows (the backfill is bounded by that same 1), and
+      // still open a PR. That is the same class of failure as a false workspace
+      // flag on the same return, so it stops the chain instead of minimising
+      // the plan. S_TASK1 should already have refused it; this is the arm that
+      // holds when schema enforcement is not available.
+      if (!Number.isInteger(impl.taskCount)) {
         auditEvents.push({
-          event: "task_count_clamped", issue: rec.issue,
-          raw: (impl.taskCount === undefined) ? null : impl.taskCount,
-          clamped: clamped, ts: nowIso,
+          event: "task_count_missing", issue: rec.issue,
+          raw: (impl.taskCount === undefined) ? null : impl.taskCount, ts: nowIso,
         });
+        log("#" + rec.issue + ": task 1 declared no usable plan task count — the plan size is "
+          + "UNKNOWN, so the chain stops here rather than implementing one task and calling it "
+          + "the plan");
+        taskCountUnknown = true;
+      } else {
+        const clamped = clampInt(impl.taskCount, 1, MAX_TASKS, 1);
+        if (impl.taskCount !== clamped) {
+          auditEvents.push({
+            event: "task_count_clamped", issue: rec.issue,
+            raw: impl.taskCount, clamped: clamped, ts: nowIso,
+          });
+        }
+        taskCount = clamped;
+        log("#" + rec.issue + ": the plan declares " + taskCount + " task(s); working in " + wt);
       }
-      taskCount = clamped;
-      log("#" + rec.issue + ": the plan declares " + taskCount + " task(s); working in " + wt);
     }
 
     const taskRec = {
-      id: k, status: "DONE", reviewVerdict: "", fixRounds: 0,
+      id: k, status: "DONE", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
       commitCount: clampInt(impl.commitCount, 0, 4096, 0),
+      // The implementer's OWN terminal word, kept beside the observation the
+      // script derives from commitCount. Same rule as the PR-claim pass below:
+      // the proof wins in the field that drives behaviour, and the claim is
+      // never erased.
+      claimedStatus: (impl.status === "DONE" || impl.status === "NO_CHANGES"
+        || impl.status === "BLOCKED") ? impl.status : "",
     };
     if (impl.status === "BLOCKED") {
       taskRec.status = "BLOCKED";
       stopLoop = true;
       auditEvents.push({ event: "task_implementer_blocked", issue: rec.issue, task: k, ts: nowIso });
+    } else if (taskCountUnknown) {
+      taskRec.status = "BLOCKED";
+      stopLoop = true;
     } else if (taskRec.commitCount === 0) {
+      if (taskRec.claimedStatus === "DONE") {
+        // A DONE claim that produced no commit is a DISAGREEMENT, not a no-op.
+        // Rewriting it to NO_CHANGES silently is how a task the implementer
+        // believed it had finished disappears — and how the run below can go on
+        // to assert that every task reported no change was needed. Every
+        // neighbouring mismatch in this function audits; so does this one.
+        auditEvents.push({ event: "task_done_without_commit", issue: rec.issue, task: k,
+          ts: nowIso });
+      }
       taskRec.status = "NO_CHANGES";
+    }
+
+    // A BLOCKED task can still carry commits: the prompt forbids the
+    // combination, the schema cannot express it. The gate below skips it, so
+    // the commit rides to delivery having been seen by no reviewer — say so,
+    // rather than leaving the not-applicable sentinel to read as "there was
+    // nothing to review". This is the case tasksUnreviewed exists to surface.
+    if (taskRec.status === "BLOCKED" && taskRec.commitCount > 0) {
+      auditEvents.push({ event: "task_blocked_with_commits", issue: rec.issue, task: k,
+        commitCount: taskRec.commitCount, ts: nowIso });
+      taskRec.reviewVerdict = "UNREVIEWED";
     }
 
     // The review gate. A task that committed nothing has nothing to review, so
@@ -997,7 +1137,7 @@ async function runTaskChain(rec, planPath) {
           // task that had nothing to review.
           budgetTripped = true;
           stopLoop = true;
-          if (taskRec.reviewVerdict === "") taskRec.reviewVerdict = "UNREVIEWED";
+          if (taskRec.reviewVerdict === "NOT_APPLICABLE") taskRec.reviewVerdict = "UNREVIEWED";
           break;
         }
         implSpent += 1;
@@ -1087,7 +1227,8 @@ async function runTaskChain(rec, planPath) {
   // Tasks the chain never reached are RECORDED, not dropped: a silently shorter
   // tasks[] would read as "the plan was smaller than it was".
   for (let s = tasks.length + 1; s <= taskCount; s++) {
-    tasks.push({ id: s, status: "SKIPPED", reviewVerdict: "", fixRounds: 0, commitCount: 0 });
+    tasks.push({ id: s, status: "SKIPPED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
+      commitCount: 0, claimedStatus: "" });
   }
 
   if (budgetTripped) {
@@ -1105,8 +1246,17 @@ async function runTaskChain(rec, planPath) {
   if (totalCommits === 0) {
     // Nothing to push, so no delivery agent at all — dispatching one here would
     // only invite it to invent work. The record is synthesized instead.
+    //
+    // NO_CHANGES_NEEDED is a claim about what the AGENTS said, so it is built
+    // from what they said: every task must itself have reported NO_CHANGES.
+    // Deriving it from the rewritten status instead would let a task that
+    // claimed DONE and committed nothing be summarised as "no change was
+    // needed", which no agent said and whose review gate was skipped — in an
+    // unattended batch that reads as an issue needing no work.
     const allNoChanges = tasks.length > 0
-      && tasks.every(function (t) { return t.status === "NO_CHANGES"; });
+      && tasks.every(function (t) {
+        return t.status === "NO_CHANGES" && t.claimedStatus === "NO_CHANGES";
+      });
     return {
       issue: rec.issue, status: allNoChanges ? "NO_CHANGES_NEEDED" : "FAILED",
       branch: "", prNumber: 0, prUrl: "", commitCount: 0, testsRunClaimed: false,
@@ -1118,11 +1268,35 @@ async function runTaskChain(rec, planPath) {
     };
   }
 
+  // The chain's own account of what it finished, computed from the task records
+  // and never from an agent's prose. Delivery runs on ANY committed work — see
+  // below — so this is what stops the prompt asserting a completeness the chain
+  // did not reach, and what makes a partial delivery legible in the result.
+  const ledger = {
+    total: tasks.length,
+    blocked: tasks.filter(function (t) { return t.status === "BLOCKED"; })
+      .map(function (t) { return t.id; }),
+    skipped: tasks.filter(function (t) { return t.status === "SKIPPED"; })
+      .map(function (t) { return t.id; }),
+    unreviewed: tasks.filter(function (t) { return t.reviewVerdict === "UNREVIEWED"; })
+      .map(function (t) { return t.id; }),
+  };
+  ledger.complete = ledger.blocked.length === 0 && ledger.skipped.length === 0
+    && ledger.unreviewed.length === 0;
+  if (!ledger.complete) {
+    auditEvents.push({ event: "partial_delivery", issue: rec.issue, tasksTotal: ledger.total,
+      blocked: ledger.blocked, skipped: ledger.skipped, unreviewed: ledger.unreviewed,
+      ts: nowIso });
+    log("#" + rec.issue + ": the task chain did NOT finish — delivering what is committed and "
+      + "telling the delivery agent to say so (blocked: " + ledger.blocked.length + ", never "
+      + "attempted: " + ledger.skipped.length + ", unreviewed: " + ledger.unreviewed.length + ")");
+  }
+
   // Delivery is the ONE implement-phase dispatch deliberately exempt from CB3.
   // Work that is already committed must reach a PR: refusing to deliver it over
   // a budget the chain has already spent would strand reviewed commits in a
   // worktree nobody is watching. The overrun is at most one agent per issue.
-  const out = await agent(deliverPrompt(rec), {
+  const out = await agent(deliverPrompt(rec, ledger), {
     label: "deliver:#" + rec.issue, phase: "implement", schema: S.solve,
   });
   if (out === null) {
@@ -1140,6 +1314,17 @@ async function runTaskChain(rec, planPath) {
   // confused return can never be attributed to the wrong issue.
   out.issue = rec.issue;
   out.tasks = tasks;
+  // Script-derived, so a delivery agent cannot report its way out of it: a PR
+  // opened over an unfinished chain must be distinguishable from one opened
+  // over a finished chain BEFORE goal-pipeline ingests the number and merges
+  // on it. The claim is not touched — only this fact is added beside it.
+  out.chainComplete = ledger.complete;
+  if (!ledger.complete) {
+    out.partialDelivery = {
+      tasksTotal: ledger.total, blocked: ledger.blocked, skipped: ledger.skipped,
+      unreviewed: ledger.unreviewed,
+    };
+  }
   return out;
 }
 
@@ -1454,11 +1639,26 @@ async function solveOne(rec) {
         // wrong with it (#507). Threading is PRESENCE-driven, not verdict-driven
         // — an APPROVE with caveats is real information, and discarding it
         // reproduces the bug. `review` can be null; that yields an empty result.
-        const findings = sanitizeFindings(review && review.blockingFindings);
+        const rawFindings = review ? review.blockingFindings : undefined;
+        const findings = sanitizeFindings(rawFindings);
         if (findings.items.length > 0) {
           auditEvents.push({
             event: "spec_findings_threaded", issue: rec.issue, count: findings.items.length,
             dropped: findings.dropped, truncated: findings.truncated, ts: nowIso,
+          });
+        } else if (findings.dropped > 0
+          || (rawFindings !== undefined && !Array.isArray(rawFindings))) {
+          // The findings ARRIVED and were unusable — a non-array, or entries
+          // that were all non-strings or whitespace-only. Gating the audit on
+          // surviving items leaves exactly the malformation sanitizeFindings
+          // exists to absorb with no record anywhere, so the planner is told
+          // the spec is advisory without being told what is wrong (#507) and a
+          // later reader cannot tell that from a reviewer that had nothing to
+          // say. COUNTS ONLY, never the text — the envelope stays as narrow as
+          // it is for the threaded case.
+          auditEvents.push({
+            event: "spec_findings_unusable", issue: rec.issue, dropped: findings.dropped,
+            arrayShaped: Array.isArray(rawFindings), ts: nowIso,
           });
         }
         const plan = await agent(planPrompt(rec.issue, dir, note, findings.items),

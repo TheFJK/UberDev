@@ -379,14 +379,19 @@ assert_grep "$CONFIG_REF" 'solve_tier_floor' \
 # back in (pre-diet was 16,511 B).
 #
 # THE UNIT IS THE WORST-CASE CRLF CHECKOUT of the committed blob — its bytes
-# plus its newline count — currently 6454 + 125 = 6579 B against the 7168 B
-# budget.
+# plus its newline count — compared against the 7168 B budget. No absolute
+# current size is written here on purpose: any PR that edits the primer moves
+# it, so a present-tense figure in a comment nothing machine-checks is stale on
+# arrival and understates the remaining headroom. T6.5 below prints the live
+# measurement, which is the only figure that is true when you read it.
 #
 # WHY NOT THE WORKTREE FILE (#522). core.autocrlf=true is live on
 # windows-latest, so a worktree byte count is a checkout-TRANSLATED size and
-# this one literal budget was silently a 7043 B budget there. Measured on the
-# same commit, same file: 6454 B on the ubuntu job, 6579 B on the windows job.
-# The number written here has to be the number CI enforces, on both jobs.
+# this one literal budget was silently a 7043 B budget there. Measured ONCE, at
+# the #522 commit and stated here as history rather than as a current size: the
+# same file counted 6454 B on the ubuntu job and 6579 B on the windows job.
+# The number the budget is compared against has to be the number CI enforces,
+# on both jobs.
 #
 # WHY NOT PLAIN BLOB BYTES. hooks/session-start reads this primer FROM THE
 # WORKTREE and injects it on every session event, so blob-only bytes would
@@ -1680,7 +1685,10 @@ assert_grep "$SOLVE_FLEET_JS" 'Do NOT bump the project version' \
 # #516 — the fleet's prompts must not name rule documents this repo does not ship.
 # Scoped to $SOLVE_FLEET_JS by PATH: a `grep -r` over plugins/uberdev/ would red on
 # five sibling agent files whose `from CLAUDE.md` prose is out of this issue's scope.
-# $SOLVE_FLEET_JS is in the hard-fail preflight above (:93), which owns readability.
+# $SOLVE_FLEET_JS is covered by the hard-fail preflight above — the readability
+# loop that exits 2 on a missing or unreadable input — which owns that
+# guarantee. Named rather than numbered: a same-file line citation in a file
+# this size rots on the first insertion above it.
 assert_absent_fixed "$SOLVE_FLEET_JS" 'from CLAUDE.md' \
   "T12.6b the solver no longer attributes its baseline to a file this repo does not ship"
 assert_absent_fixed "$SOLVE_FLEET_JS" 'Read CLAUDE.md and AGENTS.md' \
@@ -1922,17 +1930,17 @@ fi
 # T15.2 — forward. Every field the RFC promises must be accepted by the code.
 # A missing one means the manifest writer hard-rejects an event the RFC says
 # MUST be supported.
-T14_MISSING=""
+T15_MISSING=""
 while IFS= read -r _f; do
   [ -n "$_f" ] || continue
-  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T14_MISSING="$T14_MISSING $_f"
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T15_MISSING="$T15_MISSING $_f"
 done <<<"$RFC_FIELDS"
-if [ -z "$T14_MISSING" ]; then
+if [ -z "$T15_MISSING" ]; then
   echo "  PASS  T15.2 every RFC 0013 §13 field is a member of ALLOWED_FIELDS ($RFC_FIELD_N/$RFC_FIELD_N)"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  T15.2 RFC 0013 §13 declares fields ALLOWED_FIELDS would reject as unknown_field"
-  echo "        missing from run_manifest.py:$T14_MISSING"
+  echo "        missing from run_manifest.py:$T15_MISSING"
   FAIL=$((FAIL + 1))
 fi
 
@@ -1945,31 +1953,31 @@ fi
 # interrupted agent_started event" half of run_manifest.py's own comment. They
 # are intentionally absent from RFC 0013 §13, which specifies the event schema,
 # not the reconciliation bookkeeping.
-T14_EXEMPT="agent_id
+T15_EXEMPT="agent_id
 backend_handle
 owner_pid
 owner_process_identity
 status_path
 timeout_s"
 # === END run-manifest process-metadata exemptions ===
-T14_EXTRA=""
+T15_EXTRA=""
 while IFS= read -r _f; do
   [ -n "$_f" ] || continue
   grep -qxF -- "$_f" <<<"$RFC_FIELDS" && continue
-  grep -qxF -- "$_f" <<<"$T14_EXEMPT" || T14_EXTRA="$T14_EXTRA $_f"
+  grep -qxF -- "$_f" <<<"$T15_EXEMPT" || T15_EXTRA="$T15_EXTRA $_f"
 done <<<"$CODE_FIELDS"
-T14_STALE_EXEMPT=""
+T15_STALE_EXEMPT=""
 while IFS= read -r _f; do
   [ -n "$_f" ] || continue
-  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T14_STALE_EXEMPT="$T14_STALE_EXEMPT $_f"
-done <<<"$T14_EXEMPT"
-if [ -z "$T14_EXTRA" ] && [ -z "$T14_STALE_EXEMPT" ]; then
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T15_STALE_EXEMPT="$T15_STALE_EXEMPT $_f"
+done <<<"$T15_EXEMPT"
+if [ -z "$T15_EXTRA" ] && [ -z "$T15_STALE_EXEMPT" ]; then
   echo "  PASS  T15.3 every ALLOWED_FIELDS member is in RFC 0013 §13 or the pinned process-metadata roster"
   PASS=$((PASS + 1))
 else
   echo "  FAIL  T15.3 ALLOWED_FIELDS and RFC 0013 §13 have drifted"
-  [ -n "$T14_EXTRA" ] && echo "        in the code, in neither the RFC nor the exemption roster:$T14_EXTRA"
-  [ -n "$T14_STALE_EXEMPT" ] && echo "        exempted here but no longer in ALLOWED_FIELDS:$T14_STALE_EXEMPT"
+  [ -n "$T15_EXTRA" ] && echo "        in the code, in neither the RFC nor the exemption roster:$T15_EXTRA"
+  [ -n "$T15_STALE_EXEMPT" ] && echo "        exempted here but no longer in ALLOWED_FIELDS:$T15_STALE_EXEMPT"
   FAIL=$((FAIL + 1))
 fi
 

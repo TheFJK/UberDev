@@ -209,8 +209,11 @@ echo "== A2: no tests/*.test.sh has an undeclared ripgrep runtime dependency =="
 # alone on a line could ever match), and it hardcoded `python3`, so on a host
 # without that name the capture came back empty and the row printed PASS having
 # scanned nothing. Both halves are now proven in-suite, in both polarities, on
-# every run: A2.1 flags seven real invocation shapes, A2.2 spares eight
-# non-invocations, A2.3 proves a broken interpreter FAILs instead of silencing.
+# every run: A2.1 flags seven real invocation shapes; A2.2 spares seven
+# non-invocation shapes (A2.2a-g) PLUS one real invocation that is spared only
+# because it sits outside the scanned corpus (A2.2h) — two different reasons for
+# a clean result, and folding them into one count hides the corpus boundary this
+# header documents; A2.3 proves a broken interpreter FAILs instead of silencing.
 #
 # DECLARED BOUNDARY — what this row does NOT cover, written down rather than
 # left implied (the #370 / RFC 0016 shape, where a guard's name promises more
