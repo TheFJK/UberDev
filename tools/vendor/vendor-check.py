@@ -28,9 +28,10 @@ traceback that suppresses the checks queued behind it.
     C-COVER      on-disk skill dirs + agent files == declared component paths,
                  both directions; aborts rather than passing if either side is
                  empty
-    C-FILES      per component: recorded file list == disk. For `track`
-                 components the sha256 must match too, unless the change is
-                 declared in divergences[]
+    C-FILES      per component: recorded file list == disk. For DIGEST-LOCKED
+                 components — `stance: track`, or any component that records a
+                 real `vendored_at_commit` (#503) — the sha256 must match too,
+                 unless the change is declared in divergences[]
     C-HEADER     every in-file provenance header agrees with its component's
                  upstream repo and vendored_at_commit; asserts >= 1 header was
                  found before reporting agreement
@@ -57,7 +58,7 @@ Usage:
     vendor-check.py [--repo-root DIR] [--only CHECK-ID ...]
     vendor-check.py --refresh [--repo-root DIR]
 
-`--refresh` recomputes file lists and `track` digests from disk. It NEVER
+`--refresh` recomputes file lists and digest-locked digests from disk. It NEVER
 invents a `vendored_at_commit`, and no test may call it: a producer must not be
 its own oracle.
 
@@ -220,6 +221,31 @@ def third_party(register):
             if c.get("origin") == "third-party"]
 
 
+def is_pinned(component):
+    """True when the component records a real base commit rather than "unknown"."""
+    return bool(SHA40_RE.match(component.get("vendored_at_commit") or ""))
+
+
+def digest_locked(component):
+    """Whether C-FILES must hold this component's bytes to a recorded sha256.
+
+    RFC 0019 §2.3 originally tied the lock to `stance: track` alone. #503 found
+    what that coupling costs: honestly re-adjudicating a component to `fork` —
+    which §4.1 obliges the moment a real local divergence is declared — deleted
+    its digest lock at the same instant its provenance improved. A pinned `fork`
+    was then a component whose shipped bytes claimed a base, in an in-file header
+    C-HEADER validates, with nothing holding the bytes to that claim: edit the
+    file and every check stayed green.
+
+    `stance` answers a policy question (do we re-baseline from upstream?).
+    The digest answers an evidence question (have our bytes moved since we
+    recorded them?). They are different questions, so the lock follows the PIN as
+    well as the stance: recording a base is the act that puts bytes under it.
+    An unpinned `fork` stays unlocked — we own those bytes and edits are expected.
+    """
+    return component.get("stance") == "track" or is_pinned(component)
+
+
 def component_id(component):
     """The name to report a component by, even when it declares no `id`.
 
@@ -339,15 +365,16 @@ def check_files(register, plugin_dir, failures):
                                     "(undeclared=%s declared-but-absent=%s)"
                          % (cid, missing, phantom))
             continue
-        if component.get("stance") != "track":
+        if not digest_locked(component):
             continue
+        why = "stance is track" if component.get("stance") == "track" \
+            else "it records base %s" % str(component.get("vendored_at_commit"))[:12]
         excused = divergence_files(component)
         root = plugin_dir / component["path"]  # non-None: on_disk proved it
         for entry in component.get("files", []):
             if not isinstance(entry, dict):
-                failures.add("C-FILES", "%s: stance is track but files[] carries "
-                                        "a bare path (%r) with no digest"
-                             % (cid, entry))
+                failures.add("C-FILES", "%s: %s but files[] carries a bare path "
+                                        "(%r) with no digest" % (cid, why, entry))
                 continue
             # Non-None: the equality against `on_disk` above already proved every
             # declared path is a real disk name.
@@ -647,16 +674,19 @@ def check_watermark(register, failures):
 # --------------------------------------------------------------------------
 
 def refresh(register, register_path, plugin_dir):
-    """Recompute file lists and `track` digests. Never invents a commit SHA."""
+    """Recompute file lists and digest-locked digests. Never invents a commit SHA."""
     for component in third_party(register):
         on_disk = component_files_on_disk(plugin_dir, component)
         if on_disk is None:
             die_usage("%s: cannot refresh, path missing on disk"
                       % component_id(component))
         root = plugin_dir / component["path"]  # non-None: on_disk proved it
-        if component.get("stance") == "track":
+        if digest_locked(component):
             # A single-file component (an agent) IS `root`; a skill component's
-            # recorded paths are relative to its directory.
+            # recorded paths are relative to its directory. The predicate is
+            # shared with check_files on purpose: a producer that wrote bare
+            # paths where the checker demands digests would make `--refresh`
+            # itself the thing that reds the tree.
             component["files"] = [
                 {"path": rel,
                  "sha256": sha256_of(root / rel if root.is_dir() else root)}
@@ -669,7 +699,7 @@ def refresh(register, register_path, plugin_dir):
     register_path.write_text(
         json.dumps(register, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8")
-    print("vendor-check: refreshed file lists and track digests in %s"
+    print("vendor-check: refreshed file lists and digest-locked digests in %s"
           % register_path)
     print("vendor-check: vendored_at_commit values are NOT touched — a real "
           "re-baseline sets those by hand.")
@@ -682,7 +712,7 @@ def main(argv=None):
     parser.add_argument("--only", action="append", default=None, metavar="CHECK-ID",
                         help="run only the named check (repeatable)")
     parser.add_argument("--refresh", action="store_true",
-                        help="recompute file lists and track digests, then exit")
+                        help="recompute file lists and digest-locked digests, then exit")
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve() if args.repo_root \

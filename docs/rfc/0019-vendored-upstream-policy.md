@@ -82,10 +82,10 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 5 unpinned skill directories and all 6 agents. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
+The split is load-bearing. `"unknown"` is the honest value for 11 of the 20
 components — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
@@ -108,6 +108,10 @@ claim cost two coordinated lies instead of one.
   or the change is declared in `divergences[]`.
 - `stance: "fork"` ⇒ `files[]` is a plain path list. We own the bytes; edits are
   expected; only *coverage* is ratcheted.
+- **Amended by #503:** a component that records a real `vendored_at_commit` is
+  digest-locked **whatever its stance** — `files[]` is `{path, sha256}` for every
+  `track` component and for every pinned one. See the 2026-08-13 amendment for
+  why the two questions come apart.
 
 Be precise about what the digest lock buys: it guards **our bytes against local
 tampering and undeclared local edits**. It says nothing about upstream. Comparing
@@ -196,6 +200,13 @@ lines UberDev adds.
 | `skills/brainstorm` | `skills/brainstorming` | 2255 | **fork** | Deliberately gate-free (§6); driven by `/uberdev:orchestrator` Phase 1, not an interactive human loop. |
 
 Seven `track`, seven `fork`.
+
+> **Superseded rows.** This table is the dated snapshot of what was measured and
+> decided at the v6.2.0 tag. Four of its `track` rows were re-adjudicated against
+> their actual base by the 2026-08-13 (#503) amendment below, which carries the
+> live stance for `receiving-code-review`, `verification-before-completion`,
+> `execute-plan` and `write-plan`. `plugins/uberdev/vendor.json` is always the
+> live record; read the amendments before quoting a row.
 
 ### 4.3 Agents — measured against `claude-plugins-official`
 
@@ -446,3 +457,116 @@ assumed:
 deleted target with the register kept consistent, a misspelled target, the
 resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 **and nothing else**.
+
+---
+
+## Amendment (2026-08-13, #503) — five bases pinned, four stances re-adjudicated, the digest lock moved to the pin
+
+> **Amends §2.2's unpinned counts, §2.3's digest-lock rule, and the `track` rows
+> of §4.2 for `receiving-code-review`, `verification-before-completion`,
+> `execute-plan` and `write-plan`.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What was measured
+
+Each of the five components #462 left unpinned was diffed file-by-file against
+`obra/superpowers@e7a2d16` — and, to make "that is the base" evidence rather than
+assumption, against **every** upstream commit in each file's history. `e7a2d16`
+is the closest blob for all six files; no earlier or later upstream revision
+matches better, so no hunk in any of them is un-adopted upstream prose. The whole
+residual is local, and every hunk is attributed:
+
+| Component | Residual vs `e7a2d16` | Attribution |
+| --- | ---: | --- |
+| `skills/using-git-worktrees` | 17 | Brand rewrite of the global worktree location, plus a fail-loud fix to the path-resolution `case` in the creation snippet. |
+| `skills/receiving-code-review` | 29 | One appended local section, *Multi-Reviewer Parallel Triage*. **No rebrand token in the file at all.** |
+| `skills/verification-before-completion` | 30 | One appended local section, *Parallel Verification Dispatch*. **No rebrand token in the file at all.** |
+| `skills/execute-plan` | 42 | Rename + rebrand + wave-ordered Step 2 and the UberDev sub-skill handoffs. |
+| `skills/write-plan` | 99 | Rename + rebrand + the plan **format** this repo owns (wave decomposition, task headers, non-interactive handoff) + the reviewer prompt rewritten from a Task dispatch into an inline checklist. |
+
+Two of those five carried the exact sentence #462 caught on
+`skills/dispatching-parallel-agents`: *"the local delta is the namespace
+rebrand"*, on a file containing no `superpowers:` token. The register's
+`stance_reason` fields now state what was measured instead.
+
+### The stance verdicts
+
+`skills/using-git-worktrees` **stays `track`**. §4.1's fork trigger needs a
+*permanent* local divergence or a rewritten behavioural contract; a bounded
+correction inside a shell example is neither, and it is recorded as
+`divergences[].worktree-location-failloud` with `permanent: false` precisely so
+an equivalent upstream guard retires it rather than being reconciled against it.
+
+The other four **flip `track` → `fork`**. Two carry a permanent local policy
+section upstream has no equivalent for; two carry the wave contract that
+`write-plan` emits, `execute-plan` walks and `uberdev:subagent-driven-dev`
+parses — a two-sided interlock, so re-baselining either side alone breaks it.
+`track` *promises* a digest-locked re-baseline (§4.4); claiming it for a
+component whose upstream copy is not drop-in would be a false statement with no
+CI signal behind it, the same reasoning the #457 amendment used.
+
+Live tally after this amendment: **three `track`, eleven `fork`** among the 14
+skill components. §4.2's table keeps its dated numbers.
+
+### Why the flip did not cost coverage
+
+Stated plainly, because it was the reason this work was split out of #462:
+`C-FILES` enforced `sha256` only when `stance == "track"`, so an honest
+re-adjudication to `fork` **deleted five digest locks**. Worse than a wash —
+provenance improved (a real base, restated in a header `C-BASE` demands) at the
+same instant the byte evidence behind it vanished. Measured on the pre-#503 tree:
+appending a byte to any `fork`-stance file left `vendor-check.py` at exit 0, so a
+pinned fork was a component whose shipped header named a base with nothing
+holding its bytes to that claim.
+
+The coupling was the defect. `stance` answers a **policy** question — do we
+re-baseline from upstream? The digest answers an **evidence** question — have our
+bytes moved since we recorded them? #503 ties the lock to the **pin**: recording
+a base is the act that puts bytes under a digest, whatever the stance. An
+unpinned `fork` stays unlocked, which is what keeps the distinction real.
+
+Net effect on coverage, counted rather than asserted: **nine** components are now
+digest-locked instead of seven, and the file count under lock rises from **14 to
+27** — the five re-adjudicated components keep theirs, and the two previously
+pinned forks (`systematic-debugging`, `test-driven-development`) contribute 13
+files that nothing held before.
+
+Two smaller repairs fall out of the same rule:
+
+- `skills/systematic-debugging`'s two **file-scoped** `divergences[]` entries are
+  now component-scoped (`"file": null`). A file-scoped entry is `C-FILES`'
+  declared-change escape hatch, and it would have disarmed the new lock on
+  exactly the two files whose local divergence is most worth watching. It was
+  never needed: `C-FILES` compares our bytes against **our** recorded digest,
+  never against upstream, so an upstream-relative divergence has nothing to
+  excuse. `vendor-drift.py`'s `declared_files()` resolves the ref back to
+  `permanent_divergences[].file`, so the weekly report still labels those files
+  *declared* rather than raw drift.
+- `skills/dispatching-parallel-agents` no longer references `namespace-rebrand`.
+  #462 corrected that component's prose and left the machine-readable reference
+  behind, so the register asserted a divergence its own `stance_reason` denied.
+
+### What now enforces this
+
+- `tests/vendor-provenance.test.sh` **V30** — a byte changed in a *pinned fork*
+  file must red `C-FILES` by name. Run against the pre-#503 checker it reports
+  `checker stayed GREEN on a mutated tree`, which is the defect stated in the
+  row's own words. **V14** is its counter-case, holding an *unpinned* fork edit
+  green so the widening cannot creep into "every fork is locked".
+- **V31** — every digest-locked component actually records a `sha256` per file,
+  asserted against the committed register rather than through the checker.
+- **V32** — a `namespace-rebrand` reference on a *pinned* component must be
+  witnessed by a brand token in that component's own bytes. This is the ratchet
+  for the class #462 and #503 each found by hand. It is scoped to pinned
+  components because an unpinned one has no proven base, so the claim is not yet
+  checkable — the six agents are **#505**'s.
+- **V25**, widened from `track` to the digest-locked set, so the escape hatch
+  cannot be reopened on a pinned fork.
+- **V5**'s exact header count moves 21 → 27.
+
+### What is left
+
+Eleven components still read `"unknown"`: the five unpinned `fork` skills
+(**#504**) and the six agents (**#505**). This amendment supersedes §7's
+"the remaining 16 are owned by three successors" — #503 is done, and the sentence
+should be read as naming the two that remain.
