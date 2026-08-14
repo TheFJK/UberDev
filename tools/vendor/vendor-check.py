@@ -54,6 +54,9 @@ traceback that suppresses the checks queued behind it.
     C-REFS       every relative sibling file a declared markdown document points
                  at (`@ref` or `](link)`, outside code) resolves on disk;
                  aborts rather than passing if it found no reference at all
+    C-DIVREF     every components[].divergences[].ref resolves to a declared
+                 permanent_divergences[].id, for every component regardless of
+                 stance
 
 Repo-agnostic: no organisation, project id or repository name is hardcoded. All
 upstream coordinates come from the register.
@@ -118,7 +121,7 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
 
 ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-BASE",
               "C-EVIDENCE", "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK",
-              "C-REFS")
+              "C-REFS", "C-DIVREF")
 
 # The only recovery method this register knows how to state. A second method
 # would need its own required fields, so an unrecognised literal is refused
@@ -764,6 +767,61 @@ def check_stance(register, failures):
                                  "the check would be vacuous")
 
 
+def check_divref(register, failures):
+    """Every `divergences[].ref` must name a real `permanent_divergences[].id`.
+
+    The channel this closes (#509). `check_files` short-circuits every component
+    whose stance is not `track`, so a `fork`'s `divergences[]` is never read at
+    all — and no check anywhere resolved a ref against a record. The only such
+    resolution in the repo was `tests/finish-branch.test.sh` F14, scoped to one
+    component, so a dangling ref on any of the other 74 passed every gate. The
+    register's divergence records are what RFC 0019 §6 adjudicates and what
+    `vendor-drift.py` `declared_files()` subtracts from raw drift, so a ref
+    pointing at nothing silently un-declares a divergence in both directions.
+
+    Runs over EVERY component, not just third-party and not just `track`: the
+    pointer is a register-internal invariant and does not depend on origin or
+    stance.
+
+    A `ref` is MANDATORY on every entry, which tightens RFC 0019 §2.4's "plus
+    any component-local entries" — that phrase could be read as licensing an
+    entry carrying only a `file`, which `declared_files()` would still subtract
+    from raw drift while pointing at no adjudicated record. A component-local
+    `file` is still welcome; it rides on a `ref`. Measured at adoption: all 27
+    entries in the register already carry one.
+
+    Deliberately carries NO vacuity arm, unlike C-HEADER / C-BASE / C-REFS. For
+    those, finding zero means the scan broke. Here an empty `divergences[]`
+    corpus is a legal register state — a repo that has declared no permanent
+    divergence yet — and a `found == 0` failure would red a clean tree.
+    """
+    ids = {p.get("id") for p in register.get("permanent_divergences", [])
+           if isinstance(p, dict) and p.get("id")}
+    for component in register.get("components", []):
+        if not isinstance(component, dict):
+            # A non-object component is C-SCHEMA's finding; reading it here
+            # would raise and suppress every check queued behind this one.
+            continue
+        cid = component_id(component)
+        declared = component.get("divergences", [])
+        if not isinstance(declared, list):
+            failures.add("C-DIVREF", "%s: divergences is not a list" % cid)
+            continue
+        for entry in declared:
+            if not isinstance(entry, dict):
+                failures.add("C-DIVREF", "%s: a divergences[] entry is not an "
+                                         "object (%r)" % (cid, entry))
+                continue
+            ref = entry.get("ref")
+            if not ref:
+                failures.add("C-DIVREF", "%s: a divergences[] entry declares no "
+                                         "ref" % cid)
+                continue
+            if ref not in ids:
+                failures.add("C-DIVREF", "%s: divergence ref %r resolves to no "
+                                         "permanent_divergences[].id" % (cid, ref))
+
+
 def check_watermark(register, failures):
     for component in third_party(register):
         cid = component_id(component)
@@ -869,6 +927,8 @@ def main(argv=None):
         check_watermark(register, failures)
     if "C-REFS" in selected:
         check_refs(register, plugin_dir, failures)
+    if "C-DIVREF" in selected:
+        check_divref(register, failures)
 
     if failures:
         print("vendor-check: %d failure(s) across %s"

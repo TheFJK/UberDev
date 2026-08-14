@@ -111,6 +111,22 @@
       "file": "plan-document-reviewer-prompt.md",
       "note": "Upstream's plan-document-reviewer-prompt.md is a dispatch template — 'Task tool (general-purpose): description / prompt'. UberDev's copy is an INLINE self-review checklist that states it is not a provider edge and must not create a child, because the plan writer runs as a leaf under uberdev:orchestrator, where a nested dispatch has no runtime. It also carries the shared-skeleton header that keeps it in sync by hand with skills/brainstorm/spec-document-reviewer-prompt.md. Adopting upstream's version would re-introduce a spawn from a leaf. Kept forever.",
       "permanent": true
+    },
+    {
+      "id": "sdd-parallel-implementer-waves",
+      "kind": "policy-divergence",
+      "scope": "skills/subagent-driven-dev",
+      "file": "SKILL.md",
+      "note": "Upstream's subagent-driven-development/SKILL.md states an explicit prohibition: never dispatch multiple implementation subagents in parallel, because they conflict. UberDev's fork inverts it, and does so as its stated core principle — implementers within one wave dispatch in parallel into a single shared feature-branch worktree, over a strictly disjoint per-task file partition, with the controller as the only process that runs git. Adjudicated DELIBERATE in #509, not drift. What makes the inversion safe is a produced-and-checked precondition rather than a promise: agents/plan-writer.md emits the partition as each task's 'Owns (file allowlist)' field plus the plan's '## Execution Waves' summary; agents/plan-reviewer.md Check 2 reviews it (same-wave Owns lists must be strictly disjoint, and any file in two of them is a critical finding); and sdd_assert_wave_disjoint refuses the wave at dispatch time — sdd_launch_prepared_batch calls it before it launches anything, so an overlapping or ownership-less wave dispatches zero children (rc 3 overlap, rc 2 missing) instead of being caught after the fact. Today's solve-fleet route never reaches a parallel wave at all: skills/solve-fleet/workflow.js dispatches exactly one worktree-isolated implementer per issue, so the wave shape is exercised by the in-session SDD controller only. That is a description of current behaviour, not a promise about it. Never reconciled.",
+      "permanent": true
+    },
+    {
+      "id": "worktree-location-failloud",
+      "kind": "local-fix",
+      "file": null,
+      "permanent": false,
+      "note": "Local correction to upstream's worktree-path 'case': upstream's pattern is the bare '~/.config/superpowers/worktrees/*' and its body assigns a literal '~/...' string, but a tilde expands in neither a case pattern nor a quoted RHS (verified under bash and zsh), and upstream has no default arm — an unmatched LOCATION falls through with $path unset straight into 'git worktree add \"$path\"'. This copy quotes both accepted spellings, builds the path from ${HOME}, and exits 1 with a named error otherwise. NOT permanent: it is a bug fix, not a policy, so an equivalent upstream guard retires this entry instead of being reconciled against it. Component-scoped (file: null) so the C-FILES digest lock stays armed.",
+      "scope": "skills/using-git-worktrees"
     }
   ],
   "components": [
@@ -383,18 +399,22 @@
       "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 — upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
+      "stance_reason": "Base e7a2d16 — upstream main's HEAD across the 2026-04-27→2026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 — upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned. It also carries the permanent wave-parallel implementer divergence (sdd-parallel-implementer-waves), which inverts an explicit upstream prohibition — see RFC 0019 §6.",
       "measured_diff_lines": 1064,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "sdd-parallel-implementer-waves",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "d9368bddb9edf9cc9ec2420ae1cdb31454a5c28e7a54798bac87978eb4c6eac1"
+          "sha256": "57c7de507aa445530ec98074a05c2d421c2d8ec590228ad927fc7445c17e0aa9"
         },
         {
           "path": "code-quality-reviewer-prompt.md",
@@ -406,7 +426,7 @@
         },
         {
           "path": "spec-reviewer-prompt.md",
-          "sha256": "d83d4b59b3ad9b41928fae6d23f39fd1105c09355a745ace80ec376511eb8270"
+          "sha256": "e2ad55e27768c7a27193519901172572b90e6096c3ea17f4eda176c4fbd917f1"
         }
       ]
     },
@@ -553,11 +573,8 @@
           "file": null
         },
         {
-          "id": "worktree-location-failloud",
-          "kind": "local-fix",
-          "file": null,
-          "permanent": false,
-          "note": "Local correction to upstream's worktree-path 'case': upstream's pattern is the bare '~/.config/superpowers/worktrees/*' and its body assigns a literal '~/...' string, but a tilde expands in neither a case pattern nor a quoted RHS (verified under bash and zsh), and upstream has no default arm — an unmatched LOCATION falls through with $path unset straight into 'git worktree add \"$path\"'. This copy quotes both accepted spellings, builds the path from ${HOME}, and exits 1 with a named error otherwise. NOT permanent: it is a bug fix, not a policy, so an equivalent upstream guard retires this entry instead of being reconciled against it. Component-scoped (file: null) so the C-FILES digest lock stays armed."
+          "ref": "worktree-location-failloud",
+          "file": null
         }
       ],
       "files": [
