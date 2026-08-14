@@ -78,6 +78,7 @@ to poll.
 [solve] === DONE ===
   issues:   <return.issueCount> (<return.designedIssues> via the design path)
   PRs:      <return.counts.prOpened> opened -> <return.prsOpened>
+  verified: <return.verification.confirmed> confirmed, <return.verification.disproven> disproven, <return.verification.unverified> unverified
   other:    <return.counts.noChangesNeeded> no-change, <return.counts.refused> refused, <return.counts.failed> failed
 ```
 
@@ -85,6 +86,11 @@ Then print one line per entry in `return.results` that is not `PR_OPENED`,
 quoting its `blocker`. If `return.cb1Tripped` or `return.cb2Tripped` is true,
 say so explicitly and note that issues left unsolved still hold their
 `uberdev:active` claim.
+
+A `disproven` or `unverified` count above zero means the fleet could not stand
+behind a solver's PR claim — say so and point the user at `return.auditEvents`,
+which names the issue and the reason for every disagreement. This matters most
+here: `/turbo` is unattended, so nobody else is going to notice.
 
 **No-Workflow fallback:** if the `Workflow` tool is not among your tools
 (Gemini, Copilot, pre-Workflow Claude Code), re-run the same launcher

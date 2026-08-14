@@ -423,9 +423,12 @@ function budgetExhausted() {
 
 // Projected agents for ONE cycle: the claim relay, up to maxWatchTicks watch
 // relays, the collect relay, the verdict relay — plus what the nested fleet
-// will spend per issue: its own intake relay, the six research/design agents a
-// medium-tier issue costs, and up to IMPLEMENT_AGENT_BUDGET (24) implement-phase
-// agents for the fleet's per-task implementer -> reviewer -> fix chain.
+// will spend per issue: its own intake relay, its PR-claim verification relay
+// (#515), the six research/design agents a medium-tier issue costs, and up to
+// IMPLEMENT_AGENT_BUDGET (24) implement-phase agents for the fleet's per-task
+// implementer -> reviewer -> fix chain (#508). Both fleet relays are BATCHED —
+// one each per fleet run, not per issue — so they are a flat +2, not part of
+// the per-issue term.
 //
 // Consequence, stated out loud rather than buried in the arithmetic: at 30
 // agents per design-tier issue the runtime's own 1000-agent lifetime cap
@@ -434,7 +437,7 @@ function budgetExhausted() {
 // task; intra-issue agents queue rather than accelerate on a busy host.
 function projectedAgentsForCycle(issueCount) {
   // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 3 + maxWatchTicks + 1 + (issueCount * 30);
+  return 3 + maxWatchTicks + 2 + (issueCount * 30);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
@@ -587,8 +590,11 @@ async function runCycle() {
       try {
         const out = await workflow({ scriptPath: solveFleetJs }, fleetArgs);
         fleetRuns += 1;
+        // The fleet's two batched relays (intake + PR-claim verification, #515)
+        // plus its per-issue solver/design/implement-chain agents. Mirrors
+        // projectedAgentsForCycle above — they must not drift apart.
         // SHARED COST: solve-fleet-per-issue-agent-cost
-        agentsSpent += 1 + (rec.claimed.length * 30);
+        agentsSpent += 2 + (rec.claimed.length * 30);
         rec.fleet = "ran";
         if (out && typeof out === "object" && Array.isArray(out.prsOpened)) {
           rec.prsOpened = digitsOnly(out.prsOpened).map(Number);

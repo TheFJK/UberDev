@@ -356,15 +356,67 @@ const S = {
         enum: ["PR_OPENED", "PUSHED_NO_PR", "COMMITTED_NOT_PUSHED", "NO_CHANGES_NEEDED", "REFUSED", "FAILED"],
       },
       branch: { type: "string" },
-      prNumber: { type: "integer" },
+      prNumber: { type: "integer", minimum: 0 },
       prUrl: { type: "string" },
-      commitCount: { type: "integer" },
-      testsRun: { type: "boolean" },
+      commitCount: { type: "integer", minimum: 0 },
+      // NOT `testsRun`. Nothing in this repo can falsify it — there is no junit
+      // artifact and no receipt, and a solver-written receipt would be authored
+      // by the same agent that makes the claim. So the name says what it is: an
+      // unverified self-report, recorded and never believed (nothing reads it).
+      testsRunClaimed: { type: "boolean", description: "the solver's own unverified self-report that it executed tests" },
       summary: { type: "string", description: "<=400 chars, what was changed and why" },
       blocker: { type: "string", description: "why it stopped, when status is REFUSED or FAILED" },
     },
   },
+  // #515 — the PR-existence proof. OBSERVATIONS ONLY: there is deliberately no
+  // `exists`, `matches`, `verified` or `status` property here. Those are
+  // CONCLUSIONS, and the conclusion is the script's to draw — the same reason
+  // review-fleet/workflow.js's S.verify omits score and verdict ("a structured
+  // return a child composes is a score a child could report differently from
+  // the one it wrote"). The relay reports what GitHub said; verifyClaims()
+  // decides what that means.
+  //
+  // Only `pr` and `httpStatus` are REQUIRED. Everything a 200 body yields is
+  // optional, because a relay that could not read one field must be able to
+  // report the rest honestly instead of inventing it — which is exactly why
+  // every optional field is Number.isInteger/non-empty-string gated before it
+  // is compared or stored downstream.
+  prProof: {
+    type: "object", additionalProperties: false,
+    required: ["rows", "rc"],
+    properties: {
+      rc: { type: "integer" },
+      rows: {
+        type: "array", maxItems: 4096,
+        items: {
+          type: "object", additionalProperties: false,
+          required: ["pr", "httpStatus"],
+          properties: {
+            pr: { type: "integer", minimum: 0, description: "the PR number this row was asked about" },
+            httpStatus: { type: "integer", minimum: 0, description: "the integer from the HTTP status line; 0 when the command could not run" },
+            number: { type: "integer", minimum: 0 },
+            url: { type: "string" },
+            headRefName: { type: "string" },
+            state: { type: "string" },
+            commitCount: { type: "integer", minimum: 0 },
+            attempts: { type: "integer", minimum: 0 },
+          },
+        },
+      },
+    },
+  },
 };
+
+// The one repo-slug gate (#515). `repoSlug` is script-derived (it comes from
+// the launcher's envelope, not from an agent), but it is still the only
+// non-numeric value interpolated into the proof prompt, so it is shape-checked
+// before it gets there — the same conditional idiom as baseInstruction's
+// `--base`. An unusable slug SKIPS the relay rather than emitting a malformed
+// `gh api` path for an agent to "fix".
+const REPO_SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+function repoSlugUsable() {
+  return REPO_SLUG_RE.test(repoSlug);
+}
 
 // ------------------------------- prompts -------------------------------
 // Every prompt below interpolates ONLY script-derived values.
@@ -379,6 +431,45 @@ function intakePrompt() {
     + "and issues (one entry per manifest issue, mapping prompt_file -> promptFile and context_file -> "
     + "contextFile). Copy the values verbatim — do NOT invent, reorder, filter or repair entries, and "
     + "do not read any other file.";
+}
+
+// #515 — the PR-existence proof relay. Same register as intakePrompt(): a
+// MECHANICAL relay that runs fixed commands and reports raw observations. It
+// reaches no verdict, compares nothing, and is told so explicitly.
+//
+// INTERPOLATION (DR-5): exactly two values, both script-derived — `repoSlug`,
+// already gated by repoSlugUsable() at the call site, and the PR numbers,
+// re-rendered here from JS integers the caller validated. No agent-composed
+// string reaches this prompt; in particular the solver's `branch` does not, so
+// the relay must DISCOVER head.ref itself and the comparison happens in JS.
+function verifyPrsPrompt(nums) {
+  const listed = nums.map(function (n) { return "  - " + String(n); }).join("\n");
+  return "Run EXACTLY the commands described below via Bash — mechanical relay, do not interpret the "
+    + "results, do not improvise, and reach NO conclusion about whether anything is correct.\n\n"
+    + "For each of these pull-request numbers in the repository " + repoSlug + ":\n" + listed + "\n\n"
+    + "run, substituting the number for <N>:\n\n"
+    + '  gh api -i "repos/' + repoSlug + '/pulls/<N>"\n\n'
+    + "and read the INTEGER out of the HTTP status line of the response (`HTTP/2 200`, `HTTP/2 404`, and "
+    + "so on). The `-i` flag is REQUIRED and there is no substitute for it: the status integer is the only "
+    + "thing that separates \"this pull request does not exist\" (404) from \"GitHub would not answer right "
+    + "now\" (401, 403, 429, 5xx). A command exit code collapses those into one value, and a caller that "
+    + "cannot tell them apart discards real work.\n\n"
+    + "Retry policy, per number: when the status is neither 200 nor 404, `sleep 2` and run the SAME command "
+    + "again — at most 3 attempts in total — then report whatever the last attempt returned. Report how "
+    + "many attempts you made. A pull request pushed moments ago can need a few seconds to settle.\n\n"
+    + "From a 200 response body, report these fields as you read them: number, html_url, head.ref, state, "
+    + "commits.\n\n"
+    + "Prohibitions: do not retry with different flags, a different endpoint or a different repository; "
+    + "do not substitute another pull request for one you cannot find; "
+    + "do not open, close, comment on, or modify anything; "
+    + "do not read any other file and do not inspect the local git checkout. If a command could not be "
+    + "run at all, report httpStatus 0 for that number.\n\n"
+    + "Return via StructuredOutput: rc (0 if you were able to run the commands, 1 if you were not) and rows "
+    + "— one entry per number listed above, in the same order, each with pr (the number you were asked "
+    + "about, copied verbatim), httpStatus (the integer from the status line, or 0), attempts, and — only "
+    + "when the status was 200 — number, url (html_url), headRefName (head.ref), state and commitCount "
+    + "(commits). OMIT any field you did not actually observe; never guess one and never carry a value "
+    + "over from another number.";
 }
 
 function researchPrompt(issue, lens, outPath) {
@@ -554,8 +645,9 @@ function solvePrompt(rec, planPath) {
     + "Return via StructuredOutput: issue (" + rec.issue + "), status (PR_OPENED | PUSHED_NO_PR | "
     + "COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED | REFUSED | FAILED), branch (the branch name you created, "
     + 'or ""), prNumber (the integer PR number parsed from the gh URL, or 0), prUrl (or ""), commitCount '
-    + "(integer commits you made), testsRun (true only if you actually executed tests), summary (<=400 "
-    + "chars), blocker (why you stopped, when REFUSED or FAILED; else \"\").";
+    + "(integer commits you made), testsRunClaimed (true only if you actually executed tests — this is "
+    + "recorded as YOUR CLAIM and is not verified; do not report it true unless you ran them), summary "
+    + "(<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\").";
 }
 
 // ---------------- the per-task implement chain (issue #508) ----------------
@@ -716,6 +808,8 @@ let researchArtifacts = 0;
 let designedIssues = 0;
 let cb1Tripped = false;   // agent-ceiling
 let cb2Tripped = false;   // budget floor reached before the batch finished
+let prProbed = 0;         // #515: PR numbers actually sent to the proof relay
+let prRelayRc = null;     // #515: the proof relay's rc, null when it never ran
 const nullsByPhase = {};
 const auditEvents = [];
 
@@ -757,6 +851,18 @@ function finalize() {
     tasksApproved: taskRecs.filter(function (t) { return t.reviewVerdict === "APPROVE"; }).length,
     tasksBlocked: taskRecs.filter(function (t) { return t.status === "BLOCKED"; }).length,
     tasksUnreviewed: taskRecs.filter(function (t) { return t.reviewVerdict === "UNREVIEWED"; }).length,
+    // #515 — how much of the above is PROVEN rather than reported. Every field
+    // is computed here from the record classifications; nothing the proof relay
+    // returned is copied into a count. A non-zero `disproven` or `unverified`
+    // means auditEvents carries the specifics.
+    verification: {
+      probed: prProbed,
+      confirmed: countProof("CONFIRMED"),
+      disproven: countProof("DISPROVEN"),
+      unverified: countProof("UNVERIFIED"),
+      notApplicable: countProof("NOT_APPLICABLE"),
+      relayRc: prRelayRc,
+    },
     cb1Tripped: cb1Tripped,
     cb2Tripped: cb2Tripped,
     nullsByPhase: nullsByPhase,
@@ -824,7 +930,7 @@ async function runTaskChain(rec, planPath) {
           + " — stopping the chain and dispatching NO delivery agent");
         return {
           issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-          commitCount: 0, testsRun: false, summary: "",
+          commitCount: 0, testsRunClaimed: false, summary: "",
           blocker: "the task-1 implementer did not report a usable shared worktree at " + wt,
           tasks: [{ id: 1, status: "BLOCKED", reviewVerdict: "", fixRounds: 0, commitCount: 0 }],
         };
@@ -979,7 +1085,7 @@ async function runTaskChain(rec, planPath) {
       && tasks.every(function (t) { return t.status === "NO_CHANGES"; });
     return {
       issue: rec.issue, status: allNoChanges ? "NO_CHANGES_NEEDED" : "FAILED",
-      branch: "", prNumber: 0, prUrl: "", commitCount: 0, testsRun: false,
+      branch: "", prNumber: 0, prUrl: "", commitCount: 0, testsRunClaimed: false,
       summary: allNoChanges ? "every task of the plan reported that no change was needed" : "",
       blocker: allNoChanges ? ""
         : ("the task chain committed nothing for issue #" + rec.issue
@@ -1000,7 +1106,7 @@ async function runTaskChain(rec, planPath) {
     auditEvents.push({ event: "delivery_null", issue: rec.issue, ts: nowIso });
     return {
       issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-      commitCount: totalCommits, testsRun: false, summary: "",
+      commitCount: totalCommits, testsRunClaimed: false, summary: "",
       blocker: "the delivery agent returned no result; " + totalCommits + " reviewed commit(s) sit in "
         + "the shared worktree at " + wt + " and were never pushed",
       tasks: tasks,
@@ -1011,6 +1117,260 @@ async function runTaskChain(rec, planPath) {
   out.issue = rec.issue;
   out.tasks = tasks;
   return out;
+}
+
+// ==================== claim verification (#515) ====================
+//
+// WHY. The fleet used to aggregate its solvers' structured returns verbatim.
+// `status` drives every count in the run summary AND the PR set /goal ingests
+// (goal-pipeline/workflow.js reads out.prsOpened through digitsOnly(), a SHAPE
+// filter that any plausible integer passes). AGENTS.md forbids claiming done
+// without having run the command and read the output; the fleet imposed that on
+// solvers in prose and then accepted their booleans as proof. In an unattended
+// /turbo batch there is no human left to notice, so the script is the only
+// remaining check. Exactly one field was ever defended — `issue`, pinned to the
+// manifest — and the comment there shows the class was recognised.
+//
+// THE RULE. The proof wins in the field that DRIVES BEHAVIOUR; the claim is
+// never erased; the disagreement is an audit event.
+//   - `status` drives counts and /goal's queue, so a disproven status is
+//     overwritten and the claim preserved beside it (claimedStatus/…).
+//   - `commitCount` drives nothing, so the claim stays put and the proof lands
+//     beside it in provenCommitCount.
+//   - Silent correction is forbidden. scan-fleet's `area_id_mismatch` is the
+//     in-repo precedent: audit the disagreement rather than quietly fixing it.
+//
+// NEVER AN UPGRADE. A record that did not claim PR_OPENED is never promoted, no
+// matter what a probe shows. Inventing success on the fleet's behalf is the same
+// defect as accepting it.
+//
+// NEVER A FALSE DOWNGRADE. Only two observations disprove a PR claim: an
+// authoritative 404, and a 200 that names a different head branch. Everything
+// else — no relay, a null relay, rc!=0, a missing row, 0/401/403/429/5xx —
+// classifies UNVERIFIED and RETAINS the claim. A probe that cannot speak must
+// never remove a real PR from /goal's queue.
+
+function isPosInt(n) { return Number.isInteger(n) && n > 0; }
+
+// Downgrade = the proof won on `status`. The claim moves into claimed* fields
+// rather than disappearing, so the run summary can still show what the solver
+// said it did next to what GitHub actually has.
+function downgradeClaim(r) {
+  r.claimedStatus = r.status;
+  r.claimedPrNumber = Number.isInteger(r.prNumber) ? r.prNumber : 0;
+  r.claimedPrUrl = (typeof r.prUrl === "string") ? r.prUrl : "";
+  r.status = "PUSHED_NO_PR";
+  r.prNumber = 0;
+  r.prUrl = "";
+  r.prProof = "DISPROVEN";
+}
+
+function markUnverifiable(r, reason) {
+  r.prProof = "UNVERIFIED";
+  auditEvents.push({ event: "pr_claim_unverifiable", issue: r.issue,
+    pr: Number.isInteger(r.prNumber) ? r.prNumber : 0, reason: reason, ts: nowIso });
+}
+
+// STEP A — coherence, settled entirely script-side. No agent is spent on a
+// record that already contradicts itself.
+function classifyClaimCoherence() {
+  solved.forEach(function (r) {
+    if (!r) return;
+    if (r.status === "PR_OPENED") {
+      if (isPosInt(r.prNumber)) return;   // a real claim; Step B/C will probe it
+      // PR_OPENED with no usable number. Nothing to look up, and the two
+      // published numbers disagree about it on main: counts.prOpened filters on
+      // `status` while prsOpened filters on `n > 0`, so this record was counted
+      // by one and dropped by the other with no audit event at all.
+      auditEvents.push({ event: "pr_claim_incoherent", issue: r.issue,
+        claimedPrNumber: Number.isInteger(r.prNumber) ? r.prNumber : 0, ts: nowIso });
+      downgradeClaim(r);
+      return;
+    }
+    if (isPosInt(r.prNumber)) {
+      // A number on a non-PR status. Reported, never acted on: upgrading here
+      // would be the script inventing a PR the solver did not claim.
+      auditEvents.push({ event: "pr_number_on_non_pr_status", issue: r.issue,
+        status: r.status, prNumber: r.prNumber, ts: nowIso });
+    }
+    r.prProof = "NOT_APPLICABLE";
+  });
+}
+
+// STEP B — the request set. Validated, distinct, positive integers taken from
+// the records that STILL claim PR_OPENED after Step A. Distinct because two
+// solvers reporting the same number is a claim collision, not two probes; and
+// the relay is asked once, so the second record is adjudicated on the same row.
+function prNumbersToVerify() {
+  const seen = {};
+  const nums = [];
+  solved.forEach(function (r) {
+    if (!r || r.status !== "PR_OPENED") return;
+    const n = r.prNumber;
+    if (!isPosInt(n) || n > 9999999) return;
+    const key = String(n);
+    if (seen[key] === 1) return;
+    seen[key] = 1;
+    nums.push(n);
+  });
+  return nums;
+}
+
+// Every live PR claim retained, but flagged as unproven. The path taken
+// whenever the probe could not speak — never a downgrade.
+function markAllClaimsUnverified() {
+  solved.forEach(function (r) {
+    if (r && r.status === "PR_OPENED" && isPosInt(r.prNumber)) r.prProof = "UNVERIFIED";
+  });
+}
+
+function countProof(cls) {
+  return solved.filter(function (r) { return r && r.prProof === cls; }).length;
+}
+
+// Adjudication. Every conclusion below is drawn HERE, in JS, from the relay's
+// raw observations — no field of the relay return is ever copied into `status`
+// or into a count.
+function applyPrProof(rows) {
+  const byPr = {};
+  rows.forEach(function (row) {
+    if (!row || typeof row !== "object" || !Number.isInteger(row.pr)) return;
+    const key = String(row.pr);
+    if (byPr[key] !== undefined) {
+      // Two answers for one question. The first is applied and the ambiguity is
+      // surfaced rather than resolved by whichever row happened to land last.
+      auditEvents.push({ event: "pr_proof_duplicate_row", pr: row.pr, ts: nowIso });
+      return;
+    }
+    byPr[key] = row;
+  });
+
+  solved.forEach(function (r) {
+    if (!r || r.status !== "PR_OPENED" || !isPosInt(r.prNumber)) return;
+    const requested = r.prNumber;
+    const row = byPr[String(requested)];
+    if (row === undefined) {
+      markUnverifiable(r, "no_row");
+      return;
+    }
+    const http = Number.isInteger(row.httpStatus) ? row.httpStatus : 0;
+    if (http === 404) {
+      // The ONE authoritative absence. GitHub was reached and says there is no
+      // such pull request, so the claim is disproven and the count that drives
+      // behaviour is corrected.
+      auditEvents.push({ event: "pr_claim_unproven", issue: r.issue, pr: requested,
+        httpStatus: 404, ts: nowIso });
+      downgradeClaim(r);
+      return;
+    }
+    if (http !== 200) {
+      // 0 (command never ran), 401/403 (declined), 429 (throttled), 5xx (GitHub
+      // is unwell) — none of these are evidence of absence.
+      markUnverifiable(r, "http_" + String(http));
+      return;
+    }
+    // 200. Every field below is OPTIONAL in S.prProof, so each is gated before
+    // it is compared or stored: an omitted-but-valid field must never be read
+    // as a disagreement (`undefined !== 901` is true, and that would
+    // mis-classify a genuine PR).
+    if (Number.isInteger(row.number) && row.number !== requested) {
+      // A row about a DIFFERENT pull request proves nothing about this one.
+      // Unverifiable, not disproof — the relay lost track, the solver may not
+      // have.
+      auditEvents.push({ event: "pr_proof_row_mismatch", issue: r.issue,
+        requested: requested, reported: row.number, ts: nowIso });
+      r.prProof = "UNVERIFIED";
+      return;
+    }
+    const claimedRef = (typeof r.branch === "string") ? r.branch : "";
+    const provenRef = (typeof row.headRefName === "string") ? row.headRefName : "";
+    if (claimedRef.length > 0 && provenRef.length > 0 && claimedRef !== provenRef) {
+      // The PR exists but belongs to another branch — the solver pointed at
+      // work that is not its own. Disproof, and both refs ride as NAMED fields
+      // so the event stays JSON.stringify-safe and machine-readable.
+      auditEvents.push({ event: "pr_branch_mismatch", issue: r.issue, pr: requested,
+        claimedBranch: claimedRef, provenBranch: provenRef, ts: nowIso });
+      downgradeClaim(r);
+      return;
+    }
+    r.prProof = "CONFIRMED";
+    r.provenCommitCount = Number.isInteger(row.commitCount) ? row.commitCount : null;
+    if (Number.isInteger(row.commitCount) && Number.isInteger(r.commitCount)
+        && row.commitCount !== r.commitCount) {
+      // commitCount drives no count and no queue, so the CLAIM stays put and
+      // the proof sits beside it. Overwriting would erase the disagreement,
+      // which is the only thing here worth reading.
+      auditEvents.push({ event: "commit_count_mismatch", issue: r.issue, pr: requested,
+        claimedCommitCount: r.commitCount, provenCommitCount: row.commitCount, ts: nowIso });
+    }
+  });
+}
+
+// The whole pass, wrapped in its own try/catch: verification can never make the
+// run WORSE than not verifying at all. A throw here leaves every claim exactly
+// as the solvers reported it and records why.
+async function verifyClaims() {
+  try {
+    classifyClaimCoherence();
+
+    const nums = prNumbersToVerify();
+    if (nums.length < 1) {
+      // No agent spent, and no audit noise: a batch that opened no PR must read
+      // exactly as it did before this pass existed.
+      log("verify: no PR claim to prove — no proof relay dispatched");
+      return;
+    }
+    if (!repoSlugUsable()) {
+      auditEvents.push({ event: "pr_proof_skipped", reason: "no_repo_slug",
+        claimed: nums.length, ts: nowIso });
+      markAllClaimsUnverified();
+      log("verify: repoSlug is not an owner/name pair, so the GitHub API cannot be addressed — "
+        + nums.length + " PR claim(s) stay UNVERIFIED (retained, never downgraded)");
+      return;
+    }
+    if (budgetExhausted()) {
+      auditEvents.push({ event: "pr_proof_skipped", reason: "budget_exhausted",
+        claimed: nums.length, ts: nowIso });
+      markAllClaimsUnverified();
+      log("verify: the token budget is exhausted before the proof relay — " + nums.length
+        + " PR claim(s) stay UNVERIFIED (retained, never downgraded)");
+      return;
+    }
+
+    // STEP C — ONE relay for the whole run. No opts.phase: it inherits the live
+    // `deliver` phase, so the per-phase agent counts still mean what they meant.
+    prProbed = nums.length;
+    const proofOut = await agent(verifyPrsPrompt(nums),
+      { model: "haiku", label: "verify-prs", schema: S.prProof });
+    if (proofOut === null) {
+      noteNull("deliver");
+      auditEvents.push({ event: "pr_proof_null", claimed: nums.length, ts: nowIso });
+      markAllClaimsUnverified();
+      log("verify: the proof relay returned nothing — " + nums.length
+        + " PR claim(s) stay UNVERIFIED and are retained");
+      return;
+    }
+    prRelayRc = Number.isInteger(proofOut.rc) ? proofOut.rc : null;
+    if (prRelayRc !== 0) {
+      auditEvents.push({ event: "pr_proof_relay_failed", rc: prRelayRc,
+        claimed: nums.length, ts: nowIso });
+      markAllClaimsUnverified();
+      log("verify: the proof relay reported rc=" + String(prRelayRc) + " — " + nums.length
+        + " PR claim(s) stay UNVERIFIED and are retained");
+      return;
+    }
+    // `rows` is OPTIONAL in practice even though the schema requires it: `{}` is
+    // a live return shape. Never dereference it unguarded.
+    applyPrProof(Array.isArray(proofOut.rows) ? proofOut.rows : []);
+    log("verify: probed " + nums.length + " claimed PR(s) — " + countProof("CONFIRMED")
+      + " confirmed, " + countProof("DISPROVEN") + " disproven, " + countProof("UNVERIFIED")
+      + " unverified");
+  } catch (e) {
+    auditEvents.push({ event: "pr_proof_threw",
+      reason: (e && e.message) ? e.message : String(e), ts: nowIso });
+    log("verify: the claim-verification pass threw (" + ((e && e.message) ? e.message : String(e))
+      + ") — every claim stands as reported; read auditEvents before trusting the PR counts.");
+  }
 }
 
 // A per-issue chain that never rejects: any throw becomes a FAILED record, so
@@ -1110,7 +1470,7 @@ async function solveOne(rec) {
       auditEvents.push({ event: "solver_null", issue: rec.issue, ts: nowIso });
       return {
         issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-        commitCount: 0, testsRun: false, summary: "",
+        commitCount: 0, testsRunClaimed: false, summary: "",
         blocker: "the solver agent returned no result (skipped, or a terminal error after retries)",
       };
     }
@@ -1125,7 +1485,7 @@ async function solveOne(rec) {
     });
     return {
       issue: rec.issue, status: "FAILED", branch: "", prNumber: 0, prUrl: "",
-      commitCount: 0, testsRun: false, summary: "",
+      commitCount: 0, testsRunClaimed: false, summary: "",
       blocker: "the per-issue chain threw: " + ((e && e.message) ? e.message : String(e)),
     };
   }
@@ -1191,17 +1551,24 @@ async function main() {
         parsed: issuesFromArgs.length, ts: nowIso });
     }
 
-    // CB1 — projected-agent ceiling. Per issue: 1 solver. Plus the intake relay.
+    // CB1 — projected-agent ceiling. Per issue: 1 solver. Plus the intake relay
+    // AND the PR-verification relay (#515) — the latter is batched, so it costs
+    // one agent for the whole run regardless of how many PRs get claimed. It is
+    // counted unconditionally rather than conditionally on "will any issue open
+    // a PR", because that is unknowable before dispatch and a ceiling that
+    // under-projects is not a ceiling. Hence the leading 2.
+    //
     // A design tier additionally spends 3 research + 1 spec + 1 spec-review + 1
     // plan (6), and its implement phase is a per-task chain bounded by CB3's
-    // IMPLEMENT_AGENT_BUDGET rather than the single solver — hence the `- 1`,
-    // which is that issue's own solver, already counted in intakeIssues.length.
+    // IMPLEMENT_AGENT_BUDGET rather than the single solver (#508) — hence the
+    // `- 1`, which is that issue's own solver, already counted in
+    // intakeIssues.length.
     // SHARED COST: solve-fleet-per-issue-agent-cost
     // CB1 is a PRE-DISPATCH projection and the task count T is unknowable before
     // the plan is written, so projecting the live cap is the only honest upper
     // bound. It is deliberately pessimistic: a clean 2-task issue spends ~6.
     const designCount = intakeIssues.filter(function (r) { return DESIGN_TIERS[r.tier] === 1; }).length;
-    const projected = 1 + intakeIssues.length + (designCount * (6 + IMPLEMENT_AGENT_BUDGET - 1));
+    const projected = 2 + intakeIssues.length + (designCount * (6 + IMPLEMENT_AGENT_BUDGET - 1));
     if (projected > maxAgents) {
       cb1Tripped = true;
       auditEvents.push({ event: "agent_ceiling_cb1", projected: projected, maxAgents: maxAgents, ts: nowIso });
@@ -1234,6 +1601,15 @@ async function main() {
 
     // ----------------------------- deliver ----------------------------
     phase("deliver");
+    // #515 — prove the PR claims BEFORE anything reads them. Batched at deliver
+    // rather than per-issue, deliberately: ONE relay per run instead of N; no
+    // new global phase() (so meta.phases and the "intake,deliver" sequence are
+    // unchanged); no opts.phase on the relay, so the `implement` count still
+    // counts exactly the solvers; and the probe sits as far in time from the
+    // push as the run allows, which is the only settle mitigation available to
+    // a script that is forbidden a clock (DR-7). The per-record log below then
+    // prints post-verification truth rather than the claim.
+    await verifyClaims();
     solved.forEach(function (r) {
       log("#" + r.issue + " " + r.status
         + (r.prNumber ? (" PR #" + r.prNumber) : "")

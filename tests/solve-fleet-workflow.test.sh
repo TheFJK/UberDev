@@ -365,6 +365,112 @@ else
   fi
 fi
 
+# --- #515: the solver's self-report must stop reading as fact -----------------
+# Row ids continue at G11: G8/G9/G10 are the SKILL.md seam below, and a `G8a`
+# wedged next to `G8` is the row-id-collision class this repo has already been
+# bitten by.
+
+# G11 — `testsRun` is a boolean the SOLVER composes about its own diligence.
+# Nothing in this repo can falsify it (no junit artifact, no receipt), so the
+# only honest fix is to stop naming it as though it were established: the field
+# is `testsRunClaimed`. The old bare token must be GONE, or both names coexist
+# and a reader picks whichever they saw first. `testsRunClaimed:` does not
+# contain `testsRun:`, so the second grep is a real absence check.
+if grep -qE '^[[:space:]]*testsRunClaimed: \{ type: "boolean"' "$WORKFLOW" \
+  && ! grep -q 'testsRun:' "$WORKFLOW"; then
+  pass "G11 the solver's tests self-report is declared as testsRunClaimed (the bare testsRun is gone)"
+else
+  fail "G11 workflow.js still declares a bare testsRun: property (or never declares testsRunClaimed)"
+fi
+
+# G12 — and it must stay UNREAD. A claim nothing consumes is honest; the moment
+# a count or a status expression keys off it, the fleet is back to treating a
+# self-report as evidence. finalize() is where every published number is built,
+# so the field must not appear inside it. Non-vacuous: the declaration must
+# exist for the absence to mean anything.
+FINALIZE_BLOCK="$(sed -n '/^function finalize() {/,/^}/p' "$WORKFLOW")"
+if [ -z "$FINALIZE_BLOCK" ]; then
+  fail "G12 could not locate finalize() in workflow.js — the assertion cannot be evaluated"
+elif grep -q 'testsRunClaimed' "$WORKFLOW" && ! grep -q 'testsRunClaimed' <<<"$FINALIZE_BLOCK"; then
+  pass "G12 testsRunClaimed feeds no count, status or PR expression (it is recorded, never believed)"
+else
+  fail "G12 finalize() reads testsRunClaimed — an unverifiable self-report is driving a published number"
+fi
+
+# G13 — the proof edge is a MECHANICAL relay, so it pins haiku exactly like the
+# manifest intake. Two haiku sites, no more: a third would mean a judgment agent
+# got pinned to a cheap model (G2b already forbids the flagship names, but it
+# cannot see a haiku pin on a reviewer).
+HAIKU_COUNT="$(grep -c 'model: "haiku"' "$WORKFLOW" || true)"
+[ "$HAIKU_COUNT" = "2" ] \
+  && pass "G13 exactly two haiku pins (manifest intake + the PR-proof relay); every judgment agent inherits" \
+  || fail "G13 expected exactly 2 model:\"haiku\" sites (intake + verify-prs), found $HAIKU_COUNT"
+
+# G14 — the discriminator must be the HTTP STATUS INTEGER, from `gh api -i`.
+# `gh pr view <n>` exits non-zero for 404, 403, 429 and a dropped connection
+# alike, so a claim-vs-proof rule built on its exit code downgrades a REAL PR
+# out of /goal's queue the first time GitHub rate-limits the fleet. 404 has to
+# be distinguishable from "GitHub would not answer", and only the status line is.
+if grep -q 'gh api -i' "$WORKFLOW" && grep -q '/pulls/' "$WORKFLOW"; then
+  pass "G14 the proof relay reads the HTTP status line via \`gh api -i .../pulls/<N>\` (404 != unreachable)"
+else
+  fail "G14 the proof relay does not pin \`gh api -i\` on /pulls/ — a bare exit code conflates 404 with 403/429"
+fi
+
+# G15 — re-affirms G3 under the new agent. A worktree-isolated verifier would be
+# probing GitHub from a throwaway checkout for no reason; more importantly the
+# count must not drift as agents are added. This one PASSES before the relay
+# exists: it is a guard, not a new claim.
+ISO_COUNT_AFTER="$(grep -c 'isolation: "worktree"' "$WORKFLOW" || true)"
+[ "$ISO_COUNT_AFTER" = "1" ] \
+  && pass "G15 the PR-proof relay is NOT worktree-isolated (still exactly one isolation site: the solver)" \
+  || fail "G15 isolation:\"worktree\" site count drifted to $ISO_COUNT_AFTER"
+
+# G16 — the proof relay is READ-ONLY against GitHub. It runs unattended on
+# /turbo, so "verify this PR" must never become "tidy this PR up".
+grep -q 'do not open, close, comment on, or modify' "$WORKFLOW" \
+  && pass "G16 the proof relay carries an explicit read-only prohibition" \
+  || fail "G16 the proof relay may mutate GitHub state"
+
+# G17 — DR-5, the invariant recorded in this file's header: no agent-derived
+# string is ever interpolated into a downstream prompt. The solver's `branch` is
+# agent-composed text, so the relay must DISCOVER the head ref itself and the
+# comparison must happen in JS. A `.branch` inside the prompt builder would be
+# exactly the envelope breach this script is designed to avoid.
+VERIFY_PROMPT_BLOCK="$(sed -n '/^function verifyPrsPrompt(/,/^}/p' "$WORKFLOW")"
+if [ -z "$VERIFY_PROMPT_BLOCK" ]; then
+  fail "G17 verifyPrsPrompt() not found — the proof relay has no prompt builder"
+elif grep -q '\.branch' <<<"$VERIFY_PROMPT_BLOCK"; then
+  fail "G17 verifyPrsPrompt() interpolates the solver-composed .branch (DR-5 envelope breach)"
+else
+  pass "G17 verifyPrsPrompt() interpolates no agent-derived string (the relay discovers headRefName itself)"
+fi
+
+# G18 — CB1 accounting must move WITH the agent. The proof relay is a real
+# dispatch; a ceiling that does not count it under-projects by one on every run
+# and the "abort before dispatch" guarantee stops being exact. Both doc copies
+# of the formula move too, or the next reader trusts the stale one.
+RFC0015="$REPO_ROOT/docs/rfc/0015-workflow-native-dispatch.md"
+if [ ! -r "$RFC0015" ]; then
+  # Never let a missing file read as "the stale formula is absent" — that is a
+  # vacuous green, and this repo has shipped one before.
+  fail "G18 cannot read $RFC0015 — the doc half of the assertion is unevaluable"
+elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
+  && grep -q '2 + issues + (6 + implementBudget' "$SKILL" \
+  && grep -q '2 + issues + (6 + implementBudget' "$RFC0015" \
+  && ! grep -q '1 + issues + 6' "$SKILL" \
+  && ! grep -q '1 + issues + 6' "$RFC0015"; then
+  # The per-design-tier term is #508's per-task chain, not the flat 6 this row
+  # was written against; the leading 2 is still #515's point (intake relay +
+  # batched PR-claim verification relay). Both halves have to hold, so the row
+  # asserts the WHOLE combined shape rather than the prefix it started as — a
+  # guard that only checked `2 +` would stay green if the per-issue term
+  # silently reverted.
+  pass "G18 the CB1 projection counts both batched relays and the per-task implement chain, in code and in both docs"
+else
+  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (6 + implementBudget - 1) x design-tier')"
+fi
+
 echo "== G: SKILL.md seam =="
 grep -q 'skills/solve-fleet/workflow.js' "$SKILL" \
   && pass "G8 SKILL.md names its workflow script" || fail "G8 SKILL.md does not name workflow.js"
@@ -410,6 +516,18 @@ grep -q 'implementBudget' "$SKILL" || G17_OK=0
   && pass "G17 SKILL.md documents the per-task review gate, its FIX_ROUNDS cap, the implementBudget key and the tasks* return keys" \
   || fail "G17 SKILL.md does not document the per-task review gate / cap / envelope key / return keys"
 
+# G19 — the return contract has to be DOCUMENTED and RENDERED, or it is the
+# dead-contract class this repo has been filing issues about: a key nothing
+# reads. SKILL.md describes the fields; both command files print the counts.
+if grep -q 'provenCommitCount' "$SKILL" && grep -q 'prProof' "$SKILL" \
+  && grep -q 'verification' "$SKILL" \
+  && grep -q 'return.verification.confirmed' "$SOLVE_CMD" \
+  && grep -q 'return.verification.confirmed' "$TURBO_CMD"; then
+  pass "G19 the verification contract is documented in SKILL.md and rendered by both command files"
+else
+  fail "G19 the verification contract is undocumented or unrendered (a key nothing reads)"
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -440,13 +558,28 @@ function rec(issue, tier) {
 }
 function solved(issue, pr) {
   return { issue: issue, status: "PR_OPENED", branch: "fix/" + issue + "-x", prNumber: pr,
-    prUrl: "https://example/pull/" + pr, commitCount: 1, testsRun: true, summary: "done", blocker: "" };
+    prUrl: "https://example/pull/" + pr, commitCount: 1, testsRunClaimed: true, summary: "done", blocker: "" };
 }
+// #515 fixture helpers. They sit BESIDE solved() and never edit it — B6/B7/
+// B29-B32/B41 all key off the canonical shape.
+//   claimed()  — a solver return with one field bent, to model a claim that
+//                disagrees with reality.
+//   proofRow() — one raw observation from the verify-prs relay. Deliberately
+//                carries no verdict field, mirroring S.prProof.
+//   proof()    — the relay envelope.
+function claimed(issue, pr, over) { return Object.assign(solved(issue, pr), over || {}); }
+function proofRow(pr, headRef, over) {
+  return Object.assign(
+    { pr: pr, httpStatus: 200, number: pr, url: "https://example/pull/" + pr,
+      headRefName: headRef, state: "OPEN", commitCount: 1, attempts: 1 }, over || {});
+}
+function proof(rows) { return { rc: 0, rows: rows }; }
 function trivialReturns() {
   return {
     "manifest-intake": intake([rec(11, "trivial"), rec(12, "small")]),
     "solve:#11 (trivial)": solved(11, 901),
     "solve:#12 (small)": solved(12, 902),
+    "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]),
   };
 }
 function task(id, o) {
@@ -473,6 +606,7 @@ function mediumReturns() {
     // phase produces no usable plan (Runs J and T).
     "solve:#11 (medium)": solved(11, 901),
     "solve:#12 (trivial)": solved(12, 902),
+    "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]),
   };
 }
 // A t1 whose reviewer never approves, with FIX_ROUNDS(3) fixers standing by.
@@ -504,6 +638,16 @@ function resultOf(record) {
   return line ? JSON.parse(line.slice("WORKFLOW_RESULT ".length)) : null;
 }
 function labels(record) { return record.agentCalls.map(function (c) { return c.label; }); }
+// The PR numbers the verify-prs relay was actually asked about, read back off
+// the prompt itself — "" when the relay ran with an empty list, null when no
+// relay was dispatched at all. Those two are different facts and the tests
+// distinguish them.
+function probedNums(record) {
+  const c = record.agentCalls.find(function (x) { return x.label === "verify-prs"; });
+  if (!c) return null;
+  const m = c.prompt.match(/\n[ ]+- [0-9]+/g);
+  return m ? m.map(function (s) { return s.replace(/[^0-9]/g, ""); }).join(",") : "";
+}
 
 (async function () {
   const out = {};
@@ -890,8 +1034,9 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.vDelivered = labels(recV).indexOf("deliver:#11") >= 0;
 
   // Run S — CB1 arithmetic is PINNED, not merely "it trips at 2". One design
-  // issue now projects 1 intake + 2 solvers + (6 design + 24 implement - 1).
-  const PROJ = 1 + 2 + 1 * (6 + 24 - 1);   // 32
+  // issue projects 2 batched relays (intake + PR-claim verification, #515)
+  // + 2 solvers + (6 design + 24 implement - 1) for the per-task chain (#508).
+  const PROJ = 2 + 2 + 1 * (6 + 24 - 1);   // 33
   const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
   out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
   const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
@@ -907,6 +1052,162 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // of the four new agent kinds shows up here and nowhere else.
   out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
+  // ------------------------------------------------------------------ #515
+  // Claim verification. Every run below is ultimately about ONE rule: the proof
+  // wins in the field that drives behaviour, the claim is never erased, and the
+  // disagreement is an audit event.
+
+  // Run S — the INCOHERENT claim: status PR_OPENED with prNumber 0. No probe
+  // can settle this and none is spent; the record contradicts itself on its
+  // face. It also closes a live accounting split on main: counts.prOpened
+  // filters on `status` while prsOpened filters on `n > 0`, so this record used
+  // to be counted by one and dropped by the other, silently.
+  const sReturns = Object.assign({}, trivialReturns(),
+    { "solve:#11 (trivial)": claimed(11, 0, { status: "PR_OPENED" }) });
+  const recS = await run(buildArgs(), { agentReturns: sReturns });
+  const resS = resultOf(recS);
+  const s11 = resS ? resS.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.sStatus = s11 ? s11.status : null;
+  out.sClaimedStatus = s11 ? s11.claimedStatus : null;
+  out.sAudit = !!(resS && resS.auditEvents.some(function (e) { return e.event === "pr_claim_incoherent"; }));
+  out.sOpened = resS ? resS.counts.prOpened : null;
+  out.sPrNums = resS ? resS.prsOpened.join(",") : null;
+  out.sProbed = probedNums(recS);
+
+  // Run O — the relay returns NULL (user-skip / terminal API error). The claims
+  // must SURVIVE. A probe that could not speak proves nothing, and dropping a
+  // real PR out of the /goal queue on silence is strictly worse than not probing.
+  const vOReturns = Object.assign({}, trivialReturns()); vOReturns["verify-prs"] = null;
+  const vRecO = await run(buildArgs(), { agentReturns: vOReturns });
+  const vResO = resultOf(vRecO);
+  out.oObservable = !!vResO;
+  out.oPrNums = vResO ? vResO.prsOpened.join(",") : null;
+  out.oAudit = !!(vResO && vResO.auditEvents.some(function (e) { return e.event === "pr_proof_null"; }));
+  out.oNullCounted = !!(vResO && vResO.nullsByPhase && vResO.nullsByPhase.deliver >= 1);
+  out.oViolations = vRecO.violations.length;
+
+  // Run R — the relay returns `{}`: the harness absent-key / defaultAgentReturn
+  // shape, and a live shape for any relay that answers without a body. `rows`
+  // must never be dereferenced unguarded.
+  const vRReturns = Object.assign({}, trivialReturns()); vRReturns["verify-prs"] = {};
+  const vRecR = await run(buildArgs(), { agentReturns: vRReturns });
+  const vResR = resultOf(vRecR);
+  out.rObservable = !!vResR;
+  out.rProofs = vResR ? vResR.results.map(function (r) { return r.prProof; }).join(",") : null;
+  out.rPrNums = vResR ? vResR.prsOpened.join(",") : null;
+  out.rViolations = vRecR.violations.length;
+
+  // Run P — a batch where nothing claims a PR. No relay, no agent, and NO
+  // verification noise: a clean non-PR batch must read exactly as it did before
+  // this change existed.
+  const vPReturns = Object.assign({}, trivialReturns(), {
+    "solve:#11 (trivial)": claimed(11, 0, { status: "COMMITTED_NOT_PUSHED" }),
+    "solve:#12 (small)": claimed(12, 0, { status: "COMMITTED_NOT_PUSHED" }),
+  });
+  const vRecP = await run(buildArgs(), { agentReturns: vPReturns });
+  const vResP = resultOf(vRecP);
+  out.pNoRelay = probedNums(vRecP) === null;
+  out.pProofs = vResP ? vResP.results.map(function (r) { return r.prProof; }).join(",") : null;
+  out.pPrEvents = vResP ? vResP.auditEvents.filter(function (e) {
+    return String(e.event).indexOf("pr_") === 0;
+  }).length : null;
+
+  // Run Q — THE FALSE-DOWNGRADE WALL. 403 is GitHub declining to answer (rate
+  // limit, token scope), not evidence the PR is absent. Treating it as a 404
+  // would silently strip a real PR from the run summary and from the /goal queue
+  // the first time the fleet gets throttled.
+  const qReturns = Object.assign({}, trivialReturns(),
+    { "verify-prs": proof([proofRow(901, "fix/11-x", { httpStatus: 403, attempts: 3 }),
+                           proofRow(902, "fix/12-x")]) });
+  const vRecQ = await run(buildArgs(), { agentReturns: qReturns });
+  const vResQ = resultOf(vRecQ);
+  const q11 = vResQ ? vResQ.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.qStatus = q11 ? q11.status : null;
+  out.qPrNums = vResQ ? vResQ.prsOpened.join(",") : null;
+  out.qAudit = !!(vResQ && vResQ.auditEvents.some(function (e) {
+    return e.event === "pr_claim_unverifiable" && String(e.reason).indexOf("403") >= 0;
+  }));
+
+  // Run L — the 404. THE case the whole change exists for: a solver reported a
+  // PR that is not there. `status` drives the counts and the PR set /goal
+  // ingests, so the proof wins on that field — and the claim is preserved
+  // beside it rather than erased, because the disagreement is the signal.
+  const vLReturns = Object.assign({}, trivialReturns(),
+    { "verify-prs": proof([proofRow(901, "fix/11-x", { httpStatus: 404, attempts: 1 }),
+                           proofRow(902, "fix/12-x")]) });
+  const vRecL = await run(buildArgs(), { agentReturns: vLReturns });
+  const vResL = resultOf(vRecL);
+  const l11 = vResL ? vResL.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.lOpened = vResL ? vResL.counts.prOpened : null;
+  out.lPrNums = vResL ? vResL.prsOpened.join(",") : null;
+  out.lStatus = l11 ? l11.status : null;
+  out.lClaimedStatus = l11 ? l11.claimedStatus : null;
+  out.lClaimedPr = l11 ? l11.claimedPrNumber : null;
+  out.lAudit = !!(vResL && vResL.auditEvents.some(function (e) { return e.event === "pr_claim_unproven"; }));
+  out.lPushedNoPr = vResL ? vResL.counts.pushedNoPr : null;
+  out.lDisproven = vResL ? vResL.verification.disproven : null;
+
+  // Run M — the commit-count disagreement. commitCount drives NOTHING, so the
+  // claim stays put and the proof lands beside it. Overwriting a field no
+  // consumer reads would destroy the evidence of the disagreement and buy
+  // nothing.
+  const vMReturns = Object.assign({}, trivialReturns(), {
+    "solve:#11 (trivial)": claimed(11, 901, { commitCount: 7 }),
+    "verify-prs": proof([proofRow(901, "fix/11-x", { commitCount: 2 }), proofRow(902, "fix/12-x")]),
+  });
+  const recM2 = await run(buildArgs(), { agentReturns: vMReturns });
+  const resM2 = resultOf(recM2);
+  const m11 = resM2 ? resM2.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.mCommitClaim = m11 ? m11.commitCount : null;
+  out.mCommitProven = m11 ? m11.provenCommitCount : null;
+  out.mAudit = !!(resM2 && resM2.auditEvents.some(function (e) { return e.event === "commit_count_mismatch"; }));
+  out.mStatus = m11 ? m11.status : null;
+  out.mPrNums = resM2 ? resM2.prsOpened.join(",") : null;
+
+  // Run N — the PR exists, but its head ref is somebody else. That is a claim
+  // on another agent work, and it is disproof, not ambiguity.
+  const nReturns = Object.assign({}, trivialReturns(),
+    { "verify-prs": proof([proofRow(901, "fix/99-someone-else"), proofRow(902, "fix/12-x")]) });
+  const recN = await run(buildArgs(), { agentReturns: nReturns });
+  const resN = resultOf(recN);
+  const n11 = resN ? resN.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.nStatus = n11 ? n11.status : null;
+  const nEvent = resN ? resN.auditEvents.filter(function (e) { return e.event === "pr_branch_mismatch"; })[0] : null;
+  out.nAudit = !!nEvent;
+  out.nBothRefs = !!(nEvent && nEvent.claimedBranch === "fix/11-x"
+    && nEvent.provenBranch === "fix/99-someone-else");
+
+  // Run T — CB1 must count the proof relay. MUTATION-SENSITIVE by construction:
+  // 2 trivial issues, no design tier, maxAgents 3. The old projection is
+  // 1 + 2 + 0 = 3, which does NOT trip; the new one is 2 + 2 + 0 = 4, which
+  // does. Run G (maxAgents 2, medium) trips under both and could never catch a
+  // stale formula.
+  const vRecT = await run(buildArgs(null, { maxAgents: 3 }), { agentReturns: trivialReturns() });
+  const resT = resultOf(vRecT);
+  out.tTripped = !!(resT && resT.cb1Tripped);
+  out.tNoSolvers = !vRecT.agentCalls.some(function (c) { return /^solve:#/.test(c.label || ""); });
+  out.tAudit = !!(resT && resT.auditEvents.some(function (e) { return e.event === "agent_ceiling_cb1"; }));
+
+  // Run V — an unusable repoSlug. The slug is the only non-numeric value that
+  // reaches the proof prompt, so it is shape-gated; a malformed one must SKIP
+  // the relay rather than emit a broken `gh api` path for an agent to "fix"
+  // (which is how a mechanical relay turns into an improvising one). Without
+  // this run the gate could be deleted and nothing would red.
+  const vRecV = await run(buildArgs(null, { repoSlug: "not a slug" }),
+    { agentReturns: trivialReturns() });
+  const vResV = resultOf(vRecV);
+  out.vNoRelay = probedNums(vRecV) === null;
+  out.vProofs = vResV ? vResV.results.map(function (r) { return r.prProof; }).join(",") : null;
+  out.vPrNums = vResV ? vResV.prsOpened.join(",") : null;
+  out.vAudit = !!(vResV && vResV.auditEvents.some(function (e) {
+    return e.event === "pr_proof_skipped" && e.reason === "no_repo_slug";
+  }));
+
+  // The verification block must be READ by something, or it is the dead
+  // contract this repo has been filing issues about all week.
+  out.aProbed = resA ? resA.verification.probed : null;
+  out.aConfirmed = resA ? resA.verification.confirmed : null;
+  out.aRelayRc = resA ? resA.verification.relayRc : null;
 
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
@@ -1072,6 +1373,64 @@ else
   check tNoImpl true         "B64b no task agent is dispatched without a plan (no plan, no tasks, no gate)"
 
   check zViolations 0        "B1 (extended) zero harness violations across every new run (catches an undeclared opts.phase)"
+  # --- #515: claim verification ---------------------------------------------
+  check sStatus '"PUSHED_NO_PR"'  "B100 an incoherent PR_OPENED/prNumber:0 claim is downgraded"
+  check sClaimedStatus '"PR_OPENED"' "B101 the original claim is preserved beside the correction, never erased"
+  check sAudit true               "B102 pr_claim_incoherent audit event fires (the disagreement is the signal)"
+  check sOpened 1                 "B103a counts.prOpened drops the self-contradicting record"
+  check sPrNums '"902"'           "B103b prsOpened agrees with counts.prOpened (they disagreed on main)"
+  check sProbed '"902"'           "B104 no agent is spent probing PR id 0 — incoherence is settled script-side"
+
+  check oObservable true          "B105 a null proof relay still returns a structured result"
+  check oPrNums '"901,902"'       "B106 a null relay downgrades NOTHING — every claim is retained"
+  check oAudit true               "B107 pr_proof_null audit event fires"
+  check oNullCounted true         "B108 the null relay is counted in nullsByPhase.deliver"
+  check oViolations 0             "B109 zero harness violations on the null-relay path"
+
+  check rObservable true          "B110 a bodyless {} proof return does not throw (rows is never dereferenced unguarded)"
+  check rProofs '"UNVERIFIED,UNVERIFIED"' "B111 a bodyless return classifies UNVERIFIED, claims retained"
+  check rPrNums '"901,902"'       "B111b the retained claims still surface in prsOpened"
+  check rViolations 0             "B112 zero harness violations on the bodyless-return path"
+
+  check pNoRelay true             "B113 a batch with no PR claim dispatches NO proof relay at all"
+  check pProofs '"NOT_APPLICABLE,NOT_APPLICABLE"' "B114 non-PR records are classified NOT_APPLICABLE"
+  check pPrEvents 0               "B115 a clean non-PR batch emits zero verification noise"
+
+  check qStatus '"PR_OPENED"'     "B116 a 403 does NOT disprove a PR (false-downgrade wall)"
+  check qPrNums '"901,902"'       "B117 the throttled claim stays in prsOpened and in /goal's queue"
+  check qAudit true               "B118 pr_claim_unverifiable fires with a reason naming the 403"
+
+  check lOpened 1                 "B119 a 404 removes the phantom PR from counts.prOpened"
+  check lPrNums '"902"'           "B120 the phantom number never reaches prsOpened (and so never reaches /goal)"
+  check lStatus '"PUSHED_NO_PR"'  "B121 the proof wins on status — the field that drives behaviour"
+  check lClaimedStatus '"PR_OPENED"' "B122a the claim is preserved, never erased"
+  check lClaimedPr 901            "B122b the claimed PR number is preserved beside the correction"
+  check lAudit true               "B123 pr_claim_unproven audit event fires"
+  check lPushedNoPr 1             "B124 the downgraded record lands in counts.pushedNoPr"
+  check lDisproven 1              "B124b verification.disproven reports it"
+
+  check mCommitClaim 7            "B125 a commitCount disagreement leaves the CLAIM intact (it drives nothing)"
+  check mCommitProven 2           "B126 the proof lands beside it in provenCommitCount"
+  check mAudit true               "B127 commit_count_mismatch is audited, not silently corrected"
+  check mStatus '"PR_OPENED"'     "B128a a commit-count disagreement never downgrades a proven PR"
+  check mPrNums '"901,902"'       "B128b both PRs stay in prsOpened"
+
+  check nStatus '"PUSHED_NO_PR"'  "B129 a 200 naming a different head ref DISPROVES the claim"
+  check nAudit true               "B130 pr_branch_mismatch audit event fires"
+  check nBothRefs true            "B131 the event carries both refs as named fields (never concatenated)"
+
+  check tTripped true             "B132 CB1 counts the proof relay (2 trivial issues at maxAgents=3 now trips)"
+  check tNoSolvers true           "B133 the raised projection still aborts BEFORE any solver is dispatched"
+  check tAudit true               "B134 agent_ceiling_cb1 fires on the new projection"
+
+  check vNoRelay true             "B138 a malformed repoSlug skips the relay (no broken gh api path is ever emitted)"
+  check vProofs '"UNVERIFIED,UNVERIFIED"' "B139 a skipped probe classifies UNVERIFIED, never DISPROVEN"
+  check vPrNums '"901,902"'       "B140 and the claims are retained in prsOpened"
+  check vAudit true               "B141 pr_proof_skipped fires with reason no_repo_slug"
+
+  check aProbed 2                 "B135 verification.probed reports what was actually sent to the relay"
+  check aConfirmed 2              "B136 verification.confirmed is computed from the record classifications"
+  check aRelayRc 0                "B137 verification.relayRc surfaces the relay rc"
 fi
 
 echo "== S: /goal runs ON the workflow backend — the interim demotion is GONE (RFC 0015 §5) =="

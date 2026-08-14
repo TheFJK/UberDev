@@ -618,6 +618,56 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.r2Sanitised = !!(claimR2 && claimR2.prompt.indexOf("rm -rf") < 0
     && claimR2.prompt.indexOf("\"bash\" \"/p/lib/goal-phase1.sh\"") >= 0);
 
+  // Run S (#515) — the nested fleet gained a second relay (its PR-claim proof
+  // pass), so the goal-side projection has to grow with it or CB1 under-counts
+  // by one per cycle and the "halt before claiming" guarantee stops being exact.
+  //
+  // MUTATION-SENSITIVE by construction. Default fixture: 2 queued issues,
+  // maxParallel 3, maxWatchTicks 40. Old projection 3 + 40 + 1 + 14 = 58, and
+  // 58 > 58 is false, so it does NOT trip. New projection 3 + 40 + 2 + 14 = 59,
+  // which does. Run M above (maxAgents 3) trips under both and can never catch
+  // a stale formula.
+  const recS = await run(buildArgs({ maxAgents: 58 }), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+  } });
+  const resS = resultOf(recS);
+  out.sTripped = resS ? resS.cb1Tripped : null;
+  out.sNoClaim = !labels(recS).some(function (l) { return /^goal-claim/.test(l || ""); });
+
+  // Run T (#515) — the UNTESTED CONSUMER. `grep -rn prsOpened tests/` used to
+  // hit only the fleet own suite: the goal ingestion of the fleet PR set had no
+  // coverage at all, which is precisely the leg a post-verification set has to
+  // travel to matter. This locks the passthrough and nothing more.
+  //
+  // Note deliberately: `rec.prsOpened` is WRITTEN here and read by nothing
+  // downstream (goal-pipeline/workflow.js :585 is its only other mention). So
+  // this is an ingestion-passthrough lock, NOT a behavioural one — there is no
+  // "the cycle stops treating the issue as PR-bearing" behaviour to assert
+  // against, and pretending otherwise would paper over a dead consumer.
+  const recT = await run(buildArgs(), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect(),
+    },
+    workflowReturns: {
+      // The fleet disproved the PR claimed for #11 and dropped it from the set;
+      // the downgraded record still rides in `results`.
+      [FLEET_PATH]: {
+        prsOpened: [902],
+        results: [
+          { issue: 11, status: "PUSHED_NO_PR", prNumber: 0, claimedStatus: "PR_OPENED",
+            claimedPrNumber: 901, prProof: "DISPROVEN" },
+          { issue: 12, status: "PR_OPENED", prNumber: 902, prProof: "CONFIRMED" },
+        ],
+      },
+    },
+  });
+  const resT = resultOf(recT);
+  out.tPrsOpened = (resT && resT.cycles.length) ? resT.cycles[0].prsOpened : null;
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -745,6 +795,11 @@ else
   check rNoBarePathBash true              "B85 no relay falls back to a bare PATH \`bash\` when an interpreter was published"
   check rWatchTimeout true                "B86 the relay timeout is sized from the resolved watch budget"
   check r2Sanitised true                  "B87 a malformed bashBin degrades to PATH \`bash\`, never reaching the command line"
+
+  check sTripped true                     "B88 the cycle projection counts the fleet PR-proof relay (#515)"
+  check sNoClaim true                     "B89 the raised projection still halts BEFORE the claim pass"
+
+  check tPrsOpened '[902]'                "B90 /goal ingests exactly the fleet post-verification PR set — the disproven number never enters it"
 fi
 
 echo ""
