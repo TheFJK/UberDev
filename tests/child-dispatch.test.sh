@@ -1021,9 +1021,23 @@ trap '' TERM
 while :; do sleep 1; done
 SH
 chmod +x "$TMP/background-timeout-bin/claude"
+# #521 — the stub `claude` still wins (it is FIRST), but the host's real PATH is
+# preserved behind it. The old literal `…:/usr/bin:/bin` deleted every directory
+# the host installs coreutils into, so on Darwin
+# `_uberdev_dispatch_preflight_timeout_bin` found no timeout(1) at all and this
+# fixture silently exercised the UNBOUNDED preflight arm, while ubuntu (where
+# /usr/bin/timeout is real) exercised the bounded one — both green, different
+# code. The macOS job even has a step named "Install GNU timeout" that the
+# literal threw away. Precedent for prepend-and-keep: :524, :553, :1113.
+#
+# Bound to ONE variable rather than written twice: the arm assertion below has to
+# resolve the timeout bin under the exact environment the dispatch ran with, or
+# it would assert about a PATH nobody used — which is this issue's defect class
+# committed inside its own fix. Narrowing this one definition reds that row.
+BG_TIMEOUT_PATH="$TMP/background-timeout-bin:$PATH"
 (
   cd "$TMP/background-timeout-repo"
-  PATH="$TMP/background-timeout-bin:/usr/bin:/bin" MODEL=sonnet AUTO_MODE=0 SKIP_PERMISSIONS=0 \
+  PATH="$BG_TIMEOUT_PATH" MODEL=sonnet AUTO_MODE=0 SKIP_PERMISSIONS=0 \
     CHILD_LIB="$LIB" BG_HANDOFF="$TMP/background-timeout-handoff.json" \
     BG_HANDOFF_SHA256="$BG_HANDOFF_SHA256" \
     BG_RESULT="$TMP/background-timeout-run/children/background-timeout-0004/result.md" \
@@ -1049,6 +1063,27 @@ BG_CHILD="$TMP/background-timeout-run/children/background-timeout-0004"
 [ -z "$(find "$BG_CHILD" -maxdepth 1 \( -name 'result.md.partial.*' -o -name 'result.md.tmp.*' \) -print -quit)" ]
 grep -q '"event":"timed_out".*"run_id":"background-timeout-0004"' "$TMP/background-timeout-run/.agent-state-$(id -u)/agent-lifecycle.jsonl"
 ! grep -R -q 'run_id=background-timeout-0004' "$TMP/background-timeout-run/.agent-state-$(id -u)/semaphore-v1" 2>/dev/null
+# #521 — assert WHICH preflight arm the dispatch above took, not merely that one
+# was taken. `_uberdev_dispatch_preflight_timeout_bin` returns 0 silently on the
+# happy path and emits no audit record naming the bound, so the resolved binary
+# is the only observable; without this the `timed_out` event above is reached on
+# BOTH the bounded and the unbounded arm and the row cannot tell them apart.
+# Driven as a unit under the same environment the dispatch ran with — the
+# precedent is dispatch-child-worktree-teardown T15, which drives this same
+# resolver directly. `$LIB` is child-dispatch.sh, which sources dispatch.sh at
+# its own :23, so the function is in scope. No pipes: this file is
+# `set -euo pipefail`, i.e. SETE=1 for epipe-guard.test.sh.
+BG_TIMEOUT_BIN="$(
+  PATH="$BG_TIMEOUT_PATH" \
+    bash -c 'set -u; . "$1"; _uberdev_dispatch_preflight_timeout_bin' _ "$LIB"
+)"
+echo "child-dispatch: background-timeout preflight resolved timeout bin = ${BG_TIMEOUT_BIN:-<none>}"
+[ -n "$BG_TIMEOUT_BIN" ]
+# Absolute, never a bare name: a bare name in command position is answered by the
+# shell's function table first (T15's finding). The drive-letter alternation
+# mirrors goal.test.sh G52's `^PUBLISHED=([A-Za-z]:)?/`.
+case "$BG_TIMEOUT_BIN" in /*|[A-Za-z]:/*) : ;; *) false ;; esac
+[ -x "$BG_TIMEOUT_BIN" ]
 
 # Real WezTerm provider arm: a stubbed CLI executes the actual pane wrapper.
 # Agent dispatch canonicalizes the precreated empty status to pane:<id> plus
@@ -1294,4 +1329,4 @@ rm -f "$VERIFY_DIR/hardlinked.md"
 # A missing result is a refusal, never an empty success.
 ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/absent.md" >/dev/null 2>&1
 
-echo 'child-dispatch: 102 checks passed (+ the finding-verifier result boundary)'
+echo 'child-dispatch: 105 checks passed (+ the finding-verifier result boundary)'

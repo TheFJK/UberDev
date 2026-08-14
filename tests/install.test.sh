@@ -14,7 +14,9 @@
 # without touching the user's real ~/.claude or hitting the Claude API.
 #
 # Sections:
-#   I1 — install.sh exists at repo root, has shebang, is executable
+#   I1 — install.sh exists at repo root, has a shebang, and carries mode 100755
+#        in the git index (plus the POSIX filesystem exec bit, where that bit is
+#        real — see the #521 note at the section itself)
 #   I2 — fresh install: settings.json created with enabledPlugins entry
 #   I3 — preserves unrelated keys (theme/model/etc.) on existing settings.json
 #   I4 — preserves other enabledPlugins entries (doesn't clobber sibling plugins)
@@ -138,15 +140,74 @@ run_install() {
   return $?
 }
 
-echo "== I1: install.sh exists, has shebang, is executable =="
+echo "== I1: install.sh exists, has a shebang, and is recorded executable =="
 assert_grep "$INSTALL_SH" '^#!/' "install.sh has a shebang"
-if [ -x "$INSTALL_SH" ]; then
-  echo "  PASS  install.sh is executable"
-  PASS=$((PASS + 1))
+
+# #521 — the RECORDED mode bit is the real subject of this section, so it is read
+# from the index rather than inferred from the filesystem.
+#
+# The old row was `[ -x "$INSTALL_SH" ]` alone, and that answer is wrong in two
+# independent ways. On Git Bash / MSYS the exec bit is SYNTHESIZED from the
+# shebang and the file extension rather than read from a Windows ACL, so the test
+# is constant-true there regardless of the mode git carries — and this was the
+# only row in the Windows set whose subject is the exec bit. Everywhere else it
+# is simply blind to the index: `git update-index --chmod=-x install.sh` leaves
+# the filesystem bit untouched, and the row stayed green (executed on Darwin
+# against a clone: index 100644, still `PASS install.sh is executable`, rc 0)
+# while the mode a fresh `git clone` would hand a user had already flipped.
+#
+# `git ls-files -s` rather than `git ls-tree HEAD`: the index is what the next
+# commit carries, so a staged-but-uncommitted chmod is seen. Never stat(1) or
+# `ls -l`: `stat -f` means --file-system on GNU coreutils (a CI-reddening trap
+# this repo has already paid for), and Git Bash reports the same synthesized bit
+# there too — the original defect in a new costume.
+index_mode() {   # index_mode <repo-relative-path> -> 100644 | 100755 | ''
+  git -C "$REPO_ROOT" ls-files -s -- "$1" 2>/dev/null | awk 'NR==1{print $1}'
+}
+if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  I1_MODE="$(index_mode install.sh)"
+  if [ "$I1_MODE" = "100755" ]; then
+    echo "  PASS  I1.index-mode — install.sh is recorded 100755 in the git index"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  I1.index-mode — install.sh is recorded [${I1_MODE:-<not tracked>}] in the git index, want 100755 (git update-index --chmod=+x install.sh)"
+    FAIL=$((FAIL + 1))
+  fi
+  # Negative control. Without it, a field extraction that always answers the same
+  # string would leave the row above unfalsifiable for a brand-new reason — which
+  # is the very failure mode #521 is about.
+  I1_MODE_CTRL="$(index_mode README.md)"
+  if [ "$I1_MODE_CTRL" = "100644" ]; then
+    echo "  PASS  I1.index-mode-control — a non-executable tracked file reads 100644, so the reader discriminates"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  I1.index-mode-control — README.md reads [${I1_MODE_CTRL:-<not tracked>}] in the index, want 100644; the mode reader above is not discriminating"
+    FAIL=$((FAIL + 1))
+  fi
 else
-  echo "  FAIL  install.sh is not executable (chmod +x install.sh)"
-  FAIL=$((FAIL + 1))
+  # Announced, and deliberately WITHOUT an `[ -x ]` fallback: the filesystem bit
+  # is not a stand-in for the recorded mode. Falling back to it would restore
+  # exactly the blindness this row exists to remove.
+  echo "  SKIP  I1.index-mode — no git checkout at $REPO_ROOT ('git rev-parse --git-dir' failed), so install.sh's recorded mode bit cannot be read here. The filesystem [ -x ] test is NOT a substitute and is deliberately not run as a fallback."
 fi
+
+# The filesystem exec bit, kept only where that bit is real. Precedent for
+# branching on `uname -s` and asserting something narrower but non-vacuous:
+# tests/dispatch-background.test.sh:877-882.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  SKIP  I1.fs-exec-bit — Git Bash/MSYS synthesizes [ -x ] from the shebang and the file extension instead of reading a Windows ACL, so the test is constant-true on this host and can never fail. The mode bit IS asserted on this platform — by I1.index-mode above, which is the first real assertion about it this job has ever run."
+    ;;
+  *)
+    if [ -x "$INSTALL_SH" ]; then
+      echo "  PASS  install.sh is executable"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL  install.sh is not executable (chmod +x install.sh)"
+      FAIL=$((FAIL + 1))
+    fi
+    ;;
+esac
 
 echo
 echo "== I2: fresh install creates settings.json with enabledPlugins entry =="
