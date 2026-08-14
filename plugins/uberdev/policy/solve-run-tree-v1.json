@@ -47,7 +47,8 @@
   "output_contracts": {
     "phase1-reviewer-v1": "shared/phase1-reviewer-output-v1.md",
     "finding-verifier-v1": "shared/finding-verifier-output-v1.md",
-    "code-fixer-v1": "shared/code-fixer-output-v1.md"
+    "code-fixer-v1": "shared/code-fixer-output-v1.md",
+    "sdd-implementer-v1": "shared/sdd-implementer-output-v1.md"
   },
   "edges": {
     "solve.issue.lead": {
@@ -613,6 +614,7 @@
       "cardinality": "one_per_task_plus_bounded_fix_attempts",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "sdd-implementer-v1",
       "allowed_workflows": [
         "solve",
         "turbo"

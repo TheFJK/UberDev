@@ -721,6 +721,51 @@ leases = list(Path(semaphore_path).rglob("*.lease")) if Path(semaphore_path).exi
 assert leases == [], leases
 PY
 
+# ── AC-14a: the implementer's assembled prompt carries the output contract ────
+# #517's ROOT CAUSE, asserted on the bytes the child actually receives. This
+# suite does NOT set UBERDEV_CHILD_MANIFEST_PATH, so the dispatch above resolved
+# against the LIVE policy/solve-run-tree-v1.json — these assertions therefore
+# exercise the shipped binding, not a fixture.
+#
+# With no `output_contract` on `sdd.task.implement`, lib/child-dispatch.sh ends
+# every implementer prompt with its contract-less fallback directive, `Return
+# completed, blocked, or refused.` That line lands AFTER the role card, so it is
+# the last word on the vocabulary — and it names three states the controller
+# does not branch on while omitting the two it does. DONE_WITH_CONCERNS and
+# NEEDS_CONTEXT were therefore unreachable, which is what made `context_rounds`
+# a cap on a state that could not occur.
+python3 -I -B - "$PROVIDER_ARGS_LOG" "$FIXTURE_SCOPE" \
+  "$ROOT/plugins/uberdev/shared/sdd-implementer-output-v1.md" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+provider_path, scope, contract_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+rows = [json.loads(line) for line in provider_path.read_text().splitlines()]
+instance = f"sdd-p{scope}-w1-t41-implement-a7"
+row = next(r for r in rows if r["instance_id"] == instance)
+prompt = Path(row["prompt"]).read_bytes()
+
+assert contract_path.is_file(), f"missing output contract file: {contract_path}"
+contract = contract_path.read_bytes()
+count = prompt.count(contract)
+assert count == 1, (
+    f"the assembled implementer prompt embeds the output contract {count} time(s), expected 1"
+)
+
+fallback = b"Return completed, blocked, or refused."
+assert fallback not in prompt, (
+    "the assembled implementer prompt still ends with the contract-less fallback "
+    "directive; the terminal vocabulary the child is told to use disagrees with "
+    "the vocabulary the controller branches on (#517)"
+)
+
+directive = b"Return only a response matching the output contract above."
+assert directive in prompt, (
+    "the assembled implementer prompt does not point the child at its output contract"
+)
+PY
+
 # ── #459 — reviewer result paths survive the wait (AC-7) ──────────────────────
 # `sdd_wait_prepared_batch` calls `sdd_reset_batch` on every exit path, so by the
 # time the controller reads a reviewer verdict the per-instance result paths are
@@ -1366,6 +1411,197 @@ IMPLEMENTER_REPORT_BLOCK="$(awk '/^    ## Report Format$/,/^```$/' "$IMPLEMENTER
 }
 grep -Fq '## After Review Findings' <<<"$IMPLEMENTER_REPORT_BLOCK" || {
   printf 'the Report Format block has no "## After Review Findings" line\n' >&2
+  exit 1
+}
+
+# ── AC-14: every declared member is reachable, and every member is handled ────
+# #517. tests/contract_markers.py proves the four marked declarations carry the
+# SAME set; it cannot prove the set is USABLE. Two things it structurally cannot
+# see, and this block holds both:
+#   * a member with no branch in the controller — set equality is happy when
+#     both sides declare a status nothing handles;
+#   * a member the worker is told not to use — the card used to route missing
+#     context into BLOCKED, which is why `context_rounds` bounded a state that
+#     never occurred even though every copy of the word NEEDS_CONTEXT agreed.
+# Both halves are keyed on SHAPE (the marker pair, and `^**LABEL:**`), never on
+# the member names they must verify — a name-keyed probe agrees with whatever it
+# finds and proves nothing (RFC 0016 §2.2).
+WORKER_CARD="$ROOT/plugins/uberdev/agents/implementation-worker.md"
+SDD_CONTRACT_FILE="$ROOT/plugins/uberdev/shared/sdd-implementer-output-v1.md"
+SDD_VOCAB_READER="$TMP/sdd-marked-vocab.py"
+cat >"$SDD_VOCAB_READER" <<'VOCABPY'
+"""Print the members of a file's `CONTRACT: sdd-implementer-status` region.
+
+Keyed on the MARKER PAIR. The region is one backticked pipe-alternation, so the
+members are its identifier tokens. Exactly one region per file is required: a
+second one would mean the file declares the vocabulary twice, and this reader
+would silently union them.
+"""
+import re
+import sys
+
+OPEN = re.compile(r"^\s*<!--\s*CONTRACT:\s*sdd-implementer-status\s*-->\s*$")
+CLOSE = re.compile(r"^\s*<!--\s*/CONTRACT:\s*sdd-implementer-status\s*-->\s*$")
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+members, regions, start = set(), 0, None
+for idx, line in enumerate(lines, start=1):
+    if OPEN.match(line):
+        if start is not None:
+            raise SystemExit(f"{path}:{idx}: CONTRACT region opened inside another")
+        start = idx
+        continue
+    if CLOSE.match(line):
+        if start is None:
+            raise SystemExit(f"{path}:{idx}: /CONTRACT closes a region never opened")
+        regions += 1
+        body = "\n".join(lines[start:idx - 1])
+        members.update(t for t in re.split(r"[^A-Za-z0-9_]+", body) if t)
+        start = None
+if start is not None:
+    raise SystemExit(f"{path}:{start}: CONTRACT region is never closed")
+if regions != 1:
+    raise SystemExit(f"{path}: expected exactly 1 marked region, found {regions}")
+if not members:
+    raise SystemExit(f"{path}: the marked region yielded ZERO members")
+print("\n".join(sorted(members)))
+VOCABPY
+
+SKILL_VOCAB="$(python3 -I -B "$SDD_VOCAB_READER" "$SKILL")" || exit 1
+
+# 14-2 (anti-vacuity, stated before the comparison it protects): a harvest that
+# matched nothing, or matched one stray token, must not be able to satisfy 14-1.
+SKILL_VOCAB_COUNT="$(grep -c . <<<"$SKILL_VOCAB")"
+[ "$SKILL_VOCAB_COUNT" -eq 5 ] || {
+  printf 'the SKILL.md terminal-status vocabulary has %s member(s), expected 5:\n%s\n' \
+    "$SKILL_VOCAB_COUNT" "$SKILL_VOCAB" >&2
+  exit 1
+}
+
+# 14-1: the controller's branch labels are EXACTLY the declared vocabulary.
+SDD_STATUS_SECTION="$TMP/sdd-status-section.md"
+awk '/^## Handling Implementer Status$/,/^## Prompt Templates$/' "$SKILL" >"$SDD_STATUS_SECTION"
+[ -s "$SDD_STATUS_SECTION" ] || {
+  printf 'could not extract the "## Handling Implementer Status" section from SKILL.md\n' >&2
+  exit 1
+}
+SKILL_ARMS="$(grep -oE '^\*\*[A-Z_]+:\*\*' "$SDD_STATUS_SECTION" | sed 's/^\*\*//; s/:\*\*$//' | sort -u)"
+[ "$SKILL_ARMS" = "$SKILL_VOCAB" ] || {
+  printf 'the controller branches on a different set than it declares\ndeclared:\n%s\nbranched:\n%s\n' \
+    "$SKILL_VOCAB" "$SKILL_ARMS" >&2
+  exit 1
+}
+
+# 14-3: a label with no handling prose is a stub, not a branch.
+python3 -I -B - "$SDD_STATUS_SECTION" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+LABEL = re.compile(r"^\*\*([A-Z_]+):\*\*(.*)$")
+HEADING = re.compile(r"^#{1,6} ")
+# The shortest legitimate branch in the section is DONE's "Proceed to spec
+# compliance review." (5 words). The floor sits below that and well above the
+# zero a bare label yields, so it separates "has a handler" from "has a name".
+MIN_BRANCH_WORDS = 4
+
+bodies: dict[str, str] = {}
+current = None
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").split("\n"):
+    match = LABEL.match(line)
+    if match:
+        current = match.group(1)
+        bodies[current] = match.group(2).strip()
+        continue
+    if HEADING.match(line):
+        current = None
+        continue
+    if current is not None:
+        bodies[current] = (bodies[current] + " " + line.strip()).strip()
+
+assert bodies, "no **MEMBER:** branch labels found in the status section"
+for member, body in sorted(bodies.items()):
+    words = body.split()
+    assert len(words) >= MIN_BRANCH_WORDS, (
+        f"the **{member}:** branch carries {len(words)} word(s) of handling prose — "
+        "a label with no body is a declared member with no handler, which is the "
+        "half of #517 that set equality across marked sites cannot see"
+    )
+PY
+
+# 14-4: REFUSED is not BLOCKED. BLOCKED rung 1 explicitly PERMITS re-dispatch
+# after supplying context; REFUSED must forbid re-dispatching the same task
+# unchanged, or the two arms are the same arm under two names.
+SDD_REFUSED_RUNG="$(awk '/^\*\*REFUSED:\*\*/,/^$/' "$SDD_STATUS_SECTION")"
+[ -n "$SDD_REFUSED_RUNG" ] || {
+  printf 'the REFUSED rung is missing from SKILL.md\n' >&2
+  exit 1
+}
+grep -Fq 'never re-dispatched with unchanged handoff data' <<<"$SDD_REFUSED_RUNG" || {
+  printf 'the REFUSED rung does not forbid re-dispatching the same task unchanged\n' >&2
+  exit 1
+}
+
+# 14-5: the prompt template the controller pastes from agrees, and its marked
+# declaration sits inside the Report Format block rather than loose in the file.
+PROMPT_VOCAB="$(python3 -I -B "$SDD_VOCAB_READER" "$IMPLEMENTER_PROMPT")" || exit 1
+[ "$PROMPT_VOCAB" = "$SKILL_VOCAB" ] || {
+  printf 'implementer-prompt.md declares a different vocabulary than SKILL.md\n%s\nvs\n%s\n' \
+    "$PROMPT_VOCAB" "$SKILL_VOCAB" >&2
+  exit 1
+}
+grep -Fq 'CONTRACT: sdd-implementer-status' <<<"$IMPLEMENTER_REPORT_BLOCK" || {
+  printf 'the Report Format block does not carry the marked terminal-status declaration\n' >&2
+  exit 1
+}
+
+# 14-6: the role card agrees.
+WORKER_VOCAB="$(python3 -I -B "$SDD_VOCAB_READER" "$WORKER_CARD")" || exit 1
+[ "$WORKER_VOCAB" = "$SKILL_VOCAB" ] || {
+  printf 'implementation-worker.md declares a different vocabulary than SKILL.md\n%s\nvs\n%s\n' \
+    "$WORKER_VOCAB" "$SKILL_VOCAB" >&2
+  exit 1
+}
+
+# 14-7: the CHEAP path is reachable. The card used to say "if requirements are
+# unclear, return `blocked`", which routed every missing-context case into the
+# expensive escalation ladder and left `context_rounds` bounding nothing.
+! grep -Fq 'return `blocked` with the missing context' "$WORKER_CARD" || {
+  printf 'implementation-worker.md still routes missing context into BLOCKED\n' >&2
+  exit 1
+}
+WORKER_STEP2="$(awk '/^## Execution$/{seen=1} seen' "$WORKER_CARD" | awk '/^2\. /,/^3\. /')"
+[ -n "$WORKER_STEP2" ] || {
+  printf 'implementation-worker.md has no "## Execution" step 2\n' >&2
+  exit 1
+}
+grep -Fq 'NEEDS_CONTEXT' <<<"$WORKER_STEP2" || {
+  printf 'Execution step 2 does not route a missing requirement to NEEDS_CONTEXT\n' >&2
+  exit 1
+}
+
+# 14-8: no spelled-out count. A sentence that says "four statuses" is a second,
+# uncomparable copy of the member COUNT — it goes stale the moment the marked
+# declaration grows, and nothing reds.
+! grep -rq 'four statuses' "$ROOT/plugins/uberdev/skills/subagent-driven-dev/" || {
+  printf 'subagent-driven-dev still spells out a status count in prose\n' >&2
+  exit 1
+}
+
+# 14-9: the CHILD-facing contract declares the same set AND gives every member a
+# meaning. Without this, REFUSED could be declared to the child with no guidance
+# on when it applies — reachable on paper, unusable in practice.
+CONTRACT_VOCAB="$(python3 -I -B "$SDD_VOCAB_READER" "$SDD_CONTRACT_FILE")" || exit 1
+[ "$CONTRACT_VOCAB" = "$SKILL_VOCAB" ] || {
+  printf 'sdd-implementer-output-v1.md declares a different vocabulary than SKILL.md\n%s\nvs\n%s\n' \
+    "$CONTRACT_VOCAB" "$SKILL_VOCAB" >&2
+  exit 1
+}
+CONTRACT_MEANINGS="$(grep -oE '^\*\*[A-Z_]+\*\* — ' "$SDD_CONTRACT_FILE" | sed 's/^\*\*//; s/\*\* — $//' | sort -u)"
+[ "$CONTRACT_MEANINGS" = "$SKILL_VOCAB" ] || {
+  printf 'the child-facing contract does not give every member a meaning\ndeclared:\n%s\nexplained:\n%s\n' \
+    "$SKILL_VOCAB" "$CONTRACT_MEANINGS" >&2
   exit 1
 }
 

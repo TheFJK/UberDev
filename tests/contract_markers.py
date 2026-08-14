@@ -191,6 +191,29 @@ CONTRACTS: dict[str, list[str]] = {
         "lib/code_fixer_contract.py",
         "shared/finding-verifier-output-v1.md",
     ],
+    # rank n/a — the SDD implementer's terminal status (#517). #370's shape in
+    # its most direct form: the role card declared `completed | blocked |
+    # refused`, the controller branched on `DONE | DONE_WITH_CONCERNS |
+    # NEEDS_CONTEXT | BLOCKED`, and nothing compared them — so `context_rounds`
+    # bounded a state the worker could not emit. Four declarations: the
+    # child-facing output contract, the role card, the controller's branch block
+    # and the prompt template the controller pastes from.
+    #
+    # WHAT THIS COMPARATOR CANNOT SEE, stated so it is not mistaken for more.
+    # Set equality across the four sites does not show that a declared member
+    # has a HANDLER in the controller, and it does not show that the assembled
+    # prompt reaches the child carrying this vocabulary rather than
+    # lib/child-dispatch.sh's contract-less fallback directive — which was
+    # #517's actual root cause. Both are held by tests/sdd-child-inputs.test.sh
+    # (AC-14a for the assembled prompt, AC-14 for handler coverage). Nothing
+    # here is behavioural: no test in this repo proves a model EMITS one of
+    # these five.
+    "sdd-implementer-status": [
+        "agents/implementation-worker.md",
+        "shared/sdd-implementer-output-v1.md",
+        "skills/subagent-driven-dev/SKILL.md",
+        "skills/subagent-driven-dev/implementer-prompt.md",
+    ],
     # rank 6 — lib/dispatch.sh enum, the goal run-state allowlist (enum - auto),
     # the supervision-capable subset, the launcher's three copies and the triage
     # parser.  #360 shipped stale at the TRIAGE parser specifically; the launcher
@@ -394,6 +417,35 @@ TWIN_ALLOWLIST: dict[str, list[tuple[str, str, str]]] = {
         # `Permission mode:` line for the workflow backend. Same kind as the
         # lib/dispatch.sh host-capability message above.
         ("plugins/uberdev/lib/solve-launcher.sh", "the resolved bypass tier is NOT applied", _PROSE),
+    ],
+    "sdd-implementer-status": [
+        # Two windows, two needles: an allow-list entry only exempts the window
+        # its needle appears in, and this file states the same vocabulary twice
+        # — once in the fenced `status:` line of its own return contract, once
+        # in the four `- `status: X` —` bullets that give each member's meaning.
+        (
+            "plugins/uberdev/agents/uberthink-generator.md",
+            "status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED",
+            "the uberthink GENERATOR's own fenced-YAML return contract, not the "
+            "SDD implementer's. It shares four of five tokens by coincidence — "
+            "both are agent terminal statuses — and it carries no REFUSED. "
+            "Marking it would make two unrelated contracts compare equal and "
+            "would fail the path-multiset ratchet, since this file is not one "
+            "of sdd-implementer-status's four declaration sites. It is a real "
+            "unmarked declaration of a DIFFERENT contract and deserves its own "
+            "registry entry with its own >= 2 sites; #517 does not supply one, "
+            "so the honest record is an exemption with this reason, not a "
+            "silent skip.",
+        ),
+        (
+            "plugins/uberdev/agents/uberthink-generator.md",
+            "`status: NEEDS_CONTEXT` — `frame.md` is missing",
+            "the per-member meanings of the SAME uberthink generator contract "
+            "as the entry above, restated one bullet per member directly below "
+            "the fence. Same reasoning: a different contract that happens to "
+            "share four tokens, with no REFUSED member, and this file is not a "
+            "declaration site for sdd-implementer-status.",
+        ),
     ],
     "goal-circuit-breaker-reason": [
         ("plugins/uberdev/skills/goal-pipeline/SKILL.md", "halt reasons emitted by Phase", _PROSE),
