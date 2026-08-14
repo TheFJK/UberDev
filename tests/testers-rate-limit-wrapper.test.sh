@@ -5,6 +5,12 @@
 # fail-loud), 21-25 (#306: explicit mutex release on error paths, bounded mutex retry,
 # zsh runtime fixture, rl-curl shim argv/env injection + fail-closed).
 set -euo pipefail
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMPDIR"' EXIT

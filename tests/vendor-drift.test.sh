@@ -35,6 +35,12 @@
 set -u
 set -o pipefail
 
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DRIFT="$REPO_ROOT/tools/vendor/vendor-drift.py"
 REGISTER="$REPO_ROOT/plugins/uberdev/vendor.json"

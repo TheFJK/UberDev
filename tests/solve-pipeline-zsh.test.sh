@@ -24,6 +24,12 @@
 
 set -u
 
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # #304 / RFC 0012 §3.4: the dispatch composition modelled by the R2-R4
 # fixtures lives in lib/solve-launcher.sh (hoisted out of
