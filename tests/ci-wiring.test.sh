@@ -28,9 +28,25 @@
 #         only caller, and the teardown that replaced it (RULING 4) is a
 #         declared Unix-only fixture, so native Windows is no longer in the set.
 #         Recorded as a real coverage loss, not quietly dropped.
+#   W9  — every fixture the windows-skip-list DECLARES Unix-only refuses to run
+#         under Git Bash, and the enforcing set equals the declared set in BOTH
+#         directions. W1-W4 compare filenames, so before this the declaration
+#         was forgeable: a wired file could nest a declared-skipped fixture and
+#         W4 stayed green (#520). Because the two sets are locked together,
+#         un-skipping a fixture stays one atomic edit.
+#   W10 — no tests/*.test.sh may announce that it is asserting nothing and then
+#         finish with a zero status. That shape made a file wired INTO the
+#         windows job certify sixteen rows it never ran (#520).
+#         BOUNDARY: W10 catches the ANNOUNCED bail-out only. A silent one — a
+#         body wrapped in a host conditional that falls through to EOF, or a
+#         bail-out worded without a "skip" token — is not caught. The per-file
+#         executed-row floor (see tests/ubersimplify-aggregate.test.sh) is the
+#         mechanism for that, and is required of any new file gating on an
+#         optional dependency.
 #
-# Portable: bash + awk + grep + sed + sort + comm. Runs on ubuntu-latest
-# (native bash) and windows-latest (Git Bash) without any extra deps.
+# Portable: bash + awk + grep + sed + sort + comm + mktemp. Runs on
+# ubuntu-latest (native bash) and windows-latest (Git Bash) without any extra
+# deps.
 
 set -u
 set -o pipefail
@@ -87,10 +103,19 @@ fi
 
 # Comment-strip BEFORE grep so references inside free-text comments
 # (e.g. "mirroring secret-scan.test.sh") never pollute the wiring set.
-ubuntu_wired=$(awk '/^  shape-checks:/,/^  shape-checks-windows:/' "$WORKFLOW" \
+#
+# Both sets are derived from the JOB BLOCKS above, which stop at the next job
+# key, rather than from an awk range. The ranges these replace were wrong in
+# both directions and only accidentally harmless: `/^  shape-checks:/,/^
+# shape-checks-windows:/` swallowed supervision-smoke-macos, so a macOS-only
+# fixture would have been certified as ubuntu-wired, and `/^
+# shape-checks-windows:/,0` runs to EOF, so a job appended after it would be
+# read as windows wiring. Verified set-neutral on the tree at the time of the
+# change (#520): both forms yield the identical name sets.
+ubuntu_wired=$(printf '%s\n' "$linux_job_block" \
   | grep -v '^[[:space:]]*#' \
   | grep -oE 'tests/[a-zA-Z0-9._-]+\.test\.sh' | sed 's#tests/##' | sort -u)
-windows_wired=$(awk '/^  shape-checks-windows:/,0' "$WORKFLOW" \
+windows_wired=$(printf '%s\n' "$windows_job_block" \
   | grep -v '^[[:space:]]*#' \
   | grep -oE 'tests/[a-zA-Z0-9._-]+\.test\.sh' | sed 's#tests/##' | sort -u)
 
@@ -227,6 +252,253 @@ if [ -z "$missing_teardown_jobs" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL  W7 child-worktree teardown is missing from: $missing_teardown_jobs"
+  FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------------------
+# W9 / W10 — the coverage matrix must state something about EXECUTION, not
+# about filenames (#520).
+#
+# W1-W4 above compare two lists of NAMES. That predicate cannot tell a file
+# that is LISTED for a job from one that ASSERTS anything there, so both halves
+# of the matrix were forgeable:
+#
+#   * a fixture the marker block declares Unix-only could still be executed on
+#     windows-latest by a wired file that nests it — tests/simplify.test.sh
+#     runs tests/simplify-standalone-flow.test.sh directly, and W4 stayed green
+#     because the nested name never appears in the windows run: block; and
+#   * a file wired INTO the windows job could finish with a zero status having
+#     asserted nothing — tests/ubersimplify-aggregate.test.sh abandoned its
+#     whole body (all 16 rows, including the #183 envelope-breakout security
+#     rows) when PyYAML was absent, and W4 counted it as covered.
+#
+# W9 closes the first half AT RUNTIME: every declared Unix-only fixture carries
+# a refusal guard, and the ENFORCING set equals the DECLARED set in both
+# directions, so a nested execution on Git Bash reds instead of silently
+# certifying, and un-declaring a fixture stays one atomic edit.
+#
+# W10 closes the second half by banning the whole-file bail-out shape outright:
+# no tests/*.test.sh may announce that it is asserting nothing and then finish
+# with a zero status. A file that gates on an optional dependency must refuse
+# (non-zero) or run its rows.
+#
+# DECLARED BOUNDARY — W10 catches the ANNOUNCED bail-out: a line that says
+# "skip" through echo/printf, followed within three lines by a zero-status
+# exit. It does NOT catch a silent one — a body wrapped in a host conditional
+# that falls through to EOF, or a bail-out worded without that token. So W10 is
+# a corpus-wide floor, not a proof that every wired file asserts on every host.
+# The per-file executed-row floor (see tests/ubersimplify-aggregate.test.sh) is
+# the mechanism for that, and is required of any new file that gates on an
+# optional dependency. A guard whose name promises more than its predicate
+# delivers is the #370 / RFC 0016 shape, so the promise is written down rather
+# than left implied.
+#
+# SELF-TRIP WARNING: this file IS a tests/*.test.sh and IS inside both corpora
+# below. The guard token is assembled from fragments and the W10 fixtures are
+# written with printf escapes, so neither needle ever appears contiguously in
+# these bytes — the same discipline as tests/test-harness-source-guards.test.sh
+# A3/A4. W10.1 and W9.2 scanning this very file is what keeps that honest.
+# ---------------------------------------------------------------------------
+
+# Assembled, never contiguous: W9.2 greps every tests/*.test.sh for this token
+# and would otherwise name ci-wiring.test.sh as an undeclared enforcer.
+GUARD_MARK='# ci-wiring: declared Unix-''only'
+
+# guard_state — reads a test file's source on stdin and prints one word:
+#   present     the complete refusal guard IS the file's first executable
+#               statement
+#   incomplete  it is first, but the Git-Bash branch or the non-zero exit is
+#               gone
+#   misplaced   the token is in the file, but not as the first statement
+#   missing     the token is absent
+# "First executable statement" = the first line that is not the #! line, not a
+# comment, not blank, and not a `set …` options line.
+# Bracket classes rather than backslash escapes throughout: the BSD, GNU and
+# MSYS awks this suite runs under disagree least about those. `[[:space:]]*$`
+# absorbs the trailing CR a core.autocrlf=true Windows checkout leaves behind.
+GUARD_STATE_AWK='
+  !mark_at && index($0, MARK) > 0 { mark_at = FNR }
+  mark_at && FNR > mark_at && FNR <= mark_at + 5 {
+    if ($0 ~ /MINGW[*][|]MSYS[*][|]CYGWIN[*]/) branch = 1
+    if ($0 ~ /(^|[;&|[:space:]])exit[[:space:]]+2([[:space:]]|;|$)/) refuses = 1
+  }
+  seen { next }
+  FNR == 1 && /^#!/ { next }
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*$/ { next }
+  /^[[:space:]]*set[[:space:]]/ { next }
+  { first = $0; first_at = FNR; seen = 1 }
+  END {
+    if (mark_at == 0) { print "missing"; exit }
+    if (!seen || first_at != mark_at + 1 || first !~ /^[[:space:]]*case[[:space:]]+"[$][(]uname[[:space:]]+-s[)]"[[:space:]]+in[[:space:]]*$/) {
+      print "misplaced"; exit
+    }
+    if (!branch || !refuses) { print "incomplete"; exit }
+    print "present"
+  }
+'
+guard_state() { awk -v MARK="$GUARD_MARK" "$GUARD_STATE_AWK"; }
+
+# W9.0 — the declared set must be non-empty and every entry must resolve to a
+# readable file. A marker typo would otherwise let W9.1 pass over a shorter
+# set, and a marker block that stopped parsing would let it pass over nothing.
+w9_declared_count=0
+w9_resolved_count=0
+w9_unresolved=''
+while IFS= read -r w9_name; do
+  [ -n "$w9_name" ] || continue
+  w9_declared_count=$((w9_declared_count+1))
+  if [ -r "$REPO_ROOT/tests/$w9_name" ]; then
+    w9_resolved_count=$((w9_resolved_count+1))
+  else
+    w9_unresolved="${w9_unresolved}${w9_unresolved:+ }$w9_name"
+  fi
+done <<EOF
+$marker_block
+EOF
+if [ "$w9_declared_count" -gt 0 ] && [ "$w9_resolved_count" -eq "$w9_declared_count" ]; then
+  echo "  PASS  W9.0 the windows-skip-list declares $w9_declared_count fixture(s), all on disk"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W9.0 the windows-skip-list declares $w9_declared_count fixture(s), of which $w9_resolved_count resolve on disk"
+  if [ -n "$w9_unresolved" ]; then
+    printf '          unresolved: %s\n' "$w9_unresolved"
+  fi
+  FAIL=$((FAIL+1))
+fi
+
+# W9.1 — declared implies enforced.
+w9_not_guarded=''
+while IFS= read -r w9_name; do
+  [ -n "$w9_name" ] || continue
+  w9_file="$REPO_ROOT/tests/$w9_name"
+  if [ -r "$w9_file" ]; then
+    w9_state="$(guard_state < "$w9_file")"
+  else
+    w9_state="unreadable"
+  fi
+  if [ "$w9_state" != "present" ]; then
+    w9_not_guarded="${w9_not_guarded}${w9_not_guarded:+ }$w9_name($w9_state)"
+  fi
+done <<EOF
+$marker_block
+EOF
+if [ -z "$w9_not_guarded" ]; then
+  echo "  PASS  W9.1 every declared Unix-only fixture refuses to run under Git Bash"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W9.1 declared Unix-only fixture(s) whose first statement is not the refusal guard:"
+  printf '          %s\n' $w9_not_guarded
+  echo "         Copy the guard block from any other declared fixture. Without it a wired"
+  echo "         file that nests this one certifies windows coverage that never ran."
+  FAIL=$((FAIL+1))
+fi
+
+# W9.2 — enforced implies declared. Without this direction the guard could be
+# pasted into a file that really does run on windows-latest, and the run: block
+# would go red for a reason the marker block never predicted.
+w9_enforcing="$( { grep -lF "$GUARD_MARK" "$REPO_ROOT"/tests/*.test.sh 2>/dev/null || true; } \
+  | sed 's#.*/##' | sort -u )"
+if [ "$w9_enforcing" = "$marker_block" ]; then
+  echo "  PASS  W9.2 the enforcing set equals the declared set, both directions"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W9.2 the set of files carrying the refusal guard drifted from the marker block."
+  echo "         declared (marker block):"
+  printf '           %s\n' $marker_block
+  echo "         enforcing (guard token on disk):"
+  printf '           %s\n' $w9_enforcing
+  FAIL=$((FAIL+1))
+fi
+
+# W9.3 — anti-vacuity control for W9.1/W9.2: the classifier must actually
+# discriminate. A predicate that answered "present" for everything would make
+# W9.1 green over a corpus with no guards at all.
+w9_fx_present="$(printf '#!/usr/bin/env bash\nset -u\n%s\ncase "$(uname -s)" in\n  MINGW*|MSYS*|CYGWIN*)\n    exit 2 ;;\nesac\nreal_rows\n' "$GUARD_MARK")"
+w9_fx_incomplete="$(printf '#!/usr/bin/env bash\n%s\ncase "$(uname -s)" in\n  Linux)\n    : ;;\nesac\nreal_rows\n' "$GUARD_MARK")"
+w9_fx_misplaced="$(printf '#!/usr/bin/env bash\nreal_rows\n%s\ncase "$(uname -s)" in\n  MINGW*|MSYS*|CYGWIN*)\n    exit 2 ;;\nesac\n' "$GUARD_MARK")"
+w9_fx_missing="$(printf '#!/usr/bin/env bash\nset -u\nreal_rows\n')"
+w9_fx_bad=''
+for w9_fixture in \
+  "present|$w9_fx_present" \
+  "incomplete|$w9_fx_incomplete" \
+  "misplaced|$w9_fx_misplaced" \
+  "missing|$w9_fx_missing"; do
+  w9_want=${w9_fixture%%|*}
+  w9_got="$(guard_state <<<"${w9_fixture#*|}")"
+  if [ "$w9_got" != "$w9_want" ]; then
+    w9_fx_bad="${w9_fx_bad}${w9_fx_bad:+ }want=$w9_want,got=$w9_got"
+  fi
+done
+if [ -z "$w9_fx_bad" ]; then
+  echo "  PASS  W9.3 the guard classifier separates present/incomplete/misplaced/missing"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W9.3 the guard classifier is not discriminating: $w9_fx_bad"
+  echo "         W9.1 above is only as strong as this row — fix the classifier, not the fixtures."
+  FAIL=$((FAIL+1))
+fi
+
+# W10 — the whole-file bail-out ban. One awk over the corpus: a line that
+# announces the file is asserting nothing, followed within three lines by a
+# zero-status exit, is the vacuous-green shape. Three lines of slack covers the
+# `then echo …; exit …; fi` spellings without reaching an unrelated exit.
+W10_SCAN_AWK='
+  FNR == 1 { bail_at = 0; scanned++ }
+  /(echo|printf)[^;]*[Ss][Kk][Ii][Pp]/ { bail_at = FNR }
+  /(^|[;&|[:space:]])exit[[:space:]]+0([[:space:]]|;|$)/ {
+    if (bail_at > 0 && FNR - bail_at <= 3) print "hit " FILENAME ":" FNR
+  }
+  END { print "scanned " scanned+0 }
+'
+# The glob is expanded by the shell and never word-split, so a checkout path
+# containing a space (a real local case here) is safe.
+w10_out="$(awk "$W10_SCAN_AWK" "$REPO_ROOT"/tests/*.test.sh)"
+w10_scanned="$(sed -n 's/^scanned //p' <<<"$w10_out")"
+w10_hits="$(sed -n 's/^hit //p' <<<"$w10_out" | sed 's#.*/tests/#tests/#')"
+w10_expected="$(printf '%s\n' "$on_disk" | grep -c '\.test\.sh')"
+
+# W10.0 — anti-vacuity for W10.1: a glob or an awk that stopped matching reads
+# zero files and reports a clean corpus.
+if [ "${w10_scanned:-0}" -gt 0 ] && [ "${w10_scanned:-0}" -eq "$w10_expected" ]; then
+  echo "  PASS  W10.0 the bail-out scan read $w10_scanned tests/*.test.sh file(s)"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W10.0 the bail-out scan read ${w10_scanned:-<none>} file(s), expected $w10_expected"
+  FAIL=$((FAIL+1))
+fi
+
+# W10.1 — the corpus itself.
+if [ -z "$w10_hits" ]; then
+  echo "  PASS  W10.1 no tests/*.test.sh abandons its body and still reports success"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W10.1 whole-file bail-out(s) — these announce that nothing ran and then succeed:"
+  printf '          %s\n' $w10_hits
+  echo "         Make the dependency hard instead: report it on stderr and leave with a"
+  echo "         non-zero status, or run the rows. A vacuous green certifies coverage that"
+  echo "         does not exist (#520)."
+  FAIL=$((FAIL+1))
+fi
+
+# W10.2 — anti-vacuity control for W10.1. W10.1's population is zero by design,
+# so on its own it cannot distinguish "the corpus is clean" from "the predicate
+# stopped matching". These two fixtures pin both polarities of the SAME awk
+# program: the vacuous shape must be flagged, and a PATH-stub `case` arm that
+# legitimately leaves with a zero status must not.
+BAIL_TOKEN='SKI'; BAIL_TOKEN="${BAIL_TOKEN}P"
+w10_fx_dir="$(mktemp -d)"
+printf 'echo "%s: PyYAML not installed"\nexit 0\n' "$BAIL_TOKEN" > "$w10_fx_dir/positive.test.sh"
+printf 'stub_gh() { case "$1" in pr) echo ok; exit 0 ;; esac; }\nreal_rows\nexit 0\n' > "$w10_fx_dir/negative.test.sh"
+w10_fx_out="$(awk "$W10_SCAN_AWK" "$w10_fx_dir/positive.test.sh" "$w10_fx_dir/negative.test.sh")"
+w10_fx_hits="$(sed -n 's/^hit //p' <<<"$w10_fx_out" | sed 's#.*/##')"
+rm -rf "$w10_fx_dir"
+if [ "$w10_fx_hits" = "positive.test.sh:2" ]; then
+  echo "  PASS  W10.2 the bail-out predicate flags the vacuous shape and spares the control"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL  W10.2 the bail-out predicate is not discriminating:"
+  echo "         expected exactly 'positive.test.sh:2', got: ${w10_fx_hits:-<nothing>}"
   FAIL=$((FAIL+1))
 fi
 

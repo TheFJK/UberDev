@@ -6,6 +6,12 @@
 # tested behaviorally by tests/scan-fleet-workflow.test.sh; chunk.py + report.py
 # keep their own tests (uberscan-chunk.test.sh / uberscan-report.test.sh).
 set -u; set -o pipefail
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMD="$REPO_ROOT/plugins/uberdev/commands/uberscan.md"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/uberscan-pipeline/SKILL.md"

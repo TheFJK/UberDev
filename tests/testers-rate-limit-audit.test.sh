@@ -2,6 +2,12 @@
 # Tests: lib/rate-cap-audit.sh — post-hoc audit of wave-N.yaml RPS.
 # Cases: 8 (breach synthesises critical), 9 (clean run), 10 (per-host scoping).
 set -euo pipefail
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMPDIR"' EXIT

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$ROOT/plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"

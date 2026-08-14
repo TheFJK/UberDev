@@ -3,6 +3,12 @@
 # Mirrors the shape of tests/uberscan-report.test.sh — bash wrapper around a python3 heredoc
 # that imports report.py and asserts the spec §3 scoring contract.
 set -u; set -o pipefail
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIPELINE_DIR="$REPO_ROOT/plugins/uberdev/skills/uberthink-pipeline"
 PASS=0; FAIL=0
