@@ -542,11 +542,23 @@ fi
 # ---------------------------------------------------------------------------
 echo "== B: T3 behavioral fixtures (harness stubs) =="
 
-FIXTURE_OUT="$(node -e '
-const h = require(process.argv[1]);
+# GIT-BASH: this fixture is ~74 KB of JavaScript. Windows caps a CreateProcess
+# command line at 32,767 characters, so `node -e` cannot spawn at all there —
+# bash writes its own error into FIXTURE_OUT through the 2>&1 below and every
+# behavioural row reports PARSE_ERROR rather than a result. It grew past the
+# cap only when #507, #508 and #515 landed together; each was inside it alone,
+# which is why no single PR could see this. Written to a file and run from
+# there, the command line is three short arguments regardless of fixture size.
+#
+# No mktemp: this file is Git-Bash portable by contract (see the header). $$ is
+# unique enough for a per-process scratch file and the trap removes it.
+FIXTURE_JS="${TMPDIR:-/tmp}/uberdev-solve-fleet-fixture-$$.js"
+trap 'rm -f "$FIXTURE_JS"' EXIT
+cat > "$FIXTURE_JS" <<'UBERDEV_FIXTURE_JS'
+const h = require(process.argv[2]);
 const fs = require("fs");
 const vm = require("vm");
-const src = fs.readFileSync(process.argv[2], "utf8");
+const src = fs.readFileSync(process.argv[3], "utf8");
 const meta = h.extractMeta(src).meta;
 const RD = "/r/.uberdev/run/RID";
 
@@ -1254,7 +1266,8 @@ function probedNums(record) {
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
 });
-' "$HARNESS" "$WORKFLOW" 2>&1)"
+UBERDEV_FIXTURE_JS
+FIXTURE_OUT="$(node "$FIXTURE_JS" "$HARNESS" "$WORKFLOW" 2>&1)"
 
 check() {
   local key="$1" expected="$2" label="$3" got
