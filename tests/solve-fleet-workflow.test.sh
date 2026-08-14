@@ -1383,6 +1383,51 @@ function probedNums(record) {
   out.tcBadPartialTold = !!(deliverY
     && deliverY.prompt.indexOf("PARTIAL implementation of 1 planned task(s)") >= 0);
 
+  // Run Y0 — ZERO, which is not a small count but the ABSENCE of one. It
+  // satisfies Number.isInteger, so it used to slip past the stop above and take
+  // the clamp arm instead, where the floor of 1 raised it: the chain then ran as
+  // if the plan held exactly one task, the SKIPPED backfill recorded nothing,
+  // the ledger could come out COMPLETE, and the delivery agent was told every
+  // planned task was committed and passed its review gate before opening a PR
+  // whose body carries `Closes #11` for /goal to merge. Its ONLY trace was the
+  // task_count_clamped row a benign ceiling clamp also emits (Run Z2), so
+  // nothing downstream could tell a fabricated one-task plan from a real one.
+  // A NEGATIVE takes the same path for the same reason, and both mean the
+  // implementer counted no `## Task <n>:` heading at all.
+  const zeroDrive = async function (declared) {
+    const returns = Object.assign({}, mediumReturns(),
+      { "impl:#11:t1": task(1, { taskCount: declared }) });
+    const rec = await run(buildArgs(), { agentReturns: returns });
+    const res = resultOf(rec);
+    const event = res ? res.auditEvents.filter(function (e) {
+      return e.event === "task_count_missing"; })[0] : null;
+    return {
+      audit: !!event,
+      raw: event ? event.raw : "NO-EVENT",
+      blocked: res ? res.tasksBlocked : null,
+      // The clamp arm must NOT have run: its audit row is what made a
+      // fabricated plan indistinguishable from a benign ceiling correction.
+      noClamp: !!(res && !res.auditEvents.some(function (e) {
+        return e.event === "task_count_clamped"; })),
+      noLaterRung: labels(rec).indexOf("impl:#11:t2") < 0,
+      complete: (function () {
+        const r11 = res ? res.results.filter(function (r) { return r.issue === 11; })[0] : null;
+        return r11 ? r11.chainComplete : null;
+      })(),
+    };
+  };
+  const tcZero = await zeroDrive(0);
+  out.tcZeroAudit = tcZero.audit;
+  out.tcZeroRaw = tcZero.raw;
+  out.tcZeroBlocked = tcZero.blocked;
+  out.tcZeroNoClamp = tcZero.noClamp;
+  out.tcZeroNoLaterRung = tcZero.noLaterRung;
+  out.tcZeroNotComplete = tcZero.complete === false;
+  const tcNeg = await zeroDrive(-3);
+  out.tcNegAudit = tcNeg.audit;
+  out.tcNegRaw = tcNeg.raw;
+  out.tcNegNoClamp = tcNeg.noClamp;
+
   // Run Z2 — OVER THE CEILING, the clamp arm beside the stop. A count ABOVE
   // MAX_TASKS is a correctable value rather than an unknown one: the chain runs
   // the ceiling and audits the correction. But the tasks PAST the ceiling were
@@ -1573,6 +1618,53 @@ function probedNums(record) {
   out.daChainComplete = da11 ? da11.chainComplete : null;
   out.daNoPartial = !!(da11 && !da11.partialDelivery);
 
+  // --- Run FW: the FIX rung's shared-worktree gate --------------------------
+  // The suite's only workspace fixture bends workspaceReady on the task-1
+  // IMPLEMENTER, and the shared task() helper defaults that field to true, so
+  // the second writing rung's gate was never exercised: deleting or inverting it
+  // left the whole suite green, and the source comment beside it explicitly
+  // anticipates a future reader removing it as redundant belt-and-braces — which
+  // is exactly the edit no row could have caught.
+  //
+  // The regression it stops: a fixer that never entered the shared checkout runs
+  // `git commit --amend` in whatever directory it was handed (the caller's own
+  // repository root, in the worst case). Nothing it did is attributable to this
+  // branch, so the round must NOT count — a counted round reads as a fix that
+  // landed, and the next reviewer re-reads an unchanged HEAD until the rounds
+  // run out with the real cause nowhere in the record.
+  //
+  // Budget 5, spent exactly: task 1 implements (1) and draws its approving
+  // review (2); task 2 implements (3), draws one REVISIONS_REQUIRED (4) and
+  // spends its one fix round (5). At 4 the budget arm fires FIRST and blocks
+  // task 2 before the fixer is ever dispatched — every assertion below then
+  // passes for the wrong reason, which is what the fwFixRan premise row catches.
+  const fwReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2 }),
+    "review:#11:t1:r1": approve(),
+    "impl:#11:t2": task(2),
+    "review:#11:t2:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: ["f"] },
+    "fix:#11:t2:r1": task(2, { workspaceReady: false }),
+  });
+  const recFW = await run(buildArgs(null, { implementBudget: 5 }), { agentReturns: fwReturns });
+  const resFW = resultOf(recFW);
+  const fw11 = resFW ? resFW.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  // PREMISE: the fixer really was dispatched, so the gate is what stopped it and
+  // not an earlier arm.
+  out.fwFixRan = labels(recFW).indexOf("fix:#11:t2:r1") >= 0;
+  out.fwAudit = !!(resFW && resFW.auditEvents.some(function (e) {
+    return e.event === "workspace_not_ready" && e.issue === 11 && e.task === 2 && e.round === 1; }));
+  out.fwTasks = fw11 && Array.isArray(fw11.tasks)
+    ? fw11.tasks.map(function (t) { return t.id + ":" + t.status + ":" + t.fixRounds; }).join(",")
+    : null;
+  // The chain STOPS: no second fix round and no re-review of bytes nobody
+  // attributable changed.
+  out.fwStopped = labels(recFW).indexOf("fix:#11:t2:r2") < 0
+    && labels(recFW).indexOf("review:#11:t2:r2") < 0;
+  // Delivery still runs — task 1's commit is real work — and is told the truth.
+  out.fwDelivered = labels(recFW).indexOf("deliver:#11") >= 0;
+  out.fwChainComplete = fw11 ? fw11.chainComplete : null;
+
   // --- Runs ZC / ZD: the arm where the WHOLE chain committed nothing --------
   // Every chain run above gives at least one task a non-zero commit count, so
   // the totalCommits===0 arm never executed and neither of the two things it
@@ -1613,7 +1705,7 @@ function probedNums(record) {
 
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD]
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -1916,6 +2008,24 @@ else
   check dsToldWhich true          "B184 delivery is told which task disputed — never that the implementation is DONE and reviewed"
   check daChainComplete true      "B185 an AGREED no-change is not disputed, so the chain is still complete"
   check daNoPartial true          "B186 ...and no partialDelivery object is published for it"
+
+  check tcZeroAudit true          "B194 a reported taskCount of ZERO fires task_count_missing — zero is the absence of a count, not a one-task plan"
+  check tcZeroRaw 0               "B195 the event records raw:0, so the value that arrived is distinguishable from the field never arriving"
+  check tcZeroBlocked 1           "B196 the rung that declared zero tasks is recorded BLOCKED, not DONE"
+  check tcZeroNoClamp true        "B197 ...and the clamp arm did NOT run: its audit row is what made a fabricated plan look like a benign ceiling correction"
+  check tcZeroNoLaterRung true    "B198 ...and no task-2 rung is dispatched into a plan whose size is unknown"
+  check tcZeroNotComplete true    "B199 ...so the chain is NOT complete, and delivery cannot be told every planned task passed its gate"
+  check tcNegAudit true           "B200 a NEGATIVE taskCount takes the same stop, for the same reason"
+  check tcNegRaw -3               "B201 ...with the offending value preserved in the event"
+  check tcNegNoClamp true         "B202 ...and never floored into a one-task plan by the clamp"
+
+  check fwFixRan true             "B203 the fix agent really was dispatched, so the gate is what stopped the round"
+  check fwAudit true              "B204 a fix round that reports no usable shared worktree audits workspace_not_ready with its task and round"
+  check fwTasks '"1:DONE:0,2:BLOCKED:0"' \
+                                  "B205 the task is BLOCKED and its fixRounds counter did NOT advance — an unattributable amend is not a landed fix"
+  check fwStopped true            "B206 ...and the chain stops: no second fix round, no re-review of bytes nobody attributable changed"
+  check fwDelivered true          "B207 delivery still runs on task 1's real commit"
+  check fwChainComplete false     "B208 ...but the chain is not complete, so /goal cannot read the PR as covering the whole plan"
 
   check zcStatus '"NO_CHANGES_NEEDED"' "B187 a chain whose tasks ALL agreed there was nothing to do publishes NO_CHANGES_NEEDED"
   check zcNoDeliver true          "B188 ...and dispatches no delivery agent, which would only be invited to invent work"

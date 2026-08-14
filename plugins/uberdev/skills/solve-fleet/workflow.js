@@ -1129,14 +1129,27 @@ async function runTaskChain(rec, planPath) {
     if (k === 1) {
       // taskCount is the one structural fact an agent supplies here, so the
       // script re-clamps it and records the correction instead of trusting it.
-      // ABSENT or non-integer is not a correctable value: the clamp floor is 1,
-      // so accepting it would collapse an N-task plan into a one-task plan,
-      // record no SKIPPED rows (the backfill is bounded by that same 1), and
-      // still open a PR. That is the same class of failure as a false workspace
-      // flag on the same return, so it stops the chain instead of minimising
-      // the plan. S_TASK1 should already have refused it; this is the arm that
-      // holds when schema enforcement is not available.
-      if (!Number.isInteger(impl.taskCount)) {
+      // ABSENT, non-integer or BELOW ONE is not a correctable value: the clamp
+      // floor is 1, so accepting it would collapse an N-task plan into a
+      // one-task plan, record no SKIPPED rows (the backfill is bounded by that
+      // same 1), and still open a PR. That is the same class of failure as a
+      // false workspace flag on the same return, so it stops the chain instead
+      // of minimising the plan. S_TASK1 should already have refused it; this is
+      // the arm that holds when schema enforcement is not available.
+      //
+      // ZERO IS NOT A COUNT, IT IS THE ABSENCE OF ONE. A reported 0 (or a
+      // negative) satisfies Number.isInteger, so it used to skip this stop
+      // entirely and take the clamp below, which raised it to the floor: the
+      // chain then ran as if the plan held exactly one task, the ledger could
+      // come out COMPLETE, and the delivery agent was told in words that every
+      // planned task was committed and passed its review gate before opening a
+      // PR carrying `Closes #N` for /goal to merge. Zero means the implementer
+      // counted no `## Task <n>:` heading at all — a planner that ignored the
+      // heading contract, a plan file it could not parse, or a plain mistake —
+      // which is the SAME plan-size-unknown state this arm exists for. Its only
+      // trace was the task_count_clamped row a benign ceiling clamp also emits,
+      // so nothing downstream could tell the two apart.
+      if (!Number.isInteger(impl.taskCount) || impl.taskCount < 1) {
         auditEvents.push({
           event: "task_count_missing", issue: rec.issue,
           raw: (impl.taskCount === undefined) ? null : impl.taskCount, ts: nowIso,

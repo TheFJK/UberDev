@@ -23,7 +23,8 @@
 #   C1  declared agent_kinds  UNION  edge-covered kinds  ==  executed kinds
 #   C2  a kind is ungoverned OR carried by a reserved-prefix edge, never both
 #   C3  every edge sourced from that substrate sits under its reserved prefix
-#   C4  the executed set has at least 6 kinds (anti-vacuity floor)
+#   C4  the executed set has at least EXECUTED_KIND_FLOOR kinds (a RATCHET, not
+#       a magic number — see the constant)
 #   C5  dispatch_sites matches the static site count grepped below
 #   C6  source is under plugins/uberdev/ and exists; the reserved prefix does not
 #       collide with the prkit-projected review_pr. / simplify. namespaces
@@ -112,12 +113,22 @@ function isInt(v) { return typeof v === "number" && isFinite(v) && Math.floor(v)
 // ---------------------------------------------------------------------------
 // The normalization. Mirrored VERBATIM in scope.agent_kind_rule: an agent kind
 // is opts.label with the :#<issue> suffix and any trailing " (<tier>)" removed,
-// then ":" mapped to "." and "-" mapped to "_".
+// the per-task :t<n> and per-round :r<n> indices collapsed to :tN and :rN, then
+// ":" mapped to "." and "-" mapped to "_".
+//
+// THE COLLAPSE IS WHAT MAKES A FIXED LIST POSSIBLE. Without it the task index
+// and the fix-round index stay inside the kind, so a round-3 reviewer of task 12
+// is its own kind and the kind space is UNBOUNDED — no enumeration in the
+// manifest could satisfy C1 for a chain that actually runs, which is why the
+// only fixture that passed was one whose chain died at rung one. The indices are
+// not part of what an agent IS; they are which instance of it ran.
 // ---------------------------------------------------------------------------
 function kindOf(label) {
   var s = String(label);
   s = s.replace(/:#[0-9]+/, "");
   s = s.replace(/ \([a-z0-9_-]+\)$/, "");
+  s = s.replace(/:t[0-9]+/g, ":tN");
+  s = s.replace(/:r[0-9]+/g, ":rN");
   return s.split(":").join(".").split("-").join("_");
 }
 
@@ -126,6 +137,18 @@ function kindOf(label) {
 // dispatch site in the fleet, so one run derives the whole live set. Kept local
 // on purpose: tests/solve-fleet-workflow.test.sh owns a different contract and a
 // shared fixture would make both files fragile.
+//
+// IT MUST DRIVE THE TASK CHAIN, NOT JUST ENTER IT. This fixture used to register
+// a single-solver return for the design-tier issue and NO return for the task-1
+// implementer, so the harness default empty return failed the workspace gate and
+// the chain died at its first rung: three of the fleet dispatch sites — the
+// per-task reviewer, the per-task fix agent and the delivery agent — were never
+// reached, C1 certified an agent_kinds list that omitted all three, and the
+// six-kind anti-vacuity floor passed comfortably at ten. The guard advertised as
+// reddening when the fleet gains or loses an agent could not see any agent added
+// inside the chain, which is the drift class this whole file exists for. Task 1
+// therefore draws a REVISIONS_REQUIRED review and one fix round, and task 2 is
+// approved, so every rung of the chain executes on the way to delivery.
 // ---------------------------------------------------------------------------
 var RD = "/r/.uberdev/run/RID";
 function buildArgs() {
@@ -151,6 +174,16 @@ function solvedRec(issue, pr) {
     summary: "done", blocker: ""
   };
 }
+// A per-task rung return. workspaceReady MUST be true or the chain stops at the
+// gate before the rungs this fixture exists to reach.
+function taskRec(id, extra) {
+  var r = {
+    taskId: id, status: "DONE", commitCount: 1, workspaceReady: true,
+    summary: "s", blocker: ""
+  };
+  if (extra) { Object.keys(extra).forEach(function (k) { r[k] = extra[k]; }); }
+  return r;
+}
 function agentReturns() {
   return {
     "manifest-intake": { rc: 0, issues: [issueRec(11, "medium"), issueRec(12, "trivial")] },
@@ -160,7 +193,14 @@ function agentReturns() {
     "spec:#11": { path: RD + "/issue-11/spec.md", rc: 0, headline: "h" },
     "spec-review:#11": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
     "plan:#11": { path: RD + "/issue-11/plan.md", rc: 0, headline: "h" },
-    "solve:#11 (medium)": solvedRec(11, 901),
+    "impl:#11:t1": taskRec(1, { taskCount: 2 }),
+    "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: ["f"] },
+    "fix:#11:t1:r1": taskRec(1),
+    "review:#11:t1:r2": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
+    "impl:#11:t2": taskRec(2),
+    "review:#11:t2:r1": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
+    "deliver:#11": solvedRec(11, 901),
     "solve:#12 (trivial)": solvedRec(12, 902)
   };
 }
@@ -297,10 +337,21 @@ function rC3(t) {
     : [];
 }
 
+// A RATCHET, not a round number. The old floor of 6 was chosen when the fleet
+// was smaller and it passed comfortably at 10 — which is precisely why it could
+// not notice that the fixture had stopped reaching three of the chain rungs. The
+// value is the count derived when EVERY rung is driven, so a fixture that stops
+// reaching one reds here even if the manifest is edited to agree with the
+// shrunken set. Raise it deliberately when the fleet legitimately grows; the C1
+// comparator is what proves the two lists match, and this is what proves the
+// list was measured against a fleet that actually ran.
+var EXECUTED_KIND_FLOOR = 13;
+
 function rC4(live) {
-  return live.length >= 6
+  return live.length >= EXECUTED_KIND_FLOOR
     ? []
-    : ["the executed kind set has only " + live.length + " member(s) — the fixture is not reaching the fleet"];
+    : ["the executed kind set has only " + live.length + " member(s), below the floor of "
+       + EXECUTED_KIND_FLOOR + " — the fixture is not reaching every rung of the fleet"];
 }
 
 function rC5(t, sites) {
@@ -342,7 +393,8 @@ function copyTree() { return JSON.parse(JSON.stringify(tree)); }
   row(e3.length === 0, "Z3 C6: each declared source is a real file under plugins/uberdev/ with a non-colliding prefix" + tail(e3));
 
   var e4 = rC4(LIVE);
-  row(e4.length === 0, "Z4 C4: the executed fleet yields at least 6 agent kinds (" + LIVE.join(",") + ")" + tail(e4));
+  row(e4.length === 0, "Z4 C4: the executed fleet yields at least " + EXECUTED_KIND_FLOOR
+      + " agent kinds (" + LIVE.join(",") + ")" + tail(e4));
 
   var e5 = rC1(tree, LIVE);
   row(e5.length === 0, "Z5 C1: declared kinds UNION edge-covered kinds equals the EXECUTED kinds" + tail(e5));

@@ -8,7 +8,7 @@
       "adapter": "plugins/uberdev/lib/child-dispatch.sh",
       "note": "Every edge in `edges` is a child dispatched through the routed adapter and validated at runtime by lib/child-inputs.py against its required_inputs/optional_inputs. This manifest governs that substrate and no other. The `orchestrator.*` and `sdd.*` edges are reachable ONLY on the non-default --backend=wezterm|background transports; since RFC 0015 the default /solve and /turbo route is the Workflow fleet declared under does_not_govern."
     },
-    "agent_kind_rule": "An agent kind is a Workflow agent's opts.label with `:#<issue>` and any trailing ` (<tier>)` removed, then `:` mapped to `.` and `-` mapped to `_`. Derived by execution in tests/solve-run-tree-scope.test.sh, never by grep.",
+    "agent_kind_rule": "An agent kind is a Workflow agent's opts.label with `:#<issue>` and any trailing ` (<tier>)` removed, the per-task `:t<n>` and per-round `:r<n>` indices collapsed to `:tN` and `:rN`, then `:` mapped to `.` and `-` mapped to `_`. The indices are collapsed because they say which INSTANCE of a rung ran, not what it is: left in, a round-3 reviewer of task 12 is its own kind, the kind space is unbounded, and no enumeration below could satisfy C1 for a chain that actually runs. Derived by execution in tests/solve-run-tree-scope.test.sh, never by grep.",
     "does_not_govern": [
       {
         "substrate": "workflow-native-solve-fleet",
@@ -17,12 +17,15 @@
         "reserved_edge_prefix": "solve_fleet.",
         "dispatch_sites": 11,
         "agent_kinds": [
-          "impl.t1",
+          "deliver",
+          "fix.tN.rN",
+          "impl.tN",
           "manifest_intake",
           "plan",
           "research.codebase",
           "research.constraints",
           "research.test_coverage",
+          "review.tN.rN",
           "solve",
           "spec",
           "spec_review",
