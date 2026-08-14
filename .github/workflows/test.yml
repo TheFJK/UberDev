@@ -150,6 +150,7 @@ jobs:
           bash tests/child-inputs.test.sh && \
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
+          bash tests/solve-run-tree-scope.test.sh && \
           bash tests/child-contract-v2.test.sh && \
           bash tests/command-workspace.test.sh && \
           bash tests/production-run-tree-builder.test.sh && \
@@ -421,6 +422,7 @@ jobs:
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
           bash tests/solve-run-tree.test.sh && \
+          bash tests/solve-run-tree-scope.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \

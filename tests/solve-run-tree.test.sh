@@ -13,6 +13,14 @@ tree=json.loads(tree_path.read_text()); policy=json.loads(policy_path.read_text(
 assert tree['schema_version']==1 and tree['tree_id']=='solve-run-tree-v1'
 assert tree['root_edge_id']=='solve.issue.lead'
 assert tree['input_limits']=={'max_serialized_bytes':49152}
+# #510 -- the manifest must say what it governs and, just as importantly, what it
+# does NOT. Deliberately shallow: this file is the manifest's schema oracle, so its
+# job is to make the block undeletable. The semantic comparison against the agents
+# the Workflow fleet actually dispatches lives in tests/solve-run-tree-scope.test.sh,
+# which derives the live half BY EXECUTING the fleet script.
+scope=tree.get('scope')
+assert isinstance(scope,dict) and isinstance(scope.get('governs'),dict), 'manifest declares no scope.governs block'
+assert isinstance(scope.get('does_not_govern'),list) and scope['does_not_govern'], 'scope.does_not_govern is missing or empty'
 edges=tree['edges']; assert isinstance(edges,dict) and edges
 edge_re=re.compile(r'[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31}){0,3}$')
 for edge_id,edge in edges.items():
