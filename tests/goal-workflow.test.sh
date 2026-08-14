@@ -653,7 +653,10 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // travel to matter. This locks the passthrough and nothing more.
   //
   // Note deliberately: `rec.prsOpened` is WRITTEN here and read by nothing
-  // downstream (goal-pipeline/workflow.js :585 is its only other mention). So
+  // downstream — its only other mention in goal-pipeline/workflow.js is the
+  // `rec.prsOpened = digitsOnly(out.prsOpened)` assignment itself. Cited by
+  // identifier rather than by line number: a citation into a file this PR class
+  // keeps editing rots, and this one already had. So
   // this is an ingestion-passthrough lock, NOT a behavioural one — there is no
   // "the cycle stops treating the issue as PR-bearing" behaviour to assert
   // against, and pretending otherwise would paper over a dead consumer.

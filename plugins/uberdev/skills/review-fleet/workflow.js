@@ -1586,8 +1586,14 @@ function ceilingGate(projected) {
 function recordChild(entry, ret, phaseName) {
   if (ret === null) {
     noteNull(phaseName);
+    // The FULL row shape SKILL.md's "What the script returns" declares, with the
+    // same absent-value spellings the recorded row uses ("" for verdict, null
+    // for the two counts). A consumer must not have to tell an absent field from
+    // an empty one, and that rule covers every member of the row, not just note.
     children.push({ edgeId: entry.edge, slug: entry.slug, status: "BLOCKED",
-      resultPath: "", statusPath: "", note: "", reason: "agent returned null" });
+      verdict: "", resultPath: "", statusPath: "",
+      findingCount: null, blockerCount: null,
+      note: "", reason: "agent returned null" });
     return;
   }
   const expectedResult = childResultPath(entry.slug);
@@ -1663,11 +1669,13 @@ async function dispatchRoster(roster, phaseName, buildPrompt, agentTypeOf, schem
       for (let k = i + batch.length; k < roster.length; k++) {
         children.push({
           edgeId: roster[k].edge, slug: roster[k].slug, status: "BLOCKED",
+          // Every member carried EMPTY, exactly as the null-return row carries
+          // them: a consumer of this list must not have to tell an absent field
+          // from an empty one, and this entry never dispatched so no child ever
+          // wrote a verdict, a count or a note.
+          verdict: "",
           resultPath: "", statusPath: "",
-          // Carried EMPTY, exactly as the null-return row carries it: a
-          // consumer of this list must not have to tell an absent note from an
-          // empty one, and this entry never dispatched so no child ever wrote
-          // one.
+          findingCount: null, blockerCount: null,
           note: "",
           reason: "never dispatched — token budget exhausted mid-fanout",
         });

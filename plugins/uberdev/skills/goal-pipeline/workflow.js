@@ -425,10 +425,20 @@ function budgetExhausted() {
 // relays, the collect relay, the verdict relay — plus what the nested fleet
 // will spend per issue: its own intake relay, its PR-claim verification relay
 // (#515), the six research/design agents a medium-tier issue costs, and up to
-// IMPLEMENT_AGENT_BUDGET (24) implement-phase agents for the fleet's per-task
+// IMPLEMENT_AGENT_BUDGET implement-phase agents for the fleet's per-task
 // implementer -> reviewer -> fix chain (#508). Both fleet relays are BATCHED —
 // one each per fleet run, not per issue — so they are a flat +2, not part of
 // the per-issue term.
+//
+// 24 IS A DEFAULT, NOT A CONSTANT, AND THIS PROJECTION TRACKS THE DEFAULT ONLY.
+// The fleet declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4,
+// 96, 24) and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET
+// into the envelope this script relays verbatim, so an operator can move it
+// anywhere in 4..96. The fleet scales its OWN pre-dispatch ceiling by the
+// effective value; the per-issue term below is the arithmetic at the default and
+// does not. A raised budget therefore under-projects here — CB1 stops being the
+// breaker that binds, and the run dies against the runtime's own lifetime cap
+// with no named halt event instead. Read every number below as "at the default".
 //
 // Consequence, stated out loud rather than buried in the arithmetic: at 30
 // agents per design-tier issue it is maxAgents that binds first, not the
@@ -438,9 +448,10 @@ function budgetExhausted() {
 // — sooner once the per-cycle relay overhead above is counted. That default
 // sits just under the runtime cap deliberately, so a long run ends on a named
 // CB1 audit event instead of dying against the runtime limit; only an operator
-// who raises maxAgents above 1000 (the clamp permits up to 2000) makes the
-// runtime cap the binding one. That is the honest price of a review gate per
-// task; intra-issue agents queue rather than accelerate on a busy host.
+// who raises maxAgents above 1000 (the clamp permits up to 2000), or who raises
+// the implement budget above its default, makes the runtime cap the binding one.
+// That is the honest price of a review gate per task; intra-issue agents queue
+// rather than accelerate on a busy host.
 function projectedAgentsForCycle(issueCount) {
   // SHARED COST: solve-fleet-per-issue-agent-cost
   return 3 + maxWatchTicks + 2 + (issueCount * 30);

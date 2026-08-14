@@ -1328,9 +1328,11 @@ V_SH_NONCES="$(bash -c '
 # also carried no "Return via StructuredOutput" line at all while `S.verify`
 # REQUIRES four fields, so the child had to invent them or trip the retry.
 #
-# SKILL.md:437 asserts "Every child that produces a result file is a bound
-# child" and lists `verify` in the nonce table — these rows are what makes that
-# sentence true rather than aspirational.
+# The review-fleet SKILL.md section "Bound children — the nonce protocol"
+# asserts "Every child that produces a result file is a bound child" and lists
+# `verify` in the nonce table — these rows are what makes that sentence true
+# rather than aspirational. Anchored on the section heading, not on a line
+# number: this PR edits that document, so the number would drift (and did).
 #
 # Herestrings, never `printf | grep -q`: tests/epipe-guard.test.sh reds on a new
 # pipe probe (the guard fires on the WRITER side of a short-reading pipeline).

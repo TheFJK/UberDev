@@ -936,7 +936,12 @@ let designedIssues = 0;
 let cb1Tripped = false;   // agent-ceiling
 let cb2Tripped = false;   // budget floor reached before the batch finished
 let prProbed = 0;         // #515: PR numbers actually sent to the proof relay
-let prRelayRc = null;     // #515: the proof relay's rc, null when it never ran
+// #515: the proof relay's rc. `null` is TWO facts, not one — the assignment in
+// verifyClaims() stores null both when the relay never ran and when it ran and
+// returned a non-integer rc, so the published verification.relayRc must not be
+// read as evidence of the first. The audit trail is what separates them: a relay
+// that ran and answered unusably emits pr_proof_relay_failed beside this value.
+let prRelayRc = null;
 const nullsByPhase = {};
 const auditEvents = [];
 
@@ -1201,6 +1206,15 @@ async function runTaskChain(rec, planPath) {
     // never erased.
     taskRec.claimedStatus = (impl.status === "DONE" || impl.status === "NO_CHANGES"
       || impl.status === "BLOCKED") ? impl.status : "";
+    if (taskRec.claimedStatus === "") {
+      // A word outside the closed three-member vocabulary is dropped to the
+      // empty string above. Dropping it SILENTLY is the defect the review arm
+      // beside this one already refuses (task_review_verdict_invalid): nothing
+      // is erased, but an operator grepping auditEvents for claim mismatches
+      // would find this class missing and read its absence as agreement.
+      auditEvents.push({ event: "task_status_invalid", issue: rec.issue, task: k,
+        raw: (typeof impl.status === "string") ? impl.status : "", ts: nowIso });
+    }
     if (impl.status === "BLOCKED") {
       taskRec.status = "BLOCKED";
       stopLoop = true;
@@ -1219,6 +1233,15 @@ async function runTaskChain(rec, planPath) {
           ts: nowIso });
       }
       taskRec.status = "NO_CHANGES";
+    } else if (taskRec.claimedStatus === "NO_CHANGES") {
+      // The MIRROR of task_done_without_commit, and the direction that used to
+      // fall through the whole chain unhandled: a rung that COMMITTED while
+      // claiming it changed nothing. The record keeps the DONE default, runs the
+      // review gate and reaches delivery — correct behaviour, since the commit
+      // is real and must be reviewed, but a disagreement all the same, so it is
+      // audited rather than left to look like agreement.
+      auditEvents.push({ event: "task_no_changes_with_commit", issue: rec.issue, task: k,
+        commitCount: taskRec.commitCount, ts: nowIso });
     }
 
     // A BLOCKED task can still carry commits: the prompt forbids the
@@ -2032,11 +2055,13 @@ async function main() {
     // #515 — prove the PR claims BEFORE anything reads them. Batched at deliver
     // rather than per-issue, deliberately: ONE relay per run instead of N; no
     // new global phase() (so meta.phases and the "intake,deliver" sequence are
-    // unchanged); no opts.phase on the relay, so the `implement` count still
-    // counts exactly the solvers; and the probe sits as far in time from the
-    // push as the run allows, which is the only settle mitigation available to
-    // a script that is forbidden a clock (DR-7). The per-record log below then
-    // prints post-verification truth rather than the claim.
+    // unchanged); no opts.phase on the relay, so it is NOT accounted as
+    // implement-phase work and inherits the live `deliver` phase instead, which
+    // keeps every per-phase count meaning what it meant (the sibling note at the
+    // dispatch itself states the same decision); and the probe sits as far in
+    // time from the push as the run allows, which is the only settle mitigation
+    // available to a script that is forbidden a clock (DR-7). The per-record log
+    // below then prints post-verification truth rather than the claim.
     await verifyClaims();
     solved.forEach(function (r) {
       log("#" + r.issue + " " + r.status
