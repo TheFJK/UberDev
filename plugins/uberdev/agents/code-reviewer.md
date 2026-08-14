@@ -4,6 +4,7 @@ description: Use this agent when you need to review code for adherence to projec
 model: inherit
 color: green
 ---
+<!-- Vendored from anthropics/claude-plugins-official@4ca561fb8532594e7a5faef945e85096fcec0616 (Apache-2.0). Base evidenced by blob identity, not asserted: the bytes copied at that commit are upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869, the same object id this file carried when it was vendored here. Local deltas since: model routing set to inherit, the 0-100 confidence anchors extracted to the shared finding-confidence rubric, upstream's own output-format section replaced by the phase1-reviewer-v1 result-file contract, plus added untrusted-input handling and secret-leak reporting rules. -->
 
 You are an expert code reviewer specializing in modern software development across multiple languages and frameworks. Your primary responsibility is to find real defects in the change under review, with high precision to minimize false positives.
 

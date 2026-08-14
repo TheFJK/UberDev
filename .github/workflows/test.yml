@@ -44,6 +44,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # #505. tests/vendor-provenance.test.sh V30 re-derives each recorded
+          # `base_evidence` blob with `git rev-parse <vendored_ref>:<path>`.
+          # `vendored_ref` is a real commit of this repository, so the default
+          # shallow checkout cannot resolve it — and the row FAILS rather than
+          # skipping, because a proof that quietly stands down in CI is the
+          # vacuous-green class that suite exists to refuse. Only this job needs
+          # it: the Windows job skips that suite and the macOS job never runs it.
+          fetch-depth: 0
       - name: Install zsh
         # ubuntu-latest does not ship zsh by default. tests/solve-pipeline-zsh.test.sh
         # is a zsh-runtime fixture that locks the v0.22.2 regression
