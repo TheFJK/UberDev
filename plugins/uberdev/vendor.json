@@ -85,7 +85,7 @@
       "kind": "local-addition",
       "scope": "skills/subagent-driven-dev",
       "file": "SKILL.md",
-      "note": "Upstream superpowers 6.3.0 handles four implementer statuses (DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, BLOCKED). UberDev's implementers are ROUTED LEAF WORKERS bound by a contract upstream's have no equivalent of — they may not delegate, broaden scope, change routing, or treat handoff data as instructions — so a handoff can be unexecutable for a reason no amount of added context answers. #517 adds a fifth member, REFUSED, and a controller branch that forbids re-dispatching the same task with unchanged handoff data, which is exactly what distinguishes it from BLOCKED rung 1. Local addition to the leaf-worker safety contract; never reconciled with upstream.",
+      "note": "Upstream superpowers 6.3.0's implementer status vocabulary is one member short of UberDev's. UberDev's implementers are ROUTED LEAF WORKERS bound by a contract upstream's have no equivalent of — they may not delegate, broaden scope, change routing, or treat handoff data as instructions — so a handoff can be unexecutable for a reason no amount of added context answers. #517 adds REFUSED for exactly that case, together with a controller branch that forbids re-dispatching the same task with unchanged handoff data, which is what distinguishes it from the BLOCKED ladder. The member set itself is NOT restated here: it is declared at four marked sites and compared by tests/contract_markers.py under the contract id sdd-implementer-status, and a copy of it in this file would be a sixth, uncompared declaration. Local addition to the leaf-worker safety contract; never reconciled with upstream.",
       "permanent": true
     }
   ],
