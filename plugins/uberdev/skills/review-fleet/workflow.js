@@ -468,10 +468,12 @@ function iterSuffix() {
 }
 
 // --------------------- untrusted-input envelope (DR-5) ---------------------
-// scan-fleet and solve-fleet carry no SHARED:envelope block and both say why,
-// with an instruction to "carry one verbatim from testers the moment a prompt
-// embeds agent-returned content" (scan-fleet/workflow.js:102-111;
-// solve-fleet/workflow.js:48-56). review-fleet IS that moment: the notes a
+// scan-fleet carries no SHARED:envelope block and says why, with an
+// instruction to "carry one verbatim from testers the moment a prompt embeds
+// agent-returned content" (scan-fleet/workflow.js, its own DR-5 note).
+// solve-fleet took that instruction in #507, when it began forwarding the spec
+// reviewer's blockingFindings to the plan writer. review-fleet was the first to
+// reach that moment, and for the same reason: the notes a
 // reviewer, lens or fixer child returns are echoed into the defer-stage prompt
 // as leads, and those strings derive from PR-author-controlled diff bytes.
 //

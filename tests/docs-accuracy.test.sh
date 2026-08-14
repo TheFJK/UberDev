@@ -80,6 +80,11 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 # either alone.
 AGENTS_MD="$REPO_ROOT/AGENTS.md"
 SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
+# #507 design-chain surfaces. The fleet script is the machinery; its SKILL.md
+# and RFC 0015 both restate the chain AND the CB1 projection as prose, so T14
+# below locks the three against each other rather than pinning any one alone.
+SOLVE_FLEET_SKILL="$PLUGIN_DIR/skills/solve-fleet/SKILL.md"
+DISPATCH15_RFC="$RFC_DIR/0015-workflow-native-dispatch.md"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
@@ -91,6 +96,7 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
+         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" \
          "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
@@ -1674,6 +1680,53 @@ assert_grep "$PRECISION_RFC" 'SHARED_PROMPT_SURFACES.* is the one irreducible en
   "T13.6b §5 names SHARED_PROMPT_SURFACES and says why it is the one irreducible enumeration"
 assert_grep "$PRECISION_MINER" 'unmeasured_digests' \
   "T13.7 the RFC's unmeasured_digests symbol resolves in the shipped miner"
+
+echo
+echo "== T14: solve-fleet CB1 and the design-chain docs agree with the script (#507) =="
+# The fleet script IS the design chain; SKILL.md and RFC 0015 each restate it in
+# prose, and both restate the CB1 projection (1 + issues + N*designCount) with N
+# as a LITERAL. #507 threads the reviewer findings into the plan writer without
+# moving N — but the deferred follow-up (a plan reviewer) moves it by one, and
+# this join is what makes that edit safe: change N in the script and the two
+# docs go red instead of silently disagreeing.
+#
+# T14.1-T14.3 pass on the pre-#507 tree by construction; they are the ratchet.
+# T14.4-T14.6 are the red-first rows — they name the hand-off the script now
+# performs, which the prose described as going nowhere.
+SF_N="$(sed -n 's/.*designCount \* \([0-9][0-9]*\).*/\1/p' "$SOLVE_FLEET_JS" | tr -d '\r')"
+# EXACTLY one line, not "at least one that looks numeric": two differing
+# constants would satisfy a bare ^[0-9]+$ on the first line and then silently
+# build a two-line grep pattern that can never match. tr -d '\r' because this
+# path is not covered by .gitattributes (hooks-scoped) and the value is spliced
+# straight into a grep pattern.
+SF_N_LINES="$(grep -c '' <<<"$SF_N")"
+if [ "$SF_N_LINES" = "1" ] && grep -qE '^[0-9]+$' <<<"$SF_N"; then
+  echo "  PASS  T14.1 a single designCount * N constant resolves in the fleet script (N=$SF_N)"
+  PASS=$((PASS + 1))
+  # BRACED expansion is load bearing: the CB1 rows write the multiplication with
+  # a U+00D7 MULTIPLICATION SIGN, and a bare $SF_N followed by that byte is read
+  # as part of the variable NAME (unbound-variable abort under `set -u`).
+  assert_grep "$SOLVE_FLEET_SKILL" "${SF_N}×design-tier issues" \
+    "T14.2 SKILL.md CB1 row restates the fleet script constant N=$SF_N"
+  assert_grep "$DISPATCH15_RFC" "${SF_N}×design-tier issues" \
+    "T14.3 RFC 0015 CB1 row restates the fleet script constant N=$SF_N"
+else
+  echo "  FAIL  T14.1 designCount * N did not resolve to exactly one integer (lines=$SF_N_LINES, got: $SF_N)"
+  FAIL=$((FAIL + 1))
+fi
+
+# The chain rows must name the hand-off the script performs. Single-line needle:
+# assert_grep cannot match across an authored line wrap.
+assert_grep "$SOLVE_FLEET_SKILL" 'blocking findings are forwarded to the plan writer' \
+  "T14.4 SKILL.md chain row names the spec-review findings hand-off"
+assert_grep "$DISPATCH15_RFC" 'blocking findings are forwarded to the plan writer' \
+  "T14.5 RFC 0015 chain row names the spec-review findings hand-off"
+
+# R-2 recorded the design chain as a lossy translation of /uberdev:orchestrator.
+# It must no longer read as though the reviewer output goes nowhere.
+assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*\*R-3' \
+  'blocking findings' \
+  "T14.6 RFC 0015 R-2 records that the reviewer findings ARE threaded"
 
 echo
 echo "== Summary =="

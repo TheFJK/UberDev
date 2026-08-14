@@ -128,7 +128,7 @@ where fan-out is `parallel()` and every agent stays a leaf:
 | Tier | Chain |
 |---|---|
 | `trivial`, `small` | ONE solver agent, `isolation:"worktree"`. Byte-for-byte the same brief the detached session got. |
-| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** bounded revision round) → plan writer → ONE solver agent executing the plan. |
+| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** bounded revision round; its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507) → plan writer → ONE solver agent executing the plan. |
 
 Only the **solver** is worktree-isolated. Research and design agents are
 read-only and write to absolute paths under the run dir — an isolated
@@ -459,6 +459,18 @@ Every loss below is **printed, never silent** — in this section, in
   writer/reviewer pairs). RFC 0012 Phase 6 remains the path to full parity;
   until then `--backend=claude-bg` reaches the original pipeline (**#381 deleted
   that backend; `--backend=background` reaches it now, see §7**).
+  **#507 closed the first half of the gap**: the reviewer's
+  blocking findings are no longer collected and discarded — they are sanitised (count and
+  per-string caps enforced in-script, because a schema `maxItems` is a request to
+  the model, not a runtime constraint) and threaded into the plan writer's prompt
+  behind the `SHARED:envelope v1` carrier, so a non-APPROVE verdict tells the
+  planner WHAT is wrong instead of only that something is. Threading is
+  presence-driven, not verdict-driven: an APPROVE with caveats is forwarded too.
+  What remains missing is the **spec reviser** (a REJECT still yields no
+  corrected spec) and the **plan reviewer** (the plan is still the one design
+  artifact with no review at all); both add an agent per design-tier issue and
+  therefore move the CB1 constant, which
+  `tests/docs-accuracy.test.sh` T14 now locks against this document.
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not
