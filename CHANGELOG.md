@@ -48,6 +48,17 @@ Closes #486, #503, #504, #505, #507, #508, #509, #510, #511, #513, #514, #515, #
   (#522).
 - Nine cross-PR integration breaks that only the combined branch could surface — each green in
   isolation and red together. See the `fix(stack):` commits on this branch.
+- **Phase 2.5 could not run on a clean review.** A Phase 1 that returns APPROVE with no blocker
+  dispatches no fixer, so no disposition is published — and both of the values the controller
+  could then pass were refused: the zero-byte file it creates itself is `input-malformed` to
+  `findings-to-issues` (#556), and the empty string that agent documents as the "no disposition"
+  form (defaulting that phase's rows to `DEFERRED`) was rejected by review-fleet's defer gate as
+  `bad_disposition_path`. The gate now takes the empty value — which is the `optional_path` type
+  the run-tree policy and its callsite fixture already give both keys, and the form
+  `commands/simplify.md` and this script's own `ciDeferPrompt()` already use — while a
+  **non-empty** value must still be a safe absolute path. The empty form reaches the child
+  declared as empty rather than as a bare `=`, and the gate gained rows in both directions
+  (`W-DISP1`–`W-DISP7`), having had none.
 
 ## [0.46.0] — 2026-08-13
 

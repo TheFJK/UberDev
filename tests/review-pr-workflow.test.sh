@@ -1103,6 +1103,85 @@ assert_stage_runs fix-simplify fix "$W_NONCE1" "$W_FIX_SIMPLIFY" 1
 # THE #383 REGRESSION: the shipped Phase 2.5 stage. It is reached by BOTH
 # /review-pr and /simplify and it is the one stage no other test executes.
 assert_stage_runs defer defer "$W_NONCE1" '{}' 1
+
+# --- W-DISP: the defer stage's disposition-path gate, in BOTH directions ----
+# The gate had no row at all, and it refused EVERY empty value. That made the
+# ordinary clean review undispatchable: a Phase 1 returning APPROVE with no
+# blocker never runs a fixer, so no disposition is ever published, and the only
+# other value the controller can pass is the zero-byte file it created itself —
+# which agents/findings-to-issues.md refuses as `input-malformed` (#556). Both
+# input forms rejected, so Phase 2.5 could not run on the path it exists for.
+# `optional_path` is the type policy/solve-run-tree-v1.json and the callsite
+# fixture both give these keys, commands/simplify.md already passes them empty
+# on the routed transport, and ciDeferPrompt() in this same script hands the
+# same agent both empty. What must still bite is a NON-EMPTY unsafe value.
+w_disp_out() {  # w_disp_out PHASE1_VALUE PHASE2_VALUE -> the harness JSON line
+  stage_args defer "$W_NONCE1" \
+    "$(jq -n --arg p1 "$1" --arg p2 "$2" \
+       '{phase1DispositionPathAbs:$p1, phase2DispositionPathAbs:$p2}')"
+  node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1
+}
+
+W_DISP_BOTH="$(w_disp_out '' '')"
+if [ -z "$(jq -r '.abortReason' <<<"$W_DISP_BOTH")" ] \
+   && [ "$(jq -r '.dispatched' <<<"$W_DISP_BOTH")" = 1 ]; then
+  pass "W-DISP1 both disposition paths declared empty (the clean review) dispatches Phase 2.5"
+else
+  fail "W-DISP1 the clean-review shape was refused: $(jq -c '{abortReason,dispatched}' <<<"$W_DISP_BOTH")"
+fi
+
+W_DISP_P1="$(w_disp_out '' '/r/run/d2.json')"
+if [ -z "$(jq -r '.abortReason' <<<"$W_DISP_P1")" ] \
+   && [ "$(jq -r '.dispatched' <<<"$W_DISP_P1")" = 1 ]; then
+  pass "W-DISP2 an empty Phase 1 disposition alone (no Phase 1 fixer) dispatches"
+else
+  fail "W-DISP2 empty Phase 1 disposition refused: $(jq -c '{abortReason,dispatched}' <<<"$W_DISP_P1")"
+fi
+
+W_DISP_P2="$(w_disp_out '/r/run/d1.json' '')"
+if [ -z "$(jq -r '.abortReason' <<<"$W_DISP_P2")" ] \
+   && [ "$(jq -r '.dispatched' <<<"$W_DISP_P2")" = 1 ]; then
+  pass "W-DISP3 an empty Phase 2 disposition alone (no Phase 2 fixer) dispatches"
+else
+  fail "W-DISP3 empty Phase 2 disposition refused: $(jq -c '{abortReason,dispatched}' <<<"$W_DISP_P2")"
+fi
+
+# ANTI-VACUITY for the three rows above: relaxing the gate to accept the empty
+# string must not relax it to accept a RELATIVE one, which is the value that
+# would render into the prompt and leave the agent to improvise a location.
+W_DISP_REL1="$(w_disp_out 'run/d1.json' '/r/run/d2.json')"
+if [ "$(jq -r '.abortReason' <<<"$W_DISP_REL1")" = bad_disposition_path ] \
+   && [ "$(jq -r '.dispatched' <<<"$W_DISP_REL1")" = 0 ]; then
+  pass "W-DISP4 a relative Phase 1 disposition path still aborts bad_disposition_path"
+else
+  fail "W-DISP4 relative Phase 1 disposition path was accepted: $(jq -c '{abortReason,dispatched}' <<<"$W_DISP_REL1")"
+fi
+
+W_DISP_REL2="$(w_disp_out '/r/run/d1.json' 'run/d2.json')"
+if [ "$(jq -r '.abortReason' <<<"$W_DISP_REL2")" = bad_disposition_path ] \
+   && [ "$(jq -r '.dispatched' <<<"$W_DISP_REL2")" = 0 ]; then
+  pass "W-DISP5 a relative Phase 2 disposition path still aborts bad_disposition_path"
+else
+  fail "W-DISP5 relative Phase 2 disposition path was accepted: $(jq -c '{abortReason,dispatched}' <<<"$W_DISP_REL2")"
+fi
+
+# The child must be able to tell "declared empty" from "the controller lost it",
+# because those two demand opposite behaviour: default the phase's rows to
+# DEFERRED, or refuse. A bare `=` says neither.
+W_DISP_PROMPT="$(jq -r '.prompts[0] // ""' <<<"$W_DISP_BOTH")"
+if grep -qF 'no Phase 1 fixer ran, so no disposition exists' <<<"$W_DISP_PROMPT" \
+   && grep -qF 'no Phase 2 fixer ran, so no disposition exists' <<<"$W_DISP_PROMPT"; then
+  pass "W-DISP6 an empty disposition path reaches the child DECLARED empty, not as a bare ="
+else
+  fail "W-DISP6 the empty disposition path rendered with no stated meaning"
+fi
+
+W_DISP_PROMPT_FULL="$(jq -r '.prompts[0] // ""' <<<"$W_DISP_P2")"
+if grep -qF 'no Phase 1 fixer ran, so no disposition exists' <<<"$W_DISP_PROMPT_FULL"; then
+  fail "W-DISP7 the declared-empty marker is emitted for a NON-empty path, so W-DISP6 proves nothing"
+else
+  pass "W-DISP7 a supplied disposition path carries no declared-empty marker"
+fi
 assert_stage_runs ci-classify ci-classify "$W_NONCE1" "$W_CI_COMMON" 1
 assert_stage_runs ci-fix-code ci-fix "$W_NONCE1" \
   "$(printf '%s' "$W_CI_COMMON" | jq '. + {ciFixerEdgeId:"review_pr.ci.fix_code",

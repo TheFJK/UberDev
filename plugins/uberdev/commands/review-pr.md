@@ -3087,11 +3087,20 @@ EOF_VERIFY_AUDIT
     if [ -s "$RESEARCH_DIR_ABS/phase1-verification.json" ]; then
       DEFER_VERIFICATION_ARGS=(verification_path "$(review_json_string "$RESEARCH_DIR_ABS/phase1-verification.json")")
     fi
+    # Same declared-empty rule as the Workflow transport below, for the same
+    # reason: `optional_path` is the type both this edge's policy entry
+    # (policy/solve-run-tree-v1.json) and its callsite fixture give these two,
+    # `commands/simplify.md` already passes them empty on this very transport,
+    # and a zero-byte file behind a non-empty path is what the child refuses.
+    DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
+    [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
+    DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"
+    [ -s "$PHASE2_DISPOSITION_PATH" ] || DEFER_PHASE2_DISPOSITION_PATH=''
     DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings \
       phase1_path "$(review_json_string "$RESEARCH_DIR_ABS/post-impl-review-final.md")" \
       phase2_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
-      phase1_disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
-      phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
+      phase1_disposition_path "$(review_json_string "$DEFER_PHASE1_DISPOSITION_PATH")" \
+      phase2_disposition_path "$(review_json_string "$DEFER_PHASE2_DISPOSITION_PATH")" \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       ${DEFER_VERIFICATION_ARGS[@]+"${DEFER_VERIFICATION_ARGS[@]}"} \
       pr_number "$PR_NUMBER")"
@@ -3146,6 +3155,21 @@ EOF_VERIFY_AUDIT
     DEFER_VERIFICATION_PATH=''
     [ -s "$REVIEW_FLEET_RUN_DIR/phase1-verification.json" ] \
       && DEFER_VERIFICATION_PATH="$REVIEW_FLEET_RUN_DIR/phase1-verification.json"
+    # A phase that dispatched no fixer published no disposition, and the file the
+    # controller created for one is still ZERO BYTES. That is not a disposition
+    # and must not be handed over as if it were: `agents/findings-to-issues.md`
+    # refuses a non-empty path at a zero-byte file as `input-malformed` (#556),
+    # because its Step 3 contract forbids falling back to DEFERRED for a path it
+    # was given but cannot parse. The SAME contract takes the empty string as the
+    # declared "no disposition" form and defaults that phase's rows to DEFERRED.
+    # So the emptiness travels as the empty string, which is the difference
+    # between a phase that deferred everything and a run that lost its record.
+    # This is reached on every clean review: Phase 1 APPROVE with no blocker
+    # dispatches no fixer at all.
+    DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
+    [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
+    DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"
+    [ -s "$PHASE2_DISPOSITION_PATH" ] || DEFER_PHASE2_DISPOSITION_PATH=''
     REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
     review_fleet_bind_persistence "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
       "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
@@ -3166,8 +3190,8 @@ EOF_VERIFY_AUDIT
       reviewIteration="$REVIEW_ITERATION" \
       phase1PathAbs="$DEFER_PHASE1_PATH" \
       phase2PathAbs="$DEFER_PHASE2_PATH" \
-      phase1DispositionPathAbs="$PHASE1_DISPOSITION_PATH" \
-      phase2DispositionPathAbs="$PHASE2_DISPOSITION_PATH" \
+      phase1DispositionPathAbs="$DEFER_PHASE1_DISPOSITION_PATH" \
+      phase2DispositionPathAbs="$DEFER_PHASE2_DISPOSITION_PATH" \
       verificationPathAbs="$DEFER_VERIFICATION_PATH" \
       maxNew="$DEFER_MAX_NEW" \
       maxAgents=40 \

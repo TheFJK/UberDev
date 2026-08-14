@@ -1097,8 +1097,21 @@ function f2iPrompt(nonce) {
   lines.push("  phase1_path              = " + phase1PathAbs
     + (phase1PathAbs ? "" : "   (empty on purpose — no Phase 1 ran for this command)"));
   lines.push("  phase2_path              = " + phase2PathAbs);
-  lines.push("  phase1_disposition_path  = " + phase1DispositionPathAbs);
-  lines.push("  phase2_disposition_path  = " + phase2DispositionPathAbs);
+  // An empty disposition path is DECLARED empty, never missing — the same
+  // distinction ciDeferPrompt() draws for its own three empty inputs. It means
+  // that phase dispatched no fixer, so no disposition was published, and
+  // agents/findings-to-issues.md Step 3 then classifies every row of that phase
+  // DEFERRED. Rendering a bare `=` would leave the child to guess between "the
+  // controller lost it" and "there is none", which is exactly the improvisation
+  // the defer-stage gate refuses a relative path to prevent.
+  lines.push("  phase1_disposition_path  = " + phase1DispositionPathAbs
+    + (phase1DispositionPathAbs ? ""
+      : "   (declared empty — no Phase 1 fixer ran, so no disposition exists; "
+        + "classify every Phase 1 row DEFERRED)"));
+  lines.push("  phase2_disposition_path  = " + phase2DispositionPathAbs
+    + (phase2DispositionPathAbs ? ""
+      : "   (declared empty — no Phase 2 fixer ran, so no disposition exists; "
+        + "classify every Phase 2 row DEFERRED)"));
   if (verificationPathAbs) {
     lines.push("  verification_path        = " + verificationPathAbs);
   }
@@ -1817,14 +1830,29 @@ async function main() {
         // means the controller skipped a proof, not that the phase was absent.
         return abort("bad_phase1_path", phase1PathAbs);
       }
-      // Both disposition paths are REQUIRED inputs of review_pr.defer.findings
-      // (commands/review-pr.md:25). The fix stage gates every authority path it
-      // interpolates; leaving these two ungated let an empty or relative value
-      // render into the prompt and left the agent to improvise a location.
-      if (!isSafeAbsPath(phase2DispositionPathAbs)) {
+      // Both disposition paths are REQUIRED KEYS of review_pr.defer.findings
+      // (commands/review-pr.md:25), and a NON-EMPTY value must be a safe
+      // absolute path: the fix stage gates every authority path it interpolates,
+      // and leaving these two ungated let a relative value render into the
+      // prompt and left the agent to improvise a location.
+      //
+      // The EMPTY value is not a missing one. agents/findings-to-issues.md
+      // declares each of these as "a disposition path, or an empty string", and
+      // its Step 3 gives the empty form a meaning: every row of that phase is
+      // classified DEFERRED. ciDeferPrompt() in this same file already hands the
+      // same agent both paths empty and says so in words. Refusing the form here
+      // did not make the pipeline stricter, it made the ORDINARY CLEAN REVIEW
+      // undispatchable: a Phase 1 that returns APPROVE with no blocker never
+      // dispatches a fixer, so no disposition is ever published, and the only
+      // other value the controller can pass is the zero-byte file it created
+      // itself -- which the child then refuses as `input-malformed` (#556).
+      // Neither input form was accepted, so Phase 2.5 could not run at all on
+      // the very path it exists to serve.
+      if (phase2DispositionPathAbs !== "" && !isSafeAbsPath(phase2DispositionPathAbs)) {
         return abort("bad_disposition_path", phase2DispositionPathAbs);
       }
-      if (mode === "review-pr" && !isSafeAbsPath(phase1DispositionPathAbs)) {
+      if (mode === "review-pr" && phase1DispositionPathAbs !== ""
+          && !isSafeAbsPath(phase1DispositionPathAbs)) {
         return abort("bad_disposition_path", phase1DispositionPathAbs);
       }
       // ONE bound child, so ONE nonce. The pool is gated here exactly as the
