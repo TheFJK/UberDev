@@ -668,8 +668,8 @@ and a field can be re-derived. Three things now re-derive it, split by cost:
   40-hex `vendored_ref`, a `blobs` map whose key set **equals** the component's
   `files[]` with 40-hex values, and a 40-hex `vendored_at_commit` behind it.
   It validates what is *declared* and refuses over an empty set; it deliberately
-  does **not** demand universal coverage, because that would red the four
-  superpowers components whose backfill #503/#504 own, and a check that reds on
+  does **not** demand universal coverage, because that would red every
+  `obra/superpowers` component — none of them carries an evidence record — and a check that reds on
   somebody else's unstarted work gets suppressed. No `git`, no `subprocess`, no
   socket — that is what keeps §2.3's offline guarantee structural.
 - **`tests/vendor-provenance.test.sh` V35/V36/V36b** — the offline HALF of the
@@ -722,8 +722,9 @@ republication. That is its own change, and it is filed separately.
 Nothing. #503's five `track` skills, #504's five `fork` skills and these six
 agents land in one stack, so **no component reads `"unknown"`** and §7's
 successor list is closed. `C-EVIDENCE` still covers only what declares
-`base_evidence`; extending that record to the ten skill components is the
-next piece of work, not a residual of this one.
+`base_evidence`; extending that record to the fourteen `obra/superpowers`
+skill components — none of which carries one — is the next piece of work, not a
+residual of this one.
 
 ---
 

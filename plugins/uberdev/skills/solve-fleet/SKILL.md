@@ -148,7 +148,9 @@ Degradation inside the task chain is recorded, never silent:
 `task_implementer_null`, `task_implementer_blocked`, `task_review_null` (the
 task is marked UNREVIEWED and the loop **continues** — a skipped agent must not
 strand committed work), `task_review_rejected`, `task_fix_rounds_exhausted`,
-`task_fixer_null`, `task_count_clamped`, `workspace_not_ready`.
+`task_fixer_null`, `task_fix_unreviewed` (a CB3 cut-off taken straight after
+a fix round, where the last verdict is still REVISIONS_REQUIRED and the
+re-review never ran), `task_count_clamped`, `workspace_not_ready`.
 
 ## Return value
 

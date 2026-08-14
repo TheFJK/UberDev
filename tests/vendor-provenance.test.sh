@@ -1369,9 +1369,10 @@ cat > "$BASE_RATCHET_PY" <<'PY'
 
 Deliberately NOT inside vendor-check.py's `C-EVIDENCE`. That check validates
 every `base_evidence` object that is DECLARED and refuses over an empty set;
-demanding universal coverage there would instantly red the four superpowers
-components pinned at e7a2d16 whose evidence backfill is a separate change
-(RFC 0019 §7 / #503 / #504). Register-derived coverage assertions live here,
+demanding universal coverage there would instantly red every `obra/superpowers`
+component — all of them pinned at e7a2d16 and none carrying an evidence record,
+because their base was established by local diff rather than by blob identity.
+That backfill is a separate change (RFC 0019 §7). Register-derived assertions live here,
 where V1/V4/V8/V9/V24 already put them.
 """
 import json, re, sys
@@ -1441,13 +1442,13 @@ blob_identity() {
 }
 
 # V35 — every recorded blob oid re-derives from git at its vendored_ref.
-V30_OUT=""
+V35_OUT=""
 if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   no "V35 $REPO_ROOT is not a git checkout — the blob-identity proof cannot run here"
-elif V30_OUT="$(blob_identity "$REGISTER")"; then
-  ok "V35 every recorded base blob re-derives from git at its vendored_ref ($V30_OUT file(s))"
+elif V35_OUT="$(blob_identity "$REGISTER")"; then
+  ok "V35 every recorded base blob re-derives from git at its vendored_ref ($V35_OUT file(s))"
 else
-  no "V35 a recorded base blob does not re-derive: $V30_OUT"
+  no "V35 a recorded base blob does not re-derive: $V35_OUT"
 fi
 
 # V36 — the coverage ratchet (see the docstring in $BASE_RATCHET_PY).
@@ -1528,7 +1529,7 @@ echo "== V37-V39: C-EVIDENCE — a declared base_evidence object is well-formed 
 # SCOPE, stated because getting it wrong is the obvious mistake: it validates
 # every `base_evidence` object that is DECLARED, and refuses over an empty set.
 # It does NOT demand that every pinned component carry one. Demanding that would
-# instantly red the four superpowers components pinned at `e7a2d16`, whose
+# instantly red every `obra/superpowers` component pinned at `e7a2d16`, whose
 # evidence backfill RFC 0019 §7 assigns to #503/#504 — a check that reds on work
 # somebody else owns gets suppressed, and a suppressed check is not a check. The
 # coverage ratchet for what #505 itself pinned lives in V36.

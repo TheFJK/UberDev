@@ -535,7 +535,7 @@ def check_evidence(register, failures):
 
     This check owns the SHAPE of that record and nothing else. Re-deriving the
     oids is deliberately elsewhere, split by what it costs: the offline half in
-    `tests/vendor-provenance.test.sh` V30 (git, no network), the upstream half
+    `tests/vendor-provenance.test.sh` V35/V36 (git, no network), the upstream half
     in `vendor-drift.py --verify-bases` (network). This file stays a pure file
     reader — no `git`, no `subprocess`, no socket — because that is what makes
     RFC 0019 §2.3's offline guarantee structural instead of a convention, and
@@ -543,12 +543,15 @@ def check_evidence(register, failures):
     provenance.
 
     SCOPE. It validates every object that is DECLARED and refuses over an empty
-    set. It does NOT demand universal coverage: the four superpowers components
-    pinned at `e7a2d16` carry no evidence yet, and their backfill is #503/#504's
-    to make (RFC 0019 §7). A check that reds on somebody else's unstarted work
-    gets suppressed, and a suppressed check is not a check. Coverage of what
-    #505 itself pinned is ratcheted in the test suite, beside the other
-    register-derived assertions.
+    set. It does NOT demand universal coverage, and the boundary is stated as a
+    RULE rather than a count because a count goes stale the next time the
+    register moves: the record exists exactly where the base had to be measured
+    to exist at all — the `claude-plugins-official` agent components above — and
+    no `obra/superpowers` component declares one. Extending the record to those
+    is a separate change (RFC 0019 §7 and its amendments); a check that reds on
+    somebody else's unstarted work gets suppressed, and a suppressed check is
+    not a check. Coverage of what #505 itself pinned is ratcheted in the test
+    suite, beside the other register-derived assertions.
     """
     declared = 0
     for component in register.get("components", []):

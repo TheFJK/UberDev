@@ -126,10 +126,22 @@ const solveTimeoutS = clampInt(CFG.solveTimeoutS, 1, 86400, 3600);
 // than re-minting them. The helper name is greppable and byte-stable; a line
 // range into a file this PR class keeps growing is not.
 const FIX_ROUNDS = 3;
-// The plan-contract ceiling (planPrompt) AND the S.task.taskCount clamp: one
-// number, two consumers. A plan the planner split into more parts than this
-// gets clamped and audited, never trusted raw.
+// The plan-contract ceiling (planPrompt) AND the ceiling on how many rungs a
+// chain may RUN: one number, two consumers. A plan the planner split into more
+// parts than this is clamped and audited, never trusted raw — and the tasks
+// past the ceiling are recorded as never attempted rather than dropped, which
+// is what the separate recording bound below exists for.
 const MAX_TASKS = 12;
+// How many task ROWS a chain will record — deliberately NOT the same number as
+// how many rungs it may run. MAX_TASKS bounds the RUN (and with it the agent
+// spend); this bounds the ledger's account of a plan that declared MORE tasks
+// than the chain may run, so an absurd agent-reported count cannot inflate the
+// result line into something nothing can read. It caps the recording only,
+// never the reporting: a plan larger than this still records rows past
+// MAX_TASKS, so the ledger is still incomplete, the never-attempted tail is
+// still named, and `planned` on the clamp event shows the row count itself was
+// capped.
+const MAX_PLAN_TASKS_RECORDED = 64;
 // SHARED COST: solve-fleet-per-issue-agent-cost
 // The CB3 LIVE per-issue cap and the CB1 PROJECTION term — one constant, so the
 // guard the loop actually enforces and the number the ceiling is computed from
@@ -339,8 +351,10 @@ const S = {
   },
   // One task of a plan, as reported by its implementer or by a fix-round agent.
   // `taskCount` is the ONLY structural fact the script takes from an agent, and
-  // it is an integer the script re-clamps to 1..MAX_TASKS — the same class as
-  // the digit-validated issue numbers already trusted here, not a free string.
+  // it is an integer the script re-clamps itself — to 1..MAX_TASKS for how many
+  // rungs may run, and to 1..MAX_PLAN_TASKS_RECORDED for how many tasks it
+  // reports the plan as having. Same class as the digit-validated issue numbers
+  // already trusted here, not a free string.
   task: {
     type: "object", additionalProperties: false,
     required: ["taskId", "status", "commitCount", "workspaceReady"],
@@ -1015,7 +1029,8 @@ function budgetExhausted() {
 async function runTaskChain(rec, planPath) {
   const wt = issueWorktree(rec.issue);
   const tasks = [];
-  let taskCount = 1;        // provisional until task 1 reports the real count
+  let taskCount = 1;        // rungs this chain may RUN; provisional until task 1 reports
+  let plannedTaskCount = 1; // tasks the PLAN declares; >= taskCount, and what the ledger accounts for
   let implSpent = 0;        // CB3: a LIVE counter of implement-phase agents for THIS issue
   let budgetTripped = false;
   let stopLoop = false;
@@ -1087,15 +1102,34 @@ async function runTaskChain(rec, planPath) {
           + "the plan");
         taskCountUnknown = true;
       } else {
-        const clamped = clampInt(impl.taskCount, 1, MAX_TASKS, 1);
-        if (impl.taskCount !== clamped) {
+        // TWO different facts live in this one reported number, and collapsing
+        // them into one is how a plan bigger than the ceiling loses its tail:
+        // how many rungs this chain may RUN (bounded by MAX_TASKS, which is
+        // what bounds the agent spend) and how many tasks the plan HAS (which
+        // the ledger below has to account for). Clamping both to the ceiling
+        // made a 14-task plan report itself as a 12-task plan — the SKIPPED
+        // backfill is bounded by that same number, so tasks 13 and 14 were
+        // recorded nowhere, the ledger came out COMPLETE, and the delivery
+        // agent was told every planned task was committed and reviewed while
+        // putting `Closes #N` in the PR body. Every other early stop feeds the
+        // partial-delivery arm; the ceiling has to feed it as well.
+        const declared = clampInt(impl.taskCount, 1, MAX_PLAN_TASKS_RECORDED, 1);
+        const runnable = (declared > MAX_TASKS) ? MAX_TASKS : declared;
+        if (impl.taskCount !== runnable) {
           auditEvents.push({
             event: "task_count_clamped", issue: rec.issue,
-            raw: impl.taskCount, clamped: clamped, ts: nowIso,
+            raw: impl.taskCount, clamped: runnable, planned: declared, ts: nowIso,
           });
         }
-        taskCount = clamped;
-        log("#" + rec.issue + ": the plan declares " + taskCount + " task(s); working in " + wt);
+        taskCount = runnable;
+        plannedTaskCount = declared;
+        log("#" + rec.issue + ": the plan declares " + plannedTaskCount + " task(s)"
+          + (plannedTaskCount > taskCount
+            ? " — more than the " + MAX_TASKS + "-task ceiling this chain may run, so task(s) "
+              + (taskCount + 1) + ".." + plannedTaskCount + " are recorded as NEVER ATTEMPTED and "
+              + "delivery is told so"
+            : "")
+          + "; working in " + wt);
       }
     }
 
@@ -1147,12 +1181,29 @@ async function runTaskChain(rec, planPath) {
       let fixes = 0;
       while (true) {
         if (implSpent >= IMPLEMENT_AGENT_BUDGET) {
-          // Cut off BEFORE its review ever ran: committed, and honestly
-          // reported unreviewed rather than silently indistinguishable from a
-          // task that had nothing to review.
           budgetTripped = true;
           stopLoop = true;
-          if (taskRec.reviewVerdict === "NOT_APPLICABLE") taskRec.reviewVerdict = "UNREVIEWED";
+          if (taskRec.reviewVerdict === "NOT_APPLICABLE") {
+            // Cut off BEFORE its review ever ran: committed, and honestly
+            // reported unreviewed rather than silently indistinguishable from a
+            // task that had nothing to review.
+            taskRec.reviewVerdict = "UNREVIEWED";
+          } else if (taskRec.reviewVerdict !== "APPROVE") {
+            // Cut off AFTER a fix round, with the last verdict on record still
+            // demanding revisions: the fixer amended the commit and the
+            // re-review that fix round exists to earn never ran. Rewriting only
+            // the not-applicable sentinel recorded NOTHING on this arm — the
+            // task stayed DONE with a stale REVISIONS_REQUIRED verdict, matched
+            // none of the ledger's three buckets, and a chain cut off on its
+            // last task therefore reported itself COMPLETE: the delivery agent
+            // was told in words that every task passed its review gate, and
+            // /goal ingested the resulting PR number. Known blocking findings
+            // whose fix nothing re-checked are BLOCKED, recorded exactly as the
+            // sibling guard below records findings that were never addressed.
+            taskRec.status = "BLOCKED";
+            auditEvents.push({ event: "task_fix_unreviewed", issue: rec.issue, task: k,
+              round: r, verdict: taskRec.reviewVerdict, ts: nowIso });
+          }
           break;
         }
         implSpent += 1;
@@ -1259,18 +1310,26 @@ async function runTaskChain(rec, planPath) {
   }
 
   // Tasks the chain never reached are RECORDED, not dropped: a silently shorter
-  // tasks[] would read as "the plan was smaller than it was".
-  for (let s = tasks.length + 1; s <= taskCount; s++) {
+  // tasks[] would read as "the plan was smaller than it was". The bound is the
+  // PLAN's size, never the run ceiling — a task past the ceiling was never
+  // attempted either, and bounding this loop by taskCount is exactly what let
+  // those tasks vanish out of the ledger.
+  for (let s = tasks.length + 1; s <= plannedTaskCount; s++) {
     tasks.push({ id: s, status: "SKIPPED", reviewVerdict: "NOT_APPLICABLE", fixRounds: 0,
       commitCount: 0, claimedStatus: "" });
   }
 
   if (budgetTripped) {
+    // Counted, not assumed: a budget spent on the LAST task of a plan leaves no
+    // remaining task at all, and a line that says some were recorded SKIPPED
+    // when none were is the same kind of unearned claim this chain exists to
+    // stop making.
+    const skippedCount = tasks.filter(function (t) { return t.status === "SKIPPED"; }).length;
     auditEvents.push({ event: "implement_budget_exhausted", issue: rec.issue,
-      spent: implSpent, cap: IMPLEMENT_AGENT_BUDGET, ts: nowIso });
+      spent: implSpent, cap: IMPLEMENT_AGENT_BUDGET, skipped: skippedCount, ts: nowIso });
     log("CB3: issue #" + rec.issue + " spent its whole implement-phase budget of "
-      + IMPLEMENT_AGENT_BUDGET + " agent(s) — the remaining task(s) are recorded SKIPPED. Delivery "
-      + "still runs on what is already committed.");
+      + IMPLEMENT_AGENT_BUDGET + " agent(s) — " + skippedCount + " remaining task(s) recorded "
+      + "SKIPPED. Delivery still runs on what is already committed.");
   }
 
   const totalCommits = tasks.reduce(function (n, t) { return n + t.commitCount; }, 0);

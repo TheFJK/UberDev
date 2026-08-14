@@ -1383,19 +1383,26 @@ function probedNums(record) {
   out.tcBadPartialTold = !!(deliverY
     && deliverY.prompt.indexOf("PARTIAL implementation of 1 planned task(s)") >= 0);
 
-  // Run Z2 — OUT OF RANGE, the clamp arm beside the stop. A count ABOVE
-  // MAX_TASKS is a correctable value rather than an unknown one: it is clamped,
-  // the correction is audited, and the loop runs the clamped number of rungs.
-  // Canned returns are supplied for all 12 so the run exercises the ceiling
-  // itself instead of colliding with the workspace gate on an uncanned rung 13.
+  // Run Z2 — OVER THE CEILING, the clamp arm beside the stop. A count ABOVE
+  // MAX_TASKS is a correctable value rather than an unknown one: the chain runs
+  // the ceiling and audits the correction. But the tasks PAST the ceiling were
+  // never attempted, and the SKIPPED backfill used to be bounded by the same
+  // clamped number, so they were recorded nowhere at all: the ledger's three
+  // lists came out empty, ledger.complete came out true, and the delivery agent
+  // was told all 12 task(s) of a FOURTEEN-task plan were committed and reviewed
+  // — into a PR body carrying `Closes #11`, which /goal then ingests. Every
+  // other early stop feeds the partial-delivery arm; this one bypassed it.
+  // Canned returns are supplied for all 12 runnable rungs so the run exercises
+  // the ceiling itself instead of colliding with the workspace gate on an
+  // uncanned rung 13.
   //
   // The implement budget is RAISED so CB3 cannot be what stops this loop. At
   // the default of 24 a 12-task plan spends its budget exactly (2 agents per
   // clean task), so deleting the clamp entirely would still stop at rung 12 —
   // on the budget, not on MAX_TASKS — and the ceiling row below would be a
-  // vacuous green. With headroom, an unclamped 99 reaches rung 13 and reds it.
+  // vacuous green. With headroom, an unclamped 14 reaches rung 13 and reds it.
   const z2Returns = Object.assign({}, mediumReturns(),
-    { "impl:#11:t1": task(1, { taskCount: 99 }) });
+    { "impl:#11:t1": task(1, { taskCount: 14 }) });
   for (let zi = 2; zi <= 12; zi += 1) {
     z2Returns["impl:#11:t" + zi] = task(zi);
     z2Returns["review:#11:t" + zi + ":r1"] = approve();
@@ -1407,19 +1414,106 @@ function probedNums(record) {
   out.tcClampAudit = !!zEvent;
   out.tcClampRaw = zEvent ? zEvent.raw : null;
   out.tcClampTo = zEvent ? zEvent.clamped : null;
+  // The two numbers the clamp used to conflate: how many rungs may RUN
+  // (`clamped`) and how many tasks the plan HAS (`planned`). The sentinel keeps
+  // an ABSENT field legible — an undefined would render as a parse error rather
+  // than as the missing field it is (same idiom as tcAbsentRaw).
+  out.tcClampPlanned = (zEvent && zEvent.planned !== undefined) ? zEvent.planned : "NO-FIELD";
   out.tcClampImplRungs = labels(recZ).filter(function (l) { return /^impl:#11:t/.test(l || ""); }).length;
   out.tcClampTotal = resZ ? resZ.tasksTotal : null;
   out.tcClampNotStopped = !!(resZ && !resZ.auditEvents.some(function (e) {
     return e.event === "task_count_missing"; }));
-  // chainComplete only exists on the DELIVERED record, so this row proves both
-  // that delivery ran and that a clamped-but-usable count leaves the chain
-  // whole — the arm the absent-count stop must not swallow.
   const z11 = resZ ? resZ.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  // chainComplete only exists on the DELIVERED record, so these rows prove both
+  // that delivery ran and that it ran as a PARTIAL one: the two tasks past the
+  // ceiling are recorded, named to the delivery agent, and reported to /goal.
   out.tcClampComplete = z11 ? z11.chainComplete : null;
+  out.tcClampSkipped = z11 && Array.isArray(z11.tasks)
+    ? z11.tasks.filter(function (t) { return t.status === "SKIPPED"; })
+      .map(function (t) { return t.id; }).join(",")
+    : null;
+  const deliverZ = recZ.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  const deliverZText = deliverZ ? deliverZ.prompt : "";
+  out.tcClampPartialTold = deliverZText.indexOf("PARTIAL implementation of 14 planned task(s)") >= 0
+    && deliverZText.indexOf("Never attempted (task(s) after the chain stopped): 13, 14.") >= 0
+    && deliverZText.indexOf("The implementation is DONE and reviewed") < 0;
+  out.tcClampPartialEvent = !!(resZ && resZ.auditEvents.some(function (e) {
+    return e.event === "partial_delivery" && e.issue === 11
+      && Array.isArray(e.skipped) && e.skipped.join(",") === "13,14"; }));
+
+  // Run Z4 — the RECORD CAP beside the ceiling. Recording one row per declared
+  // task is what makes the dropped tail visible, so a wild count must not be
+  // able to inflate the result line without bound. The recorded plan total is
+  // itself capped (MAX_PLAN_TASKS_RECORDED = 64) — and the cap bounds the
+  // RECORDING only: the chain still reports itself incomplete, and the clamp
+  // event still says what happened by carrying a `planned` below `raw`.
+  const z4Returns = Object.assign({}, z2Returns,
+    { "impl:#11:t1": task(1, { taskCount: 5000 }) });
+  const recZ4 = await run(buildArgs(null, { implementBudget: 96 }), { agentReturns: z4Returns });
+  const resZ4 = resultOf(recZ4);
+  const z4Event = resZ4 ? resZ4.auditEvents.filter(function (e) {
+    return e.event === "task_count_clamped"; })[0] : null;
+  out.tcCapRaw = z4Event ? z4Event.raw : null;
+  out.tcCapTo = z4Event ? z4Event.clamped : null;
+  out.tcCapPlanned = (z4Event && z4Event.planned !== undefined) ? z4Event.planned : "NO-FIELD";
+  out.tcCapTotal = resZ4 ? resZ4.tasksTotal : null;
+  out.tcCapImplRungs = labels(recZ4).filter(function (l) { return /^impl:#11:t/.test(l || ""); }).length;
+  const z4r11 = resZ4 ? resZ4.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.tcCapComplete = z4r11 ? z4r11.chainComplete : null;
+
+  // ------------------------------------------------------------------ r3-1
+  // Run CF — CB3 cutting a task off AFTER a fix round landed. The fixer spends
+  // the last unit of the budget, the loop re-enters its review gate and stops,
+  // and the re-review that fix round exists to earn never runs. The cut-off arm
+  // used to rewrite only the not-applicable sentinel, so a task whose last
+  // verdict was REVISIONS_REQUIRED kept status DONE and matched NONE of the
+  // ledger's three buckets: on the LAST task of a plan the chain therefore
+  // called itself complete, the delivery agent was told in words that every
+  // task passed its review gate, and chainComplete:true went to /goal with a
+  // PR body carrying `Closes #11`.
+  //
+  // Budget 4 (the clamp floor), spent exactly: task 1 commits nothing, so it
+  // costs its implementer alone and skips the gate (1); task 2 spends its
+  // implementer (2), one REVISIONS_REQUIRED review (3) and one fix round (4).
+  const cfReturns = Object.assign({}, mediumReturns(), {
+    "impl:#11:t1": task(1, { taskCount: 2, status: "NO_CHANGES", commitCount: 0 }),
+    "impl:#11:t2": task(2),
+    "review:#11:t2:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: ["f"] },
+    "fix:#11:t2:r1": task(2),
+  });
+  const recCF = await run(buildArgs(null, { implementBudget: 4 }), { agentReturns: cfReturns });
+  const resCF = resultOf(recCF);
+  // The PREMISE of the run, asserted rather than assumed: the fixer really did
+  // run and its re-review really was refused. Without both, every row below
+  // would be testing some other path.
+  out.cfFixRan = labels(recCF).indexOf("fix:#11:t2:r1") >= 0;
+  out.cfNoReReview = labels(recCF).indexOf("review:#11:t2:r2") < 0
+    && !!(resCF && resCF.auditEvents.some(function (e) {
+      return e.event === "implement_budget_exhausted"; }));
+  out.cfBlocked = resCF ? resCF.tasksBlocked : null;
+  // Not counted as unreviewed too: the sentinel is reserved for a task cut off
+  // before its FIRST review ever ran (Run U), and one state must not fill two
+  // buckets.
+  out.cfUnreviewed = resCF ? resCF.tasksUnreviewed : null;
+  out.cfAudit = !!(resCF && resCF.auditEvents.some(function (e) {
+    return e.event === "task_fix_unreviewed" && e.issue === 11 && e.task === 2
+      && e.verdict === "REVISIONS_REQUIRED"; }));
+  const cf11 = resCF ? resCF.results.filter(function (r) { return r.issue === 11; })[0] : null;
+  out.cfTasks = cf11 && Array.isArray(cf11.tasks)
+    ? cf11.tasks.map(function (t) { return t.id + ":" + t.status + ":" + t.reviewVerdict; }).join(",")
+    : null;
+  out.cfChainComplete = cf11 ? cf11.chainComplete : null;
+  const deliverCF = recCF.agentCalls.find(function (c) { return c.label === "deliver:#11"; });
+  const deliverCFText = deliverCF ? deliverCF.prompt : "";
+  out.cfDelivered = !!deliverCF;
+  out.cfPartialTold = deliverCFText.indexOf("PARTIAL implementation of 2 planned task(s)") >= 0
+    && deliverCFText.indexOf("BLOCKED task(s): 2.") >= 0
+    && deliverCFText.indexOf("The implementation is DONE and reviewed") < 0;
 
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
-  out.newViolations = [recW, recX, recY, recZ]
+  out.newViolations = [recW, recX, recY, recZ, recZ4, recCF]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -1682,12 +1776,34 @@ else
   check tcBadPartialTold true     "B161 delivery is told the same partial truth"
 
   check tcClampAudit true         "B162 an OUT-OF-RANGE count is clamped, and the correction is audited"
-  check tcClampRaw 99             "B163 the clamp event carries the raw count"
+  check tcClampRaw 14             "B163 the clamp event carries the raw count"
   check tcClampTo 12              "B164 ...and the MAX_TASKS value it was clamped to"
-  check tcClampImplRungs 12       "B165 the loop honours the clamped ceiling, never the raw 99"
-  check tcClampTotal 12           "B166 every clamped task is accounted for in the result"
+  check tcClampImplRungs 12       "B165 the loop honours the clamped ceiling, never the raw 14"
+  check tcClampPlanned 14         "B166 the RUN ceiling and the PLAN size are recorded as two numbers, not one"
+  check tcClampTotal 14           "B166b every task the plan declared is accounted for — including the ones past the ceiling"
+  check tcClampSkipped '"13,14"'  "B166c the tasks past the ceiling are recorded SKIPPED, never dropped"
   check tcClampNotStopped true    "B167 a correctable count does NOT take the absent-count stop"
-  check tcClampComplete true      "B168 the clamped chain delivers, and delivers as a COMPLETE one"
+  check tcClampComplete false     "B168 a plan larger than the ceiling delivers as a PARTIAL chain — /goal can tell 12 of 14 tasks landed"
+  check tcClampPartialTold true   "B168b delivery is told the total is 14 and named the tasks never attempted — never that the work is whole"
+  check tcClampPartialEvent true  "B168c partial_delivery fires with the dropped ids (the clamp no longer bypasses the audit arm)"
+
+  check tcCapRaw 5000             "B168d a wild count is still carried verbatim in the audit event"
+  check tcCapTo 12                "B168e ...still runs the MAX_TASKS ceiling..."
+  check tcCapPlanned 64           "B168f ...and the recorded plan total is bounded by MAX_PLAN_TASKS_RECORDED"
+  check tcCapTotal 64             "B168g so the result line cannot be inflated without bound by an agent-reported count"
+  check tcCapImplRungs 12         "B168h the record cap changes nothing about how many rungs run"
+  check tcCapComplete false       "B168i a capped record is still an INCOMPLETE chain, never a whole one"
+
+  # --- r3-1: CB3 cutting a task off AFTER a fix round ------------------------
+  check cfFixRan true             "B170 the fixer really ran (the premise of the run, not an assumption)"
+  check cfNoReReview true         "B171 ...and the re-review it exists to earn was refused by the budget"
+  check cfBlocked 1               "B172 a landed fix nothing re-reviewed is BLOCKED, not DONE"
+  check cfUnreviewed 0            "B173 ...and not miscounted as unreviewed either (that sentinel is for a task cut off before its FIRST review)"
+  check cfAudit true              "B174 task_fix_unreviewed is audited with the task and the stale verdict"
+  check cfTasks '"1:NO_CHANGES:NOT_APPLICABLE,2:BLOCKED:REVISIONS_REQUIRED"' "B175 the stale verdict is kept beside the correction, never erased"
+  check cfChainComplete false     "B176 the chain reports itself UNFINISHED — the field /goal reads before it merges"
+  check cfDelivered true          "B177 delivery still runs on what is already committed"
+  check cfPartialTold true        "B178 delivery is told this is PARTIAL and which task is blocked — never that every task passed its review gate"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561 and #562"
 fi
