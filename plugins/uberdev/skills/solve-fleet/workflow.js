@@ -921,7 +921,10 @@ function finalize() {
   const prSeenNums = {};
   opened.forEach(function (r) {
     const n = r.prNumber;
-    if (!Number.isInteger(n) || n <= 0) return;
+    // isPosInt (hoisted, declared with the claim-verification helpers below) is
+    // the ONE definition of a usable PR number; the claim-side dedupe in
+    // prNumbersToVerify decides the same question about the same field.
+    if (!isPosInt(n)) return;
     const key = String(n);
     if (prSeenNums[key] === 1) {
       auditEvents.push({ event: "pr_number_collision", issue: r.issue, pr: n, ts: nowIso });

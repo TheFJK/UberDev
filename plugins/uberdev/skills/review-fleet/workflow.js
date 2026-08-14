@@ -823,6 +823,22 @@ function phase1OutputContract() {
     + "completed review with zero findings is `findings: []` with `verdict: APPROVE`.";
 }
 
+// The opening the two child-contract builders below share, byte for byte apart
+// from the contract's label and the absolute path the controller resolved for
+// it. It exists so the FORMAT-scoped override and the secret-leak carve-out
+// have ONE home: an edit to that carve-out can no longer land in one builder
+// and miss the other. phase1OutputContract above deliberately does NOT route
+// through it — its opening carries an extra clause and says `finding` where
+// these two say `field`, so folding it in would change the bytes a reviewer
+// reads, which is the one thing this extraction must not do.
+function contractOverrideHead(label, contractPathAbs) {
+  return "## Output contract (overrides your agent file's output FORMAT)\n"
+    + "Read the " + label + " output contract at " + contractPathAbs + " and follow it exactly. "
+    + "It OVERRIDES every response-formatting instruction in your agent file. It does NOT override "
+    + "your agent file's secret-leak prevention rule: that rule governs what a field may CONTAIN, "
+    + "not how the result is serialized, and it still binds.\n";
+}
+
 // The fixer's output contract, framed exactly the way phase1OutputContract()
 // frames the reviewers' (#474). Two things here are load-bearing and neither is
 // decoration:
@@ -837,11 +853,7 @@ function phase1OutputContract() {
 //      with no format binding, as an invitation to write a titled report. That
 //      is the exact shape both observed violations took.
 function fixerOutputContract() {
-  return "## Output contract (overrides your agent file's output FORMAT)\n"
-    + "Read the code-fixer output contract at " + fixerContractPathAbs + " and follow it exactly. "
-    + "It OVERRIDES every response-formatting instruction in your agent file. It does NOT override "
-    + "your agent file's secret-leak prevention rule: that rule governs what a field may CONTAIN, "
-    + "not how the result is serialized, and it still binds.\n"
+  return contractOverrideHead("code-fixer", fixerContractPathAbs)
     + "The entire contents of the result file must be exactly one bare ```yaml fence: no heading, "
     + "title, prose or blank-line preamble before the opening fence, and nothing whatsoever after "
     + "the closing fence. Where the protocol below says to write your full REPORT, it means this "
@@ -863,11 +875,7 @@ function fixerOutputContract() {
 // lands `verifier-unavailable`, which is indistinguishable downstream from a
 // child that never ran.
 function verifyOutputContract() {
-  return "## Output contract (overrides your agent file's output FORMAT)\n"
-    + "Read the finding-verifier output contract at " + verifyContractPathAbs + " and follow it "
-    + "exactly. It OVERRIDES every response-formatting instruction in your agent file. It does NOT "
-    + "override your agent file's secret-leak prevention rule: that rule governs what a field may "
-    + "CONTAIN, not how the result is serialized, and it still binds.\n"
+  return contractOverrideHead("finding-verifier", verifyContractPathAbs)
     + "The entire contents of the result file must be exactly one fenced YAML document with exactly "
     + "two keys: no heading, title, prose or blank-line preamble before the opening fence, and "
     + "nothing whatsoever after the closing fence. Where the protocol below says to write your full "
