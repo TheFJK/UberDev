@@ -182,6 +182,8 @@ Measured with `diff -r` against the on-disk upstream tree at the `v6.2.0` tag;
 "diff lines" counts both `<` and `>` lines and includes the provenance-header
 lines UberDev adds.
 
+**Measured:** `superpowers` at `v6.2.0`, on 2026-08-10, counting `<` plus `>` lines including the provenance headers this section's prose declares.
+
 | Component | Upstream path | Diff lines | Stance | Reason |
 | --- | --- | ---: | --- | --- |
 | `skills/dispatching-parallel-agents` | `skills/dispatching-parallel-agents` | 33 | track | 1:1 file set; delta is the namespace rebrand. |
@@ -213,6 +215,8 @@ Seven `track`, seven `fork`.
 Re-measured against each component's **recovered base** (§ Amendment 2026-08-13),
 counting both `<` and `>` lines and including the provenance-header line each
 file now carries.
+
+**Measured:** `claude-plugins-official` at the per-row `Base` column, on 2026-08-13, counting `<` plus `>` lines including the provenance header.
 
 | Component | Upstream path | Base | Diff lines | Stance |
 | --- | --- | --- | ---: | --- |
@@ -973,3 +977,243 @@ one token and every ADOPT cites an issue) and **V33** (a component sitting at it
 upstream's review point may be reviewed later than it, never earlier).
 `tests/docs-accuracy.test.sh` gains T3.6, which is what stops a future watermark
 advance from landing with no verdict table behind it.
+
+---
+
+## Amendment (2026-08-14, #534) — every measurement carries its basis
+
+> **Amends §4.2 and §4.3 by labelling each table with the revision, date and
+> counting rule its numbers were measured under; amends the *What the advance
+> does and does not claim* subsection of the 2026-08-13 (#511) amendment, which
+> reserved this work for #534; and restructures `measured_diff_basis` in the
+> register from free prose into a required record. No table cell is edited.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What the number actually depends on
+
+`measured_diff_lines` is a diff count, and a diff has **two** operands: an
+upstream revision, and a set of local bytes. The register recorded a bare
+integer — naming neither — while §4.2 and §4.3 carried a second copy of the same
+numbers, and nothing compared the two.
+
+That makes drift the steady state rather than a possibility. Both operands move,
+on unrelated schedules: upstream ships a release, and any local edit to a
+vendored file changes our half. So the two copies come apart during ordinary
+work, and when they do, a bare integer cannot say whether the RFC is stale, the
+register is stale, or both numbers are honest measurements taken at different
+points. Two components had already reached that state with every check green —
+`skills/systematic-debugging` (register 195, §4.2 83, after the local
+`find-polluter.sh` additions of #430 and #476) and
+`skills/test-driven-development` (register 64, §4.2 72, after the
+`writing-good-tests.md` swap of #457). Both had moved for good reasons. Neither
+copy could say so.
+
+`measured_diff_basis` is therefore a **required record** on every component that
+records a measurement: `upstream_rev` and `upstream_tree` name the upstream
+operand, `uberdev_rev` names the local one, `measured_on` dates the act, and
+`method` states the counting rule. The number becomes self-describing, so two
+measurements taken at different points are legible as exactly that instead of as
+a contradiction.
+
+### The cache is not upstream
+
+The 14 `superpowers` measurements below were taken against the
+`claude-plugins-official` plugin cache at `superpowers/6.3.0` — the same artifact
+the 2026-08-13 (#511) amendment measured its delta over, and corroborated rather
+than trusted for the reason that amendment gives.
+
+The register keeps the two apart instead of collapsing them into one field:
+`upstream_rev` names the revision that tree is corroborated to repackage
+(`b36e0829c6d0140e93cfef2ca599b1b07d4a7797`, the peeled `v6.3.0` tag), while
+`upstream_tree` records that the cache is a repackaging of upstream, not upstream itself.
+
+Re-measuring the 14 directly from `obra/superpowers` at the peeled tag would
+retire that distinction rather than record it — and it is a network read, which
+belongs to `tools/vendor/vendor-drift.py` (§8) and to its own issue, not to an
+offline check. Until it happens, the honest statement is the one the record now
+makes: a measurement against a corroborated repackaging, said out loud.
+
+### Why §4.2 and §4.3 are not renumbered
+
+Both tables are **dated snapshots at their own bases**, and this amendment edits
+no cell in either. §4.2's numbers are what was measured at the `v6.2.0` tag;
+§4.3's are what was measured at each component's recovered base. Now that each
+table declares that basis and the register declares its own, the surfaces no
+longer make competing claims about one measurement — they make separate,
+labelled claims about different ones, which is what they always were.
+
+§4.2's `**Measured:**` line dates that measurement `2026-08-10`, and the basis
+for that date is this RFC's own `Created` field: it is the only date the document
+records for the work that produced the table, and the table landed in commit
+`231891f74821d9108639a0eaa01ea1a5b5a82f6e` on 2026-08-11, which corroborates it.
+An asserted date with a stated basis is the whole point of this amendment; an
+asserted date with none was the defect.
+
+§4.3's label deliberately invents **no release tag**. Its upstream is a plugin
+inside a monorepo with no release vocabulary — `upstreams.pr-review-toolkit` in
+the register already records why it carries no `last_reviewed_release` — so the
+label names the per-row `Base` column, which is the honest revision that table
+already carries.
+
+### §4.2's stated counting rule, measured
+
+§4.2's prose declares that its counts *include* the provenance-header lines
+UberDev adds. Measured against the `claude-plugins-official` cache tree at
+`superpowers/6.2.0`, that rule reproduces exactly **one** of its 14 rows, and the
+other 13 miss it in two distinct ways:
+
+- **1 row** reproduces under the stated rule, headers included: `writing-skills`
+  (367).
+- **9 rows** reproduce only with the provenance-header lines **excluded**:
+  `brainstorm`, `dispatching-parallel-agents`, `execute-plan`,
+  `receiving-code-review`, `requesting-code-review`, `using-git-worktrees`,
+  `using-uberdev`, `verification-before-completion` and `write-plan`. Each is
+  off by exactly its header count.
+- **4 rows** reproduce under neither, because their bytes have moved since:
+  `finish-branch` (734 recorded; 1067 included / 1066 excluded),
+  `subagent-driven-dev` (1064; 1333 / 1332), `systematic-debugging` (83;
+  304 / 293) and `test-driven-development` (72; 64 / 62).
+
+**1 + 9 + 4 = 14.** §4.2 is frozen, so this correction lives here rather than in
+an edit to its prose — the same idiom §4.3 already uses when it records that the
+reason written down there was measurably wrong for five of its six rows.
+
+`test-driven-development` is worth naming twice, because it is the one row that
+*looks* like a match and is not: 64 is the number the **register** carried after
+the #457 swap, while §4.2's frozen cell reads 72. Read the two copies as one and
+the rule appears to hold for it; read them as what they are — two measurements of
+different byte sets — and it does not. That confusion, in miniature, is the
+defect this amendment closes.
+
+### The 14 skills re-measured at the review point
+
+The register's 14 skill measurements now sit at the review point #511 already
+advanced them to, so the numbers describe the bytes actually shipped. This table
+is **deliberately a third `Diff lines` table**: it carries its own label, which
+means the new numbers land in a *checked* copy rather than in a third
+uncompared one.
+
+**Measured:** `superpowers` at `b36e0829c6d0140e93cfef2ca599b1b07d4a7797`, on 2026-08-14, counting `<` plus `>` lines including the provenance headers.
+
+| Component | §4.2 cell | Register before | Diff lines |
+| --- | ---: | ---: | ---: |
+| `skills/brainstorm` | 2255 | 2255 | 2358 |
+| `skills/dispatching-parallel-agents` | 33 | 33 | 34 |
+| `skills/execute-plan` | 50 | 50 | 51 |
+| `skills/finish-branch` | 734 | 734 | 1077 |
+| `skills/receiving-code-review` | 41 | 41 | 42 |
+| `skills/requesting-code-review` | 228 | 228 | 238 |
+| `skills/subagent-driven-dev` | 1064 | 1064 | 1406 |
+| `skills/systematic-debugging` | 83 | 195 | 304 |
+| `skills/test-driven-development` | 72 | 64 | 64 |
+| `skills/using-git-worktrees` | 206 | 206 | 207 |
+| `skills/using-uberdev` | 174 | 174 | 176 |
+| `skills/verification-before-completion` | 49 | 49 | 50 |
+| `skills/write-plan` | 123 | 123 | 128 |
+| `skills/writing-skills` | 367 | 367 | 380 |
+
+The two rows the issue reports are settled **by measurement**, not by editing a
+frozen cell: `systematic-debugging` reads 304 and `test-driven-development` 64,
+both at `b36e0829…`, while §4.2 keeps 83 and 72 at `v6.2.0`. Different bases,
+both labelled, correctly not compared.
+
+The table carries **no stance column**, on purpose. A stance is a decision, not a
+measurement, and nothing in this repository reconciles a stance cell in this
+document against the register — §4.2's own stance cells are already superseded
+for four components by the 2026-08-13 (#503) amendment. Restating one here would
+manufacture a fresh uncompared copy of exactly the kind this amendment exists to
+retire. `plugins/uberdev/vendor.json` carries the live stance, as §4.2's own
+superseded-rows note says.
+
+### The six agent numbers are labelled, and they re-derive offline
+
+The six `agents/*` numbers are **unchanged**. Their existing free-prose basis
+moved verbatim into `method` — nothing recorded was discarded — and each gained
+`upstream_rev`, `upstream_tree`, `uberdev_rev` and `measured_on` around it.
+
+They were re-derived, and the boundary is worth stating precisely rather than
+implying, because it is narrower than it looks. Re-deriving one needs **no
+network at all**: `base_evidence.blobs` pins the upstream blob's oid and
+`base_evidence.vendored_ref` names the commit it resolves at, both inside this
+repository, and `tests/vendor-provenance.test.sh`'s V35 row already asserts —
+offline — that every one of those oids re-derives from git here. Reading each
+blob out with `git cat-file -p` and diffing it against the shipped file
+reproduces all six recorded counts exactly, at the base each row records. What
+does need a network read is a **different act**: re-measuring against a revision
+*newer* than the one `base_evidence` pins. That is
+`tools/vendor/vendor-drift.py`'s job (§8), not this amendment's, and conflating
+the two would have written down a false reason for a true decision.
+
+`measured_on` therefore reads `2026-08-14` on all six. The numbers did not move,
+but the act that date records — checking that each still re-derives at its
+recorded base — did happen, on that date and without a socket.
+
+The record is what makes that reproducible by anyone, not just here:
+`uberdev_rev` names the commit whose bytes were counted, so
+`git show <uberdev_rev>:<path>` yields our half of the diff exactly, and
+`upstream_tree` names the artifact that was the other half. Before this change,
+**13 of the 14** skill numbers no longer reproduced against the review point the
+register itself declares, and the record could not say so, because it named no
+revision at all.
+
+All six take `uberdev_rev` `9002870bbbf21dabe9cc08a81d8293495c7beb38` rather than
+the last commit to touch each file before it. Their recorded method counts the
+provenance-header line, and those headers do not exist in the earlier commits —
+`git show 231891f74821d9108639a0eaa01ea1a5b5a82f6e:plugins/uberdev/agents/code-reviewer.md`
+carries none. Both the headers and the counts landed together, so that commit is
+the one whose bytes the numbers describe.
+
+### `C-MEASURE` — the channel this drift ran through
+
+The checks `vendor-check.py` performs reconcile the register against disk, an
+in-file header against the register, a register pointer against a register
+record, or the register against its own declared shape.
+**None of them read a recorded measurement.** `measured_diff_lines` was an
+optional integer that **no code read** — its only occurrence outside the register
+and prose like this document's own was its membership in `COMPONENT_KEYS` — so it
+could hold any number, taken at any revision, against any bytes, and no check had
+an opinion.
+
+`vendor-check.py` therefore gains a thirteenth check:
+
+> **`C-MEASURE`** — `measured_diff_lines` and `measured_diff_basis` are a
+> biconditional: recording either without the other is a failure. The count is a
+> non-negative integer (and not a `bool`). The basis is a record over a **closed**
+> sub-key set — `upstream_rev`, `upstream_tree`, `uberdev_rev`, `measured_on` and
+> `method` required, `component_digest` optional — with each member's format
+> checked. Recording **zero** measurements anywhere is itself a failure, mirroring
+> `C-HEADER`'s and `C-REFS`' vacuity arms.
+
+Three boundaries are deliberate:
+
+- **It owns the shape, never the truth of a count.** Re-deriving a diff needs the
+  upstream bytes, and those always live **outside the register**: in this
+  repository's git object storage for the six agents, in the on-disk plugin cache
+  for the 14 skills, and over the network only for a revision newer than the one
+  recorded. `C-MEASURE` reaches for none of the three — it reads the register and
+  nothing else — and §2.3's offline guarantee stays structural because the checker
+  never opens a socket. A shape check that quietly grew any of those reads would
+  be the more expensive defect; the network is only the farthest of them, not the
+  boundary itself.
+- **Coverage is not universal.** A component nobody has measured is not a defect,
+  so the rule is *every component that records a measurement records its basis*,
+  not *every component records one*. The vacuity arm is what keeps that from
+  degenerating: deleting the corpus would otherwise be the cheapest way to make
+  the check permanently green.
+- **The register-to-RFC reconciliation is not here.** It compares two documents,
+  which is a test's job, not a shipped checker's. It lives in
+  `tests/vendor-provenance.test.sh`, reads every `Diff lines` table in this
+  document with its own label, and compares a register number to a table number
+  **only where both declare the same revision** — like-for-like, so a labelled
+  disagreement between two different bases is correctly not a finding. Its
+  falsifiability row drives that predicate over mutated copies of both documents,
+  one of which deletes §4.3's label. The invariant that mutation defends is that
+  a `Diff lines` table must **never inherit a neighbouring section's basis**: the
+  label scan is bounded to the table's own section, and a table carrying no label
+  of its own is a hard failure rather than a silently re-based comparison.
+
+`"schema"` deliberately stays `uberdev-vendor-v1`. A schema string earns a bump
+when it protects a consumer that cannot be updated in lockstep; the producer and
+every consumer of this register live in this repository, and `C-MEASURE` is the
+contract that the new required record is present. The unchanged literal is a
+decision, not an oversight.
