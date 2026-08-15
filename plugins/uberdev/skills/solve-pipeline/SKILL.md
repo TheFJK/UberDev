@@ -101,6 +101,59 @@ is the documentation surface.
 floor, ceiling, and the explicit tier override last without erasing risks. It
 rejects oversized snapshots instead of truncating them and emits canonical JSON.
 
+### The ratchet is one-way (#532)
+
+Tier is computed **once**, at dispatch, from issue-body signals — before anyone
+has read the code — and a solver cannot re-classify itself mid-run: its routing
+context is already resolved and immutable by the time it starts. Left at that, a
+mis-triage is silent, and a `small`-tier solver that learns the change is
+cross-cutting just runs the lighter workflow to the end. The ratchet is what it
+does instead.
+
+A solver that discovers hidden complexity **raises its own bar for the rest of
+the task** — a design note before it edits, tests first, and no shortcut kept
+only because the triage was light — and records the discovery where the next run
+can act on it:
+
+- the line `Tier escalated: <from> -> <to> — <reason>` in the PR body, so the
+  mis-triage is read off the pull request rather than inferred from it;
+- the `uberdev:tier-<to>` label on the issue. `classify()` reads that label and
+  **raises `raw_tier`** on the next dispatch, recording `escalation-label:<tier>`
+  in `matched_rules`.
+
+On the `workflow` backend the same claim also rides the solver's structured
+return (`escalatedTier` / `escalationReason`), where it is checked and audited —
+see `skills/solve-fleet/SKILL.md`.
+
+**Upgrade-only, and unable to express anything else.** `trivial` is not an
+addressable escalation target, so the label vocabulary cannot name a downgrade,
+and a label at or below the computed tier is inert rather than an error. Nothing
+downgrades mid-task, and no solver can talk an issue down into cheaper ceremony.
+
+**The operator still outranks it.** The escalation moves `raw_tier` and nothing
+else, so `solve_tier_floor` / `solve_tier_ceiling` clamp the escalated value and
+an explicit `--trivial|--small|--full` override replaces it outright, exactly as
+they act on any computed tier. The evidence survives either way: the computed
+rule token stays in `matched_rules` beside the escalation one, so the trail reads
+"computed trivial, escalated to medium" rather than "was always medium".
+
+**The escalation buys back no ceremony in the run that reported it.**
+`DESIGN_TIERS`, the `workflow.js` design gate and CB1's pre-dispatch agent
+projection are untouched by design — CB1 projects the fleet's agent budget
+*before* dispatch, and re-entering research, spec and plan for an in-flight issue
+would spend agents no ceiling ever counted. What the solver raises is its own
+bar; the tier itself moves on the **next** dispatch. That is a deliberate
+limitation rather than an oversight, and the follow-up issue filed alongside this
+change owns closing it.
+
+### Red flags — reaching for a lighter tier
+
+| Thought | Reality |
+|---|---|
+| "I'll call it small and skip the plan review" | Reaching for a lighter tier in order to skip work **is** the doubt. Take the heavier path. |
+| "It grew, but I'm almost done — no need to re-classify" | Nothing re-classifies mid-run, so your report is the only thing that carries the discovery to the next dispatch. Raise your own bar for what is left, and say so. |
+| "I know this kind of code, so it's small" | The tier measures the repo, not your familiarity. |
+
 ## Pipeline phases (all inside the launcher)
 
 ### Phase A — validate-all-first (Steps 1–4)
