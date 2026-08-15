@@ -715,7 +715,7 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream.",
+      "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream. The local bytes are no longer a clean copy of any single upstream revision: they are the e7a2d16 base PLUS one adopted 6.3.0 hunk (#531) in render-graphs.js, which spawns `dot` via execFileSync instead of locating it with a `which` probe that is not a command on Windows; the CommonJS to ESM half of that same upstream diff is declined because it raises an undeclared Node floor (>= 20.19 / >= 22.7) on a tree with no `engines` field and no CI node-version pin. vendored_at_commit is deliberately left at the base \u2014 the hunk is an adoption, not a re-baseline, and the file's sha256 above is the composite.",
       "measured_diff_lines": 367,
       "divergences": [
         {
@@ -746,7 +746,7 @@
         },
         {
           "path": "render-graphs.js",
-          "sha256": "9204d9a389f106dfae983b0c55a7ca509ef2e9087d11dd7722aa20afec8eccc0"
+          "sha256": "a26aa839960d628069840158ad735beaf155d4b029d84787f678dc6e039a7767"
         },
         {
           "path": "testing-skills-with-subagents.md",
