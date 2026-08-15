@@ -89,19 +89,35 @@
 #      an ERE alternation inside a quoted pattern (`assert_grep "$f" 'A|head'`),
 #      where a space would be literal pattern content. Every pipeline in this
 #      repo is written with the space; an unspaced one would slip through.
-#   5. Markdown `bash` fences inside `skills/**/SKILL.md`. They are executed, but
-#      their pipefail state is per-fence (Bash-tool calls share no shell state), so
-#      file-level exposure cannot be decided the way it can for a `.sh` file.
-#      Checked by hand rather than assumed: the repo's one instance,
-#      `merge-pipeline/SKILL.md:700`, sits in a fence that sets NEITHER pipefail
-#      nor -e, so its rc is grep's rc and it is not exposed. Re-check by hand if a
-#      fence ever gains `set -o pipefail`.
+#   5. Markdown fences are not judged as FILES. Every fence is walked, whatever
+#      its info string says, because the walk opens on the backtick run and never
+#      reads the info string; over-scanning is the safe direction for a guard.
+#      A fence is executed as its own Bash-tool call, and those calls share no
+#      shell state, so a fence that turns pipefail on says nothing about the next
+#      fence in the same file — the per-file gate E1 applies to shell sources
+#      cannot decide a markdown file at all.
+#      The fences are NOT exempt from the class, though: the `E4` rows below
+#      cut the markdown corpus into fences, gate each fence on its own body, and
+#      re-derive the verdict from live bytes on every run, so no answer about them
+#      is written down here to rot and no hand-check is owed. What does remain out
+#      of scope is state a fence would INHERIT from elsewhere: each fence is judged
+#      in isolation, which is sound precisely because a Bash-tool call starts a
+#      fresh shell in production too.
 #
 # SCAN SET. Every tracked `*.sh` file in the repo — tests, `plugins/uberdev/lib`,
 # `tools/prkit`, `install.sh` — that turns
 # pipefail on. Files that do NOT set pipefail are not exposed (the pipeline's rc
 # is the last command's rc) and are out of scope by construction; the day one of
 # them adds `set -o pipefail`, this guard reds on every site it just exposed.
+#
+# Alongside it, the markdown corpus: every tracked file matching the pathspec
+# `plugins/uberdev/*.md`, cut into fenced code blocks, with the same pipefail gate
+# applied per FENCE rather than per file (see the markdown note in the declared
+# boundary above). The pathspec is stated instead of the directories it happens to
+# cover, because the pathspec is what `_epipe_md_files` actually walks: a list of
+# directory names would be a second description of the same set, kept in step by
+# hand, and free to drift the moment one is added or emptied. `_epipe_sh_files`
+# and `_epipe_md_files` enumerate the two corpora; `E1` and `E4` judge them.
 #
 # Comment-only lines are skipped so the class can still be DESCRIBED in prose
 # (this header does exactly that). Quoted strings are NOT skipped: several suites
@@ -922,6 +938,196 @@ _ep_md_case "E4.2d nested fence extracted once, spanning the outer markers" "$TM
   printf '````\n'
 } >"$TMPD/md2e.md"
 _ep_md_case "E4.2e nested fence still gated and flagged (parity toggle goes green here)" "$TMPD/md2e.md" md2e 1 1 6 1 +
+
+echo
+
+# --- E4.3  the declared boundary carries no anchor that can rot ---------------
+# The filed defect itself, turned into a test. The markdown-fence boundary note
+# used to justify its exemption with a hand-check pinned to a `file:line`
+# literal. The code moved, the literal did not, and the note ended up citing a
+# line that is not a pipeline at all — an exemption nobody could re-verify
+# without redoing the whole search by hand. E4.1 above removes the NEED for the
+# anchor by re-deriving the answer from live bytes every run; these rows make
+# putting one back a FAILURE rather than a matter of remembering not to.
+#
+# The slice runs from the DECLARED BOUNDARY header to the first line of code,
+# so it covers the numbered notes AND the SCAN SET paragraph that follows them.
+# That paragraph is in scope deliberately: it describes the corpora in prose, so
+# it is exactly as able to rot as the notes are, and leaving it just past the
+# closing anchor would have left a seam where un-derived prose could be written
+# without any row here being able to see it. The `[^:]` after the header word is
+# load-bearing rather than decorative: a second `# DECLARED BOUNDARY:` line
+# declares the tilde-fence limitation further down this file, and a matcher that
+# silently grabs the wrong block is exactly the failure mode these rows exist to
+# prevent. `^set -u` is the closing anchor because it is CODE — rewording any
+# paragraph inside the header cannot move it, and it is unique in the file.
+EP_SELF="$0"
+
+# The walk reports on ITSELF. Existence and termination are different questions,
+# and asking the first while reporting the second is how a slice that ran to EOF
+# gets called "bounded": reorder the two headers without renaming either and both
+# still exist, so an existence check stays green while the walk never terminates.
+# The END rule fires only when the closing anchor was never reached, which is the
+# question the row below actually reports on — and because the sentinel comes from
+# the same walk, it cannot drift out of step with the anchors the way a second
+# copy of them would. `f=0` before `exit` is load-bearing: `exit` runs the END
+# rule, so the flag has to be cleared first or a terminated walk would raise the
+# sentinel too. Anchors stay backslash-free (`[.]`, not `\.`) so that `awk -v`
+# stays escape-safe on Git Bash, where an undefined `\.` escape is not portable.
+#
+# `openre`/`stopre`, not `open`/`close`: `close` is an awk BUILT-IN function name,
+# and using it as a variable is a syntax error on the BSD awk that macOS ships —
+# a bailout, not a wrong answer, so it fails loudly, but only where a BSD awk runs.
+EP_SENTINEL='EP-SLICE-RAN-TO-EOF'
+_epipe_slice() {
+  awk -v openre="$1" -v stopre="$2" -v sentinel="$EP_SENTINEL" '
+    $0 ~ openre { f = 1 }
+    f && $0 ~ stopre { f = 0; exit }
+    f
+    END { if (f) print sentinel }
+  '
+}
+
+EP_HEADER="$(_epipe_slice '^# DECLARED BOUNDARY[^:]' '^set -u' <"$EP_SELF")"
+EP_HEADER_LINES="$(grep -c . <<<"$EP_HEADER" || true)"
+EP_HEADER_UNTERMINATED=""
+case "$EP_HEADER" in *"$EP_SENTINEL") EP_HEADER_UNTERMINATED=yes ;; esac
+
+# Non-vacuity first, the T9.0 shape from tests/docs-accuracy.test.sh: a renamed
+# header must FAIL loudly here instead of passing every row below it over a slice
+# that is not the block anyone meant. A prose lint that lints the wrong bytes is
+# worse than none, because it reads as evidence.
+#
+# EVERY failure direction is covered, each by the predicate it actually needs,
+# because they are three different questions and no one of them implies another:
+#
+#   * ran to EOF        -> the sentinel. A length floor cannot see this: losing the
+#                          closing anchor makes the slice LONGER, not shorter, so a
+#                          floor waves through the whole rest of the file.
+#   * never started     -> the floor. The opening anchor renamed leaves nothing.
+#   * started and ended
+#     but under-covers  -> containment. Reorder the SCAN SET paragraph above the
+#                          DECLARED BOUNDARY header and the walk still terminates
+#                          honestly at `set -u` — bounded, non-empty, and quietly
+#                          no longer covering the paragraph E4.3b is here to lint.
+#                          Asserting the paragraph is INSIDE the extracted slice is
+#                          what catches that; asking whether it exists in the FILE
+#                          would not, since a reorder renames nothing.
+#
+# EP_SLICE_OK then gates the rows below, so a slice nobody meant is never linted
+# and never reported green.
+EP_SLICE_OK=""
+if [ -n "$EP_HEADER_UNTERMINATED" ]; then
+  echo "  FAIL  E4.3a declared-boundary header block never terminated — the walk ran to EOF"
+  echo "        expect: the DECLARED BOUNDARY header, the numbered notes, the SCAN SET paragraph, then 'set -u'"
+  echo "        cause:  the closing 'set -u' anchor was renamed, so the walk never stopped"
+  echo "        file:   $EP_SELF"
+  FAIL=$((FAIL + 1))
+elif [ "${EP_HEADER_LINES:-0}" -lt 20 ]; then
+  echo "  FAIL  E4.3a declared-boundary header block is empty or too short ($EP_HEADER_LINES non-blank lines)"
+  echo "        expect: the DECLARED BOUNDARY header, the numbered notes, then the SCAN SET paragraph"
+  echo "        cause:  the opening DECLARED BOUNDARY header was renamed, or this file could not be read"
+  echo "        file:   $EP_SELF"
+  FAIL=$((FAIL + 1))
+elif ! grep -qE -e '^# SCAN SET\.' <<<"$EP_HEADER"; then
+  echo "  FAIL  E4.3a declared-boundary header block does not contain the SCAN SET paragraph"
+  echo "        expect: the DECLARED BOUNDARY header, the numbered notes, then the SCAN SET paragraph"
+  echo "        cause:  SCAN SET was renamed, or moved ABOVE the DECLARED BOUNDARY header — the walk"
+  echo "                then still terminates, but over a block that silently stops covering it"
+  echo "        file:   $EP_SELF"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  E4.3a declared-boundary header block extracted and bounded ($EP_HEADER_LINES non-blank lines)"
+  PASS=$((PASS + 1))
+  EP_SLICE_OK=yes
+fi
+
+# Restated locally on purpose: tests/docs-accuracy.test.sh T9.1 carries the
+# sibling regex for RFC prose, and hoisting two call sites in two suites into a
+# shared regex library would buy indirection rather than reuse.
+EP_ANCHOR_RE='\.(md|sh|py|js|json|yaml|yml):[0-9]+'
+if [ -z "$EP_SLICE_OK" ]; then
+  echo "  FAIL  E4.3b not linted — E4.3a could not extract the header block, so any verdict here would be over bytes nobody meant"
+  FAIL=$((FAIL + 1))
+elif grep -qE -e "$EP_ANCHOR_RE" <<<"$EP_HEADER"; then
+  echo "  FAIL  E4.3b the header block cites a file:line anchor — the literal that rotted:"
+  grep -oE -e "$EP_ANCHOR_RE" <<<"$EP_HEADER" | sort -u | sed 's/^/        /'
+  echo "        fix:    name the symbol, the marker or the section instead; a line number cannot be re-verified"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  E4.3b the header block carries no file:line anchor"
+  PASS=$((PASS + 1))
+fi
+
+# _EP_PIPE's comment points at "boundary note 4 above" by number, so the numbering
+# is a live cross-reference and not merely a layout choice. Renumbering the notes
+# rots it silently; this row is what stops that.
+if [ -z "$EP_SLICE_OK" ]; then
+  echo "  FAIL  E4.3c not linted — E4.3a could not extract the header block, so the numbering cannot be checked"
+  FAIL=$((FAIL + 1))
+elif grep -qE -e '^#[[:space:]]+4\.' <<<"$EP_HEADER"; then
+  echo "  PASS  E4.3c the notes are still numbered through 4, so _EP_PIPE's cross-reference resolves"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.3c no note numbered 4 in the slice — _EP_PIPE cites 'boundary note 4' and it no longer resolves"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+
+# --- E4.4  the markdown-fence note states a boundary, never a measurement -----
+# The anchor was only half of what rotted. The other half was a COUNT: the note
+# recorded how many offending sites the corpus held at the moment somebody looked,
+# and a number written down in prose starts drifting the next time anyone edits a
+# fence. E4.1 re-derives that number every run, which is what makes recording it
+# unnecessary; this row makes re-pasting one impossible.
+#
+# WHAT THIS LINT IS AND IS NOT. It bans numerals and cardinal quantifiers inside
+# one block of prose. It is not a general claim-detector and cannot be — prose
+# lints do not generalise, and a determined sentence can always smuggle a count
+# past a word list. Its job is narrower and achievable: make the CHEAP regression
+# — pasting a freshly measured number back into the note — fail on the next run.
+# The scope is deliberately this one block, because this is where a count was
+# stated as evidence.
+#
+# `grep -w` (word match) rather than an anchored alternation: it is portable
+# across the BSD, GNU and MSYS greps this suite runs under, and it avoids the
+# anchor-inside-alternation construct that tests/test-harness-source-guards.test.sh
+# A3 records as a portability trap. It is also what keeps section ids readable —
+# the `4` in `E4` is preceded by a word character, so it is not a word match.
+# Note 5 ends where the SCAN SET paragraph begins. That terminator is explicit
+# for the same reason E4.3a asserts one: the header block now runs past SCAN SET,
+# so a sub-slice that just ran to the end of it would drag the corpus paragraph
+# into a count lint scoped to note 5 — the wrong bytes again, one level down.
+EP_NOTE5="$(_epipe_slice '^#[[:space:]]+5[.]' '^# SCAN SET[.]' <<<"$EP_HEADER")"
+EP_NOTE5_UNTERMINATED=""
+case "$EP_NOTE5" in *"$EP_SENTINEL") EP_NOTE5_UNTERMINATED=yes ;; esac
+# The `#` prefix and the `5.` enumerator are stripped before the match, or the
+# enumerator would match the lint's own numeral rule on every run.
+EP_NOTE5_TEXT="$(sed -e 's/^#//' -e 's/^[[:space:]]*5\.//' <<<"$EP_NOTE5")"
+EP_COUNT_RE='one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|single|sole|lone|instance|instances|exactly|[0-9]+'
+EP_NOTE5_LINES="$(grep -c . <<<"$EP_NOTE5" || true)"
+if [ -z "$EP_SLICE_OK" ]; then
+  echo "  FAIL  E4.4 not linted — E4.3a could not extract the header block, so note 5 could not be located"
+  FAIL=$((FAIL + 1))
+elif [ -n "$EP_NOTE5_UNTERMINATED" ]; then
+  echo "  FAIL  E4.4 note 5 never terminated — the walk ran past the end of the header block"
+  echo "        expect: note 5, then the SCAN SET paragraph that closes it"
+  echo "        cause:  the SCAN SET header was renamed, so note 5's extent can no longer be determined"
+  FAIL=$((FAIL + 1))
+elif [ "${EP_NOTE5_LINES:-0}" -lt 3 ]; then
+  echo "  FAIL  E4.4 the markdown-fence note is absent or too short to be stating a boundary — nothing was linted"
+  echo "        expect: a note numbered 5 inside the declared boundary; renumbering it makes this row vacuous"
+  FAIL=$((FAIL + 1))
+elif grep -qwE -e "$EP_COUNT_RE" <<<"$EP_NOTE5_TEXT"; then
+  echo "  FAIL  E4.4 the markdown-fence note states a measurement instead of a boundary:"
+  grep -owE -e "$EP_COUNT_RE" <<<"$EP_NOTE5_TEXT" | sort -u | sed 's/^/        /'
+  echo "        fix:    say what is out of scope and why; the corpus counts are E4's output, re-derived every run"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  E4.4 the markdown-fence note states a boundary and records no count ($EP_NOTE5_LINES lines linted)"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "==================================================================="
