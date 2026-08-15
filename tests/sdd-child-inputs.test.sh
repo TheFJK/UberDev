@@ -1299,6 +1299,137 @@ assert_exhaustion_rejected 'symlink ledger' "$LEDGER_SYMLINK" fix_rounds 4
 assert_exhaustion_rejected 'two arguments' "$LEDGER" fix_rounds
 assert_exhaustion_rejected 'four arguments' "$LEDGER" fix_rounds 4 surplus
 
+# ── AC-16: rulings are bytes on disk, one append-only line per decision ──────
+# A decision not on disk was not made. sdd_append_ruling is the carrier the
+# controller's "## Rulings I made" roll-up is read back from, so it gets the
+# same refusals its fix-ledger sibling has: absolute path only, every field
+# non-empty, fixed arity, symlink target refused, append-only at mode 0600.
+RULINGS_DIR="$INPUT_DIR/rulings"
+mkdir -p "$RULINGS_DIR"
+chmod 700 "$RULINGS_DIR"
+RULINGS="$RULINGS_DIR/rulings.md"
+
+rulings_bytes() {
+  if [ -e "$RULINGS" ]; then
+    wc -c <"$RULINGS" | tr -d ' '
+  else
+    printf '0'
+  fi
+}
+
+# stderr is discarded on purpose: a refused open raises in python3, and the
+# traceback is noise the suite must not carry. The contract asserted here is
+# the rc, never the errno text — the symlink message differs per platform.
+assert_ruling_rejected() {
+  local label="$1"
+  shift
+  local rc=0 before after
+  before="$(rulings_bytes)"
+  sdd_append_ruling "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || {
+    printf 'sdd_append_ruling accepted %s (rc %s)\n' "$label" "$rc" >&2
+    exit 1
+  }
+  after="$(rulings_bytes)"
+  [ "$after" -eq "$before" ] || {
+    printf 'sdd_append_ruling wrote while rejecting %s (%s -> %s)\n' \
+      "$label" "$before" "$after" >&2
+    exit 1
+  }
+}
+
+# AC-16a — fixed arity of four.
+assert_ruling_rejected 'three arguments' "$RULINGS" 'decision' 'why'
+assert_ruling_rejected 'five arguments' "$RULINGS" 'decision' 'why' 'cost' surplus
+
+# AC-16b — the path is absolute or nothing. The name is deliberately unique:
+# a relative path resolves against the CALLER's cwd, which is the repository
+# root here, so a broken guard has to be caught as a file that appeared there
+# rather than as a rejection that happened to return the right code.
+assert_ruling_rejected 'relative rulings path' 'sdd-relative-rulings.md' \
+  'decision' 'why' 'cost'
+[ ! -e 'sdd-relative-rulings.md' ] || {
+  printf 'sdd_append_ruling wrote a relative rulings file into %s\n' "$PWD" >&2
+  exit 1
+}
+
+# AC-16c — an empty field is a ruling nobody can read back.
+assert_ruling_rejected 'empty decision' "$RULINGS" '' 'why' 'cost'
+assert_ruling_rejected 'empty why' "$RULINGS" 'decision' '' 'cost'
+assert_ruling_rejected 'empty cost' "$RULINGS" 'decision' 'why' ''
+
+# AC-16d — O_NOFOLLOW refuses a symlink, and writes nothing through it.
+RULINGS_SYMLINK_TARGET="$RULINGS_DIR/symlink-target.md"
+: >"$RULINGS_SYMLINK_TARGET"
+chmod 600 "$RULINGS_SYMLINK_TARGET"
+RULINGS_SYMLINK="$RULINGS_DIR/rulings-symlink.md"
+ln -s "$RULINGS_SYMLINK_TARGET" "$RULINGS_SYMLINK"
+assert_ruling_rejected 'symlink rulings path' "$RULINGS_SYMLINK" \
+  'decision' 'why' 'cost'
+[ ! -s "$RULINGS_SYMLINK_TARGET" ] || {
+  printf 'sdd_append_ruling wrote through a symlink\n' >&2
+  exit 1
+}
+
+# AC-16e — two appends, two lines, in call order, at mode 0600.
+sdd_append_ruling "$RULINGS" \
+  'first decision: kept the plan step and narrowed its scope' \
+  'the wider read was unowned by this task' \
+  'a reviewer re-derives the narrowing from the diff'
+sdd_append_ruling "$RULINGS" \
+  'second decision: parked a finding at the cap' \
+  'the fix round cap fired with the finding still open' \
+  'the finding ships unfixed until the follow-up lands'
+
+rulings_stat="$(python3 -I -B -c 'import os,stat,sys; entry=os.lstat(sys.argv[1]); print("%s %s %s" % (oct(stat.S_IMODE(entry.st_mode)), stat.S_ISREG(entry.st_mode), entry.st_nlink), end="")' "$RULINGS")"
+[ "$rulings_stat" = '0o600 True 1' ] || {
+  printf 'the rulings file is not a mode-0600 regular file with one link: %s\n' \
+    "$rulings_stat" >&2
+  exit 1
+}
+
+python3 -I -B - "$RULINGS" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+body = Path(sys.argv[1]).read_bytes().decode("utf-8")
+assert body.endswith("\n"), "the rulings file does not end with a newline"
+rows = body.split("\n")[:-1]
+assert len(rows) == 2, rows
+shape = re.compile("^Ruling: .+ — .+ — .+$")
+for row in rows:
+    assert "\r" not in row, row
+    assert shape.match(row), row
+assert "first decision" in rows[0], rows
+assert "second decision" in rows[1], rows
+PY
+
+# AC-16f — a third append grows the file; it never truncates or rewrites.
+rulings_lines_before="$(wc -l <"$RULINGS" | tr -d ' ')"
+rulings_first_line_before="$(sed -n '1p' "$RULINGS")"
+sdd_append_ruling "$RULINGS" \
+  'third decision: resequenced the wave' \
+  'the second task owned a file the first still held' \
+  'the wave finishes later than the plan predicted'
+rulings_lines_after="$(wc -l <"$RULINGS" | tr -d ' ')"
+rulings_first_line_after="$(sed -n '1p' "$RULINGS")"
+[ "$rulings_lines_before" -eq 2 ] || {
+  printf 'the rulings file had %s lines before the third append, expected 2\n' \
+    "$rulings_lines_before" >&2
+  exit 1
+}
+[ "$rulings_lines_after" -eq 3 ] || {
+  printf 'the rulings file has %s lines after the third append, expected 3\n' \
+    "$rulings_lines_after" >&2
+  exit 1
+}
+[ "$rulings_first_line_before" = "$rulings_first_line_after" ] || {
+  printf 'the third append rewrote line 1 (%s -> %s)\n' \
+    "$rulings_first_line_before" "$rulings_first_line_after" >&2
+  exit 1
+}
+
 # ── AC-9b: the accepted stage set is closed, and matches the prose ───────────
 SKILL_STAGE_TOKENS="$(python3 -I -B - "$SKILL" <<'PY'
 import re
@@ -1653,14 +1784,22 @@ emit_quiet append-round-1 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 1 fix_round
 emit_quiet append-round-2 sdd_append_fix_ledger "$SDD_PARITY_LEDGER" 2 fix_rounds quality-fix \
   sdd-w1-t1-quality-review-a1 "$SDD_PARITY_TASK" "$SDD_PARITY_PRIOR" "$SDD_PARITY_FINDINGS"
 emit_quiet exhausted sdd_note_cap_exhausted "$SDD_PARITY_LEDGER" fix_rounds 4
+emit_quiet ruling-relative sdd_append_ruling relative.md decision why cost
+emit_quiet ruling-arity sdd_append_ruling "$SDD_PARITY_RULINGS" decision why
+emit_quiet ruling-empty-why sdd_append_ruling "$SDD_PARITY_RULINGS" decision '' cost
+emit_quiet ruling-one sdd_append_ruling "$SDD_PARITY_RULINGS" 'first decision' 'first why' 'first cost'
+emit_quiet ruling-two sdd_append_ruling "$SDD_PARITY_RULINGS" 'second decision' 'second why' 'second cost'
 cat "$SDD_PARITY_LEDGER"
+cat "$SDD_PARITY_RULINGS"
 PROBE
   export SDD_RUNTIME_FENCE="$TMP/runtime.sh"
   export SDD_PARITY_TASK="$task_path"
   export SDD_PARITY_PRIOR="$report_path"
   export SDD_PARITY_FINDINGS="$FINDINGS"
-  bash_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-bash.md" bash "$SDD_PARITY_PROBE")"
-  zsh_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-zsh.md" zsh -f "$SDD_PARITY_PROBE")"
+  bash_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-bash.md" \
+    SDD_PARITY_RULINGS="$RULINGS_DIR/parity-bash-rulings.md" bash "$SDD_PARITY_PROBE")"
+  zsh_parity_output="$(SDD_PARITY_LEDGER="$LEDGER_DIR/parity-zsh.md" \
+    SDD_PARITY_RULINGS="$RULINGS_DIR/parity-zsh-rulings.md" zsh -f "$SDD_PARITY_PROBE")"
   [ "$bash_parity_output" = "$zsh_parity_output" ] || {
     printf 'bash/zsh parity broke for the new SDD helpers\nbash:\n%s\nzsh:\n%s\n' \
       "$bash_parity_output" "$zsh_parity_output" >&2

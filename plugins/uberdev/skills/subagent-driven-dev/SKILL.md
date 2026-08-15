@@ -238,6 +238,29 @@ with os.fdopen(fd,"ab") as stream: stream.write(entry)
 PY
 }
 
+# A decision not on disk was not made. One append-only `rulings.md` per run,
+# living beside the fix ledgers in the controller's private run directory and
+# never inside the feature worktree — the worktree is what `git add -A` sweeps
+# into the branch. O_APPEND creates it at 0600 on the first ruling and appends
+# thereafter, O_NOFOLLOW refuses a symlink, and O_WRONLY on a directory is
+# EISDIR. One line per call, never truncated and never rewritten, so the
+# end-of-run roll-up is read back from the file instead of remembered.
+sdd_append_ruling() {
+  [ "$#" -eq 4 ] || return 2
+  local rulings_path="${@:1:1}" decision="${@:2:1}" why="${@:3:1}" cost="${@:4:1}"
+  case "$rulings_path" in /*) ;; *) return 2 ;; esac
+  [ -n "$decision" ] || return 2
+  [ -n "$why" ] || return 2
+  [ -n "$cost" ] || return 2
+  python3 -I -B - "$rulings_path" "$decision" "$why" "$cost" <<'PY' || return 2
+import os,sys
+rulings,decision,why,cost=sys.argv[1:]
+entry=("Ruling: %s — %s — %s\n" % (decision,why,cost)).encode("utf-8")
+fd=os.open(rulings,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,"ab") as stream: stream.write(entry)
+PY
+}
+
 sdd_plan_scope() {
   [ "$#" -ge 1 ] || return 2
   python3 -I -B - "${@:1:1}" <<'PY'
