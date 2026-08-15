@@ -227,11 +227,22 @@ jobs:
       - name: Install GNU timeout
         run: brew install coreutils
       - name: Run focused supervision smoke tests
+        # The two dispatch-* fixtures below also run on ubuntu and Windows, but
+        # only here do their preflight-arm rows discriminate: the resolver tries
+        # the absolute /usr/bin/timeout before any PATH name (RFC 0004 §3.8), and
+        # those runners ship one, so the bounded arm is taken there regardless of
+        # how each fixture binds its runtime PATH. macOS has no /usr/bin/timeout
+        # — GNU timeout arrives from the step above — so it is the only runner
+        # where a PATH that drops the host $PATH flips the dispatch onto the
+        # UNBOUNDED arm and reds the row (#548). tests/ci-wiring.test.sh pins
+        # both names into the macOS required-subset floor.
         run: |
           bash tests/review-pr-entry.test.sh && \
           bash tests/agent-dispatch.test.sh && \
           bash tests/child-dispatch.test.sh && \
           bash tests/dispatch-child-worktree-teardown.test.sh && \
+          bash tests/dispatch-background.test.sh && \
+          bash tests/dispatch-wezterm.test.sh && \
           bash tests/review-pr-workflow.test.sh && \
           bash tests/atomic-move.test.sh
 
