@@ -42,6 +42,21 @@
 #       `sdd_launch_prepared_batch` and still carries the dispatch-before-wait
 #       sentence, and no worker-facing section body countermands the wave
 #       contract with `in parallel`.
+#   L6  the CONTROLLER states the contract too, at the step that builds the
+#       handoff (step 4a): the rule itself, and the empirical reason for it.
+#       A template alone leaves the controller free to accept the seat it
+#       forbids.
+#   L7  and the `## Red Flags` / `**Never:**` list carries the counterpart row,
+#       so a reviewer an implementer spawned for itself reads as a defect to
+#       flag rather than as extra rigor.
+#
+# WHY L6/L7 ARE SEPARATE FROM L2. L2 asks whether the WORKER was told; L6/L7 ask
+# whether the CONTROLLER was. Both halves are load-bearing and neither implies
+# the other: a worker that ignores its prompt still gets its duplicate review
+# accepted unless the controller knows to reject it. Each of these two rows
+# opens with an ANCHOR guard — the step letter, the section headings — because
+# both predicates are scoped by a structural marker, and a renamed marker must
+# turn the row red rather than let it pass over an empty slice.
 #
 # WHY THE REGION RULE. Every one of these templates carries CONTROLLER-facing
 # prose outside the prompt it renders ("Use this template when dispatching a
@@ -500,7 +515,8 @@ control_row("L4.N", "negation-exempt in-section classifier",
 
 # --- L5: controller scoping preserved --------------------------------------
 SKILL = "plugins/uberdev/skills/subagent-driven-dev/SKILL.md"
-skill_text = "\n".join(read_lines(absolute(SKILL)))
+skill_lines = read_lines(absolute(SKILL))
+skill_text = "\n".join(skill_lines)
 WAVE_SENTENCE = "Prepare every handoff, preflight the complete wave, then dispatch before waiting."
 lost = []
 if "sdd_launch_prepared_batch" not in skill_text:
@@ -523,6 +539,108 @@ if countermanding:
         % ", ".join(countermanding))
 else:
     row(True, "L5b", "no worker-facing section countermands the parallel-wave contract")
+
+# --- L6: the controller states the contract at the step that builds the handoff
+# Step 4a is the only place the controller decides what a handoff carries, so it
+# is where the contract has to be stated on the controller side. The anchor is
+# the step letter as the wave loop writes it (three spaces, `a. `); if that
+# marker is renamed the row reds instead of scanning an empty slice.
+STEP_4A_RE = re.compile(r"^   a\. ")
+step_4a = [line for line in skill_lines if STEP_4A_RE.match(line)]
+if not step_4a:
+    row(False, "L6", "%s has no `   a. ` wave-loop step — the step-4a anchor was "
+                     "renamed and this row cannot be evaluated" % SKILL)
+else:
+    step_text = "\n".join(step_4a)
+    # Two halves, both required. The RULE alone reads as a preference; the
+    # empirical REASON is what tells a controller why a spawned reviewer is
+    # worth rejecting rather than banking (upstream's own finding: every
+    # reviewer a worker spawned duplicated the review the controller dispatched
+    # anyway — a full extra review seat per task).
+    states_rule = bool(
+        re.search(r"no-subagents", step_text, re.IGNORECASE)
+        and re.search(r"reviewer", step_text, re.IGNORECASE)
+    )
+    states_reason = bool(
+        re.search(r"duplicat", step_text, re.IGNORECASE)
+        and re.search(r"review seat", step_text, re.IGNORECASE)
+    )
+    if states_rule and states_reason:
+        row(True, "L6", "%s step 4a states the no-subagents contract and why it costs"
+            % SKILL)
+    else:
+        missing = []
+        if not states_rule:
+            missing.append("the no-subagents contract naming a reviewer")
+        if not states_reason:
+            missing.append("the empirical reason (a duplicated review seat)")
+        row(False, "L6", "%s step 4a does not state %s" % (SKILL, " nor ".join(missing)))
+
+# --- L7: the same rule as a red flag the controller can act on ---------------
+# Both range anchors are checked before the slice is taken: `awk` over a renamed
+# heading returns nothing at all, and a row scanned over nothing passes for the
+# wrong reason. `**Never:**` is checked too — it is what makes the bullets a
+# prohibition list rather than prose.
+RED_FLAGS_RE = re.compile(r"^## Red Flags$")
+QUESTIONS_RE = re.compile(r"^\*\*If subagent asks questions:\*\*")
+NEVER_RE = re.compile(r"^\*\*Never:\*\*")
+LABEL_RE = re.compile(r"^\*\*")
+BULLET_RE = re.compile(r"^- ")
+
+red_flags_at = next((i for i, line in enumerate(skill_lines) if RED_FLAGS_RE.match(line)), None)
+# The closing anchor is the FIRST match at or after the opening one — the same
+# slice `awk '/^## Red Flags$/,/^\*\*If subagent asks questions:\*\*/'` takes.
+questions_at = None
+if red_flags_at is not None:
+    questions_at = next(
+        (i for i in range(red_flags_at, len(skill_lines))
+         if QUESTIONS_RE.match(skill_lines[i])),
+        None,
+    )
+if red_flags_at is None:
+    row(False, "L7", "%s has no `## Red Flags` heading — the range anchor was renamed and "
+                     "the slice cannot be extracted" % SKILL)
+elif questions_at is None:
+    row(False, "L7", "%s has no `**If subagent asks questions:**` line after `## Red Flags` "
+                     "— the closing range anchor was renamed and the slice cannot be "
+                     "extracted" % SKILL)
+else:
+    never_at = next(
+        (i for i in range(red_flags_at, questions_at + 1) if NEVER_RE.match(skill_lines[i])),
+        None,
+    )
+    if never_at is None:
+        row(False, "L7", "%s `## Red Flags` carries no `**Never:**` list to hold the row"
+            % SKILL)
+    else:
+        bullets = []
+        for index in range(never_at + 1, questions_at):
+            line = skill_lines[index]
+            if LABEL_RE.match(line):
+                break
+            if BULLET_RE.match(line):
+                bullets.append(line)
+        # The row has to name all three of the parties involved — who spawned it
+        # (an implementer), what they spawned (a reviewer), and the act (spawn) —
+        # because a bullet naming only two of them is about something else: the
+        # list already carries "Let implementer self-review replace actual review"
+        # and "Dispatch multiple implementers without explicit file allowlists".
+        matching = [
+            line for line in bullets
+            if re.search(r"spawn", line, re.IGNORECASE)
+            and re.search(r"reviewer", line, re.IGNORECASE)
+            and re.search(r"implementer", line, re.IGNORECASE)
+        ]
+        if not bullets:
+            row(False, "L7", "%s `**Never:**` list is empty inside the Red Flags slice"
+                % SKILL)
+        elif matching:
+            row(True, "L7", "%s `**Never:**` flags a reviewer an implementer spawned for "
+                            "itself (%d bullet(s) scanned)" % (SKILL, len(bullets)))
+        else:
+            row(False, "L7", "%s `**Never:**` has no row about a reviewer an implementer "
+                             "spawned for itself (%d bullet(s) scanned)"
+                % (SKILL, len(bullets)))
 
 sys.stdout.write("\n".join(rows) + "\n")
 PY
@@ -552,7 +670,7 @@ if [ "$ROW_COUNT" -eq 0 ]; then
   echo "FATAL: the leaf-worker guard produced no rows" >&2
   exit 2
 fi
-for ident in L0 L1 L2 L3a L3b L4 L4.C L4.N L5a L5b; do
+for ident in L0 L1 L2 L3a L3b L4 L4.C L4.N L5a L5b L6 L7; do
   if ! grep -qF -- "$TAB$ident " "$ROWS"; then
     echo "FATAL: the leaf-worker guard reported no $ident row" >&2
     exit 2

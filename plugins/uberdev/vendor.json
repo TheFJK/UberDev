@@ -432,7 +432,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "7ad6f097ca83359fa8234b5868c5d4dc3dba7537d8572ac7bb0f5f2fa955d456"
+          "sha256": "b5a0502828d919eff731c85458abf66f27176ee301b3d15f261e56200d2c7d97"
         },
         {
           "path": "code-quality-reviewer-prompt.md",
