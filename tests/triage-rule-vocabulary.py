@@ -34,8 +34,11 @@ import re
 import sys
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "solve-routing"
-# 6 fixed + 12 clamp/override (floor|ceiling|override x 4 tiers) + 5 large-label.
-MIN_DECLARED_TOKENS = 23
+# 6 fixed + 12 clamp/override (floor|ceiling|override x 4 tiers) + 5 large-label
+# + 3 escalation-label (small|medium|large; `trivial` is deliberately NOT an
+# escalation target -- see the G3 canary list below, which pins that exclusion
+# from the validator side).
+MIN_DECLARED_TOKENS = 26
 
 
 def load(path):

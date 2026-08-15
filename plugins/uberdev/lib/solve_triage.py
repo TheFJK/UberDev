@@ -59,6 +59,25 @@ LARGE_LABELS = {"epic", "needs-discussion", "architectural", "architecture", "in
 TRIVIAL_LABELS = {"typo", "docs", "documentation", "chore", "good-first-issue"}
 TRIVIAL_TITLE_RE = re.compile(r"\b(?:typo|rename|bump|version|readme)\b", re.I)
 
+# The one-way tier ratchet (#532). Tier is computed ONCE, at dispatch, from
+# issue-body signals; a solver that opens the code and discovers the issue is
+# structurally larger than triage said had no way to say so, and ran the lighter
+# workflow to the end. It cannot re-classify itself mid-run either — the tier is
+# already baked into a signed, immutable routing context by the time it starts.
+# So the channel is the issue itself: the solver applies `uberdev:tier-<tier>`
+# and the NEXT classification reads it.
+#
+# UPGRADE-ONLY BY CONSTRUCTION, in two independent ways, because a downgrade path
+# here would be a label-shopping hatch for skipping brainstorm and plan review:
+#   * `trivial` is excluded (TIERS[1:]) — escalating *to* trivial is an upgrade
+#     from nothing, so the tier the ceremony bottoms out at is not addressable;
+#   * the comparison below only ever RAISES `raw`, so a label naming a tier at or
+#     below the computed one is inert rather than an error.
+# Both matter: the first makes the vocabulary unable to express a downgrade, the
+# second makes an expressible-but-lower one a no-op.
+ESCALATION_LABEL_PREFIX = "uberdev:tier-"
+ESCALATION_LABELS = {ESCALATION_LABEL_PREFIX + tier: tier for tier in TIERS[1:]}
+
 # The SIX rule tokens that are not derived from TIERS or LARGE_LABELS.
 _FIXED_RULE_TOKENS = frozenset({
     "large:three-files", "large:multi-component-high-risk", "large:cross-cutting-refactor",
@@ -83,6 +102,7 @@ _FIXED_RULE_TOKENS = frozenset({
 TRIAGE_RULE_TOKENS = frozenset(
     {f"{kind}:{tier}" for kind in ("floor", "ceiling", "override") for tier in TIERS}
     | {f"large-label:{label}" for label in LARGE_LABELS}
+    | {f"escalation-label:{tier}" for tier in ESCALATION_LABELS.values()}
     | _FIXED_RULE_TOKENS
 )
 
@@ -317,6 +337,24 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     else:
         raw = "medium"
         matched.append("medium:fallback")
+
+    # The ratchet, applied to `raw` and nothing else. Moving the RAW tier is what
+    # makes the rest compose untouched: `source` stays "computed" for a pure
+    # escalation (it IS a computed tier, just from a signal the last run left),
+    # the floor/ceiling/override machinery below clamps the escalated value, and
+    # solve-launcher.sh reads `raw_tier` off this call before its own shell-side
+    # clamp, so no launcher change is needed. The computed rule token is left in
+    # `matched` beside the escalation one, so the trail reads "computed trivial,
+    # escalated to medium" rather than "was always medium".
+    labelled = [ESCALATION_LABELS[name] for name in labels if name in ESCALATION_LABELS]
+    if labelled:
+        # Exactly one token, ever: `matched_rules` is length-capped and
+        # duplicate-checked by the routing-context validator, so emitting one per
+        # label would be a dispatch failure rather than merely noisy.
+        highest = max(labelled, key=TIERS.index)
+        if TIERS.index(highest) > TIERS.index(raw):
+            raw = highest
+            matched.append(f"escalation-label:{highest}")
 
     clamps_valid = not (floor and ceiling and TIERS.index(floor) > TIERS.index(ceiling))
     clamped = clamp(raw, floor, ceiling)
