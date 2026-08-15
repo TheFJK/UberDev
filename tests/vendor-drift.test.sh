@@ -443,6 +443,18 @@ gh_mutations() {
   grep -cE '^gh issue (create|edit|comment)' "$1" || true
 }
 
+# fingerprint_of <body> -> the drift-fingerprint the body carries, or empty.
+# Read out of the RENDERED body rather than recomputed here: a second
+# implementation of the payload would agree with itself while drifting from the
+# one whose stability D9 and D-REL12 are about.
+fingerprint_of() {
+  python3 - "$1" <<'PY'
+import re, sys
+m = re.search(r"drift-fingerprint:\s*([0-9a-f]+)", sys.argv[1])
+print(m.group(1) if m else "")
+PY
+}
+
 # --- anti-vacuity preflight ------------------------------------------------
 run_drift "$WORK/preflight.log" ok "$WATERMARK" "" "[]" --dry-run
 if [ "$DRIFT_RC" -ne 0 ]; then
@@ -535,12 +547,7 @@ echo "== D9-D11: fingerprint, dry-run, and declared divergences =="
 # D9 — the fingerprint is unchanged: the body is refreshed, but no new comment
 # is posted. Otherwise a stable drift set generates a weekly comment forever.
 run_drift "$WORK/fp.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]" --dry-run
-FP="$(python3 - <<'PY' "$DRIFT_OUT"
-import re, sys
-m = re.search(r"drift-fingerprint:\s*([0-9a-f]+)", sys.argv[1])
-print(m.group(1) if m else "")
-PY
-)"
+FP="$(fingerprint_of "$DRIFT_OUT")"
 if [ -n "$FP" ]; then
   SAME='[{"number":902,"body":"<!-- uberdev-vendor-drift-v1 -->\ndrift-fingerprint: '"$FP"'"}]'
   run_drift "$WORK/d9.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "$SAME"
@@ -1227,6 +1234,798 @@ elif [ "$DREL5_CODES" = "2" ] && [ "$DREL3_RC" -eq 1 ]; then
   ok "D-REL5 every broken release review point exits 2 in BOTH modes, named, before any subprocess, and stays distinct from an unanswerable tag query's rc 1"
 else
   no "D-REL5 the two failure modes collide: broken release metadata={$DREL5_CODES}, unanswerable tag query=$DREL3_RC"
+fi
+
+echo
+echo "== D-REL6-D-REL12: release verdicts, adjudication, and actionability (#535) =="
+
+# ---------------------------------------------------------------------------
+# WHY THESE ROWS EXIST. Resolving tags (D-REL1-D-REL4) only gives the job a
+# second OBSERVABLE. #535 is about the second VERDICT: RFC 0019 §7 adjudicates
+# releases, so "upstream cut a release you have not adjudicated" has to be a
+# finding in its own right, actionable on its own, and distinguishable from raw
+# HEAD drift in both directions.
+#
+# D-REL6 is the falsifiability anchor: it reproduces the 6.3.0 miss by
+# construction — a freshly cut release, every watermark level, not one changed
+# file — and demands an issue. Against a job that only reads HEAD that scenario
+# is the quietest possible "no drift", so the row CANNOT pass without the
+# verdict layer. Two more failure shapes it pins are one layer down and easy to
+# ship half of:
+#
+#   * `build_report`'s third return value is what `main()` gates issue creation
+#     on. A release finding rendered into a body that still reports "not
+#     drifting" opens nothing at all — #535's failure moved one level deeper,
+#     which is why D-REL6 asserts the LIVE run's `gh issue create` and not just
+#     the body;
+#   * the fingerprint decides whether an already-open issue gets a comment. A
+#     payload that ignores release state fingerprints a new release identically
+#     to last week, so the body is refreshed silently and nobody is told
+#     (D-REL12).
+#
+# The rows deliberately cover all four verdicts that can disagree with the
+# register — newer, vanished, moved, and the pre-release policy — because each
+# is one line of the same lookup, and a half-shipped lookup is a control that is
+# right about the case its author had in mind and silently wrong about the rest.
+# ---------------------------------------------------------------------------
+
+# The fixture set for these rows, all derived from $TAGS_DEFAULT and the
+# committed register so no label, sha or id is ever typed. Kept separate from
+# the D-REL1 builder above: these tables are MUTATIONS of the default one, and
+# deriving them from it is what keeps them describing the same register.
+REL_ENV="$WORK/tags-rel.env"
+TAGS_NEWER="$WORK/tags-newer.tbl"
+TAGS_VANISHED="$WORK/tags-vanished.tbl"
+TAGS_NONE="$WORK/tags-none.tbl"
+TAGS_MOVED="$WORK/tags-moved.tbl"
+TAGS_RC_ONLY="$WORK/tags-rc-only.tbl"
+TAGS_RC_RECORDED="$WORK/tags-rc-recorded.tbl"
+TAGS_RC_PRE_ONLY="$WORK/tags-rc-pre-only.tbl"
+TAGS_BUILDMETA="$WORK/tags-buildmeta.tbl"
+TAGS_WORDSEP="$WORK/tags-wordsep.tbl"
+TAGS_MOVED_NEWER="$WORK/tags-moved-newer.tbl"
+TAGS_MOVED_NEWER2="$WORK/tags-moved-newer2.tbl"
+RC_ROOT="$WORK/rc-review-point"
+mkdir -p "$RC_ROOT/plugins/uberdev"
+python3 - "$REGISTER" "$TAGS_DEFAULT" "$REL_ENV" "$TAGS_NEWER" "$TAGS_VANISHED" \
+         "$TAGS_NONE" "$TAGS_MOVED" "$TAGS_RC_ONLY" "$TAGS_RC_RECORDED" \
+         "$TAGS_RC_PRE_ONLY" "$TAGS_BUILDMETA" "$TAGS_WORDSEP" \
+         "$TAGS_MOVED_NEWER" "$TAGS_MOVED_NEWER2" \
+         "$RC_ROOT/plugins/uberdev/vendor.json" \
+         "$LEAD_SLUG" "$LEAD_LABEL" "$NEWER_LABEL" "$NEWER_SHA" "$RC_LABEL" \
+         "$RC_SHA" "$DRIFT" \
+         <<'PY' || { echo "  ABORT — could not derive the release-verdict fixtures"; exit 99; }
+import hashlib, importlib.util, json, re, shlex, sys
+
+(reg, default_tbl, envfile, newer_tbl, vanished_tbl, none_tbl, moved_tbl,
+ rc_only_tbl, rc_recorded_tbl, rc_pre_only_tbl, buildmeta_tbl, wordsep_tbl,
+ moved_newer_tbl, moved_newer2_tbl, rc_register,
+ lead_slug, lead_label, newer_label, newer_sha, rc_label,
+ rc_sha, drift) = sys.argv[1:23]
+
+# The ordering claims below are checked against the TOOL's own key, not against
+# a local re-implementation of it: a fixture that keys versions itself would
+# keep agreeing with itself while the two drifted apart, and every row here
+# turns on which of two labels is newer. Importing is side-effect free — the
+# module guards `main()` behind `if __name__ == "__main__"`.
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+release_key = vendor_drift.release_key
+
+d = json.load(open(reg, encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+labelled = [u for u in used if ups.get(u, {}).get("last_reviewed_release")]
+labelfree = [u for u in used if not ups.get(u, {}).get("last_reviewed_release")]
+if not labelled:
+    raise SystemExit("no used upstream declares last_reviewed_release — every "
+                     "verdict row below would be vacuous")
+if not labelfree:
+    raise SystemExit("every used upstream declares last_reviewed_release — the "
+                     "HEAD-only upstream D-REL10 contrasts against is gone")
+
+lead = labelled[0]
+meta = ups[lead]
+# The two builders must agree about WHICH upstream leads, or the tables below
+# would describe one upstream while the rows assert against another.
+if meta["repo"] != lead_slug or meta["last_reviewed_release"] != lead_label:
+    raise SystemExit("fixture builders disagree on the lead upstream: register "
+                     "says %s/%s, the shell passed %s/%s"
+                     % (meta["repo"], meta["last_reviewed_release"],
+                        lead_slug, lead_label))
+recorded_commit = meta["last_reviewed_commit"]
+
+rows = [line.rstrip("\n").split("\t")
+        for line in open(default_tbl, encoding="utf-8") if line.strip()]
+
+
+def tag_name(ref):
+    name = ref.split("refs/tags/", 1)[1]
+    return name[:-3] if name.endswith("^{}") else name
+
+
+def is_peel(ref):
+    return ref.endswith("^{}")
+
+
+def write(path, table):
+    open(path, "w", encoding="utf-8").write(
+        "".join("%s\t%s\t%s\n" % tuple(r) for r in table))
+
+
+recorded_rows = [r for r in rows
+                 if r[0] == lead_slug and tag_name(r[2]) == lead_label]
+if len(recorded_rows) != 2:
+    raise SystemExit("the default table carries %d row(s) for the recorded "
+                     "label, not the annotated-tag pair these mutations are "
+                     "derived from" % len(recorded_rows))
+
+# The ordering every row below depends on, asserted with the tool's own key.
+if not release_key(lead_label) < release_key(newer_label):
+    raise SystemExit("%r does not rank above the recorded %r, so D-REL6 would "
+                     "assert a 'newer release' that is not newer"
+                     % (newer_label, lead_label))
+if not release_key(lead_label) < release_key(rc_label) < release_key(newer_label):
+    raise SystemExit("%r does not sit strictly between the recorded label and "
+                     "%r, so D-REL11a would pass for the wrong reason: the "
+                     "pre-release has to be ABOVE the review point for the "
+                     "policy that excludes it to be what keeps it quiet"
+                     % (rc_label, newer_label))
+
+# D-REL6 / D-REL12: a release strictly newer than the recorded review point,
+# with every watermark level. The 6.3.0 miss, by construction.
+write(newer_tbl, rows + [[lead_slug, newer_sha, "refs/tags/%s" % newer_label]])
+
+# D-REL8(a): the recorded label is gone while the remote still publishes other
+# numbered releases — what a deleted or renamed release actually looks like.
+kept = [r for r in rows
+        if not (r[0] == lead_slug and tag_name(r[2]) == lead_label)]
+if not [r for r in kept
+        if r[0] == lead_slug and release_key(tag_name(r[2])) is not None]:
+    raise SystemExit("removing the recorded label left the lead slug with no "
+                     "numbered tag at all, which is D-REL8(b)'s case — (a) "
+                     "would stop being a distinct shape")
+write(vanished_tbl, kept)
+
+# D-REL8(b): the remote publishes nothing whatsoever for that slug. The empty
+# set has to reach the same verdict as (a) — `recorded not in published` — and
+# not fall down a "no tags, nothing to compare" hole.
+write(none_tbl, [r for r in rows if r[0] != lead_slug])
+
+# D-REL9: the recorded label IS published, at a different commit. Only the PEEL
+# line moves: the tag object's own oid is not what the register records, so
+# rewriting that instead would prove nothing about the comparison.
+moved_sha = hashlib.sha1(
+    ("moved|%s|%s" % (lead_slug, lead_label)).encode("utf-8"),
+    usedforsecurity=False).hexdigest()
+# D-REL12's re-tag comparison needs a SECOND publishing commit for the same
+# label, derived the same way.
+moved_sha2 = hashlib.sha1(
+    ("moved-again|%s|%s" % (lead_slug, lead_label)).encode("utf-8"),
+    usedforsecurity=False).hexdigest()
+if len({moved_sha, moved_sha2, recorded_commit}) != 3:
+    raise SystemExit("the derived 'published elsewhere' commits collide with "
+                     "each other or with the recorded one — D-REL9 would "
+                     "assert no disagreement and D-REL12's re-tag comparison "
+                     "would compare a table with itself")
+
+
+def retagged(peel_sha):
+    """The default table with the recorded label's peel line re-pointed."""
+    return [[r[0],
+             peel_sha if (r[0] == lead_slug
+                          and tag_name(r[2]) == lead_label
+                          and is_peel(r[2])) else r[1],
+             r[2]] for r in rows]
+
+
+write(moved_tbl, retagged(moved_sha))
+
+# D-REL12's third comparison: the SAME `moved` verdict at two different
+# published commits, with a release above the review point in both. That is the
+# state in which `newest_commit` stops covering a re-tag — it names
+# `<newer>`'s commit in both runs — so the only datum left that moves is the
+# one the `moved` finding renders as `upstream publishes ... at ...`. It is
+# also exactly the state in which a re-tag is most worth telling someone about.
+newer_row = [lead_slug, newer_sha, "refs/tags/%s" % newer_label]
+moved_newer_rows = retagged(moved_sha) + [newer_row]
+moved_newer2_rows = retagged(moved_sha2) + [newer_row]
+if len(moved_newer_rows) != len(moved_newer2_rows) or sum(
+        1 for a, b in zip(moved_newer_rows, moved_newer2_rows) if a != b) != 1:
+    raise SystemExit("the two re-tag tables differ in %d row(s), not exactly "
+                     "one — a fingerprint difference between them would no "
+                     "longer be attributable to the re-tag alone"
+                     % sum(1 for a, b in zip(moved_newer_rows,
+                                             moved_newer2_rows) if a != b))
+write(moved_newer_tbl, moved_newer_rows)
+write(moved_newer2_tbl, moved_newer2_rows)
+
+# D-REL11(a): the only thing published above the recorded review point is a
+# PRE-release. `<newer>` itself is deliberately absent from this table.
+write(rc_only_tbl, rows + [[lead_slug, rc_sha, "refs/tags/%s" % rc_label]])
+
+# D-REL11(b): the recorded review point is ITSELF a pre-release, published at
+# the recorded commit, with a final release above it. The symmetric case: an
+# upstream whose vocabulary is pre-release-shaped does owe adjudication.
+rc_recorded_label = "%s-rc1" % lead_label
+if rc_recorded_label == lead_label:
+    raise SystemExit("the pre-release review point is identical to the "
+                     "recorded label — this sub-case would model nothing")
+if not release_key(rc_recorded_label) < release_key(newer_label):
+    raise SystemExit("%r does not rank below %r, so D-REL11b's 'newer' verdict "
+                     "would not be newer" % (rc_recorded_label, newer_label))
+write(rc_recorded_tbl,
+      rows + [[lead_slug, recorded_commit,
+               "refs/tags/%s" % rc_recorded_label],
+              [lead_slug, newer_sha, "refs/tags/%s" % newer_label]])
+rc_reg = json.load(open(reg, encoding="utf-8"))
+rc_reg["upstreams"][lead]["last_reviewed_release"] = rc_recorded_label
+json.dump(rc_reg, open(rc_register, "w", encoding="utf-8"), indent=2,
+          ensure_ascii=False)
+
+# D-REL11(d): the same pre-release review point, with the ONLY name above it
+# another PRE-release. This is the half of the policy `allow_pre` alone decides,
+# and the half (b) cannot reach: (b) publishes a FINAL above the review point,
+# which a candidate set with every pre-release stripped still reports as newer —
+# so (b) reaches the same verdict, names the same release and passes whether the
+# clause exists or not. Here `<newer>` itself is deliberately WITHHELD, so
+# without the clause the newest candidate collapses to the plain recorded stem
+# and the finding names a different release.
+if not vendor_drift.is_prerelease(rc_label):
+    raise SystemExit("%r is not a pre-release by the tool's own key, so this "
+                     "sub-case would assert nothing about the clause that "
+                     "admits one" % rc_label)
+if not release_key(rc_recorded_label) < release_key(rc_label):
+    raise SystemExit("%r does not rank above the pre-release review point %r, "
+                     "so no 'newer release' verdict is owed for it"
+                     % (rc_label, rc_recorded_label))
+# ...and it must outrank the plain recorded stem too, which is the label the
+# candidate set falls back to once pre-releases are excluded. Without this the
+# two spellings would report the same name and the row would pin nothing.
+if not release_key(lead_label) < release_key(rc_label):
+    raise SystemExit("%r does not rank above %r, so excluding pre-releases "
+                     "would report the same newest release and this sub-case "
+                     "would be vacuous" % (rc_label, lead_label))
+if [r for r in rows if tag_name(r[2]) == newer_label]:
+    raise SystemExit("the default table already publishes the final %r, which "
+                     "this sub-case must withhold" % newer_label)
+write(rc_pre_only_tbl,
+      rows + [[lead_slug, recorded_commit,
+               "refs/tags/%s" % rc_recorded_label],
+              [lead_slug, rc_sha, "refs/tags/%s" % rc_label]])
+
+# D-REL11(c): two release names that CARRY the punctuation a pre-release
+# carries, and are not pre-releases. SemVer §10 puts build metadata outside the
+# version, and the `-` in `release-1.2.3` is a word separator — so both of these
+# ARE releases above the review point, while the obvious way to spell the
+# pre-release filter (a substring test for `-` or `+`) silently drops both. That
+# is a miss of exactly the class #535 exists to close, and without this row the
+# clause that prevents it is one no test can red.
+newer_nums = re.findall(r"\d+", newer_label)
+if not newer_nums:
+    raise SystemExit("%r carries no digits to build a release name from"
+                     % newer_label)
+buildmeta_label = "%s+build.1" % newer_label
+wordsep_label = "release-%s" % ".".join(newer_nums)
+buildmeta_sha = hashlib.sha1(("buildmeta|%s" % buildmeta_label).encode("utf-8"),
+                             usedforsecurity=False).hexdigest()
+wordsep_sha = hashlib.sha1(("wordsep|%s" % wordsep_label).encode("utf-8"),
+                           usedforsecurity=False).hexdigest()
+for label, punctuation in ((buildmeta_label, "+"), (wordsep_label, "-")):
+    # The row proves nothing unless the name really does carry the character a
+    # substring test would trip on...
+    if punctuation not in label:
+        raise SystemExit("%r carries no %r, so a substring-based pre-release "
+                         "filter would keep it and this sub-case would assert "
+                         "nothing" % (label, punctuation))
+    # ...and unless the tool's own key agrees it outranks the review point.
+    if not release_key(lead_label) < release_key(label):
+        raise SystemExit("%r does not rank above the recorded %r, so no "
+                         "'newer release' verdict is owed for it"
+                         % (label, lead_label))
+write(buildmeta_tbl,
+      rows + [[lead_slug, buildmeta_sha, "refs/tags/%s" % buildmeta_label]])
+write(wordsep_tbl,
+      rows + [[lead_slug, wordsep_sha, "refs/tags/%s" % wordsep_label]])
+
+env = {
+    "LEAD_ID": lead,
+    "LEAD_COMMIT12": recorded_commit[:12],
+    "MOVED_TAG_SHA12": moved_sha[:12],
+    "RC_RECORDED_LABEL": rc_recorded_label,
+    "BUILDMETA_LABEL": buildmeta_label,
+    "WORDSEP_LABEL": wordsep_label,
+}
+open(envfile, "w", encoding="utf-8").write(
+    "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in sorted(env.items())))
+PY
+. "$REL_ENV"
+
+ADJUDICATION_HEADING='## Releases awaiting adjudication'
+COMPONENT_HEADING='## Components with upstream changes since their watermark'
+
+# D-REL6 — THE FALSIFIABILITY ANCHOR. Upstream cut a release the register has
+# not adjudicated; HEAD has not moved, so not one file has changed. Against a
+# HEAD-only job this is the quietest possible report, which is exactly how the
+# 6.3.0 walk came to be triggered by a human noticing a directory in the plugin
+# cache. The LIVE run is asserted too: a finding rendered into a body that
+# `main()` still reads as "not drifting" opens no issue at all.
+TAGS_TABLE="$TAGS_NEWER"
+run_drift "$WORK/drel6-dry.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL6_RC="$DRIFT_RC"
+DREL6_BODY="$DRIFT_OUT"
+run_drift "$WORK/drel6.log" ok "$WATERMARK" "" "[]"
+TAGS_TABLE=""
+DREL6_FAILS=''
+[ "$DREL6_RC" -eq 0 ] || DREL6_FAILS="dry-run rc=$DREL6_RC"
+grep -qF -e "$ADJUDICATION_HEADING" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }no '$ADJUDICATION_HEADING' section"
+grep -qF -e "### \`$LEAD_ID\`" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the finding does not name upstream $LEAD_ID"
+# Body-wide presence, and deliberately NOT a claim about the finding: every one
+# of these tokens is also printed by the neutral HEADs and tags blocks above, so
+# a bare-token match here proves only that the run resolved what it was given.
+# The lines the FINDING owns are asserted whole, further down.
+for token in "$LEAD_LABEL" "$NEWER_LABEL" "${NEWER_SHA:0:12}"; do
+  grep -qF -e "$token" <<<"$DREL6_BODY" \
+    || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the report never names $token"
+done
+# The release finding must be its OWN section, not smuggled into the component
+# diff — nothing has changed upstream, so that section must not exist here.
+if grep -qF -e "$COMPONENT_HEADING" <<<"$DREL6_BODY"; then
+  DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the release finding was rendered as component drift"
+fi
+if grep -qF -e '**No drift.**' <<<"$DREL6_BODY"; then
+  DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the body claims no drift while carrying a release finding"
+fi
+# The per-id standing block is the OTHER half of that same summary, and it is
+# just as free to contradict the section below it: every token asserted above
+# also appears in the neutral `Upstream tags resolved this run:` block, so none
+# of them reads the standing line. Assert the whole line — the id-and-slug
+# keying together with the state-specific clause — or the standing may render
+# `level` three lines above "upstream published a newer release".
+DREL6_STANDING="- \`$LEAD_ID\` (\`$LEAD_SLUG\`): recorded \`$LEAD_LABEL\`; upstream has since published \`$NEWER_LABEL\`"
+grep -qF -e "$DREL6_STANDING" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the standing block does not state the newer standing; want '$DREL6_STANDING'"
+# A finding with no remedy is one no reader can clear. The remedy has to name
+# the EDIT — both register fields, on THIS upstream. Asserting `RFC 0019 §7`
+# alone would assert nothing: the section preamble already carries it.
+DREL6_REMEDY="advance \`last_reviewed_release\` and \`last_reviewed_commit\` on \`upstreams.$LEAD_ID\`"
+grep -qF -e "$DREL6_REMEDY" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the finding states no remedy; want '$DREL6_REMEDY'"
+# ...and every finding names the remote it is about. The component section is
+# absent here (asserted directly above), so its own differently-shaped
+# `- upstream:` line cannot be what satisfies this.
+grep -qF -e "- upstream: \`$LEAD_SLUG\`" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the finding does not name the upstream remote $LEAD_SLUG"
+# The finding's two DATA lines, asserted whole for the same reason the standing
+# line is: their tokens all leak from the blocks above, so nothing else in this
+# row reads them. Both are load-bearing. Without the review point the reader is
+# never told WHICH adjudication this delta is measured from — an upstream
+# records more than one label over time. Without the newest release's commit
+# there is no object id to review the delta AGAINST: a finding that names the
+# release but not what it points at cannot be worked from.
+DREL6_REVIEW_POINT="- recorded review point: \`$LEAD_LABEL\` (\`$LEAD_COMMIT12\`)"
+grep -qF -e "$DREL6_REVIEW_POINT" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the finding does not state the recorded review point; want '$DREL6_REVIEW_POINT'"
+DREL6_NEWEST="- newest published release: \`$NEWER_LABEL\` (\`${NEWER_SHA:0:12}\`)"
+grep -qF -e "$DREL6_NEWEST" <<<"$DREL6_BODY" \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }the finding does not name the newest release and its commit; want '$DREL6_NEWEST'"
+DREL6_CREATES="$(grep -cE '^gh issue create' "$WORK/drel6.log" || true)"
+[ "$DREL6_CREATES" = "1" ] \
+  || DREL6_FAILS="${DREL6_FAILS}${DREL6_FAILS:+; }gh issue create ran $DREL6_CREATES time(s), want 1"
+if [ -z "$DREL6_FAILS" ]; then
+  ok "D-REL6 a release newer than the recorded review point is a finding, and opens the issue on its own"
+else
+  no "D-REL6 an unadjudicated release was not reported: $DREL6_FAILS"
+fi
+
+# D-REL7 — the converse, and the noise control. HEAD has moved and files have
+# changed, but upstream has published nothing above the recorded review point.
+# Unreleased commits stay HEAD drift: rendering them as a release obligation is
+# what teaches the reader to mute the issue.
+run_drift "$WORK/drel7.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]" --dry-run
+DREL7_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL7_FAILS="rc=$DRIFT_RC"
+grep -qF -e "$COMPONENT_HEADING" <<<"$DRIFT_OUT" \
+  || DREL7_FAILS="${DREL7_FAILS}${DREL7_FAILS:+; }the component drift section is gone"
+if grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT"; then
+  DREL7_FAILS="${DREL7_FAILS}${DREL7_FAILS:+; }unreleased commits were reported as a release obligation"
+fi
+if [ -z "$DREL7_FAILS" ]; then
+  ok "D-REL7 HEAD drift with no new release stays HEAD drift, with no adjudication section"
+else
+  no "D-REL7 HEAD drift and release drift were conflated: $DREL7_FAILS"
+fi
+
+# D-REL8 — the recorded review point is not published upstream, in both shapes:
+# other numbered releases still exist, and the remote publishes nothing at all.
+# rc 0 is the load-bearing half. A published set that DISAGREES with the
+# register is a finding, and exiting 1 would abort before `gh issue edit` and
+# suppress the very thing it found — the discriminator is "could the query be
+# answered?", not "did the answer please us".
+DREL8_FAILED=0
+for spec in "still-published|$TAGS_VANISHED" "publishes-nothing|$TAGS_NONE"; do
+  IFS='|' read -r shape table <<<"$spec"
+  TAGS_TABLE="$table"
+  run_drift "$WORK/drel8-$shape-dry.log" ok "$WATERMARK" "" "[]" --dry-run
+  DREL8_RC="$DRIFT_RC"
+  DREL8_BODY="$DRIFT_OUT"
+  run_drift "$WORK/drel8-$shape.log" ok "$WATERMARK" "" "[]"
+  TAGS_TABLE=""
+  DREL8_CREATES="$(grep -cE '^gh issue create' "$WORK/drel8-$shape.log" || true)"
+  DREL8_FAILS=''
+  [ "$DREL8_RC" -eq 0 ] || DREL8_FAILS="rc=$DREL8_RC, want 0"
+  [ "$DREL8_CREATES" = "1" ] \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }gh issue create ran $DREL8_CREATES time(s), want 1"
+  grep -qF -e 'is not published upstream' <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }no finding heading says the review point is not published upstream"
+  grep -qF -e "$LEAD_LABEL" <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the report never names $LEAD_LABEL"
+  grep -qF -e "### \`$LEAD_ID\`" <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the finding does not name upstream $LEAD_ID"
+  # The standing block has to agree with the finding. Its clause is a DIFFERENT
+  # string from the `###` heading asserted above, so this is not a duplicate:
+  # the heading reads "...review point is not published upstream", the standing
+  # line "...; not published upstream at all". Left unasserted, the standing may
+  # report this upstream as level with a release it does not publish.
+  DREL8_STANDING="- \`$LEAD_ID\` (\`$LEAD_SLUG\`): recorded \`$LEAD_LABEL\`; not published upstream at all"
+  grep -qF -e "$DREL8_STANDING" <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the standing block does not state the vanished standing; want '$DREL8_STANDING'"
+  # A heading and a review point are not a finding: without the diagnosis the
+  # reader is never told what is wrong, and without the remedy there is no edit
+  # that clears it. Both are prose no other assertion reads.
+  grep -qF -e 'upstream publishes no tag by that name' <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the finding never diagnoses what disagrees"
+  DREL8_REMEDY="reconcile \`upstreams.$LEAD_ID.last_reviewed_release\`"
+  grep -qF -e "$DREL8_REMEDY" <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the finding states no remedy; want '$DREL8_REMEDY'"
+  # ...and it has to say WHICH review point vanished. The bare `$LEAD_LABEL`
+  # check above cannot: that token is also in the tags block and in the standing
+  # line asserted just above, so the finding itself may state no review point at
+  # all. On an upstream that has recorded more than one label over time, a
+  # finding that names none of them is one no reader can act on.
+  DREL8_REVIEW_POINT="- recorded review point: \`$LEAD_LABEL\` (\`$LEAD_COMMIT12\`)"
+  grep -qF -e "$DREL8_REVIEW_POINT" <<<"$DREL8_BODY" \
+    || DREL8_FAILS="${DREL8_FAILS}${DREL8_FAILS:+; }the finding does not state which review point vanished; want '$DREL8_REVIEW_POINT'"
+  if [ -n "$DREL8_FAILS" ]; then
+    DREL8_FAILED=1
+    no "D-REL8 [$shape] a review point upstream does not publish: $DREL8_FAILS"
+  fi
+done
+if [ "$DREL8_FAILED" -eq 0 ]; then
+  ok "D-REL8 a review point upstream no longer publishes is reported at rc 0, in both shapes"
+fi
+
+# D-REL9 — the recorded label is published, at a commit the register has never
+# seen: a release re-tagged in place, which is the one shape a sha comparison
+# catches and a name comparison alone cannot. The finding has to name BOTH
+# commits, or the reader cannot tell which side moved.
+TAGS_TABLE="$TAGS_MOVED"
+run_drift "$WORK/drel9-dry.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL9_RC="$DRIFT_RC"
+DREL9_BODY="$DRIFT_OUT"
+run_drift "$WORK/drel9.log" ok "$WATERMARK" "" "[]"
+TAGS_TABLE=""
+DREL9_CREATES="$(grep -cE '^gh issue create' "$WORK/drel9.log" || true)"
+DREL9_FAILS=''
+[ "$DREL9_RC" -eq 0 ] || DREL9_FAILS="rc=$DREL9_RC, want 0"
+[ "$DREL9_CREATES" = "1" ] \
+  || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }gh issue create ran $DREL9_CREATES time(s), want 1"
+for token in "$LEAD_COMMIT12" "$MOVED_TAG_SHA12" "### \`$LEAD_ID\`"; do
+  grep -qF -e "$token" <<<"$DREL9_BODY" \
+    || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }the report never names $token"
+done
+# Neither sha above is a claim about the FINDING, and both leak in opposite
+# directions: `$LEAD_COMMIT12` is a prefix of the 40-hex HEAD line (this
+# fixture's watermark IS the recorded commit) and `$MOVED_TAG_SHA12` is what
+# the neutral tags block prints as the newest tag's peel, since the re-tagged
+# review point is still the newest name published here. So the row whose name
+# is "naming both commits" needs both of the finding's own lines asserted
+# WHOLE — otherwise the `moved` finding can ship as heading, slug and remedy,
+# naming neither side of the disagreement it reports.
+DREL9_REVIEW_POINT="- recorded review point: \`$LEAD_LABEL\` (\`$LEAD_COMMIT12\`)"
+grep -qF -e "$DREL9_REVIEW_POINT" <<<"$DREL9_BODY" \
+  || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }the finding does not state the recorded review point; want '$DREL9_REVIEW_POINT'"
+DREL9_PUBLISHED="- upstream publishes \`$LEAD_LABEL\` at \`$MOVED_TAG_SHA12\`"
+grep -qF -e "$DREL9_PUBLISHED" <<<"$DREL9_BODY" \
+  || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }the finding does not name the commit upstream publishes; want '$DREL9_PUBLISHED'"
+# Both shas above come from the finding block, so the standing block is again
+# unread — and a standing that reports this upstream as level would contradict
+# the re-tag finding directly beneath it.
+DREL9_STANDING="- \`$LEAD_ID\` (\`$LEAD_SLUG\`): recorded \`$LEAD_LABEL\`; published upstream at a different commit"
+grep -qF -e "$DREL9_STANDING" <<<"$DREL9_BODY" \
+  || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }the standing block does not state the moved standing; want '$DREL9_STANDING'"
+# The two shas are the diagnosis; this is the remedy, and it is a distinct
+# string from the section preamble's own mention of the RFC.
+DREL9_REMEDY='Re-adjudicate it under RFC 0019 §7'
+grep -qF -e "$DREL9_REMEDY" <<<"$DREL9_BODY" \
+  || DREL9_FAILS="${DREL9_FAILS}${DREL9_FAILS:+; }the finding states no remedy; want '$DREL9_REMEDY'"
+if [ -z "$DREL9_FAILS" ]; then
+  ok "D-REL9 a review point published at a different commit is reported, naming both commits"
+else
+  no "D-REL9 a re-tagged review point was mishandled: $DREL9_FAILS"
+fi
+
+# D-REL10 — the standing of EVERY used upstream is stated, keyed by upstream id
+# and never by slug. Two ids can name two plugins inside one monorepo: they
+# share a slug and therefore a tag list, so a slug-keyed report would attach
+# that repo's releases to an upstream the register deliberately refuses to
+# invent a label for. The assertion is a python3 pass over the body rather than
+# a regex hairball, because the interesting claim is a NEGATIVE one about which
+# tokens share a line.
+run_drift "$WORK/drel10.log" ok "$WATERMARK" "" "[]" --dry-run
+printf '%s\n' "$DRIFT_OUT" > "$WORK/drel10.body"
+DREL10_MSG="$(python3 - "$REGISTER" "$WORK/drel10.body" "$LEAD_LABEL" <<'PY'
+import json, sys
+
+reg, body_path, recorded = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(reg, encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+labelfree = [u for u in used if not ups.get(u, {}).get("last_reviewed_release")]
+lines = open(body_path, encoding="utf-8").read().splitlines()
+
+problems = []
+if not labelfree:
+    problems.append("no used upstream is label-free, so the negative assertion "
+                    "below covers nothing")
+if not any(ln.startswith("Recorded release review points:") for ln in lines):
+    problems.append("the body carries no per-upstream release block")
+for uid in used:
+    if not [ln for ln in lines if ln.startswith("- ") and "`%s`" % uid in ln]:
+        problems.append("upstream %s has no line of its own" % uid)
+for uid in labelfree:
+    naming = [ln for ln in lines if "`%s`" % uid in ln]
+    if not any("HEAD-only" in ln for ln in naming):
+        problems.append("%s is not described as a HEAD-only upstream" % uid)
+    for ln in naming:
+        if recorded in ln:
+            problems.append("%s carries another upstream's recorded release "
+                            "%s on one line: %s" % (uid, recorded, ln.strip()))
+print("; ".join(problems))
+PY
+)"
+# ...and the happy-path standing itself, asserted whole. This is the line the
+# weekly report actually prints in the common case — every other row here drives
+# a state that DISAGREES with the register — and the python pass above only
+# checks that each id has a line, never what that line claims. Left unasserted,
+# the `level` branch is free to report a vanished or re-tagged review point with
+# no finding anywhere in the body to contradict it.
+DREL10_STANDING="- \`$LEAD_ID\` (\`$LEAD_SLUG\`): recorded \`$LEAD_LABEL\`; level with the newest published release"
+DREL10_LEVEL=''
+grep -qF -e "$DREL10_STANDING" "$WORK/drel10.body" \
+  || DREL10_LEVEL="the settled standing is not stated; want '$DREL10_STANDING'"
+# ...and a standing the renderer does not know must be LOUD, never blank. The
+# obvious alternative spelling is a dict lookup with an empty default, which
+# renders an upstream with no standing at all — an omission in a report whose
+# whole job is to say what has not been looked at. Driven by direct call
+# because `release_verdict` is the only producer, so no fixture can reach it.
+DREL10_LOUD="$(python3 - "$DRIFT" <<'PY'
+import importlib.util, sys
+
+modspec = importlib.util.spec_from_file_location("vendor_drift", sys.argv[1])
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+
+bogus = {"id": "an-upstream", "slug": "org/repo", "recorded": "v1.0.0",
+         "recorded_commit": "0" * 40, "published_commit": None,
+         "newest": None, "newest_commit": None, "actionable": True,
+         "state": "a-standing-nobody-taught-the-renderer"}
+problems = []
+for render in (vendor_drift.release_summary, vendor_drift.release_finding_lines):
+    try:
+        rendered = render(bogus)
+    except ValueError:
+        continue
+    except Exception as exc:                     # noqa: BLE001 - reported, not swallowed
+        problems.append("%s raised %r rather than a named ValueError"
+                        % (render.__name__, exc))
+        continue
+    problems.append("%s rendered %r for an unknown standing instead of "
+                    "refusing" % (render.__name__, rendered))
+print("; ".join(problems))
+PY
+)"
+# Accumulated the way every other row here accumulates, so the report names the
+# check that failed: three separate probes behind one `${MSG:-default}` would
+# report "no block at all" for a body whose block is perfectly well formed and
+# whose standing line is merely wrong.
+DREL10_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL10_FAILS="dry-run rc=$DRIFT_RC"
+[ -z "$DREL10_MSG" ] \
+  || DREL10_FAILS="${DREL10_FAILS}${DREL10_FAILS:+; }$DREL10_MSG"
+[ -z "$DREL10_LEVEL" ] \
+  || DREL10_FAILS="${DREL10_FAILS}${DREL10_FAILS:+; }$DREL10_LEVEL"
+[ -z "$DREL10_LOUD" ] \
+  || DREL10_FAILS="${DREL10_FAILS}${DREL10_FAILS:+; }$DREL10_LOUD"
+if [ -z "$DREL10_FAILS" ]; then
+  ok "D-REL10 every used upstream's release standing is reported by id, a settled one says so, a label-free one is HEAD-only, and an unknown standing is loud"
+else
+  no "D-REL10 the per-upstream release block is wrong: $DREL10_FAILS"
+fi
+
+# D-REL11 — the pre-release policy, asserted in BOTH directions. (a) a
+# pre-release above the review point is not an obligation: an upstream that has
+# published `<newer>-rc1` has not cut a release anyone must adjudicate, and a
+# weekly finding that only clears when the final lands is noise that trains the
+# reader to mute the control. (b) an upstream whose recorded review point is
+# ITSELF a pre-release has a pre-release-shaped vocabulary, so the comparison
+# must work there rather than reporting the recorded label as vanished — and
+# (d) is what pins the CLAUSE that decides it, because (b) reaches its verdict
+# off a final release and so passes with that clause deleted.
+#
+# (a) also pins the seam between the two blocks: the neutral tag OBSERVATION
+# reports the rc as the newest published tag, while the release VERDICT stays
+# level. Those two lines look contradictory read quickly, so the row asserts
+# both — a later "fix" that made them agree would silently pick one of the two
+# policies for both questions.
+TAGS_TABLE="$TAGS_RC_ONLY"
+run_drift "$WORK/drel11a.log" ok "$WATERMARK" "" "[]" --dry-run
+TAGS_TABLE=""
+DREL11A_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL11A_FAILS="rc=$DRIFT_RC"
+if grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT"; then
+  DREL11A_FAILS="${DREL11A_FAILS}${DREL11A_FAILS:+; }a pre-release was reported as a release awaiting adjudication"
+fi
+grep -qF -e "newest \`$RC_LABEL\`" <<<"$DRIFT_OUT" \
+  || DREL11A_FAILS="${DREL11A_FAILS}${DREL11A_FAILS:+; }the tag observation stopped reporting the newest published tag"
+if [ -z "$DREL11A_FAILS" ]; then
+  ok "D-REL11a a pre-release above the review point is observed, but is not an adjudication finding"
+else
+  no "D-REL11a the pre-release policy is wrong: $DREL11A_FAILS"
+fi
+
+TAGS_TABLE="$TAGS_RC_RECORDED"
+DRIFT_ROOT="$RC_ROOT"
+run_drift "$WORK/drel11b.log" ok "$WATERMARK" "" "[]" --dry-run
+DRIFT_ROOT="$REPO_ROOT"
+TAGS_TABLE=""
+DREL11B_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL11B_FAILS="rc=$DRIFT_RC"
+grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT" \
+  || DREL11B_FAILS="${DREL11B_FAILS}${DREL11B_FAILS:+; }no finding for a release above a pre-release review point"
+grep -qF -e "$NEWER_LABEL" <<<"$DRIFT_OUT" \
+  || DREL11B_FAILS="${DREL11B_FAILS}${DREL11B_FAILS:+; }the newer release is not named"
+# The pre-release review point itself, quoted back. This is also what proves the
+# run read the register COPY rather than the committed one, which records the
+# plain label and would reach the same verdict for a different reason.
+grep -qF -e "recorded review point: \`$RC_RECORDED_LABEL\`" <<<"$DRIFT_OUT" \
+  || DREL11B_FAILS="${DREL11B_FAILS}${DREL11B_FAILS:+; }the finding does not quote the recorded pre-release review point"
+if grep -qF -e 'is not published upstream' <<<"$DRIFT_OUT"; then
+  DREL11B_FAILS="${DREL11B_FAILS}${DREL11B_FAILS:+; }the pre-release review point was read as vanished"
+fi
+if [ -z "$DREL11B_FAILS" ]; then
+  ok "D-REL11b a pre-release review point is found by name, and a release above it is a finding"
+else
+  no "D-REL11b a pre-release review point is mishandled: $DREL11B_FAILS"
+fi
+
+# D-REL11c — the pre-release filter must be the tool's own PARSE, never a
+# substring test. Both names below carry the punctuation a pre-release carries
+# and are not pre-releases: SemVer §10 puts build metadata outside the version,
+# and the `-` in `release-1.2.3` is a word separator, which `release_key`
+# already handles because the stem carries no digit. Spelling the filter as
+# `"-" in n or "+" in n` passes every other row in this suite and silently drops
+# both of these — an upstream whose newest release is invisible to the control
+# that exists to notice it, which is #535 again one level down.
+DREL11C_FAILED=0
+for spec in "build-metadata|$TAGS_BUILDMETA|$BUILDMETA_LABEL" \
+            "word-separator|$TAGS_WORDSEP|$WORDSEP_LABEL"; do
+  IFS='|' read -r shape table label <<<"$spec"
+  TAGS_TABLE="$table"
+  run_drift "$WORK/drel11c-$shape.log" ok "$WATERMARK" "" "[]" --dry-run
+  TAGS_TABLE=""
+  if [ "$DRIFT_RC" -eq 0 ] \
+     && grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT" \
+     && grep -qF -e "newest published release: \`$label\`" <<<"$DRIFT_OUT"; then
+    continue
+  fi
+  DREL11C_FAILED=1
+  no "D-REL11c [$shape] '$label' is a release above the review point, but no finding names it (rc=$DRIFT_RC)"
+done
+if [ "$DREL11C_FAILED" -eq 0 ]; then
+  ok "D-REL11c a release name carrying pre-release punctuation is still a release, by the tool's own key"
+fi
+
+# D-REL11d — the OTHER half of the same policy, and the half (b) cannot reach.
+# (b) publishes a final release above the pre-release review point, and a
+# candidate set with every pre-release stripped still reports that final as
+# newer — so (b) names the same release, reaches the same verdict, and passes
+# whether "a pre-release counts when the review point is itself one" exists or
+# not. Here the only name above the review point IS a pre-release: with the
+# clause gone the newest candidate collapses back to the plain recorded stem,
+# and the finding names a release the register adjudicated long ago. Same
+# register copy as (b) — only the published set differs.
+TAGS_TABLE="$TAGS_RC_PRE_ONLY"
+DRIFT_ROOT="$RC_ROOT"
+run_drift "$WORK/drel11d.log" ok "$WATERMARK" "" "[]" --dry-run
+DRIFT_ROOT="$REPO_ROOT"
+TAGS_TABLE=""
+DREL11D_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL11D_FAILS="rc=$DRIFT_RC"
+grep -qF -e "$ADJUDICATION_HEADING" <<<"$DRIFT_OUT" \
+  || DREL11D_FAILS="${DREL11D_FAILS}${DREL11D_FAILS:+; }no finding for a pre-release above a pre-release review point"
+grep -qF -e "recorded review point: \`$RC_RECORDED_LABEL\`" <<<"$DRIFT_OUT" \
+  || DREL11D_FAILS="${DREL11D_FAILS}${DREL11D_FAILS:+; }the finding does not quote the recorded pre-release review point"
+grep -qF -e "newest published release: \`$RC_LABEL\`" <<<"$DRIFT_OUT" \
+  || DREL11D_FAILS="${DREL11D_FAILS}${DREL11D_FAILS:+; }the newest release named is not the pre-release the vocabulary admits"
+if [ -z "$DREL11D_FAILS" ]; then
+  ok "D-REL11d where the review point is a pre-release, a pre-release above it is the release owed adjudication"
+else
+  no "D-REL11d a pre-release-shaped vocabulary is not honoured: $DREL11D_FAILS"
+fi
+
+# D-REL12 — the fingerprint is what decides whether an ALREADY-OPEN issue gets
+# a comment. Without release state in the payload, a freshly cut release with an
+# unchanged file set fingerprints identically to last week: the body is
+# refreshed, the comparison matches, no comment is posted, and the news lands
+# where nobody is looking. Three runs, identical in every input except the
+# published tag set, so the only thing that can move the fingerprint is the
+# release state itself.
+#
+# These runs carry component drift as well, which the two-section ORDER is
+# asserted on: this is the only scenario in the suite where both sections
+# exist, and RFC 0019 §7 adjudicates releases, so they come first.
+DREL12_FILES="skills/writing-skills/SKILL.md"
+run_drift "$WORK/drel12a.log" ok "$MOVED_HEAD" "$DREL12_FILES" "[]" --dry-run
+FP_A="$(fingerprint_of "$DRIFT_OUT")"
+TAGS_TABLE="$TAGS_NEWER"
+run_drift "$WORK/drel12b.log" ok "$MOVED_HEAD" "$DREL12_FILES" "[]" --dry-run
+TAGS_TABLE=""
+FP_B="$(fingerprint_of "$DRIFT_OUT")"
+DREL12_BODY="$DRIFT_OUT"
+run_drift "$WORK/drel12c.log" ok "$MOVED_HEAD" "$DREL12_FILES" "[]" --dry-run
+FP_C="$(fingerprint_of "$DRIFT_OUT")"
+DREL12_FAILS=''
+[ -n "$FP_A" ] && [ -n "$FP_B" ] && [ -n "$FP_C" ] \
+  || DREL12_FAILS="a run rendered no fingerprint at all"
+[ "$FP_A" != "$FP_B" ] \
+  || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }a new release did not move the fingerprint"
+[ "$FP_A" = "$FP_C" ] \
+  || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }two identical runs fingerprinted differently"
+# ...and the same verdict at two different published commits. `newest_commit`
+# covers a re-tag only while the recorded label IS the newest candidate; put a
+# release above it and the re-tag is invisible to every other datum the payload
+# carries, while the `moved` finding's `upstream publishes ... at ...` line
+# changes underneath it. That is the state in which a re-tag matters most, so a
+# silent refresh there is the same failure D-REL12 exists to close. The two
+# tables differ in one peel sha and nothing else.
+TAGS_TABLE="$TAGS_MOVED_NEWER"
+run_drift "$WORK/drel12-retag1.log" ok "$WATERMARK" "" "[]" --dry-run
+FP_RETAG1="$(fingerprint_of "$DRIFT_OUT")"
+DREL12_RETAG_BODY="$DRIFT_OUT"
+TAGS_TABLE="$TAGS_MOVED_NEWER2"
+run_drift "$WORK/drel12-retag2.log" ok "$WATERMARK" "" "[]" --dry-run
+FP_RETAG2="$(fingerprint_of "$DRIFT_OUT")"
+TAGS_TABLE=""
+# Both anti-vacuity arms: the verdict has to be `moved` (not `newer`), and the
+# newest published release has to be a name OTHER than the re-tagged review
+# point — otherwise `newest_commit` alone would move the fingerprint and the
+# comparison would pin nothing.
+grep -qF -e 'published at a different commit' <<<"$DREL12_RETAG_BODY" \
+  || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }the re-tag runs do not report a moved review point"
+grep -qF -e "newest \`$NEWER_LABEL\`" <<<"$DREL12_RETAG_BODY" \
+  || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }the re-tag runs publish no release above the review point, so newest_commit would cover the re-tag"
+[ -n "$FP_RETAG1" ] && [ -n "$FP_RETAG2" ] && [ "$FP_RETAG1" != "$FP_RETAG2" ] \
+  || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }a review point re-tagged under a newer release did not move the fingerprint"
+REL_AT="$(grep -nF -e "$ADJUDICATION_HEADING" <<<"$DREL12_BODY" || true)"
+REL_AT="${REL_AT%%:*}"
+COMP_AT="$(grep -nF -e "$COMPONENT_HEADING" <<<"$DREL12_BODY" || true)"
+COMP_AT="${COMP_AT%%:*}"
+if [ -n "$REL_AT" ] && [ -n "$COMP_AT" ]; then
+  [ "$REL_AT" -lt "$COMP_AT" ] \
+    || DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }the component diff is rendered above the release findings"
+else
+  DREL12_FAILS="${DREL12_FAILS}${DREL12_FAILS:+; }release drift and component drift do not both render (rel=${REL_AT:-none} comp=${COMP_AT:-none})"
+fi
+if [ -z "$DREL12_FAILS" ]; then
+  ok "D-REL12 release state moves the fingerprint, is stable across identical runs, and is reported first"
+else
+  no "D-REL12 the fingerprint does not cover release state: $DREL12_FAILS"
 fi
 
 echo
