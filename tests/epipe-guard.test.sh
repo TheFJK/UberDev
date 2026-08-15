@@ -739,6 +739,76 @@ fi
 
 echo
 
+# --- E4.1  the live verdict: is any gated fence actually exposed? -------------
+# Every fence that turns pipefail on IN ITS OWN BODY gets the same detector E1
+# runs over shell sources. This row is what replaces the retired hand-check: the
+# question the old boundary note answered once, in prose, anchored on a line
+# number, is re-asked here against live bytes on every run. Nothing is
+# remembered, so nothing can rot.
+#
+# THE GATE IS pipefail ALONE, not "pipefail or -e". Without pipefail a pipeline's
+# rc is its LAST command's rc — the reader's — so an early exit poisons nothing
+# and errexit by itself is not exposure. `set -e` still matters, but it enters
+# one level down: _epipe_hits derives each BODY's own errexit state and uses it
+# to widen the flagged set to value-producing `$( ... )`, which is per-fence
+# semantics for free. The retired note's "NEITHER pipefail nor -e" was merely
+# conservative, not a second gate.
+#
+# THE GATED COUNT IS PRINTED, NEVER ASSERTED. A floor on it would be precisely
+# the defect this section retires — a measurement recorded once and trusted
+# afterwards — and the count may legitimately fall to zero as fences move. That
+# this row can fire at all is proven by E4.2a/E4.2e, which are fixtures rather
+# than a memory.
+MD_GATED=0
+MD_GATED_LIST=""
+MD_EXPOSED=0
+while IFS=$'\t' read -r md_k md_file md_start md_end md_gated md_shape md_body; do
+  [ "$md_k" = F ] || continue
+  [ "${md_gated:-0}" = 1 ] || continue
+  MD_GATED=$((MD_GATED + 1))
+  MD_GATED_LIST="$MD_GATED_LIST $md_file:$md_start-$md_end"
+  # A gated fence whose body never reached disk cannot be judged, and an unjudged
+  # fence must not read as clean — the same rule as the DETECTOR-ERROR arm below.
+  if [ ! -s "$md_body" ]; then
+    echo "  FAIL  $md_file — the fence opening at line $md_start is gated but its body was not written"
+    echo "        so it was NOT checked; the extractor, not the corpus, is what failed"
+    MD_EXPOSED=$((MD_EXPOSED + 1))
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  md_hits="$(_epipe_hits "$md_body")"
+  [ -n "$md_hits" ] || continue
+  while IFS= read -r md_hit; do
+    [ -n "$md_hit" ] || continue
+    md_line="${md_hit#*$'\t'}"
+    case "$md_line" in
+      "$_EP_ERR_MARK"*)
+        echo "  FAIL  $md_file — the detector could not run on the fence opening at line $md_start"
+        echo "        cause:  ${md_line#"$_EP_ERR_MARK"}"
+        ;;
+      *)
+        # The body holds the lines AFTER the opening marker, so body line N is
+        # file line (fence-open + N). The citation is therefore computed from
+        # this run's bytes — the one kind of line number that cannot rot.
+        md_no="${md_hit%%$'\t'*}"
+        echo "  FAIL  $md_file:$((md_start + md_no)) pipes into an early-exiting reader under pipefail"
+        echo "        fence:  opens at line $md_start, gated by its own set -o pipefail"
+        echo "        line:   $md_line"
+        echo "        expect: reader PATTERN <<<\"\$(writer)\"   (herestring — no writer process, no EPIPE)"
+        ;;
+    esac
+    MD_EXPOSED=$((MD_EXPOSED + 1))
+    FAIL=$((FAIL + 1))
+  done <<<"$md_hits"
+done <<<"$MD_INDEX"
+if [ "$MD_EXPOSED" -eq 0 ]; then
+  echo "  PASS  E4.1 all $MD_GATED pipefail-gated markdown fences are herestring-clean"
+  echo "        gated (file:open-close):$MD_GATED_LIST"
+  PASS=$((PASS + 1))
+fi
+
+echo
+
 # --- E4.2  the extractor can FAIL: one fixture per decision it makes ----------
 # Fixture bodies are assembled at RUNTIME from the split reader fragments in E2,
 # so no offending literal ever appears contiguously in this file (E1 scans this
