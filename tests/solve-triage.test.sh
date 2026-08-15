@@ -144,4 +144,34 @@ grep -q 'triage_invalid_issue' "$TMP/err"; PASS=$((PASS+1))
 python3 -I "$ROOT/tests/component-token-schema.py" "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
 PASS=$((PASS+1))
 
+# --- R0: matched_rules vocabulary must satisfy the routing-context schema -----
+# Same class as the component-token guard above, one field over: `matched_rules`
+# is validated against a closed `allowed_rule` alternation in agent-dispatch.sh,
+# and a token the producer emits but that validator refuses aborts the ENTIRE
+# batch with route_context_create_failed, not just the one issue. See
+# tests/triage-rule-vocabulary.py for the full rationale.
+python3 -I "$ROOT/tests/triage-rule-vocabulary.py" "$TRIAGE" "$ROOT/plugins/uberdev/lib/agent-dispatch.sh"
+PASS=$((PASS+1))
+
+# R1: the guard's exit contract, end to end at the CLI the launcher drives.
+# Every other triage code above is asserted through the CLI; triage_rule_unknown
+# rides the TriageError path __main__ already owns, so it must be the bare code
+# on stderr with exit 2 exactly -- not a traceback, and not a new exit path.
+# finalize reads matched_rules straight off --decision, so an undeclared token
+# needs no fixture.
+RC=0
+python3 -I "$TRIAGE" finalize --decision '{"raw_tier":"small","matched_rules":["bogus:rule"]}' \
+  --clamped small >"$TMP/out" 2>"$TMP/err" || RC=$?
+if [ "$RC" -ne 2 ]; then
+  echo "FAIL: finalize on an undeclared rule token exited $RC, expected 2" >&2; exit 1
+fi
+grep -q '^triage_rule_unknown$' "$TMP/err"
+PASS=$((PASS+1))
+# ...and it does not refuse a legitimate decision: same subcommand, declared
+# tokens, exit 0 with the floor clamp applied.
+python3 -I "$TRIAGE" finalize --decision '{"raw_tier":"small","matched_rules":["small:concrete-reproduction"]}' \
+  --clamped medium >"$TMP/out"
+grep -q '"source":"floor"' "$TMP/out"
+PASS=$((PASS+1))
+
 echo "solve-triage: $PASS passed"

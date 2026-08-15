@@ -59,6 +59,33 @@ LARGE_LABELS = {"epic", "needs-discussion", "architectural", "architecture", "in
 TRIVIAL_LABELS = {"typo", "docs", "documentation", "chore", "good-first-issue"}
 TRIVIAL_TITLE_RE = re.compile(r"\b(?:typo|rename|bump|version|readme)\b", re.I)
 
+# The SIX rule tokens that are not derived from TIERS or LARGE_LABELS.
+_FIXED_RULE_TOKENS = frozenset({
+    "large:three-files", "large:multi-component-high-risk", "large:cross-cutting-refactor",
+    "trivial:bounded-explicit-signal", "small:concrete-reproduction", "medium:fallback",
+})
+# `matched_rules` is validated entry-by-entry against a CLOSED alternation
+# (`allowed_rule` in lib/agent-dispatch.sh). A token this module emits but that
+# validator refuses makes uberdev_agent_context_create fail with
+# route_context_create_failed — which does not decline one issue, it aborts the
+# ENTIRE batch: every sibling issue in the same /solve, /turbo or /ubergoal run
+# dies with it. Same class as COMPONENT_TOKEN_RE below, one field over.
+# Declaring the vocabulary here does NOT spare the siblings — solve-launcher.sh
+# aborts the batch on a classification error too. What it buys is that the drift
+# reds CI at the producer, before it can ship: tests/triage-rule-vocabulary.py
+# keeps this set a subset of the validator's alternation, a superset of
+# everything classify() emits over the fixture corpus, and both
+# assert_rule_tokens call sites wired. An emitter on an unfixtured path is
+# outside that corpus — add a fixture with the rule. Should one ever reach a
+# user, an undeclared token also surfaces as `triage_rule_unknown` against the
+# offending issue number — for every offending issue, where route-prepare exits
+# on the first one.
+TRIAGE_RULE_TOKENS = frozenset(
+    {f"{kind}:{tier}" for kind in ("floor", "ceiling", "override") for tier in TIERS}
+    | {f"large-label:{label}" for label in LARGE_LABELS}
+    | _FIXED_RULE_TOKENS
+)
+
 
 class TriageError(ValueError):
     pass
@@ -66,6 +93,11 @@ class TriageError(ValueError):
 
 def fail(code: str) -> "None":
     raise TriageError(code)
+
+
+def assert_rule_tokens(rules: list[str]) -> None:
+    if any(rule not in TRIAGE_RULE_TOKENS for rule in rules):
+        fail("triage_rule_unknown")
 
 
 def canonical(value: Any) -> str:
@@ -299,6 +331,8 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
     if override:
         effective, source = override, "override"
         matched.append(f"override:{override}")
+    rules = list(dict.fromkeys(matched))
+    assert_rule_tokens(rules)
     return {
         "clamped_tier": clamped,
         "component_count": len(components),
@@ -307,7 +341,7 @@ def classify(value: dict[str, Any], floor: str | None, ceiling: str | None, over
         "file_count": len(files),
         "files": files,
         "issue": number,
-        "matched_rules": list(dict.fromkeys(matched)),
+        "matched_rules": rules,
         "raw_tier": raw,
         "risk_signals": risks,
         "schema_version": 1,
@@ -328,6 +362,7 @@ def finalize_decision(value: dict[str, Any], clamped: str, override: str | None)
     if override: effective=override; source="override"; matched.append(f"override:{override}")
     result["effective_tier"]=effective; result["tier"]=effective; result["source"]=source
     result["matched_rules"]=list(dict.fromkeys(matched))
+    assert_rule_tokens(result["matched_rules"])
     return result
 
 
