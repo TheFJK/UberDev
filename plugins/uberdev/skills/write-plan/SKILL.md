@@ -2,7 +2,7 @@
 name: write-plan
 description: Use when you have a spec or requirements for a multi-step task, before touching code
 ---
-<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file (upstream skills/writing-plans/SKILL.md) was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the residual is the directory rename plus the namespace rebrand plus the plan FORMAT this repo owns — the mandatory '## Wave Decomposition' rules, the 'Depends on:' / 'Wave:' / 'Owns:' task headers, the wave-correctness review pass, the opt-in alternative-decomposition comparison, and a non-interactive Execution Handoff that defaults to uberdev:subagent-driven-dev and forwards --turbo. uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in; the component is stance 'fork'. Permanent local divergence: vendor.json permanent_divergences[].plan-execution-wave-contract. -->
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file (upstream skills/writing-plans/SKILL.md) was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the residual is the directory rename plus the namespace rebrand plus the plan FORMAT this repo owns — the mandatory '## Wave Decomposition' rules, the 'Depends on:' / 'Wave:' / 'Owns:' task headers, the wave-correctness review pass, the opt-in alternative-decomposition comparison, and a non-interactive Execution Handoff that defaults to uberdev:subagent-driven-dev and forwards --turbo. uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in; the component is stance 'fork'. Permanent local divergence: vendor.json permanent_divergences[].plan-execution-wave-contract. The plan-header 'Spec:' pointer below is adopted from obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797 (v6.3.0, MIT) — that hunk only, not a component re-baseline (#531), so vendored_at_commit stays at the base above and the SHA vendor.json records for this file is the composite. Upstream's adjacent '## Global Constraints' section arrived in the same release and is NOT adopted: RFC 0019 never adjudicated it. -->
 
 # Writing Plans
 
@@ -97,6 +97,9 @@ This summary is what `uberdev:subagent-driven-dev` reads to decide its dispatch 
 **Architecture:** [2-3 sentences about approach]
 
 **Tech Stack:** [Key technologies/libraries]
+
+**Spec:** [path to the spec/design doc this plan implements — the plan
+argues from the spec, so the spec travels with it; executors read both]
 
 ---
 ```

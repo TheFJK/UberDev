@@ -123,6 +123,8 @@ Derive a kebab-case `topic_slug` from the validated spec title.
 
 **Tech Stack:** <key technologies and libraries>
 
+**Spec:** <the ABSOLUTE spec_path this plan argues from>
+
 ---
 
 ## Execution Waves

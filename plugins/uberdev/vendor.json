@@ -677,7 +677,7 @@
       "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans, and the residual against that blob is 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans. Measured at the #503 adjudication, before #531, the residual against that blob was 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended). Both figures are stale by whatever #531 then added on the SKILL.md side: the ported 6.3.0 plan-header 'Spec:' pointer plus the provenance restatement that records it, so the sha256 below is the composite rather than a clean #503 measurement. They are labelled rather than re-measured because the e7a2d16 blob is not on disk; #534 owns labelling every measurement in this register with the revision it was taken at.",
       "measured_diff_lines": 123,
       "divergences": [
         {
@@ -696,7 +696,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "656ab28e75c1242bfab6e1931a38a7e95d265e53ed739b5f3a4b0abe5731b80d"
+          "sha256": "ff77ce3e124bec682562ffbe16f448e1592b056a34154a4deb0fafe9ec10bff2"
         },
         {
           "path": "plan-document-reviewer-prompt.md",
