@@ -992,7 +992,10 @@ fi
 #
 # Every fixture body is assembled at RUNTIME from the split fragments above, so
 # no needle ever appears contiguously in this file — A4.1 scans this file, and
-# epipe-guard.test.sh:294 records the identical trap for its own literals.
+# tests/epipe-guard.test.sh records the identical trap for its own literals, in
+# the section headed `E2`, which is where its `_G`/`_H`/`_R` fragments are split.
+# Named by symbol rather than by line so the cross-reference cannot drift when
+# either file grows.
 # Fixtures are written with plain `printf ... >file` redirection; never
 # `printf ... | grep -q`, which reds tests/epipe-guard.test.sh (known class).
 #
