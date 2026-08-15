@@ -833,7 +833,11 @@ function solvePrompt(rec, planPath) {
     + 'or ""), prNumber (the integer PR number parsed from the gh URL, or 0), prUrl (or ""), commitCount '
     + "(integer commits you made), testsRunClaimed (true only if you actually executed tests — this is "
     + "recorded as YOUR CLAIM and is not verified; do not report it true unless you ran them), summary "
-    + "(<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\").";
+    + "(<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\"), escalatedTier (the "
+    + "one-way ratchet: the name of the HIGHER tier this work turned out to need, reported only if it "
+    + "proved materially larger than the `" + tier + "` tier you were dispatched at; else \"\") and "
+    + "escalationReason (one line naming what you found that the triage rules could not see — required "
+    + "whenever escalatedTier is set, because an escalation with no reason is discarded).";
 }
 
 // ---------------- the per-task implement chain (issue #508) ----------------

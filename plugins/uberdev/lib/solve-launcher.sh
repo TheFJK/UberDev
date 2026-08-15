@@ -977,7 +977,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+Skip /uberdev:brainstorm. Skip multi-step planning. The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 else
 # trivial heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
@@ -994,7 +994,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Skip /uberdev:brainstorm. Skip multi-step planning. Escalate to /uberdev:brainstorm ONLY if the scope turns out to be materially larger than triaged.
+Skip /uberdev:brainstorm. Skip multi-step planning. The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 fi
 ;;
@@ -1015,7 +1015,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 else
 # small heredoc — turbo (/turbo): no research read; post-push reviewer fanout runs in /uberdev:review-pr Phase 1
@@ -1031,7 +1031,7 @@ Steps:
 
 Do NOT run /uberdev:simplify standalone before push — Phase 2 of /uberdev:review-pr runs it automatically on a strictly larger diff (full PR + review-fix commits).
 
-Escalate to /uberdev:brainstorm if the scope proves larger than triaged.
+The ratchet is one-way. If the work turns out to be materially larger than triaged, do not quietly keep the lighter workflow: raise your own bar for the rest of the task (write a short design note before you edit, tests first, and drop any shortcut you were taking only because the triage was light), put the line \`Tier escalated: <from> -> <to> — <reason>\` in the PR body, and add the \`uberdev:tier-<to>\` label to the issue (\`gh label create uberdev:tier-<to> --force\` first if it does not exist; if the label write fails, say so in your summary and still deliver — never abandon the PR over a label). Nothing downgrades mid-task.
 EOF
 fi
 ;;

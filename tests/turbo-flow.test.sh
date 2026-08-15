@@ -687,6 +687,110 @@ else
 fi
 
 echo
+echo "== #532: the one-way tier ratchet is stated in every trivial/small heredoc =="
+# WHAT THESE THREE CASES ARE — and, more importantly, what they are NOT.
+# TF-R2 and TF-R3 are SHAPE CHECKS ON PROSE. They prove that the four rendered
+# briefs carry the ratchet wording and no longer carry the retired sentence.
+# They are NOT the behavioural proof of the escalation feature. That proof lives
+# in tests/solve-fleet-workflow.test.sh (W1-W8 — the escalatedTier return
+# channel, the upgrade-only gate, the three rejection verdicts and the
+# no-extra-agents invariant) and in tests/solve-triage.test.sh /
+# tests/solve-routing.test.sh (E1-E6, X1 — the uberdev:tier-<to> label raising
+# raw_tier on the NEXT dispatch). A green grep here says the prompt asks for the
+# escalation; it says nothing about what happens when a solver reports one. Do
+# not let a later reader mistake one for the other.
+#
+# WHY TF-R1 EXISTS. TF-R2 and TF-R3 are only as trustworthy as the extraction
+# underneath them: a heredoc reshape that empties the scan makes the presence
+# checks vacuously true AND the absence check trivially true, in the same edit.
+# That is the completeness-guard-with-a-disjoint-predicate failure this repo
+# tracks as #370, and it is the same guard tests/post-impl-review.test.sh puts
+# in front of its own extraction of this file. An unfound body is a FAILURE
+# reported as `setup error`, never a pass.
+#
+# Anchors: the `<< EOF$` / `^EOF$` pair — the same one the numbering scan above
+# drives against this same file on the green windows job. CR is stripped inside
+# awk (`gsub`) rather than by piping through `tr`: .gitattributes pins only
+# plugins/uberdev/hooks/** to eol=lf, so a Git-for-Windows clone may hold this
+# file CRLF, and `^EOF$` would then match nothing. Doing it in awk also keeps
+# this out of the `<writer> | <early-exiting reader>` shape that
+# tests/epipe-guard.test.sh forbids — there is no pipeline here at all.
+RATCHET_SETUP="$(awk '
+  { gsub(/\r/, "") }
+  /<< EOF$/       { in_h = 1; hn++; lines = 0; next }
+  in_h && /^EOF$/ { in_h = 0
+                    if (lines == 0) printf "heredoc#%d: body extracted empty\n", hn
+                    next }
+  in_h            { lines++ }
+  END             { if (hn != 4) printf "expected 4 heredocs, saw %d\n", hn }
+' "$SOLVE_PIPELINE")"
+if [[ -z "$RATCHET_SETUP" ]]; then
+  echo "  PASS  TF-R1 — all 4 trivial/small heredoc bodies extract non-empty (TF-R2/TF-R3 below are not vacuous)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  TF-R1 setup error: the heredoc extraction is broken — TF-R2/TF-R3 below cannot be trusted"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "$RATCHET_SETUP"
+  FAIL=$((FAIL + 1))
+fi
+
+# TF-R2 — every one of the four briefs states the ratchet AND both halves of the
+# record it must leave behind. Per-heredoc, not file-wide: a file-wide grep goes
+# green when one brief keeps the wording and three lose it, which is exactly the
+# regression DIRECTIVE_COUNT/INVOKE_COUNT above exist to catch on their own
+# lines. `index()` is a literal substring test — no regex metacharacter in the
+# searched text can change what is matched.
+RATCHET_MISSING="$(awk '
+  { gsub(/\r/, "") }
+  /<< EOF$/ { in_h = 1; hn++; oneway = 0; nodown = 0; prline = 0; label = 0; next }
+  in_h && /^EOF$/ {
+      in_h = 0
+      miss = ""
+      if (!oneway) miss = miss " \"The ratchet is one-way\""
+      if (!nodown) miss = miss " \"Nothing downgrades mid-task\""
+      if (!prline) miss = miss " \"Tier escalated:\" (the PR-body line)"
+      if (!label)  miss = miss " \"uberdev:tier-\" (the issue label)"
+      if (miss != "") printf "heredoc#%d missing:%s\n", hn, miss
+      next }
+  in_h && index($0, "The ratchet is one-way")      { oneway = 1 }
+  in_h && index($0, "Nothing downgrades mid-task") { nodown = 1 }
+  in_h && index($0, "Tier escalated:")             { prline = 1 }
+  in_h && index($0, "uberdev:tier-")               { label = 1 }
+  END { if (hn != 4) printf "setup error: expected 4 heredocs, saw %d\n", hn }
+' "$SOLVE_PIPELINE")"
+if [[ -z "$RATCHET_MISSING" ]]; then
+  echo "  PASS  TF-R2 — all 4 trivial/small heredocs state the one-way ratchet, the PR-body line and the uberdev:tier- label"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  TF-R2 — a trivial/small heredoc no longer states the one-way ratchet (#532)"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "$RATCHET_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# TF-R3 — the load-bearing guard of the three. The retired sentence told the
+# solver to "Escalate to /uberdev:brainstorm", an action the solver on this path
+# CANNOT take: it is a leaf agent with no ability to dispatch a subagent, so the
+# instruction resolved to nothing and the mis-triage went unrecorded. This reds
+# the instant that sentence comes back in any of the four briefs.
+RATCHET_RETIRED="$(awk '
+  { gsub(/\r/, "") }
+  /<< EOF$/       { in_h = 1; hn++; next }
+  in_h && /^EOF$/ { in_h = 0; next }
+  in_h && index($0, "Escalate to /uberdev:brainstorm") { printf "heredoc#%d: %s\n", hn, $0 }
+  END { if (hn != 4) printf "setup error: expected 4 heredocs, saw %d\n", hn }
+' "$SOLVE_PIPELINE")"
+if [[ -z "$RATCHET_RETIRED" ]]; then
+  echo "  PASS  TF-R3 — no trivial/small heredoc tells the leaf solver to escalate to /uberdev:brainstorm (an action it cannot take)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  TF-R3 — the retired 'Escalate to /uberdev:brainstorm' instruction is back in a heredoc (#532)"
+  echo "        file: $SOLVE_PIPELINE"
+  echo "$RATCHET_RETIRED"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
