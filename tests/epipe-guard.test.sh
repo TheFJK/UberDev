@@ -250,6 +250,155 @@ _epipe_sh_files() {
   fi
 }
 
+# _epipe_md_files -> every tracked markdown source under plugins/uberdev, one
+# per line. Same two-branch shape as _epipe_sh_files, and `git ls-files` is
+# mandatory on the primary branch for a sharper reason than tidiness: scratch
+# checkouts on a working machine hold UNTRACKED mirrors of the very SKILL.md
+# files being counted, and a bare walk would count each of them again.
+# git's pathspec `*` crosses `/`, so the one glob covers agents/, commands/,
+# docs/, hooks/ and skills/** in a single enumeration.
+_epipe_md_files() {
+  if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" ls-files -- 'plugins/uberdev/*.md'
+  else
+    # The fallback restates by hand what .gitignore states for the branch above:
+    # the same scratch roots plugins/uberdev/lib/goal-state.sh enumerates, which
+    # tests/test-harness-source-guards.test.sh A3 requires of any walk rooted at
+    # the repository root (#445 is what happens without them).
+    #
+    # Every exclusion is anchored at $REPO_ROOT rather than written as `*/name/*`,
+    # and that is load-bearing, not style. find matches -path against the WHOLE
+    # constructed path, ancestors of the repository root included, so an
+    # unanchored `*/worktrees/*` excludes the entire corpus whenever the checkout
+    # itself happens to live under a directory of that name — which is exactly
+    # where UberDev's own /solve and /turbo worktrees put it. Measured on such a
+    # checkout: unanchored returns 0 of 120 files, anchored returns all 120.
+    # (_epipe_sh_files above still carries the unanchored form and has the same
+    # latent hole; fixing it is a separate change from this one.)
+    find "$REPO_ROOT" -path "$REPO_ROOT/plugins/uberdev/*" -name '*.md' \
+      -not -path "$REPO_ROOT/.git/*" -not -path "$REPO_ROOT/tests/_fixtures/*" \
+      -not -path "$REPO_ROOT/.claude/*" -not -path "$REPO_ROOT/.worktrees/*" \
+      -not -path "$REPO_ROOT/worktrees/*" \
+      | sed "s#^$REPO_ROOT/##"
+  fi
+}
+
+# The markdown fence extractor. ONE awk per file, which walks the fences AND
+# computes each fence's pipefail gate and forbidden-shape count in the same pass.
+# The alternative — extract, then re-open each fence from the shell — costs a
+# process per fence instead of per file, and per-line spawns are
+# disproportionately expensive on shape-checks-windows, already the CI critical
+# path (the same constraint A3 records in test-harness-source-guards.test.sh).
+#
+#   -v FILE=  the path to report with, so reports name the repo-relative file
+#   -v TAG=   a per-file token keying the written fence bodies. Start line alone
+#             would let two files with a gated fence at the same line clobber
+#             each other; TAG plus start line cannot collide either way.
+#   -v OUT=   directory for gated fence bodies (must already exist)
+#   -v RE=    EPIPE_RE, the forbidden shape
+#   -v PFRE=  PIPEFAIL_RE, the per-fence gate
+#
+# Emits one row per fence:
+#   F<TAB>file<TAB>start<TAB>end<TAB>gated<TAB>shapehits<TAB>bodypath
+# and, for a file whose last line is still inside a fence:
+#   U<TAB>file<TAB>start
+# `bodypath` is emitted rather than recomputed by the caller so the naming rule
+# lives in one place; it is empty for a fence that is not gated.
+#
+# FENCE RULES — CommonMark, with one deliberate relaxation:
+#   * OPEN on a run of >= 3 backticks whose remainder holds no further backtick.
+#     CommonMark forbids backticks in a backtick fence's info string, and that is
+#     exactly what stops an inline code span from being read as a fence opener.
+#   * CLOSE only on a run of >= the OPENING run followed by whitespace alone. A
+#     3-backtick line therefore does NOT close a 4-backtick fence. This is the
+#     whole reason a parity toggle is unusable rather than merely imprecise: over
+#     a 4-backtick fence wrapping a 3-backtick example it reports two fences and
+#     leaves the wrapped body OUTSIDE both, i.e. silently unscanned. E4.2d/E4.2e
+#     lock the count and the extent, not just the verdict.
+#   * Indentation is not capped. CommonMark stops honouring a fence past three
+#     spaces of indent; this corpus carries fences indented far deeper. Being
+#     permissive over-scans, which is the conservative direction for a guard.
+#
+# DECLARED BOUNDARY: tilde (`~~~`) fences are not walked. This corpus has none,
+# and one appearing would leave its body unscanned rather than misread.
+#
+# COMMENT POLICY: a body line matching `^[[:space:]]*#` is kept in the body but
+# counts toward NEITHER the gate NOR the shape. A commented-out `set -o pipefail`
+# turns nothing on, and _EP_AWK already skips comments for the same reason. This
+# is outcome-changing rather than cosmetic: without it the gated set grows, the
+# extras being fences that only ever MENTION pipefail in prose. The written body
+# keeps its comment lines, because _epipe_hits derives each body's `set -e` state
+# itself and does its own comment skip.
+#
+# Trailing whitespace is stripped before every test, so a CRLF checkout cannot
+# break the open/close match on the Windows job. No backslashes appear in the
+# assembled regexes, so passing them through `awk -v` stays escape-safe there.
+_EP_MD_AWK='
+function lead_bt(s,   t, n) {
+  # Length of the leading backtick run, after any indent.
+  t = s
+  sub(/^[[:space:]]+/, "", t)
+  n = 0
+  while (substr(t, n + 1, 1) == "`") { n++ }
+  return n
+}
+function after_bt(s,   t) {
+  # Whatever follows that run: a fence info string, or "" on a closing fence.
+  t = s
+  sub(/^[[:space:]]+/, "", t)
+  sub(/^`+/, "", t)
+  return t
+}
+function emit(e,   path) {
+  path = ""
+  if (gated == 1 && OUT != "") {
+    path = OUT "/fence." TAG "." fstart ".sh"
+    # Parenthesised argument list: `printf a, b > c` is the one place awk has to
+    # guess between a redirect and a comparison, and this form does not ask it to.
+    printf("%s", body) > path
+    close(path)
+  }
+  printf "F\t%s\t%d\t%d\t%d\t%d\t%s\n", FILE, fstart, e, gated, shape, path
+}
+BEGIN { open = 0 }
+{
+  raw = $0
+  sub(/[[:space:]]+$/, "", raw)
+  n = lead_bt(raw)
+  if (open == 0) {
+    if (n >= 3 && index(after_bt(raw), "`") == 0) {
+      open = n; fstart = FNR; body = ""; gated = 0; shape = 0
+    }
+    next
+  }
+  if (n >= open && after_bt(raw) == "") { emit(FNR); open = 0; next }
+  body = body raw "\n"
+  if (raw !~ /^[[:space:]]*#/) {
+    if (raw ~ PFRE) { gated = 1 }
+    if (raw ~ RE) { shape++ }
+  }
+}
+END { if (open != 0) { printf "U\t%s\t%d\n", FILE, fstart } }
+'
+
+# _epipe_md_index PATH LABEL TAG
+#   -> the fence index for one markdown file (rows as described above), or
+#      `X<TAB>LABEL<TAB>DETECTOR-ERROR: ...` when the extractor could not run.
+# The error row exists for the same reason _epipe_hits' does: an extractor that
+# CANNOT RUN must not be indistinguishable from one that found no fences, or the
+# file drops out of the corpus with nothing to show for it.
+# Writes gated fence bodies under $TMPD/md, which E2 creates — this helper is
+# never called before that point.
+_epipe_md_index() {
+  local _f="$1" _label="$2" _tag="$3" _out
+  if ! _out="$(awk -v FILE="$_label" -v TAG="$_tag" -v OUT="$TMPD/md" \
+      -v RE="$EPIPE_RE" -v PFRE="$PIPEFAIL_RE" "$_EP_MD_AWK" "$_f" 2>/dev/null)"; then
+    printf 'X\t%s\t%sawk exited non-zero while extracting fences\n' "$_label" "$_EP_ERR_MARK"
+    return 0
+  fi
+  [ -z "$_out" ] || printf '%s\n' "$_out"
+}
+
 echo "## EPIPE class guard (#313) — pipefail-exposed shell must not pipe into an early-exiting reader"
 
 echo
@@ -453,6 +602,256 @@ else
   echo "  FAIL  E3.3 only $SCANNED pipefail-setting shell sources scanned — enumerator regressed"
   FAIL=$((FAIL + 1))
 fi
+
+echo
+echo "== E4: markdown bash fences, cut into fences and re-derived every run =="
+# Issue #549. Boundary note 5 used to exempt markdown `bash` fences on the
+# strength of a hand-check recorded in prose and anchored on a line number. Both
+# halves rotted: the anchor stopped pointing at a pipeline, so the exemption
+# became a claim nobody could re-verify without redoing the whole search. The
+# durable fix is not a fresh anchor — it is to stop remembering the answer and
+# re-derive it from the corpus on every run.
+#
+# WHY A FENCE, NOT A FILE, IS THE UNIT. Each Bash-tool call runs its own shell,
+# so `set -o pipefail` inside one fence says nothing about the next fence in the
+# same file. E1's per-FILE gate is therefore the wrong instrument here, and the
+# corpus has to be cut into fences before any gate can be applied at all.
+
+# The corpus, walked once. Every quantity below is MEASURED here and PRINTED in
+# the row that uses it. None of them is written down in prose anywhere — a
+# recorded count is the defect this section exists to retire, and it would start
+# rotting the moment the corpus moved.
+mkdir -p "$TMPD/md"
+MD_FILES=0
+MD_INDEX=""
+while IFS= read -r md_rel; do
+  [ -n "$md_rel" ] || continue
+  md_f="$REPO_ROOT/$md_rel"
+  [ -f "$md_f" ] || continue
+  MD_FILES=$((MD_FILES + 1))
+  MD_INDEX="$MD_INDEX$(_epipe_md_index "$md_f" "$md_rel" "$MD_FILES")
+"
+done <<<"$(_epipe_md_files)"
+
+MD_FENCES=0
+MD_SHAPE_FENCES=0
+MD_UNCLOSED=""
+MD_BROKEN=""
+# All seven fields are named even where a census row does not read them: reading
+# fewer would make the LAST variable swallow every remaining field, tabs and all,
+# and silently turn the shape count into a path comparison.
+while IFS=$'\t' read -r md_k md_file md_start md_end md_gated md_shape md_body; do
+  case "$md_k" in
+    F)
+      MD_FENCES=$((MD_FENCES + 1))
+      if [ "${md_shape:-0}" -gt 0 ]; then MD_SHAPE_FENCES=$((MD_SHAPE_FENCES + 1)); fi
+      ;;
+    U) MD_UNCLOSED="$MD_UNCLOSED $md_file:$md_start" ;;
+    X) MD_BROKEN="$MD_BROKEN $md_file" ;;
+  esac
+done <<<"$MD_INDEX"
+
+# --- E4.0  non-vacuity: prove the walk reached real bytes ---------------------
+# Four independent floors. A guard that silently walks nothing is the failure
+# mode this whole file exists to prevent, one level up, and a fence extractor is
+# an unusually easy place to produce one: a single wrong character in the open
+# rule yields zero fences and a clean bill of health for the entire corpus.
+if [ "$MD_FILES" -ge 90 ]; then
+  echo "  PASS  E4.0a enumerated $MD_FILES markdown sources under plugins/uberdev"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.0a enumerated only $MD_FILES markdown sources — the corpus glob regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ "$MD_FENCES" -ge 400 ]; then
+  echo "  PASS  E4.0b extracted $MD_FENCES fences from $MD_FILES markdown sources"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.0b extracted only $MD_FENCES fences — the fence open/close rule regressed"
+  FAIL=$((FAIL + 1))
+fi
+
+# The count below is a PHYSICAL-line, comment-skipped match count. It is a coarse
+# SUPERSET of what the real detector flags — it joins no logical lines and weighs
+# no substitution depth — and it is deliberately not the verdict. Its one job is
+# to prove EPIPE_RE still engages against markdown bytes, so that a regression in
+# the fence rules or the regex cannot leave the live check vacuously green.
+if [ "$MD_SHAPE_FENCES" -ge 6 ]; then
+  echo "  PASS  E4.0c $MD_SHAPE_FENCES fences carry the forbidden shape (coarse count — not the verdict)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.0c only $MD_SHAPE_FENCES fences carry the forbidden shape — the regex stopped engaging"
+  FAIL=$((FAIL + 1))
+fi
+
+# Both arms below mean "part of the corpus was not really walked": a file that
+# ends mid-fence has an unknown extent, and a file whose extractor died has no
+# fences for the reason that matters least. Either one silently shrinks the
+# corpus, so neither may pass as clean.
+if [ -z "$MD_UNCLOSED" ] && [ -z "$MD_BROKEN" ]; then
+  echo "  PASS  E4.0d every markdown source was walked to EOF outside any fence"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.0d part of the markdown corpus was not walked"
+  [ -z "$MD_UNCLOSED" ] || echo "        ends inside an unclosed fence (file:start):$MD_UNCLOSED"
+  [ -z "$MD_BROKEN" ] || echo "        extractor could not run:$MD_BROKEN"
+  FAIL=$((FAIL + 1))
+fi
+
+# _epipe_md_files' hand-written fallback runs only off a git checkout, so nothing
+# else in this suite ever executes it — and an exclusion pattern that silently
+# matches EVERYTHING is indistinguishable from an empty repository. That is not
+# hypothetical: written unanchored as `*/worktrees/*`, the fallback returned zero
+# of these files on any checkout living under a directory named `worktrees`,
+# which is precisely where /solve and /turbo put theirs.
+# `git` is shadowed rather than the tree copied, because what is under test is
+# which BRANCH runs, not which files exist.
+# Containment, not equality: find also sees UNTRACKED files, and a developer's
+# scratch note under plugins/uberdev must not red the suite for everyone — the
+# #445 lesson about guards that are green on CI and red on a working machine.
+MD_GIT_LIST="$(_epipe_md_files)"
+git() { return 1; }
+MD_FIND_HAY="
+$(_epipe_md_files)
+"
+unset -f git
+MD_FALLBACK_MISSING=""
+while IFS= read -r md_rel; do
+  [ -n "$md_rel" ] || continue
+  # Padded-haystack case, not a grep per line: 120 spawns is a real cost on the
+  # Windows job, and the padding is what makes the match whole-line.
+  case "$MD_FIND_HAY" in
+    *"
+$md_rel
+"*) ;;
+    *) MD_FALLBACK_MISSING="$MD_FALLBACK_MISSING $md_rel" ;;
+  esac
+done <<<"$MD_GIT_LIST"
+if [ -z "$MD_FALLBACK_MISSING" ]; then
+  echo "  PASS  E4.0e the non-git fallback enumerator reaches all $MD_FILES of them too"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  E4.0e the non-git fallback enumerator drops part of the corpus"
+  echo "        missing:$MD_FALLBACK_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+
+# --- E4.2  the extractor can FAIL: one fixture per decision it makes ----------
+# Fixture bodies are assembled at RUNTIME from the split reader fragments in E2,
+# so no offending literal ever appears contiguously in this file (E1 scans this
+# file). $TMPD and its EXIT trap are E2's; do NOT arm a second one, traps are
+# last-write-wins.
+#
+# _ep_md_case NAME FILE TAG WANT_FENCES WANT_START WANT_END WANT_GATED WANT_SHAPE
+#   WANT_SHAPE is `0` (must be zero) or `+` (must be greater than zero).
+# Every row asserts the fence COUNT and EXTENT as well as the verdict. Asserting
+# the verdict alone would be too weak: an unsound extractor can reach the right
+# verdict for the wrong reason on some inputs, and extent is exactly what it gets
+# wrong. Not fed from a pipe — the right-hand side of a pipeline runs in a
+# subshell and the PASS/FAIL counters would never make it back out.
+_ep_md_case() {
+  local _name="$1" _file="$2" _tag="$3" _xn="$4" _xs="$5" _xe="$6" _xg="$7" _xshape="$8"
+  local _rows _n=0 _s="" _e="" _g="" _sh="" _bp="" _why=""
+  # Declared local so a row's fields cannot leak into the global scope the later
+  # sections read; `read` would otherwise create them as globals.
+  local _k _rfile _rs _re _rg _rsh _rbp
+  if [ ! -s "$_file" ]; then
+    echo "  FAIL  $_name — fixture is missing or empty; the case proves nothing"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  _rows="$(_epipe_md_index "$_file" "$_name" "$_tag")"
+  case "$_rows" in
+    *"$_EP_ERR_MARK"*)
+      echo "  FAIL  $_name — the fence extractor could not run, so the case proves nothing"
+      echo "        cause:  $_rows"
+      FAIL=$((FAIL + 1))
+      return
+      ;;
+  esac
+  while IFS=$'\t' read -r _k _rfile _rs _re _rg _rsh _rbp; do
+    [ "$_k" = F ] || continue
+    _n=$((_n + 1))
+    if [ "$_n" -eq 1 ]; then _s="$_rs"; _e="$_re"; _g="$_rg"; _sh="$_rsh"; _bp="$_rbp"; fi
+  done <<<"$_rows"
+  [ "$_n" = "$_xn" ] || _why="$_why fences=$_n(want $_xn)"
+  if [ "$_n" -ge 1 ]; then
+    [ "$_s" = "$_xs" ] || _why="$_why start=$_s(want $_xs)"
+    [ "$_e" = "$_xe" ] || _why="$_why end=$_e(want $_xe)"
+    [ "$_g" = "$_xg" ] || _why="$_why gated=$_g(want $_xg)"
+    if [ "$_xshape" = 0 ]; then
+      [ "$_sh" = 0 ] || _why="$_why shape=$_sh(want 0)"
+    else
+      [ "${_sh:-0}" -gt 0 ] || _why="$_why shape=$_sh(want >0)"
+    fi
+    # A gated fence whose body was never written is a broken extractor: the body
+    # file is what the per-fence verdict is computed over, so its absence would
+    # read as "clean" one level up.
+    if [ "$_xg" = 1 ]; then
+      [ -s "$_bp" ] || _why="$_why gated-body-not-written"
+    else
+      [ -z "$_bp" ] || _why="$_why body-written-for-an-ungated-fence"
+    fi
+  fi
+  if [ -z "$_why" ]; then
+    echo "  PASS  $_name"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  $_name —$_why"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# a: plain fence, pipefail ON and the forbidden shape present -> gated, flagged.
+{ printf '```bash\n'
+  printf 'set -o pipefail\n'
+  printf 'ec''ho "$V" | %s -q PATTERN\n' "$_G"
+  printf '```\n'
+} >"$TMPD/md2a.md"
+_ep_md_case "E4.2a exposed fence (pipefail + forbidden shape)" "$TMPD/md2a.md" md2a 1 1 4 1 +
+
+# b: the SAME body without pipefail. The gate is per fence, so this one never
+# enters scope even though its shape is identical to a's.
+{ printf '```bash\n'
+  printf 'ec''ho "$V" | %s -q PATTERN\n' "$_G"
+  printf '```\n'
+} >"$TMPD/md2b.md"
+_ep_md_case "E4.2b same shape, no pipefail — not gated" "$TMPD/md2b.md" md2b 1 1 3 0 +
+
+# c: gated but herestring-clean. Guards the other direction — the gate must not
+# manufacture a finding out of a fence that merely turns pipefail on.
+{ printf '```bash\n'
+  printf 'set -o pipefail\n'
+  printf '%s -q PATTERN <<<"$V"\n' "$_G"
+  printf '```\n'
+} >"$TMPD/md2c.md"
+_ep_md_case "E4.2c gated but herestring-clean — no false positive" "$TMPD/md2c.md" md2c 1 1 4 1 0
+
+# d: a 4-backtick fence wrapping a 3-backtick block. ONE fence spanning the OUTER
+# markers. A 3-backtick parity toggle instead reports two fences and leaves the
+# wrapped body outside both — silently unscanned.
+{ printf '````markdown\n'
+  printf '```bash\n'
+  printf 'ec''ho hi\n'
+  printf '```\n'
+  printf '````\n'
+} >"$TMPD/md2d.md"
+_ep_md_case "E4.2d nested fence extracted once, spanning the outer markers" "$TMPD/md2d.md" md2d 1 1 5 0 0
+
+# e: the decisive row — d's nesting with a's exposed body. A parity toggle puts
+# BOTH the pipefail line and the offending line outside every fence, so the
+# verdict is a silent green. Nothing else in E4 would notice.
+{ printf '````markdown\n'
+  printf '```bash\n'
+  printf 'set -o pipefail\n'
+  printf 'ec''ho "$V" | %s -q PATTERN\n' "$_G"
+  printf '```\n'
+  printf '````\n'
+} >"$TMPD/md2e.md"
+_ep_md_case "E4.2e nested fence still gated and flagged (parity toggle goes green here)" "$TMPD/md2e.md" md2e 1 1 6 1 +
 
 echo
 echo "==================================================================="
