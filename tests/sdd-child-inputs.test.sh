@@ -753,16 +753,103 @@ assert count == 1, (
     f"the assembled implementer prompt embeds the output contract {count} time(s), expected 1"
 )
 
-fallback = b"Return completed, blocked, or refused."
+# The needle is whatever the OTHER arm emits, so this stays falsifiable: this
+# guard's purpose is "the bound edge selected the bound arm", and pinning it to
+# the sentence the composer retired in #546 would make it vacuously true
+# forever. Swapping the composer's two arms is what must red it.
+fallback = b"Return only a response matching the return contract your role card declares above."
 assert fallback not in prompt, (
-    "the assembled implementer prompt still ends with the contract-less fallback "
-    "directive; the terminal vocabulary the child is told to use disagrees with "
-    "the vocabulary the controller branches on (#517)"
+    "the bound implementer edge selected the contract-less arm; its prompt "
+    "delegates the return shape back to the role card instead of pointing at "
+    "the output contract the manifest bound to it (#517, #546)"
 )
 
 directive = b"Return only a response matching the output contract above."
 assert directive in prompt, (
     "the assembled implementer prompt does not point the child at its output contract"
+)
+PY
+
+# ── AC-14b: the contract-less arm, on a LIVE-manifest prompt (#546) ───────────
+# `sdd.task.spec_review` carries no `output_contract` in
+# policy/solve-run-tree-v1.json, and this suite does not set
+# UBERDEV_CHILD_MANIFEST_PATH — so the dispatch above resolved against the
+# shipped manifest and this is a real unbound edge, not a fixture one.
+# tests/child-dispatch.test.sh pins the same arm against a fixture manifest;
+# this block is the only place the LIVE manifest's unbound arm is asserted, and
+# 31 further composable provider edges take exactly this path.
+#
+# The directive is appended AFTER the role card, so its last line is the last
+# word the child reads about what to return. Naming a vocabulary there silently
+# overrides whatever the card just declared — that override was #517 on
+# `sdd.task.implement` and #546 on every other unbound provider edge.
+# `row["prompt"]` is a PATH, so read the bytes it points at.
+python3 -I -B - "$PROVIDER_ARGS_LOG" "$FIXTURE_SCOPE" \
+  "$ROOT/plugins/uberdev/agents/spec-compliance-reviewer.md" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+provider_path, scope, role_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+rows = [json.loads(line) for line in provider_path.read_text().splitlines()]
+instance = f"sdd-p{scope}-w1-t43-spec-review-a1"
+row = next(r for r in rows if r["instance_id"] == instance)
+prompt = Path(row["prompt"]).read_bytes()
+last = prompt.rstrip(b"\n").rsplit(b"\n", 1)[-1]
+
+# AC-14b.1 — EQUALITY on the whole last line, not `endswith`: equality also
+# forecloses anything being prepended onto the terminal sentence. The count pin
+# beside it means a partial revert that emits both the retired sentence and this
+# one cannot hide behind the last-line check.
+unbound = (
+    b"Execute only the bounded role and inputs above. "
+    b"Return only a response matching the return contract your role card declares above."
+)
+assert last == unbound, (
+    "AC-14b.1: the live-manifest spec-review prompt does not end with the "
+    f"delegating sentence, so the contract-less arm is naming a return shape of "
+    f"its own again: {last!r}"
+)
+occurrences = prompt.count(unbound)
+assert occurrences == 1, (
+    f"AC-14b.1: the delegating sentence occurs {occurrences} time(s), expected 1"
+)
+
+# AC-14b.2 — the role card stays the authority. The delegating sentence is only
+# worth anything while the card it points at still declares a return shape, and
+# this change edits no card.
+verdict = b"verdict: APPROVE | REVISIONS_REQUIRED"
+assert verdict in role_path.read_bytes(), (
+    f"AC-14b.2: {role_path.name} no longer declares its verdict vocabulary, so "
+    "the contract-less directive now delegates to nothing"
+)
+assert verdict in prompt, (
+    "AC-14b.2: the spec-compliance reviewer card's verdict vocabulary did not "
+    "survive into the assembled prompt"
+)
+
+# AC-14b.3 — ANTI-VACUITY. This row guards the CLASS (the arm naming any
+# terminal vocabulary at all), not the wording: a vocabulary-free reword leaves
+# it green, a reword that names any status reds it. Scoped to the LAST LINE
+# only — the directive above it interpolates the routing context and a mktemp
+# child path, and a scratch path containing a denylisted word would make a
+# whole-directive scan flaky.
+# `_` is a word character in Python `re`, so \bDONE\b does NOT match inside
+# DONE_WITH_CONCERNS; both members are required, as are timed_out and
+# NO_FIXES_NEEDED.
+DENY = (
+    "completed", "blocked", "refused", "failed", "timed_out", "cancelled",
+    "running", "DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED",
+    "APPLIED", "NO_FIXES_NEEDED", "APPROVE", "REVISIONS_REQUIRED", "REJECT",
+    "SURVIVES", "CULLED", "RESOLVED", "AMBIGUOUS", "CLASSIFIED", "REBASED",
+    "CONFLICT",
+)
+deny = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in DENY) + r")\b", re.IGNORECASE)
+named = deny.findall(last.decode())
+assert not named, (
+    f"AC-14b.3: the contract-less terminal line names the status vocabulary "
+    f"{named}, overriding whatever the role card declared: {last!r}"
 )
 PY
 
