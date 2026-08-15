@@ -336,12 +336,18 @@ def check_schema(register, failures):
         # Reported for EVERY component, before the origin arms below start
         # `continue`-ing: an unrecognised key on an `uberdev` component is the
         # same defect and would otherwise never be looked at.
-        if isinstance(component, dict):
-            unknown = sorted(set(component) - COMPONENT_KEYS)
-            if unknown:
-                failures.add("C-SCHEMA", "%s: unrecognised component key(s) %s "
-                                         "— a misspelled optional record must "
-                                         "not read as an absent one" % (cid, unknown))
+        #
+        # No isinstance() guard here: a non-dict component has already raised on
+        # `.get` in the id sweep above, so a guard at this point can never be
+        # false and would only read as protection this loop does not have.
+        # Moving a real guard to the top of the loop — check_divref's idiom —
+        # would SWALLOW the AttributeError C-SCHEMA currently dies on, so that
+        # belongs in a change that owns the decision.
+        unknown = sorted(set(component) - COMPONENT_KEYS)
+        if unknown:
+            failures.add("C-SCHEMA", "%s: unrecognised component key(s) %s "
+                                     "— a misspelled optional record must "
+                                     "not read as an absent one" % (cid, unknown))
         origin = component.get("origin")
         if origin not in ("third-party", "uberdev"):
             failures.add("C-SCHEMA", "%s: origin is %r, expected 'third-party' "

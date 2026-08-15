@@ -322,7 +322,11 @@ function sanitizeFindings(list) {
       break;
     }
     s = list[i];
-    if (typeof s !== "string" || s.replace(/\s/g, "").length === 0) { dropped += 1; continue; }
+    // `!/\S/` is the same predicate as stripping every space and asking whether
+    // anything is left — \s and \S are exact complements — but it stops at the
+    // first non-whitespace character instead of materialising a copy of a string
+    // whose length is still unbounded here (the clip below is what bounds it).
+    if (typeof s !== "string" || !/\S/.test(s)) { dropped += 1; continue; }
     if (s.length > FINDING_MAX_CHARS) {
       s = s.slice(0, FINDING_MAX_CHARS) + " [truncated]";
       truncated = true;
@@ -804,15 +808,23 @@ function reviewPath(issue, k, r) {
   return issueDir(issue) + "/task-" + String(k) + "/review-" + String(r) + ".md";
 }
 
-// The "never work outside the shared checkout" clause, for the two rungs that
-// address an ALREADY-EXISTING one: taskImplPrompt's later tasks and
-// taskFixPrompt. Both are told the same thing because runTaskChain applies the
-// SAME workspaceReady gate to both — they are the only rungs that write — so a
-// wording that drifted on one would tell that agent something the gate does not
-// enforce. One builder makes that impossible rather than merely unlikely.
-function existingCheckoutGate() {
-  return '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout is not '
-    + "there, report BLOCKED — never fall back to the repository root.\n";
+// The "never work outside the shared checkout" clause, for the three prompt
+// rungs that carry it: taskImplPrompt's task 1, taskImplPrompt's later tasks,
+// and taskFixPrompt. All three are told the same thing because runTaskChain
+// applies the SAME workspaceReady gate to every rung — and these are the rungs
+// that WRITE — so a wording that drifted on one would tell that agent something
+// the gate does not enforce. One builder makes that impossible rather than
+// merely unlikely. The rungs differ only in WHY the checkout might be missing
+// (task 1 has to create it, the later ones inherit it), so that clause is the
+// parameter and the prohibition itself is never restated.
+//
+// deliverPrompt is deliberately NOT composed from this builder: it states a
+// different sentence — reporting FAILED rather than BLOCKED, and additionally
+// forbidding re-creation of the work — so folding it in would change the bytes
+// that agent reads.
+function existingCheckoutGate(missingClause) {
+  return '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout '
+    + missingClause + ", report BLOCKED — never fall back to the repository root.\n";
 }
 
 // The S.task return line. Both writing rungs answer that one schema, so the
@@ -838,12 +850,11 @@ function taskImplPrompt(rec, planPath, k, isFirst) {
       + ") Then `cd \"" + wt
       + "\"` and do ALL of your work there. Report `workspaceReady: true` only after that `cd` "
       + "succeeded.\n"
-      + '   Never edit anything under "' + repoRootAbs + '" directly. If the shared checkout does not '
-      + "exist and you cannot create it, report BLOCKED — never fall back to the repository root.\n")
+      + existingCheckoutGate("does not exist and you cannot create it"))
     : ('1. `cd "' + wt + '"` — the shared checkout for this issue, created by task 1, already on its '
       + "branch with the earlier tasks committed. Do ALL of your work there and report "
       + "`workspaceReady: true` only after that `cd` succeeded.\n"
-      + existingCheckoutGate());
+      + existingCheckoutGate("is not there"));
   return "You are the implementer for Task " + k + " of GitHub issue #" + rec.issue + " of "
     + (repoSlug || "this repository") + ".\n\n"
     + workspace
@@ -908,7 +919,7 @@ function taskFixPrompt(rec, planPath, k, r) {
     + '1. `cd "' + wt + '"` — the shared checkout for this issue, created by task 1 and already on its '
     + "branch. Do ALL of your work there and report `workspaceReady: true` only after that `cd` "
     + "succeeded. The task is the HEAD commit — read it with `git show HEAD`.\n"
-    + existingCheckoutGate()
+    + existingCheckoutGate("is not there")
     + "2. Read the review findings, by path, ALL of them in order:\n" + listed
     + "   If any of those files is missing, report BLOCKED rather than guessing what it said.\n"
     + '3. Read the implementation plan at "' + planPath + '" for the `## Task ' + k + ':` section, so '
@@ -1152,6 +1163,16 @@ function unpushedIssue(issue, status, summary, blocker, commitCount, tasks) {
 // site means exactly that and reads better for saying so.
 function failedIssue(issue, blocker, commitCount, tasks) {
   return unpushedIssue(issue, "FAILED", "", blocker, commitCount, tasks);
+}
+
+// A caught value rendered for an audit `reason` or a log line. Same reason the
+// two builders above exist: this shape was written out at seven sites in this
+// file — three of them twice in adjacent statements, once for the audit event
+// and once for the log line beside it — and a hand-copied shape drifts silently.
+// `.message` is returned as-is rather than coerced, so the emitted value is
+// byte-identical to every site this replaced, non-Error throws included.
+function errText(e) {
+  return (e && e.message) ? e.message : String(e);
 }
 
 // The sequential per-task implement chain (issue #508).
@@ -1972,10 +1993,10 @@ async function verifyClaims() {
     // classifies; so does this one, and how far the pass had got rides in the
     // event rather than being inferred from the counts.
     auditEvents.push({ event: "pr_proof_threw",
-      reason: (e && e.message) ? e.message : String(e),
+      reason: errText(e),
       probed: prProbed, relayRc: prRelayRc, ts: nowIso });
     markAllClaimsUnverified();
-    log("verify: the claim-verification pass threw (" + ((e && e.message) ? e.message : String(e))
+    log("verify: the claim-verification pass threw (" + errText(e)
       + ") — every claim stands as reported and any claim left unadjudicated is UNVERIFIED; "
       + "read auditEvents before trusting the PR counts.");
   }
@@ -2101,10 +2122,10 @@ async function solveOne(rec) {
   } catch (e) {
     auditEvents.push({
       event: "solve_chain_threw", issue: rec.issue,
-      reason: (e && e.message) ? e.message : String(e), ts: nowIso,
+      reason: errText(e), ts: nowIso,
     });
     return failedIssue(rec.issue,
-      "the per-issue chain threw: " + ((e && e.message) ? e.message : String(e)), 0, null);
+      "the per-issue chain threw: " + errText(e), 0, null);
   }
 }
 
@@ -2238,7 +2259,7 @@ async function main() {
     return emitResult();
   } catch (e) {
     auditEvents.push({ event: "run_threw",
-      reason: (e && e.message) ? e.message : String(e), ts: nowIso });
+      reason: errText(e), ts: nowIso });
     // THE SECOND PATH that could leave a live PR claim with no proof class at
     // all. A throw anywhere in the wave loop or before `await verifyClaims()`
     // skips verification entirely, and emitResult() then publishes prsOpened —
@@ -2263,10 +2284,10 @@ async function main() {
         // Classification itself failing must not lose the run's results; the
         // event above already tells the operator the claims are unproven.
         auditEvents.push({ event: "pr_proof_not_run_recovery_failed",
-          reason: (e2 && e2.message) ? e2.message : String(e2), ts: nowIso });
+          reason: errText(e2), ts: nowIso });
       }
     }
-    log("solve-fleet threw (" + ((e && e.message) ? e.message : String(e))
+    log("solve-fleet threw (" + errText(e)
       + ") — finalizing with results so far"
       + (prVerifyRan ? "" : "; the PR-claim verification pass never ran, so every live claim is "
         + "retained and UNVERIFIED — read auditEvents before trusting the PR counts"));

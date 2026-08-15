@@ -190,9 +190,22 @@ grep -qE '^[^#]*\bcodex\b' "$LAUNCHER" \
 grep -q 'maxAgents="${UBERDEV_SOLVE_FLEET_MAX_AGENTS:-600}"' "$LAUNCHER" \
   && pass "S22a the fleet's default agent ceiling covers a full 6-issue medium batch" \
   || fail "S22a UBERDEV_SOLVE_FLEET_MAX_AGENTS does not default to 600 — CB1 would refuse ordinary batches"
-grep -q 'implementBudget="${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-24}"' "$LAUNCHER" \
-  && pass "S22b the launcher emits the per-issue implement budget (env-overridable)" \
-  || fail "S22b no implementBudget key in the solve-fleet args envelope"
+# FLEET_BUDGET — the fleet's own IMPLEMENT_AGENT_BUDGET default, READ OUT of the
+# script instead of retyped here. Two rows compare against it: S22b just below
+# (the launcher's env default, which feeds that script) and G16 further down
+# (/goal's two per-issue cost copies). Pinning either to a literal is the #370
+# shape — move the fleet constant and G14b plus G16 go red while the launcher row
+# stays green on a default that now disagrees with the script it feeds. The
+# vacuity guard is part of the idiom: an extraction that silently yielded empty
+# would make every dependent row pass on nothing.
+FLEET_BUDGET="$(sed -n 's/.*IMPLEMENT_AGENT_BUDGET = clampInt(CFG\.implementBudget, 4, 96, \([0-9][0-9]*\)).*/\1/p' "$WORKFLOW")"
+if [ -z "$FLEET_BUDGET" ]; then
+  fail "S22b could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the launcher-versus-fleet budget check is vacuous"
+elif grep -q "implementBudget=\"\${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-$FLEET_BUDGET}\"" "$LAUNCHER"; then
+  pass "S22b the launcher emits the per-issue implement budget (env-overridable)"
+else
+  fail "S22b no implementBudget key in the solve-fleet args envelope"
+fi
 GOAL_PHASE0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
 if [ ! -r "$GOAL_PHASE0" ]; then
   fail "S22c lib/goal-phase0.sh is missing or unreadable: $GOAL_PHASE0"
@@ -349,7 +362,8 @@ GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
 if [ ! -r "$GOAL_WF" ]; then
   fail "G16 the goal-pipeline workflow script is missing or unreadable: $GOAL_WF"
 else
-  FLEET_BUDGET="$(sed -n 's/.*IMPLEMENT_AGENT_BUDGET = clampInt(CFG\.implementBudget, 4, 96, \([0-9][0-9]*\)).*/\1/p' "$WORKFLOW")"
+  # FLEET_BUDGET is extracted ONCE, beside S22b above — this row reuses it so the
+  # launcher default and /goal's cost copies cannot be pinned to two numbers.
   if [ -z "$FLEET_BUDGET" ]; then
     fail "G16 could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the cross-file cost check is vacuous"
   else
