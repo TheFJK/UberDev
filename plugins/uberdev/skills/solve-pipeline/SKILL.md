@@ -143,8 +143,9 @@ projection are untouched by design — CB1 projects the fleet's agent budget
 *before* dispatch, and re-entering research, spec and plan for an in-flight issue
 would spend agents no ceiling ever counted. What the solver raises is its own
 bar; the tier itself moves on the **next** dispatch. That is a deliberate
-limitation rather than an oversight, and the follow-up issue filed alongside this
-change owns closing it.
+limitation rather than an oversight, and **#571** owns closing it — it carries
+both candidate designs (stop-and-re-dispatch with a CB1 re-projection, or a
+`/goal`-level retry that re-classifies off the label) and the bound each needs.
 
 ### Red flags — reaching for a lighter tier
 
