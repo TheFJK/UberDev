@@ -201,13 +201,24 @@ CONTRACTS: dict[str, list[str]] = {
     #
     # WHAT THIS COMPARATOR CANNOT SEE, stated so it is not mistaken for more.
     # Set equality across the four sites does not show that a declared member
-    # has a HANDLER in the controller, and it does not show that the assembled
-    # prompt reaches the child carrying this vocabulary rather than
-    # lib/child-dispatch.sh's contract-less fallback directive — which was
-    # #517's actual root cause. Both are held by tests/sdd-child-inputs.test.sh
-    # (AC-14a for the assembled prompt, AC-14 for handler coverage). Nothing
-    # here is behavioural: no test in this repo proves a model EMITS one of
-    # these five.
+    # has a HANDLER in the controller, and it does not show what the assembled
+    # prompt says about the vocabulary by the time it reaches the child. The
+    # second gap was #517's actual root cause: on a contract-less edge,
+    # lib/child-dispatch.sh appended a fallback directive NAMING a vocabulary of
+    # its own, last and after the role card, so it overrode whatever the card
+    # declared. #546 retired that wording composer-wide — the contract-less arm
+    # now points at the return contract the role card declares — which removes
+    # the override on every unbound provider edge but replaces a contract with a
+    # POINTER. Three of the twenty unbound roles (code-reviewer,
+    # pr-test-analyzer, code-simplifier) declare their return shape as a prose
+    # header rather than a fenced line, so for them that pointer resolves
+    # weakly; binding the edges to real output contracts is #578 and the two
+    # SDD cards' own defect is #580. The three register families #517
+    # deferred — including the uberthink one whose registration must delete both
+    # TWIN_ALLOWLIST entries below — are #579. Both gaps are held on the bytes
+    # by tests/sdd-child-inputs.test.sh (AC-14a for the bound arm, AC-14b for
+    # the contract-less one, AC-14 for handler coverage). Nothing here is
+    # behavioural: no test in this repo proves a model EMITS one of these five.
     "sdd-implementer-status": [
         "agents/implementation-worker.md",
         "shared/sdd-implementer-output-v1.md",

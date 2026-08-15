@@ -84,11 +84,15 @@ for contract_id,relative in tree['output_contracts'].items():
     assert (tree_path.parent.parent/relative).is_file(), contract_id
 # #517 -- the SDD implementer edge is the one PROVIDER edge whose card declared a
 # terminal vocabulary the controller never agreed to. Unbound, lib/child-dispatch.sh
-# appends its contract-less fallback directive ("Return completed, blocked, or
-# refused."), which overrides the card's own wording at the END of the assembled
-# prompt and makes DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
-# `context_rounds` bounded a state that could not occur. Pinned by id so the
-# binding cannot be dropped silently.
+# appended a contract-less fallback directive that NAMED a three-member vocabulary
+# of its own, which overrode the card's own wording at the END of the assembled
+# prompt and made DONE_WITH_CONCERNS / NEEDS_CONTEXT unreachable -- so
+# `context_rounds` bounded a state that could not occur. #546 retired that wording
+# composer-wide: the contract-less arm now points at the return contract the role
+# card declares and names nothing of its own, so the override is gone on every
+# edge in the SRT-546.1 set below. Delegation is not a contract, though -- the
+# binding pinned here is what puts a machine-checkable shape in front of THIS
+# child, so it stays pinned by id and cannot be dropped silently.
 assert edges['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 # #474 -- the fixer edges are format-bound the same way the reviewer edges are.
 # A fixer COMMITS before its result is parsed, so an unbound format is not a

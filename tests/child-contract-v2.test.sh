@@ -87,9 +87,12 @@ assert tree.get('output_contracts')=={
 }
 # #517: the SDD implementer edge. Its role card declared a three-member terminal
 # vocabulary, the controller branched on a different four-member one, and the
-# assembled prompt ended with the contract-less fallback directive that agreed
-# with neither -- so the controller's cheap NEEDS_CONTEXT path was unreachable
-# and `context_rounds` bounded nothing.
+# assembled prompt ended with a contract-less fallback directive that NAMED a
+# third vocabulary agreeing with neither -- so the controller's cheap
+# NEEDS_CONTEXT path was unreachable and `context_rounds` bounded nothing. #546
+# retired that directive's vocabulary: the contract-less arm now points at the
+# return contract the role card declares. The binding pinned below is what makes
+# this edge's return shape machine-checkable rather than merely delegated.
 assert providers['sdd.task.implement'].get('output_contract')=='sdd-implementer-v1'
 for edge in review_edges:
     row=providers[edge]

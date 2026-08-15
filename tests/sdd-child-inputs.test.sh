@@ -727,13 +727,17 @@ PY
 # against the LIVE policy/solve-run-tree-v1.json — these assertions therefore
 # exercise the shipped binding, not a fixture.
 #
-# With no `output_contract` on `sdd.task.implement`, lib/child-dispatch.sh ends
-# every implementer prompt with its contract-less fallback directive, `Return
-# completed, blocked, or refused.` That line lands AFTER the role card, so it is
-# the last word on the vocabulary — and it names three states the controller
-# does not branch on while omitting the two it does. DONE_WITH_CONCERNS and
-# NEEDS_CONTEXT were therefore unreachable, which is what made `context_rounds`
-# a cap on a state that could not occur.
+# Before this binding, `sdd.task.implement` carried no `output_contract`, so
+# lib/child-dispatch.sh ended every implementer prompt with a contract-less
+# fallback directive that NAMED a three-member vocabulary of its own. That line
+# lands AFTER the role card, so it was the last word on the vocabulary — and it
+# named three states the controller does not branch on while omitting the two it
+# does. DONE_WITH_CONCERNS and NEEDS_CONTEXT were therefore unreachable, which is
+# what made `context_rounds` a cap on a state that could not occur. #546 retired
+# that wording composer-wide — the contract-less arm now delegates to the role
+# card, pinned on a live-manifest prompt by AC-14b below — so what this block
+# still proves is the half that delegation cannot give you: a machine-checkable
+# return shape embedded in the bytes THIS child receives.
 python3 -I -B - "$PROVIDER_ARGS_LOG" "$FIXTURE_SCOPE" \
   "$ROOT/plugins/uberdev/shared/sdd-implementer-output-v1.md" <<'PY'
 import json
