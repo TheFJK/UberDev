@@ -463,15 +463,24 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // per-issue cost and so could not tell the arithmetic from the breaker. The
   // ceiling is pinned to the exact projection instead:
   //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
-  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 30
-  //     = 105,   where 30 = the fleet 6 design agents + IMPLEMENT_AGENT_BUDGET(24)
-  // so 104 must trip and 105 must not. Change the per-issue cost without
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 31
+  //     = 107,   where 31 = the fleet 7 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 106 must trip and 107 must not. Change the per-issue cost without
   // changing this number and B52/B52b go red, which is the point.
+  //
+  // 7, not 6, since #524: the design chain gained a BOUNDED spec-revision round.
+  // It is conditional on a non-APPROVE verdict while this projection is
+  // pessimistic by design — CB1 is computed before any verdict exists, so the
+  // only honest upper bound charges every design rung that can fire.
+  //
+  // DELIBERATELY RETYPED, unlike the fleet-side copies. This is the cross-file
+  // ratchet for the two /goal cost copies, which have no behavioural counter of
+  // their own: derive both sides of the comparison and it stops comparing.
   //
   // The flat term is 2, not 1 (#515): the fleet spends a batched PR-claim
   // verification relay alongside its intake relay, once per fleet run rather
   // than per issue.
-  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 30);   // 105
+  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 31);   // 107
   const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
@@ -629,15 +638,15 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   // MUTATION-SENSITIVE by construction — and RE-DERIVED from the live per-issue
   // cost instead of from arithmetic frozen when this row was written. The
   // hand-written ceiling of 58 charged 7 agents per issue; the shared constant
-  // BOTH sides of the comparison read is 30, so the real projection sat far
+  // BOTH sides of the comparison read is 31, so the real projection sat far
   // above 58 and the breaker tripped whether the added relay term was 2 or 1.
   // A row advertising a sensitivity it no longer has is worse than no row: the
   // next reader trusts the message instead of re-deriving it.
   //
   // Default fixture: 2 queued issues, maxParallel 3, maxWatchTicks 40, so the
-  // projection is CYCLE_PROJECTION (105) and the pre-#515 one is 104. At a
-  // ceiling of 104, the current formula trips (105 > 104) and a formula whose
-  // flat term is reverted to 1 does not (104 > 104 is false), which is exactly
+  // projection is CYCLE_PROJECTION (107) and the pre-#515 one is 106. At a
+  // ceiling of 106, the current formula trips (107 > 106) and a formula whose
+  // flat term is reverted to 1 does not (106 > 106 is false), which is exactly
   // the term this row exists to protect.
   const recS = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),

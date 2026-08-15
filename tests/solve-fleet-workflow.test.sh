@@ -373,6 +373,38 @@ grep -qE 'IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, 24\)' 
   && pass "G14b the per-issue implement budget is ONE clamped, config-overridable constant" \
   || fail "G14b IMPLEMENT_AGENT_BUDGET is not a clamped CFG.implementBudget constant"
 
+# G14c — SPEC_REVISE_ROUNDS, the OTHER bounded ladder, needs BOTH halves of the
+# G14/B72 idiom and they cannot be the same row. FIX_ROUNDS has one exit
+# condition, so Run L (a reviewer that never approves) walks the bound to its
+# end and B72/B73 pin it behaviourally. The revision loop has TWO exits —
+# `round <= SPEC_REVISE_ROUNDS` and `!revised` — so every arm whose reviser
+# SUCCEEDS leaves on the flag with the bound untouched, and only an arm where
+# the reviser never lands usably can see it at all (that is B262c, on SR3/SR5).
+# This row pins the CONSTANT; B262c pins that the loop obeys whatever it says.
+#
+# The value is 1 because CB1's `designCount * (BASE + IMPLEMENT_AGENT_BUDGET-1)`
+# term (G31) charges exactly ONE reviser per design-tier issue. Raise the
+# constant without moving that base and the projection under-counts by
+# (N-1) x designCount while the breaker still fires only at the old ceiling —
+# an accumulator that reads low, which the SHARED COST block one screen above
+# the constant exists to prevent. The vacuity and hit-count guards are the
+# S22b/G31 idiom: an extraction that yielded empty, or resolved twice, would
+# make this row and the G32 join pass on nothing.
+FLEET_SPEC_REVISE_ROUNDS="$(sed -n 's/^const SPEC_REVISE_ROUNDS = \([0-9][0-9]*\);.*/\1/p' "$WORKFLOW")"
+SPEC_REVISE_ROUNDS_HITS="$(grep -cE '^const SPEC_REVISE_ROUNDS = [0-9]+;' "$WORKFLOW" || true)"
+if [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+  fail "G14c could not read SPEC_REVISE_ROUNDS out of the fleet script — the G32 join would compare against nothing"
+elif [ "${SPEC_REVISE_ROUNDS_HITS:-0}" != "1" ]; then
+  FLEET_SPEC_REVISE_ROUNDS=""
+  fail "G14c SPEC_REVISE_ROUNDS is declared ${SPEC_REVISE_ROUNDS_HITS:-0} times, not once — the extracted cap is arbitrary"
+elif [ "$FLEET_SPEC_REVISE_ROUNDS" != "1" ]; then
+  fail "G14c SPEC_REVISE_ROUNDS is $FLEET_SPEC_REVISE_ROUNDS, not 1 — CB1 charges one reviser per design-tier issue, so the projection now under-counts by $((FLEET_SPEC_REVISE_ROUNDS - 1)) per design-tier issue"
+elif ! grep -q 'round <= SPEC_REVISE_ROUNDS && !revised' "$WORKFLOW"; then
+  fail "G14c the revision loop no longer bounds itself with SPEC_REVISE_ROUNDS — the constant would be a number written beside a loop, not the loop's bound"
+else
+  pass "G14c SPEC_REVISE_ROUNDS = 1 is the revision loop's own bound, and the one reviser CB1 charges per design-tier issue"
+fi
+
 # G15a — the house rules are one helper, reused by every prompt on the write
 # path. A copy per prompt is how one of them silently loses the version-bump
 # prohibition. (That the rules actually REACH each agent is proven at runtime by
@@ -1082,6 +1114,149 @@ function probedNums(record) {
   out.o2OnlyUsable = promptO2.indexOf("(1) FINDING-DELTA") >= 0;
   out.o2Count = !!(resO2 && resO2.auditEvents.some(function (e) {
     return e.event === "spec_findings_threaded" && e.count === 1; }));
+
+  // ------------------------------------------------------------------
+  // #524 item 1 — the BOUNDED spec-revision round. Before this the fleet had no
+  // REJECT fixture at the spec gate AT ALL: a non-APPROVE verdict produced a
+  // downgraded note and a list of what was wrong, and nothing ever corrected the
+  // spec. Runs SR* establish that gate, parameterised on the verdict and on what
+  // the reviser returns, so every row below reuses ONE shape.
+  //
+  // The reviser writes a SIBLING file, never over spec.md: the script cannot
+  // stat (T1), so an in-place rewrite makes a spec truncated by a dead reviser
+  // indistinguishable from a good one, and the planner reads it as
+  // authoritative. A script-chosen sibling path degrades to "the planner reads
+  // the original", which is the pre-#524 behaviour and the safe direction.
+  // ------------------------------------------------------------------
+  const SPEC_MD = RD + "/issue-11/spec.md";
+  const SPEC_R1 = RD + "/issue-11/spec-r1.md";
+  function reviseReturns(verdict, revReturn) {
+    const o = Object.assign({}, mediumReturns(), {
+      "spec-review:#11": { verdict: verdict, rc: 0, headline: "h",
+        blockingFindings: ["REVISE-FINDING-SENTINEL"] },
+    });
+    o["spec-revise:#11"] = (revReturn === undefined)
+      ? { path: SPEC_R1, rc: 0, headline: "h" }
+      : revReturn;
+    return o;
+  }
+  function promptOf(record, label) {
+    const c = record.agentCalls.find(function (x) { return x.label === label; });
+    return c ? c.prompt : "";
+  }
+  function countLabel(record, label) {
+    return labels(record).filter(function (l) { return l === label; }).length;
+  }
+  function rejectedFor(res, reason) {
+    return !!(res && res.auditEvents.some(function (e) {
+      return e.event === "spec_revision_rejected" && e.issue === 11 && e.reason === reason; }));
+  }
+
+  // SR1 — REVISIONS_REQUIRED, reviser answers at the script-derived path.
+  const recSR1 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED") });
+  const resSR1 = resultOf(recSR1);
+  out.srReviseCalls = countLabel(recSR1, "spec-revise:#11");
+  // The negative arm, read off the CLEAN fixture: an APPROVE spends no reviser.
+  // Without it SR1 proves only that the label can fire, never that it is gated.
+  out.srNoReviseOnApprove = countLabel(recB, "spec-revise:#11");
+
+  // SR2 — REJECT is not a second class of verdict: it takes the revision round
+  // on the same terms as REVISIONS_REQUIRED, and the reviewer is not re-run
+  // afterwards. A re-review here is the #308 unbounded-loop class rebuilt.
+  // The reviser SUCCEEDS on this arm, so the 1 below is the loop's `!revised`
+  // exit, NOT its bound — the bound is G14c plus B262c, on SR3/SR5.
+  const recSR2 = await run(buildArgs(), { agentReturns: reviseReturns("REJECT") });
+  out.srRejectSameRound = countLabel(recSR2, "spec-revise:#11") === 1
+    && countLabel(recSR2, "spec-review:#11") === 1;
+
+  const promptSR1Plan = promptOf(recSR1, "plan:#11");
+  out.srPlanReadsRevision = promptSR1Plan.indexOf(SPEC_R1) >= 0
+    && promptSR1Plan.indexOf(SPEC_MD) < 0;
+
+  // SR3 — a revision at a DIFFERENT in-run-dir path. underRunDir() is a PREFIX
+  // check and would accept this; the accept predicate is exact string equality
+  // against the path the script itself chose, so the planner can never be sent
+  // to a file no rung was told to write.
+  const recSR3 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: RD + "/issue-11/spec-final.md", rc: 0, headline: "h" }) });
+  const resSR3 = resultOf(recSR3);
+  const promptSR3Plan = promptOf(recSR3, "plan:#11");
+  out.srPathRejected = promptSR3Plan.indexOf(SPEC_MD) >= 0
+    && promptSR3Plan.indexOf("spec-final.md") < 0
+    && rejectedFor(resSR3, "path");
+
+  // SR4 — the other arm of the predicate: the right path, a non-zero rc.
+  const recSR4 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: SPEC_R1, rc: 1, headline: "h" }) });
+  const resSR4 = resultOf(recSR4);
+  const promptSR4Plan = promptOf(recSR4, "plan:#11");
+  out.srRcRejected = promptSR4Plan.indexOf(SPEC_MD) >= 0
+    && promptSR4Plan.indexOf(SPEC_R1) < 0
+    && rejectedFor(resSR4, "rc");
+
+  // SR1 envelope discipline — the reviewer findings reach the reviser through
+  // the SAME sanitizeFindings + envWrap path #507 installed, and the text sits
+  // ONLY inside the envelope. Asserted by excising the block and searching the
+  // remainder, so a second raw copy anywhere else in the prompt reds.
+  const promptSR1Rev = promptOf(recSR1, "spec-revise:#11");
+  const ENV_OPEN_SR = "<external-untrusted-input source=\"solve-fleet-spec-review-findings-issue-11\">";
+  const ENV_END_SR = "</external-untrusted-input>";
+  const srOpenAt = promptSR1Rev.indexOf(ENV_OPEN_SR);
+  const srEndAt = srOpenAt >= 0 ? promptSR1Rev.indexOf(ENV_END_SR, srOpenAt) : -1;
+  const srOutside = (srOpenAt >= 0 && srEndAt > srOpenAt)
+    ? promptSR1Rev.slice(0, srOpenAt) + promptSR1Rev.slice(srEndAt)
+    : promptSR1Rev;
+  out.srFindingsEnveloped = srOpenAt >= 0 && srEndAt > srOpenAt
+    && srOutside.indexOf("REVISE-FINDING-SENTINEL") < 0;
+
+  // SR5 — a null reviser is a missing agent, not a corrupt spec: it counts as a
+  // design-phase null, the planner falls back to the ORIGINAL spec, and the
+  // chain proceeds. Silently planning against a path nothing wrote would be the
+  // strictly worse outcome.
+  const recSR5 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED", null) });
+  const resSR5 = resultOf(recSR5);
+  out.srNullDegrades = !!(resSR5 && resSR5.nullsByPhase && resSR5.nullsByPhase.design >= 1)
+    && labels(recSR5).indexOf("plan:#11") >= 0
+    && promptOf(recSR5, "plan:#11").indexOf(SPEC_MD) >= 0
+    && rejectedFor(resSR5, "null");
+
+  // The CAP itself, on the only arms that can observe it. SR1/SR2 count
+  // dispatches but their reviser SUCCEEDS, so they leave the loop on `revised`
+  // and would count 1 at ANY bound — the number they pin is the success flag,
+  // not the ceiling. SR3 (wrong path) and SR5 (null reviser) both leave
+  // `revised` false, so what the loop dispatches there IS the bound. Compared
+  // against the constant READ OUT of the script (G31's idiom), never a retyped
+  // literal: the shell's G14c pins that constant at 1, this pins that the loop
+  // spends exactly what it declares, and G32 joins the two readings so neither
+  // regex can rot into a vacuous pass.
+  const SPEC_REVISE_ROUNDS_JS = readInt(/^const SPEC_REVISE_ROUNDS = (\d+);/m, "the spec revision round cap");
+  out.srRoundsRead = SPEC_REVISE_ROUNDS_JS;
+  out.srRoundsBounded = countLabel(recSR3, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS
+    && countLabel(recSR5, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS;
+
+  // A revision does not consume the findings. The planner is pointed at the
+  // corrected spec AND still receives the reviewer's own list, inside the #507
+  // envelope — the revision is unverified, so the planner needs to see what the
+  // reviewer objected to in order to check the answer.
+  out.srRevisedKeepsFindings = promptSR1Plan.indexOf(ENV_OPEN_SR) >= 0
+    && promptSR1Plan.indexOf("REVISE-FINDING-SENTINEL") >= 0;
+
+  out.srRevisedAudit = !!(resSR1 && resSR1.auditEvents.some(function (e) {
+    return e.event === "spec_revised" && e.issue === 11; }))
+    && promptSR1Rev.indexOf(SPEC_R1) >= 0;
+
+  // SR6 — the verdict is an AGENT-RETURNED STRING. S.reviewed declares a closed
+  // enum, but a schema is a request to the MODEL and an arbitrary value can land
+  // on that key, so the verdict is a reviewer string exactly like a finding is.
+  // It reaches the reviser and the planner in a SCRIPT-CHOSEN spelling: inside
+  // the enum it passes through verbatim, outside it is named as what it is.
+  const recSR6 = await run(buildArgs(), { agentReturns: reviseReturns("VERDICT-SENTINEL-TEXT") });
+  const resSR6 = resultOf(recSR6);
+  out.srVerdictNotRaw = promptOf(recSR6, "spec-revise:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && promptOf(recSR6, "plan:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && countLabel(recSR6, "spec-revise:#11") === 1
+    && promptSR1Rev.indexOf("REVISIONS_REQUIRED") >= 0;
+
   // ------------------- #508: the per-task chain and its gate -------------------
 
   // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
@@ -1254,7 +1429,8 @@ function probedNums(record) {
 
   // Every new run must also be harness-clean — an undeclared opts.phase on any
   // of the four new agent kinds shows up here and nowhere else.
-  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT]
+  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT,
+    recSR1, recSR2, recSR3, recSR4, recSR5, recSR6]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
   // ------------------------------------------------------------------ #515
   // Claim verification. Every run below is ultimately about ONE rule: the proof
@@ -2041,7 +2217,10 @@ else
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
-  check bDesign 3            "B13 medium tier runs spec + review + plan"
+  # The count stays 3 while the fixture APPROVES: spec + review + plan. The
+  # revision round is the fourth design rung and it is CONDITIONAL, so this row
+  # is the proof it stayed conditional — B254/B255 are the pair that move it.
+  check bDesign 3            "B13 medium tier runs spec + review + plan, and spends no reviser on an approved spec"
   # RE-CUT (#508): the medium issue's implement phase is no longer one agent.
   # A 2-task plan spends impl t1 + review t1r1 + impl t2 + review t2r1 + deliver
   # = 5, and the trivial issue still spends its single solver.
@@ -2128,6 +2307,26 @@ else
   check oNoEnvelope true            "B250 a non-array return leaves the plan prompt envelope-free"
   check o2OnlyUsable true           "B251 non-string and whitespace-only findings are dropped, the usable one renumbered"
   check o2Count true                "B252 the audit count reflects the SURVIVING findings, not the raw list"
+
+  # #524 item 1 — the bounded spec-revision round.
+  # B254/B256 drive a reviser that SUCCEEDS, so they leave the loop on its
+  # `!revised` exit and say nothing about the bound at any value of
+  # SPEC_REVISE_ROUNDS. The cap is G14c (the constant) plus B262c (the loop
+  # obeying it on an arm where the reviser never succeeds); these two rows claim
+  # only what they can see.
+  check srReviseCalls 1             "B254 a REVISIONS_REQUIRED verdict dispatches a spec reviser, and stops the moment one lands usably"
+  check srNoReviseOnApprove 0       "B255 an APPROVE dispatches none — the revision round is gated, not unconditional"
+  check srRejectSameRound true      "B256 REJECT takes the revision round on the same terms, and the reviewer is never re-run after it"
+  check srPlanReadsRevision true    "B257 an accepted revision is what the planner is pointed at, never the superseded spec"
+  check srPathRejected true         "B258 a revision at a different in-run-dir path is rejected (exact equality, not a prefix check) and audited"
+  check srRcRejected true           "B259 a non-zero rc at the right path is rejected too, and audited"
+  check srFindingsEnveloped true    "B260 the reviewer findings reach the reviser ONLY inside the #507 envelope"
+  check srNullDegrades true         "B261 a null reviser counts as a design null and the planner falls back to the original spec"
+  check srRevisedAudit true         "B262 the accepted revision is audited and the reviser is given the script-derived output path"
+  check srVerdictNotRaw true        "B262b the agent-returned verdict reaches no prompt raw — a value outside the closed enum is named, not echoed"
+  check srRoundsBounded true        "B262c the cap is the LOOP's bound: on the arms where the reviser never lands usably, exactly SPEC_REVISE_ROUNDS revisers are spent"
+  check srRevisedKeepsFindings true "B262d an accepted revision does not consume the findings — the planner still gets them, enveloped, to check the unverified revision against"
+
   check lFixCalls 3          "B72 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
   check lReviewCalls 4       "B73 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"
   check lExhaustedAudit true "B74 ladder exhaustion is audited (task_fix_rounds_exhausted), never silent"
@@ -2195,18 +2394,24 @@ else
   check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
 
   # G32 — B62/B63 above only bite while Run S's projection still tracks the
-  # script. Two INDEPENDENT extraction paths now read the same two constants —
-  # the shell `sed` beside S22b/G31 and the fixture's JS `RegExp` — so if either
-  # rots (a reformatted term, a renamed constant) this row reds by name instead
-  # of the projection silently drifting to a stale number and B62/B63 passing on
-  # arithmetic that no longer describes the script. Deliberately NOT a `check`:
-  # the agreement is over two fields at once and splitting it into two rows
-  # would report one half of a single fact twice.
-  G32_JS="$(printf '%s' "$FIXTURE_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.sDesignBase)+":"+String(o.sBudget));}catch(e){process.stdout.write("PARSE_ERROR:"+e.message);}})' 2>/dev/null)"
-  if [ "$G32_JS" = "${FLEET_DESIGN_BASE}:${FLEET_BUDGET}" ]; then
-    pass "G32 the fixture's own reading of the design base and implement budget agrees with the shell's ($G32_JS)"
+  # script, and B262c only bites while the fixture's cap reading is the script's
+  # cap. Two INDEPENDENT extraction paths read the same three constants — the
+  # shell `sed` beside S22b/G31/G14c and the fixture's JS `RegExp` — so if
+  # either rots (a reformatted term, a renamed constant) this row reds by name
+  # instead of the projection silently drifting to a stale number, or B262c
+  # comparing a dispatch count against a cap nobody enforces. Deliberately NOT a
+  # `check`: the agreement is over three fields at once and splitting it into
+  # three rows would report thirds of a single fact.
+  G32_JS="$(printf '%s' "$FIXTURE_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.sDesignBase)+":"+String(o.sBudget)+":"+String(o.srRoundsRead));}catch(e){process.stdout.write("PARSE_ERROR:"+e.message);}})' 2>/dev/null)"
+  G32_SH="${FLEET_DESIGN_BASE}:${FLEET_BUDGET}:${FLEET_SPEC_REVISE_ROUNDS}"
+  if [ -z "$FLEET_DESIGN_BASE" ] || [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+    # G31/S22b/G14c already failed by name; comparing against a blank field here
+    # would report the same defect a second time under a misleading heading.
+    fail "G32 skipped its join — the shell could not read one of the fleet's constants (read '$G32_SH'); see G31, S22b and G14c"
+  elif [ "$G32_JS" = "$G32_SH" ]; then
+    pass "G32 the fixture's own reading of the design base, implement budget and revision cap agrees with the shell's ($G32_JS)"
   else
-    fail "G32 the fixture and the shell disagree about the fleet's constants (shell read ${FLEET_DESIGN_BASE}:${FLEET_BUDGET}, fixture read $G32_JS)"
+    fail "G32 the fixture and the shell disagree about the fleet's constants (shell read $G32_SH, fixture read $G32_JS)"
   fi
 
   check tFallback true       "B64a a design tier with no usable plan falls back to the single solver"

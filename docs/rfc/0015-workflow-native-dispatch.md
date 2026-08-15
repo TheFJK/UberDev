@@ -128,7 +128,7 @@ where fan-out is `parallel()` and every agent stays a leaf:
 | Tier | Chain |
 |---|---|
 | `trivial`, `small` | ONE solver agent, `isolation:"worktree"`. Byte-for-byte the same brief the detached session got. |
-| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** bounded revision round; its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507) → plan writer → ONE solver agent executing the plan. |
+| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → **one** bounded revision round on any non-`APPROVE` verdict, writing a sibling `spec-r1.md` instead of rewriting `spec.md` in place, and never re-reviewed → plan writer, pointed at the revision only when it lands at exactly that path → ONE solver agent executing the plan. |
 
 Only the **solver** is worktree-isolated. Research and design agents are
 read-only and write to absolute paths under the run dir — an isolated
@@ -144,7 +144,7 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (6 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic. |
+| CB1 | projected agents (`2 + issues + (7 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the conditional spec-revision rung, since no verdict exists yet at projection time. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | (#508) live per-issue implement-phase agent counter over `implementBudget` → stop the task loop, record the remaining tasks `SKIPPED`, audit `implement_budget_exhausted`, and still deliver what is committed |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
@@ -467,11 +467,14 @@ Every loss below is **printed, never silent** — in this section, in
   behind the `SHARED:envelope v1` carrier, so a non-APPROVE verdict tells the
   planner WHAT is wrong instead of only that something is. Threading is
   presence-driven, not verdict-driven: an APPROVE with caveats is forwarded too.
-  What remains missing is the **spec reviser** (a REJECT still yields no
-  corrected spec) and the **plan reviewer** (the plan is still the one design
-  artifact with no review at all); both add an agent per design-tier issue and
-  therefore move the CB1 constant, which
-  `tests/docs-accuracy.test.sh` T14 now locks against this document.
+  **#524 item 1 closed the spec-reviser gap**: a non-`APPROVE` verdict now buys
+  ONE bounded spec-revision round, writing a sibling `spec-r1.md` that the plan
+  writer is pointed at only when it lands at exactly that path — and charging
+  that rung is what moved the CB1 constant to 7. What remains missing is the
+  **plan reviewer** — the plan is still the one design artifact with no review
+  at all — and closing that gap adds one more agent per design-tier issue,
+  therefore moving the CB1 constant again, which `tests/docs-accuracy.test.sh`
+  T14 locks against this document.
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not

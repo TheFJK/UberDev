@@ -191,7 +191,13 @@ function agentReturns() {
     "research:#11:constraints": { artifactPath: RD + "/issue-11/research-constraints.md", rc: 0, headline: "h" },
     "research:#11:test-coverage": { artifactPath: RD + "/issue-11/research-test-coverage.md", rc: 0, headline: "h" },
     "spec:#11": { path: RD + "/issue-11/spec.md", rc: 0, headline: "h" },
-    "spec-review:#11": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
+    // NOT an APPROVE (#524). The bounded spec-revision round is conditional on a
+    // non-APPROVE verdict, so an approving fixture never reaches the reviser and
+    // C1 would certify an agent_kinds list missing it — the same blindness that
+    // hid three chain rungs before this fixture was made to drive them.
+    "spec-review:#11": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: ["f"] },
+    "spec-revise:#11": { path: RD + "/issue-11/spec-r1.md", rc: 0, headline: "h" },
     "plan:#11": { path: RD + "/issue-11/plan.md", rc: 0, headline: "h" },
     "impl:#11:t1": taskRec(1, { taskCount: 2 }),
     "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
@@ -345,7 +351,7 @@ function rC3(t) {
 // shrunken set. Raise it deliberately when the fleet legitimately grows; the C1
 // comparator is what proves the two lists match, and this is what proves the
 // list was measured against a fleet that actually ran.
-var EXECUTED_KIND_FLOOR = 13;
+var EXECUTED_KIND_FLOOR = 14;
 
 function rC4(live) {
   return live.length >= EXECUTED_KIND_FLOOR

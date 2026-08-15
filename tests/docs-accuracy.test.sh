@@ -1869,6 +1869,22 @@ assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*
   'blocking findings' \
   "T14.6 RFC 0015 R-2 records that the reviewer findings ARE threaded"
 
+# #524 item 1. Both chain rows already claimed "one revision round" while NO
+# reviser was ever dispatched — a doc statement about a rung that did not exist.
+# The rows below need a needle the pre-#524 prose cannot satisfy, so they name
+# the artifact the round writes: a versioned sibling, never an in-place rewrite
+# of spec.md. That is the load-bearing half (the script cannot stat, so a
+# truncated in-place spec would be indistinguishable from a good one), which is
+# exactly the half a reader must not have to infer.
+#
+# Anchored to the medium/large TIER ROW, not to the file: each doc describes the
+# chain in exactly one line, and a file-wide needle would let the claim drift
+# into a footnote while the row a reader actually consults stayed stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.7 SKILL.md chain row names the versioned artifact the bounded revision round writes"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.8 RFC 0015 chain row names the same versioned revision artifact"
+
 echo "== T15: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
 # Extraction. The RFC's field list lives in a ```text fence that does NOT
 # immediately follow its anchor line — there is a blank line between them — so
