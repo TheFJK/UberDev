@@ -45,6 +45,17 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify recorded bases against upstream
+        # RFC 0019 §2.2 / #505. The offline guard can only demand that a
+        # recorded `vendored_at_commit` be RESTATED in an in-file header; it
+        # cannot prove the copy happened there. This step re-derives every
+        # `base_evidence` blob from upstream, which is a network operation and
+        # therefore belongs here rather than in the offline test suite. It
+        # mutates no GitHub issue, so it runs before the reporting step: a
+        # provenance record that has stopped being true is worth failing the job
+        # for, and failing it BEFORE the issue is edited keeps the tracking
+        # issue from being refreshed off a register nobody can trust.
+        run: python3 tools/vendor/vendor-drift.py --verify-bases
       - name: Report upstream drift
         env:
           # `gh` infers the target repo from these rather than from a hardcoded

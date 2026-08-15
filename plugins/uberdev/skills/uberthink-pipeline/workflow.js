@@ -269,14 +269,14 @@ const S = {
     properties: {
       verdict: { type: "string", enum: ["PROCEED", "REFUSE"] },
       rationale: { type: "string" },
-      framePath: { type: "string" },
-      scopeVerdictPath: { type: "string" },
+      framePath: { type: "string" }, // schema-prop-unread: frame artifacts are located by the script's own run-dir layout, not from this echo
+      scopeVerdictPath: { type: "string" }, // schema-prop-unread: frame artifacts are located by the script's own run-dir layout, not from this echo
       donors: { type: "array", items: { type: "string" } },
     } },
   frameLens: { type: "object", additionalProperties: false,
     required: ["lens", "status"],
     properties: {
-      lens: { type: "string", enum: ["teardown", "prior-art", "constraints"] },
+      lens: { type: "string", enum: ["teardown", "prior-art", "constraints"] }, // schema-prop-unread: the script dispatched this lens and never reads the child's echo of it
       status: { type: "string", enum: ["ok", "partial", "failed"] },
       outPath: { type: "string" },
     } },
@@ -292,7 +292,7 @@ const S = {
     required: ["islandIndex", "gapCount"],
     properties: {
       islandIndex: { type: "integer", minimum: 1 },
-      gapCount: { type: "integer", minimum: 0 },
+      gapCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a progress claim; gap handling is driven from the artifact the child wrote
       outPath: { type: "string" },
       gaps: { type: "array", items: { type: "object" } },
     } },
@@ -300,16 +300,16 @@ const S = {
     required: ["islandIndex", "compositeCount"],
     properties: {
       islandIndex: { type: "integer", minimum: 0 },
-      lens: { type: "string" },
+      lens: { type: "string" }, // schema-prop-unread: the script dispatched this lens and never reads the child's echo of it
       compositeCount: { type: "integer", minimum: 0 },
-      outDir: { type: "string" },
+      outDir: { type: "string" }, // schema-prop-unread: the output directory is composed by the script and passed in; the echo is unread
     } },
   falsify: { type: "object", additionalProperties: false,
     required: ["islandIndex", "compositeId", "lens"],
     properties: {
       islandIndex: { type: "integer", minimum: 1 },
-      compositeId: { type: "string" },
-      lens: { type: "string", enum: ["steelman", "premortem", "redteam", "physics"] },
+      compositeId: { type: "string" }, // schema-prop-unread: the script dispatched this composite id and never reads the child's echo of it
+      lens: { type: "string", enum: ["steelman", "premortem", "redteam", "physics"] }, // schema-prop-unread: the script dispatched this lens and never reads the child's echo of it
       outPath: { type: "string" },
       fatalKills: { type: "integer", minimum: 0 },
       fixableKills: { type: "integer", minimum: 0 },
@@ -333,9 +333,9 @@ const S = {
   arbiter: { type: "object", additionalProperties: false,
     required: ["rankedCount"],
     properties: {
-      rankedPath: { type: "string" },
+      rankedPath: { type: "string" }, // schema-prop-unread: ranked artifacts are located by the script's own run-dir layout, not from this echo
       rankedCount: { type: "integer", minimum: 0 },
-      culledCount: { type: "integer", minimum: 0 },
+      culledCount: { type: "integer", minimum: 0 }, // schema-prop-unread: a progress claim; the surviving set is re-read from the ranked artifact
     } },
   resume: { type: "object", additionalProperties: false,
     required: ["runDirExists"],

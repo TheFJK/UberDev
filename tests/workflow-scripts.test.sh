@@ -55,11 +55,19 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 THIS_FILE="$REPO_ROOT/tests/workflow-scripts.test.sh"
 HARNESS="$REPO_ROOT/tests/_workflow_harness.js"
 PLUGINS_DIR="$REPO_ROOT/plugins"
-SIZE_CAP_BYTES=524288   # 512 KB — the documented Workflow runtime script cap
+# 512 KB — the documented Workflow runtime script cap. The UNIT compared against
+# it is the worst-case CRLF checkout of the committed blob (blob bytes + newline
+# count), NOT the bytes this particular checkout happens to hold; the marked
+# T1 size-ratchet measurement region below says why. That region's markers are
+# NOT restated here on purpose: rows T1.c7/T1.c8 slice on them, and a second
+# copy of the literal is a second place for the slice to start (a mention in
+# this comment made the slice span the whole file and pass vacuously).
+SIZE_CAP_BYTES=524288
+STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
 
 # Hard-fail (exit 2) on missing inputs — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
-for f in "$THIS_FILE" "$HARNESS"; do
+for f in "$THIS_FILE" "$HARNESS" "$STRUCTURAL_LIB"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 [ -d "$PLUGINS_DIR" ] || { echo "FATAL: plugins/ directory missing: $PLUGINS_DIR" >&2; exit 2; }
@@ -67,6 +75,29 @@ command -v node >/dev/null 2>&1 || {
   echo "FATAL: node is required for the workflow-script tiers (preinstalled on both CI images)" >&2
   exit 2
 }
+command -v git >/dev/null 2>&1 || {
+  echo "FATAL: git is required for the platform-invariant size ratchet (#522)" >&2
+  exit 2
+}
+
+# Shared structural helpers. This suite uses ONE of them — the measurement
+# primitive checkout_worst_case_bytes (#522), which does not touch $PASS/$FAIL.
+# Fail-loud guard per #209: a missing or unreadable helper aborts rc=2, never
+# vacuous-green.
+source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_assert_structural.sh missing/unreadable" >&2; exit 2; }
+# The guard above only catches a helper file that is MISSING or unparseable:
+# `source` reports the status of the last command in the sourced file, so a
+# helper that was renamed, moved or split out still sources rc=0. Every call to
+# it would then fail with command-not-found (rc 127), which increments neither
+# counter — and with no errexit this file would print `failed: 0` and exit 0
+# with its size ratchet never executed. Assert the names actually called here,
+# and extend this list when a new one is used.
+for structural_fn in checkout_worst_case_bytes; do
+  command -v "$structural_fn" >/dev/null 2>&1 || {
+    echo "FATAL: _lib_assert_structural.sh sourced but $structural_fn is not defined (renamed helper?)" >&2
+    exit 2
+  }
+done
 
 PASS=0
 FAIL=0
@@ -74,7 +105,11 @@ pass() { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); }
 
 TMPDIR_FIXTURES="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_FIXTURES"' EXIT
+# The fixture tree below contains a throwaway git repo; on Git Bash a still-open
+# handle can make `rm -rf` return non-zero, and this file sets pipefail. Teardown
+# must never be the thing that reds the suite. ONE EXIT trap only — a second
+# `trap ... EXIT` silently REPLACES this one.
+trap 'rm -rf "$TMPDIR_FIXTURES" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # Discovery: workflow scripts live at plugins/*/skills/<name>/workflow.js
@@ -190,6 +225,74 @@ check_forbidden_tokens() {
   fi
 }
 
+# === BEGIN T1 size-ratchet measurement (#522) ===
+# The size cap is budgeted against the WORST-CASE CRLF CHECKOUT of the committed
+# blob, never against the bytes this particular checkout happens to hold.
+#
+# WHY. core.autocrlf=true is live on windows-latest, so a worktree byte count is
+# a checkout-TRANSLATED size and one literal cap is silently a stricter cap
+# there. Measured on one commit of a 125-line file: 6454 B on the ubuntu job,
+# 6579 B on the windows job — a delta of exactly its newline count.
+#
+# WHY /.gitattributes IS NOT THE FIX. tests/docs-accuracy.test.sh row T8.10
+# forbids widening it beyond plugins/uberdev/hooks/**: three byte-exactness
+# suites are windows-skipped on that scoping, and widening the rule would
+# convert a documented skip into an untested claim.
+#
+# WHY NOT PLAIN BLOB BYTES. The Workflow runtime loads workflow.js FROM DISK, so
+# blob-only bytes would LOOSEN the cap by one byte per line on the platform
+# carrying the biggest payload. Worst-case keeps today's Windows strictness and
+# raises every other platform to match.
+#
+# Rows T1.f8-T1.f11 drive these two functions against a throwaway repo; rows
+# T1.c7/T1.c8 keep the whole measurement inside these markers.
+wf_verdict_field() {  # <verdict_line> <1|2|3> -> that pipe-delimited field
+  # The ONE parser. The live rows below and the T1.f fixtures both go through
+  # it, so a parse bug cannot pass here while the fixtures split the line their
+  # own way (#370: one contract, N uncompared copies).
+  local line="$1" idx="$2" rest
+  rest="${line#*|}"
+  case "$idx" in
+    1) printf '%s\n' "${line%%|*}" ;;
+    2) printf '%s\n' "${rest%%|*}" ;;
+    3) printf '%s\n' "${rest#*|}" ;;
+  esac
+}
+
+wf_script_verdict() {  # <root> <repo_rel_path> <cap_bytes> -> "<verdict>|<size>|<basis>"
+  local wf_root="$1" wf_base="$2" wf_cap="$3"
+  local wf_size wf_rc wf_basis
+  wf_size="$(checkout_worst_case_bytes "$wf_root" "$wf_base")"
+  wf_rc=$?
+  wf_basis="worst-case CRLF checkout of HEAD:$wf_base"
+  if [ "$wf_rc" -eq 3 ]; then
+    # No blob at HEAD: authored but not yet committed. Measure the WORKTREE
+    # bytes and SAY SO on the row — the cap is about what the runtime loads, and
+    # a silent skip here is the vacuity class #522 exists to close. On CI every
+    # discovered script is committed, so this arm is local-dev only.
+    wf_size="$(wc -c < "$wf_root/$wf_base" | tr -d '[:space:]')"
+    wf_basis="worktree bytes — $wf_base has no blob at HEAD (uncommitted)"
+    wf_rc=0
+  fi
+  # Only re-classify a SUCCESSFUL measurement, so an rc 2/3 keeps its own
+  # identity in the basis instead of being flattened into "rc=4".
+  if [ "$wf_rc" -eq 0 ]; then
+    case "$wf_size" in ''|*[!0-9]*) wf_rc=4 ;; esac
+  fi
+  if [ "$wf_rc" -ne 0 ]; then
+    # Empty size field, never "0": a cap is satisfied by 0 bytes, so a failed
+    # measurement must not be able to wear a passing number.
+    printf 'unmeasurable||checkout_worst_case_bytes rc=%s over HEAD:%s\n' "$wf_rc" "$wf_base"
+    return 0
+  fi
+  if [ "$wf_size" -le "$wf_cap" ]; then
+    printf 'ok|%s|%s\n' "$wf_size" "$wf_basis"
+  else
+    printf 'over|%s|%s\n' "$wf_size" "$wf_basis"
+  fi
+}
+# === END T1 size-ratchet measurement (#522) ===
+
 if [ "$SCRIPT_COUNT" -eq 0 ]; then
   pass "T1 notice: no workflow scripts on disk yet — per-script lint vacuously green (carrier lands before Phase 2 ships the first script)"
 else
@@ -204,12 +307,15 @@ else
       node --check --input-type=module < "$script" 2>&1 | sed -n '1,5s/^/        /p'
     fi
 
-    size="$(wc -c < "$script" | tr -d '[:space:]')"
-    if [ "$size" -le "$SIZE_CAP_BYTES" ] 2>/dev/null; then
-      pass "T1 $base: size $size <= $SIZE_CAP_BYTES bytes (512 KB runtime cap)"
-    else
-      fail "T1 $base: size $size exceeds the 512 KB Workflow runtime cap"
-    fi
+    verdict_line="$(wf_script_verdict "$REPO_ROOT" "$base" "$SIZE_CAP_BYTES")"
+    verdict="$(wf_verdict_field "$verdict_line" 1)"
+    size="$(wf_verdict_field "$verdict_line" 2)"
+    size_basis="$(wf_verdict_field "$verdict_line" 3)"
+    case "$verdict" in
+      ok)   pass "T1 $base: size $size <= $SIZE_CAP_BYTES bytes (512 KB runtime cap; $size_basis)" ;;
+      over) fail "T1 $base: size $size exceeds the 512 KB Workflow runtime cap ($size_basis)" ;;
+      *)    fail "T1 $base: size UNMEASURABLE ($size_basis)" ;;
+    esac
 
     check_forbidden_tokens "$script" "$base"
   done < "$SCRIPTS_FILE"
@@ -238,6 +344,221 @@ if grep -qwE 'import|require' <<<'1:// important: requires careful reading'; the
   fail "T1.c6 word-boundary control: 'important'/'requires' must not trip the import/require grep"
 else
   pass "T1.c6 import/require grep is word-bounded (no 'important'/'requires' false positives)"
+fi
+
+# ---------------------------------------------------------------------------
+# T1.f — controls for the T1 SIZE cap (#522). Same role for the size ratchet
+# that T1.c* play for the lint greps.
+#
+# The cap is a fixed number of bytes, but a worktree byte count is a
+# CHECKOUT-TRANSLATED size: core.autocrlf=true is live on windows-latest
+# (/.gitattributes is deliberately scoped to plugins/uberdev/hooks/**), so one
+# literal budget is silently a stricter budget there. Measured on the same
+# commit: plugins/uberdev/skills/using-uberdev/SKILL.md is 6454 B on ubuntu and
+# 6579 B on windows — a delta of exactly its 125 newlines.
+#
+# These rows build a throwaway repo, flip core.autocrlf across it, and prove the
+# replacement measurement does not move. Every row is an explicit PASS or FAIL —
+# never a skip: a fixture that could not be built reds T1.f0 AND every row that
+# depends on it, because "no measurement" must never read as "measurement fine".
+# ---------------------------------------------------------------------------
+echo "== T1.f: size-ratchet fixtures (platform-invariant measurement, #522) =="
+
+t1f_worktree_bytes() {  # <path> -> the bytes that file occupies ON DISK, right now
+  # Argument form, not the redirect form, DELIBERATELY: T1.c8 below ratchets the
+  # redirect token to the labelled measurement region only, so these fixtures
+  # must reach the same number by an independent route (which is also what makes
+  # T1.f3 a real comparison rather than a restatement). awk reads field 1 because
+  # Git Bash pads the count.
+  wc -c "$1" | awk '{ print $1 }' | tr -d '[:space:]'
+}
+
+t1f_recheckout() {  # <core.autocrlf value> — pin the conversion, restore f.txt from the index
+  git -C "$T1F_REPO" config core.autocrlf "$1" >/dev/null 2>&1 || return 1
+  rm -f "$T1F_REPO/f.txt" || return 1
+  git -C "$T1F_REPO" checkout -- f.txt >/dev/null 2>&1 || return 1
+}
+
+T1F_REPO="$TMPDIR_FIXTURES/blob-ratchet"
+T1F_NONREPO="$TMPDIR_FIXTURES/not-a-repo"
+T1F_BLOB="$TMPDIR_FIXTURES/blob-bytes.bin"
+T1F_READY=0
+mkdir -p "$T1F_NONREPO"
+# `-b main` keeps git's default-branch advice off stderr on Git Bash. The commit
+# pins name/email AND commit.gpgsign so a host with global signing turned on
+# cannot fail the fixture.
+if git init -q -b main "$T1F_REPO" >/dev/null 2>&1 \
+   && printf 'alpha\nbeta\ngamma\n' > "$T1F_REPO/f.txt" \
+   && git -C "$T1F_REPO" add f.txt >/dev/null 2>&1 \
+   && git -C "$T1F_REPO" -c user.name=uberdev-test -c user.email=uberdev-test@example.invalid \
+          -c commit.gpgsign=false commit -qm fixture >/dev/null 2>&1 \
+   && printf 'loose\n' > "$T1F_REPO/uncommitted.js"; then
+  T1F_READY=1
+fi
+
+if [ "$T1F_READY" -eq 1 ] && git -C "$T1F_REPO" rev-parse --verify --quiet HEAD:f.txt >/dev/null 2>&1; then
+  pass "T1.f0 throwaway fixture repo built, with a committed blob at HEAD:f.txt"
+else
+  fail "T1.f0 could not build the fixture repo (git init/add/commit failed) — every T1.f row below is unproven, not fine"
+fi
+
+W_LF=""; W_CRLF=""; H_LF=""; H_CRLF=""
+if [ "$T1F_READY" -eq 1 ] && t1f_recheckout false; then
+  W_LF="$(t1f_worktree_bytes "$T1F_REPO/f.txt")"
+  H_LF="$(checkout_worst_case_bytes "$T1F_REPO" f.txt)"
+fi
+if [ "$T1F_READY" -eq 1 ] && t1f_recheckout true; then
+  W_CRLF="$(t1f_worktree_bytes "$T1F_REPO/f.txt")"
+  H_CRLF="$(checkout_worst_case_bytes "$T1F_REPO" f.txt)"
+fi
+
+# The property row: the same commit must budget to the same number on a host
+# that translates line endings and one that does not.
+if [ -n "$H_LF" ] && [ "$H_LF" = "$H_CRLF" ]; then
+  pass "T1.f1 the measurement is invariant under core.autocrlf (${H_LF} B with false, ${H_CRLF} B with true)"
+else
+  fail "T1.f1 the measurement MOVED when core.autocrlf flipped (false='$H_LF', true='$H_CRLF') — one literal budget would be two different budgets"
+fi
+
+# Fixture integrity: without a REAL translation, T1.f1 passes vacuously on any
+# host where autocrlf happens to be inert. The delta is checked arithmetically —
+# MSYS2 grep reads text-mode and cannot see a CR at all, so a grep-based CR check
+# is vacuously green on the one platform that matters
+# (tests/crossplatform-shell-wrappers.test.sh XH2a measured this).
+T1F_BLOB_LF=""
+if [ "$T1F_READY" -eq 1 ] && git -C "$T1F_REPO" cat-file blob HEAD:f.txt > "$T1F_BLOB" 2>/dev/null; then
+  T1F_BLOB_LF="$(wc -l < "$T1F_BLOB" | tr -d '[:space:]')"
+fi
+if [ -n "$W_LF" ] && [ -n "$W_CRLF" ] && [ -n "$T1F_BLOB_LF" ] \
+   && [ "$W_CRLF" -ne "$W_LF" ] && [ "$((W_CRLF - W_LF))" -eq "$T1F_BLOB_LF" ]; then
+  pass "T1.f2 the fixture genuinely translates on checkout (${W_LF} B -> ${W_CRLF} B on disk, +${T1F_BLOB_LF} = the blob's newline count)"
+else
+  fail "T1.f2 the fixture did NOT translate (LF='$W_LF', CRLF='$W_CRLF', blob newlines='$T1F_BLOB_LF') — T1.f1 proves nothing on this host"
+fi
+
+# The unit is the WORST-CASE checkout, not the blob: the runtime loads
+# workflow.js from disk, so budgeting plain blob bytes would loosen the cap by
+# one byte per line on exactly the platform that translates.
+if [ -n "$H_CRLF" ] && [ "$H_CRLF" = "$W_CRLF" ]; then
+  pass "T1.f3 the measured unit IS the worst-case checkout size (${H_CRLF} B == the translated file on disk)"
+else
+  fail "T1.f3 the measured value ('$H_CRLF') is not the translated checkout size ('$W_CRLF') — blob-only bytes LOOSEN the cap by one byte per line"
+fi
+
+# Anti-vacuity: the naive form of this fix, 'git cat-file blob HEAD:<path>'
+# piped into a byte counter, prints 0 for a path that is not in HEAD — and 0
+# satisfies every budget.
+T1F_MISS="$(checkout_worst_case_bytes "$T1F_REPO" no/such/file 2>/dev/null)"
+T1F_MISS_RC=$?
+if [ "$T1F_MISS_RC" -eq 3 ] && [ -z "$T1F_MISS" ]; then
+  pass "T1.f5 a path with no blob at HEAD returns rc=3 and prints nothing (never the '0' that satisfies any budget)"
+else
+  fail "T1.f5 a missing blob gave rc=$T1F_MISS_RC value='$T1F_MISS' — expected rc=3 and empty output; a value of '0' here is the #522 failure mode wearing a fix's clothes"
+fi
+
+T1F_NOREPO_VAL="$(checkout_worst_case_bytes "$T1F_NONREPO" f.txt 2>/dev/null)"
+T1F_NOREPO_RC=$?
+if [ "$T1F_NOREPO_RC" -eq 2 ] && [ -z "$T1F_NOREPO_VAL" ]; then
+  pass "T1.f6 a directory that is not a git work tree returns rc=2 and prints nothing"
+else
+  fail "T1.f6 a non-work-tree gave rc=$T1F_NOREPO_RC value='$T1F_NOREPO_VAL' — expected rc=2 and empty output"
+fi
+
+# The helper is called inside a command substitution, where 'exit' would kill
+# only the subshell and hand the caller an empty string — the exact vacuous-pass
+# class it exists to prevent. Same contract as _t10_corpus in
+# tests/docs-accuracy.test.sh. An empty slice is a FAIL, never a pass.
+T1F_FN_BODY="$(sed -n '/^checkout_worst_case_bytes()/,/^}/p' "$STRUCTURAL_LIB")"
+if [ -z "$T1F_FN_BODY" ]; then
+  fail "T1.f7 could not slice checkout_worst_case_bytes out of $STRUCTURAL_LIB (renamed or reformatted) — an empty slice satisfies an absence check vacuously"
+elif grep -qE '(^|[^[:alnum:]_.-])exit([[:space:]]|$)' <<<"$T1F_FN_BODY"; then
+  fail "T1.f7 checkout_worst_case_bytes contains a bare 'exit' — inside a command substitution that kills the subshell only and returns an empty string to the caller"
+else
+  pass "T1.f7 checkout_worst_case_bytes is exit-free (it returns an rc a substitution caller can branch on)"
+fi
+
+# The rows above prove the measurement primitive. The rows below prove the
+# SUITE'S OWN decision function — the one the live per-script ratchet calls — by
+# driving it against the fixture repo. Without them the live `-le` comparison
+# would be reachable only through the shipped scripts, i.e. only in the state
+# where it happens to pass. They read the verdict line through the SAME
+# wf_verdict_field parser the live rows use, so a fixture cannot stay green by
+# splitting the line differently from production.
+T1F_OVER_LINE="$(wf_script_verdict "$T1F_REPO" f.txt 10)"
+T1F_EXPECT_SIZE="$(checkout_worst_case_bytes "$T1F_REPO" f.txt)"
+if [ "$(wf_verdict_field "$T1F_OVER_LINE" 1)" = "over" ] \
+   && [ -n "$T1F_EXPECT_SIZE" ] && [ "$(wf_verdict_field "$T1F_OVER_LINE" 2)" = "$T1F_EXPECT_SIZE" ]; then
+  pass "T1.f8 a blob past its cap is reported over budget, carrying the measured size (${T1F_EXPECT_SIZE} B > 10 B)"
+else
+  fail "T1.f8 an over-budget blob gave '$T1F_OVER_LINE' — expected verdict 'over' with size '$T1F_EXPECT_SIZE'"
+fi
+
+# Control for T1.f8: without it, 'over' could be what this function says about
+# everything.
+T1F_UNDER_LINE="$(wf_script_verdict "$T1F_REPO" f.txt 100000)"
+if [ "$(wf_verdict_field "$T1F_UNDER_LINE" 1)" = "ok" ]; then
+  pass "T1.f9 a blob inside its cap is reported ok (the 'over' verdict is not this function's only answer)"
+else
+  fail "T1.f9 an in-budget blob gave '$T1F_UNDER_LINE' — expected verdict 'ok'"
+fi
+
+# A measurement that could not be made must never arrive as a number, because
+# every number small enough to be believable also satisfies the cap.
+T1F_UNMEAS_LINE="$(wf_script_verdict "$T1F_NONREPO" f.txt 10)"
+T1F_UNMEAS_SIZE="$(wf_verdict_field "$T1F_UNMEAS_LINE" 2)"
+if [ "$(wf_verdict_field "$T1F_UNMEAS_LINE" 1)" = "unmeasurable" ] && [ -z "$T1F_UNMEAS_SIZE" ] \
+   && [ -n "$(wf_verdict_field "$T1F_UNMEAS_LINE" 3)" ]; then
+  pass "T1.f10 an unmeasurable path is reported unmeasurable with an empty size and a basis naming the rc"
+else
+  fail "T1.f10 an unmeasurable path gave '$T1F_UNMEAS_LINE' — expected verdict 'unmeasurable', an EMPTY size (a '0' would silently satisfy any cap) and a non-empty basis"
+fi
+
+# The uncommitted arm: a script authored but not yet committed is still loaded
+# from disk by the runtime, so it is measured — and the row says which bytes
+# those are. Skipping it is the vacuity #522 is about.
+T1F_LOOSE_LINE="$(wf_script_verdict "$T1F_REPO" uncommitted.js 1000)"
+T1F_LOOSE_EXPECT="$(t1f_worktree_bytes "$T1F_REPO/uncommitted.js")"
+if [ "$(wf_verdict_field "$T1F_LOOSE_LINE" 1)" = "ok" ] \
+   && [ -n "$T1F_LOOSE_EXPECT" ] && [ "$(wf_verdict_field "$T1F_LOOSE_LINE" 2)" = "$T1F_LOOSE_EXPECT" ] \
+   && case "$(wf_verdict_field "$T1F_LOOSE_LINE" 3)" in *"no blob at HEAD"*) true ;; *) false ;; esac; then
+  pass "T1.f11 a file with no blob at HEAD is measured from the worktree (${T1F_LOOSE_EXPECT} B) and the basis says so"
+else
+  fail "T1.f11 an uncommitted file gave '$T1F_LOOSE_LINE' — expected verdict 'ok', size '$T1F_LOOSE_EXPECT' and a basis containing 'no blob at HEAD'"
+fi
+
+# --- T1.c7 / T1.c8: structural guards over the live measurement region -------
+# Both must sit BELOW the region they slice: awk exits at the first END match,
+# so the guards' own marker literals are never reachable and the region can
+# never extract itself.
+#
+# The anchors are pinned to a WHOLE-LINE comment (`^# === …`), not to the bare
+# phrase. Measured while writing this: an unanchored `/=== BEGIN …/` also
+# matched a backtick-quoted MENTION of the marker in the header comment, so the
+# slice began 200 lines early, ran to the first END match — this very line — and
+# swallowed enough of the file to satisfy both rows with the region absent
+# entirely. A guard whose slice can start somewhere other than the marker is
+# a guard that passes on the violation.
+T1_REGION="$(awk '/^# === BEGIN T1 size-ratchet measurement/{a=1} a{print} a && /^# === END T1 size-ratchet measurement/{exit}' "$THIS_FILE")"
+if [ -z "$T1_REGION" ]; then
+  fail "T1.c7 the T1 size-ratchet measurement region is EMPTY — its BEGIN/END markers are gone, and an empty region satisfies every check below vacuously (#347)"
+elif ! grep -qF -- 'checkout_worst_case_bytes' <<<"$T1_REGION"; then
+  fail "T1.c7 the T1 size-ratchet region no longer calls checkout_worst_case_bytes — the cap is being compared against checkout-translated bytes again (#522)"
+elif ! grep -qF -- 'no blob at HEAD' <<<"$T1_REGION"; then
+  fail "T1.c7 the T1 size-ratchet region no longer labels its uncommitted arm ('no blob at HEAD') — the printed row would not say which bytes it budgeted"
+else
+  pass "T1.c7 the T1 size-ratchet region measures via checkout_worst_case_bytes and labels its uncommitted arm"
+fi
+
+# Confinement: the checkout-translated byte count may appear ONLY inside that
+# region, where it is the deliberate, labelled fallback. Assembled at runtime so
+# this row cannot trip over its own source bytes.
+WC_TOKEN="$(printf 'wc'; printf ' -c <')"
+WC_ALL_COUNT="$(grep -c -F -- "$WC_TOKEN" "$THIS_FILE" || true)"
+WC_REGION_COUNT="$(grep -c -F -- "$WC_TOKEN" <<<"$T1_REGION" || true)"
+if [ "$WC_REGION_COUNT" -ge 1 ] && [ "$WC_ALL_COUNT" -eq "$WC_REGION_COUNT" ]; then
+  pass "T1.c8 every checkout-translated byte count in this file ($WC_ALL_COUNT) sits inside the labelled measurement region"
+else
+  fail "T1.c8 this file has $WC_ALL_COUNT checkout-translated byte count(s) but only $WC_REGION_COUNT inside the labelled region — a size measured outside it is a platform-dependent budget (#522)"
 fi
 
 # ---------------------------------------------------------------------------

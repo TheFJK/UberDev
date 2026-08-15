@@ -370,7 +370,7 @@ The receiving skill uses the same context for its own provider edges. It never c
 
 ### Phase 1 research cache — deleted (decision record, #308 / RFC 0012 §3.5)
 
-Earlier revisions carried a ~200-line artifact-reuse short-circuit here: a freshness predicate over `.uberdev/research/issue-<N>/<topic>.md` that gated per-topic reuse of cached research before the fanout. It was deleted after a live repo-wide grep verified the cache had **zero writers**: fresh runs write only to `$UBERDEV_RESEARCH_ROOT/<RUN_ID>/` (Phase 0), `/issue` stopped persisting research under `issue-<N>/` back in issue #14 (see `solve-pipeline/SKILL.md` legacy-cache notes), and no other phase, agent, or skill ever wrote those paths — the predicate could never fire and was pure dead weight on every medium/large run.
+Earlier revisions carried a ~200-line artifact-reuse short-circuit here: a freshness predicate over `.uberdev/research/issue-<N>/<topic>.md` that gated per-topic reuse of cached research before the fanout. It was deleted after a live repo-wide grep verified the cache had **zero writers**: fresh runs write only to `$UBERDEV_RESEARCH_ROOT/<RUN_ID>/` (Phase 0), `/issue` stopped persisting research under `issue-<N>/` back in issue #14 (the last readers of that path were retired in #518), and no other phase, agent, or skill ever wrote those paths — the predicate could never fire and was pure dead weight on every medium/large run.
 
 Binding rules for any future reintroduction:
 

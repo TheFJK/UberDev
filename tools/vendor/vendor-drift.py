@@ -22,16 +22,30 @@ Two properties are load-bearing, and both are the kind that rot quietly:
 Declared divergences (RFC 0019 §6) are reported separately from raw drift, so
 the five never-reconcile items do not resurface in every report as noise.
 
+`--verify-bases` is the script's second, independent mode (#505). It answers a
+different question from drift: not "has upstream moved since we last looked?"
+but "is the base this register claims to have copied from the base those bytes
+actually came from?". `vendor-check.py`'s `C-BASE` cannot answer it — that guard
+is offline by policy, so the strongest thing it can demand is that the claim be
+restated in an in-file header, which costs two coordinated lies instead of one.
+`base_evidence` records the blob oid each file had at `vendored_ref`, a commit
+of THIS repository; the offline half of the proof (that the oid matches what git
+says here) is asserted in `tests/vendor-provenance.test.sh`. This mode owns the
+upstream half, because resolving upstream's blob is a network operation and must
+never run inside the offline guard.
+
 Repo-agnostic: no organisation, repository or project id is hardcoded. Upstream
 coordinates come from `plugins/uberdev/vendor.json`; the target repository comes
 from `gh`'s own checkout/`GH_REPO` inference.
 
 Usage:
     vendor-drift.py [--repo-root DIR] [--dry-run] [--issue-limit N]
+    vendor-drift.py [--repo-root DIR] --verify-bases
 
 Exit codes:
-    0  ran to completion (drift or not)
-    1  an upstream could not be resolved, or a GitHub call failed
+    0  ran to completion (drift or not; every recorded base verified)
+    1  an upstream could not be resolved, a recorded base did not verify, or a
+       GitHub call failed
     2  usage error, or a register that is unreadable, unparseable, or missing a
        field this script would otherwise subscript
 """
@@ -163,6 +177,108 @@ def assert_upstream_path_exists(mirror, repo_slug, head, path):
              "a path upstream has renamed or deleted. That is a finding, not "
              "'no drift'; fix the register before trusting this report."
              % (path, repo_slug, head[:12]))
+
+
+def evidence_git_paths(register, repo_root, component):
+    """`(upstream-relative path, recorded oid)` for each evidenced file.
+
+    The join mirrors `vendor-check.py`'s `component_files_on_disk`: a component
+    whose path is a FILE (an agent) *is* that file, so its `files[]` entry is a
+    basename and the upstream path is already complete; a directory component
+    owns paths relative to its own root. Deciding it from disk rather than from
+    the id's shape is what makes this generalise to the multi-file skill
+    components #503/#504 will pin.
+    """
+    root_rel = register.get("root") or "plugins/uberdev"
+    upstream_path = component["upstream_path"]
+    is_file = (repo_root / root_rel / (component.get("path") or "")).is_file()
+    blobs = component["base_evidence"]["blobs"]
+    return [(upstream_path if is_file else "%s/%s" % (upstream_path, name), oid)
+            for name, oid in sorted(blobs.items())]
+
+
+def verify_bases(register, repo_root, components, slugs, urls):
+    """Re-derive every recorded base against upstream. Never certifies silence.
+
+    Deliberately taken BEFORE `resolve_head`: a base check has no use for
+    upstream HEAD, and skipping it keeps this mode cheap and its failure modes
+    narrow — an outage while resolving HEAD would otherwise be reported as a
+    base that could not be verified.
+
+    A component whose `base_evidence` is malformed exits 2, not 1. That is the
+    same separation the drift path keeps: rc 2 means somebody broke the
+    register, rc 1 means upstream is unreachable or a base genuinely does not
+    verify. `vendor-check.py`'s `C-EVIDENCE` reports the shape defect offline
+    with the field named; re-diagnosing it here would be a second, vaguer copy,
+    but SKIPPING it would let "unverifiable" render as "verified", which is the
+    silent-green class this whole tool exists to refuse.
+    """
+    work_root = Path(tempfile.mkdtemp(prefix="vendor-bases."))
+    verified_files = 0
+    verified_components = 0
+    try:
+        fetched = set()
+        for component in components:
+            evidence = component.get("base_evidence")
+            if evidence is None:
+                continue
+            cid = component["id"]
+            base = component.get("vendored_at_commit")
+            # Shape is validated UP FRONT, including every recorded oid. A
+            # malformed oid that reached the comparison below would be reported
+            # as "upstream holds a different blob" — a confident, wrong
+            # diagnosis of a broken register, and on the wrong exit code.
+            usable = (isinstance(evidence, dict)
+                      and isinstance(evidence.get("blobs"), dict)
+                      and evidence["blobs"]
+                      and SHA40_RE.match(base or "")
+                      and all(isinstance(v, str) and SHA40_RE.match(v)
+                              for v in evidence["blobs"].values()))
+            if not usable:
+                die_usage("component %s declares base_evidence that cannot be "
+                          "verified (a non-empty blobs map of 40-hex object ids "
+                          "and a 40-hex vendored_at_commit are all required) — "
+                          "run tools/vendor/vendor-check.py, whose C-EVIDENCE "
+                          "names the offending field" % cid)
+            slug = slugs[component["upstream"]]
+            mirror = ensure_mirror(work_root, urls[slug], slug, (base,), fetched)
+            for upstream_path, recorded in evidence_git_paths(register,
+                                                              repo_root,
+                                                              component):
+                rc, out, err = run(["git", "rev-parse",
+                                    "%s:%s" % (base, upstream_path)],
+                                   cwd=str(mirror))
+                if rc != 0:
+                    fail("%s: upstream_path %r does not resolve in %s@%s (rc=%d): "
+                         "%s — the recorded base cannot be the base those bytes "
+                         "came from, or the path is wrong"
+                         % (cid, upstream_path, slug, base[:12], rc,
+                            (err or out).strip()))
+                found = out.strip()
+                if not SHA40_RE.match(found):
+                    fail("%s: git rev-parse %s:%s returned %r, which is not an "
+                         "object id — refusing to read an unparseable answer as "
+                         "a verified base"
+                         % (cid, base[:12], upstream_path, found))
+                if found != recorded:
+                    fail("%s: upstream %s@%s holds blob %s for %s, but "
+                         "base_evidence records %s — the recorded base is not "
+                         "where these bytes came from"
+                         % (cid, slug, base[:12], found, upstream_path,
+                            recorded))
+                verified_files += 1
+            verified_components += 1
+            print("vendor-drift: %s verified against %s@%s (%d file(s))"
+                  % (cid, slug, base[:12], len(evidence["blobs"])))
+    finally:
+        shutil.rmtree(work_root, ignore_errors=True)
+    if verified_components == 0:
+        die_usage("no component declares base_evidence — there is nothing to "
+                  "verify, and printing a clean verdict over an empty set would "
+                  "be the silent-green failure this mode exists to detect")
+    print("vendor-drift: %d component(s), %d file(s) — every recorded base "
+          "matches upstream" % (verified_components, verified_files))
+    return 0
 
 
 def changed_paths(mirror, repo_slug, base, head):
@@ -306,8 +422,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--repo-root", default=None,
                         help="repository root to read the register from")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="render the report to stdout and touch GitHub not at all")
+    # The two modes are mutually exclusive through argparse rather than through
+    # a hand-rolled guard, so passing both is a usage error argparse reports
+    # itself (rc 2) instead of one flag being silently ignored by the other.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="render the report to stdout and touch GitHub not at all")
+    mode.add_argument("--verify-bases", action="store_true",
+                      help="re-derive every recorded base_evidence blob against "
+                           "upstream and exit; touches GitHub not at all")
     parser.add_argument("--issue-limit", type=int, default=100,
                         help="how many open issues to scan for the marker")
     args = parser.parse_args(argv)
@@ -336,7 +459,7 @@ def main(argv=None):
                          ", ".join(absent)))
 
     used = sorted({c["upstream"] for c in components})
-    heads = {}
+    slugs = {}
     urls = {}
     for upstream_id in used:
         upstream = upstreams.get(upstream_id)
@@ -346,7 +469,17 @@ def main(argv=None):
         if not slug:
             die_usage("upstream %r declares no repo — there is nothing to clone"
                       % upstream_id)
+        slugs[upstream_id] = slug
         urls.setdefault(slug, upstream.get("url") or UPSTREAM_HOST + slug)
+
+    # Base verification needs coordinates and nothing else, so it returns before
+    # a single HEAD is resolved (see verify_bases' docstring).
+    if args.verify_bases:
+        return verify_bases(register, repo_root, components, slugs, urls)
+
+    heads = {}
+    for upstream_id in used:
+        slug = slugs[upstream_id]
         if slug in heads:
             continue
         heads[slug] = resolve_head(urls[slug], slug)

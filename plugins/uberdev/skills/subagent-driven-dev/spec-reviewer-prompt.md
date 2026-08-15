@@ -32,7 +32,7 @@ the runtime-exported paths. The
 
     ## Plan Task Description (what the plan said this task should do)
 
-    [FULL TEXT of plan task entry, including its Worktree-safe paths and any prescribed steps]
+    [FULL TEXT of plan task entry, including its Owns (file allowlist) paths and any prescribed steps]
 
     ## What Implementer Claims They Built
 

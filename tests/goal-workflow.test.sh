@@ -458,7 +458,21 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
 
   // Run M — the projected-agent ceiling aborts BEFORE the claim relay, so no
   // issue is claimed and left unsolved.
-  const recM = await run(buildArgs({ maxAgents: 3 }), { agentReturns: {
+  //
+  // RE-DERIVED (#508). The old fixture used maxAgents:3, which trips under any
+  // per-issue cost and so could not tell the arithmetic from the breaker. The
+  // ceiling is pinned to the exact projection instead:
+  //   projectedAgentsForCycle(min(queue=2, maxParallel=3))
+  //     = 3 (claim/collect/verdict relays) + maxWatchTicks(40) + 2 + 2 * 30
+  //     = 105,   where 30 = the fleet 6 design agents + IMPLEMENT_AGENT_BUDGET(24)
+  // so 104 must trip and 105 must not. Change the per-issue cost without
+  // changing this number and B52/B52b go red, which is the point.
+  //
+  // The flat term is 2, not 1 (#515): the fleet spends a batched PR-claim
+  // verification relay alongside its intake relay, once per fleet run rather
+  // than per issue.
+  const CYCLE_PROJECTION = 3 + 40 + 2 + (2 * 30);   // 105
+  const recM = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
     "goal-claim:c1": claim(),
     "goal-watch:c1:t1": { rc: 0, note: "drained" },
   } });
@@ -466,6 +480,18 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.mTripped = resM ? resM.cb1Tripped : null;
   out.mNoClaim = !labels(recM).some(function (l) { return /^goal-claim/.test(l || ""); });
   out.mAudit = !!(resM && resM.auditEvents.some(function (e) { return e.event === "agent_ceiling_cb1"; }));
+
+  // ...and the companion no-trip probe at exactly the projection: the breaker
+  // must not fire one agent early, and the claim relay must actually run.
+  const recM2 = await run(buildArgs({ maxAgents: CYCLE_PROJECTION }), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+    "goal-verdicts:c1": VERDICTS,
+    "goal-collect:c1": collect(),
+  } });
+  const resM2 = resultOf(recM2);
+  out.m2Tripped = !!(resM2 && resM2.cb1Tripped);
+  out.m2Claimed = labels(recM2).some(function (l) { return /^goal-claim/.test(l || ""); });
 
   // Run N — the claim prompt must carry the exact arming chain (the runtime
   // complement to tests/goal.test.sh BT83s source-shape greps).
@@ -596,6 +622,67 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.r2Sanitised = !!(claimR2 && claimR2.prompt.indexOf("rm -rf") < 0
     && claimR2.prompt.indexOf("\"bash\" \"/p/lib/goal-phase1.sh\"") >= 0);
 
+  // Run S (#515) — the nested fleet gained a second relay (its PR-claim proof
+  // pass), so the goal-side projection has to grow with it or CB1 under-counts
+  // by one per cycle and the "halt before claiming" guarantee stops being exact.
+  //
+  // MUTATION-SENSITIVE by construction — and RE-DERIVED from the live per-issue
+  // cost instead of from arithmetic frozen when this row was written. The
+  // hand-written ceiling of 58 charged 7 agents per issue; the shared constant
+  // BOTH sides of the comparison read is 30, so the real projection sat far
+  // above 58 and the breaker tripped whether the added relay term was 2 or 1.
+  // A row advertising a sensitivity it no longer has is worse than no row: the
+  // next reader trusts the message instead of re-deriving it.
+  //
+  // Default fixture: 2 queued issues, maxParallel 3, maxWatchTicks 40, so the
+  // projection is CYCLE_PROJECTION (105) and the pre-#515 one is 104. At a
+  // ceiling of 104, the current formula trips (105 > 104) and a formula whose
+  // flat term is reverted to 1 does not (104 > 104 is false), which is exactly
+  // the term this row exists to protect.
+  const recS = await run(buildArgs({ maxAgents: CYCLE_PROJECTION - 1 }), { agentReturns: {
+    "goal-claim:c1": claim(),
+    "goal-watch:c1:t1": { rc: 0, note: "drained" },
+  } });
+  const resS = resultOf(recS);
+  out.sTripped = resS ? resS.cb1Tripped : null;
+  out.sNoClaim = !labels(recS).some(function (l) { return /^goal-claim/.test(l || ""); });
+
+  // Run T (#515) — the UNTESTED CONSUMER. `grep -rn prsOpened tests/` used to
+  // hit only the fleet own suite: the goal ingestion of the fleet PR set had no
+  // coverage at all, which is precisely the leg a post-verification set has to
+  // travel to matter. This locks the passthrough and nothing more.
+  //
+  // Note deliberately: `rec.prsOpened` is WRITTEN here and read by nothing
+  // downstream — its only other mention in goal-pipeline/workflow.js is the
+  // `rec.prsOpened = digitsOnly(out.prsOpened)` assignment itself. Cited by
+  // identifier rather than by line number: a citation into a file this PR class
+  // keeps editing rots, and this one already had. So
+  // this is an ingestion-passthrough lock, NOT a behavioural one — there is no
+  // "the cycle stops treating the issue as PR-bearing" behaviour to assert
+  // against, and pretending otherwise would paper over a dead consumer.
+  const recT = await run(buildArgs(), {
+    agentReturns: {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect(),
+    },
+    workflowReturns: {
+      // The fleet disproved the PR claimed for #11 and dropped it from the set;
+      // the downgraded record still rides in `results`.
+      [FLEET_PATH]: {
+        prsOpened: [902],
+        results: [
+          { issue: 11, status: "PUSHED_NO_PR", prNumber: 0, claimedStatus: "PR_OPENED",
+            claimedPrNumber: 901, prProof: "DISPROVEN" },
+          { issue: 12, status: "PR_OPENED", prNumber: 902, prProof: "CONFIRMED" },
+        ],
+      },
+    },
+  });
+  const resT = resultOf(recT);
+  out.tPrsOpened = (resT && resT.cycles.length) ? resT.cycles[0].prsOpened : null;
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -680,9 +767,11 @@ else
   check lHalted true                      "B50 a thrown run is reported as halted, not as converged"
   check lBudgetThrows 1                   "B51 exactly one budget throw escaped to the driver"
 
-  check mTripped true                     "B52 CB1 trips when the projection exceeds maxAgents"
+  check mTripped true                     "B52 CB1 trips one agent below the projected per-cycle cost (the formula is pinned, not just the breaker)"
   check mNoClaim true                     "B53 CB1 aborts BEFORE the claim pass — no issue is claimed and stranded"
   check mAudit true                       "B54 agent_ceiling_cb1 is audited"
+  check m2Tripped false                   "B52b CB1 does NOT trip at exactly the projected per-cycle cost"
+  check m2Claimed true                    "B52c ...and the claim relay actually runs at that ceiling"
 
   check nPhase1 true                      "B55 the claim prompt names lib/goal-phase1.sh"
   check nLauncher true                    "B56 the claim prompt names lib/solve-launcher.sh"
@@ -721,6 +810,11 @@ else
   check rNoBarePathBash true              "B85 no relay falls back to a bare PATH \`bash\` when an interpreter was published"
   check rWatchTimeout true                "B86 the relay timeout is sized from the resolved watch budget"
   check r2Sanitised true                  "B87 a malformed bashBin degrades to PATH \`bash\`, never reaching the command line"
+
+  check sTripped true                     "B88 the cycle projection counts the fleet PR-proof relay (#515)"
+  check sNoClaim true                     "B89 the raised projection still halts BEFORE the claim pass"
+
+  check tPrsOpened '[902]'                "B90 /goal ingests exactly the fleet post-verification PR set — the disproven number never enters it"
 fi
 
 echo ""

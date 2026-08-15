@@ -28,9 +28,10 @@ traceback that suppresses the checks queued behind it.
     C-COVER      on-disk skill dirs + agent files == declared component paths,
                  both directions; aborts rather than passing if either side is
                  empty
-    C-FILES      per component: recorded file list == disk. For `track`
-                 components the sha256 must match too, unless the change is
-                 declared in divergences[]
+    C-FILES      per component: recorded file list == disk. For DIGEST-LOCKED
+                 components — `stance: track`, or any component that records a
+                 real `vendored_at_commit` (#503) — the sha256 must match too,
+                 unless the change is declared in divergences[]
     C-HEADER     every in-file provenance header agrees with its component's
                  upstream repo and vendored_at_commit; asserts >= 1 header was
                  found before reporting agreement
@@ -38,6 +39,10 @@ traceback that suppresses the checks queued behind it.
                  witnessed by a matching in-file provenance header on one of the
                  component's own files; fails rather than passing over an empty
                  pinned set
+    C-EVIDENCE   every declared base_evidence object is well-formed: a known
+                 method, a 40-hex vendored_ref, a blobs map keyed exactly by the
+                 component's own files[] with 40-hex values, and a pinned
+                 component behind it; fails rather than passing over an empty set
     C-README     README Bundled-table third-party slugs == third-party
                  component slugs, both directions
     C-LICENSE    every declared licence file exists, and every file under
@@ -49,6 +54,9 @@ traceback that suppresses the checks queued behind it.
     C-REFS       every relative sibling file a declared markdown document points
                  at (`@ref` or `](link)`, outside code) resolves on disk;
                  aborts rather than passing if it found no reference at all
+    C-DIVREF     every components[].divergences[].ref resolves to a declared
+                 permanent_divergences[].id, for every component regardless of
+                 stance
 
 Repo-agnostic: no organisation, project id or repository name is hardcoded. All
 upstream coordinates come from the register.
@@ -57,7 +65,7 @@ Usage:
     vendor-check.py [--repo-root DIR] [--only CHECK-ID ...]
     vendor-check.py --refresh [--repo-root DIR]
 
-`--refresh` recomputes file lists and `track` digests from disk. It NEVER
+`--refresh` recomputes file lists and digest-locked digests from disk. It NEVER
 invents a `vendored_at_commit`, and no test may call it: a producer must not be
 its own oracle.
 
@@ -107,12 +115,41 @@ CODESPAN_RE = re.compile(r"`[^`]*`")
 AT_REF_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9]+)")
 MD_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 
+# The CLOSED component key set (C-SCHEMA). Every member value already had a
+# validator; the RECORD itself did not, so an unrecognised key passed silently
+# and a misspelling was indistinguishable from an omission. That mattered most
+# on the optional sub-record: `check_evidence` skips any component whose
+# `base_evidence` lookup yields None, and its vacuity arm fires only when ZERO
+# components declare evidence — so one mistyped key dropped that component out of
+# the measurement while the whole register stayed green, which is precisely the
+# unfalsifiable-claim state `base_evidence` was added to eliminate. Mirrors the
+# `additionalProperties: false` discipline the sibling JS schemas already use.
+#
+# Add a member here when the register grows one. That is the point: growing the
+# record is a decision, and an undeclared key is a typo until somebody says
+# otherwise.
+COMPONENT_KEYS = frozenset({
+    "id", "path", "origin",
+    "upstream", "upstream_path", "vendored_at_commit", "vendored_on",
+    "last_reviewed_upstream_commit", "last_reviewed_on",
+    "stance", "stance_reason",
+    "measured_diff_lines", "measured_diff_basis",
+    "divergences", "files", "base_evidence",
+})
+
 # Files whose bytes are never text we can scan for a provenance header.
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                    ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".webp"}
 
 ALL_CHECKS = ("C-SCHEMA", "C-COVER", "C-FILES", "C-HEADER", "C-BASE",
-              "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK", "C-REFS")
+              "C-EVIDENCE", "C-README", "C-LICENSE", "C-STANCE", "C-WATERMARK",
+              "C-REFS", "C-DIVREF")
+
+# The only recovery method this register knows how to state. A second method
+# would need its own required fields, so an unrecognised literal is refused
+# rather than waved through: "evidenced by something we cannot check" is exactly
+# the unfalsifiable claim `base_evidence` exists to replace.
+EVIDENCE_METHODS = ("blob-identity",)
 
 
 class Failures:
@@ -220,6 +257,31 @@ def third_party(register):
             if c.get("origin") == "third-party"]
 
 
+def is_pinned(component):
+    """True when the component records a real base commit rather than "unknown"."""
+    return bool(SHA40_RE.match(component.get("vendored_at_commit") or ""))
+
+
+def digest_locked(component):
+    """Whether C-FILES must hold this component's bytes to a recorded sha256.
+
+    RFC 0019 §2.3 originally tied the lock to `stance: track` alone. #503 found
+    what that coupling costs: honestly re-adjudicating a component to `fork` —
+    which §4.1 obliges the moment a real local divergence is declared — deleted
+    its digest lock at the same instant its provenance improved. A pinned `fork`
+    was then a component whose shipped bytes claimed a base, in an in-file header
+    C-HEADER validates, with nothing holding the bytes to that claim: edit the
+    file and every check stayed green.
+
+    `stance` answers a policy question (do we re-baseline from upstream?).
+    The digest answers an evidence question (have our bytes moved since we
+    recorded them?). They are different questions, so the lock follows the PIN as
+    well as the stance: recording a base is the act that puts bytes under it.
+    An unpinned `fork` stays unlocked — we own those bytes and edits are expected.
+    """
+    return component.get("stance") == "track" or is_pinned(component)
+
+
 def component_id(component):
     """The name to report a component by, even when it declares no `id`.
 
@@ -271,6 +333,21 @@ def check_schema(register, failures):
                          % component.get("path"))
         elif component.get("path") != cid:
             failures.add("C-SCHEMA", "%s: id and path disagree" % cid)
+        # Reported for EVERY component, before the origin arms below start
+        # `continue`-ing: an unrecognised key on an `uberdev` component is the
+        # same defect and would otherwise never be looked at.
+        #
+        # No isinstance() guard here: a non-dict component has already raised on
+        # `.get` in the id sweep above, so a guard at this point can never be
+        # false and would only read as protection this loop does not have.
+        # Moving a real guard to the top of the loop — check_divref's idiom —
+        # would SWALLOW the AttributeError C-SCHEMA currently dies on, so that
+        # belongs in a change that owns the decision.
+        unknown = sorted(set(component) - COMPONENT_KEYS)
+        if unknown:
+            failures.add("C-SCHEMA", "%s: unrecognised component key(s) %s "
+                                     "— a misspelled optional record must "
+                                     "not read as an absent one" % (cid, unknown))
         origin = component.get("origin")
         if origin not in ("third-party", "uberdev"):
             failures.add("C-SCHEMA", "%s: origin is %r, expected 'third-party' "
@@ -339,15 +416,16 @@ def check_files(register, plugin_dir, failures):
                                     "(undeclared=%s declared-but-absent=%s)"
                          % (cid, missing, phantom))
             continue
-        if component.get("stance") != "track":
+        if not digest_locked(component):
             continue
+        why = "stance is track" if component.get("stance") == "track" \
+            else "it records base %s" % str(component.get("vendored_at_commit"))[:12]
         excused = divergence_files(component)
         root = plugin_dir / component["path"]  # non-None: on_disk proved it
         for entry in component.get("files", []):
             if not isinstance(entry, dict):
-                failures.add("C-FILES", "%s: stance is track but files[] carries "
-                                        "a bare path (%r) with no digest"
-                             % (cid, entry))
+                failures.add("C-FILES", "%s: %s but files[] carries a bare path "
+                                        "(%r) with no digest" % (cid, why, entry))
                 continue
             # Non-None: the equality against `on_disk` above already proved every
             # declared path is a real disk name.
@@ -475,6 +553,106 @@ def check_base(register, plugin_dir, failures):
                                "the register has lost all its provenance, or the "
                                "scan is misrooted. Refusing to pass over an empty "
                                "set.")
+
+def check_evidence(register, failures):
+    """Every declared `base_evidence` object must be checkable (#505).
+
+    C-BASE makes a recorded base cost two coordinated lies instead of one: the
+    register's claim has to be restated in an in-file header. Both halves are
+    still writable by hand, and §2.2 says so in its own words — offline, nothing
+    could prove a copy really happened at that SHA. For the six
+    `claude-plugins-official` agents that was not survivable: no clone of that
+    upstream exists anywhere in this repo, so no reviewer could have compared
+    the bytes even by hand.
+
+    `base_evidence` replaces the assertion with a MEASUREMENT: per component,
+    the blob oid each declared file had at `vendored_ref`, a commit of THIS
+    repository. Recovery proved that oid equal to upstream's blob at
+    `vendored_at_commit`, so the pin is re-derivable from two independent trees.
+
+    This check owns the SHAPE of that record and nothing else. Re-deriving the
+    oids is deliberately elsewhere, split by what it costs: the offline half in
+    `tests/vendor-provenance.test.sh` V35/V36 (git, no network), the upstream half
+    in `vendor-drift.py --verify-bases` (network). This file stays a pure file
+    reader — no `git`, no `subprocess`, no socket — because that is what makes
+    RFC 0019 §2.3's offline guarantee structural instead of a convention, and
+    because a network outage inside the offline guard would render as fabricated
+    provenance.
+
+    SCOPE. It validates every object that is DECLARED and refuses over an empty
+    set. It does NOT demand universal coverage, and the boundary is stated as a
+    RULE rather than a count because a count goes stale the next time the
+    register moves: the record exists exactly where the base had to be measured
+    to exist at all — the `claude-plugins-official` agent components above — and
+    no `obra/superpowers` component declares one. Extending the record to those
+    is a separate change (RFC 0019 §7 and its amendments); a check that reds on
+    somebody else's unstarted work gets suppressed, and a suppressed check is
+    not a check. Coverage of what #505 itself pinned is ratcheted in the test
+    suite, beside the other register-derived assertions.
+    """
+    declared = 0
+    for component in register.get("components", []):
+        cid = component_id(component)
+        evidence = component.get("base_evidence")
+        if evidence is None:
+            continue
+        if component.get("origin") != "third-party":
+            failures.add("C-EVIDENCE", "%s carries base_evidence but is not a "
+                                       "third-party component — there is no "
+                                       "upstream it could have been copied from"
+                         % cid)
+            continue
+        if not isinstance(evidence, dict):
+            failures.add("C-EVIDENCE", "%s: base_evidence is %s, expected an "
+                                       "object" % (cid, type(evidence).__name__))
+            continue
+        declared += 1
+        method = evidence.get("method")
+        if method not in EVIDENCE_METHODS:
+            failures.add("C-EVIDENCE", "%s: base_evidence method is %r, expected "
+                                       "one of %s" % (cid, method,
+                                                      list(EVIDENCE_METHODS)))
+        ref = evidence.get("vendored_ref")
+        if not SHA40_RE.match(ref or ""):
+            failures.add("C-EVIDENCE", "%s: base_evidence vendored_ref is not "
+                                       "40-hex (%r) — nothing can resolve the "
+                                       "blobs it records" % (cid, ref))
+        recorded = component.get("vendored_at_commit")
+        if not SHA40_RE.match(recorded or ""):
+            failures.add("C-EVIDENCE", "%s: carries base_evidence but its "
+                                       "vendored_at_commit is %r — evidence for "
+                                       "a base it does not claim"
+                         % (cid, recorded))
+        blobs = evidence.get("blobs")
+        if not isinstance(blobs, dict):
+            failures.add("C-EVIDENCE", "%s: base_evidence blobs is %s, expected "
+                                       "an object keyed by the component's "
+                                       "files[]"
+                         % (cid, type(blobs).__name__))
+            continue
+        # Key set EQUALITY, not containment. A subset silently narrows what the
+        # re-derivation covers while still looking like evidence, and a superset
+        # records an oid for a file the component does not declare — which
+        # nothing else would ever visit.
+        want = declared_file_paths(component)
+        got = sorted(blobs)
+        if got != want:
+            failures.add("C-EVIDENCE", "%s: base_evidence blobs keys %s do not "
+                                       "match the component's files[] %s"
+                         % (cid, got, want))
+        for name in got:
+            if not SHA40_RE.match(blobs[name] if isinstance(blobs[name], str)
+                                  else ""):
+                failures.add("C-EVIDENCE", "%s: base_evidence blob for %s is not "
+                                           "a 40-hex object id (%r)"
+                             % (cid, name, blobs[name]))
+    if declared == 0:
+        failures.add("C-EVIDENCE", "no component declares base_evidence — every "
+                                   "recorded base is back to an assertion "
+                                   "nothing can re-derive, or the register was "
+                                   "misread. Refusing to pass over an empty "
+                                   "set.")
+
 
 def sibling_refs(text):
     """Relative sibling references in a markdown body, deduped and sorted.
@@ -629,6 +807,61 @@ def check_stance(register, failures):
                                  "the check would be vacuous")
 
 
+def check_divref(register, failures):
+    """Every `divergences[].ref` must name a real `permanent_divergences[].id`.
+
+    The channel this closes (#509). `check_files` short-circuits every component
+    whose stance is not `track`, so a `fork`'s `divergences[]` is never read at
+    all — and no check anywhere resolved a ref against a record. The only such
+    resolution in the repo was `tests/finish-branch.test.sh` F14, scoped to one
+    component, so a dangling ref on any of the other 74 passed every gate. The
+    register's divergence records are what RFC 0019 §6 adjudicates and what
+    `vendor-drift.py` `declared_files()` subtracts from raw drift, so a ref
+    pointing at nothing silently un-declares a divergence in both directions.
+
+    Runs over EVERY component, not just third-party and not just `track`: the
+    pointer is a register-internal invariant and does not depend on origin or
+    stance.
+
+    A `ref` is MANDATORY on every entry, which tightens RFC 0019 §2.4's "plus
+    any component-local entries" — that phrase could be read as licensing an
+    entry carrying only a `file`, which `declared_files()` would still subtract
+    from raw drift while pointing at no adjudicated record. A component-local
+    `file` is still welcome; it rides on a `ref`. Measured at adoption: all 27
+    entries in the register already carry one.
+
+    Deliberately carries NO vacuity arm, unlike C-HEADER / C-BASE / C-REFS. For
+    those, finding zero means the scan broke. Here an empty `divergences[]`
+    corpus is a legal register state — a repo that has declared no permanent
+    divergence yet — and a `found == 0` failure would red a clean tree.
+    """
+    ids = {p.get("id") for p in register.get("permanent_divergences", [])
+           if isinstance(p, dict) and p.get("id")}
+    for component in register.get("components", []):
+        if not isinstance(component, dict):
+            # A non-object component is C-SCHEMA's finding; reading it here
+            # would raise and suppress every check queued behind this one.
+            continue
+        cid = component_id(component)
+        declared = component.get("divergences", [])
+        if not isinstance(declared, list):
+            failures.add("C-DIVREF", "%s: divergences is not a list" % cid)
+            continue
+        for entry in declared:
+            if not isinstance(entry, dict):
+                failures.add("C-DIVREF", "%s: a divergences[] entry is not an "
+                                         "object (%r)" % (cid, entry))
+                continue
+            ref = entry.get("ref")
+            if not ref:
+                failures.add("C-DIVREF", "%s: a divergences[] entry declares no "
+                                         "ref" % cid)
+                continue
+            if ref not in ids:
+                failures.add("C-DIVREF", "%s: divergence ref %r resolves to no "
+                                         "permanent_divergences[].id" % (cid, ref))
+
+
 def check_watermark(register, failures):
     for component in third_party(register):
         cid = component_id(component)
@@ -647,16 +880,19 @@ def check_watermark(register, failures):
 # --------------------------------------------------------------------------
 
 def refresh(register, register_path, plugin_dir):
-    """Recompute file lists and `track` digests. Never invents a commit SHA."""
+    """Recompute file lists and digest-locked digests. Never invents a commit SHA."""
     for component in third_party(register):
         on_disk = component_files_on_disk(plugin_dir, component)
         if on_disk is None:
             die_usage("%s: cannot refresh, path missing on disk"
                       % component_id(component))
         root = plugin_dir / component["path"]  # non-None: on_disk proved it
-        if component.get("stance") == "track":
+        if digest_locked(component):
             # A single-file component (an agent) IS `root`; a skill component's
-            # recorded paths are relative to its directory.
+            # recorded paths are relative to its directory. The predicate is
+            # shared with check_files on purpose: a producer that wrote bare
+            # paths where the checker demands digests would make `--refresh`
+            # itself the thing that reds the tree.
             component["files"] = [
                 {"path": rel,
                  "sha256": sha256_of(root / rel if root.is_dir() else root)}
@@ -669,7 +905,7 @@ def refresh(register, register_path, plugin_dir):
     register_path.write_text(
         json.dumps(register, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8")
-    print("vendor-check: refreshed file lists and track digests in %s"
+    print("vendor-check: refreshed file lists and digest-locked digests in %s"
           % register_path)
     print("vendor-check: vendored_at_commit values are NOT touched — a real "
           "re-baseline sets those by hand.")
@@ -682,7 +918,7 @@ def main(argv=None):
     parser.add_argument("--only", action="append", default=None, metavar="CHECK-ID",
                         help="run only the named check (repeatable)")
     parser.add_argument("--refresh", action="store_true",
-                        help="recompute file lists and track digests, then exit")
+                        help="recompute file lists and digest-locked digests, then exit")
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve() if args.repo_root \
@@ -719,6 +955,8 @@ def main(argv=None):
         check_header(register, plugin_dir, failures)
     if "C-BASE" in selected:
         check_base(register, plugin_dir, failures)
+    if "C-EVIDENCE" in selected:
+        check_evidence(register, failures)
     if "C-README" in selected:
         check_readme(register, repo_root, failures)
     if "C-LICENSE" in selected:
@@ -729,6 +967,8 @@ def main(argv=None):
         check_watermark(register, failures)
     if "C-REFS" in selected:
         check_refs(register, plugin_dir, failures)
+    if "C-DIVREF" in selected:
+        check_divref(register, failures)
 
     if failures:
         print("vendor-check: %d failure(s) across %s"

@@ -35,6 +35,12 @@
 set -u
 set -o pipefail
 
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DRIFT="$REPO_ROOT/tools/vendor/vendor-drift.py"
 REGISTER="$REPO_ROOT/plugins/uberdev/vendor.json"
@@ -66,11 +72,47 @@ mkdir -p "$STUBS"
 #   STUB_HEAD_SHA      : the 40-hex HEAD ls-remote reports (mode=ok)
 #   STUB_DIFF_FILES    : newline-separated paths `git diff --name-only` returns
 #   STUB_LSTREE_MODE   : ok | missing  (does the declared upstream_path exist?)
+#   STUB_REVPARSE_MODE : ok | mismatch | fail   (`git rev-parse <sha>:<path>`)
+#   STUB_REVPARSE_MAP  : path<TAB>oid table answering mode=ok, so ONE stub can
+#                        serve components whose recorded oids all differ
+#   STUB_FETCH_MODE    : ok | fail
 # Every invocation is appended to $STUB_LOG so mutations can be counted.
+#
+# The `rev-parse` and `fetch` arms are not decoration. Before they existed both
+# fell through to `*) exit 0` with EMPTY stdout, so a base-verification row would
+# have passed against a stub that answered nothing at all — the vacuous-green
+# class this whole suite is built to refuse.
 cat > "$STUBS/git" <<'GITSTUB'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
+  *rev-parse*)
+    case "${STUB_REVPARSE_MODE:-ok}" in
+      # A different, still well-formed 40-hex: this exercises the "recorded oid
+      # disagrees" arm rather than the "answer is not an object id" arm.
+      mismatch) printf '%s\n' "0000000000000000000000000000000000000000"; exit 0 ;;
+      fail)     echo "fatal: path does not exist in the given revision" >&2; exit 128 ;;
+      *)
+        # The last argument is `<sha>:<path>`; answer from the row's own table.
+        for spec in "$@"; do :; done
+        want="${spec#*:}"
+        while IFS=$'\t' read -r mapped oid; do
+          [ "$mapped" = "$want" ] || continue
+          printf '%s\n' "$oid"
+          exit 0
+        done < "${STUB_REVPARSE_MAP:?STUB_REVPARSE_MAP unset}"
+        echo "fatal: stub has no mapping for $want" >&2
+        exit 128
+        ;;
+    esac
+    ;;
+  *fetch*)
+    if [ "${STUB_FETCH_MODE:-ok}" = "fail" ]; then
+      echo "fatal: could not read from remote repository" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   *ls-remote*)
     case "${STUB_LSREMOTE_MODE:-ok}" in
       rc1)     echo "fatal: could not read from remote repository" >&2; exit 1 ;;
@@ -147,10 +189,17 @@ run_drift() {
     STUB_DIFF_FILES="$files" \
     STUB_OPEN_ISSUES="$issues" \
     STUB_LSTREE_MODE="${LSTREE_MODE:-ok}" \
-    python3 "$DRIFT" --repo-root "$REPO_ROOT" "$@" 2>&1
+    STUB_REVPARSE_MODE="${REVPARSE_MODE:-ok}" \
+    STUB_REVPARSE_MAP="${REVPARSE_MAP:-/dev/null}" \
+    STUB_FETCH_MODE="${FETCH_MODE:-ok}" \
+    python3 "$DRIFT" --repo-root "${DRIFT_ROOT:-$REPO_ROOT}" "$@" 2>&1
   )" || DRIFT_RC=$?
 }
 LSTREE_MODE=ok
+REVPARSE_MODE=ok
+REVPARSE_MAP=/dev/null
+FETCH_MODE=ok
+DRIFT_ROOT="$REPO_ROOT"
 
 # gh_mutations <log> -> count of create/edit/comment invocations
 gh_mutations() {
@@ -364,6 +413,146 @@ if [ "$DRIFT_RC" -eq 1 ] && [ "$D13_RC" -eq 2 ]; then
   ok "D13b unreachable upstream (rc 1) and malformed register (rc 2) stay distinguishable"
 else
   no "D13b the two failure modes collide: unreachable=$DRIFT_RC malformed=$D13_RC"
+fi
+
+echo
+echo "== D-VB1-D-VB5: --verify-bases, the upstream half of the base proof (#505) =="
+
+# ---------------------------------------------------------------------------
+# WHY THIS MODE EXISTS. `vendor-check.py`'s C-BASE makes a recorded
+# `vendored_at_commit` cost two coordinated lies instead of one — the register's
+# claim must be restated in an in-file header — and RFC 0019 §2.2 is explicit
+# that offline it can do no better. For the six `claude-plugins-official` agents
+# that ceiling was the whole problem: no clone of that upstream exists in this
+# repo, so no reviewer could compare the bytes even by hand.
+#
+# `base_evidence` records the blob oid each file had at `vendored_ref`, a commit
+# of THIS repository. That half is re-derivable offline and is asserted in
+# tests/vendor-provenance.test.sh V30. THIS mode owns the other half: that the
+# same oid is what UPSTREAM's tree holds at `vendored_at_commit`. It is a
+# network operation, so it lives here rather than in the offline guard — mixing
+# them would make an outage render as fabricated provenance.
+#
+# Every row below drives PATH-stubbed `git`, so the assertions are about the
+# MODE's behaviour, never about upstream being reachable today. The live proof
+# is one real `--verify-bases` run, recorded in the change that adds it.
+# ---------------------------------------------------------------------------
+
+# The oid table the stub answers `rev-parse` from, derived from the committed
+# register rather than typed: a literal here would go stale the moment a base is
+# re-recorded, and would then prove the stub agrees with the test rather than
+# that the mode reads the register.
+REVPARSE_MAP="$WORK/revparse.map"
+python3 - "$REGISTER" "$REVPARSE_MAP" > /dev/null <<'PY' || { echo "  ABORT — could not derive the rev-parse map"; exit 99; }
+import json, os, sys
+reg, out = sys.argv[1], sys.argv[2]
+d = json.load(open(reg, encoding="utf-8"))
+rows = []
+for c in d.get("components", []):
+    ev = c.get("base_evidence")
+    if not isinstance(ev, dict) or not isinstance(ev.get("blobs"), dict):
+        continue
+    upath = c.get("upstream_path") or ""
+    # `files[]` is a bare path list on an unpinned component and a list of
+    # {path, sha256} on a digest-locked one (#503 tied the lock to the pin, not
+    # to the stance). Read the paths out of BOTH shapes: comparing raw entries
+    # silently stopped matching the moment these components were pinned, and the
+    # stub then answered a path the mode never asks for — a rc=1 that looks like
+    # a mode bug and is really a shape assumption.
+    declared = [e.get("path") if isinstance(e, dict) else e
+                for e in (c.get("files") or [])]
+    single = len(ev["blobs"]) == 1 and list(ev["blobs"]) == declared
+    for name, oid in sorted(ev["blobs"].items()):
+        rows.append("%s\t%s" % (upath if single else "%s/%s" % (upath, name), oid))
+if not rows:
+    raise SystemExit("the register declares no base_evidence — D-VB1 would be vacuous")
+open(out, "w", encoding="utf-8").write("\n".join(rows) + "\n")
+PY
+
+# D-VB1 — happy path. Asserts the LEDGER, not just the exit code: a mode that
+# returned 0 without fetching or resolving anything would look identical here.
+run_drift "$WORK/dvb1.log" ok "$WATERMARK" "" "[]" --verify-bases
+DVB1_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DVB1_FAILS="rc=$DRIFT_RC"
+[ "$(gh_mutations "$WORK/dvb1.log")" = "0" ] \
+  || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }it touched GitHub"
+grep -qE '^git fetch' "$WORK/dvb1.log" \
+  || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }no upstream fetch was made"
+grep -qE '^git rev-parse' "$WORK/dvb1.log" \
+  || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }no blob was resolved"
+# HEAD is irrelevant to a base check, so the mode must return before resolving
+# it. Asserting the absence keeps the mode cheap and its failure modes narrow.
+! grep -qE '^git ls-remote' "$WORK/dvb1.log" \
+  || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }it resolved upstream HEAD, which a base check does not need"
+if [ -z "$DVB1_FAILS" ]; then
+  ok "D-VB1 --verify-bases fetches, resolves every recorded blob, and exits 0"
+else
+  no "D-VB1 --verify-bases happy path: $DVB1_FAILS"
+fi
+
+# D-VB2 — upstream's blob is a DIFFERENT object. This is the finding the mode
+# exists for: the recorded base is not where those bytes came from.
+REVPARSE_MODE=mismatch
+run_drift "$WORK/dvb2.log" ok "$WATERMARK" "" "[]" --verify-bases
+REVPARSE_MODE=ok
+DVB2_MUTS="$(gh_mutations "$WORK/dvb2.log")"
+if [ "$DRIFT_RC" -ne 0 ] && [ "$DVB2_MUTS" = "0" ] \
+   && grep -q 'agents/' <<<"$DRIFT_OUT" \
+   && grep -q '0000000000000000000000000000000000000000' <<<"$DRIFT_OUT"; then
+  ok "D-VB2 a blob that disagrees with the register fails loudly, naming both oids"
+else
+  no "D-VB2 a mismatched blob was not reported (rc=$DRIFT_RC mutations=$DVB2_MUTS)"
+fi
+
+# D-VB3 — the declared upstream_path does not resolve at the recorded base. The
+# same class D12 covers for the drift path: unresolvable is a finding, never a
+# quiet pass.
+REVPARSE_MODE=fail
+run_drift "$WORK/dvb3.log" ok "$WATERMARK" "" "[]" --verify-bases
+REVPARSE_MODE=ok
+if [ "$DRIFT_RC" -ne 0 ] && grep -q 'upstream_path' <<<"$DRIFT_OUT"; then
+  ok "D-VB3 an unresolvable upstream_path at the recorded base is a refusal, not a pass"
+else
+  no "D-VB3 an unresolvable upstream_path did not fail loudly (rc=$DRIFT_RC)"
+fi
+
+# D-VB4 — the remote is unreachable. Mirrors D6-D8: an outage must never render
+# as "the bases check out".
+FETCH_MODE=fail
+run_drift "$WORK/dvb4.log" ok "$WATERMARK" "" "[]" --verify-bases
+FETCH_MODE=ok
+DVB4_RC="$DRIFT_RC"
+if [ "$DVB4_RC" -eq 1 ] && grep -qiE 'fetch|upstream' <<<"$DRIFT_OUT"; then
+  ok "D-VB4 an unreachable upstream exits 1 with a diagnostic, never a clean verdict"
+else
+  no "D-VB4 an unreachable upstream did not fail as rc 1 (rc=$DVB4_RC)"
+fi
+
+# D-VB5 — nothing to verify. A register with no `base_evidence` anywhere makes
+# the loop body unreachable, and a naive implementation would print "verified 0
+# components" and exit 0 — certifying an empty set, which is the exact class
+# C-EVIDENCE's own anti-vacuity arm refuses offline. rc 2 keeps D13b's
+# "malformed register (2) vs unreachable upstream (1)" separation intact, and
+# the row asserts that separation rather than assuming it.
+NO_EVIDENCE_ROOT="$WORK/no-evidence"
+mkdir -p "$NO_EVIDENCE_ROOT/plugins/uberdev"
+python3 - "$REGISTER" "$NO_EVIDENCE_ROOT/plugins/uberdev/vendor.json" <<'PY' || { echo "  ABORT — could not build the evidence-free register"; exit 99; }
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+d = json.load(open(src, encoding="utf-8"))
+stripped = sum(1 for c in d["components"] if c.pop("base_evidence", None) is not None)
+if not stripped:
+    raise SystemExit("the register declares no base_evidence — D-VB5 proves nothing")
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+DRIFT_ROOT="$NO_EVIDENCE_ROOT"
+run_drift "$WORK/dvb5.log" ok "$WATERMARK" "" "[]" --verify-bases
+DRIFT_ROOT="$REPO_ROOT"
+DVB5_CALLS="$(grep -cE '^(git|gh) ' "$WORK/dvb5.log" || true)"
+if [ "$DRIFT_RC" -eq 2 ] && [ "$DVB5_CALLS" = "0" ] && [ "$DVB4_RC" -eq 1 ]; then
+  ok "D-VB5 nothing to verify exits 2 before any clone, and stays distinct from an outage's rc 1"
+else
+  no "D-VB5 an empty evidence set => rc=$DRIFT_RC subprocess-calls=$DVB5_CALLS (want rc 2, 0 calls, and rc 1 for D-VB4)"
 fi
 
 echo

@@ -420,15 +420,18 @@ force-pushed is still descended from the branch the PR is based on (#438). Like
 the lease, it is a controller-side proof value about a push the script does not
 perform, so it lives in the authority document and nowhere else.
 
-`childNotes` is optional and **untrusted**: the short `note` strings the earlier
-stages' children returned, concatenated by the controller from those runs'
-`children[]` returns. Because the stages are separate Workflow calls, this
-round-trip is the only way cross-stage notes can reach the defer prompt at all.
-The script wraps them in `<external-untrusted-input source="review-fleet-child-notes">`
-at assembly time and labels them as leads to corroborate, never as instructions
-— the close tag is neutralised with a U+200B so an injected one cannot terminate
-the envelope early. The controller must pass them through verbatim and must not
-pre-wrap them.
+**There is no cross-stage note carrier, and there cannot be one.** The stages
+are separate Workflow calls, so an in-call buffer is always empty in the defer
+stage; a script has no filesystem verb, so it cannot persist one; every fence is
+a fresh shell (#427), so no scalar survives; and no controller fence parses a
+Workflow return at all. The only remaining courier would be the orchestrator
+copying untrusted agent text out of a return into a later fence's shell word —
+an LLM-composed handoff, which DR-2 forbids. The half-wired version of this — an
+envelope key with no producer, an in-call array `finalize()` never returned, and
+an untrusted-input wrapper for both — was deleted in #514: nothing embedded
+agent-returned content in a prompt, so the hardening around it never executed
+while reading, to anyone auditing, like coverage. Each child's `note` is
+reported instead — see *What the script returns*.
 
 ---
 
@@ -510,10 +513,18 @@ guard-abort and the DR-8 throw path — and returns the same object:
 ```
 { runId, mode, stage, prNumber, reviewIteration, abortReason, dispatched,
   children: [ {edgeId, slug, status, verdict, resultPath, statusPath,
-               findingCount, blockerCount, reason} ],
+               findingCount, blockerCount, note, reason} ],
   fixerStatus, issues: {issuesCreated:[int], commentedUrls:[str], skipped, halted},
   nullsByPhase, auditEvents }
 ```
+
+`children[].note` is the short sentence every child is asked for, and the one
+channel a `BLOCKED` child has for saying *why*. It is **untrusted** agent text
+derived from PR-author-controlled diff bytes, so it is clamped at capture:
+control characters removed (C0 **and** C1 — C0 includes `\n` and `\r`), then
+truncated to 200 characters, in that order. It reaches no prompt; its only
+reader is the `WORKFLOW_RESULT` line above, which `JSON.stringify` already
+escapes. Treat it as a lead when reading a run log, never as a fact.
 
 `children[].status` ∈ `COMPLETE | BLOCKED` for reviewers and lenses, and
 `APPLIED | NO_FIXES_NEEDED | REFUSED` for the fixer. A child whose returned
@@ -658,31 +669,45 @@ fences carry the same prologue.
    empty-allowlist instruction. When
    `fanoutCap < 7`, split into `ceil(7 / fanoutCap)` sequential waves, still
    dispatching every child in a wave before the first wait.
-2. **`fix`** — dispatch ONE `uberdev:code-fixer` on the controller-supplied
+2. **`verify`** — dispatch one `uberdev:finding-verifier` per ELIGIBLE Phase 1
+   finding in ONE message, each reading only its OWN claim card
+   (`<verifyClaimPrefixAbs><NN>.json`) plus the diff, the PR context and the
+   rubric BY PATH. Each is a **bound child** like every other, and that is not
+   ceremony here: the controller captures every verifier through
+   `capture-bound-child` before it reads a single opinion, so a verifier that
+   skipped the partial-then-rename publish rule or echoed a nonce this run never
+   minted is recorded `verifier-unavailable` — which never culls, but never gets
+   to defend the finding either. **Never tell the child the confidence
+   threshold**: the controller compares the score against a cutoff the verifier
+   does not see, which is what keeps the number an opinion about the claim
+   rather than a vote about the gate. Do not skip this stage silently — with no
+   verifier available, run the gate's kill switch (threshold 0) deliberately, so
+   every eligible finding is recorded `gate-disabled` and SURVIVES.
+3. **`fix`** — dispatch ONE `uberdev:code-fixer` on the controller-supplied
    edge, with the authority scalars verbatim. Never in parallel with anything,
    and never worktree-isolated: it commits onto the caller's checkout on the PR
    branch, git forbids two worktrees on one branch, and an isolated child's
    disposition artifact would vanish with its throwaway worktree.
-3. **`simplify`** — dispatch the three `uberdev:code-simplifier` lenses in ONE
+4. **`simplify`** — dispatch the three `uberdev:code-simplifier` lenses in ONE
    message, `## Lens emphasis` and `## Additional Focus` kept OUTSIDE the
    envelope.
-4. **`defer`** — dispatch ONE `uberdev:findings-to-issues` with both aggregate
+5. **`defer`** — dispatch ONE `uberdev:findings-to-issues` with both aggregate
    paths and both disposition paths; the agent owns `max_new`, dedupe and halt.
-5. **`ci-classify`** — dispatch ONE `uberdev:ci-failure-classifier` reading its
+6. **`ci-classify`** — dispatch ONE `uberdev:ci-failure-classifier` reading its
    pinned input document by path, writing `result.md` + `status.json` at the
    layout above. Its slug carries the CI loop counter (`ci-classify-ciNN`), so
    the directory is `<runDir>/children/ci-classify-ciNN-iterMM`.
-6. **`ci-fix`** — dispatch ONE `uberdev:ci-code-fixer` (for `code_bug` /
+7. **`ci-fix`** — dispatch ONE `uberdev:ci-code-fixer` (for `code_bug` /
    `env_drift`) or ONE `uberdev:ci-rebase-handler` (for `stale_base`), chosen by
    the controller-supplied `ciFixerEdgeId`. Never worktree-isolated: both commit
    onto the caller's checkout on the PR branch. **The rebase child must not be
    given a push tool** — the controller holds the lease and pushes.
-7. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
+8. **`ci-conflicts`** — dispatch one `uberdev:conflict-resolver` per conflicted
    path in ONE message, each reading only its own input document. The path list
    comes from the controller's own unmerged-path enumeration
    (`code_fixer_contract.py list-ci-unmerged-paths`), never from the rebase
    child's return.
-8. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
+9. **`ci-defer`** — dispatch ONE `uberdev:findings-to-issues` against the one-row
    `ci-refused-synthetic` aggregate, with the three other aggregate/disposition
    inputs declared empty.
 

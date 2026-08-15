@@ -89,8 +89,24 @@
 #                                       .rc2/.rc137 read the emitted outcome).
 #   MZ5.a  trust-gate-zsh            -- mis-resolve the `absent)` arm of the
 #                                       DISCOVERY_STATE case in Step (c.0); the
-#                                       bash twin is merge.test.sh M95, and
-#                                       .no-leak covers the TMPDIR carrier cleanup.
+#                                       bash twin is merge.test.sh M95.
+#   MZ5.a  .no-leak                  -- delete `[ -z "$DISCOVERY_STDERR" ] ||
+#                                       rm -f "$DISCOVERY_STDERR"` (SKILL.md's
+#                                       trust-gate fence tail), OR revert the
+#                                       DISCOVERY_STDERR allocation to a bare
+#                                       `mktemp`. Both are needed: the cleanup is
+#                                       the subject, and the ${TMPDIR}-rooted
+#                                       template is what puts the carrier inside
+#                                       $MZ5_TMP where this row can see it (BSD
+#                                       mktemp ignores $TMPDIR for the bare form,
+#                                       so without the template the row is blind
+#                                       on macOS and discriminating only on
+#                                       ubuntu -- #521).
+#   MZ5.a  .tmpdir-template          -- revert SKILL.md's DISCOVERY_STDERR
+#                                       allocation to a bare `mktemp`; this is
+#                                       the guard that keeps .no-leak's own
+#                                       precondition falsifiable on EVERY
+#                                       platform that runs this file.
 #   MZ6.a  scalar-split-control      -- negative control: proves MZ3.a CAN go red
 #                                       (locks the `CLOSED_ISSUES=(…)` array form).
 #   MZ6.b  trap-RETURN-control       -- negative control: proves this fixture would
@@ -98,6 +114,12 @@
 
 set -u
 
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL="$REPO_ROOT/plugins/uberdev/skills/merge-pipeline/SKILL.md"
 PLUGIN_ROOT="$REPO_ROOT/plugins/uberdev"
@@ -750,6 +772,18 @@ TG_POST
     pass "MZ5.a trust-gate-zsh.no-leak — the fence left no private capture directory behind under zsh"
   else
     fail "MZ5.a trust-gate-zsh.no-leak — the fence leaked $MZ5_RESIDUE entr(y|ies) under TMPDIR"
+  fi
+  # #521 — .no-leak above can only SEE a leak that lands inside $MZ5_TMP, and it
+  # only lands there when every temp the fence allocates is rooted at an EXPLICIT
+  # $TMPDIR template. BSD mktemp(1) ignores the TMPDIR environment variable for
+  # the bare `mktemp` form (verified on Darwin: bare -> /var/folders/.../T/, the
+  # supplied dir keeps 0 entries), so reverting SKILL.md's DISCOVERY_STDERR
+  # allocation to a bare `mktemp` re-blinds .no-leak on macOS while NOTHING reds
+  # on ubuntu. This row is what makes that revert visible on every platform.
+  if grep -qF 'mktemp "${TMPDIR:-/tmp}/uberdev-discovery-stderr-' "$TRUSTGATE_SLICE"; then
+    pass "MZ5.a trust-gate-zsh.tmpdir-template — DISCOVERY_STDERR is allocated from an explicit \${TMPDIR}-rooted template"
+  else
+    fail "MZ5.a trust-gate-zsh.tmpdir-template — a BARE mktemp ignores TMPDIR on BSD, which blinds the .no-leak row above on macOS"
   fi
 fi
 

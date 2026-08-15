@@ -80,9 +80,26 @@ PRE_COMPACT="$REPO_ROOT/plugins/uberdev/hooks/pre-compact"
 # either alone.
 AGENTS_MD="$REPO_ROOT/AGENTS.md"
 SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
+# #507 design-chain surfaces. The fleet script is the machinery; its SKILL.md
+# and RFC 0015 both restate the chain AND the CB1 projection as prose, so T14
+# below locks the three against each other rather than pinning any one alone.
+SOLVE_FLEET_SKILL="$PLUGIN_DIR/skills/solve-fleet/SKILL.md"
+DISPATCH15_RFC="$RFC_DIR/0015-workflow-native-dispatch.md"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
+# #518 schema-drift surfaces. run_manifest.py's ALLOWED_FIELDS says of itself
+# that it is "RFC 0013 section 13 fields plus the minimal process metadata" —
+# and nothing compared the two lists, which is how `cache_hit` sat in the schema
+# with zero producers for a full release cycle. T15 below compares them in BOTH
+# directions, so neither a field the RFC promises nor a field only the code
+# knows about can appear without showing up as a diff.
+ADAPTIVE_RFC="$RFC_DIR/0013-gpt-5-6-adaptive-execution.md"
+RUN_MANIFEST_PY="$PLUGIN_DIR/lib/run_manifest.py"
+
+# This file, read as data: row T6.5b slices its own size-ratchet region to keep
+# the measurement platform-invariant (#522).
+DOCS_ACCURACY_SELF="$REPO_ROOT/tests/docs-accuracy.test.sh"
 
 # Hard-fail (exit 2) on a missing input — a moved/renamed file must be an
 # explicit failure, never silently-zero-assertions PASS.
@@ -91,7 +108,9 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
-         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB"; do
+         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" \
+         "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
+         "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
 done
 
@@ -109,7 +128,7 @@ source "$REPO_ROOT/tests/_lib_assert_structural.sh" || { echo "FATAL: _lib_asser
 # counter — and with no errexit and no assertion floor this file would print
 # `failed: 0` and exit 0 with its structural half never executed. Assert the
 # names actually called here, and extend this list when a new one is used.
-for structural_fn in assert_in_section assert_count; do
+for structural_fn in assert_in_section assert_count checkout_worst_case_bytes; do
   command -v "$structural_fn" >/dev/null 2>&1 || {
     echo "FATAL: _lib_assert_structural.sh sourced but $structural_fn is not defined (renamed helper?)" >&2
     exit 2
@@ -282,6 +301,32 @@ assert_grep "$PRECISION_RFC" '^# RFC 0018 — ' "T3.4 precision RFC header self-
 # Numbered T3.5, not T3.4: #432 and #434 each appended their new RFC assertion as
 # "T3.4" independently, so the stacked merge would ship two rows under one label.
 assert_grep "$VENDOR_RFC" '^# RFC 0019 — Vendored Upstream Policy' "T3.5 vendor RFC header self-identifies as RFC 0019"
+# §7 adjudicates 6.1.0 -> 6.2.0 and is frozen at that measurement, so every later
+# upstream release is adjudicated by its own dated amendment (#511 = the 6.3.0
+# delta). T3.6 is what stops a watermark advance from landing with no verdict
+# table behind it.
+# NOTE two traps this pattern is written around:
+#   - assert_grep is `grep -qE`, so the heading's parentheses are ERE grouping
+#     metacharacters and MUST be escaped. An unescaped '(2026-08-13, #511)'
+#     matches a heading that was never written.
+#   - the heading deliberately carries no U+2192; the arrow lives in the body
+#     prose instead. docs-accuracy runs on ubuntu AND windows-latest, and in a
+#     C/POSIX locale `.` is one byte while the arrow is three (see T4.2).
+assert_grep "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\) — ' "T3.6 vendor RFC carries the dated #511 amendment heading"
+# Anchored to the amendment's OWN section, not the file: the 2026-08-12 (#457)
+# amendment already carries an identical status line, so a whole-file assert_grep
+# here would PASS against the pre-existing block and never notice that the #511
+# amendment was missing its status.
+# The section end is '^### ', NOT '^## '. assert_in_section builds an awk range
+# /start/,/end/, and awk tests the END pattern against the START line itself — so
+# a '^## ' end pattern matches the '## Amendment …' heading that opened the range
+# and collapses it to that one line (measured: 1 line vs 123 open-ended), which
+# reds this row for the wrong reason. '^### ' cannot match a two-hash heading and
+# bounds the blockquote exactly, while still terminating correctly if a later
+# amendment is appended below.
+assert_in_section "$VENDOR_RFC" '^## Amendment \(2026-08-13, #511\)' '^### ' \
+  'Status of this amendment: \*\*Accepted, implemented\.\*\*' \
+  "T3.6b the #511 amendment declares its own status inside its own block"
 
 echo
 echo "== dispatch RFC 0004: internal version refs agree on v0.30.0 =="
@@ -330,14 +375,89 @@ assert_absent_fixed "$USING_SKILL" "bot_authors_allow_list" \
 assert_grep "$CONFIG_REF" 'solve_tier_floor' \
   "T6.4 references/configuration.md carries the moved schema (solve_tier_floor)"
 # Size ratchet: the per-session-event injection payload stays dieted. 7168 B
-# (7 KiB) leaves headroom over the ~6.5 KB post-diet primer without allowing
-# the schema back in (pre-diet was 16,511 B).
-USING_SKILL_BYTES="$(wc -c < "$USING_SKILL" | tr -d '[:space:]')"
-if [ "$USING_SKILL_BYTES" -le 7168 ] 2>/dev/null; then
+# (7 KiB) leaves headroom over the post-diet primer without allowing the schema
+# back in (pre-diet was 16,511 B).
+#
+# THE UNIT IS THE WORST-CASE CRLF CHECKOUT of the committed blob — its bytes
+# plus its newline count — compared against the 7168 B budget. No absolute
+# current size is written here on purpose: any PR that edits the primer moves
+# it, so a present-tense figure in a comment nothing machine-checks is stale on
+# arrival and understates the remaining headroom. T6.5 below prints the live
+# measurement, which is the only figure that is true when you read it.
+#
+# WHY NOT THE WORKTREE FILE (#522). core.autocrlf=true is live on
+# windows-latest, so a worktree byte count is a checkout-TRANSLATED size and
+# this one literal budget was silently a 7043 B budget there. Measured ONCE, at
+# the #522 commit and stated here as history rather than as a current size: the
+# same file counted 6454 B on the ubuntu job and 6579 B on the windows job.
+# The number the budget is compared against has to be the number CI enforces,
+# on both jobs.
+#
+# WHY NOT PLAIN BLOB BYTES. hooks/session-start reads this primer FROM THE
+# WORKTREE and injects it on every session event, so blob-only bytes would
+# LOOSEN the guard by one byte per line on the platform with the biggest
+# payload. Worst-case keeps today's Windows strictness and raises ubuntu to
+# match; nothing has to shrink.
+#
+# WHY NOT WIDEN /.gitattributes. Row T8.10 below forbids it: the rule is scoped
+# to plugins/uberdev/hooks/** because three byte-exactness suites are
+# windows-skipped on that scoping, and /.gitattributes records the rationale.
+# === BEGIN T6.5 size-ratchet measurement (#522) ===
+# USING_SKILL is an ABSOLUTE path (set near the top of this file), and
+# `git cat-file blob "HEAD:/Volumes/…"` fails with "exists on disk, but not in
+# 'HEAD'". Derive the repo-relative form rather than retyping the path (#370:
+# one contract, N uncompared copies).
+USING_SKILL_REL="${USING_SKILL#"$REPO_ROOT"/}"
+USING_SKILL_BYTES="$(checkout_worst_case_bytes "$REPO_ROOT" "$USING_SKILL_REL")"
+USING_SKILL_RC=$?        # captured BEFORE any other command runs
+if [ "$USING_SKILL_RC" -ne 0 ]; then
+  echo "  FAIL  T6.5 could not measure using-uberdev/SKILL.md (checkout_worst_case_bytes rc=$USING_SKILL_RC)"
+  echo "        path: $USING_SKILL_REL — rc 3 means it is not in HEAD (renamed? untracked?),"
+  echo "        which is exactly the state that would have made this ratchet silently green. See #522."
+  FAIL=$((FAIL + 1))
+elif [ "$USING_SKILL_BYTES" -le 7168 ]; then
   echo "  PASS  T6.5 using-uberdev/SKILL.md stays dieted (${USING_SKILL_BYTES} B <= 7168 B)"; PASS=$((PASS + 1))
 else
   echo "  FAIL  T6.5 using-uberdev/SKILL.md regressed past the diet ratchet (${USING_SKILL_BYTES} B > 7168 B)"
   echo "        file: $USING_SKILL"; FAIL=$((FAIL + 1))
+fi
+# === END T6.5 size-ratchet measurement (#522) ===
+# T6.5a — anti-vacuity floor. A budget met by an unmeasured value is the #522
+# failure mode wearing a fix's clothes. `case`, not `[ "$X" -gt 0 ]`: on an
+# empty value the arithmetic test errors with "integer expression expected" and
+# the row would fail for the wrong reason, printing a diagnostic that sends the
+# next reader after the wrong bug. It is also the zsh-clean form.
+case "$USING_SKILL_BYTES" in
+  ''|0|*[!0-9]*)
+    echo "  FAIL  T6.5a the ratchet was satisfied by an unmeasured value ('$USING_SKILL_BYTES') — a budget met by 0 bytes is not a budget"
+    FAIL=$((FAIL + 1)) ;;
+  *)
+    echo "  PASS  T6.5a T6.5 measured a positive byte count (${USING_SKILL_BYTES} B), not a masked failure"
+    PASS=$((PASS + 1)) ;;
+esac
+# T6.5b — the ratchet above must keep measuring a size that does NOT vary with
+# core.autocrlf. Placement below the region is load-bearing: awk exits at the
+# first END match, so this row's own marker literals are unreachable and the
+# slice can never extract itself. The anchors are pinned to a whole-line comment
+# (`^# === `) rather than the bare phrase, because a backtick-quoted MENTION of
+# a marker elsewhere in a file silently moves where the slice starts — measured
+# while writing the sibling guard in tests/workflow-scripts.test.sh, where it
+# made both rows pass with the region absent entirely.
+T65_REGION="$(awk '/^# === BEGIN T6\.5 size-ratchet measurement/{a=1} a{print} a && /^# === END T6\.5 size-ratchet measurement/{exit}' "$DOCS_ACCURACY_SELF")"
+# Assembled at runtime so this row cannot trip over its own source bytes.
+T65_WORKTREE_TOKEN="$(printf 'wc'; printf ' -c <')"
+if [ -z "$T65_REGION" ]; then
+  echo "  FAIL  T6.5b the T6.5 size-ratchet region is EMPTY — its BEGIN/END markers are gone, and an empty region satisfies every check below vacuously (#347)"
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -- 'checkout_worst_case_bytes' <<<"$T65_REGION"; then
+  echo "  FAIL  T6.5b T6.5 no longer measures via checkout_worst_case_bytes — a 7168 B budget compared against checkout-translated bytes is a 7043 B budget on windows-latest, silently (#522)"
+  FAIL=$((FAIL + 1))
+elif grep -qF -- "$T65_WORKTREE_TOKEN" <<<"$T65_REGION"; then
+  echo "  FAIL  T6.5b T6.5 measures the worktree file again — that size varies with core.autocrlf, so the number in this file stops being the number CI enforces (#522)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T6.5b T6.5 budgets a checkout-independent size (git blob bytes + newline count, not the translated worktree file)"
+  PASS=$((PASS + 1))
 fi
 # Workflow sanction lines (RFC 0012 §4.1): the primer must sanction
 # skill-mandated Workflow calls so migrated pipelines are covered from day one.
@@ -1562,6 +1682,23 @@ assert_in_section "$AGENTS_MD" "$AGENTS_SECTION_START" "$AGENTS_SECTION_END" \
 # existence guarantee; T12.12 below is what actually reads the script.
 assert_grep "$SOLVE_FLEET_JS" 'Do NOT bump the project version' \
   "T12.6 solve-fleet still forbids the solver from bumping (the collision class stays closed)"
+# #516 — the fleet's prompts must not name rule documents this repo does not ship.
+# Scoped to $SOLVE_FLEET_JS by PATH: a `grep -r` over plugins/uberdev/ would red on
+# five sibling agent files whose `from CLAUDE.md` prose is out of this issue's scope.
+# $SOLVE_FLEET_JS is covered by the hard-fail preflight above — the readability
+# loop that exits 2 on a missing or unreadable input — which owns that
+# guarantee. Named rather than numbered: a same-file line citation in a file
+# this size rots on the first insertion above it.
+assert_absent_fixed "$SOLVE_FLEET_JS" 'from CLAUDE.md' \
+  "T12.6b the solver no longer attributes its baseline to a file this repo does not ship"
+assert_absent_fixed "$SOLVE_FLEET_JS" 'Read CLAUDE.md and AGENTS.md' \
+  "T12.6c the constraints lens no longer asserts CLAUDE.md/AGENTS.md exist at the repo root"
+assert_absent_fixed "$SOLVE_FLEET_JS" 'contradicts CLAUDE.md/AGENTS.md' \
+  "T12.6d the spec-review gate no longer asserts those rule documents exist"
+# Positive partner for the absence rows: three forbids alone are satisfied by an
+# empty prompt. This is the in-repo convention token (agents/research-constraints.md:95).
+assert_grep "$SOLVE_FLEET_JS" 'skipping any that do not exist' \
+  "T12.6e the constraints lens instructs conditional discovery instead"
 assert_grep "$GOAL_WATCH_SH" '_uberdev_goal_ensure_version_bump' \
   "T12.7 the /goal watch lane still calls the version-bump guarantor"
 
@@ -1674,6 +1811,422 @@ assert_grep "$PRECISION_RFC" 'SHARED_PROMPT_SURFACES.* is the one irreducible en
   "T13.6b §5 names SHARED_PROMPT_SURFACES and says why it is the one irreducible enumeration"
 assert_grep "$PRECISION_MINER" 'unmeasured_digests' \
   "T13.7 the RFC's unmeasured_digests symbol resolves in the shipped miner"
+
+echo
+echo "== T14: solve-fleet CB1 and the design-chain docs agree with the script (#507) =="
+# The fleet script IS the design chain; SKILL.md and RFC 0015 each restate it in
+# prose, and both restate the CB1 projection (1 + issues + N*designCount) with N
+# as a LITERAL. #507 threads the reviewer findings into the plan writer without
+# moving N — but the deferred follow-up (a plan reviewer) moves it by one, and
+# this join is what makes that edit safe: change N in the script and the two
+# docs go red instead of silently disagreeing.
+#
+# T14.1-T14.3 pass on the pre-#507 tree by construction; they are the ratchet.
+# T14.4-T14.6 are the red-first rows — they name the hand-off the script now
+# performs, which the prose described as going nowhere.
+# #508 replaced the per-design-tier LITERAL with an expression — the implement
+# phase is now a per-task chain bounded by CB3's budget, so the script reads
+# `designCount * (6 + IMPLEMENT_AGENT_BUDGET - 1)`. The join therefore moved from
+# a number to a TERM, and it still has to hold in both directions: edit the term
+# in the script and the two docs go red rather than silently disagreeing.
+#
+# Two spellings are normalised rather than duplicated: the docs name the envelope
+# key (`implementBudget`) instead of the script's internal constant, and they use
+# U+2212 MINUS where JS uses ASCII hyphen. Everything else must match byte for
+# byte.
+SF_TERM="$(sed -n 's/.*designCount \* (\([^)]*\)).*/\1/p' "$SOLVE_FLEET_JS" | tr -d '\r')"
+# EXACTLY one line, for the reason the constant form had: two differing terms
+# would build a needle that can never match, and the row would fail for the wrong
+# reason. tr -d '\r' because this path is not covered by .gitattributes
+# (hooks-scoped) and the value is spliced straight into a needle.
+SF_TERM_LINES="$(grep -c '' <<<"$SF_TERM")"
+SF_DOC_TERM="$(printf '%s' "$SF_TERM" \
+  | sed 's/IMPLEMENT_AGENT_BUDGET/implementBudget/g; s/ - / − /g')"
+if [ "$SF_TERM_LINES" = "1" ] && [ -n "$SF_TERM" ]; then
+  echo "  PASS  T14.1 a single designCount * (…) term resolves in the fleet script ($SF_TERM)"
+  PASS=$((PASS + 1))
+  # FIXED-string: the term carries `(`, `)` and `+`, every one of them an ERE
+  # metacharacter, so assert_grep would match a pattern rather than the text.
+  assert_grep_fixed_docs "$SOLVE_FLEET_SKILL" "(${SF_DOC_TERM}) × design-tier issues" \
+    "T14.2 SKILL.md CB1 row restates the fleet script term ($SF_DOC_TERM)"
+  assert_grep_fixed_docs "$DISPATCH15_RFC" "(${SF_DOC_TERM}) × design-tier issues" \
+    "T14.3 RFC 0015 CB1 row restates the fleet script term ($SF_DOC_TERM)"
+else
+  echo "  FAIL  T14.1 designCount * (…) did not resolve to exactly one term (lines=$SF_TERM_LINES, got: $SF_TERM)"
+  FAIL=$((FAIL + 1))
+fi
+
+# The chain rows must name the hand-off the script performs. Single-line needle:
+# assert_grep cannot match across an authored line wrap.
+assert_grep "$SOLVE_FLEET_SKILL" 'blocking findings are forwarded to the plan writer' \
+  "T14.4 SKILL.md chain row names the spec-review findings hand-off"
+assert_grep "$DISPATCH15_RFC" 'blocking findings are forwarded to the plan writer' \
+  "T14.5 RFC 0015 chain row names the spec-review findings hand-off"
+
+# R-2 recorded the design chain as a lossy translation of /uberdev:orchestrator.
+# It must no longer read as though the reviewer output goes nowhere.
+assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*\*R-3' \
+  'blocking findings' \
+  "T14.6 RFC 0015 R-2 records that the reviewer findings ARE threaded"
+
+echo "== T15: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
+# Extraction. The RFC's field list lives in a ```text fence that does NOT
+# immediately follow its anchor line — there is a blank line between them — so
+# an extractor that reads anchor+1 as the fence collects ZERO names and every
+# case below goes vacuously green. Scan forward to the first fence line instead,
+# and let T15.1 hard-fail on a short list rather than trusting the scan.
+#
+# awk does all the splitting and all the iteration: no `for n in $var` (zsh runs
+# that once over the whole string), and comparison is per-name `grep -qxF`
+# against a herestring rather than a whole-variable equality check — herestrings
+# because this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
+# set, and per-name because a `$( )` capture can retain embedded CRs on Git Bash.
+RFC_FIELDS="$(awk '
+  # `[[:space:]]*$` not a bare `$`: .gitattributes pins eol=lf only under
+  # plugins/uberdev/hooks/, and the windows job checks out core.autocrlf=true,
+  # so this RFC can arrive CRLF. POSIX [[:space:]] includes CR, so this anchor
+  # holds whether or not the resolved awk shows us the CR. Same idiom as the
+  # `^jobs:[[:space:]]*$` anchor earlier in this file.
+  /^Append-only JSONL events MUST support:[[:space:]]*$/ { seek = 1; next }
+  seek && /^```/                             { seek = 0; inf = 1; next }
+  inf  && /^```/                             { inf = 0; next }
+  inf {
+    gsub(/[,\r]/, " ")
+    n = split($0, parts, /[ \t]+/)
+    for (i = 1; i <= n; i++) if (parts[i] != "") print parts[i]
+  }
+' "$ADAPTIVE_RFC")"
+CODE_FIELDS="$(awk '
+  /^ALLOWED_FIELDS = frozenset\(/ { inf = 1; next }
+  inf && /^\)/                    { inf = 0; next }
+  inf {
+    line = $0
+    while (match(line, /"[a-z_][a-z0-9_]*"/)) {
+      print substr(line, RSTART + 1, RLENGTH - 2)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "$RUN_MANIFEST_PY")"
+
+RFC_FIELD_N=0
+while IFS= read -r _f; do [ -n "$_f" ] && RFC_FIELD_N=$((RFC_FIELD_N + 1)); done <<<"$RFC_FIELDS"
+CODE_FIELD_N=0
+while IFS= read -r _f; do [ -n "$_f" ] && CODE_FIELD_N=$((CODE_FIELD_N + 1)); done <<<"$CODE_FIELDS"
+
+# T15.1 — anti-vacuity. This case exists because a silent zero-name extraction
+# would make T15.2 and T15.3 pass while comparing nothing at all.
+if [ "$RFC_FIELD_N" -ge 30 ] && [ "$CODE_FIELD_N" -ge 30 ]; then
+  echo "  PASS  T15.1 both field lists extracted (RFC §13: $RFC_FIELD_N, ALLOWED_FIELDS: $CODE_FIELD_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T15.1 setup error: RFC 0013 §13 fence not found — anchor moved?"
+  echo "        RFC §13 names extracted:     $RFC_FIELD_N (expected >= 30)"
+  echo "        ALLOWED_FIELDS names parsed: $CODE_FIELD_N (expected >= 30)"
+  echo "        rfc: $ADAPTIVE_RFC"
+  echo "        code: $RUN_MANIFEST_PY"
+  FAIL=$((FAIL + 1))
+fi
+
+# T15.2 — forward. Every field the RFC promises must be accepted by the code.
+# A missing one means the manifest writer hard-rejects an event the RFC says
+# MUST be supported.
+T15_MISSING=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T15_MISSING="$T15_MISSING $_f"
+done <<<"$RFC_FIELDS"
+if [ -z "$T15_MISSING" ]; then
+  echo "  PASS  T15.2 every RFC 0013 §13 field is a member of ALLOWED_FIELDS ($RFC_FIELD_N/$RFC_FIELD_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T15.2 RFC 0013 §13 declares fields ALLOWED_FIELDS would reject as unknown_field"
+  echo "        missing from run_manifest.py:$T15_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T15.3 — reverse. Every ALLOWED_FIELDS member is either in the RFC or in the
+# exemption roster below. The roster is a literal fenced list, not a regex, for
+# two reasons: adding an exemption becomes a reviewable diff, and a member
+# silently DELETED from ALLOWED_FIELDS also reds here.
+# === BEGIN run-manifest process-metadata exemptions ===
+# These six are the "plus the minimal process metadata required to reconcile an
+# interrupted agent_started event" half of run_manifest.py's own comment. They
+# are intentionally absent from RFC 0013 §13, which specifies the event schema,
+# not the reconciliation bookkeeping.
+T15_EXEMPT="agent_id
+backend_handle
+owner_pid
+owner_process_identity
+status_path
+timeout_s"
+# === END run-manifest process-metadata exemptions ===
+T15_EXTRA=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$RFC_FIELDS" && continue
+  grep -qxF -- "$_f" <<<"$T15_EXEMPT" || T15_EXTRA="$T15_EXTRA $_f"
+done <<<"$CODE_FIELDS"
+T15_STALE_EXEMPT=""
+while IFS= read -r _f; do
+  [ -n "$_f" ] || continue
+  grep -qxF -- "$_f" <<<"$CODE_FIELDS" || T15_STALE_EXEMPT="$T15_STALE_EXEMPT $_f"
+done <<<"$T15_EXEMPT"
+if [ -z "$T15_EXTRA" ] && [ -z "$T15_STALE_EXEMPT" ]; then
+  echo "  PASS  T15.3 every ALLOWED_FIELDS member is in RFC 0013 §13 or the pinned process-metadata roster"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T15.3 ALLOWED_FIELDS and RFC 0013 §13 have drifted"
+  [ -n "$T15_EXTRA" ] && echo "        in the code, in neither the RFC nor the exemption roster:$T15_EXTRA"
+  [ -n "$T15_STALE_EXEMPT" ] && echo "        exempted here but no longer in ALLOWED_FIELDS:$T15_STALE_EXEMPT"
+  FAIL=$((FAIL + 1))
+fi
+
+# T15.4 — the `cache_hit` tombstone. The field is normatively declared by RFC
+# 0013 §13 and bool-validated by run_manifest.py, but has zero producers: the
+# artifact-reuse short-circuit that would have set it was deleted in #308.
+# Keeping it is the right call (an Accepted RFC promises it, and removing it is
+# a schema NARROWING that turns an out-of-tree producer's event into a hard
+# rc=2 unknown_field) — but keeping it SILENTLY is what let it rot. Require the
+# entry AND a RESERVED marker inside the frozenset literal, so the next reader
+# learns why a validated field never appears in any manifest.
+FROZEN_BODY="$(awk '
+  /^ALLOWED_FIELDS = frozenset\(/ { inf = 1; next }
+  inf && /^\)/                    { inf = 0; next }
+  inf                             { print }
+' "$RUN_MANIFEST_PY")"
+if [ -z "$FROZEN_BODY" ]; then
+  echo "  FAIL  T15.4 setup error: ALLOWED_FIELDS frozenset literal not found in run_manifest.py"
+  echo "        file: $RUN_MANIFEST_PY"
+  FAIL=$((FAIL + 1))
+elif ! grep -qF -- '"cache_hit",' <<<"$FROZEN_BODY"; then
+  echo "  FAIL  T15.4 cache_hit was dropped from ALLOWED_FIELDS — that is a schema narrowing"
+  echo "        RFC 0013 §13 still lists it; removing it here rejects a field the RFC promises"
+  FAIL=$((FAIL + 1))
+elif ! grep -qE 'RESERVED' <<<"$FROZEN_BODY"; then
+  echo "  FAIL  T15.4 cache_hit carries no RESERVED marker inside the ALLOWED_FIELDS literal"
+  echo "        file: $RUN_MANIFEST_PY"
+  echo "        a validated field with zero producers must say so where it is declared (#518)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T15.4 cache_hit is retained in ALLOWED_FIELDS and marked RESERVED at the declaration"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== T16: solve-fleet SKILL.md <-> workflow.js per-task record, compared both directions (#558) =="
+# SKILL.md is the ONLY declaration of the per-task record the fleet publishes,
+# and it was minted already wrong: it declared an EMPTY STRING for the no-gate
+# verdict where every construction and every mutation site in the script writes
+# the named sentinel NOT_APPLICABLE, and it omitted the preserved-claim field,
+# the completeness flag and the partial-delivery object outright. A consumer
+# written against the documented union matched nothing on the no-gate path and
+# read the real value as an unknown member.
+#
+# Nothing compared the two spellings — the uncompared-copies class (#370) — so
+# this section joins them the way T15 joins RFC 0013 §13 to ALLOWED_FIELDS: in
+# BOTH directions, so a member gained on either side reds the other instead of
+# drifting silently. Every row below is red on the pre-#558 doc (measured: it
+# yielded `""` and no NOT_APPLICABLE, no claimedStatus, and no partial-delivery
+# members at all).
+
+# --- extraction ------------------------------------------------------------
+# Doc side. The return-value fence and the verdict sentence are hand-wrapped
+# prose, so this BUFFERS across the authored line wrap instead of reading one
+# line: a one-line reader goes silently empty on a re-wrap, which is the
+# vacuous-green shape T15.1 exists to stop. Members are whatever sits between
+# the anchor and the first CLOSER after it (optionally skipping to an OPENER
+# first, for the backtick-quoted verdict union), split on commas, pipes and
+# whitespace. `sort -u` on the way out: these are SET comparisons, and a member
+# spelled twice is not a second member.
+sf_doc_members() {   # <file> <anchor> <closer> [<opener>]
+  tr -d '\r' < "$1" | awk -v anchor="$2" -v closer="$3" -v opener="${4:-}" '
+    {
+      if (fin) next
+      if (!cap) {
+        p = index($0, anchor)
+        if (p == 0) next
+        cap = 1
+        buf = substr($0, p + length(anchor))
+      } else {
+        buf = buf " " $0
+      }
+      seg = buf
+      if (opener != "") {
+        o = index(seg, opener)
+        if (o == 0) next
+        seg = substr(seg, o + length(opener))
+      }
+      e = index(seg, closer)
+      if (e == 0) next
+      seg = substr(seg, 1, e - 1)
+      gsub(/[,|]/, " ", seg)
+      m = split(seg, parts, /[ \t]+/)
+      for (i = 1; i <= m; i++) if (parts[i] != "") print parts[i]
+      fin = 1
+    }
+  ' | sort -u
+}
+# Script side. `//` comments are stripped BEFORE the newlines collapse — the
+# taskRec literal carries four comment lines, and prose ending in a colon
+# ("… as the PR-claim pass below:") otherwise reads as a key. Collapsing to one
+# line is what lets one ERE span an authored wrap; `[^{}]*` keeps each match
+# inside a single brace-free literal, and these records nest nothing. Braces are
+# spelled `[{]`/`[}]` and never `\{`/`\}`: an escaped brace in an ERE is
+# undefined by POSIX and GNU grep 3.8+ warns on stray escapes, so the bracket
+# expression is the form that means the same thing to every grep CI resolves.
+sf_js_keys() {       # <ERE matching the whole object literal>
+  sed 's|//.*||' "$SOLVE_FLEET_JS" | tr -d '\r' | tr '\n' ' ' \
+    | grep -oE "$1" | grep -oE '[A-Za-z_][A-Za-z0-9_]*:' | tr -d ':' | sort -u
+}
+# Count and set-difference, factored: six of each below, and six copies of the
+# same loop is the very class this section exists to police. Herestrings, not
+# pipes — this file sets `-o pipefail` and is inside epipe-guard.test.sh's scan
+# set, where a `printf | grep -q` writer takes EPIPE and poisons the rc.
+sf_member_count() {  # <newline-separated list>
+  local _n=0 _line
+  while IFS= read -r _line; do [ -n "$_line" ] && _n=$((_n + 1)); done <<<"$1"
+  printf '%s' "$_n"
+}
+sf_members_absent() {  # <needles> <haystack> -> space-prefixed missing members
+  local _out="" _m
+  while IFS= read -r _m; do
+    [ -n "$_m" ] || continue
+    grep -qxF -- "$_m" <<<"$2" || _out="$_out $_m"
+  done <<<"$1"
+  printf '%s' "$_out"
+}
+
+# The per-task record. On the script side that is every literal built with an
+# `id:` key and a `reviewVerdict:` key, PLUS every field assigned onto `taskRec`
+# afterwards — a field introduced only by mutation is still a published field,
+# and `=[^=]` keeps the `===` comparisons out.
+SF_DOC_TASK_FIELDS="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'tasks: [{' '}')"
+SF_JS_TASK_FIELDS="$({ sf_js_keys '[{] *id: [^{}]*reviewVerdict:[^{}]*[}]'
+  grep -oE 'taskRec\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]' "$SOLVE_FLEET_JS" \
+    | tr -d '\r' | sed 's/^taskRec\.//; s/[[:space:]]*=.*$//'; } | sort -u)"
+SF_DOC_TASK_N="$(sf_member_count "$SF_DOC_TASK_FIELDS")"
+SF_JS_TASK_N="$(sf_member_count "$SF_JS_TASK_FIELDS")"
+
+# T16.1 — anti-vacuity. A silent zero-name extraction on either side would make
+# T16.2 and T16.3 pass while comparing nothing at all.
+if [ "$SF_DOC_TASK_N" -ge 5 ] && [ "$SF_JS_TASK_N" -ge 5 ]; then
+  echo "  PASS  T16.1 both per-task field lists extracted (SKILL.md: $SF_DOC_TASK_N, workflow.js: $SF_JS_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.1 setup error: the per-task record did not extract from both sides"
+  echo "        SKILL.md 'tasks: [{...}]' members: $SF_DOC_TASK_N (expected >= 5) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js record fields:        $SF_JS_TASK_N (expected >= 5) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.2 — forward. A documented field the script never writes is a field a
+# consumer will read as undefined on every record.
+T16_TASK_MISSING="$(sf_members_absent "$SF_DOC_TASK_FIELDS" "$SF_JS_TASK_FIELDS")"
+if [ -z "$T16_TASK_MISSING" ]; then
+  echo "  PASS  T16.2 every per-task field SKILL.md documents is one workflow.js writes ($SF_DOC_TASK_N/$SF_DOC_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.2 SKILL.md documents per-task field(s) no task record carries"
+  echo "        absent from workflow.js:$T16_TASK_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.3 — reverse. This is the half that caught #558: `claimedStatus` was minted
+# on every record and named in no doc.
+T16_TASK_EXTRA="$(sf_members_absent "$SF_JS_TASK_FIELDS" "$SF_DOC_TASK_FIELDS")"
+if [ -z "$T16_TASK_EXTRA" ]; then
+  echo "  PASS  T16.3 every per-task field workflow.js writes is documented in SKILL.md ($SF_JS_TASK_N/$SF_JS_TASK_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.3 workflow.js publishes per-task field(s) SKILL.md never declares"
+  echo "        undocumented:$T16_TASK_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# The reviewVerdict union. What can land in the field is either a literal
+# assigned at a `reviewVerdict` site, or the reviewer's verdict — and that one
+# is closed by the ternary right above the assignment, whose arms are the
+# `rev.verdict ===` comparisons (anything outside them is coerced to
+# REVISIONS_REQUIRED). Both sources, one set.
+SF_DOC_VERDICTS="$(sf_doc_members "$SOLVE_FLEET_SKILL" '`reviewVerdict`' '`' '`')"
+SF_JS_VERDICTS="$(grep -oE '(reviewVerdict|rev\.verdict)[^"]*"[A-Z][A-Z0-9_]*"' "$SOLVE_FLEET_JS" \
+  | grep -oE '"[A-Z][A-Z0-9_]*"' | tr -d '"\r' | sort -u)"
+SF_DOC_VERDICT_N="$(sf_member_count "$SF_DOC_VERDICTS")"
+SF_JS_VERDICT_N="$(sf_member_count "$SF_JS_VERDICTS")"
+
+# T16.4 — anti-vacuity for the union. The doc-side anchor is the first
+# backticked `reviewVerdict` mention; if it ever stops being the union
+# declaration, the extraction shrinks and this row says so rather than letting
+# T16.5/T16.6 compare a fragment.
+if [ "$SF_DOC_VERDICT_N" -ge 4 ] && [ "$SF_JS_VERDICT_N" -ge 4 ]; then
+  echo "  PASS  T16.4 both reviewVerdict unions extracted (SKILL.md: $SF_DOC_VERDICT_N, workflow.js: $SF_JS_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.4 setup error: the reviewVerdict union did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_VERDICT_N (expected >= 4) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_VERDICT_N (expected >= 4) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.5 — forward. The #558 defect itself: the doc declared `""` for the no-gate
+# case, which the script never writes, so a consumer matching it matched nothing.
+T16_VERDICT_MISSING="$(sf_members_absent "$SF_DOC_VERDICTS" "$SF_JS_VERDICTS")"
+if [ -z "$T16_VERDICT_MISSING" ]; then
+  echo "  PASS  T16.5 every documented reviewVerdict member is one workflow.js can write ($SF_DOC_VERDICT_N/$SF_DOC_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.5 SKILL.md declares reviewVerdict member(s) workflow.js never writes"
+  echo "        absent from workflow.js:$T16_VERDICT_MISSING"
+  echo "        (the no-gate case is the named sentinel NOT_APPLICABLE, never an empty string)"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.6 — reverse. A verdict the script can write and the doc omits is a value
+# a consumer's switch has no arm for.
+T16_VERDICT_EXTRA="$(sf_members_absent "$SF_JS_VERDICTS" "$SF_DOC_VERDICTS")"
+if [ -z "$T16_VERDICT_EXTRA" ]; then
+  echo "  PASS  T16.6 every reviewVerdict workflow.js can write is documented in SKILL.md ($SF_JS_VERDICT_N/$SF_JS_VERDICT_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.6 workflow.js can write reviewVerdict value(s) SKILL.md never declares"
+  echo "        undocumented:$T16_VERDICT_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# The partial-delivery object, same join. It is the only machine-readable record
+# of a PR opened over an UNFINISHED chain, so an undocumented member is a fact
+# /goal's reader cannot know to look for.
+SF_DOC_PARTIAL="$(sf_doc_members "$SOLVE_FLEET_SKILL" 'partialDelivery: {' '}')"
+SF_JS_PARTIAL="$(sf_js_keys 'partialDelivery = [{][^{}]*[}]')"
+SF_DOC_PARTIAL_N="$(sf_member_count "$SF_DOC_PARTIAL")"
+SF_JS_PARTIAL_N="$(sf_member_count "$SF_JS_PARTIAL")"
+if [ "$SF_DOC_PARTIAL_N" -ge 3 ] && [ "$SF_JS_PARTIAL_N" -ge 3 ]; then
+  echo "  PASS  T16.7 both partialDelivery member lists extracted (SKILL.md: $SF_DOC_PARTIAL_N, workflow.js: $SF_JS_PARTIAL_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.7 setup error: partialDelivery did not extract from both sides"
+  echo "        SKILL.md members:    $SF_DOC_PARTIAL_N (expected >= 3) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js members: $SF_JS_PARTIAL_N (expected >= 3) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+T16_PARTIAL_MISSING="$(sf_members_absent "$SF_DOC_PARTIAL" "$SF_JS_PARTIAL")"
+T16_PARTIAL_EXTRA="$(sf_members_absent "$SF_JS_PARTIAL" "$SF_DOC_PARTIAL")"
+if [ -z "$T16_PARTIAL_MISSING" ] && [ -z "$T16_PARTIAL_EXTRA" ]; then
+  echo "  PASS  T16.8 SKILL.md and workflow.js agree on the partialDelivery members, both directions"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.8 the documented partialDelivery object and the one workflow.js builds have drifted"
+  [ -n "$T16_PARTIAL_MISSING" ] && echo "        documented but never built:$T16_PARTIAL_MISSING"
+  [ -n "$T16_PARTIAL_EXTRA" ] && echo "        built but never documented:$T16_PARTIAL_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.9 — the completeness flag has no members to join, so it gets the symbol
+# pair instead: named in the doc, and resolving in the script it describes.
+assert_grep "$SOLVE_FLEET_SKILL" 'chainComplete' \
+  "T16.9 SKILL.md's return value declares the chainComplete flag"
+assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
+  "T16.9b the chainComplete symbol resolves in the fleet script"
 
 echo
 echo "== Summary =="

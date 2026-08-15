@@ -2,6 +2,7 @@
 name: subagent-driven-dev
 description: Use when executing implementation plans with independent tasks in the current session
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this component was copied from and the SHA vendor.json records for it; stance is `fork`, so the local bytes diverge deliberately — see this component's stance_reason. -->
 
 # Subagent-Driven Development
 
@@ -11,7 +12,7 @@ Execute plan **wave-by-wave**. Within each wave, dispatch all implementer subage
 
 **Why parallel waves:** Sequential execution of independent tasks wastes wall-clock time. The plan's `## Execution Waves` summary already proves which tasks are safe to run concurrently — honor it.
 
-**Why one shared worktree (Pattern B):** Per-agent worktrees add filesystem ceremony and a merge step. Instead, the wave's implementers all work in the feature-branch worktree on **strictly disjoint file sets** (enforced by the plan's `Worktree-safe:` declarations). To prevent git-index races, **implementers never run git** — they edit files and report changed paths; the controller stages and commits per task in a deterministic order after the wave finishes.
+**Why one shared worktree (Pattern B):** Per-agent worktrees add filesystem ceremony and a merge step. Instead, the wave's implementers all work in the feature-branch worktree on **strictly disjoint file sets**. That partition is *declared* by the plan — each task's `Owns (file allowlist)` field plus the plan's `## Execution Waves` summary — *reviewed* by `plan-reviewer` Check 2 (same-wave `Owns` lists must be strictly disjoint; any file in two of them is a critical finding), and *refused at dispatch* by `sdd_assert_wave_disjoint`, which `sdd_launch_prepared_batch` calls before it dispatches anything. To prevent git-index races, **implementers never run git** — they edit files and report changed paths; the controller stages and commits per task in a deterministic order after the wave finishes.
 
 **Core principle:** Parallel-by-default within a wave + disjoint file sets + controller-only git = maximum throughput, zero races.
 
@@ -277,20 +278,70 @@ print(json.dumps(value,sort_keys=True,separators=(",",":")),end="")
 PY
 }
 
+# The wave's safety precondition, refused rather than assumed. Parallel
+# implementers in one shared worktree are only race-free while their ownership
+# is strictly disjoint; the plan DECLARES that partition (`Owns (file
+# allowlist)` per task) and `plan-reviewer` Check 2 REVIEWS it, but a review is
+# advice and a plan defect must not reach a dispatch. This is the chokepoint
+# that turns it into a refusal.
+#
+# Directory containment counts: one task owning `lib/` and a sibling owning
+# `lib/x.sh` race exactly as if they shared a path, and a plain set intersection
+# calls them disjoint. `under()` mirrors tools/vendor/vendor-drift.py's.
+#
+# Everything arrives on argv and the heredoc is quoted, so the Skill renderer's
+# positional-argument substitution has no bare positional token to corrupt (the
+# class tests/skill-renderer-awk-collision.test.sh guards). Paths are already
+# canonical absolute realpaths confined to $SDD_WORKTREE
+# (sdd_canonicalize_owned_paths runs earlier at the batch callsite), so this
+# resolves nothing itself.
+sdd_assert_wave_disjoint() {
+  [ "${#SDD_PREPARED_IMPLEMENT_PATHS[@]}" -gt 0 ] || return 0
+  python3 -I -B - "${SDD_PREPARED_IMPLEMENT_PATHS[@]}" <<'PY'
+import json,os,sys
+owned=[]
+for index,raw in enumerate(sys.argv[1:],1):
+    try:
+        value=json.loads(raw)
+    except ValueError:
+        print('uberdev sdd: wave_paths_unreadable task=%d' % index,file=sys.stderr); raise SystemExit(2)
+    paths=value.get('allowed_paths') if isinstance(value,dict) else None
+    if not isinstance(paths,list) or not paths or any(not isinstance(p,str) or not p for p in paths):
+        print('uberdev sdd: wave_paths_missing task=%d' % index,file=sys.stderr); raise SystemExit(2)
+    owned.append(paths)
+def under(a,b):
+    if a==b: return True
+    stem=b.rstrip('/\\')
+    return a.startswith(stem+'/') or a.startswith(stem+os.sep)
+for i in range(len(owned)):
+    for j in range(i+1,len(owned)):
+        for a in owned[i]:
+            for b in owned[j]:
+                if under(a,b) or under(b,a):
+                    collision=a if under(a,b) else b
+                    print('uberdev sdd: wave_paths_overlap task_a=%d task_b=%d path=%s'
+                          % (i+1,j+1,collision),file=sys.stderr)
+                    raise SystemExit(3)
+PY
+}
+
 SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
 SDD_PREPARED_HANDOFF_SHA256S=()
 SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
+SDD_PREPARED_IMPLEMENT_PATHS=()
 SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
 SDD_BATCH_RESULT_INSTANCES=(); SDD_BATCH_RESULT_PATHS=()
 sdd_reset_batch() {
   SDD_PREPARED_EDGES=(); SDD_PREPARED_INSTANCES=(); SDD_PREPARED_HANDOFFS=()
   SDD_PREPARED_HANDOFF_SHA256S=()
   SDD_PREPARED_RESULTS=(); SDD_PREPARED_STATUSES=()
+  SDD_PREPARED_IMPLEMENT_PATHS=()
   SDD_RECEIPT_INSTANCES=(); SDD_RECEIPT_STATUSES=(); SDD_RECEIPT_RESULTS=()
 }
 sdd_begin_batch() {
   [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq 0 ] || return 2
   [ "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" -eq 0 ] || return 2
+  [ "${#SDD_PREPARED_IMPLEMENT_PATHS[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_INSTANCES[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_STATUSES[@]}" -eq 0 ] || return 2
   [ "${#SDD_RECEIPT_RESULTS[@]}" -eq 0 ] || return 2
@@ -324,6 +375,15 @@ sdd_dispatch_prepared() {
   SDD_PREPARED_HANDOFFS+=("$handoff"); SDD_PREPARED_HANDOFF_SHA256S+=("$handoff_sha256")
   SDD_PREPARED_RESULTS+=("$result")
   SDD_PREPARED_STATUSES+=("$child_status")
+  # Only the implement edge writes; reviewers are read-only and deliberately
+  # share a scope, so the accumulator the disjointness guard reads is populated
+  # by edge id. A plain `if` rather than a `case`/`elif` arm on purpose: an
+  # edge-id token vocabulary spelled as a case arm is the shape
+  # tests/contract-markers.test.sh scans for, and there is no registered SDD-edge
+  # vocabulary to mark this against.
+  if [ "$edge_id" = "sdd.task.implement" ]; then
+    SDD_PREPARED_IMPLEMENT_PATHS+=("$inputs_json")
+  fi
 }
 
 # sdd_wait_prepared_batch resets the prepared arrays on every exit path, so the
@@ -342,10 +402,18 @@ sdd_snapshot_batch_results() {
 }
 
 sdd_launch_prepared_batch() {
-  local index edge instance handoff handoff_sha256 result child_status dispatch_rc cleanup_rc
+  local index edge instance handoff handoff_sha256 result child_status dispatch_rc cleanup_rc disjoint_rc
   local preflight_refs=()
   [ "${#SDD_PREPARED_HANDOFFS[@]}" -gt 0 ] || return 2
   [ "${#SDD_PREPARED_HANDOFFS[@]}" -eq "${#SDD_PREPARED_HANDOFF_SHA256S[@]}" ] || return 2
+  # The position is load-bearing. Refusing here means nothing external is called
+  # before a plan defect is rejected, and it is UPSTREAM of the
+  # `for ((index=0; …)); ${ARR[$index]}` loops below — which are bash-0-indexed
+  # and read empty under zsh (see sdd_snapshot_batch_results) — so the refusal,
+  # and only the refusal, is reproducible cross-shell. rc 3 = ownership overlaps
+  # (a plan defect; route the wave into the BLOCKED ladder), rc 2 = ownership is
+  # absent. Reset on refusal, exactly as the preflight failure arm does.
+  sdd_assert_wave_disjoint || { disjoint_rc=$?; sdd_reset_batch; return "$disjoint_rc"; }
   for ((index=0; index<${#SDD_PREPARED_HANDOFFS[@]}; index++)); do
     preflight_refs+=("${SDD_PREPARED_HANDOFFS[$index]}" "${SDD_PREPARED_HANDOFF_SHA256S[$index]}")
   done
@@ -533,7 +601,7 @@ digraph when_to_use {
 2. **Create TodoWrite** with one todo per task, labeled with its wave (e.g., `[wave-2] Task 4: ...`).
 3. **Verify clean baseline:** `git status` is clean; you're on the feature branch in the feature-branch worktree. Capture `BASELINE_SHA=$(git rev-parse HEAD)` — useful only for diagnostic logging now that the post-impl-review's `commit_range` is computed independently inside `/uberdev:review-pr` Phase 1.
 4. **For each wave (sequential):**
-   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`.
+   a. Build every implementer handoff from `./implementer-prompt.md`, using edge `sdd.task.implement`, role `implementation-worker`, phase `implementation`, and instance stage `implement`. Prepare every handoff, preflight the complete wave, then dispatch before waiting. Each handoff carries exact manifest keys, including canonical absolute `allowed_paths` and `denied_paths`. After preparation and before launch, `sdd_launch_prepared_batch` refuses any wave whose implementers' `allowed_paths` intersect — by equality *or* directory containment — with rc `3`, and any wave whose implementer ownership is absent with rc `2`; in both cases it dispatches **nothing**. An overlap is a **plan** defect: route that wave into the BLOCKED ladder and fix the decomposition — never "dispatch anyway".
    b. **Implementers never run git.** They edit files, run their tests, and report `Status + changed file paths + test results`.
    c. After all dispatch receipts exist, wait for all wave implementers with `uberdev_wait_child`; read each immutable result artifact only after its wait succeeds.
    d. For each completed implementer (in task ID order, sequential): controller stages **only that task's reported paths** with `git add <paths>` and commits with the task-specific message.
@@ -661,7 +729,15 @@ digraph per_task {
 
 ## Handling Implementer Status
 
-Implementer subagents report one of four statuses. Handle each appropriately:
+Implementer subagents report exactly one terminal status from the closed
+vocabulary declared here — the same one `shared/sdd-implementer-output-v1.md`
+declares to the child. Every member below has a branch; there is no default arm.
+
+<!-- CONTRACT: sdd-implementer-status -->
+`DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT|REFUSED`
+<!-- /CONTRACT: sdd-implementer-status -->
+
+Handle each appropriately:
 
 **DONE:** Proceed to spec compliance review.
 
@@ -674,6 +750,8 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 2. If the task exposes additional risk, update the root risk evidence and let policy select the warranted route; never put a model override in the handoff
 3. If the task is too large, break it into smaller pieces
 4. If the plan itself is wrong, escalate to the human
+
+**REFUSED:** The implementer judged the handoff itself unexecutable — it conflicts with repository instructions, demands delegation or a scope change a leaf worker may not make, or asks for something unsafe. This is a verdict on the instruction, not on the difficulty, so the same task is **never re-dispatched with unchanged handoff data**: fix the plan, re-scope the task so the instruction is one a leaf worker may carry out, or escalate to the human. Adding context does not answer a refusal.
 
 **Never** ignore an escalation or retry unchanged context and risk evidence. If the implementer said it's stuck, something needs to change.
 

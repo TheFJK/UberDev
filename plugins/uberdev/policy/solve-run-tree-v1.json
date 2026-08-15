@@ -2,6 +2,43 @@
   "schema_version": 1,
   "tree_id": "solve-run-tree-v1",
   "root_edge_id": "solve.issue.lead",
+  "scope": {
+    "governs": {
+      "substrate": "routed-child-dispatch",
+      "adapter": "plugins/uberdev/lib/child-dispatch.sh",
+      "note": "Every edge in `edges` is a child dispatched through the routed adapter and validated at runtime by lib/child-inputs.py against its required_inputs/optional_inputs. This manifest governs that substrate and no other. The `orchestrator.*` and `sdd.*` edges are reachable ONLY on the non-default --backend=wezterm|background transports; since RFC 0015 the default /solve and /turbo route is the Workflow fleet declared under does_not_govern."
+    },
+    "agent_kind_rule": "An agent kind is a Workflow agent's opts.label with `:#<issue>` and any trailing ` (<tier>)` removed, the per-task `:t<n>` and per-round `:r<n>` indices collapsed to `:tN` and `:rN`, then `:` mapped to `.` and `-` mapped to `_`. The indices are collapsed because they say which INSTANCE of a rung ran, not what it is: left in, a round-3 reviewer of task 12 is its own kind, the kind space is unbounded, and no enumeration below could satisfy C1 for a chain that actually runs. Derived by execution in tests/solve-run-tree-scope.test.sh, never by grep.",
+    "does_not_govern": [
+      {
+        "substrate": "workflow-native-solve-fleet",
+        "source": "plugins/uberdev/skills/solve-fleet/workflow.js",
+        "reason": "RFC 0015 made this the DEFAULT /solve + /turbo route. A Workflow script has no filesystem (tests/workflow-scripts.test.sh T1 forbids fs./process.), so it cannot read this manifest and no edge here can constrain it. The gap is real and tracked; it is recorded here so it is visible and machine-checked rather than inferred from a name.",
+        "reserved_edge_prefix": "solve_fleet.",
+        "dispatch_sites": 11,
+        "agent_kinds": [
+          "deliver",
+          "fix.tN.rN",
+          "impl.tN",
+          "manifest_intake",
+          "plan",
+          "research.codebase",
+          "research.constraints",
+          "research.test_coverage",
+          "review.tN.rN",
+          "solve",
+          "spec",
+          "spec_review",
+          "verify_prs"
+        ],
+        "tracking_issues": [
+          507,
+          508,
+          524
+        ]
+      }
+    ]
+  },
   "input_limits": {
     "max_serialized_bytes": 49152
   },
@@ -19,7 +56,8 @@
   "output_contracts": {
     "phase1-reviewer-v1": "shared/phase1-reviewer-output-v1.md",
     "finding-verifier-v1": "shared/finding-verifier-output-v1.md",
-    "code-fixer-v1": "shared/code-fixer-output-v1.md"
+    "code-fixer-v1": "shared/code-fixer-output-v1.md",
+    "sdd-implementer-v1": "shared/sdd-implementer-output-v1.md"
   },
   "edges": {
     "solve.issue.lead": {
@@ -585,6 +623,7 @@
       "cardinality": "one_per_task_plus_bounded_fix_attempts",
       "required": true,
       "risk_scope": "subtask",
+      "output_contract": "sdd-implementer-v1",
       "allowed_workflows": [
         "solve",
         "turbo"

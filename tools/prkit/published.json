@@ -180,7 +180,11 @@
     "agents/code-fixer.md",
     "agents/code-reviewer.md",
     "agents/code-simplifier.md",
+    "agents/comment-analyzer.md",
     "agents/findings-to-issues.md",
+    "agents/pr-test-analyzer.md",
+    "agents/silent-failure-hunter.md",
+    "agents/type-design-analyzer.md",
     "commands/review-pr.md",
     "commands/simplify.md",
     "lib/child-dispatch.sh",
@@ -188,9 +192,11 @@
     "lib/command-workspace.py",
     "lib/config-read.sh",
     "lib/review-aggregate.sh",
+    "lib/run_manifest.py",
     "policy/model-routing-v1.json",
     "policy/solve-run-tree-v1.json",
     "shared/code-fixer-output-v1.md",
+    "skills/merge-pipeline/SKILL.md",
     "skills/merge-pipeline/lib/discover.sh"
   ]
 }

@@ -2,6 +2,7 @@
 name: write-plan
 description: Use when you have a spec or requirements for a multi-step task, before touching code
 ---
+<!-- Vendored from obra/superpowers@e7a2d16476bf042e9add4699c9d018a90f86e4a6 (MIT) — see plugins/uberdev/licenses/superpowers-MIT.txt — the base this file (upstream skills/writing-plans/SKILL.md) was copied from and the SHA vendor.json records for the component. Measured against that blob (#503): the residual is the directory rename plus the namespace rebrand plus the plan FORMAT this repo owns — the mandatory '## Wave Decomposition' rules, the 'Depends on:' / 'Wave:' / 'Owns:' task headers, the wave-correctness review pass, the opt-in alternative-decomposition comparison, and a non-interactive Execution Handoff that defaults to uberdev:subagent-driven-dev and forwards --turbo. uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in; the component is stance 'fork'. Permanent local divergence: vendor.json permanent_divergences[].plan-execution-wave-contract. -->
 
 # Writing Plans
 

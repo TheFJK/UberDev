@@ -8,6 +8,12 @@
 # port stage (issue #381).
 set -u
 set -o pipefail
+# ci-wiring: declared Unix-only in the test.yml windows-skip-list (#520).
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "FATAL: ${0##*/} is declared Unix-only in test.yml (ci-wiring W9) but ran on $(uname -s)" >&2
+    exit 2 ;;
+esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GEN="$REPO_ROOT/tools/prkit/generate.sh"
 VERIFY="$REPO_ROOT/tools/prkit/verify.sh"
@@ -521,6 +527,88 @@ expect_fail_diag "V30b codex regular file fails" \
 # slip straight through a bare `-e` test.
 expect_fail_diag "V30c dangling codex symlink fails" \
   'ln -s "$dp/gone" "$d/codex"' "$CODEX_RETIRED_DIAGNOSTIC"
+
+# V31 — no provenance header smuggles a repo-relative path into the published
+# tree (UberDev #505).
+#
+# THE CONSTRAINT. The six vendored reviewer agents each carry a
+# `Vendored from <owner>/<repo>@<sha>` header, and every one of them is in
+# manifest.txt. `rewrite.sh` applies a blanket `uberdev` -> `prkit` rewrite to
+# every byte it copies, and the generated tree ships no `licenses/` directory —
+# so the obvious, natural thing to write in such a header, a pointer at the
+# licence file beside it, would be rewritten into `plugins/prkit/licenses/...`
+# and dangle in the published repo. The headers therefore name the SPDX id
+# instead of a path, which is a DECISION; without a row it is only a memory, and
+# the next person to touch one of those headers has nothing telling them why.
+#
+# Test-side rather than a verify.sh change on purpose: verify.sh already carries
+# a token guard and a `prkit:<name>` ref-integrity check, but no general
+# path-resolution pass, and adding one there for six comment lines is out of
+# proportion to what it would catch.
+header_path_scan(){
+  python3 - "$1" <<'PY'
+import os, re, sys
+
+root = sys.argv[1]
+HEADER = re.compile(r"Vendored from [^@\s]+@[0-9a-f]{40}")
+# Deliberately the POST-rewrite spelling. A header written with the pre-rewrite
+# namespace arrives here already translated, so scanning for the source spelling
+# would find nothing and report agreement.
+TREE_PATH = re.compile(r"plugins/prkit/[A-Za-z0-9._/-]*[A-Za-z0-9._-]")
+seen, dangling = 0, []
+for dirpath, dirnames, filenames in os.walk(root):
+    if ".git" in dirnames:
+        dirnames.remove(".git")
+    for name in filenames:
+        full = os.path.join(dirpath, name)
+        try:
+            text = open(full, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            if not HEADER.search(line):
+                continue
+            seen += 1
+            for ref in TREE_PATH.findall(line):
+                if not os.path.exists(os.path.join(root, ref)):
+                    dangling.append("%s cites %s"
+                                    % (os.path.relpath(full, root), ref))
+print("VACUOUS" if seen == 0 else "\n".join(dangling))
+PY
+}
+V31_OUT="$(header_path_scan "$BASE")"
+if [ "$V31_OUT" = "VACUOUS" ]; then
+  no "V31 the generated tree carries no provenance header at all — the scan proves nothing"
+elif [ -n "$V31_OUT" ]; then
+  no "V31 a shipped provenance header cites a path that is not in the generated tree: $V31_OUT"
+else
+  dp="$(mktemp -d)"; d="$dp/t"; cp -R "$BASE" "$d"
+  if python3 - "$d/plugins/prkit/agents/code-reviewer.md" <<'PY'
+import re, sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().splitlines(True)
+HEADER = re.compile(r"Vendored from [^@\s]+@[0-9a-f]{40}")
+for i, line in enumerate(lines):
+    if HEADER.search(line):
+        lines[i] = line.replace(
+            " -->",
+            " Licence text: plugins/prkit/licenses/pr-review-toolkit-Apache-2.0.txt. -->")
+        break
+else:
+    raise SystemExit("no provenance header in the generated code-reviewer agent")
+open(p, "w", encoding="utf-8").write("".join(lines))
+PY
+  then
+    if [ -n "$(header_path_scan "$d")" ]; then
+      ok "V31 provenance headers cite no path, and a path-carrying one is caught"
+    else
+      no "V31 an injected dangling plugins/prkit/ path was not caught — the scan is blind"
+    fi
+  else
+    no "V31 could not inject a path into a generated header — the probe mutated nothing"
+  fi
+  rm -rf "$dp"
+fi
 
 echo "  Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

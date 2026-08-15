@@ -4,6 +4,62 @@ All notable changes to UberDev are documented here.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.0] — 2026-08-14
+
+Consolidated landing of 18 pull requests (#523, #525–#529, #537–#545, #547, #550, #552),
+combined onto one review branch by `/uberdev:review-pr` Phase 0 and reviewed once as a unit.
+Closes #486, #503, #504, #505, #507, #508, #509, #510, #511, #513, #514, #515, #516, #517,
+#518, #520, #521, #522.
+
+### Added
+
+- **Vendor provenance is complete.** Every third-party component now records a real
+  `vendored_at_commit`: #503 pinned the five `track` skills, #504 the five `fork` skills and
+  #505 the six `pr-review-toolkit` agents — the last by blob identity against upstream rather
+  than by inference, with a new `base_evidence` record, a `C-EVIDENCE` offline check and a
+  `vendor-drift.py --verify-bases` network half. #511 adjudicated the 6.2.0 → 6.3.0 delta and
+  advanced every superpowers watermark; #509 adjudicated SDD's parallel-implementer inversion
+  and added `C-DIVREF`.
+- **A review gate inside the implement phase** (#508): the design-tier path is now a
+  sequential per-task implementer → reviewer → bounded fix ladder in one shared worktree,
+  followed by a single delivery agent.
+- **The fleet verifies its solvers' PR claims** (#515) instead of publishing them: a batched
+  proof relay reconciles each claimed PR against GitHub, and a disproven `status` is corrected
+  with the claim preserved beside it.
+- **A generic schema-property read guard** (#513), killing the "declared, requested, never
+  read" class mechanically rather than case by case.
+
+### Changed
+
+- Spec-review blocking findings are threaded into the plan writer inside an untrusted-input
+  envelope (#507); the solve-fleet prompts stop citing rule documents this repo does not ship
+  (#516); `solve-run-tree-v1.json` is scoped to the routed adapter with the fleet gap
+  machine-checked (#510).
+- CB1 now projects `2 + issues + (6 + implementBudget − 1) × design-tier issues` — two batched
+  relays plus the per-task chain — restated in SKILL.md and RFC 0015 and joined to the script
+  by `docs-accuracy` T14.
+
+### Fixed
+
+- Three dead contracts in review-fleet (#514), the retired research cache's last readers and
+  its zero-producer `cache_hit` telemetry (#518), the SDD implementer's terminal vocabulary
+  (#517), the A2 ripgrep guard's vacuous pass (#486), CI-coverage certification by filename
+  (#520), four host-hardcoded environment probes (#521) and two CRLF-variable byte ratchets
+  (#522).
+- Nine cross-PR integration breaks that only the combined branch could surface — each green in
+  isolation and red together. See the `fix(stack):` commits on this branch.
+- **Phase 2.5 could not run on a clean review.** A Phase 1 that returns APPROVE with no blocker
+  dispatches no fixer, so no disposition is published — and both of the values the controller
+  could then pass were refused: the zero-byte file it creates itself is `input-malformed` to
+  `findings-to-issues` (#556), and the empty string that agent documents as the "no disposition"
+  form (defaulting that phase's rows to `DEFERRED`) was rejected by review-fleet's defer gate as
+  `bad_disposition_path`. The gate now takes the empty value — which is the `optional_path` type
+  the run-tree policy and its callsite fixture already give both keys, and the form
+  `commands/simplify.md` and this script's own `ciDeferPrompt()` already use — while a
+  **non-empty** value must still be a safe absolute path. The empty form reaches the child
+  declared as empty rather than as a bare `=`, and the gate gained rows in both directions
+  (`W-DISP1`–`W-DISP7`), having had none.
+
 ## [0.46.0] — 2026-08-13
 
 Consolidated landing of 21 pull requests (#483–#502, #506, #512), combined onto one review

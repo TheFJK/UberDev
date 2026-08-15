@@ -44,6 +44,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # #505. tests/vendor-provenance.test.sh V30 re-derives each recorded
+          # `base_evidence` blob with `git rev-parse <vendored_ref>:<path>`.
+          # `vendored_ref` is a real commit of this repository, so the default
+          # shallow checkout cannot resolve it — and the row FAILS rather than
+          # skipping, because a proof that quietly stands down in CI is the
+          # vacuous-green class that suite exists to refuse. Only this job needs
+          # it: the Windows job skips that suite and the macOS job never runs it.
+          fetch-depth: 0
       - name: Install zsh
         # ubuntu-latest does not ship zsh by default. tests/solve-pipeline-zsh.test.sh
         # is a zsh-runtime fixture that locks the v0.22.2 regression
@@ -72,6 +81,11 @@ jobs:
         #   - testers-agent-contract.test.sh / testers-rate-limit-audit.test.sh /
         #     testers-rate-limit-wrapper.test.sh (python3 + PyYAML, same reason as
         #                                         testers-pipeline) [#196]
+        #   - ubersimplify-aggregate.test.sh    (aggregate.py imports yaml and
+        #                                         PyYAML is not importable on
+        #                                         windows-latest; it now refuses
+        #                                         rather than reporting success
+        #                                         over an unexecuted body) [#520]
         #   - uberthink.test.sh / uberthink-report.test.sh
         #                                         (python3 -c + mktemp -d paths,
         #                                         same reason as uberscan-report)
@@ -141,6 +155,7 @@ jobs:
           bash tests/child-inputs.test.sh && \
           bash tests/child-wait.test.sh && \
           bash tests/solve-run-tree.test.sh && \
+          bash tests/solve-run-tree-scope.test.sh && \
           bash tests/child-contract-v2.test.sh && \
           bash tests/command-workspace.test.sh && \
           bash tests/production-run-tree-builder.test.sh && \
@@ -199,6 +214,7 @@ jobs:
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
           bash tests/contract-markers.test.sh && \
+          bash tests/schema-property-reads.test.sh && \
           bash tests/vendor-provenance.test.sh && \
           bash tests/vendor-drift.test.sh
 
@@ -284,11 +300,28 @@ jobs:
         #   - goal-state-zsh.test.sh
         #   - merge-pipeline-zsh.test.sh
         #   - solve-pipeline-zsh.test.sh
-        #   - simplify-standalone-flow.test.sh
         #   - testers-pipeline.test.sh
         #   - testers-agent-contract.test.sh
         #   - testers-rate-limit-audit.test.sh
         #   - testers-rate-limit-wrapper.test.sh
+        #   - ubersimplify-aggregate.test.sh    (aggregate.py does `import yaml`;
+        #                                       PyYAML is not importable on
+        #                                       windows-latest — the job printed
+        #                                       `SKIP: PyYAML not installed` and
+        #                                       ran none of the four sections —
+        #                                       and the four testers-* fixtures
+        #                                       above are declared here for the
+        #                                       same dependency. COVERAGE LOSS
+        #                                       (#520): the D7 envelope-breakout
+        #                                       rows (#183) and their only mirror,
+        #                                       uberscan-report.test.sh, are both
+        #                                       Unix-only, so that property is
+        #                                       unproven on native Windows — not
+        #                                       merely untested here. It was
+        #                                       already unproven before this
+        #                                       entry existed; the file was wired
+        #                                       into the job and left with a zero
+        #                                       status having asserted nothing.)
         #   - uberscan.test.sh
         #   - uberscan-report.test.sh
         #   - uberscan-chunk.test.sh
@@ -382,6 +415,15 @@ jobs:
         # review-child-handoff and run-manifest use bounded native-Windows
         # modes for carrier/path serialization and captured publication retry;
         # their full Unix race fixtures remain in shape-checks above.
+        #
+        # simplify-standalone-flow.test.sh was DECLARED Unix-only while
+        # simplify.test.sh — wired here — ran it as a nested child on this
+        # runner and passed (#520). The skip-list is an SSOT, so the false half
+        # was the declaration, not the execution: the fixture is now wired
+        # top-level with the same MSYSTEM=MSYS entry environment the nested
+        # invocation already proved green, and the runtime refusal guard W9
+        # installs in every genuinely declared fixture makes the next such
+        # mismatch red instead of silent.
         run: |
           bash tests/ci-wiring.test.sh && \
           bash tests/run-manifest.test.sh --artifact-publication-only && \
@@ -411,6 +453,7 @@ jobs:
           bash tests/orchestrator-phase1-shortcircuit.test.sh && \
           bash tests/config-override.test.sh && \
           bash tests/solve-run-tree.test.sh && \
+          bash tests/solve-run-tree-scope.test.sh && \
           bash tests/orchestrator-phase-6-doc.test.sh && \
           bash tests/orchestrator-phase-0-bg-detection.test.sh && \
           bash tests/dev.test.sh && \
@@ -423,8 +466,8 @@ jobs:
           bash tests/review-child-handoff.test.sh --windows-path-only && \
           bash tests/dispatch-wezterm.test.sh && \
           bash tests/ubersimplify.test.sh && \
-          bash tests/ubersimplify-aggregate.test.sh && \
           bash tests/simplify.test.sh && \
+          MSYSTEM=MSYS bash tests/simplify-standalone-flow.test.sh && \
           bash tests/goal-state-sidecar.test.sh && \
           bash tests/goal-dispatch-helpers.test.sh && \
           bash tests/using-git-worktrees.test.sh && \
@@ -444,4 +487,5 @@ jobs:
           bash tests/goal-workflow.test.sh && \
           bash tests/uberthink-workflow.test.sh && \
           bash tests/epipe-guard.test.sh && \
-          bash tests/contract-markers.test.sh
+          bash tests/contract-markers.test.sh && \
+          bash tests/schema-property-reads.test.sh

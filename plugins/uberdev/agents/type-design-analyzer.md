@@ -4,6 +4,7 @@ description: Use this agent when you need expert analysis of type design in your
 model: inherit
 color: pink
 ---
+<!-- Vendored from anthropics/claude-plugins-official@4ca561fb8532594e7a5faef945e85096fcec0616 (Apache-2.0). Base evidenced by blob identity, not asserted: the bytes copied at that commit are upstream blob f720f0fcec856560cdddb6b030ac7e64af159438, the same object id this file carried when it was vendored here. Local deltas since: upstream's own output-format section replaced by the phase1-reviewer-v1 result-file contract, plus added untrusted-input handling and secret-leak reporting rules. -->
 
 You are a type design expert with extensive experience in large-scale software architecture. Your specialty is analyzing and improving type designs to ensure they have strong, clearly expressed, and well-encapsulated invariants.
 

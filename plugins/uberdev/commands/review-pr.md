@@ -2941,12 +2941,49 @@ print(value["authority_sha256"],end="")' "$PHASE2_AUTHORITY_RECEIPT" "$PHASE2_AU
     VERIFY_LEDGER="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.jsonl"
     VERIFY_OPINIONS_PATH="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-opinions-iter${REVIEW_ITERATION}.json"
     : >"$VERIFY_OPINIONS_PATH" || return 74
+    VERIFY_CAPTURED_PATH="$REVIEW_FLEET_RUN_DIR/review-fleet-verify-iter${REVIEW_ITERATION}.captured"
+    : >"$VERIFY_CAPTURED_PATH" || return 74
     VERIFY_ROW_INDEX=0
     while IFS= read -r VERIFY_ROW; do
       [ -n "$VERIFY_ROW" ] || continue
       VERIFY_ROW_INDEX=$((VERIFY_ROW_INDEX + 1))
       VERIFY_FINDING_INDEX="$(jq -r --argjson i "$VERIFY_ROW_INDEX" '.claims[$i - 1].finding_index' "$VERIFY_CLAIMS_RECEIPT_PATH")" || return 74
       VERIFY_RESULT_PATH="$(jq -r '.result' <<<"$VERIFY_ROW")" || return 74
+      # The edge and the binding come OFF THE ROW, never re-spelled here: the
+      # binder already wrote both into it, and a second copy of either string
+      # is the "one contract, N uncompared copies" class.
+      VERIFY_EDGE="$(jq -er .edge <<<"$VERIFY_ROW")" || return 74
+      VERIFY_BINDING="$(jq -er .binding <<<"$VERIFY_ROW")" || return 74
+      # Prove the child BEFORE reading its opinion. `capture-bound-child` binds
+      # on the nonce, freezes status.json and result.md and computes both
+      # digests itself, so a verifier that echoed a nonce this run never minted
+      # or published a torn half-written file is refused HERE rather than
+      # arriving as an unparseable opinion the validator blames on the child's
+      # formatting. Fail SOFT, unlike the Phase 2 lens loop above: a controller
+      # reason "MUST NOT carry a score, and always lands SURVIVES — the gate
+      # fails toward keeping the finding, so 'we could not verify' never culls"
+      # (lib/code_fixer_contract.py VERIFICATION_CONTROLLER_REASONS). One
+      # mis-published verifier must never abort a whole review.
+      if ! python3 -I -B "$CODE_FIXER_CONTRACT" capture-bound-child \
+           --edge-id "$VERIFY_EDGE" \
+           --launch-binding-json "$VERIFY_BINDING" >>"$VERIFY_CAPTURED_PATH"; then
+        # The opinion vocabulary is CLOSED, so "verifier-unavailable" is the
+        # only reason this arm may record — and it is the same string the
+        # validator failure below records. That conflates an INTEGRITY refusal
+        # (a nonce this run never minted, a torn result file) with a verifier
+        # whose opinion merely would not parse. The distinguishing signal
+        # therefore has to live in the log stream, naming the finding and the
+        # edge, exactly as the Phase 2 lens loop above does before it stops.
+        echo "warn: /uberdev:review-pr — finding ${VERIFY_FINDING_INDEX}: bound-evidence capture REFUSED for edge ${VERIFY_EDGE} (nonce or launch-binding rejected, or the child published a torn result); recording verifier-unavailable, which keeps the finding." >&2
+        # The separator is written on BOTH paths. capture-bound-child may have
+        # already appended a partial record before it failed, and skipping the
+        # separator here glues the next successful capture onto that fragment.
+        printf '\n' >>"$VERIFY_CAPTURED_PATH" || return 74
+        jq -cn --argjson i "$VERIFY_FINDING_INDEX" \
+          '{finding_index:$i, reason:"verifier-unavailable"}' >>"$VERIFY_OPINIONS_PATH" || return 74
+        continue
+      fi
+      printf '\n' >>"$VERIFY_CAPTURED_PATH" || return 74
       # A child that returned nothing usable NEVER culls. The validator is the
       # canonical boundary; its refusal is the honest answer, not a licence to
       # invent a score.
@@ -2984,6 +3021,14 @@ $(jq -r --arg pr "$PR_NUMBER" --arg run "$RUN_ID" --argjson t "$REVIEW_CONFIDENC
    "$VERIFY_SIDECAR_PATH")
 EOF_VERIFY_AUDIT
     ```
+
+    The per-verifier `binding` that `review_fleet_bind_verify`
+    (`lib/review-fleet-args.sh`) mints into every ledger row is consumed by the
+    loop above — it was minted and then ignored, so a verifier that echoed a
+    nonce this run never minted read exactly like one whose opinion did not
+    parse. That closes the loop the `branchName` paragraph above already
+    declared: the binding is what `_validate_bound_workflow_child_status`
+    compares the child's `status.json` against.
 
     `phase1-verification.json` is the artifact `findings-to-issues` binds as
     `verification_path` in Phase 2.5 below, and the `verification` sub-block of
@@ -3042,11 +3087,35 @@ EOF_VERIFY_AUDIT
     if [ -s "$RESEARCH_DIR_ABS/phase1-verification.json" ]; then
       DEFER_VERIFICATION_ARGS=(verification_path "$(review_json_string "$RESEARCH_DIR_ABS/phase1-verification.json")")
     fi
+    # Same declared-empty rule as the Workflow transport below, for the same
+    # reason: `optional_path` is the type both this edge's policy entry
+    # (policy/solve-run-tree-v1.json) and its callsite fixture give these two,
+    # `commands/simplify.md` already passes them empty on this very transport,
+    # and a zero-byte file behind a non-empty path is what the child refuses.
+    #
+    # EXISTENCE IS TESTED SEPARATELY FROM SIZE. `-s` alone collapses three states
+    # into one: a path variable that did not survive its fence, a file the
+    # controller never managed to create, and the legitimate zero-byte "no fixer
+    # ran" signal. Only the third is a record; the first two are a LOST record,
+    # and a lost record renders to the defer child as "that phase deferred
+    # everything", which re-files as fresh issues findings a fixer may in fact
+    # have applied. The emptiness still travels (the child's contract needs it),
+    # but the two situations are no longer indistinguishable.
+    if [ -z "${PHASE1_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE1_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 1 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    if [ -z "${PHASE2_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE2_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 2 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
+    [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
+    DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"
+    [ -s "$PHASE2_DISPOSITION_PATH" ] || DEFER_PHASE2_DISPOSITION_PATH=''
     DEFER_INPUTS="$(uberdev_child_inputs_build review_pr.defer.findings \
       phase1_path "$(review_json_string "$RESEARCH_DIR_ABS/post-impl-review-final.md")" \
       phase2_path "$(review_json_string "$RESEARCH_DIR_ABS/simplify-final.md")" \
-      phase1_disposition_path "$(review_json_string "$PHASE1_DISPOSITION_PATH")" \
-      phase2_disposition_path "$(review_json_string "$PHASE2_DISPOSITION_PATH")" \
+      phase1_disposition_path "$(review_json_string "$DEFER_PHASE1_DISPOSITION_PATH")" \
+      phase2_disposition_path "$(review_json_string "$DEFER_PHASE2_DISPOSITION_PATH")" \
       working_dir "$(review_json_string "$WORKTREE_ROOT")" \
       ${DEFER_VERIFICATION_ARGS[@]+"${DEFER_VERIFICATION_ARGS[@]}"} \
       pr_number "$PR_NUMBER")"
@@ -3101,6 +3170,33 @@ EOF_VERIFY_AUDIT
     DEFER_VERIFICATION_PATH=''
     [ -s "$REVIEW_FLEET_RUN_DIR/phase1-verification.json" ] \
       && DEFER_VERIFICATION_PATH="$REVIEW_FLEET_RUN_DIR/phase1-verification.json"
+    # A phase that dispatched no fixer published no disposition, and the file the
+    # controller created for one is still ZERO BYTES. That is not a disposition
+    # and must not be handed over as if it were: `agents/findings-to-issues.md`
+    # refuses a non-empty path at a zero-byte file as `input-malformed` (#556),
+    # because its Step 3 contract forbids falling back to DEFERRED for a path it
+    # was given but cannot parse. The SAME contract takes the empty string as the
+    # declared "no disposition" form and defaults that phase's rows to DEFERRED.
+    # So the emptiness travels as the empty string, which is the difference
+    # between a phase that deferred everything and a run that lost its record.
+    # This is reached on every clean review: Phase 1 APPROVE with no blocker
+    # dispatches no fixer at all.
+    #
+    # EXISTENCE IS TESTED SEPARATELY FROM SIZE, exactly as on the routed
+    # transport above: a zero-byte file is the no-fixer-ran signal, while an
+    # empty path variable or a file that is not there at all is a LOST record
+    # wearing the same clothes. Both still travel as the empty string, and the
+    # loss is named rather than passing silently.
+    if [ -z "${PHASE1_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE1_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 1 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    if [ -z "${PHASE2_DISPOSITION_PATH:-}" ] || [ ! -e "$PHASE2_DISPOSITION_PATH" ]; then
+      echo "review-pr: WARNING — the Phase 2 disposition record is LOST (its path is empty or names no file); the defer child is being told no fixer ran, which is a different fact" >&2
+    fi
+    DEFER_PHASE1_DISPOSITION_PATH="$PHASE1_DISPOSITION_PATH"
+    [ -s "$PHASE1_DISPOSITION_PATH" ] || DEFER_PHASE1_DISPOSITION_PATH=''
+    DEFER_PHASE2_DISPOSITION_PATH="$PHASE2_DISPOSITION_PATH"
+    [ -s "$PHASE2_DISPOSITION_PATH" ] || DEFER_PHASE2_DISPOSITION_PATH=''
     REVIEW_FLEET_DEFER_SIDECAR="$REVIEW_FLEET_RUN_DIR/review-fleet-defer-iter${REVIEW_ITERATION}.launch.json"
     review_fleet_bind_persistence "$REVIEW_FLEET_RUN_DIR" "$REVIEW_ITERATION" \
       "$REVIEW_FLEET_WORKTREE" "$CODE_FIXER_CONTRACT" \
@@ -3121,8 +3217,8 @@ EOF_VERIFY_AUDIT
       reviewIteration="$REVIEW_ITERATION" \
       phase1PathAbs="$DEFER_PHASE1_PATH" \
       phase2PathAbs="$DEFER_PHASE2_PATH" \
-      phase1DispositionPathAbs="$PHASE1_DISPOSITION_PATH" \
-      phase2DispositionPathAbs="$PHASE2_DISPOSITION_PATH" \
+      phase1DispositionPathAbs="$DEFER_PHASE1_DISPOSITION_PATH" \
+      phase2DispositionPathAbs="$DEFER_PHASE2_DISPOSITION_PATH" \
       verificationPathAbs="$DEFER_VERIFICATION_PATH" \
       maxNew="$DEFER_MAX_NEW" \
       maxAgents=40 \

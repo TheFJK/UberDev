@@ -8,13 +8,19 @@
       "repo": "obra/superpowers",
       "distributed_as": "anthropics/claude-plugins-official#superpowers",
       "license": "MIT",
-      "license_file": "licenses/superpowers-MIT.txt"
+      "license_file": "licenses/superpowers-MIT.txt",
+      "last_reviewed_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
+      "last_reviewed_release": "v6.3.0"
     },
     "pr-review-toolkit": {
       "repo": "anthropics/claude-plugins-official",
       "plugin": "pr-review-toolkit",
       "license": "Apache-2.0",
-      "license_file": "licenses/pr-review-toolkit-Apache-2.0.txt"
+      "license_file": "licenses/pr-review-toolkit-Apache-2.0.txt",
+      "last_reviewed_commit": "920824c3e9509890fbec03ba6097014222393022",
+      "last_reviewed_on": "2026-08-10",
+      "note": "No last_reviewed_release: this upstream is a plugin inside a monorepo with no release vocabulary, so there is no tag to name. A release label invented for it would be the fabrication this register exists to prevent."
     },
     "code-simplifier": {
       "repo": "anthropics/claude-plugins-official",
@@ -29,7 +35,7 @@
       "id": "namespace-rebrand",
       "kind": "namespace-rewrite",
       "scope": "all third-party components",
-      "note": "Every vendored skill and agent rewrites the 'superpowers:' skill namespace to 'uberdev:'. UberDev ships standalone under its own plugin id, so this can never be reconciled with upstream.",
+      "note": "Every vendored skill and agent rewrites the 'superpowers:' skill namespace to 'uberdev:'. The same rewrite covers the brand token wherever it names a location UberDev owns rather than a namespace \u2014 measured instance (#503): the global worktree location in skills/using-git-worktrees, '~/.config/superpowers/worktrees' -> '~/.config/uberdev/worktrees'. UberDev ships standalone under its own plugin id, so this can never be reconciled with upstream. A component whose bytes carry no brand token does not reference this divergence: the reference is a claim about the bytes, and an unwitnessed one is drift wearing a declaration's clothes (#462 found the first, #503 the next two).",
       "permanent": true
     },
     {
@@ -45,7 +51,7 @@
       "kind": "local-addition",
       "scope": "skills/systematic-debugging",
       "file": "find-polluter.sh",
-      "note": "Three local additions to find-polluter.sh (#430, #476), all recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, (2) local array-based enumeration that is whitespace- and glob-safe, and (3) a pre-loop runner-capability probe (npm pkg get scripts.test) that refuses with [runner-incapable] (exit 2) when the project defines no test script npm could run — without it every 'npm test <file>' fails identically, which upstream counts as a test that ran and failed, and the run reaches a clean verdict having executed nothing (#476). Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply ALL THREE; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals, F16 the capability probe — with F17 as the counter-case that stops an over-broad re-application that refuses on any non-zero runner status). Kept forever.",
+      "note": "Three local additions to find-polluter.sh (#430, #476), all recorded in the file's own provenance header: (1) fail-loud exit-2 refusals wherever the run cannot back a verdict, (2) local array-based enumeration that is whitespace- and glob-safe, and (3) a pre-loop runner-capability probe (npm pkg get scripts.test) that refuses with [runner-incapable] (exit 2) when the project defines no test script npm could run \u2014 without it every 'npm test <file>' fails identically, which upstream counts as a test that ran and failed, and the run reaches a clean verdict having executed nothing (#476). Upstream returns a green 0 in every refusal shape and its own tests/systematic-debugging/test-find-polluter.sh asserts that green, so a re-sync collides head-on. Re-apply ALL THREE; tests/find-polluter.test.sh locks them (F12 covers the array-based enumeration, F5/F11/F13 the refusals, F16 the capability probe \u2014 with F17 as the counter-case that stops an over-broad re-application that refuses on any non-zero runner status). Kept forever.",
       "permanent": true
     },
     {
@@ -77,7 +83,63 @@
       "kind": "policy-divergence",
       "scope": "skills/finish-branch",
       "file": "SKILL.md",
-      "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' — the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
+      "note": "Upstream 6.2.0 stopped offering to discard UNCOMMITTED WORK. UberDev Option 4 is a different thing: it deletes a BRANCH AND ITS COMMITS behind a typed 'discard' confirmation, and it is reachable only under --interactive (the default and turbo paths both auto-select Option 2). Verified by grep at adjudication time (#460): finish-branch/SKILL.md contains no 'git status --porcelain' and no 'stash' \u2014 the flow never inspects uncommitted work at all, so treating the two as the same defect is a category error. Adopting upstream's removal here would delete a deliberate, confirmed, opt-in capability. Declined, permanently.",
+      "permanent": true
+    },
+    {
+      "id": "receiving-review-parallel-triage",
+      "kind": "local-addition",
+      "scope": "skills/receiving-code-review",
+      "file": "SKILL.md",
+      "note": "The local 'Multi-Reviewer Parallel Triage' section, appended after upstream's GitHub-thread-reply paragraph. It is the same parallel-by-default policy review-pr-parallel-by-default records for skills/requesting-code-review, applied to feedback triage: one Task triage agent per reviewer dispatched in a single message, a fixed Critical/Important/Minor/Refute/Need-clarification output shape, de-duplication across reviewers, and three named skip conditions. It names UberDev's own reviewer agents (code-reviewer, silent-failure-hunter), so upstream has no equivalent to reconcile with. Measured against the base at #503: this section is the component's ENTIRE residual \u2014 the file carries no 'superpowers:' token, so no namespace rebrand applies to it. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "verification-parallel-dispatch",
+      "kind": "local-addition",
+      "scope": "skills/verification-before-completion",
+      "file": "SKILL.md",
+      "note": "The local 'Parallel Verification Dispatch' section, appended before 'The Bottom Line'. It applies UberDev's parallel-by-default policy to verification \u2014 two patterns chosen by tool budget (parallel Bash calls in one message; Task fanout when the output is large) \u2014 and restates the Iron Law so every parallel arm still needs fresh evidence in the current turn. Measured against the base at #503: this section is the component's ENTIRE residual \u2014 the file carries no 'superpowers:' token, so no namespace rebrand applies to it. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "plan-execution-wave-contract",
+      "kind": "policy-divergence",
+      "scope": "skills/write-plan and skills/execute-plan",
+      "file": "SKILL.md",
+      "note": "The wave-parallel plan contract UberDev owns on both sides. write-plan emits it: a MANDATORY '## Wave Decomposition' pass with the four wave-assignment rules, the per-task 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' headers, a required '## Execution Waves' plan-level summary, a wave-correctness review pass, and a non-interactive Execution Handoff that defaults to uberdev:subagent-driven-dev and forwards --turbo. execute-plan consumes it: Step 2 walks the waves in order and gates the next wave on the project's full test command. uberdev:subagent-driven-dev parses that same format to decide its dispatch pattern, so upstream's copies of skills/writing-plans and skills/executing-plans are not drop-in in either direction \u2014 re-baselining either one alone would break the interlock. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "plan-reviewer-inline-no-dispatch",
+      "kind": "policy-divergence",
+      "scope": "skills/write-plan",
+      "file": "plan-document-reviewer-prompt.md",
+      "note": "Upstream's plan-document-reviewer-prompt.md is a dispatch template \u2014 'Task tool (general-purpose): description / prompt'. UberDev's copy is an INLINE self-review checklist that states it is not a provider edge and must not create a child, because the plan writer runs as a leaf under uberdev:orchestrator, where a nested dispatch has no runtime. It also carries the shared-skeleton header that keeps it in sync by hand with skills/brainstorm/spec-document-reviewer-prompt.md. Adopting upstream's version would re-introduce a spawn from a leaf. Kept forever.",
+      "permanent": true
+    },
+    {
+      "id": "sdd-parallel-implementer-waves",
+      "kind": "policy-divergence",
+      "scope": "skills/subagent-driven-dev",
+      "file": "SKILL.md",
+      "note": "Upstream's subagent-driven-development/SKILL.md states an explicit prohibition: never dispatch multiple implementation subagents in parallel, because they conflict. UberDev's fork inverts it, and does so as its stated core principle \u2014 implementers within one wave dispatch in parallel into a single shared feature-branch worktree, over a strictly disjoint per-task file partition, with the controller as the only process that runs git. Adjudicated DELIBERATE in #509, not drift. What makes the inversion safe is a produced-and-checked precondition rather than a promise: agents/plan-writer.md emits the partition as each task's 'Owns (file allowlist)' field plus the plan's '## Execution Waves' summary; agents/plan-reviewer.md Check 2 reviews it (same-wave Owns lists must be strictly disjoint, and any file in two of them is a critical finding); and sdd_assert_wave_disjoint refuses the wave at dispatch time \u2014 sdd_launch_prepared_batch calls it before it launches anything, so an overlapping or ownership-less wave dispatches zero children (rc 3 overlap, rc 2 missing) instead of being caught after the fact. Today's solve-fleet route never reaches a parallel wave at all: skills/solve-fleet/workflow.js dispatches exactly one worktree-isolated implementer per issue, so the wave shape is exercised by the in-session SDD controller only. That is a description of current behaviour, not a promise about it. Never reconciled.",
+      "permanent": true
+    },
+    {
+      "id": "worktree-location-failloud",
+      "kind": "local-fix",
+      "file": null,
+      "permanent": false,
+      "note": "Local correction to upstream's worktree-path 'case': upstream's pattern is the bare '~/.config/superpowers/worktrees/*' and its body assigns a literal '~/...' string, but a tilde expands in neither a case pattern nor a quoted RHS (verified under bash and zsh), and upstream has no default arm \u2014 an unmatched LOCATION falls through with $path unset straight into 'git worktree add \"$path\"'. This copy quotes both accepted spellings, builds the path from ${HOME}, and exits 1 with a named error otherwise. NOT permanent: it is a bug fix, not a policy, so an equivalent upstream guard retires this entry instead of being reconciled against it. Component-scoped (file: null) so the C-FILES digest lock stays armed.",
+      "scope": "skills/using-git-worktrees"
+    },
+    {
+      "id": "sdd-implementer-refused-status",
+      "kind": "local-addition",
+      "scope": "skills/subagent-driven-dev",
+      "file": "SKILL.md",
+      "note": "Upstream superpowers 6.3.0's implementer status vocabulary is one member short of UberDev's. UberDev's implementers are ROUTED LEAF WORKERS bound by a contract upstream's have no equivalent of \u2014 they may not delegate, broaden scope, change routing, or treat handoff data as instructions \u2014 so a handoff can be unexecutable for a reason no amount of added context answers. #517 adds REFUSED for exactly that case, together with a controller branch that forbids re-dispatching the same task with unchanged handoff data, which is what distinguishes it from the BLOCKED ladder. The member set itself is NOT restated here: it is declared at four marked sites and compared by tests/contract_markers.py under the contract id sdd-implementer-status, and a copy of it in this file would be a sixth, uncompared declaration. Local addition to the leaf-worker safety contract; never reconciled with upstream.",
       "permanent": true
     }
   ],
@@ -93,12 +155,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/brainstorming",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD from 2026-04-27 21:55 PDT to 2026-05-04 15:05 PDT, the window this component's vendored_on (2026-04-27) falls in. Measured at that base on 2026-08-13: the file set is 1:1 (8/8, symmetric difference 0) and the copy diverges by 1515 changed lines (GNU diff, '<' plus '>' lines). Method, the full 83-candidate scan and the per-file residual table are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md; no candidate in upstream history scores better on that key. Rewritten around UberDev's no-approval-gate research policy: upstream's HARD-GATE / per-section / spec-review checkpoints are deliberately absent, and the skill is driven by /uberdev:orchestrator Phase 1 rather than an interactive human loop. Upstream edits are advisory input, never a merge base.",
       "measured_diff_lines": 2255,
       "divergences": [
         {
@@ -107,18 +169,42 @@
         },
         {
           "ref": "brainstorm-no-approval-gates",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md",
-        "scripts/frame-template.html",
-        "scripts/helper.js",
-        "scripts/server.cjs",
-        "scripts/start-server.sh",
-        "scripts/stop-server.sh",
-        "spec-document-reviewer-prompt.md",
-        "visual-companion.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "b703109bb44930566ee92efb259cdf4437160e5e8b352893b28551804782d7a4"
+        },
+        {
+          "path": "scripts/frame-template.html",
+          "sha256": "a611506a65e704449769ed07cd75fdb24196f08070ee76d179cac8c25a5a36c0"
+        },
+        {
+          "path": "scripts/helper.js",
+          "sha256": "990aa492b42fdbe9217e882cdf46a365f4dcd63c0d200357e4398de458176ce7"
+        },
+        {
+          "path": "scripts/server.cjs",
+          "sha256": "c8c5ea7abf9732c90a4595dfd99c9f10bb4a868ab1d1c4928ed635ca2d0eb480"
+        },
+        {
+          "path": "scripts/start-server.sh",
+          "sha256": "b12b9ddc5c915c5c0ba621fc158de8348cc374a1b7e7b7c0c98fb2ac203ccd0f"
+        },
+        {
+          "path": "scripts/stop-server.sh",
+          "sha256": "5ca419ce37194e3ec91a5e9f020a12c3ac120028b412e39be616a49ca937d34d"
+        },
+        {
+          "path": "spec-document-reviewer-prompt.md",
+          "sha256": "396268c6c8bff383b2a97d1df8d0dab34647c34f6908c59155c73bf378bfa5c4"
+        },
+        {
+          "path": "visual-companion.md",
+          "sha256": "0cf263c2a72a922d69ccfb633d3947f6a09d6612c8b5b4648639c21ca90a98c7"
+        }
       ]
     },
     {
@@ -139,17 +225,12 @@
       "upstream_path": "skills/dispatching-parallel-agents",
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "track",
       "stance_reason": "File set is 1:1 with upstream and SKILL.md is byte-identical to the recorded base e7a2d16 apart from the provenance header line this repo adds; there is no other local delta, and the file carries no 'superpowers:' token to rebrand. The 33 measured lines are upstream's own v6.2.0 prose compression (dispatch example rewritten, 'Key Benefits' and 'Real-World Impact' sections dropped), un-adopted here. Re-baseline from upstream.",
       "measured_diff_lines": 33,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "divergences": [],
       "files": [
         {
           "path": "SKILL.md",
@@ -163,23 +244,27 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/executing-plans",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 and the prose contract is upstream's. Re-baseline from upstream.",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/executing-plans, and the residual against that blob is 42 lines: the directory rename, the namespace rebrand (superpowers:subagent-driven-development -> uberdev:subagent-driven-dev, superpowers:finishing-a-development-branch -> uberdev:finish-branch), and one behavioural rewrite \u2014 Step 2 replaces upstream's flat task list with wave-ordered execution driven by the plan's '## Execution Waves' summary, gated on the project's full test command between waves, plus an inline TDD-discipline paragraph and an Integration section that names the worktree setup instead of deferring to superpowers:using-git-worktrees. Re-adjudicated track -> fork: that wave contract is the half of a two-sided interlock skills/write-plan emits and uberdev:subagent-driven-dev parses, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
       "measured_diff_lines": 50,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "plan-execution-wave-contract",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "4d8f9f3a743cf09df9da4313315e7535ef6e2e5f869ff2cbcdf83cd5b55f61bd"
+          "sha256": "710bb05acbcb350298c08b80b73438a75912b163ed1ed45eb5f55cf6a4436fc1"
         }
       ]
     },
@@ -189,12 +274,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/finishing-a-development-branch",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (1/1, symmetric difference 0) and the copy diverges by 949 changed lines (GNU diff, '<' plus '>' lines); method and the 12-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. A heavily-modified descendant: the local copy owns the pre-push secret-scan gate, the auto-chain into /uberdev:review-pr, and the no-Co-Authored-By PR rule. Upstream's version is not drop-in.",
       "measured_diff_lines": 734,
       "divergences": [
         {
@@ -203,15 +288,18 @@
         },
         {
           "ref": "no-co-authored-by",
-          "file": "SKILL.md"
+          "file": null
         },
         {
           "ref": "interactive-discard-option",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "a903693b245f818bf169eb2bd6c6ea8102beb8dc75a0925ee5c7516ea2b2e964"
+        }
       ]
     },
     {
@@ -240,23 +328,23 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/receiving-code-review",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "File set is 1:1 with upstream and the local delta is the namespace rebrand. Re-baseline from upstream.",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/receiving-code-review, and the residual against that blob is 29 lines in a single hunk: the appended local 'Multi-Reviewer Parallel Triage' section. Re-adjudicated track -> fork. The previous reason claimed 'the local delta is the namespace rebrand'; measured, the file contains no 'superpowers:' token and no rebrand at all, so that sentence was false in the same way #462 found it false for skills/dispatching-parallel-agents. What it does carry is a permanent local policy section (RFC 0019 \u00a74.1 trigger 2), so upstream's copy is not drop-in and 'track' \u2014 which promises a digest-locked re-baseline \u2014 would be a claim with nothing behind it. The digest lock is NOT lost by the flip: #503 ties it to the recorded base rather than to the stance (\u00a72.3 as amended).",
       "measured_diff_lines": 41,
       "divergences": [
         {
-          "ref": "namespace-rebrand",
+          "ref": "receiving-review-parallel-triage",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "81af370dde94cf6e3cf32d9a4cff28d464c83c5479a999115d57399b9854197f"
+          "sha256": "132e47b87fccee8e0bb69aca00b7411c01ab9d3dec33420b0d961f749789d1da"
         }
       ]
     },
@@ -266,12 +354,12 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/requesting-code-review",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (2/2, symmetric difference 0) and the copy diverges by only 18 changed lines (GNU diff, '<' plus '>' lines); method and the 14-candidate scan are in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. Carries UberDev's parallel-by-default review fanout, a permanent divergence from upstream's sequential default, so upstream's copy is not drop-in.",
       "measured_diff_lines": 228,
       "divergences": [
         {
@@ -280,12 +368,18 @@
         },
         {
           "ref": "review-pr-parallel-by-default",
-          "file": "SKILL.md"
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md",
-        "code-reviewer.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "3a19c51592c76015c32fdfb9427087471790451a57a70e3b0c6167deb6da9689"
+        },
+        {
+          "path": "code-reviewer.md",
+          "sha256": "1ceab0340aa30391f9d1da87cb7aadc760ac9161c17fcffef6819f4f878d469c"
+        }
       ]
     },
     {
@@ -314,24 +408,44 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/subagent-driven-development",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "File sets diverge: UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md; upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: the file set is 1:1 (4/4, symmetric difference 0 \u2014 upstream shipped code-quality-reviewer-prompt.md and spec-reviewer-prompt.md at the base) and the copy diverges by 964 changed lines (GNU diff, '<' plus '>' lines). Two later commits score one line better (f2cbfbef 2026-05-04, d7f47d35 2026-05-05) and are excluded because they postdate vendored_on, not because they scored worse; the 62-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md. The file-set divergence below is measured against the WATERMARK 3dcbd5c4 (v6.2.0), not the base: at the watermark UberDev ships spec-reviewer-prompt.md and code-quality-reviewer-prompt.md while upstream ships re-review-prompt.md, task-reviewer-prompt.md and scripts/. The routed SDD lifecycle is UberDev-owned. It also carries the permanent wave-parallel implementer divergence (sdd-parallel-implementer-waves), which inverts an explicit upstream prohibition \u2014 see RFC 0019 \u00a76.",
       "measured_diff_lines": 1064,
       "divergences": [
         {
           "ref": "namespace-rebrand",
           "file": null
+        },
+        {
+          "ref": "sdd-parallel-implementer-waves",
+          "file": null
+        },
+        {
+          "ref": "sdd-implementer-refused-status",
+          "file": null
         }
       ],
       "files": [
-        "SKILL.md",
-        "code-quality-reviewer-prompt.md",
-        "implementer-prompt.md",
-        "spec-reviewer-prompt.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "7ad6f097ca83359fa8234b5868c5d4dc3dba7537d8572ac7bb0f5f2fa955d456"
+        },
+        {
+          "path": "code-quality-reviewer-prompt.md",
+          "sha256": "b7d9d7c27febecd5f128604b8899965e83888eeab10669c1de689454f61243bf"
+        },
+        {
+          "path": "implementer-prompt.md",
+          "sha256": "eebde45d10b534714454c3a9a0ff5e38c6edb097e6c7a576e6a424d066047813"
+        },
+        {
+          "path": "spec-reviewer-prompt.md",
+          "sha256": "e2ad55e27768c7a27193519901172572b90e6096c3ea17f4eda176c4fbd917f1"
+        }
       ]
     },
     {
@@ -342,8 +456,8 @@
       "upstream_path": "skills/systematic-debugging",
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
       "stance_reason": "Carries the permanent local 'Parallel hypothesis testing' section recorded in its own in-file provenance header, so upstream's SKILL.md is not drop-in. Upstream fixes to the sibling scripts are still adopted deliberately (see #430).",
       "measured_diff_lines": 195,
@@ -354,25 +468,58 @@
         },
         {
           "ref": "parallel-hypothesis-testing",
-          "file": "SKILL.md"
+          "file": null
         },
         {
           "ref": "find-polluter-fail-loud",
-          "file": "find-polluter.sh"
+          "file": null
         }
       ],
       "files": [
-        "CREATION-LOG.md",
-        "SKILL.md",
-        "condition-based-waiting-example.ts",
-        "condition-based-waiting.md",
-        "defense-in-depth.md",
-        "find-polluter.sh",
-        "root-cause-tracing.md",
-        "test-academic.md",
-        "test-pressure-1.md",
-        "test-pressure-2.md",
-        "test-pressure-3.md"
+        {
+          "path": "CREATION-LOG.md",
+          "sha256": "223e7f9c301b6957b268588c3189d2ba66a7a93617b82922884906fd23aa0f83"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "69e848543a1fe5282488c897835f69a501ddceb0fe839014320a920c8c442783"
+        },
+        {
+          "path": "condition-based-waiting-example.ts",
+          "sha256": "4f1294dfc452147ad2403cb344cbfeb46bd17532460849a91823ef9569c25f81"
+        },
+        {
+          "path": "condition-based-waiting.md",
+          "sha256": "75af4e1bdefafe8b2e050265b193d9b242ddf2540c69ed0e1164ad6e92e54a93"
+        },
+        {
+          "path": "defense-in-depth.md",
+          "sha256": "2196056e167b9328db9af37d22ce16f5faae2e41003efb7e3a4ed486f721b6d3"
+        },
+        {
+          "path": "find-polluter.sh",
+          "sha256": "3e7da92624e7400ab498c8807bd0c6fa21f7e6f8b69f6abd20d0c9e9da0ce785"
+        },
+        {
+          "path": "root-cause-tracing.md",
+          "sha256": "3d43eefe8bb346e536e0905a5949b7f0613fa17bd2ae96582465814bdeae2159"
+        },
+        {
+          "path": "test-academic.md",
+          "sha256": "c201d5baf4779fa5738587ddf554fd42613b6b92c02122ce19850ae5b484c56f"
+        },
+        {
+          "path": "test-pressure-1.md",
+          "sha256": "ebf18c85651df597ec34825230cb1d090e3d796b11f053d16601c797b2dc0e02"
+        },
+        {
+          "path": "test-pressure-2.md",
+          "sha256": "f55748273ea4e24927246ec280e50a25300aeac4f1b40221ab25b9add432a610"
+        },
+        {
+          "path": "test-pressure-3.md",
+          "sha256": "e2596cde3005d0991363d408c3fc591cb8abaca4dc1929db6c7bfa0da16351d1"
+        }
       ]
     },
     {
@@ -383,10 +530,10 @@
       "upstream_path": "skills/test-driven-development",
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-12",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "File sets are now 1:1 with upstream v6.2.0, but the tree is a composite of two upstream revisions: SKILL.md is still at e7a2d16 (upstream's own v6.2.0 prose compression of \"Why Order Matters\" and the rationalisations table is un-adopted), while writing-good-tests.md was adopted whole from 3dcbd5c (v6.2.0) under #457. No single upstream commit is drop-in, so track — which promises a digest-locked re-baseline — would be a false claim. Reclassify to track when #462 genuinely re-baselines the component.",
+      "stance_reason": "File sets are now 1:1 with upstream v6.2.0, but the tree is a composite of two upstream revisions: SKILL.md is still at e7a2d16 (upstream's own v6.2.0 prose compression of \"Why Order Matters\" and the rationalisations table is un-adopted), while writing-good-tests.md was adopted whole from 3dcbd5c (v6.2.0) under #457. No single upstream commit is drop-in, so track \u2014 which promises a digest-locked re-baseline \u2014 would be a false claim. Reclassify to track when #462 genuinely re-baselines the component.",
       "measured_diff_lines": 64,
       "divergences": [
         {
@@ -395,8 +542,14 @@
         }
       ],
       "files": [
-        "SKILL.md",
-        "writing-good-tests.md"
+        {
+          "path": "SKILL.md",
+          "sha256": "9f350777619d8f189c257bdf932afc3505e6e554d37ac4277389e57ef12f29fb"
+        },
+        {
+          "path": "writing-good-tests.md",
+          "sha256": "9cd5a5428209f3554f2a666120839964f00714d35208fe09aa0e3d9849871a3a"
+        }
       ]
     },
     {
@@ -425,23 +578,27 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/using-git-worktrees",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "track",
-      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand plus UberDev path examples. Re-baseline from upstream.",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/using-git-worktrees, and the residual against that blob is 17 lines in exactly two hunks: the brand rewrite of the global worktree location ('~/.config/superpowers/worktrees' -> '~/.config/uberdev/worktrees'), and a local fix to the path-resolution 'case' in the creation snippet \u2014 quoted patterns built from ${HOME}, because a tilde expands in neither a case pattern nor a quoted RHS, plus a fail-loud '*)' arm so an unrecognised LOCATION exits 1 instead of reaching 'git worktree add' with $path unset. Nothing else differs. Stays track after re-adjudication: RFC 0019 \u00a74.1's fork trigger needs a PERMANENT local divergence or a rewritten behavioural contract, and this is neither \u2014 the snippet fix is a bounded correction inside a code example that upstream adopting an equivalent guard would retire, so re-baselining stays the plan and the digest lock stays armed. Recorded as divergences[].worktree-location-failloud with permanent: false.",
       "measured_diff_lines": 206,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "worktree-location-failloud",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ba5dc3433cb80442f6630539b685c93e89441e47f93a894016fc386c6b26e2ad"
+          "sha256": "9f7465ef852dc617efe599de2bbcf24cbb07a9a40b5c8dca40de5f804ac2f960"
         }
       ]
     },
@@ -451,39 +608,13 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/using-superpowers",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "fork",
-      "stance_reason": "This is UberDev's own plugin primer (injected by the session-start hook) and its reference set diverges from upstream's: UberDev ships references/configuration.md and references/copilot-tools.md, upstream ships antigravity-tools.md, codex-tools.md and pi-tools.md.",
+      "stance_reason": "Base e7a2d16 \u2014 upstream main's HEAD across the 2026-04-27\u21922026-05-04 vendoring window. Measured at that base on 2026-08-13: upstream ships references/codex-tools.md, references/copilot-tools.md and references/gemini-tools.md, so the BASE-relative divergence is exactly two files (ours-only references/configuration.md, upstream-only references/codex-tools.md) over 16 changed lines across the three shared files (GNU diff, '<' plus '>' lines); the 35-candidate scan is in docs/uberdev/audits/2026-08-13-superpowers-fork-base-reconciliation.md, where no candidate scores better. references/copilot-tools.md exists at the base and was deleted upstream by the watermark, so the local copy is a base-era file rather than a local invention; references/configuration.md is absent upstream at the base, which is why the in-file witness for this pin sits on SKILL.md and never there. Measured against the WATERMARK 3dcbd5c4 (v6.2.0) instead, upstream's reference set is antigravity-tools.md, codex-tools.md, gemini-tools.md and pi-tools.md. This is UberDev's own plugin primer, injected by the session-start hook.",
       "measured_diff_lines": 174,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
-      "files": [
-        "SKILL.md",
-        "references/configuration.md",
-        "references/copilot-tools.md",
-        "references/gemini-tools.md"
-      ]
-    },
-    {
-      "id": "skills/verification-before-completion",
-      "path": "skills/verification-before-completion",
-      "origin": "third-party",
-      "upstream": "superpowers",
-      "upstream_path": "skills/verification-before-completion",
-      "vendored_at_commit": "unknown",
-      "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Single file, 1:1 with upstream; the delta is the namespace rebrand. Re-baseline from upstream.",
-      "measured_diff_lines": 49,
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -493,7 +624,45 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "f083a7fb923f1df7327314395159e3abdffd6aa467f1d06e13c9feabbb0b0976"
+          "sha256": "b08c3f7d2d4b0e5e94315007b33fbf2088f018ef9beb5763f0ec5eb610730e52"
+        },
+        {
+          "path": "references/configuration.md",
+          "sha256": "5bb94642fe63553f066d365684516562e90d9000838ef2baf4afc461fd6448f4"
+        },
+        {
+          "path": "references/copilot-tools.md",
+          "sha256": "a863e486e855bc43507fafa71fb275036f15c8a5c9a99ed0dda0e8c0275b9980"
+        },
+        {
+          "path": "references/gemini-tools.md",
+          "sha256": "88901469456f4137374ac468b65482b6fccbdd54ae54710bbb82e21ecfa01e7e"
+        }
+      ]
+    },
+    {
+      "id": "skills/verification-before-completion",
+      "path": "skills/verification-before-completion",
+      "origin": "third-party",
+      "upstream": "superpowers",
+      "upstream_path": "skills/verification-before-completion",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "vendored_on": "2026-04-28",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/verification-before-completion, and the residual against that blob is 30 lines in a single hunk: the appended local 'Parallel Verification Dispatch' section. Re-adjudicated track -> fork, for the same measured reason as skills/receiving-code-review \u2014 the old 'the delta is the namespace rebrand' sentence is false (the file carries no 'superpowers:' token), and what it actually carries is a permanent local policy section (RFC 0019 \u00a74.1 trigger 2) that upstream cannot supply. The digest lock survives the flip: #503 ties it to the recorded base rather than to the stance (\u00a72.3 as amended).",
+      "measured_diff_lines": 49,
+      "divergences": [
+        {
+          "ref": "verification-parallel-dispatch",
+          "file": null
+        }
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "fe492b6bb536cf70460b7625118c84200468e396482c126292c447815549bc76"
         }
       ]
     },
@@ -503,27 +672,35 @@
       "origin": "third-party",
       "upstream": "superpowers",
       "upstream_path": "skills/writing-plans",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-27",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
-      "stance": "track",
-      "stance_reason": "Directory rename plus the namespace rebrand; file set is 1:1 with upstream. Re-baseline from upstream.",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
+      "stance": "fork",
+      "stance_reason": "Pinned at e7a2d16 (#503). File set is 1:1 with upstream skills/writing-plans, and the residual against that blob is 99 lines across both files. SKILL.md (84): the directory rename, the namespace rebrand, the plan-location change to docs/uberdev/plans/, and the plan FORMAT this repo owns \u2014 a MANDATORY '## Wave Decomposition' pass, the 'Depends on:' / 'Wave:' / 'Owns (file allowlist):' task headers, a required '## Execution Waves' summary, a fourth wave-correctness review item, an opt-in alternative-decomposition comparison, and an Execution Handoff rewritten from an interactive two-option prompt into a non-interactive default that hands off to uberdev:subagent-driven-dev and forwards --turbo. plan-document-reviewer-prompt.md (15): the shared-skeleton header plus the rewrite from a Task-dispatch template into an inline self-review checklist that must not create a child. Re-adjudicated track -> fork: uberdev:subagent-driven-dev parses that format, so upstream's copy is not drop-in (RFC 0019 \u00a74.1 trigger 2). The digest lock survives the flip: #503 ties it to the recorded base (\u00a72.3 as amended).",
       "measured_diff_lines": 123,
       "divergences": [
         {
           "ref": "namespace-rebrand",
+          "file": null
+        },
+        {
+          "ref": "plan-execution-wave-contract",
+          "file": null
+        },
+        {
+          "ref": "plan-reviewer-inline-no-dispatch",
           "file": null
         }
       ],
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c23e3c737fab01b539ba0dac20135a85f0c812753927dd4e9095cc88f242906f"
+          "sha256": "656ab28e75c1242bfab6e1931a38a7e95d265e53ed739b5f3a4b0abe5731b80d"
         },
         {
           "path": "plan-document-reviewer-prompt.md",
-          "sha256": "88c75e36c2d451b7ded3a0506fba589d0767977a3eeee9d6e4b294f2be2e6227"
+          "sha256": "b73b5d9993953cc9291798b2ad49a4899a6c8688027b48d07435ee2d6bdcfbb9"
         }
       ]
     },
@@ -535,8 +712,8 @@
       "upstream_path": "skills/writing-skills",
       "vendored_at_commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
       "vendored_on": "2026-04-28",
-      "last_reviewed_upstream_commit": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
-      "last_reviewed_on": "2026-08-10",
+      "last_reviewed_upstream_commit": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "last_reviewed_on": "2026-08-13",
       "stance": "track",
       "stance_reason": "File set is 1:1 with upstream. The 6.2.0 delta is upstream's own prose compression, which UberDev wants for the session-hook token budget. Re-baseline from upstream.",
       "measured_diff_lines": 367,
@@ -603,36 +780,50 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/code-reviewer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "code-reviewer.md": "462f2e01b89e6339994c071c765dcb4dd380c869"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 57,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "stance_reason": "The frontmatter differs by exactly two lines, both of them `model: opus` -> `model: inherit` (RFC 0019 \u00a74.2); the `description` dispatch contract inside it is byte-identical to upstream at the recovered base. The BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in. The 0-100 confidence anchors are also extracted into `shared/finding-confidence-rubric-v1.md`.",
+      "measured_diff_lines": 81,
+      "measured_diff_basis": "diff of upstream blob 462f2e01b89e6339994c071c765dcb4dd380c869 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "divergences": [],
       "files": [
-        "code-reviewer.md"
+        {
+          "path": "code-reviewer.md",
+          "sha256": "ad1fe6f0b90dff13041f423ca154fffbfeeb08c172444f954d32ccbd55dbb09d"
+        }
       ]
     },
     {
       "id": "agents/code-simplifier.md",
       "path": "agents/code-simplifier.md",
       "origin": "third-party",
-      "upstream": "pr-review-toolkit",
-      "upstream_path": "plugins/pr-review-toolkit/agents/code-simplifier.md",
-      "vendored_at_commit": "unknown",
+      "upstream": "code-simplifier",
+      "upstream_path": "plugins/code-simplifier/agents/code-simplifier.md",
+      "vendored_at_commit": "ceb9b72b4c4c20ad39efce780edd0aabe80ebce3",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "code-simplifier.md": "05e361b4ef1b688203251989707f8a924a9ed266"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
       "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 115,
+      "measured_diff_lines": 154,
+      "measured_diff_basis": "diff of upstream blob 05e361b4ef1b688203251989707f8a924a9ed266 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
       "divergences": [
         {
           "ref": "namespace-rebrand",
@@ -640,7 +831,10 @@
         }
       ],
       "files": [
-        "code-simplifier.md"
+        {
+          "path": "code-simplifier.md",
+          "sha256": "5789b72bdac2f9c078a8d5ac67e48c648319e5346524e466ac9a1acd11e52769"
+        }
       ]
     },
     {
@@ -654,21 +848,27 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/comment-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "comment-analyzer.md": "e214620a3fa348c550bfca1f8d23ceaec39bfe57"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 64,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 56,
+      "measured_diff_basis": "diff of upstream blob e214620a3fa348c550bfca1f8d23ceaec39bfe57 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "divergences": [],
       "files": [
-        "comment-analyzer.md"
+        {
+          "path": "comment-analyzer.md",
+          "sha256": "09e09a3d2e0f467f2095b9236455f849fffccae22c00ddfec4ad6dc4391125f9"
+        }
       ]
     },
     {
@@ -722,21 +922,27 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/pr-test-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "pr-test-analyzer.md": "9b2de05b90e74f828e58a8874ed17f6eb9372db3"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 64,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 58,
+      "measured_diff_basis": "diff of upstream blob 9b2de05b90e74f828e58a8874ed17f6eb9372db3 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "divergences": [],
       "files": [
-        "pr-test-analyzer.md"
+        {
+          "path": "pr-test-analyzer.md",
+          "sha256": "c5492af0f98c69072e374df1b9833902220534a28b820e93fd226bb89af2b53d"
+        }
       ]
     },
     {
@@ -775,21 +981,27 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/silent-failure-hunter.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "silent-failure-hunter.md": "b8a8dfa41e18ef6ac801ae64be38b2508aa04f44"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 56,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 57,
+      "measured_diff_basis": "diff of upstream blob b8a8dfa41e18ef6ac801ae64be38b2508aa04f44 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "divergences": [],
       "files": [
-        "silent-failure-hunter.md"
+        {
+          "path": "silent-failure-hunter.md",
+          "sha256": "35b434ec4512aa88a00d93f8d09ab4c6e813b8cacf8d8b045554fa0b66d40ed0"
+        }
       ]
     },
     {
@@ -868,21 +1080,27 @@
       "origin": "third-party",
       "upstream": "pr-review-toolkit",
       "upstream_path": "plugins/pr-review-toolkit/agents/type-design-analyzer.md",
-      "vendored_at_commit": "unknown",
+      "vendored_at_commit": "4ca561fb8532594e7a5faef945e85096fcec0616",
+      "base_evidence": {
+        "method": "blob-identity",
+        "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+        "blobs": {
+          "type-design-analyzer.md": "f720f0fcec856560cdddb6b030ac7e64af159438"
+        }
+      },
       "vendored_on": "2026-04-27",
       "last_reviewed_upstream_commit": "920824c3e9509890fbec03ba6097014222393022",
       "last_reviewed_on": "2026-08-10",
       "stance": "fork",
-      "stance_reason": "The `description` frontmatter is the dispatch contract, and UberDev rewrote it into the named-lens contract driven by /uberdev:review-pr Phase 2 and /uberdev:simplify, replacing upstream's auto-trigger examples. Upstream's copy would re-enable auto-triggering, so it is not drop-in.",
-      "measured_diff_lines": 69,
-      "divergences": [
-        {
-          "ref": "namespace-rebrand",
-          "file": null
-        }
-      ],
+      "stance_reason": "The frontmatter \u2014 including the `description` dispatch contract \u2014 is byte-identical to upstream at the recovered base; the BODY is not. Upstream's own output-format section is replaced by the `phase1-reviewer-v1` result-file contract that /uberdev:review-pr Phase 1 validates, and the untrusted-input-handling and secret-leak reporting sections are added. Upstream's copy would emit a serialization the aggregator rejects, so it is not drop-in.",
+      "measured_diff_lines": 64,
+      "measured_diff_basis": "diff of upstream blob f720f0fcec856560cdddb6b030ac7e64af159438 (the base named in vendored_at_commit) against the shipped bytes INCLUDING this component's provenance header, counting both < and > lines",
+      "divergences": [],
       "files": [
-        "type-design-analyzer.md"
+        {
+          "path": "type-design-analyzer.md",
+          "sha256": "fe64f4309cc962fc1fb499063dd4af6cd840fa701be78a2e15595d5b9b133d40"
+        }
       ]
     },
     {

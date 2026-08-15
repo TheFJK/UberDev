@@ -58,8 +58,24 @@
       "reason": "#431 moved the 0-100 confidence anchors out of this agent into shared/finding-confidence-rubric-v1.md, so the prompt changed after these numbers were measured. The precision figures predate that edit and must not be read as measuring the current prompt; re-measure with --refresh once the convention lens has adjudicated findings to mine."
     },
     {
+      "path": "agents/comment-analyzer.md",
+      "reason": "#505 recovered this agent's real upstream base and added the in-file `Vendored from anthropics/claude-plugins-official@<sha>` provenance header that `C-BASE` requires a recorded `vendored_at_commit` to be witnessed by. The prompt bytes therefore changed after these numbers were measured. The added line is an HTML comment above the body and carries no instruction the lens follows, but the digest is a byte comparison and re-stamping it here would assert that the published figures were measured against the current bytes, which is false. Declared instead; re-measure with --refresh at the next mining pass."
+    },
+    {
       "path": "agents/convention-compliance.md",
       "reason": "This prompt did not EXIST when the numbers were measured: #433 created it at 2026-08-11T01:53:48Z and measured_at is 2026-08-11T01:41:26Z. There are therefore no measured bytes to stamp, and it carries no prompt_digests entry: recording its current digest would assert that the published figures were measured against this prompt, which never happened. Declared here instead, and re-measured with --refresh once the convention lens has adjudicated findings to mine."
+    },
+    {
+      "path": "agents/pr-test-analyzer.md",
+      "reason": "#505 recovered this agent's real upstream base and added the in-file `Vendored from anthropics/claude-plugins-official@<sha>` provenance header that `C-BASE` requires a recorded `vendored_at_commit` to be witnessed by. The prompt bytes therefore changed after these numbers were measured. The added line is an HTML comment above the body and carries no instruction the lens follows, but the digest is a byte comparison and re-stamping it here would assert that the published figures were measured against the current bytes, which is false. Declared instead; re-measure with --refresh at the next mining pass."
+    },
+    {
+      "path": "agents/silent-failure-hunter.md",
+      "reason": "#505 recovered this agent's real upstream base and added the in-file `Vendored from anthropics/claude-plugins-official@<sha>` provenance header that `C-BASE` requires a recorded `vendored_at_commit` to be witnessed by. The prompt bytes therefore changed after these numbers were measured. The added line is an HTML comment above the body and carries no instruction the lens follows, but the digest is a byte comparison and re-stamping it here would assert that the published figures were measured against the current bytes, which is false. Declared instead; re-measure with --refresh at the next mining pass."
+    },
+    {
+      "path": "agents/type-design-analyzer.md",
+      "reason": "#505 recovered this agent's real upstream base and added the in-file `Vendored from anthropics/claude-plugins-official@<sha>` provenance header that `C-BASE` requires a recorded `vendored_at_commit` to be witnessed by. The prompt bytes therefore changed after these numbers were measured. The added line is an HTML comment above the body and carries no instruction the lens follows, but the digest is a byte comparison and re-stamping it here would assert that the published figures were measured against the current bytes, which is false. Declared instead; re-measure with --refresh at the next mining pass."
     },
     {
       "path": "shared/finding-confidence-rubric-v1.md",

@@ -43,12 +43,40 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class) → plan writer → ONE solver agent (`isolation:"worktree"`) executing the plan. |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (**one** revision round, never unbounded — the #308 class; its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507) → plan writer → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
+| any tier with **no usable plan** | falls back to the single solver above — no plan means no tasks, so there is no boundary a **review gate** could sit on. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
 read-only and write their artifacts to absolute paths under the run dir — an
 isolated researcher would write into its own throwaway worktree and the artifact
 would vanish (the artifact path-leak class this project has hit before).
+
+**Why the per-task path uses no runtime isolation.** `isolation:"worktree"` hands
+out an *anonymous* checkout: the script never learns its path, and a second
+isolated agent gets a different one. A single agent needs no name, so it keeps
+runtime isolation. A *chain* of agents must address one shared checkout by path,
+which runtime isolation structurally cannot provide — hence the script-derived
+`<runDirAbs>/worktrees/issue-<N>`, cut by task 1 with `git worktree add` and
+reported back as `workspaceReady`. If task 1 cannot open it the chain stops with
+`workspace_not_ready` and **no delivery agent runs**; a task agent is told
+explicitly never to fall back to the repository root.
+
+**Every rung that writes is gated on that flag, not just task 1.** The fix rung
+reads `workspaceReady` exactly as the implementer rung does, and its
+`workspace_not_ready` event carries a `round` to tell the two apart. Without it
+a fixer that never entered the shared checkout would `--amend` in whatever
+directory it did land in — and since chain agents carry no runtime isolation,
+that directory is the caller's own repository (#557).
+
+**Why sequential and not wave-parallel.** The win is fresh context per task plus
+a gate per task, and both are available one task at a time — with no git mutex,
+no disjoint-ownership validation and no two agents writing one checkout. Each
+task is left as exactly ONE commit; each fix round `--amend`s it, so the
+reviewer's target is always `git show HEAD` and no commit SHA is ever threaded
+through a prompt. Reviewer findings travel **on disk only**
+(`<runDirAbs>/issue-<N>/task-<k>/review-<r>.md`); the fixer is given those paths,
+never the text, which is what keeps this script free of the `SHARED:envelope`
+block.
 
 ## What you give up (RFC 0015 §6 — say these out loud, never silently)
 
@@ -101,34 +129,113 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 | `runDirAbs` | where prompts, contexts and per-issue design artifacts live |
 | `repoRootAbs`, `pluginRootAbs`, `repoSlug`, `branchPrefix` | script-derived prompt inputs |
 | `solveTimeoutS` | **advisory** per-issue budget, reported not policed (the runtime forbids clocks — DR-7) |
-| `maxAgents` | CB1 projected-agent ceiling |
+| `maxAgents` | CB1 projected-agent ceiling (launcher default 600) |
+| `implementBudget` | CB3 per-issue implement-phase agent cap; default 24, clamped 4..96, `UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET` overrides |
 
 ## Circuit breakers
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`1 + issues + 6×design-tier issues`) over `maxAgents` → abort **before** any dispatch |
+| CB1 | projected agents (`2 + issues + (6 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
+| CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |
 
 Wall-clock breakers are impossible in-script (the runtime forbids
-`Date.now()`); the `budget` cap plus CB1/CB2 cover the live failure modes.
+`Date.now()`); the `budget` cap plus CB1/CB2/CB3 cover the live failure modes.
+
+Degradation inside the task chain is recorded, never silent:
+`task_implementer_null`, `task_implementer_blocked`, `task_review_null` (the
+task is marked UNREVIEWED and the loop **continues** — a skipped agent must not
+strand committed work), `task_review_rejected`, `task_fix_rounds_exhausted`,
+`task_fixer_null`, `task_fix_unreviewed` (a CB3 cut-off taken straight after
+a fix round, where the last verdict is still REVISIONS_REQUIRED and the
+re-review never ran), `task_count_clamped`, `workspace_not_ready`.
 
 ## Return value
 
 The script logs `WORKFLOW_RESULT <json>` and returns:
 
 ```
-{ runId, repoSlug, issueCount, concurrency, autoMode, designedIssues,
-  researchArtifacts, results: [ {issue, status, branch, prNumber, prUrl,
-  commitCount, testsRun, summary, blocker} ], prsOpened: [<int>],
+{ runId, repoSlug, requestedIssues, issueCount, concurrency, autoMode,
+  designedIssues, researchArtifacts,
+  results: [ {issue, status, branch, prNumber, prUrl,
+  commitCount, testsRunClaimed, summary, blocker,
+  prProof, provenCommitCount, claimedStatus, claimedPrNumber, claimedPrUrl,
+  chainComplete, partialDelivery: {tasksTotal, blocked, skipped, unreviewed},
+  tasks: [{id, status, reviewVerdict, fixRounds, commitCount, claimedStatus}]} ],
+  prsOpened: [<int>],
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
+  tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
+  verification: {probed, confirmed, disproven, unverified, notApplicable, relayRc},
   cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
 ```
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
-| REFUSED | FAILED`. The solver never merges and never chains into a review
-command — opening the PR is where it stops.
+| REFUSED | FAILED`. Per-task `status` ∈ `DONE | NO_CHANGES | BLOCKED | SKIPPED`
+and `reviewVerdict` ∈
+`APPROVE | REVISIONS_REQUIRED | REJECT | UNREVIEWED | NOT_APPLICABLE`.
+`tasks` is absent on the single-solver path, which has no tasks. The fleet never
+merges and never chains into a review command — opening the PR is where it
+stops.
+
+The two non-review verdicts are opposites and must not be read as one:
+
+- `NOT_APPLICABLE` — the task committed nothing, so there was nothing to review:
+  the gate was skipped and no fix round was burned. It is a **named sentinel**,
+  never an empty string; a consumer matching `""` matches nothing on that path.
+- `UNREVIEWED` — commits exist that no reviewer saw: a null reviewer, a task
+  recorded BLOCKED that committed anyway, or CB3 cutting the chain off before
+  the first review ran. `tasksUnreviewed` counts exactly these.
+
+Per-task `claimedStatus` is the implementer's own terminal word — `DONE`,
+`NO_CHANGES`, `BLOCKED`, or `""` when it answered with none of those or never
+answered at all (a skipped rung has no implementer) — kept beside the `status`
+the script derives from `commitCount`. Same rule as the PR claim below: the
+derivation wins in the field that drives behaviour, the claim is never erased,
+and the disagreement is an audit event rather than a silent rewrite. It is a
+different field from the per-issue `claimedStatus`, which holds the solver's own
+status after the PR proof disproved it.
+
+`chainComplete` is script-derived, so no delivery agent can report its way out
+of it: `false` means the per-task chain did not finish — some task is BLOCKED,
+SKIPPED or UNREVIEWED — and `partialDelivery` then carries the ids, in the shape
+declared above. Both appear only on a record the per-task chain delivered, and
+`partialDelivery` only when the chain fell short: its presence IS the signal.
+`/goal` ingests `prsOpened` — bare numbers, carrying neither field — so a PR
+opened over an unfinished chain is distinguishable only here.
+
+## Claim verification (#515)
+
+A solver's structured return is a **self-report**. `status` drives every count
+above *and* the PR set `/goal` ingests, so the fleet no longer takes it on
+trust: in the `deliver` phase a single read-only **haiku relay** queries GitHub
+for every claimed PR (`gh api -i .../pulls/<N>`, one call per number, bounded
+in-agent retry) and returns **raw observations only** — HTTP status, `number`,
+`head.ref`, `state`, `commits`. It reaches no verdict. The **script**
+adjudicates, downgrades and audits.
+
+| Field | Meaning |
+|---|---|
+| `prProof` | `CONFIRMED` · `DISPROVEN` · `UNVERIFIED` · `NOT_APPLICABLE` |
+| `provenCommitCount` | commits GitHub reports on the PR (`null` when not observed) |
+| `claimedStatus` / `claimedPrNumber` / `claimedPrUrl` | present only on a downgraded record — the original claim, preserved |
+| `verification` | run totals; `relayRc` is `null` both when no relay was dispatched and when a dispatched relay answered with an unusable rc — the audit events are what tell the two apart |
+
+The rule: **the proof wins in the field that drives behaviour, the claim is
+never erased, and the disagreement is an audit event.** `status` is overwritten
+on disproof (with the claim moved into `claimed*`); `commitCount` drives nothing
+so the claim stays and the proof lands beside it in `provenCommitCount`.
+
+Only two observations disprove a claim — an authoritative **404**, and a **200
+naming a different head branch**. Everything else (no relay, a null relay, a
+non-zero rc, a missing row, 0/401/403/429/5xx) classifies `UNVERIFIED` and
+**retains** the claim: a probe that cannot speak must never drop a real PR out
+of `/goal`'s queue. A status is never *upgraded* — a non-`PR_OPENED` record
+carrying a PR number is audited, never promoted.
+
+`testsRunClaimed` is deliberately **honest, not verifiable**: nothing here can
+falsify it, so nothing reads it.
 
 ## No-Workflow fallback
 

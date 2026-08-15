@@ -73,8 +73,8 @@ UberDev standalone gets the attribution record with it.
 ```
 
 Every directory under `plugins/uberdev/skills/` and every file under
-`plugins/uberdev/agents/` is a component. There are **73** of them: 20
-third-party and 53 carrying `"origin": "uberdev"`. The originals are two-field
+`plugins/uberdev/agents/` is a component. There are **75** of them: 20
+third-party and 55 carrying `"origin": "uberdev"`. The originals are two-field
 stubs; their only job is to make coverage two-way, so that a *new* undeclared
 vendored file cannot hide among them.
 
@@ -82,11 +82,11 @@ vendored file cannot hide among them.
 
 | Field | Meaning |
 | --- | --- |
-| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` for the 10 unpinned skill directories and all 6 agents. |
+| `vendored_at_commit` | What we actually copied from. 40-hex where an in-file header records it; the literal `"unknown"` where no base has been recovered. With #503, #504 and #505 landed together, **no component reads `"unknown"`**. |
 | `last_reviewed_upstream_commit` | The **watermark**: the upstream commit a human has triaged this component against. What the weekly job diffs from. |
 
-The split is load-bearing. `"unknown"` is the honest value for 16 of the 20
-components — `git log` recovers the *vendoring* commit in this repo, never the
+The split is load-bearing. `"unknown"` was the honest value wherever a base was
+unrecoverable — `git log` recovers the *vendoring* commit in this repo, never the
 upstream base — and inventing a SHA would make every future diff silently wrong.
 The watermark makes those components diffable anyway, from the day this lands,
 and it means week 1's report contains post-landing changes instead of a wall of
@@ -108,6 +108,10 @@ claim cost two coordinated lies instead of one.
   or the change is declared in `divergences[]`.
 - `stance: "fork"` ⇒ `files[]` is a plain path list. We own the bytes; edits are
   expected; only *coverage* is ratcheted.
+- **Amended by #503:** a component that records a real `vendored_at_commit` is
+  digest-locked **whatever its stance** — `files[]` is `{path, sha256}` for every
+  `track` component and for every pinned one. See the 2026-08-13 amendment for
+  why the two questions come apart.
 
 Be precise about what the digest lock buys: it guards **our bytes against local
 tampering and undeclared local edits**. It says nothing about upstream. Comparing
@@ -192,38 +196,65 @@ lines UberDev adds.
 | `skills/requesting-code-review` | `skills/requesting-code-review` | 228 | **fork** | Carries the permanent parallel-by-default review fanout (§6). |
 | `skills/writing-skills` | `skills/writing-skills` | 367 | track | 1:1 file set; the 6.2.0 delta is upstream's own prose compression, which we want. |
 | `skills/finish-branch` | `skills/finishing-a-development-branch` | 734 | **fork** | Owns the pre-push secret-scan gate, the auto-chain into `/uberdev:review-pr`, and the no-`Co-Authored-By` rule. |
-| `skills/subagent-driven-dev` | `skills/subagent-driven-development` | 1064 | **fork** | File sets diverge in both directions; the routed SDD lifecycle is UberDev-owned. |
+| `skills/subagent-driven-dev` | `skills/subagent-driven-development` | 1064 | **fork** | File sets diverge in both directions; the routed SDD lifecycle is UberDev-owned. Also carries the permanent wave-parallel implementer divergence, which inverts an explicit upstream prohibition (§6). |
 | `skills/brainstorm` | `skills/brainstorming` | 2255 | **fork** | Deliberately gate-free (§6); driven by `/uberdev:orchestrator` Phase 1, not an interactive human loop. |
 
 Seven `track`, seven `fork`.
 
+> **Superseded rows.** This table is the dated snapshot of what was measured and
+> decided at the v6.2.0 tag. Four of its `track` rows were re-adjudicated against
+> their actual base by the 2026-08-13 (#503) amendment below, which carries the
+> live stance for `receiving-code-review`, `verification-before-completion`,
+> `execute-plan` and `write-plan`. `plugins/uberdev/vendor.json` is always the
+> live record; read the amendments before quoting a row.
+
 ### 4.3 Agents — measured against `claude-plugins-official`
 
-| Component | Upstream path | Diff lines | Stance |
-| --- | --- | ---: | --- |
-| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | 56 | fork |
-| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | 57 | fork |
-| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | 64 | fork |
-| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | 64 | fork |
-| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | 69 | fork |
-| `agents/code-simplifier.md` | `plugins/pr-review-toolkit/agents/code-simplifier.md` | 115 | fork |
+Re-measured against each component's **recovered base** (§ Amendment 2026-08-13),
+counting both `<` and `>` lines and including the provenance-header line each
+file now carries.
 
-All six are `fork` for one shared reason: an agent's `description` frontmatter
-**is** its dispatch contract, and UberDev rewrote all six into the named-lens
-contract driven by `/uberdev:review-pr` Phase 2 and `/uberdev:simplify`.
-Upstream's copies would re-enable conversational auto-triggering. They are not
-drop-in.
+| Component | Upstream path | Base | Diff lines | Stance |
+| --- | --- | --- | ---: | --- |
+| `agents/comment-analyzer.md` | `plugins/pr-review-toolkit/agents/comment-analyzer.md` | `4ca561f` | 56 | fork |
+| `agents/silent-failure-hunter.md` | `plugins/pr-review-toolkit/agents/silent-failure-hunter.md` | `4ca561f` | 57 | fork |
+| `agents/pr-test-analyzer.md` | `plugins/pr-review-toolkit/agents/pr-test-analyzer.md` | `4ca561f` | 58 | fork |
+| `agents/type-design-analyzer.md` | `plugins/pr-review-toolkit/agents/type-design-analyzer.md` | `4ca561f` | 64 | fork |
+| `agents/code-reviewer.md` | `plugins/pr-review-toolkit/agents/code-reviewer.md` | `4ca561f` | 81 | fork |
+| `agents/code-simplifier.md` | `plugins/code-simplifier/agents/code-simplifier.md` | `ceb9b72` | 154 | fork |
 
-**A correction the measurement forced.** The README attributed
-`code-simplifier` to the `code-simplifier` plugin. `claude-plugins-official`
-ships that agent **twice** — once in `plugins/code-simplifier/` and once in
-`plugins/pr-review-toolkit/` — and the two upstream copies themselves differ by
-38 lines. Diffed against both, the UberDev copy is 115 lines from the
-`pr-review-toolkit` copy and 137 from the `code-simplifier` copy, and only the
-`pr-review-toolkit` copy carries the block-scalar `description` with worked
-examples that our copy is built on. The register therefore points the component
-at `plugins/pr-review-toolkit/agents/code-simplifier.md`. The `code-simplifier`
-plugin is kept as a declared upstream because UberDev ships its licence text.
+All six stay `fork`, and the verdict is unchanged — but the **reason recorded
+here was measurably wrong for five of them**, and stating a true reason is the
+point of writing one down. The claim was that UberDev had rewritten every
+`description` frontmatter into the named-lens contract. Measured against the
+recovered bases, the frontmatter of `comment-analyzer`, `pr-test-analyzer`,
+`silent-failure-hunter` and `type-design-analyzer` is **byte-identical to
+upstream** — upstream's auto-trigger examples still ship verbatim — and
+`code-reviewer`'s frontmatter differs by exactly two lines, both of them
+`model: opus` → `model: inherit`. Only `code-simplifier` was rewritten as
+described (42 frontmatter lines).
+
+What actually makes all six not drop-in is the **body**: upstream's own
+output-format section is replaced by the `phase1-reviewer-v1` result-file
+contract that `/uberdev:review-pr` Phase 1 validates, and the untrusted-input
+and secret-leak reporting sections are added. Upstream's copy would emit a
+serialization the aggregator rejects. That is a stronger reason than the one it
+replaces, which is why the stances are re-stated rather than re-adjudicated.
+
+**A correction the measurement forced — now reversed by a better measurement.**
+This RFC previously moved `code-simplifier`'s upstream from the standalone
+`code-simplifier` plugin (where the README had it) to `pr-review-toolkit`, on
+the grounds that the shipped bytes were 115 diff lines from the
+`pr-review-toolkit` copy and 137 from the standalone one. That inference was
+wrong, and it was wrong in an instructive way: **similarity was measured against
+bytes that had already accumulated a 42-line local frontmatter rewrite**, so the
+smaller number was tracking our own edit rather than the ancestry. Blob identity
+settles what similarity could not — the vendored file's blob at `bae840a` is
+`05e361b4…`, which is `plugins/code-simplifier/agents/code-simplifier.md` at
+upstream `ceb9b72b…`, the only commit that has ever touched that path, and is
+*not* any blob of the `pr-review-toolkit` copy. The component points back at the
+standalone plugin. `pr-review-toolkit` remains a declared upstream for the other
+five agents, and both licence texts stay shipped and referenced.
 
 ### 4.4 What `track` obliges
 
@@ -259,17 +290,28 @@ the rename.
 
 ## 6. Permanent divergences — never reconcile
 
-Recorded in `vendor.json` under `permanent_divergences[]`, each with
-`"permanent": true`, and referenced from the components they apply to.
+Recorded in `vendor.json` under `permanent_divergences[]` and referenced from the
+components they apply to. Every entry carries `"permanent": true` except
+`worktree-location-failloud`, which is a bug fix rather than a policy and is
+marked `false` precisely so an equivalent upstream guard retires it instead of
+being reconciled against.
 
 | Id | Scope | Divergence |
 | --- | --- | --- |
 | `namespace-rebrand` | all third-party components | `superpowers:` → `uberdev:`. UberDev ships standalone under its own plugin id. |
 | `parallel-hypothesis-testing` | `skills/systematic-debugging` | The local *Parallel hypothesis testing* section, already declared in the file's own provenance header. |
+| `find-polluter-fail-loud` | `skills/systematic-debugging` | Three local additions to `find-polluter.sh` (#430, #476), declared in the file's own provenance header: fail-loud exit-2 refusals wherever the run cannot back a verdict, glob- and whitespace-safe array enumeration, and a pre-loop runner-capability probe. Upstream returns a green 0 in every refusal shape and its own test asserts that green, so a re-sync collides head-on. |
 | `brainstorm-no-approval-gates` | `skills/brainstorm` | UberDev rejects upstream's HARD-GATE / per-section / spec-review approval checkpoints. Quality comes from parallel research and always-on reviewer agents, not human gates. |
 | `review-pr-parallel-by-default` | `skills/requesting-code-review` | `/uberdev:review-pr` fans its review lenses out in parallel by default; upstream's flow is sequential. |
 | `no-co-authored-by` | `skills/finish-branch` | UberDev never emits a `Co-Authored-By` or AI-attribution trailer in commits or PR bodies. |
 | `interactive-discard-option` | `skills/finish-branch` | Upstream 6.2.0 stopped offering to discard *uncommitted work*. UberDev Option 4 discards a *branch and its commits* behind a typed confirmation, reachable only under `--interactive`. Different capability, so upstream's removal does not apply — see §7. |
+| `sdd-parallel-implementer-waves` | `skills/subagent-driven-dev` | Upstream forbids dispatching multiple implementation subagents in parallel. UberDev's fork inverts that: wave-parallel implementers over a strictly disjoint per-task file partition is its stated core principle. The partition is declared by the plan's `Owns (file allowlist)` field and its `## Execution Waves` summary, reviewed by `plan-reviewer` Check 2, and refused at dispatch by `sdd_assert_wave_disjoint`. Never reconciled — see the #509 amendment. |
+| `receiving-review-parallel-triage` | `skills/receiving-code-review` | The local *Multi-Reviewer Parallel Triage* section: one triage agent per reviewer dispatched in a single message, a fixed Critical/Important/Minor/Refute/Need-clarification shape, de-duplication across reviewers, and three named skip conditions. It names UberDev's own reviewer agents, so upstream has nothing to reconcile with. Measured at #503 as the component's entire residual. |
+| `verification-parallel-dispatch` | `skills/verification-before-completion` | The local *Parallel Verification Dispatch* section: two patterns chosen by tool budget, with the Iron Law restated so every parallel arm still needs fresh evidence in the current turn. Measured at #503 as the component's entire residual. |
+| `plan-execution-wave-contract` | `skills/write-plan` and `skills/execute-plan` | The wave-parallel plan contract UberDev owns on both sides — `write-plan` emits the wave decomposition and per-task headers, `execute-plan` walks the waves, and `uberdev:subagent-driven-dev` parses the same format. A two-sided interlock: re-baselining either side alone breaks it. |
+| `plan-reviewer-inline-no-dispatch` | `skills/write-plan` | Upstream's `plan-document-reviewer-prompt.md` is a dispatch template; UberDev's copy is an inline self-review checklist that must not create a child, because the plan writer runs as a leaf under `uberdev:orchestrator` where a nested dispatch has no runtime. |
+| `worktree-location-failloud` | `skills/using-git-worktrees` | **`permanent: false`.** A local bug fix, not a policy: upstream's worktree-path `case` relies on a tilde that expands in neither a `case` pattern nor a quoted RHS, and has no default arm, so an unmatched location falls through with `$path` unset. This copy quotes both accepted spellings, builds the path from `${HOME}`, and exits 1 with a named error. An equivalent upstream guard retires this entry rather than being reconciled against it. |
+| `sdd-implementer-refused-status` | `skills/subagent-driven-dev` | Upstream 6.3.0 handles four implementer statuses. UberDev's implementers are routed leaf workers under a safety contract upstream has no equivalent of, so a handoff can be unexecutable for a reason no added context answers; #517 adds a fifth member, `REFUSED`, and a controller branch that forbids re-dispatching the same task with unchanged handoff data. |
 
 ---
 
@@ -307,13 +349,18 @@ honest; it should not be permanent.
   file that contains neither token, and its 33 measured lines are entirely
   upstream's own v6.2.0 prose compression, un-adopted here.
 
-The remaining 16 are owned by three successors, split by what each one costs
+The remaining 16 were owned by three successors, split by what each one costs
 rather than by component type: **#503** the five unpinned `track` skills (each
 carries a real residual, and declaring it engages §4.1's `fork` trigger, so a
 stance re-adjudication comes with it), **#504** the five unpinned `fork` skills,
 and **#505** the six agents (no local clone of `claude-plugins-official` exists,
 so their base needs a network content match — the watermark is a review point,
 not a proven base).
+
+**All three successors are resolved** (see the amendments below): #503 pinned the
+five `track` skills, #504 the five `fork` skills, and #505 the six agents — the
+last of those by blob identity against upstream rather than by inference.
+`"unknown"` now stands on **none** of the 20 components.
 
 ---
 
@@ -446,3 +493,483 @@ assumed:
 deleted target with the register kept consistent, a misspelled target, the
 resolving-corpus assertion, and the vacuity arm — each proved red for `C-REFS`
 **and nothing else**.
+
+---
+
+## Amendment (2026-08-13, #503) — five bases pinned, four stances re-adjudicated, the digest lock moved to the pin
+
+> **Amends §2.2's unpinned counts, §2.3's digest-lock rule, and the `track` rows
+> of §4.2 for `receiving-code-review`, `verification-before-completion`,
+> `execute-plan` and `write-plan`.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What was measured
+
+Each of the five components #462 left unpinned was diffed file-by-file against
+`obra/superpowers@e7a2d16` — and, to make "that is the base" evidence rather than
+assumption, against **every** upstream commit in each file's history. `e7a2d16`
+is the closest blob for all six files; no earlier or later upstream revision
+matches better, so no hunk in any of them is un-adopted upstream prose. The whole
+residual is local, and every hunk is attributed:
+
+| Component | Residual vs `e7a2d16` | Attribution |
+| --- | ---: | --- |
+| `skills/using-git-worktrees` | 17 | Brand rewrite of the global worktree location, plus a fail-loud fix to the path-resolution `case` in the creation snippet. |
+| `skills/receiving-code-review` | 29 | One appended local section, *Multi-Reviewer Parallel Triage*. **No rebrand token in the file at all.** |
+| `skills/verification-before-completion` | 30 | One appended local section, *Parallel Verification Dispatch*. **No rebrand token in the file at all.** |
+| `skills/execute-plan` | 42 | Rename + rebrand + wave-ordered Step 2 and the UberDev sub-skill handoffs. |
+| `skills/write-plan` | 99 | Rename + rebrand + the plan **format** this repo owns (wave decomposition, task headers, non-interactive handoff) + the reviewer prompt rewritten from a Task dispatch into an inline checklist. |
+
+Two of those five carried the exact sentence #462 caught on
+`skills/dispatching-parallel-agents`: *"the local delta is the namespace
+rebrand"*, on a file containing no `superpowers:` token. The register's
+`stance_reason` fields now state what was measured instead.
+
+### The stance verdicts
+
+`skills/using-git-worktrees` **stays `track`**. §4.1's fork trigger needs a
+*permanent* local divergence or a rewritten behavioural contract; a bounded
+correction inside a shell example is neither, and it is recorded as
+`divergences[].worktree-location-failloud` with `permanent: false` precisely so
+an equivalent upstream guard retires it rather than being reconciled against it.
+
+The other four **flip `track` → `fork`**. Two carry a permanent local policy
+section upstream has no equivalent for; two carry the wave contract that
+`write-plan` emits, `execute-plan` walks and `uberdev:subagent-driven-dev`
+parses — a two-sided interlock, so re-baselining either side alone breaks it.
+`track` *promises* a digest-locked re-baseline (§4.4); claiming it for a
+component whose upstream copy is not drop-in would be a false statement with no
+CI signal behind it, the same reasoning the #457 amendment used.
+
+Live tally after this amendment: **three `track`, eleven `fork`** among the 14
+skill components. §4.2's table keeps its dated numbers.
+
+### Why the flip did not cost coverage
+
+Stated plainly, because it was the reason this work was split out of #462:
+`C-FILES` enforced `sha256` only when `stance == "track"`, so an honest
+re-adjudication to `fork` **deleted five digest locks**. Worse than a wash —
+provenance improved (a real base, restated in a header `C-BASE` demands) at the
+same instant the byte evidence behind it vanished. Measured on the pre-#503 tree:
+appending a byte to any `fork`-stance file left `vendor-check.py` at exit 0, so a
+pinned fork was a component whose shipped header named a base with nothing
+holding its bytes to that claim.
+
+The coupling was the defect. `stance` answers a **policy** question — do we
+re-baseline from upstream? The digest answers an **evidence** question — have our
+bytes moved since we recorded them? #503 ties the lock to the **pin**: recording
+a base is the act that puts bytes under a digest, whatever the stance. An
+unpinned `fork` stays unlocked, which is what keeps the distinction real.
+
+Net effect on coverage, counted rather than asserted: **nine** components are now
+digest-locked instead of seven, and the file count under lock rises from **14 to
+27** — the five re-adjudicated components keep theirs, and the two previously
+pinned forks (`systematic-debugging`, `test-driven-development`) contribute 13
+files that nothing held before.
+
+Two smaller repairs fall out of the same rule:
+
+- `skills/systematic-debugging`'s two **file-scoped** `divergences[]` entries are
+  now component-scoped (`"file": null`). A file-scoped entry is `C-FILES`'
+  declared-change escape hatch, and it would have disarmed the new lock on
+  exactly the two files whose local divergence is most worth watching. It was
+  never needed: `C-FILES` compares our bytes against **our** recorded digest,
+  never against upstream, so an upstream-relative divergence has nothing to
+  excuse. `vendor-drift.py`'s `declared_files()` resolves the ref back to
+  `permanent_divergences[].file`, so the weekly report still labels those files
+  *declared* rather than raw drift.
+- `skills/dispatching-parallel-agents` no longer references `namespace-rebrand`.
+  #462 corrected that component's prose and left the machine-readable reference
+  behind, so the register asserted a divergence its own `stance_reason` denied.
+
+### What now enforces this
+
+- `tests/vendor-provenance.test.sh` **V30** — a byte changed in a *pinned fork*
+  file must red `C-FILES` by name. Run against the pre-#503 checker it reports
+  `checker stayed GREEN on a mutated tree`, which is the defect stated in the
+  row's own words. **V14** is its counter-case, holding an *unpinned* fork edit
+  green so the widening cannot creep into "every fork is locked".
+- **V31** — every digest-locked component actually records a `sha256` per file,
+  asserted against the committed register rather than through the checker.
+- **V32** — a `namespace-rebrand` reference on a *pinned* component must be
+  witnessed by a brand token in that component's own bytes. This is the ratchet
+  for the class #462 and #503 each found by hand. It is scoped to pinned
+  components because an unpinned one has no proven base, so the claim is not yet
+  checkable — the six agents are **#505**'s.
+- **V25**, widened from `track` to the digest-locked set, so the escape hatch
+  cannot be reopened on a pinned fork.
+- **V5**'s exact header count moves 21 → 27 — and on to **38** with #504's five
+  and #505's six landing alongside it in the same stack.
+
+### What is left
+
+Eleven components still read `"unknown"`: the five unpinned `fork` skills
+(**#504**) and the six agents (**#505**). This amendment supersedes §7's
+"the remaining 16 are owned by three successors" — #503 is done, and the sentence
+should be read as naming the two that remain.
+
+---
+
+## Amendment (2026-08-13, #505) — the six agents pinned, by evidence
+
+> **Amends §2.1's component counts, §2.2's unpinned counts, §4.3 in full, and
+> §7's successor list. Adds `base_evidence` to the register schema, `C-EVIDENCE`
+> to `vendor-check.py`, and `--verify-bases` to `vendor-drift.py`.**
+> Status of this amendment: **Accepted, implemented.**
+
+### The ceiling this hits, and how it gets past it
+
+§2.2 is candid about `C-BASE`: it "does not — and offline cannot — prove a copy
+really happened at that SHA; it makes the claim cost two coordinated lies
+instead of one." For the skill directories #503 left unpinned that ceiling is
+tolerable, because `obra/superpowers` is on disk and a reviewer can diff. For
+the six `claude-plugins-official` agents it was not: **no clone of that upstream
+exists anywhere in this repository**, so no reviewer could have compared the
+bytes even by hand. Both lies were free.
+
+The recovery is a measurement rather than a stronger assertion. For each
+component, `git rev-parse <vendored_ref>:<path>` in **this** repository yields
+the blob oid the file had when it was vendored; `git rev-parse
+<candidate>:<upstream_path>` in a blobless scratch clone of upstream yields the
+blob oid upstream holds at a candidate commit. **The two object ids are equal
+for all six.** Git object ids are content addresses, so equality is byte
+identity — not similarity, not a date match, not a plausible ancestor.
+
+| Component | Base | Blob (both sides) |
+| --- | --- | --- |
+| `agents/code-reviewer.md` | `4ca561fb…` | `462f2e01b89e6339994c071c765dcb4dd380c869` |
+| `agents/comment-analyzer.md` | `4ca561fb…` | `e214620a3fa348c550bfca1f8d23ceaec39bfe57` |
+| `agents/pr-test-analyzer.md` | `4ca561fb…` | `9b2de05b90e74f828e58a8874ed17f6eb9372db3` |
+| `agents/silent-failure-hunter.md` | `4ca561fb…` | `b8a8dfa41e18ef6ac801ae64be38b2508aa04f44` |
+| `agents/type-design-analyzer.md` | `4ca561fb…` | `f720f0fcec856560cdddb6b030ac7e64af159438` |
+| `agents/code-simplifier.md` | `ceb9b72b…` | `05e361b4ef1b688203251989707f8a924a9ed266` |
+
+`vendored_ref` is shared (`bae840ae…`, the vendoring commit in this repo). The
+five `pr-review-toolkit` paths have 1–2 commits of upstream history each, and
+`4ca561f` is the revision current at `vendored_on: 2026-04-27`; `ceb9b72` is the
+**only** commit that has ever touched the standalone `code-simplifier` path.
+
+### `base_evidence` — the record, and why it is a field rather than prose
+
+```jsonc
+"base_evidence": {
+  "method": "blob-identity",
+  "vendored_ref": "bae840ae05a07fe47c9999843364f5bf1aa4a3c1",
+  "blobs": { "code-reviewer.md": "462f2e01b89e6339994c071c765dcb4dd380c869" }
+}
+```
+
+`blobs` is keyed by the component's own `files[]`, which is what makes it
+generalise to the multi-file skill components #503 and #504 will pin. Recorded
+in the register rather than written up here because a paragraph rots silently
+and a field can be re-derived. Three things now re-derive it, split by cost:
+
+- **`C-EVIDENCE`** (`vendor-check.py`) — offline SHAPE. A known `method`, a
+  40-hex `vendored_ref`, a `blobs` map whose key set **equals** the component's
+  `files[]` with 40-hex values, and a 40-hex `vendored_at_commit` behind it.
+  It validates what is *declared* and refuses over an empty set; it deliberately
+  does **not** demand universal coverage, because that would red every
+  `obra/superpowers` component — none of them carries an evidence record — and a check that reds on
+  somebody else's unstarted work gets suppressed. No `git`, no `subprocess`, no
+  socket — that is what keeps §2.3's offline guarantee structural.
+- **`tests/vendor-provenance.test.sh` V35/V36/V36b** — the offline HALF of the
+  identity, re-derived with `git rev-parse` against this repo's own history. It
+  **fails rather than skips** in a shallow clone (the ubuntu shape-check job
+  therefore checks out with `fetch-depth: 0`): a proof that quietly stands down
+  in CI is the vacuous green this whole ratchet exists to refuse.
+- **`vendor-drift.py --verify-bases`** — the UPSTREAM half. A blobless scratch
+  clone per upstream, `git rev-parse <base>:<upstream_path>`, compared against
+  the recorded oid. It is a network operation, so it runs in
+  `vendor-drift.yml` (before the reporting step) and never in the test suite.
+  An unreachable remote exits 1, a malformed record exits 2, and an empty
+  evidence set exits 2 rather than certifying nothing.
+
+### A deliberate departure: the six new headers cite no repository path
+
+The 21 existing provenance headers are free to reference sibling files. These
+six are not, and the constraint is external: all six agents are in
+`tools/prkit/manifest.txt`, `tools/prkit/rewrite.sh` applies a blanket
+`uberdev` → `prkit` rewrite to every byte it copies, and the generated tree
+ships no `licenses/` directory. A repo-relative path in one of these headers
+would therefore be rewritten into a path that does not exist downstream, and the
+token guard in `tools/prkit/verify.sh` fails the generation gate on the word
+`uberdev` outright. The headers name the **SPDX identifier** instead of pointing
+at the licence file, and `tests/prkit-verify.test.sh` carries a row that keeps
+the decision guarded rather than remembered.
+
+That leaves a **pre-existing** compliance gap this change deliberately does not
+widen: `TheFJK/prkit` publishes six Apache-2.0 agents with no licence text of
+its own. Closing it means adding the two licence files to
+`tools/prkit/manifest.txt`, which moves the count-lock 42 → 44 and — because
+`published-check.py` requires manifest ≡ copyset — demands a real prkit
+republication. That is its own change, and it is filed separately.
+
+### What is deliberately NOT done here
+
+- **Watermarks are untouched.** `last_reviewed_upstream_commit` still reads
+  `920824c3…` on all six. §2.2's split between "what we copied from" and "what a
+  human has triaged against" is the whole point, and advancing a watermark is
+  the recorded act of having looked.
+- **No stance is re-adjudicated.** All six stay `fork`; §4.3's *reason* is
+  corrected because it was measurably false, not its verdict.
+- **Upstream `ce721c1` (2026-04-28) is not adopted.** It adds a
+  `## When to invoke` section to four of the five `pr-review-toolkit` agents
+  that this repo has never carried. A genuine finding for the weekly drift job,
+  recorded here so it is visibly deferred rather than missed.
+
+### What is left
+
+Nothing. #503's five `track` skills, #504's five `fork` skills and these six
+agents land in one stack, so **no component reads `"unknown"`** and §7's
+successor list is closed. `C-EVIDENCE` still covers only what declares
+`base_evidence`; extending that record to the fourteen `obra/superpowers`
+skill components — none of which carries one — is the next piece of work, not a
+residual of this one.
+
+---
+
+## Amendment (2026-08-13, #509) — the SDD parallel-implementer divergence, adjudicated
+
+> **Amends the `skills/subagent-driven-dev` row of §4.2 and the table in §6, and
+> tightens §2.4's `divergences[]` shape. Adds `C-DIVREF` to
+> `vendor-check.py`'s check catalogue.**
+> Status of this amendment: **Accepted, implemented.**
+
+### What changed
+
+Upstream's `subagent-driven-development/SKILL.md` carries an explicit
+prohibition — never dispatch multiple implementation subagents in parallel,
+because they conflict. UberDev's `skills/subagent-driven-dev` inverts it, and
+does so as its **stated core principle**: implementers within one wave dispatch
+in parallel into a single shared feature-branch worktree, over a strictly
+disjoint per-task file partition, with the controller as the only process that
+runs git.
+
+The verdict is **deliberate, not drift** — the same call §6 already records for
+`review-pr-parallel-by-default`, and for the same reason: throughput the
+sequential shape cannot buy, bounded by a precondition rather than by hope. It
+is therefore registered rather than reverted, and §6 gains the
+`sdd-parallel-implementer-waves` row.
+
+§6 also gains the row it was already missing. `find-polluter-fail-loud` has been
+in `permanent_divergences[]` since #430/#476 and was never written into the
+table — the §6 list held **six** rows against the register's **seven**. That
+asymmetry is what made the SDD omission survivable: a reviewer reading §6 to
+decide "was this adjudicated?" was reading a list nothing kept honest.
+`tests/vendor-provenance.test.sh` V31 now reconciles the two by id, in both
+directions, over an anti-vacuity floor so a broken parse cannot report
+agreement.
+
+The `Seven track, seven fork` tally in §4.2 is unchanged; so is its dated
+`diff -r` measurement table, `measured_diff_lines`, both commit fields and the
+review date. The parallel-wave behaviour being adjudicated was already shipping,
+and nothing here re-baselines the component: `stance: fork` is exactly what makes
+the local `SKILL.md` edits below move no digest, and the component's file **set**
+is untouched.
+
+### The precondition now has a producer and a refusal
+
+§4.2's stance reason and the old Pattern-B paragraph both leaned on a plan
+declaration that no planner emits. The partition is real, but it was spelled
+under a name nothing produced, so the "zero races" claim rested on prose.
+
+It now rests on three things, each of which exists:
+
+1. **Produced** — `agents/plan-writer.md` emits each task's
+   `Owns (file allowlist)` field plus the plan's `## Execution Waves` summary.
+2. **Reviewed** — `agents/plan-reviewer.md` Check 2 requires same-wave `Owns`
+   lists to be strictly disjoint and treats any file appearing in two of them as
+   a critical finding.
+3. **Refused at dispatch** — `sdd_assert_wave_disjoint` compares the wave's
+   prepared implementer `allowed_paths` for equality *and directory
+   containment*, and `sdd_launch_prepared_batch` calls it **before** it launches
+   anything. An overlapping wave exits `3`, a wave whose implementers declare no
+   ownership exits `2`, and in both cases **zero** children are dispatched. An
+   overlap is a plan defect and routes into the BLOCKED ladder — never "dispatch
+   anyway".
+
+Directory containment is the boundary that is easy to get wrong and is therefore
+stated: a task owning a directory and a sibling owning a file inside it is a
+collision that a plain set intersection reports as disjoint.
+
+Today's `solve-fleet` route dispatches exactly **one** worktree-isolated
+implementer per issue, so it never reaches a parallel wave at all; the wave shape
+is exercised by the in-session SDD controller. That is a description of current
+behaviour, recorded so the next reader does not have to re-derive it — not a
+promise about it.
+
+### `C-DIVREF` — the channel this omission ran through
+
+`check_files()` short-circuits every component whose stance is not `track`, so a
+`fork`'s `divergences[]` is never read. And before this change **no check
+anywhere** resolved a `components[].divergences[].ref` against a
+`permanent_divergences[].id`. The single resolution in the repo lived in
+`tests/finish-branch.test.sh` F14 and was scoped to one component; the other
+seventy-four could reference a record that does not exist, or lose the record
+under a live reference, with every check green.
+
+`vendor-check.py` therefore gains an eleventh check:
+
+> **`C-DIVREF`** — every `components[].divergences[].ref` resolves to a declared
+> `permanent_divergences[].id`, for every component regardless of origin or
+> stance.
+
+Three boundaries are deliberate:
+
+- **No vacuity arm.** `C-HEADER`, `C-BASE` and `C-REFS` each fail on an empty
+  corpus, because for them zero findings means the scan broke. Here an empty
+  `divergences[]` corpus is a legal register state, and a `found == 0` failure
+  would red a tree that has simply declared nothing.
+- **A `ref` is mandatory, which tightens §2.4.** That section's phrase "plus any
+  component-local entries" could be read as licensing an entry with only a
+  `file` and no pointer. `C-DIVREF` closes that reading: every entry must name an
+  adjudicated record. Measured on the tree at adoption, all 27 entries across the
+  register already carry a `ref` and the only keys in use are `ref` and `file`,
+  so this costs nothing today and buys the thing this issue is about — a
+  divergence cannot be declared to the tooling without first being written down
+  as a decision. A component-local `file` stays welcome; it just rides on a
+  `ref`, exactly as `skills/subagent-driven-dev`'s new entry does.
+- **F14 stays.** Its scope is now covered by `C-DIVREF`, but its
+  `interactive-discard-option` *record* assertion — that the entry exists, is
+  permanent, and is scoped to `skills/finish-branch` — is still the only thing
+  pinning that entry, and `C-DIVREF` does not pin records, only pointers.
+
+`tests/vendor-provenance.test.sh` gains the matching falsifiability rows: a live
+reference misspelled while the record stays, the record deleted under a live
+reference, and an entry carrying a `file` with no pointer at all — each proved
+red for `C-DIVREF` **and nothing else**, and each driven through the full checker
+rather than `--only`, because an unknown `--only` id prints the wanted id inside
+its own `known:` list and would report PASS against a checker that has no such
+check.
+
+The dispatch-time refusal gains its own falsifiability fixture in
+`tests/sdd-routed-lifecycle.test.sh`, launched under both shells: measured with
+the guard call removed, the identical-ownership case returns rc `0` with two
+children dispatched under bash and rc `1` with no diagnostic under zsh, so the
+rows assert a refusal that only the guard can produce.
+
+---
+
+## Amendment (2026-08-13, #511) — the 6.3.0 delta adjudicated
+
+> **Amends §7 of this RFC: §7's table is the dated adjudication at the `v6.2.0`
+> tag and stays frozen; this block adjudicates the 6.2.0 → 6.3.0 delta and
+> advances the review point on the 14 `superpowers` components.**
+> Status of this amendment: **Accepted, implemented.**
+
+**No behavioural upstream content is imported by this amendment's PR.** Each item
+below gets a verdict; every ADOPT names a filed issue, and the port is that
+issue's PR.
+
+### The review point
+
+The 14 `superpowers` components now record
+`b36e0829c6d0140e93cfef2ca599b1b07d4a7797` as their
+`last_reviewed_upstream_commit`, reviewed on `2026-08-13`. That commit is the
+peeled `v6.3.0` tag of `obra/superpowers`, and the same value is recorded once
+more at `upstreams.superpowers` as `last_reviewed_commit` /
+`last_reviewed_release` / `last_reviewed_on`, so the upstream carries its review
+point in one place and the components are checked against it.
+
+Reproducible without a tag lookup: at adjudication time upstream's default-branch
+HEAD resolved to that same commit.
+
+```
+git ls-remote https://github.com/obra/superpowers 'refs/tags/v6.3.0*'
+  86babb696875227929e85420f287d6309374b93f  refs/tags/v6.3.0
+  b36e0829c6d0140e93cfef2ca599b1b07d4a7797  refs/tags/v6.3.0^{}
+git ls-remote https://github.com/obra/superpowers HEAD
+  b36e0829c6d0140e93cfef2ca599b1b07d4a7797  HEAD
+```
+
+`upstreams.pr-review-toolkit` gains `last_reviewed_commit` and
+`last_reviewed_on` at its components' existing values, and deliberately **no**
+`last_reviewed_release`: it is a plugin inside a monorepo with no release
+vocabulary, and inventing a label would be exactly the fabrication this register
+exists to prevent. The six agent components are byte-unchanged — that upstream
+contributed zero paths to this delta.
+
+### What was measured
+
+`diff -rq` between the two plugin-cache trees,
+`claude-plugins-official/superpowers/6.2.0` and `.../6.3.0`. Thirty-seven
+differing entries; **thirteen** of them fall under a declared `upstream_path` and
+are the corpus of the table below. The remaining twenty-four are the aggregate
+`SKIP` row.
+
+The cache is `claude-plugins-official`'s repackaging of upstream, not upstream
+itself, so it is corroborated rather than trusted. Five files were fetched from
+`raw.githubusercontent.com` at the peeled tag and compared by sha256 against the
+cache copy — `writing-skills/render-graphs.js`, `writing-plans/SKILL.md`,
+`subagent-driven-development/SKILL.md`, `brainstorming/SKILL.md` and
+`using-superpowers/SKILL.md` — and all five matched. Every "we already have
+this" claim in a reasoning cell below is backed by a probe against UberDev's own
+bytes under `plugins/uberdev/skills/`, never against the cache.
+
+Two upstream files bundle two separable decisions each, so they take two rows:
+`brainstorming/SKILL.md` and `writing-skills/render-graphs.js`. Splitting them is
+the point of adjudicating rather than importing — in both cases one half is
+adoptable and the other is not.
+
+### The verdicts
+
+| Upstream item | Verdict | Reasoning |
+| --- | --- | --- |
+| `brainstorming/SKILL.md`: ceremony tiering (Spike / Bounded / Architectural) and the one-way ratchet | **ADOPT by PORT — #532** | The tiering itself is already here: `solve-pipeline` classifies every issue `trivial` / `small` / `medium` / `large` through `lib/solve_triage.py`, and `/dev` is the shipped spike lane. The **ratchet** is not — a grep of `solve-pipeline/SKILL.md` and `solve_triage.py` for re-classification or tier escalation returns nothing. Tier is computed once, at dispatch, from issue-body signals and never revisited, so a solver that discovers mid-run that its issue is cross-cutting finishes on the lighter workflow and nothing records that it was mis-triaged. |
+| `brainstorming/SKILL.md`: approval gate restated as universal ("Too Simple To Need A Design" becomes "Too Simple To Need Approval") | **DECLINED** | Standing decision, not an open question. `permanent_divergences[].brainstorm-no-approval-gates` (§6) records that UberDev rejects upstream's HARD-GATE and per-section approval checkpoints; quality comes from parallel research and always-on reviewer agents. §6 divergences are never reconciled, so a new upstream phrasing of the same gate changes nothing. |
+| `brainstorming/visual-companion.md`: launcher invoked through `bash` | **ADOPT by PORT — #533** | The changed block is Copilot CLI's, which UberDev does not ship. The defect it fixes is shipped: every UberDev launch block, including **Claude Code (Windows)**, invokes `scripts/start-server.sh` bare and depends on the shebang plus a surviving exec bit. CI runs a `windows-latest` job. Port the `bash` prefix and upstream's stated reason, not the block. |
+| `finishing-a-development-branch/SKILL.md`: worktree removal refused, ask the human | **DECLINED** | Already held, and held more strongly. `finish-branch` removes without `--force` in merge mode and leaves a worktree holding uncommitted work standing with a `WARNING` naming it. Upstream's remedy is a three-option question to a human; UberDev's `--turbo` contract is unattended, so asking would stall a run that has no one to answer. The safety invariant upstream is protecting — never `--force` on your own initiative — is already the shipped behaviour. |
+| `requesting-code-review/code-reviewer.md`: "You Do Not Dispatch Subagents" | **ADOPT by PORT — #530** | This file **is** shipped, and a grep of the component for any never-spawn contract returns nothing. |
+| `subagent-driven-development/SKILL.md`: the no-subagents contract (dispatch bullet and red-flag row) | **ADOPT by PORT — #530** | Contract drift, not absence: `agents/implementation-worker.md` and `lib/child-dispatch.sh` both already state the leaf-worker rule, while the vendored prompt templates that SDD actually pastes into dispatches carry no trace of it. One contract, several uncompared copies. |
+| `subagent-driven-development/SKILL.md`: "Rulings, not stalls" plus four named stop conditions | **ADOPT by PORT — #530** | Split verdict inside one item. The **autonomy** half is already UberDev policy — `--turbo` is unattended by contract and `/goal` carries its own circuit breakers — so there is nothing to adopt there. The **ledger** half is absent: no `Ruling:` convention exists anywhere in the component, so an unattended solver that overrides its plan reports that in prose, if at all. Adopt the structured `Ruling: <what> — <why> — <cost if wrong>` line and its exhaustive end-of-run roll-up. |
+| `subagent-driven-development/SKILL.md`: batched same-shape dispatch, bounded waits, preflight scan-table | **DEFERRED** | Real and wanted, but written against Codex's `wait_agent` event subscription and its V1/V2 lifecycle. UberDev's solvers run in the Workflow runtime (RFC 0015), whose wait surface differs. Re-adjudicate against that surface rather than porting guidance whose cost model does not hold here. |
+| `subagent-driven-development/implementer-prompt.md`: "You Do Not Dispatch Subagents" | **ADOPT by PORT — #530** | Shipped file, same zero-hit grep as the row above. Upstream's stated reason is empirical: every reviewer a worker spawned duplicated the task review the controller dispatched anyway. |
+| `subagent-driven-development/re-review-prompt.md`: no-subagents contract | **SKIP** | Not shipped. The component's files are `SKILL.md`, `implementer-prompt.md`, `code-quality-reviewer-prompt.md` and `spec-reviewer-prompt.md`; there is no local file to review. The contract itself is adopted where UberDev does have a surface for it, under #530. |
+| `subagent-driven-development/task-reviewer-prompt.md`: no-subagents, evidence-legibility and batched-dispatch checks | **SKIP** | Not shipped, per the same file list. |
+| `using-superpowers/SKILL.md`: pointer to `references/hermes-tools.md` | **SKIP** | Adopting the pointer would red `C-REFS`, which requires every relative sibling reference in a declared markdown document to resolve on disk. UberDev ships no `hermes-tools.md`, so the adoption would be a dangling reference by construction. |
+| `using-superpowers/references/codex-tools.md`: multi-agent V1/V2 tools, waiting, model routing | **SKIP** | Not shipped — UberDev's reference set is `configuration.md`, `copilot-tools.md` and `gemini-tools.md`. The transferable half is the waiting guidance, adjudicated as `DEFERRED` two rows above rather than twice. |
+| `using-superpowers/references/hermes-tools.md` (new file) | **SKIP** | Not shipped; UberDev does not target the Hermes harness. |
+| `writing-plans/SKILL.md`: the plan template gains a `Spec:` pointer | **ADOPT by PORT — #531** | Absent locally. It matters more here than upstream: UberDev's medium and large pipeline writes spec and plan as separate artifacts and hands the plan to a solver in a fresh worktree, where nothing today names the spec the plan argues from. `skills/write-plan` is `track`, so adoption reds `C-FILES` until the recorded sha256 is refreshed in the same PR. |
+| `writing-skills/render-graphs.js`: `execSync('which dot')` becomes `execFileSync('dot', ['-V'])` | **ADOPT by PORT — #531** | A genuine portability fix that applies verbatim: the shipped copy still shells out to `which`, which is not a command on Windows, and CI runs a Windows job. `skills/writing-skills` is `track`, so the same `C-FILES` refresh obligation applies. |
+| `writing-skills/render-graphs.js`: CommonJS becomes ESM | **DECLINED** | The worked example of why §7 adjudicates instead of importing — and of checking the hypothesis before recording it. The expected finding was a hard `SyntaxError`, since no `package.json` governs `plugins/uberdev/`. **Measured, it is not:** Node 20.19.2 ships module-syntax detection unflagged, and upstream's 6.3.0 bytes ran unmodified at the UberDev path. The real cost is narrower and still disqualifying — an **undeclared runtime floor**. The identical canary run as `node --no-experimental-detect-module` exits 1 with *"To load an ES module, set `type: module`"*, and this repo declares no `engines` field and pins no CI `node-version`. Adopting the module system would raise the floor to Node 20.19 / 22.7 for a tree that is otherwise CommonJS throughout, buying nothing. Take the `execFileSync` half, leave the `import` half. |
+| Everything outside every declared `upstream_path` | **SKIP** | Measured, not omitted: `.devin-plugin/` and `.hermes-plugin/` (new harnesses), six harness manifests, `.gitignore`, `.version-bump.json`, `README.md`, `RELEASE-NOTES.md`, `package.json`, `scripts/bump-version.sh`, `scripts/sync-to-codex-plugin.sh`, new `docs/superpowers/plans/` and `docs/superpowers/specs/` material, and new `tests/devin/`, `tests/hermes/`, `tests/version-bump/` and `tests/writing-skills/` trees. `.orphaned_at` exists only in the 6.2.0 cache — a cache artifact rather than an upstream path, so it is not adjudicated. |
+
+One question the issue asked explicitly, answered by measurement: **the fix-round
+ladder did not move.** #459 adopted the resume-plus-breaker half at 6.2.0, and
+6.3.0 leaves rounds, cap and escalation identical — the ladder text appears only
+on unchanged context lines in the diff. There is nothing to adopt.
+
+### The seven untouched components
+
+Seven of the 14 `superpowers` components have **no path in this delta at all**.
+Their watermark advance records "reviewed, empty delta" rather than an
+unevidenced claim, and naming them is what makes that difference checkable:
+
+`skills/dispatching-parallel-agents`, `skills/execute-plan`,
+`skills/receiving-code-review`, `skills/systematic-debugging`,
+`skills/test-driven-development`, `skills/using-git-worktrees`,
+`skills/verification-before-completion`.
+
+### What the advance does and does not claim
+
+It is a **review point**, not a proven base.
+
+- `vendored_at_commit` does **not** move. §2.2's two-commits-per-component split
+  is exactly this distinction: `C-BASE` requires an in-file
+  `Vendored from …@<sha>` witness before a base may be pinned, and no such
+  header was written here. Base-pinning stays owned by #503, #504 and #505.
+- `measured_diff_lines` and the §4.2 / §4.3 stance tables stay at their `v6.2.0`
+  measurement. They are deliberately untouched, and #534 owns labelling each
+  measurement with the revision it was taken at — the register and §4.2 already
+  disagree on two components, which is the defect that issue exists to close.
+- Nothing under `plugins/uberdev/skills/` changes in this PR. Every ADOPT row
+  above is a filed issue, and the port is that issue's PR.
+
+`tests/vendor-provenance.test.sh` gains the matching rows: **V30** (every
+component's watermark equals its own upstream's review point), **V31** (every
+labelled review point is named by this RFC, with a vacuity arm so deleting the
+labels reds instead of passing), **V32** (every verdict row above carries exactly
+one token and every ADOPT cites an issue) and **V33** (a component sitting at its
+upstream's review point may be reviewed later than it, never earlier).
+`tests/docs-accuracy.test.sh` gains T3.6, which is what stops a future watermark
+advance from landing with no verdict table behind it.
