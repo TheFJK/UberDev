@@ -2229,6 +2229,46 @@ assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
   "T16.9b the chainComplete symbol resolves in the fleet script"
 
 echo
+echo "== T17: the brainstorm launcher is invoked through bash, with the reason recorded (#533) =="
+# WHY THIS SECTION EXISTS. visual-companion.md prescribed `scripts/start-server.sh` bare — an
+# invocation that only runs where the exec bit survived the distribution path AND the shell honours
+# the shebang. Neither holds on the marketplace copy or on Windows, and the file had ZERO test
+# coverage, so the shape was unfalsifiable and a future editor could "simplify" the prefix back out
+# with nothing noticing. Two halves are locked here:
+#   (a) the shape — every documented launch goes through `bash`, and NO bare form survives at any
+#       indentation, plus the reason recorded where the next editor reads it (the Windows block);
+#   (b) the cross-file citation — orchestrator/SKILL.md quotes a fragment OUT of this file, and it
+#       used to name a LINE RANGE (`visual-companion.md:118-127`). Editing (a) shifted those lines
+#       and silently invalidated it. Same class as #349 / T9: anchor on a SYMBOL that resolves.
+#
+# FLOOR, NOT AN EXACT COUNT (deliberate, see #533 review finding 4). The absence row forbids ANY bare
+# invocation, whitespace-tolerantly — that alone fully enforces "every invocation is prefixed". The
+# companion count row is purely an ANTI-VACUITY floor: it proves the corpus did not shrink to
+# nothing. Pinning it to exactly 7 would red CI the day an eighth launch block is legitimately
+# documented, for no detection gain.
+#
+# CHANGELOG.md:2859 carries the same `:118-127` literal and is deliberately NOT guarded: it is a
+# frozen record of what a past release shipped, and it is a forbidden version surface in the fleet
+# lane (skills/solve-fleet/workflow.js).
+VC_MD="$REPO_ROOT/plugins/uberdev/skills/brainstorm/visual-companion.md"
+ORCH_SKILL="$REPO_ROOT/plugins/uberdev/skills/orchestrator/SKILL.md"
+if [ ! -r "$VC_MD" ] || [ ! -r "$ORCH_SKILL" ]; then
+  echo "  FAIL  T17.0 corpus missing or unreadable — every row below would pass vacuously"
+  echo "        visual-companion: $VC_MD"
+  echo "        orchestrator:     $ORCH_SKILL"
+  FAIL=$((FAIL + 4))
+else
+  assert_absent_fixed "$ORCH_SKILL" 'visual-companion.md:' \
+    "T17.1 the orchestrator's cross-file citation carries no line-number anchor"
+  assert_grep "$ORCH_SKILL" 'Unload when returning to terminal' \
+    "T17.2a the orchestrator anchors on the step's heading text instead"
+  assert_grep "$VC_MD" 'Unload when returning to terminal' \
+    "T17.2b that heading still resolves in the file it cites"
+  assert_grep "$VC_MD" 'Continuing in terminal' \
+    "T17.3 the waiting.html fragment the orchestrator quotes verbatim still exists there"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
