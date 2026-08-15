@@ -464,6 +464,14 @@ const S = {
             tier: { type: "string", enum: ["trivial", "small", "medium", "large"] },
             promptFile: { type: "string" },
             contextFile: { type: "string" }, // schema-prop-unread: an optional manifest field copied verbatim; the solver prompt is built from promptFile
+            // The launcher's triage risk signals for this issue, relayed one hop
+            // (#524 item 3). OPTIONAL on purpose: an older launcher writes a
+            // manifest without the field and its runs must keep working, so the
+            // gate below reads absence and emptiness alike as "no risk". What
+            // makes that safe is the run-wide riskIssueCount join in main() —
+            // without it, a relay that DROPPED the field would be
+            // indistinguishable from a genuinely risk-free batch.
+            riskSignals: { type: "array", maxItems: 64, items: { type: "string" } },
           },
         },
       },
@@ -633,11 +641,16 @@ function intakePrompt() {
     + '  cat "' + manifestPathAbs + '"\n\n'
     + "The file is JSON written by lib/solve-launcher.sh: "
     + '{"schema_version":1,"auto_mode":<bool>,"issues":[{"issue":<int>,"tier":"trivial|small|medium|large",'
-    + '"prompt_file":"<abs path>","context_file":"<abs path, optional>"}, ...]}.\n\n'
+    + '"prompt_file":"<abs path>","context_file":"<abs path, optional>",'
+    + '"risk_signals":["<string>", ...]}, ...]}.\n\n'
     + "Return via StructuredOutput: rc (0 if the file was readable and parsed as that shape, else 1) "
-    + "and issues (one entry per manifest issue, mapping prompt_file -> promptFile and context_file -> "
-    + "contextFile). Copy the values verbatim — do NOT invent, reorder, filter or repair entries, and "
-    + "do not read any other file.";
+    + "and issues (one entry per manifest issue, mapping prompt_file -> promptFile, context_file -> "
+    + "contextFile and risk_signals -> riskSignals). Copy the values verbatim — do NOT invent, reorder, "
+    + "filter or repair entries, and do not read any other file.\n\n"
+    + "`risk_signals` in particular: copy the array EXACTLY as the file holds it, including an empty "
+    + "one. An empty array and a missing key mean different things downstream, so never substitute one "
+    + "for the other, never drop the key from an entry that has it, and never add it to an entry that "
+    + "does not.";
 }
 
 // #515 — the PR-existence proof relay. Same register as intakePrompt(): a
@@ -700,30 +713,105 @@ function researchPrompt(issue, lens, outPath) {
     + "rc (0 on success), headline (one line, <=200 chars).";
 }
 
-function lensBrief(lens) {
-  if (lens === "codebase") {
-    return "- Map the code that the issue actually concerns: entry points, the call path, the modules "
-      + "that would change.\n- Record existing conventions and patterns the fix must match.\n"
-      + "- Name the exact files a fix would touch.";
-  }
-  if (lens === "constraints") {
-    return "- Read this repository's own rule documents, skipping any that do not exist and treating "
-      + "absence as an answer rather than an error: `AGENTS.md` and `CLAUDE.md` at the repo root, "
-      + "`.claude/CLAUDE.md`, any nested copy of either alongside the files this issue touches, and the "
-      + "`docs/rfc/*.md` and `docs/adr/*.md` entries relevant to the issue when those directories exist. "
-      + "`~/.claude/CLAUDE.md` is user-global, not this repository's rules — read it for context, never "
-      + "quote it as a project constraint.\n"
-      + "- Surface the hard architectural mandates, prior decisions and release rituals that constrain "
-      + "the design space. Quote them verbatim with a `path:line` you actually opened; a constraint you "
-      + "cannot point at in a file does not go in the artifact.\n"
-      + "- Call out anything the fix MUST NOT break.\n"
-      + "- If none of those sources exist, say so in `## Constraints` in one line — do not substitute "
-      + "conventions inferred from the code and present them as written rules. If a source exists but "
-      + "you could not read it, report that as a risk: silence is not the same as absence.";
-  }
-  return "- Detect the test runner and the test files covering the affected surface.\n"
+// The lenses EVERY design-tier issue spends, and the one it spends only when the
+// launcher's triage said so. `security` is deliberately not a member: it is
+// concatenated at the dispatch site under hasRiskSignal(), so the base list
+// stays the thing a reader can trust as unconditional.
+const BASE_LENSES = ["codebase", "constraints", "test-coverage"];
+
+// One brief per lens, keyed by the name the fan-out dispatches under. A MAP, not
+// an if-chain: an if-chain's last branch is a brief that any unrecognised name
+// falls through to, which is how a lens gets handed another lens's brief and
+// nothing fails. Adding a name to the vocabulary without adding its entry is now
+// a throw at the one site that reads this table (tests/solve-fleet-workflow.test.sh
+// G34 joins the two lists so the throw is found by CI rather than in production).
+const LENS_BRIEFS = {
+  "codebase": "- Map the code that the issue actually concerns: entry points, the call path, the modules "
+    + "that would change.\n- Record existing conventions and patterns the fix must match.\n"
+    + "- Name the exact files a fix would touch.",
+  "constraints": "- Read this repository's own rule documents, skipping any that do not exist and treating "
+    + "absence as an answer rather than an error: `AGENTS.md` and `CLAUDE.md` at the repo root, "
+    + "`.claude/CLAUDE.md`, any nested copy of either alongside the files this issue touches, and the "
+    + "`docs/rfc/*.md` and `docs/adr/*.md` entries relevant to the issue when those directories exist. "
+    + "`~/.claude/CLAUDE.md` is user-global, not this repository's rules — read it for context, never "
+    + "quote it as a project constraint.\n"
+    + "- Surface the hard architectural mandates, prior decisions and release rituals that constrain "
+    + "the design space. Quote them verbatim with a `path:line` you actually opened; a constraint you "
+    + "cannot point at in a file does not go in the artifact.\n"
+    + "- Call out anything the fix MUST NOT break.\n"
+    + "- If none of those sources exist, say so in `## Constraints` in one line — do not substitute "
+    + "conventions inferred from the code and present them as written rules. If a source exists but "
+    + "you could not read it, report that as a risk: silence is not the same as absence.",
+  "test-coverage": "- Detect the test runner and the test files covering the affected surface.\n"
     + "- Map which behaviours are already pinned by tests and which are uncovered.\n"
-    + "- Name the specific test files a fix should extend, and the shape of the tests to add.";
+    + "- Name the specific test files a fix should extend, and the shape of the tests to add.",
+  // Mirrors the JOB of agents/research-security.md — the fleet cannot read agent
+  // cards (no fs), so that card is precedent here, not an input. Deliberately
+  // written to survive a stack it does not recognise and a scanner it does not
+  // have: a lens that reports "I could not scan" is worth more than one that
+  // invents findings, and the issue's own risk signals are NOT repeated here
+  // (presence is what bought this agent; the strings are not information it needs).
+  "security": "- Identify the stack from the dependency manifests that actually exist "
+    + "(`package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Gemfile`, …) and "
+    + "say which ones resolved it.\n"
+    + "- Run a SAST pass over the slice this issue touches if a scanner is available to you (Semgrep "
+    + "`p/ci`, plus `p/xss` when a web stack is present). If none is, say so plainly as a risk — an "
+    + "unscanned run must never read as a clean one.\n"
+    + "- Cross-reference the detected stack against the `awesome-secure-defaults` catalogue: which "
+    + "hardening libraries this project already adopts, and which gaps are real for THIS stack. Skip "
+    + "recommendations for languages the project does not use.\n"
+    + "- Answer the OWASP floor for the affected surface: untrusted input that reaches a sink, "
+    + "authn/authz decisions, secrets and credentials in code or logs, injection, unsafe deserialisation, "
+    + "and dependency risk.\n"
+    + "- Report findings as `path:line` plus rule id and severity. Never paste source or secret material "
+    + "into the artifact, and never report a finding you did not observe.",
+};
+
+// Anything not in the table THROWS. Not "" and not undefined: an empty brief
+// degrades to an agent told to investigate through no lens at all, which is the
+// same silent failure wearing a different mask. The throw is raised where
+// solveOne() can catch it — see the eager prompt build at the fan-out — so an
+// unknown lens costs exactly one issue, loudly, instead of being laundered by
+// parallel()'s throwing-thunk-to-null contract into "a research agent returned
+// null". hasOwnProperty for the FINDINGS_KINDS reason: an inherited
+// "constructor" would otherwise resolve to a function and be handed to an agent.
+function lensBrief(lens) {
+  if (!Object.prototype.hasOwnProperty.call(LENS_BRIEFS, lens)) {
+    throw new Error("no research brief for lens: " + String(lens));
+  }
+  return LENS_BRIEFS[lens];
+}
+
+// PAIRED PREDICATE — "at least one non-blank string".
+// Its twin is the run-wide count lib/solve-launcher.sh derives from the manifest
+// it just wrote, at the `SOLVE_FLEET_RISK_ISSUES=` assignment; each comment names
+// the other, and tests/solve-fleet-workflow.test.sh S24 joins the two ends so
+// neither can ship alone. They must agree BY CONSTRUCTION, because the relay
+// check below audits their disagreement as a relay failure — a predicate that
+// drifted here would report a fault in the launcher.
+//
+// Deliberately NOT a `CONTRACT:` marker: that marker is reserved (#370/#371) for
+// a closed VOCABULARY whose members tests/contract_markers.py extracts and
+// compares. This is one boolean rule with no member list, and claiming the
+// marker for it makes the extractor pick a one-member span — a real guard
+// reddening on a shape it was never meant to hold.
+//
+// NON-BLANK, not merely non-empty: `[" "]` is a manifest artefact, not a risk
+// finding, and treating it as one buys an agent per issue for a stray space.
+// No vocabulary is applied — re-declaring lib/solve_triage.py's RISK_PATTERNS
+// names here would be a second uncompared copy of a closed vocabulary (#370) and
+// would have this script invent a risk taxonomy. Emptiness needs no vocabulary.
+function riskSignalCount(rec) {
+  if (!rec || !Array.isArray(rec.riskSignals)) return 0;
+  var n = 0;
+  for (var i = 0; i < rec.riskSignals.length; i += 1) {
+    var s = rec.riskSignals[i];
+    if (typeof s === "string" && /\S/.test(s)) n += 1;
+  }
+  return n;
+}
+function hasRiskSignal(rec) {
+  return riskSignalCount(rec) > 0;
 }
 
 function specPrompt(issue, researchPaths) {
@@ -2254,11 +2342,33 @@ async function solveOne(rec) {
       // instead, which is the runtime's documented way to group concurrent
       // work. meta.phases still declares research/design/implement; declaring
       // a phase without ever emitting it globally is legal (T2).
-      const lenses = ["codebase", "constraints", "test-coverage"];
-      const researched = await parallel(lenses.map(function (lens) {
+      // The security lens is the one CONDITIONAL research rung (#524 item 3).
+      // Its predicate is not invented here: lib/solve-launcher.sh already
+      // computes triage risk signals for every issue, and since this change the
+      // manifest record carries them across the single hop into the fleet.
+      // Presence only — the signal STRINGS reach no prompt and no audit event,
+      // because the lens does the same work whatever they said.
+      const riskCount = riskSignalCount(rec);
+      const lenses = riskCount > 0 ? BASE_LENSES.concat(["security"]) : BASE_LENSES;
+      if (riskCount > 0) {
+        auditEvents.push({ event: "security_lens_dispatched", issue: rec.issue,
+          signalCount: riskCount, ts: nowIso });
+      }
+      // The prompts are built EAGERLY, outside the thunks, and that placement is
+      // load bearing. parallel()'s contract maps a throwing thunk to null in its
+      // slot and never rejects, so a lensBrief() throw raised inside a thunk
+      // would become a null return, trip the count check below and be recorded
+      // as noteNull("research") — an unknown lens laundered into "a research
+      // agent returned null", which is a different and much smaller fact. Built
+      // out here, the throw lands in solveOne's own catch: solve_chain_threw
+      // plus a FAILED record for this issue, and no other issue disturbed.
+      const lensJobs = lenses.map(function (lens) {
+        return { lens: lens, prompt: researchPrompt(rec.issue, lens, dir + "/research-" + lens + ".md") };
+      });
+      const researched = await parallel(lensJobs.map(function (job) {
         return function () {
-          return agent(researchPrompt(rec.issue, lens, dir + "/research-" + lens + ".md"),
-            { label: "research:#" + rec.issue + ":" + lens, phase: "research", schema: S.research });
+          return agent(job.prompt,
+            { label: "research:#" + rec.issue + ":" + job.lens, phase: "research", schema: S.research });
         };
       }));
       const paths = researched.filter(Boolean)
@@ -2447,6 +2557,44 @@ async function main() {
         + "issue keeps its `uberdev:active` label and must be released or re-run, and any "
         + "manifest-only issue is ignored because it was never claimed.");
     }
+    // ---- relay fidelity for the risk-signal channel (#524 item 3) ----
+    // The negative branch of the security gate is UNFALSIFIABLE on its own: an
+    // absent `riskSignals` and an empty one behave identically, so a relay that
+    // dropped, renamed or mangled the field looks exactly like a genuinely
+    // risk-free batch and the lens silently never runs. The launcher therefore
+    // declares a run-wide count DERIVED FROM THE MANIFEST IT JUST WROTE, and
+    // this is the join: two independent readings of the same bytes, compared.
+    //
+    // Counted over the RAW relayed list, never over intakeIssues: the
+    // cross-check above already has its own audit event, and folding the two
+    // together would make a relay-fidelity failure and a claim mismatch
+    // indistinguishable. -1 means the launcher declared nothing (an older
+    // envelope), and then neither check runs — degrading to silence, not noise.
+    const riskIssueCount = clampInt(CFG.riskIssueCount, 0, 4096, -1);
+    if (riskIssueCount >= 0) {
+      const riskObserved = intake.issues.filter(function (r) { return hasRiskSignal(r); }).length;
+      // The cheaper LOCATOR: how many records carry no `riskSignals` key at
+      // all. That is the drop/rename shape specifically, which the count
+      // comparison alone cannot separate from a mangled value.
+      const riskMissing = intake.issues.filter(function (r) {
+        return r && typeof r === "object" && !("riskSignals" in r);
+      }).length;
+      if (riskObserved !== riskIssueCount) {
+        auditEvents.push({ event: "risk_signals_relay_mismatch", declared: riskIssueCount,
+          observed: riskObserved, ts: nowIso });
+        log("intake: the launcher declared " + riskIssueCount + " issue(s) carrying triage risk signals "
+          + "but the relayed manifest shows " + riskObserved + " — the security research lens is gated on "
+          + "that field, so this run may skip it where it was owed (or spend it where it was not)");
+      }
+      if (riskMissing > 0) {
+        auditEvents.push({ event: "risk_signals_absent", records: riskMissing, ts: nowIso });
+        log("intake: " + riskMissing + " relayed record(s) carry no risk-signal field at all, though the "
+          + "launcher declared the channel — the relay dropped or renamed it");
+      }
+      // NOTHING above carries a signal STRING: counts only. The values are
+      // triage output about the issue and no consumer of this audit trail needs
+      // them (DR-5).
+    }
     if (intakeIssues.length < 1) {
       log("intake: nothing to solve after cross-check — aborting");
       return emitResult();
@@ -2463,22 +2611,36 @@ async function main() {
     // a PR", because that is unknowable before dispatch and a ceiling that
     // under-projects is not a ceiling. Hence the leading 2.
     //
-    // A design tier additionally spends 3 research + 1 spec + 1 spec-review + 1
-    // spec-revise + 1 plan + 1 plan-review (8), and its implement phase is a
-    // per-task chain bounded by CB3's IMPLEMENT_AGENT_BUDGET rather than the
-    // single solver (#508) — hence the `- 1`, which is that issue's own solver,
-    // already counted in intakeIssues.length.
+    // A design tier additionally spends 3 research + 1 security research + 1
+    // spec + 1 spec-review + 1 spec-revise + 1 plan + 1 plan-review (9), and its
+    // implement phase is a per-task chain bounded by CB3's
+    // IMPLEMENT_AGENT_BUDGET rather than the single solver (#508) — hence the
+    // `- 1`, which is that issue's own solver, already counted in
+    // intakeIssues.length.
     // SHARED COST: solve-fleet-per-issue-agent-cost
     // CB1 is a PRE-DISPATCH projection and the task count T is unknowable before
     // the plan is written, so projecting the live cap is the only honest upper
-    // bound. It is deliberately pessimistic in the same way about the revision
-    // round (#524 item 1): that rung fires only on a non-APPROVE verdict, and no
-    // verdict exists yet at projection time, so a ceiling that discounted it
-    // would under-project exactly the runs that go worst. The plan review (#524
-    // item 2) needs no such allowance — every accepted plan is reviewed. A clean
-    // 2-task issue whose spec is approved spends ~7 of the 8.
+    // bound. TWO of the nine are charged UNCONDITIONALLY although both are
+    // conditional at run time, for two DIFFERENT reasons, and neither is "we
+    // could not tell":
+    //   - the revision round (#524 item 1) fires only on a non-APPROVE verdict,
+    //     and no verdict exists yet at projection time. Genuinely unknowable.
+    //   - the security lens (#524 item 3) fires only on an issue whose relayed
+    //     triage risk signals are non-empty, and that IS readable here — the
+    //     manifest has been relayed by now. It is charged flat anyway because
+    //     this term is a per-design-issue CONSTANT multiplied by designCount,
+    //     and it is a SHARED constant: skills/goal-pipeline/workflow.js projects
+    //     its cycles from the same number BEFORE any claim pass has run, so no
+    //     manifest exists on that side at all. A per-issue-variable term here
+    //     would either desynchronise the two or force /goal to project low,
+    //     and an accumulator that reads low is worse than none — CB1 is the only
+    //     NAMED halt.
+    // Both directions of that trade are bounded by the same rule: a ceiling that
+    // under-projects is not a ceiling. The plan review (#524 item 2) needs no
+    // allowance at all — every accepted plan is reviewed. A clean, risk-free
+    // 2-task issue whose spec is approved spends ~7 of the 9.
     const designCount = intakeIssues.filter(function (r) { return DESIGN_TIERS[r.tier] === 1; }).length;
-    const projected = 2 + intakeIssues.length + (designCount * (8 + IMPLEMENT_AGENT_BUDGET - 1));
+    const projected = 2 + intakeIssues.length + (designCount * (9 + IMPLEMENT_AGENT_BUDGET - 1));
     if (projected > maxAgents) {
       cb1Tripped = true;
       auditEvents.push({ event: "agent_ceiling_cb1", projected: projected, maxAgents: maxAgents, ts: nowIso });

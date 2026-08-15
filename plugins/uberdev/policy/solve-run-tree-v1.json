@@ -25,6 +25,7 @@
           "plan_review",
           "research.codebase",
           "research.constraints",
+          "research.security",
           "research.test_coverage",
           "review.tN.rN",
           "solve",

@@ -128,7 +128,7 @@ where fan-out is `parallel()` and every agent stays a leaf:
 | Tier | Chain |
 |---|---|
 | `trivial`, `small` | ONE solver agent, `isolation:"worktree"`. Byte-for-byte the same brief the detached session got. |
-| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → **one** bounded revision round on any non-`APPROVE` verdict, writing a sibling `spec-r1.md` instead of rewriting `spec.md` in place, and never re-reviewed → plan writer, pointed at the revision only when it lands at exactly that path → **plan reviewer**, whose blocking findings ARE its output (nothing rewrites the plan) and are forwarded in the same envelope to all three rungs that read it — the implementer, task reviewer and fixer → a sequential per-task chain (implementer → reviewer → bounded fix ladder) in one script-named worktree, then one delivery agent (#508). |
+| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage — plus a fourth **`security` lens** on any issue whose relayed triage `risk_signals` hold at least one non-blank entry) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → **one** bounded revision round on any non-`APPROVE` verdict, writing a sibling `spec-r1.md` instead of rewriting `spec.md` in place, and never re-reviewed → plan writer, pointed at the revision only when it lands at exactly that path → **plan reviewer**, whose blocking findings ARE its output (nothing rewrites the plan) and are forwarded in the same envelope to all three rungs that read it — the implementer, task reviewer and fixer → a sequential per-task chain (implementer → reviewer → bounded fix ladder) in one script-named worktree, then one delivery agent (#508). |
 
 Only the **solver** is worktree-isolated. Research and design agents are
 read-only and write to absolute paths under the run dir — an isolated
@@ -144,7 +144,7 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (8 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the conditional spec-revision rung, since no verdict exists yet at projection time. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | (#508) live per-issue implement-phase agent counter over `implementBudget` → stop the task loop, record the remaining tasks `SKIPPED`, audit `implement_budget_exhausted`, and still deliver what is committed |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
@@ -482,9 +482,20 @@ Every loss below is **printed, never silent** — in this section, in
   rungs that read the plan. All three, because the per-task reviewer already
   treats work outside a task's section as a blocking finding — telling only the
   implementer that a plan-review finding may be answered would put the two gates
-  in contradiction over one document and burn a fix round on correct work. The
-  parity gap that remains is the SDD wave decomposition named at the top of this
-  entry, not a missing review rung.
+  in contradiction over one document and burn a fix round on correct work.
+  **#524 item 3 closed the security-research gap**, moving the CB1 constant to 9:
+  the launcher already computed a triage risk predicate for every issue and
+  persisted it into the prepared root request, and it was dropped on exactly one
+  hop — the per-issue manifest record, which is the only channel into a Workflow
+  script. That hop now carries it, and an issue with at least one non-blank
+  signal buys a fourth `security` research lens. Presence and counts only: no
+  signal string reaches a prompt or an audit event, and the script applies no
+  risk vocabulary of its own. Because an absent field and an empty one gate the
+  lens identically, the launcher also declares a run-wide `riskIssueCount` that
+  the script joins against the relayed records — otherwise a relay that dropped
+  the field would be indistinguishable from a risk-free batch. The parity gap
+  that remains is the SDD wave decomposition named at the top of this entry, not
+  a missing research or review rung.
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not

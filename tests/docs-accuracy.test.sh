@@ -1918,6 +1918,27 @@ else
   PASS=$((PASS + 1))
 fi
 
+# #524 item 3. The security lens is the first CONDITIONAL research rung, and the
+# condition lives in another file: lib/solve-launcher.sh's triage `risk_signals`,
+# carried one hop through the manifest record and joined run-wide by the
+# `riskIssueCount` envelope key. Three separate statements, so three rows —
+# naming the lens while leaving the gate undocumented would describe a fan-out
+# that reads as unconditional, which is precisely the design this change
+# rejected, and an operator reading the envelope table would find a key the
+# launcher sends and the doc does not admit to.
+#
+# Same TIER-ROW anchor as T14.7-T14.9 for the chain rows, for the same reason:
+# each doc describes the chain in exactly one line, and a file-wide needle lets
+# the claim drift into a footnote while the row a reader consults stays stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11a SKILL.md chain row names the security lens AND the triage field that gates it"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11b RFC 0015 chain row names the same risk-gated lens"
+assert_grep "$SOLVE_FLEET_SKILL" 'one record per issue.*risk_signals' \
+  "T14.11c SKILL.md records that the manifest record carries risk_signals — the one hop the value crosses"
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .riskIssueCount. \|' \
+  "T14.11d SKILL.md envelope-keys table documents riskIssueCount"
+
 echo "== T15: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
 # Extraction. The RFC's field list lives in a ```text fence that does NOT
 # immediately follow its anchor line — there is a blank line between them — so

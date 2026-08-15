@@ -164,8 +164,14 @@ function buildArgs() {
     }
   };
 }
-function issueRec(issue, tier) {
-  return { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+// riskSignals is OPTIONAL and, on the design-tier issue, NON-EMPTY (#524 item
+// 3): the security research lens is gated on it, so a fixture that omitted the
+// field would never reach that rung and C1 would certify an agent_kinds list
+// missing it — the same blindness that once hid three chain rungs here.
+function issueRec(issue, tier, riskSignals) {
+  var r = { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+  if (riskSignals) { r.riskSignals = riskSignals; }
+  return r;
 }
 function solvedRec(issue, pr) {
   return {
@@ -186,10 +192,11 @@ function taskRec(id, extra) {
 }
 function agentReturns() {
   return {
-    "manifest-intake": { rc: 0, issues: [issueRec(11, "medium"), issueRec(12, "trivial")] },
+    "manifest-intake": { rc: 0, issues: [issueRec(11, "medium", ["security"]), issueRec(12, "trivial")] },
     "research:#11:codebase": { artifactPath: RD + "/issue-11/research-codebase.md", rc: 0, headline: "h" },
     "research:#11:constraints": { artifactPath: RD + "/issue-11/research-constraints.md", rc: 0, headline: "h" },
     "research:#11:test-coverage": { artifactPath: RD + "/issue-11/research-test-coverage.md", rc: 0, headline: "h" },
+    "research:#11:security": { artifactPath: RD + "/issue-11/research-security.md", rc: 0, headline: "h" },
     "spec:#11": { path: RD + "/issue-11/spec.md", rc: 0, headline: "h" },
     // NOT an APPROVE (#524). The bounded spec-revision round is conditional on a
     // non-APPROVE verdict, so an approving fixture never reaches the reviser and
@@ -356,7 +363,7 @@ function rC3(t) {
 // shrunken set. Raise it deliberately when the fleet legitimately grows; the C1
 // comparator is what proves the two lists match, and this is what proves the
 // list was measured against a fleet that actually ran.
-var EXECUTED_KIND_FLOOR = 15;
+var EXECUTED_KIND_FLOOR = 16;
 
 function rC4(live) {
   return live.length >= EXECUTED_KIND_FLOOR

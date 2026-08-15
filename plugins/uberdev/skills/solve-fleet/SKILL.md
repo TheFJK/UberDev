@@ -43,7 +43,7 @@ leaf agent cannot do that, so **the orchestration moved into the script**:
 | Tier | What the fleet runs |
 |---|---|
 | `trivial`, `small` | ONE solver agent (`isolation:"worktree"`). Unchanged from the detached-session behaviour — those tiers were always a single session. |
-| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → on any non-`APPROVE` verdict, **one** spec-revision round and never more — the #308 class; the reviser writes a sibling `spec-r1.md` rather than rewriting `spec.md` in place, so a half-written revision degrades to the original spec, and it is not re-reviewed → plan writer, pointed at the revision when it lands at exactly that path and at the original otherwise → **plan reviewer** — the plan is never rewritten, so its blocking findings ARE its output and they are forwarded, in the same envelope, to all three rungs that read the plan: the implementer, task reviewer and fixer (a finding reaching only the implementer would have the task reviewer report a correct deviation as scope creep) → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
+| `medium`, `large` (`--full`) | `parallel()` research fan-out (codebase / constraints / test-coverage — plus a fourth **`security` lens** on any issue whose relayed triage `risk_signals` hold at least one non-blank entry; absent and empty alike buy the 3-lens fan-out) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → on any non-`APPROVE` verdict, **one** spec-revision round and never more — the #308 class; the reviser writes a sibling `spec-r1.md` rather than rewriting `spec.md` in place, so a half-written revision degrades to the original spec, and it is not re-reviewed → plan writer, pointed at the revision when it lands at exactly that path and at the original otherwise → **plan reviewer** — the plan is never rewritten, so its blocking findings ARE its output and they are forwarded, in the same envelope, to all three rungs that read the plan: the implementer, task reviewer and fixer (a finding reaching only the implementer would have the task reviewer report a correct deviation as scope creep) → a **sequential per-task loop** (implementer → reviewer → bounded fix ladder, at most `FIX_ROUNDS` = 3 fixes and 4 reviews per task) in ONE script-named worktree at `<runDirAbs>/worktrees/issue-<N>` → one delivery agent (full suite, push, PR). |
 | any tier with **no usable plan** | falls back to the single solver above — no plan means no tasks, so there is no boundary a **review gate** could sit on. |
 
 Only the **solver** is worktree-isolated. The research and design agents are
@@ -106,10 +106,13 @@ SOLVE_FLEET_WORKFLOW_JS="$UBERDEV_PLUGIN_ROOT/skills/solve-fleet/workflow.js"
 [ -f "$SOLVE_FLEET_WORKFLOW_JS" ] || { echo "error: ... missing (RFC 0012 §4.1)" >&2; exit 2; }
 ```
 
-It writes `$UBERDEV_TMPDIR/solve-fleet-manifest.json` (one record per issue:
-`issue`, `tier`, `prompt_file`, and the `context_file`/`context_sha256` from the
-prepared root request), then emits the args envelope via
-`uberdev_emit_workflow_args solve-fleet …` between the
+It writes `$UBERDEV_TMPDIR/solve-fleet-manifest.json` with
+one record per issue: `issue`, `tier`, `prompt_file`, `risk_signals`, and the
+`context_file`/`context_sha256` from the prepared root request. The triage
+`risk_signals` array is written ALWAYS, including empty: the manifest is the
+only channel into a Workflow script, and an absent key has to keep meaning "the
+relay dropped it" rather than "this issue had no risk". It then emits the args
+envelope via `uberdev_emit_workflow_args solve-fleet …` between the
 `WORKFLOW_ARGS_BEGIN`/`WORKFLOW_ARGS_END` markers. The command file relays that
 JSON **verbatim** (DR-2 — no LLM-composed handoffs):
 
@@ -124,6 +127,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 | `manifestPathAbs` | the per-issue manifest the `intake` relay reads |
 | `issues` | comma-joined issue numbers — cross-checked against the manifest |
 | `issueCount` | declared count; a mismatch is recorded as an audit event |
+| `riskIssueCount` | how many of those issues carry non-blank triage `risk_signals`, derived from the manifest the launcher just wrote. The script re-counts the relayed records and audits `risk_signals_relay_mismatch` / `risk_signals_absent` on a disagreement — counts only, never signal text. Absent on a pre-#524 envelope, and then neither check runs. |
 | `concurrency` | wave size (`fanout_concurrency.solve_bg`, default 6) |
 | `autoMode` | true for `/turbo` (unattended) |
 | `runDirAbs` | where prompts, contexts and per-issue design artifacts live |
@@ -136,7 +140,7 @@ Workflow({scriptPath: "$CLAUDE_PLUGIN_ROOT/skills/solve-fleet/workflow.js"}, <th
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (8 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the conditional spec-revision rung, since no verdict exists yet at projection time. The plan review needs no such allowance: every accepted plan is reviewed. |
+| CB1 | projected agents (`2 + issues + (9 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the two other conditional rungs: the spec-revision round (no verdict exists yet at projection time) and the risk-gated `security` research lens — whose gate IS readable by then, but whose cost is a per-design-issue constant shared with `/goal`'s own cycle projection, which runs before any manifest exists. The plan review needs no such allowance: every accepted plan is reviewed. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | a **live** counter of implement-phase agents per issue against `implementBudget`. On exhaustion the task loop stops, the remaining tasks are recorded `SKIPPED`, `implement_budget_exhausted` is audited — and delivery still runs on what is already committed (the one dispatch deliberately exempt, so reviewed commits never strand in a worktree). |
 | — | a per-issue chain that throws is caught and recorded as `FAILED` for that issue only; one bad issue never takes the batch down |

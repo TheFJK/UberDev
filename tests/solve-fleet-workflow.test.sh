@@ -242,6 +242,50 @@ else
   fail "S22c UBERDEV_GOAL_MAX_AGENTS does not default to 900 — /goal CB1 would halt on cycle 1"
 fi
 
+# S23 (#524 item 3) — the risk-signal channel is a JOIN, and either half alone
+# is worthless.
+#
+# The triage predicate is computed for every issue and persisted into the
+# prepared root request on every backend; it is dropped on exactly ONE hop, the
+# per-issue manifest record. That record is the only channel into a Workflow
+# script (no fs), so a launcher that writes the field to a manifest the schema
+# does not declare buys nothing, and a schema that declares a field no launcher
+# writes gates the lens permanently OFF. One row over both ends, so neither can
+# ship alone and read as done.
+S23_LAUNCHER=0
+S23_SCRIPT=0
+grep -q 'rec\["risk_signals"\]' "$LAUNCHER" && grep -q '"${RISKS\[\$_midx\]}"' "$LAUNCHER" && S23_LAUNCHER=1
+grep -q 'riskSignals: { type: "array"' "$WORKFLOW" && S23_SCRIPT=1
+if [ "$S23_LAUNCHER" = "1" ] && [ "$S23_SCRIPT" = "1" ]; then
+  pass "S23 the launcher writes the triage risk_signals into every manifest record AND S.intake declares riskSignals"
+else
+  fail "S23 the risk-signal channel is half-built (launcher=$S23_LAUNCHER script=$S23_SCRIPT) — the security lens would be gated on a field that never crosses"
+fi
+
+# S24 — the same join for the COUNT channel, which is the negative branch's only
+# failure signal. Absent `riskSignals` and empty `riskSignals` behave alike by
+# design, so a relay that drops or renames the field looks exactly like a
+# risk-free batch. The launcher declares a run-wide count derived from the
+# manifest it just wrote; the script reads it and compares. Either half alone is
+# a number nobody checks, or a check against a number nobody sends.
+# Scoped to the emission block, not to the whole file: a `riskIssueCount=`
+# assignment elsewhere in the launcher is a local variable, not an envelope key,
+# and this row would then pass on a value the script never receives. Captured
+# first and read from a herestring — a `sed | grep -q` consumed as a truth value
+# is the EPIPE-poisoned shape tests/epipe-guard.test.sh forbids.
+S24_EMIT_BLOCK="$(sed -n '/uberdev_emit_workflow_args solve-fleet/,/^$/p' "$LAUNCHER")"
+S24_LAUNCHER=0
+S24_SCRIPT=0
+grep -q 'riskIssueCount=' <<<"$S24_EMIT_BLOCK" && S24_LAUNCHER=1
+grep -q 'CFG\.riskIssueCount' "$WORKFLOW" && S24_SCRIPT=1
+if [ -z "$S24_EMIT_BLOCK" ]; then
+  fail "S24 the solve-fleet args-emission block did not slice — the launcher half of this join would inspect nothing"
+elif [ "$S24_LAUNCHER" = "1" ] && [ "$S24_SCRIPT" = "1" ]; then
+  pass "S24 the launcher emits riskIssueCount in the solve-fleet envelope AND the script joins it against the relayed records"
+else
+  fail "S24 the risk-signal relay-fidelity join is half-built (launcher=$S24_LAUNCHER script=$S24_SCRIPT) — a dropped field would be indistinguishable from a risk-free batch"
+fi
+
 echo "== S: command files mandate the Workflow call =="
 for f in "$SOLVE_CMD" "$TURBO_CMD"; do
   base="$(basename "$f")"
@@ -570,6 +614,58 @@ else
   pass "G33 findingsSection() is ONE carrier selected by a closed kind table, each source tag built exactly once, every call site kinded"
 fi
 
+# G34 (#524 item 3) — lensBrief() is TOTAL, and its vocabulary is JOINED to the
+# one the research fan-out iterates.
+#
+# The old form was `if codebase / if constraints / <bare return of the coverage
+# brief>`: adding a lens name without adding its brief silently handed the new
+# agent the test-coverage brief, and nothing anywhere failed. B277/B279 catch
+# that at the two names this change introduces; this row catches it for the NEXT
+# lens, which is the one no behavioural fixture has been written for yet.
+#
+# Three halves, because each alone is satisfiable by the bug:
+#   - the briefs live in a MAP, so an unlisted name has nowhere to fall through
+#     to (an if-chain always has a last branch);
+#   - the function THROWS on an unknown name rather than returning anything —
+#     including rather than returning "" or undefined, which would degrade to an
+#     agent asked to investigate through no lens at all;
+#   - every member of the live BASE_LENSES vocabulary, PLUS the risk-gated
+#     `security` lens, has an entry. Read out of the script rather than retyped:
+#     a retyped list is the #370 shape, and this row exists precisely because a
+#     vocabulary and its brief table are one contract in two places.
+LENS_VOCAB_RAW="$(sed -n 's/^const BASE_LENSES = \[\(.*\)\];$/\1/p' "$WORKFLOW" | tr -d '\r')"
+LENS_BRIEF_KEYS="$(sed -n '/^const LENS_BRIEFS = {/,/^};$/p' "$WORKFLOW" \
+  | sed -n 's/^  "\([A-Za-z0-9_-]*\)":.*/\1/p' | tr -d '\r')"
+LENS_FN_BODY="$(sed -n '/^function lensBrief(lens) {/,/^}$/p' "$WORKFLOW" | tr -d '\r')"
+G34_MISSING=""
+if [ -z "$LENS_VOCAB_RAW" ] || [ -z "$LENS_BRIEF_KEYS" ] || [ -z "$LENS_FN_BODY" ]; then
+  # Every arm below reads one of these three; an empty capture would make the
+  # whole row inspect nothing and pass (#347).
+  fail "G34 could not read BASE_LENSES / LENS_BRIEFS / lensBrief() out of the fleet script — the totality check would inspect nothing"
+else
+  # The required set: the base vocabulary as the script declares it, plus the
+  # conditional lens, which is NOT in BASE_LENSES precisely because it is gated.
+  LENS_REQUIRED="$(printf '%s\n' "$LENS_VOCAB_RAW" | tr -d '" ' | tr ',' '\n'; printf 'security\n')"
+  while IFS= read -r lens; do
+    [ -n "$lens" ] || continue
+    grep -qxF -- "$lens" <<<"$LENS_BRIEF_KEYS" || G34_MISSING="$G34_MISSING $lens"
+  done <<<"$LENS_REQUIRED"
+  LENS_FN_RETURNS="$(grep -cE '^[[:space:]]*return ' <<<"$LENS_FN_BODY")"
+  if ! grep -q 'throw new Error("no research brief for lens: "' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief() does not throw on an unknown lens — an unlisted name would degrade silently instead of failing the issue's chain"
+  elif [ "$LENS_FN_RETURNS" != "1" ]; then
+    # EXACTLY one, not "at least one that reads the table": a second return is
+    # the bare fallthrough itself, and it would sit happily beside a correct one.
+    fail "G34 lensBrief() has $LENS_FN_RETURNS return statements, want exactly 1 — a second one is the bare fallthrough this row forbids"
+  elif ! grep -q 'return LENS_BRIEFS\[lens\];' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief()'s single return does not read the brief table — the briefs would not be the one source"
+  elif [ -n "$G34_MISSING" ]; then
+    fail "G34 a live lens has no entry in LENS_BRIEFS:$G34_MISSING"
+  else
+    pass "G34 lensBrief() is total: briefs live in one map, an unknown name throws, and every live lens (BASE_LENSES + security) has an entry"
+  fi
+fi
+
 # G18 — CB1 accounting must move WITH the agent. The proof relay is a real
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
@@ -737,8 +833,15 @@ function buildArgs(extra, cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "solve-fleet", config: cfg }, extra || {});
 }
 function intake(issues) { return { rc: 0, issues: issues }; }
-function rec(issue, tier) {
-  return { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+// `extra` (#524 item 3) is OPTIONAL and merged in, so the ~30 existing two-arg
+// call sites keep producing the canonical record byte for byte. The security
+// lens is gated on a manifest field, and a field this fixture could not OMIT
+// would make the back-compat arm (an unpatched launcher relaying no
+// `riskSignals` at all) untestable — absence is one of the three states.
+function rec(issue, tier, extra) {
+  const r = { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+  if (extra) Object.keys(extra).forEach(function (k) { r[k] = extra[k]; });
+  return r;
 }
 function solved(issue, pr) {
   return { issue: issue, status: "PR_OPENED", branch: "fix/" + issue + "-x", prNumber: pr,
@@ -824,8 +927,13 @@ function ladderReturns(sentinel) {
   for (let i = 1; i <= 3; i++) o["fix:#11:t1:r" + i] = task(1);
   return o;
 }
-function runOpen(args, fixture) {
-  const pre = h.preprocess(src);
+// `source` defaults to the real script and is overridden by exactly one caller:
+// the B278 bogus-lens mutant, which has to make the LENS VOCABULARY wrong to
+// observe where the resulting throw lands. Threaded as an argument rather than
+// copied into a second runner, so the mutant run goes through the same
+// preprocessing, the same sandbox and the same meta as every other row.
+function runOpen(args, fixture, source) {
+  const pre = h.preprocess(source || src);
   const record = h.makeRecord();
   const sb = h.makeSandbox(Object.assign({ args }, fixture), meta, record).sandbox;
   const pending = vm.runInNewContext(pre.wrapped, sb, { filename: "solve-fleet", timeout: 8000 });
@@ -835,6 +943,10 @@ function runOpen(args, fixture) {
 }
 function run(args, fixture) {
   const open = runOpen(args, fixture);
+  return open.done.then(function () { return open.record; });
+}
+function runSource(source, args, fixture) {
+  const open = runOpen(args, fixture, source);
   return open.done.then(function () { return open.record; });
 }
 function resultOf(record) {
@@ -1431,6 +1543,160 @@ function probedNums(record) {
     && planConsumerPrompts(recPR5).every(function (p) {
       return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0 && p.indexOf("not an array") < 0; });
 
+  // ------------------------------------------------------------------
+  // Runs SEC* (#524 item 3) — the RISK-GATED security research lens.
+  //
+  // The triage predicate was never missing: lib/solve-launcher.sh computes
+  // `risk_signals` for EVERY issue and lib/dispatch.sh persists it into the
+  // prepared root request on every backend. It was dropped on exactly one hop —
+  // the per-issue manifest record, which is the ONLY channel into a Workflow
+  // script (no fs). These runs drive the field from the far end of that hop.
+  //
+  // Gated on PRESENCE, never on a vocabulary: re-declaring solve_triage.py's
+  // RISK_PATTERNS names in the fleet would be a second uncompared copy of a
+  // closed vocabulary (#370) and would have the script invent a risk taxonomy
+  // the issue forbids outright. Emptiness needs no vocabulary.
+  // ------------------------------------------------------------------
+  const SEC_LABEL = "research:#11:security";
+  const LENS_BODY_OPEN = "Investigate ONLY through your lens:\n";
+  const LENS_BODY_END = "\n\nYou are READ-ONLY";
+  function secReturns(riskFields) {
+    return Object.assign({}, mediumReturns(), {
+      "manifest-intake": intake([rec(11, "medium", riskFields), rec(12, "trivial")]),
+      "research:#11:security": { artifactPath: RD + "/issue-11/research-security.md", rc: 0, headline: "h" },
+    });
+  }
+  function researchLabels(record) {
+    return labels(record).filter(function (l) { return /^research:#11:/.test(l || ""); });
+  }
+  // The lens body the agent is ACTUALLY HANDED, sliced out of the rendered
+  // prompt rather than read off the source: a brief that stopped reaching the
+  // prompt would still grep clean in the file, which is precisely how a lens
+  // silently receiving another lens's brief goes unnoticed.
+  function lensBody(record, lens) {
+    const p = promptOf(record, "research:#11:" + lens);
+    const at = p.indexOf(LENS_BODY_OPEN);
+    if (at < 0) return null;
+    const end = p.indexOf(LENS_BODY_END, at);
+    return end > at ? p.slice(at + LENS_BODY_OPEN.length, end) : null;
+  }
+  function riskEventCount(res, name) {
+    return res ? res.auditEvents.filter(function (e) { return e.event === name; }).length : -1;
+  }
+
+  // SEC1 — one non-blank signal buys the fourth lens.
+  const recSEC = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["security"] }) });
+  out.secLensCount = researchLabels(recSEC).length;
+  out.secDispatched = researchLabels(recSEC).indexOf(SEC_LABEL) >= 0;
+
+  // SEC2/SEC3/SEC4 — the three negative shapes, which are three different facts:
+  // an EMPTY array (triage ran and found nothing), an ABSENT key (an unpatched
+  // launcher, or a relay that dropped the field), and a WHITESPACE-ONLY member
+  // (the predicate is non-blank, not merely non-empty — otherwise a single
+  // stray space in the manifest buys an agent on every issue in the batch).
+  const recSECE = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: [] }) });
+  out.secEmptyLensCount = researchLabels(recSECE).length;
+  out.secEmptyNoLens = researchLabels(recSECE).indexOf(SEC_LABEL) < 0;
+  const recSECA = await run(buildArgs(), { agentReturns: secReturns(null) });
+  out.secAbsentLensCount = researchLabels(recSECA).length;
+  const recSECW = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["   "] }) });
+  out.secBlankLensCount = researchLabels(recSECW).length;
+
+  // SEC5 — the silent-fallthrough assertion the issue's item-3 hazard demands.
+  // lensBrief() used to end in a bare `return <test-coverage brief>`, so ANY
+  // name it did not recognise was handed the coverage brief and nothing failed.
+  // The needle is the coverage brief's own first line; the emptiness guard is
+  // what stops this row passing on a prompt that was never rendered.
+  const secPrompt = promptOf(recSEC, SEC_LABEL);
+  out.secNotCoverageBrief = secPrompt.length > 0 && secPrompt.indexOf("Detect the test runner") < 0;
+
+  // SEC6 — totality, asserted WITHOUT naming any brief's text: four lenses, four
+  // pairwise-distinct bodies. A fallthrough of any one lens onto another's brief
+  // reds here even if the wording of every brief changes tomorrow.
+  const secBodies = ["codebase", "constraints", "test-coverage", "security"]
+    .map(function (l) { return lensBody(recSEC, l); });
+  out.secBodiesDistinct = secBodies.length === 4
+    && secBodies.every(function (b) { return typeof b === "string" && b.length > 0; })
+    && secBodies.every(function (b, i) {
+      return secBodies.every(function (o, j) { return i === j || b !== o; });
+    });
+
+  // SEC7 — an unrecognised lens name must fail the issue's chain LOUDLY.
+  // parallel()'s documented contract maps a throwing thunk to null in its slot
+  // and never rejects, so a lensBrief throw raised INSIDE a thunk would be
+  // laundered into "a research agent returned null" — a real defect wearing the
+  // costume of a skipped agent. Building the prompts eagerly puts the throw in
+  // solveOne's own try, where it becomes solve_chain_threw + a FAILED record.
+  //
+  // The mutation is ASSERTED, not assumed: a replacement that matched nothing
+  // would run the unmutated script and certify a claim it never tested.
+  const BASE_LENS_DECL = 'const BASE_LENSES = ["codebase", "constraints", "test-coverage"];';
+  const BOGUS_SRC = src.split(BASE_LENS_DECL).join(
+    'const BASE_LENSES = ["codebase", "constraints", "test-coverage", "no-such-lens"];');
+  if (BOGUS_SRC === src) {
+    throw new Error("FIXTURE_ERROR: the B278 mutation did not apply — BASE_LENSES is not declared "
+      + "as one line the fixture can rewrite, so the unknown-lens row would test nothing");
+  }
+  const recSECX = await runSource(BOGUS_SRC, buildArgs(), { agentReturns: mediumReturns() });
+  const resSECX = resultOf(recSECX);
+  out.secUnknownLensThrows = !!(resSECX && resSECX.auditEvents.some(function (e) {
+    return e.event === "solve_chain_threw" && e.issue === 11; }))
+    && !!(resSECX && resSECX.nullsByPhase && (resSECX.nullsByPhase.research || 0) === 0)
+    && researchLabels(recSECX).length === 0;
+
+  // SEC8 — presence and COUNTS only (DR-5). The signal strings are triage
+  // output about the issue; the lens's brief is the same work whatever they
+  // said, so forwarding them would put an agent-adjacent string in a prompt for
+  // no information gain. Two sentinels plus one blank: the count is of NON-BLANK
+  // members, which is the same predicate the gate itself applies.
+  const SEC_SENTINEL_A = "RISK-SIGNAL-SENTINEL-A";
+  const SEC_SENTINEL_B = "RISK-SIGNAL-SENTINEL-B";
+  const recSECS = await run(buildArgs(), { agentReturns:
+    secReturns({ riskSignals: [SEC_SENTINEL_A, "   ", SEC_SENTINEL_B] }) });
+  const resSECS = resultOf(recSECS);
+  const secAuditJson = JSON.stringify(resSECS ? resSECS.auditEvents : []);
+  out.secNoSignalText = recSECS.agentCalls.length > 0
+    && recSECS.agentCalls.every(function (c) {
+      const p = String(c.prompt);
+      return p.indexOf(SEC_SENTINEL_A) < 0 && p.indexOf(SEC_SENTINEL_B) < 0;
+    })
+    && secAuditJson.indexOf(SEC_SENTINEL_A) < 0 && secAuditJson.indexOf(SEC_SENTINEL_B) < 0;
+  const secDispatchEvent = resSECS ? resSECS.auditEvents.find(function (e) {
+    return e.event === "security_lens_dispatched" && e.issue === 11; }) : null;
+  out.secSignalCount = secDispatchEvent ? secDispatchEvent.signalCount : null;
+
+  // SEC9/SEC10/SEC11 — the NEGATIVE branch's failure signal. With `riskSignals`
+  // absent and `riskSignals: []` behaving identically, a relay that drops,
+  // renames or mangles the field is indistinguishable from a genuinely risk-free
+  // batch and the lens silently never runs. The launcher therefore declares a
+  // run-wide COUNT derived from the manifest it just wrote, and the script joins
+  // it against what the relay actually delivered.
+  const recSECM = await run(buildArgs(null, { riskIssueCount: 1 }),
+    { agentReturns: secReturns(null) });
+  const resSECM = resultOf(recSECM);
+  out.secRelayMismatch = !!(resSECM && resSECM.auditEvents.some(function (e) {
+    return e.event === "risk_signals_relay_mismatch" && e.declared === 1 && e.observed === 0; }))
+    && !!(resSECM && resSECM.auditEvents.some(function (e) {
+      return e.event === "risk_signals_absent" && e.records === 2; }));
+
+  // A FAITHFUL relay is silent — without this row the two events above are
+  // satisfied by a join that fires unconditionally.
+  const recSECF = await run(buildArgs(null, { riskIssueCount: 1 }), { agentReturns:
+    Object.assign({}, secReturns({ riskSignals: ["security"] }), {
+      "manifest-intake": intake([rec(11, "medium", { riskSignals: ["security"] }),
+        rec(12, "trivial", { riskSignals: [] })]),
+    }) });
+  const resSECF = resultOf(recSECF);
+  out.secFaithfulQuiet = riskEventCount(resSECF, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECF, "risk_signals_absent") === 0;
+
+  // A LEGACY envelope (no riskIssueCount at all) degrades to SILENCE, not to
+  // noise: recSECA relays records with no `riskSignals` key whatsoever, which is
+  // exactly the shape that fires both events once a count is declared.
+  const resSECA = resultOf(recSECA);
+  out.secLegacyQuiet = riskEventCount(resSECA, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECA, "risk_signals_absent") === 0;
+
   // ------------------- #508: the per-task chain and its gate -------------------
 
   // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
@@ -1605,7 +1871,12 @@ function probedNums(record) {
   // of the four new agent kinds shows up here and nowhere else.
   out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT,
     recSR1, recSR2, recSR3, recSR4, recSR5, recSR6,
-    recPR, recPR2, recPR3, recPR4, recPR5]
+    recPR, recPR2, recPR3, recPR4, recPR5,
+    // recSECX is the bogus-lens MUTANT and belongs here too: the throw it
+    // provokes is caught by solveOne, so a mutated vocabulary must still leave
+    // a harness-clean run — an undeclared phase or a stray global phase() on
+    // that path would show up nowhere else.
+    recSEC, recSECE, recSECA, recSECW, recSECS, recSECM, recSECF, recSECX]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
   // ------------------------------------------------------------------ #515
   // Claim verification. Every run below is ultimately about ONE rule: the proof
@@ -2521,6 +2792,27 @@ else
   check prNullDegrades true         "B271 a null plan reviewer counts as a design null and the task chain still runs, envelope-free"
   check prSentinelOnlyEnveloped true "B272 a reviewer-returned string appears in NO plan-consumer prompt outside its envelope block"
   check prUnusableAudit true        "B272b a plan-review findings array that arrives UNUSABLE is audited by count, degrades to no block, and never takes the chain down"
+
+  # #524 item 3 — the risk-gated security lens, and lensBrief() made total.
+  #
+  # B274-B276 are the negative arms and pass on the pre-#524 tree by
+  # construction (no fourth lens exists to find): they are what stops every
+  # positive row being satisfied by a lens that runs unconditionally, which is
+  # the option the issue offers and this change deliberately does not take.
+  check secLensCount 4              "B273 a non-blank triage risk signal buys the fourth research lens"
+  check secDispatched true          "B273b that lens is dispatched under its own label (research:#11:security)"
+  check secEmptyLensCount 3         "B274 an EMPTY risk-signal array spends no security agent"
+  check secEmptyNoLens true         "B274b ...and dispatches no research:#11:security label"
+  check secAbsentLensCount 3        "B275 an ABSENT risk-signal key is back-compatible: an unpatched launcher still gets the 3-lens fan-out"
+  check secBlankLensCount 3         "B276 the predicate is NON-BLANK, not non-empty — a whitespace-only signal buys nothing"
+  check secNotCoverageBrief true    "B277 the security lens is NOT handed the test-coverage brief (the silent-fallthrough hazard)"
+  check secBodiesDistinct true      "B279 all four rendered lens briefs are pairwise distinct — lensBrief() is total, asserted without naming brief text"
+  check secUnknownLensThrows true   "B278 an unknown lens FAILS the issue's chain loudly (solve_chain_threw), never laundered by parallel() into a research null"
+  check secNoSignalText true        "B280 no risk-signal STRING reaches any prompt or any audit event (DR-5)"
+  check secSignalCount 2            "B281 security_lens_dispatched carries the count of NON-BLANK signals, and nothing else"
+  check secRelayMismatch true       "B282 a declared count with a relay that dropped the field audits risk_signals_relay_mismatch AND risk_signals_absent"
+  check secFaithfulQuiet true       "B283 a faithful relay audits neither — the join is a comparison, not an unconditional event"
+  check secLegacyQuiet true         "B284 a legacy envelope (no riskIssueCount) degrades to SILENCE, not to noise, whatever the records carry"
 
   check lFixCalls 3          "B72 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
   check lReviewCalls 4       "B73 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"
