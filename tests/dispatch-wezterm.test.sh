@@ -442,6 +442,50 @@ else
   echo "  FAIL  wezterm runtime PATH keeps the stub bin first and the host PATH behind it: $WEZ_RUNTIME_PATH"
   FAIL=$((FAIL + 1))
 fi
+# #548 — assert WHICH preflight arm the two dispatches above took, not merely
+# that one was taken. `_uberdev_dispatch_preflight_timeout_bin` returns 0
+# SILENTLY on the happy path and emits no audit record naming the bound, so the
+# resolved binary is the only observable — every verdict above is byte-identical
+# on the bounded and the unbounded arm, which is why the narrow literal survived
+# here. The row above proves the PATH is wide; this one proves the width reaches
+# production code. One row covers the clean and the hostile dispatch: they share
+# the one binding.
+#
+# Driven as a unit under the SAME variable the dispatches ran with, so the row
+# cannot drift onto a PATH nobody used — that drift IS this issue's defect
+# class. Precedent: child-dispatch.test.sh:1074-1092 (#521) and T15 in
+# dispatch-child-worktree-teardown.test.sh, which drives this same resolver.
+#
+# TIMEOUT_BIN is neither set NOR unset here. lib/dispatch.sh tries
+# "${TIMEOUT_BIN:-}" ahead of every PATH name, and the dispatches above inherit
+# that variable from the ambient environment; the `unset TIMEOUT_BIN` lines in
+# this file belong to the #246 D-perm/D-skip subshells and do not reach here.
+# Touching it either way would assert about an environment they never had.
+#
+# No pipe, by construction: command substitution and `case` only, so this file's
+# epipe-guard.test.sh exposure is unchanged and it still needs no `pipefail`.
+# The verdict goes through the PASS/FAIL counters because the file is `set -u`
+# only — a bare `[ … ]` or `*) false ;;` here would be a no-op.
+WEZ_RUNTIME_PATH_TIMEOUT_BIN="$(
+  PATH="$WEZ_RUNTIME_PATH" \
+    /bin/bash -c 'set -u; . "$1"; _uberdev_dispatch_preflight_timeout_bin' _ "$DISPATCH_LIB"
+)"
+echo "        wezterm preflight resolved timeout bin = ${WEZ_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+# Absolute, never a bare name: a bare name in command position is answered by
+# the shell's function table first (T15's finding). The drive-letter alternation
+# is mandatory — Git Bash is in the CI matrix. Absoluteness subsumes
+# non-emptiness: the empty string matches neither branch.
+WEZ_RUNTIME_PATH_ARM_OK=0
+case "$WEZ_RUNTIME_PATH_TIMEOUT_BIN" in
+  /*|[A-Za-z]:/*) [ -x "$WEZ_RUNTIME_PATH_TIMEOUT_BIN" ] && WEZ_RUNTIME_PATH_ARM_OK=1 ;;
+esac
+if [ "$WEZ_RUNTIME_PATH_ARM_OK" -eq 1 ]; then
+  echo "  PASS  wezterm dispatch took the BOUNDED preflight arm (absolute, executable timeout bin)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  wezterm dispatch took the UNBOUNDED preflight arm — resolved timeout bin: ${WEZ_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
 rm -rf "$WEZ_RUNTIME_TMP"
 
 echo
