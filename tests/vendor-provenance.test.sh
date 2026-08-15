@@ -1877,7 +1877,7 @@ else no "V33 a component carries a review date older than the review point it si
 fi
 
 echo
-echo "== V45-V46: every measurement records the basis it was taken under (#534) =="
+echo "== V44-V46: every measurement records the basis it was taken under (#534) =="
 
 # ---------------------------------------------------------------------------
 # THE CLASS (#534). `measured_diff_lines` was a BARE INTEGER. A diff count has
@@ -1888,10 +1888,525 @@ echo "== V45-V46: every measurement records the basis it was taken under (#534) 
 # drifted that way. `measured_diff_basis` is now a required record naming both
 # operands, and `C-MEASURE` is its offline shape guard.
 #
-# V45 drives the checker (shape). V46 drives git (the local operand really
-# resolves in this history). Re-deriving the count itself needs the upstream
-# bytes, which is `vendor-drift.py`'s network job — neither row claims it.
+# The basis is only half the fix. A recorded basis nobody reads still leaves the
+# two copies free to drift, so the rows split three ways:
+#
+#   V44/V44b — the COMPARATOR. Register and RFC must agree wherever they
+#              measured the same revision, and the comparator must be
+#              falsifiable.
+#   V45      — the checker (shape): `C-MEASURE` reds for an unbased measurement.
+#   V46      — git: the local operand really resolves in this history.
+#
+# Re-deriving a count from scratch needs the upstream bytes, which is
+# `vendor-drift.py`'s network job — no row here claims it.
 # ---------------------------------------------------------------------------
+
+# V44 — THE COMPARATOR. The register and RFC 0019 must agree wherever they
+# measured the same revision.
+#
+# THE CLASS: one measurement, N uncompared copies. `measured_diff_lines` lives
+# in the register and again in every `Diff lines` table of RFC 0019. Nothing
+# compared them, so `skills/systematic-debugging` (195 vs 83) and
+# `skills/test-driven-development` (64 vs 72) drifted apart with the whole suite
+# green — and a reader could not tell a stale copy from two honest measurements
+# taken at different points.
+#
+# WHAT THIS ROW PINS, AND WHAT IT CANNOT. It pins AGREEMENT BETWEEN TWO ON-DISK
+# COPIES, not the truth of either: re-deriving a diff count needs the upstream
+# bytes, which is `vendor-drift.py`'s networked job (RFC 0019 § "The weekly
+# drift job"), and no amount of internal agreement makes a wrong number right.
+# Two copies that agree are still falsifiable by one command; two copies that
+# disagree silently are not.
+#
+# A ROW WHOSE REVISION NOTHING IS BASED AT IS VALUE-UNCHECKED, BY DESIGN.
+# §4.2's 14 cells are exactly that today: no register component sits at
+# `v6.2.0` any more, so their integers are settled by the #534 amendment's
+# re-measurement rather than by comparison. What still binds them is that their
+# row ids must resolve, and that the components they name must reconcile
+# against SOME row that names them — the anti-escape-hatch arm below, which is
+# what stops "record a different basis" from being a way out of the comparison.
+#
+# THE REGISTER->RFC DIRECTION IS DELIBERATELY ABSENT. Asserting
+# `set(register measurements) == union(RFC row ids)` holds only at today's
+# 20-for-20 and welds a LIVE register to two FROZEN dated tables: vendoring a
+# new component would red a guard that then gets suppressed, even though a new
+# component legitimately has no row in a table dated before it existed. The
+# direction that IS asserted — every frozen RFC row resolves to a measured
+# register component — is the one that catches a silent deletion, and it carries
+# a reviewed allow-list for the only legitimate exception (retirement).
+MEASURE_RECONCILE_PY="$SANDBOX_ROOT/measure-reconcile.py"
+cat > "$MEASURE_RECONCILE_PY" <<'PY'
+"""Reconcile `measured_diff_lines` against every `Diff lines` table in RFC 0019.
+
+argv: <vendor.json> <rfc-0019.md>.  Exit 0 = the two copies agree.
+
+Written to a file rather than inlined so V44 and all eight V44b mutations drive
+the IDENTICAL predicate — a mutation that reds a re-typed near-copy proves
+nothing about the row that guards the real tree (V24b's shape).
+"""
+import json, re, sys
+
+# Frozen RFC rows whose component the register no longer carries. STARTS EMPTY,
+# and is the only sanctioned way a row may resolve to nothing: retiring a
+# vendored component then costs one reviewed line here, instead of producing a
+# mystery red on unrelated work — which is how a guard gets relaxed until it
+# means nothing.
+RETIRED_ROWS = set()
+
+# The row floor is a RATCHET over the frozen tables: 14 rows in §4.2, 6 in §4.3
+# and 14 in the #534 amendment's re-measurement table. Deliberately a floor and
+# not an equality, so vendoring a component, retiring one, or appending a future
+# amendment table can never red it; a DELETED row is what it exists to catch.
+ROW_FLOOR = 34
+
+# One grammar, three call sites (§4.2, §4.3, the #534 amendment). `rev` is None
+# exactly when the table declares its revision per-row instead, in a `Base`
+# column — §4.3 does, because that upstream ships no release vocabulary and
+# inventing a tag for it would be the fabrication this register exists to stop.
+LABEL_RE = re.compile(
+    r'^\*\*Measured:\*\* `(?P<upstream>[^`]+)` at '
+    r'(?:`(?P<rev>[^`]+)`|the per-row `Base` column), '
+    r'on (?P<on>\d{4}-\d{2}-\d{2}), '
+    r'counting (?P<rule>[^.]+)\.$')
+HEADING_RE = re.compile(r'^#{1,6} ')
+HEX_RE = re.compile(r'^[0-9a-f]{7,40}$')
+DELIM_RE = re.compile(r':?-{3,}:?')
+
+
+def cells(line):
+    # Copied VERBATIM from V32's table parser (the "every verdict row carries
+    # one token" row) — a DECLARED duplication, because the two rows must never
+    # disagree about what a cell is. Split on UNESCAPED pipes only: RFC 0019
+    # legitimately carries `\|` inside backticked commands in a reasoning cell,
+    # and a naive split sees an extra field there.
+    parts = re.split(r'(?<!\\)\|', line)
+    if parts and not parts[0].strip():
+        parts = parts[1:]
+    if parts and not parts[-1].strip():
+        parts = parts[:-1]
+    return [p.strip() for p in parts]
+
+
+def unbacktick(cell):
+    m = re.fullmatch(r'`([^`]+)`', cell)
+    return m.group(1) if m else None
+
+
+def same_basis(row_rev, reg_rev):
+    """Two revisions name the same point.
+
+    Exact for a `vX.Y.Z` tag. For hex, an RFC cell may abbreviate what the
+    register spells in full (§4.3's `Base` column reads `4ca561f`), so a prefix
+    match is allowed — with a 7-character floor, below which a prefix stops
+    identifying a commit at all.
+    """
+    if row_rev == reg_rev:
+        return True
+    if HEX_RE.match(row_rev) and HEX_RE.match(reg_rev):
+        return reg_rev.startswith(row_rev) or row_rev.startswith(reg_rev)
+    return False
+
+
+register = json.load(open(sys.argv[1], encoding="utf-8"))
+lines = open(sys.argv[2], encoding="utf-8").read().splitlines()
+
+by_id = {c["id"]: c for c in register.get("components", []) if c.get("id")}
+
+# Pipe-table runs, each carrying the line index it starts at (the label scan
+# needs to walk upward from exactly there).
+runs, cur, start = [], [], 0
+for i, line in enumerate(lines):
+    if line.lstrip().startswith("|"):
+        if not cur:
+            start = i
+        cur.append(line)
+    else:
+        if cur:
+            runs.append((start, cur))
+        cur = []
+if cur:
+    runs.append((start, cur))
+
+
+def label_for(table_start):
+    """The table's own `**Measured:**` line, BOUNDED TO ITS OWN SECTION.
+
+    Walks upward from the table and stops at the first heading. An unbounded
+    scan is the one mutation that goes silently wrong: delete §4.3's label and
+    the walk would run on into §4.2 and adopt `v6.2.0` as §4.3's basis — a table
+    would then be reconciled against a revision it was never measured at, with
+    nothing red. So a `Diff lines` table with no label inside its own section is
+    a HARD FAILURE, never an inherited one.
+
+    TWO labels in one section is a hard failure for the same reason and not an
+    oversight: the pair does not say which one this table was measured under.
+    An amendment wanting a second labelled `Diff lines` table gives it its own
+    heading — as the #534 one does — rather than relaxing this to "the nearest".
+    """
+    window = []
+    j = table_start - 1
+    while j >= 0 and not HEADING_RE.match(lines[j]):
+        window.append(lines[j].strip())
+        j -= 1
+    found = [w for w in window if w.startswith("**Measured:**")]
+    if len(found) != 1:
+        return None, ("%d `**Measured:**` label(s) in its own section, expected 1"
+                      % len(found))
+    m = LABEL_RE.match(found[0])
+    if not m:
+        return None, "its `**Measured:**` label does not parse: %r" % found[0][:110]
+    return m, ""
+
+
+problems = []
+tables = rows = compared = allowed = 0
+# Component id -> every revision a frozen row names it at, and the ids that
+# actually reconciled against one of them. The anti-escape-hatch arm below is
+# the difference between these two sets.
+named_at = {}
+reconciled = set()
+
+for table_start, run in runs:
+    header = cells(run[0])
+    if "Diff lines" not in header:
+        continue
+    tables += 1
+    where = "the `Diff lines` table at line %d" % (table_start + 1)
+    # Resolve the column BY HEADER NAME, never by index: `Diff lines` is column
+    # 2 in §4.2, 3 in §4.3 and 3 in the amendment's table, so a hardcoded index
+    # would silently read §4.3's `Base` column and compare a commit to an int.
+    if header.count("Diff lines") != 1:
+        problems.append("%s declares %d `Diff lines` columns"
+                        % (where, header.count("Diff lines")))
+        continue
+    idx = header.index("Diff lines")
+    base_idx = None
+    if "Base" in header:
+        if header.count("Base") != 1:
+            problems.append("%s declares %d `Base` columns" % (where, header.count("Base")))
+            continue
+        base_idx = header.index("Base")
+
+    label, why = label_for(table_start)
+    if label is None:
+        problems.append("%s carries no usable basis: %s" % (where, why))
+        continue
+    table_rev = label.group("rev")
+    if table_rev is None and base_idx is None:
+        problems.append("%s declares its revision per-row but has no `Base` column" % where)
+        continue
+
+    for line in run[1:]:
+        row = cells(line)
+        if row and all(DELIM_RE.fullmatch(c or '-') for c in row):
+            continue  # delimiter row
+        rows += 1
+        rid = unbacktick(row[0]) if row else None
+        if rid is None:
+            problems.append("%s: row %r does not open with a backticked component id"
+                            % (where, line[:70]))
+            continue
+        row_rev = table_rev
+        if base_idx is not None:
+            if base_idx >= len(row):
+                problems.append("%s: row `%s` has no `Base` cell" % (where, rid))
+                continue
+            row_rev = unbacktick(row[base_idx]) or row[base_idx]
+        if not row_rev:
+            problems.append("%s: row `%s` names no revision" % (where, rid))
+            continue
+        if idx >= len(row) or not re.fullmatch(r'\d+', row[idx]):
+            problems.append("%s: row `%s` has no integer `Diff lines` cell" % (where, rid))
+            continue
+        value = int(row[idx])
+
+        component = by_id.get(rid)
+        recorded = component.get("measured_diff_lines") if component else None
+        # `isinstance(True, int)` is True in Python, so a `true` slipped into the
+        # count would otherwise read as a measurement of 1 and compare cleanly
+        # against nothing. C-MEASURE rejects it too; neither guard is the other's
+        # excuse for reading a bool as a number.
+        if not isinstance(recorded, int) or isinstance(recorded, bool):
+            if rid in RETIRED_ROWS:
+                allowed += 1
+            else:
+                problems.append(
+                    "%s: row `%s` resolves to no measured component in the register "
+                    "(retire it in RETIRED_ROWS if that is deliberate)" % (where, rid))
+            continue
+        basis = component.get("measured_diff_basis")
+        if not isinstance(basis, dict) or not isinstance(basis.get("upstream_rev"), str):
+            problems.append("register component `%s` records a measurement with no "
+                            "`measured_diff_basis.upstream_rev` to reconcile against" % rid)
+            continue
+        named_at.setdefault(rid, set()).add(row_rev)
+        if not same_basis(row_rev, basis["upstream_rev"]):
+            continue  # different bases, both labelled — correctly not compared
+        reconciled.add(rid)
+        compared += 1
+        if value != recorded:
+            problems.append("`%s` at %s: the RFC says %d and the register says %d"
+                            % (rid, row_rev, value, recorded))
+
+# THE BASIS IS A RECONCILIATION RULE, NOT AN ESCAPE HATCH. The `continue` above
+# is a legitimate "different bases, correctly not compared" — and it is also the
+# only door out of the comparison. Re-base a register measurement onto a
+# revision no frozen row declares, or re-rev a table's own `**Measured:**` line,
+# and every row naming that component silently stops being checked while
+# `compared >= 1` stays satisfied by the rows either side of it: a fabricated
+# `measured_diff_lines` then ships green. So a component the frozen tables NAME,
+# and which carries a measurement, must reconcile against AT LEAST ONE of the
+# rows that name it.
+#
+# This is not the register->RFC welding rejected above: a newly vendored
+# component that no frozen table names is untouched. Only a component the RFC
+# already froze is held to it, and re-measuring one legitimately arrives with an
+# amendment table — the #534 table under §4.2 is exactly that — which is the row
+# that satisfies this arm. Re-measuring WITHOUT amending the RFC is the case it
+# exists to red, and that case is the defect this whole row was written for.
+for rid in sorted(named_at):
+    if rid in reconciled:
+        continue
+    problems.append(
+        "register component `%s` is measured at `%s`, a revision none of the "
+        "frozen rows naming it declare (%s) — a basis matching no RFC copy "
+        "removes the component from reconciliation instead of disagreeing with it"
+        % (rid, by_id[rid]["measured_diff_basis"]["upstream_rev"],
+           ", ".join("`%s`" % r for r in sorted(named_at[rid]))))
+
+if problems:
+    raise SystemExit("measurement reconciliation failed:\n  - " + "\n  - ".join(problems))
+
+# ANTI-VACUITY. Every arm below is the difference between "checked" and "found
+# nothing to check": renaming a header, deleting a table, deleting a row or
+# re-basing every measurement would each empty the loop above and report success.
+if tables < 2:
+    raise SystemExit("found %d `Diff lines` table(s) in the RFC, expected at least 2 "
+                     "(§4.2 and §4.3) — the corpus has been renamed away" % tables)
+if rows < ROW_FLOOR:
+    raise SystemExit("found %d `Diff lines` row(s), below the floor of %d — a frozen "
+                     "measurement row has been deleted" % (rows, ROW_FLOOR))
+if compared < 1:
+    raise SystemExit("no RFC row shares a revision with the register measurement it "
+                     "names — nothing was reconciled")
+
+print("V44 corpus: %d table(s), %d row(s), %d compared, %d allow-listed"
+      % (tables, rows, compared, allowed))
+PY
+
+if python3 "$MEASURE_RECONCILE_PY" "$REGISTER" "$VENDOR_RFC_DOC"; then
+  ok "V44 register and RFC 0019 agree wherever they measured the same revision"
+else
+  no "V44 a measurement disagrees with its RFC copy, or a copy lost its basis"
+fi
+
+# V44b — THE COMPARATOR IS FALSIFIABLE. V44 alone would pass just as happily if
+# it parsed nothing, so the same predicate is driven against eight mutated copies
+# and each one MUST red. Staying green after a mutation is reported as a `no`
+# naming which mutation, because a comparator that cannot fail is the uncompared
+# state with extra output.
+V44B_MUTATE_PY="$SANDBOX_ROOT/measure-mutate.py"
+cat > "$V44B_MUTATE_PY" <<'PY'
+"""Emit the eight V44b mutated copies. argv: <vendor.json> <rfc.md> <outdir>.
+
+Each mutation asserts it actually changed something: a probe that mutates
+nothing makes the row below assert nothing, which is the failure mode this
+whole suite exists to kill.
+"""
+import json, os, re, sys
+
+reg_path, rfc_path, out = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(out, exist_ok=True)
+rfc_lines = open(rfc_path, encoding="utf-8").read().splitlines(True)
+
+
+def load_register():
+    return json.load(open(reg_path, encoding="utf-8"))
+
+
+def find_component(register, cid):
+    for c in register["components"]:
+        if c.get("id") == cid:
+            return c
+    raise SystemExit("mutation target %s is not in the register" % cid)
+
+
+def write_register(register, name):
+    json.dump(register, open(os.path.join(out, name), "w", encoding="utf-8"),
+              indent=2, ensure_ascii=False)
+
+
+def write_rfc(lines, name):
+    open(os.path.join(out, name), "w", encoding="utf-8").write("".join(lines))
+
+
+def only_match(pattern, what):
+    hits = [i for i, l in enumerate(rfc_lines) if re.search(pattern, l)]
+    if len(hits) != 1:
+        raise SystemExit("expected exactly 1 line matching %s (%s), found %d"
+                         % (pattern, what, len(hits)))
+    return hits[0]
+
+
+def bump_measurement(cid, name):
+    register = load_register()
+    component = find_component(register, cid)
+    before = component.get("measured_diff_lines")
+    if not isinstance(before, int):
+        raise SystemExit("%s records no measured_diff_lines to bump" % cid)
+    component["measured_diff_lines"] = before + 1
+    write_register(register, name)
+
+
+def rebase_measurement(cid, rev, name):
+    """Relabel a measurement's basis WITHOUT touching the number it recorded."""
+    register = load_register()
+    component = find_component(register, cid)
+    basis = component.get("measured_diff_basis")
+    if not isinstance(basis, dict) or "upstream_rev" not in basis:
+        raise SystemExit("%s records no basis to re-base" % cid)
+    if basis["upstream_rev"] == rev:
+        raise SystemExit("%s is already based at %s — the mutation would change "
+                         "nothing" % (cid, rev))
+    basis["upstream_rev"] = rev
+    write_register(register, name)
+
+
+# A well-formed 40-hex revision that is deliberately NOT a commit and, asserted
+# below, appears nowhere in the RFC — so nothing can reconcile against it from
+# either side. Mutations 7 and 8 need exactly that: an orphan basis. The V44b
+# driver greps for its prefix, so changing this literal moves that one too.
+ORPHAN_REV = "decafbad" * 5
+if ORPHAN_REV in "".join(rfc_lines):
+    raise SystemExit("ORPHAN_REV %s is declared in the RFC — mutations 7 and 8 "
+                     "would not be orphans" % ORPHAN_REV)
+
+
+# 1 + 2 — the VALUE arm, once per direction of the corpus. The agent bites on
+# §4.3 (which keys on its per-row `Base` column) and the skill on the #534
+# amendment's table, so both halves of the comparison are proved live: the new
+# numbers really are a checked copy, not a third uncompared one.
+bump_measurement("agents/code-reviewer.md", "reg-agent-value.json")
+bump_measurement("skills/brainstorm", "reg-skill-value.json")
+
+# 3 — a deleted frozen row. Nothing else notices: the remaining rows still agree
+# and still resolve, so only the monotone row floor can catch it. Pinned by its
+# upstream-path cell — the id alone also matches the base-recovery table in the
+# 2026-08-13 (#503) amendment, which is not a `Diff lines` table at all.
+i = only_match(r'^\| `agents/code-simplifier\.md` \| `plugins/code-simplifier/',
+               "§4.3's code-simplifier row")
+write_rfc(rfc_lines[:i] + rfc_lines[i + 1:], "rfc-row-deleted.md")
+
+# 4 — §4.3's label deleted: THE BOUNDED-SCAN ROW. An unbounded upward scan walks
+# out of §4.3, finds §4.2's `v6.2.0` label and reconciles §4.3's rows against a
+# revision they were never measured at. Verified both ways while writing this:
+# under an unbounded scan the mutated copy stays GREEN at 20 compared (§4.3's
+# rows key on their own `Base` column, so they keep matching), and only the
+# bounded scan's "no label in its own section" failure catches it.
+i = only_match(r'^\*\*Measured:\*\* `claude-plugins-official` at the per-row',
+               "§4.3's label")
+write_rfc(rfc_lines[:i] + rfc_lines[i + 1:], "rfc-label-deleted.md")
+
+# 5 — a frozen row pointed at a component the register does not carry. Proves
+# the resolution arm bites AND that RETIRED_ROWS is empty: were it pre-loaded,
+# this would be allow-listed into silence. The §4.2 row is pinned by its
+# upstream-path cell, which no other table carries.
+i = only_match(r'^\| `skills/write-plan` \| `skills/writing-plans` \|',
+               "§4.2's write-plan row")
+write_rfc(rfc_lines[:i]
+          + [rfc_lines[i].replace("`skills/write-plan`", "`skills/write-plan-retired`", 1)]
+          + rfc_lines[i + 1:], "rfc-unknown-id.md")
+
+# 6 + 7 + 8 — the basis key is a RECONCILIATION RULE, NOT AN ESCAPE HATCH, and
+# it takes all three to say so. "Record a different basis" has two outcomes and
+# only one of them was ever driven:
+#
+#   6 re-bases onto a revision an RFC table DOES declare (brainstorm's 2358
+#     relabelled `v6.2.0`, where §4.2 froze 2255) — the row lands on the
+#     conflicting cell and the value arm reds;
+#   7 re-bases onto a revision NO table declares. The row lands on nothing:
+#     before the anti-escape-hatch arm existed this was green, and a wholly
+#     fabricated `measured_diff_lines` rode out with it;
+#   8 does the same damage from the RFC side, re-revving the #534 amendment's
+#     own label so all 14 re-measured skills stop matching at once. `compared`
+#     falls 20 -> 6 and, again, nothing red before the arm existed.
+#
+# 7 and 8 are the same arm from the two sides that can reach it, exactly as 1
+# and 2 drive the value arm once per direction of the corpus.
+rebase_measurement("skills/brainstorm", "v6.2.0", "reg-rebased.json")
+rebase_measurement("skills/brainstorm", ORPHAN_REV, "reg-orphan-basis.json")
+
+i = only_match(r'^\*\*Measured:\*\* `superpowers` at `[0-9a-f]{40}`',
+               "the #534 amendment's label")
+write_rfc(rfc_lines[:i]
+          + [re.sub(r'`[0-9a-f]{40}`', '`%s`' % ORPHAN_REV, rfc_lines[i], count=1)]
+          + rfc_lines[i + 1:], "rfc-orphan-label.md")
+PY
+
+V44B_OUT="$SANDBOX_ROOT/v44b"
+if V44B_ERR="$(python3 "$V44B_MUTATE_PY" "$REGISTER" "$VENDOR_RFC_DOC" "$V44B_OUT" 2>&1)"; then
+  V44B_BAD=""
+  V44B_DRIVEN=0
+  # $1 what the mutation is, $2 the text the failure MUST carry, $3 register,
+  # $4 RFC. Each mutation is bound to the arm it exists to exercise, exactly as
+  # `assert_red` binds a checker mutation to a named check id: eight mutations
+  # that all red through the same arm would look like eightfold coverage and be
+  # one. Herestring, never `printf | grep -q` — see tests/epipe-guard.test.sh.
+  v44b_expect_red() {
+    local out rc=0
+    V44B_DRIVEN=$((V44B_DRIVEN + 1))
+    out="$(python3 "$MEASURE_RECONCILE_PY" "$3" "$4" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      V44B_BAD="${V44B_BAD}${V44B_BAD:+; }$1 (stayed GREEN)"
+    elif ! grep -qF -- "$2" <<<"$out"; then
+      V44B_BAD="${V44B_BAD}${V44B_BAD:+; }$1 (red, but never through: $2)"
+    fi
+  }
+  # Two of the expectations name the REVISION the mutation must bite at, because
+  # that is the half being proved. `b36e0829…` appears only in the #534
+  # amendment's table, so a failure quoting it is what shows the newly recorded
+  # numbers really are a checked copy; `v6.2.0` appears only in §4.2, so a
+  # failure quoting THAT is what shows re-basing cannot be used to make a
+  # disagreement vanish. Re-measuring either component moves these literals —
+  # deliberately, since the rows they pin would need re-reading anyway.
+  v44b_expect_red "an agent's recorded count bumped by one" \
+    '`agents/code-reviewer.md` at 4ca561f' \
+    "$V44B_OUT/reg-agent-value.json" "$VENDOR_RFC_DOC"
+  v44b_expect_red "a skill's recorded count bumped by one" \
+    '`skills/brainstorm` at b36e0829' \
+    "$V44B_OUT/reg-skill-value.json" "$VENDOR_RFC_DOC"
+  v44b_expect_red "a frozen RFC measurement row deleted" \
+    'below the floor of' \
+    "$REGISTER" "$V44B_OUT/rfc-row-deleted.md"
+  v44b_expect_red "section 4.3's basis label deleted" \
+    'carries no usable basis' \
+    "$REGISTER" "$V44B_OUT/rfc-label-deleted.md"
+  v44b_expect_red "an RFC row pointed at a component the register does not carry" \
+    '`skills/write-plan-retired` resolves to no measured component' \
+    "$REGISTER" "$V44B_OUT/rfc-unknown-id.md"
+  v44b_expect_red "a measurement re-based onto a revision the RFC declares" \
+    '`skills/brainstorm` at v6.2.0' \
+    "$V44B_OUT/reg-rebased.json" "$VENDOR_RFC_DOC"
+  # 7 and 8 pin the revision that must be REPORTED AS ORPHANED, which is the
+  # half being proved: the register's own basis in 7 (`decafbad…`, matching no
+  # row) and the untouched `b36e0829…` in 8 (whose only labelled table just
+  # stopped declaring it). Quoting the arm's text alone would pass on either.
+  v44b_expect_red "a measurement re-based onto a revision no RFC row declares" \
+    '`skills/brainstorm` is measured at `decafbad' \
+    "$V44B_OUT/reg-orphan-basis.json" "$VENDOR_RFC_DOC"
+  v44b_expect_red "the amendment table re-revved out from under its own rows" \
+    '`skills/brainstorm` is measured at `b36e0829' \
+    "$REGISTER" "$V44B_OUT/rfc-orphan-label.md"
+  if [ -n "$V44B_BAD" ]; then
+    no "V44b a mutation did not red through its own arm: $V44B_BAD"
+  elif [ "$V44B_DRIVEN" -ne 8 ]; then
+    no "V44b drove $V44B_DRIVEN mutation(s), expected 8"
+  else
+    ok "V44b the comparator reds for all $V44B_DRIVEN mutations (value, deleted row, deleted label, unknown id, re-base onto a declared and an undeclared revision, re-revved label)"
+  fi
+else
+  no "V44b could not build the mutated copies — the probes changed nothing: $V44B_ERR"
+fi
 
 # V45 — C-MEASURE reds for an unbased measurement, and NAMES ITSELF. Five
 # mutations through `assert_red`, which drives the FULL checker: each row
