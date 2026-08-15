@@ -163,6 +163,59 @@ def release_key(name):
     return (nums, 0 if sep else 1, pre_nums, pre, name)
 
 
+def validate_release_metadata(upstream_id, upstream):
+    """Refuse a release review point this script would otherwise mis-read.
+
+    Runs beside the `REQUIRED_COMPONENT_KEYS` loop, before the first subprocess
+    and before either mode branches, for the reason D13/D13b pin: a register
+    somebody broke exits 2, never the rc 1 `fail()` reserves for "an upstream
+    could not be resolved". A weekly job that reports a typo as an outage is one
+    that gets muted, and a muted control is not a control.
+
+    The orderability requirement is not decoration. `release_key` returns None
+    for a label naming no version, and None is not orderable against another
+    key's tuple — so a recorded `"latest"` would pass any presence-only check,
+    survive the whole tag resolution, and only THEN die at the comparison with
+    an uncaught TypeError: rc 1, mid-run, after the network cost, wearing an
+    outage's exit code. Demanding a KEY up front — from `release_key` itself,
+    never from a restatement of what it accepts — is what makes
+    `release_key(recorded)` total by the time any comparison runs.
+    """
+    if "last_reviewed_release" not in upstream:
+        # A missing label is not an error. An upstream can be a plugin inside a
+        # monorepo with no release vocabulary at all (RFC 0019, the #511
+        # amendment), and inventing a label for it would be exactly the
+        # fabrication this register exists to prevent.
+        return
+    label = upstream["last_reviewed_release"]
+    # The predicate IS the function whose totality it guarantees. Any restatement
+    # of what `release_key` accepts — "carries at least one digit", say — is a
+    # second source of truth that can drift from the first, and this one already
+    # does: SemVer §10 puts build metadata outside the version, so `release_key`
+    # strips it BEFORE looking for one, and `"stable+2026"` carries digits, would
+    # satisfy a digit test, and still keys to None. Asking `release_key` itself
+    # is the only predicate that cannot disagree with it.
+    #
+    # Two clauses, not three: `""` and `"latest"` both key to None, so a separate
+    # emptiness test would be a clause no test could ever red — the dead-contract
+    # shape this repo audits for.
+    if not isinstance(label, str) or release_key(label) is None:
+        die_usage("upstream %s declares last_reviewed_release %r — a recorded "
+                  "release review point must be a STRING that names a version "
+                  "this tool can order against what upstream publishes. "
+                  "Anything else has no key to compare, and would surface only "
+                  "at the comparison, as an uncaught TypeError wearing an "
+                  "unreachable upstream's exit code" % (upstream_id, label))
+    commit = upstream.get("last_reviewed_commit")
+    if not isinstance(commit, str) or not SHA40_RE.match(commit):
+        die_usage("upstream %s declares last_reviewed_release %r but no 40-hex "
+                  "last_reviewed_commit — half a review point is a broken "
+                  "register: the label records WHICH release was adjudicated "
+                  "and the commit records which bytes that was, and neither is "
+                  "checkable against upstream without the other"
+                  % (upstream_id, label))
+
+
 def resolve_tags(repo_url, repo_slug):
     """Every tag a remote publishes, as {name: commit}. Loud on a failed query.
 
@@ -571,6 +624,10 @@ def main(argv=None):
                       % upstream_id)
         slugs[upstream_id] = slug
         urls.setdefault(slug, upstream.get("url") or UPSTREAM_HOST + slug)
+        # In the same pass as the coordinates, and on the same side of the
+        # --verify-bases return, so both modes reach one register verdict
+        # instead of two that can disagree about whether it is readable.
+        validate_release_metadata(upstream_id, upstream)
 
     # Base verification needs coordinates and nothing else, so it returns before
     # a single HEAD is resolved (see verify_bases' docstring).

@@ -1023,6 +1023,213 @@ else
 fi
 
 echo
+echo "== D-REL5: a broken release review point is a malformed register, not an outage =="
+
+# ---------------------------------------------------------------------------
+# WHY THIS ROW EXISTS. #535 gives the register a SECOND kind of review point —
+# a release label beside the recorded commit — and the tool orders that label
+# against what upstream publishes. Every way of breaking it has the same shape
+# as D13's missing component field and must land on the same verdict: rc 2, the
+# offending upstream id and field named, before the first subprocess.
+#
+# Three of the six sub-cases are not hypothetical. A label that is not a string,
+# or one that names no version, would pass any presence-only check, survive the
+# whole tag resolution, and only THEN reach the ordering comparison — where
+# `release_key` has returned None and `None` is not orderable against another
+# key's tuple. That is an uncaught TypeError: rc 1, mid-run, after the network
+# cost, wearing the exit code `fail()` reserves for "an upstream could not be
+# resolved". D13b exists to keep those two codes apart; this row is what keeps
+# them apart for the new field. Asserting rc != 0 would pass against exactly
+# that bug, so every sub-case asserts the DIAGNOSIS: the code, the id, the
+# offending field, a fragment of the CLAUSE that must have fired, no traceback,
+# and a stub ledger with zero git and zero gh lines.
+#
+# The clause fragment is not belt-and-braces. Both diagnostics name
+# `last_reviewed_release` — the half-review-point message quotes the label it
+# found — so a `field`-only assertion passes while the WRONG clause fires, and
+# the sub-cases stop distinguishing anything. Same reason the id is pinned as
+# `upstream <id>`: the bare id is a substring of the slug that carries it.
+#
+# Every sub-case runs in BOTH modes. The guard sits on the same side of the
+# `--verify-bases` return as the component-key loop precisely so the two modes
+# cannot disagree about whether the register is readable — and only a
+# `--verify-bases` assertion can hold it there. Moved just past that return the
+# guard still precedes the drift path's first subprocess, so every drift-mode
+# assertion below stays green while `--verify-bases` goes on to reach the
+# network with a register it has already been told is broken.
+# ---------------------------------------------------------------------------
+REL_ROOT="$WORK/bad-release-register"
+mkdir -p "$REL_ROOT/plugins/uberdev"
+DREL5_FAILED=0
+# Every DISTINCT exit code the sub-cases produced, so the separation asserted at
+# the bottom covers all of them rather than whichever one happened to run last.
+DREL5_CODES=""
+
+# One invocation shape, so the two modes differ by their flags and nothing else.
+# `"$@"` with no arguments is safe under `set -u` on every bash we run on.
+run_drel5() {
+  PATH="$STUBS:$PATH" \
+  STUB_LOG="$WORK/drel5.log" \
+  STUB_LSREMOTE_MODE=ok \
+  STUB_HEAD_SHA="$MOVED_HEAD" \
+  STUB_DIFF_FILES="" \
+  STUB_OPEN_ISSUES="[]" \
+  STUB_LSTREE_MODE=ok \
+  STUB_TAGS_MODE=ok \
+  STUB_TAGS_TABLE="$TAGS_DEFAULT" \
+  python3 "$DRIFT" --repo-root "$REL_ROOT" "$@" 2>&1
+}
+
+for spec in "empty|last_reviewed_release|names a version this tool can order|a present-but-empty label" \
+            "nonstring|last_reviewed_release|names a version this tool can order|a JSON number where a label belongs" \
+            "unversioned|last_reviewed_release|names a version this tool can order|a label that names no version" \
+            "buildmeta|last_reviewed_release|names a version this tool can order|a label whose only digits are build metadata" \
+            "halfpoint|last_reviewed_commit|no 40-hex last_reviewed_commit|a label with no commit beside it" \
+            "shortsha|last_reviewed_commit|no 40-hex last_reviewed_commit|a label beside a short sha"; do
+  IFS='|' read -r mutation field clause desc <<<"$spec"
+  # The mutated upstream id is DERIVED and echoed back, so the assertion below
+  # pins the id the tool names against the id the fixture actually broke — a
+  # typed literal would only prove this file agrees with itself.
+  TARGET_ID="$(python3 - "$REGISTER" "$REL_ROOT/plugins/uberdev/vendor.json" "$mutation" "$DRIFT" <<'PY'
+import importlib.util, json, re, sys
+
+src, dst, mutation, drift = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# The `buildmeta` sub-case has to know what `release_key` actually keys, and a
+# local re-implementation of that would be the very second-source-of-truth the
+# fix removes: the fixture would keep agreeing with itself while the tool and
+# the fixture drifted apart. Importing is side-effect free — the module guards
+# `main()` behind `if __name__ == "__main__"`.
+modspec = importlib.util.spec_from_file_location("vendor_drift", drift)
+vendor_drift = importlib.util.module_from_spec(modspec)
+modspec.loader.exec_module(vendor_drift)
+release_key = vendor_drift.release_key
+
+d = json.load(open(src, encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+labelled = [u for u in used if ups.get(u, {}).get("last_reviewed_release")]
+# Anti-vacuity. Mutating an upstream no component uses would exercise nothing —
+# validation walks the USED set — and a register recording no release label at
+# all has nothing here to break.
+if not labelled:
+    raise SystemExit("no USED upstream declares last_reviewed_release — every "
+                     "sub-case would mutate a field the tool never reads")
+target = labelled[0]
+meta = ups[target]
+label = meta["last_reviewed_release"]
+
+if mutation == "empty":
+    meta["last_reviewed_release"] = ""
+elif mutation == "nonstring":
+    # Derived from the recorded label rather than typed. An unquoted hand-edit
+    # is what leaves a JSON number here, and the number still CARRIES digits —
+    # so a digit check alone never sees it, only the type check does.
+    nums = re.findall(r"\d+", label)
+    if not nums:
+        raise SystemExit("recorded release %r carries no digits to derive a "
+                         "number from" % label)
+    meta["last_reviewed_release"] = (float(".".join(nums[:2])) if len(nums) > 1
+                                     else int(nums[0]))
+elif mutation == "unversioned":
+    # A non-empty string naming no version — the moving pointer (`latest`,
+    # `stable`) an upstream publishes beside its releases, mis-recorded as a
+    # review point. `release_key` returns None for it, which is the sub-case
+    # that would otherwise surface as a TypeError at rc 1.
+    moving = "latest"
+    if re.search(r"\d", moving):
+        raise SystemExit("%r carries a digit, so release_key would rank it as a "
+                         "version and this sub-case would assert nothing"
+                         % moving)
+    meta["last_reviewed_release"] = moving
+elif mutation == "buildmeta":
+    # The label that separates "carries a digit" from "names a version".
+    # SemVer §10 puts build metadata outside the version, and `release_key`
+    # strips it BEFORE it looks for one — so digits living only after the `+`
+    # satisfy a digit-counting predicate and still key to None. Without this
+    # sub-case the guard can be weakened back to a re-implementation of
+    # `release_key`'s parsing and the residual TypeError path reopens silently.
+    nums = re.findall(r"\d+", label)
+    if not nums:
+        raise SystemExit("recorded release %r carries no digits to move behind "
+                         "the build-metadata separator" % label)
+    moving = "stable+" + ".".join(nums)
+    if not re.search(r"\d", moving):
+        raise SystemExit("%r carries no digit, so a digit-counting predicate "
+                         "would already reject it and this sub-case would prove "
+                         "nothing the 'unversioned' one does not" % moving)
+    if release_key(moving) is not None:
+        raise SystemExit("release_key(%r) is %r, not None — build metadata is no "
+                         "longer stripped before the version is read, so this "
+                         "sub-case no longer names an unorderable label"
+                         % (moving, release_key(moving)))
+    meta["last_reviewed_release"] = moving
+elif mutation == "halfpoint":
+    if meta.pop("last_reviewed_commit", None) is None:
+        raise SystemExit("the labelled upstream carries no last_reviewed_commit "
+                         "to remove — this sub-case would assert nothing")
+elif mutation == "shortsha":
+    # PRESENT but malformed, which `halfpoint` cannot reach: the 12-hex prefix
+    # `git log --oneline` hands you is the realistic hand-edit, and it is
+    # answered by the 40-hex half of the clause alone. Removing that half must
+    # red something, or it is a clause no test can red.
+    commit = meta.get("last_reviewed_commit")
+    if not isinstance(commit, str) or not re.match(r"^[0-9a-f]{40}$", commit):
+        raise SystemExit("the labelled upstream carries no 40-hex "
+                         "last_reviewed_commit to truncate — this sub-case would "
+                         "assert nothing")
+    meta["last_reviewed_commit"] = commit[:12]
+    if not meta["last_reviewed_commit"]:
+        raise SystemExit("a truncated commit must still be a non-empty string, "
+                         "else the type half of the clause answers this "
+                         "sub-case and the 40-hex half stays untested")
+else:
+    raise SystemExit("unknown mutation %r" % mutation)
+
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+print(target)
+PY
+)" || { echo "  ABORT — could not build the '$mutation' release-register mutation"; exit 99; }
+  for mode in drift verify-bases; do
+    : > "$WORK/drel5.log"
+    DREL5_RC=0
+    if [ "$mode" = "verify-bases" ]; then
+      DREL5_OUT="$(run_drel5 --verify-bases)" || DREL5_RC=$?
+    else
+      DREL5_OUT="$(run_drel5)" || DREL5_RC=$?
+    fi
+    case " $DREL5_CODES " in
+      *" $DREL5_RC "*) ;;
+      *) DREL5_CODES="$DREL5_CODES $DREL5_RC" ;;
+    esac
+    calls="$(grep -cE '^(git|gh) ' "$WORK/drel5.log" || true)"
+    if [ "$DREL5_RC" -eq 2 ] && grep -qF -e "upstream $TARGET_ID" <<<"$DREL5_OUT" \
+       && grep -qF -e "$field" <<<"$DREL5_OUT" \
+       && grep -qF -e "$clause" <<<"$DREL5_OUT" \
+       && ! grep -qF -e 'Traceback' <<<"$DREL5_OUT" && [ "$calls" = "0" ]; then
+      continue
+    fi
+    DREL5_FAILED=1
+    no "D-REL5 [$mode] $desc => rc=$DREL5_RC subprocess-calls=$calls (want rc 2, 'upstream $TARGET_ID', '$field' and '$clause' named, no traceback, no subprocess)"
+    echo "        output: $(head -c 300 <<<"$DREL5_OUT")"
+  done
+done
+# The separation, asserted rather than assumed, exactly as D13b does it for the
+# component fields: a broken release review point (2) must stay distinguishable
+# from a tag query upstream could not answer (1). D-REL3's code is reused here
+# rather than re-run, so the two verdicts compared are the ones the suite
+# actually observed — and the D-REL5 side is the SET of codes every sub-case in
+# both modes produced, so one stray rc cannot hide behind the last one.
+DREL5_CODES="${DREL5_CODES# }"
+if [ "$DREL5_FAILED" -ne 0 ]; then
+  :
+elif [ "$DREL5_CODES" = "2" ] && [ "$DREL3_RC" -eq 1 ]; then
+  ok "D-REL5 every broken release review point exits 2 in BOTH modes, named, before any subprocess, and stays distinct from an unanswerable tag query's rc 1"
+else
+  no "D-REL5 the two failure modes collide: broken release metadata={$DREL5_CODES}, unanswerable tag query=$DREL3_RC"
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
