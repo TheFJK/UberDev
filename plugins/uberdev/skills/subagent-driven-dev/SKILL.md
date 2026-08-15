@@ -55,6 +55,21 @@ The append happens **before** the dispatch, because the handoff validator requir
 
 This skill's wave-based controller-only-git approach is intentionally **not** worktree-isolated — it relies on provable file-set partitioning per wave. For any *other* parallel-agent dispatch (review fanouts, ad-hoc multi-agent edits), default to `isolation: "worktree"` on the Agent tool calls — see the `uberdev:dispatching-parallel-agents` skill.
 
+## Rulings
+
+A run of this skill never parks on a judgement call. `--turbo` is unattended by contract and `/goal` drives its own circuit breakers, so a controller that halts to consult a person is halting in front of an empty chair: nobody is reading. A call that turns out wrong costs rework a reviewer can see and undo; a parked run costs the whole run.
+
+**This adds no new stop.** The stops are the ones this skill already ships — the BLOCKED ladder in "Handling Implementer Status", the REFUSED rung beside it, and cap exhaustion (`## Loop caps`) — and every one of them *routes* rather than waits: it fixes the plan, re-scopes the task, or escalates with committed work intact. An irreversible or destructive operation, a security-sensitive action, a side effect outside the worktree, and a plan too broken to guess at are each covered by that ladder already, so none of them needs a gate of its own here.
+
+What is new is the record. A judgement the controller makes instead of stalling on it is a **ruling**, and every ruling gets one line on disk at the moment it is made:
+
+- **Where.** One append-only `rulings.md` per run, in the controller's private run directory — the same directory that holds each task's `task_path` and fix ledger. Never inside the feature worktree, for the reason `## Fix ledger` already gives: an untracked file there is exactly what `git add -A` sweeps into a task commit, and it perturbs the post-wave full-test-suite run.
+- **How.** `sdd_append_ruling <rulings_path> <decision> <why> <cost>` creates the file at mode `0600` on the first call and appends one line per call after it, never truncating and never rewriting.
+- **Shape.** `Ruling: <decision> — <why> — <cost>`: what you decided, why you decided it, and what it costs if it turns out to be wrong. All three fields are required — the helper returns rc `2` rather than writing a half-line, exactly as the fix-ledger helpers do.
+- **A decision not on disk was not made.** Rulings are no more prose the controller is asked to remember than the caps are: the file is the record, and step 5 reads it back rather than reconstructing it from memory.
+
+What counts as a ruling: overriding a step of the plan, choosing between two defensible approaches, parking a finding once a cap fires, resequencing a wave, or accepting a finding as out of scope for this run.
+
 ## When to Use
 
 ## Routed child adapter (mandatory)
@@ -677,6 +692,9 @@ model_invocation: false
 ```
 
 5. Hand off to `uberdev:finish-branch` (no flag arg). The branch close-out detects unattended mode via the inherited `UBERDEV_TURBO=1` environment variable from the selected dispatch backend — under that signal, `finish-branch` auto-selects "Push and Create PR" without prompting (#97). For large tier, `pr-test-analyzer` was dispatched in Step 4.5 (above) and its findings are now on disk at `<summary_dir>/pr-test-analyzer-<plan-scope>.md`. `finish-branch` will discover and include them in the PR body's `## Reviewer findings summary` section. Post-implementation reviewer fanout is hosted by `/uberdev:review-pr` Phase 1 (chained from `finish-branch` after PR push); no reviewer *fanout* is dispatched from `subagent-driven-dev` itself (see Step 4.5 for the carve-out vs the retired `uberdev:post-impl-review` fanout).
+
+   **Rulings roll-up.** Before that handoff, read the run's `rulings.md` and emit every line it holds under a `## Rulings I made` heading, in write order, each still carrying what it costs if wrong — the roll-up is exhaustive: if the file holds a ruling, this list holds it. That is what goes in this run's final message.
+   The same `## Rulings I made` block also goes into the `## Summary` body composed for the `finish-branch` Option-2 PR, not only into the message this run ends with: `finish-branch` collects `post-impl-review-*.md` and `pr-test-analyzer*.md` from the run directory and nothing else, so `rulings.md` reaches whoever reviews the PR only because this step writes it there.
 
 ### Parallel Dispatch Pattern
 

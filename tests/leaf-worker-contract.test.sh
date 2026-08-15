@@ -50,6 +50,41 @@
 #       so a reviewer an implementer spawned for itself reads as a defect to
 #       flag rather than as extra rigor.
 #
+# ITEM B — THE RULINGS LEDGER (L8-L12). Upstream 6.3.0's "Rulings, not stalls"
+# has two halves and only ONE of them is being adopted here. The AUTONOMY half
+# is already UberDev policy — `--turbo` is unattended by contract and `/goal`
+# drives its own circuit breakers — so importing upstream's four stop conditions
+# as fresh "stop and ask" prose would ADD a human gate this repo deliberately
+# does not have. What was missing is the LEDGER discipline: an unattended
+# controller that overrode its plan reported the override in prose, if at all,
+# and a reviewer could only recover the decisions by re-reading the transcript.
+#
+#   L8  `## Rulings` declares the LINE SHAPE, not merely the idea of writing
+#       decisions down: the `Ruling:` prefix and all three fields. A ledger of
+#       free prose cannot be diffed against the plan, which is the only reason
+#       to write one.
+#   L9  the per-decision requirement and the end-of-run roll-up are TWO
+#       requirements stated in two places, so the roll-up has to exist as its
+#       own statement on some other line. One sentence that satisfies both
+#       greps is the string-presence counterfeit
+#       tests/vendor-provenance.test.sh:929-933 names, and it is also the
+#       likeliest drift: "record your rulings and report them" reads complete
+#       and obliges nothing at either end.
+#   L10 the section adds NO new human gate — the stops stay the shipped ones
+#       (the BLOCKED ladder, the REFUSED rung, cap exhaustion), all of which
+#       route rather than wait.
+#   L11 the step-5 edit does not regress the wave loop's `per-wave` invariant.
+#       tests/post-impl-review.test.sh:424 already owns that invariant; it is
+#       duplicated here, over the same anchors, so a bad edit made FOR this
+#       contract fails in the suite that motivated it rather than only in a
+#       distant one.
+#   L12 the roll-up reaches the PR. `finish-branch` collects
+#       `post-impl-review-*.md` and `pr-test-analyzer*.md` and nothing else, so
+#       `rulings.md` is unreachable by its glob: unless step 5 composes the
+#       roll-up into the PR body itself, "a reviewer can diff decisions against
+#       the plan without re-reading the transcript" is false for everyone who
+#       reads the PR rather than the run directory.
+#
 # WHY L6/L7 ARE SEPARATE FROM L2. L2 asks whether the WORKER was told; L6/L7 ask
 # whether the CONTROLLER was. Both halves are load-bearing and neither implies
 # the other: a worker that ignores its prompt still gets its duplicate review
@@ -111,6 +146,7 @@ cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
 echo "## leaf-worker-contract — the no-subagents rule on every worker-facing prompt (#530 Item A)"
+echo "##                       and the controller's rulings ledger (#530 Item B)"
 
 # The python guard prints one row per assertion as `<PASS|FAIL><TAB><id> <text>`
 # and exits non-zero only on an INTERNAL error, which is a FATAL here: a guard
@@ -642,6 +678,221 @@ else:
                              "spawned for itself (%d bullet(s) scanned)"
                 % (SKILL, len(bullets)))
 
+# --- L8/L9/L10: the `## Rulings` ledger discipline (#530 Item B) -------------
+# A ruling is a judgement call the controller made instead of stalling on it.
+# The adoption is the RECORD, not the autonomy: autonomy is already the shipped
+# policy, and restating upstream's stop conditions as new gate prose would take
+# it away. So the section is asserted for the one thing that makes a ledger
+# useful — a fixed line shape (L8) — and for the one thing that would quietly
+# undo the policy it sits inside (L10).
+RULINGS_HEADING_RE = re.compile(r"^## Rulings$")
+TOP_HEADING_RE = re.compile(r"^## ")
+ROLLUP_HEADING = "Rulings I made"
+HELPER = "sdd_append_ruling"
+# The gate shapes upstream's prose would import. Written as phrases rather than
+# as the word "wait", because this section legitimately talks about NOT waiting:
+# "a run of this skill never parks" must pass, "wait for approval" must not.
+HUMAN_GATE_RE = re.compile(
+    r"\b(stop and ask"
+    r"|ask your human"
+    r"|wait for (approval|a human|the user)"
+    r"|pause and (check|confirm)"
+    r"|request approval)\b",
+    re.IGNORECASE,
+)
+
+rulings_at = next(
+    (i for i, line in enumerate(skill_lines) if RULINGS_HEADING_RE.match(line)), None
+)
+rulings_span = None
+if rulings_at is None:
+    # Anchor guard, same discipline as L6/L7: a row that cannot be evaluated
+    # must RED, never be silently skipped or scanned over nothing. L9 is not in
+    # this loop because it reds on its own `per_decision_at is None` branch —
+    # the section is where it looks for the per-decision requirement.
+    for ident in ("L8", "L10"):
+        row(False, ident, "%s has no `## Rulings` section — the Item-B anchor is absent and "
+                          "this row cannot be evaluated" % SKILL)
+else:
+    body_start = rulings_at + 1
+    body_end = len(skill_lines) - 1
+    for scan in range(body_start, len(skill_lines)):
+        if TOP_HEADING_RE.match(skill_lines[scan]):
+            body_end = scan - 1
+            break
+    rulings_span = (body_start, body_end)
+    rulings_body = skill_lines[body_start:body_end + 1]
+    rulings_text = "\n".join(rulings_body)
+
+    # L8 — the line shape, declared on ONE line, field by field.
+    # `Ruling: <decision> — <why> — <cost>` is what makes the ledger diffable; a
+    # section that only says "record your decisions" leaves every row a
+    # different shape.
+    #
+    # Two things this row learned the hard way. The prefix is matched
+    # CASE-SENSITIVELY, because it is a literal that lands on disk, not a word:
+    # a case-insensitive search is satisfied by the section's own prose ("what
+    # counts as a ruling: overriding a step of the plan …"), which measurably
+    # kept L8 green with the shape bullet deleted. And all three fields must
+    # appear on the SAME line as the prefix, because the shape is one
+    # declaration: fields scattered across the section are satisfied by the
+    # helper's argument list, which L9 already owns and which says nothing about
+    # what a row looks like once written.
+    shape_lines = [line for line in rulings_body if "Ruling:" in line]
+    missing_shape = []
+    if shape_lines:
+        missing_shape = [
+            label
+            for label, pattern in (
+                ("the decision field", r"\bdecision\b"),
+                ("the why field", r"\bwhy\b"),
+                ("the cost field", r"\bcost"),
+            )
+            if not any(re.search(pattern, line, re.IGNORECASE) for line in shape_lines)
+        ]
+    if not [line for line in rulings_body if line.strip()]:
+        row(False, "L8", "%s `## Rulings` has an empty body" % SKILL)
+    elif not shape_lines:
+        row(False, "L8", "%s `## Rulings` declares no literal `Ruling:` line prefix — a ledger "
+                         "of free prose cannot be diffed against the plan" % SKILL)
+    elif missing_shape:
+        row(False, "L8", "%s `## Rulings` states a `Ruling:` prefix but no line carries %s"
+            % (SKILL, ", ".join(missing_shape)))
+    else:
+        row(True, "L8", "%s `## Rulings` declares the `Ruling: <decision> — <why> — <cost>` "
+                        "line shape" % SKILL)
+
+    # L10 — the section must not smuggle a stop back in.
+    gates = sorted(set(m.group(0).lower() for m in HUMAN_GATE_RE.finditer(rulings_text)))
+    if gates:
+        row(False, "L10", "%s `## Rulings` introduces a human gate this repo does not have: %s"
+            % (SKILL, ", ".join(gates)))
+    else:
+        row(True, "L10", "%s `## Rulings` records decisions without adding a stop" % SKILL)
+
+# L9 — the anti-counterfeit row. Two obligations at opposite ends of a run:
+# WRITE each ruling when the decision is made (the line in `## Rulings` that
+# names the helper), and REPORT all of them at the end (a line that names the
+# roll-up heading). The roll-up is looked for on any line EXCEPT the per-decision
+# one, so the row asks the question it means to ask — "does a second, separate
+# statement exist?" — rather than "is the first mention somewhere else?", which
+# reds a file that carries the real roll-up further down. When the heading
+# appears only on the per-decision line, that one sentence is wearing the costume
+# of two independent requirements and the row says so.
+per_decision_at = None
+if rulings_span is not None:
+    per_decision_at = next(
+        (i for i in range(rulings_span[0], rulings_span[1] + 1)
+         if HELPER in skill_lines[i]),
+        None,
+    )
+rollup_lines = [i for i, line in enumerate(skill_lines) if ROLLUP_HEADING in line]
+rollup_elsewhere = [i for i in rollup_lines if i != per_decision_at]
+exhaustive_at = next(
+    (i for i in rollup_elsewhere
+     if re.search(r"exhaustive", skill_lines[i], re.IGNORECASE)),
+    None,
+)
+if per_decision_at is None:
+    row(False, "L9", "%s `## Rulings` never names `%s` — nothing states that a ruling is "
+                     "written when the decision is made" % (SKILL, HELPER))
+elif not rollup_elsewhere and rollup_lines:
+    row(False, "L9", "%s states the per-decision requirement and the `%s` roll-up in ONE "
+                     "sentence (line %d) — one restatement, not two requirements"
+        % (SKILL, ROLLUP_HEADING, rollup_lines[0] + 1))
+elif not rollup_elsewhere:
+    row(False, "L9", "%s states no `%s` roll-up — the per-decision requirement alone leaves "
+                     "the ledger unread" % (SKILL, ROLLUP_HEADING))
+elif exhaustive_at is None:
+    row(False, "L9", "%s states the `%s` roll-up (line %s) but never that it is EXHAUSTIVE — "
+                     "a roll-up the controller may prune is not a ledger"
+        % (SKILL, ROLLUP_HEADING, ", ".join(str(i + 1) for i in rollup_elsewhere)))
+else:
+    row(True, "L9", "%s writes each ruling at line %d and reports all of them exhaustively at "
+                    "line %d — two requirements, two places"
+        % (SKILL, per_decision_at + 1, exhaustive_at + 1))
+
+# --- L11: the step-5 edit does not regress the wave loop's per-wave invariant -
+# Same anchors and same predicate as tests/post-impl-review.test.sh:424, checked
+# here because THIS contract is what adds prose to that exact region. Both
+# anchors are verified before the slice is taken: a renamed heading yields an
+# empty range, and a count of 0 over nothing is a false pass.
+FLOW_OPEN_RE = re.compile(r"^### High-Level Flow")
+FLOW_CLOSE_RE = re.compile(r"^### Parallel Dispatch Pattern")
+PER_WAVE_RE = re.compile(r"per-wave|after each wave", re.IGNORECASE)
+flow_at = next((i for i, line in enumerate(skill_lines) if FLOW_OPEN_RE.match(line)), None)
+flow_end = None
+if flow_at is not None:
+    flow_end = next(
+        (i for i in range(flow_at, len(skill_lines)) if FLOW_CLOSE_RE.match(skill_lines[i])),
+        None,
+    )
+if flow_at is None or flow_end is None:
+    row(False, "L11", "%s is missing the `### High-Level Flow` / `### Parallel Dispatch "
+                      "Pattern` range anchors — the wave-loop region cannot be extracted" % SKILL)
+else:
+    per_wave = [
+        "line %d" % (i + 1)
+        for i in range(flow_at, flow_end + 1)
+        if PER_WAVE_RE.search(skill_lines[i])
+    ]
+    if per_wave:
+        row(False, "L11", "%s wave-loop region reintroduces per-wave / after-each-wave "
+                          "wording at %s" % (SKILL, ", ".join(per_wave)))
+    else:
+        row(True, "L11", "%s wave-loop region (lines %d-%d) carries no per-wave wording"
+            % (SKILL, flow_at + 1, flow_end + 1))
+
+# --- L12: the roll-up reaches the PR, not only the transcript ----------------
+# The issue's success criterion is a REVIEWER diffing decisions against the plan
+# without re-reading the transcript, and a reviewer reads the PR. `finish-branch`
+# globs `post-impl-review-*.md` and `pr-test-analyzer*.md` from the run directory
+# — `rulings.md` matches neither — so the roll-up arrives in the PR body only
+# because step 5 composes it there. Two destinations, two lines: a final message
+# alone is a transcript, which is what this is meant to replace.
+STEP_5_RE = re.compile(r"^5\. ")
+step_5_at = None
+if flow_at is not None and flow_end is not None:
+    step_5_at = next(
+        (i for i in range(flow_at, flow_end + 1) if STEP_5_RE.match(skill_lines[i])), None
+    )
+if step_5_at is None:
+    row(False, "L12", "%s has no `5. ` step inside the wave-loop region — the step-5 anchor "
+                      "was renamed and this row cannot be evaluated" % SKILL)
+else:
+    block = range(step_5_at, flow_end)
+    final_at = next(
+        (i for i in block
+         if ROLLUP_HEADING in skill_lines[i]
+         and re.search(r"final message", skill_lines[i], re.IGNORECASE)),
+        None,
+    )
+    # Same shape as L9: the PR destination is looked for on any step-5 line
+    # except the final-message one, so a file that names both on one line AND
+    # carries the real PR requirement further down passes, while a file whose
+    # only PR mention rides on the final-message line reds as the single
+    # restatement it is.
+    pr_lines = [
+        i for i in block
+        if ROLLUP_HEADING in skill_lines[i]
+        and re.search(r"\bPR\b", skill_lines[i])
+        and re.search(r"summary", skill_lines[i], re.IGNORECASE)
+    ]
+    pr_at = next((i for i in pr_lines if i != final_at), None)
+    if final_at is None:
+        row(False, "L12", "%s step 5 does not require the `%s` roll-up in the run's final "
+                          "message" % (SKILL, ROLLUP_HEADING))
+    elif pr_at is None and pr_lines:
+        row(False, "L12", "%s states both roll-up destinations on one line (line %d) — the PR "
+                          "route must be its own requirement" % (SKILL, pr_lines[0] + 1))
+    elif pr_at is None:
+        row(False, "L12", "%s step 5 routes the `%s` roll-up to the final message only — "
+                          "nothing carries it into the PR body, and `finish-branch`'s glob "
+                          "cannot reach `rulings.md`" % (SKILL, ROLLUP_HEADING))
+    else:
+        row(True, "L12", "%s step 5 routes the roll-up to the final message (line %d) and into "
+                         "the PR body (line %d)" % (SKILL, final_at + 1, pr_at + 1))
+
 sys.stdout.write("\n".join(rows) + "\n")
 PY
 PY_RC=$?
@@ -670,7 +921,7 @@ if [ "$ROW_COUNT" -eq 0 ]; then
   echo "FATAL: the leaf-worker guard produced no rows" >&2
   exit 2
 fi
-for ident in L0 L1 L2 L3a L3b L4 L4.C L4.N L5a L5b L6 L7; do
+for ident in L0 L1 L2 L3a L3b L4 L4.C L4.N L5a L5b L6 L7 L8 L9 L10 L11 L12; do
   if ! grep -qF -- "$TAB$ident " "$ROWS"; then
     echo "FATAL: the leaf-worker guard reported no $ident row" >&2
     exit 2
