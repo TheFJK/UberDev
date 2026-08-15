@@ -76,6 +76,15 @@ mkdir -p "$STUBS"
 #   STUB_REVPARSE_MAP  : path<TAB>oid table answering mode=ok, so ONE stub can
 #                        serve components whose recorded oids all differ
 #   STUB_FETCH_MODE    : ok | fail
+#   STUB_TAGS_MODE     : ok | rc1 | garbage | noref | badref
+#                        (`git ls-remote --tags`)
+#   STUB_TAGS_TABLE    : slug<TAB>sha<TAB>ref table answering mode=ok, so one
+#                        stub can give each upstream its OWN published tag set
+#
+# The two tag knobs are deliberately INDEPENDENT of STUB_LSREMOTE_MODE. That one
+# variable drives every ls-remote the stub sees, so reusing it would make "HEAD
+# resolves but the tag query fails" unmodellable — and would silently change what
+# D6-D8 assert, since their `mode` argument would start failing two queries.
 # Every invocation is appended to $STUB_LOG so mutations can be counted.
 #
 # The `rev-parse` and `fetch` arms are not decoration. Before they existed both
@@ -112,6 +121,39 @@ case "$*" in
       exit 1
     fi
     exit 0
+    ;;
+  # ARM ORDER IS LOAD-BEARING. The HEAD invocation carries no `--tags`, so the
+  # two patterns never overlap — but `*ls-remote*)` reached FIRST would swallow
+  # the tag query and answer it with a single `<sha>\tHEAD` line, which is the
+  # vacuous green this row set exists to refuse. Keep this arm above it.
+  *ls-remote*--tags*)
+    case "${STUB_TAGS_MODE:-ok}" in
+      rc1)     echo "fatal: could not read from remote repository" >&2; exit 1 ;;
+      garbage) printf 'not-a-sha\trefs/tags/v9.9.9\n'; exit 0 ;;
+      # A single-token line — well-formed object id, no ref field. Real
+      # `ls-remote` cannot emit one, which is exactly why the parser's own
+      # arity guard needs a row: without it that line is an IndexError
+      # traceback, not the named diagnostic every other bad answer gets.
+      noref)   printf '%s\n' "1111111111111111111111111111111111111111"; exit 0 ;;
+      # A well-formed line whose ref is not under `refs/tags`. The twin of
+      # `noref`: both fields parse, so the only thing standing between this and
+      # `match.group(1)` on None is the tool's own refs/tags guard — and an
+      # AttributeError is a loud exit that names no upstream, which is the same
+      # loss `noref` guards against.
+      badref)  printf '%s\trefs/heads/main\n' \
+                 "2222222222222222222222222222222222222222"; exit 0 ;;
+      *)
+        # The last argument is the clone url; its last two path components are
+        # the slug the table is keyed by.
+        for u in "$@"; do :; done
+        slug="${u#*://}"; slug="${slug#*/}"
+        while IFS=$'\t' read -r rslug sha ref; do
+          [ "$rslug" = "$slug" ] || continue
+          printf '%s\t%s\n' "$sha" "$ref"
+        done < "${STUB_TAGS_TABLE:?STUB_TAGS_TABLE unset}"
+        exit 0
+        ;;
+    esac
     ;;
   *ls-remote*)
     case "${STUB_LSREMOTE_MODE:-ok}" in
@@ -173,6 +215,197 @@ PY
 [ -n "$WATERMARK" ] || { echo "  ABORT — no superpowers watermark in the register"; exit 99; }
 MOVED_HEAD="a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 
+# --- the published-tag fixture (#535) --------------------------------------
+# The table the stub answers `ls-remote --tags` from, plus every label and sha
+# the D-REL rows compare against, DERIVED from the committed register. A literal
+# `v6.3.0` here would prove the stub agrees with the test rather than that the
+# tool reads the register, and it would go stale the first time a review point
+# is advanced.
+#
+# Built BEFORE the anti-vacuity preflight below, unlike REVPARSE_MAP: the
+# preflight itself calls run_drift, and a table that does not exist yet makes the
+# stub's `${STUB_TAGS_TABLE:?}` abort, hard-stopping the whole suite at rc 2.
+#
+# The labelled upstream gets an ANNOTATED-tag pair — the tag object's own oid,
+# then the `^{}` peel line carrying the register's recorded commit — so the
+# peel-wins rule is exercised on the happy path rather than only in a row of its
+# own. Slugs with no labelled upstream get NO rows at all, which is what the
+# monorepo really publishes today.
+TAGS_DEFAULT="$WORK/tags-default.tbl"
+TAGS_UNVERSIONED="$WORK/tags-unversioned.tbl"
+TAGS_ENV="$WORK/tags.env"
+TAGFREE_SLUGS_FILE="$WORK/tagfree-slugs.txt"
+ALL_SLUGS_FILE="$WORK/all-slugs.txt"
+python3 - "$REGISTER" "$TAGS_DEFAULT" "$TAGS_ENV" "$TAGFREE_SLUGS_FILE" \
+         "$ALL_SLUGS_FILE" "$TAGS_UNVERSIONED" <<'PY' || { echo "  ABORT — could not derive the tag fixture"; exit 99; }
+import hashlib, json, re, shlex, sys
+
+reg, table, envfile, tagfree_file, allslugs_file, unversioned_table = sys.argv[1:7]
+d = json.load(open(reg, encoding="utf-8"))
+ups = d.get("upstreams", {})
+used = sorted({c["upstream"] for c in d.get("components", [])
+               if c.get("origin") == "third-party"})
+
+labelled = [u for u in used if ups.get(u, {}).get("last_reviewed_release")]
+unlabelled = [u for u in used if not ups.get(u, {}).get("last_reviewed_release")]
+# Both arms are required. Without (a) every release row below asserts nothing;
+# without (b) the HEAD-only upstream the rows contrast against has vanished, and
+# "a missing label is not an error" would be untested.
+if not labelled:
+    raise SystemExit("no used upstream declares last_reviewed_release — every "
+                     "release row would be vacuous")
+if not unlabelled:
+    raise SystemExit("every used upstream declares last_reviewed_release — the "
+                     "label-free upstream these rows contrast against is gone")
+
+
+# A tag that names NO version — the moving pointer (`latest`, `stable`,
+# `nightly`) that upstreams routinely publish alongside their releases. It is
+# spelled out rather than derived because the register records only VERSIONED
+# labels, so there is nothing in it to derive a version-free name from; what
+# makes it trustworthy is the assertion below, not the spelling. The property
+# the tool's `release_key` filter turns on is "parses to no version", and a name
+# carrying no digit anywhere has that property whichever way `release_key`
+# partitions it — the same check also proves this name can never collide with a
+# generated label, since every one of those is renumbered from a digit-bearing
+# recorded release.
+UNVERSIONED = "latest"
+if re.search(r"\d", UNVERSIONED):
+    raise SystemExit("the unversioned tag label %r carries a digit, so "
+                     "release_key would rank it as a version and the rows "
+                     "that turn on it would assert nothing" % UNVERSIONED)
+
+
+def synthetic(*parts):
+    """A derived 40-hex object id. Never a literal: a typed sha stops proving
+    anything the moment the register records a different one."""
+    # Not a security primitive — a deterministic id derived from the register.
+    return hashlib.sha1("|".join(parts).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()
+
+
+def renumber(label, nums):
+    it = iter(nums)
+    return re.sub(r"\d+", lambda m: str(next(it)), label)
+
+
+def step_down(nums):
+    """The next strictly-lower version tuple: decrement the rightmost non-zero
+    component. Generic on purpose — a hardcoded "decrement the minor" aborts the
+    suite the day upstream cuts an X.0.0."""
+    out = list(nums)
+    for i in range(len(out) - 1, -1, -1):
+        if out[i] > 0:
+            out[i] -= 1
+            return out
+    return None
+
+
+def step_up(nums):
+    """Increment the SECOND numeric component and zero every later one; with
+    fewer than two components, increment the last."""
+    out = list(nums)
+    idx = 1 if len(out) > 1 else len(out) - 1
+    out[idx] += 1
+    for i in range(idx + 1, len(out)):
+        out[i] = 0
+    return out
+
+
+rows = []
+for upstream_id in labelled:
+    meta = ups[upstream_id]
+    slug, label = meta["repo"], meta["last_reviewed_release"]
+    commit = meta["last_reviewed_commit"]
+    nums = [int(n) for n in re.findall(r"\d+", label)]
+    if not nums:
+        raise SystemExit("recorded release %r carries no digits" % label)
+    rows.append((slug, synthetic(slug, label, "tag-object"),
+                 "refs/tags/%s" % label))
+    rows.append((slug, commit, "refs/tags/%s^{}" % label))
+    lower = nums
+    for _ in range(2):
+        lower = step_down(lower)
+        if lower is None:
+            raise SystemExit("recorded release %r has no room below it" % label)
+        older = renumber(label, lower)
+        rows.append((slug, synthetic(slug, older), "refs/tags/%s" % older))
+    # ...and one tag that names no version at all, on the HAPPY path. Without it
+    # every tag in this suite parses to a version, `release_key` never returns
+    # None, and the filter that keeps such a tag out of `max()` filters nothing —
+    # so deleting the filter stays green here while an upstream publishing a
+    # single moving pointer takes the weekly job down with a TypeError.
+    rows.append((slug, synthetic(slug, UNVERSIONED),
+                 "refs/tags/%s" % UNVERSIONED))
+
+lead = labelled[0]
+lead_meta = ups[lead]
+lead_slug, lead_label = lead_meta["repo"], lead_meta["last_reviewed_release"]
+lead_nums = [int(n) for n in re.findall(r"\d+", lead_label)]
+newer_label = renumber(lead_label, step_up(lead_nums))
+# The lexical trap: `ls-remote` sorts refnames, so `<label>.2` prints AFTER
+# `<label>.10` and a tool that took the last line would call it the newest.
+# Appending a component keeps both strictly above the recorded label and
+# strictly below the incremented one, whatever shape the recorded label has.
+lex_high, lex_low = "%s.10" % lead_label, "%s.2" % lead_label
+
+all_slugs = sorted({ups[u]["repo"] for u in used})
+tagfree = sorted(set(all_slugs) - {ups[u]["repo"] for u in labelled})
+# Third anti-vacuity arm. Every row that walks TAGFREE_SLUGS_FILE asserts inside
+# the loop, so an empty file makes those loops assert NOTHING while still
+# reporting a pass — the vacuous green this suite exists to refuse. An unlabelled
+# upstream is not enough on its own: it could share its repo slug with a labelled
+# one, and the tag query is answered per SLUG.
+if not tagfree:
+    raise SystemExit("every distinct slug carries a labelled upstream — the "
+                     "tag-free slug D-REL1 and D-REL1b assert over is gone, and "
+                     "both would pass without asserting anything")
+
+
+def tag_name(ref):
+    name = ref.split("refs/tags/", 1)[1]
+    return name[:-3] if name.endswith("^{}") else name
+
+
+lead_tag_count = len({tag_name(r[2]) for r in rows if r[0] == lead_slug})
+
+# The second table: every default row, PLUS the version-free tag for each
+# tag-free slug. This is the only shape that reaches the tool's "publishes tags,
+# none of them names a version" branch — in the default table those slugs publish
+# nothing at all, which renders as the DIFFERENT `no published tags` string.
+unversioned_rows = [(slug, synthetic(slug, UNVERSIONED, "tagfree"),
+                     "refs/tags/%s" % UNVERSIONED) for slug in tagfree]
+tagfree_tag_count = len({tag_name(r[2]) for r in unversioned_rows
+                         if r[0] == tagfree[0]})
+
+open(table, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % r for r in rows))
+open(unversioned_table, "w", encoding="utf-8").write(
+    "".join("%s\t%s\t%s\n" % r for r in rows + unversioned_rows))
+open(tagfree_file, "w", encoding="utf-8").write("".join(s + "\n" for s in tagfree))
+open(allslugs_file, "w", encoding="utf-8").write("".join(s + "\n" for s in all_slugs))
+env = {
+    "LEAD_SLUG": lead_slug,
+    "LEAD_LABEL": lead_label,
+    "LEAD_PEEL12": lead_meta["last_reviewed_commit"][:12],
+    "LEAD_TAG_COUNT": str(lead_tag_count),
+    "SLUG_COUNT": str(len(all_slugs)),
+    "UNVERSIONED_LABEL": UNVERSIONED,
+    "TAGFREE_TAG_COUNT": str(tagfree_tag_count),
+    "NEWER_LABEL": newer_label,
+    "NEWER_SHA": synthetic(lead_slug, newer_label),
+    "RC_LABEL": "%s-rc1" % newer_label,
+    "RC_SHA": synthetic(lead_slug, newer_label, "rc1"),
+    "LEX_HIGH_LABEL": lex_high,
+    "LEX_HIGH_SHA": synthetic(lead_slug, lex_high),
+    "LEX_LOW_LABEL": lex_low,
+    "LEX_LOW_SHA": synthetic(lead_slug, lex_low),
+}
+open(envfile, "w", encoding="utf-8").write(
+    "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in sorted(env.items())))
+PY
+. "$TAGS_ENV"
+
 # run_drift <log-file> <mode> <head> <difffiles> <openissues> [extra args...]
 DRIFT_OUT=""
 DRIFT_RC=0
@@ -192,6 +425,8 @@ run_drift() {
     STUB_REVPARSE_MODE="${REVPARSE_MODE:-ok}" \
     STUB_REVPARSE_MAP="${REVPARSE_MAP:-/dev/null}" \
     STUB_FETCH_MODE="${FETCH_MODE:-ok}" \
+    STUB_TAGS_MODE="${TAGS_MODE:-ok}" \
+    STUB_TAGS_TABLE="${TAGS_TABLE:-$TAGS_DEFAULT}" \
     python3 "$DRIFT" --repo-root "${DRIFT_ROOT:-$REPO_ROOT}" "$@" 2>&1
   )" || DRIFT_RC=$?
 }
@@ -199,6 +434,8 @@ LSTREE_MODE=ok
 REVPARSE_MODE=ok
 REVPARSE_MAP=/dev/null
 FETCH_MODE=ok
+TAGS_MODE=ok
+TAGS_TABLE=""
 DRIFT_ROOT="$REPO_ROOT"
 
 # gh_mutations <log> -> count of create/edit/comment invocations
@@ -390,6 +627,8 @@ PY
     STUB_DIFF_FILES="" \
     STUB_OPEN_ISSUES="[]" \
     STUB_LSTREE_MODE=ok \
+    STUB_TAGS_MODE=ok \
+    STUB_TAGS_TABLE="$TAGS_DEFAULT" \
     python3 "$DRIFT" --repo-root "$BAD_ROOT" 2>&1
   )" || D13_RC=$?
   calls="$(grep -cE '^(git|gh) ' "$WORK/d13.log" || true)"
@@ -482,6 +721,14 @@ grep -qE '^git rev-parse' "$WORK/dvb1.log" \
   || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }no blob was resolved"
 # HEAD is irrelevant to a base check, so the mode must return before resolving
 # it. Asserting the absence keeps the mode cheap and its failure modes narrow.
+#
+# Since #535 this one assertion forbids TWO query shapes — `ls-remote <url> HEAD`
+# and `ls-remote --tags <url>` — because both ledger lines begin `git ls-remote`.
+# Do NOT "fix" it into `ls-remote.*HEAD`: that would let the tag pass leak into a
+# mode that has no use for it, unnoticed. The stub's own `${STUB_TAGS_TABLE:?}`
+# is NOT a second guard here — run_drift builds its environment with
+# `${VAR:-default}`, so the variable is ALWAYS set and the `:?` can never fire
+# from this suite. This grep is the whole oracle.
 ! grep -qE '^git ls-remote' "$WORK/dvb1.log" \
   || DVB1_FAILS="${DVB1_FAILS}${DVB1_FAILS:+; }it resolved upstream HEAD, which a base check does not need"
 if [ -z "$DVB1_FAILS" ]; then
@@ -553,6 +800,226 @@ if [ "$DRIFT_RC" -eq 2 ] && [ "$DVB5_CALLS" = "0" ] && [ "$DVB4_RC" -eq 1 ]; the
   ok "D-VB5 nothing to verify exits 2 before any clone, and stays distinct from an outage's rc 1"
 else
   no "D-VB5 an empty evidence set => rc=$DRIFT_RC subprocess-calls=$DVB5_CALLS (want rc 2, 0 calls, and rc 1 for D-VB4)"
+fi
+
+echo
+echo "== D-REL1-D-REL4: the published-tag observable (#535) =="
+
+# ---------------------------------------------------------------------------
+# WHY THESE ROWS EXIST. RFC 0019 §8 makes this job the compensating control for
+# vendoring, and §7 adjudicates RELEASES — but the job only ever resolved HEAD,
+# so it could not say "upstream cut a release you have not adjudicated". The
+# 6.3.0 walk was triggered by a human noticing a new directory in the plugin
+# cache, not by this control. HEAD drift and release drift disagree in BOTH
+# directions: the day a release lands they can coincide (reported as no drift at
+# all), and between releases unreleased commits render as drift the register has
+# no obligation to chase — which trains the reader to mute the issue.
+#
+# Rows below assert the SECOND observable exists and is read correctly. Three
+# falsifiability checks were RUN, not assumed, and each must keep failing:
+#
+#   * delete the `*ls-remote*--tags*` stub arm — the tag query then falls through
+#     to the HEAD arm, which answers `<sha>\tHEAD`; the tool refuses a ref outside
+#     refs/tags, so the ANTI-VACUITY PREFLIGHT itself hard-stops the suite at
+#     rc 2 and no row below can report a pass at all;
+#   * stop letting an annotated tag's `^{}` peel line win — D-REL1 reds, because
+#     the reported commit becomes the tag object's oid, which the register has
+#     never seen;
+#   * key the ordering on the digit runs alone, or on refname order — D-REL2 reds
+#     on `<newer>-rc1` and on the `.2`-after-`.10` pair respectively;
+#   * drop the filter that keeps a version-free tag out of `max()` — the DEFAULT
+#     table carries such a tag, so the happy path itself dies comparing None
+#     against a tuple, and the anti-vacuity preflight hard-stops the suite at
+#     rc 2 before any row below it runs;
+#   * disable the `none of them names a version` render arm — D-REL1b reds,
+#     because `max()` over an empty filtered set raises instead of reporting;
+#   * drop the `len(fields) < 2` ref-arity guard — D-REL4b reds;
+#   * drop the "not under refs/tags" guard — D-REL4c reds.
+#
+# The version-free filter and the render arm are why every table carries a tag
+# that names NO version. A suite in which every tag parses to a version cannot
+# see that filter at all: it never filters anything, and deleting it stays green
+# — which is exactly what happened before these two rows existed.
+#
+# The last two guards refuse answers real `ls-remote --tags` cannot produce, so
+# what their rows protect is not the ANSWER but the DIAGNOSTIC: without them the
+# tool still exits non-zero, by IndexError and AttributeError respectively,
+# naming neither the upstream nor the line — the anonymous failure D6-D8 refuse
+# for HEAD.
+# ---------------------------------------------------------------------------
+
+# names_an_upstream <output> — true when the diagnostic names some upstream the
+# register actually declares, rather than failing anonymously. Derived from the
+# register so a renamed slug cannot leave this asserting a literal that is gone.
+names_an_upstream() {
+  local out="$1" slug found=1
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    if grep -qF -e "$slug" <<<"$out"; then found=0; fi
+  done < "$ALL_SLUGS_FILE"
+  return "$found"
+}
+
+# D-REL1 — the happy path asserts the LEDGER and the BODY. The ledger proves one
+# `ls-remote --tags` per distinct upstream SLUG (never one per component, and
+# never none at all); the body proves the tool read the annotated tag's `^{}`
+# PEEL line, because the recorded review point is the only commit that line
+# carries — the tag object's own oid is a different, equally well-formed sha.
+run_drift "$WORK/drel1.log" ok "$WATERMARK" "" "[]" --dry-run
+DREL1_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL1_FAILS="rc=$DRIFT_RC"
+TAG_QUERIES="$(grep -cE '^git ls-remote --tags' "$WORK/drel1.log" || true)"
+[ "$TAG_QUERIES" = "$SLUG_COUNT" ] \
+  || DREL1_FAILS="${DREL1_FAILS}${DREL1_FAILS:+; }tag queries=$TAG_QUERIES want $SLUG_COUNT"
+grep -qF -e "Upstream tags resolved this run:" <<<"$DRIFT_OUT" \
+  || DREL1_FAILS="${DREL1_FAILS}${DREL1_FAILS:+; }the body carries no tag block"
+LEAD_LINE="- \`$LEAD_SLUG\`: $LEAD_TAG_COUNT published tag(s); newest \`$LEAD_LABEL\` (\`$LEAD_PEEL12\`)"
+grep -qF -e "$LEAD_LINE" <<<"$DRIFT_OUT" \
+  || DREL1_FAILS="${DREL1_FAILS}${DREL1_FAILS:+; }missing line: $LEAD_LINE"
+while IFS= read -r tagfree_slug; do
+  [ -n "$tagfree_slug" ] || continue
+  grep -qF -e "- \`$tagfree_slug\`: no published tags" <<<"$DRIFT_OUT" \
+    || DREL1_FAILS="${DREL1_FAILS}${DREL1_FAILS:+; }$tagfree_slug not reported as publishing no tags"
+done < "$TAGFREE_SLUGS_FILE"
+# The lead's table includes a version-free tag, so the count above already
+# counts it while `newest` must still name the recorded release. Pinning the
+# negative as well keeps the version-free tag OUT of the answer under any future
+# key — one that ranked it last rather than excluding it would satisfy the line
+# above by accident.
+if grep -qF -e "newest \`$UNVERSIONED_LABEL\`" <<<"$DRIFT_OUT"; then
+  DREL1_FAILS="${DREL1_FAILS}${DREL1_FAILS:+; }a tag naming no version was reported as newest"
+fi
+if [ -z "$DREL1_FAILS" ]; then
+  ok "D-REL1 one tag query per upstream slug, and the peeled annotated tag is what gets reported"
+else
+  no "D-REL1 published tags are not resolved as declared: $DREL1_FAILS"
+fi
+
+# D-REL1b — a slug that publishes tags of which NONE names a version. This is
+# the branch between "reports an observation" and "the weekly job dies with an
+# uncaught TypeError", for an upstream doing something entirely normal: shipping
+# one moving pointer and no releases yet. It is a distinct shape from D-REL1's
+# tag-free slug, and must render as a distinct line — reporting "no published
+# tags" for a remote that published some is a false observation.
+TAGS_TABLE="$TAGS_UNVERSIONED"
+run_drift "$WORK/drel1b.log" ok "$WATERMARK" "" "[]" --dry-run
+TAGS_TABLE=""
+DREL1B_FAILS=''
+[ "$DRIFT_RC" -eq 0 ] || DREL1B_FAILS="rc=$DRIFT_RC"
+while IFS= read -r tagfree_slug; do
+  [ -n "$tagfree_slug" ] || continue
+  UNNAMED_LINE="- \`$tagfree_slug\`: $TAGFREE_TAG_COUNT published tag(s); none of them names a version"
+  grep -qF -e "$UNNAMED_LINE" <<<"$DRIFT_OUT" \
+    || DREL1B_FAILS="${DREL1B_FAILS}${DREL1B_FAILS:+; }missing line: $UNNAMED_LINE"
+  if grep -qF -e "- \`$tagfree_slug\`: no published tags" <<<"$DRIFT_OUT"; then
+    DREL1B_FAILS="${DREL1B_FAILS}${DREL1B_FAILS:+; }$tagfree_slug published tags but was reported as publishing none"
+  fi
+done < "$TAGFREE_SLUGS_FILE"
+# ...and the labelled slug is untouched by the other slug's answer.
+grep -qF -e "$LEAD_LINE" <<<"$DRIFT_OUT" \
+  || DREL1B_FAILS="${DREL1B_FAILS}${DREL1B_FAILS:+; }missing line: $LEAD_LINE"
+if [ -z "$DREL1B_FAILS" ]; then
+  ok "D-REL1b tags that name no version are reported as an observation, not a crash"
+else
+  no "D-REL1b a version-free tag set is misreported: $DREL1B_FAILS"
+fi
+
+# D-REL2 — ordering is COMPUTED, never taken from `ls-remote`'s output order.
+# Three traps in one table: a pre-release must not outrank its own final release
+# (keying on the digit runs alone puts `X-rc1` above `X`); `<label>.2` prints
+# after `<label>.10` in lexical refname order, so "the last line" is not "the
+# newest"; and neither may displace the genuinely-newest label.
+DREL2_TABLE="$WORK/tags-rel2.tbl"
+cp "$TAGS_DEFAULT" "$DREL2_TABLE"
+{
+  printf '%s\t%s\trefs/tags/%s\n' "$LEAD_SLUG" "$NEWER_SHA" "$NEWER_LABEL"
+  printf '%s\t%s\trefs/tags/%s\n' "$LEAD_SLUG" "$RC_SHA" "$RC_LABEL"
+  printf '%s\t%s\trefs/tags/%s\n' "$LEAD_SLUG" "$LEX_HIGH_SHA" "$LEX_HIGH_LABEL"
+  printf '%s\t%s\trefs/tags/%s\n' "$LEAD_SLUG" "$LEX_LOW_SHA" "$LEX_LOW_LABEL"
+} >> "$DREL2_TABLE"
+TAGS_TABLE="$DREL2_TABLE"
+run_drift "$WORK/drel2.log" ok "$WATERMARK" "" "[]" --dry-run
+TAGS_TABLE=""
+if [ "$DRIFT_RC" -eq 0 ] \
+   && grep -qF -e "newest \`$NEWER_LABEL\` (\`${NEWER_SHA:0:12}\`)" <<<"$DRIFT_OUT" \
+   && ! grep -qF -e "newest \`$RC_LABEL\`" <<<"$DRIFT_OUT" \
+   && ! grep -qF -e "newest \`$LEX_LOW_LABEL\`" <<<"$DRIFT_OUT" \
+   && ! grep -qF -e "newest \`$LEX_HIGH_LABEL\`" <<<"$DRIFT_OUT"; then
+  ok "D-REL2 the newest tag is decided by version order, not by refname order or digit runs"
+else
+  no "D-REL2 expected newest '$NEWER_LABEL' (not '$RC_LABEL', not '$LEX_LOW_LABEL'); rc=$DRIFT_RC"
+fi
+
+# D-REL3 — the tag query itself fails while HEAD still resolves. Holding
+# STUB_LSREMOTE_MODE at `ok` is the whole point: it proves the TAG arm is what
+# failed. An upstream that cannot answer is the same class as D6-D8 — rc 1, a
+# diagnostic naming the upstream and the query shape, and nothing mutated.
+TAGS_MODE=rc1
+run_drift "$WORK/drel3.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+TAGS_MODE=ok
+DREL3_RC="$DRIFT_RC"
+DREL3_MUTS="$(gh_mutations "$WORK/drel3.log")"
+if [ "$DREL3_RC" -eq 1 ] && [ "$DREL3_MUTS" = "0" ] \
+   && grep -qF -e '--tags' <<<"$DRIFT_OUT" && names_an_upstream "$DRIFT_OUT"; then
+  ok "D-REL3 an unanswerable tag query exits 1 with a diagnostic, mutating nothing"
+else
+  no "D-REL3 a failed tag query => rc=$DREL3_RC mutations=$DREL3_MUTS (want rc 1, 0, named)"
+fi
+
+# D-REL4 — the remote answers, but with something that is not an object id. The
+# same refusal D8 makes for HEAD: an unparseable answer must never be read as
+# "this upstream publishes tag v9.9.9 at <garbage>".
+TAGS_MODE=garbage
+run_drift "$WORK/drel4.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+TAGS_MODE=ok
+DREL4_MUTS="$(gh_mutations "$WORK/drel4.log")"
+if [ "$DRIFT_RC" -eq 1 ] && [ "$DREL4_MUTS" = "0" ] \
+   && names_an_upstream "$DRIFT_OUT"; then
+  ok "D-REL4 a non-40-hex tag line fails loudly, naming the upstream"
+else
+  no "D-REL4 a garbage tag line => rc=$DRIFT_RC mutations=$DREL4_MUTS (want rc 1, 0, named)"
+fi
+
+# D-REL4b — the answer is a well-formed object id with no ref beside it. D-REL4
+# lands on the "not an object id" arm, so without this row the ARITY guard is
+# unexercised and deleting it stays green; what it costs is not a wrong answer
+# but the loud diagnostic itself — an unguarded `fields[1]` is an IndexError
+# traceback naming no upstream at all.
+#
+# Numbered `4b`, not `5`: this row is a second shape of D-REL4's "the remote
+# answered with something unreadable" case, and `D-REL5` is spoken for by the
+# register-validation loop that exits 2 — two rows reporting under one id, one
+# asserting rc 1 and one rc 2, would break the only plan-row → test-row mapping
+# this drive has.
+TAGS_MODE=noref
+run_drift "$WORK/drel4b.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+TAGS_MODE=ok
+DREL4B_MUTS="$(gh_mutations "$WORK/drel4b.log")"
+if [ "$DRIFT_RC" -eq 1 ] && [ "$DREL4B_MUTS" = "0" ] \
+   && grep -qF -e 'no ref' <<<"$DRIFT_OUT" && names_an_upstream "$DRIFT_OUT" \
+   && ! grep -qF -e 'Traceback' <<<"$DRIFT_OUT"; then
+  ok "D-REL4b a ref-less tag line fails loudly by name, not by traceback"
+else
+  no "D-REL4b a ref-less tag line => rc=$DRIFT_RC mutations=$DREL4B_MUTS (want rc 1, 0, named, no traceback)"
+fi
+
+# D-REL4c — both fields parse, but the ref is not under `refs/tags`. The exact
+# twin of D-REL4b: the answer is to a question this script never asked, and
+# without the guard `match.group(1)` on a None match is an AttributeError —
+# still a non-zero exit, but an anonymous one that names neither the upstream
+# nor the ref. Guarding one arm and not the other is how a diagnostic contract
+# rots into "it exits non-zero somehow".
+TAGS_MODE=badref
+run_drift "$WORK/drel4c.log" ok "$MOVED_HEAD" "skills/writing-skills/SKILL.md" "[]"
+TAGS_MODE=ok
+DREL4C_MUTS="$(gh_mutations "$WORK/drel4c.log")"
+if [ "$DRIFT_RC" -eq 1 ] && [ "$DREL4C_MUTS" = "0" ] \
+   && grep -qF -e 'not under refs/tags' <<<"$DRIFT_OUT" \
+   && names_an_upstream "$DRIFT_OUT" \
+   && ! grep -qF -e 'Traceback' <<<"$DRIFT_OUT"; then
+  ok "D-REL4c a ref outside refs/tags is refused by name, not by traceback"
+else
+  no "D-REL4c a non-tag ref => rc=$DRIFT_RC mutations=$DREL4C_MUTS (want rc 1, 0, named, no traceback)"
 fi
 
 echo

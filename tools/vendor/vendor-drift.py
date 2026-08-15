@@ -76,6 +76,13 @@ MARKER = "<!-- uberdev-vendor-drift-v1 -->"
 FINGERPRINT_KEY = "drift-fingerprint:"
 ISSUE_TITLE = "Vendored upstream drift — weekly report"
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+# `git ls-remote --tags <url>` prints `refs/tags/<name>` for every tag and, for
+# an ANNOTATED tag, a SECOND `refs/tags/<name>^{}` line carrying the commit the
+# tag object peels to. The register records peeled commits, so the peel line is
+# the one that has to win — and `--refs`, the obvious-looking way to tidy the
+# output, DROPS that line entirely, which is why the query below deliberately
+# does not pass it.
+TAG_REF_RE = re.compile(r"^refs/tags/(.+?)(\^\{\})?$")
 FINGERPRINT_RE = re.compile(r"drift-fingerprint:\s*([0-9a-f]+)")
 # Cap the per-component file list so one large upstream release cannot turn the
 # issue body into an unreadable wall; the residual count is still reported.
@@ -125,6 +132,77 @@ def resolve_head(repo_url, repo_slug):
         fail("git ls-remote returned a non-40-hex ref for upstream %s: %r"
              % (repo_slug, sha))
     return sha
+
+
+def release_key(name):
+    """A SemVer-ish ordering key for a tag name, or None if it names no version.
+
+    The shape exists to prevent one specific inversion, so do not "simplify" it
+    into the digits alone: `v6.4.0-rc1` yields the digit run (6, 4, 0, 1), which
+    sorts ABOVE its own final release `v6.4.0` at (6, 4, 0) — `max()` would then
+    report a release CANDIDATE as the newest release. SemVer §11 ranks a
+    pre-release BELOW the version it precedes, and the `0 if sep else 1` field
+    is what encodes that.
+
+    `ls-remote` prints tags in lexical refname order, where `v6.0.10` precedes
+    `v6.0.2`; ordering is therefore always computed here, never taken from the
+    order the remote happened to print.
+    """
+    # SemVer §10: build metadata is not part of the version, so it is stripped
+    # before comparison. The trailing `name` field below is only a deterministic
+    # tiebreak, so `max()` over two names that differ ONLY in build metadata is
+    # still stable rather than arbitrary.
+    core = name.split("+", 1)[0]
+    stem, sep, pre = core.partition("-")
+    if not re.search(r"\d", stem):         # e.g. `release-1.2.3`: that "-" is a
+        stem, sep, pre = core, "", ""      # word separator, not a pre-release one
+    nums = tuple(int(n) for n in re.findall(r"\d+", stem))
+    if not nums:
+        return None
+    pre_nums = tuple(int(n) for n in re.findall(r"\d+", pre))
+    return (nums, 0 if sep else 1, pre_nums, pre, name)
+
+
+def resolve_tags(repo_url, repo_slug):
+    """Every tag a remote publishes, as {name: commit}. Loud on a failed query.
+
+    Mirrors `resolve_head`'s contract with ONE deliberate divergence: empty
+    output is DATA here, never a failure. `resolve_head` treats silence as fatal
+    because every remote has a HEAD, so an empty answer can only mean the query
+    did not really run. Tags are different — a plugin vendored out of a monorepo
+    really does have an upstream that publishes zero tags — so copying the
+    empty-is-fatal rule would take the weekly job red every week forever for an
+    upstream behaving exactly as the register describes it.
+
+    An annotated tag's `^{}` peel line OVERWRITES the tag object's own oid for
+    the same name: the register records the commit a release points at, and a
+    tag object's oid would never compare equal to it.
+    """
+    rc, out, err = run(["git", "ls-remote", "--tags", repo_url])
+    if rc != 0:
+        fail("git ls-remote --tags failed for upstream %s (rc=%d): %s"
+             % (repo_slug, rc, (err or out).strip()))
+    tags = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            fail("git ls-remote --tags returned a line with no ref for upstream "
+                 "%s: %r" % (repo_slug, line.strip()))
+        sha, ref = fields[0].strip(), fields[1].strip()
+        if not SHA40_RE.match(sha):
+            fail("git ls-remote --tags returned a non-40-hex object id for "
+                 "upstream %s: %r" % (repo_slug, sha))
+        match = TAG_REF_RE.match(ref)
+        if not match:
+            fail("git ls-remote --tags returned %r for upstream %s, which is not "
+                 "under refs/tags — refusing to read an answer to a question "
+                 "this script did not ask" % (ref, repo_slug))
+        name, peeled = match.group(1), bool(match.group(2))
+        if peeled or name not in tags:
+            tags[name] = sha
+    return tags
 
 
 def ensure_mirror(work_root, repo_url, repo_slug, refs, fetched):
@@ -311,7 +389,7 @@ def declared_files(register, component):
     return names
 
 
-def build_report(register, heads, changes):
+def build_report(register, heads, tags, changes):
     """Render the markdown body plus a stable fingerprint of its drift payload."""
     drifting = [c for c in changes if c["raw"]]
     declared_only = [c for c in changes if not c["raw"] and c["declared"]]
@@ -338,6 +416,28 @@ def build_report(register, heads, changes):
     lines.append("")
     for slug in sorted(heads):
         lines.append("- `%s` @ `%s`" % (slug, heads[slug]))
+    lines.append("")
+
+    # The second observable (#535). HEAD drift and release drift disagree in both
+    # directions — unreleased commits are drift the register has no obligation to
+    # chase, and a freshly cut release can land on a HEAD that has not moved since
+    # the last run — so what each remote PUBLISHES is reported in its own right.
+    # This block is a neutral OBSERVATION, keyed by slug because a tag query is
+    # answered by a repository, not by a vendored component.
+    lines.append("Upstream tags resolved this run:")
+    lines.append("")
+    for slug in sorted(tags):
+        published = tags[slug]
+        named = [n for n in published if release_key(n) is not None]
+        if not published:
+            lines.append("- `%s`: no published tags" % slug)
+        elif not named:
+            lines.append("- `%s`: %d published tag(s); none of them names a "
+                         "version" % (slug, len(published)))
+        else:
+            newest = max(named, key=release_key)
+            lines.append("- `%s`: %d published tag(s); newest `%s` (`%s`)"
+                         % (slug, len(published), newest, published[newest][:12]))
     lines.append("")
 
     if not drifting:
@@ -484,6 +584,16 @@ def main(argv=None):
             continue
         heads[slug] = resolve_head(urls[slug], slug)
 
+    # One tag query per distinct SLUG, not per upstream id and not per component:
+    # two upstream ids can name two plugins inside ONE monorepo, and asking that
+    # remote twice would double the network cost to answer the same question.
+    tags = {}
+    for upstream_id in used:
+        slug = slugs[upstream_id]
+        if slug in tags:
+            continue
+        tags[slug] = resolve_tags(urls[slug], slug)
+
     work_root = Path(tempfile.mkdtemp(prefix="vendor-drift."))
     try:
         cache = {}
@@ -519,7 +629,7 @@ def main(argv=None):
                 "raw": raw, "declared": dec,
             })
 
-        body, fingerprint, drifting = build_report(register, heads, changes)
+        body, fingerprint, drifting = build_report(register, heads, tags, changes)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
