@@ -143,7 +143,8 @@ wait_fixture_process_gone() {
   echo "$label: provider $pid was still live after $((tries / 10))s" >&2
   return 1
 }
-trap 'reap_fixture_pids; rm -rf "$TMP"' EXIT
+. "$ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
+trap '_floor_rc=$?; reap_fixture_pids; rm -rf "$TMP"; uberdev_test_exit_floor agent-dispatch "$_floor_rc"' EXIT
 mkdir -p "$TMP/run"
 STATE_DIR="$TMP/run/.agent-state-$(id -u)"
 printf 'instrumented prompt\n' > "$TMP/run/prompt.txt"
@@ -2694,4 +2695,5 @@ if grep -R -F -x -q -- 'run_id=adapter-attest-numeric' \
   exit 1
 fi
 
+uberdev_test_exit_floor_reached
 echo "agent-dispatch: PASS"

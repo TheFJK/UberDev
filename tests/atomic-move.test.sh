@@ -22,8 +22,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ATOMIC="$ROOT/plugins/uberdev/lib/atomic_move.py"
+. "$ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 TMP="$(mktemp -d "$ROOT/tests/_fixtures/atomic-move.XXXXXX")"
-trap 'chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap '_floor_rc=$?; chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"; uberdev_test_exit_floor atomic-move "$_floor_rc"' EXIT
 chmod 700 "$TMP"
 
 fail() { printf 'atomic-move: FAIL: %s\n' "$1" >&2; exit 1; }
@@ -243,4 +244,5 @@ print(f"  passed: {PASS}")
 print("  failed: 0")
 PY
 
+uberdev_test_exit_floor_reached
 printf 'atomic-move: PASS\n'

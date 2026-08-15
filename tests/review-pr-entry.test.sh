@@ -21,9 +21,10 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$ROOT/plugins/uberdev/commands/review-pr.md"
 SIMPLIFY_SOURCE="$ROOT/plugins/uberdev/commands/simplify.md"
+. "$ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
-trap 'rm -rf "$TMP"' EXIT
+trap '_floor_rc=$?; rm -rf "$TMP"; uberdev_test_exit_floor review-pr-entry "$_floor_rc"' EXIT
 
 # The canonical command must not pin ANY transport into
 # UBERDEV_DISPATCH_BACKEND_REQUESTED: resolution belongs to preflight, and a pin
@@ -352,4 +353,5 @@ test -f "$TMP/repo/.uberdev/runs/$RENDERED_RUN_ID/locked" || {
   exit 1
 }
 
+uberdev_test_exit_floor_reached
 echo "review-pr canonical entrypoint tests passed"

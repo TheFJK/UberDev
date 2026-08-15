@@ -28,11 +28,32 @@ import hashlib,sys
 print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())
 PY
 }
+# write_shell_pid <file> — record the PID of the shell process that calls this,
+# distinguishing a controller from a command-substitution subshell of it.
+#
+# NOT `$BASHPID`. bash 3.2 — the stock /bin/bash on macOS, which is the shell
+# `supervision-smoke-macos` runs this file under — has no BASHPID at all, so
+# under `set -u` the bare expansion ABORTED this file mid-run (#551), and `$$`
+# is no substitute: it stays the OUTER shell's pid inside a subshell, which is
+# exactly the distinction being asserted.
+#
+# A directly invoked child observes the shell that forked it as its own PPID,
+# and writes it through a redirection rather than a command substitution so no
+# extra subshell sits in between. The CHILD expands PPID; this shell never
+# does. Same mechanism as production's
+# plugins/uberdev/lib/live-semaphore.sh:_uberdev_semaphore_capture_mutex_owner.
+write_shell_pid() {
+  # shellcheck disable=SC2016  # PPID is expanded by the child, deliberately.
+  BASH_ENV='' ENV='' "${BASH:-bash}" --noprofile --norc -p \
+    -c 'builtin printf "%s\n" "$PPID"' >"$1"
+}
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/plugins/uberdev/lib/child-dispatch.sh"
 export UBERDEV_CHILD_TEST_MODE=1
 export UBERDEV_CHILD_MANIFEST_PATH="$ROOT/tests/_fixtures/child-run-tree-v1.json"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+. "$ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
+TMP="$(mktemp -d)"
+trap '_floor_rc=$?; rm -rf "$TMP"; uberdev_test_exit_floor child-dispatch "$_floor_rc"' EXIT
 [ -r "$LIB" ] || { echo "RED: child dispatch runtime missing" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -627,9 +648,16 @@ value=json.load(open(sys.argv[1])); value['instance_id']='stable-owner-0001'
 json.dump(value,open(sys.argv[2],'w'),separators=(',',':'))
 PY
 STABLE_OWNER_HANDOFF_SHA256="$(file_sha256 "$TMP/stable-owner.json")"
-CONTROLLER_BASHPID="$BASHPID"
+write_shell_pid "$TMP/controller.pid"
+CONTROLLER_SHELL_PID="$(cat "$TMP/controller.pid")"
+# Anti-vacuity: the identity below only proves anything if it can tell a
+# subshell APART from the controller. Prove that it does, here, against a
+# deliberate command-substitution subshell — otherwise the assertion at the end
+# of this block would pass for a helper that always printed the same number.
+SUBSHELL_PROBE="$(write_shell_pid "$TMP/subshell-probe.pid"; cat "$TMP/subshell-probe.pid")"
+[ -n "$CONTROLLER_SHELL_PID" ] && [ "$SUBSHELL_PROBE" != "$CONTROLLER_SHELL_PID" ]
 _capture_dispatch() {
-  printf '%s\n' "$BASHPID" >"$TMP/stable-owner-dispatch.pid"
+  write_shell_pid "$TMP/stable-owner-dispatch.pid"
   printf '%s' "$1" >"$TMP/request.json"
   cp "$2" "$TMP/prompt.txt"
   printf '{"backend":"background","state":"running","exit_code":null,"pid":"12345","process_identity":"12345|12345|12345|0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","lease_generation":"0123456789abcdef0123456789abcdef"}\n' >"$4"
@@ -641,7 +669,7 @@ uberdev_dispatch_child_capture implementation "$TMP/stable-owner.json" \
   "$STABLE_OWNER_HANDOFF_SHA256" \
   "$TMP/run/children/stable-owner-0001/result.md" \
   "$TMP/run/children/stable-owner-0001/status.json"
-[ "$(cat "$TMP/stable-owner-dispatch.pid")" = "$CONTROLLER_BASHPID" ]
+[ "$(cat "$TMP/stable-owner-dispatch.pid")" = "$CONTROLLER_SHELL_PID" ]
 python3 - "$UBERDEV_CHILD_DISPATCH_RECEIPT" <<'PY'
 import json,sys
 receipt=json.loads(sys.argv[1])
@@ -1335,4 +1363,5 @@ rm -f "$VERIFY_DIR/hardlinked.md"
 # A missing result is a refusal, never an empty success.
 ! uberdev_child_validate_finding_verifier_result "$VERIFY_DIR/absent.md" >/dev/null 2>&1
 
-echo 'child-dispatch: 105 checks passed (+ the finding-verifier result boundary)'
+uberdev_test_exit_floor_reached
+echo 'child-dispatch: 106 checks passed (+ the finding-verifier result boundary)'
