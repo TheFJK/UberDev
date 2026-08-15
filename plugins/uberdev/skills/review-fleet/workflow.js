@@ -1579,6 +1579,54 @@ function ceilingGate(projected) {
   return "";
 }
 
+// ONE constructor for the children[] row.
+//
+// The shape is a published contract — SKILL.md's "What the script returns"
+// declares it and the X7a comparator joins the two — and it was built at three
+// INDEPENDENT literal sites: the agent-returned-null row, the recorded row, and
+// the never-dispatched backfill. Two of them had silently lost four members, and
+// X7a could not see it: that guard compares only the LARGEST literal against the
+// declaration, so a key added to one site and missed on the other two passed.
+// The sibling solve-fleet script solves the identical problem with its
+// placeholderTask()/unpushedIssue() builders; this is the same move, and it
+// makes the shape identical BY CONSTRUCTION rather than by review.
+//
+// The ABSENT-VALUE SPELLINGS live here too, once: "" for verdict, "" for the two
+// paths, null for the two counts, "" for the note, "" for reason. A consumer
+// must not have to tell an absent field from an empty one, and that rule covers
+// every member of the row rather than only the ones somebody remembered. Key
+// ORDER is the base object's — `over` only overwrites members that already
+// exist — so the emitted JSON is byte-identical to the literals it replaces.
+//
+// The copy below is member-by-member and deliberately NOT `Object.assign`:
+// tests/schema_property_reads.py pins that shape at zero across this corpus,
+// because its read detector is name-shaped and cannot see through a merged
+// object. Copying only DECLARED members is the stronger rule here in any case —
+// a caller passing a key this row does not declare has made a typo, not added a
+// member, and dropping it keeps the published contract exactly what the base
+// object says it is.
+function childRow(entry, over) {
+  const row = {
+    edgeId: entry.edge,
+    slug: entry.slug,
+    status: "BLOCKED",
+    verdict: "",
+    resultPath: "",
+    statusPath: "",
+    findingCount: null,
+    blockerCount: null,
+    note: "",
+    reason: "",
+  };
+  if (over) {
+    const names = Object.keys(row);
+    for (let i = 0; i < names.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(over, names[i])) row[names[i]] = over[names[i]];
+    }
+  }
+  return row;
+}
+
 // Record a child's return without trusting it. Paths are accepted only when
 // they equal the script-derived path for that slug; anything else is recorded
 // as a mismatch and the child is downgraded to BLOCKED so the controller does
@@ -1586,14 +1634,10 @@ function ceilingGate(projected) {
 function recordChild(entry, ret, phaseName) {
   if (ret === null) {
     noteNull(phaseName);
-    // The FULL row shape SKILL.md's "What the script returns" declares, with the
-    // same absent-value spellings the recorded row uses ("" for verdict, null
-    // for the two counts). A consumer must not have to tell an absent field from
-    // an empty one, and that rule covers every member of the row, not just note.
-    children.push({ edgeId: entry.edge, slug: entry.slug, status: "BLOCKED",
-      verdict: "", resultPath: "", statusPath: "",
-      findingCount: null, blockerCount: null,
-      note: "", reason: "agent returned null" });
+    // A child that returned nothing wrote no verdict, no count and no note, so
+    // every member keeps the builder's absent-value spelling; only the reason
+    // is this arm's own.
+    children.push(childRow(entry, { reason: "agent returned null" }));
     return;
   }
   const expectedResult = childResultPath(entry.slug);
@@ -1605,9 +1649,7 @@ function recordChild(entry, ret, phaseName) {
       got: String(ret.resultPath || ""), ts: nowIso });
   }
   const status = (!pathsOk || ret.status === "BLOCKED") ? "BLOCKED" : String(ret.status || "BLOCKED");
-  children.push({
-    edgeId: entry.edge,
-    slug: entry.slug,
+  children.push(childRow(entry, {
     status: status,
     verdict: typeof ret.verdict === "string" ? ret.verdict : "",
     resultPath: pathsOk ? expectedResult : "",
@@ -1621,7 +1663,7 @@ function recordChild(entry, ret, phaseName) {
     // trusted — see clampNote().
     note: clampNote(ret.note),
     reason: pathsOk ? "" : "returned paths did not match the script-derived layout",
-  });
+  }));
 }
 
 // Dispatch a roster in concurrency-bounded waves.
@@ -1666,19 +1708,14 @@ async function dispatchRoster(roster, phaseName, buildPrompt, agentTypeOf, schem
       // Either one alone is enough for the caller's documented tests to fire;
       // both are emitted because the two tests are independent and a future
       // edit could drop one.
+      // Every member keeps the builder's absent-value spelling: this entry never
+      // dispatched, so no child ever wrote a verdict, a count or a note, and a
+      // consumer of this list must not have to tell an absent field from an
+      // empty one. Only the reason is this arm's own.
       for (let k = i + batch.length; k < roster.length; k++) {
-        children.push({
-          edgeId: roster[k].edge, slug: roster[k].slug, status: "BLOCKED",
-          // Every member carried EMPTY, exactly as the null-return row carries
-          // them: a consumer of this list must not have to tell an absent field
-          // from an empty one, and this entry never dispatched so no child ever
-          // wrote a verdict, a count or a note.
-          verdict: "",
-          resultPath: "", statusPath: "",
-          findingCount: null, blockerCount: null,
-          note: "",
+        children.push(childRow(roster[k], {
           reason: "never dispatched — token budget exhausted mid-fanout",
-        });
+        }));
       }
       abortReason = "budget_exhausted";
       log("budget exhausted mid-fanout — " + dispatched + " dispatched, "

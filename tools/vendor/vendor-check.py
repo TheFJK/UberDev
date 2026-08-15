@@ -115,6 +115,28 @@ CODESPAN_RE = re.compile(r"`[^`]*`")
 AT_REF_RE = re.compile(r"(?<![A-Za-z0-9._-])@([A-Za-z0-9._][A-Za-z0-9._/-]*\.[A-Za-z0-9]+)")
 MD_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 
+# The CLOSED component key set (C-SCHEMA). Every member value already had a
+# validator; the RECORD itself did not, so an unrecognised key passed silently
+# and a misspelling was indistinguishable from an omission. That mattered most
+# on the optional sub-record: `check_evidence` skips any component whose
+# `base_evidence` lookup yields None, and its vacuity arm fires only when ZERO
+# components declare evidence — so one mistyped key dropped that component out of
+# the measurement while the whole register stayed green, which is precisely the
+# unfalsifiable-claim state `base_evidence` was added to eliminate. Mirrors the
+# `additionalProperties: false` discipline the sibling JS schemas already use.
+#
+# Add a member here when the register grows one. That is the point: growing the
+# record is a decision, and an undeclared key is a typo until somebody says
+# otherwise.
+COMPONENT_KEYS = frozenset({
+    "id", "path", "origin",
+    "upstream", "upstream_path", "vendored_at_commit", "vendored_on",
+    "last_reviewed_upstream_commit", "last_reviewed_on",
+    "stance", "stance_reason",
+    "measured_diff_lines", "measured_diff_basis",
+    "divergences", "files", "base_evidence",
+})
+
 # Files whose bytes are never text we can scan for a provenance header.
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                    ".woff", ".woff2", ".ttf", ".otf", ".mp4", ".webp"}
@@ -311,6 +333,15 @@ def check_schema(register, failures):
                          % component.get("path"))
         elif component.get("path") != cid:
             failures.add("C-SCHEMA", "%s: id and path disagree" % cid)
+        # Reported for EVERY component, before the origin arms below start
+        # `continue`-ing: an unrecognised key on an `uberdev` component is the
+        # same defect and would otherwise never be looked at.
+        if isinstance(component, dict):
+            unknown = sorted(set(component) - COMPONENT_KEYS)
+            if unknown:
+                failures.add("C-SCHEMA", "%s: unrecognised component key(s) %s "
+                                         "— a misspelled optional record must "
+                                         "not read as an absent one" % (cid, unknown))
         origin = component.get("origin")
         if origin not in ("third-party", "uberdev"):
             failures.add("C-SCHEMA", "%s: origin is %r, expected 'third-party' "

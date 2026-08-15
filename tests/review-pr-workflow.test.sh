@@ -919,8 +919,22 @@ const sandbox = {
   })),
   pipeline: async () => [],
   workflow: async () => ({}),
+  // Opt-in via env so no existing row's argv changes. Unset (or 0) keeps the
+  // historical `null`, which is what every other row in this file runs under —
+  // budgetExhausted() short-circuits on a falsy budget, so those rows see
+  // byte-identical behaviour. Set, it models the runtime's own token budget:
+  // one unit per dispatched agent, so a total of N exhausts the moment the Nth
+  // child returns. That is the ONLY way to reach the mid-fanout guard, which is
+  // why it had no row at all until now.
   budget: null,
 };
+const W_BUDGET_TOTAL = Number(process.env.W_BUDGET_TOTAL || 0);
+if (W_BUDGET_TOTAL > 0) {
+  sandbox.budget = {
+    total: W_BUDGET_TOTAL,
+    remaining: () => Math.max(0, W_BUDGET_TOTAL - labels.length),
+  };
+}
 sandbox.globalThis = sandbox;
 
 let threw = null;
@@ -1041,6 +1055,15 @@ stage_run_with_return() {
   printf '%s' "$ret" >"$TMP/w-ret.json"
   stage_args "$stage" "$nonces" "$extra"
   node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" "$TMP/w-ret.json" 2>&1
+}
+
+# The same runner under a FINITE token budget. Separate from the two above so no
+# existing row's environment changes: the budget stub is inert unless this
+# variable is set, and only the rows below set it.
+stage_run_with_budget() {  # STAGE NONCES EXTRA_JSON BUDGET_TOTAL -> harness JSON
+  local stage="$1" nonces="$2" extra="$3" total="$4"
+  stage_args "$stage" "$nonces" "$extra"
+  W_BUDGET_TOTAL="$total" node "$W_HARNESS" "$WORKFLOW" "$TMP/w-args.json" 2>&1
 }
 
 # --- W-H: the harness extension itself, proved before anything depends on it -
@@ -3146,12 +3169,20 @@ fi
 # ---------------------------------------------------------------------------
 # X5 — `note` finally has a reader (#514 item 1)
 # ---------------------------------------------------------------------------
-# All seven reviewers, all three lenses and the fixer are asked for a `note`,
-# eight schemas declare it, and the one thing that consumed it was the dead
-# carrier above. Deleting the carrier without giving `note` a reader would leave
-# nine prompts asking for a field nothing anywhere reads — the same defect with
-# the hardening removed. The reader is the observability channel that already
-# exists: the single structured `WORKFLOW_RESULT` line.
+# All seven reviewers, all three lenses, the fixer and the finding-verifier are
+# asked for a `note`, eight schemas declare it, and the one thing that consumed
+# it was the dead carrier above. Deleting the carrier without giving `note` a
+# reader would leave every one of those prompts asking for a field nothing
+# anywhere reads — the same defect with the hardening removed. The reader is the
+# observability channel that already exists: the single structured
+# `WORKFLOW_RESULT` line.
+#
+# The count of prompt builders is deliberately NOT restated as a number here.
+# It was stated once as "nine", went stale the moment the verifier prompt
+# landed, and then read as a dated counterfactual to its author and as a live
+# count to everyone after. The assertion this block actually makes — eight
+# schemas declare the field — is the one X5e checks, and it is checked rather
+# than asserted in prose.
 #
 # It is CLAMPED, not passed through: the note is untrusted agent text derived
 # from PR-author-controlled diff bytes. It cannot split the log line —
@@ -3211,7 +3242,7 @@ else
 fi
 # The fix removes the CARRIER, never the field: `note` is the only channel a
 # BLOCKED child has for saying why, and dropping it from schemas that declare
-# additionalProperties:false while nine prompts still ask for it would trip the
+# additionalProperties:false while the prompts still ask for it would trip the
 # structured-output retry instead of failing loudly.
 X5E="$(grep -c 'note: { type: "string" }' "$WORKFLOW" || true)"
 [ "$X5E" = 8 ] \
@@ -3346,23 +3377,20 @@ script = open(sys.argv[2], encoding="utf-8").read()
 doc = re.search(r"children:\s*\[\s*\{(.*?)\}\s*\]", skill, re.S)
 doc_keys = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", doc.group(1)))) if doc else []
 
-# The canonical children.push({...}) object literal: the LARGEST of them, which
-# is the full-shape push. The null-return push is a deliberate subset.
-best = []
-for match in re.finditer(r"children\.push\(\{", script):
-    start = match.end()
-    depth, index = 1, start
-    while index < len(script) and depth:
-        if script[index] == "{":
-            depth += 1
-        elif script[index] == "}":
-            depth -= 1
-        index += 1
-    keys = re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", script[start:index - 1])
-    if len(keys) > len(best):
-        best = keys
+# The children[] row now has ONE constructor, so this comparator reads the
+# constructor's base literal instead of guessing which push carries the full
+# shape. That guess was the hole: taking the LARGEST of three independent
+# literals meant a key added to one site and missed on the other two still
+# matched the doc — which is exactly the drift #514 had to repair by hand.
+builder = re.search(r"function childRow\(entry, over\) \{\s*const row = \{(.*?)\n  \};",
+                    script, re.S)
+best = re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", builder.group(1)) if builder else []
 print("doc_keys=%s" % ",".join(doc_keys))
 print("code_keys=%s" % ",".join(sorted(set(best))))
+# And there must be NO surviving object literal on the push path: a second
+# construction site re-opens the door this builder closes, and the comparator
+# above would go on comparing only the builder while the literal drifted.
+print("literal_pushes=%d" % len(re.findall(r"children\.push\(\{", script)))
 
 # The No-Workflow fallback must enumerate every stage the script can run, or a
 # runtime without the Workflow tool silently skips one. `verify` is the gate
@@ -3375,13 +3403,99 @@ X7_RC=$?
 X7_DOC="$(l_field "$L_TMP/x7.report" doc_keys)"
 X7_CODE="$(l_field "$L_TMP/x7.report" code_keys)"
 if [ "$X7_RC" = 0 ] && [ -n "$X7_DOC" ] && [ "$X7_DOC" = "$X7_CODE" ]; then
-  pass "X7a SKILL.md's documented children[] shape equals the one recordChild actually pushes"
+  pass "X7a SKILL.md's documented children[] shape equals the one childRow() actually builds"
 else
   fail "X7a the documented return shape drifted from the code: doc=[$X7_DOC] code=[$X7_CODE]"
 fi
+[ "$(l_field "$L_TMP/x7.report" literal_pushes)" = 0 ] \
+  && pass "X7a2 every children[] row comes from the ONE constructor — no push carries its own object literal to drift" \
+  || fail "X7a2 $(l_field "$L_TMP/x7.report" literal_pushes) children.push({...}) literal(s) survive beside childRow(); X7a compares only the builder, so those sites are unguarded"
 [ "$(l_field "$L_TMP/x7.report" fallback_names_verify)" = yes ] \
   && pass "X7b the No-Workflow fallback accounts for the verify stage" \
   || fail "X7b the No-Workflow fallback omits verify entirely; a non-Workflow runtime skips the precision gate in silence"
+
+# ---------------------------------------------------------------------------
+# X8 — the mid-fanout budget guard, which stops a HALF-RUN review reading as a
+# clean one (#514)
+# ---------------------------------------------------------------------------
+# THE DEFECT THIS GUARD EXISTS FOR: a partial aggregate is indistinguishable
+# downstream from a zero-finding review, and the trust signal /goal merges on is
+# drawn from it. The ceiling gate refuses to START such a run; the budget must
+# not be a second door into the same state, so every undispatched roster entry is
+# recorded BLOCKED and abortReason is set.
+#
+# Nothing exercised it. This suite never set a budget at all (goal, scan-fleet
+# and testers suites all do, so the fixture technique was already in the repo),
+# the budget_exhausted event name appeared in no test, and abortReason was
+# asserted for five other reasons but never this one. X7a cannot cover the rows
+# it emits either: that comparator reads the ONE constructor, and both of these
+# arms are deliberately the constructor's defaults.
+echo
+echo "== X8: a fanout the budget cut short reports itself, with the full row shape =="
+
+# fanoutCap 1 makes each wave one child, so a budget of 1 is exhausted the moment
+# the first reviewer returns — 1 dispatched, 6 never dispatched, out of a roster
+# of 7.
+X8_OUT="$(stage_run_with_budget review "$W_REVIEW_NONCES" '{"fanoutCap":1}' 1)"
+X8_JQ() { jq -r "$1" <<<"$X8_OUT"; }
+
+[ "$(X8_JQ '.threw // "null"')" = null ] \
+  && pass "X8a a budget cut short mid-fanout is a REPORT, never a throw" \
+  || fail "X8a the budget path threw: $(X8_JQ '.threw')"
+[ "$(X8_JQ '.dispatched')" = 1 ] \
+  && pass "X8b exactly one child was dispatched before the budget ran out" \
+  || fail "X8b expected 1 dispatched child, got $(X8_JQ '.dispatched') — the run did not stop where this row assumes"
+[ "$(X8_JQ '.result.abortReason')" = budget_exhausted ] \
+  && pass "X8c abortReason names the budget — the caller's documented test for a truncated fanout" \
+  || fail "X8c abortReason is '$(X8_JQ '.result.abortReason')', so a half-run review reads as a completed one"
+# The event names the phase by its DISPLAY name, the same string dispatchRoster
+# was called with — asserted literally so a renamed phase cannot quietly detach
+# the event from the fanout it describes.
+[ "$(X8_JQ '[.result.auditEvents[] | select(.event == "budget_exhausted" and .phase == "Phase 1 — Review fanout")] | length')" = 1 ] \
+  && pass "X8d the budget_exhausted audit event fires once, naming the phase it cut" \
+  || fail "X8d no budget_exhausted audit event for the review fanout — the second of the two independent signals is missing: $(X8_JQ '[.result.auditEvents[] | select(.event == "budget_exhausted")] | tojson')"
+[ "$(X8_JQ '.result.children | length')" = 7 ] \
+  && pass "X8e the roster is made SELF-DESCRIBING, not short: all 7 entries are still reported" \
+  || fail "X8e only $(X8_JQ '.result.children | length') of 7 roster entries reached children[] — a truncated roster is exactly what reads as a completed fanout"
+[ "$(X8_JQ '[.result.children[] | select(.reason == "never dispatched — token budget exhausted mid-fanout")] | length')" = 6 ] \
+  && pass "X8f every undispatched slug is recorded BLOCKED with the reason that says so" \
+  || fail "X8f $(X8_JQ '[.result.children[] | select(.reason == "never dispatched — token budget exhausted mid-fanout")] | length') of 6 undispatched entries carry the never-dispatched reason"
+# THE ROW SHAPE, which is what this iteration rewrote and what nothing pinned:
+# the never-dispatched entry must carry EVERY member of the published contract,
+# in the absent-value spellings a consumer can read without guessing.
+X8_SHAPE='[.result.children[] | select(.reason == "never dispatched — token budget exhausted mid-fanout")
+  | select(.status == "BLOCKED" and .verdict == "" and .resultPath == "" and .statusPath == ""
+      and .findingCount == null and .blockerCount == null and .note == ""
+      and (.edgeId | length) > 0 and (.slug | length) > 0
+      and (keys | length) == 10)] | length'
+[ "$(X8_JQ "$X8_SHAPE")" = 6 ] \
+  && pass "X8g ...with all 10 members present in the declared absent-value spellings, so an absent field is never mistaken for an empty one" \
+  || fail "X8g only $(X8_JQ "$X8_SHAPE") of 6 never-dispatched rows carry the full 10-member shape: $(X8_JQ '[.result.children[] | select(.reason | startswith("never dispatched"))][0] // {} | tojson')"
+
+# The OTHER arm that shares the constructor and had no fixture either: a child
+# that returned null. Same shape, different reason.
+X8N_OUT="$(stage_run_with_return review "$W_REVIEW_NONCES" '{}' 'null')"
+X8N_SHAPE='[.result.children[] | select(.reason == "agent returned null")
+  | select(.status == "BLOCKED" and .verdict == "" and .resultPath == "" and .statusPath == ""
+      and .findingCount == null and .blockerCount == null and .note == ""
+      and (keys | length) == 10)] | length'
+[ "$(jq -r "$X8N_SHAPE" <<<"$X8N_OUT")" = 7 ] \
+  && pass "X8h a reviewer returning null records the SAME 10-member shape, with its own reason" \
+  || fail "X8h the null-return row shape drifted from the never-dispatched one: $(jq -c '.result.children[0] // {}' <<<"$X8N_OUT")"
+[ "$(jq -r '.result.nullsByPhase["Phase 1 — Review fanout"] // 0' <<<"$X8N_OUT")" = 7 ] \
+  && pass "X8i ...and every null return is counted under the review fanout in nullsByPhase" \
+  || fail "X8i null returns are not counted: $(jq -c '.result.nullsByPhase' <<<"$X8N_OUT")"
+
+# ANTI-VACUITY for the whole block: the identical run with NO budget must
+# dispatch the full roster and set no abort reason, or X8c-X8g would be passing
+# against a script that truncates every fanout.
+X8Z_OUT="$(stage_run_with_budget review "$W_REVIEW_NONCES" '{"fanoutCap":1}' 0)"
+if [ "$(jq -r '.dispatched' <<<"$X8Z_OUT")" = 7 ] \
+   && [ -z "$(jq -r '.result.abortReason' <<<"$X8Z_OUT")" ]; then
+  pass "X8z ANTI-VACUITY: the same wave size with no budget dispatches all 7 and aborts for nothing"
+else
+  fail "X8z the no-budget control did not run clean: $(jq -c '{dispatched,abort:.result.abortReason}' <<<"$X8Z_OUT")"
+fi
 
 # ---------------------------------------------------------------------------
 # The fixture every remaining row runs against: a REAL /review-pr run on disk

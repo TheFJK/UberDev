@@ -457,6 +457,31 @@ function projectedAgentsForCycle(issueCount) {
   return 3 + maxWatchTicks + 2 + (issueCount * 30);
 }
 
+// What ONE issue costs INSIDE a nested fleet run, measured against the budget
+// that fleet will actually run with rather than against the default.
+//
+// The projection above cannot do this — it is computed BEFORE the claim pass, so
+// no envelope exists yet and the default is the only honest number. The SPEND
+// accumulator can: by then the relayed envelope is parsed and carries the
+// operator's effective `implementBudget`. Reading it matters because the fleet
+// declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24)
+// and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET into the
+// envelope this script relays verbatim, so a literal 30 understates a maxed-out
+// budget more than threefold. An accumulator that reads low is worse than no
+// accumulator at all: CB1 is the only NAMED halt, so it never fires and the run
+// dies against the runtime's own lifetime cap with no halt reason, no audit row
+// and no cycle record explaining the stop.
+//
+// The clamp bounds and default are the fleet's, deliberately duplicated rather
+// than guessed — tests/solve-fleet-workflow.test.sh G16 reads them back out of
+// the fleet constant and reds if the two drift.
+function perIssueFleetCost(fleetArgs) {
+  const cfg = (fleetArgs && typeof fleetArgs === "object" && fleetArgs.config
+    && typeof fleetArgs.config === "object") ? fleetArgs.config : {};
+  // SHARED COST: solve-fleet-per-issue-agent-cost
+  return 6 + clampInt(cfg.implementBudget, 4, 96, 24);
+}
+
 // The fleet args envelope arrives as an agent-returned STRING. It is the only
 // agent-derived structure this script consumes, so it is validated before it
 // reaches workflow(): it must parse, it must be an object, it must declare
@@ -601,28 +626,40 @@ async function runCycle() {
             : "The claimed issues are marked `solving` with no solver behind them; the watch pass below "
               + "runs with the settled-fleet marker, so it fails them and releases their claims this cycle."));
     } else {
+      // The fleet's two batched relays (intake + PR-claim verification, #515)
+      // plus its per-issue solver/design/implement-chain agents, priced off the
+      // budget in the envelope we are about to hand it. Computed BEFORE the call
+      // so the throw arm can charge the same number the clean arm charges.
+      const fleetCost = 2 + (rec.claimed.length * perIssueFleetCost(fleetArgs));
       // THE one nested call. One per cycle, for the whole cycle. See the header:
       // a nested call per issue would spend the single nesting level on the
       // wrong thing and the fleet's own agents could not run.
       try {
         const out = await workflow({ scriptPath: solveFleetJs }, fleetArgs);
         fleetRuns += 1;
-        // The fleet's two batched relays (intake + PR-claim verification, #515)
-        // plus its per-issue solver/design/implement-chain agents. Mirrors
-        // projectedAgentsForCycle above — they must not drift apart.
-        // SHARED COST: solve-fleet-per-issue-agent-cost
-        agentsSpent += 2 + (rec.claimed.length * 30);
+        agentsSpent += fleetCost;
         rec.fleet = "ran";
         if (out && typeof out === "object" && Array.isArray(out.prsOpened)) {
           rec.prsOpened = digitsOnly(out.prsOpened).map(Number);
         }
       } catch (e) {
         rec.fleet = "threw";
+        // A fleet that threw still SPENT. Charging nothing here is what lets the
+        // accumulator read zero for a cycle that ran agents, and the likeliest
+        // cause of the throw is the runtime refusing further ones — precisely the
+        // moment the fleet has spent the most. So the same conservative estimate
+        // is charged, and the cycle whose real spend could not be measured is
+        // NAMED rather than left to be inferred from a total that is quietly
+        // short.
+        agentsSpent += fleetCost;
+        auditEvents.push({ event: "fleet_spend_unmeasured", cycle: cycle,
+          estimated: fleetCost, claimed: rec.claimed.length, ts: nowIso });
         auditEvents.push({ event: "fleet_threw", cycle: cycle,
           reason: (e && e.message) ? e.message : String(e), ts: nowIso });
         log("cycle " + cycle + ": the nested solve-fleet workflow threw ("
           + ((e && e.message) ? e.message : String(e)) + "). The watch pass still runs — solvers that already "
-          + "pushed a PR must still be driven to merge, and the claims must still be reconciled.");
+          + "pushed a PR must still be driven to merge, and the claims must still be reconciled. An estimated "
+          + fleetCost + " agent(s) are charged to the ceiling for it; the real spend is unmeasurable.");
       }
     }
   } else {

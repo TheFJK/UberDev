@@ -220,7 +220,7 @@ adjudicates, downgrades and audits.
 | `prProof` | `CONFIRMED` · `DISPROVEN` · `UNVERIFIED` · `NOT_APPLICABLE` |
 | `provenCommitCount` | commits GitHub reports on the PR (`null` when not observed) |
 | `claimedStatus` / `claimedPrNumber` / `claimedPrUrl` | present only on a downgraded record — the original claim, preserved |
-| `verification` | run totals; `relayRc` is `null` when the relay never ran |
+| `verification` | run totals; `relayRc` is `null` both when no relay was dispatched and when a dispatched relay answered with an unusable rc — the audit events are what tell the two apart |
 
 The rule: **the proof wins in the field that drives behaviour, the claim is
 never erased, and the disagreement is an audit event.** `status` is overwritten
