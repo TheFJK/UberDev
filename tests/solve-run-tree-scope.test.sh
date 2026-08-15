@@ -199,6 +199,11 @@ function agentReturns() {
       blockingFindings: ["f"] },
     "spec-revise:#11": { path: RD + "/issue-11/spec-r1.md", rc: 0, headline: "h" },
     "plan:#11": { path: RD + "/issue-11/plan.md", rc: 0, headline: "h" },
+    // Unconditional, unlike the reviser above: every accepted plan is reviewed
+    // (#524 item 2). APPROVE here — this fixture exists to reach every rung, not
+    // to drive the findings hand-off, which tests/solve-fleet-workflow.test.sh
+    // owns.
+    "plan-review:#11": { verdict: "APPROVE", rc: 0, headline: "h", blockingFindings: [] },
     "impl:#11:t1": taskRec(1, { taskCount: 2 }),
     "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
       blockingFindings: ["f"] },
@@ -351,7 +356,7 @@ function rC3(t) {
 // shrunken set. Raise it deliberately when the fleet legitimately grows; the C1
 // comparator is what proves the two lists match, and this is what proves the
 // list was measured against a fleet that actually ran.
-var EXECUTED_KIND_FLOOR = 14;
+var EXECUTED_KIND_FLOOR = 15;
 
 function rC4(live) {
   return live.length >= EXECUTED_KIND_FLOOR

@@ -536,6 +536,40 @@ else
   pass "G26 verifyPrsPrompt() interpolates no agent-derived string (the relay discovers headRefName itself)"
 fi
 
+# G33 (#524 item 2) — ONE framing, two kinds. The plan reviewer's findings reach
+# their consumers through the SAME sanitizeFindings() + envWrap() carrier #507
+# installed; the only thing that varies is a SCRIPT-CHOSEN kind. All three
+# halves are asserted, because each alone is satisfiable by the bug this guards:
+#   - the kind is drawn from a CLOSED literal table, so no caller can invent a
+#     source tag — an open string parameter is a prompt-tag steering seam and a
+#     silent-typo seam at once;
+#   - each of the two source tags is BUILT in exactly one place, the #370 "one
+#     contract, N uncompared copies" shape that is how two envelopes drift into
+#     two subtly different framings of one operation;
+#   - every call site names a kind, so a rung cannot inherit whichever framing
+#     happens to be the default (the lensBrief() fallthrough class).
+FS_SPEC_TAG_HITS="$(grep -cF 'solve-fleet-spec-review-findings-issue-' "$WORKFLOW" || true)"
+FS_PLAN_TAG_HITS="$(grep -cF 'solve-fleet-plan-review-findings-issue-' "$WORKFLOW" || true)"
+# Whole-line comments are dropped first: this file explains its own carrier in
+# prose, and a PROSE mention of the function is not a call site. A trailing
+# comment that named it would still be counted, which is the safe direction —
+# a false FAIL, never a false PASS.
+FS_UNKINDED="$(grep -nE 'findingsSection\(' "$WORKFLOW" \
+  | grep -vE '^[0-9]+:[[:space:]]*//' \
+  | grep -vE '^[0-9]+:function findingsSection' \
+  | grep -vE '"(spec-review|plan-review)"' || true)"
+if ! grep -q '^function findingsSection(issue, items, kind) {' "$WORKFLOW"; then
+  fail "G33 findingsSection() takes no kind argument — a second review gate would have to hand-roll its own framing"
+elif ! grep -q '^const FINDINGS_KINDS = {' "$WORKFLOW"; then
+  fail "G33 the findings kinds are not a closed script-chosen table (FINDINGS_KINDS) — the source tag would be an open parameter"
+elif [ "${FS_SPEC_TAG_HITS:-0}" != "1" ] || [ "${FS_PLAN_TAG_HITS:-0}" != "1" ]; then
+  fail "G33 a findings source tag is built in more than one place (spec=${FS_SPEC_TAG_HITS:-0}, plan=${FS_PLAN_TAG_HITS:-0}, want exactly 1 each)"
+elif [ -n "$FS_UNKINDED" ]; then
+  fail "G33 a findingsSection() call site names no kind from the closed table: $FS_UNKINDED"
+else
+  pass "G33 findingsSection() is ONE carrier selected by a closed kind table, each source tag built exactly once, every call site kinded"
+fi
+
 # G18 — CB1 accounting must move WITH the agent. The proof relay is a real
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
@@ -1257,6 +1291,146 @@ function probedNums(record) {
     && countLabel(recSR6, "spec-revise:#11") === 1
     && promptSR1Rev.indexOf("REVISIONS_REQUIRED") >= 0;
 
+  // ------------------------------------------------------------------
+  // Runs PR* (#524 item 2) — the PLAN review gate.
+  //
+  // The plan is the artifact the implementers actually execute, and it was the
+  // only design artifact with no review at all. There is deliberately no plan
+  // REVISER — that would be a second bounded ladder and a second agent on the
+  // ceiling — so the reviewer's FINDINGS are its whole output, and where they
+  // go is the behaviour under test.
+  //
+  // They go to all THREE rungs that read the plan, not one. taskReviewPrompt
+  // already treats work outside the `## Task k:` section as a blocking finding,
+  // so telling only the implementer that a plan-review finding may be answered
+  // would put the two gates in direct contradiction over one document and burn
+  // a fix round on a CORRECT deviation; the fixer re-reads the same section one
+  // rung later (step 3 of taskFixPrompt), so leaving it out reintroduces the
+  // contradiction there.
+  // ------------------------------------------------------------------
+  const PLAN_ENV_OPEN = "<external-untrusted-input source=\"solve-fleet-plan-review-findings-issue-11\">";
+  const PLAN_ENV_END = "</external-untrusted-input>";
+  const PLAN_SENTINEL = "PLAN-REVIEW-FINDING-SENTINEL";
+  const FIXER_CLAUSE = "describes the PLAN, not the findings you are here to fix";
+  // The fixture has to REACH the fixer. A clean mediumReturns() approves every
+  // task at r1 and never dispatches fix:#11:t1:r1, so a row reading "" for that
+  // prompt would assert nothing at all; task 1 therefore draws one
+  // REVISIONS_REQUIRED review and one fix round here.
+  function planReviewReturns(planReview) {
+    return Object.assign({}, mediumReturns(), {
+      "plan-review:#11": planReview,
+      "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+        blockingFindings: ["task-level finding, unrelated to the plan review"] },
+      "fix:#11:t1:r1": task(1),
+      "review:#11:t1:r2": approve(),
+    });
+  }
+  function planReviewOf(findings) {
+    return { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h", blockingFindings: findings };
+  }
+  // The three plan consumers, in the order the chain spends them.
+  function planConsumerPrompts(record) {
+    return ["impl:#11:t1", "review:#11:t1:r1", "fix:#11:t1:r1"].map(function (l) {
+      return promptOf(record, l);
+    });
+  }
+  // The prompt with its plan-review envelope EXCISED — null when the envelope is
+  // not there at all, so a caller cannot confuse "no second copy" with "no
+  // block". Every negative row below distinguishes the two.
+  function outsidePlanEnvelope(prompt) {
+    const openAt = prompt.indexOf(PLAN_ENV_OPEN);
+    const endAt = openAt >= 0 ? prompt.indexOf(PLAN_ENV_END, openAt) : -1;
+    return (openAt >= 0 && endAt > openAt)
+      ? prompt.slice(0, openAt) + prompt.slice(endAt)
+      : null;
+  }
+
+  const recPR = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf([PLAN_SENTINEL, "a second plan-level gap"])) });
+  const resPR = resultOf(recPR);
+  const prPrompts = planConsumerPrompts(recPR);
+
+  out.prReviewCalls = countLabel(recPR, "plan-review:#11");
+  out.prNotApprovedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_review_not_approved" && e.issue === 11
+      && e.verdict === "REVISIONS_REQUIRED"; }));
+  // The hand-off is ACCOUNTED, under this gate's own event name. #507's names
+  // stay reserved for the spec gate; one shared name would make the two gates
+  // indistinguishable in the audit trail the whole run is read back from.
+  out.prThreadedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_findings_threaded" && e.issue === 11
+      && e.count === 2 && e.truncated === false; }));
+
+  // One row per consumer rather than one `every()` row: a single aggregate
+  // would go red as a block and never say WHICH rung lost the hand-off.
+  out.prImplEnvelope = prPrompts[0].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[0].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  out.prReviewEnvelope = prPrompts[1].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[1].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  // The fixer additionally has to be told what the block IS: it arrives at that
+  // rung already holding a list of findings to fix (the review files), and two
+  // undistinguished lists is how a fixer starts "fixing" the plan.
+  out.prFixEnvelope = prPrompts[2].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[2].indexOf("(1) " + PLAN_SENTINEL) >= 0
+    && prPrompts[2].indexOf(FIXER_CLAUSE) >= 0
+    && prPrompts[0].indexOf(FIXER_CLAUSE) < 0;
+
+  // The sentinel sits ONLY inside the envelope, in every one of the three.
+  out.prSentinelOnlyEnveloped = prPrompts.every(function (p) {
+    const rest = outsidePlanEnvelope(p);
+    return rest !== null && rest.indexOf(PLAN_SENTINEL) < 0;
+  });
+
+  // PR2 — the caps are the SAME ones #507 installed, not a second set. 12
+  // findings, the first over-long: 10 survive, and the long one is clipped with
+  // its tail dropped.
+  let prLong = "";
+  while (prLong.length < 590) prLong += "y";
+  prLong += "PLAN-TAIL-SENTINEL";
+  const prMany = [prLong];
+  for (let pi = 2; pi <= 12; pi += 1) prMany.push("P-" + ("0" + pi).slice(-2));
+  const recPR2 = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf(prMany)) });
+  out.prCaps = planConsumerPrompts(recPR2).every(function (p) {
+    return p.indexOf("(10) ") >= 0 && p.indexOf("(11) ") < 0
+      && p.indexOf("P-11") < 0 && p.indexOf("P-12") < 0
+      && p.indexOf("[truncated]") >= 0 && p.indexOf("PLAN-TAIL-SENTINEL") < 0;
+  });
+
+  // PR3 — APPROVE with nothing to say adds NO block anywhere. The negative arm:
+  // without it every row above is satisfied by an unconditional envelope.
+  const recPR3 = await run(buildArgs(), { agentReturns: planReviewReturns(approve()) });
+  out.prApproveNoEnvelope = planConsumerPrompts(recPR3).every(function (p) {
+    return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0
+      && p.indexOf("The plan reviewer returned") < 0;
+  });
+
+  // PR4 — a null reviewer is a missing agent, not a bad plan: it counts as a
+  // design-phase null and the chain proceeds against the plan as written.
+  // Stranding a written plan because its reviewer was skipped would be the
+  // strictly worse outcome.
+  const recPR4 = await run(buildArgs(), { agentReturns: planReviewReturns(null) });
+  const resPR4 = resultOf(recPR4);
+  out.prNullDegrades = !!(resPR4 && resPR4.nullsByPhase && resPR4.nullsByPhase.design >= 1)
+    && labels(recPR4).indexOf("impl:#11:t1") >= 0
+    && planConsumerPrompts(recPR4).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0; });
+
+  // PR5 — findings that ARRIVE and are unusable. A non-array degrades to "no
+  // usable finding" like any malformed return, but silently: the three
+  // consumers are told nothing is wrong, and a later reader cannot tell that
+  // from a reviewer that genuinely had nothing to say. Counts only, never text.
+  const recPR5 = await run(buildArgs(), { agentReturns:
+    planReviewReturns({ verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: "not an array" }) });
+  const resPR5 = resultOf(recPR5);
+  out.prUnusableAudit = !!(resPR5 && resPR5.auditEvents.some(function (e) {
+    return e.event === "plan_findings_unusable" && e.issue === 11
+      && e.arrayShaped === false; }))
+    && !!(resPR5 && resPR5.auditEvents.every(function (e) { return e.event !== "solve_chain_threw"; }))
+    && planConsumerPrompts(recPR5).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0 && p.indexOf("not an array") < 0; });
+
   // ------------------- #508: the per-task chain and its gate -------------------
 
   // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
@@ -1430,7 +1604,8 @@ function probedNums(record) {
   // Every new run must also be harness-clean — an undeclared opts.phase on any
   // of the four new agent kinds shows up here and nowhere else.
   out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT,
-    recSR1, recSR2, recSR3, recSR4, recSR5, recSR6]
+    recSR1, recSR2, recSR3, recSR4, recSR5, recSR6,
+    recPR, recPR2, recPR3, recPR4, recPR5]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
   // ------------------------------------------------------------------ #515
   // Claim verification. Every run below is ultimately about ONE rule: the proof
@@ -2217,10 +2392,12 @@ else
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
-  # The count stays 3 while the fixture APPROVES: spec + review + plan. The
-  # revision round is the fourth design rung and it is CONDITIONAL, so this row
-  # is the proof it stayed conditional — B254/B255 are the pair that move it.
-  check bDesign 3            "B13 medium tier runs spec + review + plan, and spends no reviser on an approved spec"
+  # spec + spec-review + plan + plan-review = 4 on the CLEAN fixture. The
+  # revision round is a fifth design rung and it is CONDITIONAL on a non-APPROVE
+  # verdict, so this row is also the proof it stayed conditional — B254/B255 are
+  # the pair that move it. The plan review is NOT conditional: every accepted
+  # plan is reviewed, which is why the approving fixture spends it.
+  check bDesign 4            "B13 medium tier runs spec + spec-review + plan + plan-review, and spends no reviser on an approved spec"
   # RE-CUT (#508): the medium issue's implement phase is no longer one agent.
   # A 2-task plan spends impl t1 + review t1r1 + impl t2 + review t2r1 + deliver
   # = 5, and the trivial issue still spends its single solver.
@@ -2326,6 +2503,24 @@ else
   check srVerdictNotRaw true        "B262b the agent-returned verdict reaches no prompt raw — a value outside the closed enum is named, not echoed"
   check srRoundsBounded true        "B262c the cap is the LOOP's bound: on the arms where the reviser never lands usably, exactly SPEC_REVISE_ROUNDS revisers are spent"
   check srRevisedKeepsFindings true "B262d an accepted revision does not consume the findings — the planner still gets them, enveloped, to check the unverified revision against"
+
+  # #524 item 2 — the plan review gate and its three consumers.
+  #
+  # B270 is the NEGATIVE arm and passes on the pre-#524 tree by construction (no
+  # envelope exists to find): it is a regression pin, not a red-first row, and
+  # without it every positive row here is satisfied by an UNCONDITIONAL block.
+  # Every other row below fails without the gate.
+  check prReviewCalls 1             "B263 an accepted plan is reviewed exactly once — the design artifact the implementers execute no longer ships unreviewed"
+  check prThreadedAudit true        "B264 the hand-off is accounted under this gate's OWN event name (plan_findings_threaded), not the spec gate's"
+  check prNotApprovedAudit true     "B265 a non-APPROVE plan verdict is audited, never silent"
+  check prImplEnvelope true         "B266 the plan reviewer's findings reach the task IMPLEMENTER inside the #507 envelope, numbered"
+  check prReviewEnvelope true       "B267 they reach the task REVIEWER too — the two gates cannot contradict each other over one plan"
+  check prFixEnvelope true          "B268 they reach the FIXER, marked as context about the plan rather than the findings it is there to fix"
+  check prCaps true                 "B269 the #507 count and per-string caps bind the plan-review findings in all three prompts — no second set of caps"
+  check prApproveNoEnvelope true    "B270 an APPROVE with nothing to say adds NO block to any of the three prompts"
+  check prNullDegrades true         "B271 a null plan reviewer counts as a design null and the task chain still runs, envelope-free"
+  check prSentinelOnlyEnveloped true "B272 a reviewer-returned string appears in NO plan-consumer prompt outside its envelope block"
+  check prUnusableAudit true        "B272b a plan-review findings array that arrives UNUSABLE is audited by count, degrades to no block, and never takes the chain down"
 
   check lFixCalls 3          "B72 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
   check lReviewCalls 4       "B73 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"

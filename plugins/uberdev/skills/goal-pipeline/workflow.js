@@ -440,11 +440,11 @@ function budgetExhausted() {
 // breaker that binds, and the run dies against the runtime's own lifetime cap
 // with no named halt event instead. Read every number below as "at the default".
 //
-// Consequence, stated out loud rather than buried in the arithmetic: at 31
+// Consequence, stated out loud rather than buried in the arithmetic: at 32
 // agents per design-tier issue it is maxAgents that binds first, not the
 // runtime's own 1000-agent lifetime cap. CB1 halts once agentsSpent plus this
 // projection exceeds maxAgents, whose launcher default is 900
-// (lib/goal-phase0.sh), so a /goal run stops at roughly 28 design-tier issues
+// (lib/goal-phase0.sh), so a /goal run stops at roughly 27 design-tier issues
 // — sooner once the per-cycle relay overhead above is counted. That default
 // sits just under the runtime cap deliberately, so a long run ends on a named
 // CB1 audit event instead of dying against the runtime limit; only an operator
@@ -454,7 +454,7 @@ function budgetExhausted() {
 // rather than accelerate on a busy host.
 function projectedAgentsForCycle(issueCount) {
   // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 3 + maxWatchTicks + 2 + (issueCount * 31);
+  return 3 + maxWatchTicks + 2 + (issueCount * 32);
 }
 
 // What ONE issue costs INSIDE a nested fleet run, measured against the budget
@@ -466,7 +466,7 @@ function projectedAgentsForCycle(issueCount) {
 // operator's effective `implementBudget`. Reading it matters because the fleet
 // declares IMPLEMENT_AGENT_BUDGET as clampInt(CFG.implementBudget, 4, 96, 24)
 // and lib/solve-launcher.sh plumbs UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET into the
-// envelope this script relays verbatim, so a literal 31 understates a maxed-out
+// envelope this script relays verbatim, so a literal 32 understates a maxed-out
 // budget more than threefold. An accumulator that reads low is worse than no
 // accumulator at all: CB1 is the only NAMED halt, so it never fires and the run
 // dies against the runtime's own lifetime cap with no halt reason, no audit row
@@ -479,7 +479,7 @@ function perIssueFleetCost(fleetArgs) {
   const cfg = (fleetArgs && typeof fleetArgs === "object" && fleetArgs.config
     && typeof fleetArgs.config === "object") ? fleetArgs.config : {};
   // SHARED COST: solve-fleet-per-issue-agent-cost
-  return 7 + clampInt(cfg.implementBudget, 4, 96, 24);
+  return 8 + clampInt(cfg.implementBudget, 4, 96, 24);
 }
 
 // The fleet args envelope arrives as an agent-returned STRING. It is the only

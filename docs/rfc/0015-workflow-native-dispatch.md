@@ -128,7 +128,7 @@ where fan-out is `parallel()` and every agent stays a leaf:
 | Tier | Chain |
 |---|---|
 | `trivial`, `small` | ONE solver agent, `isolation:"worktree"`. Byte-for-byte the same brief the detached session got. |
-| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → **one** bounded revision round on any non-`APPROVE` verdict, writing a sibling `spec-r1.md` instead of rewriting `spec.md` in place, and never re-reviewed → plan writer, pointed at the revision only when it lands at exactly that path → ONE solver agent executing the plan. |
+| `medium`, `large` | `parallel()` research fan-out (codebase / constraints / test-coverage) → spec writer → spec reviewer (its blocking findings are forwarded to the plan writer inside an untrusted-input envelope, #507 — and to the reviser below, in the same envelope, whenever one runs) → **one** bounded revision round on any non-`APPROVE` verdict, writing a sibling `spec-r1.md` instead of rewriting `spec.md` in place, and never re-reviewed → plan writer, pointed at the revision only when it lands at exactly that path → **plan reviewer**, whose blocking findings ARE its output (nothing rewrites the plan) and are forwarded in the same envelope to all three rungs that read it — the implementer, task reviewer and fixer → a sequential per-task chain (implementer → reviewer → bounded fix ladder) in one script-named worktree, then one delivery agent (#508). |
 
 Only the **solver** is worktree-isolated. Research and design agents are
 read-only and write to absolute paths under the run dir — an isolated
@@ -144,7 +144,7 @@ still contains hand-off language written for a detached session.
 
 | ID | Guard |
 |---|---|
-| CB1 | projected agents (`2 + issues + (7 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the conditional spec-revision rung, since no verdict exists yet at projection time. |
+| CB1 | projected agents (`2 + issues + (8 + implementBudget − 1) × design-tier issues`) over `maxAgents` → abort **before** any dispatch. The leading 2 is the intake relay plus the batched PR-verification relay (#515); the per-issue term is the #508 per-task chain, bounded by CB3's `implementBudget` (default 24). `T` is unknowable before the plan is written, so the projection uses the live cap — deliberately pessimistic, and the same way about the conditional spec-revision rung, since no verdict exists yet at projection time. The plan review needs no such allowance: every accepted plan is reviewed. |
 | CB2 | runtime `budget` exhausted between waves → stop, report, leave remaining claims intact |
 | CB3 | (#508) live per-issue implement-phase agent counter over `implementBudget` → stop the task loop, record the remaining tasks `SKIPPED`, audit `implement_budget_exhausted`, and still deliver what is committed |
 | — | manifest/envelope cross-check: only issues the launcher actually claimed are solved; a mismatch in either direction is audited, never silent |
@@ -456,8 +456,9 @@ Every loss below is **printed, never silent** — in this section, in
   blind.
 - **R-2 — medium-tier fidelity.** The script's design chain is a faithful but
   not identical translation of `/uberdev:orchestrator` (no SDD wave
-  decomposition, one bounded review round instead of the always-on
-  writer/reviewer pairs). RFC 0012 Phase 6 remains the path to full parity;
+  decomposition; both writer/reviewer pairs are always-on since #524, but their
+  correction rounds are BOUNDED — one for the spec, none for the plan — rather
+  than iterated to agreement). RFC 0012 Phase 6 remains the path to full parity;
   until then `--backend=claude-bg` reaches the original pipeline (**#381 deleted
   that backend; `--backend=background` reaches it now, see §7**).
   **#507 closed the first half of the gap**: the reviewer's
@@ -470,11 +471,20 @@ Every loss below is **printed, never silent** — in this section, in
   **#524 item 1 closed the spec-reviser gap**: a non-`APPROVE` verdict now buys
   ONE bounded spec-revision round, writing a sibling `spec-r1.md` that the plan
   writer is pointed at only when it lands at exactly that path — and charging
-  that rung is what moved the CB1 constant to 7. What remains missing is the
-  **plan reviewer** — the plan is still the one design artifact with no review
-  at all — and closing that gap adds one more agent per design-tier issue,
-  therefore moving the CB1 constant again, which `tests/docs-accuracy.test.sh`
-  T14 locks against this document.
+  that rung is what moved the CB1 constant to 7.
+  **#524 item 2 closed the plan-review gap**: the plan — the artifact the
+  implement phase actually executes, and the last design artifact with no review
+  at all — is now reviewed on every accepted write, moving the CB1 constant to 8,
+  which `tests/docs-accuracy.test.sh` T14 locks against this document. There is
+  deliberately no plan REVISER (a second bounded ladder is a second rung on the
+  ceiling), so the reviewer's blocking findings are its entire output: they are
+  sanitised and enveloped by the same #507 carrier and forwarded to all three
+  rungs that read the plan. All three, because the per-task reviewer already
+  treats work outside a task's section as a blocking finding — telling only the
+  implementer that a plan-review finding may be answered would put the two gates
+  in contradiction over one document and burn a fix round on correct work. The
+  parity gap that remains is the SDD wave decomposition named at the top of this
+  entry, not a missing review rung.
 - **R-3 — a stranded claim, including a new relay-gap window.** If the fleet
   stops early (CB1/CB2, or the session ends), unsolved issues keep their
   `uberdev:active` label. There is also a window the detached path did not
