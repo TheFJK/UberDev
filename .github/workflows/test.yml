@@ -102,6 +102,7 @@ jobs:
           bash tests/post-impl-review.test.sh && \
           bash tests/testers-pipeline.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/leaf-worker-contract.test.sh && \
           bash tests/sdd-routed-lifecycle.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
@@ -433,6 +434,7 @@ jobs:
           bash tests/crossplatform-shell-wrappers.test.sh && \
           bash tests/docs-accuracy.test.sh && \
           bash tests/spec-reviewer-plan-aware.test.sh && \
+          bash tests/leaf-worker-contract.test.sh && \
           bash tests/audit-fixups.test.sh && \
           bash tests/review-pr.test.sh && \
           bash tests/prkit-manifest.test.sh && \

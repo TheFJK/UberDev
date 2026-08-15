@@ -378,7 +378,7 @@
         },
         {
           "path": "code-reviewer.md",
-          "sha256": "1ceab0340aa30391f9d1da87cb7aadc760ac9161c17fcffef6819f4f878d469c"
+          "sha256": "f51601f07719be65104d8725e98a589d291218bb286d0130bc617c6cbb64f605"
         }
       ]
     },
@@ -436,15 +436,15 @@
         },
         {
           "path": "code-quality-reviewer-prompt.md",
-          "sha256": "b7d9d7c27febecd5f128604b8899965e83888eeab10669c1de689454f61243bf"
+          "sha256": "444e84a6644a586d9ba1f5e90b3270332a917b3b983a94df9fd6254993103511"
         },
         {
           "path": "implementer-prompt.md",
-          "sha256": "eebde45d10b534714454c3a9a0ff5e38c6edb097e6c7a576e6a424d066047813"
+          "sha256": "25476163c9ed67f9bb903e0ba065c2bb46c7ae8026dca0c06a4dfa38280ec5ca"
         },
         {
           "path": "spec-reviewer-prompt.md",
-          "sha256": "e2ad55e27768c7a27193519901172572b90e6096c3ea17f4eda176c4fbd917f1"
+          "sha256": "c38191d0b903a9dfc4d33542ea5d6cd03c0c466fabf6a6445cc5b2c54ccfb71c"
         }
       ]
     },
