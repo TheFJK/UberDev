@@ -1877,6 +1877,209 @@ else no "V33 a component carries a review date older than the review point it si
 fi
 
 echo
+echo "== V45-V46: every measurement records the basis it was taken under (#534) =="
+
+# ---------------------------------------------------------------------------
+# THE CLASS (#534). `measured_diff_lines` was a BARE INTEGER. A diff count has
+# two operands — an upstream revision and a set of local bytes — and the register
+# recorded neither, so the number could not say whether it disagreed with the
+# copy in RFC 0019 §4.2/§4.3 because one of them was stale or because the two
+# were honest measurements taken at different points. Two components had already
+# drifted that way. `measured_diff_basis` is now a required record naming both
+# operands, and `C-MEASURE` is its offline shape guard.
+#
+# V45 drives the checker (shape). V46 drives git (the local operand really
+# resolves in this history). Re-deriving the count itself needs the upstream
+# bytes, which is `vendor-drift.py`'s network job — neither row claims it.
+# ---------------------------------------------------------------------------
+
+# V45 — C-MEASURE reds for an unbased measurement, and NAMES ITSELF. Five
+# mutations through `assert_red`, which drives the FULL checker: each row
+# therefore proves the tree went red *for this check* and not for some other one
+# that happens to trip on the same edit.
+
+# V45a — the biconditional. A recorded number whose basis has been deleted is
+# the exact pre-#534 state: a claim with no operands behind it.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("id") == "skills/systematic-debugging":
+        if "measured_diff_lines" not in c:
+            raise SystemExit("skills/systematic-debugging records no measurement")
+        if c.pop("measured_diff_basis", None) is None:
+            raise SystemExit("skills/systematic-debugging carries no basis to remove")
+        break
+else:
+    raise SystemExit("skills/systematic-debugging is not in the register")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-MEASURE" "V45a a measurement whose basis was deleted"
+else
+  no "V45a could not delete a measured_diff_basis — the probe mutated nothing"
+fi
+
+# V45b — a required member of the record. `upstream_rev` is the operand the
+# whole reconciliation turns on: without it the number cannot be compared to any
+# other copy of itself, which is how the two live mismatches survived.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if c.get("id") == "agents/code-reviewer.md":
+        basis = c.get("measured_diff_basis")
+        if not isinstance(basis, dict):
+            raise SystemExit("agents/code-reviewer.md carries no basis record")
+        if basis.pop("upstream_rev", None) is None:
+            raise SystemExit("agents/code-reviewer.md's basis records no upstream_rev")
+        break
+else:
+    raise SystemExit("agents/code-reviewer.md is not in the register")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-MEASURE" "V45b a basis missing its upstream_rev"
+else
+  no "V45b could not remove an upstream_rev — the probe mutated nothing"
+fi
+
+# V45c — `upstream_tree` is REQUIRED, not decorative. It names the concrete
+# artifact that was diffed, which for the 14 skills is a `claude-plugins-official`
+# repackaging rather than `obra/superpowers` itself; `upstream_rev` names only the
+# revision that artifact is corroborated to repackage. Drop this member and the
+# record silently claims the stronger provenance.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    if not (c.get("path") or "").startswith("skills/"):
+        continue
+    basis = c.get("measured_diff_basis")
+    if isinstance(basis, dict) and basis.pop("upstream_tree", None) is not None:
+        break
+else:
+    raise SystemExit("no skill component's basis records an upstream_tree")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-MEASURE" "V45c a basis missing its upstream_tree"
+else
+  no "V45c could not remove an upstream_tree — the probe mutated nothing"
+fi
+
+# V45d — the CLOSED sub-key set, one level down from C-SCHEMA's COMPONENT_KEYS
+# and for the same reason: a misspelt member is indistinguishable from an omitted
+# one. `mesured_on` sits beside the real key, so every required member is still
+# present and only the closed set can catch it.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+for c in d["components"]:
+    basis = c.get("measured_diff_basis")
+    if isinstance(basis, dict) and "measured_on" in basis:
+        basis["mesured_on"] = basis["measured_on"]
+        break
+else:
+    raise SystemExit("no component's basis records a measured_on to misspell")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-MEASURE" "V45d a misspelt member alongside the real one"
+else
+  no "V45d could not add a misspelt basis member — the probe mutated nothing"
+fi
+
+# V45e — ANTI-VACUITY. Deleting the corpus is the cheapest way to make a
+# per-measurement check permanently green, so an empty measured set is a failure
+# rather than a pass (C-EVIDENCE's own rule). BOTH keys are stripped on purpose:
+# stripping only `measured_diff_lines` would leave 20 orphaned basis records and
+# fire the biconditional instead, so the row would go red without ever exercising
+# the arm it exists to prove.
+SB="$(make_sandbox)" || { echo "  ABORT — sandbox creation failed"; exit 99; }
+if python3 - "$SB/plugins/uberdev/vendor.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+stripped = 0
+for c in d["components"]:
+    if c.pop("measured_diff_lines", None) is not None:
+        stripped += 1
+    c.pop("measured_diff_basis", None)
+if not stripped:
+    raise SystemExit("no component records measured_diff_lines — stripping them "
+                     "all changes nothing and the row would prove nothing")
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+PY
+then
+  assert_red "$SB" "C-MEASURE" "V45e every measurement stripped is red, not vacuously green"
+else
+  no "V45e could not strip the measurements — the register records none"
+fi
+
+# V46 — every measurement names UberDev bytes that EXIST IN THIS HISTORY.
+#
+# `upstream_rev` is checkable only against the network (`vendor-drift.py`), but
+# the other operand is ours: `uberdev_rev` must be a commit of this repository
+# reachable from HEAD, so `git show <uberdev_rev>:<path>` re-derives the exact
+# bytes that were counted. A rev that resolves to nothing records a measurement
+# of bytes nobody can produce.
+#
+# NEVER A SKIP. CI checks out with `fetch-depth: 0` (.github/workflows/test.yml,
+# the `checkout` step), so an unresolvable rev is a defect in the register and
+# not an artefact of the clone. Converting this row to a skip when git is absent
+# or the object is missing would leave CI carrying a green that checks nothing —
+# the vacuous-green class this whole suite exists to kill.
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  no "V46 $REPO_ROOT is not a git checkout — the recorded uberdev_rev values cannot be resolved"
+else
+  V46_ROWS="$(python3 - "$REGISTER" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in d.get("components", []):
+    basis = c.get("measured_diff_basis")
+    if isinstance(basis, dict) and isinstance(basis.get("uberdev_rev"), str):
+        print("%s\t%s" % (c.get("id") or "<no id>", basis["uberdev_rev"]))
+PY
+)" || V46_ROWS="__ERROR__"
+  if [ "$V46_ROWS" = "__ERROR__" ]; then
+    no "V46 could not read measured_diff_basis.uberdev_rev out of the register"
+  else
+    V46_CHECKED=0
+    V46_BAD=""
+    # Split on TAB explicitly, and never `for x in $V46_ROWS`: zsh runs that loop
+    # once over the whole string and bash splits it on spaces.
+    while IFS=$'\t' read -r V46_ID V46_REV; do
+      [ -n "$V46_ID" ] || continue
+      V46_CHECKED=$((V46_CHECKED + 1))
+      if ! git -C "$REPO_ROOT" cat-file -e "$V46_REV^{commit}" 2>/dev/null; then
+        V46_BAD="$V46_ID: $V46_REV is not a commit of this repository"
+        break
+      fi
+      if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$V46_REV" HEAD 2>/dev/null; then
+        V46_BAD="$V46_ID: $V46_REV is not reachable from HEAD — the bytes it claims were measured are not in this history"
+        break
+      fi
+    done <<<"$V46_ROWS"
+    if [ -n "$V46_BAD" ]; then
+      no "V46 a recorded uberdev_rev does not resolve: $V46_BAD"
+    elif [ "$V46_CHECKED" -eq 0 ]; then
+      no "V46 no component records measured_diff_basis.uberdev_rev — the row asserted nothing"
+    else
+      ok "V46 every recorded uberdev_rev is a commit of this repository reachable from HEAD ($V46_CHECKED component(s))"
+    fi
+  fi
+fi
+
+echo
 echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
