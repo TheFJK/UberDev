@@ -584,6 +584,109 @@ else
   fail "G20 rung one is not dispatched against the stricter task-1-only schema (or S_TASK1 stopped requiring taskCount)"
 fi
 
+# G31 (#532) — the escalation channel has to EXIST on the wire, and it has to be
+# unconstrained there. Both halves are STRUCTURAL because no behavioural row can
+# reach them: the harness clones a canned return straight through and never
+# enforces `additionalProperties: false`, so every B row for the ratchet would
+# stay green against an S.solve that declares neither property — and a real
+# solver's return would then be refused outright.
+#
+# The second half is the deliberate design choice, pinned so a later "tighten the
+# schema" edit has to argue with it: an enum here turns an illegal ADVISORY value
+# into a rejected StructuredOutput, i.e. a lost delivery record for an issue that
+# was otherwise solved. The closed check belongs in the script, where refusing
+# costs an audit row instead of a PR number.
+SOLVE_SCHEMA_BLOCK="$(sed -n '/^  solve: {/,/^  },/p' "$WORKFLOW")"
+if [ -z "$SOLVE_SCHEMA_BLOCK" ]; then
+  fail "G31 could not locate the S.solve schema in workflow.js — the escalation-channel assertion cannot be evaluated"
+elif grep -qE '^[[:space:]]*escalatedTier: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
+  && grep -qE '^[[:space:]]*escalationReason: \{ type: "string"' <<<"$SOLVE_SCHEMA_BLOCK" \
+  && ! grep -qE '^[[:space:]]*escalatedTier: \{[^}]*enum' <<<"$SOLVE_SCHEMA_BLOCK"; then
+  pass "G31 S.solve carries the mid-run escalation channel, and escalatedTier is deliberately NOT enum-constrained on the wire"
+else
+  fail "G31 S.solve is missing escalatedTier/escalationReason, or escalatedTier grew a wire-side enum (an illegal advisory value would cost the whole delivery record)"
+fi
+
+# G32 (#532) — ONE ordered spelling of the tier vocabulary in this file. The
+# ratchet needs an ORDER to compare against, and the obvious way to get one is a
+# second array beside the existing membership map — which is the uncompared-copies
+# shape (#370) the moment a tier is added to one and not the other. The map must
+# be DERIVED from the ordered list, never written out again.
+if grep -qE '^const TIER_ORDER = \[' "$WORKFLOW" \
+  && grep -q 'TIER_ORDER.reduce(' "$WORKFLOW" \
+  && ! grep -qE '^const TIERS = \{' "$WORKFLOW"; then
+  pass "G32 the tier vocabulary is spelled ONCE as TIER_ORDER, with TIERS derived from it"
+else
+  fail "G32 workflow.js carries a second hand-written copy of the tier vocabulary (or lost the ordered one)"
+fi
+
+# G33 (#532) — the rejection vocabulary is spelled TWICE: the frozen map in
+# workflow.js and the documented list in SKILL.md. Two uncompared copies of one
+# contract is the #370 shape, and the failure is quiet — a verdict the script can
+# emit and the doc never names is a value an operator cannot look up. So join
+# them in BOTH directions, the way docs-accuracy T16 joins the reviewVerdict
+# union, with an anti-vacuity floor first: a silent zero-member extraction on
+# either side would make both comparisons pass while comparing nothing.
+#
+# The doc side reads a BULLET LIST rather than an inline union, so a re-wrap of
+# the prose cannot empty the extraction — each member is the first backtick token
+# of its own list item.
+ESC_JS_VERDICTS="$(sed -n '/^const ESCALATION_REJECTIONS = Object.freeze({/,/^});/p' "$WORKFLOW" \
+  | grep -oE '"[a-z][a-z-]*"' | tr -d '"' | sort -u)"
+ESC_DOC_VERDICTS="$(sed -n '/^## Mid-run tier escalation/,/^## /p' "$SKILL" \
+  | grep -oE '^- `[a-z][a-z-]*`' | tr -d '`' | sed 's/^- //' | sort -u)"
+esc_count() { local _n=0 _l; while IFS= read -r _l; do [ -n "$_l" ] && _n=$((_n + 1)); done <<<"$1"; printf '%s' "$_n"; }
+esc_absent() {
+  local _out="" _m
+  while IFS= read -r _m; do
+    [ -n "$_m" ] || continue
+    grep -qxF -- "$_m" <<<"$2" || _out="$_out $_m"
+  done <<<"$1"
+  printf '%s' "$_out"
+}
+ESC_JS_N="$(esc_count "$ESC_JS_VERDICTS")"
+ESC_DOC_N="$(esc_count "$ESC_DOC_VERDICTS")"
+if [ "$ESC_JS_N" -ge 3 ] && [ "$ESC_DOC_N" -ge 3 ]; then
+  pass "G33.1 both rejection-verdict lists extracted (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N)"
+else
+  fail "G33.1 setup error: the rejection union did not extract from both sides (workflow.js: $ESC_JS_N, SKILL.md: $ESC_DOC_N — both expected >= 3)"
+fi
+ESC_MISSING="$(esc_absent "$ESC_DOC_VERDICTS" "$ESC_JS_VERDICTS")"
+ESC_EXTRA="$(esc_absent "$ESC_JS_VERDICTS" "$ESC_DOC_VERDICTS")"
+if [ -z "$ESC_MISSING" ] && [ -z "$ESC_EXTRA" ]; then
+  pass "G33.2 SKILL.md and workflow.js agree on the closed rejection vocabulary, both directions"
+else
+  fail "G33.2 the rejection vocabulary has drifted — documented but never emitted:$ESC_MISSING | emitted but never documented:$ESC_EXTRA"
+fi
+
+# G33.3 — the two audit event names are the operator's only handle on a
+# recorded-or-refused escalation, so both must be greppable in the doc too. An
+# event the script emits and the doc never names is an event nobody looks for.
+if grep -Fq 'tier_escalated' "$SKILL" && grep -Fq 'tier_escalation_rejected' "$SKILL" \
+  && grep -Fq 'tierEscalations' "$SKILL"; then
+  pass "G33.3 SKILL.md names both escalation audit events and the accepted-escalation counter"
+else
+  fail "G33.3 SKILL.md omits an escalation audit event or the tierEscalations counter"
+fi
+
+# G33.4 — the two per-record fields and the counter have to be declared where an
+# operator actually reads the record shape: the Return value fence. MEASURED as a
+# real hole before this row existed — deleting `escalatedTier, escalationReason`
+# from that fence reds nothing else in this file, in docs-accuracy, or in the
+# schema guard, because T16's joins cover the per-task record, the reviewVerdict
+# union and partialDelivery, and none of them reach the results member list.
+# Anti-vacuity first: an empty extraction would make the greps below meaningless.
+SF_RETURN_FENCE="$(awk '/^## Return value/{seen=1; next} seen && /^```/{n++; next} seen && n==1' "$SKILL")"
+if [ -z "$SF_RETURN_FENCE" ]; then
+  fail "G33.4 setup error: could not extract the Return value fence from SKILL.md"
+elif grep -q 'escalatedTier' <<<"$SF_RETURN_FENCE" \
+  && grep -q 'escalationReason' <<<"$SF_RETURN_FENCE" \
+  && grep -q 'tierEscalations' <<<"$SF_RETURN_FENCE"; then
+  pass "G33.4 the Return value fence declares both per-record escalation fields and the top-level counter"
+else
+  fail "G33.4 SKILL.md's Return value fence omits escalatedTier / escalationReason / tierEscalations — the documented record shape has drifted from the one the script publishes"
+fi
+
 # ---------------------------------------------------------------------------
 # B — T3 behavioral fixtures
 # ---------------------------------------------------------------------------
@@ -1944,6 +2047,253 @@ function probedNums(record) {
   out.zdBlockerNames = !!(zd11 && typeof zd11.blocker === "string"
     && zd11.blocker.indexOf("the task chain committed nothing for issue #11") >= 0);
 
+  // ------------------------------------------------------------------
+  // #532 — the ONE-WAY TIER RATCHET: the mid-run return channel.
+  //
+  // A solver that discovers hidden complexity mid-run cannot re-classify
+  // ITSELF. Re-running this run's ceremony under a raised tier would spend
+  // research and design agents CB1 never projected, mid-wave, on a budget
+  // already committed. So the escalation is RECORDED: this run finishes
+  // exactly as it was dispatched, and the NEXT classification of the issue
+  // is what acts on the record. W5 below is that invariant made
+  // BEHAVIOURAL — an agent count, not a sentence in a doc.
+  //
+  // The wire is deliberately NOT enum-constrained (see S.solve), so every
+  // illegal value has to be refused HERE, in the script, where a refusal is
+  // an audit row instead of a rejected StructuredOutput that would lose the
+  // delivery record of an issue that was otherwise solved. W3 is that.
+  // ------------------------------------------------------------------
+  // #11 rides the SINGLE-SOLVER path (small tier => no plan => no chain), so
+  // these exercise the solveOne return site. W2 uses the medium fixture
+  // instead, which returns through the DELIVERY rung — the other call site.
+  function escReturns(over) {
+    return {
+      "manifest-intake": intake([rec(11, "small"), rec(12, "small")]),
+      "solve:#11 (small)": claimed(11, 901, over),
+      "solve:#12 (small)": solved(12, 902),
+      "verify-prs": proof([proofRow(901, "fix/11-x"), proofRow(902, "fix/12-x")]),
+    };
+  }
+  function escRow(res, ev) {
+    if (!res || !Array.isArray(res.auditEvents)) return null;
+    return res.auditEvents.filter(function (e) { return e && e.event === ev; })[0] || null;
+  }
+  function escRec(res, issue) {
+    if (!res || !Array.isArray(res.results)) return null;
+    return res.results.filter(function (r) { return r && r.issue === issue; })[0] || null;
+  }
+
+  // W1 — a genuine upgrade is RECORDED, with both ends of the move, and the
+  // delivery record beside it is not disturbed by the note.
+  const recTE1 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "medium",
+    escalationReason: "the fix needs a schema migration no triage rule could see from the issue body",
+  }) });
+  const resTE1 = resultOf(recTE1);
+  const te1Row = escRow(resTE1, "tier_escalated");
+  const te1Rec = escRec(resTE1, 11);
+  out.escRecorded = !!(te1Row && te1Row.issue === 11 && te1Row.from === "small" && te1Row.to === "medium");
+  out.escReasonKept = !!(te1Row && typeof te1Row.reason === "string"
+    && te1Row.reason.indexOf("schema migration") >= 0);
+  out.escCount = resTE1 ? resTE1.tierEscalations : null;
+  out.escLogged = recTE1.logs.some(function (l) {
+    return l.indexOf("#11") >= 0 && l.indexOf("escalat") >= 0;
+  });
+  out.escDeliveryIntact = !!(te1Rec && te1Rec.status === "PR_OPENED"
+    && te1Rec.prNumber === 901 && te1Rec.branch === "fix/11-x");
+  out.escPublished = te1Rec ? te1Rec.escalatedTier : null;
+  out.escNoStrayReject = !escRow(resTE1, "tier_escalation_rejected");
+
+  // W2 — a DOWNGRADE is refused. This is the ratchet itself: `medium` -> `small`
+  // is the one move the channel exists to make impossible. It returns through
+  // the delivery rung, so the second call site is covered behaviourally too.
+  const recTE2 = await run(buildArgs(), { agentReturns: Object.assign({}, mediumReturns(), {
+    "deliver:#11": delivered(11, 901, {
+      escalatedTier: "small",
+      escalationReason: "this turned out easier than triage thought",
+    }),
+  }) });
+  const resTE2 = resultOf(recTE2);
+  const te2Row = escRow(resTE2, "tier_escalation_rejected");
+  const te2Rec = escRec(resTE2, 11);
+  out.escDownRejected = !!(te2Row && te2Row.rejection === "not-an-upgrade"
+    && te2Row.from === "medium" && te2Row.attempted === "small" && te2Row.issue === 11);
+  out.escDownCount = resTE2 ? resTE2.tierEscalations : null;
+  out.escDownNoUpgradeRow = !escRow(resTE2, "tier_escalated");
+  // the refused value must not survive onto the published record — the script
+  // said no, so `results` cannot carry a yes. It survives in the audit row.
+  out.escDownBlanked = !!(te2Rec && te2Rec.escalatedTier === "" && te2Rec.escalationReason === "");
+
+  // W2b — the EQUAL-tier boundary, which is the half a strict downgrade does not
+  // cover: reporting the tier you were already dispatched at is not an upgrade
+  // either. Measured: without this row, relaxing the gate from `<=` to `<` — so
+  // a same-tier "escalation" is accepted, counted, and logged as a real
+  // mis-triage — passes every other assertion in this file.
+  const recTE2B = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "small",
+    escalationReason: "it really was small after all",
+  }) });
+  const resTE2B = resultOf(recTE2B);
+  const te2bRow = escRow(resTE2B, "tier_escalation_rejected");
+  out.escSameRejected = !!(te2bRow && te2bRow.rejection === "not-an-upgrade"
+    && te2bRow.from === "small" && te2bRow.attempted === "small");
+  out.escSameCount = resTE2B ? resTE2B.tierEscalations : null;
+  out.escSameNoUpgradeRow = !escRow(resTE2B, "tier_escalated");
+
+  // W3 — an unknown tier is refused WITHOUT losing the delivery. This is the
+  // whole reason the wire carries no enum: the PR still has to reach /goal.
+  const recTE3 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "epic", escalationReason: "bigger than large",
+  }) });
+  const resTE3 = resultOf(recTE3);
+  const te3Row = escRow(resTE3, "tier_escalation_rejected");
+  const te3Rec = escRec(resTE3, 11);
+  out.escUnknownRejected = !!(te3Row && te3Row.rejection === "unknown-tier"
+    && te3Row.attempted === "epic");
+  out.escUnknownKeepsPr = !!(te3Rec && te3Rec.status === "PR_OPENED" && te3Rec.prNumber === 901);
+  out.escUnknownInQueue = !!(resTE3 && resTE3.prsOpened.indexOf(901) >= 0);
+
+  // W4 — an UNEXPLAINED escalation is not a record. "Recorded with a reason" is
+  // the ask; a bare tier bump tells the next triage nothing it can act on.
+  const recTE4 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "large", escalationReason: "   ",
+  }) });
+  const resTE4 = resultOf(recTE4);
+  const te4Row = escRow(resTE4, "tier_escalation_rejected");
+  out.escNoReasonRejected = !!(te4Row && te4Row.rejection === "no-reason"
+    && te4Row.attempted === "large");
+  out.escNoReasonCount = resTE4 ? resTE4.tierEscalations : null;
+
+  // W5 — THE CB1 INVARIANT, behavioural. The escalated run and the byte-identical
+  // non-escalated run must spend the SAME agents, in the same order: recording a
+  // mis-triage buys the next classification a better tier, never this run a
+  // research fleet nobody projected.
+  const recTE5 = await run(buildArgs(), { agentReturns: escReturns() });
+  const resTE5 = resultOf(recTE5);
+  const cTE1 = h.countAgentsByPhase(recTE1);
+  const cTE5 = h.countAgentsByPhase(recTE5);
+  out.escSameFleet = labels(recTE1).join("|") === labels(recTE5).join("|");
+  out.escNoResearch = (cTE1.research || 0) === 0 && (cTE5.research || 0) === 0;
+  out.escNoDesign = (cTE1.design || 0) === 0 && (cTE5.design || 0) === 0;
+  out.escNotDesignedCount = resTE1 ? resTE1.designedIssues : null;
+
+  // W6 — the reason is agent text on the wire and is SANITIZED before it reaches
+  // an audit row or a log line: a raw newline in a log line forges log lines.
+  // One line, no control characters, clipped at the named constant.
+  const recTE6 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "medium",
+    escalationReason: "first line\nsecond line\tand\u0007a bell " + "z".repeat(400),
+  }) });
+  const resTE6 = resultOf(recTE6);
+  const te6Row = escRow(resTE6, "tier_escalated");
+  const te6Rec = escRec(resTE6, 11);
+  out.escSanitizedOneLine = !!(te6Row && typeof te6Row.reason === "string"
+    // The class is written as ESCAPES, never as literal control bytes: a raw
+    // control character in a test file is invisible in review, and a CRLF
+    // checkout is free to rewrite one.
+    && !/[\u0000-\u001F\u007F]/.test(te6Row.reason));
+  out.escSanitizedClipped = !!(te6Row && te6Row.reason.indexOf(" [truncated]") >= 0
+    && te6Row.reason.length <= 300 + " [truncated]".length);
+  // the published record and the audit row must carry the SAME text — two
+  // spellings of one reason is the uncompared-copies shape all over again.
+  out.escSanitizedAgrees = !!(te6Row && te6Rec && te6Rec.escalationReason === te6Row.reason);
+  out.escSanitizedLogOneLine = recTE6.logs.filter(function (l) {
+    return l.indexOf("#11") >= 0 && l.indexOf("escalat") >= 0;
+  }).every(function (l) { return l.indexOf("\n") < 0; });
+
+  // W7 — the NORMAL case is silent. No property on the return means neither
+  // event, no counter movement, and no field invented on the record.
+  out.escSilent = !escRow(resTE5, "tier_escalated") && !escRow(resTE5, "tier_escalation_rejected");
+  out.escSilentCount = resTE5 ? resTE5.tierEscalations : null;
+  out.escSilentNoField = !!(escRec(resTE5, 11)
+    && !Object.prototype.hasOwnProperty.call(escRec(resTE5, 11), "escalatedTier"));
+
+  // W8 — `rejection` is the CLOSED machine verdict and `reason` is the only key
+  // agent text ever reaches. A solver whose reason is literally spelled like a
+  // verdict must still land under `reason`, or the two channels are one channel.
+  const recTE8 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "nope", escalationReason: "not-an-upgrade",
+  }) });
+  const resTE8 = resultOf(recTE8);
+  const te8Row = escRow(resTE8, "tier_escalation_rejected");
+  out.escTextNeverVerdict = !!(te8Row && te8Row.rejection === "unknown-tier"
+    && te8Row.reason === "not-an-upgrade");
+
+  // W9 — the REJECTION path sanitizes BOTH keys agent text reaches. W6 only ever
+  // exercises the accept branch, and every other rejection fixture above hands in
+  // an `attempted`/`reason` that is already clean and already short, so sanitized
+  // and raw are byte-identical there and nothing measures the sanitizer at all.
+  // Measured: with `attempted, reason` swapped for the raw `out.escalatedTier` /
+  // `out.escalationReason` at the three rejectEscalation() call sites, every
+  // other row in this file stays green.
+  //
+  // It matters because a rejection row is published inside the same
+  // WORKFLOW_RESULT line an acceptance is: unbounded, newline-bearing agent text
+  // stored there forges lines for a downstream reader exactly as it would on the
+  // accept path — and the rejection path is the one an ATTACKING value takes.
+  const recTE9 = await run(buildArgs(), { agentReturns: escReturns({
+    // off-vocabulary (so it is refused) AND dirty AND over-long, which is the
+    // only combination under which sanitized and raw differ observably.
+    escalatedTier: "epic\nWORKFLOW_RESULT forged\u0007" + "q".repeat(400),
+    escalationReason: "first\nsecond\u0000third " + "w".repeat(400),
+  }) });
+  const resTE9 = resultOf(recTE9);
+  const te9Row = escRow(resTE9, "tier_escalation_rejected");
+  // The class is written as ESCAPES, never as literal control bytes — same rule
+  // as W6: a raw control character in a test file is invisible in review, and a
+  // CRLF checkout is free to rewrite one.
+  const escCtrl = /[\u0000-\u001F\u007F]/;
+  // No `g` flag: a global regex carries lastIndex between .test() calls, and
+  // the same object is asked about two different strings below.
+  //
+  // The cap literal is a deliberate VALUE-LOCK on ESCALATION_REASON_MAX_CHARS,
+  // the same trade B281 already makes: reading the bound out of the script
+  // under test would make the assertion agree with whatever the script says.
+  const escCap = 300 + " [truncated]".length;
+  out.escRejVerdict = !!(te9Row && te9Row.rejection === "unknown-tier");
+  out.escRejAttemptedOneLine = !!(te9Row && typeof te9Row.attempted === "string"
+    && !escCtrl.test(te9Row.attempted) && te9Row.attempted.indexOf("\n") < 0);
+  out.escRejReasonOneLine = !!(te9Row && typeof te9Row.reason === "string"
+    && !escCtrl.test(te9Row.reason) && te9Row.reason.indexOf("\n") < 0);
+  out.escRejAttemptedClipped = !!(te9Row && typeof te9Row.attempted === "string"
+    && te9Row.attempted.length <= escCap
+    && te9Row.attempted.indexOf(" [truncated]") >= 0);
+  out.escRejReasonClipped = !!(te9Row && typeof te9Row.reason === "string"
+    && te9Row.reason.length <= escCap
+    && te9Row.reason.indexOf(" [truncated]") >= 0);
+
+  // W10 — a whitespace-only `escalatedTier` is ABSENT, not an escalation. The
+  // contract is "absent, non-string, or empty emits nothing"; three spaces are
+  // none of those under a `=== ""` test, so they fall through to the vocabulary
+  // check and produce a rejection row whose `attempted` sanitizes to the empty
+  // string — an audit row about a move nobody made.
+  const recTE10 = await run(buildArgs(), { agentReturns: escReturns({
+    escalatedTier: "   ", escalationReason: "a reason for an escalation never named",
+  }) });
+  const resTE10 = resultOf(recTE10);
+  out.escBlankTierSilent = !!(resTE10 && !escRow(resTE10, "tier_escalated")
+    && !escRow(resTE10, "tier_escalation_rejected"));
+  out.escBlankTierCount = resTE10 ? resTE10.tierEscalations : null;
+
+  const escRejections = [resTE1, resTE2, resTE2B, resTE3, resTE4, resTE5, resTE6, resTE8,
+    resTE9, resTE10]
+    .filter(Boolean)
+    .reduce(function (acc, r) {
+      return acc.concat((r.auditEvents || []).filter(function (e) {
+        return e && e.event === "tier_escalation_rejected";
+      }));
+    }, []);
+  // anti-vacuity: an extraction that found no rejection row would make the
+  // every() below pass while checking nothing at all.
+  out.escRejectionsSeen = escRejections.length;
+  out.escVerdictsClosed = escRejections.every(function (e) {
+    return ["not-an-upgrade", "unknown-tier", "no-reason"].indexOf(e.rejection) >= 0;
+  });
+
+  out.escViolations = [recTE1, recTE2, recTE2B, recTE3, recTE4, recTE5, recTE6, recTE8,
+    recTE9, recTE10]
+    .reduce(function (n, r) { return n + r.violations.length; }, 0);
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
   out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW]
@@ -2318,6 +2668,62 @@ else
   check fwTasks '"1:DONE:0,2:BLOCKED:0"' \
                                   "B205 the task is BLOCKED and its fixRounds counter did NOT advance — an unattributable amend is not a landed fix"
   check fwStopped true            "B206 ...and the chain stops: no second fix round, no re-review of bytes nobody attributable changed"
+
+  # --- #532: the one-way tier ratchet, mid-run return channel (W1-W8) -------
+  check escRecorded true          "B260 (W1) a genuine upgrade is audited as tier_escalated with BOTH ends of the move (from/to) and the issue it belongs to"
+  check escReasonKept true        "B261 (W1) ...carrying the solver's reason, so the next triage has something it can act on"
+  check escCount 1                "B262 (W1) tierEscalations counts it"
+  check escLogged true            "B263 (W1) ...and the operator gets a log line naming the issue"
+  check escDeliveryIntact true    "B264 (W1) the delivery record is untouched — an escalation is a note beside the result, never a rewrite of it"
+  check escPublished '"medium"'   "B265 (W1) the accepted tier is published on the record for the next classification to read"
+  check escNoStrayReject true     "B266 (W1) ...and no rejection row is emitted beside the acceptance"
+
+  check escDownRejected true      "B267 (W2) THE RATCHET: medium -> small is refused as not-an-upgrade, recorded through the DELIVERY rung's return site"
+  check escDownCount 0            "B268 (W2) ...and a refused move never advances the counter"
+  check escDownNoUpgradeRow true  "B269 (W2) ...and emits no tier_escalated row"
+  check escDownBlanked true       "B270 (W2) the refused value is blanked off the published record — results cannot carry a yes the script said no to (it survives in the audit row)"
+
+  # W2b was added after the block below, so its ids are the next free ones
+  # file-wide rather than the next ones in sequence — uniqueness is what the id
+  # scheme buys, and keeping these rows beside W2 is what makes them readable.
+  check escSameRejected true      "B291 (W2b) the EQUAL-tier boundary: reporting the tier you were already dispatched at is refused as not-an-upgrade too"
+  check escSameCount 0            "B292 (W2b) ...and advances no counter"
+  check escSameNoUpgradeRow true  "B293 (W2b) ...and emits no tier_escalated row"
+
+  check escUnknownRejected true   "B271 (W3) an off-vocabulary tier is refused as unknown-tier, with the attempted value preserved"
+  check escUnknownKeepsPr true    "B272 (W3) ...and the delivery record SURVIVES: the wire carries no enum precisely so an illegal advisory value cannot reject an otherwise-solved issue's return"
+  check escUnknownInQueue true    "B273 (W3) ...so the PR still reaches the queue /goal ingests"
+
+  check escNoReasonRejected true  "B274 (W4) a whitespace-only reason is refused as no-reason — an unexplained tier bump is not a record"
+  check escNoReasonCount 0        "B275 (W4) ...and does not advance the counter"
+
+  check escSameFleet true         "B276 (W5) CB1 INVARIANT: the escalated run dispatches exactly the same agents, in the same order, as the byte-identical non-escalated run"
+  check escNoResearch true        "B277 (W5) ...zero research agents in both — an escalation never buys THIS run a fleet nobody projected"
+  check escNoDesign true          "B278 (W5) ...and zero design agents in both"
+  check escNotDesignedCount 0     "B279 (W5) ...and the escalated issue is not counted as designed"
+
+  check escSanitizedOneLine true  "B280 (W6) the reason reaches the audit row as ONE line with no control characters — a raw newline in a log line forges log lines"
+  check escSanitizedClipped true  "B281 (W6) ...clipped at the named constant with the [truncated] suffix"
+  check escSanitizedAgrees true   "B282 (W6) ...and the published record carries the same sanitized text as the audit row, not a second spelling of it"
+  check escSanitizedLogOneLine true "B283 (W6) ...and the log line it produces is a single line"
+
+  check escSilent true            "B284 (W7) the normal case is SILENT: no escalatedTier on the return emits neither event"
+  check escSilentCount 0          "B285 (W7) ...and moves no counter"
+  check escSilentNoField true     "B286 (W7) ...and invents no field on the record"
+
+  check escTextNeverVerdict true  "B287 (W8) agent text spelled exactly like a verdict still lands under reason, never under the machine key rejection"
+  check escRejectionsSeen 6       "B288 (W8) anti-vacuity: the rejection rows really were extracted before the closed-enum check ran — and exactly one run above is expected to reject"
+  check escVerdictsClosed true    "B289 (W8) every rejection carries one of exactly three verdicts — rejection is a closed machine key"
+  check escViolations 0           "B290 zero harness violations across every run added for #532"
+
+  check escRejVerdict true          "B294 (W9) a dirty over-long tier is still refused as unknown-tier — sanitizing the value never launders it into the vocabulary"
+  check escRejAttemptedOneLine true "B295 (W9) the REJECTION row's attempted is sanitized: one line, no control characters — a rejection row is published in the same WORKFLOW_RESULT line an acceptance is"
+  check escRejReasonOneLine true    "B296 (W9) ...and so is its reason, on the branch an attacking value actually takes"
+  check escRejAttemptedClipped true "B297 (W9) ...attempted is bounded by the named constant and carries the [truncated] suffix when clipped"
+  check escRejReasonClipped true    "B298 (W9) ...and so is reason: neither key can put unbounded agent text into an audit row"
+
+  check escBlankTierSilent true   "B299 (W10) a whitespace-only escalatedTier is ABSENT, not an escalation: it emits neither event rather than an audit row about a move nobody made"
+  check escBlankTierCount 0       "B300 (W10) ...and moves no counter"
   check fwDelivered true          "B207 delivery still runs on task 1's real commit"
   check fwChainComplete false     "B208 ...but the chain is not complete, so /goal cannot read the PR as covering the whole plan"
 
