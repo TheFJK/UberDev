@@ -206,6 +206,33 @@ elif grep -q "implementBudget=\"\${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-$FLEET_
 else
   fail "S22b no implementBudget key in the solve-fleet args envelope"
 fi
+# G31 — FLEET_DESIGN_BASE, the OTHER half of the CB1 term
+# `designCount * (BASE + IMPLEMENT_AGENT_BUDGET - 1)`, read out of the script for
+# exactly the reason FLEET_BUDGET is. Three rows retyped this base as a literal:
+# G16 (/goal's two cost copies), G18 (the two doc copies) and Run S's projection
+# inside the behavioural fixture. The base moves by one for every rung the design
+# chain gains, so a literal in three places is the #370 "one contract, N
+# uncompared copies" shape — a missed retyping reds a row for the right reason
+# with a misleading message, and the reviewer has to grep to find out which copy
+# drifted. The vacuity guard is part of the idiom (S22b above): an extraction
+# that silently yielded empty would make every dependent row pass on nothing.
+# The hit count is the second half of that guard — two differing terms in the
+# script would make the extracted value arbitrary rather than merely absent.
+FLEET_DESIGN_BASE="$(sed -n 's/.*designCount \* (\([0-9][0-9]*\) + IMPLEMENT_AGENT_BUDGET.*/\1/p' "$WORKFLOW")"
+FLEET_DESIGN_BASE_HITS="$(grep -cE 'designCount \* \([0-9]+ \+ IMPLEMENT_AGENT_BUDGET' "$WORKFLOW" || true)"
+if [ -z "$FLEET_DESIGN_BASE" ]; then
+  fail "G31 could not read the per-design-issue agent base out of the fleet script — G16, G18 and the fixture's projection would all derive from nothing"
+elif [ "${FLEET_DESIGN_BASE_HITS:-0}" != "1" ]; then
+  # An AMBIGUOUS base is worse than an absent one, and silently so: two terms
+  # make this a two-line value, and grep reads a multi-line pattern as OR-ed
+  # alternatives — a one-digit alternative matches almost any line of the file
+  # a dependent row is searching, turning G16 into a false PASS. Clear it, so
+  # every dependent row takes its own vacuity arm instead of matching noise.
+  FLEET_DESIGN_BASE=""
+  fail "G31 the designCount * (N + IMPLEMENT_AGENT_BUDGET …) term resolves ${FLEET_DESIGN_BASE_HITS:-0} times, not once — the extracted base is arbitrary"
+else
+  pass "G31 the per-design-issue agent base reads out of the fleet script as exactly one term (base $FLEET_DESIGN_BASE)"
+fi
 GOAL_PHASE0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
 if [ ! -r "$GOAL_PHASE0" ]; then
   fail "S22c lib/goal-phase0.sh is missing or unreadable: $GOAL_PHASE0"
@@ -362,12 +389,18 @@ GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
 if [ ! -r "$GOAL_WF" ]; then
   fail "G16 the goal-pipeline workflow script is missing or unreadable: $GOAL_WF"
 else
-  # FLEET_BUDGET is extracted ONCE, beside S22b above — this row reuses it so the
-  # launcher default and /goal's cost copies cannot be pinned to two numbers.
-  if [ -z "$FLEET_BUDGET" ]; then
-    fail "G16 could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the cross-file cost check is vacuous"
+  # FLEET_BUDGET and FLEET_DESIGN_BASE are extracted ONCE, beside S22b/G31 above
+  # — this row reuses both so the launcher default, /goal's cost copies and the
+  # fleet's own constants cannot be pinned to two different numbers.
+  #
+  # NOTE the off-by-one, which a blind retyping gets wrong: the FLEET's own term
+  # is `base + budget - 1` (the issue's own solver is already counted in
+  # intakeIssues.length), while /goal's per-issue cost — the family this row
+  # compares — is `base + budget`, with no `- 1`.
+  if [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_DESIGN_BASE" ]; then
+    fail "G16 could not read IMPLEMENT_AGENT_BUDGET and the design base out of the fleet script — the cross-file cost check is vacuous"
   else
-    EXPECTED_COST=$(( 6 + FLEET_BUDGET ))
+    EXPECTED_COST=$(( FLEET_DESIGN_BASE + FLEET_BUDGET ))
     GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
     G16_OK=1
     # Copy 1 — the PRE-dispatch projection. No envelope exists yet, so the
@@ -379,13 +412,13 @@ else
     # than threefold and CB1, the only named halt, then never fires. The clamp
     # bounds and default are read back out of the fleet's own constant, so the
     # two files still cannot drift apart.
-    grep -q "6 + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    grep -q "$FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
     [ "$G16_OK" = "1" ] \
-      && pass "G16 /goal's two per-issue cost copies both track the fleet's 6 + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
+      && pass "G16 /goal's two per-issue cost copies both track the fleet's $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
+      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a $FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
   fi
 fi
 
@@ -475,14 +508,19 @@ fi
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
 # of the formula move too, or the next reader trusts the stale one.
+#
+# The design base in the doc needle is BUILT from FLEET_DESIGN_BASE (G31) rather
+# than retyped: this row is the third copy of that number and the one furthest
+# from the script. An empty extraction builds a needle that cannot match, so the
+# vacuity failure lands here as a FAIL — never as a silent match.
 RFC0015="$REPO_ROOT/docs/rfc/0015-workflow-native-dispatch.md"
 if [ ! -r "$RFC0015" ]; then
   # Never let a missing file read as "the stale formula is absent" — that is a
   # vacuous green, and this repo has shipped one before.
   fail "G18 cannot read $RFC0015 — the doc half of the assertion is unevaluable"
 elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
-  && grep -q '2 + issues + (6 + implementBudget' "$SKILL" \
-  && grep -q '2 + issues + (6 + implementBudget' "$RFC0015" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$SKILL" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$RFC0015" \
   && ! grep -q '1 + issues + 6' "$SKILL" \
   && ! grep -q '1 + issues + 6' "$RFC0015"; then
   # The per-design-tier term is #508's per-task chain, not the flat 6 this row
@@ -493,7 +531,7 @@ elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
   # silently reverted.
   pass "G18 the CB1 projection counts both batched relays and the per-task implement chain, in code and in both docs"
 else
-  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (6 + implementBudget - 1) x design-tier')"
+  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (${FLEET_DESIGN_BASE:-<unreadable>} + implementBudget - 1) x design-tier')"
 fi
 
 # G7b (#516) — the fleet's own baseline must not be attributed to a file this repo
@@ -608,6 +646,18 @@ const vm = require("vm");
 const src = fs.readFileSync(process.argv[3], "utf8");
 const meta = h.extractMeta(src).meta;
 const RD = "/r/.uberdev/run/RID";
+
+// readInt — the fixture's own reading of a scalar out of the fleet script, used
+// by Run S so its CB1 projection derives from the script instead of retyping
+// its constants. A non-match THROWS by name: a silent NaN would make the
+// projection meaningless and B62/B63 would then pin nothing. This is the second
+// of two independent extraction paths over the same constants (the shell's
+// `sed` beside S22b/G31 is the first); G32 compares them.
+function readInt(re, what) {
+  const m = re.exec(src);
+  if (!m) throw new Error("could not read " + what + " out of the fleet script");
+  return parseInt(m[1], 10);
+}
 
 function buildArgs(extra, cfgExtra) {
   const cfg = Object.assign({
@@ -1181,8 +1231,16 @@ function probedNums(record) {
 
   // Run S — CB1 arithmetic is PINNED, not merely "it trips at 2". One design
   // issue projects 2 batched relays (intake + PR-claim verification, #515)
-  // + 2 solvers + (6 design + 24 implement - 1) for the per-task chain (#508).
-  const PROJ = 2 + 2 + 1 * (6 + 24 - 1);   // 33
+  // + 2 solvers + (design base + implement budget - 1) for the per-task chain
+  // (#508). Both scalars are READ OUT of the script; only the SHAPE of the
+  // arithmetic is retyped here, and that shape is what B62/B63 pin. Retyping
+  // the scalars too would mean hand-editing a literal nothing derives every
+  // time the design chain gains a rung — the #370 shape G31 exists to close.
+  const DESIGN_BASE = readInt(/designCount \* \((\d+) \+ IMPLEMENT_AGENT_BUDGET - 1\)/, "the design base");
+  const FLEET_BUDGET_JS = readInt(/IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, (\d+)\)/, "the implement budget");
+  const PROJ = 2 + 2 + 1 * (DESIGN_BASE + FLEET_BUDGET_JS - 1);
+  out.sDesignBase = DESIGN_BASE;
+  out.sBudget = FLEET_BUDGET_JS;
   const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
   out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
   const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
@@ -2135,6 +2193,21 @@ else
 
   check sAtCeiling false     "B62 CB1 does NOT trip at exactly the projected agent count"
   check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
+
+  # G32 — B62/B63 above only bite while Run S's projection still tracks the
+  # script. Two INDEPENDENT extraction paths now read the same two constants —
+  # the shell `sed` beside S22b/G31 and the fixture's JS `RegExp` — so if either
+  # rots (a reformatted term, a renamed constant) this row reds by name instead
+  # of the projection silently drifting to a stale number and B62/B63 passing on
+  # arithmetic that no longer describes the script. Deliberately NOT a `check`:
+  # the agreement is over two fields at once and splitting it into two rows
+  # would report one half of a single fact twice.
+  G32_JS="$(printf '%s' "$FIXTURE_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.sDesignBase)+":"+String(o.sBudget));}catch(e){process.stdout.write("PARSE_ERROR:"+e.message);}})' 2>/dev/null)"
+  if [ "$G32_JS" = "${FLEET_DESIGN_BASE}:${FLEET_BUDGET}" ]; then
+    pass "G32 the fixture's own reading of the design base and implement budget agrees with the shell's ($G32_JS)"
+  else
+    fail "G32 the fixture and the shell disagree about the fleet's constants (shell read ${FLEET_DESIGN_BASE}:${FLEET_BUDGET}, fixture read $G32_JS)"
+  fi
 
   check tFallback true       "B64a a design tier with no usable plan falls back to the single solver"
   check tNoImpl true         "B64b no task agent is dispatched without a plan (no plan, no tasks, no gate)"
