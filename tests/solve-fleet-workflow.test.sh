@@ -2021,11 +2021,75 @@ function probedNums(record) {
     && resPT.auditEvents.some(function (e) { return e.event === "pr_proof_not_run"; }));
   out.ptPrNums = resPT ? resPT.prsOpened.join(",") : null;
 
+  // --- Runs X1/X2: the two cannot-speak arms #563's closing Note names ------
+  // The issue observes that verifyClaims()'s own catch carries a comment
+  // claiming to be the ONLY path that can leave a live claim with no proof
+  // class — main()'s outer catch (Runs TR/PT above) being the second. That
+  // comment is only worth anything if the arms it speaks for are themselves
+  // pinned, and two of them were not. Run O covers the null relay, Run R the
+  // unusable body and Run V the unusable slug (B141) — but the relay THROWING
+  // and the budget ceiling skipping it were both reachable and named by no
+  // test at all.
+  //
+  // Unlike TR/PT these are NOT red-first rows — they pass on HEAD and on a tree
+  // with the outer-catch recovery removed, because neither run ever enters
+  // main()'s catch. They are coverage of two live arms, so that deleting either
+  // one reds a row instead of silently republishing self-reports.
+  //
+  // The two are each other's contrast, and the pair is why both composites
+  // carry probedNums(): it is null when no relay was dispatched at all and the
+  // requested numbers when one was, which is the ONE observable separating
+  // "the pass never got to ask" from "the pass asked and the asking blew up".
+  // verification.probed cannot carry that distinction on its own — it is set
+  // from the request set immediately BEFORE the relay call, so a throw inside
+  // the relay still publishes probed=2.
+
+  // Run X1 — the relay agent itself throws. The harness resolves a function
+  // entry in agentReturns by CALLING it, so throwing from there models the
+  // relay dying mid-flight (a schema rejection, a transport fault) rather than
+  // returning an unusable body, which is Run R's arm. The throw text must ride
+  // in the audit row: `pr_proof_threw` with a swallowed reason would say a
+  // failure happened while destroying the only description of it.
+  const x1Returns = Object.assign({}, trivialReturns());
+  x1Returns["verify-prs"] = function () { throw new Error("verify-prs stub threw"); };
+  const recX1 = await run(buildArgs(), { agentReturns: x1Returns });
+  const resX1 = resultOf(recX1);
+  const x1Threw = resX1
+    ? resX1.auditEvents.filter(function (e) { return e.event === "pr_proof_threw"; })[0] : null;
+  // One composite so the failure message names WHICH half of the arm broke,
+  // rather than the "expected true, got false" a folded boolean would print.
+  out.x1Arm = resX1 ? [
+    x1Threw
+      ? (String(x1Threw.reason).indexOf("verify-prs stub threw") >= 0 ? "reason_kept" : "reason_lost")
+      : "no_pr_proof_threw_row",
+    String(probedNums(recX1)),
+    resX1.verification.probed,
+    resX1.verification.unverified,
+    resX1.prsOpened.join(","),
+  ].join("/") : "no_result";
+
+  // Run X2 — the token budget is gone before the relay. budgetTotal 3 is exact
+  // by construction: intake plus the two solvers spend it to zero, so the run
+  // completes normally and the ceiling lands on the relay alone. Nothing throws
+  // here: budgetExhausted() is checked BEFORE the call, which is why probedNums
+  // is null in this run and "901,902" in X1.
+  const recX2 = await run(buildArgs(), { agentReturns: trivialReturns(), budgetTotal: 3 });
+  const resX2 = resultOf(recX2);
+  const x2Skip = resX2
+    ? resX2.auditEvents.filter(function (e) { return e.event === "pr_proof_skipped"; })[0] : null;
+  out.x2Arm = resX2 ? [
+    x2Skip ? String(x2Skip.reason) : "no_pr_proof_skipped_row",
+    String(probedNums(recX2)),
+    resX2.verification.probed,
+    resX2.verification.unverified,
+    resX2.prsOpened.join(","),
+  ].join("/") : "no_result";
+
   // Every run added above must also be harness-clean — an undeclared opts.phase
   // on a rung these runs are the first to reach shows up here and nowhere else.
   // ENUMERATED, never derived: a new run is NOT covered until it is named here.
   out.newViolations = [recW, recX, recY, recZ, recZ4, recCF, recDS, recDA, recZC, recZD, recFW,
-                       recTR, recPT]
+                       recTR, recPT, recX1, recX2]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
 
   process.stdout.write(JSON.stringify(out));
@@ -2427,6 +2491,16 @@ else
   check ptObservable true         "B261 an intake-stage throw still emits a WORKFLOW_RESULT (DR-8: the run stays observable)"
   check ptBothEvents true         "B262 ...and audits BOTH run_threw and pr_proof_not_run — the row keys off verification never running, not off having something to downgrade"
   check ptPrNums '""'             "B263 ...with no PR claim to retain"
+
+  # --- #563: the two cannot-speak arms the issue's closing Note names --------
+  # Siblings of Run V's no_repo_slug (B141), and NOT red-first: both pass on
+  # HEAD and on a tree with main()'s recovery block removed, because neither
+  # enters that catch. They exist so the arms cannot be deleted in silence.
+  # Each row is one slash-joined composite — audit reason / numbers the relay
+  # was actually asked about (null = never dispatched) / probed / unverified /
+  # retained claims — so a break names its own half instead of printing "false".
+  check x1Arm '"reason_kept/901,902/2/2/901,902"' "B264 a proof relay that THROWS is audited as pr_proof_threw carrying the throw text, probed counts the dispatch that was made, and both claims are retained as UNVERIFIED rather than dropped or downgraded"
+  check x2Arm '"budget_exhausted/null/0/2/901,902"' "B265 a relay skipped by the token ceiling audits pr_proof_skipped reason=budget_exhausted, dispatches nothing (probed stays 0), and still classes both retained claims UNVERIFIED"
 
   check newViolations 0           "B169 zero harness violations across every run added for #561, #562 and #563"
 fi
