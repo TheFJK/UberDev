@@ -161,6 +161,7 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
   designedIssues, researchArtifacts,
   results: [ {issue, status, branch, prNumber, prUrl,
   commitCount, testsRunClaimed, summary, blocker,
+  escalatedTier, escalationReason,
   prProof, provenCommitCount, claimedStatus, claimedPrNumber, claimedPrUrl,
   chainComplete, partialDelivery: {tasksTotal, blocked, skipped, unreviewed},
   tasks: [{id, status, reviewVerdict, fixRounds, commitCount, claimedStatus}]} ],
@@ -168,7 +169,7 @@ The script logs `WORKFLOW_RESULT <json>` and returns:
   counts: {prOpened, pushedNoPr, committedNotPushed, noChangesNeeded, refused, failed},
   tasksTotal, tasksApproved, tasksBlocked, tasksUnreviewed,
   verification: {probed, confirmed, disproven, unverified, notApplicable, relayRc},
-  cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
+  tierEscalations, cb1Tripped, cb2Tripped, nullsByPhase, auditEvents }
 ```
 
 `status` ∈ `PR_OPENED | PUSHED_NO_PR | COMMITTED_NOT_PUSHED | NO_CHANGES_NEEDED
@@ -204,6 +205,62 @@ declared above. Both appear only on a record the per-task chain delivered, and
 `partialDelivery` only when the chain fell short: its presence IS the signal.
 `/goal` ingests `prsOpened` — bare numbers, carrying neither field — so a PR
 opened over an unfinished chain is distinguishable only here.
+
+## Mid-run tier escalation (#532)
+
+Triage classifies an issue from its **body**, before anyone has read the code, so
+a `small` issue that turns out to need a schema migration is simply mis-triaged.
+A solver may report that discovery on its return — `escalatedTier` plus an
+`escalationReason` — and the script records it.
+
+**An escalation changes NO ceremony in this run.** The fleet is already
+dispatched: raising the tier mid-flight would spend research and design agents
+CB1 never projected, mid-wave, against a committed budget. `DESIGN_TIERS`, the
+design gate and CB1's projection are all untouched by design. That the escalated
+run gets no in-run design chain is a deliberate limitation, not an oversight, and
+closing it is deferred to a follow-up rather than attempted here.
+
+What this channel produces is the **run's own record** of the mis-triage — a
+counted audit event an operator can grep, and the field on `results[]`. The tier
+is actually raised on the **next** classification, and that path runs through the
+issue rather than through this JSON: `lib/solve_triage.py` reads an
+`uberdev:tier-<tier>` label on the issue and raises `raw_tier`, recording
+`escalation-label:<tier>` in `matched_rules`. A solver that escalates is expected
+to write that label; this return is what makes the same claim visible in the run
+result, so an escalation reported here and never labelled on the issue is
+distinguishable from one that was never reported at all.
+
+The ratchet is **one-way**: the only accepted move is strictly *up* the ordered
+vocabulary `trivial < small < medium < large`. A solver cannot talk an issue down
+into a cheaper ceremony — and `trivial` is therefore never an escalation target,
+matching the same rule on the triage side.
+
+`escalatedTier` is deliberately **not** enum-constrained on the wire, for the
+same reason `prProof` carries observations and no verdict: an enum would refuse
+the whole structured return over an illegal value on an advisory field, losing
+the delivery record — branch, PR number, commit count — of an issue that was
+otherwise solved. The vocabulary check lives in the script instead, where a
+refusal costs one audit row and nothing else.
+
+| Event | When |
+|---|---|
+| `tier_escalated` | accepted — carries `from`, `to` and the sanitized `reason`; `tierEscalations` counts these and only these |
+| `tier_escalation_rejected` | refused — carries `from`, the `attempted` value, the sanitized `reason`, and a `rejection` verdict |
+
+`rejection` is a **closed machine verdict** — the script's word, never the
+agent's — and is always exactly one of:
+
+- `unknown-tier` — the value is not a member of the tier vocabulary
+- `not-an-upgrade` — the same tier or a lower one; this is the ratchet itself
+- `no-reason` — no usable explanation for the next classification to act on
+
+Agent text reaches `reason` and `attempted` only, both sanitized to a single
+bounded line, because a raw newline in a log line forges log lines. On any
+rejection the published record's `escalatedTier` and `escalationReason` are
+blanked — the script said no, so `results` may not carry a yes — and the refused
+value survives in the audit event. A return whose `escalatedTier` is absent, not
+a string, or blank emits neither event: that is not a refused escalation, it is
+no escalation reported.
 
 ## Claim verification (#515)
 

@@ -171,7 +171,13 @@ const issuesFromArgs = String(CFG.issues || "")
     return /^[0-9]+$/.test(s);
   });
 
-const TIERS = { trivial: 1, small: 1, medium: 1, large: 1 };
+// ORDERED, cheapest first. The order is load bearing (#532): the mid-run
+// escalation channel below compares two tiers, and "is this an upgrade" is a
+// question a membership map cannot answer. Spelled ONCE — TIERS is derived,
+// never written out a second time, because two hand-kept copies of one
+// vocabulary drift the moment a tier is added to one of them.
+const TIER_ORDER = ["trivial", "small", "medium", "large"];
+const TIERS = TIER_ORDER.reduce(function (m, t) { m[t] = 1; return m; }, {});
 // Tiers that get the script-orchestrated design phases. `large` is an alias
 // the triage table may emit; `--full` normalises to medium in the launcher.
 const DESIGN_TIERS = { medium: 1, large: 1 };
@@ -336,6 +342,35 @@ function sanitizeFindings(list) {
   return { items: items, dropped: dropped, truncated: truncated };
 }
 
+// #532 — the second piece of agent text this script stores, and the first that
+// reaches a log LINE. Same cap discipline as the findings above: S.solve puts no
+// length on `escalationReason`, so the bound lives here.
+const ESCALATION_REASON_MAX_CHARS = 300;
+
+// Returns a single-line, control-character-free, bounded string — "" for
+// anything unusable, which every caller treats as "no reason given".
+//
+// The control-character class is what makes this more than a length clip. This
+// text is written into an audit event AND into a log() line, and a raw newline
+// in a log line FORGES LOG LINES: an agent could emit its own
+// "WORKFLOW_RESULT {...}" or a second plausible audit line that an operator —
+// or a downstream grep — reads as the script's own words. Every C0 control plus
+// DEL becomes a space before anything else happens, so newline handling is a
+// consequence of the rule rather than a special case that could be forgotten.
+//
+// The class is written as ESCAPES, never as literal control bytes: a raw
+// control character in source is invisible in review and a CRLF checkout is
+// free to rewrite one.
+function sanitizeEscalationReason(s) {
+  if (typeof s !== "string" || !/\S/.test(s)) return "";
+  var out = s.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  if (!out) return "";
+  if (out.length > ESCALATION_REASON_MAX_CHARS) {
+    out = out.slice(0, ESCALATION_REASON_MAX_CHARS) + " [truncated]";
+  }
+  return out;
+}
+
 // envCell() collapses newlines to spaces, so the entries are NUMBERED — the
 // numbering, not the line break, is what keeps them separable once framed. The
 // source tag is script-derived (a digit-validated issue number), so it cannot
@@ -451,6 +486,20 @@ const S = {
       // flags also answer for different agents and different checkouts, so the
       // distinct name is what the field actually means.
       deliveryWorkspaceReady: { type: "boolean", description: "delivery rung only: true only after cd into the shared worktree succeeded" },
+      // #532 — THE MID-RUN RETURN CHANNEL for the one-way tier ratchet. A solver
+      // that discovers hidden complexity mid-run cannot re-classify itself; it
+      // says so here, the script records it, and the NEXT classification of the
+      // issue is what acts on the record.
+      //
+      // DELIBERATELY NOT ENUM-CONSTRAINED, for the same reason S.prProof carries
+      // observations and no verdict. An enum here refuses the whole
+      // StructuredOutput over an illegal value on an ADVISORY field — losing the
+      // delivery record (branch, PR number, commit count) of an issue that was
+      // otherwise solved, and dropping a real pull request out of /goal's queue.
+      // The vocabulary check therefore lives in applyEscalation(), where a
+      // refusal costs one audit row and nothing else.
+      escalatedTier: { type: "string", description: "optional: a HIGHER tier than the one this run was dispatched at, if the work turned out to need it (trivial|small|medium|large). Recorded for the next classification; this run's ceremony does not change." },
+      escalationReason: { type: "string", description: "required whenever escalatedTier is set: what you found that the triage rules could not see. An unexplained escalation is not recorded." },
       summary: { type: "string", description: "<=400 chars, what was changed and why" },
       blocker: { type: "string", description: "why it stopped, when status is REFUSED or FAILED" },
     },
@@ -784,7 +833,11 @@ function solvePrompt(rec, planPath) {
     + 'or ""), prNumber (the integer PR number parsed from the gh URL, or 0), prUrl (or ""), commitCount '
     + "(integer commits you made), testsRunClaimed (true only if you actually executed tests — this is "
     + "recorded as YOUR CLAIM and is not verified; do not report it true unless you ran them), summary "
-    + "(<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\").";
+    + "(<=400 chars), blocker (why you stopped, when REFUSED or FAILED; else \"\"), escalatedTier (the "
+    + "one-way ratchet: the name of the HIGHER tier this work turned out to need, reported only if it "
+    + "proved materially larger than the `" + tier + "` tier you were dispatched at; else \"\") and "
+    + "escalationReason (one line naming what you found that the triage rules could not see — required "
+    + "whenever escalatedTier is set, because an escalation with no reason is discarded).";
 }
 
 // ---------------- the per-task implement chain (issue #508) ----------------
@@ -1012,6 +1065,7 @@ let researchArtifacts = 0;
 let designedIssues = 0;
 let cb1Tripped = false;   // agent-ceiling
 let cb2Tripped = false;   // budget floor reached before the batch finished
+let tierEscalations = 0;  // #532: mid-run mis-triage reports ACCEPTED by the ratchet
 let prProbed = 0;         // #515: PR numbers actually sent to the proof relay
 // #515: the proof relay's rc. `null` is TWO facts, not one — the assignment in
 // verifyClaims() stores null both when the relay never ran and when it ran and
@@ -1095,6 +1149,10 @@ function finalize() {
       notApplicable: countProof("NOT_APPLICABLE"),
       relayRc: prRelayRc,
     },
+    // #532 — TOP LEVEL, deliberately not inside `counts`: `counts` is a
+    // histogram over results[].status, and an escalation is not a status. It is
+    // a count of ACCEPTED escalations only; every refusal is in auditEvents.
+    tierEscalations: tierEscalations,
     cb1Tripped: cb1Tripped,
     cb2Tripped: cb2Tripped,
     nullsByPhase: nullsByPhase,
@@ -1173,6 +1231,93 @@ function failedIssue(issue, blocker, commitCount, tasks) {
 // byte-identical to every site this replaced, non-Error throws included.
 function errText(e) {
   return (e && e.message) ? e.message : String(e);
+}
+
+// #532 — THE ONE-WAY TIER RATCHET, applied to one solver return.
+//
+// The problem it closes: triage classifies an issue from its BODY, before
+// anyone has read the code. A `small` issue that turns out to need a schema
+// migration is mis-triaged, and today that discovery dies with the run — the
+// next classification reads the same body and reaches the same wrong tier.
+//
+// The reason the solver may not simply re-classify ITSELF: this run's fleet is
+// already dispatched. Raising the tier mid-flight would mean research and
+// design agents CB1 never projected, spent mid-wave against a budget already
+// committed, on top of the agents the run has spent. So the escalation is
+// RECORDED and nothing else: this run finishes exactly as it was dispatched.
+//
+// What actually RAISES the tier is the next classification, and that path runs
+// through the issue rather than through this JSON — lib/solve_triage.py reads an
+// `uberdev:tier-<tier>` label and raises raw_tier. This channel is the run's own
+// account of the same claim, so a solver that reported an escalation and never
+// labelled the issue is distinguishable from one that reported nothing.
+//
+// ONE-WAY by construction. The only accepted move is strictly UP the ordered
+// vocabulary — a solver cannot talk an issue down into a cheaper ceremony,
+// which is the label-shopping shape the ratchet exists to make impossible.
+//
+// Every refusal is AUDITED rather than swallowed, and the refused value is
+// preserved in the audit row while being blanked off the published record: the
+// script said no, so `results` must not carry a yes, but an operator still gets
+// to see what was attempted. `rejection` is the closed MACHINE verdict and
+// `reason` is the only key agent text ever reaches — a solver whose reason is
+// spelled exactly like a verdict must not be able to forge one.
+const ESCALATION_REJECTIONS = Object.freeze({
+  UNKNOWN_TIER: "unknown-tier",       // not a member of TIER_ORDER
+  NOT_AN_UPGRADE: "not-an-upgrade",   // same tier or lower — the ratchet itself
+  NO_REASON: "no-reason",             // no usable explanation to act on later
+});
+
+function rejectEscalation(rec, out, verdict, attempted, reason) {
+  auditEvents.push({
+    event: "tier_escalation_rejected", issue: rec.issue, from: rec.tier,
+    attempted: attempted, rejection: verdict, reason: reason, ts: nowIso,
+  });
+  out.escalatedTier = "";
+  out.escalationReason = "";
+}
+
+function applyEscalation(rec, out) {
+  // Absent, non-string or BLANK is "no escalation reported", and blank is tested
+  // the same way the sanitizer tests it — `!/\S/` rather than `=== ""`. A tier of
+  // three spaces is not a claim about anything: refusing it as `unknown-tier`
+  // would file an audit row whose `attempted` sanitizes to the empty string, an
+  // operator-visible record of a move nobody made.
+  if (!out || typeof out.escalatedTier !== "string" || !/\S/.test(out.escalatedTier)) return;
+  // `attempted` is agent text on the wire exactly like the reason is, so it goes
+  // through the same sanitizer before it is stored or logged.
+  const attempted = sanitizeEscalationReason(out.escalatedTier);
+  const reason = sanitizeEscalationReason(out.escalationReason);
+  if (TIER_ORDER.indexOf(out.escalatedTier) < 0) {
+    rejectEscalation(rec, out, ESCALATION_REJECTIONS.UNKNOWN_TIER, attempted, reason);
+    return;
+  }
+  // `rec.tier` is guaranteed to be a TIER_ORDER member: the intake cross-check
+  // drops any manifest row whose tier is not one (`TIERS[r.tier] === 1`), and
+  // both call sites below are reached only from that filtered set. If that
+  // invariant ever broke, indexOf returns -1 and every real tier reads as an
+  // upgrade from it — which is the safe direction, and the run is already
+  // reportable through intake_manifest_mismatch.
+  if (TIER_ORDER.indexOf(out.escalatedTier) <= TIER_ORDER.indexOf(rec.tier)) {
+    rejectEscalation(rec, out, ESCALATION_REJECTIONS.NOT_AN_UPGRADE, attempted, reason);
+    return;
+  }
+  if (reason === "") {
+    rejectEscalation(rec, out, ESCALATION_REJECTIONS.NO_REASON, attempted, reason);
+    return;
+  }
+  tierEscalations += 1;
+  auditEvents.push({
+    event: "tier_escalated", issue: rec.issue, from: rec.tier, to: out.escalatedTier,
+    reason: reason, ts: nowIso,
+  });
+  // The published record carries the SANITIZED text, not the raw wire value:
+  // one reason, one spelling, so the audit row and `results` cannot disagree
+  // about what the solver said.
+  out.escalationReason = reason;
+  log("#" + rec.issue + ": the solver reports this issue was mis-triaged — tier escalated "
+    + rec.tier + " -> " + out.escalatedTier + " (" + reason + "). RECORDED ONLY: this run's "
+    + "ceremony is unchanged, and the next classification of the issue is what acts on it.");
 }
 
 // The sequential per-task implement chain (issue #508).
@@ -1630,6 +1775,9 @@ async function runTaskChain(rec, planPath) {
   // The agent reports its own issue number; pin it to the manifest record so a
   // confused return can never be attributed to the wrong issue.
   out.issue = rec.issue;
+  // #532 — the delivery rung speaks for the whole chain, so a mis-triage the
+  // chain uncovered is reported here. Recorded only; the chain has already run.
+  applyEscalation(rec, out);
   out.tasks = tasks;
   // Script-derived, so a delivery agent cannot report its way out of it: a PR
   // opened over an unfinished chain must be distinguishable from one opened
@@ -2118,6 +2266,9 @@ async function solveOne(rec) {
     // The agent reports its own issue number; pin it to the manifest record so
     // a confused return can never be attributed to the wrong issue.
     out.issue = rec.issue;
+    // #532 — the single-solver path: the same mid-run report, from the one agent
+    // that saw the whole issue. Recorded only; nothing about this run changes.
+    applyEscalation(rec, out);
     return out;
   } catch (e) {
     auditEvents.push({

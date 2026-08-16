@@ -9,6 +9,13 @@ esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TOOL="$ROOT/plugins/uberdev/lib/solve_triage.py"
 PASS=0
+# `set -u` is on and the two `FAIL=$((FAIL + 1))` arms below were the only
+# mentions of this counter -- unset, they crashed the run instead of reporting
+# the failure they exist to report. Initialising it alone would be WORSE than the
+# crash: nothing read the counter, so a real failure would print its line and
+# then exit 0. Both halves are needed -- initialise here, and gate the exit code
+# on it at the bottom of the file. New cases use PASS and never that idiom.
+FAIL=0
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 parse() { python3 -I "$TOOL" parse-cli "$@"; }
 expect_ok() {
@@ -252,4 +259,47 @@ NEW_ROOT="$(comm -13 <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | tail
 [ ! -e /tmp/solve-validate-77.json ]
 PASS=$((PASS+1))
 
+# X1 (#532): an ESCALATED decision survives the routing-context validator.
+#
+# The producer and the validator are independent copies of one vocabulary:
+# solve_triage.py emits `matched_rules`, lib/agent-dispatch.sh checks every entry
+# against a closed `allowed_rule` alternation. A token emitted but not allowed
+# makes uberdev_agent_context_create fail with route_context_create_failed, which
+# does not decline one issue -- it aborts the ENTIRE batch, so every sibling in
+# the same /solve, /turbo or /ubergoal run dies with it. `escalation-label:` is a
+# NEW member of that vocabulary, so it needs the end-to-end assertion here and
+# not only the containment check in tests/triage-rule-vocabulary.py: this is the
+# call the launcher actually makes.
+ESC_DECISION="$(python3 -I "$TOOL" classify --snapshot "$ROOT/tests/fixtures/solve-routing/escalated-trivial.json")"
+ESC_FINAL="$(python3 -I "$TOOL" finalize --decision "$ESC_DECISION" --clamped medium)"
+case "$ESC_FINAL" in
+  *escalation-label:medium*) ;;
+  *) echo "FAIL: escalated fixture carried no escalation-label token: $ESC_FINAL" >&2; exit 1 ;;
+esac
+ESC_RUN="$TMP/esc-run"; mkdir -p "$ESC_RUN"
+(
+  export CLAUDE_PLUGIN_ROOT="$ROOT/plugins/uberdev" UBERDEV_TMPDIR="$ESC_RUN"
+  export UBERDEV_RESOLVED_BACKEND=background
+  # shellcheck source=/dev/null
+  . "$ROOT/plugins/uberdev/lib/dispatch.sh"
+  # task_tier must equal the decision's effective_tier/tier and risk_signals must
+  # match exactly -- agent-dispatch.sh:421 cross-checks all three.
+  uberdev_dispatch_prepare_root 6 medium '[]' solve "$ESC_FINAL"
+) >"$TMP/escalated-prepared.json"
+python3 - "$TMP/escalated-prepared.json" <<'PY'
+import json,pathlib,sys
+r=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert r["issue_num"]==6 and r["task_tier"]=="medium", r
+assert pathlib.Path(r["context_file"]).is_file() and len(r["context_sha256"])==64, r
+triage=json.loads(pathlib.Path(r["context_file"]).read_text())["metadata"]["triage_decision"]
+# Verbatim round-trip: the validator neither rejected nor rewrote the token.
+assert "escalation-label:medium" in triage["matched_rules"], triage
+assert triage["raw_tier"]=="medium" and triage["tier"]=="medium", triage
+PY
+PASS=$((PASS+1))
+
+if [ "$FAIL" -ne 0 ]; then
+  echo "solve-routing: $FAIL failed, $PASS passed" >&2
+  exit 1
+fi
 echo "solve-routing: $PASS passed"

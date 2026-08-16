@@ -187,6 +187,7 @@
     "agents/type-design-analyzer.md",
     "commands/review-pr.md",
     "commands/simplify.md",
+    "lib/agent-dispatch.sh",
     "lib/child-dispatch.sh",
     "lib/code_fixer_contract.py",
     "lib/command-workspace.py",
