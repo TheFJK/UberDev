@@ -1109,13 +1109,22 @@ uncompared one.
 | `skills/using-git-worktrees` | 206 | 206 | 207 |
 | `skills/using-uberdev` | 174 | 174 | 176 |
 | `skills/verification-before-completion` | 49 | 49 | 50 |
-| `skills/write-plan` | 123 | 123 | 128 |
-| `skills/writing-skills` | 367 | 367 | 380 |
+| `skills/write-plan` | 123 | 123 | 125 |
+| `skills/writing-skills` | 367 | 367 | 373 |
 
 The two rows the issue reports are settled **by measurement**, not by editing a
 frozen cell: `systematic-debugging` reads 304 and `test-driven-development` 64,
 both at `b36e0829…`, while §4.2 keeps 83 and 72 at `v6.2.0`. Different bases,
 both labelled, correctly not compared.
+
+`write-plan` (125) and `writing-skills` (373) were **re-measured on 2026-08-16**
+against the same upstream rev. Their first figures — 128 and 380 — were taken on
+a tree that did not yet carry the two adopted 6.3.0 hunks (the plan-header
+`Spec:` pointer and the `render-graphs.js` `execFileSync` change). Those hunks
+and this measurement landed in the same stack, so each figure was correct for
+the tree it was taken on and neither was correct for the combined one. The
+upstream side did not move; only the local bytes did, and the register's
+`measured_diff_basis` records the `uberdev_rev` the new numbers were taken at.
 
 The table carries **no stance column**, on purpose. A stance is a decision, not a
 measurement, and nothing in this repository reconciles a stance cell in this
