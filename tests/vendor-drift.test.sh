@@ -1405,11 +1405,18 @@ moved_sha = hashlib.sha1(
 moved_sha2 = hashlib.sha1(
     ("moved-again|%s|%s" % (lead_slug, lead_label)).encode("utf-8"),
     usedforsecurity=False).hexdigest()
-if len({moved_sha, moved_sha2, recorded_commit}) != 3:
+if len({moved_sha[:12], moved_sha2[:12], recorded_commit[:12]}) != 3:
     raise SystemExit("the derived 'published elsewhere' commits collide with "
-                     "each other or with the recorded one — D-REL9 would "
-                     "assert no disagreement and D-REL12's re-tag comparison "
-                     "would compare a table with itself")
+                     "each other or with the recorded one IN THE FIRST 12 HEX "
+                     "— the report renders `published_commit[:12]` "
+                     "(vendor-drift.py's `moved` finding), so full-40 "
+                     "distinctness is not enough: D-REL9 would assert no "
+                     "disagreement because both of the commits it names would "
+                     "render as one token, and D-REL12's re-tag pair would "
+                     "render one `upstream publishes ... at ...` line for "
+                     "both runs — the only datum that moves between them — "
+                     "so its re-tag comparison would be comparing a body "
+                     "with itself")
 
 
 def retagged(peel_sha):
