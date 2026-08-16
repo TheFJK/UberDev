@@ -2330,12 +2330,112 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# T16.9 — the completeness flag has no members to join, so it gets the symbol
-# pair instead: named in the doc, and resolving in the script it describes.
-assert_grep "$SOLVE_FLEET_SKILL" 'chainComplete' \
-  "T16.9 SKILL.md's return value declares the chainComplete flag"
-assert_grep "$SOLVE_FLEET_JS" 'chainComplete' \
-  "T16.9b the chainComplete symbol resolves in the fleet script"
+# The ENCLOSING per-issue record. `chainComplete` has no members of its own, so
+# it was previously guarded by a whole-file `assert_grep` — a predicate scoped
+# to a DIFFERENT surface than the contract it guards: SKILL.md spells the symbol
+# twice (the normative fence AND the prose that explains it), so deleting it
+# from the published fence left the row green. Joining the record it belongs to
+# makes the flag an ordinary member and removes the need for a grep (#558).
+#
+# Doc side needs DEPTH tracking, unlike sf_doc_members above: this record nests
+# `partialDelivery: {...}` and `tasks: [{...}]`, and a first-closer reader would
+# stop inside the first nested object. Only depth-0 tokens are emitted, so the
+# nested objects appear by KEY NAME and never by their members. A depth tracker
+# that BREAKS fails loudly on T16.10, the forward row: the over-collected
+# members (tasksTotal, blocked, skipped, unreviewed) land on the DOC side, and
+# the script writes none of them.
+sf_doc_record_members() {   # <file> <anchor>
+  tr -d '\r' < "$1" | awk -v anchor="$2" '
+    { if (fin) next
+      if (!cap) { p = index($0, anchor); if (p == 0) next
+                  cap = 1; line = substr($0, p + length(anchor)) }
+      else { line = $0 }
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "{" || c == "[") { depth++; continue }
+        if (c == "}" || c == "]") { if (depth == 0) { fin = 1; break } depth--; continue }
+        if (depth == 0) buf = buf c
+      }
+      if (fin) { gsub(/[,|]/, " ", buf)
+                 m = split(buf, parts, /[ \t]+/)
+                 for (j = 1; j <= m; j++) { gsub(/:$/, "", parts[j])
+                   if (parts[j] != "") print parts[j] } }
+    }
+  ' | sort -u
+}
+# Script side: the unpushedIssue() literal UNION every `out.<f> =` / `r.<f> =`
+# assignment — the same construction-plus-mutation shape T16.1–T16.3 already
+# uses for `taskRec.`, and `=[^=]` keeps the `===` comparisons out.
+#
+# THE `\b` IS LOAD-BEARING; do not strip it for POSIX tidiness. `ledger` ends in
+# `r`, so without the boundary the alternation also matches the tail of
+# `ledger.complete =` (workflow.js:1572) and harvests a phantom member
+# `complete` — measured: 18 names instead of 17 — which reds the reverse row
+# spuriously. `\b` is a GNU/BSD ERE extension supported by both CI greps
+# (ubuntu-latest and windows-latest/Git Bash); it is NOT one of the undefined
+# escapes the `\{`/`\}` note above warns about.
+#
+# A file-wide bare `X:` key harvest is wrong for the opposite reason: `prProof`
+# is spelled twice in this script with two meanings — a relay object SCHEMA at
+# :471 and the published string classification at `r.prProof = "DISPROVEN"`
+# (:1739) — so a key harvest drags in schema properties
+# (deliveryWorkspaceReady, rows, httpStatus, …) the record never carries.
+#
+# `out` is bound five times in the script and only three of those are this
+# record (:1154 the unpushedIssue literal, :1588 the delivered record, :2106 the
+# single-solver record). `var out = [], i;` (:255) and
+# `var out = reviewPath(...)` (:884) are unrelated bindings that today carry no
+# property writes at all. A stray `out.foo =` added under either would red the
+# reverse row: a REVIEWABLE FALSE POSITIVE, never a silent pass. That is the
+# deliberate trade, stated here so it is a decision rather than an accident.
+SF_DOC_ISSUE_FIELDS="$(sf_doc_record_members "$SOLVE_FLEET_SKILL" 'results: [ {')"
+SF_JS_ISSUE_FIELDS="$({ sf_js_keys '[{] *issue: issue,[^{}]*[}]'
+  grep -oE '\b(out|r)\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]' "$SOLVE_FLEET_JS" \
+    | tr -d '\r' | sed 's/^[a-z]*\.//; s/[[:space:]]*=.*$//'; } | sort -u)"
+SF_DOC_ISSUE_N="$(sf_member_count "$SF_DOC_ISSUE_FIELDS")"
+SF_JS_ISSUE_N="$(sf_member_count "$SF_JS_ISSUE_FIELDS")"
+
+# T16.9 — anti-vacuity. A moved or renamed anchor yields ZERO, which would make
+# T16.10/T16.11 pass while comparing nothing at all. The floor is 12 rather than
+# 16 (live is 17/17) deliberately: on a 17-member record a floor one below live
+# is not an anti-vacuity guard, it is a SIZE RATCHET that reds on a legitimate
+# two-sided field removal. Any positive floor catches the failure mode this row
+# exists for, because a lost anchor extracts zero names, not fifteen.
+if [ "$SF_DOC_ISSUE_N" -ge 12 ] && [ "$SF_JS_ISSUE_N" -ge 12 ]; then
+  echo "  PASS  T16.9 both per-issue record field lists extracted (SKILL.md: $SF_DOC_ISSUE_N, workflow.js: $SF_JS_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.9 setup error: the per-issue record did not extract from both sides"
+  echo "        SKILL.md 'results: [ {...}]' members: $SF_DOC_ISSUE_N (expected >= 12) — $SOLVE_FLEET_SKILL"
+  echo "        workflow.js record fields:           $SF_JS_ISSUE_N (expected >= 12) — $SOLVE_FLEET_JS"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.10 — forward. A documented field the script never writes is a field a
+# consumer reads as undefined on every record.
+T16_ISSUE_MISSING="$(sf_members_absent "$SF_DOC_ISSUE_FIELDS" "$SF_JS_ISSUE_FIELDS")"
+if [ -z "$T16_ISSUE_MISSING" ]; then
+  echo "  PASS  T16.10 every per-issue field SKILL.md documents is one workflow.js writes ($SF_DOC_ISSUE_N/$SF_DOC_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.10 SKILL.md documents per-issue field(s) no result record carries"
+  echo "        absent from workflow.js:$T16_ISSUE_MISSING"
+  FAIL=$((FAIL + 1))
+fi
+
+# T16.11 — reverse. This is the half that closes #558's residual: deleting
+# `chainComplete` from the published fence while leaving the prose that explains
+# it reds HERE, where the whole-file grep this replaced stayed green.
+T16_ISSUE_EXTRA="$(sf_members_absent "$SF_JS_ISSUE_FIELDS" "$SF_DOC_ISSUE_FIELDS")"
+if [ -z "$T16_ISSUE_EXTRA" ]; then
+  echo "  PASS  T16.11 every per-issue field workflow.js writes is documented in SKILL.md ($SF_JS_ISSUE_N/$SF_JS_ISSUE_N)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.11 workflow.js publishes per-issue field(s) SKILL.md never declares"
+  echo "        undocumented:$T16_ISSUE_EXTRA"
+  FAIL=$((FAIL + 1))
+fi
 
 echo
 echo "== T17: the brainstorm launcher is invoked through bash, with the reason recorded (#533) =="
