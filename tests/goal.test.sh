@@ -1891,7 +1891,8 @@ fi
 # Replaces the retired uberdev_goal_extract_pr_num_from_log `pushed PR #N` log
 # parser: that marker has zero producers and `claude --bg` stdout is a detached
 # banner on CLI 2.1.150. Issue->PR resolution is now GitHub-native — a PR that
-# closes issue N (closingIssuesReferences) or whose head is `feat/N-…`.
+# closes issue N (closingIssuesReferences) or whose head is `<type>/N-…` for any
+# type in _UBERDEV_GOAL_HEAD_REF_TYPES (BT73b-e pin that set).
 
 # BT24 — happy: closingIssuesReferences match -> PR number.
 MOCK_PR_LIST_JSON='[{"number":123,"closingIssuesReferences":[{"number":100}],"headRefName":"feat/100-fix"}]'
@@ -1913,7 +1914,8 @@ assert_rc "$_bt26_rc" "0" "BT26.find-pr-no-match-rc-zero"
 
 # BT27 — head-ref fallback: closingIssuesReferences empty, head `feat/N-` matches.
 # Covers the historical-PR shape where the Closes link was dropped but the
-# branch name still carries the issue number.
+# branch name still carries the issue number. `feat` is one member of the
+# accepted type set, not the whole of it — BT73b-c cover the other ten.
 MOCK_PR_LIST_JSON='[{"number":321,"closingIssuesReferences":[],"headRefName":"feat/200-thing"}]'
 assert_eq "$(uberdev_goal_find_pr_for_issue 200)" "321" \
   "BT27.find-pr-head-ref-fallback"
@@ -2647,6 +2649,91 @@ MOCK_PR_LIST_JSON='[{"number":4242,"closingIssuesReferences":[{"number":999}],"h
 assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73.find-pr-head-prefix-300-no-match"
 assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4242" "BT73.find-pr-head-prefix-30-matches"
 MOCK_PR_LIST_JSON='[]'
+
+# BT73b — the head-ref fallback must recognise the whole conventional-type set,
+# not `feat/` alone. This fixture is SYNTHETIC — it is not a snapshot of any
+# particular PR — and it is the partial-delivery shape issue #554 introduces: a
+# non-`feat` head with NO closes-link, because the fleet's partial arm stops
+# emitting `Closes #N` (a PR must not auto-close an issue it did not finish).
+# On such a PR the head ref is the ONLY issue->PR link there is, so a
+# `^feat/N-`-only arm loses a REAL open PR. Under /goal the watch pass always
+# runs with UBERDEV_GOAL_SOLVERS_SETTLED=1, so that miss is terminal on the FIRST
+# tick (RFC 0015 §5): the issue goes solving->failed and its `uberdev:active`
+# claim is released while the shipped PR sits open and unlinked — no 150m
+# solve-timeout grace window is involved. This row is the pin that fails if the
+# arm is ever narrowed back to `feat/`.
+MOCK_PR_LIST_JSON='[{"number":8554,"closingIssuesReferences":[],"headRefName":"fix/554-partial-delivery-linkage"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 554)" "8554" "BT73b.find-pr-head-fix-type"
+MOCK_PR_LIST_JSON='[]'
+
+# BT73c — one assertion per accepted type, plus the negative that proves the set
+# is ENUMERATED rather than an open `^[a-z]+/`: a head in an unknown namespace
+# (`notes/`, and by the same token `wip/` or a personal prefix) must still
+# resolve to nothing, so a scratch branch can never win a best-effort fallback.
+_bt73c_n=700
+_bt73c_covered=''
+for _bt73c_type in feat fix refactor test docs chore perf build ci style revert; do
+  _bt73c_n=$((_bt73c_n + 1))
+  MOCK_PR_LIST_JSON="[{\"number\":9${_bt73c_n},\"closingIssuesReferences\":[],\"headRefName\":\"${_bt73c_type}/${_bt73c_n}-x\"}]"
+  assert_eq "$(uberdev_goal_find_pr_for_issue "$_bt73c_n")" "9${_bt73c_n}" \
+    "BT73c.find-pr-head-widened-type-${_bt73c_type}"
+  _bt73c_covered="${_bt73c_covered}${_bt73c_type}
+"
+done
+MOCK_PR_LIST_JSON='[{"number":9554,"closingIssuesReferences":[],"headRefName":"notes/554-x"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 554)" "" "BT73c.find-pr-head-unknown-namespace-no-match"
+MOCK_PR_LIST_JSON='[]'
+
+# BT73c.set-join — the loop list above spells the types out INDEPENDENTLY of
+# _UBERDEV_GOAL_HEAD_REF_TYPES on purpose: a loop driven by the constant would
+# pass vacuously against any value it happened to hold. The price is that the
+# two lists can drift, so join them here — adding a type to the constant without
+# adding a row above (or vice versa) fails on this line rather than shipping an
+# accepted namespace nothing ever exercised.
+assert_eq "$(printf '%s' "$_bt73c_covered" | sort)" \
+  "$(printf '%s\n' "$_UBERDEV_GOAL_HEAD_REF_TYPES" | tr '|' '\n' | sort)" \
+  "BT73c.set-join-rows-cover-exactly-the-declared-types"
+
+# BT73d — BT73's prefix invariant re-asserted on a non-`feat` type: widening the
+# TYPE set must not widen the ISSUE-NUMBER boundary. `fix/30-x` belongs to issue
+# 30, never to issue 300 — the trailing `-` after ${n} is what holds that line.
+MOCK_PR_LIST_JSON='[{"number":4343,"closingIssuesReferences":[{"number":999}],"headRefName":"fix/30-x"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 300)" "" "BT73d.find-pr-head-prefix-isolation-fix-300-no-match"
+assert_eq "$(uberdev_goal_find_pr_for_issue 30)" "4343" "BT73d.find-pr-head-prefix-isolation-fix-30-matches"
+MOCK_PR_LIST_JSON='[]'
+
+# BT73e — the `$byclose // $byhead` ranking survives the widening: a LOWER-
+# numbered PR that genuinely closes N still outranks a HIGHER-numbered PR that
+# merely carries a `fix/N-` head, because a re-used branch must never beat a
+# real closes-link (#290.4(b), now that far more branch names can match).
+MOCK_PR_LIST_JSON='[{"number":10,"closingIssuesReferences":[{"number":88}],"headRefName":"chore/other"},{"number":9000,"closingIssuesReferences":[],"headRefName":"fix/88-reused"}]'
+assert_eq "$(uberdev_goal_find_pr_for_issue 88)" "10" "BT73e.find-pr-rank-close-over-head"
+MOCK_PR_LIST_JSON='[]'
+
+# BT73f — the header above _uberdev_goal_pr_for_issue_jq justifies the widening
+# by naming what a LOST PR costs, and that consequence has been written wrongly
+# twice (first a 150m grace window, then a re-dispatch on the next cycle)
+# because nothing joined the prose to the code. Pin it in both halves, the way
+# docs-accuracy.test.sh T9 pins RFC anchors: the prose must name the real
+# consequence by SYMBOL, and every symbol it names must still resolve in the
+# file the prose says owns it. The truth being pinned — the settled arm's
+# `failed` row is what uberdev_goal_count_failed_issues counts, goal-phase3.sh
+# fires the `solver_failed` circuit breaker and exits 1 on any non-zero count
+# (halting the WHOLE run, not just the cycle), and nothing re-dispatches the
+# issue because the next cycle's candidates come only from $FINDING_LABEL
+# issues. A future edit that reverts to a self-healing story reds here.
+_bt73f_hdr="$(awk '/^# _uberdev_goal_pr_for_issue_jq ISSUE_NUM/{f=1} f && /^_uberdev_goal_pr_for_issue_jq\(\)/{exit} f' "$GOAL_LIB")"
+_bt73f_lines="$(grep -c . <<<"$_bt73f_hdr")"
+# Non-vacuity first: a reworded opening line must fail loudly here rather than
+# let the per-symbol rows below pass over an empty slice.
+assert_eq "$([ "${_bt73f_lines:-0}" -ge 20 ] && printf 'ok' || printf 'short:%s' "${_bt73f_lines:-0}")" \
+  "ok" "BT73f.header-slice-non-vacuous"
+for _bt73f_sym in solver_failed uberdev_goal_count_failed_issues FINDING_LABEL; do
+  assert_eq \
+    "$([ "$(grep -cE -e "$_bt73f_sym" <<<"$_bt73f_hdr")" -ge 1 ] && printf 'named' || printf 'missing')" \
+    "named" "BT73f.header-names-${_bt73f_sym}"
+  assert_grep "$GOAL_P3" "$_bt73f_sym" "BT73f.${_bt73f_sym}-resolves-in-goal-phase3"
+done
 
 # BT74 — agent_busy_for_issue: malformed claude JSON -> rc 1 (fail-safe "not busy").
 MOCK_CLAUDE_AGENTS_JSON='not valid json {{{'

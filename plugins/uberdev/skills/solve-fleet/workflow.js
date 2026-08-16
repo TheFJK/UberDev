@@ -1006,6 +1006,60 @@ function houseRules() {
     + "elsewhere, and never quote a sibling worktree's copy.\n";
 }
 
+// LINKAGE, which used to be the same token as COMPLETENESS (#554). A PR body
+// carrying `Closes #N` does two unrelated things at once: it ties the branch to
+// the issue, and it closes that issue on merge. Every delivery took the closing
+// form, including the arms where the chain stopped at task 2 of 5 — so an
+// unfinished implementation landed, the issue auto-closed, and the tasks that
+// were never attempted left no open work behind them.
+//
+// The two jobs are split here: the complete arm keeps the closing keyword, the
+// partial arm mandates `UberDev-Partial: #N`, a whole-line trailer /merge reads
+// to release the `uberdev:active` claim without closing anything.
+//
+// The prohibition is deliberately phrased WITHOUT rendering the closing form.
+// A sentence such as "must not contain `Closes #N`" would put those exact bytes
+// in the prompt, which makes an absence assertion over the rendered text
+// vacuous — and an absence assertion a forbidding sentence can satisfy is no
+// assertion at all. The shared prefix is written ONCE for the same reason a
+// two-branch copy is not: the two arms must be impossible to drift apart.
+function prLinkLine(issue, complete) {
+  return "The body MUST contain the line `"
+    + (complete ? "Closes #" + issue : "UberDev-Partial: #" + issue) + "` "
+    + (complete
+      ? "so the merge auto-closes the issue."
+      : "— the non-closing linkage trailer this fleet uses for an unfinished chain — and MUST NOT "
+        + "carry any GitHub closing keyword (close, closes, closed, fix, fixes, fixed, resolve, "
+        + "resolves, resolved, in any letter case) standing directly in front of a reference to "
+        + "issue " + issue + ", in any form. A pull request must not close an issue it did not "
+        + "finish: the tasks this chain never reached still need an open issue to come back to.");
+}
+
+// The half a PR-body rule cannot cover, and the reason this is a separate
+// builder rather than another clause of prLinkLine: GitHub honours a closing
+// keyword in a COMMIT MESSAGE that lands on the default branch, not only in the
+// pull-request body. A partial chain whose commit reads `fixes #N` closes the
+// issue on merge however carefully the body was worded.
+//
+// Emitted on the partial arm only, and inside the step BEFORE the push: after
+// the push, rewording a message would need a force-push, which the house rules
+// in this same prompt forbid. The base is interpolated exactly as
+// baseInstruction() does it — the launcher-resolved branch when there is one,
+// and otherwise the base-agnostic form, never a guessed branch name.
+function commitKeywordGuard(issue) {
+  return "First read every commit message this branch adds to its base — "
+    + (baseBranch
+      ? "`git log --format=%B " + baseBranch + "..HEAD`"
+      : "`git log --format=%B` over the commits step 1 had you enumerate")
+    + " — and reword any in which a GitHub closing keyword (close, closes, closed, fix, fixes, "
+    + "fixed, resolve, resolves, resolved, in any letter case) stands directly in front of a "
+    + "reference to issue " + issue + ". GitHub honours those keywords in commit messages that land "
+    + "on the default branch, not only in the PR body, so one of them would close an issue this "
+    + "chain did not finish. A conventional-commit type prefix such as `fix:` is not such a "
+    + "reference and must be left alone. Nothing has been pushed yet, so rewording here is safe and "
+    + "no force-push is involved. ";
+}
+
 // Conditional --base, mirroring scan-fleet/workflow.js's baseArg: an unknown
 // base emits NO instruction at all rather than a guessed branch name. The
 // resolved value is interpolated as a LITERAL (not a shell variable) because
@@ -1066,8 +1120,9 @@ function solvePrompt(rec, planPath) {
     + "b. Run the tests that cover what you touched, plus any test file you added. They must pass.\n"
     + "c. Commit with a conventional message.\n"
     + "d. Push the branch and open a PR with `gh pr create`. Build the PR body in a FILE and pass "
-    + "`--body-file` (never inline `--body`). The body MUST contain the line `Closes #" + rec.issue + "` "
-    + "so the merge auto-closes the issue.\n"
+    // The single-solver path has no task chain, so it is complete by
+    // construction: this call renders the same bytes it always did.
+    + "`--body-file` (never inline `--body`). " + prLinkLine(rec.issue, true) + "\n"
     + baseInstruction()
     + "e. Do NOT merge, do NOT run /merge, and do NOT chain into a review command. Opening the PR is "
     + "where your job ends.\n\n"
@@ -1280,8 +1335,13 @@ function taskFixPrompt(rec, planPath, k, r, planFindings) {
 // (implementer null/blocked, review REJECT, fix rounds exhausted, fixer
 // null/blocked, CB3 truncation) — so the opening assertion has to be earned
 // rather than stated. A prompt that tells the agent the work is complete when
-// it is not produces a PR whose body says so, carrying a `Closes` line for a
-// partial implementation, and /goal ingests that PR number through prsOpened.
+// it is not produces a PR whose body says so, and /goal ingests that PR number
+// through prsOpened.
+//
+// It governs TWO things, not one (#554): the head paragraph below, and the
+// linkage in step 4 — plus the commit-message guard in step 3. Saying "partial"
+// in prose while mandating a closing keyword left the prose advisory and the
+// keyword binding, because it is the keyword GitHub acts on.
 function deliverPrompt(rec, ledger) {
   var wt = issueWorktree(rec.issue);
   var idList = function (ids) { return ids.join(", "); };
@@ -1315,11 +1375,11 @@ function deliverPrompt(rec, ledger) {
     + "2. Run the project's full test suite, plus any test file the branch added. If something fails, "
     + "fix it here (tests first, root cause) and amend or add a commit — do not push a red branch and "
     + "do not delete or skip a test to go green.\n"
-    + "3. Push the branch.\n"
+    + "3. " + (ledger.complete ? "" : commitKeywordGuard(rec.issue)) + "Push the branch.\n"
     + "4. Open a PR with `gh pr create`. Build the PR body in a FILE and pass `--body-file` (never "
-    + "inline `--body`). The body MUST contain the line `Closes #" + rec.issue + "` so the merge "
-    + "auto-closes the issue, and it must summarise what each task changed and name anything a task "
-    + "review left unresolved. The per-task review findings are ON DISK, one directory per task, at "
+    + "inline `--body`). " + prLinkLine(rec.issue, ledger.complete)
+    + " It must also summarise what each task changed and name anything a task review left "
+    + "unresolved. The per-task review findings are ON DISK, one directory per task, at "
     + '"' + issueDir(rec.issue) + '/task-<n>/review-<round>.md" for tasks 1.."' + ledger.total
     + '" — read them rather than guessing what they said; a file that is absent means that task '
     + "never reached its review gate, which is itself worth stating in the body.\n"
@@ -2104,13 +2164,25 @@ async function runTaskChain(rec, planPath, planFindings) {
   // over a finished chain BEFORE goal-pipeline ingests the number and merges
   // on it. The claim is not touched — only this fact is added beside it.
   //
-  // DECLARED UNREAD BY PRODUCTION CODE. Both fields below are attached AFTER
-  // schema validation, so the unread-property guard cannot see them, and the
-  // only readers today are this file's suites and the sibling SKILL.md:
-  // goal-pipeline ingests prsOpened through a shape-only digit filter and
-  // consults neither. That is the OPEN half — the ingesting side ought to skip
-  // or flag a number whose chain was incomplete — and it is written down here
-  // rather than left to look enforced.
+  // DECLARED UNREAD BY PRODUCTION CODE — and the residual is now MEASURED, not
+  // guessed at. Both fields below are attached AFTER schema validation, so the
+  // unread-property guard cannot see them, and the only readers today are this
+  // file's suites and the sibling SKILL.md: goal-pipeline ingests prsOpened
+  // through a shape-only digit filter and consults neither.
+  //
+  // #554 changed the CONSEQUENCE of that, not the readership. An incomplete
+  // chain now delivers a PR carrying the non-closing `UberDev-Partial: #N`
+  // trailer, so merging it leaves the issue OPEN and /merge Step 3.4 releases
+  // its `uberdev:active` claim off that same trailer. What it does NOT buy is
+  // convergence: /goal builds each next cycle from the review-pr FINDING issues
+  // alone — `gh issue list --label <finding-label> --state open` in
+  // lib/goal-phase3.sh — so the original issue is never re-collected and the
+  // run ends with it simply open. That is strictly better than the unearned
+  // auto-close it replaces — unfinished work stays visible instead of being
+  // closed over — but it is not the ingesting side learning to read this flag,
+  // which remains the open half and is tracked as issue #592. A pointer to a
+  // filed number rather than to "a follow-up issue": an unnamed one cannot be
+  // checked, and the whole point of this note is that the gap stays legible.
   out.chainComplete = ledger.complete;
   if (!ledger.complete) {
     // The MEMBER LIST here is a published contract, joined against SKILL.md's

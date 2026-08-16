@@ -159,10 +159,21 @@ the live failure modes — the same resolution scan-fleet reached.
 The solver prompt carries the house rules that have no human in the loop to
 enforce them on `/turbo`: root-cause fixes, tests-first, conventional commits,
 **no `Co-Authored-By` / AI attribution trailer**, `--body-file` never inline
-`--body`, `Closes #N` in the body, no `--force`, no `--no-verify`, and — new,
-and specific to parallel batches — **no version bump**: every solver bumping to
-the same next version is the collision class this repo has hit repeatedly.
-Releases stay serial and operator-driven.
+`--body`, an issue-linkage line in the body, no `--force`, no `--no-verify`,
+and — new, and specific to parallel batches — **no version bump**: every solver
+bumping to the same next version is the collision class this repo has hit
+repeatedly. Releases stay serial and operator-driven.
+
+The linkage line is **conditional on what the run actually finished** (#554),
+because linkage and completeness were one token and a chain that stopped at task
+2 of 5 still auto-closed its issue. A single solver, and a per-task chain whose
+`chainComplete` is `true`, carry `Closes #N` and close the issue on merge. A
+chain that fell short carries the non-closing whole-line trailer
+`UberDev-Partial: #N` and no closing keyword anywhere — not in the body, not in
+a commit message, since GitHub honours them in both — so the issue survives the
+merge OPEN with the unreached tasks still on it. `/merge` Step 3.4 parses that
+trailer to release the `uberdev:active` claim regardless, so an unfinished issue
+is left re-solvable rather than claimed by nobody.
 
 The solver stops at PR opened. It does not merge and does not chain into a
 review command; that remains `/goal`'s decision.

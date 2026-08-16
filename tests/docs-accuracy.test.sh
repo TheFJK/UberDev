@@ -85,6 +85,12 @@ SOLVE_FLEET_JS="$PLUGIN_DIR/skills/solve-fleet/workflow.js"
 # below locks the three against each other rather than pinning any one alone.
 SOLVE_FLEET_SKILL="$PLUGIN_DIR/skills/solve-fleet/SKILL.md"
 DISPATCH15_RFC="$RFC_DIR/0015-workflow-native-dispatch.md"
+# #554 partial-linkage surface. The non-closing `UberDev-Partial: #N` trailer is
+# one contract living in three files — the producer (the fleet's delivery
+# prompt), the fleet's own return-value declaration, and the ONLY consumer that
+# acts on it (/merge Step 3.4). T16.10 below joins them; the consumer is listed
+# here so a rename is an explicit FATAL rather than a silently-skipped row.
+MERGE_PIPELINE_SKILL="$PLUGIN_DIR/skills/merge-pipeline/SKILL.md"
 GOAL_WATCH_SH="$PLUGIN_DIR/lib/goal-watch.sh"
 BUMP_VERSION_SH="$PLUGIN_DIR/lib/bump-version.sh"
 STRUCTURAL_LIB="$REPO_ROOT/tests/_lib_assert_structural.sh"
@@ -108,7 +114,7 @@ for f in "$TESTING_MD" "$CONTRIBUTING_MD" "$DISPATCH_RFC" "$ALIAS_RFC" \
          "$USING_SKILL" "$CONFIG_REF" "$HOOKS_JSON" "$HOOKS_CURSOR_JSON" \
          "$PRE_COMPACT" "$WORKFLOW_RFC" "$GOAL_RFC" "$VENDOR_RFC" \
          "$PRECISION_RFC" "$PRECISION_MINER" "$AGENTS_MD" "$SOLVE_FLEET_JS" \
-         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" \
+         "$SOLVE_FLEET_SKILL" "$DISPATCH15_RFC" "$MERGE_PIPELINE_SKILL" \
          "$GOAL_WATCH_SH" "$BUMP_VERSION_SH" "$STRUCTURAL_LIB" \
          "$ADAPTIVE_RFC" "$RUN_MANIFEST_PY" "$DOCS_ACCURACY_SELF"; do
   [ -r "$f" ] || { echo "FATAL: required file missing or unreadable: $f" >&2; exit 2; }
@@ -2526,6 +2532,37 @@ else
       FAIL=$((FAIL + 1))
     fi
   done
+fi
+
+# T16.10 — the OTHER contract the completeness flag produced, and the one with a
+# consumer. `chainComplete: false` makes the delivery prompt mandate the
+# non-closing `UberDev-Partial: #N` trailer instead of `Closes #N` (#554), and
+# that spelling now lives in three files: the producer (the fleet script), the
+# fleet's own return-value doc, and /merge's Step 3.4 cleanup, which is the only
+# code that parses it. Three uncompared copies of one literal is exactly the
+# class #370 named, and here the consequence is concrete — a consumer that
+# never learns the spelling silently strands the `uberdev:active` claim on a
+# still-OPEN issue and blocks every later /solve, /turbo and /goal Phase 1.
+#
+# A per-file grep rather than a set-difference: this is a fixed literal, not a
+# member list, so what must hold is that the exact spelling resolves in every
+# copy. `grep -qF` reads each file directly — no pipeline, so no writer exists
+# for pipefail to poison (tests/epipe-guard.test.sh).
+T16_PARTIAL_TOKEN='UberDev-Partial:'
+T16_PARTIAL_UNJOINED=""
+for T16_PARTIAL_FILE in "$SOLVE_FLEET_JS" "$SOLVE_FLEET_SKILL" "$MERGE_PIPELINE_SKILL"; do
+  grep -qF -e "$T16_PARTIAL_TOKEN" "$T16_PARTIAL_FILE" \
+    || T16_PARTIAL_UNJOINED="$T16_PARTIAL_UNJOINED $T16_PARTIAL_FILE"
+done
+if [ -z "$T16_PARTIAL_UNJOINED" ]; then
+  echo "  PASS  T16.10 the $T16_PARTIAL_TOKEN trailer resolves in all three copies (fleet script, fleet SKILL.md, /merge SKILL.md)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  T16.10 the partial-linkage trailer is missing from a copy of its own contract"
+  echo "        literal: $T16_PARTIAL_TOKEN"
+  echo "        absent from:$T16_PARTIAL_UNJOINED"
+  echo "        a copy that never learns the spelling strands the uberdev:active claim (#554)"
+  FAIL=$((FAIL + 1))
 fi
 
 echo
