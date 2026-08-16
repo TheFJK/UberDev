@@ -206,6 +206,33 @@ elif grep -q "implementBudget=\"\${UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET:-$FLEET_
 else
   fail "S22b no implementBudget key in the solve-fleet args envelope"
 fi
+# G31 — FLEET_DESIGN_BASE, the OTHER half of the CB1 term
+# `designCount * (BASE + IMPLEMENT_AGENT_BUDGET - 1)`, read out of the script for
+# exactly the reason FLEET_BUDGET is. Three rows retyped this base as a literal:
+# G16 (/goal's two cost copies), G18 (the two doc copies) and Run S's projection
+# inside the behavioural fixture. The base moves by one for every rung the design
+# chain gains, so a literal in three places is the #370 "one contract, N
+# uncompared copies" shape — a missed retyping reds a row for the right reason
+# with a misleading message, and the reviewer has to grep to find out which copy
+# drifted. The vacuity guard is part of the idiom (S22b above): an extraction
+# that silently yielded empty would make every dependent row pass on nothing.
+# The hit count is the second half of that guard — two differing terms in the
+# script would make the extracted value arbitrary rather than merely absent.
+FLEET_DESIGN_BASE="$(sed -n 's/.*designCount \* (\([0-9][0-9]*\) + IMPLEMENT_AGENT_BUDGET.*/\1/p' "$WORKFLOW")"
+FLEET_DESIGN_BASE_HITS="$(grep -cE 'designCount \* \([0-9]+ \+ IMPLEMENT_AGENT_BUDGET' "$WORKFLOW" || true)"
+if [ -z "$FLEET_DESIGN_BASE" ]; then
+  fail "G31 could not read the per-design-issue agent base out of the fleet script — G16, G18 and the fixture's projection would all derive from nothing"
+elif [ "${FLEET_DESIGN_BASE_HITS:-0}" != "1" ]; then
+  # An AMBIGUOUS base is worse than an absent one, and silently so: two terms
+  # make this a two-line value, and grep reads a multi-line pattern as OR-ed
+  # alternatives — a one-digit alternative matches almost any line of the file
+  # a dependent row is searching, turning G16 into a false PASS. Clear it, so
+  # every dependent row takes its own vacuity arm instead of matching noise.
+  FLEET_DESIGN_BASE=""
+  fail "G31 the designCount * (N + IMPLEMENT_AGENT_BUDGET …) term resolves ${FLEET_DESIGN_BASE_HITS:-0} times, not once — the extracted base is arbitrary"
+else
+  pass "G31 the per-design-issue agent base reads out of the fleet script as exactly one term (base $FLEET_DESIGN_BASE)"
+fi
 GOAL_PHASE0="$REPO_ROOT/plugins/uberdev/lib/goal-phase0.sh"
 if [ ! -r "$GOAL_PHASE0" ]; then
   fail "S22c lib/goal-phase0.sh is missing or unreadable: $GOAL_PHASE0"
@@ -213,6 +240,50 @@ elif grep -q 'maxAgents="${UBERDEV_GOAL_MAX_AGENTS:-900}"' "$GOAL_PHASE0"; then
   pass "S22c /goal's default agent ceiling covers the fleet's new per-issue cost"
 else
   fail "S22c UBERDEV_GOAL_MAX_AGENTS does not default to 900 — /goal CB1 would halt on cycle 1"
+fi
+
+# S23 (#524 item 3) — the risk-signal channel is a JOIN, and either half alone
+# is worthless.
+#
+# The triage predicate is computed for every issue and persisted into the
+# prepared root request on every backend; it is dropped on exactly ONE hop, the
+# per-issue manifest record. That record is the only channel into a Workflow
+# script (no fs), so a launcher that writes the field to a manifest the schema
+# does not declare buys nothing, and a schema that declares a field no launcher
+# writes gates the lens permanently OFF. One row over both ends, so neither can
+# ship alone and read as done.
+S23_LAUNCHER=0
+S23_SCRIPT=0
+grep -q 'rec\["risk_signals"\]' "$LAUNCHER" && grep -q '"${RISKS\[\$_midx\]}"' "$LAUNCHER" && S23_LAUNCHER=1
+grep -q 'riskSignals: { type: "array"' "$WORKFLOW" && S23_SCRIPT=1
+if [ "$S23_LAUNCHER" = "1" ] && [ "$S23_SCRIPT" = "1" ]; then
+  pass "S23 the launcher writes the triage risk_signals into every manifest record AND S.intake declares riskSignals"
+else
+  fail "S23 the risk-signal channel is half-built (launcher=$S23_LAUNCHER script=$S23_SCRIPT) — the security lens would be gated on a field that never crosses"
+fi
+
+# S24 — the same join for the COUNT channel, which is the negative branch's only
+# failure signal. Absent `riskSignals` and empty `riskSignals` behave alike by
+# design, so a relay that drops or renames the field looks exactly like a
+# risk-free batch. The launcher declares a run-wide count derived from the
+# manifest it just wrote; the script reads it and compares. Either half alone is
+# a number nobody checks, or a check against a number nobody sends.
+# Scoped to the emission block, not to the whole file: a `riskIssueCount=`
+# assignment elsewhere in the launcher is a local variable, not an envelope key,
+# and this row would then pass on a value the script never receives. Captured
+# first and read from a herestring — a `sed | grep -q` consumed as a truth value
+# is the EPIPE-poisoned shape tests/epipe-guard.test.sh forbids.
+S24_EMIT_BLOCK="$(sed -n '/uberdev_emit_workflow_args solve-fleet/,/^$/p' "$LAUNCHER")"
+S24_LAUNCHER=0
+S24_SCRIPT=0
+grep -q 'riskIssueCount=' <<<"$S24_EMIT_BLOCK" && S24_LAUNCHER=1
+grep -q 'CFG\.riskIssueCount' "$WORKFLOW" && S24_SCRIPT=1
+if [ -z "$S24_EMIT_BLOCK" ]; then
+  fail "S24 the solve-fleet args-emission block did not slice — the launcher half of this join would inspect nothing"
+elif [ "$S24_LAUNCHER" = "1" ] && [ "$S24_SCRIPT" = "1" ]; then
+  pass "S24 the launcher emits riskIssueCount in the solve-fleet envelope AND the script joins it against the relayed records"
+else
+  fail "S24 the risk-signal relay-fidelity join is half-built (launcher=$S24_LAUNCHER script=$S24_SCRIPT) — a dropped field would be indistinguishable from a risk-free batch"
 fi
 
 echo "== S: command files mandate the Workflow call =="
@@ -346,6 +417,38 @@ grep -qE 'IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, 24\)' 
   && pass "G14b the per-issue implement budget is ONE clamped, config-overridable constant" \
   || fail "G14b IMPLEMENT_AGENT_BUDGET is not a clamped CFG.implementBudget constant"
 
+# G14c — SPEC_REVISE_ROUNDS, the OTHER bounded ladder, needs BOTH halves of the
+# G14/B72 idiom and they cannot be the same row. FIX_ROUNDS has one exit
+# condition, so Run L (a reviewer that never approves) walks the bound to its
+# end and B72/B73 pin it behaviourally. The revision loop has TWO exits —
+# `round <= SPEC_REVISE_ROUNDS` and `!revised` — so every arm whose reviser
+# SUCCEEDS leaves on the flag with the bound untouched, and only an arm where
+# the reviser never lands usably can see it at all (that is B262c, on SR3/SR5).
+# This row pins the CONSTANT; B262c pins that the loop obeys whatever it says.
+#
+# The value is 1 because CB1's `designCount * (BASE + IMPLEMENT_AGENT_BUDGET-1)`
+# term (G31) charges exactly ONE reviser per design-tier issue. Raise the
+# constant without moving that base and the projection under-counts by
+# (N-1) x designCount while the breaker still fires only at the old ceiling —
+# an accumulator that reads low, which the SHARED COST block one screen above
+# the constant exists to prevent. The vacuity and hit-count guards are the
+# S22b/G31 idiom: an extraction that yielded empty, or resolved twice, would
+# make this row and the G32 join pass on nothing.
+FLEET_SPEC_REVISE_ROUNDS="$(sed -n 's/^const SPEC_REVISE_ROUNDS = \([0-9][0-9]*\);.*/\1/p' "$WORKFLOW")"
+SPEC_REVISE_ROUNDS_HITS="$(grep -cE '^const SPEC_REVISE_ROUNDS = [0-9]+;' "$WORKFLOW" || true)"
+if [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+  fail "G14c could not read SPEC_REVISE_ROUNDS out of the fleet script — the G32 join would compare against nothing"
+elif [ "${SPEC_REVISE_ROUNDS_HITS:-0}" != "1" ]; then
+  FLEET_SPEC_REVISE_ROUNDS=""
+  fail "G14c SPEC_REVISE_ROUNDS is declared ${SPEC_REVISE_ROUNDS_HITS:-0} times, not once — the extracted cap is arbitrary"
+elif [ "$FLEET_SPEC_REVISE_ROUNDS" != "1" ]; then
+  fail "G14c SPEC_REVISE_ROUNDS is $FLEET_SPEC_REVISE_ROUNDS, not 1 — CB1 charges one reviser per design-tier issue, so the projection now under-counts by $((FLEET_SPEC_REVISE_ROUNDS - 1)) per design-tier issue"
+elif ! grep -q 'round <= SPEC_REVISE_ROUNDS && !revised' "$WORKFLOW"; then
+  fail "G14c the revision loop no longer bounds itself with SPEC_REVISE_ROUNDS — the constant would be a number written beside a loop, not the loop's bound"
+else
+  pass "G14c SPEC_REVISE_ROUNDS = 1 is the revision loop's own bound, and the one reviser CB1 charges per design-tier issue"
+fi
+
 # G15a — the house rules are one helper, reused by every prompt on the write
 # path. A copy per prompt is how one of them silently loses the version-bump
 # prohibition. (That the rules actually REACH each agent is proven at runtime by
@@ -362,12 +465,18 @@ GOAL_WF="$REPO_ROOT/plugins/uberdev/skills/goal-pipeline/workflow.js"
 if [ ! -r "$GOAL_WF" ]; then
   fail "G16 the goal-pipeline workflow script is missing or unreadable: $GOAL_WF"
 else
-  # FLEET_BUDGET is extracted ONCE, beside S22b above — this row reuses it so the
-  # launcher default and /goal's cost copies cannot be pinned to two numbers.
-  if [ -z "$FLEET_BUDGET" ]; then
-    fail "G16 could not read IMPLEMENT_AGENT_BUDGET out of the fleet script — the cross-file cost check is vacuous"
+  # FLEET_BUDGET and FLEET_DESIGN_BASE are extracted ONCE, beside S22b/G31 above
+  # — this row reuses both so the launcher default, /goal's cost copies and the
+  # fleet's own constants cannot be pinned to two different numbers.
+  #
+  # NOTE the off-by-one, which a blind retyping gets wrong: the FLEET's own term
+  # is `base + budget - 1` (the issue's own solver is already counted in
+  # intakeIssues.length), while /goal's per-issue cost — the family this row
+  # compares — is `base + budget`, with no `- 1`.
+  if [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_DESIGN_BASE" ]; then
+    fail "G16 could not read IMPLEMENT_AGENT_BUDGET and the design base out of the fleet script — the cross-file cost check is vacuous"
   else
-    EXPECTED_COST=$(( 6 + FLEET_BUDGET ))
+    EXPECTED_COST=$(( FLEET_DESIGN_BASE + FLEET_BUDGET ))
     GOAL_MARKERS="$(grep -c 'SHARED COST: solve-fleet-per-issue-agent-cost' "$GOAL_WF" || true)"
     G16_OK=1
     # Copy 1 — the PRE-dispatch projection. No envelope exists yet, so the
@@ -379,13 +488,13 @@ else
     # than threefold and CB1, the only named halt, then never fires. The clamp
     # bounds and default are read back out of the fleet's own constant, so the
     # two files still cannot drift apart.
-    grep -q "6 + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
+    grep -q "$FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET)" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
     [ "$G16_OK" = "1" ] \
-      && pass "G16 /goal's two per-issue cost copies both track the fleet's 6 + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
+      && pass "G16 /goal's two per-issue cost copies both track the fleet's $FLEET_DESIGN_BASE + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
+      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a $FLEET_DESIGN_BASE + clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
   fi
 fi
 
@@ -471,18 +580,109 @@ else
   pass "G26 verifyPrsPrompt() interpolates no agent-derived string (the relay discovers headRefName itself)"
 fi
 
+# G33 (#524 item 2) — ONE framing, two kinds. The plan reviewer's findings reach
+# their consumers through the SAME sanitizeFindings() + envWrap() carrier #507
+# installed; the only thing that varies is a SCRIPT-CHOSEN kind. All three
+# halves are asserted, because each alone is satisfiable by the bug this guards:
+#   - the kind is drawn from a CLOSED literal table, so no caller can invent a
+#     source tag — an open string parameter is a prompt-tag steering seam and a
+#     silent-typo seam at once;
+#   - each of the two source tags is BUILT in exactly one place, the #370 "one
+#     contract, N uncompared copies" shape that is how two envelopes drift into
+#     two subtly different framings of one operation;
+#   - every call site names a kind, so a rung cannot inherit whichever framing
+#     happens to be the default (the lensBrief() fallthrough class).
+FS_SPEC_TAG_HITS="$(grep -cF 'solve-fleet-spec-review-findings-issue-' "$WORKFLOW" || true)"
+FS_PLAN_TAG_HITS="$(grep -cF 'solve-fleet-plan-review-findings-issue-' "$WORKFLOW" || true)"
+# Whole-line comments are dropped first: this file explains its own carrier in
+# prose, and a PROSE mention of the function is not a call site. A trailing
+# comment that named it would still be counted, which is the safe direction —
+# a false FAIL, never a false PASS.
+FS_UNKINDED="$(grep -nE 'findingsSection\(' "$WORKFLOW" \
+  | grep -vE '^[0-9]+:[[:space:]]*//' \
+  | grep -vE '^[0-9]+:function findingsSection' \
+  | grep -vE '"(spec-review|plan-review)"' || true)"
+if ! grep -q '^function findingsSection(issue, items, kind) {' "$WORKFLOW"; then
+  fail "G33 findingsSection() takes no kind argument — a second review gate would have to hand-roll its own framing"
+elif ! grep -q '^const FINDINGS_KINDS = {' "$WORKFLOW"; then
+  fail "G33 the findings kinds are not a closed script-chosen table (FINDINGS_KINDS) — the source tag would be an open parameter"
+elif [ "${FS_SPEC_TAG_HITS:-0}" != "1" ] || [ "${FS_PLAN_TAG_HITS:-0}" != "1" ]; then
+  fail "G33 a findings source tag is built in more than one place (spec=${FS_SPEC_TAG_HITS:-0}, plan=${FS_PLAN_TAG_HITS:-0}, want exactly 1 each)"
+elif [ -n "$FS_UNKINDED" ]; then
+  fail "G33 a findingsSection() call site names no kind from the closed table: $FS_UNKINDED"
+else
+  pass "G33 findingsSection() is ONE carrier selected by a closed kind table, each source tag built exactly once, every call site kinded"
+fi
+
+# G34 (#524 item 3) — lensBrief() is TOTAL, and its vocabulary is JOINED to the
+# one the research fan-out iterates.
+#
+# The old form was `if codebase / if constraints / <bare return of the coverage
+# brief>`: adding a lens name without adding its brief silently handed the new
+# agent the test-coverage brief, and nothing anywhere failed. B277/B279 catch
+# that at the two names this change introduces; this row catches it for the NEXT
+# lens, which is the one no behavioural fixture has been written for yet.
+#
+# Three halves, because each alone is satisfiable by the bug:
+#   - the briefs live in a MAP, so an unlisted name has nowhere to fall through
+#     to (an if-chain always has a last branch);
+#   - the function THROWS on an unknown name rather than returning anything —
+#     including rather than returning "" or undefined, which would degrade to an
+#     agent asked to investigate through no lens at all;
+#   - every member of the live BASE_LENSES vocabulary, PLUS the risk-gated
+#     `security` lens, has an entry. Read out of the script rather than retyped:
+#     a retyped list is the #370 shape, and this row exists precisely because a
+#     vocabulary and its brief table are one contract in two places.
+LENS_VOCAB_RAW="$(sed -n 's/^const BASE_LENSES = \[\(.*\)\];$/\1/p' "$WORKFLOW" | tr -d '\r')"
+LENS_BRIEF_KEYS="$(sed -n '/^const LENS_BRIEFS = {/,/^};$/p' "$WORKFLOW" \
+  | sed -n 's/^  "\([A-Za-z0-9_-]*\)":.*/\1/p' | tr -d '\r')"
+LENS_FN_BODY="$(sed -n '/^function lensBrief(lens) {/,/^}$/p' "$WORKFLOW" | tr -d '\r')"
+G34_MISSING=""
+if [ -z "$LENS_VOCAB_RAW" ] || [ -z "$LENS_BRIEF_KEYS" ] || [ -z "$LENS_FN_BODY" ]; then
+  # Every arm below reads one of these three; an empty capture would make the
+  # whole row inspect nothing and pass (#347).
+  fail "G34 could not read BASE_LENSES / LENS_BRIEFS / lensBrief() out of the fleet script — the totality check would inspect nothing"
+else
+  # The required set: the base vocabulary as the script declares it, plus the
+  # conditional lens, which is NOT in BASE_LENSES precisely because it is gated.
+  LENS_REQUIRED="$(printf '%s\n' "$LENS_VOCAB_RAW" | tr -d '" ' | tr ',' '\n'; printf 'security\n')"
+  while IFS= read -r lens; do
+    [ -n "$lens" ] || continue
+    grep -qxF -- "$lens" <<<"$LENS_BRIEF_KEYS" || G34_MISSING="$G34_MISSING $lens"
+  done <<<"$LENS_REQUIRED"
+  LENS_FN_RETURNS="$(grep -cE '^[[:space:]]*return ' <<<"$LENS_FN_BODY")"
+  if ! grep -q 'throw new Error("no research brief for lens: "' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief() does not throw on an unknown lens — an unlisted name would degrade silently instead of failing the issue's chain"
+  elif [ "$LENS_FN_RETURNS" != "1" ]; then
+    # EXACTLY one, not "at least one that reads the table": a second return is
+    # the bare fallthrough itself, and it would sit happily beside a correct one.
+    fail "G34 lensBrief() has $LENS_FN_RETURNS return statements, want exactly 1 — a second one is the bare fallthrough this row forbids"
+  elif ! grep -q 'return LENS_BRIEFS\[lens\];' <<<"$LENS_FN_BODY"; then
+    fail "G34 lensBrief()'s single return does not read the brief table — the briefs would not be the one source"
+  elif [ -n "$G34_MISSING" ]; then
+    fail "G34 a live lens has no entry in LENS_BRIEFS:$G34_MISSING"
+  else
+    pass "G34 lensBrief() is total: briefs live in one map, an unknown name throws, and every live lens (BASE_LENSES + security) has an entry"
+  fi
+fi
+
 # G18 — CB1 accounting must move WITH the agent. The proof relay is a real
 # dispatch; a ceiling that does not count it under-projects by one on every run
 # and the "abort before dispatch" guarantee stops being exact. Both doc copies
 # of the formula move too, or the next reader trusts the stale one.
+#
+# The design base in the doc needle is BUILT from FLEET_DESIGN_BASE (G31) rather
+# than retyped: this row is the third copy of that number and the one furthest
+# from the script. An empty extraction builds a needle that cannot match, so the
+# vacuity failure lands here as a FAIL — never as a silent match.
 RFC0015="$REPO_ROOT/docs/rfc/0015-workflow-native-dispatch.md"
 if [ ! -r "$RFC0015" ]; then
   # Never let a missing file read as "the stale formula is absent" — that is a
   # vacuous green, and this repo has shipped one before.
   fail "G18 cannot read $RFC0015 — the doc half of the assertion is unevaluable"
 elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
-  && grep -q '2 + issues + (6 + implementBudget' "$SKILL" \
-  && grep -q '2 + issues + (6 + implementBudget' "$RFC0015" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$SKILL" \
+  && grep -q "2 + issues + ($FLEET_DESIGN_BASE + implementBudget" "$RFC0015" \
   && ! grep -q '1 + issues + 6' "$SKILL" \
   && ! grep -q '1 + issues + 6' "$RFC0015"; then
   # The per-design-tier term is #508's per-task chain, not the flat 6 this row
@@ -493,7 +693,7 @@ elif grep -q 'const projected = 2 + intakeIssues.length' "$WORKFLOW" \
   # silently reverted.
   pass "G18 the CB1 projection counts both batched relays and the per-task implement chain, in code and in both docs"
 else
-  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (6 + implementBudget - 1) x design-tier')"
+  fail "G18 the CB1 projection or one of its doc copies drifted (want '2 + issues + (${FLEET_DESIGN_BASE:-<unreadable>} + implementBudget - 1) x design-tier')"
 fi
 
 # G7b (#516) — the fleet's own baseline must not be attributed to a file this repo
@@ -712,6 +912,18 @@ const src = fs.readFileSync(process.argv[3], "utf8");
 const meta = h.extractMeta(src).meta;
 const RD = "/r/.uberdev/run/RID";
 
+// readInt — the fixture's own reading of a scalar out of the fleet script, used
+// by Run S so its CB1 projection derives from the script instead of retyping
+// its constants. A non-match THROWS by name: a silent NaN would make the
+// projection meaningless and B62/B63 would then pin nothing. This is the second
+// of two independent extraction paths over the same constants (the shell's
+// `sed` beside S22b/G31 is the first); G32 compares them.
+function readInt(re, what) {
+  const m = re.exec(src);
+  if (!m) throw new Error("could not read " + what + " out of the fleet script");
+  return parseInt(m[1], 10);
+}
+
 function buildArgs(extra, cfgExtra) {
   const cfg = Object.assign({
     runId: "RID", runDirAbs: RD, pluginRootAbs: "/p", repoRootAbs: "/r",
@@ -724,8 +936,15 @@ function buildArgs(extra, cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "solve-fleet", config: cfg }, extra || {});
 }
 function intake(issues) { return { rc: 0, issues: issues }; }
-function rec(issue, tier) {
-  return { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+// `extra` (#524 item 3) is OPTIONAL and merged in, so the ~30 existing two-arg
+// call sites keep producing the canonical record byte for byte. The security
+// lens is gated on a manifest field, and a field this fixture could not OMIT
+// would make the back-compat arm (an unpatched launcher relaying no
+// `riskSignals` at all) untestable — absence is one of the three states.
+function rec(issue, tier, extra) {
+  const r = { issue: issue, tier: tier, promptFile: RD + "/solve-prompt-" + issue + ".txt" };
+  if (extra) Object.keys(extra).forEach(function (k) { r[k] = extra[k]; });
+  return r;
 }
 function solved(issue, pr) {
   return { issue: issue, status: "PR_OPENED", branch: "fix/" + issue + "-x", prNumber: pr,
@@ -811,8 +1030,13 @@ function ladderReturns(sentinel) {
   for (let i = 1; i <= 3; i++) o["fix:#11:t1:r" + i] = task(1);
   return o;
 }
-function runOpen(args, fixture) {
-  const pre = h.preprocess(src);
+// `source` defaults to the real script and is overridden by exactly one caller:
+// the B278 bogus-lens mutant, which has to make the LENS VOCABULARY wrong to
+// observe where the resulting throw lands. Threaded as an argument rather than
+// copied into a second runner, so the mutant run goes through the same
+// preprocessing, the same sandbox and the same meta as every other row.
+function runOpen(args, fixture, source) {
+  const pre = h.preprocess(source || src);
   const record = h.makeRecord();
   const sb = h.makeSandbox(Object.assign({ args }, fixture), meta, record).sandbox;
   const pending = vm.runInNewContext(pre.wrapped, sb, { filename: "solve-fleet", timeout: 8000 });
@@ -822,6 +1046,10 @@ function runOpen(args, fixture) {
 }
 function run(args, fixture) {
   const open = runOpen(args, fixture);
+  return open.done.then(function () { return open.record; });
+}
+function runSource(source, args, fixture) {
+  const open = runOpen(args, fixture, source);
   return open.done.then(function () { return open.record; });
 }
 function resultOf(record) {
@@ -1135,6 +1363,443 @@ function probedNums(record) {
   out.o2OnlyUsable = promptO2.indexOf("(1) FINDING-DELTA") >= 0;
   out.o2Count = !!(resO2 && resO2.auditEvents.some(function (e) {
     return e.event === "spec_findings_threaded" && e.count === 1; }));
+
+  // ------------------------------------------------------------------
+  // #524 item 1 — the BOUNDED spec-revision round. Before this the fleet had no
+  // REJECT fixture at the spec gate AT ALL: a non-APPROVE verdict produced a
+  // downgraded note and a list of what was wrong, and nothing ever corrected the
+  // spec. Runs SR* establish that gate, parameterised on the verdict and on what
+  // the reviser returns, so every row below reuses ONE shape.
+  //
+  // The reviser writes a SIBLING file, never over spec.md: the script cannot
+  // stat (T1), so an in-place rewrite makes a spec truncated by a dead reviser
+  // indistinguishable from a good one, and the planner reads it as
+  // authoritative. A script-chosen sibling path degrades to "the planner reads
+  // the original", which is the pre-#524 behaviour and the safe direction.
+  // ------------------------------------------------------------------
+  const SPEC_MD = RD + "/issue-11/spec.md";
+  const SPEC_R1 = RD + "/issue-11/spec-r1.md";
+  function reviseReturns(verdict, revReturn) {
+    const o = Object.assign({}, mediumReturns(), {
+      "spec-review:#11": { verdict: verdict, rc: 0, headline: "h",
+        blockingFindings: ["REVISE-FINDING-SENTINEL"] },
+    });
+    o["spec-revise:#11"] = (revReturn === undefined)
+      ? { path: SPEC_R1, rc: 0, headline: "h" }
+      : revReturn;
+    return o;
+  }
+  function promptOf(record, label) {
+    const c = record.agentCalls.find(function (x) { return x.label === label; });
+    return c ? c.prompt : "";
+  }
+  function countLabel(record, label) {
+    return labels(record).filter(function (l) { return l === label; }).length;
+  }
+  function rejectedFor(res, reason) {
+    return !!(res && res.auditEvents.some(function (e) {
+      return e.event === "spec_revision_rejected" && e.issue === 11 && e.reason === reason; }));
+  }
+
+  // SR1 — REVISIONS_REQUIRED, reviser answers at the script-derived path.
+  const recSR1 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED") });
+  const resSR1 = resultOf(recSR1);
+  out.srReviseCalls = countLabel(recSR1, "spec-revise:#11");
+  // The negative arm, read off the CLEAN fixture: an APPROVE spends no reviser.
+  // Without it SR1 proves only that the label can fire, never that it is gated.
+  out.srNoReviseOnApprove = countLabel(recB, "spec-revise:#11");
+
+  // SR2 — REJECT is not a second class of verdict: it takes the revision round
+  // on the same terms as REVISIONS_REQUIRED, and the reviewer is not re-run
+  // afterwards. A re-review here is the #308 unbounded-loop class rebuilt.
+  // The reviser SUCCEEDS on this arm, so the 1 below is the loop's `!revised`
+  // exit, NOT its bound — the bound is G14c plus B262c, on SR3/SR5.
+  const recSR2 = await run(buildArgs(), { agentReturns: reviseReturns("REJECT") });
+  out.srRejectSameRound = countLabel(recSR2, "spec-revise:#11") === 1
+    && countLabel(recSR2, "spec-review:#11") === 1;
+
+  const promptSR1Plan = promptOf(recSR1, "plan:#11");
+  out.srPlanReadsRevision = promptSR1Plan.indexOf(SPEC_R1) >= 0
+    && promptSR1Plan.indexOf(SPEC_MD) < 0;
+
+  // SR3 — a revision at a DIFFERENT in-run-dir path. underRunDir() is a PREFIX
+  // check and would accept this; the accept predicate is exact string equality
+  // against the path the script itself chose, so the planner can never be sent
+  // to a file no rung was told to write.
+  const recSR3 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: RD + "/issue-11/spec-final.md", rc: 0, headline: "h" }) });
+  const resSR3 = resultOf(recSR3);
+  const promptSR3Plan = promptOf(recSR3, "plan:#11");
+  out.srPathRejected = promptSR3Plan.indexOf(SPEC_MD) >= 0
+    && promptSR3Plan.indexOf("spec-final.md") < 0
+    && rejectedFor(resSR3, "path");
+
+  // SR4 — the other arm of the predicate: the right path, a non-zero rc.
+  const recSR4 = await run(buildArgs(), { agentReturns:
+    reviseReturns("REVISIONS_REQUIRED", { path: SPEC_R1, rc: 1, headline: "h" }) });
+  const resSR4 = resultOf(recSR4);
+  const promptSR4Plan = promptOf(recSR4, "plan:#11");
+  out.srRcRejected = promptSR4Plan.indexOf(SPEC_MD) >= 0
+    && promptSR4Plan.indexOf(SPEC_R1) < 0
+    && rejectedFor(resSR4, "rc");
+
+  // SR1 envelope discipline — the reviewer findings reach the reviser through
+  // the SAME sanitizeFindings + envWrap path #507 installed, and the text sits
+  // ONLY inside the envelope. Asserted by excising the block and searching the
+  // remainder, so a second raw copy anywhere else in the prompt reds.
+  const promptSR1Rev = promptOf(recSR1, "spec-revise:#11");
+  const ENV_OPEN_SR = "<external-untrusted-input source=\"solve-fleet-spec-review-findings-issue-11\">";
+  const ENV_END_SR = "</external-untrusted-input>";
+  const srOpenAt = promptSR1Rev.indexOf(ENV_OPEN_SR);
+  const srEndAt = srOpenAt >= 0 ? promptSR1Rev.indexOf(ENV_END_SR, srOpenAt) : -1;
+  const srOutside = (srOpenAt >= 0 && srEndAt > srOpenAt)
+    ? promptSR1Rev.slice(0, srOpenAt) + promptSR1Rev.slice(srEndAt)
+    : promptSR1Rev;
+  out.srFindingsEnveloped = srOpenAt >= 0 && srEndAt > srOpenAt
+    && srOutside.indexOf("REVISE-FINDING-SENTINEL") < 0;
+
+  // SR5 — a null reviser is a missing agent, not a corrupt spec: it counts as a
+  // design-phase null, the planner falls back to the ORIGINAL spec, and the
+  // chain proceeds. Silently planning against a path nothing wrote would be the
+  // strictly worse outcome.
+  const recSR5 = await run(buildArgs(), { agentReturns: reviseReturns("REVISIONS_REQUIRED", null) });
+  const resSR5 = resultOf(recSR5);
+  out.srNullDegrades = !!(resSR5 && resSR5.nullsByPhase && resSR5.nullsByPhase.design >= 1)
+    && labels(recSR5).indexOf("plan:#11") >= 0
+    && promptOf(recSR5, "plan:#11").indexOf(SPEC_MD) >= 0
+    && rejectedFor(resSR5, "null");
+
+  // The CAP itself, on the only arms that can observe it. SR1/SR2 count
+  // dispatches but their reviser SUCCEEDS, so they leave the loop on `revised`
+  // and would count 1 at ANY bound — the number they pin is the success flag,
+  // not the ceiling. SR3 (wrong path) and SR5 (null reviser) both leave
+  // `revised` false, so what the loop dispatches there IS the bound. Compared
+  // against the constant READ OUT of the script (G31's idiom), never a retyped
+  // literal: the shell's G14c pins that constant at 1, this pins that the loop
+  // spends exactly what it declares, and G32 joins the two readings so neither
+  // regex can rot into a vacuous pass.
+  const SPEC_REVISE_ROUNDS_JS = readInt(/^const SPEC_REVISE_ROUNDS = (\d+);/m, "the spec revision round cap");
+  out.srRoundsRead = SPEC_REVISE_ROUNDS_JS;
+  out.srRoundsBounded = countLabel(recSR3, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS
+    && countLabel(recSR5, "spec-revise:#11") === SPEC_REVISE_ROUNDS_JS;
+
+  // A revision does not consume the findings. The planner is pointed at the
+  // corrected spec AND still receives the reviewer's own list, inside the #507
+  // envelope — the revision is unverified, so the planner needs to see what the
+  // reviewer objected to in order to check the answer.
+  out.srRevisedKeepsFindings = promptSR1Plan.indexOf(ENV_OPEN_SR) >= 0
+    && promptSR1Plan.indexOf("REVISE-FINDING-SENTINEL") >= 0;
+
+  out.srRevisedAudit = !!(resSR1 && resSR1.auditEvents.some(function (e) {
+    return e.event === "spec_revised" && e.issue === 11; }))
+    && promptSR1Rev.indexOf(SPEC_R1) >= 0;
+
+  // SR6 — the verdict is an AGENT-RETURNED STRING. S.reviewed declares a closed
+  // enum, but a schema is a request to the MODEL and an arbitrary value can land
+  // on that key, so the verdict is a reviewer string exactly like a finding is.
+  // It reaches the reviser and the planner in a SCRIPT-CHOSEN spelling: inside
+  // the enum it passes through verbatim, outside it is named as what it is.
+  const recSR6 = await run(buildArgs(), { agentReturns: reviseReturns("VERDICT-SENTINEL-TEXT") });
+  const resSR6 = resultOf(recSR6);
+  out.srVerdictNotRaw = promptOf(recSR6, "spec-revise:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && promptOf(recSR6, "plan:#11").indexOf("VERDICT-SENTINEL-TEXT") < 0
+    && countLabel(recSR6, "spec-revise:#11") === 1
+    && promptSR1Rev.indexOf("REVISIONS_REQUIRED") >= 0;
+
+  // ------------------------------------------------------------------
+  // Runs PR* (#524 item 2) — the PLAN review gate.
+  //
+  // The plan is the artifact the implementers actually execute, and it was the
+  // only design artifact with no review at all. There is deliberately no plan
+  // REVISER — that would be a second bounded ladder and a second agent on the
+  // ceiling — so the reviewer's FINDINGS are its whole output, and where they
+  // go is the behaviour under test.
+  //
+  // They go to all THREE rungs that read the plan, not one. taskReviewPrompt
+  // already treats work outside the `## Task k:` section as a blocking finding,
+  // so telling only the implementer that a plan-review finding may be answered
+  // would put the two gates in direct contradiction over one document and burn
+  // a fix round on a CORRECT deviation; the fixer re-reads the same section one
+  // rung later (step 3 of taskFixPrompt), so leaving it out reintroduces the
+  // contradiction there.
+  // ------------------------------------------------------------------
+  const PLAN_ENV_OPEN = "<external-untrusted-input source=\"solve-fleet-plan-review-findings-issue-11\">";
+  const PLAN_ENV_END = "</external-untrusted-input>";
+  const PLAN_SENTINEL = "PLAN-REVIEW-FINDING-SENTINEL";
+  const FIXER_CLAUSE = "describes the PLAN, not the findings you are here to fix";
+  // The fixture has to REACH the fixer. A clean mediumReturns() approves every
+  // task at r1 and never dispatches fix:#11:t1:r1, so a row reading "" for that
+  // prompt would assert nothing at all; task 1 therefore draws one
+  // REVISIONS_REQUIRED review and one fix round here.
+  function planReviewReturns(planReview) {
+    return Object.assign({}, mediumReturns(), {
+      "plan-review:#11": planReview,
+      "review:#11:t1:r1": { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+        blockingFindings: ["task-level finding, unrelated to the plan review"] },
+      "fix:#11:t1:r1": task(1),
+      "review:#11:t1:r2": approve(),
+    });
+  }
+  function planReviewOf(findings) {
+    return { verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h", blockingFindings: findings };
+  }
+  // The three plan consumers, in the order the chain spends them.
+  function planConsumerPrompts(record) {
+    return ["impl:#11:t1", "review:#11:t1:r1", "fix:#11:t1:r1"].map(function (l) {
+      return promptOf(record, l);
+    });
+  }
+  // The prompt with its plan-review envelope EXCISED — null when the envelope is
+  // not there at all, so a caller cannot confuse "no second copy" with "no
+  // block". Every negative row below distinguishes the two.
+  function outsidePlanEnvelope(prompt) {
+    const openAt = prompt.indexOf(PLAN_ENV_OPEN);
+    const endAt = openAt >= 0 ? prompt.indexOf(PLAN_ENV_END, openAt) : -1;
+    return (openAt >= 0 && endAt > openAt)
+      ? prompt.slice(0, openAt) + prompt.slice(endAt)
+      : null;
+  }
+
+  const recPR = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf([PLAN_SENTINEL, "a second plan-level gap"])) });
+  const resPR = resultOf(recPR);
+  const prPrompts = planConsumerPrompts(recPR);
+
+  out.prReviewCalls = countLabel(recPR, "plan-review:#11");
+  out.prNotApprovedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_review_not_approved" && e.issue === 11
+      && e.verdict === "REVISIONS_REQUIRED"; }));
+  // The hand-off is ACCOUNTED, under this gate's own event name. #507's names
+  // stay reserved for the spec gate; one shared name would make the two gates
+  // indistinguishable in the audit trail the whole run is read back from.
+  out.prThreadedAudit = !!(resPR && resPR.auditEvents.some(function (e) {
+    return e.event === "plan_findings_threaded" && e.issue === 11
+      && e.count === 2 && e.truncated === false; }));
+
+  // One row per consumer rather than one `every()` row: a single aggregate
+  // would go red as a block and never say WHICH rung lost the hand-off.
+  out.prImplEnvelope = prPrompts[0].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[0].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  out.prReviewEnvelope = prPrompts[1].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[1].indexOf("(1) " + PLAN_SENTINEL) >= 0;
+  // The fixer additionally has to be told what the block IS: it arrives at that
+  // rung already holding a list of findings to fix (the review files), and two
+  // undistinguished lists is how a fixer starts "fixing" the plan.
+  out.prFixEnvelope = prPrompts[2].indexOf(PLAN_ENV_OPEN) >= 0
+    && prPrompts[2].indexOf("(1) " + PLAN_SENTINEL) >= 0
+    && prPrompts[2].indexOf(FIXER_CLAUSE) >= 0
+    && prPrompts[0].indexOf(FIXER_CLAUSE) < 0;
+
+  // The sentinel sits ONLY inside the envelope, in every one of the three.
+  out.prSentinelOnlyEnveloped = prPrompts.every(function (p) {
+    const rest = outsidePlanEnvelope(p);
+    return rest !== null && rest.indexOf(PLAN_SENTINEL) < 0;
+  });
+
+  // PR2 — the caps are the SAME ones #507 installed, not a second set. 12
+  // findings, the first over-long: 10 survive, and the long one is clipped with
+  // its tail dropped.
+  let prLong = "";
+  while (prLong.length < 590) prLong += "y";
+  prLong += "PLAN-TAIL-SENTINEL";
+  const prMany = [prLong];
+  for (let pi = 2; pi <= 12; pi += 1) prMany.push("P-" + ("0" + pi).slice(-2));
+  const recPR2 = await run(buildArgs(), { agentReturns:
+    planReviewReturns(planReviewOf(prMany)) });
+  out.prCaps = planConsumerPrompts(recPR2).every(function (p) {
+    return p.indexOf("(10) ") >= 0 && p.indexOf("(11) ") < 0
+      && p.indexOf("P-11") < 0 && p.indexOf("P-12") < 0
+      && p.indexOf("[truncated]") >= 0 && p.indexOf("PLAN-TAIL-SENTINEL") < 0;
+  });
+
+  // PR3 — APPROVE with nothing to say adds NO block anywhere. The negative arm:
+  // without it every row above is satisfied by an unconditional envelope.
+  const recPR3 = await run(buildArgs(), { agentReturns: planReviewReturns(approve()) });
+  out.prApproveNoEnvelope = planConsumerPrompts(recPR3).every(function (p) {
+    return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0
+      && p.indexOf("The plan reviewer returned") < 0;
+  });
+
+  // PR4 — a null reviewer is a missing agent, not a bad plan: it counts as a
+  // design-phase null and the chain proceeds against the plan as written.
+  // Stranding a written plan because its reviewer was skipped would be the
+  // strictly worse outcome.
+  const recPR4 = await run(buildArgs(), { agentReturns: planReviewReturns(null) });
+  const resPR4 = resultOf(recPR4);
+  out.prNullDegrades = !!(resPR4 && resPR4.nullsByPhase && resPR4.nullsByPhase.design >= 1)
+    && labels(recPR4).indexOf("impl:#11:t1") >= 0
+    && planConsumerPrompts(recPR4).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0; });
+
+  // PR5 — findings that ARRIVE and are unusable. A non-array degrades to "no
+  // usable finding" like any malformed return, but silently: the three
+  // consumers are told nothing is wrong, and a later reader cannot tell that
+  // from a reviewer that genuinely had nothing to say. Counts only, never text.
+  const recPR5 = await run(buildArgs(), { agentReturns:
+    planReviewReturns({ verdict: "REVISIONS_REQUIRED", rc: 0, headline: "h",
+      blockingFindings: "not an array" }) });
+  const resPR5 = resultOf(recPR5);
+  out.prUnusableAudit = !!(resPR5 && resPR5.auditEvents.some(function (e) {
+    return e.event === "plan_findings_unusable" && e.issue === 11
+      && e.arrayShaped === false; }))
+    && !!(resPR5 && resPR5.auditEvents.every(function (e) { return e.event !== "solve_chain_threw"; }))
+    && planConsumerPrompts(recPR5).every(function (p) {
+      return p.length > 0 && p.indexOf(PLAN_ENV_OPEN) < 0 && p.indexOf("not an array") < 0; });
+
+  // ------------------------------------------------------------------
+  // Runs SEC* (#524 item 3) — the RISK-GATED security research lens.
+  //
+  // The triage predicate was never missing: lib/solve-launcher.sh computes
+  // `risk_signals` for EVERY issue and lib/dispatch.sh persists it into the
+  // prepared root request on every backend. It was dropped on exactly one hop —
+  // the per-issue manifest record, which is the ONLY channel into a Workflow
+  // script (no fs). These runs drive the field from the far end of that hop.
+  //
+  // Gated on PRESENCE, never on a vocabulary: re-declaring solve_triage.py's
+  // RISK_PATTERNS names in the fleet would be a second uncompared copy of a
+  // closed vocabulary (#370) and would have the script invent a risk taxonomy
+  // the issue forbids outright. Emptiness needs no vocabulary.
+  // ------------------------------------------------------------------
+  const SEC_LABEL = "research:#11:security";
+  const LENS_BODY_OPEN = "Investigate ONLY through your lens:\n";
+  const LENS_BODY_END = "\n\nYou are READ-ONLY";
+  function secReturns(riskFields) {
+    return Object.assign({}, mediumReturns(), {
+      "manifest-intake": intake([rec(11, "medium", riskFields), rec(12, "trivial")]),
+      "research:#11:security": { artifactPath: RD + "/issue-11/research-security.md", rc: 0, headline: "h" },
+    });
+  }
+  function researchLabels(record) {
+    return labels(record).filter(function (l) { return /^research:#11:/.test(l || ""); });
+  }
+  // The lens body the agent is ACTUALLY HANDED, sliced out of the rendered
+  // prompt rather than read off the source: a brief that stopped reaching the
+  // prompt would still grep clean in the file, which is precisely how a lens
+  // silently receiving another lens's brief goes unnoticed.
+  function lensBody(record, lens) {
+    const p = promptOf(record, "research:#11:" + lens);
+    const at = p.indexOf(LENS_BODY_OPEN);
+    if (at < 0) return null;
+    const end = p.indexOf(LENS_BODY_END, at);
+    return end > at ? p.slice(at + LENS_BODY_OPEN.length, end) : null;
+  }
+  function riskEventCount(res, name) {
+    return res ? res.auditEvents.filter(function (e) { return e.event === name; }).length : -1;
+  }
+
+  // SEC1 — one non-blank signal buys the fourth lens.
+  const recSEC = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["security"] }) });
+  out.secLensCount = researchLabels(recSEC).length;
+  out.secDispatched = researchLabels(recSEC).indexOf(SEC_LABEL) >= 0;
+
+  // SEC2/SEC3/SEC4 — the three negative shapes, which are three different facts:
+  // an EMPTY array (triage ran and found nothing), an ABSENT key (an unpatched
+  // launcher, or a relay that dropped the field), and a WHITESPACE-ONLY member
+  // (the predicate is non-blank, not merely non-empty — otherwise a single
+  // stray space in the manifest buys an agent on every issue in the batch).
+  const recSECE = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: [] }) });
+  out.secEmptyLensCount = researchLabels(recSECE).length;
+  out.secEmptyNoLens = researchLabels(recSECE).indexOf(SEC_LABEL) < 0;
+  const recSECA = await run(buildArgs(), { agentReturns: secReturns(null) });
+  out.secAbsentLensCount = researchLabels(recSECA).length;
+  const recSECW = await run(buildArgs(), { agentReturns: secReturns({ riskSignals: ["   "] }) });
+  out.secBlankLensCount = researchLabels(recSECW).length;
+
+  // SEC5 — the silent-fallthrough assertion the issue's item-3 hazard demands.
+  // lensBrief() used to end in a bare `return <test-coverage brief>`, so ANY
+  // name it did not recognise was handed the coverage brief and nothing failed.
+  // The needle is the coverage brief's own first line; the emptiness guard is
+  // what stops this row passing on a prompt that was never rendered.
+  const secPrompt = promptOf(recSEC, SEC_LABEL);
+  out.secNotCoverageBrief = secPrompt.length > 0 && secPrompt.indexOf("Detect the test runner") < 0;
+
+  // SEC6 — totality, asserted WITHOUT naming any brief's text: four lenses, four
+  // pairwise-distinct bodies. A fallthrough of any one lens onto another's brief
+  // reds here even if the wording of every brief changes tomorrow.
+  const secBodies = ["codebase", "constraints", "test-coverage", "security"]
+    .map(function (l) { return lensBody(recSEC, l); });
+  out.secBodiesDistinct = secBodies.length === 4
+    && secBodies.every(function (b) { return typeof b === "string" && b.length > 0; })
+    && secBodies.every(function (b, i) {
+      return secBodies.every(function (o, j) { return i === j || b !== o; });
+    });
+
+  // SEC7 — an unrecognised lens name must fail the issue's chain LOUDLY.
+  // parallel()'s documented contract maps a throwing thunk to null in its slot
+  // and never rejects, so a lensBrief throw raised INSIDE a thunk would be
+  // laundered into "a research agent returned null" — a real defect wearing the
+  // costume of a skipped agent. Building the prompts eagerly puts the throw in
+  // solveOne's own try, where it becomes solve_chain_threw + a FAILED record.
+  //
+  // The mutation is ASSERTED, not assumed: a replacement that matched nothing
+  // would run the unmutated script and certify a claim it never tested.
+  const BASE_LENS_DECL = 'const BASE_LENSES = ["codebase", "constraints", "test-coverage"];';
+  const BOGUS_SRC = src.split(BASE_LENS_DECL).join(
+    'const BASE_LENSES = ["codebase", "constraints", "test-coverage", "no-such-lens"];');
+  if (BOGUS_SRC === src) {
+    throw new Error("FIXTURE_ERROR: the B278 mutation did not apply — BASE_LENSES is not declared "
+      + "as one line the fixture can rewrite, so the unknown-lens row would test nothing");
+  }
+  const recSECX = await runSource(BOGUS_SRC, buildArgs(), { agentReturns: mediumReturns() });
+  const resSECX = resultOf(recSECX);
+  out.secUnknownLensThrows = !!(resSECX && resSECX.auditEvents.some(function (e) {
+    return e.event === "solve_chain_threw" && e.issue === 11; }))
+    && !!(resSECX && resSECX.nullsByPhase && (resSECX.nullsByPhase.research || 0) === 0)
+    && researchLabels(recSECX).length === 0;
+
+  // SEC8 — presence and COUNTS only (DR-5). The signal strings are triage
+  // output about the issue; the lens's brief is the same work whatever they
+  // said, so forwarding them would put an agent-adjacent string in a prompt for
+  // no information gain. Two sentinels plus one blank: the count is of NON-BLANK
+  // members, which is the same predicate the gate itself applies.
+  const SEC_SENTINEL_A = "RISK-SIGNAL-SENTINEL-A";
+  const SEC_SENTINEL_B = "RISK-SIGNAL-SENTINEL-B";
+  const recSECS = await run(buildArgs(), { agentReturns:
+    secReturns({ riskSignals: [SEC_SENTINEL_A, "   ", SEC_SENTINEL_B] }) });
+  const resSECS = resultOf(recSECS);
+  const secAuditJson = JSON.stringify(resSECS ? resSECS.auditEvents : []);
+  out.secNoSignalText = recSECS.agentCalls.length > 0
+    && recSECS.agentCalls.every(function (c) {
+      const p = String(c.prompt);
+      return p.indexOf(SEC_SENTINEL_A) < 0 && p.indexOf(SEC_SENTINEL_B) < 0;
+    })
+    && secAuditJson.indexOf(SEC_SENTINEL_A) < 0 && secAuditJson.indexOf(SEC_SENTINEL_B) < 0;
+  const secDispatchEvent = resSECS ? resSECS.auditEvents.find(function (e) {
+    return e.event === "security_lens_dispatched" && e.issue === 11; }) : null;
+  out.secSignalCount = secDispatchEvent ? secDispatchEvent.signalCount : null;
+
+  // SEC9/SEC10/SEC11 — the NEGATIVE branch's failure signal. With `riskSignals`
+  // absent and `riskSignals: []` behaving identically, a relay that drops,
+  // renames or mangles the field is indistinguishable from a genuinely risk-free
+  // batch and the lens silently never runs. The launcher therefore declares a
+  // run-wide COUNT derived from the manifest it just wrote, and the script joins
+  // it against what the relay actually delivered.
+  const recSECM = await run(buildArgs(null, { riskIssueCount: 1 }),
+    { agentReturns: secReturns(null) });
+  const resSECM = resultOf(recSECM);
+  out.secRelayMismatch = !!(resSECM && resSECM.auditEvents.some(function (e) {
+    return e.event === "risk_signals_relay_mismatch" && e.declared === 1 && e.observed === 0; }))
+    && !!(resSECM && resSECM.auditEvents.some(function (e) {
+      return e.event === "risk_signals_absent" && e.records === 2; }));
+
+  // A FAITHFUL relay is silent — without this row the two events above are
+  // satisfied by a join that fires unconditionally.
+  const recSECF = await run(buildArgs(null, { riskIssueCount: 1 }), { agentReturns:
+    Object.assign({}, secReturns({ riskSignals: ["security"] }), {
+      "manifest-intake": intake([rec(11, "medium", { riskSignals: ["security"] }),
+        rec(12, "trivial", { riskSignals: [] })]),
+    }) });
+  const resSECF = resultOf(recSECF);
+  out.secFaithfulQuiet = riskEventCount(resSECF, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECF, "risk_signals_absent") === 0;
+
+  // A LEGACY envelope (no riskIssueCount at all) degrades to SILENCE, not to
+  // noise: recSECA relays records with no `riskSignals` key whatsoever, which is
+  // exactly the shape that fires both events once a count is declared.
+  const resSECA = resultOf(recSECA);
+  out.secLegacyQuiet = riskEventCount(resSECA, "risk_signals_relay_mismatch") === 0
+    && riskEventCount(resSECA, "risk_signals_absent") === 0;
+
   // ------------------- #508: the per-task chain and its gate -------------------
 
   // Run L — the fix ladder is BOUNDED by FIX_ROUNDS. A reviewer that never
@@ -1284,8 +1949,16 @@ function probedNums(record) {
 
   // Run S — CB1 arithmetic is PINNED, not merely "it trips at 2". One design
   // issue projects 2 batched relays (intake + PR-claim verification, #515)
-  // + 2 solvers + (6 design + 24 implement - 1) for the per-task chain (#508).
-  const PROJ = 2 + 2 + 1 * (6 + 24 - 1);   // 33
+  // + 2 solvers + (design base + implement budget - 1) for the per-task chain
+  // (#508). Both scalars are READ OUT of the script; only the SHAPE of the
+  // arithmetic is retyped here, and that shape is what B62/B63 pin. Retyping
+  // the scalars too would mean hand-editing a literal nothing derives every
+  // time the design chain gains a rung — the #370 shape G31 exists to close.
+  const DESIGN_BASE = readInt(/designCount \* \((\d+) \+ IMPLEMENT_AGENT_BUDGET - 1\)/, "the design base");
+  const FLEET_BUDGET_JS = readInt(/IMPLEMENT_AGENT_BUDGET = clampInt\(CFG\.implementBudget, 4, 96, (\d+)\)/, "the implement budget");
+  const PROJ = 2 + 2 + 1 * (DESIGN_BASE + FLEET_BUDGET_JS - 1);
+  out.sDesignBase = DESIGN_BASE;
+  out.sBudget = FLEET_BUDGET_JS;
   const recS1 = await run(buildArgs(null, { maxAgents: PROJ }), { agentReturns: mediumReturns() });
   out.sAtCeiling = !!(resultOf(recS1) && resultOf(recS1).cb1Tripped);
   const recS2 = await run(buildArgs(null, { maxAgents: PROJ - 1 }), { agentReturns: mediumReturns() });
@@ -1299,7 +1972,14 @@ function probedNums(record) {
 
   // Every new run must also be harness-clean — an undeclared opts.phase on any
   // of the four new agent kinds shows up here and nowhere else.
-  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT]
+  out.zViolations = [recB, recTL, recTM, openN.record, recTO, recP, recQ, recR, recU, recV, recS1, recS2, recT,
+    recSR1, recSR2, recSR3, recSR4, recSR5, recSR6,
+    recPR, recPR2, recPR3, recPR4, recPR5,
+    // recSECX is the bogus-lens MUTANT and belongs here too: the throw it
+    // provokes is caught by solveOne, so a mutated vocabulary must still leave
+    // a harness-clean run — an undeclared phase or a stray global phase() on
+    // that path would show up nowhere else.
+    recSEC, recSECE, recSECA, recSECW, recSECS, recSECM, recSECF, recSECX]
     .reduce(function (n, r) { return n + r.violations.length; }, 0);
   // ------------------------------------------------------------------ #515
   // Claim verification. Every run below is ultimately about ONE rule: the proof
@@ -2333,7 +3013,12 @@ else
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
-  check bDesign 3            "B13 medium tier runs spec + review + plan"
+  # spec + spec-review + plan + plan-review = 4 on the CLEAN fixture. The
+  # revision round is a fifth design rung and it is CONDITIONAL on a non-APPROVE
+  # verdict, so this row is also the proof it stayed conditional — B254/B255 are
+  # the pair that move it. The plan review is NOT conditional: every accepted
+  # plan is reviewed, which is why the approving fixture spends it.
+  check bDesign 4            "B13 medium tier runs spec + spec-review + plan + plan-review, and spends no reviser on an approved spec"
   # RE-CUT (#508): the medium issue's implement phase is no longer one agent.
   # A 2-task plan spends impl t1 + review t1r1 + impl t2 + review t2r1 + deliver
   # = 5, and the trivial issue still spends its single solver.
@@ -2420,6 +3105,65 @@ else
   check oNoEnvelope true            "B250 a non-array return leaves the plan prompt envelope-free"
   check o2OnlyUsable true           "B251 non-string and whitespace-only findings are dropped, the usable one renumbered"
   check o2Count true                "B252 the audit count reflects the SURVIVING findings, not the raw list"
+
+  # #524 item 1 — the bounded spec-revision round.
+  # B254/B256 drive a reviser that SUCCEEDS, so they leave the loop on its
+  # `!revised` exit and say nothing about the bound at any value of
+  # SPEC_REVISE_ROUNDS. The cap is G14c (the constant) plus B262c (the loop
+  # obeying it on an arm where the reviser never succeeds); these two rows claim
+  # only what they can see.
+  check srReviseCalls 1             "B254 a REVISIONS_REQUIRED verdict dispatches a spec reviser, and stops the moment one lands usably"
+  check srNoReviseOnApprove 0       "B255 an APPROVE dispatches none — the revision round is gated, not unconditional"
+  check srRejectSameRound true      "B256 REJECT takes the revision round on the same terms, and the reviewer is never re-run after it"
+  check srPlanReadsRevision true    "B257 an accepted revision is what the planner is pointed at, never the superseded spec"
+  check srPathRejected true         "B258 a revision at a different in-run-dir path is rejected (exact equality, not a prefix check) and audited"
+  check srRcRejected true           "B259 a non-zero rc at the right path is rejected too, and audited"
+  check srFindingsEnveloped true    "B260 the reviewer findings reach the reviser ONLY inside the #507 envelope"
+  check srNullDegrades true         "B261 a null reviser counts as a design null and the planner falls back to the original spec"
+  check srRevisedAudit true         "B262 the accepted revision is audited and the reviser is given the script-derived output path"
+  check srVerdictNotRaw true        "B262b the agent-returned verdict reaches no prompt raw — a value outside the closed enum is named, not echoed"
+  check srRoundsBounded true        "B262c the cap is the LOOP's bound: on the arms where the reviser never lands usably, exactly SPEC_REVISE_ROUNDS revisers are spent"
+  check srRevisedKeepsFindings true "B262d an accepted revision does not consume the findings — the planner still gets them, enveloped, to check the unverified revision against"
+
+  # #524 item 2 — the plan review gate and its three consumers.
+  #
+  # B270 is the NEGATIVE arm and passes on the pre-#524 tree by construction (no
+  # envelope exists to find): it is a regression pin, not a red-first row, and
+  # without it every positive row here is satisfied by an UNCONDITIONAL block.
+  # Every other row below fails without the gate.
+  check prReviewCalls 1             "B263 an accepted plan is reviewed exactly once — the design artifact the implementers execute no longer ships unreviewed"
+  check prThreadedAudit true        "B264 the hand-off is accounted under this gate's OWN event name (plan_findings_threaded), not the spec gate's"
+  check prNotApprovedAudit true     "B265 a non-APPROVE plan verdict is audited, never silent"
+  check prImplEnvelope true         "B266 the plan reviewer's findings reach the task IMPLEMENTER inside the #507 envelope, numbered"
+  check prReviewEnvelope true       "B267 they reach the task REVIEWER too — the two gates cannot contradict each other over one plan"
+  check prFixEnvelope true          "B268 they reach the FIXER, marked as context about the plan rather than the findings it is there to fix"
+  check prCaps true                 "B269 the #507 count and per-string caps bind the plan-review findings in all three prompts — no second set of caps"
+  check prApproveNoEnvelope true    "B270 an APPROVE with nothing to say adds NO block to any of the three prompts"
+  check prNullDegrades true         "B271 a null plan reviewer counts as a design null and the task chain still runs, envelope-free"
+  check prSentinelOnlyEnveloped true "B272 a reviewer-returned string appears in NO plan-consumer prompt outside its envelope block"
+  check prUnusableAudit true        "B272b a plan-review findings array that arrives UNUSABLE is audited by count, degrades to no block, and never takes the chain down"
+
+  # #524 item 3 — the risk-gated security lens, and lensBrief() made total.
+  #
+  # B274-B276 are the negative arms and pass on the pre-#524 tree by
+  # construction (no fourth lens exists to find): they are what stops every
+  # positive row being satisfied by a lens that runs unconditionally, which is
+  # the option the issue offers and this change deliberately does not take.
+  check secLensCount 4              "B273 a non-blank triage risk signal buys the fourth research lens"
+  check secDispatched true          "B273b that lens is dispatched under its own label (research:#11:security)"
+  check secEmptyLensCount 3         "B274 an EMPTY risk-signal array spends no security agent"
+  check secEmptyNoLens true         "B274b ...and dispatches no research:#11:security label"
+  check secAbsentLensCount 3        "B275 an ABSENT risk-signal key is back-compatible: an unpatched launcher still gets the 3-lens fan-out"
+  check secBlankLensCount 3         "B276 the predicate is NON-BLANK, not non-empty — a whitespace-only signal buys nothing"
+  check secNotCoverageBrief true    "B277 the security lens is NOT handed the test-coverage brief (the silent-fallthrough hazard)"
+  check secBodiesDistinct true      "B279 all four rendered lens briefs are pairwise distinct — lensBrief() is total, asserted without naming brief text"
+  check secUnknownLensThrows true   "B278 an unknown lens FAILS the issue's chain loudly (solve_chain_threw), never laundered by parallel() into a research null"
+  check secNoSignalText true        "B280 no risk-signal STRING reaches any prompt or any audit event (DR-5)"
+  check secSignalCount 2            "B281 security_lens_dispatched carries the count of NON-BLANK signals, and nothing else"
+  check secRelayMismatch true       "B282 a declared count with a relay that dropped the field audits risk_signals_relay_mismatch AND risk_signals_absent"
+  check secFaithfulQuiet true       "B283 a faithful relay audits neither — the join is a comparison, not an unconditional event"
+  check secLegacyQuiet true         "B284 a legacy envelope (no riskIssueCount) degrades to SILENCE, not to noise, whatever the records carry"
+
   check lFixCalls 3          "B72 the fix ladder dispatches at most FIX_ROUNDS=3 fixers"
   check lReviewCalls 4       "B73 a bounded ladder means FIX_ROUNDS+1=4 reviews, never an unbounded loop"
   check lExhaustedAudit true "B74 ladder exhaustion is audited (task_fix_rounds_exhausted), never silent"
@@ -2485,6 +3229,27 @@ else
 
   check sAtCeiling false     "B62 CB1 does NOT trip at exactly the projected agent count"
   check sBelowCeiling true   "B63 CB1 trips one below the projection — the formula is pinned, not just the breaker"
+
+  # G32 — B62/B63 above only bite while Run S's projection still tracks the
+  # script, and B262c only bites while the fixture's cap reading is the script's
+  # cap. Two INDEPENDENT extraction paths read the same three constants — the
+  # shell `sed` beside S22b/G31/G14c and the fixture's JS `RegExp` — so if
+  # either rots (a reformatted term, a renamed constant) this row reds by name
+  # instead of the projection silently drifting to a stale number, or B262c
+  # comparing a dispatch count against a cap nobody enforces. Deliberately NOT a
+  # `check`: the agreement is over three fields at once and splitting it into
+  # three rows would report thirds of a single fact.
+  G32_JS="$(printf '%s' "$FIXTURE_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String(o.sDesignBase)+":"+String(o.sBudget)+":"+String(o.srRoundsRead));}catch(e){process.stdout.write("PARSE_ERROR:"+e.message);}})' 2>/dev/null)"
+  G32_SH="${FLEET_DESIGN_BASE}:${FLEET_BUDGET}:${FLEET_SPEC_REVISE_ROUNDS}"
+  if [ -z "$FLEET_DESIGN_BASE" ] || [ -z "$FLEET_BUDGET" ] || [ -z "$FLEET_SPEC_REVISE_ROUNDS" ]; then
+    # G31/S22b/G14c already failed by name; comparing against a blank field here
+    # would report the same defect a second time under a misleading heading.
+    fail "G32 skipped its join — the shell could not read one of the fleet's constants (read '$G32_SH'); see G31, S22b and G14c"
+  elif [ "$G32_JS" = "$G32_SH" ]; then
+    pass "G32 the fixture's own reading of the design base, implement budget and revision cap agrees with the shell's ($G32_JS)"
+  else
+    fail "G32 the fixture and the shell disagree about the fleet's constants (shell read $G32_SH, fixture read $G32_JS)"
+  fi
 
   check tFallback true       "B64a a design tier with no usable plan falls back to the single solver"
   check tNoImpl true         "B64b no task agent is dispatched without a plan (no plan, no tasks, no gate)"

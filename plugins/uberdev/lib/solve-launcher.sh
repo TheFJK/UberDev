@@ -1127,9 +1127,17 @@ if [[ "${UBERDEV_RESOLVED_BACKEND:-}" == "workflow" ]]; then
     for ISSUE_NUM in "${ISSUE_NUMS[@]}"; do
       [ "$_mfirst" = "1" ] || printf ','
       _mfirst=0
+      # risk_signals is written ALWAYS, including as [] (#524 item 3). The
+      # triage predicate is computed for every issue above and persisted into
+      # the prepared root request on every backend; this record is the ONLY
+      # channel into a Workflow script (no fs), and it was the one hop the value
+      # never crossed. Writing the empty array rather than omitting the key is
+      # what lets the fleet read an ABSENT key as "the relay dropped it" instead
+      # of as "this issue had no risk" — the two are otherwise indistinguishable
+      # and the security research lens is gated on the difference.
       python3 -I -c '
 import json,sys
-issue,tier,prompt_file,root_request=sys.argv[1:5]
+issue,tier,prompt_file,root_request,risk_signals=sys.argv[1:6]
 rec={"issue":int(issue),"tier":tier,"prompt_file":prompt_file}
 try:
     r=json.loads(root_request) if root_request else {}
@@ -1138,14 +1146,44 @@ except ValueError:
 for key in ("context_file","context_sha256","run_id"):
     if r.get(key):
         rec[key]=r[key]
+try:
+    rs=json.loads(risk_signals) if risk_signals else []
+except ValueError:
+    rs=[]
+if not isinstance(rs,list):
+    rs=[]
+rec["risk_signals"]=[s for s in rs if isinstance(s,str)]
 print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
 ' "$ISSUE_NUM" "${TIERS[$_midx]}" "$UBERDEV_TMPDIR/solve-prompt-$ISSUE_NUM.txt" "${ROOT_REQUESTS[$_midx]:-}" \
+        "${RISKS[$_midx]}" \
         || { echo "error: failed to build the solve-fleet manifest record for #$ISSUE_NUM" >&2; exit 2; }
       _midx=$((_midx + 1))
     done
     printf ']}\n'
   } > "$SOLVE_FLEET_MANIFEST" || { echo "error: failed to write $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
   chmod 600 "$SOLVE_FLEET_MANIFEST" 2>/dev/null || true
+
+  # PAIRED PREDICATE — "at least one non-blank string".
+  # Its twin is riskSignalCount() in skills/solve-fleet/workflow.js, which
+  # re-counts the RELAYED records with the same rule; each comment names the
+  # other, and tests/solve-fleet-workflow.test.sh S24 joins the two ends so
+  # neither can ship alone. They must agree by construction: the script audits
+  # their disagreement as a RELAY failure, so a predicate that drifted here
+  # would raise a fault against an innocent relay.
+  #
+  # Derived from the MANIFEST rather than from RISKS[] directly, so both ends of
+  # the comparison describe the same bytes: a count taken from the array while
+  # the record-builder above wrote something else would report a disagreement
+  # that does not exist, and hide one that does. Failing loud beats emitting a
+  # wrong number — a fleet told "1 risky issue" that sees none audits a relay
+  # failure, and a wrong declaration would manufacture exactly that false alarm.
+  SOLVE_FLEET_RISK_ISSUES="$(python3 -I -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(1 for r in d["issues"]
+          if any(isinstance(s,str) and s.strip() for s in r.get("risk_signals",[]))),end="")
+' "$SOLVE_FLEET_MANIFEST")" \
+    || { echo "error: failed to derive the solve-fleet risk-issue count from $SOLVE_FLEET_MANIFEST" >&2; exit 2; }
 
   _uberdev_audit_emit solve_workflow_fleet_prepared \
     "{\"issues\":${#ISSUE_NUMS[@]},\"manifest\":\"$SOLVE_FLEET_MANIFEST\",\"concurrency\":$MAX_PARALLEL_BG_AGENTS}"
@@ -1159,6 +1197,7 @@ print(json.dumps(rec,sort_keys=True,separators=(",",":")),end="")
     runDirAbs="$UBERDEV_TMPDIR" \
     issues="$SOLVE_FLEET_ISSUES" \
     issueCount="${#ISSUE_NUMS[@]}" \
+    riskIssueCount="$SOLVE_FLEET_RISK_ISSUES" \
     concurrency="$MAX_PARALLEL_BG_AGENTS" \
     autoMode="$([[ "$AUTO_MODE" == "1" ]] && echo true || echo false)" \
     repoSlug="$REPO_SLUG" \

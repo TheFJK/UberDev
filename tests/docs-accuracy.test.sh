@@ -1908,6 +1908,76 @@ assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*
   'blocking findings' \
   "T14.6 RFC 0015 R-2 records that the reviewer findings ARE threaded"
 
+# #524 item 1. Both chain rows already claimed "one revision round" while NO
+# reviser was ever dispatched — a doc statement about a rung that did not exist.
+# The rows below need a needle the pre-#524 prose cannot satisfy, so they name
+# the artifact the round writes: a versioned sibling, never an in-place rewrite
+# of spec.md. That is the load-bearing half (the script cannot stat, so a
+# truncated in-place spec would be indistinguishable from a good one), which is
+# exactly the half a reader must not have to infer.
+#
+# Anchored to the medium/large TIER ROW, not to the file: each doc describes the
+# chain in exactly one line, and a file-wide needle would let the claim drift
+# into a footnote while the row a reader actually consults stayed stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.7 SKILL.md chain row names the versioned artifact the bounded revision round writes"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*spec-r1\.md' \
+  "T14.8 RFC 0015 chain row names the same versioned revision artifact"
+
+# #524 item 2. Naming the plan REVIEWER is not enough on its own: the rung has
+# no reviser, so its findings ARE its whole output and a chain row that says a
+# plan reviewer runs, without saying where what it finds goes, describes a stage
+# that could be theatre. Both halves are therefore in the one anchored needle.
+# Same TIER-ROW anchor as T14.7/T14.8, for the same reason.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+  "T14.9a SKILL.md chain row names the plan reviewer AND the three rungs its findings reach"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*plan reviewer.*implementer, task reviewer and fixer' \
+  "T14.9b RFC 0015 chain row names the plan reviewer AND the three rungs its findings reach"
+
+# R-2 is the RFC's own register of what the translation still LOSES. It named
+# the plan reviewer as the gap that remained; shipping the gate without moving
+# it leaves the document asserting the opposite of the code. Positive and
+# absence rows in a PAIR (the T13 doctrine): an absence-only predicate is
+# disjoint from the drift it must catch, and a positive-only one passes while
+# the stale sentence sits two lines below it.
+assert_in_section "$DISPATCH15_RFC" '^- \*\*R-2 — medium-tier fidelity' '^- \*\*R-3' \
+  '#524 item 2 closed the plan-review gap' \
+  "T14.10 RFC 0015 R-2 records that the plan review gate now exists"
+# Sliced, then guarded on non-emptiness: an awk range whose anchors were renamed
+# yields nothing, and grep over nothing is a PASS that inspected no bytes (#347).
+R2_SECTION="$(awk '/^- \*\*R-2 — medium-tier fidelity/,/^- \*\*R-3/' "$DISPATCH15_RFC")"
+if [ -z "$R2_SECTION" ]; then
+  echo "  FAIL  T14.10b the R-2 slice is EMPTY — its anchors are gone, and an absence check over nothing passes vacuously"
+  FAIL=$((FAIL + 1))
+elif grep -qF 'What remains missing is the' <<<"$R2_SECTION"; then
+  echo "  FAIL  T14.10b R-2 still names a remaining missing design rung — the plan reviewer ships in #524 item 2"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS  T14.10b R-2 no longer describes a design-review rung as missing"
+  PASS=$((PASS + 1))
+fi
+
+# #524 item 3. The security lens is the first CONDITIONAL research rung, and the
+# condition lives in another file: lib/solve-launcher.sh's triage `risk_signals`,
+# carried one hop through the manifest record and joined run-wide by the
+# `riskIssueCount` envelope key. Three separate statements, so three rows —
+# naming the lens while leaving the gate undocumented would describe a fan-out
+# that reads as unconditional, which is precisely the design this change
+# rejected, and an operator reading the envelope table would find a key the
+# launcher sends and the doc does not admit to.
+#
+# Same TIER-ROW anchor as T14.7-T14.9 for the chain rows, for the same reason:
+# each doc describes the chain in exactly one line, and a file-wide needle lets
+# the claim drift into a footnote while the row a reader consults stays stale.
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11a SKILL.md chain row names the security lens AND the triage field that gates it"
+assert_grep "$DISPATCH15_RFC" '^\| .medium., .large.*security. lens.*risk_signals' \
+  "T14.11b RFC 0015 chain row names the same risk-gated lens"
+assert_grep "$SOLVE_FLEET_SKILL" 'one record per issue.*risk_signals' \
+  "T14.11c SKILL.md records that the manifest record carries risk_signals — the one hop the value crosses"
+assert_grep "$SOLVE_FLEET_SKILL" '^\| .riskIssueCount. \|' \
+  "T14.11d SKILL.md envelope-keys table documents riskIssueCount"
+
 echo "== T15: RFC 0013 §13 <-> run_manifest.py ALLOWED_FIELDS, compared both directions (#518) =="
 # Extraction. The RFC's field list lives in a ```text fence that does NOT
 # immediately follow its anchor line — there is a blank line between them — so
