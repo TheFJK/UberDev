@@ -8,8 +8,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 Consolidated landing of 20 pull requests (#567, #569, #570, #573–#577, #584–#587, #589,
 #591, #593, #596–#600), combined onto one review branch by `/uberdev:review-pr` Phase 0
-and reviewed once as a unit. Closes #524, #530–#536, #546, #548, #549, #551, #554,
-#556–#558, #560, #563–#565.
+and reviewed once as a unit. Closes #524, #531, #532, #533, #534, #546, #548, #549,
+#551, #554, #556, #557, #560, #563, #565.
+
+#530, #535, #536, #558 and #564 are NOT closed by this release. Their solver chains
+stopped early and said so, so their `Closes` lines were removed from the combined PR
+rather than left to auto-close unfinished work; the landed half is described below and
+each issue stays open with its remainder. An earlier draft of this entry listed them as
+closed, which contradicted the merge intent.
 
 #555, #559, #561 and #562 were closed unchanged: all four were already fixed on `main` by
 PR #553, which under-credited its `Closes:` list. Each was verified by executing the suite
