@@ -488,6 +488,20 @@ echo "== Git metadata mutex uses the validated Python argv and records its live 
 MUTEX_OWNER_TMP="$(mktemp -d)"
 MUTEX_OWNER_BASH="$(command -v bash)"
 mkdir -p "$MUTEX_OWNER_TMP/tools"
+# The holder PID this fixture compares against must be obtained the SAME way
+# lib/live-semaphore.sh obtains it, because `$BASHPID` does not exist in bash
+# 3.2 — which is exactly the /bin/bash the only macOS job runs. Reading it there
+# yielded an empty expected PID, so the comparison failed with no output at all
+# while the production resolver it is testing was working correctly: the fixture
+# was less portable than the code (see the "Bash 3.2 has no BASHPID" note at
+# lib/live-semaphore.sh).
+#
+# A directly-invoked child observes the shell that spawned it as its PPID, and
+# writes it through a FILE rather than a command substitution — inside `$( )`
+# the PPID would be the substitution subshell, not the shell holding the
+# critical section.
+MUTEX_OWNER_PID_HELPER="$MUTEX_OWNER_TMP/holder-pid.sh"
+printf 'builtin printf "%%s\\n" "$PPID"\n' >"$MUTEX_OWNER_PID_HELPER"
 _dispatch_test_populate_mutex_tools "$MUTEX_OWNER_TMP/tools" || {
   echo "  FAIL  portable mutex fixture tools are unavailable"
   exit 1
@@ -522,7 +536,9 @@ SH
     PATH="$2:$3"
     unset _UBERDEV_PYTHON_EXE _UBERDEV_PYTHON_PREFIX
     _uberdev_dispatch_resolve_python || exit 90
-    holder_pid="$BASHPID"
+    BASH_ENV="" ENV="" "$6" --noprofile --norc -p "$5" >"$4/holder-pid.out" 2>/dev/null || exit 96
+    read -r holder_pid <"$4/holder-pid.out" || exit 96
+    case "$holder_pid" in ""|*[!0-9]*) exit 96 ;; esac
     expected_pid="$holder_pid"
     case "$(uname -s 2>/dev/null)" in
       MINGW*|MSYS*|CYGWIN*)
@@ -542,7 +558,7 @@ SH
     done
     [ -z "$remaining" ] || exit 94
     printf "holder=%s expected=%s recorded=%s match=yes\n" "$holder_pid" "$expected_pid" "$recorded_pid"
-  ' _ "$DISPATCH_LIB" "$resolver_dir" "$MUTEX_OWNER_TMP/tools" "$resolver_dir" 2>&1)" \
+  ' _ "$DISPATCH_LIB" "$resolver_dir" "$MUTEX_OWNER_TMP/tools" "$resolver_dir" "$MUTEX_OWNER_PID_HELPER" "$MUTEX_OWNER_BASH" 2>&1)" \
       && printf '%s\n' "$MUTEX_OWNER_OUT" | grep -Eq '^holder=[1-9][0-9]* expected=[1-9][0-9]* recorded=[1-9][0-9]* match=yes$'; then
     :
   else

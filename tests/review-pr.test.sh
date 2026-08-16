@@ -1947,7 +1947,13 @@ def build(index):
         f"{payload}\n</external-untrusted-input>\n"
     ).encode())
     commit_range = evidence / "commit-range.txt"
-    commit_range.write_text(f"{base}..{head}\n", encoding="ascii")
+    # write_bytes, exactly like `findings` above and like the production writer
+    # in lib/review-fences.sh. Text mode translates "\n" to CRLF on Windows, and
+    # COMMIT_RANGE in code_fixer_contract.py permits a trailing "\n" but not
+    # "\r\n" — so on the Windows job this fixture wrote a range the contract it
+    # is testing then refused as commit_range_invalid, while the production path
+    # (which writes bytes) was fine. The fixture was less portable than the code.
+    commit_range.write_bytes(f"{base}..{head}\n".encode("ascii"))
     disposition = evidence / "phase1-disposition.json"
     disposition.write_bytes(b"")
     receipt = module.prepare_authority(
@@ -1964,7 +1970,7 @@ def build(index):
     result_path = evidence / "phase1-fixer-result.md"
     status_path = evidence / "phase1-fixer-status.json"
     row = keys[0]
-    result_path.write_text("\n".join([
+    result_path.write_bytes("\n".join([
         "```yaml", "status: REFUSED", "phase: phase1", "commits: []",
         "findings_disposition:",
         f"  - finding_index: {row['finding_index']}",
@@ -1974,7 +1980,7 @@ def build(index):
         "    behavior_tag: n/a",
         "    reason: prepared and verified; publication gate refused",
         "risks: []", "```",
-    ]) + "\n", encoding="utf-8")
+    ]).encode("utf-8") + b"\n")
     return repo, evidence, authority_path, receipt, result_path, status_path, head, disposition
 
 
