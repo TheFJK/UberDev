@@ -834,6 +834,103 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   out.xUnreadable = await spendAtBudget({ implementBudget: "abc" }, GOAL_PER_ISSUE_DEFAULT);
   out.xAbsent = await spendAtBudget(undefined, GOAL_PER_ISSUE_DEFAULT);
 
+  // Runs Y (#564) — CB1 halts a LATER cycle because an EARLIER one was charged.
+  //
+  // Runs M/M2/S all trip CB1 on cycle 1, where agentsSpent is still zero. They
+  // pin the projection and nothing else, so the `agentsSpent +` half of the
+  // comparison the breaker actually makes has never been exercised by any row
+  // in this repo — a ledger that never grows would keep every one of them
+  // green. That half is the whole point of the accumulator: the projection is
+  // computed before the claim pass and cannot know what the run already burnt.
+  // And an accumulator reading low does not merely mis-report — CB1 is the only
+  // NAMED halt, so it stops firing altogether and the run dies against the
+  // runtime lifetime cap with no halt reason, no audit row, and no cycle record
+  // saying why it stopped.
+  //
+  // Two cycles, with the ceiling placed exactly ONE agent below what cycle 1
+  // spends plus what cycle 2 projects. Cycle 1 loops back carrying a single
+  // surviving candidate, so cycle 2 sizes its projection from one issue. The
+  // decision must be `loop`: the driver recognises only `converged` and `loop`,
+  // and any other value halts at cycle 1 — cycle 2 would never run and the row
+  // would pass on a ledger that was never read.
+  const CYCLE1_TOTAL = cycleTotal(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT);
+  // READ-ONLY MIRROR of projectedAgentsForCycle for the ONE issue cycle 2
+  // claims: the three per-cycle relays it counts, the maxWatchTicks bound this
+  // fixture runs at, the two batched fleet relays, and the per-issue term. Runs
+  // M/M2/S own that surface; CYCLE_PROJECTION above stays untouched.
+  //
+  // That per-issue term is a flat LITERAL in the projection — it does NOT track
+  // the relayed budget the spend term derives, which the workflow header states
+  // outright and which is tracked as its own gap. At the fleet default the two
+  // are the same number, so the named default is reused here rather than typed
+  // a fourth time; if the fleet default ever moves, the projection stops
+  // following it and this row reds naming which half moved.
+  const CYCLE2_PROJECTION = 3 + 40 + 2 + (1 * GOAL_PER_ISSUE_DEFAULT);
+  function twoCycleReturns() {
+    return {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect({ rc: 42, decision: "loop", candidates: 1, queued: 1, queue: "11" }),
+      "goal-claim:c2": claim({ dispatch: "11", armed: "11" }),
+      "goal-watch:c2:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c2": VERDICTS,
+      "goal-collect:c2": collect(),
+    };
+  }
+
+  // Run Y — one agent short of the sum, so the breaker must fire, and it can
+  // only fire on the charged ledger. Delete the clean-arm charge and cycle 1
+  // costs the four driver relays alone: CYCLE_RELAYS + CYCLE2_PROJECTION is far
+  // under this ceiling, nothing trips, and the run converges having spent a
+  // fleet it never counted. Cycle 1 itself never trips at this ceiling either —
+  // its own projection covers two issues and still fits — so the halt below is
+  // attributable to the cycle-1 charge and to nothing else.
+  const recY = await run(buildArgs({ maxAgents: CYCLE1_TOTAL + CYCLE2_PROJECTION - 1 }),
+    { agentReturns: twoCycleReturns() });
+  const resY = resultOf(recY);
+  out.yCeiling = (function () {
+    if (!resY) return "no result";
+    if (resY.cb1Tripped !== true) return "not tripped at spent=" + resY.agentsSpent;
+    const ev = resY.auditEvents.filter(function (e) { return e.event === "agent_ceiling_cb1"; })[0];
+    if (!ev) return "no agent_ceiling_cb1 event";
+    // The event has to publish BOTH terms, or an operator reading it cannot
+    // tell a run that overspent from a projection that was too big.
+    if (ev.spent !== CYCLE1_TOTAL) return "spent " + ev.spent + " != " + CYCLE1_TOTAL;
+    if (ev.projected !== CYCLE2_PROJECTION) return "projected " + ev.projected + " != " + CYCLE2_PROJECTION;
+    if (ev.cycle !== 2) return "cycle " + ev.cycle;
+    return "ok";
+  })();
+
+  // Run Y2 — the same run with exactly one more agent of headroom. Without it
+  // the row above could pass on a breaker that fires early for any reason at
+  // all, and the claim label proves cycle 2 really went on to claim rather than
+  // ending some other way with cb1Tripped left false.
+  const recY2 = await run(buildArgs({ maxAgents: CYCLE1_TOTAL + CYCLE2_PROJECTION }),
+    { agentReturns: twoCycleReturns() });
+  const resY2 = resultOf(recY2);
+  out.yHeadroom = (function () {
+    if (!resY2) return "no result";
+    if (resY2.cb1Tripped) return "tripped with exact headroom";
+    if (!labels(recY2).some(function (l) { return l === "goal-claim:c2"; })) return "cycle 2 never claimed";
+    return "ok";
+  })();
+
+  // Run V again (#564) — charging for the throw must not turn into HALTING on
+  // it. Solvers that already pushed a PR still have to be driven to merge and
+  // the claims still have to be reconciled, so the cycle continues past the
+  // failed fleet; the charge is a ledger entry, not a verdict.
+  out.vWatched = (function () {
+    if (!resV) return "no result";
+    if (!labels(recV).some(function (l) { return l === "goal-watch:c1:t1"; })) return "no watch pass";
+    if (resV.halted !== false) return "halted " + resV.haltReason;
+    if (resV.converged !== true) return "not converged";
+    return "ok";
+  })();
+  // And the failed call is still ON the record: every call-count row in this
+  // file would otherwise be silently conditional on the nested run succeeding.
+  out.vNestedCalls = recV.workflowCalls.length;
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -976,6 +1073,11 @@ else
   check xCeiling '"match"'                "B95b a relayed budget ABOVE the fleet ceiling is charged at the ceiling, so reading the envelope cannot make the ledger overcount either"
   check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
   check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
+
+  check yCeiling '"ok"'                   "B96 CB1 halts cycle 2 ONLY BECAUSE cycle 1 was charged — the spent half of the ceiling comparison, which every earlier CB1 row (M/M2/S) leaves at zero and so cannot exercise: the audit event publishes the cycle-1 spend AND the cycle-2 projection, and with the fleet charge removed the same ceiling never trips at all"
+  check yHeadroom '"ok"'                  "B96b one more agent of headroom and the same run claims cycle 2 instead — the ceiling row cannot pass on a breaker that fired early, nor on a run that ended some other way"
+  check vWatched '"ok"'                   "B97 a nested fleet that THREW is charged but does not abort the cycle: the watch pass still runs, so solvers that already pushed a PR are still driven to merge and the claims are still reconciled, and the run finishes converged rather than halted"
+  check vNestedCalls 1                    "B97b the nested call is RECORDED even though it threw, so no call-count assertion in this file is silently conditional on the fleet succeeding"
 fi
 
 echo ""
