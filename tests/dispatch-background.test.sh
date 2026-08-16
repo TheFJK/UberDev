@@ -759,7 +759,13 @@ chmod +x "$IMMEDIATE_TMP/bin/git" "$IMMEDIATE_TMP/bin/claude"
 for runtime_command in env nohup cat sleep rm uname grep stat id ps find basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$IMMEDIATE_TMP/bin/$runtime_command"
 done
-IMMEDIATE_RUNTIME_PATH="$IMMEDIATE_TMP/bin:/usr/bin:/bin"
+# The stub bin stays FIRST so the fixture git/claude and the symlinked
+# coreutils above still win, and the host $PATH sits behind it so the dispatch
+# below resolves the same `timeout` a real run would (#548). The trailing
+# /usr/bin:/bin is kept as the MSYS fallback for Git Bash, where the host $PATH
+# may carry those directories in Windows form only — the value is a strict
+# superset of the old one, so it cannot regress any runner.
+IMMEDIATE_RUNTIME_PATH="$IMMEDIATE_TMP/bin:$PATH:/usr/bin:/bin"
 NATIVE_BASH_PROBE="$(PATH="$IMMEDIATE_RUNTIME_PATH" "$REAL_PYTHON" -I -B -c \
   'import shutil; print(shutil.which("bash") or "", end="")')"
 case "$NATIVE_BASH_PROBE" in
@@ -910,6 +916,74 @@ else
   echo "  FAIL  background captures provider stdout into a private canonical result and preserves exact immediate terminal handles"
   echo "        $IMMEDIATE_OUT"; FAIL=$((FAIL + 1))
 fi
+# #548 — the binding above is a fixture INPUT, not a constant. Narrowing it back
+# silently moves the dispatch onto the UNBOUNDED preflight arm on any host that
+# ships no /usr/bin/timeout, and every existing verdict in this file is
+# byte-identical on both arms. This row is what makes the widening enforced
+# rather than merely present, and it reds on ubuntu, Windows and macOS alike.
+#
+# The haystack is padded with a trailing ':' so the host $PATH counts whether it
+# is followed by a segment (the form below) or is LAST (the #521 donor form at
+# child-dispatch.test.sh:1043, and :179 in this file). An unpadded *":$PATH:"*
+# would red that shape for no reason.
+# BOUNDARY: a degenerate host whose entire $PATH is one of the pinned segments
+# is not distinguished here; the arm row below covers the real property there.
+IMMEDIATE_RUNTIME_PATH_STUB_OK=0
+IMMEDIATE_RUNTIME_PATH_TAIL_OK=0
+case "$IMMEDIATE_RUNTIME_PATH" in "$IMMEDIATE_TMP/bin:"*) IMMEDIATE_RUNTIME_PATH_STUB_OK=1 ;; esac
+case "$IMMEDIATE_RUNTIME_PATH:" in *":$PATH:"*)           IMMEDIATE_RUNTIME_PATH_TAIL_OK=1 ;; esac
+if [ "$IMMEDIATE_RUNTIME_PATH_STUB_OK" -eq 1 ] && [ "$IMMEDIATE_RUNTIME_PATH_TAIL_OK" -eq 1 ]; then
+  echo "  PASS  immediate runtime PATH keeps the stub bin first and the host PATH behind it"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  immediate runtime PATH keeps the stub bin first and the host PATH behind it: $IMMEDIATE_RUNTIME_PATH"
+  FAIL=$((FAIL + 1))
+fi
+# #548 — assert WHICH preflight arm the dispatch above took, not merely that one
+# was taken. `_uberdev_dispatch_preflight_timeout_bin` returns 0 SILENTLY on the
+# happy path and emits no audit record naming the bound, so the resolved binary
+# is the only observable — every verdict above is byte-identical on the bounded
+# and the unbounded arm, which is exactly why the narrow literal survived here
+# for so long. The row above proves the PATH is wide; this one proves the width
+# reaches production code.
+#
+# Driven as a unit under the SAME variable the dispatch ran with, so the row
+# cannot drift onto a PATH nobody used — that drift IS this issue's defect
+# class, and committing it inside the fix would be the worst outcome available.
+# Precedent: child-dispatch.test.sh:1074-1092 (#521) and T15 in
+# dispatch-child-worktree-teardown.test.sh, which drives this same resolver.
+#
+# TIMEOUT_BIN is neither set NOR unset here. lib/dispatch.sh tries
+# "${TIMEOUT_BIN:-}" ahead of every PATH name, and the dispatch above inherits
+# that variable from the ambient environment; the `unset TIMEOUT_BIN` lines in
+# this file belong to the #246 D-perm/D-skip subshells and do not reach here.
+# Touching it either way would assert about an environment the dispatch never
+# had.
+#
+# No pipe, by construction: command substitution and `case` only, so this file's
+# epipe-guard.test.sh exposure is unchanged and it still needs no `pipefail`.
+# The verdict goes through the PASS/FAIL counters because the file is `set -u`
+# only — a bare `[ … ]` or `*) false ;;` here would be a no-op.
+IMMEDIATE_RUNTIME_PATH_TIMEOUT_BIN="$(
+  PATH="$IMMEDIATE_RUNTIME_PATH" \
+    /bin/bash -c 'set -u; . "$1"; _uberdev_dispatch_preflight_timeout_bin' _ "$DISPATCH_LIB"
+)"
+echo "        immediate preflight resolved timeout bin = ${IMMEDIATE_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+# Absolute, never a bare name: a bare name in command position is answered by
+# the shell's function table first (T15's finding). The drive-letter alternation
+# is mandatory — Git Bash is in the CI matrix. Absoluteness subsumes
+# non-emptiness: the empty string matches neither branch.
+IMMEDIATE_RUNTIME_PATH_ARM_OK=0
+case "$IMMEDIATE_RUNTIME_PATH_TIMEOUT_BIN" in
+  /*|[A-Za-z]:/*) [ -x "$IMMEDIATE_RUNTIME_PATH_TIMEOUT_BIN" ] && IMMEDIATE_RUNTIME_PATH_ARM_OK=1 ;;
+esac
+if [ "$IMMEDIATE_RUNTIME_PATH_ARM_OK" -eq 1 ]; then
+  echo "  PASS  immediate dispatch took the BOUNDED preflight arm (absolute, executable timeout bin)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  immediate dispatch took the UNBOUNDED preflight arm — resolved timeout bin: ${IMMEDIATE_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+  FAIL=$((FAIL + 1))
+fi
 rm -rf "$IMMEDIATE_TMP"
 
 echo
@@ -1031,7 +1105,9 @@ chmod +x "$DELAYED_TMP/bin/py"
 for runtime_command in env nohup cat sleep rm uname grep stat id ps basename dirname mkdir; do
   ln -s "$(command -v "$runtime_command")" "$DELAYED_TMP/bin/$runtime_command"
 done
-DELAYED_RUNTIME_PATH="$DELAYED_TMP/bin:/usr/bin:/bin"
+# Stub bin first, host $PATH behind it, /usr/bin:/bin kept as the Git Bash MSYS
+# fallback — see the IMMEDIATE_RUNTIME_PATH binding above (#548).
+DELAYED_RUNTIME_PATH="$DELAYED_TMP/bin:$PATH:/usr/bin:/bin"
 printf 'delayed' > "$DELAYED_TMP/prompt.txt"
 # The receipt verifier lives in its own file so the dispatch fixture and the
 # contract checks each stay readable. It prints exactly one verdict word —
@@ -1161,6 +1237,53 @@ if [ "$delayed_verdict" = ok ] || [ "$delayed_verdict" = race ]; then
 else
   echo "  FAIL  delayed background running and terminal receipts agree with the dispatch handle after $delayed_try attempt(s): $delayed_verdict"
   echo "        $delayed_report"; FAIL=$((FAIL + 1))
+fi
+# #548 — the binding above is a fixture INPUT, not a constant. Narrowing it back
+# silently moves the dispatch onto the UNBOUNDED preflight arm on any host that
+# ships no /usr/bin/timeout, and every existing verdict in this file is
+# byte-identical on both arms. This row is what makes the widening enforced
+# rather than merely present, and it reds on ubuntu, Windows and macOS alike.
+#
+# The haystack is padded with a trailing ':' so the host $PATH counts whether it
+# is followed by a segment (the form below) or is LAST (the #521 donor form at
+# child-dispatch.test.sh:1043, and :179 in this file). An unpadded *":$PATH:"*
+# would red that shape for no reason.
+# BOUNDARY: a degenerate host whose entire $PATH is one of the pinned segments
+# is not distinguished here; the arm row below covers the real property there.
+DELAYED_RUNTIME_PATH_STUB_OK=0
+DELAYED_RUNTIME_PATH_TAIL_OK=0
+case "$DELAYED_RUNTIME_PATH" in "$DELAYED_TMP/bin:"*) DELAYED_RUNTIME_PATH_STUB_OK=1 ;; esac
+case "$DELAYED_RUNTIME_PATH:" in *":$PATH:"*)         DELAYED_RUNTIME_PATH_TAIL_OK=1 ;; esac
+if [ "$DELAYED_RUNTIME_PATH_STUB_OK" -eq 1 ] && [ "$DELAYED_RUNTIME_PATH_TAIL_OK" -eq 1 ]; then
+  echo "  PASS  delayed runtime PATH keeps the stub bin first and the host PATH behind it"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  delayed runtime PATH keeps the stub bin first and the host PATH behind it: $DELAYED_RUNTIME_PATH"
+  FAIL=$((FAIL + 1))
+fi
+# #548 — assert WHICH preflight arm the dispatch above took, not merely that one
+# was taken; same reasoning as the immediate site's arm row, and the same
+# constraints (unit-driven under the one shared variable, TIMEOUT_BIN untouched,
+# no pipe, counter-scored verdict). See that row's comment for the full record.
+DELAYED_RUNTIME_PATH_TIMEOUT_BIN="$(
+  PATH="$DELAYED_RUNTIME_PATH" \
+    /bin/bash -c 'set -u; . "$1"; _uberdev_dispatch_preflight_timeout_bin' _ "$DISPATCH_LIB"
+)"
+echo "        delayed preflight resolved timeout bin = ${DELAYED_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+# Absolute, never a bare name: a bare name in command position is answered by
+# the shell's function table first (T15's finding). The drive-letter alternation
+# is mandatory — Git Bash is in the CI matrix. Absoluteness subsumes
+# non-emptiness: the empty string matches neither branch.
+DELAYED_RUNTIME_PATH_ARM_OK=0
+case "$DELAYED_RUNTIME_PATH_TIMEOUT_BIN" in
+  /*|[A-Za-z]:/*) [ -x "$DELAYED_RUNTIME_PATH_TIMEOUT_BIN" ] && DELAYED_RUNTIME_PATH_ARM_OK=1 ;;
+esac
+if [ "$DELAYED_RUNTIME_PATH_ARM_OK" -eq 1 ]; then
+  echo "  PASS  delayed dispatch took the BOUNDED preflight arm (absolute, executable timeout bin)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  delayed dispatch took the UNBOUNDED preflight arm — resolved timeout bin: ${DELAYED_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+  FAIL=$((FAIL + 1))
 fi
 rm -rf "$DELAYED_TMP"
 

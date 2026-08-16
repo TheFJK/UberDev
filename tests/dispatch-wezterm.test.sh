@@ -211,6 +211,14 @@ rm -f "$TALLY_FILE"
 
 echo
 echo "== Process-separated WezTerm pane retains portable Python after PATH narrowing =="
+# WHICH "PATH narrowing" THE TITLE MEANS. It is the IN-PANE `PATH=../bin`
+# python-resolution step inside the two `bash -c` bodies below — the pane is
+# handed a relative, one-entry PATH and must still resolve a portable Python.
+# It is NOT the WEZ_RUNTIME_PATH binding, which deliberately keeps the host
+# $PATH behind the stub bin so the dispatch resolves the same `timeout` a real
+# run would. Do not "restore" that binding to a stub-dir-plus-pinned-system-dirs
+# literal on the strength of this header: dropping the host $PATH is the #548
+# defect, and the row above the teardown below reds when it comes back.
 WEZ_RUNTIME_TMP="$(mktemp -d)"
 mkdir -p "$WEZ_RUNTIME_TMP/bin" "$WEZ_RUNTIME_TMP/repo/.git" "$WEZ_RUNTIME_TMP/tmp" "$WEZ_RUNTIME_TMP/home"
 if REAL_PYTHON_EXE="$(command -v python3 2>/dev/null)" && [ -n "$REAL_PYTHON_EXE" ]; then
@@ -298,7 +306,13 @@ WEZ_CYGPATH_U_PROBE="$(WEZ_REAL_CYGPATH='' "$WEZ_RUNTIME_TMP/bin/cygpath" -u 'C:
 for runtime_command in env cat sleep rm uname grep stat id awk mv tee mkdir basename dirname; do
   ln -s "$(command -v "$runtime_command")" "$WEZ_RUNTIME_TMP/bin/$runtime_command"
 done
-WEZ_RUNTIME_PATH="$WEZ_RUNTIME_TMP/bin:/usr/bin:/bin"
+# The stub bin stays FIRST so the fixture py/cygpath/git/claude/wezterm and the
+# symlinked coreutils above still win, and the host $PATH sits behind it so the
+# dispatches below resolve the same `timeout` a real run would (#548). The
+# trailing /usr/bin:/bin is kept as the MSYS fallback for Git Bash, where the
+# host $PATH may carry those directories in Windows form only — the value is a
+# strict superset of the old one, so it cannot regress any runner.
+WEZ_RUNTIME_PATH="$WEZ_RUNTIME_TMP/bin:$PATH:/usr/bin:/bin"
 printf 'wezterm portable python prompt\n' > "$WEZ_RUNTIME_TMP/prompt.txt"
 WEZ_STATUS_FILE="$WEZ_RUNTIME_TMP/tmp/wezterm-clean-status.json"
 WEZ_PROVIDER_CAPTURE="$WEZ_RUNTIME_TMP/clean-provider-capture.txt"
@@ -402,6 +416,74 @@ if printf '%s\n' "$WEZ_RUNTIME_OUT" | grep -Fq 'rc=0' \
 else
   echo "  FAIL  clean and hostile WezTerm py -3 panes retain launchers, cwd, status, and non-exported bridges"
   echo "        clean=$WEZ_RUNTIME_OUT hostile=$WEZ_HOSTILE_OUT cygpath_u=$WEZ_CYGPATH_U_PROBE verifier=$WEZ_VERIFY_OUT"
+  FAIL=$((FAIL + 1))
+fi
+# #548 — the binding above is a fixture INPUT, not a constant. Narrowing it back
+# silently moves the dispatch onto the UNBOUNDED preflight arm on any host that
+# ships no /usr/bin/timeout, and every existing verdict in this file is
+# byte-identical on both arms. This row is what makes the widening enforced
+# rather than merely present, and it reds on ubuntu, Windows and macOS alike.
+# One row covers both dispatches above — they share the one binding.
+#
+# The haystack is padded with a trailing ':' so the host $PATH counts whether it
+# is followed by a segment (the form below) or is LAST (the #521 donor form at
+# child-dispatch.test.sh:1043). An unpadded *":$PATH:"* would red that shape for
+# no reason.
+# BOUNDARY: a degenerate host whose entire $PATH is one of the pinned segments
+# is not distinguished here; the arm row below covers the real property there.
+WEZ_RUNTIME_PATH_STUB_OK=0
+WEZ_RUNTIME_PATH_TAIL_OK=0
+case "$WEZ_RUNTIME_PATH" in "$WEZ_RUNTIME_TMP/bin:"*) WEZ_RUNTIME_PATH_STUB_OK=1 ;; esac
+case "$WEZ_RUNTIME_PATH:" in *":$PATH:"*)             WEZ_RUNTIME_PATH_TAIL_OK=1 ;; esac
+if [ "$WEZ_RUNTIME_PATH_STUB_OK" -eq 1 ] && [ "$WEZ_RUNTIME_PATH_TAIL_OK" -eq 1 ]; then
+  echo "  PASS  wezterm runtime PATH keeps the stub bin first and the host PATH behind it"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  wezterm runtime PATH keeps the stub bin first and the host PATH behind it: $WEZ_RUNTIME_PATH"
+  FAIL=$((FAIL + 1))
+fi
+# #548 — assert WHICH preflight arm the two dispatches above took, not merely
+# that one was taken. `_uberdev_dispatch_preflight_timeout_bin` returns 0
+# SILENTLY on the happy path and emits no audit record naming the bound, so the
+# resolved binary is the only observable — every verdict above is byte-identical
+# on the bounded and the unbounded arm, which is why the narrow literal survived
+# here. The row above proves the PATH is wide; this one proves the width reaches
+# production code. One row covers the clean and the hostile dispatch: they share
+# the one binding.
+#
+# Driven as a unit under the SAME variable the dispatches ran with, so the row
+# cannot drift onto a PATH nobody used — that drift IS this issue's defect
+# class. Precedent: child-dispatch.test.sh:1074-1092 (#521) and T15 in
+# dispatch-child-worktree-teardown.test.sh, which drives this same resolver.
+#
+# TIMEOUT_BIN is neither set NOR unset here. lib/dispatch.sh tries
+# "${TIMEOUT_BIN:-}" ahead of every PATH name, and the dispatches above inherit
+# that variable from the ambient environment; the `unset TIMEOUT_BIN` lines in
+# this file belong to the #246 D-perm/D-skip subshells and do not reach here.
+# Touching it either way would assert about an environment they never had.
+#
+# No pipe, by construction: command substitution and `case` only, so this file's
+# epipe-guard.test.sh exposure is unchanged and it still needs no `pipefail`.
+# The verdict goes through the PASS/FAIL counters because the file is `set -u`
+# only — a bare `[ … ]` or `*) false ;;` here would be a no-op.
+WEZ_RUNTIME_PATH_TIMEOUT_BIN="$(
+  PATH="$WEZ_RUNTIME_PATH" \
+    /bin/bash -c 'set -u; . "$1"; _uberdev_dispatch_preflight_timeout_bin' _ "$DISPATCH_LIB"
+)"
+echo "        wezterm preflight resolved timeout bin = ${WEZ_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
+# Absolute, never a bare name: a bare name in command position is answered by
+# the shell's function table first (T15's finding). The drive-letter alternation
+# is mandatory — Git Bash is in the CI matrix. Absoluteness subsumes
+# non-emptiness: the empty string matches neither branch.
+WEZ_RUNTIME_PATH_ARM_OK=0
+case "$WEZ_RUNTIME_PATH_TIMEOUT_BIN" in
+  /*|[A-Za-z]:/*) [ -x "$WEZ_RUNTIME_PATH_TIMEOUT_BIN" ] && WEZ_RUNTIME_PATH_ARM_OK=1 ;;
+esac
+if [ "$WEZ_RUNTIME_PATH_ARM_OK" -eq 1 ]; then
+  echo "  PASS  wezterm dispatch took the BOUNDED preflight arm (absolute, executable timeout bin)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL  wezterm dispatch took the UNBOUNDED preflight arm — resolved timeout bin: ${WEZ_RUNTIME_PATH_TIMEOUT_BIN:-<none>}"
   FAIL=$((FAIL + 1))
 fi
 rm -rf "$WEZ_RUNTIME_TMP"
