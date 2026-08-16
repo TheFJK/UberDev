@@ -1913,15 +1913,37 @@ def build(index):
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
+    # This throwaway repo must be byte-deterministic, because the contract under
+    # test refuses on ANY worktree residue. `core.autocrlf=true` is live on
+    # windows-latest and is inherited from global config by a fresh `git init`,
+    # so without pinning it here the fixture's own checkout can differ from its
+    # index and `_require_clean_worktree` fails with `worktree_unstaged` — a
+    # fixture failing a cleanliness gate it created the residue for.
+    git(repo, "config", "core.autocrlf", "false")
+    git(repo, "config", "core.eol", "lf")
     (repo / "src").mkdir()
-    (repo / "src/a.py").write_text("A = 0\n", encoding="utf-8")
+    # write_bytes, not write_text: text mode emits CRLF on Windows, which is the
+    # other half of the same determinism problem (see commit-range.txt below).
+    (repo / "src/a.py").write_bytes(b"A = 0\n")
     git(repo, "add", "--", "src/a.py")
     git(repo, "commit", "-qm", "test: refused terminal base")
     base = git(repo, "rev-parse", "HEAD")
-    (repo / "src/a.py").write_text("A = 1\n", encoding="utf-8")
+    (repo / "src/a.py").write_bytes(b"A = 1\n")
     git(repo, "add", "--", "src/a.py")
     git(repo, "commit", "-qm", "test: refused terminal head")
     head = git(repo, "rev-parse", "HEAD")
+    # The contract under test refuses on ANY worktree residue, and when it does
+    # the reason it reports is `worktree_unstaged` with no indication of WHICH
+    # path is dirty — which on a platform the author cannot run locally is a
+    # failure that names nothing. Assert the precondition here, where the fixture
+    # still knows what it built, so a dirty checkout is reported as the fixture's
+    # own setup problem and names the file.
+    residue = git(repo, "status", "--porcelain")
+    if residue:
+        raise SystemExit(
+            "fixture repo is not clean immediately after its own commits; "
+            f"git status --porcelain reported:\n{residue}"
+        )
     evidence = repo / ".uberdev/research/run"
     evidence.mkdir(parents=True)
     payload = json.dumps({
