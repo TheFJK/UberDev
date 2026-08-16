@@ -15,8 +15,10 @@
 #       canned relay returns, asserting the cycle semantics no grep can see:
 #       convergence, loop-back with surviving candidates, the max-cycles
 #       backstop, fingerprint repeats, the 42/42/0 watch drain, the tick
-#       breaker, a rollover blocking convergence, a refused fleet envelope, and
-#       a budget throw still routing through finalize.
+#       breaker, a rollover blocking convergence, a refused fleet envelope, a
+#       budget throw still routing through finalize, and the per-cycle agent
+#       SPEND ledger CB1 compares its ceiling against — including the arm that
+#       charges for a nested fleet that threw.
 #
 # GIT-BASH PORTABLE: grep + node only (no python3/PyYAML). Runs on BOTH the
 # ubuntu and windows shape-check jobs.
@@ -235,11 +237,17 @@ function buildArgs(cfgExtra) {
     plugin_root: "/p", repo_root: "/r", cwd: "/r", pipeline: "goal", config: cfg };
 }
 
-function fleetEnvelope(issues) {
+// The optional second parameter merges extra keys into the envelope CONFIG. The
+// driver reads that config back out (implementBudget, #564), so a run has to be
+// able to relay a budget the operator raised — the envelope is the only channel
+// carrying it. Defaulted, so every call site passing an issue list alone still
+// produces byte-identical JSON.
+function fleetEnvelope(issues, cfgExtra) {
   return JSON.stringify({ v: 1, run_id: "RID", now_epoch: 1767225600,
     now_iso: "2026-01-01T00:00:00Z", plugin_root: "/p", repo_root: "/r", cwd: "/r",
     pipeline: "solve-fleet",
-    config: { runId: "RID", issues: (issues === undefined ? "11,12" : issues), concurrency: 6 } });
+    config: Object.assign({ runId: "RID", issues: (issues === undefined ? "11,12" : issues),
+      concurrency: 6 }, cfgExtra || {}) });
 }
 // A healthy claim relay returns an envelope whose issue set IS the claimed set —
 // that is the invariant `--force` arming depends on, so the default fixture
@@ -695,6 +703,246 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
   const resT = resultOf(recT);
   out.tPrsOpened = (resT && resT.cycles.length) ? resT.cycles[0].prsOpened : null;
 
+  // Runs U/V (#564) — the per-cycle SPEND accumulator, observed as a VALUE.
+  //
+  // Every run above asserts what the driver DID. None asserted what it CHARGED:
+  // `grep -rn agentsSpent tests/` had ZERO hits, so the term CB1 compares its
+  // ceiling against was free to be wrong in either direction and no row here
+  // would have gone red. Two specific wrongs are what #564 is about — a fleet
+  // priced at a hardcoded 30 per issue while the operator raised the relayed
+  // implement budget, and a fleet that THREW being charged nothing at all.
+  // Runs M/M2/S cannot see either: they trip CB1 while agentsSpent is still 0,
+  // which is also why the `agentsSpent +` term at the CB1 comparison has never
+  // been exercised by anything.
+  //
+  // READ-ONLY MIRROR of goal-pipeline/workflow.js: six research/design agents
+  // plus the clamped implement budget per claimed issue, the two BATCHED fleet
+  // relays (intake + PR-claim verification, #515), and the four relays the
+  // driver charges one at a time per cycle (claim, one watch tick, verdicts,
+  // collect). Named rather than typed, so no expected number below is a digit a
+  // later reader has to re-derive by hand. The projection surface is a separate
+  // formula owned by runs M/M2/S — CYCLE_PROJECTION above stays untouched.
+  // perIssueFleetCost prices ONE issue as its six research/design agents plus
+  // clampInt(cfg.implementBudget, 4, 96, 24). The clamp triple is NAMED because
+  // runs W/X below drive the relayed budget past both bounds and every expected
+  // total there is derived from it: a second typed copy of any of these three
+  // numbers is a copy that can drift away from the fleet with no row noticing.
+  const FLEET_DESIGN_AGENTS = 6;
+  const BUDGET_FLOOR = 4;
+  const BUDGET_CEILING = 96;
+  const BUDGET_DEFAULT = 24;
+  function perIssueCost(budget) { return FLEET_DESIGN_AGENTS + budget; }
+  const GOAL_PER_ISSUE_DEFAULT = perIssueCost(BUDGET_DEFAULT);  // the default arm: 30
+  const FLEET_BATCHED_RELAYS = 2;
+  const CYCLE_RELAYS = 4;
+  const SPEND_CLAIMED = 2;                // the default fixture claims 11,12
+  function fleetCost(issues, perIssue) { return FLEET_BATCHED_RELAYS + (issues * perIssue); }
+  function cycleTotal(issues, perIssue) { return CYCLE_RELAYS + fleetCost(issues, perIssue); }
+  const THROW_MSG = "runtime refused further agents";
+  const THROWING_FLEET = {};
+  // A FUNCTION value is resolved per call by the harness, so this is the only
+  // way any fixture in this repo can make a nested workflow() call fail and
+  // reach the catch arm under test (tests/_workflow_harness.js H14.4).
+  THROWING_FLEET[FLEET_PATH] = function () { throw new Error(THROW_MSG); };
+  // One assert per row, with BOTH numbers in the failure text: the shell side
+  // then carries no second copy of the arithmetic above to drift from it.
+  function spendMatch(observed, expected) {
+    return (observed === expected) ? "match" : (String(observed) + " != " + String(expected));
+  }
+  function spendReturns() {
+    return {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect(),
+    };
+  }
+
+  // Run U — a clean converged cycle: the fleet ran, so the clean arm charges.
+  // Only the TOTAL is pinned here. At the default budget the per-issue term the
+  // driver derives from the relayed envelope and a hardcoded literal are the
+  // same number, so this row cannot tell them apart — separating them needs a
+  // run whose envelope carries a raised implementBudget, which is its own row.
+  const recU = await run(buildArgs(), { agentReturns: spendReturns() });
+  const resU = resultOf(recU);
+  out.uSpend = spendMatch(resU ? resU.agentsSpent : null,
+    cycleTotal(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT));
+
+  // Run V — the SAME cycle with the nested fleet THROWING. The likeliest cause
+  // of that throw is the runtime refusing further agents, which is the moment
+  // the fleet has spent the MOST; a catch arm charging nothing would leave CB1
+  // comparing its ceiling against a spend that never happened, and the run
+  // would then die against an opaque runtime cap with no named halt.
+  const recV = await run(buildArgs(),
+    { agentReturns: spendReturns(), workflowReturns: THROWING_FLEET });
+  const resV = resultOf(recV);
+  out.vParity = spendMatch(resV ? resV.agentsSpent : null, resU ? resU.agentsSpent : null);
+  // The ledger has to stay HONEST about what it does not know: the cycle is
+  // marked, the estimate it charged is published, and the cause is recorded.
+  // Reported as a diagnostic string so a failure names which half broke.
+  out.vLedger = (function () {
+    if (!resV) return "no result";
+    const c0 = resV.cycles.length ? resV.cycles[0] : null;
+    if (!c0 || c0.fleet !== "threw") return "cycle fleet=" + (c0 ? c0.fleet : "no cycle");
+    const est = resV.auditEvents.filter(function (e) { return e.event === "fleet_spend_unmeasured"; })[0];
+    if (!est) return "no fleet_spend_unmeasured event";
+    const want = fleetCost(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT);
+    if (est.estimated !== want) return "estimated " + est.estimated + " != " + want;
+    if (est.claimed !== SPEND_CLAIMED) return "claimed " + est.claimed;
+    const threw = resV.auditEvents.filter(function (e) { return e.event === "fleet_threw"; })[0];
+    if (!threw) return "no fleet_threw event";
+    if (String(threw.reason || "").indexOf(THROW_MSG) < 0) return "reason " + threw.reason;
+    return "ok";
+  })();
+
+  // Runs W/X (#564) — the per-issue term is READ OUT of the relayed envelope.
+  //
+  // Run U pins the total at the DEFAULT budget, and at the default the shipped
+  // derivation
+  //     2 + (rec.claimed.length * perIssueFleetCost(fleetArgs))
+  // and the hardcoded `* 30` it replaced produce the SAME number, so no row
+  // above can tell them apart. G16 in tests/solve-fleet-workflow.test.sh does
+  // red on that exact textual revert — but it is a grep, and a grep cannot see a
+  // VALUE. Measured: making perIssueFleetCost read `{}` in place of
+  // fleetArgs.config leaves every token G16 matches on exactly where it was,
+  // keeps that suite GREEN at rc=0, and silently prices every issue at the
+  // default again. Only the rows below red on it. The budget is operator-set
+  // through UBERDEV_SOLVE_FLEET_IMPLEMENT_BUDGET, which
+  // lib/solve-launcher.sh plumbs into the very envelope the claim relay hands
+  // back and this driver relays verbatim; at the ceiling one issue costs more
+  // than three times the literal, so an accumulator reading 30 hands CB1 a
+  // spend that is threefold short and the only NAMED halt never fires. These
+  // rows are the only place in the repo where the two can be told apart at
+  // runtime.
+  //
+  // Identical to run U in every other respect — same relays, same clean
+  // converged cycle, same claimed set — so the only thing any delta below can
+  // be attributed to is the config the claim relay put in the envelope.
+  async function spendAtBudget(cfgExtra, expectedPerIssue) {
+    const returns = spendReturns();
+    returns["goal-claim:c1"] = claim({ fleetArgsJson: fleetEnvelope("11,12", cfgExtra) });
+    const rec = await run(buildArgs(), { agentReturns: returns });
+    const res = resultOf(rec);
+    return spendMatch(res ? res.agentsSpent : null, cycleTotal(SPEND_CLAIMED, expectedPerIssue));
+  }
+
+  // Run W — a budget the operator raised to the top of the supported range.
+  out.wRaised = await spendAtBudget({ implementBudget: BUDGET_CEILING },
+    perIssueCost(BUDGET_CEILING));
+
+  // Runs X — budgets the FLEET itself would refuse to run with. clampInt is what
+  // it applies to this key, so charging a relayed budget as typed would overcount
+  // as wrongly as the literal undercounts, and the ledger has to clamp the same
+  // way. Probed just OUTSIDE each bound rather than far outside: that reds both
+  // a missing clamp and a clamp whose boundary moved, which a distant value
+  // cannot tell apart.
+  out.xFloor = await spendAtBudget({ implementBudget: BUDGET_FLOOR - 1 },
+    perIssueCost(BUDGET_FLOOR));
+  out.xCeiling = await spendAtBudget({ implementBudget: BUDGET_CEILING + 1 },
+    perIssueCost(BUDGET_CEILING));
+  // A value that cannot be read as a number is not a budget of zero: it falls to
+  // the fleet default, exactly as a missing key does. Charging zero would be the
+  // same silent undercount by another route.
+  out.xUnreadable = await spendAtBudget({ implementBudget: "abc" }, GOAL_PER_ISSUE_DEFAULT);
+  out.xAbsent = await spendAtBudget(undefined, GOAL_PER_ISSUE_DEFAULT);
+
+  // Runs Y (#564) — CB1 halts a LATER cycle because an EARLIER one was charged.
+  //
+  // Runs M/M2/S all trip CB1 on cycle 1, where agentsSpent is still zero. They
+  // pin the projection and nothing else, so the `agentsSpent +` half of the
+  // comparison the breaker actually makes has never been exercised by any row
+  // in this repo — a ledger that never grows would keep every one of them
+  // green. That half is the whole point of the accumulator: the projection is
+  // computed before the claim pass and cannot know what the run already burnt.
+  // And an accumulator reading low does not merely mis-report — CB1 is the only
+  // NAMED halt, so it stops firing altogether and the run dies against the
+  // runtime lifetime cap with no halt reason, no audit row, and no cycle record
+  // saying why it stopped.
+  //
+  // Two cycles, with the ceiling placed exactly ONE agent below what cycle 1
+  // spends plus what cycle 2 projects. Cycle 1 loops back carrying a single
+  // surviving candidate, so cycle 2 sizes its projection from one issue. The
+  // decision must be `loop`: the driver recognises only `converged` and `loop`,
+  // and any other value halts at cycle 1 — cycle 2 would never run and the row
+  // would pass on a ledger that was never read.
+  const CYCLE1_TOTAL = cycleTotal(SPEND_CLAIMED, GOAL_PER_ISSUE_DEFAULT);
+  // READ-ONLY MIRROR of projectedAgentsForCycle for the ONE issue cycle 2
+  // claims: the three per-cycle relays it counts, the maxWatchTicks bound this
+  // fixture runs at, the two batched fleet relays, and the per-issue term. Runs
+  // M/M2/S own that surface; CYCLE_PROJECTION above stays untouched.
+  //
+  // That per-issue term is a flat LITERAL in the projection — it does NOT track
+  // the relayed budget the spend term derives, which the workflow header states
+  // outright and which is tracked as its own gap. At the fleet default the two
+  // are the same number, so the named default is reused here rather than typed
+  // a fourth time; if the fleet default ever moves, the projection stops
+  // following it and this row reds naming which half moved.
+  const CYCLE2_PROJECTION = 3 + 40 + 2 + (1 * GOAL_PER_ISSUE_DEFAULT);
+  function twoCycleReturns() {
+    return {
+      "goal-claim:c1": claim(),
+      "goal-watch:c1:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c1": VERDICTS,
+      "goal-collect:c1": collect({ rc: 42, decision: "loop", candidates: 1, queued: 1, queue: "11" }),
+      "goal-claim:c2": claim({ dispatch: "11", armed: "11" }),
+      "goal-watch:c2:t1": { rc: 0, note: "drained" },
+      "goal-verdicts:c2": VERDICTS,
+      "goal-collect:c2": collect(),
+    };
+  }
+
+  // Run Y — one agent short of the sum, so the breaker must fire, and it can
+  // only fire on the charged ledger. Delete the clean-arm charge and cycle 1
+  // costs the four driver relays alone: CYCLE_RELAYS + CYCLE2_PROJECTION is far
+  // under this ceiling, nothing trips, and the run converges having spent a
+  // fleet it never counted. Cycle 1 itself never trips at this ceiling either —
+  // its own projection covers two issues and still fits — so the halt below is
+  // attributable to the cycle-1 charge and to nothing else.
+  const recY = await run(buildArgs({ maxAgents: CYCLE1_TOTAL + CYCLE2_PROJECTION - 1 }),
+    { agentReturns: twoCycleReturns() });
+  const resY = resultOf(recY);
+  out.yCeiling = (function () {
+    if (!resY) return "no result";
+    if (resY.cb1Tripped !== true) return "not tripped at spent=" + resY.agentsSpent;
+    const ev = resY.auditEvents.filter(function (e) { return e.event === "agent_ceiling_cb1"; })[0];
+    if (!ev) return "no agent_ceiling_cb1 event";
+    // The event has to publish BOTH terms, or an operator reading it cannot
+    // tell a run that overspent from a projection that was too big.
+    if (ev.spent !== CYCLE1_TOTAL) return "spent " + ev.spent + " != " + CYCLE1_TOTAL;
+    if (ev.projected !== CYCLE2_PROJECTION) return "projected " + ev.projected + " != " + CYCLE2_PROJECTION;
+    if (ev.cycle !== 2) return "cycle " + ev.cycle;
+    return "ok";
+  })();
+
+  // Run Y2 — the same run with exactly one more agent of headroom. Without it
+  // the row above could pass on a breaker that fires early for any reason at
+  // all, and the claim label proves cycle 2 really went on to claim rather than
+  // ending some other way with cb1Tripped left false.
+  const recY2 = await run(buildArgs({ maxAgents: CYCLE1_TOTAL + CYCLE2_PROJECTION }),
+    { agentReturns: twoCycleReturns() });
+  const resY2 = resultOf(recY2);
+  out.yHeadroom = (function () {
+    if (!resY2) return "no result";
+    if (resY2.cb1Tripped) return "tripped with exact headroom";
+    if (!labels(recY2).some(function (l) { return l === "goal-claim:c2"; })) return "cycle 2 never claimed";
+    return "ok";
+  })();
+
+  // Run V again (#564) — charging for the throw must not turn into HALTING on
+  // it. Solvers that already pushed a PR still have to be driven to merge and
+  // the claims still have to be reconciled, so the cycle continues past the
+  // failed fleet; the charge is a ledger entry, not a verdict.
+  out.vWatched = (function () {
+    if (!resV) return "no result";
+    if (!labels(recV).some(function (l) { return l === "goal-watch:c1:t1"; })) return "no watch pass";
+    if (resV.halted !== false) return "halted " + resV.haltReason;
+    if (resV.converged !== true) return "not converged";
+    return "ok";
+  })();
+  // And the failed call is still ON the record: every call-count row in this
+  // file would otherwise be silently conditional on the nested run succeeding.
+  out.vNestedCalls = recV.workflowCalls.length;
+
   process.stdout.write(JSON.stringify(out));
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
@@ -827,6 +1075,21 @@ else
   check sNoClaim true                     "B89 the raised projection still halts BEFORE the claim pass"
 
   check tPrsOpened '[902]'                "B90 /goal ingests exactly the fleet post-verification PR set — the disproven number never enters it"
+
+  check uSpend '"match"'                  "B91 the per-cycle spend accumulator is charged for the fleet it ran: agentsSpent is the four driver relays plus the two batched fleet relays plus the per-issue fleet cost at the DEFAULT budget (nothing in tests/ read agentsSpent at all before this row; at the default this total cannot tell the envelope-derived per-issue term from a literal, which needs a raised-budget row of its own)"
+  check vParity '"match"'                 "B92 a fleet that THREW is charged the same estimate as a fleet that ran — the catch arm is not free, and CB1 is never handed a ceiling to compare against a spend that never happened"
+  check vLedger '"ok"'                    "B93 the unmeasurable cycle is NAMED, not inferred from a total that is quietly short: fleet=threw on the cycle, fleet_spend_unmeasured carries the estimate actually charged and the claimed count, and fleet_threw carries the cause"
+
+  check wRaised '"match"'                 "B94 the per-issue fleet term is DERIVED from the relayed envelope, not typed: a raised implementBudget is charged at the raised budget — the only assertion in the repo that separates the shipped derivation from the hardcoded 30 it replaced, because at the default budget the two agree exactly and every other row here runs at the default"
+  check xFloor '"match"'                  "B95a a relayed budget BELOW the fleet floor is charged at the floor the fleet would clamp it to, not as relayed"
+  check xCeiling '"match"'                "B95b a relayed budget ABOVE the fleet ceiling is charged at the ceiling, so reading the envelope cannot make the ledger overcount either"
+  check xUnreadable '"match"'             "B95c a non-numeric implementBudget is charged the fleet default, not read as a budget of zero"
+  check xAbsent '"match"'                 "B95d an envelope carrying no implementBudget at all is charged the fleet default"
+
+  check yCeiling '"ok"'                   "B96 CB1 halts cycle 2 ONLY BECAUSE cycle 1 was charged — the spent half of the ceiling comparison, which every earlier CB1 row (M/M2/S) leaves at zero and so cannot exercise: the audit event publishes the cycle-1 spend AND the cycle-2 projection, and with the fleet charge removed the same ceiling never trips at all"
+  check yHeadroom '"ok"'                  "B96b one more agent of headroom and the same run claims cycle 2 instead — the ceiling row cannot pass on a breaker that fired early, nor on a run that ended some other way"
+  check vWatched '"ok"'                   "B97 a nested fleet that THREW is charged but does not abort the cycle: the watch pass still runs, so solvers that already pushed a PR are still driven to merge and the claims are still reconciled, and the run finishes converged rather than halted"
+  check vNestedCalls 1                    "B97b the nested call is RECORDED even though it threw, so no call-count assertion in this file is silently conditional on the fleet succeeding"
 fi
 
 echo ""

@@ -73,7 +73,10 @@
  *   - args: the fixture's JSON, verbatim (deep-cloned per run).
  *   - workflow(nameOr{scriptPath}, args): recorder with canned returns keyed
  *     by scriptPath/name. One-level-nesting enforcement is the live runtime's
- *     job; the harness only records.
+ *     job; the harness only records. A canned value may be a FUNCTION, called
+ *     with the recorded entry (same as agentReturns) — a function that THROWS
+ *     is the only way a fixture can make a nested run fail, and the call is
+ *     recorded before the value is resolved so it stays visible either way.
  *   - No timers in the sandbox (setTimeout/setInterval absent — constraint 3:
  *     no script-level sleeps). A script that references them fails at call
  *     time with a ReferenceError, which fails validate.
@@ -322,7 +325,7 @@ function makeRecord() {
 //   agentReturns?: { [labelOrAgentType]: any | (entry) => any },
 //   defaultAgentReturn?: any,       // default {}
 //   agentGate?: (entry) => Promise|null,   // self-test interleaving control
-//   workflowReturns?: { [scriptPathOrName]: any },
+//   workflowReturns?: { [scriptPathOrName]: any | (entry) => any },
 // }
 function makeSandbox(fixture, meta, record) {
   const budgetState = {
@@ -446,10 +449,22 @@ function makeSandbox(fixture, meta, record) {
   };
 
   async function workflowStub(nameOrObj, args) {
-    record.workflowCalls.push({ ref: clone(nameOrObj), args: clone(args) });
+    // Recorded BEFORE the value is resolved: a fixture whose value throws must
+    // still leave the call visible, or every call-count assertion in the
+    // suites that drive this stub becomes conditional on the nested run
+    // succeeding.
+    const entry = { ref: clone(nameOrObj), args: clone(args) };
+    record.workflowCalls.push(entry);
     const key = nameOrObj && typeof nameOrObj === 'object' ? nameOrObj.scriptPath : nameOrObj;
     if (key != null && fixture.workflowReturns && hasOwn(fixture.workflowReturns, key)) {
-      return clone(fixture.workflowReturns[key]);
+      let ret = fixture.workflowReturns[key];
+      // Symmetric with agentStub above: a function value is resolved per call,
+      // so a fixture can vary the return by entry — or THROW, which is the only
+      // way to drive a caller's catch arm. Before this, clone() handed a
+      // function back to the script verbatim (non-object => returned as-is),
+      // so a nested run could never fail and every catch arm was dead code.
+      if (typeof ret === 'function') ret = ret(entry);
+      return clone(ret);
     }
     return {};
   }
@@ -742,6 +757,12 @@ async function selfTest() {
         'review-1': { verdict: 'GREEN' },
         'uberdev:code-reviewer': { findings: 2 },
         'skip-me': null,
+        // A FUNCTION value: resolved per call with the recorded entry, so a
+        // fixture can vary the return by label/agentType/phase instead of
+        // pinning one canned object for the whole run. H5.6 locks it — the
+        // semantic was live but unasserted, so a rewrite of agentStub could
+        // have dropped it and left every suite green.
+        'vary-me': (entry) => ({ sawLabel: entry.label }),
       },
       defaultAgentReturn: { fallback: true },
     };
@@ -752,7 +773,8 @@ async function selfTest() {
       'const skipped = await agent("p3", { label: "skip-me" });',
       'const dflt = await agent("p4", { label: "unknown-label" });',
       'const withSchema = await agent("p5", { label: "review-1", schema: { "type": "object" } });',
-      'log(JSON.stringify([byLabel, byType, skipped, dflt]));',
+      'const dyn = await agent("p6", { label: "vary-me" });',
+      'log(JSON.stringify([byLabel, byType, skipped, dflt, dyn]));',
     ]);
     const { errors, record } = await runScript(script, fixture, 'h5', RUN_TIMEOUT_MS);
     const got = errors.length === 0 ? JSON.parse(record.logs[0]) : null;
@@ -761,6 +783,8 @@ async function selfTest() {
     ok(got && got[2] === null, 'H5.3 canned null models user-skip / terminal API error (resolves null, never rejects)', why(errors));
     ok(got && got[3].fallback === true, 'H5.4 unmatched label falls through to the fixture default', why(errors));
     ok(record.agentCalls.filter((c) => c.hasSchema).length === 1, 'H5.5 schema presence recorded per call', why(errors));
+    ok(!!got && !!got[4] && got[4].sawLabel === 'vary-me',
+      'H5.6 a function VALUE is resolved per call and receives the recorded entry', why(errors));
   }
 
   /* H6 — budget semantics */
@@ -1013,6 +1037,45 @@ async function selfTest() {
       'H14.1 workflow() canned return keyed by scriptPath', why(errors));
     ok(errors.length === 0 && record.workflowCalls.length === 2,
       'H14.2 workflow() calls are recorded', why(errors));
+  }
+
+  /* H14 (cont.) — workflow() function values: per-call resolution + the throw seam
+   *
+   * Before these rows, a function in `workflowReturns` was NOT "ignored" — it
+   * was handed to the script RAW (clone() returns any non-object verbatim), so
+   * a caller testing `out && typeof out === "object"` silently took its
+   * failure path and the run still read as clean. That is the shape of #564:
+   * no fixture in this repo could make a nested workflow() call FAIL, so every
+   * caller's catch arm was unreachable and its charges/audit events untested.
+   */
+  {
+    const fixture = {
+      workflowReturns: {
+        'skills/x/workflows/dyn.js': (entry) => ({ echoed: entry.args.v }),
+        'skills/x/workflows/boom.js': () => { throw new Error('nested workflow refused'); },
+      },
+    };
+    const script = src([
+      ...VALID_META,
+      'const dyn = await workflow({ scriptPath: "skills/x/workflows/dyn.js" }, { v: 7 });',
+      'let thrown = "no-throw";',
+      'try {',
+      '  await workflow({ scriptPath: "skills/x/workflows/boom.js" }, { v: 8 });',
+      '} catch (e) { thrown = e.message; }',
+      'log(JSON.stringify({ dyn: dyn, thrown: thrown }));',
+    ]);
+    const { errors, record } = await runScript(script, fixture, 'h14-fn', RUN_TIMEOUT_MS);
+    const got = errors.length === 0 && record.logs.length > 0 ? JSON.parse(record.logs[0]) : null;
+    ok(!!got && !!got.dyn && got.dyn.echoed === 7,
+      'H14.3 a function VALUE in workflowReturns is resolved per call and receives the recorded entry (symmetric with agentReturns / H5.6)',
+      why(errors));
+    ok(!!got && got.thrown === 'nested workflow refused',
+      'H14.4 a THROWING function value propagates into the caller await — the only way any fixture in this repo can make a nested workflow() run fail',
+      why(errors));
+    ok(errors.length === 0 && record.workflowCalls.length === 2
+      && record.workflowCalls[1].args && record.workflowCalls[1].args.v === 8,
+      'H14.5 the throwing call is still RECORDED — the push happens before the value is resolved, so call-count assertions in the suites that drive this stub stay unconditional',
+      why(errors));
   }
 
   /* H15 — hung script hits the timeout */
