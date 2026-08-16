@@ -306,6 +306,7 @@ function makeRecord() {
   return {
     agentCalls: [],
     budgetThrows: 0,
+    phaseThrows: 0,
     parallelCalls: [],
     pipelineCalls: [],
     pipelineDrops: [],
@@ -326,7 +327,19 @@ function makeRecord() {
 //   defaultAgentReturn?: any,       // default {}
 //   agentGate?: (entry) => Promise|null,   // self-test interleaving control
 //   workflowReturns?: { [scriptPathOrName]: any | (entry) => any },
+//   phaseThrows?: string,           // default-off; phase(<this exact title>) throws
 // }
+//
+// phaseThrows is the ONLY lever that reaches a script's run-level catch. Every
+// other seam is infallible on the whole-run path — parallel() maps a throwing
+// thunk to null and never rejects, pipeline() drops the item to null, and
+// agent() throws only on a budget ceiling the caller usually catches — so a
+// script's outer `catch (e)` is otherwise structurally untestable, and the
+// finalization it performs (audit rows, claim downgrades) cannot be pinned.
+// Default-off, and equality on the title rather than "any phase", so an
+// existing fixture cannot acquire a throw by adding a phase. Deliberately not
+// a general fault-injection framework: one opt-in equality check, no per-call
+// counters, no throw-on-Nth — generalise when a second caller exists.
 function makeSandbox(fixture, meta, record) {
   const budgetState = {
     total: hasOwn(fixture, 'budgetTotal') ? fixture.budgetTotal : null,
@@ -435,6 +448,14 @@ function makeSandbox(fixture, meta, record) {
     record.currentPhase = title;
     if (meta && !meta.phases.includes(title)) {
       record.violations.push(`phase("${title}") is not declared in meta.phases`);
+    }
+    // Opt-in seam throw — LAST, so the phase record, the current-phase update
+    // and any declaration violation all survive the throw and stay assertable.
+    // The malformed-title early return above stays ahead of it: a non-string
+    // or empty title must never reach the lever.
+    if (hasOwn(fixture, 'phaseThrows') && fixture.phaseThrows === title) {
+      record.phaseThrows += 1;
+      throw new Error(`fixture: phase("${title}") threw (harness phaseThrows lever — models a mid-run failure reaching the script's run-level catch)`);
     }
   }
 
@@ -1099,6 +1120,32 @@ async function selfTest() {
     const r2 = await runScript(script2, {}, 'h16-fs', RUN_TIMEOUT_MS);
     ok(r2.errors.some((e) => e.includes('fs')),
       'H16.2 fs is absent from the sandbox (constraint 6: the script cannot touch the filesystem)', why(r2.errors));
+  }
+
+  /* H17 — opt-in phase-seam throw lever */
+  {
+    // The ONLY lever that reaches a workflow's run-level catch: every other
+    // seam is modelled infallible on the whole-run path (parallel() maps a
+    // throwing thunk to null, pipeline() drops the item, agent() throws only
+    // on a budget ceiling the caller usually catches). Without it a script's
+    // outer `catch (e)` is structurally untestable. Default-off, equality on
+    // the phase title — see the fixture doc block.
+    const script = src([...VALID_META, 'phase("Alpha");', 'log("after");']);
+    const fired = await runScript(script, { phaseThrows: 'Alpha' }, 'h17', RUN_TIMEOUT_MS);
+    ok(fired.errors.some((e) => e.includes('fixture: phase("Alpha") threw')),
+      'H17.1 fixture.phaseThrows makes the named phase() throw, surfacing as a dry-run failure',
+      why(fired.errors));
+    ok(fired.record.phases.includes('Alpha') && fired.record.phaseThrows === 1,
+      'H17.2 the phase is recorded and the throw counted BEFORE the throw, so a test can still assert the phase was entered',
+      () => `phases: ${JSON.stringify(fired.record.phases)}, phaseThrows: ${String(fired.record.phaseThrows)}`);
+    const off = await runScript(script, {}, 'h17-off', RUN_TIMEOUT_MS);
+    ok(off.errors.length === 0 && off.record.phaseThrows === 0,
+      'H17.3 the lever is default-off with the key absent, and phaseThrows is 0 (a number, never undefined)',
+      () => `errors: ${JSON.stringify(off.errors)}, phaseThrows: ${String(off.record.phaseThrows)}`);
+    const other = await runScript(script, { phaseThrows: 'Zeta' }, 'h17-other', RUN_TIMEOUT_MS);
+    ok(other.errors.length === 0 && other.record.phaseThrows === 0,
+      'H17.4 the lever is equality on the title, not "any phase" — a non-matching title never fires',
+      () => `errors: ${JSON.stringify(other.errors)}, phaseThrows: ${String(other.record.phaseThrows)}`);
   }
 
   console.log('');
