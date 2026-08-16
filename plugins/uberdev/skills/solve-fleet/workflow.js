@@ -1696,13 +1696,24 @@ async function runTaskChain(rec, planPath) {
   // over a finished chain BEFORE goal-pipeline ingests the number and merges
   // on it. The claim is not touched — only this fact is added beside it.
   //
-  // DECLARED UNREAD BY PRODUCTION CODE. Both fields below are attached AFTER
-  // schema validation, so the unread-property guard cannot see them, and the
-  // only readers today are this file's suites and the sibling SKILL.md:
-  // goal-pipeline ingests prsOpened through a shape-only digit filter and
-  // consults neither. That is the OPEN half — the ingesting side ought to skip
-  // or flag a number whose chain was incomplete — and it is written down here
-  // rather than left to look enforced.
+  // DECLARED UNREAD BY PRODUCTION CODE — and the residual is now MEASURED, not
+  // guessed at. Both fields below are attached AFTER schema validation, so the
+  // unread-property guard cannot see them, and the only readers today are this
+  // file's suites and the sibling SKILL.md: goal-pipeline ingests prsOpened
+  // through a shape-only digit filter and consults neither.
+  //
+  // #554 changed the CONSEQUENCE of that, not the readership. An incomplete
+  // chain now delivers a PR carrying the non-closing `UberDev-Partial: #N`
+  // trailer, so merging it leaves the issue OPEN and /merge Step 3.4 releases
+  // its `uberdev:active` claim off that same trailer. What it does NOT buy is
+  // convergence: /goal builds each next cycle from the review-pr FINDING issues
+  // alone — `gh issue list --label <finding-label> --state open` in
+  // lib/goal-phase3.sh — so the original issue is never re-collected and the
+  // run ends with it simply open. That is strictly better than the unearned
+  // auto-close it replaces — unfinished work stays visible instead of being
+  // closed over — but it is not the ingesting side learning to read this flag,
+  // which remains the open half and is tracked as its own follow-up issue,
+  // filed with this change and named in the PR body.
   out.chainComplete = ledger.complete;
   if (!ledger.complete) {
     // The MEMBER LIST here is a published contract, joined against SKILL.md's

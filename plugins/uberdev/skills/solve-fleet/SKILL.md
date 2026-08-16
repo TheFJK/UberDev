@@ -198,12 +198,34 @@ different field from the per-issue `claimedStatus`, which holds the solver's own
 status after the PR proof disproved it.
 
 `chainComplete` is script-derived, so no delivery agent can report its way out
-of it: `false` means the per-task chain did not finish — some task is BLOCKED,
-SKIPPED or UNREVIEWED — and `partialDelivery` then carries the ids, in the shape
-declared above. Both appear only on a record the per-task chain delivered, and
-`partialDelivery` only when the chain fell short: its presence IS the signal.
-`/goal` ingests `prsOpened` — bare numbers, carrying neither field — so a PR
-opened over an unfinished chain is distinguishable only here.
+of it: `false` means the per-task chain did not finish. **Four** buckets make it
+false, not three — a task recorded BLOCKED, a task SKIPPED, a task whose commits
+no reviewer saw (UNREVIEWED), and a **disputed** task: one rewritten to
+`NO_CHANGES` because it committed nothing while its own implementer claimed
+`DONE`. `partialDelivery` carries the ids of the first three, in the shape
+declared above; the disputed ids are deliberately **not** members of it —
+widening that object is a contract change joined against this section in both
+directions — and they ride in the `partial_delivery` audit event and in the
+delivery agent's brief instead. Both fields appear only on a record the per-task
+chain delivered, and `partialDelivery` only when the chain fell short: its
+presence IS the signal. `/goal` ingests `prsOpened` — bare numbers, carrying
+neither field — so a PR opened over an unfinished chain is distinguishable only
+here.
+
+The flag also decides **how the PR links to its issue** (#554) — the one
+consequence of it that is visible outside this return value, because linkage and
+completeness used to be the same token:
+
+- `chainComplete: true` → the delivery brief mandates `Closes #N` in the PR
+  body, and GitHub closes the issue when that PR merges.
+- `chainComplete: false` → it mandates the non-closing, whole-line trailer
+  `UberDev-Partial: #N` instead, and forbids any GitHub closing keyword standing
+  in front of this issue's number in the body **or** in any commit message on
+  the branch (GitHub honours them in both). The issue therefore stays **OPEN**
+  when the PR merges — the tasks the chain never reached still need an issue to
+  come back to — and `/merge` Step 3.4 reads that trailer to release the
+  `uberdev:active` claim anyway, so the issue is immediately re-solvable rather
+  than stranded behind a claim no solver still holds.
 
 ## Claim verification (#515)
 
