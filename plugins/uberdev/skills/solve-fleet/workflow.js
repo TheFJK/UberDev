@@ -1402,7 +1402,11 @@ function deliverPrompt(rec, ledger) {
     + "commitCount (integer commits on the branch), testsRunClaimed (true only if you actually "
     + "executed tests — this is recorded as YOUR CLAIM and is not verified; do not report it true "
     + "unless you ran them), summary (<=400 chars), blocker (why you stopped, when REFUSED or "
-    + "FAILED; else \"\").";
+    + "FAILED; else \"\"), escalatedTier (the one-way ratchet: the name of the HIGHER tier this work "
+    + "turned out to need, reported only if the chain proved materially larger than the `"
+    + rec.tier + "` tier it was dispatched at; else \"\") and escalationReason (one line naming what "
+    + "the chain found that the triage rules could not see — required whenever escalatedTier is set, "
+    + "because an escalation with no reason is discarded).";
 }
 
 // ----------------------------- run state -----------------------------

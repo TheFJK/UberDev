@@ -839,6 +839,30 @@ else
   fail "G37 S.solve is missing escalatedTier/escalationReason, or escalatedTier grew a wire-side enum (an illegal advisory value would cost the whole delivery record)"
 fi
 
+# G39 (#532) — the channel needs a PRODUCER on every path that calls
+# applyEscalation(), not just a schema. Both rungs that can report an escalation
+# must ASK for it in the prompt they render, because an agent returns what it was
+# told to return.
+#
+# This is structural because no behavioural row can reach it: every fixture in
+# this file injects escalatedTier into a CANNED return, so the whole ratchet
+# stays green against a prompt that never mentions the field — which is exactly
+# what shipped. `deliverPrompt` is the design-tier (medium/large) rung, and it
+# asked for neither field while applyEscalation() ran on its return and the
+# comment beside that call said "the delivery rung speaks for the whole chain".
+# The result was a ratchet that worked on trivial/small and was inert on the two
+# tiers where a mis-triage costs the most, reported as `tierEscalations: 0` —
+# indistinguishable from "nobody found one".
+SOLVE_PROMPT_FN="$(sed -n '/^function solvePrompt(/,/^}/p' "$WORKFLOW")"
+DELIVER_PROMPT_FN="$(sed -n '/^function deliverPrompt(/,/^}/p' "$WORKFLOW")"
+if [ -z "$SOLVE_PROMPT_FN" ] || [ -z "$DELIVER_PROMPT_FN" ]; then
+  fail "G39 could not locate solvePrompt()/deliverPrompt() in workflow.js — the producer assertion cannot be evaluated"
+elif grep -q 'escalatedTier' <<<"$SOLVE_PROMPT_FN"   && grep -q 'escalationReason' <<<"$SOLVE_PROMPT_FN"   && grep -q 'escalatedTier' <<<"$DELIVER_PROMPT_FN"   && grep -q 'escalationReason' <<<"$DELIVER_PROMPT_FN"; then
+  pass "G39 both rungs that call applyEscalation() ask their agent for escalatedTier and escalationReason"
+else
+  fail "G39 a rung that calls applyEscalation() never asks for the fields (solvePrompt and deliverPrompt must BOTH request escalatedTier + escalationReason, or the ratchet is inert on that path and reports 0 escalations)"
+fi
+
 # G38 (#532) — ONE ordered spelling of the tier vocabulary in this file. The
 # ratchet needs an ORDER to compare against, and the obvious way to get one is a
 # second array beside the existing membership map — which is the uncompared-copies
