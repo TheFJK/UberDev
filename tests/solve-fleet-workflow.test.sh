@@ -383,9 +383,27 @@ else
     grep -q "claimed.length \* perIssueFleetCost(" "$GOAL_WF" || G16_OK=0
     grep -q "claimed.length \* $EXPECTED_COST" "$GOAL_WF" && G16_OK=0
     [ "${GOAL_MARKERS:-0}" = "2" ] || G16_OK=0
+    # Deriving the term is only half of it — the cost still has to be CHARGED,
+    # on BOTH exit arms of the nested fleet call. The clean arm and the catch
+    # arm each carry their own copy, and the catch arm is the one that rots
+    # unnoticed: a fleet that threw is the likeliest to have spent the most
+    # (the usual cause is the runtime refusing further agents, which is the
+    # exact ceiling CB1 exists to stay under), yet deleting its copy left this
+    # row GREEN at 9002870b — measured against the seeded mutant, not assumed.
+    GOAL_CHARGE_SITES="$(grep -c 'agentsSpent += fleetCost' "$GOAL_WF" || true)"
+    [ "${GOAL_CHARGE_SITES:-0}" = "2" ] || G16_OK=0
+    # ...and the cycle whose real spend could not be measured must stay NAMED,
+    # so an estimate is never silently laundered into the ledger as a fact.
+    grep -q 'fleet_spend_unmeasured' "$GOAL_WF" || G16_OK=0
+    # HONEST LIMIT: both additions are a TRIPWIRE, not the fix. A structural
+    # grep cannot observe a value — `agentsSpent += fleetCost` can appear
+    # exactly twice with `fleetCost` computed from the wrong term, and this row
+    # would still pass. The runtime oracle is B91-B96 in goal-workflow.test.sh,
+    # which assert the accumulator as a number; these greps only stop the two
+    # charge sites and the named event from being deleted outright.
     [ "$G16_OK" = "1" ] \
       && pass "G16 /goal's two per-issue cost copies both track the fleet's 6 + IMPLEMENT_AGENT_BUDGET ($EXPECTED_COST at the default) — the projection as a literal, the accumulator derived from the relayed envelope — and both carry the contract marker" \
-      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers)"
+      || fail "G16 /goal's cost copies drifted from the fleet constant (want the literal $EXPECTED_COST in the projection, a clampInt(cfg.implementBudget, 4, 96, $FLEET_BUDGET) derivation in the accumulator, 2 markers, found ${GOAL_MARKERS:-0} markers; want the cost CHARGED on both the clean and the catch arm, found ${GOAL_CHARGE_SITES:-0} of 2 'agentsSpent += fleetCost' sites; want the unmeasured-spend cycle still named by a fleet_spend_unmeasured event)"
   fi
 fi
 
