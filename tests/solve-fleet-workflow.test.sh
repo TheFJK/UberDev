@@ -317,10 +317,18 @@ else
 fi
 
 # G2 — model policy: the solver/research/design agents are JUDGMENT paths and
-# must NOT be pinned to a cheap model; only the manifest relay pins haiku.
+# must NOT be pinned to a cheap model. TWO dispatches pin haiku, not one — the
+# manifest intake and the #515 PR-existence proof — and both are MECHANICAL
+# relays that pass an rc and rows through without interpreting them.
+#
+# Saying "only the manifest relay" here is the exact drift #560 reported against
+# workflow.js's own run-header note: model routing is locked by this suite, so a
+# maintainer auditing a pin against a one-relay policy reads the second,
+# deliberate pin as a mistake and "fixes" it. G23 locks the haiku COUNT; B10 and
+# B10b lock WHICH dispatch carries each pin, which a count alone cannot see.
 grep -q 'model: "haiku"' "$WORKFLOW" \
-  && pass "G2a the mechanical intake relay pins haiku" \
-  || fail "G2a no haiku pin on the mechanical relay"
+  && pass "G2a the mechanical relays pin haiku" \
+  || fail "G2a no haiku pin on either mechanical relay (manifest intake, verify-prs)"
 if grep -qE 'model:[[:space:]]*"(fable|sonnet|opus)"' "$WORKFLOW"; then
   fail "G2b a judgment agent is model-pinned — the session flagship must flow through"
 else
@@ -1131,6 +1139,13 @@ function probedNums(record) {
   // the intake relay pins haiku; every solver inherits (model null)
   const intakeCall = recA.agentCalls.find(function (c) { return c.label === "manifest-intake"; });
   out.aIntakeHaiku = !!(intakeCall && intakeCall.model === "haiku");
+  // ...and so does the SECOND mechanical relay, the #515 PR-existence proof.
+  // G23 only counts the haiku sites, so a pin MIGRATING off this relay onto a
+  // reviewer keeps the count at 2 and sails past it (G2b cannot see it either —
+  // it only forbids the flagship names). This names the dispatch that must
+  // carry the pin, so the two-relay policy is checked per site, not in bulk.
+  const proofCall = recA.agentCalls.find(function (c) { return c.label === "verify-prs"; });
+  out.aProofHaiku = !!(proofCall && proofCall.model === "haiku");
   out.aSolversInherit = recA.agentCalls.filter(function (c) { return /^solve:#/.test(c.label || ""); })
     .every(function (c) { return c.model === null; });
 
@@ -3163,6 +3178,7 @@ else
   check aPrNums '"901,902"'  "B7 PR numbers surface in prsOpened"
   check aDesigned 0          "B8 designedIssues=0 on the no-design path"
   check aIntakeHaiku true    "B10 the manifest relay runs on haiku"
+  check aProofHaiku true     "B10b the #515 PR-existence proof — the SECOND mechanical relay — runs on haiku"
   check aSolversInherit true "B11 solvers inherit the session model (never pinned)"
 
   check bResearch 3          "B12 medium tier runs 3 research lenses"
