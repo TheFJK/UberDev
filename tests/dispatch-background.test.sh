@@ -7,6 +7,13 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# bash 3.2 (the only bash on macos-latest) exits ZERO from a `set -u` abort in a
+# script carrying an EXIT trap, so this fixture could die partway and still let
+# the job's && chain go green. The floor is a completion flag no abort path can
+# forge — see convention 9 in plugins/uberdev/docs/testing.md (#551).
+. "$REPO_ROOT/tests/_lib_exit_floor.sh" || { echo "FATAL: _lib_exit_floor.sh missing/unreadable" >&2; exit 2; }
+trap '_floor_rc=$?; uberdev_test_exit_floor dispatch-background "$_floor_rc"' EXIT
 DISPATCH_LIB="$REPO_ROOT/plugins/uberdev/lib/dispatch.sh"
 
 PASS=0
@@ -1306,4 +1313,5 @@ echo "== Summary =="
 echo "  passed: $PASS"
 echo "  failed: $FAIL"
 
+uberdev_test_exit_floor_reached
 [[ $FAIL -eq 0 ]]
