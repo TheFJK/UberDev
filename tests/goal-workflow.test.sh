@@ -215,7 +215,21 @@ fi
 # ---------------------------------------------------------------------------
 echo "== B: T3 behavioral fixtures (harness stubs) =="
 
-FIXTURE_OUT="$(node -e '
+# The fixture script is written to a FILE rather than passed with `node -e`.
+# It is ~40 KB, and Windows caps a command line at 32767 bytes, so the -e form
+# died inside the command substitution on the only Windows job and the failure
+# surfaced as PARSE_ERROR on B1/B2 — the captured stderr was a bash error, not
+# the JSON the rows expected. This file never reached that job before: the &&
+# chain aborted at an earlier fixture, so the breakage sat latent.
+#
+# `process.argv.splice(1, 1)` drops the script path so the argv indices below
+# keep their `node -e` meaning (argv[1] = harness) rather than shifting by one.
+FIXTURE_JS="$(mktemp)"
+trap 'rm -f "$FIXTURE_JS"' EXIT
+{
+  printf 'process.argv.splice(1, 1);\n'
+  cat <<'UBERDEV_FIXTURE_JS_EOF'
+
 const h = require(process.argv[1]);
 const fs = require("fs");
 const vm = require("vm");
@@ -966,7 +980,9 @@ function labels(record) { return record.agentCalls.map(function (c) { return c.l
 })().catch(function (e) {
   process.stdout.write(JSON.stringify({ FIXTURE_ERROR: (e && e.message) ? e.message : String(e), STACK: (e && e.stack) ? e.stack : "" }));
 });
-' "$HARNESS" "$WORKFLOW" "$FLEET" 2>&1)"
+UBERDEV_FIXTURE_JS_EOF
+} > "$FIXTURE_JS"
+FIXTURE_OUT="$(node "$FIXTURE_JS" "$HARNESS" "$WORKFLOW" "$FLEET" 2>&1)"
 
 check() {
   local key="$1" expected="$2" label="$3" got
