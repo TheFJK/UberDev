@@ -2211,6 +2211,25 @@ sf_members_absent() {  # <needles> <haystack> -> space-prefixed missing members
   printf '%s' "$_out"
 }
 
+# Same rule as the _lib_assert_structural.sh guard near the top of this file,
+# and for the same reason — this file has no errexit and no assertion floor, so
+# a helper that is renamed, moved or typo'd at a call site fails with
+# command-not-found (rc 127), which increments NEITHER counter. Every row below
+# is of the shape `X="$(sf_… )"; [ -z "$X" ]`, so a missing helper yields the
+# empty string, which reads as "no violations found" and prints PASS while
+# asserting nothing. Verified: renaming sf_members_absent alone left this file at
+# `259 passed, 0 failed`, rc 0, with 8 command-not-found errors on stderr and a
+# fabricated 19/19 in the row text.
+#
+# The guard sits HERE rather than beside the other one because these helpers are
+# defined further down the file than that loop runs.
+for _sf_fn in sf_doc_members sf_js_keys sf_member_count sf_members_absent; do
+  command -v "$_sf_fn" >/dev/null 2>&1 || {
+    echo "FATAL: solve-fleet doc-join helper $_sf_fn is not defined (renamed, or a typo'd call site) — every row that calls it would report PASS having asserted nothing" >&2
+    exit 2
+  }
+done
+
 # The per-task record. On the script side that is every literal built with an
 # `id:` key and a `reviewVerdict:` key, PLUS every field assigned onto `taskRec`
 # afterwards — a field introduced only by mutation is still a published field,
@@ -2370,6 +2389,15 @@ sf_doc_record_members() {   # <file> <anchor>
     }
   ' | sort -u
 }
+
+
+# Same fail-open rule as the sf_* guard above; this helper is defined below that
+# loop, so it needs its own check before its first call site.
+command -v sf_doc_record_members >/dev/null 2>&1 || {
+  echo "FATAL: solve-fleet doc-join helper sf_doc_record_members is not defined (renamed, or a typo'd call site) — every row that calls it would report PASS having asserted nothing" >&2
+  exit 2
+}
+
 # Script side: the unpushedIssue() literal UNION every `out.<f> =` / `r.<f> =`
 # assignment — the same construction-plus-mutation shape T16.1–T16.3 already
 # uses for `taskRec.`, and `=[^=]` keeps the `===` comparisons out.
