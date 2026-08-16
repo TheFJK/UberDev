@@ -76,6 +76,29 @@
 #                                       `--remove-assignee "@me"` from the edit.
 #   MZ3.e  gh-failure-is-fail-soft   -- move the audit emit out of the
 #                                       `if gh issue edit …; then` guard.
+#   MZ3.f  partial-alone             -- delete the `PARTIAL_ISSUES=(…)` harvest
+#                                       (or its `merge-partial` reason literal):
+#                                       a landed PARTIAL PR then strands the
+#                                       claim on a still-OPEN issue forever.
+#   MZ3.g  union-dedupe              -- drop the `_CLEAR_SEEN` padded-haystack
+#                                       `case … continue` skip; an issue carrying
+#                                       BOTH forms is then edited twice, the
+#                                       second time under the wrong reason.
+#   MZ3.h  prose-negative            -- relax either anchor of
+#                                       `^UberDev-Partial: #[0-9]+$`; the trailer
+#                                       then fires from mid-sentence prose (the
+#                                       twin of MZ3.b's `preclose #61`).
+#   MZ3.i  neither-form              -- floor row for the two-harvest no-op (and
+#                                       the empty-array expansion of the SECOND
+#                                       array under `set -u` — MZ3.c only ever
+#                                       covered the first).
+#   MZ3.j  crlf                      -- remove `tr -d '\r'` from the partial
+#                                       harvest: a body edited in GitHub's web
+#                                       textarea arrives CRLF, the `$` anchor
+#                                       stops matching, and the claim strands
+#                                       silently. NOTE: falsifiable only under a
+#                                       grep that SEES the CR (GNU/BSD grep do;
+#                                       some drop-in replacements strip it).
 #   MZ4.stub                         -- harness floor for the dispatch-line
 #                                       substitution (0 or >=2 matches red it).
 #   MZ4.a  first-claim               -- floor row for Step 1.4.5.
@@ -285,7 +308,7 @@ fi
 MARKERS="merge-lock-acquire-fence-v1
 merge-lock-heartbeat-touch-fence-v1
 merge-lock-release-fence-v1
-merge-issue-cleanup-fence-v1
+merge-issue-cleanup-fence-v2
 merge-autoreview-dispatch-fence-v1"
 
 while IFS= read -r m; do
@@ -330,7 +353,7 @@ MZ1_READY=0; MZ2_READY=0; MZ3_READY=0; MZ4_READY=0; MZ5_READY=0
 assert_extract merge-lock-acquire-fence-v1          "$ACQUIRE_SLICE"   'RUN_ID_REGEX=' && MZ1_READY=1
 assert_extract merge-lock-heartbeat-touch-fence-v1  "$TOUCH_SLICE"     "jq -r '.run_id // empty'" && MZ2_READY=1
 assert_extract merge-lock-release-fence-v1          "$RELEASE_SLICE"   'rm -rf "$LOCK_DIR"' || MZ2_READY=0
-assert_extract merge-issue-cleanup-fence-v1         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
+assert_extract merge-issue-cleanup-fence-v2         "$CLEANUP_SLICE"   'CLOSED_ISSUES=' && MZ3_READY=1
 assert_extract merge-autoreview-dispatch-fence-v1   "$DISPATCH_SLICE"  'AUTO_REVIEW_MARKER_DIR' && MZ4_READY=1
 assert_extract merge-trust-gate-fence-v1            "$TRUSTGATE_SLICE" 'discover_review_verdict_json "$PR_NUMBER"' --dedent && MZ5_READY=1
 
@@ -509,7 +532,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# MZ3 — `merge-issue-cleanup-fence-v1` (Step 3.4).
+# MZ3 — `merge-issue-cleanup-fence-v2` (Step 3.4).
 # `gh` and `_uberdev_audit_emit` are shell FUNCTIONS, not PATH executables:
 # a function wins over PATH lookup in every POSIX shell and needs no exec bit
 # (the precedent is merge.test.sh M97). `git`, `jq`, `awk`, `grep` stay real.
@@ -531,6 +554,20 @@ CLEANUP_PRE
 
 MZ3_POS_BODY='Closes #42, Fixes #42 and resolves #7'
 MZ3_NEG_BODY='I tried to preclose #61 and unresolve #50, then a postfix #100 plus a code-fix #50'
+
+# `UberDev-Partial: #N` — the NON-closing linkage trailer a solve-fleet PR carries
+# when its task chain stopped early (#554). It releases the `uberdev:active` claim
+# without closing the issue, so these bodies deliberately carry no closing keyword:
+# the claim can only come off the trailer. Whole-line and namespaced, exactly like
+# the `Blocks: #N` trailer `lib/goal-state.sh` already parses.
+MZ3_PARTIAL_BODY='UberDev-Partial: #77'
+MZ3_UNION_BODY='Closes #42
+UberDev-Partial: #42'
+MZ3_PARTIAL_PROSE_BODY='see UberDev-Partial: #50 for context'
+MZ3_NEITHER_BODY='Refactors the discovery projection. Background in #33.'
+# Built with real CR bytes: a body edited in the GitHub web textarea decodes to
+# CRLF, and a `$`-anchored match with no CR strip silently harvests nothing.
+MZ3_CRLF_BODY="$(printf 'intro\r\nUberDev-Partial: #88\r\n')"
 
 mz3_run() {   # mz3_run <label> [NAME=VALUE ...]
   _m3_box="$SANDBOXES/mz3-$1"; shift
@@ -607,6 +644,88 @@ else
     pass "MZ3.e gh-failure-is-fail-soft — a failing gh keeps rc 0 and emits NO audit event"
   else
     fail "MZ3.e gh-failure-is-fail-soft — rc=$LAST_RC calls=$MZ3E_CALLS audits=$MZ3E_AUDITS"
+  fi
+
+  # -- MZ3.f partial-alone ---------------------------------------------------
+  # #554's whole point. A chain that stopped early lands a PR that must NOT
+  # close the issue, so the claim can only come off the non-closing trailer.
+  # Without this arm the issue stays OPEN with `uberdev:active` set forever, and
+  # every later /solve, /turbo and /goal Phase 1 refuses to pick it up.
+  # `merge-partial` is what tells this release apart in the audit trail from one
+  # that happened *because* the issue closed.
+  mz3_run f "BODY=$MZ3_PARTIAL_BODY" 'PR_JSON_RAW='
+  MZ3F_N="$(count_lines "$MZ3_GHLOG")"
+  MZ3F_1="$(sed -n '1p' "$MZ3_GHLOG")"
+  MZ3F_AUDITS=0
+  while IFS= read -r ev; do
+    case "$ev" in *'"reason":"merge-partial"'*) MZ3F_AUDITS=$((MZ3F_AUDITS + 1)) ;; esac
+  done < "$MZ3_AUDITLOG"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3F_N" = "1" ] \
+     && [ "$MZ3F_1" = 'issue edit 77 --remove-label uberdev:active --remove-assignee @me' ] \
+     && [ "$MZ3F_AUDITS" -eq 1 ]; then
+    pass "MZ3.f partial-alone — 'UberDev-Partial: #77' releases the claim exactly once, reason merge-partial"
+  else
+    fail "MZ3.f partial-alone — rc=$LAST_RC calls=$MZ3F_N partial_audits=$MZ3F_AUDITS [$MZ3F_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
+  fi
+
+  # -- MZ3.g union-dedupe ----------------------------------------------------
+  # Both forms naming the SAME issue is one release, not two, and the closing
+  # form wins the reason: a closed issue is released BECAUSE it closed.
+  mz3_run g "BODY=$MZ3_UNION_BODY" 'PR_JSON_RAW='
+  MZ3G_N="$(count_lines "$MZ3_GHLOG")"
+  MZ3G_1="$(sed -n '1p' "$MZ3_GHLOG")"
+  MZ3G_MERGE=0; MZ3G_PARTIAL=0
+  while IFS= read -r ev; do
+    case "$ev" in
+      *'"reason":"merge"'*)         MZ3G_MERGE=$((MZ3G_MERGE + 1)) ;;
+      *'"reason":"merge-partial"'*) MZ3G_PARTIAL=$((MZ3G_PARTIAL + 1)) ;;
+    esac
+  done < "$MZ3_AUDITLOG"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3G_N" = "1" ] \
+     && grep -qE '^issue edit 42( |$)' <<<"$MZ3G_1" \
+     && [ "$MZ3G_MERGE" -eq 1 ] && [ "$MZ3G_PARTIAL" -eq 0 ]; then
+    pass "MZ3.g union-dedupe — an issue named by BOTH forms is edited once, under the closing reason"
+  else
+    fail "MZ3.g union-dedupe — rc=$LAST_RC calls=$MZ3G_N merge=$MZ3G_MERGE partial=$MZ3G_PARTIAL [$MZ3G_1]"
+  fi
+
+  # -- MZ3.h prose-negative --------------------------------------------------
+  # The twin of MZ3.b: the trailer is whole-line, so prose that merely mentions
+  # it must not release anything. /merge runs on EVERY PR, so an unanchored
+  # match would let a drive-by sentence strip a claim a live solver still holds.
+  mz3_run h "BODY=$MZ3_PARTIAL_PROSE_BODY" 'PR_JSON_RAW='
+  MZ3H_N="$(count_lines "$MZ3_GHLOG")"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3H_N" = "0" ]; then
+    pass "MZ3.h prose-negative — a mid-sentence 'UberDev-Partial: #50' never reaches gh (whole-line anchor holds)"
+  else
+    fail "MZ3.h prose-negative — rc=$LAST_RC calls=$MZ3H_N: $(tr '\n' ' ' < "$MZ3_GHLOG")"
+  fi
+
+  # -- MZ3.i neither-form ----------------------------------------------------
+  # No-op semantics for a drive-by PR are unchanged by the second harvest — and
+  # this is the row that expands the SECOND empty array under `set -u` (MZ3.c
+  # only ever covered the first).
+  mz3_run i "BODY=$MZ3_NEITHER_BODY" 'PR_JSON_RAW='
+  MZ3I_N="$(count_lines "$MZ3_GHLOG")"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3I_N" = "0" ] \
+     && ! grep -qiE 'unbound|bad substitution|parameter not set' "$LAST_ERR"; then
+    pass "MZ3.i neither-form — a body with neither linkage form is a clean no-op under set -u"
+  else
+    fail "MZ3.i neither-form — rc=$LAST_RC calls=$MZ3I_N; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
+  fi
+
+  # -- MZ3.j crlf ------------------------------------------------------------
+  # A body edited in the GitHub web textarea comes back CRLF. Anchoring on `$`
+  # without stripping CR strands the claim — the exact failure this arm exists
+  # to prevent, so it would fail silently and look like "no trailer present".
+  mz3_run j "BODY=$MZ3_CRLF_BODY" 'PR_JSON_RAW='
+  MZ3J_N="$(count_lines "$MZ3_GHLOG")"
+  MZ3J_1="$(sed -n '1p' "$MZ3_GHLOG")"
+  if [ "$LAST_RC" -eq 0 ] && [ "$MZ3J_N" = "1" ] \
+     && grep -qE '^issue edit 88( |$)' <<<"$MZ3J_1"; then
+    pass "MZ3.j crlf — a CRLF body still releases the claim (the harvest strips CR before anchoring)"
+  else
+    fail "MZ3.j crlf — rc=$LAST_RC calls=$MZ3J_N [$MZ3J_1]; stderr: $(tr '\n' ' ' < "$LAST_ERR")"
   fi
 fi
 
