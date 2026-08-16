@@ -356,6 +356,84 @@ PY
   return "$wait_rc"
 }
 # END review-fixer-child-bound-v2
+# BEGIN review-fixer-terminal-outcome-v1
+# review_fixer_terminal_outcome BINDING AUTHORITY_PATH AUTHORITY_SHA256
+#                               DISPOSITION_PATH APPLIED_CONTENT_PATH
+#                               HEAD_BEFORE HEAD_AFTER
+#
+# Turns a returned fixer child into the ONE authenticated outcome document
+# review_promote_validated_fixer_outcome consumes. Prints that document on
+# stdout and nothing else; every diagnostic goes to stderr.
+#
+# WHY THIS EXISTS (#556). A child that returns `status: REFUSED` writes NEITHER
+# artifact the controller binds by path: it restores the worktree to HEAD and
+# stops, so the applied-content document is never created and the disposition
+# is left at the zero bytes lib/command-workspace.py pre-created. Every fixer
+# fence went straight to `capture-review-terminal`, whose --applied-content-path
+# is required and whose disposition capture has minimum=1 -- so the one terminal
+# where the findings most need to survive could not be captured at all, and the
+# BLOCKER rows the child refused were dropped instead of deferred.
+#
+# WHY IT IS ONE FUNCTION. The terminal chain was written out four times (Phase 1
+# and Phase 2 x routed and Workflow-native). Teaching four copies to tell three
+# states apart is the #370 "one contract, N uncompared copies" shape; the branch
+# gets a single owner and the fences call it.
+#
+# EXISTENCE IS TESTED SEPARATELY FROM SIZE, in the same vocabulary the Phase 2.5
+# defer fence uses (commands/review-pr.md, the DEFER_ guard). `-s` alone
+# collapses three states into one, and they demand opposite handling:
+#
+#   absent     the controller allocates this file, so a path naming none is
+#              workspace loss or tampering. Publishing a "nothing was applied"
+#              record over it would fabricate evidence about a run whose
+#              artifacts are gone -- refuse, and run no contract verb at all.
+#   non-empty  the child published its own disposition. Capture and validate it,
+#              byte-for-byte as before.
+#   empty      the child refused (or needed no fixes) and could not publish.
+#              The controller publishes the record on its behalf and validates
+#              it in the same call.
+#
+# The caller keeps its own `review_guard_failed_fixer_return` arm: this helper
+# returns each sub-call's own rc (74 from a contract refusal, 2 from an arity
+# error) and never normalises a residue-bearing failure itself, so a mutation
+# left behind by a failed fixer still lands as MUTATED_BLOCKED where it always did.
+review_fixer_terminal_outcome() {
+  [ "$#" -eq 7 ] || return 2
+  local binding="${@:1:1}" authority_path="${@:2:1}" authority_sha256="${@:3:1}"
+  local disposition_path="${@:4:1}" applied_content_path="${@:5:1}"
+  local head_before="${@:6:1}" head_after="${@:7:1}"
+  local terminal status_sha256 result_sha256 disposition_sha256 applied_content_sha256
+  if [ ! -e "$disposition_path" ]; then
+    echo "error: the fixer disposition record is LOST (path '$disposition_path' is empty or names no file); the controller creates this file, so absence is infrastructure failure, not a refusal" >&2
+    return 74
+  fi
+  if [ -s "$disposition_path" ]; then
+    terminal="$(python3 -I -B "$CODE_FIXER_CONTRACT" capture-review-terminal \
+      --launch-binding-json "$binding" \
+      --disposition-path "$disposition_path" \
+      --applied-content-path "$applied_content_path")" || return $?
+    status_sha256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["status_sha256"],end="")' "$terminal")" || return $?
+    result_sha256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["result_sha256"],end="")' "$terminal")" || return $?
+    disposition_sha256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["disposition_sha256"],end="")' "$terminal")" || return $?
+    applied_content_sha256="$(python3 -I -B -c 'import json,sys; print(json.loads(sys.argv[1])["applied_content_sha256"],end="")' "$terminal")" || return $?
+    python3 -I -B "$CODE_FIXER_CONTRACT" validate-review-outcome \
+      --launch-binding-json "$binding" \
+      --authority-path "$authority_path" --authority-sha256 "$authority_sha256" \
+      --disposition-path "$disposition_path" --disposition-sha256 "$disposition_sha256" \
+      --applied-content-path "$applied_content_path" --applied-content-sha256 "$applied_content_sha256" \
+      --status-sha256 "$status_sha256" --result-sha256 "$result_sha256" \
+      --working-dir "$WORKTREE_ROOT" --head-before "$head_before" --head-after "$head_after"
+    return $?
+  fi
+  python3 -I -B "$CODE_FIXER_CONTRACT" publish-unapplied-terminal \
+    --launch-binding-json "$binding" \
+    --authority-path "$authority_path" --authority-sha256 "$authority_sha256" \
+    --disposition-path "$disposition_path" \
+    --applied-content-path "$applied_content_path" \
+    --working-dir "$WORKTREE_ROOT" \
+    --head-before "$head_before" --head-after "$head_after"
+}
+# END review-fixer-terminal-outcome-v1
 review_assert_selected_pr_head() {
   local repo_slug="${@:1:1}" pr_number="${@:2:1}" expected_head="${@:3:1}" worktree_root="${@:4:1}"
   local live_head local_head
