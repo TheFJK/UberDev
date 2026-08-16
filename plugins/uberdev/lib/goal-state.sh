@@ -1007,9 +1007,9 @@ uberdev_goal_locate_review_pr_audit() {
   # Resolve PR number via the GitHub-native finder (issue #180), then delegate
   # to the PR-keyed locator. The old solve-bg stdout `pushed PR #N` marker has
   # ZERO producers and `claude --bg` stdout is a detached banner on CLI 2.1.150,
-  # so the only reliable issue->PR link is `closingIssuesReferences` / `feat/N-`
-  # head. Candidate filtering and ranking live in ONE place — the canonical
-  # selector in merge-pipeline/lib/discover.sh, reached via
+  # so the only reliable issue->PR link is `closingIssuesReferences` / a
+  # `<type>/N-` head. Candidate filtering and ranking live in ONE place — the
+  # canonical selector in merge-pipeline/lib/discover.sh, reached via
   # uberdev_goal_locate_review_pr_audit_by_pr. Ranking is by the 15-byte
   # YYYYMMDD-HHMMSS prefix, requiring byte-identical artifacts on a tie
   # (RFC 0005 B12); the previous lex-greatest-run_id tiebreak is retired.
@@ -1422,21 +1422,22 @@ uberdev_goal_get_last_held_audit() {
 # GitHub-native issue->PR resolver. Echoes the highest OPEN PR number that
 # closes issue N (its `closingIssuesReferences` carries the `Closes #N` link
 # every solver PR adds); if no closes-match exists it FALLS BACK to the highest
-# OPEN PR whose head branch is `feat/N-…`. Replaces the retired solve-bg
-# `pushed PR #N` log parser: that marker has ZERO producers and `claude --bg`
+# OPEN PR whose head branch is `<type>/N-…` for any conventional type in
+# _UBERDEV_GOAL_HEAD_REF_TYPES. Replaces the retired solve-bg `pushed PR #N`
+# log parser: that marker has ZERO producers and `claude --bg`
 # stdout is a detached banner on CLI 2.1.150, so the loop keying on it never
 # advanced (issue #180).
 #
 # #290.4 (MAJOR) — bind to the LIVE PR, prefer the authoritative link:
-#   (a) `--state open` (was `--state all`): a stale CLOSED `feat/N-` branch from
+#   (a) `--state open` (was `--state all`): a stale CLOSED `<type>/N-` branch from
 #       a prior failed attempt, or a re-dispatched issue's abandoned PR, could
 #       otherwise win the `max` and corrupt batch-registry accounting / verdict
 #       location (the locator keys on this result). Merge-completion detection
 #       is unaffected — uberdev_goal_pr_state_gh / pr_is_merged issue their own
 #       `gh pr view <pr>` against the known PR number, never this finder.
-#   (b) prefer the `closingIssuesReferences` match over the `feat/N-` head-ref
+#   (b) prefer the `closingIssuesReferences` match over the `<type>/N-` head-ref
 #       heuristic: the head-ref arm is a best-effort fallback for PRs whose
-#       Closes-link was dropped, but a branch *named* feat/N- that does NOT
+#       Closes-link was dropped, but a branch *named* fix/N- that does NOT
 #       close N (a re-used branch) must never outrank a real closes-match. The
 #       jq below computes both maxes and takes `$byclose // $byhead`.
 #
@@ -1498,16 +1499,78 @@ uberdev_goal_find_pr_for_issue() {
 # issue in the pass sees the same GitHub state.
 # ---------------------------------------------------------------------------
 
+# _UBERDEV_GOAL_HEAD_REF_TYPES — the branch-name types the head-ref FALLBACK arm
+# below will accept. It has exactly ONE consumer, the `test("^(…)/${n}-")` call
+# inside _uberdev_goal_pr_for_issue_jq, so the syntax that governs it is jq's
+# Oniguruma — there is no ERE call site.
+#
+# The set is the Conventional Commits vocabulary because that is the shape the
+# PRODUCER emits: plugins/uberdev/skills/solve-fleet/workflow.js tells every
+# solver to name its branch `<type>/<issue>-<short-slug>`, once in the solve
+# prompt's branch step and again in the chain's `git worktree add -b` command,
+# defining `<type>` as "the conventional-commit type of the change".
+#
+# UNGUARDED RESIDUAL — producer and consumer are NOT mechanically joined. In
+# workflow.js `<type>` is free text the solver agent picks at run time: it is
+# never enumerated there, never validated, and nothing compares it against this
+# list. A solver that writes `hotfix/N-…`, `bugfix/N-…` or `feature/N-…` still
+# produces a head this arm cannot see, and on a partial PR (which carries no
+# `Closes #N`) that is the whole linkage gone. Binding the producer to this list,
+# or adding a drift guard across the two, is follow-up work; until it exists,
+# read a head-ref miss on an off-vocabulary type as this known gap rather than as
+# a bug in the jq.
+#
+# ENUMERATED, never an open `[a-z]+`: the arm is a best-effort guess with no
+# authoritative link behind it, so the namespaces it may guess from have to be
+# named. Leave it open and a `notes/N-…`, `wip/N-…` or personal `<handle>/N-…`
+# branch — none of which is the solver's PR — silently wins the fallback and the
+# goal binds the issue to the wrong PR.
+_UBERDEV_GOAL_HEAD_REF_TYPES='feat|fix|refactor|test|docs|chore|perf|build|ci|style|revert'
+
 # _uberdev_goal_pr_for_issue_jq ISSUE_NUM — the SSOT ranking program shared by
 # the live finder and the snapshot finder, so the two can never disagree about
 # which PR belongs to an issue. `any/2` (not `.closingIssuesReferences[]?.number
 # == N`) is deliberate: a bare stream yields EMPTY for a PR whose Closes-link was
 # dropped, while any/2 returns a concrete false, keeping `select` boolean.
+#
+# The head-ref arm matches EVERY conventional type, not `feat/` alone. Two
+# reasons, and this consumer is widened FIRST so neither can strand a PR:
+#   (1) a partial-delivery PR carries no `Closes #N` at all, by design (#554) —
+#       a PR must not auto-close an issue it did not finish — so its head ref is
+#       the ONLY issue->PR link it has, and the producer types that branch for
+#       whatever change it made, not `feat/` by default;
+#   (2) defence in depth for the historical shape BT27 pins, a PR whose
+#       Closes-link was dropped or edited away: there too the head ref is all
+#       that is left, and a fix, refactor or chore PR is exactly as real as a
+#       feature PR.
+# When this arm loses a live PR the watch loop reads "no PR yet", and under
+# /goal that is terminal on the spot rather than the start of a grace period.
+# goal-pipeline/workflow.js runs EVERY watch pass with
+# UBERDEV_GOAL_SOLVERS_SETTLED=1 — unconditionally, no branch and no config key,
+# because the nested fleet call is awaited — so the settled arm in
+# lib/goal-watch.sh transitions the issue solving->failed and calls
+# _uberdev_goal_phase2_release_claim (dropping the `uberdev:active` label and the
+# assignee) on the FIRST tick (RFC 0015 §5). Nor is that self-healing: the
+# `failed` row it writes is what uberdev_goal_count_failed_issues counts, and
+# lib/goal-phase3.sh's terminal region fires the `solver_failed` circuit breaker
+# and exits 1 on any non-zero count — a gate that sits ABOVE the max-cycles and
+# convergence gates and is keyed on the whole GOAL_ID, not on this cycle. So one
+# lost PR halts the ENTIRE /goal run, taking every other issue in the cycle down
+# with it, while the real PR sits open and its issue reads as a failed solve.
+# Nothing re-queues it either: Phase 3 collects the next cycle's candidates only
+# from $FINDING_LABEL issues, never the original one.
+# _UBERDEV_GOAL_SOLVE_TIMEOUT (150m) is NOT the symptom to look for — that arm
+# answers a detached-solver liveness question and is reachable only where the
+# env var is unset: the Workflow driver always sets it, the documented
+# no-Workflow fallback fence in goal-pipeline/SKILL.md does not.
+#
+# The trailing `-` after ${n} is load-bearing and survives the widening: it is
+# what keeps `fix/30-x` out of issue 300 (BT73/BT73d).
 _uberdev_goal_pr_for_issue_jq() {
   local n="$1"
   printf '%s' ". as \$prs
           | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${n})) | .number] | max) as \$byclose
-          | ([\$prs[] | select(.headRefName | test(\"^feat/${n}-\")) | .number] | max) as \$byhead
+          | ([\$prs[] | select(.headRefName | test(\"^(${_UBERDEV_GOAL_HEAD_REF_TYPES})/${n}-\")) | .number] | max) as \$byhead
           | (\$byclose // \$byhead // empty)"
 }
 
