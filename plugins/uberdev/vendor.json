@@ -165,9 +165,9 @@
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
         "measured_on": "2026-08-16",
-        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted. The uberdev_rev names the BASE this measurement was taken against: this stack lands squashed (main is first-parent linear), so the intermediate branch commit whose tree was actually counted does not survive the merge and would leave this basis citing an operand that cannot be resolved on main. The tree counted is that rev PLUS the changes this same register update ships for this component \u2014 stated here rather than implied, because a count that cannot say which operand it was taken against is the defect this basis exists to prevent."
       },
       "divergences": [
         {
@@ -399,9 +399,9 @@
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
         "measured_on": "2026-08-16",
-        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted. The uberdev_rev names the BASE this measurement was taken against: this stack lands squashed (main is first-parent linear), so the intermediate branch commit whose tree was actually counted does not survive the merge and would leave this basis citing an operand that cannot be resolved on main. The tree counted is that rev PLUS the changes this same register update ships for this component \u2014 stated here rather than implied, because a count that cannot say which operand it was taken against is the defect this basis exists to prevent."
       },
       "divergences": [
         {
@@ -460,9 +460,9 @@
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "2522b1a4047b03ca81b03019a636ee70c362d3a6",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
         "measured_on": "2026-08-16",
-        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted. The uberdev_rev names the BASE this measurement was taken against: this stack lands squashed (main is first-parent linear), so the intermediate branch commit whose tree was actually counted does not survive the merge and would leave this basis citing an operand that cannot be resolved on main. The tree counted is that rev PLUS the changes this same register update ships for this component \u2014 stated here rather than implied, because a count that cannot say which operand it was taken against is the defect this basis exists to prevent."
       },
       "divergences": [
         {
@@ -766,9 +766,9 @@
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "ffb7bbbac53c93958502e66005b6f6d1d03bdd85",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
         "measured_on": "2026-08-16",
-        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted. The uberdev_rev names the BASE this measurement was taken against: this stack lands squashed (main is first-parent linear), so the intermediate branch commit whose tree was actually counted does not survive the merge and would leave this basis citing an operand that cannot be resolved on main. The tree counted is that rev PLUS the changes this same register update ships for this component \u2014 stated here rather than implied, because a count that cannot say which operand it was taken against is the defect this basis exists to prevent."
       },
       "divergences": [
         {
@@ -811,9 +811,9 @@
       "measured_diff_basis": {
         "upstream_rev": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
         "upstream_tree": "claude-plugins-official plugin cache: superpowers/6.3.0 \u2014 a repackaging of the peeled v6.3.0 tag, corroborated per RFC 0019's 2026-08-13 (#511) amendment rather than trusted, and therefore not obra/superpowers itself",
-        "uberdev_rev": "ffb7bbbac53c93958502e66005b6f6d1d03bdd85",
+        "uberdev_rev": "9002870bbbf21dabe9cc08a81d8293495c7beb38",
         "measured_on": "2026-08-16",
-        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted."
+        "method": "`diff -r` of the tree named in upstream_tree against this component's path under plugins/uberdev, counting both < and > output lines INCLUDING the provenance-header line each shipped file carries. A file present on only one side yields an `Only in` line, which is not counted. The uberdev_rev names the BASE this measurement was taken against: this stack lands squashed (main is first-parent linear), so the intermediate branch commit whose tree was actually counted does not survive the merge and would leave this basis citing an operand that cannot be resolved on main. The tree counted is that rev PLUS the changes this same register update ships for this component \u2014 stated here rather than implied, because a count that cannot say which operand it was taken against is the defect this basis exists to prevent."
       },
       "divergences": [
         {
